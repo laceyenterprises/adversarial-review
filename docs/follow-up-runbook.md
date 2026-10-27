@@ -1922,7 +1922,11 @@ It names `repo` (`github.com/owner/repo`), `branch`, exact leased `oldHead`, pus
 `newHead`, service `actor`, nullable `launchRequestId`, and UTC `recordedAt`.
 Files use 0660, directories request 2770 and inherit the dispatch group; writers
 repair only their own modes. The file is fsynced, atomically renamed and its
-directory fsynced. Filesystem ownership is audit evidence, not authentication.
+directory syncing is attempted on a best-effort basis. A directory open or flush
+failure does not mask the committed receipt; file-write, file-sync and rename
+failures still return recovery errors. Ancestry inspection and receipt repository
+resolution run after successful publication, so their failures also preserve the
+published outcome. Filesystem ownership is audit evidence, not authentication.
 
 A receipt storage failure returns and logs `rewriteReceiptError` with exact tips
 and `repo` (null if resolution failed; independently establish the push target)

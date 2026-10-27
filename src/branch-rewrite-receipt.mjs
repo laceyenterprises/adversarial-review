@@ -11,7 +11,7 @@ const sha = /^[0-9a-f]{40}$/i;
 const encode = value => encodeURIComponent(value).replace(/[!'()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 
 export function rewriteRepositoryKey(value) {
-  const url = String(value || '').replace(/^workerpush::/, '');
+  const url = String(value || '').trim().replace(/^workerpush::/, '');
   const scp = /^(?:[^/@:]+@)?github\.com:([^\s]+)$/.exec(url);
   let slug = scp?.[1];
   if (!slug) {
@@ -54,8 +54,10 @@ export function recordPublishedRewrite({ repository, branch, oldHead, newHead,
         fsyncSync(fd);
       } finally { closeSync(fd); }
       renameSync(temporary, destination);
-      const directoryFd = openSync(directory, 'r');
-      try { fsyncSync(directoryFd); } finally { closeSync(directoryFd); }
+      try {
+        const directoryFd = openSync(directory, 'r');
+        try { fsyncSync(directoryFd); } finally { closeSync(directoryFd); }
+      } catch { /* Directory syncing is best effort after the committed rename. */ }
     } finally { rmSync(temporary, { force: true }); }
     return { rewriteReceipt: destination };
   } catch (error) {

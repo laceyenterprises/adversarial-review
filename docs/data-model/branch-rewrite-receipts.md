@@ -21,13 +21,16 @@ Only successful rewrites produce evidence. Ordinary fast forwards, failed pushes
 and unproven observations do not. Native auth publication proof is recorded before
 fallible live-head verification. Receipts use the existing Agent OS schema;
 there is no new ledger table or lifecycle enum. Files request 0660 and directories
-2770, retain the dispatch group, and are fsynced/atomically renamed before return.
+2770 and retain the dispatch group. Files are fsynced and atomically renamed
+before return; directory syncing is best effort and cannot mask a committed receipt.
 Filesystem owner/group metadata is audit evidence, not authentication.
 Repository identity follows the actual push destination. Ordinary remediation
 and auth recovery resolve origin's push URL; scoped workflow auth recovery uses
 its explicit HTTPS destination instead of origin. The queue uses its head
-repository. All three publishers check ancestry before recording rewrite evidence;
-an unreadable ancestry check preserves publication success with a recovery error.
+repository. Remote URL input is trimmed before transport normalization. All three
+publishers inspect ancestry and resolve receipt identity after successful publication,
+before recording rewrite evidence; unreadable ancestry or repository resolution
+preserves publication success with a recovery error.
 
 Storage errors preserve published status and return/log `rewriteReceiptError`
 with branch, old/new tips, actor and `repo` (null when resolution failed). Recovery and

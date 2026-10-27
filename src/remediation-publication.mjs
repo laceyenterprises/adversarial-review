@@ -1,4 +1,4 @@
-import { recordPublishedRewrite, rewriteRepositoryKey } from './branch-rewrite-receipt.mjs';
+import { recordWorkspaceRewrite } from './branch-rewrite-receipt.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // REMLABEL-01: the remediation publisher owns the final diff check and push.
 import { execFile } from 'node:child_process';
@@ -64,21 +64,12 @@ export async function publishRemediation({ workspaceDir = process.cwd(), baseBra
   if (await git(['rev-parse', 'HEAD']) !== candidate) {
     throw Object.assign(new Error('Remediation head moved during publication validation.'), { code: 'remediation-publication-head-moved' });
   }
-  let rewritten = false;
-  try { await git(['merge-base', '--is-ancestor', expectedRemoteSha, candidate]); }
-  catch (error) {
-    if (error.code !== 1) throw error;
-    rewritten = true;
-  }
-  // Resolve the actual push destination before publication, not the PR base repo
-  // (which may differ for forks). Unknown identities refuse before the push.
-  const repository = rewritten ? rewriteRepositoryKey(await git(['remote', 'get-url', '--push', 'origin'])) : null;
   // Pin the inspected commit as well as the expected old remote head. Neither
   // a concurrent local checkout nor a competing branch push can swap the result.
   await execFileImpl(pushCommand ?? defaultPushCommand(env), ['-C', workspaceDir, 'push',
     `--force-with-lease=refs/heads/${branch}:${expectedRemoteSha}`, 'origin', `${candidate}:refs/heads/${branch}`],
   { env, timeout: loadAwareTimeoutMs(120_000), maxBuffer: 4 * 1024 * 1024 });
-  const receipt = rewritten ? recordPublishedRewrite({ repository, branch,
-    oldHead: expectedRemoteSha, newHead: candidate, actor: 'review-service:remediation', env }) : {};
+  const receipt = await recordWorkspaceRewrite({ git, branch,
+    oldHead: expectedRemoteSha, newHead: candidate, actor: 'review-service:remediation', env });
   return { published: true, headSha: candidate, previousHead, ...receipt };
 }

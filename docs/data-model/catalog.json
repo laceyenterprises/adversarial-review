@@ -9,7 +9,7 @@
       "schemaSurface": "src/branch-rewrite-receipt.mjs",
       "relatedSchemaSurfaces": ["src/remediation-publication.mjs", "src/github-auth-recovery.mjs", "src/finalization/queue-git.mjs"],
       "owner": "successful leased Git publisher; compatible with Agent OS cwp_dispatch.branch_rewrite",
-      "compatibility": "Existing worker.branch_rewritten schema; nullable launchRequestId for service writers; nonzero hexadecimal tips accept either case. Actual push destination determines repository identity; ancestry checks exclude fast forwards. Receipt storage failure preserves published outcome and returns/logs exact recovery tips with nullable repo. No automatic expiry."
+      "compatibility": "Existing worker.branch_rewritten schema; nullable launchRequestId for service writers; nonzero hexadecimal tips accept either case. Actual push destination determines repository identity; post-publication ancestry checks exclude fast forwards. Unreadable ancestry or repository resolution preserves publication with a recovery error. Directory syncing is best effort after file fsync and atomic rename. Receipt storage failure preserves published outcome and returns/logs exact recovery tips with nullable repo. No automatic expiry."
     },
     {
       "id": "closer-holds",

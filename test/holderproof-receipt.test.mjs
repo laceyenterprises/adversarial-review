@@ -1,4 +1,6 @@
 import test from 'node:test';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import assert from 'node:assert/strict';
 import { mkdtempSync, chownSync, rmSync, readFileSync, statSync, readdirSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -41,7 +43,8 @@ test('receipt matches the shared Python schema, encoded paths, modes and actual 
   assert.equal(row.actor, 'fixture'); assert.ok(Date.parse(row.recordedAt));
   assert.ok(result.rewriteReceipt);
   for (const url of ['git@github.com:Example/Repo.git', 'https://github.com/Example/Repo.git',
-    'workerpush::https://github.com/Example/Repo.git', 'ssh://git@github.com/Example/Repo.git']) {
+    'workerpush::https://github.com/Example/Repo.git', 'ssh://git@github.com/Example/Repo.git',
+    ' git@github.com:Example/Repo.git\n', '\tworkerpush::git@github.com:Example/Repo.git\r\n']) {
     assert.equal(rewriteRepositoryKey(url), 'github.com/example/repo');
   }
   assert.throws(() => rewriteRepositoryKey('https://example.invalid/Example/Repo.git'));
@@ -59,7 +62,48 @@ test('receipt accepts uppercase hexadecimal tips while rejecting zero and malfor
   receipt(f.root); // Invalid tips did not add receipts.
 });
 
-for (const outcome of ['rewrite', 'forward', 'rejected', 'storage-failed']) {
+for (const failureAt of ['directory-open', 'directory-fsync', 'file-fsync']) {
+  test(`receipt preserves a committed file despite directory sync failure: ${failureAt}`, t => {
+    const f = fixture(t);
+    const open = fs.openSync, flush = fs.fsyncSync;
+    let directoryFd;
+    t.mock.method(fs, 'openSync', (path, flags, ...args) => {
+      if (flags === 'r') {
+        if (failureAt === 'directory-open') throw Object.assign(new Error('unsupported'), { code: 'EINVAL' });
+        directoryFd = open(path, flags, ...args);
+        return directoryFd;
+      }
+      return open(path, flags, ...args);
+    });
+    t.mock.method(fs, 'fsyncSync', fd => {
+      if ((failureAt === 'directory-fsync' && fd === directoryFd)
+        || (failureAt === 'file-fsync' && fd !== directoryFd)) {
+        throw Object.assign(new Error('unsupported'), { code: 'EINVAL' });
+      }
+      return flush(fd);
+    });
+    syncBuiltinESMExports();
+    let result;
+    try {
+      result = recordPublishedRewrite({ repository: 'github.com/example/repo', branch: 'topic/sample',
+        oldHead, newHead, actor: 'fixture', env: f.env });
+    } finally {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+    }
+    if (failureAt === 'file-fsync') {
+      assert.equal(result.rewriteReceiptError.code, 'EINVAL');
+      const dir = join(f.root, 'dispatch', 'branch-rewrites', 'github.com%2Fexample%2Frepo', 'topic%2Fsample');
+      assert.deepEqual(readdirSync(dir), []);
+    } else {
+      assert.ok(result.rewriteReceipt);
+      assert.equal(result.rewriteReceiptError, undefined);
+      assert.equal(receipt(f.root).newHead, newHead);
+    }
+  });
+}
+
+for (const outcome of ['rewrite', 'forward', 'rejected', 'storage-failed', 'unknown-ancestry', 'remote-unavailable', 'invalid-remote']) {
   test(`remediation publisher receipts only successful rewrites: ${outcome}`, async t => {
     const f = fixture(t);
     if (outcome === 'storage-failed') writeFileSync(join(f.root, 'dispatch'), 'blocked');
@@ -67,11 +111,16 @@ for (const outcome of ['rewrite', 'forward', 'rejected', 'storage-failed']) {
     const execute = async (command, args) => {
       calls.push(args);
       if (args.includes('merge-base') && args.includes('--is-ancestor')) {
+        assert.ok(calls.some(call => call.includes('push')), 'receipt inspection follows publication');
         assert.deepEqual(args.slice(-2), [oldHead, newHead]);
+        if (outcome === 'unknown-ancestry') throw Object.assign(new Error('missing object'), { code: 128 });
         if (outcome !== 'forward') throw Object.assign(new Error('not ancestor'), { code: 1 });
       }
       if (args.includes('push') && outcome === 'rejected') throw new Error('lease refused');
-      if (args.includes('remote')) return { stdout: 'git@github.com:example/repo.git\n' };
+      if (args.includes('remote')) {
+        if (outcome === 'remote-unavailable') throw Object.assign(new Error('remote unavailable'), { code: 128 });
+        return { stdout: outcome === 'invalid-remote' ? 'unverified remote' : 'git@github.com:example/repo.git\n' };
+      }
       if (args.includes('rev-parse')) return { stdout: args.some(x => x.includes('origin/main')) ? base : newHead };
       if (args.includes('merge-base')) return { stdout: base };
       if (args.includes('diff')) return { stdout: 'feature.txt\0' };
@@ -89,6 +138,11 @@ for (const outcome of ['rewrite', 'forward', 'rejected', 'storage-failed']) {
     assert.equal(calls.filter(args => args.includes('push')).length, 1);
     if (outcome === 'rewrite') assert.equal(receipt(f.root).newHead, newHead);
     if (outcome === 'forward') assert.equal(readdirSync(f.root).length, 0);
+    if (['unknown-ancestry', 'remote-unavailable', 'invalid-remote'].includes(outcome)) {
+      assert.deepEqual(result.rewriteReceiptError, { repo: null, branch: 'topic/sample', oldHead, newHead,
+        actor: 'review-service:remediation', code: outcome === 'invalid-remote' ? 'ERR_INVALID_URL' : 128 });
+      assert.equal(readdirSync(f.root).length, 0);
+    }
     if (outcome === 'storage-failed') {
       assert.equal(result.rewriteReceiptError.oldHead, oldHead);
       assert.equal(result.rewriteReceiptError.newHead, newHead);

@@ -6372,3 +6372,51 @@ unhandled pending lease. Abandonment reuses that pass's intent reconciliation;
 it does not repeat the receipt query. Recovery scope accepts both `projectRef`
 and canonical `project_ref` (camelCase takes precedence), defaulting to
 `adversarial-merge-authority` only when neither is supplied.
+
+### Deadline-bound ownership (OWNERDEADLINE-01)
+
+OWNERDEADLINE-01: every open PR needs one live owner with a next action and
+an anchored deadline. Once that deadline is at least the existing ownerless
+bound overdue, retained-route reasons and renewed review requests cannot prove
+ownership. A current-head live process, live launch or fresh lease heartbeat
+still fences recovery. The existing watchdog executes the selected successor
+under its two-attempt cap, or pages once per head and missing transition with
+its row, reason and deadline. Discovery checks local lane evidence before
+admission or slow-lane deferral on every tick; checking the deadline adds no
+GitHub calls. Legacy lane records select the shared refresh row from their
+existing no-progress anchor. Recovery dispatch rechecks the live candidate.
+Existing merge predicates, lease mutation rules and review admission remain
+authoritative. Focused synthetic fixtures establish source behavior; existing
+smoke promises are unchanged and natural deployed recovery remains unverified.
+
+`probeOrphanOwnership` receives the shared next action. A matching-head
+`deadline.at` that is at least `ownerlessBoundMs` old disables request-only
+ownership. A live current-head reviewer, a current-head remediation process,
+a live current-head launch/retry chain, or a fresh pending lease with its live
+watcher still holds recovery. An explicit dispatched-lease `heartbeatAt`
+inside the same bound also proves ownership. No heartbeat writer or lease
+mutation is introduced. Unreadable ownership evidence permits a diagnostic
+page but never a competing dispatch.
+
+`recoverOrphan` uses the earlier of its PR-wide idle anchor and the overdue
+action's deadline. It does not restart the fifteen-minute clock when the
+route is first inspected or when a live owner disappears after the deadline.
+Queue deferrals, unsupported executors, reconcile/observe transitions,
+expired recovery waits and exhausted attempts page the missing transition.
+Review and hammer successors use their existing executors; a supplied
+remediation executor shares the same attempt budget. A transition needing a
+scoped PR update without an available executor pages for that update rather
+than gaining new mutation authority. Page receipts persist in the existing
+watchdog database; see the [data model](data-model/orphan-watchdog.md).
+
+The discovery pass reads the current-head lane record before docs fast-path,
+reviewer handoff and normal admission returns. Slow-lane scheduling can still
+defer a full walk. The local deadline check is independent of that schedule.
+An admitted hammer recovery fetches its candidate again and refuses a moved
+or terminal head before entering ordinary closure dispatch. Explicit operator
+holds, drafts, terminal subjects and disabled AMA remain outside recovery.
+
+After normal deployment, the runtime owner can observe an organic expired
+route selecting its successor or producing one missing-transition page.
+No live fault injection, worker dispatch, state edit or restart is part of
+source validation. The SEV report belongs in the next batched docs PR.

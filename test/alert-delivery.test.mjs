@@ -1484,3 +1484,32 @@ test('HOLDOWNER-01: STUCK pages deduplicate the durable outbox per PR head after
   await drainPendingAlerts(options);
   assert.equal(sent, 2);
 });
+
+
+test('OWNERDEADLINE-01: outbox deduplicates lost watchdog receipts by head and transition', async t => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  let sends = 0;
+  const selected = { row: 'R05-structural', action: 'hammer', actor: 'closure-recovery', reason: 'safety-refusal',
+    deadline: { at: '2026-10-27T10:00:00Z' } };
+  const payload = { repo: 'example/repo', prNumber: 1, headSha: 'synthetic', nextAction: selected };
+  const options = { env, event: 'ama.orphan_recovery.missing-transition', payload,
+    fsImpl: { existsSync: () => true, readFileSync: () => 'synthetic-token' },
+    requestText: async () => { sends++; return { statusCode: 200, body: '{}' }; } };
+  const first = await deliverAlert('synthetic missing transition', options);
+  assert.equal(first.queued, true);
+  const retry = await deliverAlert('updated diagnostic', { ...options, payload: { ...payload,
+    nextAction: { ...selected, deadline: { at: '2026-10-27T10:01:00Z' } }, routeReason: 'different-route', attempts: 2 } });
+  assert.equal(retry.queued, false);
+  assert.equal(retry.id, first.id);
+  await drainPendingAlerts(options);
+  assert.equal((await deliverAlert('lost receipt retry', options)).status, 'delivered');
+  assert.equal(sends, 1);
+  const nextTransition = await deliverAlert('another transition', { ...options, payload: { ...payload,
+    nextAction: { ...selected, reason: 'different-transition' } } });
+  const nextHead = await deliverAlert('another head', { ...options, payload: { ...payload, headSha: 'next' } });
+  assert.equal(nextTransition.queued, true);
+  assert.equal(nextHead.queued, true);
+  assert.notEqual(nextTransition.id, first.id);
+  assert.notEqual(nextHead.id, first.id);
+});

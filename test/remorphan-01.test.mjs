@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { acquireAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { acquireAmaCloserLease, amaCloserLeaseFilePath } from '../src/ama/closer-lease.mjs';
 import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { recoverOrphan, probeOrphanOwnership, ownerlessBoundMs, OWNERLESS_BOUND_MS, isOrphanRecoveryWait } from '../src/ama/orphan-watchdog.mjs';
 import Database from 'better-sqlite3';
@@ -17,7 +17,7 @@ import { openReviewStateDb, ensureReviewStateSchema, hasSettledCommentOnlyVerdic
 mock.method(os, 'loadavg', () => [0, 0, 0]);
 
 function syntheticDecision(head) {
-  return nextAction(deriveNextActionSnapshot({ subjectKey: 'subject-orphan-07', head,
+  const decision = nextAction(deriveNextActionSnapshot({ subjectKey: 'subject-orphan-07', head,
     observedAt: '2026-10-11T16:00:00.000Z', anchors: { firstActionableAt: '2026-10-11T16:00:00.000Z' },
     observations: {
       pr: { state: 'OPEN', headSha: head, mergeable: 'MERGEABLE' },
@@ -26,6 +26,8 @@ function syntheticDecision(head) {
       checks: { conclusion: 'SUCCESS' }, remediation: { roundsLeft: false },
       leases: { closer: null }, launches: { closer: null }, policy: { autonomousMergeExecutionEnabled: true },
     } }));
+  // Legacy clock tests exercise first-observation recovery without a deadline.
+  return { ...decision, deadline: null };
 }
 
 function setup(t) {
@@ -390,4 +392,126 @@ test('orphan review request normalizes an absent diagnostic reason', async t => 
   assert.equal(result.amaClosureResult.reviewRequest.triggered, true);
   assert.equal(calls.reviews.length, 1);
   assert.deepEqual(JSON.parse(recoveryState(args.rootDir).evidence).reasons, []);
+});
+
+function expiredDecision(overrides = {}) {
+  return { ...syntheticDecision('current'), deadline: { at: '2026-10-11T15:40:00.000Z' }, ...overrides };
+}
+
+test('OWNERDEADLINE-01: expired retained route recovers on its first observation', async t => {
+  const { args, calls, tick } = setup(t);
+  const selected = expiredDecision();
+  const result = await tick(0, { result: { reason: 'AMA hammer route retained ownership', nextAction: selected },
+    hasOwnerImpl: options => probeOrphanOwnership({ ...options, processKillImpl: () => { throw Object.assign(new Error('dead'), { code: 'ESRCH' }); } }) });
+  assert.equal(result.outcome, 'ama-dispatched');
+  assert.equal(calls.launches.length, 1);
+  assert.equal(recoveryState(args.rootDir).attempts, 1);
+});
+
+test('OWNERDEADLINE-01: deadline boundary and head must match; request renewal is not liveness', async t => {
+  const { args } = setup(t);
+  const selected = expiredDecision();
+  const options = { ...args, nextAction: selected, now: '2026-10-11T15:55:00Z',
+    reviewStateRow: { review_status: 'pending', revision_ref: 'current', rereview_requested_at: '2026-10-11T15:54:00Z' } };
+  assert.equal((await probeOrphanOwnership(options)).owned, false);
+  assert.equal((await probeOrphanOwnership({ ...options, now: '2026-10-11T15:54:59Z' })).owned, true);
+  assert.equal((await probeOrphanOwnership({ ...options, nextAction: { ...selected, head: 'old' } })).owned, true);
+});
+
+for (const proof of ['reviewer', 'launch', 'lease']) test(`OWNERDEADLINE-01: live ${proof} prevents overdue recovery`, async t => {
+  const { args, record, tick, calls } = setup(t);
+  if (proof === 'launch') record('ama-closer-dispatches', { launchRequestId: 'synthetic-live' });
+  if (proof === 'lease') acquireAmaCloserLease({ ...args, watcherPid: 123, now: '2026-10-11T16:00:00Z' });
+  const row = proof === 'reviewer' ? { reviewer_head_sha: 'current', reviewer_pgid: 123 } : args.reviewStateRow;
+  await tick(0, { reviewStateRow: row, result: { nextAction: expiredDecision() },
+    hasOwnerImpl: options => probeOrphanOwnership({ ...options, processKillImpl: () => {},
+      readStatusImpl: async () => ({ ok: true, row: { status: 'running' } }) }) });
+  assert.equal(calls.launches.length + calls.reviews.length + calls.pages.length, 0);
+});
+
+test('OWNERDEADLINE-01: another head launch cannot hide an overdue current-head action', async t => {
+  const { args, record } = setup(t);
+  record('ama-closer-dispatches', { headSha: 'old', launchRequestId: 'old-live' });
+  const result = await probeOrphanOwnership({ ...args, now: '2026-10-11T16:00:00Z', nextAction: expiredDecision(),
+    readStatusImpl: () => assert.fail('foreign head cannot prove ownership') });
+  assert.equal(result.owned, false);
+});
+
+for (const blocker of ['reconcile', 'observe', 'deferred', 'uncertain', 'wait']) test(`OWNERDEADLINE-01: impossible ${blocker} pages per head and missing transition across restarts`, async t => {
+  const { tick, calls } = setup(t);
+  const selected = expiredDecision({ row: 'R05-structural', actor: 'closure-recovery', reason: 'safety-refusal',
+    queue: { intent: blocker === 'observe' ? 'observe' : 'reconcile' } });
+  if (blocker === 'deferred') Object.assign(selected, { actor: 'hammer', queue: { intent: 'dispatch', deferredBy: 'drain' } });
+  const overrides = { result: { nextAction: selected, ...(blocker === 'wait' ? { recoveryWait: true } : {}) },
+    hasOwnerImpl: async () => ({ owned: false, uncertain: blocker === 'uncertain' }) };
+  for (const minute of [0, 1, 2]) await tick(minute, overrides);
+  assert.equal(calls.launches.length, 0);
+  assert.equal(calls.pages.length, 1);
+  assert.deepEqual(calls.pages[0][1].payload.nextAction, selected);
+  assert.match(calls.pages[0][0], /R05-structural.*safety-refusal.*deadline=2026-10-11T15:40/);
+  await tick(3, { ...overrides, result: { nextAction: { ...selected, reason: 'another-missing-transition' } } });
+  assert.equal(calls.pages.length, 2);
+  await tick(4, { ...overrides, headSha: 'next', result: { nextAction: { ...selected, head: 'next' } } });
+  assert.equal(calls.pages.length, 3);
+});
+
+test('OWNERDEADLINE-01: remediation uses the same two-attempt recovery cap', async t => {
+  const { tick, calls } = setup(t);
+  let remediation = 0;
+  const options = { result: { nextAction: expiredDecision({ action: 'remediate', actor: 'remediator' }) },
+    dispatchRemediation: async () => { remediation++; return { dispatched: true }; } };
+  for (const minute of [0, 1, 2, 3]) await tick(minute, options);
+  assert.equal(remediation, 2);
+  assert.equal(calls.pages.length, 1);
+  assert.equal(calls.pages[0][1].payload.missingTransition, 'recovery-attempts-exhausted');
+});
+
+
+for (const heartbeat of ['fresh', 'stale', 'future', 'absent']) test(`OWNERDEADLINE-01: ${heartbeat} lease heartbeat is bounded`, async t => {
+  const { args } = setup(t);
+  const path = amaCloserLeaseFilePath(args.rootDir, args);
+  acquireAmaCloserLease({ ...args, watcherPid: 123, now: '2026-10-11T14:00:00Z' });
+  const record = { schemaVersion: 1, repo: args.repo, prNumber: args.prNumber, headSha: args.headSha,
+    status: 'dispatched', acquiredAt: '2026-10-11T14:00:00Z',
+    ...(heartbeat !== 'absent' ? { heartbeatAt: heartbeat === 'fresh' ? '2026-10-11T15:59:00Z'
+      : heartbeat === 'future' ? '2026-10-11T16:01:00Z' : '2026-10-11T15:00:00Z' } : {}) };
+  writeFileSync(path, JSON.stringify(record));
+  const result = await probeOrphanOwnership({ ...args, now: '2026-10-11T16:00:00Z', nextAction: expiredDecision() });
+  assert.equal(result.owned, heartbeat === 'fresh');
+});
+
+for (const receipt of ['failed', 'delivered', 'dead-letter']) test(`OWNERDEADLINE-01: ${receipt} transition receipt preserves retry semantics`, async t => {
+  const { tick, calls } = setup(t);
+  const result = { nextAction: expiredDecision({ actor: 'closure-recovery', queue: { intent: 'reconcile' } }) };
+  let enqueue = 0;
+  const options = { result, pageImpl: async () => { enqueue++; return { queued: false, status: receipt }; } };
+  await tick(0, options);
+  await tick(1, options);
+  assert.equal(enqueue, receipt === 'failed' ? 2 : 1);
+  assert.equal(calls.launches.length, 0);
+});
+
+test('OWNERDEADLINE-01: an overdue reviewer action with uncertain ownership pages without queueing', async t => {
+  const { tick, calls } = setup(t);
+  await tick(0, { result: { nextAction: expiredDecision({ action: 'review', actor: 'reviewer' }) },
+    hasOwnerImpl: async () => ({ owned: false, uncertain: true }) });
+  assert.equal(calls.reviews.length, 0);
+  assert.equal(calls.pages.length, 1);
+});
+
+test('OWNERDEADLINE-01: re-observation dispatches the new generation and pages the expired generation', async t => {
+  const { args, tick, calls } = setup(t);
+  const result = { amaEnabled: true, nextAction: expiredDecision() };
+  // An ownership observation may invalidate dispatch selection during the probe.
+  const onOwnershipObserved = () => { result.nextAction = expiredDecision({ actor: 'closure-recovery', queue: { intent: 'reconcile' } }); };
+  await recoverOrphan({ ...args, result, now: '2026-10-11T16:00:00Z', onOwnershipObserved,
+    dispatchHammer: () => assert.fail('old generation cannot dispatch'),
+    pageImpl: async (_message, metadata) => calls.pages.push(metadata) });
+  assert.equal(calls.pages.length, 1);
+  assert.equal(calls.pages[0].payload.nextAction.actor, 'hammer');
+  // Changing only the deadline cannot create a second page for a missing transition.
+  const selected = expiredDecision({ actor: 'closure-recovery', queue: { intent: 'reconcile' } });
+  await tick(0, { result: { nextAction: selected } });
+  await tick(1, { result: { nextAction: { ...selected, deadline: { at: '2026-10-11T15:39:00Z' } } } });
+  assert.equal(calls.pages.length, 2);
 });

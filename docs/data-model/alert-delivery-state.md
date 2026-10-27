@@ -192,3 +192,13 @@ Directory: `data/alert-delivery/`
   own home directories.
 
 An unreadable or corrupt legacy recovery receipt is retained conservatively for deduplication and logged; it does not prevent enqueue through a thrown read error.
+
+
+OWNERDEADLINE-01 adds `ama.orphan_recovery.missing-transition` to the existing
+fixed recovery identities. Its hash covers repository, PR, head and the shared
+next action's `[row, action, actor, reason]` tuple. Deadline updates, route
+messages and attempt counters do not change the outbox ID. A crash between
+enqueue and the watchdog's `transition_pages` receipt therefore reuses the
+same pending, delivered or dead-letter document; a different head or missing
+transition can enqueue its own page. The queue schema and delivery retries do
+not change.

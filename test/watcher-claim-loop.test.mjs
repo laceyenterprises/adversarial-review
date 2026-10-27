@@ -85,6 +85,7 @@ const DEFAULT_FOLLOW_UP_JOBS_SOURCE = "export const FOLLOW_UP_JOB_DIRS = { pendi
   + " export function readFollowUpJob() { throw new Error('unexpected fixture job read'); } export function releaseInfrastructureCiStop() { throw new Error('unexpected fixture CI stop release'); }";
 
 function buildLoaderSource({
+  deadlineRecoverySource = null,
   capRouteSource = null,
   provenanceReaderSource = null,
   discoveryHookSource = '',
@@ -110,6 +111,7 @@ function buildLoaderSource({
   const packageParentUrl = fileUrl('package.json');
 
   const stubs = {
+    ...(deadlineRecoverySource ? { [fileUrl('src', 'ownerproof-review-recovery.mjs')]: 'fixture:deadline-recovery' } : {}),
     ...(capRouteSource ? { [fileUrl('src', 'review-cycle-cap-hammer.mjs')]: 'fixture:cap-route' } : {}),
     [reviewStateUrl]: 'fixture:review-state',
     [subjectAdapterUrl]: 'fixture:subject-adapter',
@@ -146,6 +148,7 @@ function buildLoaderSource({
   };
 
   return `
+const deadlineRecoverySource = ${JSON.stringify(deadlineRecoverySource)};
 const capRouteSource = ${JSON.stringify(capRouteSource)};
 const cascadeSource = ${JSON.stringify(cascadeSource)};
 const stubs = new Map(${JSON.stringify(Object.entries(stubs))});
@@ -162,6 +165,7 @@ export async function resolve(specifier, context, nextResolve) {
 
 export async function load(url, context, nextLoad) {
   if (url === 'fixture:reviewer-cascade' && cascadeSource) return { format: 'module', shortCircuit: true, source: cascadeSource };
+  if (url === 'fixture:deadline-recovery') return { format: 'module', shortCircuit: true, source: deadlineRecoverySource };
   if (url === 'fixture:cap-route') return { format: 'module', shortCircuit: true, source: capRouteSource };
   if (url === 'fixture:heldhead') {
     return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
@@ -534,6 +538,7 @@ try {
     reviewerSpawns: globalThis.__watcherClaimLoopReviewerSpawns || [],
     brokerRefreshes: globalThis.__watcherClaimLoopBrokerRefreshes || 0,
     pollError: pollError ? String(pollError.message || pollError) : null,
+    deadlineRecoveries: globalThis.__deadlineRecoveries || [],
     depthDiagnostics: globalThis.__watcherDepthDiagnostics || null,
   }));
 } catch (err) {
@@ -4664,5 +4669,33 @@ test('LABELSTOPOWNER-01: failed CI requeue pages before the watcher releases its
         assert.ok(!row.reviewer_session_uuid);
       `,
     });
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+
+test('OWNERDEADLINE-01: every open subject visits deadline recovery before reviewer admission', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-deadline-'));
+  try {
+    const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs'), runnerPath = path.join(tmp, 'runner.mjs');
+    writeFileSync(loaderPath, buildLoaderSource({ deadlineRecoverySource: `
+      export async function recoverOwnerlessReview() { return null; }
+      export async function recoverOverdueOwnership({ prNumber, subject }) {
+        if (subject.terminal) throw new Error('terminal subject cannot recover');
+        (globalThis.__deadlineRecoveries ||= []).push(prNumber);
+        return { outcome: 'ama-dispatched' };
+      }
+    ` }));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource());
+    const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
+      cwd: REPO_ROOT, encoding: 'utf8', timeout: 30000, env: fixtureEnv(installGhFixture(tmp)),
+    });
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    const summary = JSON.parse(result.stdout.split(/\r?\n/).find(line => line.startsWith(SUMMARY_MARKER)).slice(SUMMARY_MARKER.length));
+    assert.ok(summary.deadlineRecoveries.includes(101));
+    assert.equal(summary.claims.length, 0);
+    assert.equal(summary.reviewerSpawns.length, 0);
+    assert.equal(summary.githubWrites.length, 0);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });

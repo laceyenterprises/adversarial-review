@@ -23,6 +23,14 @@ export function ownerlessBoundMs(env = process.env) {
 }
 const text = value => String(value || '').slice(0, 300);
 
+// This clock is shared with ordinary ownerless recovery. Route observations
+// and fresh request timestamps cannot renew an overdue action's ownership.
+export function overdueNextAction(nextAction, headSha, now = new Date().toISOString(), env = process.env) {
+  const deadline = Date.parse(nextAction?.deadline?.at);
+  return nextAction?.head === headSha && Number.isFinite(deadline)
+    && Date.parse(now) - deadline >= ownerlessBoundMs(env);
+}
+
 // A proven publication chain can still lack a settled live verdict. Preserve
 // that rejection while executing the separately selected, head-bound owner.
 export function hasExactHeadReviewDecision(result, headSha) {
@@ -35,7 +43,8 @@ export function hasExactHeadReviewDecision(result, headSha) {
 export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, reviewStateRow, labels = [],
   readStatusImpl = readLaunchRequestStatusFromLedgerAsync, timeoutMs = loadAwareTimeoutMs(5000), signal = null, reservationStartedAt = null,
   now = new Date().toISOString(), processKillImpl = process.kill, logger = console, reservationRecordHead = null,
-  excludeWatcherPid = null, env = process.env, includeOwnerEvidence = false }) {
+  excludeWatcherPid = null, env = process.env, includeOwnerEvidence = false, nextAction = null }) {
+  const overdue = overdueNextAction(nextAction, headSha, now, env);
   const alive = (pid, group = false) => {
     if (!Number.isInteger(Number(pid)) || Number(pid) <= 0) return false;
     try { processKillImpl(group ? -Number(pid) : Number(pid), 0); return true; } catch (error) { return error.code === 'EPERM'; }
@@ -45,6 +54,12 @@ export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, r
   // Recovery's post-acquisition probe must exclude its own reservation only.
   const pendingLease = readAmaCloserLease(rootDir, { repo, prNumber, headSha });
   const pendingAge = Date.parse(now) - Date.parse(pendingLease?.acquiredAt);
+  const heartbeatAge = Date.parse(now) - Date.parse(pendingLease?.heartbeatAt);
+  if (pendingLease?.status === 'dispatched' && Number.isFinite(heartbeatAge)
+    && heartbeatAge >= 0 && heartbeatAge < ownerlessBoundMs(env)) {
+    return { owned: true, proof: 'fresh-closer-heartbeat',
+      ...(includeOwnerEvidence ? { actor: 'hammer', lease: pendingLease } : {}) };
+  }
   if (pendingLease?.status === 'pending' && alive(pendingLease.watcherPid)
     && Number(pendingLease.watcherPid) !== Number(excludeWatcherPid)
     && Number.isFinite(pendingAge) && pendingAge >= 0
@@ -58,7 +73,7 @@ export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, r
   }
   const requested = Date.parse(reviewStateRow?.reviewer_started_at || reviewStateRow?.rereview_requested_at || reviewStateRow?.reviewed_at);
   const age = Date.parse(now) - requested;
-  if (rowHead === headSha && ['pending', 'pending-upstream', 'reviewing'].includes(reviewStateRow?.review_status)
+  if (!overdue && rowHead === headSha && ['pending', 'pending-upstream', 'reviewing'].includes(reviewStateRow?.review_status)
     && Number.isFinite(age) && age >= 0 && age < ownerlessBoundMs(env)) {
     return { owned: true, proof: 'bounded-review-request', ...(includeOwnerEvidence ? { actor: 'reviewer' } : {}) };
   }
@@ -113,6 +128,7 @@ export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, r
       if (signal?.aborted || Date.now() >= deadline) { uncertain('ownership-probe-timeout'); return result; }
       const record = readRecord(join(dir, name), !queue || matchesName(name));
       if (!record || !sameRepo(record.repo) || Number(record.prNumber) !== Number(prNumber)) continue;
+      if (overdue && (record.targetRemediationSha || record.headSha || record.reviewedSha) !== headSha) continue;
       if (bucket === 'merge-agent-dispatches') mergeRecordSeen = true;
       if (queue && alive(record.remediationWorker?.processId)) return { ...result, owned: true, proof: 'live-remediator', ...(includeOwnerEvidence ? { actor: 'remediator' } : {}) };
       const launchRequestId = record.remediationWorker?.launchRequestId || record.launchRequestId || record.dispatchId;
@@ -135,7 +151,9 @@ export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, r
       } catch { uncertain('ledger-read-failed'); continue; }
       if (launchRequestMeaning(record.lastObservedStatus).parked
         && (!probe?.ok || launchRequestOwned(probe) === null || probe.retryChainUnreadable)) {
-        result.owned = true; continue;
+        if (overdue) uncertain('parked-launch-unreadable');
+        else result.owned = true;
+        continue;
       }
       if (!probe?.ok) {
         uncertain(probe?.reason || 'ledger-read-failed'); continue;
@@ -230,6 +248,7 @@ export async function recoverOrphan(options) {
 
 async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candidate,
   labels = candidate?.labels || [], result, reviewStateRow, dispatchHammer,
+  dispatchRemediation = null,
   hasOwnerImpl = probeOrphanOwnership, pageImpl = defaultPage, requestRereviewImpl = defaultRereview,
   ownershipOperation = fn => fn({}), ownershipTimeoutMs = loadAwareTimeoutMs(5000),
   onOwnershipObserved = null,
@@ -252,33 +271,41 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
       if (!columns.has(name)) db.exec(`ALTER TABLE heads ADD COLUMN ${name} ${type}`);
     }
     db.exec('CREATE TABLE IF NOT EXISTS ownership (id INTEGER PRIMARY KEY CHECK (id=1), idleSince TEXT)');
+    db.exec('CREATE TABLE IF NOT EXISTS transition_pages (head TEXT, transition TEXT, PRIMARY KEY(head,transition))');
     db.prepare('INSERT OR IGNORE INTO ownership(id,idleSince) SELECT 1,MIN(idleSince) FROM heads').run();
     db.prepare('INSERT OR IGNORE INTO heads(head) VALUES (?)').run(headSha);
     const state = db.prepare('SELECT * FROM heads WHERE head=?').get(headSha);
-    const idleSince = db.prepare('SELECT idleSince FROM ownership WHERE id=1').get().idleSince;
+    const storedIdleSince = db.prepare('SELECT idleSince FROM ownership WHERE id=1').get().idleSince;
+    let selected = result?.nextAction;
+    const overdue = overdueNextAction(selected, headSha, now, env);
+    const expiredAction = overdue ? selected : null;
+    const idleSince = overdue && (!storedIdleSince || Date.parse(selected.deadline.at) < Date.parse(storedIdleSince))
+      ? selected.deadline.at : storedIdleSince;
     let ownership;
     const exactHeadReview = hasExactHeadReviewDecision(result, headSha, reviewStateRow);
-    if (isOrphanRecoveryWait(result) && !exactHeadReview) {
+    if (isOrphanRecoveryWait(result) && !exactHeadReview && !overdue) {
       // A proof timeout must return at its serial deadline. Observing this
       // wait only needs the clock; no ownership probe or recovery can run.
       ownership = { owned: false };
     } else {
       try {
         const probe = await ownershipOperation(({ signal: childSignal }) => hasOwnerImpl({ rootDir, repo, prNumber,
-          headSha, reviewStateRow, labels, now, env, includeOwnerEvidence: Boolean(onOwnershipObserved), signal: childSignal || signal, timeoutMs: ownershipTimeoutMs, logger }));
+          headSha, reviewStateRow, labels, now, env, nextAction: selected, includeOwnerEvidence: Boolean(onOwnershipObserved), signal: childSignal || signal, timeoutMs: ownershipTimeoutMs, logger }));
         ownership = typeof probe === 'boolean' ? { owned: probe } : probe;
       } catch { ownership = { uncertain: true }; }
     }
     try { onOwnershipObserved?.(ownership); }
     catch (error) { logger?.warn?.(`Closure ownership observation failed: ${text(error.message)}`); }
+    // Observation may replace the shared generation. Never dispatch its predecessor.
+    selected = result?.nextAction;
     if (ownership?.owned) {
       db.prepare('UPDATE ownership SET idleSince=NULL WHERE id=1').run();
       db.prepare('UPDATE heads SET idleSince=NULL WHERE head=?').run(headSha);
       return null;
     }
     const pending = { outcome: 'ama-pending', amaClosureResult: { ...result, skipMergeAgent: true } };
-    if (!idleSince) {
-      db.prepare('UPDATE ownership SET idleSince=? WHERE id=1').run(now);
+    if (idleSince !== storedIdleSince || !idleSince) {
+      db.prepare('UPDATE ownership SET idleSince=? WHERE id=1').run(idleSince || now);
     }
     if (!state.idleSince) db.prepare('UPDATE heads SET idleSince=? WHERE head=?').run(idleSince || now, headSha);
     const idleMs = Date.parse(now) - Date.parse(idleSince || now);
@@ -288,8 +315,8 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     // HAMATTEST-02: execute the shared decision on this pass, before historical
     // hammer ownership or the idle timer can leave an unprovable head actorless.
     // Unknown ownership is a read wait, never permission to race a live closer.
-    if (exactHeadReview) {
-      if (ownership?.uncertain) return pending;
+    if (hasExactHeadReviewDecision(result, headSha)) {
+      if (ownership?.uncertain && !overdue) return pending;
       if (idleMs < ownerlessBoundMs(env)) {
         const reviewRequest = await requestBoundedOrphanReview({ rootDir, repo, prNumber, headSha,
           reviewStateRow, requestRereviewImpl, logger, db,
@@ -299,7 +326,32 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     }
     // The route already owns a proof/read/dispatch wait. Keep the ownerless
     // clock, but neither spend recovery nor page an exhausted launch budget.
-    if (isOrphanRecoveryWait(result) || idleMs < ownerlessBoundMs(env)) return pending;
+    if ((!overdue && isOrphanRecoveryWait(result)) || idleMs < ownerlessBoundMs(env)) return pending;
+    const pageTransition = async missingTransition => {
+      const transition = JSON.stringify([expiredAction.row, expiredAction.action, expiredAction.actor, expiredAction.reason]);
+      if (!db.prepare('SELECT 1 FROM transition_pages WHERE head=? AND transition=?').get(headSha, transition)) {
+        try {
+          const receipt = await pageImpl(`SEV1 ownerless PR: ${repo} PR ${prNumber} head ${headSha}; missing transition ${missingTransition}; ${text(expiredAction.row)} ${text(expiredAction.action)} owner=${text(expiredAction.actor)} reason=${text(expiredAction.reason)} deadline=${text(expiredAction.deadline?.at)}`, {
+            event: 'ama.orphan_recovery.missing-transition', payload: { severity: 'SEV1', repo, prNumber, headSha,
+              missingTransition, nextAction: expiredAction, routeReason: text(result.reason), attempts: state.attempts } });
+          if (receipt?.status === 'dead-letter') logger?.warn?.('Orphan transition page is dead-lettered; operator action required');
+          if (receipt?.queued !== false || ['delivered', 'dead-letter'].includes(receipt?.status)) {
+            db.prepare('INSERT OR IGNORE INTO transition_pages(head,transition) VALUES (?,?)').run(headSha, transition);
+          }
+        } catch (error) { logger?.warn?.(`Orphan transition page enqueue failed: ${text(error.message || error)}`); }
+      }
+      return { ...pending, outcome: 'recovery-exhausted' };
+    };
+    const executor = selected?.action === 'review' && selected.actor === 'reviewer' ? requestRereviewImpl
+      : selected?.action === 'hammer' && selected.actor === 'hammer' ? dispatchHammer
+      : selected?.action === 'remediate' && selected.actor === 'remediator' ? dispatchRemediation : null;
+    const canDispatch = selected?.head === headSha && selected.queue?.intent === 'dispatch'
+      && !selected.queue?.deferredBy && typeof executor === 'function';
+    if (overdue && (ownership?.uncertain || !canDispatch || isOrphanRecoveryWait(result))) {
+      return await pageTransition(ownership?.uncertain ? 'ownership-proof-unavailable'
+        : isOrphanRecoveryWait(result) ? 'recovery-wait-expired'
+        : selected?.queue?.deferredBy || 'selected-owner-executor-unavailable');
+    }
     const previous = readEvidence(state.evidence);
     const outcomes = JSON.parse(state.outcomes || '[]');
     if (!Array.isArray(outcomes)) throw new Error('orphan watchdog outcomes are malformed');
@@ -308,6 +360,7 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
         ? previous : { reason: 'legacy-outcome-unknown' });
     }
     if (state.attempts >= 2) {
+      if (overdue) return await pageTransition('recovery-attempts-exhausted');
       if (!state.paged) {
         try {
           const reasons = outcomes.slice(0, 2).map((outcome, index) =>
@@ -336,11 +389,7 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     // reservation; a missing receipt never implies that no launch happened.
     // Ownership probes and durable retry reservations remain physical fences.
     // The successor itself is always the generation selected by nextAction.
-    const selected = result?.nextAction;
-    if (ownership?.uncertain || selected?.head !== headSha
-      || selected.queue?.intent !== 'dispatch' || selected.queue?.deferredBy
-      || !((selected.action === 'review' && selected.actor === 'reviewer')
-        || (selected.action === 'hammer' && selected.actor === 'hammer'))) return pending;
+    if (ownership?.uncertain || !canDispatch) return pending;
     const action = selected.action;
     const attempt = { action, reason: 'outcome-unknown', at: now };
     outcomes.push(attempt);
@@ -354,7 +403,7 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
       retry = action === 'review'
         ? await requestRereviewImpl({ rootDir, repo, prNumber, targetRevisionRef: headSha,
           requestedAt: now, reason: `system-orphan-head-review:${headSha}`, ownerlessRecovery: true, logger })
-        : await dispatchHammer({ ownerProof: true, headSha });
+        : await executor({ ownerProof: true, headSha, nextAction: selected });
       Object.assign(attempt, attemptSummary(retry), { triggered: retry?.triggered === true });
     } catch (error) {
       attempt.reason = text(error.message || error);

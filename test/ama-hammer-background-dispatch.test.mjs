@@ -768,8 +768,9 @@ function scopedEvent(headSha = HEAD) {
 
 function sharedResult(args, result, observations = {}) {
   const seed = matrixPair().snapshot;
-  const snapshot = deriveNextActionSnapshot({ base: seed, subjectKey: `${args.repoPath}#${args.prNumber}`,
-    head: HEAD, observations: {
+  const observedAt = new Date().toISOString();
+  const snapshot = deriveNextActionSnapshot({ base: { ...seed, observedAt }, subjectKey: `${args.repoPath}#${args.prNumber}`,
+    head: HEAD, anchors: { firstActionableAt: observedAt }, observations: {
       pr: { ...seed.observations.pr.value, headSha: HEAD, labels: args.labelNames || [] },
       reviews: { ...seed.observations.reviews.value, headSha: HEAD }, ...Object.fromEntries(Object.entries(observations).map(([name, value]) => [name,
         value === null ? { state: 'unknown', value: null } : value])),
@@ -1958,4 +1959,24 @@ test('CLOSERDISPATCHDEAD-01: shutdown aborts running work synchronously and prev
   assert.equal(interrupted, true, 'abort persistence completes before shutdown returns');
   assert.equal(queue.submit({ key: 'example/repo#10@head', run: () => assert.fail('shutdown is closed') }).state, 'stopped');
   await queue.drain();
+});
+
+for (const action of ['wait-for-CI', 'remediate', 'hammer']) test(`OWNERDEADLINE-01: overdue ${action} reaches watchdog before retained-route returns`, async t => {
+  const args = closureArgs();
+  t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+  const selected = { head: HEAD, row: 'R05-structural', action, actor: 'closure-recovery', reason: 'safety-refusal',
+    queue: { intent: 'reconcile' }, deadline: { at: '2026-10-11T15:00:00Z' } };
+  let recoveries = 0;
+  const result = await resolveMergeAgentCoexistenceForWatcher({ ...args,
+    maybeDispatchAmaClosureForImpl: async () => ({ amaEnabled: true, skipMergeAgent: true,
+      reason: 'safety-refusal', nextAction: selected, boundedWait: { exhausted: true } }),
+    orphanOptions: { now: '2026-10-11T16:00:00Z' },
+    recoverOrphanImpl: async options => {
+      assert.equal(options.result.nextAction, selected);
+      recoveries++;
+      return { outcome: 'recovery-exhausted', amaClosureResult: options.result };
+    },
+  });
+  assert.equal(result.outcome, 'recovery-exhausted');
+  assert.equal(recoveries, 1);
 });

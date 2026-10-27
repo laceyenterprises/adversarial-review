@@ -1144,9 +1144,10 @@
         "src/ama/dispatch-closer.mjs",
         "src/alert-delivery.mjs"
       ],
-      "owner": "AMA ownerless recovery (OWNERPROOF-01)",
+      "owner": "AMA ownerless recovery (OWNERPROOF-01 / OWNERDEADLINE-01)",
+      "deadlineRecovery": "Matching-head nextAction.deadline.at older than ownerlessBoundMs seeds the existing idle clock; live current-head owners still fence dispatch. transition_pages(head,transition) deduplicates pages by head and JSON tuple [row,action,actor,reason]. Discovery checks local lane evidence before admission and slow-lane deferral.",
       "ownershipClock": "ownership.idleSince (singleton id=1; PR-wide across head changes)",
-      "recoveryEvidenceFields": ["ownership.idleSince", "heads.idleSince", "heads.attempts", "heads.outcomes", "heads.evidence", "heads.paged", "heads.rereview"],
+      "recoveryEvidenceFields": ["ownership.idleSince", "heads.idleSince", "heads.attempts", "heads.outcomes", "heads.evidence", "heads.paged", "heads.rereview", "transition_pages.head", "transition_pages.transition"],
       "attemptOutcomeFields": ["action", "reason", "holdReason", "at", "dispatched", "launchRequestId", "triggered"],
       "attemptHoldReasonNormalization": "Explicit result holdReason takes precedence; otherwise extract the harness-hold: suffix from reason for outcomes and evidence summaries.",
       "sharedRereviewDecision": "rereview-exact-head queues once per head immediately when ownership is certainly absent; heads.evidence records action, reason and reasons; local queue failure refunds heads.rereview; both explicit decisions and selectedClosureOwner review/exact-head-review intents require matching distinct current/reviewed heads; selected intents execute before bounded-wait return while closureOwner stays wait/page until certain owner absence and successful queueing; selection is in-memory and the durable shape is unchanged",

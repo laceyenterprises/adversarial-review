@@ -851,6 +851,20 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 CLOSURESPLIT-01: closure and background hammer dispatch carry the selected immutable next-action pair, including the decision key, generation and head-scoped primary-change result. A changed decision key returns closure-decision-mismatch with both keys/generations and the complete replacement snapshot. Closure re-resolves that snapshot once; a daemon successor enters the existing live merge gates, while waits retain the refreshed owner. PRIMARYREPAIRDISPATCH-01 durably counts consumed mismatches per PR/head; the second mismatch, including during that successor attempt or on a later background tick, pages through closure-wait and returns closure-decision-mismatch-escalated without another successor attempt. Inherited primary-change failures are recomputed at the current head and their raw evidence is passed into dispatcher eligibility; absent raw evidence cannot default an observed refusal to not-applicable. A passing predicate supersedes only the associated primary-change decline. When both selected and refreshed exact-subject/head decisions name R05 primary-change-repair, dispatch uses existing repair admission: comment-only verdicts, non-blocking findings and reverted/unknown primary change admit the hammer to restore author lines or perform a finding-cited authorized reversal. Unauthorized reversals still refuse merge; unrelated/permanent declines, R15 conditions, structural safety, retry caps and leases retain their protections. The additive decision_mismatch_cycle table in the closure-wait database records head and a count capped at two; lifecycle states are unchanged. Changed hammer decisions are reported before repair-admission refusal after primary validation passes; structural safety refusals remain in the replacement snapshot. Non-dispatch successors return the refreshed nextAction, reason and snapshot together, and primary refresh preserves unrelated progress metadata.
 
+OWNERDEADLINE-01: every open PR needs one live owner with a next action and
+an anchored deadline. Once that deadline is at least the existing ownerless
+bound overdue, retained-route reasons and renewed review requests cannot prove
+ownership. A current-head live process, live launch or fresh lease heartbeat
+still fences recovery. The existing watchdog executes the selected successor
+under its two-attempt cap, or pages once per head and missing transition with
+its row, reason and deadline. Discovery checks local lane evidence before
+admission or slow-lane deferral on every tick; checking the deadline adds no
+GitHub calls. Legacy lane records select the shared refresh row from their
+existing no-progress anchor. Recovery dispatch rechecks the live candidate.
+Existing merge predicates, lease mutation rules and review admission remain
+authoritative. Focused synthetic fixtures establish source behavior; existing
+smoke promises are unchanged and natural deployed recovery remains unverified.
+
 CLOSERREFRESHLOOP-01: explicit transient daemon declines can return to the
 existing R15 daemon row at the same head after changed gate evidence supersedes
 the transient execution observation and current clean-merge predicates pass.

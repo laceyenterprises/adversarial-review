@@ -501,7 +501,10 @@ CLOSURESPLIT-01: closure and background hammer admission share a decision key,
 generation and complete evidence snapshot, including head-scoped primary change.
 Fresh disagreement returns `closure-decision-mismatch`; closure selects a
 successor from that snapshot once. Inherited primary-change failures are
-recomputed before routing and real reversals still refuse. Existing merge gates,
+recomputed before routing and real reversals still refuse. Changed decisions
+precede repair-admission refusal while retaining structural safety holds;
+non-dispatch successors expose the refreshed action and preserve progress.
+Existing merge gates,
 leases, lifecycle states and smoke promises remain unchanged. See the
 [decision contract](docs/RUNBOOK-ama-closure.md#shared-closurehammer-decision-closuresplit-01).
 Offline source acceptance is separate from read-only observation of natural

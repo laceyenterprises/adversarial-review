@@ -745,11 +745,14 @@ test('DRAINDEFER-01: disabled closer retires a fresh drain hint and restores bac
 });
 
 
-for (const outcome of ['preserved', 'reverted', 'unknown', 'read-failed']) {
+for (const outcome of ['preserved', 'clean-preserved', 'admission-refused', 'reverted', 'unknown', 'read-failed']) {
   test(`CLOSURESPLIT-01: real dispatcher refreshes inherited refusal: ${outcome}`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'closure-split-dispatch-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     const inputs = eligibleInputs(rootDir);
+    const preserved = ['preserved', 'clean-preserved', 'admission-refused'].includes(outcome);
+    if (outcome !== 'preserved') inputs.reviewState.reviewCycleExhausted = false;
+    if (outcome === 'admission-refused') inputs.cfg.eligibility.riskClasses = [];
     inputs.prMetadata.statusCheckRollup = [{ name: 'test', conclusion: 'SUCCESS' },
       { name: 'agent-os/adversarial-gate', conclusion: 'SUCCESS' }];
     const { headSha } = inputs;
@@ -764,7 +767,7 @@ for (const outcome of ['preserved', 'reverted', 'unknown', 'read-failed']) {
     const shared = { snapshot, decision: nextAction(snapshot) };
     assert.equal(shared.decision.reason, 'primary-change-repair');
     let reads = 0;
-    const evidence = outcome === 'preserved' ? primaryChangeFixture(headSha)
+    const evidence = preserved ? primaryChangeFixture(headSha)
       : outcome === 'reverted' ? { ...primaryChangeFixture(headSha), finalFiles: [] }
         : { headSha, ...(outcome === 'read-failed' ? { readFailed: true } : {}) };
     const result = await maybeDispatchAmaCloser({ ...inputs, sharedNextAction: shared,
@@ -774,10 +777,14 @@ for (const outcome of ['preserved', 'reverted', 'unknown', 'read-failed']) {
     });
     assert.equal(reads, 1);
     assert.equal(result.dispatched, false);
-    assert.equal(result.reason, outcome === 'preserved' ? 'closure-decision-mismatch'
+    assert.equal(result.reason, preserved ? 'closure-decision-mismatch'
       : outcome === 'read-failed' ? 'gate-read-failed' : 'primary-change-repair-required');
-    if (outcome === 'preserved') {
-      assert.equal(result.nextActionShared.decision.action, 'daemon-merge');
+    if (preserved) {
+      if (outcome === 'admission-refused') {
+        assert.equal(result.nextActionShared.snapshot.observations.controls.value.safetyRefusal.reason,
+          'risk-class-not-permitted');
+        assert.notEqual(result.nextActionShared.decision.action, 'daemon-merge');
+      } else assert.equal(result.nextActionShared.decision.action, 'daemon-merge');
       assert.equal(result.decisionMismatch.selectedKey, shared.decision.decisionKey);
       assert.equal(result.nextActionShared.snapshot.observations.progress.value.primaryChange.ok, true);
     }

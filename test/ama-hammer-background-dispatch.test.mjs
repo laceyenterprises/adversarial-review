@@ -1778,6 +1778,7 @@ for (const failedHead of ['older-head', HEAD]) {
       const seed = matrixPair().snapshot;
       const passSnapshot = deriveNextActionSnapshot({ base: seed, head: HEAD, observations: {
         progress: { primaryChange: { ok: false, reason: 'primary-change-reverted', headSha: failedHead },
+          terminalReview: { validated: false, headSha: HEAD },
           daemonExecution: { headSha: HEAD, reason: 'not-eligible', reasons: ['primary-change-reverted'] } },
       } });
       const live = hasHammerCommits ? primaryChangeFixture(HEAD) : { headSha: HEAD, hasHammerCommits: false };
@@ -1787,6 +1788,8 @@ for (const failedHead of ['older-head', HEAD]) {
           merges++;
           assert.equal(payload.sharedNextAction.decision.action, 'daemon-merge');
           assert.equal(payload.sharedNextAction.snapshot.observations.progress.value.primaryChange.ok, true);
+          assert.deepEqual(payload.sharedNextAction.snapshot.observations.progress.value.terminalReview,
+            passSnapshot.observations.progress.value.terminalReview);
           return { merged: true, disposition: 'merged', reason: 'daemon-merged' };
         },
         maybeDispatchAmaCloserImpl: () => assert.fail('passing live evidence selects daemon'),
@@ -1864,4 +1867,30 @@ test('CLOSURESPLIT-01: background disagreement returns keys and reselects daemon
   assert.equal(dispatches, 1);
   assert.equal(daemonAttempts, 3);
   assert.equal(queue.snapshot().running, 0);
+});
+
+test('CLOSURESPLIT-01: background mismatch to pending CI retains the refreshed decision', async t => {
+  const queue = createAmaHammerBackgroundQueue();
+  let dispatches = 0;
+  let fresh;
+  const args = closureArgs({
+    resolveAmaHammerDispatchModeImpl: () => 'background', amaHammerBackgroundQueueImpl: () => queue,
+    maybeDispatchAmaCloserImpl: async payload => {
+      dispatches++;
+      fresh = reviseClosureNextAction(payload.sharedNextAction, { checks: { conclusion: 'PENDING' } });
+      assert.equal(fresh.decision.action, 'wait-for-CI');
+      return hammerDispatchMismatch(payload.sharedNextAction, fresh,
+        { repo: args.repoPath, prNumber: args.prNumber, headSha: HEAD });
+    },
+  });
+  t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+  await maybeDispatchAmaClosureFor(args);
+  await queue.drain();
+  const result = await maybeDispatchAmaClosureFor(args);
+  assert.equal(result.decisionReresolutions, 1);
+  assert.equal(result.reason, fresh.decision.reason);
+  assert.deepEqual(result.nextAction, fresh.decision);
+  assert.deepEqual(readClosureNextAction(result), fresh);
+  assert.equal(result.retryAfterMs, 30_000);
+  assert.equal(dispatches, 1);
 });

@@ -806,7 +806,7 @@ async function maybeDispatchAmaClosureForInner({
       result = await dispatchAmaClosureFor({ ...dispatchArgs, resolvedNextAction: resolved,
         passSnapshot: resolved.snapshot, priorDaemonCleanMerge: null });
     } else {
-      result = { ...result, reason: resolved.decision.reason, nextActionShared: resolved,
+      result = { ...result, reason: resolved.decision.reason, nextAction: resolved.decision, nextActionShared: resolved,
         retryAfterMs: 30_000 };
     }
     result = { ...result, mismatchReason: 'closure-decision-mismatch',
@@ -1714,7 +1714,7 @@ async function dispatchAmaClosureFor({
     const primary = checkPrimaryChange(refreshedPrimaryChange, currentPrHeadSha,
       { strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false });
     shared = reviseClosureNextAction(shared, { progress: {
-      ...shared.snapshot.observations.progress?.value,
+      ...(shared.snapshot.observations.progress?.value ?? shared.snapshot.observations.progress),
       primaryChange: { ...primary, headSha: currentPrHeadSha },
     } }, passSnapshot);
   }

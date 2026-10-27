@@ -4838,10 +4838,12 @@ async function maybeDispatchAmaCloserAttempt({
       nextActionShared: sharedNextAction });
   }
   observeSharedDecision(sharedNextAction);
-  if (!verdict.repairAdmission.ok) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-    reason: 'not-eligible', reasons: verdict.reasons, eligibilityRejected: true, safetyRefusal: true, nextActionShared: sharedNextAction });
+  // Report changed routing before enforcing hammer-only admission. The fresh
+  // snapshot retains structural safety refusals for successor resolution.
   const mismatch = hammerDispatchMismatch(selectedNextAction, sharedNextAction, decisionIdentity);
   if (mismatch) return noAmaDispatch(mismatch);
+  if (!verdict.repairAdmission.ok) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+    reason: 'not-eligible', reasons: verdict.reasons, eligibilityRejected: true, safetyRefusal: true, nextActionShared: sharedNextAction });
   const reviewHandoffFindings = reviewHandoffLease?.status === 'handed-to-review'
     && hasHammerDispatchIntent(sharedNextAction, decisionIdentity);
   const orphanAdmit = ownerProofRecovery;

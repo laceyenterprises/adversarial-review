@@ -37,6 +37,13 @@ bare `snapshot-refresh`. Closure re-resolves that same snapshot once and reports
 enters the ordinary live exact-head merge path. A second disagreement returns to
 the caller without another in-pass retry.
 
+After primary-change validation passes, a changed hammer decision is reported
+before repair-admission refusal. Structural admission refusals remain in the
+replacement snapshot and cannot authorize daemon merge; zero findings alone do
+not refuse repair admission. Non-dispatch successors return the refreshed
+`nextAction` together with its reason and snapshot. Primary-change refresh
+preserves unrelated progress metadata.
+
 Primary-change observations carry `headSha`. R05 ignores older-head failures;
 closure refreshes inherited failures at the current head before selecting its
 owner, including same-head failures whose live evidence may have improved.

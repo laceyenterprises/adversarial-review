@@ -80,6 +80,9 @@ ambiguous HQ submission errors retain the one-shot reservation. Partial closure
 snapshots safely fall back to the exact-head hammer refusal; missing recorded
 repair evidence still fails closed.
 
+GitHub inspection uses the shared metered reader within a 15-second budget.
+The repair executor loads only when recovery selects that path.
+
 The reversal collector checks subsequent immutable review snapshots when the
 first superseding snapshot predates the original remediation commit. It still
 proves the finding was current at that commit's parent and verifies identity,

@@ -13,7 +13,6 @@ import { amaRetainLoopCapFor } from '../kernel/convergence-budget.mjs';
 import { reconcileRecoveryLaunches } from './recovery-launch-reconciliation.mjs';
 import { readClosureNextAction } from './closure-next-action.mjs';
 import { deriveNextActionSnapshot, nextAction } from '../pr-next-action.mjs';
-import { dispatchSafetyStopRepair } from './safety-stop-repair.mjs';
 import { readLaunchRequestStatusFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
 import { launchRequestOwned } from './launch-request-status.mjs';
 
@@ -27,6 +26,11 @@ export function isSafetyRecoveryHold(result) {
 async function requestRereview(options) {
   const { requestReviewRereview } = await import('../review-state.mjs');
   return requestReviewRereview(options);
+}
+
+async function dispatchSafetyStopRepair(options) {
+  const { dispatchSafetyStopRepair: dispatch } = await import('./safety-stop-repair.mjs');
+  return dispatch(options);
 }
 
 async function page(text, options) {

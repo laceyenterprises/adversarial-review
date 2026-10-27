@@ -1,6 +1,7 @@
 import { buildMergeAgentDispatchJob } from '../src/follow-up-merge-agent.mjs';
 import { attemptDaemonCleanMerge } from '../src/ama/daemon-merge.mjs';
-import test from 'node:test';
+import test, { mock } from 'node:test';
+import os from 'node:os';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -16,6 +17,9 @@ import { recordNoProgressLaneRun, readNoProgressLane } from '../src/watcher-no-p
 import { registerSharedNextAction, resolveSharedNextAction } from '../src/pr-next-action-shadow.mjs';
 
 import { HEAD, AT, quiet, identity, cases, matrixPair } from './helpers/next-action-matrix.mjs';
+
+// Simulated timestamps exercise the idle policy independently of fleet host load.
+mock.method(os, 'loadavg', () => [0, 0, 0]);
 
 for (const [name, observations, action, actor] of cases) {
   test(`one shared workflow across adapters: ${name}`, async t => {

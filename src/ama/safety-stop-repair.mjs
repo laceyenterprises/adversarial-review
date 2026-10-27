@@ -9,7 +9,7 @@ import { loadConfigCached } from '../config-loader.mjs';
 import { OPERATOR_HOLD_LABELS } from '../operator-hold-labels.mjs';
 import { resolveHqRoot } from '../hq-root.mjs';
 import { fleetStopReason } from '../fleet-stop.mjs';
-import { isTransientGhError } from '../gh-cli.mjs';
+import { execGhWithRetry, isTransientGhError } from '../gh-cli.mjs';
 import { probeOrphanOwnership } from './orphan-watchdog.mjs';
 import { reserveHammerRepairDispatch } from './hammer-retry-cap.mjs';
 
@@ -35,8 +35,9 @@ export async function dispatchSafetyStopRepair({ rootDir, repo, prNumber, headSh
   if (stop) return defer(stop);
   let stdout;
   try {
-    ({ stdout } = await execFileImpl('gh', ['pr', 'view', String(prNumber), '--repo', repo,
-      '--json', 'state,headRefOid,headRefName,isDraft,labels'], { env, signal, timeout: 15_000, maxBuffer: 1024 * 1024 }));
+    ({ stdout } = await execGhWithRetry({ execFileImpl, args: ['pr', 'view', String(prNumber), '--repo', repo,
+      '--json', 'state,headRefOid,headRefName,isDraft,labels'], env, signal, timeoutMs: 15_000,
+      retries: 0, totalTimeoutMs: 15_000 }));
   } catch (error) {
     if (signal?.aborted) throw error;
     if (isTransientGhError(error)) return defer('live-pr-read-transient');

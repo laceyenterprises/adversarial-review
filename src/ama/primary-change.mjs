@@ -949,7 +949,7 @@ async function originalReversalAuthorization({ repo, review, reviews, supersedin
 // snapshot cannot contain the reversal; later immutable snapshots may pin it.
 // Each candidate still proves that the citation was current at its own parent.
 async function recordedReversalAuthorization(args) {
-  const start = args.reviews.indexOf(args.superseding);
+  const start = Math.max(0, args.reviews.indexOf(args.superseding));
   let firstFailure;
   for (const superseding of args.reviews.slice(start)) {
     if (!amaReviewerFamilyForLogin(superseding.user?.login)

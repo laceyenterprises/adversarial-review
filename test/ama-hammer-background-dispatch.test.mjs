@@ -887,6 +887,7 @@ test('background mode re-evaluates a cleared safety hold on the same head', asyn
 test('a scoped label still evaluates closer safety gates on every background cycle', async () => {
   const queue = createAmaHammerBackgroundQueue();
   let calls = 0;
+  let pages = 0;
   const args = closureArgs({
     labelNames: ['merge-agent-requested'], mergeAgentRequestEvent: scopedEvent(),
     resolveAmaHammerDispatchModeImpl: () => 'background',
@@ -900,14 +901,15 @@ test('a scoped label still evaluates closer safety gates on every background cyc
   const run = () => resolveMergeAgentCoexistenceForWatcher({
     ...args,
     maybeDispatchAmaClosureForImpl: (input) => maybeDispatchAmaClosureFor({ ...args, ...input }),
-    recoveryOptions: { pageImpl: async () => assert.fail('safety holds do not page recovery') },
+    recoveryOptions: { pageImpl: async () => { pages += 1; } },
   });
   for (let cycle = 0; cycle < 3; cycle += 1) {
     assert.equal((await run()).outcome, 'ama-pending');
     await queue.drain();
-    assert.equal((await run()).outcome, 'ama-pending');
+    assert.equal((await run()).outcome, 'recovery-exhausted');
   }
   assert.equal(calls, 3);
+  assert.equal(pages, 1, 'a safety refusal without recorded repair pages once without bypassing closer gates');
 });
 
 test('safety refusals are consumed once and expire under the normal TTL', async () => {

@@ -3577,6 +3577,22 @@ loaded builds and an organic bounded lookup; do not infer activation from merge.
 Existing lifecycle states and smoke promises remain unchanged. The added
 producer/backend and SDK tests run on demand, with synthetic external boundaries.
 
+## Opener identity read retries (IDENTITYREAD503-01)
+
+IDENTITYREAD503-01: the daemon's opener provenance read retries transient
+dispatch failures within a single load-aware 8-second nominal budget per
+selector (three attempts, 100/200ms backoff). Exhausted reads retain
+`identity-read-transient` in the worker-identity decline so ordinary snapshot
+refresh can retry the same head. Empty or ambiguous provenance, disabled reads
+and scope denial remain fail-closed. Focused synthetic fixtures in
+`test/daemon-worker-identity-ledger-target.test.mjs` and
+`test/daemon-next-action.test.mjs` cover 503 recovery, persistent failure,
+timeout budgets and unchanged absence/ambiguity refusal. Existing lifecycle
+states and smoke promises remain unchanged. After normal deployment, the
+runtime owner can observe natural same-head recovery read-only; no live worker
+verification or config flip is part of this change. See the closure runbook's
+worker-identity section for the retry contract.
+
 ## No-progress lane resets (NOPROGRESSRESET-01)
 
 The posted-review lane fingerprints closure next-action row/action/reason and

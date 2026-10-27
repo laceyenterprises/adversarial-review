@@ -11,6 +11,13 @@ function sleepMs(ms) {
 }
 
 const HEAD_ATTESTATION_CHAIN_RETRY_DELAYS_MS = [250, 1000];
+const BUILD_IDENTITY_RETRY_DELAYS_MS = [100, 200];
+
+function isTransientIdentityRead(result) {
+  if (result?.ok || result?.transient === false) return false;
+  return result?.transient === true || ['dispatch-read-unavailable',
+    'worker-observation-unavailable'].includes(result?.reason);
+}
 
 // Attestation-resolve failure reasons that mean the LHA layer is structurally
 // UNABLE to function (infra down) rather than healthily refusing a head. Only
@@ -21,17 +28,40 @@ const HEAD_ATTESTATION_CHAIN_RETRY_DELAYS_MS = [250, 1000];
 // raises HCPHeadAttestationConfigurationError) — the 2026-07-15 outage class.
 const ATTESTATION_INFRA_FAILURE_REASONS = new Set(['head-attestation-chain-read-failed']);
 
-async function readDaemonBuildIdentity(args) {
+export async function readDaemonBuildIdentity(args, {
+  readWorkerObservationImpl = readWorkerObservation,
+  sleepImpl = sleepMs,
+  nowMs = () => performance.now(),
+} = {}) {
   // SDK 0.9.0 / producer f37c748: PR provenance defaults to the latest live
   // pr_opened row. builder_identity:true deliberately selects later completions
   // for review routing and MUST NOT be used for this stable opener identity.
-  const result = await readWorkerObservation({observation:'provenance',repo:args.repo,
-    pr_number:Number(args.prNumber),head_sha:args.headSha || undefined,limit:100}, args);
-  if (!result.ok) return {...result,reason:result.reason || 'missing-build-completion-signal'};
-  if (result.rows.length !== 1) {
-    return {ok:false,reason:'unconfirmed-pr-opener-provenance'};
+  // Size once for this selector. Registration, all pages, attempts and backoff
+  // share the original budget. Reserve time for retrying a timed-out attempt;
+  // giving the first request the whole budget would make timeout retries inert.
+  const budgetMs = args.timeoutMs ?? loadAwareTimeoutMs(8000);
+  const deadline = nowMs() + budgetMs;
+  const maxAttempts = BUILD_IDENTITY_RETRY_DELAYS_MS.length + 1;
+  let result;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const remaining = deadline - nowMs();
+    if (remaining <= 0) break;
+    result = await readWorkerObservationImpl({observation:'provenance',repo:args.repo,
+      pr_number:Number(args.prNumber),head_sha:args.headSha || undefined,limit:100},
+    {...args, timeoutMs: Math.min(remaining, Math.ceil(budgetMs / maxAttempts))});
+    if (!isTransientIdentityRead(result)) {
+      if (!result.ok) return {...result,reason:result.reason || 'missing-build-completion-signal'};
+      if (result.rows.length !== 1) return {ok:false,reason:'unconfirmed-pr-opener-provenance'};
+      return result;
+    }
+    const delay = BUILD_IDENTITY_RETRY_DELAYS_MS[attempt];
+    if (delay === undefined || deadline - nowMs() <= delay) break;
+    await sleepImpl(delay);
   }
-  return result;
+  // Keep transport diagnostics bounded/redacted by the public reader. The
+  // explicit reason becomes the daemon decline detail, never merge authority.
+  return {ok:false,reason:'identity-read-transient',transient:true,
+    readFailureReason:result?.reason || 'worker-observation-unavailable'};
 }
 
 export async function resolveDaemonWorkerIdentityForPr({
@@ -160,6 +190,7 @@ export async function resolveDaemonWorkerIdentityForPr({
     });
   }
   let resolvedBy = 'current-head';
+  if (resolved?.reason === 'identity-read-transient') return stamp(resolved);
   if (!resolved?.ok) {
     // Head-independent retry: resolve the single 'pr_opened' row by PR, ignoring
     // head_sha (the reader matches any head when headSha is null/empty). Recovers
@@ -175,6 +206,9 @@ export async function resolveDaemonWorkerIdentityForPr({
         error: String(err?.message || err),
       };
     }
+    // A failed PR-wide read cannot prove the opener is missing. Do not retain
+    // the strict selector's empty result and turn an outage into a sticky park.
+    if (byPr?.reason === 'identity-read-transient') return stamp(byPr);
     if (byPr?.ok) {
       resolved = byPr;
       resolvedBy = 'pr-opened-head-moved';

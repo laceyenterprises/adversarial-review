@@ -425,12 +425,13 @@ function writeLedger(rootDir, identity, doc) {
 
 export function resetNoProgressLanesForGeneration(rootDir, watcherGeneration, {
   now = new Date().toISOString(), logger = console,
+  readdirSyncImpl = readdirSync, writeLedgerImpl = writeLedger,
 } = {}) {
   let entries;
-  try { entries = readdirSync(noProgressLaneDir(rootDir), { withFileTypes: true }); }
+  try { entries = readdirSyncImpl(noProgressLaneDir(rootDir), { withFileTypes: true }); }
   catch (error) {
-    if (error.code === 'ENOENT') return 0;
-    throw error;
+    if (error.code !== 'ENOENT') logger?.warn?.(`[watcher] no-progress lane: generation reset could not list lanes: ${error.message}`);
+    return 0;
   }
   let reset = 0;
   for (const entry of entries) {
@@ -452,20 +453,41 @@ export function resetNoProgressLanesForGeneration(rootDir, watcherGeneration, {
       noProgressTicks: normalizeCount(ledger.noProgressTicks), skippedTicks: normalizeCount(ledger.skippedTicks),
       decisionResets: normalizeCount(ledger.decisionResets), firstNoProgressAt: ledger.firstNoProgressAt ?? null,
       resetAt: now };
-    clearOperatorDecisionAlertState(rootDir, identity, { logger });
+    // A deploy is not a new operator blocker. Preserve the head/row debounce.
     const retained = { ...ledger };
     delete retained.stalledEvent;
     delete retained.operatorReason;
     delete retained.nextAction;
-    writeLedger(rootDir, identity, { ...retained, watcherGeneration,
-      generationHistory: [...history, previous].slice(-MAX_PROMOTION_HISTORY_ENTRIES),
-      generationResets: normalizeCount(ledger.generationResets) + 1,
-      lane: LANE_ACTIVE, noProgressTicks: 0, skippedTicks: 0, decisionResets: 0,
-      fingerprint: null, decisionFingerprint: null, firstNoProgressAt: null,
-      progressClass: PROGRESS_CLASS_SELF_RESOLVING, hammerRouteActive: false, updatedAt: now });
-    reset += 1;
+    try {
+      writeLedgerImpl(rootDir, identity, { ...retained, watcherGeneration,
+        generationHistory: [...history, previous].slice(-MAX_PROMOTION_HISTORY_ENTRIES),
+        generationResets: normalizeCount(ledger.generationResets) + 1,
+        lane: LANE_ACTIVE, noProgressTicks: 0, skippedTicks: 0, decisionResets: 0,
+        fingerprint: null, decisionFingerprint: null, firstNoProgressAt: null,
+        progressClass: PROGRESS_CLASS_SELF_RESOLVING, hammerRouteActive: false, updatedAt: now });
+      reset += 1;
+    } catch (error) {
+      logger?.warn?.(`[watcher] no-progress lane: generation reset could not write ${filePath}: ${error.message}`);
+    }
   }
   return reset;
+}
+
+// Incomplete/resource-limited walks still observed the local daemon park. Absorb
+// that evidence without forgiving scheduling debt or claiming review progress.
+export function recordNoProgressLaneDecisionObservation(rootDir, identity, {
+  headSha, decisionFingerprint, now = null, logger = console,
+} = {}) {
+  const existing = readNoProgressLane(rootDir, identity, { logger });
+  if (!existing || !normalizeHead(headSha) || existing.headSha !== headSha) return null;
+  if (typeof decisionFingerprint !== 'string' || decisionFingerprint === existing.decisionFingerprint) return existing;
+  const resets = normalizeCount(existing.decisionResets);
+  if (resets < DEFAULT_NO_PROGRESS_DECISION_RESET_CAP) {
+    clearOperatorDecisionAlertState(rootDir, identity, { logger });
+  }
+  return writeLedger(rootDir, identity, { ...existing, decisionFingerprint,
+    decisionResets: resets + (resets < DEFAULT_NO_PROGRESS_DECISION_RESET_CAP ? 1 : 0),
+    updatedAt: now || existing.updatedAt });
 }
 
 function starvedPromotionMarkerPath(rootDir, promotionId = STARVED_SLOW_LANE_PROMOTION_ID) {

@@ -1385,6 +1385,23 @@ aborted reads are not retained as successful evidence.
 Readiness probes use the adoption phase's injected `execFileImpl` executor,
 including the normal candidate snapshot read and its abort signal.
 
+NOPROGRESSRESET-01: a changed build/config generation resets lane scheduling
+at startup while retaining prior counters in bounded history. This deliberately
+clears fingerprints: an unchanged, formerly slow self-resolving PR receives a
+baseline walk plus up to three unchanged walks at the default cap before it
+returns to backoff. A deploy can therefore produce a bounded burst across parked
+PRs; the phase budget and four-handler concurrency ceiling still apply. A
+same-head, same-fingerprint operator alert stays debounced across this reset.
+Actual decision changes and explicit operator wakes retain their alert resets.
+Startup hashes code lazily, follows symlinks with cycle detection and skips absent
+optional bin/domain/prompt roots. Identity failures warn and skip generation
+reset; lane-list faults skip the reset, and per-ledger write faults preserve
+that ledger while continuing the rest. None prevents watcher startup.
+Failed or null-result walks absorb current-head local daemon decline evidence
+and consume the decision-reset cap without forgiving prior scheduling debt.
+Resource/rate-limited walks observe that decision baseline without charging
+no-progress ticks. A changed park cannot keep admitting failed walks every tick.
+
 Timed-out handler work keeps its concurrency slot until it actually settles.
 Deferrals caused by those occupied slots are reported as `in_flight_deferred`,
 separately from phase-time exhaustion (`budget_deferred`); both retain next-tick

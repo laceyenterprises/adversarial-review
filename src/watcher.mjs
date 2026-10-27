@@ -177,7 +177,7 @@ import {
   runQueuedReviewAdoptionPhase,
 } from './posted-review-row.mjs';
 import { resetNoProgressLanesForGeneration } from './watcher-no-progress-lane.mjs';
-import { WATCHER_BUILD_IDENTITY, watcherConfigGeneration } from './watcher-lane-generation.mjs';
+import { watcherBuildIdentity, watcherConfigGeneration } from './watcher-lane-generation.mjs';
 import {
   maybeDispatchReviewerTimeoutExhaustedMergeAgent,
 } from './reviewer-timeout-exhausted-dispatch.mjs';
@@ -1683,9 +1683,13 @@ async function main() {
     throw err;
   }
 
-  watcherLaneGeneration = { buildIdentity: WATCHER_BUILD_IDENTITY,
-    configGeneration: watcherConfigGeneration({ watcher: config, roles: loadRoleConfig().values }) };
-  resetNoProgressLanesForGeneration(ROOT, watcherLaneGeneration);
+  try {
+    watcherLaneGeneration = { buildIdentity: watcherBuildIdentity(ROOT),
+      configGeneration: watcherConfigGeneration({ watcher: config, roles: loadRoleConfig().values }) };
+    resetNoProgressLanesForGeneration(ROOT, watcherLaneGeneration);
+  } catch (error) {
+    console.warn(`[watcher] no-progress lane: startup generation unavailable; preserving backoff (${error.message})`);
+  }
 
   const octokit = createWatcherOctokit({
     auth: process.env.GITHUB_TOKEN,

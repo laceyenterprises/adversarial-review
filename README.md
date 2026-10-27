@@ -3539,9 +3539,16 @@ startup a new watcher code identity or effective config generation resets stale
 backoff to active, preserving prior counters for telemetry. The same build,
 config and cause preserve the existing backoff constants and cadence. See the
 [lane data contract](docs/data-model/watcher-no-progress-lane.md).
+Incomplete walks absorb changed stored declines without clearing scheduling debt;
+resource-limited walks update only that decision evidence. Startup identity and
+reset I/O failures warn and preserve old backoff so the watcher can boot.
+Generation resets preserve operator alert debounce. The bounded post-deploy
+baseline-plus-cap burst is documented in the closure runbook's scheduling notes.
 
 Focused offline `test/watcher-poll-starvation.test.mjs` fixtures verify cause,
-build/config and legacy resets plus unchanged backoff. After normal deployment,
+build/config and legacy resets, incomplete-walk admission, reset I/O failures,
+alert debounce, lazy identity and symlink hashing, plus unchanged backoff.
+After normal deployment,
 the runtime owner observes organic generation stamps and subsequent lane walks.
 Existing smoke promises remain; no forced restart or live state change is part
 of this validation, and no new smoke step, config key or CI check is added.

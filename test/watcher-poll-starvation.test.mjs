@@ -12,7 +12,7 @@ import './helpers/load-aware-timeout-fixture.mjs';
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -3604,5 +3604,147 @@ test('NOPROGRESSRESET-01: generation hashes follow content and ignore config key
     assert.equal(watcherConfigGeneration({ a: 1, b: { c: 2, d: 3 } }),
       watcherConfigGeneration({ b: { d: 3, c: 2 }, a: 1 }));
     assert.notEqual(watcherConfigGeneration({ enabled: true }), watcherConfigGeneration({ enabled: false }));
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+
+for (const failure of ['timeout', 'error', 'null', 'rate-limit']) {
+  for (const operatorBlocked of [false, true]) {
+    test(`NOPROGRESSRESET-01: ${failure} absorbs decline admission in ${operatorBlocked ? 'operator' : 'slow'} lane`, async () => {
+      const rootDir = tempRoot();
+      try {
+        const before = seedResetSlowLane(rootDir, RESET_VALUE, { daemonDeclineReason: 'old-decline' });
+        if (operatorBlocked) {
+          before.progressClass = PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED;
+          before.lane = LANE_OPERATOR_BLOCKED;
+          writeFileSync(noProgressLaneFilePath(rootDir, RESET_IDENTITY), JSON.stringify(before));
+        }
+        recordDaemonMergePark({ rootDir, ...RESET_IDENTITY, headSha: HEAD_A, reason: 'new-decline' });
+        const gate = createNoProgressLaneGate({ rootDir, hqRoot: rootDir, readReviewRow: () => null,
+          logger: silentLogger, deliverAlertFn: async () => {} });
+        const handler = { repoPath: RESET_IDENTITY.repo, prNumber: RESET_IDENTITY.prNumber, headSha: HEAD_A };
+        assert.equal(gate.evaluate(handler, { recordSkip: false }).reason, 'decision-changed');
+        if (failure === 'rate-limit') {
+          const result = await runPostedReviewHandlersFairly({ handlers: [{ ...handler, run: async () => {
+            throw Object.assign(new Error('API rate limit exceeded'), { status: 403 });
+          } }], laneGate: gate, budgetMs: 1000, handlerTimeoutMs: 100, minimumHandlerStartBudgetMs: 1,
+          laneStarvationFloor: 0, logger: silentLogger });
+          assert.equal(result.failed, 1);
+        } else {
+          assert.equal(gate.evaluate(handler).reason, 'decision-changed');
+          await gate.record(handler, failure === 'timeout' ? { timedOut: true }
+            : failure === 'error' ? { error: new Error('walk failed') } : { value: null });
+        }
+        const after = readNoProgressLane(rootDir, RESET_IDENTITY);
+        assert.equal(after.decisionResets, 1);
+        assert.equal(after.fingerprint, before.fingerprint, 'missing output is not review progress');
+        assert.equal(JSON.parse(after.decisionFingerprint).storedDaemonDeclineReason, 'new-decline');
+        assert.equal(after.noProgressTicks, before.noProgressTicks + (failure === 'rate-limit' ? 0 : 1));
+        assert.equal(gate.evaluate(handler, { recordSkip: false }).run, false);
+        assert.equal(after.lane, before.lane);
+      } finally { rmSync(rootDir, { recursive: true, force: true }); }
+    });
+  }
+}
+
+test('NOPROGRESSRESET-01: generation reset retains operator alert debounce', async () => {
+  const rootDir = tempRoot();
+  try {
+    seedResetSlowLane(rootDir);
+    let alerts = 0;
+    const options = { rootDir, identity: RESET_IDENTITY, headSha: HEAD_A, fingerprint: 'same-review-row',
+      noProgressTicks: DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS,
+      deliverAlertFn: async () => { alerts += 1; }, logger: silentLogger };
+    assert.equal(await maybeFireOperatorDecisionRequiredAlert(options), true);
+    assert.equal(noProgressLane.resetNoProgressLanesForGeneration(rootDir,
+      { ...LANE_GENERATION, buildIdentity: 'new-build' }), 1);
+    for (let tick = 0; tick <= DEFAULT_OPERATOR_BLOCKED_ALERT_NO_PROGRESS_TICKS; tick += 1) {
+      recordNoProgressLaneRun(rootDir, RESET_IDENTITY, { headSha: HEAD_A, fingerprint: options.fingerprint,
+        progressClass: PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED, logger: silentLogger });
+    }
+    assert.equal(await maybeFireOperatorDecisionRequiredAlert(options), false);
+    assert.equal(alerts, 1);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+for (const code of ['EACCES', 'EROFS', 'ENOSPC']) {
+  test(`NOPROGRESSRESET-01: startup reset logs ${code} and preserves failed ledgers`, () => {
+    const rootDir = tempRoot();
+    try {
+      seedResetSlowLane(rootDir);
+      const originalBytes = readFileSync(noProgressLaneFilePath(rootDir, RESET_IDENTITY), 'utf8');
+      const warnings = [];
+      const logger = { warn: message => warnings.push(message) };
+      const fault = () => { throw Object.assign(new Error(code), { code }); };
+      assert.equal(noProgressLane.resetNoProgressLanesForGeneration(rootDir, LANE_GENERATION,
+        { readdirSyncImpl: fault, logger }), 0);
+      assert.equal(readFileSync(noProgressLaneFilePath(rootDir, RESET_IDENTITY), 'utf8'), originalBytes);
+      const sibling = { ...RESET_IDENTITY, prNumber: RESET_IDENTITY.prNumber + 1 };
+      const ledger = readNoProgressLane(rootDir, RESET_IDENTITY);
+      writeFileSync(noProgressLaneFilePath(rootDir, sibling), JSON.stringify({ ...ledger, ...sibling }));
+      const writes = [];
+      assert.equal(noProgressLane.resetNoProgressLanesForGeneration(rootDir,
+        { ...LANE_GENERATION, buildIdentity: 'next' }, { logger,
+          writeLedgerImpl: (_root, identity) => { writes.push(identity.prNumber); fault(); } }), 0);
+      assert.equal(writes.length, 2, 'one failed write must not stop later resets');
+      assert.equal(readFileSync(noProgressLaneFilePath(rootDir, RESET_IDENTITY), 'utf8'), originalBytes);
+      assert.equal(warnings.length, 3);
+    } finally { rmSync(rootDir, { recursive: true, force: true }); }
+  });
+}
+
+test('NOPROGRESSRESET-01: build identity skips absent optional roots and follows symlinks', () => {
+  const rootDir = tempRoot();
+  try {
+    mkdirSync(join(rootDir, 'src'));
+    writeFileSync(join(rootDir, 'package.json'), '{}');
+    writeFileSync(join(rootDir, 'package-lock.json'), '{}');
+    const first = watcherBuildIdentity(rootDir);
+    mkdirSync(join(rootDir, 'prompts'));
+    writeFileSync(join(rootDir, 'external-prompt'), 'first');
+    symlinkSync(join(rootDir, 'external-prompt'), join(rootDir, 'prompts', 'linked.md'));
+    const linked = watcherBuildIdentity(rootDir);
+    assert.notEqual(linked, first);
+    writeFileSync(join(rootDir, 'external-prompt'), 'second');
+    assert.notEqual(watcherBuildIdentity(rootDir), linked);
+    mkdirSync(join(rootDir, 'external-dir'));
+    writeFileSync(join(rootDir, 'external-dir', 'prompt.md'), 'nested');
+    symlinkSync(join(rootDir, 'external-dir'), join(rootDir, 'prompts', 'linked-dir'));
+    const directory = watcherBuildIdentity(rootDir);
+    writeFileSync(join(rootDir, 'external-dir', 'prompt.md'), 'nested-change');
+    assert.notEqual(watcherBuildIdentity(rootDir), directory);
+    symlinkSync(join(rootDir, 'prompts'), join(rootDir, 'prompts', 'cycle'));
+    assert.throws(() => watcherBuildIdentity(rootDir), /symlink cycle/);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+
+test('NOPROGRESSRESET-01: importing generation helpers does not read a deployment tree', async () => {
+  const rootDir = tempRoot();
+  try {
+    const modulePath = join(rootDir, 'generation.mjs');
+    writeFileSync(modulePath, readFileSync(new URL('../src/watcher-lane-generation.mjs', import.meta.url)));
+    const module = await import(modulePath);
+    assert.equal(typeof module.watcherBuildIdentity, 'function');
+    assert.throws(() => module.watcherBuildIdentity(rootDir), /ENOENT/);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+
+test('NOPROGRESSRESET-01: failed walks establish a baseline after a generation reset and demote', async () => {
+  const rootDir = tempRoot();
+  try {
+    seedResetSlowLane(rootDir);
+    noProgressLane.resetNoProgressLanesForGeneration(rootDir, { ...LANE_GENERATION, buildIdentity: 'next' });
+    const gate = createNoProgressLaneGate({ rootDir, hqRoot: rootDir, readReviewRow: () => null,
+      logger: silentLogger, deliverAlertFn: async () => {} });
+    const handler = { repoPath: RESET_IDENTITY.repo, prNumber: RESET_IDENTITY.prNumber, headSha: HEAD_A };
+    for (let tick = 0; tick <= DEFAULT_NO_PROGRESS_LANE_CAP; tick += 1) {
+      await gate.record(handler, { timedOut: true });
+    }
+    const after = readNoProgressLane(rootDir, RESET_IDENTITY);
+    assert.equal(after.fingerprint, 'timed-out');
+    assert.equal(after.noProgressTicks, DEFAULT_NO_PROGRESS_LANE_CAP);
+    assert.equal(gate.evaluate(handler, { recordSkip: false }).run, false);
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });

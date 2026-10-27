@@ -96,6 +96,7 @@ import {
   PROGRESS_CLASS_SELF_RESOLVING,
   chooseNoProgressMissingInput,
   recordNoProgressLaneRun,
+  recordNoProgressLaneDecisionObservation,
   recordNoProgressLaneSkip,
   resolveNoProgressProducerState,
   subjectProgressFingerprint,
@@ -1117,6 +1118,15 @@ export function createNoProgressLaneGate({
       return record?.headSha === handler.headSha ? record.reason : null;
     } catch { return null; }
   };
+  const observeDecision = handler => {
+    const identity = { repo: handler.repoPath, prNumber: handler.prNumber };
+    const existing = readNoProgressLane(rootDir, identity, { logger });
+    return recordNoProgressLaneDecisionObservation(rootDir, identity, {
+      headSha: handler.headSha,
+      decisionFingerprint: decisionFingerprintWithDaemonDecline(existing?.decisionFingerprint, storedDaemonDecline(handler)),
+      now: now(), logger,
+    });
+  };
   const freshDrainHint = (identity, observedAt) => {
     const record = readAmaCloserDispatchRecord(rootDir, identity);
     const fresh = isFreshDrainDeferredAmaCloserRecord(record, observedAt);
@@ -1124,6 +1134,9 @@ export function createNoProgressLaneGate({
     return fresh;
   };
   return {
+    // Resource failures do not charge no-progress ticks, but must consume the
+    // local evidence that bypassed backoff for this walk.
+    observeDecision,
     evaluate(handler, { recordSkip = true } = {}) {
       const identity = { repo: handler.repoPath, prNumber: handler.prNumber };
       const ledger = readNoProgressLane(rootDir, identity, { logger });
@@ -1178,11 +1191,12 @@ export function createNoProgressLaneGate({
       return { run: decision.due, ...decision };
     },
     async record(handler, { timedOut = false, error = null, value = null, laneAdmission = null } = {}) {
-      // The scheduler already excludes resource-limited handler outcomes. Its
-      // parent poll may have seen an unrelated credential fail earlier.
-      if (isGitHubRateLimitError(error) || value?.rateLimited) return null;
       // Without a head there is no series to key on; skip the row read too.
       if (!handler.headSha) return null;
+      const incomplete = Boolean(timedOut || error || !value);
+      const previous = incomplete || isGitHubRateLimitError(error) || value?.rateLimited
+        ? observeDecision(handler) : null;
+      if (isGitHubRateLimitError(error) || value?.rateLimited) return null;
       const identity = { repo: handler.repoPath, prNumber: handler.prNumber };
       if (!timedOut && !error && value?.outcome !== 'await-operator'
         && !value?.operatorHoldReason && !value?.amaClosureResult?.needsOperator
@@ -1203,8 +1217,9 @@ export function createNoProgressLaneGate({
           return null;
         }
       }
-      const fingerprint = timedOut
-        ? 'timed-out'
+      const fingerprint = incomplete && typeof previous?.fingerprint === 'string'
+        ? previous.fingerprint
+        : timedOut ? 'timed-out'
         : subjectProgressFingerprint(row, { headSha: handler.headSha || null });
       // The final review's generic operator flag does not describe closure
       // ownership. A retained hammer route must run each tick, including while
@@ -1228,10 +1243,9 @@ export function createNoProgressLaneGate({
         }
       }
       const observedAt = now();
-      // LANESTARVE-01. A timed-out handler reported no decision at all, so it
-      // carries no decision fingerprint — its `'timed-out'` row fingerprint is
-      // the whole signal, exactly as before.
-      const decisionFingerprint = timedOut ? null : handlerDecisionFingerprint(value, {
+      // Incomplete walks already absorbed local decline evidence above. Keep
+      // their prior review baseline and operator cadence: missing output is not progress.
+      const decisionFingerprint = incomplete ? null : handlerDecisionFingerprint(value, {
         daemonDeclineReason: storedDaemonDecline(handler),
       });
       const outcome = recordNoProgressLaneRun(rootDir, identity, {
@@ -1239,11 +1253,13 @@ export function createNoProgressLaneGate({
         fingerprint,
         decisionFingerprint,
         watcherGeneration,
-        progressClass,
+        progressClass: incomplete && previous ? previous.progressClass : progressClass,
         operatorHold,
         hammerRouteActive,
-        nextAction: timedOut ? null : value?.amaClosureResult?.nextAction || value?.nextAction || null,
-        operatorReason: value?.operatorHoldReason || value?.amaClosureResult?.operatorReason || null,
+        nextAction: incomplete && previous?.progressClass === PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED
+          ? previous.nextAction : value?.amaClosureResult?.nextAction || value?.nextAction || null,
+        operatorReason: incomplete && previous ? previous.operatorReason
+          : value?.operatorHoldReason || value?.amaClosureResult?.operatorReason || null,
         // HAMUNKNOWN-01: GitHub can finish computing without any review-row
         // change. Recovery bounds urgency to its tolerated cycle budget.
         urgent: value?.urgent === true,

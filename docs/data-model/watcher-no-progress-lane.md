@@ -43,9 +43,9 @@ Required fields:
 | `prNumber` | number | Pull request number. |
 | `headSha` | string or null | Head SHA for the series. A different head resets the lane. |
 | `fingerprint` | string or null | Stable review-state fingerprint used to detect progress. |
-| `decisionFingerprint` | string or null | Stable handler-decision fingerprint for the current head. This is carried forward across silent walks so the next usable decision can detect decision-only changes without treating missing handler output as a new baseline. |
-| `decisionResets` | number | Count of decision-only resets already honored for the current head. A new head resets this to `0`; repeated decision changes are capped by the watcher so the lane cannot reset forever on decision churn. |
-| `watcherGeneration` | object, optional | `buildIdentity` is a process-captured SHA-256 of service source, bin, domains, prompts and package manifests. `configGeneration` hashes the canonical effective role-config values and watcher config. Startup migrates legacy records without a generation. Only hashes are persisted. |
+| `decisionFingerprint` | string or null | Stable handler-decision fingerprint for the current head. Incomplete walks retain the handler fields but absorb the current-head stored daemon decline, including clearance, so failed output cannot repeatedly bypass backoff. |
+| `decisionResets` | number | Count of decision-only resets or incomplete-walk decline changes consumed for the current head. A new head resets this to `0`; repeated decision changes are capped by the watcher so the lane cannot reset forever on decision churn. |
+| `watcherGeneration` | object, optional | `buildIdentity` is a startup-captured SHA-256 of service source, bin, domains, prompts and package manifests. `configGeneration` hashes the canonical effective role-config values and watcher config. Startup migrates legacy records without a generation. Only hashes are persisted. |
 | `generationResets` | number, optional | Cumulative count of startup generation resets for this PR, retained across walks. |
 | `generationHistory` | array, optional | Last ten startup resets, retaining the prior generation, lane, no-progress/skip/decision-reset counters, first no-progress timestamp and reset timestamp. |
 | `hammerRouteActive` | boolean, optional | Final-review hammer ownership keeps this head active regardless of unchanged review state. A subsequent operator hold clears it. |
@@ -110,13 +110,31 @@ Optional `stalledEvent` field:
   Before deferring a walk the gate compares the stored daemon decline against
   the recorded fingerprint; changed or cleared current-head evidence admits
   the next tick within the existing decision-reset cap. Other-head parks do
-  not supply a decline reason. The completed walk records the fresh decision.
+  not supply a decline reason. A completed walk records the fresh decision.
+  Timed-out, errored and null-result walks absorb the stored decline into the
+  prior fingerprint and charge a decision reset without forgiving scheduling
+  debt. They preserve a usable prior review fingerprint and operator cadence;
+  a reset's null fingerprint is replaced by the first failed walk's baseline.
+  Resource/rate-limited walks use the gate's `observeDecision` hook for that
+  baseline update without charging no-progress ticks or updating `lastRunAt`.
 - On watcher startup, a different code identity or effective config generation
   resets each lane to `active`, clearing current-series counters, fingerprints,
-  selected action, stall event and alert debounce. Prior counters remain in
+  selected action and stall event. Operator-decision alert debounce survives:
+  a deployment alone is not a changed blocker. Prior counters remain in
   `generationHistory`; `lastRunAt` remains the actual last walk. The same build
   and config leave ledger bytes and backoff unchanged. Legacy records migrate
-  once. No new config keys or backoff constants are introduced.
+  once. Identity hashing runs inside guarded startup, follows symlinked files
+  and directories with cycle detection, and skips absent optional `bin`,
+  `domains` and `prompts` roots. Unreadable source/manifests or symlink cycles
+  log a startup warning and skip generation reset. Directory-list faults log
+  and skip the reset; individual write faults log and leave that ledger's old
+  backoff while other ledgers continue. The watcher still starts.
+  No new config keys or backoff constants are introduced.
+- A successful generation reset deliberately clears fingerprints. Formerly slow,
+  unchanged self-resolving PRs therefore receive a new baseline walk plus up to
+  `DEFAULT_NO_PROGRESS_LANE_CAP` unchanged walks (four total at the default cap
+  of three) before demotion. The ordinary phase budget and concurrency ceiling
+  still bound this post-deploy burst. See the closure runbook's scheduling notes.
 - Decision-only resets are capped per head by the watcher's configured
   decision-reset cap. Once the cap is spent, later decision changes keep the
   current no-progress series and are logged instead of resetting the lane

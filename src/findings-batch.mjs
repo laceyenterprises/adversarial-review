@@ -12,8 +12,14 @@ import fsExt from 'fs-ext';
 import { readDispatchStatus, readLaunchRequestStatus } from './producer-contracts/launch-status.mjs';
 import { readLaunchRequestByIdempotencyKeyAsync } from './session-ledger-read-adapter.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 
 const execFileAsync = promisify(execFile);
+
+// Dispatch provisions before returning its receipt (measured up to 496s).
+// Leave room for the provisioner's own watchdog/rollback, and scale once for
+// host load without the helper's shorter default ceiling.
+const dispatchTimeoutMs = () => loadAwareTimeoutMs(900_000, { maxMs: Infinity });
 
 async function fetchFindingBatchPr(repo, prNumber, { execFileImpl, env, logger }) {
   const { stdout } = await execGhWithRetry({ execFileImpl, env, log: logger,
@@ -249,7 +255,7 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
     const args = findingBatchDispatchArgs({ batch, promptPath, branch, env,
       workerClass: pickRemediationWorkerClass({ repo: batch.repo }, { env }) });
     const receipt = readDispatchReceipt(parseDispatchJsonOutput((await execFileImpl(env.HQ_BIN || 'hq', args,
-      { env, timeout: 60_000, maxBuffer: 1024 * 1024 })).stdout));
+      { env, timeout: dispatchTimeoutMs(), maxBuffer: 1024 * 1024 })).stdout));
     if (!receipt.launchRequestId) throw Error(receipt.identityDiagnostic);
     if (receipt.launchRequestId === batch.launch_id) throw Error('batch-publish-reused-decision-launch');
     db.prepare('UPDATE finding_batches SET error=NULL WHERE batch_id=?').run(batch.batch_id);
@@ -289,7 +295,7 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
         const promptPath = join(dir, 'prompt.md');
         writeFileSync(promptPath, findingBatchPrompt(batch, findings, outputPath, batchNotes(db, batch.batch_id)));
         const args = findingBatchDispatchArgs({ batch, promptPath, workerClass: pickRemediationWorkerClass({ repo: batch.repo }, { env }), env });
-        const { stdout } = await execFileImpl(env.HQ_BIN || 'hq', args, { env, timeout: 60_000, maxBuffer: 1024 * 1024 });
+        const { stdout } = await execFileImpl(env.HQ_BIN || 'hq', args, { env, timeout: dispatchTimeoutMs(), maxBuffer: 1024 * 1024 });
         const receipt = readDispatchReceipt(parseDispatchJsonOutput(stdout));
         if (!receipt.launchRequestId) throw Error(receipt.identityDiagnostic);
         db.prepare('UPDATE finding_batches SET launch_id=?,error=NULL WHERE batch_id=?')

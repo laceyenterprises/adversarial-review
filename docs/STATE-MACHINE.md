@@ -2386,3 +2386,20 @@ entitlement, selector-bound proof and native audited settlement composition.
 Ordinary filtered emptiness and partial/unreadable scope stay held. Durable
 query evidence retains both absence proofs; current receipt, submitter,
 record/lease fences and once-only refund rules remain unchanged.
+
+## No-progress lane cause and generation resets (NOPROGRESSRESET-01)
+
+Closure next-action row/action/reason and returned/current-head stored daemon
+declines participate in the lane fingerprint. Stored decline changes or
+clearance admit the next tick before backoff, within the existing per-head
+reset cap. A new watcher build identity or effective config generation resets
+persisted lanes to active at startup, including legacy unstamped records.
+Prior counters remain in bounded generation history; the last actual walk
+anchor is preserved. Operator alert debounce survives generation changes.
+Incomplete walks absorb local decline changes and charge the decision-reset cap
+without clearing scheduling debt; resource-limited observations leave tick debt
+unchanged. Startup identity/list/write faults warn and preserve affected backoff
+without preventing boot. Reset fingerprints permit a bounded baseline-plus-cap
+burst after deploy. An unchanged cause and generation preserve normal backoff.
+These transitions affect scheduling only and confer no merge authority. See
+[the lane data contract](data-model/watcher-no-progress-lane.md).

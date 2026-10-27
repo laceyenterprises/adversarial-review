@@ -443,7 +443,9 @@ function runWithDeadline(run, {
  * per-handler deadline, and (optionally) the no-progress lane gate.
  *
  * `laneGate` is `{ evaluate(handler) -> { run, ... }, record(handler, outcome) }`;
- * it is injected so this scheduler stays free of SQLite and the filesystem.
+ * Optional `observeDecision(handler)` absorbs local decision evidence after a
+ * resource-limited walk without charging no-progress ticks. These hooks keep
+ * the scheduler free of SQLite and the filesystem.
  * A positive `retryAfterMs` is a cadence hold respected by priority and the
  * idle floor; ordinary tick backoff remains eligible for those overrides.
  *
@@ -585,6 +587,13 @@ export async function runPostedReviewHandlersFairly({
       }
     }
 
+    if ((resourceLimited || isGitHubRateLimitError(outcome.error)) && !handler.suppressNoProgress) {
+      try {
+        await laneGate?.observeDecision?.(handler);
+      } catch (err) {
+        logger?.warn?.(`[watcher] no-progress lane decision observation failed for ${key} (${err?.message || err})`);
+      }
+    }
     if (!resourceLimited && !isGitHubRateLimitError(outcome.error)
       && !handler.suppressNoProgress && laneGate && typeof laneGate.record === 'function') {
       try {

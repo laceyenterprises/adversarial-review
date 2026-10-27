@@ -172,9 +172,12 @@ import {
   writeAutonomousMergeDisabledAudit,
 } from './ama-closure-orchestration.mjs';
 import {
+  createNoProgressLaneGate,
   handlePostedReviewRow,
   runQueuedReviewAdoptionPhase,
 } from './posted-review-row.mjs';
+import { resetNoProgressLanesForGeneration } from './watcher-no-progress-lane.mjs';
+import { watcherBuildIdentity, watcherConfigGeneration } from './watcher-lane-generation.mjs';
 import {
   maybeDispatchReviewerTimeoutExhaustedMergeAgent,
 } from './reviewer-timeout-exhausted-dispatch.mjs';
@@ -447,6 +450,7 @@ const ROOT = join(__dirname, '..');
 // ./reviewer-runtime-support.mjs (ARC-18); imported back above.
 
 const config = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'));
+let watcherLaneGeneration = null;
 // Fail fast during watcher bootstrap; a bad gate-context override should not
 // leave reviews running while commit-status publication silently stops later.
 resolveGateStatusContext(process.env);
@@ -1563,6 +1567,7 @@ async function pollOnceWithinBudget(
     operatorSurface,
     primaryDomainId: WATCHER_PRIMARY_DOMAIN_ID,
     postedReviewPriorityTargets: wakePayloadForPoll() || [],
+    noProgressLaneGate: createNoProgressLaneGate({ rootDir: ROOT, watcherGeneration: watcherLaneGeneration }),
   });
   } finally {
     try {
@@ -1672,10 +1677,16 @@ async function main() {
       }
     }
   } catch (err) {
-    console.error(
-      `[watcher] FATAL config${err?.logKey ? ` key=${err.logKey}` : ''}: ${err?.message || err}`
-    );
+    console.error(`[watcher] FATAL config${err?.logKey ? ` key=${err.logKey}` : ''}: ${err?.message || err}`);
     throw err;
+  }
+
+  try {
+    watcherLaneGeneration = { buildIdentity: watcherBuildIdentity(ROOT),
+      configGeneration: watcherConfigGeneration({ watcher: config, roles: loadRoleConfig().values }) };
+    resetNoProgressLanesForGeneration(ROOT, watcherLaneGeneration);
+  } catch (error) {
+    console.warn(`[watcher] no-progress lane: startup generation unavailable; preserving backoff (${error.message})`);
   }
 
   const octokit = createWatcherOctokit({

@@ -289,6 +289,9 @@ test('WFDRIFT-01: daemon persists update proof and resumes verification on the n
   const job = { ...spawned.job, branch: args.branch, revisionRef: oldHead };
   writeFileSync(claimed.jobPath, JSON.stringify(job));
   const testEnv = { HQ_REPO_ROOT: rootDir, HQ_ROOT: join(rootDir, 'hq'),
+    // The fixture may live under the real deployment's owned TMPDIR. Its fake
+    // deployment must stay separate from the fixture's mutable workspace.
+    AGENT_OS_DEPLOY_CHECKOUT: join(rootDir, 'deploy'),
     OAUTH_BROKER_SHARED_SECRET_FILE: secretPath,
     ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT: 'true' };
   const previousEnv = Object.fromEntries(Object.keys(testEnv).map((key) => [key, process.env[key]]));

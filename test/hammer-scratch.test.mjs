@@ -911,7 +911,7 @@ for (const interrupted of ['prelaunch', 'dispatch']) {
       },
     });
     if (interrupted === 'prelaunch') await assert.rejects(attempt, /synthetic admission abort/);
-    else assert.equal((await attempt).reason, 'existing-dispatch-unknown');
+    else assert.equal((await attempt).reason, 'dispatch-interrupted');
     assert.equal(readFileSync(helper, 'utf8'), 'synthetic phase helper');
     assert.equal(existsSync(first.promptPath), true);
     if (interrupted === 'dispatch') {

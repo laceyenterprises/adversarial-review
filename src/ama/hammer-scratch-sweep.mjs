@@ -1,3 +1,4 @@
+import { isPreReceiptIntent } from './dispatch-record-read.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
 import { lstatSync, opendirSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
@@ -268,7 +269,7 @@ async function readScratchPullRequestState({ repo, prNumber, timeout, env }) {
 
 async function isTerminalOwner(record, options, getDeadline, readLedger) {
   // A retry intent can still carry its predecessor's LRQ and terminal status.
-  if (record.state === 'dispatching' || Date.now() >= getDeadline()) return false;
+  if (isPreReceiptIntent(record) || Date.now() >= getDeadline()) return false;
   if (record.launchRequestId) {
     const probe = withLiveLaunchRetry(await readLedger(record, options.readLaunchRequestStatusImpl));
     if (!probe?.ok && probe?.reason !== 'missing-launch-request-row') {

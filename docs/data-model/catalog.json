@@ -798,8 +798,10 @@
     },
     {
       "id": "ama-closer-dispatches",
+      "interruptedDispatchFields": ["hqProject", "interruptedAt"],
+      "interruptedDispatchState": "dispatch-interrupted",
       "mergeCaptureReadDiagnostics": ["mergeCaptureReadReason", "mergeCaptureReadAt"],
-      "dispatchAbsenceContract": "LAC-2120: exact expiring operator entitlement permits only selector-bound canonical-exact-selector-absence proof. preReceiptReconciliation.query.absenceProof and query.ticketQuery.absenceProof retain version, kind, grant_id, selector and observed_at in intent and operator audit. Grant IDs must contain non-whitespace within 256 characters; selector keys must be own properties with defined, equal values. Filtered, malformed, unbound, partial or unreadable scope retains ownership; existing fences, settlement and once-only refunds are unchanged.",
+      "dispatchAbsenceContract": "CLOSERDISPATCHDEAD-01: key and ticket/time recovery selectors carry project_ref and qualified repo, validated against an existing exact dispatch_reads pair. Successful unfiltered canonical zero-match queries produce selector-bound absence proof without a per-attempt entitlement; filtered emptiness, hidden matches, unknown identities, bounds and read failures retain ownership. Existing exact expiring operator proofs remain supported. Dead/reused watcher and submitter identities plus absence retire the intent and defer its pending lease in one pass; positive keyed receipts are adopted. SIGTERM/SIGINT stop background admission and synchronously persist dispatch-interrupted before abort/exit. Interrupted intents retain ownership and artifacts until the same fenced reconciliation proves absence or recovers a receipt. Retry refunds and launch CAS remain once-only. No grant/config provisioning, new CI check, live operation or new smoke promise.",
       "noWorkFields": ["failure", "failureReason"],
       "noWorkStatus": "failed",
       "terminalLaunchEvidence": "Wire-only terminal rows override stale active worker observations; succeeded maps to unverified-terminal-success until independent closure proof, failed remains failed.",

@@ -4,7 +4,7 @@
   "reviewObservationContract": "Review observations add app-authorized completion/verdict pages and explicitly granted DAG/hardening projections. DOG-11 capture-read refusal/unavailability enters missing-capture reconciliation with specific diagnostics, without stopping closer admission or hammer startup. DAG not-live proceeds; denied/unavailable/unknown outcomes hold only the affected PR with plan ID and outcome. Existing lifecycle states and smoke promises remain unchanged. Disposable SQLite/Postgres and installed-SDK tests in test_review_observations.py run on demand; no host activation is claimed.",
   "noProgressLaneReset": "NOPROGRESSRESET-01: closure next-action row/action/reason and returned/current-head stored daemon decline reasons participate in the lane decision fingerprint outside the bounded generic reason set. Changed stored decline evidence is checked before backoff admission, within the existing per-head decision-reset cap. Watcher startup resets legacy or different build/config generations to active and retains historical counters. Same generation and unchanged cause preserve backoff; merge eligibility is unchanged. Incomplete walks absorb stored decline changes and charge decision resets without clearing debt; resource-limited observations do not charge no-progress ticks. Generation resets retain operator alert debounce; startup identity/list/write faults warn and preserve affected backoff without preventing boot. Reset fingerprints permit a bounded baseline-plus-cap burst.",
   "daemonDeclineRecovery": "CLOSURESPLIT-01: closure and background hammer dispatch carry the selected immutable next-action pair, including the decision key, generation and head-scoped primary-change result. A changed decision key returns closure-decision-mismatch with both keys/generations and the complete replacement snapshot. Closure re-resolves that snapshot once; a daemon successor enters the existing live merge gates, while waits retain the refreshed owner. Inherited primary-change failures are recomputed at the current head and their raw evidence is passed into dispatcher eligibility; absent raw evidence cannot default an observed refusal to not-applicable. A passing predicate supersedes only the associated primary-change decline. Real unauthorized reversals, unrelated/permanent declines, R15 conditions, retry caps and leases retain their protections. No persistent schema or lifecycle state changes. Changed hammer decisions are reported before repair-admission refusal after primary validation passes; structural safety refusals remain in the replacement snapshot. Non-dispatch successors return the refreshed nextAction, reason and snapshot together, and primary refresh preserves unrelated progress metadata. CLOSERREFRESHLOOP-01: explicit transient daemon declines retry the same head after changed live gate evidence supersedes transient execution observations and current R15 predicates pass. Unchanged declines select snapshot-refresh; collection reordering is not new evidence. Missing identity requires non-empty identity read-failure details to be transient; permanent, unknown and missing-attestation safety refusals retain existing owners. Three unchanged settled snapshot-refresh cycles persist a blocker naming the decline and page through the existing closure-wait receipt across restart. Queue submissions retain debt; reordered label/check/context/detail collections and older-head decline details do not reset it. Changed facts/head or settled non-refresh outcomes reset it. Existing owner states, exact-head merge authority, leases and smoke promises are unchanged.",
-  "dispatchAbsenceContract": "LAC-2120: exact expiring operator absence entitlement and canonical-exact-selector-absence proof permit only selector-bound empty key/ticket evidence. query.absenceProof and query.ticketQuery.absenceProof persist grant ID, selector and observed time in intent and operator audit. Filtered emptiness, malformed/unbound/partial/unreadable scope retain ownership. Existing native locks, full snapshot fences, submitter/deadline policy, receipt recovery and once-only retry refund are unchanged; no new states or smoke promises. On-demand producer HTTP -> immutable SDK 0.8/0.9 -> native settlement fixtures cover actual composition; source, loaded deployment and organic recovery are independent.",
+  "dispatchAbsenceContract": "CLOSERDISPATCHDEAD-01: key and ticket/time recovery selectors carry project_ref and qualified repo, validated against an existing exact dispatch_reads pair. Successful unfiltered canonical zero-match queries produce selector-bound absence proof without a per-attempt entitlement; filtered emptiness, hidden matches, unknown identities, bounds and read failures retain ownership. Existing exact expiring operator proofs remain supported. Dead/reused watcher and submitter identities plus absence retire the intent and defer its pending lease in one pass; positive keyed receipts are adopted. SIGTERM/SIGINT stop background admission and synchronously persist dispatch-interrupted before abort/exit. Interrupted intents retain ownership and artifacts until the same fenced reconciliation proves absence or recovers a receipt. Retry refunds and launch CAS remain once-only. No grant/config provisioning, new CI check, live operation or new smoke promise.",
   "ttmOwnership": "HOLDOWNER-01: watcher observations select one PR owner or persist an ownerless clock. The current timeline revision overrides cached head state. A tracker-observed new head resets suppression, its reason and the clock without requiring a reviewer-gate observation; ownership or terminal state clears the clock. More than seven minutes without ownership emits STUCK ownerless with lane-decline reasons. Every STUCK kind reaches one durable alert per PR/head, with deterministic outbox dedup after a lost receipt. Offline tracker, health, claim-loop and injected alert fixtures cover these transitions. Existing routing, merge authority, SLOW budgets and smoke promises are unchanged. After normal deployment, the runtime owner may read natural ownership flags and alert receipts; no forced stall, live delivery test or new smoke step is authorized.",
   "hammerValidatedHeadOwnership": "HAMVALIDORPHAN-01: recognized current-head hammer validation or closer trailer suppresses auto-refresh. Queued automatic review rows return to posted at their latest delivered review head through a null-safe request CAS, then enter closure processing in the same poll. The shared decision and rescue retain hammer dispatch ownership without carrying a verdict. Existing live ownership, explicit review handoffs, CI waits, certified daemon authority, strict mode, leases, attempt/backoff/lifetime caps and exhaustion pages remain unchanged. Offline regressions: watcher-claim-loop, watcher-auto-refresh-stale-posted-review, ama-hammer-background-dispatch, ama-hammer-retry-cap, closer-next-action and merge-agent-rescue-classifier. Natural deployed recovery observation remains pending; existing smoke promises are unchanged.",
   "queueCutoverObservation": {
@@ -1332,6 +1332,15 @@
           "deadEndEvidence": "CLOSERINTENTRECON-01 invokes the existing fenced proof from closure orchestration and the recovery reaper before waiting on a dead or expired pending owner, including the intent named by rekeyedFromHeadSha. LAC-2081 bounds diagnostics by the original dispatch timeout (30 minutes without it). LEGACYINTENT-01 supplies an audited operator exit on empty successful ticket/time ledger evidence. CLOSERGATE-01 scopes unresolved ownership to its PR/head with no fleet launch capacity and one durable inspection page; CLOSERINTENT-01 supplies an exit on successful empty-key proof after the dispatch deadline or audited empty closer-ticket proof; unreadable absence evidence remains held; authoritative closed/merged PR metadata retires the intent without claiming no submission."
         },
         {
+          "name": "dispatch-interrupted",
+          "terminal": false,
+          "exitOwner": "native pre-receipt reconciliation",
+          "maxDurationSeconds": 1831.5,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "Shutdown persists interruption before abort. Canonical receipt adoption or proven no-launch retires ownership; unavailable evidence keeps the PR held and existing inspection paging applies."
+        },
+        {
           "name": "dispatched",
           "terminal": false,
           "exitOwner": "closer dispatcher",
@@ -1391,6 +1400,34 @@
         }
       ],
       "transitions": [
+        {
+          "id": "hammer-dispatch.33",
+          "from": "dispatching",
+          "to": "dispatch-interrupted",
+          "trigger": "watcher shutdown abort listener synchronously persists interrupted attempt under native intent lock before exit",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.34",
+          "from": "dispatch-interrupted",
+          "to": "dispatched",
+          "trigger": "recover exact canonical keyed receipt without launching again",
+          "codeSource": "src/ama/pre-receipt-intent.mjs"
+        },
+        {
+          "id": "hammer-dispatch.35",
+          "from": "dispatch-interrupted",
+          "to": "no-dispatch",
+          "trigger": "fenced conclusive no-launch proof defers pending lease and refunds intent once",
+          "codeSource": "src/ama/pre-receipt-intent.mjs"
+        },
+        {
+          "id": "hammer-dispatch.36",
+          "from": "dispatch-interrupted",
+          "to": "completed",
+          "trigger": "authoritative PR termination retires hold without asserting no launch",
+          "codeSource": "src/ama/pre-receipt-intent.mjs"
+        },
         {
           "id": "hammer-dispatch.29",
           "from": "dispatching",
@@ -1625,7 +1662,7 @@
     "src/ama/dispatch-submitter.mjs": "c186abb1b2071524a8afd722bf10c637d1e54586f2f186b47f57be3baad9dd60",
     "src/ama/closure-next-action.mjs": "5bb0293c10c0b45c7086401cd9f7d4d137363a39308cf7178891c1c8b5375dcc",
     "src/pr-next-action.mjs": "e392a7dbaff95f97131cd62f9f4f9edf4f7e1697b61261967302ca8425c68527",
-    "src/ama/pre-receipt-intent.mjs": "f78c12d791b287307441f121a782ba00e5b52e1e6ef7a1522a51443de8c5f14c",
+    "src/ama/pre-receipt-intent.mjs": "4954d9ad52d99a9eff753b0b0a399c15aa3b6872e2d3462b8dde2ba5f7673e0d",
     "src/follow-up-branch.mjs": "637f2a18c5fb2a89d2d02c98d80587a713a188c10d70891941d77df847579a8d",
     "src/posted-review-head-repair.mjs": "ce761260224b7a82d152e5b289e8967bbf54026c427a17bdb5cff0a6556ff7d6",
     "src/pollonce-phases.mjs": "71fe10f8c2e420924e48503838faf54a22e6a63eb2726a109ccecdd5dab36247",
@@ -1638,7 +1675,7 @@
     "src/ama-closure-orchestration.mjs": "084a327a902dcde21814da0bc691847c009ae25b8d547a1e6598c14148df6fa7",
     "src/ama/closer-lease.mjs": "c2aa021100d2cc5fc0ba2de3ca035dab42d46d416039853d0df4a69a8b2c3900",
     "src/ama/closure-owner.mjs": "2448cded95d11c7a03d85758d16bf1719a433daef79e8d7454c1696c6bfc079e",
-    "src/ama/dispatch-closer.mjs": "eb2a8ca33ce5c46cbe411e7ed7a8c4cfe7d34808fd675420ce00adb3c8b872fa",
+    "src/ama/dispatch-closer.mjs": "5d9cea4918673f93014f88510d6e4e42e3780ffe5ce84fbecb5b3a506d299941",
     "src/fast-merge-processing.mjs": "2bb4cfe6ab2b4479285e1c48aaf1b0a7a4019a9e95437ba0a1a73a1af73a461b",
     "src/follow-up-jobs.mjs": "2b9daa25ce7f61a615c8d35e1e92954ddffff68bebdb6e2a5a090c3e2e15392d",
     "src/follow-up-remediation.mjs": "dfb899357e34eb3256e153531b11a883c80cbbe4097ff81ffa6bbc9d81c3ac4d",

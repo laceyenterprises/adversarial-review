@@ -11,7 +11,7 @@ import fsExt from 'fs-ext';
 import { reapStaleCloserLeases } from '../src/recovery-reaper.mjs';
 import { reconcileRecoveryLaunches } from '../src/ama/recovery-launch-reconciliation.mjs';
 import { closerLaunchMatches, reconcilePreReceiptIntent, tryAcquireCloserIntentLock } from '../src/ama/pre-receipt-intent.mjs';
-import { acquireAmaCloserLease, readAmaCloserLease, updateAmaCloserLease, amaCloserLeaseFilePath } from '../src/ama/closer-lease.mjs';
+import { acquireAmaCloserLease, readAmaCloserLease, updateAmaCloserLease, amaCloserLeaseFilePath, isReclaimableTerminalAmaCloserLease, deleteAmaCloserLeaseIfCurrent } from '../src/ama/closer-lease.mjs';
 import { amaCloserDispatchFilePath, readAmaCloserDispatchRecord, updateAmaCloserDispatchRecord,
   findActiveAmaCloserLaunches, reconcileAmaCloserDispatches, isActiveAmaCloserDispatchRecord, maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
 import { readHammerRetryCapLedger, recordHammerRetryDispatch, hammerRetryCapFilePath } from '../src/ama/hammer-retry-cap.mjs';
@@ -334,6 +334,7 @@ for (const lease of [true, false]) test(`legacy empty ticket/time query settles 
   assert.equal(f.read().launchRequestId, null);
   assert.equal(f.read().retryCount, 1);
   assert.deepEqual(f.read().preReceiptReconciliation.query, {
+    projectRef: 'adversarial-merge-authority', repo: identity.repo,
     kind: 'launch-requests-for-ticket-since', ticketRef: 'AMA-PR-8',
     requestedAtOrAfter: started, limit: 1, ok: true, rowCount: 0,
     backend: 'synthetic-policy', source: 'fixture', reason: null, detail: null,
@@ -1139,3 +1140,44 @@ test('grant-scoped SDK emptiness cannot settle keyed or legacy ownership', async
     assert.deepEqual(readAmaCloserLease(f.rootDir, identity), before);
   }
 });
+
+for (const state of ['dispatching', 'dispatch-interrupted']) {
+  for (const mode of ['absent', 'receipt', 'live', 'live-expired', 'unreadable', 'reused']) {
+    test(`CLOSERDISPATCHDEAD-01: abandon reconciles ${state} with ${mode} submitter`, async t => {
+      const { abandonAmaCloserLease } = await import('../src/ama/abandoned-closer-lease.mjs');
+      const f = fixture(t, { state, dispatchWatcher: { pid: 12345, startedAt: started } });
+      if (mode === 'receipt') f.insert(receipt);
+      const before = readAmaCloserLease(f.rootDir, identity);
+      const observed = mode.startsWith('live') ? processRow(12345) : mode === 'reused'
+        ? processRow(12345, 'unrelated', 'Thu Oct 22 11:18:18 2026') : processRow(99);
+      const result = await abandonAmaCloserLease(f.rootDir, before, { ...f.options, now: mode === 'live-expired' ? now : firstPoll,
+        isProcessAlive: () => mode.startsWith('live') || mode === 'reused',
+        captureProcessImpl: () => ({ startedAt: mode === 'reused' ? '2026-10-22T11:18:18Z' : started }),
+        processKillImpl: mode.startsWith('live') || mode === 'reused' ? () => {} : dead,
+        processExecFileSyncImpl: processScan(observed),
+        ...(mode === 'unreadable' ? { readIntentReceiptImpl: () => ({ ok: false }) } : {}),
+      });
+      if (['absent', 'reused'].includes(mode)) {
+        assert.equal(result.status, 'terminal');
+        assert.equal(result.terminalOutcome, 'deferred');
+        assert.equal(f.read().state, 'no-dispatch');
+        assert.equal(f.read().retryCount, 1);
+        assert.equal(isReclaimableTerminalAmaCloserLease(result), true);
+        assert.equal(deleteAmaCloserLeaseIfCurrent(f.rootDir, result), true);
+        const retry = acquireAmaCloserLease({ rootDir: f.rootDir, ...identity,
+          now: firstPoll, watcherPid: 54321 });
+        assert.equal(retry.acquired, true);
+        assert.equal(acquireAmaCloserLease({ rootDir: f.rootDir, ...identity,
+          now: firstPoll, watcherPid: 54321 }).acquired, false, 'only one successor wins');
+      } else if (mode === 'receipt') {
+        assert.equal(result, null);
+        assert.equal(f.read().launchRequestId, receipt.launch_request_id);
+        assert.equal(readAmaCloserLease(f.rootDir, identity).lrqId, receipt.launch_request_id);
+      } else {
+        assert.equal(result, null);
+        assert.deepEqual(readAmaCloserLease(f.rootDir, identity), before);
+        assert.equal(f.read().state, state);
+      }
+    });
+  }
+}

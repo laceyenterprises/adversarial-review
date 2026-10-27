@@ -1,3 +1,4 @@
+import { isPreReceiptIntent } from './dispatch-record-read.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { findLiveAmaCloserLease } from './closer-lease.mjs';
 import { readAmaCloserDispatchRecordsForPR } from './dispatch-record-read.mjs';
@@ -48,7 +49,7 @@ export async function operatorNoticeInFlight(rootDir, identity, {
   for (const record of readAmaCloserDispatchRecordsForPR(rootDir, identity)) {
     // A replacement can still carry the previous launch ID and terminal status
     // while hq dispatch admits it. Do not probe that old ID as the new launch.
-    if (record.state === 'dispatching') {
+    if (isPreReceiptIntent(record)) {
       if (isActiveAmaCloserDispatchRecord({ ...record, lastObservedStatus: null },
         { now: new Date(now).toISOString() })) return 'closer-in-flight';
       continue;

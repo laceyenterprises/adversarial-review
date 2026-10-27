@@ -672,3 +672,30 @@ through missing-capture reconciliation. They never certify absence, delivery,
 merge success or permission to skip live PR checks. A structured
 `ama_closer.merge_capture_read_degraded` event carries the same reason even when
 no dispatch record exists yet. No new lifecycle state or merge gate is added.
+
+
+## Dead dispatch submitters (CLOSERDISPATCHDEAD-01)
+
+Recovery reads now send `project_ref` and owner-qualified `repo` with the exact
+key or inclusive ticket/time selector. The producer requires the existing paired
+`dispatch_reads` grant and checks unfiltered canonical rows before returning
+`canonical-exact-selector-absence`. Zero canonical matches prove no launch; a
+hidden match, incomplete scope, unreadable identity, timeout or exceeded bound
+still holds ownership. This fixes the ordinary recovery contract without
+per-attempt operator entitlements; unscoped incident recovery remains supported.
+
+Dispatch records add `hqProject` (the project passed to HQ; older records use
+`adversarial-merge-authority`) and optional `interruptedAt`. SIGTERM/SIGINT stop
+background admission and synchronously persist `state: dispatch-interrupted`
+before aborting submissions or waiting on reviewer fences. It is a pre-receipt
+intent: retain its lease, key and artifacts until native reconciliation adopts
+the matching receipt or proves no launch. It never authorizes a direct retry.
+
+`abandonAmaCloserLease` is asynchronous and invokes that reconciliation before
+releasing a pending lease. Dead/reused PID plus process-start identity, no live
+submission/key process and canonical absence settle to `no-dispatch` and a
+terminal `deferred` lease in the same pass. Normal fenced reclamation admits
+one successor; retry refund replays once. Live submitters, launch owners,
+foreign hosts and uncertain evidence retain ownership. No live recovery is
+performed by this source change. After normal producer then consumer deployment,
+the runtime owner may observe organic recovery; existing smoke promises remain.

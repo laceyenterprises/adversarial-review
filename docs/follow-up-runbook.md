@@ -1942,3 +1942,15 @@ This changes no lifecycle states, merge authority, configuration keys or smoke
 commands. After normal deployment and separately authorized service reload,
 observe naturally occurring receipts read-only. Offline synthetic tests authorize
 no live push, PR rescue, worker-slot change or service action.
+
+
+## Dead dispatch submitters (CLOSERDISPATCHDEAD-01)
+
+Scoped project/repository selectors use the existing paired grant and require
+canonical absence before retiring dead submissions. Asynchronous lease
+abandonment reconciles the intent in the same pass. SIGTERM/SIGINT synchronously
+mark background submissions `dispatch-interrupted` before exit; these retain
+leases and artifacts until receipt adoption or conclusive no-launch proof.
+Live owners and once-only launch/refund fences remain authoritative. See the
+[recovery contract](dispatch-absence-recovery.md) for fields, deployment order and offline evidence.
+Existing smoke promises remain; no live operation is part of validation.

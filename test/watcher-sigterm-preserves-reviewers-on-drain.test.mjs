@@ -7,7 +7,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -103,4 +103,38 @@ test('poll reconcile includes adopted reviewer sessions before timeout expiry', 
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+for (const signal of ['SIGTERM', 'SIGINT']) test(`CLOSERDISPATCHDEAD-01: ${signal} interrupts background work before reviewer cleanup`, async t => {
+  const { parse } = await import('acorn');
+  const { runInNewContext } = await import('node:vm');
+  const { amaHammerBackgroundQueue, shutdownAmaHammerBackgroundQueue,
+    resetAmaHammerBackgroundQueueForTests } = await import('../src/ama-hammer-background-dispatch.mjs');
+  resetAmaHammerBackgroundQueueForTests();
+  t.after(resetAmaHammerBackgroundQueueForTests);
+  const queue = amaHammerBackgroundQueue();
+  let interrupted = false;
+  queue.submit({ key: 'example/repo#8@head', run: abortSignal => new Promise(resolve => {
+    abortSignal.addEventListener('abort', () => { interrupted = true; resolve({ dispatched: false }); }, { once: true });
+  }) });
+  const source = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
+  const statement = parse(source, { ecmaVersion: 'latest', sourceType: 'module' }).body.find(node =>
+    node.type === 'ExpressionStatement' && node.expression.callee?.object?.name === 'process'
+    && node.expression.callee?.property?.name === 'on' && node.expression.arguments[0]?.value === signal);
+  assert.ok(statement);
+  let handler, exited = false;
+  runInNewContext(source.slice(statement.start, statement.end), {
+    process: { env: {}, on: (_signal, callback) => { handler = callback; } },
+    shutdownAmaHammerBackgroundQueue,
+    readWatcherDrainState: () => ({}), shouldPreserveReviewersOnSigterm: () => true,
+    resolveSigtermFenceMode: () => 'on',
+    waitForActiveReviewerFencesOnSigterm: async () => { assert.equal(interrupted, true); },
+    exitAfterReviewerCleanup: () => { assert.equal(interrupted, true); exited = true; },
+    console: { error: message => assert.fail(message) },
+  });
+  handler();
+  assert.equal(interrupted, true);
+  await queue.drain();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(exited, true);
 });

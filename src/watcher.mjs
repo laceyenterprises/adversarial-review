@@ -1,3 +1,4 @@
+import { shutdownAmaHammerBackgroundQueue } from './ama-hammer-background-dispatch.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { withHoldRecordPoll } from './ama/hold-record.mjs';
 import { evaluateCloserHoldsForPoll } from './ama/closer-hold-records.mjs';
@@ -133,9 +134,7 @@ import {
   requestReviewRereview,
 } from './review-state.mjs';
 import { acquireDaemonSingleton } from './daemon-singleton.mjs';
-// ARC-18: the review-state db handle and prepared statements were extracted to
-// ./review-state-db.mjs; import them back so pollOnce and the reviewer/merge
-// helpers keep referencing the same shared handles.
+// ARC-18: review-state-db.mjs shares the db handle/statements across pollOnce and review/merge helpers.
 import {
   db,
   stmtGetReviewRow, stmtHasPostedReview,
@@ -908,8 +907,8 @@ process.on('unhandledRejection', (err) => {
     message: 'unhandledRejection; preserving in-flight reviewer runtime sessions before exit',
   });
 });
-
 process.on('SIGTERM', () => {
+  shutdownAmaHammerBackgroundQueue();
   const drainState = readWatcherDrainState();
   const preserveInFlightReviewers = shouldPreserveReviewersOnSigterm(drainState);
   if (resolveSigtermFenceMode(process.env) === 'off') {
@@ -948,8 +947,8 @@ process.on('SIGTERM', () => {
       });
     });
 });
-
 process.on('SIGINT', () => {
+  shutdownAmaHammerBackgroundQueue();
   exitAfterReviewerCleanup({
     code: 130,
     reason: 'SIGINT',

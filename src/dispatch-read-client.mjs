@@ -116,8 +116,12 @@ function checked(result, selector) {
 function completeAbsence(result, selector) {
   const proof = result.absence_proof;
   const keys = Object.keys(selector).sort();
-  const exactKey = keys.length === 1 && keys[0] === 'idempotency_key';
-  const exactTicket = keys.length === 2 && keys[0] === 'requested_at_or_after' && keys[1] === 'ticket_ref';
+  const scoped = keys.includes('project_ref') || keys.includes('repo');
+  if (scoped && (typeof selector.project_ref !== 'string' || !selector.project_ref.trim()
+    || typeof selector.repo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(selector.repo))) return false;
+  const identityKeys = keys.filter(key => !scoped || !['project_ref', 'repo'].includes(key));
+  const exactKey = identityKeys.length === 1 && identityKeys[0] === 'idempotency_key';
+  const exactTicket = identityKeys.length === 2 && identityKeys[0] === 'requested_at_or_after' && identityKeys[1] === 'ticket_ref';
   if ((!exactKey && !exactTicket) || result.scope_complete !== true
     || proof?.version !== 1 || proof.kind !== 'canonical-exact-selector-absence'
     || typeof proof.grant_id !== 'string' || !proof.grant_id.trim() || proof.grant_id.length > 256

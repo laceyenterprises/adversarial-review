@@ -3120,3 +3120,52 @@ for (const terminalPr of [false, true]) {
     assert.ok(warnings.some(line => line.includes('closer lease unreadable') && line.includes('fixture/project#17')));
   });
 }
+
+test('CLOSERDISPATCHDEAD-01: background shutdown persists interruption before submission settles', async t => {
+  const { createAmaHammerBackgroundQueue } = await import('../src/ama-hammer-background-dispatch.mjs');
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-interrupted-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = findingsRemediationArgs(rootDir);
+  const identity = { repo: args.dispatchContext.repo, prNumber: args.prMetadata.prNumber, headSha: HEAD };
+  const queue = createAmaHammerBackgroundQueue();
+  let submitted;
+  const ready = new Promise(resolve => { submitted = resolve; });
+  let rejectSubmission;
+  queue.submit({ key: `${identity.repo}#${identity.prNumber}@${HEAD}`, run: signal =>
+    maybeDispatchAmaCloser({ ...args, ...testDeps(), signal,
+      processExecFileImpl: async () => ({ stdout: 'Thu Oct 22 10:18:18 2026\n' }),
+      execFileImpl: () => {
+        submitted();
+        return new Promise((_resolve, reject) => { rejectSubmission = reject; });
+      },
+    }),
+  });
+  await ready;
+  queue.shutdown();
+  assert.equal(JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity))).state, 'dispatch-interrupted');
+  rejectSubmission(Object.assign(Error('synthetic termination'), { name: 'AbortError' }));
+  await queue.drain();
+  const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity)));
+  assert.equal(record.state, 'dispatch-interrupted', 'late failure cannot erase uncertainty');
+  assert.equal(record.hqProject, 'adversarial-merge-authority');
+  assert.equal(readAmaCloserLease(rootDir, identity).status, 'pending', 'only canonical reconciliation can release');
+  const { abandonAmaCloserLease } = await import('../src/ama/abandoned-closer-lease.mjs');
+  const pending = readAmaCloserLease(rootDir, identity);
+  const retired = await abandonAmaCloserLease(rootDir, pending, {
+    now: '2026-07-20T12:00:01Z', livePid: 54321,
+    isProcessAlive: () => false,
+    processKillImpl: () => { throw Object.assign(Error('synthetic dead submitter'), { code: 'ESRCH' }); },
+    processExecFileSyncImpl: () => '515151 Mon Jul 20 12:00:00 2026 synthetic\n',
+    readPullRequestStateImpl: async () => ({ state: 'OPEN' }),
+    readIntentReceiptImpl: async () => ({ ok: true, rows: [] }),
+    logger: { warn() {} },
+  });
+  assert.equal(retired.status, 'terminal');
+  const retryDeps = testDeps();
+  const nextPass = await maybeDispatchAmaCloser({ ...args, ...retryDeps });
+  assert.equal(nextPass.dispatched, true, JSON.stringify(nextPass));
+  assert.equal(retryDeps.calls.length, 1);
+  const laterPass = await maybeDispatchAmaCloser({ ...args, ...retryDeps });
+  assert.equal(laterPass.dispatched, false);
+  assert.equal(retryDeps.calls.filter(call => call.args[0] === 'dispatch' && call.args.includes('--idempotency-key')).length, 1, 'successor receipt prevents another launch');
+});

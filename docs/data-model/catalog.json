@@ -650,6 +650,8 @@
       "optionalOwnershipFields": ["nextAction"],
       "owner": "watcher posted-review dispatch fairness",
       "optionalCadenceFields": ["lastRunAt"],
+      "optionalGenerationFields": ["watcherGeneration", "generationResets", "generationHistory"],
+      "generationResetContract": "NOPROGRESSRESET-01: changed watcher build or effective config resets scheduling debt at startup; preserve prior counters in the last ten generationHistory entries and cumulative generationResets",
       "lastRunAtContract": "Explicit null means no recorded walk; only absent legacy fields fall back to updatedAt",
       "evidenceStopRecheckMs": 300000,
       "drainHintTtlMs": 300000,

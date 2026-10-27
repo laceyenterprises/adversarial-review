@@ -20,6 +20,7 @@ import { primaryChangeReadStatus } from './ama/primary-change-store.mjs';
 // imports both back. ROOT/execFileAsync are re-derived; WATCHER_PRIMARY_DOMAIN_ID
 // is threaded (see the `domainId`/`primaryDomainId` defaults).
 import { execFile } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { promisify } from 'node:util';
 import { dirname, join, resolve } from 'node:path';
@@ -35,6 +36,7 @@ import { finalReviewHammerLatencySummary, resolveMergeAgentCoexistenceForWatcher
 import { createLogChangeGate } from './log-change-gate.mjs';
 import { COEXISTENCE_ACTION } from './ama/coexistence.mjs';
 import { isSafetyRecoveryHold } from './ama/automated-recovery.mjs';
+import { parkRecordPath } from './daemon-merge-park-log.mjs';
 import { withDaemonMergeReservation } from './ama/merge-lease.mjs';
 import {
   clearPendingAmaHammerDispatch,
@@ -83,6 +85,7 @@ import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import {
   evaluateNoProgressLane,
   handlerDecisionFingerprint,
+  decisionFingerprintWithDaemonDecline,
   markNoProgressStalledEventEmitted,
   maybeFireOperatorDecisionRequiredAlert,
   maybeMarkNoProgressStalledEvent,
@@ -1106,7 +1109,14 @@ export function createNoProgressLaneGate({
   deliverAlertFn = defaultDeliverAlert,
   emitStalledEventFn = null,
   logger = console,
+  watcherGeneration = null,
 } = {}) {
+  const storedDaemonDecline = handler => {
+    try {
+      const record = JSON.parse(readFileSync(parkRecordPath(rootDir, handler.repoPath, handler.prNumber), 'utf8'));
+      return record?.headSha === handler.headSha ? record.reason : null;
+    } catch { return null; }
+  };
   const freshDrainHint = (identity, observedAt) => {
     const record = readAmaCloserDispatchRecord(rootDir, identity);
     const fresh = isFreshDrainDeferredAmaCloserRecord(record, observedAt);
@@ -1124,7 +1134,8 @@ export function createNoProgressLaneGate({
       const pending = readPendingAmaHammerDispatch(rootDir, { ...identity, headSha: handler.headSha }, { logger });
       let decision = pending
         ? { lane: 'active', due: true, reason: 'hammer-dispatch-recovery', backoffTicks: 0 }
-        : evaluateNoProgressLane(ledger, { headSha: handler.headSha || null, drainDeferred });
+        : evaluateNoProgressLane(ledger, { headSha: handler.headSha || null, drainDeferred,
+          decisionFingerprint: decisionFingerprintWithDaemonDecline(ledger?.decisionFingerprint, storedDaemonDecline(handler)) });
       let reviewedSha = null;
       try {
         reviewedSha = readReviewRow(handler.repoPath, handler.prNumber)?.reviewer_head_sha ?? null;
@@ -1220,11 +1231,14 @@ export function createNoProgressLaneGate({
       // LANESTARVE-01. A timed-out handler reported no decision at all, so it
       // carries no decision fingerprint — its `'timed-out'` row fingerprint is
       // the whole signal, exactly as before.
-      const decisionFingerprint = timedOut ? null : handlerDecisionFingerprint(value);
+      const decisionFingerprint = timedOut ? null : handlerDecisionFingerprint(value, {
+        daemonDeclineReason: storedDaemonDecline(handler),
+      });
       const outcome = recordNoProgressLaneRun(rootDir, identity, {
         headSha: handler.headSha || null,
         fingerprint,
         decisionFingerprint,
+        watcherGeneration,
         progressClass,
         operatorHold,
         hammerRouteActive,

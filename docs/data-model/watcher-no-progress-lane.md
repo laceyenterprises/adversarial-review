@@ -45,6 +45,9 @@ Required fields:
 | `fingerprint` | string or null | Stable review-state fingerprint used to detect progress. |
 | `decisionFingerprint` | string or null | Stable handler-decision fingerprint for the current head. This is carried forward across silent walks so the next usable decision can detect decision-only changes without treating missing handler output as a new baseline. |
 | `decisionResets` | number | Count of decision-only resets already honored for the current head. A new head resets this to `0`; repeated decision changes are capped by the watcher so the lane cannot reset forever on decision churn. |
+| `watcherGeneration` | object, optional | `buildIdentity` is a process-captured SHA-256 of service source, bin, domains, prompts and package manifests. `configGeneration` hashes the canonical effective role-config values and watcher config. Startup migrates legacy records without a generation. Only hashes are persisted. |
+| `generationResets` | number, optional | Cumulative count of startup generation resets for this PR, retained across walks. |
+| `generationHistory` | array, optional | Last ten startup resets, retaining the prior generation, lane, no-progress/skip/decision-reset counters, first no-progress timestamp and reset timestamp. |
 | `hammerRouteActive` | boolean, optional | Final-review hammer ownership keeps this head active regardless of unchanged review state. A subsequent operator hold clears it. |
 | `nextAction` | object, optional | NXA-05 selected shared decision for this head, including action, actor, reason, deadline, evidence references, key and queue intent. Automatic stops and cap/deadline reports retain recovery ownership. Explicit operator hold alone selects the operator lane when this field is supplied. |
 | `progressClass` | string | `self-resolving` or `operator-decision-required`. |
@@ -99,6 +102,21 @@ Optional `stalledEvent` field:
   it clears `noProgressTicks`, `firstNoProgressAt`, and any prepared or emitted
   `stalledEvent`, but it does not report durable review-state progress to the
   caller. The watcher records the reset separately via `decisionResets`.
+- NOPROGRESSRESET-01: the decision fingerprint retains closure next-action
+  `row`, `action` and `reason`, the returned daemon decline reason, and the
+  current-head stored daemon park reason in distinct fields outside the bounded
+  generic reason set. Closure's selected decision takes precedence over a
+  top-level projection. Timestamps, counts and diagnostic text remain excluded.
+  Before deferring a walk the gate compares the stored daemon decline against
+  the recorded fingerprint; changed or cleared current-head evidence admits
+  the next tick within the existing decision-reset cap. Other-head parks do
+  not supply a decline reason. The completed walk records the fresh decision.
+- On watcher startup, a different code identity or effective config generation
+  resets each lane to `active`, clearing current-series counters, fingerprints,
+  selected action, stall event and alert debounce. Prior counters remain in
+  `generationHistory`; `lastRunAt` remains the actual last walk. The same build
+  and config leave ledger bytes and backoff unchanged. Legacy records migrate
+  once. No new config keys or backoff constants are introduced.
 - Decision-only resets are capped per head by the watcher's configured
   decision-reset cap. Once the cap is spent, later decision changes keep the
   current no-progress series and are logged instead of resetting the lane

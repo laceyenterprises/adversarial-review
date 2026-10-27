@@ -172,9 +172,12 @@ import {
   writeAutonomousMergeDisabledAudit,
 } from './ama-closure-orchestration.mjs';
 import {
+  createNoProgressLaneGate,
   handlePostedReviewRow,
   runQueuedReviewAdoptionPhase,
 } from './posted-review-row.mjs';
+import { resetNoProgressLanesForGeneration } from './watcher-no-progress-lane.mjs';
+import { WATCHER_BUILD_IDENTITY, watcherConfigGeneration } from './watcher-lane-generation.mjs';
 import {
   maybeDispatchReviewerTimeoutExhaustedMergeAgent,
 } from './reviewer-timeout-exhausted-dispatch.mjs';
@@ -447,6 +450,7 @@ const ROOT = join(__dirname, '..');
 // ./reviewer-runtime-support.mjs (ARC-18); imported back above.
 
 const config = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'));
+let watcherLaneGeneration = null;
 // Fail fast during watcher bootstrap; a bad gate-context override should not
 // leave reviews running while commit-status publication silently stops later.
 resolveGateStatusContext(process.env);
@@ -1563,6 +1567,7 @@ async function pollOnceWithinBudget(
     operatorSurface,
     primaryDomainId: WATCHER_PRIMARY_DOMAIN_ID,
     postedReviewPriorityTargets: wakePayloadForPoll() || [],
+    noProgressLaneGate: createNoProgressLaneGate({ rootDir: ROOT, watcherGeneration: watcherLaneGeneration }),
   });
   } finally {
     try {
@@ -1677,6 +1682,10 @@ async function main() {
     );
     throw err;
   }
+
+  watcherLaneGeneration = { buildIdentity: WATCHER_BUILD_IDENTITY,
+    configGeneration: watcherConfigGeneration({ watcher: config, roles: loadRoleConfig().values }) };
+  resetNoProgressLanesForGeneration(ROOT, watcherLaneGeneration);
 
   const octokit = createWatcherOctokit({
     auth: process.env.GITHUB_TOKEN,

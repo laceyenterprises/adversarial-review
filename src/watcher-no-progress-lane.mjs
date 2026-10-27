@@ -332,7 +332,7 @@ function normalizeDecisionSlug(value) {
  * Returns `null` when the handler reported nothing usable; a null fingerprint
  * never counts as a change, so an unreporting handler behaves exactly as before.
  */
-export function handlerDecisionFingerprint(value) {
+export function handlerDecisionFingerprint(value, { daemonDeclineReason = null } = {}) {
   if (!value || typeof value !== 'object') return null;
   const slugs = new Set();
   const add = (raw) => {
@@ -340,7 +340,7 @@ export function handlerDecisionFingerprint(value) {
     if (slug) slugs.add(slug);
   };
   add(value.outcome);
-  const selected = value.nextAction || value.amaClosureResult?.nextAction;
+  const selected = value.amaClosureResult?.nextAction || value.nextAction;
   add(selected?.action);
   add(selected?.actor);
   add(selected?.reason);
@@ -350,8 +350,28 @@ export function handlerDecisionFingerprint(value) {
   add(value.amaClosureResult?.reason);
   add(value.amaClosureResult?.namedReason);
   for (const reason of normalizeReasonList(value.amaClosureResult?.reasons)) add(reason);
-  if (slugs.size === 0) return null;
-  return JSON.stringify([...slugs].sort().slice(0, MAX_DECISION_FINGERPRINT_SLUGS));
+  const closure = {
+    row: normalizeDecisionSlug(selected?.row),
+    action: normalizeDecisionSlug(selected?.action),
+    reason: normalizeDecisionSlug(selected?.reason),
+  };
+  const daemonReason = normalizeDecisionSlug(value.amaClosureResult?.daemonCleanMerge?.reason);
+  const storedDaemonDeclineReason = normalizeDecisionSlug(daemonDeclineReason);
+  if (slugs.size === 0 && !closure.row && !daemonReason && !storedDaemonDeclineReason) return null;
+  // Keep cause fields outside the bounded reason set: sorting/truncation must
+  // never hide a closure row change or a daemon decline behind generic reasons.
+  return JSON.stringify({ slugs: [...slugs].sort().slice(0, MAX_DECISION_FINGERPRINT_SLUGS),
+    closure, daemonReason, storedDaemonDeclineReason });
+}
+
+// The stored decline can change between walks. Compare that cheap local signal
+// before admission, without executing closure or granting any merge authority.
+export function decisionFingerprintWithDaemonDecline(fingerprint, reason) {
+  try {
+    const prior = JSON.parse(fingerprint);
+    if (!prior || Array.isArray(prior) || !hasOwn(prior, 'storedDaemonDeclineReason')) return null;
+    return JSON.stringify({ ...prior, storedDaemonDeclineReason: normalizeDecisionSlug(reason) });
+  } catch { return null; }
 }
 
 export function readNoProgressLane(rootDir, identity, { logger = console } = {}) {
@@ -401,6 +421,51 @@ function writeLedger(rootDir, identity, doc) {
   mkdirSync(noProgressLaneDir(rootDir), { recursive: true });
   writeFileAtomic(noProgressLaneFilePath(rootDir, identity), `${JSON.stringify(doc, null, 2)}\n`);
   return doc;
+}
+
+export function resetNoProgressLanesForGeneration(rootDir, watcherGeneration, {
+  now = new Date().toISOString(), logger = console,
+} = {}) {
+  let entries;
+  try { entries = readdirSync(noProgressLaneDir(rootDir), { withFileTypes: true }); }
+  catch (error) {
+    if (error.code === 'ENOENT') return 0;
+    throw error;
+  }
+  let reset = 0;
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.json') || entry.name.endsWith('.promotion.json')) continue;
+    const filePath = join(noProgressLaneDir(rootDir), entry.name);
+    let ledger;
+    try { ledger = JSON.parse(readFileSync(filePath, 'utf8')); }
+    catch (error) {
+      logger?.warn?.(`[watcher] no-progress lane: generation reset could not read ${filePath}: ${error.message}`);
+      continue;
+    }
+    if (!ledger?.repo || !Number.isInteger(ledger.prNumber) || !ledger.headSha) continue;
+    const identity = { repo: ledger.repo, prNumber: ledger.prNumber };
+    if (filePath !== noProgressLaneFilePath(rootDir, identity)) continue;
+    if (ledger.watcherGeneration?.buildIdentity === watcherGeneration.buildIdentity
+      && ledger.watcherGeneration?.configGeneration === watcherGeneration.configGeneration) continue;
+    const history = Array.isArray(ledger.generationHistory) ? ledger.generationHistory : [];
+    const previous = { watcherGeneration: ledger.watcherGeneration ?? null, lane: ledger.lane,
+      noProgressTicks: normalizeCount(ledger.noProgressTicks), skippedTicks: normalizeCount(ledger.skippedTicks),
+      decisionResets: normalizeCount(ledger.decisionResets), firstNoProgressAt: ledger.firstNoProgressAt ?? null,
+      resetAt: now };
+    clearOperatorDecisionAlertState(rootDir, identity, { logger });
+    const retained = { ...ledger };
+    delete retained.stalledEvent;
+    delete retained.operatorReason;
+    delete retained.nextAction;
+    writeLedger(rootDir, identity, { ...retained, watcherGeneration,
+      generationHistory: [...history, previous].slice(-MAX_PROMOTION_HISTORY_ENTRIES),
+      generationResets: normalizeCount(ledger.generationResets) + 1,
+      lane: LANE_ACTIVE, noProgressTicks: 0, skippedTicks: 0, decisionResets: 0,
+      fingerprint: null, decisionFingerprint: null, firstNoProgressAt: null,
+      progressClass: PROGRESS_CLASS_SELF_RESOLVING, hammerRouteActive: false, updatedAt: now });
+    reset += 1;
+  }
+  return reset;
 }
 
 function starvedPromotionMarkerPath(rootDir, promotionId = STARVED_SLOW_LANE_PROMOTION_ID) {
@@ -634,6 +699,8 @@ export function backoffTicksFor(noProgressTicks, {
  */
 export function evaluateNoProgressLane(ledger, {
   headSha = null,
+  decisionFingerprint = null,
+  decisionResetCap = DEFAULT_NO_PROGRESS_DECISION_RESET_CAP,
   cap = DEFAULT_NO_PROGRESS_LANE_CAP,
   maxBackoffTicks = DEFAULT_NO_PROGRESS_MAX_BACKOFF_TICKS,
   operatorBlockedRewalkTicks: operatorRewalkTicks = DEFAULT_OPERATOR_BLOCKED_REWALK_TICKS,
@@ -655,6 +722,11 @@ export function evaluateNoProgressLane(ledger, {
   if (!ledger) return { ...base, reason: 'no-ledger' };
   if (!head || ledgerHead === null || ledgerHead !== head) {
     return { ...base, reason: 'head-changed' };
+  }
+  if (typeof decisionFingerprint === 'string' && typeof ledger.decisionFingerprint === 'string'
+    && decisionFingerprint !== ledger.decisionFingerprint
+    && normalizeCount(ledger.decisionResets) < positiveIntOr(decisionResetCap, DEFAULT_NO_PROGRESS_DECISION_RESET_CAP)) {
+    return { ...base, reason: 'decision-changed' };
   }
   const noProgressTicks = normalizeCount(ledger.noProgressTicks);
   const selected = ledger.nextAction?.head === head ? ledger.nextAction : null;
@@ -755,6 +827,7 @@ export function recordNoProgressLaneRun(rootDir, identity, {
   headSha,
   fingerprint,
   decisionFingerprint = null,
+  watcherGeneration = null,
   progressClass = PROGRESS_CLASS_SELF_RESOLVING,
   operatorHold = false,
   hammerRouteActive = false,
@@ -886,6 +959,10 @@ export function recordNoProgressLaneRun(rootDir, identity, {
     : [];
   writeLedger(rootDir, identity, {
     schemaVersion: NO_PROGRESS_LANE_SCHEMA_VERSION,
+    ...(existing?.generationHistory ? { generationHistory: existing.generationHistory } : {}),
+    ...(existing?.generationResets ? { generationResets: existing.generationResets } : {}),
+    ...(watcherGeneration || existing?.watcherGeneration
+      ? { watcherGeneration: watcherGeneration || existing.watcherGeneration } : {}),
     repo: identity?.repo ?? null,
     prNumber: Number(identity?.prNumber),
     headSha: head,

@@ -565,11 +565,9 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
       return { row: 'R08-retry', action: 'hammer', actor: 'hammer', reason: 'retry-no-merge',
         deadlineKind: 'admission', queue: 'dispatch' };
     }
-    // Transient facts may recover without a push. R15's live snapshot predicates
-    // below still have to pass; unknown and terminal declines retain refresh.
-    if (!isTransientDaemonDecline(execution)) {
-      return refresh('snapshot-refresh', [`daemon:${text(execution.reason) || 'unknown'}`]);
-    }
+    // Unchanged declines retain refresh accounting. Changed live gate facts
+    // supersede transient evidence in reviseClosureNextAction before retrying.
+    return refresh('snapshot-refresh', [`daemon:${text(execution.reason) || 'unknown'}`]);
   }
   if (checks.state === 'SUCCESS' && pr.mergeable === 'MERGEABLE' && review.attestation !== 'unknown') {
     return { row: 'R15-daemon', action: 'daemon-merge', actor: 'daemon', reason: carried ? 'carried-clean-head' : 'clean-exact-head',

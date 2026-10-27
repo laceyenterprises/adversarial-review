@@ -109,7 +109,12 @@ additive table retains one row (`id INTEGER PRIMARY KEY CHECK(id=1)`) with
 `head TEXT NOT NULL`, `fingerprint TEXT NOT NULL` and `cycles INTEGER NOT NULL`.
 The SHA-256 fingerprint covers PR/check/review observation states and values,
 plus the same-head daemon decline reason and detail reasons, excluding pass
-generation, observation clock and provenance. Object key order is canonical.
+generation, observation clock and provenance. Object key order and unordered
+label, check-rollup, required-context and decline-detail arrays are canonical;
+all entry fields are retained, and other arrays keep their order. Both decline
+reason and detail reasons are excluded for executions from older heads. The
+canonical encoding change can restart an existing counter once at deployment;
+it does not clear the independent successful page receipt.
 
 Each settled snapshot-refresh outcome increments the unchanged head/fingerprint
 count, capped at three. Head or fact changes replace the row with count one;

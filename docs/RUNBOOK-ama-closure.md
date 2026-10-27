@@ -27,19 +27,25 @@ forced launch, ledger mutation or new smoke step is authorized by this change.
 ## Same-head daemon decline recovery (CLOSERREFRESHLOOP-01)
 
 The shared R15 clean-merge row retries explicit transient daemon declines on
-the same head once current checks, mergeability, clean review and attestation
-satisfy its existing predicates. Pending checks/mergeability, failed live-gate
-reads and unreadable identity evidence cannot permanently suppress that row.
-Changed PR/check/review observations supersede transient `daemonExecution`
-evidence. Unknown reasons, permanent declines and missing-attestation safety
-refusals retain their existing owners. Every attempt still revalidates live
+the same head after changed PR/check/review observations supersede the old
+`daemonExecution` evidence and current checks, mergeability, clean review and
+attestation satisfy its existing predicates. An unchanged decline selects
+`snapshot-refresh`, including when the stored gates are green. Wrapped progress
+observations clear the old decline inside their payload, preserving their
+envelope and any newly supplied execution result. Unreadable identity evidence
+is transient only with non-empty details consisting solely of attestation-chain
+or build-completion read failures; missing identity alone remains a safety
+refusal. Collection ordering alone is not changed gate evidence. Unknown
+reasons, permanent declines and missing-attestation safety refusals retain their
+existing owners. Every attempt still revalidates live
 exact-head review/identity/eligibility and acquires the existing merge lease.
 
 Three consecutive settled `snapshot-refresh` outcomes with unchanged facts at
 the same head emit `snapshot-refresh-no-progress`, naming the stored daemon
 decline, and page through the existing closure-wait path. The counter survives
-restart; queue submissions do not reset it. Changed facts, head movement or a
-settled non-refresh outcome reset the count. Delivery failure retries with the
+restart; queue submissions do not reset it. Label, check-rollup, required-context
+and decline-detail ordering is canonical; older-head decline details are excluded.
+Changed facts, head movement or a settled non-refresh outcome reset the count. Delivery failure retries with the
 existing receipt; successful pages dedupe per PR/head. No configuration, check
 or label is added. See the [storage contract](data-model/ama-closure-waits.md#snapshot-refresh-cycles-closerrefreshloop-01).
 

@@ -10,6 +10,7 @@ import { attemptDaemonCleanMerge } from '../src/ama/daemon-merge.mjs';
 import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { runDaemonCleanMergeAttempt } from '../src/daemon-clean-merge.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
+import { isTransientDaemonDecline } from '../src/ama/daemon-decline.mjs';
 
 const HEAD = 'a'.repeat(40), OLD = 'b'.repeat(40), OTHER = 'c'.repeat(40);
 const AT = '2026-01-01T00:00:00.000Z';
@@ -106,10 +107,10 @@ for (const result of [
   const shared = observeDaemonResult(pair(), result);
   owned(shared);
   assert.notEqual(shared.decision.action, 'operator-hold');
-  if (result.reason === 'lease-contended') assert.equal(shared.decision.actor, 'daemon');
+  if (result.reason === 'lease-contended') assert.equal(shared.decision.reason, 'snapshot-refresh');
   if (result.reason === 'merge-retry-budget-exhausted') assert.equal(shared.decision.actor, 'hammer');
-  if (result.reasons?.includes('head-attestation-chain-read-failed')) assert.equal(shared.decision.actor, 'daemon');
-  if (result.reasons?.includes('build-completion-read-failed')) assert.equal(shared.decision.actor, 'daemon');
+  if (result.reasons?.includes('head-attestation-chain-read-failed')) assert.equal(shared.decision.reason, 'snapshot-refresh');
+  if (result.reasons?.includes('build-completion-read-failed')) assert.equal(shared.decision.reason, 'snapshot-refresh');
   if (result.reasons?.includes('missing-produced-head-attestation')) assert.equal(shared.decision.actor, 'closure-recovery');
   if (result.reason === 'unrecognized-synthetic-reason') assert.equal(shared.decision.actor, 'watcher');
   if (result.reasons?.some(reason => ['branch-protection-missing-gate', 'duplicate-family-unresolved'].includes(reason))
@@ -118,6 +119,64 @@ for (const result of [
       requiredChecks: [{ name: 'unit', status: 'COMPLETED', conclusion: 'FAILURE' }] }));
     assert.equal(red.decision.actor, 'closure-recovery');
   }
+});
+
+test('identity recovery requires explicit read failures and never clears missing provenance', () => {
+  for (const reasons of [undefined, [], ['worker-identity-unresolved'], ['missing-produced-head-attestation'],
+    ['head-attestation-chain-read-failed', 'worker-identity-unresolved']]) {
+    const execution = { headSha: HEAD, reason: 'worker-identity-unresolved', reasons };
+    assert.equal(isTransientDaemonDecline(execution), false);
+    const refused = pair({ progress: { daemonExecution: execution } });
+    assert.equal(refused.decision.reason, 'safety-refusal');
+    assert.equal(observeDaemonGate(refused, gate()).decision.reason, 'safety-refusal');
+    assert.equal(isTransientDaemonDecline({ reason: 'gate-not-eligible', reasons }), false);
+  }
+  for (const reasons of [['head-attestation-chain-read-failed'], ['build-completion-read-failed'],
+    ['head-attestation-chain-read-failed', 'build-completion-read-failed']]) {
+    const execution = { headSha: HEAD, reason: 'worker-identity-unresolved', reasons };
+    assert.equal(isTransientDaemonDecline(execution), true);
+    const held = pair({ progress: { daemonExecution: execution } });
+    assert.equal(held.decision.reason, 'snapshot-refresh');
+    assert.equal(observeDaemonGate(held, gate()).decision.action, 'daemon-merge');
+    assert.equal(isTransientDaemonDecline({ ...execution, permanent: true }), false);
+  }
+});
+
+test('wrapped progress clears a superseded decline inside its payload and retains provenance', () => {
+  const held = observeDaemonResult(pair(), { reason: 'gate-read-failed' });
+  const execution = held.snapshot.observations.progress.value.daemonExecution;
+  for (const payload of [{ marker: 'retained' }, { marker: 'retained', daemonExecution: execution }]) {
+    const progress = { state: 'complete', value: payload, provenance: { sourceRef: 'wrapped-fixture' } };
+    const refreshed = reviseClosureNextAction(held, {
+      checks: { state: 'complete', value: { rollup: green, requiredContexts: ['unit'] } }, progress,
+    });
+    assert.equal(refreshed.decision.action, 'daemon-merge');
+    assert.equal(refreshed.snapshot.observations.progress.value.daemonExecution, null);
+    assert.equal(refreshed.snapshot.observations.progress.value.marker, 'retained');
+    assert.deepEqual(refreshed.snapshot.observations.progress.provenance, progress.provenance);
+    assert.equal(held.snapshot.observations.progress.value.daemonExecution, execution);
+  }
+  for (const progress of [
+    { state: 'complete', value: { daemonExecution: { headSha: HEAD, reason: 'synthetic-terminal' } } },
+    { state: 'error', value: null }, { state: 'unknown', value: null },
+  ]) {
+    const refreshed = reviseClosureNextAction(held, { checks: { rollup: green, requiredContexts: ['unit'] }, progress });
+    assert.deepEqual(refreshed.snapshot.observations.progress, progress);
+  }
+});
+
+test('reordered gate collections do not clear an unchanged transient decline', () => {
+  const labels = [{ name: 'first' }, { name: 'second' }];
+  const rollup = [...green, { context: 'legacy', state: 'SUCCESS' }];
+  const held = pair({ pr: { state: 'OPEN', headSha: HEAD, mergeable: 'MERGEABLE', labels },
+    checks: { rollup, requiredContexts: ['unit', 'legacy'] },
+    progress: { daemonExecution: { headSha: HEAD, reason: 'gate-read-failed' } } });
+  const reordered = reviseClosureNextAction(held, {
+    pr: { labels: [...labels].reverse(), mergeable: 'MERGEABLE', headSha: HEAD, state: 'OPEN' },
+    checks: { requiredContexts: ['legacy', 'unit'], rollup: [...rollup].reverse() },
+  });
+  assert.equal(reordered, held);
+  assert.equal(reordered.decision.reason, 'snapshot-refresh');
 });
 
 test('CLOSERREFRESHLOOP-01: a changed live gate supersedes a pending decline without changing the head', () => {
@@ -177,7 +236,10 @@ async function execute(initial, { live = gate(), result = { exitCode: 0 }, after
 }
 
 test('CLOSERREFRESHLOOP-01: recovered same-head decline reaches the leased executor with fresh checks', async () => {
-  const initial = pair({ progress: { daemonExecution: { headSha: HEAD, reason: 'pending-required-checks' } } });
+  const pending = observeDaemonGate(pair(), gate({ requiredChecks: [{ name: 'unit', status: 'IN_PROGRESS' }] }));
+  const declined = observeDaemonResult(pending, { reason: 'pending-required-checks' });
+  const initial = observeDaemonGate(declined, gate());
+  assert.equal(initial.decision.action, 'daemon-merge');
   const { shared, effects } = await execute(initial, { confirmed: true });
   assert.equal(shared.decision.action, 'done');
   assert.equal(effects.filter(effect => effect === 'acquire').length, 1);
@@ -269,8 +331,8 @@ test('daemon intent cannot steal a contended shared merge lease', async () => {
   const { shared, effects } = await execute(pair(), { lease: false });
   assert.ok(!effects.includes('merge'));
   assert.ok(!effects.includes('release'));
-  assert.equal(shared.decision.actor, 'daemon');
-  assert.equal(shared.decision.queue.intent, 'daemon');
+  assert.equal(shared.decision.actor, 'watcher');
+  assert.equal(shared.decision.reason, 'snapshot-refresh');
 });
 
 test('production adapter passes the same frozen decision and returns its live replacement', async t => {

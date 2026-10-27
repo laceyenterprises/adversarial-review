@@ -3,14 +3,9 @@ import { createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { observeClosureWait } from './closure-wait.mjs';
+import { closureGateFactsKey } from './closure-gate-facts.mjs';
 
 export const CLOSURE_REFRESH_CYCLE_LIMIT = 3;
-
-function stable(value) {
-  if (Array.isArray(value)) return value.map(stable);
-  if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])]));
-}
 
 // Count settled refresh outcomes, never queue submissions or re-observations of
 // in-flight work. This diagnostic evidence grants no merge/dispatch authority.
@@ -22,14 +17,15 @@ export async function observeClosureRefreshLoop({ rootDir, repo, prNumber, share
   if (!headSha || snapshot.head !== headSha) return result;
   const refresh = !result.dispatched && decision.reason === 'snapshot-refresh';
   const observations = snapshot.observations;
-  const execution = observations.progress?.value?.daemonExecution;
-  const declineReason = execution?.headSha === headSha ? execution.reason : null;
-  const facts = ['pr', 'checks', 'reviews'].map(name => ({
+  const storedExecution = observations.progress?.value?.daemonExecution;
+  const execution = storedExecution?.headSha === headSha ? storedExecution : null;
+  const declineReason = execution?.reason || null;
+  const facts = Object.fromEntries(['pr', 'checks', 'reviews'].map(name => [name, {
     state: observations[name]?.state, value: observations[name]?.value,
-  }));
-  const fingerprint = createHash('sha256').update(JSON.stringify(stable([
-    ...facts, declineReason, execution?.reasons || [],
-  ]))).digest('hex');
+  }]));
+  const fingerprint = createHash('sha256').update(closureGateFactsKey({
+    facts, declineReason, reasons: execution?.reasons || [],
+  })).digest('hex');
   const dir = join(rootDir, 'data', 'ama-closure-waits');
   mkdirSync(dir, { recursive: true });
   const key = createHash('sha256').update(`${repo}#${prNumber}`).digest('hex');

@@ -850,14 +850,19 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 ## MSM two-path merge authority (current)
 
 CLOSERREFRESHLOOP-01: explicit transient daemon declines can return to the
-existing R15 daemon row at the same head when the current clean-merge predicates
-pass. Changed gate evidence supersedes the transient execution observation;
-unknown/permanent declines retain refresh/recovery. Existing exact-head review,
-identity, eligibility and lease checks still authorize execution. Three settled
+existing R15 daemon row at the same head after changed gate evidence supersedes
+the transient execution observation and current clean-merge predicates pass.
+Unchanged declines select snapshot-refresh, even with green gates. Missing
+identity is a safety refusal unless non-empty details prove only transient
+identity read failures; unknown/permanent declines retain refresh/recovery.
+Existing exact-head review, identity, eligibility and lease checks still
+authorize execution. Three settled
 unchanged snapshot-refresh cycles persist a diagnostic blocker naming the decline
 and use the existing closure-wait page receipt. Submissions do not count as
 progress; new facts, head movement or a settled non-refresh outcome reset the
-counter. Owner states and merge authority are unchanged.
+counter. Reordered labels, checks, required contexts and detail reasons are
+unchanged facts; older-head decline details do not affect the fingerprint.
+Owner states and merge authority are unchanged.
 
 CLOSERLEASEDEAD-01: a launch-less pending closer lease transitions to terminal
 `abandoned-holder-dead` on a confirmed absent/reused same-host watcher PID

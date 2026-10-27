@@ -9,7 +9,7 @@ const TRANSIENT_DETAILS = new Set([
   'ci-not-green', 'pr-mergeability-unknown', 'labels-unavailable',
   'primary-change-read-failed', 'history-read-failed', 'ci-cost-read-failed',
   'ci-cost-check-failed', 'ci-cost-unauthorized',
-  'head-attestation-chain-read-failed', 'build-completion-read-failed', 'worker-identity-unresolved',
+  'head-attestation-chain-read-failed', 'build-completion-read-failed',
 ]);
 
 export function isTransientDaemonDecline(execution) {
@@ -20,7 +20,7 @@ export function isTransientDaemonDecline(execution) {
     return details.every(reason => TRANSIENT_REASONS.has(reason) || TRANSIENT_DETAILS.has(reason));
   }
   if (execution.reason === 'worker-identity-unresolved') {
-    return details.every(reason => ['worker-identity-unresolved', 'head-attestation-chain-read-failed',
+    return details.length > 0 && details.every(reason => ['head-attestation-chain-read-failed',
       'build-completion-read-failed'].includes(reason));
   }
   return ['not-eligible', 'gate-not-eligible'].includes(execution.reason)

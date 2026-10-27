@@ -53,11 +53,11 @@ function snap({ pr = {}, checks = {}, reviews = {}, remediation = {}, launches =
 
 const pick = decision => [decision.action, decision.actor, decision.reason];
 
-for (const reason of ['pending-required-checks', 'pending-mergeability', 'worker-identity-unresolved',
+for (const reason of ['pending-required-checks', 'pending-mergeability',
   'gate-read-failed', 'live-head-refresh-failed', 'live-head-unresolved']) {
-  test(`CLOSERREFRESHLOOP-01: recovered transient ${reason} retries at the same head`, () => {
+  test(`CLOSERREFRESHLOOP-01: unchanged transient ${reason} retains snapshot refresh`, () => {
     const progress = { daemonExecution: { headSha: HEAD, reason } };
-    assert.equal(nextAction(snap({ progress })).action, 'daemon-merge');
+    assert.equal(nextAction(snap({ progress })).reason, 'snapshot-refresh');
     for (const changed of [
       { checks: { conclusion: 'PENDING' } }, { checks: { conclusion: null } },
       { pr: { mergeable: 'UNKNOWN' } }, { reviews: { attestation: 'unknown' } },
@@ -76,6 +76,9 @@ for (const execution of [
   { reason: 'pending-required-checks', reasons: ['new-unknown-reason'] },
   { reason: 'gate-not-eligible', reasons: ['ci-not-green', 'branch-protection-missing-gate'] },
   { reason: 'worker-identity-unresolved', reasons: ['missing-produced-head-attestation'] },
+  { reason: 'worker-identity-unresolved' },
+  { reason: 'worker-identity-unresolved', reasons: [] },
+  { reason: 'worker-identity-unresolved', reasons: ['worker-identity-unresolved'] },
 ]) test(`CLOSERREFRESHLOOP-01: terminal or unknown ${JSON.stringify(execution)} retains its owner`, () => {
   const selected = nextAction(snap({ progress: { daemonExecution: { headSha: HEAD, ...execution } } }));
   assert.notEqual(selected.action, 'daemon-merge');

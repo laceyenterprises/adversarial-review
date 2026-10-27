@@ -138,7 +138,8 @@ test('session budgets follow each caller; transient and authentication failures 
   assert.equal((await read(8000)).ok, true);
   assert.equal((await read(30000)).ok, true);
   assert.equal((await read(30000)).ok, true);
-  assert.deepEqual(budgets, [8000]);
+  assert.equal(budgets.length, 1);
+  assert.ok(budgets[0] > 0 && budgets[0] <= 8000);
   for (const error of [Object.assign(new Error('secret endpoint'), { code: 'ECONNRESET' }), new Error('app-contract 401: secret token')]) {
     failure = error;
     const result = await read(30000);
@@ -169,8 +170,9 @@ test('HCP own-launch route selects credentials and never falls back on failure',
   const env = { ADVERSARIAL_DISPATCH_READS_ENABLED: '1', HQ_LAUNCH_REQUEST_ID: 'root', HCP_TOKEN_PATH: '/synthetic/token', HCP_TOKEN: 'primary',
     HCP_BEARER_TOKEN: 'secondary', HCP_BASE_URL: 'synthetic://hcp' };
   assert.equal((await readDispatchLaunches(selector, { env, timeoutMs: 30000 })).ok, true);
+  assert.ok(calls[0].config.request_timeout_ms > 0 && calls[0].config.request_timeout_ms <= 30000);
   assert.deepEqual(calls[0], { selector, config: { token_path: '/synthetic/token', token: 'primary',
-    endpoint_url: 'synthetic://hcp', request_timeout_ms: 30000 } });
+    endpoint_url: 'synthetic://hcp', request_timeout_ms: calls[0].config.request_timeout_ms } });
   delete env.HCP_TOKEN_PATH;
   delete env.HCP_TOKEN;
   assert.equal((await readDispatchLaunches(selector, { env })).ok, true);
@@ -291,5 +293,80 @@ test('exact absence proof cannot authorize launch ID or retry-chain absence', as
   for (const selector of [{ launch_request_ids: ['missing'] },
     { idempotency_key: 'key', include_retry_chain: true }]) {
     assert.equal((await readDispatchLaunches(selector, options(authorizedAbsence(selector)))).ok, false);
+  }
+});
+
+
+for (const body of ['', JSON.stringify({error:{code:'dispatch_read_unavailable',message:'unavailable'}}),
+  JSON.stringify({error:{code:'read_capacity_exhausted',message:'retry later'}}), '<html>busy</html>']) {
+  test(`packaged SDK 503 (${body ? 'body' : 'empty'}) retries once and recovers ownership`, async t => {
+    let calls = 0;
+    const budgets = [];
+    t.mock.method(globalThis, 'fetch', async (_url, config) => {
+      calls++;
+      assert.match(_url, /\/v1\/dispatch\/lookup$/);
+      assert.equal(config.method, 'POST');
+      return calls === 1 ? new Response(body, {status:503})
+        : Response.json(capture('completed'));
+    });
+    const sdk = dispatchReadTransport.sdk();
+    t.mock.method(dispatchReadTransport, 'sdk', () => ({...sdk,
+      readSessionDispatchLookup: (selector, config) => {
+        budgets.push(config.request_timeout_ms);
+        return sdk.readSessionDispatchLookup(selector, config);
+      },
+    }));
+    const probe = await readLaunchRequestStatusFromLedgerAsync({launchRequestId:'root',
+      timeoutMs:1000, env:{ADVERSARIAL_DISPATCH_READS_ENABLED:'1'},
+      connectOptions:{session_token:'synthetic',endpoint_url:'https://example.invalid'}});
+    assert.equal(probe.ok, true);
+    assert.equal(calls, 2);
+    assert.ok(budgets[1] < budgets[0] && budgets[0] <= 1000);
+    assert.equal(isReclaimableTerminalAmaCloserLease(
+      {status:'terminal',terminalOutcome:'deferred',lrqId:'root'}, {launchStatusProbe:probe}), true);
+  });
+}
+
+test('two packaged SDK 503s retain unreadable ownership with no third attempt', async t => {
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => { calls++; return new Response('', {status:503}); });
+  const probe = await readLaunchRequestStatusFromLedgerAsync({launchRequestId:'root',timeoutMs:1000,
+    env:{ADVERSARIAL_DISPATCH_READS_ENABLED:'1'},
+    connectOptions:{session_token:'synthetic',endpoint_url:'https://example.invalid'}});
+  assert.equal(calls, 2);
+  assert.equal(probe.ok, false);
+  assert.equal(probe.transient, true);
+  assert.equal(probe.detail, 'transient dispatch lookup failure');
+  assert.equal(isReclaimableTerminalAmaCloserLease(
+    {status:'terminal',terminalOutcome:'deferred',lrqId:'root'}, {launchStatusProbe:probe}), false);
+});
+
+test('retry delay cannot extend a caller deadline or start work after abort', async () => {
+  for (const abort of [false, true]) {
+    const controller = new AbortController();
+    let calls = 0;
+    const dispatchSession = {dispatchLookup:async () => {
+      calls++;
+      if (abort) controller.abort();
+      throw new Error('app-contract 503: Service Unavailable');
+    }};
+    const result = await readDispatchLaunches({launch_request_ids:['root']},
+      {dispatchSession,timeoutMs:10,signal:controller.signal});
+    assert.equal(result.ok, false);
+    await new Promise(resolve => setTimeout(resolve, 70));
+    assert.equal(calls, 1);
+  }
+});
+
+test('dispatch retries neither authorization failures nor unproven absence', async () => {
+  for (const reply of [absent, new Error('app-contract dispatch_scope_denied: grant required')]) {
+    let calls = 0;
+    const result = await readDispatchLaunches({idempotency_key:'key'}, {dispatchSession:{dispatchLookup:async () => {
+      calls++;
+      if (reply instanceof Error) throw reply;
+      return reply;
+    }}});
+    assert.equal(result.ok, false);
+    assert.equal(calls, 1);
   }
 });

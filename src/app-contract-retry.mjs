@@ -5,6 +5,8 @@ const TRANSIENT_APP_CONTRACT_CODES = new Set([
   'launch_refused_memory_pressure', 'launch-refused-memory-pressure',
   'lease_lost', 'lease-lost', 'memory_pressure', 'memory-pressure',
   'service_unavailable', 'service-unavailable',
+  'dispatch_read_unavailable', 'dispatch-read-unavailable',
+  'read_capacity_exhausted', 'read-capacity-exhausted',
   'supervisor_restart', 'supervisor-restart',
 ]);
 
@@ -22,7 +24,10 @@ function isTransientAppContractError(error) {
 
   const message = String(error?.message || '');
   if (/timeout|timed out|fetch failed|network|connection (?:refused|reset|timed out)/i.test(message)) return true;
-  const statusMatch = message.match(/^app-contract (\d{3})\b/);
+  // SDK 0.9 reports status in bad_response when a proxy returns HTML/text.
+  // Empty bodies use the numeric form; JSON errors use the producer code.
+  const statusMatch = message.match(/^app-contract (\d{3})\b/)
+    ?? message.match(/^app-contract bad_response: non-JSON response \(status (\d{3})\):/);
   if (statusMatch) {
     const messageStatus = Number(statusMatch[1]);
     return (

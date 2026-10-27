@@ -5,6 +5,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
+test('invalid merge observations retain a useful bounded diagnostic', () => {
+  const result = spawnSync(process.execPath,
+    [new URL('../bin/record-merge-signal.mjs', import.meta.url).pathname, '/tmp/hq', 'invalid', 'invalid', 'squash'],
+    {encoding:'utf8',timeout:5000});
+  assert.ifError(result.error);
+  assert.equal(result.status,1);
+  assert.match(result.stderr,/merge completion capture unavailable.*invalid merge observation/);
+});
+
 test('hammer merge capture forwards launch provenance through the SDK and honors HQ_BIN', t => {
   const dir = mkdtempSync(join(tmpdir(), 'merge-signal-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

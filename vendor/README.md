@@ -49,8 +49,8 @@ reach the reviewed base before a later upgrade can use the same-producer rule.
 ## Coordinated review-observation candidate 0.10.0 (DOG-11)
 
 The coordinated producer PR #9489 refreshed its 0.10.0 candidate at revision
-`dac9b8690234648346b052ab16f5ee77bee5c191`. The unchanged archive copied here has
-SHA-256 `6644ab93a1233ad731a58ac2aeec1dd0d5437994fbb24bf0574fb0df22f2cfb8`.
+`5ed3354755ce7526e8a3a9db601660a7f3100b08`. The unchanged archive copied here has
+SHA-256 `3c85183c497351739181b7ccc37f768d3c08c85cc36f2f2bf8f441b05f4ec83a`.
 The lockfile and `recorded.dispatchLookupSdk` provenance pin these exact bytes.
 This remains a coordinated draft dependency; it does not claim merged release
 or runtime activation. Historical release archives and Argus enrollment remain

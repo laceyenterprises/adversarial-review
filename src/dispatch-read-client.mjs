@@ -245,7 +245,8 @@ function observationFailure(error) {
 function observationRows(rows, observation) {
   if (!rows.length && ['workers','sessions','provenance'].includes(observation)) return {ok:false,reason:'worker-observation-inconclusive',detail:'authorized observation returned no rows'};
   const identity = {workers:'run_id',sessions:'session_id',provenance:'launch_request_id',completions:'completion_id',dag_runs:'run_id',execution_verdicts:'verdictId',hardening_contracts:'contract_id',hardening_records:'record_id',hardening_exposure:'contract_id'}[observation];
-  if (new Set(rows.map(row => row[identity])).size !== rows.length) return {ok:false,reason:'worker-observation-unavailable'};
+  if (rows.some(row => typeof row?.[identity] !== 'string' || !row[identity].trim())
+    || new Set(rows.map(row => row[identity])).size !== rows.length) return {ok:false,reason:'worker-observation-unavailable'};
   return {ok:true,rows,row:rows[0],target:{backend:'app-contract',source:'app-sdk'}};
 }
 function checkedObservation(reply, selector, offset) {

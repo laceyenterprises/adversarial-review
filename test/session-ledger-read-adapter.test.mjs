@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readWorkerObservation} from '../src/dispatch-read-client.mjs';
+import {readWorkerObservation, dispatchReadTransport} from '../src/dispatch-read-client.mjs';
 import {readBuildCompletionSignalForPr,readBuildCompletionSignalForPrAsync,
   readBuildCompletionProducerEvidence,readBuildCompletionProducerEvidenceAsync,readActiveDagRunsForPlan,readActiveDagRunsForPlanAsync,
   readExecutionVerdictsFromLedgerAsync} from '../src/session-ledger-read-adapter.mjs';
@@ -8,6 +8,21 @@ import {readBuildCompletionSignalForPr,readBuildCompletionSignalForPrAsync,
 const page = (observation,items,more={}) => ({schema_version:1,observation,
   status:items.length?'found':'not_found',complete:true,next_offset:null,
   scope_complete:false,mutation_authority:false,items,...more});
+
+test('aggregate identity guard rejects a single malformed row independently of SDK validation', async t => {
+  const sdk = dispatchReadTransport.sdk;
+  t.after(() => { dispatchReadTransport.sdk = sdk; });
+  dispatchReadTransport.sdk = () => ({...sdk(), readWorkerObservations: reply => ({available:true,items:reply.items})});
+  for (const observation of ['workers','sessions','provenance','completions','dag_runs',
+    'execution_verdicts','hardening_contracts','hardening_records','hardening_exposure']) {
+    for (const row of [{}, null]) {
+      const result = await readWorkerObservation({observation}, {
+        dispatchSession:{dispatchLookup:async () => page(observation,[row])},
+      });
+      assert.equal(result.ok,false,observation);
+    }
+  }
+});
 
 test('production consumers link with the retained ledger compatibility exports', async()=>{
   for (const path of ['../src/watcher.mjs', '../src/follow-up-merge-agent.mjs',

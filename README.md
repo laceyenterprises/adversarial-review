@@ -3585,3 +3585,11 @@ of this validation, and no new smoke step, config key or CI check is added.
 REBASECURRENCY-01: conflict-owner-review-route reads reviews.db in a read-only transaction without schema migration, retaining better-sqlite3 defaults of deferred BEGIN and a 5000ms busy timeout. Repository and commit SHA comparisons ignore case; the result preserves the requested head spelling. A current-head reviewing row (or missing reviewer head while reviewing) defers; any delivered review verdict or legacy posted row selects the existing AMA watcher route. A PR without delivered review retains PR-update. Missing DB, schema or reader is unavailable evidence, never unreviewed. This is routing evidence only: the watcher owns dispatch selection, rate caps, hammer limits and leases. Authenticated hammer rebase provenance continues to preserve review currency; the proofs and merge safety core are unchanged. Offline synthetic fixtures certify routing and currency; no new smoke command or live verification action.
 
 `node bin/conflict-owner-review-route.mjs --root-dir <review-service-root> --repo <owner/name> --pr <number> --head-sha <sha>` returns `review-in-flight`, `hammer`, or `pr-update`, bound to the requested head. Failure exits nonzero with the unavailable notice and underlying argument or database error on stderr, and emits no routing JSON. The caller requests `bin/watcher-wake.mjs` for the hammer route; this read API does not dispatch or write review state. Deploy this reader before its worker-pool caller.
+
+### Findings-batch dispatch budget (FINDINGSPROVLEAK-01)
+
+Findings preparation and publication each use the shared load-aware timeout with
+900 seconds nominal and no shorter helper ceiling. Dispatch provisions before
+returning its receipt; measured provisioning up to 496 seconds must survive the
+caller's budget. The existing batch idempotency key, publication fence and
+settlement contract remain unchanged. Tests use synthetic dispatch receipts.

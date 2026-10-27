@@ -556,7 +556,8 @@ async function publicationFixture(t, { advice = false } = {}) {
   const { runFindingBatches } = await import('../src/findings-batch.mjs');
   const env = { HQ_ROOT: f.rootDir };
   const dispatches = [];
-  await runFindingBatches({ ...f, env, day: '2026-01-02', execFileImpl: async (_bin, args) => {
+  await runFindingBatches({ ...f, env, day: '2026-01-02', execFileImpl: async (_bin, args, options) => {
+    assert.ok(options.timeout >= 900_000);
     dispatches.push(args);
     return { stdout: '{"launchRequestId":"fixture-initial"}' };
   } });
@@ -587,12 +588,15 @@ async function publicationFixture(t, { advice = false } = {}) {
       assert.equal(args.timeoutMs, 15_000);
       return { ok: true, rows: launches };
     },
-    execFileImpl: async (bin, args) => {
+    execFileImpl: async (bin, args, options) => {
       assert.equal(bin, 'hq');
       if (args[1] === 'status') {
         assert.deepEqual(args, ['dispatch', 'status', batch.launch_id, '--json', '--root', f.rootDir]);
         return { stdout: JSON.stringify(status) };
       }
+      // Model provisioning that takes 496 seconds without a real wall-clock
+      // wait. Both submissions must survive the former fixed 60-second kill.
+      assert.ok(options.timeout >= 900_000);
       dispatches.push(args);
       launches.push({ ...launch, launch_request_id: 'fixture-publish', status: 'running' });
       return { stdout: '{"launchRequestId":"fixture-publish"}' };
@@ -690,9 +694,9 @@ test('FINDINGSSHAPE-01 valid unmerged publication clears stale errors without se
 test('FINDINGSSHAPE-01 lost publisher receipts and terminal launches never dispatch a second publisher', async t => {
   for (const enqueued of [false, true]) await t.test(`enqueued=${enqueued}`, async t => {
     const f = await publicationFixture(t);
-    await f.run({ execFileImpl: async (bin, args) => {
-      if (args[1] === 'status') return f.options.execFileImpl(bin, args);
-      if (enqueued) await f.options.execFileImpl(bin, args);
+    await f.run({ execFileImpl: async (bin, args, options) => {
+      if (args[1] === 'status') return f.options.execFileImpl(bin, args, options);
+      if (enqueued) await f.options.execFileImpl(bin, args, options);
       throw Error('lost publish receipt');
     } });
     if (enqueued) f.launches[1].status = 'failed';

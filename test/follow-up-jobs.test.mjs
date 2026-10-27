@@ -8,6 +8,26 @@ import { followUpJobFilePrefix } from '../src/follow-up-job-names.mjs';
 import Database from 'better-sqlite3';
 import { openReviewStateDb } from '../src/review-state.mjs';
 import { activeRemediationStopDecision } from '../src/follow-up-lifecycle.mjs';
+
+test('LABELSTOPOWNER-01: repeating a terminal stop preserves its own queue record and spent budget', t => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'terminal-same-path-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const job = buildFollowUpJob({ repo: 'fixture/repo', prNumber: 42, reviewerModel: 'codex',
+    reviewBody: '## Verdict\nRequest changes\n' });
+  job.status = 'stopped';
+  job.remediationWorker = { state: 'completed' };
+  job.remediationPlan.currentRound = 3;
+  job.remediationPlan.maxRounds = 3;
+  job.remediationPlan.stop = { code: 'max-rounds-reached' };
+  const jobPath = path.join(rootDir, 'data/follow-up-jobs/stopped', `${job.jobId}.json`);
+  writeFollowUpJob(jobPath, job);
+  const before = readFileSync(jobPath, 'utf8');
+  const stopped = requeueFollowUpJobForNextRound({ rootDir, jobPath });
+  assert.equal(stopped.alreadyTerminal, true);
+  assert.equal(stopped.job.status, 'stopped');
+  assert.equal(readFileSync(jobPath, 'utf8'), before);
+  assert.equal(summarizePRRemediationLedger(rootDir, job).completedRoundsForPR, 3);
+});
 import { acquireAmaCloserLease, readAmaCloserLease, rekeyAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { readAmaCloserDispatchRecord, updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import {

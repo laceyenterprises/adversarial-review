@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { clearNoProgressLane } from './watcher-no-progress-lane.mjs';
 import { requestWatcherWake } from './watcher-wake.mjs';
+import { OPERATOR_LABEL_GATES } from './ama/operator-label-gates.mjs';
 
 export const OPERATOR_WAKE_LABELS = [
   'merge-agent-requested',
@@ -11,6 +12,7 @@ export const OPERATOR_WAKE_LABELS = [
   'retrigger-remediation',
   'address-all-findings',
   'operator-approved',
+  ...OPERATOR_LABEL_GATES.map(gate => gate.label),
 ];
 
 // Scoped to one discovery pass. Cache promises, including failures, so retrigger

@@ -1,9 +1,10 @@
+import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildFollowUpJob, readFollowUpJob, requeueFollowUpJobForNextRound, writeFollowUpJob } from '../src/follow-up-jobs.mjs';
+import { buildFollowUpJob, claimNextFollowUpJob, readFollowUpJob, requeueFollowUpJobForNextRound, writeFollowUpJob } from '../src/follow-up-jobs.mjs';
 import { fetchHammerHeadRange, readCompletedRemediationRounds } from '../src/ama/hammer-head-validation.mjs';
 import { findLatestFollowUpJob } from '../src/operator-retrigger-helpers.mjs';
 
@@ -14,6 +15,10 @@ import {
   guardRereviewCiBeforeReviewer,
   shouldRecheckCiBlockedRereview,
 } from '../src/reviewer-ci-admission.mjs';
+import { readFollowUpOperatorLabel } from '../src/follow-up-operator-label.mjs';
+import { addCiRegressionFinding } from '../src/ci-regression-finding.mjs';
+import { classifyOperatorGatedFindings } from '../src/ama/operator-label-gates.mjs';
+import { parseBlockingFindingsSection } from '../src/kernel/review-findings.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from '../src/review-statuses.mjs';
 
 function silentLog() {
@@ -22,6 +27,19 @@ function silentLog() {
     warn() {},
   };
 }
+
+test('LABELSTOPOWNER-01: CI findings ignore quoted headings and preserve prior findings across rounds', () => {
+  const body = '```markdown\n## Blocking issues\n- None.\n```\n\n## Blocking issue\n'
+    + '- **Original finding**\n  - **File:** fixture.md\n  - **Problem:** Original problem.\n  - **Why it matters:** Preserve this finding.\n'
+    + '  - **Recommended fix:** Repair the original issue.\n\n## Verdict\nRequest changes\n';
+  const once = addCiRegressionFinding(body, 'link-check=FAILURE');
+  const twice = addCiRegressionFinding(once, 'other-check=FAILURE');
+  const findings = parseBlockingFindingsSection(twice);
+  assert.equal(findings.length, 2);
+  assert.ok(findings.some(finding => finding.title === 'Original finding'));
+  assert.ok(findings.some(finding => /other-check=FAILURE/.test(finding.problem)));
+  assert.doesNotMatch(twice, /link-check=FAILURE/);
+});
 
 test('consecutive failed-CI admissions retain a persisted no-progress hammer hand-off', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ci-admission-no-progress-'));
@@ -41,6 +59,7 @@ test('consecutive failed-CI admissions retain a persisted no-progress hammer han
   const args = {
     rootDir, repo, prNumber, passKind: 'rereview', reviewerHeadSha: 'head-red',
     log: silentLog(), now: () => '2026-10-10T18:00:00.000Z',
+    deliverAlertImpl: async () => {},
     inspectCiImpl: async () => ({ state: 'failed', headSha: 'head-red', failedChecks: [{ name: 'repo-guards', state: 'FAILURE' }] }),
   };
   const first = await guardRereviewCiBeforeReviewer(args);
@@ -262,7 +281,7 @@ test('guardRereviewCiBeforeReviewer requeues latest follow-up job on failed exte
   assert.match(requeueArgs.reason, /Ruff lint and format baseline=FAILURE/);
 });
 
-test('guardRereviewCiBeforeReviewer refuses failed-CI rereview when there is no job to requeue', async () => {
+test('guardRereviewCiBeforeReviewer creates remediation when there is no job to requeue', async () => {
   const result = await guardRereviewCiBeforeReviewer({
     rootDir: '/tmp/adversarial-review-fixture',
     repo: 'laceyenterprises/agent-os',
@@ -276,19 +295,27 @@ test('guardRereviewCiBeforeReviewer refuses failed-CI rereview when there is no 
       failedChecks: [{ name: 'repo-guards', state: 'FAILURE' }],
     }),
     latestJobFinder: () => null,
+    summarizeLedgerImpl: () => ({ completedRoundsForPR: 1, latestMaxRounds: 3 }),
+    createJobImpl: args => {
+      assert.equal(args.revisionRef, 'head-red');
+      assert.equal(args.priorCompletedRounds, 1);
+      assert.equal(args.maxRemediationRounds, 3);
+      assert.match(args.reviewBody, /repo-guards=FAILURE/);
+      return { job: { status: 'pending' }, jobPath: '/fixture/pending.json' };
+    },
   });
 
   assert.equal(result.proceed, false);
-  assert.equal(result.reason, 'ci-regression-no-job');
-  assert.equal(result.parkReview, true);
-  assert.equal(result.parkReviewStatus, REREVIEW_CI_BLOCKED_STATUS);
-  assert.match(result.failureMessage, /^\[ci-regression-no-job\]/);
-  assert.match(result.failureMessage, /repo-guards=FAILURE/);
+  assert.equal(result.reason, 'ci-regression-created');
+  assert.equal(result.job.status, 'pending');
 });
 
-test('guardRereviewCiBeforeReviewer treats a vanished stopped job as nothing to requeue', async () => {
+test('guardRereviewCiBeforeReviewer pages a vanished stopped job instead of waiving its stop', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ci-vanished-job-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const pages = [];
   const result = await guardRereviewCiBeforeReviewer({
-    rootDir: '/tmp/adversarial-review-fixture',
+    rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 6946,
     passKind: 'rereview',
@@ -304,11 +331,14 @@ test('guardRereviewCiBeforeReviewer treats a vanished stopped job as nothing to 
       job: { status: 'stopped' },
     }),
     requeueImpl: () => { throw Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' }); },
+    createJobImpl: () => assert.fail('a racing deletion cannot waive the observed stop'),
+    deliverAlertImpl: async body => pages.push(body),
   });
 
   assert.equal(result.proceed, false);
-  assert.equal(result.reason, 'ci-regression-no-job');
-  assert.equal(result.parkReview, true);
+  assert.equal(result.reason, 'ci-regression-requeue-failed');
+  assert.equal(result.needsOperator, true);
+  assert.equal(pages.length, 1);
   assert.equal(result.error, undefined);
 });
 
@@ -435,4 +465,150 @@ test('CIBLOCKINFRA-01 infrastructure red never requeues remediation or routes a 
   assert.equal(result.proceed, false);
   assert.equal(result.reason, 'ci-infrastructure');
   assert.equal(result.hammerOwner, undefined);
+});
+
+function labelStopFixture(t, { stopCode = 'operator-label-required:live-pack-edit-approved', round = 1, cap = 3 } = {}) {
+  const rootDir = mkdtempSync(join(tmpdir(), 'label-stop-owner-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const repo = 'fixture/repo', prNumber = 42, headSha = 'b'.repeat(40);
+  const job = buildFollowUpJob({ repo, prNumber, branch: 'fixture/topic', reviewerModel: 'codex', revisionRef: 'a'.repeat(40),
+    reviewBody: '## Blocking issues\n- **Guarded change**\n  - **File:** fixture.md\n  - **Problem:** operator-label-required:live-pack-edit-approved\n\n## Verdict\nRequest changes\n' });
+  job.status = 'stopped';
+  job.remediationPlan.currentRound = round;
+  job.remediationPlan.maxRounds = cap;
+  job.remediationPlan.stop = { code: stopCode };
+  const dir = join(rootDir, 'data/follow-up-jobs/stopped');
+  mkdirSync(dir, { recursive: true });
+  const jobPath = join(dir, `${job.jobId}.json`);
+  writeFollowUpJob(jobPath, job);
+  const evidence = { repo, prNumber, label: 'live-pack-edit-approved', headSha, eventId: 'event-label-7', actor: 'fixture-operator',
+    appliedAt: '2026-01-01T10:00:00Z', observedAt: '2026-01-01T11:00:00Z' };
+  const pages = [], logs = [];
+  const args = { rootDir, repo, prNumber, passKind: 'rereview', reviewerHeadSha: headSha,
+    inspectCiImpl: async () => ({ state: 'failed', headSha, failedChecks: [{ name: 'link-check', state: 'FAILURE' }] }),
+    readOperatorLabelImpl: () => evidence, deliverAlertImpl: async (body, options) => { pages.push({ body, options }); },
+    log: { warn: message => logs.push(message) } };
+  return { rootDir, jobPath, evidence, pages, logs, args };
+}
+
+test('LABELSTOPOWNER-01: a satisfied label queues CI remediation at the newer head with event evidence', async t => {
+  const f = labelStopFixture(t);
+  let reads = 0;
+  const result = await guardRereviewCiBeforeReviewer({ ...f.args, readOperatorLabelImpl: identity => {
+    reads++;
+    assert.deepEqual(identity, { repo: 'fixture/repo', prNumber: 42, label: 'live-pack-edit-approved' });
+    return f.evidence;
+  } });
+  assert.equal(result.proceed, false);
+  assert.equal(result.reason, 'ci-regression-requeued');
+  assert.equal(reads, 1);
+  const queued = readFollowUpJob(result.jobPath);
+  assert.equal(queued.revisionRef, f.args.reviewerHeadSha);
+  assert.equal(queued.remediationPlan.currentRound, 1);
+  assert.equal(queued.remediationPlan.maxRounds, 3);
+  assert.equal(queued.remediationPlan.nextAction.round, 2);
+  assert.deepEqual(queued.remediationPlan.operatorLabelSatisfactions.at(-1), f.evidence);
+  assert.equal(queued.remediationPlan.stop, null);
+  assert.equal(classifyOperatorGatedFindings(queued.reviewBody).allGated, false, 'consume must reach actionable CI repair instead of immediately stopping again');
+  assert.equal(classifyOperatorGatedFindings(queued.reviewBody).gated.length, 1, 'the original guarded finding remains visible');
+  assert.ok(parseBlockingFindingsSection(queued.reviewBody).some(finding => /link-check=FAILURE/.test(finding.problem)));
+  assert.equal(f.pages.length, 0);
+  const claimed = claimNextFollowUpJob({ rootDir: f.rootDir, workerType: 'fixture-remediator', launcherPid: process.pid });
+  assert.equal(claimed.job.remediationPlan.currentRound, 2);
+  assert.deepEqual(readFollowUpJob(claimed.jobPath).remediationPlan.operatorLabelSatisfactions, [f.evidence],
+    'claiming a round must retain the approval event after nextAction changes');
+});
+
+for (const scenario of ['absent-label', 'unreadable-label', 'terminal-stop', 'spent-budget', 'moved-head']) {
+  test(`LABELSTOPOWNER-01: ${scenario} pages the named ownerless blocker and never admits a reviewer`, async t => {
+    const f = labelStopFixture(t, scenario === 'terminal-stop' ? { stopCode: 'abandoned', round: 3, cap: 3 }
+      : scenario === 'spent-budget' ? { round: 3, cap: 3 } : {});
+    const before = readFileSync(f.jobPath, 'utf8');
+    const args = { ...f.args, readOperatorLabelImpl: () => {
+      if (scenario === 'unreadable-label') throw new Error('label read unavailable');
+      if (scenario === 'absent-label') return null;
+      return scenario === 'moved-head' ? { ...f.evidence, headSha: 'c'.repeat(40) } : f.evidence;
+    } };
+    const result = await guardRereviewCiBeforeReviewer(args);
+    assert.equal(result.proceed, false);
+    assert.equal(result.needsOperator, true);
+    assert.match(result.closureBlocker, /ci-regression-ownerless/);
+    if (scenario === 'spent-budget') assert.match(result.closureBlocker, /round-budget-exhausted \(3\/3\)/);
+    assert.equal(f.pages.length, 1);
+    assert.equal(f.pages[0].options.severity, 'SEV1');
+    assert.match(f.pages[0].body, scenario === 'terminal-stop' ? /stopped:abandoned/ : /live-pack-edit-approved/);
+    assert.ok(f.logs.some(message => message.includes('ama.closure_blocker')));
+    await guardRereviewCiBeforeReviewer(args);
+    assert.equal(f.pages.length, 1, 'durable closure wait deduplicates repeat polls');
+    if (scenario !== 'spent-budget') assert.equal(readFileSync(f.jobPath, 'utf8'), before);
+  });
+}
+
+test('LABELSTOPOWNER-01: failed page transport retries the existing closure wait', async t => {
+  const f = labelStopFixture(t);
+  const failed = await guardRereviewCiBeforeReviewer({ ...f.args, readOperatorLabelImpl: () => null,
+    deliverAlertImpl: async () => { throw new Error('fixture transport unavailable'); } });
+  assert.match(failed.page.error, /transport unavailable/);
+  await guardRereviewCiBeforeReviewer({ ...f.args, readOperatorLabelImpl: () => null });
+  assert.equal(f.pages.length, 1);
+});
+
+test('LABELSTOPOWNER-01: fresh current-head CI finding carries the existing PR round budget', async t => {
+  const f = labelStopFixture(t);
+  rmSync(f.jobPath);
+  const result = await guardRereviewCiBeforeReviewer({ ...f.args,
+    summarizeLedgerImpl: () => ({ completedRoundsForPR: 2, latestMaxRounds: 3, latestRiskClass: 'medium' }),
+    readPRHeadImpl: () => ({ branch: 'fixture/topic', builderTag: '[codex]' }) });
+  assert.equal(result.reason, 'ci-regression-created');
+  assert.equal(result.job.revisionRef, f.args.reviewerHeadSha);
+  assert.equal(result.job.remediationPlan.currentRound, 2);
+  assert.equal(result.job.remediationPlan.maxRounds, 3);
+  assert.ok(parseBlockingFindingsSection(result.job.reviewBody).some(finding => /link-check=FAILURE/.test(finding.problem)));
+  assert.equal(f.pages.length, 0);
+});
+
+test('LABELSTOPOWNER-01: a missing job cannot reset an exhausted PR-wide budget', async t => {
+  const f = labelStopFixture(t);
+  rmSync(f.jobPath);
+  const result = await guardRereviewCiBeforeReviewer({ ...f.args,
+    summarizeLedgerImpl: () => ({ completedRoundsForPR: 3, latestMaxRounds: 3 }),
+    createJobImpl: () => assert.fail('budget cannot be reset by a fresh job') });
+  assert.equal(result.needsOperator, true);
+  assert.match(result.closureBlocker, /round-budget-exhausted \(3\/3\)/);
+  assert.equal(f.pages.length, 1);
+});
+
+test('LABELSTOPOWNER-01: an archived label stop retains its approval requirement and budget', async t => {
+  const f = labelStopFixture(t);
+  const archive = join(f.rootDir, 'data/follow-up-jobs/stopped-archived/2026-01');
+  mkdirSync(archive, { recursive: true });
+  const archivePath = join(archive, f.jobPath.split('/').at(-1));
+  renameSync(f.jobPath, archivePath);
+  const args = { ...f.args, createJobImpl: () => assert.fail('archive cannot waive a label stop') };
+  const absent = await guardRereviewCiBeforeReviewer({ ...args, readOperatorLabelImpl: () => null });
+  assert.equal(absent.needsOperator, true);
+  assert.match(absent.closureBlocker, /operator-label-required:live-pack-edit-approved/);
+  assert.equal(readFollowUpJob(archivePath).status, 'stopped');
+  const satisfied = await guardRereviewCiBeforeReviewer(args);
+  assert.equal(satisfied.reason, 'ci-regression-requeued');
+  assert.equal(satisfied.job.revisionRef, f.args.reviewerHeadSha);
+  assert.equal(satisfied.job.remediationPlan.currentRound, 1);
+  assert.equal(satisfied.job.remediationPlan.maxRounds, 3);
+  assert.equal(existsSync(archivePath), false);
+});
+
+for (const present of [true, false]) test(`LABELSTOPOWNER-01: live label reader requires current presence (${present}) and records the latest event`, () => {
+  const calls = [];
+  const result = readFollowUpOperatorLabel({ repo: 'fixture/repo', prNumber: 42, label: 'live-pack-edit-approved' }, {
+    execFileSyncImpl: (_cmd, args) => {
+      calls.push(args);
+      return JSON.stringify(args[1].includes('/events?') ? [[
+        { event: 'labeled', id: 1, label: { name: 'live-pack-edit-approved' }, actor: { login: 'fixture-operator' }, created_at: '2026-01-01T10:00:00Z' },
+        { event: 'labeled', id: 7, label: { name: 'live-pack-edit-approved' }, actor: { login: 'fixture-operator' }, created_at: '2026-01-01T11:00:00Z' },
+      ]] : { head: { sha: 'current-head' }, labels: present ? [{ name: 'live-pack-edit-approved' }] : [] });
+    },
+  });
+  assert.equal(calls.length, 2);
+  if (!present) assert.equal(result, null);
+  else { assert.equal(result.eventId, '7'); assert.equal(result.headSha, 'current-head'); }
 });

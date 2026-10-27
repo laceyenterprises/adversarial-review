@@ -1,6 +1,28 @@
 # Data Model - Follow-Up Remediation Jobs
 
 
+## Operator-label requeue and CI remediation (LABELSTOPOWNER-01)
+
+LABELSTOPOWNER-01: a follow-up stopped as
+`operator-label-required:<label>` can requeue only after a live label read
+confirms presence and an attributable application event. The round plan durably retains
+`operatorLabelSatisfactions[]` (label, event ID, actor, application/observation time,
+repo, PR and observed head). CLI requeues use that observed head when no revision
+is supplied; a mismatched supplied head refuses requeue. Existing approval labels
+also enter the operator wake path. Re-review still requires green external CI.
+Failed external CI queues remediation at the current head with an actionable CI
+finding, preserving prior findings and round accounting. When no job remains,
+a fresh job seeds its count and cap from the existing PR-wide remediation ledger.
+The newest archived stop is recovered when no queue record remains; archival
+does not waive its label requirement or budget.
+A terminal stop, missing/unreadable label or spent budget emits
+`ama.closure_blocker` with `ci-regression-ownerless`, the stop state and failure
+reason, and immediately pages through the existing closure-wait path. Its
+`ci-regression-ownerless` receipt deduplicates per PR/head; failed delivery stays
+retryable. Repeating a stop on its own terminal path preserves the record.
+Completed final-round hammer handoffs keep their existing provenance and owner.
+No check, label, config key or budget is added.
+
 ## Actions infrastructure waits (CIBLOCKINFRA-01)
 
 The shared `src/ci-infrastructure.mjs` classifier requires failed jobs with

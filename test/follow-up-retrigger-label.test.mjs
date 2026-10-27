@@ -1,3 +1,4 @@
+import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, readdirSync } from 'node:fs';
@@ -6,6 +7,7 @@ import path from 'node:path';
 
 import {
   claimNextFollowUpJob,
+  buildFollowUpJob,
   createFollowUpJob,
   readFollowUpJob,
   requeueFollowUpJobForNextRound,
@@ -19,6 +21,41 @@ import {
 } from '../src/follow-up-retrigger-label.mjs';
 
 const COMMENT_ONLY_REVIEW_BODY = '## Summary\nsummary\n\n## Verdict\nComment only';
+
+for (const present of [true, false]) test(`LABELSTOPOWNER-01: remediation retrigger respects live required-label presence (${present})`, async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'label-stop-retrigger-'));
+  const repo = 'fixture/repo', prNumber = 42, revisionRef = 'b'.repeat(40);
+  const job = buildFollowUpJob({ repo, prNumber, branch: 'fixture/topic', reviewerModel: 'codex',
+    revisionRef: 'a'.repeat(40), reviewBody: '## Verdict\nRequest changes\n' });
+  job.status = 'stopped';
+  job.remediationPlan.currentRound = 1;
+  job.remediationPlan.maxRounds = 3;
+  job.remediationPlan.stop = { code: 'operator-label-required:fixture-approved' };
+  const jobPath = path.join(rootDir, 'data/follow-up-jobs/stopped', `${job.jobId}.json`);
+  writeFollowUpJob(jobPath, job);
+  let reads = 0, writes = 0;
+  const result = await tryRetriggerRemediationFromLabel({ rootDir, repo, prNumber, revisionRef,
+    labelEvent: { id: 'fixture-retrigger', actor: 'fixture-operator', headSha: revisionRef },
+    readOperatorLabelImpl: () => {
+      reads++;
+      return present ? { repo, prNumber, label: 'fixture-approved', eventId: 'fixture-approval',
+        actor: 'fixture-operator', appliedAt: '2026-01-01T10:00:00Z', observedAt: '2026-01-01T11:00:00Z', headSha: revisionRef } : null;
+    },
+    execFileImpl: async () => { writes++; return { stdout: '[]' }; },
+    appendAuditRow: () => {}, findAuditRow: () => null });
+  if (present) {
+    assert.equal(result.outcome, 'bumped-and-requeued');
+    const queued = readFollowUpJob(result.jobPath);
+    assert.equal(queued.revisionRef, revisionRef);
+    assert.equal(queued.remediationPlan.operatorLabelSatisfactions.at(-1).eventId, 'fixture-approval');
+    assert.equal(reads, 2, 'revalidate the required label again when actually requeueing');
+  } else {
+    assert.equal(result.outcome, 'job-active');
+    assert.equal(readFollowUpJob(jobPath).status, 'stopped');
+    assert.equal(readFollowUpJob(jobPath).remediationPlan.maxRounds, 3);
+    assert.equal(writes, 0, 'missing approval cannot consume the retrigger label');
+  }
+});
 
 function sectionBetween(text, startMarker, endMarker) {
   const start = text.indexOf(startMarker);

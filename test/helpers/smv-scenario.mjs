@@ -921,6 +921,7 @@ if (scenario === 'clean') {
   for (const exhausted of [false, true]) {
     const admission = await guardRereviewCiBeforeReviewer({ ...identity(), passKind: 'rereview', reviewerHeadSha: headSha,
       inspectCiImpl: async () => ciGate, latestJobFinder: () => exhausted ? { jobPath: 'synthetic', job: { status: 'stopped', remediationPlan: { stop: { code: 'no-progress' } } } } : null,
+      summarizeLedgerImpl: () => ({ completedRoundsForPR: 3, latestMaxRounds: 3 }),
       execFileImpl: refuse, deliverAlertImpl: refuse, log: quiet });
     assert.equal(admission.proceed, false); assert.equal(admission.parkReviewStatus, 'ci-blocked'); assert.equal(admission.hammerOwner, true);
   }
@@ -948,6 +949,30 @@ if (scenario === 'clean') {
     requeueImpl: () => ({ job: { status: 'pending' } }),
     execFileImpl: refuse, deliverAlertImpl: refuse, log: quiet });
   assert.equal(incompleteAdmission.reason, 'ci-regression-requeued');
+  const labelJob = buildFollowUpJob({ repo, prNumber: 43, branch: 'synthetic', reviewerModel: 'codex', revisionRef: base,
+    reviewBody: '## Blocking issues\n- **Guarded change**\n  - **File:** fixture.md\n  - **Problem:** operator-label-required:live-pack-edit-approved\n\n## Verdict\nRequest changes\n' });
+  labelJob.status = 'stopped';
+  labelJob.remediationPlan.currentRound = 1;
+  labelJob.remediationPlan.maxRounds = 3;
+  labelJob.remediationPlan.stop = { code: 'operator-label-required:live-pack-edit-approved' };
+  const labelPath = join(rootDir, 'data/follow-up-jobs/stopped', `${labelJob.jobId}.json`);
+  writeFollowUpJob(labelPath, labelJob);
+  let labelPages = 0;
+  const labelAdmissionArgs = { ...identity(), prNumber: 43, passKind: 'rereview', reviewerHeadSha: headSha,
+    inspectCiImpl: async () => ciGate, log: quiet, execFileImpl: refuse,
+    deliverAlertImpl: async () => { labelPages++; }, readOperatorLabelImpl: () => null };
+  const absentLabel = await guardRereviewCiBeforeReviewer(labelAdmissionArgs);
+  assert.equal(absentLabel.needsOperator, true);
+  assert.match(absentLabel.closureBlocker, /operator-label-required:live-pack-edit-approved/);
+  assert.equal(labelPages, 1);
+  const satisfiedLabel = await guardRereviewCiBeforeReviewer({ ...labelAdmissionArgs,
+    readOperatorLabelImpl: () => ({ repo, prNumber: 43, label: 'live-pack-edit-approved', eventId: 'synthetic-label',
+      actor: 'synthetic-operator', appliedAt: '2026-01-01', observedAt: '2026-01-01', headSha }) });
+  assert.equal(satisfiedLabel.reason, 'ci-regression-requeued');
+  assert.equal(satisfiedLabel.job.revisionRef, headSha);
+  assert.equal(satisfiedLabel.job.remediationPlan.currentRound, 1);
+  assert.equal(satisfiedLabel.job.remediationPlan.maxRounds, 3);
+  assert.equal(satisfiedLabel.job.remediationPlan.operatorLabelSatisfactions.at(-1).eventId, 'synthetic-label');
   const finalProof = await fetchHammerHeadRange({ repo, reviewedHead: base, currentHead: headSha, hammerBaseHead: headSha,
     remediationRounds: await readCompletedRemediationRounds(rootDir, repo, prNumber), env: {}, get: async path => {
       assert.equal(path, `repos/${repo}/compare/${base}...${headSha}`);

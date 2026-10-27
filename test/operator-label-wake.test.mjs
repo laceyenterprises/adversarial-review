@@ -1,3 +1,4 @@
+import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -10,10 +11,15 @@ import { runPostedReviewHandlersFairly } from '../src/watcher-poll-fairness.mjs'
 import { noProgressLaneFilePath, operatorDecisionAlertStateDir, readNoProgressLane, recordNoProgressLaneRun } from '../src/watcher-no-progress-lane.mjs';
 import { createWatcherWakeSource } from '../src/watcher-wake.mjs';
 import { COEXISTENCE_ACTION } from '../src/ama/coexistence.mjs';
+import { OPERATOR_LABEL_GATES } from '../src/ama/operator-label-gates.mjs';
 
 const identity = { repo: 'fixture/repo', prNumber: 7681 };
 const headSha = 'current-head';
 const logger = { log() {}, warn() {}, error() {} };
+test('LABELSTOPOWNER-01: existing required approval labels participate in the operator wake path', () => {
+  for (const { label } of OPERATOR_LABEL_GATES) assert.ok(OPERATOR_WAKE_LABELS.includes(label));
+  assert.equal(new Set(OPERATOR_WAKE_LABELS).size, OPERATOR_WAKE_LABELS.length);
+});
 function park(rootDir) {
   recordNoProgressLaneRun(rootDir, identity, { headSha, fingerprint: 'parked', logger });
   const path = noProgressLaneFilePath(rootDir, identity);

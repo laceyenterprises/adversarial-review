@@ -341,6 +341,7 @@
     },
     {
       "id": "follow-up-jobs",
+      "operatorLabelSatisfactions": "remediationPlan.operatorLabelSatisfactions[] retains live required-label evidence: repo, prNumber, label, eventId, actor, appliedAt, observedAt, headSha. Presence and event are required; CI requeue binds the current head and adds an actionable finding without resetting rounds. Same-path terminal stops preserve their record (LABELSTOPOWNER-01).",
       "ciInfrastructureWait": { "fields": ["reason", "headSha", "failedChecks", "firstObservedAt", "deadline", "nextProbeAt", "parked", "evidencePending"], "probeMs": 300000, "parkAfterMs": 3600000, "refundCode": "ci-infrastructure-refund", "refundReason": "checks-executed-again" },
       "simplicityNote": "Optional advisory section text or null; normalization preserves existing non-null notes and otherwise derives from reviewBody; excluded from findings, gates and round accounting (REVIEWSIMPLE-01)",
       "hammerSimplicitySnapshot": "review.simplicityNote is capped at 1200 UTF-8 bytes; review.simplicityNoteTruncated is a boolean (false when absent). Fetch the full review if it or review.findingsTruncated is true.",
@@ -907,13 +908,13 @@
       "path": "docs/data-model/ama-closure-waits.md",
       "store": "data/ama-closure-waits/<sha256(repo#prNumber)>.db",
       "schemaSurface": "src/ama/closure-wait.mjs",
-      "relatedSchemaSurfaces": ["src/ama-closure-orchestration.mjs", "src/ama/dispatch-closer.mjs", "src/ama/closure-next-action.mjs"],
+      "relatedSchemaSurfaces": ["src/ama-closure-orchestration.mjs", "src/ama/dispatch-closer.mjs", "src/ama/closure-next-action.mjs", "src/reviewer-ci-admission.mjs"],
       "sharedDecisionAnchor": "anchor-only observations reuse bounded-wait started without reserving or delivering a page",
       "owner": "AMA bounded closure wait and exhaustion paging",
       "waitTable": "waits_by_class",
       "waitColumns": ["head", "class", "started", "reason", "paged"],
       "waitPrimaryKey": ["head", "class"],
-      "waitClasses": ["primary-change", "bounded-wait", "final-round", "lane-busy"],
+      "waitClasses": ["primary-change", "bounded-wait", "final-round", "lane-busy", "ci-regression-ownerless"],
       "finalRoundReceiptScope": "per PR across heads; independent of primary-change",
       "waitProgress": "launch/head progress restarts the deadline before stall evaluation; retained running/starting launch or confirmed dispatched lease timestamps advance existing final-round rows only when no later than observation time; retained succeeded-awaiting-audit-or-merged-signal holds supply no launch progress; running background dispatch uses ephemeral launchWait from actual start for its dispatch timeout (15-minute fallback), preserving original debt on refusal and paging explicitly on overrun",
       "legacyWaitMigration": "none; one-time deadline and page-reservation reset"

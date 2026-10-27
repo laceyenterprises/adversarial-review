@@ -24,6 +24,7 @@ import { opendir } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 
 import { writeFileAtomic } from './atomic-write.mjs';
+import { requiredFollowUpOperatorLabel, readFollowUpOperatorLabel } from './follow-up-operator-label.mjs';
 import {
   isRetriggerableStoppedFollowUpJob,
   requeueFollowUpJobForNextRound,
@@ -94,11 +95,11 @@ function normalizeLabelEventKey({ repo, prNumber, labelEvent }) {
   return null;
 }
 
-function isHaltedTerminal(job) {
+function isHaltedTerminal(job, operatorLabelSatisfaction = null) {
   if (!job) return false;
   if (job.status === 'failed') return true;
   if (job.status === 'completed' && job?.reReview?.requested === true) return true;
-  if (job.status === 'stopped') return isRetriggerableStoppedFollowUpJob(job);
+  if (job.status === 'stopped') return isRetriggerableStoppedFollowUpJob(job, { operatorLabelSatisfaction });
   return false;
 }
 
@@ -918,6 +919,7 @@ export async function tryRetriggerRemediationFromLabel({
   appendAuditRow = appendOperatorMutationAuditRow,
   findAuditRow = findOperatorMutationAuditRow,
   requeueImpl = requeueFollowUpJobForNextRound,
+  readOperatorLabelImpl = readFollowUpOperatorLabel,
   labelEvent = null,
   revisionRef = null,
   // NOOWNER-01: `async ({ repo, prNumber, revisionRef }) => ({ action, outcome,
@@ -997,7 +999,10 @@ export async function tryRetriggerRemediationFromLabel({
   if (!latest) {
     return { outcome: 'no-job', detail: 'no follow-up job exists for this PR yet' };
   }
-  if (!isHaltedTerminal(latest.job)) {
+  const requiredLabel = requiredFollowUpOperatorLabel(latest.job);
+  const operatorLabelSatisfaction = requiredLabel
+    ? readOperatorLabelImpl({ repo, prNumber, label: requiredLabel }) : null;
+  if (!isHaltedTerminal(latest.job, operatorLabelSatisfaction)) {
     return {
       outcome: 'job-active',
       detail: `job is in '${latest.job.status}' state; leaving label in place for next tick`,
@@ -1213,6 +1218,7 @@ export async function tryRetriggerRemediationFromLabel({
       // requeue would re-fire the same stop on the next consume tick
       // (round-1 review B1).
       revisionRef: normalizedRevisionRef,
+      readOperatorLabelImpl,
     });
   } catch (err) {
     const failedRequeue = {

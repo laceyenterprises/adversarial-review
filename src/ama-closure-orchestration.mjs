@@ -10,10 +10,12 @@ import { withClosureEvaluationReadCache } from './closure-evaluation-cache.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { fleetStopReason } from './fleet-stop.mjs';
 import { recordOperatorNoticeCloserOutcome } from './operator-decision-notice.mjs';
-import { checkPrimaryChange } from './ama/primary-change.mjs';
+import { checkPrimaryChange, fetchPrimaryChange } from './ama/primary-change.mjs';
 import { readHammerStopForHead, readHammerStopHoldForHead, isInfrastructureStop, isLegacyReviewHandoffStop } from './ama/hammer-stop-hold.mjs';
 import { evaluateHammerRetryCap, readHammerRetryCapLedger } from './ama/hammer-retry-cap.mjs';
-import { bindClosureNextAction, readClosureNextAction, observeClosureOwnership, closureOwnerFromDecision, hasHammerDispatchIntent, observeClosureResult, observeDaemonGate as reviseDaemonGate, observeDaemonResult, revalidateClosurePr, resolveClosureNextAction, reviseClosureNextAction } from './ama/closure-next-action.mjs';
+import { resolveSharedNextAction } from './pr-next-action-shadow.mjs';
+import { createHistoryReader } from './ama/history-reader.mjs';
+import { hammerDispatchMismatch, bindClosureNextAction, readClosureNextAction, observeClosureOwnership, closureOwnerFromDecision, hasHammerDispatchIntent, observeClosureResult, observeDaemonGate as reviseDaemonGate, observeDaemonResult, revalidateClosurePr, resolveClosureNextAction, reviseClosureNextAction } from './ama/closure-next-action.mjs';
 import { probeOrphanOwnership } from './ama/orphan-watchdog.mjs';
 import { observeClosureWait } from './ama/closure-wait.mjs';
 import { observeClosureRefreshLoop } from './ama/closure-refresh-loop.mjs';
@@ -794,6 +796,22 @@ async function maybeDispatchAmaClosureForInner({
       return (maybeDispatchAmaCloserImpl || maybeDispatchAmaCloser)(...args);
     }, closerAuthoredStaleSink, ownerProofFactsSink, closureOwnerSink, finalRoundSink, hammerWakeSink };
   let result = await dispatchAmaClosureFor(dispatchArgs);
+  if (result?.reason === 'closure-decision-mismatch' && result.nextActionShared) {
+    const mismatch = result.decisionMismatch;
+    // Exactly one successor selection uses the executor's complete snapshot,
+    // including primaryChange. Do not rebuild it from the older candidate.
+    const resolved = await resolveSharedNextAction({ snapshot: result.nextActionShared.snapshot });
+    if (resolved.decision.action === 'daemon-merge' || hasHammerDispatchIntent(resolved,
+      { repo: options.repoPath, prNumber: options.prNumber, headSha: resolved.decision.head })) {
+      result = await dispatchAmaClosureFor({ ...dispatchArgs, resolvedNextAction: resolved,
+        passSnapshot: resolved.snapshot, priorDaemonCleanMerge: null });
+    } else {
+      result = { ...result, reason: resolved.decision.reason, nextAction: resolved.decision, nextActionShared: resolved,
+        retryAfterMs: 30_000 };
+    }
+    result = { ...result, mismatchReason: 'closure-decision-mismatch',
+      decisionMismatch: mismatch, decisionReresolutions: 1 };
+  }
   if (hammerWakeSink.value && hammerWakeSink.closerInvoked) {
     try { amaDispatchCloser.settleRefusedHammerWake({ ...hammerWakeSink.value, result }); }
     catch (error) { options.logger?.warn?.(`[watcher] refused hammer wake reconciliation failed: ${error.message}`); }
@@ -880,6 +898,7 @@ function closureWaitProgress(result, startedAt) {
 
 async function dispatchAmaClosureFor({
   hammerWakeSink = null,
+  resolvedNextAction = null,
   passSnapshot = null,
   finalRoundSink = null,
   closerAuthoredStaleSink = null,
@@ -911,6 +930,7 @@ async function dispatchAmaClosureFor({
   liveReviewRetryDelaysMs = AMA_LIVE_REVIEW_LOOKUP_RETRY_DELAYS_MS,
   resolveReviewCycleExhaustionImpl = null,
   runDaemonCleanMergeAttemptImpl = runDaemonCleanMergeAttempt,
+  fetchPrimaryChangeImpl = fetchPrimaryChange,
   headHasValidatedHamTerminalRemediationImpl = headHasValidatedHamTerminalRemediation,
   resolveHeadCloserCommitSuppressionImpl = null,
   fetchHeadCloserVerifiedCommitImpl = fetchHeadCloserVerifiedCommit,
@@ -1680,7 +1700,24 @@ async function dispatchAmaClosureFor({
     anchors: { postedAt: reviewState.postedAt || reviewStateRow?.posted_at || null, finalRoundCompletedAt },
     checksRollup: candidate?.statusCheckRollup,
     candidate: { ...candidate, ...mergeabilityForGate }, labels: prMetadata.labels });
-  let shared = await resolveOwner();
+  let shared = resolvedNextAction || await resolveOwner();
+  // Scheduling failures are observations, not durable head-independent truth.
+  // Re-read even on the same head: finding authorization/evidence may improve.
+  let refreshedPrimaryChange;
+  if (autonomousMergeExecutionEnabled && prMetadata.isOpen
+    && shared.snapshot.observations.progress?.value?.primaryChange?.ok === false) {
+    refreshedPrimaryChange = await runCoexistenceOperation('closure-primary-change-refresh',
+      ({ signal: operationSignal }) => fetchPrimaryChangeImpl({ repo: repoPath, prNumber,
+        headSha: currentPrHeadSha, rootDir,
+        get: createHistoryReader({ env, signal: operationSignal }) }),
+      { timeoutMs: operationTimeoutMs, parentSignal: signal, operationTracker, logger, repoPath, prNumber });
+    const primary = checkPrimaryChange(refreshedPrimaryChange, currentPrHeadSha,
+      { strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false });
+    shared = reviseClosureNextAction(shared, { progress: {
+      ...(shared.snapshot.observations.progress?.value ?? shared.snapshot.observations.progress),
+      primaryChange: { ...primary, headSha: currentPrHeadSha },
+    } }, passSnapshot);
+  }
   let closureOwner = closureOwnerFromDecision(shared.decision);
   if (closureOwnerSink) closureOwnerSink.shared = shared;
   if (closureOwnerSink) closureOwnerSink.value = closureOwner;
@@ -2491,6 +2528,7 @@ async function dispatchAmaClosureFor({
     cfg,
     options: {
       env: process.env,
+      ...(refreshedPrimaryChange ? { primaryChange: refreshedPrimaryChange } : {}),
       ...(nonReviewableHeadDeltaEvidence
         ? { nonReviewableHeadDelta: nonReviewableHeadDeltaEvidence }
         : {}),
@@ -2637,8 +2675,11 @@ async function dispatchAmaClosureFor({
             return { dispatched: false, reason: 'background-pr-state-changed', ...changedDecision };
           }
           if (live?.isDraft) return { dispatched: false, reason: 'background-pr-draft', ...changedDecision };
-          if (!hasHammerDispatchIntent(launchShared, { repo: repoPath, prNumber, headSha: live.headSha })) {
-            return { dispatched: false, reason: launchShared.decision.reason, recoveryWait: true, skipMergeAgent: true, retryAfterMs: 30_000, ...changedDecision };
+          const launchMismatch = hammerDispatchMismatch(shared, launchShared,
+            { repo: repoPath, prNumber, headSha: live.headSha });
+          if (launchMismatch || !hasHammerDispatchIntent(launchShared, { repo: repoPath, prNumber, headSha: live.headSha })) {
+            return { ...(launchMismatch
+              || { dispatched: false, reason: 'closure-decision-mismatch', ...changedDecision }), retryAfterMs: 30_000 };
           }
           const launched = await maybeDispatchAmaCloserImpl({ ...closerArgs, sharedNextAction: launchShared, signal: backgroundSignal,
             operatorLabelClassificationRetryDelaysMs: [20_000, 40_000] });

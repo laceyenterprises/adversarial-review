@@ -1,3 +1,4 @@
+import { deriveNextActionSnapshot, nextAction } from '../src/pr-next-action.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import { createNoProgressLaneGate } from '../src/posted-review-row.mjs';
 import { evaluateNoProgressLane, readNoProgressLane, recordNoProgressLaneRun } from '../src/watcher-no-progress-lane.mjs';
@@ -742,3 +743,51 @@ test('DRAINDEFER-01: disabled closer retires a fresh drain hint and restores bac
   assert.equal(readAmaCloserDispatchRecord(rootDir, identity).state, 'no-dispatch');
   assert.equal(gate.evaluate(handler).run, false);
 });
+
+
+for (const outcome of ['preserved', 'clean-preserved', 'admission-refused', 'reverted', 'unknown', 'read-failed']) {
+  test(`CLOSURESPLIT-01: real dispatcher refreshes inherited refusal: ${outcome}`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closure-split-dispatch-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const inputs = eligibleInputs(rootDir);
+    const preserved = ['preserved', 'clean-preserved', 'admission-refused'].includes(outcome);
+    if (outcome !== 'preserved') inputs.reviewState.reviewCycleExhausted = false;
+    if (outcome === 'admission-refused') inputs.cfg.eligibility.riskClasses = [];
+    inputs.prMetadata.statusCheckRollup = [{ name: 'test', conclusion: 'SUCCESS' },
+      { name: 'agent-os/adversarial-gate', conclusion: 'SUCCESS' }];
+    const { headSha } = inputs;
+    const snapshot = deriveNextActionSnapshot({ subjectKey: `${inputs.dispatchContext.repo}#1234`, head: headSha,
+      observedAt: inputs.dispatchContext.dispatchedAt, observations: {
+        pr: { headSha, state: 'OPEN', mergeable: 'MERGEABLE', labels: [] },
+        reviews: inputs.reviewState, checks: { conclusion: 'SUCCESS' },
+        policy: { autonomousMergeExecutionEnabled: true },
+        leases: { closer: null }, launches: { closer: null },
+        progress: { primaryChange: { ok: false, reason: 'primary-change-reverted', headSha } },
+      } });
+    const shared = { snapshot, decision: nextAction(snapshot) };
+    assert.equal(shared.decision.reason, 'primary-change-repair');
+    let reads = 0;
+    const evidence = preserved ? primaryChangeFixture(headSha)
+      : outcome === 'reverted' ? { ...primaryChangeFixture(headSha), finalFiles: [] }
+        : { headSha, ...(outcome === 'read-failed' ? { readFailed: true } : {}) };
+    const result = await maybeDispatchAmaCloser({ ...inputs, sharedNextAction: shared,
+      fetchPrimaryChangeImpl: async args => { reads++; assert.equal(args.headSha, headSha); return evidence; },
+      execFileImpl: async () => assert.fail('no dispatch or merge on this admission result'),
+      readTemplateImpl: () => assert.fail('mismatch/refusal precedes prompt construction'),
+    });
+    assert.equal(reads, 1);
+    assert.equal(result.dispatched, false);
+    assert.equal(result.reason, preserved ? 'closure-decision-mismatch'
+      : outcome === 'read-failed' ? 'gate-read-failed' : 'primary-change-repair-required');
+    if (preserved) {
+      if (outcome === 'admission-refused') {
+        assert.equal(result.nextActionShared.snapshot.observations.controls.value.safetyRefusal.reason,
+          'risk-class-not-permitted');
+        assert.notEqual(result.nextActionShared.decision.action, 'daemon-merge');
+      } else assert.equal(result.nextActionShared.decision.action, 'daemon-merge');
+      assert.equal(result.decisionMismatch.selectedKey, shared.decision.decisionKey);
+      assert.equal(result.nextActionShared.snapshot.observations.progress.value.primaryChange.ok, true);
+    }
+    assert.equal(readAmaCloserLease(rootDir, { repo: inputs.dispatchContext.repo, prNumber: 1234, headSha }), null);
+  });
+}

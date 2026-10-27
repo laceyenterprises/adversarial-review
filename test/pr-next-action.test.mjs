@@ -747,3 +747,34 @@ test('CLOSERSTOPTRANSIENT-01 a transient stop permits retry ownership while exis
     assert.equal(decision.reason, hammerCap.lifetimeExhausted ? 'lifetime-exhausted' : 'retry-exhausted');
   }
 });
+
+
+test('CLOSURESPLIT-01: an older-head primary refusal cannot select current-head repair', () => {
+  for (const reason of ['primary-change-reverted', 'primary-change-unknown']) {
+    assert.equal(nextAction(snap({ progress: { primaryChange: { ok: false, reason, headSha: OLD } } })).action,
+      'daemon-merge');
+    assert.equal(nextAction(snap({ progress: { primaryChange: { ok: false, reason, headSha: HEAD } } })).reason,
+      'primary-change-repair');
+  }
+});
+
+
+test('CLOSURESPLIT-01: a passing predicate supersedes only its primary-change decline', async () => {
+  const { reviseClosureNextAction } = await import('../src/ama/closure-next-action.mjs');
+  for (const execution of [
+    { headSha: HEAD, reason: 'not-eligible', reasons: ['primary-change-reverted'] },
+    { headSha: HEAD, reason: 'not-eligible', reasons: ['primary-change-reverted'], permanent: true },
+    { headSha: HEAD, reason: 'not-eligible', reasons: ['primary-change-reverted', 'unrelated-refusal'] },
+    { headSha: HEAD, reason: 'unrelated-refusal', reasons: [] },
+  ]) {
+    const snapshot = snap({ progress: { primaryChange: { ok: false, reason: 'primary-change-reverted', headSha: HEAD },
+      daemonExecution: execution } });
+    const shared = { snapshot, decision: nextAction(snapshot) };
+    const revised = reviseClosureNextAction(shared, { progress: {
+      ...snapshot.observations.progress.value, primaryChange: { ok: true, headSha: HEAD },
+    } });
+    const superseded = !execution.permanent && execution.reasons.length === 1;
+    assert.equal(revised.snapshot.observations.progress.value.daemonExecution === null, superseded);
+    assert.equal(revised.decision.action === 'daemon-merge', superseded);
+  }
+});

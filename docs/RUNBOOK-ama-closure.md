@@ -24,6 +24,42 @@ forced launch, ledger mutation or new smoke step is authorized by this change.
 
 # RUNBOOK — AMA closure pipeline
 
+## Shared closure/hammer decision (CLOSURESPLIT-01)
+
+Closure passes its immutable next-action snapshot and decision key/generation to
+background hammer admission, including `progress.primaryChange`. Launch-time
+PR/check observations and dispatcher eligibility revise that pair. If they select
+a different decision key, admission returns `closure-decision-mismatch` with
+`decisionMismatch` (selected/resolved keys and generations, resolved action/reason)
+and the complete replacement snapshot. It never reports this disagreement as a
+bare `snapshot-refresh`. Closure re-resolves that same snapshot once and reports
+`decisionReresolutions: 1`; waits keep the fresh owner and a daemon successor
+enters the ordinary live exact-head merge path. A second disagreement returns to
+the caller without another in-pass retry.
+
+After primary-change validation passes, a changed hammer decision is reported
+before repair-admission refusal. Structural admission refusals remain in the
+replacement snapshot and cannot authorize daemon merge; zero findings alone do
+not refuse repair admission. Non-dispatch successors return the refreshed
+`nextAction` together with its reason and snapshot. Primary-change refresh
+preserves unrelated progress metadata.
+
+Primary-change observations carry `headSha`. R05 ignores older-head failures;
+closure refreshes inherited failures at the current head before selecting its
+owner, including same-head failures whose live evidence may have improved.
+The shared predicate evaluates preservation or no-hammer history, and its raw
+evidence accompanies dispatcher eligibility. A dispatcher lacking that evidence
+refreshes an inherited failure instead of defaulting it to not-applicable. A
+passing predicate supersedes its associated primary-change-only daemon decline;
+unrelated or permanent refusals remain. A real unauthorized reversal still
+refuses. R15's other predicates, operator holds, dispatch caps and leases remain
+authoritative.
+
+After normal deployment, the runtime owner can observe natural clean-head closure
+and any named mismatches read-only. Synthetic fixtures prove source behavior;
+live recovery remains pending. No restart, forced dispatch or live repair is
+part of this change.
+
 ## Same-head daemon decline recovery (CLOSERREFRESHLOOP-01)
 
 The shared R15 clean-merge row retries explicit transient daemon declines on

@@ -376,7 +376,7 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
       deadlineKind: 'recovery', queue: 'reconcile', refs: [`refusal:${text(refusal?.reason) || safetyReason || execution?.reason || 'unnamed'}`] };
   }
   const primary = plain(progress?.primaryChange);
-  if (primary && primary.ok === false) {
+  if (primary && primary.ok === false && (!text(primary.headSha) || sameHead(primary.headSha, head))) {
     const primaryReason = text(primary.reason) || 'primary-change-unknown';
     const refs = [`primary-change:${primaryReason}`];
     if (['primary-change-read-failed', 'history-read-failed'].includes(primaryReason)) {

@@ -497,6 +497,19 @@ two-path merge model** (operational reference:
   spawned. `strict_mode` defaults on; turning it off permits daemon
   merge over *known non-blocking* findings only.
 
+CLOSURESPLIT-01: closure and background hammer admission share a decision key,
+generation and complete evidence snapshot, including head-scoped primary change.
+Fresh disagreement returns `closure-decision-mismatch`; closure selects a
+successor from that snapshot once. Inherited primary-change failures are
+recomputed before routing and real reversals still refuse. Changed decisions
+precede repair-admission refusal while retaining structural safety holds;
+non-dispatch successors expose the refreshed action and preserve progress.
+Existing merge gates,
+leases, lifecycle states and smoke promises remain unchanged. See the
+[decision contract](docs/RUNBOOK-ama-closure.md#shared-closurehammer-decision-closuresplit-01).
+Offline source acceptance is separate from read-only observation of natural
+recovery after normal deployment; no live verification action is added.
+
 TERMLEASE-01: terminal non-merge closer leases (`superseded`,
 `failed-without-merge`, `deferred`) release on the same dispatch pass once ledger
 or matching dispatch evidence proves the launch ended or is absent. Live or

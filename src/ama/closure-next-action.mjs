@@ -29,6 +29,22 @@ export function hasHammerDispatchIntent(shared, identity) {
     && decision.actor === 'hammer' && decision.queue?.intent === 'dispatch';
 }
 
+// A refreshed executor may invalidate queued intent, but cannot silently turn
+// a hammer request into an unrelated refresh. Return the exact replacement pair
+// so closure can select its successor once without rebuilding partial evidence.
+export function hammerDispatchMismatch(selected, fresh, identity) {
+  if (!hasHammerDispatchIntent(selected, identity)
+    || (hasHammerDispatchIntent(fresh, identity)
+      && selected.decision.decisionKey === fresh.decision.decisionKey)) return null;
+  return { dispatched: false, skipMergeAgent: true, recoveryWait: true,
+    reason: 'closure-decision-mismatch', nextActionShared: fresh,
+    decisionMismatch: {
+      selectedKey: selected.decision.decisionKey, selectedGeneration: selected.snapshot.generation,
+      resolvedKey: fresh.decision.decisionKey, resolvedGeneration: fresh.snapshot.generation,
+      resolvedAction: fresh.decision.action, resolvedReason: fresh.decision.reason,
+    } };
+}
+
 export async function resolveClosureNextAction({ input, passSnapshot = null, readLaunches, ...options }) {
   const evidence = closureOwnerShadowEvidence(input, options);
   if (readLaunches) evidence.readLaunches = readLaunches;
@@ -62,13 +78,22 @@ export function reviseClosureNextAction(shared, observations, passSnapshot = nul
   }).map(([name]) => name);
   if (!changedFields.length) return registerSharedNextAction(passSnapshot, shared);
   // A refreshed gate supersedes a transient execution observation. Preserve a
-  // newly supplied result, and never erase terminal refusals or other progress.
+  // newly supplied result, unrelated/permanent refusals and other progress. A
+  // newly passing primary predicate supersedes its own old refusal only.
   const execution = shared.snapshot.observations.progress?.value?.daemonExecution;
   const progressWrapped = observations.progress && Object.hasOwn(observations.progress, 'state')
     && Object.hasOwn(observations.progress, 'value');
   const progress = progressWrapped ? observations.progress.value : observations.progress;
-  if (isTransientDaemonDecline(execution)
-    && changedFields.some(name => ['pr', 'checks', 'reviews'].includes(name))
+  const primaryRefreshed = progress?.primaryChange?.ok === true
+    && progress.primaryChange.headSha === shared.snapshot.head
+    && shared.snapshot.observations.progress?.value?.primaryChange?.ok === false;
+  const primaryDeclineSuperseded = primaryRefreshed && execution?.permanent !== true
+    && ['not-eligible', 'gate-not-eligible', 'primary-change-needs-operator'].includes(execution?.reason)
+    && Array.isArray(execution.reasons) && execution.reasons.length > 0
+    && execution.reasons.every(reason => ['primary-change-reverted', 'primary-change-unknown',
+      'primary-change-read-failed', 'history-read-failed'].includes(reason));
+  if ((primaryDeclineSuperseded || (isTransientDaemonDecline(execution)
+    && (primaryRefreshed || changedFields.some(name => ['pr', 'checks', 'reviews'].includes(name)))))
     && (!progressWrapped || observations.progress.state === 'complete')
     && (!Object.hasOwn(progress || {}, 'daemonExecution') || progress.daemonExecution === execution)) {
     const value = { ...shared.snapshot.observations.progress?.value, ...progress, daemonExecution: null };
@@ -126,7 +151,7 @@ export function observeDaemonGate(shared, live, passSnapshot = null) {
     { strictNonBlockingRemediation: (live.strictNonBlockingRemediation
       ?? shared.snapshot.observations.policy?.value?.strictNonBlockingRemediation) !== false }) : null;
   const progress = { ...shared.snapshot.observations.progress?.value,
-    ...(primary ? { primaryChange: { ok: primary.ok, reason: primary.reason } } : {}),
+    ...(primary ? { primaryChange: { ok: primary.ok, reason: primary.reason, headSha: live.candidateHead } } : {}),
     ...(Object.hasOwn(live, 'terminalReviewValidated') ? { terminalReview: { validated: live.terminalReviewValidated === true,
       headSha: live.candidateHead, reviewedHeadSha: shared.snapshot.observations.reviews?.value?.headSha } } : {}) };
   return reviseClosureNextAction(shared, {

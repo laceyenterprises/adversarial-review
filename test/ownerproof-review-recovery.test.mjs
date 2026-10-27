@@ -42,9 +42,35 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { recordNoProgressLaneRun, evaluateNoProgressLane } from '../src/watcher-no-progress-lane.mjs';
 import { recoverOrphan } from '../src/ama/orphan-watchdog.mjs';
+import { deriveNextActionSnapshot, nextAction } from '../src/pr-next-action.mjs';
+import { OPERATOR_HOLD_LABELS } from '../src/operator-hold-labels.mjs';
 
 const deadlineDecision = { head: 'live', row: 'R08-retry', action: 'hammer', actor: 'hammer', reason: 'retry-no-merge',
   queue: { intent: 'dispatch' }, deadline: { at: '2026-10-27T10:00:00Z' } };
+
+test('legacy snapshot observations recognize string and GitHub object hold labels equally', () => {
+  const select = labels => nextAction(deriveNextActionSnapshot({ head: 'live',
+    observedAt: '2026-10-27T10:30:00Z', anchors: { firstActionableAt: '2026-10-27T10:00:00Z' },
+    observations: { pr: { state: 'OPEN', headSha: 'live', labels } } }));
+  for (const name of OPERATOR_HOLD_LABELS) {
+    const decision = select([{ name }]);
+    assert.deepEqual(decision, select([name]));
+    assert.equal(decision.action, 'operator-hold');
+    assert.equal(decision.reason, 'hold-label');
+  }
+});
+
+for (const name of OPERATOR_HOLD_LABELS) for (const labels of [[name], [{ name }]]) {
+  test(`OWNERDEADLINE-01: held discovery skips lane reads and recovery for ${JSON.stringify(labels)}`, async () => {
+    const result = await recoverOverdueOwnership({ rootDir: '/fixture', repo: 'example/repo', prNumber: 1,
+      enabled: true, subject: { headSha: 'live', labels },
+      now: '2026-10-27T10:30:00Z',
+      readLaneImpl: () => assert.fail('held discovery must not inspect an expired lane'),
+      recoverImpl: () => assert.fail('held discovery cannot dispatch or page'),
+      fetchCandidateImpl: () => assert.fail('no GitHub read') });
+    assert.equal(result, null);
+  });
+}
 
 test('OWNERDEADLINE-01: a slow-lane PR recovers before full-walk admission using local evidence', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'deadline-lane-'));

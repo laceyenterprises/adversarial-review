@@ -408,6 +408,19 @@ test('OWNERDEADLINE-01: expired retained route recovers on its first observation
   assert.equal(recoveryState(args.rootDir).attempts, 1);
 });
 
+test('OWNERDEADLINE-01: overdue review preserves its once-per-head reservation and handoff result', async t => {
+  const { args, calls, tick } = setup(t);
+  const result = { nextAction: expiredDecision({ action: 'review', actor: 'reviewer' }) };
+  const first = await tick(0, { result });
+  assert.equal(first.amaClosureResult.reviewRequest.triggered, true);
+  assert.equal(recoveryState(args.rootDir).rereview, 1);
+  await tick(1, { result });
+  await tick(2, { result });
+  assert.equal(calls.reviews.length, 1);
+  assert.equal(recoveryState(args.rootDir).attempts, 2);
+  assert.equal(calls.pages.length, 1);
+});
+
 test('OWNERDEADLINE-01: deadline boundary and head must match; request renewal is not liveness', async t => {
   const { args } = setup(t);
   const selected = expiredDecision();
@@ -436,6 +449,25 @@ test('OWNERDEADLINE-01: another head launch cannot hide an overdue current-head 
     readStatusImpl: () => assert.fail('foreign head cannot prove ownership') });
   assert.equal(result.owned, false);
 });
+
+for (const bucket of ['in-progress', 'ama-closer-dispatches']) {
+  for (const matchingField of ['targetRemediationSha', 'headSha', 'reviewedSha']) {
+    test(`OWNERDEADLINE-01: ${bucket} ownership accepts current ${matchingField} among different SHA fields`, async t => {
+      const { args, record } = setup(t);
+      record(bucket, { targetRemediationSha: 'target', headSha: 'dispatch', reviewedSha: 'reviewed',
+        [matchingField]: args.headSha,
+        ...(bucket === 'in-progress' ? { remediationWorker: { processId: 123 } }
+          : { launchRequestId: 'synthetic-multi-head' }) });
+      let probes = 0;
+      const result = await probeOrphanOwnership({ ...args, nextAction: expiredDecision(),
+        now: '2026-10-11T16:00:00Z', processKillImpl: () => {},
+        readStatusImpl: async () => { probes++; return { ok: true, row: { status: 'running' } }; } });
+      assert.equal(result.owned, true);
+      assert.equal(probes, bucket === 'in-progress' ? 0 : 1);
+      if (bucket === 'in-progress') assert.equal(result.proof, 'live-remediator');
+    });
+  }
+}
 
 for (const blocker of ['reconcile', 'observe', 'deferred', 'uncertain', 'wait']) test(`OWNERDEADLINE-01: impossible ${blocker} pages per head and missing transition across restarts`, async t => {
   const { tick, calls } = setup(t);

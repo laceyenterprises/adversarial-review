@@ -13,6 +13,12 @@ existing no-progress anchor. Recovery dispatch rechecks the live candidate.
 Existing merge predicates, lease mutation rules and review admission remain
 authoritative. Focused synthetic fixtures establish source behavior; existing
 smoke promises are unchanged and natural deployed recovery remains unverified.
+Discovery excludes enforced operator holds before lane reads. Any matching
+dispatch-record SHA retains live ownership evidence. Scoped operator requests
+keep their existing executor admission and safety/lease checks when overdue;
+expired safety reconciliation still receives diagnostic paging.
+Overdue review requests retain the once-per-head reservation and expose their
+handoff receipt under the existing recovery attempt cap.
 
 See the [deadline recovery contract](docs/RUNBOOK-ama-closure.md#deadline-bound-ownership-ownerdeadline-01).
 

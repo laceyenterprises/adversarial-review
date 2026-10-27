@@ -2991,7 +2991,9 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
     }
     return orphan;
   };
-  if (overdueNextAction(amaClosureResult?.nextAction, candidate?.headSha || currentRevisionRef,
+  // A scoped operator request already has an executor below. Deadline recovery
+  // must not intercept that request; its safety and live-lease gates still apply.
+  if (!mergeAgentRequestedScoped && overdueNextAction(amaClosureResult?.nextAction, candidate?.headSha || currentRevisionRef,
     orphanOptions.now, orphanOptions.env)) {
     const orphan = await recoverOwnerless();
     if (orphan) return orphan;

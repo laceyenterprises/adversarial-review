@@ -6397,6 +6397,9 @@ watcher still holds recovery. An explicit dispatched-lease `heartbeatAt`
 inside the same bound also proves ownership. No heartbeat writer or lease
 mutation is introduced. Unreadable ownership evidence permits a diagnostic
 page but never a competing dispatch.
+For overdue actions, any matching `targetRemediationSha`, `headSha` or
+`reviewedSha` binds a dispatch record to the inspected head; a different value
+in another SHA field does not discard live process or launch evidence.
 
 `recoverOrphan` uses the earlier of its PR-wide idle anchor and the overdue
 action's deadline. It does not restart the fifteen-minute clock when the
@@ -6408,6 +6411,9 @@ remediation executor shares the same attempt budget. A transition needing a
 scoped PR update without an available executor pages for that update rather
 than gaining new mutation authority. Page receipts persist in the existing
 watchdog database; see the [data model](data-model/orphan-watchdog.md).
+Overdue review dispatch uses the existing once-per-head `rereview` reservation
+and returns its `reviewRequest` receipt to coexistence, just like immediate
+exact-head review. The deadline path retains its two-attempt recovery cap.
 
 The discovery pass reads the current-head lane record before docs fast-path,
 reviewer handoff and normal admission returns. Slow-lane scheduling can still
@@ -6415,6 +6421,16 @@ defer a full walk. The local deadline check is independent of that schedule.
 An admitted hammer recovery fetches its candidate again and refuses a moved
 or terminal head before entering ordinary closure dispatch. Explicit operator
 holds, drafts, terminal subjects and disabled AMA remain outside recovery.
+Discovery excludes enforced holds before reading lane evidence, for both
+string and GitHub object labels. The shared snapshot selector already accepts
+both label forms and retains object-label actor provenance.
+
+A valid head-scoped `merge-agent-requested` operator request bypasses the
+coexistence deadline probe and reaches its existing executor admission, including
+safety and live-lease checks. It is distinct from watchdog `orphanRecovery`,
+which calls ordinary closure dispatch directly rather than re-entering
+coexistence. Expired safety reconciliation routes still receive missing-transition
+diagnostics; a deadline never waives their dispatch refusal.
 
 After normal deployment, the runtime owner can observe an organic expired
 route selecting its successor or producing one missing-transition page.

@@ -1961,6 +1961,37 @@ test('CLOSERDISPATCHDEAD-01: shutdown aborts running work synchronously and prev
   await queue.drain();
 });
 
+for (const scenario of ['scoped', 'stale-scope', 'live-lease']) {
+  test(`OWNERDEADLINE-01: overdue scoped repair preserves executor admission (${scenario})`, async t => {
+    const args = closureArgs();
+    t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+    if (scenario === 'live-lease') acquireAmaCloserLease({ rootDir: args.rootDir, repo: args.repoPath,
+      prNumber: args.prNumber, headSha: HEAD, watcherPid: process.pid });
+    let recoveries = 0;
+    const result = await resolveMergeAgentCoexistenceForWatcher({ ...args,
+      labelNames: ['merge-agent-requested'], mergeAgentRequestEvent: scopedEvent(scenario === 'stale-scope' ? 'old' : HEAD),
+      maybeDispatchAmaClosureForImpl: async () => {
+        const result = sharedResult(args, { amaEnabled: true, skipMergeAgent: true, primaryChangeRepair: true },
+          { progress: { primaryChange: { ok: false, reason: 'primary-change-reverted' } } });
+        const shared = readClosureNextAction(result);
+        const decision = { ...shared.decision, deadline: { at: '2026-10-11T15:00:00Z' } };
+        return bindClosureNextAction({ ...result, nextAction: decision }, { ...shared, decision });
+      },
+      orphanOptions: { now: '2026-10-11T16:00:00Z' },
+      recoverOrphanImpl: async options => {
+        recoveries++;
+        assert.equal(scenario, 'stale-scope', 'valid scoped requests must reach their existing executor');
+        return { outcome: 'ama-pending', amaClosureResult: options.result };
+      },
+      recoverAmaAutomationImpl: () => assert.fail('scoped repair uses its existing executor'),
+    });
+    assert.equal(recoveries, scenario === 'stale-scope' ? 1 : 0);
+    assert.equal(result.outcome, scenario === 'scoped' ? 'dispatch-merge-agent' : 'ama-pending');
+    if (scenario === 'scoped') assert.deepEqual(result.dispatchEnv, { AMA_OPERATOR_MERGE_AGENT_OVERRIDE: 'true' });
+    else assert.equal(result.dispatchEnv, undefined);
+  });
+}
+
 for (const action of ['wait-for-CI', 'remediate', 'hammer']) test(`OWNERDEADLINE-01: overdue ${action} reaches watchdog before retained-route returns`, async t => {
   const args = closureArgs();
   t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));

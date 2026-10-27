@@ -1,6 +1,7 @@
 import { recoverOrphan, overdueNextAction } from './ama/orphan-watchdog.mjs';
 import { readNoProgressLane } from './watcher-no-progress-lane.mjs';
 import { deriveNextActionSnapshot, nextAction } from './pr-next-action.mjs';
+import { isOperatorHeld } from './operator-hold-labels.mjs';
 const fetchMergeAgentCandidate = async (...args) => (await import('./merge-agent-candidate.mjs')).fetchMergeAgentCandidate(...args);
 import { normalizeEffectiveReviewVerdict } from './review-verdict.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
@@ -13,7 +14,8 @@ export async function recoverOverdueOwnership({ rootDir, repo, prNumber, subject
   domainId, enabled, now = new Date().toISOString(), env = process.env, logger = console, execFileImpl,
   readLaneImpl = readNoProgressLane, recoverImpl = recoverOrphan,
   fetchCandidateImpl = fetchMergeAgentCandidate, dispatchImpl = maybeDispatchAmaClosureFor }) {
-  if (!enabled || subject?.terminal || subject?.isDraft || subject?.draft || !subject?.headSha) return null;
+  if (!enabled || subject?.terminal || subject?.isDraft || subject?.draft || !subject?.headSha
+    || isOperatorHeld(subject.labels || [])) return null;
   const lane = readLaneImpl(rootDir, { repo, prNumber }, { logger });
   // Pre-contract lane records may have no selected action. Missing evidence
   // selects the shared refresh row, anchored to durable lack of progress.

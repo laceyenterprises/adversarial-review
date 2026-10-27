@@ -93,6 +93,12 @@ current-head dispatched lease's explicit `heartbeatAt` proves liveness only
 inside that same bound; absent, stale or future heartbeats do not. No lease
 writer or lease mutation changes. Older-head receipts do not own an overdue
 current-head action. Uncertain ownership pages diagnostics without dispatch.
+Dispatch records match the inspected head when any of `targetRemediationSha`,
+`headSha` or `reviewedSha` matches; live worker/launch evidence is still required.
+Different values in the other SHA fields do not override a matching field.
+Overdue reviewer dispatch also uses `heads.rereview` for once-per-head request
+reservation and returns the `reviewRequest` receipt for closure handoff, while
+retaining the deadline recovery attempt cap. No column or table shape changes.
 
 The additive `transition_pages(head TEXT, transition TEXT, PRIMARY KEY
 (head, transition))` table records successful or terminal page receipts. The

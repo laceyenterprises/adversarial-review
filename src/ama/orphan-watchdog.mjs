@@ -128,7 +128,7 @@ export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, r
       if (signal?.aborted || Date.now() >= deadline) { uncertain('ownership-probe-timeout'); return result; }
       const record = readRecord(join(dir, name), !queue || matchesName(name));
       if (!record || !sameRepo(record.repo) || Number(record.prNumber) !== Number(prNumber)) continue;
-      if (overdue && (record.targetRemediationSha || record.headSha || record.reviewedSha) !== headSha) continue;
+      if (overdue && ![record.targetRemediationSha, record.headSha, record.reviewedSha].includes(headSha)) continue;
       if (bucket === 'merge-agent-dispatches') mergeRecordSeen = true;
       if (queue && alive(record.remediationWorker?.processId)) return { ...result, owned: true, proof: 'live-remediator', ...(includeOwnerEvidence ? { actor: 'remediator' } : {}) };
       const launchRequestId = record.remediationWorker?.launchRequestId || record.launchRequestId || record.dispatchId;
@@ -401,8 +401,9 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     try {
       if (signal?.aborted) throw signal.reason || new Error('orphan recovery aborted');
       retry = action === 'review'
-        ? await requestRereviewImpl({ rootDir, repo, prNumber, targetRevisionRef: headSha,
-          requestedAt: now, reason: `system-orphan-head-review:${headSha}`, ownerlessRecovery: true, logger })
+        ? await requestBoundedOrphanReview({ rootDir, repo, prNumber, headSha,
+          reviewStateRow, requestRereviewImpl, logger, db,
+          decisionReasons: [selected.reason].filter(Boolean) })
         : await executor({ ownerProof: true, headSha, nextAction: selected });
       Object.assign(attempt, attemptSummary(retry), { triggered: retry?.triggered === true });
     } catch (error) {
@@ -418,6 +419,9 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
         db.prepare('UPDATE heads SET outcomes=?, evidence=? WHERE head=?')
           .run(JSON.stringify(outcomes), JSON.stringify(attempt), headSha);
       }
+    }
+    if (action === 'review') {
+      return { ...pending, amaClosureResult: { ...pending.amaClosureResult, reviewRequest: retry } };
     }
     return retry?.dispatched ? { outcome: 'ama-dispatched', amaClosureResult: retry } : pending;
   } finally { try { db?.close(); } finally { fsImpl.closeSync(fd); } }

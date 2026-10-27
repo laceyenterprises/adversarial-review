@@ -237,7 +237,7 @@ test('unreadable ledger fails closed with the inconclusive reason', async () => 
   assert.equal(finding.blocking, true);
   assert.equal(finding.inconclusive, true);
   assert.match(finding.reason, /inconclusive/);
-  assert.match(finding.reason, /ledger unreadable \(ledger-read-failed\)/);
+  assert.match(finding.reason, /plan model-efficiency-gym-v1: live-pack-read-unavailable \(ledger-read-failed\)/);
   assert.match(finding.reason, /failing closed/);
   const body = applyLivePackCrossEditFindings(REVIEW_TEXT, result.findings);
   assert.equal(normalizeEffectiveReviewVerdict(body, { log: null }), 'request-changes');

@@ -44,3 +44,15 @@ It is an untrusted claim until the collector reads the producer's authoritative
 merged PR/commit and Argus compares both old/new producer and consumer bytes.
 See [the runbook](../docs/RUNBOOK-argus-artifact-provenance.md). Enrollment must
 reach the reviewed base before a later upgrade can use the same-producer rule.
+
+
+## Coordinated review-observation candidate 0.10.0 (DOG-11)
+
+The coordinated producer PR #9489 refreshed its 0.10.0 candidate at revision
+`dac9b8690234648346b052ab16f5ee77bee5c191`. The unchanged archive copied here has
+SHA-256 `6644ab93a1233ad731a58ac2aeec1dd0d5437994fbb24bf0574fb0df22f2cfb8`.
+The lockfile and `recorded.dispatchLookupSdk` provenance pin these exact bytes.
+This remains a coordinated draft dependency; it does not claim merged release
+or runtime activation. Historical release archives and Argus enrollment remain
+unchanged. A later producer artifact refresh must update this candidate's
+checksum and provenance together.

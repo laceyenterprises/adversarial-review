@@ -551,13 +551,22 @@ Completion reads accept repo/PR/head/signal selectors and collect every bounded
 page. Launch-scoped public reads retain all companion receipts. Partial or failed
 reads cannot establish absence or delivery. Authoritative live merged/closed
 state, exact-head review, and all required companion deliveries remain separate
-requirements. An API outage holds evidence-dependent work.
+requirements. Capture-read scope denial or unavailability enters the existing
+missing-capture reconciliation path, with `merge-capture-read-scope-denied` or
+`merge-capture-read-unavailable` diagnostics; it does not stop closer admission
+or hammer startup. Independent evidence-dependent work retains its own holds.
 
 The operator-provisioned app entitlement keeps existing `dispatch_reads` grants.
-DAG liveness additionally needs an exact `dag_reads` list of authorized plan IDs;
+DAG liveness uses the producer's operator-provisioned `dag_reads` entitlement;
 hardening context needs `hardening_reads: true`. These are producer-owned grants,
 not caller configuration or registration claims. The existing worker-observation
 rollout switch also covers these review observations. No shared config changes.
+
+Live-pack checks map allowed, not-live, scope-denied and unavailable reads
+explicitly. A not-live answer proceeds. A denied or unavailable answer holds only
+the PR touching that plan, with the plan ID and read outcome in its finding.
+Unknown outcomes remain unavailable; unrelated PRs do not read a plan or inherit
+a global refusal. Existing own-pack, gate-stamp and operator-waiver rules apply.
 
 The closer and rendered hammer use SDK `recordMergeSignal` through
 `hq build-completions record-merge`. A remote merge followed by capture failure

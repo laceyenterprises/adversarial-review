@@ -167,3 +167,44 @@ test('hammer prompt emits merge signal before releasing successful merge lease',
     /if ! ham_emit_git_merge_signal; then[\s\S]*?\n  fi\n  trap ham_release_merge_lease EXIT\n  ham_release_merge_lease/,
   );
 });
+
+
+for (const method of ['readMergedBuildCompletionSignal', 'readMergedBuildCompletionSignalAsync']) {
+  for (const reason of ['worker-observation-scope-denied', 'worker-observation-unavailable', 'dispatch-read-unavailable']) {
+    test(`${method}: ${reason} uses missing-capture reconciliation`, async () => {
+      const warnings = [];
+      const result = await __testables__[method]({repo:'example/repo',prNumber:1,headSha:'a'.repeat(40),
+        logger:{warn:message => warnings.push(JSON.parse(message))},
+        readBuildCompletionSignalForPrImpl:() => ({ok:false,reason}),
+        readBuildCompletionProducerEvidenceImpl:() => assert.fail('refused PR read must not broaden scope')});
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, 'missing-build-completion-signal');
+      assert.equal(result.readReason, reason.endsWith('scope-denied')
+        ? 'merge-capture-read-scope-denied' : 'merge-capture-read-unavailable');
+      assert.equal(warnings[0].reason, result.readReason);
+    });
+  }
+  test(`${method}: allowed capture stays bound to the reviewed head`, async () => {
+    const head = 'a'.repeat(40);
+    const result = await __testables__[method]({repo:'example/repo',prNumber:1,headSha:head,
+      readBuildCompletionSignalForPrImpl:() => ({ok:true,row:{head_sha:head,completion_id:'receipt'}}),
+      readBuildCompletionProducerEvidenceImpl:() => assert.fail('valid capture needs no fallback')});
+    assert.equal(result.ok, true);
+    assert.equal(result.headShaMatchesReviewed, true);
+    assert.equal(result.readReason, undefined);
+  });
+  test(`${method}: producer probe failure also degrades after a missing capture`, async () => {
+    const result = await __testables__[method]({repo:'example/repo',prNumber:1,headSha:'a'.repeat(40),logger:{warn(){}},
+      readBuildCompletionSignalForPrImpl:() => ({ok:false,reason:'missing-build-completion-signal'}),
+      readBuildCompletionProducerEvidenceImpl:() => ({ok:false,reason:'worker-observation-scope-denied'})});
+    assert.equal(result.reason, 'missing-build-completion-signal');
+    assert.equal(result.readReason, 'merge-capture-read-scope-denied');
+  });
+  test(`${method}: thrown read failures cannot fail the closer`, async () => {
+    const result = await __testables__[method]({repo:'example/repo',prNumber:1,logger:{warn(){}},
+      readBuildCompletionSignalForPrImpl:() => {throw new Error('synthetic private failure');}});
+    assert.equal(result.reason, 'missing-build-completion-signal');
+    assert.equal(result.readReason, 'merge-capture-read-unavailable');
+    assert.doesNotMatch(JSON.stringify(result), /private failure/);
+  });
+}

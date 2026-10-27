@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readWorkerObservation} from '../src/dispatch-read-client.mjs';
 import {readBuildCompletionSignalForPr,readBuildCompletionSignalForPrAsync,
-  readBuildCompletionProducerEvidence,readBuildCompletionProducerEvidenceAsync,readActiveDagRunsForPlanAsync,
+  readBuildCompletionProducerEvidence,readBuildCompletionProducerEvidenceAsync,readActiveDagRunsForPlan,readActiveDagRunsForPlanAsync,
   readExecutionVerdictsFromLedgerAsync} from '../src/session-ledger-read-adapter.mjs';
 
 const page = (observation,items,more={}) => ({schema_version:1,observation,
@@ -107,4 +107,50 @@ test('latest receipt consumes one valid page without requiring the entire reposi
   }}});
   assert.equal(result.ok,true);assert.equal(result.row.completion_id,'latest');
   assert.equal(result.complete,false);assert.equal(calls,1);
+});
+
+
+for (const [status, outcome, ok] of [
+  ['found', 'allowed', true], ['not_live', 'not-live', true],
+  ['scope_denied', 'scope-denied', false], ['unavailable', 'unavailable', false],
+  ['unknown_future_outcome', 'unavailable', false],
+]) {
+  test(`DAG read maps producer ${status} explicitly in sync and async clients`, async () => {
+    const reply = page('dag_runs', status === 'found' ? [{run_id:'synthetic-run',state:'running'}] : [], {status});
+    const args = {planId:'synthetic-plan', workerObservationSyncImpl:() => reply,
+      dispatchSession:{dispatchLookup:async () => reply}};
+    const sync = readActiveDagRunsForPlan(args);
+    assert.deepEqual(await readActiveDagRunsForPlanAsync(args), sync);
+    assert.equal(sync.ok, ok);
+    assert.equal(sync.outcome, outcome);
+    assert.equal(sync.planId, 'synthetic-plan');
+    if (status === 'found') assert.equal(sync.runs[0].run_id, 'synthetic-run');
+    else if (ok) assert.deepEqual(sync.runs, []);
+    else assert.equal(sync.runs, undefined);
+  });
+}
+
+test('scope refusal and unavailable HTTP reads preserve safe, specific outcomes', async t => {
+  for (const [code, outcome] of [['scope_denied','scope-denied'], ['service_unavailable','unavailable']]) {
+    t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({error:{code,message:'synthetic private detail'}}),
+      {status:code === 'scope_denied' ? 403 : 503}));
+    const result = await readActiveDagRunsForPlanAsync({planId:'synthetic-plan',
+      env:{ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED:'1'},
+      connectOptions:{session_token:'synthetic',endpoint_url:'https://synthetic.invalid/outcomes'}});
+    assert.equal(result.outcome, outcome);
+    assert.doesNotMatch(JSON.stringify(result), /private detail/);
+    t.mock.restoreAll();
+  }
+});
+
+test('not-live cannot override a partial page, foreign observation or a malformed envelope', async () => {
+  for (const reply of [
+    page('dag_runs', [{run_id:'run'}], {status:'not_live'}),
+    page('dag_runs', [], {status:'not_live',mutation_authority:true}),
+    page('completions', [], {status:'not_live'}),
+    page('dag_runs', [], {status:'not_live',complete:false,next_offset:1}),
+  ]) {
+    assert.equal((await readActiveDagRunsForPlanAsync({planId:'synthetic-plan',
+      dispatchSession:{dispatchLookup:async () => reply}})).outcome, 'unavailable');
+  }
 });

@@ -4350,3 +4350,25 @@ test('HAMVALIDORPHAN-01 worker_crashed after validation resumes under the existi
   assert.ok(launches <= HAMMER_RETRY_CAP_TOTAL_DISPATCHES);
   assert.ok(pages.length > 0, 'attempt exhaustion must use the existing escalation');
 });
+
+
+for (const reason of ['worker-observation-scope-denied','worker-observation-unavailable']) {
+  test(`capture ${reason} permits hammer startup through missing-capture reconciliation`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'capture-degraded-'));
+    t.after(() => rmSync(rootDir, {recursive:true,force:true}));
+    const warnings = [];
+    const result = await maybeDispatchAmaCloser({
+      ...hammerDispatchArgs(rootDir),
+      ...hammerDispatchDeps({
+        readBuildCompletionSignalForPrImpl:() => ({ok:false,reason}),
+        logger:{log(){},info(){},error(){},warn:message => warnings.push(message)},
+      }),
+    });
+    assert.equal(result.dispatched, true, JSON.stringify(result));
+    const record = readAmaCloserDispatchRecord(rootDir, {repo:REPO,prNumber:PR_NUMBER,headSha:REVIEWED_HEAD});
+    assert.equal(record.mergeCaptureReadReason, result.mergeCaptureReadReason);
+    assert.equal(record.mergeCaptureReadAt, '2026-07-06T12:00:00Z');
+    assert.match(warnings.join('\n'), reason.endsWith('scope-denied')
+      ? /merge-capture-read-scope-denied/ : /merge-capture-read-unavailable/);
+  });
+}

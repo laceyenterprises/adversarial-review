@@ -412,7 +412,7 @@ for (const status of ['running', 'starting', 'stalled', 'blocked', 'unknown', 's
       };
     }
     const result = await maybeDispatchAmaCloser(f.args);
-    assert.equal(result.reason, status === 'unknown' ? 'dispatch-status-unknown' : `existing-dispatch-${status}`);
+    assert.equal(result.reason, status === 'succeeded' ? 'live-owner' : status === 'unknown' ? 'dispatch-status-unknown' : `existing-dispatch-${status}`);
     assert.equal(result.namedReason, result.reason, 'retained returns share the named no-dispatch reason');
     assert.equal(result.closerLaunchAlive === true, status === 'running' || status === 'starting');
     if (status === 'running' || status === 'starting') assert.equal(result.closerProgressAt, started);

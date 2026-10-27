@@ -258,8 +258,8 @@
     "dispatchLookupSdk": {
       "version": "0.10.0",
       "file": "vendor/agent-os-app-sdk-0.10.0.tgz",
-      "sha256": "edd77783b9f771ebd53aeab34a0d08254556157f66db95b080f4589d42dd6a0a",
-      "integrity": "sha512-fEgJtxUw6yWwSkYUeURg4ZyxC7lydp+7sCWzk5XPjTPLUBlFUe76kM4uJSER7nOehH/k8A2D5sCzdwl4HOcoUA==",
+      "sha256": "6644ab93a1233ad731a58ac2aeec1dd0d5437994fbb24bf0574fb0df22f2cfb8",
+      "integrity": "sha512-PFUtS09VeMMUH5OMdv1+FW7zlFpLwxY/BNUkXkuUG3rdBCegVNNcZfZ7HrpNehpElXsVXAlBwqHoLqWC9IxwGA==",
       "releaseStatus": "coordinated-pr",
       "openerProjection": {
         "file": "test/fixtures/producer-contracts/pr-opener-projection.json",
@@ -269,7 +269,7 @@
         "producerRevision": "f37c7489439a8b53eafecb38870f75fe9f07fa57",
         "capture": "Immutable producer projection executed on disposable SQLite; authorization stub permits open-launch and repair-launch only. Later remediation, superseded opener and foreign opener are simultaneous inputs. No endpoint or live state used."
       },
-      "releaseRevision": "1873a2dd17af8001695b0a0de868b4131bd0ad20"
+      "releaseRevision": "dac9b8690234648346b052ab16f5ee77bee5c191"
     }
   },
   "refresh": "python3 scripts/contracts/refresh.py ../agent-os",

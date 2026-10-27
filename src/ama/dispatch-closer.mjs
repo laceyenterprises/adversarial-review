@@ -3410,6 +3410,8 @@ export const __testables__ = Object.freeze({
   normalizeAmaLivePrProbeResult,
   fetchMergeCommitShaBestEffort,
   emitWorkerGitMergeSignalBestEffort,
+  readMergedBuildCompletionSignal,
+  readMergedBuildCompletionSignalAsync,
 });
 
 function resolveRollupRequiredChecks(rollup) {
@@ -3643,7 +3645,7 @@ function* readMergedBuildCompletionSignalSteps({
   readBuildCompletionProducerEvidenceImpl = readBuildCompletionProducerEvidence,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
 } = {}) {
-  let result = yield readBuildCompletionSignalForPrImpl({
+  const readArgs = {
     repo,
     prNumber,
     signalKind: 'merged',
@@ -3652,8 +3654,19 @@ function* readMergedBuildCompletionSignalSteps({
     ledgerTarget,
     ledgerDbPath,
     env, signal,
-  });
-  if (!result) return { ok: false, reason: 'ledger-read-failed' };
+  };
+  let result;
+  try { result = yield readBuildCompletionSignalForPrImpl(readArgs); }
+  catch { result = {ok:false,reason:'worker-observation-unavailable'}; }
+  const missingCapture = (failure) => {
+    const readReason = failure?.reason === 'worker-observation-scope-denied'
+      ? 'merge-capture-read-scope-denied' : 'merge-capture-read-unavailable';
+    logger?.warn?.(JSON.stringify({event:'ama_closer.merge_capture_read_degraded',repo,prNumber,reason:readReason}));
+    // Missing capture is a reconciliation hint, never merge/absence authority.
+    // Live PR state, review and merge gates remain independently required.
+    return {ok:false,reason:'missing-build-completion-signal',readReason};
+  };
+  if (!result || !result.ok && !isCleanMissingMergedSignal(result)) return missingCapture(result);
   if (result.ok) {
     const producerHeadSha = String(result.row?.head_sha || '').trim().toLowerCase() || null;
     const expectedHeadSha = String(headSha || '').trim().toLowerCase() || null;
@@ -3680,7 +3693,8 @@ function* readMergedBuildCompletionSignalSteps({
     result = { ok: false, reason: 'missing-build-completion-signal' };
   }
   if (isCleanMissingMergedSignal(result)) {
-    const producerEvidence = yield readBuildCompletionProducerEvidenceImpl({
+    let producerEvidence;
+    try { producerEvidence = yield readBuildCompletionProducerEvidenceImpl({
       repo,
       signalKind: 'merged',
       hqRoot,
@@ -3688,7 +3702,7 @@ function* readMergedBuildCompletionSignalSteps({
       ledgerTarget,
       ledgerDbPath,
       env, signal,
-    });
+    }); } catch { producerEvidence = {ok:false,reason:'worker-observation-unavailable'}; }
     if (producerEvidence?.ok) {
       return {
         ...result,
@@ -3697,7 +3711,7 @@ function* readMergedBuildCompletionSignalSteps({
       };
     }
     return {
-      ...(producerEvidence || { ok: false, reason: 'missing-build-completion-producer-evidence' }),
+      ...(producerEvidence?.reason === 'missing-build-completion-producer-evidence' ? producerEvidence : missingCapture(producerEvidence)),
       producerEvidence: producerEvidence || null,
       prSignal: result,
     };
@@ -3706,11 +3720,12 @@ function* readMergedBuildCompletionSignalSteps({
 }
 
 function isCleanMissingMergedSignal(result) {
-  return result?.ok === false && result.reason === 'missing-build-completion-signal';
+  return result?.ok === false && result.reason === 'missing-build-completion-signal' && !result.readReason;
 }
 
 function isUnknownMergedSignal(result) {
-  return result?.ok === false && !isCleanMissingMergedSignal(result);
+  return result?.ok === false && !isCleanMissingMergedSignal(result)
+    && !['merge-capture-read-scope-denied','merge-capture-read-unavailable'].includes(result.readReason);
 }
 
 function retainExistingAmaCloserDispatch(existingRecord, workerClass, status) {
@@ -5321,6 +5336,17 @@ async function maybeDispatchAmaCloserAttempt({
     readBuildCompletionProducerEvidenceImpl,
     readBuildCompletionSignalForPrImpl,
   });
+  if (mergedSignal?.readReason && existingRecord) {
+    try {
+      updateDispatchRecord(rootDir, existingDispatchIdentity, current => current ? {
+        ...current,mergeCaptureReadReason:mergedSignal.readReason,
+        mergeCaptureReadAt:dispatchContext.dispatchedAt,
+      } : null);
+    } catch {
+      logger?.warn?.(JSON.stringify({event:'ama_closer.merge_capture_diagnostic_unavailable',repo,prNumber,
+        reason:mergedSignal.readReason}));
+    }
+  }
   if (mergedSignal?.ok) {
     if (existingRecord?.launchRequestId || existingRecord?.dispatchId) {
       finalizeAmaCloserLeaseBestEffort({
@@ -7937,6 +7963,10 @@ async function maybeDispatchAmaCloserAttempt({
       lastObservedStatus: 'starting',
       lastObservedAt: dispatchContext.dispatchedAt,
       lastError: null,
+      ...(mergedSignal?.readReason ? {
+        mergeCaptureReadReason: mergedSignal.readReason,
+        mergeCaptureReadAt: dispatchContext.dispatchedAt,
+      } : {}),
     };
   });
 
@@ -7978,6 +8008,7 @@ async function maybeDispatchAmaCloserAttempt({
     harnessResolution,
     eligibilityReasons: verdict.trace,
     leasePath: leaseResult.leasePath,
+    ...(mergedSignal?.readReason ? {mergeCaptureReadReason:mergedSignal.readReason} : {}),
     ...(leaseUpdateError ? { leaseUpdateError } : {}),
   };
   } finally {

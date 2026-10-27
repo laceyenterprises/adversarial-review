@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {readActiveDagRunsForPlanAsync} from '../src/session-ledger-read-adapter.mjs';
 import { checkLivePackMerge } from '../src/live-pack-merge-check.mjs';
 
 const head = 'a'.repeat(40);
@@ -53,3 +54,29 @@ test('REMLABEL-01: head movement or waiver removal during the check refuses merg
 test('REMLABEL-01: finished packs continue through the merge preflight', async () => {
   assert.equal((await checkLivePackMerge({ ...fixture(), readActiveDagRunsImpl: async () => ({ ok: true, runs: [] }) })).ok, true);
 });
+
+
+for (const status of ['not_live','scope_denied','unavailable','found','unknown_future_outcome']) {
+  test(`SDK ${status} holds only the PR touching the affected plan`, async () => {
+    const args = fixture();
+    args.readActiveDagRunsImpl = query => readActiveDagRunsForPlanAsync({...query,
+      dispatchSession:{dispatchLookup:async selector => {
+        assert.equal(selector.plan_id, 'sample-pack-plan');
+        return {schema_version:1,observation:'dag_runs',status,complete:true,next_offset:null,
+          scope_complete:false,mutation_authority:false,
+          items:status === 'found' ? [{run_id:'synthetic-run',state:'running'}] : []};
+      }}});
+    const result = await checkLivePackMerge(args);
+    assert.equal(result.ok, status === 'not_live');
+    if (['scope_denied','unavailable','unknown_future_outcome'].includes(status)) {
+      assert.equal(result.reason, `live-pack-read-${status === 'scope_denied' ? 'scope-denied' : 'unavailable'}:sample-pack-plan`);
+      assert.match(result.findings[0].reason, /plan sample-pack-plan/);
+      assert.match(result.findings[0].reason, status === 'scope_denied'
+        ? /live-pack-read-scope-denied/ : /live-pack-read-unavailable/);
+    }
+    const unrelated = await checkLivePackMerge({...args,prNumber:2,
+      listFilesImpl:async () => ['src/synthetic.mjs'],
+      readActiveDagRunsImpl:() => assert.fail('unrelated PR must not read any plan')});
+    assert.equal(unrelated.ok, true, 'no global refusal survives a plan read');
+  });
+}

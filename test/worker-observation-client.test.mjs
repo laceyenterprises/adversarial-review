@@ -204,7 +204,7 @@ test('daemon branch provenance cannot replace missing opener evidence or scan wo
 // Observation failures must enter the owner's existing teardown hold codes.
 test('public read failures preserve teardown-safe worker lookup classification',async()=>{
   const {lookupOriginalWorkerRunStatus}=await import('../src/merge-agent-original-worker.mjs');
-  for(const reason of ['dispatch-read-unavailable','worker-observation-unavailable','worker-observation-inconclusive']) {
+  for(const reason of ['dispatch-read-unavailable','worker-observation-unavailable','worker-observation-scope-denied','worker-observation-inconclusive']) {
     const result=await lookupOriginalWorkerRunStatus({workspace:{launchRequestId:'launch'},
       runRecord:{runId:'run'},readLatestWorkerRunStatusImpl:async()=>({ok:false,reason})});
     assert.equal(result.found,false);

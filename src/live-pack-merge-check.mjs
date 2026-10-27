@@ -30,8 +30,10 @@ export async function checkLivePackMerge({ repo, prNumber, headSha, execFileImpl
       fetchFileAtRefImpl, readActiveDagRunsImpl, trustedStampLoginsImpl,
       resolvePrAuthorImpl: async () => normalizeActorLogin(pr.user?.login, { typename: pr.user?.type }) });
     if (inputsOf(await readPrImpl()) !== inputsOf(pr)) return { ok: false, reason: 'live-pack-inputs-changed' };
+    const unreadablePlan = result.findings.find(finding => finding.read_outcome);
     return { ok: result.findings.length === 0,
-      reason: result.findings.length ? 'operator-label-required:live-pack-edit-approved' : 'live-pack-clear',
+      reason: unreadablePlan ? `live-pack-read-${unreadablePlan.read_outcome}:${unreadablePlan.plan_id}`
+        : result.findings.length ? 'operator-label-required:live-pack-edit-approved' : 'live-pack-clear',
       headSha, findings: result.findings, waived: result.waived, exemptions: result.exemptions };
   } catch {
     return { ok: false, reason: 'live-pack-check-unreadable' };

@@ -147,7 +147,12 @@ function dagSelector(args) {
   return {observation:'dag_runs', plan_id:args.planId, states:args.states ?? LIVE_DAG_RUN_STATES, limit:100};
 }
 function dagResult(result, args) {
-  return result.ok ? {...result, runs:result.rows.slice(0, Math.max(1, Math.min(20, Number.parseInt(args.limit,10)||20)))} : result;
+  // Keep the producer's authorization/liveness answer explicit for PR-local
+  // guards. An unavailable or unknown answer never becomes an empty run list.
+  if (!result.ok) return {...result,planId:args.planId,
+    outcome:result.reason === 'worker-observation-scope-denied' ? 'scope-denied' : 'unavailable'};
+  return {...result,planId:args.planId,outcome:result.outcome ?? 'allowed',
+    runs:result.rows.slice(0, Math.max(1, Math.min(20, Number.parseInt(args.limit,10)||20)))};
 }
 export function readActiveDagRunsForPlan(args = {}) {
   if (!normalizeText(args.planId)) return {ok:false,reason:'missing-plan-id'};

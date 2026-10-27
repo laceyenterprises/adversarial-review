@@ -510,3 +510,20 @@ test('LABELGATE-01: ordinary exit refund cannot reuse durable label/non-executio
   assert.equal(readHammerRetryCapLedger(rootDir, identity).attemptCount, 1);
   assert.equal(refundHammerRetryDispatch(rootDir, identity, { ...args, launchRequestId: NEXT_LRQ }).refunded, true);
 });
+
+
+for (const reason of ['worker-observation-scope-denied','worker-observation-unavailable']) {
+  test(`DOG-11: degraded capture ${reason} cannot authorize a non-execution refund`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'capture-no-refund-'));
+    t.after(() => rmSync(rootDir, {recursive:true,force:true}));
+    seedDeadHammer(rootDir, {retryCount:1});
+    const deps = closerDeps({launchRows:{[DEAD_LRQ]:{status:'failed',failure_class:'worker_killed',failure_detail:'SIGTERM'}}});
+    await maybeDispatchAmaCloser({
+      ...closerArgs(rootDir, {dispatchedAt:'2026-10-10T23:07:00Z'}),...deps,
+      readBuildCompletionSignalForPrImpl:() => ({ok:false,reason}),
+    });
+    const ledger = readHammerRetryCapLedger(rootDir, {repo:REPO,prNumber:PR_NUMBER});
+    assert.equal(ledger.unexecutedLaunchRequestIds, undefined);
+    assert.ok(ledger.lifetimeAttemptCount >= 1, 'failed read cannot erase launch spend');
+  });
+}

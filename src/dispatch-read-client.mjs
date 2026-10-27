@@ -207,12 +207,13 @@ export async function readWorkerObservation(selector, args = {}) {
       const reply = await boundedLookup({...selector, offset}, {...args,timeoutMs:remaining});
       const evidence = checkedObservation(reply, selector, offset);
       if (!evidence.ok) return evidence;
+      if (evidence.notLive) return {...observationRows([], selector.observation),outcome:'not-live'};
       rows.push(...evidence.rows);
       if (reply.complete) return observationRows(rows, selector.observation);
       offset = reply.next_offset;
     }
     return {ok:false,reason:'worker-observation-unavailable'};
-  } catch (error) { cachedSession = null; return unavailable(error); }
+  } catch (error) { cachedSession = null; return observationFailure(error); }
 }
 export function readWorkerObservationSync(selector, args = {}) {
   try {
@@ -225,12 +226,21 @@ export function readWorkerObservationSync(selector, args = {}) {
       const reply = dispatchReadTransport.observationSync({...selector,offset}, {...args,timeoutMs:remaining});
       const evidence = checkedObservation(reply, selector, offset);
       if (!evidence.ok) return evidence;
+      if (evidence.notLive) return {...observationRows([], selector.observation),outcome:'not-live'};
       rows.push(...evidence.rows);
       if (reply.complete) return observationRows(rows, selector.observation);
       offset = reply.next_offset;
     }
     return {ok:false,reason:'worker-observation-unavailable'};
-  } catch (error) { cachedSession = null; return unavailable(error); }
+  } catch (error) { cachedSession = null; return observationFailure(error); }
+}
+function observationFailure(error) {
+  if (Number(error?.status ?? error?.statusCode ?? error?.response?.status) === 403
+    || ['scope_denied','read_scope_denied','dispatch_read_scope_denied','dag_read_scope_denied'].includes(error?.code)
+    || /^app-contract (?:403|scope_denied|read_scope_denied|dispatch_read_scope_denied|dag_read_scope_denied)\b/.test(error?.message ?? '')) {
+    return {ok:false,reason:'worker-observation-scope-denied'};
+  }
+  return unavailable(error);
 }
 function observationRows(rows, observation) {
   if (!rows.length && ['workers','sessions','provenance'].includes(observation)) return {ok:false,reason:'worker-observation-inconclusive',detail:'authorized observation returned no rows'};
@@ -239,6 +249,15 @@ function observationRows(rows, observation) {
   return {ok:true,rows,row:rows[0],target:{backend:'app-contract',source:'app-sdk'}};
 }
 function checkedObservation(reply, selector, offset) {
+  // The producer's explicit refusal is distinct from an empty authorized page.
+  // Unknown statuses always remain unavailable, including on later pages.
+  if (reply?.schema_version === 1 && reply.observation === selector.observation
+    && reply.status === 'scope_denied') return {ok:false,reason:'worker-observation-scope-denied'};
+  if (reply?.schema_version === 1 && selector.observation === 'dag_runs'
+    && reply.observation === 'dag_runs' && reply.status === 'not_live'
+    && offset === 0 && reply.complete === true && reply.next_offset === null
+    && reply.scope_complete === false && reply.mutation_authority === false
+    && Array.isArray(reply.items) && reply.items.length === 0) return {ok:true,rows:[],notLive:true};
   const evidence = dispatchReadTransport.sdk().readWorkerObservations(reply);
   if (!evidence.available || reply.observation !== selector.observation
     || !reply.complete && (reply.next_offset !== offset + evidence.items.length || !evidence.items.length)) {
@@ -253,15 +272,17 @@ export async function readLatestReviewObservation(selector, args = {}) {
   try {
     const reply=await boundedLookup({...selector,limit:1,offset:0},args);
     const evidence=checkedObservation(reply,selector,0);
-    if(!evidence.ok || evidence.rows.length>1) return {ok:false,reason:'worker-observation-unavailable'};
+    if(!evidence.ok) return evidence;
+    if(evidence.rows.length>1) return {ok:false,reason:'worker-observation-unavailable'};
     return {...observationRows(evidence.rows,selector.observation),complete:reply.complete};
-  } catch(error) {cachedSession=null;return unavailable(error);}
+  } catch(error) {cachedSession=null;return observationFailure(error);}
 }
 export function readLatestReviewObservationSync(selector, args = {}) {
   try {
     const reply=dispatchReadTransport.observationSync({...selector,limit:1,offset:0},args);
     const evidence=checkedObservation(reply,selector,0);
-    if(!evidence.ok || evidence.rows.length>1) return {ok:false,reason:'worker-observation-unavailable'};
+    if(!evidence.ok) return evidence;
+    if(evidence.rows.length>1) return {ok:false,reason:'worker-observation-unavailable'};
     return {...observationRows(evidence.rows,selector.observation),complete:reply.complete};
-  } catch(error) {cachedSession=null;return unavailable(error);}
+  } catch(error) {cachedSession=null;return observationFailure(error);}
 }

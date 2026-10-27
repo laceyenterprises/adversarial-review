@@ -1,6 +1,6 @@
 // Read-only app boundary. No local ledger or filesystem fallback is permitted.
 import { loadAppSdkSync } from './app-sdk-loader.mjs';
-import { isTransientAppContractError } from './app-contract-retry.mjs';
+import { isTransientAppContractError, withAppContractTransientRetry } from './app-contract-retry.mjs';
 import { observeSynchronousChild } from './watcher-latency.mjs';
 
 let cachedSession;
@@ -90,7 +90,7 @@ export async function prepareWorkerObservationSession(args = {}) {
 }
 
 export async function readDispatchLaunches(selector, args = {}) {
-  try { return checked(await boundedLookup(selector, args), selector); }
+  try { return checked(await retryingDispatchLookup(selector, args), selector); }
   catch (error) {
     cachedSession = null;
     return unavailable(error);
@@ -136,6 +136,23 @@ export function launchProbe(result, launchRequestId, includeRetryChain) {
 // Bound caller settlement across registration and lookup. SDK HTTP requests
 // also receive the remaining physical timeout. AbortSignal settlement does not
 // imply physical cancellation; SDK 0.9.0 has no AbortSignal API.
+// One retry shares the caller's original deadline, including registration and
+// retry delay. Never grant another full timeout or retry after abort/expiry.
+async function retryingDispatchLookup(selector, args) {
+  const deadline = Date.now() + (args.timeoutMs ?? 8000);
+  return boundedCall(() => withAppContractTransientRetry(async () => {
+    args.signal?.throwIfAborted();
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw Object.assign(new Error('dispatch lookup timed out'), {code:'ETIMEDOUT'});
+    try {
+      return await dispatchReadTransport.lookup(selector, {...args, timeoutMs: remaining});
+    } catch (error) {
+      cachedSession = null;
+      throw error;
+    }
+  }, {maxAttempts: 2}), args);
+}
+
 async function boundedLookup(selector, args) {
   return boundedCall(() => dispatchReadTransport.lookup(selector, args), args);
 }

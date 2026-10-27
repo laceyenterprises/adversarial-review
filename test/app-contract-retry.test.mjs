@@ -84,3 +84,16 @@ test('withAppContractTransientRetry does not retry a fatal error', async () => {
   );
   assert.equal(calls, 1);
 });
+
+
+test('dispatch endpoint JSON, empty and non-JSON 503 SDK errors are transient', () => {
+  for (const error of [
+    {status:503}, {statusCode:503}, {response:{status:503}},
+    new Error('app-contract 503: Service Unavailable'),
+    new Error('app-contract dispatch_read_unavailable: dispatch evidence unavailable'),
+    new Error('app-contract read_capacity_exhausted: retry later'),
+    new Error('app-contract bad_response: non-JSON response (status 503): <html>'),
+  ]) assert.equal(isTransientAppContractError(error), true);
+  assert.equal(isTransientAppContractError(new Error('app-contract bad_response: non-JSON response (status 403): denied')), false);
+  assert.equal(isTransientAppContractError(new Error('app-contract dispatch_scope_denied: grant required')), false);
+});

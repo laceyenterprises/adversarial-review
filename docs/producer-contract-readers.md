@@ -420,9 +420,14 @@ Session reuse is keyed by connection settings, excluding caller timeout. Each
 HTTP request receives its own remaining budget (8 seconds by default; receipt
 recovery supplies its load-aware 30-second budget). Every
 connection/read failure evicts the session. Results expose the shared transient
-classification and fixed secret-free diagnostics, allowing the existing receipt
-owner to retry at most three times with its 100/200ms backoff; no nested retry
-loop is added. A caller deadline or abort bounds settlement across registration
+classification and fixed secret-free diagnostics. Dispatch launch reads retry
+a transient failure once within the original
+caller deadline, including registration and the 50ms retry delay. Each attempt
+receives only the remaining physical HTTP timeout. JSON producer codes, empty
+503 responses and non-JSON 503 responses are transient. Exhaustion retains
+unreadable ownership; authorization failures and unproven absence are not retried.
+The existing receipt owner retains its outer retry policy within its own
+deadline. A caller deadline or abort bounds settlement across registration
 and lookup. SDK 0.9.0 does not accept an abort signal: its outstanding HTTP work
 can outlive caller cancellation and follows SDK transport timeout handling. Full
 transport cancellation requires a producer SDK update. Sync compatibility reads

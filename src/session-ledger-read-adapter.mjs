@@ -5,7 +5,7 @@ import { withLiveLaunchRetry, launchRequestInFlight, isTerminalLaunchRequestStat
   launchRequestMeaning } from './ama/launch-request-status.mjs';
 
 function recoveryScope(args) {
-  return args.repo ? { project_ref: args.projectRef || 'adversarial-merge-authority', repo: args.repo } : {};
+  return args.repo ? { project_ref: args.projectRef || args.project_ref || 'adversarial-merge-authority', repo: args.repo } : {};
 }
 
 function normalizeText(value) { return String(value ?? '').trim() || null; }

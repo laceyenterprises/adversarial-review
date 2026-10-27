@@ -908,11 +908,11 @@ for (const scenario of ['dead', 'hostless-dead', 'timeout', 'live', 'hostless-li
 }
 
 for (const launchStatus of ['succeeded', 'running']) {
-  test(`HAMLANEWAIT-02: closure/rescue routes a dispatched lease with ${launchStatus} launch truth`, async t => {
+  test(`HAMLANEWAIT-02: closure/rescue reconciles an expired dispatched lease with ${launchStatus} launch truth`, async t => {
     const rootDir = finalRound(t), identity = { repo, prNumber, headSha };
     const hqRoot = join(rootDir, 'hq');
     const launchRequestId = 'synthetic-lane-busy';
-    acquireAmaCloserLease({ rootDir, ...identity, now: started });
+    acquireAmaCloserLease({ rootDir, ...identity, now: started, dispatchTimeoutMs: 1 });
     updateAmaCloserLease({ rootDir, ...identity, status: 'dispatched', lrqId: launchRequestId, now: started });
     updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity, state: 'dispatched',
       launchRequestId, dispatchedAt: started, lastObservedStatus: 'running' }));
@@ -930,7 +930,11 @@ for (const launchStatus of ['succeeded', 'running']) {
       fetchLatestHeadReviewBodiesImpl: async () => [body],
       proveCloserAuthoredStaleHeadImpl: async () => ({ proven: false }),
       closerLeaseLivenessOptions: {
-        readLaunchRequestStatusImpl: async () => ({ ok: true, row: { status: launchStatus } }),
+        readLaunchRequestStatusImpl: async () => {
+          assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched',
+            'lease expiry cannot abandon a launch before its outcome is reconciled');
+          return { ok: true, row: { status: launchStatus } };
+        },
         readMergedSignalImpl: async () => assert.fail('recorded no-merge deferral requires no merge signal'),
       },
       probeClosureOwnershipImpl: options => probeOrphanOwnership({ ...options,

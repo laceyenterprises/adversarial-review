@@ -866,6 +866,16 @@ counter. Reordered labels, checks, required contexts and detail reasons are
 unchanged facts; older-head decline details do not affect the fingerprint.
 Owner states and merge authority are unchanged.
 
+IDENTITYREAD503-01: opener provenance reads retry transient dispatch failures
+at most three times within one load-aware 8-second nominal budget per selector,
+including 100/200ms backoff and bounded attempt timeouts. Exhausted reads supply
+`identity-read-transient` on `worker-identity-unresolved`, selecting ordinary
+snapshot refresh and permitting same-head retry through the shared classifier.
+A failed head-independent read supersedes strict-selector absence. Empty or
+ambiguous opener evidence, disabled reads and scope denial retain fail-closed
+recovery. Existing identity, exact-head, CI and lease predicates still authorize
+every execution; lifecycle states and smoke promises are unchanged.
+
 SAFETYSTOPOWNER-01 supplies an executor for existing R05 closure recovery:
 an audited deterministic refusal with a concrete `next` gets one scoped coding
 PR update per head/refusal key. The recovery receipt and existing hammer ledger

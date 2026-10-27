@@ -2325,6 +2325,19 @@ latest authorized, non-superseded `pr_opened` record). A head-independent retry
 preserves opener identity after remediation moves the head. `builder_identity`
 is a distinct selector that permits later completions and is not opener evidence.
 
+IDENTITYREAD503-01: each opener provenance selector retries transient HTTP 503,
+dispatch-read-unavailable, worker-observation-unavailable and timeout failures
+up to three attempts with 100/200ms backoff inside one load-aware 8-second
+nominal budget. Each attempt receives at most one third of that budget, leaving
+room to retry a timeout. Exhaustion declines `worker-identity-unresolved` with
+`identity-read-transient`; the shared decline classifier permits ordinary
+snapshot refresh and same-head retry. An exhausted strict read does not start a
+fresh head-independent or diagnostic branch-read budget. A transient failure
+on the head-independent lookup takes precedence over an empty strict lookup.
+Zero or multiple opener rows, disabled observations and scope denial still
+fail closed without transient retry classification. No config activation or
+live repair is required by this change.
+
 Worker observations are staged separately with the default-off env-only
 `ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED=1`. The already-enabled own-launch
 `ADVERSARIAL_DISPATCH_READS_ENABLED` HCP flag stays independent. Missing grants,

@@ -11,6 +11,7 @@ import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orche
 import { runDaemonCleanMergeAttempt } from '../src/daemon-clean-merge.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import { isTransientDaemonDecline } from '../src/ama/daemon-decline.mjs';
+import { readDaemonBuildIdentity } from '../src/daemon-worker-identity.mjs';
 
 const HEAD = 'a'.repeat(40), OLD = 'b'.repeat(40), OTHER = 'c'.repeat(40);
 const AT = '2026-01-01T00:00:00.000Z';
@@ -97,6 +98,7 @@ for (const result of [
   { disposition: 'failed-closed', reason: 'worker-identity-unresolved', reasons: ['missing-produced-head-attestation'] },
   { disposition: 'failed-closed', reason: 'worker-identity-unresolved', reasons: ['head-attestation-chain-read-failed'] },
   { disposition: 'failed-closed', reason: 'worker-identity-unresolved', reasons: ['build-completion-read-failed'] },
+  { disposition: 'failed-closed', reason: 'worker-identity-unresolved', reasons: ['identity-read-transient'] },
   { disposition: 'not-taken', reason: 'not-eligible', reasons: ['branch-protection-missing-gate'] },
   { disposition: 'not-taken', reason: 'not-eligible', reasons: ['duplicate-family-unresolved'] },
   { disposition: 'not-taken', reason: 'protective-predecessor-state-unreadable' },
@@ -111,6 +113,7 @@ for (const result of [
   if (result.reason === 'merge-retry-budget-exhausted') assert.equal(shared.decision.actor, 'hammer');
   if (result.reasons?.includes('head-attestation-chain-read-failed')) assert.equal(shared.decision.reason, 'snapshot-refresh');
   if (result.reasons?.includes('build-completion-read-failed')) assert.equal(shared.decision.reason, 'snapshot-refresh');
+  if (result.reasons?.includes('identity-read-transient')) assert.equal(shared.decision.reason, 'snapshot-refresh');
   if (result.reasons?.includes('missing-produced-head-attestation')) assert.equal(shared.decision.actor, 'closure-recovery');
   if (result.reason === 'unrecognized-synthetic-reason') assert.equal(shared.decision.actor, 'watcher');
   if (result.reasons?.some(reason => ['branch-protection-missing-gate', 'duplicate-family-unresolved'].includes(reason))
@@ -123,7 +126,9 @@ for (const result of [
 
 test('identity recovery requires explicit read failures and never clears missing provenance', () => {
   for (const reasons of [undefined, [], ['worker-identity-unresolved'], ['missing-produced-head-attestation'],
-    ['head-attestation-chain-read-failed', 'worker-identity-unresolved']]) {
+    ['head-attestation-chain-read-failed', 'worker-identity-unresolved'],
+    ['identity-read-transient', 'worker-observation-inconclusive'],
+    ['identity-read-transient', 'unconfirmed-pr-opener-provenance']]) {
     const execution = { headSha: HEAD, reason: 'worker-identity-unresolved', reasons };
     assert.equal(isTransientDaemonDecline(execution), false);
     const refused = pair({ progress: { daemonExecution: execution } });
@@ -132,7 +137,7 @@ test('identity recovery requires explicit read failures and never clears missing
     assert.equal(isTransientDaemonDecline({ reason: 'gate-not-eligible', reasons }), false);
   }
   for (const reasons of [['head-attestation-chain-read-failed'], ['build-completion-read-failed'],
-    ['head-attestation-chain-read-failed', 'build-completion-read-failed']]) {
+    ['head-attestation-chain-read-failed', 'build-completion-read-failed'], ['identity-read-transient']]) {
     const execution = { headSha: HEAD, reason: 'worker-identity-unresolved', reasons };
     assert.equal(isTransientDaemonDecline(execution), true);
     const held = pair({ progress: { daemonExecution: execution } });
@@ -140,6 +145,37 @@ test('identity recovery requires explicit read failures and never clears missing
     assert.equal(observeDaemonGate(held, gate()).decision.action, 'daemon-merge');
     assert.equal(isTransientDaemonDecline({ ...execution, permanent: true }), false);
   }
+});
+
+test('IDENTITYREAD503-01: exhausted opener read reaches the real decline and same-head retry decision', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'identity-read-decline-'));
+  t.after(() => rmSync(rootDir, {recursive:true,force:true}));
+  let calls = 0;
+  const first = pair();
+  const result = await runDaemonCleanMergeAttempt({
+    rootDir, repoPath:'fixture/subject-06', prNumber:6,
+    cfg:{autonomousMergeExecutionEnabled:true,strictMode:true,lha:{consumeAttestations:false}},
+    candidate:{headSha:HEAD,baseBranch:'main',prState:'OPEN'}, currentPrHeadSha:HEAD,
+    gateSnapshot:{reviewedHeadSha:HEAD,settledReview:{verdict:'approved'}},reviewState:clean,
+    sharedNextAction:first,passSnapshot:first.snapshot,env:{HQ_ROOT:rootDir},logger:quiet,
+    fetchRollupImpl:async () => ({state:'OPEN',headRefOid:HEAD,checks:green,mergeable:'MERGEABLE',labels:[]}),
+    readBuildCompletionSignalForPrImpl:args => readDaemonBuildIdentity(args, {sleepImpl:async()=>{}}),
+    dispatchSession:{dispatchLookup:async () => {
+      calls++;
+      throw Object.assign(new Error('synthetic service unavailable'), {status:503});
+    }},
+    attemptDaemonCleanMergeImpl:() => assert.fail('unresolved identity cannot reach merge'),
+  });
+  assert.equal(calls, 3);
+  assert.equal(result.reason, 'worker-identity-unresolved');
+  assert.deepEqual(result.reasons, ['identity-read-transient']);
+  assert.equal(result.leaseAcquired, false);
+  assert.equal(isTransientDaemonDecline(result), true);
+  const held = observeDaemonResult(first, result);
+  assert.equal(held.decision.reason, 'snapshot-refresh');
+  const refreshed = observeDaemonGate(held, gate());
+  assert.equal(refreshed.decision.action, 'daemon-merge');
+  assert.equal(refreshed.decision.head, HEAD);
 });
 
 test('wrapped progress clears a superseded decline inside its payload and retains provenance', () => {

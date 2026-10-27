@@ -1,5 +1,7 @@
+import { addCiRegressionFinding } from './ci-regression-finding.mjs';
 import { infrastructureOnlyFailures, recordedCiFailures, CI_INFRASTRUCTURE_STOP_REASONS } from './ci-infrastructure.mjs';
 import { MAX_BRANCH_RESOLUTION_ATTEMPTS, resolveFollowUpBranch } from './follow-up-branch.mjs';
+import { requiredFollowUpOperatorLabel, readFollowUpOperatorLabel, operatorLabelSatisfiesStop } from './follow-up-operator-label.mjs';
 import { captureFindingRemediationSafe } from './finding-remediation-capture.mjs';
 import { writeFollowUpJob, withFollowUpJobLock } from './follow-up-job-write.mjs';
 import { followUpJobFilePrefix, sanitizeRepo } from './follow-up-job-names.mjs';
@@ -2094,6 +2096,9 @@ function moveTerminalJobRecord({
     throw err;
   }
 
+  if (resolve(terminalPath) === resolve(jobPath)) {
+    return { job: currentJob, jobPath: terminalPath, alreadyTerminal: true };
+  }
   if (existsSync(terminalPath)) {
     rmSync(jobPath, { force: true });
     return { job: readFollowUpJob(terminalPath), jobPath: terminalPath, alreadyTerminal: true };
@@ -3405,6 +3410,8 @@ function requeueFollowUpJobForNextRound({
   // (the CLI) get the safe fallback below.
   revisionRef = null,
   stopMetadata = null,
+  readOperatorLabelImpl = readFollowUpOperatorLabel,
+  ciRegressionFinding = null,
 }) {
   const currentJob = readFollowUpJob(jobPath);
   // This terminal handoff is progress. Keep its completed provenance even at
@@ -3432,7 +3439,13 @@ function requeueFollowUpJobForNextRound({
   if (!['completed', 'failed', 'stopped'].includes(currentJob.status)) {
     throw new Error(`Cannot requeue follow-up job ${currentJob.jobId} from status ${currentJob.status}`);
   }
-  if (currentJob.status === 'stopped' && !isRetriggerableStoppedFollowUpJob(currentJob)) {
+  const requiredLabel = requiredFollowUpOperatorLabel(currentJob);
+  const operatorLabelSatisfaction = requiredLabel
+    ? readOperatorLabelImpl({ repo: currentJob.repo, prNumber: currentJob.prNumber, label: requiredLabel }) : null;
+  if (operatorLabelSatisfaction && revisionRef && operatorLabelSatisfaction.headSha !== revisionRef) {
+    throw new Error(`Cannot requeue follow-up job ${currentJob.jobId}: operator-label observation head moved`);
+  }
+  if (currentJob.status === 'stopped' && !isRetriggerableStoppedFollowUpJob(currentJob, { operatorLabelSatisfaction })) {
     const code = currentJob?.remediationPlan?.stop?.code || 'unknown';
     throw new Error(`Cannot requeue follow-up job ${currentJob.jobId} from stopped:${code}`);
   }
@@ -3489,12 +3502,20 @@ function requeueFollowUpJobForNextRound({
     previousStopCode === 'revision-superseded'
   ) {
     nextRevisionRef = null;
+  } else if (operatorLabelSatisfaction?.headSha) {
+    nextRevisionRef = operatorLabelSatisfaction.headSha;
   } else {
     nextRevisionRef = currentJob?.revisionRef ?? null;
   }
 
   const nextJob = {
     ...currentJob,
+    ...(ciRegressionFinding ? {
+      reviewBody: addCiRegressionFinding(currentJob.reviewBody, ciRegressionFinding),
+      critical: true,
+      nonBlockingOnly: false,
+      finalRound: null,
+    } : {}),
     revisionRef: nextRevisionRef,
     ...(previousStopCode === 'branch-unresolved' ? {
       branchResolution: { ...currentJob.branchResolution, attempts: 0, retryAfter: requestedAt },
@@ -3512,6 +3533,9 @@ function requeueFollowUpJobForNextRound({
       ...(currentJob.remediationPlan || buildRemediationRoundPlan(maxRounds)),
       stopReason: null,
       stop: null,
+      ...(operatorLabelSatisfaction ? { operatorLabelSatisfactions: [
+        ...(currentJob.remediationPlan?.operatorLabelSatisfactions || []), operatorLabelSatisfaction,
+      ] } : {}),
       nextAction: {
         type: 'consume-pending-round',
         round: currentRound + 1,
@@ -3593,9 +3617,10 @@ function stopFollowUpJob({
   });
 }
 
-function isRetriggerableStoppedFollowUpJob(job) {
+function isRetriggerableStoppedFollowUpJob(job, { operatorLabelSatisfaction = null } = {}) {
   if (job?.status !== 'stopped') return false;
-  return RETRIGGERABLE_STOP_CODE_SET.has(job?.remediationPlan?.stop?.code);
+  return RETRIGGERABLE_STOP_CODE_SET.has(job?.remediationPlan?.stop?.code)
+    || operatorLabelSatisfiesStop(job, operatorLabelSatisfaction);
 }
 
 export {

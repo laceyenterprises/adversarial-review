@@ -1,9 +1,12 @@
-import { requeueFollowUpJobForNextRound } from './follow-up-jobs.mjs';
+import { createFollowUpJob, requeueFollowUpJobForNextRound, resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
+import { addCiRegressionFinding } from './ci-regression-finding.mjs';
+import { observeClosureWait } from './ama/closure-wait.mjs';
 import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import { inspectRemediationCiRegression } from './remediation-ci-regression.mjs';
 import { formatCiCheckList } from './ci-check-format.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
-import { isCompletedFinalRemediationJob } from './comment-only-final-round.mjs';
+import { isCompletedFinalRemediationJob, scanArchivedStoppedFollowUpJobs } from './comment-only-final-round.mjs';
+import { RECOVERY_SOURCE_PATH } from './comment-only-recovery-record.mjs';
 import { recoverCancelledChecks, recoverInfrastructureChecks } from './ci-recovery.mjs';
 
 const DEFAULT_CI_BLOCKED_REREVIEW_RECHECK_MS = 5 * 60 * 1000;
@@ -117,6 +120,10 @@ async function guardRereviewCiBeforeReviewer({
   inspectCiImpl = inspectRemediationCiRegression,
   latestJobFinder = findLatestFollowUpJob,
   requeueImpl = requeueFollowUpJobForNextRound,
+  createJobImpl = createFollowUpJob,
+  summarizeLedgerImpl = summarizePRRemediationLedger,
+  readOperatorLabelImpl,
+  readPRHeadImpl,
   now = () => new Date().toISOString(),
 } = {}) {
   if (passKind !== 'rereview') {
@@ -164,13 +171,76 @@ async function guardRereviewCiBeforeReviewer({
     } catch (error) {
       log.warn?.(`[watcher] CI recovery unavailable for ${repo}#${prNumber}: ${error.message}`);
     }
-    const latest = latestJobFinder(rootDir, { repo, prNumber });
+    const reason = buildRereviewCiRegressionReason({ repo, prNumber, ciGate });
+    const blockOwnerless = async (result, detail) => {
+      const stop = result.job?.remediationPlan?.stop?.code || result.job?.status || 'no-job';
+      const plan = result.job?.remediationPlan;
+      const budget = Number(plan?.maxRounds) > 0 && Number(plan?.currentRound) >= Number(plan.maxRounds)
+        ? `; round-budget-exhausted (${plan.currentRound}/${plan.maxRounds})` : '';
+      const blocker = `ci-regression-ownerless: ${stop}${budget}: ${detail}`;
+      log.warn?.(JSON.stringify({ event: 'ama.closure_blocker', repo, pr: prNumber,
+        headSha: ciGate.headSha, reason: blocker }));
+      let page;
+      try {
+        page = await observeClosureWait({ rootDir, repo, prNumber, headSha: ciGate.headSha || reviewerHeadSha,
+          reason: `${blocker}. Failed external CI: ${formatCiCheckList(ciGate.failedChecks)}. Remediation cannot own this unreviewed head; operator action is required.`,
+          immediate: true, waitClass: 'ci-regression-ownerless',
+          ...(deliverAlertImpl ? { pageImpl: deliverAlertImpl } : {}) });
+      } catch (error) {
+        log.warn?.(`[watcher] CI-regression closure blocker page failed: ${error.message}`);
+        page = { error: error.message };
+      }
+      return { ...result, closureBlocker: blocker, needsOperator: true, page,
+        // Keep admission retryable when transport failed, including cap stops.
+        ...(page?.error ? { parkReview: false, hammerOwner: false } : {}) };
+    };
+    const createCurrentHeadJob = async () => {
+      try {
+        const ledger = summarizeLedgerImpl(rootDir, { repo, prNumber });
+        if (!Number.isSafeInteger(ledger.completedRoundsForPR) || ledger.completedRoundsForPR < 0) {
+          throw new Error('PR-wide remediation round accounting is unavailable');
+        }
+        const { roundBudget, riskClass } = resolveRoundBudgetForJob({ riskClass: ledger.latestRiskClass,
+          remediationPlan: { maxRounds: ledger.latestMaxRounds } }, { rootDir });
+        if (ledger.completedRoundsForPR >= roundBudget) {
+          return blockOwnerless(ciBlockedHammerOwnerResult({ repo, prNumber, ciGate, reason: 'ci-regression-no-job' }),
+            `round-budget-exhausted (${ledger.completedRoundsForPR}/${roundBudget})`);
+        }
+        if (!ciGate.headSha) throw new Error('current CI head is unavailable');
+        const created = createJobImpl({ rootDir, repo, prNumber, revisionRef: ciGate.headSha,
+          reviewPostedAt: now(), reviewerModel: 'codex', readPRHeadImpl,
+          reviewBody: addCiRegressionFinding('## Verdict\nRequest changes\n', reason),
+          priorCompletedRounds: ledger.completedRoundsForPR, maxRemediationRounds: roundBudget, riskClass });
+        if (created?.job?.status === 'pending') return { proceed: false, reason: 'ci-regression-created', ciGate, ...created };
+        // A concurrent admission may already have queued the exact same work.
+        if (created?.duplicateOf && ['pending', 'in_progress'].includes(created.duplicateOf.status)) {
+          return { proceed: false, reason: 'ci-regression-remediation-active', ciGate, ...created };
+        }
+        throw new Error('fresh current-head remediation was not queued');
+      } catch (error) {
+        return blockOwnerless({ proceed: false, reason: 'ci-regression-requeue-failed', ciGate }, error.message);
+      }
+    };
+    let latest;
+    try {
+      latest = latestJobFinder(rootDir, { repo, prNumber });
+      if (!latest) {
+        // Archival retains a stop's authority; it cannot mint a fresh job that
+        // forgets the required label, prior findings or spent rounds.
+        const archived = scanArchivedStoppedFollowUpJobs(rootDir, repo, prNumber, log)
+          .sort((a, b) => String(a.stoppedAt || a.createdAt || '').localeCompare(String(b.stoppedAt || b.createdAt || ''))).at(-1);
+        if (archived) latest = { job: archived, jobPath: archived[RECOVERY_SOURCE_PATH] };
+      }
+    } catch (error) {
+      return blockOwnerless({ proceed: false, reason: 'ci-regression-requeue-failed', ciGate },
+        `follow-up state is unreadable: ${error.message}`);
+    }
     if (!latest?.jobPath) {
       log.warn?.(
         `[watcher] Refusing re-review for ${repo}#${prNumber}: failed external CI ` +
           `(${formatCiCheckList(ciGate.failedChecks)}) but no follow-up job exists to requeue.`
       );
-      return ciBlockedHammerOwnerResult({ repo, prNumber, ciGate, reason: 'ci-regression-no-job' });
+      return createCurrentHeadJob();
     }
 
     // Preserve the completed round's start/result edge for the hammer's proof.
@@ -184,13 +254,18 @@ async function guardRereviewCiBeforeReviewer({
     // Automatic CI admission must not reopen a no-progress hand-off. Explicit
     // operator retriggers retain their separate stopped-job allowlist.
     if (latest.job?.status === 'stopped' && latest.job?.remediationPlan?.stop?.code === 'no-progress') {
-      return ciBlockedHammerOwnerResult({
+      return blockOwnerless(ciBlockedHammerOwnerResult({
         repo, prNumber, ciGate, reason: 'ci-regression-stopped',
         jobPath: latest.jobPath, job: latest.job,
-      });
+      }), 'automatic requeue cannot reopen a no-progress handoff');
     }
 
-    const reason = buildRereviewCiRegressionReason({ repo, prNumber, ciGate });
+    // Routine polling must not attempt a terminal-to-pending transition for
+    // remediation that already owns the head.
+    if (['in_progress', 'inProgress', 'pending'].includes(latest.job?.status)) {
+      return { proceed: false, reason: 'ci-regression-remediation-active', ciGate, jobPath: latest.jobPath, job: latest.job };
+    }
+
     try {
       const requeued = requeueImpl({
         rootDir,
@@ -200,6 +275,8 @@ async function guardRereviewCiBeforeReviewer({
         reason,
         revisionRef: reviewerHeadSha || ciGate.headSha || null,
         stopMetadata: { ciRegression: true },
+        ciRegressionFinding: reason,
+        readOperatorLabelImpl,
       });
       const nextStatus = requeued?.job?.status || null;
       if (nextStatus === 'pending') {
@@ -224,9 +301,9 @@ async function guardRereviewCiBeforeReviewer({
         job: requeued?.job || latest.job || null,
       };
       if (nextStatus === 'stopped') {
-        return ciBlockedHammerOwnerResult({ repo, prNumber, ciGate, reason: 'ci-regression-stopped', ...jobFields });
+        return blockOwnerless(ciBlockedHammerOwnerResult({ repo, prNumber, ciGate, reason: 'ci-regression-stopped', ...jobFields }), 'requeue stopped without a remediation owner');
       }
-      return { proceed: false, reason: 'ci-regression-not-requeued', ciGate, ...jobFields };
+      return blockOwnerless({ proceed: false, reason: 'ci-regression-not-requeued', ciGate, ...jobFields }, 'requeue produced no active remediation job');
     } catch (err) {
       if (err?.code === 'ENOENT') {
         log.warn?.(
@@ -234,20 +311,23 @@ async function guardRereviewCiBeforeReviewer({
             `(${formatCiCheckList(ciGate.failedChecks)}) but the stopped follow-up job no longer exists. ` +
             'Nothing remains to requeue.'
         );
-        return ciBlockedHammerOwnerResult({ repo, prNumber, ciGate, reason: 'ci-regression-no-job' });
+        // Preserve the observed stop/budget contract when a record disappears
+        // after discovery; absence is not permission to start a fresh budget.
+        return blockOwnerless({ proceed: false, reason: 'ci-regression-requeue-failed', ciGate,
+          jobPath: latest.jobPath, job: latest.job }, 'follow-up record disappeared during requeue');
       }
       log.warn?.(
         `[watcher] Refusing re-review for ${repo}#${prNumber}: failed external CI ` +
           `(${formatCiCheckList(ciGate.failedChecks)}) and requeue failed: ${err?.message || err}`
       );
-      return {
+      return blockOwnerless({
         proceed: false,
         reason: 'ci-regression-requeue-failed',
         ciGate,
         jobPath: latest.jobPath,
         job: latest.job,
         error: err?.message || String(err),
-      };
+      }, err?.message || String(err));
     }
   }
 

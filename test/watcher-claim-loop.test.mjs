@@ -12,6 +12,7 @@ import { spawnSync } from 'node:child_process';
 const REPO_ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const SUMMARY_MARKER = '@@WATCHER_CLAIM_LOOP_SUMMARY@@';
 
+
 function fixtureEnv(overrides = {}) {
   return {
     ...process.env,
@@ -4627,5 +4628,41 @@ test('HOLDCONTRACT-01: each completed poll evaluates discovered hold subjects on
       ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
       { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(installGhFixture(tmp)), timeout: 60000 });
     assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('LABELSTOPOWNER-01: failed CI requeue pages before the watcher releases its claim', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'ci-requeue-claim-'));
+  const admissionUrl = fileUrl('src', 'reviewer-ci-admission.mjs');
+  try {
+    const source = `
+      export * from '${admissionUrl}?actual';
+      import { guardRereviewCiBeforeReviewer as actual } from '${admissionUrl}?actual';
+      export function guardRereviewCiBeforeReviewer(args) {
+        if (args.prNumber !== 101) return { proceed: true, reason: 'fixture-ci-green' };
+        return actual({ ...args, rootDir: ${JSON.stringify(tmp)}, passKind: 'rereview',
+          inspectCiImpl: async () => ({ state: 'failed', headSha: args.reviewerHeadSha,
+            failedChecks: [{ name: 'link-check', state: 'FAILURE' }] }),
+          latestJobFinder: () => ({ jobPath: '/fixture/stopped.json', job: { status: 'stopped',
+            remediationPlan: { stop: { code: 'operator-label-required:fixture-approved' } } } }),
+          requeueImpl: () => { throw new Error('Cannot requeue from stopped:operator-label-required:fixture-approved'); },
+          deliverAlertImpl: async body => { (globalThis.__labelStopPages ||= []).push(body); } });
+      }
+    `;
+    runHoldReleaseRegression({
+      transformLoader: loader => loader.replace('  return nextLoad(url, context);', `
+        if (url === ${JSON.stringify(admissionUrl)}) return { format: 'module', shortCircuit: true, source: ${JSON.stringify(source)} };
+        return nextLoad(url, context);
+      `),
+      setup: '',
+      verify: `
+        assert.equal(globalThis.__labelStopPages.length, 1);
+        assert.match(globalThis.__labelStopPages[0], /operator-label-required:fixture-approved/);
+        assert.ok(!(globalThis.__watcherClaimLoopReviewerSpawns || []).some(s => s.subjectContext.prNumber === 101));
+        const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=101').get();
+        assert.notEqual(row.review_status, 'reviewing');
+        assert.ok(!row.reviewer_session_uuid);
+      `,
+    });
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });

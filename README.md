@@ -2003,9 +2003,33 @@ delivered wake re-arms exactly once for that finished LRQ. An armed auto-merge
 retains the lease inside the 30-minute bound and releases for retry at expiry;
 unreadable fresh receipted launch reservations retain fleet capacity.
 
+LABELSTOPOWNER-01: a follow-up stopped as
+`operator-label-required:<label>` can requeue only after a live label read
+confirms presence and an attributable application event. The round plan durably retains
+`operatorLabelSatisfactions[]` (label, event ID, actor, application/observation time,
+repo, PR and observed head). CLI requeues use that observed head when no revision
+is supplied; a mismatched supplied head refuses requeue. Existing approval labels
+also enter the operator wake path. Re-review still requires green external CI.
+Failed external CI queues remediation at the current head with an actionable CI
+finding, preserving prior findings and round accounting. The populated blocking
+section drops its empty sentinel and a comment-only verdict becomes
+`Request changes`; fenced examples and other sections remain intact. Active
+remediation retains ownership without a requeue attempt or failure warning.
+When no job remains, a fresh job seeds its count and cap from the existing
+PR-wide remediation ledger.
+The newest archived stop is recovered when no queue record remains; archival
+does not waive its label requirement or budget.
+A terminal stop, missing/unreadable label or spent budget emits
+`ama.closure_blocker` with `ci-regression-ownerless`, the stop state and failure
+reason, and immediately pages through the existing closure-wait path. Its
+`ci-regression-ownerless` receipt deduplicates per PR/head; failed delivery stays
+retryable. Repeating a stop on its own terminal path preserves the record.
+Completed final-round hammer handoffs keep their existing provenance and owner.
+No check, label, config key or budget is added.
+
 <a id="smv-ci-blocked"></a>**smv-ci-blocked:** same-head failed CI parks the real
-review claim; no follow-up job and exhausted/no-progress remediation both assign
-the hammer, while the shared merge predicate refuses a merge over red CI.
+review claim; a missing job with a spent PR-wide budget, and exhausted/no-progress
+remediation, assign the hammer, while the shared merge predicate refuses a merge over red CI.
 The smoke checks shared failed-CI repair admission, including final-round
 findings; merge permission still requires the existing findings, proof, CI and
 structural gates. A completed comment-only final-round handoff stays
@@ -2223,7 +2247,7 @@ stateDiagram-v2
     s1 --> s0: follow-up-job.10 transient retry or unpublished infrastructure-only CI execution recovery without round charge
     s2 --> s0: follow-up-job.11 next round unless comment-only final hammer handoff
     s3 --> s0: follow-up-job.12 explicit retrigger or all-infrastructure CI stop with successful current-head replacement checks
-    s4 --> s0: follow-up-job.13 allowlisted explicit retrigger; branch-unresolved resets lookup attempts; all-infrastructure CI stops except max-rounds recover on successful current-head replacements
+    s4 --> s0: follow-up-job.13 allowlisted explicit retrigger or live satisfied required-label event with unchanged round cap; branch-unresolved resets lookup attempts; all-infrastructure CI stops except max-rounds recover on successful current-head replacements
     s1 --> s4: follow-up-job.14 stacked-base-merged: hold before worker spawn and request rebase/retarget
     s1 --> s0: follow-up-job.15 base evidence unreadable: budget-neutral delayed recheck
     s1 --> s4: follow-up-job.16 operator-only findings after lifecycle admission: hold without spawning

@@ -73,8 +73,9 @@ function tempRoot(t, prefix) {
 }
 
 function guard(overrides = {}) {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ciblockham-guard-'));
   return guardRereviewCiBeforeReviewer({
-    rootDir: '/tmp/ciblockham-fixture',
+    rootDir,
     repo: REPO,
     prNumber: PR_NUMBER,
     passKind: 'rereview',
@@ -82,8 +83,13 @@ function guard(overrides = {}) {
     log: QUIET_LOGGER,
     now: () => '2026-10-10T17:26:00.000Z',
     inspectCiImpl: async () => RED_CI_GATE,
+    // PR 8007 had spent its PR-wide budget. A missing job alone now creates
+    // remediation when rounds remain (LABELSTOPOWNER-01).
+    summarizeLedgerImpl: () => ({ completedRoundsForPR: 2, latestMaxRounds: 2, latestRiskClass: 'medium' }),
+    createJobImpl: () => assert.fail('spent PR-wide rounds must not create a new job'),
+    deliverAlertImpl: async () => {},
     ...overrides,
-  });
+  }).finally(() => rmSync(rootDir, { recursive: true, force: true }));
 }
 
 // The review DB as the watcher leaves it: the comment-only review posted on
@@ -132,8 +138,9 @@ function handOffDeps({ coexistence, alerts = [], calls = [] } = {}) {
 
 // ── (a) failed CI + no job → hammer dispatched, not parked forever ───────────
 
-test('(a) failed CI with no follow-up job: the guard parks the reviewer and names the hammer as owner', async () => {
-  const result = await guard({ latestJobFinder: () => null });
+test('(a) failed CI with no follow-up job and spent budget: the guard parks, names the hammer and pages the blocker', async () => {
+  const pages = [];
+  const result = await guard({ latestJobFinder: () => null, deliverAlertImpl: async (...args) => { pages.push(args); } });
 
   assert.equal(result.proceed, false, 'reviewer admission still requires green external CI');
   assert.equal(result.reason, 'ci-regression-no-job');
@@ -144,9 +151,12 @@ test('(a) failed CI with no follow-up job: the guard parks the reviewer and name
   assert.match(result.failureMessage, /repo-guards=FAILURE/);
   assert.match(result.failureMessage, /Routed to the hammer for final adjudication/);
   assert.doesNotMatch(result.failureMessage, /Push a fix or requeue remediation/);
+  assert.equal(result.needsOperator, true);
+  assert.match(result.closureBlocker, /ci-regression-ownerless.*round-budget-exhausted/);
+  assert.equal(pages.length, 1);
 });
 
-test('(a) failed CI with no follow-up job: the watcher hands the red head to the hammer and pages nobody', async (t) => {
+test('(a) failed CI with spent budget: the watcher hands the red head to the hammer without an additional page', async (t) => {
   const rootDir = tempRoot(t, 'ciblockham-dispatch-');
   const ciAdmission = await guard({ latestJobFinder: () => null });
   const alerts = [];

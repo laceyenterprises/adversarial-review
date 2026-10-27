@@ -1,3 +1,4 @@
+import './helpers/worker-observation-fixture.mjs';
 // The AMA closer records its pass post-merge and only briefly polls the ledger
 // for the hammer worker's rollup, so a slow rollup leaves the closer pass with
 // null tokens — and the job-driven backfill only heals remediation. This

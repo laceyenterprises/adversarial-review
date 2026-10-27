@@ -3323,7 +3323,7 @@ repository's remediation diff.
 ### Public launch observations
 
 Launch status, retry descendants, capacity snapshots, exact idempotency receipts
-and legacy ticket-window observations use the pinned SDK 0.8.0 dispatch lookup.
+and legacy ticket-window observations use the pinned SDK 0.9.0 dispatch lookup.
 The OS authorizes every row using app receipts or explicit operator-owned
 project/repository grants. Unavailable reads retain ownership holds; they never
 fall back to SQLite, psql or OS files. Existing blocked-decision, cancellation,
@@ -3347,16 +3347,50 @@ producer, and run `npm ci` in this submodule before normal service deployment.
 Service rollback removes the flag from both service templates and redeploys,
 safely pausing service reads and retaining ownership holds. Closer rollback
 reverts the reviewed Agent OS adapter activation policy for new launches;
-changing service templates does not deactivate closer launch records. The SDK
-bytes are
-pinned to merged producer revision `387fb06d5d8835e320f49388a2ebdf67f2249945`.
-SDK 0.8.0 cannot attest global absence: empty lookups and missing rows retain
-ownership instead of settling or reclaiming it. See the reader contract for the
-remaining producer completeness obligation and cancellation limits. Existing lifecycle states, transitions and smoke promises
-are unchanged. Focused offline regressions run with:
+changing service templates does not deactivate closer launch records. SDK 0.9.0
+is byte-verified against merged producer `f37c7489439a8b53eafecb38870f75fe9f07fa57`;
+runtime activation remains separate. Ordinary filtered empty lookups and missing
+rows retain ownership. Only the validated LAC-2120 exact-selector producer proof
+under a separate expiring operator entitlement can certify absence. See the
+reader contract for proof validation and cancellation limits. Existing lifecycle
+states, transitions and smoke promises are unchanged. Focused offline regressions run with:
 
 ```bash
 node test/run-tests.mjs dispatch-read-client.test.mjs ama-pre-receipt-intent.test.mjs
+```
+
+Worker, process, session accounting and daemon/builder provenance now use SDK
+0.9.0 through the same authorized lookup. The consumer collects bounded pages
+and keeps ownership on failed, malformed, incomplete or grant-filtered empty
+reads. Process identities and start timestamps are evidence; the OS process and
+lease owners retain mutation authority. Session totals require every linked
+launch to belong to the app grant, and unavailable usage stays unknown. Zero
+cost remains zero. No worker-directory scan or ledger backend selection is used
+by daemon identity or these usage readers.
+
+Producer agent-os#9435 is merged/deployed at
+`f37c7489439a8b53eafecb38870f75fe9f07fa57`; the pinned SDK 0.9.0 bytes match it.
+Observation rollout requires the separate default-off env-only
+`ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED=1`, after runtime-owner verification of
+producer support, pinned install and exact project/repository grants. The already
+enabled `ADVERSARIAL_DISPATCH_READS_ENABLED=1` own-launch HCP gate remains
+independent. No template flag is changed or service restarted by this PR.
+Disabled, unsupported or empty observation reads retain title-based cross-model
+review intake with a persisted inconclusive finding, while authoritative merge
+identity, leases and OS-selected usage remain unknown. Positive head attestations
+remain usable independently; no private fallback is restored. Default PR
+provenance identifies the opener; `builder_identity:true` is distinct and allows
+later completions. Branch launch provenance is diagnostic-only when opener
+evidence is missing, including under partial grants. Reroute awaits async
+provenance; cold backfill registers once
+before its synchronous reads and reports readiness failures before writes.
+See [rollout and selector details](docs/producer-contract-readers.md#worker-observations). Existing lifecycle states, transitions, current-head verdict checks,
+merged/closed terminal handling and smoke promises are unchanged. Session usage
+without an authorized launch link remains unavailable; workspace paths cannot
+supply ownership. Run the offline consumer regressions with:
+
+```bash
+node test/run-tests.mjs worker-observation-client.test.mjs worker-observation-rollout.test.mjs watcher-claim-loop.test.mjs reviewer-pass-tokens.test.mjs recovery-reaper.test.mjs remorphan-01.test.mjs daemon-worker-identity-ledger-target.test.mjs
 ```
 
 HOLDOWNER-01 adds observational ownership resolution to the TTM tracker. An open
@@ -3371,6 +3405,12 @@ Offline tracker, pipeline-health, watcher claim-loop and injected alert fixtures
 verify ownership, deadline expiry, timer resets and lost-receipt dedup. Lifecycle
 routing and existing smoke promises are unchanged; post-deploy observation uses
 natural flags and receipts, with no forced stall or alert delivery test.
+
+Synchronous observation reads reuse an already registered SDK app session
+with matching connection identity, or an explicit existing session token. Synchronous read
+timeout changes reuse the cached session receipt; another endpoint cannot borrow
+the cached token. Cold sync reads remain unavailable until async registration.
+Partial worker accounting remains marked partial through reviewer capture.
 
 ## Exact absence recovery (LAC-2120)
 

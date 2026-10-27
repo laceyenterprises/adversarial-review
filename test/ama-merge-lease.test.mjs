@@ -1283,7 +1283,16 @@ test('reclaimIfStale reclaims dead same-host owner pid holder', () => {
   }
 });
 
-test('reclaimIfStale breaks stale mutation lock before reclaiming holder', () => {
+test('reclaimIfStale breaks stale mutation lock before reclaiming holder', t => {
+  // The host may actually have PID 99998 (especially a busy CI runner).
+  // Pin this synthetic owner's liveness instead of depending on host traffic.
+  const kill = process.kill;
+  t.mock.method(process, 'kill', (pid, signal) => {
+    if (pid === 99998 && signal === 0) {
+      throw Object.assign(new Error('synthetic dead lock owner'), { code: 'ESRCH' });
+    }
+    return kill.call(process, pid, signal);
+  });
   const rootDir = freshRoot();
   try {
     const acquired = acquire(rootDir, { holderPid: 99999, holderHost: 'test-host' });

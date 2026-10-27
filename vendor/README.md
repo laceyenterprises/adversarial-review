@@ -34,9 +34,12 @@ complete grants and the explicit default-off flag documented in
 
 ## Argus provenance record (LAC-2117)
 
-`argus-artifacts.json` seeds the existing 0.8.0 merged producer from the record
-above; this PR does not upgrade the dependency or change either immutable
-archive. Future upgrades update this machine record alongside the lockfile.
+The reviewed base enrolled the existing 0.8.0 producer above. This upgrade updates
+`argus-artifacts.json` to the already-merged 0.9.0 producer, Agent OS PR #9435 at
+`f37c7489439a8b53eafecb38870f75fe9f07fa57`, with SHA-256
+`6882b99962cd7319ed858d0a15ee84f9384a566474359085153aef2b615f2cf9`.
+Both immutable archives remain unchanged. Future upgrades update this machine
+record alongside the lockfile.
 It is an untrusted claim until the collector reads the producer's authoritative
 merged PR/commit and Argus compares both old/new producer and consumer bytes.
 See [the runbook](../docs/RUNBOOK-argus-artifact-provenance.md). Enrollment must

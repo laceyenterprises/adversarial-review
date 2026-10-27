@@ -9,6 +9,8 @@ import {
   backfillReviewerWorkerRunAttribution,
 } from '../src/reviewer-pass-tokens.mjs';
 
+import {prepareWorkerObservationSession} from '../src/dispatch-read-client.mjs';
+
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 const USAGE = `\
@@ -72,7 +74,7 @@ function parseArgs(argv) {
   return args;
 }
 
-function main(argv = process.argv.slice(2), io = {}) {
+async function main(argv = process.argv.slice(2), io = {}) {
   const stdout = io.stdout || process.stdout;
   const stderr = io.stderr || process.stderr;
   const env = io.env || process.env;
@@ -84,6 +86,12 @@ function main(argv = process.argv.slice(2), io = {}) {
     }
     if (args.ledgerDbDeprecated) {
       stderr.write('warning: --ledger-db is deprecated; use --ledger-target instead\n');
+    }
+    if (env.ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED === '1') {
+      const readiness = await (io.prepareObservations ?? prepareWorkerObservationSession)({env});
+      if (!readiness.ok) throw new Error(`worker observation registration unavailable: ${readiness.detail || readiness.reason}`);
+    } else {
+      stderr.write('worker observations disabled: OS accounting remains unknown; local-only backfill may proceed\n');
     }
     const result = backfillReviewerPasses(args.rootDir, {
       ledgerTarget: args.ledgerTarget,
@@ -137,7 +145,7 @@ function main(argv = process.argv.slice(2), io = {}) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  process.exitCode = main();
+  process.exitCode = await main();
 }
 
 export { main, parseArgs };

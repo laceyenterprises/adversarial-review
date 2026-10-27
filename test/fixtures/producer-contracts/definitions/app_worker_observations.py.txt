@@ -1,0 +1,438 @@
+"""Authorized, bounded observations; process/lease owners retain all authority.
+
+Session totals are exported only when every linked launch is authorized. Missing
+ownership is unknown evidence, never permission to recover a worker.
+"""
+
+from datetime import datetime
+from functools import cache
+from time import monotonic
+
+from .app_dispatch_reads import (
+    DispatchReadUnavailable,
+    DispatchSelectorError,
+    fetch_app_dispatch_reads,
+)
+from .app_eval_usage import _run_public
+from .read_helpers import is_postgres, json_object, query_rows
+
+RUN_FIELDS = (
+    "run_id launch_request_id session_id status started_at ended_at updated_at "
+    "token_usage_input token_usage_output token_usage_cache_read token_usage_cache_write "
+    "token_usage_guardrail token_usage_cost_usd token_usage_source metadata_json "
+    "token_usage_by_model_json"
+).split()
+PROCESS_FIELDS = (
+    "worker_process_id launch_request_id runtime_session_id pid process_status "
+    "started_at last_observed_at exited_at updated_at created_at"
+).split()
+SESSION_FIELDS = (
+    "session_id adapter_session_key status started_at ended_at total_input_tokens "
+    "total_output_tokens total_cache_read_tokens total_cache_write_tokens total_cost_usd"
+).split()
+
+
+def fetch_worker_observations(conn, *, target, selector, registry_ids=(), grants=(), deadline=None):
+    observation = selector.get("observation")
+    if not isinstance(observation, str) or observation not in {"workers", "sessions", "provenance"}:
+        raise DispatchSelectorError("unknown observation")
+    limit, offset = selector.get("limit", 50), selector.get("offset", 0)
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise DispatchSelectorError("limit must be between 1 and 100")
+    if type(offset) is not int or not 0 <= offset <= 10000:
+        raise DispatchSelectorError("offset must be between 0 and 10000")
+    deadline = monotonic() + 8 if deadline is None else deadline
+
+    def query(sql, values):
+        if monotonic() >= deadline:
+            raise DispatchReadUnavailable("observation deadline exceeded")
+        rows = query_rows(conn, target, sql, values, use_connection=True)
+        if monotonic() >= deadline:
+            raise DispatchReadUnavailable("observation deadline exceeded")
+        return rows
+
+    @cache
+    def columns(table):
+        if is_postgres(target):
+            return {
+                r["name"]
+                for r in query(
+                    "SELECT column_name AS name FROM information_schema.columns "
+                    "WHERE table_schema=current_schema() AND table_name={table}",
+                    {"table": table},
+                )
+            }
+        return {
+            r["name"]
+            for r in query("SELECT name FROM pragma_table_info({table})", {"table": table})
+        }
+
+    def select(table, fields, where, values, *, optional=False):
+        names = columns(table)
+        if not names:
+            if optional:
+                return []
+            raise DispatchReadUnavailable("observation schema unavailable")
+        projection = ",".join(f if f in names else "NULL AS " + f for f in fields)
+        rows = query(f"SELECT {projection} FROM {table} WHERE {where} LIMIT 1001", values)
+        if len(rows) > 1000:
+            raise DispatchReadUnavailable("observation exceeds bounded projection")
+        return rows
+
+    def text(name, required=False):
+        value = selector.get(name)
+        if value is None and not required:
+            return None
+        if not isinstance(value, str) or not value or len(value) > 256:
+            raise DispatchSelectorError(name + " requires a bounded string")
+        return value
+
+    def authorized(ids):
+        result = set()
+        for start in range(0, len(ids), 100):
+            page = fetch_app_dispatch_reads(
+                conn,
+                target=target,
+                selector={"launch_request_ids": ids[start : start + 100]},
+                registry_ids=registry_ids,
+                grants=grants,
+                deadline=deadline,
+            )
+            result.update(page["roots"])
+        return result
+
+    @cache
+    def session_usage(session_id):
+        linked = select(
+            "worker_runs", ["launch_request_id"], "session_id={session}", {"session": session_id}
+        )
+        launch_columns = columns("launch_requests")
+        if "runtime_session_id" in launch_columns:
+            linked += select(
+                "launch_requests",
+                ["launch_request_id"],
+                "runtime_session_id={session}",
+                {"session": session_id},
+            )
+        ids = sorted({r["launch_request_id"] for r in linked if r["launch_request_id"]})
+        if not ids or authorized(ids) != set(ids):
+            return None
+        rows = select(
+            "runtime_sessions",
+            SESSION_FIELDS,
+            "session_id={session}",
+            {"session": session_id},
+            optional=True,
+        )
+        return rows[0] if rows else None
+
+    @cache
+    def launch_processes(launch_request_id):
+        processes = select(
+            "worker_processes",
+            PROCESS_FIELDS,
+            "launch_request_id={lrq}",
+            {"lrq": launch_request_id},
+            optional=True,
+        )
+        processes.sort(
+            key=lambda p: (
+                str(p["updated_at"] or p["exited_at"] or p["started_at"] or p["created_at"] or ""),
+                str(p["started_at"] or p["created_at"] or ""),
+                p["worker_process_id"],
+            ),
+            reverse=True,
+        )
+        return processes
+
+    def latest_process(launch_request_id, session_id):
+        processes = launch_processes(launch_request_id)
+        matches = [p for p in processes if session_id and p["runtime_session_id"] == session_id]
+        if matches:
+            return matches[0], "session"
+        return (processes[0], "launch") if processes else (None, None)
+
+    items = []
+    total_items = None
+    if observation == "workers":
+        run_id, lrq = text("worker_run_id"), text("launch_request_id")
+        if not run_id and not lrq:
+            raise DispatchSelectorError("worker selector required")
+        where = "run_id={run}" if run_id else "launch_request_id={lrq}"
+        values = {"run": run_id} if run_id else {"lrq": lrq}
+        rows = select("worker_runs", RUN_FIELDS, where, values)
+        if run_id and not rows and lrq:
+            rows = select("worker_runs", RUN_FIELDS, "launch_request_id={lrq}", {"lrq": lrq})
+        owned = authorized(sorted({r["launch_request_id"] for r in rows if r["launch_request_id"]}))
+        rows = [row for row in rows if row["launch_request_id"] in owned]
+        rows.sort(
+            key=lambda r: (
+                str(r["updated_at"] or r["ended_at"] or r["started_at"] or ""),
+                str(r["ended_at"] or r["started_at"] or ""),
+                str(r["started_at"] or ""),
+                r["run_id"],
+            ),
+            reverse=True,
+        )
+        total_items = len(rows)
+        for row in rows[offset : offset + limit]:
+            # DOG-04 owns run accounting interpretation, including partial usage.
+            accounting = _run_public(row)
+            public = {
+                name: accounting[name]
+                for name in RUN_FIELDS
+                if name not in {"metadata_json", "token_usage_by_model_json"}
+            }
+            process, process_match = latest_process(row["launch_request_id"], row["session_id"])
+            public.update(
+                {
+                    "pid": process["pid"] if process else None,
+                    "process_status": process["process_status"] if process else None,
+                    "process": process,
+                    "process_match": process_match,
+                    "liveness": "unknown",
+                    "mutation_authority": False,
+                }
+            )
+            session = session_usage(row["session_id"]) if row["session_id"] else None
+            for field in ("total_cache_read_tokens", "total_cache_write_tokens"):
+                public[field] = session[field] if session else None
+            public["usage_partial"] = accounting["usage_partial"]
+            public["usage_known"] = not public["usage_partial"] and any(
+                row[name] is not None
+                for name in ("token_usage_input", "token_usage_output", "token_usage_cost_usd")
+            )
+            items.append(public)
+    elif observation == "sessions":
+        keys = selector.get("session_keys")
+        if (
+            not isinstance(keys, list)
+            or not 1 <= len(keys) <= 100
+            or any(not isinstance(k, str) or not k or len(k) > 256 for k in keys)
+        ):
+            raise DispatchSelectorError("session_keys requires 1..100 bounded strings")
+        values = {f"key{i}": key for i, key in enumerate(keys)}
+        markers = ",".join("{" + name + "}" for name in values)
+        rows = select(
+            "runtime_sessions",
+            SESSION_FIELDS,
+            f"(adapter_session_key IN ({markers}) OR session_id IN ({markers}))",
+            values,
+            optional=True,
+        )
+        for row in rows:
+            public = session_usage(row["session_id"])
+            if public:
+                public["updated_at"] = public["ended_at"]
+                items.append(public)
+        items.sort(
+            key=lambda r: (str(r["ended_at"] or r["started_at"] or ""), r["session_id"]),
+            reverse=True,
+        )
+    else:
+        repo, branch = text("repo", True), text("branch")
+        pr_number = selector.get("pr_number")
+        if pr_number is not None:
+            if type(pr_number) is not int or pr_number <= 0:
+                raise DispatchSelectorError("pr_number requires a positive integer")
+            head = text("head_sha")
+            builder = selector.get("builder_identity", False)
+            if type(builder) is not bool:
+                raise DispatchSelectorError("builder_identity must be boolean")
+            fields = [
+                "completion_id",
+                "launch_request_id",
+                "worker_class",
+                "repo",
+                "pr_number",
+                "head_sha",
+                "branch",
+                "recorded_at",
+                "superseded_at",
+            ]
+            rows = select(
+                "build_completions",
+                fields,
+                "repo={repo} AND pr_number={pr}"
+                + ("" if builder else " AND signal_kind='pr_opened'"),
+                {"repo": repo, "pr": pr_number},
+                optional=True,
+            )
+            owned = authorized(
+                sorted({r["launch_request_id"] for r in rows if r["launch_request_id"]})
+            )
+            rows = [
+                r
+                for r in rows
+                if r["launch_request_id"] in owned
+                and not r["superseded_at"]
+                and (not head or r["head_sha"] == head)
+            ]
+            rows.sort(key=lambda r: (str(r["recorded_at"] or ""), r["completion_id"]), reverse=True)
+            items = [
+                {
+                    key: value
+                    for key, value in row.items()
+                    if key not in {"recorded_at", "superseded_at"}
+                }
+                | {"updated_at": row["recorded_at"]}
+                for row in rows[:1]
+            ]
+            for item in items:
+                launch = select(
+                    "launch_requests",
+                    ["worker_class", "request_payload_json"],
+                    "launch_request_id={lrq}",
+                    {"lrq": item["launch_request_id"]},
+                )
+                if not launch:
+                    raise DispatchReadUnavailable("launch provenance unavailable")
+                payload = json_object(launch[0]["request_payload_json"])
+                runs = select(
+                    "worker_runs",
+                    ["run_id", "created_at", "updated_at", "started_at", "metadata_json"],
+                    "launch_request_id={lrq}",
+                    {"lrq": item["launch_request_id"]},
+                    optional=True,
+                )
+                runs.sort(
+                    # Current ledgers own creation recency (008_worker_observability).
+                    # Imported ledgers without it retain an observed-time fallback.
+                    key=lambda r: (
+                        str(r["created_at"] or r["updated_at"] or r["started_at"] or ""),
+                        r["run_id"],
+                    ),
+                    reverse=True,
+                )
+                harness = next(
+                    (
+                        value
+                        for value in (
+                            payload.get("actualHarness"),
+                            json_object(payload.get("workerSpec")).get("harness"),
+                            json_object(runs[0]["metadata_json"]).get("actualHarness")
+                            if runs
+                            else None,
+                            launch[0]["worker_class"],
+                        )
+                        if isinstance(value, str) and value.strip()
+                    ),
+                    None,
+                )
+                item["actual_harness"] = _bounded_text(harness)
+                if builder:
+                    item["worker_class"] = launch[0]["worker_class"]
+        elif branch:
+            # Restrict candidates before loading provenance; no client-supplied grant.
+            from .app_dispatch_reads import _field
+
+            predicates, values = [], {}
+            for i, grant in enumerate(grants):
+                if isinstance(grant, dict) and grant.get("project_ref"):
+                    values[f"project{i}"] = grant["project_ref"]
+                    predicates.append(
+                        _field("lineage_json", "projectRef", is_postgres(target))
+                        + f"={{project{i}}}"
+                    )
+            if registry_ids:
+                for i, lrq in enumerate(registry_ids):
+                    values[f"lrq{i}"] = lrq
+                    predicates.append(f"launch_request_id={{lrq{i}}}")
+            # Narrow to the requested branch/repository before the candidate
+            # bound and authorization. Historical project rows cannot poison an
+            # unrelated branch lookup. Authorization remains the paired grant.
+            pg = is_postgres(target)
+            nested = _field("request_payload_json", "launchProvenance", pg)
+            sources = ["request_payload_json", nested]
+            branch_filter = " OR ".join(
+                _field(source, "branch", pg) + "={branch}" for source in sources
+            )
+            repo_filter = " OR ".join(
+                "LOWER(" + _field(source, key, pg) + ")=LOWER({repo})"
+                for source in sources
+                for key in ["prRepoFullName", "repoFullName", "repo"]
+            )
+            values.update(branch=branch, repo=repo)
+            rows = select(
+                "launch_requests",
+                [
+                    "launch_request_id",
+                    "worker_class",
+                    "request_payload_json",
+                    "lineage_json",
+                    "updated_at",
+                ],
+                "("
+                + (" OR ".join(predicates) or "1=0")
+                + ") AND ("
+                + branch_filter
+                + ") AND ("
+                + repo_filter
+                + ")",
+                values,
+            )
+            owned = authorized([r["launch_request_id"] for r in rows])
+            for row in rows:
+                payload = json_object(row["request_payload_json"])
+                provenance = json_object(payload.get("launchProvenance")) or payload
+                record_repo = (
+                    provenance.get("prRepoFullName")
+                    or provenance.get("repoFullName")
+                    or provenance.get("repo")
+                )
+                if (
+                    row["launch_request_id"] in owned
+                    and isinstance(record_repo, str)
+                    and record_repo.lower() == repo.lower()
+                    and provenance.get("branch") == branch
+                ):
+                    items.append(
+                        {
+                            "launch_request_id": row["launch_request_id"],
+                            "worker_class": row["worker_class"],
+                            "branch": branch,
+                            "repo": repo,
+                            "head_sha": _bounded_text(
+                                provenance.get("prHeadSha") or provenance.get("headSha")
+                            ),
+                            "pr_number": provenance.get("prNumber")
+                            if type(provenance.get("prNumber")) is int
+                            and provenance["prNumber"] > 0
+                            else None,
+                            "updated_at": row["updated_at"],
+                        }
+                    )
+            items.sort(
+                key=lambda r: (str(r["updated_at"] or ""), r["launch_request_id"]), reverse=True
+            )
+        else:
+            raise DispatchSelectorError("provenance requires branch or pr_number")
+
+    if total_items is None:
+        total_items = len(items)
+        items = items[offset : offset + limit]
+    return {
+        "schema_version": 1,
+        "observation": observation,
+        "status": "found" if total_items else "not_found",
+        "items": _wire(items),
+        "complete": offset + limit >= total_items,
+        "next_offset": offset + limit if offset + limit < total_items else None,
+        "scope_complete": False,
+        "mutation_authority": False,
+        "units": {"tokens": "tokens", "cost": "USD"},
+    }
+
+
+def _wire(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {key: _wire(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_wire(item) for item in value]
+    return value
+
+
+def _bounded_text(value):
+    return value if isinstance(value, str) and len(value) <= 256 else None

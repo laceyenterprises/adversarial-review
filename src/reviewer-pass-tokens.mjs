@@ -5,7 +5,6 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import {
   readReviewerSessionUsageFromLedger,
   readWorkerRunUsageFromLedger,
-  resolveSessionLedgerReadTarget,
 } from './session-ledger-read-adapter.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import { deriveReviewerTokenCost, loadReviewerPricingTable } from './reviewer-token-pricing.mjs';
@@ -781,18 +780,6 @@ function coerceNonNegativeFloat(value) {
 
 const tokenRollupWarnings = new Set();
 
-function selectLedgerTargetSource({
-  ledgerTarget = null,
-  ledgerDbPath = null,
-  env = process.env,
-} = {}) {
-  if (ledgerTarget !== null && ledgerTarget !== undefined) return ledgerTarget;
-  if (!ledgerDbPath) return null;
-  const resolved = resolveSessionLedgerReadTarget({ ledgerDbPath, env });
-  if (!resolved.ok) throw new Error(resolved.detail || resolved.reason);
-  return resolved.target;
-}
-
 function warnTokenRollupDegraded(scope, result) {
   if (result?.reason !== 'unsupported-ledger-backend') return;
   const key = `${scope}:${result.target?.backend || 'unknown'}`;
@@ -815,15 +802,15 @@ function readReviewerSessionTokenUsage({
   rootDir = process.cwd(),
   // undefined lets the adapter's default (real spawnSync) engage; tests inject a stub.
   spawnSyncImpl,
+  ...transportOptions
 } = {}) {
-  const selectedLedgerTarget = selectLedgerTargetSource({ ledgerTarget, ledgerDbPath, env });
   const result = readReviewerSessionUsageFromLedger({
     adapterSessionKey,
     sessionKeys,
     workspacePath,
     startedAt,
     endedAt,
-    ledgerTarget: selectedLedgerTarget,
+    ledgerTarget, ledgerDbPath, ...transportOptions,
     env,
     rootDir,
     spawnSyncImpl,
@@ -847,12 +834,12 @@ function readWorkerRunTokenUsageResult({
   hqRoot = null,
   // undefined lets the adapter's default (real spawnSync) engage; tests inject a stub.
   spawnSyncImpl,
+  ...transportOptions
 } = {}) {
-  const selectedLedgerTarget = selectLedgerTargetSource({ ledgerTarget, ledgerDbPath, env });
   const result = readWorkerRunUsageFromLedger({
     workerRunId,
     launchRequestId,
-    ledgerTarget: selectedLedgerTarget,
+    ledgerTarget, ledgerDbPath, ...transportOptions,
     env,
     rootDir,
     hqRoot,
@@ -881,6 +868,7 @@ function tokenUsageFromWorkerRun(row, { workerRunId = null, launchRequestId = nu
     costUSD: coerceNonNegativeFloat(row.token_usage_cost_usd),
     source: row.token_usage_source || 'session-ledger',
     usageTag: coerceNonNegativeInt(row.token_usage_guardrail) !== null ? 'guardrail' : null,
+    ...(row.usage_partial === true ? { partial: true } : {}),
   };
 }
 
@@ -893,7 +881,7 @@ function tokenUsageFromRuntimeSession(row) {
     output: coerceNonNegativeInt(row.total_output_tokens),
     cacheRead: coerceNonNegativeInt(row.total_cache_read_tokens),
     cacheWrite: coerceNonNegativeInt(row.total_cache_write_tokens),
-    costUSD: cost && cost > 0 ? cost : null,
+    costUSD: cost,
     source: 'session-ledger',
   };
 }
@@ -1521,23 +1509,25 @@ function readBestReviewerEvidenceTokenUsage({
   transcriptFallback = true,
   workerLogPath = null,
 } = {}) {
-  const selectedLedgerTarget = selectLedgerTargetSource({ ledgerTarget, ledgerDbPath, env });
   const ledgerUsage = readWorkerRunTokenUsage({
     workerRunId,
     launchRequestId,
-    ledgerTarget: selectedLedgerTarget,
+    ledgerTarget, ledgerDbPath,
     env,
     rootDir,
-  }) || readReviewerSessionTokenUsage({
+  }) || ((adapterSessionKey || sessionKeys.length) ? readReviewerSessionTokenUsage({
     adapterSessionKey,
     sessionKeys,
     workspacePath,
     startedAt,
     endedAt,
-    ledgerTarget: selectedLedgerTarget,
+    ledgerTarget, ledgerDbPath,
     env,
     rootDir,
-  });
+  }) : null);
+  // An OS-selected worker's unavailable public accounting stays unknown. Local
+  // reviewer evidence is a separate app policy for reviews without an OS worker.
+  if (!ledgerUsage && (workerRunId || launchRequestId)) return null;
   let transcriptUsage = null;
   if (transcriptFallback) {
     const shouldUseDefaults = shouldUseDefaultTranscriptRoots(rootDir);
@@ -1719,7 +1709,6 @@ function backfillReviewerPasses(rootDir, {
   env = process.env,
   dryRun = false,
 } = {}) {
-  const selectedLedgerTarget = selectLedgerTargetSource({ ledgerTarget, ledgerDbPath, env });
   const jobs = readHistoricalFollowUpJobs(rootDir);
   let considered = 0;
   let insertedOrUpdated = 0;
@@ -1763,20 +1752,32 @@ function backfillReviewerPasses(rootDir, {
         ? 'completed'
         : (job.status === 'failed' ? 'failed' : 'cancelled');
       const launchRequestId = worker.launchRequestId || worker.launchRequestID || job.replyStorageKey || null;
-      const usage = readWorkerRunTokenUsage({
+      const adapterSessionKey = [worker.adapterSessionKey, job.adapterSessionKey]
+        .find(key => typeof key === 'string' && key.trim()) || null;
+      const sessionKeys = [...new Set([worker.sessionKeys, job.sessionKeys]
+        .flatMap(keys => Array.isArray(keys) ? keys : [])
+        .filter(key => typeof key === 'string' && key.trim()))];
+      // A workspace path cannot select a public session. Only explicit linked
+      // keys may reach session accounting; unlinked history keeps its existing
+      // transcript/log fallback without an inert observation call.
+      const publicUsage = readWorkerRunTokenUsage({
         workerRunId: worker.workerRunId || worker.runId || null,
         launchRequestId,
-        ledgerTarget: selectedLedgerTarget,
+        ledgerTarget, ledgerDbPath,
         env,
         rootDir,
-      }) || readReviewerSessionTokenUsage({
+      }) || ((adapterSessionKey || sessionKeys.length) ? readReviewerSessionTokenUsage({
+        adapterSessionKey,
+        sessionKeys,
         workspacePath,
         startedAt,
         endedAt,
-        ledgerTarget: selectedLedgerTarget,
+        ledgerTarget, ledgerDbPath,
         env,
         rootDir,
-      }) || (transcriptFallback ? readTranscriptTokenUsageForModel({
+      }) : null);
+      const usage = publicUsage || (!(worker.workerRunId || worker.runId || launchRequestId)
+        ? (transcriptFallback ? readTranscriptTokenUsageForModel({
         reviewerModel: worker.model || worker.workerClass,
         workspacePath,
         startedAt,
@@ -1790,7 +1791,7 @@ function backfillReviewerPasses(rootDir, {
         rootDir,
       }) : null) || readCodexWorkerLogTokenUsage(worker.logPath
         ? (isAbsolute(worker.logPath) ? worker.logPath : join(rootDir, worker.logPath))
-        : null);
+        : null) : null);
       if (usage) {
         tokenMatched += 1;
         if (usage.source === 'codex-worker-log') workerLogMatched += 1;

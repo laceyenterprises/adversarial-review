@@ -2169,13 +2169,23 @@ takeover; rescue archives and decisions are recorded under `rescues/holder-adopt
 
 ### `worker-identity-unresolved` on daemon clean-merge
 
-The daemon clean-merge path resolves the identity of the worker that opened the
-PR (head-attestation → `pr_opened` ledger row → HQ worker
-`launch-provenance.json`) so the merge is attributable. The provenance fallback
-matches only when it carries the exact canonical repository identity GitHub
-reports for the PR: `<owner>/<name>`. Short-form `<name>` provenance is ambiguous
-across forks and intentionally fails closed; update the producer to write full
-repo identity rather than weakening the daemon matcher.
+The daemon resolves attributable identity through an existing valid produced
+head attestation or the public SDK's default PR provenance selector (the single
+latest authorized, non-superseded `pr_opened` record). A head-independent retry
+preserves opener identity after remediation moves the head. `builder_identity`
+is a distinct selector that permits later completions and is not opener evidence.
+
+Worker observations are staged separately with the default-off env-only
+`ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED=1`. The already-enabled own-launch
+`ADVERSARIAL_DISPATCH_READS_ENABLED` HCP flag stays independent. Missing grants,
+unsupported producers, disabled reads or empty pages retain unknown authoritative
+identity. Branch launch provenance is diagnostic-only: partial grants may hide
+the opener while exposing a single remediation launch on the same repository,
+branch and PR. That record cannot authorize merge. Private ledger and HQ worker
+`launch-provenance.json` scans are removed; do not restore them for rollout.
+Review intake may still follow the existing title-based cross-model route with
+an audited inconclusive finding; it grants no merge, lease or teardown authority.
+See [observation activation and evidence](producer-contract-readers.md#worker-observations).
 
 **Un-attributed PRs (operator/agent infra-fix PRs).** A PR that no hq worker
 opened — an operator/agent infra-fix PR authored by the operator on a

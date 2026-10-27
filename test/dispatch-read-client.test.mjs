@@ -132,13 +132,13 @@ test('session budgets follow each caller; transient and authentication failures 
   let failure;
   t.mock.method(dispatchReadTransport, 'sdk', () => ({ ...sdk, connect: async config => {
     budgets.push(config.request_timeout_ms);
-    return { dispatchLookup: async () => { if (failure) throw failure; return capture(); } };
-  } }));
+    return {sessionToken:'synthetic',endpoint_url:config.endpoint_url};
+  }, readSessionDispatchLookup: async () => { if (failure) throw failure; return capture(); } }));
   const read = timeoutMs => readDispatchLaunches({}, { timeoutMs, env: { ADVERSARIAL_DISPATCH_READS_ENABLED: '1' }, connectOptions: { endpoint_url: 'synthetic://budgets' } });
   assert.equal((await read(8000)).ok, true);
   assert.equal((await read(30000)).ok, true);
   assert.equal((await read(30000)).ok, true);
-  assert.deepEqual(budgets, [8000, 30000]);
+  assert.deepEqual(budgets, [8000]);
   for (const error of [Object.assign(new Error('secret endpoint'), { code: 'ECONNRESET' }), new Error('app-contract 401: secret token')]) {
     failure = error;
     const result = await read(30000);
@@ -162,7 +162,8 @@ test('HCP own-launch route selects credentials and never falls back on failure',
       if (fail) throw new Error('HCP unavailable');
       return capture();
     },
-    connect: async () => { appCalls++; return { dispatchLookup: async () => capture() }; },
+    connect: async () => { appCalls++; return {sessionToken:'synthetic',endpoint_url:'synthetic://app'}; },
+    readSessionDispatchLookup: async () => capture(),
   }));
   const selector = { launch_request_ids: ['root'] };
   const env = { ADVERSARIAL_DISPATCH_READS_ENABLED: '1', HQ_LAUNCH_REQUEST_ID: 'root', HCP_TOKEN_PATH: '/synthetic/token', HCP_TOKEN: 'primary',

@@ -71,7 +71,6 @@ import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority
 import { resolveRequiredCheckContextsFromCfg } from './ama/required-check-contexts.mjs';
 import { loadConfigCached } from './config-loader.mjs';
 import { abandonAmaCloserLease } from './ama/abandoned-closer-lease.mjs';
-import { reconcileAmaCloserLeaseIntent } from './ama/pre-receipt-intent.mjs';
 import { loadDomainConfig } from './domain-config.mjs';
 import { resolveMergeAuthorityConfigFromDomain } from './domain-policy.mjs';
 import {
@@ -1635,7 +1634,7 @@ async function dispatchAmaClosureFor({
   });
   if (autonomousMergeExecutionEnabled && !(labelNames || []).some(label =>
     [...OPERATOR_HOLD_LABELS, 'duplicate-family-hold', 'adversarial-merge-blocked'].includes(label))) {
-    await reconcileAmaCloserLeaseIntent(rootDir, handoffLease, {
+    await abandonAmaCloserLease(rootDir, handoffLease, {
       ...closerLeaseLivenessOptions, ...preReceiptIntentOptions,
       now: now(), prMetadata, env, signal, logger,
     });
@@ -1651,9 +1650,6 @@ async function dispatchAmaClosureFor({
       : currentPrHeadSha && readAmaCloserLease(rootDir, {
         repo: repoPath, prNumber, headSha: currentPrHeadSha,
       });
-    const abandoned = abandonAmaCloserLease(rootDir, handoffLease,
-      { ...closerLeaseLivenessOptions, now: now(), logger });
-    if (abandoned) handoffLease = abandoned;
   }
   let recordedStop = readHammerStopForHeadImpl({ hqRoot: resolveHqRoot(env), repo: repoPath,
     prNumber, headSha: currentPrHeadSha, reviewedSha: reviewState.headSha, logger });
@@ -1825,8 +1821,8 @@ async function dispatchAmaClosureFor({
       headSha: currentPrHeadSha, labels: labelNames || [], signal, timeoutMs: loadAwareTimeoutMs(5000), logger }) : null;
     // A yielded ownership read cannot carry an uncertain pending lease across
     // its deadline. Recompute routing from the recorded terminal transition.
-    const abandoned = abandonAmaCloserLease(rootDir, handoffLease,
-      { ...closerLeaseLivenessOptions, now: now(), logger });
+    const abandoned = await abandonAmaCloserLease(rootDir, handoffLease,
+      { ...closerLeaseLivenessOptions, now: now(), logger, reconcileIntent: false });
     if (abandoned) {
       handoffLease = abandoned;
       closureOwnerInput.lease = abandoned;

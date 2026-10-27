@@ -1,3 +1,4 @@
+import { isPreReceiptIntent } from './ama/dispatch-record-read.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { reconcileAmaCloserLeaseIntent, tryAcquireCloserIntentLock } from './ama/pre-receipt-intent.mjs';
 import { abandonAmaCloserLease } from './ama/abandoned-closer-lease.mjs';
@@ -695,7 +696,7 @@ function resetTransientExhaustedCloserBudget(rootDir, lease, logger, intentLock)
     return 'failed';
   }
   if (!record) return 'not-needed';
-  if (record.state === 'dispatching') return 'failed'; // Native intent reconciliation owns proof of no launch.
+  if (isPreReceiptIntent(record)) return 'failed'; // Native intent reconciliation owns proof of no launch.
   const exhausted = Number(record.retryCount || 0) >= AMA_CLOSER_REDISPATCH_BOUND;
   if (!exhausted) return 'not-needed';
   const transient = record.lastFailureTransient === true
@@ -794,7 +795,7 @@ export async function reapStaleCloserLeases({
     } catch {
       record = null;
     }
-    if (record?.state !== 'dispatching') continue;
+    if (!isPreReceiptIntent(record)) continue;
     // Keep this observation out of the age-only tiers even if proof recovers a
     // receipt or yields to a replacement owner. The next pass sees fresh state.
     unresolvedIntentLeasePaths.add(lease._path);
@@ -830,7 +831,7 @@ export async function reapStaleCloserLeases({
       || !abandonedAmaCloserLeaseOutcome(lease, abandonmentOptions)) continue;
     // Never let the legacy age tiers delete a raced or unfenced observation.
     abandonedPaths.add(lease._path);
-    const abandoned = abandonAmaCloserLease(rootDir, lease, abandonmentOptions);
+    const abandoned = await abandonAmaCloserLease(rootDir, lease, abandonmentOptions);
     if (abandoned) abandonedLeases.push(abandoned);
   }
   // Repair terminal launch ownership on the next bounded sweep, without

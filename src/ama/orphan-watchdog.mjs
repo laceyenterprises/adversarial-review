@@ -1,3 +1,4 @@
+import { isPreReceiptIntent } from './dispatch-record-read.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { isOperatorHeld } from '../operator-hold-labels.mjs';
 // REMORPHAN-01: dispatch admission only. HAM retains all live merge predicates.
@@ -115,7 +116,7 @@ export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, r
       if (bucket === 'merge-agent-dispatches') mergeRecordSeen = true;
       if (queue && alive(record.remediationWorker?.processId)) return { ...result, owned: true, proof: 'live-remediator', ...(includeOwnerEvidence ? { actor: 'remediator' } : {}) };
       const launchRequestId = record.remediationWorker?.launchRequestId || record.launchRequestId || record.dispatchId;
-      if (record.state === 'dispatching' && !launchRequestId) {
+      if (isPreReceiptIntent(record) && !launchRequestId) {
         uncertain('dispatching-without-launch-id');
         continue;
       }

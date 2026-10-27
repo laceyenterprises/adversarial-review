@@ -169,6 +169,7 @@ export function createAmaHammerBackgroundQueue({
   const settled = new Map();
   const waiting = [];
   let running = 0;
+  let stopping = false;
   const runningPrKeys = new Set();
 
   function prKey(key) {
@@ -177,7 +178,7 @@ export function createAmaHammerBackgroundQueue({
   }
 
   function launchWaiting() {
-    while (running < limit()) {
+    while (!stopping && running < limit()) {
       const nextIndex = waiting.findIndex((entry) => !runningPrKeys.has(entry.prKey));
       if (nextIndex < 0) return;
       const [next] = waiting.splice(nextIndex, 1);
@@ -261,10 +262,19 @@ export function createAmaHammerBackgroundQueue({
   return {
     /** Cancel waiting work or signal a running task without freeing its slot early. */
     abort,
+    // Abort listeners persist interrupted closer intents synchronously before
+    // watcher exit. Queued retry hints remain available for the next watcher.
+    shutdown() {
+      stopping = true;
+      for (const entry of entries.values()) entry.controller.abort();
+      waiting.length = 0;
+      for (const [key, entry] of entries) if (entry.state === 'queued') entries.delete(key);
+    },
     /**
      * @returns {{state: 'started'|'queued'|'in-flight', key: string, queuedAtMs: number, startedAtMs?: number, boundMs: number}}
      */
     submit({ key, run, onSettled = null, pendingDispatch = null, timeoutMs = null, sharedNextAction = null }) {
+      if (stopping) return { state: 'stopped', key };
       discardOlderHeads(key);
       for (const oldKey of settled.keys()) {
         if (prKey(oldKey) === prKey(key) && oldKey !== key) settled.delete(oldKey);
@@ -362,4 +372,8 @@ export function amaHammerBackgroundQueue({ maxConcurrent } = {}) {
 
 export function resetAmaHammerBackgroundQueueForTests() {
   processQueue = null;
+}
+
+export function shutdownAmaHammerBackgroundQueue() {
+  processQueue?.shutdown();
 }

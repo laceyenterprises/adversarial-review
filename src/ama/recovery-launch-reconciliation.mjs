@@ -1,3 +1,4 @@
+import { isPreReceiptIntent } from './dispatch-record-read.mjs';
 // AMAFIND-01 / AMACAP-01 seam: recover phantom ownership using the existing
 // closer liveness predicates. Never reclaim on age alone or a failed ledger read.
 import { readFileSync } from 'node:fs';
@@ -27,7 +28,7 @@ export async function reconcileRecoveryLaunches({
     if (headSha !== undefined && record.headSha !== headSha) continue;
     // A retry intent may still name its predecessor's receipt. Only native
     // intent reconciliation can decide whether the replacement was submitted.
-    if (record.state === 'dispatching') { uncertain += 1; continue; }
+    if (isPreReceiptIntent(record)) { uncertain += 1; continue; }
     const launchRequestId = record.launchRequestId || record.dispatchId;
     if (!launchRequestId) { uncertain += 1; continue; }
     let probe;
@@ -43,7 +44,7 @@ export async function reconcileRecoveryLaunches({
     if (!TERMINAL.has(status) && !phantom) { active += 1; continue; }
     // A concurrently replaced record belongs to a new launch. Do not touch it.
     const current = JSON.parse(readFileSync(record.dispatchPath, 'utf8'));
-    if (current.state === 'dispatching') { uncertain += 1; continue; }
+    if (isPreReceiptIntent(current)) { uncertain += 1; continue; }
     if ((current.launchRequestId || current.dispatchId) !== launchRequestId) { active += 1; continue; }
     const identity = { repo: record.repo, prNumber: record.prNumber, headSha: record.headSha };
     const lease = readAmaCloserLease(rootDir, identity);

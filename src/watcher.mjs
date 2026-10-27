@@ -1,3 +1,4 @@
+import { shutdownAmaHammerBackgroundQueue } from './ama-hammer-background-dispatch.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { withHoldRecordPoll } from './ama/hold-record.mjs';
 import { evaluateCloserHoldsForPoll } from './ama/closer-hold-records.mjs';
@@ -910,6 +911,7 @@ process.on('unhandledRejection', (err) => {
 });
 
 process.on('SIGTERM', () => {
+  shutdownAmaHammerBackgroundQueue();
   const drainState = readWatcherDrainState();
   const preserveInFlightReviewers = shouldPreserveReviewersOnSigterm(drainState);
   if (resolveSigtermFenceMode(process.env) === 'off') {
@@ -950,6 +952,7 @@ process.on('SIGTERM', () => {
 });
 
 process.on('SIGINT', () => {
+  shutdownAmaHammerBackgroundQueue();
   exitAfterReviewerCleanup({
     code: 130,
     reason: 'SIGINT',

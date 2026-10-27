@@ -370,3 +370,26 @@ test('dispatch retries neither authorization failures nor unproven absence', asy
     assert.equal(calls, 1);
   }
 });
+
+test('CLOSERDISPATCHDEAD-01: recovery selectors carry the exact grant scope and validate canonical absence', async () => {
+  for (const selector of [{ idempotency_key: 'synthetic-key' },
+    { ticket_ref: 'AMA-PR-8', requested_at_or_after: '2026-01-01T00:00:00.000Z' }]) {
+    const scoped = { project_ref: 'synthetic-project', repo: 'example/repo', ...selector };
+    const args = { repo: scoped.repo, projectRef: scoped.project_ref, dispatchSession: {
+      dispatchLookup: async observed => {
+        assert.deepEqual(observed, scoped);
+        return authorizedAbsence(scoped);
+      },
+    } };
+    const result = selector.idempotency_key
+      ? await readLaunchRequestByIdempotencyKeyAsync({ ...args, idempotencyKey: selector.idempotency_key })
+      : await readLaunchRequestsForTicketSinceAsync({ ...args, ticketRef: selector.ticket_ref,
+        requestedAtOrAfter: selector.requested_at_or_after });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.rows, []);
+    for (const changed of [{ project_ref: 'other' }, { repo: 'foreign/repo' }]) {
+      assert.equal((await readDispatchLaunches(scoped, options(authorizedAbsence({ ...scoped, ...changed })))).ok, false);
+    }
+    assert.equal((await readDispatchLaunches(scoped, options(absent))).ok, false);
+  }
+});

@@ -851,7 +851,7 @@ const HAMMER_SCRATCH_TERMINAL_STATUSES = new Set([
 ]);
 
 export function isTerminalHammerScratchRecord(record) {
-  if (!record || record.state === 'dispatching' || launchRequestMeaning(record.lastObservedStatus).parked) return false;
+  if (!record || isPreReceiptIntent(record) || launchRequestMeaning(record.lastObservedStatus).parked) return false;
   return record.state === 'dispatch-configuration-refused' || record.state === 'launch-terminal' || record.state === 'dispatch-failed'
     || [record.state, record.lastObservedStatus, record.outcome, record.terminalOutcome]
       .some(value => HAMMER_SCRATCH_TERMINAL_STATUSES.has(normalizeWorkerRunStatus(value))
@@ -1393,7 +1393,7 @@ function terminalLaunchLeaseOutcome({ status, auditOutcome, merged = false, head
 function recordTerminalCloserLaunch(rootDir, identity, launchRequestId, status, now, cleanupScratchImpl = cleanupHammerScratchDir) {
   let updated = false;
   updateAmaCloserDispatchRecord(rootDir, identity, live => {
-    if (!live || live.state === 'dispatching' || live.launchRequestId !== launchRequestId) return null;
+    if (!live || isPreReceiptIntent(live) || live.launchRequestId !== launchRequestId) return null;
     updated = true;
     const preserve = AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES.has(normalizeWorkerRunStatus(live.lastObservedStatus));
     return { ...live,
@@ -1476,10 +1476,10 @@ function* reconcileAmaCloserLeaseSteps({
     if (launchRequestParked(probe)) {
       const dispatchIdentity = { repo, prNumber, headSha: held.lease.rekeyedFromHeadSha || held.headSha };
       const record = readAmaCloserDispatchRecord(rootDir, dispatchIdentity);
-      if (record && (record.state === 'dispatching'
+      if (record && (isPreReceiptIntent(record)
         || (record.launchRequestId && record.launchRequestId !== launchRequestId))) return false;
       updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, current =>
-        current?.launchRequestId === launchRequestId && current.state !== 'dispatching'
+        current?.launchRequestId === launchRequestId && !isPreReceiptIntent(current)
           ? { ...current, lastObservedStatus: withLiveLaunchRetry(probe).row.status } : null);
       return finalizeAmaCloserLeaseBestEffort({ rootDir,
         leaseIdentity: { repo, prNumber, headSha: held.headSha }, terminalOutcome: 'deferred',
@@ -1492,7 +1492,7 @@ function* reconcileAmaCloserLeaseSteps({
     const dispatchIdentity = { ...identity, headSha: held.lease.rekeyedFromHeadSha || held.headSha };
     const record = readAmaCloserDispatchRecord(rootDir, dispatchIdentity);
     // Do not reconcile an old launch over a newer dispatch intent.
-    if (record && (record.state === 'dispatching'
+    if (record && (isPreReceiptIntent(record)
       || (record.launchRequestId && record.launchRequestId !== launchRequestId))) return false;
     // Disk ownership ends at terminal launch observation, even while merge
     // evidence is unreadable or still inside the success-settlement grace.
@@ -1536,12 +1536,12 @@ function* reconcileAmaCloserLeaseSteps({
     const current = readAmaCloserLease(rootDir, identity);
     if (current?.status !== AMA_CLOSER_LEASE_STATUS.DISPATCHED || current.lrqId !== launchRequestId) return false;
     const liveRecord = readAmaCloserDispatchRecord(rootDir, dispatchIdentity);
-    if (liveRecord?.state === 'dispatching'
+    if (isPreReceiptIntent(liveRecord)
       || (record && liveRecord?.launchRequestId !== launchRequestId)) return false;
     if (!finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity: identity,
       terminalOutcome, launchRequestId, now, logger, repo, prNumber })) return false;
     updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, live =>
-      live?.launchRequestId === launchRequestId && live.state !== 'dispatching'
+      live?.launchRequestId === launchRequestId && !isPreReceiptIntent(live)
         ? { ...live, outcome: terminalOutcome, terminalOutcome } : null, { cleanupScratchImpl });
     logger?.info?.(JSON.stringify({ event: 'ama_closer.terminal_lease_reconciled',
       repo, prNumber, launchRequestId, terminalOutcome,
@@ -1582,7 +1582,7 @@ export function isInterruptedInFlightAmaCloserDispatch(record, lease = null, opt
 function hasInterruptedInFlightAmaCloserDispatchShape(record) {
   return Boolean(
     record
-      && record.state === 'dispatching'
+      && isPreReceiptIntent(record)
       && !record.launchRequestId
       && !record.dispatchId
       && !record.lastError,
@@ -1832,7 +1832,7 @@ export function isActiveAmaCloserDispatchRecord(record, options = {}) {
   const state = String(record.state || '').trim().toLowerCase();
   if (options.lease?.status === 'handed-to-review'
     || AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES.has(normalizeWorkerRunStatus(record.lastObservedStatus))) return false;
-  if (state === 'dispatching') {
+  if (isPreReceiptIntent(record)) {
     if (isStaleDispatchingAmaCloserRecord(record, options)) return false;
     // Legacy keyless JSON retains the orphan escape. Keyed ownership above
     // cannot be canceled using age or caller death as absence evidence.
@@ -1953,7 +1953,7 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
     const record = readJsonFile(dispatchPath);
     const prNumber = Number(record?.prNumber);
     if (!record?.repo || !Number.isInteger(prNumber) || prNumber <= 0
-      || !['dispatched', 'dispatching'].includes(record.state)) return [];
+      || !(record.state === 'dispatched' || isPreReceiptIntent(record))) return [];
     let lease = null;
     try { lease = readAmaCloserDispatchLease(rootDir, record); }
     catch { /* Preserve the existing lease-less liveness rules. */ }
@@ -1972,7 +1972,7 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
     if (options.capacityOnly && !inProgress) continue;
     // Same-head retries may carry a predecessor LRQ. Use attempt-key evidence
     // or, for legacy intents, the ticket/time ledger query.
-    if (record.state === 'dispatching') {
+    if (isPreReceiptIntent(record)) {
       const recovery = await reconcilePreReceiptIntent(rootDir, record, { ...options, now,
         logger: options.logger || options.log,
         ...(Date.now() - scanStarted >= (options.scanBudgetMs ?? 1000)
@@ -2403,8 +2403,8 @@ export function updateAmaCloserDispatchRecord(rootDir, identity, mutate, { clean
   // but an explicit dispatch-failed state proves this launch did not start.
   // Otherwise retry cleanup on repeated observations too: an earlier removal
   // may have failed, or this may be a pre-cleanup terminal record after restart.
-  if (next.state !== 'dispatching'
-    && (existing?.state !== 'dispatching' || ['dispatch-failed', 'dispatch-configuration-refused'].includes(next.state))
+  if (!isPreReceiptIntent(next)
+    && (!isPreReceiptIntent(existing) || ['dispatch-failed', 'dispatch-configuration-refused'].includes(next.state))
     && isTerminalHammerScratchRecord(next)) {
     cleanupScratchImpl(next, undefined, { rootDir });
   }
@@ -4498,6 +4498,7 @@ async function maybeDispatchAmaCloserAttempt({
 }) {
   const selectShared = shared => { observeSharedDecision(shared); return shared; };
   let releaseIntentLock;
+  let markDispatchInterrupted;
   const updateDispatchRecord = (root, identity, mutate) =>
     updateAmaCloserDispatchRecord(root, identity, mutate, { cleanupScratchImpl, intentLock: releaseIntentLock });
   throwIfAborted(signal);
@@ -4541,10 +4542,10 @@ async function maybeDispatchAmaCloserAttempt({
         const record = readAmaCloserDispatchRecord(reconciliationRoot,
           { repo: reconciliationRepo, prNumber, headSha: held.lease.rekeyedFromHeadSha || held.headSha });
         if (current?.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED && current.lrqId === held.lease.lrqId
-          && (!record || (record.state !== 'dispatching' && record.launchRequestId === held.lease.lrqId))) {
+          && (!record || (!isPreReceiptIntent(record) && record.launchRequestId === held.lease.lrqId))) {
           updateAmaCloserDispatchRecord(reconciliationRoot,
             { repo: reconciliationRepo, prNumber, headSha: held.lease.rekeyedFromHeadSha || held.headSha },
-            current => current?.launchRequestId === held.lease.lrqId && current.state !== 'dispatching'
+            current => current?.launchRequestId === held.lease.lrqId && !isPreReceiptIntent(current)
               ? { ...current, lastObservedStatus: withLiveLaunchRetry(statusProbe).row.status } : null);
           finalizeAmaCloserLeaseBestEffort({ rootDir: reconciliationRoot,
             leaseIdentity: { repo: reconciliationRepo, prNumber, headSha: held.headSha },
@@ -6452,7 +6453,7 @@ async function maybeDispatchAmaCloserAttempt({
       // A missing lease plus an unreadable ledger otherwise resurrects the
       // old running record and delays this already-admitted retry until age-out.
       updateDispatchRecord(rootDir, existingDispatchIdentity, (current) => (
-        current?.launchRequestId === existingRecord.launchRequestId && current.state !== 'dispatching'
+        current?.launchRequestId === existingRecord.launchRequestId && !isPreReceiptIntent(current)
           && !AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES.has(normalizeWorkerRunStatus(current.lastObservedStatus))
           ? { ...current, lastObservedStatus: status, lastObservedAt: dispatchContext.dispatchedAt || new Date().toISOString() }
           : null
@@ -7197,6 +7198,7 @@ async function maybeDispatchAmaCloserAttempt({
       scratchDir,
       hqRoot,
       dispatchTimeoutMs,
+      hqProject,
       lastAttemptedAt: dispatchContext.dispatchedAt,
       dispatchedAt: null,
       dispatchId: null,
@@ -7225,6 +7227,13 @@ async function maybeDispatchAmaCloserAttempt({
     throw error;
   }
 
+  markDispatchInterrupted = () => updateDispatchRecord(rootDir, targetDispatchIdentity, current => {
+    if (!isPreReceiptIntent(current) || current.dispatchIdempotencyKey !== dispatchIdempotencyKey) return current;
+    return { ...current, state: 'dispatch-interrupted', interruptedAt: new Date().toISOString(),
+      reason: 'dispatch-interrupted' };
+  });
+  signal?.addEventListener('abort', markDispatchInterrupted, { once: true });
+  if (signal?.aborted) markDispatchInterrupted();
   releaseLaunchAdmission();
 
   if (ownerProofRecovery) {
@@ -7662,7 +7671,7 @@ async function maybeDispatchAmaCloserAttempt({
       throwIfAborted(signal);
       updateDispatchRecord(rootDir, targetDispatchIdentity, current => {
         if (current?.dispatchIdempotencyKey !== dispatchIdempotencyKey
-          || current.state !== 'dispatching') throw Object.assign(
+          || !isPreReceiptIntent(current)) throw Object.assign(
           new Error('closer dispatch intent changed before submission'), { code: 'CLOSER_INTENT_CHANGED' });
         return { ...current, dispatchPhase: 'submitting' };
       });
@@ -7708,6 +7717,11 @@ async function maybeDispatchAmaCloserAttempt({
       throwIfAborted(signal);
       break;
     } catch (err) {
+      if (signal?.aborted) {
+        markDispatchInterrupted?.();
+        retainScratchDir = true;
+        return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'dispatch-interrupted' });
+      }
       if (err.code === 'CLOSER_INTENT_CHANGED') throw err;
       const parsedDrainRefusal = parseHqDispatchDrainRefusal(err);
       const liveClaimRefusal = !parsedDrainRefusal && /uq_worker_runs_live_logical_job/i.test(formatHqDispatchError(err));
@@ -8046,7 +8060,7 @@ async function maybeDispatchAmaCloserAttempt({
     // preflight returns must not leave its own prepared intent orphaned.
     const unfinished = readAmaCloserDispatchRecord(rootDir, targetDispatchIdentity);
     if (unfinished?.dispatchIdempotencyKey === dispatchIdempotencyKey
-      && unfinished.state === 'dispatching' && unfinished.dispatchPhase === 'submitting') retainScratchDir = true;
+      && isPreReceiptIntent(unfinished) && unfinished.dispatchPhase === 'submitting') retainScratchDir = true;
     if (unfinished?.dispatchIdempotencyKey === dispatchIdempotencyKey
       && unfinished.state === 'dispatching' && unfinished.dispatchPhase === 'prepared') {
       updateDispatchRecord(rootDir, targetDispatchIdentity, current => ({ ...current,
@@ -8071,7 +8085,10 @@ async function maybeDispatchAmaCloserAttempt({
       }
     }
   }
-  } finally { releaseIntentLock?.(); releaseLaunchAdmission(); }
+  } finally {
+    signal?.removeEventListener('abort', markDispatchInterrupted);
+    releaseIntentLock?.(); releaseLaunchAdmission();
+  }
 }
 
 function runCloserStepsSync(iterator) {

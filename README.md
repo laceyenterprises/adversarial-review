@@ -2405,54 +2405,59 @@ stateDiagram-v2
 ```mermaid
 stateDiagram-v2
     state "dispatching" as s0
-    state "dispatched" as s1
-    state "launch-terminal" as s2
-    state "deferred-by-drain" as s3
-    state "dispatch-deferred-transient" as s4
-    state "dispatch-blocked-branch-holder" as s5
-    state "dispatch-branch-holder-block-exhausted" as s6
-    state "dispatch-failed" as s7
-    state "dispatch-configuration-refused" as s8
-    state "no-dispatch" as s9
-    state "completed" as s10
-    s0 --> s1: hammer-dispatch.29 recover one canonical receipt by exact attempt key, AMA ticket and repository even with unreadable PR state; preserve retry charge once
-    s0 --> s9: hammer-dispatch.30 closure orchestration, recovery reaper and per-PR admission reconcile the named intent including a rekeyed lease; fenced prepared attempt with dead matching owner and absent key, submitting attempt with dead watcher and submitter plus absent process key then empty ledger key, expired successful empty-key query, or successful empty ticket/time query (legacy automatic or keyed audited) proves no launch; defer lease and refund intent retry once
-    s0 --> s10: hammer-dispatch.32 authoritative closed/merged PR state retires intent as pr-terminal under fence; preserve lease and budgets; unreadable PR state permits exact-key receipt recovery but otherwise holds without paging
+    state "dispatch-interrupted" as s1
+    state "dispatched" as s2
+    state "launch-terminal" as s3
+    state "deferred-by-drain" as s4
+    state "dispatch-deferred-transient" as s5
+    state "dispatch-blocked-branch-holder" as s6
+    state "dispatch-branch-holder-block-exhausted" as s7
+    state "dispatch-failed" as s8
+    state "dispatch-configuration-refused" as s9
+    state "no-dispatch" as s10
+    state "completed" as s11
+    s0 --> s1: hammer-dispatch.33 watcher shutdown abort listener synchronously persists interrupted attempt under native intent lock before exit
+    s1 --> s2: hammer-dispatch.34 recover exact canonical keyed receipt without launching again
+    s1 --> s10: hammer-dispatch.35 fenced conclusive no-launch proof defers pending lease and refunds intent once
+    s1 --> s11: hammer-dispatch.36 authoritative PR termination retires hold without asserting no launch
+    s0 --> s2: hammer-dispatch.29 recover one canonical receipt by exact attempt key, AMA ticket and repository even with unreadable PR state; preserve retry charge once
+    s0 --> s10: hammer-dispatch.30 closure orchestration, recovery reaper and per-PR admission reconcile the named intent including a rekeyed lease; fenced prepared attempt with dead matching owner and absent key, submitting attempt with dead watcher and submitter plus absent process key then empty ledger key, expired successful empty-key query, or successful empty ticket/time query (legacy automatic or keyed audited) proves no launch; defer lease and refund intent retry once
+    s0 --> s11: hammer-dispatch.32 authoritative closed/merged PR state retires intent as pr-terminal under fence; preserve lease and budgets; unreadable PR state permits exact-key receipt recovery but otherwise holds without paging
     s0 --> s0: hammer-dispatch.31 unprovable launch absence: fixed inspection deadline pages once; retain only own PR/head ownership with no fleet launch admission or capacity; legacy active listings retain stale/orphan escapes
-    s0 --> s3: hammer-dispatch.24 exit 6 drain refusal: persist epoch, preserve budget, release pending lease
-    s3 --> s9: hammer-dispatch.25 drain clears, expires, is unreadable or AMA is disabled: retire hint before ordinary accounting/admission
-    s4 --> s9: hammer-dispatch.27 retire legacy drain-only hint on clearance, expiry, unreadable status or AMA disabled
-    s3 --> s3: hammer-dispatch.26 active drain status keeps deferral without attempt or no-progress charge
+    s0 --> s4: hammer-dispatch.24 exit 6 drain refusal: persist epoch, preserve budget, release pending lease
+    s4 --> s10: hammer-dispatch.25 drain clears, expires, is unreadable or AMA is disabled: retire hint before ordinary accounting/admission
+    s5 --> s10: hammer-dispatch.27 retire legacy drain-only hint on clearance, expiry, unreadable status or AMA disabled
+    s4 --> s4: hammer-dispatch.26 active drain status keeps deferral without attempt or no-progress charge
     [*] --> s0: hammer-dispatch.01 persist launch intent with empty receipt IDs; adopt only own closer ticket and matching repo/head context
-    s0 --> s1: hammer-dispatch.02 launch result: dispatched
-    s0 --> s4: hammer-dispatch.03 transient launch refusal or unknown live head branch within fork horizon: release pending lease and preserve budget
-    s0 --> s9: hammer-dispatch.28 unidentified fork still unresolved after six hours: release pending lease, preserve budget, stop same-head probes for operator inspection
-    s0 --> s5: hammer-dispatch.04 launch result: dispatch-blocked-branch-holder
-    s0 --> s6: hammer-dispatch.05 launch result: dispatch-branch-holder-block-exhausted
-    s0 --> s7: hammer-dispatch.06 explicit launch failure, including unreadable/mismatched refusal-time retry probe: release new pending lease, charge bounded failure, preserve predecessor receipt/artifacts on original head; later wake refusal cannot settle an earlier interrupted intent
-    s0 --> s9: hammer-dispatch.07 explicit foreign receipt: supersede new pending lease, refund attempt and clean unused artifacts without adopting foreign launch
-    s0 --> s10: hammer-dispatch.08 launch result: completed
-    s1 --> s2: hammer-dispatch.09 terminal chain observed on PR decision path or shared capacity snapshot (no live retry)
-    s1 --> s7: hammer-dispatch.10 failed outcome reconciled
-    s2 --> s0: hammer-dispatch.11 bounded same-head retry or changed context; green lease exhaustion resumes next pass without failure charge; legacy lane-busy refunds failure credit with 2-minute exponential backoff capped at 30 minutes and durable third-launch same-head page; only succeeded/failed rewrite for uncertified repair; merged success stays sticky
-    s4 --> s0: hammer-dispatch.12 bounded retry, next-poll branch confirmation or changed context
-    s5 --> s0: hammer-dispatch.13 bounded retry or changed context
-    s7 --> s0: hammer-dispatch.14 bounded retry or changed context
-    s9 --> s0: hammer-dispatch.15 bounded retry or changed context
-    s1 --> s9: hammer-dispatch.16 foreign ticket retires mistaken ownership and charge
-    s2 --> s9: hammer-dispatch.17 foreign ticket corrects terminal launch attribution
-    s0 --> s8: hammer-dispatch.18 repo_unregistered: release pending lease and page repository once
-    s4 --> s8: hammer-dispatch.19 reclassify legacy configuration refusal
-    s7 --> s8: hammer-dispatch.20 reclassify legacy configuration refusal
-    s8 --> s0: hammer-dispatch.21 normal backoff due, re-probe dispatch, admission clears blocker
-    s0 --> s1: hammer-dispatch.22 proven live retry restores same-head ownership and artifacts
-    s2 --> s1: hammer-dispatch.23 proven live retry restores original-head ownership
-    s2 --> [*]
-    s6 --> [*]
+    s0 --> s2: hammer-dispatch.02 launch result: dispatched
+    s0 --> s5: hammer-dispatch.03 transient launch refusal or unknown live head branch within fork horizon: release pending lease and preserve budget
+    s0 --> s10: hammer-dispatch.28 unidentified fork still unresolved after six hours: release pending lease, preserve budget, stop same-head probes for operator inspection
+    s0 --> s6: hammer-dispatch.04 launch result: dispatch-blocked-branch-holder
+    s0 --> s7: hammer-dispatch.05 launch result: dispatch-branch-holder-block-exhausted
+    s0 --> s8: hammer-dispatch.06 explicit launch failure, including unreadable/mismatched refusal-time retry probe: release new pending lease, charge bounded failure, preserve predecessor receipt/artifacts on original head; later wake refusal cannot settle an earlier interrupted intent
+    s0 --> s10: hammer-dispatch.07 explicit foreign receipt: supersede new pending lease, refund attempt and clean unused artifacts without adopting foreign launch
+    s0 --> s11: hammer-dispatch.08 launch result: completed
+    s2 --> s3: hammer-dispatch.09 terminal chain observed on PR decision path or shared capacity snapshot (no live retry)
+    s2 --> s8: hammer-dispatch.10 failed outcome reconciled
+    s3 --> s0: hammer-dispatch.11 bounded same-head retry or changed context; green lease exhaustion resumes next pass without failure charge; legacy lane-busy refunds failure credit with 2-minute exponential backoff capped at 30 minutes and durable third-launch same-head page; only succeeded/failed rewrite for uncertified repair; merged success stays sticky
+    s5 --> s0: hammer-dispatch.12 bounded retry, next-poll branch confirmation or changed context
+    s6 --> s0: hammer-dispatch.13 bounded retry or changed context
+    s8 --> s0: hammer-dispatch.14 bounded retry or changed context
+    s10 --> s0: hammer-dispatch.15 bounded retry or changed context
+    s2 --> s10: hammer-dispatch.16 foreign ticket retires mistaken ownership and charge
+    s3 --> s10: hammer-dispatch.17 foreign ticket corrects terminal launch attribution
+    s0 --> s9: hammer-dispatch.18 repo_unregistered: release pending lease and page repository once
+    s5 --> s9: hammer-dispatch.19 reclassify legacy configuration refusal
+    s8 --> s9: hammer-dispatch.20 reclassify legacy configuration refusal
+    s9 --> s0: hammer-dispatch.21 normal backoff due, re-probe dispatch, admission clears blocker
+    s0 --> s2: hammer-dispatch.22 proven live retry restores same-head ownership and artifacts
+    s3 --> s2: hammer-dispatch.23 proven live retry restores original-head ownership
+    s3 --> [*]
     s7 --> [*]
     s8 --> [*]
     s9 --> [*]
     s10 --> [*]
+    s11 --> [*]
 ```
 
 <!-- smv:diagrams:end -->
@@ -3620,3 +3625,15 @@ Offline merge-lease, cap-recovery and rendered hammer fixtures certify these
 transitions. After normal deployment, the runtime owner may observe organic
 retry reasons and owner/page receipts read-only; no forced conflict, live page
 test, config flip or new smoke command is required.
+
+
+## Dead dispatch submitters (CLOSERDISPATCHDEAD-01)
+
+Scoped project/repository selectors use the existing paired grant and require
+canonical absence before retiring dead submissions. Asynchronous lease
+abandonment reconciles the intent in the same pass. SIGTERM/SIGINT synchronously
+mark background submissions `dispatch-interrupted` before exit; these retain
+leases and artifacts until receipt adoption or conclusive no-launch proof.
+Live owners and once-only launch/refund fences remain authoritative. See the
+[recovery contract](docs/dispatch-absence-recovery.md) for fields, deployment order and offline evidence.
+Existing smoke promises remain; no live operation is part of validation.

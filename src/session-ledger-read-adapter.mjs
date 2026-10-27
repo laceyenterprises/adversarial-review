@@ -4,6 +4,10 @@ import { readDispatchLaunches, readDispatchLaunchesSync, launchProbe,
 import { withLiveLaunchRetry, launchRequestInFlight, isTerminalLaunchRequestStatus,
   launchRequestMeaning } from './ama/launch-request-status.mjs';
 
+function recoveryScope(args) {
+  return args.repo ? { project_ref: args.projectRef || 'adversarial-merge-authority', repo: args.repo } : {};
+}
+
 function normalizeText(value) { return String(value ?? '').trim() || null; }
 
 function workerSelector(args) {
@@ -27,14 +31,14 @@ export async function readLaunchRequestSnapshotFromLedgerAsync(args = {}) {
 }
 export async function readLaunchRequestByIdempotencyKeyAsync(args = {}) {
   if (!normalizeText(args.idempotencyKey)) return { ok: false, reason: 'missing-idempotency-key' };
-  return readDispatchLaunches({ idempotency_key: args.idempotencyKey }, args);
+  return readDispatchLaunches({ ...recoveryScope(args), idempotency_key: args.idempotencyKey }, args);
 }
 export async function readLaunchRequestsForTicketSinceAsync(args = {}) {
   if (!normalizeText(args.ticketRef) || typeof args.requestedAtOrAfter !== 'string'
     || !Number.isFinite(Date.parse(args.requestedAtOrAfter))) {
     return { ok: false, reason: 'invalid-ticket-attempt-query' };
   }
-  return readDispatchLaunches({ ticket_ref: args.ticketRef,
+  return readDispatchLaunches({ ...recoveryScope(args), ticket_ref: args.ticketRef,
     requested_at_or_after: new Date(args.requestedAtOrAfter).toISOString() }, args);
 }
 

@@ -459,14 +459,14 @@ test('CLAIMPIDSTALE-01 hostless lease abandonment agrees with local ownership', 
     ...opts, isProcessAlive: () => assert.fail('foreign PIDs must not be probed') }), null);
 });
 
-test('CLOSERLEASEDEAD-01 a replacement launch installed during the identity probe is preserved', t => {
+test('CLOSERLEASEDEAD-01 a replacement launch installed during the identity probe is preserved', async t => {
   const rootDir = freshRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const now = '2026-01-01T00:00:00Z';
   const identity = { rootDir, repo: 'fixture/project', prNumber: 7, headSha: 'a'.repeat(40) };
   const lease = acquireAmaCloserLease({ ...identity, now, host: 'fixture-host', watcherPid: 4242,
     dispatchTimeoutMs: 120_000 }).lease;
-  const abandoned = abandonAmaCloserLease(rootDir, lease, { now, host: 'fixture-host', livePid: 4343,
+  const abandoned = await abandonAmaCloserLease(rootDir, lease, { now, host: 'fixture-host', livePid: 4343,
     isProcessAlive: () => true, captureProcessImpl: () => {
       updateAmaCloserLease({ ...identity, status: 'dispatched', lrqId: 'lrq_replacement', now });
       return { startedAt: '2026-01-01T00:00:01Z' };
@@ -476,13 +476,13 @@ test('CLOSERLEASEDEAD-01 a replacement launch installed during the identity prob
   assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
 });
 
-for (const rekeyed of [false, true]) test(`CLOSERINTENTRECON-01 age-only abandonment defers to intent proof, rekeyed=${rekeyed}`, t => {
+for (const rekeyed of [false, true]) test(`CLOSERINTENTRECON-01 age-only abandonment defers to intent proof, rekeyed=${rekeyed}`, async t => {
   const rootDir = freshRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const f = seedCloserIntent(rootDir, { repo: 'fixture/project', prNumber: 17, headSha: 'a'.repeat(40) },
     { rekeyedHead: rekeyed ? 'b'.repeat(40) : null });
   const before = f.lease();
-  assert.equal(abandonAmaCloserLease(rootDir, before, { now: intentExpired, isProcessAlive: () => false,
+  assert.equal(await abandonAmaCloserLease(rootDir, before, { ...f.options, now: intentExpired, readIntentReceiptImpl: () => ({ ok: false }), isProcessAlive: () => false,
     logger: { warn() {} } }), null);
   assert.deepEqual(f.lease(), before);
   assert.equal(f.record().state, 'dispatching');

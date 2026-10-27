@@ -40,3 +40,6 @@ export function readAmaCloserDispatchRecordsForPR(rootDir, { repo, prNumber }) {
       }
     });
 }
+
+// Interrupted submissions still require canonical receipt reconciliation.
+export const isPreReceiptIntent = record => ['dispatching', 'dispatch-interrupted'].includes(record?.state);

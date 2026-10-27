@@ -1942,3 +1942,20 @@ test('CLOSURESPLIT-01: background mismatch to pending CI retains the refreshed d
   assert.equal(result.retryAfterMs, 30_000);
   assert.equal(dispatches, 1);
 });
+
+test('CLOSERDISPATCHDEAD-01: shutdown aborts running work synchronously and prevents queued starts', async t => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'hammer-shutdown-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const queue = createAmaHammerBackgroundQueue({ maxConcurrent: 1 });
+  let interrupted = false;
+  queue.submit({ key: 'example/repo#8@head', pendingDispatch: { rootDir, repo: 'example/repo', prNumber: 8, headSha: 'head' },
+    run: signal => new Promise(resolve => signal.addEventListener('abort', () => {
+      interrupted = true;
+      resolve({ dispatched: false });
+    }, { once: true })) });
+  queue.submit({ key: 'example/repo#9@head', run: () => assert.fail('queued work must not start on shutdown') });
+  queue.shutdown();
+  assert.equal(interrupted, true, 'abort persistence completes before shutdown returns');
+  assert.equal(queue.submit({ key: 'example/repo#10@head', run: () => assert.fail('shutdown is closed') }).state, 'stopped');
+  await queue.drain();
+});

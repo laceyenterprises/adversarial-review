@@ -19,7 +19,7 @@ const identity = { repo: 'example/repo', prNumber: 8, headSha: 'a'.repeat(40) };
 const started = '2026-01-01T00:00:00.000Z';
 const expired = '2026-01-01T01:00:00.000Z';
 const key = 'ama-closer-synthetic';
-const record = { ...identity, schemaVersion: 1, workerClass: 'hammer',
+const record = { ...identity, hqProject: 'review-project', schemaVersion: 1, workerClass: 'hammer',
   reviewedSha: identity.headSha, targetRemediationSha: identity.headSha,
   dispatchPhase: 'submitting', state: 'dispatching', dispatchIdempotencyKey: key,
   dispatchWatcher: { pid: 424242, startedAt: started },
@@ -71,7 +71,7 @@ if (['live', 'reused'].includes(scenario)) {
   assert.equal(read().launchRequestId, 'lrq_matching');
   assert.equal(lease().lrqId, 'lrq_matching');
   assert.equal(readHammerRetryCapLedger(root, identity).lifetimeAttemptCount, 1);
-} else if (['absent', 'refund-replay'].includes(scenario)) {
+} else if (['absent', 'scoped-absent', 'refund-replay'].includes(scenario)) {
   const before = readFileSync(amaCloserDispatchFilePath(root, identity), 'utf8');
   const leaseBefore = lease();
   assert.equal((await settle(args, options)).conclusive, true);
@@ -88,11 +88,11 @@ if (['live', 'reused'].includes(scenario)) {
   assert.equal(lease().terminalOutcome, 'deferred');
   assert.equal(readHammerRetryCapLedger(root, identity), null);
   const proof = read().preReceiptReconciliation.query;
-  assert.equal(proof.absenceProof.grant_id, 'incident-synthetic-attempt');
+  assert.equal(proof.absenceProof.grant_id, scenario === 'scoped-absent' ? 'project-repository-dispatch-read' : 'incident-synthetic-attempt');
   assert.equal(proof.ticketQuery.absenceProof.selector.ticket_ref, 'AMA-PR-8');
   const audit = readFileSync(result.auditPath, 'utf8').trim().split('\n').map(JSON.parse);
   assert.deepEqual(audit.map(row => row.outcome), ['settlement-authorized', 'settled-no-dispatch']);
-  assert.equal(audit[0].evidence.absenceProof.grant_id, 'incident-synthetic-attempt');
+  assert.equal(audit[0].evidence.absenceProof.grant_id, proof.absenceProof.grant_id);
   await assert.rejects(settle([...args, '--apply', '--reason', 'replay'], options));
   assert.equal(read().retryCount, 1);
 } else {

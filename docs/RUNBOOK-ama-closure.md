@@ -6353,3 +6353,15 @@ After normal deployment, the runtime owner can observe a naturally occurring
 released receipt followed by exactly one admitted retry once the lane is free.
 Source tests alone do not establish live incident recovery; no live mutation or
 new smoke step is authorized here.
+
+
+## Dead dispatch submitters (CLOSERDISPATCHDEAD-01)
+
+Scoped project/repository selectors use the existing paired grant and require
+canonical absence before retiring dead submissions. Asynchronous lease
+abandonment reconciles the intent in the same pass. SIGTERM/SIGINT synchronously
+mark background submissions `dispatch-interrupted` before exit; these retain
+leases and artifacts until receipt adoption or conclusive no-launch proof.
+Live owners and once-only launch/refund fences remain authoritative. See the
+[recovery contract](dispatch-absence-recovery.md) for fields, deployment order and offline evidence.
+Existing smoke promises remain; no live operation is part of validation.

@@ -7,7 +7,7 @@ import { dirname } from 'node:path';
 import { hostname } from 'node:os';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { readLaunchRequestByIdempotencyKeyAsync, readLaunchRequestsForTicketSinceAsync } from '../session-ledger-read-adapter.mjs';
-import { amaCloserDispatchFilePath, readAmaCloserDispatchRecord } from './dispatch-record-read.mjs';
+import { amaCloserDispatchFilePath, readAmaCloserDispatchRecord, isPreReceiptIntent } from './dispatch-record-read.mjs';
 import { abandonedAmaCloserLeaseOutcome, readAmaCloserLease, isAmaCloserPidAlive, updateAmaCloserLease, deleteAmaCloserLeaseIfCurrent } from './closer-lease.mjs';
 import { recordHammerRetryDispatch } from './hammer-retry-cap.mjs';
 import { deliverAlert } from '../alert-delivery.mjs';
@@ -50,7 +50,7 @@ const readBytes = path => {
   catch (error) { if (error.code === 'ENOENT') return null; throw error; }
 };
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-export const isPreReceiptIntent = record => record?.state === 'dispatching';
+export { isPreReceiptIntent } from './dispatch-record-read.mjs';
 // Accept PR metadata only: dispatch lifecycle state is a separate contract.
 export const isTerminalCloserPullRequest = pr => pr?.isOpen === false
   || pr?.isMerged === true || pr?.merged === true
@@ -189,15 +189,16 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
     // Re-prove absence after a crash between lease deferral and intent write.
     const canProbeSubmitter = matchingPendingLease || (settledNoLaunch
       && (!lease.holderHost || lease.holderHost === hostname()));
-    const processes = !legacy && canProbeSubmitter && record.dispatchPhase === 'submitting'
-      && !deadlinePassed ? probeCloserSubmitter(record, lease, options) : null;
+    const processes = !legacy && canProbeSubmitter
+      ? probeCloserSubmitter(record, lease, options) : null;
     const deadSubmitter = processes?.watcher.status === 'gone'
       && processes.submitter.status === 'gone' && processes.key.status === 'absent';
     // Use the adapter's normal 30s ledger budget, scaled once for host load.
     const timeoutMs = loadAwareTimeoutMs(30_000, options.loadAwareTimeoutOptions);
-    const ticketQuery = { kind: 'launch-requests-for-ticket-since',
+    const scope = { projectRef: record.hqProject || 'adversarial-merge-authority', repo: record.repo };
+    const ticketQuery = { ...scope, kind: 'launch-requests-for-ticket-since',
       ticketRef: `AMA-PR-${record.prNumber}`, requestedAtOrAfter: record.lastAttemptedAt, limit: 1, timeoutMs };
-    const query = legacy ? ticketQuery : { kind: 'launch-request-by-idempotency-key',
+    const query = legacy ? ticketQuery : { ...scope, kind: 'launch-request-by-idempotency-key',
       idempotencyKey: record.dispatchIdempotencyKey, limit: 2, timeoutMs };
     const read = legacy ? options.readLegacyIntentLaunchesImpl || readLaunchRequestsForTicketSinceAsync
       : options.readIntentReceiptImpl || readLaunchRequestByIdempotencyKeyAsync;
@@ -277,7 +278,7 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
         // Let ordinary reconciliation resolve live retries and terminal status.
         lastObservedStatus: 'unknown', lastObservedAt: now, lastError: null,
         preReceiptReconciliation: { status, observedAt: now, query: evidence } };
-    } else if (!foreignLease && ((legacy && rows?.length === 0 && Number.isFinite(started))
+    } else if (!foreignLease && ![processes?.watcher.status, processes?.submitter.status, processes?.key.status].includes('live') && ((legacy && rows?.length === 0 && Number.isFinite(started))
       || (!legacy && keyedAbsenceAllowed && (!promotedLease || misattributedLease) && deadlinePassed
         && (rows?.length === 0 || operatorAbsence))
       || (!legacy && keyedAbsenceAllowed && deadSubmitter && rows?.length === 0)

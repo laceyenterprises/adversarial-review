@@ -2437,3 +2437,15 @@ without preventing boot. Reset fingerprints permit a bounded baseline-plus-cap
 burst after deploy. An unchanged cause and generation preserve normal backoff.
 These transitions affect scheduling only and confer no merge authority. See
 [the lane data contract](data-model/watcher-no-progress-lane.md).
+
+
+## Dead dispatch submitters (CLOSERDISPATCHDEAD-01)
+
+Scoped project/repository selectors use the existing paired grant and require
+canonical absence before retiring dead submissions. Asynchronous lease
+abandonment reconciles the intent in the same pass. SIGTERM/SIGINT synchronously
+mark background submissions `dispatch-interrupted` before exit; these retain
+leases and artifacts until receipt adoption or conclusive no-launch proof.
+Live owners and once-only launch/refund fences remain authoritative. See the
+[recovery contract](dispatch-absence-recovery.md) for fields, deployment order and offline evidence.
+Existing smoke promises remain; no live operation is part of validation.

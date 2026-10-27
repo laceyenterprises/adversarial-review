@@ -17,6 +17,20 @@ const repo = 'fixture/repo', prNumber = 42;
 const body = '## Blocking issues\n- **Prefix already present**\n  - **File:** `feature.txt`\n  - **Problem:** Prefix absent.\n\n## Non-blocking issues\n- None.\n\n## Verdict\nRequest changes';
 const evidence = '```\n$ git show HEAD:feature.txt\nprefix: feature\n```';
 
+test('REBASECURRENCY-01: conflict resolution needs hammer provenance to carry review currency', async t => {
+  const f = await fixture(t, { changed: true });
+  // Source resolution changes the patch: a PR-update rebase has no currency proof.
+  assert.equal((await f.currency()(f.a, f.b, { rebaseOnly: true })).current, false);
+  const body = `HAM-Base-Head: ${f.a}\nHAM-Validated-Head: ${f.b}`;
+  f.comments.push({ user: { login: 'fixture-builder[bot]' }, body });
+  assert.equal((await f.currency()(f.a, f.b, { rebaseOnly: true })).current, false);
+  f.comments.push({ user: { login: 'the-hammer-lacey[bot]' }, body });
+  const currency = await f.currency()(f.a, f.b, { rebaseOnly: true });
+  assert.equal(currency.current, true);
+  assert.equal(currency.proof, 'closer-rebase-provenance');
+  assert.equal((await f.currency()(f.a, 'c'.repeat(40), { rebaseOnly: true })).current, false);
+});
+
 async function fixture(t, { changed = false, remediation = false, binary = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'hamwithdraw-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

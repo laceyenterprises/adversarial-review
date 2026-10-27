@@ -126,7 +126,7 @@ test('owner transport deadline does not hold the event loop open', async t => {
     deadline = setTimeoutImpl(...args);
     return deadline;
   });
-  const pending = seam.remediatorProposalOwner({}, { env: { HQ_PYTHON3: join(rootDir, 'missing-python') } });
+  const pending = seam.remediatorProposalOwner({kind:'hammer',repo:'example/repo',prNumber:1}, { env: { HQ_BIN: join(rootDir, 'missing-hq') } });
   assert.equal(deadline.hasRef(), false);
   await assert.rejects(pending, /osg-owner-unavailable/);
 });

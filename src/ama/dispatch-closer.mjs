@@ -1,3 +1,4 @@
+import { loadAppSdkSync } from '../app-sdk-loader.mjs';
 import { prepareQueueCloserDispatch, renderQueueCloserPrompt, queueAdmissionCallback } from '../finalization/queue-closer.mjs';
 import { routeFinalizationWriter } from '../finalization/queue-routing-boundary.mjs';
 import { readExecutionVerdictsFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
@@ -1128,37 +1129,11 @@ async function emitWorkerGitMergeSignalBestEffort({
   env = process.env,
 }) {
   if (!hqRoot || !prNumber || !mergeCommitSha) return false;
-  const pythonPath = [
-    join(AGENT_OS_ROOT, 'modules', 'worker-pool', 'lib', 'python'),
-    join(AGENT_OS_ROOT, 'platform', 'session-ledger', 'src'),
-    env.PYTHONPATH || '',
-  ].filter(Boolean).join(':');
-  const pythonBin = resolveAgentOsPythonBin(env);
-  const args = [
-    '-m',
-    'cwp_dispatch.git_signal',
-    'emit',
-    '--root',
-    hqRoot,
-    '--event-type',
-    'worker.git.merge_signal',
-    '--pr-number',
-    String(prNumber),
-    '--merge-commit-sha',
-    mergeCommitSha,
-    '--merged-by',
-    mergedBy || 'ama-closer',
-    '--mode',
-    mode || 'unknown',
-  ];
-  if (launchRequestId) args.push('--launch-request-id', String(launchRequestId));
-  if (ticketRef) args.push('--ticket-ref', String(ticketRef));
   try {
-    await execFileImpl(pythonBin, args, {
-      env: { ...env, PYTHONPATH: pythonPath },
-      maxBuffer: 1024 * 1024,
-      timeout: loadAwareTimeoutMs(15_000),
-    });
+    await loadAppSdkSync().recordMergeSignal({hq_root:hqRoot, pr_number:Number(prNumber),
+      launch_request_id:launchRequestId, ticket_ref:ticketRef, merge_commit_sha:mergeCommitSha,
+      merged_by:mergedBy || 'ama-closer', mode:mode || 'squash'},
+    {execFile:execFileImpl, hq_bin:env.HQ_BIN || 'hq', env, timeout_ms:loadAwareTimeoutMs(15000)});
     return true;
   } catch (err) {
     logger?.warn?.(JSON.stringify({
@@ -1172,17 +1147,6 @@ async function emitWorkerGitMergeSignalBestEffort({
   }
 }
 
-function resolveAgentOsPythonBin(env = process.env, { existsImpl = existsSync } = {}) {
-  for (const candidate of [
-    env.HAM_PYTHON_BIN,
-    env.HQ_PYTHON3,
-    env.AGENT_OS_PY,
-  ]) {
-    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
-  }
-  if (existsImpl('/opt/homebrew/bin/python3')) return '/opt/homebrew/bin/python3';
-  return 'python3';
-}
 
 /**
  * Decide whether the HAM terminal-remediation prompt (`hammer-prompt.md`) is
@@ -3442,11 +3406,12 @@ export const __testables__ = Object.freeze({
   isPhantomActiveWorkerRun,
   resolveAmaDispatchTimeoutMs,
   withProvisionTimeoutCappedAtDispatch,
-  resolveAgentOsPythonBin,
   defaultAmaLivePrProbe,
   normalizeAmaLivePrProbeResult,
   fetchMergeCommitShaBestEffort,
   emitWorkerGitMergeSignalBestEffort,
+  readMergedBuildCompletionSignal,
+  readMergedBuildCompletionSignalAsync,
 });
 
 function resolveRollupRequiredChecks(rollup) {
@@ -3680,7 +3645,7 @@ function* readMergedBuildCompletionSignalSteps({
   readBuildCompletionProducerEvidenceImpl = readBuildCompletionProducerEvidence,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
 } = {}) {
-  let result = yield readBuildCompletionSignalForPrImpl({
+  const readArgs = {
     repo,
     prNumber,
     signalKind: 'merged',
@@ -3689,8 +3654,19 @@ function* readMergedBuildCompletionSignalSteps({
     ledgerTarget,
     ledgerDbPath,
     env, signal,
-  });
-  if (!result) return { ok: false, reason: 'ledger-read-failed' };
+  };
+  let result;
+  try { result = yield readBuildCompletionSignalForPrImpl(readArgs); }
+  catch { result = {ok:false,reason:'worker-observation-unavailable'}; }
+  const missingCapture = (failure) => {
+    const readReason = failure?.reason === 'worker-observation-scope-denied'
+      ? 'merge-capture-read-scope-denied' : 'merge-capture-read-unavailable';
+    logger?.warn?.(JSON.stringify({event:'ama_closer.merge_capture_read_degraded',repo,prNumber,reason:readReason}));
+    // Missing capture is a reconciliation hint, never merge/absence authority.
+    // Live PR state, review and merge gates remain independently required.
+    return {ok:false,reason:'missing-build-completion-signal',readReason};
+  };
+  if (!result || !result.ok && !isCleanMissingMergedSignal(result)) return missingCapture(result);
   if (result.ok) {
     const producerHeadSha = String(result.row?.head_sha || '').trim().toLowerCase() || null;
     const expectedHeadSha = String(headSha || '').trim().toLowerCase() || null;
@@ -3717,7 +3693,8 @@ function* readMergedBuildCompletionSignalSteps({
     result = { ok: false, reason: 'missing-build-completion-signal' };
   }
   if (isCleanMissingMergedSignal(result)) {
-    const producerEvidence = yield readBuildCompletionProducerEvidenceImpl({
+    let producerEvidence;
+    try { producerEvidence = yield readBuildCompletionProducerEvidenceImpl({
       repo,
       signalKind: 'merged',
       hqRoot,
@@ -3725,7 +3702,7 @@ function* readMergedBuildCompletionSignalSteps({
       ledgerTarget,
       ledgerDbPath,
       env, signal,
-    });
+    }); } catch { producerEvidence = {ok:false,reason:'worker-observation-unavailable'}; }
     if (producerEvidence?.ok) {
       return {
         ...result,
@@ -3734,7 +3711,7 @@ function* readMergedBuildCompletionSignalSteps({
       };
     }
     return {
-      ...(producerEvidence || { ok: false, reason: 'missing-build-completion-producer-evidence' }),
+      ...(producerEvidence?.reason === 'missing-build-completion-producer-evidence' ? producerEvidence : missingCapture(producerEvidence)),
       producerEvidence: producerEvidence || null,
       prSignal: result,
     };
@@ -3743,11 +3720,12 @@ function* readMergedBuildCompletionSignalSteps({
 }
 
 function isCleanMissingMergedSignal(result) {
-  return result?.ok === false && result.reason === 'missing-build-completion-signal';
+  return result?.ok === false && result.reason === 'missing-build-completion-signal' && !result.readReason;
 }
 
 function isUnknownMergedSignal(result) {
-  return result?.ok === false && !isCleanMissingMergedSignal(result);
+  return result?.ok === false && !isCleanMissingMergedSignal(result)
+    && !['merge-capture-read-scope-denied','merge-capture-read-unavailable'].includes(result.readReason);
 }
 
 function retainExistingAmaCloserDispatch(existingRecord, workerClass, status) {
@@ -5358,6 +5336,17 @@ async function maybeDispatchAmaCloserAttempt({
     readBuildCompletionProducerEvidenceImpl,
     readBuildCompletionSignalForPrImpl,
   });
+  if (mergedSignal?.readReason && existingRecord) {
+    try {
+      updateDispatchRecord(rootDir, existingDispatchIdentity, current => current ? {
+        ...current,mergeCaptureReadReason:mergedSignal.readReason,
+        mergeCaptureReadAt:dispatchContext.dispatchedAt,
+      } : null);
+    } catch {
+      logger?.warn?.(JSON.stringify({event:'ama_closer.merge_capture_diagnostic_unavailable',repo,prNumber,
+        reason:mergedSignal.readReason}));
+    }
+  }
   if (mergedSignal?.ok) {
     if (existingRecord?.launchRequestId || existingRecord?.dispatchId) {
       finalizeAmaCloserLeaseBestEffort({
@@ -7974,6 +7963,10 @@ async function maybeDispatchAmaCloserAttempt({
       lastObservedStatus: 'starting',
       lastObservedAt: dispatchContext.dispatchedAt,
       lastError: null,
+      ...(mergedSignal?.readReason ? {
+        mergeCaptureReadReason: mergedSignal.readReason,
+        mergeCaptureReadAt: dispatchContext.dispatchedAt,
+      } : {}),
     };
   });
 
@@ -8015,6 +8008,7 @@ async function maybeDispatchAmaCloserAttempt({
     harnessResolution,
     eligibilityReasons: verdict.trace,
     leasePath: leaseResult.leasePath,
+    ...(mergedSignal?.readReason ? {mergeCaptureReadReason:mergedSignal.readReason} : {}),
     ...(leaseUpdateError ? { leaseUpdateError } : {}),
   };
   } finally {

@@ -298,6 +298,7 @@ function hammerDispatchDeps(overrides = {}) {
     deliverAlertImpl: async () => {},
     fetchPrimaryChangeImpl: async ({ headSha }) => primaryChangeFixture(headSha),
     execFileImpl: async (cmd, args) => {
+        if (args[0] === "build-completions" && args[1] === "record-merge") return {stdout: JSON.stringify({status:"recorded",event_id:"synthetic-event"}),stderr:""};
       execCalls.push({ cmd, args });
       return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: `dispatch_hammer_${execCalls.length}`, launchRequestId: execCalls.length === 1 ? 'lrq_hammer' : `lrq_hammer_${execCalls.length}` }), stderr: '' };
     },
@@ -1188,6 +1189,7 @@ test('same-head terminal HAM remediation auto-merges when structural gates pass'
   const candidate = await fetchMergeAgentCandidate(REPO, PR_NUMBER, {
     guardStackedBaseImpl: async () => null,
     execFileImpl: async (_cmd, args) => {
+        if (args[0] === "build-completions" && args[1] === "record-merge") return {stdout: JSON.stringify({status:"recorded",event_id:"synthetic-event"}),stderr:""};
       const livePr = { title: 'Fix #7732 regression', body: 'Fix: #7732', headRefOid: REVIEWED_HEAD,
         state: 'OPEN', mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', labels: [],
         statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] };
@@ -1216,6 +1218,7 @@ test('same-head terminal HAM remediation auto-merges when structural gates pass'
     }),
     ...hammerDispatchDeps({
       execFileImpl: async (cmd, args) => {
+        if (args[0] === "build-completions" && args[1] === "record-merge") return {stdout: JSON.stringify({status:"recorded",event_id:"synthetic-event"}),stderr:""};
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
         }
@@ -1325,7 +1328,7 @@ test('same-head terminal HAM remediation leaves terminal breadcrumb when merge s
         if (cmd === 'gh' && args[0] === 'pr' && args[1] === 'view') {
           return { stdout: JSON.stringify({ mergeCommit: { oid: 'd'.repeat(40) } }), stderr: '' };
         }
-        if (args[0] === '-m' && args[1] === 'cwp_dispatch.git_signal') {
+        if (args[0] === 'build-completions' && args[1] === 'record-merge') {
           throw new Error('database is locked');
         }
         if (args[0] === 'worker' && args[1] === 'tear-down') {
@@ -1351,7 +1354,7 @@ test('same-head terminal HAM remediation leaves terminal breadcrumb when merge s
     readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD }).terminalOutcome,
     'succeeded',
   );
-  assert.equal(calls.some((call) => call.args[0] === '-m' && call.args[1] === 'cwp_dispatch.git_signal'), true);
+  assert.equal(calls.some((call) => call.args[0] === 'build-completions' && call.args[1] === 'record-merge'), true);
   const dispatchRecord = readAmaCloserDispatchRecord(rootDir, {
     repo: REPO,
     prNumber: PR_NUMBER,
@@ -1409,6 +1412,7 @@ test('same-head terminal HAM remediation passes canonical live gate shape to dae
     }),
     ...hammerDispatchDeps({
       execFileImpl: async (cmd, args) => {
+        if (args[0] === "build-completions" && args[1] === "record-merge") return {stdout: JSON.stringify({status:"recorded",event_id:"synthetic-event"}),stderr:""};
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
         }
@@ -1476,6 +1480,7 @@ test('same-head terminal HAM remediation records merged audit before nonfatal cl
     }),
     ...hammerDispatchDeps({
       execFileImpl: async (cmd, args) => {
+        if (args[0] === "build-completions" && args[1] === "record-merge") return {stdout: JSON.stringify({status:"recorded",event_id:"synthetic-event"}),stderr:""};
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
         }
@@ -1547,6 +1552,7 @@ test('same-head terminal HAM evidence cannot merge red CI or invent an operator 
     }),
     ...hammerDispatchDeps({
       execFileImpl: async (cmd, args) => {
+        if (args[0] === "build-completions" && args[1] === "record-merge") return {stdout: JSON.stringify({status:"recorded",event_id:"synthetic-event"}),stderr:""};
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
         }
@@ -1604,6 +1610,7 @@ test('same-head terminal HAM remediation parks for operator on head mismatch wit
     }),
     ...hammerDispatchDeps({
       execFileImpl: async (cmd, args) => {
+        if (args[0] === "build-completions" && args[1] === "record-merge") return {stdout: JSON.stringify({status:"recorded",event_id:"synthetic-event"}),stderr:""};
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
         }
@@ -1685,6 +1692,7 @@ test('succeeded old-head hammer dispatch ignores stale concurrent-writer error',
     }),
     ...hammerDispatchDeps({
       execFileImpl: async (_cmd, args) => {
+        if (args[0] === "build-completions" && args[1] === "record-merge") return {stdout: JSON.stringify({status:"recorded",event_id:"synthetic-event"}),stderr:""};
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
         }
@@ -1789,6 +1797,7 @@ test('dead target-head pending lease is reconciled without dispatching over the 
     },
     ...hammerDispatchDeps({
       execFileImpl: async (_cmd, args) => {
+        if (args[0] === "build-completions" && args[1] === "record-merge") return {stdout: JSON.stringify({status:"recorded",event_id:"synthetic-event"}),stderr:""};
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'not-found' }), stderr: '' };
         }
@@ -1854,6 +1863,7 @@ test('terminal current-head hammer dispatch is not superseded after remediation 
     options: validHamTerminalRemediationOptions(),
     ...hammerDispatchDeps({
       execFileImpl: async (_cmd, args) => {
+        if (args[0] === "build-completions" && args[1] === "record-merge") return {stdout: JSON.stringify({status:"recorded",event_id:"synthetic-event"}),stderr:""};
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
         }
@@ -1931,6 +1941,7 @@ test('fresh succeeded current-head hammer without HAM evidence is retried as a f
     },
     ...hammerDispatchDeps({
       execFileImpl: async (cmd, args) => {
+        if (args[0] === "build-completions" && args[1] === "record-merge") return {stdout: JSON.stringify({status:"recorded",event_id:"synthetic-event"}),stderr:""};
         execCalls.push({ cmd, args });
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
@@ -2016,6 +2027,7 @@ test('fresh succeeded current-head hammer trusts live open state over stale merg
     },
     ...hammerDispatchDeps({
       execFileImpl: async (cmd, args) => {
+        if (args[0] === "build-completions" && args[1] === "record-merge") return {stdout: JSON.stringify({status:"recorded",event_id:"synthetic-event"}),stderr:""};
         execCalls.push({ cmd, args });
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
@@ -2107,6 +2119,7 @@ test('fresh succeeded hammer accepts a merged signal for its target head', async
     },
     ...hammerDispatchDeps({
       execFileImpl: async (cmd, args) => {
+        if (args[0] === "build-completions" && args[1] === "record-merge") return {stdout: JSON.stringify({status:"recorded",event_id:"synthetic-event"}),stderr:""};
         execCalls.push({ cmd, args });
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
@@ -2220,6 +2233,7 @@ test('terminal failed current-head hammer without HAM evidence is redispatched',
     },
     ...hammerDispatchDeps({
       execFileImpl: async (cmd, args) => {
+        if (args[0] === "build-completions" && args[1] === "record-merge") return {stdout: JSON.stringify({status:"recorded",event_id:"synthetic-event"}),stderr:""};
         execCalls.push({ cmd, args });
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
@@ -2306,6 +2320,7 @@ test('current-head hammer dispatch ignores old-head audit terminal outcome while
     }),
     ...hammerDispatchDeps({
       execFileImpl: async (_cmd, args) => {
+        if (args[0] === "build-completions" && args[1] === "record-merge") return {stdout: JSON.stringify({status:"recorded",event_id:"synthetic-event"}),stderr:""};
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'running' }), stderr: '' };
         }
@@ -2424,6 +2439,7 @@ test('AMAGAP-01: unknown dispatch status releases when ledger says LRQ is termin
 
   const deps = hammerDispatchDeps({
     execFileImpl: async (cmd, args) => {
+        if (args[0] === "build-completions" && args[1] === "record-merge") return {stdout: JSON.stringify({status:"recorded",event_id:"synthetic-event"}),stderr:""};
       deps.execCalls.push({ cmd, args });
       if (args[0] === 'dispatch' && args[1] === 'status') {
         return { stdout: JSON.stringify({ status: 'unknown' }), stderr: '' };
@@ -2499,6 +2515,7 @@ test('AMAGAP-01: unknown dispatch status parks when ledger requires operator tri
 
   const deps = hammerDispatchDeps({
     execFileImpl: async (cmd, args) => {
+        if (args[0] === "build-completions" && args[1] === "record-merge") return {stdout: JSON.stringify({status:"recorded",event_id:"synthetic-event"}),stderr:""};
       deps.execCalls.push({ cmd, args });
       if (args[0] === 'dispatch' && args[1] === 'status') {
         return { stdout: JSON.stringify({ status: 'unknown' }), stderr: '' };
@@ -3165,6 +3182,7 @@ function spawnThenDieDeps(overrides = {}) {
     execCalls,
     fetchPrimaryChangeImpl: async ({ headSha }) => primaryChangeFixture(headSha),
     execFileImpl: async (cmd, args) => {
+        if (args[0] === "build-completions" && args[1] === "record-merge") return {stdout: JSON.stringify({status:"recorded",event_id:"synthetic-event"}),stderr:""};
       execCalls.push({ cmd, args });
       const err = new Error('worker_killed ~36s into planning');
       // hq already emitted the launch identifiers before the worker died — this is
@@ -3552,6 +3570,7 @@ for (const parkKind of ['merge-lease-timeout', 'required-checks-pending', 'pr-me
         options: validHamTerminalRemediationOptions({ reviewedHead: REVIEWED_HEAD, currentHead: ADVANCED_HEAD }),
         ...hammerDispatchDeps({
           execFileImpl: async (_cmd, args) => {
+        if (args[0] === "build-completions" && args[1] === "record-merge") return {stdout: JSON.stringify({status:"recorded",event_id:"synthetic-event"}),stderr:""};
             if (args[0] === 'dispatch' && args[1] === 'status') return { stdout: JSON.stringify({ status: 'failed' }), stderr: '' };
             return { stdout: '{}', stderr: '' };
           },
@@ -3639,6 +3658,7 @@ for (const scenario of ['risk class changes', 'pending CI turns red', 'pending C
       ...hammerDispatchDeps({
         readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: scenario === 'stale park active repair' ? 'running' : 'failed' } }),
         execFileImpl: async (_cmd, args) => {
+        if (args[0] === "build-completions" && args[1] === "record-merge") return {stdout: JSON.stringify({status:"recorded",event_id:"synthetic-event"}),stderr:""};
           calls.push(args);
           if (args[0] === 'dispatch' && args[1] === 'status') return { stdout: JSON.stringify({ status: scenario === 'stale park active repair' ? 'running' : 'failed' }), stderr: '' };
           return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: 'repair_dispatch', launchRequestId: 'repair_launch' }), stderr: '' };
@@ -3706,6 +3726,7 @@ for (const mergeableState of ['MERGEABLE', 'UNKNOWN']) {
       options: validHamTerminalRemediationOptions(),
       ...hammerDispatchDeps({
         execFileImpl: async (_cmd, args) => {
+        if (args[0] === "build-completions" && args[1] === "record-merge") return {stdout: JSON.stringify({status:"recorded",event_id:"synthetic-event"}),stderr:""};
           if (args[0] === 'dispatch' && args[1] === 'status') return { stdout: JSON.stringify({ status: 'failed' }) };
           throw new Error('unexpected dispatch');
         },
@@ -3942,6 +3963,7 @@ for (const ambiguous of [false, true]) {
     let ticket = null;
     const deps = hammerDispatchDeps({
       execFileImpl: async (_cmd, args) => {
+        if (args[0] === "build-completions" && args[1] === "record-merge") return {stdout: JSON.stringify({status:"recorded",event_id:"synthetic-event"}),stderr:""};
         if (args[0] === 'dispatch' && args[1] !== 'status') {
           spawns++;
           const receipt = { stdout: JSON.stringify({ launchRequestId: 'unverified-launch' }) };
@@ -4032,6 +4054,7 @@ test('same-head terminal HAM pre-click guard reads the base after default-base a
       return { disposition: 'deferred', reason: click.closureHold.reason, closureHold: click.closureHold };
     },
     execFileImpl: async (_cmd, args) => {
+        if (args[0] === "build-completions" && args[1] === "record-merge") return {stdout: JSON.stringify({status:"recorded",event_id:"synthetic-event"}),stderr:""};
       assert.notEqual(args[1], 'merge', 'held click cannot merge');
       return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
     },
@@ -4286,6 +4309,7 @@ test('HAMVALIDORPHAN-01 worker_crashed after validation resumes under the existi
   const deps = hammerDispatchDeps({
     readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'failed', failure_class: 'worker_crashed' } }),
     execFileImpl: async (_cmd, args) => {
+        if (args[0] === "build-completions" && args[1] === "record-merge") return {stdout: JSON.stringify({status:"recorded",event_id:"synthetic-event"}),stderr:""};
       if (args[0] === 'dispatch' && args[1] === 'status') return { stdout: '{"status":"failed"}', stderr: '' };
       if (args[0] !== 'dispatch') return { stdout: '{}', stderr: '' };
       launches++;
@@ -4326,3 +4350,25 @@ test('HAMVALIDORPHAN-01 worker_crashed after validation resumes under the existi
   assert.ok(launches <= HAMMER_RETRY_CAP_TOTAL_DISPATCHES);
   assert.ok(pages.length > 0, 'attempt exhaustion must use the existing escalation');
 });
+
+
+for (const reason of ['worker-observation-scope-denied','worker-observation-unavailable']) {
+  test(`capture ${reason} permits hammer startup through missing-capture reconciliation`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'capture-degraded-'));
+    t.after(() => rmSync(rootDir, {recursive:true,force:true}));
+    const warnings = [];
+    const result = await maybeDispatchAmaCloser({
+      ...hammerDispatchArgs(rootDir),
+      ...hammerDispatchDeps({
+        readBuildCompletionSignalForPrImpl:() => ({ok:false,reason}),
+        logger:{log(){},info(){},error(){},warn:message => warnings.push(message)},
+      }),
+    });
+    assert.equal(result.dispatched, true, JSON.stringify(result));
+    const record = readAmaCloserDispatchRecord(rootDir, {repo:REPO,prNumber:PR_NUMBER,headSha:REVIEWED_HEAD});
+    assert.equal(record.mergeCaptureReadReason, result.mergeCaptureReadReason);
+    assert.equal(record.mergeCaptureReadAt, '2026-07-06T12:00:00Z');
+    assert.match(warnings.join('\n'), reason.endsWith('scope-denied')
+      ? /merge-capture-read-scope-denied/ : /merge-capture-read-unavailable/);
+  });
+}

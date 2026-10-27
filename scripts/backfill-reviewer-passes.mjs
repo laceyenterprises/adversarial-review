@@ -15,13 +15,12 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 const USAGE = `\
 Usage:
-  node scripts/backfill-reviewer-passes.mjs [--root-dir <path>] [--ledger-target <target>] [--ledger-db <deprecated-path>] [--codex-session-root <path>] [--claude-session-root <path>] [--transcript-fallback] [--dry-run] [--json]
+  node scripts/backfill-reviewer-passes.mjs [--root-dir <path>] [--codex-session-root <path>] [--claude-session-root <path>] [--transcript-fallback] [--dry-run] [--json]
 `;
 
 function parseArgs(argv) {
   const args = {
     rootDir: ROOT,
-    ledgerTarget: null,
     codexSessionRoots: [],
     claudeSessionRoots: [],
     transcriptFallback: false,
@@ -34,21 +33,6 @@ function parseArgs(argv) {
       idx += 1;
       if (!argv[idx]) throw new Error('--root-dir requires a value');
       args.rootDir = argv[idx];
-    } else if (arg === '--ledger-target' || arg === '--ledger-db') {
-      idx += 1;
-      if (!argv[idx]) throw new Error(`${arg} requires a value`);
-      if (arg === '--ledger-db') {
-        args.ledgerTarget = {
-          backend: 'sqlite',
-          path: argv[idx],
-          source: 'deprecated-ledger-db-path',
-          deprecatedAlias: true,
-        };
-        args.ledgerDbDeprecated = true;
-      } else {
-        args.ledgerTarget = argv[idx];
-        args.ledgerDbDeprecated = false;
-      }
     } else if (arg === '--codex-session-root') {
       idx += 1;
       if (!argv[idx]) throw new Error('--codex-session-root requires a value');
@@ -84,9 +68,6 @@ async function main(argv = process.argv.slice(2), io = {}) {
       stdout.write(USAGE);
       return 0;
     }
-    if (args.ledgerDbDeprecated) {
-      stderr.write('warning: --ledger-db is deprecated; use --ledger-target instead\n');
-    }
     if (env.ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED === '1') {
       const readiness = await (io.prepareObservations ?? prepareWorkerObservationSession)({env});
       if (!readiness.ok) throw new Error(`worker observation registration unavailable: ${readiness.detail || readiness.reason}`);
@@ -94,7 +75,6 @@ async function main(argv = process.argv.slice(2), io = {}) {
       stderr.write('worker observations disabled: OS accounting remains unknown; local-only backfill may proceed\n');
     }
     const result = backfillReviewerPasses(args.rootDir, {
-      ledgerTarget: args.ledgerTarget,
       codexSessionRoots: args.codexSessionRoots,
       claudeSessionRoots: args.claudeSessionRoots,
       transcriptFallback: args.transcriptFallback,
@@ -105,13 +85,11 @@ async function main(argv = process.argv.slice(2), io = {}) {
     // slow rollups leave them null; the job-driven backfill above only heals
     // remediation. Self-heal null closer passes straight from the ledger.
     const closer = backfillCloserReviewerPasses(args.rootDir, {
-      ledgerTarget: args.ledgerTarget,
       dryRun: args.dryRun,
       env,
     });
     result.closer = closer;
     const attribution = backfillReviewerWorkerRunAttribution(args.rootDir, {
-      ledgerTarget: args.ledgerTarget,
       dryRun: args.dryRun,
       env,
     });

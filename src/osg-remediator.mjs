@@ -1,6 +1,6 @@
 // OSG-14 execution seam. Assignments/budgets belong to the ledger owner;
 // account proposals belong to ITP; merge authority remains with the caller.
-import { spawn } from 'node:child_process';
+import { loadAppSdkSync } from './app-sdk-loader.mjs';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
@@ -12,25 +12,8 @@ import { writeFileAtomic } from './atomic-write.mjs';
 import { resolveAdversarialReviewStateDir } from './reviewer-fence.mjs';
 
 export function remediatorProposalOwner(value, { env = process.env } = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(env.HQ_PYTHON3 || env.AGENT_OS_PY || 'python3',
-      ['-B', '-m', 'cwp_dispatch.osg_remediator'], { env, stdio: ['pipe', 'pipe', 'ignore'] });
-    let stdout = '';
-    // Optional evidence has a fixed bound, no retries and no load scaling.
-    const timeout = setTimeout(() => child.kill('SIGKILL'), 1500);
-    timeout.unref?.();
-    child.stdout.on('data', data => { stdout += data; if (stdout.length > 131072) child.kill('SIGKILL'); });
-    child.on('error', () => { clearTimeout(timeout); reject(new Error('osg-owner-unavailable')); });
-    child.stdin.on('error', () => {});
-    child.on('close', code => {
-      clearTimeout(timeout);
-      try {
-        if (code !== 0) throw new Error();
-        resolve(JSON.parse(stdout));
-      } catch { reject(new Error('osg-owner-unavailable')); }
-    });
-    child.stdin.end(JSON.stringify(value));
-  });
+  return loadAppSdkSync().readRemediatorProposal(value, {env, hq_bin:env.HQ_BIN || 'hq', timeout_ms:1500})
+    .catch(()=>{throw new Error('osg-owner-unavailable');});
 }
 
 function recordRoute(rootDir, env, value) {

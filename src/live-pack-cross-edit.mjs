@@ -25,8 +25,7 @@
 // body. Anything else is gated exactly as before.
 //
 // Cost is bounded: per touched pack, one plan.json fetch (a second only when
-// the pack is absent at the base ref) and one LIMIT-bounded, indexed,
-// read-only ledger SELECT (up to three attempts for transient failures).
+// the pack is absent at the base ref) and a bounded public SDK observation.
 
 import { execFile } from 'node:child_process';
 import { isDeepStrictEqual, promisify } from 'node:util';
@@ -61,6 +60,8 @@ const TICKET_ID_RE = /^[A-Z][A-Z0-9]*-\d+[A-Z0-9]*$/;
 const TITLE_TICKET_RE = /^\s*(?:\[[^\]]*\]\s*)*(?:\([^)]*\)\s*)*(?:SEV\d+\s+)?([A-Za-z][A-Za-z0-9]*-\d+[A-Za-z0-9]*)\b/;
 
 const PUBLIC_LEDGER_REASONS = new Set([
+  'dispatch-read-unavailable', 'worker-observation-unavailable',
+  'worker-observation-scope-denied',
   'ledger-read-failed', 'ledger-read-threw', 'missing-ledger-target',
   'malformed-ledger-target', 'unsupported-ledger-backend',
   'postgres-configured-but-sqlite-resolved', 'psql-not-installed',
@@ -327,6 +328,8 @@ async function resolvePackLiveness({
   if (!result?.ok) {
     // Private operator diagnostics never enter findings or review JSON.
     console.warn('[live-pack-cross-edit] ledger read failed:', result?.reason, result?.detail);
+    const readOutcome = result?.outcome === 'scope-denied' || result?.reason === 'worker-observation-scope-denied'
+      ? 'scope-denied' : 'unavailable';
     return {
       slug,
       planId: plan.planId,
@@ -334,7 +337,8 @@ async function resolvePackLiveness({
       runs: [],
       live: false,
       inconclusive: true,
-      reason: `ledger unreadable (${PUBLIC_LEDGER_REASONS.has(result?.reason) ? result.reason : 'ledger-read-failed'})`,
+      readOutcome,
+      reason: `plan ${plan.planId}: live-pack-read-${readOutcome} (${PUBLIC_LEDGER_REASONS.has(result?.reason) ? result.reason : 'ledger-read-failed'})`,
     };
   }
   const runs = (result.runs || [])
@@ -347,7 +351,7 @@ async function resolvePackLiveness({
     runs,
     live: runs.length > 0,
     inconclusive: false,
-    reason: runs.length > 0 ? 'non-terminal-dag-runs' : 'no-non-terminal-dag-runs',
+    reason: result.outcome === 'not-live' ? 'not-live' : runs.length > 0 ? 'non-terminal-dag-runs' : 'no-non-terminal-dag-runs',
   };
 }
 
@@ -366,6 +370,7 @@ function buildLivePackCrossEditFinding({ pack, touchedFiles }) {
     runs: pack.runs,
     touched_files: touchedFiles,
     inconclusive: pack.inconclusive,
+    ...(pack.readOutcome ? {read_outcome:pack.readOutcome} : {}),
     reason,
     detail:
       `This PR edits build pack \`${pack.slug}\` (${touchedFiles.map((file) => `\`${file}\``).join(', ')}) ` +

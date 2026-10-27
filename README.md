@@ -3456,3 +3456,52 @@ Focused SDK/intent tests and the producer's authenticated packaged-SDK/native
 settlement composition verify this on demand. Existing smoke promises remain
 unchanged; deployment/loaded generations and organic recovery need independent
 operator evidence. No live activation, grants or settlement are part of this PR.
+
+
+## Review receipts through the public OS boundary
+
+Review completion, execution-verdict, DAG liveness and hardening-context reads
+now use the pinned app SDK 0.10.0. The compatibility adapter exports keep their
+existing policy-facing names, and no longer resolve ledger paths, credentials
+or SQL transports. Review-owned SQLite databases remain application state.
+
+Completion reads accept repo/PR/head/signal selectors and collect every bounded
+page. Launch-scoped public reads retain all companion receipts. Partial or failed
+reads cannot establish absence or delivery. Authoritative live merged/closed
+state, exact-head review, and all required companion deliveries remain separate
+requirements. Capture-read scope denial or unavailability enters the existing
+missing-capture reconciliation path, with `merge-capture-read-scope-denied` or
+`merge-capture-read-unavailable` diagnostics; it does not stop closer admission
+or hammer startup. Independent evidence-dependent work retains its own holds.
+
+The operator-provisioned app entitlement keeps existing `dispatch_reads` grants.
+DAG liveness uses the producer's operator-provisioned `dag_reads` entitlement;
+hardening context needs `hardening_reads: true`. These are producer-owned grants,
+not caller configuration or registration claims. The existing worker-observation
+rollout switch also covers these review observations. No shared config changes.
+
+Live-pack checks map allowed, not-live, scope-denied and unavailable reads
+explicitly. A not-live answer proceeds. A denied or unavailable answer holds only
+the PR touching that plan, with the plan ID and read outcome in its finding.
+Unknown outcomes remain unavailable; unrelated PRs do not read a plan or inherit
+a global refusal. Existing own-pack, gate-stamp and operator-waiver rules apply.
+
+The closer and rendered hammer use SDK `recordMergeSignal` through
+`hq build-completions record-merge`. A remote merge followed by capture failure
+retains its accepted remote outcome for reconciliation; empty/skipped capture
+is an error. Hammer capture forwards its inherited launch ID (`HQ_LAUNCH_REQUEST_ID`,
+then `AGENT_OS_WORKER_LRQ_ID` or `LAUNCH_REQUEST_ID`), `HQ_TICKET_REF`, and
+`WORKER_CLASS` (default `hammer`) as SDK provenance. It honors `HQ_BIN` and
+passes the environment, including `HQ_WORKER_RUN_ID`, to the owner command.
+Repository-level producer-evidence reads with no PR selector retain an undefined
+PR number in empty results. Advisory remediator routing uses SDK `readRemediatorProposal`
+through `hq osg remediator-proposal`. Neither command grants merge authority.
+The reconciliation and accounting-backfill CLIs reject obsolete ledger-source
+flags. No SQL, OS-file or internal-module fallback is available on failure.
+
+After both coordinated changes are reviewed and deployed, the runtime owner must
+hydrate the pinned SDK, provision the narrow grants, and activate the producer
+before the watcher/follow-up services and reused hammer clients. Confirm actual
+loaded builds and an organic bounded lookup; do not infer activation from merge.
+Existing lifecycle states and smoke promises remain unchanged. The added
+producer/backend and SDK tests run on demand, with synthetic external boundaries.

@@ -35,12 +35,24 @@ complete grants and the explicit default-off flag documented in
 ## Argus provenance record (LAC-2117)
 
 The reviewed base enrolled the existing 0.8.0 producer above. This upgrade updates
-`argus-artifacts.json` to the already-merged 0.9.0 producer, Agent OS PR #9435 at
-`f37c7489439a8b53eafecb38870f75fe9f07fa57`, with SHA-256
-`6882b99962cd7319ed858d0a15ee84f9384a566474359085153aef2b615f2cf9`.
-Both immutable archives remain unchanged. Future upgrades update this machine
+`argus-artifacts.json` to the already-merged 0.10.0 producer, Agent OS PR #9489 at
+`eba16c857d18b3f153071b846429bd9cb08e875c`, with SHA-256
+`3c85183c497351739181b7ccc37f768d3c08c85cc36f2f2bf8f441b05f4ec83a`.
+The immutable archives remain unchanged. Future upgrades update this machine
 record alongside the lockfile.
 It is an untrusted claim until the collector reads the producer's authoritative
 merged PR/commit and Argus compares both old/new producer and consumer bytes.
 See [the runbook](../docs/RUNBOOK-argus-artifact-provenance.md). Enrollment must
 reach the reviewed base before a later upgrade can use the same-producer rule.
+
+
+## Review-observation release 0.10.0 (DOG-11)
+
+Producer PR [#9489](https://github.com/laceyenterprises/agent-os/pull/9489) merged
+the 0.10.0 release at revision
+`eba16c857d18b3f153071b846429bd9cb08e875c`. The unchanged archive copied here has
+SHA-256 `3c85183c497351739181b7ccc37f768d3c08c85cc36f2f2bf8f441b05f4ec83a`.
+The lockfile and `recorded.dispatchLookupSdk` provenance pin these exact bytes.
+This is a merged release dependency; runtime activation remains separate.
+Historical release archives remain unchanged. A later producer artifact refresh
+must update the checksum and provenance together.

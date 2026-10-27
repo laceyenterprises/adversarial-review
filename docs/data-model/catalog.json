@@ -793,6 +793,7 @@
     },
     {
       "id": "ama-closer-dispatches",
+      "mergeCaptureReadDiagnostics": ["mergeCaptureReadReason", "mergeCaptureReadAt"],
       "dispatchAbsenceContract": "LAC-2120: exact expiring operator entitlement permits only selector-bound canonical-exact-selector-absence proof. preReceiptReconciliation.query.absenceProof and query.ticketQuery.absenceProof retain version, kind, grant_id, selector and observed_at in intent and operator audit. Grant IDs must contain non-whitespace within 256 characters; selector keys must be own properties with defined, equal values. Filtered, malformed, unbound, partial or unreadable scope retains ownership; existing fences, settlement and once-only refunds are unchanged.",
       "noWorkFields": ["failure", "failureReason"],
       "noWorkStatus": "failed",

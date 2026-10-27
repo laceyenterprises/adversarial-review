@@ -1141,30 +1141,20 @@ test('watcher census prefetches head-independent provenance only after a pinned 
   } finally { db.close(); }
 });
 
-for (const useAsync of [false, true]) {
-  test(`watcher census uses the injected ${useAsync ? 'async' : 'sync'} subprocess seam`, async () => {
-    const db = memoryDb();
+for (const useAsync of [false,true]) {
+  test(`watcher census uses the injected ${useAsync ? 'async' : 'sync'} public completion seam`,async()=>{
+    const db=memoryDb();let calls=0;
     try {
-      let calls = 0;
-      const spawn = (command, argv, options) => {
-        calls++;
-        assert.equal(command, 'psql');
-        assert.ok(argv.includes('postgres://ledger.example/agent_os_ledger'));
-        assert.ok(options.timeout <= 1500);
-        return { status: 0, stdout: JSON.stringify({ ticket_id: 'DPA-01', spec_ref: 'spec@1' }), stderr: '' };
-      };
-      const result = await runDuplicateFamilyCensusForWatcher({
-        db, subjectEntries: [subject(481), subject(482)], repoPath: REPO,
-        env: { AGENT_OS_CONFIG_PATH: '/dev/null', AGENT_OS_SESSION_LEDGER_DSN: 'postgres://ledger.example/agent_os_ledger',
-          AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME: 'on' },
-        log: { log() {}, error() {} },
-        spawnSyncImpl: useAsync ? () => { throw new Error('async seam must take precedence'); } : spawn,
-        ...(useAsync ? { spawnAsyncImpl: async (...args) => spawn(...args) } : {}),
-      });
-      assert.equal(result.error, undefined);
-      assert.equal(result.families.length, 1);
-      assert.equal(calls, 2);
-    } finally { db.close(); }
+      const read=args=>readBuildCompletionSignalForPr({...args,workerObservationSyncImpl:selector=>{
+        calls++;assert.equal(selector.observation,'completions');assert.equal(selector.repo,REPO);
+        return {schema_version:1,observation:'completions',status:'found',complete:true,next_offset:null,
+          scope_complete:false,mutation_authority:false,
+          items:[{completion_id:'completion',ticket_id:'DPA-01',spec_ref:'spec@1'}]};
+      }});
+      const result=await runDuplicateFamilyCensusForWatcher({db,subjectEntries:[subject(481),subject(482)],repoPath:REPO,
+        env:{},log:{log(){},error(){}},readBuildCompletionSignalForPrImpl:useAsync ? async args=>read(args) : read});
+      assert.equal(result.error,undefined);assert.equal(result.families.length,1);assert.equal(calls,2);
+    } finally {db.close();}
   });
 }
 
@@ -1650,7 +1640,7 @@ test('DUPTERM-01: unreadable reviewed-state join propagates the error without re
   } finally { db.close(); }
 });
 
-test('DUPTERM-01: Postgres provenance keeps terminal PR authority in local reviews.db', async () => {
+test('DUPTERM-01: public provenance keeps terminal PR authority in local reviews.db', async () => {
   const db = memoryDb();
   try {
     reconcileDuplicateFamiliesForRepo(db, [subject(6674), subject(6680)], {
@@ -1675,17 +1665,15 @@ test('DUPTERM-01: Postgres provenance keeps terminal PR authority in local revie
       readBuildCompletionSignalForPrImpl: (args) => {
         const result = readBuildCompletionSignalForPr({
           ...args,
-          spawnSyncImpl: (command, argv, options) => {
-            provenanceReads += 1;
-            assert.equal(command, 'psql');
-            assert.ok(argv.includes('postgres://ledger.example/agent_os_ledger'));
-            assert.match(options.input, /FROM build_completions/);
-            assert.doesNotMatch(options.input, /reviewed_prs|sqlite_master/);
-            return { status: 0, stdout: JSON.stringify({ ticket_id: 'OTHER-01', spec_ref: 'spec@1' }), stderr: '' };
+          workerObservationSyncImpl: selector => {
+            provenanceReads++;
+            assert.equal(selector.observation,'completions');
+            return {schema_version:1,observation:'completions',status:'found',complete:true,next_offset:null,
+              scope_complete:false,mutation_authority:false,items:[{completion_id:'completion',ticket_id:'OTHER-01',spec_ref:'spec@1'}]};
           },
         });
         assert.equal(result.ok, true);
-        assert.equal(result.target.backend, 'postgres');
+        assert.equal(result.target.backend, 'app-contract');
         return result;
       },
     });

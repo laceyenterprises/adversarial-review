@@ -6132,3 +6132,21 @@ query evidence retains both absence proofs; current receipt, submitter,
 record/lease fences and once-only refund rules remain unchanged.
 
 LAC-2097 recurrence evidence and limits: [2026-10-27 RCA](postmortems/LAC-2097-closer-convergence-recurrence.md). Source publication does not establish deployment or runtime acceptance.
+
+## Capture-read degradation (DOG-11)
+
+Closer merge-capture reads that are scope-denied or unavailable use the existing
+missing-capture reconciliation path. They emit `merge-capture-read-scope-denied`
+or `merge-capture-read-unavailable` and retain timestamped diagnostics on an
+existing dispatch record. They do not stop closer admission or rendered hammer
+startup. A degraded read cannot prove clean absence or authorize a non-execution
+refund. Exact-head capture, live PR state, terminal audits, required checks and
+merge leases retain their independent authority. A failed capture after a remote
+merge retains its successful remote audit and reconcilable lease; never reissue
+the remote merge to repair capture.
+
+DAG observations map allowed, not-live, scope-denied and unavailable answers
+explicitly. Not-live proceeds. Denied, unavailable and unknown outcomes produce
+a visible finding with the plan ID and read outcome for the PR editing that
+plan. Unrelated PRs do not read that plan or inherit a global refusal. Existing
+own-pack, gate-stamp and operator-waiver semantics remain unchanged.

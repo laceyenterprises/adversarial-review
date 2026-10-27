@@ -4,10 +4,10 @@ import assert from 'node:assert/strict';
 import {
   buildHardeningReviewContext,
   changedPathsFromDiff,
-  getExposureRollupFromPython,
+  getExposureRollupFromSdk,
   isLowExposureRollup,
   isLowOrNoExposure,
-  listHardeningRecordsFromPython,
+  listHardeningRecordsFromSdk,
   touchedContractsForPaths,
 } from '../src/hardening-ledger-context.mjs';
 
@@ -131,50 +131,19 @@ test('low or missing exposure flags a contract for harsher review', async () => 
   assert.match(context, /missed push or branch-switch paths/);
 });
 
-test('python ledger readers use runtime read-only opens', async () => {
+test('hardening readers use public observations and never invoke Python or a ledger fallback', async () => {
   const calls = [];
-  const execFileImpl = async (cmd, args, options) => {
-    calls.push({ cmd, args, options });
-    assert.equal(cmd, 'python3');
-    assert.equal(options.env.HLG_LEDGER_TARGET, '/tmp/session-ledger.sqlite3');
-    assert.match(options.env.PYTHONPATH, /\/agent-os\/platform\/session-ledger\/src/);
-    if (args.length === 4) return { stdout: '[]' };
-    return {
-      stdout: JSON.stringify({
-        contract_id: 'worker-pool.deploy-checkout-tripwire',
-        exposure_score: 0,
-      }),
-    };
-  };
-
-  assert.deepEqual(
-    await listHardeningRecordsFromPython('worker-pool.deploy-checkout-tripwire', {
-      repoRoot: '/agent-os',
-      ledgerTarget: '/tmp/session-ledger.sqlite3',
-      execFileImpl,
-      env: {},
-    }),
-    [],
-  );
-  assert.deepEqual(
-    await getExposureRollupFromPython('worker-pool.deploy-checkout-tripwire', {
-      repoRoot: '/agent-os',
-      ledgerTarget: '/tmp/session-ledger.sqlite3',
-      execFileImpl,
-      env: {},
-    }),
-    {
-      contract_id: 'worker-pool.deploy-checkout-tripwire',
-      exposure_score: 0,
-    },
-  );
-
-  const scripts = calls.map((call) => call.args[1]).join('\n---\n');
-  assert.match(scripts, /open_ledger_for_runtime_readonly/);
-  assert.doesNotMatch(scripts, /LedgerDatabase/);
-  assert.doesNotMatch(scripts, /_empty_exposure_rollup/);
-  assert.doesNotMatch(scripts, /_exposure_rollup_row_to_dict/);
-  assert.doesNotMatch(scripts, /_hardening_record_row_to_dict/);
+  const args = {dispatchSession:{dispatchLookup:async selector=>{
+    calls.push(selector.observation);
+    return {schema_version:1,observation:selector.observation,status:'found',complete:true,
+      next_offset:null,scope_complete:false,mutation_authority:false,
+      items:selector.observation==='hardening_records' ? [{record_id:'record',failure_mode:'synthetic'}]
+        : [{contract_id:'example.contract',exposure_score:0}]};
+  }}};
+  assert.equal((await listHardeningRecordsFromSdk('example.contract',args))[0].failure_mode,'synthetic');
+  assert.equal((await getExposureRollupFromSdk('example.contract',args)).exposure_score,0);
+  assert.deepEqual(calls,['hardening_records','hardening_exposure']);
+  await assert.rejects(listHardeningRecordsFromSdk('example.contract',{dispatchSession:{dispatchLookup:async()=>{throw Error('offline');}}}),/unavailable/);
 });
 
 test('live low exposure rollup raises review tier for touched contracts', async () => {

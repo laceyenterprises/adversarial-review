@@ -660,3 +660,15 @@ selector and `observed_at`. Grant IDs must contain non-whitespace within 256
 characters; proof selector keys must be own properties with defined values equal
 to the query. Current receipt, submitter,
 record/lease fences and once-only refund rules remain unchanged.
+
+
+### Merge-capture read degradation (DOG-11)
+
+Existing dispatch records may retain `mergeCaptureReadReason` with
+`merge-capture-read-scope-denied` or `merge-capture-read-unavailable`, and
+`mergeCaptureReadAt` with the observation timestamp. These diagnostic fields
+record a refused or unavailable completion read while the closer continues
+through missing-capture reconciliation. They never certify absence, delivery,
+merge success or permission to skip live PR checks. A structured
+`ama_closer.merge_capture_read_degraded` event carries the same reason even when
+no dispatch record exists yet. No new lifecycle state or merge gate is added.

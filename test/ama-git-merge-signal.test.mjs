@@ -9,7 +9,7 @@ test('AMA closer emits worker.git.merge_signal with merge commit metadata', asyn
   const emitted = await __testables__.emitWorkerGitMergeSignalBestEffort({
     execFileImpl: async (cmd, args, options) => {
       calls.push({ cmd, args, options });
-      return { stdout: '{"status":"recorded"}', stderr: '' };
+      return { stdout: '{"status":"recorded","event_id":"synthetic-event"}', stderr: '' };
     },
     hqRoot: '/tmp/hq',
     repo: 'laceyenterprises/agent-os',
@@ -25,26 +25,16 @@ test('AMA closer emits worker.git.merge_signal with merge commit metadata', asyn
 
   assert.equal(emitted, true);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].cmd, '/opt/homebrew/bin/python3');
-  assert.deepEqual(calls[0].args.slice(0, 4), ['-m', 'cwp_dispatch.git_signal', 'emit', '--root']);
-  assert.equal(calls[0].args[calls[0].args.indexOf('--event-type') + 1], 'worker.git.merge_signal');
+  assert.equal(calls[0].cmd, 'hq');
+  assert.deepEqual(calls[0].args.slice(0, 3), ['build-completions', 'record-merge', '--hq-root']);
   assert.equal(calls[0].args[calls[0].args.indexOf('--launch-request-id') + 1], 'lrq_hammer_1');
   assert.equal(calls[0].args[calls[0].args.indexOf('--ticket-ref') + 1], 'WGS-02');
   assert.equal(calls[0].args[calls[0].args.indexOf('--pr-number') + 1], '3311');
   assert.equal(calls[0].args[calls[0].args.indexOf('--merge-commit-sha') + 1], 'a'.repeat(40));
   assert.equal(calls[0].args[calls[0].args.indexOf('--merged-by') + 1], 'hammer');
   assert.equal(calls[0].args[calls[0].args.indexOf('--mode') + 1], 'squash');
-  assert.match(calls[0].options.env.PYTHONPATH, /modules\/worker-pool\/lib\/python/);
+  assert.equal(calls[0].options.env.PYTHONPATH, '/existing/pythonpath');
   assert.match(calls[0].options.env.PYTHONPATH, /\/existing\/pythonpath/);
-});
-
-test('AMA closer resolves the Agent OS Python runtime before falling back to python3', () => {
-  const { resolveAgentOsPythonBin } = __testables__;
-  assert.equal(resolveAgentOsPythonBin({ HAM_PYTHON_BIN: ' /tmp/ham-python ', HQ_PYTHON3: '/tmp/hq-python' }), '/tmp/ham-python');
-  assert.equal(resolveAgentOsPythonBin({ HQ_PYTHON3: '/tmp/hq-python' }), '/tmp/hq-python');
-  assert.equal(resolveAgentOsPythonBin({ AGENT_OS_PY: '/tmp/agent-os-python' }), '/tmp/agent-os-python');
-  assert.equal(resolveAgentOsPythonBin({}, { existsImpl: (path) => path === '/opt/homebrew/bin/python3' }), '/opt/homebrew/bin/python3');
-  assert.equal(resolveAgentOsPythonBin({}, { existsImpl: () => false }), 'python3');
 });
 
 test('AMA closer merge signal emission reports failure', async () => {
@@ -133,7 +123,7 @@ test('AMA closer merge commit lookup does not retry permanent gh failures', asyn
 test('hammer prompt emits merge signal before releasing successful merge lease', () => {
   const prompt = readFileSync(new URL('../bin/hammer-merge.sh', import.meta.url), 'utf8');
   assert.match(prompt, /ham_emit_git_merge_signal\(\)/);
-  assert.match(prompt, /EVENT_MERGE_SIGNAL/);
+  assert.match(prompt, /record-merge-signal.mjs/);
   assert.match(prompt, /ham_mark_ama_closer_lease_succeeded\(\)/);
   assert.match(prompt, /terminalOutcome: 'succeeded'/);
   assert.match(
@@ -177,3 +167,44 @@ test('hammer prompt emits merge signal before releasing successful merge lease',
     /if ! ham_emit_git_merge_signal; then[\s\S]*?\n  fi\n  trap ham_release_merge_lease EXIT\n  ham_release_merge_lease/,
   );
 });
+
+
+for (const method of ['readMergedBuildCompletionSignal', 'readMergedBuildCompletionSignalAsync']) {
+  for (const reason of ['worker-observation-scope-denied', 'worker-observation-unavailable', 'dispatch-read-unavailable']) {
+    test(`${method}: ${reason} uses missing-capture reconciliation`, async () => {
+      const warnings = [];
+      const result = await __testables__[method]({repo:'example/repo',prNumber:1,headSha:'a'.repeat(40),
+        logger:{warn:message => warnings.push(JSON.parse(message))},
+        readBuildCompletionSignalForPrImpl:() => ({ok:false,reason}),
+        readBuildCompletionProducerEvidenceImpl:() => assert.fail('refused PR read must not broaden scope')});
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, 'missing-build-completion-signal');
+      assert.equal(result.readReason, reason.endsWith('scope-denied')
+        ? 'merge-capture-read-scope-denied' : 'merge-capture-read-unavailable');
+      assert.equal(warnings[0].reason, result.readReason);
+    });
+  }
+  test(`${method}: allowed capture stays bound to the reviewed head`, async () => {
+    const head = 'a'.repeat(40);
+    const result = await __testables__[method]({repo:'example/repo',prNumber:1,headSha:head,
+      readBuildCompletionSignalForPrImpl:() => ({ok:true,row:{head_sha:head,completion_id:'receipt'}}),
+      readBuildCompletionProducerEvidenceImpl:() => assert.fail('valid capture needs no fallback')});
+    assert.equal(result.ok, true);
+    assert.equal(result.headShaMatchesReviewed, true);
+    assert.equal(result.readReason, undefined);
+  });
+  test(`${method}: producer probe failure also degrades after a missing capture`, async () => {
+    const result = await __testables__[method]({repo:'example/repo',prNumber:1,headSha:'a'.repeat(40),logger:{warn(){}},
+      readBuildCompletionSignalForPrImpl:() => ({ok:false,reason:'missing-build-completion-signal'}),
+      readBuildCompletionProducerEvidenceImpl:() => ({ok:false,reason:'worker-observation-scope-denied'})});
+    assert.equal(result.reason, 'missing-build-completion-signal');
+    assert.equal(result.readReason, 'merge-capture-read-scope-denied');
+  });
+  test(`${method}: thrown read failures cannot fail the closer`, async () => {
+    const result = await __testables__[method]({repo:'example/repo',prNumber:1,logger:{warn(){}},
+      readBuildCompletionSignalForPrImpl:() => {throw new Error('synthetic private failure');}});
+    assert.equal(result.reason, 'missing-build-completion-signal');
+    assert.equal(result.readReason, 'merge-capture-read-unavailable');
+    assert.doesNotMatch(JSON.stringify(result), /private failure/);
+  });
+}

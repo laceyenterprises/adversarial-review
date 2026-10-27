@@ -528,7 +528,8 @@ test('(e) the CI-blocked page is a SEV1 page with one outbox identity per PR hea
 
 // ── (d) the existing hammer retry cap bounds attempts ────────────────────────
 
-for (const evidenceReason of ['missing-build-completion-producer-evidence', 'ledger-read-failed']) {
+for (const evidenceReason of ['missing-build-completion-producer-evidence', 'ledger-read-failed',
+  'worker-observation-scope-denied', 'worker-observation-unavailable']) {
   test(`ciblockham: succeeded hammer retains ownership with unknown merged evidence (${evidenceReason})`, async (t) => {
     const rootDir = tempRoot(t, 'ciblockham-success-hold-');
     await seedFinishedCiBlockedHammer(rootDir);
@@ -539,8 +540,10 @@ for (const evidenceReason of ['missing-build-completion-producer-evidence', 'led
         readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'synthetic-unreadable' }),
         readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: evidenceReason }),
       });
-      assert.equal(result.reason, 'existing-dispatch-succeeded', JSON.stringify(result));
-      assert.equal(result.launchRequestId, LRQ_FIRST);
+      assert.equal(result.reason, evidenceReason === 'missing-build-completion-producer-evidence'
+        ? 'existing-dispatch-succeeded' : 'ownership-unreadable', JSON.stringify(result));
+      if (evidenceReason === 'missing-build-completion-producer-evidence') assert.equal(result.launchRequestId, LRQ_FIRST);
+      else assert.equal(result.recoveryWait, true, 'independent unreadable launch ownership still holds this PR');
       assert.equal(deps.launches.length, 0, 'unknown evidence cannot authorize a second hammer');
       const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
       assert.equal(ledger.attemptCount, 1);

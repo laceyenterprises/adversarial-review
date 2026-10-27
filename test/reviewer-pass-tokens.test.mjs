@@ -1052,80 +1052,17 @@ test('worker-run lookup prefers explicit workerRunId over a newer launch request
   assert.equal(usage.output, 45);
 });
 
-test('backfill reviewer-pass CLI accepts backend-neutral ledger targets', () => {
-  const parsed = parseBackfillReviewerPassArgs([
-    '--root-dir', '/tmp/repo',
-    '--ledger-target', 'sqlite:///tmp/ledger.db',
-    '--dry-run',
-  ]);
-
-  assert.equal(parsed.rootDir, '/tmp/repo');
-  assert.equal(parsed.ledgerTarget, 'sqlite:///tmp/ledger.db');
-  assert.equal(parsed.ledgerDbDeprecated, false);
-  assert.equal(parsed.dryRun, true);
-});
-
-test('backfill reviewer-pass CLI keeps --ledger-db as a deprecated alias', () => {
-  const parsed = parseBackfillReviewerPassArgs([
-    '--ledger-db', '/tmp/legacy-ledger.db',
-  ]);
-
-  assert.deepEqual(parsed.ledgerTarget, {
-    backend: 'sqlite',
-    path: '/tmp/legacy-ledger.db',
-    source: 'deprecated-ledger-db-path',
-    deprecatedAlias: true,
-  });
-  assert.equal(parsed.ledgerDbDeprecated, true);
-});
-
-test('backfill reviewer-pass CLI lets --ledger-target override deprecated --ledger-db warning', () => {
-  const parsed = parseBackfillReviewerPassArgs([
-    '--ledger-db', '/tmp/legacy-ledger.db',
-    '--ledger-target', 'sqlite:///tmp/current-ledger.db',
-  ]);
-
-  assert.equal(parsed.ledgerTarget, 'sqlite:///tmp/current-ledger.db');
-  assert.equal(parsed.ledgerDbDeprecated, false);
-});
-
-test('backfill reviewer-pass CLI warns for deprecated --ledger-db and still reads the ledger', async () => {
-  const stdout = makeCaptureStream();
-  const stderr = makeCaptureStream();
-  const rootDir = tempRoot();
-  const ledgerDb = path.join(rootDir, 'ledger.db');
-  createSessionLedgerDb(ledgerDb);
-  const completedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
-  mkdirSync(completedDir, { recursive: true });
-  writeFileSync(path.join(completedDir, 'job-cli.json'), JSON.stringify({
-    repo: 'laceyenterprises/agent-os',
-    prNumber: 43,
-    jobId: 'job-cli',
-    status: 'completed',
-    completedAt: '2026-05-18T01:02:00.000Z',
-    workspaceDir: '/tmp/review-workspace',
-    remediationPlan: { currentRound: 1 },
-    remediationWorker: {
-      model: 'codex',
-      state: 'completed',
-      spawnedAt: '2026-05-18T01:00:00.000Z',
-      workerRunId: 'wr_1',
-      workspaceDir: '/tmp/review-workspace',
-    },
-  }), 'utf8');
-
-  const rc = await backfillReviewerPassesMain([
-    '--root-dir', rootDir,
-    '--ledger-db', ledgerDb,
-    '--dry-run',
-  ], { stdout, stderr, env: HERMETIC_CONFIG_ENV });
-
-  assert.equal(rc, 0);
-  assert.match(stderr.read(), /warning: --ledger-db is deprecated; use --ledger-target instead/);
-  const output = stdout.read();
-  assert.match(output, /reviewer_passes backfill dry_run=true considered=1/);
-  assert.match(output, /would_insert_or_update=1/);
-  assert.match(output, /token_matched=1/);
+test('backfill reviewer-pass CLI rejects obsolete ledger sources instead of reading OS state', async () => {
+  for (const flag of ['--ledger-target','--ledger-db']) {
+    assert.throws(()=>parseBackfillReviewerPassArgs([flag,'unused']),/unknown option/);
+    const stdout=makeCaptureStream(),stderr=makeCaptureStream();
+    assert.equal(await backfillReviewerPassesMain([flag,'unused'],{stdout,stderr,env:{}}),2);
+    assert.match(stderr.read(),/unknown option/);
+    assert.equal(stdout.read(),'');
+  }
+  const parsed=parseBackfillReviewerPassArgs(['--root-dir','/synthetic/review','--dry-run']);
+  assert.equal(parsed.dryRun,true);
+  assert.equal(parsed.ledgerTarget,undefined);
 });
 
 test('backfill is idempotent for historical follow-up workspaces', () => {

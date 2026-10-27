@@ -40,6 +40,7 @@ const TICKET_RE = /\b([A-Z][A-Z0-9]{1,12}-\d{1,6})\b/i;
 const STACK_LABEL_RE = /^(?:stack|stacked|depends-on|follow-up|followup|remediation)(?::|$)/i;
 const EXPLICIT_IDENTITY_LABEL_RE = /^work-identity:(.+)$/i;
 const TRANSIENT_PROVENANCE_FAILURES = new Set([
+  'dispatch-read-unavailable', 'worker-observation-unavailable',
   'missing-ledger-target',
   'malformed-ledger-target',
   'postgres-configured-but-sqlite-resolved',

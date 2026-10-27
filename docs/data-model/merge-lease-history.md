@@ -32,7 +32,9 @@ A fenced no-merge release also writes `requeue` (or `park` when its repeated
 chargeable failure cap is reached), with reason
 `re-queued after no-merge release: <failure reason>`. The ordinary release row
 retains the original reason. Planned CI-wait yields use `required-checks-wait`;
-yields and retryable aborts record re-entry/backoff without charging the parking
+outside-lease changed-surface validation yields use `local-validation`. These
+are values of the existing free-form `reason` field, with no schema change.
+Yields and retryable aborts record re-entry/backoff without charging the parking
 count. Only daemon reservations are reinserted; a CLI re-enters on its next
 invocation. These rows are scheduling evidence; they grant no
 merge permission. Retry records retain counters, backoff deadline and parking

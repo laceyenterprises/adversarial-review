@@ -109,7 +109,7 @@ ham_release_merge_lease() {
     elif [ "${HAM_MERGE_LEASE_RETRYABLE_ABORT:-0}" -eq 1 ]; then
       ham_release_retryable_args=(--retryable-abort "${HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON:-retryable-abort}")
     elif [ "${1:-}" = "--yield" ]; then
-      ham_release_retryable_args=(--yield --reason required-checks-wait)
+      ham_release_retryable_args=(--yield --reason "${2:-required-checks-wait}")
     else
       ham_release_retryable_args=(--reason "${HAM_PHASE_OUTCOME:-holder-release}")
     fi
@@ -774,6 +774,7 @@ else
   # endpoint returns 403, even on an unprotected branch. An error is no proof
   # of strictness or its absence. Require an authoritative, identity-bound
   # unprotected branch response; protected/unknown/malformed stays fail-closed.
+  # A classic required-checks-disabled 404 cannot exclude strict rulesets.
   if ham_gh api "repos/<<REPO>>/branches/$ham_base_enc_early" \
       > "<<RUN_DIR>>/base-protection.json" 2> "<<RUN_DIR>>/base-protection.stderr" \
     && jq -e --arg base "$BASE_BRANCH" '.name == $base and .protected == false and
@@ -816,12 +817,25 @@ if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then
   ham_acquire_merge_lease || return $?
 fi
 
-if ! ham_is_full_sha "$HAM_VALIDATION_BASE_SHA"; then
+# A successful outside-lease validation may supersede the parallel-phase base
+# only for its exact tested head. Keep the original validation evidence intact.
+HAM_EFFECTIVE_VALIDATION_BASE_SHA="$HAM_VALIDATION_BASE_SHA"
+if ham_is_full_sha "${HAM_LOCALLY_VALIDATED_HEAD:-}" \
+  && [ "$HAM_LOCALLY_VALIDATED_HEAD" = "$HAM_PRODUCED_HEAD" ] \
+  && ham_is_full_sha "${HAM_LOCALLY_VALIDATED_BASE_SHA:-}"; then
+  HAM_EFFECTIVE_VALIDATION_BASE_SHA="$HAM_LOCALLY_VALIDATED_BASE_SHA"
+fi
+if ! ham_is_full_sha "$HAM_EFFECTIVE_VALIDATION_BASE_SHA"; then
   HAM_FORCE_REVALIDATION=1
 fi
 if ham_capture_current_base_sha; then
   HAM_CURRENT_BASE_SHA="$HAM_CAPTURED_BASE_SHA"
-  HAM_REBASED_ONTO_BASE_SHA="$HAM_CAPTURED_BASE_SHA"
+  # Queue service may advance the base after first-pass retention. Report
+  # containment only when it is proved; a captured tip is not rebase provenance.
+  HAM_REBASED_ONTO_BASE_SHA=""
+  if git merge-base --is-ancestor "$HAM_CAPTURED_BASE_SHA" "$POST_REMEDIATION_SHA"; then
+    HAM_REBASED_ONTO_BASE_SHA="$HAM_CAPTURED_BASE_SHA"
+  fi
 else
   HAM_CURRENT_BASE_SHA=""
   HAM_REBASED_ONTO_BASE_SHA=""
@@ -834,7 +848,7 @@ else
   if "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-lease.mjs needs-revalidation \
     --repo-path . \
     --base "$BASE_BRANCH" \
-    --validation-base "$HAM_VALIDATION_BASE_SHA" \
+    --validation-base "$HAM_EFFECTIVE_VALIDATION_BASE_SHA" \
     --current-base "$HAM_CURRENT_BASE_SHA" \
     --changed-files-from "$POST_REMEDIATION_SHA" \
     > "<<RUN_DIR>>/merge-lease-revalidation.json"; then
@@ -855,10 +869,10 @@ fi
 
 # CONFIRM THE REBASE HOLDS: the head satisfies the strictness/overlap policy. If
 # HAM_NEEDS_REVALIDATION is true, re-run the changed-surface tests (mandate step
-# 2b) and required checks against THIS rebased $POST_REMEDIATION_SHA and fix anything
-# the rebase newly broke. If HAM_NEEDS_REVALIDATION is false, trust the
-# parallel-phase validation already performed for this head/base relationship
-# only for that parallel phase. GitHub required checks are the sole CI authority;
+# 2b) outside the lease against THIS rebased $POST_REMEDIATION_SHA and fix anything
+# the rebase newly broke. Record the tested head/base before re-entry.
+# If HAM_NEEDS_REVALIDATION is false, trust the parallel-phase validation or
+# successful exact-head local validation for this head/base relationship. GitHub required checks are the sole CI authority;
 # the hammer runs no local battery or pre-push CI mirror as a merge gate. A rebase
 # that turns changed-surface tests or required checks red must be fixed (and
 # re-committed, which moves the head and re-enters this validation), never merged.

@@ -924,7 +924,7 @@ The former `fast-merge:docs` label shortcut is retired; it cannot waive review
 for Markdown outside `docs/`. Other explicit fast-merge categories are unchanged.
 
 
-LAC-2093 bounds local validation under the shared lease with
+LAC-2093 bounds local validation with
 `bin/hammer-validate.mjs`: 120 seconds without child output returns 124,
 independent of the load-scaled 360-second nominal absolute ceiling. Real pytest
 phase events expose collection/setup/call/teardown progress. TERM/INT/HUP
@@ -933,6 +933,16 @@ leader exit. Incomplete validation exits through the existing lease-release trap
 before any validated-head audit or merge; retry reacquires and rechecks unchanged
 head/base/file-overlap safety. Existing review-row and closer-lease states are unchanged.
 See [source evidence and pending deployment acceptance](validation/lac-2093.md).
+LAC-2097 runs targeted revalidation outside the shared lease using a
+`local-validation` yield. Save the produced head/base pair before testing and
+record it only on success with unchanged local HEAD; verify-head re-entry uses
+that pair only for the exact head and rechecks overlapping base drift. The
+original parallel-phase base remains intact. Audit `rebasedOntoBase` requires
+proved ancestry after acquisition. Pending retry CI retains merge-gate charges;
+pushed-only provenance does not promise certified operator-free redispatch.
+Protected classic-checks-disabled 404s remain strict until effective rules can
+be proved. Existing lifecycle states and smoke promises remain unchanged.
+
 
 DOGREADSFLAG-02 binds dispatch-read activation to the adapter's existing own-LRQ
 environment contract. Missing, malformed or foreign records refuse startup;

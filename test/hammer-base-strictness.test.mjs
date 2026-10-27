@@ -16,6 +16,8 @@ for (const [name, protection, metadata, expected] of [
   ['missing strict is unreadable', {}, branch, 1],
   ['403 plus unprotected branch', null, branch, 0],
   ['404 plus unprotected branch', null, branch, 0],
+  ['404 required checks disabled plus protected branch', null, { ...branch, protected: true }, 1],
+  ['404 plus protected branch', null, { ...branch, protected: true }, 1],
   ['403 plus protected branch', null, { ...branch, protected: true }, 1],
   ['403 plus missing protected', null, { name: branch.name, commit: branch.commit }, 1],
   ['403 plus wrong branch', null, { ...branch, name: 'other' }, 1],
@@ -44,7 +46,7 @@ ham_resolve_base_strictness
 echo "$HAM_REQUIRES_UP_TO_DATE"
 `], { encoding: 'utf8', timeout: 5000, env: { ...process.env,
       PROTECTION: JSON.stringify(protection), METADATA: JSON.stringify(metadata),
-      ERROR: name.startsWith('404') ? 'Branch not protected (HTTP 404)' : 'Resource not accessible by integration (HTTP 403)',
+      ERROR: name.startsWith('404 required') ? 'Required status checks not enabled (HTTP 404)' : name.startsWith('404') ? 'Branch not protected (HTTP 404)' : 'Resource not accessible by integration (HTTP 403)',
     } });
     assert.equal(result.status, 0, result.stdout + result.stderr);
     assert.equal(result.stdout.trim(), String(expected));

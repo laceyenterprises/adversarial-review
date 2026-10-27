@@ -174,3 +174,43 @@ short CI window or releasing with its pending receipt. Retain canonical controll
 drain and matching lease release evidence on organic cancellation/terminality.
 Do not manufacture production PRs, force cancellation, replace copied scripts,
 clear live leases, start paid runs or change services/flags for acceptance.
+
+## Final Comment-only review accounting
+
+The 120-second retry ceiling remains a fairness tradeoff. A rendered fixture now
+models CI that would become green at 300 seconds and proves a pending deferral
+with publication provenance and lease release at 120 seconds. The existing
+`test/leasepark-ci-wait.test.mjs` pins that pending waits retain gate-attempt
+charges; they are not refunded. `dispatch-closer.mjs`'s certified park requires
+current-head validation and dispatch evidence, so pushed-only retry provenance
+does not establish that path. Earlier references to pending recovery describe
+preserved evidence, not a guaranteed free or operator-free redispatch. Increasing
+the hold or changing charging/recovery needs separate liveness work grounded in
+observed CI durations; neither is changed in this final round.
+
+A protected branch with a classic `Required status checks not enabled` 404 stays
+strict. The new protected-404 fixtures pin this choice because that classic
+response cannot disprove ruleset strictness. Review-only classic protection can
+therefore still incur containment rebases; the unprotected metadata exception
+is deliberately narrower than the removed message heuristic.
+
+Outside-lease validation now captures the tested head/base pair before yielding,
+records it only after success, and rechecks it on re-entry without overwriting
+parallel-phase validation evidence. Unchanged tested heads no longer request
+the same tests again; invalid receipts and overlapping later bases still do.
+Local validation releases use reason `local-validation`. FIFO acquisition may
+advance the captured base; `rebasedOntoBase` is now stamped only with proven
+ancestry. Focused rendered fixtures cover both corrections, including stale
+head/base evidence. These are source/offline proofs, not deployment acceptance.
+After ordinary deployment, observe the tested pair, distinct release reason and
+truthful audit base in a naturally occurring run; do not manufacture traffic.
+
+Final-round validation ran only seven related test files: 189 of 190 checks
+passed initially, with the rendered prompt exceeding its existing 60 KiB guard.
+After shortening the instructions, all 10 prompt-focused checks and all 37
+protocol/generation checks passed. The other closer, strictness, revalidation,
+charging and trim checks had passed in that bounded run, including the new
+disjoint-drift case. Lint has zero errors; contract types, the byte-equivalence
+demo and all 81 data-model catalog entries validate. Rendered Bash syntax passes
+and verify-head ShellCheck diagnostics match the reviewed baseline. No full
+local suite or live recovery action was run in this final round.

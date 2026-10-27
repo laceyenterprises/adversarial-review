@@ -20,7 +20,10 @@ const localHead = () => git('rev-parse', 'HEAD');
 const args = process.argv.slice(2);
 const retryScenario = process.env.SCENARIO.startsWith('ci-');
 
-if (args[0] === 'legacy') {
+if (args[0] === 'advance-base') {
+  git('--git-dir', join(dir, 'remote.git'), 'update-ref', 'refs/heads/main', state.nextBase, state.base);
+  save();
+} else if (args[0] === 'legacy') {
   // The rendered shell and real lane writer must share the advancing fixture
   // clock; mixing the synthetic shell deadline with wall time expires it.
   process.exitCode = await legacyLaneWriteMain(args.slice(1), {
@@ -54,7 +57,10 @@ if (args[0] === 'legacy') {
     state.behind = true;
   }
   const retryReads = state.retried ? (state.retryReads = (state.retryReads || 0) + 1) : 0;
-  const pending = (process.env.SCENARIO === 'pending' && state.checkReads === 1) ||
+  const now = Number(readFileSync(join(dir, 'clock'), 'utf8'));
+  if (state.retried && !state.retryStartedAt) state.retryStartedAt = now;
+  const pending = (state.retried && process.env.SCENARIO === 'ci-slow-green' && now - state.retryStartedAt < 300) ||
+    (process.env.SCENARIO === 'pending' && state.checkReads === 1) ||
     (process.env.SCENARIO === 'ci-shared-deadline' && state.checkReads === 1) ||
     (retryScenario && state.retried && (retryReads === 1 || ['ci-pending', 'ci-shared-deadline'].includes(process.env.SCENARIO)));
   const red = state.retried && process.env.SCENARIO === 'ci-red';

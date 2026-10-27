@@ -1989,7 +1989,8 @@ HAMSELFREBASE-01 keeps the hammer's own successful server-side rebase in the
 same merge attempt. Verify-head fetches the exact returned head, detaches the
 scratch checkout, synchronizes initialized submodules, and records
 `HAM_PRODUCED_HEAD`. It refuses to carry dirty tracked files into that checkout.
-Run changed-surface tests there when `needsRevalidation` is true, then publish
+Yield for changed-surface tests there when `needsRevalidation` is true, then
+re-enter verify-head with the saved successful tested head/base pair and publish
 the attestation and use the existing bounded required-check wait and exact-head
 merge under the merge lease in this run. The existing pending-CI release and
 reacquisition stay unchanged. Publish's initial live-head comparison and its
@@ -1997,10 +1998,11 @@ recovered-attestation comparison both use the produced head. A foreign push
 still stops with `head-changed`; sync failures release without attesting or
 merging. Rebase conflicts retain the existing lease-release conflict procedure.
 
-LAC-2093: under the shared merge lease use
+LAC-2093 bounds the validator; LAC-2097 runs local tests outside the shared
+merge lease (see the saved head/base re-entry flow in LEASEFAIR-01). Use
 `node "$HAM_ROOT_DIR/bin/hammer-validate.mjs" --pytest -- <required test paths>`
 (`-- <command> [args...]` for other validators), followed by `|| exit $?` in the
-lease-owning script. Its 360-second nominal absolute limit scales with host load;
+controller-owned script. Its 360-second nominal absolute limit scales with host load;
 `--nominal-timeout 1..3600` selects the project's idle-host budget within the
 existing load-helper ceiling. The 120-second child-output idle limit never
 scales. Both timeouts return 124.
@@ -4653,12 +4655,25 @@ An administration-only protection read can fail with 403 even for an unprotected
 branch. On failure, the closer reads branch metadata with the same identity; only
 matching branch name, full commit SHA and boolean `protected:false` establish
 non-strictness. Protected, wrong, malformed or unreadable metadata stays strict.
+This includes a protected branch whose classic required-status-check endpoint
+returns 404 / `Required status checks not enabled`: that response does not rule
+out strict rulesets. Classic-review-only branches may therefore rebase needlessly;
+this conservative fallback is intentional until effective rules can be proved.
 The first verification uses the same base policy, without a mandatory update CAS.
 Rendered scripts carry `hammer-procedure-source-sha256` for generation diagnosis;
 this comment grants no validation, publication or merge authority.
-Run optional changed-surface validation outside the lease: yield, test, then
-source verify-head again before publishing the audit. If it changes the head,
-validate that head outside the lease within the existing rebase cap.
+Run optional changed-surface validation outside the lease. Save the produced
+head and captured current base before `ham_release_merge_lease --yield local-validation`;
+run the registered validator, then only on success with the same local HEAD set
+`HAM_LOCALLY_VALIDATED_HEAD` and `HAM_LOCALLY_VALIDATED_BASE_SHA` to that saved pair.
+Source verify-head before publishing the audit. It uses the local validation base
+only for the exact tested head and checks drift again; the original parallel-phase
+`HAM_VALIDATION_BASE_SHA` remains unchanged. Invalid evidence or overlapping base
+drift still needs validation; a new head cannot borrow the prior head's evidence.
+Retest outside the lease within the existing rebase cap. The lease history records
+`local-validation`, separately from `required-checks-wait`. The audit's
+`rebasedOntoBase` is empty unless the captured base is proved an ancestor of the
+produced head, including after first-pass FIFO acquisition.
 With an explicitly non-strict rule, the exact validated head may retain its CI
 when the base advance is disjoint from the PR's entire changed-file set. Both
 sides of renames count. The comparison starts at the exact head/base merge-base,
@@ -4672,7 +4687,17 @@ the exact resulting SHA, and wait once for that head's required CI while
 retaining the lease for at most 120 wall-clock seconds of new-head CI. This
 fixed ceiling only shortens the existing deadline and is never load-scaled.
 Pending expiry retains pushed provenance and releases with the existing
-exact-head pending recovery receipt. Both CI windows share one absolute deadline initialized
+exact-head pending recovery receipt. This is a fairness bound, not a guarantee
+of in-run convergence for slower CI: a retry becoming green at 300 seconds parks
+at 120 seconds. Pending waits retain their merge-gate attempt charges (including
+both acquisitions); they are not retryable-abort refunds. Existing dispatch-ledger
+deferrals are separately bounded. `certifiedContentionPark` requires a current-head
+`hamTerminalRemediation.ok` and a matching dispatch receipt; a retry-pushed head
+with only pushed provenance has no certified-park guarantee. Normal head recovery
+still owns it; automatic operator-free redispatch is not promised here. Raising
+the serialized wait or changing budget/recovery policy is deferred to a separate
+liveness change with observed CI durations and end-to-end recovery evidence.
+Both CI windows share one absolute deadline initialized
 before the first wait from the nominal wait scaled once. The intervening rebase,
 polling, backoffs and gate reads consume the remaining deadline. This single
 serialized retry prevents cooperating mergers from overtaking the closer again. The

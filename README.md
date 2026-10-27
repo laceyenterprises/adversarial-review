@@ -743,6 +743,16 @@ and leaving no holder/waiters. Focused `rebase-result` and `hammer-self-rebase`
 fixtures cover invalid candidates and bounded failure cleanup. See the
 [LAC-2097 RCA and deployment acceptance](docs/postmortems/LAC-2097-validated-closer-convergence.md) and the
 [2026-10-27 recurrence RCA](docs/postmortems/LAC-2097-closer-convergence-recurrence.md).
+Outside-lease targeted validation records the exact tested head/base pair before
+verify-head re-entry; overlapping base drift or another head still requires validation.
+Its yield reason is `local-validation`, and captured audit bases require ancestry
+proof. Protected classic-checks-disabled 404s remain strict because rulesets may
+apply. The 120-second retry ceiling favors lane fairness over slow-CI in-run
+convergence; pending gate charges remain, and pushed-only provenance does not
+promise certified operator-free redispatch. These limits and the focused offline
+fixtures are recorded in the recurrence RCA; no lifecycle states or smoke
+promises change.
+
 The first verification uses the same retention policy. An inaccessible protection
 endpoint can resolve non-strict only through authoritative unprotected branch
 metadata. Copied scripts include a diagnostic source SHA-256. Run optional local
@@ -1231,7 +1241,8 @@ samples the next 20 reviews, counts notes, and confirms none changed verdicts
 or added rounds; this read-only observation is declared in
 `post-merge-verify.json`, outside the smoke harness.
 
-LAC-2093 bounds lease-held validation through `bin/hammer-validate.mjs`: the
+LAC-2093 bounds validation through `bin/hammer-validate.mjs`; LAC-2097 runs it
+outside the shared lease: the
 absolute ceiling scales from 360 seconds, but 120 seconds without child output
 fails with status 124 regardless of load. Pytest reports real collection and test
 phase boundaries and uses local ledger routing; explicit disposable-Postgres

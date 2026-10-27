@@ -44,8 +44,7 @@ At start and after **each push**, before reads, run `node <<ROOT_DIR>>/bin/hamme
 
 **Never run a full test suite locally.** Keep required tests/checks.
 Run targeted tests in foreground via `hammer-validate.mjs` outside the lease.
-Yield (`--yield`), test, then source verify-head to reacquire/recheck head/base.
-Retest changed heads outside the lease within the existing rebase cap.
+Yield (`--yield local-validation`), test, then source verify-head to recheck head/base.
 Use `run-bounded.sh` for other commands.
 Never nest buffering runners. Any timeout, cancellation or nonzero exit releases
 the lease via its trap before validation audit/merge. Diagnose outside it;
@@ -507,14 +506,10 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    `main`. After a successful server-side rebase, verify-head fetches the exact
    resulting SHA, detaches the scratch checkout at it, synchronizes initialized
    submodules, and records `HAM_PRODUCED_HEAD`. Keep this identity through
-   validation, audit publication (including recovery), and merge under the lease.
-   Preserve the existing lease release/reacquisition during pending-CI waits.
+   outside-lease tests, leased audit/recovery and merge. Reacquire/recheck after waits.
    A later foreign push still stops with `head-changed`; the hammer's own rebase
-   continues in this run. After the rebase, fetch the base, capture the exact
-   current base SHA, and run
-   `<<ROOT_DIR>>/bin/merge-lease.mjs needs-revalidation ... --current-base <sha>`. Re-run the
-   changed-surface tests (mandate step 2b) in that synchronized checkout when
-   `needsRevalidation` is true; otherwise trust the parallel-phase local validation.
+   continues in this run. Verify-head captures the base and computes
+   `needsRevalidation`; follow its outside-lease revalidation flow below.
    Always use the existing bounded required-check wait on that exact produced head.
    Do not parse this boolean with a jq fallback such as
    `.needsRevalidation // true`: jq treats JSON `false` as fallback-worthy, so
@@ -523,8 +518,8 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    GitHub required checks are the SOLE CI authority: the hammer does NOT run a
    local test battery or the PPH pre-push CI mirror as a merge gate.
    `HAM_VALIDATION_BASE_SHA` must name the base SHA that the parallel-phase full
-   suite actually validated. If that value is missing or malformed, force the
-   full revalidation instead of deriving a post-hoc validation base.
+   suite actually validated; never derive it post hoc. Missing/malformed evidence
+   forces targeted revalidation unless an exact local tested head/base pair applies.
    Fix any changed-surface test the rebase newly broke, commit it, publish
    the new head, and re-enter this lease/gate flow from a fresh base fetch. Once
    the rebase holds and required checks are green on the settled head, post the
@@ -650,10 +645,13 @@ These waits are fixed by the procedure; do not export or shorten them. A hammer 
 
 In the same shell with dispatch values exported, `source "<<RUN_DIR>>/hammer-verify-head.sh"`. Wait ≤300s for `HAM_PUSHED_HEAD` to replace `HAM_PUSHED_FROM_HEAD`. Retry transient errors/alarms within that bound; retain cached JSON. Permanent errors/invalid heads stop; third heads take the race path. Acquire the lease, rebase within bounds, validate. Nonzero stops: 20 parked/blocked, 21 conflict. Resolve, revalidate, rerun verify-head.
 
-On success, if `HAM_NEEDS_REVALIDATION=true`, run the changed-surface tests from
-step 2b against the synchronized `HAM_PRODUCED_HEAD` before sourcing publish.
-Keep the lease held and continue with the existing exact-head required-check
-wait and merge in this run. Never treat the hammer's own rebase as `head-changed`.
+If `HAM_NEEDS_REVALIDATION=true`, save `HAM_PRODUCED_HEAD`/`HAM_CURRENT_BASE_SHA`
+before `ham_release_merge_lease --yield local-validation`. Run step-2b tests via
+`hammer-validate.mjs` outside the lease. Only on success with local HEAD unchanged,
+set `HAM_LOCALLY_VALIDATED_HEAD`/`HAM_LOCALLY_VALIDATED_BASE_SHA` from that saved pair.
+Source verify-head again to recheck head/base drift; retest within the rebase cap
+if flagged. Publish only with `HAM_NEEDS_REVALIDATION=false`, then continue
+exact-head CI/merge. Own rebases never mean `head-changed`.
 
 
 ## Resolving merge conflicts

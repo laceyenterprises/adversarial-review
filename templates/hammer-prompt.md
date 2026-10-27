@@ -352,7 +352,9 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    Never post it after merge or claim remediation/rebase completion as merge.
    At either lease admission cap (gate attempts or repeated no-merge releases),
    copy the acquire result's `closingStatus` verbatim
-   into that comment and terminal audit.
+   into that comment and terminal audit. Refreshed conflicting heads return to
+   the existing conflict procedure; other admissible heads use durable closure
+   recovery paging. Never require an operator to reset the attempt counter.
 0c. **Run every step in the foreground (HAMBG-02).** If a step can exceed your tool's timeout, split it into repeated
    foreground polls. Never end your final message while a command you started is still running. Each exit needs a merge or
    current-head no-merge audit; otherwise `hammer-exited-without-close` redispatches

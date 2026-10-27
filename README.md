@@ -646,8 +646,8 @@ while their reservations re-enter at the tail. Status/list separates FIFO
 Consecutive chargeable failures park the head with `repeated-no-merge-release`
 after the existing attempt cap.
 Planned CI-wait yields and retryable aborts retain backoff but reset consecutive
-failure counting; non-permanent daemon failures yield too. Yields retain the
-gate charge; aborts refund it atomically with release identity. Only daemon
+failure counting; non-permanent daemon failures yield too. Yields and retryable aborts refund the
+provisional gate charge atomically with release identity. Only daemon
 reservations requeue; the next CLI invocation registers a fresh waiter with its
 remembered arrival and a fresh invocation deadline. Parking and merged/closed
 releases clear remembered arrivals across heads. Focused offline merge-lease
@@ -3608,3 +3608,15 @@ Findings preparation and publication each use the shared load-aware timeout with
 returning its receipt; measured provisioning up to 496 seconds must survive the
 caller's budget. The existing batch idempotency key, publication fence and
 settlement contract remain unchanged. Tests use synthetic dispatch receipts.
+
+GATECAPBASE-01: merge-lease refusal budgets are scoped to the current PR head
+and observed base. Base advances, server rebase conflicts, lane-busy and lease
+contention are recorded as retryable; planned CI/local-validation yields also
+refund provisional charges. A changed head/base starts a fresh budget. At the
+cap, refreshed conflicting heads return to the hammer conflict procedure;
+other admissible heads reach the existing durable closure page path. Closing
+status names recovery as next actor, without requiring an operator reset.
+Offline merge-lease, cap-recovery and rendered hammer fixtures certify these
+transitions. After normal deployment, the runtime owner may observe organic
+retry reasons and owner/page receipts read-only; no forced conflict, live page
+test, config flip or new smoke command is required.

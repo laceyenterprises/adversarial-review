@@ -4028,36 +4028,40 @@ the current holder, FIFO waiters, ages, and per-PR attempt counts. If the holder
 PR has already merged/closed, or the holder process is dead/stale, run
 `node bin/merge-lease.mjs reconcile --repo <owner/name> --base <branch>`; this
 only removes the lease file through the holder identity fence and does not kill
-processes or change verdicts. A normal holder release leaves its gate-attempt
-record in place. `release --retryable-abort <reason>` and an acquire timeout
-refund the provisional attempt instead: `attempts` decreases by one and
-`retryable` increases by one for that PR/head. A timeout still returns `75`
-with `{"timedOut":true}` if its refund fails; `refundFailed:true` in the JSON
-and a stderr warning identify the charged attempt for operator inspection.
-Use `reset-attempts` with that repo, base, PR, and head to clear its counters
-after resolving the cause; reset checks for a current holder before clearing
-the record. Because holder acquisition uses its own atomic file operation, this
-check is best effort if acquisition races the reset.
-`classify` reports
-whether a mergeability, required-check, or protection-read failure qualifies
-for a retryable refund. On a remote-CI timeout, the hammer passes the gate's
-structured check states to `classify`; it refunds only when pending or queued
-checks remain and none are red. A red check or unrecognized gate state leaves
-the attempt charged. When `acquire` parks a head at the cap, the hammer writes
-the returned `closingStatus` (attempt and retryable counts plus the exact
-`reset-attempts` command) to stderr, the terminal audit, and its PR closing
-comment. The green-check sentence describes the fresh pre-acquire snapshot for
-the same head, not a later live gate result.
-Attempt records older than 30 days are pruned
-during new attempt recording. The cap applies to charged `attempts`, not the
-`retryable` count. Contention timeouts are bounded by the outer hammer lifetime
-retry cap, not by this gate-attempt cap. When a PR exceeds `AMG_MAX_GATE_ATTEMPTS`
-(default `5`), `acquire` exits `70` with `{"parked":true}` so the caller should
-park it for operator review instead of re-queueing. The hammer terminal closer
-also treats an acquire wait timeout (`75` with `{"timedOut":true}`) as an
-intentional AMG-04 park and exits successfully after logging the waited seconds,
-so a contended base does not churn through repeated long retry windows. Other
-non-zero acquire exits remain hard failures; inspect their CLI output and stderr.
+processes or change verdicts. A predicate-refusal release leaves its provisional gate-attempt
+charged. Planned yields, base advances, server rebase conflicts, lane-busy,
+lease contention and explicit retryable aborts refund the provisional charge
+and retain their reason and retryable count. Acquire timeouts also refund;
+failed refunds remain visible as `refundFailed:true` and return exit 75.
+The hammer supplies the fetched base SHA to `acquire --base-sha`. Counts and
+consecutive-refusal parks belong to one PR head at one observed base. A new
+head starts fresh; changed bases clear the old budget, park and backoff. Legacy
+records without a base start a fresh bound budget on the first supplied base.
+No new config key is needed; `AMG_MAX_GATE_ATTEMPTS` retains its existing role.
+
+The hammer marks both post-wait and final base-containment failures retryable.
+If the final server merge reports a rebase/mergeability conflict, a bounded
+fresh base fetch must prove that the base differs from the pre-click base
+before that failure receives a retryable refund. A stable-base refusal remains
+chargeable. The expected-head fence and all merge predicates remain mandatory.
+Server update-branch conflicts release retryably before local conflict repair.
+
+At either admission cap, exit 70 still stops the unchanged refusal loop. The
+hammer audits the cap and invokes `merge-lease recover-cap` with a refreshed
+current PR snapshot: a conflicting, admissible head returns exit 21 to the
+existing hammer conflict procedure without acquiring a lease. Other admissible
+heads page immediately through the existing durable `observeClosureWait` path
+(`merge-lease-cap` class); repeated observations reuse its receipt. The page
+names closure recovery as owner and does not require an operator counter reset.
+Terminal, moved, held and draft snapshots keep their admission fences. Delivery
+failures propagate for retry. The closing status names these recovery actors
+instead of an exact reset command. `reset-attempts` remains a fenced diagnostic
+for compatibility, not the normal exit from a capped PR.
+
+Attempt records still expire after 30 days. Lease-wait timeouts remain bounded
+by the existing hammer lifetime and ownerless-recovery paths. No worker action
+against live stores, PRs or pages is needed to validate this contract; use the
+synthetic merge-lease, cap-recovery and rendered hammer fixtures.
 
 #### CLI output completion (LAC-2094)
 
@@ -4429,9 +4433,10 @@ returns `hammer-deferral-budget-exhausted` for operator handling.
 The lease CLI maintains FIFO waiters and respects the caller's explicit `--wait`
 window, including with `--wait-for-holder-deadline`; it never extends the worker's
 command budget. Zero-wait callers return immediately. Hammer releases its lease
-before sleeping on remote CI without refunding the acquisition, so a subsequent
-red-CI outcome remains charged to the gate-attempt cap. Pending-only terminal
-deferrals may still refund a held acquisition. Each successful acquire clears
+before sleeping on remote CI and refunds that provisional acquisition. A
+predicate refusal while holding the reacquired lease remains chargeable;
+lease-free CI failures retain the existing hammer recovery budgets. Pending-only
+terminal deferrals refund a held acquisition. Each successful acquire clears
 previous retryable-abort state. Pre-acquire and park-state GitHub reads retry
 transient failures three times using the full stderr; exhausted transient
 post-CI reads record a deferred lease-timeout audit. Permanent failures stay fatal.
@@ -4732,14 +4737,14 @@ Consecutive chargeable failures through the existing
 attempt cap parks the head with `repeated-no-merge-release`. Only chargeable
 failures count; `release --yield` (the hammer's first CI-wait release) and
 retryable aborts reset the consecutive count without clearing an existing park.
-Yields retain the gate charge; retryable aborts refund it atomically with release
-accounting. Non-permanent daemon failures use the yield outcome. Grants alone
+Yields and retryable aborts refund the provisional gate charge atomically with
+release accounting. Non-permanent daemon failures use the yield outcome. Grants alone
 do not prove gate success and preserve failure evidence. Repeated-failure parks
 use the same audit, closing-status comment and page path as gate-attempt parks. Inspect
 `status`/`list` for arrival time, role, position and retry evidence. `ageSeconds`
 measures FIFO age; `registeredAt` and `invocationAgeSeconds` distinguish a restored
-invocation from its older arrival. Inspect history for `requeue`/`park` with the release reason. Recovery uses a new head
-or the existing `reset-attempts` command while that head is not holding the lease.
+invocation from its older arrival. Inspect history for `requeue`/`park` with the release reason. Recovery uses a new head/base, hammer conflict repair, or durable closure
+paging; the existing diagnostic reset command remains optional.
 Only daemon reservations requeue; CLI invocations return with fresh IDs and
 restore their remembered arrival without retaining an exited process's waiter.
 Restored waiters measure invocation expiry from registration. Parking and
@@ -4860,8 +4865,9 @@ of in-run convergence for slower CI: a retry becoming green at 300 seconds parks
 at the default 120 seconds, but merges with a 360-second allowance when the original
 deadline has sufficient time. The offline slow-green fixtures verify both outcomes
 and invalid/below-floor fallback; the shared-deadline fixture verifies an extended
-allowance cannot reset the original deadline. Pending waits retain their merge-gate attempt charges (including
-both acquisitions); they are not retryable-abort refunds. Existing dispatch-ledger
+allowance cannot reset the original deadline. Planned yields and pending waits
+refund provisional merge-gate charges, including the reacquired lease on
+pending-only expiry. Existing dispatch-ledger
 deferrals are separately bounded. `certifiedContentionPark` requires a current-head
 `hamTerminalRemediation.ok` and a matching dispatch receipt; a retry-pushed head
 with only pushed provenance has no certified-park guarantee. Normal head recovery

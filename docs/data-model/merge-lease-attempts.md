@@ -19,7 +19,8 @@ each `attempts[]` entry by `(pr, head)`.
 | `attempts` | array | Entries sorted by PR number, then head. |
 | `attempts[].pr` | positive integer | PR number. |
 | `attempts[].head` | string | PR head being gated. |
-| `attempts[].attempts` | non-negative integer | Charged acquisitions; the cap uses this count. |
+| `attempts[].attempts` | non-negative integer | Provisional acquisitions minus retryable releases; retained refusals at one head/base consume the cap. |
+| `attempts[].baseSha` | optional full SHA | Observed base for the refusal budget. A changed base starts a fresh budget; legacy unbound counts are reset once when a base is first supplied. |
 | `attempts[].retryable` | non-negative integer | Refunded retryable aborts, retained for diagnosis. Legacy entries without this field read as zero. |
 | `attempts[].firstAttemptAt` | ISO timestamp | First attempt on this PR/head. |
 | `attempts[].queueArrivedAt` | optional ISO timestamp | Original closer queue arrival, looked up by PR across heads within this repo/base while its restoration deadline is live. |
@@ -44,8 +45,8 @@ erDiagram
 ```
 
 `acquire` records a provisional attempt and parks when the charged count
-exceeds `AMG_MAX_GATE_ATTEMPTS`. A normal release leaves it charged. A
-retryable-abort release or acquire wait timeout decrements one charged attempt
+would exceed `AMG_MAX_GATE_ATTEMPTS`, without charging the refused acquisition. A predicate-refusal release leaves it charged. Planned yields, known base-advance/server-rebase-conflict, lane-busy and lease-contention releases, a
+retryable-abort release or acquire wait timeout decrement one charged attempt
 and increments `retryable`. `reset-attempts` removes one PR/head entry while
 refusing a current lease holder. All mutations take the waiter and attempt
 mutation locks; writes replace the JSON file atomically.
@@ -55,7 +56,7 @@ Optional no-merge retry fields share this existing PR/head record:
 `consecutiveNoMergeReleases` count the current consecutive chargeable failure sequence;
 `noMergeLeaseId` makes recording the same release idempotent.
 `reenteredAt` records the latest re-entry, and `nextEligibleAt` is its earliest
-next grant. Backoff starts at one second, doubles per no-merge release, and caps
+next grant. Optional `baseSha` scopes the budget to the observed base, without changing FIFO identity. A new head uses its own fresh entry. Backoff starts at one second, doubles per no-merge release, and caps
 at the existing watcher poll interval before being load-scaled once.
 Planned `--yield` releases and retryable aborts reset the consecutive failure
 count to zero while retaining backoff and any existing park. Successful grants
@@ -64,8 +65,7 @@ After `AMG_MAX_GATE_ATTEMPTS` consecutive chargeable releases, even when reasons
 (default five), `parkedReason: "repeated-no-merge-release"` refuses admission
 for that head and removes its reservation. There is no new config key or merge
 gate: this bounds rescheduling of failed holders. Parking clears remembered
-closer arrivals across all heads of that PR. Changing the head or using
-the existing fenced `reset-attempts` command resets the retry state; the
+closer arrivals across all heads of that PR. Changing the head or observed base resets the refusal budget. The existing fenced `reset-attempts` diagnostic remains available, but recovery never requires it; the
 existing 30-day attempt expiry still applies. Gate charges and retryable refunds
 preserve these fields and cannot erase a park.
 
@@ -76,7 +76,7 @@ refund twice; lock contention returns `mutation-lock-busy` without mutation.
 Explicit merged or terminal releases skip re-entry. The CLI accepts mutually
 exclusive `release --merged`, `--terminal`, `--yield`, or `--retryable-abort`,
 plus `--reason`. The hammer uses `--yield --reason required-checks-wait` before
-its first CI wait, retaining the provisional gate charge. Retryable aborts refund
+its first CI wait, refunding the provisional gate charge. Retryable aborts also refund
 that charge. The daemon marks non-permanent failed outcomes as `yielded: true`,
 so transient reads and retry exhaustion cannot cause failure parking. Unknown
 exceptions remain chargeable. Repeated-failure parks carry a closing status and
@@ -102,3 +102,22 @@ Merged, closed or explicit terminal release, and either parking cap, clear the P
 erasing gate counts or refund evidence. Attempt expiry and explicit reset
 retain their existing behavior. Legacy records without the field use a fresh
 arrival. No history format change or migration is required.
+
+## GATECAPBASE-01 recovery
+
+The hammer supplies `acquire --base-sha` from its bounded base fetch. A base
+change clears the current head's gate count, consecutive refusal count, park
+and backoff while retaining retryable evidence. Each retryable release records
+its reason and refunds under the existing release-identity fence; retrying a
+partially persisted release cannot refund twice. Planned CI/local-validation
+yields refund too, so an acquisition that did no predicate work does not spend
+the refusal budget. Stable-base predicate refusals still cap normally.
+
+At either cap, `recover-cap` reads the caller's refreshed PR snapshot. An open,
+unheld, current conflicting head returns to the hammer's existing lease-free
+conflict procedure (exit 21); other admissible heads use `observeClosureWait`
+with class `merge-lease-cap`, immediate escalation and its durable per-head
+page deduplication. Terminal, moved, draft and held heads retain admission
+fences. Paging failures propagate for retry. The closing status names recovery
+as the next actor and never prescribes an operator reset. Existing predicate,
+expected-head and lease fences still govern every later merge.

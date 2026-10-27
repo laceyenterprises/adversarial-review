@@ -39,6 +39,8 @@ import {
   resetMergeLeaseGateAttempts,
 } from '../src/ama/merge-lease.mjs';
 
+import { recoverMergeLeaseCap } from '../src/ama/merge-lease-cap-recovery.mjs';
+
 import { loadAwareTimeoutSeconds, MAX_TIMER_DELAY_MS } from '../src/load-aware-timeout.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -58,7 +60,7 @@ Usage:
   merge-lease acquire --repo <owner/name> --base <branch> --pr <n> --head <sha>
                       --owner-pid <pid> [--owner-pgid <pgid>] --wait <seconds>
                       [--root-dir <path>] [--required-checks-green] [--pr-state-file <json>]
-                      [--wait-for-holder-deadline] [--wait-by-progress]
+                      [--wait-for-holder-deadline] [--wait-by-progress] [--base-sha <sha>]
   merge-lease release --repo <owner/name> --base <branch> --pr <n>
                       --lease-id <id> [--retryable-abort <reason> | --merged | --terminal | --yield] [--reason <reason>]
                       [--root-dir <path>]
@@ -70,6 +72,8 @@ Usage:
                       [--changed-files-from <ref>]
   merge-lease classify --stage <mergeability|required-checks|protection>
                       [--state <state>] [--error <message>] [--http-status <code>]
+  merge-lease recover-cap --repo <owner/name> --pr <n> --head <sha>
+                      --pr-state-file <json> [--root-dir <path>]
   merge-lease reset-attempts --repo <owner/name> --base <branch> --pr <n>
                       --head <sha> [--root-dir <path>]
 
@@ -327,6 +331,7 @@ async function runAcquire(argv, deps) {
     pr: { type: 'string' },
     head: { type: 'string' },
     'pr-state-file': { type: 'string' },
+    'base-sha': { type: 'string' },
     'owner-pid': { type: 'string' },
     'owner-pgid': { type: 'string' },
     wait: { type: 'string' },
@@ -344,6 +349,8 @@ async function runAcquire(argv, deps) {
   const base = requireBaseName(values);
   const pr = parsePositiveInteger(values.pr, 'pr');
   const head = requireString(values, 'head');
+  const baseSha = values['base-sha'];
+  if (baseSha && !/^[a-f0-9]{40}$/i.test(baseSha)) throw usageError('--base-sha must be a full SHA');
   let prBody;
   if (values['pr-state-file']) {
     try {
@@ -462,6 +469,7 @@ async function runAcquire(argv, deps) {
         head,
         now: deps.nowIso(),
         maxAttempts: deps.maxGateAttempts,
+        baseSha,
       });
     } catch (err) {
       if (!isMutationLockBusyError(err)) throw err;
@@ -894,6 +902,16 @@ export async function main(argv = process.argv.slice(2), overrides = {}) {
         return runStatus(argv.slice(1), deps);
       case 'classify':
         return runClassify(argv.slice(1), deps);
+      case 'recover-cap': {
+        const { values } = parseCommon(argv.slice(1), { pr: { type: 'string' }, head: { type: 'string' },
+          'pr-state-file': { type: 'string' } });
+        const result = await recoverMergeLeaseCap({ rootDir: values['root-dir'] || DEFAULT_ROOT_DIR,
+          repo: requireRepoName(values), prNumber: parsePositiveInteger(values.pr, 'pr'),
+          headSha: requireString(values, 'head'),
+          pr: JSON.parse(readFileSync(requireString(values, 'pr-state-file'), 'utf8')) });
+        jsonLine(deps.stdout, result);
+        return 0;
+      }
       case 'reset-attempts':
         return runResetAttempts(argv.slice(1), deps);
       case 'needs-revalidation':

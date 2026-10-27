@@ -709,8 +709,8 @@ for (const kind of ['yield', 'retryable-abort']) {
     assert.equal(held.acquired, true);
     assert.equal(releaseMergeLease({ rootDir, ...held.lease, now: at(seconds + 300), merged: true }).released, true);
     const [retry] = readMergeLeaseAttempts(rootDir, IDENTITY);
-    assert.equal(retry.retryable, kind === 'yield' ? 0 : 6);
-    assert.equal(retry.attempts, kind === 'yield' ? 6 : 0);
+    assert.equal(retry.retryable, 6);
+    assert.equal(retry.attempts, 0);
   });
 }
 

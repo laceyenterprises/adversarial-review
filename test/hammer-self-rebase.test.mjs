@@ -82,12 +82,20 @@ case "$1" in
   */merge-lease.mjs)
     case "$2" in
       acquire)
+        if [[ "$SCENARIO" = capped-* ]]; then
+          echo '{"parked":true,"reason":"max-gate-attempts","closingStatus":"HAM closing status — no merge: recovery owns the capped head."}'
+          exit 70
+        fi
         if { [ "$SCENARIO" = ci-lease-deadline ] || [ "$SCENARIO" = ci-disjoint-lease-delay ]; } && [ -f "$FIXTURE_DIR/leases" ]; then echo 1700000900 > "$FIXTURE_DIR/clock"; fi
         if [ "$SCENARIO" = initial-lease-drift ] && [ ! -f "$FIXTURE_DIR/leases" ]; then
           "$REAL_NODE" "$FIXTURE_HELPER" advance-base || exit $?
         fi
         touch "$FIXTURE_DIR/lease-held"; echo acquire >> "$FIXTURE_DIR/leases"; echo '{"leaseId":"fixture-lease"}' ;;
       release) printf '%s\\n' "$@" >> "$FIXTURE_DIR/release-args"; rm "$FIXTURE_DIR/lease-held"; echo release >> "$FIXTURE_DIR/leases"; echo '{}' ;;
+      recover-cap)
+        echo recover-cap >> "$FIXTURE_DIR/leases"
+        if [ "$SCENARIO" = capped-conflict ]; then echo '{"owner":"hammer","action":"resolve-conflict"}';
+        else echo '{"owner":"closure-recovery","action":"page"}'; fi ;;
       status) echo '{"holder":{"leaseId":"fixture-lease","holderPr":42,"pastDeadline":false,"holderPidLive":true,"ageSeconds":1}}' ;;
       needs-revalidation) exec "$REAL_NODE" "$@" ;;
       *) exit 78 ;;
@@ -502,3 +510,28 @@ test('LEASEFAIR-02: configured retry allowance cannot extend the original absolu
   assert.equal(Number(readFileSync(join(f.dir, 'clock'), 'utf8')) - 1700000000, 900);
   assert.equal(existsSync(join(f.dir, 'lease-held')), false);
 });
+
+for (const scenario of ['server-base-conflict', 'server-stable-conflict', 'server-base-auth']) {
+  test(`GATECAPBASE-01: final server merge outcome ${scenario}`, t => {
+    const f = fixture(t, scenario);
+    const result = f.run();
+    assert.equal(result.status, scenario === 'server-base-conflict' ? 21 : 20, result.stdout + result.stderr);
+    assert.equal(existsSync(join(f.dir, 'lease-held')), false);
+    const releases = readFileSync(join(f.dir, 'release-args'), 'utf8');
+    if (scenario === 'server-base-conflict') {
+      assert.match(releases, /--retryable-abort\nbase-advanced-during-server-rebase/);
+    } else assert.doesNotMatch(releases, /base-advanced-during-server-rebase/);
+  });
+}
+
+for (const scenario of ['capped-conflict', 'capped-stable']) {
+  test(`GATECAPBASE-01: capped shell invokes recovery ${scenario}`, t => {
+    const f = fixture(t, scenario);
+    const result = f.run();
+    assert.equal(result.status, scenario === 'capped-conflict' ? 21 : 20, result.stdout + result.stderr);
+    assert.equal(existsSync(join(f.dir, 'lease-held')), false);
+    assert.equal(readFileSync(join(f.dir, 'leases'), 'utf8'), 'recover-cap\n');
+    assert.equal(JSON.parse(readFileSync(join(f.dir, 'gate-cap-recovery.json'))).owner,
+      scenario === 'capped-conflict' ? 'hammer' : 'closure-recovery');
+  });
+}

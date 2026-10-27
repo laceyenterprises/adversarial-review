@@ -239,7 +239,7 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.ok(HAMMER_PROMPT.includes('"${ham_release_retryable_args[@]+"${ham_release_retryable_args[@]}"}"'));
   assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort merge-retry-budget-exhausted/);
   assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort github-gate-read-failed/);
-  assert.doesNotMatch(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort required-checks-pending/);
+  assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort required-checks-pending/);
   assert.match(HAMMER_PROMPT, /ham_required_gate_pending_only\(\)/);
   assert.match(HAMMER_PROMPT, /\.checksConclusion == "PENDING" and/);
   assert.match(HAMMER_PROMPT, /const checksConclusion = classifyCheckRollup\(checks\)/);
@@ -432,14 +432,14 @@ test('hammer fires watcher wake only after durable eligible audit append', () =>
   assert.ok(mergeLoopIdx < mergeIdx, 'merge command remains inside the retry loop');
 });
 
-test('hammer CI timeout releases a serialized retry without refunding its charge', () => {
+test('hammer CI timeout refunds a pending serialized retry', () => {
   const start = HAMMER_PROMPT.indexOf('ham_ci_timeout()');
   const end = HAMMER_PROMPT.indexOf('ham_merge_error_retryable()', start);
   const timeoutBranch = HAMMER_PROMPT.slice(start, end);
   assert.match(timeoutBranch, /if ham_required_gate_pending_only/);
   assert.match(timeoutBranch, /failed-without-merge github-gate-timeout/);
   assert.match(timeoutBranch, /ham_release_merge_lease/);
-  assert.doesNotMatch(timeoutBranch, /ham_mark_merge_lease_retryable_abort/);
+  assert.match(timeoutBranch, /ham_mark_merge_lease_retryable_abort required-checks-pending/);
 });
 
 test('hammer merge capability shell fallback mirrors JS token-class discovery', () => {
@@ -670,7 +670,7 @@ test('HAMCIWAKE-01 pending-only terminal audit records exact-head resume intent'
 });
 
 for (const [pendingOnly, auditFails] of [[false, false], [false, true], [true, false], [true, true]]) {
-  test(`CI timeout releases the retry lease without refund with pending-only=${pendingOnly}, audit fails=${auditFails}`, () => {
+  test(`CI timeout releases the retry lease with conditional refund, pending-only=${pendingOnly}, audit fails=${auditFails}`, () => {
     const source = readFileSync(join(REPO_ROOT, 'bin', 'hammer-merge.sh'), 'utf8');
     const start = source.indexOf('ham_ci_timeout()');
     const end = source.indexOf('ham_merge_error_retryable()', start);
@@ -703,8 +703,9 @@ for (const [pendingOnly, auditFails] of [[false, false], [false, true], [true, f
     assert.ifError(result.error);
     assert.equal(result.status, 20, result.stderr);
     assert.deepEqual(result.stdout.trim().split('\n'), [
+      ...(pendingOnly ? ['marker:required-checks-pending'] : []),
       pendingOnly ? 'audit:deferred:required-checks-pending' : 'audit:failed-without-merge:github-gate-timeout',
-      'release:none',
+      pendingOnly ? 'release:required-checks-pending' : 'release:none',
     ]);
     assert.equal(result.stderr.includes('hammer-ci-pending-resume-owed head=validated-head'), pendingOnly && !auditFails);
   });
@@ -732,4 +733,13 @@ test('GENCONFLICT-01: hammer regenerates committed generated conflicts after sou
   assert.match(block, /Merge and stage hand-written sources first/);
   assert.match(block, /aborts\s+# and removes this worktree/);
   assert.doesNotMatch(block, /git add <resolved files> && git rebase --continue/);
+});
+
+test('GATECAPBASE-01: prompt preserves recovery ownership after merge-lease caps', () => {
+  assert.match(HAMMER_TEMPLATE, /Never require an operator to reset the attempt counter/);
+  assert.match(HAMMER_PROMPT, /--base-sha "\$HAM_CAPTURED_BASE_SHA"/);
+  assert.match(HAMMER_PROMPT, /bin\/merge-lease\.mjs recover-cap/);
+  assert.match(HAMMER_PROMPT, /HAM_PHASE_OUTCOME=rebase-conflict\n      return 21/);
+  assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort server-rebase-conflict/);
+  assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort base-advanced-during-server-rebase/);
 });

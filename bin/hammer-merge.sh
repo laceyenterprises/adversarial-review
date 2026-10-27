@@ -461,8 +461,9 @@ ham_ci_timeout() {
   echo "HAM hard-blocker: timed out waiting for GitHub required gate to become green for validated head" >&2
   cat "$HAM_GATE_JSON" >&2
   HAM_REMOTE_CI_STATUS=remote-ci-timeout
-  # Keep both attempts charged; a timeout is a real CI outcome.
+  # A pending wait is retryable; a red gate remains a real refusal.
   if ham_required_gate_pending_only; then
+    ham_mark_merge_lease_retryable_abort required-checks-pending
     if ham_append_terminal_audit deferred required-checks-pending; then
       echo "hammer-ci-pending-resume-owed head=$POST_REMEDIATION_SHA" >&2
     fi
@@ -643,8 +644,8 @@ while :; do
     return 20
   fi
   # Remote CI does not own the serialized merge lane. Reacquisition below
-  # repeats the live exact-head gate before any merge attempt. Keep this
-  # attempt charged: a later red CI outcome must retain the gate-cap charge.
+  # repeats the live exact-head gate before any merge attempt. Keep the
+  # yield retryable; only the later predicate refusal consumes the cap.
   if [ "$HAM_CI_BASE_RETRY" -eq 0 ] && [ "${HAM_MERGE_LEASE_HELD:-0}" -eq 1 ]; then
     ham_release_merge_lease --yield || return 1
   fi
@@ -676,7 +677,8 @@ if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && ham_base_touches_pr_files v
   fi
   if [ "$HAM_CI_BASE_RETRY" -eq 1 ]; then
     # Non-cooperating writers can still move the base while we own the lease.
-    ham_append_terminal_audit failed-without-merge retry-base-not-contained || true
+    ham_mark_merge_lease_retryable_abort base-advanced
+    ham_append_terminal_audit deferred retry-base-not-contained || true
     ham_release_merge_lease
     return 20
   fi
@@ -1038,7 +1040,8 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
   fi
   # Repeat the same strictness/overlap policy as the post-wait boundary.
   if ham_base_touches_pr_files validated-head "$(jq -r '.mergeable // empty' "$HAM_GATE_JSON")"; then
-    ham_append_terminal_audit failed-without-merge retry-base-not-contained || true
+    ham_mark_merge_lease_retryable_abort base-advanced
+    ham_append_terminal_audit deferred retry-base-not-contained || true
     ham_release_merge_lease
     return 20
   fi
@@ -1051,6 +1054,7 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
     ham_release_merge_lease
     return 1
   fi
+  HAM_MERGE_ATTEMPT_BASE_SHA="${HAM_CURRENT_BASE_SHA:-}"
   # CI and merge-lease waits do not consume the legacy writer's 60s budget.
   HAM_LANE_WRITE_DEADLINE_MS=$(( ($(date +%s) + 60) * 1000 ))
   HAM_MERGE_EXECUTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -1084,6 +1088,18 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
     echo "HAM merge response says PR is already merged; proceeding to post-merge validation" >&2
     HAM_MERGE_EXIT=0
     break
+  fi
+  # GitHub can rebase against a newer base after the final local check. Only
+  # proven base movement reclassifies a server conflict; stable-base refusal
+  # remains chargeable and the expected-head fence remains mandatory.
+  if grep -Eiq 'not mergeable|merge conflict|rebase|base.*(changed|modified|advanced)' "$HAM_MERGE_STDERR" \
+    && ham_is_full_sha "$HAM_MERGE_ATTEMPT_BASE_SHA" \
+    && ham_capture_current_base_sha \
+    && [ "$HAM_CAPTURED_BASE_SHA" != "$HAM_MERGE_ATTEMPT_BASE_SHA" ]; then
+    ham_mark_merge_lease_retryable_abort base-advanced-during-server-rebase
+    ham_append_terminal_audit deferred rebase-conflict || true
+    ham_release_merge_lease || return 1
+    return 21
   fi
   if ham_merge_error_permanent "$HAM_MERGE_STDERR"; then
     cat "$HAM_MERGE_STDERR" >&2 || true

@@ -2,12 +2,34 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readWorkerObservation} from '../src/dispatch-read-client.mjs';
 import {readBuildCompletionSignalForPr,readBuildCompletionSignalForPrAsync,
-  readBuildCompletionProducerEvidenceAsync,readActiveDagRunsForPlanAsync,
+  readBuildCompletionProducerEvidence,readBuildCompletionProducerEvidenceAsync,readActiveDagRunsForPlanAsync,
   readExecutionVerdictsFromLedgerAsync} from '../src/session-ledger-read-adapter.mjs';
 
 const page = (observation,items,more={}) => ({schema_version:1,observation,
   status:items.length?'found':'not_found',complete:true,next_offset:null,
   scope_complete:false,mutation_authority:false,items,...more});
+
+test('production consumers link with the retained ledger compatibility exports', async()=>{
+  for (const path of ['../src/watcher.mjs', '../src/follow-up-merge-agent.mjs',
+    '../src/merge-agent-original-worker.mjs', '../src/reviewer-pass-tokens.mjs',
+    '../scripts/backfill-reviewer-passes.mjs']) {
+    await import(path);
+  }
+});
+
+test('empty producer evidence preserves an absent PR number in sync and async results', async()=>{
+  const args={repo:'example/repo',
+    workerObservationSyncImpl:()=>page('completions',[]),
+    dispatchSession:{dispatchLookup:async()=>page('completions',[])}};
+  for (const result of [readBuildCompletionProducerEvidence(args),
+    await readBuildCompletionProducerEvidenceAsync(args)]) {
+    assert.equal(result.reason,'missing-build-completion-producer-evidence');
+    assert.equal(result.prNumber,undefined);
+    assert.equal(Object.hasOwn(JSON.parse(JSON.stringify(result)),'prNumber'),false);
+  }
+  assert.equal(readBuildCompletionSignalForPr({...args,prNumber:'42'}).prNumber,42);
+  assert.equal((await readBuildCompletionSignalForPrAsync({...args,prNumber:'42'})).prNumber,42);
+});
 
 test('completion repo/PR/head/signal selectors use SDK, retaining all companion receipts',async()=>{
   const calls=[];

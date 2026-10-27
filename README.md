@@ -3472,7 +3472,12 @@ rollout switch also covers these review observations. No shared config changes.
 The closer and rendered hammer use SDK `recordMergeSignal` through
 `hq build-completions record-merge`. A remote merge followed by capture failure
 retains its accepted remote outcome for reconciliation; empty/skipped capture
-is an error. Advisory remediator routing uses SDK `readRemediatorProposal`
+is an error. Hammer capture forwards its inherited launch ID (`HQ_LAUNCH_REQUEST_ID`,
+then `AGENT_OS_WORKER_LRQ_ID` or `LAUNCH_REQUEST_ID`), `HQ_TICKET_REF`, and
+`WORKER_CLASS` (default `hammer`) as SDK provenance. It honors `HQ_BIN` and
+passes the environment, including `HQ_WORKER_RUN_ID`, to the owner command.
+Repository-level producer-evidence reads with no PR selector retain an undefined
+PR number in empty results. Advisory remediator routing uses SDK `readRemediatorProposal`
 through `hq osg remediator-proposal`. Neither command grants merge authority.
 The reconciliation and accounting-backfill CLIs reject obsolete ledger-source
 flags. No SQL, OS-file or internal-module fallback is available on failure.

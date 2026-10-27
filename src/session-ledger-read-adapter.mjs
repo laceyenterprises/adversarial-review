@@ -165,7 +165,7 @@ function completionSelector(args) {
 function completionResult(result, args, producer = false) {
   if (!result.ok) return result;
   if (!result.rows.length) return {ok:false,reason:producer ? 'missing-build-completion-producer-evidence' : 'missing-build-completion-signal',
-    repo:args.repo,prNumber:Number(args.prNumber),signalKind:args.signalKind ?? 'merged',target:result.target};
+    repo:args.repo,prNumber:args.prNumber == null ? undefined : Number(args.prNumber),signalKind:args.signalKind ?? 'merged',target:result.target};
   return {...result,row:result.rows[0]};
 }
 function validCompletion(args) {

@@ -918,12 +918,21 @@ if (scenario === 'clean') {
     now: leaseNowMs + AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS + 1 }), true);
   assert.equal(foreignPidProbes, 0);
   const ciGate = { state: 'failed', headSha, failedChecks: [{ name: 'synthetic-ci', conclusion: 'FAILURE' }], pendingChecks: [] };
+  let ciBlockerPages = 0;
   for (const exhausted of [false, true]) {
     const admission = await guardRereviewCiBeforeReviewer({ ...identity(), passKind: 'rereview', reviewerHeadSha: headSha,
       inspectCiImpl: async () => ciGate, latestJobFinder: () => exhausted ? { jobPath: 'synthetic', job: { status: 'stopped', remediationPlan: { stop: { code: 'no-progress' } } } } : null,
       summarizeLedgerImpl: () => ({ completedRoundsForPR: 3, latestMaxRounds: 3 }),
-      execFileImpl: refuse, deliverAlertImpl: refuse, log: quiet });
+      execFileImpl: refuse, deliverAlertImpl: async () => { ciBlockerPages++; }, log: quiet });
     assert.equal(admission.proceed, false); assert.equal(admission.parkReviewStatus, 'ci-blocked'); assert.equal(admission.hammerOwner, true);
+  }
+  assert.equal(ciBlockerPages, 1, 'ownerless CI pages once per head across admission polls');
+  for (const status of ['pending', 'in_progress', 'inProgress']) {
+    const activeAdmission = await guardRereviewCiBeforeReviewer({ ...identity(), passKind: 'rereview', reviewerHeadSha: headSha,
+      inspectCiImpl: async () => ciGate, latestJobFinder: () => ({ jobPath: 'synthetic', job: { status } }),
+      requeueImpl: refuse, execFileImpl: refuse, deliverAlertImpl: refuse, log: { warn: refuse } });
+    assert.equal(activeAdmission.reason, 'ci-regression-remediation-active');
+    assert.equal(activeAdmission.proceed, false);
   }
   const finalJob = buildFollowUpJob({ repo, prNumber, reviewerModel: 'codex', revisionRef: base,
     reviewBody: '## Verdict\nComment only' });
@@ -973,6 +982,21 @@ if (scenario === 'clean') {
   assert.equal(satisfiedLabel.job.remediationPlan.currentRound, 1);
   assert.equal(satisfiedLabel.job.remediationPlan.maxRounds, 3);
   assert.equal(satisfiedLabel.job.remediationPlan.operatorLabelSatisfactions.at(-1).eventId, 'synthetic-label');
+  const commentJob = buildFollowUpJob({ repo, prNumber: 44, branch: 'synthetic', reviewerModel: 'codex', revisionRef: base,
+    reviewBody: '## Blocking issues\n- None.\n\n## Non-blocking issues\n- None.\n\n## Verdict\nComment only\n' });
+  commentJob.status = 'stopped';
+  commentJob.remediationPlan.currentRound = 1;
+  commentJob.remediationPlan.maxRounds = 3;
+  commentJob.remediationPlan.stop = { code: 'stale-review-head' };
+  const commentPath = join(rootDir, 'data/follow-up-jobs/stopped', `${commentJob.jobId}.json`);
+  writeFollowUpJob(commentPath, commentJob);
+  const commentAdmission = await guardRereviewCiBeforeReviewer({ ...identity(), prNumber: 44, passKind: 'rereview', reviewerHeadSha: headSha,
+    inspectCiImpl: async () => ciGate, execFileImpl: refuse, deliverAlertImpl: refuse, log: quiet });
+  assert.equal(commentAdmission.reason, 'ci-regression-requeued');
+  const commentBody = readFollowUpJob(commentAdmission.jobPath).reviewBody;
+  assert.doesNotMatch(commentBody.split('## Non-blocking issues')[0], /- None\./);
+  assert.match(commentBody, /## Verdict\nRequest changes/);
+  assert.match(commentBody, /## Non-blocking issues\n- None\./);
   const finalProof = await fetchHammerHeadRange({ repo, reviewedHead: base, currentHead: headSha, hammerBaseHead: headSha,
     remediationRounds: await readCompletedRemediationRounds(rootDir, repo, prNumber), env: {}, get: async path => {
       assert.equal(path, `repos/${repo}/compare/${base}...${headSha}`);

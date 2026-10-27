@@ -2456,8 +2456,12 @@ repo, PR and observed head). CLI requeues use that observed head when no revisio
 is supplied; a mismatched supplied head refuses requeue. Existing approval labels
 also enter the operator wake path. Re-review still requires green external CI.
 Failed external CI queues remediation at the current head with an actionable CI
-finding, preserving prior findings and round accounting. When no job remains,
-a fresh job seeds its count and cap from the existing PR-wide remediation ledger.
+finding, preserving prior findings and round accounting. The populated blocking
+section drops its empty sentinel and a comment-only verdict becomes
+`Request changes`; fenced examples and other sections remain intact. Active
+remediation retains ownership without a requeue attempt or failure warning.
+When no job remains, a fresh job seeds its count and cap from the existing
+PR-wide remediation ledger.
 The newest archived stop is recovered when no queue record remains; archival
 does not waive its label requirement or budget.
 A terminal stop, missing/unreadable label or spent budget emits

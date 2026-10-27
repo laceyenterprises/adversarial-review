@@ -19,6 +19,7 @@ import { readFollowUpOperatorLabel } from '../src/follow-up-operator-label.mjs';
 import { addCiRegressionFinding } from '../src/ci-regression-finding.mjs';
 import { classifyOperatorGatedFindings } from '../src/ama/operator-label-gates.mjs';
 import { parseBlockingFindingsSection } from '../src/kernel/review-findings.mjs';
+import { extractReviewVerdict } from '../src/kernel/verdict.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from '../src/review-statuses.mjs';
 
 function silentLog() {
@@ -40,6 +41,45 @@ test('LABELSTOPOWNER-01: CI findings ignore quoted headings and preserve prior f
   assert.ok(findings.some(finding => /other-check=FAILURE/.test(finding.problem)));
   assert.doesNotMatch(twice, /link-check=FAILURE/);
 });
+
+for (const sentinel of ['- None.', '- None', '  - None.  ', '\t-\tNone\t']) {
+  test(`CI finding replaces the blocking empty sentinel (${JSON.stringify(sentinel)}) and comment-only verdict`, () => {
+    const quoted = '~~~markdown\n## Blocking issues\n- None.\n## Verdict\nComment only\n~~~';
+    const body = `## Blocking issues\n${sentinel}\n${quoted}\n\n## Non-blocking issues\n- None.\n\n## Verdict\nComment only\n`;
+    const result = addCiRegressionFinding(body.replace(/\n/g, '\r\n'), 'check=FAILURE');
+    const blocking = result.slice(0, result.indexOf(quoted));
+    assert.doesNotMatch(blocking, /^[ \t]*-[ \t]+None\.?[ \t]*$/m);
+    assert.ok(result.includes(quoted), 'fenced examples must remain byte-equivalent after newline normalization');
+    assert.match(result, /## Non-blocking issues\n- None\./);
+    assert.equal(parseBlockingFindingsSection(result).length, 1);
+    assert.equal(extractReviewVerdict(result), 'Request changes');
+    assert.equal(extractReviewVerdict(addCiRegressionFinding(result, 'other=FAILURE')), 'Request changes');
+  });
+}
+
+test('CI finding adds a missing blocking section and updates the actual verdict without editing quoted verdicts', () => {
+  const quoted = '```markdown\n## Verdict\nComment only\n```';
+  const result = addCiRegressionFinding(`${quoted}\n## Non-blocking issues\n- None.\n## Verdict\n\nComment only`, 'check=FAILURE');
+  assert.ok(result.startsWith('## Blocking issues\n- **[ci-regression]'));
+  assert.ok(result.includes(quoted));
+  assert.equal(extractReviewVerdict(result), 'Request changes');
+});
+
+for (const status of ['in_progress', 'inProgress', 'pending']) {
+  test(`failed CI keeps ${status} remediation active without requeueing or warnings`, async () => {
+    const job = { status };
+    const ciGate = { state: 'failed', headSha: 'head-red', failedChecks: [{ name: 'check', state: 'FAILURE' }] };
+    const result = await guardRereviewCiBeforeReviewer({
+      rootDir: '/unused', repo: 'fixture/repo', prNumber: 42, passKind: 'rereview', reviewerHeadSha: 'head-red',
+      inspectCiImpl: async () => ciGate,
+      latestJobFinder: () => ({ jobPath: '/unused/job.json', job }),
+      requeueImpl: () => assert.fail('active remediation must bypass requeue'),
+      deliverAlertImpl: async () => assert.fail('active remediation must not page'),
+      log: { warn: () => assert.fail('active remediation must not emit failure warnings') },
+    });
+    assert.deepEqual(result, { proceed: false, reason: 'ci-regression-remediation-active', ciGate, jobPath: '/unused/job.json', job });
+  });
+}
 
 test('consecutive failed-CI admissions retain a persisted no-progress hammer hand-off', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ci-admission-no-progress-'));
@@ -490,6 +530,27 @@ function labelStopFixture(t, { stopCode = 'operator-label-required:live-pack-edi
     log: { warn: message => logs.push(message) } };
   return { rootDir, jobPath, evidence, pages, logs, args };
 }
+
+test('CI requeue persists a consistent blocking review when the stopped round was comment-only', async t => {
+  const f = labelStopFixture(t);
+  const job = readFollowUpJob(f.jobPath);
+  job.reviewBody = '## Blocking issues\n- None.\n\n## Non-blocking issues\n- None.\n\n## Verdict\nComment only';
+  job.critical = false;
+  job.nonBlockingOnly = true;
+  job.finalRound = 'comment-only';
+  writeFollowUpJob(f.jobPath, job);
+  const result = await guardRereviewCiBeforeReviewer(f.args);
+  assert.equal(result.reason, 'ci-regression-requeued');
+  const queued = readFollowUpJob(result.jobPath);
+  assert.equal(extractReviewVerdict(queued.reviewBody), 'Request changes');
+  assert.equal(parseBlockingFindingsSection(queued.reviewBody).length, 1);
+  assert.doesNotMatch(queued.reviewBody.split('## Non-blocking issues')[0], /- None\./);
+  assert.equal(queued.critical, true);
+  assert.equal(queued.nonBlockingOnly, false);
+  assert.equal(queued.finalRound, null);
+  assert.equal(queued.remediationPlan.currentRound, job.remediationPlan.currentRound);
+  assert.equal(queued.remediationPlan.maxRounds, job.remediationPlan.maxRounds);
+});
 
 test('LABELSTOPOWNER-01: a satisfied label queues CI remediation at the newer head with event evidence', async t => {
   const f = labelStopFixture(t);

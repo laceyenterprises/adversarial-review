@@ -502,6 +502,7 @@ test('NXA-04: pending non-final CI completes with durable watcher admission inte
 test('CIBLOCKHAM-01: the watcher resumes a pending-at-timeout round on green CI and on red CI', async () => {
   const { guardRereviewCiBeforeReviewer } = await import('../src/reviewer-ci-admission.mjs');
   const quiet = { log() {}, warn() {} };
+  const pages = [];
   const settled = (state) => async () => ({
     state,
     conclusion: state === 'green' ? 'SUCCESS' : 'FAILURE',
@@ -519,6 +520,7 @@ test('CIBLOCKHAM-01: the watcher resumes a pending-at-timeout round on green CI 
     log: quiet,
     now: () => '2026-04-21T11:00:00.000Z',
     inspectCiImpl: settled(state),
+    deliverAlertImpl: async (...args) => { pages.push(args); },
   });
 
   const pendingRoot = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
@@ -552,14 +554,15 @@ test('CIBLOCKHAM-01: the watcher resumes a pending-at-timeout round on green CI 
     priorCompletedRounds: probe - 1,
   });
   assert.equal(lastClaim.job.remediationPlan.currentRound, lastClaim.job.remediationPlan.maxRounds);
-  // The first red tick re-stops the job at its round cap; every later tick
-  // finds nothing left to requeue (the steady state PR 8007 logged).
-  for (const expectedReason of ['ci-regression-stopped', 'ci-regression-no-job', 'ci-regression-no-job']) {
+  // Repeated cap refusals preserve the terminal queue record and page once.
+  for (const expectedReason of ['ci-regression-stopped', 'ci-regression-stopped', 'ci-regression-stopped']) {
     const last = await rereviewGuard(lastRoot, 'failed');
     assert.equal(last.reason, expectedReason);
     assert.equal(last.hammerOwner, true, expectedReason);
     assert.equal(last.parkReview, true, expectedReason);
+    assert.equal(last.job.remediationPlan.currentRound, lastClaim.job.remediationPlan.maxRounds);
   }
+  assert.equal(pages.length, 1);
 });
 
 function buildProbeRounds() {

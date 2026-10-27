@@ -260,6 +260,12 @@ async function guardRereviewCiBeforeReviewer({
       }), 'automatic requeue cannot reopen a no-progress handoff');
     }
 
+    // Routine polling must not attempt a terminal-to-pending transition for
+    // remediation that already owns the head.
+    if (['in_progress', 'inProgress', 'pending'].includes(latest.job?.status)) {
+      return { proceed: false, reason: 'ci-regression-remediation-active', ciGate, jobPath: latest.jobPath, job: latest.job };
+    }
+
     try {
       const requeued = requeueImpl({
         rootDir,
@@ -297,10 +303,6 @@ async function guardRereviewCiBeforeReviewer({
       if (nextStatus === 'stopped') {
         return blockOwnerless(ciBlockedHammerOwnerResult({ repo, prNumber, ciGate, reason: 'ci-regression-stopped', ...jobFields }), 'requeue stopped without a remediation owner');
       }
-      // Already active work owns remediation; do not page it as ownerless.
-      if (['in_progress', 'inProgress', 'pending'].includes(latest.job?.status)) {
-        return { proceed: false, reason: 'ci-regression-remediation-active', ciGate, ...jobFields };
-      }
       return blockOwnerless({ proceed: false, reason: 'ci-regression-not-requeued', ciGate, ...jobFields }, 'requeue produced no active remediation job');
     } catch (err) {
       if (err?.code === 'ENOENT') {
@@ -318,9 +320,6 @@ async function guardRereviewCiBeforeReviewer({
         `[watcher] Refusing re-review for ${repo}#${prNumber}: failed external CI ` +
           `(${formatCiCheckList(ciGate.failedChecks)}) and requeue failed: ${err?.message || err}`
       );
-      if (['in_progress', 'inProgress', 'pending'].includes(latest.job?.status)) {
-        return { proceed: false, reason: 'ci-regression-remediation-active', ciGate, jobPath: latest.jobPath, job: latest.job };
-      }
       return blockOwnerless({
         proceed: false,
         reason: 'ci-regression-requeue-failed',

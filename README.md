@@ -647,7 +647,7 @@ head and CI across disjoint base advances when protection is explicitly
 non-strict. Strict/unknown protection requires complete base containment;
 overlap requires rebase even with CLEAN mergeability. LEASEFAIR-02 handles a
 required rebase in the same run, holds the reacquired
-lease through one bounded CI wait on the new head, then rebuilds its audit and
+lease through one CI wait capped at 120 wall-clock seconds on the new head, then rebuilds its audit and
 predicate before merge. Both CI waits share one absolute deadline, set before
 the first wait from the once-scaled nominal bound; rebase time, sleeps and gate
 reads consume the remaining budget. Expired reacquisition or base probing cannot
@@ -731,7 +731,7 @@ initialized submodules before changed-surface revalidation. Publish and recovere
 attestations compare the live head with `HAM_PRODUCED_HEAD`; required checks and
 merge remain bound to that head under the merge lease. LEASEFAIR-01 releases
 before the first remote-CI wait and reacquires before merging; LEASEFAIR-02
-retains that lease through one retry CI wait if the base policy requires it. Foreign pushes still
+retains that lease through one retry CI wait, capped at 120 wall-clock seconds, if the base policy requires it. Foreign pushes still
 stop with `head-changed`. Existing lifecycle states are unchanged.
 
 Old-head update-branch acknowledgements now poll without repeating the mutation.
@@ -741,7 +741,12 @@ checks, audit/range proof and the full predicate. The clean offline smoke proves
 two queued validated PRs drain across unrelated advances, preserving source heads
 and leaving no holder/waiters. Focused `rebase-result` and `hammer-self-rebase`
 fixtures cover invalid candidates and bounded failure cleanup. See the
-[LAC-2097 RCA and deployment acceptance](docs/postmortems/LAC-2097-validated-closer-convergence.md).
+[LAC-2097 RCA and deployment acceptance](docs/postmortems/LAC-2097-validated-closer-convergence.md) and the
+[2026-10-27 recurrence RCA](docs/postmortems/LAC-2097-closer-convergence-recurrence.md).
+The first verification uses the same retention policy. An inaccessible protection
+endpoint can resolve non-strict only through authoritative unprotected branch
+metadata. Copied scripts include a diagnostic source SHA-256. Run optional local
+validation outside the lease, then re-enter verify-head before audit publication.
 
 1. **Acquire the merge lease** for `(repo, base, PR)` — no merge happens without it.
 2. **Remediate all adversarial findings** the final review raised — blocking and

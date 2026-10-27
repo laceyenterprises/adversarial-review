@@ -8,7 +8,7 @@ import { evaluateMergeEligibility } from '../../src/ama/merge-eligibility.mjs';
 
 // Disposable Git + real lease queue, driven by an explicit deterministic schedule.
 // No timers, live credentials, daemon state or provider calls are involved.
-export function exerciseValidatedCloserQueue(rootDir, { strict = false } = {}) {
+export function exerciseValidatedCloserQueue(rootDir, { strict = false, samePath = false } = {}) {
   mkdirSync(rootDir, { recursive: true });
   const cwd = join(rootDir, 'checkout'); mkdirSync(cwd);
   const env = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_ALLOW_PROTOCOL: 'file',
@@ -18,13 +18,18 @@ export function exerciseValidatedCloserQueue(rootDir, { strict = false } = {}) {
   const remote = join(rootDir, 'remote.git');
   git('init', '--bare', '-q', remote); git('init', '-q', '-b', 'main'); git('remote', 'add', 'origin', remote);
   const commit = message => { git('add', '--', 'a', 'b', 'unrelated'); git('commit', '-qm', message); return git('rev-parse', 'HEAD'); };
-  for (const file of ['a', 'b', 'unrelated']) writeFileSync(join(cwd, file), 'base\n');
+  const shared = Array.from({ length: 80 }, (_, i) => `line ${i}\n`);
+  for (const file of ['a', 'b', 'unrelated']) writeFileSync(join(cwd, file), samePath && file === 'a' ? shared.join('') : 'base\n');
   const base = commit('base'); git('push', '-q', 'origin', 'main');
   const heads = [];
   for (const [pr, file] of [[1, 'a'], [2, 'b']]) {
     git('checkout', '-q', '-B', `pr-${pr}`, base);
-    writeFileSync(join(cwd, file), 'author intent\n'); commit('author');
-    writeFileSync(join(cwd, file), 'author intent\nHAM finding fixed\n'); heads.push(commit('HAM remediation'));
+    const target = samePath ? 'a' : file;
+    const contents = [...shared];
+    contents[pr * 20] = `author intent ${pr}\n`;
+    writeFileSync(join(cwd, target), samePath ? contents.join('') : 'author intent\n'); commit('author');
+    contents[pr * 20 + 1] = `HAM finding fixed ${pr}\n`;
+    writeFileSync(join(cwd, target), samePath ? contents.join('') : 'author intent\nHAM finding fixed\n'); heads.push(commit('HAM remediation'));
   }
   git('checkout', '-q', 'main');
   const source = readFileSync(new URL('../../bin/hammer-verify-head.sh', import.meta.url), 'utf8');
@@ -57,7 +62,13 @@ ham_base_touches_pr_files validated-head "$3"
     assert.equal(result.released, true);
     return result;
   };
-  const advance = text => { writeFileSync(join(cwd, 'unrelated'), text); commit('unrelated base advance'); git('push', '-q', 'origin', 'main'); };
+  const advance = text => {
+    if (samePath) {
+      const lines = readFileSync(join(cwd, 'a'), 'utf8').split('\n'); lines[65] = text.trim();
+      writeFileSync(join(cwd, 'a'), lines.join('\n'));
+    }
+    writeFileSync(join(cwd, 'unrelated'), text); commit('base advance'); git('push', '-q', 'origin', 'main');
+  };
   const blocker = acquire(99); assert.equal(blocker.acquired, true);
   assert.equal(acquire(1).acquired, false); assert.equal(acquire(2).acquired, false);
   advance('advance before queued validation\n'); release(blocker.lease);
@@ -84,10 +95,10 @@ ham_base_touches_pr_files validated-head "$3"
     const previouslyValidated = head;
     assert.equal(needsRebase(head, '1'), true, 'strict protection still requires containment');
     assert.equal(needsRebase(head, ''), true, 'unknown protection fails closed');
-    assert.equal(needsRebase(head, '0'), false, 'unrelated advancement keeps the exact validated head');
+    assert.equal(needsRebase(head, '0'), samePath, 'path overlap still requires rebase even for disjoint hunks');
     assert.equal(needsRebase(head, '0', 'CONFLICTING'), true, 'live conflicts require rebase even with disjoint path lists');
     assert.equal(needsRebase(head, '0', 'MERGEABLE', true), true, 'comparison errors cannot authorize disjoint retention');
-    if (strict) {
+    if (strict || samePath) {
       git('checkout', '-q', `pr-${pr}`); git('rebase', 'main');
       head = git('rev-parse', 'HEAD'); heads[pr - 1] = head;
       git('checkout', '-q', 'main');
@@ -98,7 +109,7 @@ ham_base_touches_pr_files validated-head "$3"
     const gate = (checks, validatedHead = head) => evaluateMergeEligibility({ verdict: 'settled-success', leaseHeld: true, requiredChecks: checks,
       branchProtectionRequired: false, requiresUpToDateBranch: strict, mergeable: 'MERGEABLE', mergeStateStatus: strict ? 'CLEAN' : 'BEHIND',
       prState: 'OPEN', labels: [], candidateHead: head, validatedHead });
-    if (strict) assert.equal(gate([{ name: 'required', conclusion: 'SUCCESS' }], previouslyValidated).eligible, false,
+    if (strict || samePath) assert.equal(gate([{ name: 'required', conclusion: 'SUCCESS' }], previouslyValidated).eligible, false,
       'old exact-head green evidence cannot authorize the rebase');
     assert.equal(gate([{ name: 'required', status: 'IN_PROGRESS' }]).eligible, false);
     assert.equal(gate([{ name: 'required', conclusion: 'SUCCESS' }]).eligible, true);
@@ -118,12 +129,17 @@ ham_base_touches_pr_files validated-head "$3"
   release(daemon.lease);
   assert.equal(readMergeLeaseWaiters(rootDir, identity).length, 0);
   assert.equal(inspectMergeLease(identity).lease, null);
-  for (const file of ['a', 'b']) assert.equal(readFileSync(join(cwd, file), 'utf8'), 'author intent\nHAM finding fixed\n');
+  if (samePath) {
+    for (const pr of [1, 2]) {
+      const text = readFileSync(join(cwd, 'a'), 'utf8');
+      assert.ok(text.includes(`author intent ${pr}\nHAM finding fixed ${pr}\n`));
+    }
+  } else for (const file of ['a', 'b']) assert.equal(readFileSync(join(cwd, file), 'utf8'), 'author intent\nHAM finding fixed\n');
   // A rename must include its source path in the PR file set. Main changed
   // that path even though it never touched the rename destination.
   git('checkout', '-q', '--detach', base); git('mv', 'a', 'renamed'); git('commit', '-qm', 'rename');
   assert.equal(needsRebase(git('rev-parse', 'HEAD'), '0'), true, 'renamed-away paths still overlap');
   git('checkout', '-q', 'main');
-  assert.equal(sourceMutations, strict ? 2 : 0);
+  assert.equal(sourceMutations, strict || samePath ? 2 : 0);
   return { merged, sourceMutations, ciRestarts, leaseAndWaitersClean: true };
 }

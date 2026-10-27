@@ -40,8 +40,9 @@ function fixture(t, scenario) {
   };
   const ancestor = commit('base-old\nbody\nhammer-old\n');
   const original = commit('base-old\nbody\nhammer-new\n', ancestor);
-  const base = commit('base-new\nbody\nhammer-old\n', ancestor);
-  const rebased = commit('base-new\nbody\nhammer-new\n', base);
+  const initialDisjoint = scenario === 'initial-disjoint';
+  const base = commit(initialDisjoint ? 'base-old\nbody\nhammer-old\n' : 'base-new\nbody\nhammer-old\n', ancestor, initialDisjoint);
+  const rebased = initialDisjoint ? original : commit('base-new\nbody\nhammer-new\n', base);
   const foreign = commit('foreign\n', rebased);
   const disjoint = scenario.startsWith('ci-disjoint') || scenario === 'ci-old-reply';
   const nextBase = commit(disjoint ? 'base-new\nbody\nhammer-old\n' : 'base-new\nadvanced\nhammer-old\n', base, disjoint);
@@ -70,7 +71,6 @@ function fixture(t, scenario) {
 echo "$1" >> "$FIXTURE_DIR/sleeps"
 value=$(cat "$FIXTURE_DIR/clock")
 increment="$1"
-if [ "$SCENARIO" = ci-pending ]; then increment=300; fi
 if [ "$SCENARIO" = ci-shared-deadline ] && [ "$value" -eq 1700000000 ]; then increment=600; fi
 echo $((value + increment)) > "$FIXTURE_DIR/clock"
 `);
@@ -134,8 +134,16 @@ if [ "$SCENARIO" = ci-disjoint ]; then
   [ "$HAM_REQUIRES_UP_TO_DATE" -eq 0 ] || exit 94
 fi
 if [ "$HAM_NEEDS_REVALIDATION" = true ]; then
+  if [ "$SCENARIO" = local-validation-yield ]; then
+    ham_release_merge_lease --yield || exit 1
+    [ ! -f "$FIXTURE_DIR/lease-held" ] || exit 93
+  fi
   env -u NODE_TEST_CONTEXT "$REAL_NODE" --test surface.test.mjs || exit 1
   git rev-parse HEAD > "$FIXTURE_DIR/tested-head"
+  if [ "$SCENARIO" = local-validation-yield ]; then
+    source "$FIXTURE_DIR/hammer-verify-head.sh" || exit $?
+    [ "$(cat "$FIXTURE_DIR/tested-head")" = "$HAM_PRODUCED_HEAD" ] || exit 92
+  fi
 fi
 git rev-parse HEAD > "$FIXTURE_DIR/validated-head"
 if [ "$SCENARIO" = foreign ]; then
@@ -276,8 +284,8 @@ for (const scenario of ['ci-touching', 'ci-disjoint', 'ci-disjoint-strict', 'ci-
     assert.equal(existsSync(join(f.dir, 'lease-held')), false);
     assert.equal(readFileSync(join(f.dir, 'wait-scales'), 'utf8'), 'scale\n');
     if (scenario === 'ci-shared-deadline') {
-      assert.equal(Number(readFileSync(join(f.dir, 'clock'), 'utf8')) - 1700000000, 900,
-        'first CI wait, rebase and retry must consume one absolute deadline');
+      assert.equal(Number(readFileSync(join(f.dir, 'clock'), 'utf8')) - 1700000000, 780,
+        '600 seconds before retry plus 60 rebase seconds plus the unscaled 120-second retry ceiling');
     }
     const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
     const checks = events.filter(e => e.kind === 'checks').map(e => e.value);
@@ -285,6 +293,12 @@ for (const scenario of ['ci-touching', 'ci-disjoint', 'ci-disjoint-strict', 'ci-
     if (!['ci-conflict', 'ci-disjoint-conflict', 'ci-disjoint', 'ci-disjoint-lease-delay'].includes(scenario)) {
       const retryChecks = checks.filter(c => c.head === f.nextRebased);
       assert.ok(retryChecks.length >= 1, diagnostics);
+      if (scenario === 'ci-pending') {
+        const expiredAt = Number(readFileSync(join(f.dir, 'clock'), 'utf8'));
+        assert.ok(expiredAt - retryChecks[0].at <= 120, 'pending retry CI cannot consume the scaled 900-second window');
+        assert.match(diagnostics, /hammer-ci-pending-resume-owed/);
+        assert.ok(existsSync(join(f.dir, 'pushed-comments')), 'preserve real publication provenance for recovery');
+      }
       assert.ok(retryChecks.every(c => c.held === true), 'retry never releases while polling');
     }
     const merges = events.filter(e => e.kind === 'gh' && e.value[1] === 'merge');
@@ -367,16 +381,18 @@ for (const scenario of ['ci-canceled', 'ci-closed']) {
   });
 }
 
-test('LAC-2097: a strict already-up-to-date no-op keeps its exact head without another mutation', t => {
-  const f = fixture(t, 'no-op');
-  const result = f.run(), diagnostics = result.stdout + result.stderr;
-  assert.equal(result.status, 0, diagnostics);
-  assert.equal(f.git(['rev-parse', 'HEAD']), f.rebased);
-  const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-  assert.equal(events.filter(e => e.kind === 'gh' && e.value.some(arg => arg.includes('updatePullRequestBranch'))).length, 1);
-  assert.equal(events.some(e => e.kind === 'pushed-edge'), false, 'no invented publication edge for unchanged SHA');
-  assert.equal(existsSync(join(f.dir, 'lease-held')), false);
-});
+for (const scenario of ['no-op', 'initial-disjoint']) {
+  test(`LAC-2097: first-pass base policy retains the exact head without a mutation: ${scenario}`, t => {
+    const f = fixture(t, scenario);
+    const result = f.run(), diagnostics = result.stdout + result.stderr;
+    assert.equal(result.status, 0, diagnostics);
+    assert.equal(f.git(['rev-parse', 'HEAD']), f.rebased);
+    const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(events.filter(e => e.kind === 'gh' && e.value.some(arg => arg.includes('updatePullRequestBranch'))).length, 0);
+    assert.equal(events.some(e => e.kind === 'pushed-edge'), false, 'no invented publication edge for unchanged SHA');
+    assert.equal(existsSync(join(f.dir, 'lease-held')), false);
+  });
+}
 
 for (const scenario of ['ci-lease-deadline', 'ci-id-deadline']) {
   test(`LAC-2097: exhausted CI deadline cannot start a rebase or restart CI: ${scenario}`, t => {
@@ -392,3 +408,14 @@ for (const scenario of ['ci-lease-deadline', 'ci-id-deadline']) {
     assert.equal(existsSync(join(f.dir, 'lease-held')), false);
   });
 }
+
+test('LAC-2097: optional local validation yields and reacquires without rewriting its tested head', t => {
+  const f = fixture(t, 'local-validation-yield');
+  const result = f.run(), diagnostics = result.stdout + result.stderr;
+  assert.equal(result.status, 0, diagnostics);
+  assert.equal(readFileSync(join(f.dir, 'leases'), 'utf8'), 'acquire\nrelease\nacquire\nrelease\nacquire\nrelease\n');
+  assert.equal(readFileSync(join(f.dir, 'tested-head'), 'utf8').trim(), f.rebased);
+  const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(events.filter(e => e.kind === 'gh' && e.value.some(arg => arg.includes('updatePullRequestBranch'))).length, 1);
+  assert.equal(existsSync(join(f.dir, 'lease-held')), false);
+});

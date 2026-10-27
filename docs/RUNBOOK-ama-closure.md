@@ -2069,14 +2069,14 @@ prompt-driven worker behavior, not predicate gates — the audit comment and the
    otherwise clean close. Test fixes remain the one sanctioned exception to
    "scope only to the findings"; net-new feature scope stays out.
 2. **Rebase onto a recent `main` and confirm the merge guards.** The hammer
-   always rebases at least once onto the current base and re-validates the
-   rebased head — required checks plus the changed-surface test bar above —
+   rebases when the strictness/overlap policy requires it and validates the
+   exact resulting head — required checks plus the changed-surface test bar above —
    before merging. LEASEFAIR-01 releases the lease during remote CI, then
    applies the strictness/overlap base policy after reacquisition (LAC-2097).
    Explicitly non-strict disjoint advances retain the exact head and its CI;
    strict/unknown protection requires containment and overlap requires rebase.
-   One required rebase and exact-head CI wait retain the reacquired lease
-   (LEASEFAIR-02). Deferred daemon merges retain priority before reacquisition;
+   One required rebase and at most 120 wall-clock seconds of retry CI retain
+   the reacquired lease (LEASEFAIR-02). Deferred daemon merges retain priority before reacquisition;
    conflict, red CI or timeout release with their actual reasons. A lagging
    `BEHIND` snapshot cannot force another source rewrite when this policy is
    satisfied; the final live gate still must pass.
@@ -4649,6 +4649,16 @@ transient reads and UNKNOWN sampling/backoffs. After green CI it reacquires
 through the same priority queue, so deferred daemon merges are served first.
 LAC-2097 makes the post-wait and final-click base policy match branch protection:
 strict or unreadable protection requires complete current-base containment.
+An administration-only protection read can fail with 403 even for an unprotected
+branch. On failure, the closer reads branch metadata with the same identity; only
+matching branch name, full commit SHA and boolean `protected:false` establish
+non-strictness. Protected, wrong, malformed or unreadable metadata stays strict.
+The first verification uses the same base policy, without a mandatory update CAS.
+Rendered scripts carry `hammer-procedure-source-sha256` for generation diagnosis;
+this comment grants no validation, publication or merge authority.
+Run optional changed-surface validation outside the lease: yield, test, then
+source verify-head again before publishing the audit. If it changes the head,
+validate that head outside the lease within the existing rebase cap.
 With an explicitly non-strict rule, the exact validated head may retain its CI
 when the base advance is disjoint from the PR's entire changed-file set. Both
 sides of renames count. The comparison starts at the exact head/base merge-base,
@@ -4659,7 +4669,10 @@ CONFLICTING gate requires the rebase/conflict path even with disjoint path names
 LEASEFAIR-02 handles a required rebase in this same run:
 rebase/publish through GitHub's existing update-branch path, fetch and detach
 the exact resulting SHA, and wait once for that head's required CI while
-retaining the lease. Both CI windows share one absolute deadline initialized
+retaining the lease for at most 120 wall-clock seconds of new-head CI. This
+fixed ceiling only shortens the existing deadline and is never load-scaled.
+Pending expiry retains pushed provenance and releases with the existing
+exact-head pending recovery receipt. Both CI windows share one absolute deadline initialized
 before the first wait from the nominal wait scaled once. The intervening rebase,
 polling, backoffs and gate reads consume the remaining deadline. This single
 serialized retry prevents cooperating mergers from overtaking the closer again. The
@@ -5438,7 +5451,7 @@ are load-scaled once and timer-clamped. Poll delays double from 250ms to a
 fixed 15-second ceiling independent of host load; every sleep respects the
 remaining budget. Holder-file changes interrupt sleep, with polling as the
 best-effort wake fallback.
-All roles share arrival order and dead-holder rules remain unchanged. LEASEFAIR-02's single retry still holds its lease through CI;
+All roles share arrival order and dead-holder rules remain unchanged. LEASEFAIR-02's single retry holds its lease through at most 120 wall-clock seconds of CI;
 its grant, renewal and release are included in the per-base history.
 
 Inspect `data/merge-leases/<repo-slug>__<base>.history.jsonl` for the newest 4096
@@ -6071,3 +6084,5 @@ entitlement, selector-bound proof and native audited settlement composition.
 Ordinary filtered emptiness and partial/unreadable scope stay held. Durable
 query evidence retains both absence proofs; current receipt, submitter,
 record/lease fences and once-only refund rules remain unchanged.
+
+LAC-2097 recurrence evidence and limits: [2026-10-27 RCA](postmortems/LAC-2097-closer-convergence-recurrence.md). Source publication does not establish deployment or runtime acceptance.

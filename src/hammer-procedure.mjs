@@ -1,6 +1,7 @@
 // Shared dispatch/CLI renderer. Procedure sources belong to this deployed checkout.
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 
 export const HAMMER_PHASES = ['hammer-verify-head', 'hammer-publish', 'hammer-merge'];
 
@@ -8,6 +9,7 @@ export function renderHammerProcedure(phase, values) {
   if (!HAMMER_PHASES.includes(phase)) throw new Error(`unknown hammer phase: ${phase}`);
   const path = fileURLToPath(new URL(`../bin/${phase}.sh`, import.meta.url));
   let source = readFileSync(path, 'utf8');
+  const sourceHash = createHash('sha256').update(source).digest('hex');
   // Run unconditionally: placing a shell function in `if` disables errexit in
   // every nested function. Record handled refusals after return, and fatal
   // errexit failures through ERR without replacing the lease's EXIT trap.
@@ -38,7 +40,8 @@ return "$ham_phase_exit"
     /^(HAM_[A-Z_]*(?:WAIT_SECONDS|POLL_SECONDS|RETRY_CAP|ATTEMPT_CAP|FAILURE_LIMIT|BACKOFF_BASE_SECONDS|NOMINAL_SECONDS))="\$\{\1:-([0-9]+)\}"$/gm,
     (_match, name, floor) => `ham_procedure_floor ${name} ${floor}`,
   );
-  const procedureFloor = `# Waits are fixed by the procedure; do not export or shorten them.
+  const procedureFloor = `# hammer-procedure-source-sha256: ${sourceHash}
+# Waits are fixed by the procedure; do not export or shorten them.
 # A hammer that has only the lease left waits for it.
 ham_procedure_floor() {
   local name="$1" floor="$2" given normalized used

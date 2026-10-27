@@ -757,6 +757,7 @@ ham_rebase_head() {
 # OTHER PRs merged is NOT a merge blocker (GitHub squash-merges a BEHIND-but-
 # MERGEABLE PR), so chasing it with a rebase would only re-run the full required
 # check suite on identical code (agent-os#5464).
+ham_resolve_base_strictness() {
 HAM_REQUIRES_UP_TO_DATE=1
 ham_rsc_json="<<RUN_DIR>>/required-status-checks.json"
 ham_rsc_err="<<RUN_DIR>>/required-status-checks.stderr"
@@ -765,14 +766,25 @@ if ham_gh api \
     "repos/<<REPO>>/branches/$ham_base_enc_early/protection/required_status_checks" \
     > "$ham_rsc_json" 2> "$ham_rsc_err"; then
   # jq's // treats false as absent; preserve an explicit non-strict rule.
-  if [ "$(jq -r '.strict' "$ham_rsc_json" 2>/dev/null)" = "false" ]; then
+  if jq -e '.strict == false' "$ham_rsc_json" >/dev/null 2>&1; then
     HAM_REQUIRES_UP_TO_DATE=0
   fi
-elif grep -Eiq 'HTTP 404|Not Found|not protected|Branch not protected|Required status checks.*not' "$ham_rsc_err"; then
-  # No branch protection / no required-status-checks object → no strict rule.
-  HAM_REQUIRES_UP_TO_DATE=0
+else
+  # Apps can read branch metadata while the administration-only protection
+  # endpoint returns 403, even on an unprotected branch. An error is no proof
+  # of strictness or its absence. Require an authoritative, identity-bound
+  # unprotected branch response; protected/unknown/malformed stays fail-closed.
+  if ham_gh api "repos/<<REPO>>/branches/$ham_base_enc_early" \
+      > "<<RUN_DIR>>/base-protection.json" 2> "<<RUN_DIR>>/base-protection.stderr" \
+    && jq -e --arg base "$BASE_BRANCH" '.name == $base and .protected == false and
+      (.commit.sha | type == "string" and test("^[a-fA-F0-9]{40}$"))' \
+      "<<RUN_DIR>>/base-protection.json" >/dev/null; then
+    HAM_REQUIRES_UP_TO_DATE=0
+  fi
 fi
 echo "HAM: requiresUpToDate=$HAM_REQUIRES_UP_TO_DATE base=$BASE_BRANCH" >&2
+}
+ham_resolve_base_strictness
 
 # Keep this identity across verify/publish/merge in the persistent shell. Only
 # our successful publication or server-side rebase may replace it.
@@ -786,11 +798,10 @@ while [ "$(jq -r '.mergeStateStatus // ""' "<<RUN_DIR>>/pr-after.json")" = "BEHI
     ham_release_merge_lease || return 1
     return 20
   fi
-  # After the initial update attempt, retain the produced head when the base
-  # policy permits it. This also handles a strict already-up-to-date no-op with
+  # Retain the produced head when the base policy permits it, including the
+  # first pass. This also handles a strict already-up-to-date head with
   # a lagging BEHIND snapshot; the final live gate must still settle green.
   if [ "$(jq -r '.mergeable // ""' "<<RUN_DIR>>/pr-after.json")" = "MERGEABLE" ] \
-     && [ "${HAM_REBASE_ATTEMPTS:-0}" -ge 1 ] \
      && ! ham_base_touches_pr_files validated-head; then
     echo "HAM: produced head covers the base policy; avoiding a redundant rebase." >&2
     break

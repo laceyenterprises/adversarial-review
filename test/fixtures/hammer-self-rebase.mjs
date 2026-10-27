@@ -45,6 +45,8 @@ if (args[0] === 'legacy') {
   assert.equal(localHead(), expected);
   if (!state.retried) assert.equal(readFileSync(join(dir, 'validated-head'), 'utf8').trim(), expected);
   state.checkReads = (state.checkReads || 0) + 1;
+  // A stale BEHIND snapshot settles independently of update-branch.
+  if (process.env.SCENARIO === 'no-op' && state.checkReads >= 2) state.behind = false;
   if (retryScenario && state.checkReads === 1) {
     assert.equal(existsSync(join(dir, 'lease-held')), false);
     // A synthetic daemon finishes during the lease-free wait and advances main.
@@ -65,7 +67,7 @@ if (args[0] === 'legacy') {
     requiredChecks: checks, branchProtectionRequired: false, mergeable,
     requiresUpToDateBranch: process.env.HAM_REQUIRES_UP_TO_DATE !== '0',
     mergeStateStatus, prState: 'OPEN', labels: [], candidateHead: state.head, validatedHead: expected });
-  log('checks', { head: expected, held: existsSync(join(dir, 'lease-held')), conclusion: classifyCheckRollup(checks) });
+  log('checks', { at: Number(readFileSync(join(dir, 'clock'), 'utf8')), head: expected, held: existsSync(join(dir, 'lease-held')), conclusion: classifyCheckRollup(checks) });
   save();
   console.log(JSON.stringify({ ok: verdict.eligible, reasons: verdict.reasons, state: 'OPEN',
     headMatches: state.head === expected, liveHead: state.head, expectedHead: expected,
@@ -174,7 +176,7 @@ if (args[0] === 'legacy') {
   } else if (args[0] === 'api' && args.includes('graphql')) {
     console.log(JSON.stringify({ login: 'hammer-worker', databaseId: 77 }));
   } else if (args[0] === 'api' && args.some(arg => arg.endsWith('required_status_checks'))) {
-    console.log(JSON.stringify({ strict: !['ci-disjoint', 'ci-disjoint-conflict', 'ci-disjoint-lease-delay'].includes(process.env.SCENARIO) }));
+    console.log(JSON.stringify({ strict: !['initial-disjoint', 'ci-disjoint', 'ci-disjoint-conflict', 'ci-disjoint-lease-delay'].includes(process.env.SCENARIO) }));
   } else if (args[0] === 'api' && args.some(arg => arg.includes('/commits/'))) {
     console.log(JSON.stringify({ sha: state.head, parents: [{ sha: state.nextBase }] }));
   } else if (args[0] === 'api' && args.includes('--paginate')) {

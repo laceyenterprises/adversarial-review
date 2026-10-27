@@ -169,6 +169,21 @@ or reorder each other's entries through last-writer-wins file replacement.
 
 ## AMG-03 merge-lease base revalidation
 
+LAC-2097 recurrence: optional local validation runs outside the shared lease,
+then verify-head reacquires and rechecks the exact head/base before audit
+publication. First verification applies the same strictness/overlap policy as
+post-CI checks; it does not require an initial update CAS when retention is safe.
+An unreadable protection endpoint resolves non-strict only from successful branch
+metadata with matching name, a full commit SHA and boolean `protected:false`.
+Unknown/protected metadata retains containment. Overlapping paths, including
+separated hunks, still require rebase. Retry CI additionally has an unscaled `HAM_CI_RETRY_WAIT_SECONDS` ceiling
+(default/minimum 120 seconds) after the rebase settles; it can only shorten the original
+absolute deadline. Pending expiry preserves published provenance and releases via
+existing exact-head recovery. Copied procedure hashes are diagnostic only.
+Custody receipts, controller cancellation, verdicts, required checks and head CAS
+remain their existing owners' authority. See the
+[recurrence RCA](../../docs/postmortems/LAC-2097-closer-convergence-recurrence.md).
+
 LAC-2093 validation liveness: changed-surface validation while holding the shared
 lease uses `bin/hammer-validate.mjs`. A 120-second child-output idle deadline is
 independent of the load-scaled absolute ceiling (nominal 360 seconds). Pytest

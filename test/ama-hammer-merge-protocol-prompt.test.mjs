@@ -76,6 +76,15 @@ test('hammer controller launch honors an isolated Node executable and the PATH f
   }
 });
 
+test('LAC-2097 prompt binds outside-lease validation to the saved head and base', () => {
+  const flow = HAMMER_TEMPLATE.slice(HAMMER_TEMPLATE.indexOf('If `HAM_NEEDS_REVALIDATION=true`'));
+  assert.match(flow, /before `ham_release_merge_lease --yield local-validation`/);
+  assert.match(flow, /Only on success with local HEAD unchanged/);
+  assert.match(flow, /HAM_LOCALLY_VALIDATED_HEAD[\s\S]*?HAM_LOCALLY_VALIDATED_BASE_SHA/);
+  assert.match(flow, /Source verify-head again[\s\S]*?HAM_NEEDS_REVALIDATION=false/);
+  assert.doesNotMatch(HAMMER_TEMPLATE, /Keep the lease held and continue/);
+});
+
 test('HAMNOREREVIEW-01 prompt keeps hammer responsibility through publication and merge', () => {
   assert.match(HAMMER_TEMPLATE, /HAM_COMMIT_PUBLICATION_ONLY=1/);
   assert.match(HAMMER_TEMPLATE, /tree IDs/);

@@ -647,7 +647,7 @@ head and CI across disjoint base advances when protection is explicitly
 non-strict. Strict/unknown protection requires complete base containment;
 overlap requires rebase even with CLEAN mergeability. LEASEFAIR-02 handles a
 required rebase in the same run, holds the reacquired
-lease through one bounded CI wait on the new head, then rebuilds its audit and
+lease through one CI wait capped by `HAM_CI_RETRY_WAIT_SECONDS` (default/minimum 120 wall-clock seconds) on the new head, then rebuilds its audit and
 predicate before merge. Both CI waits share one absolute deadline, set before
 the first wait from the once-scaled nominal bound; rebase time, sleeps and gate
 reads consume the remaining budget. Expired reacquisition or base probing cannot
@@ -731,7 +731,7 @@ initialized submodules before changed-surface revalidation. Publish and recovere
 attestations compare the live head with `HAM_PRODUCED_HEAD`; required checks and
 merge remain bound to that head under the merge lease. LEASEFAIR-01 releases
 before the first remote-CI wait and reacquires before merging; LEASEFAIR-02
-retains that lease through one retry CI wait if the base policy requires it. Foreign pushes still
+retains that lease through one retry CI wait, capped by `HAM_CI_RETRY_WAIT_SECONDS` (default/minimum 120 wall-clock seconds), if the base policy requires it. Foreign pushes still
 stop with `head-changed`. Existing lifecycle states are unchanged.
 
 Old-head update-branch acknowledgements now poll without repeating the mutation.
@@ -741,7 +741,24 @@ checks, audit/range proof and the full predicate. The clean offline smoke proves
 two queued validated PRs drain across unrelated advances, preserving source heads
 and leaving no holder/waiters. Focused `rebase-result` and `hammer-self-rebase`
 fixtures cover invalid candidates and bounded failure cleanup. See the
-[LAC-2097 RCA and deployment acceptance](docs/postmortems/LAC-2097-validated-closer-convergence.md).
+[LAC-2097 RCA and deployment acceptance](docs/postmortems/LAC-2097-validated-closer-convergence.md) and the
+[2026-10-27 recurrence RCA](docs/postmortems/LAC-2097-closer-convergence-recurrence.md).
+Outside-lease targeted validation records the exact tested head/base pair before
+verify-head re-entry; overlapping base drift or another head still requires validation.
+Its yield reason is `local-validation`, and captured audit bases require ancestry
+proof. Protected classic-checks-disabled 404s remain strict because rulesets may
+apply. The default 120-second retry ceiling favors lane fairness over slow-CI in-run
+convergence; set `HAM_CI_RETRY_WAIT_SECONDS` to a measured allowance of at least
+120 seconds for slower CI (the original absolute deadline still applies). Invalid
+values use 120. Pending gate charges remain, and pushed-only provenance does not
+promise certified operator-free redispatch. These limits and the focused offline
+fixtures are recorded in the recurrence RCA; no lifecycle states or smoke
+promises change.
+
+The first verification uses the same retention policy. An inaccessible protection
+endpoint can resolve non-strict only through authoritative unprotected branch
+metadata. Copied scripts include a diagnostic source SHA-256. Run optional local
+validation outside the lease, then re-enter verify-head before audit publication.
 
 1. **Acquire the merge lease** for `(repo, base, PR)` — no merge happens without it.
 2. **Remediate all adversarial findings** the final review raised — blocking and
@@ -1226,7 +1243,8 @@ samples the next 20 reviews, counts notes, and confirms none changed verdicts
 or added rounds; this read-only observation is declared in
 `post-merge-verify.json`, outside the smoke harness.
 
-LAC-2093 bounds lease-held validation through `bin/hammer-validate.mjs`: the
+LAC-2093 bounds validation through `bin/hammer-validate.mjs`; LAC-2097 runs it
+outside the shared lease: the
 absolute ceiling scales from 360 seconds, but 120 seconds without child output
 fails with status 124 regardless of load. Pytest reports real collection and test
 phase boundaries and uses local ledger routing; explicit disposable-Postgres

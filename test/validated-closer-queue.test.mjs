@@ -17,3 +17,12 @@ test('LAC-2097: two queued strict PRs drain after bounded rebases with new exact
   assert.deepEqual(exerciseValidatedCloserQueue(root, { strict: true }),
     { merged: [1, 2], sourceMutations: 2, ciRestarts: 2, leaseAndWaitersClean: true });
 });
+
+for (const strict of [false, true]) {
+  test(`LAC-2097: two remediated PRs with shared paths and separated hunks drain (strict=${strict})`, t => {
+    const root = mkdtempSync(join(tmpdir(), 'shared-path-queue-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    assert.deepEqual(exerciseValidatedCloserQueue(root, { strict, samePath: true }),
+      { merged: [1, 2], sourceMutations: 2, ciRestarts: 2, leaseAndWaitersClean: true });
+  });
+}

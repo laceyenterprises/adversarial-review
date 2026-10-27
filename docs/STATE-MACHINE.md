@@ -924,7 +924,7 @@ The former `fast-merge:docs` label shortcut is retired; it cannot waive review
 for Markdown outside `docs/`. Other explicit fast-merge categories are unchanged.
 
 
-LAC-2093 bounds local validation under the shared lease with
+LAC-2093 bounds local validation with
 `bin/hammer-validate.mjs`: 120 seconds without child output returns 124,
 independent of the load-scaled 360-second nominal absolute ceiling. Real pytest
 phase events expose collection/setup/call/teardown progress. TERM/INT/HUP
@@ -933,6 +933,16 @@ leader exit. Incomplete validation exits through the existing lease-release trap
 before any validated-head audit or merge; retry reacquires and rechecks unchanged
 head/base/file-overlap safety. Existing review-row and closer-lease states are unchanged.
 See [source evidence and pending deployment acceptance](validation/lac-2093.md).
+LAC-2097 runs targeted revalidation outside the shared lease using a
+`local-validation` yield. Save the produced head/base pair before testing and
+record it only on success with unchanged local HEAD; verify-head re-entry uses
+that pair only for the exact head and rechecks overlapping base drift. The
+original parallel-phase base remains intact. Audit `rebasedOntoBase` requires
+proved ancestry after acquisition. Pending retry CI retains merge-gate charges;
+pushed-only provenance does not promise certified operator-free redispatch.
+Protected classic-checks-disabled 404s remain strict until effective rules can
+be proved. Existing lifecycle states and smoke promises remain unchanged.
+
 
 DOGREADSFLAG-02 binds dispatch-read activation to the adapter's existing own-LRQ
 environment contract. Missing, malformed or foreign records refuse startup;
@@ -1187,7 +1197,7 @@ guards still apply, and an already captured prompt path must remain unchanged.
 
 | Path | When | What happens |
 |---|---|---|
-| **Hammer (common)** | Final review carries findings (blocking, or non-blocking under the default strict posture); its remediation may also require a rebase or CI repair | The watcher dispatches exactly one hammer terminal-remediation worker (`templates/hammer-prompt.md`, via `src/ama/dispatch-closer.mjs`). In the default `watcher.ama_hammer_dispatch_mode: inline` mode, the posted-review phase awaits that `hq dispatch` attempt. In `background` mode, the phase submits the same closer call to a bounded in-process queue keyed by PR@head with durable pending intent under `data/ama-hammer-background/` (recovered through normal guards on the first adoption phase after restart), returns retained ownership (`ama-pending`) with reason `ama-closer-dispatch-backgrounded`, and lets the closer's lease/dispatch-record guards prevent duplicate launches on later ticks. The hammer remediates, rebases at least once onto a recent current base, holds the required-checks-plus-changed-surface-tests merge bar, waits out GitHub required checks on the exact post-remediation head inside a bounded remote-CI window, and merges under its own lease with `--match-head-commit`. LEASEFAIR-01 releases the lease during the first CI wait. LAC-2097 retains an exact validated head across disjoint advances under non-strict protection; strict/unknown protection and overlap require rebase. LEASEFAIR-02 handles a required rebase with one in-run rebase and exact-head CI wait while retaining that lease, then rebuilds audit and predicate authority. |
+| **Hammer (common)** | Final review carries findings (blocking, or non-blocking under the default strict posture); its remediation may also require a rebase or CI repair | The watcher dispatches exactly one hammer terminal-remediation worker (`templates/hammer-prompt.md`, via `src/ama/dispatch-closer.mjs`). In the default `watcher.ama_hammer_dispatch_mode: inline` mode, the posted-review phase awaits that `hq dispatch` attempt. In `background` mode, the phase submits the same closer call to a bounded in-process queue keyed by PR@head with durable pending intent under `data/ama-hammer-background/` (recovered through normal guards on the first adoption phase after restart), returns retained ownership (`ama-pending`) with reason `ama-closer-dispatch-backgrounded`, and lets the closer's lease/dispatch-record guards prevent duplicate launches on later ticks. The hammer remediates, rebases only when the strictness/overlap policy requires it, holds the required-checks-plus-changed-surface-tests merge bar, waits out GitHub required checks on the exact post-remediation head inside a bounded remote-CI window, and merges under its own lease with `--match-head-commit`. LEASEFAIR-01 releases the lease during the first CI wait. LAC-2097 retains an exact validated head across disjoint advances under non-strict protection; strict/unknown protection and overlap require rebase. LEASEFAIR-02 handles a required rebase with one in-run rebase and at most `HAM_CI_RETRY_WAIT_SECONDS` (default/minimum 120) wall-clock seconds of exact-head CI while retaining that lease, then rebuilds audit and predicate authority. |
 | **Daemon inline merge (rare)** | Final review is fully clean — zero blocking AND zero non-blocking findings, both classifications known — or a current-head `operator-approved` overrides the verdict and finding gates; green required checks (or explicit no-CI bootstrap evidence), a MERGEABLE PR, and a live validated head remain mandatory | The watcher daemon clicks merge inline through a bounded `gh pr merge --match-head-commit` subprocess under the shared merge lease (`src/ama/daemon-merge.mjs`). An approval override records operator evidence and distinct closure authority in the audit. No agent is spawned. Dispositions: `merged`, `failed-closed` (conflicts, real CI failures and stale heads fall through to capped HAM; a current MERGEABLE clean head waiting on empty/no-CI evidence or cancelled recovery returns to the merge-agent path), `deferred` (lease contention; retry next tick), `not-taken` (a current MERGEABLE zero-finding settled head waiting on empty/no-CI evidence or cancelled recovery returns to the merge path; remediable failures and reviews with findings fall through to HAM). Protective predecessor and revoked-approval holds remain authoritative. |
 
 Merge lease scheduling uses FIFO arrival across daemon and closer roles.
@@ -1241,7 +1251,7 @@ retry waits, and reacquires before merge. At that boundary and before each click
 strict/unknown protection requires complete base containment; non-strict disjoint
 advances retain the exact validated head and its checks (LAC-2097). Overlap or a
 strict missing base triggers LEASEFAIR-02: one in-run rebase and fresh exact-head CI wait, retaining
-the reacquired lease so cooperating mergers cannot overtake again. Daemon
+the reacquired lease for at most `HAM_CI_RETRY_WAIT_SECONDS` (default/minimum 120) wall-clock seconds of CI so cooperating mergers cannot overtake during that short window. Pending expiry releases through the existing exact-head recovery; no validation or merge authority is fabricated. Daemon
 reservations still precede reacquisition. Both waits and the intervening rebase
 consume one absolute deadline, initialized before the first wait from the
 once-scaled nominal CI bound. An exhausted reacquisition/base probe cannot start

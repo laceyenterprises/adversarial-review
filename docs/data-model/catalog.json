@@ -279,6 +279,7 @@
     },
     {
       "id": "ama-audit",
+      "hammerCapturedBase": "rebasedOntoBase is empty after verification unless the captured base is proved an ancestor of the produced head; FIFO capture alone is not rebase provenance. Existing successful retry rebases retain their proved target.",
       "docsFastPathRange": "Terminal metadata records the latest eligible immutable base/head comparison on the same leased base branch; live gates precede attestation recording on every transport attempt. Record failures are deferred with exitCode, signal, stderrTail (redacted, at most 2000 characters), error, retryAfter, needsOperator and parkReason. Exact-head history permits three failures with 60s then 120s backoff and parks subsequent ticks without writes; legacy failure entries also count.",
       "docsFastPathFields": ["closureAuthority=docs-fast-path", "mergeAccountability=docs-fast-path", "docsFastPath.headSha", "docsFastPath.baseSha", "docsFastPath.baseBranch", "attempts[].reason=attestation-record-failed"],
       "launchOutcomeFields": ["attempts[].launchRequestId", "attempts[].reason", "attempts[].attemptPhase"],
@@ -437,7 +438,7 @@
       "owner": "AMA daemon and hammer merge lane",
       "retentionRows": 4096,
       "noMergeReleaseEvents": ["requeue", "park"],
-      "nonFailureReleases": "yield/retryable-abort record backoff without failure parking"
+      "nonFailureReleases": "yield/retryable-abort record backoff without failure parking; planned yield reasons distinguish required-checks-wait and local-validation"
     },
     {
       "id": "merge-lease-attempts",

@@ -717,6 +717,20 @@ if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && ham_base_touches_pr_files v
       ham_release_merge_lease
       return 20
     fi
+    # Preserve serialization for a short new-head CI run, never a load-scaled
+    # validation hold. The configured wall-clock ceiling only SHORTENS the original
+    # deadline; 120 seconds is the default and minimum. Pending CI defers via
+    # the existing exact-head recovery receipt;
+    # it never authorizes another rewrite, a reset CI budget or a merge.
+    HAM_CI_RETRY_WAIT_SECONDS="${HAM_CI_RETRY_WAIT_SECONDS:-120}"
+    if [[ ! "$HAM_CI_RETRY_WAIT_SECONDS" =~ ^[1-9][0-9]{0,5}$ ]] \
+      || [ "$HAM_CI_RETRY_WAIT_SECONDS" -lt 120 ]; then
+      HAM_CI_RETRY_WAIT_SECONDS=120
+    fi
+    HAM_CI_RETRY_DEADLINE=$(( $(date +%s) + HAM_CI_RETRY_WAIT_SECONDS ))
+    if [ "$HAM_REMOTE_CI_DEADLINE" -gt "$HAM_CI_RETRY_DEADLINE" ]; then
+      HAM_REMOTE_CI_DEADLINE="$HAM_CI_RETRY_DEADLINE"
+    fi
     # New head, new CI evidence and predicate. Publication follows green CI.
     HAM_VERDICT_READY_FILE=""
     HAM_PUBLISHED_AUDIT_HEAD=""

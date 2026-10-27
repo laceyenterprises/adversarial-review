@@ -109,7 +109,7 @@ ham_release_merge_lease() {
     elif [ "${HAM_MERGE_LEASE_RETRYABLE_ABORT:-0}" -eq 1 ]; then
       ham_release_retryable_args=(--retryable-abort "${HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON:-retryable-abort}")
     elif [ "${1:-}" = "--yield" ]; then
-      ham_release_retryable_args=(--yield --reason required-checks-wait)
+      ham_release_retryable_args=(--yield --reason "${2:-required-checks-wait}")
     else
       ham_release_retryable_args=(--reason "${HAM_PHASE_OUTCOME:-holder-release}")
     fi
@@ -757,6 +757,7 @@ ham_rebase_head() {
 # OTHER PRs merged is NOT a merge blocker (GitHub squash-merges a BEHIND-but-
 # MERGEABLE PR), so chasing it with a rebase would only re-run the full required
 # check suite on identical code (agent-os#5464).
+ham_resolve_base_strictness() {
 HAM_REQUIRES_UP_TO_DATE=1
 ham_rsc_json="<<RUN_DIR>>/required-status-checks.json"
 ham_rsc_err="<<RUN_DIR>>/required-status-checks.stderr"
@@ -765,14 +766,26 @@ if ham_gh api \
     "repos/<<REPO>>/branches/$ham_base_enc_early/protection/required_status_checks" \
     > "$ham_rsc_json" 2> "$ham_rsc_err"; then
   # jq's // treats false as absent; preserve an explicit non-strict rule.
-  if [ "$(jq -r '.strict' "$ham_rsc_json" 2>/dev/null)" = "false" ]; then
+  if jq -e '.strict == false' "$ham_rsc_json" >/dev/null 2>&1; then
     HAM_REQUIRES_UP_TO_DATE=0
   fi
-elif grep -Eiq 'HTTP 404|Not Found|not protected|Branch not protected|Required status checks.*not' "$ham_rsc_err"; then
-  # No branch protection / no required-status-checks object → no strict rule.
-  HAM_REQUIRES_UP_TO_DATE=0
+else
+  # Apps can read branch metadata while the administration-only protection
+  # endpoint returns 403, even on an unprotected branch. An error is no proof
+  # of strictness or its absence. Require an authoritative, identity-bound
+  # unprotected branch response; protected/unknown/malformed stays fail-closed.
+  # A classic required-checks-disabled 404 cannot exclude strict rulesets.
+  if ham_gh api "repos/<<REPO>>/branches/$ham_base_enc_early" \
+      > "<<RUN_DIR>>/base-protection.json" 2> "<<RUN_DIR>>/base-protection.stderr" \
+    && jq -e --arg base "$BASE_BRANCH" '.name == $base and .protected == false and
+      (.commit.sha | type == "string" and test("^[a-fA-F0-9]{40}$"))' \
+      "<<RUN_DIR>>/base-protection.json" >/dev/null; then
+    HAM_REQUIRES_UP_TO_DATE=0
+  fi
 fi
 echo "HAM: requiresUpToDate=$HAM_REQUIRES_UP_TO_DATE base=$BASE_BRANCH" >&2
+}
+ham_resolve_base_strictness
 
 # Keep this identity across verify/publish/merge in the persistent shell. Only
 # our successful publication or server-side rebase may replace it.
@@ -786,11 +799,10 @@ while [ "$(jq -r '.mergeStateStatus // ""' "<<RUN_DIR>>/pr-after.json")" = "BEHI
     ham_release_merge_lease || return 1
     return 20
   fi
-  # After the initial update attempt, retain the produced head when the base
-  # policy permits it. This also handles a strict already-up-to-date no-op with
+  # Retain the produced head when the base policy permits it, including the
+  # first pass. This also handles a strict already-up-to-date head with
   # a lagging BEHIND snapshot; the final live gate must still settle green.
   if [ "$(jq -r '.mergeable // ""' "<<RUN_DIR>>/pr-after.json")" = "MERGEABLE" ] \
-     && [ "${HAM_REBASE_ATTEMPTS:-0}" -ge 1 ] \
      && ! ham_base_touches_pr_files validated-head; then
     echo "HAM: produced head covers the base policy; avoiding a redundant rebase." >&2
     break
@@ -805,12 +817,25 @@ if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then
   ham_acquire_merge_lease || return $?
 fi
 
-if ! ham_is_full_sha "$HAM_VALIDATION_BASE_SHA"; then
+# A successful outside-lease validation may supersede the parallel-phase base
+# only for its exact tested head. Keep the original validation evidence intact.
+HAM_EFFECTIVE_VALIDATION_BASE_SHA="$HAM_VALIDATION_BASE_SHA"
+if ham_is_full_sha "${HAM_LOCALLY_VALIDATED_HEAD:-}" \
+  && [ "$HAM_LOCALLY_VALIDATED_HEAD" = "$HAM_PRODUCED_HEAD" ] \
+  && ham_is_full_sha "${HAM_LOCALLY_VALIDATED_BASE_SHA:-}"; then
+  HAM_EFFECTIVE_VALIDATION_BASE_SHA="$HAM_LOCALLY_VALIDATED_BASE_SHA"
+fi
+if ! ham_is_full_sha "$HAM_EFFECTIVE_VALIDATION_BASE_SHA"; then
   HAM_FORCE_REVALIDATION=1
 fi
 if ham_capture_current_base_sha; then
   HAM_CURRENT_BASE_SHA="$HAM_CAPTURED_BASE_SHA"
-  HAM_REBASED_ONTO_BASE_SHA="$HAM_CAPTURED_BASE_SHA"
+  # Queue service may advance the base after first-pass retention. Report
+  # containment only when it is proved; a captured tip is not rebase provenance.
+  HAM_REBASED_ONTO_BASE_SHA=""
+  if git merge-base --is-ancestor "$HAM_CAPTURED_BASE_SHA" "$POST_REMEDIATION_SHA"; then
+    HAM_REBASED_ONTO_BASE_SHA="$HAM_CAPTURED_BASE_SHA"
+  fi
 else
   HAM_CURRENT_BASE_SHA=""
   HAM_REBASED_ONTO_BASE_SHA=""
@@ -823,7 +848,7 @@ else
   if "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-lease.mjs needs-revalidation \
     --repo-path . \
     --base "$BASE_BRANCH" \
-    --validation-base "$HAM_VALIDATION_BASE_SHA" \
+    --validation-base "$HAM_EFFECTIVE_VALIDATION_BASE_SHA" \
     --current-base "$HAM_CURRENT_BASE_SHA" \
     --changed-files-from "$POST_REMEDIATION_SHA" \
     > "<<RUN_DIR>>/merge-lease-revalidation.json"; then
@@ -844,10 +869,10 @@ fi
 
 # CONFIRM THE REBASE HOLDS: the head satisfies the strictness/overlap policy. If
 # HAM_NEEDS_REVALIDATION is true, re-run the changed-surface tests (mandate step
-# 2b) and required checks against THIS rebased $POST_REMEDIATION_SHA and fix anything
-# the rebase newly broke. If HAM_NEEDS_REVALIDATION is false, trust the
-# parallel-phase validation already performed for this head/base relationship
-# only for that parallel phase. GitHub required checks are the sole CI authority;
+# 2b) outside the lease against THIS rebased $POST_REMEDIATION_SHA and fix anything
+# the rebase newly broke. Record the tested head/base before re-entry.
+# If HAM_NEEDS_REVALIDATION is false, trust the parallel-phase validation or
+# successful exact-head local validation for this head/base relationship. GitHub required checks are the sole CI authority;
 # the hammer runs no local battery or pre-push CI mirror as a merge gate. A rebase
 # that turns changed-surface tests or required checks red must be fixed (and
 # re-committed, which moves the head and re-enters this validation), never merged.

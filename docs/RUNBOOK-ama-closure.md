@@ -1989,7 +1989,8 @@ HAMSELFREBASE-01 keeps the hammer's own successful server-side rebase in the
 same merge attempt. Verify-head fetches the exact returned head, detaches the
 scratch checkout, synchronizes initialized submodules, and records
 `HAM_PRODUCED_HEAD`. It refuses to carry dirty tracked files into that checkout.
-Run changed-surface tests there when `needsRevalidation` is true, then publish
+Yield for changed-surface tests there when `needsRevalidation` is true, then
+re-enter verify-head with the saved successful tested head/base pair and publish
 the attestation and use the existing bounded required-check wait and exact-head
 merge under the merge lease in this run. The existing pending-CI release and
 reacquisition stay unchanged. Publish's initial live-head comparison and its
@@ -1997,10 +1998,11 @@ recovered-attestation comparison both use the produced head. A foreign push
 still stops with `head-changed`; sync failures release without attesting or
 merging. Rebase conflicts retain the existing lease-release conflict procedure.
 
-LAC-2093: under the shared merge lease use
+LAC-2093 bounds the validator; LAC-2097 runs local tests outside the shared
+merge lease (see the saved head/base re-entry flow in LEASEFAIR-01). Use
 `node "$HAM_ROOT_DIR/bin/hammer-validate.mjs" --pytest -- <required test paths>`
 (`-- <command> [args...]` for other validators), followed by `|| exit $?` in the
-lease-owning script. Its 360-second nominal absolute limit scales with host load;
+controller-owned script. Its 360-second nominal absolute limit scales with host load;
 `--nominal-timeout 1..3600` selects the project's idle-host budget within the
 existing load-helper ceiling. The 120-second child-output idle limit never
 scales. Both timeouts return 124.
@@ -2069,14 +2071,14 @@ prompt-driven worker behavior, not predicate gates — the audit comment and the
    otherwise clean close. Test fixes remain the one sanctioned exception to
    "scope only to the findings"; net-new feature scope stays out.
 2. **Rebase onto a recent `main` and confirm the merge guards.** The hammer
-   always rebases at least once onto the current base and re-validates the
-   rebased head — required checks plus the changed-surface test bar above —
+   rebases when the strictness/overlap policy requires it and validates the
+   exact resulting head — required checks plus the changed-surface test bar above —
    before merging. LEASEFAIR-01 releases the lease during remote CI, then
    applies the strictness/overlap base policy after reacquisition (LAC-2097).
    Explicitly non-strict disjoint advances retain the exact head and its CI;
    strict/unknown protection requires containment and overlap requires rebase.
-   One required rebase and exact-head CI wait retain the reacquired lease
-   (LEASEFAIR-02). Deferred daemon merges retain priority before reacquisition;
+   One required rebase and at most `HAM_CI_RETRY_WAIT_SECONDS` (default/minimum 120) wall-clock seconds of retry CI retain
+   the reacquired lease (LEASEFAIR-02). Deferred daemon merges retain priority before reacquisition;
    conflict, red CI or timeout release with their actual reasons. A lagging
    `BEHIND` snapshot cannot force another source rewrite when this policy is
    satisfied; the final live gate still must pass.
@@ -4649,6 +4651,29 @@ transient reads and UNKNOWN sampling/backoffs. After green CI it reacquires
 through the same priority queue, so deferred daemon merges are served first.
 LAC-2097 makes the post-wait and final-click base policy match branch protection:
 strict or unreadable protection requires complete current-base containment.
+An administration-only protection read can fail with 403 even for an unprotected
+branch. On failure, the closer reads branch metadata with the same identity; only
+matching branch name, full commit SHA and boolean `protected:false` establish
+non-strictness. Protected, wrong, malformed or unreadable metadata stays strict.
+This includes a protected branch whose classic required-status-check endpoint
+returns 404 / `Required status checks not enabled`: that response does not rule
+out strict rulesets. Classic-review-only branches may therefore rebase needlessly;
+this conservative fallback is intentional until effective rules can be proved.
+The first verification uses the same base policy, without a mandatory update CAS.
+Rendered scripts carry `hammer-procedure-source-sha256` for generation diagnosis;
+this comment grants no validation, publication or merge authority.
+Run optional changed-surface validation outside the lease. Save the produced
+head and captured current base before `ham_release_merge_lease --yield local-validation`;
+run the registered validator, then only on success with the same local HEAD set
+`HAM_LOCALLY_VALIDATED_HEAD` and `HAM_LOCALLY_VALIDATED_BASE_SHA` to that saved pair.
+Source verify-head before publishing the audit. It uses the local validation base
+only for the exact tested head and checks drift again; the original parallel-phase
+`HAM_VALIDATION_BASE_SHA` remains unchanged. Invalid evidence or overlapping base
+drift still needs validation; a new head cannot borrow the prior head's evidence.
+Retest outside the lease within the existing rebase cap. The lease history records
+`local-validation`, separately from `required-checks-wait`. The audit's
+`rebasedOntoBase` is empty unless the captured base is proved an ancestor of the
+produced head, including after first-pass FIFO acquisition.
 With an explicitly non-strict rule, the exact validated head may retain its CI
 when the base advance is disjoint from the PR's entire changed-file set. Both
 sides of renames count. The comparison starts at the exact head/base merge-base,
@@ -4659,7 +4684,25 @@ CONFLICTING gate requires the rebase/conflict path even with disjoint path names
 LEASEFAIR-02 handles a required rebase in this same run:
 rebase/publish through GitHub's existing update-branch path, fetch and detach
 the exact resulting SHA, and wait once for that head's required CI while
-retaining the lease. Both CI windows share one absolute deadline initialized
+retaining the lease for at most `HAM_CI_RETRY_WAIT_SECONDS` (default/minimum 120) wall-clock seconds of new-head CI. This
+ceiling only shortens the existing deadline and is never load-scaled. Set
+`HAM_CI_RETRY_WAIT_SECONDS` to a positive decimal allowance of at least 120 seconds
+(up to six digits) for repositories with slower required CI; invalid or smaller
+values use 120. The original absolute CI deadline still bounds the entire run.
+Pending expiry retains pushed provenance and releases with the existing
+exact-head pending recovery receipt. This is a fairness bound, not a guarantee
+of in-run convergence for slower CI: a retry becoming green at 300 seconds parks
+at the default 120 seconds, but merges with a 360-second allowance when the original
+deadline has sufficient time. The offline slow-green fixtures verify both outcomes
+and invalid/below-floor fallback; the shared-deadline fixture verifies an extended
+allowance cannot reset the original deadline. Pending waits retain their merge-gate attempt charges (including
+both acquisitions); they are not retryable-abort refunds. Existing dispatch-ledger
+deferrals are separately bounded. `certifiedContentionPark` requires a current-head
+`hamTerminalRemediation.ok` and a matching dispatch receipt; a retry-pushed head
+with only pushed provenance has no certified-park guarantee. Normal head recovery
+still owns it; automatic operator-free redispatch is not promised here. The configured serialized allowance can accommodate measured slower CI without
+changing the default fairness bound. Budget/recovery policy remains unchanged.
+Both CI windows share one absolute deadline initialized
 before the first wait from the nominal wait scaled once. The intervening rebase,
 polling, backoffs and gate reads consume the remaining deadline. This single
 serialized retry prevents cooperating mergers from overtaking the closer again. The
@@ -5438,7 +5481,7 @@ are load-scaled once and timer-clamped. Poll delays double from 250ms to a
 fixed 15-second ceiling independent of host load; every sleep respects the
 remaining budget. Holder-file changes interrupt sleep, with polling as the
 best-effort wake fallback.
-All roles share arrival order and dead-holder rules remain unchanged. LEASEFAIR-02's single retry still holds its lease through CI;
+All roles share arrival order and dead-holder rules remain unchanged. LEASEFAIR-02's single retry holds its lease through at most `HAM_CI_RETRY_WAIT_SECONDS` (default/minimum 120) wall-clock seconds of CI;
 its grant, renewal and release are included in the per-base history.
 
 Inspect `data/merge-leases/<repo-slug>__<base>.history.jsonl` for the newest 4096
@@ -6071,3 +6114,5 @@ entitlement, selector-bound proof and native audited settlement composition.
 Ordinary filtered emptiness and partial/unreadable scope stay held. Durable
 query evidence retains both absence proofs; current receipt, submitter,
 record/lease fences and once-only refund rules remain unchanged.
+
+LAC-2097 recurrence evidence and limits: [2026-10-27 RCA](postmortems/LAC-2097-closer-convergence-recurrence.md). Source publication does not establish deployment or runtime acceptance.

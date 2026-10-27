@@ -285,3 +285,13 @@ HAMLANEWAIT-01 uses the existing `deferred` outcome with reason `lane-busy` for
 legacy lane-lock `owner-operation-in-flight` exit 75. It is not a terminal
 no-merge attempt. No schema or migration changes; the wrapper reports measured
 `waitedMs` in its refusal diagnostic. Other refusals keep their prior outcomes.
+
+## Hammer captured-base provenance (LAC-2097)
+
+Hammer's existing `rebasedOntoBase` string records the captured base only when
+`git merge-base --is-ancestor` proves it is contained in the produced head after
+FIFO acquisition. Otherwise verification leaves it empty, including first-pass
+retention followed by base advancement while waiting for the lease. Capturing a
+base tip alone is not evidence of a rebase. The merge phase's own successful
+server-side rebase continues to record its proved target. This tightens evidence
+semantics without changing the audit schema or granting merge authority.

@@ -1,7 +1,11 @@
 # LAC-2097: validated closers chase unrelated base advances
 
-Status: source fix proposed for ordinary cross-model PR review. Publication and
-offline tests do not establish deployment or resolution of the live incident.
+Status: original source fix merged in #1481. Source completion and deployment
+acceptance remain separate; the October 27 recurrence is documented below.
+Offline tests do not establish resolution of the live incident.
+
+The [October 27 recurrence RCA](LAC-2097-closer-convergence-recurrence.md)
+qualifies later rescue observations and documents the follow-up source policy.
 
 ## Evidence and impact
 

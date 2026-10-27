@@ -176,8 +176,8 @@ post-CI checks; it does not require an initial update CAS when retention is safe
 An unreadable protection endpoint resolves non-strict only from successful branch
 metadata with matching name, a full commit SHA and boolean `protected:false`.
 Unknown/protected metadata retains containment. Overlapping paths, including
-separated hunks, still require rebase. Retry CI additionally has a fixed unscaled
-120-second ceiling after the rebase settles; it can only shorten the original
+separated hunks, still require rebase. Retry CI additionally has an unscaled `HAM_CI_RETRY_WAIT_SECONDS` ceiling
+(default/minimum 120 seconds) after the rebase settles; it can only shorten the original
 absolute deadline. Pending expiry preserves published provenance and releases via
 existing exact-head recovery. Copied procedure hashes are diagnostic only.
 Custody receipts, controller cancellation, verdicts, required checks and head CAS

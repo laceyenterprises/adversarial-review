@@ -469,3 +469,36 @@ test('LAC-2097: disjoint base drift preserves successful exact-head local valida
   assert.equal(readFileSync(join(f.dir, 'reentry-needs-revalidation'), 'utf8'), 'false');
   assert.equal(existsSync(join(f.dir, 'lease-held')), false);
 });
+
+for (const allowance of ['360', '119', 'invalid', '9999999999999999999']) {
+  test(`LEASEFAIR-02: slow retry CI respects configured allowance ${allowance}`, t => {
+    const f = fixture(t, 'ci-slow-green');
+    const result = f.run({ HAM_CI_RETRY_WAIT_SECONDS: allowance });
+    const diagnostics = result.stdout + result.stderr;
+    const extended = allowance === '360';
+    assert.equal(result.status, extended ? 0 : 20, diagnostics);
+    const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    const checks = events.filter(e => e.kind === 'checks' && e.value.head === f.nextRebased).map(e => e.value);
+    assert.ok(checks.length > 0);
+    assert.ok(checks.every(c => c.held), 'new-head checks retain the lease');
+    if (extended) {
+      const green = checks.find(c => c.conclusion === 'SUCCESS');
+      assert.ok(green && green.at - checks[0].at >= 300, diagnostics);
+      assert.ok(events.some(e => e.kind === 'predicate' && e.value === f.nextRebased));
+      assert.ok(events.some(e => e.kind === 'gh' && e.value[1] === 'merge' && e.value.includes(f.nextRebased)));
+    } else {
+      assert.ok(Number(readFileSync(join(f.dir, 'clock'), 'utf8')) - checks[0].at <= 120);
+      assert.match(diagnostics, /hammer-ci-pending-resume-owed/);
+      assert.equal(events.some(e => e.kind === 'gh' && e.value[1] === 'merge'), false);
+    }
+    assert.equal(existsSync(join(f.dir, 'lease-held')), false);
+  });
+}
+
+test('LEASEFAIR-02: configured retry allowance cannot extend the original absolute deadline', t => {
+  const f = fixture(t, 'ci-shared-deadline');
+  const result = f.run({ HAM_CI_RETRY_WAIT_SECONDS: '360' });
+  assert.equal(result.status, 20, result.stdout + result.stderr);
+  assert.equal(Number(readFileSync(join(f.dir, 'clock'), 'utf8')) - 1700000000, 900);
+  assert.equal(existsSync(join(f.dir, 'lease-held')), false);
+});

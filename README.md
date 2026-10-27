@@ -647,7 +647,7 @@ head and CI across disjoint base advances when protection is explicitly
 non-strict. Strict/unknown protection requires complete base containment;
 overlap requires rebase even with CLEAN mergeability. LEASEFAIR-02 handles a
 required rebase in the same run, holds the reacquired
-lease through one CI wait capped at 120 wall-clock seconds on the new head, then rebuilds its audit and
+lease through one CI wait capped by `HAM_CI_RETRY_WAIT_SECONDS` (default/minimum 120 wall-clock seconds) on the new head, then rebuilds its audit and
 predicate before merge. Both CI waits share one absolute deadline, set before
 the first wait from the once-scaled nominal bound; rebase time, sleeps and gate
 reads consume the remaining budget. Expired reacquisition or base probing cannot
@@ -731,7 +731,7 @@ initialized submodules before changed-surface revalidation. Publish and recovere
 attestations compare the live head with `HAM_PRODUCED_HEAD`; required checks and
 merge remain bound to that head under the merge lease. LEASEFAIR-01 releases
 before the first remote-CI wait and reacquires before merging; LEASEFAIR-02
-retains that lease through one retry CI wait, capped at 120 wall-clock seconds, if the base policy requires it. Foreign pushes still
+retains that lease through one retry CI wait, capped by `HAM_CI_RETRY_WAIT_SECONDS` (default/minimum 120 wall-clock seconds), if the base policy requires it. Foreign pushes still
 stop with `head-changed`. Existing lifecycle states are unchanged.
 
 Old-head update-branch acknowledgements now poll without repeating the mutation.
@@ -747,8 +747,10 @@ Outside-lease targeted validation records the exact tested head/base pair before
 verify-head re-entry; overlapping base drift or another head still requires validation.
 Its yield reason is `local-validation`, and captured audit bases require ancestry
 proof. Protected classic-checks-disabled 404s remain strict because rulesets may
-apply. The 120-second retry ceiling favors lane fairness over slow-CI in-run
-convergence; pending gate charges remain, and pushed-only provenance does not
+apply. The default 120-second retry ceiling favors lane fairness over slow-CI in-run
+convergence; set `HAM_CI_RETRY_WAIT_SECONDS` to a measured allowance of at least
+120 seconds for slower CI (the original absolute deadline still applies). Invalid
+values use 120. Pending gate charges remain, and pushed-only provenance does not
 promise certified operator-free redispatch. These limits and the focused offline
 fixtures are recorded in the recurrence RCA; no lifecycle states or smoke
 promises change.

@@ -2077,7 +2077,7 @@ prompt-driven worker behavior, not predicate gates — the audit comment and the
    applies the strictness/overlap base policy after reacquisition (LAC-2097).
    Explicitly non-strict disjoint advances retain the exact head and its CI;
    strict/unknown protection requires containment and overlap requires rebase.
-   One required rebase and at most 120 wall-clock seconds of retry CI retain
+   One required rebase and at most `HAM_CI_RETRY_WAIT_SECONDS` (default/minimum 120) wall-clock seconds of retry CI retain
    the reacquired lease (LEASEFAIR-02). Deferred daemon merges retain priority before reacquisition;
    conflict, red CI or timeout release with their actual reasons. A lagging
    `BEHIND` snapshot cannot force another source rewrite when this policy is
@@ -4684,19 +4684,24 @@ CONFLICTING gate requires the rebase/conflict path even with disjoint path names
 LEASEFAIR-02 handles a required rebase in this same run:
 rebase/publish through GitHub's existing update-branch path, fetch and detach
 the exact resulting SHA, and wait once for that head's required CI while
-retaining the lease for at most 120 wall-clock seconds of new-head CI. This
-fixed ceiling only shortens the existing deadline and is never load-scaled.
+retaining the lease for at most `HAM_CI_RETRY_WAIT_SECONDS` (default/minimum 120) wall-clock seconds of new-head CI. This
+ceiling only shortens the existing deadline and is never load-scaled. Set
+`HAM_CI_RETRY_WAIT_SECONDS` to a positive decimal allowance of at least 120 seconds
+(up to six digits) for repositories with slower required CI; invalid or smaller
+values use 120. The original absolute CI deadline still bounds the entire run.
 Pending expiry retains pushed provenance and releases with the existing
 exact-head pending recovery receipt. This is a fairness bound, not a guarantee
 of in-run convergence for slower CI: a retry becoming green at 300 seconds parks
-at 120 seconds. Pending waits retain their merge-gate attempt charges (including
+at the default 120 seconds, but merges with a 360-second allowance when the original
+deadline has sufficient time. The offline slow-green fixtures verify both outcomes
+and invalid/below-floor fallback; the shared-deadline fixture verifies an extended
+allowance cannot reset the original deadline. Pending waits retain their merge-gate attempt charges (including
 both acquisitions); they are not retryable-abort refunds. Existing dispatch-ledger
 deferrals are separately bounded. `certifiedContentionPark` requires a current-head
 `hamTerminalRemediation.ok` and a matching dispatch receipt; a retry-pushed head
 with only pushed provenance has no certified-park guarantee. Normal head recovery
-still owns it; automatic operator-free redispatch is not promised here. Raising
-the serialized wait or changing budget/recovery policy is deferred to a separate
-liveness change with observed CI durations and end-to-end recovery evidence.
+still owns it; automatic operator-free redispatch is not promised here. The configured serialized allowance can accommodate measured slower CI without
+changing the default fairness bound. Budget/recovery policy remains unchanged.
 Both CI windows share one absolute deadline initialized
 before the first wait from the nominal wait scaled once. The intervening rebase,
 polling, backoffs and gate reads consume the remaining deadline. This single
@@ -5476,7 +5481,7 @@ are load-scaled once and timer-clamped. Poll delays double from 250ms to a
 fixed 15-second ceiling independent of host load; every sleep respects the
 remaining budget. Holder-file changes interrupt sleep, with polling as the
 best-effort wake fallback.
-All roles share arrival order and dead-holder rules remain unchanged. LEASEFAIR-02's single retry holds its lease through at most 120 wall-clock seconds of CI;
+All roles share arrival order and dead-holder rules remain unchanged. LEASEFAIR-02's single retry holds its lease through at most `HAM_CI_RETRY_WAIT_SECONDS` (default/minimum 120) wall-clock seconds of CI;
 its grant, renewal and release are included in the per-base history.
 
 Inspect `data/merge-leases/<repo-slug>__<base>.history.jsonl` for the newest 4096

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
@@ -64,7 +64,7 @@ if (args[0] === '--input-type=module') {
   log({ outcome: value('--outcome'), attempt: JSON.parse(fs.readFileSync(value('--attempt-json'))),
     at: Number(fs.readFileSync(dir + '/clock')) });
   const child = require('node:child_process').spawnSync(${JSON.stringify(process.execPath)},
-    [${JSON.stringify(new URL('../bin/ama-audit.mjs', import.meta.url).pathname)}, ...args.slice(1)],
+    [${JSON.stringify(realpathSync(new URL('../bin/ama-audit.mjs', import.meta.url)))}, ...args.slice(1)],
     { encoding: 'utf8', env: { ...process.env, HQ_LAUNCH_REQUEST_ID: 'synthetic-closer' } });
   if (child.status !== 0) { console.error(child.stderr); process.exit(child.status ?? 1); }
 } else if (args[0].endsWith('/metered-gh.mjs')) {

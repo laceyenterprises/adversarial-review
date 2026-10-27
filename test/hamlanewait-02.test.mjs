@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { acquireAmaCloserLease, updateAmaCloserLease, readAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { acquireAmaCloserLease, updateAmaCloserLease, readAmaCloserLease, rekeyAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import { updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { reapStaleCloserLeases } from '../src/recovery-reaper.mjs';
@@ -31,20 +31,23 @@ for (const status of ['succeeded', 'running']) {
   });
 }
 
-for (const status of ['succeeded', 'running']) {
-  test(`HAMLANEWAIT-02: next reaper sweep settles ${status} launch only when terminal`, async t => {
+for (const status of ['succeeded', 'running']) for (const projection of ['present', 'missing', 'rekeyed']) {
+  test(`HAMLANEWAIT-02: next reaper sweep settles ${status} with ${projection} projection only when terminal`, async t => {
     const rootDir = fixture(t), hqRoot = join(rootDir, 'hq');
-    updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity, state: 'dispatched',
+    if (projection !== 'missing') updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity, state: 'dispatched',
       launchRequestId, dispatchedAt: now }));
     writeAmaAuditEntry({ hqRoot, ...identity, now,
       attempt: { outcome: 'deferred', reason: 'lane-busy', launchRequestId } });
-    const result = await reapStaleCloserLeases({ rootDir, now, env: { HQ_ROOT: hqRoot },
+    const leaseIdentity = projection === 'rekeyed' ? { ...identity, headSha: 'b'.repeat(40) } : identity;
+    if (projection === 'rekeyed') rekeyAmaCloserLease({ rootDir, ...identity,
+      fromHeadSha: identity.headSha, toHeadSha: leaseIdentity.headSha, now });
+    const result = await reapStaleCloserLeases({ rootDir, now: '2026-10-27T00:00:15Z', env: { HQ_ROOT: hqRoot },
       readLaunchRequestStatusImpl: async () => ({ ok: true, row: { status } }),
       closerLeaseReconciliationOptions: {
         readMergedSignalImpl: async () => assert.fail('no remote merge read needed for recorded deferral'),
       }, logger: { warn() {}, info() {} } });
     assert.equal(result.released, status === 'succeeded' ? 1 : 0);
-    const receipt = readAmaCloserLease(rootDir, identity);
+    const receipt = readAmaCloserLease(rootDir, leaseIdentity);
     assert.equal(receipt.status, status === 'succeeded' ? 'terminal' : 'dispatched');
     assert.equal(receipt.terminalOutcome, status === 'succeeded' ? 'retryable-lane-busy' : null);
   });

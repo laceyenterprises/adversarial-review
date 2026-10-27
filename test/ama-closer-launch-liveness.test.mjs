@@ -13,7 +13,8 @@ import {
   isReclaimableDispatchedAmaCloserLeaseAsync as reclaimAsync,
 } from '../src/ama/closer-lease.mjs';
 import { MAX_WORKER_EXEC_TIMEOUT_SECONDS } from '../src/worker-execution-limits.mjs';
-import { reapStaleCloserLeases, selectReleasableCloserLeases } from '../src/recovery-reaper.mjs';
+import { DEFAULT_CLOSER_LEASE_PROBE_MIN_AGE_MS as PROBE_AGE,
+  reapStaleCloserLeases, selectReleasableCloserLeases } from '../src/recovery-reaper.mjs';
 
 const probes = JSON.parse(readFileSync(new URL('./fixtures/closer-launch-liveness.json', import.meta.url)));
 const now = Date.parse('2026-10-01T12:00:00Z');
@@ -87,21 +88,24 @@ test('LEASELIVE-01: periodic missing/unreadable launch fallback ignores dead wat
   }
 });
 
-test('HAMLANEWAIT-02: periodic reaper settles terminal launches regardless of lease age', async t => {
+test('HAMLANEWAIT-02: periodic reaper probes after a short minimum age, including legacy timestamps', async t => {
   const stamp = age => new Date(now - age).toISOString();
   const cases = [
+    { updatedAt: stamp(PROBE_AGE - 1), shouldProbe: false },
+    { updatedAt: stamp(PROBE_AGE) },
+    { updatedAt: stamp(PROBE_AGE + 1) },
     { updatedAt: stamp(TERMINAL_AGE - 1) },
     { updatedAt: stamp(TERMINAL_AGE) },
     { updatedAt: stamp(TERMINAL_AGE + 1) },
-    { updatedAt: stamp(1), acquiredAt: stamp(FALLBACK + 1) },
+    { updatedAt: stamp(1), acquiredAt: stamp(FALLBACK + 1), shouldProbe: false },
     { updatedAt: null, acquiredAt: stamp(TERMINAL_AGE) },
     { updatedAt: null, acquiredAt: stamp(TERMINAL_AGE - 1) },
     { updatedAt: 'unreadable', acquiredAt: stamp(FALLBACK + 1) },
     { updatedAt: null, acquiredAt: null },
-    { updatedAt: stamp(-1) },
+    { updatedAt: stamp(-1), shouldProbe: false },
   ];
   for (const clock of [now, new Date(now).toISOString()]) {
-    for (const timestamps of cases) {
+    for (const { shouldProbe = true, ...timestamps } of cases) {
       const rootDir = mkdtempSync(join(tmpdir(), 'closer-probe-age-'));
       t.after(() => rmSync(rootDir, { recursive: true, force: true }));
       const identity = { repo: 'acme/repo', prNumber: 9, headSha: 'synthetic-head' };
@@ -117,10 +121,10 @@ test('HAMLANEWAIT-02: periodic reaper settles terminal launches regardless of le
         },
         logger: { info() {}, warn() {}, error() {} },
         readLaunchRequestStatusImpl: async args => { calls.push(args); return probes.terminal; } });
-      assert.equal(calls.length, 1, JSON.stringify({ clock, timestamps }));
-      assert.equal(result.released, 1);
-      assert.equal(readAmaCloserLease(rootDir, identity).status, 'terminal');
-      assert.deepEqual(calls[0], {
+      assert.equal(calls.length, shouldProbe ? 1 : 0, JSON.stringify({ clock, timestamps }));
+      assert.equal(result.released, shouldProbe ? 1 : 0);
+      assert.equal(readAmaCloserLease(rootDir, identity).status, shouldProbe ? 'terminal' : 'dispatched');
+      if (shouldProbe) assert.deepEqual(calls[0], {
         launchRequestId: 'synthetic-launch', rootDir, env: process.env, includeRetryChain: true,
       });
     }

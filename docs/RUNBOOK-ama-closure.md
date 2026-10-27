@@ -6321,8 +6321,11 @@ success is preserved under the existing reclaim flock and expected-owner fence.
 
 Closure evaluation (including rescue) reconciles a terminal launch before
 classifying a dispatched lease as an owner. Startup/periodic recovery applies the
-same settlement to its bounded lease scan. A recorded matching retryable audit
-settles immediately; other exits retain their existing PR proof and grace rules.
+same settlement to its bounded lease scan. These sweeps wait at least 15 seconds
+after the latest lease timestamp (`updatedAt`, falling back to `acquiredAt`) before
+probing the launch ledger; missing timestamps remain probeable. Closure evaluation
+has no such delay. A recorded matching retryable audit
+settles immediately after a terminal launch observation; other exits retain their existing PR proof and grace rules.
 The orphan watchdog also probes the lease's launch when no dispatch projection
 exists. A live launch or retry remains owned, and unknown evidence fails closed.
 

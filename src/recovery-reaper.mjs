@@ -103,6 +103,8 @@ export const DEFAULT_TERMINAL_CLOSER_LEASE_PRUNE_MS = 7 * 24 * HOUR_MS;
 export const DEFAULT_STALE_STATE_REAPER_INTERVAL_MS = 15 * 60 * 1000;
 export const DEFAULT_CLOSER_LEASE_ENTRY_SCAN_LIMIT = 250;
 export const DEFAULT_CLOSER_LEASE_READ_LIMIT = 50;
+// Avoid ledger reads for launches that have only just been dispatched.
+export const DEFAULT_CLOSER_LEASE_PROBE_MIN_AGE_MS = 15_000;
 
 const LEASE_DIR_SEGMENTS = ['data', 'ama-closer-leases'];
 const REAPER_STATE_DIR_SEGMENTS = ['data', 'recovery-reaper'];
@@ -773,6 +775,8 @@ export async function reapStaleCloserLeases({
   const nowMs = parseTimestampMs(now) ?? (now instanceof Date ? now.getTime() : Number(now));
   for (const lease of discovery.records) {
     if (lease?.status !== 'dispatched' || !lease.lrqId || launchStatusProbes.has(lease.lrqId)) continue;
+    const stampMs = parseTimestampMs(lease.updatedAt) ?? parseTimestampMs(lease.acquiredAt);
+    if (stampMs != null && nowMs - stampMs < DEFAULT_CLOSER_LEASE_PROBE_MIN_AGE_MS) continue;
     try { launchStatusProbes.set(lease.lrqId, await readLaunchRequestStatusImpl({
       launchRequestId: lease.lrqId, rootDir, env, includeRetryChain: true,
     })); } catch { launchStatusProbes.set(lease.lrqId, null); }

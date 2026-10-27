@@ -246,12 +246,22 @@ test('periodic reaper cannot reassign a decision-blocked worker at any age', asy
   const stamp = '2026-10-01T00:00:00Z';
   acquireAmaCloserLease({ rootDir, ...identity, now: stamp });
   updateAmaCloserLease({ rootDir, ...identity, now: stamp, status: 'dispatched', lrqId: 'decision' });
+  updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity,
+    state: 'dispatched', launchRequestId: 'decision', dispatchedAt: stamp }));
+  const statusProbe = { ok: true, row: { status: 'blocked_needs_decision' } };
   const result = await reapStaleCloserLeases({ rootDir, now: '2026-10-10T00:00:00Z',
     thresholdMs: 1, deadHolderThresholdMs: 1, isProcessAlive: () => false,
-    readLaunchRequestStatusImpl: async () => ({ ok: true, row: { status: 'blocked_needs_decision' } }),
+    readLaunchRequestStatusImpl: async () => statusProbe,
     logger: { info() {}, warn() {}, error() {} } });
-  assert.equal(result.released, 0);
-  assert.equal(readAmaCloserLease(rootDir, identity).lrqId, 'decision');
+  assert.equal(result.released, 1, 'parked observation settles the disk lease as deferred');
+  const lease = readAmaCloserLease(rootDir, identity);
+  assert.equal(lease.lrqId, 'decision');
+  assert.equal(lease.status, 'terminal');
+  assert.equal(lease.terminalOutcome, 'deferred');
+  assert.equal(isReclaimableTerminalAmaCloserLease(lease, { launchStatusProbe: statusProbe }), false);
+  assert.equal((await probeOrphanOwnership({ rootDir, ...identity,
+    now: '2026-10-10T00:00:00Z', readStatusImpl: async () => statusProbe })).owned, true,
+  'the parked launch still owns the PR after disk lease settlement');
 });
 
 test('an awaited parked probe cannot terminalize a successor lease', async t => {

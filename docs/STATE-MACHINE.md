@@ -934,6 +934,11 @@ before any validated-head audit or merge; retry reacquires and rechecks unchange
 head/base/file-overlap safety. Existing review-row and closer-lease states are unchanged.
 See [source evidence and pending deployment acceptance](validation/lac-2093.md).
 
+DOGREADSFLAG-02 binds dispatch-read activation to the adapter's existing own-LRQ
+environment contract. Missing, malformed or foreign records refuse startup;
+later worker exports cannot replace the recorded value. The unchanged reader
+requires exactly the string `"1"` before its mandatory own-launch SDK/HCP read.
+
 The 2026-10-24 LAC-2093 recurrence adds a private controller registration lifecycle:
 `running` → `stopping` → `quiescent` after witnessed group drain, otherwise
 `cleanup-unconfirmed` (exit 125; preserve scratch and lease). Execution starts

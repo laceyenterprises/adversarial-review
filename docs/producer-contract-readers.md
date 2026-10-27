@@ -380,22 +380,25 @@ read; a transport failure never switches routes or opens local state.
 
 ### Dispatch lookup activation and limits
 
-Runtime reads require exactly `ADVERSARIAL_DISPATCH_READS_ENABLED=1` and default
-off in environments without it. The tracked watcher and follow-up service
-templates now carry this flag so hammer controllers inherit the activation
-required by their mandatory own-launch HCP read. That read uses the provisioned
-worker token; app grants remain a separate operator step and are not needed for
-hammer starts. Without grants, key, ticket and receipt lookups return not-found,
-which maps to `dispatch absence scope unproven` and retains ownership holds.
+Service reads require exactly `ADVERSARIAL_DISPATCH_READS_ENABLED=1` and default
+off without it. The tracked watcher and follow-up templates carry their service
+activation. DOGREADSFLAG-02 controllers instead load the adapter-recorded value
+from their own-LRQ `env-contract.json`, verify its launch provenance and resolve
+HAM_HQ_ROOT before generic roots. Later worker exports cannot activate or disable
+that recorded value. Missing, malformed or foreign contracts refuse startup.
+The mandatory own-launch HCP read uses the provisioned worker token and needs
+no app grant. App key/ticket/receipt reads retain separate operator grants;
+ordinary filtered not-found remains `dispatch absence scope unproven`.
 
 Before service deployment, verify the reviewed merged 0.9.0 producer release
 and its artifact hashes, deploy its endpoint, and run `npm ci` in the deployed
 adversarial-review submodule. Observe organic own-LRQ HCP reads and, once grants
 are provisioned, app receipt/retry reads. Disabled reads return unavailable with
 `dispatch lookup disabled`; they retain ownership holds and refuse hammer starts.
-Rollback removes the flag from both templates and redeploys through the normal
-service deployment to pause observations safely; no SQL/file fallback is
-restored. Source publication does not authorize service activation.
+Service rollback removes the flag from both templates and redeploys normally.
+Closer rollback reverts the reviewed Agent OS adapter activation policy for new
+launches; changing service templates cannot alter existing launch records. No
+SQL/file fallback is restored. Source publication does not authorize service activation.
 Dispatch-only SDK exports load at read time, so an older installed SDK produces
 unavailable evidence rather than preventing daemon module linking.
 

@@ -3,6 +3,18 @@
 **Owner:** versioned closer controller (`src/ama/hammer-controller.mjs`)
 **Source of truth:** `src/ama/hammer-controller.mjs`
 **Store:** `<HAM_RUN_DIR>/controller-<uuid>.json`, mode 0600
+
+Before any dispatch read, the controller loads
+`<hq-root>/dispatch/<own-lrq>/env-contract.json`, resolving `HAM_HQ_ROOT`
+before the standard `HQ_ROOT` / `AGENT_OS_HQ_ROOT` / home-directory fallback.
+It requires `launchProvenance.launchRequestId` to match its unambiguous launch identity.
+It replaces any caller-exported `ADVERSARIAL_DISPATCH_READS_ENABLED` with the
+value in that adapter-owned record. Missing, malformed or foreign records
+refuse startup; absent or non-string/non-`"1"` activation remains disabled by
+the unchanged reader. This file supplies environment provenance only: launch
+status still comes exclusively from the SDK/HCP own-launch read. The Agent OS
+adapter records and explicitly delivers `"1"` for reviewed hammer classes
+before spawn. No controller registration fields or lifecycle states change.
 **Entrypoint:** `bin/hammer-controller.mjs run <script> [args...]`
 
 Each invocation creates an independent registration before releasing its Bash
@@ -24,7 +36,7 @@ The controller reads through the bounded SDK dispatch lookup adapter and
 producer status vocabulary every 10 seconds (`LAUNCH_POLL_MS`, never load
 scaled), one read at a time and without blocking the one-second process census.
 Each read uses the adapter's load-aware timeout and a bounded caller abort
-signal. SDK 0.8.0 may retain its HTTP request until its transport deadline after
+signal. SDK 0.9.0 may retain its HTTP request until its transport deadline after
 caller cancellation. Dispatch reads require `ADVERSARIAL_DISPATCH_READS_ENABLED=1`
 in the controller environment after the verified producer release and grants are live. A readable terminal, parked or foreign row stops at once (`launch-ended`).
 A failed read (timeout, spawn error, unreadable target) is recorded and the

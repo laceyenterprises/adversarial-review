@@ -3333,18 +3333,25 @@ See [the reader contract](docs/producer-contract-readers.md#dispatch-lookup).
 
 Dispatch lookup requires exactly `ADVERSARIAL_DISPATCH_READS_ENABLED=1`; code
 defaults off in environments without it. The tracked watcher and follow-up
-service templates now carry the flag so hammer controllers inherit activation
-for their mandatory own-launch HCP read. That read uses the provisioned worker
+service templates carry the flag for those services. DOGREADSFLAG-02 delivers
+closer activation separately through the Agent OS adapter's recorded launch
+environment, across payload environment clearing. The controller checks the
+record's own launch identity and uses its activation value for every mandatory
+own-launch HCP read, ignoring later worker exports. Missing, malformed or
+foreign records refuse startup; absent or non-`"1"` values remain disabled. That read uses the provisioned worker
 token and needs no app grants; grants remain a separate operator step for
 app-scoped lookups. Without grants, key, ticket and receipt lookups return
 not-found, mapped to `dispatch absence scope unproven`, and retain ownership
 holds. The runtime owner must verify the merged SDK release record, deploy the
 producer, and run `npm ci` in this submodule before normal service deployment.
-Rollback removes the flag from both templates and redeploys, safely pausing
-reads and retaining ownership holds. SDK 0.9.0 is byte-verified against merged producer `f37c7489439a8b53eafecb38870f75fe9f07fa57`; runtime activation remains separate.
-Ordinary filtered empty lookups and missing rows retain ownership. Only the
-LAC-2120 exact-selector producer proof, under a separate expiring operator
-entitlement, can certify absence through the unchanged SDK transport. See the
+Service rollback removes the flag from both service templates and redeploys,
+safely pausing service reads and retaining ownership holds. Closer rollback
+reverts the reviewed Agent OS adapter activation policy for new launches;
+changing service templates does not deactivate closer launch records. SDK 0.9.0
+is byte-verified against merged producer `f37c7489439a8b53eafecb38870f75fe9f07fa57`;
+runtime activation remains separate. Ordinary filtered empty lookups and missing
+rows retain ownership. Only the validated LAC-2120 exact-selector producer proof
+under a separate expiring operator entitlement can certify absence. See the
 reader contract for proof validation and cancellation limits. Existing lifecycle
 states, transitions and smoke promises are unchanged. Focused offline regressions run with:
 

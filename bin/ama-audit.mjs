@@ -26,6 +26,7 @@
  *   1   usage error
  */
 
+import { releaseRetryableAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { pathToFileURL } from 'node:url';
@@ -51,6 +52,8 @@ Usage:
 Common args:
   --hq-root      \$HQ_ROOT (audit file is written under
                   <hq-root>/dispatch/audit/adversarial-merge-authority/)
+  --root-dir     optional review-service root; settles this launch’s retryable closer lease
+  --lease-head   original dispatch head for an unrekeyed closer lease
   --repo         <owner>/<name>
   --pr           PR number
   --head         authorized head SHA
@@ -78,6 +81,8 @@ function parseWriteArgs(argv) {
     allowPositionals: true,
     options: {
       'hq-root': { type: 'string' },
+      'root-dir': { type: 'string' },
+      'lease-head': { type: 'string' },
       repo: { type: 'string' },
       pr: { type: 'string' },
       head: { type: 'string' },
@@ -147,6 +152,11 @@ function runInitOrAppend(subcommand, argv) {
       subcommand === 'init'
         ? writeAmaAuditEntry(args)
         : appendAmaAuditAttempt(args);
+    if (values['root-dir']) releaseRetryableAmaCloserLease({
+      rootDir: values['root-dir'], repo: args.repo, prNumber: args.prNumber,
+      headSha: args.headSha, launchRequestId: process.env.HQ_LAUNCH_REQUEST_ID,
+      sourceHeadSha: values['lease-head'], attempt, now: args.now,
+    });
     process.stdout.write(`${filePath}\n`);
     if (created) process.stderr.write(`ama-audit: created missing record for ${values.repo} pr#${values.pr} head=${values.head}\n`);
     return 0;

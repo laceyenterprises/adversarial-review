@@ -2401,6 +2401,8 @@ services, observes exact-head receipts and slot release before CI, rehearses
 rollback/reactivation and records explicit approval. Worker publication and PR
 merge do not complete operator approval. No new smoke/check or merge authority.
 
+HAMLANEWAIT-02: retryable merge deferrals release closer ownership as terminal with retryable-<reason> (lane-busy, merge-lease-timeout, required-checks-pending, pr-mergeability-unknown). The audit CLI writes the receipt under the existing owner snapshot fence. In-run lease retries retain ownership. Closure/rescue and bounded startup/periodic sweeps reconcile terminal launches before admission; live launches, retries, parked owners and unreadable evidence retain their existing semantics. Ordinary same-head daemon eligibility or hammer admission schedules the retry through existing backoff, attempt and lifetime caps; terminal lease reclamation and exclusive acquisition prevent duplicate retries. Orphan ownership probes a dispatched lease LRQ even without its dispatch projection. No new lifecycle states, config keys, checks or smoke actions; deployment acceptance requires natural recovery observation.
+
 HAMLANEWAIT-01: the legacy closer's lane-lock contention waits on release up to
 a fresh 60-second merge-attempt deadline after CI/lease waits. Exhaustion records `deferred` with reason
 `lane-busy`; retryable-abort lease release and the existing lease-wait refund

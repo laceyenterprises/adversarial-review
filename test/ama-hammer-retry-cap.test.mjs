@@ -107,11 +107,14 @@ for (const outcome of ['failed', 'succeeded', 'no_work_done']) {
     let launches = 0;
     let alerts = 0;
     const status = outcome === 'no_work_done' ? 'failed' : outcome;
+    let observedLaunch = null;
+    let reportedStatus = 'running';
     const deps = hammerDispatchDeps({
-      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status,
-        ...(outcome === 'no_work_done' ? { failure_class: outcome } : {}) } }),
+      readLaunchRequestStatusImpl: ({ launchRequestId }) => ({ ok: true, row: {
+        status: launchRequestId === observedLaunch ? status : 'running',
+        ...(launchRequestId === observedLaunch && outcome === 'no_work_done' ? { failure_class: outcome } : {}) } }),
       execFileImpl: async (_cmd, argv) => {
-        if (argv[0] === 'dispatch' && argv[1] === 'status') return { stdout: JSON.stringify({ status }) };
+        if (argv[0] === 'dispatch' && argv[1] === 'status') return { stdout: JSON.stringify({ status: reportedStatus }) };
         if (argv[0] === 'dispatch' && argv[1] === '--priority') return { stdout: JSON.stringify({
           ticketRef: `AMA-PR-${PR_NUMBER}`, launchRequestId: `synthetic-repair-${++launches}`, dispatchId: `synthetic-dispatch-${launches}` }) };
         return { stdout: '{}' };
@@ -123,6 +126,8 @@ for (const outcome of ['failed', 'succeeded', 'no_work_done']) {
     const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD };
     for (let i = 1; i <= 3; i++) {
       const record = readAmaCloserDispatchRecord(rootDir, identity);
+      observedLaunch = record.launchRequestId;
+      reportedStatus = status;
       writeAmaAuditEntry({ hqRoot: join(rootDir, 'hq-root'), ...identity,
         attempt: { outcome: 'deferred', reason: 'lane-busy', launchRequestId: record.launchRequestId },
         now: `2026-07-06T12:${i}0:00Z` });
@@ -131,6 +136,9 @@ for (const outcome of ['failed', 'succeeded', 'no_work_done']) {
       });
       result = await run(`2026-07-06T12:${i}0:30Z`);
       assert.equal(result.reason, 'hammer-deferral-backoff');
+      const released = readAmaCloserLease(rootDir, identity);
+      assert.equal(released.status, 'terminal', 'HAMLANEWAIT-02: backoff must not retain a dispatched owner');
+      assert.equal(released.terminalOutcome, 'retryable-lane-busy');
       const next = readHammerRetryCapLedger(rootDir, identity).deferralNextAt;
       // Repeated observation neither re-refunds nor extends the backoff/page.
       result = await run(`2026-07-06T12:${i}1:00Z`);
@@ -139,6 +147,11 @@ for (const outcome of ['failed', 'succeeded', 'no_work_done']) {
       assert.equal(alerts, i === 3 ? 1 : 0);
       result = await run(next);
       assert.equal(result.dispatched, true, JSON.stringify(result));
+      const launchCount = launches;
+      reportedStatus = 'running';
+      const retained = await run(next);
+      assert.equal(retained.dispatched, false, 'HAMLANEWAIT-02: repeated recovery cannot dispatch twice');
+      assert.equal(launches, launchCount);
       assert.notEqual(result.needsOperator, true);
       const ledger = readHammerRetryCapLedger(rootDir, identity);
       assert.equal(ledger.attemptCount, 1, 'only the new repair launch remains charged');

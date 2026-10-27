@@ -1633,6 +1633,14 @@ async function dispatchAmaClosureFor({
       ...closerLeaseLivenessOptions, ...preReceiptIntentOptions,
       now: now(), prMetadata, env, signal, logger,
     });
+    // Settle a finished launch before the shared decision can classify its
+    // stale dispatched receipt as an in-flight owner (including rescue).
+    if (handoffLease?.status === 'dispatched' && handoffLease.lrqId) {
+      await amaDispatchCloser.reconcileAmaCloserLeaseAsync({
+        ...closerLeaseLivenessOptions, rootDir, repo: repoPath, prNumber,
+        hqRoot: resolveHqRoot(env), now: new Date(now()).toISOString(), env, signal, logger,
+      });
+    }
     handoffLease = handoffLease?.headSha ? readAmaCloserLease(rootDir, handoffLease)
       : currentPrHeadSha && readAmaCloserLease(rootDir, {
         repo: repoPath, prNumber, headSha: currentPrHeadSha,

@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -62,6 +63,7 @@ test('LEASELIVE-01: periodic reaper retains a running launch despite dead watche
   acquireAmaCloserLease({ rootDir, ...identity, now: stamp, watcherPid: 4242 });
   updateAmaCloserLease({ rootDir, ...identity, now: stamp, status: 'dispatched', lrqId: 'synthetic-launch' });
   const options = { rootDir, now, thresholdMs: 1, deadHolderThresholdMs: 1, livePid: null,
+    closerLeaseReconciliationOptions: { readMergedSignalImpl: async () => ({ ok: false }) },
     isProcessAlive: () => false, logger: { info() {}, warn() {}, error() {} } };
   const held = await reapStaleCloserLeases({ ...options, readLaunchRequestStatusImpl: async () => probes.running });
   assert.equal(held.released, 0);
@@ -69,7 +71,8 @@ test('LEASELIVE-01: periodic reaper retains a running launch despite dead watche
   assert.equal(isHeldAmaCloserLease(rootDir, identity, { now, launchStatusProbe: probes.running }), true);
   const released = await reapStaleCloserLeases({ ...options, readLaunchRequestStatusImpl: async () => probes.terminal });
   assert.equal(released.released, 1);
-  assert.equal(readAmaCloserLease(rootDir, identity), null);
+  assert.equal(readAmaCloserLease(rootDir, identity).status, 'terminal');
+  assert.equal(readAmaCloserLease(rootDir, identity).terminalOutcome, 'failed-without-merge');
 });
 
 test('LEASELIVE-01: periodic missing/unreadable launch fallback ignores dead watcher tier', () => {
@@ -84,21 +87,21 @@ test('LEASELIVE-01: periodic missing/unreadable launch fallback ignores dead wat
   }
 });
 
-test('LEASELIVE-01: periodic reaper probes only leases at the terminal reclaim age', async t => {
+test('HAMLANEWAIT-02: periodic reaper settles terminal launches regardless of lease age', async t => {
   const stamp = age => new Date(now - age).toISOString();
   const cases = [
-    { updatedAt: stamp(TERMINAL_AGE - 1), probe: false },
-    { updatedAt: stamp(TERMINAL_AGE), probe: true },
-    { updatedAt: stamp(TERMINAL_AGE + 1), probe: true },
-    { updatedAt: stamp(1), acquiredAt: stamp(FALLBACK + 1), probe: false },
-    { updatedAt: null, acquiredAt: stamp(TERMINAL_AGE), probe: true },
-    { updatedAt: null, acquiredAt: stamp(TERMINAL_AGE - 1), probe: false },
-    { updatedAt: 'unreadable', acquiredAt: stamp(FALLBACK + 1), probe: false },
-    { updatedAt: null, acquiredAt: null, probe: false },
-    { updatedAt: stamp(-1), probe: false },
+    { updatedAt: stamp(TERMINAL_AGE - 1) },
+    { updatedAt: stamp(TERMINAL_AGE) },
+    { updatedAt: stamp(TERMINAL_AGE + 1) },
+    { updatedAt: stamp(1), acquiredAt: stamp(FALLBACK + 1) },
+    { updatedAt: null, acquiredAt: stamp(TERMINAL_AGE) },
+    { updatedAt: null, acquiredAt: stamp(TERMINAL_AGE - 1) },
+    { updatedAt: 'unreadable', acquiredAt: stamp(FALLBACK + 1) },
+    { updatedAt: null, acquiredAt: null },
+    { updatedAt: stamp(-1) },
   ];
   for (const clock of [now, new Date(now).toISOString()]) {
-    for (const { probe, ...timestamps } of cases) {
+    for (const timestamps of cases) {
       const rootDir = mkdtempSync(join(tmpdir(), 'closer-probe-age-'));
       t.after(() => rmSync(rootDir, { recursive: true, force: true }));
       const identity = { repo: 'acme/repo', prNumber: 9, headSha: 'synthetic-head' };
@@ -108,11 +111,16 @@ test('LEASELIVE-01: periodic reaper probes only leases at the terminal reclaim a
       writeFileSync(amaCloserLeaseFilePath(rootDir, identity), JSON.stringify({ ...lease, ...timestamps }));
       const calls = [];
       const result = await reapStaleCloserLeases({ rootDir, now: clock, livePid: null,
+        closerLeaseReconciliationOptions: {
+          readMergedSignalImpl: async () => ({ ok: false }),
+          readPullRequestStateImpl: async () => null,
+        },
         logger: { info() {}, warn() {}, error() {} },
         readLaunchRequestStatusImpl: async args => { calls.push(args); return probes.terminal; } });
-      assert.equal(calls.length, probe ? 1 : 0, JSON.stringify({ clock, timestamps }));
-      assert.equal(result.released, probe ? 1 : 0);
-      if (probe) assert.deepEqual(calls[0], {
+      assert.equal(calls.length, 1, JSON.stringify({ clock, timestamps }));
+      assert.equal(result.released, 1);
+      assert.equal(readAmaCloserLease(rootDir, identity).status, 'terminal');
+      assert.deepEqual(calls[0], {
         launchRequestId: 'synthetic-launch', rootDir, env: process.env, includeRetryChain: true,
       });
     }

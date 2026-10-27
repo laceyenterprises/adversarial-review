@@ -906,3 +906,48 @@ for (const scenario of ['dead', 'hostless-dead', 'timeout', 'live', 'hostless-li
     else assert.deepEqual(readAmaCloserLease(f.identity.rootDir, f.identity), lease);
   });
 }
+
+for (const launchStatus of ['succeeded', 'running']) {
+  test(`HAMLANEWAIT-02: closure/rescue routes a dispatched lease with ${launchStatus} launch truth`, async t => {
+    const rootDir = finalRound(t), identity = { repo, prNumber, headSha };
+    const hqRoot = join(rootDir, 'hq');
+    const launchRequestId = 'synthetic-lane-busy';
+    acquireAmaCloserLease({ rootDir, ...identity, now: started });
+    updateAmaCloserLease({ rootDir, ...identity, status: 'dispatched', lrqId: launchRequestId, now: started });
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity, state: 'dispatched',
+      launchRequestId, dispatchedAt: started, lastObservedStatus: 'running' }));
+    writeAmaAuditEntry({ hqRoot, ...identity, now: observed,
+      attempt: { outcome: 'deferred', reason: 'lane-busy', launchRequestId } });
+    let dispatches = 0;
+    const result = await maybeDispatchAmaClosureFor({ rootDir, repoPath: repo, prNumber,
+      currentRevisionRef: headSha, labelNames: [], now: () => Date.parse(observed), env: { HQ_ROOT: hqRoot },
+      reviewStateRow: { repo, pr_number: prNumber, review_status: 'posted', reviewer: 'claude',
+        reviewer_head_sha: reviewed, last_verdict: 'Comment only', posted_at: started },
+      candidate: { headSha, prState: 'open', riskClass: 'low', prAuthor: 'synthetic-builder',
+        mergeable: 'MERGEABLE', statusCheckRollup: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] },
+      loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true }) }),
+      resolveAmaHammerDispatchModeImpl: () => 'inline',
+      fetchLatestHeadReviewBodiesImpl: async () => [body],
+      proveCloserAuthoredStaleHeadImpl: async () => ({ proven: false }),
+      closerLeaseLivenessOptions: {
+        readLaunchRequestStatusImpl: async () => ({ ok: true, row: { status: launchStatus } }),
+        readMergedSignalImpl: async () => assert.fail('recorded no-merge deferral requires no merge signal'),
+      },
+      probeClosureOwnershipImpl: options => probeOrphanOwnership({ ...options,
+        readStatusImpl: async () => ({ ok: true, row: { status: launchStatus } }) }),
+      runDaemonCleanMergeAttemptImpl: async () => assert.fail('findings still require hammer admission'),
+      maybeDispatchAmaCloserImpl: async () => { dispatches++; return { dispatched: true, launchRequestId: 'synthetic-retry' }; },
+      observeClosureWaitImpl: async () => ({ exhausted: false }),
+      logger: { log() {}, info() {}, warn() {} },
+    });
+    assert.equal(dispatches, launchStatus === 'succeeded' ? 1 : 0, JSON.stringify(result));
+    if (launchStatus === 'succeeded') {
+      assert.doesNotMatch(result.reason || '', /^in-flight:/);
+      assert.equal(readAmaCloserLease(rootDir, identity).terminalOutcome, 'retryable-lane-busy');
+    } else {
+      assert.match(result.reason, /^in-flight:/);
+      assert.equal(result.closerLaunchAlive, true);
+      assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
+    }
+  });
+}

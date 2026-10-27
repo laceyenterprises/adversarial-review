@@ -384,6 +384,7 @@ $HAM_GATE_CAP_COMMENT"
         leaseWaitExhausted:$green,inRunRetry:$retrying,holders:(.holders // []),
         waitReason:.reason,closingStatus:.closingStatus}' "<<RUN_DIR>>/merge-lease-acquire.json" > "$ham_park_json"
     if "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/ama-audit.mjs append --hq-root <<HQ_ROOT>> \
+      --root-dir <<ROOT_DIR>> --lease-head <<TARGET_REMEDIATION_SHA>> \
       --repo <<REPO>> --pr <<PR_NUMBER>> --head "$POST_REMEDIATION_SHA" \
       --outcome deferred --closure-authority ham-terminal-remediation \
       --reviewer <<REVIEWER>> --risk-class <<RISK_CLASS>> --attempt-json "$ham_park_json"; then

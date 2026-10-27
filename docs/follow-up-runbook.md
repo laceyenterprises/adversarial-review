@@ -1900,3 +1900,34 @@ entitlement, selector-bound proof and native audited settlement composition.
 Ordinary filtered emptiness and partial/unreadable scope stay held. Durable
 query evidence retains both absence proofs; current receipt, submitter,
 record/lease fences and once-only refund rules remain unchanged.
+
+## Successful branch rewrite receipts (HOLDERPROOF-01)
+
+Remediation publication, auth-recovery Git publication and the finalization
+queue record successful leased history rewrites in the Agent OS HQ dispatch
+store. This also covers plain-Git fallback and service workspaces without a
+managed worker manifest. Ordinary fast forwards, failed pushes and observations
+without native publication proof never confer rewrite authority. Auth recovery
+records a native proven update before the fallible live-head verification.
+
+The compatible `worker.branch_rewritten` record lives at
+`dispatch/branch-rewrites/<percent-encoded-repository>/<percent-encoded-branch>/<uuid>.json`.
+It names `repo` (`github.com/owner/repo`), `branch`, exact leased `oldHead`, pushed
+`newHead`, service `actor`, nullable `launchRequestId`, and UTC `recordedAt`.
+Files use 0660, directories request 2770 and inherit the dispatch group; writers
+repair only their own modes. The file is fsynced, atomically renamed and its
+directory fsynced. Filesystem ownership is audit evidence, not authentication.
+
+A receipt storage failure returns and logs `rewriteReceiptError` with exact tips
+while preserving successful publication. Repair storage and use the Agent OS
+`cwp_dispatch.branch_rewrite.record_rewrite` writer with those verified tips;
+never repeat the push just to recreate a receipt. Receipts have no automatic
+expiry; owner cleanup requires a closed branch, no dependent retained holder,
+and elapsed dispatch evidence retention. Agent OS can independently consult
+GitHub force-push history when no matching receipt exists, and bundles holder-only
+history before release. Unknown or ambiguous evidence keeps custody.
+
+This changes no lifecycle states, merge authority, configuration keys or smoke
+commands. After normal deployment and separately authorized service reload,
+observe naturally occurring receipts read-only. Offline synthetic tests authorize
+no live push, PR rescue, worker-slot change or service action.

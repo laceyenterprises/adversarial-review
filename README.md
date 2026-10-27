@@ -1,5 +1,13 @@
 # Adversarial Review
 
+HOLDERPROOF-01: successful leased remediation, auth-recovery and finalization-queue
+rewrites record compatible branch receipts in HQ dispatch storage, including
+service workspaces without managed worker manifests. Receipt storage errors
+preserve publication success and expose exact recovery tips; no push retry is
+authorized by a missing receipt. See the [receipt contract](docs/follow-up-runbook.md#successful-branch-rewrite-receipts-holderproof-01).
+Existing lifecycle states, merge rules and smoke promises remain unchanged;
+post-deploy verification observes natural receipts read-only.
+
 HAMVALIDORPHAN-01: automatic review queues cannot orphan a hammer-validated
 head. The watcher restores its last delivered review and evaluates ordinary
 closure in the same poll. Shared rescue classification retains hammer ownership;

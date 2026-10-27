@@ -2,6 +2,16 @@
   "version": 1,
   "entries": [
     {
+      "id": "branch-rewrite-receipts",
+      "title": "Successful Branch Rewrite Receipts",
+      "path": "docs/data-model/branch-rewrite-receipts.md",
+      "store": "<HQ root>/dispatch/branch-rewrites/<encoded-repository>/<encoded-branch>/<uuid>.json",
+      "schemaSurface": "src/branch-rewrite-receipt.mjs",
+      "relatedSchemaSurfaces": ["src/remediation-publication.mjs", "src/github-auth-recovery.mjs", "src/finalization/queue-git.mjs"],
+      "owner": "successful leased Git publisher; compatible with Agent OS cwp_dispatch.branch_rewrite",
+      "compatibility": "Existing worker.branch_rewritten schema; nullable launchRequestId for service writers. Receipt storage failure preserves published outcome and returns/logs exact recovery tips. No automatic expiry."
+    },
+    {
       "id": "closer-holds",
       "title": "Shared Closer Hold Contract",
       "path": "docs/data-model/closer-holds.md",

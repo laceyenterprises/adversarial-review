@@ -1,3 +1,4 @@
+import { recordPublishedRewrite } from '../branch-rewrite-receipt.mjs';
 // Git execution for the v2 finalization port. No API tree publisher, content
 // repair, hook, generated-output regeneration or credential persistence.
 import { spawn, execFileSync } from 'node:child_process';
@@ -44,7 +45,7 @@ export function runQueueGit(args, { cwd, timeoutMs, env = process.env } = {}) {
 }
 
 export function resolveQueueGitAdapter({ rootDir, run = runQueueGit, networkRunner, resolveRemote = remote,
-  now = () => new Date().toISOString(), load } = {}) {
+  now = () => new Date().toISOString(), load, env = process.env } = {}) {
   const root = realpathSync(rootDir);
   if (statSync(root).uid !== process.getuid?.()) throw error('git-root-owner-mismatch');
   const parent = join(root, 'data', 'finalization-git');
@@ -128,7 +129,10 @@ export function resolveQueueGitAdapter({ rootDir, run = runQueueGit, networkRunn
         await transport(entry.rebase.headRepository, target => ['push', '--porcelain',
           `--force-with-lease=refs/heads/${entry.rebase.headRef}:${intent.expectedOldHead}`,
           '--', target, `${intent.candidate}:refs/heads/${entry.rebase.headRef}`], cwd, intent.deadline, intent.timeoutMs, () => { invoked = true; });
-        return { outcome: 'succeeded', sourceRef: `git:push:${intent.candidate}:refs/heads/${entry.rebase.headRef}` };
+        const receipt = recordPublishedRewrite({ repository: `github.com/${entry.rebase.headRepository.toLowerCase()}`,
+          branch: entry.rebase.headRef, oldHead: intent.expectedOldHead, newHead: intent.candidate,
+          actor: 'review-service:finalization-queue', env });
+        return { outcome: 'succeeded', sourceRef: `git:push:${intent.candidate}:refs/heads/${entry.rebase.headRef}`, ...receipt };
       } catch (failure) {
         // Explicit single-ref porcelain refusals prove non-application.
         // Transport/timeout failures remain ambiguous; do not expose diagnostics.

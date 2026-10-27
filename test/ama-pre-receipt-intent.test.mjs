@@ -1109,7 +1109,8 @@ test('SDK transient classification reaches receipt-owner retries with safe persi
   const result = await f.reconcile({
     readIntentReceiptImpl: readLaunchRequestByIdempotencyKeyAsync,
     dispatchSession: { dispatchLookup: async () => {
-      if (++calls === 1) throw Object.assign(new Error('secret endpoint token'), { code: 'ECONNRESET' });
+      // Exhaust the dispatch reader's two attempts so the receipt owner retries.
+      if (++calls <= 2) throw Object.assign(new Error('secret endpoint token'), { code: 'ECONNRESET' });
       return { schema_version: 1, status: 'not_found', complete: true, roots: [], items: [], retry_edges: [] };
     } },
     delayAsyncImpl: async ms => delays.push(ms),
@@ -1118,7 +1119,7 @@ test('SDK transient classification reaches receipt-owner retries with safe persi
   assert.equal(f.read().state, 'dispatching');
   assert.equal(f.read().retryCount, 2);
   assert.equal(readAmaCloserLease(f.rootDir, identity).status, 'pending');
-  assert.equal(calls, 2);
+  assert.equal(calls, 3);
   assert.deepEqual(delays, [100]);
   assert.equal(result.evidence.attempts[0].detail, 'transient dispatch lookup failure');
   assert.doesNotMatch(JSON.stringify(f.read().preReceiptReconciliation), /secret endpoint token/);

@@ -9,7 +9,7 @@
       "schemaSurface": "src/branch-rewrite-receipt.mjs",
       "relatedSchemaSurfaces": ["src/remediation-publication.mjs", "src/github-auth-recovery.mjs", "src/finalization/queue-git.mjs"],
       "owner": "successful leased Git publisher; compatible with Agent OS cwp_dispatch.branch_rewrite",
-      "compatibility": "Existing worker.branch_rewritten schema; nullable launchRequestId for service writers. Receipt storage failure preserves published outcome and returns/logs exact recovery tips. No automatic expiry."
+      "compatibility": "Existing worker.branch_rewritten schema; nullable launchRequestId for service writers; nonzero hexadecimal tips accept either case. Actual push destination determines repository identity; ancestry checks exclude fast forwards. Receipt storage failure preserves published outcome and returns/logs exact recovery tips with nullable repo. No automatic expiry."
     },
     {
       "id": "closer-holds",
@@ -404,7 +404,8 @@
       "closeoutSuccessorFields": ["reReview.nextAction", "remediationPlan.rounds[].reReview.nextAction", "completion.workerPushedHeadSha", "completion.finalRemediationPush"],
       "closeoutSuccessorMeaning": "one shared action, actor, reason, head and anchored UTC deadline; pending CI completes under an observer with durable watcher re-review admission intent when rounds remain; recovered red CI registers intent to requeue remaining remediation; final push evidence preserves terminal hammer handoff without merge authority",
       "pendingCiCompletionEvidenceFields": ["completion.pendingCiOnly", "completion.workerPushedHeadSha"],
-      "workflowPublicationEvidenceFields": ["operationalBlockerRecovery.retry.pendingNativePublication", "operationalBlockerRecovery.retry.nativePublicationReceipt", "operationalBlockerRecovery.retry.retryLater"]
+      "workflowPublicationEvidenceFields": ["operationalBlockerRecovery.retry.pendingNativePublication", "operationalBlockerRecovery.retry.pendingNativePublication.rewriteEvidence", "operationalBlockerRecovery.retry.nativePublicationReceipt", "operationalBlockerRecovery.retry.retryLater"],
+      "workflowRewriteEvidenceCompatibility": "Optional on legacy native publication proofs; records receipt path, recovery error or empty fast-forward result once and reuses it on verification retries."
     },
     {
       "id": "merge-lease-waiters",

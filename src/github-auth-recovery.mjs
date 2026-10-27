@@ -425,6 +425,7 @@ export GH_TOKEN="$HQ_ENTITLEMENT_GH_TOKEN" GITHUB_TOKEN="$HQ_ENTITLEMENT_GH_TOKE
   });
   const recordRewrite = () => recordWorkspaceRewrite({ oldHead: expectedHead, newHead: commitSha,
     branch: targetBranch, actor: 'review-service:auth-recovery', env,
+    // Scoped workflow pushes use PUSH_REMOTE below, not the workspace origin.
     repository: requiresWorkflowPush ? `github.com/${repo.toLowerCase()}` : null,
     git: async args => String((await execFileImpl('git', recoveryGitArgs(workspaceDir, args),
       { ...localGitOptions(), env })).stdout || '').trim() });
@@ -470,8 +471,13 @@ export GH_TOKEN="$HQ_ENTITLEMENT_GH_TOKEN" GITHUB_TOKEN="$HQ_ENTITLEMENT_GH_TOKE
       && pendingNativePublication.expectedRemoteSha === expectedHead
       && pendingNativePublication.headSha === commitSha
       && Number.isFinite(Date.parse(pendingNativePublication.observedAt))) {
-      publicationProof = pendingNativePublication;
-      rewriteEvidence = await recordRewrite();
+      rewriteEvidence = pendingNativePublication.rewriteEvidence ?? await recordRewrite();
+      publicationProof = { ...pendingNativePublication, rewriteEvidence };
+      // Upgrade legacy proof once; verification retries reuse even failed or
+      // empty (fast-forward) receipt evidence without retrying storage.
+      if (pendingNativePublication.rewriteEvidence == null) {
+        await recordNativePublicationImpl(publicationProof, workflowPush);
+      }
       return verifyPublication();
     }
     try {
@@ -552,6 +558,7 @@ export GIT_TERMINAL_PROMPT=0
         // Persist the native update before the fallible live-head verification.
         // A later reconcile can finish verification without losing attribution.
         rewriteEvidence = await recordRewrite();
+        publicationProof = { ...publicationProof, rewriteEvidence };
         await recordNativePublicationImpl(publicationProof, workflowPush);
         return { ...await verifyPublication(), attempts: attemptsMade };
       }

@@ -7,7 +7,7 @@ import { join, isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { resolveHqRoot } from './hq-root.mjs';
 
-const sha = /^[0-9a-f]{40}$/;
+const sha = /^[0-9a-f]{40}$/i;
 const encode = value => encodeURIComponent(value).replace(/[!'()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 
 export function rewriteRepositoryKey(value) {
@@ -30,7 +30,7 @@ export function recordPublishedRewrite({ repository, branch, oldHead, newHead,
   const evidence = { repo: repository, branch, oldHead, newHead, actor };
   if (oldHead === newHead) return {};
   try {
-    if (!repository || !branch || !actor || ![oldHead, newHead].every(tip => sha.test(tip || '') && /[1-9a-f]/.test(tip))) {
+    if (!repository || !branch || !actor || ![oldHead, newHead].every(tip => sha.test(tip || '') && /[1-9a-f]/i.test(tip))) {
       throw new Error('invalid-branch-rewrite-receipt');
     }
     const root = resolveHqRoot(env);
@@ -73,7 +73,7 @@ export async function recordWorkspaceRewrite({ git, oldHead, newHead, branch, ac
     repository ||= rewriteRepositoryKey(await git(['remote', 'get-url', '--push', 'origin']));
     return recordPublishedRewrite({ repository, branch, oldHead, newHead, actor, env });
   } catch (error) {
-    const rewriteReceiptError = { branch, oldHead, newHead, actor, code: error.code || 'rewrite-receipt-unavailable' };
+    const rewriteReceiptError = { repo: repository || null, branch, oldHead, newHead, actor, code: error.code || 'rewrite-receipt-unavailable' };
     console.warn('[branch-rewrite] published rewrite receipt unavailable', JSON.stringify(rewriteReceiptError));
     return { rewriteReceiptError };
   }

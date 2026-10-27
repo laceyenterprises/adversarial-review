@@ -1909,6 +1909,12 @@ store. This also covers plain-Git fallback and service workspaces without a
 managed worker manifest. Ordinary fast forwards, failed pushes and observations
 without native publication proof never confer rewrite authority. Auth recovery
 records a native proven update before the fallible live-head verification.
+Its retained `pendingNativePublication.rewriteEvidence` saves the receipt path,
+storage error or empty fast-forward result so later verification retries do not
+write duplicate receipts. Legacy proofs acquire that field once on reconciliation.
+The repository identity follows the actual push target: origin's push URL for
+ordinary auth recovery and remediation, the explicit HTTPS destination for scoped
+workflow recovery, and the queue's head repository.
 
 The compatible `worker.branch_rewritten` record lives at
 `dispatch/branch-rewrites/<percent-encoded-repository>/<percent-encoded-branch>/<uuid>.json`.
@@ -1919,6 +1925,7 @@ repair only their own modes. The file is fsynced, atomically renamed and its
 directory fsynced. Filesystem ownership is audit evidence, not authentication.
 
 A receipt storage failure returns and logs `rewriteReceiptError` with exact tips
+and `repo` (null if resolution failed; independently establish the push target)
 while preserving successful publication. Repair storage and use the Agent OS
 `cwp_dispatch.branch_rewrite.record_rewrite` writer with those verified tips;
 never repeat the push just to recreate a receipt. Receipts have no automatic

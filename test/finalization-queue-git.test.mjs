@@ -26,9 +26,9 @@ test('all Git execution calls consume a nominal single-scaled finite budget clip
   } });
   const request = { entry: f.entry, oldHead: f.oldHead, exactBase: f.base, headRepository: 'example/review', headRef: 'topic', deadline: handoffTime(1800) };
   await assert.rejects(adapter(idle).prepare(request)); assert.equal(waits.pop(), 30_000);
-  await assert.rejects(adapter({ enabled: true, loadAvg1m: 2, cpuCount: 1 }).prepare(request));
+  await assert.rejects(adapter({ enabled: true, loadAvg1m: 2, cpuCount: 1, cpuBusyPercent: 100 }).prepare(request));
   assert.equal(waits.pop(), 60_000, '2x load scales nominal 30s once');
-  f.clock(1799); await assert.rejects(adapter({ enabled: true, loadAvg1m: 1000, cpuCount: 1 }).prepare(request));
+  f.clock(1799); await assert.rejects(adapter({ enabled: true, loadAvg1m: 1000, cpuCount: 1, cpuBusyPercent: 100 }).prepare(request));
   assert.equal(waits.pop(), 1000);
   assert.throws(() => runQueueGit(['--version'], { timeoutMs: Infinity }), /git-deadline-expired/);
   assert.throws(() => runQueueGit(['--version'], { timeoutMs: 2 ** 31 }), /git-deadline-expired/);
@@ -56,7 +56,7 @@ test('network Git has no ambient credential fallback and consumes an injected ru
   const guarded = resolveQueueGitAdapter({ rootDir: f.root, now: f.now, load: idle });
   await assert.rejects(guarded.prepare(request), /entitled-git-runner-unavailable/);
   const calls = [];
-  const injected = resolveQueueGitAdapter({ rootDir: f.root, now: f.now, load: { enabled: true, loadAvg1m: 2, cpuCount: 1 },
+  const injected = resolveQueueGitAdapter({ rootDir: f.root, now: f.now, load: { enabled: true, loadAvg1m: 2, cpuCount: 1, cpuBusyPercent: 100 },
     networkRunner: async (args, options) => { calls.push({ args, options }); throw new Error('synthetic entitled transport stop'); } });
   await assert.rejects(injected.prepare(request), /synthetic entitled transport stop/);
   assert.equal(calls.length, 1); assert.equal(calls[0].options.timeoutMs, 60_000);
@@ -80,6 +80,31 @@ test('remote non-fast-forward refusal settles as not-applied without removing su
   assert.equal(result.outcome, 'not-applied'); assert.match(result.sourceRef, /^git:/);
   assert.equal(f.g(['--git-dir', f.remote, 'rev-parse', 'topic']), f.oldHead);
   assert.deepEqual(readdirSync(join(f.root, 'data/finalization-git')), [p.workspace]);
+});
+
+for (const kind of ['rewrite', 'forward', 'no-op']) test(`real Git queue publication records receipts only for a rewrite: ${kind}`, async t => {
+  const f = gitFixture(t), p = await f.prepare();
+  const cwd = join(f.root, 'data/finalization-git', p.workspace);
+  let candidate = p.candidate;
+  if (kind !== 'rewrite') {
+    localGit(cwd, ['checkout', '--detach', f.oldHead]);
+    if (kind === 'forward') {
+      writeFileSync(join(cwd, 'follow-up'), 'next change\n');
+      localGit(cwd, ['add', 'follow-up']);
+      localGit(cwd, ['commit', '-m', 'fast forward']);
+    }
+    candidate = localGit(cwd, ['rev-parse', 'HEAD']);
+  }
+  if (kind === 'rewrite') {
+    await assert.rejects(runQueueGit(['merge-base', '--is-ancestor', f.oldHead, candidate], { cwd, timeoutMs: 5000 }), e => e.code === 1);
+  }
+  const adapter = resolveQueueGitAdapter({ rootDir: f.root, now: f.now, load: idle, resolveRemote: () => f.remote, env: { HQ_ROOT: f.root } });
+  const entry = { ...f.entry, ...p, rebase: { workspace: p.workspace, headRepository: 'example/review', headRef: 'topic' } };
+  const result = await adapter.push({ entry, intent: { expectedOldHead: f.oldHead, candidate, deadline: handoffTime(1800), timeoutMs: 30_000 } });
+  assert.equal(result.outcome, 'succeeded');
+  assert.equal(f.g(['--git-dir', f.remote, 'rev-parse', 'topic']), candidate);
+  assert.equal(Boolean(result.rewriteReceipt), kind === 'rewrite');
+  assert.equal(result.rewriteReceiptError, undefined);
 });
 
 for (const status of ['[rejected] (stale info)', '[remote rejected] (protected branch hook declined)',

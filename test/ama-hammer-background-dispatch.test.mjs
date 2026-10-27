@@ -1869,6 +1869,54 @@ test('CLOSURESPLIT-01: background disagreement returns keys and reselects daemon
   assert.equal(queue.snapshot().running, 0);
 });
 
+for (const mode of ['inline', 'background']) {
+  test(`PRIMARYREPAIRDISPATCH-01: second same-head mismatch pages in ${mode} mode`, async t => {
+    const queue = createAmaHammerBackgroundQueue();
+    const pages = [];
+    let dispatches = 0;
+    const args = closureArgs({
+      resolveAmaHammerDispatchModeImpl: () => mode, amaHammerBackgroundQueueImpl: () => queue,
+      fetchPrimaryChangeImpl: async ({ headSha }) => ({ ...primaryChangeFixture(headSha), finalFiles: [] }),
+      observeClosureWaitImpl: options => observeClosureWait({ ...options,
+        pageImpl: async (message, metadata) => pages.push({ message, metadata }) }),
+      maybeDispatchAmaCloserImpl: async payload => {
+        dispatches++;
+        // Alternate selected hammer owners to model executor facts changing
+        // after every selection, without ever producing a launch.
+        const primary = payload.sharedNextAction.snapshot.observations.progress.value?.primaryChange;
+        const fresh = reviseClosureNextAction(payload.sharedNextAction, { progress: {
+          ...payload.sharedNextAction.snapshot.observations.progress.value,
+          primaryChange: primary?.ok === false ? null
+            : { ok: false, reason: 'primary-change-reverted', headSha: HEAD },
+        } });
+        const mismatch = hammerDispatchMismatch(payload.sharedNextAction, fresh,
+          { repo: args.repoPath, prNumber: args.prNumber, headSha: HEAD });
+        assert.equal(mismatch?.reason, 'closure-decision-mismatch');
+        return mismatch;
+      },
+    });
+    t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+    let result = await maybeDispatchAmaClosureFor(args);
+    if (mode === 'background') {
+      await queue.drain();
+      const retry = await maybeDispatchAmaClosureFor(args);
+      assert.equal(retry.decisionReresolutions, 1);
+      assert.equal(retry.backgroundDispatch.state, 'started');
+      assert.equal(pages.length, 0);
+      await queue.drain();
+      result = await maybeDispatchAmaClosureFor(args);
+    }
+    assert.equal(dispatches, 2, 'one re-resolution, then page instead of a third dispatch');
+    assert.equal(result.reason, 'closure-decision-mismatch-escalated');
+    assert.equal(result.needsOperator, true);
+    assert.equal(result.boundedWait.exhausted, true);
+    assert.match(result.closureBlocker, /closure-decision-mismatch-no-progress/);
+    assert.equal(pages.length, 1);
+    assert.equal(pages[0].metadata.source, 'hamclose-closure-wait');
+    assert.equal(queue.snapshot().running, 0);
+  });
+}
+
 test('CLOSURESPLIT-01: background mismatch to pending CI retains the refreshed decision', async t => {
   const queue = createAmaHammerBackgroundQueue();
   let dispatches = 0;

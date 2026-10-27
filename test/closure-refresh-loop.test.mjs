@@ -4,7 +4,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { deriveNextActionSnapshot, nextAction } from '../src/pr-next-action.mjs';
-import { observeClosureRefreshLoop } from '../src/ama/closure-refresh-loop.mjs';
+import { observeClosureDecisionMismatch, observeClosureRefreshLoop } from '../src/ama/closure-refresh-loop.mjs';
+import { observeClosureWait } from '../src/ama/closure-wait.mjs';
 import { closureGateFactsKey } from '../src/ama/closure-gate-facts.mjs';
 
 const HEAD = 'a'.repeat(40), OLD = 'b'.repeat(40);
@@ -72,4 +73,36 @@ test('gate canonicalization preserves ordered arrays and every collection entry 
   assert.notEqual(closureGateFactsKey({ labels: [{ name: 'one', id: 1 }] }),
     closureGateFactsKey({ labels: [{ name: 'one', id: 2 }] }));
   assert.notEqual(closureGateFactsKey({ chain: ['one', 'two'] }), closureGateFactsKey({ chain: ['two', 'one'] }));
+});
+
+test('same-head mismatch debt survives reopen and failed delivery; a new head gets one re-resolution', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closure-mismatch-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  let attempts = 0;
+  const observe = (headSha = HEAD) => {
+    const base = pair({ mergeable: null }).snapshot;
+    const snapshot = deriveNextActionSnapshot({ base, head: headSha, observations: {
+      pr: { ...base.observations.pr.value, headSha },
+      reviews: { ...base.observations.reviews.value, headSha },
+    } });
+    return observeClosureDecisionMismatch({ rootDir, repo: 'fixture/repo', prNumber: 17,
+      result: { dispatched: false, reason: 'closure-decision-mismatch',
+        nextActionShared: { snapshot, decision: nextAction(snapshot) } },
+      observeWaitImpl: options => observeClosureWait({ ...options, pageImpl: async () => {
+        attempts++;
+        if (attempts === 1) throw new Error('synthetic page delivery failure');
+      } }),
+    });
+  };
+  assert.equal((await observe()).reason, 'closure-decision-mismatch');
+  assert.equal(attempts, 0);
+  await assert.rejects(observe(), /synthetic page delivery failure/);
+  assert.equal((await observe()).reason, 'closure-decision-mismatch-escalated');
+  assert.equal(attempts, 2, 'a fresh connection retains saturated debt and retries delivery');
+  await observe();
+  assert.equal(attempts, 2, 'successful page receipt dedupes across reopen');
+  assert.equal((await observe(OLD)).reason, 'closure-decision-mismatch');
+  assert.equal(attempts, 2, 'new head gets one re-resolution');
+  assert.equal((await observe(OLD)).reason, 'closure-decision-mismatch-escalated');
+  assert.equal(attempts, 3);
 });

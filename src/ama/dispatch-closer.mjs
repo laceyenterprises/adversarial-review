@@ -4837,7 +4837,14 @@ async function maybeDispatchAmaCloserAttempt({
       } } : {}),
     },
   });
-  if (!verdict.trace.primaryChange.ok) {
+  // R05 selects the hammer to repair this failed predicate. Preserve the
+  // predicate as merge evidence, but admit the selected repair through the
+  // existing structural safety, cap and lease checks below.
+  const selectedPrimaryRepair = hasHammerDispatchIntent(selectedNextAction, decisionIdentity)
+    && selectedNextAction.decision.reason === 'primary-change-repair'
+    && hasHammerDispatchIntent(sharedNextAction, decisionIdentity)
+    && sharedNextAction.decision.reason === 'primary-change-repair';
+  if (!verdict.trace.primaryChange.ok && !selectedPrimaryRepair) {
     observeSharedDecision(sharedNextAction);
     const primaryChangeRepair = sharedNextAction.decision.actor === 'hammer';
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true, recoveryWait: true,

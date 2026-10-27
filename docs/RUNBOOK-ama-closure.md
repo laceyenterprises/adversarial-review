@@ -67,9 +67,18 @@ The head/refusal reservation survives restarts and ambiguous submissions. It
 spends existing recovery and hammer series/target/lifetime budgets; no override,
 config or manual state migration is needed. A live launch retains ownership for
 the existing bounded recovery wait. Missing repair, failed/unreadable/expired
-attempt, dispatch refusal or exhausted caps page through the existing closure
-path with `safety-refusal:<key>`. Failed page delivery retries; successful pages
+attempt, non-deferred dispatch refusal or exhausted caps page through the existing
+closure path with `safety-refusal:<key>`. Failed page delivery retries; successful pages
 deduplicate by head/key. The original hammer hold remains authoritative.
+
+Proven pre-submission deferrals (operator holds, disabled execution, fleet stops,
+occupied/uncertain ownership and transient GitHub inspection errors) remove only
+that refusal reservation and refund its recovery charge under the head flock.
+They spend no hammer budget and do not page. The next ordinary poll rechecks all
+admission gates; no local retry loop is added. Permanent read failures and
+ambiguous HQ submission errors retain the one-shot reservation. Partial closure
+snapshots safely fall back to the exact-head hammer refusal; missing recorded
+repair evidence still fails closed.
 
 The reversal collector checks subsequent immutable review snapshots when the
 first superseding snapshot predates the original remediation commit. It still

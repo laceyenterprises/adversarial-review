@@ -1106,7 +1106,7 @@
     },
     {
       "id": "ama-automated-recovery",
-      "scopedSafetyRepair": "SAFETYSTOPOWNER-01: optional repairs[refusalKey] records reservedAt, dispatchKey and optional dispatched, launchRequestId, promptPath, reason; one coding/push attempt per head/key, reserved before submission under recovery flock and existing hammer caps; missing, refused or exhausted repair pages immediately with safety-refusal:<key>; no merge or lease authority",
+      "scopedSafetyRepair": "SAFETYSTOPOWNER-01: optional repairs[refusalKey] records reservedAt, dispatchKey and optional dispatched, launchRequestId, promptPath, reason; one coding/push attempt per head/key, reserved before submission under recovery flock and existing hammer caps; proven pre-submission holds, disabled execution, fleet stops, occupied/uncertain ownership and transient GitHub reads release only their recovery reservation/charge for next-poll admission without paging or hammer spend; ambiguous submissions stay charged; missing, non-deferred refused or exhausted repair pages immediately with safety-refusal:<key>; no merge or lease authority",
       "ciInfrastructureRecovery": ["reason", "stopKey", "refundedAt", "attempts", "event"],
       "title": "AMA Automated Recovery",
       "path": "docs/data-model/ama-automated-recovery.md",

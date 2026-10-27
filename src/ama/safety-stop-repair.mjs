@@ -9,6 +9,7 @@ import { loadConfigCached } from '../config-loader.mjs';
 import { OPERATOR_HOLD_LABELS } from '../operator-hold-labels.mjs';
 import { resolveHqRoot } from '../hq-root.mjs';
 import { fleetStopReason } from '../fleet-stop.mjs';
+import { isTransientGhError } from '../gh-cli.mjs';
 import { probeOrphanOwnership } from './orphan-watchdog.mjs';
 import { reserveHammerRepairDispatch } from './hammer-retry-cap.mjs';
 
@@ -26,17 +27,27 @@ export async function dispatchSafetyStopRepair({ rootDir, repo, prNumber, headSh
     throw new Error('offline tests must inject safety-stop repair transport');
   }
   const refuse = reason => ({ dispatched: false, reason });
-  if (cfg.enabled !== true || cfg.autonomousMergeExecutionEnabled !== true) return refuse('execution-disabled');
+  // Only proven pre-submission waits may release the caller's reservation.
+  // Once HQ submission starts, errors remain ambiguous and stay charged.
+  const defer = reason => ({ dispatched: false, deferred: true, reason });
+  if (cfg.enabled !== true || cfg.autonomousMergeExecutionEnabled !== true) return defer('execution-disabled');
   const stop = fleetStopImpl({ env, logger });
-  if (stop) return refuse(stop);
-  const { stdout } = await execFileImpl('gh', ['pr', 'view', String(prNumber), '--repo', repo,
-    '--json', 'state,headRefOid,headRefName,isDraft,labels'], { env, signal, timeout: 15_000, maxBuffer: 1024 * 1024 });
+  if (stop) return defer(stop);
+  let stdout;
+  try {
+    ({ stdout } = await execFileImpl('gh', ['pr', 'view', String(prNumber), '--repo', repo,
+      '--json', 'state,headRefOid,headRefName,isDraft,labels'], { env, signal, timeout: 15_000, maxBuffer: 1024 * 1024 }));
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    if (isTransientGhError(error)) return defer('live-pr-read-transient');
+    throw error;
+  }
   const pr = JSON.parse(stdout);
   if (pr.state !== 'OPEN' || pr.headRefOid !== headSha || pr.isDraft !== false || !pr.headRefName
     || !Array.isArray(pr.labels)) return refuse('live-pr-not-actionable');
-  if (pr.labels.some(label => OPERATOR_HOLD_LABELS.includes(label.name))) return refuse('operator-held');
+  if (pr.labels.some(label => OPERATOR_HOLD_LABELS.includes(label.name))) return defer('operator-held');
   const owner = await probeOwnershipImpl({ rootDir, repo, prNumber, headSha, signal, logger, env });
-  if (owner?.owned !== false || owner?.uncertain !== false) return refuse('ownership-unavailable');
+  if (owner?.owned !== false || owner?.uncertain !== false) return defer('ownership-unavailable');
   const workerClass = workerClassImpl({}, { env });
   const promptPath = join(rootDir, 'data', 'follow-up-jobs', 'ama-automated-recovery', `${dispatchKey}.md`);
   const missing = refusal.missingEvidence;

@@ -119,7 +119,7 @@ async function recoverAmaAutomationLocked({
   // reservation before submission under this head's existing recovery flock.
   if (selected.row === 'R05-structural' && selected.actor === 'closure-recovery'
     && selected.reason === 'safety-refusal' && !selected.queue?.deferredBy) {
-    const controls = readClosureNextAction(result)?.snapshot.observations.controls?.value;
+    const controls = readClosureNextAction(result)?.snapshot?.observations?.controls?.value;
     const stop = result.hammerStop;
     const refusal = stop?.headSha === headSha ? stop.refusal
       : controls?.safetyRefusal?.headSha === headSha ? controls.safetyRefusal.refusal : null;
@@ -147,6 +147,12 @@ async function recoverAmaAutomationLocked({
       const receipt = await dispatchRepairImpl({ ...repairOptions, rootDir, repo, prNumber, headSha,
         refusal, dispatchKey, jobKey: reviewStateRow?.head_sha || reviewStateRow?.revision_ref,
         signal, logger });
+      if (receipt?.dispatched === false && receipt.deferred === true) {
+        delete state.repairs[refusal.key];
+        state.attempts -= 1;
+        save();
+        return waiting('repair-deferred');
+      }
       Object.assign(state.repairs[refusal.key], receipt);
       save();
       if (receipt?.dispatched === true && receipt.launchRequestId) return waiting('scoped-repair');
@@ -216,7 +222,7 @@ async function recoverAmaAutomationLocked({
     clearStall();
     save();
   }
-  const launch = readClosureNextAction(result)?.snapshot.observations.launches?.value?.closer;
+  const launch = readClosureNextAction(result)?.snapshot?.observations?.launches?.value?.closer;
   if (selected.actor === 'closure-recovery' && launch?.launchRequestId) {
     try { await reclaimLaunch(); }
     catch (error) { logger.warn?.(`[ama-recovery] launch reconciliation failed: ${error.message}`); }

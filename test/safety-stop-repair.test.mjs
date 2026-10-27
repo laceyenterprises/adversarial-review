@@ -78,13 +78,12 @@ test('both snapshot projections carry exact refusal evidence to the R05 executor
   assert.equal((await recoverAmaAutomation(f.options)).recovery.action, 'scoped-repair');
 });
 
-for (const cause of ['dispatch-refused', 'throw', 'missing-next', 'budget', 'lifetime', 'owned', 'uncertain']) {
+for (const cause of ['dispatch-refused', 'throw', 'missing-next', 'budget', 'lifetime']) {
   test(`unavailable repair pages its refusal key without a second submission: ${cause}`, async t => {
     const f = setup(t);
     if (cause === 'missing-next') delete f.refusal.next;
     if (cause === 'dispatch-refused') f.options.dispatchRepairImpl = async () => ({ dispatched: false, reason: 'unavailable' });
     if (cause === 'throw') f.options.dispatchRepairImpl = async () => { throw new Error('synthetic submission interrupted'); };
-    if (cause === 'owned' || cause === 'uncertain') f.options.repairOptions.probeOwnershipImpl = async () => ({ [cause]: true });
     if (cause === 'budget' || cause === 'lifetime') {
       for (let i = 0; i < (cause === 'budget' ? 2 : 6); i++) recordHammerRetryDispatch(f.options.rootDir,
         f.options, { headSha: HEAD, jobKey: cause === 'lifetime' ? `review-${i}` : HEAD });
@@ -109,6 +108,112 @@ test('terminal repair, unknown receipt and page delivery failure retain the rese
   await recoverAmaAutomation(f.options);
   assert.equal(pages, 2);
   assert.equal(f.commands.filter(call => call.command === 'hq').length, 1);
+});
+
+for (const cause of ['hold', 'disabled', 'fleet', 'owned', 'uncertain', 'unknown-owner']) {
+  test(`preflight deferral preserves budgets and resumes after release: ${cause}`, async t => {
+    const f = setup(t);
+    const original = { ...f.options.repairOptions };
+    if (cause === 'disabled') f.options.repairOptions.cfg = { enabled: true, autonomousMergeExecutionEnabled: false };
+    if (cause === 'fleet') f.options.repairOptions.fleetStopImpl = () => 'fleet-stop-active';
+    if (cause === 'hold') f.options.repairOptions.execFileImpl = async () => ({ stdout: JSON.stringify({
+      state: 'OPEN', headRefOid: HEAD, headRefName: 'fixture/repair', isDraft: false,
+      labels: [{ name: 'no-merge-hold' }],
+    }) });
+    if (cause === 'owned' || cause === 'uncertain' || cause === 'unknown-owner') {
+      f.options.repairOptions.probeOwnershipImpl = async () => cause === 'unknown-owner' ? null : { [cause]: true };
+    }
+    for (let tick = 0; tick < 3; tick++) {
+      const deferred = await recoverAmaAutomation({ ...f.options });
+      assert.equal(deferred.recovery.action, 'repair-deferred');
+      assert.equal(deferred.recovery.attempts, 0);
+      assert.equal(deferred.recovery.repairs[f.refusal.key], undefined);
+      assert.equal(readHammerRetryCapLedger(f.options.rootDir, f.options), null);
+      f.advance();
+    }
+    assert.equal(f.pages.length, 0);
+    f.options.repairOptions = original;
+    const resumed = await recoverAmaAutomation({ ...f.options });
+    assert.equal(resumed.recovery.action, 'scoped-repair');
+    assert.equal(resumed.recovery.attempts, 1);
+    assert.equal(f.commands.filter(call => call.command === 'hq').length, 1);
+    assert.equal(readHammerRetryCapLedger(f.options.rootDir, f.options).lifetimeAttemptCount, 1);
+  });
+}
+
+for (const error of [
+  Object.assign(new Error('synthetic timeout'), { code: 'ETIMEDOUT' }),
+  Object.assign(new Error('synthetic subprocess exit'), { stderr: 'net/http: TLS handshake timeout' }),
+  Object.assign(new Error('synthetic timeout'), { killed: true, signal: 'SIGTERM' }),
+  Object.assign(new Error('synthetic HTTP failure'), { stderr: 'HTTP 503 Service Unavailable' }),
+]) {
+  test(`transient GitHub preflight failure retries on the next poll without charging: ${error.stderr || error.code || error.signal}`, async t => {
+    const f = setup(t);
+    const transport = f.options.repairOptions.execFileImpl;
+    let reads = 0;
+    f.options.repairOptions.execFileImpl = async (...args) => {
+      if (args[0] === 'gh' && ++reads === 1) throw error;
+      return transport(...args);
+    };
+    const deferred = await recoverAmaAutomation(f.options);
+    assert.equal(deferred.recovery.action, 'repair-deferred');
+    assert.equal(deferred.recovery.attempts, 0);
+    assert.equal(deferred.recovery.repairs[f.refusal.key], undefined);
+    assert.equal(readHammerRetryCapLedger(f.options.rootDir, f.options), null);
+    assert.equal(f.pages.length, 0);
+    assert.equal((await recoverAmaAutomation({ ...f.options })).recovery.action, 'scoped-repair');
+    assert.equal(reads, 2);
+    assert.equal(f.commands.filter(call => call.command === 'hq').length, 1);
+  });
+}
+
+test('permanent preflight errors and ambiguous HQ timeouts retain the one-shot reservation', async t => {
+  for (const command of ['gh', 'hq']) {
+    const f = setup(t);
+    const transport = f.options.repairOptions.execFileImpl;
+    let failures = 0;
+    f.options.repairOptions.execFileImpl = async (...args) => {
+      if (args[0] === command) {
+        failures++;
+        throw Object.assign(new Error(command === 'gh' ? 'HTTP 403 Forbidden' : 'TLS handshake timeout'),
+          { code: command === 'gh' ? 1 : 'ETIMEDOUT' });
+      }
+      return transport(...args);
+    };
+    assert.equal((await recoverAmaAutomation(f.options)).outcome, 'recovery-exhausted');
+    const repeated = await recoverAmaAutomation({ ...f.options });
+    assert.equal(repeated.recovery.attempts, 1);
+    assert.ok(repeated.recovery.repairs[f.refusal.key]);
+    assert.equal(failures, 1);
+    assert.equal(f.pages.length, 1);
+  }
+});
+
+test('partial closure snapshots fall back to exact-head hammer refusal without crashing', async t => {
+  for (const shared of [null, {}, { snapshot: {} }, { snapshot: { observations: {} } }]) {
+    const f = setup(t);
+    f.options.result = { ...f.options.result };
+    if (shared) bindClosureNextAction(f.options.result, shared);
+    assert.equal((await recoverAmaAutomation(f.options)).recovery.action, 'scoped-repair');
+    assert.equal(f.pages.length, 0);
+  }
+});
+
+test('missing closure observations without a recorded refusal exhaust safely', async t => {
+  const f = setup(t);
+  f.options.result = { nextAction: f.options.result.nextAction };
+  bindClosureNextAction(f.options.result, {});
+  assert.equal((await recoverAmaAutomation(f.options)).outcome, 'recovery-exhausted');
+  assert.equal(f.commands.length, 0);
+  assert.equal(f.pages.length, 1);
+});
+
+test('ordinary recovery tolerates a bound closure observation without a snapshot', async t => {
+  const f = setup(t);
+  f.options.result = { nextAction: { ...f.options.result.nextAction, reason: 'ordinary-retry' } };
+  bindClosureNextAction(f.options.result, {});
+  assert.equal((await recoverAmaAutomation(f.options)).outcome, 'ama-pending');
+  assert.equal(f.pages.length, 0);
 });
 
 test('parallel wakes serialize; a new refusal uses remaining shared hammer budget', async t => {

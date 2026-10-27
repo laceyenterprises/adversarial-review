@@ -83,14 +83,22 @@ label, lease, review-state or additional-dispatch authority.
 flock persists the reservation and charges `attempts` before submission. The
 dispatcher separately reserves the existing hammer series/target/lifetime budget
 under its PR ledger lock. Charges and reservations survive crashes and ambiguous
-receipts; no automatic refund or second submission occurs. Live head, operator
-holds, fleet stop, configured execution switch and ownership are checked before
-submission. HCP retains ordinary dispatch admission, with origin-owned retry.
+receipts; these never authorize an automatic refund or second submission. Live
+head, operator holds, fleet stop, configured execution switch and ownership are
+checked before submission. An explicit pre-submission `{ dispatched: false,
+deferred: true, reason }` result removes only the current refusal reservation and
+refunds its recovery attempt under the same head flock. Operator holds, disabled
+execution, fleet stops, occupied/uncertain ownership and transient GitHub read
+errors take this path without spending hammer budget or paging. The next ordinary
+poll rechecks admission; there is no local retry loop. Permanent read errors and
+errors after HQ submission starts remain charged and terminal. HCP retains
+ordinary dispatch admission, with origin-owned retry.
 
 A live receipt waits at most `stuckDeadlineMs` (default 30 minutes). A completed,
 unreadable, interrupted or expired attempt, exhausted budget, missing repair or
-dispatch refusal immediately uses the existing exhaustion page path. Its reason
-is `safety-refusal:<refusal key>` and its payload retains `refusalKey` and `detail`.
+non-deferred dispatch refusal immediately uses the existing exhaustion page path.
+Its reason is `safety-refusal:<refusal key>` and its payload retains `refusalKey`
+and `detail`.
 Pages deduplicate per head/key and retry failed delivery. A new key may use only
 remaining shared budgets. A changed head receives its own receipt; the hammer
 lifetime ceiling still follows the PR. Legacy records without `repairs` remain

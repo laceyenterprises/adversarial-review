@@ -868,9 +868,12 @@ SAFETYSTOPOWNER-01 supplies an executor for existing R05 closure recovery:
 an audited deterministic refusal with a concrete `next` gets one scoped coding
 PR update per head/refusal key. The recovery receipt and existing hammer ledger
 reserve budget before submission, including ambiguous attempts. Missing repair,
-submission refusal or exhaustion pages with the key; a live receipt waits within
-the existing recovery deadline. This adds no merge authority, lease transition
-or lifecycle status. Primary-change authorization may search later immutable
+non-deferred submission refusal or exhaustion pages with the key; a live receipt
+waits within the existing recovery deadline. Proven pre-submission holds, disabled
+execution, fleet stops, occupied/uncertain ownership and transient GitHub reads
+release only their reservation and recovery charge without paging; the next poll
+rechecks admission. Ambiguous submission errors stay charged. This adds no merge
+authority, lease transition or lifecycle status. Primary-change authorization may search later immutable
 review snapshots for the original reversal, while retaining current-at-parent
 review proof, exact commit identity/content and cited-region coverage.
 

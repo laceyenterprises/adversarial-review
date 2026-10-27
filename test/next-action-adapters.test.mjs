@@ -79,7 +79,14 @@ for (const [name, observations, action, actor] of cases) {
       dispatchHammer: async () => { effects.push('hammer'); return { dispatched: true }; },
       pageImpl: async () => { effects.push('page'); } });
     const unownedDispatch = decision.queue.intent === 'dispatch' && !decision.queue.deferredBy;
-    assert.deepEqual(effects, unownedDispatch && ['review', 'hammer'].includes(action) ? [action] : []);
+    const missingSafetyRepair = decision.row === 'R05-structural' && actor === 'closure-recovery'
+      && decision.reason === 'safety-refusal' && !decision.queue.deferredBy;
+    assert.deepEqual(effects, missingSafetyRepair ? ['page']
+      : unownedDispatch && ['review', 'hammer'].includes(action) ? [action] : []);
+    if (missingSafetyRepair) {
+      assert.equal(recover.outcome, 'recovery-exhausted');
+      assert.equal(recover.recovery.event.detail, 'no-recorded-repair');
+    }
     if (action === 'done') assert.equal(recover.outcome, 'pr-terminal');
 
     const orphanEffects = [];

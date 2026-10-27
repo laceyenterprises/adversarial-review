@@ -841,6 +841,19 @@ export function recordHammerRetryDispatch(rootDir, identity, options = {}) {
   return mutateHammerLedger(rootDir, identity, () => recordHammerRetryDispatchUnlocked(rootDir, identity, options));
 }
 
+// Safety-stop repair spends the existing budget before submission. An uncertain
+// submission keeps its charge; it must never mint a second attempt after a crash.
+export function reserveHammerRepairDispatch(rootDir, identity, options) {
+  return mutateHammerLedger(rootDir, identity, () => {
+    const ledger = readHammerRetryCapLedger(rootDir, identity);
+    if (ledger?.__corrupt) throw new Error('corrupt hammer retry ledger');
+    if (ledger?.chargedDispatchKeys?.includes(options.dispatchKey)) return false;
+    if (evaluateHammerRetryCap(ledger, options).capExhausted) return false;
+    recordHammerRetryDispatchUnlocked(rootDir, identity, options);
+    return true;
+  });
+}
+
 export function markHammerRetryCapExhausted(rootDir, identity, options = {}) {
   return mutateHammerLedger(rootDir, identity, () => markHammerRetryCapExhaustedUnlocked(rootDir, identity, options));
 }

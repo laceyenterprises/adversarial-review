@@ -69,6 +69,33 @@ result, or other tick diagnostics. These return-only fields are not stored.
 
 ## Budget and exhaustion
 
+SAFETYSTOPOWNER-01 executes an exact-head R05 `safety-refusal` with a recorded
+repair as one scoped coding PR update, using the existing remediator routing,
+`branch-push` completion and `push` outcome. Both closure snapshot projections
+carry the full refusal. The brief includes its unmodified `next`, exact
+missing-evidence summary and complete evidence with protected regions. The worker
+must recheck the expected open head before editing and pushing; it has no merge,
+label, lease, review-state or additional-dispatch authority.
+
+`repairs` is an optional object keyed by refusal key. Each entry records
+`reservedAt` (epoch milliseconds), deterministic `dispatchKey`, and optional
+`dispatched`, `launchRequestId`, `promptPath` and `reason`. The existing head
+flock persists the reservation and charges `attempts` before submission. The
+dispatcher separately reserves the existing hammer series/target/lifetime budget
+under its PR ledger lock. Charges and reservations survive crashes and ambiguous
+receipts; no automatic refund or second submission occurs. Live head, operator
+holds, fleet stop, configured execution switch and ownership are checked before
+submission. HCP retains ordinary dispatch admission, with origin-owned retry.
+
+A live receipt waits at most `stuckDeadlineMs` (default 30 minutes). A completed,
+unreadable, interrupted or expired attempt, exhausted budget, missing repair or
+dispatch refusal immediately uses the existing exhaustion page path. Its reason
+is `safety-refusal:<refusal key>` and its payload retains `refusalKey` and `detail`.
+Pages deduplicate per head/key and retry failed delivery. A new key may use only
+remaining shared budgets. A changed head receives its own receipt; the hammer
+lifetime ceiling still follows the PR. Legacy records without `repairs` remain
+readable. No merge gate or lease rule changes.
+
 The watcher passes `amaRetainLoopCapFor(dispatchJob.remediationPlan.maxRounds)`
 as the action cap; absent a job budget, the shared convergence default applies.
 The cap prevents further recovery actions. A refusal or exhausted action cap

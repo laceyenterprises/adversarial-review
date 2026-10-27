@@ -217,6 +217,7 @@ export function observeClosureResult(shared, result, passSnapshot = null) {
         recordedAt: result.hammerStop.recordedAt ?? result.hammerStop.recorded_at ?? null },
       ...(result.hammerStop.refusal ? { safetyRefusal: {
         deterministic: true, reason: result.hammerStop.predicate,
+        headSha: result.hammerStop.headSha || shared.decision.head, refusal: result.hammerStop.refusal,
       } } : {}) },
   }, passSnapshot);
   if (result.reason === 'daemon-merged') return observeDaemonResult(shared, result.daemonCleanMerge || { merged: true }, passSnapshot);

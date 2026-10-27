@@ -945,6 +945,22 @@ async function originalReversalAuthorization({ repo, review, reviews, supersedin
   return { detail: boundedReversalText(failures.join('; ')) };
 }
 
+// A review of an intermediate head can precede the remediation commit. That
+// snapshot cannot contain the reversal; later immutable snapshots may pin it.
+// Each candidate still proves that the citation was current at its own parent.
+async function recordedReversalAuthorization(args) {
+  const start = args.reviews.indexOf(args.superseding);
+  let firstFailure;
+  for (const superseding of args.reviews.slice(start)) {
+    if (!amaReviewerFamilyForLogin(superseding.user?.login)
+      || !['CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'APPROVED'].includes(superseding.state)) continue;
+    const proof = await originalReversalAuthorization({ ...args, superseding });
+    if (proof.authorization) return proof;
+    firstFailure ||= proof;
+  }
+  return firstFailure || { detail: 'no authoritative superseding snapshot' };
+}
+
 // get is an injected bounded JSON API reader. Compare caps are errors, not empty diffs.
 async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir, builderHead }) {
   // Reuse only within this evaluation. The in-lease evaluation must re-read live state.
@@ -1162,7 +1178,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
             || !Array.isArray(parent.files)) { reject('capped-file-list'); continue; }
           let originalAuthorization;
           if (superseding) {
-            const proof = await originalReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, readCommit, metadata, prNumber,
+            const proof = await recordedReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, readCommit, metadata, prNumber,
               matchTrailers: recommitted });
             originalAuthorization = proof.authorization;
             if (!originalAuthorization) { reject(recommitted && !commit.reversalAppAttested

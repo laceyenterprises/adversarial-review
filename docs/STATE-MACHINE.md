@@ -864,6 +864,16 @@ counter. Reordered labels, checks, required contexts and detail reasons are
 unchanged facts; older-head decline details do not affect the fingerprint.
 Owner states and merge authority are unchanged.
 
+SAFETYSTOPOWNER-01 supplies an executor for existing R05 closure recovery:
+an audited deterministic refusal with a concrete `next` gets one scoped coding
+PR update per head/refusal key. The recovery receipt and existing hammer ledger
+reserve budget before submission, including ambiguous attempts. Missing repair,
+submission refusal or exhaustion pages with the key; a live receipt waits within
+the existing recovery deadline. This adds no merge authority, lease transition
+or lifecycle status. Primary-change authorization may search later immutable
+review snapshots for the original reversal, while retaining current-at-parent
+review proof, exact commit identity/content and cited-region coverage.
+
 CLOSERLEASEDEAD-01: a launch-less pending closer lease transitions to terminal
 `abandoned-holder-dead` on a confirmed absent/reused same-host watcher PID
 (including legacy hostless leases, CLAIMPIDSTALE-01), or

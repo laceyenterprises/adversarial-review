@@ -182,6 +182,7 @@ export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, cand
         recordedAt: input.hammerStop.recordedAt ?? input.hammerStop.recorded_at ?? null },
       ...(input.hammerStop.refusal ? { safetyRefusal: {
         deterministic: true, reason: input.hammerStop.predicate,
+        headSha: input.hammerStop.headSha || head, refusal: input.hammerStop.refusal,
       } } : {}),
     } } : {}),
     ...(pr ? { pr: { ...pr, headSha: head, mergeable: input.mergeable ?? pr.mergeable } } : {}),

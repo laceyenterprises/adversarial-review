@@ -37,6 +37,13 @@ charges; real failures retain their budget cost.
 
 ## Purpose
 
+SAFETYSTOPOWNER-01 uses this same ledger for scoped safety-stop PR updates.
+`reserveHammerRepairDispatch` evaluates all existing caps and writes a normal
+dispatch charge under the existing PR lock before submission. Its deterministic
+key binds the recovery head and refusal key. An already charged key refuses
+another reservation; interrupted or uncertain submissions retain the charge.
+No cap is reset, suppression bypassed, lease changed or refund introduced.
+
 `data/follow-up-jobs/hammer-retry-cap/` records per-PR hammer dispatch counts
 for the AMA closer. The ledger bounds three related retry loops:
 
@@ -128,7 +135,9 @@ explicit evidence and launch identity; a hold-only reason alone never qualifies.
 - Missing ledger files are treated as no prior attempts.
 - Read or parse failures fail closed by returning a synthetic exhausted ledger;
   corrupt files must page the operator rather than silently resetting counts.
-- The ledger counts confirmed hammer launches only. Interrupted pre-launch work
+- Ordinary hammer accounting counts confirmed launches. Scoped safety-stop
+  repairs reserve a charge before submission, including interrupted attempts.
+  Interrupted ordinary pre-launch work
   does not create phantom attempts that need reclaiming.
 - Ordinary exited-without-close/infrastructure refunds never touch
   `lifetimeAttemptCount`, and are refused once the series is suppressed or their

@@ -191,7 +191,8 @@
       "schemaSurface": "src/ama/primary-change-store.mjs",
       "relatedSchemaSurfaces": ["src/ama/primary-change.mjs", "src/ama/history-reader.mjs", "bin/primary-change-context.mjs", "src/watcher.mjs"],
       "owner": "AMA canonical daemon data owner",
-      "identityVersion": "reversalprov-v4",
+      "identityVersion": "reversalprov-v5",
+      "reversalSnapshotProof": "SAFETYSTOPOWNER-01: subsequent authoritative snapshots may pin the original cited reversal when the first snapshot predates it; original-parent review currency, immutable identity, exact changed content and cited-region coverage remain required",
       "optionalHistoryFields": ["builderBoundary", "diagnosticCommitRange", "reversalAuthorizations", "rejectedReversalAuthorizations", "renameProofs", "primaryPathChanges", "renameProofReadFailed"],
       "rejectedReversalAuthorizationOptionalFields": ["detail"],
       "diagnosticCommitRangeEntryFields": ["sha"],
@@ -1105,6 +1106,7 @@
     },
     {
       "id": "ama-automated-recovery",
+      "scopedSafetyRepair": "SAFETYSTOPOWNER-01: optional repairs[refusalKey] records reservedAt, dispatchKey and optional dispatched, launchRequestId, promptPath, reason; one coding/push attempt per head/key, reserved before submission under recovery flock and existing hammer caps; missing, refused or exhausted repair pages immediately with safety-refusal:<key>; no merge or lease authority",
       "ciInfrastructureRecovery": ["reason", "stopKey", "refundedAt", "attempts", "event"],
       "title": "AMA Automated Recovery",
       "path": "docs/data-model/ama-automated-recovery.md",
@@ -1114,7 +1116,9 @@
         "src/posted-review-row.mjs",
         "src/ama-closure-orchestration.mjs",
         "src/ama/dispatch-closer.mjs",
-        "src/ama/recovery-launch-reconciliation.mjs"
+        "src/ama/recovery-launch-reconciliation.mjs",
+        "src/ama/safety-stop-repair.mjs",
+        "src/ama/hammer-retry-cap.mjs"
       ],
       "owner": "AMA watcher recovery router",
       "pageReceiptFields": ["paged", "pagedReasons"],

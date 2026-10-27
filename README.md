@@ -1695,6 +1695,16 @@ Per-head, series and lifetime caps and terminal-PR guards still apply; no
 executed attempts are refunded. See [the hold-store contract](docs/data-model/hammer-stop-hold.md)
 for the vocabulary audit and migration shape.
 
+SAFETYSTOPOWNER-01 gives an R05 deterministic refusal with a recorded repair
+one scoped PR-update executor per head/refusal key. Its brief carries the exact
+missing-evidence line and protected regions. Recovery reserves the existing
+hammer budgets before submission; missing, unavailable or exhausted repair
+pages through closure recovery with the refusal key. Holds, merge predicates,
+safety core and leases remain in force. Later immutable review snapshots can
+prove a finding-cited original reversal on the finding's reviewed parent;
+uncited and wrong-region reversals remain refused. See the
+[recovery contract](docs/data-model/ama-automated-recovery.md#budget-and-exhaustion).
+
 HOLDCONTRACT-01 unifies deterministic/transient hammer stops, companion waits,
 operator-label holds and stacked-base holds under a validated owner, predicate
 list, absolute deadline, escalation identifier and reason. Legacy records retain

@@ -1677,9 +1677,7 @@ async function main() {
       }
     }
   } catch (err) {
-    console.error(
-      `[watcher] FATAL config${err?.logKey ? ` key=${err.logKey}` : ''}: ${err?.message || err}`
-    );
+    console.error(`[watcher] FATAL config${err?.logKey ? ` key=${err.logKey}` : ''}: ${err?.message || err}`);
     throw err;
   }
 

@@ -155,10 +155,9 @@ export function classifyMergeLeaseGateFailure({ stage, state, error, status } = 
   return { retryable: false, reason: 'non-retryable-gate-failure' };
 }
 
-export function formatHamGateAttemptCapClosingStatus({ attempts, retryable, repo, base, pr, head, rootDir, requiredChecksGreen, reason } = {}) {
-  const cliPath = new URL('../../bin/merge-lease.mjs', import.meta.url).pathname;
+export function formatHamGateAttemptCapClosingStatus({ attempts, retryable, requiredChecksGreen, reason } = {}) {
   const cap = reason === 'repeated-no-merge-release' ? 'repeated-no-merge-release cap' : 'gate-attempt cap';
-  return `HAM closing status — no merge: parked by the ${cap} after ${attempts} attempts (${retryable} retryable).${requiredChecksGreen ? ' Required checks were green in the latest pre-acquire snapshot for this head.' : ''} Reset with: node ${cliPath} reset-attempts --repo ${repo} --base ${base} --pr ${pr} --head ${head}${rootDir ? ` --root-dir ${rootDir}` : ''}`;
+  return `HAM closing status — no merge: parked by the ${cap} after ${attempts} attempts (${retryable} retryable).${requiredChecksGreen ? ' Required checks were green in the latest pre-acquire snapshot for this head.' : ''} Next actor: hammer conflict recovery for a conflicting head; otherwise closure recovery pages through the existing durable ownerless path. No operator reset is required.`;
 }
 
 function sanitizeSegment(value) {
@@ -847,6 +846,7 @@ export function recordMergeLeaseGateAttempt({
   head,
   now,
   maxAttempts = parseMaxGateAttempts(process.env.AMG_MAX_GATE_ATTEMPTS),
+  baseSha,
 } = {}) {
   validateIdentity({ rootDir, repo, base });
   const attemptsPath = mergeLeaseAttemptsFilePath(rootDir, { repo, base });
@@ -860,25 +860,38 @@ export function recordMergeLeaseGateAttempt({
       .filter((record) => !attemptExpired(record, updatedAt));
     const attempts = activeAttempts
       .filter((record) => !(record.pr === normalizedPr && record.head === normalizedHead));
-    const existing = activeAttempts.find((record) => (
+    let existing = activeAttempts.find((record) => (
       record.pr === normalizedPr && record.head === normalizedHead
     ));
+    // A refusal budget describes one head at one observed base. Retain queue
+    // identity and retry evidence, but never carry a stable-base park forward.
+    if (baseSha && existing && existing.baseSha !== baseSha) {
+      existing = { ...existing, attempts: 0, consecutiveNoMergeReleases: 0,
+        parkedReason: null, noMergeReason: null, nextEligibleAt: null };
+    }
     if (existing?.parkedReason) {
       return { attemptsPath, attempt: existing, attempts: sortedAttempts(activeAttempts),
+        maxAttempts: parseMaxGateAttempts(maxAttempts), parked: true };
+    }
+    if ((existing?.attempts || 0) >= parseMaxGateAttempts(maxAttempts)) {
+      const capped = withoutCloserArrival({ ...existing, parkedReason: 'max-gate-attempts' });
+      const sorted = sortedAttempts(clearCloserArrivals([...attempts, capped], normalizedPr));
+      writeJsonFile(attemptsPath, { schemaVersion: LEASE_SCHEMA_VERSION, updatedAt, attempts: sorted });
+      return { attemptsPath, attempt: capped, attempts: sorted,
         maxAttempts: parseMaxGateAttempts(maxAttempts), parked: true };
     }
     const next = normalizeAttemptRecord({
       ...existing,
       pr: normalizedPr,
       head: normalizedHead,
+      ...(baseSha ? { baseSha } : {}),
       attempts: (Number(existing?.attempts) || 0) + 1,
       retryable: Number(existing?.retryable) || 0,
       firstAttemptAt: existing?.firstAttemptAt || updatedAt,
       lastAttemptAt: updatedAt,
     }, updatedAt);
     attempts.push(next);
-    const parked = next.attempts > parseMaxGateAttempts(maxAttempts);
-    const sorted = sortedAttempts(parked ? clearCloserArrivals(attempts, normalizedPr) : attempts);
+    const sorted = sortedAttempts(attempts);
     writeJsonFile(attemptsPath, {
       schemaVersion: LEASE_SCHEMA_VERSION,
       updatedAt,
@@ -886,10 +899,10 @@ export function recordMergeLeaseGateAttempt({
     });
     return {
       attemptsPath,
-      attempt: parked ? withoutCloserArrival(next) : next,
+      attempt: next,
       attempts: sorted,
       maxAttempts: parseMaxGateAttempts(maxAttempts),
-      parked,
+      parked: false,
     };
   });
 }
@@ -1237,6 +1250,15 @@ function recordNoMergeRelease(rootDir, lease, at, reason, { chargeable = true, r
   return { retry, attemptPrune };
 }
 
+// These outcomes can occur after a successful predicate. Recognize them at
+// the store boundary too, so a caller cannot accidentally charge base churn
+// by using an ordinary release instead of --retryable-abort.
+const RETRYABLE_MERGE_OUTCOMES = new Set([
+  'base-advanced', 'base-advanced-during-server-rebase', 'server-rebase-conflict',
+  'rebase-conflict', 'retry-base-not-contained', 'lane-busy',
+  'lease-contention', 'merge-lease-timeout',
+]);
+
 export function releaseMergeLease({
   rootDir,
   repo,
@@ -1293,7 +1315,8 @@ export function releaseMergeLease({
       }
     }
     if (historyEvent === 'release' && !terminalRelease) {
-      try { ({ retry } = recordNoMergeRelease(rootDir, currentLease, releasedAt, reason, { chargeable: !yielded })); }
+      try { ({ retry } = recordNoMergeRelease(rootDir, currentLease, releasedAt, reason, { chargeable: !yielded && !RETRYABLE_MERGE_OUTCOMES.has(reason),
+        refund: yielded || RETRYABLE_MERGE_OUTCOMES.has(reason) })); }
       catch (err) {
         if (!isMutationLockBusyError(err)) throw err;
         return { released: false, leasePath, existingLease: currentLease, reason: 'mutation-lock-busy' };

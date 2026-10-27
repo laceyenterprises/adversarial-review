@@ -26,7 +26,9 @@ if (args[0] === 'advance-base') {
 } else if (args[0] === 'legacy') {
   // The rendered shell and real lane writer must share the advancing fixture
   // clock; mixing the synthetic shell deadline with wall time expires it.
-  process.exitCode = await legacyLaneWriteMain(args.slice(1), {
+  const laneArgs = args.slice(1);
+  laneArgs[laneArgs.indexOf('--root') + 1] = dir;
+  process.exitCode = await legacyLaneWriteMain(laneArgs, {
     run: options => runLegacyLaneWrite({ ...options,
       now: () => new Date(Number(readFileSync(join(dir, 'clock'), 'utf8')) * 1000).toISOString() }),
   });
@@ -188,6 +190,11 @@ if (args[0] === 'advance-base') {
   } else if (args[0] === 'api' && args.includes('--paginate')) {
     console.log('[]');
   } else if (args[0] === 'pr' && args[1] === 'comment') {
+    if (process.env.SCENARIO.startsWith('capped-')) {
+      assert.equal(existsSync(join(dir, 'lease-held')), false);
+      assert.match(args[args.indexOf('--body') + 1], /HAM closing status/);
+      process.exit(0);
+    }
     assert.equal(localHead(), state.head);
     assert.ok(existsSync(join(dir, 'lease-held')));
     const body = args[args.indexOf('--body') + 1];
@@ -200,6 +207,13 @@ if (args[0] === 'advance-base') {
     if (retryScenario && !['ci-disjoint', 'ci-disjoint-lease-delay'].includes(process.env.SCENARIO)) assert.ok(state.retryReads >= 2, 'new exact head must pass checks');
     assert.ok(state.checkReads >= (process.env.SCENARIO === 'pending' ? 2 : 1), 'must read exact-head checks');
     assert.ok(existsSync(join(dir, 'lease-held')));
+    if (['server-base-conflict', 'server-stable-conflict', 'server-base-auth'].includes(process.env.SCENARIO)) {
+      if (process.env.SCENARIO !== 'server-stable-conflict') {
+        git('--git-dir', join(dir, 'remote.git'), 'update-ref', 'refs/heads/main', state.nextBase, state.base);
+      }
+      console.error(process.env.SCENARIO === 'server-base-auth' ? 'HTTP 403: Forbidden' : 'Pull request is not mergeable: server rebase conflict');
+      process.exit(1);
+    }
     state.merged = true;
     save();
   } else throw new Error(`unexpected fake gh call: ${JSON.stringify(args)}`);

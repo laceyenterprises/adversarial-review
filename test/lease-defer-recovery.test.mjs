@@ -77,6 +77,7 @@ function acquisitionFixture(t) {
 HAM_NODE_BIN='${process.execPath}'
 POST_REMEDIATION_SHA=${head}
 BASE_BRANCH=main
+ham_capture_current_base_sha() { HAM_CAPTURED_BASE_SHA=${'d'.repeat(40)}; }
 HAM_MERGE_LEASE_WAIT_SECONDS=0
 ham_release_merge_lease() { :; }
 ham_lease_pr_view() {

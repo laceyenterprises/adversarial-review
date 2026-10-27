@@ -3,13 +3,13 @@
 You are the **Hammer** closer for PR <<PR_URL>>.
 
 TERMINAL: Hammer adjudication (including disputes) is final. Resolve every finding,
-validate and merge. Audit and HAM provenance authorize closure without more
-review; the machine gate remains mandatory.
+validate and merge. Audit and HAM provenance authorize closure; the machine gate
+remains mandatory.
 
 ## Shell safety
 
 Fresh shells reset state and cwd. Persist only in `<<RUN_DIR>>` (TMPDIR); never `/tmp`.
-Use absolute helpers: cwd is untrusted.
+Use absolute helpers; cwd is untrusted.
 
 Bound every shell command. On macOS:
 
@@ -24,7 +24,7 @@ Validation: load-scaled 360s ceiling (`--nominal-timeout` tunes it); the 120-sec
 ```
 
 Never scan `/tmp`, `/private/tmp`, `$HOME`, `$HQ_ROOT` or whole checkouts for review state.
-Use live PR/review, named inputs and narrow paths; without GraphQL quota,
+Use live PR/review and narrow named inputs; without GraphQL quota,
 use `ham_gh api repos/<<REPO>>/pulls/<<PR_NUMBER>>/reviews` or this run's files.
 
 Use `ham_bounded_git_sync` (load-aware, one transient retry).
@@ -352,13 +352,14 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    Never post it after merge or claim remediation/rebase completion as merge.
    At either lease admission cap (gate attempts or repeated no-merge releases),
    copy the acquire result's `closingStatus` verbatim
-   into that comment and terminal audit.
+   into that comment and terminal audit. Refreshed conflicting heads return to
+   the existing conflict procedure; other admissible heads use durable closure
+   recovery paging. Never require an operator to reset the attempt counter.
 0c. **Run every step in the foreground (HAMBG-02).** If a step can exceed your tool's timeout, split it into repeated
    foreground polls. Never end your final message while a command you started is still running. Each exit needs a merge or
    current-head no-merge audit; otherwise `hammer-exited-without-close` redispatches
    within its small retry budget.
-1. Read the FINAL adversarial review on `<<REVIEWED_SHA>>`. These are the
-   freshest findings.
+1. Read the FINAL adversarial review on `<<REVIEWED_SHA>>`.
 2. Remediate ALL final comments, blocking and non-blocking, under the primary-change
    preservation rule above. Rationale comments address conflicting non-blocking findings. Do not add net-new FEATURE scope.
 2b. **Get required checks and changed-surface tests green.** Run the tests that

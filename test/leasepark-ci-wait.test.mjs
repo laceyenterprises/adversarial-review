@@ -102,6 +102,7 @@ export PATH=${quote(dir)}:"$PATH"
 HAM_NODE_BIN=${quote(process.execPath)}
 TEST_ROOT=${quote(dir)}
 BASE_BRANCH=main
+ham_capture_current_base_sha() { HAM_CAPTURED_BASE_SHA=${fixture ? '$(git rev-parse origin/main)' : 'd'.repeat(40)}; }
 export POST_REMEDIATION_SHA=${fixture?.head || head}
 HAM_GATE_JSON="$TEST_ROOT/gate.json"
 HAM_MERGE_LEASE_RELEASE_RETRY_CAP=1
@@ -188,28 +189,28 @@ done
     attempts: readMergeLeaseAttempts(dir, { repo: 'fixture/repo', base: 'main' }) };
 }
 
-test('four same-head pending CI launches retain charges within the gate cap', t => {
+test('four same-head pending CI launches refund planned wait yields', t => {
   const result = runWait(t, { gate: { ok: false, checksConclusion: 'PENDING', reasons: ['ci-not-green'] }, launches: 4 });
   assert.equal(result.audit.match(/deferred required-checks-pending/g).length, 4);
   assert.equal(result.audit.match(/exit:20/g).length, 4);
-  assert.equal(result.attempts[0].attempts, 4);
-  assert.equal(result.attempts[0].retryable, 0);
+  assert.equal(result.attempts[0].attempts, 0);
+  assert.equal(result.attempts[0].retryable, 4);
   assert.equal(result.attempts[0].consecutiveNoMergeReleases, 0);
   assert.equal(result.attempts[0].parkedReason, null);
 });
 
-test('CI-green reacquisition retains the pending attempt charge', t => {
+test('CI-green reacquisition charges only the settled gate attempt', t => {
   const result = runWait(t, { gate: { ok: false, checksConclusion: 'PENDING', reasons: ['ci-not-green'] }, greenAfterSleep: true });
   assert.equal(result.audit, 'exit:0\n');
-  assert.equal(result.attempts[0].attempts, 2);
-  assert.equal(result.attempts[0].retryable, 0);
+  assert.equal(result.attempts[0].attempts, 1);
+  assert.equal(result.attempts[0].retryable, 1);
 });
 
 test('successful acquisition clears refund state inherited from a previous lease', t => {
   const result = runWait(t, { gate: { ok: true, checksConclusion: 'SUCCESS', reasons: [] }, staleAbortBeforeAcquire: true });
   assert.equal(result.audit, 'exit:0\n');
-  assert.equal(result.attempts[0].attempts, 2);
-  assert.equal(result.attempts[0].retryable, 0);
+  assert.equal(result.attempts[0].attempts, 1);
+  assert.equal(result.attempts[0].retryable, 1);
 });
 
 for (const failAfterGreen of [false, true]) {
@@ -217,8 +218,9 @@ for (const failAfterGreen of [false, true]) {
     const result = runWait(t, { gate: { ok: false, checksConclusion: 'PENDING', reasons: ['ci-not-green'] },
       greenAfterSleep: true, greenAfterPolls: 3, failAfterGreen });
     assert.match(result.audit, failAfterGreen ? /failed-without-merge github-gate-not-green\nexit:20/ : /^exit:0\n$/);
-    assert.equal(result.attempts[0].attempts, 2);
-    assert.equal(result.attempts[0].retryable, 0, 'pending waits retain the pre-wait charge');
+    assert.equal(result.attempts[0].attempts, 1);
+    assert.equal(result.attempts[0].retryable, 1, 'the earlier wait refund remains recorded');
+    assert.equal(result.attempts[0].consecutiveNoMergeReleases, 1, 'the settled gate release is charged');
   });
 }
 
@@ -298,8 +300,8 @@ for (const validationBase of ['old', '', 'malformed']) {
     const result = runWait(t, { gate: { ok: false, checksConclusion: 'PENDING', reasons: ['ci-not-green'] },
       greenAfterSleep: true, greenAfterPolls: 3, fixture });
     assert.equal(result.audit, 'exit:0\n', 'already incorporated base changes permit merge to proceed');
-    assert.equal(result.attempts[0].attempts, 2);
-    assert.equal(result.attempts[0].retryable, 0);
+    assert.equal(result.attempts[0].attempts, 1);
+    assert.equal(result.attempts[0].retryable, 1);
   });
 }
 
@@ -368,6 +370,7 @@ HAM_NODE_BIN=${quote(stub)}
 TEST_ROOT=${quote(dir)}
 POST_REMEDIATION_SHA=${head}
 BASE_BRANCH=main
+ham_capture_current_base_sha() { HAM_CAPTURED_BASE_SHA=${'d'.repeat(40)}; }
 HAM_MERGE_LEASE_WAIT_SECONDS=1
 ham_pr() {
   if [[ "$*" == *--jq* ]]; then echo ${state}; else echo '{"statusCheckRollup":[]}'; fi
@@ -416,6 +419,7 @@ export TEST_ROOT=${quote(dir)} TEST_OUTCOME=${quote(outcome)}
 HAM_NODE_BIN=${quote(stub)}
 POST_REMEDIATION_SHA=${head}
 BASE_BRANCH=main
+ham_capture_current_base_sha() { HAM_CAPTURED_BASE_SHA=${'d'.repeat(40)}; }
 HAM_MERGE_LEASE_WAIT_SECONDS=1
 ham_lease_pr_view() {
   n=0; [ ! -f "$TEST_ROOT/acquires" ] || n=$(cat "$TEST_ROOT/acquires")

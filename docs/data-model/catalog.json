@@ -453,8 +453,8 @@
         "templates/hammer-prompt.md"
       ],
       "owner": "AMA daemon and hammer merge lane",
-      "releaseAccounting": "atomic refund and release identity; yielded/retryable reset consecutive failures, preserve existing park",
-      "optionalRetryFields": ["queueArrivedAt", "queueArrivalExpiresAt", "noMergeReleases", "consecutiveNoMergeReleases", "noMergeReason", "noMergeLeaseId", "reenteredAt", "nextEligibleAt", "parkedReason"]
+      "releaseAccounting": "GATECAPBASE-01: atomic refund and release identity; planned yields, base advances, server rebase conflicts and contention refund provisional charges. Stable-head/base predicate refusals retain the cap; a new head/base resets it. Capped heads return to hammer conflict recovery or durable closure paging without a required operator reset",
+      "optionalRetryFields": ["baseSha", "queueArrivedAt", "queueArrivalExpiresAt", "noMergeReleases", "consecutiveNoMergeReleases", "noMergeReason", "noMergeLeaseId", "reenteredAt", "nextEligibleAt", "parkedReason"]
     },
     {
       "id": "finalization-ledger",

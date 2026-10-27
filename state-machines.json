@@ -7,26 +7,256 @@
   "dispatchAbsenceContract": "LAC-2120: exact expiring operator absence entitlement and canonical-exact-selector-absence proof permit only selector-bound empty key/ticket evidence. query.absenceProof and query.ticketQuery.absenceProof persist grant ID, selector and observed time in intent and operator audit. Filtered emptiness, malformed/unbound/partial/unreadable scope retain ownership. Existing native locks, full snapshot fences, submitter/deadline policy, receipt recovery and once-only retry refund are unchanged; no new states or smoke promises. On-demand producer HTTP -> immutable SDK 0.8/0.9 -> native settlement fixtures cover actual composition; source, loaded deployment and organic recovery are independent.",
   "ttmOwnership": "HOLDOWNER-01: watcher observations select one PR owner or persist an ownerless clock. The current timeline revision overrides cached head state. A tracker-observed new head resets suppression, its reason and the clock without requiring a reviewer-gate observation; ownership or terminal state clears the clock. More than seven minutes without ownership emits STUCK ownerless with lane-decline reasons. Every STUCK kind reaches one durable alert per PR/head, with deterministic outbox dedup after a lost receipt. Offline tracker, health, claim-loop and injected alert fixtures cover these transitions. Existing routing, merge authority, SLOW budgets and smoke promises are unchanged. After normal deployment, the runtime owner may read natural ownership flags and alert receipts; no forced stall, live delivery test or new smoke step is authorized.",
   "hammerValidatedHeadOwnership": "HAMVALIDORPHAN-01: recognized current-head hammer validation or closer trailer suppresses auto-refresh. Queued automatic review rows return to posted at their latest delivered review head through a null-safe request CAS, then enter closure processing in the same poll. The shared decision and rescue retain hammer dispatch ownership without carrying a verdict. Existing live ownership, explicit review handoffs, CI waits, certified daemon authority, strict mode, leases, attempt/backoff/lifetime caps and exhaustion pages remain unchanged. Offline regressions: watcher-claim-loop, watcher-auto-refresh-stale-posted-review, ama-hammer-background-dispatch, ama-hammer-retry-cap, closer-next-action and merge-agent-rescue-classifier. Natural deployed recovery observation remains pending; existing smoke promises are unchanged.",
-  "queueCutoverObservation": {"owner":"v2 finalization read-only expansion observer","states":["pending","complete"],"transitions":"Observation only: joins effective queue routing, fresh loaded writer/build/config and owner census, zero legacy writers, confirmed exact-candidate merge receipts and sourced release of every sampled remediated closer after ack and before first CI. Prior canary approval and ordered rollback/reactivation remain operator evidence. Missing organic/runtime/resource evidence stays pending; reader never activates or approves.","codeSources":["src/finalization/queue-cutover.mjs","src/finalization/queue-probe.mjs"],"validation":"test/finalization-queue-cutover.test.mjs; deployed runtime-owner cutover probe; no new smoke action"},
-  "queueCloserRetirement": {"owner":"v2 finalization closer boundary","states":["remediating","acknowledged","resources-released"],"transitions":"Resolved queue route selects dedicated remediation/publication/handoff prompt without legacy merge procedures. A durable acknowledgement observed before the final dispatch recheck suppresses duplicate dispatch; a later commit can still race launch. Acknowledgement precedes mandatory idempotent worker/closer resource release and successful exit. Failed ack or release cannot complete. Returned entries owe fresh admission; legacy/rollback routes retain existing incident repair and execution. Legacy preflight reads routing without a lane lock or writer journal; unreadable ownership refuses. Queue prompts render once after scratch allocation; missing inputs defer the unsubmitted lease with a structured refusal. Uncomposed migrated lanes refuse all closer remediation at deployment.","codeSources":["src/finalization/queue-closer.mjs","src/ama/dispatch-closer.mjs","templates/queue-closer-prompt.md"],"validation":"test/finalization-queue-closer.test.mjs; test/finalization-queue-closer-race.test.mjs; organic resource-release observation separate from smoke"},
-  "queueCanaryObservation": {"owner": "v2 finalization read-only canary observer","states": ["pending","complete"],"transitions": "Projection only: complete requires at least 20 sourced organic stored admissions of both types, all sourced isolated recovery results, ordered rollback/reactivation outcomes, current per-service writer build/config observations (including watcher and follow-up), inventory/producer/identity observations and existing shadow readiness. The latest route writer is a hint only; owner ID/generation churn does not invalidate process evidence. Malformed evidence collections remain pending. Only the explicit canary capability reads or emits private rollout evidence. Missing, stale, failed, duplicate or unknown evidence remains pending. Reading never changes route, lane, approvals or services. Operator approval is separate.","codeSources": ["src/finalization/queue-canary.mjs","src/finalization/queue-probe.mjs"],"validation": "test/finalization-queue-canary.test.mjs; runtime-owner deployed read-only canary probe; no new live smoke action"},
-  "queueRouting": {"owner":"v2 finalization lane router","states":["legacy","transfer-pending","queue-v2"],"transitions":"Issuance lock and monotonic route fence precede drain/reconciliation. Unknown outcomes retain transfer-pending and fence both routes. Rollback also acknowledges durable stable-key returns before legacy ownership. Cached selector mismatches cannot mutate. Config defaults legacy, brake independent; no production flip or new smoke/check. HAMLANEWAIT-01: legacy shell contention waits on release through a fresh 60-second merge-attempt deadline after CI/lease waits; exhaustion records deferred/lane-busy and refunds contention credit with 2-minute exponential backoff capped at 30 minutes, never a final-no-merge. The third same-head launch pages through the durable closure-wait receipt; other launch statuses and bare queue-route refusals retain existing semantics. Queue-v2 transitions are unchanged.","codeSources":["src/finalization/queue-routing.mjs","src/finalization/queue-routing-boundary.mjs","src/finalization/legacy-lane-write.mjs"],"validation":"test/finalization-queue-routing.test.mjs; test/finalization-queue-status.test.mjs; runtime-owner routing probe after deployment"},
-  "queueShadowObservation": {"owner":"v2 finalization observation consumer (explicit composition)","states":["observed","unknown"],"transitions":"Read-only lane/receipt replay and supplied live observations produce paired v1 action and proposed readiness/order/rebase/check/final decisions. Valid unique pairs append to existing shadow telemetry; duplicate delivery returns the retained row. Store/fold/read failures expose unknown with open disposition and escalation, including an explicit unpersisted result on write failure. Operator direction, evidence, principal and time disposition differences toward v1-defect, v2-suspect or benign. No lane claim, push, merge, dispatch, pager or budget consumption. Synthetic replay cannot supply organic readiness coverage; existing operator promotion criteria remain. No new smoke step or CI check.","codeSources":["src/finalization/queue-shadow.mjs","src/finalization/shadow-recorder.mjs","src/finalization/shadow-store.mjs","src/finalization/queue-shadow-metrics.mjs"],"validation":"test/finalization-queue-shadow.test.mjs; runtime-owner read-only shadow probe after deployment; null lastObservationAt with organicEvidence=pending is valid pending evidence; observed organic evidence requires a timestamp"},
-  "queueMergeFoundation": {"owner":"v2 final merge and receipt delivery (unwired)","states":["finalizing","merged","waiting-checks","rebasing","parked-hold","parked-infrastructure","returned-to-closer","closed-observed"],"transitions":"Final rereads of brake, subject ledger, receipt digest, live head/base/holds/identity/rights/primary change/structural eligibility, recomputed proof and complete exact-candidate checks precede a persisted eligible decision and owner-journaled merge intent; the lane fence replaces only the merge-lease input. Under the issuance lock the brake, snapshot, settled merges, ledger count and a last live read are rechecked before the existing squash expected-head surface. Success requires live merged state at the candidate, structured merge SHA and the attributed bot as merger; foreign head/merger reconciles closed-observed without receipt; ambiguous replies remain unresolved until drained takeover. Not-green rerun returns to waiting-checks; base change clears checks/decision and rebases under original patience; head change/red return; holds/brake park-hold; unavailable dependencies/expiry park-infrastructure with cause page and lane release. Receipt, merged phase, subject-ledger finalized event and stable-key outbox commit together; delivery retries after lane release never repeat merge or actions; pending stays visible. No production route or smoke promise change.","codeSources":["src/finalization/queue-merge.mjs","src/finalization/queue-delivery.mjs","src/finalization/queue-store.mjs"],"validation":"test/finalization-queue-merge.test.mjs; test/finalization-execution-surfaces.test.mjs; runtime-owner read-only merge probe; existing smoke promises unchanged"},
-  "queueChecksFoundation": {"owner":"v2 exact-candidate checks (unwired)","states":["waiting-checks","finalizing","rebasing","ready","parked-infrastructure","returned-to-closer","closed-observed"],"transitions":"Green complete policy-resolved exact-candidate checks advance to finalizing; completed red returns and releases. Infrastructure expiry retains original once-scaled absolute deadline, journals deduplicated cause page, parks outside FIFO and releases lane without remediation charge. Base movement invalidates checks under original patience. Bounded reprobe verifies checks, immutable receipt and derivation, then freshly rechecks holds/identity/permission/structural policy before tail readmission. A recovered published candidate gets one bounded observation, no fresh CI patience. Snapshot CAS rejects late responses. Owner expiry and fixed reprobe cadence are independent of patience. Existing Sentinel bus owns delivery; no production route or smoke promise change.","codeSources":["src/finalization/queue-checks.mjs","src/finalization/queue-check-reader.mjs","src/finalization/queue-check-transport.mjs"],"validation":"test/finalization-queue-checks.test.mjs; test/finalization-queue-check-transport.test.mjs; fake alert-delivery fixtures; runtime-owner read-only checks probe"},
-  "hammerControllerLifecycle": {"owner":"versioned closer controller","states":["running","stopping","quiescent","cleanup-unconfirmed"],"transitions":"DOGREADSFLAG-02: before launch lookup, load activation from the adapter-recorded env-contract bound to this LRQ; ignore later worker exports. Missing/malformed/foreign records refuse start and the unchanged reader requires exactly the string 1. LAC-2108: Darwin uses a bounded kernel-filtered kern.proc.pgrp sysctl PID/PGID/exact-birth census (never setuid /bin/ps) and native getpgid owner assertion; other hosts retain ps. Initial denial refuses readiness, lost census retains unknown drain/lease. LAC-2093 recurrence: exact HQ launch and isolated shell registration precede execution. Signals, validator timeout, absolute ceiling or terminal/parked/foreign launch stop the group; HAMCTLPOLL-01: failed 10s launch reads (load-aware timeout) stop it only after a bounded grace window without a permitted read, and lease acquisition and merge require a fresh permitted read. Gate deadlines allow three load-scaled reads and any already-admitted read to finish; unreadable grace accommodates this bounded gate budget. FD-4 replies correlate by per-request UUID and advertise the gate socket timeout. A witnessed PID/birth census guards TERM and KILL after leader exit; only confirmed drain is quiescent. An empty census before the shell exit event waits for that event and preserves its status; emptiness alone grants no signaling or lease-release authority. Validators share the shell group. Cancellation defers trap release to full-generation-fenced owned lease cleanup. Unknown drain retains scratch/lease and returns 125. HQ terminality alone never proves process quiescence. Existing review/closer lease states and smoke promises unchanged.","codeSources":["src/controller-process-census.mjs","src/controller_process_census.py","src/process-group-identity.mjs","src/ama/hammer-controller.mjs","src/ama/bounded-command.mjs","bin/hammer-verify-head.sh","bin/hammer-merge.sh","bin/hammer-controller.mjs"],"validation":"test/controller-process-census.test.mjs; test/hammer-controller.test.mjs; docs/validation/lac-2108.md; docs/validation/lac-2093.md; separate runtime-owner organic acceptance"},
-  "queueRebaseFoundation": {"owner":"v2 mechanical rebase (unwired)","states":["ready","rebasing","publishing","waiting-checks","parked-permission","parked-hold","parked-infrastructure","returned-to-closer","closed-observed"],"transitions":"Disjoint-file isolated Git replay persists exact old/candidate/base, strict ordered binary proof and immutable source reference before owner-fenced expected-old-head publication. Empty/nonlinear/unprovable changes return to closer. Explicit rights/holds are read again under issuance lock; denied rights park with named notice intent. Ambiguous operations retain intent until proven stop/drain and reconciliation. Restart reuses proven candidate; live candidate resumes checks without repush, proven not-applied old head permits retry, prior successful result with old head parks, foreign head returns. Base advances retain derivation chain and original patience; no-op retains SHA explicitly. Authoritative terminal state outranks unreadable receipts/workspaces and never returns a closed PR to a closer. Original signatures remain at source heads. The existing execution brake intercepts preparation and last-moment push. Network Git requires an injected entitled runner with no ambient fallback. Admission recomputes the complete contiguous proof chain plus immutable receipt digest before treating either candidate or expected old head as derived. Transient proof execution failures park; computed mismatches return; expired patience parks before verification. Already-published progress rechecks holds and permissions. Deterministic pre-invocation refusals settle not-applied. Readmitted retained candidates resume ready → rebasing → publishing without recreation. Explicit drained Git success settles with Git provenance despite a lagging API; explicit single-ref porcelain refusals settle not-applied. Failed prepares remove unreturned workspaces; successful workspace retention and repeated full proof/snapshot payloads remain follow-up before production routing. HOLDERPROOF-01: successful leased queue, remediation and auth-recovery Git rewrites record compatible branch receipts after publication. Receipt storage errors preserve the published outcome and expose exact tips for operator recovery; no lifecycle state or merge authority change.","codeSources":["src/finalization/queue-rebase.mjs","src/finalization/queue-rebase-proof.mjs","src/finalization/queue-git.mjs"],"validation":"test/finalization-queue-rebase.test.mjs; test/finalization-queue-rebase-proof.test.mjs; test/finalization-queue-git.test.mjs; runtime-owner read-only rebase probe; existing smoke promises unchanged"},
-  "queueAdmissionFoundation": {"owner":"v2 FIFO admission (unwired)","states":["acknowledged","ready","parked-hold","parked-permission","parked-infrastructure","returned-to-closer","closed-observed"],"transitions":"Clean signed exact-head reviews and validated terminal handoffs share transactional readiness. Live reads validate holds, head/base, identity, permission and shared structural policy; normal clean work retains its final review read. Terminal lifecycle observations reconcile without dispatch. Parked recovery appends tail readiness with fresh reads and original patience; repair uses a new admission generation. Snapshot CAS after awaits rejects stale recovery and duplicate wakes. Terminal structural returns retain their matching conflict/reversion diagnostic despite infrastructure failures. Valid SHA comparisons ignore hex casing and review IDs compare as strings without rewriting evidence; validated labels become names. Progress events capture priorPhase before applying the patch, while legacy events remain replayable. Readiness grants no merge authority. Candidate or expected-old-head readmission requires recomputing every contiguous derivation and matching the immutable receipt digest; transient proof execution failures park; existing structural/hold/permission checks remain enforced.","codeSources":["src/finalization/queue-admission.mjs","src/finalization/queue-clean-review.mjs","src/finalization/queue-store.mjs"],"validation":"test/finalization-queue-admission.test.mjs; runtime-owner read-only admission probe; existing smoke promises unchanged"},
+  "queueCutoverObservation": {
+    "owner": "v2 finalization read-only expansion observer",
+    "states": [
+      "pending",
+      "complete"
+    ],
+    "transitions": "Observation only: joins effective queue routing, fresh loaded writer/build/config and owner census, zero legacy writers, confirmed exact-candidate merge receipts and sourced release of every sampled remediated closer after ack and before first CI. Prior canary approval and ordered rollback/reactivation remain operator evidence. Missing organic/runtime/resource evidence stays pending; reader never activates or approves.",
+    "codeSources": [
+      "src/finalization/queue-cutover.mjs",
+      "src/finalization/queue-probe.mjs"
+    ],
+    "validation": "test/finalization-queue-cutover.test.mjs; deployed runtime-owner cutover probe; no new smoke action"
+  },
+  "queueCloserRetirement": {
+    "owner": "v2 finalization closer boundary",
+    "states": [
+      "remediating",
+      "acknowledged",
+      "resources-released"
+    ],
+    "transitions": "Resolved queue route selects dedicated remediation/publication/handoff prompt without legacy merge procedures. A durable acknowledgement observed before the final dispatch recheck suppresses duplicate dispatch; a later commit can still race launch. Acknowledgement precedes mandatory idempotent worker/closer resource release and successful exit. Failed ack or release cannot complete. Returned entries owe fresh admission; legacy/rollback routes retain existing incident repair and execution. Legacy preflight reads routing without a lane lock or writer journal; unreadable ownership refuses. Queue prompts render once after scratch allocation; missing inputs defer the unsubmitted lease with a structured refusal. Uncomposed migrated lanes refuse all closer remediation at deployment.",
+    "codeSources": [
+      "src/finalization/queue-closer.mjs",
+      "src/ama/dispatch-closer.mjs",
+      "templates/queue-closer-prompt.md"
+    ],
+    "validation": "test/finalization-queue-closer.test.mjs; test/finalization-queue-closer-race.test.mjs; organic resource-release observation separate from smoke"
+  },
+  "queueCanaryObservation": {
+    "owner": "v2 finalization read-only canary observer",
+    "states": [
+      "pending",
+      "complete"
+    ],
+    "transitions": "Projection only: complete requires at least 20 sourced organic stored admissions of both types, all sourced isolated recovery results, ordered rollback/reactivation outcomes, current per-service writer build/config observations (including watcher and follow-up), inventory/producer/identity observations and existing shadow readiness. The latest route writer is a hint only; owner ID/generation churn does not invalidate process evidence. Malformed evidence collections remain pending. Only the explicit canary capability reads or emits private rollout evidence. Missing, stale, failed, duplicate or unknown evidence remains pending. Reading never changes route, lane, approvals or services. Operator approval is separate.",
+    "codeSources": [
+      "src/finalization/queue-canary.mjs",
+      "src/finalization/queue-probe.mjs"
+    ],
+    "validation": "test/finalization-queue-canary.test.mjs; runtime-owner deployed read-only canary probe; no new live smoke action"
+  },
+  "queueRouting": {
+    "owner": "v2 finalization lane router",
+    "states": [
+      "legacy",
+      "transfer-pending",
+      "queue-v2"
+    ],
+    "transitions": "Issuance lock and monotonic route fence precede drain/reconciliation. Unknown outcomes retain transfer-pending and fence both routes. Rollback also acknowledges durable stable-key returns before legacy ownership. Cached selector mismatches cannot mutate. Config defaults legacy, brake independent; no production flip or new smoke/check. HAMLANEWAIT-01: legacy shell contention waits on release through a fresh 60-second merge-attempt deadline after CI/lease waits; exhaustion records deferred/lane-busy and refunds contention credit with 2-minute exponential backoff capped at 30 minutes, never a final-no-merge. The third same-head launch pages through the durable closure-wait receipt; other launch statuses and bare queue-route refusals retain existing semantics. Queue-v2 transitions are unchanged.",
+    "codeSources": [
+      "src/finalization/queue-routing.mjs",
+      "src/finalization/queue-routing-boundary.mjs",
+      "src/finalization/legacy-lane-write.mjs"
+    ],
+    "validation": "test/finalization-queue-routing.test.mjs; test/finalization-queue-status.test.mjs; runtime-owner routing probe after deployment"
+  },
+  "queueShadowObservation": {
+    "owner": "v2 finalization observation consumer (explicit composition)",
+    "states": [
+      "observed",
+      "unknown"
+    ],
+    "transitions": "Read-only lane/receipt replay and supplied live observations produce paired v1 action and proposed readiness/order/rebase/check/final decisions. Valid unique pairs append to existing shadow telemetry; duplicate delivery returns the retained row. Store/fold/read failures expose unknown with open disposition and escalation, including an explicit unpersisted result on write failure. Operator direction, evidence, principal and time disposition differences toward v1-defect, v2-suspect or benign. No lane claim, push, merge, dispatch, pager or budget consumption. Synthetic replay cannot supply organic readiness coverage; existing operator promotion criteria remain. No new smoke step or CI check.",
+    "codeSources": [
+      "src/finalization/queue-shadow.mjs",
+      "src/finalization/shadow-recorder.mjs",
+      "src/finalization/shadow-store.mjs",
+      "src/finalization/queue-shadow-metrics.mjs"
+    ],
+    "validation": "test/finalization-queue-shadow.test.mjs; runtime-owner read-only shadow probe after deployment; null lastObservationAt with organicEvidence=pending is valid pending evidence; observed organic evidence requires a timestamp"
+  },
+  "queueMergeFoundation": {
+    "owner": "v2 final merge and receipt delivery (unwired)",
+    "states": [
+      "finalizing",
+      "merged",
+      "waiting-checks",
+      "rebasing",
+      "parked-hold",
+      "parked-infrastructure",
+      "returned-to-closer",
+      "closed-observed"
+    ],
+    "transitions": "Final rereads of brake, subject ledger, receipt digest, live head/base/holds/identity/rights/primary change/structural eligibility, recomputed proof and complete exact-candidate checks precede a persisted eligible decision and owner-journaled merge intent; the lane fence replaces only the merge-lease input. Under the issuance lock the brake, snapshot, settled merges, ledger count and a last live read are rechecked before the existing squash expected-head surface. Success requires live merged state at the candidate, structured merge SHA and the attributed bot as merger; foreign head/merger reconciles closed-observed without receipt; ambiguous replies remain unresolved until drained takeover. Not-green rerun returns to waiting-checks; base change clears checks/decision and rebases under original patience; head change/red return; holds/brake park-hold; unavailable dependencies/expiry park-infrastructure with cause page and lane release. Receipt, merged phase, subject-ledger finalized event and stable-key outbox commit together; delivery retries after lane release never repeat merge or actions; pending stays visible. No production route or smoke promise change.",
+    "codeSources": [
+      "src/finalization/queue-merge.mjs",
+      "src/finalization/queue-delivery.mjs",
+      "src/finalization/queue-store.mjs"
+    ],
+    "validation": "test/finalization-queue-merge.test.mjs; test/finalization-execution-surfaces.test.mjs; runtime-owner read-only merge probe; existing smoke promises unchanged"
+  },
+  "queueChecksFoundation": {
+    "owner": "v2 exact-candidate checks (unwired)",
+    "states": [
+      "waiting-checks",
+      "finalizing",
+      "rebasing",
+      "ready",
+      "parked-infrastructure",
+      "returned-to-closer",
+      "closed-observed"
+    ],
+    "transitions": "Green complete policy-resolved exact-candidate checks advance to finalizing; completed red returns and releases. Infrastructure expiry retains original once-scaled absolute deadline, journals deduplicated cause page, parks outside FIFO and releases lane without remediation charge. Base movement invalidates checks under original patience. Bounded reprobe verifies checks, immutable receipt and derivation, then freshly rechecks holds/identity/permission/structural policy before tail readmission. A recovered published candidate gets one bounded observation, no fresh CI patience. Snapshot CAS rejects late responses. Owner expiry and fixed reprobe cadence are independent of patience. Existing Sentinel bus owns delivery; no production route or smoke promise change.",
+    "codeSources": [
+      "src/finalization/queue-checks.mjs",
+      "src/finalization/queue-check-reader.mjs",
+      "src/finalization/queue-check-transport.mjs"
+    ],
+    "validation": "test/finalization-queue-checks.test.mjs; test/finalization-queue-check-transport.test.mjs; fake alert-delivery fixtures; runtime-owner read-only checks probe"
+  },
+  "hammerControllerLifecycle": {
+    "owner": "versioned closer controller",
+    "states": [
+      "running",
+      "stopping",
+      "quiescent",
+      "cleanup-unconfirmed"
+    ],
+    "transitions": "DOGREADSFLAG-02: before launch lookup, load activation from the adapter-recorded env-contract bound to this LRQ; ignore later worker exports. Missing/malformed/foreign records refuse start and the unchanged reader requires exactly the string 1. LAC-2108: Darwin uses a bounded kernel-filtered kern.proc.pgrp sysctl PID/PGID/exact-birth census (never setuid /bin/ps) and native getpgid owner assertion; other hosts retain ps. Initial denial refuses readiness, lost census retains unknown drain/lease. LAC-2093 recurrence: exact HQ launch and isolated shell registration precede execution. Signals, validator timeout, absolute ceiling or terminal/parked/foreign launch stop the group; HAMCTLPOLL-01: failed 10s launch reads (load-aware timeout) stop it only after a bounded grace window without a permitted read, and lease acquisition and merge require a fresh permitted read. Gate deadlines allow three load-scaled reads and any already-admitted read to finish; unreadable grace accommodates this bounded gate budget. FD-4 replies correlate by per-request UUID and advertise the gate socket timeout. A witnessed PID/birth census guards TERM and KILL after leader exit; only confirmed drain is quiescent. An empty census before the shell exit event waits for that event and preserves its status; emptiness alone grants no signaling or lease-release authority. Validators share the shell group. Cancellation defers trap release to full-generation-fenced owned lease cleanup. Unknown drain retains scratch/lease and returns 125. HQ terminality alone never proves process quiescence. Existing review/closer lease states and smoke promises unchanged.",
+    "codeSources": [
+      "src/controller-process-census.mjs",
+      "src/controller_process_census.py",
+      "src/process-group-identity.mjs",
+      "src/ama/hammer-controller.mjs",
+      "src/ama/bounded-command.mjs",
+      "bin/hammer-verify-head.sh",
+      "bin/hammer-merge.sh",
+      "bin/hammer-controller.mjs"
+    ],
+    "validation": "test/controller-process-census.test.mjs; test/hammer-controller.test.mjs; docs/validation/lac-2108.md; docs/validation/lac-2093.md; separate runtime-owner organic acceptance"
+  },
+  "queueRebaseFoundation": {
+    "owner": "v2 mechanical rebase (unwired)",
+    "states": [
+      "ready",
+      "rebasing",
+      "publishing",
+      "waiting-checks",
+      "parked-permission",
+      "parked-hold",
+      "parked-infrastructure",
+      "returned-to-closer",
+      "closed-observed"
+    ],
+    "transitions": "Disjoint-file isolated Git replay persists exact old/candidate/base, strict ordered binary proof and immutable source reference before owner-fenced expected-old-head publication. Empty/nonlinear/unprovable changes return to closer. Explicit rights/holds are read again under issuance lock; denied rights park with named notice intent. Ambiguous operations retain intent until proven stop/drain and reconciliation. Restart reuses proven candidate; live candidate resumes checks without repush, proven not-applied old head permits retry, prior successful result with old head parks, foreign head returns. Base advances retain derivation chain and original patience; no-op retains SHA explicitly. Authoritative terminal state outranks unreadable receipts/workspaces and never returns a closed PR to a closer. Original signatures remain at source heads. The existing execution brake intercepts preparation and last-moment push. Network Git requires an injected entitled runner with no ambient fallback. Admission recomputes the complete contiguous proof chain plus immutable receipt digest before treating either candidate or expected old head as derived. Transient proof execution failures park; computed mismatches return; expired patience parks before verification. Already-published progress rechecks holds and permissions. Deterministic pre-invocation refusals settle not-applied. Readmitted retained candidates resume ready → rebasing → publishing without recreation. Explicit drained Git success settles with Git provenance despite a lagging API; explicit single-ref porcelain refusals settle not-applied. Failed prepares remove unreturned workspaces; successful workspace retention and repeated full proof/snapshot payloads remain follow-up before production routing. HOLDERPROOF-01: successful leased queue, remediation and auth-recovery Git rewrites record compatible branch receipts after publication. Receipt storage errors preserve the published outcome and expose exact tips for operator recovery; no lifecycle state or merge authority change.",
+    "codeSources": [
+      "src/finalization/queue-rebase.mjs",
+      "src/finalization/queue-rebase-proof.mjs",
+      "src/finalization/queue-git.mjs"
+    ],
+    "validation": "test/finalization-queue-rebase.test.mjs; test/finalization-queue-rebase-proof.test.mjs; test/finalization-queue-git.test.mjs; runtime-owner read-only rebase probe; existing smoke promises unchanged"
+  },
+  "queueAdmissionFoundation": {
+    "owner": "v2 FIFO admission (unwired)",
+    "states": [
+      "acknowledged",
+      "ready",
+      "parked-hold",
+      "parked-permission",
+      "parked-infrastructure",
+      "returned-to-closer",
+      "closed-observed"
+    ],
+    "transitions": "Clean signed exact-head reviews and validated terminal handoffs share transactional readiness. Live reads validate holds, head/base, identity, permission and shared structural policy; normal clean work retains its final review read. Terminal lifecycle observations reconcile without dispatch. Parked recovery appends tail readiness with fresh reads and original patience; repair uses a new admission generation. Snapshot CAS after awaits rejects stale recovery and duplicate wakes. Terminal structural returns retain their matching conflict/reversion diagnostic despite infrastructure failures. Valid SHA comparisons ignore hex casing and review IDs compare as strings without rewriting evidence; validated labels become names. Progress events capture priorPhase before applying the patch, while legacy events remain replayable. Readiness grants no merge authority. Candidate or expected-old-head readmission requires recomputing every contiguous derivation and matching the immutable receipt digest; transient proof execution failures park; existing structural/hold/permission checks remain enforced.",
+    "codeSources": [
+      "src/finalization/queue-admission.mjs",
+      "src/finalization/queue-clean-review.mjs",
+      "src/finalization/queue-store.mjs"
+    ],
+    "validation": "test/finalization-queue-admission.test.mjs; runtime-owner read-only admission probe; existing smoke promises unchanged"
+  },
   "ciInfrastructureRecovery": "CIBLOCKINFRA-01: Zero-step proof corroborates billing/quota CI. Unpublished commits keep publication stops; proven publications complete before holds and legacy published waits complete on green without another worker. Other waits retain the uncharged round, clear on moved/terminal heads, and requeue after execution. CI recovery revalidates jobs, reruns each workflow/head once and pages repeated blocks; conflicts retain rebase ownership. Only newest current-head infrastructure stops refund; max-rounds, real/mixed stops and merge greenness remain enforced.",
   "version": 1,
   "labelStopOwner": "LABELSTOPOWNER-01: required-label stops requeue only with live presence and attributed event evidence; CI admission owns red unreviewed heads through current-head remediation using the existing PR round budget, or an immediate deduplicated closure blocker naming the stop. Same-path terminal stops preserve the queue record. Active remediation bypasses requeue and failure warnings; injected CI cards remove blocking empty sentinels and promote comment-only review text to Request changes. No lifecycle states or transitions change. Completed final hammer handoffs and reviewer green-CI admission remain unchanged.",
-  "nonBlockingFindingsBatch": {"owner":"FINDINGSBATCH-01 daily findings backlog","findingStates":["pending","applied","dropped"],"batchStates":["prepared","launched","completed"],"transitions":"Merge or exact-head/body ready capture enrolls pending findings; superseded reviews or unmerged closes drop them with a reason. Reopened merges restore current findings dropped only for the close. UTC daily immediate claim binds up to 100 merged findings per repository/area to one active batch; stable dispatch key survives lost receipts. Every manifest ID requires applied or dropped with reason. Applied requires merged batch PR and matching exact-ID marker from a retrying body/lifecycle read; marker lines accept whitespace, bold or HTML comments. Failed sweep startup or fleet-stop interruption retries next poll without advancing the daily deadline, preserving claimed batches and dispatch keys; in-flight sweeps fence overlapping ticks. Claim/dispatch errors retain the daily retry cadence; hourly collection passes collect worker outcomes and observe batch PR merges without new claims or preparation dispatch. FINDINGSSHAPE-01 keeps preparation decision-only; all declines complete without a PR. Complete provisional applied outcomes with null prNumber and pushed headSha allow one pr-shaped publication follow-up on the terminal preparation launch's pushed branch, retaining the batch ID, ticket and idempotency key. This is a launched-to-launched transition, not a new batch state. Before any GitHub publication read, terminal preparation requires branch_pushed done; missing or failed push evidence records batch-push-evidence-missing locally and retains the fence. Remote ref queries preserve slashes and encode individual branch path segments. Existing same-repository marked PRs across all states bind through unchanged settlement before remote-ref lookup, including deleted-branch or lost-outcome-rewrite recovery; unmerged closes never spawn another publisher. Complete push and matching remote head evidence are required before dispatch. A per-batch file lock, durable publish-intent.json and existing keyed launch-ledger receipts (including terminal publishers) prevent duplicate publication after concurrency, timeout or lost receipt. Ambiguous submission without a visible receipt retains intent and error; failed publishers retain their fence for existing-launch recovery. No outcome/SQLite schema or dispatcher contract change. Dropped findings retain null result_pr. Valid manifest and batch PR marker evidence clears prior errors while unmerged PRs leave outcomes pending. Normal review may rebase the batch head, and outcome recording grants no merge authority. Missing results and failed launches retain their fence and surface backlog age/error; no timeout guesses completion. Strict-off handed reviews use the daemon lane; strict-on hammer behavior is unchanged. Advisory snapshots are separate from findings and merge gates. Only the final posted review of a source PR with a verified merge timestamp at or after the simplicity migration receipt can dispatch; historical backfill never enrolls old merged advice. Unassigned notes retain dropped_reason for superseded/duplicate final reviews, closes without merge, historical merges or unverified merge timestamps; lifecycle/receipt refreshes recompute only unassigned dispositions, allowing reopen and late-receipt recovery. Assigned snapshots are immutable. Notes join a pending finding area or reserved _simplicity; advisory-only batches have empty findings. Each daily claim binds up to 100 notes as well as 100 findings. Advisories may touch cited paths outside the finding area. Every note requires a boolean simplicityNoteApplied and nonempty reason, normalized to one line. Applied notes require a merged marked batch PR; declines require no PR. Settlement persists only the validated batchId, prNumber, headSha, findings and simplicityNotes projection in result_json; applied/declined note states derive from the completed batch result. Health includes unresolved notes and their batch errors.","codeSources":["src/findings-backlog.mjs","src/findings-batch.mjs","migrations/20261024_findings_backlog.sql","src/review-finding-records.mjs","migrations/20261024_simplicity_batch.sql","migrations/20261024_simplicity_batch_lifecycle.sql"],"validation":"test/findings-batch.test.mjs; FINDINGSBATCH-01 case in test/watcher-daemon-clean-merge.test.mjs","noteStates":["unassigned","dropped","assigned","applied","declined"]},
+  "nonBlockingFindingsBatch": {
+    "owner": "FINDINGSBATCH-01 daily findings backlog",
+    "findingStates": [
+      "pending",
+      "applied",
+      "dropped"
+    ],
+    "batchStates": [
+      "prepared",
+      "launched",
+      "completed"
+    ],
+    "transitions": "Merge or exact-head/body ready capture enrolls pending findings; superseded reviews or unmerged closes drop them with a reason. Reopened merges restore current findings dropped only for the close. UTC daily immediate claim binds up to 100 merged findings per repository/area to one active batch; stable dispatch key survives lost receipts. Every manifest ID requires applied or dropped with reason. Applied requires merged batch PR and matching exact-ID marker from a retrying body/lifecycle read; marker lines accept whitespace, bold or HTML comments. Failed sweep startup or fleet-stop interruption retries next poll without advancing the daily deadline, preserving claimed batches and dispatch keys; in-flight sweeps fence overlapping ticks. Claim/dispatch errors retain the daily retry cadence; hourly collection passes collect worker outcomes and observe batch PR merges without new claims or preparation dispatch. FINDINGSSHAPE-01 keeps preparation decision-only; all declines complete without a PR. Complete provisional applied outcomes with null prNumber and pushed headSha allow one pr-shaped publication follow-up on the terminal preparation launch's pushed branch, retaining the batch ID, ticket and idempotency key. This is a launched-to-launched transition, not a new batch state. Before any GitHub publication read, terminal preparation requires branch_pushed done; missing or failed push evidence records batch-push-evidence-missing locally and retains the fence. Remote ref queries preserve slashes and encode individual branch path segments. Existing same-repository marked PRs across all states bind through unchanged settlement before remote-ref lookup, including deleted-branch or lost-outcome-rewrite recovery; unmerged closes never spawn another publisher. Complete push and matching remote head evidence are required before dispatch. A per-batch file lock, durable publish-intent.json and existing keyed launch-ledger receipts (including terminal publishers) prevent duplicate publication after concurrency, timeout or lost receipt. Ambiguous submission without a visible receipt retains intent and error; failed publishers retain their fence for existing-launch recovery. No outcome/SQLite schema or dispatcher contract change. Dropped findings retain null result_pr. Valid manifest and batch PR marker evidence clears prior errors while unmerged PRs leave outcomes pending. Normal review may rebase the batch head, and outcome recording grants no merge authority. Missing results and failed launches retain their fence and surface backlog age/error; no timeout guesses completion. Strict-off handed reviews use the daemon lane; strict-on hammer behavior is unchanged. Advisory snapshots are separate from findings and merge gates. Only the final posted review of a source PR with a verified merge timestamp at or after the simplicity migration receipt can dispatch; historical backfill never enrolls old merged advice. Unassigned notes retain dropped_reason for superseded/duplicate final reviews, closes without merge, historical merges or unverified merge timestamps; lifecycle/receipt refreshes recompute only unassigned dispositions, allowing reopen and late-receipt recovery. Assigned snapshots are immutable. Notes join a pending finding area or reserved _simplicity; advisory-only batches have empty findings. Each daily claim binds up to 100 notes as well as 100 findings. Advisories may touch cited paths outside the finding area. Every note requires a boolean simplicityNoteApplied and nonempty reason, normalized to one line. Applied notes require a merged marked batch PR; declines require no PR. Settlement persists only the validated batchId, prNumber, headSha, findings and simplicityNotes projection in result_json; applied/declined note states derive from the completed batch result. Health includes unresolved notes and their batch errors.",
+    "codeSources": [
+      "src/findings-backlog.mjs",
+      "src/findings-batch.mjs",
+      "migrations/20261024_findings_backlog.sql",
+      "src/review-finding-records.mjs",
+      "migrations/20261024_simplicity_batch.sql",
+      "migrations/20261024_simplicity_batch_lifecycle.sql"
+    ],
+    "validation": "test/findings-batch.test.mjs; FINDINGSBATCH-01 case in test/watcher-daemon-clean-merge.test.mjs",
+    "noteStates": [
+      "unassigned",
+      "dropped",
+      "assigned",
+      "applied",
+      "declined"
+    ]
+  },
   "reviewEvidence": "REVIEWEVIDENCE-01: unsupported new PR blockers demote with recorded reasons. Missing repository metadata or an absent/malformed head SHA preserves blockers and verdicts; grounding retains raw Markdown reproductions. Failed reads and exhausted file budgets preserve blockers and verdicts; hosted result verdicts follow the grounded body. Disputes accept complete comma/semicolon range lists and disambiguate repeated titles by citation during completion and durable admission. Known non-blocking acknowledgements may accompany evidence-only completion; claimed blocker repairs cannot. Focused evidence fixtures cover these cases; deployed smoke promises are unchanged. Validated evidence-only remediation completes the existing round without re-review after an independent unchanged open-head observation; completion caches withdrawn-by-remediator with retained reply ID, reviewed head, review-body digest and evidence digest in the existing withdrawal store. Same-head/body admission alone resolves findings; checks, leases and merge authority remain enforced. Offline acceptance: test/review-evidence.test.mjs (real SQLite and Node). SRE after deploy: sample 20 reviews for path:line and behaviour on every blocker, repeat the audit 34-finding noise classification and verify its noise share drops. Organic acceptance is separate from the disposable smoke; no new step, runner or lifecycle state.",
-
   "docsFastPath": "DOCSFASTPATH-01: docs-only classification precedes review/closer admission and owns deterministic CI/lease waits. The existing daemon lease requires green exact-head checks and a signed/recorded docs-fast-path attestation; Before each transport attempt, live head/base classification, review requests and merge gates are rechecked under lease before recording. A moving base tip requires a fresh docs-only range on the same leased branch; terminal audit metadata records that range. Review requests observed at admission, classification or the live gate withdraw the waiver with pending status before full review; failed withdrawal retains the fast-path wait for retry. Request-review/operator retrigger selects full review. No durable review states or existing smoke promises change. After signer/ledger-first deployment SRE observes three natural docs-only merges within about ten minutes of green checks, no reviewer/closer, recorded attestation, and one non-docs change reviewed. Record subprocess promises retain child.stdin through watcher passthrough. Failed records are deferred outcomes with redacted exit code (including zero) and bounded stderr tail formatted once across module boundaries. Synchronous stdin delivery failure without successful child termination fails promptly while observing late subprocess rejection. Durable exact-head audit history allows three failed pre-merge record attempts with 60-second then 120-second backoff; later ticks park as attestation-record-retry-exhausted with needsOperator until the head changes. Unit fixtures cover child rejection, stdin delivery failure, retry history and a fresh-head budget. After deployment SRE verifies a natural docs-only merge records successfully and the watcher stays running; any record failure must include bounded redacted diagnostics.",
-  "queueHandoffFoundation": {"owner": "v2 finalization queue handoff (unwired)","states": ["absent","acknowledged"],"transitions": "Complete mechanically validated evidence atomically commits handoff, queue entry, readiness/event and immutable ack. Invalid evidence or write failure leaves absent. Duplicate/lost ack and restart return the same acknowledged receipt. The explicit closer boundary confirms durable ack before idempotent resource release and suppresses duplicate dispatch at the admission tuple. Candidate derivation preserves original signed evidence/dispositions. Legacy execution is unchanged until lane routing.","codeSources": ["src/finalization/queue-handoff.mjs","src/finalization/queue-handoff-store.mjs","src/ama/closer-queue-handoff.mjs"],"validation": "test/finalization-queue-handoff.test.mjs; separate runtime-owner read-only handoff probe; no new live smoke promise"},
+  "queueHandoffFoundation": {
+    "owner": "v2 finalization queue handoff (unwired)",
+    "states": [
+      "absent",
+      "acknowledged"
+    ],
+    "transitions": "Complete mechanically validated evidence atomically commits handoff, queue entry, readiness/event and immutable ack. Invalid evidence or write failure leaves absent. Duplicate/lost ack and restart return the same acknowledged receipt. The explicit closer boundary confirms durable ack before idempotent resource release and suppresses duplicate dispatch at the admission tuple. Candidate derivation preserves original signed evidence/dispositions. Legacy execution is unchanged until lane routing.",
+    "codeSources": [
+      "src/finalization/queue-handoff.mjs",
+      "src/finalization/queue-handoff-store.mjs",
+      "src/ama/closer-queue-handoff.mjs"
+    ],
+    "validation": "test/finalization-queue-handoff.test.mjs; separate runtime-owner read-only handoff probe; no new live smoke promise"
+  },
   "deadCloserSubmitter": "CLOSERPENDINGDEAD-01: dispatching to no-dispatch also permits first-poll recovery of a matching local pending submitting intent with dead/reused watcher and submitter identities, no live key carrier in a bounded complete process scan including argument continuation lines, and a subsequent successful empty exact-key ledger query. Child identity persistence requires the same dispatching attempt key and preserves missing or replaced records. System PID 0 rows are valid scan evidence but not process handles. A scanned watcher overrides prior ESRCH: matching identity is live, verified reuse is gone, and unverified identity is unknown. Unknown liveness retains the original deadline; lease CAS, intent fence and merge authority are unchanged.",
-  "queueOwnerFoundation": {"owner": "v2 finalization queue (unwired)","ownerStates": ["idle","active","parked"],"entryPhases": ["acknowledged","ready","rebasing","publishing","waiting-checks","finalizing","merged","parked-hold","parked-permission","parked-infrastructure","returned-to-closer","closed-observed"],"transitions": "Claim increments retained generation; expiry requires issuance lock and proven reconciliation of every unresolved operation. Ambiguous drain parks the lane. Release with no unresolved operations returns idle. Parked entries explicitly rejoin readiness tail; terminal admissions require fresh generation. Original patience/candidate survive replay.","codeSources": ["src/finalization/queue-owner.mjs","src/finalization/queue-store.mjs","src/finalization/ledger-fold.mjs"],"validation": "test/finalization-queue-owner.test.mjs; no live route or service lifecycle change"},
+  "queueOwnerFoundation": {
+    "owner": "v2 finalization queue (unwired)",
+    "ownerStates": [
+      "idle",
+      "active",
+      "parked"
+    ],
+    "entryPhases": [
+      "acknowledged",
+      "ready",
+      "rebasing",
+      "publishing",
+      "waiting-checks",
+      "finalizing",
+      "merged",
+      "parked-hold",
+      "parked-permission",
+      "parked-infrastructure",
+      "returned-to-closer",
+      "closed-observed"
+    ],
+    "transitions": "Claim increments retained generation; expiry requires issuance lock and proven reconciliation of every unresolved operation. Ambiguous drain parks the lane. Release with no unresolved operations returns idle. Parked entries explicitly rejoin readiness tail; terminal admissions require fresh generation. Original patience/candidate survive replay.",
+    "codeSources": [
+      "src/finalization/queue-owner.mjs",
+      "src/finalization/queue-store.mjs",
+      "src/finalization/ledger-fold.mjs"
+    ],
+    "validation": "test/finalization-queue-owner.test.mjs; no live route or service lifecycle change"
+  },
   "closerDecisionRouting": "CIREDOWNER-01: failed CI with rounds left selects remediation for a PR-scoped pending/in-progress job regardless of head or repo case, posted current-head findings awaiting job creation before the existing admission deadline, or completed non-final pushed-head closeout with a prior-head review awaiting watcher CI admission. Closure reuses the gate live-job observation and scans terminal history only without a live owner. A same-head terminal job created before the latest review does not suppress its job-creation wait. Otherwise clean verdicts, terminal jobs and expired missing-job admission select hammer with ci-red-clean-verdict. Closure waits report active-remediation-job only for live PR jobs; otherwise remediation-job-missing. Findings, pending-check waits and mutation-time merge gates retain their existing rules. NXA-07: nextAction(snapshot) is the only successor policy for wake, closeout, closer, daemon, rescue and recovery/no-progress adapters. Changed preflight or execution facts replace the immutable generation. Exact-head validated terminal HAM proof bypasses retry selection only to re-enter CI/review gates; mismatched heads, review handoff, live owners and lifetime caps retain their existing routes. Deleted reason allowlists, final-round resume/grace selection, legacy owner/rescue tables, daemon route classifiers, background mergeability admission refusal and independent rescue eligibility. Retained structural and pure merge predicates, semantic reversal/content proof, strict/domain and terminal hammer judgement, arming, HCP/identity, exact-head required-check/protection rules, terminal settlement, claim/idempotency, shared leases, bounded retries, immutable history/cache, wake transport, drain observations, queues and external class-cap diagnostics. No new runtime refusal, lifecycle state or CI topology. Handoff smoke exercises seven synthetic incident families and unknown/stop combinations. Live rollout evidence remains separate operator/SRE work. Rollback uses source revision 4d06237c.",
   "truthfulNoOpOutcomes": "LVR-02: hammer/closer require terminal-audit and remediation requires push. Launch-bound early failure attempts use failed-without-merge and fixed reasons. Unkeyed early-exit reports preserve the first unkeyed terminal reason per repo/PR/head independently of keyed launches. An open PR without a terminal audit records failed/no_work_done with a reason under existing grace, holds and bounded refund/final-hammer charging. Incident scheduling preserves timeout/wait/wake protections, daemon reservation lifetimes and holder exclusivity. Unreadable auxiliary lease snapshots warn and fall back to ordinary priority; nested subject bodies supply the daemon hint when the live body is absent. Lifecycle states, smoke promises and merge authority are unchanged.",
   "hammerWakeRouting": "NXA-03: closure hammer wake routing consumes the shared immutable snapshot/decision. NXA-04 also adopts shared decisions for remediation closeout. Other routes remain legacy with observational shadow. Existing reserved/requested/failed transport outcomes and exclusive reservation remain; initial or completed-launch attempt keys rearm retryable no-merge without granting retry budget. Live/unreadable retry descendants retain ownership; sticky succeeded receipts reconcile remote state. The handoff smoke verifies shared routing and attempt rearming. No lifecycle states, transition IDs, merge authorization, CI cadence or runner changes.",
@@ -43,7 +273,7 @@
   "reviewerAccountPools": "ITP-12: declared Claude/Codex reviewer pools acquire shared broker execution capacity before native spawn through an explicitly supported runtime ID. Secret-free account receipts survive runtime and pass settlement. Renewal and recovery retain the original fence; only confirmed drain releases. Held selections cannot mark unreadable fleet quota available, but still reach admission. Unknown admission evidence releases the effective result session claim without charging retry budgets, including after fallback. Existing states, edges and smoke promises are unchanged; live enrollment is operator-only ITP-19.",
   "agyHolderLeases": "ITP-11: one canonical gemini-reviewer role leases distinct OS holders at concurrency one. An undeclared gemini-reviewer pool retains legacy holders or the HQ owner despite unrelated pool validation or account-policy conflicts; declared reviewer pools retain full validation and legacy holder-order agreement. Conflicts warn once per key per process with only the key path. The scoped config cache is separate from ordinary readers; readiness probes, leasing and the holder/model fingerprint are unchanged. Durable holder claims precede launch; local release receipts remain populated with admission fenced until persistence completes, including overlapping readiness passes. Generation-fenced release retains its claim through cleanup/drain failures and retries on readiness. Dead-owner reclaim reconstructs workspace cleanup from the durable review ID under lock. Failed auth requirements persist during drain and probes back off across restart. Drained failed releases and acquisition-discovered auth holds immediately initiate isolated recovery; successful obsolete-generation probes retain admission fencing without adding auth failures or backoff. Only launching records hold without a PGID; terminal live PGIDs are verified against spawnedAt, proven recycled leaders are excluded, and unknown evidence holds. Stale heartbeats never free live processes. Existing review/run statuses and merge authority remain unchanged.",
   "commentOnlyFinalRoundCiRepair": "HAMREDCI-01: a proven comment-only final-round handoff resumes hammer terminal validation with failed CI and stale review head, with or without non-blocking findings or strict non-blocking remediation enabled. Non-conflicting pending-only CI and known rollups without external checks retain the bounded wait from the proven push; empty rollups remain non-green and the deadline restores retain-loop charging. Blocking/unknown blocking findings, structural blocks, hard-stop labels and merge leases retain their gates; exact-head green CI is still required for merge. Existing states, transitions and smoke promises are unchanged.",
-  "mergeLeaseFairness": "LAC-2098: ordinary CLI waiters record the acquiring process separately from the holder parent, use unique invocation IDs, and clean up their exact request on timeout, runtime failure and SIGINT/SIGTERM/SIGHUP with bounded mutation-lock retries. Confirmed same-host explicit acquisition PID absence permits pruning; legacy IDs may have been adopted and retain existing parent/deadline rules. Live/reused/unknown or foreign-host identities retain requests until existing expiry. Holder fences and merge-authority lifecycle states are unchanged. The clean smoke verifies dead-child/live-parent empty-lane progress; focused cli-waiter-lifecycle fixtures cover interruptions and cleanup contention. LAC-2087: posted-review candidate exits own daemon reservation cleanup before closure dispatch; operator skip and terminal/head changes can prevent the next acquire. Only eligible daemon contention or a concrete coexistence promise still active after a soft caller deadline retains the current reservation; its entire reservation scope owns cleanup, including terminal/stacked-base exits before closure dispatch and errors. Only eventual eligible lease contention retains the reservation. A process-local review-root/repo/PR guard excludes overlapping posted-review passes at any head until both the handler and concrete coexistence operation settle; competing polls return posted-review-in-flight and unrelated PRs continue. Success and rejection release the guard. The existing step promise race observes and logs late rejection. Cleanup falls back to stored review base metadata. The clean smoke verifies these boundaries without a test-owned catch on the detached promise. Watcher PID liveness is not acquire ownership; other FIFO waiters and holder fences are preserved. The clean smoke verifies empty-lane next-closer progress with a live watcher PID and surviving daemon FIFO order. LEASEFAIR-04: daemon reservations last twice the configured watcher poll interval, load-scaled once with a timer-safe ceiling. Ineligibility, head movement and merge completion remove them immediately; confirmed dead same-host watchers are pruned and uncertain identities expire. Holder release wakes the first daemon PR at its reserved head through the existing per-head cap. The clean offline smoke verifies retention at 299 seconds and one exact-head release wake. LEASEFAIR-01: daemon PR/head reservations survive live watcher passes and share FIFO arrival order with closers. No holder is preempted. Closers release before the first remote-CI wait and reacquire before the final live gate. LAC-2097 retains validated heads across non-strict disjoint base advances. Recurrence: first-pass retention uses the same policy; an administration-read error resolves non-strict only from identity-bound unprotected branch metadata. Copied scripts record their source SHA-256 for diagnosis. Retry CI has an additional unscaled HAM_CI_RETRY_WAIT_SECONDS ceiling (default/minimum 120 seconds) and pending expiry releases through existing recovery. Local targeted validation runs outside the shared lease with reason local-validation; re-entry uses the successful exact tested head/base pair and rechecks base drift. The audit stamps a captured rebase base only with proven ancestry. Pending CI retains merge-gate charges; pushed-only retry provenance does not guarantee certified operator-free redispatch. Protected classic-checks-disabled 404s stay strict because they cannot exclude rulesets. No custody or cancellation changes. Strict/unknown protection requires containment and overlap requires rebase regardless of CLEAN mergeability. Asynchronous old-head CAS replies poll without another mutation; exact ordered tree replay onto the pre-CAS base precedes pushed provenance. Unproven results/visibility expiry release without merge. LEASEFAIR-02 handles required rebases with one in-run rebase and exact-head CI wait while retaining the reacquired lease. Earlier arrivals remain ahead of retry acquisition. Both waits and the intervening rebase consume one absolute deadline initialized before the first wait from the once-scaled nominal CI bound; expired reacquisition/base capture cannot start a retry source mutation; conflict, red CI and expiry release with actual reasons. Successful retry rebuilds head-bound audit and predicate authority. Queue positions accompany contention and overdue wait notices. Existing lifecycle states and transitions are unchanged; the clean offline smoke also verifies FIFO service without preemption. Closer no-merge releases retain their PR arrival across heads for restoration before nextEligibleAt plus one configured watcher poll interval (unscaled), persisted as queueArrivalExpiresAt. Later absent closers join at the tail; live registered waiters keep FIFO order through their invocation deadline. Daemon releases preserve closer memory and its fixed expiry. Fresh invocation deadlines start at registration. Status/list separates FIFO ageSeconds and invocationAgeSeconds. Parking and merged/closed releases clear remembered arrivals across heads. Focused offline merge-lease fixtures verify retention and cleanup; existing smoke promises are unchanged. Daemon no-merge releases re-enter at the tail with persistent PR/head exponential backoff, capped at the existing watcher poll interval and scaled once. Delayed waiters yield to ready requests. The existing attempt cap parks consecutive chargeable failures with repeated-no-merge-release; a new head or fenced reset recovers. Draft, closed, terminal, moved or declined daemon reservations withdraw on the next pass. CLI polling doubles from 250ms to a fixed 15-second ceiling independent of host load. Both release paths interrupt sleeping CLI waiters through a directory watch of the holder filename. Ambiguous directory events wake only on a holder metadata change, retaining macOS removal notifications without spinning on queue/lock writes; watch setup/delivery failure falls back to polling. Focused merge-lease CLI fixtures verify prompt release wakeup, FIFO preservation and polling fallback. Status/list reports arrival, role and position; history records requeue/park with release reason. Planned CI-wait yields and retryable aborts reset consecutive failure counting without clearing an existing park; yields retain gate charges and abort refunds persist atomically with release identity. Non-permanent daemon failures yield. Only daemon reservations requeue; CLI processes return with fresh invocation IDs. Grants alone preserve failure evidence. Repeated-failure parks use the existing audit, closing-status comment and page path. HAMLEASE-01 progress gaps are bounded by 40 seconds (25 seconds plus the fixed 15-second polling ceiling), excluding synchronous I/O.",
+  "mergeLeaseFairness": "LAC-2098: ordinary CLI waiters record the acquiring process separately from the holder parent, use unique invocation IDs, and clean up their exact request on timeout, runtime failure and SIGINT/SIGTERM/SIGHUP with bounded mutation-lock retries. Confirmed same-host explicit acquisition PID absence permits pruning; legacy IDs may have been adopted and retain existing parent/deadline rules. Live/reused/unknown or foreign-host identities retain requests until existing expiry. Holder fences and merge-authority lifecycle states are unchanged. The clean smoke verifies dead-child/live-parent empty-lane progress; focused cli-waiter-lifecycle fixtures cover interruptions and cleanup contention. LAC-2087: posted-review candidate exits own daemon reservation cleanup before closure dispatch; operator skip and terminal/head changes can prevent the next acquire. Only eligible daemon contention or a concrete coexistence promise still active after a soft caller deadline retains the current reservation; its entire reservation scope owns cleanup, including terminal/stacked-base exits before closure dispatch and errors. Only eventual eligible lease contention retains the reservation. A process-local review-root/repo/PR guard excludes overlapping posted-review passes at any head until both the handler and concrete coexistence operation settle; competing polls return posted-review-in-flight and unrelated PRs continue. Success and rejection release the guard. The existing step promise race observes and logs late rejection. Cleanup falls back to stored review base metadata. The clean smoke verifies these boundaries without a test-owned catch on the detached promise. Watcher PID liveness is not acquire ownership; other FIFO waiters and holder fences are preserved. The clean smoke verifies empty-lane next-closer progress with a live watcher PID and surviving daemon FIFO order. LEASEFAIR-04: daemon reservations last twice the configured watcher poll interval, load-scaled once with a timer-safe ceiling. Ineligibility, head movement and merge completion remove them immediately; confirmed dead same-host watchers are pruned and uncertain identities expire. Holder release wakes the first daemon PR at its reserved head through the existing per-head cap. The clean offline smoke verifies retention at 299 seconds and one exact-head release wake. LEASEFAIR-01: daemon PR/head reservations survive live watcher passes and share FIFO arrival order with closers. No holder is preempted. Closers release before the first remote-CI wait and reacquire before the final live gate. LAC-2097 retains validated heads across non-strict disjoint base advances. Recurrence: first-pass retention uses the same policy; an administration-read error resolves non-strict only from identity-bound unprotected branch metadata. Copied scripts record their source SHA-256 for diagnosis. Retry CI has an additional unscaled HAM_CI_RETRY_WAIT_SECONDS ceiling (default/minimum 120 seconds) and pending expiry releases through existing recovery. Local targeted validation runs outside the shared lease with reason local-validation; re-entry uses the successful exact tested head/base pair and rechecks base drift. The audit stamps a captured rebase base only with proven ancestry. Pending CI refunds provisional merge-gate charges; pushed-only retry provenance does not guarantee certified operator-free redispatch. Protected classic-checks-disabled 404s stay strict because they cannot exclude rulesets. No custody or cancellation changes. Strict/unknown protection requires containment and overlap requires rebase regardless of CLEAN mergeability. Asynchronous old-head CAS replies poll without another mutation; exact ordered tree replay onto the pre-CAS base precedes pushed provenance. Unproven results/visibility expiry release without merge. LEASEFAIR-02 handles required rebases with one in-run rebase and exact-head CI wait while retaining the reacquired lease. Earlier arrivals remain ahead of retry acquisition. Both waits and the intervening rebase consume one absolute deadline initialized before the first wait from the once-scaled nominal CI bound; expired reacquisition/base capture cannot start a retry source mutation; conflict, red CI and expiry release with actual reasons. Successful retry rebuilds head-bound audit and predicate authority. Queue positions accompany contention and overdue wait notices. Existing lifecycle states and transitions are unchanged; the clean offline smoke also verifies FIFO service without preemption. Closer no-merge releases retain their PR arrival across heads for restoration before nextEligibleAt plus one configured watcher poll interval (unscaled), persisted as queueArrivalExpiresAt. Later absent closers join at the tail; live registered waiters keep FIFO order through their invocation deadline. Daemon releases preserve closer memory and its fixed expiry. Fresh invocation deadlines start at registration. Status/list separates FIFO ageSeconds and invocationAgeSeconds. Parking and merged/closed releases clear remembered arrivals across heads. Focused offline merge-lease fixtures verify retention and cleanup; existing smoke promises are unchanged. Daemon no-merge releases re-enter at the tail with persistent PR/head exponential backoff, capped at the existing watcher poll interval and scaled once. Delayed waiters yield to ready requests. The existing attempt cap parks consecutive chargeable failures with repeated-no-merge-release; a new head/base or existing conflict/page recovery owns the exit. Draft, closed, terminal, moved or declined daemon reservations withdraw on the next pass. CLI polling doubles from 250ms to a fixed 15-second ceiling independent of host load. Both release paths interrupt sleeping CLI waiters through a directory watch of the holder filename. Ambiguous directory events wake only on a holder metadata change, retaining macOS removal notifications without spinning on queue/lock writes; watch setup/delivery failure falls back to polling. Focused merge-lease CLI fixtures verify prompt release wakeup, FIFO preservation and polling fallback. Status/list reports arrival, role and position; history records requeue/park with release reason. Planned CI-wait yields and retryable aborts reset consecutive failure counting without clearing an existing park; yields and abort refunds persist atomically with release identity. Non-permanent daemon failures yield. Only daemon reservations requeue; CLI processes return with fresh invocation IDs. Grants alone preserve failure evidence. Repeated-failure parks use the existing audit, closing-status comment and page path. HAMLEASE-01 progress gaps are bounded by 40 seconds (25 seconds plus the fixed 15-second polling ceiling), excluding synchronous I/O.",
   "hammerRangeResponsibility": "HAMNOREREVIEW-01: an unprovable starting base widens the audit range to the reviewed SHA. HAMSELFREBASE-01: successful server-side rebases fetch and detach the scratch checkout at the exact produced SHA and synchronize initialized submodules. Changed-surface revalidation, audit publication including recovery, required-check waiting and merge continue in the same run under the merge lease, preserving existing pending-CI release and reacquisition; foreign head changes still release with head-changed. Existing lifecycle states and smoke promises are unchanged. HAMATTEST-02: authenticated pushed and validated App edges share one provenance chain reader; pushed edges do not certify CI. Proven hammer heads retain closure ownership and exact-head checks remain required. An explicit rereview-exact-head decision on an unbound head executes immediately through the existing per-head orphan review reservation when no live owner exists and ownership reads are certain; reasons persist in watchdog evidence. Queue failures refund the reservation. Existing pending-review transitions execute this decision. Legacy review handoff stops release without a new verdict; mixed safety refusals hold. Current-head closer evidence selects hammer in ordinary automated and ownerless recovery; an explicit shared rereview-exact-head decision takes precedence. The compatibility handoff CLI uses the existing terminal failed-without-merge transition; new hammer runs do not produce handed-to-review records. Historical records remain readable during rolling deployment. Post-rebase snapshot reads retry transient errors within the update-branch cap; permanent failures and exhaustion release the lease. A known API publication whose scratch sync failed is attested and preserved without a fallback push. Explicit exact-head review requests start both idle clocks; absent ownership at the idle bound retains the review route through two recovery attempts and one exhaustion page. HAMATTEST-03 executes the head-bound exact-head review decision before coexistence returns a bounded closure wait. The watchdog still fences live or uncertain ownership and durably reserves one request per head; successful queueing reports review as the next owner and preserves the prior wait reason. A complete publication bridge with unsettled live review evidence preserves its review intent as selectedClosureOwner through the wait wrapper. Both explicit decisions and selected intents bind distinct current/reviewed heads. The reported closureOwner remains wait/page for live or uncertain ownership and queue refusal; only successful watchdog queueing promotes it to review, without changing carry-forward rejection.",
   "hammerAuditRecovery": "HAMATTESTRETRY-01: audit comment delivery retries five times with lease checks and fixed 2/4/8/16-second backoff. Failed delivery records a validated edge in a deferred AMA audit attempt. Recovery posts only for a matching live head, reviewed base and authenticated App identity, before the unchanged provenance predicate. Initial validated-edge delivery failure and recovery delivery failure mark lease release as a retryable audit-comment-unavailable abort; recovery retains the existing pending edge. Existing states, retry caps, merge authority and smoke promises remain unchanged.",
   "ownerlessRecovery": "ORPHANACTION-01: settled final-round and exhausted-cycle evidence selects hammer after head movement. Shared settled Comment-only admission evidence prevents refused re-review attempts; readonly captured-pass query errors warn and fall back to filesystem evidence without migration. Proven quota-status and stacked-base read failures refund reservations; an explicit transient holdReason qualifies regardless of the outer reason. Genuine quota exhaustion spends attempts. Exhausted pages include both outcome reasons. Existing lifecycle states, transitions and smoke promises remain unchanged.",
@@ -51,9 +281,18 @@
   "hammerScratchLifetime": "SCRATCHLEAK-01: terminal cleanup retains recorded draining processes and live launch leases; pytest uses one replaceable tmp-tests base under scratch. Startup sweeps reclaim old terminal backlog; cwd-only probe timeouts expire after the idle bound plus twice the existing launch/lease window, requiring readable ps, terminal retry chains and no positive holder. Partial size accounting cannot prevent terminal reclamation. SCRATCHLEAK-02: an atomic candidate cursor resumes oldest-first laps across passes and restarts, including kept candidates and zero-removal laps. Launch/retry and worker ledger reads have separate 10-second timeouts outside the scan budget; timed-out candidates are retained and advanced past. No merge-authority transitions change.",
   "fleetStopGuard": {
     "source": "src/fleet-stop.mjs",
-    "consumers": ["src/ama-closure-orchestration.mjs", "src/daemon-clean-merge.mjs", "bin/ama-check.mjs"],
+    "consumers": [
+      "src/ama-closure-orchestration.mjs",
+      "src/daemon-clean-merge.mjs",
+      "bin/ama-check.mjs"
+    ],
     "authority": "Uncached presence of HQ_ROOT/control/halt/active.json or merge-kill.json; unreadable state refuses merge",
-    "reasons": {"active.json": "fleet-stop-active", "merge-kill.json": "fleet-stop-merge-kill", "readError": "fleet-stop-unreadable", "precedence": "active.json first; fleet-stop- prefix preserves intentional deferral"},
+    "reasons": {
+      "active.json": "fleet-stop-active",
+      "merge-kill.json": "fleet-stop-merge-kill",
+      "readError": "fleet-stop-unreadable",
+      "precedence": "active.json first; fleet-stop- prefix preserves intentional deferral"
+    },
     "recovery": "Matching-epoch resume clears owned files; closure remains deferred and releases the merge lease without permanent parking",
     "observability": "Unreadable state retains the hold, logs its path class and error code, and pages through deliverAlert once per distinct root/path-class/error-code cause per process lifetime. Readability recovery logs only for the state root that recovered; deliberate stops never page from this evaluator.",
     "lifecycleChange": "No new persisted lifecycle states or transitions"
@@ -74,10 +313,38 @@
   "terminalSemantics": "Quiescent for this attempt or decision, not irreversible PR completion. Explicit recovery edges may reopen terminal attempts. Closure owner is a recomputed projection; [*] is its evaluation boundary. Lease deletion is record removal, not merge authority. Transitions describe owned lifecycle routes, not arbitrary low-level patch calls. Certified HAM contention parks with UNKNOWN mergeability, alone or with pending CI, retain bounded deferral backoff and expiry rather than immediate operator escalation; red CI still routes to bounded repair. Retryable UNKNOWN deferral requires the PR to remain open at the validated head; moved heads and closed PRs retain terminal refusals.",
   "terminalCloserLeaseReclaim": "NXA-07: physical reclaim requires the selected shared workflow; missing launch rows or historical dispatch records alone cannot establish readable retry descendants. TERMLEASE-01: terminal superseded/failed-without-merge/deferred leases with terminal ledger or matching dispatch evidence, or a confirmed missing launch, are removed under a nonblocking reclaim lock with observed-owner revalidation, then reacquired through the existing exclusive CAS on the same pass. Positive live launches/retries, unreadable retry chains and otherwise unproven liveness hold; succeeded remains sticky. Superseded dispatches release matching rekeyed leases while preserving successors and review handoffs. Inline and settled background closure blockers identify retained terminal launches. No new statuses or merge/retry authority. LRQSTATUS-01: parked launch/retry evidence explicitly retains terminal deferred lease ownership without reserving capacity. Resumed in-flight launches retain closure ownership; known observations persist under the matching receipt while unknown status/retry evidence cannot erase ownership. Matching deferred receipts, including rekeyed leases, remain visible to capacity scans; positive resumed execution occupies capacity again.",
   "knownDeadEnds": [
-    {"state": "closer-lease.pending", "condition": "Malformed timestamp or unreadable liveness/ownership evidence", "proposedExitOwner": "watcher / closer operator", "proposedMaxDurationSeconds": 1800, "overdueRecipient": "adversarial-review operator", "enforcement": "missing"},
-    {"state": "closer-lease.dispatched", "condition": "Malformed timestamp or unreadable liveness/ownership evidence", "proposedExitOwner": "watcher / closer operator", "proposedMaxDurationSeconds": 1800, "overdueRecipient": "adversarial-review operator", "enforcement": "missing"},
-    {"state": "hammer-dispatch.dispatching", "condition": "Unprovable absence of unreceipted launch; deadline alone cannot authorize retirement, but successful empty-key proof after expiry or audited empty closer-ticket proof can settle no-dispatch", "proposedExitOwner": "watcher / closer operator", "proposedMaxDurationSeconds": 1800, "overdueRecipient": "adversarial-review operator", "enforcement": "missing"},
-    {"state": "hammer-dispatch.dispatched", "condition": "Malformed timestamp or unreadable liveness/ownership evidence", "proposedExitOwner": "watcher / closer operator", "proposedMaxDurationSeconds": 1800, "overdueRecipient": "adversarial-review operator", "enforcement": "missing"}
+    {
+      "state": "closer-lease.pending",
+      "condition": "Malformed timestamp or unreadable liveness/ownership evidence",
+      "proposedExitOwner": "watcher / closer operator",
+      "proposedMaxDurationSeconds": 1800,
+      "overdueRecipient": "adversarial-review operator",
+      "enforcement": "missing"
+    },
+    {
+      "state": "closer-lease.dispatched",
+      "condition": "Malformed timestamp or unreadable liveness/ownership evidence",
+      "proposedExitOwner": "watcher / closer operator",
+      "proposedMaxDurationSeconds": 1800,
+      "overdueRecipient": "adversarial-review operator",
+      "enforcement": "missing"
+    },
+    {
+      "state": "hammer-dispatch.dispatching",
+      "condition": "Unprovable absence of unreceipted launch; deadline alone cannot authorize retirement, but successful empty-key proof after expiry or audited empty closer-ticket proof can settle no-dispatch",
+      "proposedExitOwner": "watcher / closer operator",
+      "proposedMaxDurationSeconds": 1800,
+      "overdueRecipient": "adversarial-review operator",
+      "enforcement": "missing"
+    },
+    {
+      "state": "hammer-dispatch.dispatched",
+      "condition": "Malformed timestamp or unreadable liveness/ownership evidence",
+      "proposedExitOwner": "watcher / closer operator",
+      "proposedMaxDurationSeconds": 1800,
+      "overdueRecipient": "adversarial-review operator",
+      "enforcement": "missing"
+    }
   ],
   "objects": [
     {
@@ -100,56 +367,338 @@
         "src/closer-head-rereview-decline.mjs"
       ],
       "states": [
-        {"name": "pending","terminal": false,"exitOwner": "watcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},
-        {"name": "pending-upstream","terminal": false,"exitOwner": "watcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},
-        {"name": "reviewing","terminal": false,"exitOwner": "watcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},
-        {"name": "ci-blocked","terminal": false,"exitOwner": "watcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},
-        {"name": "posted","terminal": true},
-        {"name": "failed","terminal": true},
-        {"name": "failed-orphan","terminal": true},
-        {"name": "malformed","terminal": true},
-        {"name": "unroutable-bot-author","terminal": true},
-        {"name": "argus-security-queued","terminal": false,"exitOwner": "watcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},
-        {"name": "skipped","terminal": true},
-        {"name": "fast_merge_skipped","terminal": false,"exitOwner": "watcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."}
+        {
+          "name": "pending",
+          "terminal": false,
+          "exitOwner": "watcher",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."
+        },
+        {
+          "name": "pending-upstream",
+          "terminal": false,
+          "exitOwner": "watcher",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."
+        },
+        {
+          "name": "reviewing",
+          "terminal": false,
+          "exitOwner": "watcher",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."
+        },
+        {
+          "name": "ci-blocked",
+          "terminal": false,
+          "exitOwner": "watcher",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."
+        },
+        {
+          "name": "posted",
+          "terminal": true
+        },
+        {
+          "name": "failed",
+          "terminal": true
+        },
+        {
+          "name": "failed-orphan",
+          "terminal": true
+        },
+        {
+          "name": "malformed",
+          "terminal": true
+        },
+        {
+          "name": "unroutable-bot-author",
+          "terminal": true
+        },
+        {
+          "name": "argus-security-queued",
+          "terminal": false,
+          "exitOwner": "watcher",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."
+        },
+        {
+          "name": "skipped",
+          "terminal": true
+        },
+        {
+          "name": "fast_merge_skipped",
+          "terminal": false,
+          "exitOwner": "watcher",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."
+        }
       ],
       "transitions": [
-        {"id": "review-row.01","from": "[*]","to": "pending","trigger": "discover tagged subject","codeSource": "src/watcher.mjs"},
-        {"id": "review-row.02","from": "[*]","to": "malformed","trigger": "title rejected","codeSource": "src/watcher.mjs"},
-        {"id": "review-row.03","from": "[*]","to": "argus-security-queued","trigger": "route bot","codeSource": "src/watcher.mjs"},
-        {"id": "review-row.04","from": "[*]","to": "unroutable-bot-author","trigger": "bot route disabled","codeSource": "src/watcher.mjs"},
-        {"id": "review-row.05","from": "unroutable-bot-author","to": "argus-security-queued","trigger": "legacy bot recovery","codeSource": "src/watcher.mjs"},
-        {"id": "review-row.06","from": "argus-security-queued","to": "argus-security-queued","trigger": "enqueue new head","codeSource": "src/watcher.mjs"},
-        {"id": "review-row.07","from": "pending","to": "reviewing","trigger": "claim CAS (startup: recovery complete, drain inactive)","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.08","from": "pending-upstream","to": "reviewing","trigger": "claim after hold (startup: recovery complete, drain inactive)","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.09","from": "failed","to": "reviewing","trigger": "eligible retry CAS","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.10","from": "reviewing","to": "posted","trigger": "deliver review with matching session and recorded reviewed head","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.11","from": "reviewing","to": "failed","trigger": "dispatch or reviewer failure","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.12","from": "reviewing","to": "failed-orphan","trigger": "startup cannot prove recovery or recorded builder/reviewer family matches","codeSource": "src/reviewer-reattach.mjs"},
-        {"id": "review-row.13","from": "reviewing","to": "pending","trigger": "operator reset after confirmed reviewer exit","codeSource": "src/review-state.mjs"},
-        {"id": "review-row.14","from": "reviewing","to": "pending-upstream","trigger": "provider hold","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.15","from": "pending","to": "pending-upstream","trigger": "upstream outage","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.16","from": "pending-upstream","to": "pending","trigger": "provider recovery","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.17","from": "reviewing","to": "ci-blocked","trigger": "red CI without remediation","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.18","from": "ci-blocked","to": "pending","trigger": "confirmed current-head green CI","codeSource": "src/pollonce-phases.mjs"},
-        {"id": "review-row.19","from": "posted","to": "pending","trigger": "accepted rereview","codeSource": "src/review-state.mjs"},
-        {"id": "review-row.20","from": "failed","to": "pending","trigger": "new head archives failure","codeSource": "src/review-state.mjs"},
-        {"id": "review-row.21","from": "failed-orphan","to": "posted","trigger": "reconcile posted review with null-safe claim match and non-empty GitHub or stored head","codeSource": "src/orphan-post-reconcile.mjs"},
-        {"id": "review-row.22","from": "failed-orphan","to": "pending","trigger": "operator verified reset","codeSource": "src/review-state.mjs"},
-        {"id": "review-row.23","from": "posted","to": "posted","trigger": "closure maintenance","codeSource": "src/posted-review-row.mjs"},
-        {"id": "review-row.24","from": "pending","to": "skipped","trigger": "PR already merged","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.25","from": "pending-upstream","to": "skipped","trigger": "PR already merged","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.26","from": "reviewing","to": "skipped","trigger": "PR already merged","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.27","from": "[*]","to": "fast_merge_skipped","trigger": "authorized bypass","codeSource": "src/review-state-db.mjs"},
-        {"id": "review-row.28","from": "fast_merge_skipped","to": "pending","trigger": "authorization withdrawn or head moved","codeSource": "src/fast-merge-processing.mjs"},
-        {"id": "review-row.29","from": "reviewing","to": "pending","trigger": "stale head, missing reviewed head or lost claim match; no charge","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.30","from": "posted","to": "pending","trigger": "repair empty reviewed head at matching live revision once; no charge","codeSource": "src/posted-review-head-repair.mjs"},
-        {"id": "review-row.31","from": "failed","to": "pending","trigger": "recovered post cannot settle its reviewed head; no charge","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.32","from": "failed-orphan","to": "pending","trigger": "recovered post cannot match its claim; no charge","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.33","from": "reviewing","to": "reviewing","trigger": "defer rereview request while claim is in flight","codeSource": "src/review-state.mjs"},
-        {"id": "review-row.34","from": "pending","to": "posted","trigger": "automatic hammer-owned-head request restored to delivered review identity with request CAS","codeSource": "src/closer-head-rereview-decline.mjs"},
-        {"id": "review-row.35","from": "pending-upstream","to": "posted","trigger": "automatic hammer-owned-head request restored to delivered review identity with request CAS","codeSource": "src/closer-head-rereview-decline.mjs"},
-        {"id": "review-row.36","from": "ci-blocked","to": "posted","trigger": "automatic hammer-owned-head request restored for closure CI evaluation with request CAS","codeSource": "src/closer-head-rereview-decline.mjs"}
+        {
+          "id": "review-row.01",
+          "from": "[*]",
+          "to": "pending",
+          "trigger": "discover tagged subject",
+          "codeSource": "src/watcher.mjs"
+        },
+        {
+          "id": "review-row.02",
+          "from": "[*]",
+          "to": "malformed",
+          "trigger": "title rejected",
+          "codeSource": "src/watcher.mjs"
+        },
+        {
+          "id": "review-row.03",
+          "from": "[*]",
+          "to": "argus-security-queued",
+          "trigger": "route bot",
+          "codeSource": "src/watcher.mjs"
+        },
+        {
+          "id": "review-row.04",
+          "from": "[*]",
+          "to": "unroutable-bot-author",
+          "trigger": "bot route disabled",
+          "codeSource": "src/watcher.mjs"
+        },
+        {
+          "id": "review-row.05",
+          "from": "unroutable-bot-author",
+          "to": "argus-security-queued",
+          "trigger": "legacy bot recovery",
+          "codeSource": "src/watcher.mjs"
+        },
+        {
+          "id": "review-row.06",
+          "from": "argus-security-queued",
+          "to": "argus-security-queued",
+          "trigger": "enqueue new head",
+          "codeSource": "src/watcher.mjs"
+        },
+        {
+          "id": "review-row.07",
+          "from": "pending",
+          "to": "reviewing",
+          "trigger": "claim CAS (startup: recovery complete, drain inactive)",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.08",
+          "from": "pending-upstream",
+          "to": "reviewing",
+          "trigger": "claim after hold (startup: recovery complete, drain inactive)",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.09",
+          "from": "failed",
+          "to": "reviewing",
+          "trigger": "eligible retry CAS",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.10",
+          "from": "reviewing",
+          "to": "posted",
+          "trigger": "deliver review with matching session and recorded reviewed head",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.11",
+          "from": "reviewing",
+          "to": "failed",
+          "trigger": "dispatch or reviewer failure",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.12",
+          "from": "reviewing",
+          "to": "failed-orphan",
+          "trigger": "startup cannot prove recovery or recorded builder/reviewer family matches",
+          "codeSource": "src/reviewer-reattach.mjs"
+        },
+        {
+          "id": "review-row.13",
+          "from": "reviewing",
+          "to": "pending",
+          "trigger": "operator reset after confirmed reviewer exit",
+          "codeSource": "src/review-state.mjs"
+        },
+        {
+          "id": "review-row.14",
+          "from": "reviewing",
+          "to": "pending-upstream",
+          "trigger": "provider hold",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.15",
+          "from": "pending",
+          "to": "pending-upstream",
+          "trigger": "upstream outage",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.16",
+          "from": "pending-upstream",
+          "to": "pending",
+          "trigger": "provider recovery",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.17",
+          "from": "reviewing",
+          "to": "ci-blocked",
+          "trigger": "red CI without remediation",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.18",
+          "from": "ci-blocked",
+          "to": "pending",
+          "trigger": "confirmed current-head green CI",
+          "codeSource": "src/pollonce-phases.mjs"
+        },
+        {
+          "id": "review-row.19",
+          "from": "posted",
+          "to": "pending",
+          "trigger": "accepted rereview",
+          "codeSource": "src/review-state.mjs"
+        },
+        {
+          "id": "review-row.20",
+          "from": "failed",
+          "to": "pending",
+          "trigger": "new head archives failure",
+          "codeSource": "src/review-state.mjs"
+        },
+        {
+          "id": "review-row.21",
+          "from": "failed-orphan",
+          "to": "posted",
+          "trigger": "reconcile posted review with null-safe claim match and non-empty GitHub or stored head",
+          "codeSource": "src/orphan-post-reconcile.mjs"
+        },
+        {
+          "id": "review-row.22",
+          "from": "failed-orphan",
+          "to": "pending",
+          "trigger": "operator verified reset",
+          "codeSource": "src/review-state.mjs"
+        },
+        {
+          "id": "review-row.23",
+          "from": "posted",
+          "to": "posted",
+          "trigger": "closure maintenance",
+          "codeSource": "src/posted-review-row.mjs"
+        },
+        {
+          "id": "review-row.24",
+          "from": "pending",
+          "to": "skipped",
+          "trigger": "PR already merged",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.25",
+          "from": "pending-upstream",
+          "to": "skipped",
+          "trigger": "PR already merged",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.26",
+          "from": "reviewing",
+          "to": "skipped",
+          "trigger": "PR already merged",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.27",
+          "from": "[*]",
+          "to": "fast_merge_skipped",
+          "trigger": "authorized bypass",
+          "codeSource": "src/review-state-db.mjs"
+        },
+        {
+          "id": "review-row.28",
+          "from": "fast_merge_skipped",
+          "to": "pending",
+          "trigger": "authorization withdrawn or head moved",
+          "codeSource": "src/fast-merge-processing.mjs"
+        },
+        {
+          "id": "review-row.29",
+          "from": "reviewing",
+          "to": "pending",
+          "trigger": "stale head, missing reviewed head or lost claim match; no charge",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.30",
+          "from": "posted",
+          "to": "pending",
+          "trigger": "repair empty reviewed head at matching live revision once; no charge",
+          "codeSource": "src/posted-review-head-repair.mjs"
+        },
+        {
+          "id": "review-row.31",
+          "from": "failed",
+          "to": "pending",
+          "trigger": "recovered post cannot settle its reviewed head; no charge",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.32",
+          "from": "failed-orphan",
+          "to": "pending",
+          "trigger": "recovered post cannot match its claim; no charge",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.33",
+          "from": "reviewing",
+          "to": "reviewing",
+          "trigger": "defer rereview request while claim is in flight",
+          "codeSource": "src/review-state.mjs"
+        },
+        {
+          "id": "review-row.34",
+          "from": "pending",
+          "to": "posted",
+          "trigger": "automatic hammer-owned-head request restored to delivered review identity with request CAS",
+          "codeSource": "src/closer-head-rereview-decline.mjs"
+        },
+        {
+          "id": "review-row.35",
+          "from": "pending-upstream",
+          "to": "posted",
+          "trigger": "automatic hammer-owned-head request restored to delivered review identity with request CAS",
+          "codeSource": "src/closer-head-rereview-decline.mjs"
+        },
+        {
+          "id": "review-row.36",
+          "from": "ci-blocked",
+          "to": "posted",
+          "trigger": "automatic hammer-owned-head request restored for closure CI evaluation with request CAS",
+          "codeSource": "src/closer-head-rereview-decline.mjs"
+        }
       ]
     },
     {
@@ -163,33 +712,175 @@
         "src/follow-up-remediation.mjs"
       ],
       "states": [
-        {"name": "pending","terminal": false,"exitOwner": "follow-up daemon","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},
-        {"name": "in_progress","terminal": false,"exitOwner": "follow-up daemon","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},
-        {"name": "completed","terminal": true},
-        {"name": "failed","terminal": true},
-        {"name": "stopped","terminal": true},
-        {"name": "cancelled","terminal": true}
+        {
+          "name": "pending",
+          "terminal": false,
+          "exitOwner": "follow-up daemon",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."
+        },
+        {
+          "name": "in_progress",
+          "terminal": false,
+          "exitOwner": "follow-up daemon",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."
+        },
+        {
+          "name": "completed",
+          "terminal": true
+        },
+        {
+          "name": "failed",
+          "terminal": true
+        },
+        {
+          "name": "stopped",
+          "terminal": true
+        },
+        {
+          "name": "cancelled",
+          "terminal": true
+        }
       ],
       "transitions": [
-        {"id": "follow-up-job.01","from": "[*]","to": "pending","trigger": "create from delivered review","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.02","from": "pending","to": "in_progress","trigger": "resolve head branch, claim and start round","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.03","from": "pending","to": "stopped","trigger": "settled clean bypasses branch hold, exhausted branch lookups or rounds","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.04","from": "pending","to": "failed","trigger": "claim failure","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.05","from": "pending","to": "cancelled","trigger": "operator cancellation","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.06","from": "in_progress","to": "completed","trigger": "validated worker reply; proven publication precedes infrastructure hold and legacy published wait completes on green","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.07","from": "in_progress","to": "failed","trigger": "worker failure","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.08","from": "in_progress","to": "stopped","trigger": "lifecycle, budget or committed-unpublished stop","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.09","from": "in_progress","to": "cancelled","trigger": "operator cancellation","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.10","from": "in_progress","to": "pending","trigger": "transient retry or unpublished infrastructure-only CI execution recovery without round charge","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.11","from": "completed","to": "pending","trigger": "next round unless comment-only final hammer handoff","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.12","from": "failed","to": "pending","trigger": "explicit retrigger or all-infrastructure CI stop with successful current-head replacement checks","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.13","from": "stopped","to": "pending","trigger": "allowlisted explicit retrigger or live satisfied required-label event with unchanged round cap; branch-unresolved resets lookup attempts; all-infrastructure CI stops except max-rounds recover on successful current-head replacements","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.14","from": "in_progress","to": "stopped","trigger": "stacked-base-merged: hold before worker spawn and request rebase/retarget","codeSource": "src/follow-up-remediation.mjs"},
-        {"id": "follow-up-job.15","from": "in_progress","to": "pending","trigger": "base evidence unreadable: budget-neutral delayed recheck","codeSource": "src/follow-up-remediation.mjs"},
-        {"id": "follow-up-job.16","from": "in_progress","to": "stopped","trigger": "operator-only findings after lifecycle admission: hold without spawning","codeSource": "src/follow-up-remediation.mjs"},
-        {"id": "follow-up-job.17","from": "in_progress","to": "failed","trigger": "exited worker has a matching preservation-refusal sidecar","codeSource": "src/follow-up-remediation.mjs"},
-        {"id": "follow-up-job.18","from": "pending","to": "pending","trigger": "branch-unresolved remediation: up to three delayed head lookups without worker or round charge","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.19","from": "in_progress","to": "in_progress","trigger": "infrastructure-only CI without retained publication work: bounded wait; moved/terminal head clears wait under lock","codeSource": "src/remediation-ci-infrastructure.mjs"}
+        {
+          "id": "follow-up-job.01",
+          "from": "[*]",
+          "to": "pending",
+          "trigger": "create from delivered review",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.02",
+          "from": "pending",
+          "to": "in_progress",
+          "trigger": "resolve head branch, claim and start round",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.03",
+          "from": "pending",
+          "to": "stopped",
+          "trigger": "settled clean bypasses branch hold, exhausted branch lookups or rounds",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.04",
+          "from": "pending",
+          "to": "failed",
+          "trigger": "claim failure",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.05",
+          "from": "pending",
+          "to": "cancelled",
+          "trigger": "operator cancellation",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.06",
+          "from": "in_progress",
+          "to": "completed",
+          "trigger": "validated worker reply; proven publication precedes infrastructure hold and legacy published wait completes on green",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.07",
+          "from": "in_progress",
+          "to": "failed",
+          "trigger": "worker failure",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.08",
+          "from": "in_progress",
+          "to": "stopped",
+          "trigger": "lifecycle, budget or committed-unpublished stop",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.09",
+          "from": "in_progress",
+          "to": "cancelled",
+          "trigger": "operator cancellation",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.10",
+          "from": "in_progress",
+          "to": "pending",
+          "trigger": "transient retry or unpublished infrastructure-only CI execution recovery without round charge",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.11",
+          "from": "completed",
+          "to": "pending",
+          "trigger": "next round unless comment-only final hammer handoff",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.12",
+          "from": "failed",
+          "to": "pending",
+          "trigger": "explicit retrigger or all-infrastructure CI stop with successful current-head replacement checks",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.13",
+          "from": "stopped",
+          "to": "pending",
+          "trigger": "allowlisted explicit retrigger or live satisfied required-label event with unchanged round cap; branch-unresolved resets lookup attempts; all-infrastructure CI stops except max-rounds recover on successful current-head replacements",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.14",
+          "from": "in_progress",
+          "to": "stopped",
+          "trigger": "stacked-base-merged: hold before worker spawn and request rebase/retarget",
+          "codeSource": "src/follow-up-remediation.mjs"
+        },
+        {
+          "id": "follow-up-job.15",
+          "from": "in_progress",
+          "to": "pending",
+          "trigger": "base evidence unreadable: budget-neutral delayed recheck",
+          "codeSource": "src/follow-up-remediation.mjs"
+        },
+        {
+          "id": "follow-up-job.16",
+          "from": "in_progress",
+          "to": "stopped",
+          "trigger": "operator-only findings after lifecycle admission: hold without spawning",
+          "codeSource": "src/follow-up-remediation.mjs"
+        },
+        {
+          "id": "follow-up-job.17",
+          "from": "in_progress",
+          "to": "failed",
+          "trigger": "exited worker has a matching preservation-refusal sidecar",
+          "codeSource": "src/follow-up-remediation.mjs"
+        },
+        {
+          "id": "follow-up-job.18",
+          "from": "pending",
+          "to": "pending",
+          "trigger": "branch-unresolved remediation: up to three delayed head lookups without worker or round charge",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.19",
+          "from": "in_progress",
+          "to": "in_progress",
+          "trigger": "infrastructure-only CI without retained publication work: bounded wait; moved/terminal head clears wait under lock",
+          "codeSource": "src/remediation-ci-infrastructure.mjs"
+        }
       ]
     },
     {
@@ -215,30 +906,159 @@
         "src/adapters/reviewer-runtime/fixture-stub/index.mjs"
       ],
       "states": [
-        {"name": "launching","terminal": false,"exitOwner": "reviewer runtime","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},
-        {"name": "spawned","terminal": false,"exitOwner": "reviewer runtime","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},
-        {"name": "heartbeating","terminal": false,"exitOwner": "reviewer runtime","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},
-        {"name": "completed","terminal": true},
-        {"name": "failed","terminal": true},
-        {"name": "cancelled","terminal": true}
+        {
+          "name": "launching",
+          "terminal": false,
+          "exitOwner": "reviewer runtime",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."
+        },
+        {
+          "name": "spawned",
+          "terminal": false,
+          "exitOwner": "reviewer runtime",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."
+        },
+        {
+          "name": "heartbeating",
+          "terminal": false,
+          "exitOwner": "reviewer runtime",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."
+        },
+        {
+          "name": "completed",
+          "terminal": true
+        },
+        {
+          "name": "failed",
+          "terminal": true
+        },
+        {
+          "name": "cancelled",
+          "terminal": true
+        }
       ],
       "transitions": [
-        {"id": "reviewer-run.01","from": "[*]","to": "launching","trigger": "claim launch intent","codeSource": "src/adapters/reviewer-runtime/cli-direct/index.mjs"},
-        {"id": "reviewer-run.02","from": "[*]","to": "spawned","trigger": "legacy record default","codeSource": "src/adapters/reviewer-runtime/run-state.mjs"},
-        {"id": "reviewer-run.03","from": "[*]","to": "heartbeating","trigger": "adopt existing runtime","codeSource": "src/adapters/reviewer-runtime/agent-os-hq/index.mjs"},
-        {"id": "reviewer-run.04","from": "launching","to": "heartbeating","trigger": "PGID captured","codeSource": "src/adapters/reviewer-runtime/cli-direct/index.mjs"},
-        {"id": "reviewer-run.05","from": "spawned","to": "heartbeating","trigger": "heartbeat","codeSource": "src/adapters/reviewer-runtime/cli-direct/index.mjs"},
-        {"id": "reviewer-run.06","from": "heartbeating","to": "heartbeating","trigger": "heartbeat","codeSource": "src/adapters/reviewer-runtime/cli-direct/index.mjs"},
-        {"id": "reviewer-run.07","from": "launching","to": "completed","trigger": "settle subprocess","codeSource": "src/adapters/reviewer-runtime/run-state.mjs"},
-        {"id": "reviewer-run.08","from": "launching","to": "failed","trigger": "settle subprocess","codeSource": "src/adapters/reviewer-runtime/run-state.mjs"},
-        {"id": "reviewer-run.09","from": "launching","to": "cancelled","trigger": "settle subprocess","codeSource": "src/adapters/reviewer-runtime/run-state.mjs"},
-        {"id": "reviewer-run.10","from": "spawned","to": "completed","trigger": "settle subprocess","codeSource": "src/adapters/reviewer-runtime/run-state.mjs"},
-        {"id": "reviewer-run.11","from": "spawned","to": "failed","trigger": "settle subprocess","codeSource": "src/adapters/reviewer-runtime/run-state.mjs"},
-        {"id": "reviewer-run.12","from": "spawned","to": "cancelled","trigger": "settle subprocess","codeSource": "src/adapters/reviewer-runtime/run-state.mjs"},
-        {"id": "reviewer-run.13","from": "heartbeating","to": "completed","trigger": "settle subprocess","codeSource": "src/adapters/reviewer-runtime/run-state.mjs"},
-        {"id": "reviewer-run.14","from": "heartbeating","to": "failed","trigger": "settle subprocess","codeSource": "src/adapters/reviewer-runtime/run-state.mjs"},
-        {"id": "reviewer-run.15","from": "heartbeating","to": "cancelled","trigger": "settle subprocess","codeSource": "src/adapters/reviewer-runtime/run-state.mjs"},
-        {"id": "reviewer-run.16","from": "cancelled","to": "heartbeating","trigger": "recover adopted PGID","codeSource": "src/adapters/reviewer-runtime/cli-direct/index.mjs"}
+        {
+          "id": "reviewer-run.01",
+          "from": "[*]",
+          "to": "launching",
+          "trigger": "claim launch intent",
+          "codeSource": "src/adapters/reviewer-runtime/cli-direct/index.mjs"
+        },
+        {
+          "id": "reviewer-run.02",
+          "from": "[*]",
+          "to": "spawned",
+          "trigger": "legacy record default",
+          "codeSource": "src/adapters/reviewer-runtime/run-state.mjs"
+        },
+        {
+          "id": "reviewer-run.03",
+          "from": "[*]",
+          "to": "heartbeating",
+          "trigger": "adopt existing runtime",
+          "codeSource": "src/adapters/reviewer-runtime/agent-os-hq/index.mjs"
+        },
+        {
+          "id": "reviewer-run.04",
+          "from": "launching",
+          "to": "heartbeating",
+          "trigger": "PGID captured",
+          "codeSource": "src/adapters/reviewer-runtime/cli-direct/index.mjs"
+        },
+        {
+          "id": "reviewer-run.05",
+          "from": "spawned",
+          "to": "heartbeating",
+          "trigger": "heartbeat",
+          "codeSource": "src/adapters/reviewer-runtime/cli-direct/index.mjs"
+        },
+        {
+          "id": "reviewer-run.06",
+          "from": "heartbeating",
+          "to": "heartbeating",
+          "trigger": "heartbeat",
+          "codeSource": "src/adapters/reviewer-runtime/cli-direct/index.mjs"
+        },
+        {
+          "id": "reviewer-run.07",
+          "from": "launching",
+          "to": "completed",
+          "trigger": "settle subprocess",
+          "codeSource": "src/adapters/reviewer-runtime/run-state.mjs"
+        },
+        {
+          "id": "reviewer-run.08",
+          "from": "launching",
+          "to": "failed",
+          "trigger": "settle subprocess",
+          "codeSource": "src/adapters/reviewer-runtime/run-state.mjs"
+        },
+        {
+          "id": "reviewer-run.09",
+          "from": "launching",
+          "to": "cancelled",
+          "trigger": "settle subprocess",
+          "codeSource": "src/adapters/reviewer-runtime/run-state.mjs"
+        },
+        {
+          "id": "reviewer-run.10",
+          "from": "spawned",
+          "to": "completed",
+          "trigger": "settle subprocess",
+          "codeSource": "src/adapters/reviewer-runtime/run-state.mjs"
+        },
+        {
+          "id": "reviewer-run.11",
+          "from": "spawned",
+          "to": "failed",
+          "trigger": "settle subprocess",
+          "codeSource": "src/adapters/reviewer-runtime/run-state.mjs"
+        },
+        {
+          "id": "reviewer-run.12",
+          "from": "spawned",
+          "to": "cancelled",
+          "trigger": "settle subprocess",
+          "codeSource": "src/adapters/reviewer-runtime/run-state.mjs"
+        },
+        {
+          "id": "reviewer-run.13",
+          "from": "heartbeating",
+          "to": "completed",
+          "trigger": "settle subprocess",
+          "codeSource": "src/adapters/reviewer-runtime/run-state.mjs"
+        },
+        {
+          "id": "reviewer-run.14",
+          "from": "heartbeating",
+          "to": "failed",
+          "trigger": "settle subprocess",
+          "codeSource": "src/adapters/reviewer-runtime/run-state.mjs"
+        },
+        {
+          "id": "reviewer-run.15",
+          "from": "heartbeating",
+          "to": "cancelled",
+          "trigger": "settle subprocess",
+          "codeSource": "src/adapters/reviewer-runtime/run-state.mjs"
+        },
+        {
+          "id": "reviewer-run.16",
+          "from": "cancelled",
+          "to": "heartbeating",
+          "trigger": "recover adopted PGID",
+          "codeSource": "src/adapters/reviewer-runtime/cli-direct/index.mjs"
+        }
       ]
     },
     {
@@ -249,23 +1069,115 @@
         "src/ama/closer-lease.mjs"
       ],
       "states": [
-        {"name": "pending","terminal": false,"exitOwner": "watcher / closer","maxDurationSeconds": 1831.5,"overdueRecipient": "adversarial-review operator","enforcement": "present"},
-        {"name": "dispatched","terminal": false,"exitOwner": "watcher / closer","maxDurationSeconds": 88200,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "Live launch evidence retains ownership regardless of age; unknown liveness has the execution-ceiling fallback, malformed timestamps require operator recovery."},
-        {"name": "handed-to-review","terminal": false,"exitOwner": "watcher / closer","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},
-        {"name": "terminal","terminal": true}
+        {
+          "name": "pending",
+          "terminal": false,
+          "exitOwner": "watcher / closer",
+          "maxDurationSeconds": 1831.5,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "present"
+        },
+        {
+          "name": "dispatched",
+          "terminal": false,
+          "exitOwner": "watcher / closer",
+          "maxDurationSeconds": 88200,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "Live launch evidence retains ownership regardless of age; unknown liveness has the execution-ceiling fallback, malformed timestamps require operator recovery."
+        },
+        {
+          "name": "handed-to-review",
+          "terminal": false,
+          "exitOwner": "watcher / closer",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."
+        },
+        {
+          "name": "terminal",
+          "terminal": true
+        }
       ],
       "transitions": [
-        {"id": "closer-lease.01","from": "[*]","to": "pending","trigger": "exclusive acquisition","codeSource": "src/ama/closer-lease.mjs"},
-        {"id": "closer-lease.02","from": "pending","to": "dispatched","trigger": "launch receipt","codeSource": "src/ama/closer-lease.mjs"},
-        {"id": "closer-lease.03","from": "pending","to": "terminal","trigger": "terminal observed before launch or launch-less holder abandoned after local death/PID reuse or dispatch timeout","codeSource": "src/ama/closer-lease.mjs"},
-        {"id": "closer-lease.04","from": "dispatched","to": "terminal","trigger": "terminal settlement after readable 60s grace; armed auto-merge holds only inside fixed 30-minute dispatched-lease window unless no-merge audit resolves exit","codeSource": "src/ama/closer-lease.mjs"},
-        {"id": "closer-lease.05","from": "pending","to": "handed-to-review","trigger": "bounded review request accepted","codeSource": "src/ama/closer-lease.mjs"},
-        {"id": "closer-lease.06","from": "dispatched","to": "handed-to-review","trigger": "bounded review request accepted","codeSource": "src/ama/closer-lease.mjs"},
-        {"id": "closer-lease.07","from": "handed-to-review","to": "pending","trigger": "review completed; locked reclaim","codeSource": "src/ama/closer-lease.mjs"},
-        {"id": "closer-lease.08","from": "handed-to-review","to": "terminal","trigger": "external terminal outcome","codeSource": "src/ama/closer-lease.mjs"},
-        {"id": "closer-lease.09","from": "pending","to": "[*]","trigger": "expired pending lease reclaimed","codeSource": "src/ama/closer-lease.mjs"},
-        {"id": "closer-lease.10","from": "dispatched","to": "[*]","trigger": "superseded launch releases matching rekeyed lease; otherwise terminal launch aged out or unknown launch exceeded execution ceiling plus margin; live launch retained","codeSource": "src/ama/closer-lease.mjs"},
-        {"id": "closer-lease.11","from": "terminal","to": "[*]","trigger": "non-merge terminal with ended or absent launch reclaimed; live or unproven launch retained; succeeded sticky","codeSource": "src/ama/closer-lease.mjs"}
+        {
+          "id": "closer-lease.01",
+          "from": "[*]",
+          "to": "pending",
+          "trigger": "exclusive acquisition",
+          "codeSource": "src/ama/closer-lease.mjs"
+        },
+        {
+          "id": "closer-lease.02",
+          "from": "pending",
+          "to": "dispatched",
+          "trigger": "launch receipt",
+          "codeSource": "src/ama/closer-lease.mjs"
+        },
+        {
+          "id": "closer-lease.03",
+          "from": "pending",
+          "to": "terminal",
+          "trigger": "terminal observed before launch or launch-less holder abandoned after local death/PID reuse or dispatch timeout",
+          "codeSource": "src/ama/closer-lease.mjs"
+        },
+        {
+          "id": "closer-lease.04",
+          "from": "dispatched",
+          "to": "terminal",
+          "trigger": "terminal settlement after readable 60s grace; armed auto-merge holds only inside fixed 30-minute dispatched-lease window unless no-merge audit resolves exit",
+          "codeSource": "src/ama/closer-lease.mjs"
+        },
+        {
+          "id": "closer-lease.05",
+          "from": "pending",
+          "to": "handed-to-review",
+          "trigger": "bounded review request accepted",
+          "codeSource": "src/ama/closer-lease.mjs"
+        },
+        {
+          "id": "closer-lease.06",
+          "from": "dispatched",
+          "to": "handed-to-review",
+          "trigger": "bounded review request accepted",
+          "codeSource": "src/ama/closer-lease.mjs"
+        },
+        {
+          "id": "closer-lease.07",
+          "from": "handed-to-review",
+          "to": "pending",
+          "trigger": "review completed; locked reclaim",
+          "codeSource": "src/ama/closer-lease.mjs"
+        },
+        {
+          "id": "closer-lease.08",
+          "from": "handed-to-review",
+          "to": "terminal",
+          "trigger": "external terminal outcome",
+          "codeSource": "src/ama/closer-lease.mjs"
+        },
+        {
+          "id": "closer-lease.09",
+          "from": "pending",
+          "to": "[*]",
+          "trigger": "expired pending lease reclaimed",
+          "codeSource": "src/ama/closer-lease.mjs"
+        },
+        {
+          "id": "closer-lease.10",
+          "from": "dispatched",
+          "to": "[*]",
+          "trigger": "superseded launch releases matching rekeyed lease; otherwise terminal launch aged out or unknown launch exceeded execution ceiling plus margin; live launch retained",
+          "codeSource": "src/ama/closer-lease.mjs"
+        },
+        {
+          "id": "closer-lease.11",
+          "from": "terminal",
+          "to": "[*]",
+          "trigger": "non-merge terminal with ended or absent launch reclaimed; live or unproven launch retained; succeeded sticky",
+          "codeSource": "src/ama/closer-lease.mjs"
+        }
       ]
     },
     {
@@ -312,18 +1224,90 @@
         }
       ],
       "transitions": [
-        {"id": "closure-owner.01","from": "[*]","to": "hammer","trigger": "empty-diff closure recovery until remote termination","codeSource": "src/pr-next-action.mjs"},
-        {"id": "closure-owner.02","from": "[*]","to": "hammer","trigger": "current automatic stops or exhaustion retain closure-recovery actor unless a newer eligible exact-head review selects daemon merge","codeSource": "src/pr-next-action.mjs"},
-        {"id": "closure-owner.03","from": "[*]","to": "wait","trigger": "project shared next action: wait, including infrastructure-only CI without hammer or automated-stop charge","codeSource": "src/ama/closure-next-action.mjs"},
-        {"id": "closure-owner.04","from": "[*]","to": "hammer","trigger": "project shared next action: hammer (including exhausted CI-stopped stale reviewed head with terminal failed external CI)","codeSource": "src/ama/closure-next-action.mjs"},
-        {"id": "closure-owner.05","from": "[*]","to": "review","trigger": "project shared next action: review (including a head-bound shared rereview-exact-head decision before historical review ceiling or hammer ownership)","codeSource": "src/ama/closure-next-action.mjs"},
-        {"id": "closure-owner.06","from": "[*]","to": "remediation","trigger": "project shared next action: remediation","codeSource": "src/ama/closure-next-action.mjs"},
-        {"id": "closure-owner.07","from": "[*]","to": "remediation","trigger": "proven live remediation owner retained","codeSource": "src/pr-next-action.mjs"},
-        {"id": "closure-owner.08","from": "[*]","to": "hammer","trigger": "confirmed conflict selects capped repair with merge safety retained","codeSource": "src/pr-next-action.mjs"},
-        {"id": "closure-owner.09","from": "[*]","to": "daemon-merge","trigger": "project shared next action: daemon-merge, including a stop superseded by newer eligible exact-head review","codeSource": "src/ama/closure-next-action.mjs"},
-        {"id": "closure-owner.10","from": "wait","to": "[*]","trigger": "next bounded observation; overdue reporting preserves the selected workflow","codeSource": "src/ama/closure-next-action.mjs"},
-        {"id": "closure-owner.11","from": "[*]","to": "operator-hold","trigger": "explicit hold, draft or disabled execution intent","codeSource": "src/ama/closure-next-action.mjs"},
-        {"id": "closure-owner.12","from": "[*]","to": "done","trigger": "confirmed merged or closed PR","codeSource": "src/ama/closure-next-action.mjs"}
+        {
+          "id": "closure-owner.01",
+          "from": "[*]",
+          "to": "hammer",
+          "trigger": "empty-diff closure recovery until remote termination",
+          "codeSource": "src/pr-next-action.mjs"
+        },
+        {
+          "id": "closure-owner.02",
+          "from": "[*]",
+          "to": "hammer",
+          "trigger": "current automatic stops or exhaustion retain closure-recovery actor unless a newer eligible exact-head review selects daemon merge",
+          "codeSource": "src/pr-next-action.mjs"
+        },
+        {
+          "id": "closure-owner.03",
+          "from": "[*]",
+          "to": "wait",
+          "trigger": "project shared next action: wait, including infrastructure-only CI without hammer or automated-stop charge",
+          "codeSource": "src/ama/closure-next-action.mjs"
+        },
+        {
+          "id": "closure-owner.04",
+          "from": "[*]",
+          "to": "hammer",
+          "trigger": "project shared next action: hammer (including exhausted CI-stopped stale reviewed head with terminal failed external CI)",
+          "codeSource": "src/ama/closure-next-action.mjs"
+        },
+        {
+          "id": "closure-owner.05",
+          "from": "[*]",
+          "to": "review",
+          "trigger": "project shared next action: review (including a head-bound shared rereview-exact-head decision before historical review ceiling or hammer ownership)",
+          "codeSource": "src/ama/closure-next-action.mjs"
+        },
+        {
+          "id": "closure-owner.06",
+          "from": "[*]",
+          "to": "remediation",
+          "trigger": "project shared next action: remediation",
+          "codeSource": "src/ama/closure-next-action.mjs"
+        },
+        {
+          "id": "closure-owner.07",
+          "from": "[*]",
+          "to": "remediation",
+          "trigger": "proven live remediation owner retained",
+          "codeSource": "src/pr-next-action.mjs"
+        },
+        {
+          "id": "closure-owner.08",
+          "from": "[*]",
+          "to": "hammer",
+          "trigger": "confirmed conflict selects capped repair with merge safety retained",
+          "codeSource": "src/pr-next-action.mjs"
+        },
+        {
+          "id": "closure-owner.09",
+          "from": "[*]",
+          "to": "daemon-merge",
+          "trigger": "project shared next action: daemon-merge, including a stop superseded by newer eligible exact-head review",
+          "codeSource": "src/ama/closure-next-action.mjs"
+        },
+        {
+          "id": "closure-owner.10",
+          "from": "wait",
+          "to": "[*]",
+          "trigger": "next bounded observation; overdue reporting preserves the selected workflow",
+          "codeSource": "src/ama/closure-next-action.mjs"
+        },
+        {
+          "id": "closure-owner.11",
+          "from": "[*]",
+          "to": "operator-hold",
+          "trigger": "explicit hold, draft or disabled execution intent",
+          "codeSource": "src/ama/closure-next-action.mjs"
+        },
+        {
+          "id": "closure-owner.12",
+          "from": "[*]",
+          "to": "done",
+          "trigger": "confirmed merged or closed PR",
+          "codeSource": "src/ama/closure-next-action.mjs"
+        }
       ]
     },
     {
@@ -338,51 +1322,299 @@
         "src/recovery-reaper.mjs"
       ],
       "states": [
-        {"name": "dispatching","terminal": false,"exitOwner": "closure orchestration / recovery reaper / closer dispatcher / operator inspection","maxDurationSeconds": 1831.5,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "CLOSERINTENTRECON-01 invokes the existing fenced proof from closure orchestration and the recovery reaper before waiting on a dead or expired pending owner, including the intent named by rekeyedFromHeadSha. LAC-2081 bounds diagnostics by the original dispatch timeout (30 minutes without it). LEGACYINTENT-01 supplies an audited operator exit on empty successful ticket/time ledger evidence. CLOSERGATE-01 scopes unresolved ownership to its PR/head with no fleet launch capacity and one durable inspection page; CLOSERINTENT-01 supplies an exit on successful empty-key proof after the dispatch deadline or audited empty closer-ticket proof; unreadable absence evidence remains held; authoritative closed/merged PR metadata retires the intent without claiming no submission."},
-        {"name": "dispatched","terminal": false,"exitOwner": "closer dispatcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "present"},
-        {"name": "launch-terminal","terminal": true},
-        {"name": "deferred-by-drain","terminal": false,"exitOwner": "closer dispatcher or watcher lane","maxDurationSeconds": 300,"overdueRecipient": "adversarial-review operator","enforcement": "present"},
-        {"name": "dispatch-deferred-transient","terminal": false,"exitOwner": "closer dispatcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "Retries preserve budget; repeated transport failure has no unconditional elapsed-time exit; unidentified fork metadata alone has a six-hour operator-inspection horizon."},
-        {"name": "dispatch-blocked-branch-holder","terminal": false,"exitOwner": "closer dispatcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "Attempt cap exists but no elapsed-time exit if polling/holder release stops."},
-        {"name": "dispatch-branch-holder-block-exhausted","terminal": true},
-        {"name": "dispatch-failed","terminal": true},
-        {"name": "dispatch-configuration-refused","terminal": true},
-        {"name": "no-dispatch","terminal": true},
-        {"name": "completed","terminal": true}
+        {
+          "name": "dispatching",
+          "terminal": false,
+          "exitOwner": "closure orchestration / recovery reaper / closer dispatcher / operator inspection",
+          "maxDurationSeconds": 1831.5,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "CLOSERINTENTRECON-01 invokes the existing fenced proof from closure orchestration and the recovery reaper before waiting on a dead or expired pending owner, including the intent named by rekeyedFromHeadSha. LAC-2081 bounds diagnostics by the original dispatch timeout (30 minutes without it). LEGACYINTENT-01 supplies an audited operator exit on empty successful ticket/time ledger evidence. CLOSERGATE-01 scopes unresolved ownership to its PR/head with no fleet launch capacity and one durable inspection page; CLOSERINTENT-01 supplies an exit on successful empty-key proof after the dispatch deadline or audited empty closer-ticket proof; unreadable absence evidence remains held; authoritative closed/merged PR metadata retires the intent without claiming no submission."
+        },
+        {
+          "name": "dispatched",
+          "terminal": false,
+          "exitOwner": "closer dispatcher",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "present"
+        },
+        {
+          "name": "launch-terminal",
+          "terminal": true
+        },
+        {
+          "name": "deferred-by-drain",
+          "terminal": false,
+          "exitOwner": "closer dispatcher or watcher lane",
+          "maxDurationSeconds": 300,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "present"
+        },
+        {
+          "name": "dispatch-deferred-transient",
+          "terminal": false,
+          "exitOwner": "closer dispatcher",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "Retries preserve budget; repeated transport failure has no unconditional elapsed-time exit; unidentified fork metadata alone has a six-hour operator-inspection horizon."
+        },
+        {
+          "name": "dispatch-blocked-branch-holder",
+          "terminal": false,
+          "exitOwner": "closer dispatcher",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "Attempt cap exists but no elapsed-time exit if polling/holder release stops."
+        },
+        {
+          "name": "dispatch-branch-holder-block-exhausted",
+          "terminal": true
+        },
+        {
+          "name": "dispatch-failed",
+          "terminal": true
+        },
+        {
+          "name": "dispatch-configuration-refused",
+          "terminal": true
+        },
+        {
+          "name": "no-dispatch",
+          "terminal": true
+        },
+        {
+          "name": "completed",
+          "terminal": true
+        }
       ],
       "transitions": [
-        {"id": "hammer-dispatch.29","from": "dispatching","to": "dispatched","trigger": "recover one canonical receipt by exact attempt key, AMA ticket and repository even with unreadable PR state; preserve retry charge once","codeSource": "src/ama/pre-receipt-intent.mjs"},
-        {"id": "hammer-dispatch.30","from": "dispatching","to": "no-dispatch","trigger": "closure orchestration, recovery reaper and per-PR admission reconcile the named intent including a rekeyed lease; fenced prepared attempt with dead matching owner and absent key, submitting attempt with dead watcher and submitter plus absent process key then empty ledger key, expired successful empty-key query, or successful empty ticket/time query (legacy automatic or keyed audited) proves no launch; defer lease and refund intent retry once","codeSource": "src/ama/pre-receipt-intent.mjs"},
-        {"id": "hammer-dispatch.32","from": "dispatching","to": "completed","trigger": "authoritative closed/merged PR state retires intent as pr-terminal under fence; preserve lease and budgets; unreadable PR state permits exact-key receipt recovery but otherwise holds without paging","codeSource": "src/ama/pre-receipt-intent.mjs"},
-        {"id": "hammer-dispatch.31","from": "dispatching","to": "dispatching","trigger": "unprovable launch absence: fixed inspection deadline pages once; retain only own PR/head ownership with no fleet launch admission or capacity; legacy active listings retain stale/orphan escapes","codeSource": "src/ama/pre-receipt-intent.mjs"},
-        {"id": "hammer-dispatch.24","from": "dispatching","to": "deferred-by-drain","trigger": "exit 6 drain refusal: persist epoch, preserve budget, release pending lease","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.25","from": "deferred-by-drain","to": "no-dispatch","trigger": "drain clears, expires, is unreadable or AMA is disabled: retire hint before ordinary accounting/admission","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.27","from": "dispatch-deferred-transient","to": "no-dispatch","trigger": "retire legacy drain-only hint on clearance, expiry, unreadable status or AMA disabled","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.26","from": "deferred-by-drain","to": "deferred-by-drain","trigger": "active drain status keeps deferral without attempt or no-progress charge","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.01","from": "[*]","to": "dispatching","trigger": "persist launch intent with empty receipt IDs; adopt only own closer ticket and matching repo/head context","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.02","from": "dispatching","to": "dispatched","trigger": "launch result: dispatched","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.03","from": "dispatching","to": "dispatch-deferred-transient","trigger": "transient launch refusal or unknown live head branch within fork horizon: release pending lease and preserve budget","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.28","from": "dispatching","to": "no-dispatch","trigger": "unidentified fork still unresolved after six hours: release pending lease, preserve budget, stop same-head probes for operator inspection","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.04","from": "dispatching","to": "dispatch-blocked-branch-holder","trigger": "launch result: dispatch-blocked-branch-holder","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.05","from": "dispatching","to": "dispatch-branch-holder-block-exhausted","trigger": "launch result: dispatch-branch-holder-block-exhausted","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.06","from": "dispatching","to": "dispatch-failed","trigger": "explicit launch failure, including unreadable/mismatched refusal-time retry probe: release new pending lease, charge bounded failure, preserve predecessor receipt/artifacts on original head; later wake refusal cannot settle an earlier interrupted intent","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.07","from": "dispatching","to": "no-dispatch","trigger": "explicit foreign receipt: supersede new pending lease, refund attempt and clean unused artifacts without adopting foreign launch","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.08","from": "dispatching","to": "completed","trigger": "launch result: completed","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.09","from": "dispatched","to": "launch-terminal","trigger": "terminal chain observed on PR decision path or shared capacity snapshot (no live retry)","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.10","from": "dispatched","to": "dispatch-failed","trigger": "failed outcome reconciled","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.11","from": "launch-terminal","to": "dispatching","trigger": "bounded same-head retry or changed context; green lease exhaustion resumes next pass without failure charge; legacy lane-busy refunds failure credit with 2-minute exponential backoff capped at 30 minutes and durable third-launch same-head page; only succeeded/failed rewrite for uncertified repair; merged success stays sticky","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.12","from": "dispatch-deferred-transient","to": "dispatching","trigger": "bounded retry, next-poll branch confirmation or changed context","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.13","from": "dispatch-blocked-branch-holder","to": "dispatching","trigger": "bounded retry or changed context","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.14","from": "dispatch-failed","to": "dispatching","trigger": "bounded retry or changed context","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.15","from": "no-dispatch","to": "dispatching","trigger": "bounded retry or changed context","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.16","from": "dispatched","to": "no-dispatch","trigger": "foreign ticket retires mistaken ownership and charge","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.17","from": "launch-terminal","to": "no-dispatch","trigger": "foreign ticket corrects terminal launch attribution","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.18","from": "dispatching","to": "dispatch-configuration-refused","trigger": "repo_unregistered: release pending lease and page repository once","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.19","from": "dispatch-deferred-transient","to": "dispatch-configuration-refused","trigger": "reclassify legacy configuration refusal","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.20","from": "dispatch-failed","to": "dispatch-configuration-refused","trigger": "reclassify legacy configuration refusal","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.21","from": "dispatch-configuration-refused","to": "dispatching","trigger": "normal backoff due, re-probe dispatch, admission clears blocker","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.22","from": "dispatching","to": "dispatched","trigger": "proven live retry restores same-head ownership and artifacts","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.23","from": "launch-terminal","to": "dispatched","trigger": "proven live retry restores original-head ownership","codeSource": "src/ama/dispatch-closer.mjs"}
+        {
+          "id": "hammer-dispatch.29",
+          "from": "dispatching",
+          "to": "dispatched",
+          "trigger": "recover one canonical receipt by exact attempt key, AMA ticket and repository even with unreadable PR state; preserve retry charge once",
+          "codeSource": "src/ama/pre-receipt-intent.mjs"
+        },
+        {
+          "id": "hammer-dispatch.30",
+          "from": "dispatching",
+          "to": "no-dispatch",
+          "trigger": "closure orchestration, recovery reaper and per-PR admission reconcile the named intent including a rekeyed lease; fenced prepared attempt with dead matching owner and absent key, submitting attempt with dead watcher and submitter plus absent process key then empty ledger key, expired successful empty-key query, or successful empty ticket/time query (legacy automatic or keyed audited) proves no launch; defer lease and refund intent retry once",
+          "codeSource": "src/ama/pre-receipt-intent.mjs"
+        },
+        {
+          "id": "hammer-dispatch.32",
+          "from": "dispatching",
+          "to": "completed",
+          "trigger": "authoritative closed/merged PR state retires intent as pr-terminal under fence; preserve lease and budgets; unreadable PR state permits exact-key receipt recovery but otherwise holds without paging",
+          "codeSource": "src/ama/pre-receipt-intent.mjs"
+        },
+        {
+          "id": "hammer-dispatch.31",
+          "from": "dispatching",
+          "to": "dispatching",
+          "trigger": "unprovable launch absence: fixed inspection deadline pages once; retain only own PR/head ownership with no fleet launch admission or capacity; legacy active listings retain stale/orphan escapes",
+          "codeSource": "src/ama/pre-receipt-intent.mjs"
+        },
+        {
+          "id": "hammer-dispatch.24",
+          "from": "dispatching",
+          "to": "deferred-by-drain",
+          "trigger": "exit 6 drain refusal: persist epoch, preserve budget, release pending lease",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.25",
+          "from": "deferred-by-drain",
+          "to": "no-dispatch",
+          "trigger": "drain clears, expires, is unreadable or AMA is disabled: retire hint before ordinary accounting/admission",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.27",
+          "from": "dispatch-deferred-transient",
+          "to": "no-dispatch",
+          "trigger": "retire legacy drain-only hint on clearance, expiry, unreadable status or AMA disabled",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.26",
+          "from": "deferred-by-drain",
+          "to": "deferred-by-drain",
+          "trigger": "active drain status keeps deferral without attempt or no-progress charge",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.01",
+          "from": "[*]",
+          "to": "dispatching",
+          "trigger": "persist launch intent with empty receipt IDs; adopt only own closer ticket and matching repo/head context",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.02",
+          "from": "dispatching",
+          "to": "dispatched",
+          "trigger": "launch result: dispatched",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.03",
+          "from": "dispatching",
+          "to": "dispatch-deferred-transient",
+          "trigger": "transient launch refusal or unknown live head branch within fork horizon: release pending lease and preserve budget",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.28",
+          "from": "dispatching",
+          "to": "no-dispatch",
+          "trigger": "unidentified fork still unresolved after six hours: release pending lease, preserve budget, stop same-head probes for operator inspection",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.04",
+          "from": "dispatching",
+          "to": "dispatch-blocked-branch-holder",
+          "trigger": "launch result: dispatch-blocked-branch-holder",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.05",
+          "from": "dispatching",
+          "to": "dispatch-branch-holder-block-exhausted",
+          "trigger": "launch result: dispatch-branch-holder-block-exhausted",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.06",
+          "from": "dispatching",
+          "to": "dispatch-failed",
+          "trigger": "explicit launch failure, including unreadable/mismatched refusal-time retry probe: release new pending lease, charge bounded failure, preserve predecessor receipt/artifacts on original head; later wake refusal cannot settle an earlier interrupted intent",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.07",
+          "from": "dispatching",
+          "to": "no-dispatch",
+          "trigger": "explicit foreign receipt: supersede new pending lease, refund attempt and clean unused artifacts without adopting foreign launch",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.08",
+          "from": "dispatching",
+          "to": "completed",
+          "trigger": "launch result: completed",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.09",
+          "from": "dispatched",
+          "to": "launch-terminal",
+          "trigger": "terminal chain observed on PR decision path or shared capacity snapshot (no live retry)",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.10",
+          "from": "dispatched",
+          "to": "dispatch-failed",
+          "trigger": "failed outcome reconciled",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.11",
+          "from": "launch-terminal",
+          "to": "dispatching",
+          "trigger": "bounded same-head retry or changed context; green lease exhaustion resumes next pass without failure charge; legacy lane-busy refunds failure credit with 2-minute exponential backoff capped at 30 minutes and durable third-launch same-head page; only succeeded/failed rewrite for uncertified repair; merged success stays sticky",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.12",
+          "from": "dispatch-deferred-transient",
+          "to": "dispatching",
+          "trigger": "bounded retry, next-poll branch confirmation or changed context",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.13",
+          "from": "dispatch-blocked-branch-holder",
+          "to": "dispatching",
+          "trigger": "bounded retry or changed context",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.14",
+          "from": "dispatch-failed",
+          "to": "dispatching",
+          "trigger": "bounded retry or changed context",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.15",
+          "from": "no-dispatch",
+          "to": "dispatching",
+          "trigger": "bounded retry or changed context",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.16",
+          "from": "dispatched",
+          "to": "no-dispatch",
+          "trigger": "foreign ticket retires mistaken ownership and charge",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.17",
+          "from": "launch-terminal",
+          "to": "no-dispatch",
+          "trigger": "foreign ticket corrects terminal launch attribution",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.18",
+          "from": "dispatching",
+          "to": "dispatch-configuration-refused",
+          "trigger": "repo_unregistered: release pending lease and page repository once",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.19",
+          "from": "dispatch-deferred-transient",
+          "to": "dispatch-configuration-refused",
+          "trigger": "reclassify legacy configuration refusal",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.20",
+          "from": "dispatch-failed",
+          "to": "dispatch-configuration-refused",
+          "trigger": "reclassify legacy configuration refusal",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.21",
+          "from": "dispatch-configuration-refused",
+          "to": "dispatching",
+          "trigger": "normal backoff due, re-probe dispatch, admission clears blocker",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.22",
+          "from": "dispatching",
+          "to": "dispatched",
+          "trigger": "proven live retry restores same-head ownership and artifacts",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.23",
+          "from": "launch-terminal",
+          "to": "dispatched",
+          "trigger": "proven live retry restores original-head ownership",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        }
       ]
     }
   ],
@@ -421,5 +1653,6 @@
     "src/watcher.mjs": "ea85b67f96d3c7cfeb1fd7c450ca82ab2a48e22c378bd155539dd88ce5dd713c",
     "src/adapters/reviewer-runtime/fixture-stub/index.mjs": "551075e64dc0fba15d5411f1d79297bedec2d3e17accecc5c496c04dab3e26ad"
   },
-  "workerObservationReads": "DOG-10 / LAC-2118: worker/process/session/provenance observations use the immutable SDK 0.9.0 public HTTP boundary, separately gated by default-off ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED=1 (env only; no template activation). Already enabled ADVERSARIAL_DISPATCH_READS_ENABLED own-launch HCP reads remain independent. Disabled, unsupported, failed and successful-empty provenance permits existing title-based cross-model review intake with persisted builder_class_inconclusive; empty scope_complete:false evidence never certifies absence, merge identity, lease release or teardown. Positive head attestations remain valid independently; otherwise authoritative identity stays unknown without authorized evidence, with no private fallback. Default PR provenance means the single live pr_opened row; builder_identity permits later completions and is reserved for review routing. Ambiguous identity fails closed; branch provenance is diagnostic-only and cannot replace an opener hidden by grants. Cache identity excludes request_timeout_ms; public token-based HTTP reads receive per-call remaining physical deadlines and failed sessions are evicted. Reroute uses async provenance; cold backfill prepares one SDK registration before sync loops and fails readiness before writes. Partial accounting and zero/null meanings persist. No new lifecycle states or smoke authority."
+  "workerObservationReads": "DOG-10 / LAC-2118: worker/process/session/provenance observations use the immutable SDK 0.9.0 public HTTP boundary, separately gated by default-off ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED=1 (env only; no template activation). Already enabled ADVERSARIAL_DISPATCH_READS_ENABLED own-launch HCP reads remain independent. Disabled, unsupported, failed and successful-empty provenance permits existing title-based cross-model review intake with persisted builder_class_inconclusive; empty scope_complete:false evidence never certifies absence, merge identity, lease release or teardown. Positive head attestations remain valid independently; otherwise authoritative identity stays unknown without authorized evidence, with no private fallback. Default PR provenance means the single live pr_opened row; builder_identity permits later completions and is reserved for review routing. Ambiguous identity fails closed; branch provenance is diagnostic-only and cannot replace an opener hidden by grants. Cache identity excludes request_timeout_ms; public token-based HTTP reads receive per-call remaining physical deadlines and failed sessions are evicted. Reroute uses async provenance; cold backfill prepares one SDK registration before sync loops and fails readiness before writes. Partial accounting and zero/null meanings persist. No new lifecycle states or smoke authority.",
+  "mergeLeaseGateAccounting": "GATECAPBASE-01: head/base-scoped refusal budgets refund base advances, server rebase conflicts, lane-busy, contention and planned yields under the release-identity fence. New heads and observed bases reset caps; stable-base predicate loops still stop. Capped admissible conflicts return to the existing hammer conflict procedure without a lease; other admissible heads page through durable closure-wait deduplication. Terminal, moved, held and draft heads retain admission fences. No operator reset is required. Synthetic merge-lease, recovery and rendered hammer fixtures cover these routes; existing lifecycle states, merge fences and smoke promises remain unchanged. Runtime owner may observe organic reasons and owner/page receipts read-only after normal deployment; no live worker action or new probe."
 }

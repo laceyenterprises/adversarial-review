@@ -908,14 +908,13 @@ test('merge-lease status reports holder and waiter ages', async () => {
   }
 });
 
-test('six planned CLI yields retain charges without failure parking or stale CLI reservations', async t => {
+test('six planned CLI yields refund charges without failure parking or stale CLI reservations', async t => {
   const rootDir = freshRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const args = ['--repo', REPO, '--base', BASE, '--pr', '601'];
   for (let i = 0; i < 6; i++) {
-    // Isolate the five-release failure counter from the separate charged gate cap.
     const acquired = await runCli(rootDir, ['acquire', ...args, '--head', 'yield-head',
-      '--owner-pid', '8601', '--wait', '0'], { maxGateAttempts: 100,
+      '--owner-pid', '8601', '--wait', '0'], { maxGateAttempts: 5,
       startMs: Date.parse('2026-06-20T18:00:00Z') + i * 300_000 });
     assert.equal(acquired.code, 0);
     const lease = inspectMergeLease({ rootDir, repo: REPO, base: BASE }).lease;
@@ -927,7 +926,8 @@ test('six planned CLI yields retain charges without failure parking or stale CLI
     assert.deepEqual(readMergeLeaseWaiters(rootDir, { repo: REPO, base: BASE }), []);
   }
   const [retry] = readMergeLeaseAttempts(rootDir, { repo: REPO, base: BASE });
-  assert.equal(retry.attempts, 6);
+  assert.equal(retry.attempts, 0);
+  assert.equal(retry.retryable, 6);
   assert.equal(retry.consecutiveNoMergeReleases, 0);
   assert.equal(retry.parkedReason, null);
   assert.equal(retry.queueArrivedAt, '2026-06-20T18:00:00.000Z');
@@ -955,7 +955,7 @@ for (const command of ['status', 'list']) {
   });
 }
 
-test('repeated-failure CLI park supplies a closing status and reset instruction', async t => {
+test('repeated-failure CLI park supplies a closing status and recovery owner', async t => {
   const rootDir = freshRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   for (let i = 0; i < 5; i++) {
@@ -971,7 +971,8 @@ test('repeated-failure CLI park supplies a closing status and reset instruction'
   const out = jsonOutput(result.io);
   assert.equal(out.reason, 'repeated-no-merge-release');
   assert.match(out.closingStatus, /repeated-no-merge-release cap/);
-  assert.match(out.closingStatus, /reset-attempts/);
+  assert.match(out.closingStatus, /Next actor: hammer conflict recovery/);
+  assert.doesNotMatch(out.closingStatus, /reset-attempts/);
 });
 
 test('merge-lease acquire parks after max gate attempts', async () => {
@@ -1022,10 +1023,10 @@ test('merge-lease acquire parks after max gate attempts', async () => {
     assert.equal(parked.code, 70);
     assert.equal(out.parked, true);
     assert.equal(out.reason, 'max-gate-attempts');
-    assert.equal(out.attempts, 3);
+    assert.equal(out.attempts, 2);
     assert.equal(out.maxAttempts, 2);
-    assert.match(out.closingStatus, /parked by the gate-attempt cap after 3 attempts \(0 retryable\)/);
-    assert.match(out.closingStatus, /node \/.*\/bin\/merge-lease\.mjs reset-attempts --repo owner\/name --base main --pr 601 --head starved-head --root-dir /);
+    assert.match(out.closingStatus, /parked by the gate-attempt cap after 2 attempts \(0 retryable\)/);
+    assert.match(out.closingStatus, /closure recovery pages/);
     assert.doesNotMatch(formatHamGateAttemptCapClosingStatus({ ...out, repo: REPO, base: BASE, requiredChecksGreen: false }), /Required checks are green/);
     const reset = await runCli(rootDir, ['reset-attempts', '--repo', REPO, '--base', BASE, '--pr', '601', '--head', 'starved-head']);
     assert.equal(reset.code, 0);
@@ -1064,7 +1065,7 @@ test('pending checks then green can acquire without parking; real failures still
     await runCli(rootDir, ['release', '--repo', REPO, '--base', BASE, '--pr', '602', '--lease-id', jsonOutput(real.io).leaseId]);
     const parked = await runCli(rootDir, ['acquire', ...args], { maxGateAttempts: 2 });
     assert.equal(parked.code, 70);
-    assert.equal(jsonOutput(parked.io).attempts, 3);
+    assert.equal(jsonOutput(parked.io).attempts, 2);
     assert.equal(jsonOutput(parked.io).retryable, 4);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -1510,3 +1511,70 @@ for (const content of [undefined, '', '{"body":', 'not JSON', 'null']) {
     assert.match(io.stderrText, /warning: PR state snapshot unavailable/);
   });
 }
+
+for (const outcome of ['base-advanced', 'server-rebase-conflict', 'lane-busy']) {
+  test(`GATECAPBASE-01: six ${outcome} outcomes never consume the cap`, async t => {
+    const rootDir = freshRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const args = ['--repo', REPO, '--base', BASE, '--pr', '777', '--head', 'finished-head',
+      '--owner-pid', '8777', '--wait', '0', '--base-sha', 'a'.repeat(40)];
+    for (let i = 0; i < 7; i++) {
+      const acquired = await runCli(rootDir, ['acquire', ...args], {
+        maxGateAttempts: 5, startMs: Date.parse('2026-06-20T18:00:00Z') + i * 300_000 });
+      assert.equal(acquired.code, 0, acquired.io.stdoutText);
+      const released = await runCli(rootDir, ['release', '--repo', REPO, '--base', BASE,
+        '--pr', '777', '--lease-id', jsonOutput(acquired.io).leaseId, '--reason', outcome]);
+      assert.equal(released.code, 0);
+      const [record] = readMergeLeaseAttempts(rootDir, { repo: REPO, base: BASE });
+      assert.equal(record.attempts, 0);
+      assert.equal(record.retryable, i + 1);
+      assert.equal(record.consecutiveNoMergeReleases, 0);
+    }
+  });
+}
+
+test('GATECAPBASE-01: stable predicate refusals cap; new head and new base each recover', async t => {
+  const priorCap = process.env.AMG_MAX_GATE_ATTEMPTS;
+  process.env.AMG_MAX_GATE_ATTEMPTS = '6';
+  t.after(() => {
+    if (priorCap === undefined) delete process.env.AMG_MAX_GATE_ATTEMPTS;
+    else process.env.AMG_MAX_GATE_ATTEMPTS = priorCap;
+  });
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  let tick = 0;
+  const acquire = (head, baseSha) => runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
+    '--pr', '778', '--head', head, '--owner-pid', '8778', '--wait', '0', '--base-sha', baseSha], {
+    maxGateAttempts: 6, startMs: Date.parse('2026-06-20T18:00:00Z') + tick++ * 300_000 });
+  for (const head of ['original-head', 'rebased-head']) {
+    for (let i = 0; i < 6; i++) {
+      const grant = await acquire(head, 'a'.repeat(40));
+      assert.equal(grant.code, 0, grant.io.stdoutText);
+      const release = await runCli(rootDir, ['release', '--repo', REPO, '--base', BASE,
+        '--pr', '778', '--lease-id', jsonOutput(grant.io).leaseId, '--reason', 'predicate-not-eligible']);
+      assert.equal(release.code, 0);
+    }
+    const capped = await acquire(head, 'a'.repeat(40));
+    assert.equal(capped.code, 70);
+    assert.match(jsonOutput(capped.io).closingStatus, /closure recovery pages/);
+  }
+  const movedBase = await acquire('rebased-head', 'b'.repeat(40));
+  assert.equal(movedBase.code, 0, movedBase.io.stdoutText);
+  const record = readMergeLeaseAttempts(rootDir, { repo: REPO, base: BASE }).find(r => r.head === 'rebased-head');
+  assert.equal(record.attempts, 1);
+  assert.equal(record.parkedReason, null);
+});
+
+test('GATECAPBASE-01: six lease-contention timeouts are retryable without cap spend', async t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  acquireFixture(rootDir);
+  for (let i = 0; i < 6; i++) {
+    const result = await runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
+      '--pr', '779', '--head', 'waiting-head', '--owner-pid', '8779', '--wait', '0']);
+    assert.equal(result.code, 75);
+    const record = readMergeLeaseAttempts(rootDir, { repo: REPO, base: BASE }).find(r => r.pr === 779);
+    assert.equal(record.attempts, 0);
+    assert.equal(record.retryable, i + 1);
+  }
+});

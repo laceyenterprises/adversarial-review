@@ -256,9 +256,11 @@ NODE
   # callers without that descriptor still receive progress on stderr.
   local ham_lease_progress_fd=2
   if ( : >&3 ) 2>/dev/null; then ham_lease_progress_fd=3; fi
+  ham_capture_current_base_sha || return 1
   if "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-lease.mjs acquire \
     --repo <<REPO>> \
     --base "$BASE_BRANCH" \
+    --base-sha "$HAM_CAPTURED_BASE_SHA" \
     --pr <<PR_NUMBER>> \
     --head "$POST_REMEDIATION_SHA" \
     --pr-state-file "<<RUN_DIR>>/pre-acquire-checks.json" \
@@ -304,6 +306,14 @@ NODE
       return 20
     fi
     [ "$HAM_GATE_CAP_AUDIT_EXIT" -eq 0 ] || return "$HAM_GATE_CAP_AUDIT_EXIT"
+    # Refresh before selecting recovery. The page path is durable and deduped;
+    # a conflicting current head returns to the existing conflict procedure.
+    ham_lease_pr_view --json body,headRefOid,state,isDraft,labels,mergeable,mergeStateStatus \
+      > "<<RUN_DIR>>/gate-cap-pr.json" || return 1
+    "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-lease.mjs recover-cap \
+      --repo <<REPO>> --pr <<PR_NUMBER>> --head "$POST_REMEDIATION_SHA" \
+      --pr-state-file "<<RUN_DIR>>/gate-cap-pr.json" \
+      > "<<RUN_DIR>>/gate-cap-recovery.json" || return 1
     if [ -z "${HAMMER_LACEY_GH_TOKEN:-${HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND:-${MERGE_AGENT_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND:-${HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND:-}}}}}" ]; then
       echo "HAM hard-blocker: no entitled hammer token for gate-cap closing status" >&2
       return 1
@@ -363,6 +373,10 @@ $HAM_GATE_CAP_COMMENT"
         --body "$HAM_GATE_CAP_COMMENT" || { rm -f "$HAM_GATE_CAP_OUT" "$HAM_GATE_CAP_ERR"; return 1; }
     fi
     rm -f "$HAM_GATE_CAP_OUT" "$HAM_GATE_CAP_ERR"
+    if [ "$(jq -r '.action' "<<RUN_DIR>>/gate-cap-recovery.json")" = resolve-conflict ]; then
+      HAM_PHASE_OUTCOME=rebase-conflict
+      return 21
+    fi
     HAM_PHASE_OUTCOME="parked:${HAM_PARK_REASON}"
     return 20
   fi
@@ -693,6 +707,7 @@ ham_rebase_head() {
     # suite + required checks in the parallel phase, then return here and
     # re-acquire before the next rebase/merge attempt.
     echo "HAM-03 conflict: releasing merge lease before local conflict resolution" >&2
+    ham_mark_merge_lease_retryable_abort server-rebase-conflict
     if ! ham_release_merge_lease; then
       echo "HAM-03 hard-blocker: cannot resolve conflict while merge lease release is unconfirmed" >&2
       HAM_PHASE_OUTCOME=merge-lease-release-unconfirmed

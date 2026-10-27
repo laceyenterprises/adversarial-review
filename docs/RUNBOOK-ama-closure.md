@@ -6366,7 +6366,7 @@ Live owners and once-only launch/refund fences remain authoritative. See the
 [recovery contract](dispatch-absence-recovery.md) for fields, deployment order and offline evidence.
 Existing smoke promises remain; no live operation is part of validation.
 
-Closer orchestration first reconciles pre-receipt intents, then observes a
+The shared closer recovery helper first reconciles pre-receipt intents, then observes a
 dispatched launch's outcome, re-reads its lease, and only then abandons an
 unhandled pending lease. Abandonment reuses that pass's intent reconciliation;
 it does not repeat the receipt query. Recovery scope accepts both `projectRef`

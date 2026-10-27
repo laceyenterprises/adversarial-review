@@ -70,8 +70,7 @@ import { amaRetainLoopCapFor } from './kernel/convergence-budget.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
 import { resolveRequiredCheckContextsFromCfg } from './ama/required-check-contexts.mjs';
 import { loadConfigCached } from './config-loader.mjs';
-import { abandonAmaCloserLease } from './ama/abandoned-closer-lease.mjs';
-import { reconcileAmaCloserLeaseIntent } from './ama/pre-receipt-intent.mjs';
+import { abandonAmaCloserLease, reconcileAndAbandonAmaCloserLease } from './ama/abandoned-closer-lease.mjs';
 import { loadDomainConfig } from './domain-config.mjs';
 import { resolveMergeAuthorityConfigFromDomain } from './domain-policy.mjs';
 import {
@@ -1635,25 +1634,15 @@ async function dispatchAmaClosureFor({
   });
   if (autonomousMergeExecutionEnabled && !(labelNames || []).some(label =>
     [...OPERATOR_HOLD_LABELS, 'duplicate-family-hold', 'adversarial-merge-blocked'].includes(label))) {
-    await reconcileAmaCloserLeaseIntent(rootDir, handoffLease, {
+    handoffLease = await reconcileAndAbandonAmaCloserLease(rootDir, handoffLease, {
       ...closerLeaseLivenessOptions, ...preReceiptIntentOptions,
       now: now(), prMetadata, env, signal, logger,
-    });
-    // Settle a finished launch before the shared decision can classify its
-    // stale dispatched receipt as an in-flight owner (including rescue).
-    if (handoffLease?.status === 'dispatched' && handoffLease.lrqId) {
-      await amaDispatchCloser.reconcileAmaCloserLeaseAsync({
+      // Settle launches adopted by intent recovery before reclaiming ownership.
+      reconcileDispatched: () => amaDispatchCloser.reconcileAmaCloserLeaseAsync({
         ...closerLeaseLivenessOptions, rootDir, repo: repoPath, prNumber,
         hqRoot: resolveHqRoot(env), now: new Date(now()).toISOString(), env, signal, logger,
-      });
-    }
-    handoffLease = handoffLease?.headSha ? readAmaCloserLease(rootDir, handoffLease)
-      : currentPrHeadSha && readAmaCloserLease(rootDir, {
-        repo: repoPath, prNumber, headSha: currentPrHeadSha,
-      });
-    const abandoned = await abandonAmaCloserLease(rootDir, handoffLease,
-      { ...closerLeaseLivenessOptions, now: now(), logger, reconcileIntent: false });
-    if (abandoned) handoffLease = abandoned;
+      }),
+    });
   }
   let recordedStop = readHammerStopForHeadImpl({ hqRoot: resolveHqRoot(env), repo: repoPath,
     prNumber, headSha: currentPrHeadSha, reviewedSha: reviewState.headSha, logger });

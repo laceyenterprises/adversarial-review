@@ -3,6 +3,17 @@ import { abandonedAmaCloserLeaseOutcome, readAmaCloserLease, updateAmaCloserLeas
 import { readAmaCloserDispatchRecord } from './dispatch-closer.mjs';
 import { reconcileAmaCloserLeaseIntent, tryAcquireCloserIntentLock } from './pre-receipt-intent.mjs';
 
+export async function reconcileAndAbandonAmaCloserLease(rootDir, lease, { reconcileDispatched, ...options } = {}) {
+  if (!lease) return null;
+  await reconcileAmaCloserLeaseIntent(rootDir, lease, options);
+  let current = readAmaCloserLease(rootDir, lease);
+  if (current?.status === 'dispatched' && current.lrqId) {
+    await reconcileDispatched(current);
+    current = readAmaCloserLease(rootDir, current);
+  }
+  return await abandonAmaCloserLease(rootDir, current, { ...options, reconcileIntent: false }) || current;
+}
+
 // Keep the terminal receipt until ordinary dispatch reclaims it. Serialize with
 // submissions as well as lease mutations: a launch-less file alone cannot prove
 // that an interrupted keyed submission never reached the launch service.

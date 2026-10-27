@@ -1,6 +1,6 @@
 import { seedCloserIntent, intentExpired } from './helpers/closer-intent-fixture.mjs';
 import test from 'node:test';
-import { abandonAmaCloserLease } from '../src/ama/abandoned-closer-lease.mjs';
+import { abandonAmaCloserLease, reconcileAndAbandonAmaCloserLease } from '../src/ama/abandoned-closer-lease.mjs';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
@@ -497,6 +497,56 @@ function fixture(t) {
   acquireAmaCloserLease({ rootDir, ...identity, now });
   updateAmaCloserLease({ rootDir, ...identity, now, status: 'dispatched', lrqId: launchRequestId });
   return rootDir;
+}
+
+test('closure recovery observes a dispatched outcome before abandonment and returns its fresh receipt', async t => {
+  const rootDir = fixture(t);
+  let calls = 0;
+  const result = await reconcileAndAbandonAmaCloserLease(rootDir, readAmaCloserLease(rootDir, identity), {
+    now: '2026-10-28T00:00:00Z',
+    reconcileDispatched: async lease => {
+      calls++;
+      assert.equal(lease.status, 'dispatched');
+      assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
+      updateAmaCloserLease({ rootDir, ...identity, status: 'terminal', terminalOutcome: 'succeeded', now });
+    },
+  });
+  assert.equal(calls, 1);
+  assert.equal(result.terminalOutcome, 'succeeded');
+  assert.deepEqual(result, readAmaCloserLease(rootDir, identity));
+});
+
+test('closure recovery does not abandon ownership when dispatched reconciliation fails', async t => {
+  const rootDir = fixture(t);
+  const before = readAmaCloserLease(rootDir, identity);
+  await assert.rejects(reconcileAndAbandonAmaCloserLease(rootDir, before, {
+    now: '2026-10-28T00:00:00Z',
+    reconcileDispatched: async () => { throw new Error('ledger unavailable'); },
+  }), /ledger unavailable/);
+  assert.deepEqual(readAmaCloserLease(rootDir, identity), before);
+});
+
+for (const scenario of ['receipt', 'absent', 'unreadable']) {
+  test(`closure recovery re-reads intent settlement before launch observation: ${scenario}`, async t => {
+    const rootDir = freshRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const f = seedCloserIntent(rootDir, identity, { scenario });
+    const before = f.lease();
+    let calls = 0;
+    const result = await reconcileAndAbandonAmaCloserLease(rootDir, before, {
+      ...f.options, now: intentExpired, logger: { warn() {} },
+      reconcileDispatched: async lease => {
+        calls++;
+        assert.equal(lease.lrqId, f.receipt.launch_request_id);
+        assert.equal(lease.status, 'dispatched');
+      },
+    });
+    assert.equal(f.reads(), 1, 'intent evidence is queried once');
+    assert.equal(calls, scenario === 'receipt' ? 1 : 0);
+    assert.deepEqual(result, f.lease());
+    if (scenario === 'absent') assert.equal(result.terminalOutcome, 'deferred');
+    if (scenario === 'unreadable') assert.deepEqual(result, before);
+  });
 }
 
 for (const reason of ['lane-busy', 'merge-lease-timeout', 'required-checks-pending', 'pr-mergeability-unknown']) {

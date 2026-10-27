@@ -74,7 +74,6 @@ import {
   resolveMergeAgentProject,
   summarizeChecksConclusion,
 } from '../src/follow-up-merge-agent.mjs';
-import { resolveSessionLedgerReadTarget } from '../src/session-ledger-read-adapter.mjs';
 import { execHqDispatchCancel, isLabelAlreadyAbsentError } from '../src/merge-agent-hq-exec.mjs';
 // CFG-09 (2026-05-30, round-2): role-config cascade caches by
 // (topPath, modulePaths) — not env. Tests in this file rotate env
@@ -4147,78 +4146,6 @@ test('lookupOriginalWorkerRunStatus ignores cwd-rooted ledger candidates during 
   } finally {
     process.chdir(previousCwd);
   }
-});
-
-test('resolveSessionLedgerReadTarget treats explicit canonical targets as authoritative over discovered sqlite fallbacks', () => {
-  const deployCheckout = mkdtempSync(path.join(tmpdir(), 'agent-os-deploy-'));
-  const homeDir = mkdtempSync(path.join(tmpdir(), 'agent-os-home-'));
-  const explicitLedgerDir = mkdtempSync(path.join(tmpdir(), 'agent-os-explicit-'));
-  const explicitLedgerDbPath = path.join(explicitLedgerDir, 'session-ledger.db');
-  createWorkerRunsLedgerDb(explicitLedgerDbPath);
-  createWorkerRunsLedgerDb(path.join(deployCheckout, '.agent-os', 'session-ledger', 'ledger.db'));
-  createWorkerRunsLedgerDb(path.join(homeDir, '.agent-os', 'session-ledger', 'ledger.db'));
-
-  const result = resolveSessionLedgerReadTarget({
-    ledgerTarget: { backend: 'sqlite', path: explicitLedgerDbPath },
-    requiredTables: ['worker_runs'],
-    env: { ...HERMETIC_CONFIG_ENV, AGENT_OS_DEPLOY_CHECKOUT: deployCheckout, HOME: homeDir },
-  });
-
-  assert.equal(result.ok, true);
-  assert.equal(result.target.backend, 'sqlite');
-  assert.equal(result.target.path, explicitLedgerDbPath);
-  assert.equal(result.target.source, 'explicit-ledger-target');
-});
-
-test('resolveSessionLedgerReadTarget falls back to HOME-based ledger.db when no deploy-checkout DB exists', () => {
-  // Pre-fix behavior must still work when there is no repo-rooted DB
-  // (e.g., fresh install, or repo-rooted DB legitimately absent).
-  // hqRoot uses a tmpdir path (outside /Users/) so the hqRootOwnerHome
-  // regex returns undefined and no /Users/-derived candidates leak in
-  // from the test host's actual filesystem.
-  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-fallback-'));
-  const homeDir = mkdtempSync(path.join(tmpdir(), 'agent-os-home-fallback-'));
-  const homeLedgerDir = path.join(homeDir, '.agent-os', 'session-ledger');
-  const homeLedgerDbPath = path.join(homeLedgerDir, 'ledger.db');
-  mkdirSync(homeLedgerDir, { recursive: true });
-  const homeDb = new Database(homeLedgerDbPath);
-  homeDb.exec('CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT, started_at TEXT, ended_at TEXT, updated_at TEXT)');
-  homeDb.close();
-
-  const result = resolveSessionLedgerReadTarget({
-    hqRoot,
-    requiredTables: ['worker_runs'],
-    env: { ...HERMETIC_CONFIG_ENV, HOME: homeDir },
-  });
-
-  assert.equal(result.ok, true);
-  assert.equal(result.target.path, homeLedgerDbPath,
-    'When no deploy-checkout DB exists, the lookup must still find the '
-    + 'HOME-based fallback DB so the merge-agent can operate on hosts '
-    + 'where only the service-refresh DB is provisioned.');
-});
-
-test('resolveSessionLedgerReadTarget prefers AGENT_OS_DEPLOY_CHECKOUT/.agent-os/session-ledger/ledger.db over managed-service-root fallback', () => {
-  const deployCheckout = mkdtempSync(path.join(tmpdir(), 'agent-os-deploy-'));
-  const homeDir = mkdtempSync(path.join(tmpdir(), 'agent-os-home-priority-'));
-  const deployLedgerDbPath = path.join(deployCheckout, '.agent-os', 'session-ledger', 'ledger.db');
-  const homeLedgerDbPath = path.join(homeDir, '.agent-os', 'session-ledger', 'ledger.db');
-  createWorkerRunsLedgerDb(deployLedgerDbPath);
-  createWorkerRunsLedgerDb(homeLedgerDbPath);
-
-  // Regression guard for the 2026-05-18 outage: preferring the stale
-  // managed-service-root fallback here caused false
-  // `original-worker-run-row-missing-but-worktree-present` deferrals.
-  const result = resolveSessionLedgerReadTarget({
-    requiredTables: ['worker_runs'],
-    env: { ...HERMETIC_CONFIG_ENV, AGENT_OS_DEPLOY_CHECKOUT: deployCheckout, HOME: homeDir },
-  });
-
-  assert.equal(result.ok, true);
-  assert.equal(result.target.path, deployLedgerDbPath,
-    'Regression guard for the 2026-05-18 outage: when both ledgers exist '
-    + 'and no explicit target is provided, auto-discovery must read the '
-    + 'deploy-checkout DB before the managed-service-root HOME fallback.');
 });
 
 test('lookupOriginalWorkerRunStatus holds during public outage despite deploy and standby files', async () => {

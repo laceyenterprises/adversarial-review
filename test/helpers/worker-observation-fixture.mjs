@@ -36,6 +36,24 @@ function reply(selector, args) {
         .filter(row=>selector.session_keys.includes(row.adapter_session_key)||selector.session_keys.includes(row.session_id))
         .map(({source_path:_path,...row})=>({...row,updated_at:row.ended_at}));
       items.sort((a,b)=>String(b.ended_at||b.started_at||'').localeCompare(String(a.ended_at||a.started_at||'')) || b.session_id.localeCompare(a.session_id));
+    } else if (selector.observation === 'completions') {
+      items = db.prepare('SELECT * FROM build_completions').all().filter(r =>
+        (!selector.repo || r.repo === selector.repo)
+        && (selector.pr_number == null || r.pr_number === selector.pr_number)
+        && (!selector.head_sha || r.head_sha === selector.head_sha)
+        && (!selector.signal_kind || r.signal_kind === selector.signal_kind)
+        && (!selector.launch_request_id || r.launch_request_id === selector.launch_request_id)
+        && !r.superseded_at);
+      items.sort((a,b) => String(b.recorded_at??'').localeCompare(String(a.recorded_at??'')) || b.completion_id.localeCompare(a.completion_id));
+    } else if (selector.observation === 'dag_runs') {
+      items = db.prepare('SELECT * FROM dag_runs').all().filter(r => r.plan_id === selector.plan_id && selector.states.includes(r.state));
+      items.sort((a,b) => String(b.started_at??'').localeCompare(String(a.started_at??'')) || b.run_id.localeCompare(a.run_id));
+    } else if (selector.observation === 'execution_verdicts') {
+      items = db.prepare('SELECT * FROM execution_verdicts').all()
+        .filter(r => !selector.launch_request_id || r.launch_request_id === selector.launch_request_id)
+        .map(r => ({launchRequestId:r.launch_request_id,attempt:r.attempt,verdictId:r.verdict_id,
+          verdict:r.verdict,reason:r.reason,evidenceRefs:JSON.parse(r.evidence_refs_json),
+          producer:r.producer,schemaVersion:r.schema_version,observedAt:r.observed_at}));
     } else throw new Error('synthetic observation selector unavailable');
   } finally {db.close();}
   const page = items.slice(selector.offset??0,(selector.offset??0)+(selector.limit??50));

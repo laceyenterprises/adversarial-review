@@ -61,6 +61,7 @@ const TICKET_ID_RE = /^[A-Z][A-Z0-9]*-\d+[A-Z0-9]*$/;
 const TITLE_TICKET_RE = /^\s*(?:\[[^\]]*\]\s*)*(?:\([^)]*\)\s*)*(?:SEV\d+\s+)?([A-Za-z][A-Za-z0-9]*-\d+[A-Za-z0-9]*)\b/;
 
 const PUBLIC_LEDGER_REASONS = new Set([
+  'dispatch-read-unavailable', 'worker-observation-unavailable',
   'ledger-read-failed', 'ledger-read-threw', 'missing-ledger-target',
   'malformed-ledger-target', 'unsupported-ledger-backend',
   'postgres-configured-but-sqlite-resolved', 'psql-not-installed',

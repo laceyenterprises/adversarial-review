@@ -9,7 +9,7 @@ test('AMA closer emits worker.git.merge_signal with merge commit metadata', asyn
   const emitted = await __testables__.emitWorkerGitMergeSignalBestEffort({
     execFileImpl: async (cmd, args, options) => {
       calls.push({ cmd, args, options });
-      return { stdout: '{"status":"recorded"}', stderr: '' };
+      return { stdout: '{"status":"recorded","event_id":"synthetic-event"}', stderr: '' };
     },
     hqRoot: '/tmp/hq',
     repo: 'laceyenterprises/agent-os',
@@ -25,26 +25,16 @@ test('AMA closer emits worker.git.merge_signal with merge commit metadata', asyn
 
   assert.equal(emitted, true);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].cmd, '/opt/homebrew/bin/python3');
-  assert.deepEqual(calls[0].args.slice(0, 4), ['-m', 'cwp_dispatch.git_signal', 'emit', '--root']);
-  assert.equal(calls[0].args[calls[0].args.indexOf('--event-type') + 1], 'worker.git.merge_signal');
+  assert.equal(calls[0].cmd, 'hq');
+  assert.deepEqual(calls[0].args.slice(0, 3), ['build-completions', 'record-merge', '--hq-root']);
   assert.equal(calls[0].args[calls[0].args.indexOf('--launch-request-id') + 1], 'lrq_hammer_1');
   assert.equal(calls[0].args[calls[0].args.indexOf('--ticket-ref') + 1], 'WGS-02');
   assert.equal(calls[0].args[calls[0].args.indexOf('--pr-number') + 1], '3311');
   assert.equal(calls[0].args[calls[0].args.indexOf('--merge-commit-sha') + 1], 'a'.repeat(40));
   assert.equal(calls[0].args[calls[0].args.indexOf('--merged-by') + 1], 'hammer');
   assert.equal(calls[0].args[calls[0].args.indexOf('--mode') + 1], 'squash');
-  assert.match(calls[0].options.env.PYTHONPATH, /modules\/worker-pool\/lib\/python/);
+  assert.equal(calls[0].options.env.PYTHONPATH, '/existing/pythonpath');
   assert.match(calls[0].options.env.PYTHONPATH, /\/existing\/pythonpath/);
-});
-
-test('AMA closer resolves the Agent OS Python runtime before falling back to python3', () => {
-  const { resolveAgentOsPythonBin } = __testables__;
-  assert.equal(resolveAgentOsPythonBin({ HAM_PYTHON_BIN: ' /tmp/ham-python ', HQ_PYTHON3: '/tmp/hq-python' }), '/tmp/ham-python');
-  assert.equal(resolveAgentOsPythonBin({ HQ_PYTHON3: '/tmp/hq-python' }), '/tmp/hq-python');
-  assert.equal(resolveAgentOsPythonBin({ AGENT_OS_PY: '/tmp/agent-os-python' }), '/tmp/agent-os-python');
-  assert.equal(resolveAgentOsPythonBin({}, { existsImpl: (path) => path === '/opt/homebrew/bin/python3' }), '/opt/homebrew/bin/python3');
-  assert.equal(resolveAgentOsPythonBin({}, { existsImpl: () => false }), 'python3');
 });
 
 test('AMA closer merge signal emission reports failure', async () => {
@@ -133,7 +123,7 @@ test('AMA closer merge commit lookup does not retry permanent gh failures', asyn
 test('hammer prompt emits merge signal before releasing successful merge lease', () => {
   const prompt = readFileSync(new URL('../bin/hammer-merge.sh', import.meta.url), 'utf8');
   assert.match(prompt, /ham_emit_git_merge_signal\(\)/);
-  assert.match(prompt, /EVENT_MERGE_SIGNAL/);
+  assert.match(prompt, /record-merge-signal.mjs/);
   assert.match(prompt, /ham_mark_ama_closer_lease_succeeded\(\)/);
   assert.match(prompt, /terminalOutcome: 'succeeded'/);
   assert.match(

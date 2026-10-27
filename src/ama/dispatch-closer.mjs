@@ -1,3 +1,4 @@
+import { loadAppSdkSync } from '../app-sdk-loader.mjs';
 import { prepareQueueCloserDispatch, renderQueueCloserPrompt, queueAdmissionCallback } from '../finalization/queue-closer.mjs';
 import { routeFinalizationWriter } from '../finalization/queue-routing-boundary.mjs';
 import { readExecutionVerdictsFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
@@ -1128,37 +1129,11 @@ async function emitWorkerGitMergeSignalBestEffort({
   env = process.env,
 }) {
   if (!hqRoot || !prNumber || !mergeCommitSha) return false;
-  const pythonPath = [
-    join(AGENT_OS_ROOT, 'modules', 'worker-pool', 'lib', 'python'),
-    join(AGENT_OS_ROOT, 'platform', 'session-ledger', 'src'),
-    env.PYTHONPATH || '',
-  ].filter(Boolean).join(':');
-  const pythonBin = resolveAgentOsPythonBin(env);
-  const args = [
-    '-m',
-    'cwp_dispatch.git_signal',
-    'emit',
-    '--root',
-    hqRoot,
-    '--event-type',
-    'worker.git.merge_signal',
-    '--pr-number',
-    String(prNumber),
-    '--merge-commit-sha',
-    mergeCommitSha,
-    '--merged-by',
-    mergedBy || 'ama-closer',
-    '--mode',
-    mode || 'unknown',
-  ];
-  if (launchRequestId) args.push('--launch-request-id', String(launchRequestId));
-  if (ticketRef) args.push('--ticket-ref', String(ticketRef));
   try {
-    await execFileImpl(pythonBin, args, {
-      env: { ...env, PYTHONPATH: pythonPath },
-      maxBuffer: 1024 * 1024,
-      timeout: loadAwareTimeoutMs(15_000),
-    });
+    await loadAppSdkSync().recordMergeSignal({hq_root:hqRoot, pr_number:Number(prNumber),
+      launch_request_id:launchRequestId, ticket_ref:ticketRef, merge_commit_sha:mergeCommitSha,
+      merged_by:mergedBy || 'ama-closer', mode:mode || 'squash'},
+    {execFile:execFileImpl, hq_bin:env.HQ_BIN || 'hq', env, timeout_ms:loadAwareTimeoutMs(15000)});
     return true;
   } catch (err) {
     logger?.warn?.(JSON.stringify({
@@ -1172,17 +1147,6 @@ async function emitWorkerGitMergeSignalBestEffort({
   }
 }
 
-function resolveAgentOsPythonBin(env = process.env, { existsImpl = existsSync } = {}) {
-  for (const candidate of [
-    env.HAM_PYTHON_BIN,
-    env.HQ_PYTHON3,
-    env.AGENT_OS_PY,
-  ]) {
-    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
-  }
-  if (existsImpl('/opt/homebrew/bin/python3')) return '/opt/homebrew/bin/python3';
-  return 'python3';
-}
 
 /**
  * Decide whether the HAM terminal-remediation prompt (`hammer-prompt.md`) is
@@ -3442,7 +3406,6 @@ export const __testables__ = Object.freeze({
   isPhantomActiveWorkerRun,
   resolveAmaDispatchTimeoutMs,
   withProvisionTimeoutCappedAtDispatch,
-  resolveAgentOsPythonBin,
   defaultAmaLivePrProbe,
   normalizeAmaLivePrProbeResult,
   fetchMergeCommitShaBestEffort,

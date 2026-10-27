@@ -274,16 +274,15 @@ test('invalid repository and PR identities are excluded before probing', async (
 test('CLI pins ledger and HQ roots and reports backend/source without credentials', async (t) => {
   const root = fixture(t, 'cli-target');
   dispatchRecord(root, 1);
-  const ledgerTarget = 'postgresql://user:secret@localhost/fixture';
   const calls = [];
-  const result = await main(['--root-dir', root, '--hq-root', root, '--ledger-target', ledgerTarget, '--dry-run'], {
+  const result = await main(['--root-dir', root, '--hq-root', root, '--dry-run'], {
     now: NOW, print() {}, readLaunchRequestStatusImpl: args => {
       calls.push(args);
       return { ok: true, row: { status: 'failed' } };
     },
   });
-  assert.deepEqual(result.ledger, { backend: 'postgres', source: 'explicit-ledger-target' });
-  assert.equal(calls[0].ledgerTarget.dsn, ledgerTarget);
+  assert.equal(result.source, 'app-sdk');
+  assert.equal(calls[0].ledgerTarget, undefined);
   assert.equal(calls[0].hqRoot, root);
   assert.equal(JSON.stringify(result).includes('secret'), false);
   assert.equal(result.changed, 1);

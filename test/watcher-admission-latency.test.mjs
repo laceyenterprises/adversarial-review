@@ -12,8 +12,8 @@ import { createWatcherLatencyMonitor } from '../src/watcher-latency.mjs';
 import * as ledger from '../src/session-ledger-read-adapter.mjs';
 
 const quiet = { log() {}, warn() {}, error() {} };
-const target = { backend: 'postgres', dsn: 'postgres://ledger.example/synthetic_ledger' };
-const ok = { status: 0, stdout: '{}\n', stderr: '' };
+const page = (observation,items=[]) => ({schema_version:1,observation,status:items.length?'found':'not_found',
+  complete:true,next_offset:null,scope_complete:false,mutation_authority:false,items});
 const flush = async () => { for (let n = 0; n < 100; n++) await Promise.resolve(); };
 
 test('WATCHERLAG-01: capacity-freed admission starts within 60s while concurrent posted handlers stall for 180s', async t => {
@@ -39,9 +39,8 @@ test('WATCHERLAG-01: capacity-freed admission starts within 60s while concurrent
     handlers: [{ repoPath: 'example/closure-fixture', prNumber, async run() {
       handlersStarted++;
       await ledger.readBuildCompletionSignalForPrAsync({ repo: 'example/closure-fixture', prNumber,
-        signalKind: 'merged', ledgerTarget: target, env: { AGENT_OS_CONFIG_PATH: '/dev/null' },
-        spawnAsyncImpl: () => new Promise(resolve => setTimeout(() => resolve(ok), 180_000)),
-        spawnSyncImpl: () => { t.mock.timers.tick(180_000); return ok; },
+        signalKind:'merged',timeoutMs:200000,
+        dispatchSession:{dispatchLookup:selector=>new Promise(resolve=>setTimeout(()=>resolve(page(selector.observation,[{completion_id:'completion'}])),180000))},
       });
       handlersFinished++;
     } }], budgetMs: 240_000, handlerTimeoutMs: 200_000, minimumHandlerStartBudgetMs: 0,
@@ -61,81 +60,37 @@ test('WATCHERLAG-01: capacity-freed admission starts within 60s while concurrent
   assert.equal(handlersFinished, 2);
 });
 
-test('WATCHERLAG-01: independent candidate preflight completes while an unrelated real child is slow', async t => {
-  const root = mkdtempSync(join(tmpdir(), 'admission-child-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  writeFileSync(join(root, 'psql'), '#!/bin/sh\nexec "$SYNTHETIC_NODE" -e \'setTimeout(() => process.stdout.write("{}\\n"), 250)\'\n', { mode: 0o755 });
-  const previousPath = process.env.PATH, previousNode = process.env.SYNTHETIC_NODE;
-  process.env.PATH = root; process.env.SYNTHETIC_NODE = process.execPath;
-  t.after(() => { process.env.PATH = previousPath; if (previousNode === undefined) delete process.env.SYNTHETIC_NODE; else process.env.SYNTHETIC_NODE = previousNode; });
-  const monitor = createWatcherLatencyMonitor({ logger: quiet });
-  t.after(() => monitor.stop());
-  let childFinished = false;
-  const unrelated = ledger.readBuildCompletionSignalForPrAsync({ repo: 'example/closure-fixture', prNumber: 1,
-    signalKind: 'merged', ledgerTarget: target,
-    env: { PATH: root, SYNTHETIC_NODE: process.execPath, AGENT_OS_CONFIG_PATH: '/dev/null' },
-  }).then(result => { childFinished = true; return result; });
-  const preflight = createReviewerPreflight();
-  const results = await Promise.all(['dedup', 'freshness', 'ci', 'hcp'].map(name => preflight.read(name,
-    () => new Promise(resolve => setTimeout(() => resolve(name), 10)))));
-  assert.equal(childFinished, false, 'preflight must not serialize behind unrelated psql');
-  assert.deepEqual(results, ['dedup', 'freshness', 'ci', 'hcp']);
-  assert.equal((await unrelated).ok, true);
-  const measured = monitor.summary().children.psql;
-  assert.equal(measured.count, 1); assert.equal(measured.completed, 1);
-  assert.ok(measured.spawn.p99_ms > 0); assert.ok(measured.wall.p99_ms >= 250);
-  const timedOut = await ledger.readBuildCompletionSignalForPrAsync({ repo: 'example/closure-fixture', prNumber: 1,
-    signalKind: 'merged', ledgerTarget: target, timeoutMs: 30,
-    env: { AGENT_OS_CONFIG_PATH: '/dev/null' },
-  });
-  assert.equal(timedOut.ok, false); assert.equal(timedOut.transient, true);
-  assert.match(timedOut.detail, /timed out after 30ms/);
-  process.env.PATH = join(root, 'missing-bin');
-  const missing = await ledger.readBuildCompletionSignalForPrAsync({ repo: 'example/closure-fixture', prNumber: 1,
-    signalKind: 'merged', ledgerTarget: target, env: { AGENT_OS_CONFIG_PATH: '/dev/null' },
-  });
-  assert.equal(missing.reason, 'psql-not-installed');
+test('WATCHERLAG-01: independent candidate preflight completes while a public observation is slow',async()=>{
+  let complete=false;
+  const dispatchSession={dispatchLookup:selector=>new Promise(resolve=>setTimeout(()=>resolve(
+    page(selector.observation,[{completion_id:'completion'}])),250))};
+  const pending=ledger.readBuildCompletionSignalForPrAsync({repo:'example/repo',prNumber:1,dispatchSession})
+    .then(result=>{complete=true;return result;});
+  const preflight=createReviewerPreflight();
+  const result=await Promise.all(['dedup','freshness','ci','hcp'].map(name=>preflight.read(name,
+    ()=>new Promise(resolve=>setTimeout(()=>resolve(name),10)))));
+  assert.equal(complete,false);
+  assert.deepEqual(result,['dedup','freshness','ci','hcp']);
+  assert.equal((await pending).ok,true);
+  const timeout=await ledger.readBuildCompletionSignalForPrAsync({repo:'example/repo',prNumber:1,
+    timeoutMs:10,dispatchSession:{dispatchLookup:()=>new Promise(resolve=>setTimeout(()=>resolve(page('completions')),30))}});
+  assert.equal(timeout.ok,false);assert.equal(timeout.transient,true);
 });
 
-test('WATCHERLAG-01: asynchronous ledger readers preserve sync fixtures, executor precedence, SQL, selectors, and failure results', async t => {
-  // A broken fixture seam must fail offline rather than query a host ledger.
-  const root = mkdtempSync(join(tmpdir(), 'ledger-fixture-path-'));
-  const previousPath = process.env.PATH;
-  process.env.PATH = root;
-  t.after(() => {
-    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
-    rmSync(root, { recursive: true, force: true });
-  });
-  const monitor = createWatcherLatencyMonitor({ logger: quiet });
-  t.after(() => monitor.stop());
-  const cases = [
-    ['readBuildCompletionSignalForPr', { repo: 'example/review-fixture', prNumber: 1, signalKind: 'merged' }],
-    ['readBuildCompletionProducerEvidence', { repo: 'example/review-fixture', signalKind: 'merged' }],
-    ['readActiveDagRunsForPlan', { planId: 'synthetic-plan' }],
-  ];
-  for (const [name, selectors] of cases) {
-    for (const result of [ok, { status: 1, stderr: 'permanent synthetic failure', stdout: '' }, { error: { code: 'ENOENT' } }]) {
-      const calls = [];
-      const exec = (...args) => { calls.push(args); return result; };
-      const args = { ...selectors, ledgerTarget: target, env: { AGENT_OS_CONFIG_PATH: '/dev/null' } };
-      const sync = ledger[name]({ ...args, spawnSyncImpl: exec });
-      monitor.summary(); // Discard telemetry from the synchronous reference reader.
-      const asyncResult = await ledger[`${name}Async`]({ ...args, spawnAsyncImpl: exec });
-      assert.deepEqual(asyncResult, sync, name);
-      assert.deepEqual(calls[0], calls[1], name);
-      const syncFixtureResult = await ledger[`${name}Async`]({ ...args, spawnSyncImpl: exec });
-      assert.equal(calls.length, 3, `${name}: sync fixture must be invoked`);
-      assert.deepEqual(syncFixtureResult, sync, name);
-      assert.deepEqual(calls[0], calls[2], name);
-      const bothResult = await ledger[`${name}Async`]({ ...args, spawnAsyncImpl: exec,
-        spawnSyncImpl: () => assert.fail(`${name}: async executor must take precedence`),
-      });
-      assert.equal(calls.length, 4, `${name}: async executor must be invoked`);
-      assert.deepEqual(bothResult, sync, name);
-      assert.deepEqual(calls[0], calls[3], name);
-    }
+test('WATCHERLAG-01: sync and asynchronous public observation readers preserve selectors and failure results',async()=>{
+  const cases=[['readBuildCompletionSignalForPr',{repo:'example/repo',prNumber:1}],
+    ['readBuildCompletionProducerEvidence',{repo:'example/repo'}],['readActiveDagRunsForPlan',{planId:'plan'}]];
+  for(const [name,args] of cases) {
+    const calls=[];
+    const reply=selector=>{calls.push(selector);return page(selector.observation,
+      selector.observation==='dag_runs' ? [{run_id:'run',state:'parked'}] : [{completion_id:'completion'}]);};
+    const sync=ledger[name]({...args,workerObservationSyncImpl:reply});
+    const asyncResult=await ledger[name+'Async']({...args,dispatchSession:{dispatchLookup:async selector=>reply(selector)}});
+    assert.deepEqual(asyncResult,sync);assert.deepEqual(calls[0],calls[1]);
+    const unavailable=await ledger[name+'Async']({...args,dispatchSession:{dispatchLookup:async()=>{throw Error('offline');}},
+      spawnSyncImpl:()=>assert.fail('no SQL fallback')});
+    assert.equal(unavailable.ok,false);
   }
-  assert.equal(monitor.summary().children.psql?.count ?? 0, 0, 'fixtures must not start real async children');
 });
 
 test('WATCHERLAG-01: pending public provenance read yields to admission and failure permits title review intake', async () => {

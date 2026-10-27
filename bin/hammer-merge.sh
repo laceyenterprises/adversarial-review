@@ -179,40 +179,11 @@ fi
 
 ham_emit_git_merge_signal() {
   [ -n "${HAM_MERGE_COMMIT:-}" ] || return 1
-  HAM_AGENT_OS_ROOT="${AGENT_OS_ROOT:-/Users/airlock/agent-os}"
-  [ -d "$HAM_AGENT_OS_ROOT/modules/worker-pool/lib/python" ] || return 1
-  [ -d "$HAM_AGENT_OS_ROOT/platform/session-ledger/src" ] || return 1
-  HAM_SIGNAL_PYTHON_BIN="${HAM_PYTHON_BIN:-${HQ_PYTHON3:-${AGENT_OS_PY:-}}}"
-  if [ -z "$HAM_SIGNAL_PYTHON_BIN" ] && [ -x /opt/homebrew/bin/python3 ]; then
-    HAM_SIGNAL_PYTHON_BIN=/opt/homebrew/bin/python3
-  fi
-  if [ -z "$HAM_SIGNAL_PYTHON_BIN" ]; then
-    HAM_SIGNAL_PYTHON_BIN="$(command -v python3 2>/dev/null || true)"
-  fi
-  [ -n "$HAM_SIGNAL_PYTHON_BIN" ] || return 1
   HAM_SIGNAL_ATTEMPTS=0
   while [ "$HAM_SIGNAL_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
     HAM_SIGNAL_ATTEMPTS=$((HAM_SIGNAL_ATTEMPTS + 1))
-    if PYTHONPATH="$HAM_AGENT_OS_ROOT/modules/worker-pool/lib/python:$HAM_AGENT_OS_ROOT/platform/session-ledger/src${PYTHONPATH:+:$PYTHONPATH}" \
-      /usr/bin/perl -e 'alarm shift; exec @ARGV' 15 "$HAM_SIGNAL_PYTHON_BIN" - "<<HQ_ROOT>>" "<<PR_NUMBER>>" "$HAM_MERGE_COMMIT" "<<MERGE_METHOD>>" <<'PYEOF' >/dev/null 2>&1
-import sys
-
-from cwp_dispatch.git_signal import EVENT_MERGE_SIGNAL, emit_git_event_best_effort, workspace_context
-
-hq_root, pr_number, merge_commit_sha, mode = sys.argv[1:]
-ctx = workspace_context()
-emit_git_event_best_effort(
-    hq_root=hq_root,
-    event_type=EVENT_MERGE_SIGNAL,
-    worker_run_id=ctx.worker_run_id,
-    launch_request_id=ctx.launch_request_id,
-    ticket_ref=ctx.ticket_ref,
-    pr_number=int(pr_number),
-    merge_commit_sha=merge_commit_sha,
-    merged_by=ctx.worker_class or "hammer",
-    mode=mode,
-)
-PYEOF
+    if /usr/bin/perl -e 'alarm shift; exec @ARGV' 20 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/record-merge-signal.mjs \
+      "<<HQ_ROOT>>" "<<PR_NUMBER>>" "$HAM_MERGE_COMMIT" "<<MERGE_METHOD>>" >/dev/null 2>&1
     then
       return 0
     fi

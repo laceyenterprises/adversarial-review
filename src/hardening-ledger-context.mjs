@@ -1,15 +1,6 @@
-import { execFile } from 'node:child_process';
-import { dirname, resolve } from 'node:path';
-import { promisify } from 'node:util';
-import { fileURLToPath } from 'node:url';
-
+import { readWorkerObservation } from './dispatch-read-client.mjs';
 import { parseDiffFiles } from './reviewer-util.mjs';
 
-const execFileAsync = promisify(execFile);
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const DEFAULT_AGENT_OS_ROOT = resolve(__dirname, '..', '..', '..');
 const DEFAULT_RECORD_LIMIT = 8;
 
 function normalizeText(value) {
@@ -54,136 +45,21 @@ function touchedContractsForPaths(paths, contracts) {
   return touched.filter((contract) => contract.contract_id);
 }
 
-function pythonEnv(repoRoot, env = process.env) {
-  const srcPath = resolve(repoRoot || DEFAULT_AGENT_OS_ROOT, 'platform', 'session-ledger', 'src');
-  return {
-    ...env,
-    PYTHONPATH: env.PYTHONPATH ? `${srcPath}:${env.PYTHONPATH}` : srcPath,
-  };
+async function sdkRows(selector, args) {
+  const result = await readWorkerObservation(selector, args);
+  if (!result.ok) throw new Error('hardening evidence unavailable');
+  return result.rows;
 }
-
-async function loadContractsFromPython({
-  repoRoot = DEFAULT_AGENT_OS_ROOT,
-  execFileImpl = execFileAsync,
-  env = process.env,
-} = {}) {
-  const script = `
-import json
-from session_ledger.hardening_contracts import list_contract_identities
-
-print(json.dumps([
-    {
-        "contract_id": contract.contract_id,
-        "summary": contract.summary,
-        "locations": [
-            {"path": location.path, "symbol": location.symbol, "notes": location.notes}
-            for location in contract.locations
-        ],
-    }
-    for contract in list_contract_identities()
-], sort_keys=True))
-`.trim();
-  const { stdout } = await execFileImpl('python3', ['-c', script], {
-    env: pythonEnv(repoRoot, env),
-    maxBuffer: 1024 * 1024,
-  });
-  const parsed = JSON.parse(stdout || '[]');
-  return Array.isArray(parsed) ? parsed : [];
+async function loadContractsFromSdk(args = {}) {
+  return sdkRows({observation:'hardening_contracts',limit:100}, args);
 }
-
-async function listHardeningRecordsFromPython(contractId, {
-  repoRoot = DEFAULT_AGENT_OS_ROOT,
-  ledgerTarget = null,
-  limit = DEFAULT_RECORD_LIMIT,
-  execFileImpl = execFileAsync,
-  env = process.env,
-} = {}) {
-  const script = `
-import json
-import os
-import sys
-from session_ledger.db_runtime import open_ledger_for_runtime_readonly
-from session_ledger.db_stores.hardening_records import hardening_record_row_to_dict
-from session_ledger.hardening_contracts import require_contract_identity
-
-contract_id = sys.argv[1]
-limit = int(sys.argv[2])
-target = os.environ.get("HLG_LEDGER_TARGET") or None
-require_contract_identity(contract_id)
-conn = open_ledger_for_runtime_readonly(target, timeout=10.0)
-try:
-    rows = conn.execute(
-        """
-        SELECT *
-        FROM hardening_records
-        WHERE contract_id = ?
-        ORDER BY created_at DESC, recorded_at DESC, record_id DESC
-        LIMIT ?
-        """,
-        (contract_id, limit),
-    ).fetchall()
-    print(json.dumps([
-        hardening_record_row_to_dict(row)
-        for row in rows
-    ], sort_keys=True))
-finally:
-    conn.close()
-`.trim();
-  const childEnv = pythonEnv(repoRoot, env);
-  if (ledgerTarget) childEnv.HLG_LEDGER_TARGET = String(ledgerTarget);
-  const { stdout } = await execFileImpl('python3', ['-c', script, contractId, String(limit)], {
-    env: childEnv,
-    maxBuffer: 1024 * 1024,
-  });
-  const parsed = JSON.parse(stdout || '[]');
-  return Array.isArray(parsed) ? parsed : [];
+async function listHardeningRecordsFromSdk(contractId, args = {}) {
+  const rows = await sdkRows({observation:'hardening_records',contract_id:contractId,limit:100}, args);
+  return rows.slice(0, args.limit ?? DEFAULT_RECORD_LIMIT);
 }
-
-async function getExposureRollupFromPython(contractId, {
-  repoRoot = DEFAULT_AGENT_OS_ROOT,
-  ledgerTarget = null,
-  execFileImpl = execFileAsync,
-  env = process.env,
-} = {}) {
-  const script = `
-import json
-import os
-import sys
-from session_ledger.db_runtime import open_ledger_for_runtime_readonly
-from session_ledger.db_stores.exposure_events import empty_exposure_rollup
-from session_ledger.db_stores.exposure_events import exposure_rollup_row_to_dict
-from session_ledger.hardening_contracts import require_contract_identity
-
-contract_id = sys.argv[1]
-target = os.environ.get("HLG_LEDGER_TARGET") or None
-require_contract_identity(contract_id)
-conn = open_ledger_for_runtime_readonly(target, timeout=10.0)
-try:
-    row = conn.execute(
-        """
-        SELECT *
-        FROM exposure_rollups
-        WHERE contract_id = ?
-        """,
-        (contract_id,),
-    ).fetchone()
-    rollup = (
-        empty_exposure_rollup(contract_id)
-        if row is None
-        else exposure_rollup_row_to_dict(row, now=None)
-    )
-    print(json.dumps(rollup, sort_keys=True))
-finally:
-    conn.close()
-`.trim();
-  const childEnv = pythonEnv(repoRoot, env);
-  if (ledgerTarget) childEnv.HLG_LEDGER_TARGET = String(ledgerTarget);
-  const { stdout } = await execFileImpl('python3', ['-c', script, contractId], {
-    env: childEnv,
-    maxBuffer: 1024 * 1024,
-  });
-  const parsed = JSON.parse(stdout || 'null');
-  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+async function getExposureRollupFromSdk(contractId, args = {}) {
+  const rows = await sdkRows({observation:'hardening_exposure',contract_id:contractId,limit:100}, args);
+  return rows[0] ?? null;
 }
 
 function isLowOrNoExposure(exposure) {
@@ -263,20 +139,20 @@ function formatHardeningReviewContext(entries) {
 }
 
 async function buildHardeningReviewContext(diffText, {
-  repoRoot = DEFAULT_AGENT_OS_ROOT,
-  ledgerTarget = null,
+  repoRoot = null,
   limit = DEFAULT_RECORD_LIMIT,
-  loadContracts = loadContractsFromPython,
-  listRecords = listHardeningRecordsFromPython,
-  getExposureRollup = getExposureRollupFromPython,
+  loadContracts = loadContractsFromSdk,
+  listRecords = listHardeningRecordsFromSdk,
+  getExposureRollup = getExposureRollupFromSdk,
   logger = console,
+  ...transport
 } = {}) {
   const changedPaths = changedPathsFromDiff(diffText);
   if (changedPaths.length === 0) return '';
 
   let contracts;
   try {
-    contracts = await loadContracts({ repoRoot });
+    contracts = await loadContracts({ repoRoot, ...transport });
   } catch (err) {
     logger?.warn?.(`[reviewer] WARN: failed to load hardening-ledger contract registry: ${err?.message || err}`);
     return '';
@@ -289,14 +165,14 @@ async function buildHardeningReviewContext(diffText, {
   for (const contract of touched) {
     let exposureRollup = null;
     try {
-      exposureRollup = await getExposureRollup(contract.contract_id, { repoRoot, ledgerTarget });
+      exposureRollup = await getExposureRollup(contract.contract_id, { repoRoot, ...transport });
     } catch (err) {
       logger?.warn?.(
         `[reviewer] WARN: failed to load exposure rollup for ${contract.contract_id}: ${err?.message || err}`
       );
     }
     try {
-      const records = await listRecords(contract.contract_id, { repoRoot, ledgerTarget, limit });
+      const records = await listRecords(contract.contract_id, { repoRoot, ...transport, limit });
       entries.push({ contract, records: Array.isArray(records) ? records : [], exposureRollup });
     } catch (err) {
       logger?.warn?.(
@@ -310,14 +186,13 @@ async function buildHardeningReviewContext(diffText, {
 }
 
 export {
-  DEFAULT_AGENT_OS_ROOT,
   changedPathsFromDiff,
   touchedContractsForPaths,
   isLowOrNoExposure,
   formatHardeningReviewContext,
   buildHardeningReviewContext,
-  loadContractsFromPython,
-  listHardeningRecordsFromPython,
-  getExposureRollupFromPython,
+  loadContractsFromSdk,
+  listHardeningRecordsFromSdk,
+  getExposureRollupFromSdk,
   isLowExposureRollup,
 };

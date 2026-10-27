@@ -1553,6 +1553,17 @@ combined unknown/stop evidence. Rollback uses source revision `4d06237c`.
 First live hammer observations for each earlier caller remain pending separate
 operator/SRE rollout evidence. This source change performs no live operation.
 
+CLOSERREFRESHLOOP-01 retries explicit transient declines at the same head when
+current R15 predicates pass, and supersedes transient execution evidence on
+changed live gate observations. Unknown/permanent and missing-attestation
+refusals retain their owners. Three unchanged settled snapshot-refresh cycles
+persist a blocker naming the daemon reason and page through the existing
+closure-wait receipt, including across restarts. Submissions retain the count;
+new facts/head or settled progress reset it. Existing owner states and smoke
+promises are unchanged; scoped pr-next-action, daemon-next-action and background
+dispatch fixtures cover recovery, refusal and deduplicated paging. Natural
+deployed recovery remains runtime-owner observation.
+
 NXA-06: daemon selection and decline handoff consume that same generation.
 Live head/check/source-proof changes re-decide before mutation. Live facts
 returned in `liveGate` survive adoption of `nextActionShared`. Same-head

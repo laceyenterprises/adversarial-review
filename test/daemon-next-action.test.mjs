@@ -95,6 +95,7 @@ for (const result of [
   { disposition: 'not-taken', reason: 'unrecognized-synthetic-reason' },
   { disposition: 'failed-closed', reason: 'worker-identity-unresolved', reasons: ['missing-produced-head-attestation'] },
   { disposition: 'failed-closed', reason: 'worker-identity-unresolved', reasons: ['head-attestation-chain-read-failed'] },
+  { disposition: 'failed-closed', reason: 'worker-identity-unresolved', reasons: ['build-completion-read-failed'] },
   { disposition: 'not-taken', reason: 'not-eligible', reasons: ['branch-protection-missing-gate'] },
   { disposition: 'not-taken', reason: 'not-eligible', reasons: ['duplicate-family-unresolved'] },
   { disposition: 'not-taken', reason: 'protective-predecessor-state-unreadable' },
@@ -107,7 +108,8 @@ for (const result of [
   assert.notEqual(shared.decision.action, 'operator-hold');
   if (result.reason === 'lease-contended') assert.equal(shared.decision.actor, 'daemon');
   if (result.reason === 'merge-retry-budget-exhausted') assert.equal(shared.decision.actor, 'hammer');
-  if (result.reasons?.includes('head-attestation-chain-read-failed')) assert.equal(shared.decision.actor, 'watcher');
+  if (result.reasons?.includes('head-attestation-chain-read-failed')) assert.equal(shared.decision.actor, 'daemon');
+  if (result.reasons?.includes('build-completion-read-failed')) assert.equal(shared.decision.actor, 'daemon');
   if (result.reasons?.includes('missing-produced-head-attestation')) assert.equal(shared.decision.actor, 'closure-recovery');
   if (result.reason === 'unrecognized-synthetic-reason') assert.equal(shared.decision.actor, 'watcher');
   if (result.reasons?.some(reason => ['branch-protection-missing-gate', 'duplicate-family-unresolved'].includes(reason))
@@ -116,6 +118,21 @@ for (const result of [
       requiredChecks: [{ name: 'unit', status: 'COMPLETED', conclusion: 'FAILURE' }] }));
     assert.equal(red.decision.actor, 'closure-recovery');
   }
+});
+
+test('CLOSERREFRESHLOOP-01: a changed live gate supersedes a pending decline without changing the head', () => {
+  const pending = observeDaemonGate(pair(), gate({ requiredChecks: [{ name: 'unit', status: 'IN_PROGRESS' }] }));
+  const declined = observeDaemonResult(pending, { disposition: 'not-taken', reason: 'pending-required-checks' });
+  assert.equal(declined.decision.actor, 'ci');
+  const refreshed = observeDaemonGate(declined, gate());
+  assert.equal(refreshed.decision.action, 'daemon-merge');
+  assert.equal(refreshed.snapshot.observations.progress.value.daemonExecution, null);
+  assert.equal(declined.snapshot.observations.progress.value.daemonExecution.reason, 'pending-required-checks');
+  assert.equal(refreshed.decision.head, HEAD);
+  const terminal = observeDaemonResult(pending, { reason: 'synthetic-terminal', permanent: true });
+  const held = observeDaemonGate(terminal, gate());
+  assert.equal(held.decision.reason, 'snapshot-refresh');
+  assert.equal(held.snapshot.observations.progress.value.daemonExecution.reason, 'synthetic-terminal');
 });
 
 test('retry descendants and a live hammer remain owners despite clean daemon evidence', () => {
@@ -158,6 +175,19 @@ async function execute(initial, { live = gate(), result = { exitCode: 0 }, after
   });
   return { outcome, shared: observeDaemonResult(shared, outcome), effects };
 }
+
+test('CLOSERREFRESHLOOP-01: recovered same-head decline reaches the leased executor with fresh checks', async () => {
+  const initial = pair({ progress: { daemonExecution: { headSha: HEAD, reason: 'pending-required-checks' } } });
+  const { shared, effects } = await execute(initial, { confirmed: true });
+  assert.equal(shared.decision.action, 'done');
+  assert.equal(effects.filter(effect => effect === 'acquire').length, 1);
+  assert.equal(effects.filter(effect => effect === 'merge').length, 1);
+  const red = await execute(initial, { live: gate({ requiredChecks: [
+    { name: 'unit', status: 'COMPLETED', conclusion: 'FAILURE' },
+  ] }) });
+  assert.ok(!red.effects.includes('merge'));
+  assert.equal(red.shared.decision.actor, 'hammer');
+});
 
 test('exit zero retains receipt reconciliation until remote exact-head confirmation', async () => {
   for (const confirmed of [false, true]) {

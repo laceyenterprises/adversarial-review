@@ -4,6 +4,7 @@ import { registerSharedNextAction, resolveSharedNextAction } from '../pr-next-ac
 import { observeClosureWait } from './closure-wait.mjs';
 import { checkPrimaryChange } from './primary-change.mjs';
 import { classifyCheckRollup } from '../checks-summary.mjs';
+import { isTransientDaemonDecline } from './daemon-decline.mjs';
 
 const decisionsByResult = new WeakMap();
 export function bindClosureNextAction(result, shared) {
@@ -50,14 +51,25 @@ export async function resolveClosureNextAction({ input, passSnapshot = null, rea
 // Yielding proofs/preflight can change facts within a pass. Keep the previous
 // immutable pair intact; publish a new generation for subsequent consumers.
 export function reviseClosureNextAction(shared, observations, passSnapshot = null) {
-  const changed = Object.entries(observations).some(([name, value]) => {
+  const changedFields = Object.entries(observations).filter(([name, value]) => {
     if (value === undefined) return false;
     const prior = shared.snapshot.observations[name];
     const wrapped = value && Object.hasOwn(value, 'state') && Object.hasOwn(value, 'value');
     return wrapped ? prior?.state !== value.state || JSON.stringify(prior?.value) !== JSON.stringify(value.value)
       : prior?.state !== 'complete' || JSON.stringify(prior.value) !== JSON.stringify(value);
-  });
-  if (!changed) return registerSharedNextAction(passSnapshot, shared);
+  }).map(([name]) => name);
+  if (!changedFields.length) return registerSharedNextAction(passSnapshot, shared);
+  // A refreshed gate supersedes a transient execution observation. Preserve a
+  // newly supplied result, and never erase terminal refusals or other progress.
+  const execution = shared.snapshot.observations.progress?.value?.daemonExecution;
+  if (isTransientDaemonDecline(execution)
+    && changedFields.some(name => ['pr', 'checks', 'reviews'].includes(name))
+    && (!Object.hasOwn(observations.progress || {}, 'daemonExecution')
+      || observations.progress.daemonExecution === execution)) {
+    observations = { ...observations, progress: {
+      ...shared.snapshot.observations.progress?.value, ...observations.progress, daemonExecution: null,
+    } };
+  }
   const derived = deriveNextActionSnapshot({ base: shared.snapshot,
     head: observations.pr?.headSha || shared.snapshot.head, observations });
   const snapshot = Object.freeze({ ...derived, generation: (shared.snapshot.generation || 0) + 1 });

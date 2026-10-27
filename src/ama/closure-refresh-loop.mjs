@@ -1,0 +1,59 @@
+import Database from 'better-sqlite3';
+import { createHash } from 'node:crypto';
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { observeClosureWait } from './closure-wait.mjs';
+
+export const CLOSURE_REFRESH_CYCLE_LIMIT = 3;
+
+function stable(value) {
+  if (Array.isArray(value)) return value.map(stable);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])]));
+}
+
+// Count settled refresh outcomes, never queue submissions or re-observations of
+// in-flight work. This diagnostic evidence grants no merge/dispatch authority.
+export async function observeClosureRefreshLoop({ rootDir, repo, prNumber, shared, result,
+  now = Date.now(), env = process.env, observeWaitImpl = observeClosureWait }) {
+  if (!shared || !result || result.backgroundDispatch) return result;
+  const { snapshot, decision } = shared;
+  const headSha = decision.head;
+  if (!headSha || snapshot.head !== headSha) return result;
+  const refresh = !result.dispatched && decision.reason === 'snapshot-refresh';
+  const observations = snapshot.observations;
+  const execution = observations.progress?.value?.daemonExecution;
+  const declineReason = execution?.headSha === headSha ? execution.reason : null;
+  const facts = ['pr', 'checks', 'reviews'].map(name => ({
+    state: observations[name]?.state, value: observations[name]?.value,
+  }));
+  const fingerprint = createHash('sha256').update(JSON.stringify(stable([
+    ...facts, declineReason, execution?.reasons || [],
+  ]))).digest('hex');
+  const dir = join(rootDir, 'data', 'ama-closure-waits');
+  mkdirSync(dir, { recursive: true });
+  const key = createHash('sha256').update(`${repo}#${prNumber}`).digest('hex');
+  const db = new Database(join(dir, `${key}.db`));
+  let cycles;
+  try {
+    db.exec('CREATE TABLE IF NOT EXISTS refresh_cycle (id INTEGER PRIMARY KEY CHECK(id=1), head TEXT NOT NULL, fingerprint TEXT NOT NULL, cycles INTEGER NOT NULL)');
+    cycles = db.transaction(() => {
+      if (!refresh) {
+        db.prepare('DELETE FROM refresh_cycle').run();
+        return 0;
+      }
+      const previous = db.prepare('SELECT * FROM refresh_cycle WHERE id=1').get();
+      const count = previous?.head === headSha && previous.fingerprint === fingerprint
+        ? Math.min(CLOSURE_REFRESH_CYCLE_LIMIT, previous.cycles + 1) : 1;
+      db.prepare('INSERT OR REPLACE INTO refresh_cycle(id,head,fingerprint,cycles) VALUES (1,?,?,?)')
+        .run(headSha, fingerprint, count);
+      return count;
+    }).immediate();
+  } finally { db.close(); }
+  if (cycles < CLOSURE_REFRESH_CYCLE_LIMIT) return result;
+  const closureBlocker = `snapshot-refresh-no-progress: daemon:${declineReason || 'unknown'} cycles=${cycles}`;
+  const boundedWait = await observeWaitImpl({ rootDir, repo, prNumber, headSha, env, now,
+    reason: closureBlocker, immediate: true, waitClass: 'snapshot-refresh' });
+  return { ...result, closureBlocker, boundedWait, needsOperator: true, skipMergeAgent: true,
+    recoveryWait: true };
+}

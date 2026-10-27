@@ -2,7 +2,7 @@
 
 **Owner:** AMA bounded closure wait and exhaustion paging (HAMCLOSE-01)
 **Store:** `data/ama-closure-waits/<sha256(repo#prNumber)>.db`
-**Source of truth:** `src/ama/closure-wait.mjs`
+**Source of truth:** `src/ama/closure-wait.mjs`, `src/ama/closure-refresh-loop.mjs`
 **Runtime surfaces:** `src/reviewer-ci-admission.mjs`, `src/ama-closure-orchestration.mjs`, `src/ama/dispatch-closer.mjs`
 
 ## Purpose and schema
@@ -101,3 +101,29 @@ page or sends an alert, even if overdue. Persistence failure is diagnostic and
 cannot refuse execution. Ordinary observations retain existing delivery,
 debounce, refund and retry behavior and report the selected action and actor.
 There is no new table, column or migration.
+
+### Snapshot-refresh cycles (CLOSERREFRESHLOOP-01)
+
+The same per-PR database also initializes `refresh_cycle` on observation. This
+additive table retains one row (`id INTEGER PRIMARY KEY CHECK(id=1)`) with
+`head TEXT NOT NULL`, `fingerprint TEXT NOT NULL` and `cycles INTEGER NOT NULL`.
+The SHA-256 fingerprint covers PR/check/review observation states and values,
+plus the same-head daemon decline reason and detail reasons, excluding pass
+generation, observation clock and provenance. Object key order is canonical.
+
+Each settled snapshot-refresh outcome increments the unchanged head/fingerprint
+count, capped at three. Head or fact changes replace the row with count one;
+a settled non-refresh outcome deletes it. Background queue submissions leave
+it untouched, so submission/settlement alternation cannot erase the debt.
+SQLite immediate transactions serialize observations; closing/reopening the
+database preserves the count across watcher restarts. Consumed background
+outcomes count once in the ordinary result wrapper, not again at settlement.
+
+At three cycles, the result carries `closureBlocker`:
+`snapshot-refresh-no-progress: daemon:<stored reason> cycles=3`,
+`needsOperator: true` and the existing bounded wait. The `snapshot-refresh`
+wait class pages immediately through `observeClosureWait`; its per-PR/head
+reservation and delivery-refund rules apply. A missing stored decline is named
+`unknown`. Failed page delivery retains the saturated count for retry. Resetting
+the counter never resets a successful page receipt. The table measures a loop;
+it grants no authority and changes no lease or retry budget.

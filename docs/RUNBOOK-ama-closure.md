@@ -24,6 +24,30 @@ forced launch, ledger mutation or new smoke step is authorized by this change.
 
 # RUNBOOK — AMA closure pipeline
 
+## Same-head daemon decline recovery (CLOSERREFRESHLOOP-01)
+
+The shared R15 clean-merge row retries explicit transient daemon declines on
+the same head once current checks, mergeability, clean review and attestation
+satisfy its existing predicates. Pending checks/mergeability, failed live-gate
+reads and unreadable identity evidence cannot permanently suppress that row.
+Changed PR/check/review observations supersede transient `daemonExecution`
+evidence. Unknown reasons, permanent declines and missing-attestation safety
+refusals retain their existing owners. Every attempt still revalidates live
+exact-head review/identity/eligibility and acquires the existing merge lease.
+
+Three consecutive settled `snapshot-refresh` outcomes with unchanged facts at
+the same head emit `snapshot-refresh-no-progress`, naming the stored daemon
+decline, and page through the existing closure-wait path. The counter survives
+restart; queue submissions do not reset it. Changed facts, head movement or a
+settled non-refresh outcome reset the count. Delivery failure retries with the
+existing receipt; successful pages dedupe per PR/head. No configuration, check
+or label is added. See the [storage contract](data-model/ama-closure-waits.md#snapshot-refresh-cycles-closerrefreshloop-01).
+
+After normal deployment, the runtime owner can inspect natural same-head
+recovery and, if one occurs, the no-progress blocker and page receipt. Offline
+fixtures establish scheduling and paging composition, not deployed recovery.
+No live repair, restart or forced page is needed for source acceptance.
+
 ## Worker pool policy conflicts (ITPPOOLCONFLICT-01)
 
 Worker proposals check membership before pool validation. A builder-only pool

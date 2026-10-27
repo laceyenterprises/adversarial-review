@@ -18,6 +18,7 @@ import { createHash } from 'node:crypto';
 import { classifyCheckRollup } from './checks-summary.mjs';
 import { hasOperatorApprovedOverride, SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
 import { isDaemonMergeReviewAllowed } from './ama/daemon-merge.mjs';
+import { isTransientDaemonDecline } from './ama/daemon-decline.mjs';
 import { launchRequestOwned, withLiveLaunchRetry } from './ama/launch-request-status.mjs';
 import { AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS, AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS } from './ama/closer-lease.mjs';
 import { OPERATOR_HOLD_LABELS } from './operator-hold-labels.mjs';
@@ -369,7 +370,7 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
     'permanent-merge-rejection', 'unclassified-merge-failure',
   ].includes(reason) || PROTECTIVE_PREDECESSOR_HOLD_REASONS.has(reason));
   const identityRefusal = execution?.reason === 'worker-identity-unresolved'
-    && !executionReasons.some(reason => /read-failed|unavailable/.test(reason));
+    && !isTransientDaemonDecline(execution);
   if ((refusal && refusal.deterministic === true) || safetyReason || identityRefusal) {
     return { row: 'R05-structural', action: 'hammer', actor: 'closure-recovery', reason: 'safety-refusal',
       deadlineKind: 'recovery', queue: 'reconcile', refs: [`refusal:${text(refusal?.reason) || safetyReason || execution?.reason || 'unnamed'}`] };
@@ -564,9 +565,9 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
       return { row: 'R08-retry', action: 'hammer', actor: 'hammer', reason: 'retry-no-merge',
         deadlineKind: 'admission', queue: 'dispatch' };
     }
-    // A decline with no changed semantic facts needs refreshed evidence. New
-    // reason strings and unavailable evidence cannot manufacture a launch.
-    if (!['lease-contended', 'lease-acquire-error', 'audit-init-failed', 'findings-capture-pending'].includes(execution.reason)) {
+    // Transient facts may recover without a push. R15's live snapshot predicates
+    // below still have to pass; unknown and terminal declines retain refresh.
+    if (!isTransientDaemonDecline(execution)) {
       return refresh('snapshot-refresh', [`daemon:${text(execution.reason) || 'unknown'}`]);
     }
   }

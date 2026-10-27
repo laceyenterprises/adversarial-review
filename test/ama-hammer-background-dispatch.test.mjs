@@ -27,10 +27,102 @@ import { maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
 import { recoverStrandedCloserHead } from '../src/ama/closer-head-recovery.mjs';
 import { hammerWakeAuditPath, readHammerWakeAudit, requestEligibleHammerWake } from '../src/hammer-wake.mjs';
 import { closerAuthoredStaleAuditPath } from '../src/closer-authored-stale.mjs';
+import { observeClosureRefreshLoop, CLOSURE_REFRESH_CYCLE_LIMIT } from '../src/ama/closure-refresh-loop.mjs';
+import { observeClosureWait } from '../src/ama/closure-wait.mjs';
 
 function cfgReturning(value) {
   return { get: (key, fallback) => (value === undefined ? fallback : value) };
 }
+
+test('CLOSERREFRESHLOOP-01: unchanged background refresh settlements page with the stored decline', async t => {
+  const queue = createAmaHammerBackgroundQueue();
+  const pages = [];
+  const events = [];
+  let dispatches = 0;
+  const args = closureArgs({
+    logger: { log() {}, warn(message) { assert.fail(message); }, info(message) { events.push(JSON.parse(message)); } },
+    resolveAmaHammerDispatchModeImpl: () => 'background', amaHammerBackgroundQueueImpl: () => queue,
+    observeClosureWaitImpl: options => observeClosureWait({ ...options,
+      pageImpl: async (message, metadata) => pages.push({ message, metadata }) }),
+    maybeDispatchAmaCloserImpl: async payload => {
+      dispatches++;
+      const shared = reviseClosureNextAction(payload.sharedNextAction, { progress: {
+        daemonExecution: { headSha: HEAD, reason: 'synthetic-terminal-decline' },
+      } });
+      return { dispatched: false, reason: 'snapshot-refresh', nextActionShared: shared };
+    },
+  });
+  t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+  for (let cycle = 1; cycle <= CLOSURE_REFRESH_CYCLE_LIMIT + 1; cycle++) {
+    const queued = await maybeDispatchAmaClosureFor(args);
+    assert.equal(queued.reason, AMA_HAMMER_BACKGROUND_REASON);
+    await queue.drain();
+    const applied = await resolveMergeAgentCoexistenceForWatcher({ ...args,
+      maybeDispatchAmaClosureForImpl: input => maybeDispatchAmaClosureFor({ ...args, ...input }),
+      recoverOrphanImpl: () => assert.fail('snapshot refresh retains its observer'),
+    });
+    const settled = applied.amaClosureResult;
+    assert.equal(settled.nextAction.reason, 'snapshot-refresh');
+    if (cycle < CLOSURE_REFRESH_CYCLE_LIMIT) assert.equal(settled.closureBlocker, undefined);
+    else {
+      assert.match(settled.closureBlocker, /snapshot-refresh-no-progress: daemon:synthetic-terminal-decline/);
+      assert.equal(settled.needsOperator, true);
+      assert.equal(settled.boundedWait.exhausted, true);
+    }
+  }
+  assert.equal(dispatches, CLOSURE_REFRESH_CYCLE_LIMIT + 1);
+  assert.equal(pages.length, 1);
+  assert.match(pages[0].message, /synthetic-terminal-decline/);
+  assert.equal(pages[0].metadata.source, 'hamclose-closure-wait');
+  assert.ok(events.some(event => event.event === 'ama.closure_blocker'
+    && event.reason.includes('snapshot-refresh-no-progress: daemon:synthetic-terminal-decline')));
+});
+
+test('CLOSERREFRESHLOOP-01: refresh count survives reopen, resets on facts/head/progress, retries failed paging', async t => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'closure-refresh-loop-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  let shared;
+  let pageAttempts = 0;
+  const identity = { rootDir, repo: 'fixture/repo', prNumber: 17 };
+  const observe = result => observeClosureRefreshLoop({ ...identity, shared, result,
+    observeWaitImpl: options => observeClosureWait({ ...options, pageImpl: async () => {
+      pageAttempts++;
+      if (pageAttempts === 1) throw new Error('synthetic delivery refusal');
+    } }) });
+  const reset = (head = HEAD, labels = []) => {
+    const snapshot = deriveNextActionSnapshot({ subjectKey: 'fixture/repo#17', head, observations: {
+      pr: { state: 'OPEN', headSha: head, mergeable: 'MERGEABLE', labels },
+      checks: { conclusion: 'SUCCESS' },
+      reviews: { headSha: head, verdict: 'approved', blockingFindingState: 'known', blockingFindingCount: 0,
+        nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 },
+      leases: { closer: null }, launches: { closer: null },
+      policy: { autonomousMergeExecutionEnabled: true },
+      progress: { daemonExecution: { headSha: head, reason: 'synthetic-terminal-decline' } },
+    } });
+    shared = { snapshot, decision: nextAction(snapshot) };
+    assert.equal(shared.decision.reason, 'snapshot-refresh');
+  };
+  const refresh = { dispatched: false, reason: 'snapshot-refresh' };
+  reset();
+  await observe(refresh);
+  reset(); // A fresh immutable pair and SQLite connection retain the counter.
+  await observe(refresh);
+  reset(HEAD, ['synthetic-progress']);
+  assert.equal((await observe(refresh)).closureBlocker, undefined);
+  await observe(refresh);
+  reset('b'.repeat(40));
+  assert.equal((await observe(refresh)).closureBlocker, undefined);
+  await observe({ dispatched: true });
+  for (let i = 1; i < CLOSURE_REFRESH_CYCLE_LIMIT; i++) {
+    assert.equal((await observe(refresh)).closureBlocker, undefined);
+    await observe({ backgroundDispatch: { state: 'started' } });
+  }
+  await assert.rejects(observe(refresh), /synthetic delivery refusal/);
+  const paged = await observe(refresh);
+  assert.equal(paged.needsOperator, true);
+  await observe(refresh);
+  assert.equal(pageAttempts, 2);
+});
 
 test('in-flight lookup exposes revalidated decisions without changing the submitted pair', async () => {
   const queue = createAmaHammerBackgroundQueue();

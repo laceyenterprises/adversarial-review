@@ -16,6 +16,7 @@ import { evaluateHammerRetryCap, readHammerRetryCapLedger } from './ama/hammer-r
 import { bindClosureNextAction, readClosureNextAction, observeClosureOwnership, closureOwnerFromDecision, hasHammerDispatchIntent, observeClosureResult, observeDaemonGate as reviseDaemonGate, observeDaemonResult, revalidateClosurePr, resolveClosureNextAction, reviseClosureNextAction } from './ama/closure-next-action.mjs';
 import { probeOrphanOwnership } from './ama/orphan-watchdog.mjs';
 import { observeClosureWait } from './ama/closure-wait.mjs';
+import { observeClosureRefreshLoop } from './ama/closure-refresh-loop.mjs';
 import { closureOwnerShadowEvidence, shadowNextActionLater } from './pr-next-action-consumer.mjs';
 import { hostname } from 'node:os';
 import { OPERATOR_HOLD_LABELS } from './operator-hold-labels.mjs';
@@ -811,6 +812,12 @@ async function maybeDispatchAmaClosureForInner({
         ...closureOwnerFromDecision(selected), reason: 'exact-head-review',
       } } : {}) };
   }
+  try {
+    result = await observeClosureRefreshLoop({ rootDir: options.rootDir || ROOT,
+      repo: options.repoPath, prNumber: options.prNumber, shared: closureOwnerSink.shared, result,
+      now: options.now ? options.now() : Date.now(), env: options.env || process.env,
+      observeWaitImpl: options.observeClosureWaitImpl || observeClosureWait });
+  } catch (error) { options.logger?.warn?.(`[watcher] snapshot-refresh loop observation failed: ${error.message}`); }
   if (finalRoundSink.value
     && result?.reason !== 'hammer-stop-awaiting-companion'
     && !(result?.boundedWait && ['review', 'remediate', 'wait-for-CI'].includes(result.nextAction?.action))

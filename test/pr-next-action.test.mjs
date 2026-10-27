@@ -53,6 +53,38 @@ function snap({ pr = {}, checks = {}, reviews = {}, remediation = {}, launches =
 
 const pick = decision => [decision.action, decision.actor, decision.reason];
 
+for (const reason of ['pending-required-checks', 'pending-mergeability',
+  'gate-read-failed', 'live-head-refresh-failed', 'live-head-unresolved']) {
+  test(`CLOSERREFRESHLOOP-01: unchanged transient ${reason} retains snapshot refresh`, () => {
+    const progress = { daemonExecution: { headSha: HEAD, reason } };
+    assert.equal(nextAction(snap({ progress })).reason, 'snapshot-refresh');
+    for (const changed of [
+      { checks: { conclusion: 'PENDING' } }, { checks: { conclusion: null } },
+      { pr: { mergeable: 'UNKNOWN' } }, { reviews: { attestation: 'unknown' } },
+      { reviews: { headSha: OLD } }, { reviews: { blockingFindingCount: 1, verdict: 'request-changes' } },
+      { reviews: { attestation: 'invalid' } },
+      { leases: { closer: { headSha: HEAD, status: 'pending', acquiredAt: OBSERVED } } },
+      { policy: { autonomousMergeExecutionEnabled: false } },
+    ]) assert.notEqual(nextAction(snap({ progress, ...changed })).action, 'daemon-merge');
+  });
+}
+
+for (const execution of [
+  { reason: 'stale-head', permanent: true },
+  { reason: 'new-unknown-reason' },
+  { reason: 'pending-required-checks', permanent: true },
+  { reason: 'pending-required-checks', reasons: ['new-unknown-reason'] },
+  { reason: 'gate-not-eligible', reasons: ['ci-not-green', 'branch-protection-missing-gate'] },
+  { reason: 'worker-identity-unresolved', reasons: ['missing-produced-head-attestation'] },
+  { reason: 'worker-identity-unresolved' },
+  { reason: 'worker-identity-unresolved', reasons: [] },
+  { reason: 'worker-identity-unresolved', reasons: ['worker-identity-unresolved'] },
+]) test(`CLOSERREFRESHLOOP-01: terminal or unknown ${JSON.stringify(execution)} retains its owner`, () => {
+  const selected = nextAction(snap({ progress: { daemonExecution: { headSha: HEAD, ...execution } } }));
+  assert.notEqual(selected.action, 'daemon-merge');
+  assert.ok(['snapshot-refresh', 'safety-refusal'].includes(selected.reason));
+});
+
 test('HAMLANEWAIT-01: repeated lane-busy audits leave next action retryable; a real refusal still stops', () => {
   const attempts = [1, 2].map(i => ({ outcome: 'deferred', reason: 'lane-busy', head: HEAD,
     startedAt: `2026-01-01T00:00:0${i}Z`, attemptPhase: 'hammer-gh-pr-merge' }));

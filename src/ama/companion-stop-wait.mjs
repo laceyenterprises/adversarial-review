@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { createHoldRecord, evaluateHoldRecord, markHoldEscalated, holdEscalatedInProcess } from './hold-record.mjs';
 import { creditHammerDispatchBudgets, readHammerRetryCapLedger, updateHammerRetryCapLedger } from './hammer-retry-cap.mjs';
 import { meteredExecFile } from '../metered-gh.mjs';
@@ -32,7 +33,7 @@ function repoFromUrl(value) {
 // The injected executor keeps all regression coverage fully offline.
 export async function probeCompanionWait({ repo, prNumber, headSha, prMetadata, stop, prior, execFileImpl }) {
   const get = async endpoint => {
-    const { stdout } = await meteredExecFile(execFileImpl, 'gh', ['api', endpoint], { timeout: 15_000, maxBuffer: 1024 * 1024 });
+    const { stdout } = await meteredExecFile(execFileImpl, 'gh', ['api', endpoint], { timeout: loadAwareTimeoutMs(15_000), maxBuffer: 1024 * 1024 });
     return JSON.parse(stdout);
   };
   let companion = companionReference(stop.companionWait) || companionReference(prior?.companionWait);
@@ -149,6 +150,9 @@ export async function evaluateCompanionWait({ rootDir, repo, prNumber, headSha, 
     delete entry.probeError;
     if (entry.companionWait.evidenceUnreadable) entry.probeError = 'base gitlink evidence unreadable';
   } catch {
+    // A previous closed/merged observation is not a fresh classification.
+    // Retain timing/identity evidence, but require a readable next-pass probe.
+    entry.companionWait = { ...entry.companionWait, state: 'unknown', containsMerge: false };
     entry.probeError = 'companion evidence unreadable';
   }
   const wait = entry.companionWait;

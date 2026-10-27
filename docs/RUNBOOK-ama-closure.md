@@ -398,6 +398,22 @@ registered. Operator RCV-09 owns final enforce/rollback evidence.
 
 ## Load-aware per-call budgets
 
+TIMEOUTSWEEP-01 extends this contract to hammer API and local Git publication,
+review-currency Git, companion reads, submitter identity/scan probes and closer
+worktree removal plus registration/reap pass budgets. Scale nominal operation
+waits once at use time. Poll intervals, retry backoffs, leases and the companion
+25-hour escalation horizon keep their existing policy durations.
+A timeout means unknown and the next pass retries. Publication retains its
+CAS/fallback head and ordinary review route; currency read errors supply no
+proof. Failed companion state reads replace stale closed/merged classifications
+with `unknown` plus `probeError`, retaining identity/timing evidence. Cleanup
+keeps timed-out removal incomplete even if partial diagnostics resemble absence,
+and cannot use an uncertain teardown to authorize a disk-removal fallback.
+See the [inventory](architecture/ARCH-control-path-timeouts.md) for remaining
+control-path work. Tests use synthetic identities and temporary directories;
+this change authorizes no service restart or live recovery action.
+
+
 The service scales GitHub lookups, quota-status reads, lock waits and
 posted-review step deadlines through `src/load-aware-timeout.mjs`. All quota
 readers share a 45-second nominal budget. The existing graded CPU

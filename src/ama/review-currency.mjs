@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
 import { hammerAttestationChain } from './hammer-head-validation.mjs';
 import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers } from './ham-provenance.mjs';
@@ -9,7 +10,7 @@ const LIMIT = 256;
 // never permission to assume that a rewritten review is still current.
 export function currencyGit(args, input, { cwd } = {}) {
   return new Promise((resolve, reject) => {
-    const child = execFile('git', args, { cwd, timeout: 15000, maxBuffer: 16 * 1024 * 1024 },
+    const child = execFile('git', args, { cwd, timeout: loadAwareTimeoutMs(15000), maxBuffer: 16 * 1024 * 1024 },
       (error, stdout) => error ? reject(error) : resolve(stdout));
     child.stdin.on('error', () => {});
     child.stdin.end(input);

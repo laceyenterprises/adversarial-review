@@ -1,8 +1,9 @@
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { isAmaCloserPidAlive } from './closer-lease.mjs';
 
-const psOptions = { encoding: 'utf8', timeout: 1000, maxBuffer: 4 * 1024 * 1024 };
+const psOptions = () => ({ encoding: 'utf8', timeout: loadAwareTimeoutMs(1000), maxBuffer: 4 * 1024 * 1024 });
 const validPid = pid => Number.isInteger(pid) && pid > 0;
 // System process tables can include macOS kernel_task (PID 0).
 const validRowPid = pid => Number.isInteger(pid) && pid >= 0;
@@ -16,7 +17,7 @@ export function captureCloserProcessSync(pid, options = {}) {
   if (!validPid(pid)) return null;
   try {
     const stdout = (options.processExecFileSyncImpl || execFileSync)('ps', ['-o', 'lstart=', '-p', String(pid)],
-      { ...psOptions, env: psEnvironment(options.env) });
+      { ...psOptions(), env: psEnvironment(options.env) });
     return { pid, startedAt: psTimestamp(String(stdout).trim()) };
   } catch { return { pid, startedAt: null }; }
 }
@@ -26,7 +27,7 @@ export async function captureCloserProcess(pid, options = {}) {
   if (!validPid(pid)) return null;
   try {
     const { stdout } = await (options.processExecFileImpl || execFileAsync)('ps', ['-o', 'lstart=', '-p', String(pid)],
-      { ...psOptions, env: psEnvironment(options.env) });
+      { ...psOptions(), env: psEnvironment(options.env) });
     return { pid, startedAt: psTimestamp(String(stdout).trim()) };
   } catch { return { pid, startedAt: null }; }
 }
@@ -48,7 +49,7 @@ export function probeCloserSubmitter(record, lease, options = {}) {
     // overflow, empty result or malformed row is unknown, never an empty scan.
     const output = String((options.processExecFileSyncImpl || execFileSync)('ps',
       ['-axww', '-o', 'pid=', '-o', 'lstart=', '-o', 'args='],
-      { ...psOptions, env: psEnvironment(options.env) }));
+      { ...psOptions(), env: psEnvironment(options.env) }));
     if (!output.endsWith('\n')) throw Error('incomplete process scan');
     rows = [];
     for (const line of output.slice(0, -1).split('\n')) {

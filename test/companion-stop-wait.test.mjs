@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import { assertHoldRecord } from '../src/ama/hold-record.mjs';
 import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
@@ -34,7 +35,7 @@ function fixture(t, { structured = true } = {}) {
       assert.ok(options.timeout <= 15_000);
       const endpoint = argv[1];
       calls.push(endpoint);
-      if (live.fail && endpoint.includes(live.fail)) throw new Error('synthetic read failure');
+      if (live.fail && endpoint.includes(live.fail)) throw live.error || new Error('synthetic read failure');
       let value;
       if (endpoint === 'repos/example/project/pulls/3') value = { state: 'open', head: { sha: head }, base: { sha: base } };
       else if (endpoint.includes('/contents/.gitmodules')) value = { content: Buffer.from(`[submodule "component"]\n path = tools/component\n url = ${live.submoduleUrl}\n`).toString('base64') };
@@ -170,4 +171,28 @@ test('COMPANIONFLOAT-01 mixed stops, unknown references and stale parent stay fa
     execFileImpl: async () => ({ stdout: JSON.stringify({ state: 'closed', head: { sha: head } }) }) }), /changed or terminal/);
   const stop = readHammerStopForHead(f.args);
   assert.equal(stop.companionWait, null);
+});
+
+for (const state of ['closed', 'merged']) test(`TIMEOUTSWEEP-01 a timed-out companion probe invalidates stale ${state} classification and retries`, async t => {
+  const f = fixture(t);
+  f.live.state = 'closed';
+  f.live.merged = state === 'merged';
+  await f.evaluate();
+  assert.equal(f.entry().companionWait.state, state);
+  // Clear the synthetic delivery record to observe this evaluation alone.
+  f.pages.length = 0;
+  f.live.fail = '/pulls/7';
+  f.live.error = Object.assign(Error('synthetic timeout'), { code: 'ETIMEDOUT' });
+  assert.equal((await f.evaluate({ now: at(60_000) })).action, 'hold');
+  assert.equal(f.entry().companionWait.state, 'unknown');
+  assert.equal(f.entry().companionWait.containsMerge, false);
+  assert.equal(f.entry().refusal, undefined);
+  assert.equal(f.entry().releasedAt, undefined);
+  assert.equal(f.pages.length, 0);
+  f.live.fail = null;
+  f.live.state = 'open';
+  f.live.merged = false;
+  await f.evaluate({ now: at(120_000) });
+  assert.equal(f.entry().companionWait.state, 'open');
+  assert.equal(f.entry().probeError, undefined);
 });

@@ -1,9 +1,8 @@
 #!/usr/bin/env node
-import { execFileSync } from 'node:child_process';
-import { hammerNetworkCall } from '../src/ama/hammer-api-network.mjs';
+import { hammerNetworkCall, hammerLocalGit } from '../src/ama/hammer-api-network.mjs';
 import { hammerPublicationFailureReason, publishHammerTree } from '../src/ama/hammer-api-publish.mjs';
 const [repo, pr] = process.argv.slice(2);
-const git = (...args) => execFileSync('git', args, { timeout: 30000, maxBuffer: 64 * 1024 * 1024, stdio: 'pipe' });
+const git = (...args) => hammerLocalGit(args);
 const network = hammerNetworkCall;
 const api = async (path, input) => JSON.parse((await network('gh',
   ['api', path, ...(input ? ['--input', '-'] : [])], input ? JSON.stringify(input) : undefined)).toString());
@@ -21,7 +20,9 @@ try {
   // must use the lease-protected git route so the new base remains an ancestor.
   try {
     git('merge-base', '--is-ancestor', info.headRefOid, 'HEAD');
-  } catch {
+  } catch (error) {
+    // Exit 1 is Git's negative ancestry proof. A killed/failed probe is unknown.
+    if (error.status !== 1 || error.signal || error.killed) throw error;
     throw new Error('local HEAD does not descend from the remote head; preserve rebased history with git');
   }
   const count = git('rev-list', '--count', `${info.headRefOid}..HEAD`).toString().trim();

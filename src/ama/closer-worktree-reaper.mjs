@@ -492,11 +492,11 @@ async function removeHammerWorktree({
           repoPath: registration.repoPath,
           args: ['worktree', 'remove', '--force', registration.path],
           execFileImpl,
-          timeout: 60_000,
+          timeout: loadAwareTimeoutMs(60_000),
         });
       } catch (err) {
         const detail = String(err?.stderr || err?.message || err);
-        if (gitWorktreeRemoveIndicatesGone(detail)) {
+        if (!isTransientProbeError(err) && gitWorktreeRemoveIndicatesGone(detail)) {
           // The tree is already physically gone; prune the stale entry below.
           treeAlreadyGone = true;
           removePhysicalInvalidTree = registration.diskPresent !== false;
@@ -536,7 +536,7 @@ async function removeHammerWorktree({
             repoPath: registration.repoPath,
             args: ['worktree', 'prune'],
             execFileImpl,
-            timeout: 60_000,
+            timeout: loadAwareTimeoutMs(60_000),
           });
           pruned = true;
         } catch (err) {
@@ -550,18 +550,18 @@ async function removeHammerWorktree({
     await execFileImpl(hqPath, ['worker', 'tear-down', entry.workerId, '--force', '--root', hqRoot], {
       env: process.env,
       maxBuffer: 1024 * 1024,
-      timeout: 60_000,
+      timeout: loadAwareTimeoutMs(60_000),
       killSignal: 'SIGTERM',
     });
   } catch (err) {
     const detail = String(err?.stderr || err?.message || err);
-    if (!/worker not found|worker does not exist|no worker with id|no such worker|service not found|could not find service|not loaded|no such process/i.test(detail)) {
+    if (isTransientProbeError(err) || !/worker not found|worker does not exist|no worker with id|no such worker|service not found|could not find service|not loaded|no such process/i.test(detail)) {
       errors.push(`hq-worker-tear-down:${detail}`);
     }
   }
 
-  const mayRemoveDiskFallback = !entry.registered
-    || (entry.registrationMismatch && errors.length === 0);
+  const mayRemoveDiskFallback = errors.length === 0
+    && (!entry.registered || entry.registrationMismatch);
   if (mayRemoveDiskFallback && entry.workerDir && existsSync(entry.workerDir)) {
     try {
       const stat = statSync(entry.workerDir);
@@ -801,6 +801,9 @@ async function reapCloserHammerWorktrees({
   env = process.env,
   logger = console,
 } = {}) {
+  // Inputs are nominal operation budgets, never queue polling intervals.
+  budgetMs = loadAwareTimeoutMs(budgetMs);
+  registrationBudgetMs = loadAwareTimeoutMs(registrationBudgetMs);
   const cursor = await readScanCursor(cursorPath, logger);
   const repoDiscovery = Array.isArray(repoPaths)
     ? { paths: repoPaths }

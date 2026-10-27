@@ -1099,6 +1099,14 @@ records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
 
+TIMEOUTSWEEP-01 scales nominal hammer/closer operation waits with host load.
+Timeouts retain unknown evidence and next-pass recovery; failed companion reads
+cannot reuse a stale closed/merged classification, and uncertain teardown cannot
+claim removal or authorize a disk fallback. Existing lifecycle states and smoke
+promises remain unchanged. Offline coverage is in `test/timeoutsweep-control.test.mjs`
+and `test/companion-stop-wait.test.mjs`; see the
+[inventory](docs/architecture/ARCH-control-path-timeouts.md) for follow-up surfaces.
+
 CIBLOCKINFRA-01 keeps zero-step and Actions billing/quota failures in a bounded,
 visible CI wait without spending remediation rounds or arming automated stops.
 One durable workflow/head rerun has a CI recovery owner; repeated blocks page

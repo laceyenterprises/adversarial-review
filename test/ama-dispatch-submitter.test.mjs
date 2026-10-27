@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { captureCloserProcessSync, captureCloserProcess, probeCloserSubmitter } from '../src/ama/dispatch-submitter.mjs';

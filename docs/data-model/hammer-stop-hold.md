@@ -54,7 +54,12 @@ The hold adds `owner: closure-recovery`, `awaitedEvent`, `waitUntil`,
 `companionWait`, `events` and optional `probeError`. The dependency records its
 repository, PR and path, authoritative `state`, `mergeCommit`, `mergedAt`,
 observed `baseSha`, `gitlinkSha` and `containsMerge`. Failed ancestry reads retain
-known merge evidence and fail closed. Status and escalation name the automated
+known merge evidence and fail closed. TIMEOUTSWEEP-01 records a failed companion
+state read as `state: unknown`, `containsMerge: false` and `probeError`; prior
+identity and timing remain evidence only. This record never proves open, closed,
+merged or floated and is re-probed on the next pass. A closed-unmerged alert
+requires a fresh read; the existing elapsed dependency SLA still escalates once.
+Status and escalation name the automated
 owner and awaited event, replacing historical operator follow-through prose.
 
 The posted-review lane probes unreleased waits every five minutes, including

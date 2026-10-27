@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { execFileSync } from 'node:child_process';
 import { isTransientGhError } from '../gh-cli.mjs';
 import { meteredExecFileSync } from '../metered-gh.mjs';
@@ -10,7 +11,7 @@ const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 export async function hammerNetworkCall(command, args, input, { execFileImpl = execFileSync, env = process.env, sleep = pause } = {}) {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      return meteredExecFileSync(execFileImpl, command, args, { input, hammerToken: true, timeout: 15000,
+      return meteredExecFileSync(execFileImpl, command, args, { input, hammerToken: true, timeout: loadAwareTimeoutMs(15000),
         maxBuffer: 64 * 1024 * 1024, env });
     } catch (error) {
       const transient = isTransientGhError(error) || (command === 'git'
@@ -19,4 +20,11 @@ export async function hammerNetworkCall(command, args, input, { execFileImpl = e
       await sleep(500 * (2 ** attempt));
     }
   }
+}
+
+// Local publication plumbing shares the same unknown-on-error boundary. The
+// caller may classify an ancestry result only after a completed Git exit 1.
+export function hammerLocalGit(args, { execFileImpl = execFileSync } = {}) {
+  return execFileImpl('git', args, { timeout: loadAwareTimeoutMs(30_000),
+    maxBuffer: 64 * 1024 * 1024, stdio: 'pipe' });
 }

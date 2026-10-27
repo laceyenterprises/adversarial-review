@@ -388,7 +388,7 @@
     "src/closer-head-rereview-decline.mjs": "21b6becc81f55d341b989d878161c82ad25b25a1ab1e8136c8cdf264315882b8",
     "src/remediation-ci-infrastructure.mjs": "0473feae0f4eefa22a4bcd6474788963c9fa95f11a601fdd6340da1599841568",
     "src/ama/dispatch-submitter.mjs": "c186abb1b2071524a8afd722bf10c637d1e54586f2f186b47f57be3baad9dd60",
-    "src/ama/closure-next-action.mjs": "da3205b6c7a40a45a790714eaec6dffc893b3c8e17a6c61410951ebb8fd24f87",
+    "src/ama/closure-next-action.mjs": "5bb0293c10c0b45c7086401cd9f7d4d137363a39308cf7178891c1c8b5375dcc",
     "src/pr-next-action.mjs": "e392a7dbaff95f97131cd62f9f4f9edf4f7e1697b61261967302ca8425c68527",
     "src/ama/pre-receipt-intent.mjs": "f78c12d791b287307441f121a782ba00e5b52e1e6ef7a1522a51443de8c5f14c",
     "src/follow-up-branch.mjs": "637f2a18c5fb2a89d2d02c98d80587a713a188c10d70891941d77df847579a8d",

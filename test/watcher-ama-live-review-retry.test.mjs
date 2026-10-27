@@ -113,8 +113,10 @@ test('AMA live review reconciliation uses Gemini reviewer authority for native G
     assert.equal(seenReviewStates[0].verdict, 'comment-only');
     assert.equal(result.dispatched, false);
     assert.equal(result.reason, 'daemon-deferred');
-    assert.equal(result.nextAction.action, 'daemon-merge');
-    assert.equal(result.closureOwner.owner, 'daemon-merge');
+    assert.equal(result.nextAction.action, 'wait-for-CI');
+    assert.equal(result.nextAction.reason, 'snapshot-refresh');
+    assert.equal(result.closureOwner.owner, 'wait');
+    assert.equal(result.closureOwner.actor, 'watcher');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -188,8 +190,10 @@ test('AMA live review reconciliation treats opencode as Codex reviewer authority
     assert.equal(seenReviewStates[0].verdict, 'comment-only');
     assert.equal(result.dispatched, false);
     assert.equal(result.reason, 'daemon-deferred');
-    assert.equal(result.nextAction.action, 'daemon-merge');
-    assert.equal(result.closureOwner.owner, 'daemon-merge');
+    assert.equal(result.nextAction.action, 'wait-for-CI');
+    assert.equal(result.nextAction.reason, 'snapshot-refresh');
+    assert.equal(result.closureOwner.owner, 'wait');
+    assert.equal(result.closureOwner.actor, 'watcher');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

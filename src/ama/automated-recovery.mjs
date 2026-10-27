@@ -13,6 +13,8 @@ import { amaRetainLoopCapFor } from '../kernel/convergence-budget.mjs';
 import { reconcileRecoveryLaunches } from './recovery-launch-reconciliation.mjs';
 import { readClosureNextAction } from './closure-next-action.mjs';
 import { deriveNextActionSnapshot, nextAction } from '../pr-next-action.mjs';
+import { readLaunchRequestStatusFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
+import { launchRequestOwned } from './launch-request-status.mjs';
 
 // Physical refusals are explicit evidence, never a reason-string allowlist.
 export function isSafetyRecoveryHold(result) {
@@ -24,6 +26,11 @@ export function isSafetyRecoveryHold(result) {
 async function requestRereview(options) {
   const { requestReviewRereview } = await import('../review-state.mjs');
   return requestReviewRereview(options);
+}
+
+async function dispatchSafetyStopRepair(options) {
+  const { dispatchSafetyStopRepair: dispatch } = await import('./safety-stop-repair.mjs');
+  return dispatch(options);
 }
 
 async function page(text, options) {
@@ -38,6 +45,8 @@ async function recoverAmaAutomationLocked({
   requestRereviewImpl = requestRereview, pageImpl = page,
   logger = console, maxAttempts = amaRetainLoopCapFor(), now = () => Date.now(),
   rereviewDeadlineMs = 30 * 60 * 1000, stuckDeadlineMs = 30 * 60 * 1000, signal = null,
+  dispatchRepairImpl = dispatchSafetyStopRepair, repairOptions = {},
+  readRepairStatusImpl = readLaunchRequestStatusFromLedgerAsync,
 }) {
   const reason = result?.reason || 'unknown';
   const reasons = result?.reasons || result?.daemonCleanMerge?.reasons || [];
@@ -78,10 +87,12 @@ async function recoverAmaAutomationLocked({
   if (result?.reason === 'hammer-stop-awaiting-companion') return waiting('companion');
   const ordinaryWait = value => Boolean(value?.nextAction && (value.nextAction.queue?.intent !== 'dispatch'
     || value.nextAction.queue?.deferredBy));
-  async function exhausted() {
-    const event = state.event || { event: 'ama.automated_recovery.exhausted', severity: 'SEV1',
+  async function exhausted(refusalKey = null, detail = null) {
+    const event = refusalKey ? { event: 'ama.automated_recovery.exhausted', severity: 'SEV1',
+      reason: `safety-refusal:${refusalKey}`, refusalKey, detail, repo, pr: prNumber, head: headSha,
+      attempts: state.attempts, nextAction: selected } : state.event || { event: 'ama.automated_recovery.exhausted', severity: 'SEV1',
       reason, reasons, repo, pr: prNumber, head: headSha, attempts: state.attempts, nextAction: selected };
-    if (!state.event) {
+    if (state.event?.reason !== event.reason) {
       state.event = event;
       save();
       logger.error?.(JSON.stringify(event));
@@ -107,6 +118,56 @@ async function recoverAmaAutomationLocked({
       }
     }
     return { outcome: 'recovery-exhausted', amaClosureResult: result, recovery: state, nextAction: selected };
+  }
+  // R05 delegates code repair, never merge authority. Persist the one-shot
+  // reservation before submission under this head's existing recovery flock.
+  if (selected.row === 'R05-structural' && selected.actor === 'closure-recovery'
+    && selected.reason === 'safety-refusal' && !selected.queue?.deferredBy) {
+    const controls = readClosureNextAction(result)?.snapshot?.observations?.controls?.value;
+    const stop = result.hammerStop;
+    const refusal = stop?.headSha === headSha ? stop.refusal
+      : controls?.safetyRefusal?.headSha === headSha ? controls.safetyRefusal.refusal : null;
+    const refusalKey = refusal?.key || selected.decisionKey || 'unrecorded';
+    if (!/^[a-f0-9]{64}$/.test(refusal?.key || '') || refusal.repairable === false || !String(refusal.next || '').trim()) {
+      return exhausted(refusalKey, 'no-recorded-repair');
+    }
+    state.repairs ||= {};
+    const prior = state.repairs[refusal.key];
+    if (prior) {
+      if (prior.launchRequestId && now() - prior.reservedAt < stuckDeadlineMs) {
+        try {
+          const status = await readRepairStatusImpl({ launchRequestId: prior.launchRequestId,
+            rootDir, includeRetryChain: true, signal, timeoutMs: 5000 });
+          if (launchRequestOwned(status) === true) return waiting('scoped-repair');
+        } catch { /* Unknown ownership cannot authorize another attempt. */ }
+      }
+      return exhausted(refusal.key, prior.reason || 'repair-attempt-exhausted');
+    }
+    if (state.attempts >= maxAttempts) return exhausted(refusal.key, 'recovery-attempt-cap');
+    const dispatchKey = `safety-repair-${key}-${refusal.key}`;
+    state.repairs[refusal.key] = { reservedAt: now(), dispatchKey };
+    charge();
+    try {
+      const receipt = await dispatchRepairImpl({ ...repairOptions, rootDir, repo, prNumber, headSha,
+        refusal, dispatchKey, jobKey: reviewStateRow?.head_sha || reviewStateRow?.revision_ref,
+        signal, logger });
+      if (receipt?.dispatched === false && receipt.deferred === true) {
+        delete state.repairs[refusal.key];
+        state.attempts -= 1;
+        save();
+        return waiting('repair-deferred');
+      }
+      Object.assign(state.repairs[refusal.key], receipt);
+      save();
+      if (receipt?.dispatched === true && receipt.launchRequestId) return waiting('scoped-repair');
+      return exhausted(refusal.key, receipt?.reason || 'repair-dispatch-refused');
+    } catch (error) {
+      state.repairs[refusal.key].reason = String(error.message || error);
+      save();
+      if (signal?.aborted || ['AbortError', 'AmaCoexistenceAbortError'].includes(error?.name)
+        || ['ABORT_ERR', 'AMA_COEXISTENCE_ABORTED', 'AMA_COEXISTENCE_OPERATION_TIMEOUT'].includes(error?.code)) throw error;
+      return exhausted(refusal.key, 'repair-dispatch-failed');
+    }
   }
   const checks = readClosureNextAction(result)?.snapshot?.observations?.checks?.value;
   const failures = checks?.failedChecks || summarizeExternalChecks(checks?.rollup, {
@@ -159,13 +220,13 @@ async function recoverAmaAutomationLocked({
     if (state.event || now() - state.blockedSince >= stuckDeadlineMs) return exhausted();
     return { outcome: 'ama-pending', amaClosureResult, recovery: { ...state, action } };
   }
-  const charge = () => {
+  function charge() {
     state.attempts += 1;
     state.lastReason = reason;
     clearStall();
     save();
-  };
-  const launch = readClosureNextAction(result)?.snapshot.observations.launches?.value?.closer;
+  }
+  const launch = readClosureNextAction(result)?.snapshot?.observations?.launches?.value?.closer;
   if (selected.actor === 'closure-recovery' && launch?.launchRequestId) {
     try { await reclaimLaunch(); }
     catch (error) { logger.warn?.(`[ama-recovery] launch reconciliation failed: ${error.message}`); }

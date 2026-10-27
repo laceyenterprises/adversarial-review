@@ -59,6 +59,7 @@ test('GUARDREVERT-01: packaging after a refusal never dispatches or re-pages acr
     assert.equal(first.skipMergeAgent, true, 'the refusal fence must prevent legacy fallback');
     assert.equal(first.recoveryWait, true);
     assert.equal(first.hammerStop.deterministic, true);
+    assert.equal(first.hammerStop.refusal.repairable, true);
     assert.deepEqual(first.hammerStop.refusal.missingEvidence, missingEvidence);
     assert.equal(holdEvaluations, 1, 'the pre-route fence evaluates the hold once per tick');
     assert.equal(ownershipProbes, 0, 'a held refusal fences ownership probes');

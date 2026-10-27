@@ -28,6 +28,33 @@ function withReversalContext(commit, context) {
   })) };
 }
 
+test('SAFETYSTOPOWNER-01: a later snapshot proves the cited reversal after an intermediate review', async () => {
+  const intermediate = review({ node_id: 'PRR_intermediate', commit_id: sha('8'),
+    body: '## Blocking issues\n- None.\n## Verdict\nComment only' });
+  const snapshot = review({ node_id: 'PRR_snapshot', commit_id: sha('f'),
+    body: '## Blocking issues\n- None.\n## Verdict\nComment only' });
+  const run = async options => snapshotReversal({ reviews: [review(), intermediate, snapshot], ...options,
+    transform: (path, response) => {
+      if (path.endsWith(`${reviewedHead}...${sha('8')}`)) return {
+        status: 'diverged', total_commits: 0, commits: [],
+      };
+      return response;
+    } });
+  const valid = await run();
+  assert.equal(valid.result.ok, true, JSON.stringify(valid.result));
+  assert.equal(valid.evidence.reversalAuthorizations[0].originalAuthorization.commit.parents[0].sha, reviewedHead);
+  assert.equal((await run({ cites: [] })).result.reason, 'primary-change-reverted');
+  const wrongRegion = await run({ reviews: [review({ body: review().body.replace('`10-11`', '`30-31`') }),
+    intermediate, snapshot] });
+  assert.equal(wrongRegion.result.reason, 'primary-change-reverted');
+  // A newer same-head review withdrawing the finding still invalidates it.
+  const withdrawn = await snapshotReversal({ reviews: [review(), review({ node_id: 'PRR_withdrawn',
+    body: '## Blocking issues\n- None.\n## Verdict\nComment only' }), snapshot],
+    transform: (path, response) => path.endsWith(`${reviewedHead}...${reviewedHead}`)
+      ? { status: 'identical', total_commits: 0, commits: [] } : response });
+  assert.equal(withdrawn.result.reason, 'primary-change-reverted');
+});
+
 async function recommittedReversal({ attested = false, original = false,
   transform = (_path, response) => response, ...options } = {}) {
   return snapshotReversal({

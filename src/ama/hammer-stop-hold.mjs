@@ -151,7 +151,8 @@ function deterministicRefusal(attempt, { repo, prNumber, headSha }) {
     ? 'Restore the uncited reverted regions, then push the repaired head.'
     : reasons.includes('stale-review-head') ? 'Revalidate the full range from the last reviewed head under a hammer lease.'
       : `Supply the missing evidence for ${reasons[0]}.`);
-  return { key, reasons, missingEvidence, next };
+  return { key, reasons, missingEvidence, next,
+    repairable: Boolean(String(attempt.next || '').trim()) || reasons.includes('primary-change-reverted') };
 }
 
 function classifiedStopReasons(attempt) {

@@ -54,6 +54,47 @@ recovery and, if one occurs, the no-progress blocker and page receipt. Offline
 fixtures establish scheduling and paging composition, not deployed recovery.
 No live repair, restart or forced page is needed for source acceptance.
 
+## Deterministic refusal repair (SAFETYSTOPOWNER-01)
+
+R05 closure recovery dispatches one scoped coding PR update for an audited
+deterministic refusal with a concrete recorded repair. The worker receives the
+exact missing-evidence summary, protected regions and complete recorded evidence.
+It must prove the expected open head before editing/pushing and preserve the
+primary-change contract. It cannot merge or change gates, labels, leases or
+review state. The existing remediator route and HCP admission execute the update.
+
+The head/refusal reservation survives restarts and ambiguous submissions. It
+spends existing recovery and hammer series/target/lifetime budgets; no override,
+config or manual state migration is needed. A live launch retains ownership for
+the existing bounded recovery wait. Missing repair, failed/unreadable/expired
+attempt, non-deferred dispatch refusal or exhausted caps page through the existing
+closure path with `safety-refusal:<key>`. Failed page delivery retries; successful pages
+deduplicate by head/key. The original hammer hold remains authoritative.
+
+Proven pre-submission deferrals (operator holds, disabled execution, fleet stops,
+occupied/uncertain ownership and transient GitHub inspection errors) remove only
+that refusal reservation and refund its recovery charge under the head flock.
+They spend no hammer budget and do not page. The next ordinary poll rechecks all
+admission gates; no local retry loop is added. Permanent read failures and
+ambiguous HQ submission errors retain the one-shot reservation. Partial closure
+snapshots safely fall back to the exact-head hammer refusal; missing recorded
+repair evidence still fails closed.
+
+GitHub inspection uses the shared metered reader within a 15-second budget.
+The repair executor loads only when recovery selects that path.
+
+The reversal collector checks subsequent immutable review snapshots when the
+first superseding snapshot predates the original remediation commit. It still
+proves the finding was current at that commit's parent and verifies identity,
+changed content and exact region coverage. History identity `reversalprov-v5`
+recomputes old refusals once at an unchanged head.
+
+After normal deployment, the owner can inspect a naturally occurring refusal's
+recovery receipt and scoped PR-update result, or its keyed exhaustion page.
+Offline fixtures establish the contract; no live dispatch, page, state reset,
+restart or additional smoke action is part of this change. The SEV report is
+reserved for the next batched docs PR.
+
 ## Worker pool policy conflicts (ITPPOOLCONFLICT-01)
 
 Worker proposals check membership before pool validation. A builder-only pool

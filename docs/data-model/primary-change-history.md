@@ -20,7 +20,7 @@ Each completed history read is an atomic JSON record named
 | 4 | Live merge-base SHA |
 | 5 | Review-response SHA-256 digest (`reviewKey`), or `null` |
 | 6 | Trusted dispatcher launch head (`launchHead`), or `null` |
-| 7 | History proof cache identity version: `reversalprov-v4` |
+| 7 | History proof cache identity version: `reversalprov-v5` |
 
 The JSON object contains `key` and `history`; there is no schema-version field.
 `history.headSha` is the requested head and `hasHammerCommits` is a boolean.
@@ -81,6 +81,12 @@ existing context budget still bounds a retry. This NXA-01 collection change
 does not change the durable record shape, key or reversal-proof semantics.
 
 Entries in `rejectedReversalAuthorizations` retain their existing `reason` codes.
+SAFETYSTOPOWNER-01 searches subsequent authoritative review snapshots when an
+intermediate snapshot does not contain the original reversal. The cited finding
+must still be authoritative at the original commit's parent, including when that
+parent is the finding's reviewed head. Immutable commit identity, exact changed
+content and cited-region coverage remain required. Version `reversalprov-v5`
+recomputes earlier cached refusals at an unchanged head and review key.
 An `original-reversal-not-proven-before-supersession` entry also carries optional
 `detail`: no candidate with the same commit message, a change-line mismatch with
 the affected paths, or the failed snapshot/provenance/ancestry/parent-patch check.

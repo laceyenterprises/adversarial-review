@@ -14,7 +14,8 @@ const directory = rootDir => join(rootDir, 'data', 'primary-change-history');
 // complete changed-content identities, including previously ambiguous hunks.
 // LAC-2101: recompute historical snapshot refusals made before literal
 // secondary/brace finding paths could cover the original HAM reversal.
-const identity = args => [args.repo, Number(args.prNumber), args.baseSha, args.headSha, args.mergeBase, args.reviewKey || null, args.launchHead || null, 'reversalprov-v4'];
+// SAFETYSTOPOWNER-01: discard refusals based only on the first superseding snapshot.
+const identity = args => [args.repo, Number(args.prNumber), args.baseSha, args.headSha, args.mergeBase, args.reviewKey || null, args.launchHead || null, 'reversalprov-v5'];
 const pathFor = args => join(directory(args.rootDir), `${createHash('sha256').update(JSON.stringify(identity(args))).digest('hex')}.json`);
 
 // Atomic replacement inherits the writer's UID. Never let a worker replace

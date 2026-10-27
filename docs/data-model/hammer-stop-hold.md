@@ -90,6 +90,15 @@ credits too; see [retry-cap accounting](hammer-retry-cap.md#companion-wait-credi
 
 ## Purpose
 
+SAFETYSTOPOWNER-01 adds `refusal.repairable`: true for an explicit nonempty
+audit `next` or the existing primary-change restoration repair. Synthetic
+generic evidence requests remain non-repairable. The full refusal travels in
+both closure snapshot projections. The unchanged hold still fences the hammer;
+R05 closure recovery can spend one scoped PR-update attempt per head/refusal
+key through the [existing recovery owner](ama-automated-recovery.md#budget-and-exhaustion).
+Missing or exhausted repair ownership pages with that key instead of silently
+skipping every wake. Legacy concrete `next` records remain eligible for repair.
+
 After a hammer stops without merging, explicitly deterministic refusals wait
 for an input change. Other stops become eligible for retry after a five-minute backoff,
 subject to ordinary gates and existing per-head, series and lifetime caps. Holds

@@ -486,7 +486,9 @@ test('retryGithubAuthPushOnce retries transient reminted push failures only with
   assert.equal(transientResult.pushed, true);
   assert.equal(transientResult.reason, 'push-succeeded');
   assert.equal(transientResult.attempts, 3);
-  assert.equal(transientCalls.length, 3);
+  assert.equal(transientCalls.filter(call => call.command === 'bash').length, 3);
+  assert.deepEqual(transientCalls.at(-1).args.slice(-4), ['merge-base', '--is-ancestor',
+    '1111111111111111111111111111111111111111', '2222222222222222222222222222222222222222']);
 
   const terminalCalls = [];
   const terminalResult = await retryGithubAuthPushOnce({

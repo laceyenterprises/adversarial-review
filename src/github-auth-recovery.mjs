@@ -1,3 +1,4 @@
+import { recordWorkspaceRewrite } from './branch-rewrite-receipt.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { execFile } from 'node:child_process';
@@ -422,12 +423,19 @@ export GH_TOKEN="$HQ_ENTITLEMENT_GH_TOKEN" GITHUB_TOKEN="$HQ_ENTITLEMENT_GH_TOKE
   const readHead = (expectedHead = null) => readRecoveryPrHead({
     repo, prNumber, execFileImpl, env: pushEnv, retryDelaysMs, sleepImpl, expectedHead,
   });
+  const recordRewrite = () => recordWorkspaceRewrite({ oldHead: expectedHead, newHead: commitSha,
+    branch: targetBranch, actor: 'review-service:auth-recovery', env,
+    // Scoped workflow pushes use PUSH_REMOTE below, not the workspace origin.
+    repository: requiresWorkflowPush ? `github.com/${repo.toLowerCase()}` : null,
+    git: async args => String((await execFileImpl('git', recoveryGitArgs(workspaceDir, args),
+      { ...localGitOptions(), env })).stdout || '').trim() });
+  let rewriteEvidence = {};
   const verifyPublication = async () => {
     let error = null;
     try {
       if (await readHead(commitSha) === commitSha) {
         return { retried: true, pushed: true, reason: 'push-succeeded-remote-confirmed',
-          workflowPush, pendingNativePublication: publicationProof,
+          ...rewriteEvidence, workflowPush, pendingNativePublication: publicationProof,
           nativePublicationReceipt: { ...publicationProof, method: 'git-update-and-live-pr-head',
             observedAt: new Date().toISOString() } };
       }
@@ -463,7 +471,13 @@ export GH_TOKEN="$HQ_ENTITLEMENT_GH_TOKEN" GITHUB_TOKEN="$HQ_ENTITLEMENT_GH_TOKE
       && pendingNativePublication.expectedRemoteSha === expectedHead
       && pendingNativePublication.headSha === commitSha
       && Number.isFinite(Date.parse(pendingNativePublication.observedAt))) {
-      publicationProof = pendingNativePublication;
+      rewriteEvidence = pendingNativePublication.rewriteEvidence ?? await recordRewrite();
+      publicationProof = { ...pendingNativePublication, rewriteEvidence };
+      // Upgrade legacy proof once; verification retries reuse even failed or
+      // empty (fast-forward) receipt evidence without retrying storage.
+      if (pendingNativePublication.rewriteEvidence == null) {
+        await recordNativePublicationImpl(publicationProof, workflowPush);
+      }
       return verifyPublication();
     }
     try {
@@ -543,6 +557,8 @@ export GIT_TERMINAL_PROMPT=0
       if (publicationProof) {
         // Persist the native update before the fallible live-head verification.
         // A later reconcile can finish verification without losing attribution.
+        rewriteEvidence = await recordRewrite();
+        publicationProof = { ...publicationProof, rewriteEvidence };
         await recordNativePublicationImpl(publicationProof, workflowPush);
         return { ...await verifyPublication(), attempts: attemptsMade };
       }
@@ -558,7 +574,7 @@ export GIT_TERMINAL_PROMPT=0
         return { retried: true, pushed: false, reason: 'workflow-push-publication-unproven',
           attempts: attemptsMade, workflowPush };
       }
-      return { retried: true, pushed: true, reason: 'push-succeeded', attempts: attemptsMade };
+      return { retried: true, pushed: true, reason: 'push-succeeded', attempts: attemptsMade, ...await recordRewrite() };
     }
     const err = pushError;
     if (workflowPush) {

@@ -1,3 +1,4 @@
+import { recordWorkspaceRewrite } from '../branch-rewrite-receipt.mjs';
 // Git execution for the v2 finalization port. No API tree publisher, content
 // repair, hook, generated-output regeneration or credential persistence.
 import { spawn, execFileSync } from 'node:child_process';
@@ -33,7 +34,7 @@ export function runQueueGit(args, { cwd, timeoutMs, env = process.env } = {}) {
       const porcelain = Buffer.concat(output).toString('latin1');
       const statuses = porcelain.split('\n').filter(line => /^[ =*+!\-]\t/.test(line));
       if (code !== 0 || failed) reject(Object.assign(error(failed ? 'git-deadline-or-output-limit' : 'git-command-refused'),
-        { publicationRefused: args[0] === 'push' && !failed && statuses.length === 1
+        { code: failed ? null : code, publicationRefused: args[0] === 'push' && !failed && statuses.length === 1
           && /^!\t[^\t\n]+\t\[(?:remote rejected|rejected)\] [^\n]+$/.test(statuses[0]) }));
       // latin1 is a bijection over bytes. UTF-8 replacement would let distinct
       // invalid source bytes compare equal in an otherwise textual Git patch.
@@ -44,7 +45,7 @@ export function runQueueGit(args, { cwd, timeoutMs, env = process.env } = {}) {
 }
 
 export function resolveQueueGitAdapter({ rootDir, run = runQueueGit, networkRunner, resolveRemote = remote,
-  now = () => new Date().toISOString(), load } = {}) {
+  now = () => new Date().toISOString(), load, env = process.env } = {}) {
   const root = realpathSync(rootDir);
   if (statSync(root).uid !== process.getuid?.()) throw error('git-root-owner-mismatch');
   const parent = join(root, 'data', 'finalization-git');
@@ -128,7 +129,10 @@ export function resolveQueueGitAdapter({ rootDir, run = runQueueGit, networkRunn
         await transport(entry.rebase.headRepository, target => ['push', '--porcelain',
           `--force-with-lease=refs/heads/${entry.rebase.headRef}:${intent.expectedOldHead}`,
           '--', target, `${intent.candidate}:refs/heads/${entry.rebase.headRef}`], cwd, intent.deadline, intent.timeoutMs, () => { invoked = true; });
-        return { outcome: 'succeeded', sourceRef: `git:push:${intent.candidate}:refs/heads/${entry.rebase.headRef}` };
+        const receipt = await recordWorkspaceRewrite({ repository: `github.com/${entry.rebase.headRepository.toLowerCase()}`,
+          branch: entry.rebase.headRef, oldHead: intent.expectedOldHead, newHead: intent.candidate,
+          actor: 'review-service:finalization-queue', env, git: git(cwd, intent.deadline, intent.timeoutMs) });
+        return { outcome: 'succeeded', sourceRef: `git:push:${intent.candidate}:refs/heads/${entry.rebase.headRef}`, ...receipt };
       } catch (failure) {
         // Explicit single-ref porcelain refusals prove non-application.
         // Transport/timeout failures remain ambiguous; do not expose diagnostics.

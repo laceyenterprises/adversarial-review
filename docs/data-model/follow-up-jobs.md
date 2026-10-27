@@ -467,10 +467,18 @@ rescue, retry, recordedAt }`. After a scoped native push emits a matching Git
 update transcript, reconcile atomically saves
 `retry.pendingNativePublication` before querying the live PR head. Its shape is
 `{ schemaVersion: 1, source: "native-workflow-publisher", method: "git-update",
-jobId, repo, prNumber, branch, expectedRemoteSha, headSha, observedAt }`.
+jobId, repo, prNumber, branch, expectedRemoteSha, headSha, observedAt,
+rewriteEvidence }`.
 `observedAt` is the original update-evidence timestamp. No subprocess output or
 credential is stored. `retry.workflowPush` retains the proven outgoing paths,
 provider and lease/commit identity.
+
+`rewriteEvidence` retains `{ rewriteReceipt: <path> }`, `{ rewriteReceiptError:
+{ repo, branch, oldHead, newHead, actor, code } }`, or `{}` for a fast forward.
+Reconciliation reuses this result, including storage errors, rather than writing
+another receipt. Legacy proofs without this field record and persist it once
+before resuming live-head verification. A crash before proof persistence can still
+leave duplicate compatible receipts; this is not an exactly-once transaction.
 
 Live head reads retry transient subprocess errors with 250/750 ms backoff;
 post-push verification also retries a stale head. Exhausted transient or stale

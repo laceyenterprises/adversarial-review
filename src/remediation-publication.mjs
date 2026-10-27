@@ -1,3 +1,4 @@
+import { recordWorkspaceRewrite } from './branch-rewrite-receipt.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // REMLABEL-01: the remediation publisher owns the final diff check and push.
 import { execFile } from 'node:child_process';
@@ -68,5 +69,7 @@ export async function publishRemediation({ workspaceDir = process.cwd(), baseBra
   await execFileImpl(pushCommand ?? defaultPushCommand(env), ['-C', workspaceDir, 'push',
     `--force-with-lease=refs/heads/${branch}:${expectedRemoteSha}`, 'origin', `${candidate}:refs/heads/${branch}`],
   { env, timeout: loadAwareTimeoutMs(120_000), maxBuffer: 4 * 1024 * 1024 });
-  return { published: true, headSha: candidate, previousHead };
+  const receipt = await recordWorkspaceRewrite({ git, branch,
+    oldHead: expectedRemoteSha, newHead: candidate, actor: 'review-service:remediation', env });
+  return { published: true, headSha: candidate, previousHead, ...receipt };
 }

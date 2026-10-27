@@ -45,6 +45,7 @@ function fixture(t, { paths = '.github/workflows/repair.yml\0', remote, headBefo
         if (failDiff) throw new Error('missing commit object');
         return { stdout: paths };
       }
+      if (command === 'git' && argv.includes('merge-base')) return { stdout: '' };
       if (command === 'gh') {
         const read = headReads.length ? headReads.shift() : observedHead;
         if (read instanceof Error) throw read;
@@ -82,6 +83,32 @@ test('WFDRIFT-01: an explicit late workflow denial is a bounded recovery candida
     'revoked entitlement and missing workflows permission']) {
     assert.equal(classifyGithubAuthOperationalBlocker({ category: 'github-auth', detail: reason }).kind, 'terminal');
   }
+});
+
+test('HOLDERPROOF-01: workflow receipt follows explicit push destination despite a fork origin', async t => {
+  const { args, calls, env } = fixture(t);
+  env.HQ_ROOT = env.HQ_REPO_ROOT;
+  const execute = args.execFileImpl;
+  args.execFileImpl = async (command, argv, options) => {
+    if (command === 'git' && argv.includes('merge-base')) {
+      throw Object.assign(new Error('not ancestor'), { code: 1 });
+    }
+    if (command === 'git' && argv.includes('remote')) {
+      return { stdout: 'git@github.com:contributor/repo.git\n' };
+    }
+    return execute(command, argv, options);
+  };
+  const result = await retryGithubAuthPushOnce(args);
+  assert.equal(result.pushed, true);
+  const push = calls.find(call => call.type === 'bash');
+  assert.equal(push.env.PUSH_REMOTE, 'https://github.com/example/repo.git');
+  assert.match(push.argv[1], /"\$PUSH_REMOTE" "\$COMMIT_SHA:refs\/heads\/\$TARGET_BRANCH"/);
+  const row = JSON.parse(readFileSync(result.rewriteReceipt, 'utf8'));
+  assert.equal(row.repo, 'github.com/example/repo');
+  assert.equal(row.oldHead, oldHead);
+  assert.equal(row.newHead, fixedHead);
+  assert.equal(existsSync(join(env.HQ_ROOT, 'dispatch/branch-rewrites/github.com%2Fcontributor%2Frepo')), false);
+  t.diagnostic(`push=${push.env.PUSH_REMOTE}; receipt.repo=${row.repo}; fork receipt absent`);
 });
 
 test('WFDRIFT-01: preflight retries transient head reads with bounded backoff', async (t) => {
@@ -148,6 +175,39 @@ test('WFDRIFT-01: exhausted verification resumes from retained proof without ano
     assert.equal(resumed.nativePublicationReceipt.headSha, fixedHead);
     assert.equal(calls.filter((call) => call.type === 'bash').length, 1);
   }
+});
+
+for (const kind of ['rewrite', 'forward', 'storage-error', 'legacy']) test(`HOLDERPROOF-01: reconciliation reuses receipt evidence: ${kind}`, async t => {
+  const { args, calls, env } = fixture(t, { headReads: kind === 'legacy' ? [oldHead, fixedHead] : [oldHead, oldHead, oldHead, fixedHead] });
+  env.HQ_ROOT = env.HQ_REPO_ROOT;
+  if (kind === 'storage-error') writeFileSync(join(env.HQ_ROOT, 'dispatch'), 'blocked');
+  const execute = args.execFileImpl;
+  let ancestryReads = 0, recorded = null;
+  args.execFileImpl = async (command, argv, options) => {
+    if (command === 'git' && argv.includes('merge-base')) {
+      ancestryReads++;
+      if (kind === 'forward') return { stdout: '' };
+      throw Object.assign(new Error('not ancestor'), { code: 1 });
+    }
+    return execute(command, argv, options);
+  };
+  args.recordNativePublicationImpl = proof => { recorded = JSON.parse(JSON.stringify(proof)); };
+  const initial = kind === 'legacy' ? { pendingNativePublication: {
+    schemaVersion: 1, source: 'native-workflow-publisher', method: 'git-update', jobId: args.jobId,
+    repo: args.repo, prNumber: args.prNumber, branch: args.branch, expectedRemoteSha: oldHead,
+    headSha: fixedHead, observedAt: new Date().toISOString(),
+  } } : await retryGithubAuthPushOnce(args);
+  const pending = initial.pendingNativePublication;
+  const unconfirmed = await retryGithubAuthPushOnce({ ...args, pendingNativePublication: JSON.parse(JSON.stringify(pending)) });
+  assert.equal(unconfirmed.pushed, false);
+  const resumed = await retryGithubAuthPushOnce({ ...args, pendingNativePublication: JSON.parse(JSON.stringify(recorded)) });
+  assert.equal(resumed.pushed, true);
+  assert.equal(ancestryReads, 1);
+  assert.equal(calls.filter(call => call.type === 'bash').length, kind === 'legacy' ? 0 : 1);
+  assert.deepEqual(resumed.pendingNativePublication.rewriteEvidence, recorded.rewriteEvidence);
+  if (kind === 'storage-error') assert.equal(resumed.rewriteReceiptError.repo, 'github.com/example/repo');
+  else if (kind === 'forward') assert.deepEqual(recorded.rewriteEvidence, {});
+  else assert.equal(resumed.rewriteReceipt, recorded.rewriteEvidence.rewriteReceipt);
 });
 
 test('WFDRIFT-01: permanent verification errors and expired holds retain proof without active retries', async (t) => {
@@ -229,6 +289,9 @@ test('WFDRIFT-01: daemon persists update proof and resumes verification on the n
   const job = { ...spawned.job, branch: args.branch, revisionRef: oldHead };
   writeFileSync(claimed.jobPath, JSON.stringify(job));
   const testEnv = { HQ_REPO_ROOT: rootDir, HQ_ROOT: join(rootDir, 'hq'),
+    // The fixture may live under the real deployment's owned TMPDIR. Its fake
+    // deployment must stay separate from the fixture's mutable workspace.
+    AGENT_OS_DEPLOY_CHECKOUT: join(rootDir, 'deploy'),
     OAUTH_BROKER_SHARED_SECRET_FILE: secretPath,
     ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT: 'true' };
   const previousEnv = Object.fromEntries(Object.keys(testEnv).map((key) => [key, process.env[key]]));
@@ -332,6 +395,10 @@ test('WFDRIFT-01: ordinary auth recovery preserves the physical entitlement', as
   args.env.WORKFLOW_PUSH_SCOPED = '1';
   args.execFileImpl = async (command, argv, options) => {
     calls.push({ type: command });
+    if (command === 'git') {
+      assert.deepEqual(argv.slice(-4), ['merge-base', '--is-ancestor', oldHead, fixedHead]);
+      return { stdout: '' };
+    }
     assert.equal(command, 'bash');
     assert.equal(options.env.WORKER_CLASS, 'codex');
     assert.equal(options.env.WORKFLOW_PUSH_SCOPED, '0');
@@ -340,7 +407,9 @@ test('WFDRIFT-01: ordinary auth recovery preserves the physical entitlement', as
   };
   const result = await retryGithubAuthPushOnce(args);
   assert.equal(result.pushed, true);
-  assert.equal(calls.length, 1);
+  assert.equal(calls.filter(call => call.type === 'bash').length, 1);
+  assert.equal(calls.filter(call => call.type === 'git').length, 1);
+  assert.equal(calls.length, 2);
 });
 
 test('WFDRIFT-01: native Git history retains an intermediate workflow edit reverted at the tip', async (t) => {
@@ -408,7 +477,8 @@ test('WFDRIFT-01: native ownership guard is scoped to the workspace across prese
   assert.equal(recovered.pushed, true);
   assert.deepEqual(recovered.workflowPush.paths, ['.github/workflows/repair.yml'],
     'replacement refs cannot hide actual outgoing workflow history');
-  assert.equal(rawCalls.length, 8, 'cat-file, two update-ref, two bundle, log and two rev-parse siblings');
+  assert.equal(rawCalls.length, 9, 'cat-file, two update-ref, two bundle, log, two rev-parse and receipt ancestry');
+  assert.ok(rawCalls.some(argv => argv.includes('merge-base') && argv.includes('--is-ancestor')));
   for (const argv of rawCalls) {
     assert.ok(argv.includes('--no-replace-objects'));
     assert.ok(argv.includes('safe.directory=' + resolve(repo)));

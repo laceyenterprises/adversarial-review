@@ -128,8 +128,10 @@ test('expired spawn token is replaced before recovery push and missing branch co
   });
   assert.equal(result.pushed, true);
   assert.equal(calls[0].command, 'git');
-  assert.ok(calls.at(-1).args[1].includes('--force-with-lease='));
-  assert.ok(!calls.at(-1).args[1].includes('merge-base'));
+  const pushes = calls.filter(call => call.command === 'bash');
+  assert.equal(pushes.length, 1);
+  assert.ok(pushes[0].args[1].includes('--force-with-lease='));
+  assert.deepEqual(calls.at(-1).args.slice(-4), ['merge-base', '--is-ancestor', 'b'.repeat(40), 'a'.repeat(40)]);
   assert.deepEqual(calls[0].args.slice(-3), ['rev-parse', '--abbrev-ref', 'HEAD']);
 });
 

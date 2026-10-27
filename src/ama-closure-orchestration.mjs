@@ -18,7 +18,7 @@ import { createHistoryReader } from './ama/history-reader.mjs';
 import { hammerDispatchMismatch, bindClosureNextAction, readClosureNextAction, observeClosureOwnership, closureOwnerFromDecision, hasHammerDispatchIntent, observeClosureResult, observeDaemonGate as reviseDaemonGate, observeDaemonResult, revalidateClosurePr, resolveClosureNextAction, reviseClosureNextAction } from './ama/closure-next-action.mjs';
 import { probeOrphanOwnership } from './ama/orphan-watchdog.mjs';
 import { observeClosureWait } from './ama/closure-wait.mjs';
-import { observeClosureRefreshLoop } from './ama/closure-refresh-loop.mjs';
+import { observeClosureDecisionMismatch, observeClosureRefreshLoop } from './ama/closure-refresh-loop.mjs';
 import { closureOwnerShadowEvidence, shadowNextActionLater } from './pr-next-action-consumer.mjs';
 import { hostname } from 'node:os';
 import { OPERATOR_HOLD_LABELS } from './operator-hold-labels.mjs';
@@ -796,6 +796,11 @@ async function maybeDispatchAmaClosureForInner({
       return (maybeDispatchAmaCloserImpl || maybeDispatchAmaCloser)(...args);
     }, closerAuthoredStaleSink, ownerProofFactsSink, closureOwnerSink, finalRoundSink, hammerWakeSink };
   let result = await dispatchAmaClosureFor(dispatchArgs);
+  const observeMismatch = result => observeClosureDecisionMismatch({ rootDir: options.rootDir || ROOT,
+    repo: options.repoPath, prNumber: options.prNumber, result,
+    now: options.now ? options.now() : Date.now(), env: options.env || process.env,
+    observeWaitImpl: options.observeClosureWaitImpl || observeClosureWait });
+  result = await observeMismatch(result);
   if (result?.reason === 'closure-decision-mismatch' && result.nextActionShared) {
     const mismatch = result.decisionMismatch;
     // Exactly one successor selection uses the executor's complete snapshot,
@@ -809,6 +814,7 @@ async function maybeDispatchAmaClosureForInner({
       result = { ...result, reason: resolved.decision.reason, nextAction: resolved.decision, nextActionShared: resolved,
         retryAfterMs: 30_000 };
     }
+    result = await observeMismatch(result);
     result = { ...result, mismatchReason: 'closure-decision-mismatch',
       decisionMismatch: mismatch, decisionReresolutions: 1 };
   }

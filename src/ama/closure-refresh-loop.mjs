@@ -7,6 +7,37 @@ import { closureGateFactsKey } from './closure-gate-facts.mjs';
 
 export const CLOSURE_REFRESH_CYCLE_LIMIT = 3;
 
+// Count consumed disagreements, including a second disagreement during the
+// one allowed successor attempt. Submissions and changed decision keys cannot
+// erase same-head debt. This is diagnostic evidence, never dispatch authority.
+export async function observeClosureDecisionMismatch({ rootDir, repo, prNumber, result,
+  now = Date.now(), env = process.env, observeWaitImpl = observeClosureWait }) {
+  const shared = result?.nextActionShared;
+  const headSha = shared?.decision?.head;
+  if (result?.reason !== 'closure-decision-mismatch' || !headSha
+    || shared.snapshot.head !== headSha || shared.snapshot.subjectKey !== `${repo}#${prNumber}`) return result;
+  const dir = join(rootDir, 'data', 'ama-closure-waits');
+  mkdirSync(dir, { recursive: true });
+  const key = createHash('sha256').update(`${repo}#${prNumber}`).digest('hex');
+  const db = new Database(join(dir, `${key}.db`));
+  let cycles;
+  try {
+    db.exec('CREATE TABLE IF NOT EXISTS decision_mismatch_cycle (id INTEGER PRIMARY KEY CHECK(id=1), head TEXT NOT NULL, cycles INTEGER NOT NULL)');
+    cycles = db.transaction(() => {
+      const previous = db.prepare('SELECT * FROM decision_mismatch_cycle WHERE id=1').get();
+      const count = previous?.head === headSha ? Math.min(2, previous.cycles + 1) : 1;
+      db.prepare('INSERT OR REPLACE INTO decision_mismatch_cycle(id,head,cycles) VALUES (1,?,?)').run(headSha, count);
+      return count;
+    }).immediate();
+  } finally { db.close(); }
+  if (cycles < 2) return result;
+  const closureBlocker = `closure-decision-mismatch-no-progress: head=${headSha} cycles=${cycles}`;
+  const boundedWait = await observeWaitImpl({ rootDir, repo, prNumber, headSha, env, now,
+    reason: closureBlocker, immediate: true, waitClass: 'closure-decision-mismatch' });
+  return { ...result, reason: 'closure-decision-mismatch-escalated', closureBlocker, boundedWait,
+    needsOperator: true, skipMergeAgent: true, recoveryWait: true };
+}
+
 // Count settled refresh outcomes, never queue submissions or re-observations of
 // in-flight work. This diagnostic evidence grants no merge/dispatch authority.
 export async function observeClosureRefreshLoop({ rootDir, repo, prNumber, shared, result,

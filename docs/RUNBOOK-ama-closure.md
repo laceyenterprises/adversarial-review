@@ -34,10 +34,13 @@ a different decision key, admission returns `closure-decision-mismatch` with
 and the complete replacement snapshot. It never reports this disagreement as a
 bare `snapshot-refresh`. Closure re-resolves that same snapshot once and reports
 `decisionReresolutions: 1`; waits keep the fresh owner and a daemon successor
-enters the ordinary live exact-head merge path. A second disagreement returns to
-the caller without another in-pass retry.
+enters the ordinary live exact-head merge path. PRIMARYREPAIRDISPATCH-01 counts
+consumed disagreements durably per PR/head. A second disagreement at that head,
+including during the successor attempt or on a later background tick, pages
+immediately through the existing closure-wait path and returns
+`closure-decision-mismatch-escalated`. It does not start another successor attempt.
 
-After primary-change validation passes, a changed hammer decision is reported
+After primary-change validation or selected R05 repair admission, a changed hammer decision is reported
 before repair-admission refusal. Structural admission refusals remain in the
 replacement snapshot and cannot authorize daemon merge; zero findings alone do
 not refuse repair admission. Non-dispatch successors return the refreshed
@@ -51,9 +54,14 @@ The shared predicate evaluates preservation or no-hammer history, and its raw
 evidence accompanies dispatcher eligibility. A dispatcher lacking that evidence
 refreshes an inherited failure instead of defaulting it to not-applicable. A
 passing predicate supersedes its associated primary-change-only daemon decline;
-unrelated or permanent refusals remain. A real unauthorized reversal still
-refuses. R15's other predicates, operator holds, dispatch caps and leases remain
-authoritative.
+unrelated or permanent refusals remain. When the selected and refreshed decisions
+both name R05 `primary-change-repair` for the exact subject/head, hammer dispatch
+uses existing repair admission: comment-only verdicts, non-blocking findings and
+`primary-change-reverted`/`primary-change-unknown` are repair input. The hammer
+must restore author lines or produce a finding-cited reversal under the unchanged
+authorization contract. Unreadable history retains recovery ownership. A real
+unauthorized reversal still refuses merge. R15's other predicates, operator
+holds, structural safety, dispatch caps and leases remain authoritative.
 
 After normal deployment, the runtime owner can observe natural clean-head closure
 and any named mismatches read-only. Synthetic fixtures prove source behavior;
@@ -3687,9 +3695,11 @@ Neither finding-anchored reversal nor dispute raises `hq decision raise`.
 Disputes no longer spend the review cap, page, or emit
 `ama_finding_dispute_exhausted`; the `requests`, `refusals` and `paged` columns
 remain for legacy rows.
-Preservation refusals retain the merge hold as
-`primary-change-repair-required` with `needsOperator: true` until the REMORPHAN-01
-watchdog admits a repair worker. Refusal observations alone no longer page.
+Preservation refusals retain the merge hold. The shared R05
+`primary-change-repair` decision admits the hammer through repair eligibility;
+callers without that selected intent retain `primary-change-repair-required`
+with `needsOperator: true` for existing recovery. Refusal observations alone do
+not page.
 The dispute page guard persists across restarts. Read outages remain `gate-read-failed`
 and retry normal ticks after transport/auth recovery. Recovery-store or pager
 failures are logged and always retain `skipMergeAgent: true`.

@@ -751,7 +751,9 @@ for (const outcome of ['preserved', 'clean-preserved', 'admission-refused', 'rev
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     const inputs = eligibleInputs(rootDir);
     const preserved = ['preserved', 'clean-preserved', 'admission-refused'].includes(outcome);
+    const repair = ['reverted', 'unknown'].includes(outcome);
     if (outcome !== 'preserved') inputs.reviewState.reviewCycleExhausted = false;
+    if (repair) inputs.reviewState.nonBlockingFindingCount = 1;
     if (outcome === 'admission-refused') inputs.cfg.eligibility.riskClasses = [];
     inputs.prMetadata.statusCheckRollup = [{ name: 'test', conclusion: 'SUCCESS' },
       { name: 'agent-os/adversarial-gate', conclusion: 'SUCCESS' }];
@@ -772,13 +774,35 @@ for (const outcome of ['preserved', 'clean-preserved', 'admission-refused', 'rev
         : { headSha, ...(outcome === 'read-failed' ? { readFailed: true } : {}) };
     const result = await maybeDispatchAmaCloser({ ...inputs, sharedNextAction: shared,
       fetchPrimaryChangeImpl: async args => { reads++; assert.equal(args.headSha, headSha); return evidence; },
-      execFileImpl: async () => assert.fail('no dispatch or merge on this admission result'),
-      readTemplateImpl: () => assert.fail('mismatch/refusal precedes prompt construction'),
+      resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
+      writeFileImpl: () => {},
+      execFileImpl: async (_cmd, args) => {
+        assert.equal(repair, true, 'only selected R05 repair reaches dispatch');
+        if (args[0] === 'fleet') return { stdout: JSON.stringify(codexAccountFixture()) };
+        assert.equal(args[0], 'dispatch');
+        assert.equal(args[args.indexOf('--worker-class') + 1], 'hammer');
+        // Synthetic downstream refusal proves dispatch admission, without a
+        // live launch or bypassing the closer's real lease/cap path.
+        throw Object.assign(new Error('synthetic drain'), { code: 6,
+          stderr: '[hq] dispatch refused: drain in effect (epoch=fixture)' });
+      },
+      readTemplateImpl: () => {
+        assert.equal(repair, true, 'mismatch/refusal precedes prompt construction');
+        return readFileSync(HAMMER_TEMPLATE_PATH, 'utf8');
+      },
     });
     assert.equal(reads, 1);
     assert.equal(result.dispatched, false);
     assert.equal(result.reason, preserved ? 'closure-decision-mismatch'
-      : outcome === 'read-failed' ? 'gate-read-failed' : 'primary-change-repair-required');
+      : outcome === 'read-failed' ? 'gate-read-failed' : 'deferred-by-drain');
+    if (repair) {
+      assert.equal(result.drainEpoch, 'fixture');
+      assert.equal(inputs.reviewState.verdict, 'comment-only');
+      assert.equal(inputs.reviewState.reviewCycleExhausted, false);
+      const record = readAmaCloserDispatchRecord(rootDir,
+        { repo: inputs.dispatchContext.repo, prNumber: 1234, headSha });
+      assert.equal(record.state, 'deferred-by-drain');
+    }
     if (preserved) {
       if (outcome === 'admission-refused') {
         assert.equal(result.nextActionShared.snapshot.observations.controls.value.safetyRefusal.reason,

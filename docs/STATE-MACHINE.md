@@ -849,7 +849,7 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
-CLOSURESPLIT-01: closure and background hammer dispatch carry the selected immutable next-action pair, including the decision key, generation and head-scoped primary-change result. A changed decision key returns closure-decision-mismatch with both keys/generations and the complete replacement snapshot. Closure re-resolves that snapshot once; a daemon successor enters the existing live merge gates, while waits retain the refreshed owner. Inherited primary-change failures are recomputed at the current head and their raw evidence is passed into dispatcher eligibility; absent raw evidence cannot default an observed refusal to not-applicable. A passing predicate supersedes only the associated primary-change decline. Real unauthorized reversals, unrelated/permanent declines, R15 conditions, retry caps and leases retain their protections. No persistent schema or lifecycle state changes. Changed hammer decisions are reported before repair-admission refusal after primary validation passes; structural safety refusals remain in the replacement snapshot. Non-dispatch successors return the refreshed nextAction, reason and snapshot together, and primary refresh preserves unrelated progress metadata.
+CLOSURESPLIT-01: closure and background hammer dispatch carry the selected immutable next-action pair, including the decision key, generation and head-scoped primary-change result. A changed decision key returns closure-decision-mismatch with both keys/generations and the complete replacement snapshot. Closure re-resolves that snapshot once; a daemon successor enters the existing live merge gates, while waits retain the refreshed owner. PRIMARYREPAIRDISPATCH-01 durably counts consumed mismatches per PR/head; the second mismatch, including during that successor attempt or on a later background tick, pages through closure-wait and returns closure-decision-mismatch-escalated without another successor attempt. Inherited primary-change failures are recomputed at the current head and their raw evidence is passed into dispatcher eligibility; absent raw evidence cannot default an observed refusal to not-applicable. A passing predicate supersedes only the associated primary-change decline. When both selected and refreshed exact-subject/head decisions name R05 primary-change-repair, dispatch uses existing repair admission: comment-only verdicts, non-blocking findings and reverted/unknown primary change admit the hammer to restore author lines or perform a finding-cited authorized reversal. Unauthorized reversals still refuse merge; unrelated/permanent declines, R15 conditions, structural safety, retry caps and leases retain their protections. The additive decision_mismatch_cycle table in the closure-wait database records head and a count capped at two; lifecycle states are unchanged. Changed hammer decisions are reported before repair-admission refusal after primary validation passes; structural safety refusals remain in the replacement snapshot. Non-dispatch successors return the refreshed nextAction, reason and snapshot together, and primary refresh preserves unrelated progress metadata.
 
 CLOSERREFRESHLOOP-01: explicit transient daemon declines can return to the
 existing R15 daemon row at the same head after changed gate evidence supersedes
@@ -1688,9 +1688,11 @@ Key control points:
   daemon state and the configured pager sink. Only the latest authoritative
   review in live-head ancestry may be disputed.
   Neither reversal authorization nor dispute raises `hq decision raise`. Proven reversal
-  refusals hold merge with `needsOperator: true`; an attributable current-head
+  refusals hold merge. Selected R05 `primary-change-repair` admits hammer repair
+  under the unchanged authorization and merge predicates. Callers without that
+  selected intent retain `needsOperator: true`; an attributable current-head
   `merge-agent-requested` event can dispatch the existing operator recovery lane.
-  The closer returns `primary-change-repair-required`; the daemon returns
+  Without selected repair intent, the closer returns `primary-change-repair-required`; the daemon returns
   `primary-change-needs-operator` before the closer. OWNERPROOF-01 admits repair
   after 15 minutes without proven ownership (`OWNERPROOF_IDLE_MINUTES` overrides
   the bound), with a PR-wide clock that survives head changes. Refused or thrown

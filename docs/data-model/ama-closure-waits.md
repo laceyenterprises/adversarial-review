@@ -132,3 +132,21 @@ reservation and delivery-refund rules apply. A missing stored decline is named
 `unknown`. Failed page delivery retains the saturated count for retry. Resetting
 the counter never resets a successful page receipt. The table measures a loop;
 it grants no authority and changes no lease or retry budget.
+
+### Closure decision mismatches (PRIMARYREPAIRDISPATCH-01)
+
+The same database initializes `decision_mismatch_cycle` with one row:
+`id INTEGER PRIMARY KEY CHECK(id=1)`, `head TEXT NOT NULL`, and
+`cycles INTEGER NOT NULL`. Each consumed `closure-decision-mismatch` increments
+the count, capped at two. A different head replaces it with count one. Decision
+key changes, queue submissions and process restarts retain same-head debt.
+There is no completion reset or migration of older observations.
+
+The first mismatch permits one successor resolution from the complete replacement
+snapshot. The second, whether in that attempt or a later background tick, returns
+`closure-decision-mismatch-escalated`, `needsOperator: true`, and
+`closureBlocker: closure-decision-mismatch-no-progress: head=<head> cycles=2`.
+It pages immediately using the `closure-decision-mismatch` wait class and the
+existing per-PR/head reservation. Failed delivery leaves the saturated count
+and refunds the page receipt for retry. This counter grants no merge or dispatch
+authority and leaves caps and leases unchanged. Synthetic tests inject paging.

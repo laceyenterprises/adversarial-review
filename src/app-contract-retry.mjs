@@ -5,7 +5,8 @@ const TRANSIENT_APP_CONTRACT_CODES = new Set([
   'launch_refused_memory_pressure', 'launch-refused-memory-pressure',
   'lease_lost', 'lease-lost', 'memory_pressure', 'memory-pressure',
   'service_unavailable', 'service-unavailable',
-  'dispatch_read_unavailable', 'read_capacity_exhausted',
+  'dispatch_read_unavailable', 'dispatch-read-unavailable',
+  'read_capacity_exhausted', 'read-capacity-exhausted',
   'supervisor_restart', 'supervisor-restart',
 ]);
 

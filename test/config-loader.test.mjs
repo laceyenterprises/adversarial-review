@@ -30,6 +30,62 @@ import {
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const MODULE_CONFIG_PATH = join(REPO_ROOT, 'config.yaml');
 
+test('worker observations host key defaults off independently of the runtime env gate', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'worker-observations-config-'));
+  try {
+    const topPath = join(dir, 'config.yaml');
+    for (const doc of [{ version: 1 }, { version: 1, adversarial: {} }]) {
+      writeFileSync(topPath, JSON.stringify(doc));
+      for (const loader of [loadConfig, loadConfigRuntime]) {
+        const env = { ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED: '1' };
+        assert.equal(loader({ topPath, env }).get('adversarial.worker_observations_enabled'), false);
+        assert.deepEqual(env, { ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED: '1' });
+      }
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('worker observations host key accepts booleans in top-level and local config', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'worker-observations-config-'));
+  try {
+    const topPath = join(dir, 'config.yaml');
+    const localPath = join(dir, 'config.local.yaml');
+    for (const value of [true, false]) {
+      for (const target of [topPath, localPath]) {
+        writeFileSync(topPath, 'version: 1\n');
+        rmSync(localPath, { force: true });
+        writeFileSync(target, `version: 1\nadversarial:\n  worker_observations_enabled: ${value}\n`);
+        for (const loader of [loadConfig, loadConfigRuntime]) {
+          const env = { ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED: '0' };
+          const cfg = loader({ topPath, env });
+          assert.equal(cfg.get('adversarial.worker_observations_enabled'), value);
+          assert.deepEqual(env, { ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED: '0' });
+        }
+      }
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('worker observations host key rejects non-booleans in top-level and local config', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'worker-observations-config-'));
+  try {
+    const topPath = join(dir, 'config.yaml');
+    const localPath = join(dir, 'config.local.yaml');
+    for (const value of ['true', 1, null, [], {}]) {
+      for (const target of [topPath, localPath]) {
+        writeFileSync(topPath, 'version: 1\n');
+        rmSync(localPath, { force: true });
+        writeFileSync(target, JSON.stringify({ version: 1, adversarial: { worker_observations_enabled: value } }));
+        for (const loader of [loadConfig, loadConfigRuntime]) {
+          assert.throws(() => loader({ topPath, env: {} }), {
+            name: 'AgentOSConfigError', key: 'adversarial.worker_observations_enabled',
+          });
+        }
+      }
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('local example keeps load-aware policy inside the shared adversarial reviewer extension', () => {
   const dir = mkdtempSync(join(tmpdir(), 'load-aware-example-'));
   try {

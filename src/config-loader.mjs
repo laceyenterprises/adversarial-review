@@ -3594,6 +3594,8 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          // Agent OS projects this host setting into the runtime env gate.
+          worker_observations_enabled: { __type: TYPE_BOOL, __default: false },
           reviewer_pool: {
             __type: TYPE_DICT,
             __strict: true,

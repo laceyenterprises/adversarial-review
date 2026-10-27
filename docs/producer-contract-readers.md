@@ -478,12 +478,16 @@ The 0.9.0 artifact is byte-identical to merged producer revision
 The fixture records the exact SHA-256/SHA-512 integrity and `releaseStatus: merged`.
 The producer is merged/deployed; artifact verification does not establish app grants.
 
-`ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED=1` is a separate, default-off, env-only
-rollout gate for worker/process/session/provenance reads. It is absent from service
-templates. `ADVERSARIAL_DISPATCH_READS_ENABLED=1` remains the independent DOG-09
+`ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED=1` is a separate, default-off runtime
+gate for worker/process/session/provenance reads. A host can set the boolean
+`adversarial.worker_observations_enabled: true` in its config; Agent OS renders
+the env flag into the watcher, follow-up worker and dispatch daemon that launches
+the closers. The config key defaults to `false`. This Node loader accepts the
+host key without setting the runtime env flag itself. Env-only enabling still
+works by supplying `ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED=1` directly.
+`ADVERSARIAL_DISPATCH_READS_ENABLED=1` remains the independent DOG-09
 own-launch HCP gate, already enabled in tracked templates. Do not roll it back to
-stage DOG-10. No shared YAML key, loader-schema change or live flag change is part
-of this work. Runtime owner verifies the deployed producer revision, SDK bytes,
+stage DOG-10. Runtime owner verifies the deployed producer revision, SDK bytes,
 project AND repository grants and organic reads before a reviewed observation
 flag activation. Missing support/grants preserve title review intake but cannot
 supply daemon merge identity. With observations disabled, existing positive head

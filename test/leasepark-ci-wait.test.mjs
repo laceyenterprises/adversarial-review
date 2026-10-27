@@ -16,6 +16,7 @@ const verify = readFileSync(join(rootDir, 'bin/hammer-verify-head.sh'), 'utf8');
 const head = 'a'.repeat(40);
 const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
 const render = source => source.replaceAll('<<ROOT_DIR>>', quote(rootDir))
+  .replaceAll('<<TARGET_REMEDIATION_SHA>>', head)
   .replaceAll('<<PR_URL>>', 'fixture-url').replaceAll('<<REPO>>', 'fixture/repo').replaceAll('<<PR_NUMBER>>', '7702')
   .replaceAll('<<HQ_ROOT>>', '$TEST_ROOT').replaceAll('<<REVIEWER>>', 'claude').replaceAll('<<RISK_CLASS>>', 'critical')
   .replaceAll('<<RUN_DIR>>', '$TEST_ROOT');

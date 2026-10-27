@@ -121,6 +121,9 @@ import {
   AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS,
   AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS,
   AMA_CLOSER_LEASE_STATUS,
+  AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES,
+  AMA_CLOSER_RETRYABLE_DEFERRAL_REASONS,
+  retryableAmaCloserDeferralOutcome,
   amaCloserPendingLeaseExpiryMs,
   isAmaCloserPidAlive as isPidAlive,
   isReclaimablePendingAmaCloserLease,
@@ -1495,10 +1498,13 @@ function* reconcileAmaCloserLeaseSteps({
     // evidence is unreadable or still inside the success-settlement grace.
     // The shared writer runs terminal scratch cleanup without releasing leases.
     if (record && !recordTerminalCloserLaunch(rootDir, dispatchIdentity, launchRequestId, status, now, cleanupScratchImpl)) return false;
-    const auditOutcome = readAmaAuditTerminalOutcome(hqRoot || rootDir, identity)
+    const deferral = [identity, dispatchIdentity].map(key =>
+      readAmaAuditEntry(hqRoot || rootDir, key.repo, key.prNumber, key.headSha)?.attempts?.at(-1))
+      .find(attempt => attempt?.launchRequestId === launchRequestId && retryableAmaCloserDeferralOutcome(attempt));
+    const auditOutcome = retryableAmaCloserDeferralOutcome(deferral) || readAmaAuditTerminalOutcome(hqRoot || rootDir, identity)
       || readAmaAuditTerminalOutcome(hqRoot || rootDir, dispatchIdentity);
     // A merged completion proves success only for this lease head.
-    const mergedSignal = yield readMergedSignalImpl({
+    const mergedSignal = deferral ? null : yield readMergedSignalImpl({
       ...identity, hqRoot, rootDir, ledgerTarget, ledgerDbPath, env, signal, logger,
       readBuildCompletionSignalForPrImpl, readBuildCompletionProducerEvidenceImpl,
     });
@@ -1629,9 +1635,12 @@ export function finalizeAmaCloserLeaseBestEffort({
         return deleteAmaCloserLeaseIfCurrent(rootDir, exact);
       }
     }
+    const expectedLease = readAmaCloserLease(rootDir, leaseIdentity);
+    if (launchRequestId && expectedLease?.lrqId !== launchRequestId) return false;
     updateAmaCloserLease({
       rootDir,
       ...leaseIdentity,
+      expectedLease,
       status: AMA_CLOSER_LEASE_STATUS.TERMINAL,
       terminalOutcome,
       now,
@@ -4864,7 +4873,7 @@ async function maybeDispatchAmaCloserAttempt({
   const queuedParkReason = queuedParkAudit?.status === 'deferred'
     ? queuedParkAudit.attempts?.at(-1)?.reason : null;
   const certifiedContentionPark = verdict.trace?.hamTerminalRemediation?.ok === true
-    && ['merge-lease-timeout', 'required-checks-pending', 'pr-mergeability-unknown', 'lane-busy'].includes(queuedParkReason);
+    && AMA_CLOSER_RETRYABLE_DEFERRAL_REASONS.has(queuedParkReason);
   // Certification and parking are execution evidence. The shared workflow
   // determines whether this attempt observes, resumes the daemon, or repairs.
   const repairCertifiedPark = certifiedContentionPark && hasHammerDispatchIntent(sharedNextAction, decisionIdentity);
@@ -5084,7 +5093,7 @@ async function maybeDispatchAmaCloserAttempt({
   const parkAttempt = parkAudit?.attempts?.at(-1);
   const parkReason = parkAttempt?.reason;
   const deferredPark = parkAudit?.status === 'deferred'
-    && ['merge-lease-timeout', 'required-checks-pending', 'pr-mergeability-unknown', 'lane-busy'].includes(parkReason)
+    && AMA_CLOSER_RETRYABLE_DEFERRAL_REASONS.has(parkReason)
     && Date.parse(parkAttempt?.startedAt) >= Date.parse(existingRecord?.dispatchedAt);
   const certifiedPark = resumeCertifiedPark && deferredPark;
   const laneBusyPark = deferredPark && parkReason === 'lane-busy';
@@ -7065,8 +7074,7 @@ async function maybeDispatchAmaCloserAttempt({
       return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'lease-held', existingLease });
     }
     if (existingLease?.status === AMA_CLOSER_LEASE_STATUS.TERMINAL
-      && ['superseded', 'failed-without-merge', 'deferred',
-        'abandoned-holder-dead', 'abandoned-timeout'].includes(existingLease.terminalOutcome)) {
+      && AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES.has(existingLease.terminalOutcome)) {
       const probe = existingLease.lrqId
         ? await Promise.resolve().then(() => readLaunchRequestStatusImpl({
           launchRequestId: existingLease.lrqId, rootDir, hqRoot, signal, env,

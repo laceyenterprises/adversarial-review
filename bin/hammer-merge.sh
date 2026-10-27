@@ -109,6 +109,7 @@ ham_append_terminal_audit() {
     }' > "$ham_audit_attempt_json"
   "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/ama-audit.mjs append \
     --hq-root <<HQ_ROOT>> \
+    --root-dir <<ROOT_DIR>> --lease-head <<TARGET_REMEDIATION_SHA>> \
     --repo <<REPO>> \
     --pr <<PR_NUMBER>> \
     --head "$POST_REMEDIATION_SHA" \
@@ -760,6 +761,7 @@ else
     }' > "$HAM_PRE_MERGE_ATTEMPT_FILE"
   "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/ama-audit.mjs append \
     --hq-root <<HQ_ROOT>> \
+    --root-dir <<ROOT_DIR>> --lease-head <<TARGET_REMEDIATION_SHA>> \
     --repo <<REPO>> \
     --pr <<PR_NUMBER>> \
     --head "$POST_REMEDIATION_SHA" \

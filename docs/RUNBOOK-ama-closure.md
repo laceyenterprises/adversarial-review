@@ -6306,3 +6306,34 @@ own-pack, gate-stamp and operator-waiver semantics remain unchanged.
 REBASECURRENCY-01: conflict-owner-review-route reads reviews.db in a read-only transaction without schema migration, retaining better-sqlite3 defaults of deferred BEGIN and a 5000ms busy timeout. Repository and commit SHA comparisons ignore case; the result preserves the requested head spelling. A current-head reviewing row (or missing reviewer head while reviewing) defers; any delivered review verdict or legacy posted row selects the existing AMA watcher route. A PR without delivered review retains PR-update. Missing DB, schema or reader is unavailable evidence, never unreviewed. This is routing evidence only: the watcher owns dispatch selection, rate caps, hammer limits and leases. Authenticated hammer rebase provenance continues to preserve review currency; the proofs and merge safety core are unchanged. Offline synthetic fixtures certify routing and currency; no new smoke command or live verification action.
 
 `node bin/conflict-owner-review-route.mjs --root-dir <review-service-root> --repo <owner/name> --pr <number> --head-sha <sha>` returns `review-in-flight`, `hammer`, or `pr-update`, bound to the requested head. Failure exits nonzero with the unavailable notice and underlying argument or database error on stderr, and emits no routing JSON. The caller requests `bin/watcher-wake.mjs` for the hammer route; this read API does not dispatch or write review state. Deploy this reader before its worker-pool caller.
+
+## Retryable closer merge deferrals (HAMLANEWAIT-02)
+
+The hammer's terminal audit append also releases its matching AMA closer lease,
+using the existing `terminal` status and outcome `retryable-lane-busy`,
+`retryable-merge-lease-timeout`, `retryable-required-checks-pending`, or
+`retryable-pr-mergeability-unknown`. This receipt is separate from releasing the
+merge-write lease. Intermediate in-run lease waits do not release closer ownership.
+The audit CLI accepts `--root-dir` and `--lease-head` to bind settlement to the
+review-service store and original dispatch head; its launch ID must match.
+Rekeyed heads follow that same launch. A changed owner, review handoff or sticky
+success is preserved under the existing reclaim flock and expected-owner fence.
+
+Closure evaluation (including rescue) reconciles a terminal launch before
+classifying a dispatched lease as an owner. Startup/periodic recovery applies the
+same settlement to its bounded lease scan. These sweeps wait at least 15 seconds
+after the latest lease timestamp (`updatedAt`, falling back to `acquiredAt`) before
+probing the launch ledger; missing timestamps remain probeable. Closure evaluation
+has no such delay. A recorded matching retryable audit
+settles immediately after a terminal launch observation; other exits retain their existing PR proof and grace rules.
+The orphan watchdog also probes the lease's launch when no dispatch projection
+exists. A live launch or retry remains owned, and unknown evidence fails closed.
+
+The ordinary closure pass retries through daemon merge only when its current-head
+predicates permit it, otherwise through hammer admission. Existing lane-write
+waiting, deferral backoff, single-claim lease acquisition, attempt and lifetime
+caps remain authoritative. No deployment setting or data migration is required.
+After normal deployment, the runtime owner can observe a naturally occurring
+released receipt followed by exactly one admitted retry once the lane is free.
+Source tests alone do not establish live incident recovery; no live mutation or
+new smoke step is authorized here.

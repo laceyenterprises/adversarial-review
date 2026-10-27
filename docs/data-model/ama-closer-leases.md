@@ -140,3 +140,23 @@ in startup recovery and each closure evaluation, retaining the terminal owner
 receipt and abandonment log. Offline regressions cover dead/reused PIDs,
 uncertain and foreign ownership, deadline boundaries, a raced launch, retained live owners and
 same-pass hammer admission.
+
+## Retryable merge release (HAMLANEWAIT-02)
+
+`status: terminal` is the store's released state. `terminalOutcome` additionally
+accepts `retryable-lane-busy`, `retryable-merge-lease-timeout`,
+`retryable-required-checks-pending` and `retryable-pr-mergeability-unknown`.
+These are reclaimable outcomes under the existing launch-liveness checks.
+The terminal audit CLI settles the matching launch's current or original-head
+lease under the complete expected snapshot/reclaim flock. Intermediate audit
+attempts with `inRunRetry: true` do not release ownership; completed review
+handoffs and successor launches are preserved.
+
+Before closure/rescue routing and during bounded recovery sweeps,
+`reconcileAmaCloserLeaseAsync` turns a dispatched lease whose launch ended and
+whose latest matching audit is retryable into this terminal receipt. Live or
+unreadable retry chains retain ownership. The ordinary closure path then owns
+same-head daemon eligibility or hammer resume, with existing deferral backoff,
+retry/lifetime limits and the exclusive acquisition CAS. No persistent fields
+or status values are added. The orphan watchdog uses the lease LRQ as liveness
+evidence even when its dispatch projection is missing.

@@ -58,7 +58,16 @@ const TERMINAL = 'terminal';
 const HANDED_TO_REVIEW = 'handed-to-review';
 
 const VALID_STATUSES = new Set([PENDING, DISPATCHED, HANDED_TO_REVIEW, TERMINAL]);
+export const AMA_CLOSER_RETRYABLE_DEFERRAL_REASONS = new Set([
+  'lane-busy', 'merge-lease-timeout', 'required-checks-pending', 'pr-mergeability-unknown',
+]);
+export function retryableAmaCloserDeferralOutcome(attempt) {
+  return attempt?.outcome === 'deferred' && attempt.inRunRetry !== true && AMA_CLOSER_RETRYABLE_DEFERRAL_REASONS.has(attempt.reason)
+    ? `retryable-${attempt.reason}` : null;
+}
+const RETRYABLE_DEFERRAL_OUTCOMES = [...AMA_CLOSER_RETRYABLE_DEFERRAL_REASONS].map(reason => `retryable-${reason}`);
 const VALID_TERMINAL_OUTCOMES = new Set([
+  ...RETRYABLE_DEFERRAL_OUTCOMES,
   'succeeded',
   'failed-without-merge',
   'deferred',
@@ -74,6 +83,7 @@ const VALID_TERMINAL_OUTCOMES = new Set([
 // These attempts spent no closure authority. Retry admission remains owned by
 // the closer's existing series, target and lifetime budgets.
 export const AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES = new Set([
+  ...RETRYABLE_DEFERRAL_OUTCOMES,
   'failed-without-merge', 'deferred', 'superseded',
   'pr-closed-externally', 'no-merge:concurrent-writer',
   'abandoned-holder-dead', 'abandoned-timeout',
@@ -216,7 +226,7 @@ export function isCurrentAmaCloserLease(rootDir, lease) {
 // Positive ledger liveness (including retries) always wins over an older record.
 export function isReclaimableTerminalAmaCloserLease(lease, { launchStatusProbe, dispatchRecord } = {}) {
   if (lease?.status !== TERMINAL
-    || !['superseded', 'failed-without-merge', 'deferred',
+    || ![...RETRYABLE_DEFERRAL_OUTCOMES, 'superseded', 'failed-without-merge', 'deferred',
       'abandoned-holder-dead', 'abandoned-timeout'].includes(lease.terminalOutcome)) return false;
   if (launchRequestParked(launchStatusProbe)) return false;
   const inFlight = launchRequestInFlight(launchStatusProbe);
@@ -731,7 +741,7 @@ export function updateAmaCloserLease({
   // The completed worker cannot take ownership back from its review handoff.
   // A reviewed-head retry must acquire a fresh lease through the handoff CAS.
   if (existing.status === HANDED_TO_REVIEW && status === TERMINAL
-    && ['failed-without-merge', 'deferred', 'superseded'].includes(terminalOutcome)) {
+    && [...RETRYABLE_DEFERRAL_OUTCOMES, 'failed-without-merge', 'deferred', 'superseded'].includes(terminalOutcome)) {
     return { leasePath, lease: existing };
   }
 
@@ -784,3 +794,20 @@ export const AMA_CLOSER_LEASE_STATUS = Object.freeze({
   TERMINAL,
   HANDED_TO_REVIEW,
 });
+
+// The terminal receipt releases closer ownership, independently of the merge
+// write lease. The launch identity and complete snapshot fence late workers
+// against retiring a successor or a completed review handoff.
+export function releaseRetryableAmaCloserLease({ rootDir, repo, prNumber, headSha,
+  launchRequestId, sourceHeadSha = headSha, attempt, now } = {}) {
+  const terminalOutcome = retryableAmaCloserDeferralOutcome(attempt);
+  if (!terminalOutcome || !launchRequestId) return false;
+  let lease = readAmaCloserDispatchLease(rootDir, { repo, prNumber, headSha, launchRequestId });
+  if (lease?.lrqId !== launchRequestId && sourceHeadSha !== headSha) lease = readAmaCloserDispatchLease(rootDir,
+    { repo, prNumber, headSha: sourceHeadSha, launchRequestId });
+  if (!lease || lease.lrqId !== launchRequestId || lease.status === HANDED_TO_REVIEW) return false;
+  if (lease.status === TERMINAL) return lease.terminalOutcome === terminalOutcome;
+  updateAmaCloserLease({ rootDir, ...lease, expectedLease: lease,
+    status: TERMINAL, terminalOutcome, now });
+  return true;
+}

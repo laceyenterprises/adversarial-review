@@ -1,12 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
 import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
 import { evaluateHammerStopHold, hammerStopInputs, readHammerStopForHead, _resetHammerStopHoldPageDebounceForTests } from '../src/ama/hammer-stop-hold.mjs';
+
+import { acquireAmaCloserLease, updateAmaCloserLease, readAmaCloserLease } from '../src/ama/closer-lease.mjs';
 
 const head = 'a'.repeat(40);
 const subprocessTimeout = loadAwareTimeoutMs(30_000);
@@ -20,6 +22,9 @@ function runMerge(t, gates, { laneRefusal = null, laneExit = 75, leaseWaitSecond
   const dir = mkdtempSync(join(tmpdir(), 'hamunknown-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   for (const path of ['modules/worker-pool/lib/python', 'platform/session-ledger/src']) mkdirSync(join(dir, path), { recursive: true });
+  const identity = { rootDir: dir, repo: 'fixture/repo', prNumber: 1, headSha: head };
+  acquireAmaCloserLease(identity);
+  updateAmaCloserLease({ ...identity, status: 'dispatched', lrqId: 'synthetic-closer' });
   writeFileSync(join(dir, 'clock'), '1000');
   writeFileSync(join(dir, 'gates.json'), JSON.stringify(gates));
   writeFileSync(join(dir, 'verdict.json'), JSON.stringify({ eligible: true,
@@ -58,6 +63,10 @@ if (args[0] === '--input-type=module') {
   const value = key => args[args.indexOf(key) + 1];
   log({ outcome: value('--outcome'), attempt: JSON.parse(fs.readFileSync(value('--attempt-json'))),
     at: Number(fs.readFileSync(dir + '/clock')) });
+  const child = require('node:child_process').spawnSync(${JSON.stringify(process.execPath)},
+    [${JSON.stringify(realpathSync(new URL('../bin/ama-audit.mjs', import.meta.url)))}, ...args.slice(1)],
+    { encoding: 'utf8', env: { ...process.env, HQ_LAUNCH_REQUEST_ID: 'synthetic-closer' } });
+  if (child.status !== 0) { console.error(child.stderr); process.exit(child.status ?? 1); }
 } else if (args[0].endsWith('/metered-gh.mjs')) {
   log({ merge: args });
 } else if (args[0].endsWith('/hammer-pr-read.mjs')) {
@@ -95,7 +104,7 @@ exit "$?"
   assert.equal(result.error, undefined);
   assert.ok(existsSync(join(dir, 'events')), result.stderr);
   const events = readFileSync(join(dir, 'events'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
-  return { ...result, events, release: readFileSync(join(dir, 'release'), 'utf8') };
+  return { ...result, events, lease: readAmaCloserLease(dir, identity), release: readFileSync(join(dir, 'release'), 'utf8') };
 }
 
 test('HAMUNKNOWN-02: UNKNOWN at final merge read resolves to MERGEABLE and merges the validated head', t => {
@@ -123,6 +132,8 @@ for (const phase of ['final', 'preflight']) {
     assert.ok(result.events.some(event => event.outcome === 'deferred' && event.attempt.remoteCiStatus === 'mergeability-unknown'));
     assert.ok(!result.events.some(event => event.outcome === 'failed-without-merge'));
     assert.match(result.release, /release:pr-mergeability-unknown/);
+    assert.equal(result.lease.status, 'terminal');
+    assert.equal(result.lease.terminalOutcome, 'retryable-pr-mergeability-unknown');
   });
 }
 
@@ -318,6 +329,8 @@ for (const [reason, exitCode, outcome] of [
   if (outcome === 'deferred') {
     assert.match(result.stderr, /waited 3000ms/);
     assert.match(result.release, /release:lane-busy/);
+    assert.equal(result.lease.status, 'terminal');
+    assert.equal(result.lease.terminalOutcome, 'retryable-lane-busy');
     assert.ok(!result.events.some(event => event.outcome === 'failed-without-merge'));
   }
 });

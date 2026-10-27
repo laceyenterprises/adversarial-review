@@ -8,6 +8,8 @@ import { join } from 'node:path';
 
 import {
   AMA_CLOSER_LEASE_STATUS,
+  releaseRetryableAmaCloserLease,
+  rekeyAmaCloserLease,
   abandonedAmaCloserLeaseOutcome,
   acquireAmaCloserLease,
   amaCloserLeaseFilePath,
@@ -484,4 +486,60 @@ for (const rekeyed of [false, true]) test(`CLOSERINTENTRECON-01 age-only abandon
     logger: { warn() {} } }), null);
   assert.deepEqual(f.lease(), before);
   assert.equal(f.record().state, 'dispatching');
+});
+
+const identity = { repo: 'fixture/repo', prNumber: 21, headSha: 'a'.repeat(40) };
+const launchRequestId = 'synthetic-closer';
+const now = '2026-10-27T00:00:00Z';
+function fixture(t) {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  acquireAmaCloserLease({ rootDir, ...identity, now });
+  updateAmaCloserLease({ rootDir, ...identity, now, status: 'dispatched', lrqId: launchRequestId });
+  return rootDir;
+}
+
+for (const reason of ['lane-busy', 'merge-lease-timeout', 'required-checks-pending', 'pr-mergeability-unknown']) {
+  test(`HAMLANEWAIT-02: ${reason} records one released terminal receipt`, t => {
+    const rootDir = fixture(t), args = { rootDir, ...identity, launchRequestId,
+      attempt: { outcome: 'deferred', reason }, now };
+    assert.equal(releaseRetryableAmaCloserLease(args), true);
+    const receipt = readAmaCloserLease(rootDir, identity);
+    assert.equal(receipt.status, 'terminal');
+    assert.equal(receipt.terminalOutcome, `retryable-${reason}`);
+    assert.equal(releaseRetryableAmaCloserLease({ ...args, now: '2026-10-27T01:00:00Z' }), true);
+    assert.deepEqual(readAmaCloserLease(rootDir, identity), receipt);
+  });
+}
+
+test('HAMLANEWAIT-02: release preserves successor, review handoff and in-run lease retry', t => {
+  const rootDir = fixture(t), args = { rootDir, ...identity, launchRequestId,
+    attempt: { outcome: 'deferred', reason: 'lane-busy' }, now };
+  assert.equal(releaseRetryableAmaCloserLease({ ...args, launchRequestId: 'old-worker' }), false);
+  assert.equal(releaseRetryableAmaCloserLease({ ...args, attempt: { ...args.attempt, inRunRetry: true } }), false);
+  assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
+  updateAmaCloserLease({ rootDir, ...identity, status: 'handed-to-review', now });
+  assert.equal(releaseRetryableAmaCloserLease(args), false);
+  assert.equal(readAmaCloserLease(rootDir, identity).status, 'handed-to-review');
+});
+
+test('HAMLANEWAIT-02: release follows the matching rekeyed launch', t => {
+  const rootDir = fixture(t), moved = { ...identity, headSha: 'b'.repeat(40) };
+  rekeyAmaCloserLease({ rootDir, ...identity, fromHeadSha: identity.headSha, toHeadSha: moved.headSha });
+  assert.equal(releaseRetryableAmaCloserLease({ rootDir, ...identity, launchRequestId,
+    attempt: { outcome: 'deferred', reason: 'lane-busy' }, now }), true);
+  assert.equal(readAmaCloserLease(rootDir, moved).terminalOutcome, 'retryable-lane-busy');
+});
+
+
+test('HAMLANEWAIT-02: original-head release cannot retire a successor at the published head', t => {
+  const rootDir = fixture(t), moved = { ...identity, headSha: 'c'.repeat(40) };
+  acquireAmaCloserLease({ rootDir, ...moved, now });
+  updateAmaCloserLease({ rootDir, ...moved, status: 'dispatched', lrqId: 'successor', now });
+  const successor = readAmaCloserLease(rootDir, moved);
+  assert.equal(releaseRetryableAmaCloserLease({ rootDir, ...moved,
+    sourceHeadSha: identity.headSha, launchRequestId,
+    attempt: { outcome: 'deferred', reason: 'lane-busy' }, now }), true);
+  assert.equal(readAmaCloserLease(rootDir, identity).terminalOutcome, 'retryable-lane-busy');
+  assert.deepEqual(readAmaCloserLease(rootDir, moved), successor);
 });

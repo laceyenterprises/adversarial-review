@@ -85,6 +85,25 @@ export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, r
       return undefined;
     }
   };
+  // A lease can outlive or lose its dispatch projection. Its LRQ remains the
+  // ownership authority; status=dispatched alone proves no live owner.
+  const leaseProbes = new Map();
+  if (pendingLease?.lrqId && pendingLease.status === 'dispatched') {
+    let probe;
+    try {
+      probe = await readStatusImpl({ launchRequestId: pendingLease.lrqId, rootDir, env,
+        signal, includeRetryChain: true, timeoutMs: Math.max(1, deadline - Date.now()) });
+    } catch { probe = null; }
+    leaseProbes.set(pendingLease.lrqId, probe);
+    result.launchIds.push(text(pendingLease.lrqId));
+    const owned = launchRequestOwned(probe);
+    if (owned === null) uncertain('closer-lease-launch-unreadable');
+    else if (owned) {
+      result.owned = true;
+      if (includeOwnerEvidence) Object.assign(result, { actor: 'hammer',
+        launchProbe: probe, launchRequestId: pendingLease.lrqId });
+    }
+  }
   let mergeRecordSeen = false;
   for (const bucket of ['pending', 'in-progress', 'ama-closer-dispatches', 'merge-agent-dispatches']) {
     const dir = join(rootDir, 'data', 'follow-up-jobs', bucket);
@@ -104,9 +123,9 @@ export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, r
         if (record.state === 'dispatched') uncertain('missing-launch-request-id');
         continue;
       }
-      if (result.launchIds.length < 5) result.launchIds.push(text(launchRequestId));
+      if (result.launchIds.length < 5 && !result.launchIds.includes(text(launchRequestId))) result.launchIds.push(text(launchRequestId));
       const cacheKey = JSON.stringify([rootDir, record.hqRoot || '', launchRequestId]);
-      let probe = includeOwnerEvidence ? null : terminalLaunches.get(cacheKey);
+      let probe = leaseProbes.get(launchRequestId) || (includeOwnerEvidence ? null : terminalLaunches.get(cacheKey));
       try {
         probe ||= await readStatusImpl({ launchRequestId, rootDir, env, hqRoot: record.hqRoot, signal,
           includeRetryChain: true,

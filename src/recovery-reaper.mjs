@@ -59,17 +59,18 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { hostname } from 'node:os';
+import { resolveHqRoot } from './hq-root.mjs';
 import { basename, dirname, join } from 'node:path';
 
 import {
   AMA_CLOSER_REDISPATCH_BOUND,
+  reconcileAmaCloserLeaseAsync,
   isTransientHqDispatchError,
   readAmaCloserDispatchRecord,
   updateAmaCloserDispatchRecord,
 } from './ama/dispatch-closer.mjs';
 
 import {
-  AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS,
   isReclaimableDispatchedAmaCloserLease,
   isCurrentAmaCloserLease,
   abandonedAmaCloserLeaseOutcome,
@@ -102,6 +103,8 @@ export const DEFAULT_TERMINAL_CLOSER_LEASE_PRUNE_MS = 7 * 24 * HOUR_MS;
 export const DEFAULT_STALE_STATE_REAPER_INTERVAL_MS = 15 * 60 * 1000;
 export const DEFAULT_CLOSER_LEASE_ENTRY_SCAN_LIMIT = 250;
 export const DEFAULT_CLOSER_LEASE_READ_LIMIT = 50;
+// Avoid ledger reads for launches that have only just been dispatched.
+export const DEFAULT_CLOSER_LEASE_PROBE_MIN_AGE_MS = 15_000;
 
 const LEASE_DIR_SEGMENTS = ['data', 'ama-closer-leases'];
 const REAPER_STATE_DIR_SEGMENTS = ['data', 'recovery-reaper'];
@@ -747,6 +750,7 @@ export async function reapStaleCloserLeases({
   statImpl = fsPromises.stat,
   logger = console,
   readLaunchRequestStatusImpl = readLaunchRequestStatusFromLedgerAsync,
+  closerLeaseReconciliationOptions = {},
   captureProcessImpl,
   preReceiptIntentOptions = {},
   env = process.env,
@@ -771,10 +775,8 @@ export async function reapStaleCloserLeases({
   const nowMs = parseTimestampMs(now) ?? (now instanceof Date ? now.getTime() : Number(now));
   for (const lease of discovery.records) {
     if (lease?.status !== 'dispatched' || !lease.lrqId || launchStatusProbes.has(lease.lrqId)) continue;
-    // Even a terminal launch cannot release a dispatched lease before this age.
-    const stampMs = Date.parse(String(lease.updatedAt || lease.acquiredAt || ''));
-    if (!Number.isFinite(nowMs) || !Number.isFinite(stampMs)
-      || nowMs - stampMs < loadAwareTimeoutMs(AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS, { maxMs: Infinity })) continue;
+    const stampMs = parseTimestampMs(lease.updatedAt) ?? parseTimestampMs(lease.acquiredAt);
+    if (stampMs != null && nowMs - stampMs < DEFAULT_CLOSER_LEASE_PROBE_MIN_AGE_MS) continue;
     try { launchStatusProbes.set(lease.lrqId, await readLaunchRequestStatusImpl({
       launchRequestId: lease.lrqId, rootDir, env, includeRetryChain: true,
     })); } catch { launchStatusProbes.set(lease.lrqId, null); }
@@ -831,8 +833,26 @@ export async function reapStaleCloserLeases({
     const abandoned = abandonAmaCloserLease(rootDir, lease, abandonmentOptions);
     if (abandoned) abandonedLeases.push(abandoned);
   }
+  // Repair terminal launch ownership on the next bounded sweep, without
+  // waiting for stale-file age. The normal settlement proof and caps apply.
+  const terminalLaunchPaths = new Set();
+  for (const lease of discovery.records) {
+    if (lease.status !== 'dispatched' || !lease.lrqId || unresolvedIntentLeasePaths.has(lease._path)) continue;
+    const statusProbe = launchStatusProbes.get(lease.lrqId);
+    if (!statusProbe?.ok) continue;
+    const reconciled = await reconcileAmaCloserLeaseAsync({
+      hqRoot: resolveHqRoot(env), ...closerLeaseReconciliationOptions, rootDir, repo: lease.repo, prNumber: lease.prNumber,
+      now: new Date(nowMs).toISOString(), env, logger, statusProbe,
+      probedLaunchRequestId: lease.lrqId,
+    });
+    if (reconciled) {
+      terminalLaunchPaths.add(lease._path);
+      reconciledLeases.push({ ...readAmaCloserLease(rootDir, lease), _path: lease._path });
+    }
+  }
   const releasable = selectReleasableCloserLeases(discovery.records.filter(lease =>
-    !unresolvedIntentLeasePaths.has(lease._path) && !abandonedPaths.has(lease._path)), {
+    !unresolvedIntentLeasePaths.has(lease._path) && !abandonedPaths.has(lease._path)
+      && !terminalLaunchPaths.has(lease._path)), {
     now,
     thresholdMs,
     livePid,

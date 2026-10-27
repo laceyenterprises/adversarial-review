@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
 import { conflictOwnerReviewRoute } from '../src/conflict-owner-review-route.mjs';
 import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
 
@@ -21,8 +22,63 @@ function fixture(t, { status = null, head = headSha, settled = false } = {}) {
     gh_comment_id, body_captured_at, attempt_number, reviewer_class, started_at, status)
     VALUES (?, ?, ?, 'rereview', 'fixture-comment', '2026-01-01T00:00:00Z', 1, 'synthetic',
     '2026-01-01T00:00:00Z', 'completed')`).run(repo, prNumber, oldHead);
-  return { db, rootDir, path, route: () => conflictOwnerReviewRoute({ rootDir, repo, prNumber, headSha }) };
+  return { db, rootDir, path, route: (overrides = {}) => conflictOwnerReviewRoute({ rootDir, repo, prNumber, headSha, ...overrides }) };
 }
+
+for (const length of [40, 64]) for (const storedUpper of [false, true]) {
+  test(`in-flight SHA matching ignores case (${length} hex, storedUpper=${storedUpper})`, t => {
+    const stored = (storedUpper ? 'ABCd' : 'abcD').repeat(length / 4);
+    const requested = storedUpper ? stored.toLowerCase() : stored.toUpperCase();
+    const f = fixture(t, { status: 'reviewing', head: stored, settled: true });
+    assert.deepEqual(f.route({ headSha: requested }), { route: 'review-in-flight', headSha: requested });
+  });
+}
+
+for (const [status, settled, expected] of [
+  ['reviewing', false, 'review-in-flight'], ['posted', false, 'hammer'], [null, true, 'hammer'],
+]) {
+  test(`repository casing preserves ${expected} routing`, t => {
+    const f = fixture(t, { status, settled });
+    assert.equal(f.route({ repo: 'Fixture/REPO' }).route, expected);
+    for (const table of ['reviewed_prs', 'reviewer_passes']) {
+      f.db.prepare(`UPDATE ${table} SET repo = ?`).run('FIXTURE/Repo');
+    }
+    assert.equal(f.route().route, expected);
+    assert.equal(f.route({ repo: 'different/repo' }).route, 'pr-update');
+    assert.equal(f.route({ prNumber: prNumber + 1 }).route, 'pr-update');
+  });
+}
+
+test('read transaction coexists with an immediate writer without requesting a write lock', t => {
+  const f = fixture(t, { status: 'reviewing' });
+  f.db.exec('BEGIN IMMEDIATE');
+  try {
+    assert.equal(f.route().route, 'review-in-flight');
+  } finally {
+    f.db.exec('ROLLBACK');
+  }
+});
+
+test('default reader busy timeout waits for a transient exclusive writer', { timeout: 10000 }, async t => {
+  const f = fixture(t, { status: 'pending' });
+  f.db.pragma('journal_mode = DELETE');
+  const writer = spawn(process.execPath, ['--input-type=module', '-e', `
+    import Database from 'better-sqlite3';
+    const db = new Database(process.argv[1]);
+    db.exec("BEGIN EXCLUSIVE; UPDATE reviewed_prs SET review_status = 'reviewing'");
+    process.stdout.write('locked');
+    setTimeout(() => { db.exec('COMMIT'); db.close(); }, 300);
+  `, f.path], { stdio: ['ignore', 'pipe', 'pipe'] });
+  t.after(() => { if (writer.exitCode === null) writer.kill('SIGKILL'); });
+  let stderr = '';
+  writer.stderr.on('data', chunk => { stderr += chunk; });
+  const exited = once(writer, 'exit');
+  const ready = await Promise.race([once(writer.stdout, 'data'), exited.then(() => [])]);
+  assert.equal(String(ready[0]), 'locked', stderr);
+  assert.equal(f.route().route, 'review-in-flight');
+  const [code] = await exited;
+  assert.equal(code, 0, stderr);
+});
 
 for (const settled of [false, true]) test(`current-head review in flight wins over settled=${settled}`, t => {
   const f = fixture(t, { status: 'reviewing', settled });
@@ -66,5 +122,22 @@ test('CLI binds the requested head and reports unavailable state without creatin
   const unavailable = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 15000 });
   assert.equal(unavailable.status, 1);
   assert.equal(unavailable.stdout, '');
+  assert.match(unavailable.stderr, /conflict-owner review state unavailable: .*directory does not exist/);
   assert.throws(() => readFileSync(join(f.rootDir, 'missing/data/reviews.db')), /ENOENT/);
+});
+
+test('CLI reports argument and schema diagnostics without emitting a route', t => {
+  const f = fixture(t);
+  const args = ['bin/conflict-owner-review-route.mjs', '--root-dir', f.rootDir,
+    '--repo', repo, '--pr', 'invalid', '--head-sha', headSha];
+  const invalid = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 15000 });
+  assert.equal(invalid.status, 1);
+  assert.equal(invalid.stdout, '');
+  assert.match(invalid.stderr, /conflict-owner review state unavailable: root-dir, repo, positive pr and head-sha required/);
+  args[6] = String(prNumber);
+  f.db.exec('DROP TABLE reviewed_prs');
+  const incompatible = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 15000 });
+  assert.equal(incompatible.status, 1);
+  assert.equal(incompatible.stdout, '');
+  assert.match(incompatible.stderr, /conflict-owner review state unavailable: no such table: reviewed_prs/);
 });

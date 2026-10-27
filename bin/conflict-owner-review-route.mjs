@@ -13,8 +13,8 @@ try {
   }
   console.log(JSON.stringify(conflictOwnerReviewRoute({ rootDir: values['root-dir'],
     repo: values.repo, prNumber: Number(values.pr), headSha: values['head-sha'] })));
-} catch {
+} catch (error) {
   // Unavailable evidence must not be confused with an unreviewed PR.
-  console.error('conflict-owner review state unavailable');
+  console.error(`conflict-owner review state unavailable: ${error.message}`);
   process.exitCode = 1;
 }

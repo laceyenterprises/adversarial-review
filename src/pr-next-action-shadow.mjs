@@ -106,7 +106,7 @@ function primaryChangeObservation(input, progress) {
   try {
     result = checkPrimaryChange(input.evidence, input.head, { strictNonBlockingRemediation: input.strictNonBlockingRemediation });
   } catch { result = { ok: false, reason: 'primary-change-unknown' }; }
-  return { ...(progress || {}), primaryChange: { ok: result?.ok === true, reason: result?.reason ?? null } };
+  return { ...(progress || {}), primaryChange: { ok: result?.ok === true, reason: result?.reason ?? null, headSha: input.head } };
 }
 
 // Resolve execution intent independently of shadow sinks/alerts. Adopted wake

@@ -1,7 +1,9 @@
 import { seedCloserIntent, intentStarted, intentExpired, intentEarly } from './helpers/closer-intent-fixture.mjs';
 import { matrixPair } from './helpers/next-action-matrix.mjs';
 import { deriveNextActionSnapshot, nextAction } from '../src/pr-next-action.mjs';
-import { bindClosureNextAction, readClosureNextAction, reviseClosureNextAction } from '../src/ama/closure-next-action.mjs';
+import { primaryChangeFixture } from './helpers/primary-change.mjs';
+import { checkPrimaryChange } from '../src/ama/primary-change.mjs';
+import { hammerDispatchMismatch, bindClosureNextAction, readClosureNextAction, reviseClosureNextAction } from '../src/ama/closure-next-action.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import { proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
 import test from 'node:test';
@@ -667,13 +669,18 @@ test('queued hammer dispatch launches the closer for a CONFLICTING PR and a CLEA
     });
     await maybeDispatchAmaClosureFor(args);
     await queue.drain();
-    assert.equal(closerCalls, live.mergeable === 'UNKNOWN' ? 0 : 1);
+    assert.equal(closerCalls, 0, 'a changed hammer decision key must be acknowledged before dispatch');
     if (live.mergeable === 'UNKNOWN') {
       const waiting = await maybeDispatchAmaClosureFor(args);
       assert.equal(waiting.nextAction.action, 'wait-for-CI');
       assert.equal(waiting.reason, 'mergeability-unknown');
       continue;
     }
+    const revised = await maybeDispatchAmaClosureFor(args);
+    assert.equal(revised.decisionReresolutions, 1);
+    assert.equal(revised.decisionMismatch.resolvedReason, 'conflict-rebase');
+    await queue.drain();
+    assert.equal(closerCalls, 1);
     const settled = await maybeDispatchAmaClosureFor(args);
     assert.equal(settled.dispatched, true);
     assert.equal(settled.launchRequestId, 'lrq_conflict');
@@ -1328,9 +1335,15 @@ for (const scenario of ['MERGEABLE', 'CONFLICTING', 'UNKNOWN', 'null', 'head-mov
     t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
     await maybeDispatchAmaClosureFor(args);
     await queue.drain();
-    const result = await maybeDispatchAmaClosureFor(args);
-    assert.equal(reads, ['UNKNOWN', 'null'].includes(scenario) ? 3 : 2);
-    assert.ok(logs.some(line => line.includes(`mergeability_samples=${reads}`) && /mergeability_elapsed_ms=\d+/.test(line)));
+    let result = await maybeDispatchAmaClosureFor(args);
+    if (scenario === 'CONFLICTING') {
+      assert.equal(result.decisionReresolutions, 1);
+      assert.equal(result.decisionMismatch.resolvedReason, 'conflict-rebase');
+      await queue.drain();
+      result = await maybeDispatchAmaClosureFor(args);
+    }
+    assert.equal(reads, ['UNKNOWN', 'null', 'CONFLICTING'].includes(scenario) ? 3 : 2);
+    assert.ok(logs.some(line => line.includes(`mergeability_samples=${scenario === 'CONFLICTING' ? 2 : reads}`) && /mergeability_elapsed_ms=\d+/.test(line)));
     assert.equal(dispatches, ['MERGEABLE', 'CONFLICTING'].includes(scenario) ? 1 : 0);
     if (['UNKNOWN', 'null'].includes(scenario)) {
       assert.equal(result.reason, 'mergeability-unknown');
@@ -1755,3 +1768,100 @@ for (const reason of ['hammer-validated-head', 'closer-commit-trailer']) {
     assert.equal(payloads.length, 1);
   });
 }
+
+
+for (const failedHead of ['older-head', HEAD]) {
+  for (const hasHammerCommits of [false, true]) {
+    test(`CLOSURESPLIT-01: refresh ${failedHead} refusal with live hammer=${hasHammerCommits}`, async t => {
+      let reads = 0;
+      let merges = 0;
+      const seed = matrixPair().snapshot;
+      const passSnapshot = deriveNextActionSnapshot({ base: seed, head: HEAD, observations: {
+        progress: { primaryChange: { ok: false, reason: 'primary-change-reverted', headSha: failedHead },
+          daemonExecution: { headSha: HEAD, reason: 'not-eligible', reasons: ['primary-change-reverted'] } },
+      } });
+      const live = hasHammerCommits ? primaryChangeFixture(HEAD) : { headSha: HEAD, hasHammerCommits: false };
+      const args = closureArgs({ passSnapshot,
+        fetchPrimaryChangeImpl: async ({ headSha }) => { reads++; assert.equal(headSha, HEAD); return live; },
+        runDaemonCleanMergeAttemptImpl: async payload => {
+          merges++;
+          assert.equal(payload.sharedNextAction.decision.action, 'daemon-merge');
+          assert.equal(payload.sharedNextAction.snapshot.observations.progress.value.primaryChange.ok, true);
+          return { merged: true, disposition: 'merged', reason: 'daemon-merged' };
+        },
+        maybeDispatchAmaCloserImpl: () => assert.fail('passing live evidence selects daemon'),
+      });
+      t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+      const result = await maybeDispatchAmaClosureFor(args);
+      assert.equal(reads, 1);
+      assert.equal(merges, 1);
+      assert.equal(result.nextAction.action, 'daemon-merge');
+      assert.equal(passSnapshot.observations.progress.value.primaryChange.ok, false);
+    });
+  }
+}
+
+test('CLOSURESPLIT-01: unauthorized current-head reversal still refuses with shared raw evidence', async t => {
+  const live = { ...primaryChangeFixture(HEAD), finalFiles: [] };
+  assert.equal(checkPrimaryChange(live, HEAD).reason, 'primary-change-reverted');
+  const seed = matrixPair().snapshot;
+  const passSnapshot = deriveNextActionSnapshot({ base: seed, head: HEAD, observations: {
+    progress: { primaryChange: { ok: false, reason: 'primary-change-reverted', headSha: 'older-head' } },
+  } });
+  const args = closureArgs({ passSnapshot,
+    fetchPrimaryChangeImpl: async () => live,
+    observeClosureWaitImpl: async () => ({}),
+    runDaemonCleanMergeAttemptImpl: () => assert.fail('reversal cannot enter daemon lane'),
+    maybeDispatchAmaCloserImpl: async payload => {
+      assert.equal(payload.options.primaryChange, live);
+      assert.equal(payload.sharedNextAction.decision.reason, 'primary-change-repair');
+      return { dispatched: false, skipMergeAgent: true, reason: 'primary-change-repair-required' };
+    },
+  });
+  t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+  const result = await maybeDispatchAmaClosureFor(args);
+  assert.equal(result.reason, 'primary-change-repair-required');
+  assert.equal(result.nextAction.reason, 'primary-change-repair');
+});
+
+test('CLOSURESPLIT-01: background disagreement returns keys and reselects daemon exactly once', async t => {
+  const queue = createAmaHammerBackgroundQueue();
+  let dispatches = 0;
+  let daemonAttempts = 0;
+  let mismatch;
+  const args = closureArgs({
+    resolveAmaHammerDispatchModeImpl: () => 'background', amaHammerBackgroundQueueImpl: () => queue,
+    runDaemonCleanMergeAttemptImpl: async payload => {
+      daemonAttempts++;
+      if (payload.sharedNextAction.snapshot.observations.progress.value?.primaryChange?.ok) {
+        return { merged: true, disposition: 'merged', reason: 'daemon-merged' };
+      }
+      return { disposition: 'failed-closed', reason: 'merge-retry-budget-exhausted', attempts: 2 };
+    },
+    maybeDispatchAmaCloserImpl: async payload => {
+      dispatches++;
+      const fresh = reviseClosureNextAction(payload.sharedNextAction, { progress: {
+        ...payload.sharedNextAction.snapshot.observations.progress.value,
+        primaryChange: { ok: true, headSha: HEAD }, daemonExecution: null,
+      } });
+      assert.equal(fresh.decision.action, 'daemon-merge');
+      mismatch = hammerDispatchMismatch(payload.sharedNextAction, fresh,
+        { repo: args.repoPath, prNumber: args.prNumber, headSha: HEAD });
+      assert.equal(mismatch.reason, 'closure-decision-mismatch');
+      assert.equal(mismatch.decisionMismatch.selectedKey, payload.sharedNextAction.decision.decisionKey);
+      assert.equal(mismatch.decisionMismatch.resolvedKey, fresh.decision.decisionKey);
+      assert.ok(mismatch.decisionMismatch.resolvedGeneration > mismatch.decisionMismatch.selectedGeneration);
+      return mismatch;
+    },
+  });
+  t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+  await maybeDispatchAmaClosureFor(args);
+  await queue.drain();
+  const result = await maybeDispatchAmaClosureFor(args);
+  assert.equal(result.decisionReresolutions, 1);
+  assert.deepEqual(result.decisionMismatch, mismatch.decisionMismatch);
+  assert.equal(result.nextAction.action, 'daemon-merge');
+  assert.equal(dispatches, 1);
+  assert.equal(daemonAttempts, 3);
+  assert.equal(queue.snapshot().running, 0);
+});

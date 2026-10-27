@@ -17,7 +17,7 @@ import { meteredExecFile, meteredExecFileSync } from '../metered-gh.mjs';
 import { filterGitHubBody } from '../github-outbound-body.mjs';
 import { companionWaitRefundCount } from './companion-stop-wait.mjs';
 import { observeClosureWait } from './closure-wait.mjs';
-import { closureDecisionMatches, hasHammerDispatchIntent, resolveClosureNextAction, reviseClosureNextAction, bindClosureNextAction } from './closure-next-action.mjs';
+import { hammerDispatchMismatch, closureDecisionMatches, hasHammerDispatchIntent, resolveClosureNextAction, reviseClosureNextAction, bindClosureNextAction } from './closure-next-action.mjs';
 import { createHistoryReader } from './history-reader.mjs';
 import { exactHammerValidation, fetchHammerHeadRange } from './hammer-head-validation.mjs';
 import { OPERATOR_LABEL_GATES, operatorGatedRemediationInstructions, resolveOperatorLabelGateFailuresWithRetry, holdForOperatorLabels, sweepOperatorLabelHolds } from './operator-label-gates.mjs';
@@ -4757,6 +4757,17 @@ async function maybeDispatchAmaCloserAttempt({
   });
 
   // The eligibility predicate is the second gate.
+  const selectedNextAction = sharedNextAction;
+  // Missing raw evidence is not proof that a previously observed refusal is
+  // inapplicable. Standalone/adopted dispatchers refresh that same predicate.
+  if (!eligibilityOptions.primaryChange
+    && sharedNextAction?.snapshot.observations.progress?.value?.primaryChange?.ok === false) {
+    eligibilityOptions.primaryChange = await fetchPrimaryChangeImpl({
+      repo: dispatchContext.repo, prNumber, headSha: prMetadata.headSha,
+      rootDir: dispatchContext.rootDir || SUBMODULE_ROOT,
+      get: createHistoryReader({ execFileImpl, env, signal }),
+    });
+  }
   const verdict = isEligibleForAmaClosure(reviewState, prMetadata, cfg, eligibilityOptions);
   const decisionIdentity = { repo: dispatchContext?.repo, prNumber, headSha: prMetadata.headSha };
   const reviewHandoffLease = prMetadata.headSha
@@ -4811,7 +4822,7 @@ async function maybeDispatchAmaCloserAttempt({
       job: { status: 'in_progress', headSha: prMetadata.headSha },
     } } : {}),
     progress: { ...sharedNextAction.snapshot.observations.progress?.value,
-      primaryChange: verdict.trace.primaryChange,
+      primaryChange: { ...verdict.trace.primaryChange, headSha: prMetadata.headSha },
       ...(verdict.trace.hamTerminalRemediation?.ok === true ? { terminalReview: {
         validated: true, headSha: prMetadata.headSha, reviewedHeadSha: reviewState.headSha,
       } } : {}),
@@ -4829,6 +4840,8 @@ async function maybeDispatchAmaCloserAttempt({
   observeSharedDecision(sharedNextAction);
   if (!verdict.repairAdmission.ok) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
     reason: 'not-eligible', reasons: verdict.reasons, eligibilityRejected: true, safetyRefusal: true, nextActionShared: sharedNextAction });
+  const mismatch = hammerDispatchMismatch(selectedNextAction, sharedNextAction, decisionIdentity);
+  if (mismatch) return noAmaDispatch(mismatch);
   const reviewHandoffFindings = reviewHandoffLease?.status === 'handed-to-review'
     && hasHammerDispatchIntent(sharedNextAction, decisionIdentity);
   const orphanAdmit = ownerProofRecovery;
@@ -6637,7 +6650,7 @@ async function maybeDispatchAmaCloserAttempt({
       || sharedNextAction.snapshot.observations.policy?.value?.hammerCap?.lifetimeExhausted);
   if (!hasHammerDispatchIntent(sharedNextAction, decisionIdentity) && !resumeCertifiedPark && !capReport) {
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-      reason: sharedNextAction.decision.reason, recoveryWait: true, eligibilityRejected: !verdict.eligible, nextActionShared: sharedNextAction });
+      ...(hammerDispatchMismatch(selectedNextAction, sharedNextAction, decisionIdentity) || { reason: sharedNextAction.decision.reason }), recoveryWait: true, eligibilityRejected: !verdict.eligible, nextActionShared: sharedNextAction });
   }
 
   // A same-PR remediation worker owns the branch. Check before the append-only
@@ -6798,7 +6811,7 @@ async function maybeDispatchAmaCloserAttempt({
 
   if (!hasHammerDispatchIntent(sharedNextAction, decisionIdentity) && !resumeCertifiedPark) {
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
-      reason: sharedNextAction.decision.reason, nextActionShared: sharedNextAction });
+      ...(hammerDispatchMismatch(selectedNextAction, sharedNextAction, decisionIdentity) || { reason: sharedNextAction.decision.reason }), nextActionShared: sharedNextAction });
   }
 
   // Persist the prompt under watcher-owned repo state and pass that path

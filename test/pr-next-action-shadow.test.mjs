@@ -151,8 +151,8 @@ for (const awaitBaseline of [false, true]) test(`bare pass read cannot suppress 
 });
 
 for (const [name, evidence, primaryChange, reason] of [
-  ['valid', { headSha: HEAD, hasHammerCommits: false }, { ok: true, reason: null }, 'stale-verdict'],
-  ['unreadable', { headSha: OLD }, { ok: false, reason: 'primary-change-read-failed' }, 'primary-change-unreadable'],
+  ['valid', { headSha: HEAD, hasHammerCommits: false }, { ok: true, reason: null, headSha: HEAD }, 'stale-verdict'],
+  ['unreadable', { headSha: OLD }, { ok: false, reason: 'primary-change-read-failed', headSha: HEAD }, 'primary-change-unreadable'],
 ]) test(`shared resolution preserves ${name} primary-change observation through launch enrichment`, async () => {
   const pass = base({ observations: { progress: { diffEmpty: false } } });
   const shared = await resolveSharedNextAction({ passSnapshot: pass, evidence: {

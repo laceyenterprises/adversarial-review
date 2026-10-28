@@ -42,8 +42,12 @@ in the controller environment after the verified producer release and grants are
 A failed read (timeout, spawn error, unreadable target) is recorded and the
 round continues; it stops with `launch-unreadable` only after
 `LAUNCH_UNREADABLE_GRACE_MS` (120 seconds, widened to the poll plus two read
-timeouts under load) passes with no permitted read. It does not adopt a
-successor LRQ or follow retries to authorize the old process. Start retries an
+timeouts under load) passes with no permitted read and the latest completed read
+was unreadable. Elapsed time alone, including a delayed controller poll while
+all launch reads succeed, cannot trigger that reason (HAMVALTIMEOUTFLAKE-01).
+A validator timeout still cancels the registered group as `validation-stopped`
+and permits no validation audit. It does not adopt a successor LRQ or follow
+retries to authorize the old process. Start retries an
 unreadable launch read up to three times within that window; a terminal or
 parked start read, or an unreadable process census, refuses execution at once.
 

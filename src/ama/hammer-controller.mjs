@@ -196,7 +196,7 @@ export async function runHammerController(script, args = [], {
   // Reads abandoned at exit must not hold the process open until they time out.
   const closing = new AbortController();
   const launchReads = { failures: 0, firstFailureAt: null, lastError: null, source: null };
-  let lastPermitted, latestReadTimeoutMs;
+  let lastPermitted, latestReadTimeoutMs, latestReadOutcome;
   // Returns permitted, ended (a readable row that forbids continuing) or unreadable.
   async function readLaunch(readTimeoutMs = readTimeoutImpl()) {
     const startedRead = nowImpl();
@@ -219,6 +219,7 @@ export async function runHammerController(script, args = [], {
       launchReads.firstFailureAt ??= new Date().toISOString();
       launchReads.lastError = String(error).slice(0, 120);
     }
+    latestReadOutcome = outcome;
     return outcome;
   }
   const startBegun = nowImpl();
@@ -321,7 +322,10 @@ export async function runHammerController(script, args = [], {
       if (spawnError) { stop('spawn-failed'); drained = true; break; }
       if (!reason && !pendingGate && !reading && now >= nextRead) beginRead();
       const gateReading = pendingGate && (reading || now < pendingGate.deadline);
-      if (!reason && !gateReading && now - lastPermitted.at >= unreadableAfter()) stop('launch-unreadable');
+      // A delayed poll can resume beyond the grace window before its new read
+      // resolves. Age alone is not evidence that the launch became unreadable.
+      if (!reason && !gateReading && latestReadOutcome === 'unreadable'
+          && now - lastPermitted.at >= unreadableAfter()) stop('launch-unreadable');
       if (now - begun >= timeoutMs) stop('controller-timeout');
       if (exited) stop('shell-exited');
       let members;

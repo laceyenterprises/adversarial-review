@@ -1039,6 +1039,9 @@ acquisition and merge proceed only on a fresh permitted read (HAMCTLPOLL-01). Th
 gate allows three load-scaled reads within a bounded advertised socket budget,
 letting an admitted read finish before deadline refusal. Unreadable grace waits
 for that bounded gate; terminal evidence and other stop reasons remain immediate.
+HAMVALTIMEOUTFLAKE-01 requires an unreadable latest completed read for
+`launch-unreadable`; a scheduling stall alone cannot trigger that transition.
+A validator timeout records `validation-stopped` and writes no audit.
 FD-4 replies echo a per-request UUID and callers discard stale replies. The
 controller never adopts a live retry to justify an old process. Cancellation
 defers the shell release trap until group drain; fallback release retains the

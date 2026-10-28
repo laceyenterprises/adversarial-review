@@ -713,7 +713,7 @@ function buildRemediationOutcomeCommentBody({
       lines.push(
         '> **Human intervention required.** The worker reported blockers it could not resolve in this round. See the blockers list below.'
       );
-    } else if (!reply?.operationalBlockers?.length) {
+    } else if (stopCode === 'no-progress' || !reply?.operationalBlockers?.length) {
       lines.push('');
       lines.push(
         '> The worker did not request a re-review pass; this PR will retain its current adversarial-review verdict until a human re-arms or closes the job.'
@@ -793,7 +793,7 @@ function buildRemediationOutcomeCommentBody({
     }
   }
 
-  if (['completed', 'stopped'].includes(action)) {
+  if (action === 'completed') {
     for (const owner of classifyRemediationBlockers(reply).pipelineOwners) {
       lines.push('');
       lines.push(`> **Informational wait.** Owner: ${owner}. The pipeline owns the next step.`);

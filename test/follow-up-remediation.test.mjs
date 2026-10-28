@@ -13157,6 +13157,10 @@ for (const scenario of ['pending-ci', 'legacy-ci', 'closer', 'pipeline-review', 
       assert.equal(result.job.remediationPlan.stop.code, scenario === 'refused-review' ? 'rereview-blocked'
         : scenario === 'unpublished' ? 'committed-unpublished' : 'no-progress');
       assert.equal(body.includes('Human intervention required'), !['no-progress', 'unpublished'].includes(scenario));
+      if (scenario === 'no-progress') {
+        assert.match(body, /retain its current adversarial-review verdict until a human re-arms or closes the job/);
+        assert.doesNotMatch(body, /Informational wait/);
+      }
       if (scenario !== 'refused-review') assert.equal(requests.length, 0);
     } else if (scenario === 'audit-error') {
       assert.equal(result.action, 'failed');

@@ -844,7 +844,9 @@ sentence is a pipeline follow-up even in `needsHumanInput`. Review blockers,
 unknown operational blockers and explicit
 human input retain human-required reporting. The normal base/audit, CI admission
 and refused-reset paths still apply; a genuine no-progress exit still stops.
-Informational wait lines name the owner, including alongside a human blocker.
+Completed-job informational wait lines name the owner, including alongside a
+human blocker. A stopped `no-progress` job instead tells the operator that its
+verdict remains in place until a human re-arms or closes it.
 
 That conservatism is intentional. A completed comment-only final round with
 `finalRound = "comment-only"` and

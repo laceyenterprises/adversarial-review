@@ -9,10 +9,11 @@ export function operationalBlockerOwner(entry) {
   // Accept that entire sentence only, never an appended request for access.
   const legacyCiFollowup = /^Confirm (?:CI|[\w-]+|required checks?) (?:succeeds?|pass(?:es)?|completes?) for the pushed head, then request (?:another )?(?:adversarial )?review pass\.?$/i.test(humanInput);
   if ((humanInput && !legacyCiFollowup) || isDeclaredOperationalBlockerCode(entry)
-    || /\b(?:credentials?|auth(?:entication|orization)?|permissions?|operator|human|decision|conflicting requirements?|approval|tokens?)\b/i.test(text)
+    || /\b(?:credentials?|auth(?:entication|orization)?|permissions?|operator|human|decision|conflicting requirements?|approval|(?:auth|access|api|session|bearer|github)[ -]tokens?)\b/i.test(text)
     || /\b(?:fetch|rebase|push)\b[^.]{0,30}\b(?:failed|rejected|conflict)\b/i.test(text)) return 'human';
   if (entry?.kind === 'pending-ci') return 'CI';
   if (entry?.kind !== undefined) return 'human';
+  if (legacyCiFollowup) return 'CI';
   // Legacy replies have no ownership field. Accept only explicit wait language.
   if (/\b(?:pending-ci|ci-pending|pr-head-ci-pending)\b/i.test(entry?.title || '')
     || /\b(?:required checks?|PR[- ]head CI|CI checks?|CI)\b (?:is |are |remains? |still )?(?:pending|queued|running|in[ -]progress)\b/i.test(text)) return 'CI';

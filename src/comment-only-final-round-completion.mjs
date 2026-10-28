@@ -52,7 +52,8 @@ function writeJob(jobPath, job) {
  * shape is also accepted, for workers that predate the tag: exactly ONE untagged
  * entry, while the probe shows CI still running (not green: a finished CI cannot
  * be what that entry waits on), in a reply that is not `outcome: 'blocked'`. Any
- * entry asking for human input fails closed, tagged or not. So do two or more
+ * human-owned input request fails closed, as does a tagged human-owned entry.
+ * So do two or more
  * untagged entries, and any entry carrying a declared non-CI operational code
  * (for example `stale-pr-head`). The declared-code set only ever EXCLUDES an
  * entry; no title can make an entry count as pending CI.
@@ -73,10 +74,8 @@ export function classifyFinalRoundOperationalBlockers(operationalBlockers, {
   if (entries.some((entry) => isDeclaredOperationalBlockerCode(entry))) {
     return { pendingCiOnly: false, reason: 'declared-non-ci-operational-blocker' };
   }
-  if (entries.some((entry) => String(entry?.needsHumanInput || '').trim())) {
-    return { pendingCiOnly: false, reason: 'operational-blocker-needs-human-input' };
-  }
-  if (entries.some(entry => entry.kind === OPERATIONAL_BLOCKER_KIND_PENDING_CI
+  if (entries.some((entry) => (String(entry?.needsHumanInput || '').trim()
+    || entry?.kind === OPERATIONAL_BLOCKER_KIND_PENDING_CI)
     && operationalBlockerOwner(entry) === 'human')) {
     return { pendingCiOnly: false, reason: 'operational-blocker-needs-human-input' };
   }

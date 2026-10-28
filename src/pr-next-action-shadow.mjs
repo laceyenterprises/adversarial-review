@@ -19,6 +19,7 @@
 // sets AMA_NEXT_ACTION_OVERDUE_ALERTS=1; a deadline never gates execution.
 import { appendFile, mkdir, rename, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { join } from 'node:path';
 import { deriveNextActionSnapshot, nextAction } from './pr-next-action.mjs';
 import { fromLegacyClosureOwner, markNextActionShadowTestSink, NEXT_ACTION_SHADOW_LAUNCH_READ_MS } from './pr-next-action-consumer.mjs';
@@ -91,12 +92,32 @@ export function caseKeyOf(record) {
     record.next?.action, record.next?.actor, record.next?.reason])).digest('hex').slice(0, 24);
 }
 
-function bounded(promise, ms) {
+function boundedLaunchReads(readLaunches) {
+  const controller = new AbortController();
+  const deadline = Date.now() + NEXT_ACTION_SHADOW_LAUNCH_READ_MS;
+  const unknown = { state: 'unknown', value: null, provenance: { sourceRef: 'launch-requests', timedOut: true } };
   let timer;
-  return Promise.race([promise, new Promise((resolve) => {
-    timer = setTimeout(() => resolve({ state: 'unknown', value: null, provenance: { sourceRef: 'launch-requests', timedOut: true } }), ms);
+  const reads = async () => {
+    let result;
+    // R04 is recovery work. Retry failed observations as well as thrown reads,
+    // sharing one physical deadline and stopping after 100/200ms backoff.
+    // Complete observations, even unreadable payloads, need no immediate retry.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      controller.signal.throwIfAborted();
+      if (Date.now() >= deadline) return unknown;
+      result = await Promise.resolve().then(() => readLaunches({ signal: controller.signal,
+        timeoutMs: Math.max(1, deadline - Date.now()) }))
+        .catch(() => ({ state: 'error', value: null, provenance: { sourceRef: 'launch-requests' } }));
+      controller.signal.throwIfAborted();
+      if (result?.state === 'complete') return result;
+      if (attempt < 2) await delay(100 * 2 ** attempt, undefined, { signal: controller.signal });
+    }
+    return result;
+  };
+  return Promise.race([reads(), new Promise(resolve => {
+    timer = setTimeout(() => { controller.abort(); resolve(unknown); }, NEXT_ACTION_SHADOW_LAUNCH_READ_MS);
     timer.unref?.();
-  })]).finally(() => clearTimeout(timer));
+  })]).catch(() => unknown).finally(() => { clearTimeout(timer); controller.abort(); });
 }
 
 // Raw primary-change evidence goes through the shared pure helper.
@@ -121,13 +142,21 @@ export function resolveSharedNextAction({ snapshot = null, passSnapshot = null, 
     const refreshed = previous.then(async prior => {
       const launch = captured.observations?.launches?.value?.closer;
       const existing = prior.snapshot.observations?.launches;
-      const reuseLaunch = launch?.launchRequestId && launch.launchRequestId === existing?.value?.closer?.launchRequestId
+      const reuseLaunch = existing?.state === 'complete'
+        && (Array.isArray(existing.value?.closer?.retryChain) || prior.decision.reason === 'live-owner')
+        && existing.value?.closer?.retryChainUnreadable !== true
+        && prior.decision.reason !== 'ownership-unreadable'
+        && launch?.launchRequestId && launch.launchRequestId === existing?.value?.closer?.launchRequestId
         && launch.headSha === existing.value.closer.headSha;
-      const next = await resolveSharedNextAction({ passSnapshot: prior.snapshot, evidence: reuseLaunch
+      // A registered pair may use the pass itself as its snapshot. Derive a
+      // fresh base so recovery cannot wait on its own in-flight refresh.
+      const base = deriveNextActionSnapshot({ base: { ...prior.snapshot,
+        observedAt: captured.observedAt || prior.snapshot.observedAt } });
+      const next = await resolveSharedNextAction({ passSnapshot: base, evidence: reuseLaunch
         ? { ...captured, readLaunches: null, observations: { ...captured.observations, launches: existing } } : captured });
       if (JSON.stringify(next.snapshot.observations) === JSON.stringify(prior.snapshot.observations)
         && JSON.stringify(next.snapshot.anchors) === JSON.stringify(prior.snapshot.anchors)
-        && next.snapshot.head === prior.snapshot.head) return prior;
+        && next.snapshot.head === prior.snapshot.head && next.snapshot.observedAt === prior.snapshot.observedAt) return prior;
       const updated = Object.freeze({ ...next.snapshot, generation: (prior.snapshot.generation || 0) + 1 });
       return Object.freeze({ snapshot: updated, decision: nextAction(updated) });
     });
@@ -156,8 +185,7 @@ export function resolveSharedNextAction({ snapshot = null, passSnapshot = null, 
     const shared = (async () => {
       let final = derived;
       if (readLaunches) {
-        const launches = await bounded(Promise.resolve().then(readLaunches), NEXT_ACTION_SHADOW_LAUNCH_READ_MS)
-          .catch(() => ({ state: 'error', value: null, provenance: { sourceRef: 'launch-requests' } }));
+        const launches = await boundedLaunchReads(readLaunches);
         const reference = derived.observations?.launches;
         // Failed descendant reads cannot erase an independently read receipt,
         // including after terminal lease removal. Keep unknown provenance.

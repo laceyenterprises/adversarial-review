@@ -172,10 +172,14 @@ function requestEligibleHammerWake({
   let reason = eligibilityReasons[0] || 'not-eligible';
   let auditPath = null;
   let latencyEvent = { recorded: false, reason: 'not-attempted' };
-  let retryable = false;
+  // Recovery re-reads on the next closure pass. A skipped wake must retain
+  // that retry intent without requesting a launch from uncertain evidence.
+  let retryable = Boolean(decision?.row === 'R04-ownership' && decision.reason === 'ownership-unreadable'
+    && decision.head === headSha && shared.snapshot?.head === headSha);
 
   if (!identity.repo || !Number.isInteger(identity.prNumber) || identity.prNumber <= 0 || !identity.headSha || !identity.eligibilityReason) {
     reason = 'invalid-wake-identity';
+    retryable = false;
   } else if (eligibility?.eligible === true) {
     try {
       mkdirSync(hammerWakeAuditDir(rootDir), { recursive: true });

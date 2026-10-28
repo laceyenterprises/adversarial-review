@@ -453,7 +453,12 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
     return { row: 'R08-retry', action: 'hammer', actor: 'hammer', reason: 'retry-no-merge',
       deadlineKind: 'admission', queue: 'dispatch' };
   }
-  if (!daemonAfterSupersededStop && launchForHead && launch.owned === false && launch.outcome === 'no-merge' && launch.retryable === true && !terminalHead) {
+  // After recovery expires, a terminal lease and a freshly readable terminal
+  // launch return ownership to hammer even when historical validation exists.
+  // Unreadable descendants, live owners, holds and caps already won above.
+  const terminalRecoveryExpired = facts.recoveryExpired && leaseForHead && lease.status === 'terminal';
+  if (!daemonAfterSupersededStop && launchForHead && launch.owned === false && launch.outcome === 'no-merge' && launch.retryable === true
+    && (!terminalHead || terminalRecoveryExpired)) {
     return { row: 'R08-retry', action: 'hammer', actor: 'hammer', reason: 'retry-no-merge', deadlineKind: 'admission',
       queue: 'dispatch', attempt: launch.attempt !== null ? launch.attempt + 1 : null };
   }
@@ -612,6 +617,9 @@ export function nextAction(snapshot) {
     const admission = deadline(snapshot, facts, 'admission');
     facts.admissionExpired = facts.observedMs !== null && admission.at !== null
       && facts.observedMs >= timeMs(admission.at);
+    const recovery = deadline(snapshot, facts, 'recovery');
+    facts.recoveryExpired = facts.observedMs !== null && recovery.at !== null
+      && facts.observedMs >= timeMs(recovery.at);
     selected = selectRow(facts);
   } catch {
     // Totality: malformed evidence is an owned refresh, never an exception.

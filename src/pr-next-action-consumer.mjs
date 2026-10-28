@@ -109,17 +109,18 @@ export function launchSource(observation, lease, cap) {
 }
 
 // Bounded NXA-01 ledger read. The seam loads lazily so the shadow can never
-// break a consumer's module graph; the abort kills a slow ledger child at the
-// bound, and any failure is an unreadable launch, which reconciles.
+// break a consumer's module graph. Each SDK read shares the recovery deadline
+// and abort signal; a failed read remains unreadable ownership evidence.
 function boundedLaunchRead(rootDir, lease, cap) {
-  return () => {
+  return ({ signal = null, timeoutMs = NEXT_ACTION_SHADOW_LAUNCH_READ_MS } = {}) => {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), NEXT_ACTION_SHADOW_LAUNCH_READ_MS);
+    const readSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     timer.unref?.();
     return import('./session-ledger-read-adapter.mjs')
       .then(({ readLaunchRequestObservationFromLedgerAsync: read }) => read({ rootDir, launchRequestId: lease.lrqId,
-        timeoutMs: NEXT_ACTION_SHADOW_LAUNCH_READ_MS, signal: controller.signal }))
-      .then(observation => (controller.signal.aborted ? { state: 'unknown', value: null } : observation))
+        timeoutMs, signal: readSignal }))
+      .then(observation => (readSignal.aborted ? { state: 'unknown', value: null } : observation))
       .then(observation => launchSource(observation, lease, cap))
       .finally(() => clearTimeout(timer));
   };

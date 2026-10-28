@@ -1,3 +1,4 @@
+import './helpers/registry-session-fixture.mjs';
 import { beforeEach } from 'node:test';
 import { seedWorkerRegistry } from './helpers/dispatch-files-fixture.mjs';
 import './helpers/dispatch-files-preload.mjs';

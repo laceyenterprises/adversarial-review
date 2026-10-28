@@ -3,6 +3,7 @@
 import { existsSync as exists, readFileSync as read, readdirSync as list, statSync, realpathSync, lstatSync, mkdirSync, writeFileSync } from 'node:fs';
 import {tmpdir} from 'node:os';
 import { join, basename, resolve, sep } from 'node:path';
+import { fixtureWorkerClasses } from './registry-classes-fixture.mjs';
 import { dispatchReadTransport } from '../../src/dispatch-read-client.mjs';
 
 function disposable(path) {
@@ -119,7 +120,7 @@ export function installDispatchFileProducerFixture() {
     let data;
     if (request.action === 'worker_registry') {
       const registry = object(join(root, 'registry/worker-classes.json'));
-      data = {classes: registry?.classes || registry || {}};
+      data = {classes: registry?.classes || registry || (existsSync(join(root, 'registry/worker-classes.json')) ? {} : fixtureWorkerClasses)};
     } else if (request.action === 'deploy_status') {
       const statePath = join(root, 'main-catchup/.state.json');
       const state = object(statePath);

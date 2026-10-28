@@ -1,3 +1,4 @@
+import './helpers/registry-session-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readdirSync, readFileSync } from 'node:fs';

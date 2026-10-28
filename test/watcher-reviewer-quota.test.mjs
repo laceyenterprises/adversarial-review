@@ -1,3 +1,4 @@
+import './helpers/registry-session-fixture.mjs';
 import { exportedReserveFloors } from './helpers/reserve-floor-fixture.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import { fleetStatusWithCodexAccountEvidence } from './helpers/codex-account-fixture.mjs';

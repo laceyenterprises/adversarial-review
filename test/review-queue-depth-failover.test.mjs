@@ -1,3 +1,4 @@
+import './helpers/registry-session-fixture.mjs';
 import { fleetStatusWithClaudeAccountEvidence } from './helpers/claude-account-fixture.mjs';
 // RSP-01 — CFG-gated queue-depth trigger that spills first-pass review across
 // worker classes.

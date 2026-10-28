@@ -1,3 +1,4 @@
+import './helpers/registry-session-fixture.mjs';
 import './helpers/dispatch-files-preload.mjs';
 import { appendScopeViolationFinding, evaluateAdditiveOnlyScope } from '../src/additive-only-scope.mjs';
 import { ReviewerPromptTooLargeError } from '../src/reviewer-outcomes.mjs';
@@ -3305,7 +3306,7 @@ test('Codex review invocation uses the reviewer snapshot cwd and passes prompt a
   ]);
 });
 
-test('resolveCodexExecOverrides preserves top-level model settings when user config is ignored', () => {
+test('resolveCodexExecOverrides uses registry model and keeps safe host provider settings', () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'codex-config-'));
   const codexHome = join(rootDir, '.codex');
   mkdirSync(codexHome, { recursive: true });
@@ -3317,14 +3318,15 @@ test('resolveCodexExecOverrides preserves top-level model settings when user con
   try {
     const overrides = withEnv({ CODEX_HOME: codexHome, HOME: rootDir, HQ_ROOT: rootDir, AGENT_OS_DEPLOY_CHECKOUT: rootDir }, () => resolveCodexExecOverrides());
     assert.deepEqual(overrides, {
-      model: 'gpt-5.4',
+      model: 'gpt-5.5',
       modelProvider: 'openai',
       configOverrides: [
         { key: 'model_provider', value: 'openai' },
+        { key: 'model_reasoning_effort', value: 'high' },
       ],
-      reasoningEffort: null,
-      modelSource: 'host-config',
-      effortSource: 'none',
+      reasoningEffort: 'high',
+      modelSource: 'producer',
+      effortSource: 'producer',
     });
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -3358,8 +3360,8 @@ test('resolveCodexExecOverrides preserves allowed scalar model tuning without fo
         { key: 'model_reasoning_effort', value: 'high' },
       ],
       reasoningEffort: 'high',
-      modelSource: 'host-config',
-      effortSource: 'host-config',
+      modelSource: 'producer',
+      effortSource: 'producer',
     });
     assert.deepEqual(
       buildCodexReviewArgs({

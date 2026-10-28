@@ -1,3 +1,4 @@
+import './helpers/registry-session-fixture.mjs';
 import { beforeEach } from 'node:test';
 import { mkdirSync } from 'node:fs';
 import { seedWorkerRegistry } from './helpers/dispatch-files-fixture.mjs';

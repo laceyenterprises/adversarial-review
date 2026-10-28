@@ -1,3 +1,4 @@
+import './helpers/registry-session-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { applyReviewerArm, applyReviewerArmEffectiveRoute, reviewerArmExecution } from '../src/osg-reviewer-arm.mjs';

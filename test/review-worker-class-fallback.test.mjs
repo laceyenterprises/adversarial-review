@@ -1,3 +1,4 @@
+import './helpers/registry-session-fixture.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import { claudeAccountFixture, fleetStatusWithClaudeAccountEvidence } from './helpers/claude-account-fixture.mjs';
 import { test } from 'node:test';

@@ -1,3 +1,4 @@
+import './helpers/registry-session-fixture.mjs';
 // Historical cross-harness scenarios retain explicit personal-class pin behavior.
 // Automatic account routing is covered in codex-worker-account-routing.test.mjs.
 import { afhGroundingSnapshotFromStdout, reviewerModelGrounding, applyAfhReviewerFallback, createAfhReviewerGroundingCache } from '../src/afh-reviewer-fallback.mjs';

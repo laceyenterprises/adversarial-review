@@ -12,11 +12,7 @@ import { runLowBudgetWatcherPoll } from './watcher-github-budget.mjs';
 import { withGitHubBudgetScope } from './rate-limit-throttle.mjs';
 import { sweepPrimaryChangeStore } from './ama/primary-change-store.mjs';
 import { createHammerScratchSweepTicker } from './ama/hammer-scratch-sweep.mjs';
-/**
- * LAC-11: PR Watcher
- * Polls GitHub every N minutes for new agent-built PRs and spawns reviewer agents.
- * Also tracks PR lifecycle (merged/closed) and syncs status to Linear automatically.
- */
+// Polls GitHub for new agent-built PRs and spawns reviewer agents.
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';

@@ -1,3 +1,4 @@
+import './helpers/registry-session-fixture.mjs';
 import './helpers/dispatch-files-preload.mjs';
 import { resolveOsgRemediatorRoute } from '../src/osg-remediator.mjs';
 import test from 'node:test';

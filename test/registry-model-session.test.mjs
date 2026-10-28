@@ -113,6 +113,38 @@ test('registry outage defers remediation before claiming a pending job', async t
   }
 });
 
+test('registry expiry after claim requeues a non-blocking Codex job without spawning or losing a round', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'registry-claimed-expiry-'));
+  const previousEndpoint = process.env.APP_CONTRACT_ENDPOINT_URL;
+  const f = fixture(t, 'claimed-expiry');
+  process.env.APP_CONTRACT_ENDPOINT_URL = f.env.APP_CONTRACT_ENDPOINT_URL;
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  try {
+    createFollowUpJob({rootDir, branch: 'fixture/remediation', repo: 'example/fixture',
+      prNumber: 8, reviewerModel: 'claude', builderTag: 'codex',
+      reviewBody: '## Summary\nFix it.\n\n## Verdict\nComment only',
+      reviewPostedAt: '2026-10-28T10:00:00.000Z', critical: false});
+    const result = await consumeNextFollowUpJob({rootDir, promptTemplate: 'fixture prompt', log: quiet,
+      onClaim(job) { job.nonBlockingOnly = true; now += 60_000; },
+      resolvePRLifecycleImpl: async () => null,
+      resolveRemediationWorkerClassImpl: async () => ({workerClass: 'codex'}),
+      execFileImpl: () => assert.fail('expired registry must not invoke a subprocess'),
+      spawnImpl: () => assert.fail('expired registry must not spawn a worker'),
+    });
+    assert.equal(result.reason, 'registry-unavailable');
+    assert.equal(result.consumed, false);
+    assert.equal(result.job.status, 'pending');
+    assert.equal(result.job.remediationPlan.currentRound, 0);
+    assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'pending')).filter(name => name.endsWith('.json')).length, 1);
+    assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'inProgress')).filter(name => name.endsWith('.json')).length, 0);
+  } finally {
+    if (previousEndpoint === undefined) delete process.env.APP_CONTRACT_ENDPOINT_URL;
+    else process.env.APP_CONTRACT_ENDPOINT_URL = previousEndpoint;
+    rmSync(rootDir, {recursive: true, force: true});
+  }
+});
+
 test('expired cache refuses sync use and async resolution refreshes without a new session', async t => {
   const f = fixture(t, 'expiry');
   let now = Date.now();

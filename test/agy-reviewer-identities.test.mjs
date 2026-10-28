@@ -1,3 +1,4 @@
+import './helpers/registry-session-fixture.mjs';
 // CCX-08 — multi-identity agy reviewer (credential-capacity-expansion SPEC
 // §2b, §3 CCX-08). The pinned commands CCX-07 installs are root-owned and
 // reached through sudo; here a fake install stands in for both: a fake `sudo`

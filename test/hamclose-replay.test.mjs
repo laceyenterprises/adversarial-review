@@ -1,3 +1,4 @@
+import './helpers/registry-session-fixture.mjs';
 import { watcherTick } from './helpers/smv-watcher.mjs';
 import { collect } from './helpers/hamclose-history.mjs';
 import test from 'node:test';

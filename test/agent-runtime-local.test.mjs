@@ -626,7 +626,8 @@ test('remediation registry uses public evidence and never falls back to a checko
       modelSource: 'producer',
       reasoningSource: 'none',
     });
-    rmSync(mirrorPath);
+    writeFileSync(mirrorPath, JSON.stringify({classes: {}}));
+    // An explicit empty producer snapshot exercises optional-model fallback.
     // This fixture replaces the transport itself; TTL behavior is exercised
     // against the real transport in registry-model-session.test.mjs.
     assert.equal(resolveRemediationModel('remediator-codex', options).resolvedModel, 'constant');

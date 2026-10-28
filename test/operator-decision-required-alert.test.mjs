@@ -288,15 +288,16 @@ for (const [bucket, status] of [
   });
 }
 
-for (const bucket of ['stopped', 'failed']) {
-  test(`NOTICEHOLD-01 reports a ${bucket} job failure when no explicit stop is recorded`, async () => {
+for (const [bucket, diagnostic] of ['stopped', 'failed'].flatMap(bucket =>
+  ['reason', 'message'].map(diagnostic => [bucket, diagnostic]))) {
+  test(`NOTICEHOLD-01 reports a ${bucket} job failure ${diagnostic} when no explicit stop is recorded`, async () => {
     await withRootAsync(async root => {
       const { alerts, options } = noticeFixture(root);
       recordOperatorNoticeCloserOutcome(root, identity, remediatorWait);
       writeFollowUpJob(join(getFollowUpJobDir(root, bucket), 'o__r-pr-1-failure.json'), {
         ...identity, schemaVersion: FOLLOW_UP_JOB_SCHEMA_VERSION, revisionRef: HEAD,
         status: bucket, kind: 'adversarial-review-follow-up',
-        failure: { code: 'worker-crash', message: 'Remediation worker exited unexpectedly.' },
+        failure: { code: 'worker-crash', [diagnostic]: 'Remediation worker exited unexpectedly.' },
       });
       await maybeDeliverOperatorDecisionNotice(options);
       assert.equal(alerts.length, 1);
@@ -308,6 +309,27 @@ for (const bucket of ['stopped', 'failed']) {
     });
   });
 }
+
+test('NOTICEHOLD-01 preserves an explicit stop over incidental failure metadata', async () => {
+  await withRootAsync(async root => {
+    const { alerts, options } = noticeFixture(root);
+    recordOperatorNoticeCloserOutcome(root, identity, remediatorWait);
+    writeFollowUpJob(join(getFollowUpJobDir(root, 'stopped'), 'o__r-pr-1-explicit-stop.json'), {
+      ...identity, schemaVersion: FOLLOW_UP_JOB_SCHEMA_VERSION, revisionRef: HEAD,
+      status: 'stopped', kind: 'adversarial-review-follow-up',
+      remediationPlan: { currentRound: 1, maxRounds: 3, stop: {
+        code: 'operator-label-required', reason: 'An operator must authorize the guarded change.',
+      } },
+      failure: { code: 'worker-crash', reason: 'Incidental worker exit after the stop.' },
+    });
+    await maybeDeliverOperatorDecisionNotice(options);
+    assert.equal(alerts.length, 1);
+    assert.equal(alerts[0].meta.payload.remediation_stop_code, 'operator-label-required');
+    assert.equal(alerts[0].meta.payload.remediation_stop_reason,
+      'An operator must authorize the guarded change.');
+    assert.doesNotMatch(alerts[0].text, /worker-crash|Incidental worker exit/);
+  });
+});
 
 test('NOTICEHOLD-01 holds a closer-owned next action with a live closer', async () => {
   await withRootAsync(async root => {

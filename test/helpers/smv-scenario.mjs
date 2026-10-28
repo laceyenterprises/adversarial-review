@@ -70,6 +70,13 @@ let evidence = {};
 if (scenario === 'clean') {
   // LRQSTATUS-01: scheduling terminality does not release a parked PR owner.
   const { launchRequestInFlight, launchRequestOwned, launchRequestMeaning } = await import('../../src/ama/launch-request-status.mjs');
+  // GSR-03: suspended work retains ownership without becoming parked or terminal.
+  const suspended = { ok: true, row: { status: 'suspended' } };
+  assert.equal(launchRequestMeaning(suspended.row).terminal, false);
+  assert.equal(launchRequestMeaning(suspended.row).succeeded, false);
+  assert.equal(launchRequestMeaning(suspended.row).parked, false);
+  assert.equal(launchRequestInFlight(suspended), true);
+  assert.equal(launchRequestOwned(suspended), true);
   assert.equal(launchRequestMeaning({ status: 'succeeded', terminal: false, succeeded: false }).terminal, false);
   assert.equal(launchRequestMeaning({ status: 'succeeded', succeeded: false }).succeeded, false);
   assert.equal(launchRequestMeaning({ status: null, terminal: true, succeeded: false }).terminal, true);

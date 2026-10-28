@@ -2931,9 +2931,27 @@ async function resolveSelfOwnedHammerCloserRunLiveness({
   return { live, workerStatus, launchRequestId, pid, pidAlive };
 }
 
+// Only settled, exact-head absence evidence can bridge missing workspace launch
+// metadata. An empty query on an unresolved intent is not a no-launch proof.
+function provenNoLaunchCloserRecord(record, { repo, prNumber, headSha, workerId }) {
+  const proof = record?.preReceiptReconciliation;
+  const query = proof?.query;
+  return record?.state === 'no-dispatch' && record.repo === repo
+    && Number(record.prNumber) === Number(prNumber) && record.headSha === headSha
+    && (!record.workerId || record.workerId === workerId)
+    && !record.launchRequestId && !record.dispatchId
+    && proof?.status === 'no-launch' && query?.ok === true && query.rowCount === 0
+    && query.kind === 'launch-request-by-idempotency-key'
+    && Boolean(record.dispatchIdempotencyKey)
+    && query.idempotencyKey === record.dispatchIdempotencyKey;
+}
+
 async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
   repo,
   prNumber,
+  headSha,
+  noLaunchRecord = null,
+  recordOrphanRefusalImpl = () => {},
   workerClass,
   workerId: workerIdOverride = null,
   hqPath,
@@ -2991,7 +3009,10 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
     readWorkerDispatchFilesImpl,
     processKillImpl,
   });
-  if (liveness.live || liveness.unknown) {
+  const orphan = liveness.unknown && !liveness.launchRequestId
+    && ['missing-launch-request-id', 'dispatch-files-unavailable'].includes(liveness.reason)
+    && provenNoLaunchCloserRecord(noLaunchRecord, { repo, prNumber, headSha, workerId });
+  if (liveness.live || (liveness.unknown && !orphan)) {
     logAmaCloserDispatchEvent(logger, liveness.unknown ? 'closer_reclaim_deferred_unknown_run' : 'closer_reclaim_skipped_live_run', {
       repo,
       prNumber,
@@ -3013,8 +3034,10 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
     };
   }
 
-  const args = ['worker', 'tear-down', workerId, '--force', '--root', root];
-  const maxAttempts = 3;
+  // Orphan absence permits a request, never a force-kill. The host retains its
+  // owner/process/git proofs and may refuse teardown.
+  const args = ['worker', 'tear-down', workerId, ...(orphan ? [] : ['--force']), '--root', root];
+  const maxAttempts = orphan ? 1 : 3;
   const retryBackoffMs = [250, 1000];
   let lastErr = null;
   let attempts = 0;
@@ -3022,7 +3045,7 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
     attempts = attempt;
     try {
       await execFileImpl(hqPath, args, {
-        env: process.env,
+        env,
         cwd: AGENT_OS_ROOT,
         maxBuffer: 1024 * 1024,
         timeout: loadAwareTimeoutMs(60_000),
@@ -3040,6 +3063,17 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
   }
   if (lastErr) {
     const error = String(lastErr?.stderr || lastErr?.message || lastErr);
+    if (orphan) {
+      if (noLaunchRecord.preReceiptReconciliation.orphanReclaimRefusal?.reason !== error) {
+        recordOrphanRefusalImpl({ reason: error });
+        logAmaCloserDispatchEvent(logger, 'closer_orphan_reclaim_refused', {
+          repo, prNumber, headSha, workerId, worktreePath,
+          reason: error, action: 'hq-worker-tear-down', force: false, attempts,
+        }, { level: 'warn' });
+      }
+      return { attempted: true, ok: false, orphan: true, unknown: true,
+        reason: 'closer-orphan-reclaim-refused', workerId, worktreePath, error };
+    }
     logAmaCloserDispatchEvent(logger, 'closer_provision_collision_reclaim_failed', {
       repo,
       prNumber,
@@ -3061,11 +3095,12 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
     workerId,
     worktreePath,
     action: 'hq-worker-tear-down',
-    force: true,
+    force: !orphan,
     status: 'reclaimed',
     worktreeAgeMs,
   });
-  return { attempted: true, ok: true, workerId, worktreePath, worktreeAgeMs };
+  return { attempted: true, ok: true, workerId, worktreePath, worktreeAgeMs,
+    ...(orphan ? { orphan: true } : {}) };
 }
 
 async function teardownSamePrHammerHolder({
@@ -4468,6 +4503,8 @@ async function maybeDispatchAmaCloserAttempt({
   execFileImpl = execFileAsync,
   processKillImpl = process.kill,
   processExecFileImpl,
+  readWorkerDispatchFilesImpl = readWorkerDispatchFiles,
+  readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedgerAsync,
   observeCloserBacklogImpl = observeCloserBacklog,
   readTemplateImpl = null,
   writeFileImpl = null,
@@ -7153,7 +7190,43 @@ async function maybeDispatchAmaCloserAttempt({
   // Allocate only for a lease-owning launch attempt.
   let scratchDir;
   let retainScratchDir = false;
+  let closerReclaim;
   try {
+  // Re-read under the PR lock before a new intent overwrites the settled proof.
+  // A refusal leaves that proof available for the next ordinary admission.
+  const noLaunchRecord = readAmaCloserDispatchRecord(rootDir, targetDispatchIdentity);
+  if (provenNoLaunchCloserRecord(noLaunchRecord, { repo, prNumber,
+    headSha: targetRemediationSha, workerId })) {
+    try {
+      closerReclaim = await reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+        repo, prNumber, headSha: targetRemediationSha, noLaunchRecord,
+        workerClass, workerId, hqPath, hqRoot, execFileImpl, logger, env,
+        readWorkerDispatchFilesImpl, readLatestWorkerRunStatusImpl, processKillImpl,
+        recordOrphanRefusalImpl: refusal => updateDispatchRecord(rootDir, targetDispatchIdentity,
+          current => ({ ...current, preReceiptReconciliation: {
+            ...current.preReceiptReconciliation, orphanReclaimRefusal: refusal,
+          } })),
+      });
+    } catch (error) {
+      updateAmaCloserLease({ rootDir, ...leaseIdentity, status: 'terminal',
+        expectedLease: leaseResult.lease,
+        terminalOutcome: 'deferred', now: dispatchContext.dispatchedAt });
+      throw error;
+    }
+    if (closerReclaim.live || closerReclaim.unknown) {
+      updateAmaCloserLease({ rootDir, ...leaseIdentity, status: 'terminal',
+        expectedLease: leaseResult.lease,
+        terminalOutcome: 'deferred', now: dispatchContext.dispatchedAt });
+      if (closerReclaim.unknown) {
+        return deferUnknownCloserCustody({ rootDir, repo, prNumber,
+          headSha: targetRemediationSha, now: Date.parse(dispatchContext.dispatchedAt), env,
+          pageImpl: (message, options) => deliverAlertImpl(message, { ...options,
+            event: 'ama_closer.worker_evidence_wait_exhausted', payload: { repo, prNumber } }) });
+      }
+      return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+        reason: 'hammer-closer-in-flight', workerStatus: closerReclaim.workerStatus || null });
+    }
+  }
   try {
   scratchDir = createHammerScratchDir(promptDir);
   promptPath = join(promptDir, `${repo.replace('/', '-')}-pr-${prNumber}-${reviewedSha}-${basename(scratchDir)}.md`);
@@ -7482,7 +7555,7 @@ async function maybeDispatchAmaCloserAttempt({
   // regress any repo -- the only repos it applied to are exactly the ones where
   // dispatch always failed.
 
-  const closerReclaim = await reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+  closerReclaim ||= await reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
     repo,
     prNumber,
     workerClass,
@@ -7491,6 +7564,10 @@ async function maybeDispatchAmaCloserAttempt({
     hqRoot,
     execFileImpl,
     logger,
+    env,
+    readWorkerDispatchFilesImpl,
+    readLatestWorkerRunStatusImpl,
+    processKillImpl,
   });
   if (closerReclaim?.live || closerReclaim?.unknown) {
     // Retain custody for a live closer or unavailable liveness evidence. Do NOT re-provision

@@ -2300,6 +2300,19 @@ bounded watcher, submitter and key-presence evidence, without command lines.
 empty-key query. A crash after lease deferral replays only after re-proving the
 same evidence against that unchanged deferred lease. No config key, CI gate or
 live-state repair is added.
+
+CLOSERORPHAN-01 carries that settled exact-head `no-launch` proof into worktree
+reclaim before a replacement intent overwrites it. Only unknown liveness caused
+by missing launch metadata, with a successful empty query for the settled
+record's idempotency key, permits host teardown without `--force`. Host refusal
+retains the proof and defers the pending lease; a bounded refusal reason in
+`preReceiptReconciliation.orphanReclaimRefusal` suppresses repeat events for an
+unchanged refusal across polls and restarts. Successful teardown proceeds through
+ordinary dispatch. Plain unknown and launch-bound live/unknown runs still hold;
+the pending lease defers before replacement intent publication, preserving the
+settled no-launch proof for later admission.
+Existing lifecycle states, transitions and smoke promises are unchanged.
+
 Settlement defers a matching pending lease and rolls back the intent retry
 increment once; retry ledgers and merge eligibility remain authoritative.
 

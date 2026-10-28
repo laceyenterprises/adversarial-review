@@ -799,6 +799,7 @@
     },
     {
       "id": "ama-closer-dispatches",
+      "orphanWorktreeReclaim": "CLOSERORPHAN-01: settled exact-head empty-key no-launch proof permits non-force host teardown for missing launch metadata before replacement intent publication; refusal preserves proof and stores bounded preReceiptReconciliation.orphanReclaimRefusal.reason for unchanged-reason event deduplication across restart. Launch-bound and unproven runs retain custody.",
       "dispatchFilesEvidence": "SDK 0.12.0 launch/run-authorized sidecar and redacted logical log projections; independent workspace/host capabilities. Partial, foreign or unavailable evidence retains custody; no native fallback. See ama-closer-dispatches.md.",
       "interruptedDispatchFields": ["hqProject", "interruptedAt"],
       "interruptedDispatchState": "dispatch-interrupted",

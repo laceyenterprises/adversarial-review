@@ -223,11 +223,14 @@ legacy intents, reads authoritative PR state through the shared reconciler,
 and performs no GitHub mutation or dispatch.
 
 Run the existing reconciliation CLI **as the daemon owner**, with its explicit
-`--root-dir` and `--hq-root`, first with `--dry-run`. Unlike the settlement
-command, this older reconciliation CLI still accepts and validates `--ledger-target`
-and prints its resolved label for compatibility; SDK launch reads ignore that
-target. Its printed `ledger` label is not launch-query provenance. Check the
-recorded `app-contract` / `app-sdk` evidence and complete grants instead.
+`--root-dir` and `--hq-root`, first with `--dry-run`. Like the settlement
+command, it rejects retired database-source flags such as `--ledger-target`
+before reconciliation. It prints `source: app-sdk` and reconciliation counts,
+without a `ledger` label. Follow the
+[owner-qualified recovery commands](RUNBOOK-ama-closure.md#amacap-01--amascale-01-closer-launch-capacity-and-reconciliation)
+and enable SDK reads only after release, producer and full-grant readiness.
+Check the recorded `app-contract` / `app-sdk` evidence; a source label alone
+cannot certify successful reads or unfiltered absence.
 Dry-run preserves intent, lease and budget bytes; a companion lock file may be
 created. `preReceipt` counts report recovered, no-launch, retired, unknown and held cases.
 A source-code change does not authorize production apply. Do not run apply

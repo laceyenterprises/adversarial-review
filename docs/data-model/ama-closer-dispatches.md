@@ -222,11 +222,14 @@ legacy intents, reads authoritative PR state through the shared reconciler,
 and performs no GitHub mutation or dispatch.
 
 Run the existing reconciliation CLI **as the daemon owner**, with its explicit
-`--root-dir` and `--hq-root`, first with `--dry-run`. Unlike the settlement
-command, this older reconciliation CLI still accepts and validates `--ledger-target`
-and prints its resolved label for compatibility; SDK launch reads ignore that
-target. Its printed `ledger` label is not launch-query provenance. Check the
-recorded `app-contract` / `app-sdk` evidence and complete grants instead.
+`--root-dir` and `--hq-root`, first with `--dry-run`. Like the settlement
+command, it rejects retired database-source flags such as `--ledger-target`
+before reconciliation. It prints `source: app-sdk` and reconciliation counts,
+without a `ledger` label. Follow the
+[owner-qualified recovery commands](../RUNBOOK-ama-closure.md#amacap-01--amascale-01-closer-launch-capacity-and-reconciliation)
+and enable SDK reads only after release, producer and full-grant readiness.
+Check the recorded `app-contract` / `app-sdk` evidence; a source label alone
+cannot certify successful reads or unfiltered absence.
 Dry-run preserves intent, lease and budget bytes; a companion lock file may be
 created. `preReceipt` counts report recovered, no-launch, retired, unknown and held cases.
 A source-code change does not authorize production apply. Do not run apply
@@ -437,9 +440,10 @@ The LAC-2081 reconciliation contract above supersedes dead-owner/age rollback.
   `unverified-terminal-success` with raw `terminalLaunchStatus: succeeded`.
 - Manual reconciliation must run as the canonical daemon account for the runtime
   root, pinning `--hq-root` to match the watcher and enabling the SDK reader
-  only after producer/release/grant readiness. The reconciliation CLI retains
-  legacy ledger-target validation and output labels, but they do not select
-  the SDK launch evidence source or certify unfiltered absence.
+  only after producer/release/grant readiness. The reconciliation CLI rejects
+  retired database-source flags and prints `source: app-sdk` with counts;
+  inspect recorded query evidence rather than inferring unfiltered absence
+  from the source label.
   Atomic replacement takes the caller's ownership; see the owner-qualified
   commands in `docs/RUNBOOK-ama-closure.md`.
 - `workerId` is authoritative for scoped hammer cleanup when present. Legacy

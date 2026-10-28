@@ -2857,9 +2857,15 @@ not activate routing or change review/merge authority.
 The strict config default for Codex account order is now `corporate-first`,
 matching the pooled hammer, remediator and reviewer selectors. Explicit legacy
 orders remain loadable before enrollment. Once a role pool is declared,
-`resolveIdentityTokenPools` refuses conflicting explicit legacy class pins or
-personal-first order with the exact config path and winning source. It never
-rewrites an override. The migration helper canonicalizes class aliases before
+`resolveIdentityTokenPools` accepts canonical role selectors from repo, local
+and environment layers, including `roles.remediator: codex` for the
+`remediator-codex` pool. Only account-affine twins conflict with a declared role
+pool. An explicit `roles.codex_worker_account_order` conflicts when its provider
+order disagrees with any declared Codex-family pool; an agreeing key emits one
+redacted redundancy warning per process. Singleton pools agree with either
+legacy order. Account IDs are opaque; provider bindings determine agreement.
+Refusals retain the exact config path and winning source. The helper never
+rewrites an override, and canonicalizes class aliases before
 mapping remediator harness names to their role pools. This does not expand the
 strict schema's accepted role values. Empty maps mean no enrollment; null pool
 declarations remain invalid and produce a sourced configuration error from the

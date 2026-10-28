@@ -36,6 +36,27 @@ function wireFor(identity, index = 0) {
   return value;
 }
 
+test('ITPROLEPOOL-01 canonical selectors let pooled hammer reach the account owner', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'canonical-pool-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const topPath = join(dir, 'config.yaml');
+  const wire = wireFor('hammer');
+  writeFileSync(topPath, JSON.stringify({ version: 1, oauth: wire.oauth, roles: {
+    remediator: 'codex', merge_agent_worker_class: 'hammer', build_pack_default_worker_class: 'codex',
+    adversarial: { merge_authority: { worker_class: 'hammer' } },
+  } }));
+  let proposals = 0;
+  const result = await pool.selectWorkerTokenAccount({ identity: 'hammer', model: 'gpt-6',
+    env: { AGENT_OS_CONFIG_PATH: topPath }, ownerImpl: async request => {
+      proposals++;
+      assert.equal(request.identity, 'hammer');
+      return wire;
+    } });
+  assert.equal(proposals, 1);
+  assert.equal(result.tokenAccountId, wire.selection.account_id);
+  assert.equal(result.hold, false);
+});
+
 for (const invalidAccounts of [false, true]) {
   test(`ITPPOOLCONFLICT-01 undeclared workers retain class routing with invalidAccounts=${invalidAccounts}`, async t => {
     const fixture = poolConflictFixture(t, { invalidAccounts });

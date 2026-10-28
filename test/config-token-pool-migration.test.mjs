@@ -4,7 +4,7 @@ import { AgentOSConfigError, loadConfig } from '../src/config-loader.mjs';
 import { PoolConfigConflictError, legacyPoolOverrideConflicts, validateLegacyPoolOverrides } from '../src/config-token-pool-migration.mjs';
 import { resolveIdentityTokenPools, validateStartupRoleConfig } from '../src/role-config.mjs';
 import { poolConflictFixture } from './helpers/pool-conflict-fixture.mjs';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -12,6 +12,44 @@ const accounts = {
   corp: { family: 'codex', broker_provider: 'codex-corp', allowed_models: ['gpt-6'], concurrency: 1 },
   personal: { family: 'codex', broker_provider: 'codex', allowed_models: ['gpt-6'], concurrency: 1 },
 };
+
+const selectorCases = JSON.parse(readFileSync(new URL('./fixtures/pool-role-selector-cases.v1.json', import.meta.url)));
+for (const [index, fixture] of selectorCases.cases.entries()) {
+  test(`ITPROLEPOOL-01 shared selector contract: ${fixture.name}`, async t => {
+    // Fresh module gives each case its own process-lifetime warning cache.
+    const { legacyPoolOverrideConflicts: conflicts } = await import(`../src/config-token-pool-migration.mjs?case=${index}`);
+    const messages = [];
+    t.mock.method(console, 'warn', message => messages.push(message));
+    const values = { ...fixture.values, 'oauth.identity_token_pools': fixture.pools,
+      'oauth.token_accounts': selectorCases.accounts };
+    const cfg = { get: (key, fallback) => values[key] ?? fallback,
+      resolutionTrace: key => Object.hasOwn(fixture.values, key) ? [{ source: fixture.source }] : [] };
+    for (let attempt = 0; attempt < 2; attempt++) assert.deepEqual(conflicts(cfg), fixture.conflicts);
+    assert.deepEqual(messages, fixture.warnings.map(key => `pool-config-redundant: ${key}; declared pools own account order`));
+  });
+}
+
+test('ITPROLEPOOL-01 all four Codex pools resolve with canonical selectors from every layer', () => {
+  for (const source of ['top', 'local', 'env']) {
+    const dir = mkdtempSync(join(tmpdir(), 'role-pools-'));
+    try {
+      const topPath = join(dir, 'config.yaml');
+      const pools = Object.fromEntries(['codex', 'codex-reviewer', 'hammer', 'remediator-codex'].map(role => [role, ['personal', 'corp']]));
+      const roles = { remediator: 'codex', build_pack_default_worker_class: 'codex',
+        merge_agent_worker_class: 'hammer', adversarial: { merge_authority: { worker_class: 'hammer' } } };
+      writeFileSync(topPath, JSON.stringify({ version: 1, oauth: { token_accounts: accounts, identity_token_pools: pools },
+        ...(source === 'top' ? { roles } : {}) }));
+      if (source === 'local') writeFileSync(join(dir, 'config.local.yaml'), JSON.stringify({ roles }));
+      const env = source === 'env' ? {
+        AGENT_OS_ROLES_REMEDIATOR: 'codex', AGENT_OS_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS: 'codex',
+        AGENT_OS_ROLES_MERGE_AGENT_WORKER_CLASS: 'hammer', AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_WORKER_CLASS: 'hammer',
+      } : {};
+      const options = { topPath, modulePaths: [], env };
+      assert.equal(resolveIdentityTokenPools(options).identity_token_pools.hammer[0], 'personal');
+      assert.deepEqual(legacyPoolOverrideConflicts(loadConfig(options)), []);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+});
 
 test('ITPPOOLCONFLICT-01 startup reports runtime conflicts as nonfatal redacted warnings', t => {
   const fixture = poolConflictFixture(t, { identities: ['codex', 'hammer'] });
@@ -73,10 +111,7 @@ for (const declaration of ['', ' null']) {
 }
 
 for (const [pin, role] of [
-  ['codex', 'remediator-codex'],
   ['codex-corp', 'remediator-codex'],
-  ['claude', 'remediator-claude'],
-  ['claude-code', 'remediator-claude'],
   ['claude-code-corp', 'remediator-claude'],
   ['remediator-codex-corp', 'remediator-codex'],
   ['remediator-claude-corp', 'remediator-claude'],
@@ -96,15 +131,15 @@ for (const [pin, role] of [
 
 for (const [key, value] of [
   ['roles.codex_worker_account_order', 'personal-first'],
-  ['roles.remediator', 'codex'],
-  ['roles.adversarial.merge_authority.worker_class', 'hammer'],
+  ['roles.build_pack_default_worker_class', 'codex-corp'],
+  ['roles.adversarial.merge_authority.worker_class', 'hammer-corp'],
 ]) test(`ITP-17 conflicting legacy override refuses with exact path: ${key}`, () => {
   const dir = mkdtempSync(join(tmpdir(), 'itp17-conflict-'));
   try {
     const topPath = join(dir, 'config.yaml');
     writeFileSync(topPath, JSON.stringify({ version: 1, oauth: {
       token_accounts: accounts, identity_token_pools: {
-        hammer: ['corp', 'personal'], 'remediator-codex': ['corp', 'personal'],
+        codex: ['corp', 'personal'], hammer: ['corp', 'personal'], 'remediator-codex': ['corp', 'personal'],
       },
     } }));
     const local = {};

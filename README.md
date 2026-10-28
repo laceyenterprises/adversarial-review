@@ -1165,7 +1165,8 @@ empty idempotency-key query. The host receives one teardown request without
 `--force` before a replacement intent overwrites that proof. Refusal retains
 custody and the proof, with one structured event per unchanged host reason
 across polls/restarts; success resumes ordinary dispatch. Plain unknown and
-launch-bound runs retain their existing holds. Synthetic branch-holder and
+launch-bound runs retain their existing holds and settled proof before any
+replacement intent is written. Synthetic branch-holder and
 dispatch-priority fixtures cover recovery and refusal. Lifecycle states and
 smoke promises are unchanged; deployed recovery awaits natural observation.
 

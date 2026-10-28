@@ -2308,7 +2308,9 @@ record's idempotency key, permits host teardown without `--force`. Host refusal
 retains the proof and defers the pending lease; a bounded refusal reason in
 `preReceiptReconciliation.orphanReclaimRefusal` suppresses repeat events for an
 unchanged refusal across polls and restarts. Successful teardown proceeds through
-ordinary dispatch. Plain unknown and launch-bound live/unknown runs still hold.
+ordinary dispatch. Plain unknown and launch-bound live/unknown runs still hold;
+the pending lease defers before replacement intent publication, preserving the
+settled no-launch proof for later admission.
 Existing lifecycle states, transitions and smoke promises are unchanged.
 
 Settlement defers a matching pending lease and rolls back the intent retry

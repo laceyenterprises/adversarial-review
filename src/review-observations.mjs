@@ -11,10 +11,13 @@ const tables = { passes: 'reviewer_passes', reviews: 'reviewed_prs' };
 const columns = (db, table) => new Set(db.prepare(`PRAGMA table_info(${table})`).all().map(row => row.name));
 
 export function readReviewObservations({ rootDir, selector, repositories }) {
+  if (selector === null || typeof selector !== 'object' || Array.isArray(selector)) throw new Error('invalid review selector');
   const { kind, since, ended_since: endedSince, limit = 100, offset = 0 } = selector;
   if (!Object.hasOwn(FIELDS, kind) || Object.keys(selector).some(key => !['kind', 'since', 'ended_since', 'limit', 'offset'].includes(key)) ||
       !Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isInteger(offset) || offset < 0 || offset > 10000 ||
-      (since !== undefined && (typeof since !== 'string' || !Number.isFinite(Date.parse(since))))) throw new Error('invalid review selector');
+      (kind === 'reviews' && (since !== undefined || endedSince !== undefined)) ||
+      (since !== undefined && (typeof since !== 'string' || !Number.isFinite(Date.parse(since)))) ||
+      (endedSince !== undefined && (typeof endedSince !== 'string' || !Number.isFinite(Date.parse(endedSince))))) throw new Error('invalid review selector');
   if (!Array.isArray(repositories) || !repositories.length || repositories.length > 100 ||
       repositories.some(repo => typeof repo !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo))) throw new Error('review repository grant required');
   const { db, status } = openReviewStateReadOnlyDb(rootDir);
@@ -43,7 +46,7 @@ export function readReviewObservations({ rootDir, selector, repositories }) {
       args.push(since);
     }
     if (endedSince !== undefined) {
-      if (kind !== 'passes' || !cols.has('ended_at') || typeof endedSince !== 'string' || !Number.isFinite(Date.parse(endedSince))) throw new Error('review end time unavailable');
+      if (!cols.has('ended_at')) throw new Error('review end time unavailable');
       where += ' AND julianday(ended_at) >= julianday(?)';
       args.push(endedSince);
     }
@@ -56,21 +59,19 @@ export function readReviewObservations({ rootDir, selector, repositories }) {
       const closeCols = columns(db, 'pr_merge_closeouts');
       const passFields = { body_md: 'review_body', verdict: 'verdict', ended_at: 'review_ended_at', attempt_number: 'attempt_number' };
       const closeFields = { closeout_body_md: 'closeout_body', closeout_posted_at: 'closeout_posted_at' };
+      const passQuery = ['repo', 'pr_number', 'pass_id', 'status'].every(field => passCols.has(field))
+        ? db.prepare(`SELECT ${Object.entries(passFields).map(([field, alias]) => `${passCols.has(field) ? field : 'NULL'} AS ${alias}`).join(',')} FROM reviewer_passes WHERE lower(repo) = lower(?) AND pr_number = ? AND status = 'completed' ORDER BY pass_id DESC LIMIT 1`)
+        : null;
+      const closeoutQuery = ['repo', 'pr_number'].every(field => closeCols.has(field))
+        ? db.prepare(`SELECT ${Object.entries(closeFields).map(([field, alias]) => `${closeCols.has(field) ? field : 'NULL'} AS ${alias}`).join(',')} FROM pr_merge_closeouts WHERE lower(repo) = lower(?) AND pr_number = ? LIMIT 1`)
+        : null;
       for (const item of items) {
-        let pass = null;
-        if (['repo', 'pr_number', 'pass_id', 'status'].every(field => passCols.has(field))) {
-          const fields = Object.entries(passFields).map(([field, alias]) => `${passCols.has(field) ? field : 'NULL'} AS ${alias}`);
-          pass = db.prepare(`SELECT ${fields.join(',')} FROM reviewer_passes WHERE repo = ? AND pr_number = ? AND status = 'completed' ORDER BY pass_id DESC LIMIT 1`).get(item.repo, item.pr_number);
-        }
+        const pass = passQuery?.get(item.repo, item.pr_number);
         for (const alias of Object.values(passFields)) item[alias] = pass?.[alias] ?? null;
-        let closeout = null;
-        if (['repo', 'pr_number'].every(field => closeCols.has(field))) {
-          const fields = Object.entries(closeFields).map(([field, alias]) => `${closeCols.has(field) ? field : 'NULL'} AS ${alias}`);
-          closeout = db.prepare(`SELECT ${fields.join(',')} FROM pr_merge_closeouts WHERE repo = ? AND pr_number = ? LIMIT 1`).get(item.repo, item.pr_number);
-        }
+        const closeout = closeoutQuery?.get(item.repo, item.pr_number);
         for (const alias of Object.values(closeFields)) item[alias] = closeout?.[alias] ?? null;
       }
-      for (const field of ['pass_id', 'status', ...Object.keys(passFields)]) if (!passCols.has(field)) missing.push(`reviewer_passes.${field}`);
+      for (const field of ['repo', 'pr_number', 'pass_id', 'status', ...Object.keys(passFields)]) if (!passCols.has(field)) missing.push(`reviewer_passes.${field}`);
       for (const field of ['repo', 'pr_number', ...Object.keys(closeFields)]) if (!closeCols.has(field)) missing.push(`pr_merge_closeouts.${field}`);
     }
     return { schema_version: 1, kind, items, complete, next_offset: complete ? null : offset + limit,

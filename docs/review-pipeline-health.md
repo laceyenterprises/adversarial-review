@@ -661,11 +661,15 @@ or database directly. It imports the existing read-only opener without a daemon
 singleton, reconciliation, schema migration, provider call or GitHub request.
 
 `passes` pages retain producer timestamps, statuses and failure metadata;
-`reviews` pages join the highest completed pass ID and nullable closeout fields.
+`reviews` pages join the highest completed pass ID and nullable closeout fields,
+matching repository names without case sensitivity across the three tables.
 A later failed/running pass cannot replace a completed review. Missing optional
-columns are NULL and listed in `missing_fields`; a confirmed absent store is
+columns produce NULL values; missing pass identity columns suppress the join.
+Both are listed in `missing_fields`. A confirmed absent store is
 `review_store`, distinct from an unreadable dependency. Pages are limited to
 100, offsets to 10000, with exact repository filtering before pagination.
+Only `passes` accepts `since` and `ended_since`; malformed or unsupported
+selectors fail as `invalid review selector` before the store is opened.
 A complete page conveys neither global absence nor mutation authority.
 
 The export changes no durable state machine, merge eligibility, terminal-PR

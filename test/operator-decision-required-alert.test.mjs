@@ -268,17 +268,43 @@ for (const stopped of [false, true]) {
   });
 }
 
-for (const bucket of ['pending', 'inProgress']) {
-  test(`NOTICEHOLD-01 holds a remediator-owned notice for a live ${bucket} job`, async () => {
+for (const [bucket, status] of [
+  ['pending', 'pending'],
+  ['inProgress', 'inProgress'],
+  ['inProgress', 'in-progress'],
+  ['inProgress', 'in_progress'],
+]) {
+  test(`NOTICEHOLD-01 holds a remediator-owned notice for a live ${status} job`, async () => {
     await withRootAsync(async root => {
       const { alerts, options } = noticeFixture(root);
       recordOperatorNoticeCloserOutcome(root, identity, remediatorWait);
       writeFollowUpJob(join(getFollowUpJobDir(root, bucket), 'o__r-pr-1-live.json'), {
-        ...identity, status: bucket === 'pending' ? 'pending' : 'in-progress', kind: 'adversarial-review-follow-up',
+        ...identity, status, kind: 'adversarial-review-follow-up',
       });
       await maybeDeliverOperatorDecisionNotice(options);
       await maybeDeliverOperatorDecisionNotice({ ...options, now: 60 * 60_000 });
       assert.equal(alerts.length, 0);
+    });
+  });
+}
+
+for (const bucket of ['stopped', 'failed']) {
+  test(`NOTICEHOLD-01 reports a ${bucket} job failure when no explicit stop is recorded`, async () => {
+    await withRootAsync(async root => {
+      const { alerts, options } = noticeFixture(root);
+      recordOperatorNoticeCloserOutcome(root, identity, remediatorWait);
+      writeFollowUpJob(join(getFollowUpJobDir(root, bucket), 'o__r-pr-1-failure.json'), {
+        ...identity, schemaVersion: FOLLOW_UP_JOB_SCHEMA_VERSION, revisionRef: HEAD,
+        status: bucket, kind: 'adversarial-review-follow-up',
+        failure: { code: 'worker-crash', message: 'Remediation worker exited unexpectedly.' },
+      });
+      await maybeDeliverOperatorDecisionNotice(options);
+      assert.equal(alerts.length, 1);
+      assert.equal(alerts[0].meta.payload.remediation_stop_code, 'worker-crash');
+      assert.equal(alerts[0].meta.payload.remediation_stop_reason,
+        'Remediation worker exited unexpectedly.');
+      assert.match(alerts[0].text, /worker-crash/);
+      assert.match(alerts[0].text, /Remediation worker exited unexpectedly/);
     });
   });
 }

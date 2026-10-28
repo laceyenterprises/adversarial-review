@@ -8,7 +8,7 @@ import { readAmaCloserDispatchRecord, readAmaCloserDispatchRecordsForPR } from '
 import { operatorNoticeInFlight, operatorNoticeNonRetryableStop,
   operatorNoticePendingRetry, operatorNoticeRetryCapReached } from './ama/operator-notice-route.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
-import { listFollowUpJobsInDir } from './follow-up-jobs.mjs';
+import { isActiveFollowUpJobStatus, listFollowUpJobsInDir } from './follow-up-jobs.mjs';
 import { hasOperatorDecisionRequiredAlerted, markOperatorDecisionRequiredAlerted } from './reviewer-cascade.mjs';
 
 export const OPERATOR_DECISION_NOTICE_BACKSTOP_MS = 45 * 60 * 1000;
@@ -35,7 +35,7 @@ function latestDispatchReviewedSha(rootDir, identity) {
 function liveRemediationJob(rootDir, identity) {
   return ['pending', 'inProgress'].some(bucket => listFollowUpJobsInDir(rootDir, bucket, identity)
     .some(({ job }) => job?.repo === identity.repo && Number(job.prNumber) === Number(identity.prNumber)
-      && ['pending', 'in-progress', 'in_progress'].includes(job.status)));
+      && isActiveFollowUpJobStatus(job.status)));
 }
 
 function remediatorOwns(outcome, headSha) {
@@ -44,13 +44,21 @@ function remediatorOwns(outcome, headSha) {
 }
 
 function remediationStop(rootDir, identity) {
-  const jobs = listFollowUpJobsInDir(rootDir, 'stopped', identity)
+  const jobs = ['stopped', 'failed'].flatMap(bucket => listFollowUpJobsInDir(rootDir, bucket, identity))
     .map(({ job }) => job)
     .filter(job => job?.repo === identity.repo && Number(job.prNumber) === Number(identity.prNumber)
       && [job.headSha, job.revisionRef, job.reviewedHeadSha].includes(identity.headSha))
-    .sort((a, b) => (Date.parse(b.stoppedAt || b.updatedAt || b.createdAt) || 0)
-      - (Date.parse(a.stoppedAt || a.updatedAt || a.createdAt) || 0));
-  return jobs[0]?.remediationPlan?.stop;
+    .sort((a, b) => (Date.parse(b.stoppedAt || b.failedAt || b.updatedAt || b.createdAt) || 0)
+      - (Date.parse(a.stoppedAt || a.failedAt || a.updatedAt || a.createdAt) || 0));
+  const latest = jobs[0];
+  const stop = latest?.remediationPlan?.stop;
+  // Job normalization supplies this placeholder even when no explicit stop exists.
+  const genericStop = stop?.code === 'stopped' && stop.reason === 'Follow-up remediation stopped.';
+  if (stop && !genericStop) return stop;
+  return (latest?.failure && {
+    code: latest.failure.code,
+    reason: latest.failure.reason || latest.failure.message,
+  }) || stop;
 }
 
 // Observation only: never alters closer eligibility, ownership, or dispatch.

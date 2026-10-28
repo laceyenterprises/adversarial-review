@@ -1167,7 +1167,7 @@ function resolveReviewerExecution(harness, { env = process.env, fallbackModel = 
   const pin = modelPin || (harness === 'gemini' ? env.GEMINI_REVIEWER_MODEL : '');
   // Account routing changes the broker binding, not the governed reviewer role.
   const className = `${harness}-reviewer`;
-  const resolution = resolveRemediationModel(className, { env, pin, reasoningPin, fallbackModel });
+  const resolution = resolveRemediationModel(className, { env, pin, reasoningPin, fallbackModel, requireModel: true });
   const model = resolution.modelSource === 'fallback-constant' ? fallbackModel : resolution.resolvedModel;
   const effort = resolution.resolvedReasoningLevel || fallbackEffort;
   const modelSource = resolution.modelSource === 'fallback-constant' ? (fallbackModel ? 'host-config' : 'cli-default') : resolution.modelSource;

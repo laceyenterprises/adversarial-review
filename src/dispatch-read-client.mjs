@@ -7,14 +7,30 @@ let cachedSession;
 const WORKER_REGISTRY_TTL_MS = 60_000;
 // Only async app-session reads populate this cache. Sync model resolution must
 // never register a session or issue a physical request, even after TTL expiry.
-let workerRegistry;
-let workerRegistryRead;
+const workerRegistries = new Map();
+const workerRegistryReads = new Map();
 function registryKey(args) {
   return sessionKey(options(args));
 }
-function registryFresh(key, now = Date.now()) {
-  return workerRegistry?.key === key && now >= workerRegistry.at
-    && now - workerRegistry.at < WORKER_REGISTRY_TTL_MS;
+function registryEntry(store, key, session) {
+  return store.get(key)?.get(session);
+}
+function setRegistryEntry(store, key, session, entry) {
+  if (!store.has(key)) store.set(key, new Map());
+  store.get(key).set(session, entry);
+}
+function deleteRegistryEntry(store, key, session, expected) {
+  const entries = store.get(key);
+  if (entries?.get(session) !== expected) return;
+  entries.delete(session);
+  if (entries.size === 0) store.delete(key);
+}
+function registryFresh(key, session, now = Date.now()) {
+  const entry = registryEntry(workerRegistries, key, session);
+  if (!entry) return null;
+  if (now >= entry.at && now - entry.at < WORKER_REGISTRY_TTL_MS) return entry;
+  deleteRegistryEntry(workerRegistries, key, session, entry);
+  return null;
 }
 function options(args) {
   return { app_id: 'adversarial-review', mode: 'agent-os',
@@ -87,29 +103,37 @@ export const dispatchReadTransport = {
     if (request.action !== 'worker_registry') return boundedCall(read, args);
     const key = registryKey(args);
     const session = args.dispatchSession;
-    if (registryFresh(key) && workerRegistry.session === session) return workerRegistry.reply;
-    if (workerRegistryRead?.key === key && workerRegistryRead.session === session) return workerRegistryRead.promise;
-    const entry = {key, session};
-    workerRegistryRead = entry;
+    const cached = registryFresh(key, session);
+    if (cached) return cached.reply;
+    const pending = registryEntry(workerRegistryReads, key, session);
+    if (pending) return pending.promise;
+    const entry = {};
+    setRegistryEntry(workerRegistryReads, key, session, entry);
     entry.promise = boundedCall(read, args).then(reply => {
-      if (workerRegistryRead === entry) {
-        workerRegistry = reply?.schema_version === 1 && reply.status === 'found'
-          && reply.data?.classes && typeof reply.data.classes === 'object' && !Array.isArray(reply.data.classes)
-          ? {key, session, at: Date.now(), reply} : null;
+      if (registryEntry(workerRegistryReads, key, session) === entry) {
+        if (reply?.schema_version === 1 && reply.status === 'found'
+          && reply.data?.classes && typeof reply.data.classes === 'object' && !Array.isArray(reply.data.classes)) {
+          setRegistryEntry(workerRegistries, key, session, {at: Date.now(), reply});
+        } else {
+          const prior = registryEntry(workerRegistries, key, session);
+          if (prior) deleteRegistryEntry(workerRegistries, key, session, prior);
+        }
       }
       return reply;
     }).catch(error => {
-      if (workerRegistryRead === entry) workerRegistry = null;
+      const prior = registryEntry(workerRegistries, key, session);
+      if (prior) deleteRegistryEntry(workerRegistries, key, session, prior);
       throw error;
-    }).finally(() => { if (workerRegistryRead === entry) workerRegistryRead = null; });
+    }).finally(() => deleteRegistryEntry(workerRegistryReads, key, session, entry));
     return entry.promise;
   },
   hostServicesSync(request, args = {}) {
     if (request.action === 'worker_registry') {
-      if (!registryFresh(registryKey(args), args.nowMs ?? Date.now()) || workerRegistry.session !== args.dispatchSession) {
+      const cached = registryFresh(registryKey(args), args.dispatchSession, args.nowMs ?? Date.now());
+      if (!cached) {
         throw Object.assign(new Error('worker registry unavailable; async prefetch required'), {code: 'registry-unavailable'});
       }
-      return workerRegistry.reply;
+      return cached.reply;
     }
     const config = options(args);
     const session = cachedSession?.config && sessionKey(cachedSession.config) === sessionKey(config) ? cachedSession.session : null;

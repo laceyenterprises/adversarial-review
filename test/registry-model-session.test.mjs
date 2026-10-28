@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { dispatchReadTransport, prepareWorkerObservationSession } from '../src/dispatch-read-client.mjs';
@@ -10,6 +10,8 @@ import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-di
 import { infraRecoverableFailureClass, reviewerFailureClassFromStoredRow } from '../src/reviewer-failure-classification.mjs';
 import { recordCascadeFailure } from '../src/reviewer-cascade.mjs';
 import { settleReviewerAttempt } from '../src/reviewer-spawn-settle.mjs';
+import { consumeNextFollowUpJob } from '../src/follow-up-remediation.mjs';
+import { createFollowUpJob, getFollowUpJobDir } from '../src/follow-up-jobs.mjs';
 
 const quiet = {info() {}, warn() {}};
 const reply = model => ({schema_version: 1, status: 'found', data: {classes: {
@@ -54,6 +56,61 @@ test('cold sync resolution refuses, async prefetch registers once and shares cac
   assert.equal(resolveRemediationModel('hammer', {env: f.env}).resolvedModel, 'governed-closer');
   assert.deepEqual(f.counts(), {connects: 1, reads: 1});
   assert.throws(() => resolveReviewerExecution('claude', {env: {APP_CONTRACT_ENDPOINT_URL: 'https://example.invalid/foreign'}, log: quiet}), {code: 'registry-unavailable'});
+});
+
+test('a valid snapshot missing the reviewer class cannot select a host fallback', async t => {
+  const f = fixture(t, 'missing-class');
+  f.set({schema_version: 1, status: 'found', data: {classes: {}}});
+  await prefetchWorkerRegistry({env: f.env});
+  assert.throws(() => resolveReviewerExecution('codex', {
+    env: f.env, fallbackModel: 'host-model', log: quiet,
+  }), {code: 'registry-unavailable', failureClass: 'reviewer-model-unresolved'});
+});
+
+test('concurrent prefetches for different endpoints each populate their own sync cache', async t => {
+  const first = {APP_CONTRACT_ENDPOINT_URL: 'https://example.invalid/concurrent-first'};
+  const second = {APP_CONTRACT_ENDPOINT_URL: 'https://example.invalid/concurrent-second'};
+  const finish = new Map();
+  t.mock.method(dispatchReadTransport, 'sdk', () => ({
+    async connect(config) { return {sessionToken: config.endpoint_url, endpoint_url: config.endpoint_url}; },
+    readSessionHostServices(_request, options) {
+      return new Promise(resolve => finish.set(options.endpoint_url, resolve));
+    },
+    readHostServicesSync() { assert.fail('sync registry read issued a physical request'); },
+  }));
+  const a = prefetchWorkerRegistry({env: first});
+  const b = prefetchWorkerRegistry({env: second});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(finish.size, 2);
+  finish.get(second.APP_CONTRACT_ENDPOINT_URL)(reply('second-model'));
+  await b;
+  finish.get(first.APP_CONTRACT_ENDPOINT_URL)(reply('first-model'));
+  await a;
+  assert.equal(resolveReviewerExecution('claude', {env: first, log: quiet}).model, 'first-model');
+  assert.equal(resolveReviewerExecution('claude', {env: second, log: quiet}).model, 'second-model');
+});
+
+test('registry outage defers remediation before claiming a pending job', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'registry-claim-'));
+  const previousEndpoint = process.env.APP_CONTRACT_ENDPOINT_URL;
+  process.env.APP_CONTRACT_ENDPOINT_URL = 'https://example.invalid/claim-outage';
+  t.mock.method(dispatchReadTransport, 'sdk', () => ({
+    async connect() { throw new Error('fixture registry endpoint down'); },
+  }));
+  try {
+    createFollowUpJob({rootDir, branch: 'fixture/remediation', repo: 'example/fixture',
+      prNumber: 7, reviewerModel: 'codex', builderTag: 'claude-code',
+      reviewBody: '## Summary\nFix it.\n\n## Verdict\nComment only',
+      reviewPostedAt: '2026-10-28T10:00:00.000Z', critical: false});
+    const result = await consumeNextFollowUpJob({rootDir, promptTemplate: 'fixture prompt', log: quiet});
+    assert.deepEqual(result, {consumed: false, reason: 'registry-unavailable'});
+    assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'pending')).filter(name => name.endsWith('.json')).length, 1);
+    assert.equal(existsSync(getFollowUpJobDir(rootDir, 'inProgress')), false);
+  } finally {
+    if (previousEndpoint === undefined) delete process.env.APP_CONTRACT_ENDPOINT_URL;
+    else process.env.APP_CONTRACT_ENDPOINT_URL = previousEndpoint;
+    rmSync(rootDir, {recursive: true, force: true});
+  }
 });
 
 test('expired cache refuses sync use and async resolution refreshes without a new session', async t => {

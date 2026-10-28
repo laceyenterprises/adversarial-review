@@ -3136,7 +3136,13 @@ async function consumeNextFollowUpJob({
   // propagates to `pickRemediationWorkerClass`; without this, a stale
   // cached config from a prior `loadRoleConfig` call (in this process
   // or via the role resolvers below) would mask the new env.
-  await prefetchWorkerRegistry().catch(error => log.warn(error.message));
+  try {
+    await prefetchWorkerRegistry();
+  } catch (error) {
+    if (error.code !== 'registry-unavailable') throw error;
+    log.warn?.(`[follow-up-remediation] deferring claim until worker registry recovers: ${error.message}`);
+    return { consumed: false, reason: 'registry-unavailable' };
+  }
   resetRoleConfigCache();
   // Claim first so we know which worker class we're running. This lets
   // an `[claude-code]` PR (reviewerModel=codex) get its OAuth pre-flight
@@ -3730,6 +3736,13 @@ async function consumeNextFollowUpJob({
       jobPath: updated.jobPath,
     };
   } catch (err) {
+    if (err.code === 'registry-unavailable' && !spawnAttempted && !spawnedWorker) {
+      const requeued = requeueClaimedFollowUpJobBeforeSpawn({
+        rootDir, jobPath: claimed.jobPath, requeuedAt: now(),
+      });
+      log.warn?.(`[follow-up-remediation] requeued ${claimed.job?.repo}#${claimed.job?.prNumber} after worker registry loss: ${err.message}`);
+      return { consumed: false, reason: 'registry-unavailable', ...requeued };
+    }
     const probeRetry = requeueClaimedJobForConflictedBaseProbe({ rootDir, job: claimed.job, jobPath: claimed.jobPath, error: err, maxRetries: resolveMaxTransientRemediationRetries(), now, log });
     if (probeRetry) return probeRetry;
     if (err.isWorkflowPushPreflightTransientError) {
@@ -4056,7 +4069,7 @@ async function stopConsumedJobWithComment({
 }
 
 async function main() {
-  await prefetchWorkerRegistry();
+  await prefetchWorkerRegistry().catch(error => console.warn(`[follow-up-remediation] startup registry prefetch unavailable: ${error.message}`));
   if (process.argv.includes('--with-hq-integration')) {
     process.env.ADV_WITH_HQ_INTEGRATION = '1';
   }

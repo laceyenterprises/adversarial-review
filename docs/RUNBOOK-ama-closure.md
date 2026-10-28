@@ -6569,6 +6569,15 @@ cache; they never register a session or invoke the synchronous SDK transport.
 Empty, stale or unavailable cache evidence raises `registry-unavailable`;
 asynchronous reviewer resolution re-prefetches before retrying. Failed or
 malformed reads are not cached, so the next attempt can recover immediately.
+Concurrent prefetches keep independent entries per connection and session;
+one endpoint cannot displace another endpoint's snapshot. A valid snapshot
+without the requested reviewer class also fails closed instead of selecting
+a host-configured model. Remediation startup logs a failed warmup and proceeds;
+consumption defers claims while prefetch is unavailable, and a registry loss
+after claim requeues the unspawned job without charging a round. The
+non-blocking Codex default applies only when the registry is readable and the
+configured model is outside its allowlist; registry loss does not authorize
+that fallback.
 No local registry, ledger or filesystem fallback is permitted.
 
 Registry outages are retryable `reviewer-model-unresolved` infrastructure faults,

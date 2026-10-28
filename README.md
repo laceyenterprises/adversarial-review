@@ -278,6 +278,21 @@ Gemini's Google quota check. Both Claude accounts resolve the governed model fro
 the canonical `claude-reviewer` role; the selected broker provider binds token
 mints and renewals to the account.
 
+REGISTRYSESSION-01: reviewer subprocesses, watcher polls, remediation consumers
+and closer routing asynchronously prefetch the governed worker-class registry
+through an established app session. Successful snapshots last 60 seconds within
+the matching app connection scope; synchronous model resolution reads only that
+cache. Cold, expired or unavailable evidence raises retryable
+`reviewer-model-unresolved` infrastructure failure and never asks the operator
+to re-authenticate Claude. Registry faults use existing bounded infrastructure
+backoff without charging review attempts; closers defer instead of dispatching
+with an unresolved model. Corporate model governance and broker minting remain
+enforced. Offline coverage: `test/registry-model-session.test.mjs` and
+`test/standalone-reviewer-execution.test.mjs`. After deployment, SRE observes that
+`public-registry-unavailable` stops appearing in watcher logs and an organic
+corporate Claude review completes. Publication alone does not establish this
+receipt; the existing smoke command is unchanged.
+
 Codex reviewer routes also prefer corporate capacity, including spills and all
 fallbacks. Fresh measured quota and a serving broker admit the selected account;
 corporate exhaustion or explicit broker unavailability permits independently

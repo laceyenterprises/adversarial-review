@@ -2158,6 +2158,10 @@ async function main() {
     console.error(`[reviewer] DEBUG: review completed (${reviewText.length} bytes)`);
   } catch (err) {
     if (effectiveModel === 'claude') captureLocalReviewerUsage({ model: effectiveModel, workspacePath: reviewerSubprocessCwd, startedAt: reviewerStartedAt, rootDir: ROOT, failed: true });
+    if (err.failureClass === 'reviewer-model-unresolved') {
+      console.error(err.message);
+      process.exit(1);
+    }
     if (err.failureClass === 'token-refresh-pending') {
       // The bridge is the sole Claude refresh owner. A too-short token means
       // refresh is pending, not that an operator must re-authenticate.

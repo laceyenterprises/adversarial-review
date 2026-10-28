@@ -1,3 +1,7 @@
+import { beforeEach } from 'node:test';
+import { mkdirSync } from 'node:fs';
+import { seedWorkerRegistry } from './helpers/dispatch-files-fixture.mjs';
+import './helpers/dispatch-files-preload.mjs';
 // CLOSERREUSE-01: the merge-agent fallback resolves its worker class through
 // the AMA closer's grounding and fallback, and never dispatches a class whose
 // harness is quota-grounded. This host pins roles.merge_agent_worker_class to
@@ -304,4 +308,24 @@ test('the dispatch record fields name the class that actually ran and why', () =
       reason: 'primary-grounded',
     },
   });
+});
+
+
+test('registry infrastructure failure defers the closer instead of failing open to dispatch', async () => {
+  const harness = await resolveMergeAgentDispatchHarness({
+    workerClass: 'hammer', fallbackWorkerClasses: [],
+    resolveHarnessImpl: async () => { throw Object.assign(new Error('fixture registry unavailable'), {code: 'registry-unavailable'}); },
+    logger: {warn() {}},
+  });
+  assert.equal(harness.deferred, true);
+  assert.equal(harness.retryable, true);
+  assert.equal(harness.reason, 'reviewer-model-unresolved');
+});
+
+
+beforeEach(() => {
+  mkdirSync(process.env.HQ_ROOT, {recursive: true});
+  seedWorkerRegistry(process.env.HQ_ROOT, Object.fromEntries(
+    ['hammer', 'codex', 'hammer-claude', 'claude-code', 'gemini', 'remediator-codex', 'remediator-claude']
+      .map(name => [name, {defaultModel: name.includes('claude') ? 'claude-opus-5-5' : name === 'gemini' ? 'gemini-2.5-pro' : 'gpt-5.5'}])));
 });

@@ -109,6 +109,9 @@ function reply(selector, args) {
 }
 
 export function installDispatchFileProducerFixture() {
+  const originalHost = dispatchReadTransport.hostServices;
+  dispatchReadTransport.hostServices = async (request, args = {}) => rootOf(args)
+    ? dispatchReadTransport.hostServicesSync(request, args) : originalHost(request, args);
   const originalHostSync = dispatchReadTransport.hostServicesSync;
   dispatchReadTransport.hostServicesSync = (request, args = {}) => {
     const root = rootOf(args);

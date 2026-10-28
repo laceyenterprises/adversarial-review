@@ -66,3 +66,11 @@ export function readHostObservationSync(action, args = {}) {
       ? {ok: true, data: reply.data} : {ok: false, reason: 'host-observation-unavailable'};
   } catch { return {ok: false, reason: 'host-observation-unavailable'}; }
 }
+
+export async function readHostObservation(action, args = {}) {
+  try {
+    const reply = await dispatchReadTransport.hostServices({action, ...args.parameters}, args);
+    return reply?.schema_version === 1 && reply.status === 'found' && reply.data && typeof reply.data === 'object'
+      ? {ok: true, data: reply.data} : {ok: false, reason: 'host-observation-unavailable'};
+  } catch { return {ok: false, reason: 'host-observation-unavailable'}; }
+}

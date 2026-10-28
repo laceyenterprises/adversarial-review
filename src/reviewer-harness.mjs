@@ -91,7 +91,7 @@ import {
   prepareAgyIdentityReview,
   resolveAgyReviewIdentityFromEnv,
 } from './agy-reviewer-identities.mjs';
-import { resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
+import { prefetchWorkerRegistry, RegistryUnavailableError, resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
 import {
   REVIEW_POST_RETRY_DELAYS_MS,
   WAKE_HOOK_RETRY_DELAYS_MS,
@@ -311,9 +311,9 @@ async function prepareClaudeOAuthEnv({
     return { env, stripped, transport: 'keychain' };
   }
 
-  const brokerModel = model || resolveReviewerExecution('claude', { env, log: logger }).model;
+  const brokerModel = model || (await resolveReviewerExecutionAsync('claude', { env, log: logger })).model;
   if (provider === 'claude-code-corp' && !brokerModel) {
-    throw new OAuthError('claude', 'corporate Claude reviewer requires a governed model');
+    throw new RegistryUnavailableError('claude-reviewer');
   }
   const brokerEnv = {
     ...env,
@@ -796,8 +796,9 @@ async function reviewWithClaude(diff, extraContext = '', {
 } = {}) {
   const readNowMs = () => (typeof nowMs === 'function' ? nowMs() : Date.now());
   const claudeStartedAtMs = readNowMs();
+  const reviewerExecution = await resolveReviewerExecutionAsync('claude', { modelPin, reasoningPin, log: logger });
   const auth = await assertClaudeOAuthImpl({ resolveClaudeLaunchctlUidImpl, logger, platform,
-    ...(modelPin ? { model: modelPin } : {}) });
+    model: reviewerExecution.model });
 
   const prompt = promptOverride ?? buildReviewerPrompt({
     promptPrefix: withSnapshotBoundaryPrompt(buildReviewerPromptPrefix({ stage: promptStage })), extraContext, diff,
@@ -810,7 +811,6 @@ async function reviewWithClaude(diff, extraContext = '', {
   }
   const env = hasAuthEnv ? auth.env : scrubOAuthFallbackEnv(process.env).env;
   const subprocessEnv = withReviewerSubprocessCwdEnv(env, reviewerSubprocessCwd);
-  const reviewerExecution = resolveReviewerExecution('claude', { env: subprocessEnv, modelPin, reasoningPin, log: logger });
   const authTransport = hasAuthEnv ? (auth?.transport || resolveClaudeReviewerOAuthTransport(subprocessEnv)) : 'keychain';
   // The retry runs inside the SAME reviewer pass, so it must share that pass's
   // wall-clock budget. Without this a silent first attempt plus a fresh full
@@ -1176,6 +1176,17 @@ function resolveReviewerExecution(harness, { env = process.env, fallbackModel = 
   return { model, effort, modelSource, effortSource };
 }
 
+// Async composition roots recover a cold/expired cache before retrying the pure
+// synchronous resolver. No model fallback or credential work precedes recovery.
+async function resolveReviewerExecutionAsync(harness, args = {}) {
+  try { return resolveReviewerExecution(harness, args); }
+  catch (error) {
+    if (error.code !== 'registry-unavailable') throw error;
+    await prefetchWorkerRegistry({env: args.env ?? process.env});
+    return resolveReviewerExecution(harness, args);
+  }
+}
+
 function resolveCodexExecOverrides({ env = process.env, modelPin = '', reasoningPin = '', log = console } = {}) {
   const values = readCodexConfigTopLevelValues(CODEX_EXEC_CONFIG_FORWARD_KEYS);
   const resolved = resolveReviewerExecution('codex', {
@@ -1289,6 +1300,7 @@ async function reviewWithCodex(diff, extraContext = '', {
   promptOverride = null,
   modelPin = '', reasoningPin = '',
 } = {}) {
+  await prefetchWorkerRegistry();
   console.error('[reviewWithCodex] asserting OAuth...');
   await assertCodexOAuth();
   console.error('[reviewWithCodex] OAuth OK');
@@ -2829,6 +2841,7 @@ async function reviewWithGemini(diff, extraContext = '', {
   prepareAgyIdentityReviewImpl = prepareAgyIdentityReview,
   finishAgyIdentityReviewImpl = finishAgyIdentityReview,
 } = {}) {
+  await prefetchWorkerRegistry();
   const runtime = resolveGeminiRuntimeForReview(resolveGeminiRuntimeImpl, log);
   if (runtime !== 'cli' && runtime !== 'antigravity') {
     throw new Error(`Unsupported Gemini runtime: ${runtime}`);
@@ -2943,7 +2956,7 @@ async function reviewWithGemini(diff, extraContext = '', {
     const fallbackModel = runtime === 'antigravity'
       ? resolveGeminiAntigravityModel({ env: reviewEnv })
       : resolveGeminiReviewerModel(reviewEnv);
-    const reviewerExecution = resolveReviewerExecution('gemini', { env: reviewEnv, fallbackModel, log });
+    const reviewerExecution = await resolveReviewerExecutionAsync('gemini', { env: reviewEnv, fallbackModel, log });
     // agy requires a display-name token; the registry's Gemini CLI slug is
     // invalid for that runtime and would silently select its persisted default.
     const model = runtime === 'antigravity' && !/^Gemini\s/u.test(reviewerExecution.model || '')
@@ -3904,6 +3917,7 @@ const __test__ = {
   resolveCodexCliPath,
   resolveCodexExecOverrides,
   resolveReviewerExecution,
+  resolveReviewerExecutionAsync,
   resolveCqpBrokerConfig,
   resolveGeminiAntigravityModel,
   resolveGeminiCheckoutConflictBackoffMs,
@@ -3943,6 +3957,7 @@ const __test__ = {
 
 export {
   resolveReviewerExecution,
+  resolveReviewerExecutionAsync,
   dispatchReviewerModel,
   reviewAgyOversizedInChunks,
   reviewWithClaude,

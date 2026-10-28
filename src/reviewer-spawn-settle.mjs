@@ -1669,6 +1669,7 @@ function settleReviewerAttempt({
   }
 
   const transientFailureClasses = new Set([
+    'reviewer-model-unresolved',
     'cascade',
     'oauth-broken',
     'reviewer-timeout',
@@ -1687,6 +1688,7 @@ function settleReviewerAttempt({
     AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS,
   ]);
   const defaultFailureMessages = {
+    'reviewer-model-unresolved': 'Governed reviewer model is unavailable from the app registry; infrastructure retry backoff engaged.',
     cascade: 'Reviewer hit a LiteLLM/upstream cascade failure; watcher backoff engaged.',
     [PROVIDER_OVERLOADED_FAILURE_CLASS]: 'Reviewer hit a provider/backend overload (HTTP 529 or capacity signal); watcher backoff engaged.',
     [REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS]: 'Reviewer runtime returned empty output before posting; watcher backoff engaged.',

@@ -1,5 +1,16 @@
 # Adversarial Review State Machine Notes
 
+REGISTRYSESSION-01: `reviewer-model-unresolved` identifies a governed model that
+cannot be read from the asynchronously prefetched app registry. It follows the
+existing bounded infrastructure retry path (`pending-upstream`, then `failed`
+at the existing cap), preserves review attempts, and remains recoverable through
+the stored-row infrastructure classifier. It never enters credential outage
+tracking or emits an OAuth re-authentication notice. Closer routing defers on
+`registry-unavailable` until a subsequent prefetch succeeds. No lifecycle state,
+merge predicate or lease authority is added. SRE's deployment receipt is an
+organic corporate Claude review and absence of registry fallback warnings;
+the existing smoke promises and command are unchanged.
+
 
 ## Actions billing/quota infrastructure (CIBLOCKINFRA-01)
 

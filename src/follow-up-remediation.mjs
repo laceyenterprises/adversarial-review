@@ -1,3 +1,4 @@
+import { prefetchWorkerRegistry } from './adapters/agent-runtime/local/remediation.mjs';
 import { prepareWorkerObservationSession } from './dispatch-read-client.mjs';
 import { readHostIdentitySync } from './dispatch-files-client.mjs';
 import { recoverInfrastructureChecks } from './ci-recovery.mjs';
@@ -2899,6 +2900,7 @@ async function reconcileInProgressFollowUpJobs({
   // CLI entrypoints (cache is empty per process), so the contract held
   // by accident; this reset makes it robust against a future long-
   // running tick loop that folds reconciliation in.
+  await prefetchWorkerRegistry().catch(error => log.warn(error.message));
   resetRoleConfigCache();
   const cleanup = cleanupReconcileClaimArtifacts({ rootDir, log });
   if (cleanup.removedTmp || cleanup.removedLocks || cleanup.errors) {
@@ -3134,6 +3136,7 @@ async function consumeNextFollowUpJob({
   // propagates to `pickRemediationWorkerClass`; without this, a stale
   // cached config from a prior `loadRoleConfig` call (in this process
   // or via the role resolvers below) would mask the new env.
+  await prefetchWorkerRegistry().catch(error => log.warn(error.message));
   resetRoleConfigCache();
   // Claim first so we know which worker class we're running. This lets
   // an `[claude-code]` PR (reviewerModel=codex) get its OAuth pre-flight
@@ -4053,6 +4056,7 @@ async function stopConsumedJobWithComment({
 }
 
 async function main() {
+  await prefetchWorkerRegistry();
   if (process.argv.includes('--with-hq-integration')) {
     process.env.ADV_WITH_HQ_INTEGRATION = '1';
   }

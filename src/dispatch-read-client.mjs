@@ -4,6 +4,18 @@ import { isTransientAppContractError, withAppContractTransientRetry } from './ap
 import { observeSynchronousChild } from './watcher-latency.mjs';
 
 let cachedSession;
+const WORKER_REGISTRY_TTL_MS = 60_000;
+// Only async app-session reads populate this cache. Sync model resolution must
+// never register a session or issue a physical request, even after TTL expiry.
+let workerRegistry;
+let workerRegistryRead;
+function registryKey(args) {
+  return sessionKey(options(args));
+}
+function registryFresh(key, now = Date.now()) {
+  return workerRegistry?.key === key && now >= workerRegistry.at
+    && now - workerRegistry.at < WORKER_REGISTRY_TTL_MS;
+}
 function options(args) {
   return { app_id: 'adversarial-review', mode: 'agent-os',
     endpoint_url: (args.env ?? process.env).APP_CONTRACT_ENDPOINT_URL,
@@ -56,11 +68,49 @@ export const dispatchReadTransport = {
       (args.workerObservationSyncImpl ?? dispatchReadTransport.sdk().readWorkerObservationsSync)(selector, syncOptions));
   },
   async hostServices(request, args = {}) {
-    if (args.dispatchSession) return args.dispatchSession.hostServices(request.action, request);
-    const session = await registeredSession(args);
-    return session.hostServices(request.action, request);
+    const deadline = Date.now() + (args.timeoutMs ?? 8000);
+    const read = async () => {
+      if (args.dispatchSession) return args.dispatchSession.hostServices(request.action, request);
+      const session = await registeredSession(args);
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw Object.assign(new Error('host observation timed out'), {code: 'ETIMEDOUT'});
+      try {
+        return await dispatchReadTransport.sdk().readSessionHostServices(request, {
+          session_token: session.sessionToken, endpoint_url: session.endpoint_url,
+          request_timeout_ms: remaining,
+        });
+      } catch (error) {
+        if (cachedSession?.session === session) cachedSession = null;
+        throw error;
+      }
+    };
+    if (request.action !== 'worker_registry') return boundedCall(read, args);
+    const key = registryKey(args);
+    const session = args.dispatchSession;
+    if (registryFresh(key) && workerRegistry.session === session) return workerRegistry.reply;
+    if (workerRegistryRead?.key === key && workerRegistryRead.session === session) return workerRegistryRead.promise;
+    const entry = {key, session};
+    workerRegistryRead = entry;
+    entry.promise = boundedCall(read, args).then(reply => {
+      if (workerRegistryRead === entry) {
+        workerRegistry = reply?.schema_version === 1 && reply.status === 'found'
+          && reply.data?.classes && typeof reply.data.classes === 'object' && !Array.isArray(reply.data.classes)
+          ? {key, session, at: Date.now(), reply} : null;
+      }
+      return reply;
+    }).catch(error => {
+      if (workerRegistryRead === entry) workerRegistry = null;
+      throw error;
+    }).finally(() => { if (workerRegistryRead === entry) workerRegistryRead = null; });
+    return entry.promise;
   },
   hostServicesSync(request, args = {}) {
+    if (request.action === 'worker_registry') {
+      if (!registryFresh(registryKey(args), args.nowMs ?? Date.now()) || workerRegistry.session !== args.dispatchSession) {
+        throw Object.assign(new Error('worker registry unavailable; async prefetch required'), {code: 'registry-unavailable'});
+      }
+      return workerRegistry.reply;
+    }
     const config = options(args);
     const session = cachedSession?.config && sessionKey(cachedSession.config) === sessionKey(config) ? cachedSession.session : null;
     return dispatchReadTransport.sdk().readHostServicesSync(request, {...config,

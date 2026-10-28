@@ -2015,19 +2015,26 @@ observations do not rewrite/log another transition, and closeout wakes settle as
 `review-ceiling-hammer-owned`. The existing final-round wait pages once if closure
 cannot act. Ceiling wake admission is independent of the legacy exhaustion
 dispatch reason or exhaustion snapshot. No review round or merge authority is added.
+CEILINGOWNER-01 shares ceiling ownership between review admission and next-action
+evidence. A capped non-closer head with an explicit rereview recommendation belongs
+to the final hammer. An impossible reviewer assignment records one contract
+violation and uses the existing closure-wait bound and `needsOperator` escalation.
 
 <a id="smv-clean"></a>**smv-clean:** synthetic reviewer lease intents survive a lost
 transport response, failed release stays retryable, and live leases renew until
 process drain is confirmed, independently of delivery rows. An approved
 exact-head, zero-finding review merges autonomously and the bare remote records that SHA. The synthetic commit
 is unsigned: an ordinary reviewed head does not require fleet identity proof.
-HAMATTEST-03 verifies shared exact-head review selection after the historical
-review ceiling and exercises production coexistence with a bounded closure wait:
+CEILINGOWNER-01 verifies final-hammer ownership at the review ceiling, including
+an explicit head-bound rereview decision. HAMATTEST-03 verifies exact-head review
+selection below the ceiling and production coexistence with a bounded closure wait:
 live or uncertain hammer ownership suppresses re-review and retains the wait
 owner; after confirmed absence, a head-bound review decision queues in the same
 poll and promotes the owner to review, once per head. SRE verifies the next
 deployed hammer that publishes and stops without merging reaches merge or an
-exact-head review within one poll without manual rescue.
+admitted exact-head review within one poll without manual rescue. After normal
+deployment, observe a naturally capped non-closer head reaching its final hammer;
+no forced live state change or new smoke command is required.
 
 <a id="smv-handoff"></a>**smv-handoff:** NXA-07 also verifies exact-head validated terminal HAM proof crossing retry selection into pending, failed or green CI gates; mismatched proof retains hammer retry ownership. NXA-07 verifies the common adapter matrix and retains lease/retry settlement; NXA-06 verifies daemon CI changes, operator-approved retry exhaustion selecting R08 hammer repair, live hammer ownership and remote-unconfirmed receipt recovery through the shared decision. NXA-05 verifies that drain/capacity observations
 retain hammer intent and its deadline, and current deterministic automatic stops retain

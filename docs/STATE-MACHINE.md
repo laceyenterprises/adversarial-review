@@ -1420,7 +1420,7 @@ A crashed closer resumes through existing leases, attempt keys, retry/backoff
 and lifetime caps. Exhaustion uses the existing escalation path. No new review
 or remediation round is created.
 
-HAMATTEST-03 executes that head-bound decision before coexistence returns a
+HAMATTEST-03 executes an admitted head-bound review decision before coexistence returns a
 bounded closure wait, including a consumed background `not-eligible` outcome.
 The watchdog checks live/uncertain ownership before requesting review. Successful
 queueing reports `exact-head-review-queued` with review as the next owner; the
@@ -1556,6 +1556,15 @@ verdict allowlist stays unchanged. An already routed row retains ownership
 without another write or `review-ceiling-closure-transition` event. The posted
 lane settles `remediation-closeout` wakes as `skipped: review-ceiling-hammer-owned`.
 The existing final-round wait records refusals and pages once after 30 minutes.
+CEILINGOWNER-01 uses the same `reviewCeilingOwner` predicate in admission and
+next-action evidence. When admission caps review to closure, even a head-bound
+`rereview-exact-head` recommendation selects the final hammer (`review-ceiling`).
+Existing explicit operator/orphan exceptions and the hammer-owned-head row keep
+their ownership. A selected reviewer refused by capped admission emits one
+`ama.next_action.contract_violation` record per head and retains the existing
+bounded closure wait under `actor-admission`; exhaustion returns `needsOperator`
+and pages once instead of requeueing or backing off indefinitely. No merge
+eligibility check, ceiling count, configuration key or lifecycle state changes.
 HAMCLOSEWAIT-01 measures a retained running/starting closer from its recorded launch or
 confirmed dispatched lease progress, advancing existing final-round waits too.
 An unchanged timestamp cannot extend the bound. Future timestamps seed new rows

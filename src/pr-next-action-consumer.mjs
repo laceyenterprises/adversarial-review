@@ -3,9 +3,10 @@
 // What the current closure consumers import: faithful legacy adapters, evidence
 // builders, and a hook that copies a consumer's evidence synchronously and only
 // then loads the shadow (src/pr-next-action-shadow.mjs) lazily. This module
-// imports nothing, so short-lived processes that load a consumer and never
-// reach a shadow call (hammer helpers, CLIs) do not pay for the policy module.
+// imports only the pure ceiling contract, so short-lived consumers do not pay
+// for the full policy module until they reach a shadow call.
 // Nothing here throws into a caller or changes a legacy decision.
+import { reviewCeilingOwner } from './review-ceiling-owner.mjs';
 
 // ── Legacy adapters: old outputs expressed as owned workflows ────────────────
 // Faithful translation, not correction: a legacy page stays an operator hold
@@ -169,7 +170,8 @@ export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, cand
     policy: { strictMode: input.strictMode !== false, strictNonBlockingRemediation: input.strictNonBlockingRemediation !== false,
       ...(input.operatorLogins ? { operatorLogins: input.operatorLogins } : {}),
       ...(input.operatorLabelActorEnforcement ? { operatorLabelActorEnforcement: input.operatorLabelActorEnforcement } : {}),
-      reviewCeilingReached: input.reviewCeilingReached === true, hammerCap: cap,
+      reviewCeilingReached: reviewCeilingOwner({ row: input.reviewAdmissionRow, headSha: head,
+        ...(typeof input.reviewCeilingReached === 'boolean' ? { ceilingReached: input.reviewCeilingReached } : {}) }) === 'hammer', hammerCap: cap,
       ...(typeof autonomousMergeExecutionEnabled === 'boolean' ? { autonomousMergeExecutionEnabled } : {}) },
     progress: { diffEmpty: input.diffEmpty === true,
       ...((input.hammerHead || input.closerAuthoredStale?.hammerHead)

@@ -1,5 +1,6 @@
 import { DELIVERED_REVIEW_SQL, countReviewCeilingUnits } from './review-ceiling-metrics.mjs';
-import { isOrphanHeadReviewRequested, isExplicitOperatorReviewRetrigger } from './first-pass-review-suppression.mjs';
+import { reviewCeilingOwner } from './review-ceiling-owner.mjs';
+export { reviewCeilingOwner } from './review-ceiling-owner.mjs';
 
 // A persisted legacy/operator increase remains authoritative for the active
 // PR cycle. Routing to closure and admitting reviews must use the same budget.
@@ -22,8 +23,8 @@ export { hammerHandoffReviewBypass } from './hammer-handoff-review-bypass.mjs';
 
 export function routeCappedReviewToClosure({ db, stmtGetReviewRow, repo, prNumber, headSha, row, ceiling, logger = console }) {
   if (!row || ['reviewing', 'malformed', 'failed-orphan'].includes(row.review_status)
-    || isExplicitOperatorReviewRetrigger(row) || isOrphanHeadReviewRequested(row, headSha)
-    || !postedReviewCeilingReached({ db, repo, prNumber, ceiling })) return false;
+    || reviewCeilingOwner({ row, headSha,
+      ceilingReached: postedReviewCeilingReached({ db, repo, prNumber, ceiling }) }) !== 'hammer') return false;
   if (row.review_status === 'failed' && row.rereview_reason !== 'system-review-ceiling-closure') return false;
   const posted = db.prepare(`SELECT head_sha, ended_at FROM reviewer_passes
     WHERE repo=? AND pr_number=? AND status='completed'

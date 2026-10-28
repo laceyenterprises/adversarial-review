@@ -521,12 +521,20 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
   const attestedCarry = carryable && closerPair && closerCarry.carryForward === true
     && closerCarry.decision !== 'rereview-exact-head' && !handedToReview;
   const carried = semanticCarry || attestedCarry || terminalHead;
+  // Admission and the producer use the same ceiling ownership contract. Every
+  // request for review here, including an explicit head-bound closer decision
+  // or invalid attestation, must have an actor that admission can actually run.
+  const exactHeadReview = reason => ({ row: 'R13-review',
+    action: policy?.reviewCeilingReached === true ? 'hammer' : 'review',
+    actor: policy?.reviewCeilingReached === true ? 'hammer' : 'reviewer',
+    reason: policy?.reviewCeilingReached === true ? 'review-ceiling' : reason,
+    deadlineKind: 'admission', queue: 'dispatch' });
   if (review.attestation === 'invalid') {
-    return { row: 'R13-review', action: 'review', actor: 'reviewer', reason: 'attestation-invalid', deadlineKind: 'admission', queue: 'dispatch' };
+    return exactHeadReview('attestation-invalid');
   }
-  // HAMATTEST-03: an explicit head-bound review decision survives the old ceiling.
+  // HAMATTEST-03 recommendations remain bounded by reviewer admission.
   if (closerPair && closerCarry.decision === 'rereview-exact-head' && !terminalHead) {
-    return { row: 'R13-review', action: 'review', actor: 'reviewer', reason: 'exact-head-review', deadlineKind: 'admission', queue: 'dispatch' };
+    return exactHeadReview('exact-head-review');
   }
   // A suppressed hammer head retains its closer even when an automatic
   // refresh lost the posted row or the attestation chain cannot carry a verdict.
@@ -537,13 +545,9 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
       deadlineKind: 'admission', queue: 'dispatch',
       attempt: launchForHead && launch.attempt !== null ? launch.attempt + 1 : null };
   }
-  if (review.currentHeadVerdictAbsent && !carried && policy?.reviewCeilingReached === true && !handedToReview) {
-    return { row: 'R13-review', action: 'hammer', actor: 'hammer', reason: 'review-ceiling', deadlineKind: 'admission', queue: 'dispatch' };
-  }
   if (review.currentHeadVerdictAbsent && !carried) {
-    return { row: 'R13-review', action: 'review', actor: 'reviewer',
-      reason: handedToReview ? 'handed-to-review' : review.reviewedHead && review.verdict ? 'stale-verdict' : 'exact-head-review',
-      deadlineKind: 'admission', queue: 'dispatch' };
+    return exactHeadReview(handedToReview ? 'handed-to-review'
+      : review.reviewedHead && review.verdict ? 'stale-verdict' : 'exact-head-review');
   }
   if (!review.verdict && !terminalHead) return refresh('verdict-unknown');
 

@@ -115,7 +115,7 @@ if (scenario === 'clean') {
     assert.equal(launchRequestOwned(resumedProbe), false);
   }
 
-  // HAMATTEST-02: the shared, head-bound decision selects ownership only.
+  // CEILINGOWNER-01: a head-bound recommendation respects capped admission.
   const reviewState = { verdict: 'approved', headSha: base, blockingFindingCount: 0,
     blockingFindingState: 'known', nonBlockingFindingCount: 0, nonBlockingFindingState: 'known' };
   const closureInput = { reviewState, currentHead: headSha, roundsLeft: false, reviewCeilingReached: true };
@@ -123,8 +123,17 @@ if (scenario === 'clean') {
     decision: 'rereview-exact-head', carryForward: false };
 
   const { resolveClosureNextAction } = await import('../../src/ama/closure-next-action.mjs');
-  const exactHead = await resolveClosureNextAction({
+  const cappedHead = await resolveClosureNextAction({
     input: { ...closureInput, attested: true, closerAuthoredStale, checks: 'SUCCESS', lease: null },
+    subjectKey: `${repo}#${prNumber}`, observedAt: '2026-01-01T00:00:00.000Z',
+    candidate: { headSha, prState: 'open', mergeable: 'MERGEABLE' }, autonomousMergeExecutionEnabled: true,
+  });
+  assert.equal(cappedHead.decision.action, 'hammer');
+  assert.equal(cappedHead.decision.actor, 'hammer');
+  assert.equal(cappedHead.decision.reason, 'review-ceiling');
+  const exactHead = await resolveClosureNextAction({
+    input: { ...closureInput, reviewCeilingReached: false, attested: true,
+      closerAuthoredStale, checks: 'SUCCESS', lease: null },
     subjectKey: `${repo}#${prNumber}`, observedAt: '2026-01-01T00:00:00.000Z',
     candidate: { headSha, prState: 'open', mergeable: 'MERGEABLE' }, autonomousMergeExecutionEnabled: true,
   });
@@ -132,7 +141,7 @@ if (scenario === 'clean') {
   assert.equal(exactHead.decision.reason, 'exact-head-review');
 
 
-  // HAMATTEST-03: production coexistence executes review before its wait return.
+  // HAMATTEST-03: an admitted review executes before the closure wait return.
   const { resolveMergeAgentCoexistenceForWatcher } = await import('../../src/ama-closure-orchestration.mjs');
   for (const decision of ['rereview-exact-head', 'not-eligible']) {
     let hammerLive = true, ownershipUncertain = false, reviewRequests = 0;

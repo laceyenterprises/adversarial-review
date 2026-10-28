@@ -12,7 +12,7 @@ import { acquireAmaCloserLease, updateAmaCloserLease, rekeyAmaCloserLease } from
 import { amaCloserDispatchFilePath, maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
 import { closeEmptyPullRequest, EMPTY_PR_COMMENT } from '../src/empty-pr-close.mjs';
 import { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
-import { routeCappedReviewToClosure, hammerHandoffReviewBypass, postedReviewCeilingReached } from '../src/hamclose-review-admission.mjs';
+import { routeCappedReviewToClosure, hammerHandoffReviewBypass, postedReviewCeilingReached, reviewCeilingOwner } from '../src/hamclose-review-admission.mjs';
 import { classifyClosureOwnership } from '../src/merge-agent-rescue-classifier.mjs';
 
 const repo = 'fixture/repo';
@@ -41,7 +41,7 @@ test('HAMCLOSE-03 replay A: synthetic reversal merges in one posted-review/closu
   assert.equal(store.merged, true);
 });
 
-test('HAMCLOSE-03 replay B: head-bound exact-head review precedes the delivered ceiling hammer fallback', async t => {
+test('CEILINGOWNER-01 replay B: admission and next action assign a capped non-closer head to the final hammer', async t => {
   const rootDir = root(t), headSha = 'c'.repeat(40), old = 'a'.repeat(40);
   const db = openReviewStateDb(rootDir); ensureReviewStateSchema(db); t.after(() => db.close());
   db.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,review_status,reviewer_head_sha,review_attempts)
@@ -65,16 +65,25 @@ test('HAMCLOSE-03 replay B: head-bound exact-head review precedes the delivered 
   const identity = { rootDir, repo, prNumber: 8143, headSha };
   const closureStore = { merged: false };
   const cappedRow = { ...db.prepare('SELECT * FROM reviewed_prs').get(), review_body: cleanBody };
+  assert.equal(reviewCeilingOwner({ row: cappedRow, headSha }), 'hammer');
+  let hammers = 0;
   await watcherTick({ ...identity, row: cappedRow, evidence: { headSha, hasHammerCommits: false },
     store: closureStore, closureOnly: true,
-    closerImpl: async () => assert.fail('an explicit exact-head review must not dispatch a ceiling hammer') });
+    closerImpl: async args => {
+      hammers++;
+      assert.equal(args.prMetadata.headSha, headSha);
+      assert.equal(args.reviewState.headSha, old);
+      assert.equal(args.reviewState.reviewCycleExhausted, true);
+      return { dispatched: true, reason: 'dispatched' };
+    } });
   assert.equal(closureStore.merged, false);
   const closure = closureStore.lastClosure;
   assert.equal(closure.ownerProofFacts.reviewCycleExhausted, true);
-  assert.equal(closure.dispatched, false);
-  assert.equal(closure.nextAction.action, 'review');
-  assert.equal(closure.nextAction.reason, 'exact-head-review');
-  assert.equal(closure.closureOwner.owner, 'review');
+  assert.equal(hammers, 1);
+  assert.equal(closure.dispatched, true);
+  assert.equal(closure.nextAction.action, 'hammer');
+  assert.equal(closure.nextAction.reason, 'review-ceiling');
+  assert.equal(closure.closureOwner.owner, 'hammer');
   assert.equal(closure.closerAuthoredStale.decision, 'rereview-exact-head');
   assert.equal(closure.closerAuthoredStale.reviewedHead, old);
   assert.equal(closure.closerAuthoredStale.currentHead, headSha);

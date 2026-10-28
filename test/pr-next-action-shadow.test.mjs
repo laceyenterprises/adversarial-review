@@ -420,10 +420,18 @@ for (const parked of [false, true]) test(`closure orchestration${parked ? ' (par
   assert.equal(disagreement, undefined, 'the adopted consumer reports the shared decision');
 });
 
-test('the consumer seam imports nothing and copies evidence before the caller resumes', async () => {
-  const { readFileSync } = await import('node:fs');
-  const source = readFileSync(new URL('../src/pr-next-action-consumer.mjs', import.meta.url), 'utf8');
-  assert.equal(/^import /m.test(source), false, 'short-lived consumers must not load the policy module eagerly');
+test('the consumer seam keeps policy loading lazy and copies evidence before the caller resumes', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const loader = `export async function load(url, context, nextLoad) {
+    if (/\\/pr-next-action(?:-shadow)?\\.mjs$/.test(url)) throw new Error('policy loaded eagerly: ' + url);
+    return nextLoad(url, context);
+  }`;
+  const probe = spawnSync(process.execPath, ['--input-type=module', '--eval', `
+    import { register } from 'node:module';
+    register(${JSON.stringify(`data:text/javascript,${encodeURIComponent(loader)}`)}, import.meta.url);
+    await import(${JSON.stringify(new URL('../src/pr-next-action-consumer.mjs', import.meta.url).href)});
+  `], { encoding: 'utf8', timeout: 10_000 });
+  assert.equal(probe.status, 0, probe.error?.message || probe.stderr);
   const records = [];
   setNextActionShadowSinkForTesting(r => records.push(r));
   const lease = { status: 'dispatched', headSha: HEAD, updatedAt: ANCHOR };

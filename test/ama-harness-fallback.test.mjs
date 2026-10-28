@@ -683,10 +683,21 @@ for (const payload of [null, [], true, 'synthetic']) {
 
 
 test('closer session failure cannot silently retain a fallback model', async t => {
-  t.mock.method(dispatchReadTransport, 'hostServices', async () => {throw new Error('fixture registry down');});
-  await assert.rejects(resolveCloserDispatchHarness({workerClass: 'hammer', env: {},
+  // The producer fixture serves both async readiness and sync model selection.
+  // Fail both hooks so a synthetic ready registry cannot mask the outage.
+  const env = {};
+  let registryReads = 0;
+  t.mock.method(dispatchReadTransport, 'hostServices', async () => {
+    registryReads += 1;
+    throw new Error('fixture registry down');
+  });
+  t.mock.method(dispatchReadTransport, 'hostServicesSync', () => {
+    throw new Error('fixture registry down');
+  });
+  await assert.rejects(resolveCloserDispatchHarness({workerClass: 'hammer', env,
     execFileImpl: async () => assert.fail('quota or dispatch must follow registry prefetch')}),
   {code: 'registry-unavailable', retryable: true});
+  assert.ok(registryReads > 0, 'the failing registry transport must be exercised');
 });
 
 

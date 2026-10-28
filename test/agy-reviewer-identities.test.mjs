@@ -49,6 +49,7 @@ import {
   listUserProcesses,
   prepareAgyIdentityReview,
   referenceAgySettingsFromEnv,
+  readPinnedCopyWarnings,
   resolveAgyReviewIdentityFromEnv,
   resolveAgyReviewerIdentityPlan,
   resolveHqOwner,
@@ -427,6 +428,7 @@ function makePool(fake, {
   runtime = 'antigravity',
   checkHqOwnerAuthImpl = async () => ({ ok: true }),
   readBootstrapRecordImpl = () => null,
+  readPinnedCopyWarningsImpl = async () => [],
   runPinnedImpl = fake?.runPinned,
   // The fake identities are not real OS users, so `ps -U` cannot see them;
   // by default nothing survives a review.
@@ -452,6 +454,7 @@ function makePool(fake, {
     runPinnedImpl,
     checkHqOwnerAuthImpl,
     readBootstrapRecordImpl,
+    readPinnedCopyWarningsImpl,
     referenceSettings: () => HQ_SETTINGS,
     listUserProcessesImpl,
     readActiveRunRecordsImpl,
@@ -2115,4 +2118,64 @@ test('CHUNKTIME-01: timeout fences its lease through cleanup and drains until ch
     await released;
     fake.cleanup();
   }
+});
+
+
+test('AGYPINNEDDRIFT-01: currency command is bounded, read-only and validates its result', async () => {
+  let called = 0;
+  const runImpl = async (command, args, options) => {
+    called++;
+    assert.equal(command, '/fixture/deploy/modules/worker-pool/bin/agy-reviewer-identities');
+    assert.deepEqual(args, ['currency']);
+    assert.equal(options.env.AGENT_OS_DEPLOY_CHECKOUT, '/fixture/deploy');
+    return { code: 0, stdout: '[]' };
+  };
+  assert.deepEqual(await readPinnedCopyWarnings({ env: { AGENT_OS_DEPLOY_CHECKOUT: '/fixture/deploy' }, runImpl }), []);
+  assert.equal(called, 1);
+  await assert.rejects(readPinnedCopyWarnings({ env: { AGENT_OS_DEPLOY_CHECKOUT: '/fixture/deploy' },
+    runImpl: async () => ({ code: null, timedOut: true }) }), /timed out/);
+});
+
+test('AGYPINNEDDRIFT-01: drift warns while serving, once per digest fingerprint across identities', async () => {
+  const fake = makeFakeInstall({ users: [REVIEWER_A, REVIEWER_B] });
+  const alerts = [];
+  const warning = fingerprint => ({ code: 'pinned-copy-stale', fingerprint: fingerprint.repeat(64),
+    files: [['agy-reviewer-workspace-helper', 'old-digest', 'new-digest']],
+    findings: ['agy-reviewer-workspace-helper differs from deploy copy'] });
+  let warnings = [warning('a')];
+  let record = { ready: true, warnings };
+  const pool = makePool(fake, { identities: [REVIEWER_A, REVIEWER_B],
+    readBootstrapRecordImpl: () => record,
+    readPinnedCopyWarningsImpl: async () => warnings,
+    deliverAlertImpl: async (text, options) => { alerts.push({ text, ...options }); return { queued: true }; } });
+  try {
+    assert.equal(await pool.refreshReadiness(), 2);
+    for (const state of pool.snapshot()) {
+      assert.equal(state.ready, record.ready);
+      assert.deepEqual(state.warnings, record.warnings);
+      assert.deepEqual(state.reasons, []);
+    }
+    assert.equal(alerts.length, 1);
+    assert.match(alerts[0].text, /sudo scripts\/setup-reviewer-os-user.sh --apply/);
+    assert.match(alerts[0].text, new RegExp(`sudo scripts/verify-reviewer-os-user.sh --user ${REVIEWER_A}`));
+    assert.match(alerts[0].text, new RegExp(`sudo scripts/verify-reviewer-os-user.sh --user ${REVIEWER_B}`));
+    await pool.refreshReadiness();
+    assert.equal(alerts.length, 1);
+    // A record from an older bootstrap must not reintroduce currency isolation.
+    record = { ready: false, reasons: ['currency: old copy differs'], checkedAt: 'old-bootstrap' };
+    assert.equal(await pool.refreshReadiness(), 2);
+    warnings = [warning('b')];
+    assert.equal(await pool.refreshReadiness(), 2);
+    assert.equal(alerts.length, 2);
+    warnings = [];
+    assert.equal(await pool.refreshReadiness(), 2);
+    assert.ok(pool.snapshot().every(state => state.warnings.length === 0));
+    assert.equal(alerts.length, 2);
+    // Real security evidence is retained even in a legacy mixed record.
+    record = { ready: false, reasons: ['currency: old copy differs', 'ownership/ACL unsafe'], checkedAt: 'security-bootstrap' };
+    writeFileSync(join(fake.home(REVIEWER_A), '.probe-fails'), '');
+    writeFileSync(join(fake.home(REVIEWER_B), '.probe-fails'), '');
+    assert.equal(await pool.refreshReadiness(), 0);
+    await pool.settleProbes();
+  } finally { fake.cleanup(); }
 });

@@ -696,7 +696,8 @@
       "automatedRecoveryIdentityFields": ["repo", "pr", "head", "reason"],
       "quarantineDiagnosticCacheKey": ["rootDir", "quarantineCount", "filesystemReaders"],
       "sev1DeliveryFailureFields": ["signal", "alertId", "event", "repo", "pr", "at", "attemptCount", "reason"],
-      "heartbeatDeliveryFailureField": "alert_delivery_failure"
+      "heartbeatDeliveryFailureField": "alert_delivery_failure",
+      "pinnedReviewerCurrency": "reviewer.agy_pinned_copy_stale: fixed identity by payload.fingerprint; files and users are evidence. Delivered/receipt identity survives archive expiry and watcher restarts."
     },
     {
       "id": "daemon-merge-parks",

@@ -198,12 +198,6 @@ const LAUNCHCTL = '/bin/launchctl';
 const ENV_BIN = '/usr/bin/env';
 const CLAUDE_STRIPPED_ENV_VARS = OAUTH_ENV_STRIP_LIST;
 
-// ACPX-local Codex adapter path. The reviewer keeps wrapper-owned completion
-// semantics: ACPX/Codex does the work, and the outer wrapper owns parsing /
-// posting / downstream side effects. Today the handoff is ACPX stdout capture;
-// explicit file-artifact handoff remains a valid future refinement.
-const MAINTAINER_ACPX_CLI = join(homedir(), '.openclaw', 'tools', 'acpx', 'node_modules', '.bin', 'acpx');
-
 // Raw Codex CLI is still used only for login-status probing.
 const CODEX_CLI = resolveCodexCliPath();
 
@@ -242,14 +236,6 @@ function resolveGeminiCliPath(env = process.env) {
 
 function resolveAgyCliPath(env = process.env) {
   return env.AGY_CLI_PATH || env.AGY_CLI || findOnPath('agy', env.PATH) || 'agy';
-}
-
-function resolveAcpxCliPath({ env = process.env, preferLocalAcpx = false } = {}) {
-  if (env.ACPX_CLI) return env.ACPX_CLI;
-  if (env.ACPX_CLI_PATH) return env.ACPX_CLI_PATH;
-  const fromPath = findOnPath('acpx', env.PATH);
-  if (fromPath) return fromPath;
-  return preferLocalAcpx ? MAINTAINER_ACPX_CLI : 'acpx';
 }
 
 // ── OAuth credential checks ──────────────────────────────────────────────────
@@ -607,8 +593,8 @@ async function assertCodexOAuth() {
 // ── Gemini OAuth checks ──────────────────────────────────────────────────────
 
 /**
- * Resolve the Gemini OAuth credential file. Mirrors the worker adapter
- * contract (`modules/worker-pool/lib/adapters/acpx-gemini.sh`): a pinned
+ * Resolve the Gemini OAuth credential file. Mirrors the native Gemini worker adapter
+ * contract: a pinned
  * HOME holds a private `~/.gemini/oauth_creds.json`. GEMINI_OAUTH_CREDS_PATH
  * overrides explicitly; GEMINI_HOME (when set) points at the `.gemini` dir.
  */
@@ -1286,10 +1272,6 @@ async function spawnCodexReview({
  * Run adversarial review using Codex CLI (OAuth).
  * OPENAI_API_KEY is explicitly removed from the env so Codex
  * uses its stored OAuth credentials only.
- *
- * Note: ACPX session bootstrap is currently broken in this environment
- * (see runbooks/INCIDENT-2026-04-21-ACPX-codex-exec-regression.md).
- * Using native Codex CLI instead, which is stable and produces quality reviews.
  */
 async function reviewWithCodex(diff, extraContext = '', {
   promptStage = 'first',
@@ -3823,7 +3805,6 @@ const __test__ = {
   GeminiCredentialPoolUnavailableError,
   LAUNCHCTL,
   LaunchctlSessionError,
-  MAINTAINER_ACPX_CLI,
   OAuthError,
   TokenRefreshPendingError,
   REVIEWER_METADATA_BY_MODEL,
@@ -3903,7 +3884,6 @@ const __test__ = {
   resetGeminiReviewerSessionPreflightForTest,
   resetGeminiCredentialCheckoutQueueForTest,
   resetGeminiSignalReleaseForTest,
-  resolveAcpxCliPath,
   resolveAgyArgvMaxBytes,
   resolveAgyAuthProbeTimeoutMs,
   resolveAgyChunkMaxChunks,

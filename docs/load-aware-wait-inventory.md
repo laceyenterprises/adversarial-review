@@ -25,8 +25,6 @@ the default one-hour policy cap, but remain bounded by the platform timer limit.
 | `src/adapters/comms/github-pr-comments/pr-comments.mjs:1084` | `GH_COMMENT_TIMEOUT_MS = 30000 ms` | postRemediationOutcomeComment |
 | `src/adapters/comms/slack-thread/index.mjs:128` | `LOCK_TIMEOUT_MS = 5000 ms` | acquireLock |
 | `src/adapters/comms/slack-thread/index.mjs:275` | `Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SLACK_POST_TIMEOUT_MS` | normalizeSlackPostTimeoutMs |
-| `src/adapters/reviewer-runtime/acpx/index.mjs:154` | `DEFAULT_DISCOVERY_TIMEOUT_MS = 5000 ms` | resolveAcpxCliPath |
-| `src/adapters/reviewer-runtime/acpx/index.mjs:242` | `DEFAULT_OAUTH_PROBE_TIMEOUT_MS = 20000 ms` | assertCodexOAuthLayers |
 | `src/adapters/reviewer-runtime/agent-runtime/index.mjs:46` | `Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_APP_CONTRACT_REQUEST_TIMEOUT_MS` | resolveRequestTimeoutMs |
 | `src/adapters/reviewer-runtime/agent-runtime/index.mjs:71` | `DEFAULT_APP_CONTRACT_REQUEST_TIMEOUT_MS = 75000 ms` | createAppContractHealthzCheck |
 | `src/adapters/reviewer-runtime/agent-runtime/index.mjs:395` | `DEFAULT_REVIEW_BUDGET.maxWallMs` | toAgentRequest |

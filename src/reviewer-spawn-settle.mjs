@@ -717,7 +717,7 @@ async function spawnReviewerOnce(args) {
       throw error;
     }
   }
-  if (receipt && !(args.accountBindingRuntimeIds || ['cli-direct', 'acpx']).includes(runtimeId)) {
+  if (receipt && !(args.accountBindingRuntimeIds || ['cli-direct']).includes(runtimeId)) {
     // These runtimes do not yet carry an execution binding to their credential
     // owner. Never claim the selected token was used by an unbound dispatch.
     try {

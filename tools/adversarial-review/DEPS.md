@@ -46,12 +46,6 @@ uses PATH and per-user defaults.
   - Discovery: `OP_CLI_PATH`, `OP_CLI`, then `op` on `PATH`.
   - Used by `src/secret-source/op.mjs` for 1Password-backed secret injection.
 
-- `acpx` CLI, optional
-  - Discovery: `ACPX_CLI_PATH`, `ACPX_CLI`, then `acpx` on `PATH`.
-  - Maintainer-local fallback `$HOME/.openclaw/tools/acpx/node_modules/.bin/acpx`
-    is used by some maintainer-local wrappers but is not part of the
-    portable installer's render path.
-
 - `hq` CLI, optional Agent OS reviewer-runtime substrate
   - Discovery: `HQ_BIN`, then `hq` on `PATH`.
   - Runtime: only used by the `agent-os-hq` reviewer runtime adapter.
@@ -178,7 +172,7 @@ Claude runtime is supposed to use.
   - Without HQ integration, remediation replies remain local under
     `data/replies/`.
   - Required for `reviewerRuntime: "agent-os-hq"`. If absent, that runtime
-    fails loudly with guidance to set `HQ_ROOT` or use `cli-direct`/`acpx`.
+    fails loudly with guidance to set `HQ_ROOT` or use `cli-direct`.
 
 - `HQ_PARENT_SESSION`
   - Agent OS HQ dispatch attribution parent session.

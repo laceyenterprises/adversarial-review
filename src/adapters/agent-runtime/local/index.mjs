@@ -52,7 +52,7 @@ function validateRequest(request) {
 
 // cli-direct itself resolves the reviewer prompt inside the spawned
 // `reviewer.mjs` process (from subjectContext), so `prompt` is only load-bearing
-// for the OS-dispatch/acpx runtimes. We still forward the subject representation
+// for the OS-dispatch runtimes. We still forward the subject representation
 // so the request round-trips faithfully and so a future non-cli-direct local
 // spawn has the material to build from.
 function defaultBuildPrompt(request) {

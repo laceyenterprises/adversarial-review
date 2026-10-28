@@ -117,13 +117,13 @@ function resolveHqBin(env = process.env) {
   }
   const fromPath = findOnPath('hq', env.PATH);
   if (fromPath) return fromPath;
-  throw makeConfigurationError('hq binary not found on PATH; set HQ_BIN or use cli-direct/acpx');
+  throw makeConfigurationError('hq binary not found on PATH; set HQ_BIN or use cli-direct');
 }
 
 function resolveHqRoot(env = process.env) {
   const hqRoot = String(env.HQ_ROOT || '').trim();
   if (!hqRoot) {
-    throw makeConfigurationError('HQ_ROOT is required for agent-os-hq reviewer runtime; set HQ_ROOT or use cli-direct/acpx');
+    throw makeConfigurationError('HQ_ROOT is required for agent-os-hq reviewer runtime; set HQ_ROOT or use cli-direct');
   }
   return hqRoot;
 }

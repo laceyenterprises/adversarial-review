@@ -93,9 +93,6 @@ function resolveAuthSyncBin(env) {
     // submodule of agent-os) -> runtime/...
     resolve(here, '..', '..', '..', 'runtime', 'codex', 'bin', 'codex-worker-auth-sync'),
     '/Users/airlock/agent-os/runtime/codex/bin/codex-worker-auth-sync',  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
-    // Historical pre-runtime-split path retained only for older checkouts.
-    resolve(here, '..', '..', '..', 'runtime', 'acpx-runtime', 'bin', 'acpx-codex-worker-auth-sync'),
-    '/Users/airlock/agent-os/runtime/acpx-runtime/bin/acpx-codex-worker-auth-sync',  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
   ];
   for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate;
@@ -181,7 +178,7 @@ export function materializePerWorkerCodexAuth({
     // Best-effort: top up the access/id token from the OAuth broker so a
     // long-running worker gets the maximum TTL before its (un-refreshable)
     // token expires. The copied token is already broker-fresh on a host where
-    // the acpx-codex-worker-auth-sync LaunchAgent runs, so this only widens the
+    // the codex-worker-auth-sync LaunchAgent runs, so this only widens the
     // safety margin. Corporate auth has no copied token: its mint is mandatory
     // and retries only transient transport/HTTP errors, at most three times.
     if (brokerRefresh || corporate) {

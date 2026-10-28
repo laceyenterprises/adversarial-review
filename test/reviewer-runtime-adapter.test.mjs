@@ -8,20 +8,11 @@ import Database from 'better-sqlite3';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-
-import {
-  CANONICAL_OAUTH_STRIP_ENV as ACPX_CANONICAL_OAUTH_STRIP_ENV,
-  assertCodexOAuthLayers,
-  buildAcpxCodexArgs,
-  classifyAcpxFailure,
-  createAcpxReviewerRuntimeAdapter,
-  domainRequiresMcpOAuth,
-  resolveAcpxCliPath,
-} from '../src/adapters/reviewer-runtime/acpx/index.mjs';
-
 import {
   createAgentOsHqReviewerRuntimeAdapter,
+  createReviewerRuntimeAdapterByName,
   createReviewerRuntimeAdapterForDomain,
+  loadDomainConfig,
   recoverReviewerRunRecords,
   resolveReviewerRuntimeName,
 } from '../src/adapters/reviewer-runtime/index.mjs';
@@ -31,11 +22,11 @@ import { writeSettleSmokeResult } from '../src/adapters/agent-runtime/settle-smo
 import { createCliDirectReviewerRuntimeAdapter } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
 import { persistReviewerChildRunState } from '../src/reviewer-child-run-state.mjs';
 import {
-  CANONICAL_OAUTH_STRIP_ENV as CLI_DIRECT_CANONICAL_OAUTH_STRIP_ENV,
   resolveProgressTimeoutForModel,
   tailText,
 } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
-import { AgentOSConfigError, resetConfigCache } from '../src/config-loader.mjs';
+import { resolveReviewerRuntimeCutover } from '../src/reviewer-runtime-cutover.mjs';
+import { domainRequiresMcpOAuth } from '../src/adapters/reviewer-runtime/domain-mcp-oauth.mjs';
 import { probeCodexCli, resolveCliBinary } from '../src/adapters/reviewer-runtime/cli-direct/discovery.mjs';
 import {
   readActiveReviewerRunRecords,
@@ -217,10 +208,10 @@ test('resolveReviewerRuntimeName selects agent-runtime only when agentos cutover
   );
   assert.equal(
     resolveReviewerRuntimeName(
-      { reviewerRuntime: 'acpx' },
+      { reviewerRuntime: 'fixture-stub' },
       { orchestrationMode: 'native' },
     ),
-    'acpx',
+    'fixture-stub',
   );
 });
 
@@ -247,10 +238,10 @@ test('ADVERSARIAL_REVIEWER_RUNTIME ignores unknown/blank values instead of wedgi
   // Unknown value: ignored, falls through to domain config (no throw).
   assert.equal(
     resolveReviewerRuntimeName(
-      { reviewerRuntime: 'acpx' },
+      { reviewerRuntime: 'fixture-stub' },
       { env: { ADVERSARIAL_REVIEWER_RUNTIME: 'not-a-real-adapter' } },
     ),
-    'acpx',
+    'fixture-stub',
   );
   // Blank/whitespace: ignored, normal resolution applies.
   assert.equal(
@@ -260,6 +251,54 @@ test('ADVERSARIAL_REVIEWER_RUNTIME ignores unknown/blank values instead of wedgi
     ),
     'cli-direct',
   );
+});
+
+test('retired ACPX env override falls through to the existing runtime selection', () => {
+  const env = { ADVERSARIAL_REVIEWER_RUNTIME: 'acpx' };
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = (message) => warnings.push(message);
+  try {
+    for (const [config, orchestrationMode, expected] of [
+      [{}, 'native', 'cli-direct'],
+      [{ reviewerRuntime: 'fixture-stub' }, 'native', 'fixture-stub'],
+      [{ reviewerRuntime: 'agent-runtime' }, 'native', 'cli-direct'],
+      [{}, 'agentos', 'agent-os-hq'],
+      [{ reviewerRuntime: 'agent-runtime' }, 'agentos', 'agent-os-hq'],
+    ]) {
+      assert.equal(resolveReviewerRuntimeName(config, { env, orchestrationMode }), expected);
+      assert.equal(resolveReviewerRuntimeCutover({ domainConfig: config, env, orchestrationMode }).selectedRuntime, expected);
+    }
+    assert.equal(warnings.length, 5);
+    assert.ok(warnings.every((message) => /ignoring.*acpx.*not a known adapter/.test(message)));
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test('ACPX domain config and direct factory calls fail with clear validation errors', () => {
+  const rootDir = makeRoot();
+  try {
+    writeFileSync(join(rootDir, 'domains', 'retired-runtime.json'), JSON.stringify({
+      id: 'retired-runtime', reviewerRuntime: 'acpx',
+    }));
+    assert.throws(() => loadDomainConfig(rootDir, 'retired-runtime'), /reviewerRuntime: ACPX reviewer runtime has been removed; use cli-direct/);
+    for (const orchestrationMode of ['native', 'agentos']) {
+      const domainConfig = { reviewerRuntime: 'acpx' };
+      assert.throws(() => resolveReviewerRuntimeName(domainConfig, { env: {}, orchestrationMode }), /ACPX reviewer runtime has been removed/);
+      assert.throws(() => resolveReviewerRuntimeCutover({ domainConfig, env: {}, orchestrationMode }), /ACPX reviewer runtime has been removed/);
+      assert.throws(() => createReviewerRuntimeAdapterForDomain({ rootDir, domainConfig, orchestrationMode, env: {} }), /ACPX reviewer runtime has been removed/);
+    }
+    assert.throws(() => createReviewerRuntimeAdapterByName('acpx'), /Unknown reviewer runtime adapter: acpx/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('shared MCP requirement detection remains available to cli-direct', () => {
+  assert.equal(domainRequiresMcpOAuth({}), false);
+  assert.equal(domainRequiresMcpOAuth({ codexMcpServers: ['fixture-server'] }), true);
+  assert.equal(domainRequiresMcpOAuth({ mcpServers: ['fixture-server'] }), true);
 });
 
 test('createReviewerRuntimeAdapterForDomain applies readiness-gated orchestration override without mutating domain JSON', () => {
@@ -306,11 +345,11 @@ test('createReviewerRuntimeAdapterForDomain preserves explicit native non-defaul
     const adapter = createReviewerRuntimeAdapterForDomain({
       rootDir,
       domainId: 'code-pr',
-      domainConfig: { id: 'code-pr', reviewerRuntime: 'acpx' },
+      domainConfig: { id: 'code-pr', reviewerRuntime: 'fixture-stub' },
       orchestrationMode: 'native',
       env: { CODEX_HOME: rootDir },
     });
-    assert.equal(adapter.describe().id, 'acpx');
+    assert.equal(adapter.describe().id, 'fixture-stub');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -632,7 +671,7 @@ test('agent-os-hq fails loud when HQ_ROOT is missing', async () => {
     assert.equal(result.ok, false);
     assert.equal(result.failureClass, 'bug');
     assert.equal(result.configurationError, true);
-    assert.match(result.stderrTail, /set HQ_ROOT or use cli-direct\/acpx/);
+    assert.match(result.stderrTail, /set HQ_ROOT or use cli-direct/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -1270,74 +1309,6 @@ test('cli-direct does not classify generated stdout review prose as a bug', asyn
     assert.equal(result.ok, false);
     assert.equal(result.failureClass, 'unknown');
     assert.match(result.stdoutTail, /SyntaxError/);
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-  }
-});
-
-test('acpx classifies quota text from stdout even when stderr has wrapper noise', async () => {
-  const rootDir = makeRoot();
-  try {
-    const adapter = createAcpxReviewerRuntimeAdapter({
-      rootDir,
-      resolveAcpxCliImpl: async () => '/bin/acpx',
-      execFileImpl: async () => ({ stdout: '[]\n', stderr: '' }),
-      spawnCapturedImpl: async () => {
-        const err = new Error('Command failed with code 1');
-        err.stdout = "You've hit your weekly limit · resets Jun 27 at 3am (America/Los_Angeles)";
-        err.stderr = '[reviewer] DEBUG: acpx review failed';
-        err.exitCode = 1;
-        throw err;
-      },
-      now: () => '2026-06-23T00:39:39.000Z',
-    });
-
-    const result = await adapter.spawnReviewer({
-      model: 'codex',
-      prompt: '',
-      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 2454 },
-      timeoutMs: 100,
-      sessionUuid: 'acpx-classification-quota-stdout-session',
-      forbiddenFallbacks: ['api-key'],
-    });
-
-    assert.equal(result.ok, false);
-    assert.equal(result.failureClass, QUOTA_EXHAUSTED_FAILURE_CLASS);
-    assert.match(result.stdoutTail, /weekly limit/);
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-  }
-});
-
-test('acpx does not classify generated stdout review prose as a bug', async () => {
-  const rootDir = makeRoot();
-  try {
-    const adapter = createAcpxReviewerRuntimeAdapter({
-      rootDir,
-      resolveAcpxCliImpl: async () => '/bin/acpx',
-      execFileImpl: async () => ({ stdout: '[]\n', stderr: '' }),
-      spawnCapturedImpl: async () => {
-        const err = new Error('Command failed with code 1');
-        err.stdout = 'Review draft: blocking issue mentions TypeError in the submitted code.';
-        err.stderr = '';
-        err.exitCode = 1;
-        throw err;
-      },
-      now: () => '2026-06-23T00:39:39.000Z',
-    });
-
-    const result = await adapter.spawnReviewer({
-      model: 'codex',
-      prompt: '',
-      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 2454 },
-      timeoutMs: 100,
-      sessionUuid: 'acpx-classification-stdout-prose-session',
-      forbiddenFallbacks: ['api-key'],
-    });
-
-    assert.equal(result.ok, false);
-    assert.equal(result.failureClass, 'unknown');
-    assert.match(result.stdoutTail, /TypeError/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -2899,179 +2870,6 @@ test('cli-direct cancel sends SIGTERM then SIGKILL and atomically marks cancelle
   }
 });
 
-test('acpx adapter uses canonical argv shape, strips OAuth fallbacks, and records isolated pgid', async () => {
-  const rootDir = makeRoot();
-  const previous = {};
-  for (const k of ACPX_CANONICAL_OAUTH_STRIP_ENV) {
-    previous[k] = process.env[k];
-    process.env[k] = 'must-not-propagate';
-  }
-  previous.ANTHROPIC_AUTH_TOKEN = process.env.ANTHROPIC_AUTH_TOKEN;
-  process.env.ANTHROPIC_AUTH_TOKEN = 'preserve-oauth-token';
-  try {
-    assert.deepEqual(ACPX_CANONICAL_OAUTH_STRIP_ENV, CLI_DIRECT_CANONICAL_OAUTH_STRIP_ENV);
-
-    let capturedOptions;
-    let probeCalls = 0;
-    const adapter = createAcpxReviewerRuntimeAdapter({
-      rootDir,
-      domainConfig: { id: 'acpx-smoke' },
-      resolveAcpxCliImpl: async () => '/opt/acpx/bin/acpx',
-      execFileImpl: async (command, args) => {
-        probeCalls += 1;
-        assert.equal(command, '/opt/acpx/bin/acpx');
-        assert.deepEqual(args, ['codex', 'sessions', 'list']);
-        return { stdout: '[]\n', stderr: '' };
-      },
-      spawnCapturedImpl: async (command, args, options) => {
-        capturedOptions = options;
-        assert.equal(command, '/opt/acpx/bin/acpx');
-        assert.deepEqual(args.slice(0, 4), ['codex', 'exec', '--ephemeral', '--output-last-message']);
-        assert.equal(args[5], 'review this fixture');
-        assert.equal(args.includes('--cwd'), false);
-        assert.equal(Object.hasOwn(options, 'cwd'), false);
-        assert.equal(Object.hasOwn(options, 'input'), false);
-        options.onSpawn({ pgid: process.pid + 1000 });
-        writeFileSync(args[4], '## Verdict\nComment only\n', 'utf8');
-        return { stdout: 'acpx ok\n', stderr: '' };
-      },
-      now: () => '2026-05-11T20:00:00.000Z',
-    });
-
-    const result = await adapter.spawnReviewer({
-      model: 'codex',
-      prompt: 'review this fixture',
-      subjectContext: { domainId: 'acpx-smoke', repo: 'lacey/repo', prNumber: 6 },
-      timeoutMs: 100,
-      sessionUuid: 'acpx-shape-session',
-      forbiddenFallbacks: ['api-key'],
-    });
-
-    assert.equal(result.ok, true);
-    assert.equal(result.reviewBody, '## Verdict\nComment only\n');
-    assert.equal(result.pgid, process.pid + 1000);
-    assert.equal(probeCalls, 1);
-    for (const k of ACPX_CANONICAL_OAUTH_STRIP_ENV) {
-      assert.equal(Object.hasOwn(capturedOptions.env, k), false, `${k} must not propagate to acpx`);
-    }
-    assert.equal(capturedOptions.env.ANTHROPIC_AUTH_TOKEN, 'preserve-oauth-token');
-
-    const record = readReviewerRunRecord(rootDir, 'acpx-shape-session');
-    assert.equal(record.runtime, 'acpx');
-    assert.equal(record.state, 'completed');
-    assert.equal(record.pgid, process.pid + 1000);
-    assert.equal(adapter.describe().capabilities.oauthStripEnforced, true);
-    assert.equal(adapter.describe().capabilities.heartbeatPersisted, true);
-  } finally {
-    for (const k of ACPX_CANONICAL_OAUTH_STRIP_ENV) {
-      if (previous[k] === undefined) delete process.env[k];
-      else process.env[k] = previous[k];
-    }
-    if (previous.ANTHROPIC_AUTH_TOKEN === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
-    else process.env.ANTHROPIC_AUTH_TOKEN = previous.ANTHROPIC_AUTH_TOKEN;
-    rmSync(rootDir, { recursive: true, force: true });
-  }
-});
-
-test('acpx adapter persists heartbeat rows while reviewer is running', async () => {
-  const rootDir = makeRoot();
-  let release;
-  let tick = 0;
-  try {
-    const adapter = createAcpxReviewerRuntimeAdapter({
-      rootDir,
-      domainConfig: { id: 'acpx-smoke' },
-      heartbeatIntervalMs: 5,
-      resolveAcpxCliImpl: async () => '/opt/acpx/bin/acpx',
-      execFileImpl: async () => ({ stdout: '[]\n', stderr: '' }),
-      spawnCapturedImpl: async (_command, args, options) => {
-        options.onSpawn({ pgid: 6161 });
-        await new Promise((resolve) => { release = () => {
-          writeFileSync(args[4], 'heartbeat complete\n', 'utf8');
-          resolve();
-        }; });
-        return { stdout: 'ok\n', stderr: '' };
-      },
-      now: () => new Date(Date.UTC(2026, 4, 11, 20, 0, tick++)).toISOString(),
-    });
-
-    const run = adapter.spawnReviewer({
-      model: 'codex',
-      prompt: 'keep heartbeating',
-      subjectContext: { domainId: 'acpx-smoke', repo: 'lacey/repo', prNumber: 7 },
-      timeoutMs: 5_000,
-      sessionUuid: 'acpx-heartbeat-session',
-      forbiddenFallbacks: ['api-key'],
-    });
-
-    for (let attempt = 0; attempt < 40; attempt += 1) {
-      const record = readReviewerRunRecord(rootDir, 'acpx-heartbeat-session');
-      if (record?.state === 'heartbeating' && record.lastHeartbeatAt !== '2026-05-11T20:00:01.000Z') break;
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
-
-    const live = readReviewerRunRecord(rootDir, 'acpx-heartbeat-session');
-    assert.equal(live.state, 'heartbeating');
-    assert.equal(live.pgid, 6161);
-    assert.notEqual(live.lastHeartbeatAt, null);
-
-    release();
-    const completed = await run;
-    assert.equal(completed.ok, true);
-    assert.equal(readReviewerRunRecord(rootDir, 'acpx-heartbeat-session').state, 'completed');
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-  }
-});
-
-test('acpx cancellation does not let heartbeat overwrite the cancelled state', async () => {
-  const rootDir = makeRoot();
-  let release;
-  try {
-    const adapter = createAcpxReviewerRuntimeAdapter({
-      rootDir,
-      domainConfig: { id: 'acpx-smoke' },
-      heartbeatIntervalMs: 1,
-      resolveAcpxCliImpl: async () => '/opt/acpx/bin/acpx',
-      execFileImpl: async () => ({ stdout: '[]\n', stderr: '' }),
-      spawnCapturedImpl: async (_command, _args, options) => {
-        options.onSpawn({ pgid: 6262 });
-        await new Promise((resolve) => { release = resolve; });
-        const err = new Error('aborted');
-        err.code = 'ABORT_ERR';
-        err.signal = 'SIGTERM';
-        throw err;
-      },
-      now: () => '2026-05-11T20:00:00.000Z',
-    });
-
-    const run = adapter.spawnReviewer({
-      model: 'codex',
-      prompt: 'cancel me',
-      subjectContext: { domainId: 'acpx-smoke', repo: 'lacey/repo', prNumber: 8 },
-      timeoutMs: 100,
-      sessionUuid: 'acpx-cancelled-session',
-      forbiddenFallbacks: ['api-key'],
-    });
-
-    await waitFor(() => {
-      const record = readReviewerRunRecord(rootDir, 'acpx-cancelled-session');
-      assert.equal(record?.state, 'heartbeating');
-      assert.equal(record?.pgid, 6262);
-      return record;
-    });
-    await adapter.cancel('acpx-cancelled-session');
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    release();
-
-    const cancelled = await run;
-    assert.equal(cancelled.ok, false);
-    assert.equal(readReviewerRunRecord(rootDir, 'acpx-cancelled-session').state, 'cancelled');
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-  }
-});
-
 test('reviewer run-state remains parseable after SIGKILL during repeated heartbeat writes', async () => {
   const rootDir = makeRoot();
   const runStateUrl = new URL('../src/adapters/reviewer-runtime/run-state.mjs', import.meta.url).href;
@@ -3087,13 +2885,13 @@ test('reviewer run-state remains parseable after SIGKILL during repeated heartbe
         let tick = 0;
         let record = writeReviewerRunRecord(rootDir, {
           sessionUuid: 'sigkill-heartbeat-session',
-          domain: 'acpx-smoke',
-          runtime: 'acpx',
+          domain: 'research-finding',
+          runtime: 'cli-direct',
           state: 'spawned',
           pgid: 7171,
           spawnedAt: '2026-05-11T20:00:00.000Z',
           lastHeartbeatAt: null,
-          reattachToken: 'acpx:sigkill-heartbeat-session',
+          reattachToken: 'cli-direct:sigkill-heartbeat-session',
         });
         setInterval(() => {
           record = updateReviewerRunRecord(rootDir, record, {
@@ -3131,432 +2929,6 @@ test('reviewer run-state remains parseable after SIGKILL during repeated heartbe
     await killFixtureChild(child);
     rmSync(rootDir, { recursive: true, force: true });
   }
-});
-
-test('acpx discovery uses ACPX_CLI, PATH lookup, fallback path, and a clear missing-binary hint', async () => {
-  resetConfigCache();
-  assert.equal(
-    await resolveAcpxCliPath({
-      env: { ACPX_CLI: 'custom-acpx' },
-      execFileImpl: async (_command, args) => {
-        assert.deepEqual(args, ['custom-acpx']);
-        return { stdout: '/usr/local/bin/custom-acpx\n', stderr: '' };
-      },
-    }),
-    '/usr/local/bin/custom-acpx',
-  );
-  assert.equal(
-    await resolveAcpxCliPath({
-      env: { HOME: '/no/such/home' },
-      execFileImpl: async (command, args) => {
-        assert.equal(command, 'which');
-        assert.deepEqual(args, ['acpx']);
-        return { stdout: '/usr/local/bin/acpx\n', stderr: '' };
-      },
-    }),
-    '/usr/local/bin/acpx',
-  );
-  const fakeOpenclawRoot = mkdtempSync(join(tmpdir(), 'acpx-openclaw-root-'));
-  const fakeHomeRoot = mkdtempSync(join(tmpdir(), 'acpx-home-root-'));
-  const fakeAcpx = join(fakeOpenclawRoot, 'tools', 'acpx', 'node_modules', '.bin', 'acpx');
-  const fakeHomeAcpx = join(fakeHomeRoot, '.openclaw', 'tools', 'acpx', 'node_modules', '.bin', 'acpx');
-  try {
-    mkdirSync(dirname(fakeAcpx), { recursive: true });
-    writeFileSync(fakeAcpx, '');
-    mkdirSync(dirname(fakeHomeAcpx), { recursive: true });
-    writeFileSync(fakeHomeAcpx, '');
-    assert.equal(
-      await resolveAcpxCliPath({
-        env: { AGENT_OS_OPENCLAW_INSTALL_ROOT: fakeOpenclawRoot },
-        configLoaderImpl: ({ env }) => ({
-          get: (key, defaultValue = null) => (
-            key === 'openclaw.install_root'
-              ? (env?.AGENT_OS_OPENCLAW_INSTALL_ROOT ?? defaultValue)
-              : defaultValue
-          ),
-        }),
-        execFileImpl: async () => {
-          const err = new Error('not found');
-          err.code = 1;
-          throw err;
-        },
-      }),
-      fakeAcpx,
-    );
-    assert.equal(
-      await resolveAcpxCliPath({
-        env: {},
-        configLoaderImpl: () => ({
-          get: (key, defaultValue = null) => (key === 'openclaw.install_root' ? fakeOpenclawRoot : defaultValue),
-        }),
-        execFileImpl: async () => {
-          const err = new Error('not found');
-          err.code = 1;
-          throw err;
-        },
-      }),
-      fakeAcpx,
-    );
-    assert.equal(
-      await resolveAcpxCliPath({
-        env: { HOME: fakeHomeRoot },
-        configLoaderImpl: () => ({
-          get: (_key, defaultValue = null) => defaultValue,
-        }),
-        execFileImpl: async () => {
-          const err = new Error('not found');
-          err.code = 1;
-          throw err;
-        },
-      }),
-      fakeHomeAcpx,
-    );
-    assert.equal(
-      await resolveAcpxCliPath({
-        env: { HOME: fakeHomeRoot },
-        configLoaderImpl: () => {
-          throw new AgentOSConfigError('bad config');
-        },
-        execFileImpl: async () => {
-          const err = new Error('not found');
-          err.code = 1;
-          throw err;
-        },
-      }),
-      fakeHomeAcpx,
-    );
-  } finally {
-    rmSync(fakeOpenclawRoot, { recursive: true, force: true });
-    rmSync(fakeHomeRoot, { recursive: true, force: true });
-    resetConfigCache();
-  }
-  await assert.rejects(
-    resolveAcpxCliPath({
-      env: { ACPX_CLI: 'acpx-typo', HOME: '/no/such/home' },
-      configLoaderImpl: () => ({
-        get: (_key, defaultValue = null) => defaultValue,
-      }),
-      execFileImpl: async () => {
-        const err = new Error('not found');
-        err.code = 1;
-        throw err;
-      },
-    }),
-    /ACPX CLI not found at ACPX_CLI=acpx-typo.*Install ACPX or set ACPX_CLI/s,
-  );
-});
-
-test('acpx OAuth probe reports CLI and MCP OAuth failures distinctly', async () => {
-  await assert.rejects(
-    assertCodexOAuthLayers({
-      env: {},
-      acpxCli: '/opt/acpx/bin/acpx',
-      execFileImpl: async (command, args) => {
-        assert.equal(command, '/opt/acpx/bin/acpx');
-        assert.deepEqual(args, ['codex', 'sessions', 'list']);
-        const err = new Error('auth.json missing');
-        err.stderr = 'auth.json missing';
-        throw err;
-      },
-    }),
-    (err) => err.layer === 'cli' && /auth\.json/.test(err.message),
-  );
-
-  await assert.rejects(
-    assertCodexOAuthLayers({
-      env: {},
-      acpxCli: '/opt/acpx/bin/acpx',
-      domainConfig: { mcpServers: ['linear'] },
-      execFileImpl: async (_command, args) => {
-        if (args[1] === 'sessions') return { stdout: '[]\n', stderr: '' };
-        const err = new Error('rmcp::transport::worker TokenRefreshFailed');
-        err.stderr = 'rmcp::transport::worker TokenRefreshFailed';
-        throw err;
-      },
-    }),
-    (err) => err.layer === 'mcp' && /per-MCP-server OAuth token refresh failed/.test(err.message),
-  );
-
-  let calls = 0;
-  await assertCodexOAuthLayers({
-    env: {},
-    domainConfig: { mcpServers: ['github'] },
-    execFileImpl: async () => {
-      calls += 1;
-      return { stdout: 'ok\n', stderr: '' };
-    },
-  });
-  assert.equal(calls, 2);
-  assert.equal(domainRequiresMcpOAuth({ codexMcpServers: ['autok'] }), true);
-  assert.equal(domainRequiresMcpOAuth({ mcpServers: ['github'] }), true);
-});
-
-test('acpx spawnReviewer reports missing binary with install guidance', async () => {
-  const rootDir = makeRoot();
-  try {
-    const adapter = createAcpxReviewerRuntimeAdapter({
-      rootDir,
-      domainConfig: { id: 'acpx-smoke' },
-      resolveAcpxCliImpl: async () => {
-        throw new Error('ACPX CLI not found. Install ACPX or set ACPX_CLI');
-      },
-      execFileImpl: async () => {
-        throw new Error('OAuth probe should not run without acpx');
-      },
-      spawnCapturedImpl: async () => {
-        throw new Error('spawn should not run without acpx');
-      },
-      now: () => '2026-05-11T20:00:00.000Z',
-    });
-
-    const result = await adapter.spawnReviewer({
-      model: 'codex',
-      prompt: 'review',
-      subjectContext: { domainId: 'acpx-smoke', repo: 'lacey/repo', prNumber: 9 },
-      timeoutMs: 100,
-      sessionUuid: 'acpx-missing-binary-session',
-      forbiddenFallbacks: ['api-key'],
-    });
-
-    assert.equal(result.ok, false);
-    assert.equal(result.failureClass, 'bug');
-    assert.match(result.stderrTail, /ACPX CLI not found/);
-    assert.match(result.stderrTail, /Install ACPX or set ACPX_CLI/);
-    assert.equal(readReviewerRunRecord(rootDir, 'acpx-missing-binary-session').state, 'failed');
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-  }
-});
-
-test('acpx spawnReviewer fails when ACPX exits 0 without a review body', async () => {
-  const rootDir = makeRoot();
-  try {
-    const cases = [
-      { name: 'missing', content: null },
-      { name: 'empty', content: '' },
-      { name: 'whitespace', content: ' \n\t ' },
-    ];
-
-    for (const [index, fixture] of cases.entries()) {
-      const adapter = createAcpxReviewerRuntimeAdapter({
-        rootDir,
-        domainConfig: { id: 'acpx-smoke' },
-        resolveAcpxCliImpl: async () => '/opt/acpx/bin/acpx',
-        execFileImpl: async () => ({ stdout: '[]\n', stderr: '' }),
-        spawnCapturedImpl: async (_command, args, options) => {
-          options.onSpawn({ pgid: 6363 + index });
-          const outputPath = args[args.indexOf('--output-last-message') + 1];
-          if (fixture.content !== null) writeFileSync(outputPath, fixture.content);
-          return { stdout: 'ok\n', stderr: `${fixture.name} last message\n` };
-        },
-        now: () => '2026-05-11T20:00:00.000Z',
-      });
-
-      const sessionUuid = `acpx-empty-output-${fixture.name}-session`;
-      const result = await adapter.spawnReviewer({
-        model: 'codex',
-        prompt: 'review',
-        subjectContext: { domainId: 'acpx-smoke', repo: 'lacey/repo', prNumber: 10 },
-        timeoutMs: 100,
-        sessionUuid,
-        forbiddenFallbacks: ['api-key'],
-      });
-
-      assert.equal(result.ok, false);
-      assert.equal(result.failureClass, 'bug');
-      assert.match(result.stderrTail, /produced no review body/i);
-      assert.equal(readReviewerRunRecord(rootDir, sessionUuid).state, 'failed');
-    }
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-  }
-});
-
-test('acpx spawnReviewer releases the active claim when tmpdir allocation throws', async () => {
-  const rootDir = makeRoot();
-  let attempts = 0;
-  try {
-    const adapter = createAcpxReviewerRuntimeAdapter({
-      rootDir,
-      domainConfig: { id: 'acpx-smoke' },
-      resolveAcpxCliImpl: async () => '/opt/acpx/bin/acpx',
-      mkdtempImpl: () => {
-        attempts += 1;
-        throw new Error('disk full');
-      },
-      execFileImpl: async () => {
-        throw new Error('OAuth probe should not run after mkdtemp failure');
-      },
-      spawnCapturedImpl: async () => {
-        throw new Error('spawn should not run after mkdtemp failure');
-      },
-      now: () => '2026-05-11T20:00:00.000Z',
-    });
-
-    const req = {
-      model: 'codex',
-      prompt: 'review',
-      subjectContext: { domainId: 'acpx-smoke', repo: 'lacey/repo', prNumber: 11 },
-      timeoutMs: 100,
-      sessionUuid: 'acpx-mkdtemp-failure-session',
-      forbiddenFallbacks: ['api-key'],
-    };
-    const first = await adapter.spawnReviewer(req);
-    const second = await adapter.spawnReviewer(req);
-
-    assert.equal(first.ok, false);
-    assert.equal(first.failureClass, 'unknown');
-    assert.equal(second.ok, false);
-    assert.equal(second.failureClass, 'bug');
-    assert.equal(attempts, 1);
-    assert.equal(adapter.__activeRuns.has(req.sessionUuid), false);
-    assert.equal(readReviewerRunRecord(rootDir, req.sessionUuid).state, 'failed');
-    assert.match(second.stderrTail, /terminal state failed/);
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-  }
-});
-
-test('acpx spawnReviewer maps OAuth probe failures to oauth-broken with layer-specific text', async () => {
-  const rootDir = makeRoot();
-  try {
-    const cliAdapter = createAcpxReviewerRuntimeAdapter({
-      rootDir,
-      domainConfig: { id: 'acpx-smoke' },
-      resolveAcpxCliImpl: async () => '/opt/acpx/bin/acpx',
-      execFileImpl: async () => {
-        const err = new Error('auth.json missing');
-        err.stderr = 'auth.json missing';
-        throw err;
-      },
-      spawnCapturedImpl: async () => {
-        throw new Error('spawn should not run after failed CLI OAuth probe');
-      },
-      now: () => '2026-05-11T20:00:00.000Z',
-    });
-    const cliResult = await cliAdapter.spawnReviewer({
-      model: 'codex',
-      prompt: 'review',
-      subjectContext: { domainId: 'acpx-smoke', repo: 'lacey/repo', prNumber: 12 },
-      timeoutMs: 100,
-      sessionUuid: 'acpx-oauth-cli-session',
-      forbiddenFallbacks: ['api-key'],
-    });
-    assert.equal(cliResult.ok, false);
-    assert.equal(cliResult.failureClass, 'oauth-broken');
-    assert.match(cliResult.stderrTail, /codex cli OAuth unavailable/i);
-    assert.match(cliResult.stderrTail, /auth\.json/);
-
-    const mcpAdapter = createAcpxReviewerRuntimeAdapter({
-      rootDir,
-      domainConfig: { id: 'acpx-smoke', mcpServers: ['linear'] },
-      resolveAcpxCliImpl: async () => '/opt/acpx/bin/acpx',
-      execFileImpl: async (_command, args) => {
-        if (args[1] === 'sessions') return { stdout: '[]\n', stderr: '' };
-        const err = new Error('rmcp::transport::worker TokenRefreshFailed');
-        err.stderr = 'rmcp::transport::worker TokenRefreshFailed';
-        throw err;
-      },
-      spawnCapturedImpl: async () => {
-        throw new Error('spawn should not run after failed MCP OAuth probe');
-      },
-      now: () => '2026-05-11T20:00:00.000Z',
-    });
-    const mcpResult = await mcpAdapter.spawnReviewer({
-      model: 'codex',
-      prompt: 'review',
-      subjectContext: { domainId: 'acpx-smoke', repo: 'lacey/repo', prNumber: 13 },
-      timeoutMs: 100,
-      sessionUuid: 'acpx-oauth-mcp-session',
-      forbiddenFallbacks: ['api-key'],
-    });
-    assert.equal(mcpResult.ok, false);
-    assert.equal(mcpResult.failureClass, 'oauth-broken');
-    assert.match(mcpResult.stderrTail, /codex mcp OAuth unavailable/i);
-    assert.match(mcpResult.stderrTail, /per-MCP-server OAuth token refresh failed/);
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-  }
-});
-
-test('acpx remediator records enrich subjectContext consistently with reviewer records', async () => {
-  const rootDir = makeRoot();
-  try {
-    const remediatorPgid = process.pid + 1000;
-    const adapter = createAcpxReviewerRuntimeAdapter({
-      rootDir,
-      domainConfig: { id: 'acpx-smoke' },
-      resolveAcpxCliImpl: async () => '/opt/acpx/bin/acpx',
-      execFileImpl: async () => ({ stdout: '[]\n', stderr: '' }),
-      spawnCapturedImpl: async (_command, args, options) => {
-        options.onSpawn({ pgid: remediatorPgid });
-        writeFileSync(args[4], 'patched remediation\n', 'utf8');
-        return { stdout: 'ok\n', stderr: '' };
-      },
-      now: () => '2026-05-11T20:00:00.000Z',
-    });
-
-    const result = await adapter.spawnRemediator({
-      model: 'codex',
-      prompt: 'fix it',
-      subjectContext: { repo: 'lacey/repo', prNumber: 14 },
-      timeoutMs: 100,
-      sessionUuid: 'acpx-remediator-session',
-      forbiddenFallbacks: ['api-key'],
-    });
-
-    assert.equal(result.ok, true);
-    const record = readReviewerRunRecord(rootDir, 'acpx-remediator-session');
-    assert.equal(record.subjectContext.domainId, 'acpx-smoke');
-    assert.equal(record.subjectContext.reviewerSessionUuid, 'acpx-remediator-session');
-    assert.equal(record.subjectContext.sessionUuid, 'acpx-remediator-session');
-    assert.equal(record.subjectContext.model, 'codex');
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-  }
-});
-
-test('acpx spawnReviewer rejects non-integer pgids as isolation failures', async () => {
-  const rootDir = makeRoot();
-  try {
-    const adapter = createAcpxReviewerRuntimeAdapter({
-      rootDir,
-      domainConfig: { id: 'acpx-smoke' },
-      resolveAcpxCliImpl: async () => '/opt/acpx/bin/acpx',
-      execFileImpl: async () => ({ stdout: '[]\n', stderr: '' }),
-      spawnCapturedImpl: async (_command, _args, options) => {
-        options.onSpawn({ pgid: null });
-        return { stdout: 'ok\n', stderr: '' };
-      },
-      now: () => '2026-05-11T20:00:00.000Z',
-    });
-
-    const result = await adapter.spawnReviewer({
-      model: 'codex',
-      prompt: 'review',
-      subjectContext: { domainId: 'acpx-smoke', repo: 'lacey/repo', prNumber: 15 },
-      timeoutMs: 100,
-      sessionUuid: 'acpx-invalid-pgid-session',
-      forbiddenFallbacks: ['api-key'],
-    });
-
-    assert.equal(result.ok, false);
-    assert.equal(result.failureClass, 'unknown');
-    assert.match(result.stderrTail, /invalid pgid/i);
-    assert.equal(readReviewerRunRecord(rootDir, 'acpx-invalid-pgid-session').state, 'failed');
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-  }
-});
-
-test('acpx failure classification adds queue and zombie-process handling', () => {
-  assert.equal(classifyAcpxFailure('acpx queue full', 1, null), 'queue-back-pressure');
-  assert.equal(classifyAcpxFailure('acpx zombie codex-acp processes detected', 1, null), 'queue-back-pressure');
-  assert.equal(classifyAcpxFailure('LiteLLM retry pool: all upstream attempts failed', 1, null), 'cascade');
-  assert.deepEqual(
-    buildAcpxCodexArgs('hello', '/tmp/out.txt'),
-    ['codex', 'exec', '--ephemeral', '--output-last-message', '/tmp/out.txt', 'hello'],
-  );
 });
 
 test('cancelled reviewer run records remain recoverable on next startup', () => {

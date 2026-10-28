@@ -475,7 +475,7 @@ export async function proveGeneratedBlocks(args, evidence, refusal, {
 } = {}) {
   const regions = refusal.missingEvidence?.regions;
   if (!regions?.length || refusal.missingEvidence.evidence !== 'reversal-authorization') return [];
-  // One diagnostic per subject/path per attempt, including fallback failures.
+  // One diagnostic per subject/path per attempt without a successful proof.
   // Never log subprocess messages, stderr, commands or local clone paths.
   let reason, stage = 'checkout';
   const skipped = value => { reason ||= value; };
@@ -573,7 +573,7 @@ export async function proveGeneratedBlocks(args, evidence, refusal, {
     // Optional proof failure must retain the independently computed refusal.
     return [];
   } finally {
-    if (reason) console.warn('[derived-content] proof skipped: ' + JSON.stringify({
+    if (reason && !proofs.length) console.warn('[derived-content] proof skipped: ' + JSON.stringify({
       repo: String(args.repo).replace(/[\x00-\x1f\x7f]/g, '?').slice(0, 200),
       prNumber: Number.isSafeInteger(Number(args.prNumber)) ? Number(args.prNumber) : null,
       headSha: BLOCK_SHA.test(evidence.headSha || '') ? evidence.headSha : null,

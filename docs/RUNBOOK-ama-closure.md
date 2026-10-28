@@ -3303,9 +3303,11 @@ modified text files qualify; additions, deletions, renames and opaque files keep
 their existing rules.
 Each matching declaration is evaluated independently: missing or ambiguous markers
 and generator failures skip that candidate without discarding other proofs.
-Skipped candidates emit bounded diagnostics naming the artifact path, declared
-working directory and failure; missing or non-directory working directories are
-reported explicitly. A failed candidate never supplies preservation evidence.
+If no declaration supplies a proof, skipped candidates emit one bounded diagnostic
+naming the artifact path and a fixed failure stage/reason. A successful proof
+suppresses skip warnings from other candidates. Missing or non-directory working
+directories fail at the generator stage. A failed candidate never supplies
+preservation evidence.
 
 On a region refusal, shared primary-change collection creates an independent
 scratch Git worktree at the exact head, using `localRepository`, the domain's
@@ -3357,8 +3359,8 @@ worker base in the existing `remediationCloneReferences` map. Provisioned worker
 worktrees share that object store, including their PR heads; proofs fetch only
 immutable identities locally into scratch. Missing root `package.json` means no
 block declarations, while a completed whole-file proof needs no manifest.
-Failed or skipped candidates emit one `[derived-content]` warning per
-repository/PR/head/path per proof attempt through the existing log channel.
+When no proof succeeds, failed or skipped candidates emit one `[derived-content]`
+warning per repository/PR/head/path per proof attempt through the existing log channel.
 The warning names a fixed failure stage/reason and the subject; subprocess
 output, commands and host clone paths are excluded. A fallback failure does not
 produce duplicate warnings. Missing objects, malformed manifests and failed or

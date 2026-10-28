@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { ensureWorkerRegistryReady } from './adapters/agent-runtime/local/remediation.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // ARGUSDRAIN-01 — review one claimed Argus job in its own process.
 //
@@ -40,6 +41,7 @@ async function main() {
   const rootDir = argValue('--root');
   const jobPath = argValue('--job');
   if (!rootDir || !jobPath) throw new Error('usage: argus-security-review-child.mjs --root <dir> --job <path>');
+  await ensureWorkerRegistryReady();
   const job = readArgusJob(jobPath);
   const workDir = join(rootDir, 'data', 'argus-security-work', job.jobId);
   rmSync(workDir, { recursive: true, force: true });

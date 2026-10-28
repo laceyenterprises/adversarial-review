@@ -422,12 +422,17 @@ class RegistryUnavailableError extends Error {
   }
 }
 
-async function prefetchWorkerRegistry(args = {}) {
+// Each async caller establishes this process's snapshot before synchronous
+// model selection. The app transport coalesces reads and refreshes on TTL expiry.
+async function ensureWorkerRegistryReady(args = {}) {
   const observed = await readHostObservation('worker_registry', args);
   if (!observed.ok || !observed.data.classes || typeof observed.data.classes !== 'object' || Array.isArray(observed.data.classes)) {
     throw new RegistryUnavailableError();
   }
 }
+
+// Compatibility for integrations using the REGISTRYSESSION-01 name.
+const prefetchWorkerRegistry = ensureWorkerRegistryReady;
 
 function readWorkerClasses(nowMs, args = {}) {
   const observed = readHostObservationSync('worker_registry', {...args, nowMs});
@@ -1358,6 +1363,7 @@ export {
   resolveRemediationModel,
   RegistryUnavailableError,
   prefetchWorkerRegistry,
+  ensureWorkerRegistryReady,
   resolveNonBlockingCodexModel,
   spawnClaudeCodeRemediationWorker,
   spawnCodexRemediationWorker,

@@ -348,7 +348,7 @@ export async function load(url, context, nextLoad) {
   }
 
   const simpleStubs = {
-    'fixture:worker-registry': ${JSON.stringify(`export * from '${fileUrl('src', 'adapters', 'agent-runtime', 'local', 'remediation.mjs')}?actual'; export async function prefetchWorkerRegistry() { globalThis.__registryPrefetches = (globalThis.__registryPrefetches || 0) + 1; } export function resolveRemediationModel(_className, {pin, fallbackModel} = {}) { return {resolvedModel: pin || fallbackModel || null, modelSource: 'producer', resolvedReasoningLevel: null}; }`)},
+    'fixture:worker-registry': ${JSON.stringify(`export * from '${fileUrl('src', 'adapters', 'agent-runtime', 'local', 'remediation.mjs')}?actual'; export async function ensureWorkerRegistryReady() { globalThis.__registryPrefetches = (globalThis.__registryPrefetches || 0) + 1; } export const prefetchWorkerRegistry = ensureWorkerRegistryReady; export function resolveRemediationModel(_className, {pin, fallbackModel} = {}) { return {resolvedModel: pin || fallbackModel || null, modelSource: 'producer', resolvedReasoningLevel: null}; }`)},
     // Claim-loop cases own adapter usage fixtures, not ledger subprocesses.
     // Keep the newer worker transport inside the same offline accounting seam.
     'fixture:closer-hold-records': 'export async function evaluateCloserHoldsForPoll(args) { globalThis.__closerHoldPolls = (globalThis.__closerHoldPolls || 0) + 1; globalThis.__closerHoldSubjects = args.subjects; }',
@@ -505,6 +505,7 @@ try {
   let pollError = null;
   try {
     const pollOptions = {
+      ensureWorkerRegistryReadyImpl: async () => { globalThis.__registryPrefetches = (globalThis.__registryPrefetches || 0) + 1; },
       healthProbe: {
         beginTick() { return {}; },
         recordOpenPending() {},
@@ -621,6 +622,7 @@ try {
   };
 
   const pollOptions = {
+    ensureWorkerRegistryReadyImpl: async () => { globalThis.__registryPrefetches = (globalThis.__registryPrefetches || 0) + 1; },
     healthProbe: {
       beginTick() { return {}; },
       recordOpenPending() {},

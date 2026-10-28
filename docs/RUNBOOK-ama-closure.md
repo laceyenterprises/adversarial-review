@@ -6559,7 +6559,13 @@ same environment/transport, including concurrent preflights; failures are not
 cached. This is a short process-local cache, not a durable admission receipt.
 The deprecated `reviewer.quota_status_dir` (including its environment aliases)
 is ignored and warns once per environment; use `hq fleet quota status --json`.
-REGISTRYSESSION-01: model resolution prefetches `worker_registry` asynchronously
+REGISTRYSESSION-02: each process calls `ensureWorkerRegistryReady()` before
+synchronous governed model selection. Reviewer subprocesses, security review
+children, quota grounding/readers, reviewer account and fallback routing, watcher
+polls, follow-up consumers and closer routing own this readiness independently.
+Async boundaries refresh again after long quota/auth reads before synchronous
+selection; a caller never relies on another root or process warming its cache.
+The helper prefetches `worker_registry` asynchronously
 through the app SDK's registered session at reviewer startup, watcher startup
 and poll boundaries, remediation consumption, and closer routing. Successful
 snapshots cache for 60 seconds in the matching app connection scope (including
@@ -6567,7 +6573,7 @@ endpoint and explicit session identity). Environment copies with the same
 connection reuse the snapshot. Synchronous registry reads only consult that
 cache; they never register a session or invoke the synchronous SDK transport.
 Empty, stale or unavailable cache evidence raises `registry-unavailable`;
-asynchronous reviewer resolution re-prefetches before retrying. Failed or
+asynchronous model-resolution boundaries ensure readiness before selection. Failed or
 malformed reads are not cached, so the next attempt can recover immediately.
 Concurrent prefetches keep independent entries per connection and session;
 one endpoint cannot displace another endpoint's snapshot. A valid snapshot

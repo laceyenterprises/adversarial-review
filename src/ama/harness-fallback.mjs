@@ -54,7 +54,7 @@ import { codexWorkerLaneFromSnapshot, isAutomaticCodexAccountPolicy } from '../c
 // all continue to key off the LOGICAL worker_class at the call site. It is the
 // MERGE path that must survive a cap, not the harness identity.
 
-import { prefetchWorkerRegistry, resolveRemediationModel } from '../adapters/agent-runtime/local/remediation.mjs';
+import { ensureWorkerRegistryReady, resolveRemediationModel } from '../adapters/agent-runtime/local/remediation.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname, join, resolve } from 'node:path';
@@ -180,6 +180,7 @@ export async function resolveCloserDispatchHarness({
   codexAccountPolicy = 'corporate-first',
   selectAccountImpl,
   modelForWorkerClass = null,
+  ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
   // CLOSERREUSE-01: the merge-agent needs the primary's grounding even with no
   // fallback configured, because it defers rather than dispatch a grounded
   // class (src/merge-agent-harness.mjs). With no fallbacks, a grounded primary
@@ -189,8 +190,9 @@ export async function resolveCloserDispatchHarness({
   // classification already screens soft grounding for tracked harnesses.
   screenSoftGroundedFallbacks = false,
 } = {}) {
-  if (!modelForWorkerClass) {
-    await prefetchWorkerRegistry({env});
+  const usesRegistry = !modelForWorkerClass;
+  if (usesRegistry) {
+    await ensureWorkerRegistryReadyImpl({env});
     modelForWorkerClass = className => resolveRemediationModel(className, { env, fallbackModel: null, requireModel: true }).resolvedModel;
   }
   const primary = String(workerClass || '').trim();
@@ -250,6 +252,7 @@ export async function resolveCloserDispatchHarness({
     evidence = { evidenceSource: 'last-good-snapshot', evidenceAgeMs: cached.ageMs,
       evidenceReadAt: cached.readAt, liveReadReason: failureReason };
   }
+  if (usesRegistry) await ensureWorkerRegistryReadyImpl({env});
   base = { ...base, ...evidence };
   const providerStatuses = quotaStatusesFromSnapshot(snapshot);
   const primaryAvailability = providerAvailabilityFromStatuses(providerStatuses, {

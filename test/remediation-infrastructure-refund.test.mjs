@@ -163,7 +163,8 @@ test('harness-specific refund selects the configured fallback and preserves revi
   const job = { remediationPlan: { currentRound: 1, retryHistory: [{ round: 1, retryMetadata: {
     code: 'infrastructure-refund', harnessSpecific: true, workerClass: 'codex',
   } }] } };
-  const args = { primary: 'codex', fallbackWorkerClasses: ['claude-code'], job, execFileImpl: null, env: {} };
+  const args = { primary: 'codex', fallbackWorkerClasses: ['claude-code'], job, execFileImpl: null, env: {},
+    ensureWorkerRegistryReadyImpl: async () => {} };
   const routing = await resolveRemediationWorkerClassWithFallback({ ...args, codexAccountPolicy: 'pinned' });
   assert.equal(routing.workerClass, 'claude-code');
   assert.equal(routing.fellBack, true);

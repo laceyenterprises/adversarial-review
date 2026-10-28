@@ -56,7 +56,7 @@ import {
 import {
   CODEX_BUILDER_REVIEW_REFUSAL, reviewerRefusesBuilder, isCrossModelReviewWaived, normalizeReviewerModel,
 } from './adapters/subject/github-pr/routing.mjs';
-import { resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
+import { ensureWorkerRegistryReady, resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
 import { loadRoleConfig } from './role-config.mjs';
 import {
   AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS,
@@ -213,6 +213,7 @@ export async function readReviewerQuotaDecision({
   claudeBrokerProvider = 'claude-code',
   env = process.env,
   execFileImpl = executeQuota,
+  ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
 } = {}) {
   try {
     if (!resolveReviewerQuotaCheckEnabled(env)) {
@@ -235,6 +236,7 @@ export async function readReviewerQuotaDecision({
     if (!status) {
       return { available: true, state: 'missing-provider-status', provider };
     }
+    if (reviewerModel === 'codex') await ensureWorkerRegistryReadyImpl({env});
     const cap = harnessCapFromStatuses(parseHqFleetQuotaStatus(JSON.stringify({ providerStatuses: accountStatuses })), {
       harness: corporateAccount ? (reviewerModel === 'codex' ? 'codex-corp' : 'claude-reviewer-corp') : reviewerModel,
       model: reviewerModel === 'codex'
@@ -242,7 +244,8 @@ export async function readReviewerQuotaDecision({
         : null,
     });
     return { available: !cap.capped, capped: cap.capped, state: cap.state, resetAt: cap.resetAt, provider };
-  } catch {
+  } catch (error) {
+    if (error.code === 'registry-unavailable') throw error;
     return {
       available: true,
       state: 'probe-error',
@@ -681,6 +684,7 @@ async function spawnReviewerOnce(args) {
     receipt = await (args.selectReviewerTokenAccountImpl || selectReviewerTokenAccount)({
       reviewerModel: args.reviewerModel, requestId: sessionUuid, acquire: true, env,
       rootDir: args.rootDir || ROOT,
+      ensureWorkerRegistryReadyImpl: args.ensureWorkerRegistryReadyImpl,
       ...(arm ? { model: arm.model } : {}),
     });
   } catch (error) {
@@ -820,6 +824,7 @@ async function spawnReviewerOnceWithAccount({
   ledgerLookupSleepImpl = sleepMs,
   quotaCheckEnv = process.env,
   readReviewerQuotaDecisionImpl = readReviewerQuotaDecision,
+  ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
   beginReviewerPassImpl = beginReviewerPass,
   completeReviewerPassImpl = completeReviewerPass,
   fetchPullRequestHeadAndStateImpl = fetchPullRequestHeadAndState,
@@ -867,6 +872,7 @@ async function spawnReviewerOnceWithAccount({
         codexBrokerProvider,
         claudeBrokerProvider,
         env: quotaCheckEnv,
+        ensureWorkerRegistryReadyImpl,
       });
     if (normalizeReviewerModel(reviewerModel) === 'gemini' && quotaDecision.state !== 'disabled') {
       const poolAvailability = await readReviewerGeminiPoolAvailability({

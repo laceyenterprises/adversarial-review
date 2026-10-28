@@ -278,20 +278,27 @@ Gemini's Google quota check. Both Claude accounts resolve the governed model fro
 the canonical `claude-reviewer` role; the selected broker provider binds token
 mints and renewals to the account.
 
-REGISTRYSESSION-01: reviewer subprocesses, watcher polls, remediation consumers
-and closer routing asynchronously prefetch the governed worker-class registry
-through an established app session. Successful snapshots last 60 seconds within
-the matching app connection scope; synchronous model resolution reads only that
-cache. Cold, expired or unavailable evidence raises retryable
-`reviewer-model-unresolved` infrastructure failure and never asks the operator
-to re-authenticate Claude. Registry faults use existing bounded infrastructure
-backoff without charging review attempts; closers defer instead of dispatching
-with an unresolved model. Corporate model governance and broker minting remain
-enforced. Offline coverage: `test/registry-model-session.test.mjs` and
-`test/standalone-reviewer-execution.test.mjs`. After deployment, SRE observes that
-`public-registry-unavailable` stops appearing in watcher logs and an organic
-corporate Claude review completes. Publication alone does not establish this
-receipt; the existing smoke command is unchanged.
+REGISTRYSESSION-02: each process that resolves governed reviewer, closer or
+remediation models owns its registry readiness. The shared
+`ensureWorkerRegistryReady()` helper asynchronously registers an app session and
+prefetches `worker_registry` before synchronous selection, reusing a fresh
+60-second snapshot and refreshing on expiry. Reviewer subprocesses, security
+review children, quota grounding/readers, account and fallback routing, watcher
+polls and follow-up consumers use this boundary independently. Library callers
+can inject `ensureWorkerRegistryReadyImpl` through their existing options; the
+default remains the production prefetch. Readiness precedes governed model
+selection while lease/cooldown checks retain their order, and local remediation
+rechecks shutdown after its awaited refresh before spawning. A transport
+outage remains retryable `reviewer-model-unresolved`, never a fallback model or
+an OAuth re-authentication notice. Synchronous resolution performs no physical
+request and has no filesystem fallback. Corporate governance, existing bounded
+infrastructure backoff and merge authority are unchanged. Offline coverage:
+`test/worker-registry-entrypoints.test.mjs`, `test/registry-model-session.test.mjs`,
+`test/standalone-reviewer-execution.test.mjs` and
+`test/dispatch-read-client.test.mjs`. After normal deployment, SRE observes
+organic reviewer/security routing and quota grounding without missing-prefetch
+errors. Publication alone does not establish this receipt; the existing smoke
+command is unchanged.
 
 Codex reviewer routes also prefer corporate capacity, including spills and all
 fallbacks. Fresh measured quota and a serving broker admit the selected account;

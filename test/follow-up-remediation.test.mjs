@@ -6996,6 +6996,38 @@ test('consumeFollowUpJobsUntilCapacity requeues claimed jobs that finish prepara
   assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'pending')).filter((name) => name.endsWith('.json')).length, 3 - spawnCalls.length);
 });
 
+test('shutdown while local registry readiness awaits requeues the unspawned job without a round charge', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-stop-registry-'));
+  const created = createPendingRemediationJob(rootDir);
+  const spawnCalls = [];
+  let stopping = false;
+  let localPrefetches = 0;
+  let workspacePrepared = false;
+  const defaults = drainerTestOptions(rootDir, spawnCalls);
+  const result = await withOAuthTestEnv(rootDir, () => consumeNextFollowUpJob(
+    drainerTestOptions(rootDir, spawnCalls, {
+      shouldStop: () => stopping,
+      execFileImpl: async (command, args, options) => {
+        const result = await defaults.execFileImpl(command, args, options);
+        if (command === 'git' && args[0] === 'clone') workspacePrepared = true;
+        return result;
+      },
+      ensureWorkerRegistryReadyImpl: async ({env} = {}) => {
+        // The runtime's local refresh follows routing, OAuth and workspace prep.
+        if (env && workspacePrepared) {
+          localPrefetches++;
+          stopping = true;
+        }
+      },
+    })
+  ));
+  assert.equal(localPrefetches, 1);
+  assert.equal(result.reason, 'shutting-down');
+  assert.equal(spawnCalls.length, 0);
+  assert.equal(result.job.status, 'pending');
+  assert.equal(result.job.remediationPlan.currentRound, created.job.remediationPlan.currentRound);
+});
+
 test('shutdown during workspace preparation returns the claimed job to pending without a round charge', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-stop-prep-'));
   createPendingRemediationJob(rootDir);

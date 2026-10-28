@@ -845,6 +845,8 @@ async function handlePostedReviewRowWithinReadCache({
       const operatorHoldReason = isSafetyRecoveryHold(amaClosureResult)
         || amaClosureResult?.reason === HAMMER_STOP_HOLD_REASON
         ? amaClosureResult?.operatorReason || amaClosureResult?.reason || 'ama-operator-hold' : null;
+      const remediationMissing = amaClosureResult?.reason === 'remediation-job-missing'
+        && (!amaClosureResult.nextAction || amaClosureResult.nextAction.actor === 'remediator');
       // Log-feed noise control: this route retains ownership and re-polls a
       // stuck PR every tick. Log once per retained-worker state transition
       // instead of every poll; a new head/reason/worker identity still logs.
@@ -859,7 +861,7 @@ async function handlePostedReviewRowWithinReadCache({
           ? ` (after ${retainDecision.suppressedSincePrevious} suppressed identical polls)`
           : '';
         logger.log(
-          `[watcher] AMA hammer route retained ownership for ${repoPath}#${prNumber}: ` +
+          `[watcher] AMA hammer route ${remediationMissing ? 'waiting without a live actor' : 'retained ownership'} for ${repoPath}#${prNumber}: ` +
           `${leaseWaitMessage || amaClosureResult.reason || 'ama-dispatch-pending'} ` +
           (isAmaCloserLaunching(amaClosureResult) ? 'closer is launching; ' : '') +
           `lrq=${amaClosureResult.launchRequestId || amaClosureResult.dispatchId || 'unknown'} ` +
@@ -867,12 +869,12 @@ async function handlePostedReviewRowWithinReadCache({
         );
       }
       return { handled: true, outcome: 'ama-pending', urgent: coexistenceDecision.urgent === true,
-        ...(operatorHoldReason || amaClosureResult?.reason === 'deferred-by-drain'
+        ...(operatorHoldReason || remediationMissing || amaClosureResult?.reason === 'deferred-by-drain'
           || leaseWaitMessage
           ? { amaClosureResult } : {}),
         ...(operatorHoldReason ? { operatorHoldReason } : {}),
         ...(gateProjection?.decision?.operatorDecisionRequired === true
-          && !operatorHoldReason ? { hammerRouteActive: true } : {}),
+          && !operatorHoldReason && !remediationMissing ? { hammerRouteActive: true } : {}),
         gateDecision: gateProjection?.decision || null };
     }
 

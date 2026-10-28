@@ -367,6 +367,20 @@ pipeline re-dispatches. An available but idle hammer route eventually sends
 from the beginning of its idle interval. The page text includes the reason.
 This observation does not change closer eligibility or dispatch.
 
+NOTICEHOLD-01: when the current next action belongs to the remediator, only an
+existing pending/in-progress remediation job holds delivery. Historical
+`inProgress`, `in-progress` and `in_progress` statuses all count as active. A stopped, failed or missing
+job releases the notice immediately as `no-route`, even if closure returns
+`recoveryWait`, a retry delay, or a closer lease remains. That closer cannot act
+on a remediator-owned action. The notice includes the current-head remediation
+stop code and reason, falling back to recorded failure code and reason or message
+when there is no explicit stop, including the operator decision needed; if no stop or failure
+record exists, it names `remediation-job-missing` and asks the operator to inspect the
+unresolved findings. Delivery rechecks remediation activity after the live PR
+lookup. `remediation-job-missing` does not claim a live hammer actor in the
+no-progress lane, and the ownerless clock keeps accruing. Closer-owned live work,
+hammer wake eligibility, live-pack stops and label requirements are unchanged.
+
 Before delivery, the watcher reads the live PR and requires it to remain open
 at the observed head, then checks again for a new launch or pending re-dispatch.
 It also re-checks the per-head alert marker immediately before enqueue so a

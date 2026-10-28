@@ -233,6 +233,23 @@ async function handleClosureResult(rootDir, amaClosureResult, outcome = 'ama-pen
   });
 }
 
+test('NOTICEHOLD-01 missing remediation retains no live hammer actor in lane accounting', async () => {
+  const { rootDir, gate } = fixture();
+  try {
+    const closure = { reason: 'remediation-job-missing', recoveryWait: true, retryAfterMs: 30_000,
+      nextAction: { head: headSha, action: 'remediate', actor: 'remediator', reason: 'review-findings' } };
+    const value = await handleClosureResult(rootDir, closure);
+    assert.notEqual(value.hammerRouteActive, true);
+    assert.deepEqual(value.amaClosureResult.nextAction, closure.nextAction);
+    for (let i = 0; i < 4; i++) await gate.record(handler, { value });
+    const lane = readNoProgressLane(rootDir, { repo: handler.repoPath, prNumber: handler.prNumber });
+    assert.equal(lane.hammerRouteActive, false);
+    assert.equal(lane.noProgressTicks, 3);
+    assert.equal(lane.lane, 'operator-blocked');
+    assert.equal(gate.evaluate(handler).run, false);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
 for (const terminalReason of ['closed', 'merged']) {
   for (const operatorSkip of [false, true]) {
     test(`HAMLANE-01 ${terminalReason} PR retires superseded-head intent; operator skip=${operatorSkip}`, async () => {

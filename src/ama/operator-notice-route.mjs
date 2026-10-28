@@ -36,6 +36,9 @@ export function operatorNoticeNonRetryableStop(record) {
 
 export function operatorNoticePendingRetry(outcome, record) {
   return Boolean(outcome && !outcome.needsOperator && outcome.closureOwner?.owner !== 'page'
+    // A wait for another actor is not a pending closer retry.
+    && outcome.nextAction?.actor !== 'remediator'
+    && (outcome.nextAction || outcome.reason !== 'remediation-job-missing')
     && (outcome.inFlight || outcome.recoveryWait || outcome.retryAfterMs || outcome.backgroundDispatch
       || (outcome.dispatched && !record?.outcome)
       || outcome.closureOwner?.reason?.startsWith('in-flight:')));

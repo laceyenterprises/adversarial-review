@@ -338,7 +338,7 @@ const SEARCH_COUNT_LIMITS = ['max_results', 'max_pages', 'max_urls', 'max_input_
 
 function searchSchema() {
   const record = keys => ({ __type: TYPE_DICT, __strict: true, __strict_always: true, __keys: keys });
-  const money = () => ({ __type: TYPE_STRING, __default: '0.00', __pattern: SEARCH_MONEY_PATTERN, __nullable: false });
+  const money = () => ({ __type: TYPE_STRING, __pattern: SEARCH_MONEY_PATTERN, __nullable: false });
   const ref = () => ({ __type: TYPE_STRING, __pattern: SEARCH_REF_PATTERN, __nullable: false });
   const providers = {};
   for (const [provider, operations] of Object.entries(SEARCH_OPERATIONS)) {
@@ -347,6 +347,7 @@ function searchSchema() {
     }]));
     Object.assign(limitKeys, {
       max_charge_usd: { __type: TYPE_STRING, __pattern: SEARCH_MONEY_PATTERN },
+      product_authorized: { __type: TYPE_BOOL },
       currency: { __type: TYPE_STRING, __enum: ['USD'] },
       pricing_provenance: { __type: TYPE_STRING, __pattern: String.raw`^\S[^\r\n]{0,511}$` },
       research_effort: { __type: TYPE_STRING, __enum: ['low', 'medium', 'high'] },
@@ -360,6 +361,7 @@ function searchSchema() {
       presentation: { __type: TYPE_STRING, __default: 'abstracted', __enum: ['abstracted', 'native'] },
       credential_ref: ref(),
       budget_usd: money(),
+      watch_threshold_usd: money(),
       budget_window_seconds: { __type: TYPE_INT, __default: 86400, __min: 1, __max: 2678400 },
       allowed_operations: { __type: TYPE_LIST, __item: { __type: TYPE_STRING, __enum: operations }, __default: [] },
       operation_limits: limits,
@@ -370,6 +372,8 @@ function searchSchema() {
   return record({
     enabled: { __type: TYPE_BOOL, __default: false },
     run_budget_usd: money(),
+    run_watch_threshold_usd: money(),
+    usage_watch_window_seconds: { __type: TYPE_INT, __min: 1, __max: 2678400 },
     providers: record(providers),
   });
 }
@@ -386,12 +390,14 @@ function validateSearch(search = {}) {
     // Only positivity is compared: decimal billing arithmetic belongs to HCP.
     return /[1-9]/.test(value);
   };
-  const runPositive = money(search.run_budget_usd ?? '0.00', '.run_budget_usd');
+  const runPositive = !Object.hasOwn(search, 'run_budget_usd') || money(search.run_budget_usd, '.run_budget_usd');
+  if (Object.hasOwn(search, 'run_watch_threshold_usd')) money(search.run_watch_threshold_usd, '.run_watch_threshold_usd');
   if (search.enabled && !runPositive) fail('.run_budget_usd', 'enabled gateway requires a positive budget');
   for (const [provider, entry] of Object.entries(search.providers ?? {})) {
     const path = `.providers.${provider}`;
     if (!Object.hasOwn(SEARCH_OPERATIONS, provider)) fail(path, 'unknown provider');
-    const positive = money(entry.budget_usd ?? '0.00', `${path}.budget_usd`);
+    const positive = !Object.hasOwn(entry, 'budget_usd') || money(entry.budget_usd, `${path}.budget_usd`);
+    if (Object.hasOwn(entry, 'watch_threshold_usd')) money(entry.watch_threshold_usd, `${path}.watch_threshold_usd`);
     for (const field of ['credential_ref', 'answers_credential_ref']) {
       if (Object.hasOwn(entry, field) && (!(new RegExp(SEARCH_REF_PATTERN).test(entry[field])) || entry[field].endsWith('\n'))) {
         fail(`${path}.${field}`, 'expected unambiguous op reference metadata');
@@ -408,15 +414,15 @@ function validateSearch(search = {}) {
     for (const [operation, limit] of Object.entries(limits)) {
       const opPath = `${path}.operation_limits.${operation}`;
       if (!SEARCH_OPERATIONS[provider].includes(operation) || !operations.includes(operation)) fail(opPath, 'operation must be supported and explicitly allowed');
-      if (!money(limit.max_charge_usd, `${opPath}.max_charge_usd`)) fail(opPath, 'maximum charge must be positive');
-      if (limit.currency !== 'USD' || typeof limit.pricing_provenance !== 'string' || !limit.pricing_provenance.trim() || /[\r\n]/.test(limit.pricing_provenance)) {
+      if (Object.hasOwn(limit, 'max_charge_usd') && !money(limit.max_charge_usd, `${opPath}.max_charge_usd`)) fail(opPath, 'maximum charge must be positive');
+      if (Object.hasOwn(limit, 'max_charge_usd') && (limit.currency !== 'USD' || typeof limit.pricing_provenance !== 'string' || !limit.pricing_provenance.trim() || /[\r\n]/.test(limit.pricing_provenance))) {
         fail(opPath, 'USD currency and pricing provenance are required');
       }
       if (Object.hasOwn(limit, 'processor') && /[\r\n]/.test(limit.processor)) fail(opPath, 'invalid processor');
       if (!SEARCH_COUNT_LIMITS.some(key => Object.hasOwn(limit, key))) fail(opPath, 'at least one request ceiling is required');
     }
     if (entry.enabled) {
-      if (!positive || !runPositive) fail(path, 'enabled provider requires positive provider and run budgets');
+      if (!positive || !runPositive) fail(path, 'configured provider and run budgets must be positive when enabled');
       if (!entry.credential_ref || !operations.length || !Object.keys(limits).length) fail(path, 'enabled provider requires credential metadata and a bounded operation');
       if (provider === 'brave' && operations.some(op => ['answer', 'research'].includes(op)) && !entry.answers_credential_ref) {
         fail(path, 'Brave answer/research requires separate Answers credential metadata');

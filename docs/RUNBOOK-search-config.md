@@ -3,7 +3,7 @@
 `src/config-loader.mjs` mirrors `services.hcp.search` for Node consumers such as
 the watcher and follow-up daemons. This reader validates metadata only: loading
 configuration does not resolve credentials, contact providers or enable worker
-access. Defaults keep all six providers disabled with zero spend.
+access. Defaults keep all six providers disabled; omitted local budgets stay unset.
 
 ## Strict policy and deployment order
 
@@ -28,6 +28,33 @@ or deploying its reader; do not use runtime tolerance as a rollout bypass.
 Validation failures identify the policy path. Successful resolution exposes
 winning file provenance through `sources` and layer history through
 `resolutionTrace`; this mirror adds no separate audit store.
+
+## Optional budgets and usage watch
+
+Provider `budget_usd` and gateway `run_budget_usd` are independent optional
+local controls. Omission disables local spend refusal for that dimension; a
+configured budget must be positive when enabled. Explicit disabled zero values
+remain valid and are retained, so enabling an inherited zero requires changing
+that value. No loader inserts an implicit zero. Money is a finite nonnegative
+decimal USD string; negative, non-finite and numeric values are rejected.
+
+Request ceilings remain required. `max_charge_usd` is optional in each operation
+limit; when supplied it must be positive and accompanied by `currency: USD` and
+`pricing_provenance`. An absent charge declaration does not remove request limits,
+product authorization or route/confinement requirements. Optional operation-limit
+`product_authorized` is a boolean host attestation for separately authorized
+products; its omission grants no product access.
+
+Optional provider `watch_threshold_usd` and gateway `run_watch_threshold_usd`
+use the same money syntax but accept zero while enabled. They are monitoring
+thresholds, never budgets or access controls. Optional gateway
+`usage_watch_window_seconds` is an integer from 1 through 2678400 (runtime default
+86400). Omitted thresholds do not create a local budget. This reader validates
+these declarations only; the host gateway owns durable accounting and alerts.
+
+The companion superproject change depends on this Node relaxation merging and
+floating first. Deploy the updated reader before publishing optional-budget
+configuration or new watch keys; Node tests do not attest the other loaders.
 
 ## Layer replacement and credential metadata
 

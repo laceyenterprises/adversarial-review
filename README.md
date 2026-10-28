@@ -2465,7 +2465,7 @@ stateDiagram-v2
 ## Search configuration mirror (SPE-01)
 
 `services.hcp.search` is inert metadata in this reader, with every provider
-disabled and spend set to zero by default. Search policy is strict in both
+disabled and local budgets unset by default. Search policy is strict in both
 `loadConfig` and `loadConfigRuntime`, including local overrides. Deploy the
 updated Node reader before publishing new search keys in shared configuration.
 Provider `operation_limits` maps replace whole prior-layer declarations; `{}`

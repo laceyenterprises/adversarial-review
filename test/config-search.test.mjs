@@ -64,10 +64,10 @@ test('SPE defaults and overlay retain dotted operation IDs as atomic declaration
     writeFileSync(topPath, 'version: 1\n');
     const defaults = loadConfig({ topPath, env: {} }).get('services.hcp.search');
     assert.equal(defaults.enabled, false);
-    assert.equal(defaults.run_budget_usd, '0.00');
+    assert.equal(Object.hasOwn(defaults, 'run_budget_usd'), false);
     assert.equal(Object.keys(defaults.providers).length, 6);
     for (const entry of Object.values(defaults.providers)) {
-      assert.deepEqual(entry, { enabled: false, presentation: 'abstracted', budget_usd: '0.00', budget_window_seconds: 86400, allowed_operations: [], operation_limits: {} });
+      assert.deepEqual(entry, { enabled: false, presentation: 'abstracted', budget_window_seconds: 86400, allowed_operations: [], operation_limits: {} });
     }
     writeFileSync(join(dir, 'config.local.yaml'), JSON.stringify({ services: { hcp: { search: fixture.configured } } }));
     assert.deepEqual(loadConfig({ topPath, env: {} }).get('services.hcp.search'), fixture.configured);
@@ -145,4 +145,39 @@ test('SPE excludes Exa KB PAT spellings from every search credential field', () 
       }
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+test('enabled search overlay preserves independently omitted local budgets', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'search-optional-budget-'));
+  const topPath = join(dir, 'config.yaml');
+  try {
+    for (const providerBudget of [undefined, '1.00']) {
+      for (const runBudget of [undefined, '5.00']) {
+        const search = { enabled: true, providers: { exa: {
+          enabled: true, credential_ref: 'op://test-vault/Exa API Key/credential',
+          allowed_operations: ['web_search'], budget_window_seconds: 86400,
+          operation_limits: { web_search: { max_results: 10 } },
+          ...(providerBudget === undefined ? {} : { budget_usd: providerBudget }),
+        } }, ...(runBudget === undefined ? {} : { run_budget_usd: runBudget }) };
+        writeFileSync(topPath, 'version: 1\n');
+        writeFileSync(join(dir, 'config.local.yaml'), JSON.stringify({ services: { hcp: { search } } }));
+        for (const load of [loadConfig, loadConfigRuntime]) {
+          const effective = load({ topPath, env: {} }).get('services.hcp.search');
+          assert.equal(effective.run_budget_usd, runBudget);
+          assert.equal(effective.providers.exa.budget_usd, providerBudget);
+        }
+      }
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+test('operation product attestation is typed independently of financial declarations', () => {
+  const doc = { version: 1, services: { hcp: { search: { providers: { brave: {
+    allowed_operations: ['answer'], operation_limits: { answer: { max_output_tokens: 100, product_authorized: true } },
+  } } } } } };
+  validateSchema(doc);
+  doc.services.hcp.search.providers.brave.operation_limits.answer.product_authorized = 'yes';
+  assert.throws(() => validateSchema(doc), AgentOSConfigError);
 });

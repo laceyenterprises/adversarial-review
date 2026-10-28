@@ -4047,7 +4047,22 @@ test('launchd label prefix loads through strict Node schema and env alias', () =
   }
 });
 
-test('OSR-04 host-local roots load through strict Node schema and env aliases', () => {
+test('config validates without ACPX discovery keys and rejects the removed install root', () => {
+  const tmp = freshTmp();
+  try {
+    const topPath = join(tmp, 'config.yaml');
+    writeFile(topPath, 'version: 1\n');
+    const cfg = loadConfig({ topPath, modulePaths: [MODULE_CONFIG_PATH], env: {} });
+    assert.equal(cfg.get('openclaw.install_root'), null);
+    assert.equal(Object.hasOwn(ENV_ALIASES, 'openclaw.install_root'), false);
+    assert.throws(() => validateSchema({ version: 1, openclaw: { install_root: '/fixture/retired-runtime' } }),
+      (err) => err instanceof AgentOSConfigError && err.key === 'openclaw.install_root' && /unknown key/.test(err.message));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('OSR-04 parent-owned host-local keys retain strict Node schema and env aliases', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -4055,32 +4070,24 @@ test('OSR-04 host-local roots load through strict Node schema and env aliases', 
       version: 1
       openclaw:
         live: false
-        install_root: /cfg/openclaw
       codex:
         acp_state_home: /cfg/codex-acp
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('openclaw.live'), false);
-    assert.equal(cfg.get('openclaw.install_root'), '/cfg/openclaw');
     assert.equal(cfg.get('codex.acp_state_home'), '/cfg/codex-acp');
     const envCfg = loadConfig({
       topPath: top,
       env: {
         AGENT_OS_OPENCLAW_LIVE: 'true',
-        AGENT_OS_OPENCLAW_INSTALL_ROOT: '/env/openclaw',
         AGENT_OS_CODEX_ACP_STATE_HOME: '/env/codex-acp',
       },
     });
     assert.equal(envCfg.get('openclaw.live'), true);
-    assert.equal(envCfg.get('openclaw.install_root'), '/env/openclaw');
     assert.equal(envCfg.get('codex.acp_state_home'), '/env/codex-acp');
     assert.equal(
       envCfg.resolutionTrace('openclaw.live').at(-1).source,
       'env:AGENT_OS_OPENCLAW_LIVE',
-    );
-    assert.equal(
-      envCfg.resolutionTrace('openclaw.install_root').at(-1).source,
-      'env:AGENT_OS_OPENCLAW_INSTALL_ROOT',
     );
     assert.equal(
       envCfg.resolutionTrace('codex.acp_state_home').at(-1).source,

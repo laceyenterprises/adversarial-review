@@ -44,10 +44,6 @@ environment as fallbacks. The current set is documented in
 [`DEPLOYMENT.md`](DEPLOYMENT.md), but for honesty's sake the load-bearing
 ones are:
 
-- `src/reviewer.mjs` resolves an `ACPX_CLI` default that points at
-  `<operator-home>/.openclaw/tools/acpx/node_modules/.bin/acpx`. This is
-  only consulted when ACPX is the configured reviewer runtime, which it
-  is not by default.
 - `src/alert-delivery.mjs` defaults its secret root to
   `<operator-home>/.config/adversarial-review/secrets` and probes a
   legacy `<operator-home>/agent-os/agents/clio/credentials/local` path

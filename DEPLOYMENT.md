@@ -58,11 +58,6 @@ paths use neutral defaults instead.
   `<operator-home>` when no environment override is present. This is
   a maintainer-local daemon default for cross-user reviewer spawn
   and is overridden in normal operation.
-- **`src/reviewer.mjs`** has
-  `ACPX_CLI = '<operator-home>/.openclaw/tools/acpx/node_modules/.bin/acpx'`.
-  This is only consulted when ACPX is the configured reviewer
-  runtime, which it is not by default — `cli-direct` is the default
-  runtime and it discovers `claude` and `codex` on `PATH`.
 - **`src/follow-up-remediation.mjs`** defaults reply storage to
   `<operator-home>/agent-os-hq` when `HQ_ROOT` is set, and to
   `<repo>/data/replies` otherwise. The HQ-rooted path is part of the

@@ -45,7 +45,7 @@ test('production domains/ registers every config, enables only code-pr', () => {
   const registered = registry.domains.map((d) => d.id).sort();
   // code-pr-security (ARC-04) is registered but gated OFF: it must appear in the
   // registered set yet stay out of the enabled (actively polled) set.
-  assert.deepEqual(registered, ['acpx-smoke', 'code-pr', 'code-pr-security', 'research-finding']);
+  assert.deepEqual(registered, ['code-pr', 'code-pr-security', 'research-finding']);
   assert.deepEqual(resolveEnabledDomainIds(registry), ['code-pr']);
 });
 
@@ -59,6 +59,17 @@ test('two enabled domains are both surfaced; disabled domains are excluded', () 
     const registry = loadDomainRegistry(root);
     assert.deepEqual(registry.domains.map((d) => d.id), ['domain-a', 'domain-b', 'domain-c']);
     assert.deepEqual(resolveEnabledDomainIds(registry), ['domain-a', 'domain-b']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('registry rejects retired ACPX runtime even on a disabled domain', () => {
+  const config = baseConfig('domain-a', { enabled: false, reviewerRuntime: 'acpx' });
+  const root = makeRoot({ 'domain-a': config });
+  try {
+    assert.throws(() => loadDomainRegistry(root), /ACPX reviewer runtime has been removed; use cli-direct/);
+    assert.throws(() => validateDomainConfig('domain-a', config), /ACPX reviewer runtime has been removed/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

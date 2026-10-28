@@ -174,15 +174,17 @@ npm test
 
 CI runs both on Node 22 and Node 26 on every PR.
 
-### ACPX Discovery
-
-When the Codex reviewer runtime uses ACPX, the module resolves the ACPX
-binary in this order: `ACPX_CLI`, then `acpx` on `PATH`, then
-`AGENT_OS_OPENCLAW_INSTALL_ROOT` / `openclaw.install_root` as
-`<install-root>/tools/acpx/node_modules/.bin/acpx`, then the historical
-`~/.openclaw/tools/acpx/node_modules/.bin/acpx` fallback.
-
 ### AgentOS Reviewer Runtime Routing
+
+Supported reviewer runtimes are `cli-direct`, `agent-os-hq`, `agent-runtime`
+and `fixture-stub`. The retired ACPX runtime and its smoke domain have been
+removed. Domains that still name `acpx` fail validation with a migration
+message. An `ADVERSARIAL_REVIEWER_RUNTIME=acpx` override is ignored with the
+same warning and fallthrough as other unknown runtime overrides.
+`ACPX_CLI`, `ACPX_CLI_PATH` and `openclaw.install_root` no longer configure
+reviewers; remove the obsolete install-root key from configuration. The
+shared schema still accepts parent-owned retention, reaper and ACP state-home
+settings for Agent OS compatibility; none selects a reviewer runtime.
 
 The GitHub-PR watcher resolves `roles.adversarial.orchestration_mode`
 once per poll tick. In the default `native` mode, `domains/code-pr.json`
@@ -2813,7 +2815,7 @@ releases the unstarted slot and holds. A capacity CAS loss holds until a later
 dispatch, without an unleased fallback. The deployed Python environment must
 provide `agent_os_core`, `cwp_dispatch` and their quota dependencies. A missing
 owner or unreadable evidence holds rather than reverting to a legacy account.
-Native `cli-direct` and Codex `acpx` consume the binding; other production runtime
+Native `cli-direct` consumes the binding; other production runtime
 adapters hold until they support account binding. This is inert without declared
 pools; ITP-19 remains the separately approved operator enrollment step.
 

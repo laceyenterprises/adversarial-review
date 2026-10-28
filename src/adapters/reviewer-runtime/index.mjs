@@ -1,6 +1,5 @@
 import { createAgentOsHqReviewerRuntimeAdapter } from './agent-os-hq/index.mjs';
 import { createAgentRuntimeReviewerRuntimeAdapter } from './agent-runtime/index.mjs';
-import { createAcpxReviewerRuntimeAdapter } from './acpx/index.mjs';
 import { createCliDirectReviewerRuntimeAdapter } from './cli-direct/index.mjs';
 import { createFixtureStubReviewerRuntimeAdapter } from './fixture-stub/index.mjs';
 import { pruneReviewerRunRecords, readRecoverableReviewerRunRecords } from './run-state.mjs';
@@ -54,8 +53,6 @@ function createReviewerRuntimeAdapterByName(name = 'cli-direct', options = {}) {
   switch (name) {
     case 'agent-runtime':
       return createAgentRuntimeReviewerRuntimeAdapter(options);
-    case 'acpx':
-      return createAcpxReviewerRuntimeAdapter(options);
     case 'cli-direct':
       return createCliDirectReviewerRuntimeAdapter(options);
     case 'fixture-stub':

@@ -4,13 +4,13 @@ import {
   evaluateSettleSmokeResult,
 } from './adapters/agent-runtime/settle-smoke.mjs';
 import { readRuntimeStatusSnapshot } from './runtime-status-snapshot.mjs';
+import { validateReviewerRuntimeConfig } from './domain-config.mjs';
 
 const DEFAULT_RUNTIME = 'cli-direct';
 const AGENTOS_FALLBACK_RUNTIME = 'agent-os-hq';
 const CUTOVER_RUNTIME = 'agent-runtime';
 const KNOWN_REVIEWER_RUNTIME_NAMES = new Set([
   'agent-runtime',
-  'acpx',
   'cli-direct',
   'fixture-stub',
   'agent-os-hq',
@@ -25,6 +25,7 @@ function detail(code, message) {
 }
 
 function requestedReviewerRuntime(domainConfig = {}) {
+  validateReviewerRuntimeConfig(domainConfig);
   return String(domainConfig?.reviewerRuntime || DEFAULT_RUNTIME).trim() || DEFAULT_RUNTIME;
 }
 

@@ -1,6 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+function validateReviewerRuntimeConfig(config) {
+  if (String(config?.reviewerRuntime || '').trim().toLowerCase() === 'acpx') {
+    throw new Error('reviewerRuntime: ACPX reviewer runtime has been removed; use cli-direct, agent-os-hq, agent-runtime or fixture-stub');
+  }
+}
+
 /**
  * Load a domain configuration document (`domains/<id>.json`).
  *
@@ -25,7 +31,9 @@ function loadDomainConfig(rootDir, domainId) {
     }
     throw err;
   }
-  return JSON.parse(raw);
+  const config = JSON.parse(raw);
+  validateReviewerRuntimeConfig(config);
+  return config;
 }
 
-export { loadDomainConfig };
+export { loadDomainConfig, validateReviewerRuntimeConfig };

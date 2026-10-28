@@ -903,7 +903,6 @@ function schemaV1() {
           // OSR-04b: top-level keys must be accepted by every strict CFG
           // loader even when only one language consumes the value at runtime.
           live: { __type: TYPE_BOOL, __default: false },
-          install_root: { __type: TYPE_STRING, __default: null, __nullable: true },
         },
       },
       codex: {
@@ -4831,11 +4830,6 @@ export const ENV_ALIASES = {
   },
   'openclaw.live': {
     canonical: 'AGENT_OS_OPENCLAW_LIVE',
-    aliases: [],
-  },
-  'openclaw.install_root': {
-    // OSR-04b: ACPX discovery alias; see schema comment above.
-    canonical: 'AGENT_OS_OPENCLAW_INSTALL_ROOT',
     aliases: [],
   },
   'codex.acp_state_home': {

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import childProcess, { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { EventEmitter } from 'node:events';
 import { dirname, join } from 'node:path';
@@ -185,8 +185,9 @@ test('cwd failures retain refusal and diagnostics while later declarations start
     ? runDerivedGenerator(args) : offlineGenerator(args) });
   assert.equal(result.generatedBlockProofs.length, 1);
   assert.equal(checkPrimaryChange(result, f.args.headSha).ok, true);
-  assert.ok(diagnostics.some(message => message.includes('docs/guide.md')
-    && message.includes('generator cwd unavailable:') && message.includes('missing') && message.includes('ENOENT')));
+  assert.equal(diagnostics.length, 1);
+  assert.ok(diagnostics[0].includes('docs/guide.md') && diagnostics[0].includes('block-generator-failed'));
+  assert.equal(diagnostics[0].includes(f.root), false);
   const missing = fixture(t, { generatorCwd: 'missing' });
   const refused = await prove(missing, { runGeneratorImpl: runDerivedGenerator });
   assert.deepEqual(refused.generatedBlockProofs, []);
@@ -343,7 +344,7 @@ test('missing or incomplete local clone references fail closed without a network
   await assert.rejects(withDerivedCheckout({ ...identity, headSha: 'f'.repeat(40) },
     () => assert.fail('missing commit must not run operation')), error => {
     assert.ok(!error.message.includes('https://github.com/'));
-    assert.ok(error.message.includes(f.root));
+    assert.ok(error.message.includes(realpathSync(f.root)));
     return true;
   });
   assert.deepEqual((await prove(f, { checkoutImpl: (args, operation) =>

@@ -3352,6 +3352,18 @@ Changed or missing headers, hand edits, no-op generators, unavailable generators
 and timeouts keep the existing refusal. Proof collection remains outside the
 history cache; no reversal authorization or merge check changes.
 
+GENERATEDPRIMARY-02: the code-pr domain registers agent-os's provision-managed
+worker base in the existing `remediationCloneReferences` map. Provisioned worker
+worktrees share that object store, including their PR heads; proofs fetch only
+immutable identities locally into scratch. Missing root `package.json` means no
+block declarations, while a completed whole-file proof needs no manifest.
+Failed or skipped candidates emit one `[derived-content]` warning per
+repository/PR/head/path per proof attempt through the existing log channel.
+The warning names a fixed failure stage/reason and the subject; subprocess
+output, commands and host clone paths are excluded. A fallback failure does not
+produce duplicate warnings. Missing objects, malformed manifests and failed or
+mismatched generators still supply no proof.
+
 Generators run with a sanitized environment, scratch HOME, no host credentials,
 network denied and writes confined to scratch, using macOS `sandbox-exec` or
 Linux `bwrap`. macOS permits reading the root directory entry and metadata of

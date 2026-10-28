@@ -14,6 +14,7 @@
   },
   "promptSet": "code-pr",
   "remediationCloneReferences": {
+    "laceyenterprises/agent-os": "/Users/airlock/agent-os-hq/worker-base/agent-os",
     "laceyenterprises/adversarial-review": "/Users/airlock/agent-os-hq/adversarial-review/clone-references/adversarial-review.git",
     "laceyenterprises/foundry": "/Users/airlock/agent-os/.git/modules/tools/foundry",
     "laceyenterprises/podium": "/Users/airlock/agent-os/.git/modules/tools/podium"

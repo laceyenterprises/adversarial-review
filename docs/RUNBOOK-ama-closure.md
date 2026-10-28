@@ -883,9 +883,11 @@ not a gate, and it is not authorized by NXA-02.
 
 ### Unreadable ownership recovery (OWNERUNREADABLE-01)
 
-R04 re-reads the referenced closer launch and its retry chain up to three times
-with 100/200 ms backoff inside one five-second read deadline. A same-pass refresh
-may reuse a complete readable retry chain, but cannot reuse the closer-lease
+R04 retries failed, unknown or thrown reads of the referenced closer launch and
+its retry chain up to three times with 100/200 ms backoff inside one five-second
+read deadline. Complete observations return immediately, including unreadable
+payloads, which retain recovery ownership until a later closure pass. A same-pass
+refresh may reuse a complete readable retry chain, but cannot reuse the closer-lease
 placeholder's `retryChainUnreadable: true` or a failed observation merely because
 its launch ID and head match. A complete SDK `found` reply containing the
 terminal root and empty `retry_edges` proves there are no retries; it is distinct
@@ -897,8 +899,9 @@ including a stale head with historical terminal validation. This selects R08
 dispatch without requesting re-review. Existing holds, live owners, retry caps,
 execution policy, drain, capacity, lease acquisition and merge predicates still
 apply. A ledger outage retains R04 and marks its skipped wake retryable for the
-next closure pass; deadline expiry alone never licenses a launch. Recovery reads
-share one abort signal and remaining physical timeout.
+next closure pass when its wake identity is valid; malformed identities return
+`invalid-wake-identity` with `retryable: false`. Deadline expiry alone never
+licenses a launch. Recovery reads share one abort signal and remaining physical timeout.
 
 Synthetic fixtures reproduce a green, carried comment-only head whose terminal
 closer finished earlier but whose cached placeholder kept it in R04 for hours.

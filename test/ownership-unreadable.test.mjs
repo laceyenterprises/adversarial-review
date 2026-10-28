@@ -98,6 +98,39 @@ test('OWNERUNREADABLE-01: a transient unreadable result re-reads with backoff an
   assert.equal(shared.decision.reason, 'retry-no-merge');
 });
 
+test('OWNERUNREADABLE-01: a complete unreadable payload stays fenced without immediate retries', async t => {
+  const f = fixture(t, { observedAt: LATER });
+  let reads = 0;
+  const shared = await f.resolve({ readLaunches: async () => {
+    reads++;
+    return { state: 'complete', value: { closer: {
+      launchRequestId: lease.lrqId, headSha: HEAD, row: { status: 'succeeded' },
+      retryChainUnreadable: true,
+    } } };
+  } });
+  assert.equal(reads, 1, 'complete unreadable evidence is not a transient read failure');
+  assert.equal(shared.decision.reason, 'ownership-unreadable');
+  assert.equal(f.wake(shared).retryable, true, 'the next closure pass may refresh the evidence');
+  assert.equal(f.wakes(), 0);
+});
+
+for (const identity of [{ repo: '' }, { prNumber: 0 }, { prNumber: -1 }, { prNumber: 1.5 }, { headSha: '' }]) {
+  test(`OWNERUNREADABLE-01: invalid wake identity is not retryable (${JSON.stringify(identity)})`, t => {
+    const f = fixture(t);
+    // Keep the R04 head binding valid even for a malformed empty head.
+    const headSha = identity.headSha ?? HEAD;
+    const result = requestEligibleHammerWake({ rootDir: f.options.rootDir,
+      repo: 'example/repo', prNumber: 1, headSha, ...identity,
+      shared: { snapshot: { head: headSha }, decision: {
+        row: 'R04-ownership', reason: 'ownership-unreadable', head: headSha,
+      } }, requestWatcherWakeImpl: () => assert.fail('invalid identity cannot wake the watcher') });
+    assert.equal(result.outcome, 'skipped');
+    assert.equal(result.reason, 'invalid-wake-identity');
+    assert.equal(result.retryable, false);
+    assert.equal(result.auditPath, undefined);
+  });
+}
+
 test('OWNERUNREADABLE-01: recovery also re-reads when a registered snapshot is the pass itself', { timeout: 1000 }, async t => {
   const f = fixture(t);
   registerSharedNextAction(f.passSnapshot, { snapshot: f.passSnapshot, decision: nextAction(f.passSnapshot) });

@@ -101,6 +101,7 @@ function boundedLaunchReads(readLaunches) {
     let result;
     // R04 is recovery work. Retry failed observations as well as thrown reads,
     // sharing one physical deadline and stopping after 100/200ms backoff.
+    // Complete observations, even unreadable payloads, need no immediate retry.
     for (let attempt = 0; attempt < 3; attempt++) {
       controller.signal.throwIfAborted();
       if (Date.now() >= deadline) return unknown;
@@ -108,7 +109,7 @@ function boundedLaunchReads(readLaunches) {
         timeoutMs: Math.max(1, deadline - Date.now()) }))
         .catch(() => ({ state: 'error', value: null, provenance: { sourceRef: 'launch-requests' } }));
       controller.signal.throwIfAborted();
-      if (result?.state === 'complete' && result.value?.closer?.retryChainUnreadable !== true) return result;
+      if (result?.state === 'complete') return result;
       if (attempt < 2) await delay(100 * 2 ** attempt, undefined, { signal: controller.signal });
     }
     return result;

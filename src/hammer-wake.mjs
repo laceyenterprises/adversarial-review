@@ -179,6 +179,7 @@ function requestEligibleHammerWake({
 
   if (!identity.repo || !Number.isInteger(identity.prNumber) || identity.prNumber <= 0 || !identity.headSha || !identity.eligibilityReason) {
     reason = 'invalid-wake-identity';
+    retryable = false;
   } else if (eligibility?.eligible === true) {
     try {
       mkdirSync(hammerWakeAuditDir(rootDir), { recursive: true });

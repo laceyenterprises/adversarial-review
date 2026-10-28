@@ -290,12 +290,13 @@ test('resolvePublishedWorkerClasses reads the published roster and refreshes the
   assert.equal(result.source, 'published');
   assert.deepEqual([...result.classes].sort(), ['claude-code', 'codex', 'gemini']);
 
-  // A subsequent run with no reachable checkout degrades to the snapshot just
-  // written under rootDir/data.
+  // An unavailable public registry degrades to the snapshot just written
+  // under rootDir/data, independently of the default producer fixture.
   const degraded = resolvePublishedWorkerClasses({
     env: {},
     rootDir,
     moduleRoot: tmp(),
+    readHostObservationImpl: () => ({ ok: false }),
   });
   assert.equal(degraded.source, 'snapshot');
   assert.deepEqual([...degraded.classes].sort(), ['claude-code', 'codex', 'gemini']);
@@ -381,7 +382,10 @@ test('writeSnapshot refuses to replace a snapshot owned by a non-canonical uid',
 
 test('resolvePublishedWorkerClasses throws when neither roster nor snapshot exists', () => {
   assert.throws(
-    () => resolvePublishedWorkerClasses({ env: {}, rootDir: tmp(), moduleRoot: tmp() }),
+    () => resolvePublishedWorkerClasses({
+      env: {}, rootDir: tmp(),
+      readHostObservationImpl: () => ({ ok: false }),
+    }),
     (err) => err instanceof WorkerClassRosterError,
   );
 });

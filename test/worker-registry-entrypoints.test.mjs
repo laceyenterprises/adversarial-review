@@ -96,14 +96,16 @@ for (const [name, read] of Object.entries(readers)) {
     assert.equal(f.reads(), 2);
     now += 60_000;
     f.outage();
-    await read(f.env);
+    if (name === 'closer') await assert.rejects(read(f.env), { code: 'registry-unavailable' });
+    else await read(f.env);
     assert.equal(resolveReviewerExecution('claude', {env: f.env, log: quiet}).modelSource, 'committed-seed');
   });
 
   test(`${name} resolves covered models during a cold transport outage`, async t => {
     const f = registry(t, `outage-${name}`);
     f.outage();
-    await read(f.env);
+    if (name === 'closer') await assert.rejects(read(f.env), { code: 'registry-unavailable' });
+    else await read(f.env);
     assert.equal(resolveReviewerExecution('claude', {env: f.env, log: quiet}).modelSource, 'committed-seed');
   });
 }

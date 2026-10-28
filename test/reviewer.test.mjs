@@ -4888,6 +4888,7 @@ test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scr
   // antigravity runtime resolves the agy display-name token (default), NOT the
   // cli slug, and binds --model BEFORE --print with the prompt as the --print value.
   assert.equal(spawnCalls[0].model, 'Gemini 3.8 Flash (High)');
+  assert.equal(result.execution.modelSource, 'runtime-display-token');
   const aMi = spawnCalls[0].args.indexOf('--model');
   const aPi = spawnCalls[0].args.indexOf('--print');
   assert.ok(aMi >= 0 && aMi < aPi, '--model must be present and precede --print');
@@ -5750,7 +5751,7 @@ test('reviewWithGemini keeps successful antigravity review when spend report loo
     }));
 
     assert.deepEqual(result, { reviewText, tokenUsage: null,
-      execution: { harness: 'gemini', model: 'Gemini 3.8 Flash (High)', modelSource: 'registry', effort: null } });
+      execution: { harness: 'gemini', model: 'Gemini 3.8 Flash (High)', modelSource: 'runtime-display-token', effort: null } });
     assert.equal(cleaned, true);
     assert.deepEqual(released, [{ checkoutId: 'co_spend_success_throw', quotaSignal: false }]);
     assert.equal(warnings.length, 1);

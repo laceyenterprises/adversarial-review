@@ -7,7 +7,11 @@ Local `remediationWorker` records retain `resolvedModel`,
 `resolvedReasoningLevel`, `modelSource` and `reasoningSource`. Governed model
 resolution records `modelSource` as `env-pin`, `registry` or `committed-seed`.
 The repository-owned seed default permits remediation during a registry outage,
-with an allowlist check and a visible warning for each fallback resolution.
+with an allowlist check and a visible warning at most once per class per
+60 seconds. A readable snapshot missing the class fails closed, without seed
+restoration. Prefetch does not itself defer a claim; per-class resolution owns
+unspawned requeue. Pins are also allowlist-checked; rejected pins require the
+operator to correct or unset them despite retaining retryable classification.
 Missing defaults or disallowed models raise the retryable infrastructure fault
 with `modelSource=unresolved`; existing requeue/refund behavior applies.
 Historical records keep their original source strings. Explicit non-blocking

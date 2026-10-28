@@ -297,22 +297,23 @@ can inject `ensureWorkerRegistryReadyImpl` through their existing options; the
 default remains the production prefetch. Readiness precedes governed model
 selection while lease/cooldown checks retain their order, and local remediation
 rechecks shutdown after its awaited refresh before spawning. A transport
-outage remains retryable `reviewer-model-unresolved`, never a fallback model or
-an OAuth re-authentication notice. HOSTOBSDENIAL-01 preserves redacted host-read
-causes: `entitlement-denied` names `host.observations.read`; `timeout`,
-`unavailable` and `not-found` remain distinct. Entitlement denials and missing
-registries are non-retryable `reviewer-configuration-error` faults that stay
-failed without infrastructure auto-recovery. Timeouts and outages remain
-retryable. Synchronous reads retain the last refusal until a successful async
-read replaces it; failure diagnostics never satisfy readiness or suppress an
-async refresh. Synchronous resolution performs no physical
-request and has no filesystem fallback. Corporate governance, existing bounded
+outage permits the immutable packaged worker-model seed for its six reviewer and
+remediator classes (REMODELFALLBACK-01), with allowlist validation and a visible
+warning limited to once per class per 60 seconds. A readable registry missing a
+class fails closed, so a retired class cannot return through the seed. Pins
+remain allowlist-checked, including during outages. Unresolved classes retain
+retryable `reviewer-model-unresolved`, without OAuth paging; closer model faults
+propagate before pool selection under automatic and pinned account policies.
+Antigravity display-token substitution records `runtime-display-token` rather
+than registry/seed provenance. Readiness returns availability; per-class selection
+after claim owns infrastructure requeue. Synchronous resolution performs no
+physical request and reads no host filesystem fallback. Corporate governance, existing bounded
 infrastructure backoff and merge authority are unchanged. Offline coverage:
 `test/worker-registry-entrypoints.test.mjs`, `test/registry-model-session.test.mjs`,
 `test/standalone-reviewer-execution.test.mjs` and
 `test/dispatch-read-client.test.mjs`. After normal deployment, SRE observes
-organic reviewer/security routing and quota grounding without missing-prefetch
-errors. Publication alone does not establish this receipt; the existing smoke
+organic reviewer/security routing and quota grounding with registry provenance
+or visible seed warnings, and a corporate Claude review completing. Publication alone does not establish this receipt; the existing smoke
 command is unchanged.
 
 Codex reviewer routes also prefer corporate capacity, including spills and all

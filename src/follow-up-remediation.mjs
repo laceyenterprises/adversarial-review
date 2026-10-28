@@ -2905,7 +2905,7 @@ async function reconcileInProgressFollowUpJobs({
   // CLI entrypoints (cache is empty per process), so the contract held
   // by accident; this reset makes it robust against a future long-
   // running tick loop that folds reconciliation in.
-  await ensureWorkerRegistryReadyImpl().catch(error => log.warn(error.message));
+  await ensureWorkerRegistryReadyImpl();
   resetRoleConfigCache();
   const cleanup = cleanupReconcileClaimArtifacts({ rootDir, log });
   if (cleanup.removedTmp || cleanup.removedLocks || cleanup.errors) {
@@ -3142,13 +3142,9 @@ async function consumeNextFollowUpJob({
   // propagates to `pickRemediationWorkerClass`; without this, a stale
   // cached config from a prior `loadRoleConfig` call (in this process
   // or via the role resolvers below) would mask the new env.
-  try {
-    await ensureWorkerRegistryReadyImpl();
-  } catch (error) {
-    if (error.code !== 'registry-unavailable') throw error;
-    log.warn?.(`[follow-up-remediation] deferring claim until worker registry recovers: ${error.message}`);
-    return { consumed: false, reason: 'registry-unavailable' };
-  }
+  // Readiness warms the cache; class-specific resolution after claim owns
+  // infrastructure deferral because covered classes can use the committed seed.
+  await ensureWorkerRegistryReadyImpl();
   resetRoleConfigCache();
   // Claim first so we know which worker class we're running. This lets
   // an `[claude-code]` PR (reviewerModel=codex) get its OAuth pre-flight
@@ -4088,7 +4084,7 @@ async function stopConsumedJobWithComment({
 }
 
 async function main() {
-  await ensureWorkerRegistryReady().catch(error => console.warn(`[follow-up-remediation] startup registry prefetch unavailable: ${error.message}`));
+  await ensureWorkerRegistryReady();
   if (process.argv.includes('--with-hq-integration')) {
     process.env.ADV_WITH_HQ_INTEGRATION = '1';
   }

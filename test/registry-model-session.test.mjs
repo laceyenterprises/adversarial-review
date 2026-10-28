@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { dispatchReadTransport, prepareWorkerObservationSession } from '../src/dispatch-read-client.mjs';
-import { ensureWorkerRegistryReady, prefetchWorkerRegistry, resolveRemediationModel, RegistryUnavailableError, readCommittedWorkerModelSeed } from '../src/adapters/agent-runtime/local/remediation.mjs';
+import { ensureWorkerRegistryReady, prefetchWorkerRegistry, resolveRemediationModel, readCommittedWorkerModelSeed } from '../src/adapters/agent-runtime/local/remediation.mjs';
 import { prepareClaudeOAuthEnv, resolveReviewerExecution, resolveReviewerExecutionAsync } from '../src/reviewer-harness.mjs';
 import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { infraRecoverableFailureClass, reviewerFailureClassFromStoredRow } from '../src/reviewer-failure-classification.mjs';
@@ -62,9 +62,9 @@ test('a valid snapshot missing the reviewer class cannot select a host fallback'
   const f = fixture(t, 'missing-class');
   f.set({schema_version: 1, status: 'found', data: {classes: {}}});
   await prefetchWorkerRegistry({env: f.env});
-  assert.equal(resolveReviewerExecution('codex', {
+  assert.throws(() => resolveReviewerExecution('codex', {
     env: f.env, fallbackModel: 'host-model', log: quiet,
-  }).modelSource, 'committed-seed');
+  }), { code: 'registry-unavailable', retryable: true });
 });
 
 test('concurrent prefetches for different endpoints each populate their own sync cache', async t => {
@@ -90,31 +90,7 @@ test('concurrent prefetches for different endpoints each populate their own sync
   assert.equal(resolveReviewerExecution('claude', {env: second, log: quiet}).model, 'second-model');
 });
 
-test('unresolved model infrastructure defers remediation before claiming a pending job', async t => {
-  const rootDir = mkdtempSync(join(tmpdir(), 'registry-claim-'));
-  const previousEndpoint = process.env.APP_CONTRACT_ENDPOINT_URL;
-  process.env.APP_CONTRACT_ENDPOINT_URL = 'https://example.invalid/claim-outage';
-  t.mock.method(dispatchReadTransport, 'sdk', () => ({
-    async connect() { throw new Error('fixture registry endpoint down'); },
-  }));
-  try {
-    createFollowUpJob({rootDir, branch: 'fixture/remediation', repo: 'example/fixture',
-      prNumber: 7, reviewerModel: 'codex', builderTag: 'claude-code',
-      reviewBody: '## Summary\nFix it.\n\n## Verdict\nComment only',
-      reviewPostedAt: '2026-10-28T10:00:00.000Z', critical: false});
-    const result = await consumeNextFollowUpJob({rootDir, promptTemplate: 'fixture prompt', log: quiet,
-      ensureWorkerRegistryReadyImpl: async () => { throw new RegistryUnavailableError(); }});
-    assert.deepEqual(result, {consumed: false, reason: 'registry-unavailable'});
-    assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'pending')).filter(name => name.endsWith('.json')).length, 1);
-    assert.equal(existsSync(getFollowUpJobDir(rootDir, 'inProgress')), false);
-  } finally {
-    if (previousEndpoint === undefined) delete process.env.APP_CONTRACT_ENDPOINT_URL;
-    else process.env.APP_CONTRACT_ENDPOINT_URL = previousEndpoint;
-    rmSync(rootDir, {recursive: true, force: true});
-  }
-});
-
-test('unresolved model infrastructure after claim requeues a non-blocking Codex job without spawning or losing a round', async t => {
+test('a class withdrawn after claim requeues a non-blocking Codex job without spawning or losing a round', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'registry-claimed-expiry-'));
   const previousEndpoint = process.env.APP_CONTRACT_ENDPOINT_URL;
   const f = fixture(t, 'claimed-expiry');
@@ -126,13 +102,11 @@ test('unresolved model infrastructure after claim requeues a non-blocking Codex 
       prNumber: 8, reviewerModel: 'claude', builderTag: 'codex',
       reviewBody: '## Summary\nFix it.\n\n## Verdict\nComment only',
       reviewPostedAt: '2026-10-28T10:00:00.000Z', critical: false});
-    let unavailable = false;
     const result = await consumeNextFollowUpJob({rootDir, promptTemplate: 'fixture prompt', log: quiet,
       ensureWorkerRegistryReadyImpl: async () => {
-        if (unavailable) throw new RegistryUnavailableError();
         await ensureWorkerRegistryReady({env: f.env});
       },
-      onClaim(job) { unavailable = true; job.nonBlockingOnly = true; now += 60_000; f.set(new Error('fixture refresh down')); },
+      onClaim(job) { job.nonBlockingOnly = true; now += 60_000; f.set({schema_version: 1, status: 'found', data: {classes: {}}}); },
       resolvePRLifecycleImpl: async () => null,
       resolveRemediationWorkerClassImpl: async () => ({workerClass: 'codex'}),
       execFileImpl: () => assert.fail('expired registry must not invoke a subprocess'),

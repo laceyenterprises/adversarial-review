@@ -385,12 +385,12 @@ function allowedReasoningLevelsForClass(className) {
   return null;
 }
 
-function warnRateLimited(key, nowMs, message) {
+function warnRateLimited(key, nowMs, message, log = console, level = 'warn') {
   if (nowMs - (fallbackWarnings.get(key) ?? -Infinity) < REGISTRY_TTL_MS) return;
   for (const [existingKey, warnedAt] of fallbackWarnings) {
     if (nowMs - warnedAt >= REGISTRY_TTL_MS) fallbackWarnings.delete(existingKey);
   }
-  console.warn(message);
+  log[level]?.(message);
   fallbackWarnings.set(key, nowMs);
 }
 
@@ -426,23 +426,32 @@ class RegistryUnavailableError extends Error {
 async function ensureWorkerRegistryReady(args = {}) {
   // Preserve the shared session/cache prefetch contract. An unavailable snapshot
   // is resolved per class below, where env pins and the committed seed apply.
-  try {
-    const observed = await readHostObservation('worker_registry', args);
-    return Boolean(observed.ok && observed.data?.classes
-      && typeof observed.data.classes === 'object' && !Array.isArray(observed.data.classes));
-  } catch {
-    return false;
-  }
+  // The observation adapter normalizes transport failures to { ok: false }.
+  // Do not add another catch that can hide bugs in the readiness logic.
+  const observed = await readHostObservation('worker_registry', args);
+  return Boolean(observed.ok && observed.data?.classes
+    && typeof observed.data.classes === 'object' && !Array.isArray(observed.data.classes));
 }
 
 // A package-relative asset is the only seed. Never consult HQ_ROOT, HOME,
 // deployment checkouts, ledgers, or caller-supplied filesystem paths.
-function readCommittedWorkerModelSeed() {
+const committedWorkerModelSeed = (() => {
   try {
-    return JSON.parse(readFileSync(new URL('./worker-model-seed.json', import.meta.url), 'utf8'));
+    const freeze = value => {
+      if (value && typeof value === 'object') {
+        for (const child of Object.values(value)) freeze(child);
+        Object.freeze(value);
+      }
+      return value;
+    };
+    return freeze(JSON.parse(readFileSync(new URL('./worker-model-seed.json', import.meta.url), 'utf8')));
   } catch {
     return null;
   }
+})();
+
+function readCommittedWorkerModelSeed() {
+  return committedWorkerModelSeed;
 }
 
 // Compatibility for integrations using the REGISTRYSESSION-01 name.
@@ -471,20 +480,23 @@ function resolveRemediationModel(className, {
     throw error;
   };
   let registrySpec;
+  let registryAvailable = false;
   try {
     registrySpec = readWorkerClasses(nowMs, { env, hqRoot }).classes[className];
+    registryAvailable = true;
   } catch (error) {
     if (!(error instanceof RegistryUnavailableError)) throw error;
   }
+  if (registryAvailable && registrySpec == null) fail('readable registry has no class; committed seed cannot restore a withdrawn class');
   const seedClasses = seed?.classes;
   const seedSpec = seedClasses && typeof seedClasses === 'object' && !Array.isArray(seedClasses)
     ? seedClasses[className] : null;
   const rawModelPin = String(pin ?? '').trim();
   const modelPin = rawModelPin ? nonEmptyModelString(rawModelPin) : null;
-  if (rawModelPin && !modelPin) fail('invalid explicit model pin');
+  if (rawModelPin && !modelPin) fail('invalid explicit model pin; correct or unset pin');
   // A registry allowlist remains authoritative for a pin even when that class
   // has no default. The seed must not reject a newer registry-approved pin.
-  const useRegistry = registrySpec != null && (modelPin || registrySpec.defaultModel !== undefined);
+  const useRegistry = registryAvailable;
   const spec = useRegistry ? registrySpec : seedSpec;
   const source = useRegistry ? 'registry' : 'committed-seed';
   const model = modelPin || nonEmptyModelString(spec?.defaultModel);
@@ -493,7 +505,7 @@ function resolveRemediationModel(className, {
   for (const [candidate, authority] of [[registrySpec, 'registry'], [spec, source]]) {
     if (candidate?.allowedModels !== undefined
       && (!Array.isArray(candidate.allowedModels) || !candidate.allowedModels.includes(model))) {
-      fail(`resolved model ${JSON.stringify(model)} is outside ${authority} allowedModels`);
+      fail(`resolved model ${JSON.stringify(model)} is outside ${authority} allowedModels${modelPin ? '; correct or unset explicit model pin' : ''}`);
     }
   }
   const pinnedReasoning = normalizeReasoningLevel(className, reasoningPin, 'env', nowMs);
@@ -501,11 +513,12 @@ function resolveRemediationModel(className, {
     ? pinnedReasoning
     : normalizeReasoningLevel(className, spec?.defaultReasoningLevel, source, nowMs);
   if (modelSource === 'committed-seed') {
-    log.warn?.(`[worker-model] WARNING: ${className} modelSource=committed-seed model=${model}; governed registry class unavailable`);
+    warnRateLimited(`model-seed:${className}`, nowMs,
+      `[worker-model] WARNING: ${className} modelSource=committed-seed model=${model}; governed registry unavailable`, log);
   }
   const message = `[worker-model] ${className} model=${model} modelSource=${modelSource}`;
-  if (log === console) console.error(message);
-  else log.info?.(message);
+  warnRateLimited(`model-resolution:${className}:${modelSource}:${model}`, nowMs, message,
+    log, log === console ? 'error' : 'info');
   return {
     resolvedModel: model,
     resolvedReasoningLevel: reasoning.resolvedReasoningLevel,

@@ -51,7 +51,7 @@ test('non-blocking Codex model and effort require the remediator allowlists', ()
   try {
     mkdirSync(join(root, 'registry'), { recursive: true });
     writeFileSync(join(root, 'registry', 'worker-classes.json'), JSON.stringify({
-      'remediator-codex': { allowedModels: ['gpt-6-sol', 'gpt-6-luna'] },
+      'remediator-codex': { defaultModel: 'gpt-6-sol', defaultReasoningLevel: 'high', allowedModels: ['gpt-6-sol', 'gpt-6-luna'] },
     }));
     const env = { HQ_ROOT: root };
     assert.deepEqual(resolveNonBlockingCodexModel({ model: 'gpt-6-luna', reasoningEffort: 'medium', env, hqRoot: root }), {
@@ -61,10 +61,10 @@ test('non-blocking Codex model and effort require the remediator allowlists', ()
     const invalid = resolveNonBlockingCodexModel({ model: 'unknown', reasoningEffort: 'max', env, hqRoot: root });
     assert.equal(invalid.resolvedModel, 'gpt-6-sol');
     assert.equal(invalid.resolvedReasoningLevel, 'high');
-    assert.equal(invalid.modelSource, 'committed-seed');
+    assert.equal(invalid.modelSource, 'registry');
     const missingSol61 = resolveNonBlockingCodexModel({ model: 'gpt-6.1-sol', env, hqRoot: root });
     assert.equal(missingSol61.resolvedModel, 'gpt-6-sol');
-    assert.equal(missingSol61.modelSource, 'committed-seed');
+    assert.equal(missingSol61.modelSource, 'registry');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -628,9 +628,10 @@ test('remediation registry uses public evidence and never falls back to a checko
       reasoningSource: 'none',
     });
     writeFileSync(mirrorPath, JSON.stringify({classes: {}}));
-    // An empty producer snapshot exercises the repository-owned seed.
-    // This fixture replaces the transport itself; TTL behavior is exercised
-    // against the real transport in registry-model-session.test.mjs.
+    // A readable empty producer retires the class; only unavailable evidence
+    // permits the packaged seed. This fixture replaces the transport itself.
+    assert.throws(() => resolveRemediationModel('remediator-codex', options), { code: 'registry-unavailable' });
+    writeFileSync(mirrorPath, JSON.stringify({classes: []}));
     assert.equal(resolveRemediationModel('remediator-codex', options).resolvedModel, readCommittedWorkerModelSeed().classes['remediator-codex'].defaultModel);
     assert.equal(resolveRemediationModel('remediator-codex', { ...options, nowMs: Date.now() + 61_000 }).modelSource, 'committed-seed');
     assert.equal(resolveRemediationModel('remediator-gemini', options).resolvedModel, readCommittedWorkerModelSeed().classes['remediator-gemini'].defaultModel);
@@ -645,7 +646,7 @@ test('remediation registry uses public evidence and never falls back to a checko
     assert.match(warnings.at(-1), /remediator-codex.*modelSource=committed-seed/);
     const warningCount = warnings.length;
     resolveRemediationModel('remediator-codex', { ...options, nowMs: Date.now() + 122_000 });
-    assert.equal(warnings.length, warningCount + 1);
+    assert.equal(warnings.length, warningCount);
     rmSync(seedPath);
     const missing = resolveRemediationModel('remediator-codex', { ...options, nowMs: Date.now() + 183_000 });
     assert.equal(missing.modelSource, 'committed-seed');

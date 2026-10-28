@@ -2968,7 +2968,8 @@ async function reviewWithGemini(diff, extraContext = '', {
       log.info?.(`[reviewer-harness] gemini agy model=${model} source=runtime-display-token`);
     }
     selectedModel = model;
-    selectedModelSource = reviewerExecution.modelSource;
+    selectedModelSource = model !== reviewerExecution.model
+      ? 'runtime-display-token' : reviewerExecution.modelSource;
 
     console.error(`[reviewWithGemini] invoking Gemini reviewer CLI (model=${model}, runtime=${runtime})`);
     signal?.throwIfAborted();

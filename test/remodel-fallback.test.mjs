@@ -6,6 +6,8 @@ import {
   resolveClaudeRemediationModel, resolveCodexRemediationModel, resolveGeminiRemediationModel,
   RegistryUnavailableError,
 } from '../src/adapters/agent-runtime/local/remediation.mjs';
+import { resolveMergeAgentDispatchHarness } from '../src/merge-agent-harness.mjs';
+import { resolveCloserDispatchHarness } from '../src/ama/harness-fallback.mjs';
 import { __test__ as harness } from '../src/reviewer-harness.mjs';
 
 const seed = readCommittedWorkerModelSeed();
@@ -35,6 +37,8 @@ function registry(t, name, data) {
 }
 
 test('committed seed uses the registry classes/defaultModel/allowedModels shape for every covered class', () => {
+  assert.strictEqual(readCommittedWorkerModelSeed(), seed);
+  assert.ok(Object.isFrozen(seed.classes));
   assert.deepEqual(Object.keys(seed.classes).sort(), [...classes].sort());
   for (const spec of Object.values(seed.classes)) {
     assert.equal(typeof spec.defaultModel, 'string');
@@ -61,6 +65,7 @@ for (const className of classes) {
     assert.match(f.messages.infos.join('\n'), /modelSource=env-pin/);
     assert.throws(() => resolveRemediationModel(className, { ...f, pin: 'outside-allowlist' }),
       { code: 'registry-unavailable', retryable: true, modelSource: 'unresolved' });
+    assert.match(f.messages.errors.at(-1), /outside registry allowedModels; correct or unset explicit model pin/);
   });
 
   test(`${className}: unavailable registry uses the committed default and warns visibly`, async t => {
@@ -212,7 +217,82 @@ for (const [reviewer, recovery, available] of [
     assert.equal(result.execution.model, expected);
     assert.equal(result.execution.modelSource, source);
     if (available) assert.equal(f.messages.warnings.length, 0);
-    else assert.match(f.messages.warnings.join('\n'), /WARNING.*modelSource=committed-seed/);
+    // Warning frequency is covered separately; earlier resolutions may have warned.
     assert.doesNotMatch(f.messages.errors.join('\n'), /reviewer-model-unresolved/);
   });
 }
+
+
+test('seed warnings and selection logs are limited per class for one registry TTL', async t => {
+  const f = registry(t, 'rate-limit', new Error('synthetic outage'));
+  const options = { ...f, seed: { classes: { 'rate-limit-fixture': {
+    defaultModel: 'synthetic-seed', allowedModels: ['synthetic-seed'],
+  } } }, nowMs: Date.now() };
+  await ensureWorkerRegistryReady({ env: f.env });
+  for (let call = 0; call < 10; call++) resolveRemediationModel('rate-limit-fixture', options);
+  assert.equal(f.messages.warnings.length, 1);
+  assert.equal(f.messages.infos.length, 1);
+  resolveRemediationModel('rate-limit-fixture', { ...options, nowMs: options.nowMs + 60_000 });
+  assert.equal(f.messages.warnings.length, 2);
+  assert.equal(f.messages.infos.length, 2);
+});
+
+for (const spec of [null, {}]) {
+  test(`readable registry cannot restore a withdrawn or incomplete class from seed (${JSON.stringify(spec)})`, async t => {
+    const f = registry(t, `withdrawn-${JSON.stringify(spec)}`, { classes: spec === null ? {} : { 'codex-reviewer': spec } });
+    await ensureWorkerRegistryReady({ env: f.env });
+    assert.throws(() => resolveRemediationModel('codex-reviewer', f), { code: 'registry-unavailable' });
+    if (spec === null) assert.throws(() => resolveRemediationModel('codex-reviewer', { ...f, pin: 'synthetic-pin' }),
+      { code: 'registry-unavailable' });
+  });
+}
+
+
+for (const workerClass of ['hammer', 'hammer-claude']) {
+  for (const codexAccountPolicy of ['personal-first', 'corporate-first', 'pinned']) {
+    for (const pooled of [false, true]) {
+      test(`closer outage defers ${workerClass} as unresolved (${codexAccountPolicy}, pooled=${pooled})`, async t => {
+        const f = registry(t, `closer-${workerClass}-${codexAccountPolicy}-${pooled}`, new Error('synthetic registry outage'));
+        const args = { workerClass, codexAccountPolicy, fallbackWorkerClasses: [],
+          env: { ...f.env, AGENT_OS_CONFIG_PATH: '/dev/null' },
+          execFileImpl: () => assert.fail('model infrastructure must defer before quota reads'),
+        };
+        const result = await resolveMergeAgentDispatchHarness({ ...args,
+          ...(pooled ? { resolveHarnessImpl: options => resolveCloserDispatchHarness({ ...options,
+            selectAccountImpl: () => assert.fail('model fault must propagate before selecting an account'),
+          }) } : {}),
+        });
+        assert.deepEqual(result, { workerClass, fellBack: false, deferred: true,
+          reason: 'reviewer-model-unresolved', retryable: true });
+      });
+    }
+  }
+}
+
+test('fallback closer model faults also preserve the typed infrastructure deferral', async t => {
+  const f = registry(t, 'closer-fallback-withdrawn', { classes: { hammer: { defaultModel: 'synthetic-hammer' } } });
+  const selected = [];
+  const result = await resolveMergeAgentDispatchHarness({ workerClass: 'hammer', env: f.env,
+    codexAccountPolicy: 'corporate-first', fallbackWorkerClasses: ['hammer-claude'],
+    resolveHarnessImpl: options => resolveCloserDispatchHarness({ ...options,
+      selectAccountImpl: ({ identity }) => {
+        selected.push(identity);
+        return { identity, workerClass: identity, pooled: true, status: 'unavailable', reason: 'accounts-unavailable' };
+      },
+    }),
+  });
+  assert.deepEqual(selected, ['hammer']);
+  assert.equal(result.reason, 'reviewer-model-unresolved');
+  assert.equal(result.deferred, true);
+  assert.equal(result.retryable, true);
+});
+
+
+test('readiness does not hide programming errors while validating an observation', async t => {
+  t.mock.method(dispatchReadTransport, 'hostServices', async () => ({
+    schema_version: 1, status: 'found', data: {
+      get classes() { throw new TypeError('synthetic invalid observation access'); },
+    },
+  }));
+  await assert.rejects(ensureWorkerRegistryReady(), { name: 'TypeError', message: 'synthetic invalid observation access' });
+});

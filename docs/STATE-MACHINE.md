@@ -27,10 +27,17 @@ readers, watcher polls and follow-up consumption. The app transport reuses a
 register or request data themselves. REMODELFALLBACK-01 keeps registry outages
 from aborting reviewer startup or remediation while a validated class default
 exists in the repository-owned `src/adapters/agent-runtime/local/worker-model-seed.json`.
-Selection is explicit env pin, session-scoped registry, then committed seed.
+Selection is explicit env pin, session-scoped registry, then committed seed only
+when the snapshot is unavailable. A readable registry missing a class fails
+closed, so the seed cannot restore a withdrawn class. Prefetch returns readiness;
+per-class resolution after claim owns infrastructure requeue.
 Registry/seed allowlists validate the selected model, including pins. Seed use
-warns visibly; execution metadata and logs record `modelSource=env-pin`,
-`registry`, or `committed-seed`. Missing defaults or disallowed models remain
+warns visibly at most once per class per 60 seconds; selection logs are likewise
+rate-limited per class/source/model; execution metadata and logs record `modelSource=env-pin`,
+`registry`, or `committed-seed`. Antigravity display-token substitution records
+`runtime-display-token` from runtime configuration. Closer model faults propagate
+before pool selection under automatic and pinned account policies, preserving
+typed infrastructure deferral rather than account holds. Missing defaults or disallowed models remain
 retryable `reviewer-model-unresolved` infrastructure with `modelSource=unresolved`,
 using existing backoff/requeue behavior without OAuth paging. Reviewer startup
 and harnesses validate model infrastructure before credential probes. There is no host

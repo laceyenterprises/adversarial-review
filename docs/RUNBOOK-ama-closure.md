@@ -6601,22 +6601,31 @@ connection reuse the snapshot. Synchronous registry reads only consult that
 cache; they never register a session or invoke the synchronous SDK transport.
 Empty, stale or unavailable cache evidence does not abort the shared prefetch
 helper. REMODELFALLBACK-01 resolves each class in order: explicit existing env
-pin, governed registry default, then the `defaultModel` in the packaged
+pin, governed registry default, then, only when the registry snapshot is
+unavailable, the `defaultModel` in the packaged
 `src/adapters/agent-runtime/local/worker-model-seed.json`. The seed uses the
 registry's `classes` object with `defaultModel`, `allowedModels` and optional
 `defaultReasoningLevel`. It covers Codex, Claude and Gemini remediators and
 reviewers. Updating these emergency defaults is a reviewed repository change.
 The seed path is relative to the resolver module; host files, another checkout,
-local registries and ledgers cannot supply it. A registry class with an invalid
+local registries and ledgers cannot supply it. A readable registry that omits a
+class fails closed; the seed cannot restore a withdrawn class. A class with an invalid
 default or a selected model outside its allowlist fails closed rather than
 bypassing validation with the seed. Pins retain precedence and are checked
-against the available class allowlist.
+against the available class allowlist, including the seed during an outage.
+Rejected pins log the rejected model and allowlist source; operators must correct
+or unset them. They retain the retryable infrastructure classification, so a
+permanent pin typo will not recover through retries alone.
 
 Failed or malformed reads are not cached, so the next prefetch can recover
 immediately. Concurrent prefetches keep independent entries per connection and
 session; one endpoint cannot displace another endpoint's snapshot. Seed use
-logs a visible warning on every resolution. Model metadata and log lines use
+logs a visible warning at most once per class per 60 seconds. Selection logs
+are likewise limited per class, source and model for 60 seconds. Model metadata
+and log lines use
 `modelSource=env-pin`, `modelSource=registry` or `modelSource=committed-seed`.
+Antigravity display-token substitution records `modelSource=runtime-display-token`
+from runtime configuration rather than claiming registry/seed provenance.
 Both native Codex execution and OAuth Responses recovery use the same resolved
 model and provenance; recovery never inserts a literal model id. Non-blocking
 Codex configuration keeps its explicit allowlisted selection; its default now
@@ -6632,7 +6641,13 @@ Existing bounded infrastructure backoff, unspawned
 remediation requeue and stored failure recovery still apply without charging
 normal attempts or emitting the OAuth re-authentication notice. Classes outside
 the seed, including closer-only classes, still require governed registry data
-or an explicit valid pin. Corporate Claude binds the validated registry/seed/pin
+or an explicit valid pin when no readable registry withdraws the class. Model
+resolution precedes pool selection; a model fault propagates as
+`reviewer-model-unresolved` under automatic and pinned account policies, rather
+than becoming an account hold or permitting unresolved hammer dispatch.
+The prefetch returns readiness rather than deferring claims; per-class selection
+after claim owns remediation requeue. Corporate Claude binds the validated
+registry/seed/pin
 model to broker minting and CLI invocation.
 After normal deployment, SRE records read-only organic acceptance: watcher logs
 stop emitting `public-registry-unavailable`, and a corporate Claude review

@@ -13084,7 +13084,95 @@ for (const scenario of ['pushed', 'unchanged', 'other-blocker', 'normalized-rere
       assert.doesNotMatch(body, /Human intervention required/);
     } else {
       assert.equal(result.job.remediationPlan.stop.code, 'no-progress');
-      assert.match(body, /Human intervention required/);
+      if (scenario === 'other-blocker') assert.match(body, /Human intervention required/);
+      else assert.doesNotMatch(body, /Human intervention required/);
+    }
+  });
+}
+
+for (const scenario of ['pending-ci', 'legacy-ci', 'closer', 'pipeline-review', 'mixed', 'human-input',
+  'credential', 'operator-label', 'no-progress', 'unpublished', 'refused-review', 'audit-error', 'final-round', 'final-human']) {
+  test(`REMREPORTHUMAN-01 completion with ${scenario}`, async t => {
+    const rootDir = mkdtempSync(path.join(tmpdir(), 'remediation-owner-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const head = 'a'.repeat(40);
+    const { claimed } = makeQueuedJob(rootDir, { repo: 'example/fixture', prNumber: 42,
+      revisionRef: head, maxRemediationRounds: 2, reviewBody: '## Verdict\nComment only' });
+    const finalRound = ['final-round', 'final-human'].includes(scenario);
+    if (finalRound) {
+      claimed.job.finalRound = 'comment-only';
+      writeFollowUpJob(claimed.jobPath, claimed.job);
+    }
+    const workspaceDir = path.join(rootDir, 'workspace');
+    mkdirSync(workspaceDir, { recursive: true });
+    const outputPath = path.join(workspaceDir, 'last-message.md');
+    writeFileSync(outputPath, 'Remediation round ended.');
+    const { hqRoot, replyPath } = prepareCanonicalReply(rootDir, claimed.job);
+    const pending = { kind: 'pending-ci', finding: 'Required CI is pending.', reasoning: 'One bounded wait ended.' };
+    const human = { finding: 'An operator label is required.', reasoning: 'Approval requires a decision.' };
+    const closer = { finding: 'The AMA closer retains closure authority.', reasoning: 'Awaiting closure.' };
+    const operationalBlockers = scenario === 'legacy-ci' ? [{ ...pending, kind: undefined }]
+      : scenario === 'mixed' ? [pending, human]
+      : scenario === 'human-input' ? [{ ...pending, needsHumanInput: 'Restore access.' }]
+      : scenario === 'final-human' ? [{ ...pending, reasoning: 'Credentials must be restored before CI can run.' }]
+      : scenario === 'credential' ? [{ finding: 'Credentials are missing.', reasoning: 'Access must be restored.' }]
+      : scenario === 'operator-label' ? [human]
+      : ['closer', 'final-round'].includes(scenario) ? [closer]
+      : scenario === 'pipeline-review' ? [{ finding: 'The pipeline will run the adversarial review.', reasoning: 'Awaiting review.' }]
+      : [pending];
+    writeValidReply(replyPath, claimed.job, { outcome: 'blocked',
+      summary: scenario === 'no-progress' ? 'Remediation remains incomplete.'
+        : scenario === 'unpublished' ? `Remediation is complete; commit ${'b'.repeat(40)} is unpublished.`
+        : scenario === 'human-input' ? `Remediation is complete; pushed ${'b'.repeat(40)}.`
+        : 'Remediation is complete; only pipeline-owned waits remain.',
+      operationalBlockers, reReview: { requested: false, reason: null } });
+    const spawned = markFollowUpJobSpawned({ jobPath: claimed.jobPath, worker: { model: 'codex',
+      processId: 4242, state: 'spawned', workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath), replyPath } });
+    const comments = [], requests = [];
+    const result = await withHqRootEnv(hqRoot, () => reconcileFollowUpJob({ rootDir, ...spawned,
+      isWorkerRunning: () => false, now: () => '2026-04-21T11:00:00.000Z',
+      execFileImpl: finalRound
+        ? finalRoundPushedExec({ jobId: claimed.job.jobId, pushedHead: 'b'.repeat(40) })
+        : async () => ({ stdout: '[]', stderr: '' }),
+      auditWorkspaceForContaminationImpl: scenario === 'audit-error'
+        ? async () => ({ suspect: [], error: 'Synthetic audit unavailable.' }) : cleanContaminationAudit,
+      resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: finalRound ? 'b'.repeat(40) : head }),
+      inspectRemediationCiRegressionImpl: async () => ({ state: 'pending', headSha: finalRound ? 'b'.repeat(40) : head }),
+      requestReviewRereviewImpl: args => {
+        requests.push(args);
+        return scenario === 'refused-review' ? { triggered: false, status: 'blocked', reason: 'review-row-missing' }
+          : { triggered: true, status: 'pending', reason: 'review-status-reset' };
+      },
+      requestRereviewWakeImpl: () => ({ requested: true, outcome: 'queued' }),
+      requestWatcherWakeImpl: () => ({ requested: true }),
+      postCommentImpl: async args => { comments.push(args); return { posted: false, reason: 'offline-fixture' }; },
+      log: { log() {}, warn() {}, error() {} },
+    }));
+    assert.equal(comments.length, 1);
+    const body = comments[0].body;
+    assert.equal(result.job.commentDelivery.body, body);
+    if (['mixed', 'human-input', 'credential', 'operator-label', 'no-progress', 'unpublished', 'refused-review', 'final-human'].includes(scenario)) {
+      assert.equal(result.action, 'stopped');
+      assert.equal(result.job.remediationPlan.stop.code, scenario === 'refused-review' ? 'rereview-blocked'
+        : scenario === 'unpublished' ? 'committed-unpublished' : 'no-progress');
+      assert.equal(body.includes('Human intervention required'), !['no-progress', 'unpublished'].includes(scenario));
+      if (scenario === 'no-progress') {
+        assert.match(body, /retain its current adversarial-review verdict until a human re-arms or closes the job/);
+        assert.doesNotMatch(body, /Informational wait/);
+      }
+      if (scenario !== 'refused-review') assert.equal(requests.length, 0);
+    } else if (scenario === 'audit-error') {
+      assert.equal(result.action, 'failed');
+      assert.equal(result.job.failure.code, 'branch-contamination-audit-error');
+      assert.equal(requests.length, 0);
+    } else {
+      assert.equal(result.action, 'completed', JSON.stringify(result.job.failure));
+      assert.equal(result.job.remediationPlan.stop, null);
+      assert.doesNotMatch(body, /Human intervention required|stopped.*no-progress/);
+      assert.match(body, /Informational wait/);
+      assert.equal(requests.length, scenario === 'final-round' ? 0 : 1);
+      assert.ok(result.job.reReview.nextAction);
     }
   });
 }

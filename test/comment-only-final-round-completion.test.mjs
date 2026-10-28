@@ -22,8 +22,17 @@ test('pending CI on the proven pushed head is the only thing a final-round block
   assert.deepEqual(classify([]), { pendingCiOnly: true, reason: 'none' });
   assert.deepEqual(classify([{ ...pendingCiBlocker, kind: 'pending-ci' }]),
     { pendingCiOnly: true, reason: 'kind-pending-ci' });
+  assert.deepEqual(classify([{ ...pendingCiBlocker, kind: 'pending-ci',
+    needsHumanInput: 'Confirm required checks pass for the pushed head, then request another adversarial review pass.' }]),
+  { pendingCiOnly: true, reason: 'kind-pending-ci' });
+  assert.deepEqual(classify([{ ...pendingCiBlocker, kind: 'pending-ci',
+    finding: 'Tokenizer tokens pass local tests; required CI is pending.' }]),
+  { pendingCiOnly: true, reason: 'kind-pending-ci' });
   // A worker predating the tag writes one entry; the probe corroborates it.
   assert.deepEqual(classify([pendingCiBlocker]), { pendingCiOnly: true, reason: 'ci-probe-pending-ci' });
+  assert.deepEqual(classify([{ ...pendingCiBlocker,
+    needsHumanInput: 'Confirm required checks pass for the pushed head, then request another adversarial review pass.' }]),
+  { pendingCiOnly: true, reason: 'ci-probe-pending-ci' });
   assert.deepEqual(classify([{ ...pendingCiBlocker, kind: 'pending-ci' }], { ...pendingGate, state: 'green' }),
     { pendingCiOnly: true, reason: 'kind-pending-ci' });
   // The untagged legacy entry is the CI wait only while CI is still running.

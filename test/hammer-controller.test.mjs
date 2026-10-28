@@ -341,7 +341,7 @@ test('normal script preserves real failure and releases only its matching lease'
   assert.equal(inspectMergeLease({ rootDir: f.dir, repo: 'fixture/repo', base: 'main' }).holder, null);
 });
 
-for (const kind of ['terminal', 'unreadable', 'different-launch']) {
+for (const kind of ['terminal', 'unreadable', 'malformed', 'different-launch']) {
   test(`${kind} ownership stops shell, validator and TERM-ignoring test after detach`, { timeout: 15000 }, async t => {
     const f = fixture(t, `
       "${process.execPath}" "${root}/bin/hammer-controller.mjs" assert-owner
@@ -364,10 +364,17 @@ for (const kind of ['terminal', 'unreadable', 'different-launch']) {
     t.after(async () => { const done = once(unrelated, 'close'); unrelated.kill(); await done; });
     const testPid = JSON.parse(readFileSync(join(f.dir, 'test-ready'), 'utf8')).pid;
     assert.ok(testPid > 1);
-    f.cancel(kind === 'terminal' ? launch('canceled') : kind === 'unreadable' ? { ok: false }
-      : { ok: true, row: { launch_request_id: 'lrq_foreign', status: 'running' } });
+    if (kind === 'malformed') {
+      writeFileSync(f.launchPath + '.tmp', '{');
+      renameSync(f.launchPath + '.tmp', f.launchPath);
+    } else {
+      f.cancel(kind === 'terminal' ? launch('canceled') : kind === 'unreadable' ? { ok: false }
+        : { ok: true, row: { launch_request_id: 'lrq_foreign', status: 'running' } });
+    }
     await until(() => existsSync(join(f.dir, 'result')));
     assert.equal(readFileSync(join(f.dir, 'result'), 'utf8'), '143');
+    assert.equal(f.receipt().reason, ['unreadable', 'malformed'].includes(kind) ? 'launch-unreadable' : 'launch-ended');
+    if (kind === 'malformed') assert.equal(f.receipt().launchReadLastError, 'SyntaxError');
     assert.equal(f.receipt().state, 'quiescent');
     assert.equal(f.receipt().killSent, true);
     assert.equal(f.receipt().leaseCleanup.released, true);
@@ -747,6 +754,39 @@ test('one failed launch read mid-run does not stop the round', async t => {
   assert.equal(receipt.launchReadFailures, 1);
   assert.equal(receipt.launchReadLastError, 'fixture-read-timeout');
   assert.ok(Number.isFinite(Date.parse(receipt.launchReadFirstFailureAt)));
+});
+
+test('a poll delayed beyond the grace window does not make a readable launch unreadable', async t => {
+  const pollMs = LAUNCH_UNREADABLE_GRACE_MS + 1000;
+  const sim = simulate(t, {
+    pollMs,
+    reads: () => launch('running'),
+    onTick: s => { if (s.clock() >= 2 * pollMs) s.exit(0); },
+  });
+  const { status, receipt } = await sim.done;
+  assert.equal(status, 0);
+  assert.equal(receipt.reason, 'shell-exited');
+  assert.equal(receipt.launchReadFailures, 0);
+  assert.ok(sim.readCalls.length >= 2, 'a periodic read starts before its result is available');
+  assert.deepEqual(sim.signals, []);
+});
+
+test('validator stop after a delayed poll cancels the registered round as validation-stopped', async t => {
+  const sim = simulate(t, {
+    pollMs: LAUNCH_UNREADABLE_GRACE_MS + 1000,
+    reads: (n, s) => {
+      // Queue the validator cancellation behind the resumed poll. The launch
+      // remains readable throughout; elapsed scheduler time is not read failure.
+      if (n === 2) setImmediate(() => s.control.push('stop\n'));
+      return launch('running');
+    },
+  });
+  const { status, receipt } = await sim.done;
+  assert.equal(status, 143);
+  assert.equal(receipt.reason, 'validation-stopped');
+  assert.equal(receipt.state, 'quiescent');
+  assert.equal(receipt.launchReadFailures, 0);
+  assert.equal(sim.signals[0].signal, 'SIGTERM');
 });
 
 test('failed launch reads sustained past the grace window stop the round as unreadable', async t => {

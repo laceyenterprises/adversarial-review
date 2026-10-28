@@ -4510,7 +4510,10 @@ The controller registers before execution and watches its exact HQ launch throug
 the existing read adapter and producer vocabulary. Validation runs in that shell's
 group. Terminal, parked or mismatched ownership stops the round at once; failed
 reads stop it only after two minutes without a permitted read, widened under load
-to the poll plus two read timeouts (HAMCTLPOLL-01).
+to the poll plus two read timeouts (HAMCTLPOLL-01). HAMVALTIMEOUTFLAKE-01 requires
+the latest completed read to be unreadable as well as the grace window to have
+expired before recording `launch-unreadable`. A scheduling stall with successful launch reads cannot preempt a
+validator timeout, which records `validation-stopped` and writes no audit.
 Lease acquisition and the merge click run `assert-launch`, which proceeds only on
 a fresh permitted read. A stale-read gate has a bounded three-read budget sized
 from the current load-aware timeout (60-second floor), and an admitted read may

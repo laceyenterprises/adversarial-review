@@ -3839,3 +3839,15 @@ rules or HCP-outage hold. Deploy the coordinated OS endpoint and consumer after
 both PRs converge; the one-shot adapter loads the deployed owner code each read.
 No daemon bounce or host activation was performed as validation. Offline
 producer coverage: `node --test test/review-observations.test.mjs`.
+
+PENDINGCLAIM-01: the watcher uses one failure-shape expression for classification
+and bounded unknown, population, infrastructure and daemon-bounce retry claims.
+Same-head lease-released `pending` failures remain retryable within their existing
+budgets. Moved heads retain fresh-review attempt reset; exhausted unknown failures
+still park. Released session evidence remains available for late-post
+reconciliation. A refused claim with unchanged status, session and failure time
+logs `claim-shape-mismatch branch=<name> status=<status>`; this adds no gate or
+alert. The synthetic offline regression is
+`test/watcher-pending-failure-claim.test.mjs`. Existing smoke promises remain;
+post-deployment acceptance is read-only observation of natural retry progress,
+with no restart or forced failure.

@@ -1,5 +1,20 @@
 # Adversarial Review State Machine Notes
 
+PENDINGCLAIM-01: retry classification and the unknown, review-population,
+infrastructure and daemon-bounce claims share one SQL failure-shape expression.
+A lease-released `pending` failure with `failed_at`, accrued attempts (or an
+uncharged daemon bounce) and the same reviewer head takes its bounded retry CAS.
+Population decisions receive an explicit-failure snapshot after that proof.
+Moved heads retain the fresh pending claim and attempt reset; exhausted unknown
+failures retain parking. Session UUID and PGID remain on lease release because
+`reconcileReviewerCommandFailedBeforeRetry` needs the session/start evidence to
+reconcile late posted reviews before replacing a reviewer. Claims clear the old
+PGID and replace the session as before. A zero-row CAS re-reads the row: unchanged
+status, session and failure timestamp log `claim-shape-mismatch` with the branch
+and status; changed evidence retains the claim-race log. Neither diagnostic
+changes state or admission policy. Retry caps, defaults, failure classifiers,
+token-refresh claims and merge guards retain their existing rules.
+
 REGISTRYSESSION-02: async entry points call the shared
 `ensureWorkerRegistryReady()` before synchronous governed model selection in
 that process, including reviewer/security children, quota grounding and fallback

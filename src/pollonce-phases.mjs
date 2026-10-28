@@ -188,6 +188,7 @@ import {
   stmtMarkReviewPopulationRetryAttemptStarted,
   stmtMarkReviewerCommandFailedRecoveredPosted,
   stmtMarkUnknownFailureRetryAttemptStarted,
+  stmtReviewRowInTerminalFailureState,
   stmtReleaseReviewerClaim,
   stmtReleaseUnsettledPostedReview,
   stmtRestoreReviewedHeadDedupSuppressedReviewPosted,
@@ -640,17 +641,21 @@ const logReviewerQuotaBlock = createReviewerQuotaBlockLogger();
 // crash loop.
 export function reviewRowInTerminalFailureState(row, currentHeadSha) {
   if (!row) return false;
-  if (row.review_status === 'failed') {
-    return !row.reviewer_head_sha || !currentHeadSha || String(row.reviewer_head_sha) === String(currentHeadSha);
-  }
-  if (row.review_status !== 'pending') return false;
-  if (!row.failed_at) return false;
-  // REVIEWBOUNCE-01: a bounced row charges no attempt, but it must still route
-  // through the bounded infra CAS rather than the uncharged pending claim.
-  if (!(Number(row.review_attempts || 0) > 0) && !isDaemonBounceFailure(row)) return false;
-  const rowHead = row.reviewer_head_sha || null;
-  if (!rowHead || !currentHeadSha) return false;
-  return String(rowHead) === String(currentHeadSha);
+  // Retain the classifier's attempt/head evidence guards. CASes retain their
+  // existing snapshot guards, including legacy incomplete bounce evidence.
+  if (row.review_status === 'pending' && (
+    (!(Number(row.review_attempts || 0) > 0) && !isDaemonBounceFailure(row)) ||
+    !row.reviewer_head_sha || !currentHeadSha
+  )) return false;
+  // Explicit failures retain the existing missing-head compatibility guard.
+  if (row.review_status === 'failed' && row.reviewer_head_sha && currentHeadSha &&
+      String(row.reviewer_head_sha) !== String(currentHeadSha)) return false;
+  return Boolean(stmtReviewRowInTerminalFailureState.get(
+    row.review_status ?? null,
+    row.failed_at || null,
+    row.reviewer_head_sha ? String(row.reviewer_head_sha) : null,
+    currentHeadSha ? String(currentHeadSha) : null,
+  ).terminal_failure);
 }
 
 export function finalizePendingTerminalFailureState(row, {
@@ -1566,7 +1571,7 @@ export async function processReviewSubject(entry, ctx) {
             terminalFailure: reviewRowInTerminalFailureState(existing, subject.headSha) &&
               !infraRecoverableFailureClass(existing) &&
               !(unknownReviewerCommandFailureClass(existing) && Number(existing?.review_attempts || 0) < REVIEW_UNKNOWN_FAILURE_MAX_RETRIES) &&
-              !['wait', 'retry'].includes(reviewPopulationRetryDecision(existing, {
+              !['wait', 'retry'].includes(reviewPopulationRetryDecision({ ...existing, review_status: 'failed' }, {
                 config: normalizeReviewPopulationRetryConfig(resolveReviewPopulationRetryConfig()), headSha: subject.headSha,
               }).action),
             request: (options) => requestReviewRereview({ ...options, db, inTransaction: true }),
@@ -2656,8 +2661,10 @@ export async function processReviewSubject(entry, ctx) {
         ? unknownReviewerCommandFailureClass(current)
         : null;
       const reviewPopulationRetryConfig = normalizeReviewPopulationRetryConfig(resolveReviewPopulationRetryConfig());
+      // The decision helper consumes an explicit failure. Normalize only after
+      // proving the durable row is failed or a same-head lease-released failure.
       const populationRetry = inTerminalFailure && !infraRecoveryClass && !unknownFailureClass
-        ? reviewPopulationRetryDecision(current, {
+        ? reviewPopulationRetryDecision({ ...current, review_status: 'failed' }, {
           config: reviewPopulationRetryConfig,
           headSha: subject?.headSha || null,
         })
@@ -3405,6 +3412,11 @@ export async function processReviewSubject(entry, ctx) {
             if (reviewerTimeoutBudget(readCascadeState(ROOT, { repo: repoPath, prNumber }), {
               headSha: reviewerHeadSha, row: stmtGetReviewRow.get(repoPath, prNumber),
             }).parked) return { dispatched: false, reason: REVIEWER_TIMEOUT_REPEATED_REASON };
+            const claimBranch = tokenRefreshRecovery ? 'token-refresh'
+              : infraRecoveryClass === DAEMON_BOUNCE_FAILURE_CLASS ? 'daemon-bounce'
+              : infraRecoveryClass ? 'infra'
+              : reviewPopulationRetryable ? 'review-population'
+              : unknownFailureRetryable ? 'unknown-failure' : 'pending';
             const claimReviewer = () => tokenRefreshRecovery
               ? stmtMarkTokenRefreshRecoveryAttemptStarted.run(
                 attemptAt,
@@ -3464,6 +3476,7 @@ export async function processReviewSubject(entry, ctx) {
                   repoPath,
                   prNumber,
                   reviewerHeadSha,
+                  reviewerHeadSha,
                   reviewPopulationRetryConfig.maxAttempts
                 )
               : unknownFailureRetryable
@@ -3476,6 +3489,7 @@ export async function processReviewSubject(entry, ctx) {
                   reviewerLeaseExpiresAt,
                   repoPath,
                   prNumber,
+                  reviewerHeadSha,
                   REVIEW_UNKNOWN_FAILURE_MAX_RETRIES
                 )
               : stmtMarkAttemptStarted.run(
@@ -3494,13 +3508,14 @@ export async function processReviewSubject(entry, ctx) {
               return claimReviewer();
             }).immediate() : claimReviewer();
             if (claim.changes === 0) {
-              // Lost the cross-process compare-and-swap. Either another
-              // watcher just claimed this row, or the row's status moved to
-              // a non-claimable state (`reviewing`, `failed-orphan`, terminal)
-              // between the readback above and the UPDATE here. Either way,
-              // do NOT spawn a reviewer; the next poll will see fresh state.
-              console.log(
-                `[watcher] Lost claim race on ${repoPath}#${prNumber} — another watcher is handling this PR (or its row is now in a non-claimable state). Skipping.`
+              const afterClaim = stmtGetReviewRow.get(repoPath, prNumber);
+              const unchangedShape = afterClaim && current &&
+                ['review_status', 'reviewer_session_uuid', 'failed_at'].every(
+                  field => afterClaim[field] === current[field]
+                );
+              console.log(unchangedShape
+                ? `[watcher] claim-shape-mismatch branch=${claimBranch} status=${afterClaim.review_status} repo=${repoPath} pr=${prNumber}`
+                : `[watcher] Lost claim race on ${repoPath}#${prNumber} — another watcher is handling this PR (or its row is now in a non-claimable state). Skipping.`
               );
               return { dispatched: false, reason: 'claim-race-lost' };
             }

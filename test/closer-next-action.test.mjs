@@ -2,6 +2,8 @@ import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
+import Database from 'better-sqlite3';
 import { syncBuiltinESMExports } from 'node:module';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -15,7 +17,7 @@ import { closureOwnerFromDecision, hasHammerDispatchIntent, observeClosureResult
   resolveClosureNextAction, revalidateClosurePr, reviseClosureNextAction, readClosureNextAction } from '../src/ama/closure-next-action.mjs';
 import { maybeDispatchAmaClosureFor, resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { reviewCeilingOwner } from '../src/review-ceiling-owner.mjs';
-import { observeClosureWait, CLOSURE_WAIT_BOUND_MS } from '../src/ama/closure-wait.mjs';
+import { observeClosureWait, CLOSURE_WAIT_BOUND_MS, CLOSURE_WAIT_RETRY_MS } from '../src/ama/closure-wait.mjs';
 import { followUpJobFilePrefix } from '../src/follow-up-job-names.mjs';
 import { getFollowUpJobDir } from '../src/follow-up-jobs.mjs';
 import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
@@ -152,6 +154,13 @@ for (const attested of [false, true]) {
 
 test('CEILINGOWNER-01: injected refused-review ownership records once and escalates through the bounded closure wait', async t => {
   const rootDir = root(t), records = [], pages = [];
+  // Existing ordinary and explicitly named closure waits must not consume the
+  // admission diagnostic's first observation, clock or page receipt.
+  const priorStartedAt = Date.parse(AT) - 1_000;
+  for (const waitClass of [null, 'closure']) {
+    await observeClosureWait({ rootDir, ...identity, now: priorStartedAt, waitClass,
+      reason: 'existing closure wait', pageImpl: async () => assert.fail('prior wait must not page') });
+  }
   const reviewStateRow = { review_status: 'posted', reviewer_head_sha: OLD,
     rereview_reason: 'system-review-ceiling-closure' };
   // Simulate a stale producer still running the old below-ceiling policy.
@@ -173,6 +182,7 @@ test('CEILINGOWNER-01: injected refused-review ownership records once and escala
     });
     assert.equal(result.amaClosureResult.reason, 'next-action-contract-violation');
     assert.equal(result.amaClosureResult.boundedWait.startedAt, Date.parse(AT));
+    assert.equal(result.amaClosureResult.retryAfterMs, CLOSURE_WAIT_RETRY_MS);
     assert.equal(result.outcome, elapsed >= CLOSURE_WAIT_BOUND_MS ? 'await-operator' : 'ama-pending');
     assert.equal(Boolean(result.amaClosureResult.needsOperator), elapsed >= CLOSURE_WAIT_BOUND_MS);
     assert.equal(result.urgent, elapsed < CLOSURE_WAIT_BOUND_MS);
@@ -182,6 +192,17 @@ test('CEILINGOWNER-01: injected refused-review ownership records once and escala
   assert.equal(records[0].actor, 'reviewer');
   assert.equal(pages.length, 1, 'the existing closure-wait page receipt dedupes exhaustion');
   assert.match(pages[0], /next-action-contract-violation/);
+  const key = createHash('sha256').update(`${identity.repo}#${identity.prNumber}`).digest('hex');
+  const db = new Database(join(rootDir, 'data', 'ama-closure-waits', `${key}.db`), { readonly: true });
+  try {
+    const rows = db.prepare('SELECT class, started, reason, paged FROM waits_by_class WHERE head=? ORDER BY class').all(HEAD);
+    assert.deepEqual(rows, [
+      { class: 'actor-admission', started: Date.parse(AT),
+        reason: `next-action-contract-violation: actor=reviewer head=${HEAD} admission=review-ceiling`, paged: 1 },
+      { class: 'bounded-wait', started: priorStartedAt, reason: 'existing closure wait', paged: 0 },
+      { class: 'closure', started: priorStartedAt, reason: 'existing closure wait', paged: 0 },
+    ]);
+  } finally { db.close(); }
 });
 
 for (const reason of ['retrigger-review: synthetic request', `system-orphan-head-review:${HEAD}`]) {

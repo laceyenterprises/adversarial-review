@@ -294,6 +294,11 @@ for (const scenario of ['plain-unknown', 'live-launch', 'unknown-launch']) {
     assert.equal(result.dispatched, false);
     assert.equal(result.skipMergeAgent, true);
     assert.equal(deps.calls.length, 0);
+    if (f) {
+      assert.equal(f.record().state, 'no-dispatch');
+      assert.equal(f.record().preReceiptReconciliation.status, 'no-launch');
+      assert.equal(f.lease().terminalOutcome, 'deferred');
+    }
   });
 }
 

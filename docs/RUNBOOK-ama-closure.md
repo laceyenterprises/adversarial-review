@@ -401,8 +401,10 @@ teardown resumes ordinary dispatch. A refusal preserves the absence proof,
 defers the new pending lease without charging a launch, and emits
 `closer_orphan_reclaim_refused` with the host reason once per unchanged reason.
 The bounded `preReceiptReconciliation.orphanReclaimRefusal.reason` marker survives
-polls and restarts. Missing proof and live or unknown launch-bound runs retain
-custody. No direct worktree deletion, process kill or new configuration is added.
+polls and restarts. A live or unknown launch-bound run defers the new pending
+lease before any replacement intent is written, preserving the settled
+`no-launch` proof for a later admission. Missing proof also retains custody.
+No direct worktree deletion, process kill or new configuration is added.
 After normal deployment, the runtime owner may observe organic recovery and
 refusal events; source validation uses disposable synthetic fixtures only.
 

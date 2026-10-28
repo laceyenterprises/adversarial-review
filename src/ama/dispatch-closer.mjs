@@ -7213,14 +7213,18 @@ async function maybeDispatchAmaCloserAttempt({
         terminalOutcome: 'deferred', now: dispatchContext.dispatchedAt });
       throw error;
     }
-    if (closerReclaim.orphan && !closerReclaim.ok) {
+    if (closerReclaim.live || closerReclaim.unknown) {
       updateAmaCloserLease({ rootDir, ...leaseIdentity, status: 'terminal',
         expectedLease: leaseResult.lease,
         terminalOutcome: 'deferred', now: dispatchContext.dispatchedAt });
-      return deferUnknownCloserCustody({ rootDir, repo, prNumber,
-        headSha: targetRemediationSha, now: Date.parse(dispatchContext.dispatchedAt), env,
-        pageImpl: (message, options) => deliverAlertImpl(message, { ...options,
-          event: 'ama_closer.worker_evidence_wait_exhausted', payload: { repo, prNumber } }) });
+      if (closerReclaim.unknown) {
+        return deferUnknownCloserCustody({ rootDir, repo, prNumber,
+          headSha: targetRemediationSha, now: Date.parse(dispatchContext.dispatchedAt), env,
+          pageImpl: (message, options) => deliverAlertImpl(message, { ...options,
+            event: 'ama_closer.worker_evidence_wait_exhausted', payload: { repo, prNumber } }) });
+      }
+      return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+        reason: 'hammer-closer-in-flight', workerStatus: closerReclaim.workerStatus || null });
     }
   }
   try {

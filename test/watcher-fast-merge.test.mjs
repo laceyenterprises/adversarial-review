@@ -225,6 +225,10 @@ function buildRunnerSource(scenario) {
   const watcherUrl = fileUrl('src', 'watcher.mjs');
   return `
 const scenario = ${JSON.stringify(scenario)};
+const { dispatchReadTransport } = await import(${JSON.stringify(fileUrl('src', 'dispatch-read-client.mjs'))});
+const { registryProducerSdk } = await import(${JSON.stringify(fileUrl('test', 'helpers', 'registry-classes-fixture.mjs'))});
+const registrySdk = registryProducerSdk(dispatchReadTransport.sdk());
+dispatchReadTransport.sdk = () => registrySdk;
 const { pollOnce } = await import(${JSON.stringify(watcherUrl)});
 const db = globalThis.__fastMergeDb;
 globalThis.__fastMergeFailAuditWrites = Boolean(scenario.failAuditWrites);

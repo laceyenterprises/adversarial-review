@@ -1,4 +1,4 @@
-import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
+import { installDispatchFileProducerFixture, seedWorkerRegistry } from './helpers/dispatch-files-fixture.mjs';
 installDispatchFileProducerFixture();
 import './helpers/load-aware-timeout-fixture.mjs';
 import test, { beforeEach } from 'node:test';
@@ -264,6 +264,15 @@ test('consumeFollowUpJobsUntilCapacity prefetches quota holds before synchronous
 import './helpers/role-config-cache-reset.mjs';
 beforeEach((context) => {
   resetOAuthPreflightCache();
+  // Direct spawner fixtures exercise identity and argv without an async
+  // composition root. Give their synchronous resolver disposable producer
+  // evidence rather than depending on a host registry or model fallback.
+  mkdirSync(TEST_HQ_ROOT, {recursive: true});
+  seedWorkerRegistry(TEST_HQ_ROOT, {
+    'remediator-codex': {defaultModel: 'gpt-5.5', allowedModels: ['gpt-6-sol', 'gpt-5.5']},
+    'remediator-claude': {defaultModel: 'claude-opus-5-5'},
+    'remediator-gemini': {defaultModel: 'gemini-2.5-pro'},
+  });
   const isolatedKeys = [
     'ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR',
     'ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT',
@@ -616,7 +625,7 @@ function writeValidReply(replyPath, job, overrides = {}) {
   }, null, 2)}\n`, 'utf8');
 }
 
-const TEST_HQ_ROOT = '/tmp/adversarial-review-hq';
+const TEST_HQ_ROOT = path.join(tmpdir(), 'adversarial-review-hq');
 const TEST_LAUNCH_REQUEST_ID = 'lrq_test';
 
 function testReplyContext(overrides = {}) {

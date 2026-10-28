@@ -1,3 +1,4 @@
+import './helpers/registry-session-fixture.mjs';
 import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
 installDispatchFileProducerFixture();
 // ARC-08 — remediation dispatch e2e through both AgentRuntime runtimes.

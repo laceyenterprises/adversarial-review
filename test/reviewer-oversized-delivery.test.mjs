@@ -1,3 +1,4 @@
+import './helpers/registry-session-fixture.mjs';
 import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
 installDispatchFileProducerFixture();
 import test from 'node:test';

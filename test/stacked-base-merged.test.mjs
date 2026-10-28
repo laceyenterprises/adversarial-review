@@ -1,3 +1,4 @@
+import './helpers/registry-session-fixture.mjs';
 import { assertHoldRecord } from '../src/ama/hold-record.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import { runDaemonCleanMergeAttempt } from '../src/daemon-clean-merge.mjs';

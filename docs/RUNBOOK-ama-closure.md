@@ -6559,10 +6559,40 @@ same environment/transport, including concurrent preflights; failures are not
 cached. This is a short process-local cache, not a durable admission receipt.
 The deprecated `reviewer.quota_status_dir` (including its environment aliases)
 is ignored and warns once per environment; use `hq fleet quota status --json`.
-Remediation model observations cache successful registry snapshots for 60 seconds
-within the same environment and host/launch/token scope. Missing evidence uses
-the existing rate-limited fallback warning. Registry model/effort logs now use
-`modelSource: producer` rather than `registry-mirror`; update log filters.
+REGISTRYSESSION-01: model resolution prefetches `worker_registry` asynchronously
+through the app SDK's registered session at reviewer startup, watcher startup
+and poll boundaries, remediation consumption, and closer routing. Successful
+snapshots cache for 60 seconds in the matching app connection scope (including
+endpoint and explicit session identity). Environment copies with the same
+connection reuse the snapshot. Synchronous registry reads only consult that
+cache; they never register a session or invoke the synchronous SDK transport.
+Empty, stale or unavailable cache evidence raises `registry-unavailable`;
+asynchronous reviewer resolution re-prefetches before retrying. Failed or
+malformed reads are not cached, so the next attempt can recover immediately.
+Concurrent prefetches keep independent entries per connection and session;
+one endpoint cannot displace another endpoint's snapshot. A valid snapshot
+without the requested reviewer class also fails closed instead of selecting
+a host-configured model. Remediation startup logs a failed warmup and proceeds;
+consumption defers claims while prefetch is unavailable, and a registry loss
+after claim requeues the unspawned job without charging a round. The
+non-blocking Codex default applies only when the registry is readable and the
+configured model is outside its allowlist; registry loss does not authorize
+that fallback.
+No local registry, ledger or filesystem fallback is permitted.
+
+Registry outages are retryable `reviewer-model-unresolved` infrastructure faults,
+not OAuth failures. They use existing bounded infrastructure backoff and stored
+failure recovery without charging normal review attempts; they do not emit the
+OAuth re-authentication notice. The closer defers on the same typed fault rather
+than treating it as a generic fail-open quota resolver error. Corporate Claude
+still requires a governed model before broker minting, with the same model bound
+to the CLI invocation. Explicit configured pins retain their existing precedence.
+Registry model/effort logs use `modelSource: producer`.
+
+After normal deployment, SRE records read-only organic acceptance: watcher logs
+stop emitting `public-registry-unavailable`, and a corporate Claude review
+completes. Offline fixtures do not establish deployment acceptance. No new
+configuration, CI check, smoke step, live dispatch or credential repair is added.
 
 Stdout fallback in both HQ reviewer and OS-dispatch remediation runtimes reads
 only the first 262144 bytes. Truncated, incomplete or boundary-truncated logs

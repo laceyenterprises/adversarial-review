@@ -1,3 +1,4 @@
+import './helpers/registry-session-fixture.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 // AFH-04 — reviewer ordered fallback: codex-reviewer → gemini-reviewer →
 // claude-reviewer (LAST RESORT).

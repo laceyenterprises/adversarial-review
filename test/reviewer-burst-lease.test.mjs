@@ -1,3 +1,4 @@
+import './helpers/registry-session-fixture.mjs';
 import { fleetStatusWithClaudeAccountEvidence } from './helpers/claude-account-fixture.mjs';
 // RPL-07 — controlled burst reviewer capacity lease.
 //

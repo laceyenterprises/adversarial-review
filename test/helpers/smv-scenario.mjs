@@ -39,6 +39,10 @@ const { default: classifyRescue } = await import('../../src/merge-agent-rescue-c
 const { closeoutRereview } = await import('../../src/remediation-closeout.mjs');
 const { isEligibleForAmaClosure } = await import('../../src/ama/eligibility.mjs');
 const { fetchHammerHeadRange, fleetCommitIdentityMatches, readCompletedRemediationRounds } = await import('../../src/ama/hammer-head-validation.mjs');
+const { dispatchReadTransport } = await import('../../src/dispatch-read-client.mjs');
+const { registryProducerSdk } = await import('./registry-classes-fixture.mjs');
+const registrySdk = registryProducerSdk(dispatchReadTransport.sdk());
+dispatchReadTransport.sdk = () => registrySdk;
 const rootDir = process.cwd(), repo = 'fixture/repo', prNumber = 7;
 const quiet = { log() {}, warn() {}, error() {} };
 const refuse = () => { throw new Error('unexpected worker/GitHub/notification boundary'); };

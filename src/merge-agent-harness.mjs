@@ -244,6 +244,10 @@ async function resolveHarness({
       screenSoftGroundedFallbacks: true,
     });
   } catch (err) {
+    if (err.code === 'registry-unavailable') {
+      return {workerClass, fellBack: false, deferred: true,
+        reason: 'reviewer-model-unresolved', retryable: true};
+    }
     // Fail open, like the closer: a resolver fault is not proof of grounding.
     harness = { workerClass, fellBack: false, reason: 'harness-fallback-resolver-error', error: String(err?.message || err) };
   }

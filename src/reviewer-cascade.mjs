@@ -287,6 +287,7 @@ function isRepresentableInstant(ms) {
 function normalizeTransientFailureClass(failureClass) {
   const value = String(failureClass || '').trim();
   if (
+    value === 'reviewer-model-unresolved' ||
     value === 'cascade' ||
     value === 'oauth-broken' ||
     value === 'reviewer-timeout' ||

@@ -1,3 +1,4 @@
+import './helpers/registry-session-fixture.mjs';
 import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
 installDispatchFileProducerFixture();
 // TOKDZ-01 — the Claude reviewer survives a broker token rotation. A loopback

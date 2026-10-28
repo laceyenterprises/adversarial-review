@@ -111,6 +111,7 @@ function buildLoaderSource({
   const packageParentUrl = fileUrl('package.json');
 
   const stubs = {
+    [fileUrl('src', 'adapters', 'agent-runtime', 'local', 'remediation.mjs')]: 'fixture:worker-registry',
     ...(deadlineRecoverySource ? { [fileUrl('src', 'ownerproof-review-recovery.mjs')]: 'fixture:deadline-recovery' } : {}),
     ...(capRouteSource ? { [fileUrl('src', 'review-cycle-cap-hammer.mjs')]: 'fixture:cap-route' } : {}),
     [reviewStateUrl]: 'fixture:review-state',
@@ -347,6 +348,7 @@ export async function load(url, context, nextLoad) {
   }
 
   const simpleStubs = {
+    'fixture:worker-registry': ${JSON.stringify(`export * from '${fileUrl('src', 'adapters', 'agent-runtime', 'local', 'remediation.mjs')}?actual'; export async function prefetchWorkerRegistry() { globalThis.__registryPrefetches = (globalThis.__registryPrefetches || 0) + 1; } export function resolveRemediationModel(_className, {pin, fallbackModel} = {}) { return {resolvedModel: pin || fallbackModel || null, modelSource: 'producer', resolvedReasoningLevel: null}; }`)},
     // Claim-loop cases own adapter usage fixtures, not ledger subprocesses.
     // Keep the newer worker transport inside the same offline accounting seam.
     'fixture:closer-hold-records': 'export async function evaluateCloserHoldsForPoll(args) { globalThis.__closerHoldPolls = (globalThis.__closerHoldPolls || 0) + 1; globalThis.__closerHoldSubjects = args.subjects; }',
@@ -628,6 +630,7 @@ try {
   };
 
   await pollOnce(octokit, pollOptions);
+  assert.ok(globalThis.__registryPrefetches > 0, 'registry session warms before claim-loop work');
   const afterFirst = db.prepare(
     'SELECT review_status, reviewer_head_sha FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
   ).get('laceyenterprises/adversarial-review', 101);

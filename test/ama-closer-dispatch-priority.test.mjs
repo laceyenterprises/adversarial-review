@@ -1,3 +1,4 @@
+import './helpers/registry-session-fixture.mjs';
 import { assertHoldRecord } from '../src/ama/hold-record.mjs';
 import { seedCloserIntent, intentExpired, intentEarly } from './helpers/closer-intent-fixture.mjs';
 import { selectWorkerTokenAccount } from '../src/worker-token-pool.mjs';

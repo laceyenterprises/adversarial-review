@@ -17,18 +17,37 @@ const PROBE = `
 const h = (await import(process.env.AR_ROOT + '/src/reviewer-harness.mjs')).__test__;
 const r = await import(process.env.AR_ROOT + '/src/adapters/agent-runtime/local/remediation.mjs');
 const quiet = { info() {}, warn() {}, error() {} };
-const codex = h.resolveCodexExecOverrides({ env: process.env, log: quiet });
-const claude = r.resolveRemediationModel('claude-reviewer', { env: process.env, fallbackModel: null });
-const gemini = r.resolveRemediationModel('gemini-reviewer', { env: process.env, fallbackModel: null });
-process.stdout.write(JSON.stringify({
-  codex: { model: codex.model, effort: codex.reasoningEffort, modelSource: codex.modelSource, effortSource: codex.effortSource, cfg: codex.configOverrides },
-  claude: { model: claude.resolvedModel, effort: claude.resolvedReasoningLevel },
-  gemini: { model: gemini.resolvedModel, effort: gemini.resolvedReasoningLevel },
-  claudeArgs: h.buildClaudeReviewArgs('PROMPT', { model: claude.resolvedModel, effort: claude.resolvedReasoningLevel }),
-}));
+const { dispatchReadTransport } = await import(process.env.AR_ROOT + '/src/dispatch-read-client.mjs');
+let connects = 0;
+dispatchReadTransport.sdk = () => ({
+  async connect(config) {
+    connects++;
+    return { sessionToken: 'fixture-session', endpoint_url: config.endpoint_url };
+  },
+  async readSessionHostServices(request, options) {
+    if (request.action !== 'worker_registry' || options.session_token !== 'fixture-session') throw Error('session required');
+    if (process.env.REGISTRY_DOWN === '1') throw Error('fixture transport down');
+    return {schema_version: 1, status: 'found', data: {classes: {
+      'codex-reviewer': {defaultModel: 'governed-codex', defaultReasoningLevel: 'high'},
+      'claude-reviewer': {defaultModel: 'governed-claude'},
+      'gemini-reviewer': {defaultModel: 'governed-gemini'},
+    }}};
+  },
+  readHostServicesSync() { throw Error('sync transport must never run'); },
+});
+try {
+  await h.resolveReviewerExecutionAsync('codex', {env: process.env, log: quiet});
+  const codex = h.resolveCodexExecOverrides({env: process.env, log: quiet});
+  const claude = r.resolveRemediationModel('claude-reviewer', {env: process.env});
+  const gemini = r.resolveRemediationModel('gemini-reviewer', {env: process.env});
+  process.stdout.write(JSON.stringify({connects, codex, claude, gemini}));
+} catch (error) {
+  process.stdout.write(JSON.stringify({connects, code: error.code, failureClass: error.failureClass,
+    retryable: error.retryable, isOAuthError: error.isOAuthError === true, message: error.message}));
+}
 `;
 
-function standaloneRun(t, { codexConfig = null } = {}) {
+function standaloneRun(t, { codexConfig = null, down = false } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), 'ar-standalone-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const arRoot = path.join(root, 'adversarial-review');
@@ -46,30 +65,34 @@ function standaloneRun(t, { codexConfig = null } = {}) {
   const probePath = path.join(root, 'probe.mjs');
   writeFileSync(probePath, PROBE);
   // Deliberately minimal env: nothing from an Agent OS host leaks in.
-  const env = { HOME: home, PATH: process.env.PATH, AR_ROOT: arRoot, TMPDIR: root };
+  const env = { HOME: home, PATH: process.env.PATH, AR_ROOT: arRoot, TMPDIR: root, REGISTRY_DOWN: down ? '1' : '0' };
   const result = spawnSync(process.execPath, [probePath], { env, cwd: root, encoding: 'utf8' });
   assert.equal(result.status, 0, `standalone probe failed:\n${result.stderr}`);
   return JSON.parse(result.stdout);
 }
 
-test('standalone without a host codex config: reviewers use CLI defaults and nothing throws', (t) => {
+test('fresh standalone process establishes its own app session before synchronous resolution', t => {
   const out = standaloneRun(t);
-  assert.equal(out.codex.model, null);
-  assert.equal(out.codex.effort, null);
-  assert.equal(out.codex.modelSource, 'cli-default');
-  assert.equal(out.codex.effortSource, 'none');
-  assert.deepEqual(out.codex.cfg, []);
-  assert.equal(out.claude.model, null);
-  assert.equal(out.gemini.model, null);
-  assert.ok(!out.claudeArgs.includes('--model') && !out.claudeArgs.includes('--effort'),
-    'an unresolved claude reviewer must not pass --model/--effort');
+  assert.equal(out.connects, 1);
+  assert.equal(out.codex.model, 'governed-codex');
+  assert.equal(out.codex.modelSource, 'producer');
+  assert.equal(out.claude.resolvedModel, 'governed-claude');
+  assert.equal(out.gemini.resolvedModel, 'governed-gemini');
 });
 
-test('standalone with a host codex config: the codex reviewer keeps the host model and effort', (t) => {
-  const out = standaloneRun(t, { codexConfig: 'model = "gpt-5.5"\nmodel_reasoning_effort = "medium"\n' });
-  assert.equal(out.codex.model, 'gpt-5.5');
-  assert.equal(out.codex.effort, 'medium');
-  assert.equal(out.codex.modelSource, 'host-config');
-  assert.equal(out.codex.effortSource, 'host-config');
-  assert.deepEqual(out.codex.cfg, [{ key: 'model_reasoning_effort', value: 'medium' }]);
+test('standalone host model cannot replace the governed registry model', t => {
+  const out = standaloneRun(t, {codexConfig: 'model = "host-model"\nmodel_reasoning_effort = "medium"\n'});
+  assert.equal(out.codex.model, 'governed-codex');
+  assert.equal(out.codex.reasoningEffort, 'high');
+  assert.equal(out.codex.modelSource, 'producer');
+});
+
+test('fresh standalone registry outage is retryable infrastructure without an OAuth notice', t => {
+  const out = standaloneRun(t, {down: true});
+  assert.equal(out.connects, 1);
+  assert.equal(out.code, 'registry-unavailable');
+  assert.equal(out.failureClass, 'reviewer-model-unresolved');
+  assert.equal(out.retryable, true);
+  assert.equal(out.isOAuthError, false);
+  assert.doesNotMatch(out.message, /re-authenticate|OAuth credentials unavailable/);
 });

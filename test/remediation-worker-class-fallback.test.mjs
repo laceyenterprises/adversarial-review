@@ -1,3 +1,4 @@
+import './helpers/registry-session-fixture.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 // Historical cross-harness scenarios retain explicit personal-class pin behavior.
 // Automatic account routing is covered in codex-worker-account-routing.test.mjs.

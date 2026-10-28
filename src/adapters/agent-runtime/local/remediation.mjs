@@ -1,4 +1,4 @@
-import { readHostObservationSync } from '../../../dispatch-files-client.mjs';
+import { readHostObservation, readHostObservationSync } from '../../../dispatch-files-client.mjs';
 import { execFile } from 'node:child_process';
 import { closeSync, existsSync, openSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -27,7 +27,6 @@ const REGISTRY_TTL_MS = 60_000;
 const CODEX_REASONING_LEVELS = Object.freeze(new Set(['low', 'medium', 'high', 'xhigh']));
 const CLAUDE_REASONING_LEVELS = Object.freeze(new Set(['low', 'medium', 'high', 'xhigh', 'max']));
 const fallbackWarnings = new Map();
-const registryCache = new WeakMap();
 const DEFAULT_POLL_MS = 250;
 const IDENTITY_PROBE_RETRY_DELAYS_MS = Object.freeze([50, 100, 200]);
 const TRANSIENT_IDENTITY_PROBE_RE = /ps probe failed.*(?:EIO|EAGAIN|ETIMEDOUT|timeout|timed out|resource temporarily unavailable|input\/output error)/i;
@@ -413,19 +412,29 @@ function normalizeReasoningLevel(className, value, source, nowMs) {
   return { resolvedReasoningLevel: level, reasoningSource: source };
 }
 
+class RegistryUnavailableError extends Error {
+  constructor(className = 'worker-registry') {
+    super(`[reviewer-model-unresolved] governed model unavailable for ${className}; worker registry requires async prefetch`);
+    this.name = 'RegistryUnavailableError';
+    this.code = 'registry-unavailable';
+    this.failureClass = 'reviewer-model-unresolved';
+    this.retryable = true;
+  }
+}
+
+async function prefetchWorkerRegistry(args = {}) {
+  const observed = await readHostObservation('worker_registry', args);
+  if (!observed.ok || !observed.data.classes || typeof observed.data.classes !== 'object' || Array.isArray(observed.data.classes)) {
+    throw new RegistryUnavailableError();
+  }
+}
+
 function readWorkerClasses(nowMs, args = {}) {
-  const env = args.env ?? process.env;
-  const key = JSON.stringify([args.hqRoot, env.HCP_BASE_URL, env.HQ_LAUNCH_REQUEST_ID,
-    env.HCP_TOKEN_PATH, env.HCP_TOKEN, env.HCP_BEARER_TOKEN]);
-  const cached = registryCache.get(env);
-  if (cached?.key === key && nowMs >= cached.at && nowMs - cached.at < REGISTRY_TTL_MS) return cached.value;
-  const observed = readHostObservationSync('worker_registry', args);
-  const value = observed.ok && observed.data.classes ? {classes: observed.data.classes} : {classes: null, reason: 'public-registry-unavailable'};
-  // Outages are not cached; the next call can recover immediately. Fallbacks
-  // already emit the rate-limited warning in resolveRemediationModel.
-  if (value.classes) registryCache.set(env, {key, at: nowMs, value});
-  else registryCache.delete(env);
-  return value;
+  const observed = readHostObservationSync('worker_registry', {...args, nowMs});
+  if (!observed.ok || !observed.data.classes || typeof observed.data.classes !== 'object' || Array.isArray(observed.data.classes)) {
+    throw new RegistryUnavailableError();
+  }
+  return {classes: observed.data.classes};
 }
 
 function resolveRemediationModel(className, {
@@ -434,6 +443,7 @@ function resolveRemediationModel(className, {
   pin = '',
   reasoningPin = '',
   fallbackModel,
+  requireModel = false,
   nowMs = Date.now(),
 } = {}) {
   const rawModelPin = String(pin ?? '').trim();
@@ -486,6 +496,7 @@ function resolveRemediationModel(className, {
     };
   }
   const warningKey = `${className}:${candidates.map(([path]) => path).join(':')}`;
+  if (requireModel) throw new RegistryUnavailableError(className);
   warnRateLimited(
     warningKey,
     nowMs,
@@ -1345,6 +1356,8 @@ export {
   resolveGeminiCliPath,
   resolveGeminiRemediationModel,
   resolveRemediationModel,
+  RegistryUnavailableError,
+  prefetchWorkerRegistry,
   resolveNonBlockingCodexModel,
   spawnClaudeCodeRemediationWorker,
   spawnCodexRemediationWorker,

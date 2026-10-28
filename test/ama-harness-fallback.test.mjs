@@ -1,3 +1,8 @@
+import './helpers/registry-session-fixture.mjs';
+import { beforeEach } from 'node:test';
+import { seedWorkerRegistry } from './helpers/dispatch-files-fixture.mjs';
+import './helpers/dispatch-files-preload.mjs';
+import { dispatchReadTransport } from '../src/dispatch-read-client.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 // Historical cross-harness scenarios retain explicit personal-class pin behavior.
 // Automatic account routing is covered in codex-worker-account-routing.test.mjs.
@@ -467,6 +472,7 @@ test('the fleet-quota payload is parsed exactly once per resolve, however many c
   let result;
   try {
     result = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
+      modelForWorkerClass: () => 'synthetic-model',
       workerClass: 'hammer',
       fallbackWorkerClasses: ['claude-code', 'hammer-claude', 'gemini'],
       execFileImpl: exec.impl,
@@ -674,3 +680,19 @@ for (const payload of [null, [], true, 'synthetic']) {
     assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { readAt: SNAPSHOT_NOW, payload });
   });
 }
+
+
+test('closer session failure cannot silently retain a fallback model', async t => {
+  t.mock.method(dispatchReadTransport, 'hostServices', async () => {throw new Error('fixture registry down');});
+  await assert.rejects(resolveCloserDispatchHarness({workerClass: 'hammer', env: {},
+    execFileImpl: async () => assert.fail('quota or dispatch must follow registry prefetch')}),
+  {code: 'registry-unavailable', retryable: true});
+});
+
+
+beforeEach(() => {
+  mkdirSync(process.env.HQ_ROOT, {recursive: true});
+  seedWorkerRegistry(process.env.HQ_ROOT, Object.fromEntries(
+    ['hammer', 'codex', 'hammer-claude', 'claude-code', 'gemini', 'remediator-codex', 'remediator-claude']
+      .map(name => [name, {defaultModel: name.includes('claude') ? 'claude-opus-5-5' : name === 'gemini' ? 'gemini-2.5-pro' : 'gpt-5.5'}])));
+});

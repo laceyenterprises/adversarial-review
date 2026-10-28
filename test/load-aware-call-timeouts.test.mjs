@@ -1,4 +1,5 @@
 import './helpers/load-aware-timeout-fixture.mjs';
+import './helpers/registry-session-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';

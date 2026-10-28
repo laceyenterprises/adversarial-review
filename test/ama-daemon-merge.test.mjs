@@ -1,8 +1,9 @@
+import { observeClosureLag } from '../src/ama/closure-lag.mjs';
 import { readAmaAuditEntry, writeAmaAuditEntry, appendAmaAuditAttempt } from '../src/ama/audit.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { acquireDaemonMergeLease, acquireMergeLease, releaseMergeLease, withDaemonMergeReservation, readMergeLeaseWaiters, readMergeLeaseAttempts } from '../src/ama/merge-lease.mjs';
@@ -1573,3 +1574,28 @@ test('drafted daemon reservation withdraws on next pass and cannot block a ready
   releaseMergeLease({ rootDir, ...held.lease, merged: true });
   assert.equal(acquireMergeLease(closer).acquired, true);
 });
+
+for (const outcome of ['merged', 'already-merged', 'live-merged']) {
+  test(`inline ${outcome} records closure-lag terminal state before receipt verification`, async (t) => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closure-lag-inline-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const args = { rootDir, repo: 'fixture/repo', prNumber: 1, headSha: HEAD, logger: {} };
+    await observeClosureLag({ ...args, eligible: true, now: 1000 });
+    const harness = makeHarness({
+      mergeResults: [outcome === 'already-merged' ? { exitCode: 1, stderr: 'already merged' } : { exitCode: 0 }],
+      liveGateSequence: [outcome === 'live-merged' ? greenGate({ merged: true, prState: 'MERGED' }) : greenGate(),
+        new Error('verification unavailable')],
+    });
+    const result = await attemptDaemonCleanMerge(baseArgs(harness, {
+      rootDir, repo: args.repo, prNumber: args.prNumber, now: () => new Date(2000).toISOString(),
+    }));
+    assert.equal(result.merged, true);
+    assert.equal(result.remoteMergedConfirmed, false);
+    assert.equal(result.mergedAt, new Date(2000).toISOString());
+    const state = JSON.parse(readFileSync(join(rootDir, 'data', 'ama-closure-lag', 'state.json'), 'utf8'));
+    assert.equal(state.prs['fixture/repo#1'].terminal, true);
+    assert.equal(state.prs['fixture/repo#1'].headSha, HEAD);
+    assert.equal(state.samples.length, 1);
+    assert.equal(state.samples[0].lagMs, 1000);
+  });
+}

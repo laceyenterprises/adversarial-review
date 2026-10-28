@@ -71,8 +71,8 @@ export async function observeCloserBacklog({ rootDir, repo, prNumber, now = Date
   return locked(rootDir, (state) => {
     const key = `${repo}#${prNumber}`;
     state.prs[key] ??= {};
-    if (state.prs[key].terminal) state.prs[key] = {};
-    state.prs[key].closerSeenAt = now;
+    // A census is not evidence that a terminal PR reopened.
+    if (!state.prs[key].terminal) state.prs[key].closerSeenAt = now;
     // A stale observation is not a current eligible backlog. Active launches
     // are counted independently by the caller and retain their exclusivity.
     return Object.values(state.prs).filter((pr) => pr.closerSeenAt >= now - 600000 && !pr.terminal).length;
@@ -85,67 +85,128 @@ async function page(text, options) {
   return deliverAlert(text, options);
 }
 
+async function fetchLiveState(repo, prNumber) {
+  if (process.env.NODE_TEST_CONTEXT) throw new Error('offline tests must inject fetchLiveStateImpl');
+  const { fetchPullRequestHeadAndState } = await import('../github-api.mjs');
+  return fetchPullRequestHeadAndState(repo, prNumber, { withLabels: false });
+}
+
+function markTerminal(state, key, { repo, prNumber, headSha, merged, mergedAt, now }, events) {
+  const pr = state.prs[key];
+  if (merged && pr.eligibleAt != null && !pr.terminal) {
+    const parsed = Date.parse(mergedAt);
+    const end = Number.isFinite(parsed) ? parsed : now;
+    const lagMs = Math.max(0, end - pr.eligibleAt);
+    events.push({ event: 'ama.closure_lag', repo, pr: prNumber, headSha: pr.headSha,
+      eligible_at: new Date(pr.eligibleAt).toISOString(), merged_at: new Date(end).toISOString(), lag_ms: lagMs });
+    state.samples.push({ at: now, lagMs, pr: key, reason: pr.reason });
+  }
+  pr.headSha = headSha || pr.headSha;
+  pr.terminal = true;
+  pr.terminalAt = Math.max(pr.terminalAt || 0, now);
+  delete pr.closerSeenAt;
+  delete state.breaches[`pr:${key}`];
+}
+
+function summarizeLag(state, { now, sloMs }, events, checkedCandidates = []) {
+  for (const [name, value] of Object.entries(state.prs)) {
+    if (value.terminalAt < now - 86400000) delete state.prs[name];
+  }
+  state.samples = state.samples.filter((sample) => sample.at >= now - 86400000).slice(-10000);
+  const pending = Object.entries(state.prs).filter(([, value]) => value.eligibleAt != null && !value.terminal);
+  const lags = [...state.samples.map((sample) => sample.lagMs), ...pending.map(([, value]) => Math.max(0, now - value.eligibleAt))].sort((a, b) => a - b);
+  const p95 = lags.length ? lags[Math.ceil(lags.length * 0.95) - 1] : 0;
+  events.push({ event: 'ama.closure_queue_depth', value: pending.length, p95_lag_ms: p95 });
+  const blockers = pending.map(([name, value]) => ({ pr: name, reason: String(value.reason).slice(0, 160), lag_ms: now - value.eligibleAt }));
+  const breaches = [];
+  const addBreach = (id, details) => {
+    if (!state.breaches[id]) {
+      const event = { event: 'ama.closure_lag.slo_breach', severity: 'SEV1', id, occurred_at: new Date(now).toISOString(), ...details };
+      state.breaches[id] = { event, paged: false };
+      events.push(event);
+    }
+    if (!state.breaches[id].paged) breaches.push(state.breaches[id].event);
+  };
+  if (sloMs != null) state.sloMs = Math.max(1, Number(sloMs) || 1800000);
+  const limit = state.sloMs || 1800000;
+  const completed = state.samples.filter((sample) => sample.lagMs > limit).map(({ pr, reason, lagMs }) => ({ pr, reason, lag_ms: lagMs }));
+  const top = (items) => items.sort((a, b) => b.lag_ms - a.lag_ms).slice(0, 5)
+    .map((item) => ({ ...item, pr: String(item.pr).slice(0, 120), reason: String(item.reason).slice(0, 160) }));
+  if (p95 > limit) addBreach('p95', { p95_lag_ms: p95, slo_ms: limit,
+    blockers: top([...blockers]), blockers_omitted: Math.max(0, blockers.length - 5),
+    completed: top(completed), completed_omitted: Math.max(0, completed.length - 5) });
+  else delete state.breaches.p95;
+  for (const blocker of blockers) {
+    const pr = state.prs[blocker.pr];
+    const checked = checkedCandidates.some((candidate) => candidate.key === blocker.pr
+      && candidate.headSha === pr.headSha && candidate.eligibleAt === pr.eligibleAt);
+    if (blocker.lag_ms > 3600000 && checked) addBreach(`pr:${blocker.pr}`, blocker);
+  }
+  return { events, breaches };
+}
+
 export async function observeClosureLag({ rootDir, repo, prNumber, headSha, eligible = null,
-  merged = false, closed = false, mergedAt = null, reason = null,
-  now = Date.now(), sloMs = null, logger = console, pageImpl = page }) {
-  const result = await locked(rootDir, (state) => {
+  open = false, merged = false, closed = false, mergedAt = null, reason = null,
+  now = Date.now(), observedAt = now, sloMs = null, logger = console, pageImpl = page,
+  fetchLiveStateImpl = fetchLiveState }) {
+  const events = [];
+  let result = await locked(rootDir, (state) => {
     const key = `${repo}#${prNumber}`;
-    let pr = state.prs[key];
-    if (!pr) pr = state.prs[key] = {};
-    if (!merged && !closed && (eligible === false || (headSha && pr.headSha && headSha !== pr.headSha) || (eligible && pr.terminal))) {
-      pr = state.prs[key] = { headSha };
-      delete state.breaches[`pr:${key}`];
+    let pr = state.prs[key] ??= {};
+    // Neither ineligibility, a head change nor a census may erase a tombstone.
+    // Reopening needs positive OPEN evidence at a different, newer head.
+    const reopened = pr.terminal && open && headSha && pr.headSha && headSha !== pr.headSha
+      && observedAt > pr.terminalAt;
+    if (!merged && !closed && (!pr.terminal || reopened)) {
+      if (reopened || eligible === false || (headSha && pr.headSha && headSha !== pr.headSha)) {
+        pr = state.prs[key] = { headSha };
+        delete state.breaches[`pr:${key}`];
+      }
+      if (eligible && pr.eligibleAt == null) {
+        Object.assign(pr, { eligibleAt: observedAt, headSha, terminal: false });
+      }
+      if (reason) pr.reason = reason;
     }
-    if (eligible && pr.eligibleAt == null) {
-      Object.assign(pr, { eligibleAt: now, headSha, terminal: false });
-    }
-    if (reason) pr.reason = reason;
     pr.reason ??= 'merge-pending';
-    const events = [];
-    if (merged || closed) {
-      if (merged && pr.eligibleAt != null && !pr.terminal) {
-        const end = Date.parse(mergedAt) || now;
-        const lagMs = Math.max(0, end - pr.eligibleAt);
-        events.push({ event: 'ama.closure_lag', repo, pr: prNumber, headSha: pr.headSha,
-          eligible_at: new Date(pr.eligibleAt).toISOString(), merged_at: new Date(end).toISOString(), lag_ms: lagMs });
-        state.samples.push({ at: now, lagMs, pr: key, reason: pr.reason });
-      }
-      pr.terminal = true;
-      pr.terminalAt = now;
-      delete pr.closerSeenAt;
-    }
-    for (const [name, value] of Object.entries(state.prs)) {
-      if (value.terminalAt < now - 86400000) delete state.prs[name];
-    }
-    state.samples = state.samples.filter((sample) => sample.at >= now - 86400000).slice(-10000);
-    const pending = Object.entries(state.prs).filter(([, value]) => value.eligibleAt != null && !value.terminal);
-    const lags = [...state.samples.map((sample) => sample.lagMs), ...pending.map(([, value]) => Math.max(0, now - value.eligibleAt))].sort((a, b) => a - b);
-    const p95 = lags.length ? lags[Math.ceil(lags.length * 0.95) - 1] : 0;
-    events.push({ event: 'ama.closure_queue_depth', value: pending.length, p95_lag_ms: p95 });
-    const blockers = pending.map(([name, value]) => ({ pr: name, reason: String(value.reason).slice(0, 160), lag_ms: now - value.eligibleAt }));
-    const breaches = [];
-    const addBreach = (id, details) => {
-      if (!state.breaches[id]) {
-        const event = { event: 'ama.closure_lag.slo_breach', severity: 'SEV1', id, occurred_at: new Date(now).toISOString(), ...details };
-        state.breaches[id] = { event, paged: false };
-        events.push(event);
-      }
-      if (!state.breaches[id].paged) breaches.push(state.breaches[id].event);
-    };
-    if (sloMs != null) state.sloMs = Math.max(1, Number(sloMs) || 1800000);
-    const limit = state.sloMs || 1800000;
-    const completed = state.samples.filter((sample) => sample.lagMs > limit).map(({ pr, reason, lagMs }) => ({ pr, reason, lag_ms: lagMs }));
-    const top = (items) => items.sort((a, b) => b.lag_ms - a.lag_ms).slice(0, 5)
-      .map((item) => ({ ...item, pr: String(item.pr).slice(0, 120), reason: String(item.reason).slice(0, 160) }));
-    if (p95 > limit) addBreach('p95', { p95_lag_ms: p95, slo_ms: limit,
-      blockers: top([...blockers]), blockers_omitted: Math.max(0, blockers.length - 5),
-      completed: top(completed), completed_omitted: Math.max(0, completed.length - 5) });
-    else delete state.breaches.p95;
-    for (const blocker of blockers) {
-      if (blocker.lag_ms > 3600000) addBreach(`pr:${blocker.pr}`, blocker);
-    }
-    return { events, breaches };
+    if (merged || closed) markTerminal(state, key, { repo, prNumber, headSha, merged, mergedAt, now }, events);
+    // Only undelivered per-PR breaches need a live read. Keep network IO out of
+    // the file lock, then fence each result against the original wait/head.
+    const candidates = Object.entries(state.prs)
+      .filter(([key, value]) => !value.terminal && value.eligibleAt != null
+        && now - value.eligibleAt > 3600000 && !state.breaches[`pr:${key}`]?.paged)
+      .map(([key, value]) => ({ key, headSha: value.headSha, eligibleAt: value.eligibleAt }));
+    return candidates.length ? { candidates } : summarizeLag(state, { now, sloMs }, events);
   }, logger);
+  if (result.candidates) {
+    const candidates = result.candidates;
+    const observations = [];
+    for (const candidate of candidates) {
+      const split = candidate.key.lastIndexOf('#');
+      const target = { repo: candidate.key.slice(0, split), prNumber: Number(candidate.key.slice(split + 1)) };
+      try {
+        const live = await fetchLiveStateImpl(target.repo, target.prNumber);
+        observations.push({ ...candidate, ...target, live });
+      } catch (error) {
+        // An unreadable PR is still pending for diagnostic paging; never silently
+        // discard a genuine breach because GitHub is unavailable.
+        logger?.warn?.(`AMA closure-lag live state check failed for ${candidate.key}: ${error.message}`);
+      }
+    }
+    result = await locked(rootDir, (state) => {
+      for (const observation of observations) {
+        const { key, headSha, eligibleAt, live } = observation;
+        const pr = state.prs[key];
+        if (!pr || pr.terminal || pr.headSha !== headSha || pr.eligibleAt !== eligibleAt) continue;
+        const liveState = String(live?.state || live?.prState || '').trim().toUpperCase();
+        const merged = live?.merged === true || liveState === 'MERGED';
+        if (merged || liveState === 'CLOSED') {
+          markTerminal(state, key, { ...observation, headSha: live?.headRefOid || live?.headSha || headSha,
+            merged, mergedAt: live?.mergedAt, now }, events);
+        }
+      }
+      return summarizeLag(state, { now, sloMs }, events, candidates);
+    }, logger);
+  }
   for (const event of result.events) {
     const sink = event.severity === 'SEV1' ? (logger?.error || logger?.info) : logger?.info;
     sink?.call(logger, JSON.stringify(event));

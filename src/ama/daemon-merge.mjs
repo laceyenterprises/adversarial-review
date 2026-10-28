@@ -1,3 +1,4 @@
+import { observeClosureLag } from './closure-lag.mjs';
 import { attestationRecordErrorDetails } from '../attestation-record-error.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { buildMergeCommitBody } from './closing-keywords.mjs';
@@ -1205,18 +1206,28 @@ export async function attemptDaemonCleanMerge(args = {}) {
   let ownMergeExecuted = false;
   let remoteMergedConfirmed = false;
   let executedAt;
+  let mergedAt;
   const result = await attemptDaemonCleanMergeInner({ ...args,
     runMergeImpl: async (target) => {
       const response = await args.runMergeImpl(target);
       if (Number(response?.exitCode) === 0 && !/already merged/i.test(`${response?.stdout || ''} ${response?.stderr || ''}`)) {
         ownMergeExecuted = true;
-        executedAt = new Date().toISOString();
+        executedAt = (args.now || (() => new Date().toISOString()))();
       }
       return response;
     },
   });
   const writer = args.writeMergeActionImpl || recordMergeActionBestEffort;
   if (result.merged) {
+    mergedAt = executedAt || (args.now || (() => new Date().toISOString()))();
+    // Record success at the common merge boundary, independent of the caller's
+    // routing/disposition handling and of the later receipt verification read.
+    if (args.rootDir) {
+      try {
+        await observeClosureLag({ rootDir: args.rootDir, repo: args.repo, prNumber: args.prNumber,
+          headSha: args.validatedHead, merged: true, mergedAt, logger: args.logger });
+      } catch (error) { args.logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
+    }
     try {
       const live = normalizeGateState(await args.fetchLiveGateImpl());
       if (live.merged && live.candidateHead === args.validatedHead) {
@@ -1232,5 +1243,5 @@ export async function attemptDaemonCleanMerge(args = {}) {
       headSha: args.validatedHead, merged: false, reason: result.reason,
       producerClass: args.receiptProducerClass || 'ama-daemon' }, args.logger);
   }
-  return { ...result, remoteMergedConfirmed };
+  return { ...result, ...(mergedAt ? { mergedAt } : {}), remoteMergedConfirmed };
 }

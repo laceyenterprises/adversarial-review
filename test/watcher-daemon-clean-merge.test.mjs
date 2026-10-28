@@ -9,7 +9,7 @@ import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import { inspectCiBootstrap } from '../src/ci-recovery.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -4387,7 +4387,7 @@ test('FINDINGSBATCH-01 strict-off closure uses the settled body digest and real 
   const runDaemon = async options => {
     assert.equal(options.reviewState.refusalReviewVersion, digest);
     assert.equal(options.gateSnapshot.settledReview.evidenceVersion, digest);
-    return runDaemonCleanMergeAttempt({ ...options,
+    const daemonResult = await runDaemonCleanMergeAttempt({ ...options,
       dismissStaleRequestChangesOnResolved: false,
       env: { HQ_ROOT: rootDir },
       fetchRollupImpl: async () => {
@@ -4406,6 +4406,11 @@ test('FINDINGSBATCH-01 strict-off closure uses the settled body digest and real 
         return { stdout: 'Merged', stderr: '' };
       },
     });
+    const lag = JSON.parse(readFileSync(join(rootDir, 'data', 'ama-closure-lag', 'state.json'), 'utf8'));
+    assert.equal(lag.prs[`${args.repoPath}#${args.prNumber}`].terminal, true,
+      'the inline executor records completion before orchestration handles its disposition');
+    assert.ok(daemonResult.mergedAt);
+    return daemonResult;
   };
   const result = await maybeDispatchAmaClosureFor({ ...args,
     loadConfigImpl: () => ({ getMergeAuthorityConfig: () => config, getOrchestrationMode: () => 'native' }),

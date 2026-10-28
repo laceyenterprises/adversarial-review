@@ -48,6 +48,7 @@ test('closure lag emits one completion metric and pages each breach once across 
   const rootDir = root(t);
   const events = [], pages = [];
   const args = { rootDir, repo: 'test/repo', prNumber: 1, headSha: 'head',
+    fetchLiveStateImpl: async () => ({ state: 'OPEN' }),
     logger: { info: (text) => events.push(JSON.parse(text)) }, pageImpl: async (text) => pages.push(text) };
   await observeClosureLag({ ...args, eligible: true, now: 1000, reason: 'merge-lease-held' });
   await observeClosureLag({ ...args, now: 1801001, reason: 'merge-lease-held' });
@@ -139,7 +140,7 @@ test('concurrent lag writers serialize without losing observations or exhausting
 
 test('terminal and orphan PR breaches are removed while active breach dedupe survives', async (t) => {
   const rootDir = root(t);
-  const args = { rootDir, repo: 'test/repo', headSha: 'head', logger: {}, pageImpl: async () => {} };
+  const args = { rootDir, repo: 'test/repo', headSha: 'head', fetchLiveStateImpl: async () => ({ state: 'OPEN' }), logger: {}, pageImpl: async () => {} };
   for (const prNumber of [1, 2, 3]) {
     await observeClosureLag({ ...args, prNumber, eligible: true, now: 1000 });
   }
@@ -168,7 +169,7 @@ test('terminal and orphan PR breaches are removed while active breach dedupe sur
 for (const transition of [{ eligible: false }, { headSha: 'new-head' }]) {
   test(`eligibility invalidation stops pages: ${JSON.stringify(transition)}`, async (t) => {
     const pages = [];
-    const args = { rootDir: root(t), repo: 'test/repo', prNumber: 1, headSha: 'head', logger: {}, pageImpl: async (text) => pages.push(text) };
+    const args = { rootDir: root(t), repo: 'test/repo', prNumber: 1, headSha: 'head', fetchLiveStateImpl: async () => ({ state: 'OPEN' }), logger: {}, pageImpl: async (text) => pages.push(text) };
     await observeClosureLag({ ...args, eligible: true, now: 1000 });
     await observeClosureLag({ ...args, ...transition, now: 2000 });
     const result = await observeClosureLag({ ...args, ...transition, now: 7201000 });
@@ -177,17 +178,17 @@ for (const transition of [{ eligible: false }, { headSha: 'new-head' }]) {
   });
 }
 test('reopened eligible PR starts a fresh wait and rejoins backlog', async (t) => {
-  const args = { rootDir: root(t), repo: 'test/repo', prNumber: 1, headSha: 'head', logger: {}, pageImpl: async () => {} };
+  const args = { rootDir: root(t), repo: 'test/repo', prNumber: 1, headSha: 'head', fetchLiveStateImpl: async () => ({ state: 'OPEN' }), logger: {}, pageImpl: async () => {} };
   await observeClosureLag({ ...args, eligible: true, now: 1000 });
   await observeClosureLag({ ...args, closed: true, now: 2000 });
-  const result = await observeClosureLag({ ...args, eligible: true, now: 3000 });
+  const result = await observeClosureLag({ ...args, eligible: true, open: true, headSha: 'new-head', now: 3000 });
   assert.equal(result.events.at(-1).value, 1);
   assert.equal(result.events.at(-1).p95_lag_ms, 0);
   assert.equal(await observeCloserBacklog({ ...args, now: 3000 }), 1);
 });
 test('large backlogs produce bounded SEV1 pages with omitted counts', async (t) => {
   const rootDir = root(t), pages = [];
-  const args = { rootDir, repo: 'test/repo', headSha: 'head', logger: {}, pageImpl: async (text) => pages.push(text) };
+  const args = { rootDir, repo: 'test/repo', headSha: 'head', fetchLiveStateImpl: async () => ({ state: 'OPEN' }), logger: {}, pageImpl: async (text) => pages.push(text) };
   for (let prNumber = 1; prNumber <= 20; prNumber++) await observeClosureLag({ ...args, prNumber, eligible: true, now: 1000 });
   const result = await observeClosureLag({ ...args, prNumber: 1, now: 1801001 });
   const breach = result.breaches.find((event) => event.id === 'p95');
@@ -205,4 +206,117 @@ test('unchanged lag observations preserve the state inode without fsync replacem
   await observeClosureLag({ ...args, now: 2000 });
   assert.equal(statSync(path).ino, before.ino);
   assert.equal(statSync(path).mtimeMs, before.mtimeMs);
+});
+
+function lagState(rootDir) {
+  return JSON.parse(readFileSync(join(rootDir, 'data', 'ama-closure-lag', 'state.json'), 'utf8'));
+}
+
+for (const observation of [
+  { eligible: true, observedAt: 1500 },
+  { eligible: true, open: true, observedAt: 1500, headSha: 'new-head' },
+  { eligible: true, open: true, observedAt: 3000 },
+  { eligible: true, observedAt: 3000, headSha: 'new-head' },
+  { eligible: false, observedAt: 1500 },
+  { eligible: false, observedAt: 3000, headSha: 'new-head' },
+]) {
+  test(`terminal closure lag survives stale or unproven reopen: ${JSON.stringify(observation)}`, async (t) => {
+    const rootDir = root(t), pages = [];
+    const args = { rootDir, repo: 'fixture/repo', prNumber: 1, headSha: 'head', logger: {},
+      pageImpl: async (text) => pages.push(text), fetchLiveStateImpl: async () => assert.fail('terminal PR needs no read') };
+    await observeClosureLag({ ...args, eligible: true, now: 1000 });
+    await observeClosureLag({ ...args, merged: true, mergedAt: new Date(2000).toISOString(), now: 2000 });
+    await observeClosureLag({ ...args, ...observation, now: 4000 });
+    assert.equal(await observeCloserBacklog({ ...args, now: 5000 }), 0);
+    await observeClosureLag({ ...args, now: 7201000 });
+    const state = lagState(rootDir);
+    assert.equal(state.prs['fixture/repo#1'].terminal, true);
+    assert.equal(state.prs['fixture/repo#1'].terminalAt, 2000);
+    assert.equal(state.samples.length, 1);
+    assert.deepEqual(pages, []);
+  });
+}
+
+for (const live of [
+  { state: 'MERGED', mergedAt: new Date(2000).toISOString() },
+  { state: 'CLOSED', merged: true, mergedAt: new Date(2000).toISOString() },
+  { state: 'CLOSED' },
+  { state: 'MERGED', headRefOid: 'merged-head', mergedAt: new Date(2000).toISOString() },
+]) {
+  test(`live terminal state suppresses overdue per-PR page: ${JSON.stringify(live)}`, async (t) => {
+    const rootDir = root(t), pages = [], reads = [];
+    const args = { rootDir, repo: 'fixture/repo', prNumber: 1, headSha: 'head', logger: {},
+      pageImpl: async (_text, { payload }) => pages.push(payload),
+      fetchLiveStateImpl: async (repo, prNumber) => { reads.push([repo, prNumber]); return live; } };
+    await observeClosureLag({ ...args, eligible: true, now: 1000 });
+    // A different PR's observation must correct the stranded tracker entry too.
+    const result = await observeClosureLag({ ...args, prNumber: 2, now: 3601001 });
+    assert.deepEqual(reads, [['fixture/repo', 1]]);
+    assert.equal(lagState(rootDir).prs['fixture/repo#1'].terminal, true);
+    assert.equal(lagState(rootDir).prs['fixture/repo#1'].headSha, live.headRefOid || 'head');
+    assert.equal(lagState(rootDir).breaches['pr:fixture/repo#1'], undefined);
+    assert.equal(result.events.at(-1).value, 0);
+    assert.equal(result.events.at(-1).p95_lag_ms, live.state === 'CLOSED' && !live.merged ? 0 : 1000);
+    assert.deepEqual(pages, []);
+    await observeClosureLag({ ...args, prNumber: 2, now: 3601002 });
+    assert.equal(reads.length, 1);
+  });
+}
+
+for (const unreadable of [false, true]) {
+  test(`genuine overdue PR still pages once (live read unavailable=${unreadable})`, async (t) => {
+    const rootDir = root(t), pages = [], warnings = [];
+    let reads = 0;
+    const args = { rootDir, repo: 'fixture/repo', prNumber: 1, headSha: 'head', sloMs: 7200000,
+      logger: { warn: (text) => warnings.push(text) },
+      pageImpl: async (_text, { payload }) => pages.push(payload),
+      fetchLiveStateImpl: async () => { reads++; if (unreadable) throw new Error('synthetic read failure'); return { state: 'OPEN' }; } };
+    await observeClosureLag({ ...args, eligible: true, now: 1000 });
+    await observeClosureLag({ ...args, now: 3601000 });
+    assert.deepEqual(pages, []);
+    await observeClosureLag({ ...args, now: 3601001 });
+    await observeClosureLag({ ...args, now: 3601002 });
+    assert.equal(reads, 1);
+    assert.equal(warnings.length, unreadable ? 1 : 0);
+    assert.equal(pages.length, 1);
+    assert.equal(pages[0].id, 'pr:fixture/repo#1');
+    assert.equal(pages[0].reason, 'merge-pending');
+    assert.equal(pages[0].lag_ms, 3600001);
+    assert.equal(lagState(rootDir).prs['fixture/repo#1'].terminal, false);
+  });
+}
+
+test('late live terminal read cannot overwrite a concurrently reopened head', async (t) => {
+  const rootDir = root(t), pages = [];
+  const args = { rootDir, repo: 'fixture/repo', prNumber: 1, headSha: 'head', logger: {},
+    pageImpl: async (text) => pages.push(text) };
+  await observeClosureLag({ ...args, eligible: true, now: 1000 });
+  const result = await observeClosureLag({ ...args, now: 3601001,
+    fetchLiveStateImpl: async () => {
+      // These writes also prove that the network read does not hold state.lock.
+      await observeClosureLag({ ...args, closed: true, now: 3601002 });
+      await observeClosureLag({ ...args, headSha: 'new-head', open: true, eligible: true, now: 3601003 });
+      return { state: 'CLOSED' };
+    } });
+  assert.equal(result.events.at(-1).value, 1);
+  const pr = lagState(rootDir).prs['fixture/repo#1'];
+  assert.equal(pr.headSha, 'new-head');
+  assert.equal(pr.terminal, false);
+  assert.equal(pr.eligibleAt, 3601003);
+  assert.deepEqual(pages, []);
+});
+
+test('an undelivered old breach is discarded when the live PR is terminal', async (t) => {
+  const rootDir = root(t), pages = [];
+  const args = { rootDir, repo: 'fixture/repo', prNumber: 1, headSha: 'head', sloMs: 7200000, logger: {},
+    fetchLiveStateImpl: async () => ({ state: 'OPEN' }), pageImpl: async () => { throw new Error('synthetic page failure'); } };
+  await observeClosureLag({ ...args, eligible: true, now: 1000 });
+  await observeClosureLag({ ...args, now: 3601001 });
+  assert.equal(lagState(rootDir).breaches['pr:fixture/repo#1'].paged, false);
+  const result = await observeClosureLag({ ...args, now: 3601002,
+    fetchLiveStateImpl: async () => ({ state: 'MERGED', mergedAt: new Date(2000).toISOString() }),
+    pageImpl: async (text) => pages.push(text) });
+  assert.deepEqual(result.breaches, []);
+  assert.deepEqual(pages, []);
+  assert.equal(lagState(rootDir).breaches['pr:fixture/repo#1'], undefined);
 });

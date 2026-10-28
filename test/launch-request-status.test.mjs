@@ -341,6 +341,7 @@ test('GSR-03: suspended is non-terminal, unparked and owned even before the SDK 
     const meaning = launchRequestMeaning({ status });
     assert.equal(meaning.status, 'suspended');
     assert.equal(meaning.terminal, false);
+    assert.equal(meaning.succeeded, false);
     assert.equal(meaning.parked, false);
     assert.deepEqual(meaning.diagnostics, []);
     assert.equal(launchRequestInFlight({ ok: true, row: { status } }), true);
@@ -355,6 +356,17 @@ test('GSR-03: suspended is non-terminal, unparked and owned even before the SDK 
     retryChain: [{ status: 'suspended', launch_request_id: 'suspended-retry' }] };
   assert.equal(withLiveLaunchRetry(chain).liveRetryLaunchRequestId, 'suspended-retry');
   assert.equal(launchRequestInFlight(chain), true);
+});
+
+test('GSR-03: suspended success evidence uses SDK boolean normalization', () => {
+  assert.equal(launchRequestMeaning('suspended').succeeded, false);
+  for (const status of ['suspended', ' Suspended ']) {
+    for (const succeeded of [undefined, null, 'true', 'false', 0, 1, false, true]) {
+      const meaning = launchRequestMeaning({ status, succeeded });
+      assert.equal(meaning.succeeded, typeof succeeded === 'boolean' ? succeeded : false);
+      assert.equal(meaning.terminal, false, 'success evidence is independent of terminality');
+    }
+  }
 });
 
 test('GSR-03: closer-lease recovery keeps a suspended closer lease at any age until release', async t => {

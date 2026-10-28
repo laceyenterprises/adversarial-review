@@ -2161,7 +2161,7 @@ async function main() {
     console.error(`[reviewer] DEBUG: review completed (${reviewText.length} bytes)`);
   } catch (err) {
     if (effectiveModel === 'claude') captureLocalReviewerUsage({ model: effectiveModel, workspacePath: reviewerSubprocessCwd, startedAt: reviewerStartedAt, rootDir: ROOT, failed: true });
-    if (err.failureClass === 'reviewer-model-unresolved') {
+    if (err.code === 'registry-unavailable') {
       console.error(err.message);
       process.exit(1);
     }

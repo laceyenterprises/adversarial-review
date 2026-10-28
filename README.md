@@ -298,7 +298,14 @@ default remains the production prefetch. Readiness precedes governed model
 selection while lease/cooldown checks retain their order, and local remediation
 rechecks shutdown after its awaited refresh before spawning. A transport
 outage remains retryable `reviewer-model-unresolved`, never a fallback model or
-an OAuth re-authentication notice. Synchronous resolution performs no physical
+an OAuth re-authentication notice. HOSTOBSDENIAL-01 preserves redacted host-read
+causes: `entitlement-denied` names `host.observations.read`; `timeout`,
+`unavailable` and `not-found` remain distinct. Entitlement denials and missing
+registries are non-retryable `reviewer-configuration-error` faults that stay
+failed without infrastructure auto-recovery. Timeouts and outages remain
+retryable. Synchronous reads retain the last refusal until a successful async
+read replaces it; failure diagnostics never satisfy readiness or suppress an
+async refresh. Synchronous resolution performs no physical
 request and has no filesystem fallback. Corporate governance, existing bounded
 infrastructure backoff and merge authority are unchanged. Offline coverage:
 `test/worker-registry-entrypoints.test.mjs`, `test/registry-model-session.test.mjs`,
@@ -1197,6 +1204,13 @@ The [reader contract](docs/producer-contract-readers.md#weekly-evidence-and-admi
 records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
+
+HOSTOBSDENIAL-01 keeps registry entitlement denials and not-found replies in the
+existing failed state as configuration faults, outside infrastructure retry and
+auto-recovery budgets. Timeouts and unavailability retain bounded retry behavior.
+Synthetic host-observation refusal fixtures cover redaction, sync diagnostics,
+terminal settlement and recovery after a successful async read. Existing smoke
+commands and merge authority remain unchanged.
 
 CLOSERORPHAN-01 reclaims a self-owned closer worktree lacking launch metadata
 only after the current PR/head has settled `no-launch` evidence from a successful

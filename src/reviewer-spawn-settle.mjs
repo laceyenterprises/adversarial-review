@@ -1718,7 +1718,7 @@ function settleReviewerAttempt({
   const failureMessage = appendFailureDiagnostics(baseFailureMessage, result);
   const classifiedMessage = `[${failureClass}] ${failureMessage}`;
 
-  if (failureClass === 'reviewer-model-unavailable') {
+  if (failureClass === 'reviewer-model-unavailable' || failureClass === 'reviewer-configuration-error') {
     // Immediate fallback was already tried by spawnReviewer. A deterministic
     // refusal left here needs configuration repair, not another poll-time spawn.
     withSqliteBusyRetrySync(

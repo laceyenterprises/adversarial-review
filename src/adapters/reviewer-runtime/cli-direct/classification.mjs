@@ -68,6 +68,7 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
   // identifies stale-head churn; an ordinary temporary failure keeps its class.
   const text = String(stderr || '');
   const lower = text.toLowerCase();
+  if (lower.includes('[reviewer-configuration-error]')) return 'reviewer-configuration-error';
   if (lower.includes('[reviewer-model-unresolved]')) return 'reviewer-model-unresolved';
   // Exit 77 is also sysexits EX_NOPERM, and this classifier also reads exit codes
   // from other CLIs; only the reviewer's own marker identifies the budget refusal.

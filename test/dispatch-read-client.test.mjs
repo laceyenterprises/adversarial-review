@@ -412,11 +412,11 @@ test('registry readiness uses a registered async session and refreshes the sync 
     readHostServicesSync() { assert.fail('sync registry transport forbidden'); },
   }));
   const read = () => dispatchReadTransport.hostServicesSync({action: 'worker_registry'}, {env});
-  assert.throws(read, {code: 'registry-unavailable'});
+  assert.throws(read, {code: 'registry-unavailable', failureClass: 'reviewer-model-unresolved'});
   await ensureWorkerRegistryReady({env});
   assert.equal(read().data.classes.fixture.defaultModel, 'model-1');
   now += 60_000;
-  assert.throws(read, {code: 'registry-unavailable'});
+  assert.throws(read, {code: 'registry-unavailable', failureClass: 'reviewer-model-unresolved'});
   await ensureWorkerRegistryReady({env: {...env}});
   assert.equal(read().data.classes.fixture.defaultModel, 'model-2');
   assert.equal(connects, 1);

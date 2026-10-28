@@ -6601,7 +6601,10 @@ connection reuse the snapshot. Synchronous registry reads only consult that
 cache; they never register a session or invoke the synchronous SDK transport.
 Empty, stale or unavailable cache evidence raises `registry-unavailable`;
 asynchronous model-resolution boundaries ensure readiness before selection. Failed or
-malformed reads are not cached, so the next attempt can recover immediately.
+malformed reads never satisfy readiness, so the next async attempt can recover
+immediately. HOSTOBSDENIAL-01 retains the last redacted failure separately for
+sync diagnostics; it cannot select a model or suppress a new async read. A
+successful async read clears that failure.
 Concurrent prefetches keep independent entries per connection and session;
 one endpoint cannot displace another endpoint's snapshot. A valid snapshot
 without the requested reviewer class also fails closed instead of selecting
@@ -6613,7 +6616,15 @@ configured model is outside its allowlist; registry loss does not authorize
 that fallback.
 No local registry, ledger or filesystem fallback is permitted.
 
-Registry outages are retryable `reviewer-model-unresolved` infrastructure faults,
+Host observation failures distinguish `entitlement-denied` (fixed detail
+`host.observations.read`), `timeout`, `unavailable` and `not-found`. Arbitrary
+producer messages, bodies, credentials and tokens are never copied into errors.
+Entitlement denials and missing registries are non-retryable
+`reviewer-configuration-error` faults: repair the app grant or registry
+configuration, rather than consuming infrastructure retry/auto-recovery caps.
+The closer retains the refusal and non-retryability without selecting a fallback.
+
+Registry timeouts and outages are retryable `reviewer-model-unresolved` infrastructure faults,
 not OAuth failures. They use existing bounded infrastructure backoff and stored
 failure recovery without charging normal review attempts; they do not emit the
 OAuth re-authentication notice. The closer defers on the same typed fault rather

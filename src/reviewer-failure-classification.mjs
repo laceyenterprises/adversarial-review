@@ -63,8 +63,9 @@ function storedRowFailureSignal(reviewRow) {
 function reviewerFailureClassFromStoredRow(reviewRow) {
   const rawMessage = storedRowFailureSignal(reviewRow);
   const message = rawMessage.toLowerCase();
+  if (message.includes('[reviewer-configuration-error]')) return 'reviewer-configuration-error';
   const tagMatch = message.match(
-    /^\[(reviewer-chunk-budget-exceeded|reviewer-model-unresolved|reviewer-model-unavailable|reviewer-timeout|launchctl-bootstrap|cascade|quota-exhausted|provider-overloaded|reviewer-empty-output|reviewer-output|oauth-broken|token-refresh-pending|attestation-sign-failed|hcp-unavailable|infra-runtime-missing-library|agy-identity-unavailable|dispatch-failed|adapter_spawn_timeout|daemon-bounce)\]/
+    /^\[(reviewer-chunk-budget-exceeded|reviewer-configuration-error|reviewer-model-unresolved|reviewer-model-unavailable|reviewer-timeout|launchctl-bootstrap|cascade|quota-exhausted|provider-overloaded|reviewer-empty-output|reviewer-output|oauth-broken|token-refresh-pending|attestation-sign-failed|hcp-unavailable|infra-runtime-missing-library|agy-identity-unavailable|dispatch-failed|adapter_spawn_timeout|daemon-bounce)\]/
   );
   if (tagMatch) return tagMatch[1];
   const legacyClass = classifyReviewerFailure(rawMessage, null);
@@ -172,7 +173,7 @@ function infraRecoverableFailureClass(reviewRow) {
   const known = reviewerFailureClassFromStoredRow(reviewRow);
   // A refused model cannot recover without a configuration change. Keep its
   // diagnostic class, but exclude it from automatic same-head infra retries.
-  if (known === 'reviewer-model-unavailable' || known === 'reviewer-chunk-budget-exceeded') return null;
+  if (known === 'reviewer-configuration-error' || known === 'reviewer-model-unavailable' || known === 'reviewer-chunk-budget-exceeded') return null;
   // Registry resolution, empty model output, dispatch failure and adapter spawn
   // timeout can all clear on a later same-head attempt. Keep them recoverable
   // within the existing cap; none represents a delivered review verdict.

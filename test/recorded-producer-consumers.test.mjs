@@ -74,7 +74,7 @@ function checkWorkerClass(t, value) {
     const result = resolveRemediationModel(value.className, {
       env: { HQ_ROOT: root, AGENT_OS_DEPLOY_CHECKOUT: root }, fallbackModel: null,
     });
-    assert.equal(result.modelSource, 'producer');
+    assert.equal(result.modelSource, 'registry');
     assert.equal(result.resolvedModel, 'synthetic-string');
   });
 }

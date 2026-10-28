@@ -1,6 +1,18 @@
 # Data Model - Follow-Up Remediation Jobs
 
 
+## Model provenance (REMODELFALLBACK-01)
+
+Local `remediationWorker` records retain `resolvedModel`,
+`resolvedReasoningLevel`, `modelSource` and `reasoningSource`. Governed model
+resolution records `modelSource` as `env-pin`, `registry` or `committed-seed`.
+The repository-owned seed default permits remediation during a registry outage,
+with an allowlist check and a visible warning for each fallback resolution.
+Missing defaults or disallowed models raise the retryable infrastructure fault
+with `modelSource=unresolved`; existing requeue/refund behavior applies.
+Historical records keep their original source strings. Explicit non-blocking
+configuration retains its existing `non-blocking-config` provenance.
+
 ## Operator-label requeue and CI remediation (LABELSTOPOWNER-01)
 
 LABELSTOPOWNER-01: a follow-up stopped as

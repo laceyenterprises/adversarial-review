@@ -4,7 +4,8 @@ export const fixtureWorkerClasses = Object.fromEntries([
   'hammer', 'hammer-corp', 'hammer-claude', 'hammer-claude-corp', 'gemini',
 ].map(name => [name, {defaultModel: name.includes('claude') ? 'claude-opus-5-5'
   : name.includes('gemini') ? 'gemini-2.5-pro' : 'gpt-5.5',
-  defaultReasoningLevel: 'high', allowedModels: ['gpt-6-sol', 'gpt-5.5']} ]));
+  defaultReasoningLevel: 'high', allowedModels: name.includes('claude') ? ['claude-opus-5-5']
+    : name.includes('gemini') ? ['gemini-2.5-pro', 'gemini-2.5-flash'] : ['gpt-6-sol', 'gpt-6.1-sol', 'gpt-6-luna', 'gpt-5.5', 'synthetic-model']} ]));
 
 export function registryProducerSdk(sdk) {
   return {...sdk,

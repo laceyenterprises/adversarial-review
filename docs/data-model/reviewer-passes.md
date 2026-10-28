@@ -107,6 +107,11 @@ Schema convergence in `src/review-state.mjs` adds `token_input` and
 write the model and effort actually passed to the harness when the posted body
 is captured; remediation passes write their resolved values at launch.
 `metadata_json.reviewerExecution` preserves the hosted harness attribution.
+REMODELFALLBACK-01 adds its `modelSource` (`env-pin`, `registry`, or
+`committed-seed`) for Claude, Gemini and both native/OAuth-recovered Codex
+execution. Historical metadata may omit this field. Failed resolution carries
+`modelSource=unresolved` on the retryable infrastructure error and log; it does
+not invent a model or successful execution record.
 For Claude, its `replySelection` records `candidateCount`, the one-based
 `selectedCandidate`, `selectedType` (`result` or `assistant`), `laterCandidates`
 set aside, and `contractValid`. The newest individual output passing

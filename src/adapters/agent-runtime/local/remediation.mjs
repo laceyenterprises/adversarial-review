@@ -21,9 +21,6 @@ import { scrubOAuthFallbackEnv, OAUTH_ENV_STRIP_LIST } from '../../../secret-sou
 const execFileAsync = promisify(execFile);
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../../..');
-const DEFAULT_GEMINI_REMEDIATION_MODEL = 'gemini-2.5-pro';
-const DEFAULT_CODEX_REMEDIATION_MODEL = 'gpt-5.5';
-const DEFAULT_CLAUDE_REMEDIATION_MODEL = 'claude-opus-5-5';
 const REGISTRY_TTL_MS = 60_000;
 const CODEX_REASONING_LEVELS = Object.freeze(new Set(['low', 'medium', 'high', 'xhigh']));
 const CLAUDE_REASONING_LEVELS = Object.freeze(new Set(['low', 'medium', 'high', 'xhigh', 'max']));
@@ -414,27 +411,37 @@ function normalizeReasoningLevel(className, value, source, nowMs) {
 }
 
 class RegistryUnavailableError extends Error {
-  constructor(className = 'worker-registry', observation) {
-    const failure = hostObservationFailure(observation);
-    const failureClass = failure.retryable ? 'reviewer-model-unresolved' : 'reviewer-configuration-error';
-    super(`[${failureClass}] worker registry read refused: ${failure.reason} (${failure.detail})`);
+  constructor(className = 'worker-registry', reason = 'registry and committed seed unavailable') {
+    super(`[reviewer-model-unresolved] modelSource=unresolved: governed model unavailable for ${className}; ${reason}`);
     this.name = 'RegistryUnavailableError';
     this.code = 'registry-unavailable';
-    this.failureClass = failureClass;
-    this.workerClass = className;
-    this.reason = failure.reason;
-    this.detail = failure.detail;
-    this.retryable = failure.retryable;
-    this.category = failure.retryable ? 'infrastructure' : 'configuration';
+    this.failureClass = 'reviewer-model-unresolved';
+    this.retryable = true;
+    this.modelSource = 'unresolved';
   }
 }
 
 // Each async caller establishes this process's snapshot before synchronous
 // model selection. The app transport coalesces reads and refreshes on TTL expiry.
 async function ensureWorkerRegistryReady(args = {}) {
-  const observed = await readHostObservation('worker_registry', args);
-  if (!observed.ok || !observed.data.classes || typeof observed.data.classes !== 'object' || Array.isArray(observed.data.classes)) {
-    throw new RegistryUnavailableError('worker-registry', observed);
+  // Preserve the shared session/cache prefetch contract. An unavailable snapshot
+  // is resolved per class below, where env pins and the committed seed apply.
+  try {
+    const observed = await readHostObservation('worker_registry', args);
+    return Boolean(observed.ok && observed.data?.classes
+      && typeof observed.data.classes === 'object' && !Array.isArray(observed.data.classes));
+  } catch {
+    return false;
+  }
+}
+
+// A package-relative asset is the only seed. Never consult HQ_ROOT, HOME,
+// deployment checkouts, ledgers, or caller-supplied filesystem paths.
+function readCommittedWorkerModelSeed() {
+  try {
+    return JSON.parse(readFileSync(new URL('./worker-model-seed.json', import.meta.url), 'utf8'));
+  } catch {
+    return null;
   }
 }
 
@@ -454,93 +461,77 @@ function resolveRemediationModel(className, {
   hqRoot = env.HQ_ROOT,
   pin = '',
   reasoningPin = '',
-  fallbackModel,
-  requireModel = false,
   nowMs = Date.now(),
+  seed = readCommittedWorkerModelSeed(),
+  log = console,
 } = {}) {
+  const fail = (reason) => {
+    const error = new RegistryUnavailableError(className, reason);
+    log.error?.(`[worker-model] ${className} modelSource=unresolved: ${reason}`);
+    throw error;
+  };
+  let registrySpec;
+  try {
+    registrySpec = readWorkerClasses(nowMs, { env, hqRoot }).classes[className];
+  } catch (error) {
+    if (!(error instanceof RegistryUnavailableError)) throw error;
+  }
+  const seedClasses = seed?.classes;
+  const seedSpec = seedClasses && typeof seedClasses === 'object' && !Array.isArray(seedClasses)
+    ? seedClasses[className] : null;
   const rawModelPin = String(pin ?? '').trim();
-  const modelPin = rawModelPin ? nonEmptyModelString(rawModelPin) : '';
+  const modelPin = rawModelPin ? nonEmptyModelString(rawModelPin) : null;
+  if (rawModelPin && !modelPin) fail('invalid explicit model pin');
+  // A registry allowlist remains authoritative for a pin even when that class
+  // has no default. The seed must not reject a newer registry-approved pin.
+  const useRegistry = registrySpec != null && (modelPin || registrySpec.defaultModel !== undefined);
+  const spec = useRegistry ? registrySpec : seedSpec;
+  const source = useRegistry ? 'registry' : 'committed-seed';
+  const model = modelPin || nonEmptyModelString(spec?.defaultModel);
+  const modelSource = modelPin ? 'env-pin' : source;
+  if (!model) fail('registry and committed seed have no valid class defaultModel');
+  for (const [candidate, authority] of [[registrySpec, 'registry'], [spec, source]]) {
+    if (candidate?.allowedModels !== undefined
+      && (!Array.isArray(candidate.allowedModels) || !candidate.allowedModels.includes(model))) {
+      fail(`resolved model ${JSON.stringify(model)} is outside ${authority} allowedModels`);
+    }
+  }
   const pinnedReasoning = normalizeReasoningLevel(className, reasoningPin, 'env', nowMs);
-  const hasReasoningPin = pinnedReasoning.resolvedReasoningLevel !== null;
-  if (rawModelPin && !modelPin) {
-    warnRateLimited(
-      `invalid-model:${className}:env:${rawModelPin}`,
-      nowMs,
-      `[follow-up-remediation] ${className}: ignoring invalid model pin ${JSON.stringify(rawModelPin)} from env`,
-    );
+  const reasoning = modelPin || pinnedReasoning.resolvedReasoningLevel !== null
+    ? pinnedReasoning
+    : normalizeReasoningLevel(className, spec?.defaultReasoningLevel, source, nowMs);
+  if (modelSource === 'committed-seed') {
+    log.warn?.(`[worker-model] WARNING: ${className} modelSource=committed-seed model=${model}; governed registry class unavailable`);
   }
-  if (modelPin) {
-    return {
-      resolvedModel: modelPin,
-      resolvedReasoningLevel: pinnedReasoning.resolvedReasoningLevel,
-      modelSource: 'env',
-      reasoningSource: pinnedReasoning.reasoningSource,
-    };
-  }
-  const candidates = [['public-worker-registry', 'producer']];
-  const names = [className];
-  let reason = 'missing file';
-  for (const [path, source] of candidates) {
-    const registry = readWorkerClasses(nowMs, {env, hqRoot});
-    if (!registry.classes) {
-      reason = registry.reason;
-      continue;
-    }
-    const selected = names.find((name) => registry.classes[name]?.defaultModel);
-    if (!selected) {
-      reason = 'class absent';
-      continue;
-    }
-    const spec = registry.classes[selected];
-    const registryModel = nonEmptyModelString(spec.defaultModel);
-    if (!registryModel) {
-      reason = 'invalid defaultModel';
-      continue;
-    }
-    const reasoning = hasReasoningPin
-      ? pinnedReasoning
-      : normalizeReasoningLevel(className, spec.defaultReasoningLevel, source, nowMs);
-    return {
-      resolvedModel: registryModel,
-      resolvedReasoningLevel: reasoning.resolvedReasoningLevel,
-      modelSource: source,
-      reasoningSource: reasoning.reasoningSource,
-    };
-  }
-  const warningKey = `${className}:${candidates.map(([path]) => path).join(':')}`;
-  if (requireModel) throw new RegistryUnavailableError(className);
-  warnRateLimited(
-    warningKey,
-    nowMs,
-    `[follow-up-remediation] ${className}: using fallback model constant (${reason})`,
-  );
+  const message = `[worker-model] ${className} model=${model} modelSource=${modelSource}`;
+  if (log === console) console.error(message);
+  else log.info?.(message);
   return {
-    resolvedModel: fallbackModel,
-    resolvedReasoningLevel: pinnedReasoning.resolvedReasoningLevel,
-    modelSource: 'fallback-constant',
-    reasoningSource: pinnedReasoning.reasoningSource,
+    resolvedModel: model,
+    resolvedReasoningLevel: reasoning.resolvedReasoningLevel,
+    modelSource,
+    reasoningSource: reasoning.reasoningSource,
   };
 }
 
 function resolveNonBlockingCodexModel({ model, reasoningEffort, env = process.env, hqRoot = env.HQ_ROOT } = {}) {
-  // The fallback model stays the universally allowlisted gpt-6-sol: it is only used when
-  // the configured model is not in the remediator-codex allowlist. Effort follows the
-  // fleet default (operator 2026-09-29: HIGH everywhere).
-  const fallback = { resolvedModel: 'gpt-6-sol', resolvedReasoningLevel: 'high', modelSource: 'non-blocking-default', reasoningSource: 'non-blocking-default' };
-  const requestedModel = nonEmptyModelString(model);
-  const candidates = [['public-worker-registry']];
-  for (const [path] of candidates) {
-    const registry = readWorkerClasses(Date.now(), {env, hqRoot});
-    const allowed = registry.classes?.['remediator-codex']?.allowedModels;
-    if (!Array.isArray(allowed)) continue;
-    return {
-      resolvedModel: requestedModel && allowed.includes(requestedModel) ? requestedModel : fallback.resolvedModel,
-      resolvedReasoningLevel: CODEX_REASONING_LEVELS.has(reasoningEffort) ? reasoningEffort : fallback.resolvedReasoningLevel,
-      modelSource: requestedModel && allowed.includes(requestedModel) ? 'non-blocking-config' : fallback.modelSource,
-      reasoningSource: CODEX_REASONING_LEVELS.has(reasoningEffort) ? 'non-blocking-config' : fallback.reasoningSource,
-    };
+  const fallback = resolveRemediationModel('remediator-codex', { env, hqRoot });
+  let spec;
+  try {
+    spec = readWorkerClasses(Date.now(), { env, hqRoot }).classes['remediator-codex'];
+  } catch (error) {
+    if (!(error instanceof RegistryUnavailableError)) throw error;
   }
-  return fallback;
+  spec ??= readCommittedWorkerModelSeed()?.classes?.['remediator-codex'];
+  const requestedModel = nonEmptyModelString(model);
+  const allowed = spec?.allowedModels;
+  return {
+    ...fallback,
+    ...(requestedModel && Array.isArray(allowed) && allowed.includes(requestedModel)
+      ? { resolvedModel: requestedModel, modelSource: 'non-blocking-config' } : {}),
+    ...(CODEX_REASONING_LEVELS.has(reasoningEffort)
+      ? { resolvedReasoningLevel: reasoningEffort, reasoningSource: 'non-blocking-config' } : {}),
+  };
 }
 
 function resolveGeminiRemediationModel(env = process.env, { hqRoot = env.HQ_ROOT } = {}) {
@@ -548,7 +539,6 @@ function resolveGeminiRemediationModel(env = process.env, { hqRoot = env.HQ_ROOT
     env,
     hqRoot,
     pin: geminiModelPin(env),
-    fallbackModel: DEFAULT_GEMINI_REMEDIATION_MODEL,
   }).resolvedModel;
 }
 
@@ -558,17 +548,16 @@ function resolveCodexRemediationModel(env = process.env, { hqRoot = env.HQ_ROOT 
     hqRoot,
     pin: codexModelPin(env),
     reasoningPin: codexReasoningPin(env),
-    fallbackModel: DEFAULT_CODEX_REMEDIATION_MODEL,
   }).resolvedModel;
 }
 
-function resolveClaudeRemediationModel(env = process.env, { hqRoot = env.HQ_ROOT } = {}) {
+function resolveClaudeRemediationModel(env = process.env, { hqRoot = env.HQ_ROOT, log = console } = {}) {
   return resolveRemediationModel('remediator-claude', {
+    log,
     env,
     hqRoot,
     pin: claudeModelPin(env),
     reasoningPin: claudeReasoningPin(env),
-    fallbackModel: DEFAULT_CLAUDE_REMEDIATION_MODEL,
   });
 }
 
@@ -935,6 +924,7 @@ function spawnClaudeCodeRemediationWorker({
   installWorkerAdapterEnv(env, sourceEnv, 'claude-code', workerClass, repo, log, startupEvidence.mergeAgentBroker);
   const modelResolution = requestedModelResolution || resolveClaudeRemediationModel(env, {
     hqRoot: hqRoot || sourceEnv.HQ_ROOT,
+    log,
   });
   const claudeArgs = [
     '--print', '--permission-mode', 'acceptEdits', '--dangerously-skip-permissions',
@@ -1038,7 +1028,7 @@ function spawnGeminiRemediationWorker({
     env,
     hqRoot: hqRoot || sourceEnv.HQ_ROOT,
     pin: geminiModelPin(env),
-    fallbackModel: DEFAULT_GEMINI_REMEDIATION_MODEL,
+    log,
   });
   const geminiArgs = ['--approval-mode', 'yolo', '--skip-trust', '-m', modelResolution.resolvedModel];
   let promptFd;
@@ -1141,7 +1131,7 @@ function spawnCodexRemediationWorker({
     hqRoot: hqRoot || sourceEnv.HQ_ROOT,
     pin: codexModelPin(env),
     reasoningPin: codexReasoningPin(env),
-    fallbackModel: DEFAULT_CODEX_REMEDIATION_MODEL,
+    log,
   });
   const codexArgs = [
     'exec',
@@ -1368,6 +1358,7 @@ export {
   resolveGeminiCliPath,
   resolveGeminiRemediationModel,
   resolveRemediationModel,
+  readCommittedWorkerModelSeed,
   RegistryUnavailableError,
   prefetchWorkerRegistry,
   ensureWorkerRegistryReady,

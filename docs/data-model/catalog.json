@@ -291,6 +291,7 @@
       "title": "AMA Closure Audit",
       "path": "docs/data-model/ama-audit.md",
       "store": "$HQ_ROOT/dispatch/audit/adversarial-merge-authority/",
+      "remediationModelSources": ["env-pin", "registry", "committed-seed", "non-blocking-config"],
       "accountProposalField": "harnessResolution.accountProposal and attempts[].harnessResolution.accountProposal; diagnostic only, dispatcher binding is authoritative",
       "schemaSurface": "src/ama/audit.mjs",
       "relatedSchemaSurfaces": [
@@ -540,6 +541,7 @@
         "src/ama/closer-pass-attempt.mjs"
       ],
       "deliveryHeadWaitFields": ["head_wait_started_at"],
+      "reviewerExecutionModelSources": ["env-pin", "registry", "committed-seed"],
       "claudeReplySelectionFields": ["candidateCount", "selectedCandidate", "selectedType", "laterCandidates", "contractValid"],
       "reviewerSettlementFailureMessage": { "successfulPass": null, "unsuccessfulPassPriority": ["error", "stderr", "stderrTail"] },
       "owner": "reviewer spawn, settle, and token attribution"

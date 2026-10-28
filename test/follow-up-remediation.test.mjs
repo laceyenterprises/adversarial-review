@@ -4286,21 +4286,21 @@ test('buildRemediationPrompt defaults the provenance trailer to codex-remediatio
   assert.match(prompt, /Never use a direct push/);
 });
 
-test('resolveGeminiRemediationModel defaults to gemini-2.5-pro and honors overrides', () => {
-  const noRegistryEnv = { AGENT_OS_DEPLOY_CHECKOUT: path.join(tmpdir(), 'missing-agent-os-checkout') };
-  assert.equal(resolveGeminiRemediationModel(noRegistryEnv), 'gemini-2.5-pro');
-  assert.equal(
-    resolveGeminiRemediationModel({ GEMINI_MODEL: 'gemini-2.5-flash' }),
-    'gemini-2.5-flash'
-  );
+test('resolveGeminiRemediationModel uses the registry default and honors allowed overrides', t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'remodel-gemini-pin-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  seedWorkerRegistry(root, { 'remediator-gemini': {
+    defaultModel: 'synthetic-gemini-default',
+    allowedModels: ['synthetic-gemini-default', 'synthetic-generic-pin', 'synthetic-remediation-pin'],
+  } });
+  const env = { HQ_ROOT: root };
+  assert.equal(resolveGeminiRemediationModel(env), 'synthetic-gemini-default');
+  assert.equal(resolveGeminiRemediationModel({ ...env, GEMINI_MODEL: 'synthetic-generic-pin' }),
+    'synthetic-generic-pin');
   // The remediation-specific pin wins over the generic GEMINI_MODEL.
-  assert.equal(
-    resolveGeminiRemediationModel({
-      GEMINI_REMEDIATION_MODEL: 'gemini-3.0-pro',
-      GEMINI_MODEL: 'gemini-2.5-flash',
-    }),
-    'gemini-3.0-pro'
-  );
+  assert.equal(resolveGeminiRemediationModel({ ...env,
+    GEMINI_REMEDIATION_MODEL: 'synthetic-remediation-pin', GEMINI_MODEL: 'synthetic-generic-pin',
+  }), 'synthetic-remediation-pin');
 });
 
 test('resolveGeminiRemediationModel honors explicit hqRoot for display parity with worker spawn', () => {
@@ -4316,22 +4316,23 @@ test('resolveGeminiRemediationModel honors explicit hqRoot for display parity wi
   }
 });
 
-test('SEV0: resolveCodexRemediationModel pins gpt-5.5 by default and honors overrides (never rides the codex server-default)', () => {
-  // Regression for the 2026-07-19 SEV0: riding codex's server-default model
-  // routed remediation through the code_mode_only tool-host that times out at
-  // handshake, so the worker could not run any command and never wrote its
-  // reply. Remediation MUST pin an explicit model.
-  const noRegistryEnv = { AGENT_OS_DEPLOY_CHECKOUT: path.join(tmpdir(), 'missing-agent-os-checkout') };
-  assert.equal(resolveCodexRemediationModel(noRegistryEnv), 'gpt-5.5');
-  assert.equal(resolveCodexRemediationModel({ CODEX_MODEL_ID: 'gpt-5.4' }), 'gpt-5.4');
+test('SEV0: resolveCodexRemediationModel uses a governed default and allowed pins, never the CLI default', t => {
+  // Riding a CLI server default can select an unusable tool host before the
+  // worker writes a reply. Always pass an explicit resolved model.
+  const root = mkdtempSync(path.join(tmpdir(), 'remodel-codex-pin-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  seedWorkerRegistry(root, { 'remediator-codex': {
+    defaultModel: 'synthetic-codex-default',
+    allowedModels: ['synthetic-codex-default', 'synthetic-generic-pin', 'synthetic-remediation-pin'],
+  } });
+  const env = { HQ_ROOT: root };
+  assert.equal(resolveCodexRemediationModel(env), 'synthetic-codex-default');
+  assert.equal(resolveCodexRemediationModel({ ...env, CODEX_MODEL_ID: 'synthetic-generic-pin' }),
+    'synthetic-generic-pin');
   // The remediation-specific pin wins over the generic CODEX_MODEL_ID.
-  assert.equal(
-    resolveCodexRemediationModel({
-      ADVERSARIAL_REMEDIATION_CODEX_MODEL: 'gpt-5.3-codex',
-      CODEX_MODEL_ID: 'gpt-5.4',
-    }),
-    'gpt-5.3-codex'
-  );
+  assert.equal(resolveCodexRemediationModel({ ...env,
+    ADVERSARIAL_REMEDIATION_CODEX_MODEL: 'synthetic-remediation-pin', CODEX_MODEL_ID: 'synthetic-generic-pin',
+  }), 'synthetic-remediation-pin');
 });
 
 test('resolveCodexRemediationModel honors explicit hqRoot for display parity with worker spawn', () => {

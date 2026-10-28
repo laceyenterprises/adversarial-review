@@ -21,6 +21,7 @@ import {
   prepareCodexRemediationStartupEnv,
   resolveCodexRemediationModel,
   resolveRemediationModel,
+  readCommittedWorkerModelSeed,
   resolveNonBlockingCodexModel,
   spawnClaudeCodeRemediationWorker,
   spawnCodexRemediationWorker,
@@ -60,10 +61,10 @@ test('non-blocking Codex model and effort require the remediator allowlists', ()
     const invalid = resolveNonBlockingCodexModel({ model: 'unknown', reasoningEffort: 'max', env, hqRoot: root });
     assert.equal(invalid.resolvedModel, 'gpt-6-sol');
     assert.equal(invalid.resolvedReasoningLevel, 'high');
-    assert.equal(invalid.modelSource, 'non-blocking-default');
+    assert.equal(invalid.modelSource, 'committed-seed');
     const missingSol61 = resolveNonBlockingCodexModel({ model: 'gpt-6.1-sol', env, hqRoot: root });
     assert.equal(missingSol61.resolvedModel, 'gpt-6-sol');
-    assert.equal(missingSol61.modelSource, 'non-blocking-default');
+    assert.equal(missingSol61.modelSource, 'committed-seed');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -99,7 +100,7 @@ for (const model of ['gpt-6-sol', 'gpt-6.1-sol']) {
           spawnImpl: () => ({ pid: 4141, unref() {} }),
         });
         assert.equal(pinnedRecord.resolvedModel, model);
-        assert.equal(pinnedRecord.modelSource, 'env');
+        assert.equal(pinnedRecord.modelSource, 'env-pin');
       }
       const record = spawnCodexRemediationWorker({
         workspaceDir: root, promptPath, outputPath: join(root, 'out.txt'),
@@ -516,9 +517,9 @@ test('remediation spawners use governed models and reasoning from the public reg
     ]) {
       const record = spawn(shared);
       assert.deepEqual(record.command, calls.at(-1));
-      assert.equal(record.modelSource, 'producer');
+      assert.equal(record.modelSource, 'registry');
       assert.equal(record.reasoningSource, spawn === spawnGeminiRemediationWorker
-        ? 'unsupported' : 'producer');
+        ? 'unsupported' : 'registry');
       if (spawn === spawnGeminiRemediationWorker) {
         assert.equal(record.resolvedReasoningLevel, null);
       }
@@ -534,8 +535,8 @@ test('remediation spawners use governed models and reasoning from the public reg
     const preflightResolution = {
       resolvedModel: 'claude-preflight-model',
       resolvedReasoningLevel: 'high',
-      modelSource: 'producer',
-      reasoningSource: 'producer',
+      modelSource: 'registry',
+      reasoningSource: 'registry',
     };
     const sharedResolution = spawnClaudeCodeRemediationWorker({
       ...shared,
@@ -546,13 +547,13 @@ test('remediation spawners use governed models and reasoning from the public reg
     ]);
     assert.equal(resolveRemediationModel('remediator-codex', {
       env: { HQ_ROOT: root }, pin: 'gpt-pinned', fallbackModel: 'old',
-    }).modelSource, 'env');
+    }).modelSource, 'env-pin');
     const pinned = spawnCodexRemediationWorker({
       ...shared,
       sourceEnv: { ...shared.sourceEnv, ADVERSARIAL_REMEDIATION_CODEX_MODEL: 'gpt-pinned' },
     });
     assert.equal(pinned.resolvedModel, 'gpt-pinned');
-    assert.equal(pinned.modelSource, 'env');
+    assert.equal(pinned.modelSource, 'env-pin');
     assert.equal(pinned.resolvedReasoningLevel, null);
     assert.equal(pinned.reasoningSource, 'none');
     assert.ok(!pinned.command.includes('model_reasoning_effort=xhigh'));
@@ -582,7 +583,7 @@ test('remediation spawners use governed models and reasoning from the public reg
       sourceEnv: { ...shared.sourceEnv, CLAUDE_REMEDIATION_MODEL: 'claude-pinned' },
     });
     assert.equal(pinnedClaude.resolvedModel, 'claude-pinned');
-    assert.equal(pinnedClaude.modelSource, 'env');
+    assert.equal(pinnedClaude.modelSource, 'env-pin');
     assert.equal(pinnedClaude.resolvedReasoningLevel, null);
     assert.deepEqual(pinnedClaude.command.slice(-2), ['--model', 'claude-pinned']);
 
@@ -623,32 +624,32 @@ test('remediation registry uses public evidence and never falls back to a checko
     assert.deepEqual(resolveRemediationModel('remediator-codex', options), {
       resolvedModel: 'mirror',
       resolvedReasoningLevel: null,
-      modelSource: 'producer',
+      modelSource: 'registry',
       reasoningSource: 'none',
     });
     writeFileSync(mirrorPath, JSON.stringify({classes: {}}));
-    // An explicit empty producer snapshot exercises optional-model fallback.
+    // An empty producer snapshot exercises the repository-owned seed.
     // This fixture replaces the transport itself; TTL behavior is exercised
     // against the real transport in registry-model-session.test.mjs.
-    assert.equal(resolveRemediationModel('remediator-codex', options).resolvedModel, 'constant');
-    assert.equal(resolveRemediationModel('remediator-codex', { ...options, nowMs: Date.now() + 61_000 }).modelSource, 'fallback-constant');
-    assert.equal(resolveRemediationModel('remediator-gemini', options).resolvedModel, 'constant');
+    assert.equal(resolveRemediationModel('remediator-codex', options).resolvedModel, readCommittedWorkerModelSeed().classes['remediator-codex'].defaultModel);
+    assert.equal(resolveRemediationModel('remediator-codex', { ...options, nowMs: Date.now() + 61_000 }).modelSource, 'committed-seed');
+    assert.equal(resolveRemediationModel('remediator-gemini', options).resolvedModel, readCommittedWorkerModelSeed().classes['remediator-gemini'].defaultModel);
     writeFileSync(seedPath, '{bad json');
     const fallback = resolveRemediationModel('remediator-codex', { ...options, nowMs: Date.now() + 122_000 });
     assert.deepEqual(fallback, {
-      resolvedModel: 'constant',
-      resolvedReasoningLevel: null,
-      modelSource: 'fallback-constant',
-      reasoningSource: 'none',
+      resolvedModel: readCommittedWorkerModelSeed().classes['remediator-codex'].defaultModel,
+      resolvedReasoningLevel: 'high',
+      modelSource: 'committed-seed',
+      reasoningSource: 'committed-seed',
     });
-    assert.match(warnings.at(-1), /remediator-codex.*class absent/);
+    assert.match(warnings.at(-1), /remediator-codex.*modelSource=committed-seed/);
     const warningCount = warnings.length;
     resolveRemediationModel('remediator-codex', { ...options, nowMs: Date.now() + 122_000 });
-    assert.equal(warnings.length, warningCount);
+    assert.equal(warnings.length, warningCount + 1);
     rmSync(seedPath);
     const missing = resolveRemediationModel('remediator-codex', { ...options, nowMs: Date.now() + 183_000 });
-    assert.equal(missing.modelSource, 'fallback-constant');
-    assert.match(warnings.at(-1), /remediator-codex.*class absent/);
+    assert.equal(missing.modelSource, 'committed-seed');
+    assert.match(warnings.at(-1), /remediator-codex.*modelSource=committed-seed/);
   } finally {
     console.warn = originalWarn;
     rmSync(root, { recursive: true, force: true });
@@ -679,7 +680,7 @@ test('remediation model resolver validates producer reasoning and ignores legacy
     });
     assert.equal(claude.resolvedModel, 'claude-opus-5-5');
     assert.equal(claude.resolvedReasoningLevel, null);
-    assert.equal(claude.reasoningSource, 'invalid-producer');
+    assert.equal(claude.reasoningSource, 'invalid-registry');
     assert.match(warnings.at(-1), /remediator-claude.*invalid reasoning level.*extra/);
 
     const invalidPin = resolveRemediationModel('remediator-codex', {
@@ -688,20 +689,12 @@ test('remediation model resolver validates producer reasoning and ignores legacy
       fallbackModel: 'codex-fallback',
     });
     assert.equal(invalidPin.resolvedReasoningLevel, 'high');
-    assert.equal(invalidPin.reasoningSource, 'producer');
+    assert.equal(invalidPin.reasoningSource, 'registry');
 
-    const invalidModel = resolveRemediationModel('remediator-test-invalid', {
+    assert.throws(() => resolveRemediationModel('remediator-test-invalid', {
       env: { HQ_ROOT: join(root, 'hq'), AGENT_OS_DEPLOY_CHECKOUT: join(root, 'agent-os') },
-      fallbackModel: 'constant',
-      nowMs: Date.now() + 61_000,
-    });
-    assert.deepEqual(invalidModel, {
-      resolvedModel: 'constant',
-      resolvedReasoningLevel: null,
-      modelSource: 'fallback-constant',
-      reasoningSource: 'none',
-    });
-    assert.match(warnings.at(-1), /remediator-test-invalid.*invalid defaultModel/);
+      fallbackModel: 'forbidden-constant',
+    }), { code: 'registry-unavailable', modelSource: 'unresolved', retryable: true });
   } finally {
     console.warn = originalWarn;
     rmSync(root, { recursive: true, force: true });

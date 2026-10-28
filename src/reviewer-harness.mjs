@@ -978,7 +978,7 @@ async function reviewWithClaude(diff, extraContext = '', {
   const raw = stdout.trim();
   const parsed = parseClaudeJsonOutput(raw, replySelection ?? undefined);
   return { reviewText: parsed.reviewText, tokenUsage: parsed.tokenUsage,
-    execution: { harness: 'claude', model: reviewerExecution.model, effort: reviewerExecution.effort,
+    execution: { harness: 'claude', model: reviewerExecution.model, modelSource: reviewerExecution.modelSource, effort: reviewerExecution.effort,
       replySelection: parsed.replySelection } };
 }
 
@@ -1165,16 +1165,16 @@ function readCodexConfigTopLevelValues(keys, {
   return values;
 }
 
-function resolveReviewerExecution(harness, { env = process.env, fallbackModel = null, fallbackEffort = null, modelPin = '', reasoningPin = '', log = console } = {}) {
+function resolveReviewerExecution(harness, { env = process.env, fallbackEffort = null, modelPin = '', reasoningPin = '', seed, log = console } = {}) {
   const pin = modelPin || (harness === 'gemini' ? env.GEMINI_REVIEWER_MODEL : '');
   // Account routing changes the broker binding, not the governed reviewer role.
   const className = `${harness}-reviewer`;
-  const resolution = resolveRemediationModel(className, { env, pin, reasoningPin, fallbackModel, requireModel: true });
-  const model = resolution.modelSource === 'fallback-constant' ? fallbackModel : resolution.resolvedModel;
+  const resolution = resolveRemediationModel(className, { env, pin, reasoningPin, seed, log });
+  const model = resolution.resolvedModel;
   const effort = resolution.resolvedReasoningLevel || fallbackEffort;
-  const modelSource = resolution.modelSource === 'fallback-constant' ? (fallbackModel ? 'host-config' : 'cli-default') : resolution.modelSource;
+  const modelSource = resolution.modelSource;
   const effortSource = resolution.resolvedReasoningLevel ? resolution.reasoningSource : (fallbackEffort ? 'host-config' : 'none');
-  log.info?.(`[reviewer-harness] ${harness} model=${model || 'default'} source=${modelSource}; effort=${effort || 'none'} source=${effortSource}`);
+  log.info?.(`[reviewer-harness] ${harness} model=${model} modelSource=${modelSource}; effort=${effort || 'none'} source=${effortSource}`);
   return { model, effort, modelSource, effortSource };
 }
 
@@ -1188,7 +1188,7 @@ async function resolveReviewerExecutionAsync(harness, args = {}) {
 function resolveCodexExecOverrides({ env = process.env, modelPin = '', reasoningPin = '', log = console } = {}) {
   const values = readCodexConfigTopLevelValues(CODEX_EXEC_CONFIG_FORWARD_KEYS);
   const resolved = resolveReviewerExecution('codex', {
-    env, modelPin, reasoningPin, fallbackModel: values.model || null, fallbackEffort: values.model_reasoning_effort || null, log,
+    env, modelPin, reasoningPin, fallbackEffort: values.model_reasoning_effort || null, log,
   });
   const configOverrides = Object.entries(values)
     .filter(([key]) => key !== 'model' && key !== 'model_reasoning_effort')
@@ -1298,14 +1298,21 @@ async function reviewWithCodex(diff, extraContext = '', {
   promptOverride = null,
   modelPin = '', reasoningPin = '',
   ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
+  codexCli = CODEX_CLI,
+  assertCodexOAuthImpl = assertCodexOAuth,
+  spawnCodexReviewImpl = spawnCodexReview,
+  reviewWithCodexOAuthResponsesImpl = reviewWithCodexOAuthResponses,
+  log = console,
 } = {}) {
   await ensureWorkerRegistryReadyImpl();
+  // Resolve infrastructure before probing credentials; refresh again after auth.
+  resolveReviewerExecution('codex', { modelPin, reasoningPin, log });
   console.error('[reviewWithCodex] asserting OAuth...');
-  await assertCodexOAuth();
+  await assertCodexOAuthImpl();
   console.error('[reviewWithCodex] OAuth OK');
 
-  if (!existsSync(CODEX_CLI)) {
-    throw new Error(`Codex CLI not found at ${CODEX_CLI}`);
+  if (!existsSync(codexCli)) {
+    throw new Error(`Codex CLI not found at ${codexCli}`);
   }
 
   const prompt = promptOverride ?? buildReviewerPrompt({
@@ -1332,7 +1339,7 @@ async function reviewWithCodex(diff, extraContext = '', {
   const codexSessionHome = perWorkerAuth?.codexHome || process.env.CODEX_HOME || null;
   const outputPath = join(tmpdir(), `codex-review-${process.pid}-${Date.now()}.md`);
   await ensureWorkerRegistryReadyImpl();
-  const codexExecOverrides = resolveCodexExecOverrides({ modelPin, reasoningPin });
+  const codexExecOverrides = resolveCodexExecOverrides({ modelPin, reasoningPin, log });
   const changedLines = countChangedLines(diff);
   const effort = codexExecOverrides.reasoningEffort;
   onProgress?.({ changedLines, effort });
@@ -1352,8 +1359,8 @@ async function reviewWithCodex(diff, extraContext = '', {
     let stderr = '';
     try {
       console.error('[reviewWithCodex] invoking native Codex CLI');
-      const result = await spawnCodexReview({
-        codexCli: CODEX_CLI,
+      const result = await spawnCodexReviewImpl({
+        codexCli,
         outputPath,
         prompt,
         model: codexExecOverrides.model,
@@ -1380,14 +1387,14 @@ async function reviewWithCodex(diff, extraContext = '', {
         try {
           const reasoningEffort = codexExecOverrides.configOverrides
             .find((override) => override.key === 'model_reasoning_effort')?.value || 'high';
-          const recovered = await reviewWithCodexOAuthResponses(prompt, {
+          const recovered = await reviewWithCodexOAuthResponsesImpl(prompt, {
             authPath: effectiveAuthPath,
-            model: codexExecOverrides.model || 'gpt-5.5',
+            model: codexExecOverrides.model,
             reasoningEffort,
             timeoutMs: resolveReviewerTimeoutMs(env),
             idleTimeoutMs: Math.max(resolveProgressTimeoutMs(env), 3 * 60 * 1000),
           });
-          return { ...recovered, execution: { harness: 'codex', model: codexExecOverrides.model || 'gpt-5.5', effort: reasoningEffort } };
+          return { ...recovered, execution: { harness: 'codex', model: codexExecOverrides.model, modelSource: codexExecOverrides.modelSource, effort: reasoningEffort } };
         } catch (fallbackErr) {
           throw new Error(
             `Native Codex made no progress and OAuth Responses recovery failed: `
@@ -1452,7 +1459,7 @@ async function reviewWithCodex(diff, extraContext = '', {
     return {
       reviewText: combined,
       tokenUsage,
-      execution: { harness: 'codex', model: codexExecOverrides.model, effort: codexExecOverrides.reasoningEffort },
+      execution: { harness: 'codex', model: codexExecOverrides.model, modelSource: codexExecOverrides.modelSource, effort: codexExecOverrides.reasoningEffort },
     };
   } finally {
     // Always remove the codex temp file — including when spawnCodexReview throws
@@ -1464,10 +1471,6 @@ async function reviewWithCodex(diff, extraContext = '', {
 
 // ── Gemini review ─────────────────────────────────────────────────────────────
 
-// Default to the best available reviewer model. GEMINI_REVIEWER_MODEL
-// overrides the default at runtime — set it to the cheaper fallback
-// (gemini-2.5-flash) when pro is unavailable or quota-capped.
-const DEFAULT_GEMINI_REVIEWER_MODEL = 'gemini-2.5-pro';
 const REVIEWER_METADATA_BY_MODEL = Object.freeze({
   claude: {
     displayName: 'Claude',
@@ -1484,8 +1487,7 @@ const REVIEWER_METADATA_BY_MODEL = Object.freeze({
 });
 
 function resolveGeminiReviewerModel(env = process.env) {
-  const override = String(env.GEMINI_REVIEWER_MODEL || '').trim();
-  return override || DEFAULT_GEMINI_REVIEWER_MODEL;
+  return resolveReviewerExecution('gemini', { env }).model;
 }
 
 const DEFAULT_CQP_BROKER_URL = 'http://127.0.0.1:4099';
@@ -2843,6 +2845,7 @@ async function reviewWithGemini(diff, extraContext = '', {
   ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
 } = {}) {
   await ensureWorkerRegistryReadyImpl();
+  resolveReviewerExecution('gemini', { log });
   const runtime = resolveGeminiRuntimeForReview(resolveGeminiRuntimeImpl, log);
   if (runtime !== 'cli' && runtime !== 'antigravity') {
     throw new Error(`Unsupported Gemini runtime: ${runtime}`);
@@ -2927,6 +2930,7 @@ async function reviewWithGemini(diff, extraContext = '', {
   let stdout = '';
   let stderr = '';
   let selectedModel = null;
+  let selectedModelSource = null;
   let subprocessStarted = false;
   try {
     reviewEnv = withReviewerSubprocessCwdEnv(reviewEnv, reviewerSubprocessCwd);
@@ -2954,19 +2958,17 @@ async function reviewWithGemini(diff, extraContext = '', {
     // (e.g. "Gemini 3.8 Flash (High)"). Feeding the cli slug to agy is the bug
     // that previously left the model unbound — agy ignores an unknown token and
     // falls back to its persisted default (Flash).
-    const fallbackModel = runtime === 'antigravity'
-      ? resolveGeminiAntigravityModel({ env: reviewEnv })
-      : resolveGeminiReviewerModel(reviewEnv);
-    const reviewerExecution = await resolveReviewerExecutionAsync('gemini', { env: reviewEnv, fallbackModel, log, ensureWorkerRegistryReadyImpl });
+    const reviewerExecution = await resolveReviewerExecutionAsync('gemini', { env: reviewEnv, log, ensureWorkerRegistryReadyImpl });
     // agy requires a display-name token; the registry's Gemini CLI slug is
     // invalid for that runtime and would silently select its persisted default.
     const model = runtime === 'antigravity' && !/^Gemini\s/u.test(reviewerExecution.model || '')
-      ? fallbackModel
+      ? resolveGeminiAntigravityModel({ env: reviewEnv })
       : reviewerExecution.model;
     if (model !== reviewerExecution.model) {
       log.info?.(`[reviewer-harness] gemini agy model=${model} source=runtime-display-token`);
     }
     selectedModel = model;
+    selectedModelSource = reviewerExecution.modelSource;
 
     console.error(`[reviewWithGemini] invoking Gemini reviewer CLI (model=${model}, runtime=${runtime})`);
     signal?.throwIfAborted();
@@ -3125,7 +3127,7 @@ async function reviewWithGemini(diff, extraContext = '', {
   if (!reviewText.trim()) throw new Error('Gemini returned empty response.');
 
   return { reviewText, tokenUsage: geminiUsage,
-    execution: { harness: 'gemini', model: selectedModel, effort: null } };
+    execution: { harness: 'gemini', model: selectedModel, modelSource: selectedModelSource, effort: null } };
 }
 
 // ── Reviewer-model selection ──────────────────────────────────────────────────
@@ -3809,7 +3811,6 @@ const __test__ = {
   DEFAULT_CQP_BROKER_URL,
   DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_BACKOFF_MS,
   DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_RETRIES,
-  DEFAULT_GEMINI_REVIEWER_MODEL,
   ENV_BIN,
   GEMINI_CLI,
   GEMINI_CQP_CHECKOUT_TIMEOUT_MS,

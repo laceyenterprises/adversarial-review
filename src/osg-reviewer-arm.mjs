@@ -46,7 +46,7 @@ export function reviewerArmOwner(value, { env = process.env, timeoutMs = 1500 } 
 
 export async function applyReviewerArm({ baseRoute, domainId, repoPath, prNumber,
   reviewerMode = 'off', primaryReviewerQuotaCapped = false, routeTable,
-  config, owner = reviewerArmOwner, log = console } = {}) {
+  config, owner = reviewerArmOwner, ensureWorkerRegistryReadyImpl, log = console } = {}) {
   try {
     if (domainId !== 'code-pr' || !baseRoute || baseRoute.configBroken) return baseRoute;
     config ??= getConfig('osg', { mode: 'off' });
@@ -58,7 +58,7 @@ export async function applyReviewerArm({ baseRoute, domainId, repoPath, prNumber
       .filter(family => !reviewerRefusesBuilder(baseRoute.builderClass, family));
     const result = await owner({ repo: repoPath, prNumber, mode: config.mode,
       reviewerModel: currentRoute.reviewerModel, allowedFamilies,
-      execution: await resolveReviewerExecutionAsync(currentRoute.reviewerModel, { log }) });
+      execution: await resolveReviewerExecutionAsync(currentRoute.reviewerModel, { log, ensureWorkerRegistryReadyImpl }) });
     // Stable tokens only: the owner must never echo provider/DB diagnostics.
     const reason = /^[A-Za-z0-9_-]{1,80}$/.test(result?.reason) ? result.reason : 'error-invalid-owner';
     recordReason(log, reason, repoPath, prNumber);

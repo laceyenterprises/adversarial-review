@@ -64,6 +64,7 @@ export function createDefaultArgusReviewDeps({
   geminiResetAt = null,
   identityPool = getAgyReviewerIdentityPool(),
   reviewWithGeminiImpl = reviewWithGemini,
+  ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
   nowMs = () => Date.now(),
   evidenceIo = createDefaultArgusEvidenceIo({ env, execGhWithRetryImpl, logger }),
 } = {}) {
@@ -110,10 +111,12 @@ export function createDefaultArgusReviewDeps({
     reviewerDeferral: () => ({ resetAt: availability.resetAt }),
 
     async runReviewerModel({ model, prompt, cwd, diff }) {
-      await ensureWorkerRegistryReady({env});
-      const options = { promptOverride: prompt, reviewerSubprocessCwd: cwd };
+      const options = { promptOverride: prompt, reviewerSubprocessCwd: cwd, ensureWorkerRegistryReadyImpl };
       let output;
-      if (model === 'claude') output = await reviewWithClaude(diff || '', '', options);
+      if (model === 'claude') {
+        await ensureWorkerRegistryReadyImpl({env});
+        output = await reviewWithClaude(diff || '', '', options);
+      }
       else if (model === 'gemini') {
         const { lease, resetAt } = agyLease === undefined
           ? await acquireArgusGeminiLease(identityOptions()) : { lease: agyLease, resetAt: geminiResetAt };
@@ -125,21 +128,27 @@ export function createDefaultArgusReviewDeps({
         let failed = false;
         let reason = '';
         try {
-          const cooldown = readGeminiQuotaCooldown({
-            ...identityOptions(), log: logger, hqOwner: identityPool.plan().hqOwner, identityUser: lease.user,
-          });
-          if (cooldown) {
-            const error = new Error(`[${AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS}] no ready agy reviewer identity`);
-            error.resetAt = cooldown.resetAt;
-            throw error;
-          }
+          const assertNotCooled = () => {
+            const cooldown = readGeminiQuotaCooldown({
+              ...identityOptions(), log: logger, hqOwner: identityPool.plan().hqOwner, identityUser: lease.user,
+            });
+            if (cooldown) {
+              const error = new Error(`[${AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS}] no ready agy reviewer identity`);
+              error.resetAt = cooldown.resetAt;
+              throw error;
+            }
+          };
+          assertNotCooled();
+          await ensureWorkerRegistryReadyImpl({env});
+          assertNotCooled();
           output = await reviewWithGeminiImpl(diff || '', '', {
             ...options, agyIdentity: lease.hqOwner ? null : { user: lease.user, reviewId: lease.reviewId },
           });
         } catch (err) {
           const diagnostic = [err?.message, err?.stderr].filter(Boolean).join('\n');
           reason = classifyReviewerFailure(diagnostic, null, err?.code, err);
-          failed = !['quota-exhausted', AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS].includes(reason);
+          failed = err.code !== 'registry-unavailable'
+            && !['quota-exhausted', AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS].includes(reason);
           if (reason === 'quota-exhausted') {
             const signal = parseReviewerQuotaExhaustion({ error: err, nowMs: nowMs() });
             signal.resetAt ||= resolveQuotaResetIso(diagnostic, { nowMs: nowMs() });
@@ -154,7 +163,10 @@ export function createDefaultArgusReviewDeps({
           if (agyLease === undefined) await identityPool.release(lease, { failed, reason });
         }
       }
-      else if (model === 'codex') output = await reviewWithCodex(diff || '', '', options);
+      else if (model === 'codex') {
+        await ensureWorkerRegistryReadyImpl({env});
+        output = await reviewWithCodex(diff || '', '', options);
+      }
       else throw new Error(`unknown Argus reviewer model ${JSON.stringify(model)}`);
       const text = typeof output === 'string' ? output : output?.reviewText;
       return { text, execution: output?.execution || { harness: model } };

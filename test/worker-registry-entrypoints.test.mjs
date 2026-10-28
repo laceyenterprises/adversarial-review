@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'acorn';
 import { dispatchReadTransport } from '../src/dispatch-read-client.mjs';
+import { ensureWorkerRegistryReady, RegistryUnavailableError } from '../src/adapters/agent-runtime/local/remediation.mjs';
 import { resolveReviewerExecution, resolveReviewerExecutionAsync } from '../src/reviewer-harness.mjs';
 import { readAfhReviewerGrounding } from '../src/afh-reviewer-fallback.mjs';
 import { resolveReviewerWorkerClassWithFallback } from '../src/review-worker-class-fallback.mjs';
@@ -44,26 +45,45 @@ function registry(t, name) {
 }
 
 const readers = {
-  remediation: env => resolveRemediationWorkerClassWithFallback({env, primary: 'remediator-claude',
+  remediation: (env, ensureWorkerRegistryReadyImpl) => resolveRemediationWorkerClassWithFallback({env, ensureWorkerRegistryReadyImpl, primary: 'remediator-claude',
     execFileImpl: async () => ({stdout: quota}), selectAccountImpl: async () => null}),
-  closer: env => resolveCloserDispatchHarness({env, workerClass: 'hammer',
+  closer: (env, ensureWorkerRegistryReadyImpl) => resolveCloserDispatchHarness({env, ensureWorkerRegistryReadyImpl, workerClass: 'hammer',
     execFileImpl: async () => ({stdout: quota}), selectAccountImpl: async () => null}),
-  pool: env => selectReviewerTokenAccount({env, reviewerModel: 'codex',
+  pool: (env, ensureWorkerRegistryReadyImpl) => selectReviewerTokenAccount({env, ensureWorkerRegistryReadyImpl, reviewerModel: 'codex',
     oauth: {identity_token_pools: {'codex-reviewer': []}}, ownerImpl: async request => {
       assert.equal(request.model, 'governed-codex');
       return {held: 'fixture-hold'};
     }}),
-  reviewer: env => resolveReviewerExecutionAsync('claude', {env, log: quiet}),
-  grounding: env => readAfhReviewerGrounding({env, execFileImpl: async () => ({stdout: quota}),
+  reviewer: (env, ensureWorkerRegistryReadyImpl) => resolveReviewerExecutionAsync('claude', {env, ensureWorkerRegistryReadyImpl, log: quiet}),
+  grounding: (env, ensureWorkerRegistryReadyImpl) => readAfhReviewerGrounding({env, ensureWorkerRegistryReadyImpl, execFileImpl: async () => ({stdout: quota}),
     selectReviewerTokenAccountImpl: async () => null, retryDelaysMs: []}),
-  fallback: env => resolveReviewerWorkerClassWithFallback({env, authorClass: 'claude-code',
+  fallback: (env, ensureWorkerRegistryReadyImpl) => resolveReviewerWorkerClassWithFallback({env, ensureWorkerRegistryReadyImpl, authorClass: 'claude-code',
     primary: 'codex', fallbackWorkerClasses: ['claude-code'],
     fleetQuotaStatus: {stdout: quota}, logger: quiet}),
-  quota: env => readReviewerQuotaDecision({env, reviewerModel: 'codex',
+  quota: (env, ensureWorkerRegistryReadyImpl) => readReviewerQuotaDecision({env, ensureWorkerRegistryReadyImpl, reviewerModel: 'codex',
     execFileImpl: async () => ({stdout: quota})}),
 };
 
 for (const [name, read] of Object.entries(readers)) {
+  test(`${name} accepts injected readiness with a ready registry`, async t => {
+    const f = registry(t, `injected-ready-${name}`);
+    await ensureWorkerRegistryReady({env: f.env});
+    f.outage();
+    let calls = 0;
+    await read(f.env, async ({env}) => {
+      assert.deepEqual(env, f.env);
+      calls++;
+    });
+    assert.ok(calls > 0);
+    assert.equal(f.reads(), 1, 'injected readiness never consults the physical transport');
+  });
+
+  test(`${name} preserves an injected readiness outage`, async t => {
+    const f = registry(t, `injected-outage-${name}`);
+    const error = new RegistryUnavailableError();
+    await assert.rejects(read(f.env, async () => { throw error; }), caught => caught === error);
+    assert.equal(f.reads(), 0);
+  });
   test(`${name} owns its cold registry and refreshes it on expiry`, async t => {
     const f = registry(t, `cold-${name}`);
     let now = Date.now();
@@ -154,7 +174,7 @@ test('every production model-resolution importer has an async readiness owner', 
   assert.deepEqual(importers.sort(), [...owners, syncAdapter].sort());
   for (const name of [...owners, 'src/reviewer.mjs', 'src/watcher.mjs',
     'src/argus-security-review-child.mjs', 'src/argus-security-review-deps.mjs']) {
-    assert.match(readFileSync(new URL(name, root), 'utf8'), /await ensureWorkerRegistryReady\(/, name);
+    assert.match(readFileSync(new URL(name, root), 'utf8'), /await ensureWorkerRegistryReady(?:Impl)?\(/, name);
   }
   assert.match(readFileSync(new URL('src/osg-reviewer-arm.mjs', root), 'utf8'),
     /await resolveReviewerExecutionAsync\(/);

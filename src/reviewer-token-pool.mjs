@@ -67,6 +67,7 @@ export function reviewerPoolOwner(value, { env = process.env } = {}) {
 export async function selectReviewerTokenAccount({ reviewerModel, requestId = 'reviewer-proposal',
   acquire = false, env = process.env, oauth = null,
   model = null,
+  ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
   rootDir = fileURLToPath(new URL('..', import.meta.url)),
   resolvePoolsImpl = resolveIdentityTokenPools,
   ownerImpl = reviewerPoolOwner, log = console } = {}) {
@@ -98,7 +99,7 @@ export async function selectReviewerTokenAccount({ reviewerModel, requestId = 'r
   let journaled = false;
   try {
     if (!Object.hasOwn(oauth.identity_token_pools, identity)) return null;
-    if (model === null) await ensureWorkerRegistryReady({env});
+    if (model === null) await ensureWorkerRegistryReadyImpl({env});
     model ??= resolveRemediationModel(identity, { env,
       ...(family === 'codex' ? { pin: env.CODEX_MODEL_ID || null } : {}), fallbackModel: null }).resolvedModel;
     if (acquire) {

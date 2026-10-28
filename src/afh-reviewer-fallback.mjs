@@ -456,6 +456,7 @@ export async function readAfhReviewerGrounding({
   claudeRuntimeProbeTimeoutMs = loadAwareTimeoutMs(CLAUDE_REVIEWER_RUNTIME_PROBE_TIMEOUT_MS),
   claudeRuntimeProbeRetryDelaysMs = CLAUDE_REVIEWER_RUNTIME_PROBE_RETRY_DELAYS_MS,
   selectReviewerTokenAccountImpl = selectReviewerTokenAccount,
+  ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
 } = {}) {
   const routingDisabled = afhReviewerFallbackDisabled(env);
   // Standalone AFH rollback remains a no-I/O operation. Watcher callers also
@@ -485,7 +486,7 @@ export async function readAfhReviewerGrounding({
   }
   if (!snapshot) {
     try {
-      await ensureWorkerRegistryReady({env});
+      await ensureWorkerRegistryReadyImpl({env});
       snapshot = afhGroundingSnapshotFromStdout(stdout, {
         claudeModel: resolveRemediationModel('claude-reviewer', { env, fallbackModel: null }).resolvedModel,
         codexModel: resolveRemediationModel('codex-reviewer', { env, pin: env.CODEX_MODEL_ID || null, fallbackModel: null }).resolvedModel,
@@ -501,8 +502,8 @@ export async function readAfhReviewerGrounding({
     ? { stdout } : { error: true, cause: quotaError, errorMessage: snapshot.error || snapshot.reason }) : null;
   const finalizeSnapshot = async result => {
     const [codex, claude] = await Promise.all([
-      selectReviewerTokenAccountImpl({ reviewerModel: 'codex', env }),
-      routingDisabled ? null : selectReviewerTokenAccountImpl({ reviewerModel: 'claude', env }),
+      selectReviewerTokenAccountImpl({ reviewerModel: 'codex', env, ensureWorkerRegistryReadyImpl }),
+      routingDisabled ? null : selectReviewerTokenAccountImpl({ reviewerModel: 'claude', env, ensureWorkerRegistryReadyImpl }),
     ]);
     return Object.freeze({ ...result,
       available: Boolean(result.available || (codex && !codex.hold) || (claude && !claude.hold)),

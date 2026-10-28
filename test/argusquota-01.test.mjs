@@ -52,7 +52,7 @@ function productionDeps({ rootDir, pool, runner, ...options }) {
   return createDefaultArgusReviewDeps({
     rootDir, env: {}, logger: quiet, identityPool: pool, nowMs: () => NOW,
     resolveReviewerModels: async () => ['gemini'], reviewWithGeminiImpl: runner,
-    evidenceIo: {}, ...options,
+    evidenceIo: {}, ensureWorkerRegistryReadyImpl: async () => {}, ...options,
   });
 }
 
@@ -74,6 +74,38 @@ for (const failure of [false, true]) {
     assert.equal(pool.snapshot().some((state) => state.leased), false);
   }));
 }
+
+test('Argus releases its acquired identity when injected registry readiness fails', () => withPool(async ({ rootDir, pool, cleanups }) => {
+  const outage = Object.assign(new Error('synthetic registry outage'), {code: 'registry-unavailable'});
+  const releases = [];
+  const identityPool = {...pool, release: async (lease, options) => {
+    releases.push(options);
+    return pool.release(lease, options);
+  }};
+  const deps = productionDeps({ rootDir, pool: identityPool,
+    ensureWorkerRegistryReadyImpl: async ({env}) => {
+      assert.deepEqual(env, {});
+      assert.equal(pool.snapshot().find(state => state.user === 'reviewer-b').leased, true);
+      throw outage;
+    },
+    runner: async () => assert.fail('registry outage must prevent a model call'),
+  });
+  await assert.rejects(deps.runReviewerModel({model: 'gemini', prompt: 'fixture', cwd: rootDir}), error => error === outage);
+  assert.equal(releases.length, 1);
+  assert.equal(releases[0].failed, false, 'registry infrastructure never invalidates OAuth readiness');
+  assert.equal(cleanups.length, 1);
+  assert.equal(cleanups[0].user, 'reviewer-b');
+  assert.equal(pool.snapshot().some(state => state.leased), false);
+}));
+
+test('Argus rechecks identity cooldown after awaited registry readiness', () => withPool(async ({ rootDir, pool, cooldown }) => {
+  const deps = productionDeps({ rootDir, pool,
+    ensureWorkerRegistryReadyImpl: async () => { cooldown('reviewer-b'); },
+    runner: async () => assert.fail('identity cooled during readiness must not run'),
+  });
+  await assert.rejects(deps.runReviewerModel({model: 'gemini', prompt: 'fixture', cwd: rootDir}), error => error.resetAt === RESET);
+  assert.equal(pool.snapshot().some(state => state.leased), false);
+}));
 
 test('with no ready identity Gemini is removed without running its harness', () => withPool(async ({ rootDir, pool, cooldown }) => {
   cooldown('reviewer-b');

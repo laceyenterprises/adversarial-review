@@ -409,6 +409,7 @@ export async function resolveReviewerWorkerClassWithFallback({
   sleepImpl = sleep,
   retryDelaysMs = FLEET_QUOTA_STATUS_RETRY_DELAYS_MS,
   fleetQuotaStatus = null,
+  ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
   fleetQuotaStatusCache = fleetQuotaStatusCacheFor(execFileImpl),
   fleetQuotaStatusCacheTtlMs = FLEET_QUOTA_STATUS_CACHE_TTL_MS,
   agyReviewerIdentityPool = undefined,
@@ -521,7 +522,7 @@ export async function resolveReviewerWorkerClassWithFallback({
   };
   let primaryAvail;
   try {
-    await ensureWorkerRegistryReady({env});
+    await ensureWorkerRegistryReadyImpl({env});
     codexAccountSelection = selectCodexReviewerAccount(parseHqFleetQuotaSnapshot(stdout), {
       model: resolveRemediationModel('codex-reviewer', { env, pin: env.CODEX_MODEL_ID || null, fallbackModel: null }).resolvedModel,
       corporateExhausted: blockedCodexCorporate,

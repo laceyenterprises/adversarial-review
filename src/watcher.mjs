@@ -1167,6 +1167,7 @@ async function pollOnceWithinBudget(
   octokit,
   {
     healthProbe = watcherHealthProbe,
+    ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
     afterClaim = null, wakePayload = null, consumeWakePayload = null,
   } = {}
 ) {
@@ -1176,7 +1177,7 @@ async function pollOnceWithinBudget(
   // Cache-hit reuse happens within the tick (multiple PRs in this loop
   // see the same cached config); operator env rotations between ticks
   // propagate after this reset, not at next file-mtime change.
-  await ensureWorkerRegistryReady().catch(error => console.warn(error.message));
+  await ensureWorkerRegistryReadyImpl().catch(error => console.warn(error.message));
   resetRoleConfigCache();
   refreshReviewerRuntimeAdapter();
   assertReviewDbWritesRoundTrip(db);

@@ -284,7 +284,11 @@ remediation models owns its registry readiness. The shared
 prefetches `worker_registry` before synchronous selection, reusing a fresh
 60-second snapshot and refreshing on expiry. Reviewer subprocesses, security
 review children, quota grounding/readers, account and fallback routing, watcher
-polls and follow-up consumers use this boundary independently. A transport
+polls and follow-up consumers use this boundary independently. Library callers
+can inject `ensureWorkerRegistryReadyImpl` through their existing options; the
+default remains the production prefetch. Readiness precedes governed model
+selection while lease/cooldown checks retain their order, and local remediation
+rechecks shutdown after its awaited refresh before spawning. A transport
 outage remains retryable `reviewer-model-unresolved`, never a fallback model or
 an OAuth re-authentication notice. Synchronous resolution performs no physical
 request and has no filesystem fallback. Corporate governance, existing bounded

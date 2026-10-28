@@ -180,6 +180,7 @@ export async function resolveCloserDispatchHarness({
   codexAccountPolicy = 'corporate-first',
   selectAccountImpl,
   modelForWorkerClass = null,
+  ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
   // CLOSERREUSE-01: the merge-agent needs the primary's grounding even with no
   // fallback configured, because it defers rather than dispatch a grounded
   // class (src/merge-agent-harness.mjs). With no fallbacks, a grounded primary
@@ -191,7 +192,7 @@ export async function resolveCloserDispatchHarness({
 } = {}) {
   const usesRegistry = !modelForWorkerClass;
   if (usesRegistry) {
-    await ensureWorkerRegistryReady({env});
+    await ensureWorkerRegistryReadyImpl({env});
     modelForWorkerClass = className => resolveRemediationModel(className, { env, fallbackModel: null, requireModel: true }).resolvedModel;
   }
   const primary = String(workerClass || '').trim();
@@ -251,7 +252,7 @@ export async function resolveCloserDispatchHarness({
     evidence = { evidenceSource: 'last-good-snapshot', evidenceAgeMs: cached.ageMs,
       evidenceReadAt: cached.readAt, liveReadReason: failureReason };
   }
-  if (usesRegistry) await ensureWorkerRegistryReady({env});
+  if (usesRegistry) await ensureWorkerRegistryReadyImpl({env});
   base = { ...base, ...evidence };
   const providerStatuses = quotaStatusesFromSnapshot(snapshot);
   const primaryAvailability = providerAvailabilityFromStatuses(providerStatuses, {

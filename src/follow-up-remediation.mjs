@@ -388,6 +388,8 @@ function createRemediationRuntime({
   env = process.env,
   now = () => new Date().toISOString(),
   processKillImpl = process.kill,
+  ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
+  shouldStop = () => false,
   waitForExitImpl,
   sleepImpl,
   pollMs,
@@ -442,7 +444,8 @@ function createRemediationRuntime({
       if (!worker) {
         throw new Error(`unknown remediation worker class: ${workerClass}`);
       }
-      await ensureWorkerRegistryReady({env});
+      await ensureWorkerRegistryReadyImpl({env});
+      if (shouldStop()) throw Object.assign(new Error('remediation stopped before local spawn'), {code: 'remediation-shutting-down'});
       // Enforce (or, under the kill-switch, just audit) that the worker about to
       // be spawned commits + pushes under its PHYSICAL harness identity. On a
       // mismatch while enforcing, the spawn fn throws and this run() call fails
@@ -2892,6 +2895,7 @@ async function reconcileInProgressFollowUpJobs({
   resolvePRLifecycleImpl = resolvePRLifecycle,
   inspectRemediationCiRegressionImpl = inspectRemediationCiRegression,
   execFileImpl = execFileAsync,
+  ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
   log = console,
 } = {}) {
   // CFG-09: per-reconcile-pass boundary for the role-config cascade
@@ -2901,7 +2905,7 @@ async function reconcileInProgressFollowUpJobs({
   // CLI entrypoints (cache is empty per process), so the contract held
   // by accident; this reset makes it robust against a future long-
   // running tick loop that folds reconciliation in.
-  await ensureWorkerRegistryReady().catch(error => log.warn(error.message));
+  await ensureWorkerRegistryReadyImpl().catch(error => log.warn(error.message));
   resetRoleConfigCache();
   const cleanup = cleanupReconcileClaimArtifacts({ rootDir, log });
   if (cleanup.removedTmp || cleanup.removedLocks || cleanup.errors) {
@@ -3124,6 +3128,7 @@ async function consumeNextFollowUpJob({
   shouldStop = () => false,
   quotaHoldRevalidator = null,
   resolveRemediationWorkerClassImpl = null,
+  ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
   resolveOsgRemediatorRouteImpl = resolveOsgRemediatorRoute,
   mintClaudeCodeRemediationTokenImpl = null,
   conflictedBaseGateImpl = null,
@@ -3138,7 +3143,7 @@ async function consumeNextFollowUpJob({
   // cached config from a prior `loadRoleConfig` call (in this process
   // or via the role resolvers below) would mask the new env.
   try {
-    await ensureWorkerRegistryReady();
+    await ensureWorkerRegistryReadyImpl();
   } catch (error) {
     if (error.code !== 'registry-unavailable') throw error;
     log.warn?.(`[follow-up-remediation] deferring claim until worker registry recovers: ${error.message}`);
@@ -3312,6 +3317,7 @@ async function consumeNextFollowUpJob({
     // consume path subprocess-free in unit tests (job-local evidence only).
     let remediatorRouting = await resolveClaimedRemediatorRouting({
       job: claimed.job,
+      ensureWorkerRegistryReadyImpl,
       primary: pickRemediationWorkerClass(claimed.job),
       env: jobEnv,
       nowMs: Date.parse(claimed.job.claimedAt),
@@ -3329,7 +3335,7 @@ async function consumeNextFollowUpJob({
       });
     }
     if (claimed.job.nonBlockingOnly === true && ['codex', 'remediator-codex', 'remediator-codex-corp'].includes(workerClass)) {
-      await ensureWorkerRegistryReady({env: jobEnv});
+      await ensureWorkerRegistryReadyImpl({env: jobEnv});
       codexModelResolution = resolveConfiguredNonBlockingCodexModel(jobEnv);
     }
     // Pooled accounts require dispatcher-owned selection, binding and leases.
@@ -3466,7 +3472,7 @@ async function consumeNextFollowUpJob({
     // consume hot path stays network-free under test. Keychain transport or an
     // already-present token is left untouched by the mint helper.
     if (!hqDispatchEnabled && ['claude-code', 'remediator-claude'].includes(workerClass) && mintClaudeCodeRemediationTokenImpl) {
-      await ensureWorkerRegistryReady({env: jobEnv});
+      await ensureWorkerRegistryReadyImpl({env: jobEnv});
       claudeModelResolution = resolveClaudeRemediationModel(jobEnv);
       // Pass `log` so the mint's bounded transient-retry ladder surfaces a
       // broker bounce in the daemon log instead of retrying silently.
@@ -3654,6 +3660,8 @@ async function consumeNextFollowUpJob({
     // ARC-08: the health-routed AgentRuntime handles OS or local dispatch and
     // returns the worker descriptor. The subject adapter owns git workspace prep.
     const remediationRuntime = createRemediationRuntime({
+      ensureWorkerRegistryReadyImpl,
+      shouldStop,
       execFileImpl,
       spawnImpl,
       env: jobEnv,
@@ -3739,6 +3747,12 @@ async function consumeNextFollowUpJob({
       jobPath: updated.jobPath,
     };
   } catch (err) {
+    if (err.code === 'remediation-shutting-down' && !spawnAttempted && !spawnedWorker) {
+      const requeued = requeueClaimedFollowUpJobBeforeSpawn({
+        rootDir, jobPath: claimed.jobPath, requeuedAt: now(),
+      });
+      return { consumed: false, reason: 'shutting-down', ...requeued };
+    }
     if (err.code === 'registry-unavailable' && !spawnAttempted && !spawnedWorker) {
       const requeued = requeueClaimedFollowUpJobBeforeSpawn({
         rootDir, jobPath: claimed.jobPath, requeuedAt: now(),
@@ -3912,6 +3926,7 @@ async function consumeFollowUpJobsUntilCapacity({
   shouldStop = () => false,
   quotaHoldRevalidator = defaultQuotaHoldRevalidator,
   resolveRemediationWorkerClassImpl = null,
+  ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
   mintClaudeCodeRemediationTokenImpl = null,
   conflictedBaseGateImpl = null,
   guardStackedBaseImpl = guardStackedBase,
@@ -3965,6 +3980,7 @@ async function consumeFollowUpJobsUntilCapacity({
         },
         quotaHoldRevalidator,
         resolveRemediationWorkerClassImpl,
+        ensureWorkerRegistryReadyImpl,
         mintClaudeCodeRemediationTokenImpl,
         conflictedBaseGateImpl,
         guardStackedBaseImpl,

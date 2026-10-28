@@ -193,6 +193,7 @@ export async function resolveRemediationWorkerClassWithFallback({
   job = null,
   nowMs = Date.now(),
   modelForClass = null,
+  ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
   reviewerModels = [],
   env = process.env,
   hqPath = resolveHqPath(env),
@@ -200,7 +201,7 @@ export async function resolveRemediationWorkerClassWithFallback({
   codexAccountPolicy = 'corporate-first',
   selectAccountImpl,
 } = {}) {
-  await ensureWorkerRegistryReady({env});
+  await ensureWorkerRegistryReadyImpl({env});
   modelForClass ??= (workerClass) => remediatorModelForClass(workerClass, { job, env });
   let primaryClass = String(primary || '').trim().toLowerCase();
   const fallbacks = [...new Set((Array.isArray(fallbackWorkerClasses) ? fallbackWorkerClasses : [])
@@ -229,7 +230,7 @@ export async function resolveRemediationWorkerClassWithFallback({
 
   const evidence = remediatorQuotaEvidence(job, { nowMs });
   const { statuses, snapshot, error } = await readFleetQuotaStatuses({ env, hqPath, execFileImpl });
-  await ensureWorkerRegistryReady({env});
+  await ensureWorkerRegistryReadyImpl({env});
   // Model lookups only matter against fleet `models[]` rows.
   const capOf = (workerClass) => classCapState(workerClass, {
     evidence,
@@ -437,6 +438,7 @@ export async function resolveClaimedRemediatorRouting({
   env = process.env,
   nowMs = Date.now(),
   resolveImpl = null,
+  ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
   topPath,
   loaderImpl,
   log = console,
@@ -449,10 +451,11 @@ export async function resolveClaimedRemediatorRouting({
     && !['codex', 'claude-code', 'clio-agent'].includes(String(job?.builderTag || '').trim().toLowerCase())) {
     accountPolicy = codexWorkerAccountPolicy('roles.registry.remediator.workerClass', primary, { env, topPath, loaderImpl });
   }
-  await ensureWorkerRegistryReady({env});
+  await ensureWorkerRegistryReadyImpl({env});
   const routing = await resolver({
     primary,
     codexAccountPolicy: accountPolicy,
+    ensureWorkerRegistryReadyImpl,
     fallbackWorkerClasses: remediationWorkerClassFallback(env, { topPath, loaderImpl }),
     job,
     nowMs: Number.isFinite(nowMs) ? nowMs : Date.now(),

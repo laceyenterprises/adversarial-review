@@ -24,6 +24,33 @@ forced launch, ledger mutation or new smoke step is authorized by this change.
 
 # RUNBOOK — AMA closure pipeline
 
+## Host identity reads (HOSTIDCACHE-01)
+
+Every host-owner consumer shares `readHostIdentitySync`. A successful read is
+trimmed before returning and caching for the process lifetime, scoped by HQ
+root and transport endpoint. Explicit and environment HQ root paths are resolved
+lexically to absolute paths for the cache key, so relative paths, trailing
+slashes and dot segments share the same entry; symlinks are not resolved and
+an unspecified root keeps its own scope. Failures are never cached.
+An uncached read makes at most three attempts,
+with 50/100 ms synchronous backoff, within the existing read budget and any
+caller deadline. The nominal transport timeout remains eight seconds. An
+own-launch token continues to select `readHcpDispatchLookupSync` first.
+
+Failures expose only `timeout`, `spawn-failure`, `unavailable`, `denied` or
+`malformed`. A definitive not-found reply is classified as `denied` (no owner
+is authorized). The closer returns a retryable `host-identity-<class>` defer
+for the three transient classes before dispatch bookkeeping. It preserves
+the selected closure owner, lease, artifacts and anchored deadline for the
+next poll; this is not a new lease state or a terminal refusal. Definitive
+denial, not-found, malformed identity and current-user mismatch refuse.
+No merge predicate or lease transition is relaxed.
+
+Offline synthetic fixtures cover timeout-then-success, caching, failure
+classes, retry/deadline bounds, owner mismatch and unchanged custody across
+polls. After normal deployment, natural dispatch logs can establish runtime
+recovery; source tests alone do not. No restart or forced dispatch is required.
+
 ## Shared closure/hammer decision (CLOSURESPLIT-01)
 
 Closure passes its immutable next-action snapshot and decision key/generation to

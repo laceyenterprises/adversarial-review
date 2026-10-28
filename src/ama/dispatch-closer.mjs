@@ -3480,10 +3480,6 @@ function sleep(ms, signal = null) {
   });
 }
 
-function resolveHqOwner(hqRoot) {
-  return readHostIdentitySync({hqRoot}).ownerUser;
-}
-
 function currentUserName() {
   try {
     return String(userInfo().username || '').trim() || null;
@@ -4988,7 +4984,18 @@ async function maybeDispatchAmaCloserAttempt({
     ? dispatchContext.authoritativeReviewerLogins
     : [];
   const promptDir = dispatchContext.promptDir || amaCloserPromptDir(rootDir);
-  const ownerUser = dispatchContext.hqOwnerUser || resolveHqOwner(hqRoot);
+  const hostIdentity = dispatchContext.hqOwnerUser ? {ownerUser: dispatchContext.hqOwnerUser}
+    : readHostIdentitySync({hqRoot, env, signal, deadlineMs: dispatchContext.deadlineMs});
+  const ownerUser = hostIdentity.ownerUser;
+  if (!ownerUser && ['timeout', 'spawn-failure', 'unavailable'].includes(hostIdentity.reason)) {
+    const reason = `host-identity-${hostIdentity.reason}`;
+    logger.log?.(`[ama-closer] deferred ${repo}#${prNumber}: ${reason}`);
+    return noAmaDispatch({dispatched: false, skipMergeAgent: true, recoveryWait: true,
+      retryable: true, preservePredecessorArtifacts: true, reason});
+  }
+  if (!ownerUser) {
+    throw new Error(`AMA audit bootstrap refused: HQ ownerUser is unavailable for ${hqRoot} (host-identity-${hostIdentity.reason})`);
+  }
   const auditPath = amaAuditFilePath(hqRoot, repo, prNumber, reviewedSha);
   const auditRef = amaAuditTraceRef(repo, prNumber, reviewedSha);
   const bootstrapEligibilityReasons = buildBootstrapEligibilityReasons({

@@ -20,7 +20,7 @@
 // or override `topPath` to make the cascade hermetic against the real
 // `~/agent-os/config.yaml` on the host.
 
-import { legacyPoolOverrideConflicts, validateLegacyPoolOverrides, warnPoolConfigConflicts } from './config-token-pool-migration.mjs';
+import { inspectLegacyPoolOverrides, validateLegacyPoolOverrides, warnPoolConfigConflicts, warnPoolConfigRedundancies } from './config-token-pool-migration.mjs';
 import { warnPoolConfigConflict } from './pool-config-conflict.mjs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -542,7 +542,7 @@ export function resolveGeminiReviewerTokenPools({ log = console, ...options } = 
   const pools = cfg.get('oauth.identity_token_pools', {});
   const declared = Object.hasOwn(pools, 'gemini-reviewer');
   try {
-    validateLegacyPoolOverrides(cfg);
+    validateLegacyPoolOverrides(cfg, message => log.warn?.(message));
   } catch (error) {
     if (!warnPoolConfigConflict(error, log) || declared) throw error;
   }
@@ -613,8 +613,9 @@ export function validateStartupRoleConfig({
     loaderImpl,
     contextKey: null,
   });
-  const keys = legacyPoolOverrideConflicts(cfg);
+  const { conflicts: keys, redundant } = inspectLegacyPoolOverrides(cfg);
   warnPoolConfigConflicts(keys, warn);
+  warnPoolConfigRedundancies(redundant, warn);
   return { warnings: keys.map(key => ({ reason: 'pool-config-conflict', key })) };
 }
 

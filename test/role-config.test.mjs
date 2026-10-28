@@ -38,6 +38,19 @@ test('ITPPOOLCONFLICT-01 startup returns an empty warning list for clean role co
     warn: () => assert.fail('clean config must not warn') }), { warnings: [] });
 });
 
+test('ITPROLEPOOL-01 startup accepts the repo-default remediator selector with its pool', t => {
+  const dir = makeTmp();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const topPath = join(dir, 'config.yaml');
+  writeYaml(topPath, JSON.stringify({ version: 1, roles: { remediator: 'codex' }, oauth: {
+    token_accounts: { account: { family: 'codex', broker_provider: 'codex', allowed_models: ['gpt-6'], concurrency: 1 } },
+    identity_token_pools: { 'remediator-codex': ['account'] },
+  } }));
+  assert.deepEqual(validateStartupRoleConfig({ topPath, modulePaths: [], env: {},
+    warn: () => assert.fail('canonical selector must not warn') }), { warnings: [] });
+  assert.equal(resolveDefaultRemediator({ topPath, modulePaths: [], env: {} }), 'codex');
+});
+
 const REVIEWER_ROUTE_BY_MODEL = {
   claude: { reviewerModel: 'claude', botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN' },
   'claude-code': { reviewerModel: 'claude', botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN' },

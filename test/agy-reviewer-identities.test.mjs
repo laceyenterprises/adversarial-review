@@ -27,6 +27,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { resetPoolConfigConflictWarnings } from '../src/pool-config-conflict.mjs';
+import { resetLegacyPoolOverrideWarnings } from '../src/config-token-pool-migration.mjs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 
@@ -266,11 +267,13 @@ test('ITPPOOLCONFLICT-02: builder-only conflicts preserve legacy holders and war
   t.after(resetPoolConfigConflictWarnings);
   const builder = { token_accounts: { 'fixture-builder': {
     family: 'codex', broker_provider: 'codex', allowed_models: ['gpt-6'], concurrency: 1,
-  } }, identity_token_pools: { codex: ['fixture-builder'] } };
+  }, 'fixture-corp': {
+    family: 'codex', broker_provider: 'codex-corp', allowed_models: ['gpt-6'], concurrency: 1,
+  } }, identity_token_pools: { codex: ['fixture-builder', 'fixture-corp'] } };
   const log = quietLog();
   for (const [key, value] of [
-    ['build_pack_default_worker_class', 'codex'],
-    ['codex_worker_account_order', 'personal-first'],
+    ['build_pack_default_worker_class', 'codex-corp'],
+    ['codex_worker_account_order', 'corporate-first'],
   ]) {
     for (const identities of [['fixture-login-b', 'fixture-login-a'], undefined]) {
       const fixture = tokenPoolPlanFixture(t, { oauth: builder, identities, local: { roles: { [key]: value } } });
@@ -284,6 +287,46 @@ test('ITPPOOLCONFLICT-02: builder-only conflicts preserve legacy holders and war
   assert.deepEqual(log.lines, [
     'warn [agy-identities] pool-config-conflict: roles.build_pack_default_worker_class; inspect migration report',
     'warn [agy-identities] pool-config-conflict: roles.codex_worker_account_order; inspect migration report',
+  ]);
+});
+
+test('explicit Codex order with unresolved providers preserves legacy Gemini holders', t => {
+  t.mock.method(console, 'warn', () => assert.fail('must use the reviewer logger'));
+  const identities = ['fixture-login-a'];
+  const baseline = tokenPoolPlanFixture(t, { identities }).pool(quietLog()).plan();
+  for (const token_accounts of [undefined, null, {}, { missing: null }, { missing: {} }]) {
+    resetPoolConfigConflictWarnings();
+    const log = quietLog();
+    const fixture = tokenPoolPlanFixture(t, { identities, oauth: {
+      token_accounts, identity_token_pools: { codex: ['missing'] },
+    }, local: { roles: { codex_worker_account_order: 'personal-first' } } });
+    assert.throws(() => loadRoleConfig({ env: fixture.env }), /oauth\./,
+      'ordinary reads retain full declaration validation');
+    assert.deepEqual(fixture.pool(log).plan(), baseline);
+    assert.deepEqual(fixture.pool(log).plan(), baseline);
+    assert.deepEqual(log.lines, [
+      'warn [agy-identities] pool-config-conflict: roles.codex_worker_account_order; inspect migration report',
+    ]);
+  }
+  t.after(resetPoolConfigConflictWarnings);
+});
+
+test('redundant Codex order uses the legacy Gemini reviewer logger', t => {
+  resetLegacyPoolOverrideWarnings();
+  t.after(resetLegacyPoolOverrideWarnings);
+  t.mock.method(console, 'warn', () => assert.fail('must use the reviewer logger'));
+  const identities = ['fixture-login-a'];
+  const log = quietLog();
+  const fixture = tokenPoolPlanFixture(t, { identities, oauth: {
+    token_accounts: { personal: {
+      family: 'codex', broker_provider: 'codex', allowed_models: ['gpt-6'], concurrency: 1,
+    } }, identity_token_pools: { codex: ['personal'] },
+  }, local: { roles: { codex_worker_account_order: 'personal-first' } } });
+  const baseline = tokenPoolPlanFixture(t, { identities }).pool(log).plan();
+  assert.deepEqual(fixture.pool(log).plan(), baseline);
+  assert.deepEqual(fixture.pool(log).plan(), baseline);
+  assert.deepEqual(log.lines, [
+    'warn pool-config-redundant: roles.codex_worker_account_order; declared pools own account order',
   ]);
 });
 
@@ -356,7 +399,7 @@ test('ITPPOOLCONFLICT-02: declared reviewer pools still validate accounts, membe
       family: 'codex', broker_provider: 'codex', allowed_models: ['gpt-6'], concurrency: 1,
     } },
     identity_token_pools: { ...valid.identity_token_pools, codex: ['fixture-builder'] },
-  }, local: { roles: { build_pack_default_worker_class: 'codex' } } });
+  }, local: { roles: { build_pack_default_worker_class: 'codex-corp' } } });
   assert.deepEqual(conflicted.pool(log).plan().identities, []);
   assert.ok(log.lines.every(line => !line.includes('conflicting legacy/new')));
   const invalidAccount = tokenPoolPlanFixture(t, { identities, oauth: {

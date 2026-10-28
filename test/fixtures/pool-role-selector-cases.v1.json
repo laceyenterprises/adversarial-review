@@ -1,0 +1,811 @@
+{
+  "version": 1,
+  "accounts": {
+    "token-a": {
+      "family": "codex",
+      "broker_provider": "codex",
+      "allowed_models": [
+        "gpt-6"
+      ],
+      "concurrency": 1
+    },
+    "token-b": {
+      "family": "codex",
+      "broker_provider": "codex-corp",
+      "allowed_models": [
+        "gpt-6"
+      ],
+      "concurrency": 1
+    },
+    "token-c": {
+      "family": "claude",
+      "broker_provider": "claude-code",
+      "allowed_models": [
+        "opus"
+      ],
+      "concurrency": 1
+    },
+    "token-d": {
+      "family": "claude",
+      "broker_provider": "claude-code-corp",
+      "allowed_models": [
+        "opus"
+      ],
+      "concurrency": 1
+    }
+  },
+  "cases": [
+    {
+      "name": "canonical-roles.remediator-top",
+      "values": {
+        "roles.remediator": "codex"
+      },
+      "pools": {
+        "remediator-codex": [
+          "token-a",
+          "token-b"
+        ]
+      },
+      "source": "top",
+      "conflicts": [],
+      "pins": [],
+      "warnings": []
+    },
+    {
+      "name": "canonical-roles.remediator-local:config.local.yaml",
+      "values": {
+        "roles.remediator": "codex"
+      },
+      "pools": {
+        "remediator-codex": [
+          "token-a",
+          "token-b"
+        ]
+      },
+      "source": "local:config.local.yaml",
+      "conflicts": [],
+      "pins": [],
+      "warnings": []
+    },
+    {
+      "name": "canonical-roles.remediator-env:ROLE_SELECTOR",
+      "values": {
+        "roles.remediator": "codex"
+      },
+      "pools": {
+        "remediator-codex": [
+          "token-a",
+          "token-b"
+        ]
+      },
+      "source": "env:ROLE_SELECTOR",
+      "conflicts": [],
+      "pins": [],
+      "warnings": []
+    },
+    {
+      "name": "twin-roles.remediator",
+      "values": {
+        "roles.remediator": "codex-corp"
+      },
+      "pools": {
+        "remediator-codex": [
+          "token-a",
+          "token-b"
+        ]
+      },
+      "source": "top",
+      "conflicts": [
+        "roles.remediator"
+      ],
+      "pins": [
+        {
+          "identity": "remediator-codex",
+          "account_affinity": "openai-corporate"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "name": "canonical-roles.adversarial.merge_authority.worker_class-top",
+      "values": {
+        "roles.adversarial.merge_authority.worker_class": "hammer"
+      },
+      "pools": {
+        "hammer": [
+          "token-a",
+          "token-b"
+        ]
+      },
+      "source": "top",
+      "conflicts": [],
+      "pins": [],
+      "warnings": []
+    },
+    {
+      "name": "canonical-roles.adversarial.merge_authority.worker_class-local:config.local.yaml",
+      "values": {
+        "roles.adversarial.merge_authority.worker_class": "hammer"
+      },
+      "pools": {
+        "hammer": [
+          "token-a",
+          "token-b"
+        ]
+      },
+      "source": "local:config.local.yaml",
+      "conflicts": [],
+      "pins": [],
+      "warnings": []
+    },
+    {
+      "name": "canonical-roles.adversarial.merge_authority.worker_class-env:ROLE_SELECTOR",
+      "values": {
+        "roles.adversarial.merge_authority.worker_class": "hammer"
+      },
+      "pools": {
+        "hammer": [
+          "token-a",
+          "token-b"
+        ]
+      },
+      "source": "env:ROLE_SELECTOR",
+      "conflicts": [],
+      "pins": [],
+      "warnings": []
+    },
+    {
+      "name": "twin-roles.adversarial.merge_authority.worker_class",
+      "values": {
+        "roles.adversarial.merge_authority.worker_class": "hammer-corp"
+      },
+      "pools": {
+        "hammer": [
+          "token-a",
+          "token-b"
+        ]
+      },
+      "source": "top",
+      "conflicts": [
+        "roles.adversarial.merge_authority.worker_class"
+      ],
+      "pins": [
+        {
+          "identity": "hammer",
+          "account_affinity": "openai-corporate"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "name": "canonical-roles.merge_agent_worker_class-top",
+      "values": {
+        "roles.merge_agent_worker_class": "hammer"
+      },
+      "pools": {
+        "hammer": [
+          "token-a",
+          "token-b"
+        ]
+      },
+      "source": "top",
+      "conflicts": [],
+      "pins": [],
+      "warnings": []
+    },
+    {
+      "name": "canonical-roles.merge_agent_worker_class-local:config.local.yaml",
+      "values": {
+        "roles.merge_agent_worker_class": "hammer"
+      },
+      "pools": {
+        "hammer": [
+          "token-a",
+          "token-b"
+        ]
+      },
+      "source": "local:config.local.yaml",
+      "conflicts": [],
+      "pins": [],
+      "warnings": []
+    },
+    {
+      "name": "canonical-roles.merge_agent_worker_class-env:ROLE_SELECTOR",
+      "values": {
+        "roles.merge_agent_worker_class": "hammer"
+      },
+      "pools": {
+        "hammer": [
+          "token-a",
+          "token-b"
+        ]
+      },
+      "source": "env:ROLE_SELECTOR",
+      "conflicts": [],
+      "pins": [],
+      "warnings": []
+    },
+    {
+      "name": "twin-roles.merge_agent_worker_class",
+      "values": {
+        "roles.merge_agent_worker_class": "hammer-corp"
+      },
+      "pools": {
+        "hammer": [
+          "token-a",
+          "token-b"
+        ]
+      },
+      "source": "top",
+      "conflicts": [
+        "roles.merge_agent_worker_class"
+      ],
+      "pins": [
+        {
+          "identity": "hammer",
+          "account_affinity": "openai-corporate"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "name": "canonical-roles.build_pack_default_worker_class-top",
+      "values": {
+        "roles.build_pack_default_worker_class": "codex"
+      },
+      "pools": {
+        "codex": [
+          "token-a",
+          "token-b"
+        ]
+      },
+      "source": "top",
+      "conflicts": [],
+      "pins": [],
+      "warnings": []
+    },
+    {
+      "name": "canonical-roles.build_pack_default_worker_class-local:config.local.yaml",
+      "values": {
+        "roles.build_pack_default_worker_class": "codex"
+      },
+      "pools": {
+        "codex": [
+          "token-a",
+          "token-b"
+        ]
+      },
+      "source": "local:config.local.yaml",
+      "conflicts": [],
+      "pins": [],
+      "warnings": []
+    },
+    {
+      "name": "canonical-roles.build_pack_default_worker_class-env:ROLE_SELECTOR",
+      "values": {
+        "roles.build_pack_default_worker_class": "codex"
+      },
+      "pools": {
+        "codex": [
+          "token-a",
+          "token-b"
+        ]
+      },
+      "source": "env:ROLE_SELECTOR",
+      "conflicts": [],
+      "pins": [],
+      "warnings": []
+    },
+    {
+      "name": "twin-roles.build_pack_default_worker_class",
+      "values": {
+        "roles.build_pack_default_worker_class": "codex-corp"
+      },
+      "pools": {
+        "codex": [
+          "token-a",
+          "token-b"
+        ]
+      },
+      "source": "top",
+      "conflicts": [
+        "roles.build_pack_default_worker_class"
+      ],
+      "pins": [
+        {
+          "identity": "codex",
+          "account_affinity": "openai-corporate"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "name": "remediator-spelling-claude",
+      "values": {
+        "roles.remediator": "claude"
+      },
+      "pools": {
+        "remediator-claude": [
+          "token-c",
+          "token-d"
+        ]
+      },
+      "source": "top",
+      "conflicts": [],
+      "pins": [],
+      "warnings": []
+    },
+    {
+      "name": "remediator-spelling-claude-code",
+      "values": {
+        "roles.remediator": "claude-code"
+      },
+      "pools": {
+        "remediator-claude": [
+          "token-c",
+          "token-d"
+        ]
+      },
+      "source": "top",
+      "conflicts": [],
+      "pins": [],
+      "warnings": []
+    },
+    {
+      "name": "remediator-spelling-remediator-codex",
+      "values": {
+        "roles.remediator": "remediator-codex"
+      },
+      "pools": {
+        "remediator-codex": [
+          "token-a",
+          "token-b"
+        ]
+      },
+      "source": "top",
+      "conflicts": [],
+      "pins": [],
+      "warnings": []
+    },
+    {
+      "name": "remediator-spelling-remediator-claude",
+      "values": {
+        "roles.remediator": "remediator-claude"
+      },
+      "pools": {
+        "remediator-claude": [
+          "token-c",
+          "token-d"
+        ]
+      },
+      "source": "top",
+      "conflicts": [],
+      "pins": [],
+      "warnings": []
+    },
+    {
+      "name": "remediator-twin-claude-code-corp",
+      "values": {
+        "roles.remediator": "claude-code-corp"
+      },
+      "pools": {
+        "remediator-claude": [
+          "token-c",
+          "token-d"
+        ]
+      },
+      "source": "top",
+      "conflicts": [
+        "roles.remediator"
+      ],
+      "pins": [
+        {
+          "identity": "remediator-claude",
+          "account_affinity": "anthropic-corporate"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "name": "remediator-twin-remediator-claude-corp",
+      "values": {
+        "roles.remediator": "remediator-claude-corp"
+      },
+      "pools": {
+        "remediator-claude": [
+          "token-c",
+          "token-d"
+        ]
+      },
+      "source": "top",
+      "conflicts": [
+        "roles.remediator"
+      ],
+      "pins": [
+        {
+          "identity": "remediator-claude",
+          "account_affinity": "anthropic-corporate"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "name": "unpooled-twin",
+      "values": {
+        "roles.merge_agent_worker_class": "hammer-corp"
+      },
+      "pools": {
+        "codex": [
+          "token-a",
+          "token-b"
+        ]
+      },
+      "source": "top",
+      "conflicts": [],
+      "pins": [],
+      "warnings": []
+    },
+    {
+      "name": "order-agrees-personal-first-top",
+      "values": {
+        "roles.codex_worker_account_order": "personal-first"
+      },
+      "pools": {
+        "codex": [
+          "token-a",
+          "token-b"
+        ],
+        "codex-reviewer": [
+          "token-a",
+          "token-b"
+        ],
+        "hammer": [
+          "token-a",
+          "token-b"
+        ],
+        "remediator-codex": [
+          "token-a",
+          "token-b"
+        ]
+      },
+      "source": "top",
+      "conflicts": [],
+      "pins": [],
+      "warnings": [
+        "roles.codex_worker_account_order"
+      ]
+    },
+    {
+      "name": "order-agrees-personal-first-local:config.local.yaml",
+      "values": {
+        "roles.codex_worker_account_order": "personal-first"
+      },
+      "pools": {
+        "codex": [
+          "token-a",
+          "token-b"
+        ],
+        "codex-reviewer": [
+          "token-a",
+          "token-b"
+        ],
+        "hammer": [
+          "token-a",
+          "token-b"
+        ],
+        "remediator-codex": [
+          "token-a",
+          "token-b"
+        ]
+      },
+      "source": "local:config.local.yaml",
+      "conflicts": [],
+      "pins": [],
+      "warnings": [
+        "roles.codex_worker_account_order"
+      ]
+    },
+    {
+      "name": "order-agrees-personal-first-env:ACCOUNT_ORDER",
+      "values": {
+        "roles.codex_worker_account_order": "personal-first"
+      },
+      "pools": {
+        "codex": [
+          "token-a",
+          "token-b"
+        ],
+        "codex-reviewer": [
+          "token-a",
+          "token-b"
+        ],
+        "hammer": [
+          "token-a",
+          "token-b"
+        ],
+        "remediator-codex": [
+          "token-a",
+          "token-b"
+        ]
+      },
+      "source": "env:ACCOUNT_ORDER",
+      "conflicts": [],
+      "pins": [],
+      "warnings": [
+        "roles.codex_worker_account_order"
+      ]
+    },
+    {
+      "name": "order-disagrees-personal-first",
+      "values": {
+        "roles.codex_worker_account_order": "personal-first"
+      },
+      "pools": {
+        "codex": [
+          "token-b",
+          "token-a"
+        ],
+        "codex-reviewer": [
+          "token-b",
+          "token-a"
+        ],
+        "hammer": [
+          "token-b",
+          "token-a"
+        ],
+        "remediator-codex": [
+          "token-b",
+          "token-a"
+        ]
+      },
+      "source": "top",
+      "conflicts": [
+        "roles.codex_worker_account_order"
+      ],
+      "pins": [],
+      "warnings": []
+    },
+    {
+      "name": "singleton-personal-first-token-a",
+      "values": {
+        "roles.codex_worker_account_order": "personal-first"
+      },
+      "pools": {
+        "hammer": [
+          "token-a"
+        ]
+      },
+      "source": "top",
+      "conflicts": [],
+      "pins": [],
+      "warnings": [
+        "roles.codex_worker_account_order"
+      ]
+    },
+    {
+      "name": "singleton-personal-first-token-b",
+      "values": {
+        "roles.codex_worker_account_order": "personal-first"
+      },
+      "pools": {
+        "hammer": [
+          "token-b"
+        ]
+      },
+      "source": "top",
+      "conflicts": [],
+      "pins": [],
+      "warnings": [
+        "roles.codex_worker_account_order"
+      ]
+    },
+    {
+      "name": "order-agrees-corporate-first-top",
+      "values": {
+        "roles.codex_worker_account_order": "corporate-first"
+      },
+      "pools": {
+        "codex": [
+          "token-b",
+          "token-a"
+        ],
+        "codex-reviewer": [
+          "token-b",
+          "token-a"
+        ],
+        "hammer": [
+          "token-b",
+          "token-a"
+        ],
+        "remediator-codex": [
+          "token-b",
+          "token-a"
+        ]
+      },
+      "source": "top",
+      "conflicts": [],
+      "pins": [],
+      "warnings": [
+        "roles.codex_worker_account_order"
+      ]
+    },
+    {
+      "name": "order-agrees-corporate-first-local:config.local.yaml",
+      "values": {
+        "roles.codex_worker_account_order": "corporate-first"
+      },
+      "pools": {
+        "codex": [
+          "token-b",
+          "token-a"
+        ],
+        "codex-reviewer": [
+          "token-b",
+          "token-a"
+        ],
+        "hammer": [
+          "token-b",
+          "token-a"
+        ],
+        "remediator-codex": [
+          "token-b",
+          "token-a"
+        ]
+      },
+      "source": "local:config.local.yaml",
+      "conflicts": [],
+      "pins": [],
+      "warnings": [
+        "roles.codex_worker_account_order"
+      ]
+    },
+    {
+      "name": "order-agrees-corporate-first-env:ACCOUNT_ORDER",
+      "values": {
+        "roles.codex_worker_account_order": "corporate-first"
+      },
+      "pools": {
+        "codex": [
+          "token-b",
+          "token-a"
+        ],
+        "codex-reviewer": [
+          "token-b",
+          "token-a"
+        ],
+        "hammer": [
+          "token-b",
+          "token-a"
+        ],
+        "remediator-codex": [
+          "token-b",
+          "token-a"
+        ]
+      },
+      "source": "env:ACCOUNT_ORDER",
+      "conflicts": [],
+      "pins": [],
+      "warnings": [
+        "roles.codex_worker_account_order"
+      ]
+    },
+    {
+      "name": "order-disagrees-corporate-first",
+      "values": {
+        "roles.codex_worker_account_order": "corporate-first"
+      },
+      "pools": {
+        "codex": [
+          "token-a",
+          "token-b"
+        ],
+        "codex-reviewer": [
+          "token-a",
+          "token-b"
+        ],
+        "hammer": [
+          "token-a",
+          "token-b"
+        ],
+        "remediator-codex": [
+          "token-a",
+          "token-b"
+        ]
+      },
+      "source": "top",
+      "conflicts": [
+        "roles.codex_worker_account_order"
+      ],
+      "pins": [],
+      "warnings": []
+    },
+    {
+      "name": "singleton-corporate-first-token-b",
+      "values": {
+        "roles.codex_worker_account_order": "corporate-first"
+      },
+      "pools": {
+        "hammer": [
+          "token-b"
+        ]
+      },
+      "source": "top",
+      "conflicts": [],
+      "pins": [],
+      "warnings": [
+        "roles.codex_worker_account_order"
+      ]
+    },
+    {
+      "name": "singleton-corporate-first-token-a",
+      "values": {
+        "roles.codex_worker_account_order": "corporate-first"
+      },
+      "pools": {
+        "hammer": [
+          "token-a"
+        ]
+      },
+      "source": "top",
+      "conflicts": [],
+      "pins": [],
+      "warnings": [
+        "roles.codex_worker_account_order"
+      ]
+    },
+    {
+      "name": "mixed-pool-orders",
+      "values": {
+        "roles.codex_worker_account_order": "personal-first"
+      },
+      "pools": {
+        "codex": [
+          "token-a",
+          "token-b"
+        ],
+        "hammer": [
+          "token-b",
+          "token-a"
+        ]
+      },
+      "source": "top",
+      "conflicts": [
+        "roles.codex_worker_account_order"
+      ],
+      "pins": [],
+      "warnings": []
+    },
+    {
+      "name": "default-order-does-not-pin",
+      "values": {
+        "roles.codex_worker_account_order": "corporate-first"
+      },
+      "pools": {
+        "codex": [
+          "token-a",
+          "token-b"
+        ]
+      },
+      "source": "code-default",
+      "conflicts": [],
+      "pins": [],
+      "warnings": []
+    },
+    {
+      "name": "non-codex-order-irrelevant",
+      "values": {
+        "roles.codex_worker_account_order": "personal-first"
+      },
+      "pools": {
+        "hammer-claude": [
+          "token-d",
+          "token-c"
+        ]
+      },
+      "source": "top",
+      "conflicts": [],
+      "pins": [],
+      "warnings": []
+    }
+  ]
+}

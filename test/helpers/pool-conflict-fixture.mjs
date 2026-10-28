@@ -15,7 +15,7 @@ export function poolConflictFixture(t, { identities = ['codex'], invalidAccounts
   };
   writeFileSync(topPath, JSON.stringify({ version: 1, oauth }));
   writeFileSync(join(dir, 'config.local.yaml'), JSON.stringify({ roles: {
-    build_pack_default_worker_class: 'codex', codex_worker_account_order: 'personal-first',
+    build_pack_default_worker_class: 'codex-corp', codex_worker_account_order: 'personal-first',
   } }));
   return { oauth, options: { topPath, modulePaths: [], env: {} },
     env: { AGENT_OS_CONFIG_PATH: topPath } };

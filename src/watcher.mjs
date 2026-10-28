@@ -1,4 +1,4 @@
-import { prefetchWorkerRegistry } from './adapters/agent-runtime/local/remediation.mjs';
+import { ensureWorkerRegistryReady } from './adapters/agent-runtime/local/remediation.mjs';
 import { prepareWorkerObservationSession } from './dispatch-read-client.mjs';
 import { shutdownAmaHammerBackgroundQueue } from './ama-hammer-background-dispatch.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
@@ -1176,7 +1176,7 @@ async function pollOnceWithinBudget(
   // Cache-hit reuse happens within the tick (multiple PRs in this loop
   // see the same cached config); operator env rotations between ticks
   // propagate after this reset, not at next file-mtime change.
-  await prefetchWorkerRegistry().catch(error => console.warn(error.message));
+  await ensureWorkerRegistryReady().catch(error => console.warn(error.message));
   resetRoleConfigCache();
   refreshReviewerRuntimeAdapter();
   assertReviewDbWritesRoundTrip(db);
@@ -1645,7 +1645,7 @@ async function main() {
   });
   process.once('exit', () => singleton.release());
 
-  await prefetchWorkerRegistry().catch(error => console.warn(error.message));
+  await ensureWorkerRegistryReady().catch(error => console.warn(error.message));
   requireEnv('GITHUB_TOKEN');
   process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = resolveRateLimitSharedStatePath(process.env, ROOT);
   try {

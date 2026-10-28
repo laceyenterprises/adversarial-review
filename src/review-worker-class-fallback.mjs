@@ -1,6 +1,6 @@
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { FLEET_QUOTA_STATUS_TIMEOUT_MS } from './fleet-quota-status.mjs';
-import { resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
+import { ensureWorkerRegistryReady, resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
 import { selectCodexReviewerAccount } from './codex-account-routing.mjs';
 import { parseHqFleetQuotaSnapshot } from './fleet-quota-status.mjs';
 import { selectClaudeAccountLane } from './claude-account-routing.mjs';
@@ -521,6 +521,7 @@ export async function resolveReviewerWorkerClassWithFallback({
   };
   let primaryAvail;
   try {
+    await ensureWorkerRegistryReady({env});
     codexAccountSelection = selectCodexReviewerAccount(parseHqFleetQuotaSnapshot(stdout), {
       model: resolveRemediationModel('codex-reviewer', { env, pin: env.CODEX_MODEL_ID || null, fallbackModel: null }).resolvedModel,
       corporateExhausted: blockedCodexCorporate,
@@ -607,6 +608,7 @@ export async function resolveReviewerWorkerClassWithFallback({
       }
     }
   } catch (err) {
+    if (err.code === 'registry-unavailable') throw err;
     const message = fleetQuotaStatusErrorMessage(err);
     logger?.error?.(
       `[watcher] review-worker-class-fallback quota-status parse failed; failing open: ${message}`

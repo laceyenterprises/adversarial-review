@@ -1,4 +1,4 @@
-import { prefetchWorkerRegistry } from './adapters/agent-runtime/local/remediation.mjs';
+import { ensureWorkerRegistryReady } from './adapters/agent-runtime/local/remediation.mjs';
 import { prepareWorkerObservationSession } from './dispatch-read-client.mjs';
 import { readHostIdentitySync } from './dispatch-files-client.mjs';
 import { recoverInfrastructureChecks } from './ci-recovery.mjs';
@@ -442,6 +442,7 @@ function createRemediationRuntime({
       if (!worker) {
         throw new Error(`unknown remediation worker class: ${workerClass}`);
       }
+      await ensureWorkerRegistryReady({env});
       // Enforce (or, under the kill-switch, just audit) that the worker about to
       // be spawned commits + pushes under its PHYSICAL harness identity. On a
       // mismatch while enforcing, the spawn fn throws and this run() call fails
@@ -2900,7 +2901,7 @@ async function reconcileInProgressFollowUpJobs({
   // CLI entrypoints (cache is empty per process), so the contract held
   // by accident; this reset makes it robust against a future long-
   // running tick loop that folds reconciliation in.
-  await prefetchWorkerRegistry().catch(error => log.warn(error.message));
+  await ensureWorkerRegistryReady().catch(error => log.warn(error.message));
   resetRoleConfigCache();
   const cleanup = cleanupReconcileClaimArtifacts({ rootDir, log });
   if (cleanup.removedTmp || cleanup.removedLocks || cleanup.errors) {
@@ -3137,7 +3138,7 @@ async function consumeNextFollowUpJob({
   // cached config from a prior `loadRoleConfig` call (in this process
   // or via the role resolvers below) would mask the new env.
   try {
-    await prefetchWorkerRegistry();
+    await ensureWorkerRegistryReady();
   } catch (error) {
     if (error.code !== 'registry-unavailable') throw error;
     log.warn?.(`[follow-up-remediation] deferring claim until worker registry recovers: ${error.message}`);
@@ -3328,6 +3329,7 @@ async function consumeNextFollowUpJob({
       });
     }
     if (claimed.job.nonBlockingOnly === true && ['codex', 'remediator-codex', 'remediator-codex-corp'].includes(workerClass)) {
+      await ensureWorkerRegistryReady({env: jobEnv});
       codexModelResolution = resolveConfiguredNonBlockingCodexModel(jobEnv);
     }
     // Pooled accounts require dispatcher-owned selection, binding and leases.
@@ -3464,6 +3466,7 @@ async function consumeNextFollowUpJob({
     // consume hot path stays network-free under test. Keychain transport or an
     // already-present token is left untouched by the mint helper.
     if (!hqDispatchEnabled && ['claude-code', 'remediator-claude'].includes(workerClass) && mintClaudeCodeRemediationTokenImpl) {
+      await ensureWorkerRegistryReady({env: jobEnv});
       claudeModelResolution = resolveClaudeRemediationModel(jobEnv);
       // Pass `log` so the mint's bounded transient-retry ladder surfaces a
       // broker bounce in the daemon log instead of retrying silently.
@@ -4069,7 +4072,7 @@ async function stopConsumedJobWithComment({
 }
 
 async function main() {
-  await prefetchWorkerRegistry().catch(error => console.warn(`[follow-up-remediation] startup registry prefetch unavailable: ${error.message}`));
+  await ensureWorkerRegistryReady().catch(error => console.warn(`[follow-up-remediation] startup registry prefetch unavailable: ${error.message}`));
   if (process.argv.includes('--with-hq-integration')) {
     process.env.ADV_WITH_HQ_INTEGRATION = '1';
   }

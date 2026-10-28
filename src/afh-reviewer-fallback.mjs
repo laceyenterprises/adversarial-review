@@ -81,7 +81,7 @@ import {
   normalizeBuilderClass,
   normalizeReviewerModel,
 } from './adapters/subject/github-pr/routing.mjs';
-import { resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
+import { ensureWorkerRegistryReady, resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
 import { resolveClaudeReviewerOAuthTransport } from './claude-reviewer-oauth-transport.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -485,11 +485,13 @@ export async function readAfhReviewerGrounding({
   }
   if (!snapshot) {
     try {
+      await ensureWorkerRegistryReady({env});
       snapshot = afhGroundingSnapshotFromStdout(stdout, {
         claudeModel: resolveRemediationModel('claude-reviewer', { env, fallbackModel: null }).resolvedModel,
         codexModel: resolveRemediationModel('codex-reviewer', { env, pin: env.CODEX_MODEL_ID || null, fallbackModel: null }).resolvedModel,
       });
     } catch (err) {
+      if (err.code === 'registry-unavailable') throw err;
       snapshot = unavailableGrounding('fleet-quota-status-unreadable', err);
     }
   }

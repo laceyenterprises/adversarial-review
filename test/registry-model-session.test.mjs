@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { dispatchReadTransport, prepareWorkerObservationSession } from '../src/dispatch-read-client.mjs';
-import { prefetchWorkerRegistry, resolveRemediationModel } from '../src/adapters/agent-runtime/local/remediation.mjs';
+import { ensureWorkerRegistryReady, prefetchWorkerRegistry, resolveRemediationModel } from '../src/adapters/agent-runtime/local/remediation.mjs';
 import { prepareClaudeOAuthEnv, resolveReviewerExecution, resolveReviewerExecutionAsync } from '../src/reviewer-harness.mjs';
 import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { infraRecoverableFailureClass, reviewerFailureClassFromStoredRow } from '../src/reviewer-failure-classification.mjs';
@@ -113,7 +113,7 @@ test('registry outage defers remediation before claiming a pending job', async t
   }
 });
 
-test('registry expiry after claim requeues a non-blocking Codex job without spawning or losing a round', async t => {
+test('registry outage on refresh after claim requeues a non-blocking Codex job without spawning or losing a round', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'registry-claimed-expiry-'));
   const previousEndpoint = process.env.APP_CONTRACT_ENDPOINT_URL;
   const f = fixture(t, 'claimed-expiry');
@@ -126,7 +126,7 @@ test('registry expiry after claim requeues a non-blocking Codex job without spaw
       reviewBody: '## Summary\nFix it.\n\n## Verdict\nComment only',
       reviewPostedAt: '2026-10-28T10:00:00.000Z', critical: false});
     const result = await consumeNextFollowUpJob({rootDir, promptTemplate: 'fixture prompt', log: quiet,
-      onClaim(job) { job.nonBlockingOnly = true; now += 60_000; },
+      onClaim(job) { job.nonBlockingOnly = true; now += 60_000; f.set(new Error('fixture refresh down')); },
       resolvePRLifecycleImpl: async () => null,
       resolveRemediationWorkerClassImpl: async () => ({workerClass: 'codex'}),
       execFileImpl: () => assert.fail('expired registry must not invoke a subprocess'),
@@ -271,4 +271,18 @@ test('reviewer settlement retries registry faults without using auth tracking or
       assert.doesNotMatch(calls[0][1], /re-authenticate|OAuth credentials unavailable/);
     }
   } finally { rmSync(root, {recursive: true, force: true}); }
+});
+
+
+test('shared readiness coalesces cold reads and refreshes on expiry without borrowing another endpoint', async t => {
+  const f = fixture(t, 'shared-readiness');
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  await Promise.all(Array.from({length: 6}, () => ensureWorkerRegistryReady({env: {...f.env}})));
+  assert.deepEqual(f.counts(), {connects: 1, reads: 1});
+  now += 60_000;
+  f.set(reply('new-governed-claude'));
+  await Promise.all(Array.from({length: 6}, () => ensureWorkerRegistryReady({env: {...f.env}})));
+  assert.equal(resolveReviewerExecution('claude', {env: f.env, log: quiet}).model, 'new-governed-claude');
+  assert.deepEqual(f.counts(), {connects: 1, reads: 2});
 });

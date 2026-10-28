@@ -395,3 +395,29 @@ test(`CLOSERDISPATCHDEAD-01: ${projectKey} recovery selectors carry the exact gr
   }
 });
 }
+
+
+test('registry readiness uses a registered async session and refreshes the sync cache on TTL expiry', async t => {
+  const {ensureWorkerRegistryReady} = await import('../src/adapters/agent-runtime/local/remediation.mjs');
+  const env = {APP_CONTRACT_ENDPOINT_URL: 'https://example.invalid/dispatch-registry-refresh'};
+  let reads = 0, connects = 0, now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(dispatchReadTransport, 'sdk', () => ({
+    async connect(config) { connects++; return {sessionToken: 'fixture-session', endpoint_url: config.endpoint_url}; },
+    async readSessionHostServices(request, config) {
+      assert.equal(request.action, 'worker_registry');
+      assert.equal(config.session_token, 'fixture-session');
+      return {schema_version: 1, status: 'found', data: {classes: {fixture: {defaultModel: `model-${++reads}`}}}};
+    },
+    readHostServicesSync() { assert.fail('sync registry transport forbidden'); },
+  }));
+  const read = () => dispatchReadTransport.hostServicesSync({action: 'worker_registry'}, {env});
+  assert.throws(read, {code: 'registry-unavailable'});
+  await ensureWorkerRegistryReady({env});
+  assert.equal(read().data.classes.fixture.defaultModel, 'model-1');
+  now += 60_000;
+  assert.throws(read, {code: 'registry-unavailable'});
+  await ensureWorkerRegistryReady({env: {...env}});
+  assert.equal(read().data.classes.fixture.defaultModel, 'model-2');
+  assert.equal(connects, 1);
+});

@@ -58,6 +58,7 @@ import {
   resolveCodexRemediationModel,
   resolveGeminiRemediationModel,
   resolveRemediationModel,
+  ensureWorkerRegistryReady,
 } from './adapters/agent-runtime/local/remediation.mjs';
 import { resolveConfiguredNonBlockingCodexModel } from './adapters/agent-runtime/local/non-blocking-codex-model.mjs';
 import {
@@ -143,7 +144,8 @@ function modelOf(modelForClass, workerClass) {
   if (typeof modelForClass !== 'function') return null;
   try {
     return modelForClass(workerClass) || null;
-  } catch {
+  } catch (error) {
+    if (error.code === 'registry-unavailable') throw error;
     return null;
   }
 }
@@ -198,6 +200,7 @@ export async function resolveRemediationWorkerClassWithFallback({
   codexAccountPolicy = 'corporate-first',
   selectAccountImpl,
 } = {}) {
+  await ensureWorkerRegistryReady({env});
   modelForClass ??= (workerClass) => remediatorModelForClass(workerClass, { job, env });
   let primaryClass = String(primary || '').trim().toLowerCase();
   const fallbacks = [...new Set((Array.isArray(fallbackWorkerClasses) ? fallbackWorkerClasses : [])
@@ -226,6 +229,7 @@ export async function resolveRemediationWorkerClassWithFallback({
 
   const evidence = remediatorQuotaEvidence(job, { nowMs });
   const { statuses, snapshot, error } = await readFleetQuotaStatuses({ env, hqPath, execFileImpl });
+  await ensureWorkerRegistryReady({env});
   // Model lookups only matter against fleet `models[]` rows.
   const capOf = (workerClass) => classCapState(workerClass, {
     evidence,
@@ -445,6 +449,7 @@ export async function resolveClaimedRemediatorRouting({
     && !['codex', 'claude-code', 'clio-agent'].includes(String(job?.builderTag || '').trim().toLowerCase())) {
     accountPolicy = codexWorkerAccountPolicy('roles.registry.remediator.workerClass', primary, { env, topPath, loaderImpl });
   }
+  await ensureWorkerRegistryReady({env});
   const routing = await resolver({
     primary,
     codexAccountPolicy: accountPolicy,

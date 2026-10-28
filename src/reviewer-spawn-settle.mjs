@@ -56,7 +56,7 @@ import {
 import {
   CODEX_BUILDER_REVIEW_REFUSAL, reviewerRefusesBuilder, isCrossModelReviewWaived, normalizeReviewerModel,
 } from './adapters/subject/github-pr/routing.mjs';
-import { resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
+import { ensureWorkerRegistryReady, resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
 import { loadRoleConfig } from './role-config.mjs';
 import {
   AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS,
@@ -235,6 +235,7 @@ export async function readReviewerQuotaDecision({
     if (!status) {
       return { available: true, state: 'missing-provider-status', provider };
     }
+    await ensureWorkerRegistryReady({env});
     const cap = harnessCapFromStatuses(parseHqFleetQuotaStatus(JSON.stringify({ providerStatuses: accountStatuses })), {
       harness: corporateAccount ? (reviewerModel === 'codex' ? 'codex-corp' : 'claude-reviewer-corp') : reviewerModel,
       model: reviewerModel === 'codex'
@@ -242,7 +243,8 @@ export async function readReviewerQuotaDecision({
         : null,
     });
     return { available: !cap.capped, capped: cap.capped, state: cap.state, resetAt: cap.resetAt, provider };
-  } catch {
+  } catch (error) {
+    if (error.code === 'registry-unavailable') throw error;
     return {
       available: true,
       state: 'probe-error',

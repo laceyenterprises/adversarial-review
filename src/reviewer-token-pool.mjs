@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { resolveIdentityTokenPools } from './role-config.mjs';
 import { readAccountSelection } from './identity-token-snapshot.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
-import { resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
+import { ensureWorkerRegistryReady, resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
 import { normalizeReviewerModel } from './adapters/subject/github-pr/routing.mjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -98,6 +98,7 @@ export async function selectReviewerTokenAccount({ reviewerModel, requestId = 'r
   let journaled = false;
   try {
     if (!Object.hasOwn(oauth.identity_token_pools, identity)) return null;
+    if (model === null) await ensureWorkerRegistryReady({env});
     model ??= resolveRemediationModel(identity, { env,
       ...(family === 'codex' ? { pin: env.CODEX_MODEL_ID || null } : {}), fallbackModel: null }).resolvedModel;
     if (acquire) {
@@ -145,7 +146,8 @@ export async function selectReviewerTokenAccount({ reviewerModel, requestId = 'r
       brokerProvider: account.broker_provider,
       reason: selection.reason, tokenAccountId: selection.account_id,
       evidenceGeneration: selection.generation, selection, lease: lease ? Object.freeze({ ...lease }) : null });
-  } catch {
+  } catch (error) {
+    if (error.code === 'registry-unavailable') throw error;
     return { hold: true, reason: 'evidence-unknown', identity, pooled: true };
   } finally {
     if (journaled) markReviewerTokenLeaseActive(rootDir, requestId, false);

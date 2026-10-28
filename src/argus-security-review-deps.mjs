@@ -1,3 +1,4 @@
+import { ensureWorkerRegistryReady } from './adapters/agent-runtime/local/remediation.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 // ARGUSDRAIN-01 — the production I/O behind `reviewArgusJob`.
@@ -109,6 +110,7 @@ export function createDefaultArgusReviewDeps({
     reviewerDeferral: () => ({ resetAt: availability.resetAt }),
 
     async runReviewerModel({ model, prompt, cwd, diff }) {
+      await ensureWorkerRegistryReady({env});
       const options = { promptOverride: prompt, reviewerSubprocessCwd: cwd };
       let output;
       if (model === 'claude') output = await reviewWithClaude(diff || '', '', options);

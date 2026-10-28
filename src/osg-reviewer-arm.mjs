@@ -51,14 +51,14 @@ export async function applyReviewerArm({ baseRoute, domainId, repoPath, prNumber
     if (domainId !== 'code-pr' || !baseRoute || baseRoute.configBroken) return baseRoute;
     config ??= getConfig('osg', { mode: 'off' });
     if (!['apply', 'shadow'].includes(config?.mode)) return baseRoute;
-    const { resolveReviewerExecution } = await import('./reviewer-harness.mjs');
+    const { resolveReviewerExecutionAsync } = await import('./reviewer-harness.mjs');
     const currentRoute = applyEffectiveReviewerRoute({ baseRoute, builderClass: baseRoute.builderClass,
       mode: reviewerMode, primaryReviewerQuotaCapped, routeTable: routeTable ?? baseRoute.routeTable });
     const allowedFamilies = Object.keys(REVIEWER_ROUTE_BY_MODEL)
       .filter(family => !reviewerRefusesBuilder(baseRoute.builderClass, family));
     const result = await owner({ repo: repoPath, prNumber, mode: config.mode,
       reviewerModel: currentRoute.reviewerModel, allowedFamilies,
-      execution: resolveReviewerExecution(currentRoute.reviewerModel, { log }) });
+      execution: await resolveReviewerExecutionAsync(currentRoute.reviewerModel, { log }) });
     // Stable tokens only: the owner must never echo provider/DB diagnostics.
     const reason = /^[A-Za-z0-9_-]{1,80}$/.test(result?.reason) ? result.reason : 'error-invalid-owner';
     recordReason(log, reason, repoPath, prNumber);

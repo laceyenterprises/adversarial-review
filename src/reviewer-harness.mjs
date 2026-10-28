@@ -91,7 +91,7 @@ import {
   prepareAgyIdentityReview,
   resolveAgyReviewIdentityFromEnv,
 } from './agy-reviewer-identities.mjs';
-import { prefetchWorkerRegistry, RegistryUnavailableError, resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
+import { ensureWorkerRegistryReady, RegistryUnavailableError, resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
 import {
   REVIEW_POST_RETRY_DELAYS_MS,
   WAKE_HOOK_RETRY_DELAYS_MS,
@@ -1176,15 +1176,10 @@ function resolveReviewerExecution(harness, { env = process.env, fallbackModel = 
   return { model, effort, modelSource, effortSource };
 }
 
-// Async composition roots recover a cold/expired cache before retrying the pure
-// synchronous resolver. No model fallback or credential work precedes recovery.
+// Readiness is process-local and refreshes on expiry before any sync selection.
 async function resolveReviewerExecutionAsync(harness, args = {}) {
-  try { return resolveReviewerExecution(harness, args); }
-  catch (error) {
-    if (error.code !== 'registry-unavailable') throw error;
-    await prefetchWorkerRegistry({env: args.env ?? process.env});
-    return resolveReviewerExecution(harness, args);
-  }
+  await ensureWorkerRegistryReady({env: args.env ?? process.env});
+  return resolveReviewerExecution(harness, args);
 }
 
 function resolveCodexExecOverrides({ env = process.env, modelPin = '', reasoningPin = '', log = console } = {}) {
@@ -1300,7 +1295,7 @@ async function reviewWithCodex(diff, extraContext = '', {
   promptOverride = null,
   modelPin = '', reasoningPin = '',
 } = {}) {
-  await prefetchWorkerRegistry();
+  await ensureWorkerRegistryReady();
   console.error('[reviewWithCodex] asserting OAuth...');
   await assertCodexOAuth();
   console.error('[reviewWithCodex] OAuth OK');
@@ -1332,6 +1327,7 @@ async function reviewWithCodex(diff, extraContext = '', {
   const effectiveAuthPath = perWorkerAuth?.authPath || authPath;
   const codexSessionHome = perWorkerAuth?.codexHome || process.env.CODEX_HOME || null;
   const outputPath = join(tmpdir(), `codex-review-${process.pid}-${Date.now()}.md`);
+  await ensureWorkerRegistryReady();
   const codexExecOverrides = resolveCodexExecOverrides({ modelPin, reasoningPin });
   const changedLines = countChangedLines(diff);
   const effort = codexExecOverrides.reasoningEffort;
@@ -2841,7 +2837,7 @@ async function reviewWithGemini(diff, extraContext = '', {
   prepareAgyIdentityReviewImpl = prepareAgyIdentityReview,
   finishAgyIdentityReviewImpl = finishAgyIdentityReview,
 } = {}) {
-  await prefetchWorkerRegistry();
+  await ensureWorkerRegistryReady();
   const runtime = resolveGeminiRuntimeForReview(resolveGeminiRuntimeImpl, log);
   if (runtime !== 'cli' && runtime !== 'antigravity') {
     throw new Error(`Unsupported Gemini runtime: ${runtime}`);

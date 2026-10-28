@@ -1,3 +1,4 @@
+import { ensureWorkerRegistryReady } from './adapters/agent-runtime/local/remediation.mjs';
 import { reviewerAttributionForModel, validateReviewerAttribution } from './reviewer-attribution.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
@@ -1832,6 +1833,8 @@ async function main() {
     console.error('[reviewer] Missing required fields in args:', args);
     process.exit(1);
   }
+
+  await ensureWorkerRegistryReady();
 
   if (!pinReviewerGhIdentity(process.env, botTokenEnv).pinned) {
     console.error(`[github-auth-outage] required PR context missing selected ${botTokenEnv}`);

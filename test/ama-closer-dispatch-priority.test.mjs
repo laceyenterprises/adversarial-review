@@ -1,12 +1,12 @@
 import { assertHoldRecord } from '../src/ama/hold-record.mjs';
-import { seedCloserIntent, intentExpired } from './helpers/closer-intent-fixture.mjs';
+import { seedCloserIntent, intentExpired, intentEarly } from './helpers/closer-intent-fixture.mjs';
 import { selectWorkerTokenAccount } from '../src/worker-token-pool.mjs';
 import { poolConflictFixture } from './helpers/pool-conflict-fixture.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, readdirSync, statSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, readdirSync, statSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { hostname, tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 
@@ -181,6 +181,120 @@ function cleanValidateAndClickArgs(rootDir, overrides = {}) {
 function flagValue(args, flag) {
   const idx = args.indexOf(flag);
   return idx === -1 ? undefined : args[idx + 1];
+}
+
+for (const metadata of ['missing-id', 'unavailable', 'expired-key']) {
+  test(`CLOSERORPHAN-01: proven no-launch orphan (${metadata}) is torn down once before dispatch`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closer-orphan-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const args = findingsRemediationArgs(rootDir, { dispatchContext: {
+      dispatchedAt: metadata === 'expired-key' ? intentExpired : intentEarly,
+    } });
+    const identity = { repo: args.dispatchContext.repo, prNumber: 404, headSha: HEAD };
+    const f = seedCloserIntent(rootDir, identity, {
+      scenario: metadata === 'expired-key' ? 'absent' : 'early-absent',
+    });
+    const worktree = join(args.dispatchContext.hqRoot, 'workers', 'hammer-ama-pr-404-aaaaaaaaaaaa', 'agent-os');
+    mkdirSync(worktree, { recursive: true });
+    const deps = testDeps();
+    const events = [];
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps, ...f.options,
+      readWorkerDispatchFilesImpl: async () => metadata === 'unavailable'
+        ? { ok: false, reason: 'synthetic-unavailable' } : { ok: true, metadata: {} },
+      readLatestWorkerRunStatusImpl: async () => assert.fail('no launch ID may query a run'),
+      logger: { ...deps.logger, info: line => { if (line.startsWith('{')) events.push(JSON.parse(line)); },
+        warn: line => { if (line.startsWith('{')) events.push(JSON.parse(line)); } },
+      execFileImpl: async (cmd, argv, options) => {
+        if (argv[0] === 'worker' && argv[1] === 'tear-down') {
+          assert.deepEqual(argv, ['worker', 'tear-down', 'hammer-ama-pr-404-aaaaaaaaaaaa', '--root', args.dispatchContext.hqRoot]);
+          assert.equal(f.record().preReceiptReconciliation.status, 'no-launch');
+          // Simulate the host removing only this disposable fixture.
+          rmSync(worktree, { recursive: true });
+        }
+        return deps.execFileImpl(cmd, argv, options);
+      },
+    });
+    assert.equal(result.dispatched, true);
+    const hostCalls = deps.calls.filter(call => call.args[0] === 'worker' || call.args[0] === 'dispatch');
+    assert.deepEqual(hostCalls.map(call => call.args[0]), ['worker', 'dispatch']);
+    assert.ok(events.some(event => event.event === 'ama_closer.pre_receipt_reconciled'
+      && event.status === 'no-launch' && event.reason === (metadata === 'expired-key'
+        ? 'keyed-no-launch-proven' : 'dead-submitter-no-launch-proven')));
+    assert.equal(f.record().state, 'dispatched');
+    assert.equal(f.lease().status, 'dispatched');
+  });
+}
+
+test('CLOSERORPHAN-01: host refusal retains proof and defers repeated polls with one event', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-orphan-refusal-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = findingsRemediationArgs(rootDir, { dispatchContext: { dispatchedAt: intentEarly } });
+  const identity = { repo: args.dispatchContext.repo, prNumber: 404, headSha: HEAD };
+  const f = seedCloserIntent(rootDir, identity, { scenario: 'early-absent' });
+  const worktree = join(args.dispatchContext.hqRoot, 'workers', 'hammer-ama-pr-404-aaaaaaaaaaaa', 'agent-os');
+  mkdirSync(worktree, { recursive: true });
+  const deps = testDeps();
+  const events = [];
+  let refused = true;
+  const input = { ...args, ...deps, ...f.options,
+    readWorkerDispatchFilesImpl: async () => ({ ok: true, metadata: {} }),
+    readLatestWorkerRunStatusImpl: async () => assert.fail('no run exists'),
+    logger: { ...deps.logger, warn: line => { if (line.startsWith('{')) events.push(JSON.parse(line)); } },
+    execFileImpl: async (cmd, argv, options) => {
+      if (argv[0] === 'worker' && argv[1] === 'tear-down') {
+        assert.equal(argv.includes('--force'), false);
+        deps.calls.push({ cmd, args: argv });
+        if (refused) throw Object.assign(Error('synthetic host refusal'), { stderr: 'live-process-in-holder-cwd' });
+        rmSync(worktree, { recursive: true });
+        return { stdout: '', stderr: '' };
+      }
+      return deps.execFileImpl(cmd, argv, options);
+    },
+  };
+  for (let poll = 0; poll < 2; poll++) {
+    const result = await maybeDispatchAmaCloser(input);
+    assert.equal(result.dispatched, false);
+    assert.equal(result.skipMergeAgent, true);
+    assert.equal(f.record().preReceiptReconciliation.status, 'no-launch');
+    assert.equal(f.record().retryCount, 1);
+    assert.equal(f.lease().terminalOutcome, 'deferred');
+    assert.equal(existsSync(worktree), true);
+  }
+  assert.equal(deps.calls.filter(call => call.args[0] === 'dispatch').length, 0);
+  assert.equal(deps.calls.filter(call => call.args[0] === 'worker').length, 2);
+  const refusals = events.filter(event => event.event === 'closer_orphan_reclaim_refused');
+  assert.equal(refusals.length, 1);
+  assert.equal(refusals[0].reason, 'live-process-in-holder-cwd');
+  refused = false;
+  assert.equal((await maybeDispatchAmaCloser(input)).dispatched, true);
+  assert.equal(deps.calls.filter(call => call.args[0] === 'dispatch').length, 1);
+});
+
+for (const scenario of ['plain-unknown', 'live-launch', 'unknown-launch']) {
+  test(`CLOSERORPHAN-01: ${scenario} keeps custody without teardown or dispatch`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closer-orphan-hold-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const args = findingsRemediationArgs(rootDir, { dispatchContext: { dispatchedAt: intentEarly } });
+    const identity = { repo: args.dispatchContext.repo, prNumber: 404, headSha: HEAD };
+    const f = scenario === 'plain-unknown' ? null
+      : seedCloserIntent(rootDir, identity, { scenario: 'early-absent' });
+    mkdirSync(join(args.dispatchContext.hqRoot, 'workers', 'hammer-ama-pr-404-aaaaaaaaaaaa', 'agent-os'), { recursive: true });
+    const deps = testDeps();
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps, ...f?.options,
+      readWorkerDispatchFilesImpl: async () => ({ ok: true, metadata: scenario === 'plain-unknown'
+        ? {} : { launchRequestId: 'lrq_synthetic_bound' } }),
+      readLatestWorkerRunStatusImpl: async () => scenario === 'live-launch'
+        ? { ok: true, row: { status: 'running', pid: 424244 } }
+        : { ok: false, reason: 'missing-launch-request-id' },
+      // The recorded watcher is dead; the synthetic launch PID is alive.
+      processKillImpl: pid => {
+        if (pid !== 424244) throw Object.assign(Error('synthetic absent process'), { code: 'ESRCH' });
+      },
+    });
+    assert.equal(result.dispatched, false);
+    assert.equal(result.skipMergeAgent, true);
+    assert.equal(deps.calls.length, 0);
+  });
 }
 
 test('LRQSTATUS-01: the secondary launch probe persists a newly parked status', async t => {

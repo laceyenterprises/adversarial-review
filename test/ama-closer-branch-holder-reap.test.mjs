@@ -14,6 +14,38 @@ import { __testables__, samePrHammerHolderWorktreePaths } from '../src/ama/dispa
 // PR could never close.
 const HQ_ROOT = '/Users/airlock/agent-os-hq';
 
+for (const mismatch of ['missing-proof', 'unknown-proof', 'head', 'repo', 'pr', 'worker',
+  'key', 'nonempty-query', 'unreadable-query', 'unsettled', 'launch-receipt']) {
+  test(`CLOSERORPHAN-01: missing launch metadata retains custody with ${mismatch}`, async () => {
+    const record = { repo: 'fixture/project', prNumber: 17, headSha: 'a'.repeat(40),
+      workerId: 'hammer-ama-pr-17', state: 'no-dispatch', dispatchIdempotencyKey: 'synthetic-key',
+      preReceiptReconciliation: { status: 'no-launch', reason: 'dead-submitter-no-launch-proven',
+        query: { kind: 'launch-request-by-idempotency-key', idempotencyKey: 'synthetic-key', ok: true, rowCount: 0 } } };
+    if (mismatch === 'missing-proof') delete record.preReceiptReconciliation;
+    if (mismatch === 'unknown-proof') record.preReceiptReconciliation.status = 'unknown';
+    if (mismatch === 'head') record.headSha = 'b'.repeat(40);
+    if (mismatch === 'repo') record.repo = 'other/project';
+    if (mismatch === 'pr') record.prNumber = 18;
+    if (mismatch === 'worker') record.workerId = 'hammer-ama-pr-17-other';
+    if (mismatch === 'key') record.dispatchIdempotencyKey = 'other-key';
+    if (mismatch === 'nonempty-query') record.preReceiptReconciliation.query.rowCount = 1;
+    if (mismatch === 'unreadable-query') record.preReceiptReconciliation.query.ok = false;
+    if (mismatch === 'unsettled') record.state = 'dispatching';
+    if (mismatch === 'launch-receipt') record.launchRequestId = 'lrq_synthetic_bound';
+    const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+      repo: 'fixture/project', prNumber: 17, headSha: 'a'.repeat(40), noLaunchRecord: record,
+      workerClass: 'hammer', hqRoot: '/synthetic/hq', hqPath: '/synthetic/bin/hq',
+      existsSyncImpl: () => true, statSyncImpl: () => ({ mtimeMs: 0 }),
+      readWorkerDispatchFilesImpl: async () => ({ ok: true, metadata: {} }),
+      readLatestWorkerRunStatusImpl: async () => assert.fail('no launch ID may query a run'),
+      execFileImpl: async () => assert.fail('unproven absence cannot authorize teardown'),
+      logger: { info() {}, warn() {} },
+    });
+    assert.equal(result.attempted, false);
+    assert.equal(result.unknown, true);
+  });
+}
+
 test('unknown closer custody pages once at its durable bound without authorizing reclaim', async () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'closer-evidence-wait-'));
   const notices = [];

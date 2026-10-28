@@ -390,6 +390,22 @@ bounded watcher, submitter and key-presence evidence, without command lines.
 empty-key query. A crash after lease deferral replays only after re-proving the
 same evidence against that unchanged deferred lease. No config key, CI gate or
 live-state repair is added.
+
+CLOSERORPHAN-01: if the self-owned closer worktree lacks a launch ID
+(`missing-launch-request-id` or `dispatch-files-unavailable`), admission reads
+the current PR/head's settled `no-launch` reconciliation under the existing PR
+lock before publishing a replacement intent. A successful empty query for that
+record's idempotency key permits one `hq worker tear-down` request without
+`--force`; host ownership, process and Git proofs still decide removal. Successful
+teardown resumes ordinary dispatch. A refusal preserves the absence proof,
+defers the new pending lease without charging a launch, and emits
+`closer_orphan_reclaim_refused` with the host reason once per unchanged reason.
+The bounded `preReceiptReconciliation.orphanReclaimRefusal.reason` marker survives
+polls and restarts. Missing proof and live or unknown launch-bound runs retain
+custody. No direct worktree deletion, process kill or new configuration is added.
+After normal deployment, the runtime owner may observe organic recovery and
+refusal events; source validation uses disposable synthetic fixtures only.
+
 CLOSERINTENTRECON-01 makes closure orchestration and the recovery reaper invoke
 that same fenced reconciliation before deferring to an unresolved intent, at
 most once per named intent per pass and only for a dead/expired lease holder or

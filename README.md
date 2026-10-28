@@ -1159,6 +1159,16 @@ records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
 
+CLOSERORPHAN-01 reclaims a self-owned closer worktree lacking launch metadata
+only after the current PR/head has settled `no-launch` evidence from a successful
+empty idempotency-key query. The host receives one teardown request without
+`--force` before a replacement intent overwrites that proof. Refusal retains
+custody and the proof, with one structured event per unchanged host reason
+across polls/restarts; success resumes ordinary dispatch. Plain unknown and
+launch-bound runs retain their existing holds. Synthetic branch-holder and
+dispatch-priority fixtures cover recovery and refusal. Lifecycle states and
+smoke promises are unchanged; deployed recovery awaits natural observation.
+
 TIMEOUTSWEEP-01 scales nominal hammer/closer operation waits with host load.
 Timeouts retain unknown evidence and next-pass recovery; failed companion reads
 cannot reuse a stale closed/merged classification, and uncertain teardown cannot

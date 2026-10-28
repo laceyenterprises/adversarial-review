@@ -89,6 +89,17 @@ live-state repair is added.
 Settlement defers a matching pending lease and rolls back the intent retry
 increment once; retry ledgers and merge eligibility remain authoritative.
 
+CLOSERORPHAN-01: the current PR/head's settled `no-launch` reconciliation with
+a successful empty query for the record's idempotency key may authorize a host
+teardown request when the self-owned worktree lacks launch metadata. Admission
+reads this proof under the PR lock before replacing the intent. Refused teardown
+preserves the record and stores `preReceiptReconciliation.orphanReclaimRefusal`
+as `{ reason: <host refusal> }`, replacing the previous reason only when it
+changes. This bounded marker suppresses duplicate `closer_orphan_reclaim_refused`
+events across polls/restarts. Successful dispatch replaces the prior proof and
+marker with its new intent/receipt. Unknown evidence without this proof and
+live or unknown launch-bound runs retain custody. No lifecycle state is added.
+
 `bin/settle-legacy-closer-intent.mjs` also supports expired keyed intents. For
 keyed recovery it additionally queries the entire closer ticket at or after
 `lastAttemptedAt`, without repo/head filtering. A successful empty ticket query

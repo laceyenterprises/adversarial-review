@@ -263,7 +263,8 @@ for (const workerClass of ['hammer', 'hammer-claude']) {
           }) } : {}),
         });
         assert.deepEqual(result, { workerClass, fellBack: false, deferred: true,
-          reason: 'reviewer-model-unresolved', retryable: true });
+          reason: 'reviewer-model-unresolved', retryable: true,
+          refusalClass: 'unavailable', detail: 'host observation unavailable' });
       });
     }
   }

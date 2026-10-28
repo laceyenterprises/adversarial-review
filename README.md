@@ -286,6 +286,14 @@ Gemini's Google quota check. Both Claude accounts resolve the governed model fro
 the canonical `claude-reviewer` role; the selected broker provider binds token
 mints and renewals to the account.
 
+HOSTOBSDENIAL-01 retains safe host-read refusal classes and fixed detail:
+entitlement-denied names host.observations.read. Entitlement denials and
+not-found registries remain non-retryable reviewer-configuration-error faults
+and never permit seed fallback or infrastructure auto-recovery. Timeouts and
+outages permit seed selection for the six supported classes; unresolved
+classes retain the original retryable refusal. Sync diagnostics never satisfy
+readiness or suppress an async refresh.
+
 REGISTRYSESSION-02: each process that resolves governed reviewer, closer or
 remediation models owns its registry readiness. The shared
 `ensureWorkerRegistryReady()` helper asynchronously registers an app session and

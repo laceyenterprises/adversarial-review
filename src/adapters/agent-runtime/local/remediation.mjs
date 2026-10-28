@@ -411,12 +411,19 @@ function normalizeReasoningLevel(className, value, source, nowMs) {
 }
 
 class RegistryUnavailableError extends Error {
-  constructor(className = 'worker-registry', reason = 'registry and committed seed unavailable') {
-    super(`[reviewer-model-unresolved] modelSource=unresolved: governed model unavailable for ${className}; ${reason}`);
+  constructor(className = 'worker-registry', reason = 'registry and committed seed unavailable', observation) {
+    const failure = hostObservationFailure(observation ?? (typeof reason === 'object' ? reason : undefined));
+    const failureClass = failure.retryable ? 'reviewer-model-unresolved' : 'reviewer-configuration-error';
+    const context = typeof reason === 'string' ? `${reason}; ` : '';
+    super(`[${failureClass}] modelSource=unresolved: governed model unavailable for ${className}; ${context}worker registry read refused: ${failure.reason} (${failure.detail})`);
     this.name = 'RegistryUnavailableError';
     this.code = 'registry-unavailable';
-    this.failureClass = 'reviewer-model-unresolved';
-    this.retryable = true;
+    this.failureClass = failureClass;
+    this.workerClass = className;
+    this.reason = failure.reason;
+    this.detail = failure.detail;
+    this.retryable = failure.retryable;
+    this.category = failure.retryable ? 'infrastructure' : 'configuration';
     this.modelSource = 'unresolved';
   }
 }
@@ -429,6 +436,10 @@ async function ensureWorkerRegistryReady(args = {}) {
   // The observation adapter normalizes transport failures to { ok: false }.
   // Do not add another catch that can hide bugs in the readiness logic.
   const observed = await readHostObservation('worker_registry', args);
+  // Outages permit seed selection; authorization and missing-registry refusals do not.
+  if (!observed.ok && !hostObservationFailure(observed).retryable) {
+    throw new RegistryUnavailableError('worker-registry', observed);
+  }
   return Boolean(observed.ok && observed.data?.classes
     && typeof observed.data.classes === 'object' && !Array.isArray(observed.data.classes));
 }
@@ -474,8 +485,9 @@ function resolveRemediationModel(className, {
   seed = readCommittedWorkerModelSeed(),
   log = console,
 } = {}) {
+  let registryFailure;
   const fail = (reason) => {
-    const error = new RegistryUnavailableError(className, reason);
+    const error = new RegistryUnavailableError(className, reason, registryFailure);
     log.error?.(`[worker-model] ${className} modelSource=unresolved: ${reason}`);
     throw error;
   };
@@ -485,7 +497,8 @@ function resolveRemediationModel(className, {
     registrySpec = readWorkerClasses(nowMs, { env, hqRoot }).classes[className];
     registryAvailable = true;
   } catch (error) {
-    if (!(error instanceof RegistryUnavailableError)) throw error;
+    if (!(error instanceof RegistryUnavailableError) || !error.retryable) throw error;
+    registryFailure = error;
   }
   if (registryAvailable && registrySpec == null) fail('readable registry has no class; committed seed cannot restore a withdrawn class');
   const seedClasses = seed?.classes;

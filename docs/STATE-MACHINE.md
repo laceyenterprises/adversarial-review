@@ -54,8 +54,9 @@ state without infrastructure retries or auto-recovery. `timeout` and
 `unavailable` retain the retryable path above. Sync resolution retains the last
 redacted refusal in the matching connection/session scope until an async read
 succeeds. Diagnostic evidence never selects a model or suppresses an async read.
-No credentials, arbitrary response text, model fallback or new smoke action is
-authorized.
+No credentials, arbitrary response text or new smoke action is authorized.
+Entitlement denials and missing registries never permit seed fallback; retryable
+timeouts and outages permit the committed seed for its six supported classes.
 
 ## Actions billing/quota infrastructure (CIBLOCKINFRA-01)
 

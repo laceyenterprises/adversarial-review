@@ -6631,6 +6631,14 @@ model and provenance; recovery never inserts a literal model id. Non-blocking
 Codex configuration keeps its explicit allowlisted selection; its default now
 uses this resolver instead of a literal fallback.
 
+HOSTOBSDENIAL-01 retains safe host-read refusal classes and fixed detail:
+entitlement-denied names host.observations.read. Entitlement denials and
+not-found registries remain non-retryable reviewer-configuration-error faults
+and never permit seed fallback or infrastructure auto-recovery. Timeouts and
+outages permit seed selection for the six supported classes; unresolved
+classes retain the original retryable refusal. Sync diagnostics never satisfy
+readiness or suppress an async refresh.
+
 If neither the registry nor the committed seed supplies a valid default, or
 allowlist validation fails, resolution throws the existing retryable
 `registry-unavailable` / `reviewer-model-unresolved` infrastructure fault with

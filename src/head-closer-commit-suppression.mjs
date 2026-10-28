@@ -3,17 +3,37 @@ import { createHistoryReader } from './ama/history-reader.mjs';
 import { exactHammerValidation } from './ama/hammer-head-validation.mjs';
 import { fetchPrimaryChange } from './ama/primary-change.mjs';
 import { execFile } from 'node:child_process';
-import { stat } from 'node:fs/promises';
-import { isAbsolute } from 'node:path';
+import { realpath, stat } from 'node:fs/promises';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
 import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers } from './ama/ham-provenance.mjs';
 
 const execFileAsync = promisify(execFile);
+const checkoutInventories = new WeakMap();
+
+async function readCheckoutInventory(hqRoot, execFileImpl) {
+  let cache = checkoutInventories.get(execFileImpl);
+  if (!cache) { cache = new Map(); checkoutInventories.set(execFileImpl, cache); }
+  const bin = process.env.HQ_BIN || 'hq';
+  const key = JSON.stringify([bin, hqRoot]);
+  const now = Date.now();
+  const prior = cache.get(key);
+  if (prior && now - prior.at < 5000) return prior.promise;
+  const promise = execFileImpl(bin,
+    ['repo', 'list', '--json', ...(hqRoot ? ['--root', hqRoot] : [])],
+    {timeout: loadAwareTimeoutMs(5000), maxBuffer: 1024 * 1024})
+    .then(({stdout}) => JSON.parse(stdout));
+  const entry = {at: now, promise};
+  cache.set(key, entry);
+  try { return await promise; }
+  catch (error) { if (cache.get(key) === entry) cache.delete(key); throw error; }
+}
 
 // Resolve OS-managed checkouts through their public owner inventory. Explicit
 // app workspaces remain ordinary Git inputs; unavailable inventory uses the
-// existing GitHub transport, never a guessed OS directory.
+// existing GitHub transport. Name-only inventory rows may resolve a registered
+// repo under the inventory root, after identity and filesystem containment checks.
 export async function resolveLocalRepoCheckout(repoPath, hqRoot, {execFileImpl = execFileAsync} = {}) {
   const raw = String(repoPath || '').trim();
   if (!raw) return null;
@@ -21,14 +41,22 @@ export async function resolveLocalRepoCheckout(repoPath, hqRoot, {execFileImpl =
     try { return (await stat(raw)).isDirectory() ? raw : null; } catch { return null; }
   }
   try {
-    const {stdout} = await execFileImpl(process.env.HQ_BIN || 'hq',
-      ['repo', 'list', '--json', ...(hqRoot ? ['--root', hqRoot] : [])],
-      {timeout: loadAwareTimeoutMs(5000), maxBuffer: 1024 * 1024});
-    const value = JSON.parse(stdout);
+    const value = await readCheckoutInventory(hqRoot, execFileImpl);
     if (!Array.isArray(value.repos) || value.errors?.length) return null;
     const name = raw.split('/').pop();
-    const row = value.repos.find(row => row.name === name);
-    return typeof row?.checkoutPath === 'string' && isAbsolute(row.checkoutPath) ? row.checkoutPath : null;
+    const rows = value.repos.filter(row => row.name === name);
+    if (rows.length !== 1) return null;
+    const row = rows[0];
+    if (typeof row.checkoutPath === 'string' && isAbsolute(row.checkoutPath)) return row.checkoutPath;
+    // A same-name repository from another owner is not this PR's checkout.
+    const slug = String(row.url || '').replace(/^https:\/\/github\.com\//, '')
+      .replace(/^git@github\.com:/, '').replace(/\.git\/?$/, '').replace(/\/$/, '');
+    if (slug !== raw || !hqRoot || !isAbsolute(hqRoot) || !/^[A-Za-z0-9_.-]+$/.test(name) || name === '.' || name === '..') return null;
+    const root = await realpath(join(hqRoot, 'repos'));
+    const candidate = await realpath(join(root, name));
+    const within = relative(root, candidate);
+    if (!within || within === '..' || within.startsWith(`..${sep}`) || isAbsolute(within)) return null;
+    return (await stat(candidate)).isDirectory() ? candidate : null;
   } catch { return null; }
 }
 

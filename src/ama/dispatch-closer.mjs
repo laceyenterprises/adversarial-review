@@ -382,6 +382,16 @@ function noAmaDispatch(result) {
   };
 }
 
+async function deferUnknownCloserCustody({ rootDir, repo, prNumber, headSha, now,
+  env, pageImpl }) {
+  const evidenceWait = await observeClosureWait({ rootDir, repo, prNumber, headSha,
+    reason: 'hammer-closer-liveness-unknown', waitClass: 'closer-worker-evidence',
+    now, env, pageImpl });
+  return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+    reason: evidenceWait.exhausted ? 'hammer-closer-evidence-wait-exhausted' : 'hammer-closer-in-flight',
+    needsOperator: evidenceWait.exhausted, evidenceWait });
+}
+
 function normalizeAmaLivePrProbeResult(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const state = String(raw.state || raw.prState || '').trim().toUpperCase();
@@ -3398,6 +3408,7 @@ export const __testables__ = Object.freeze({
   logHammerCleanupFailure,
   reclaimSelfOwnedHammerCloserWorktreeBeforeProvision,
   resolveSelfOwnedHammerCloserRunLiveness,
+  deferUnknownCloserCustody,
   resolveRollupRequiredChecks,
   selfOwnedHammerCloserWorktreePath,
   isProvisionBranchHolderBlocked,
@@ -7482,14 +7493,20 @@ async function maybeDispatchAmaCloserAttempt({
     logger,
   });
   if (closerReclaim?.live || closerReclaim?.unknown) {
-    // A healthy hammer closer for this PR is still in-flight. Do NOT re-provision
+    // Retain custody for a live closer or unavailable liveness evidence. Do NOT re-provision
     // (which collides on the worktree and force-kills the live worker) and do NOT
     // fall back to the merge-agent (which skips as remediation-active). Defer this
-    // cycle and let the live closer finish; the next poll re-evaluates cleanly.
+    // cycle; unknown evidence has a durable bounded page, never age-based teardown.
     logger.info?.(
       `[ama-closer] deferring dispatch: PR ${repo}#${prNumber} hammer closer custody is retained `
       + `(status=${closerReclaim.workerStatus || 'unknown'}); waiting for it to complete`,
     );
+    if (closerReclaim.unknown) {
+      return deferUnknownCloserCustody({ rootDir, repo, prNumber,
+        headSha: targetRemediationSha, now: Date.parse(dispatchContext.dispatchedAt), env,
+        pageImpl: (message, options) => deliverAlertImpl(message, { ...options,
+          event: 'ama_closer.worker_evidence_wait_exhausted', payload: { repo, prNumber } }) });
+    }
     return noAmaDispatch({
       dispatched: false,
       skipMergeAgent: true,

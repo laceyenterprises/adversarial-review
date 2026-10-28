@@ -6535,23 +6535,26 @@ The reaper requires absolute checkout paths and explicit `worktreeRoots` coverag
 complete. A deployed `hq repo list --json` row containing only name, URL,
 trunkBranch and commitSha is incomplete and cannot authorize half-registered
 cleanup. Explicit caller-supplied repo paths remain the caller's complete scope.
-The head-closer resolver likewise requires an inventory `checkoutPath`; name-only
-rows use the existing GitHub fallback. It does not infer private HQ layout.
-Consequently local closer-head recovery can be unavailable in an unauthenticated
-daemon until producer inventory support is deployed. That fallback currently
-spawns an inventory process per resolution; inventory caching is deferred with
-the producer contract rather than caching a guessed path.
+The head-closer resolver accepts an explicit inventory `checkoutPath`. For a
+name-only row, it verifies the registered GitHub URL matches the requested slug
+and resolves `<hqRoot>/repos/<name>` only when its real path stays inside the
+repository root and is an existing directory. Duplicate registrations, foreign
+owners and symlink escapes fail closed to the existing GitHub fallback. Inventory
+snapshots share a five-second process-local cache per root/transport, including
+concurrent reads; failed reads are not cached. This checkout compatibility rule
+does not establish the complete worktree coverage required by the reaper.
 
-Two liveness limits remain open: original-worker teardown defers on missing
-worker evidence, and closer reclaim retains unknown liveness without an internal
-deferral cap. No automatic reclamation from age alone is authorized by this
-change; that could kill a live successor. These holds emit existing lifecycle
-logs, but those logs are not a bounded page or recovery guarantee. The runtime
-operator owns resolving grants/observation availability and inspecting such
-holds before rollout. A durable bound/page policy and producer-backed checkout
-inventory remain follow-up acceptance work tracked by consumer PR #1583 and
-coordinated producer agent-os#9570. This round does not claim to implement those
-bounds or to restore local checkout recovery for name-only inventories.
+Original-worker teardown retains custody on missing evidence, and closer reclaim
+retains unknown liveness. Both now use the existing durable closure-wait ledger:
+`original-worker-evidence` and `closer-worker-evidence` have independent per-head
+deadlines and once-only pages across ticks and restarts. The nominal bound is
+30 minutes, scaled by load; `AMA_CLOSURE_WAIT_BOUND_MS` sets the base. Exhaustion
+reports `needsOperator: true`; the closer also reports
+`hammer-closer-evidence-wait-exhausted`. The runtime operator restores grants or
+observation availability and inspects the retained worker; later polls still
+recheck evidence and can resume normally. Failed alert delivery refunds its
+receipt for retry. Expiry never authorizes teardown or a second launch, and
+positive live-worker evidence retains its ordinary in-flight handling.
 
 The release operator for agent-os#9570 owns the coordinated SDK handoff tracked
 in that PR and consumer #1583: after producer merge, compare the merged archive's

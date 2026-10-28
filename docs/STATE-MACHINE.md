@@ -2528,5 +2528,9 @@ observations no longer select an uncharged deploy-wedge reviewer pause. A bug
 failure retains ordinary charged settlement; positive freeze evidence or explicit
 producer unreadability retains the existing pause. No status value is added.
 Ambiguous worker runs and incomplete repository registration inventories retain
-custody. Unknown teardown/reclaim waits still have no internal escalation bound;
-see the closure runbook's public evidence rollout limits and tracked follow-ups.
+custody. Unknown teardown/reclaim observations now enter the durable
+`original-worker-evidence` or `closer-worker-evidence` wait class. After the
+load-scaled thirty-minute base, exhaustion pages once per head/class and reports
+`needsOperator`; no expiry permits teardown or duplicate dispatch. Evidence is
+rechecked on later polls, so restoring observations resumes normal resolution.
+See the closure runbook's public evidence rollout limits.

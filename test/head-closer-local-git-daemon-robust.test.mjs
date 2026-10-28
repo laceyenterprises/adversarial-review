@@ -1,6 +1,6 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, readdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execGhWithRetry } from '../src/gh-cli.mjs';
@@ -755,10 +755,30 @@ test('HAMFINAL-02: no-diff hammer validation suppresses review of the exact flee
 });
 
 
-test('deployed name-only inventory leaves local closer resolution unavailable', async () => {
-  const result = await resolveLocalRepoCheckout('acme/agent-os', TEST_HQ_ROOT, {
-    execFileImpl: async () => ({stdout: JSON.stringify({repos: [{name: 'agent-os',
-      url: 'https://github.com/acme/agent-os', trunkBranch: 'main', commitSha: HEAD_SHA}], errors: []})}),
-  });
-  assert.equal(result, null);
+test('registered name-only inventory restores local closer resolution and shares its snapshot', async () => {
+  let calls = 0;
+  const execFileImpl = async () => {
+    calls++;
+    return { stdout: JSON.stringify({ repos: [{ name: 'agent-os',
+      url: 'https://github.com/acme/agent-os', trunkBranch: 'main', commitSha: HEAD_SHA }], errors: [] }) };
+  };
+  const results = await Promise.all(Array.from({ length: 3 }, () =>
+    resolveLocalRepoCheckout('acme/agent-os', TEST_HQ_ROOT, { execFileImpl })));
+  assert.deepEqual(results, Array(3).fill(join(TEST_HQ_ROOT, 'repos', 'agent-os')));
+  assert.equal(await resolveLocalRepoCheckout('foreign/agent-os', TEST_HQ_ROOT, { execFileImpl }), null);
+  assert.equal(calls, 1);
+});
+
+test('name-only checkout resolution rejects ambiguous inventory and symlink escapes', async () => {
+  const row = { name: 'agent-os', url: 'https://github.com/acme/agent-os' };
+  assert.equal(await resolveLocalRepoCheckout('acme/agent-os', TEST_HQ_ROOT, {
+    execFileImpl: async () => ({ stdout: JSON.stringify({ repos: [row, row], errors: [] }) }),
+  }), null);
+  const escaped = mkdtempSync(join(tmpdir(), 'closer-escape-'));
+  tempRoots.push(escaped);
+  symlinkSync(escaped, join(TEST_HQ_ROOT, 'repos', 'escape'));
+  assert.equal(await resolveLocalRepoCheckout('acme/escape', TEST_HQ_ROOT, {
+    execFileImpl: async () => ({ stdout: JSON.stringify({ repos: [{ name: 'escape',
+      url: 'https://github.com/acme/escape' }], errors: [] }) }),
+  }), null);
 });

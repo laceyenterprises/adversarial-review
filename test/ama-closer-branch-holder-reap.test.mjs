@@ -1,8 +1,7 @@
-import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
-installDispatchFileProducerFixture();
+import './helpers/dispatch-files-preload.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -14,6 +13,26 @@ import { __testables__, samePrHammerHolderWorktreePaths } from '../src/ama/dispa
 // (hammer-ama-pr-<PR> only) returned [] here, so the reap never fired and the
 // PR could never close.
 const HQ_ROOT = '/Users/airlock/agent-os-hq';
+
+test('unknown closer custody pages once at its durable bound without authorizing reclaim', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-evidence-wait-'));
+  const notices = [];
+  const options = { rootDir, repo: 'acme/repo', prNumber: 42, headSha: 'a'.repeat(40),
+    env: { AMA_CLOSURE_WAIT_BOUND_MS: '1' }, pageImpl: async text => notices.push(text) };
+  try {
+    const first = await __testables__.deferUnknownCloserCustody({ ...options, now: 1000 });
+    assert.equal(first.needsOperator, false);
+    const expired = await __testables__.deferUnknownCloserCustody({ ...options, now: 86_401_000 });
+    assert.equal(expired.reason, 'hammer-closer-evidence-wait-exhausted');
+    assert.equal(expired.needsOperator, true);
+    assert.equal(expired.skipMergeAgent, true);
+    assert.equal(expired.dispatched, false);
+    assert.equal(expired.evidenceWait.startedAt, first.evidenceWait.startedAt);
+    await __testables__.deferUnknownCloserCustody({ ...options, now: 172_801_000 });
+    assert.equal(notices.length, 1);
+    assert.match(notices[0], /hammer-closer-liveness-unknown/);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
 
 const TCT04_PROVISION_ERROR = {
   stderr: [

@@ -1,4 +1,5 @@
 import { readHostIdentitySync, readHostObservationSync } from './dispatch-files-client.mjs';
+import { observeClosureWait } from './ama/closure-wait.mjs';
 import { readDispatchStatus } from './producer-contracts/launch-status.mjs';
 import { parseHqDispatchStatusOutput } from './hq-dispatch-status-output.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
@@ -2044,6 +2045,7 @@ async function dispatchMergeAgentForPR({
   hqPath = DEFAULT_HQ_PATH,
   agentOsDetectImpl = detectAgentOsPresence,
   prepareOriginalWorkerImpl = prepareOriginalWorkerForMergeAgent,
+  observeClosureWaitImpl = observeClosureWait,
   resolveMergeAgentHarnessImpl = resolveMergeAgentDispatchHarness,
   dispatchRetryDelaysMs = HQ_DISPATCH_TRANSIENT_RETRY_DELAYS_MS,
   logger = console,
@@ -2546,9 +2548,14 @@ async function dispatchMergeAgentForPR({
     logger,
   });
   if (originalWorkerPrep?.decision === 'deferred') {
+    const wait = await observeClosureWaitImpl({rootDir, repo, prNumber, headSha,
+      reason: originalWorkerPrep.reason || 'original-worker-not-terminal',
+      waitClass: 'original-worker-evidence', now: Date.parse(now), env: runtimeEnv});
     return {
       decision: 'dispatch-deferred',
       reason: originalWorkerPrep.reason || 'original-worker-not-terminal',
+      needsOperator: wait.exhausted,
+      evidenceWait: wait,
       originalWorkerId: originalWorkerPrep.originalWorkerId || null,
       workerStatus: originalWorkerPrep.workerStatus || null,
       launchRequestId: originalWorkerPrep.launchRequestId || null,

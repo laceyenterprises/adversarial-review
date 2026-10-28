@@ -163,9 +163,11 @@ try {
     'HQ_LAUNCH_REQUEST_ID', 'LAUNCH_REQUEST_ID', 'AGENT_OS_WORKER_LRQ_ID',
     'AGENT_OS_WORKER_SPAWN_MARKER', 'HAM_CONTROLLER_RECORD', 'HAM_CONTROLLER_TOKEN',
     'HAM_CONTROLLER_PID', 'HAM_CONTROLLER_FD',
+    'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE',
+    'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES',
   ]);
   const testEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
-    !inheritedStatePaths.has(key) && !/^(?:GH_.*TOKEN|GITHUB_.*TOKEN|.*_GH_TOKEN)(?:_REFRESH_COMMAND|_EXPIRES_AT)?$/.test(key)));
+    !inheritedStatePaths.has(key) && !key.startsWith('HCP_') && !/^(?:GH_.*TOKEN|GITHUB_.*TOKEN|.*_GH_TOKEN)(?:_REFRESH_COMMAND|_EXPIRES_AT)?$/.test(key)));
   child = spawn(process.execPath, [
     '--preserve-symlinks',
     '--preserve-symlinks-main',
@@ -188,6 +190,8 @@ try {
       // node:test coordinator must never inherit the caller's live roots.
       HQ_ROOT: coordinatorHqRoot,
       AGENT_OS_HQ_ROOT: coordinatorHqRoot,
+      AGENT_OS_DEPLOY_CHECKOUT: path.join(sandboxTmpDir, 'deploy-checkout'),
+      GIT_CEILING_DIRECTORIES: sandboxRoot,
       HOME: coordinatorHome,
       USERPROFILE: coordinatorHome,
       GH_CONFIG_DIR: path.join(sandboxRoot, 'gh-config'),

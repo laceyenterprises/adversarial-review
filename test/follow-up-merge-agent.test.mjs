@@ -1,8 +1,7 @@
-import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
-installDispatchFileProducerFixture();
 // Must stay the first import: it isolates this file's state before any production module loads.
 import './helpers/rate-limit-state-isolation.mjs';
 import './helpers/worker-observation-fixture.mjs';
+import './helpers/dispatch-files-preload.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -28,6 +27,7 @@ import {
   writeFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
+import { observeClosureWait } from '../src/ama/closure-wait.mjs';
 import { CASCADE_FAILURE_CAP, recordCascadeFailure } from '../src/reviewer-cascade.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE, resetConfigCache } from '../src/config-loader.mjs';
 import { extractNonBlockingFindingIdentities } from '../src/kernel/remediation-reply.mjs';
@@ -3149,6 +3149,28 @@ test('dispatchMergeAgentForPR retries transient hq dispatch failures with the sa
   assert.ok(hqCalls[2].args.includes('--priority'));
   assert.equal(result.launchRequestId, 'lrq_after_retry');
   assert.equal(listMergeAgentDispatches(rootDir)[0].priorityFlagSupported, true);
+});
+
+test('dispatchMergeAgentForPR bounds missing original-worker evidence and pages without launching', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'merge-evidence-wait-'));
+  const notices = [];
+  const options = { ...makeJob(), rootDir, agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    env: { ...HERMETIC_CONFIG_ENV, AMA_CLOSURE_WAIT_BOUND_MS: '1' },
+    prepareOriginalWorkerImpl: async () => ({ decision: 'deferred', reason: 'dispatch-files-unavailable' }),
+    observeClosureWaitImpl: opts => observeClosureWait({ ...opts, pageImpl: async text => notices.push(text) }),
+    execFileImpl: async () => { throw new Error('must not launch or tear down without worker evidence'); } };
+  try {
+    const first = await dispatchMergeAgentForPR({ ...options, now: '2026-10-01T00:00:00.000Z' });
+    assert.equal(first.decision, 'dispatch-deferred');
+    assert.equal(first.needsOperator, false);
+    const expired = await dispatchMergeAgentForPR({ ...options, now: '2026-10-02T00:00:00.000Z' });
+    assert.equal(expired.decision, 'dispatch-deferred');
+    assert.equal(expired.needsOperator, true);
+    assert.equal(expired.evidenceWait.startedAt, first.evidenceWait.startedAt);
+    await dispatchMergeAgentForPR({ ...options, now: '2026-10-03T00:00:00.000Z' });
+    assert.equal(notices.length, 1);
+    assert.match(notices[0], /dispatch-files-unavailable/);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
 
 test('dispatchMergeAgentForPR tears down terminal original worker before merge-agent dispatch', async () => {

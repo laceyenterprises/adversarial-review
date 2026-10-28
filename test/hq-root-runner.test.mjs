@@ -8,7 +8,7 @@ import test from 'node:test';
 
 const testDir = dirname(fileURLToPath(import.meta.url));
 
-test('runner replaces inherited HQ roots, clears host run-as users, ignores exhausted home quota and cleans up each root', () => {
+test('runner isolates inherited roots and credentials, ignores exhausted home quota and cleans up each root', () => {
   const fixture = mkdtempSync(join(tmpdir(), 'hq-runner-fixture-'));
   try {
     const home = join(fixture, 'home');
@@ -31,6 +31,13 @@ test('runner replaces inherited HQ roots, clears host run-as users, ignores exha
         HOME: home,
         HQ_ROOT: primary,
         AGENT_OS_HQ_ROOT: secondaryRoot,
+        AGENT_OS_DEPLOY_CHECKOUT: fixture,
+        HCP_TOKEN: 'fixture-token',
+        HCP_BEARER_TOKEN: 'fixture-bearer-token',
+        HCP_TOKEN_PATH: join(fixture, 'host-token'),
+        HCP_BASE_URL: 'https://fixture.invalid',
+        GIT_DIR: join(fixture, 'host.git'),
+        GIT_WORK_TREE: fixture,
         AGENT_OS_WORKER_RUN_AS_USER: 'fixture-primary-worker',
         HQ_WORKER_RUN_AS_USER: 'fixture-fallback-worker',
         HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: 'exit 91',
@@ -56,6 +63,7 @@ test('runner replaces inherited HQ roots, clears host run-as users, ignores exha
         assert.notEqual(observed.root, inheritedRoot);
         assert.notEqual(observed.root, secondaryRoot);
         assert.notEqual(observed.home, home);
+        assert.notEqual(observed.deployCheckout, fixture);
         assert.equal(existsSync(observed.root), false, 'the file HQ root must be removed after exit');
         assert.equal(existsSync(observed.home), false, 'the file home must be removed after exit');
       }

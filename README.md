@@ -3750,6 +3750,9 @@ repository inventories retain custody. Unavailable deploy evidence leaves ordina
 reviewer failures charged; only positive freeze or explicitly unreadable producer
 state pauses them. Managed-CI trusts the producer verifier plus exact repo/head
 binding. Offline regressions cover these cases; smoke promises are unchanged.
-Runtime owner acceptance must check producer inventory/grants and resolve unknown
-custody holds before activation; bounded escalation and name-only local checkout
-resolution remain follow-ups. See [rollout limits](docs/RUNBOOK-ama-closure.md#public-evidence-rollout-limits-pr-1583).
+Unknown original-worker and closer custody retains ownership, with durable
+per-head escalation after the load-scaled closure-wait bound. Registered name-only
+checkout inventory supports local recovery after URL identity and real-path
+containment checks; incomplete worktree inventories still cannot authorize reaping.
+Runtime owner acceptance must check producer inventory/grants before activation.
+See [rollout limits](docs/RUNBOOK-ama-closure.md#public-evidence-rollout-limits-pr-1583).

@@ -459,7 +459,7 @@ export async function withDerivedCheckout({ repo, rootDir, headSha, mergeBase, p
         refs.add(ref);
       }
       // Absence is distinct from an unreadable object or a failed Git command.
-      if (optional && !(await git('--git-dir=objects.git', 'ls-tree', '--name-only', '-z', ref, '--', path)).stdout) return null;
+      if (optional && !(await git('--git-dir=objects.git', 'ls-tree', '-r', '--name-only', '-z', ref, '--', path)).stdout) return null;
       return (await git('--git-dir=objects.git', 'show', `${ref}:${path}`)).stdout;
     };
     const reset = async () => {

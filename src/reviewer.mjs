@@ -1835,7 +1835,7 @@ async function main() {
     process.exit(1);
   }
 
-  await ensureWorkerRegistryReady();
+  await ensureWorkerRegistryReady({pin: ['codex', 'claude'].includes(reviewerModel) ? reviewerArm?.model : ''});
   // Model infrastructure must resolve before either GitHub or model auth.
   resolveReviewerExecution(reviewerModel, {
     modelPin: ['codex', 'claude'].includes(reviewerModel) ? reviewerArm?.model || '' : '',

@@ -115,6 +115,15 @@ REMODELFALLBACK-01 adds its `modelSource` (`env-pin`, `registry`, `committed-see
 execution. Historical metadata may omit this field. Failed resolution carries
 `modelSource=unresolved` on the retryable infrastructure error and log; it does
 not invent a model or successful execution record.
+
+REMODELFALLBACK-02 also preserves `modelSource=unresolved` for non-retryable
+configuration refusals naming `host.observations.read`, without a seed warning.
+Only retryable infrastructure failures permit seed defaults. Valid explicit pins
+remain allowlist-validated with `env-pin` provenance. Native Codex and OAuth
+Responses recovery share the selected model and source. After deployment, the
+build manager reads `metadata_json.reviewerExecution.modelSource` on an organic
+review, expecting `registry` with the grant present and no explicit pin.
+
 For Claude, its `replySelection` records `candidateCount`, the one-based
 `selectedCandidate`, `selectedType` (`result` or `assistant`), `laterCandidates`
 set aside, and `contractValid`. The newest individual output passing

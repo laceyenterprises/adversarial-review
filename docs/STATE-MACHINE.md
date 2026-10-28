@@ -46,6 +46,28 @@ After normal deployment, observe organic reviewer/security routing and quota
 grounding for registry provenance or visible seed warnings; offline fixtures do
 not establish runtime adoption. No new smoke command is added.
 
+REMODELFALLBACK-02 requires `RegistryUnavailableError.retryable === true` and
+`category === 'infrastructure'` before selecting a seed default, including the
+secondary non-blocking Codex read. The host-observation classifier normalizes
+`entitlement_denied`, `not_entitled`, and HTTP 401/403 to the existing
+non-retryable entitlement refusal naming `host.observations.read`. Unpinned
+resolution preserves `reviewer-configuration-error` and `modelSource=unresolved`
+without a seed warning. Timeout, unavailable and 5xx failures retain seed
+selection, warning throttling and existing retry bounds. Valid explicit pins
+retain precedence and allowlist validation, returning `modelSource=env-pin`
+even after a refused read; readiness defers a pinned refusal to class selection,
+so an unrelated pin cannot supply an unpinned class's seed default.
+
+After normal deployment, the build manager reads an organic run's
+`[worker-model] <class> model=<model> modelSource=registry` selection message
+or `[reviewer-harness] <harness> model=<model> modelSource=registry; effort=<effort> source=<source>`.
+For review records, the corresponding durable field is
+`metadata_json.reviewerExecution.modelSource`; local remediation records use
+`remediationWorker.modelSource`. Expect `registry` with the grant present and
+no explicit pin. These are consumer receipts after deployment; offline tests
+and PR publication do not establish live adoption. No service restart, grant
+change or synthetic live run is part of this change.
+
 HOSTOBSDENIAL-01: host-read failures retain only the refusal class and fixed safe
 detail. `entitlement-denied` names `host.observations.read`; it and `not-found`
 raise non-retryable `reviewer-configuration-error` faults. Subprocess

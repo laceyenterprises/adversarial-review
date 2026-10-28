@@ -1181,7 +1181,7 @@ function resolveReviewerExecution(harness, { env = process.env, fallbackEffort =
 // Readiness is process-local and refreshes on expiry before any sync selection.
 async function resolveReviewerExecutionAsync(harness, args = {}) {
   const { ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady } = args;
-  await ensureWorkerRegistryReadyImpl({env: args.env ?? process.env});
+  await ensureWorkerRegistryReadyImpl({env: args.env ?? process.env, pin: args.modelPin});
   return resolveReviewerExecution(harness, args);
 }
 
@@ -1304,7 +1304,7 @@ async function reviewWithCodex(diff, extraContext = '', {
   reviewWithCodexOAuthResponsesImpl = reviewWithCodexOAuthResponses,
   log = console,
 } = {}) {
-  await ensureWorkerRegistryReadyImpl();
+  await ensureWorkerRegistryReadyImpl({pin: modelPin});
   // Resolve infrastructure before probing credentials; refresh again after auth.
   resolveReviewerExecution('codex', { modelPin, reasoningPin, log });
   console.error('[reviewWithCodex] asserting OAuth...');
@@ -1338,7 +1338,7 @@ async function reviewWithCodex(diff, extraContext = '', {
   const effectiveAuthPath = perWorkerAuth?.authPath || authPath;
   const codexSessionHome = perWorkerAuth?.codexHome || process.env.CODEX_HOME || null;
   const outputPath = join(tmpdir(), `codex-review-${process.pid}-${Date.now()}.md`);
-  await ensureWorkerRegistryReadyImpl();
+  await ensureWorkerRegistryReadyImpl({pin: modelPin});
   const codexExecOverrides = resolveCodexExecOverrides({ modelPin, reasoningPin, log });
   const changedLines = countChangedLines(diff);
   const effort = codexExecOverrides.reasoningEffort;

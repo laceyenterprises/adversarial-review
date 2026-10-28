@@ -3909,3 +3909,14 @@ with no restart or forced failure.
 The infrastructure claim fences the exact classified failure message; JavaScript
 alone decides recoverability. The invariant enumerates the classifier's exported
 recovery classes in both shapes and refuses changed message snapshots.
+
+
+CLAUDESTEERON-01: the packaged Python module schema recognizes
+`worker_pool.dispatch.claude_batch_steer_enabled` as a strict boolean with a
+false default. Shared tracked config may activate it; local overrides and the
+`HQ_CLAUDE_BATCH_STEER` / canonical
+`AGENT_OS_WORKER_POOL_DISPATCH_CLAUDE_BATCH_STEER_ENABLED` environment override
+use the normal cascade. The Claude adapter owns launch eligibility, nested
+sandbox exclusions and rollback; the review service only accepts the key.
+Deploy this schema compatibility change before the companion Agent OS config
+activation. No reviewer lifecycle, journal or smoke promise changes.

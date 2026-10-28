@@ -916,6 +916,10 @@
             "__type": "bool",
             "__default": false
           },
+          "claude_batch_steer_enabled": {
+            "__type": "bool",
+            "__default": false
+          },
           "substrate": {
             "__keys": {
               "swap_breach_max_ram_avail_mb": {

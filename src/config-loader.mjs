@@ -4121,6 +4121,10 @@ export const ENV_ALIASES = {
     canonical: 'AGENT_OS_WORKER_POOL_MEMORY_RETENTION_SHADOW_ONLY',
     aliases: [['HQ_MEMORY_RETENTION_SHADOW_ONLY', identity]],
   },
+  'worker_pool.dispatch.claude_batch_steer_enabled': {
+    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_CLAUDE_BATCH_STEER_ENABLED',
+    aliases: [['HQ_CLAUDE_BATCH_STEER', identity]],
+  },
   'worker_pool.dispatch.codex_exec_mode': {
     canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_CODEX_EXEC_MODE',
     aliases: [['HQ_CODEX_EXEC_MODE', identity]],

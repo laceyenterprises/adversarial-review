@@ -7876,3 +7876,25 @@ test('RCV-01 sparse recovery config preserves overrides and fills omitted defaul
     assert.deepEqual(cfg.get('worker_pool.recovery'), { ...fixture.valid, ...recovery });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+
+test('CLAUDESTEERON-01 mirrors batch steering activation, rollback and launch override', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'claude-batch-steer-config-'));
+  const topPath = join(dir, 'config.yaml');
+  const key = 'worker_pool.dispatch.claude_batch_steer_enabled';
+  try {
+    writeFileSync(topPath, 'version: 1\n');
+    assert.equal(loadConfig({ topPath, env: {} }).get(key), false);
+    for (const value of [true, false]) {
+      writeFileSync(topPath, JSON.stringify({ version: 1, worker_pool: { dispatch: { claude_batch_steer_enabled: value } } }));
+      for (const loader of [loadConfig, loadConfigRuntime]) {
+        assert.equal(loader({ topPath, env: {} }).get(key), value);
+        assert.equal(loader({ topPath, env: { HQ_CLAUDE_BATCH_STEER: value ? '0' : '1' } }).get(key), !value);
+      }
+    }
+    for (const value of ['true', 1, null, [], {}]) {
+      writeFileSync(topPath, JSON.stringify({ version: 1, worker_pool: { dispatch: { claude_batch_steer_enabled: value } } }));
+      assert.throws(() => loadConfig({ topPath, env: {} }), { name: 'AgentOSConfigError', key });
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

@@ -143,7 +143,8 @@ export const dispatchReadTransport = {
         const failure = registryEntry(workerRegistryFailures, registryKey(args), args.dispatchSession)
           ?? hostObservationFailure();
         throw Object.assign(new Error(`worker registry read refused: ${failure.reason} (${failure.detail})`),
-          failure, {code: 'registry-unavailable'});
+          failure, {code: 'registry-unavailable',
+            failureClass: failure.retryable ? 'reviewer-model-unresolved' : 'reviewer-configuration-error'});
       }
       return cached.reply;
     }

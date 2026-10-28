@@ -78,10 +78,12 @@ for (const [reason, producer, retryable] of [
       },
       readHostServicesSync: () => assert.fail('sync resolution must not issue a request'),
     }));
+    const failureClass = retryable ? 'reviewer-model-unresolved' : 'reviewer-configuration-error';
     const check = error => {
       assert.equal(error.code, 'registry-unavailable');
       assert.equal(error.reason, reason);
       assert.equal(error.retryable, retryable);
+      assert.equal(error.failureClass, failureClass);
       assert.match(error.message, new RegExp(reason));
       assert.ok(!`${error.stack}${JSON.stringify(error)}`.includes(secret));
       if (reason === 'entitlement-denied') {
@@ -91,6 +93,14 @@ for (const [reason, producer, retryable] of [
       return true;
     };
     await assert.rejects(ensureWorkerRegistryReady({env}), check);
+    assert.throws(() => dispatchReadTransport.hostServicesSync({action: 'worker_registry'}, {env}), error => {
+      assert.equal(error.code, 'registry-unavailable');
+      assert.equal(error.reason, reason);
+      assert.equal(error.retryable, retryable);
+      assert.equal(error.failureClass, failureClass);
+      assert.ok(!`${error.stack}${JSON.stringify(error)}`.includes(secret));
+      return true;
+    });
     assert.throws(() => resolveRemediationModel('fixture', {env, fallbackModel: 'forbidden-fixture'}), check);
     assert.equal(reads, 1);
     const foreign = readHostObservationSync('worker_registry', {env: {APP_CONTRACT_ENDPOINT_URL: 'https://example.invalid/other-refusal'}});
@@ -108,11 +118,13 @@ test('entitlement refusal stays terminal through subprocess classification, sett
   await assert.rejects(ensureWorkerRegistryReady(), error => {refusal = error; return true;});
   const failureClass = classifyReviewerFailure(refusal.message, 1);
   assert.equal(failureClass, 'reviewer-configuration-error');
-  for (const failure_message of [refusal.message, `[${failureClass}] ${refusal.message}`]) {
+  for (const failure_message of [refusal.message, `[${failureClass}] ${refusal.message}`, `[${failureClass}]`]) {
     assert.equal(reviewerFailureClassFromStoredRow({failure_message}), failureClass);
     assert.equal(infraRecoverableFailureClass({failure_message}), null);
   }
-  assert.equal(infraRecoverableFailureClass({metadata_json: JSON.stringify({failureClass})}), null);
+  const metadataRow = {metadata_json: JSON.stringify({failureClass})};
+  assert.equal(reviewerFailureClassFromStoredRow(metadataRow), failureClass);
+  assert.equal(infraRecoverableFailureClass(metadataRow), null);
   const calls = [];
   settleReviewerAttempt({repoPath: 'example/fixture', prNumber: 1,
     failureAt: '2026-01-01T00:00:00Z', log: {warn() {}},

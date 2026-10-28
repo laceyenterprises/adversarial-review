@@ -881,6 +881,32 @@ a caller needs at least 20 distinct classified live cases, including candidate
 mistakes and expected corrections. That acceptance is human rollout acceptance,
 not a gate, and it is not authorized by NXA-02.
 
+### Unreadable ownership recovery (OWNERUNREADABLE-01)
+
+R04 re-reads the referenced closer launch and its retry chain up to three times
+with 100/200 ms backoff inside one five-second read deadline. A same-pass refresh
+may reuse a complete readable retry chain, but cannot reuse the closer-lease
+placeholder's `retryChainUnreadable: true` or a failed observation merely because
+its launch ID and head match. A complete SDK `found` reply containing the
+terminal root and empty `retry_edges` proves there are no retries; it is distinct
+from a grant-filtered empty `not_found` reply, which cannot prove absence.
+
+After the anchored 300-second recovery deadline, a terminal lease and newly
+readable terminal launch with no live retries return ownership to the hammer,
+including a stale head with historical terminal validation. This selects R08
+dispatch without requesting re-review. Existing holds, live owners, retry caps,
+execution policy, drain, capacity, lease acquisition and merge predicates still
+apply. A ledger outage retains R04 and marks its skipped wake retryable for the
+next closure pass; deadline expiry alone never licenses a launch. Recovery reads
+share one abort signal and remaining physical timeout.
+
+Synthetic fixtures reproduce a green, carried comment-only head whose terminal
+closer finished earlier but whose cached placeholder kept it in R04 for hours.
+After ordinary deployment, SRE must observe the next natural R04 case leave
+recovery within its budget and merge, and verify no readable ownerless case stays
+in R04 beyond that budget. A continuing ledger outage remains fenced and requires
+service recovery. Worker validation performs no live rescue or service action.
+
 ### Hammer wake adoption (NXA-03)
 
 The closure caller resolves one immutable snapshot/decision pair before the

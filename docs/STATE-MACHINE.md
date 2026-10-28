@@ -2445,6 +2445,18 @@ review invalidates the terminal proof for successor selection.
 Offline handoff smoke verifies the adapter matrix; organic rollout is separate
 operator/SRE acceptance. Source rollback is revision `4d06237c`.
 
+OWNERUNREADABLE-01: R04 ownership recovery never caches an unreadable
+closer-lease placeholder as a resolved launch. Closure refreshes retry failed
+observations with 100/200 ms backoff, at most three reads inside five seconds;
+unreadable skipped wakes remain retryable. Complete terminal-root evidence with
+an empty retry chain resolves ownership immediately. Once the anchored recovery
+budget lapses, a terminal lease and terminal launch without a live retry select
+the existing R08 hammer dispatch, including historically validated stale heads.
+Live workers, parked retries, unknown status, unreadable evidence, safety holds
+and caps retain their fences. No re-review or new merge authority is introduced;
+the hammer retains the existing remediation, rebase, CI and lease gates. See the
+[recovery procedure](RUNBOOK-ama-closure.md#unreadable-ownership-recovery-ownerunreadable-01).
+
 ## V2 queue candidate checks (MGQ-05, unwired)
 
 The candidate waiter advances waiting-checks → finalizing only from a complete,

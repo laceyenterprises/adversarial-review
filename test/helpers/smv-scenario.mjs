@@ -370,6 +370,19 @@ if (scenario === 'clean') {
   }
   assert.equal(matrixPair({ ...terminalOptions, progress: { terminalReview: {
     validated: true, headSha: 'c'.repeat(40), reviewedHeadSha: reviewedHead } } }).decision.reason, 'retry-no-merge');
+  // OWNERUNREADABLE-01: expired recovery cannot strand a certified head when
+  // terminal launch/retry evidence is readable. An outage still fences it.
+  const recovery = deriveNextActionSnapshot({ base: { ...matrixPair({ ...terminalOptions,
+    leases: { closer: { status: 'terminal', lrqId: 'synthetic-recovery', headSha: terminalHead } },
+    launches: { closer: { ...terminalOptions.launches.closer, launchRequestId: 'synthetic-recovery', retryChain: [] } },
+  }).snapshot, observedAt: '2026-01-01T00:05:00.000Z' } });
+  assert.equal(nextAction(recovery).actor, 'hammer');
+  assert.equal(nextAction(recovery).queue.intent, 'dispatch');
+  const unreadableRecovery = deriveNextActionSnapshot({ base: recovery, observations: { launches: { closer: {
+    ...recovery.observations.launches.value.closer, retryChainUnreadable: true,
+  } } } });
+  assert.equal(nextAction(unreadableRecovery).reason, 'ownership-unreadable');
+  assert.equal(nextAction(unreadableRecovery).queue.intent, 'reconcile');
   for (const [name, observations, action, actor] of actionCases) {
     const shared = matrixPair(observations);
     assert.deepEqual([shared.decision.action, shared.decision.actor], [action, actor], name);
@@ -894,7 +907,8 @@ if (scenario === 'clean') {
   evidence = { hammers, cleanBranchHoldSettled: true, unchangedHeadHasNoPublicationDebt: true, nullHeadConfirmed: true, unknownBranchRetryRecovered: true, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, scratchCursorResumed: true, scratchLedgerClockIndependent: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, hammerRangeValidated: true, noHammerReviewRequest: true, claimPreserved: true, reviewedHeadRecorded: true,
     headlessPostRequeuedOnce: true, terminalRetryable: true, terminalCapacityFreed: true, terminalNoMergeReclaimedSamePass: true,
     autoMergeHeld: true, autoMergeBoundReleased: true, unreadableCapacityReserved: true,
-    wakeRearmed: true, remediationCloseoutOwned: true, merged: true, remoteHeadMatches: true };
+    wakeRearmed: true, remediationCloseoutOwned: true, terminalRecoveryHandedToHammer: true,
+    unreadableRecoveryFenced: true, merged: true, remoteHeadMatches: true };
 } else if (scenario === 'ci-blocked') {
   const ceilingDb = openReviewStateDb(rootDir); ensureReviewStateSchema(ceilingDb);
   const ceilingPr = 8, ceilingLogs = [];

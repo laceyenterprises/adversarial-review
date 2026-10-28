@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import childProcess, { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { EventEmitter } from 'node:events';
 import { dirname, join } from 'node:path';
@@ -151,7 +151,7 @@ test('UTF-8 regeneration clears only the interior and refuses edits to either ex
 });
 
 test('shared globs skip missing or ambiguous markers before and after valid declarations', async t => {
-  t.mock.method(console, 'warn', () => {});
+  const warning = t.mock.method(console, 'warn', () => {});
   for (const markers of [
     { start: '<!-- other:start -->', end: '<!-- other:end -->' },
     { start: end, end: start },
@@ -163,6 +163,21 @@ test('shared globs skip missing or ambiguous markers before and after valid decl
       assert.equal(checkPrimaryChange(result, f.args.headSha).ok, true);
     }
   }
+  assert.equal(warning.mock.callCount(), 0);
+});
+
+test('unrelated block regions do not warn when another declaration proves the file', async t => {
+  const warning = t.mock.method(console, 'warn', () => {});
+  const other = { start: '<!-- other:start -->', end: '<!-- other:end -->' };
+  for (const declarationLast of [false, true]) {
+    const f = fixture(t, { declarationLast,
+      additionalDeclarations: [{ ...declaration, ...other }],
+      tail: `${other.start}\nUnrelated row\n${other.end}\nTail` });
+    const result = await prove(f);
+    assert.equal(result.generatedBlockProofs.length, 1);
+    assert.equal(checkPrimaryChange(result, f.args.headSha).ok, true);
+  }
+  assert.equal(warning.mock.callCount(), 0);
 });
 
 test('missing and non-directory generator cwd report actionable errors without starting a process', async t => {
@@ -176,7 +191,7 @@ test('missing and non-directory generator cwd report actionable errors without s
   }
 });
 
-test('cwd failures retain refusal and diagnostics while later declarations start from a fresh head', async t => {
+test('cwd failures warn only without a proof while later declarations start from a fresh head', async t => {
   const diagnostics = [];
   t.mock.method(console, 'warn', message => diagnostics.push(message));
   const f = fixture(t, { declarationLast: true,
@@ -185,12 +200,14 @@ test('cwd failures retain refusal and diagnostics while later declarations start
     ? runDerivedGenerator(args) : offlineGenerator(args) });
   assert.equal(result.generatedBlockProofs.length, 1);
   assert.equal(checkPrimaryChange(result, f.args.headSha).ok, true);
-  assert.ok(diagnostics.some(message => message.includes('docs/guide.md')
-    && message.includes('generator cwd unavailable:') && message.includes('missing') && message.includes('ENOENT')));
+  assert.equal(diagnostics.length, 0);
   const missing = fixture(t, { generatorCwd: 'missing' });
   const refused = await prove(missing, { runGeneratorImpl: runDerivedGenerator });
   assert.deepEqual(refused.generatedBlockProofs, []);
   assert.equal(checkPrimaryChange(refused, missing.args.headSha).reason, 'primary-change-reverted');
+  assert.equal(diagnostics.length, 1);
+  assert.ok(diagnostics[0].includes('docs/guide.md') && diagnostics[0].includes('block-generator-failed'));
+  assert.equal(diagnostics[0].includes(missing.root), false);
 });
 
 test('empty merge-base interiors accept insertion units and protect adjacent marker/prose edits', async t => {
@@ -335,6 +352,20 @@ test('manifest declaration key order does not change generated authority', async
   assert.equal(checkPrimaryChange(result, f.args.headSha).ok, true);
 });
 
+test('optional checkout reads resolve nested files and distinguish absent paths from Git failures', async t => {
+  const f = fixture(t);
+  await withDerivedCheckout({ ...f.args, mergeBase: f.evidence.mergeBase,
+    primaryHead: f.evidence.primaryHead }, async ({ show }) => {
+    for (const ref of [f.evidence.mergeBase, f.evidence.primaryHead, f.evidence.headSha]) {
+      assert.equal(await show(ref, 'docs/guide.md', { optional: true }),
+        await show(ref, 'docs/guide.md'));
+      assert.equal(await show(ref, 'docs/missing.md', { optional: true }), null);
+      assert.equal(await show(ref, 'missing/nested.md', { optional: true }), null);
+    }
+    await assert.rejects(show('f'.repeat(40), 'docs/guide.md', { optional: true }));
+  });
+});
+
 test('missing or incomplete local clone references fail closed without a network fallback', async t => {
   const f = fixture(t);
   const identity = { ...f.args, mergeBase: f.evidence.mergeBase, rootDir: undefined };
@@ -343,7 +374,7 @@ test('missing or incomplete local clone references fail closed without a network
   await assert.rejects(withDerivedCheckout({ ...identity, headSha: 'f'.repeat(40) },
     () => assert.fail('missing commit must not run operation')), error => {
     assert.ok(!error.message.includes('https://github.com/'));
-    assert.ok(error.message.includes(f.root));
+    assert.ok(error.message.includes(realpathSync(f.root)));
     return true;
   });
   assert.deepEqual((await prove(f, { checkoutImpl: (args, operation) =>

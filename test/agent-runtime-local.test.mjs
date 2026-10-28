@@ -1,5 +1,4 @@
-import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
-installDispatchFileProducerFixture();
+import './helpers/dispatch-files-preload.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -628,6 +627,7 @@ test('remediation registry uses public evidence and never falls back to a checko
       reasoningSource: 'none',
     });
     rmSync(mirrorPath);
+    assert.equal(resolveRemediationModel('remediator-codex', options).resolvedModel, 'mirror');
     assert.equal(resolveRemediationModel('remediator-codex', { ...options, nowMs: Date.now() + 61_000 }).modelSource, 'fallback-constant');
     assert.equal(resolveRemediationModel('remediator-gemini', options).resolvedModel, 'constant');
     writeFileSync(seedPath, '{bad json');

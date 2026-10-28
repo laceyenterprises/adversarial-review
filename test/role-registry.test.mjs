@@ -1,5 +1,5 @@
-import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
-installDispatchFileProducerFixture();
+import {seedWorkerRegistry} from './helpers/dispatch-files-fixture.mjs';
+import './helpers/dispatch-files-preload.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
@@ -274,11 +274,7 @@ test('validateStartupRoleRegistry surfaces an unknown worker class from config',
 // ---------------------------------------------------------------------------
 
 function seedRoster(repoRoot, classes) {
-  const rosterPath = join(repoRoot, "registry/worker-classes.json");
-  mkdirSync(dirname(rosterPath), { recursive: true });
-  const doc = Object.fromEntries(classes.map((c) => [c, {}]));
-  writeFileSync(rosterPath, JSON.stringify(doc), 'utf8');
-  return rosterPath;
+  seedWorkerRegistry(repoRoot, Object.fromEntries(classes.map(c => [c, {}])));
 }
 
 test('resolvePublishedWorkerClasses reads the published roster and refreshes the snapshot', () => {
@@ -289,7 +285,7 @@ test('resolvePublishedWorkerClasses reads the published roster and refreshes the
   const result = resolvePublishedWorkerClasses({
     env: { HQ_ROOT: repoRoot },
     rootDir,
-    moduleRoot: tmp(), // isolate the upward walk so only AGENT_OS_REPO_ROOT resolves
+    moduleRoot: tmp(), // unrelated module root; HQ_ROOT selects the fixture producer
   });
   assert.equal(result.source, 'published');
   assert.deepEqual([...result.classes].sort(), ['claude-code', 'codex', 'gemini']);
@@ -397,7 +393,7 @@ test('a malformed published roster degrades to the snapshot when one exists', ()
   // Seed the snapshot from a good read.
   resolvePublishedWorkerClasses({ env: { HQ_ROOT: repoRoot }, rootDir, moduleRoot: tmp() });
   // Corrupt the published roster.
-  writeFileSync(join(repoRoot, 'registry/worker-classes.json'), '{ not json', 'utf8');
+  seedWorkerRegistry(repoRoot, {}, {malformed: true});
   const result = resolvePublishedWorkerClasses({ env: { HQ_ROOT: repoRoot }, rootDir, moduleRoot: tmp() });
   assert.equal(result.source, 'snapshot');
   assert.deepEqual([...result.classes].sort(), ['codex', 'gemini']);

@@ -1,5 +1,5 @@
-import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
-installDispatchFileProducerFixture();
+import {dispatchReadTransport} from '../src/dispatch-read-client.mjs';
+import './helpers/dispatch-files-preload.mjs';
 // Regression coverage for the `describeStaleDispatch` helper that
 // detects merge-agent dispatches recorded by the watcher but never
 // admitted by the agent-os dispatch daemon (BEG-00-era incident:
@@ -342,4 +342,22 @@ test('describeStaleDispatch — probe returning unknown status falls through to 
   } finally {
     rmSync(hqRoot, { recursive: true, force: true });
   }
+});
+
+
+test('missing producer timestamps retain exact-launch refusal evidence', t => {
+  const root = tmpHqRoot();
+  t.after(() => rmSync(root, {recursive: true, force: true}));
+  t.mock.method(dispatchReadTransport, 'hostServicesSync', request => {
+    assert.equal(request.action, 'dispatch_audit');
+    assert.equal(request.launch_request_id, LRQ);
+    return {schema_version: 1, status: 'found', data: {records: [
+      refusal('2026-05-18T03:00:00Z'), refusal('2026-05-18T03:10:00Z'),
+      {...refusal('2026-05-18T03:20:00Z'), recordedAt: 'invalid'},
+      {...refusal('2026-05-01T03:20:00Z'), recordedAt: '2026-05-01T03:20:00Z'},
+    ]}};
+  });
+  const detail = describeStaleDispatch({dispatchedAt: '2026-05-18T02:00:00Z', launchRequestId: LRQ},
+    {hqRoot: root, now: NOW});
+  assert.equal(detail.refusalCount, 3);
 });

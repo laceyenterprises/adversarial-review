@@ -3743,3 +3743,13 @@ existing artifact provenance gate remains a hold until the producer merges.
 Then copy the exact merged artifact, verify its digest and update the consumer
 producer record with the authoritative merge commit, following the SDK
 coordinated-release procedure. Do not substitute a candidate revision.
+
+
+PR #1583 public-evidence remediation: ambiguous reused worker slots and incomplete
+repository inventories retain custody. Unavailable deploy evidence leaves ordinary
+reviewer failures charged; only positive freeze or explicitly unreadable producer
+state pauses them. Managed-CI trusts the producer verifier plus exact repo/head
+binding. Offline regressions cover these cases; smoke promises are unchanged.
+Runtime owner acceptance must check producer inventory/grants and resolve unknown
+custody holds before activation; bounded escalation and name-only local checkout
+resolution remain follow-ups. See [rollout limits](docs/RUNBOOK-ama-closure.md#public-evidence-rollout-limits-pr-1583).

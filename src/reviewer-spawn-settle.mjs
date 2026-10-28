@@ -182,6 +182,31 @@ function resolveReviewerQuotaCheckEnabled(env = process.env) {
 }
 
 
+// Share concurrent/nearby reviewer preflights without retaining a stale quota
+// decision across the normal poll interval. Scope by transport and environment.
+const reviewerQuotaSnapshots = new WeakMap();
+const deprecatedQuotaWarnings = new WeakSet();
+async function readReviewerQuotaSnapshot(env, execFileImpl) {
+  const config = loadRoleConfig({env, contextKey: 'reviewer.quota_status_dir'});
+  if (config.get('reviewer.quota_status_dir', null) && !deprecatedQuotaWarnings.has(env)) {
+    console.warn('[watcher] reviewer.quota_status_dir is ignored; quota uses hq fleet quota status --json');
+    deprecatedQuotaWarnings.add(env);
+  }
+  let byTransport = reviewerQuotaSnapshots.get(env);
+  if (!byTransport) { byTransport = new WeakMap(); reviewerQuotaSnapshots.set(env, byTransport); }
+  const now = Date.now();
+  const cached = byTransport.get(execFileImpl);
+  const signature = JSON.stringify([env.HQ_BIN, env.HQ_ROOT, env.AGENT_OS_HQ_ROOT]);
+  if (cached?.signature === signature && now - cached.at < 5000) return cached.promise;
+  const promise = execFileImpl(env.HQ_BIN || 'hq', ['fleet', 'quota', 'status', '--json'],
+    {env, encoding: 'utf8', maxBuffer: 5 * 1024 * 1024, timeout: loadAwareTimeoutMs(30_000)})
+    .then(({stdout}) => parseHqFleetQuotaStatus(stdout));
+  const entry = {signature, at: now, promise};
+  byTransport.set(execFileImpl, entry);
+  try { return await promise; }
+  catch (err) { if (byTransport.get(execFileImpl) === entry) byTransport.delete(execFileImpl); throw err; }
+}
+
 export async function readReviewerQuotaDecision({
   reviewerModel,
   codexBrokerProvider = 'codex',
@@ -198,9 +223,7 @@ export async function readReviewerQuotaDecision({
       return { available: true, state: 'unknown-harness', provider: null };
     }
 
-    const {stdout} = await execFileImpl(env.HQ_BIN || 'hq', ['fleet', 'quota', 'status', '--json'],
-      {env, encoding: 'utf8', maxBuffer: 5 * 1024 * 1024, timeout: loadAwareTimeoutMs(30_000)});
-    const snapshot = parseHqFleetQuotaStatus(stdout);
+    const snapshot = await readReviewerQuotaSnapshot(env, execFileImpl);
     const statuses = snapshot.filter(row => row.provider === provider);
     const corporateAccount = reviewerModel === 'codex'
       ? codexBrokerProvider === 'codex-corp'
@@ -392,10 +415,11 @@ function truncateCodePoints(value, maxLength) {
 
 function mainCatchupOutageSignal({ env = process.env } = {}) {
   const result = readHostObservationSync('deploy_status', {env, hqRoot: env.HQ_ROOT || env.AGENT_OS_HQ_ROOT});
-  if (!result.ok) return {reason: 'deploy-wedge', detail: 'deploy-evidence-unavailable', retryAfter: null};
+  if (!result.ok) return null;
   const state = result.data;
   if (state.availability === 'missing') return null;
-  if (state.availability !== 'available') return {reason: 'deploy-wedge', detail: 'state-unreadable', retryAfter: null};
+  if (state.availability === 'unreadable') return {reason: 'deploy-wedge', detail: 'state-unreadable', retryAfter: null};
+  if (state.availability !== 'available') return null;
   if (state.freezeClass || ['frozen', 'deploy-freeze'].includes(state.currentState)
       || state.schemaGatePending || state.schemaHealPending || state.recoveryFreezeClass) {
     return {reason: 'deploy-wedge', detail: String(state.freezeClass || state.currentState || 'main-catchup-freeze'), retryAfter: null};
@@ -1955,4 +1979,5 @@ export {
   settleReviewerAttempt,
   evaluateRoundBudgetForReview,
   truncateCodePoints,
+  resolveReviewerOutageSignal,
 };

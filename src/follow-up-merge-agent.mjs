@@ -963,7 +963,10 @@ function describeStaleDispatch(recordedDispatch, {
   if (!audit.ok) return null;
   const since = _utcDateString(now - 86_400_000);
   const refusals = (audit.data.records || []).filter(event => typeof event.decision === 'string'
-    && event.decision.startsWith('refuse_') && String(event.recordedAt || '').slice(0, 10) >= since);
+    && event.decision.startsWith('refuse_')
+    // Missing/invalid producer timestamps are conservatively in-window. They
+    // cannot silently erase refusal evidence for this exact launch.
+    && (!Number.isFinite(Date.parse(event.recordedAt)) || String(event.recordedAt).slice(0, 10) >= since));
   if (refusals.length < minRefusals) return null;
 
   // Reason-code histogram: which refusal cause is dominating?

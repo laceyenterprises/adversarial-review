@@ -3,7 +3,7 @@ import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
 import { existsSync, rmSync, statSync, promises as fsPromises } from 'node:fs';
 import { userInfo } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -196,7 +196,14 @@ async function listHqRepoPaths(hqRoot, {hqPath = DEFAULT_HQ_PATH, execFileImpl =
     const result = JSON.parse(stdout);
     const rows = Array.isArray(result) ? result : result.repos;
     if (!Array.isArray(rows)) throw new Error('invalid repository inventory');
-    return {paths: [...new Set([...(result.worktreeRoots || []), ...rows.map(row => row.checkoutPath || row.path || row.repoPath)].filter(path => typeof path === 'string'))], complete: !result.errors?.length, failedRoots: result.errors?.length || 0};
+    const candidates = [...(result.worktreeRoots || []), ...rows.map(row => row.checkoutPath || row.path || row.repoPath)];
+    const missingPaths = candidates.filter(path => typeof path !== 'string' || !isAbsolute(path)).length;
+    // Name/URL-only inventories cannot prove registration absence, nor cover
+    // worker-base roots. Keep all cleanup that depends on that absence fenced.
+    const missingRoots = !Array.isArray(result.worktreeRoots);
+    const failedRoots = (result.errors?.length || 0) + missingPaths + Number(missingRoots);
+    return {paths: [...new Set(candidates.filter(path => typeof path === 'string' && isAbsolute(path)))],
+      complete: failedRoots === 0, failedRoots};
   } catch { logger?.warn?.("[closer-worktree-reap] repository-inventory-unavailable"); return {paths: [], complete: false, failedRoots: 1}; }
 }
 

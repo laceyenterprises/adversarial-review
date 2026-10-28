@@ -161,13 +161,17 @@ test('CIUNKNOWN-01 settled zero-finding review stays on merge path when CI is un
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
 
-test('CIUNKNOWN-01 bootstrap closes a clean head, audits mode and rechecks proof before merge', async t => {
+for (const proofCase of ['verified', 'unverified', 'foreign-head', 'foreign-repo', 'unavailable', 'truncated', 'missing-schema']) {
+test(`CIUNKNOWN-01 bootstrap proof ${proofCase} retains exact merge authority`, async t => {
   const rootDir = tempRoot();
   try {
     const head = '2f1c6edc'.padEnd(40, '0');
     t.mock.method(dispatchReadTransport, 'hostServicesSync', request => ({
-      schema_version: 1, status: 'found', data: {repo: request.repo, headSha: request.head_sha,
-        verified: request.action === 'managed_ci' && request.repo === 'acme/searchlight' && request.head_sha === head},
+      ...(proofCase === 'missing-schema' ? {} : {schema_version: 1}),
+      status: ['unavailable', 'truncated'].includes(proofCase) ? proofCase : 'found',
+      data: {repo: proofCase === 'foreign-repo' ? 'acme/foreign' : request.repo,
+        headSha: proofCase === 'foreign-head' ? 'f'.repeat(40) : request.head_sha,
+        verified: proofCase !== 'unverified' && request.action === 'managed_ci'},
     }));
     t.mock.method(dispatchReadTransport, 'observationSync', () => ({schema_version: 1, status: 'found', ownerUser: userInfo().username}));
     let proofReads = 0;
@@ -212,12 +216,18 @@ test('CIUNKNOWN-01 bootstrap closes a clean head, audits mode and rechecks proof
       },
       env: { HQ_ROOT: rootDir }, logger: { log() {}, warn() {} },
     });
-    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
-    assert.ok(proofReads >= 2);
-    assert.equal(attempted.auditMetadata.ciMode, 'no-ci-bootstrap');
-    assert.equal(attempted.liveGate.requiredChecks, true);
+    if (proofCase === 'verified') {
+      assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+      assert.ok(proofReads >= 2);
+      assert.equal(attempted.auditMetadata.ciMode, 'no-ci-bootstrap');
+      assert.equal(attempted.liveGate.requiredChecks, true);
+    } else {
+      assert.notEqual(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+      assert.equal(merged, false);
+    }
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
+}
 
 test('AMA closure loads merge-authority policy for the supplied domain id', async () => {
   const rootDir = tempRoot();

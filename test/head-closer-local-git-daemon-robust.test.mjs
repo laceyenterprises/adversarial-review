@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { execGhWithRetry } from '../src/gh-cli.mjs';
 
 import {
+  resolveLocalRepoCheckout,
   buildNonReviewableHeadDeltaEvidence,
   fetchVerifiedCommitFromLocalGit,
   getHeadCloserCommitSuppression,
@@ -751,4 +752,13 @@ test('HAMFINAL-02: no-diff hammer validation suppresses review of the exact flee
   assert.equal((await invoke('validated')).reason, 'hammer-validated-head');
   assert.equal((await invoke('moved')).suppressed, false);
   assert.equal(calls.filter(args => args.includes('--slurp')).length, 2);
+});
+
+
+test('deployed name-only inventory leaves local closer resolution unavailable', async () => {
+  const result = await resolveLocalRepoCheckout('acme/agent-os', TEST_HQ_ROOT, {
+    execFileImpl: async () => ({stdout: JSON.stringify({repos: [{name: 'agent-os',
+      url: 'https://github.com/acme/agent-os', trunkBranch: 'main', commitSha: HEAD_SHA}], errors: []})}),
+  });
+  assert.equal(result, null);
 });

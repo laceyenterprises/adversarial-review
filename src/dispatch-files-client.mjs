@@ -14,7 +14,7 @@ export function readDispatchFilesSync(selector, args = {}) {
   try {
     const env = args.env ?? process.env;
     const request = {...selector, observation: 'dispatch_files'};
-    if (selector.launch_request_id === env.HQ_LAUNCH_REQUEST_ID && (env.HCP_TOKEN_PATH || env.HCP_TOKEN || env.HCP_BEARER_TOKEN)) {
+    if (typeof selector.launch_request_id === 'string' && selector.launch_request_id.trim() && selector.launch_request_id === env.HQ_LAUNCH_REQUEST_ID && (env.HCP_TOKEN_PATH || env.HCP_TOKEN || env.HCP_BEARER_TOKEN)) {
       return checked(dispatchReadTransport.sdk().readHcpDispatchLookupSync(request, {
         token_path: env.HCP_TOKEN_PATH, token: env.HCP_TOKEN || env.HCP_BEARER_TOKEN,
         endpoint_url: env.HCP_BASE_URL, request_timeout_ms: args.timeoutMs ?? 8000}));
@@ -25,7 +25,9 @@ export function readDispatchFilesSync(selector, args = {}) {
 }
 export async function readWorkerDispatchFiles(workerId, args = {}) {
   const observed = await readWorkerObservation({observation: 'workers', worker_id: workerId}, args);
-  if (!observed.ok || !observed.rows?.length) return unavailable();
+  // Worker slots are reused. Without a producer ordering contract, multiple runs
+  // cannot identify the current slot safely, regardless of their status.
+  if (!observed.ok || observed.rows?.length !== 1) return unavailable();
   const row = observed.rows[0];
   const result = await readDispatchFiles({launch_request_id: row.launch_request_id, worker_run_id: row.run_id, tail: true}, args);
   if (result.ok && (result.metadata?.status !== 'found'
@@ -34,7 +36,9 @@ export async function readWorkerDispatchFiles(workerId, args = {}) {
 }
 export function readWorkerDispatchFilesSync(workerId, args = {}) {
   const observed = readWorkerObservationSync({observation: 'workers', worker_id: workerId}, args);
-  if (!observed.ok || !observed.rows?.length) return unavailable();
+  // Worker slots are reused. Without a producer ordering contract, multiple runs
+  // cannot identify the current slot safely, regardless of their status.
+  if (!observed.ok || observed.rows?.length !== 1) return unavailable();
   const row = observed.rows[0];
   const result = readDispatchFilesSync({launch_request_id: row.launch_request_id, worker_run_id: row.run_id, tail: true}, args);
   if (result.ok && (result.metadata?.status !== 'found'

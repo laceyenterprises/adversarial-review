@@ -1,6 +1,5 @@
+import './helpers/dispatch-files-preload.mjs';
 import {spawnReviewer} from './helpers/reviewer-quota-fixture.mjs';
-import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
-installDispatchFileProducerFixture();
 import './helpers/worker-observation-fixture.mjs';
 import { openReviewStateDb } from '../src/review-state.mjs';
 import test from 'node:test';

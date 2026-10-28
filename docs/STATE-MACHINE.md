@@ -2521,3 +2521,12 @@ existing artifact provenance gate remains a hold until the producer merges.
 Then copy the exact merged artifact, verify its digest and update the consumer
 producer record with the authoritative merge commit, following the SDK
 coordinated-release procedure. Do not substitute a candidate revision.
+
+
+Public-evidence failure classification (PR #1583): unavailable or unknown deploy
+observations no longer select an uncharged deploy-wedge reviewer pause. A bug
+failure retains ordinary charged settlement; positive freeze evidence or explicit
+producer unreadability retains the existing pause. No status value is added.
+Ambiguous worker runs and incomplete repository registration inventories retain
+custody. Unknown teardown/reclaim waits still have no internal escalation bound;
+see the closure runbook's public evidence rollout limits and tracked follow-ups.

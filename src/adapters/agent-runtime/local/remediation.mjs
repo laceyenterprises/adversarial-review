@@ -27,6 +27,7 @@ const REGISTRY_TTL_MS = 60_000;
 const CODEX_REASONING_LEVELS = Object.freeze(new Set(['low', 'medium', 'high', 'xhigh']));
 const CLAUDE_REASONING_LEVELS = Object.freeze(new Set(['low', 'medium', 'high', 'xhigh', 'max']));
 const fallbackWarnings = new Map();
+const registryCache = new WeakMap();
 const DEFAULT_POLL_MS = 250;
 const IDENTITY_PROBE_RETRY_DELAYS_MS = Object.freeze([50, 100, 200]);
 const TRANSIENT_IDENTITY_PROBE_RE = /ps probe failed.*(?:EIO|EAGAIN|ETIMEDOUT|timeout|timed out|resource temporarily unavailable|input\/output error)/i;
@@ -412,9 +413,19 @@ function normalizeReasoningLevel(className, value, source, nowMs) {
   return { resolvedReasoningLevel: level, reasoningSource: source };
 }
 
-function readWorkerClasses(_nowMs, args = {}) {
+function readWorkerClasses(nowMs, args = {}) {
+  const env = args.env ?? process.env;
+  const key = JSON.stringify([args.hqRoot, env.HCP_BASE_URL, env.HQ_LAUNCH_REQUEST_ID,
+    env.HCP_TOKEN_PATH, env.HCP_TOKEN, env.HCP_BEARER_TOKEN]);
+  const cached = registryCache.get(env);
+  if (cached?.key === key && nowMs >= cached.at && nowMs - cached.at < REGISTRY_TTL_MS) return cached.value;
   const observed = readHostObservationSync('worker_registry', args);
-  return observed.ok && observed.data.classes ? {classes: observed.data.classes} : {classes: null, reason: 'public-registry-unavailable'};
+  const value = observed.ok && observed.data.classes ? {classes: observed.data.classes} : {classes: null, reason: 'public-registry-unavailable'};
+  // Outages are not cached; the next call can recover immediately. Fallbacks
+  // already emit the rate-limited warning in resolveRemediationModel.
+  if (value.classes) registryCache.set(env, {key, at: nowMs, value});
+  else registryCache.delete(env);
+  return value;
 }
 
 function resolveRemediationModel(className, {

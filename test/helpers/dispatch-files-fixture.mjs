@@ -1,6 +1,6 @@
 // Fake public producer for policy tests whose synthetic owner state lives in
 // disposable directories. Production code never invokes these filesystem reads.
-import { existsSync as exists, readFileSync as read, readdirSync as list, statSync, realpathSync, lstatSync } from 'node:fs';
+import { existsSync as exists, readFileSync as read, readdirSync as list, statSync, realpathSync, lstatSync, mkdirSync, writeFileSync } from 'node:fs';
 import {tmpdir} from 'node:os';
 import { join, basename, resolve, sep } from 'node:path';
 import { dispatchReadTransport } from '../../src/dispatch-read-client.mjs';
@@ -118,11 +118,12 @@ export function installDispatchFileProducerFixture() {
       const registry = object(join(root, 'registry/worker-classes.json'));
       data = {classes: registry?.classes || registry || {}};
     } else if (request.action === 'deploy_status') {
-      const state = object(join(root, 'main-catchup/.state.json'));
+      const statePath = join(root, 'main-catchup/.state.json');
+      const state = object(statePath);
       data = state ? {availability: 'available', currentState: state.currentState,
         freezeClass: state.freezeClass || state.pendingFreeze?.freezeClass || state.pendingPgSchemaGateFreeze?.freezeClass || state.pendingRecovery?.freezeClass,
         schemaGatePending: Boolean(state.pendingPgSchemaGateFreeze), schemaHealPending: Boolean(state.pendingPgSchemaSelfHeal),
-        recoveryFreezeClass: state.pendingRecovery?.classification?.freezeClass} : {availability: 'missing'};
+        recoveryFreezeClass: state.pendingRecovery?.classification?.freezeClass} : {availability: existsSync(statePath) ? 'unreadable' : 'missing'};
     } else if (request.action === 'dispatch_health') {
       const path = join(root, 'dispatch/_daemon/daemon.err.log');
       let log; try { const text = readFileSync(path, 'utf8'); log = {status: 'found', text, redacted: true, updatedAtEpochMs: statSync(path).mtimeMs}; }
@@ -147,4 +148,11 @@ export function installDispatchFileProducerFixture() {
   const originalSync = dispatchReadTransport.observationSync;
   dispatchReadTransport.lookup = async (selector, args = {}) => reply(selector, args) ?? originalLookup(selector, args);
   dispatchReadTransport.observationSync = (selector, args = {}) => reply(selector, args) ?? originalSync(selector, args);
+}
+
+export function seedWorkerRegistry(root, classes, {malformed = false} = {}) {
+  if (!disposable(root)) throw new Error('fixture registry requires disposable root');
+  const directory = join(root, 'registry');
+  mkdirSync(directory, {recursive: true});
+  writeFileSync(join(directory, 'worker-classes.json'), malformed ? '{ invalid json' : JSON.stringify({classes}));
 }

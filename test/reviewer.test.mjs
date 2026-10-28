@@ -1,5 +1,4 @@
-import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
-installDispatchFileProducerFixture();
+import './helpers/dispatch-files-preload.mjs';
 import { appendScopeViolationFinding, evaluateAdditiveOnlyScope } from '../src/additive-only-scope.mjs';
 import { ReviewerPromptTooLargeError } from '../src/reviewer-outcomes.mjs';
 import test from 'node:test';
@@ -3376,7 +3375,7 @@ test('resolveCodexExecOverrides preserves allowed scalar model tuning without fo
   }
 });
 
-test('reviewer model and effort use HQ mirror before seed and host config', () => {
+test('reviewer model and effort use producer registry before host config', () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'reviewer-registry-'));
   const codexHome = join(rootDir, '.codex');
   mkdirSync(codexHome, { recursive: true });

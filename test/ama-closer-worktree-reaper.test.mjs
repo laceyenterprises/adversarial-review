@@ -1,5 +1,4 @@
-import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
-installDispatchFileProducerFixture();
+import './helpers/dispatch-files-preload.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -1361,4 +1360,29 @@ test('closer worktree parser handles porcelain and GitHub remote URLs', () => {
   ]);
   assert.equal(parseGitHubRepoFromRemote('git@github.com:owner/repo.git\n'), 'owner/repo');
   assert.equal(parseGitHubRepoFromRemote('https://github.com/owner/repo.git'), 'owner/repo');
+});
+
+
+test('name-only deployed repo inventory cannot prove half-registration absence', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-name-only-inventory-'));
+  t.after(() => rmSync(root, {recursive: true, force: true}));
+  const workerId = 'hammer-ama-pr-4242';
+  const worktree = join(root, 'workers', workerId, 'agent-os');
+  mkdirSync(worktree, {recursive: true});
+  const result = await reapCloserHammerWorktrees({hqRoot: root, cursorPath: join(root, 'cursor.json'),
+    readWorkerObservationImpl: async () => ({ok: true, rows: [{worker_id: workerId,
+      directory_name: 'agent-os', present: true, manifest_state: 'missing'}]}),
+    execFileImpl: async (_command, args) => {
+      assert.deepEqual(args.slice(0, 3), ['repo', 'list', '--json']);
+      // Deployed repo_list.py projection: no checkout path or worker-base roots.
+      return {stdout: JSON.stringify({repos: [{name: 'agent-os', url: 'https://github.com/acme/agent-os',
+        trunkBranch: 'main', commitSha: 'a'.repeat(40)}], errors: []})};
+    },
+    execGhWithRetryImpl: async () => assert.fail('incomplete absence cannot select PR cleanup'),
+    logger: {info() {}, warn() {}},
+  });
+  assert.equal(result.registrationIncomplete, true);
+  assert.equal(result.deferredIncompleteRegistration, 1);
+  assert.equal(result.reaped, 0);
+  assert.equal(existsSync(worktree), true);
 });

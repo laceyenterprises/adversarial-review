@@ -72,3 +72,10 @@ until the producer merges. Follow the coordinated-release procedure in the
 SDK README to verify merged bytes and update `argus-artifacts.json` with the
 authoritative producer PR and merge commit. A candidate revision or this note
 confers no artifact authority and permits no runtime activation.
+
+
+Follow-up owner: the release operator for [agent-os#9570](https://github.com/laceyenterprises/agent-os/pull/9570),
+tracked jointly with consumer [#1583](https://github.com/laceyenterprises/adversarial-review/pull/1583),
+must compare the merged archive digest, refresh bytes if necessary and update
+`recorded.dispatchLookupSdk`, the lockfile and `argus-artifacts.json` together
+before activation. See the closure runbook's public evidence rollout limits.

@@ -644,12 +644,13 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
     const authorizationCache = new Map();
     const guardReversals = verifiedGuardReversals(evidence, headSha);
     const primary = preservationChanges(evidence.primaryFiles);
-    // Only verified interiors in this exact merge-base/head pair are derived.
+    // Only verified output in this exact merge-base/head pair is derived.
     // Keep marker lines, renames, opaque files and every outside unit protected.
     for (const [path, change] of primary) {
       if (change.opaque || change.renamed || change.status !== 'modified') continue;
       const blocks = (evidence.generatedBlockProofs || []).filter(proof => proof.path === path
         && proof.headSha === headSha && proof.mergeBase === evidence.mergeBase
+        && (!proof.primaryHead || proof.primaryHead === evidence.primaryHead)
         && Number.isSafeInteger(proof.start) && Number.isSafeInteger(proof.end)
         && proof.start > 0 && proof.end >= proof.start);
       const derived = unit => blocks.some(block => unit.start >= block.start && unit.end <= block.end);

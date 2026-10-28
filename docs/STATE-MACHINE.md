@@ -1617,6 +1617,11 @@ Key control points:
   outside regions and other files remain protected. Unavailable or mismatching
   regeneration retains the existing refusal and recovery transitions; see the
   [declaration and sandbox contract](RUNBOOK-ama-closure.md#derivedblock-01).
+  GENERATEDPRIMARY-01 applies the same proof to whole generated text files whose
+  header declares an unchanged generator at the protected primary and final heads.
+  Deleting the scratch output and reproducing the complete final file exempts its
+  derived regions; source declarations and generator code remain protected.
+  Missing proof retains the same refusal, with no new states or merge gates.
   A HAM reversal requires a `Reversal-Authorized-By` trailer citing an authoritative
   blocking finding, or a non-blocking finding required by the effective
   `strict_non_blocking_remediation` policy, on its reviewed head. Non-strict

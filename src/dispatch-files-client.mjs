@@ -1,4 +1,5 @@
 // Public dispatch-file evidence only. Transport failure always retains custody.
+import { resolve } from 'node:path';
 import { dispatchReadTransport, readWorkerObservation, readWorkerObservationSync } from './dispatch-read-client.mjs';
 
 const unavailable = () => ({ok: false, reason: 'dispatch-files-unavailable'});
@@ -72,7 +73,8 @@ function hostIdentityFailure(error) {
 export function readHostIdentitySync(args = {}) {
   const env = args.env ?? process.env;
   const ownToken = env.HQ_LAUNCH_REQUEST_ID && (env.HCP_TOKEN_PATH || env.HCP_TOKEN || env.HCP_BEARER_TOKEN);
-  const key = JSON.stringify([args.hqRoot || env.HQ_ROOT || env.AGENT_OS_HQ_ROOT || null,
+  const hqRoot = args.hqRoot || env.HQ_ROOT || env.AGENT_OS_HQ_ROOT;
+  const key = JSON.stringify([hqRoot ? resolve(hqRoot) : null,
     ownToken ? env.HCP_BASE_URL || null : args.connectOptions?.endpoint_url || env.APP_CONTRACT_ENDPOINT_URL || null,
     // Synthetic transports can model multiple host lifetimes in one process.
     // The production transport has no scope override: its cache never expires.
@@ -90,8 +92,9 @@ export function readHostIdentitySync(args = {}) {
         : dispatchReadTransport.observationSync({observation: 'host_identity'}, {...args, timeoutMs: remaining});
       if (reply?.schema_version !== 1) reason = 'malformed';
       else if (reply.status === 'found' && typeof reply.ownerUser === 'string' && reply.ownerUser.trim()) {
-        hostOwners.set(key, reply.ownerUser);
-        return {ownerUser: reply.ownerUser};
+        const ownerUser = reply.ownerUser.trim();
+        hostOwners.set(key, ownerUser);
+        return {ownerUser};
       } else if (['not_found', 'denied', 'scope_denied'].includes(reply.status)) reason = 'denied';
       else reason = reply.status === 'unavailable' ? 'unavailable' : 'malformed';
     } catch (error) { reason = hostIdentityFailure(error); }

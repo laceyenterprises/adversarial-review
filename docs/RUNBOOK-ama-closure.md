@@ -27,8 +27,12 @@ forced launch, ledger mutation or new smoke step is authorized by this change.
 ## Host identity reads (HOSTIDCACHE-01)
 
 Every host-owner consumer shares `readHostIdentitySync`. A successful read is
-cached for the process lifetime, scoped by HQ root and transport endpoint;
-failures are never cached. An uncached read makes at most three attempts,
+trimmed before returning and caching for the process lifetime, scoped by HQ
+root and transport endpoint. Explicit and environment HQ root paths are resolved
+lexically to absolute paths for the cache key, so relative paths, trailing
+slashes and dot segments share the same entry; symlinks are not resolved and
+an unspecified root keeps its own scope. Failures are never cached.
+An uncached read makes at most three attempts,
 with 50/100 ms synchronous backoff, within the existing read budget and any
 caller deadline. The nominal transport timeout remains eight seconds. An
 own-launch token continues to select `readHcpDispatchLookupSync` first.

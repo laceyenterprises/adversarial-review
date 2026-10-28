@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 
@@ -54,6 +54,46 @@ test('successful identity is cached and callers cannot mutate it', t => {
   read().ownerUser = 'changed-by-caller';
   for (let i = 0; i < 5; i++) assert.deepEqual(read(), { ownerUser: 'fixture-owner' });
   assert.equal(calls, 1);
+});
+
+test('successful identity is trimmed before returning and caching', t => {
+  let calls = 0;
+  const read = reader(t, () => { calls++; return { ...found, ownerUser: ' \tfixture-owner\n' }; });
+  assert.deepEqual(read(), { ownerUser: 'fixture-owner' });
+  assert.deepEqual(read(), { ownerUser: 'fixture-owner' });
+  assert.equal(calls, 1);
+});
+
+test('equivalent explicit and environment HQ root paths share cached identity', t => {
+  let calls = 0;
+  const read = reader(t, () => { calls++; return found; });
+  const root = join(sandbox, 'equivalent-root');
+  for (const args of [
+    { hqRoot: root },
+    { hqRoot: `${root}/` },
+    { hqRoot: `${root}/child/..` },
+    { hqRoot: relative(process.cwd(), root) },
+    { hqRoot: undefined, env: { HQ_ROOT: `${root}/` } },
+    { hqRoot: undefined, env: { AGENT_OS_HQ_ROOT: relative(process.cwd(), root) } },
+  ]) assert.deepEqual(read(args), { ownerUser: 'fixture-owner' });
+  assert.equal(calls, 1);
+});
+
+test('distinct HQ roots and transport endpoints retain separate cached identities', t => {
+  let calls = 0;
+  const read = reader(t, () => ({ ...found, ownerUser: `owner-${++calls}` }));
+  const root = join(sandbox, 'distinct-root');
+  const scopes = [
+    { hqRoot: root },
+    { hqRoot: `${root}-other` },
+    { hqRoot: root, connectOptions: { endpoint_url: 'https://example.invalid/other' } },
+  ];
+  for (let repeat = 0; repeat < 2; repeat++) {
+    for (const [index, args] of scopes.entries()) {
+      assert.deepEqual(read(args), { ownerUser: `owner-${index + 1}` });
+    }
+  }
+  assert.equal(calls, 3);
 });
 
 test('transient failures stop at three attempts and are never cached', t => {

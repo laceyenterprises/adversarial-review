@@ -292,7 +292,8 @@ export function hostObservationFailure(value) {
   const marker = String(value?.message ?? '').match(/^(?:app-contract )?(?:403 )?([a-z0-9_.-]+):/i)?.[1];
   const envelope = value?.schema_version === 1 ? value.status : undefined;
   const signals = [code, marker, envelope, value?.reason];
-  if (signals.some(signal => ['entitlement_denied', 'entitlement-denied'].includes(signal))) {
+  if (signals.some(signal => ['entitlement_denied', 'entitlement-denied', 'not_entitled', 'not-entitled'].includes(signal))
+    || [401, 403].includes(status) || ['401', '403'].includes(marker)) {
     return {ok: false, reason: 'entitlement-denied', detail: 'host.observations.read', retryable: false};
   }
   if (signals.some(signal => ['not_found', 'not-found'].includes(signal)) || status === 404 || marker === '404') {

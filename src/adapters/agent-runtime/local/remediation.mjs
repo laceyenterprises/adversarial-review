@@ -428,6 +428,13 @@ class RegistryUnavailableError extends Error {
   }
 }
 
+// Seed defaults are outage recovery, never authorization recovery. Require the
+// producer's typed classification at every seed-selection catch boundary.
+function permitsCommittedSeed(error) {
+  return error instanceof RegistryUnavailableError
+    && error.retryable === true && error.category === 'infrastructure';
+}
+
 // Each async caller establishes this process's snapshot before synchronous
 // model selection. The app transport coalesces reads and refreshes on TTL expiry.
 async function ensureWorkerRegistryReady(args = {}) {
@@ -437,7 +444,12 @@ async function ensureWorkerRegistryReady(args = {}) {
   // Do not add another catch that can hide bugs in the readiness logic.
   const observed = await readHostObservation('worker_registry', args);
   // Outages permit seed selection; authorization and missing-registry refusals do not.
-  if (!observed.ok && !hostObservationFailure(observed).retryable) {
+  const env = args.env ?? process.env;
+  const pinned = [args.pin, codexModelPin(env), claudeModelPin(env), geminiModelPin(env), env.GEMINI_REVIEWER_MODEL]
+    .some(nonEmptyModelString);
+  // A pin defers the refusal to per-class resolution. Unpinned classes still
+  // see the cached typed fault and cannot obtain a seed default.
+  if (!observed.ok && !hostObservationFailure(observed).retryable && !pinned) {
     throw new RegistryUnavailableError('worker-registry', observed);
   }
   return Boolean(observed.ok && observed.data?.classes
@@ -485,6 +497,8 @@ function resolveRemediationModel(className, {
   seed = readCommittedWorkerModelSeed(),
   log = console,
 } = {}) {
+  const rawModelPin = String(pin ?? '').trim();
+  const modelPin = rawModelPin ? nonEmptyModelString(rawModelPin) : null;
   let registryFailure;
   const fail = (reason) => {
     const error = new RegistryUnavailableError(className, reason, registryFailure);
@@ -497,15 +511,14 @@ function resolveRemediationModel(className, {
     registrySpec = readWorkerClasses(nowMs, { env, hqRoot }).classes[className];
     registryAvailable = true;
   } catch (error) {
-    if (!(error instanceof RegistryUnavailableError) || !error.retryable) throw error;
+    if (!(error instanceof RegistryUnavailableError)) throw error;
+    if (!permitsCommittedSeed(error) && !modelPin) throw error;
     registryFailure = error;
   }
   if (registryAvailable && registrySpec == null) fail('readable registry has no class; committed seed cannot restore a withdrawn class');
   const seedClasses = seed?.classes;
   const seedSpec = seedClasses && typeof seedClasses === 'object' && !Array.isArray(seedClasses)
     ? seedClasses[className] : null;
-  const rawModelPin = String(pin ?? '').trim();
-  const modelPin = rawModelPin ? nonEmptyModelString(rawModelPin) : null;
   if (rawModelPin && !modelPin) fail('invalid explicit model pin; correct or unset pin');
   // A registry allowlist remains authoritative for a pin even when that class
   // has no default. The seed must not reject a newer registry-approved pin.
@@ -546,9 +559,9 @@ function resolveNonBlockingCodexModel({ model, reasoningEffort, env = process.en
   try {
     spec = readWorkerClasses(Date.now(), { env, hqRoot }).classes['remediator-codex'];
   } catch (error) {
-    if (!(error instanceof RegistryUnavailableError)) throw error;
+    if (!permitsCommittedSeed(error)) throw error;
+    spec = readCommittedWorkerModelSeed()?.classes?.['remediator-codex'];
   }
-  spec ??= readCommittedWorkerModelSeed()?.classes?.['remediator-codex'];
   const requestedModel = nonEmptyModelString(model);
   const allowed = spec?.allowedModels;
   return {

@@ -17,6 +17,14 @@ with `modelSource=unresolved`; existing requeue/refund behavior applies.
 Historical records keep their original source strings. Explicit non-blocking
 configuration retains its existing `non-blocking-config` provenance.
 
+REMODELFALLBACK-02 permits seed defaults only for typed retryable infrastructure
+failures. Authorization refusals preserve the non-retryable configuration fault
+naming `host.observations.read` and `modelSource=unresolved`; they create no
+successful seed execution record. A valid explicit pin remains `env-pin` with
+allowlist validation and no seed warning. The build manager's organic local
+remediation receipt is `remediationWorker.modelSource`, expected `registry`
+when the grant is present and no pin is set.
+
 ## Operator-label requeue and CI remediation (LABELSTOPOWNER-01)
 
 LABELSTOPOWNER-01: a follow-up stopped as

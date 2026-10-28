@@ -5,6 +5,7 @@ import {
   ensureWorkerRegistryReady, readCommittedWorkerModelSeed, resolveRemediationModel,
   resolveClaudeRemediationModel, resolveCodexRemediationModel, resolveGeminiRemediationModel,
   RegistryUnavailableError,
+  resolveNonBlockingCodexModel,
 } from '../src/adapters/agent-runtime/local/remediation.mjs';
 import { resolveMergeAgentDispatchHarness } from '../src/merge-agent-harness.mjs';
 import { resolveCloserDispatchHarness } from '../src/ama/harness-fallback.mjs';
@@ -14,6 +15,16 @@ const seed = readCommittedWorkerModelSeed();
 const classes = ['remediator-codex', 'remediator-claude', 'remediator-gemini',
   'codex-reviewer', 'claude-reviewer', 'gemini-reviewer'];
 const review = '## Summary\nSynthetic change reviewed.\n\n## Verdict\nComment only';
+
+const failures = [
+  ['entitlement-denied', { code: 'entitlement_denied' }, false],
+  ['not-entitled', { code: 'not_entitled' }, false],
+  ['401', { statusCode: 401 }, false],
+  ['403', { statusCode: 403 }, false],
+  ['timeout', { code: 'ETIMEDOUT' }, true],
+  ['unavailable', { code: 'ECONNREFUSED' }, true],
+  ['5xx', { statusCode: 503 }, true],
+];
 
 function registry(t, name, data) {
   const env = { APP_CONTRACT_ENDPOINT_URL: `https://example.invalid/remodel-${name}` };
@@ -297,3 +308,92 @@ test('readiness does not hide programming errors while validating an observation
   }));
   await assert.rejects(ensureWorkerRegistryReady(), { name: 'TypeError', message: 'synthetic invalid observation access' });
 });
+
+for (const className of classes) {
+  for (const [name, fields, retryable] of failures) {
+    test(`${className}: ${name} uses seed defaults only for typed transient faults; pins retain precedence`, async t => {
+      const f = registry(t, `typed-${className}-${name}`, Object.assign(new Error('synthetic refusal'), fields));
+      // Warning keys are process-wide; give each case a fresh TTL window.
+      const nowMs = Date.now() + (classes.indexOf(className) * failures.length + failures.findIndex(row => row[0] === name) + 1) * 60_000;
+      t.mock.method(Date, 'now', () => nowMs);
+      const check = error => {
+        assert.ok(error instanceof RegistryUnavailableError);
+        assert.equal(error.retryable, false);
+        assert.equal(error.category, 'configuration');
+        assert.equal(error.failureClass, 'reviewer-configuration-error');
+        assert.equal(error.modelSource, 'unresolved');
+        assert.match(error.message, /modelSource=unresolved.*host\.observations\.read/);
+        return true;
+      };
+      if (retryable) assert.equal(await ensureWorkerRegistryReady({env: f.env}), false);
+      else await assert.rejects(ensureWorkerRegistryReady({env: f.env}), check);
+      const resolve = () => className.endsWith('-reviewer')
+        ? harness.resolveReviewerExecution(className.replace('-reviewer', ''), f)
+        : resolveRemediationModel(className, f);
+      if (retryable) {
+        assert.equal(resolve().modelSource, 'committed-seed');
+        assert.match(f.messages.warnings.join('\n'), /WARNING.*modelSource=committed-seed/);
+      } else {
+        assert.throws(resolve, check);
+        assert.equal(f.messages.warnings.length, 0);
+      }
+      f.messages.warnings.length = 0;
+      assert.throws(() => resolveRemediationModel(className, {...f, pin: 'outside-allowlist'}),
+        {retryable, modelSource: 'unresolved'});
+      assert.equal(f.messages.warnings.length, 0);
+      const pin = seed.classes[className].defaultModel;
+      assert.equal(await ensureWorkerRegistryReady({env: f.env, pin}), false);
+      const pinned = className.endsWith('-reviewer')
+        ? await harness.resolveReviewerExecutionAsync(className.replace('-reviewer', ''), {...f, modelPin: pin})
+        : resolveRemediationModel(className, {...f, pin});
+      assert.equal(pinned.modelSource, 'env-pin');
+      assert.equal(pinned.model ?? pinned.resolvedModel, pin);
+      assert.equal(f.messages.warnings.length, 0);
+      // A pin for one role cannot authorize seed selection for another.
+      if (!retryable) assert.throws(() => resolveRemediationModel(className, f), check);
+    });
+  }
+}
+
+test('non-blocking Codex secondary registry read cannot replace a refusal with seed evidence', t => {
+  let reads = 0;
+  t.mock.method(dispatchReadTransport, 'hostServicesSync', () => {
+    if (++reads === 1) return {schema_version: 1, status: 'found', data: {classes: {
+      'remediator-codex': {defaultModel: 'synthetic-model', allowedModels: ['synthetic-model']},
+    }}};
+    throw Object.assign(new Error('synthetic refusal'), {reason: 'entitlement-denied', retryable: false});
+  });
+  assert.throws(() => resolveNonBlockingCodexModel({env: {}}), error => {
+    assert.equal(error.retryable, false);
+    assert.equal(error.category, 'configuration');
+    assert.equal(error.modelSource, 'unresolved');
+    assert.match(error.message, /host\.observations\.read/);
+    return true;
+  });
+  assert.equal(reads, 2);
+});
+
+for (const [className, resolve, names] of [
+  ['remediator-codex', resolveCodexRemediationModel,
+    ['ADVERSARIAL_REMEDIATION_CODEX_MODEL', 'CODEX_REMEDIATION_MODEL', 'CODEX_MODEL_ID']],
+  ['remediator-claude', resolveClaudeRemediationModel,
+    ['ADVERSARIAL_REMEDIATION_CLAUDE_MODEL', 'CLAUDE_REMEDIATION_MODEL']],
+  ['remediator-gemini', resolveGeminiRemediationModel, ['GEMINI_REMEDIATION_MODEL', 'GEMINI_MODEL']],
+]) {
+  test(`${className}: every env pin alias survives a refused registry without a seed warning`, async t => {
+    const f = registry(t, `refused-aliases-${className}`,
+      Object.assign(new Error('synthetic refusal'), {code: 'entitlement_denied'}));
+    const warnings = [];
+    t.mock.method(console, 'warn', message => warnings.push(message));
+    const model = seed.classes[className].defaultModel;
+    for (const name of names) {
+      const env = {...f.env, [name]: model};
+      assert.equal(await ensureWorkerRegistryReady({env}), false);
+      const result = resolve(env);
+      assert.equal(typeof result === 'string' ? result : result.resolvedModel, model);
+      assert.throws(() => resolveRemediationModel('codex-reviewer', {env, log: f.log}),
+        {retryable: false, category: 'configuration', modelSource: 'unresolved'});
+    }
+    assert.equal(warnings.length, 0);
+  });
+}

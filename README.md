@@ -2864,6 +2864,16 @@ pool. An explicit `roles.codex_worker_account_order` conflicts when its provider
 order disagrees with any declared Codex-family pool; an agreeing key emits one
 redacted redundancy warning per process. Singleton pools agree with either
 legacy order. Account IDs are opaque; provider bindings determine agreement.
+Unresolved provider bindings or malformed Codex-family membership cannot prove
+agreement and yield a structured account-order conflict. Legacy Gemini reviewers
+without a declared pool log that conflict and retain their legacy holders;
+ordinary configuration reads retain full OAuth declaration validation.
+`inspectLegacyPoolOverrides` returns conflict and redundant keys without logging
+or changing warning state; `legacyPoolOverrideConflicts` remains a pure array
+query. Validation and startup emit redundancy warnings through injectable loggers,
+including the Gemini reviewer's logger. Tests and explicit reload boundaries can
+call `resetLegacyPoolOverrideWarnings()` to clear conflict and redundancy warning
+scopes; ordinary reads retain per-process deduplication.
 Refusals retain the exact config path and winning source. The helper never
 rewrites an override, and canonicalizes class aliases before
 mapping remediator harness names to their role pools. This does not expand the

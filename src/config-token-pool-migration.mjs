@@ -21,10 +21,25 @@ export function warnPoolConfigConflicts(keys, warn = console.warn) {
   }
 }
 
-export function legacyPoolOverrideConflicts(cfg) {
+export function warnPoolConfigRedundancies(keys, warn = console.warn) {
+  for (const key of keys) {
+    if (warnedRedundantKeys.has(key)) continue;
+    warnedRedundantKeys.add(key);
+    warn(`pool-config-redundant: ${key}; declared pools own account order`);
+  }
+}
+
+// Explicit test/reload boundary; inspection never changes either warning scope.
+export function resetLegacyPoolOverrideWarnings() {
+  warnedKeys.clear();
+  warnedRedundantKeys.clear();
+}
+
+export function inspectLegacyPoolOverrides(cfg) {
+  const result = { conflicts: [], redundant: [] };
   const pools = cfg.get('oauth.identity_token_pools', {});
-  if (pools == null || !Object.keys(pools).length) return [];
-  const conflicts = [];
+  if (pools == null || !Object.keys(pools).length) return result;
+  const { conflicts, redundant } = result;
   const source = key => cfg.resolutionTrace?.(key)?.at(-1)?.source || 'code-default';
   const paths = {
     'roles.remediator': { codex: 'remediator-codex', 'claude-code': 'remediator-claude', claude: 'remediator-claude' },
@@ -44,24 +59,31 @@ export function legacyPoolOverrideConflicts(cfg) {
   const key = 'roles.codex_worker_account_order';
   const orderSetting = cfg.get(key);
   if (['personal-first', 'corporate-first'].includes(orderSetting) && source(key) !== 'code-default') {
-    const accounts = cfg.get('oauth.token_accounts', {});
+    const accounts = cfg.get('oauth.token_accounts', {}) ?? {};
     const orders = Object.entries(pools)
       .filter(([role]) => ['codex', 'codex-reviewer', 'hammer', 'remediator-codex'].includes(role))
-      .map(([, members]) => members.map(member => accounts[member].broker_provider));
-    if (!orders.length) return conflicts;
+      .map(([, members]) => Array.isArray(members)
+        ? members.map(member => accounts[member]?.broker_provider) : null);
+    if (!orders.length) return result;
     const preferred = orderSetting === 'personal-first' ? ['codex', 'codex-corp'] : ['codex-corp', 'codex'];
-    const agrees = orders.every(order => order.join(',') === preferred.filter(p => order.includes(p)).join(','));
+    // Legacy Gemini reads may intentionally bypass unrelated OAuth validation.
+    // Unresolved providers cannot prove agreement and must remain conflicts.
+    const agrees = orders.every(order => order?.length > 0
+      && order.every(provider => preferred.includes(provider))
+      && order.join(',') === preferred.filter(p => order.includes(p)).join(','));
     if (!agrees) conflicts.push(key);
-    else if (!warnedRedundantKeys.has(key)) {
-      warnedRedundantKeys.add(key);
-      console.warn(`pool-config-redundant: ${key}; declared pools own account order`);
-    }
+    else redundant.push(key);
   }
-  return conflicts;
+  return result;
 }
 
-export function validateLegacyPoolOverrides(cfg) {
-  const keys = legacyPoolOverrideConflicts(cfg);
+export function legacyPoolOverrideConflicts(cfg) {
+  return inspectLegacyPoolOverrides(cfg).conflicts;
+}
+
+export function validateLegacyPoolOverrides(cfg, warn = console.warn) {
+  const { conflicts: keys, redundant } = inspectLegacyPoolOverrides(cfg);
+  warnPoolConfigRedundancies(redundant, warn);
   if (keys.length) throw new PoolConfigConflictError(keys,
     cfg.resolutionTrace?.(keys[0])?.at(-1)?.source || 'code-default');
 }

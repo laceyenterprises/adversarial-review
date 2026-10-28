@@ -1,7 +1,8 @@
-import { test } from 'node:test';
+import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AgentOSConfigError, loadConfig } from '../src/config-loader.mjs';
-import { PoolConfigConflictError, legacyPoolOverrideConflicts, validateLegacyPoolOverrides } from '../src/config-token-pool-migration.mjs';
+import { PoolConfigConflictError, inspectLegacyPoolOverrides, legacyPoolOverrideConflicts,
+  resetLegacyPoolOverrideWarnings, validateLegacyPoolOverrides, warnPoolConfigRedundancies } from '../src/config-token-pool-migration.mjs';
 import { resolveIdentityTokenPools, validateStartupRoleConfig } from '../src/role-config.mjs';
 import { poolConflictFixture } from './helpers/pool-conflict-fixture.mjs';
 import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
@@ -13,20 +14,68 @@ const accounts = {
   personal: { family: 'codex', broker_provider: 'codex', allowed_models: ['gpt-6'], concurrency: 1 },
 };
 
+afterEach(resetLegacyPoolOverrideWarnings);
+
 const selectorCases = JSON.parse(readFileSync(new URL('./fixtures/pool-role-selector-cases.v1.json', import.meta.url)));
-for (const [index, fixture] of selectorCases.cases.entries()) {
-  test(`ITPROLEPOOL-01 shared selector contract: ${fixture.name}`, async t => {
-    // Fresh module gives each case its own process-lifetime warning cache.
-    const { legacyPoolOverrideConflicts: conflicts } = await import(`../src/config-token-pool-migration.mjs?case=${index}`);
+for (const fixture of selectorCases.cases) {
+  test(`ITPROLEPOOL-01 shared selector contract: ${fixture.name}`, t => {
     const messages = [];
-    t.mock.method(console, 'warn', message => messages.push(message));
+    t.mock.method(console, 'warn', () => assert.fail('inspection must not warn'));
     const values = { ...fixture.values, 'oauth.identity_token_pools': fixture.pools,
       'oauth.token_accounts': selectorCases.accounts };
     const cfg = { get: (key, fallback) => values[key] ?? fallback,
       resolutionTrace: key => Object.hasOwn(fixture.values, key) ? [{ source: fixture.source }] : [] };
-    for (let attempt = 0; attempt < 2; attempt++) assert.deepEqual(conflicts(cfg), fixture.conflicts);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      assert.deepEqual(legacyPoolOverrideConflicts(cfg), fixture.conflicts);
+      const result = inspectLegacyPoolOverrides(cfg);
+      assert.deepEqual(result, { conflicts: fixture.conflicts, redundant: fixture.warnings });
+      warnPoolConfigRedundancies(result.redundant, message => messages.push(message));
+    }
     assert.deepEqual(messages, fixture.warnings.map(key => `pool-config-redundant: ${key}; declared pools own account order`));
   });
+}
+
+test('redundancy logging is injectable in validation and startup, with an explicit reset', t => {
+  t.mock.method(console, 'warn', () => assert.fail('must use the injected logger'));
+  const values = { 'oauth.identity_token_pools': { codex: ['personal', 'corp'] },
+    'oauth.token_accounts': accounts, 'roles.codex_worker_account_order': 'personal-first' };
+  const cfg = { get: key => values[key], resolutionTrace: () => [{ source: 'fixture' }] };
+  const messages = [];
+  const warn = message => messages.push(message);
+  for (let attempt = 0; attempt < 2; attempt++) validateLegacyPoolOverrides(cfg, warn);
+  const warning = 'pool-config-redundant: roles.codex_worker_account_order; declared pools own account order';
+  assert.deepEqual(messages, [warning]);
+  resetLegacyPoolOverrideWarnings();
+  assert.deepEqual(validateStartupRoleConfig({ loaderImpl: () => cfg, env: {}, warn }), { warnings: [] });
+  assert.deepEqual(messages, [warning, warning]);
+});
+
+for (const [name, tokenAccounts, members] of [
+  ['missing accounts', undefined, ['missing']],
+  ['null accounts', null, ['missing']],
+  ['missing entry', {}, ['missing']],
+  ['null entry', { missing: null }, ['missing']],
+  ['missing provider', { missing: {} }, ['missing']],
+  ['unknown provider', { missing: { broker_provider: 'other' } }, ['missing']],
+  ['partially resolved', accounts, ['personal', 'missing']],
+  ['null membership', accounts, null],
+  ['non-array membership', accounts, 'personal'],
+  ['empty membership', accounts, []],
+]) {
+  for (const setting of ['personal-first', 'corporate-first']) {
+    test(`unresolvable pool order is a structured conflict: ${name}, ${setting}`, t => {
+      t.mock.method(console, 'warn', () => assert.fail('invalid declarations must not warn as redundant'));
+      const key = 'roles.codex_worker_account_order';
+      const values = { 'oauth.identity_token_pools': { codex: members },
+        'oauth.token_accounts': tokenAccounts, [key]: setting };
+      const cfg = { get: (path, fallback) => Object.hasOwn(values, path) ? values[path] : fallback,
+        resolutionTrace: () => [{ source: 'fixture' }] };
+      assert.deepEqual(inspectLegacyPoolOverrides(cfg), { conflicts: [key], redundant: [] });
+      assert.deepEqual(legacyPoolOverrideConflicts(cfg), [key]);
+      assert.throws(() => validateLegacyPoolOverrides(cfg), error =>
+        error instanceof PoolConfigConflictError && error.key === key);
+    });
+  }
 }
 
 test('ITPROLEPOOL-01 all four Codex pools resolve with canonical selectors from every layer', () => {

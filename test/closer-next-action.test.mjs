@@ -13,7 +13,9 @@ import { routeToHammerOwner } from '../src/hammer-owner-route.mjs';
 import { launchSource } from '../src/pr-next-action-consumer.mjs';
 import { closureOwnerFromDecision, hasHammerDispatchIntent, observeClosureResult, observeClosureOwnership,
   resolveClosureNextAction, revalidateClosurePr, reviseClosureNextAction, readClosureNextAction } from '../src/ama/closure-next-action.mjs';
-import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
+import { maybeDispatchAmaClosureFor, resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
+import { reviewCeilingOwner } from '../src/review-ceiling-owner.mjs';
+import { observeClosureWait, CLOSURE_WAIT_BOUND_MS } from '../src/ama/closure-wait.mjs';
 import { followUpJobFilePrefix } from '../src/follow-up-job-names.mjs';
 import { getFollowUpJobDir } from '../src/follow-up-jobs.mjs';
 import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
@@ -130,17 +132,75 @@ test('closure invalidates an earlier wake decision when round evidence changes',
 
 for (const attested of [false, true]) {
   for (const reviewCeilingReached of [false, true]) {
-    test(`explicit head-bound review survives attested=${attested}, ceiling=${reviewCeilingReached}`, async () => {
+    test(`CEILINGOWNER-01: explicit head-bound review agrees with admission, attested=${attested}, ceiling=${reviewCeilingReached}`, async () => {
+      const reviewAdmissionRow = { review_status: 'posted', reviewer_head_sha: OLD,
+        ...(reviewCeilingReached ? { rereview_reason: 'system-review-ceiling-closure' } : {}) };
       const shared = await resolveClosureNextAction({
         input: { reviewState: { ...clean, headSha: OLD }, currentHead: HEAD, attested,
           closerAuthoredStale: { decision: 'rereview-exact-head', reviewedHead: OLD, currentHead: HEAD },
-          reviewCeilingReached, lease: null, roundsLeft: false, checks: 'SUCCESS' },
+          reviewAdmissionRow, lease: null, roundsLeft: false, checks: 'SUCCESS' },
         candidate: { headSha: HEAD, prState: 'OPEN', mergeable: 'MERGEABLE' },
         autonomousMergeExecutionEnabled: true, observedAt: AT,
       });
-      assert.deepEqual(tuple(shared.decision), ['review', 'reviewer', 'exact-head-review']);
+      const owner = reviewCeilingOwner({ row: reviewAdmissionRow, headSha: HEAD });
+      assert.equal(shared.decision.actor, owner);
+      assert.deepEqual(tuple(shared.decision), reviewCeilingReached
+        ? ['hammer', 'hammer', 'review-ceiling'] : ['review', 'reviewer', 'exact-head-review']);
     });
   }
+}
+
+test('CEILINGOWNER-01: injected refused-review ownership records once and escalates through the bounded closure wait', async t => {
+  const rootDir = root(t), records = [], pages = [];
+  const reviewStateRow = { review_status: 'posted', reviewer_head_sha: OLD,
+    rereview_reason: 'system-review-ceiling-closure' };
+  // Simulate a stale producer still running the old below-ceiling policy.
+  const shared = pair(base({ reviews: { ...clean, headSha: OLD }, progress: {
+    closerAuthoredStale: { decision: 'rereview-exact-head', reviewedHead: OLD, currentHead: HEAD },
+  } }));
+  assert.equal(shared.decision.action, 'review');
+  for (const elapsed of [0, 1_000, CLOSURE_WAIT_BOUND_MS, CLOSURE_WAIT_BOUND_MS + 1]) {
+    const now = Date.parse(AT) + elapsed;
+    const result = await resolveMergeAgentCoexistenceForWatcher({ rootDir,
+      repoPath: identity.repo, prNumber: identity.prNumber, currentRevisionRef: HEAD,
+      candidate: { headSha: HEAD, prState: 'open' }, labelNames: [], reviewStateRow,
+      logger: { ...quiet, warn: line => records.push(JSON.parse(line)) },
+      maybeDispatchAmaClosureForImpl: async () => ({ amaEnabled: true, dispatched: false,
+        nextAction: shared.decision, reason: 'handed-to-review' }),
+      recoverOrphanImpl: async () => assert.fail('a refused actor must not enter review request/backoff'),
+      orphanOptions: { now, observeClosureWaitImpl: options => observeClosureWait({ ...options,
+        pageImpl: async message => pages.push(message) }) },
+    });
+    assert.equal(result.amaClosureResult.reason, 'next-action-contract-violation');
+    assert.equal(result.amaClosureResult.boundedWait.startedAt, Date.parse(AT));
+    assert.equal(result.outcome, elapsed >= CLOSURE_WAIT_BOUND_MS ? 'await-operator' : 'ama-pending');
+    assert.equal(Boolean(result.amaClosureResult.needsOperator), elapsed >= CLOSURE_WAIT_BOUND_MS);
+    assert.equal(result.urgent, elapsed < CLOSURE_WAIT_BOUND_MS);
+  }
+  assert.equal(records.length, 1, 'durable first observation dedupes the contract record across ticks');
+  assert.equal(records[0].event, 'ama.next_action.contract_violation');
+  assert.equal(records[0].actor, 'reviewer');
+  assert.equal(pages.length, 1, 'the existing closure-wait page receipt dedupes exhaustion');
+  assert.match(pages[0], /next-action-contract-violation/);
+});
+
+for (const reason of ['retrigger-review: synthetic request', `system-orphan-head-review:${HEAD}`]) {
+  test(`CEILINGOWNER-01: existing explicit review exception is shared for ${reason.split(':')[0]}`, async () => {
+    const row = { rereview_reason: reason, rereview_requested_at: AT, revision_ref: HEAD };
+    assert.equal(reviewCeilingOwner({ row, headSha: HEAD, ceilingReached: true }), 'reviewer');
+    assert.equal(reviewCeilingOwner({ row: { ...row, rereview_requested_at: null },
+      headSha: HEAD, ceilingReached: true }), 'hammer');
+    if (reason.startsWith('system-orphan-head-review:')) {
+      assert.equal(reviewCeilingOwner({ row, headSha: OTHER, ceilingReached: true }), 'hammer');
+    }
+    const shared = await resolveClosureNextAction({ input: {
+      reviewState: { ...clean, headSha: OLD }, currentHead: HEAD, reviewAdmissionRow: row,
+      reviewCeilingReached: true, lease: null, roundsLeft: false, checks: 'SUCCESS',
+      closerAuthoredStale: { decision: 'rereview-exact-head', reviewedHead: OLD, currentHead: HEAD },
+    }, candidate: { headSha: HEAD, prState: 'OPEN', mergeable: 'MERGEABLE' },
+    autonomousMergeExecutionEnabled: true, observedAt: AT });
+    assert.deepEqual(tuple(shared.decision), ['review', 'reviewer', 'exact-head-review']);
+  });
 }
 
 test('existing operator approval keeps exact-head and actor policy before daemon admission', () => {

@@ -39,7 +39,8 @@ export async function observeClosureWait({ rootDir, repo, prNumber, headSha, rea
             .run(headSha, reasonClass, now, reason, paged);
         }
       }
-      db.prepare('INSERT OR IGNORE INTO waits_by_class(head, class, started, reason) VALUES (?, ?, ?, ?)').run(headSha, reasonClass, Number.isFinite(startedAt) ? Math.min(now, startedAt) : now, reason);
+      const firstObserved = db.prepare('INSERT OR IGNORE INTO waits_by_class(head, class, started, reason) VALUES (?, ?, ?, ?)')
+        .run(headSha, reasonClass, Number.isFinite(startedAt) ? Math.min(now, startedAt) : now, reason).changes === 1;
       db.prepare('UPDATE waits_by_class SET reason=? WHERE head=? AND class=?').run(reason, headSha, reasonClass);
       // Retained launches carry durable progress timestamps. Apply them to an
       // existing final-round wait too. Ignore future timestamps here so clock
@@ -58,7 +59,7 @@ export async function observeClosureWait({ rootDir, repo, prNumber, headSha, rea
         ? now - launchWait.startedAt >= launchWait.boundMs
         : !progress && now - row.started >= boundMs);
       const notify = !anchorOnly && exhausted && db.prepare('UPDATE waits_by_class SET paged=1 WHERE head=? AND class=? AND paged=0').run(headSha, reasonClass).changes === 1;
-      return { exhausted, notify, startedAt: launching ? launchWait.startedAt : progress ? now : row.started,
+      return { exhausted, notify, firstObserved, startedAt: launching ? launchWait.startedAt : progress ? now : row.started,
         boundedMs: launching ? launchWait.boundMs : boundMs };
     }).immediate();
     if (result.notify) {

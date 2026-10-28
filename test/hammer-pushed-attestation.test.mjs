@@ -129,14 +129,14 @@ test('HAMATTEST-02: unchanged publication writes nothing; read and credential fa
 });
 
 
-test('HAMATTEST-02: ownership and rescue execute the shared unproven-head decision despite the old ceiling', async () => {
+test('CEILINGOWNER-01: ownership and rescue retain the final hammer for an unproven head at the ceiling', async () => {
   const headProof = await proveCloserAuthoredStaleHead({ reviewedHead: baseHead, currentHead: pushedHead, comments: [] });
   const closerAuthoredStale = closerAuthoredStaleEligible({ headProof });
   const closureOwner = decideClosureOwner({ closerAuthoredStale, attested: true,
     reviewState: { headSha: baseHead, verdict: 'approved' }, currentHead: pushedHead,
     roundsLeft: false, reviewCeilingReached: true });
-  assert.equal(closureOwner.action, 'review');
-  assert.equal(closureOwner.actor, 'reviewer');
-  assert.equal(closureOwner.reason, 'exact-head-review');
-  assert.equal(classifyRescue({ closureOwner }).decision, 'rereview-eligible');
+  assert.equal(closureOwner.action, 'hammer');
+  assert.equal(closureOwner.actor, 'hammer');
+  assert.equal(closureOwner.reason, 'review-ceiling');
+  assert.equal(classifyRescue({ closureOwner }).decision, 'hammer-eligible');
 });

@@ -150,3 +150,14 @@ It pages immediately using the `closure-decision-mismatch` wait class and the
 existing per-PR/head reservation. Failed delivery leaves the saturated count
 and refunds the page receipt for retry. This counter grants no merge or dispatch
 authority and leaves caps and leases unchanged. Synthetic tests inject paging.
+
+### Actor admission disagreements (CEILINGOWNER-01)
+
+An impossible review assignment to a capped closure row uses `waits_by_class`
+with class `actor-admission`. The existing first-observation clock, bounded
+retry and once-only page reservation apply. `observeClosureWait` also returns
+`firstObserved`, derived from the insert result; the caller uses it to emit one
+`ama.next_action.contract_violation` diagnostic per PR/head across restarts.
+At the ordinary closure-wait bound the result carries `needsOperator: true`.
+The watchdog cannot requeue this refused actor while the wait owns escalation.
+There is no new table, column, admission gate or configuration key.

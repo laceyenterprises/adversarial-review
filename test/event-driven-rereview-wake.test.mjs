@@ -22,6 +22,7 @@ import {
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 import { collectReviewLatencyReport } from '../src/review-latency-report.mjs';
 import { main as rereviewWakeCli } from '../bin/rereview-wake.mjs';
+import { reviewCeilingOwner } from '../src/review-ceiling-owner.mjs';
 
 const REPO = 'laceyenterprises/agent-os';
 const PR = 6603;
@@ -37,6 +38,18 @@ function collectingWake(calls) {
     return { requested: true, payload: { request_id: 'watcher-wake-1', requested_at: args.requestedAt, reason: args.reason } };
   };
 }
+
+test('CEILINGOWNER-01: a capped non-closer moved head settles its closeout wake with the shared hammer owner', () => {
+  const reviewedHead = 'b'.repeat(40);
+  const reviewRow = { review_status: 'posted', reviewer_head_sha: reviewedHead,
+    rereview_reason: 'system-review-ceiling-closure' };
+  assert.equal(reviewCeilingOwner({ row: reviewRow, headSha: HEAD }), 'hammer');
+  assert.deepEqual(classifyRereviewWakeOutcome({
+    record: { repo: 'fixture/repo', prNumber: 17, headSha: HEAD,
+      reason: REREVIEW_WAKE_REASONS.REMEDIATION_CLOSEOUT },
+    reviewRow, currentHeadSha: HEAD,
+  }), { state: REREVIEW_WAKE_STATES.SKIPPED, reason: 'review-ceiling-hammer-owned' });
+});
 
 test('a producer with the wrong UID refuses before creating queue or SQLite files', (t) => {
   const rootDir = root();

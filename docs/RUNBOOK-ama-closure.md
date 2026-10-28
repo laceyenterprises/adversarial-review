@@ -5357,6 +5357,18 @@ admitted. A `remediation-closeout` wake settles explicitly as
 act, the existing final-round durable wait records the refusal and pages once
 at its 30-minute bound. After deployment, verify the next such PR reaches a
 hammer lease, terminal validation and merge without an operator hand merge.
+CEILINGOWNER-01 shares `reviewCeilingOwner` between capped review admission and
+the next-action input. A head-bound `rereview-exact-head` recommendation cannot
+override a ceiling that refuses reviewer admission: the final hammer owns the
+unreviewed delta. Existing operator and exact-head orphan review exceptions
+remain shared exceptions; the ceiling value and delivered-review counting are
+unchanged. An injected or stale producer decision assigning review to a capped
+closure row records `ama.next_action.contract_violation` once per head, then
+uses the existing durable closure wait (`actor-admission`) and `needsOperator`
+at exhaustion. It does not requeue an inadmissible review or enter exponential
+no-progress backoff. Verify after deployment that a capped non-closer head with
+an explicit rereview recommendation dispatches its final hammer; all exact-head
+CI, mergeability, findings and attestation checks still apply.
 The ledger and ceiling are computed only when the review head has moved.
 
 The watcher persists the last head verified nonempty and probes again only on a
@@ -5729,8 +5741,8 @@ remain retryable. After deployment, inspect an ownerless synthetic replay's
 request marker and per-head evidence, and confirm pushed edges never satisfy
 `exactHammerValidation`. No configuration, CI status or merge gate is added.
 
-HAMATTEST-03 fixes the coexistence return order: a head-bound exact-head review
-decision visits the watchdog before a bounded closure wait can return. This
+HAMATTEST-03 fixes the coexistence return order: an admitted head-bound exact-head
+review decision visits the watchdog before a bounded closure wait can return. This
 includes applying a background dispatch refusal. Live or uncertain ownership
 still fences review; successful queueing reports `exact-head-review-queued`
 and `closureOwner.owner=review`, preserving the wait reason and durable request
@@ -5746,6 +5758,10 @@ recovery. An overdue page does not substitute an operator hold. The watchdog's
 existing ownership proof and once-per-head reservation still fence review. The rejected
 verdict remains visible; only a new authoritative review or valid carried verdict
 can settle it.
+CEILINGOWNER-01 bounds this recommendation by the shared ceiling predicate:
+an exhausted review budget belongs to the final hammer. A selected reviewer
+whose capped admission refuses the head instead retains a contract-violation
+wait and escalates through `needsOperator` at its existing bound.
 Pending exact-head CI already records `required-checks-pending`, `resumeOwed`
 and `resumeHead` in the hammer terminal audit. Neither that receipt nor pushed
 provenance certifies CI or authorizes merge.

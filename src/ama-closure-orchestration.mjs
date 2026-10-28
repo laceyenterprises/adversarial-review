@@ -1,4 +1,5 @@
 import { hammerHeadOwnership } from './hammer-head-ownership.mjs';
+import { reviewCeilingOwner } from './review-ceiling-owner.mjs';
 import { infrastructureOnlyFailures } from './ci-infrastructure.mjs';
 import { recoverInfrastructureChecks } from './ci-recovery.mjs';
 import { recoverInfrastructureCiStops } from './remediation-ci-infrastructure.mjs';
@@ -1670,7 +1671,8 @@ async function dispatchAmaClosureFor({
   const closureOwnerInput = { hammerStop: recordedStop && (!recordedStop.refusal || !releasedStop) && !isInfrastructureStop(recordedStop) ? recordedStop : null,
     ...(recordedTerminalReview ? { terminalReview: { validated: true,
       headSha: currentPrHeadSha, reviewedHeadSha: reviewState.headSha } } : {}),
-    rootDir, reviewState, currentHead: currentPrHeadSha, strictMode, closerAuthoredStale, hammerHead,
+    rootDir, reviewState, reviewAdmissionRow: reviewStateRow,
+    currentHead: currentPrHeadSha, strictMode, closerAuthoredStale, hammerHead,
     operatorLogins: cfg?.operatorLogins, operatorLabelActorEnforcement: cfg?.operatorLabelActorEnforcement,
     strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
     retryExhausted: ownerCap.capExhausted, lifetimeExhausted: ownerCap.lifetimeCapExhausted,
@@ -2820,6 +2822,29 @@ export function resolveMergeAgentCoexistenceForWatcher(options) {
   return withClosureEvaluationReadCache(() => resolveMergeAgentCoexistenceWithinEvaluation(options));
 }
 
+// Diagnose impossible ownership through the existing durable closure wait.
+// This never authorizes a review or a merge, and must run before the watchdog
+// can turn a refused review into another request/backoff cycle.
+async function observeReviewAdmissionContract({ rootDir, repo, prNumber, headSha, reviewStateRow,
+  result, logger, now, env, observeWaitImpl }) {
+  const decision = result?.nextAction;
+  if (decision?.action !== 'review' || decision.actor !== 'reviewer' || decision.head !== headSha
+    || decision.queue?.intent === 'owned'
+    || reviewCeilingOwner({ row: reviewStateRow, headSha }) !== 'hammer') return null;
+  const contractViolation = { actor: decision.actor, headSha, admissionReason: 'review-ceiling' };
+  const boundedWait = await observeWaitImpl({ rootDir, repo, prNumber, headSha, now, env,
+    waitClass: 'actor-admission', reason: `next-action-contract-violation: actor=${decision.actor} head=${headSha} admission=review-ceiling` });
+  if (boundedWait.firstObserved) logger?.warn?.(JSON.stringify({
+    event: 'ama.next_action.contract_violation', repo, prNumber, ...contractViolation,
+  }));
+  const amaClosureResult = { ...result, reason: 'next-action-contract-violation',
+    closureBlocker: 'next-action-contract-violation', contractViolation, boundedWait,
+    recoveryWait: true, skipMergeAgent: true, retryAfterMs: boundedWait.retryAfterMs,
+    ...(boundedWait.exhausted ? { needsOperator: true } : {}) };
+  return { outcome: boundedWait.exhausted ? 'await-operator' : 'ama-pending',
+    urgent: !boundedWait.exhausted, amaClosureResult };
+}
+
 async function resolveMergeAgentCoexistenceWithinEvaluation({
   rootDir = ROOT,
   reviewStateRow,
@@ -2946,6 +2971,12 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
       ? { outcome: 'pr-terminal', terminalReason: 'merged', amaClosureResult }
       : { outcome: 'ama-pending', amaClosureResult };
   }
+  const admissionDisagreement = await observeReviewAdmissionContract({ rootDir, repo: repoPath, prNumber,
+    headSha: candidate?.headSha || currentRevisionRef, reviewStateRow, result: amaClosureResult, logger,
+    now: typeof orphanOptions.now === 'number' ? orphanOptions.now
+      : orphanOptions.now ? Date.parse(orphanOptions.now) : Date.now(), env: orphanOptions.env || process.env,
+    observeWaitImpl: orphanOptions.observeClosureWaitImpl || observeClosureWait });
+  if (admissionDisagreement) return admissionDisagreement;
   const mergeAgentRequestedScoped = !labelNames?.some((label) =>
     [...OPERATOR_HOLD_LABELS, 'adversarial-merge-blocked',
       'merge-agent-stuck', 'duplicate-family-hold'].includes(label))

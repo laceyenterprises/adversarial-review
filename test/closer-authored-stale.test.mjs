@@ -21,6 +21,7 @@ import {
   readHammerRetryCapLedger,
   recordHammerRetryDispatch,
 } from '../src/ama/hammer-retry-cap.mjs';
+import { resolveClosureNextAction } from '../src/ama/closure-next-action.mjs';
 
 const R = 'r'.repeat(40);
 const P = 'p'.repeat(40);
@@ -114,6 +115,23 @@ test('HAMROUNDEDGE-01 completed rounds cannot authorize a round-only or builder-
     const { eligibility } = await decideRound({ ...options, ...overrides });
     assert.equal(eligibility.decision, 'rereview-exact-head');
   }
+});
+
+test('CEILINGOWNER-01: an unproven builder head recommends rereview while capped admission assigns the final hammer', async t => {
+  const { options } = remediationFixture(t);
+  const { eligibility } = await decideRound({ ...options, currentHead: M, comments: [] });
+  assert.equal(eligibility.decision, 'rereview-exact-head');
+  const shared = await resolveClosureNextAction({ input: {
+    currentHead: M, reviewState: { ...CLEAN, verdict: 'approved', headSha: R,
+      nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 },
+    reviewAdmissionRow: { review_status: 'posted', reviewer_head_sha: R,
+      rereview_reason: 'system-review-ceiling-closure' },
+    closerAuthoredStale: { ...eligibility, currentHead: M, reviewedHead: R },
+    checks: 'SUCCESS', roundsLeft: false, lease: null,
+  }, candidate: { headSha: M, prState: 'OPEN', mergeable: 'MERGEABLE' },
+  autonomousMergeExecutionEnabled: true, observedAt: '2026-01-01T00:00:00Z' });
+  assert.equal(shared.decision.action, 'hammer');
+  assert.equal(shared.decision.reason, 'review-ceiling');
 });
 
 test('HAMROUNDEDGE-01 mixed edges retain the chain-length limit and eligibility gates', async t => {

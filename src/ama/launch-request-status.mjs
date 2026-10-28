@@ -9,9 +9,22 @@ export const AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES = new Set(
       return readDispatchStatus({ status }).terminal;
     }),
 );
+// GSR-03: a graceful restart holds a launch `suspended` until it resumes from
+// its own session, an operator abandons it or its age bound expires. The status
+// postdates the pinned SDK vocabulary, so name it here: it is non-terminal and
+// not parked, so its closer lease stays dispatched and held like a live one.
+const SUSPENDED = 'suspended';
+function withSuspendedStatus(row, meaning) {
+  if (meaning.status !== null || typeof row?.status !== 'string'
+    || row.status.trim().toLowerCase() !== SUSPENDED) return meaning;
+  return { ...meaning, status: SUSPENDED,
+    terminal: typeof row.terminal === 'boolean' ? row.terminal : false,
+    diagnostics: meaning.diagnostics.filter(note => !note.includes('$.status')) };
+}
+
 export function launchRequestMeaning(value) {
   const row = typeof value === 'string' ? { status: value } : value;
-  const meaning = readDispatchStatus(row);
+  const meaning = withSuspendedStatus(row, readDispatchStatus(row));
   return { ...meaning,
     // Parking is scheduling/ownership policy over the published vocabulary.
     parked: meaning.status !== null && /^(blocked_|waiting_)/.test(meaning.status),

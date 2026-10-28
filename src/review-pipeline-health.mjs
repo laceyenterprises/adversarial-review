@@ -2544,7 +2544,8 @@ function liveWorkerForBranch(hqRoot, repo, branch, {
   const timeout = loadAwareTimeoutMs(workerStatusTimeoutMs);
   const hqBin = process.env.AGENT_OS_HQ_BIN || process.env.HQ_BIN || 'hq';
   const ownerUser = readHostIdentitySync({hqRoot}).ownerUser;
-  const liveStatuses = new Set(['requested', 'admitted', 'leased', 'starting', 'running']);
+  // GSR-03: a suspended worker still owns its branch and resumes on it.
+  const liveStatuses = new Set(['requested', 'admitted', 'leased', 'starting', 'running', 'suspended']);
   if (!workerIndex) return {status: 'unknown', error: 'worker-observation-unavailable'};
   for (const row of workerIndex) {
     const {worker_id: workerId, launch_request_id: launchRequestId} = row;

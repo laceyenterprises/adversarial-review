@@ -1,3 +1,4 @@
+import './helpers/dispatch-files-preload.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';

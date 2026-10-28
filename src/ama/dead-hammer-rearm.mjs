@@ -14,8 +14,7 @@ import { validNoWorkVerdict } from '../execution-verdict.mjs';
 // Refund authority is the persisted RCV-07 ExecutionVerdict.export. Missing or
 // work_started evidence stays charged; existing admission health/backoff still
 // owns when another dispatch may run. No worker output is read by this consumer.
-import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
-import { join } from 'node:path';
+import { readDispatchFilesSync } from '../dispatch-files-client.mjs';
 
 import { refundHammerRetryDispatch } from './hammer-retry-cap.mjs';
 import { isHammerWorkerClass } from './hammer-worker-class.mjs';
@@ -30,8 +29,6 @@ export const API_429_DEAD_HAMMER_FAILURE_CLASSES = Object.freeze([
   'worker_killed',
 ]);
 
-const WORKER_OUTPUT_TAIL_BYTES = 64 * 1024;
-const LAUNCH_REQUEST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 // Claude Code's error line, e.g. `API Error: Request rejected (429) · This
 // request would exceed your account's rate limit.` or `API Error: 429 {...}`.
 const PROVIDER_API_429_LINE_RE = /^API Error: (?:Request rejected \()?429\b/m;
@@ -95,29 +92,13 @@ export function unexecutedHammerReason(row = {}) {
   return null;
 }
 
-function readFileTail(path, maxBytes = WORKER_OUTPUT_TAIL_BYTES) {
-  let fd = null;
-  try {
-    fd = openSync(path, 'r');
-    const size = fstatSync(fd).size;
-    const length = Math.min(size, maxBytes);
-    const buffer = Buffer.alloc(length);
-    readSync(fd, buffer, 0, length, size - length);
-    return buffer.toString('utf8');
-  } catch {
-    return '';
-  } finally {
-    if (fd !== null) closeSync(fd);
+export function readDeadHammerWorkerOutput({ launchRequestId, readDispatchFilesImpl = readDispatchFilesSync, ...args } = {}) {
+  const output = {};
+  for (const stream of ['stdout', 'stderr']) {
+    const result = readDispatchFilesImpl({launch_request_id: launchRequestId, stream, tail: true}, args);
+    output[stream] = result?.ok && result.log?.status === 'found' ? result.log.text : '';
   }
-}
-
-// The worker's durable output, where hq dispatch writes it:
-// `<hqRoot>/dispatch/<launchRequestId>/{stdout,stderr}.log`.
-export function readDeadHammerWorkerOutput({ hqRoot, launchRequestId } = {}) {
-  const lrq = String(launchRequestId || '').trim();
-  if (!hqRoot || !LAUNCH_REQUEST_ID_RE.test(lrq)) return { stdout: '', stderr: '' };
-  const dir = join(String(hqRoot), 'dispatch', lrq);
-  return { stdout: readFileTail(join(dir, 'stdout.log')), stderr: readFileTail(join(dir, 'stderr.log')) };
+  return output;
 }
 
 /**

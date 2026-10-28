@@ -1,3 +1,4 @@
+import './helpers/dispatch-files-preload.mjs';
 // watcher-quota-reset-capture.test.mjs — proves the review-lane HRR
 // quota-exhaustion capture/hold/recovery path end to end:
 //

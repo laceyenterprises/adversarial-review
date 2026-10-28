@@ -1,3 +1,4 @@
+import './helpers/dispatch-files-preload.mjs';
 import { resolveOsgRemediatorRoute } from '../src/osg-remediator.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';

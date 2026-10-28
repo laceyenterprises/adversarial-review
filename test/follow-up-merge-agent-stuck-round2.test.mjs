@@ -1,3 +1,5 @@
+import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
+installDispatchFileProducerFixture();
 // Round-2 review regressions for PR #126.
 //
 // All three blocking findings from the operator's manual review get a

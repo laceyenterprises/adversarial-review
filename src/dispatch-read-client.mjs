@@ -6,6 +6,7 @@ import { observeSynchronousChild } from './watcher-latency.mjs';
 let cachedSession;
 function options(args) {
   return { app_id: 'adversarial-review', mode: 'agent-os',
+    endpoint_url: (args.env ?? process.env).APP_CONTRACT_ENDPOINT_URL,
     ...args.connectOptions, request_timeout_ms: args.timeoutMs ?? 8000 };
 }
 function sessionKey(config) {
@@ -53,6 +54,18 @@ export const dispatchReadTransport = {
       endpoint_url: config.endpoint_url || session?.endpoint_url };
     return observeSynchronousChild('node', () =>
       (args.workerObservationSyncImpl ?? dispatchReadTransport.sdk().readWorkerObservationsSync)(selector, syncOptions));
+  },
+  async hostServices(request, args = {}) {
+    if (args.dispatchSession) return args.dispatchSession.hostServices(request.action, request);
+    const session = await registeredSession(args);
+    return session.hostServices(request.action, request);
+  },
+  hostServicesSync(request, args = {}) {
+    const config = options(args);
+    const session = cachedSession?.config && sessionKey(cachedSession.config) === sessionKey(config) ? cachedSession.session : null;
+    return dispatchReadTransport.sdk().readHostServicesSync(request, {...config,
+      session_token: config.session_token || session?.sessionToken,
+      endpoint_url: config.endpoint_url || session?.endpoint_url});
   },
   lookupSync(selector, args = {}) {
     if (!args.dispatchLookupSyncImpl) assertReadsEnabled(args.env ?? process.env);
@@ -248,7 +261,7 @@ function observationFailure(error) {
 }
 function observationRows(rows, observation) {
   if (!rows.length && ['workers','sessions','provenance'].includes(observation)) return {ok:false,reason:'worker-observation-inconclusive',detail:'authorized observation returned no rows'};
-  const identity = {workers:'run_id',sessions:'session_id',provenance:'launch_request_id',completions:'completion_id',dag_runs:'run_id',execution_verdicts:'verdictId',hardening_contracts:'contract_id',hardening_records:'record_id',hardening_exposure:'contract_id'}[observation];
+  const identity = {workspaces:'workspace_id',workers:'run_id',sessions:'session_id',provenance:'launch_request_id',completions:'completion_id',dag_runs:'run_id',execution_verdicts:'verdictId',hardening_contracts:'contract_id',hardening_records:'record_id',hardening_exposure:'contract_id'}[observation];
   if (rows.some(row => typeof row?.[identity] !== 'string' || !row[identity].trim())
     || new Set(rows.map(row => row[identity])).size !== rows.length) return {ok:false,reason:'worker-observation-unavailable'};
   return {ok:true,rows,row:rows[0],target:{backend:'app-contract',source:'app-sdk'}};

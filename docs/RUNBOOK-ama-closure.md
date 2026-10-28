@@ -6490,3 +6490,75 @@ After normal deployment, the runtime owner can observe an organic expired
 route selecting its successor or producing one missing-transition page.
 No live fault injection, worker dispatch, state edit or restart is part of
 source validation. The SEV report belongs in the next batched docs PR.
+
+
+## Public evidence rollout limits (PR #1583)
+
+Managed-CI signature verification belongs to the producer's `managed_ci` host
+observation. The consumer trusts that authenticated, authorized service's
+`verified: true` assertion; it no longer independently verifies an Ed25519
+record against a consumer-pinned key. `readGreenManagedCi` also requires the
+exact requested repository and head. Missing schema, non-`found` status,
+`verified: false` and foreign repo/head evidence cannot authorize daemon merge.
+The retained `verifyManagedCiRecord` utility tests historical signed records;
+it is not an independent production trust boundary. Activation therefore
+requires the producer verifier and narrow host-observation grants, not just
+consumer source publication. Offline daemon tests cover positive and negative
+proofs; they do not establish live producer or grant acceptance.
+
+Worker slots may have several historical runs. Dispatch-file consumers require
+one unambiguous worker observation row and otherwise retain custody. The
+own-token path requires a non-empty launch ID matching the caller's ID.
+Unavailable deploy observations do not excuse reviewer failures: only explicit
+producer `unreadable` state or positive freeze evidence creates a deploy-wedge
+pause. Ordinary bug failures keep their charged attempt path when deploy
+observation is unavailable or has unknown availability.
+
+Reviewer quota preflight shares CLI snapshots for up to five seconds within the
+same environment/transport, including concurrent preflights; failures are not
+cached. This is a short process-local cache, not a durable admission receipt.
+The deprecated `reviewer.quota_status_dir` (including its environment aliases)
+is ignored and warns once per environment; use `hq fleet quota status --json`.
+Remediation model observations cache successful registry snapshots for 60 seconds
+within the same environment and host/launch/token scope. Missing evidence uses
+the existing rate-limited fallback warning. Registry model/effort logs now use
+`modelSource: producer` rather than `registry-mirror`; update log filters.
+
+Stdout fallback in both HQ reviewer and OS-dispatch remediation runtimes reads
+only the first 262144 bytes. Truncated, incomplete or boundary-truncated logs
+cannot substitute for a review artifact. Reviews larger than this limit must
+publish their canonical artifact; log paging is deferred. This bounded fallback
+is an intentional compatibility limit, not a promise of full-log recovery.
+
+The reaper requires absolute checkout paths and explicit `worktreeRoots` coverage
+(including worker-base repositories) before treating its registration scan as
+complete. A deployed `hq repo list --json` row containing only name, URL,
+trunkBranch and commitSha is incomplete and cannot authorize half-registered
+cleanup. Explicit caller-supplied repo paths remain the caller's complete scope.
+The head-closer resolver accepts an explicit inventory `checkoutPath`. For a
+name-only row, it verifies the registered GitHub URL matches the requested slug
+and resolves `<hqRoot>/repos/<name>` only when its real path stays inside the
+repository root and is an existing directory. Duplicate registrations, foreign
+owners and symlink escapes fail closed to the existing GitHub fallback. Inventory
+snapshots share a five-second process-local cache per root/transport, including
+concurrent reads; failed reads are not cached. This checkout compatibility rule
+does not establish the complete worktree coverage required by the reaper.
+
+Original-worker teardown retains custody on missing evidence, and closer reclaim
+retains unknown liveness. Both now use the existing durable closure-wait ledger:
+`original-worker-evidence` and `closer-worker-evidence` have independent per-head
+deadlines and once-only pages across ticks and restarts. The nominal bound is
+30 minutes, scaled by load; `AMA_CLOSURE_WAIT_BOUND_MS` sets the base. Exhaustion
+reports `needsOperator: true`; the closer also reports
+`hammer-closer-evidence-wait-exhausted`. The runtime operator restores grants or
+observation availability and inspects the retained worker; later polls still
+recheck evidence and can resume normally. Failed alert delivery refunds its
+receipt for retry. Expiry never authorizes teardown or a second launch, and
+positive live-worker evidence retains its ordinary in-flight handling.
+
+The release operator for agent-os#9570 owns the coordinated SDK handoff tracked
+in that PR and consumer #1583: after producer merge, compare the merged archive's
+SHA-256 with `vendor/README.md`, copy authoritative merged bytes if different,
+and update the lockfile, `recorded.dispatchLookupSdk` provenance and
+`argus-artifacts.json` together before activation. The current `coordinated-pr`
+label is not merged artifact authority. Source merge must not waive that hold.

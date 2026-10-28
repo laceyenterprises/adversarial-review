@@ -1,3 +1,5 @@
+import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
+installDispatchFileProducerFixture();
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -148,11 +150,7 @@ test('reaper DEFERS a merged worktree when the manifest read fails transiently (
     repoPaths: [repoPath],
     execFileImpl: mergedRepoWorktreeExecFile({ calls, workerDir }),
     execGhWithRetryImpl: mergedGh,
-    readFileImpl: async () => {
-      const err = new Error('input/output error');
-      err.code = 'EIO';
-      throw err;
-    },
+    readWorkerObservationImpl: async () => ({ok: false, reason: 'workspace-observation-unavailable'}),
     probeWorkerActivityImpl: async () => {
       probed = true;
       return { active: false, defer: false, status: 'succeeded' };
@@ -696,45 +694,17 @@ test('reaper prunes stale and absent-worker probeFailures before persisting curs
   });
 });
 
-test('resolveEntryLaunchRequestId: reads launchRequestId; ENOENT untracked; EIO defers', async (t) => {
-  const root = mkdtempSync(join(tmpdir(), 'ama-lrq-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const workerDir = join(root, 'hammer-ama-pr-791-x');
-  mkdirSync(workerDir, { recursive: true });
-  writeFileSync(join(workerDir, 'workspace.json'), JSON.stringify({ launchRequestId: 'lrq_zzz' }));
-
-  const ok = await resolveEntryLaunchRequestId({ workerDir });
+test('resolveEntryLaunchRequestId uses public workspace observations and holds on outages', async () => {
+  const entry = {workerId: 'hammer-ama-pr-791-x'};
+  const reader = row => async () => ({ok: true, rows: row ? [row] : []});
+  const ok = await resolveEntryLaunchRequestId(entry, {readWorkerObservationImpl: reader({launch_request_id: 'lrq_zzz', manifest_state: 'available'})});
   assert.equal(ok.launchRequestId, 'lrq_zzz');
   assert.equal(ok.defer, false);
-
-  const noDir = await resolveEntryLaunchRequestId({});
-  assert.equal(noDir.launchRequestId, null);
-  assert.equal(noDir.defer, false);
-
-  const enoent = await resolveEntryLaunchRequestId({ workerDir: join(root, 'nope') });
-  assert.equal(enoent.launchRequestId, null);
-  assert.equal(enoent.defer, false, 'ENOENT is definitively untracked (safe reap)');
-  assert.equal(enoent.reason, 'manifest-absent');
-
-  const eio = await resolveEntryLaunchRequestId(
-    { workerDir },
-    {
-      readFileImpl: async () => {
-        const err = new Error('io');
-        err.code = 'EMFILE';
-        throw err;
-      },
-    },
-  );
-  assert.equal(eio.launchRequestId, null);
-  assert.equal(eio.defer, true, 'transient manifest read DEFERS');
-  assert.match(eio.reason, /^manifest-read-error:/);
-
-  const malformed = await resolveEntryLaunchRequestId(
-    { workerDir },
-    { readFileImpl: async () => '{not-json' },
-  );
-  assert.equal(malformed.launchRequestId, null);
-  assert.equal(malformed.defer, false, 'malformed JSON is definitive (safe reap)');
+  assert.equal((await resolveEntryLaunchRequestId({})).defer, false);
+  assert.equal((await resolveEntryLaunchRequestId(entry, {readWorkerObservationImpl: reader(null)})).reason, 'manifest-absent');
+  const unavailable = await resolveEntryLaunchRequestId(entry, {readWorkerObservationImpl: async () => ({ok: false})});
+  assert.equal(unavailable.defer, true);
+  const malformed = await resolveEntryLaunchRequestId(entry, {readWorkerObservationImpl: reader({manifest_state: 'invalid'})});
+  assert.equal(malformed.defer, false);
   assert.equal(malformed.reason, 'manifest-malformed');
 });

@@ -1,3 +1,4 @@
+import { readHostObservationSync } from '../../../dispatch-files-client.mjs';
 import { execFile } from 'node:child_process';
 import { closeSync, existsSync, openSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -15,7 +16,6 @@ import {
 } from '../../../remediation-worker-provenance.mjs';
 import { requireWorkerReplyContext } from '../../../remediation-reply-paths.mjs';
 import { scrubOAuthFallbackEnv, OAUTH_ENV_STRIP_LIST } from '../../../secret-source/env.mjs';
-import { resolveRosterPath as resolveWorkerClassRosterPath } from '../../../hq-worker-classes.mjs';
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
@@ -26,8 +26,8 @@ const DEFAULT_CLAUDE_REMEDIATION_MODEL = 'claude-opus-5-5';
 const REGISTRY_TTL_MS = 60_000;
 const CODEX_REASONING_LEVELS = Object.freeze(new Set(['low', 'medium', 'high', 'xhigh']));
 const CLAUDE_REASONING_LEVELS = Object.freeze(new Set(['low', 'medium', 'high', 'xhigh', 'max']));
-const registryCache = new Map();
 const fallbackWarnings = new Map();
+const registryCache = new WeakMap();
 const DEFAULT_POLL_MS = 250;
 const IDENTITY_PROBE_RETRY_DELAYS_MS = Object.freeze([50, 100, 200]);
 const TRANSIENT_IDENTITY_PROBE_RE = /ps probe failed.*(?:EIO|EAGAIN|ETIMEDOUT|timeout|timed out|resource temporarily unavailable|input\/output error)/i;
@@ -413,35 +413,19 @@ function normalizeReasoningLevel(className, value, source, nowMs) {
   return { resolvedReasoningLevel: level, reasoningSource: source };
 }
 
-function registrySeedCandidates(env = process.env) {
-  const explicitSeedRoot = String(env?.AGENT_OS_DEPLOY_CHECKOUT ?? '').trim();
-  if (explicitSeedRoot) {
-    return [[join(resolve(explicitSeedRoot), 'modules', 'worker-pool', 'worker-classes.json'), 'registry-seed']];
-  }
-  const rosterPath = resolveWorkerClassRosterPath({ env });
-  return rosterPath ? [[rosterPath, 'registry-seed']] : [];
-}
-
-function readWorkerClasses(path, nowMs) {
-  const cached = registryCache.get(path);
-  if (cached && nowMs - cached.readAt < REGISTRY_TTL_MS) return cached;
-  let entry;
-  try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8'));
-    const classes = parsed?.classes || parsed;
-    if (!classes || typeof classes !== 'object' || Array.isArray(classes)) {
-      throw new SyntaxError('registry root is not an object');
-    }
-    entry = { classes, readAt: nowMs, reason: null };
-  } catch (error) {
-    entry = {
-      classes: null,
-      readAt: nowMs,
-      reason: error.code === 'ENOENT' ? 'missing file' : 'unparsable JSON',
-    };
-  }
-  registryCache.set(path, entry);
-  return entry;
+function readWorkerClasses(nowMs, args = {}) {
+  const env = args.env ?? process.env;
+  const key = JSON.stringify([args.hqRoot, env.HCP_BASE_URL, env.HQ_LAUNCH_REQUEST_ID,
+    env.HCP_TOKEN_PATH, env.HCP_TOKEN, env.HCP_BEARER_TOKEN]);
+  const cached = registryCache.get(env);
+  if (cached?.key === key && nowMs >= cached.at && nowMs - cached.at < REGISTRY_TTL_MS) return cached.value;
+  const observed = readHostObservationSync('worker_registry', args);
+  const value = observed.ok && observed.data.classes ? {classes: observed.data.classes} : {classes: null, reason: 'public-registry-unavailable'};
+  // Outages are not cached; the next call can recover immediately. Fallbacks
+  // already emit the rate-limited warning in resolveRemediationModel.
+  if (value.classes) registryCache.set(env, {key, at: nowMs, value});
+  else registryCache.delete(env);
+  return value;
 }
 
 function resolveRemediationModel(className, {
@@ -471,15 +455,11 @@ function resolveRemediationModel(className, {
       reasoningSource: pinnedReasoning.reasoningSource,
     };
   }
-  const mirrorPath = hqRoot && join(resolve(hqRoot), 'registry', 'worker-classes.json');
-  const candidates = [
-    mirrorPath && [mirrorPath, 'registry-mirror'],
-    ...registrySeedCandidates(env),
-  ].filter(Boolean);
+  const candidates = [['public-worker-registry', 'producer']];
   const names = [className];
   let reason = 'missing file';
   for (const [path, source] of candidates) {
-    const registry = readWorkerClasses(path, nowMs);
+    const registry = readWorkerClasses(nowMs, {env, hqRoot});
     if (!registry.classes) {
       reason = registry.reason;
       continue;
@@ -525,12 +505,9 @@ function resolveNonBlockingCodexModel({ model, reasoningEffort, env = process.en
   // fleet default (operator 2026-09-29: HIGH everywhere).
   const fallback = { resolvedModel: 'gpt-6-sol', resolvedReasoningLevel: 'high', modelSource: 'non-blocking-default', reasoningSource: 'non-blocking-default' };
   const requestedModel = nonEmptyModelString(model);
-  const candidates = [
-    hqRoot && [join(resolve(hqRoot), 'registry', 'worker-classes.json'), 'registry-mirror'],
-    ...registrySeedCandidates(env),
-  ].filter(Boolean);
+  const candidates = [['public-worker-registry']];
   for (const [path] of candidates) {
-    const registry = readWorkerClasses(path, Date.now());
+    const registry = readWorkerClasses(Date.now(), {env, hqRoot});
     const allowed = registry.classes?.['remediator-codex']?.allowedModels;
     if (!Array.isArray(allowed)) continue;
     return {

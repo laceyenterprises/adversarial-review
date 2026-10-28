@@ -1,3 +1,5 @@
+import { readHostIdentitySync, readHostObservationSync } from './dispatch-files-client.mjs';
+import { readWorkerObservationSync } from './dispatch-read-client.mjs';
 import { openReviewStateReadOnlyDb } from './pipeline-health-db.mjs';
 import { collectLaneLivenessEvidence } from './lane-liveness-evidence.mjs';
 import { summarizeFindingBacklog } from './findings-backlog.mjs';
@@ -2526,87 +2528,11 @@ function parseJsonArray(raw) {
   }
 }
 
-function readHqOwnerUser(hqRoot) {
-  const config = parseJson(readFileIfExists(join(hqRoot, '.hq', 'config.json')), {});
-  const ownerUser = String(config.ownerUser || config.owner_user || '').trim();
-  return ownerUser || null;
-}
-
-function readFileIfExists(path) {
-  try {
-    return existsSync(path) ? readFileSync(path, 'utf8') : '';
-  } catch {
-    return '';
-  }
-}
-
-function collectStringValues(value, keys, output = []) {
-  if (!value || typeof value !== 'object') return output;
-  for (const [key, child] of Object.entries(value)) {
-    if (keys.has(key) && typeof child === 'string' && child.trim()) {
-      output.push(child.trim());
-    } else if (child && typeof child === 'object') {
-      collectStringValues(child, keys, output);
-    }
-  }
-  return output;
-}
-
-function readWorkerManifests(workerDir) {
-  const manifests = [];
-  for (const filename of ['launch-provenance.json', 'run.json', 'workspace.json']) {
-    const manifest = parseJson(readFileIfExists(join(workerDir, filename)), null);
-    if (manifest) manifests.push(manifest);
-  }
-  return manifests;
-}
-
-function workerManifestMatches(manifests, repo, branch) {
-  const branches = new Set(collectStringValues(manifests, new Set([
-    'branch',
-    'headBranch',
-    'headRefName',
-    'head_ref',
-    'head_ref_name',
-  ])));
-  if (!branches.has(branch)) return false;
-  const repos = new Set(collectStringValues(manifests, new Set([
-    'repo',
-    'repository',
-    'repoSlug',
-    'repo_slug',
-    'githubRepo',
-    'github_repo',
-  ])));
-  return repos.size === 0 || repos.has(repo) || repos.has(bareRepoName(repo));
-}
-
-function bareRepoName(repo) {
-  const text = String(repo || '').trim();
-  return text.includes('/') ? text.split('/').pop() : text;
-}
-
-function workerLaunchRequestId(manifests) {
-  return collectStringValues(manifests, new Set([
-    'launchRequestId',
-    'launch_request_id',
-    'lrq',
-  ]))[0] || null;
-}
-
-function branchWorkerIndex(hqRoot) {
-  const workersDir = join(hqRoot, 'workers');
-  const workers = [];
-  if (!existsSync(workersDir)) return workers;
-  for (const workerId of readdirSync(workersDir)) {
-    const manifests = readWorkerManifests(join(workersDir, workerId));
-    workers.push({
-      workerId,
-      manifests,
-      launchRequestId: workerLaunchRequestId(manifests),
-    });
-  }
-  return workers;
+function branchWorkerIndex(_hqRoot) {
+  const observed = readWorkerObservationSync({observation: 'workspaces'}, {hqRoot: _hqRoot});
+  if (!observed.ok) return null;
+  const seen = new Set();
+  return observed.rows.filter(row => row.worker_id && !seen.has(row.worker_id) && seen.add(row.worker_id));
 }
 
 function liveWorkerForBranch(hqRoot, repo, branch, {
@@ -2617,11 +2543,13 @@ function liveWorkerForBranch(hqRoot, repo, branch, {
   if (!branch) return null;
   const timeout = loadAwareTimeoutMs(workerStatusTimeoutMs);
   const hqBin = process.env.AGENT_OS_HQ_BIN || process.env.HQ_BIN || 'hq';
-  const ownerUser = readHqOwnerUser(hqRoot);
+  const ownerUser = readHostIdentitySync({hqRoot}).ownerUser;
   const liveStatuses = new Set(['requested', 'admitted', 'leased', 'starting', 'running']);
-  for (const { workerId, manifests, launchRequestId } of workerIndex) {
-    if (!workerManifestMatches(manifests, repo, branch)) continue;
-    if (!launchRequestId) continue;
+  if (!workerIndex) return {status: 'unknown', error: 'worker-observation-unavailable'};
+  for (const row of workerIndex) {
+    const {worker_id: workerId, launch_request_id: launchRequestId} = row;
+    if (row.branch !== branch || !launchRequestId) continue;
+    if (row.repo && row.repo !== repo && row.repo !== String(repo).split('/').pop()) continue;
     try {
       const args = ['dispatch', 'status', launchRequestId, '--json'];
       if (ownerUser) args.push('--as-owner', ownerUser);
@@ -4392,18 +4320,6 @@ function summarizeLaunchdServices({ env, config, execFileSyncImpl, sleepSyncImpl
   return { owner: labels.owner, services };
 }
 
-function tailRecentLines(path, maxBytes = 64 * 1024) {
-  if (!existsSync(path)) return { path, exists: false, lines: [], mtimeMs: null };
-  const stat = statSync(path);
-  const raw = readFileSync(path, { encoding: 'utf8' });
-  const sliced = raw.length > maxBytes ? raw.slice(raw.length - maxBytes) : raw;
-  return {
-    path,
-    exists: true,
-    lines: sliced.split(/\r?\n/).filter((line) => line.trim()),
-    mtimeMs: stat.mtimeMs,
-  };
-}
 
 function dispatchSpawnWorkerClassPattern() {
   return String.raw`(?<![A-Za-z0-9-])(?:hammer|closer|ama|merge-agent)(?![A-Za-z0-9-])`;
@@ -4430,8 +4346,10 @@ function dispatchSpawnFailurePatterns() {
 }
 
 function summarizeDispatchSpawnFailures(hqRoot, { nowMs, config }) {
-  const logPath = join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log');
-  const log = tailRecentLines(logPath);
+  const logPath = 'host-observation:dispatch-health';
+  const observed = readHostObservationSync('dispatch_health', {hqRoot});
+  const page = observed.ok ? observed.data.log : null;
+  const log = {exists: page?.status === 'found', lines: page?.text?.split('\n') || [], mtimeMs: page?.updatedAtEpochMs ?? null};
   const patterns = dispatchSpawnFailurePatterns();
   const successPattern = dispatchSpawnSuccessPattern();
   const matches = [];
@@ -4467,21 +4385,10 @@ function hammerDispatchPattern() {
 }
 
 function readDirtyPrBacklogState(hqRoot, { env = process.env, nowMs, db = null }) {
-  const owner = env.AUTO_MERGE_OWNER_USER
-    || env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_OWNER_USER
-    || currentUserName(env);
-  const statePaths = [
-    join(hqRoot, 'dispatch', `_auto_merge-${owner}`, 'daemon-state.json'),
-    join(hqRoot, 'dispatch', '_auto_merge', 'daemon-state.json'),
-  ];
-  for (const statePath of statePaths) {
-    if (!existsSync(statePath)) continue;
-    let state;
-    try {
-      state = parseJson(readFileSync(statePath, 'utf8'), null);
-    } catch {
-      continue;
-    }
+  const observed = readHostObservationSync('merge_backlog', {hqRoot, env});
+  const statePath = 'host-observation:merge-backlog';
+  if (observed.ok && observed.data.present) {
+    const state = observed.data;
     const backlog = state?.dirtyPrBacklog;
     const rawDirtyPrCount = Number(backlog?.dirtyPrCount || 0);
     if (!backlog || !Number.isFinite(rawDirtyPrCount) || rawDirtyPrCount <= 0) {
@@ -4506,13 +4413,15 @@ function readDirtyPrBacklogState(hqRoot, { env = process.env, nowMs, db = null }
       prs: signature.filter(key => !heldKeys.has(String(key).split('@')[0])),
     };
   }
-  return { present: false, statePath: statePaths[0], dirtyPrCount: 0, prs: [] };
+  return { present: false, statePath, unavailable: !observed.ok, dirtyPrCount: 0, prs: [] };
 }
 
 function summarizeHammerDispatchStall(hqRoot, { env = process.env, nowMs, config, db = null }) {
   const backlog = readDirtyPrBacklogState(hqRoot, { env, nowMs, db });
-  const logPath = join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log');
-  const log = tailRecentLines(logPath);
+  const logPath = 'host-observation:dispatch-health';
+  const observed = readHostObservationSync('dispatch_health', {hqRoot});
+  const page = observed.ok ? observed.data.log : null;
+  const log = {exists: page?.status === 'found', lines: page?.text?.split('\n') || [], mtimeMs: page?.updatedAtEpochMs ?? null};
   let hammerDispatchSeen = false;
   const pattern = hammerDispatchPattern();
   if (log.exists) {
@@ -4531,10 +4440,11 @@ function summarizeHammerDispatchStall(hqRoot, { env = process.env, nowMs, config
   const dispatchStale = lastHammerDispatchAgeMs === null
     || lastHammerDispatchAgeMs >= config.hammerDispatchStallMaxAgeMs;
   const logMissingWithBacklog = !log.exists && backlog.present;
+  const unavailable = backlog.unavailable || !observed.ok;
   return {
-    active: log.exists ? Boolean(backlogOldEnough && dispatchStale) : (logMissingWithBacklog ? null : false),
-    blind: logMissingWithBacklog,
-    blindReason: logMissingWithBacklog ? 'dispatch-log-missing' : null,
+    active: unavailable ? null : log.exists ? Boolean(backlogOldEnough && dispatchStale) : (logMissingWithBacklog ? null : false),
+    blind: unavailable || logMissingWithBacklog,
+    blindReason: unavailable ? 'host-observation-unavailable' : logMissingWithBacklog ? 'dispatch-log-missing' : null,
     thresholdMs: config.hammerDispatchStallMaxAgeMs,
     backlog,
     logPath,
@@ -6258,14 +6168,14 @@ function collectReviewPipelineHealth({
       : { owner: currentUserName(env), services: [], dagAutowalk: { label: null, loaded: true, lastExitCode: 0 } };
     const dispatchSpawnFailures = config.hostChecksEnabled
       ? summarizeDispatchSpawnFailures(hqRoot, { nowMs, config })
-      : { logPath: join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log'), logExists: false, logAgeMs: null, windowMs: config.dispatchSpawnFailureWindowMs, matches: [] };
+      : { logPath: 'host-observation:dispatch-health', logExists: false, logAgeMs: null, windowMs: config.dispatchSpawnFailureWindowMs, matches: [] };
     const hammerDispatchStall = config.hostChecksEnabled
       ? summarizeHammerDispatchStall(hqRoot, { env, nowMs, config, db })
       : {
           active: false,
           thresholdMs: config.hammerDispatchStallMaxAgeMs,
           backlog: { present: false, statePath: null, dirtyPrCount: 0, prs: [] },
-          logPath: join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log'),
+          logPath: 'host-observation:dispatch-health',
           logExists: false,
           hammerDispatchSeen: false,
           lastHammerDispatchAt: null,

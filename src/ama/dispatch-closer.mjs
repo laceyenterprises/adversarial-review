@@ -1,3 +1,4 @@
+import { readWorkerDispatchFiles, readHostIdentitySync } from '../dispatch-files-client.mjs';
 import { loadAppSdkSync } from '../app-sdk-loader.mjs';
 import { prepareQueueCloserDispatch, renderQueueCloserPrompt, queueAdmissionCallback } from '../finalization/queue-closer.mjs';
 import { routeFinalizationWriter } from '../finalization/queue-routing-boundary.mjs';
@@ -212,7 +213,7 @@ const SUBMODULE_ROOT = resolve(__dirname, '..', '..');
 const AGENT_OS_ROOT = resolve(SUBMODULE_ROOT, '..', '..');
 
 const DEFAULT_HQ_PATH = '/Users/airlock/.local/bin/hq';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
-const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
+const DEFAULT_HQ_ROOT = process.env.HQ_ROOT || process.env.AGENT_OS_HQ_ROOT || null;
 const DEFAULT_PROJECT = 'adversarial-merge-authority';
 const HAMMER_TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'hammer-prompt.md');
 export const HAM_TERMINAL_REMEDIATION_AUDIT_MARKER = '<!-- hq:ham-terminal-remediation:audit -->';
@@ -379,6 +380,16 @@ function noAmaDispatch(result) {
     ...result,
     namedReason: result?.namedReason || namedAmaNoDispatchReason(reason, result?.reasons),
   };
+}
+
+async function deferUnknownCloserCustody({ rootDir, repo, prNumber, headSha, now,
+  env, pageImpl }) {
+  const evidenceWait = await observeClosureWait({ rootDir, repo, prNumber, headSha,
+    reason: 'hammer-closer-liveness-unknown', waitClass: 'closer-worker-evidence',
+    now, env, pageImpl });
+  return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+    reason: evidenceWait.exhausted ? 'hammer-closer-evidence-wait-exhausted' : 'hammer-closer-in-flight',
+    needsOperator: evidenceWait.exhausted, evidenceWait });
 }
 
 function normalizeAmaLivePrProbeResult(raw) {
@@ -1684,13 +1695,6 @@ function readJsonFile(filePath) {
   }
 }
 
-function readJsonFileSafe(readJsonFileImpl, filePath) {
-  try {
-    return readJsonFileImpl(filePath);
-  } catch {
-    return null;
-  }
-}
 
 // Every dispatch record for one PR, whatever head each is keyed on. The
 // directory listing is shared with listActiveAmaCloserDispatches and re-read
@@ -2885,16 +2889,15 @@ function auditHolderDecision({ hqRoot, logger, record }) {
 // SIGKILLing a healthy closer mid-planning (the `worker_killed ~36s into
 // planning` churn: each poll re-provisions and kills the live closer, so a PR
 // burns 2-3 runs before one survives a whole poll interval). Deliberately
-// conservative: it reports live ONLY when it can confirm both an active status
-// and a live pid, so any ambiguity falls back to reclaim and a crashed closer
-// can never strand the PR.
+// conservative: confirmed active status plus a live PID is live. Unavailable
+// identity remains an explicit hold; it never authorizes reclaim.
 async function resolveSelfOwnedHammerCloserRunLiveness({
   prNumber,
   hqRoot,
   workerId: workerIdOverride = null,
   env = process.env,
   readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedgerAsync,
-  readJsonFileImpl = readJsonFile,
+  readWorkerDispatchFilesImpl = readWorkerDispatchFiles,
   processKillImpl = process.kill,
 } = {}) {
   const workerId = isSamePrHammerCloserWorkerId(workerIdOverride, prNumber)
@@ -2902,27 +2905,28 @@ async function resolveSelfOwnedHammerCloserRunLiveness({
     : hammerCloserWorkerId(prNumber);
   const root = String(hqRoot || '').trim();
   if (!workerId || !root) return { live: false, reason: 'invalid-worker-id-or-root' };
-  const workerDir = join(root, 'workers', workerId);
-  const workspace = readJsonFileSafe(readJsonFileImpl, join(workerDir, 'workspace.json'));
-  const runRecord = readJsonFileSafe(readJsonFileImpl, join(workerDir, 'run.json'));
-  const launchRequestId = workspace?.launchRequestId || workspace?.lrq
-    || runRecord?.launchRequestId || runRecord?.lrq || null;
-  if (!launchRequestId) return { live: false, reason: 'missing-launch-request-id' };
+  const files = await readWorkerDispatchFilesImpl(workerId, {env, hqRoot: root});
+  if (!files?.ok) return {live: null, unknown: true, reason: 'dispatch-files-unavailable'};
+  const launchRequestId = files.metadata?.launchRequestId;
+  if (!launchRequestId) return {live: null, unknown: true, reason: 'missing-launch-request-id'};
   let result;
   try {
     result = await readLatestWorkerRunStatusImpl({ launchRequestId, env, hqRoot: root });
   } catch (err) {
-    return { live: false, reason: 'worker-run-lookup-threw', detail: err?.message || String(err) };
+    return { live: null, unknown: true, reason: 'worker-run-lookup-threw', detail: err?.message || String(err) };
   }
   if (!result?.ok || !result.row) {
-    return { live: false, reason: result?.reason || 'worker-run-lookup-failed', launchRequestId };
+    return { live: null, unknown: true, reason: result?.reason || 'worker-run-lookup-failed', launchRequestId };
   }
   const workerStatus = normalizeWorkerRunStatus(result.row.status);
   const active = AMA_CLOSER_ACTIVE_STATUSES.has(workerStatus);
   const pid = result.row.pid ?? result.row.worker_process_pid ?? null;
   const pidAlive = isPidAlive(pid, processKillImpl);
-  // Live only when the status is active AND the pid is CONFIRMED alive. An
-  // active status with an unknown/dead pid is a phantom and gets reclaimed.
+  if ((!active && !isTerminalBranchHolderWorkerRunStatus(workerStatus)) || (active && pidAlive === null)) {
+    return {live: null, unknown: true, reason: 'worker-liveness-unavailable', workerStatus, launchRequestId, pid, pidAlive};
+  }
+  // A confirmed-dead PID can identify a phantom. Missing process evidence
+  // remains unknown while producer publication is incomplete.
   const live = Boolean(active) && pidAlive === true;
   return { live, workerStatus, launchRequestId, pid, pidAlive };
 }
@@ -2942,7 +2946,7 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
   sleepImpl = sleep,
   env = process.env,
   readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedgerAsync,
-  readJsonFileImpl = readJsonFile,
+  readWorkerDispatchFilesImpl = readWorkerDispatchFiles,
   processKillImpl = process.kill,
 }) {
   if (!isHammerWorkerClass(workerClass)) {
@@ -2984,11 +2988,11 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
     workerId,
     env,
     readLatestWorkerRunStatusImpl,
-    readJsonFileImpl,
+    readWorkerDispatchFilesImpl,
     processKillImpl,
   });
-  if (liveness.live) {
-    logAmaCloserDispatchEvent(logger, 'closer_reclaim_skipped_live_run', {
+  if (liveness.live || liveness.unknown) {
+    logAmaCloserDispatchEvent(logger, liveness.unknown ? 'closer_reclaim_deferred_unknown_run' : 'closer_reclaim_skipped_live_run', {
       repo,
       prNumber,
       workerId,
@@ -2999,11 +3003,12 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
     });
     return {
       attempted: false,
-      live: true,
+      live: liveness.unknown ? null : true,
+      unknown: Boolean(liveness.unknown),
       workerId,
       worktreePath,
       worktreeAgeMs,
-      reason: 'live-run-in-flight',
+      reason: liveness.unknown ? 'worker-liveness-unavailable' : 'live-run-in-flight',
       workerStatus: liveness.workerStatus,
     };
   }
@@ -3354,12 +3359,9 @@ async function resolveTerminalCodingBranchHolder({
   if (!isRecognizedCodingBranchHolderWorkerId(normalizedWorkerId) && !allowHammer) {
     return { terminal: false, reason: 'unrecognized-worker-id-shape' };
   }
-  const workerDir = hqRoot ? join(hqRoot, 'workers', normalizedWorkerId) : null;
-  const workspace = workerDir ? readJsonFile(join(workerDir, 'workspace.json')) : null;
-  const runRecord = workerDir ? readJsonFile(join(workerDir, 'run.json')) : null;
-  const launchRequestId = workspace?.launchRequestId || workspace?.lrq
-    || runRecord?.launchRequestId || runRecord?.lrq || null;
-  const runId = runRecord?.runId || null;
+  const files = await readWorkerDispatchFiles(normalizedWorkerId, {env, hqRoot});
+  const launchRequestId = files?.ok ? files.metadata?.launchRequestId : null;
+  const runId = files?.ok ? files.metadata?.runId : null;
   if (!launchRequestId) {
     return {
       terminal: false,
@@ -3406,6 +3408,7 @@ export const __testables__ = Object.freeze({
   logHammerCleanupFailure,
   reclaimSelfOwnedHammerCloserWorktreeBeforeProvision,
   resolveSelfOwnedHammerCloserRunLiveness,
+  deferUnknownCloserCustody,
   resolveRollupRequiredChecks,
   selfOwnedHammerCloserWorktreePath,
   isProvisionBranchHolderBlocked,
@@ -3443,10 +3446,7 @@ function sleep(ms, signal = null) {
 }
 
 function resolveHqOwner(hqRoot) {
-  if (!hqRoot) return null;
-  const config = readJsonFile(join(hqRoot, '.hq', 'config.json'));
-  const ownerUser = String(config?.ownerUser || '').trim();
-  return ownerUser || null;
+  return readHostIdentitySync({hqRoot}).ownerUser;
 }
 
 function currentUserName() {
@@ -7492,15 +7492,21 @@ async function maybeDispatchAmaCloserAttempt({
     execFileImpl,
     logger,
   });
-  if (closerReclaim?.live) {
-    // A healthy hammer closer for this PR is still in-flight. Do NOT re-provision
+  if (closerReclaim?.live || closerReclaim?.unknown) {
+    // Retain custody for a live closer or unavailable liveness evidence. Do NOT re-provision
     // (which collides on the worktree and force-kills the live worker) and do NOT
     // fall back to the merge-agent (which skips as remediation-active). Defer this
-    // cycle and let the live closer finish; the next poll re-evaluates cleanly.
+    // cycle; unknown evidence has a durable bounded page, never age-based teardown.
     logger.info?.(
-      `[ama-closer] deferring dispatch: PR ${repo}#${prNumber} hammer closer is live in-flight `
+      `[ama-closer] deferring dispatch: PR ${repo}#${prNumber} hammer closer custody is retained `
       + `(status=${closerReclaim.workerStatus || 'unknown'}); waiting for it to complete`,
     );
+    if (closerReclaim.unknown) {
+      return deferUnknownCloserCustody({ rootDir, repo, prNumber,
+        headSha: targetRemediationSha, now: Date.parse(dispatchContext.dispatchedAt), env,
+        pageImpl: (message, options) => deliverAlertImpl(message, { ...options,
+          event: 'ama_closer.worker_evidence_wait_exhausted', payload: { repo, prNumber } }) });
+    }
     return noAmaDispatch({
       dispatched: false,
       skipMergeAgent: true,

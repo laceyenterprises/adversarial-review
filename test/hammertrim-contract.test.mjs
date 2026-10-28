@@ -1,3 +1,6 @@
+process.env.NODE_OPTIONS = `${process.env.NODE_OPTIONS || ''} --import=${new URL('./helpers/dispatch-files-preload.mjs', import.meta.url).href}`;
+import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
+installDispatchFileProducerFixture();
 import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
 import { fetchHammerHeadRange, hammerAttestationChain } from '../src/ama/hammer-head-validation.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';

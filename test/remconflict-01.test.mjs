@@ -1,3 +1,5 @@
+import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
+installDispatchFileProducerFixture();
 // REMCONFLICT-01 (SEV1, 2026-10-10): remediation can start on a CONFLICTING PR,
 // and an accepted retrigger always reports what happened. The hold side (a
 // CONFLICTING PR is never held) lives next to the NOOWNER-01 hold cases in

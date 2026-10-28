@@ -3,44 +3,61 @@ import { createHistoryReader } from './ama/history-reader.mjs';
 import { exactHammerValidation } from './ama/hammer-head-validation.mjs';
 import { fetchPrimaryChange } from './ama/primary-change.mjs';
 import { execFile } from 'node:child_process';
-import { stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { realpath, stat } from 'node:fs/promises';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
 import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers } from './ama/ham-provenance.mjs';
 
 const execFileAsync = promisify(execFile);
+const checkoutInventories = new WeakMap();
 
-// Resolve a GitHub repo reference to the daemon's LOCAL checkout so `git -C`
-// operates on a real directory. Callers pass `repoPath` as a repo SLUG
-// (`owner/name`) taken from the PR report — NOT a filesystem path — so
-// `git -C owner/name` fails ("No such file or directory") and silently starves
-// the local closer-commit read (RCA: cross-repo PRs stranded because the watcher
-// then fell back to `gh`, which fails-closed in the daemon with no interactive
-// auth, and suppressed auto-refresh). The daemon clones every repo under
-// `${HQ_ROOT}/repos/<name>`, so resolve there. Returns null when no local
-// checkout exists (the caller falls back to gh) — this is the quiet, expected
-// case, not the noisy "read failed" error.
-export async function resolveLocalRepoCheckout(repoPath, hqRoot) {
+async function readCheckoutInventory(hqRoot, execFileImpl) {
+  let cache = checkoutInventories.get(execFileImpl);
+  if (!cache) { cache = new Map(); checkoutInventories.set(execFileImpl, cache); }
+  const bin = process.env.HQ_BIN || 'hq';
+  const key = JSON.stringify([bin, hqRoot]);
+  const now = Date.now();
+  const prior = cache.get(key);
+  if (prior && now - prior.at < 5000) return prior.promise;
+  const promise = execFileImpl(bin,
+    ['repo', 'list', '--json', ...(hqRoot ? ['--root', hqRoot] : [])],
+    {timeout: loadAwareTimeoutMs(5000), maxBuffer: 1024 * 1024})
+    .then(({stdout}) => JSON.parse(stdout));
+  const entry = {at: now, promise};
+  cache.set(key, entry);
+  try { return await promise; }
+  catch (error) { if (cache.get(key) === entry) cache.delete(key); throw error; }
+}
+
+// Resolve OS-managed checkouts through their public owner inventory. Explicit
+// app workspaces remain ordinary Git inputs; unavailable inventory uses the
+// existing GitHub transport. Name-only inventory rows may resolve a registered
+// repo under the inventory root, after identity and filesystem containment checks.
+export async function resolveLocalRepoCheckout(repoPath, hqRoot, {execFileImpl = execFileAsync} = {}) {
   const raw = String(repoPath || '').trim();
   if (!raw) return null;
-  const isDir = async (p) => {
-    try {
-      return (await stat(p)).isDirectory();
-    } catch {
-      return false;
-    }
-  };
-  // Already an existing local directory (a worktree / real checkout path).
-  if (await isDir(raw)) return raw;
-  // A GitHub slug (`owner/name` or bare `name`) → the daemon clone.
-  const name = raw.split('/').filter(Boolean).pop();
-  const root = String(hqRoot || '').trim();
-  if (root && name) {
-    const candidate = join(root, 'repos', name);
-    if (await isDir(candidate)) return candidate;
+  if (isAbsolute(raw)) {
+    try { return (await stat(raw)).isDirectory() ? raw : null; } catch { return null; }
   }
-  return null;
+  try {
+    const value = await readCheckoutInventory(hqRoot, execFileImpl);
+    if (!Array.isArray(value.repos) || value.errors?.length) return null;
+    const name = raw.split('/').pop();
+    const rows = value.repos.filter(row => row.name === name);
+    if (rows.length !== 1) return null;
+    const row = rows[0];
+    if (typeof row.checkoutPath === 'string' && isAbsolute(row.checkoutPath)) return row.checkoutPath;
+    // A same-name repository from another owner is not this PR's checkout.
+    const slug = String(row.url || '').replace(/^https:\/\/github\.com\//, '')
+      .replace(/^git@github\.com:/, '').replace(/\.git\/?$/, '').replace(/\/$/, '');
+    if (slug !== raw || !hqRoot || !isAbsolute(hqRoot) || !/^[A-Za-z0-9_.-]+$/.test(name) || name === '.' || name === '..') return null;
+    const root = await realpath(join(hqRoot, 'repos'));
+    const candidate = await realpath(join(root, name));
+    const within = relative(root, candidate);
+    if (!within || within === '..' || within.startsWith(`..${sep}`) || isAbsolute(within)) return null;
+    return (await stat(candidate)).isDirectory() ? candidate : null;
+  } catch { return null; }
 }
 
 const HEAD_CLOSER_SUPPRESSION_RETRY_BACKOFF_MS = [250, 1000];
@@ -144,7 +161,7 @@ export async function fetchVerifiedCommitFromLocalGit({
 } = {}) {
   const sha = String(headSha || '').trim();
   if (!repoPath || !sha) return null;
-  const checkoutDir = await resolveLocalRepoCheckout(repoPath, hqRoot);
+  const checkoutDir = await resolveLocalRepoCheckout(repoPath, hqRoot, {execFileImpl});
   if (!checkoutDir) {
     // No local checkout for this repo (the daemon does not clone it, or hqRoot
     // is unset) — the caller falls back to gh. Debug-only: this is the expected

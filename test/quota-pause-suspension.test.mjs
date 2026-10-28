@@ -17,7 +17,7 @@ import { resolveCloserDispatchHarness } from '../src/ama/harness-fallback.mjs';
 import { harnessCapFromFleetStatus, providerAvailabilityFromFleetStatus } from '../src/fleet-quota-status.mjs';
 import { resolveRemediationWorkerClassWithFallback } from '../src/remediation-worker-class-fallback.mjs';
 import { resolveReviewerWorkerClassWithFallback } from '../src/review-worker-class-fallback.mjs';
-import { spawnReviewer } from '../src/reviewer-spawn-settle.mjs';
+import {spawnReviewer} from './helpers/reviewer-quota-fixture.mjs';
 
 // cwp_quota_probe.status_store.operator_suspend_payload, as written by
 // cwp_dispatch.quota_pause.reconcile_suspension.

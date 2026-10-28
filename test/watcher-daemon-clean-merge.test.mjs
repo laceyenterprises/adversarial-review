@@ -1,3 +1,5 @@
+import {dispatchReadTransport} from '../src/dispatch-read-client.mjs';
+import {userInfo} from 'node:os';
 import { acquireMergeLease, acquireDaemonMergeLease, readMergeLeaseWaiters } from '../src/ama/merge-lease.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import { createNoProgressLaneGate, handlePostedReviewRow } from '../src/posted-review-row.mjs';
@@ -159,21 +161,19 @@ test('CIUNKNOWN-01 settled zero-finding review stays on merge path when CI is un
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
 
-test('CIUNKNOWN-01 bootstrap closes a clean head, audits mode and rechecks proof before merge', async () => {
+for (const proofCase of ['verified', 'unverified', 'foreign-head', 'foreign-repo', 'unavailable', 'truncated', 'missing-schema']) {
+test(`CIUNKNOWN-01 bootstrap proof ${proofCase} retains exact merge authority`, async t => {
   const rootDir = tempRoot();
   try {
     const head = '2f1c6edc'.padEnd(40, '0');
-    const attestationDir = join(rootDir, 'workers', 'builder', 'logs', 'ci-attestations');
-    mkdirSync(attestationDir, { recursive: true });
-    const { generateKeyPairSync, sign } = await import('node:crypto');
-    const { privateKey, publicKey } = generateKeyPairSync('ed25519');
-    const record = { schemaVersion: 1, repo: 'acme/searchlight', headSha: head,
-      verdict: 'green', mode: 'github', manifestHash: `sha256:${'a'.repeat(64)}` };
-    const payload = Object.fromEntries(Object.entries(record).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
-    record.signature = sign(null, Buffer.from(JSON.stringify(payload)), privateKey).toString('hex');
-    writeFileSync(join(attestationDir, `${head}.json`), JSON.stringify(record));
-    const keyPath = join(rootDir, 'runner.pub');
-    writeFileSync(keyPath, publicKey.export({ format: 'der', type: 'spki' }).subarray(-32));
+    t.mock.method(dispatchReadTransport, 'hostServicesSync', request => ({
+      ...(proofCase === 'missing-schema' ? {} : {schema_version: 1}),
+      status: ['unavailable', 'truncated'].includes(proofCase) ? proofCase : 'found',
+      data: {repo: proofCase === 'foreign-repo' ? 'acme/foreign' : request.repo,
+        headSha: proofCase === 'foreign-head' ? 'f'.repeat(40) : request.head_sha,
+        verified: proofCase !== 'unverified' && request.action === 'managed_ci'},
+    }));
+    t.mock.method(dispatchReadTransport, 'observationSync', () => ({schema_version: 1, status: 'found', ownerUser: userInfo().username}));
     let proofReads = 0;
     let merged = false;
     let attempted;
@@ -214,14 +214,20 @@ test('CIUNKNOWN-01 bootstrap closes a clean head, audits mode and rechecks proof
         merged = true;
         return { stdout: '', stderr: '' };
       },
-      env: { HQ_ROOT: rootDir, AGENT_OS_CI_ATTESTATION_PUBLIC_KEY_PATH: keyPath }, logger: { log() {}, warn() {} },
+      env: { HQ_ROOT: rootDir }, logger: { log() {}, warn() {} },
     });
-    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
-    assert.ok(proofReads >= 2);
-    assert.equal(attempted.auditMetadata.ciMode, 'no-ci-bootstrap');
-    assert.equal(attempted.liveGate.requiredChecks, true);
+    if (proofCase === 'verified') {
+      assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+      assert.ok(proofReads >= 2);
+      assert.equal(attempted.auditMetadata.ciMode, 'no-ci-bootstrap');
+      assert.equal(attempted.liveGate.requiredChecks, true);
+    } else {
+      assert.notEqual(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+      assert.equal(merged, false);
+    }
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
+}
 
 test('AMA closure loads merge-authority policy for the supplied domain id', async () => {
   const rootDir = tempRoot();

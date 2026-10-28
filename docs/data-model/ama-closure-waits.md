@@ -3,7 +3,7 @@
 **Owner:** AMA bounded closure wait and exhaustion paging (HAMCLOSE-01)
 **Store:** `data/ama-closure-waits/<sha256(repo#prNumber)>.db`
 **Source of truth:** `src/ama/closure-wait.mjs`, `src/ama/closure-refresh-loop.mjs`
-**Runtime surfaces:** `src/reviewer-ci-admission.mjs`, `src/ama-closure-orchestration.mjs`, `src/ama/dispatch-closer.mjs`
+**Runtime surfaces:** `src/reviewer-ci-admission.mjs`, `src/ama-closure-orchestration.mjs`, `src/ama/dispatch-closer.mjs`, `src/follow-up-merge-agent.mjs`
 
 ## Purpose and schema
 
@@ -22,6 +22,14 @@ daemon owns these databases. `CREATE TABLE IF NOT EXISTS` initializes
 | `paged` | `INTEGER DEFAULT 0` | Exhaustion page reservation: 0 available, 1 reserved/sent. |
 
 ## Lifecycle and recovery
+
+`original-worker-evidence` and `closer-worker-evidence` use separate per-head
+rows for unavailable original-worker teardown evidence and unknown closer
+liveness. Each retains its first observation and pages once at the configured
+load-scaled bound, including across restarts. Exhaustion reports operator
+recovery while retaining custody; it never authorizes reclaim or duplicate
+dispatch. Later evidence reads can resume normal resolution. Alert failures
+refund the page reservation using the existing transaction path.
 
 An immediate transaction inserts the head/class with `INSERT OR IGNORE`, updates its
 reason and compares elapsed time against the wait bound. Later ticks, changed

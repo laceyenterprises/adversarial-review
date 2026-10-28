@@ -1,3 +1,5 @@
+import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
+installDispatchFileProducerFixture();
 // ARC-08 — remediation dispatch e2e through both AgentRuntime runtimes.
 //
 // Drives `consumeNextFollowUpJob` end to end with the health router forcing

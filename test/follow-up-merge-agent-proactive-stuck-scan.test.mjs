@@ -1,3 +1,5 @@
+import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
+installDispatchFileProducerFixture();
 // Proactive stuck-merge-agent scan tests.
 //
 // 2026-05-19 incident: PR #719 merge-agent stalled for 33 min under memory

@@ -1,35 +1,15 @@
-// The hq-published worker-class roster, for load-time validation of role →
-// workerClass mappings in the role registry (ARC-12). Two hard rules from the
-// ticket: (1) never validate against a hardcoded class list; (2) source the
-// list from hq with a cached-snapshot fallback so a transient inability to
-// reach the published registry degrades to the last-known-good roster rather
-// than failing every worker PR.
-//
-// Where the list actually lives. The canonical published roster is
-// `modules/worker-pool/worker-classes.json` in the agent-os checkout — the same
-// file `cwp_dispatch/worker_classes_registry.load_registry()` reads, whose
-// top-level keys ARE the published worker-class names. There is deliberately no
-// `hq worker-class list` shell-out: `hq` is a bash dispatcher whose only
-// class-aware commands (`hq harness health <class>`, `hq worker`, dispatch)
-// take a class as INPUT and validate it against the same registry; none
-// enumerate it, and neither does any HCP HTTP route. Reading the published JSON
-// (keyed by `AGENT_OS_REPO_ROOT`) is therefore the sanctioned, non-hardcoded
-// source. If a future `hq` subcommand enumerates classes, swap `readLiveRoster`
-// for the shell-out — the snapshot cache and validator above it are unchanged.
-
+// Read the public worker registry; the app owns its last-known-good cache.
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { readHostObservationSync } from './dispatch-files-client.mjs';
 import { assertCanonicalOwner } from './adapters/agent-runtime/append-only-owner.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Module root (adversarial-review/), one level up from src/.
 const MODULE_ROOT = join(__dirname, '..');
-
-// Relative path of the published roster inside the agent-os checkout.
-const WORKER_CLASSES_REL_PATH = join('modules', 'worker-pool', 'worker-classes.json');
 
 // Where the last-known-good snapshot is cached. Under the module's own data/
 // dir so it travels with the app store and survives a checkout that later
@@ -47,30 +27,6 @@ export class WorkerClassRosterError extends Error {
 
 function snapshotPath(rootDir) {
   return join(rootDir, SNAPSHOT_REL_PATH);
-}
-
-// Resolve the agent-os checkout that owns the published roster. Mirrors the
-// Python loader's precedence: explicit AGENT_OS_REPO_ROOT first, then walk up
-// from the module directory looking for the roster file. Returns the resolved
-// worker-classes.json path, or null when no checkout is reachable (the caller
-// then degrades to the snapshot).
-export function resolveRosterPath({ env = process.env, moduleRoot = MODULE_ROOT } = {}) {
-  const fromEnv = String(env?.AGENT_OS_REPO_ROOT ?? '').trim();
-  if (fromEnv) {
-    const candidate = join(fromEnv, WORKER_CLASSES_REL_PATH);
-    if (existsSync(candidate)) return candidate;
-  }
-  // Upward walk: the daemon runs from tools/adversarial-review, so the checkout
-  // root (two-plus levels up) carries modules/worker-pool/worker-classes.json.
-  let dir = moduleRoot;
-  for (let i = 0; i < 8; i += 1) {
-    const candidate = join(dir, WORKER_CLASSES_REL_PATH);
-    if (existsSync(candidate)) return candidate;
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return null;
 }
 
 function parseRosterKeys(raw, source) {
@@ -93,15 +49,10 @@ function parseRosterKeys(raw, source) {
   return classes;
 }
 
-// Read the live published roster from the agent-os checkout. Returns
-// { classes, path } or null when no checkout is reachable. Throws only when a
-// reachable roster file is malformed (a corrupt published registry is a loud
-// failure, not a silent snapshot fallback).
-function readLiveRoster({ env, moduleRoot, readFileImpl = readFileSync } = {}) {
-  const rosterPath = resolveRosterPath({ env, moduleRoot });
-  if (!rosterPath) return null;
-  const raw = readFileImpl(rosterPath, 'utf8');
-  return { classes: parseRosterKeys(raw, rosterPath), path: rosterPath };
+function readLiveRoster({ env, readHostObservationImpl = readHostObservationSync } = {}) {
+  const reply = readHostObservationImpl('worker_registry', {env});
+  if (!reply.ok) return null;
+  return {classes: parseRosterKeys(JSON.stringify(reply.data?.classes), 'public worker registry'), path: null};
 }
 
 function readSnapshot(rootDir, { readFileImpl = readFileSync } = {}) {
@@ -145,7 +96,7 @@ function writeSnapshot(rootDir, classes, {
 
 /**
  * Resolve the hq-published worker-class roster. Reads the live published
- * registry when the agent-os checkout is reachable, refreshing the on-disk
+ * registry when its public owner is reachable, refreshing the on-disk
  * snapshot; otherwise degrades to the last cached snapshot. Never returns a
  * hardcoded list — when neither the live registry nor a snapshot is available
  * it throws, so a role registry cannot be "validated" against nothing.
@@ -153,7 +104,6 @@ function writeSnapshot(rootDir, classes, {
  * @param {{
  *   env?: NodeJS.ProcessEnv,
  *   rootDir?: string,
- *   moduleRoot?: string,
  *   readFileImpl?: typeof readFileSync,
  *   writeSnapshotImpl?: typeof writeSnapshot,
  *   readOnly?: boolean,
@@ -166,8 +116,8 @@ function writeSnapshot(rootDir, classes, {
 export function resolvePublishedWorkerClasses({
   env = process.env,
   rootDir = MODULE_ROOT,
-  moduleRoot = MODULE_ROOT,
   readFileImpl = readFileSync,
+  readHostObservationImpl = readHostObservationSync,
   writeSnapshotImpl = writeSnapshot,
   readOnly = false,
   now = () => new Date().toISOString(),
@@ -177,7 +127,7 @@ export function resolvePublishedWorkerClasses({
   let live = null;
   let liveError = null;
   try {
-    live = readLiveRoster({ env, moduleRoot, readFileImpl });
+    live = readLiveRoster({ env, readHostObservationImpl });
   } catch (err) {
     // A reachable-but-malformed roster: remember it, but still try the snapshot
     // below so one corrupt publish does not zero out validation fleet-wide.
@@ -210,7 +160,7 @@ export function resolvePublishedWorkerClasses({
   if (liveError) throw liveError;
   throw new WorkerClassRosterError(
     'no hq-published worker-class roster is reachable and no cached snapshot exists; ' +
-      'set AGENT_OS_REPO_ROOT to the agent-os checkout, or run once from a checkout to seed the snapshot',
+      'authorize the public worker registry or seed the app snapshot from an authorized observation',
   );
 }
 
@@ -224,11 +174,9 @@ export function publishedWorkerClassSet(options) {
 }
 
 export const __testing = {
-  resolveRosterPath,
   parseRosterKeys,
   readSnapshot,
   writeSnapshot,
   snapshotPath,
   SNAPSHOT_REL_PATH,
-  WORKER_CLASSES_REL_PATH,
 };

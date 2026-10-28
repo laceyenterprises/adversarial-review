@@ -1,3 +1,5 @@
+import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
+installDispatchFileProducerFixture();
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
@@ -131,7 +133,10 @@ function producerShapedCiRegressionStopReason({
 }
 
 function tempRoot() {
-  return mkdtempSync(path.join(tmpdir(), 'review-pipeline-health-'));
+  const root = mkdtempSync(path.join(tmpdir(), 'review-pipeline-health-'));
+  mkdirSync(path.join(root, '.hq'));
+  writeFileSync(path.join(root, '.hq/config.json'), JSON.stringify({ownerUser: 'fixture'}));
+  return root;
 }
 
 test('collector resolves HQ aliases from its supplied environment and preserves explicit roots', (t) => {

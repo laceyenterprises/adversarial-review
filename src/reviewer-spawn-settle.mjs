@@ -1,3 +1,8 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { readHostObservationSync } from './dispatch-files-client.mjs';
+import { execFile as execQuotaFile } from 'node:child_process';
+import { promisify as promisifyQuota } from 'node:util';
+const executeQuota = promisifyQuota(execQuotaFile);
 import { groundBlockingFindingsAtHead, persistReviewGroundingMetadata } from './review-head-grounding.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from './kernel/verdict.mjs';
 import { buildReviewerAttribution } from './reviewer-attribution.mjs';
@@ -176,23 +181,38 @@ function resolveReviewerQuotaCheckEnabled(env = process.env) {
   }).get('reviewer.quota_check_enabled', true);
 }
 
-function resolveReviewerQuotaStatusDir(env = process.env) {
-  const configured = loadRoleConfig({
-    env,
-    contextKey: 'reviewer.quota_status_dir',
-  }).get('reviewer.quota_status_dir', null);
-  if (typeof configured === 'string' && configured.trim()) return configured.trim();
-  const hqRoot = resolveHqRoot(env);
-  return join(hqRoot, 'quota');
+
+// Share concurrent/nearby reviewer preflights without retaining a stale quota
+// decision across the normal poll interval. Scope by transport and environment.
+const reviewerQuotaSnapshots = new WeakMap();
+const deprecatedQuotaWarnings = new WeakSet();
+async function readReviewerQuotaSnapshot(env, execFileImpl) {
+  const config = loadRoleConfig({env, contextKey: 'reviewer.quota_status_dir'});
+  if (config.get('reviewer.quota_status_dir', null) && !deprecatedQuotaWarnings.has(env)) {
+    console.warn('[watcher] reviewer.quota_status_dir is ignored; quota uses hq fleet quota status --json');
+    deprecatedQuotaWarnings.add(env);
+  }
+  let byTransport = reviewerQuotaSnapshots.get(env);
+  if (!byTransport) { byTransport = new WeakMap(); reviewerQuotaSnapshots.set(env, byTransport); }
+  const now = Date.now();
+  const cached = byTransport.get(execFileImpl);
+  const signature = JSON.stringify([env.HQ_BIN, env.HQ_ROOT, env.AGENT_OS_HQ_ROOT]);
+  if (cached?.signature === signature && now - cached.at < 5000) return cached.promise;
+  const promise = execFileImpl(env.HQ_BIN || 'hq', ['fleet', 'quota', 'status', '--json'],
+    {env, encoding: 'utf8', maxBuffer: 5 * 1024 * 1024, timeout: loadAwareTimeoutMs(30_000)})
+    .then(({stdout}) => parseHqFleetQuotaStatus(stdout));
+  const entry = {signature, at: now, promise};
+  byTransport.set(execFileImpl, entry);
+  try { return await promise; }
+  catch (err) { if (byTransport.get(execFileImpl) === entry) byTransport.delete(execFileImpl); throw err; }
 }
 
-async function readReviewerQuotaDecision({
+export async function readReviewerQuotaDecision({
   reviewerModel,
   codexBrokerProvider = 'codex',
   claudeBrokerProvider = 'claude-code',
   env = process.env,
-  readdirImpl = readdir,
-  readFileImpl = readFile,
+  execFileImpl = executeQuota,
 } = {}) {
   try {
     if (!resolveReviewerQuotaCheckEnabled(env)) {
@@ -203,25 +223,8 @@ async function readReviewerQuotaDecision({
       return { available: true, state: 'unknown-harness', provider: null };
     }
 
-    const statusDir = resolveReviewerQuotaStatusDir(env);
-    const files = await readdirImpl(statusDir);
-    const statuses = [];
-    for (const file of files) {
-      if (!file.startsWith(`${provider}-`) || !file.endsWith('.status.json')) continue;
-      const authPath = file.slice(provider.length + 1, -'.status.json'.length);
-      try {
-        const payload = JSON.parse(await readFileImpl(join(statusDir, file), 'utf8'));
-        statuses.push({
-          ...payload,
-          provider,
-          authPath: String(payload?.authPath || payload?.auth_path || authPath).trim().toLowerCase(),
-          state: String(payload?.state || '').trim().toLowerCase(),
-        });
-      } catch {
-        // A malformed or transiently unreadable record is ambiguous. Keep
-        // looking for a valid record; if none exists, the decision fails open.
-      }
-    }
+    const snapshot = await readReviewerQuotaSnapshot(env, execFileImpl);
+    const statuses = snapshot.filter(row => row.provider === provider);
     const corporateAccount = reviewerModel === 'codex'
       ? codexBrokerProvider === 'codex-corp'
       : normalizeReviewerModel(reviewerModel) === 'claude' && claudeBrokerProvider === 'claude-code-corp';
@@ -409,38 +412,17 @@ function truncateCodePoints(value, maxLength) {
   return Array.from(text).slice(0, maxLength).join('');
 }
 
-function readJsonFile(path) {
-  try {
-    return JSON.parse(readFileSync(path, 'utf8'));
-  } catch (err) {
-    if (err?.code === 'ENOENT') return null;
-    return { __unreadableJson: true };
-  }
-}
 
 function mainCatchupOutageSignal({ env = process.env } = {}) {
-  const hqRoot = resolveHqRoot(env);
-  const state = readJsonFile(join(hqRoot, 'main-catchup', '.state.json'));
-  if (!state || typeof state !== 'object') return null;
-  if (state.__unreadableJson) {
-    return { reason: 'deploy-wedge', detail: 'state-unreadable', retryAfter: null };
-  }
-  const freezeClass = state.freezeClass
-    || state.pendingFreeze?.freezeClass
-    || state.pendingPgSchemaGateFreeze?.freezeClass
-    || state.pendingRecovery?.freezeClass
-    || null;
-  if (freezeClass) {
-    return { reason: 'deploy-wedge', detail: String(freezeClass), retryAfter: null };
-  }
-  if (
-    state.currentState === 'frozen' ||
-    state.currentState === 'deploy-freeze' ||
-    state.pendingPgSchemaGateFreeze ||
-    state.pendingPgSchemaSelfHeal ||
-    state.pendingRecovery?.classification?.freezeClass
-  ) {
-    return { reason: 'deploy-wedge', detail: String(state.currentState || 'main-catchup-freeze'), retryAfter: null };
+  const result = readHostObservationSync('deploy_status', {env, hqRoot: env.HQ_ROOT || env.AGENT_OS_HQ_ROOT});
+  if (!result.ok) return null;
+  const state = result.data;
+  if (state.availability === 'missing') return null;
+  if (state.availability === 'unreadable') return {reason: 'deploy-wedge', detail: 'state-unreadable', retryAfter: null};
+  if (state.availability !== 'available') return null;
+  if (state.freezeClass || ['frozen', 'deploy-freeze'].includes(state.currentState)
+      || state.schemaGatePending || state.schemaHealPending || state.recoveryFreezeClass) {
+    return {reason: 'deploy-wedge', detail: String(state.freezeClass || state.currentState || 'main-catchup-freeze'), retryAfter: null};
   }
   return null;
 }
@@ -1997,4 +1979,5 @@ export {
   settleReviewerAttempt,
   evaluateRoundBudgetForReview,
   truncateCodePoints,
+  resolveReviewerOutageSignal,
 };

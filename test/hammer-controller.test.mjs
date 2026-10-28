@@ -1,3 +1,6 @@
+process.env.NODE_OPTIONS = `${process.env.NODE_OPTIONS || ''} --import=${new URL('./helpers/dispatch-files-preload.mjs', import.meta.url).href}`;
+import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
+installDispatchFileProducerFixture();
 import './helpers/dispatch-read-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -279,7 +282,7 @@ for (const value of [undefined, '', '0', 'true', 1, '1']) {
       },
       spawnImpl: () => { throw Error('spawn-reached'); },
     }), value === '1' ? /spawn-reached/ : /refusing controller start/);
-    assert.equal(observed, value);
+    assert.equal(observed, value === '1' ? '1' : '0');
     assert.equal(env.ADVERSARIAL_DISPATCH_READS_ENABLED, value === '1' ? '0' : '1');
   });
 }
@@ -315,7 +318,8 @@ test('controller launch environment defaults to process.env', t => {
     import { controllerLaunchEnvironment } from ${JSON.stringify(new URL('../src/ama/hammer-controller.mjs', import.meta.url).href)};
     console.log(controllerLaunchEnvironment().ADVERSARIAL_DISPATCH_READS_ENABLED);
   `], { encoding: 'utf8', timeout: 10000,
-    env: { HQ_ROOT: dir, HQ_LAUNCH_REQUEST_ID: 'lrq_default-env', ADVERSARIAL_DISPATCH_READS_ENABLED: '0' } });
+    env: { NODE_OPTIONS: process.env.NODE_OPTIONS, TMPDIR: process.env.TMPDIR,
+      ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT: process.env.ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT, HQ_ROOT: dir, HQ_LAUNCH_REQUEST_ID: 'lrq_default-env', ADVERSARIAL_DISPATCH_READS_ENABLED: '0' } });
   assert.equal(output.trim(), '1');
 });
 

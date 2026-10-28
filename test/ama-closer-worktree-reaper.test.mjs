@@ -1,3 +1,4 @@
+import './helpers/dispatch-files-preload.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -194,6 +195,7 @@ test('closer worktree reaper discovers dedicated-base non-agent-os hammer worktr
     hqPath: '/bin/hq',
     execFileImpl: async (cmd, args) => {
       calls.push({ cmd, args });
+      if (args[0] === 'repo' && args[1] === 'list') return {stdout: JSON.stringify({repos: [], errors: [], worktreeRoots: [deployRepoPath, workerBasePath]})};
       const repoPath = args[1];
       const joined = args.join(' ');
       if (cmd === 'git' && joined.includes('remote get-url origin')) {
@@ -580,6 +582,8 @@ test('closer worktree reaper prunes registered worktrees whose on-disk dir is al
   const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-gone-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const hqRoot = join(root, 'hq');
+  // The owner root is readable even though the registered slot is absent.
+  mkdirSync(hqRoot, {recursive: true});
   const repoPath = join(hqRoot, 'repos', 'agent-os');
   // Registered in git metadata but the on-disk worktree dir is never created:
   // this is the hammer-ama-pr-* worktree whose directory is already gone.
@@ -1246,6 +1250,7 @@ test('closer worktree reaper defers only half-registered cleanup on a partial re
     cursorPath: join(root, 'cursor.json'),
     scanLimit: 1,
     execFileImpl: async (cmd, args) => {
+      if (args[0] === 'repo' && args[1] === 'list') return {stdout: JSON.stringify({repos: [], errors: [], worktreeRoots: [repoA, repoB]})};
       if (cmd === 'git' && args.includes('get-url')) {
         return { stdout: 'https://github.com/x/y.git\n', stderr: '' };
       }
@@ -1290,21 +1295,16 @@ test('closer worktree discovery skips unreadable or non-directory roots', async 
   const result = await reapCloserHammerWorktrees({
     hqRoot: join(root, 'hq'),
     cursorPath: join(root, 'cursor.json'),
-    readdirImpl: async (path) => {
-      const err = new Error('unreadable');
-      err.code = path.endsWith('/repos') ? 'EACCES' : 'ENOTDIR';
-      throw err;
-    },
+    execFileImpl: async () => { throw new Error('owner inventory unavailable'); },
     logger: { info() {}, warn(message) { warnings.push(message); } },
   });
 
   assert.equal(result.scanned, 0);
   assert.equal(result.budgetExceeded, false);
   assert.equal(result.registrationIncomplete, true);
-  assert.equal(result.registrationFailedRepos, 2);
+  assert.equal(result.registrationFailedRepos, 1);
   assert.equal(result.cursorPersisted, true);
-  assert.equal(warnings.some((message) => message.includes('code=EACCES')), true);
-  assert.equal(warnings.some((message) => message.includes('code=ENOTDIR')), true);
+  assert.equal(warnings.some(message => message.includes('repository-inventory-unavailable')), true);
 });
 
 test('failed repo listing still permits terminal cleanup from a healthy repo', async (t) => {
@@ -1360,4 +1360,29 @@ test('closer worktree parser handles porcelain and GitHub remote URLs', () => {
   ]);
   assert.equal(parseGitHubRepoFromRemote('git@github.com:owner/repo.git\n'), 'owner/repo');
   assert.equal(parseGitHubRepoFromRemote('https://github.com/owner/repo.git'), 'owner/repo');
+});
+
+
+test('name-only deployed repo inventory cannot prove half-registration absence', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-name-only-inventory-'));
+  t.after(() => rmSync(root, {recursive: true, force: true}));
+  const workerId = 'hammer-ama-pr-4242';
+  const worktree = join(root, 'workers', workerId, 'agent-os');
+  mkdirSync(worktree, {recursive: true});
+  const result = await reapCloserHammerWorktrees({hqRoot: root, cursorPath: join(root, 'cursor.json'),
+    readWorkerObservationImpl: async () => ({ok: true, rows: [{worker_id: workerId,
+      directory_name: 'agent-os', present: true, manifest_state: 'missing'}]}),
+    execFileImpl: async (_command, args) => {
+      assert.deepEqual(args.slice(0, 3), ['repo', 'list', '--json']);
+      // Deployed repo_list.py projection: no checkout path or worker-base roots.
+      return {stdout: JSON.stringify({repos: [{name: 'agent-os', url: 'https://github.com/acme/agent-os',
+        trunkBranch: 'main', commitSha: 'a'.repeat(40)}], errors: []})};
+    },
+    execGhWithRetryImpl: async () => assert.fail('incomplete absence cannot select PR cleanup'),
+    logger: {info() {}, warn() {}},
+  });
+  assert.equal(result.registrationIncomplete, true);
+  assert.equal(result.deferredIncompleteRegistration, 1);
+  assert.equal(result.reaped, 0);
+  assert.equal(existsSync(worktree), true);
 });

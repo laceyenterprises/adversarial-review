@@ -14,9 +14,19 @@ test('runner gives the shared HQ resolver canonical roots inside its sandbox', (
   assert.equal(process.env.AGENT_OS_WORKER_RUN_AS_USER, undefined);
   assert.equal(process.env.HQ_WORKER_RUN_AS_USER, undefined);
   for (const key of ['HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND', 'MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND',
-    'HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND', 'GH_TOKEN_REFRESH_COMMAND', 'GITHUB_TOKEN_REFRESH_COMMAND']) {
+    'HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND', 'GH_TOKEN_REFRESH_COMMAND', 'GITHUB_TOKEN_REFRESH_COMMAND',
+    'HCP_TOKEN', 'HCP_BEARER_TOKEN', 'HCP_TOKEN_PATH', 'HCP_BASE_URL',
+    'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE',
+    'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES']) {
     assert.equal(process.env[key], undefined, `runner must remove inherited ${key}`);
   }
+  const deployCheckout = process.env.AGENT_OS_DEPLOY_CHECKOUT;
+  const beneathSandbox = relative(process.env.ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT, deployCheckout);
+  assert.ok(beneathSandbox && beneathSandbox !== '..' && !beneathSandbox.startsWith(`..${sep}`) && !isAbsolute(beneathSandbox),
+    'the synthetic deploy checkout must be inside the runner sandbox');
+  assert.equal(process.env.GIT_CEILING_DIRECTORIES, process.env.ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT);
+  const git = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd: homedir(), encoding: 'utf8', timeout: 5_000 });
+  assert.notEqual(git.status, 0, 'an uninitialized fixture must not discover an enclosing checkout');
   for (const directory of [root, homedir()]) {
     assert.equal(directory, realpathSync(directory), 'worker roots must be canonical');
     const beneathWorker = relative(process.env.ADVERSARIAL_REVIEW_TEST_CWD, directory);
@@ -33,7 +43,7 @@ test('runner gives the shared HQ resolver canonical roots inside its sandbox', (
   assert.equal(child.status, 0, child.stderr || child.error?.message);
   assert.deepEqual(JSON.parse(child.stdout), { HQ_ROOT: root });
   if (process.env.HQ_ROOT_FIXTURE_REPORT) {
-    writeFileSync(join(process.env.HQ_ROOT_FIXTURE_REPORT, `${process.pid}.json`), JSON.stringify({ root, home: homedir() }));
+    writeFileSync(join(process.env.HQ_ROOT_FIXTURE_REPORT, `${process.pid}.json`), JSON.stringify({ root, home: homedir(), deployCheckout }));
   }
 });
 

@@ -150,19 +150,14 @@ test('signed CI is bound to repo/head and tampering or missing keys fails closed
   assert.equal(verifyManagedCiRecord({ ...record, verdict: 'red' }, key, { repo, headSha }), false);
   assert.equal(verifyManagedCiRecord(record, key, { repo: 'acme/other', headSha }), false);
   assert.equal(verifyManagedCiRecord(record, key, { repo, headSha: 'other' }), false);
-  const dir = join(rootDir, 'workers', 'builder', 'logs', 'ci-attestations');
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, `${headSha}.json`), JSON.stringify(record));
-  const publicKeyPath = join(rootDir, 'ci-key');
-  writeFileSync(publicKeyPath, key);
-  assert.equal(readGreenManagedCi({ repo, headSha, env: { HQ_ROOT: rootDir,
-    AGENT_OS_CI_ATTESTATION_PUBLIC_KEY_PATH: publicKeyPath } }), true);
-  assert.equal(readGreenManagedCi({ repo, headSha, env: { HQ_ROOT: rootDir } }), false);
-  const localRecord = { ...record, signature: undefined, mode: 'github', manifestHash: `sha256:${'a'.repeat(64)}` };
-  writeFileSync(join(dir, `${headSha}.json`), JSON.stringify(localRecord));
-  assert.equal(readGreenManagedCi({ repo, headSha, env: { HQ_ROOT: rootDir, AGENT_OS_CI_HOSTING_MODE: 'github' } }), false);
-  assert.equal(readGreenManagedCi({ repo, headSha, env: { HQ_ROOT: rootDir,
-    AGENT_OS_CI_HOSTING_MODE: 'self-hosted-container' } }), false);
+  const readProofImpl = (_action, {parameters}) => ({ok: true, data: {
+    repo: parameters.repo, headSha: parameters.head_sha, verified: true}});
+  assert.equal(readGreenManagedCi({repo, headSha, readProofImpl}), true);
+  assert.equal(readGreenManagedCi({repo, headSha, readProofImpl: () => ({ok: false})}), false);
+  assert.equal(readGreenManagedCi({repo, headSha, readProofImpl: () => ({ok: true,
+    data: {repo: 'acme/foreign', headSha, verified: true}})}), false);
+  assert.equal(readGreenManagedCi({repo, headSha, readProofImpl: () => {throw new Error('outage');}}), false);
+
 });
 
 test('searchlight#2 replay: signed green evidence selects bootstrap merge; absent evidence pages once', async t => {

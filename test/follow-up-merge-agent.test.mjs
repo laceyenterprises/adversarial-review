@@ -1,6 +1,7 @@
 // Must stay the first import: it isolates this file's state before any production module loads.
 import './helpers/rate-limit-state-isolation.mjs';
 import './helpers/worker-observation-fixture.mjs';
+import './helpers/dispatch-files-preload.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -26,6 +27,7 @@ import {
   writeFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
+import { observeClosureWait } from '../src/ama/closure-wait.mjs';
 import { CASCADE_FAILURE_CAP, recordCascadeFailure } from '../src/reviewer-cascade.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE, resetConfigCache } from '../src/config-loader.mjs';
 import { extractNonBlockingFindingIdentities } from '../src/kernel/remediation-reply.mjs';
@@ -3149,6 +3151,28 @@ test('dispatchMergeAgentForPR retries transient hq dispatch failures with the sa
   assert.equal(listMergeAgentDispatches(rootDir)[0].priorityFlagSupported, true);
 });
 
+test('dispatchMergeAgentForPR bounds missing original-worker evidence and pages without launching', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'merge-evidence-wait-'));
+  const notices = [];
+  const options = { ...makeJob(), rootDir, agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    env: { ...HERMETIC_CONFIG_ENV, AMA_CLOSURE_WAIT_BOUND_MS: '1' },
+    prepareOriginalWorkerImpl: async () => ({ decision: 'deferred', reason: 'dispatch-files-unavailable' }),
+    observeClosureWaitImpl: opts => observeClosureWait({ ...opts, pageImpl: async text => notices.push(text) }),
+    execFileImpl: async () => { throw new Error('must not launch or tear down without worker evidence'); } };
+  try {
+    const first = await dispatchMergeAgentForPR({ ...options, now: '2026-10-01T00:00:00.000Z' });
+    assert.equal(first.decision, 'dispatch-deferred');
+    assert.equal(first.needsOperator, false);
+    const expired = await dispatchMergeAgentForPR({ ...options, now: '2026-10-02T00:00:00.000Z' });
+    assert.equal(expired.decision, 'dispatch-deferred');
+    assert.equal(expired.needsOperator, true);
+    assert.equal(expired.evidenceWait.startedAt, first.evidenceWait.startedAt);
+    await dispatchMergeAgentForPR({ ...options, now: '2026-10-03T00:00:00.000Z' });
+    assert.equal(notices.length, 1);
+    assert.match(notices[0], /dispatch-files-unavailable/);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
 test('dispatchMergeAgentForPR tears down terminal original worker before merge-agent dispatch', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
@@ -3414,7 +3438,7 @@ test('merge-agent terminal status set matches parent session-ledger model when a
   );
 });
 
-test('dispatchMergeAgentForPR is idempotent when original worker is already torn down', async () => {
+test('dispatchMergeAgentForPR holds when an absent directory has no canonical worker identity', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
   const originalWorkerId = 'codex-lac-662';
@@ -3432,10 +3456,9 @@ test('dispatchMergeAgentForPR is idempotent when original worker is already torn
     now: '2026-05-17T14:32:00.000Z',
   });
 
-  assert.equal(result.decision, 'dispatch');
-  assert.equal(result.dispatchId, 'disp_idempotent');
-  assert.equal(hqCalls.length, 1);
-  assert.deepEqual(hqCalls[0].args.slice(0, 3), ['dispatch', '--worker-class', 'merge-agent']);
+  assert.equal(result.decision, 'dispatch-deferred');
+  assert.equal(hqCalls.length, 0);
+  assert.equal(result.reason, 'dispatch-files-unavailable');
 });
 
 test('prepareOriginalWorkerForMergeAgent defers when workerDir exists but workspace.json is missing', async () => {
@@ -3467,9 +3490,9 @@ test('prepareOriginalWorkerForMergeAgent defers when workerDir exists but worksp
   });
 
   assert.equal(result.decision, 'deferred');
-  assert.equal(result.reason, 'workspace-json-missing-but-worker-dir-present');
+  assert.equal(result.reason, 'dispatch-files-unavailable');
   assert.equal(execCalled, false);
-  assert.equal(logs[0].event, 'merge_agent.workspace_missing');
+  assert.equal(logs[0].event, 'merge_agent.workspace_read_failed');
 });
 
 test('dispatchMergeAgentForPR skips original-worker teardown when HQ_ROOT is unset', async () => {
@@ -3577,10 +3600,10 @@ test('prepareOriginalWorkerForMergeAgent fails closed when HQ owner cannot be re
   });
 
   assert.equal(result.decision, 'deferred');
-  assert.equal(result.reason, 'hq-owner-unknown');
+  assert.equal(result.reason, 'host-identity-unavailable');
   assert.equal(execCalled, false);
   assert.equal(logs[0].event, 'merge_agent.tear_down_skipped');
-  assert.equal(logs[0].reason, 'hq-owner-unknown');
+  assert.equal(logs[0].reason, 'host-identity-unavailable');
 });
 
 test('prepareOriginalWorkerForMergeAgent fails closed when runtime user cannot be resolved', async () => {
@@ -3628,7 +3651,7 @@ test('prepareOriginalWorkerForMergeAgent fails closed when runtime user cannot b
   assert.equal(logs[0].reason, 'hq-runtime-user-unknown');
 });
 
-test('prepareOriginalWorkerForMergeAgent passes parsed workspace and run metadata to worker-run lookup', async () => {
+test('prepareOriginalWorkerForMergeAgent passes projected workspace and run metadata to worker-run lookup', async () => {
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
   const originalWorkerId = 'codex-lac-664meta';
   const branch = `${originalWorkerId}/LAC-664meta-pass-records`;
@@ -3655,7 +3678,7 @@ test('prepareOriginalWorkerForMergeAgent passes parsed workspace and run metadat
       assert.equal(workspace.workerId, originalWorkerId);
       assert.equal(workspace.branch, branch);
       assert.equal(runRecord.runId, 'run_metadata');
-      assert.deepEqual(runRecord.launchProvenance, { source: 'unit-test' });
+      assert.equal(runRecord.launchProvenance, undefined);
       return {
         found: true,
         status: 'running',
@@ -3807,8 +3830,8 @@ test('prepareOriginalWorkerForMergeAgent recognizes MHX-09 worker-id branch pref
       now: '2026-05-17T14:33:51.000Z',
     });
 
-    assert.equal(result.decision, 'ready');
-    assert.equal(result.reason, 'original-worker-already-torn-down');
+    assert.equal(result.decision, 'deferred');
+    assert.equal(result.reason, 'dispatch-files-unavailable');
     assert.equal(result.originalWorkerId, originalWorkerId);
   }
 });
@@ -4367,7 +4390,7 @@ test('dispatchMergeAgentForPR records psql-not-installed as a durable skipped di
   assert.equal(skipRecord.decision, 'skip-worker-run-lookup-failed');
 });
 
-test('prepareOriginalWorkerForMergeAgent records missing launchRequestId as a structured skip', async () => {
+test('prepareOriginalWorkerForMergeAgent records missing launchRequestId as unavailable custody', async () => {
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
   const originalWorkerId = 'codex-lac-666b2';
   const branch = `${originalWorkerId}/LAC-666b2-missing-lrq`;
@@ -4397,11 +4420,11 @@ test('prepareOriginalWorkerForMergeAgent records missing launchRequestId as a st
     },
   });
 
-  assert.equal(result.decision, 'skip');
-  assert.equal(result.reason, 'missing-launch-request-id');
+  assert.equal(result.decision, 'deferred');
+  assert.equal(result.reason, 'dispatch-files-unavailable');
   assert.equal(execCalled, false);
-  assert.equal(logs[0].event, 'merge_agent.tear_down_skipped');
-  assert.equal(logs[0].reason, 'missing-launch-request-id');
+  assert.equal(logs[0].event, 'merge_agent.workspace_read_failed');
+  assert.equal(logs[0].reason, 'dispatch-files-unavailable');
 });
 
 test('dispatchMergeAgentForPR records a skip when worker-run lookup fails operationally', async () => {
@@ -4554,9 +4577,9 @@ test('prepareOriginalWorkerForMergeAgent: orphan worktree + missing worker_run r
     lookupRunStatusImpl: async () => ({ found: false, reason: 'missing-worker-run-row', launchRequestId: 'lrq_test-rc' }),
   });
   assert.equal(result.decision, 'deferred');
-  assert.equal(result.reason, 'original-worker-run-row-missing-but-worktree-present');
-  const deferEvent = logs.find((l) => l.event === 'merge_agent.dispatch_deferred');
-  assert.ok(deferEvent, 'expected dispatch_deferred lifecycle event');
+  assert.equal(result.reason, 'dispatch-files-unavailable');
+  const deferEvent = logs.find((l) => l.event === 'merge_agent.workspace_read_failed');
+  assert.ok(deferEvent, 'expected unavailable-workspace observation');
   rmSync(hqRoot, { recursive: true, force: true });
 });
 
@@ -4587,7 +4610,7 @@ test('prepareOriginalWorkerForMergeAgent: orphan worktree + operator-approved tr
     lookupRunStatusImpl: async () => ({ found: false, reason: 'missing-worker-run-row', launchRequestId: 'lrq_test-oa' }),
   });
   assert.equal(result.decision, 'deferred');
-  assert.equal(result.reason, 'original-worker-run-row-missing-but-worktree-present');
+  assert.equal(result.reason, 'dispatch-files-unavailable');
   rmSync(hqRoot, { recursive: true, force: true });
 });
 

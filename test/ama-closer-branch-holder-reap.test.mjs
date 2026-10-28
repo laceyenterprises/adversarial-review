@@ -1,6 +1,7 @@
+import './helpers/dispatch-files-preload.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -12,6 +13,26 @@ import { __testables__, samePrHammerHolderWorktreePaths } from '../src/ama/dispa
 // (hammer-ama-pr-<PR> only) returned [] here, so the reap never fired and the
 // PR could never close.
 const HQ_ROOT = '/Users/airlock/agent-os-hq';
+
+test('unknown closer custody pages once at its durable bound without authorizing reclaim', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-evidence-wait-'));
+  const notices = [];
+  const options = { rootDir, repo: 'acme/repo', prNumber: 42, headSha: 'a'.repeat(40),
+    env: { AMA_CLOSURE_WAIT_BOUND_MS: '1' }, pageImpl: async text => notices.push(text) };
+  try {
+    const first = await __testables__.deferUnknownCloserCustody({ ...options, now: 1000 });
+    assert.equal(first.needsOperator, false);
+    const expired = await __testables__.deferUnknownCloserCustody({ ...options, now: 86_401_000 });
+    assert.equal(expired.reason, 'hammer-closer-evidence-wait-exhausted');
+    assert.equal(expired.needsOperator, true);
+    assert.equal(expired.skipMergeAgent, true);
+    assert.equal(expired.dispatched, false);
+    assert.equal(expired.evidenceWait.startedAt, first.evidenceWait.startedAt);
+    await __testables__.deferUnknownCloserCustody({ ...options, now: 172_801_000 });
+    assert.equal(notices.length, 1);
+    assert.match(notices[0], /hammer-closer-liveness-unknown/);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
 
 const TCT04_PROVISION_ERROR = {
   stderr: [
@@ -764,6 +785,9 @@ test('pre-provision reclaim tears down stale self-owned hammer worktree and emit
   const logs = [];
   const now = 1_800_000;
   const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+    readWorkerDispatchFilesImpl: async () => ({ok: true, metadata: {launchRequestId: 'launch-one'}}),
+    readLatestWorkerRunStatusImpl: async () => ({ok: true, row: {status: 'succeeded'}}),
+    statSyncImpl: () => ({mtimeMs: 0}),
     repo: 'owner/agent-os',
     prNumber: 3312,
     workerClass: 'hammer',
@@ -801,6 +825,9 @@ test('pre-provision reclaim retries transient teardown failures before provision
   const calls = [];
   const sleeps = [];
   const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+    readWorkerDispatchFilesImpl: async () => ({ok: true, metadata: {launchRequestId: 'launch-one'}}),
+    readLatestWorkerRunStatusImpl: async () => ({ok: true, row: {status: 'succeeded'}}),
+    statSyncImpl: () => ({mtimeMs: 0}),
     repo: 'owner/agent-os',
     prNumber: 3312,
     workerClass: 'hammer',
@@ -836,6 +863,9 @@ test('pre-provision reclaim does not retry non-transient teardown failures and l
   const sleeps = [];
   const warnings = [];
   const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+    readWorkerDispatchFilesImpl: async () => ({ok: true, metadata: {launchRequestId: 'launch-one'}}),
+    readLatestWorkerRunStatusImpl: async () => ({ok: true, row: {status: 'succeeded'}}),
+    statSyncImpl: () => ({mtimeMs: 0}),
     repo: 'owner/agent-os',
     prNumber: 3312,
     workerClass: 'hammer',
@@ -875,6 +905,9 @@ test('pre-provision reclaim logs exhausted transient retries before provisioning
   const sleeps = [];
   const warnings = [];
   const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+    readWorkerDispatchFilesImpl: async () => ({ok: true, metadata: {launchRequestId: 'launch-one'}}),
+    readLatestWorkerRunStatusImpl: async () => ({ok: true, row: {status: 'succeeded'}}),
+    statSyncImpl: () => ({mtimeMs: 0}),
     repo: 'owner/agent-os',
     prNumber: 3312,
     workerClass: 'hammer',
@@ -911,6 +944,9 @@ test('pre-provision reclaim logs exhausted transient retries before provisioning
 
 test('pre-provision reclaim reports missing hqRoot separately from invalid worker id', async () => {
   const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+    readWorkerDispatchFilesImpl: async () => ({ok: true, metadata: {launchRequestId: 'launch-one'}}),
+    readLatestWorkerRunStatusImpl: async () => ({ok: true, row: {status: 'succeeded'}}),
+    statSyncImpl: () => ({mtimeMs: 0}),
     repo: 'owner/agent-os',
     prNumber: 3312,
     workerClass: 'hammer',
@@ -929,6 +965,9 @@ test('pre-provision reclaim reports missing hqRoot separately from invalid worke
 test('pre-provision reclaim is unchanged when no self-owned stale worktree exists', async () => {
   const calls = [];
   const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+    readWorkerDispatchFilesImpl: async () => ({ok: true, metadata: {launchRequestId: 'launch-one'}}),
+    readLatestWorkerRunStatusImpl: async () => ({ok: true, row: {status: 'succeeded'}}),
+    statSyncImpl: () => ({mtimeMs: 0}),
     repo: 'owner/agent-os',
     prNumber: 3312,
     workerClass: 'hammer',
@@ -950,6 +989,9 @@ test('pre-provision reclaim is unchanged when no self-owned stale worktree exist
 test('pre-provision reclaim never tears down a non-closer worker class', async () => {
   const calls = [];
   const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+    readWorkerDispatchFilesImpl: async () => ({ok: true, metadata: {launchRequestId: 'launch-one'}}),
+    readLatestWorkerRunStatusImpl: async () => ({ok: true, row: {status: 'succeeded'}}),
+    statSyncImpl: () => ({mtimeMs: 0}),
     repo: 'owner/agent-os',
     prNumber: 3312,
     workerClass: 'codex',
@@ -974,6 +1016,9 @@ test('pre-provision reclaim never tears down a different hammer worker id', asyn
     '/Users/airlock/agent-os-hq/workers/hammer-ama-pr-9999/agent-os',
   ]);
   const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+    readWorkerDispatchFilesImpl: async () => ({ok: true, metadata: {launchRequestId: 'launch-one'}}),
+    readLatestWorkerRunStatusImpl: async () => ({ok: true, row: {status: 'succeeded'}}),
+    statSyncImpl: () => ({mtimeMs: 0}),
     repo: 'owner/agent-os',
     prNumber: 3312,
     workerClass: 'hammer',
@@ -1003,35 +1048,30 @@ test('pre-provision reclaim never tears down a different hammer worker id', asyn
 // Helper defaults that make resolveSelfOwnedHammerCloserRunLiveness see a
 // workspace.json carrying a launchRequestId for PR 3312.
 function livenessWorkspaceReader() {
-  return (path) => {
-    if (path === `${HQ_ROOT}/workers/hammer-ama-pr-3312/workspace.json`) {
-      return { launchRequestId: 'lrq_closer_3312' };
-    }
-    return null;
-  };
+  return async () => ({ok: true, metadata: {launchRequestId: 'launch-one'}});
 }
 
 test('liveness: active status with a confirmed-alive pid is live', async () => {
   const liveness = await __testables__.resolveSelfOwnedHammerCloserRunLiveness({
     prNumber: 3312,
     hqRoot: HQ_ROOT,
-    readJsonFileImpl: livenessWorkspaceReader(),
+    readWorkerDispatchFilesImpl: livenessWorkspaceReader(),
     readLatestWorkerRunStatusImpl: async ({ launchRequestId }) => {
-      assert.equal(launchRequestId, 'lrq_closer_3312');
+      assert.equal(launchRequestId, 'launch-one');
       return { ok: true, row: { status: 'running', pid: 4242 } };
     },
     processKillImpl: () => {}, // pid 4242 alive (no throw)
   });
   assert.equal(liveness.live, true);
   assert.equal(liveness.workerStatus, 'running');
-  assert.equal(liveness.launchRequestId, 'lrq_closer_3312');
+  assert.equal(liveness.launchRequestId, 'launch-one');
 });
 
 test('liveness: active status but a dead pid is a phantom, not live', async () => {
   const liveness = await __testables__.resolveSelfOwnedHammerCloserRunLiveness({
     prNumber: 3312,
     hqRoot: HQ_ROOT,
-    readJsonFileImpl: livenessWorkspaceReader(),
+    readWorkerDispatchFilesImpl: livenessWorkspaceReader(),
     readLatestWorkerRunStatusImpl: async () => ({ ok: true, row: { status: 'running', pid: 4242 } }),
     processKillImpl: () => { const err = new Error('no such process'); err.code = 'ESRCH'; throw err; },
   });
@@ -1043,7 +1083,7 @@ test('liveness: a terminal status is never live even with an alive pid', async (
   const liveness = await __testables__.resolveSelfOwnedHammerCloserRunLiveness({
     prNumber: 3312,
     hqRoot: HQ_ROOT,
-    readJsonFileImpl: livenessWorkspaceReader(),
+    readWorkerDispatchFilesImpl: livenessWorkspaceReader(),
     readLatestWorkerRunStatusImpl: async () => ({ ok: true, row: { status: 'succeeded', pid: 4242 } }),
     processKillImpl: () => {},
   });
@@ -1051,45 +1091,48 @@ test('liveness: a terminal status is never live even with an alive pid', async (
   assert.equal(liveness.workerStatus, 'succeeded');
 });
 
-test('liveness: a failed ledger lookup is treated as not-live (reclaim-safe)', async () => {
+test('liveness: a failed ledger lookup is treated as unknown and holds custody', async () => {
   const liveness = await __testables__.resolveSelfOwnedHammerCloserRunLiveness({
     prNumber: 3312,
     hqRoot: HQ_ROOT,
-    readJsonFileImpl: livenessWorkspaceReader(),
+    readWorkerDispatchFilesImpl: livenessWorkspaceReader(),
     readLatestWorkerRunStatusImpl: async () => ({ ok: false, reason: 'ledger-unreachable' }),
     processKillImpl: () => {},
   });
-  assert.equal(liveness.live, false);
+  assert.equal(liveness.live, null);
+  assert.equal(liveness.unknown, true);
   assert.equal(liveness.reason, 'ledger-unreachable');
 });
 
-test('liveness: a missing workspace launchRequestId is not-live (reclaim-safe)', async () => {
+test('liveness: a missing workspace launchRequestId is unknown and holds custody', async () => {
   const liveness = await __testables__.resolveSelfOwnedHammerCloserRunLiveness({
     prNumber: 3312,
     hqRoot: HQ_ROOT,
-    readJsonFileImpl: () => null,
+    readWorkerDispatchFilesImpl: () => null,
     readLatestWorkerRunStatusImpl: async () => { throw new Error('must not be queried without an lrq'); },
     processKillImpl: () => {},
   });
-  assert.equal(liveness.live, false);
-  assert.equal(liveness.reason, 'missing-launch-request-id');
+  assert.equal(liveness.live, null);
+  assert.equal(liveness.unknown, true);
+  assert.equal(liveness.reason, 'dispatch-files-unavailable');
 });
 
-test('liveness: thrown workspace/run JSON reads are not-live (reclaim-safe)', async () => {
+test('liveness: thrown public metadata reads are unknown and holds custody', async () => {
   const liveness = await __testables__.resolveSelfOwnedHammerCloserRunLiveness({
     prNumber: 3312,
     hqRoot: HQ_ROOT,
-    readJsonFileImpl: () => { throw new SyntaxError('Unexpected end of JSON input'); },
+    readWorkerDispatchFilesImpl: async () => ({ok: false, reason: 'dispatch-files-unavailable'}),
     readLatestWorkerRunStatusImpl: async () => { throw new Error('must not be queried without an lrq'); },
     processKillImpl: () => {},
   });
-  assert.equal(liveness.live, false);
-  assert.equal(liveness.reason, 'missing-launch-request-id');
+  assert.equal(liveness.live, null);
+  assert.equal(liveness.unknown, true);
+  assert.equal(liveness.reason, 'dispatch-files-unavailable');
 });
 
 test('live closer dispatch deferral logs through logger.info', () => {
   const source = readFileSync(new URL('../src/ama/dispatch-closer.mjs', import.meta.url), 'utf8');
-  const marker = 'deferring dispatch: PR ${repo}#${prNumber} hammer closer is live in-flight';
+  const marker = 'deferring dispatch: PR ${repo}#${prNumber} hammer closer custody is retained';
   const markerIndex = source.indexOf(marker);
   assert.notEqual(markerIndex, -1);
   const logWindow = source.slice(Math.max(0, markerIndex - 100), markerIndex + marker.length);
@@ -1108,6 +1151,9 @@ test('pre-provision reclaim SKIPS tear-down when the hammer closer is live', asy
   const logs = [];
   const now = 1_800_000;
   const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+    readWorkerDispatchFilesImpl: async () => ({ok: true, metadata: {launchRequestId: 'launch-one'}}),
+    readLatestWorkerRunStatusImpl: async () => ({ok: true, row: {status: 'succeeded'}}),
+    statSyncImpl: () => ({mtimeMs: 0}),
     repo: 'owner/agent-os',
     prNumber: 3312,
     workerClass: 'hammer',
@@ -1120,7 +1166,7 @@ test('pre-provision reclaim SKIPS tear-down when the hammer closer is live', asy
     existsSyncImpl: (path) => path === `${HQ_ROOT}/workers/hammer-ama-pr-3312/agent-os`,
     statSyncImpl: () => ({ mtimeMs: now - 20_000 }),
     nowMs: () => now,
-    readJsonFileImpl: livenessWorkspaceReader(),
+    readWorkerDispatchFilesImpl: livenessWorkspaceReader(),
     readLatestWorkerRunStatusImpl: async () => ({ ok: true, row: { status: 'running', pid: 4242 } }),
     processKillImpl: () => {}, // pid alive
     logger: { info(line) { logs.push(JSON.parse(line)); }, warn() {} },
@@ -1141,7 +1187,7 @@ test('pre-provision reclaim SKIPS tear-down when the hammer closer is live', asy
     worktreePath: `${HQ_ROOT}/workers/hammer-ama-pr-3312/agent-os`,
     worktreeAgeMs: 20000,
     workerStatus: 'running',
-    launchRequestId: 'lrq_closer_3312',
+    launchRequestId: 'launch-one',
   }]);
 });
 
@@ -1149,6 +1195,9 @@ test('pre-provision reclaim TEARS DOWN a phantom closer (active status, dead pid
   const calls = [];
   const now = 1_800_000;
   const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+    readWorkerDispatchFilesImpl: async () => ({ok: true, metadata: {launchRequestId: 'launch-one'}}),
+    readLatestWorkerRunStatusImpl: async () => ({ok: true, row: {status: 'succeeded'}}),
+    statSyncImpl: () => ({mtimeMs: 0}),
     repo: 'owner/agent-os',
     prNumber: 3312,
     workerClass: 'hammer',
@@ -1161,7 +1210,7 @@ test('pre-provision reclaim TEARS DOWN a phantom closer (active status, dead pid
     existsSyncImpl: (path) => path === `${HQ_ROOT}/workers/hammer-ama-pr-3312/agent-os`,
     statSyncImpl: () => ({ mtimeMs: now - 41_000 }),
     nowMs: () => now,
-    readJsonFileImpl: livenessWorkspaceReader(),
+    readWorkerDispatchFilesImpl: livenessWorkspaceReader(),
     readLatestWorkerRunStatusImpl: async () => ({ ok: true, row: { status: 'running', pid: 4242 } }),
     processKillImpl: () => { const err = new Error('no such process'); err.code = 'ESRCH'; throw err; },
     logger: { info() {}, warn() {} },

@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -62,7 +62,14 @@ function makeDaemonClone({ substantiveMove = false } = {}) {
     git(clone, 'commit', '-q', '--allow-empty', '-m', 'Add provenance trailer\n\nReviewed-by: codex');
   }
   const live = git(clone, 'rev-parse', 'HEAD');
-  return { tmp, hqRoot, clone, reviewed, live };
+  const ownerCli = path.join(tmp, 'owner-cli');
+  writeFileSync(ownerCli, '#!/usr/bin/env node\nconsole.log(JSON.stringify({repos: [{name: ' + JSON.stringify(path.basename(clone)) + ', checkoutPath: ' + JSON.stringify(clone) + '}], errors: []}));\n', {mode: 0o755});
+  const previousHqBin = process.env.HQ_BIN;
+  process.env.HQ_BIN = ownerCli;
+  return { tmp, hqRoot, clone, reviewed, live, restoreEnv() {
+    if (previousHqBin === undefined) delete process.env.HQ_BIN;
+    else process.env.HQ_BIN = previousHqBin;
+  } };
 }
 
 function insertPendingFsrRow(db, { reviewed, live, reason = fsrReason(reviewed, live) }) {
@@ -136,6 +143,7 @@ test('verifyTrailerOnlyHeadDelta verifies an empty delta from the daemon clone',
     assert.equal(result.reason, 'empty-delta');
     assert.equal(result.commitCount, 1);
   } finally {
+    fixture.restoreEnv();
     rmSync(fixture.tmp, { recursive: true, force: true });
   }
 });
@@ -169,6 +177,7 @@ test('verifyTrailerOnlyHeadDelta retries transient local git failures before fai
     assert.equal(result.reason, 'empty-delta');
     assert.equal(diffCalls, 2);
   } finally {
+    fixture.restoreEnv();
     rmSync(fixture.tmp, { recursive: true, force: true });
   }
 });
@@ -187,7 +196,8 @@ test('verifyTrailerOnlyHeadDelta falls back to gh compare when the daemon clone 
     sleepImpl: async () => {},
     execFileImpl: async (file, args) => {
       calls.push({ file, args });
-      assert.equal(file, 'gh');
+      if (args[0] === 'repo') return {stdout: JSON.stringify({repos: [], errors: []})};
+        assert.equal(file, 'gh');
       assert.deepEqual(args, ['api', `repos/${REPO}/compare/${reviewed}...${live}`]);
       return { stdout: JSON.stringify({ ahead_by: 1, files: [] }), stderr: '' };
     },
@@ -196,7 +206,7 @@ test('verifyTrailerOnlyHeadDelta falls back to gh compare when the daemon clone 
   assert.equal(result.reason, 'empty-delta');
   assert.equal(result.commitCount, 1);
   assert.equal(result.source, 'gh-compare');
-  assert.equal(calls.length, 1);
+  assert.equal(calls.filter(call => call.file === "gh").length, 1);
 });
 
 test('verifyTrailerOnlyHeadDelta refuses a substantive move, a non-ancestor, and a same head', async () => {
@@ -236,6 +246,7 @@ test('verifyTrailerOnlyHeadDelta refuses a substantive move, a non-ancestor, and
     assert.equal(same.verified, false);
     assert.equal(same.reason, 'reviewed-head-is-current-head');
   } finally {
+    fixture.restoreEnv();
     rmSync(fixture.tmp, { recursive: true, force: true });
   }
 });
@@ -251,7 +262,8 @@ test('verifyTrailerOnlyHeadDelta fails CLOSED on a git error, gh compare failure
       hqRoot: path.join(fixture.tmp, 'no-such-hq'),
       logger: quietLogger,
       sleepImpl: async () => {},
-      execFileImpl: async (file) => {
+      execFileImpl: async (file, args) => {
+        if (args[0] === 'repo') return {stdout: JSON.stringify({repos: [], errors: []})};
         assert.equal(file, 'gh');
         const err = new Error('gh unavailable');
         err.code = 1;
@@ -311,6 +323,7 @@ test('verifyTrailerOnlyHeadDelta fails CLOSED on a git error, gh compare failure
     assert.equal(unresolved.verified, false);
     assert.equal(unresolved.reason, 'heads-unresolved');
   } finally {
+    fixture.restoreEnv();
     rmSync(fixture.tmp, { recursive: true, force: true });
   }
 });
@@ -375,6 +388,7 @@ test('resolveFleetSelfRepairTrailerOnlyRereview honours only a verified, current
     });
     assert.deepEqual(operator, { requested: false, honored: false, stale: false, reason: null });
   } finally {
+    fixture.restoreEnv();
     rmSync(fixture.tmp, { recursive: true, force: true });
   }
 });
@@ -399,6 +413,7 @@ test('resolveFleetSelfRepairTrailerOnlyRereview withholds the bypass when the de
     assert.equal(result.stale, false);
     assert.equal(result.reason, 'unverified:non-empty-delta');
   } finally {
+    fixture.restoreEnv();
     rmSync(fixture.tmp, { recursive: true, force: true });
   }
 });

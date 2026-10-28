@@ -35,17 +35,17 @@ export function exerciseValidatedCloserQueue(rootDir, { strict = false, samePath
   const source = readFileSync(new URL('../../bin/hammer-verify-head.sh', import.meta.url), 'utf8');
   const policy = source.slice(source.indexOf('ham_base_touches_pr_files() {'), source.indexOf('# Shared by initial verification'));
   assert.ok(policy.startsWith('ham_base_touches_pr_files() {') && policy.trimEnd().endsWith('}'));
-  const needsRebase = (head, strict, mergeable = 'MERGEABLE', failComparison = false) => {
+  const needsRebase = (head, strict, mergeable = 'MERGEABLE', failComparison = false, mergeState = 'BEHIND') => {
     const result = spawnSync('/bin/bash', ['-c', `
 ham_is_full_sha() { [[ "$1" =~ ^[a-f0-9]{40}$ ]]; }
 ham_bounded_git_sync() { git fetch -q origin "$@"; }
 ${policy}
-if [ "$4" = true ]; then comm() { return 2; }; fi
+if [ "$4" = true ]; then ham_bounded_git_sync() { return 2; }; fi
 BASE_BRANCH=main
 POST_REMEDIATION_SHA="$1"
 HAM_REQUIRES_UP_TO_DATE="$2"
-ham_base_touches_pr_files validated-head "$3"
-`, 'fixture', head, strict, mergeable, String(failComparison)], { cwd, env, encoding: 'utf8', timeout: 5000 });
+ham_base_touches_pr_files validated-head "$3" "$5"
+`, 'fixture', head, strict, mergeable, String(failComparison), mergeState], { cwd, env, encoding: 'utf8', timeout: 5000 });
     assert.equal(result.signal, null, result.stderr);
     assert.ok([0, 1].includes(result.status), result.stderr);
     return result.status === 0;
@@ -95,10 +95,11 @@ ham_base_touches_pr_files validated-head "$3"
     const previouslyValidated = head;
     assert.equal(needsRebase(head, '1'), true, 'strict protection still requires containment');
     assert.equal(needsRebase(head, ''), true, 'unknown protection fails closed');
-    assert.equal(needsRebase(head, '0'), samePath, 'path overlap still requires rebase even for disjoint hunks');
+    assert.equal(needsRebase(head, '0'), false, 'MERGEABLE non-strict heads retain exact CI even with path overlap');
+    assert.equal(needsRebase(head, '1', 'MERGEABLE', false, 'CLEAN'), false, 'CLEAN is not blocked for being behind');
     assert.equal(needsRebase(head, '0', 'CONFLICTING'), true, 'live conflicts require rebase even with disjoint path lists');
-    assert.equal(needsRebase(head, '0', 'MERGEABLE', true), true, 'comparison errors cannot authorize disjoint retention');
-    if (strict || samePath) {
+    assert.equal(needsRebase(head, '1', 'MERGEABLE', true), true, 'unreadable containment cannot bypass strict BEHIND');
+    if (strict) {
       git('checkout', '-q', `pr-${pr}`); git('rebase', 'main');
       head = git('rev-parse', 'HEAD'); heads[pr - 1] = head;
       git('checkout', '-q', 'main');
@@ -109,7 +110,7 @@ ham_base_touches_pr_files validated-head "$3"
     const gate = (checks, validatedHead = head) => evaluateMergeEligibility({ verdict: 'settled-success', leaseHeld: true, requiredChecks: checks,
       branchProtectionRequired: false, requiresUpToDateBranch: strict, mergeable: 'MERGEABLE', mergeStateStatus: strict ? 'CLEAN' : 'BEHIND',
       prState: 'OPEN', labels: [], candidateHead: head, validatedHead });
-    if (strict || samePath) assert.equal(gate([{ name: 'required', conclusion: 'SUCCESS' }], previouslyValidated).eligible, false,
+    if (strict) assert.equal(gate([{ name: 'required', conclusion: 'SUCCESS' }], previouslyValidated).eligible, false,
       'old exact-head green evidence cannot authorize the rebase');
     assert.equal(gate([{ name: 'required', status: 'IN_PROGRESS' }]).eligible, false);
     assert.equal(gate([{ name: 'required', conclusion: 'SUCCESS' }]).eligible, true);
@@ -135,11 +136,12 @@ ham_base_touches_pr_files validated-head "$3"
       assert.ok(text.includes(`author intent ${pr}\nHAM finding fixed ${pr}\n`));
     }
   } else for (const file of ['a', 'b']) assert.equal(readFileSync(join(cwd, file), 'utf8'), 'author intent\nHAM finding fixed\n');
-  // A rename must include its source path in the PR file set. Main changed
-  // that path even though it never touched the rename destination.
+  // A rename can overlap a changed source path while GitHub still reports
+  // MERGEABLE. Only a confirmed conflict justifies rewriting a non-strict head.
   git('checkout', '-q', '--detach', base); git('mv', 'a', 'renamed'); git('commit', '-qm', 'rename');
-  assert.equal(needsRebase(git('rev-parse', 'HEAD'), '0'), true, 'renamed-away paths still overlap');
+  assert.equal(needsRebase(git('rev-parse', 'HEAD'), '0'), false, 'rename overlap alone cannot invalidate a MERGEABLE head');
+  assert.equal(needsRebase(git('rev-parse', 'HEAD'), '0', 'CONFLICTING'), true);
   git('checkout', '-q', 'main');
-  assert.equal(sourceMutations, strict || samePath ? 2 : 0);
+  assert.equal(sourceMutations, strict ? 2 : 0);
   return { merged, sourceMutations, ciRestarts, leaseAndWaitersClean: true };
 }

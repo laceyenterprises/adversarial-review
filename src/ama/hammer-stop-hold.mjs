@@ -250,7 +250,8 @@ function headsMatch(a, b) {
 
 function isHammerAttempt(attempt, doc) {
   const phase = String(attempt?.attemptPhase || '').trim().toLowerCase();
-  if (phase === 'hammer-lease-admission') return false;
+  // Resume bookkeeping must not replace the helper's actual safety decision.
+  if (phase === 'hammer-lease-admission' || phase === 'hammer-resume') return false;
   const path = String(attempt?.path || '').trim().toLowerCase();
   const hammerPaths = new Set(['hammer', 'ham-terminal-remediation']);
   // Per-attempt provenance wins over document metadata: daemon and hammer

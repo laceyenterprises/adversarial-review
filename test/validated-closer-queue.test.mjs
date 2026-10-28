@@ -23,6 +23,6 @@ for (const strict of [false, true]) {
     const root = mkdtempSync(join(tmpdir(), 'shared-path-queue-'));
     t.after(() => rmSync(root, { recursive: true, force: true }));
     assert.deepEqual(exerciseValidatedCloserQueue(root, { strict, samePath: true }),
-      { merged: [1, 2], sourceMutations: 2, ciRestarts: 2, leaseAndWaitersClean: true });
+      { merged: [1, 2], sourceMutations: strict ? 2 : 0, ciRestarts: strict ? 2 : 0, leaseAndWaitersClean: true });
   });
 }

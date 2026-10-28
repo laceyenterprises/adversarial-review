@@ -53,3 +53,38 @@ echo "$HAM_REQUIRES_UP_TO_DATE"
     if (!protection) assert.match(readFileSync(join(dir, 'required-status-checks.stderr'), 'utf8'), /HTTP 40[34]/);
   });
 }
+
+const needsRebase = source.match(/^ham_base_touches_pr_files\(\) \{\n[\s\S]*?^\}/m)?.[0];
+for (const [state, mergeable, strict, expected] of [
+  ['CLEAN', 'MERGEABLE', 0, 1],
+  ['CLEAN', 'MERGEABLE', 1, 1],
+  ['BEHIND', 'MERGEABLE', 0, 1],
+  ['BEHIND', 'MERGEABLE', 1, 0],
+  ['CLEAN', 'CONFLICTING', 0, 0],
+  ['DIRTY', 'CONFLICTING', 1, 0],
+  ['UNKNOWN', 'UNKNOWN', 1, 1],
+]) {
+  for (const checks of ['SUCCESS', 'PENDING']) test(`HAMRESUMEOWED-01: ${state}/${mergeable}, strict=${strict}, checks=${checks}`, () => {
+    // The base advanced across the SAME path as this PR. GitHub's exact-head
+    // conflict/up-to-date gate, rather than a local overlap guess, owns rewrite.
+    const result = spawnSync('/bin/bash', ['-uc', `
+${needsRebase}
+BASE_BRANCH=main
+HAM_REQUIRES_UP_TO_DATE=${strict}
+POST_REMEDIATION_SHA=${'a'.repeat(40)}
+ham_bounded_git_sync() { return 0; }
+ham_is_full_sha() { return 0; }
+git() {
+  case "$1" in
+    rev-parse) echo ${'b'.repeat(40)} ;;
+    merge-base) echo ${'c'.repeat(40)} ;;
+    diff) echo shared.txt ;;
+    *) return 90 ;;
+  esac
+}
+ham_base_touches_pr_files validated-head ${mergeable} ${state}
+exit $?
+`], { encoding: 'utf8', timeout: 5000, env: { ...process.env, CHECKS: checks } });
+    assert.equal(result.status, expected, result.stdout + result.stderr);
+  });
+}

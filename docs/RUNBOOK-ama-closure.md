@@ -2293,12 +2293,12 @@ prompt-driven worker behavior, not predicate gates — the audit comment and the
    otherwise clean close. Test fixes remain the one sanctioned exception to
    "scope only to the findings"; net-new feature scope stays out.
 2. **Rebase onto a recent `main` and confirm the merge guards.** The hammer
-   rebases when the strictness/overlap policy requires it and validates the
+   rebases when GitHub reports a conflict or strict/unknown BEHIND and validates the
    exact resulting head — required checks plus the changed-surface test bar above —
    before merging. LEASEFAIR-01 releases the lease during remote CI, then
-   applies the strictness/overlap base policy after reacquisition (LAC-2097).
-   Explicitly non-strict disjoint advances retain the exact head and its CI;
-   strict/unknown protection requires containment and overlap requires rebase.
+   applies the GitHub conflict/strict-BEHIND policy after reacquisition.
+   CLEAN heads and known non-strict MERGEABLE BEHIND heads retain their exact CI,
+   including overlapping-file base advances (HAMRESUMEOWED-01).
    One required rebase and at most `HAM_CI_RETRY_WAIT_SECONDS` (default/minimum 120) wall-clock seconds of retry CI retain
    the reacquired lease (LEASEFAIR-02). Deferred daemon merges retain priority before reacquisition;
    conflict, red CI or timeout release with their actual reasons. A lagging
@@ -4604,11 +4604,11 @@ current wait totals for audit reporting. Phases that update them must run in
 the persistent shell; child-process changes do not propagate back to a parent.
 After reacquisition LEASEFAIR-01 re-runs the fail-closed base revalidation from
 verify-head against the fetched live base before the final fresh exact-head
-gate. Strict/unknown protection requires the merge-base to equal the fetched
-current base. Explicitly non-strict protection permits disjoint changes measured
-from the exact CI-validated head/base merge-base; overlap requires rebase and
-fresh exact-head CI even if mergeability is CLEAN. The older parallel-phase
-validation base is not used as a substitute (LAC-2097).
+gate. HAMRESUMEOWED-01 retains CLEAN and known non-strict MERGEABLE BEHIND
+heads with their exact-head CI, even across overlapping-file base advances.
+Only a GitHub conflict or BEHIND blocked by strict/unknown protection requires
+rebase and new exact-head CI. A lagging strict BEHIND can settle without a
+rewrite once current-base containment is proved.
 
 IDENTBASE-01 merge-agent rebases with a worker author remain reviewable. Do not
 assume a per-head review ceiling bounds repeated new rebase heads: the combined
@@ -4816,9 +4816,22 @@ HAMCIWAKE-01: `closer-commit-trailer` review-spawn suppression also supports
 CI-green resume. A bounded ancestry walk must prove that every commit since the
 reviewed head is a closer commit before the watcher reads that head's verdict
 and findings; CI and mergeability still refer to the exact live head. A pending-only
-hammer exit durably records audit-only `resumeOwed` and `resumeHead` diagnostics
-and logs `hammer-ci-pending-resume-owed`; no runtime consumer reads these fields.
-The watcher independently proves ancestry and reads live CI each tick. Pending-only
+hammer exit durably records `resumeOwed` and `resumeHead`
+and logs `hammer-ci-pending-resume-owed`. HAMRESUMEOWED-01 gives these fields a
+runtime consumer: `src/ama/hammer-resume.mjs`, called by the watcher closure
+path. Outstanding receipts bypass posted-review no-progress backoff and receive
+scheduler priority on every poll, without waiting for an unrelated wake. The
+same-head receipt suppresses automatic stale-review refresh. Green exact-head
+checks select the existing hammer verify-and-merge lane under normal leases,
+retry/lifetime limits, remediation validation and all merge gates. The receipt
+grants routing intent only. Red checks close the debt and enter normal repair;
+a moved head explicitly closes the stale debt and enters normal head-change
+handling. Confirmed dispatch closes the receipt once; refused or uncertain
+dispatch retains it for bounded recovery. Existing retry/lifetime exhaustion
+settles the debt as `resume-budget-exhausted` for ordinary capped recovery.
+Settlements append head-bound
+`hammer-resume` audit attempts linked by `resumeAttempt` with an idempotent
+delivery key. The watcher still independently proves ancestry and reads live CI. Pending-only
 CI returns an ordinary recovery wait without a hammer retry or recovery charge;
 red CI still enters the capped hammer repair lane. A pending deferral marks the
 lease retryable before release even if the audit append fails (hard-block exit 20
@@ -5050,7 +5063,7 @@ PR node-ID resolution shares the update-branch transient retry cap and backoff;
 permanent lookup failures stop immediately. Real read, publication, head-race and
 authority failures continue to fail closed. A non-cooperating base writer during
 the serialized retry refuses as `retry-base-not-contained` when the same
-strictness/overlap policy requires another rebase; disjoint non-strict movement
+GitHub conflict/strict-BEHIND policy requires another rebase; non-strict movement
 does not mutate the head. No unbounded retry loop is added.
 
 A successful update-branch CAS can acknowledge the old head before GitHub finishes
@@ -5082,9 +5095,9 @@ normal submodule float and daemon rollout; already running closers finish with
 their original procedure and are never interrupted by a reservation. After
 rollout, inspect waiter service order and logs for a deferred clean head taking
 the first eligible acquisition ahead of closer retries. Check that the first
-remote-CI wait shows no base holder. A required strict/overlap rebase stays in the
-same closer run and holds the lease through its retry CI wait; non-strict
-disjoint advancement retains the validated head and does not restart CI.
+remote-CI wait shows no base holder. A required conflict/strict-BEHIND rebase stays in the
+same closer run and holds the lease through its retry CI wait; CLEAN or known non-strict
+MERGEABLE BEHIND advancement retains the validated head and does not restart CI.
 The lifecycle graph is unchanged. The clean offline smoke also verifies
 priority service without preemption; focused synthetic regressions cover
 reacquisition, CI and current-base behavior.
@@ -5859,7 +5872,8 @@ an exhausted review budget belongs to the final hammer. A selected reviewer
 whose capped admission refuses the head instead retains a contract-violation
 wait and escalates through `needsOperator` at its existing bound.
 Pending exact-head CI already records `required-checks-pending`, `resumeOwed`
-and `resumeHead` in the hammer terminal audit. Neither that receipt nor pushed
+and `resumeHead` in the hammer terminal audit. HAMRESUMEOWED-01 consumes that
+receipt on each poll as described above. Neither that receipt nor pushed
 provenance certifies CI or authorizes merge.
 
 After deployment, SRE observes the next hammer that publishes and stops without
@@ -6751,3 +6765,30 @@ SHA-256 with `vendor/README.md`, copy authoritative merged bytes if different,
 and update the lockfile, `recorded.dispatchLookupSdk` provenance and
 `argus-artifacts.json` together before activation. The current `coordinated-pr`
 label is not merged artifact authority. Source merge must not waive that hold.
+
+
+## Pending-CI hammer resume (HAMRESUMEOWED-01)
+
+The hammer's contract is remediate → rebase when required → MERGE. A hammer
+head returns to hammer validation and closure without another automatic review.
+The final helper retains a CLEAN head, or a MERGEABLE BEHIND head under known
+non-strict protection, whether required checks are green or still pending.
+Overlapping file paths after main advances are not proof of a conflict. Rebase
+only for a live GitHub conflict or BEHIND blocked by strict protection; unknown
+protection stays conservative for BEHIND. The final refreshed exact-head gate
+and `--match-head-commit` remain mandatory; never use `--admin`.
+
+Synthetic incident shape (SEVDOCS-332): PR 17 stopped three times for
+`required-checks-pending` after repeated base updates restarted required CI.
+Each stop recorded `resumeOwed: true` for its new head; all required checks later
+passed without further code repair. No consumer resumed the last head for about
+two hours, and manual merge ended the stall. The consumer now preserves this
+work as explicit closure debt instead of leaving it as diagnostics.
+
+After merge and normal deployment, SRE observes the next natural
+`required-checks-pending` hammer stop. When required checks become green on the
+recorded `resumeHead`, verify that the next watcher poll selects hammer resume,
+records `resume-dispatched`, and the normal leased helper merges without an
+operator action. Confirm the merged head matches the green head and no extra
+rebase occurred merely because main advanced. This live receipt is post-merge
+verification; offline synthetic fixtures do not establish it.

@@ -1,3 +1,4 @@
+import { reconcileHammerResumes, settleHammerResume } from './ama/hammer-resume.mjs';
 import { hammerHeadOwnership } from './hammer-head-ownership.mjs';
 import { reviewCeilingOwner } from './review-ceiling-owner.mjs';
 import { infrastructureOnlyFailures } from './ci-infrastructure.mjs';
@@ -1424,6 +1425,12 @@ async function dispatchAmaClosureFor({
   throwIfAborted(signal);
   const currentPrHeadSha = candidate?.headSha || currentRevisionRef || null;
 
+  let hammerResume = reconcileHammerResumes({ hqRoot: resolveHqRoot(env), repo: repoPath, prNumber,
+    headSha: currentPrHeadSha, prState: candidate?.prState, readOnly: probeCloserAuthoredStale,
+    checks: classifyCheckRollup(candidate?.statusCheckRollup, {
+      requiredContexts: [...resolveRequiredCheckContextsFromCfg(cfg), ...(candidate?.branchProtection?.requiredContexts || [])],
+    }), now: new Date(now()).toISOString() });
+
   // Resolve dispatch ownership independently of the stronger carry-forward
   // proof. Rescue's read-only probe and the watcher consume this same fact.
   const recordedTerminalReview = headHasValidatedHamTerminalRemediationImpl({ hqRoot: resolveHqRoot(env),
@@ -1668,13 +1675,18 @@ async function dispatchAmaClosureFor({
     jobKey: reviewState.headSha, headSha: currentPrHeadSha,
     lifetimeDispatchCeiling: cfg.hammerLifetimeDispatchCeiling,
   });
+  if (hammerResume && ownerCap.capExhausted) {
+    settleHammerResume({ hqRoot: resolveHqRoot(env), repo: repoPath, prNumber, resume: hammerResume,
+      reason: 'budget-exhausted', now: new Date(now()).toISOString() });
+    hammerResume = null;
+  }
   const releasedStop = recordedStop && readHammerStopHoldForHead({ rootDir, repo: repoPath,
     prNumber, headSha: currentPrHeadSha, stopKey: recordedStop.stopKey })?.releasedAt;
   const closureOwnerInput = { hammerStop: recordedStop && (!recordedStop.refusal || !releasedStop) && !isInfrastructureStop(recordedStop) ? recordedStop : null,
     ...(recordedTerminalReview ? { terminalReview: { validated: true,
       headSha: currentPrHeadSha, reviewedHeadSha: reviewState.headSha } } : {}),
     rootDir, reviewState, reviewAdmissionRow: reviewStateRow,
-    currentHead: currentPrHeadSha, strictMode, closerAuthoredStale, hammerHead,
+    currentHead: currentPrHeadSha, strictMode, closerAuthoredStale, hammerHead, hammerResume,
     operatorLogins: cfg?.operatorLogins, operatorLabelActorEnforcement: cfg?.operatorLabelActorEnforcement,
     strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
     retryExhausted: ownerCap.capExhausted, lifetimeExhausted: ownerCap.lifetimeCapExhausted,
@@ -1708,6 +1720,9 @@ async function dispatchAmaClosureFor({
     checksRollup: candidate?.statusCheckRollup,
     candidate: { ...candidate, ...mergeabilityForGate }, labels: prMetadata.labels });
   let shared = resolvedNextAction || await resolveOwner();
+  if (resolvedNextAction) shared = reviseClosureNextAction(shared, { progress: {
+    ...shared.snapshot.observations.progress?.value, hammerResume,
+  } }, passSnapshot);
   // Scheduling failures are observations, not durable head-independent truth.
   // Re-read even on the same head: finding authorization/evidence may improve.
   let refreshedPrimaryChange;
@@ -1973,7 +1988,7 @@ async function dispatchAmaClosureFor({
       nextAction: decision, boundedWait, retryAfterMs: boundedWait?.retryAfterMs || 30_000 }, { amaEnabled: true });
   }
 
-  let allowStaleReviewHeadHammerResume = false;
+  let allowStaleReviewHeadHammerResume = Boolean(hammerResume);
   // NOOWNER-01: a closer tip suppresses ordinary automatic review refresh;
   // ownerless, uncertified heads return to hammer validation.
   let liveHeadCloserAuthored = false;
@@ -2036,8 +2051,8 @@ async function dispatchAmaClosureFor({
       }
       // A HAM rebase can break the chain to the reviewed SHA. Its exact-head
       // ground-truth certificate below remains authoritative independently.
-      allowStaleReviewHeadHammerResume = liveHeadCloserAuthored && !closerHeadHasLiveReview
-        && (Boolean(hammerHead) || closerOnlyHeadDelta || authoritativeReviewerLogins.length > 0);
+      allowStaleReviewHeadHammerResume = Boolean(hammerResume) || (liveHeadCloserAuthored && !closerHeadHasLiveReview
+        && (Boolean(hammerHead) || closerOnlyHeadDelta || authoritativeReviewerLogins.length > 0));
       if (
         allowStaleReviewHeadHammerResume &&
         closerCommitSuppression?.reason === 'closer-commit-trailer'
@@ -2564,7 +2579,14 @@ async function dispatchAmaClosureFor({
     dispatchContext,
     logger,
   };
-  const logHammerLaunchLatency = (launchResult) => {
+  const recordHammerLaunch = (launchResult) => {
+    if (hammerResume && launchResult?.dispatched === true) {
+      try {
+        settleHammerResume({ hqRoot: resolveHqRoot(env), repo: repoPath, prNumber, resume: hammerResume,
+          reason: 'dispatched', now: new Date(now()).toISOString(),
+          launchRequestId: launchResult.launchRequestId || launchResult.dispatchId || null });
+      } catch (error) { logger?.warn?.(`[watcher] hammer resume audit failed: ${error.message}`); }
+    }
     if (!reviewCycleExhausted || launchResult?.dispatched !== true) return;
     const postedMs = Date.parse(reviewStateRow?.posted_at || '');
     const confirmedMs = now();
@@ -2701,7 +2723,7 @@ async function dispatchAmaClosureFor({
             try { amaDispatchCloser.settleRefusedHammerWake({ ...hammerWakeSink.value, result: settledResult }); }
             catch (error) { logger?.warn?.(`[watcher] refused hammer wake reconciliation failed: ${error.message}`); }
           }
-          if (ok) logHammerLaunchLatency(settledResult);
+          if (ok) recordHammerLaunch(settledResult);
           if (ok && settledResult?.closureBlocker) {
             logger?.info?.(JSON.stringify({ event: 'ama.closure_blocker', repo: repoPath, pr: prNumber,
               reason: settledResult.closureBlocker }));
@@ -2765,7 +2787,7 @@ async function dispatchAmaClosureFor({
       const stopTracking = trackCoexistenceOperation(operationTracker, 'ama-hammer-dispatch');
       try {
         result = await maybeDispatchAmaCloserImpl({ ...closerArgs, signal });
-        logHammerLaunchLatency(result);
+        recordHammerLaunch(result);
       } finally {
         stopTracking();
       }

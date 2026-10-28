@@ -483,9 +483,11 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    exact head that merges. The predicate accepts only a matched
    timeline comment whose author is the verified HAM commit author or an
    allowlisted hammer bot.
-5. Refresh the PR head; **CONFIRM THE REBASE HOLDS.** Strict/unknown protection
-   requires base containment; non-strict disjoint advances retain the exact
-   validated head. Conflicts/overlap require rebase even with CLEAN mergeability.
+5. Refresh the PR head; **CONFIRM THE REBASE HOLDS.** Retain a CLEAN head
+   and its exact-head CI. Rebase only for a live GitHub conflict or BEHIND
+   blocked by strict/unknown protection. A MERGEABLE BEHIND head under known
+   non-strict protection retains its SHA, even when main touched the same files.
+   Pending checks wait on that head; main movement alone never restarts CI.
    Release for initial CI, then reacquire through daemon priority. One required
    retry holds the lease for at most 120 seconds of CI within the original deadline; expiry forbids
    another mutation. Retry rebuilds audit/predicate.
@@ -528,7 +530,7 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    block refreshes the single marker comment in place, so re-entries never
    duplicate it), so it names this exact head, THEN re-run
    the closer eligibility predicate in SPEC §1.1.1 HAM terminal-remediation mode
-   for that same live head. Only a head satisfying the strictness/overlap base
+   for that same live head. Only a head satisfying the GitHub conflict/strict-BEHIND base
    policy whose GitHub required check bar is green may merge while holding the
    lease. For any blocking,
    stale-head, remediation-state, or bare verdict failure, the predicate must
@@ -958,10 +960,10 @@ hard-blocker report, and do not re-dispatch.
   floated current main instead of creating a gitlink-only PR.
 - No merging a superproject PR that is still blocked on an unmerged submodule
   fix PR.
-- No merging across overlapping base changes or absent base commits under
-  strict/unknown protection. Rebase and re-validate required checks on the new
-  exact head. Under explicitly non-strict protection, disjoint advances may keep
-  the validated head, with fresh live eligibility and head CAS still mandatory.
+- No merging a GitHub-conflicting head or BEHIND blocked by strict/unknown
+  protection. Rebase those heads and re-validate exact-head required checks.
+  Retain CLEAN heads and known non-strict MERGEABLE BEHIND heads; path overlap
+  alone is not a conflict. Fresh live eligibility and head CAS remain mandatory.
 - No hammer merge without holding the merge lease for `(<<REPO>>, base, PR <<PR_NUMBER>>)`
   and saving its `leaseId`; no cleanup path may release without
   `--lease-id "$HAM_MERGE_LEASE_ID"`.

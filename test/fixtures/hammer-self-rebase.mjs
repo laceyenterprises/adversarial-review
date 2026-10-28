@@ -62,14 +62,14 @@ if (args[0] === 'advance-base') {
   const now = Number(readFileSync(join(dir, 'clock'), 'utf8'));
   if (state.retried && !state.retryStartedAt) state.retryStartedAt = now;
   const pending = (state.retried && process.env.SCENARIO === 'ci-slow-green' && now - state.retryStartedAt < 300) ||
-    (process.env.SCENARIO === 'pending' && state.checkReads === 1) ||
+    (['pending', 'ci-clean-pending'].includes(process.env.SCENARIO) && state.checkReads === 1) ||
     (process.env.SCENARIO === 'ci-shared-deadline' && state.checkReads === 1) ||
     (retryScenario && state.retried && (retryReads === 1 || ['ci-pending', 'ci-shared-deadline'].includes(process.env.SCENARIO)));
   const red = state.retried && process.env.SCENARIO === 'ci-red';
   if (state.retried && process.env.SCENARIO === 'ci-head-moved') state.head = state.foreign;
   const checks = [{ name: 'fixture-test', status: pending ? 'IN_PROGRESS' : 'COMPLETED',
     conclusion: pending ? null : red ? 'FAILURE' : 'SUCCESS' }];
-  const mergeStateStatus = state.behind ? 'BEHIND' : 'CLEAN';
+  const mergeStateStatus = process.env.SCENARIO.startsWith('ci-clean-') ? 'CLEAN' : state.behind ? 'BEHIND' : 'CLEAN';
   const mergeable = !state.retried && process.env.SCENARIO === 'ci-disjoint-conflict' ? 'CONFLICTING' : 'MERGEABLE';
   const verdict = evaluateMergeEligibility({ verdict: 'settled-success', leaseHeld: true,
     requiredChecks: checks, branchProtectionRequired: false, mergeable,
@@ -204,7 +204,7 @@ if (args[0] === 'advance-base') {
     save();
   } else if (args[0] === 'pr' && args[1] === 'merge') {
     assert.equal(args[args.indexOf('--match-head-commit') + 1], state.retried ? state.nextRebased : state.rebased);
-    if (retryScenario && !['ci-disjoint', 'ci-disjoint-lease-delay'].includes(process.env.SCENARIO)) assert.ok(state.retryReads >= 2, 'new exact head must pass checks');
+    if (retryScenario && !process.env.SCENARIO.startsWith('ci-clean-') && !['ci-disjoint', 'ci-disjoint-lease-delay'].includes(process.env.SCENARIO)) assert.ok(state.retryReads >= 2, 'new exact head must pass checks');
     assert.ok(state.checkReads >= (process.env.SCENARIO === 'pending' ? 2 : 1), 'must read exact-head checks');
     assert.ok(existsSync(join(dir, 'lease-held')));
     if (['server-base-conflict', 'server-stable-conflict', 'server-base-auth'].includes(process.env.SCENARIO)) {

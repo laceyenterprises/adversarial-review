@@ -617,7 +617,7 @@ while :; do
     jq -e '.state == "OPEN" and .headMatches == true and .checksConclusion == "SUCCESS" and
       (.mergeStateStatus == "BEHIND" or .mergeable == "CONFLICTING") and
       (.reasons | length > 0 and all(.[]; . == "pr-not-mergeable"))' "$HAM_GATE_JSON" >/dev/null &&
-    ham_base_touches_pr_files validated-head "$(jq -r '.mergeable // empty' "$HAM_GATE_JSON")"; }; then
+    ham_base_touches_pr_files validated-head "$(jq -r '.mergeable // empty' "$HAM_GATE_JSON")" "$(jq -r '.mergeStateStatus // empty' "$HAM_GATE_JSON")"; }; then
     HAM_REMOTE_CI_STATUS=remote-ci-green
     break
   fi
@@ -668,7 +668,7 @@ if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "${HAM_MERGE_LEASE_HELD:-
     return "$HAM_REACQUIRE_EXIT"
   fi
 fi
-if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && ham_base_touches_pr_files validated-head "$(jq -r '.mergeable // empty' "$HAM_GATE_JSON")"; then
+if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && ham_base_touches_pr_files validated-head "$(jq -r '.mergeable // empty' "$HAM_GATE_JSON")" "$(jq -r '.mergeStateStatus // empty' "$HAM_GATE_JSON")"; then
   # Queue service can outlast CI patience. A ready unchanged head can proceed;
   # a source mutation needs remaining time to validate its result.
   if [ -n "${HAM_REMOTE_CI_DEADLINE:-}" ] && [ "$(date +%s)" -ge "$HAM_REMOTE_CI_DEADLINE" ]; then
@@ -1038,8 +1038,8 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
     ham_release_merge_lease
     return 20
   fi
-  # Repeat the same strictness/overlap policy as the post-wait boundary.
-  if ham_base_touches_pr_files validated-head "$(jq -r '.mergeable // empty' "$HAM_GATE_JSON")"; then
+  # Repeat the live GitHub conflict/strict-BEHIND policy at the click boundary.
+  if ham_base_touches_pr_files validated-head "$(jq -r '.mergeable // empty' "$HAM_GATE_JSON")" "$(jq -r '.mergeStateStatus // empty' "$HAM_GATE_JSON")"; then
     ham_mark_merge_lease_retryable_abort base-advanced
     ham_append_terminal_audit deferred retry-base-not-contained || true
     ham_release_merge_lease

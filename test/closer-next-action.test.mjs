@@ -898,3 +898,102 @@ for (const reason of ['hammer-validated-head', 'closer-commit-trailer']) {
     assert.equal(classify({ sharedNextAction: foreign, headSha: HEAD }).decision, 'rereview-eligible');
   });
 }
+
+for (const conclusion of ['PENDING', 'SUCCESS', 'FAILURE']) {
+  test(`HAMRESUMEOWED-01: exact-head ${conclusion} selects its successor in one closure pass`, async t => {
+    const { readHammerResumes } = await import('../src/ama/hammer-resume.mjs');
+    const { readAmaAuditEntry } = await import('../src/ama/audit.mjs');
+    const f = closureFixture(t);
+    f.args.env = { HQ_ROOT: f.args.rootDir };
+    writeAmaAuditEntry({ hqRoot: f.args.rootDir, ...identity, now: AT,
+      attempt: { outcome: 'deferred', reason: 'required-checks-pending',
+        attemptPhase: 'hammer-gh-pr-merge', resumeOwed: true, resumeHead: HEAD } });
+    const check = f.args.candidate.statusCheckRollup[0];
+    Object.assign(check, { status: conclusion === 'PENDING' ? 'IN_PROGRESS' : 'COMPLETED', conclusion });
+    const result = await maybeDispatchAmaClosureFor(f.args);
+    if (conclusion === 'PENDING') {
+      assert.equal(result.dispatched, false);
+      assert.equal(result.nextAction.action, 'wait-for-CI');
+      assert.equal(f.effects.some(([kind]) => kind === 'closer' || kind === 'daemon'), false);
+      assert.equal(readHammerResumes({ hqRoot: f.args.rootDir, ...identity }).length, 1);
+      // No unrelated wake, review mutation or retry-budget reset: the next pass
+      // observes CI completing on this same SHA and resumes immediately.
+      Object.assign(check, { status: 'COMPLETED', conclusion: 'SUCCESS' });
+      assert.equal((await maybeDispatchAmaClosureFor(f.args)).dispatched, true);
+    } else {
+      assert.equal(result.dispatched, true);
+      assert.equal(result.nextAction.action, 'hammer');
+      assert.equal(result.nextAction.reason, conclusion === 'SUCCESS' ? 'required-checks-resume' : 'ci-red-final');
+      assert.equal(f.effects.some(([kind]) => kind === 'daemon'), false, 'receipt cannot authorize a bare merge');
+    }
+    const doc = readAmaAuditEntry(f.args.rootDir, identity.repo, identity.prNumber, HEAD);
+    assert.equal(doc.attempts.at(-1).reason, conclusion === 'FAILURE' ? 'resume-checks-red' : 'resume-dispatched');
+    assert.equal(readHammerResumes({ hqRoot: f.args.rootDir, ...identity }).length, 0);
+  });
+}
+
+test('HAMRESUMEOWED-01: resume retains caps, holds, live ownership and dispatch refusal', async t => {
+  const progress = { hammerResume: { headSha: HEAD, attemptNumber: 1 } };
+  for (const observations of [
+    { policy: { hammerCap: { retryExhausted: true, headSha: HEAD } } },
+    { policy: { autonomousMergeExecutionEnabled: false } },
+    { pr: { headSha: HEAD, state: 'OPEN', labels: ['no-merge-hold'] } },
+    { launches: { closer: { headSha: HEAD, status: 'running' } } },
+    { controls: { safetyRefusal: { deterministic: true, reason: 'synthetic-finding' } } },
+  ]) {
+    const decision = nextAction(base({ progress, ...observations }));
+    assert.notEqual(decision.reason, 'required-checks-resume');
+  }
+  const f = closureFixture(t, { maybeDispatchAmaCloserImpl: async () => ({ dispatched: false,
+    skipMergeAgent: true, reason: 'synthetic-refusal' }) });
+  f.args.env = { HQ_ROOT: f.args.rootDir };
+  writeAmaAuditEntry({ hqRoot: f.args.rootDir, ...identity, now: AT,
+    attempt: { outcome: 'deferred', reason: 'required-checks-pending', resumeOwed: true, resumeHead: HEAD } });
+  assert.equal((await maybeDispatchAmaClosureFor(f.args)).dispatched, false);
+  const { readHammerResumes } = await import('../src/ama/hammer-resume.mjs');
+  assert.equal(readHammerResumes({ hqRoot: f.args.rootDir, ...identity }).length, 1);
+});
+
+test('HAMRESUMEOWED-01: exhausted existing dispatch budgets explicitly close resume debt', async t => {
+  const { recordHammerRetryDispatch } = await import('../src/ama/hammer-retry-cap.mjs');
+  const { readHammerResumes } = await import('../src/ama/hammer-resume.mjs');
+  const { readAmaAuditEntry } = await import('../src/ama/audit.mjs');
+  const f = closureFixture(t, { deliverAlertImpl: async () => true,
+    maybeDispatchAmaCloserImpl: async args => {
+      assert.equal(args.sharedNextAction.decision.actor, 'closure-recovery');
+      return { dispatched: false, skipMergeAgent: true, reason: 'hammer-retry-cap-exhausted' };
+    } });
+  f.args.env = { HQ_ROOT: f.args.rootDir };
+  writeAmaAuditEntry({ hqRoot: f.args.rootDir, ...identity, now: AT,
+    attempt: { outcome: 'deferred', reason: 'required-checks-pending', resumeOwed: true, resumeHead: HEAD } });
+  for (let i = 0; i < 2; i++) recordHammerRetryDispatch(f.args.rootDir, identity, { jobKey: HEAD, headSha: HEAD, launchRequestId: `synthetic-cap-${i}` });
+  const result = await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(result.dispatched, false, JSON.stringify(result));
+  assert.equal(result.nextAction.actor, 'closure-recovery');
+  assert.equal(f.effects.some(([kind]) => kind === 'closer' || kind === 'daemon'), false);
+  assert.deepEqual(readHammerResumes({ hqRoot: f.args.rootDir, ...identity }), []);
+  assert.equal(readAmaAuditEntry(f.args.rootDir, identity.repo, identity.prNumber, HEAD).attempts.at(-1).reason,
+    'resume-budget-exhausted');
+});
+
+test('HAMRESUMEOWED-01: a recorded hammer head resumes validation across an unproven stale review delta', async t => {
+  let dispatchArgs;
+  const f = closureFixture(t, {
+    proveCloserAuthoredStaleHeadImpl: async () => ({ proven: false, reason: 'hammer-app-attestation-missing',
+      reviewedHead: OLD, currentHead: HEAD }),
+    resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: false }),
+    maybeDispatchAmaCloserImpl: async args => { dispatchArgs = args; return { dispatched: false,
+      skipMergeAgent: true, reason: 'terminal-evidence-required' }; },
+  });
+  f.args.env = { HQ_ROOT: f.args.rootDir };
+  f.args.reviewStateRow.reviewer_head_sha = OLD;
+  writeAmaAuditEntry({ hqRoot: f.args.rootDir, ...identity, now: AT,
+    attempt: { outcome: 'deferred', reason: 'required-checks-pending', resumeOwed: true, resumeHead: HEAD } });
+  const result = await maybeDispatchAmaClosureFor(f.args);
+  assert.ok(dispatchArgs, 'receipt assigns the normal validation owner instead of another review');
+  assert.equal(dispatchArgs.dispatchContext.allowStaleReviewHeadHammerResume, true);
+  assert.equal(dispatchArgs.prMetadata.headSha, HEAD);
+  assert.equal(dispatchArgs.reviewState.headSha, OLD);
+  assert.equal(result.dispatched, false, 'receipt cannot waive missing terminal evidence');
+  assert.equal(result.nextAction.reason, 'required-checks-resume');
+});

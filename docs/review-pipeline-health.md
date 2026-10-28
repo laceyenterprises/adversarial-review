@@ -650,3 +650,30 @@ once per PR head; ownerless reasons name the declined lanes. Health collection
 remains read-only. See [ownership observations](data-model/ttm-ownership.md) for
 clock reset, hold deadline and durable delivery semantics. SLOW budgets, existing
 STUCK thresholds, routing and merge gates are unchanged.
+
+
+## Bounded OS observation export (DOG-15)
+
+`src/review-observations.mjs` is the review-store owner's read-only export for
+public OS clients. The CLI adapter accepts OS-supplied roots, exact repository
+lists and selectors on stdin; apps call the authorized OS API, never this CLI
+or database directly. It imports the existing read-only opener without a daemon
+singleton, reconciliation, schema migration, provider call or GitHub request.
+
+`passes` pages retain producer timestamps, statuses and failure metadata;
+`reviews` pages join the highest completed pass ID and nullable closeout fields,
+matching repository names without case sensitivity across the three tables.
+A later failed/running pass cannot replace a completed review. Missing optional
+columns produce NULL values; missing pass identity columns suppress the join.
+Both are listed in `missing_fields`. A confirmed absent store is
+`review_store`, distinct from an unreadable dependency. Pages are limited to
+100, offsets to 10000, with exact repository filtering before pagination.
+Only `passes` accepts `since` and `ended_since`; malformed or unsupported
+selectors fail as `invalid review selector` before the store is opened.
+A complete page conveys neither global absence nor mutation authority.
+
+The export changes no durable state machine, merge eligibility, terminal-PR
+rules or HCP-outage hold. Deploy the coordinated OS endpoint and consumer after
+both PRs converge; the one-shot adapter loads the deployed owner code each read.
+No daemon bounce or host activation was performed as validation. Offline
+producer coverage: `node --test test/review-observations.test.mjs`.

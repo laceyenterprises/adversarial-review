@@ -17,6 +17,14 @@ no-progress and refused-review stops retain their semantics. Synthetic
 pr-comments and follow-up-remediation fixtures verify this behavior. Existing
 smoke promises are unchanged; deployed observation awaits a natural round.
 
+HOSTIDCACHE-01: host-owner reads cache success for the process lifetime and
+retry transient failures within the caller budget. A transient closer read
+defers to the next poll with its owner, lease and anchored deadline intact;
+definitive refusals and merge gates remain enforced. See the
+[host identity contract](docs/RUNBOOK-ama-closure.md#host-identity-reads-hostidcache-01).
+Offline fixtures prove source behavior; existing smoke promises are unchanged,
+and natural runtime recovery awaits normal deployment. No restart is required.
+
 OWNERDEADLINE-01: every open PR needs one live owner with a next action and
 an anchored deadline. Once that deadline is at least the existing ownerless
 bound overdue, retained-route reasons and renewed review requests cannot prove

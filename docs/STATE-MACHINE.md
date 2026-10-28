@@ -895,6 +895,16 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+HOSTIDCACHE-01: uncached host-owner reads share one bounded retry budget and
+cache only success for the process lifetime. Transient timeout, spawn failure
+or unavailability returns a retryable closer defer, preserving the selected
+owner, lease, artifacts and existing anchored deadline across polls. No lease
+state, terminal refusal or retry charge is written for this defer. Denial,
+definitive not-found, malformed identity and owner mismatch still refuse.
+Both dispatch paths and all host-owner consumers use the same reader; merge
+gates and launch-token preference remain unchanged. See the
+[host identity contract](RUNBOOK-ama-closure.md#host-identity-reads-hostidcache-01).
+
 CLOSURESPLIT-01: closure and background hammer dispatch carry the selected immutable next-action pair, including the decision key, generation and head-scoped primary-change result. A changed decision key returns closure-decision-mismatch with both keys/generations and the complete replacement snapshot. Closure re-resolves that snapshot once; a daemon successor enters the existing live merge gates, while waits retain the refreshed owner. PRIMARYREPAIRDISPATCH-01 durably counts consumed mismatches per PR/head; the second mismatch, including during that successor attempt or on a later background tick, pages through closure-wait and returns closure-decision-mismatch-escalated without another successor attempt. Inherited primary-change failures are recomputed at the current head and their raw evidence is passed into dispatcher eligibility; absent raw evidence cannot default an observed refusal to not-applicable. A passing predicate supersedes only the associated primary-change decline. When both selected and refreshed exact-subject/head decisions name R05 primary-change-repair, dispatch uses existing repair admission: comment-only verdicts, non-blocking findings and reverted/unknown primary change admit the hammer to restore author lines or perform a finding-cited authorized reversal. Unauthorized reversals still refuse merge; unrelated/permanent declines, R15 conditions, structural safety, retry caps and leases retain their protections. The additive decision_mismatch_cycle table in the closure-wait database records head and a count capped at two; lifecycle states are unchanged. Changed hammer decisions are reported before repair-admission refusal after primary validation passes; structural safety refusals remain in the replacement snapshot. Non-dispatch successors return the refreshed nextAction, reason and snapshot together, and primary refresh preserves unrelated progress metadata.
 
 OWNERDEADLINE-01: every open PR needs one live owner with a next action and

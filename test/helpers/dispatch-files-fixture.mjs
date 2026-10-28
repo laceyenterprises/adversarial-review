@@ -110,6 +110,14 @@ function reply(selector, args) {
 }
 
 export function installDispatchFileProducerFixture() {
+  // A changed synthetic owner models another host lifetime. Production identity
+  // is immutable, but legacy receipt fixtures reuse a disposable root to test
+  // a different owner without spawning another process. Preserve their coverage
+  // while exercising the shared success cache within each synthetic lifetime.
+  dispatchReadTransport.hostIdentityCacheScope = args => {
+    const root = rootOf(args);
+    return root ? object(join(root, '.hq/config.json'))?.ownerUser ?? null : null;
+  };
   const originalHost = dispatchReadTransport.hostServices;
   dispatchReadTransport.hostServices = async (request, args = {}) => rootOf(args)
     ? dispatchReadTransport.hostServicesSync(request, args) : originalHost(request, args);

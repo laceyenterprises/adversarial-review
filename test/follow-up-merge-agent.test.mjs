@@ -3600,10 +3600,10 @@ test('prepareOriginalWorkerForMergeAgent fails closed when HQ owner cannot be re
   });
 
   assert.equal(result.decision, 'deferred');
-  assert.equal(result.reason, 'host-identity-unavailable');
+  assert.equal(result.reason, 'unavailable');
   assert.equal(execCalled, false);
   assert.equal(logs[0].event, 'merge_agent.tear_down_skipped');
-  assert.equal(logs[0].reason, 'host-identity-unavailable');
+  assert.equal(logs[0].reason, 'unavailable');
 });
 
 test('prepareOriginalWorkerForMergeAgent fails closed when runtime user cannot be resolved', async () => {

@@ -9,6 +9,9 @@ const WORKER_REGISTRY_TTL_MS = 60_000;
 // never register a session or issue a physical request, even after TTL expiry.
 const workerRegistries = new Map();
 const workerRegistryReads = new Map();
+// Diagnostics never satisfy readiness or suppress a new async read. Keep only
+// redacted evidence so a subsequent sync selection can name the last refusal.
+const workerRegistryFailures = new Map();
 function registryKey(args) {
   return sessionKey(options(args));
 }
@@ -114,15 +117,21 @@ export const dispatchReadTransport = {
         if (reply?.schema_version === 1 && reply.status === 'found'
           && reply.data?.classes && typeof reply.data.classes === 'object' && !Array.isArray(reply.data.classes)) {
           setRegistryEntry(workerRegistries, key, session, {at: Date.now(), reply});
+          const failure = registryEntry(workerRegistryFailures, key, session);
+          if (failure) deleteRegistryEntry(workerRegistryFailures, key, session, failure);
         } else {
           const prior = registryEntry(workerRegistries, key, session);
           if (prior) deleteRegistryEntry(workerRegistries, key, session, prior);
+          setRegistryEntry(workerRegistryFailures, key, session, hostObservationFailure(reply));
         }
       }
       return reply;
     }).catch(error => {
-      const prior = registryEntry(workerRegistries, key, session);
-      if (prior) deleteRegistryEntry(workerRegistries, key, session, prior);
+      if (registryEntry(workerRegistryReads, key, session) === entry) {
+        const prior = registryEntry(workerRegistries, key, session);
+        if (prior) deleteRegistryEntry(workerRegistries, key, session, prior);
+        setRegistryEntry(workerRegistryFailures, key, session, hostObservationFailure(error));
+      }
       throw error;
     }).finally(() => deleteRegistryEntry(workerRegistryReads, key, session, entry));
     return entry.promise;
@@ -131,7 +140,10 @@ export const dispatchReadTransport = {
     if (request.action === 'worker_registry') {
       const cached = registryFresh(registryKey(args), args.dispatchSession, args.nowMs ?? Date.now());
       if (!cached) {
-        throw Object.assign(new Error('worker registry unavailable; async prefetch required'), {code: 'registry-unavailable'});
+        const failure = registryEntry(workerRegistryFailures, registryKey(args), args.dispatchSession)
+          ?? hostObservationFailure();
+        throw Object.assign(new Error(`worker registry read refused: ${failure.reason} (${failure.detail})`),
+          failure, {code: 'registry-unavailable'});
       }
       return cached.reply;
     }
@@ -268,6 +280,30 @@ function unavailable(error) {
       : error?.code === 'DISPATCH_READ_DISABLED' ? 'dispatch lookup disabled'
       : error?.name === 'AbortError' ? 'dispatch lookup aborted'
       : transient ? 'transient dispatch lookup failure' : 'dispatch lookup failed' };
+}
+
+// As with unavailable(), never copy a message, response body, endpoint, token
+// or arbitrary producer detail. The host-services contract has one required
+// capability; emitting that fixed name cannot disclose producer-controlled text.
+export function hostObservationFailure(value) {
+  const code = value?.code ?? value?.error?.code;
+  const status = Number(value?.statusCode ?? value?.response?.status ?? value?.status);
+  const marker = String(value?.message ?? '').match(/^(?:app-contract )?(?:403 )?([a-z0-9_.-]+):/i)?.[1];
+  const envelope = value?.schema_version === 1 ? value.status : undefined;
+  const signals = [code, marker, envelope, value?.reason];
+  if (signals.some(signal => ['entitlement_denied', 'entitlement-denied'].includes(signal))) {
+    return {ok: false, reason: 'entitlement-denied', detail: 'host.observations.read', retryable: false};
+  }
+  if (signals.some(signal => ['not_found', 'not-found'].includes(signal)) || status === 404 || marker === '404') {
+    return {ok: false, reason: 'not-found', detail: 'host observation not found', retryable: false};
+  }
+  if (signals.some(signal => ['ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'timeout'].includes(signal))
+    || ['ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT'].includes(value?.cause?.code)
+    || value?.name === 'TimeoutError' || status === 408 || status === 504
+    || /\b(?:timeout|timed out)\b/i.test(value?.message ?? '')) {
+    return {ok: false, reason: 'timeout', detail: 'host observation timed out', retryable: true};
+  }
+  return {ok: false, reason: 'unavailable', detail: 'host observation unavailable', retryable: true};
 }
 
 function assertReadsEnabled(env) {

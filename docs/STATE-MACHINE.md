@@ -24,13 +24,24 @@ REGISTRYSESSION-02: async entry points call the shared
 that process, including reviewer/security children, quota grounding and fallback
 readers, watcher polls and follow-up consumption. The app transport reuses a
 60-second snapshot and refreshes it on expiry. Pure synchronous adapters never
-register or request data themselves. A failed refresh remains retryable
+register or request data themselves. A transport outage remains retryable
 `reviewer-model-unresolved` through quota error handlers; existing infrastructure
 backoff and remediation requeue behavior apply without OAuth paging or model
 fallback. No lifecycle state or merge authority changes. After normal deployment,
 SRE observes organic reviewer/security routing and quota grounding without
 missing-prefetch errors; offline fixtures do not establish runtime adoption.
 No new smoke command is added.
+
+HOSTOBSDENIAL-01: host-read failures retain only the refusal class and fixed safe
+detail. `entitlement-denied` names `host.observations.read`; it and `not-found`
+raise non-retryable `reviewer-configuration-error` faults. Subprocess
+classification and stored-row recovery keep those faults in the existing failed
+state without infrastructure retries or auto-recovery. `timeout` and
+`unavailable` retain the retryable path above. Sync resolution retains the last
+redacted refusal in the matching connection/session scope until an async read
+succeeds. Diagnostic evidence never selects a model or suppresses an async read.
+No credentials, arbitrary response text, model fallback or new smoke action is
+authorized.
 
 ## Actions billing/quota infrastructure (CIBLOCKINFRA-01)
 

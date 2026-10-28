@@ -1,4 +1,5 @@
 import { readHostObservation, readHostObservationSync } from '../../../dispatch-files-client.mjs';
+import { hostObservationFailure } from '../../../dispatch-read-client.mjs';
 import { execFile } from 'node:child_process';
 import { closeSync, existsSync, openSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -413,12 +414,18 @@ function normalizeReasoningLevel(className, value, source, nowMs) {
 }
 
 class RegistryUnavailableError extends Error {
-  constructor(className = 'worker-registry') {
-    super(`[reviewer-model-unresolved] governed model unavailable for ${className}; worker registry requires async prefetch`);
+  constructor(className = 'worker-registry', observation) {
+    const failure = hostObservationFailure(observation);
+    const failureClass = failure.retryable ? 'reviewer-model-unresolved' : 'reviewer-configuration-error';
+    super(`[${failureClass}] worker registry read refused: ${failure.reason} (${failure.detail})`);
     this.name = 'RegistryUnavailableError';
     this.code = 'registry-unavailable';
-    this.failureClass = 'reviewer-model-unresolved';
-    this.retryable = true;
+    this.failureClass = failureClass;
+    this.workerClass = className;
+    this.reason = failure.reason;
+    this.detail = failure.detail;
+    this.retryable = failure.retryable;
+    this.category = failure.retryable ? 'infrastructure' : 'configuration';
   }
 }
 
@@ -427,7 +434,7 @@ class RegistryUnavailableError extends Error {
 async function ensureWorkerRegistryReady(args = {}) {
   const observed = await readHostObservation('worker_registry', args);
   if (!observed.ok || !observed.data.classes || typeof observed.data.classes !== 'object' || Array.isArray(observed.data.classes)) {
-    throw new RegistryUnavailableError();
+    throw new RegistryUnavailableError('worker-registry', observed);
   }
 }
 
@@ -437,7 +444,7 @@ const prefetchWorkerRegistry = ensureWorkerRegistryReady;
 function readWorkerClasses(nowMs, args = {}) {
   const observed = readHostObservationSync('worker_registry', {...args, nowMs});
   if (!observed.ok || !observed.data.classes || typeof observed.data.classes !== 'object' || Array.isArray(observed.data.classes)) {
-    throw new RegistryUnavailableError();
+    throw new RegistryUnavailableError('worker-registry', observed);
   }
   return {classes: observed.data.classes};
 }

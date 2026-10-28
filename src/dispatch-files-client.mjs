@@ -1,6 +1,6 @@
 // Public dispatch-file evidence only. Transport failure always retains custody.
 import { resolve } from 'node:path';
-import { dispatchReadTransport, readWorkerObservation, readWorkerObservationSync } from './dispatch-read-client.mjs';
+import { dispatchReadTransport, hostObservationFailure, readWorkerObservation, readWorkerObservationSync } from './dispatch-read-client.mjs';
 
 const unavailable = () => ({ok: false, reason: 'dispatch-files-unavailable'});
 function checked(reply) {
@@ -111,14 +111,14 @@ export function readHostObservationSync(action, args = {}) {
   try {
     const reply = dispatchReadTransport.hostServicesSync({action, ...args.parameters}, args);
     return reply?.schema_version === 1 && reply.status === 'found' && reply.data && typeof reply.data === 'object'
-      ? {ok: true, data: reply.data} : {ok: false, reason: 'host-observation-unavailable'};
-  } catch { return {ok: false, reason: 'host-observation-unavailable'}; }
+      ? {ok: true, data: reply.data} : hostObservationFailure(reply);
+  } catch (error) { return hostObservationFailure(error); }
 }
 
 export async function readHostObservation(action, args = {}) {
   try {
     const reply = await dispatchReadTransport.hostServices({action, ...args.parameters}, args);
     return reply?.schema_version === 1 && reply.status === 'found' && reply.data && typeof reply.data === 'object'
-      ? {ok: true, data: reply.data} : {ok: false, reason: 'host-observation-unavailable'};
-  } catch { return {ok: false, reason: 'host-observation-unavailable'}; }
+      ? {ok: true, data: reply.data} : hostObservationFailure(reply);
+  } catch (error) { return hostObservationFailure(error); }
 }

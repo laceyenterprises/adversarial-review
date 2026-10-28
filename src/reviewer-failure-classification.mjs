@@ -9,6 +9,30 @@ import {
 import { QUOTA_EXHAUSTED_FAILURE_CLASS } from './quota-exhaustion.mjs';
 import { INFRA_RUNTIME_MISSING_LIBRARY_FAILURE_CLASS } from './runtime-missing-library.mjs';
 
+// The classifier's complete bounded-retry vocabulary. Consumers and invariant
+// tests enumerate this list; SQL claims only fence the classified snapshot.
+export const INFRA_RECOVERABLE_FAILURE_CLASSES = Object.freeze([
+  'reviewer-model-unresolved',
+  'reviewer-timeout',
+  'launchctl-bootstrap',
+  'cascade',
+  QUOTA_EXHAUSTED_FAILURE_CLASS,
+  PROVIDER_OVERLOADED_FAILURE_CLASS,
+  REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS,
+  'reviewer-output',
+  'oauth-broken',
+  TOKEN_REFRESH_PENDING_FAILURE_CLASS,
+  ATTESTATION_SIGN_FAILED_FAILURE_CLASS,
+  HCP_UNAVAILABLE_FAILURE_CLASS,
+  INFRA_RUNTIME_MISSING_LIBRARY_FAILURE_CLASS,
+  'agy-identity-unavailable',
+  'dispatch-failed',
+  'adapter_spawn_timeout',
+  'daemon-bounce',
+  'github-review-create-transient',
+  'reviewer-command-failed',
+]);
+
 function parseStoredRowMetadata(reviewRow) {
   const rawMetadata = reviewRow?.metadata_json;
   if (typeof rawMetadata !== 'string' || rawMetadata.trim() === '') return {};
@@ -149,7 +173,10 @@ function infraRecoverableFailureClass(reviewRow) {
   // A refused model cannot recover without a configuration change. Keep its
   // diagnostic class, but exclude it from automatic same-head infra retries.
   if (known === 'reviewer-model-unavailable' || known === 'reviewer-chunk-budget-exceeded') return null;
-  if (known) return known;
+  // Registry resolution, empty model output, dispatch failure and adapter spawn
+  // timeout can all clear on a later same-head attempt. Keep them recoverable
+  // within the existing cap; none represents a delivered review verdict.
+  if (known) return INFRA_RECOVERABLE_FAILURE_CLASSES.includes(known) ? known : null;
   const message = String(reviewRow?.failure_message || '').toLowerCase();
   if (message.includes('[oauth-broken]')) {
     return 'oauth-broken';

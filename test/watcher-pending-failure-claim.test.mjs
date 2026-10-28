@@ -14,6 +14,7 @@ import {
   prepareReviewRowInTerminalFailureState,
 } from '../src/review-state-statements.mjs';
 import {
+  INFRA_RECOVERABLE_FAILURE_CLASSES,
   infraRecoverableFailureClass,
   unknownReviewerCommandFailureClass,
 } from '../src/reviewer-failure-classification.mjs';
@@ -146,6 +147,63 @@ function claimBindings(f, decision, head = HEAD) {
       INFRA_AUTO_RECOVER_CAP: 3, REVIEW_UNKNOWN_FAILURE_MAX_RETRIES: 3, cascadeRetryDue: false,
     },
   };
+}
+
+const unresolvedModelMessage = '[unknown] Command failed with code 1\n'
+  + 'stderr tail:\n[reviewer-model-unresolved] governed model unavailable for worker-registry; '
+  + 'worker registry requires async prefetch\nstdout tail:\nsynthetic reviewer startup';
+for (const status of ['failed', 'pending']) {
+  test(`PENDINGCLAIM-01 nested unresolved model failure claims: ${status}`, () => {
+    const f = fixture({ review_status: status, failure_message: unresolvedModelMessage,
+      review_attempts: 1 });
+    try {
+      const decision = route(f);
+      assert.equal(decision.infraRecoveryClass, 'reviewer-model-unresolved');
+      const { bindings, selected } = claimBindings(f, decision);
+      const result = execute(`${claimClosure}\nreturn claimReviewer();`, bindings);
+      assert.deepEqual(selected, ['stmtMarkInfraAutoRecoveryAttemptStarted']);
+      assert.equal(result.changes, 1);
+    } finally { f.db.close(); }
+  });
+}
+
+for (const failureClass of INFRA_RECOVERABLE_FAILURE_CLASSES) {
+  const message = failureClass === 'reviewer-command-failed'
+    ? '[unknown] Command failed with code 1'
+    : failureClass === 'github-review-create-transient'
+      ? 'review-create HTTP 503'
+      : `[${failureClass}] synthetic failure`;
+  for (const status of ['failed', 'pending']) {
+    for (const changed of [false, true]) {
+      test(`all recoverable classes claim their snapshot: ${failureClass}, ${status}, changed=${changed}`, () => {
+        const f = fixture({ review_status: status, failure_message: message });
+        try {
+          const decision = route(f);
+          assert.equal(decision.infraRecoveryClass, failureClass);
+          const { bindings, selected } = claimBindings(f, decision);
+          if (changed) {
+            // Keep the class, timestamp, head and status unchanged. Only the
+            // exact message snapshot can reject this competing settlement.
+            f.db.prepare('UPDATE reviewed_prs SET failure_message = ?')
+              .run(`${message}\nsynthetic newer failure`);
+          }
+          // Bounce and token refresh retain their separate production CASes.
+          // Still prove the infra CAS accepts every classifier result without
+          // re-deciding its class, including these separately routed controls.
+          const separateClaim = ['daemon-bounce', 'token-refresh-pending'].includes(failureClass);
+          const claim = separateClaim
+            ? bindings.stmtMarkInfraAutoRecoveryAttemptStarted.run(
+              ATTEMPT_AT, 'replacement-session', HEAD, HEAD, 60000, ATTEMPT_AT,
+              REPO, PR, bindings.current.failed_at, bindings.current.reviewer_head_sha,
+              3, 0, bindings.current.failure_message)
+            : execute(`${claimClosure}\nreturn claimReviewer();`, bindings);
+          assert.equal(claim.changes, changed ? 0 : 1);
+          assert.deepEqual(selected, ['stmtMarkInfraAutoRecoveryAttemptStarted']);
+          assert.equal(f.read().infra_auto_recover_attempts, changed ? 0 : 1);
+        } finally { f.db.close(); }
+      });
+    }
+  }
 }
 
 test('invariant table covers every production claim branch, including unchanged controls', () => {

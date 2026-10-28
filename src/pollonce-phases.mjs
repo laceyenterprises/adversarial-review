@@ -3460,7 +3460,7 @@ export async function processReviewSubject(entry, ctx) {
                 current?.reviewer_head_sha || null,
                 INFRA_AUTO_RECOVER_CAP,
                 cascadeRetryDue ? 1 : 0,
-                infraRecoveryClass
+                current?.failure_message ?? null
               )
               : reviewPopulationRetryable
                 ? stmtMarkReviewPopulationRetryAttemptStarted.run(

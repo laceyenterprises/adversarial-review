@@ -142,7 +142,7 @@ function claimInfraRecovery(db, row, failureClass) {
     row.reviewer_head_sha,
     DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS,
     0,
-    failureClass,
+    row.failure_message,
   );
 }
 
@@ -337,8 +337,10 @@ test('a legacy failed bounce row re-queues without touching review_attempts, bou
     ).run(BOUNCE_MESSAGE, DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS, PR);
     assert.equal(claimInfraRecovery(db, reviewRow(db), DAEMON_BOUNCE_FAILURE_CLASS).changes, 0,
       'the infra cap still bounds bounce re-queues');
+    db.prepare(`UPDATE reviewed_prs SET failure_message = ?, infra_auto_recover_attempts = 0
+      WHERE pr_number = ?`).run('[reviewer-timeout] synthetic newer failure', PR);
     assert.equal(claimInfraRecovery(db, failed, 'reviewer-timeout').changes, 0,
-      'the class guard still ties the claim to the stored tag');
+      'the snapshot fence refuses a changed message independently of its class');
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

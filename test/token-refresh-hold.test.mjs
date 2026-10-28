@@ -261,7 +261,7 @@ test('a legacy failed token-refresh row at the infra cap is reclaimed by the rea
     const infraClaim = prepareMarkInfraAutoRecoveryAttemptStarted(fixture.db).run(
       '2026-09-28T20:00:00.000Z', 'session-i', 'head-1', 'head-1', 20 * MINUTE,
       '2026-09-28T20:20:00.000Z', REPO, PR, row.failed_at, row.reviewer_head_sha,
-      3, 0, 'token-refresh-pending',
+      3, 0, row.failure_message,
     );
     assert.equal(infraClaim.changes, 0);
     const claim = claimTokenRefreshRecovery(fixture);

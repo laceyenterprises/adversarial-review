@@ -3851,3 +3851,6 @@ alert. The synthetic offline regression is
 `test/watcher-pending-failure-claim.test.mjs`. Existing smoke promises remain;
 post-deployment acceptance is read-only observation of natural retry progress,
 with no restart or forced failure.
+The infrastructure claim fences the exact classified failure message; JavaScript
+alone decides recoverability. The invariant enumerates the classifier's exported
+recovery classes in both shapes and refuses changed message snapshots.

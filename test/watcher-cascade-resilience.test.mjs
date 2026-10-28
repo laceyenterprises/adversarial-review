@@ -1042,7 +1042,7 @@ test('elapsed cascade nextRetryAfter allows infra retry after auto-recovery cap'
       'head-cascade',
       3,
       1,
-      'cascade',
+      db.prepare('SELECT failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?').get(repo, prNumber).failure_message,
     );
 
     assert.equal(claim.changes, 1);

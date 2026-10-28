@@ -13,7 +13,11 @@ PGID and replace the session as before. A zero-row CAS re-reads the row: unchang
 status, session and failure timestamp log `claim-shape-mismatch` with the branch
 and status; changed evidence retains the claim-race log. Neither diagnostic
 changes state or admission policy. Retry caps, defaults, failure classifiers,
-token-refresh claims and merge guards retain their existing rules.
+token-refresh claims and merge guards retain their existing rules. The infra CAS
+fences the exact `failure_message` snapshot instead of maintaining a second
+failure-class list. The exported classifier vocabulary drives the invariant
+across both shapes, including changed-message refusal. Transient model resolution,
+empty output, dispatch failure and adapter spawn timeout retain bounded retries.
 
 REGISTRYSESSION-02: async entry points call the shared
 `ensureWorkerRegistryReady()` before synchronous governed model selection in
@@ -509,7 +513,8 @@ new PR
   `reviewer-command-failed` stored as `[unknown] Command failed...`) use the
   dedicated claim path that atomically promotes the row to `reviewing` and
   increments `infra_auto_recover_attempts` only if the row is still the same
-  failed infrastructure class. Lease-released same-head `pending` rows with
+  failure message classified by JavaScript (`failure_message IS ?`). SQL never
+  re-decides recoverability. Lease-released same-head `pending` rows with
   infrastructure-class terminal evidence use that same dedicated claim only
   when their `failed_at` and `reviewer_head_sha` still match the row observed by
   the watcher.

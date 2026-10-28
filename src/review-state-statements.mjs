@@ -186,66 +186,8 @@ export const MARK_INFRA_AUTO_RECOVERY_ATTEMPT_STARTED_SQL =
      AND pr_number = ?
      AND ${reviewerTerminalFailureSql('failed_at = ? AND reviewer_head_sha = ?')}
      AND (COALESCE(infra_auto_recover_attempts, 0) < ? OR ? = 1)
-     AND CASE ?
-       WHEN 'cascade' THEN (
-         lower(COALESCE(failure_message, '')) LIKE '[cascade]%' OR
-         lower(COALESCE(failure_message, '')) LIKE '%litellm/upstream cascade%' OR
-         lower(COALESCE(failure_message, '')) LIKE '%watcher backoff engaged%'
-       )
-       WHEN 'provider-overloaded' THEN lower(COALESCE(failure_message, '')) LIKE '[provider-overloaded]%'
-       WHEN 'reviewer-timeout' THEN lower(COALESCE(failure_message, '')) LIKE '[reviewer-timeout]%'
-       WHEN 'reviewer-output' THEN lower(COALESCE(failure_message, '')) LIKE '[reviewer-output]%'
-       WHEN 'attestation-sign-failed' THEN lower(COALESCE(failure_message, '')) LIKE '[attestation-sign-failed]%'
-       WHEN 'hcp-unavailable' THEN lower(COALESCE(failure_message, '')) LIKE '[hcp-unavailable]%'
-       WHEN 'launchctl-bootstrap' THEN (
-         lower(COALESCE(failure_message, '')) LIKE '[launchctl-bootstrap]%' OR
-         lower(COALESCE(failure_message, '')) LIKE '%claude launchctl session bootstrap failed%' OR
-         lower(COALESCE(failure_message, '')) LIKE '%launchctlsessionerror%'
-       )
-      WHEN 'oauth-broken' THEN (
-        lower(COALESCE(failure_message, '')) LIKE '%[oauth-broken]%' OR
-        lower(COALESCE(failure_message, '')) LIKE '%bad credentials%' OR
-        lower(COALESCE(failure_message, '')) LIKE '%401%unauthorized%' OR
-        lower(COALESCE(failure_message, '')) LIKE '%requires authentication%'
-      )
-       WHEN 'token-refresh-pending' THEN (
-         lower(COALESCE(failure_message, '')) LIKE '[token-refresh-pending]%' OR
-         lower(COALESCE(failure_message, '')) LIKE '%broker claude reviewer token expires too soon for subprocess handoff%'
-       )
-       WHEN 'quota-exhausted' THEN lower(COALESCE(failure_message, '')) LIKE '[quota-exhausted]%'
-       WHEN 'agy-identity-unavailable' THEN lower(COALESCE(failure_message, '')) LIKE '[agy-identity-unavailable]%'
-       WHEN 'infra-runtime-missing-library' THEN (
-         lower(COALESCE(failure_message, '')) LIKE '[infra-runtime-missing-library]%' OR
-         lower(COALESCE(failure_message, '')) LIKE '%dyld: library not loaded%' OR
-         lower(COALESCE(failure_message, '')) LIKE '%dyld[%]: library not loaded%'
-       )
-       WHEN 'reviewer-command-failed' THEN (
-         (
-           lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed%' AND
-           lower(COALESCE(failure_message, '')) NOT LIKE '[unknown] command failed with code %'
-         ) OR
-         lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed with code %'
-       )
-       WHEN 'github-review-create-transient' THEN (
-         lower(COALESCE(failure_message, '')) LIKE '[github-review-create-transient]%' OR
-         (
-           (
-             lower(COALESCE(failure_message, '')) LIKE '%pulls/%/reviews%' OR
-             lower(COALESCE(failure_message, '')) LIKE '%create-a-review-for-a-pull-request%' OR
-             lower(COALESCE(failure_message, '')) LIKE '%review-create%'
-           ) AND
-           (
-             lower(COALESCE(failure_message, '')) LIKE '%http 403%' OR
-             lower(COALESCE(failure_message, '')) LIKE '%http 429%' OR
-             lower(COALESCE(failure_message, '')) LIKE '%status 403%' OR
-             lower(COALESCE(failure_message, '')) LIKE '%status 429%' OR
-             lower(COALESCE(failure_message, '')) LIKE '%http 5__%' OR
-             lower(COALESCE(failure_message, '')) LIKE '%status 5__%'
-           )
-         )
-       )
-       ELSE 0
-     END`;
+     -- JS alone decides recoverability. Claim only the failure it classified.
+     AND failure_message IS ?`;
 
 // Only the session whose exit and lack of a late post were confirmed may be
 // replaced. Admission and dispatch queueing can outlive that reconciliation.

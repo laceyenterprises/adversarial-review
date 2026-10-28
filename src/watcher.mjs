@@ -1650,11 +1650,7 @@ async function main() {
   requireEnv('GITHUB_TOKEN');
   process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = resolveRateLimitSharedStatePath(process.env, ROOT);
   try {
-    // CFG-02: defaultReviewerRouteFromEnv now consults the loader, which
-    // validates the full config.yaml schema. Validate merge-agent here too
-    // so a typo in ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS or in
-    // tools/adversarial-review/config.yaml fails loud at boot instead of
-    // hours later at first merge-agent dispatch.
+    // CFG-02: warm public observations before validating worker routes and config.
     if (process.env.ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED === '1') {
       const ready = await prepareWorkerObservationSession({env: process.env});
       if (!ready.ok) console.warn('[public-observations] startup session unavailable; authoritative reads remain held');

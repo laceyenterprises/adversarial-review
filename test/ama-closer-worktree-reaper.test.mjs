@@ -583,6 +583,8 @@ test('closer worktree reaper prunes registered worktrees whose on-disk dir is al
   const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-gone-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const hqRoot = join(root, 'hq');
+  // The owner root is readable even though the registered slot is absent.
+  mkdirSync(hqRoot, {recursive: true});
   const repoPath = join(hqRoot, 'repos', 'agent-os');
   // Registered in git metadata but the on-disk worktree dir is never created:
   // this is the hammer-ama-pr-* worktree whose directory is already gone.

@@ -106,6 +106,11 @@ both closer redispatch and inline daemon merge, even though the lease remains
 terminal `deferred`. The fence follows matching rekeyed leases and persists
 until confirmed terminal launch/retry evidence restores the existing
 retry/settlement policy. Unknown evidence preserves the ownership observation.
+GSR-03 `suspended` (a launch a graceful restart stopped for resume from its own
+session) is non-terminal and not parked, named locally until the pinned SDK
+vocabulary carries it: its lease stays `dispatched` and held against every
+recovery tier at any holder or launch age, keeping its scratch, until the
+ledger releases it to `failed` (`suspended_abandoned` / `suspended_age_expired`).
 The installed SDK 0.3.0 `readDispatchStatus` reader interprets its bundled
 public `statusVocabulary`. Each explicit boolean wins independently, including
 false; absent or invalid booleans use the vocabulary and malformed values carry

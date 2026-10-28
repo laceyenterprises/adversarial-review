@@ -335,3 +335,56 @@ for (const status of ['succeeded', 'failed', 'canceled', 'superseded']) {
     assert.deepEqual(readAmaCloserLease(rootDir, identity), before);
   });
 }
+
+test('GSR-03: suspended is non-terminal, unparked and owned even before the SDK names it', () => {
+  for (const status of ['suspended', ' Suspended ']) {
+    const meaning = launchRequestMeaning({ status });
+    assert.equal(meaning.status, 'suspended');
+    assert.equal(meaning.terminal, false);
+    assert.equal(meaning.parked, false);
+    assert.deepEqual(meaning.diagnostics, []);
+    assert.equal(launchRequestInFlight({ ok: true, row: { status } }), true);
+    assert.equal(launchRequestOwned({ ok: true, row: { status } }), true);
+  }
+  // Wire booleans keep precedence; no other unfamiliar status changes meaning.
+  assert.equal(launchRequestInFlight({ ok: true, row: { status: 'suspended', terminal: true } }), false);
+  assert.equal(launchRequestInFlight({ ok: true, row: { status: 'suspend' } }), null);
+  // A suspended descendant (a failed resume returns its launch to suspended)
+  // supplies the chain's liveness.
+  const chain = { ok: true, row: { status: 'failed' },
+    retryChain: [{ status: 'suspended', launch_request_id: 'suspended-retry' }] };
+  assert.equal(withLiveLaunchRetry(chain).liveRetryLaunchRequestId, 'suspended-retry');
+  assert.equal(launchRequestInFlight(chain), true);
+});
+
+test('GSR-03: closer-lease recovery keeps a suspended closer lease at any age until release', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'suspended-reaper-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: 'fixture/repo', prNumber: 11, headSha: 'synthetic-head' };
+  const stamp = '2026-10-01T00:00:00Z';
+  const later = '2026-10-10T00:00:00Z';
+  acquireAmaCloserLease({ rootDir, ...identity, now: stamp });
+  updateAmaCloserLease({ rootDir, ...identity, now: stamp, status: 'dispatched', lrqId: 'suspended-closer' });
+  updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity,
+    state: 'dispatched', launchRequestId: 'suspended-closer', dispatchedAt: stamp }));
+  let statusProbe = { ok: true, row: { status: 'suspended' } };
+  const reap = () => reapStaleCloserLeases({ rootDir, now: later,
+    thresholdMs: 1, deadHolderThresholdMs: 1, isProcessAlive: () => false,
+    readLaunchRequestStatusImpl: async () => statusProbe,
+    logger: { info() {}, warn() {}, error() {} } });
+
+  assert.equal((await reap()).released, 0, 'a dead holder and any age never release a suspended closer');
+  const held = readAmaCloserLease(rootDir, identity);
+  assert.equal(held.status, 'dispatched', 'the lease stays dispatched for resume to re-adopt');
+  assert.equal(held.lrqId, 'suspended-closer');
+  assert.equal(isHeldAmaCloserLease(rootDir, identity, { now: later, launchStatusProbe: statusProbe }), true);
+  assert.equal(await reconcileAmaCloserLeaseAsync({ rootDir, ...identity, now: later, statusProbe,
+    cleanupScratchImpl: () => assert.fail('a suspended closer keeps its scratch') }), false);
+  assert.equal((await probeOrphanOwnership({ rootDir, ...identity, now: later,
+    readStatusImpl: async () => statusProbe })).owned, true);
+
+  // Abandon or the age bound terminalizes the launch; recovery then releases it.
+  statusProbe = { ok: true, row: { status: 'failed', failure_class: 'suspended_abandoned' } };
+  assert.equal((await reap()).released, 1);
+  assert.equal(readAmaCloserLease(rootDir, identity).status, 'terminal');
+});

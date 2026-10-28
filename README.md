@@ -1474,6 +1474,8 @@ Positive resumed execution also restores fleet capacity accounting, including
 when the deferred lease was rekeyed to the worker's new head.
 Confirmed terminal ledger evidence overrides a stored parked observation;
 unknown ledger evidence preserves parked ownership.
+GSR-03 `suspended` launches are non-terminal and unparked: their closer lease stays
+`dispatched` and held until resume, operator abandon or the ledger age bound.
 Producer-terminal decision states retain ownership; wire-only live probes with
 no status string return an `unknown` wait reason without interrupting arbitration.
 The offline `test/hq-dispatch-status-json.test.mjs` uses public SDK serializer

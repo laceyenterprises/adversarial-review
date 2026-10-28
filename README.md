@@ -1,5 +1,13 @@
 # Adversarial Review
 
+REMREPORTHUMAN-01: remediation reports reserve “Human intervention required”
+for human-owned blockers and name CI, AMA closer or review pipeline owners for
+informational waits. An explicit completed-remediation reply with only those
+waits uses the existing audited closeout and completed transition; genuine
+no-progress and refused-review stops retain their semantics. Synthetic
+pr-comments and follow-up-remediation fixtures verify this behavior. Existing
+smoke promises are unchanged; deployed observation awaits a natural round.
+
 OWNERDEADLINE-01: every open PR needs one live owner with a next action and
 an anchored deadline. Once that deadline is at least the existing ownerless
 bound overdue, retained-route reasons and renewed review requests cannot prove

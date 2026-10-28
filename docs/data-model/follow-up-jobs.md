@@ -454,6 +454,12 @@ closure-wait/shadow delivery; expiry grants no refusal or extra work.
 
 `completion.pendingCiOnly` remains reply-normalization evidence. It cannot
 substitute for independent worker push proof or waive an execution gate.
+REMREPORTHUMAN-01 also accepts an explicit completed-remediation summary with
+only pipeline-owned waits through the existing closeout and completed record.
+The immutable operational blocker evidence remains in the reply; ownership is
+derived for reporting and routing, without new durable fields. Human-input and
+unknown blockers cannot take this completion path. Final-round closure/review
+waits additionally require the existing independent worker-push proof.
 `completion.finalRemediationPush` and the exact published head feed the existing
 final-hammer route, including first-pass budget suppression and merge-agent
 handoff. They do not change the stored verdict or establish merge permission.

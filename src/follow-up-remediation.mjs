@@ -6,6 +6,7 @@ import { resolveOsgRemediatorRoute } from './osg-remediator.mjs';
 import { readDispatchStatus } from './producer-contracts/launch-status.mjs';
 import { findCommittedUnpublishedWork } from './remediation-unpublished.mjs';
 import { remediationCloseout, closeoutRereview, refusedCloseout } from './remediation-closeout.mjs';
+import { reportsCompletedPipelineWait } from './remediation-blocker-ownership.mjs';
 import { guardStackedBase } from './ama/stacked-base.mjs';
 import { logCodexWorkerDispatch } from './codex-account-routing.mjs';
 import { DEFAULT_REMEDIATION_WORKER_CLASS, defaultRemediatorWorkerClassFromEnv, resolveRoleRegistryRemediator, pickRemediationWorkerClass, resolveReconcileWorkerClass } from './remediation-worker-routing.mjs';
@@ -1900,6 +1901,7 @@ async function reconcileFollowUpJob({
     let completionLifecycle = null;
     let pendingCiCompletion = false;
     let evidenceOnlyCompletion = false;
+    let completedPipelineWait = false;
 
     if (replyProbe.state === 'valid') {
       ({ reply: parsedReply, job, remediationReply, completionLifecycle, pendingCiCompletion } = await resolvePendingCiCompletion({
@@ -1907,6 +1909,8 @@ async function reconcileFollowUpJob({
         resolvePRLifecycleImpl, execFileImpl, inspectRemediationCiRegressionImpl, log,
       }));
       const reply = parsedReply;
+      completedPipelineWait = reportsCompletedPipelineWait(reply)
+        && !await findCommittedUnpublishedWork({ reply, job, workspaceDir: paths.workspaceDir, execFileImpl });
       remediationReply = { ...remediationReply, payload: reply };
       if (allBlockingDisputed(job, reply, job.revisionRef)) {
         completionLifecycle ||= await resolveJobPRLifecycleSafe({ rootDir, job, resolvePRLifecycleImpl, execFileImpl, log });
@@ -1915,7 +1919,7 @@ async function reconcileFollowUpJob({
         if (evidenceOnlyCompletion) rereview = { requested: false, status: 'suppressed', reason: 'blocking-findings-disputed-with-evidence' };
       }
 
-      if (reply.reReview.requested && job?.finalRound !== 'comment-only' && !evidenceOnlyCompletion) {
+      if ((reply.reReview.requested || completedPipelineWait) && job?.finalRound !== 'comment-only' && !evidenceOnlyCompletion) {
         // Pre-rereview branch-contamination gate. Even though the
         // remediator prompt forbids pushing patch-id duplicates of
         // upstream commits, workers can ignore the contract or run a
@@ -2561,7 +2565,7 @@ async function reconcileFollowUpJob({
 
     if (!rereview.requested && !finalRound.completed && !pendingCiCompletion && !evidenceOnlyCompletion
       && !(closeout && job.finalRound !== 'comment-only'
-        && (parsedReply?.reReview?.requested || workerPublishedHead))) {
+        && (parsedReply?.reReview?.requested || workerPublishedHead || completedPipelineWait))) {
       const published = operationalBlockerRecovery?.rescue?.preserved && worker.dispatchMode !== 'hq' && completeKnownWorkerPublish({ proof: workerPublishedHead, rootDir, jobPath, completedAt, requestReviewRereviewImpl, requestRereviewWakeImpl, requestWatcherWakeImpl });
       if (published) return published;
       const resumed = operationalBlockerRecovery?.rescue?.preserved && worker.dispatchMode !== 'hq' && requeueForWorkspaceResume({

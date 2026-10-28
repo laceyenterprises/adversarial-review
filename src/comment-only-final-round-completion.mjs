@@ -14,6 +14,7 @@
 // For a withheld push, ciState records only reported-pending, not probed CI.
 // The worker's free-text title is never read to decide that CI is merely pending.
 import { writeFileAtomic } from './atomic-write.mjs';
+import { classifyRemediationBlockers, operationalBlockerOwner, reportsCompletedPipelineWait } from './remediation-blocker-ownership.mjs';
 import { classifyGithubAuthOperationalBlocker, extractCommitShaFromOperationalBlocker } from './github-auth-recovery.mjs';
 import { FINAL_ROUND_REPLAY_PROOF, isTransientGitFailure, proveFinalRoundWorkerPush } from './comment-only-final-round.mjs';
 import {
@@ -75,6 +76,10 @@ export function classifyFinalRoundOperationalBlockers(operationalBlockers, {
   if (entries.some((entry) => String(entry?.needsHumanInput || '').trim())) {
     return { pendingCiOnly: false, reason: 'operational-blocker-needs-human-input' };
   }
+  if (entries.some(entry => entry.kind === OPERATIONAL_BLOCKER_KIND_PENDING_CI
+    && operationalBlockerOwner(entry) === 'human')) {
+    return { pendingCiOnly: false, reason: 'operational-blocker-needs-human-input' };
+  }
   const untagged = entries.filter((entry) => entry?.kind !== OPERATIONAL_BLOCKER_KIND_PENDING_CI);
   if (untagged.length === 0) return { pendingCiOnly: true, reason: 'kind-pending-ci' };
   if (untagged.length > 1) return { pendingCiOnly: false, reason: 'ambiguous-untagged-operational-blockers' };
@@ -93,7 +98,9 @@ export async function resolvePendingCiCompletion({
   inspectRemediationCiRegressionImpl, log = console,
 }) {
   if (!finalRound) {
-    reply = normalizeCiPendingOnlyReply(reply, { expectedJob: job });
+    if (!classifyRemediationBlockers(reply).humanRequired) {
+      reply = normalizeCiPendingOnlyReply(reply, { expectedJob: job });
+    }
     if (reply.reReview.normalizedFrom) {
       job = { ...job, reReview: { ...job.reReview, normalizedFrom: reply.reReview.normalizedFrom } };
       log.log?.(`[follow-up-remediation] normalized ${job.repo}#${job.prNumber}: ci-pending-only`);
@@ -288,7 +295,12 @@ export async function resolveCommentOnlyFinalRoundCompletion({
   if (blockers.length > 0) {
     classification = { pendingCiOnly: false, reason: 'review-blockers' };
   } else {
-    classification = classifyFinalRoundOperationalBlockers(projection.operationalBlockers, {
+    // A proven final push may also wait on closure/review owners. Keep CI's
+    // exact-head probe and every human-required entry in the existing gate.
+    const remaining = workerPushedHeadSha && reportsCompletedPipelineWait(reply)
+      ? projection.operationalBlockers.filter(entry => !['AMA closer', 'review pipeline'].includes(operationalBlockerOwner(entry)))
+      : projection.operationalBlockers;
+    classification = classifyFinalRoundOperationalBlockers(remaining, {
       ciGate, pushedHead: workerPushedHeadSha, outcome: reply.outcome,
     });
   }

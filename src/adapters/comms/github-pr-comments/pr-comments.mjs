@@ -1,6 +1,7 @@
 import { loadAwareTimeoutMs } from '../../../load-aware-timeout.mjs';
 import { meteredExecFile } from '../../../metered-gh.mjs';
 import { filterGitHubBody } from '../../../github-outbound-body.mjs';
+import { classifyRemediationBlockers, operationalBlockerOwner } from '../../../remediation-blocker-ownership.mjs';
 // PR comment poster for the remediation pipeline.
 //
 // Every terminal reconcile transition (completed / stopped / failed) emits a
@@ -448,7 +449,7 @@ function formatPushbackList(items, emptyText = '_(none reported)_') {
 // string treated as the finding. New replies always come through the
 // validator which rejects strings, so this fallback only fires on
 // imported / hand-edited terminal job records.
-function formatBlockersList(items, emptyText = '_(none reported)_') {
+function formatBlockersList(items, emptyText = '_(none reported)_', { operational = false } = {}) {
   if (!Array.isArray(items) || items.length === 0) return emptyText;
   const entries = items
     .map((entry) => {
@@ -471,6 +472,7 @@ function formatBlockersList(items, emptyText = '_(none reported)_') {
         finding,
         reasoning: sanitizePerFindingText(entry.reasoning),
         needsHumanInput: sanitizePerFindingText(entry.needsHumanInput),
+        owner: operational ? operationalBlockerOwner(entry) : null,
       };
     })
     .filter(Boolean)
@@ -484,11 +486,13 @@ function formatBlockersList(items, emptyText = '_(none reported)_') {
         `- **${entry.title}**`,
         `  - **Finding:** ${indentNestedBulletContent(defangUntrustedMarkdown(entry.finding))}`,
       ];
+      if (entry.owner) lines.push(`  - **Owner:** ${entry.owner}`);
       if (entry.reasoning) {
         lines.push(`  - **Reasoning:** ${indentNestedBulletContent(defangUntrustedMarkdown(entry.reasoning))}`);
       }
       if (entry.needsHumanInput) {
-        lines.push(`  - **Needs human input:** ${indentNestedBulletContent(defangUntrustedMarkdown(entry.needsHumanInput))}`);
+        const label = entry.owner && entry.owner !== 'human' ? 'Pipeline follow-up' : 'Needs human input';
+        lines.push(`  - **${label}:** ${indentNestedBulletContent(defangUntrustedMarkdown(entry.needsHumanInput))}`);
       }
       return lines.join('\n');
     })
@@ -704,12 +708,12 @@ function buildRemediationOutcomeCommentBody({
       lines.push(
         '> **Remediation could not start.** This PR has merge conflicts, and the installed `hq dispatch` does not support `--allow-conflicted-base`, so worker provisioning would fail its rebase onto the base branch before the remediation worker starts. Upgrade agent-os hq, then apply the `retrigger-remediation` label. No remediation round was spent.'
       );
-    } else if (reply && (reply.outcome === 'blocked' || reply.operationalBlockers?.length)) {
+    } else if (reply && classifyRemediationBlockers(reply).humanRequired) {
       lines.push('');
       lines.push(
         '> **Human intervention required.** The worker reported blockers it could not resolve in this round. See the blockers list below.'
       );
-    } else {
+    } else if (!reply?.operationalBlockers?.length) {
       lines.push('');
       lines.push(
         '> The worker did not request a re-review pass; this PR will retain its current adversarial-review verdict until a human re-arms or closes the job.'
@@ -789,6 +793,13 @@ function buildRemediationOutcomeCommentBody({
     }
   }
 
+  if (['completed', 'stopped'].includes(action)) {
+    for (const owner of classifyRemediationBlockers(reply).pipelineOwners) {
+      lines.push('');
+      lines.push(`> **Informational wait.** Owner: ${owner}. The pipeline owns the next step.`);
+    }
+  }
+
   if (action === 'completed' && successor) {
     lines.push('');
     lines.push(`**Next action:** ${sanitizeInlineText(successor.action, 80)} · **Owner:** ${sanitizeInlineText(successor.actor, 80)} · **Reason:** ${sanitizeInlineText(successor.reason, 120)}`);
@@ -865,7 +876,7 @@ function buildRemediationOutcomeCommentBody({
   }
 
   if (reply?.operationalBlockers?.length) {
-    const blockers = formatBlockersList(reply.operationalBlockers, '');
+    const blockers = formatBlockersList(reply.operationalBlockers, '', { operational: true });
     if (blockers) {
       lines.push('');
       lines.push('## Operational blockers');

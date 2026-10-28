@@ -829,10 +829,22 @@ The only normal rereview trigger is the remediation reply artifact:
 }
 ```
 
-If that durable flag is absent or false:
+If that durable flag is absent or false, and no validated completion handoff exists:
 
 - the queue does **not** fabricate another pass
 - the job stops with `code = "no-progress"`
+
+REMREPORTHUMAN-01: a validated reply explicitly reporting remediation complete
+with only pipeline-owned waits uses the existing closeout decision and completed
+transition. Pending CI belongs to CI, closure to the AMA closer, and queued
+review to the review pipeline. Structured blocker kinds take precedence; narrow
+legacy wait wording is accepted only without genuine human-input requests or
+recognized failure evidence. The legacy “confirm CI, then request review”
+sentence is a pipeline follow-up even in `needsHumanInput`. Review blockers,
+unknown operational blockers and explicit
+human input retain human-required reporting. The normal base/audit, CI admission
+and refused-reset paths still apply; a genuine no-progress exit still stops.
+Informational wait lines name the owner, including alongside a human blocker.
 
 That conservatism is intentional. A completed comment-only final round with
 `finalRound = "comment-only"` and

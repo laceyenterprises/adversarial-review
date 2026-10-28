@@ -737,6 +737,7 @@ const FIXED_RECOVERY_EVENTS = Object.freeze([
   'ama_finding_dispute_exhausted', 'ama_primary_change_refusal_exhausted',
   'ama.orphan_recovery.exhausted', 'ama.orphan_recovery.ownership-uncertain',
   'ama.orphan_recovery.store-error', ...HAMMER_OWNER_PAGE_EVENTS,
+  'ama.orphan_recovery.missing-transition',
   'ama_closer.pre_receipt_inspection_required',
   'finalization.queue.infrastructure',
 ]);
@@ -1564,7 +1565,13 @@ async function deliverAlert(text, {
         return { status: state, queued: false, id: legacyRecoveryId, queuePath: existingPath };
       }
     }
-    if (event === 'finalization.queue.infrastructure') {
+    if (event === 'ama.orphan_recovery.missing-transition') {
+      const selected = payload?.nextAction;
+      doc.id = fixedAlertId(event, crypto.createHash('sha256').update(JSON.stringify([
+        payload?.repo, payload?.prNumber, payload?.headSha,
+        selected?.row, selected?.action, selected?.actor, selected?.reason,
+      ])).digest('hex'));
+    } else if (event === 'finalization.queue.infrastructure') {
       doc.id = fixedAlertId('queue-infrastructure', crypto.createHash('sha256').update(String(payload?.causeKey)).digest('hex'));
     } else if (event === 'ama_closer.pre_receipt_inspection_required') {
       // Same attempt, including a crash after enqueue but before alertedAt.

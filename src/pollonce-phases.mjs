@@ -15,7 +15,7 @@ import { handoffWakeLegacy, handoffWakeShadowEvidence, shadowNextActionLater } f
 import { CODE_PR_DOMAIN_ID } from './identity-shapes.mjs';
 import { closeEmptyPullRequest } from './empty-pr-close.mjs';
 import { routeCappedReviewToClosure, hammerHandoffReviewBypass, resolveMaxRemediationRounds } from './hamclose-review-admission.mjs';
-import { recoverOwnerlessReview } from './ownerproof-review-recovery.mjs';
+import { recoverOwnerlessReview, recoverOverdueOwnership } from './ownerproof-review-recovery.mjs';
 import { isOperatorHeld } from './operator-hold-labels.mjs';
 import { summarizeChecksConclusion } from './checks-summary.mjs';
 // HELDHEAD-01: admit withheld-head recovery without interrupting other subjects.
@@ -753,9 +753,6 @@ export async function processReviewSubject(entry, ctx) {
     findArgusJobImpl = findArgusJob,
     maybeAutoAdjudicateDependencyBotArgusJobImpl = maybeAutoAdjudicateDependencyBotArgusJob,
   } = ctx;
-  // Keep discovery moving; the posted row remains the durable retry handle.
-  if (reviewerHandoffPending(repoPath, prNumber)) return;
-
       const wakeIdentity = { repoPath, prNumber, headSha: subject.headSha };
       retainedWatcherWakes?.observe({ ...wakeIdentity, terminal: subject.terminal });
       const retainWakeForCapacity = () => {
@@ -808,6 +805,22 @@ export async function processReviewSubject(entry, ctx) {
         'UPDATE reviewed_prs SET is_draft = ? WHERE repo = ? AND pr_number = ?'
       ).run(Number(draft), repoPath, prNumber);
       if (draft === true) return;
+      if (!subject.terminal) {
+        try {
+          const loaded = loadConfigCached();
+          const authority = resolveMergeAuthorityConfigFromDomain(loadDomainConfig(ROOT, effectiveDomainId),
+            loaded.getMergeAuthorityConfig(), { fallbackSources: loaded.sources || {} });
+          const recovered = await recoverOverdueOwnership({
+            rootDir: ROOT, repo: repoPath, prNumber, subject, reviewStateRow: existing,
+            domainId: effectiveDomainId, enabled: authority?.enabled, execFileImpl: execFileAsync, logger: console,
+          });
+          if (recovered?.outcome === 'ama-dispatched') return;
+        } catch (error) {
+          console.warn(`[watcher] OWNERDEADLINE-01 deadline recovery deferred for ${repoPath} PR ${prNumber}: ${error.message}`);
+        }
+      }
+      // Deadline observation precedes even an in-process handoff deferral.
+      if (reviewerHandoffPending(repoPath, prNumber)) return;
       if (effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal) {
         if (await maybeRunDocsFastPath({ subject, reviewRow: existing, rootDir: ROOT,
           repoPath, prNumber, execFileImpl: execFileAsync,

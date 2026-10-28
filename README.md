@@ -1,5 +1,27 @@
 # Adversarial Review
 
+OWNERDEADLINE-01: every open PR needs one live owner with a next action and
+an anchored deadline. Once that deadline is at least the existing ownerless
+bound overdue, retained-route reasons and renewed review requests cannot prove
+ownership. A current-head live process, live launch or fresh lease heartbeat
+still fences recovery. The existing watchdog executes the selected successor
+under its two-attempt cap, or pages once per head and missing transition with
+its row, reason and deadline. Discovery checks local lane evidence before
+admission or slow-lane deferral on every tick; checking the deadline adds no
+GitHub calls. Legacy lane records select the shared refresh row from their
+existing no-progress anchor. Recovery dispatch rechecks the live candidate.
+Existing merge predicates, lease mutation rules and review admission remain
+authoritative. Focused synthetic fixtures establish source behavior; existing
+smoke promises are unchanged and natural deployed recovery remains unverified.
+Discovery excludes enforced operator holds before lane reads. Any matching
+dispatch-record SHA retains live ownership evidence. Scoped operator requests
+keep their existing executor admission and safety/lease checks when overdue;
+expired safety reconciliation still receives diagnostic paging.
+Overdue review requests retain the once-per-head reservation and expose their
+handoff receipt under the existing recovery attempt cap.
+
+See the [deadline recovery contract](docs/RUNBOOK-ama-closure.md#deadline-bound-ownership-ownerdeadline-01).
+
 HOLDERPROOF-01: successful leased remediation, auth-recovery and finalization-queue
 rewrites record compatible branch receipts in HQ dispatch storage, including
 service workspaces without managed worker manifests. Receipt storage errors

@@ -23,7 +23,7 @@ import { closureOwnerShadowEvidence, shadowNextActionLater } from './pr-next-act
 import { hostname } from 'node:os';
 import { OPERATOR_HOLD_LABELS } from './operator-hold-labels.mjs';
 import { isOrphanHeadReviewRequested } from './orphan-head-review-requested.mjs';
-import { recoverOrphan, isOrphanRecoveryWait, hasExactHeadReviewDecision } from './ama/orphan-watchdog.mjs';
+import { recoverOrphan, isOrphanRecoveryWait, hasExactHeadReviewDecision, overdueNextAction } from './ama/orphan-watchdog.mjs';
 import { observeClosureLag } from './ama/closure-lag.mjs';
 // ── AMA closure orchestration: dispatch decision + coexistence + audit ────────
 //
@@ -2991,6 +2991,16 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
     }
     return orphan;
   };
+  // A scoped operator request already has an executor below. Deadline recovery
+  // must not intercept that request; its safety and live-lease gates still apply.
+  if (!mergeAgentRequestedScoped && overdueNextAction(amaClosureResult?.nextAction, candidate?.headSha || currentRevisionRef,
+    orphanOptions.now, orphanOptions.env)) {
+    const orphan = await recoverOwnerless();
+    if (orphan) return orphan;
+    // A proven live owner ended the overdue probe. Do not enter another
+    // recovery route after that observation replaced the shared generation.
+    return { outcome: 'ama-pending', amaClosureResult };
+  }
   if (!mergeAgentRequestedScoped && hasExactHeadReviewDecision(amaClosureResult, candidate?.headSha || currentRevisionRef, reviewStateRow)
     && !isSafetyRecoveryHold(amaClosureResult)) {
     const orphan = await recoverOwnerless();

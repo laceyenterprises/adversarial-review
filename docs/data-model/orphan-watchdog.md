@@ -82,3 +82,36 @@ Every recovery emits one `ownerless-recovery` log line containing repo, PR,
 head, elapsed idle minutes, last reason and action. Store failures retain the existing
 store-error page behavior. All tests use fixture state and injected dispatch,
 ledger and pager functions.
+
+## Deadline-bound ownership (OWNERDEADLINE-01)
+
+For a matching-head shared next action overdue by `ownerlessBoundMs`, recovery
+uses the earlier of `ownership.idleSince` and `nextAction.deadline.at`. A fresh
+request timestamp cannot extend this deadline. Current-head live processes,
+live launches/retries and fresh lease evidence still hold dispatch. A
+current-head dispatched lease's explicit `heartbeatAt` proves liveness only
+inside that same bound; absent, stale or future heartbeats do not. No lease
+writer or lease mutation changes. Older-head receipts do not own an overdue
+current-head action. Uncertain ownership pages diagnostics without dispatch.
+Dispatch records match the inspected head when any of `targetRemediationSha`,
+`headSha` or `reviewedSha` matches; live worker/launch evidence is still required.
+Different values in the other SHA fields do not override a matching field.
+Overdue reviewer dispatch also uses `heads.rereview` for once-per-head request
+reservation and returns the `reviewRequest` receipt for closure handoff, while
+retaining the deadline recovery attempt cap. No column or table shape changes.
+
+The additive `transition_pages(head TEXT, transition TEXT, PRIMARY KEY
+(head, transition))` table records successful or terminal page receipts. The
+transition is the JSON tuple `[row, action, actor, reason]`, scoped by head;
+rolling timestamps and route reason strings do not create another page.
+Missing executors, deferrals, reconcile/observe rows, expired waits and spent
+attempts page the selected row, reason and deadline as structured `nextAction`
+evidence and in message text. Failed enqueues retry on the next observation;
+`delivered` and `dead-letter` receipts end enqueue retries. The outbox uses the same head/transition identity even after a crash before
+the SQLite receipt; see [alert delivery](alert-delivery-state.md). The legacy
+`heads.paged` exhaustion receipt remains readable. Attempt caps stay per head.
+
+Discovery reads current-head lane evidence before admission or full-walk
+backoff. Legacy lanes without a stored action derive the shared refresh
+row from `firstNoProgressAt` (or `lastRunAt`); observation time cannot move a
+durable anchor. Deadline observation itself performs no GitHub requests.

@@ -1,9 +1,44 @@
-import { recoverOrphan } from './ama/orphan-watchdog.mjs';
+import { recoverOrphan, overdueNextAction } from './ama/orphan-watchdog.mjs';
+import { readNoProgressLane } from './watcher-no-progress-lane.mjs';
+import { deriveNextActionSnapshot, nextAction } from './pr-next-action.mjs';
+import { isOperatorHeld } from './operator-hold-labels.mjs';
 const fetchMergeAgentCandidate = async (...args) => (await import('./merge-agent-candidate.mjs')).fetchMergeAgentCandidate(...args);
 import { normalizeEffectiveReviewVerdict } from './review-verdict.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
 const fetchReviews = async (...args) => (await import('./github-api.mjs')).fetchReviewBodiesForHead(...args);
 const maybeDispatchAmaClosureFor = async (...args) => (await import('./ama-closure-orchestration.mjs')).maybeDispatchAmaClosureFor(...args);
+
+// Every discovered open PR visits this local check before admission/backoff.
+// Only actual recovery enters the normal executor and its fresh candidate read.
+export async function recoverOverdueOwnership({ rootDir, repo, prNumber, subject, reviewStateRow,
+  domainId, enabled, now = new Date().toISOString(), env = process.env, logger = console, execFileImpl,
+  readLaneImpl = readNoProgressLane, recoverImpl = recoverOrphan,
+  fetchCandidateImpl = fetchMergeAgentCandidate, dispatchImpl = maybeDispatchAmaClosureFor }) {
+  if (!enabled || subject?.terminal || subject?.isDraft || subject?.draft || !subject?.headSha
+    || isOperatorHeld(subject.labels || [])) return null;
+  const lane = readLaneImpl(rootDir, { repo, prNumber }, { logger });
+  // Pre-contract lane records may have no selected action. Missing evidence
+  // selects the shared refresh row, anchored to durable lack of progress.
+  const selected = lane?.headSha === subject.headSha ? lane.nextAction || nextAction(deriveNextActionSnapshot({
+    subjectKey: `${repo}#${prNumber}`, head: subject.headSha, observedAt: now,
+    anchors: { firstActionableAt: lane.firstNoProgressAt || lane.lastRunAt },
+    observations: { pr: { state: 'OPEN', headSha: subject.headSha, labels: subject.labels } },
+  })) : null;
+  if (!overdueNextAction(selected, subject.headSha, now, env)) return null;
+  const labels = (subject.labels || []).map(label => typeof label === 'string' ? label : label.name);
+  return recoverImpl({ rootDir, repo, prNumber, headSha: subject.headSha, reviewStateRow, labels, now, env, logger,
+    candidate: { prState: 'open', headSha: subject.headSha },
+    result: { amaEnabled: true, nextAction: selected, reason: 'next-action-deadline-expired' },
+    dispatchHammer: async orphanRecovery => {
+      const candidate = await fetchCandidateImpl(repo, prNumber, { rootDir, execFileImpl });
+      if (candidate?.headSha !== subject.headSha || candidate.merged || String(candidate.prState).toLowerCase() !== 'open') {
+        return { dispatched: false, reason: 'recovery-head-no-longer-open' };
+      }
+      return dispatchImpl({ rootDir, repoPath: repo, prNumber, candidate, labelNames: candidate.labels,
+        currentRevisionRef: candidate.headSha, reviewStateRow, domainId, orphanRecovery, logger });
+    },
+  });
+}
 
 // Posted rows already visit the closure watchdog. Visit the other routable
 // review rows before their retry/backoff/cap returns can hide an ownerless PR.

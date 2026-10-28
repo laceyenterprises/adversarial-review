@@ -156,6 +156,7 @@ import {
   assertClaudeOAuth,
   assertCodexOAuth,
   spawnCaptured,
+  resolveReviewerExecution,
   __test__ as harnessTest,
 } from './reviewer-harness.mjs';
 import {
@@ -1835,6 +1836,10 @@ async function main() {
   }
 
   await ensureWorkerRegistryReady();
+  // Model infrastructure must resolve before either GitHub or model auth.
+  resolveReviewerExecution(reviewerModel, {
+    modelPin: ['codex', 'claude'].includes(reviewerModel) ? reviewerArm?.model || '' : '',
+  });
 
   if (!pinReviewerGhIdentity(process.env, botTokenEnv).pinned) {
     console.error(`[github-auth-outage] required PR context missing selected ${botTokenEnv}`);

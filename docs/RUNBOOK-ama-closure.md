@@ -6628,40 +6628,64 @@ snapshots cache for 60 seconds in the matching app connection scope (including
 endpoint and explicit session identity). Environment copies with the same
 connection reuse the snapshot. Synchronous registry reads only consult that
 cache; they never register a session or invoke the synchronous SDK transport.
-Empty, stale or unavailable cache evidence raises `registry-unavailable`;
-asynchronous model-resolution boundaries ensure readiness before selection. Failed or
-malformed reads never satisfy readiness, so the next async attempt can recover
-immediately. HOSTOBSDENIAL-01 retains the last redacted failure separately for
-sync diagnostics; it cannot select a model or suppress a new async read. A
-successful async read clears that failure.
-Concurrent prefetches keep independent entries per connection and session;
-one endpoint cannot displace another endpoint's snapshot. A valid snapshot
-without the requested reviewer class also fails closed instead of selecting
-a host-configured model. Remediation startup logs a failed warmup and proceeds;
-consumption defers claims while prefetch is unavailable, and a registry loss
-after claim requeues the unspawned job without charging a round. The
-non-blocking Codex default applies only when the registry is readable and the
-configured model is outside its allowlist; registry loss does not authorize
-that fallback.
-No local registry, ledger or filesystem fallback is permitted.
+Empty, stale or unavailable cache evidence does not abort the shared prefetch
+helper. REMODELFALLBACK-01 resolves each class in order: explicit existing env
+pin, governed registry default, then, only when the registry snapshot is
+unavailable, the `defaultModel` in the packaged
+`src/adapters/agent-runtime/local/worker-model-seed.json`. The seed uses the
+registry's `classes` object with `defaultModel`, `allowedModels` and optional
+`defaultReasoningLevel`. It covers Codex, Claude and Gemini remediators and
+reviewers. Updating these emergency defaults is a reviewed repository change.
+The seed path is relative to the resolver module; host files, another checkout,
+local registries and ledgers cannot supply it. A readable registry that omits a
+class fails closed; the seed cannot restore a withdrawn class. A class with an invalid
+default or a selected model outside its allowlist fails closed rather than
+bypassing validation with the seed. Pins retain precedence and are checked
+against the available class allowlist, including the seed during an outage.
+Rejected pins log the rejected model and allowlist source; operators must correct
+or unset them. They retain the retryable infrastructure classification, so a
+permanent pin typo will not recover through retries alone.
 
-Host observation failures distinguish `entitlement-denied` (fixed detail
-`host.observations.read`), `timeout`, `unavailable` and `not-found`. Arbitrary
-producer messages, bodies, credentials and tokens are never copied into errors.
-Entitlement denials and missing registries are non-retryable
-`reviewer-configuration-error` faults: repair the app grant or registry
-configuration, rather than consuming infrastructure retry/auto-recovery caps.
-The closer retains the refusal and non-retryability without selecting a fallback.
+Failed or malformed reads are not cached, so the next prefetch can recover
+immediately. Concurrent prefetches keep independent entries per connection and
+session; one endpoint cannot displace another endpoint's snapshot. Seed use
+logs a visible warning at most once per class per 60 seconds. Selection logs
+are likewise limited per class, source and model for 60 seconds. Model metadata
+and log lines use
+`modelSource=env-pin`, `modelSource=registry` or `modelSource=committed-seed`.
+Antigravity display-token substitution records `modelSource=runtime-display-token`
+from runtime configuration rather than claiming registry/seed provenance.
+Both native Codex execution and OAuth Responses recovery use the same resolved
+model and provenance; recovery never inserts a literal model id. Non-blocking
+Codex configuration keeps its explicit allowlisted selection; its default now
+uses this resolver instead of a literal fallback.
 
-Registry timeouts and outages are retryable `reviewer-model-unresolved` infrastructure faults,
-not OAuth failures. They use existing bounded infrastructure backoff and stored
-failure recovery without charging normal review attempts; they do not emit the
-OAuth re-authentication notice. The closer defers on the same typed fault rather
-than treating it as a generic fail-open quota resolver error. Corporate Claude
-still requires a governed model before broker minting, with the same model bound
-to the CLI invocation. Explicit configured pins retain their existing precedence.
-Registry model/effort logs use `modelSource: producer`.
+HOSTOBSDENIAL-01 retains safe host-read refusal classes and fixed detail:
+entitlement-denied names host.observations.read. Entitlement denials and
+not-found registries remain non-retryable reviewer-configuration-error faults
+and never permit seed fallback or infrastructure auto-recovery. Timeouts and
+outages permit seed selection for the six supported classes; unresolved
+classes retain the original retryable refusal. Sync diagnostics never satisfy
+readiness or suppress an async refresh.
 
+If neither the registry nor the committed seed supplies a valid default, or
+allowlist validation fails, resolution throws the existing retryable
+`registry-unavailable` / `reviewer-model-unresolved` infrastructure fault with
+`modelSource=unresolved`. The reviewer entry point validates the model before
+GitHub auth, and native harnesses validate before model credential probes, so
+a missing seed during an outage cannot be misreported as an OAuth failure.
+Existing bounded infrastructure backoff, unspawned
+remediation requeue and stored failure recovery still apply without charging
+normal attempts or emitting the OAuth re-authentication notice. Classes outside
+the seed, including closer-only classes, still require governed registry data
+or an explicit valid pin when no readable registry withdraws the class. Model
+resolution precedes pool selection; a model fault propagates as
+`reviewer-model-unresolved` under automatic and pinned account policies, rather
+than becoming an account hold or permitting unresolved hammer dispatch.
+The prefetch returns readiness rather than deferring claims; per-class selection
+after claim owns remediation requeue. Corporate Claude binds the validated
+registry/seed/pin
+model to broker minting and CLI invocation.
 After normal deployment, SRE records read-only organic acceptance: watcher logs
 stop emitting `public-registry-unavailable`, and a corporate Claude review
 completes. Offline fixtures do not establish deployment acceptance. No new

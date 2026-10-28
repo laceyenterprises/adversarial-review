@@ -24,13 +24,27 @@ REGISTRYSESSION-02: async entry points call the shared
 that process, including reviewer/security children, quota grounding and fallback
 readers, watcher polls and follow-up consumption. The app transport reuses a
 60-second snapshot and refreshes it on expiry. Pure synchronous adapters never
-register or request data themselves. A transport outage remains retryable
-`reviewer-model-unresolved` through quota error handlers; existing infrastructure
-backoff and remediation requeue behavior apply without OAuth paging or model
-fallback. No lifecycle state or merge authority changes. After normal deployment,
-SRE observes organic reviewer/security routing and quota grounding without
-missing-prefetch errors; offline fixtures do not establish runtime adoption.
-No new smoke command is added.
+register or request data themselves. REMODELFALLBACK-01 keeps registry outages
+from aborting reviewer startup or remediation while a validated class default
+exists in the repository-owned `src/adapters/agent-runtime/local/worker-model-seed.json`.
+Selection is explicit env pin, session-scoped registry, then committed seed only
+when the snapshot is unavailable. A readable registry missing a class fails
+closed, so the seed cannot restore a withdrawn class. Prefetch returns readiness;
+per-class resolution after claim owns infrastructure requeue.
+Registry/seed allowlists validate the selected model, including pins. Seed use
+warns visibly at most once per class per 60 seconds; selection logs are likewise
+rate-limited per class/source/model; execution metadata and logs record `modelSource=env-pin`,
+`registry`, or `committed-seed`. Antigravity display-token substitution records
+`runtime-display-token` from runtime configuration. Closer model faults propagate
+before pool selection under automatic and pinned account policies, preserving
+typed infrastructure deferral rather than account holds. Missing defaults or disallowed models remain
+retryable `reviewer-model-unresolved` infrastructure with `modelSource=unresolved`,
+using existing backoff/requeue behavior without OAuth paging. Reviewer startup
+and harnesses validate model infrastructure before credential probes. There is no host
+filesystem or ledger seed fallback. No lifecycle state or merge authority changes.
+After normal deployment, observe organic reviewer/security routing and quota
+grounding for registry provenance or visible seed warnings; offline fixtures do
+not establish runtime adoption. No new smoke command is added.
 
 HOSTOBSDENIAL-01: host-read failures retain only the refusal class and fixed safe
 detail. `entitlement-denied` names `host.observations.read`; it and `not-found`
@@ -40,8 +54,9 @@ state without infrastructure retries or auto-recovery. `timeout` and
 `unavailable` retain the retryable path above. Sync resolution retains the last
 redacted refusal in the matching connection/session scope until an async read
 succeeds. Diagnostic evidence never selects a model or suppresses an async read.
-No credentials, arbitrary response text, model fallback or new smoke action is
-authorized.
+No credentials, arbitrary response text or new smoke action is authorized.
+Entitlement denials and missing registries never permit seed fallback; retryable
+timeouts and outages permit the committed seed for its six supported classes.
 
 ## Actions billing/quota infrastructure (CIBLOCKINFRA-01)
 

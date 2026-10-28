@@ -3325,8 +3325,8 @@ test('resolveCodexExecOverrides uses registry model and keeps safe host provider
         { key: 'model_reasoning_effort', value: 'high' },
       ],
       reasoningEffort: 'high',
-      modelSource: 'producer',
-      effortSource: 'producer',
+      modelSource: 'registry',
+      effortSource: 'registry',
     });
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -3360,8 +3360,8 @@ test('resolveCodexExecOverrides preserves allowed scalar model tuning without fo
         { key: 'model_reasoning_effort', value: 'high' },
       ],
       reasoningEffort: 'high',
-      modelSource: 'producer',
-      effortSource: 'producer',
+      modelSource: 'registry',
+      effortSource: 'registry',
     });
     assert.deepEqual(
       buildCodexReviewArgs({
@@ -3396,9 +3396,9 @@ test('reviewer model and effort use producer registry before host config', () =>
       AGENT_OS_DEPLOY_CHECKOUT: rootDir }, () => resolveCodexExecOverrides({ log: { info: (line) => logs.push(line) } }));
     assert.equal(overrides.model, 'gpt-mirror');
     assert.equal(overrides.reasoningEffort, 'high');
-    assert.equal(overrides.modelSource, 'producer');
+    assert.equal(overrides.modelSource, 'registry');
     assert.deepEqual(overrides.configOverrides, [{ key: 'model_reasoning_effort', value: 'high' }]);
-    assert.match(logs[0], /source=producer.*source=producer/);
+    assert.match(logs[0], /modelSource=registry/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -4785,7 +4785,7 @@ test('reviewWithGemini happy path returns the captured review text', async () =>
   assert.deepEqual(result, {
     reviewText: 'BLOCKING: real finding\n\nVERDICT: blocked',
     tokenUsage: null,
-    execution: { harness: 'gemini', model: 'gemini-2.5-pro', effort: null },
+    execution: { harness: 'gemini', model: 'gemini-2.5-pro', modelSource: 'registry', effort: null },
   });
   // The prompt fed to gemini carries the extra context and the diff fence.
   assert.equal(captured.length, 1);
@@ -4888,6 +4888,7 @@ test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scr
   // antigravity runtime resolves the agy display-name token (default), NOT the
   // cli slug, and binds --model BEFORE --print with the prompt as the --print value.
   assert.equal(spawnCalls[0].model, 'Gemini 3.8 Flash (High)');
+  assert.equal(result.execution.modelSource, 'runtime-display-token');
   const aMi = spawnCalls[0].args.indexOf('--model');
   const aPi = spawnCalls[0].args.indexOf('--print');
   assert.ok(aMi >= 0 && aMi < aPi, '--model must be present and precede --print');
@@ -5750,7 +5751,7 @@ test('reviewWithGemini keeps successful antigravity review when spend report loo
     }));
 
     assert.deepEqual(result, { reviewText, tokenUsage: null,
-      execution: { harness: 'gemini', model: 'Gemini 3.8 Flash (High)', effort: null } });
+      execution: { harness: 'gemini', model: 'Gemini 3.8 Flash (High)', modelSource: 'runtime-display-token', effort: null } });
     assert.equal(cleaned, true);
     assert.deepEqual(released, [{ checkoutId: 'co_spend_success_throw', quotaSignal: false }]);
     assert.equal(warnings.length, 1);
@@ -6108,7 +6109,7 @@ test('reviewWithGemini retries transient Gemini subprocess failures before succe
   });
 
   assert.deepEqual(result, { reviewText: '## Verdict\n\nComment only', tokenUsage: null,
-    execution: { harness: 'gemini', model: 'gemini-2.5-pro', effort: null } });
+    execution: { harness: 'gemini', model: 'gemini-2.5-pro', modelSource: 'registry', effort: null } });
   assert.equal(attempts.length, 3);
   assert.deepEqual(sleeps, [0, 0]);
 });

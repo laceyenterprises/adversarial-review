@@ -78,8 +78,13 @@ export async function resolvePooledWorkerRouting({ primary, fallbackWorkerClasse
   const select = async role => {
     let account;
     try { account = await selectAccountImpl({ identity: role, model: modelForClass?.(role), env, ...options }); }
-    catch { account = { identity: role, workerClass: role, pooled: true,
-      hold: true, status: 'held', reason: 'evidence-unknown' }; }
+    catch (error) {
+      // Model infrastructure faults belong to the caller's typed deferral,
+      // including undeclared pools. Preserve other account-evidence holds.
+      if (error?.code === 'registry-unavailable') throw error;
+      account = { identity: role, workerClass: role, pooled: true,
+        hold: true, status: 'held', reason: 'evidence-unknown' };
+    }
     return account;
   };
   const account = await select(identity);

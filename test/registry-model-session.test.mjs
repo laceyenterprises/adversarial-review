@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { dispatchReadTransport, prepareWorkerObservationSession } from '../src/dispatch-read-client.mjs';
-import { ensureWorkerRegistryReady, prefetchWorkerRegistry, resolveRemediationModel } from '../src/adapters/agent-runtime/local/remediation.mjs';
+import { ensureWorkerRegistryReady, prefetchWorkerRegistry, resolveRemediationModel, readCommittedWorkerModelSeed } from '../src/adapters/agent-runtime/local/remediation.mjs';
 import { prepareClaudeOAuthEnv, resolveReviewerExecution, resolveReviewerExecutionAsync } from '../src/reviewer-harness.mjs';
 import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { infraRecoverableFailureClass, reviewerFailureClassFromStoredRow } from '../src/reviewer-failure-classification.mjs';
@@ -43,19 +43,19 @@ function fixture(t, name) {
   return {env, set(value) {result = value;}, counts: () => ({connects, reads})};
 }
 
-test('cold sync resolution refuses, async prefetch registers once and shares cache across env copies', async t => {
+test('cold sync resolution uses seed, async prefetch registers once and shares cache across env copies', async t => {
   const f = fixture(t, 'cold');
-  assert.throws(() => resolveReviewerExecution('claude', {env: f.env, log: quiet}), {code: 'registry-unavailable'});
+  assert.equal(resolveReviewerExecution('claude', {env: f.env, log: quiet}).modelSource, 'committed-seed');
   assert.deepEqual(f.counts(), {connects: 0, reads: 0});
   await Promise.all([prefetchWorkerRegistry({env: f.env}), prefetchWorkerRegistry({env: {...f.env}})]);
   for (const harness of ['claude', 'codex', 'gemini']) {
     const execution = resolveReviewerExecution(harness, {env: {...f.env}, fallbackModel: 'forbidden-fallback', log: quiet});
     assert.equal(execution.model, `governed-${harness}`);
-    assert.equal(execution.modelSource, 'producer');
+    assert.equal(execution.modelSource, 'registry');
   }
   assert.equal(resolveRemediationModel('hammer', {env: f.env}).resolvedModel, 'governed-closer');
   assert.deepEqual(f.counts(), {connects: 1, reads: 1});
-  assert.throws(() => resolveReviewerExecution('claude', {env: {APP_CONTRACT_ENDPOINT_URL: 'https://example.invalid/foreign'}, log: quiet}), {code: 'registry-unavailable'});
+  assert.equal(resolveReviewerExecution('claude', {env: {APP_CONTRACT_ENDPOINT_URL: 'https://example.invalid/foreign'}, log: quiet}).modelSource, 'committed-seed');
 });
 
 test('a valid snapshot missing the reviewer class cannot select a host fallback', async t => {
@@ -64,7 +64,7 @@ test('a valid snapshot missing the reviewer class cannot select a host fallback'
   await prefetchWorkerRegistry({env: f.env});
   assert.throws(() => resolveReviewerExecution('codex', {
     env: f.env, fallbackModel: 'host-model', log: quiet,
-  }), {code: 'registry-unavailable', failureClass: 'reviewer-model-unresolved'});
+  }), { code: 'registry-unavailable', retryable: true });
 });
 
 test('concurrent prefetches for different endpoints each populate their own sync cache', async t => {
@@ -90,30 +90,7 @@ test('concurrent prefetches for different endpoints each populate their own sync
   assert.equal(resolveReviewerExecution('claude', {env: second, log: quiet}).model, 'second-model');
 });
 
-test('registry outage defers remediation before claiming a pending job', async t => {
-  const rootDir = mkdtempSync(join(tmpdir(), 'registry-claim-'));
-  const previousEndpoint = process.env.APP_CONTRACT_ENDPOINT_URL;
-  process.env.APP_CONTRACT_ENDPOINT_URL = 'https://example.invalid/claim-outage';
-  t.mock.method(dispatchReadTransport, 'sdk', () => ({
-    async connect() { throw new Error('fixture registry endpoint down'); },
-  }));
-  try {
-    createFollowUpJob({rootDir, branch: 'fixture/remediation', repo: 'example/fixture',
-      prNumber: 7, reviewerModel: 'codex', builderTag: 'claude-code',
-      reviewBody: '## Summary\nFix it.\n\n## Verdict\nComment only',
-      reviewPostedAt: '2026-10-28T10:00:00.000Z', critical: false});
-    const result = await consumeNextFollowUpJob({rootDir, promptTemplate: 'fixture prompt', log: quiet});
-    assert.deepEqual(result, {consumed: false, reason: 'registry-unavailable'});
-    assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'pending')).filter(name => name.endsWith('.json')).length, 1);
-    assert.equal(existsSync(getFollowUpJobDir(rootDir, 'inProgress')), false);
-  } finally {
-    if (previousEndpoint === undefined) delete process.env.APP_CONTRACT_ENDPOINT_URL;
-    else process.env.APP_CONTRACT_ENDPOINT_URL = previousEndpoint;
-    rmSync(rootDir, {recursive: true, force: true});
-  }
-});
-
-test('registry outage on refresh after claim requeues a non-blocking Codex job without spawning or losing a round', async t => {
+test('a class withdrawn after claim requeues a non-blocking Codex job without spawning or losing a round', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'registry-claimed-expiry-'));
   const previousEndpoint = process.env.APP_CONTRACT_ENDPOINT_URL;
   const f = fixture(t, 'claimed-expiry');
@@ -126,7 +103,10 @@ test('registry outage on refresh after claim requeues a non-blocking Codex job w
       reviewBody: '## Summary\nFix it.\n\n## Verdict\nComment only',
       reviewPostedAt: '2026-10-28T10:00:00.000Z', critical: false});
     const result = await consumeNextFollowUpJob({rootDir, promptTemplate: 'fixture prompt', log: quiet,
-      onClaim(job) { job.nonBlockingOnly = true; now += 60_000; f.set(new Error('fixture refresh down')); },
+      ensureWorkerRegistryReadyImpl: async () => {
+        await ensureWorkerRegistryReady({env: f.env});
+      },
+      onClaim(job) { job.nonBlockingOnly = true; now += 60_000; f.set({schema_version: 1, status: 'found', data: {classes: {}}}); },
       resolvePRLifecycleImpl: async () => null,
       resolveRemediationWorkerClassImpl: async () => ({workerClass: 'codex'}),
       execFileImpl: () => assert.fail('expired registry must not invoke a subprocess'),
@@ -145,18 +125,18 @@ test('registry outage on refresh after claim requeues a non-blocking Codex job w
   }
 });
 
-test('expired cache refuses sync use and async resolution refreshes without a new session', async t => {
+test('expired cache uses seed and async resolution refreshes without a new session', async t => {
   const f = fixture(t, 'expiry');
   let now = Date.now();
   t.mock.method(Date, 'now', () => now);
   await prefetchWorkerRegistry({env: f.env});
   now += 60_000;
-  assert.throws(() => resolveReviewerExecution('claude', {env: f.env, log: quiet}), {code: 'registry-unavailable'});
+  assert.equal(resolveReviewerExecution('claude', {env: f.env, log: quiet}).modelSource, 'committed-seed');
   f.set(reply('refreshed-claude'));
   assert.equal((await resolveReviewerExecutionAsync('claude', {env: {...f.env}, log: quiet})).model, 'refreshed-claude');
   assert.deepEqual(f.counts(), {connects: 1, reads: 2});
   now -= 120_000;
-  assert.throws(() => resolveReviewerExecution('claude', {env: f.env, log: quiet}), {code: 'registry-unavailable'});
+  assert.equal(resolveReviewerExecution('claude', {env: f.env, log: quiet}).modelSource, 'committed-seed');
 });
 
 test('prefetch reuses an already established observation session', async t => {
@@ -176,7 +156,7 @@ test('registration failure is retryable and does not poison the next registratio
     if (++attempts === 1) throw new Error('fixture registration down');
     return sdk.connect(config);
   }}));
-  await assert.rejects(prefetchWorkerRegistry({env: f.env}), {code: 'registry-unavailable'});
+  assert.equal(await prefetchWorkerRegistry({env: f.env}), false);
   assert.equal((await resolveReviewerExecutionAsync('claude', {env: f.env, log: quiet})).model, 'governed-claude');
   assert.equal(attempts, 2);
 });
@@ -190,10 +170,10 @@ test('a timed-out prefetch cannot populate the cache when the transport settles 
     readSessionHostServices: () => pending,
     readHostServicesSync: () => assert.fail('no synchronous transport'),
   }));
-  await assert.rejects(prefetchWorkerRegistry({env, timeoutMs: 10}), {code: 'registry-unavailable'});
+  assert.equal(await prefetchWorkerRegistry({env, timeoutMs: 10}), false);
   finish(reply('too-late'));
   await pending;
-  assert.throws(() => resolveReviewerExecution('claude', {env, log: quiet}), {code: 'registry-unavailable'});
+  assert.equal(resolveReviewerExecution('claude', {env, log: quiet}).modelSource, 'committed-seed');
 });
 
 test('transport and malformed registry outages remain infrastructure and recover on the next prefetch', async t => {
@@ -201,7 +181,8 @@ test('transport and malformed registry outages remain infrastructure and recover
   for (const result of [new Error('fixture down'), {schema_version: 1, status: 'unavailable'},
     {schema_version: 1, status: 'found', data: {classes: []}}]) {
     f.set(result);
-    await assert.rejects(resolveReviewerExecutionAsync('claude', {env: f.env, log: quiet}), error => {
+    assert.equal((await resolveReviewerExecutionAsync('claude', {env: f.env, log: quiet})).modelSource, 'committed-seed');
+    await assert.rejects(resolveReviewerExecutionAsync('claude', {env: f.env, seed: {}, log: quiet}), error => {
       assert.equal(error.failureClass, 'reviewer-model-unresolved');
       assert.equal(error.code, 'registry-unavailable');
       assert.equal(error.retryable, true);
@@ -218,7 +199,7 @@ test('transport and malformed registry outages remain infrastructure and recover
   assert.equal((await resolveReviewerExecutionAsync('claude', {env: f.env, log: quiet})).model, 'recovered-claude');
 });
 
-test('corporate Claude obtains the governed model before broker minting; an outage never mints', async t => {
+test('corporate Claude obtains the governed or seed model before broker minting', async t => {
   const f = fixture(t, 'corporate');
   const sourceEnv = {...f.env, CLAUDE_BROKER_PROVIDER: 'claude-code-corp',
     ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT: 'broker'};
@@ -226,18 +207,18 @@ test('corporate Claude obtains the governed model before broker minting; an outa
   const args = {sourceEnv, logger: quiet, nowMs: Date.parse('2026-01-01T00:00:00Z'),
     mintClaudeCodeBrokerTokenImpl: async request => {
       mints++;
-      assert.equal(request.model, 'governed-claude');
+      assert.equal(request.model, mints === 1 ? readCommittedWorkerModelSeed().classes['claude-reviewer'].defaultModel : 'governed-claude');
       assert.equal(request.provider, 'claude-code-corp');
       return {injected: true, token: 'synthetic-bearer', expiresAt: '2026-01-02T00:00:00Z'};
     }};
   f.set(new Error('fixture down'));
-  await assert.rejects(prepareClaudeOAuthEnv(args), {failureClass: 'reviewer-model-unresolved', retryable: true});
-  assert.equal(mints, 0);
+  assert.equal((await prepareClaudeOAuthEnv(args)).transport, 'broker');
+  assert.equal(mints, 1);
   f.set(reply('governed-claude'));
   const auth = await prepareClaudeOAuthEnv(args);
   assert.equal(auth.transport, 'broker');
   assert.equal(auth.env.ANTHROPIC_AUTH_TOKEN, 'synthetic-bearer');
-  assert.equal(mints, 1);
+  assert.equal(mints, 2);
 });
 
 test('registry failure uses existing bounded infrastructure backoff with its own breakdown', () => {

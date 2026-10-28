@@ -66,7 +66,7 @@ for (const [reason, producer, retryable] of [
   ['unavailable', {schema_version: 1, status: 'unavailable', reason: secret}, true],
   ['not-found', {schema_version: 1, status: 'not_found'}, false],
 ]) {
-  test(`registry ${reason} survives async and sync resolution without model fallback`, async t => {
+  test(`registry ${reason} retains refusal evidence and permits seed fallback only for retryable outages`, async t => {
     const env = {APP_CONTRACT_ENDPOINT_URL: `https://example.invalid/refusal-${reason}`};
     let value = producer, reads = 0;
     t.mock.method(dispatchReadTransport, 'sdk', () => ({
@@ -92,7 +92,8 @@ for (const [reason, producer, retryable] of [
       }
       return true;
     };
-    await assert.rejects(ensureWorkerRegistryReady({env}), check);
+    if (retryable) assert.equal(await ensureWorkerRegistryReady({env}), false);
+    else await assert.rejects(ensureWorkerRegistryReady({env}), check);
     assert.throws(() => dispatchReadTransport.hostServicesSync({action: 'worker_registry'}, {env}), error => {
       assert.equal(error.code, 'registry-unavailable');
       assert.equal(error.reason, reason);
@@ -102,6 +103,13 @@ for (const [reason, producer, retryable] of [
       return true;
     });
     assert.throws(() => resolveRemediationModel('fixture', {env, fallbackModel: 'forbidden-fixture'}), check);
+    if (retryable) {
+      const selected = resolveRemediationModel('remediator-codex', {env, log: {warn() {}, info() {}}});
+      assert.equal(selected.modelSource, 'committed-seed');
+      assert.ok(selected.resolvedModel);
+    } else {
+      assert.throws(() => resolveRemediationModel('remediator-codex', {env}), check);
+    }
     assert.equal(reads, 1);
     const foreign = readHostObservationSync('worker_registry', {env: {APP_CONTRACT_ENDPOINT_URL: 'https://example.invalid/other-refusal'}});
     assert.equal(foreign.reason, 'unavailable');

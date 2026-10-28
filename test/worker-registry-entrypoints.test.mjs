@@ -96,20 +96,17 @@ for (const [name, read] of Object.entries(readers)) {
     assert.equal(f.reads(), 2);
     now += 60_000;
     f.outage();
-    await assert.rejects(read(f.env), {failureClass: 'reviewer-model-unresolved', retryable: true});
-    assert.throws(() => resolveReviewerExecution('claude', {env: f.env, log: quiet}),
-      {failureClass: 'reviewer-model-unresolved'});
+    if (name === 'closer') await assert.rejects(read(f.env), { code: 'registry-unavailable' });
+    else await read(f.env);
+    assert.equal(resolveReviewerExecution('claude', {env: f.env, log: quiet}).modelSource, 'committed-seed');
   });
 
-  test(`${name} reports a cold transport outage as retryable model infrastructure`, async t => {
+  test(`${name} resolves covered models during a cold transport outage`, async t => {
     const f = registry(t, `outage-${name}`);
     f.outage();
-    await assert.rejects(read(f.env), error => {
-      assert.equal(error.failureClass, 'reviewer-model-unresolved');
-      assert.equal(error.retryable, true);
-      assert.ok(!error.isOAuthError);
-      return true;
-    });
+    if (name === 'closer') await assert.rejects(read(f.env), { code: 'registry-unavailable' });
+    else await read(f.env);
+    assert.equal(resolveReviewerExecution('claude', {env: f.env, log: quiet}).modelSource, 'committed-seed');
   });
 }
 
@@ -122,7 +119,8 @@ for (const down of [false, true]) {
     const deps = createDefaultArgusReviewDeps({rootDir, env: f.env, logger: quiet,
       evidenceIo: {}, identityPool: {plan: () => ({hqOwner: true})}, agyLease: {legacy: true},
       reviewWithGeminiImpl: async () => {
-        assert.equal(resolveReviewerExecution('gemini', {env: f.env, log: quiet}).model, 'governed-gemini');
+        const execution = resolveReviewerExecution('gemini', {env: f.env, log: quiet});
+        assert.equal(execution.modelSource, down ? 'committed-seed' : 'registry');
         return {reviewText: 'fixture review'};
       }});
     const headSha = 'a'.repeat(40);
@@ -140,11 +138,7 @@ for (const down of [false, true]) {
     assert.equal(f.reads(), 1);
     const found = findArgusJob(rootDir, {repo: 'example/fixture', prNumber: 7, headSha});
     assert.equal(found.bucket, 'pending');
-    if (down) {
-      assert.equal(caught.failureClass, 'reviewer-model-unresolved');
-      assert.equal(caught.retryable, true);
-      assert.match(found.job.drain.lastError, /reviewer-model-unresolved/);
-    } else assert.equal(caught, undefined);
+    assert.equal(caught, undefined);
   });
 }
 
@@ -166,13 +160,13 @@ test('every production model-resolution importer has an async readiness owner', 
     'src/afh-reviewer-fallback.mjs', 'src/ama/harness-fallback.mjs',
     'src/follow-up-remediation.mjs', 'src/remediation-worker-class-fallback.mjs',
     'src/review-worker-class-fallback.mjs', 'src/reviewer-harness.mjs',
-    'src/reviewer-spawn-settle.mjs', 'src/reviewer-token-pool.mjs',
+    'src/reviewer-spawn-settle.mjs', 'src/reviewer-token-pool.mjs', 'src/reviewer.mjs',
   ];
   // This pure sync config adapter is consumed only by the two async owners
   // above. It never registers a session or accesses the physical transport.
   const syncAdapter = 'src/adapters/agent-runtime/local/non-blocking-codex-model.mjs';
   assert.deepEqual(importers.sort(), [...owners, syncAdapter].sort());
-  for (const name of [...owners, 'src/reviewer.mjs', 'src/watcher.mjs',
+  for (const name of [...owners, 'src/watcher.mjs',
     'src/argus-security-review-child.mjs', 'src/argus-security-review-deps.mjs']) {
     assert.match(readFileSync(new URL(name, root), 'utf8'), /await ensureWorkerRegistryReady(?:Impl)?\(/, name);
   }

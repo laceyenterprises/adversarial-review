@@ -3044,24 +3044,31 @@ round within the normal PR-wide budget.
 
 `roles.adversarial.remediation.non_blocking.{model,reasoning_effort,max_rounds}`
 controls this path. The configured defaults are `gpt-6.1-sol`, `high`, and `1`.
-The model is checked against `remediator-codex.allowedModels`; the effort is
-checked against the Codex reasoning levels. If the configured model is not
-allowlisted, the runtime falls back to the universally allowlisted `gpt-6-sol`,
-while preserving a valid configured effort. Invalid effort values fall back to
-`high`. If no registry provides the allowlist, the runtime falls back to
-`gpt-6-sol` at `high` effort. Invalid round caps fail config validation. The
+The model is checked against the selected `remediator-codex.allowedModels`; the
+effort is checked against Codex reasoning levels. An invalid configured model
+uses the governed class default, preserving a valid configured effort. Invalid
+effort uses the class default effort. During registry outages the packaged seed
+supplies the default and allowlist; missing or invalid sources raise retryable
+`reviewer-model-unresolved`, with no literal model or effort fallback. Invalid round caps fail config validation. The
 follow-up job and remediation pass metadata record the trigger, resolved model,
 effort, and PR-wide round number for TOKCAP-02. In HQ mode, pinned Codex
 rounds use the existing direct `hq dispatch --model --reasoning-level` path;
 the App Contract endpoint currently omits those overrides. TOKCAP-01 may
 revise the configured model after quota measurements; until then the configured
-default and compatibility fallback above apply.
+default and governed fallback above apply.
 
 Reviewer harnesses resolve their model and supported effort from the
-explicit `GEMINI_REVIEWER_MODEL` process override for Gemini, then the
-`codex-reviewer`, `claude-reviewer`, or `gemini-reviewer` worker-class entry in
-the HQ registry mirror, then the repo seed. Missing values fall back to the
-host harness configuration with the source logged. Posted review and
+explicit `GEMINI_REVIEWER_MODEL` override for Gemini, then the session-scoped
+`codex-reviewer`, `claude-reviewer`, or `gemini-reviewer` registry entry. Only an
+unavailable registry snapshot permits the packaged worker-model seed; a readable
+snapshot missing the class fails closed. Pins must satisfy the available class
+allowlist, including the seed during outages. Unresolved or disallowed models
+raise retryable `reviewer-model-unresolved` with an operator-visible log, rather
+than using host configuration. Seed warnings and selection logs are limited to
+once per class/source/model per 60 seconds (seed warnings once per class).
+Antigravity substitutes its configured display token for a Gemini CLI slug and
+records `modelSource=runtime-display-token`; registry provenance does not attest
+the substituted token. Posted review and
 remediation outcome comments carry a `harness · model · effort` line below
 their existing heading. `reviewer_passes.reviewer_model` and nullable
 `reasoning_effort` retain the values passed to the harness; old rows remain

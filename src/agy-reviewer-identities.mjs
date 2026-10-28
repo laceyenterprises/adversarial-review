@@ -38,7 +38,7 @@ import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { readReviewerRunRecord, scanActiveReviewerRunRecords } from './adapters/reviewer-runtime/run-state.mjs';
@@ -47,7 +47,7 @@ import { readGeminiQuotaCooldown, readGeminiQuotaCooldownForIdentities } from '.
 import { deliverAlert } from './alert-delivery.mjs';
 import { isPgidAlive, verifyPgidIdentity } from './process-group-identity.mjs';
 import { resolveGeminiReviewerIdentities, resolveGeminiRuntime, resolveGeminiAntigravityModel, resolveGeminiReviewerTokenPools } from './role-config.mjs';
-import { loadGeminiReviewerConfigCached } from './config-loader.mjs';
+import { loadConfigCached, loadGeminiReviewerConfigCached } from './config-loader.mjs';
 import { warnPoolConfigConflict } from './pool-config-conflict.mjs';
 import { readIdentityTokenPools } from './identity-token-snapshot.mjs';
 import { createAgyHolderLeaseStore, agyLeaseOwnerAlive } from './agy-holder-leases.mjs';
@@ -620,6 +620,21 @@ function readBootstrapRecord(user, { env = process.env } = {}) {
   }
 }
 
+// Agent OS owns the comparison and fingerprint recipe. This command only
+// reads the world-readable pinned files; it never runs sudo or a helper.
+async function readPinnedCopyWarnings({ env = process.env, runImpl = runBoundedProcess, loadConfigImpl = loadConfigCached } = {}) {
+  const root = env.AGENT_OS_DEPLOY_CHECKOUT || loadConfigImpl({ env }).get('roots.deploy');
+  if (!root || !isAbsolute(root)) throw new Error('pinned-copy currency requires an absolute deploy checkout');
+  const result = await runImpl(join(root, 'modules/worker-pool/bin/agy-reviewer-identities'), ['currency'], { env });
+  if (result.code !== 0 || result.timedOut || result.error) throw new Error(describeFailure('pinned-copy currency', result));
+  const warnings = JSON.parse(result.stdout);
+  if (!Array.isArray(warnings) || warnings.some(warning => warning?.code !== 'pinned-copy-stale'
+    || !/^[a-f0-9]{64}$/.test(warning.fingerprint) || !Array.isArray(warning.files) || !Array.isArray(warning.findings))) {
+    throw new Error('invalid pinned-copy currency response');
+  }
+  return warnings;
+}
+
 async function defaultCheckHqOwnerAuth({ env }) {
   const { env: scrubbed } = scrubOAuthFallbackEnv({ ...env, HOME: env.HOME || homedir() });
   return checkAgyReviewerAuth({ env: scrubbed, cacheSuccess: false });
@@ -637,6 +652,7 @@ function createAgyReviewerIdentityPool({
   runPinnedImpl = runPinnedCommand,
   checkHqOwnerAuthImpl = defaultCheckHqOwnerAuth,
   readBootstrapRecordImpl = (user) => readBootstrapRecord(user, { env }),
+  readPinnedCopyWarningsImpl = () => readPinnedCopyWarnings({ env }),
   referenceSettings = () => referenceAgySettingsFromEnv(env),
   listUserProcessesImpl = listUserProcesses,
   runStateRootDir = DEFAULT_RUN_STATE_ROOT,
@@ -668,6 +684,33 @@ function createAgyReviewerIdentityPool({
   let noReadySince = null;
   let noReadyAlertedAt = null;
   let unreadableRunRecords = [];
+  const notifiedPinnedCopies = new Set();
+
+  async function pinnedCopyWarnings(plan) {
+    const users = plan.identities.filter(identity => !identity.hqOwner).map(identity => identity.user).sort();
+    if (!users.length) return [];
+    let warnings;
+    try {
+      warnings = await readPinnedCopyWarningsImpl();
+    } catch (error) {
+      // Unknown currency must not erase a security finding or invent drift.
+      log.warn?.(`[agy-identities] pinned-copy currency unavailable: ${error.message}`);
+      return [{ code: 'pinned-copy-currency-unavailable', findings: [error.message] }];
+    }
+    for (const warning of warnings) {
+      if (notifiedPinnedCopies.has(warning.fingerprint)) continue;
+      try {
+        await deliverAlertImpl(`agy reviewer pinned-copy-stale (identities keep serving): ${warning.findings.join('; ')}. From the deploy checkout run: sudo scripts/setup-reviewer-os-user.sh --apply; then ${users.map(user => `sudo scripts/verify-reviewer-os-user.sh --user ${user}`).join('; ')}`, {
+          event: 'reviewer.agy_pinned_copy_stale',
+          payload: { fingerprint: warning.fingerprint, files: warning.files, users },
+        });
+        notifiedPinnedCopies.add(warning.fingerprint);
+      } catch (error) {
+        log.warn?.(`[agy-identities] failed to queue pinned-copy-stale: ${error.message}`);
+      }
+    }
+    return warnings;
+  }
 
   function runHelper(opts) {
     const user = opts.user;
@@ -738,6 +781,7 @@ function createAgyReviewerIdentityPool({
         hqOwner: identity.hqOwner,
         ready: identity.hqOwner,
         reasons: identity.hqOwner ? [] : ['no readiness pass yet'],
+        warnings: [],
         initialFailureReasonSets: new Set(),
         needsProbe: false,
         probeFailureReason: null,
@@ -901,7 +945,11 @@ function createAgyReviewerIdentityPool({
     const record = readBootstrapRecordImpl(state.user);
     if (!record || record.ready !== false || !record.checkedAt || record.checkedAt === state.bootstrapCheckedAt) return;
     state.bootstrapCheckedAt = record.checkedAt;
-    const reasons = Array.isArray(record.reasons) ? record.reasons.map(String) : [];
+    const recordedReasons = Array.isArray(record.reasons) ? record.reasons.map(String) : [];
+    // Rolling deploy: an older bootstrap isolated currency alone. Currency is
+    // now evaluated above on every pass; retain every other isolation reason.
+    const reasons = recordedReasons.filter(reason => !reason.startsWith('currency: '));
+    if (recordedReasons.length && !reasons.length) return;
     isolate(state, [`keychain bootstrap isolated it${reasons.length ? `: ${reasons.join('; ')}` : ''}`]);
   }
 
@@ -1056,8 +1104,10 @@ function createAgyReviewerIdentityPool({
       }
     }
     const runningLeases = await leasesFromRunRecords();
+    const warnings = await pinnedCopyWarnings(plan);
     await Promise.all(plan.identities.map(async (identity) => {
       const state = stateFor(identity);
+      state.warnings = identity.hqOwner ? [] : warnings;
       if (state.releasing) return;
       if (state.pendingRelease) {
         await release(state.lease, state.pendingRelease);
@@ -1343,11 +1393,12 @@ function createAgyReviewerIdentityPool({
     sweepAll,
     noteGeminiDemand,
     settleProbes: () => Promise.all([...probes.values()]),
-    snapshot: () => [...states.values()].map(({ user, hqOwner: owner, ready, reasons, needsProbe, draining, adopted, lease }) => ({
+    snapshot: () => [...states.values()].map(({ user, hqOwner: owner, ready, reasons, warnings, needsProbe, draining, adopted, lease }) => ({
       user,
       hqOwner: owner,
       ready,
       reasons: [...reasons],
+      warnings: structuredClone(warnings),
       needsProbe,
       draining,
       adoptedReviews: adopted.map((entry) => entry.reviewId),
@@ -1477,6 +1528,7 @@ export {
   parseHelperKeyValues,
   prepareAgyIdentityReview,
   readBootstrapRecord,
+  readPinnedCopyWarnings,
   referenceAgySettingsFromEnv,
   resolveAgyReviewIdentityFromEnv,
   resolveAgyReviewerIdentityPlan,

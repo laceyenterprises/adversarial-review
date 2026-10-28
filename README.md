@@ -1464,6 +1464,17 @@ invalid or conflicts with a legacy account policy. Declared reviewer pools
 still fail closed, including mismatched legacy holder order. Conflicts warn as
 `pool-config-conflict` with only the key path, once per key per process.
 The scoped reviewer config cache cannot weaken ordinary config validation.
+AGYPINNEDDRIFT-01: each readiness pass calls Agent OS's read-only
+`agy-reviewer-identities currency` command for the same pinned-copy warning
+contract bootstrap uses. Drift alone keeps serving with `pinned-copy-stale` in
+snapshot warnings; security and auth failures retain isolation. The existing
+alert outbox deduplicates the sorted drifted file digest fingerprint across
+holders and watcher restarts. The notice names the operator-only commands
+`sudo scripts/setup-reviewer-os-user.sh --apply`, then
+`sudo scripts/verify-reviewer-os-user.sh --user <user>` from the deploy checkout.
+Matching copies clear the warning; unknown currency is separately visible as
+`pinned-copy-currency-unavailable`. Deploy the companion Agent OS command before
+this reader; no automatic root repair or service restart is performed.
 Synthetic regressions are in `test/agy-reviewer-identities.test.mjs` and
 `test/config-token-pool-migration.test.mjs`; existing smoke promises are unchanged.
 Operator cutover still requires ITP-19 approval;

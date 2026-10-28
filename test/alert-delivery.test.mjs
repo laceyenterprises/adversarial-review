@@ -1513,3 +1513,31 @@ test('OWNERDEADLINE-01: outbox deduplicates lost watchdog receipts by head and t
   assert.notEqual(nextTransition.id, first.id);
   assert.notEqual(nextHead.id, first.id);
 });
+
+
+test('AGYPINNEDDRIFT-01: one operator delivery per shared drift fingerprint survives pool restart', async t => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  let sent = 0;
+  const options = { env, event: 'reviewer.agy_pinned_copy_stale',
+    payload: { fingerprint: 'a'.repeat(64), users: ['reviewer-a'] },
+    fsImpl: { readFileSync: () => 'fixture-token', existsSync: () => true },
+    requestText: async () => { sent++; return '{}'; } };
+  const first = await deliverAlert('fixture drift', options);
+  const repeat = await deliverAlert('fixture repeated pass', options);
+  assert.equal(repeat.id, first.id);
+  assert.equal(repeat.queued, false);
+  await drainPendingAlerts(options);
+  assert.equal(sent, 1);
+  const deliveredPath = sinkPath(rootDir, 'delivered', `${first.id}.json`);
+  utimesSync(deliveredPath, new Date('2020-01-01'), new Date('2020-01-01'));
+  sweepAlertArchiveRetention(rootDir, { now: new Date('2026-10-28'), retentionDays: 1 });
+  assert.equal(existsSync(deliveredPath), true, 'digest receipts outlive ordinary archive retention');
+  const restarted = await deliverAlert('fixture restarted watcher, different user', {
+    ...options, payload: { ...options.payload, users: ['reviewer-b'] } });
+  assert.equal(restarted.id, first.id);
+  assert.equal(restarted.queued, false);
+  await deliverAlert('fixture changed bytes', { ...options, payload: { ...options.payload, fingerprint: 'b'.repeat(64) } });
+  await drainPendingAlerts(options);
+  assert.equal(sent, 2);
+});

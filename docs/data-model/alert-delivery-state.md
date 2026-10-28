@@ -202,3 +202,16 @@ enqueue and the watchdog's `transition_pages` receipt therefore reuses the
 same pending, delivered or dead-letter document; a different head or missing
 transition can enqueue its own page. The queue schema and delivery retries do
 not change.
+
+
+## Pinned reviewer currency notifications (AGYPINNEDDRIFT-01)
+
+`reviewer.agy_pinned_copy_stale` uses the existing outbox and transport with a
+fixed ID derived solely from `payload.fingerprint`. Payload also carries the
+sorted drifted `files` digest rows and affected `users`. The fingerprint comes
+from Agent OS's shared read-only currency comparison; user-list changes and
+watcher restarts do not create a second notification. Pending, inflight,
+delivered and dead-letter documents all suppress duplicate enqueues. Delivered
+and receipt filenames for this event are exempt from ordinary archive expiry:
+they are permanent once-per-fingerprint receipts. Changed fingerprints use new
+IDs. Transport delivery retains the existing at-least-once guarantee.

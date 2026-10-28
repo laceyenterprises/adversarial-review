@@ -352,6 +352,8 @@ function sweepAlertArchiveRetention(rootDir, {
       continue;
     }
     for (const name of names) {
+      // This receipt is the once-per-digest contract, not a timed reminder.
+      if (name.startsWith(`${sanitizeAlertIdPrefix('reviewer.agy_pinned_copy_stale')}-`)) continue;
       const filePath = join(directory, name);
       try {
         if (statSyncImpl(filePath).mtimeMs >= cutoffMs) continue;
@@ -713,6 +715,12 @@ function alertPresentationForDoc(doc) {
 
   }
 
+  if (event === 'reviewer.agy_pinned_copy_stale') {
+    return { severity: 'SEV3', headline: 'Pinned reviewer copies need refresh',
+      body: String(doc.text || ''), action: 'Run the setup and per-user verification commands from the deploy checkout.',
+      detail: `Drift fingerprint: ${payload.fingerprint}` };
+  }
+
   const recovered = event === 'watcher.recovered';
   const headlineByEvent = {
     'watcher.no_progress': 'Review dispatch delayed — monitor queue',
@@ -740,6 +748,7 @@ const FIXED_RECOVERY_EVENTS = Object.freeze([
   'ama.orphan_recovery.missing-transition',
   'ama_closer.pre_receipt_inspection_required',
   'finalization.queue.infrastructure',
+  'reviewer.agy_pinned_copy_stale',
 ]);
 
 function sanitizeAlertIdPrefix(prefix) {
@@ -1571,6 +1580,10 @@ async function deliverAlert(text, {
         payload?.repo, payload?.prNumber, payload?.headSha,
         selected?.row, selected?.action, selected?.actor, selected?.reason,
       ])).digest('hex'));
+    } else if (event === 'reviewer.agy_pinned_copy_stale') {
+      // The install is shared by all added identities. Keep the receipt across
+      // watcher restarts and users; only changed drift digests warrant a page.
+      doc.id = fixedAlertId(event, crypto.createHash('sha256').update(String(payload?.fingerprint)).digest('hex'));
     } else if (event === 'finalization.queue.infrastructure') {
       doc.id = fixedAlertId('queue-infrastructure', crypto.createHash('sha256').update(String(payload?.causeKey)).digest('hex'));
     } else if (event === 'ama_closer.pre_receipt_inspection_required') {

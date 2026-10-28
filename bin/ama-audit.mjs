@@ -130,8 +130,10 @@ function runInitOrAppend(subcommand, argv) {
     }
   }
   const attemptBase = loadAttemptJson(values['attempt-json']);
+  const launchRequestId = process.env.HQ_LAUNCH_REQUEST_ID
+    || process.env.AGENT_OS_WORKER_LRQ_ID || process.env.LAUNCH_REQUEST_ID || null;
   const attempt = { ...attemptBase, outcome: values.outcome,
-    ...(process.env.HQ_LAUNCH_REQUEST_ID ? { launchRequestId: process.env.HQ_LAUNCH_REQUEST_ID } : {}) };
+    ...(launchRequestId ? { launchRequestId } : {}) };
   const metadata = Object.fromEntries([
     ['closureAuthority', values['closure-authority']],
     ['reviewer', values.reviewer],
@@ -154,7 +156,7 @@ function runInitOrAppend(subcommand, argv) {
         : appendAmaAuditAttempt(args);
     if (values['root-dir']) releaseRetryableAmaCloserLease({
       rootDir: values['root-dir'], repo: args.repo, prNumber: args.prNumber,
-      headSha: args.headSha, launchRequestId: process.env.HQ_LAUNCH_REQUEST_ID,
+      headSha: args.headSha, launchRequestId,
       sourceHeadSha: values['lease-head'], attempt, now: args.now,
     });
     process.stdout.write(`${filePath}\n`);

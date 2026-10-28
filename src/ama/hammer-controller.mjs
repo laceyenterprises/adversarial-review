@@ -1,3 +1,4 @@
+import { readDispatchFilesSync } from '../dispatch-files-client.mjs';
 import { spawn, execFileSync } from 'node:child_process';
 import { fstatSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -44,14 +45,14 @@ export function controllerLaunchId(env) {
 
 // Activation belongs to the adapter's launch record, not a later shell export.
 // This is environment provenance only; launch status still uses the SDK reader.
-export function controllerLaunchEnvironment(env = process.env) {
+export function controllerLaunchEnvironment(env = process.env, {readDispatchFilesImpl = readDispatchFilesSync} = {}) {
   const launchRequestId = controllerLaunchId(env);
-  const contract = JSON.parse(readFileSync(join(env.HAM_HQ_ROOT || resolveHqRoot(env), 'dispatch',
-    launchRequestId, 'env-contract.json'), 'utf8'));
-  if (contract.launchProvenance?.launchRequestId !== launchRequestId) {
+  const result = readDispatchFilesImpl({launch_request_id: launchRequestId}, {env});
+  const enabled = result?.metadata?.launchEnvironment?.dispatchReadsEnabled;
+  if (!result?.ok || result.metadata.launchRequestId !== launchRequestId || typeof enabled !== 'boolean') {
     throw new Error('hammer controller launch environment identity unconfirmed');
   }
-  return { ...env, ADVERSARIAL_DISPATCH_READS_ENABLED: contract.ADVERSARIAL_DISPATCH_READS_ENABLED };
+  return {...env, ADVERSARIAL_DISPATCH_READS_ENABLED: enabled ? '1' : '0'};
 }
 
 export function assertHammerController(env = process.env, { readGroupImpl = currentProcessGroupId } = {}) {

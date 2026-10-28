@@ -84,17 +84,17 @@ test('only the harness\'s own 429 counts, not a 429 the hammer read or quoted', 
   }), true);
 });
 
-test('the worker output is read from the launch\'s dispatch dir, and only a safe launch id is joined', (t) => {
-  const hqRoot = mkdtempSync(join(tmpdir(), 'closerreuse-worker-output-'));
-  t.after(() => rmSync(hqRoot, { recursive: true, force: true }));
-  mkdirSync(join(hqRoot, 'dispatch', LRQ), { recursive: true });
-  writeFileSync(join(hqRoot, 'dispatch', LRQ, 'stdout.log'), `${'x'.repeat(100_000)}\n${RESULT_429}\n`);
-  const output = readDeadHammerWorkerOutput({ hqRoot, launchRequestId: LRQ });
+test('worker output uses bounded public logical tails without an HQ root', () => {
+  const calls = [];
+  const readDispatchFilesImpl = selector => {
+    calls.push(selector);
+    return {ok: true, log: {status: 'found', text: selector.stream === 'stdout' ? RESULT_429 : '', redacted: true, truncated: true}};
+  };
+  const output = readDeadHammerWorkerOutput({launchRequestId: LRQ, readDispatchFilesImpl});
   assert.equal(output.stderr, '');
-  assert.ok(output.stdout.length <= 64 * 1024);
-  assert.equal(hasProviderApi429(output), true, 'the tail keeps the final result event');
-  assert.deepEqual(readDeadHammerWorkerOutput({ hqRoot, launchRequestId: '../etc' }), { stdout: '', stderr: '' });
-  assert.deepEqual(readDeadHammerWorkerOutput({ hqRoot: null, launchRequestId: LRQ }), { stdout: '', stderr: '' });
+  assert.equal(hasProviderApi429(output), true);
+  assert.deepEqual(calls.map(row => [row.launch_request_id, row.stream, row.tail]), [[LRQ, 'stdout', true], [LRQ, 'stderr', true]]);
+  assert.deepEqual(readDeadHammerWorkerOutput({launchRequestId: LRQ, readDispatchFilesImpl: () => ({ok: false})}), {stdout: '', stderr: ''});
 });
 
 // The next dispatch would run on a different harness (a fallback took over).

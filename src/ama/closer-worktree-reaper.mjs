@@ -1,3 +1,4 @@
+import { readWorkerObservation } from '../dispatch-read-client.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
 import { existsSync, rmSync, statSync, promises as fsPromises } from 'node:fs';
@@ -11,8 +12,8 @@ import { execGhWithRetry } from '../gh-cli.mjs';
 
 const execFileAsync = promisify(execFile);
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-const DEFAULT_HQ_PATH = '/Users/airlock/.local/bin/hq';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
-const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
+const DEFAULT_HQ_PATH = process.env.HQ_BIN || 'hq';
+const DEFAULT_HQ_ROOT = null;
 const DEFAULT_REAP_LIMIT = 8;
 const DEFAULT_REAP_BUDGET_MS = 15_000;
 const DEFAULT_SCAN_LIMIT = 64;
@@ -155,9 +156,6 @@ function persistScanCursor(cursorPath, cursor, logger = console) {
   }
 }
 
-function recoverableDiscoveryError(err) {
-  return ['ENOENT', 'EACCES', 'ENOTDIR'].includes(String(err?.code || ''));
-}
 
 function pruneProbeFailures(probeFailures, {
   currentWorkerIds = null,
@@ -186,165 +184,41 @@ function pruneProbeFailures(probeFailures, {
   return probeFailures;
 }
 
-async function listCurrentHammerWorkerIds(hqRoot, {
-  registeredByWorker = new Map(),
-  readdirImpl = fsPromises.readdir,
-  logger = console,
-} = {}) {
-  const workersDir = join(hqRoot, 'workers');
-  try {
-    const entries = await readdirImpl(workersDir, { withFileTypes: true });
-    const workerIds = new Set(
-      entries
-        .filter((entry) => entry.isDirectory() && HAMMER_WORKER_RE.test(entry.name))
-        .map((entry) => entry.name),
-    );
-    for (const workerId of registeredByWorker.keys()) workerIds.add(workerId);
-    return workerIds;
-  } catch (err) {
-    if (recoverableDiscoveryError(err)) {
-      if (err?.code !== 'ENOENT') {
-        logger?.warn?.(`[closer-worktree-reap] probe-failure-gc-discovery-skipped path=${workersDir} code=${err.code}`);
-      }
-      return null;
-    }
-    throw err;
-  }
+async function listCurrentHammerWorkerIds(hqRoot, {registeredByWorker = new Map(), readWorkerObservationImpl = readWorkerObservation} = {}) {
+  const observed = await readWorkerObservationImpl({observation: 'workspaces'}, {hqRoot});
+  if (!observed.ok) return null;
+  return new Set([...registeredByWorker.keys(), ...observed.rows.map(row => row.worker_id).filter(id => HAMMER_WORKER_RE.test(id || ''))]);
 }
 
-async function listHqRepoPaths(hqRoot, {
-  scanLimit,
-  lastName,
-  readdirImpl = fsPromises.readdir,
-  logger = console,
-} = {}) {
+async function listHqRepoPaths(hqRoot, {hqPath = DEFAULT_HQ_PATH, execFileImpl = execFileAsync, logger = console} = {}) {
+  try {
+    const {stdout} = await execFileImpl(hqPath, ['repo', 'list', '--json', ...(hqRoot ? ['--root', hqRoot] : [])], {timeout: loadAwareTimeoutMs(30_000), maxBuffer: 1024 * 1024});
+    const result = JSON.parse(stdout);
+    const rows = Array.isArray(result) ? result : result.repos;
+    if (!Array.isArray(rows)) throw new Error('invalid repository inventory');
+    return {paths: [...new Set([...(result.worktreeRoots || []), ...rows.map(row => row.checkoutPath || row.path || row.repoPath)].filter(path => typeof path === 'string'))], complete: !result.errors?.length, failedRoots: result.errors?.length || 0};
+  } catch { logger?.warn?.("[closer-worktree-reap] repository-inventory-unavailable"); return {paths: [], complete: false, failedRoots: 1}; }
+}
+
+async function listHammerWorkerDirs(hqRoot, {scanLimit, lastName,
+  readWorkerObservationImpl = readWorkerObservation} = {}) {
+  const observed = await readWorkerObservationImpl({observation: 'workspaces'}, {hqRoot});
+  if (!observed.ok) return {entries: [], nextCursor: null, complete: false};
+  const seen = new Set();
+  const workers = observed.rows.filter(row => HAMMER_WORKER_RE.test(row.worker_id || '')
+    && !seen.has(row.worker_id) && seen.add(row.worker_id)).map(row => ({name: row.worker_id, row}));
+  const discovery = pageAfterCursor(workers, lastName, scanLimit);
   const entries = [];
-  let complete = true;
-  let failedRoots = 0;
-  for (const rootName of ['repos', 'worker-base']) {
-    const reposDir = join(hqRoot, rootName);
-    const rootEntries = await readdirImpl(reposDir, { withFileTypes: true }).catch((err) => {
-      if (recoverableDiscoveryError(err)) {
-        if (err?.code !== 'ENOENT') {
-          complete = false;
-          failedRoots += 1;
-          logger?.warn?.(`[closer-worktree-reap] repo-discovery-skipped path=${reposDir} code=${err.code}`);
-        }
-        return [];
-      }
-      throw err;
-    });
-    entries.push(...rootEntries
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => ({
-        name: `${rootName}/${entry.name}`,
-        path: join(reposDir, entry.name),
-      })));
+  for (const {name, row} of discovery.page) {
+    const directoryName = row.directory_name;
+    const workerDir = join(hqRoot, 'workers', name);
+    const worktreePath = typeof directoryName === 'string' && basename(directoryName) === directoryName
+      ? join(workerDir, directoryName) : null;
+    entries.push({workerId: name, workerDir, worktreePath, launchRequestId: row.launch_request_id,
+      manifestState: row.manifest_state, prNumber: parseHammerPrNumber(name), diskPresent: row.present === true,
+      unresolvable: !worktreePath});
   }
-  const discovery = pageAfterCursor(
-    entries,
-    lastName,
-    scanLimit,
-  );
-  return {
-    paths: discovery.page.map((entry) => entry.path),
-    nextCursor: discovery.nextCursor,
-    complete,
-    failedRoots,
-  };
-}
-
-function manifestWorktreePath(workerDir, manifest) {
-  const rawPath = manifest?.workspacePath || manifest?.worktreePath;
-  if (typeof rawPath !== 'string' || !rawPath.trim()) return null;
-  const candidate = rawPath.startsWith('/')
-    ? resolve(rawPath)
-    : resolve(workerDir, rawPath);
-  return pathTextEquals(dirname(candidate), workerDir) ? candidate : null;
-}
-
-async function resolveHammerWorktreePath(workerDir, {
-  readdirImpl = fsPromises.readdir,
-  readFileImpl = fsPromises.readFile,
-  logger = console,
-} = {}) {
-  const manifestPath = join(workerDir, 'workspace.json');
-  try {
-    const manifest = JSON.parse(await readFileImpl(manifestPath, 'utf8'));
-    const worktreePath = manifestWorktreePath(workerDir, manifest);
-    if (worktreePath) return worktreePath;
-
-    const declaredPath = manifest?.workspacePath || manifest?.worktreePath;
-    if (typeof declaredPath === 'string' && declaredPath.trim()) {
-      // A present-but-invalid path is a security boundary violation. Do not
-      // replace it with a guessed child directory.
-      logger?.warn?.(`[closer-worktree-reap] manifest-workspace-invalid path=${manifestPath}`);
-      return null;
-    }
-    // V1 manifests did not always persist either path field. Fall through to
-    // the single-child legacy discovery below instead of leaking those
-    // half-registered worker directories forever.
-    logger?.warn?.(`[closer-worktree-reap] manifest-workspace-legacy-fallback path=${manifestPath}`);
-  } catch (err) {
-    if (err?.code !== 'ENOENT') {
-      logger?.warn?.(`[closer-worktree-reap] manifest-read-failed path=${manifestPath}: ${err?.message || err}`);
-      return null;
-    }
-  }
-
-  const children = await readdirImpl(workerDir, { withFileTypes: true }).catch((err) => {
-    if (!recoverableDiscoveryError(err)) throw err;
-    return [];
-  });
-  const candidates = children
-    .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
-    .map((entry) => resolve(workerDir, entry.name));
-  return candidates.length === 1 ? candidates[0] : null;
-}
-
-async function listHammerWorkerDirs(hqRoot, {
-  scanLimit,
-  lastName,
-  readdirImpl = fsPromises.readdir,
-  readFileImpl = fsPromises.readFile,
-  logger = console,
-} = {}) {
-  const workersDir = join(hqRoot, 'workers');
-  const entries = await readdirImpl(workersDir, { withFileTypes: true }).catch((err) => {
-    if (recoverableDiscoveryError(err)) {
-      if (err?.code !== 'ENOENT') {
-        logger?.warn?.(`[closer-worktree-reap] worker-discovery-skipped path=${workersDir} code=${err.code}`);
-      }
-      return [];
-    }
-    throw err;
-  });
-  const discovery = pageAfterCursor(
-    entries.filter((entry) => entry.isDirectory() && HAMMER_WORKER_RE.test(entry.name)),
-    lastName,
-    scanLimit,
-  );
-  const resolvedEntries = [];
-  for (const entry of discovery.page) {
-    const workerDir = join(workersDir, entry.name);
-    const worktreePath = await resolveHammerWorktreePath(workerDir, {
-      readdirImpl,
-      readFileImpl,
-      logger,
-    });
-    resolvedEntries.push({
-      workerId: entry.name,
-      workerDir,
-      worktreePath,
-      prNumber: parseHammerPrNumber(entry.name),
-      diskPresent: Boolean(worktreePath) && existsSync(worktreePath),
-      unresolvable: !worktreePath,
-    });
-  }
-  return {
-    entries: resolvedEntries,
-    nextCursor: discovery.nextCursor,
-  };
+  return {entries, nextCursor: discovery.nextCursor, complete: true};
 }
 
 async function execGit({ repoPath, args, execFileImpl = execFileAsync, timeout = loadAwareTimeoutMs(30_000) }) {
@@ -593,38 +467,17 @@ function isPidAliveLocal(pid, processKillImpl = process.kill) {
   }
 }
 
-async function resolveEntryLaunchRequestId(entry, { readFileImpl = fsPromises.readFile } = {}) {
-  const workerDir = entry?.workerDir;
-  if (!workerDir) return { launchRequestId: null, defer: false, reason: 'no-worker-dir' };
-  let body;
-  try {
-    body = await readFileImpl(join(workerDir, 'workspace.json'), 'utf8');
-  } catch (err) {
-    if (String(err?.code || '') === 'ENOENT') {
-      // Genuinely untracked (no manifest) → safe to fall through to the ordinary
-      // reap path (the half-registered / legacy leak-prevention case).
-      return { launchRequestId: null, defer: false, reason: 'manifest-absent' };
-    }
-    // Transient I/O reading the manifest (EIO / EMFILE / EAGAIN / EACCES under
-    // load, ...). Do NOT null-and-reap: a momentary read failure must not delete
-    // a live hammer's tree. DEFER; the next tick re-reads.
-    return { launchRequestId: null, defer: true, reason: `manifest-read-error:${err?.code || 'unknown'}` };
-  }
-  let manifest;
-  try {
-    manifest = JSON.parse(body);
-  } catch {
-    // Definitively malformed JSON — a stable property of the file, not a
-    // transient condition → treat as untracked (safe reap).
-    return { launchRequestId: null, defer: false, reason: 'manifest-malformed' };
-  }
-  const raw = manifest?.launchRequestId || manifest?.dispatchId;
-  const launchRequestId = typeof raw === 'string' && raw.trim() ? raw.trim() : null;
-  return {
-    launchRequestId,
-    defer: false,
-    reason: launchRequestId ? 'resolved' : 'no-launch-request-id',
-  };
+async function resolveEntryLaunchRequestId(entry, {readWorkerObservationImpl = readWorkerObservation} = {}) {
+  if (!entry?.workerId) return {launchRequestId: null, defer: false, reason: 'no-worker-identity'};
+  if (entry?.manifestState === 'unavailable') return {launchRequestId: null, defer: true, reason: 'manifest-unavailable'};
+  if (entry?.launchRequestId) return {launchRequestId: entry.launchRequestId, defer: false, reason: 'resolved'};
+  const result = await readWorkerObservationImpl({observation: 'workspaces', worker_id: entry?.workerId},
+    {hqRoot: entry?.workerDir ? dirname(dirname(entry.workerDir)) : undefined});
+  if (!result?.ok) return {launchRequestId: null, defer: true, reason: 'workspace-observation-unavailable'};
+  const row = result.rows[0];
+  const launchRequestId = row?.launch_request_id || null;
+  return {launchRequestId, defer: row?.manifest_state === 'unavailable',
+    reason: launchRequestId ? 'resolved' : row?.manifest_state === 'invalid' ? 'manifest-malformed' : 'manifest-absent'};
 }
 
 async function probeHammerWorkerActivity({
@@ -780,6 +633,7 @@ async function reapCloserHammerWorktrees({
   execGhWithRetryImpl = execGhWithRetry,
   rmSyncImpl = rmSync,
   readFileImpl = fsPromises.readFile,
+  readWorkerObservationImpl = readWorkerObservation,
   probeWorkerActivityImpl = probeHammerWorkerActivity,
   probeWorkerDirectoryUseImpl = probeWorkerDirectoryUse,
   unknownProbeLimit = normalizePositiveInteger(
@@ -811,7 +665,7 @@ async function reapCloserHammerWorktrees({
         // A registration map is safe only when it covers every discovered repo.
         scanLimit: Infinity,
         lastName: null,
-        readdirImpl,
+        hqPath, execFileImpl,
         logger,
       });
   const effectiveRepoPaths = repoDiscovery.paths;
@@ -827,6 +681,7 @@ async function reapCloserHammerWorktrees({
   const reapStartedAt = Date.now();
   const registered = registrationScan.byPath;
   const workerDiscovery = await listHammerWorkerDirs(hqRoot, {
+    readWorkerObservationImpl,
     scanLimit,
     lastName: cursor.worker,
     readdirImpl,
@@ -933,6 +788,7 @@ async function reapCloserHammerWorktrees({
   let evaluationCursor = cursor.evaluation;
   const probeFailures = { ...cursor.probeFailures };
   const currentWorkerIds = await listCurrentHammerWorkerIds(hqRoot, {
+    readWorkerObservationImpl,
     registeredByWorker,
     readdirImpl,
     logger,
@@ -1012,7 +868,7 @@ async function reapCloserHammerWorktrees({
     // observes no same-UID cwd or completes a clean no-match scan. The
     // worker-pool orphan reaper remains the backstop for trees that cannot be
     // classified safely here.
-    const manifestProbe = await resolveEntryLaunchRequestId(entry, { readFileImpl });
+    const manifestProbe = await resolveEntryLaunchRequestId(entry, { readWorkerObservationImpl });
     const deferReap = (deferReason, launchRequestId, evidence = {}) => {
       summary.deferredActiveWorker += 1;
       if (evidence.livenessState === 'unknown') summary.deferredUnknownWorker += 1;

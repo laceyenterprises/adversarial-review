@@ -1,3 +1,5 @@
+import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
+installDispatchFileProducerFixture();
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
@@ -24,8 +26,9 @@ function makeHqRoot() {
   mkdirSync(workerDir, { recursive: true });
   writeFileSync(
     join(workerDir, 'workspace.json'),
-    JSON.stringify({ launchRequestId: 'lrq_637a5137' })
+    JSON.stringify({ launchRequestId: 'lrq_637a5137', runId: 'wrun_spv03', workspacePath: 'agent-os' })
   );
+  writeFileSync(join(workerDir, 'run.json'), JSON.stringify({runId: 'wrun_spv03', launchRequestId: 'lrq_637a5137'}));
   return root;
 }
 

@@ -25,17 +25,11 @@ function validateReplyStorageKey(key, label = 'replyStorageKey') {
   return value;
 }
 
-function resolveHqRoot(env = process.env, { requireExists = false } = {}) {
+function resolveHqRoot(env = process.env) {
   if (!env.HQ_ROOT) {
     throw new Error(`HQ_ROOT must be set when ${HQ_REMEDIATION_DISPATCH_TRIGGER}`);
   }
   const root = resolve(env.HQ_ROOT);
-  if (requireExists && !existsSync(root)) {
-    throw new Error(
-      `HQ remediation root does not exist: ${root}. ` +
-      `Set HQ_ROOT to an existing agent-os-hq checkout before consuming follow-up jobs when ${HQ_REMEDIATION_DISPATCH_TRIGGER}.`
-    );
-  }
   return root;
 }
 

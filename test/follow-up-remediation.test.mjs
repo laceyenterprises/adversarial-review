@@ -1,3 +1,5 @@
+import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
+installDispatchFileProducerFixture();
 import './helpers/load-aware-timeout-fixture.mjs';
 import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -1286,7 +1288,7 @@ test('resolveHqRoot honors HQ_ROOT when set', async () => {
   });
 });
 
-test('resolveHqRoot defaults under the current home directory and can require an existing root', () => {
+test('resolveHqRoot forwards explicit transport context without an OS filesystem probe', () => {
   assert.throws(
     () => resolveHqRoot({}),
     /HQ_ROOT must be set/
@@ -1296,10 +1298,9 @@ test('resolveHqRoot defaults under the current home directory and can require an
   const target = resolveRemediationReplyTarget({});
   assert.equal(target.mode, 'local');
   assert.equal(target.root, path.join(repoRoot, 'data', 'replies'));
-  assert.throws(
-    () => resolveHqRoot({ HQ_ROOT: path.join(tmpdir(), 'missing-hq-root-does-not-exist') }, { requireExists: true }),
-    /HQ remediation root does not exist/
-  );
+  const explicit = path.join(tmpdir(), 'missing-hq-root-does-not-exist');
+  assert.equal(resolveHqRoot({HQ_ROOT: explicit}, {requireExists: true}), explicit);
+
 });
 
 test('resolveRemediationWorkspaceRoot uses HQ runtime state outside the deploy checkout', () => {

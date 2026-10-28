@@ -1,3 +1,5 @@
+import { prepareWorkerObservationSession } from './dispatch-read-client.mjs';
+import { readHostIdentitySync } from './dispatch-files-client.mjs';
 import { recoverInfrastructureChecks } from './ci-recovery.mjs';
 import { holdRemediationForCiInfrastructure, resumeCiInfrastructureRound, deferCiInfrastructureProbe, clearCiInfrastructureWait } from './remediation-ci-infrastructure.mjs';
 import { resolveOsgRemediatorRoute } from './osg-remediator.mjs';
@@ -310,12 +312,8 @@ function requireHqDispatchEnvValue(env, key, message) {
 }
 
 function readHqConfigOwnerUser(hqRoot) {
-  const configPath = join(hqRoot, '.hq', 'config.json');
-  const parsed = JSON.parse(readFileSync(configPath, 'utf8'));
-  const ownerUser = String(parsed?.ownerUser || parsed?.owner_user || '').trim();
-  if (!ownerUser) {
-    throw new Error(`HQ config at ${configPath} is missing ownerUser`);
-  }
+  const ownerUser = readHostIdentitySync({hqRoot}).ownerUser;
+  if (!ownerUser) throw new Error('host identity unavailable');
   return ownerUser;
 }
 
@@ -4053,6 +4051,10 @@ async function stopConsumedJobWithComment({
 async function main() {
   if (process.argv.includes('--with-hq-integration')) {
     process.env.ADV_WITH_HQ_INTEGRATION = '1';
+  }
+  if (process.env.ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED === '1') {
+    const ready = await prepareWorkerObservationSession({env: process.env});
+    if (!ready.ok) console.warn('[public-observations] startup session unavailable; authoritative reads remain held');
   }
   validateStartupRemediationConfig(process.env);
   const mode = process.argv.includes('reconcile') ? 'reconcile' : 'consume';

@@ -1,3 +1,5 @@
+import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
+installDispatchFileProducerFixture();
 import { noWorkVerdict } from './fixtures/execution-verdict.mjs';
 // CLOSERREUSE-01 (SEV2 2026-09-29, agent-os#7355): a dead hammer's terminal
 // closer record failed every later closer decision for its PR.

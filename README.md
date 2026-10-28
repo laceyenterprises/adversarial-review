@@ -3712,3 +3712,34 @@ leases and artifacts until receipt adoption or conclusive no-launch proof.
 Live owners and once-only launch/refund fences remain authoritative. See the
 [recovery contract](docs/dispatch-absence-recovery.md) for fields, deployment order and offline evidence.
 Existing smoke promises remain; no live operation is part of validation.
+
+
+### Public dispatch metadata and logical logs
+
+The client uses the pinned 0.12.0 SDK to request producer-owned dispatch files
+by authorized launch/run identity. Closer discovery, teardown identity, daemon
+owner identity, controller activation provenance and runtime stdout consume
+public projections. Partial publication, changed slot identity, unavailable
+transport and truncated output retain custody; none enables a native-file
+fallback or authorizes merge. Existing merged/closed handling and exact-head
+review authority remain unchanged.
+
+Workspace discovery requires the separately granted
+`worker.workspaces.observe` capability; Git checkout discovery uses the existing
+`hq repo list --json` inventory. Host diagnostic, registry, deploy and admission
+observations require `host.observations.read`; audit requests also require
+launch scope. Managed CI is verified by its owner for the exact repository and
+commit, without a worker-directory scan. App policy still chooses models,
+interprets diagnostics and owns cleanup and merge decisions.
+
+App-owned review databases, reply artifacts, audit receipts and workspace
+records keep their existing storage and retention rules, including historical
+HQ namespaces. They are not OS-owned dispatch metadata. The app's roster cache
+contains prior public observations and labels its cached source explicitly.
+
+Activation requires the merged producer, installed SDK and complete narrow
+grants before a reviewed client reload. For this coordinated SDK release, the
+existing artifact provenance gate remains a hold until the producer merges.
+Then copy the exact merged artifact, verify its digest and update the consumer
+producer record with the authoritative merge commit, following the SDK
+coordinated-release procedure. Do not substitute a candidate revision.

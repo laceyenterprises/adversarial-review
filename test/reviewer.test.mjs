@@ -1,3 +1,5 @@
+import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
+installDispatchFileProducerFixture();
 import { appendScopeViolationFinding, evaluateAdditiveOnlyScope } from '../src/additive-only-scope.mjs';
 import { ReviewerPromptTooLargeError } from '../src/reviewer-outcomes.mjs';
 import test from 'node:test';
@@ -3393,9 +3395,9 @@ test('reviewer model and effort use HQ mirror before seed and host config', () =
       AGENT_OS_DEPLOY_CHECKOUT: rootDir }, () => resolveCodexExecOverrides({ log: { info: (line) => logs.push(line) } }));
     assert.equal(overrides.model, 'gpt-mirror');
     assert.equal(overrides.reasoningEffort, 'high');
-    assert.equal(overrides.modelSource, 'registry-mirror');
+    assert.equal(overrides.modelSource, 'producer');
     assert.deepEqual(overrides.configOverrides, [{ key: 'model_reasoning_effort', value: 'high' }]);
-    assert.match(logs[0], /source=registry-mirror.*source=registry-mirror/);
+    assert.match(logs[0], /source=producer.*source=producer/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

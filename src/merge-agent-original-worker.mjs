@@ -6,7 +6,8 @@
 // original worker is safe to reuse/tear down. This is a LEAF module: it must
 // never import from ./follow-up-merge-agent.mjs.
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename } from 'node:path';
+import { readWorkerDispatchFiles } from './dispatch-files-client.mjs';
 
 import { readLatestWorkerRunStatusFromLedgerAsync } from './session-ledger-read-adapter.mjs';
 
@@ -64,21 +65,12 @@ function isTerminalWorkerRunStatus(status) {
   return Boolean(normalized) && TERMINAL_WORKER_RUN_STATUSES.has(normalized);
 }
 
-function readWorkerWorkspace(workerDir) {
-  const workspacePath = join(workerDir, 'workspace.json');
-  const workspace = readJsonFileDetailed(workspacePath);
-  if (workspace.ok) {
-    return { found: true, workspace: workspace.value };
+async function readWorkerWorkspace(workerId, args = {}) {
+  const files = await (args.readWorkerDispatchFilesImpl ?? readWorkerDispatchFiles)(workerId, args);
+  if (!files?.ok || (files.metadata?.fileStates?.workspace !== 'available' && files.metadata?.workspace?.present !== false)) {
+    return {found: false, reason: 'dispatch-files-unavailable'};
   }
-  if (workspace.error?.code === 'ENOENT') {
-    return { found: false, reason: 'workspace-missing' };
-  }
-  return {
-    found: false,
-    reason: 'workspace-read-failed',
-    detail: workspace.error?.message || String(workspace.error),
-    code: workspace.error?.code || null,
-  };
+  return {found: true, workspace: files.metadata.workspace, runRecord: files.metadata.run, row: files.row, launchRequestId: files.metadata.launchRequestId, runId: files.metadata.runId};
 }
 
 function validateWorkerWorkspaceForBranch(workspace, originalWorkerId, branch) {
@@ -109,25 +101,23 @@ function normalizeDeferredLookupFailureReason(reason) {
 
 async function lookupOriginalWorkerRunStatus({
   workerDir,
+  workerId,
   hqRoot,
   env,
   ledgerTarget = null,
   workspace = undefined,
   runRecord = undefined,
+  launchRequestId: authorizedLaunchRequestId = null,
+  runId: authorizedRunId = null,
   readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedgerAsync,
 } = {}) {
-  const resolvedWorkspace = workspace === undefined
-    ? readWorkerWorkspace(workerDir).workspace || null
-    : workspace;
-  const resolvedRunRecord = runRecord === undefined
-    ? (() => {
-      const run = readJsonFileDetailed(join(workerDir, 'run.json'));
-      return run.ok ? run.value : null;
-    })()
-    : runRecord;
-  const launchRequestId = resolvedWorkspace?.launchRequestId || resolvedWorkspace?.lrq
+  const files = workspace === undefined || runRecord === undefined
+    ? await readWorkerWorkspace(workerId || basename(workerDir || ''), {env, hqRoot}) : null;
+  const resolvedWorkspace = workspace ?? files?.workspace;
+  const resolvedRunRecord = runRecord ?? files?.runRecord;
+  const launchRequestId = authorizedLaunchRequestId || files?.launchRequestId || resolvedWorkspace?.launchRequestId || resolvedWorkspace?.lrq
     || resolvedRunRecord?.launchRequestId || resolvedRunRecord?.lrq || null;
-  const runId = resolvedRunRecord?.runId || null;
+  const runId = authorizedRunId || files?.runId || resolvedRunRecord?.runId || null;
   if (!launchRequestId) {
     return { found: false, reason: 'missing-launch-request-id' };
   }

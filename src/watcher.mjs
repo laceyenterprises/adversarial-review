@@ -1,3 +1,4 @@
+import { prepareWorkerObservationSession } from './dispatch-read-client.mjs';
 import { shutdownAmaHammerBackgroundQueue } from './ama-hammer-background-dispatch.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { withHoldRecordPoll } from './ama/hold-record.mjs';
@@ -1654,6 +1655,10 @@ async function main() {
     // so a typo in ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS or in
     // tools/adversarial-review/config.yaml fails loud at boot instead of
     // hours later at first merge-agent dispatch.
+    if (process.env.ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED === '1') {
+      const ready = await prepareWorkerObservationSession({env: process.env});
+      if (!ready.ok) console.warn('[public-observations] startup session unavailable; authoritative reads remain held');
+    }
     validateDefaultReviewerRouteConfig(process.env);
     validateStartupMergeAgentConfig(process.env);
     // ARC-12: the role registry (roles.registry) is validated at boot so a

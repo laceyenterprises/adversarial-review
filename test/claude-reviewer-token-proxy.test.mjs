@@ -1,3 +1,5 @@
+import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
+installDispatchFileProducerFixture();
 // TOKDZ-01 — the Claude reviewer survives a broker token rotation. A loopback
 // fake upstream plays the Anthropic API (it revokes a grant on rotation, exactly
 // as the upstream does), a stub plays the broker's `/token` re-read, and the real

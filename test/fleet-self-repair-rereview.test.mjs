@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -62,6 +62,9 @@ function makeDaemonClone({ substantiveMove = false } = {}) {
     git(clone, 'commit', '-q', '--allow-empty', '-m', 'Add provenance trailer\n\nReviewed-by: codex');
   }
   const live = git(clone, 'rev-parse', 'HEAD');
+  const ownerCli = path.join(tmp, 'owner-cli');
+  writeFileSync(ownerCli, '#!/usr/bin/env node\nconsole.log(JSON.stringify({repos: [{name: ' + JSON.stringify(path.basename(clone)) + ', checkoutPath: ' + JSON.stringify(clone) + '}], errors: []}));\n', {mode: 0o755});
+  process.env.HQ_BIN = ownerCli;
   return { tmp, hqRoot, clone, reviewed, live };
 }
 
@@ -187,6 +190,7 @@ test('verifyTrailerOnlyHeadDelta falls back to gh compare when the daemon clone 
     sleepImpl: async () => {},
     execFileImpl: async (file, args) => {
       calls.push({ file, args });
+      if (args[0] === 'repo') return {stdout: JSON.stringify({repos: [], errors: []})};
       assert.equal(file, 'gh');
       assert.deepEqual(args, ['api', `repos/${REPO}/compare/${reviewed}...${live}`]);
       return { stdout: JSON.stringify({ ahead_by: 1, files: [] }), stderr: '' };
@@ -196,7 +200,7 @@ test('verifyTrailerOnlyHeadDelta falls back to gh compare when the daemon clone 
   assert.equal(result.reason, 'empty-delta');
   assert.equal(result.commitCount, 1);
   assert.equal(result.source, 'gh-compare');
-  assert.equal(calls.length, 1);
+  assert.equal(calls.filter(call => call.file === "gh").length, 1);
 });
 
 test('verifyTrailerOnlyHeadDelta refuses a substantive move, a non-ancestor, and a same head', async () => {
@@ -252,7 +256,8 @@ test('verifyTrailerOnlyHeadDelta fails CLOSED on a git error, gh compare failure
       logger: quietLogger,
       sleepImpl: async () => {},
       execFileImpl: async (file) => {
-        assert.equal(file, 'gh');
+        if (args[0] === 'repo') return {stdout: JSON.stringify({repos: [], errors: []})};
+      assert.equal(file, 'gh');
         const err = new Error('gh unavailable');
         err.code = 1;
         err.stderr = 'gh unavailable';

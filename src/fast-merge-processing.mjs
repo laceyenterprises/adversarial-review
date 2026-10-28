@@ -1,3 +1,4 @@
+import { readHostIdentitySync } from './dispatch-files-client.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
@@ -99,31 +100,7 @@ function protectivePredecessorStateError(reason, err) {
 }
 
 function resolveHqOwner(hqRoot) {
-  if (!hqRoot) return null;
-  const config = readJsonFileDetailed(join(hqRoot, '.hq', 'config.json'));
-  if (!config.ok) {
-    return {
-      ownerUser: null,
-      reason: 'hq-owner-unknown',
-      detail: config.error?.message || String(config.error),
-      code: config.error?.code || null,
-    };
-  }
-  const ownerUser = String(config.value?.ownerUser || '').trim();
-  if (!ownerUser) {
-    return {
-      ownerUser: null,
-      reason: 'hq-owner-unknown',
-      detail: 'ownerUser missing from .hq/config.json',
-      code: null,
-    };
-  }
-  return {
-    ownerUser,
-    reason: null,
-    detail: null,
-    code: null,
-  };
+  return readHostIdentitySync({hqRoot});
 }
 
 function normalizeLabelNames(labels) {

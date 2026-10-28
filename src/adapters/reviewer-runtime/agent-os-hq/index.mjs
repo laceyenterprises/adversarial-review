@@ -1,3 +1,4 @@
+import { readHostIdentitySync, readDispatchFilesSync } from '../../../dispatch-files-client.mjs';
 import { parseHqDispatchStatusOutput } from '../../../hq-dispatch-status-output.mjs';
 import { readDispatchReceipt, parseHqDispatchStatus } from '../../../producer-contracts/dispatch-receipt.mjs';
 import { readDispatchStatus } from '../../../producer-contracts/launch-status.mjs';
@@ -124,9 +125,6 @@ function resolveHqRoot(env = process.env) {
   if (!hqRoot) {
     throw makeConfigurationError('HQ_ROOT is required for agent-os-hq reviewer runtime; set HQ_ROOT or use cli-direct/acpx');
   }
-  if (!existsSync(join(hqRoot, '.hq', 'config.json'))) {
-    throw makeConfigurationError(`HQ_ROOT is not initialized at ${hqRoot}; set HQ_ROOT to an Agent OS HQ root or use cli-direct/acpx`);
-  }
   return hqRoot;
 }
 
@@ -137,12 +135,8 @@ function requireEnvValue(env, key, message) {
 }
 
 function readHqOwnerUser(hqRoot) {
-  const configPath = join(hqRoot, '.hq', 'config.json');
-  const parsed = JSON.parse(readFileSync(configPath, 'utf8'));
-  const ownerUser = String(parsed.ownerUser || parsed.owner_user || '').trim();
-  if (!ownerUser) {
-    throw new Error(`HQ config at ${configPath} is missing ownerUser`);
-  }
+  const ownerUser = readHostIdentitySync({hqRoot}).ownerUser;
+  if (!ownerUser) throw new Error('host identity unavailable');
   return ownerUser;
 }
 
@@ -208,9 +202,6 @@ function hqReviewArtifactPath(rootDir, sessionUuid) {
   return join(hqArtifactDir(rootDir), `${sessionUuid}.agent-os-hq.review.md`);
 }
 
-function hqDispatchStdoutPath(hqRoot, dispatchId) {
-  return join(hqRoot, 'dispatch', dispatchId, 'stdout.log');
-}
 
 function buildReviewerPrompt(req, artifactPath) {
   const subjectContext = req.subjectContext || {};
@@ -269,19 +260,12 @@ function readValidatedArtifact(artifactPath) {
   return validateReviewArtifact(readFileSync(artifactPath, 'utf8'));
 }
 
-function readValidatedReviewOutput({ artifactPath, hqRoot, dispatchId }) {
-  try {
-    return readValidatedArtifact(artifactPath);
-  } catch (artifactErr) {
-    const stdoutPath = dispatchId && hqRoot ? hqDispatchStdoutPath(hqRoot, dispatchId) : null;
-    if (!stdoutPath || !existsSync(stdoutPath)) throw artifactErr;
-    try {
-      return validateReviewArtifact(readFileSync(stdoutPath, 'utf8'));
-    } catch (stdoutErr) {
-      throw new Error(
-        `${artifactErr.message}; stdout fallback at ${stdoutPath} was not a valid review artifact: ${stdoutErr.message}`
-      );
-    }
+function readValidatedReviewOutput({ artifactPath, dispatchId, hqRoot, env, readDispatchFilesImpl = readDispatchFilesSync }) {
+  try { return readValidatedArtifact(artifactPath); }
+  catch (artifactErr) {
+    const result = readDispatchFilesImpl({launch_request_id: dispatchId, limit: 262144}, {hqRoot, env});
+    if (!result?.ok || result.log?.status !== 'found' || result.log.truncated || result.log.complete !== true || result.log.boundaryTruncated) throw artifactErr;
+    return validateReviewArtifact(result.log.text);
   }
 }
 
@@ -508,6 +492,7 @@ function createAgentOsHqReviewerRuntimeAdapter({
             const reviewBody = readValidatedReviewOutput({
               artifactPath,
               hqRoot: resolvedHqRoot,
+              env: runtimeEnv,
               dispatchId,
             });
             record = updateReviewerRunRecord(rootDir, record, {
@@ -836,7 +821,6 @@ export {
   DEFAULT_FORBIDDEN_FALLBACKS,
   buildDispatchArgs,
   createAgentOsHqReviewerRuntimeAdapter,
-  hqDispatchStdoutPath,
   readValidatedReviewOutput,
   validateReviewArtifact,
 };

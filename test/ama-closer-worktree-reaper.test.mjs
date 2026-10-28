@@ -1,3 +1,5 @@
+import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
+installDispatchFileProducerFixture();
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -194,6 +196,7 @@ test('closer worktree reaper discovers dedicated-base non-agent-os hammer worktr
     hqPath: '/bin/hq',
     execFileImpl: async (cmd, args) => {
       calls.push({ cmd, args });
+      if (args[0] === 'repo' && args[1] === 'list') return {stdout: JSON.stringify({repos: [], errors: [], worktreeRoots: [deployRepoPath, workerBasePath]})};
       const repoPath = args[1];
       const joined = args.join(' ');
       if (cmd === 'git' && joined.includes('remote get-url origin')) {
@@ -1246,6 +1249,7 @@ test('closer worktree reaper defers only half-registered cleanup on a partial re
     cursorPath: join(root, 'cursor.json'),
     scanLimit: 1,
     execFileImpl: async (cmd, args) => {
+      if (args[0] === 'repo' && args[1] === 'list') return {stdout: JSON.stringify({repos: [], errors: [], worktreeRoots: [repoA, repoB]})};
       if (cmd === 'git' && args.includes('get-url')) {
         return { stdout: 'https://github.com/x/y.git\n', stderr: '' };
       }
@@ -1290,21 +1294,16 @@ test('closer worktree discovery skips unreadable or non-directory roots', async 
   const result = await reapCloserHammerWorktrees({
     hqRoot: join(root, 'hq'),
     cursorPath: join(root, 'cursor.json'),
-    readdirImpl: async (path) => {
-      const err = new Error('unreadable');
-      err.code = path.endsWith('/repos') ? 'EACCES' : 'ENOTDIR';
-      throw err;
-    },
+    execFileImpl: async () => { throw new Error('owner inventory unavailable'); },
     logger: { info() {}, warn(message) { warnings.push(message); } },
   });
 
   assert.equal(result.scanned, 0);
   assert.equal(result.budgetExceeded, false);
   assert.equal(result.registrationIncomplete, true);
-  assert.equal(result.registrationFailedRepos, 2);
+  assert.equal(result.registrationFailedRepos, 1);
   assert.equal(result.cursorPersisted, true);
-  assert.equal(warnings.some((message) => message.includes('code=EACCES')), true);
-  assert.equal(warnings.some((message) => message.includes('code=ENOTDIR')), true);
+  assert.equal(warnings.some(message => message.includes('repository-inventory-unavailable')), true);
 });
 
 test('failed repo listing still permits terminal cleanup from a healthy repo', async (t) => {

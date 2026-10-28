@@ -56,3 +56,19 @@ The lockfile and `recorded.dispatchLookupSdk` provenance pin these exact bytes.
 This is a merged release dependency; runtime activation remains separate.
 Historical release archives remain unchanged. A later producer artifact refresh
 must update the checksum and provenance together.
+
+
+## Coordinated dispatch-file release 0.12.0
+
+The runtime archive is `agent-os-app-sdk-0.12.0.tgz`, SHA-256
+`5aeaf21a592cc8e1811c5eefdb1d68efced730d46cd3dc0d22c95be1d0b55daf`. The lockfile pins its SHA-512 integrity.
+It adds authorized dispatch metadata, bounded redacted logical logs and public
+host observations. `recorded.dispatchLookupSdk` labels this candidate
+`coordinated-pr`; its producer has not yet merged. Historical immutable
+archives and capture definitions retain their provenance.
+
+The artifact authority record deliberately continues to hold this upgrade
+until the producer merges. Follow the coordinated-release procedure in the
+SDK README to verify merged bytes and update `argus-artifacts.json` with the
+authoritative producer PR and merge commit. A candidate revision or this note
+confers no artifact authority and permits no runtime activation.

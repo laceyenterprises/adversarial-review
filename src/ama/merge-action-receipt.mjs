@@ -1,3 +1,4 @@
+import { readHostIdentitySync } from '../dispatch-files-client.mjs';
 /** Append-only OPSEV1-03 evidence. Receipt failure never changes merge authority. */
 import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, fchmodSync, fchownSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -32,7 +33,7 @@ export function writeMergeActionReceipt({ hqRoot, repo, prNumber, headSha, produ
     throw new Error('Invalid merge-action receipt');
   }
   const identity = userInfo();
-  const owner = JSON.parse(readFileSync(join(hqRoot, '.hq', 'config.json'), 'utf8')).ownerUser;
+  const owner = readHostIdentitySync({hqRoot}).ownerUser;
   if (owner !== identity.username || lstatSync(hqRoot).uid !== identity.uid) {
     throw new Error('Merge-action writer must run as HQ ownerUser');
   }

@@ -93,11 +93,7 @@ function resolveOssReadinessApplyScript({ rootDir = ROOT, env = process.env } = 
     return isAbsolute(override) ? override : resolve(rootDir, override);
   }
 
-  const hqRoot = typeof env?.HQ_ROOT === 'string' && env.HQ_ROOT.trim()
-    ? env.HQ_ROOT.trim()
-    : null;
   const candidates = [
-    ...(hqRoot ? [join(hqRoot, 'agent-os', 'scripts', 'audit-oss-readiness-hardcodes.py')] : []),
     ...OSS_READINESS_APPLY_SCRIPT_CANDIDATES.map((parts) => resolve(rootDir, ...parts)),
   ];
   return candidates.find((candidate) => existsSync(candidate)) || candidates[0];

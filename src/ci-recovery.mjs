@@ -1,8 +1,9 @@
+import { readHostObservationSync } from './dispatch-files-client.mjs';
 import { infrastructureOnlyFailures } from './ci-infrastructure.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { createHash, createPublicKey, verify, randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, realpathSync, unlinkSync, renameSync, linkSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, statSync, unlinkSync, renameSync, linkSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -271,28 +272,13 @@ export function verifyManagedCiRecord(record, publicKey, { repo, headSha }) {
   } catch { return false; }
 }
 
-export function readGreenManagedCi({ repo, headSha, env = process.env }) {
-  if (!/^[0-9a-f]{40}$/.test(headSha || '') || !env.HQ_ROOT) return false;
+export function readGreenManagedCi({ repo, headSha, env = process.env,
+  readProofImpl = readHostObservationSync }) {
+  if (!/^[0-9a-f]{40}$/.test(headSha || '')) return false;
   try {
-    const root = realpathSync(env.HQ_ROOT);
-    const owner = statSync(root).uid;
-    let key = null;
-    if (env.AGENT_OS_CI_ATTESTATION_PUBLIC_KEY_PATH) {
-      const raw = readFileSync(env.AGENT_OS_CI_ATTESTATION_PUBLIC_KEY_PATH);
-      key = raw.length === 32 ? raw : /^[0-9a-f]{64}$/i.test(raw.toString().trim())
-        ? Buffer.from(raw.toString().trim(), 'hex') : Buffer.from(raw.toString().trim(), 'base64');
-      if (key.length !== 32) return false;
-    }
-    return readdirSync(join(root, 'workers'), { withFileTypes: true })
-      .filter(entry => entry.isDirectory()).some(entry => {
-        try {
-          const path = join(root, 'workers', entry.name, 'logs', 'ci-attestations', `${headSha}.json`);
-          if (realpathSync(path) !== path || statSync(path).uid !== owner) return false;
-          const record = JSON.parse(readFileSync(path, 'utf8'));
-          if (record.signature) return key && verifyManagedCiRecord(record, key, { repo, headSha });
-          return false;
-        } catch { return false; }
-      });
+    const reply = readProofImpl('managed_ci', {env, parameters: {repo, head_sha: headSha}});
+    return reply.ok === true && reply.data?.verified === true
+      && reply.data.repo?.toLowerCase() === repo.toLowerCase() && reply.data.headSha === headSha;
   } catch { return false; }
 }
 

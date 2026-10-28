@@ -1,3 +1,5 @@
+import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
+installDispatchFileProducerFixture();
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
@@ -272,7 +274,7 @@ test('validateStartupRoleRegistry surfaces an unknown worker class from config',
 // ---------------------------------------------------------------------------
 
 function seedRoster(repoRoot, classes) {
-  const rosterPath = join(repoRoot, hqTesting.WORKER_CLASSES_REL_PATH);
+  const rosterPath = join(repoRoot, "registry/worker-classes.json");
   mkdirSync(dirname(rosterPath), { recursive: true });
   const doc = Object.fromEntries(classes.map((c) => [c, {}]));
   writeFileSync(rosterPath, JSON.stringify(doc), 'utf8');
@@ -285,7 +287,7 @@ test('resolvePublishedWorkerClasses reads the published roster and refreshes the
   seedRoster(repoRoot, ['codex', 'claude-code', 'gemini']);
 
   const result = resolvePublishedWorkerClasses({
-    env: { AGENT_OS_REPO_ROOT: repoRoot },
+    env: { HQ_ROOT: repoRoot },
     rootDir,
     moduleRoot: tmp(), // isolate the upward walk so only AGENT_OS_REPO_ROOT resolves
   });
@@ -309,7 +311,7 @@ test('resolvePublishedWorkerClasses read-only consumers do not refresh the share
   let writes = 0;
 
   const result = resolvePublishedWorkerClasses({
-    env: { AGENT_OS_REPO_ROOT: repoRoot },
+    env: { HQ_ROOT: repoRoot },
     rootDir: tmp(),
     moduleRoot: tmp(),
     readOnly: true,
@@ -393,10 +395,10 @@ test('a malformed published roster degrades to the snapshot when one exists', ()
   const repoRoot = tmp();
   seedRoster(repoRoot, ['codex', 'gemini']);
   // Seed the snapshot from a good read.
-  resolvePublishedWorkerClasses({ env: { AGENT_OS_REPO_ROOT: repoRoot }, rootDir, moduleRoot: tmp() });
+  resolvePublishedWorkerClasses({ env: { HQ_ROOT: repoRoot }, rootDir, moduleRoot: tmp() });
   // Corrupt the published roster.
-  writeFileSync(join(repoRoot, hqTesting.WORKER_CLASSES_REL_PATH), '{ not json', 'utf8');
-  const result = resolvePublishedWorkerClasses({ env: { AGENT_OS_REPO_ROOT: repoRoot }, rootDir, moduleRoot: tmp() });
+  writeFileSync(join(repoRoot, 'registry/worker-classes.json'), '{ not json', 'utf8');
+  const result = resolvePublishedWorkerClasses({ env: { HQ_ROOT: repoRoot }, rootDir, moduleRoot: tmp() });
   assert.equal(result.source, 'snapshot');
   assert.deepEqual([...result.classes].sort(), ['codex', 'gemini']);
 });
@@ -404,7 +406,7 @@ test('a malformed published roster degrades to the snapshot when one exists', ()
 test('publishedWorkerClassSet returns a Set for membership checks', () => {
   const repoRoot = tmp();
   seedRoster(repoRoot, ['codex', 'gemini']);
-  const set = publishedWorkerClassSet({ env: { AGENT_OS_REPO_ROOT: repoRoot }, rootDir: tmp(), moduleRoot: tmp() });
+  const set = publishedWorkerClassSet({ env: { HQ_ROOT: repoRoot }, rootDir: tmp(), moduleRoot: tmp() });
   assert.ok(set.has('codex'));
   assert.ok(!set.has('nope'));
 });

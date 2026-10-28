@@ -1,3 +1,5 @@
+import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
+installDispatchFileProducerFixture();
 // watcher-quota-reset-capture.test.mjs — proves the review-lane HRR
 // quota-exhaustion capture/hold/recovery path end to end:
 //

@@ -1,3 +1,4 @@
+import { readHostIdentitySync, readHostObservationSync } from './dispatch-files-client.mjs';
 import { readDispatchStatus } from './producer-contracts/launch-status.mjs';
 import { parseHqDispatchStatusOutput } from './hq-dispatch-status-output.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
@@ -389,30 +390,7 @@ function resolveHqRoot(env = {}) {
 }
 
 function resolveHqOwner(hqRoot) {
-  if (!hqRoot) return null;
-  const config = readJsonFileDetailed(join(hqRoot, '.hq', 'config.json'));
-  if (!config.ok) {
-    return {
-      ownerUser: null,
-      reason: 'hq-owner-unknown',
-      detail: config.error?.message || String(config.error),
-      code: config.error?.code || null,
-    };
-  }
-  const ownerUser = String(config.value?.ownerUser || '').trim();
-  if (!ownerUser) {
-    return {
-      ownerUser: null,
-      reason: 'hq-owner-unknown',
-      detail: 'ownerUser missing from .hq/config.json',
-      code: null,
-    };
-  } return {
-    ownerUser,
-    reason: null,
-    detail: null,
-    code: null,
-  };
+  return readHostIdentitySync({hqRoot});
 }
 
 function resolveMergeAgentParentSession(env = process.env) {
@@ -689,14 +667,7 @@ const STUCK_DISPATCH_DEFAULTS = Object.freeze({
   minRefusals: STUCK_DISPATCH_MIN_REFUSALS,
 });
 
-function _safeReadJsonLines(path, fsImpl) {
-  try {
-    const text = fsImpl.readFileSync(path, 'utf8');
-    return text.split('\n').filter((line) => line.length > 0);
-  } catch {
-    return null;
-  }
-}
+
 
 function _utcDateString(timestampMs) {
   return new Date(timestampMs).toISOString().slice(0, 10);
@@ -720,7 +691,7 @@ function _utcDateString(timestampMs) {
  * Returns { stuckForMinutes, refusalCount, primaryReason, lastRefusedAt }
  * when the signals indicate the spawn never happened.
  *
- * Pure-ish: optional `fsImpl` / `now` make this fully testable without
+ * The public owner observation and optional `now` make this testable without
  * touching the real filesystem or clock.
  */
 // Authoritative HQ status tokens that mean the dispatch has reached a
@@ -956,7 +927,6 @@ function hasPendingDispatchedLabelAddCleanup(rootDir, job, { logger = console } 
 function describeStaleDispatch(recordedDispatch, {
   hqRoot = null,
   now = Date.now(),
-  fsImpl = { readFileSync },
   minAgeMinutes = STUCK_DISPATCH_MIN_AGE_MINUTES,
   minRefusals = STUCK_DISPATCH_MIN_REFUSALS,
   // Optional caller-supplied probe of current dispatch state. When
@@ -989,34 +959,11 @@ function describeStaleDispatch(recordedDispatch, {
     }
   }
 
-  // Audit logs are UTC-keyed (see modules/worker-pool .../daemon.py
-  // _append_dispatch_audit_jsonl, and the 2026-05-18 incident docs).
-  // A dispatch could have started yesterday-UTC and still be queued
-  // today-UTC, so scan both. Don't use $(date +%Y-%m-%d) — local time
-  // misses events at the day boundary; this trap previously hid 1621
-  // memory-pressure events from operator visibility.
-  const todayUtc = _utcDateString(now);
-  const yesterdayUtc = _utcDateString(now - 86_400_000);
-  const dates = todayUtc === yesterdayUtc ? [todayUtc] : [yesterdayUtc, todayUtc];
-
-  const refusals = [];
-  for (const date of dates) {
-    const path = join(hqRoot, 'dispatch', 'audit', date, `${lrq}.jsonl`);
-    const lines = _safeReadJsonLines(path, fsImpl);
-    if (!lines) continue;
-    for (const line of lines) {
-      try {
-        const event = JSON.parse(line);
-        if (typeof event?.decision === 'string' && event.decision.startsWith('refuse_')) {
-          refusals.push(event);
-        }
-      } catch {
-        // Skip malformed lines silently — audit log integrity is
-        // tracked elsewhere; we don't want to crash the watcher loop
-        // over one corrupt line.
-      }
-    }
-  }
+  const audit = readHostObservationSync('dispatch_audit', {hqRoot, parameters: {launch_request_id: lrq}});
+  if (!audit.ok) return null;
+  const since = _utcDateString(now - 86_400_000);
+  const refusals = (audit.data.records || []).filter(event => typeof event.decision === 'string'
+    && event.decision.startsWith('refuse_') && String(event.recordedAt || '').slice(0, 10) >= since);
   if (refusals.length < minRefusals) return null;
 
   // Reason-code histogram: which refusal cause is dominating?

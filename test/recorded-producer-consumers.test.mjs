@@ -1,3 +1,5 @@
+import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
+installDispatchFileProducerFixture();
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, copyFileSync } from 'node:fs';
@@ -66,18 +68,18 @@ function checkWorkerClass(t, value) {
     const root = mkdtempSync(join(tmpdir(), 'recorded-worker-class-'));
     t.after(() => rmSync(root, { recursive: true, force: true }));
     mkdirSync(join(root, 'registry'));
-    // This service consumes the registry mirror, not `worker-class show` stdout.
-    // Project the recorded envelope explicitly; retain its spec verbatim.
+    // The fake public owner projects this recorded class specification;
+    // application code receives only its public registry response.
     writeFileSync(join(root, 'registry/worker-classes.json'), JSON.stringify({ classes: { [value.className]: value.spec } }));
     const result = resolveRemediationModel(value.className, {
       env: { HQ_ROOT: root, AGENT_OS_DEPLOY_CHECKOUT: root }, fallbackModel: null,
     });
-    assert.equal(result.modelSource, 'registry-mirror');
+    assert.equal(result.modelSource, 'producer');
     assert.equal(result.resolvedModel, 'synthetic-string');
   });
 }
 
-test('worker-class model reads consume the recorded spec through the mirror projection', t => {
+test('worker-class model reads consume the recorded spec through the public owner projection', t => {
   checkWorkerClass(t, recordedFixture('worker-class-show'));
 });
 

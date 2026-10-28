@@ -1,3 +1,5 @@
+import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
+installDispatchFileProducerFixture();
 import { dispatchStatusExamples } from './helpers/dispatch-status-cases.mjs';
 import { readDispatchStatus } from '@agent-os/app-sdk';
 import test from 'node:test';

@@ -7,7 +7,11 @@
       "path": "docs/data-model/branch-rewrite-receipts.md",
       "store": "<HQ root>/dispatch/branch-rewrites/<encoded-repository>/<encoded-branch>/<uuid>.json",
       "schemaSurface": "src/branch-rewrite-receipt.mjs",
-      "relatedSchemaSurfaces": ["src/remediation-publication.mjs", "src/github-auth-recovery.mjs", "src/finalization/queue-git.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/remediation-publication.mjs",
+        "src/github-auth-recovery.mjs",
+        "src/finalization/queue-git.mjs"
+      ],
       "owner": "successful leased Git publisher; compatible with Agent OS cwp_dispatch.branch_rewrite",
       "compatibility": "Existing worker.branch_rewritten schema; nullable launchRequestId for service writers; nonzero hexadecimal tips accept either case. Actual push destination determines repository identity; post-publication ancestry checks exclude fast forwards. Unreadable ancestry or repository resolution preserves publication with a recovery error. Directory syncing is best effort after file fsync and atomic rename. Receipt storage failure preserves published outcome and returns/logs exact recovery tips with nullable repo. No automatic expiry."
     },
@@ -17,7 +21,14 @@
       "path": "docs/data-model/closer-holds.md",
       "store": "data/follow-up-jobs/hammer-stop-hold/, data/operator-label-holds/, data/stacked-base-holds/",
       "schemaSurface": "src/ama/hold-record.mjs",
-      "relatedSchemaSurfaces": ["src/ama/closer-hold-records.mjs", "src/ama/hammer-stop-hold.mjs", "src/ama/companion-stop-wait.mjs", "src/ama/operator-label-gates.mjs", "src/ama/stacked-base.mjs", "src/watcher.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/ama/closer-hold-records.mjs",
+        "src/ama/hammer-stop-hold.mjs",
+        "src/ama/companion-stop-wait.mjs",
+        "src/ama/operator-label-gates.mjs",
+        "src/ama/stacked-base.mjs",
+        "src/watcher.mjs"
+      ],
       "owner": "AMA closure; existing per-hold owner and escalation recipients",
       "compatibility": "Legacy records normalize with existing paging horizons and receipts; active versioned writes require owner and deadline. No schema change: operator-label CI clearance requires readable gate arrays and stored own-context policy"
     },
@@ -27,7 +38,11 @@
       "path": "docs/data-model/ttm-ownership.md",
       "store": "data/reviews.db: ttm_owner_state and ttm_stuck_pages",
       "schemaSurface": "src/ttm-owner.mjs",
-      "relatedSchemaSurfaces": ["src/ttm-tracker.mjs", "src/pollonce-phases.mjs", "src/alert-delivery.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/ttm-tracker.mjs",
+        "src/pollonce-phases.mjs",
+        "src/alert-delivery.mjs"
+      ],
       "owner": "watcher TTM tracker; observation only",
       "headBinding": "Current timeline revision wins over cached state; tracker polls persist head and observation time and reset suppression, reason and ownerless grace on head change."
     },
@@ -37,10 +52,28 @@
       "path": "docs/data-model/finalization-queue-cutover.md",
       "store": "data/finalization-queue-cutover.json and read-only joins to data/reviews.db",
       "schemaSurface": "src/finalization/queue-cutover.mjs",
-      "relatedSchemaSurfaces": ["src/finalization/queue-probe.mjs", "src/finalization/queue-canary.mjs", "src/finalization/queue-closer.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/finalization/queue-probe.mjs",
+        "src/finalization/queue-canary.mjs",
+        "src/finalization/queue-closer.mjs"
+      ],
       "owner": "v2 finalization rollout operator; observation only"
     },
-    {"id": "finalization-queue-canary","title": "Queue Canary Rollout Observations","path": "docs/data-model/finalization-queue-canary.md","store": "data/finalization-queue-canary.json and read-only joins to data/reviews.db","schemaSurface": "src/finalization/queue-canary.mjs","relatedSchemaSurfaces": ["src/finalization/queue-probe.mjs","src/finalization/queue-routing.mjs","src/finalization/queue-admission.mjs","src/finalization/shadow-report.mjs","src/finalization/shadow-store.mjs"],"owner": "v2 finalization rollout operator; observation only"},
+    {
+      "id": "finalization-queue-canary",
+      "title": "Queue Canary Rollout Observations",
+      "path": "docs/data-model/finalization-queue-canary.md",
+      "store": "data/finalization-queue-canary.json and read-only joins to data/reviews.db",
+      "schemaSurface": "src/finalization/queue-canary.mjs",
+      "relatedSchemaSurfaces": [
+        "src/finalization/queue-probe.mjs",
+        "src/finalization/queue-routing.mjs",
+        "src/finalization/queue-admission.mjs",
+        "src/finalization/shadow-report.mjs",
+        "src/finalization/shadow-store.mjs"
+      ],
+      "owner": "v2 finalization rollout operator; observation only"
+    },
     {
       "id": "hammer-controllers",
       "title": "Hammer Controller Registrations",
@@ -48,7 +81,15 @@
       "store": "<HAM_RUN_DIR>/controller-<uuid>.json",
       "schemaSurface": "src/ama/hammer-controller.mjs",
       "launchReadSource": "SDK app-sdk source or null when unavailable; older v1 receipts omit it. Launch observations do not select canonical or standby DSNs. No DSN, credentials or path is stored.",
-      "relatedSchemaSurfaces": ["src/controller-process-census.mjs", "src/controller_process_census.py", "bin/hammer-controller.mjs", "bin/hammer-verify-head.sh", "bin/hammer-merge.sh", "src/ama/bounded-command.mjs", "src/merge-agent-prompt.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/controller-process-census.mjs",
+        "src/controller_process_census.py",
+        "bin/hammer-controller.mjs",
+        "bin/hammer-verify-head.sh",
+        "bin/hammer-merge.sh",
+        "src/ama/bounded-command.mjs",
+        "src/merge-agent-prompt.mjs"
+      ],
       "owner": "versioned closer controller"
     },
     {
@@ -57,7 +98,13 @@
       "path": "docs/data-model/next-action-shadow.md",
       "store": "<watcher root>/data/next-action-shadow/disagreements.jsonl and .jsonl.1",
       "schemaSurface": "src/pr-next-action-shadow.mjs",
-      "relatedSchemaSurfaces": ["src/pr-next-action.mjs", "src/pr-next-action-consumer.mjs", "src/next-action-disagreements.mjs", "src/ama/closure-next-action.mjs", "src/ama/closure-owner.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/pr-next-action.mjs",
+        "src/pr-next-action-consumer.mjs",
+        "src/next-action-disagreements.mjs",
+        "src/ama/closure-next-action.mjs",
+        "src/ama/closure-owner.mjs"
+      ],
       "owner": "NXA-02 closure observation and rollout owner"
     },
     {
@@ -66,7 +113,10 @@
       "path": "docs/data-model/osg-remediator.md",
       "store": "<adversarial review state dir>/osg-remediator/<uuid>.json",
       "schemaSurface": "src/osg-remediator.mjs",
-      "relatedSchemaSurfaces": ["src/ama/dispatch-closer.mjs", "src/follow-up-remediation.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/ama/dispatch-closer.mjs",
+        "src/follow-up-remediation.mjs"
+      ],
       "owner": "remediator execution routing"
     },
     {
@@ -75,7 +125,19 @@
       "path": "docs/data-model/review-findings.md",
       "store": "data/reviews.db: review_findings, review_finding_replies, review_finding_remediations, review_finding_disputes, finding_backlog, finding_batches, finding_batch_notes",
       "schemaSurface": "migrations/20261021_review_findings.sql",
-      "relatedSchemaSurfaces": ["src/findings-backlog.mjs","src/findings-batch.mjs","migrations/20261024_findings_backlog.sql","migrations/20261024_simplicity_batch.sql","migrations/20261024_simplicity_batch_lifecycle.sql","src/review-finding-records.mjs","src/finding-commit-attribution.mjs","src/finding-remediation-capture.mjs","src/kernel/finding-lines.mjs","src/kernel/review-findings.mjs","src/kernel/remediation-reply.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/findings-backlog.mjs",
+        "src/findings-batch.mjs",
+        "migrations/20261024_findings_backlog.sql",
+        "migrations/20261024_simplicity_batch.sql",
+        "migrations/20261024_simplicity_batch_lifecycle.sql",
+        "src/review-finding-records.mjs",
+        "src/finding-commit-attribution.mjs",
+        "src/finding-remediation-capture.mjs",
+        "src/kernel/finding-lines.mjs",
+        "src/kernel/review-findings.mjs",
+        "src/kernel/remediation-reply.mjs"
+      ],
       "owner": "review-body capture and remediation completion observations"
     },
     {
@@ -99,7 +161,9 @@
       "path": "docs/data-model/reviewer-account-cooldowns.md",
       "store": "<adversarial review state dir>/reviewer-account-cooldowns/<sha256(account ID)>.json",
       "schemaSurface": "src/reviewer-token-pool.mjs",
-      "relatedSchemaSurfaces": ["src/reviewer-spawn-settle.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/reviewer-spawn-settle.mjs"
+      ],
       "timestampSource": "typed provider reset, bounded to seven days; default 15 minutes",
       "owner": "reviewer orchestration"
     },
@@ -128,7 +192,14 @@
       "store": "data/stacked-base-holds/",
       "schemaSurface": "src/ama/stacked-base.mjs",
       "persistence": "best-effort receipt; filesystem failure preserves the hold result",
-      "readErrorValues": ["timeout", "auth", "5xx", "parse", "unknown", null],
+      "readErrorValues": [
+        "timeout",
+        "auth",
+        "5xx",
+        "parse",
+        "unknown",
+        null
+      ],
       "readErrorClassification": "typed auth outage or 401 is auth; 403/429 are unknown; HTTP 5xx precedes timeout text",
       "readFailureWarning": "once per hold reason/error-class change after successful receipt persistence; successful clearance re-arms",
       "readErrorAbsence": "omitted and null are equivalent for unchanged comment receipts; no rewrite required",
@@ -140,7 +211,10 @@
       "path": "docs/data-model/ama-hammer-background.md",
       "store": "data/ama-hammer-background/",
       "schemaSurface": "src/ama-hammer-background-dispatch.mjs",
-      "relatedSchemaSurfaces": ["src/posted-review-row.mjs", "src/ama-closure-orchestration.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/posted-review-row.mjs",
+        "src/ama-closure-orchestration.mjs"
+      ],
       "owner": "watcher background hammer recovery",
       "retirement": "queue settlement/cancellation checks head and attempt; operator/safety holds, confirmed dispatch and active-launch reconciliation check head; confirmed pr-terminal reconciliation removes any head's intent for the PR"
     },
@@ -152,8 +226,16 @@
       "schemaSurface": "src/rate-limit-throttle.mjs",
       "storeVersion": 2,
       "bucketKey": "githubBudgetKey(resource, credential): token-<sha256-prefix-24>/<resource>, or bare resource for default",
-      "optionalBucketFields": ["credential", "credentialSelector", "rateLimitedCalls"],
-      "relatedSchemaSurfaces": ["src/metered-gh.mjs", "bin/metered-gh.mjs", "src/runtime-status.mjs"],
+      "optionalBucketFields": [
+        "credential",
+        "credentialSelector",
+        "rateLimitedCalls"
+      ],
+      "relatedSchemaSurfaces": [
+        "src/metered-gh.mjs",
+        "bin/metered-gh.mjs",
+        "src/runtime-status.mjs"
+      ],
       "owner": "shared GitHub request throttle"
     },
     {
@@ -162,7 +244,13 @@
       "path": "docs/data-model/operator-decision-notices.md",
       "store": "<runtime rootDir>/data/operator-decision-notices/",
       "schemaSurface": "src/operator-decision-notice.mjs",
-      "relatedSchemaSurfaces": ["src/pollonce-phases.mjs", "src/ama-closure-orchestration.mjs", "src/reviewer-cascade.mjs", "src/ama/operator-notice-route.mjs", "src/ama/dispatch-record-read.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/pollonce-phases.mjs",
+        "src/ama-closure-orchestration.mjs",
+        "src/reviewer-cascade.mjs",
+        "src/ama/operator-notice-route.mjs",
+        "src/ama/dispatch-record-read.mjs"
+      ],
       "owner": "watcher operator-decision notification observation"
     },
     {
@@ -171,7 +259,9 @@
       "path": "docs/data-model/nonempty-pr-heads.md",
       "store": "data/reviews.db: nonempty_pr_heads",
       "schemaSurface": "src/pollonce-phases.mjs",
-      "relatedSchemaSurfaces": ["src/empty-pr-close.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/empty-pr-close.mjs"
+      ],
       "owner": "watcher empty-PR admission"
     },
     {
@@ -180,7 +270,11 @@
       "path": "docs/data-model/derived-artifact-receipts.md",
       "store": "<runtime rootDir>/data/derived-artifact-receipts/",
       "schemaSurface": "src/ama/derived-artifact-receipt.mjs",
-      "relatedSchemaSurfaces": ["bin/derived-artifact-receipt.mjs", "src/ama/derived-artifacts.mjs", "src/ama/primary-change.mjs"],
+      "relatedSchemaSurfaces": [
+        "bin/derived-artifact-receipt.mjs",
+        "src/ama/derived-artifacts.mjs",
+        "src/ama/primary-change.mjs"
+      ],
       "owner": "AMA canonical daemon data owner"
     },
     {
@@ -189,13 +283,30 @@
       "path": "docs/data-model/primary-change-history.md",
       "store": "<runtime rootDir>/data/primary-change-history/",
       "schemaSurface": "src/ama/primary-change-store.mjs",
-      "relatedSchemaSurfaces": ["src/ama/primary-change.mjs", "src/ama/history-reader.mjs", "bin/primary-change-context.mjs", "src/watcher.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/ama/primary-change.mjs",
+        "src/ama/history-reader.mjs",
+        "bin/primary-change-context.mjs",
+        "src/watcher.mjs"
+      ],
       "owner": "AMA canonical daemon data owner",
       "identityVersion": "reversalprov-v5",
       "reversalSnapshotProof": "SAFETYSTOPOWNER-01: subsequent authoritative snapshots may pin the original cited reversal when the first snapshot predates it; original-parent review currency, immutable identity, exact changed content and cited-region coverage remain required",
-      "optionalHistoryFields": ["builderBoundary", "diagnosticCommitRange", "reversalAuthorizations", "rejectedReversalAuthorizations", "renameProofs", "primaryPathChanges", "renameProofReadFailed"],
-      "rejectedReversalAuthorizationOptionalFields": ["detail"],
-      "diagnosticCommitRangeEntryFields": ["sha"],
+      "optionalHistoryFields": [
+        "builderBoundary",
+        "diagnosticCommitRange",
+        "reversalAuthorizations",
+        "rejectedReversalAuthorizations",
+        "renameProofs",
+        "primaryPathChanges",
+        "renameProofReadFailed"
+      ],
+      "rejectedReversalAuthorizationOptionalFields": [
+        "detail"
+      ],
+      "diagnosticCommitRangeEntryFields": [
+        "sha"
+      ],
       "diagnosticCollection": "snapshot attribution is operator opt-in only, 20 commits and 15 seconds; shared reads retain commit-file attribution from rename proof reads, capped at 20 commits when no destination exists"
     },
     {
@@ -204,7 +315,10 @@
       "path": "docs/data-model/claude-corporate-quota-cooldown.md",
       "store": "data/claude-corporate-quota-cooldown.json",
       "schemaSurface": "src/claude-account-routing.mjs",
-      "relatedSchemaSurfaces": ["src/pollonce-phases.mjs", "src/reviewer-spawn-settle.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/pollonce-phases.mjs",
+        "src/reviewer-spawn-settle.mjs"
+      ],
       "owner": "Claude reviewer account routing"
     },
     {
@@ -213,7 +327,10 @@
       "path": "docs/data-model/codex-corporate-quota-cooldown.md",
       "store": "data/codex-corporate-quota-cooldown.json",
       "schemaSurface": "src/codex-account-routing.mjs",
-      "relatedSchemaSurfaces": ["src/pollonce-phases.mjs", "src/reviewer-spawn-settle.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/pollonce-phases.mjs",
+        "src/reviewer-spawn-settle.mjs"
+      ],
       "owner": "Codex reviewer account routing"
     },
     {
@@ -222,7 +339,11 @@
       "path": "docs/data-model/gemini-quota-cooldown.md",
       "store": "data/gemini-quota-cooldown.json",
       "schemaSurface": "src/gemini-quota-cooldown.mjs",
-      "relatedSchemaSurfaces": ["src/reviewer-quota-signal.mjs", "src/pollonce-phases.mjs", "src/reviewer-spawn-settle.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/reviewer-quota-signal.mjs",
+        "src/pollonce-phases.mjs",
+        "src/reviewer-spawn-settle.mjs"
+      ],
       "owner": "Gemini reviewer quota routing"
     },
     {
@@ -238,7 +359,17 @@
         "src/ama/operator-hold-refund.mjs"
       ],
       "owner": "watcher operator-hold release routing",
-      "stageValues": ["first-review", "rereview", "blocking-findings", "clean-review", "code-work", "closeout", "cycle-cap", "review-failed", "pr-terminal"]
+      "stageValues": [
+        "first-review",
+        "rereview",
+        "blocking-findings",
+        "clean-review",
+        "code-work",
+        "closeout",
+        "cycle-cap",
+        "review-failed",
+        "pr-terminal"
+      ]
     },
     {
       "id": "ci-recovery-reservations",
@@ -246,9 +377,22 @@
       "path": "docs/data-model/ci-recovery-reservations.md",
       "store": "<watcher rootDir>/data/ci-recovery/",
       "schemaSurface": "src/ci-recovery.mjs",
-      "relatedSchemaSurfaces": ["src/daemon-clean-merge.mjs", "src/follow-up-merge-agent.mjs", "src/merge-agent-candidate.mjs", "src/reviewer-ci-admission.mjs", "src/reviewer-timeout-exhausted-dispatch.mjs", "src/ama-closure-orchestration.mjs", "src/follow-up-remediation.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/daemon-clean-merge.mjs",
+        "src/follow-up-merge-agent.mjs",
+        "src/merge-agent-candidate.mjs",
+        "src/reviewer-ci-admission.mjs",
+        "src/reviewer-timeout-exhausted-dispatch.mjs",
+        "src/ama-closure-orchestration.mjs",
+        "src/follow-up-remediation.mjs"
+      ],
       "owner": "adversarial-review watcher CI recovery",
-      "reservationEvidenceFields": ["reservedAt", "state", "runId", "attempt"]
+      "reservationEvidenceFields": [
+        "reservedAt",
+        "state",
+        "runId",
+        "attempt"
+      ]
     },
     {
       "id": "automation-merge-actions",
@@ -274,18 +418,47 @@
       "path": "docs/data-model/ama-closure-lag.md",
       "store": "data/ama-closure-lag/state.json",
       "schemaSurface": "src/ama/closure-lag.mjs",
-      "relatedSchemaSurfaces": ["src/ama/dispatch-closer.mjs", "src/ama-closure-orchestration.mjs", "src/pr-lifecycle-sync.mjs", "src/daemon-clean-merge.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/ama/dispatch-closer.mjs",
+        "src/ama-closure-orchestration.mjs",
+        "src/pr-lifecycle-sync.mjs",
+        "src/daemon-clean-merge.mjs"
+      ],
       "owner": "AMA closure diagnostics and SLO paging",
-      "breachSummary": { "maxBlockers": 5, "maxCompleted": 5, "omittedFields": ["blockers_omitted", "completed_omitted"], "maxPageCharacters": 3500 }
+      "breachSummary": {
+        "maxBlockers": 5,
+        "maxCompleted": 5,
+        "omittedFields": [
+          "blockers_omitted",
+          "completed_omitted"
+        ],
+        "maxPageCharacters": 3500
+      }
     },
     {
       "id": "ama-audit",
       "hammerCapturedBase": "rebasedOntoBase is empty after verification unless the captured base is proved an ancestor of the produced head; FIFO capture alone is not rebase provenance. Existing successful retry rebases retain their proved target.",
       "docsFastPathRange": "Terminal metadata records the latest eligible immutable base/head comparison on the same leased base branch; live gates precede attestation recording on every transport attempt. Record failures are deferred with exitCode, signal, stderrTail (redacted, at most 2000 characters), error, retryAfter, needsOperator and parkReason. Exact-head history permits three failures with 60s then 120s backoff and parks subsequent ticks without writes; legacy failure entries also count.",
-      "docsFastPathFields": ["closureAuthority=docs-fast-path", "mergeAccountability=docs-fast-path", "docsFastPath.headSha", "docsFastPath.baseSha", "docsFastPath.baseBranch", "attempts[].reason=attestation-record-failed"],
-      "launchOutcomeFields": ["attempts[].launchRequestId", "attempts[].reason", "attempts[].attemptPhase"],
+      "docsFastPathFields": [
+        "closureAuthority=docs-fast-path",
+        "mergeAccountability=docs-fast-path",
+        "docsFastPath.headSha",
+        "docsFastPath.baseSha",
+        "docsFastPath.baseBranch",
+        "attempts[].reason=attestation-record-failed"
+      ],
+      "launchOutcomeFields": [
+        "attempts[].launchRequestId",
+        "attempts[].reason",
+        "attempts[].attemptPhase"
+      ],
       "earlyFailureDeduplication": "Keyed reports preserve each launch's terminal reason; unkeyed hammer-early-exit reports preserve the first unkeyed terminal reason per repo/PR/head without suppressing keyed launches.",
-      "osgResolutionFields": ["harnessResolution.modelResolution", "harnessResolution.osgRemediator", "attempts[].harnessResolution.modelResolution", "attempts[].harnessResolution.osgRemediator"],
+      "osgResolutionFields": [
+        "harnessResolution.modelResolution",
+        "harnessResolution.osgRemediator",
+        "attempts[].harnessResolution.modelResolution",
+        "attempts[].harnessResolution.osgRemediator"
+      ],
       "harnessResolutionDiagnostics": "optional array of producer/field evidence strings; no admission or retry authority",
       "title": "AMA Closure Audit",
       "path": "docs/data-model/ama-audit.md",
@@ -313,20 +486,69 @@
         "src/daemon-clean-merge.mjs",
         "src/ama/hammer-stop-hold.mjs"
       ],
-      "pendingAttestationFields": ["attempts[].pendingAttestation.baseHead", "attempts[].pendingAttestation.validatedHead", "attempts[].pendingAttestation.identity", "attempts[].pendingAttestation.validationSummary"],
+      "pendingAttestationFields": [
+        "attempts[].pendingAttestation.baseHead",
+        "attempts[].pendingAttestation.validatedHead",
+        "attempts[].pendingAttestation.identity",
+        "attempts[].pendingAttestation.validationSummary"
+      ],
       "owner": "AMA merge authority",
-      "guardReversalEvidenceFields": ["attempts[].guardReversals"],
-      "guardReversalEntryFields": ["authorization", "paths", "failedCheckRun", "passingCheckRun", "failedHead", "passingHead"],
-      "messageRewriteFields": ["closingKeywordRewrites", "attempts[].closingKeywordRewrites"],
-      "waitEvidenceFields": { "attempts[].waitNote": "string", "attempts[].headWaitedSeconds": "non-negative integer seconds; 0 means not started", "attempts[].requiredChecksWaitedSeconds": "non-negative integer seconds; 0 means not started" },
-      "pendingCiResumeFields": ["attempts[].resumeOwed", "attempts[].resumeHead"],
-      "unknownMergeabilityEvidence": { "reason": "pr-mergeability-unknown", "remoteCiStatus": ["mergeability-unknown", "mergeability-unknown-ci-timeout"], "checksConclusion": "attempts[].githubGate.checksConclusion" },
+      "guardReversalEvidenceFields": [
+        "attempts[].guardReversals"
+      ],
+      "guardReversalEntryFields": [
+        "authorization",
+        "paths",
+        "failedCheckRun",
+        "passingCheckRun",
+        "failedHead",
+        "passingHead"
+      ],
+      "messageRewriteFields": [
+        "closingKeywordRewrites",
+        "attempts[].closingKeywordRewrites"
+      ],
+      "waitEvidenceFields": {
+        "attempts[].waitNote": "string",
+        "attempts[].headWaitedSeconds": "non-negative integer seconds; 0 means not started",
+        "attempts[].requiredChecksWaitedSeconds": "non-negative integer seconds; 0 means not started"
+      },
+      "pendingCiResumeFields": [
+        "attempts[].resumeOwed",
+        "attempts[].resumeHead"
+      ],
+      "unknownMergeabilityEvidence": {
+        "reason": "pr-mergeability-unknown",
+        "remoteCiStatus": [
+          "mergeability-unknown",
+          "mergeability-unknown-ci-timeout"
+        ],
+        "checksConclusion": "attempts[].githubGate.checksConclusion"
+      },
       "pendingCiResumeConsumer": "audit-only; watcher independently evaluates closer ancestry and live CI",
-      "leaseTimeoutEvidence": { "waited_s": "number or null when duration evidence is absent", "configured_s": "number" },
-      "leaseAdmissionOutcomes": { "operator-hold": "deferred", "pr-is-draft": "deferred", "head-changed": "superseded", "pr-not-open": "failed-without-merge" },
-      "stackedBaseHoldOutcomes": { "stacked-base-merged": "deferred", "stacked-base-read-failed": "deferred" },
-      "daemonAttemptPhases": ["daemon-pre-merge", "daemon-merged", "daemon-deferred", "daemon-failed"],
-      "compatibilityFields": ["appendedRecords"]
+      "leaseTimeoutEvidence": {
+        "waited_s": "number or null when duration evidence is absent",
+        "configured_s": "number"
+      },
+      "leaseAdmissionOutcomes": {
+        "operator-hold": "deferred",
+        "pr-is-draft": "deferred",
+        "head-changed": "superseded",
+        "pr-not-open": "failed-without-merge"
+      },
+      "stackedBaseHoldOutcomes": {
+        "stacked-base-merged": "deferred",
+        "stacked-base-read-failed": "deferred"
+      },
+      "daemonAttemptPhases": [
+        "daemon-pre-merge",
+        "daemon-merged",
+        "daemon-deferred",
+        "daemon-failed"
+      ],
+      "compatibilityFields": [
+        "appendedRecords"
+      ]
     },
     {
       "id": "fast-merge-audits",
@@ -334,22 +556,62 @@
       "path": "docs/data-model/fast-merge-audits.md",
       "store": "data/fast-merge-audits/",
       "schemaSurface": "src/fast-merge-processing.mjs",
-      "relatedSchemaSurfaces": ["src/fast-merge-audit-storage.mjs", "src/fast-merge-audit-recovery.mjs", "src/ama/closing-keywords.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/fast-merge-audit-storage.mjs",
+        "src/fast-merge-audit-recovery.mjs",
+        "src/ama/closing-keywords.mjs"
+      ],
       "owner": "Fast-merge close processing",
-      "messageRewriteFields": ["closingKeywordRewrites"],
-      "mergeWritePathValues": ["gh-admin-explicit-message", null],
+      "messageRewriteFields": [
+        "closingKeywordRewrites"
+      ],
+      "mergeWritePathValues": [
+        "gh-admin-explicit-message",
+        null
+      ],
       "mergeActor": "nullable ambient gh login for the attempted write"
     },
     {
       "id": "follow-up-jobs",
       "operatorLabelSatisfactions": "remediationPlan.operatorLabelSatisfactions[] retains live required-label evidence: repo, prNumber, label, eventId, actor, appliedAt, observedAt, headSha. Presence and event are required; CI requeue binds the current head and adds an actionable finding without resetting rounds; its blocking section removes empty sentinels and its comment-only verdict becomes Request changes. Fenced examples and other sections are preserved. Active remediation bypasses requeue without failure warnings. Same-path terminal stops preserve their record (LABELSTOPOWNER-01).",
-      "ciInfrastructureWait": { "fields": ["reason", "headSha", "failedChecks", "firstObservedAt", "deadline", "nextProbeAt", "parked", "evidencePending"], "probeMs": 300000, "parkAfterMs": 3600000, "refundCode": "ci-infrastructure-refund", "refundReason": "checks-executed-again" },
+      "ciInfrastructureWait": {
+        "fields": [
+          "reason",
+          "headSha",
+          "failedChecks",
+          "firstObservedAt",
+          "deadline",
+          "nextProbeAt",
+          "parked",
+          "evidencePending"
+        ],
+        "probeMs": 300000,
+        "parkAfterMs": 3600000,
+        "refundCode": "ci-infrastructure-refund",
+        "refundReason": "checks-executed-again"
+      },
       "simplicityNote": "Optional advisory section text or null; normalization preserves existing non-null notes and otherwise derives from reviewBody; excluded from findings, gates and round accounting (REVIEWSIMPLE-01)",
       "hammerSimplicitySnapshot": "review.simplicityNote is capped at 1200 UTF-8 bytes; review.simplicityNoteTruncated is a boolean (false when absent). Fetch the full review if it or review.findingsTruncated is true.",
       "simplicityNoteApplied": "Optional reply observation; boolean or null in completion and remediationPlan.rounds[].completion. Unknown never creates a validation failure or retry.",
       "terminalEventEvidence": "Normalized events and status probes retain SDK terminal/succeeded booleans, including explicit false and wire-only terminal outcomes.",
-      "branchResolution": { "reason": "branch-unresolved", "state": "blocked", "queueState": "pending", "retrySeconds": 60, "readTimeoutMs": 8000, "settledCleanBypassesResolution": true, "attempts": "failed lookups including creation; legacy holds count as one", "maxAttempts": 3, "exhaustedStopCode": "branch-unresolved", "operatorRequeueResetsAttempts": true },
-      "unpublishedWorkFields": ["jobId", "commitSha", "workspaceDir", "reported"],
+      "branchResolution": {
+        "reason": "branch-unresolved",
+        "state": "blocked",
+        "queueState": "pending",
+        "retrySeconds": 60,
+        "readTimeoutMs": 8000,
+        "settledCleanBypassesResolution": true,
+        "attempts": "failed lookups including creation; legacy holds count as one",
+        "maxAttempts": 3,
+        "exhaustedStopCode": "branch-unresolved",
+        "operatorRequeueResetsAttempts": true
+      },
+      "unpublishedWorkFields": [
+        "jobId",
+        "commitSha",
+        "workspaceDir",
+        "reported"
+      ],
       "unpublishedWorkEvidence": "inspected workspace HEAD overrides reply hashes; unchanged revisionRef has no debt; reported commit fallback only without valid workspace HEAD",
       "unpublishedWorkRetention": "retained workspace; committed-unpublished stop; failed gate until live head confirms publication, then pending review",
       "title": "Follow-Up Remediation Jobs",
@@ -388,7 +650,9 @@
       "owner": "follow-up remediation queue",
       "publicationFailureCommitField": "localCommit",
       "publicationFailureRetention": "Successful guarded publication removes the supplied failure sidecar; retained failures follow reply-artifact storage",
-      "missingLabelEventObservationFields": ["firstSeenAt"],
+      "missingLabelEventObservationFields": [
+        "firstSeenAt"
+      ],
       "missingLabelEventRetention": "no automatic expiry; operator cleanup after PR closure or head supersession",
       "infrastructureRefundRetryCode": "infrastructure-refund",
       "infrastructureRefundLimit": 2,
@@ -397,17 +661,58 @@
       "infrastructureRefundNoticeDelivery": "best-effort-without-terminal-stamp",
       "infrastructureOutcomeLockRetries": 5,
       "publishedRoundsMeaning": "observed-head-movement-since-tracking-began",
-      "infrastructureRefundEvidenceFields": ["remediationPlan.rounds[].startHeadSha", "remediationPlan.rounds[].publishedHeadSha", "remediationWorker.recordedOutcome", "remediationPlan.publishedRoundsForPR", "remediationPlan.retryHistory[].retryMetadata"],
-      "completedRemediationHeadEvidenceFields": ["remediationPlan.rounds[].state", "remediationPlan.rounds[].startHeadSha", "remediationPlan.rounds[].resultingHeadSha"],
-      "publishedHeadRecoveryCompletionEvidenceFields": ["completion.source", "completion.publishEvidence", "remediationPlan.rounds[].completion.source", "remediationPlan.rounds[].completion.publishEvidence"],
-      "remediationReplyBackfillCursor": { "store": "data/follow-up-jobs/delivery-retry-index/.remediation-reply-backfill-cursor", "fields": ["directory", "after"], "workBudgetPerTick": 100, "retention": "removed after successful complete backfill" },
+      "infrastructureRefundEvidenceFields": [
+        "remediationPlan.rounds[].startHeadSha",
+        "remediationPlan.rounds[].publishedHeadSha",
+        "remediationWorker.recordedOutcome",
+        "remediationPlan.publishedRoundsForPR",
+        "remediationPlan.retryHistory[].retryMetadata"
+      ],
+      "completedRemediationHeadEvidenceFields": [
+        "remediationPlan.rounds[].state",
+        "remediationPlan.rounds[].startHeadSha",
+        "remediationPlan.rounds[].resultingHeadSha"
+      ],
+      "publishedHeadRecoveryCompletionEvidenceFields": [
+        "completion.source",
+        "completion.publishEvidence",
+        "remediationPlan.rounds[].completion.source",
+        "remediationPlan.rounds[].completion.publishEvidence"
+      ],
+      "remediationReplyBackfillCursor": {
+        "store": "data/follow-up-jobs/delivery-retry-index/.remediation-reply-backfill-cursor",
+        "fields": [
+          "directory",
+          "after"
+        ],
+        "workBudgetPerTick": 100,
+        "retention": "removed after successful complete backfill"
+      },
       "conflictedBaseProbeRetryCode": "hq-conflicted-base-probe-transient",
       "conflictedBaseProbeExhaustionCode": "hq-conflicted-base-probe-retries-exhausted",
-      "pendingCiRereviewEvidenceFields": ["reReview.ciSettlement", "reReview.ciGate", "remediationPlan.rounds[].reReview.ciSettlement", "remediationPlan.rounds[].reReview.ciGate"],
-      "closeoutSuccessorFields": ["reReview.nextAction", "remediationPlan.rounds[].reReview.nextAction", "completion.workerPushedHeadSha", "completion.finalRemediationPush"],
+      "pendingCiRereviewEvidenceFields": [
+        "reReview.ciSettlement",
+        "reReview.ciGate",
+        "remediationPlan.rounds[].reReview.ciSettlement",
+        "remediationPlan.rounds[].reReview.ciGate"
+      ],
+      "closeoutSuccessorFields": [
+        "reReview.nextAction",
+        "remediationPlan.rounds[].reReview.nextAction",
+        "completion.workerPushedHeadSha",
+        "completion.finalRemediationPush"
+      ],
       "closeoutSuccessorMeaning": "one shared action, actor, reason, head and anchored UTC deadline; pending CI completes under an observer with durable watcher re-review admission intent when rounds remain; recovered red CI registers intent to requeue remaining remediation; final push evidence preserves terminal hammer handoff without merge authority",
-      "pendingCiCompletionEvidenceFields": ["completion.pendingCiOnly", "completion.workerPushedHeadSha"],
-      "workflowPublicationEvidenceFields": ["operationalBlockerRecovery.retry.pendingNativePublication", "operationalBlockerRecovery.retry.pendingNativePublication.rewriteEvidence", "operationalBlockerRecovery.retry.nativePublicationReceipt", "operationalBlockerRecovery.retry.retryLater"],
+      "pendingCiCompletionEvidenceFields": [
+        "completion.pendingCiOnly",
+        "completion.workerPushedHeadSha"
+      ],
+      "workflowPublicationEvidenceFields": [
+        "operationalBlockerRecovery.retry.pendingNativePublication",
+        "operationalBlockerRecovery.retry.pendingNativePublication.rewriteEvidence",
+        "operationalBlockerRecovery.retry.nativePublicationReceipt",
+        "operationalBlockerRecovery.retry.retryLater"
+      ],
       "workflowRewriteEvidenceCompatibility": "Optional on legacy native publication proofs; records receipt path, recovery error or empty fast-forward result once and reuses it on verification retries."
     },
     {
@@ -416,9 +721,20 @@
       "path": "docs/data-model/merge-lease-waiters.md",
       "store": "data/merge-leases/<repo-slug>__<base>.waiters.json",
       "schemaSurface": "src/ama/merge-lease.mjs",
-      "relatedSchemaSurfaces": ["src/daemon-clean-merge.mjs", "src/ama/dispatch-closer.mjs", "src/posted-review-row.mjs", "bin/merge-lease.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/daemon-clean-merge.mjs",
+        "src/ama/dispatch-closer.mjs",
+        "src/posted-review-row.mjs",
+        "bin/merge-lease.mjs"
+      ],
       "owner": "AMA daemon and hammer merge lane",
-      "optionalWaiterFields": ["priority", "acquisitionPid", "registeredAt", "notBefore", "deployIncident"],
+      "optionalWaiterFields": [
+        "priority",
+        "acquisitionPid",
+        "registeredAt",
+        "notBefore",
+        "deployIncident"
+      ],
       "admissionOrder": "incident-first-then-arrival-fifo-across-roles; delayed-reentries-yield-to-ready-waiters",
       "cliWaiterLifecycle": "unique-invocation-id; same-host-confirmed-dead-acquirer-pruning; bounded-finally-cleanup",
       "daemonReservationSeconds": "2 * pollIntervalMs / 1000, load-scaled once and capped at floor((2^31 - 1) / 1000)",
@@ -436,10 +752,16 @@
       "path": "docs/data-model/merge-lease-history.md",
       "store": "data/merge-leases/<repo-slug>__<base>.history.jsonl",
       "schemaSurface": "src/ama/merge-lease.mjs",
-      "relatedSchemaSurfaces": ["bin/merge-lease.mjs", "bin/hammer-verify-head.sh"],
+      "relatedSchemaSurfaces": [
+        "bin/merge-lease.mjs",
+        "bin/hammer-verify-head.sh"
+      ],
       "owner": "AMA daemon and hammer merge lane",
       "retentionRows": 4096,
-      "noMergeReleaseEvents": ["requeue", "park"],
+      "noMergeReleaseEvents": [
+        "requeue",
+        "park"
+      ],
       "nonFailureReleases": "yield/retryable-abort record backoff without failure parking; planned yield reasons distinguish required-checks-wait and local-validation"
     },
     {
@@ -454,7 +776,18 @@
       ],
       "owner": "AMA daemon and hammer merge lane",
       "releaseAccounting": "GATECAPBASE-01: atomic refund and release identity; planned yields, base advances, server rebase conflicts and contention refund provisional charges. Stable-head/base predicate refusals retain the cap; a new head/base resets it. Capped heads return to hammer conflict recovery or durable closure paging without a required operator reset",
-      "optionalRetryFields": ["baseSha", "queueArrivedAt", "queueArrivalExpiresAt", "noMergeReleases", "consecutiveNoMergeReleases", "noMergeReason", "noMergeLeaseId", "reenteredAt", "nextEligibleAt", "parkedReason"]
+      "optionalRetryFields": [
+        "baseSha",
+        "queueArrivedAt",
+        "queueArrivalExpiresAt",
+        "noMergeReleases",
+        "consecutiveNoMergeReleases",
+        "noMergeReason",
+        "noMergeLeaseId",
+        "reenteredAt",
+        "nextEligibleAt",
+        "parkedReason"
+      ]
     },
     {
       "id": "finalization-ledger",
@@ -462,7 +795,35 @@
       "path": "docs/data-model/finalization-ledger.md",
       "store": "data/reviews.db",
       "schemaSurface": "migrations/20260717_finalization_ledger.sql",
-      "relatedSchemaSurfaces": ["migrations/20261029_finalization_queue_routing.sql", "src/finalization/queue-routing.mjs", "src/finalization/queue-status.mjs", "migrations/20261023_finalization_queue.sql", "migrations/20261024_finalization_queue_handoff.sql", "migrations/20261025_finalization_queue_admission.sql", "src/finalization/queue-admission.mjs", "src/finalization/queue-clean-review.mjs", "src/finalization/queue-read.mjs", "migrations/20261026_finalization_queue_checks.sql", "src/finalization/queue-checks.mjs", "migrations/20261027_finalization_queue_merge.sql", "src/finalization/queue-merge.mjs", "src/finalization/queue-delivery.mjs", "src/finalization/queue-check-reader.mjs", "src/finalization/queue-check-transport.mjs", "src/finalization/queue-rebase.mjs", "src/finalization/queue-rebase-proof.mjs", "src/finalization/queue-git.mjs", "src/finalization/queue-store.mjs", "src/finalization/queue-owner.mjs", "src/finalization/queue-handoff.mjs", "src/finalization/queue-handoff-store.mjs", "src/ama/closer-queue-handoff.mjs", "src/finalization/ledger-events.mjs", "src/finalization/ledger-fold.mjs", "src/finalization/queue-probe.mjs"],
+      "relatedSchemaSurfaces": [
+        "migrations/20261029_finalization_queue_routing.sql",
+        "src/finalization/queue-routing.mjs",
+        "src/finalization/queue-status.mjs",
+        "migrations/20261023_finalization_queue.sql",
+        "migrations/20261024_finalization_queue_handoff.sql",
+        "migrations/20261025_finalization_queue_admission.sql",
+        "src/finalization/queue-admission.mjs",
+        "src/finalization/queue-clean-review.mjs",
+        "src/finalization/queue-read.mjs",
+        "migrations/20261026_finalization_queue_checks.sql",
+        "src/finalization/queue-checks.mjs",
+        "migrations/20261027_finalization_queue_merge.sql",
+        "src/finalization/queue-merge.mjs",
+        "src/finalization/queue-delivery.mjs",
+        "src/finalization/queue-check-reader.mjs",
+        "src/finalization/queue-check-transport.mjs",
+        "src/finalization/queue-rebase.mjs",
+        "src/finalization/queue-rebase-proof.mjs",
+        "src/finalization/queue-git.mjs",
+        "src/finalization/queue-store.mjs",
+        "src/finalization/queue-owner.mjs",
+        "src/finalization/queue-handoff.mjs",
+        "src/finalization/queue-handoff-store.mjs",
+        "src/ama/closer-queue-handoff.mjs",
+        "src/finalization/ledger-events.mjs",
+        "src/finalization/ledger-fold.mjs",
+        "src/finalization/queue-probe.mjs"
+      ],
       "owner": "Merge Authority v2 subject ledger and repository/base queue",
       "queueCheckTimestamps": "REST check-run createdAt normalizes started_at then completed_at, or null for undated runs retained without deduplication; legacy statuses require created_at. Numeric REST IDs or GraphQL databaseId break timestamp ties despite opaque node IDs. Repeated Link headers and canonical repository-ID next links retain the exact candidate/endpoint and original named repository reads.",
       "queueRouting": "Durable effective executor/config/writer runtime and pending transfer; monotonic lane route_generation fences mutation under shared issuance flock. Registered legacy intents and authoritative drain inventory prevent mixed ownership. Stable-key rollback return outbox commits acknowledged returned-to-closer progress; receipts retained. Status and routing capability probe read real schema/config/store, distinguish observer/writer builds and preserve pending organic evidence.",
@@ -538,9 +899,24 @@
         "src/reviewer-spawn-settle.mjs",
         "src/ama/closer-pass-attempt.mjs"
       ],
-      "deliveryHeadWaitFields": ["head_wait_started_at"],
-      "claudeReplySelectionFields": ["candidateCount", "selectedCandidate", "selectedType", "laterCandidates", "contractValid"],
-      "reviewerSettlementFailureMessage": { "successfulPass": null, "unsuccessfulPassPriority": ["error", "stderr", "stderrTail"] },
+      "deliveryHeadWaitFields": [
+        "head_wait_started_at"
+      ],
+      "claudeReplySelectionFields": [
+        "candidateCount",
+        "selectedCandidate",
+        "selectedType",
+        "laterCandidates",
+        "contractValid"
+      ],
+      "reviewerSettlementFailureMessage": {
+        "successfulPass": null,
+        "unsuccessfulPassPriority": [
+          "error",
+          "stderr",
+          "stderrTail"
+        ]
+      },
       "owner": "reviewer spawn, settle, and token attribution"
     },
     {
@@ -648,10 +1024,18 @@
         "src/operator-label-wake.mjs",
         "src/ama/closure-next-action.mjs"
       ],
-      "optionalOwnershipFields": ["nextAction"],
+      "optionalOwnershipFields": [
+        "nextAction"
+      ],
       "owner": "watcher posted-review dispatch fairness",
-      "optionalCadenceFields": ["lastRunAt"],
-      "optionalGenerationFields": ["watcherGeneration", "generationResets", "generationHistory"],
+      "optionalCadenceFields": [
+        "lastRunAt"
+      ],
+      "optionalGenerationFields": [
+        "watcherGeneration",
+        "generationResets",
+        "generationHistory"
+      ],
       "generationResetContract": "NOPROGRESSRESET-01: changed watcher build or effective config resets scheduling debt at startup; preserve prior counters in the last ten generationHistory entries and cumulative generationResets; retain operator alert debounce; log and preserve old backoff on reset I/O faults",
       "incompleteWalkDecisionContract": "Absorb current-head stored decline changes and charge the decision-reset cap without clearing scheduling debt; resource-limited observations leave no-progress counters and lastRunAt unchanged",
       "lastRunAtContract": "Explicit null means no recorded walk; only absent legacy fields fall back to updatedAt",
@@ -665,7 +1049,9 @@
       "path": "docs/data-model/operator-label-holds.md",
       "store": "data/operator-label-holds/",
       "schemaSurface": "src/ama/operator-label-gates.mjs",
-      "relatedSchemaSurfaces": ["src/ama/dispatch-closer.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/ama/dispatch-closer.mjs"
+      ],
       "owner": "AMA closer operator-label paging",
       "commentReceiptPolicy": "Normalized posted success records commentedAt; unposted comments retry independently of delivered alerts",
       "receiptWritePolicy": "Unchanged delivered identity/reason/gates skip paging locks and atomic replacement",
@@ -691,11 +1077,34 @@
       "path": "docs/data-model/alert-delivery-state.md",
       "store": "data/alert-delivery/",
       "schemaSurface": "src/alert-delivery.mjs",
-      "relatedSchemaSurfaces": ["src/ama/orphan-watchdog.mjs", "src/ama/automated-recovery.mjs", "src/fleet-stop.mjs", "src/watcher.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/ama/orphan-watchdog.mjs",
+        "src/ama/automated-recovery.mjs",
+        "src/fleet-stop.mjs",
+        "src/watcher.mjs"
+      ],
       "owner": "adversarial-review alert delivery",
-      "automatedRecoveryIdentityFields": ["repo", "pr", "head", "reason"],
-      "quarantineDiagnosticCacheKey": ["rootDir", "quarantineCount", "filesystemReaders"],
-      "sev1DeliveryFailureFields": ["signal", "alertId", "event", "repo", "pr", "at", "attemptCount", "reason"],
+      "automatedRecoveryIdentityFields": [
+        "repo",
+        "pr",
+        "head",
+        "reason"
+      ],
+      "quarantineDiagnosticCacheKey": [
+        "rootDir",
+        "quarantineCount",
+        "filesystemReaders"
+      ],
+      "sev1DeliveryFailureFields": [
+        "signal",
+        "alertId",
+        "event",
+        "repo",
+        "pr",
+        "at",
+        "attemptCount",
+        "reason"
+      ],
       "heartbeatDeliveryFailureField": "alert_delivery_failure",
       "pinnedReviewerCurrency": "reviewer.agy_pinned_copy_stale: fixed identity by payload.fingerprint; files and users are evidence. Delivered/receipt identity survives archive expiry and watcher restarts."
     },
@@ -705,7 +1114,9 @@
       "path": "docs/data-model/daemon-merge-parks.md",
       "store": "data/daemon-merge-parks/",
       "schemaSurface": "src/daemon-merge-park-log.mjs",
-      "relatedSchemaSurfaces": ["src/ama/primary-change.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/ama/primary-change.mjs"
+      ],
       "owner": "AMA daemon clean-merge diagnostics"
     },
     {
@@ -714,7 +1125,9 @@
       "path": "docs/data-model/daemon-route-disagreement.md",
       "store": "data/follow-up-jobs/daemon-route-disagreement/",
       "schemaSurface": "src/daemon-route-disagreement.mjs",
-      "relatedSchemaSurfaces": ["src/ama-closure-orchestration.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/ama-closure-orchestration.mjs"
+      ],
       "owner": "AMA watcher and closer route arbitration"
     },
     {
@@ -724,7 +1137,11 @@
       "path": "docs/data-model/hammer-wakes.md",
       "store": "data/hammer-wakes/",
       "schemaSurface": "src/hammer-wake.mjs",
-      "relatedSchemaSurfaces": ["src/pr-next-action.mjs", "src/pr-next-action-consumer.mjs", "src/ama-closure-orchestration.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/pr-next-action.mjs",
+        "src/pr-next-action-consumer.mjs",
+        "src/ama-closure-orchestration.mjs"
+      ],
       "owner": "AMA event-driven hammer wake diagnostics"
     },
     {
@@ -733,7 +1150,9 @@
       "path": "docs/data-model/merge-agent-harness-deferrals.md",
       "store": "data/follow-up-jobs/merge-agent-harness-deferrals/",
       "schemaSurface": "src/merge-agent-harness.mjs",
-      "relatedSchemaSurfaces": ["src/follow-up-merge-agent.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/follow-up-merge-agent.mjs"
+      ],
       "owner": "merge-agent dispatch (CLOSERREUSE-01)"
     },
     {
@@ -771,17 +1190,40 @@
       "path": "docs/data-model/hammer-retry-cap.md",
       "store": "data/follow-up-jobs/hammer-retry-cap/",
       "schemaSurface": "src/ama/hammer-retry-cap.mjs",
-      "receiptChargeFields": ["chargedDispatchKeys", "dispatchCharges", "targetChargeEpoch", "pendingTransientCharge", "noWorkRefunds"],
+      "receiptChargeFields": [
+        "chargedDispatchKeys",
+        "dispatchCharges",
+        "targetChargeEpoch",
+        "pendingTransientCharge",
+        "noWorkRefunds"
+      ],
       "receiptChargeSemantics": "LAC-2081/RCV-08: exact native attempt key and LRQ charge once across receipt interruptions and head resets; schema 3 retains per-budget partial credits and permanent canonical no-work refund receipts under one PR-scoped flock; new charge timestamps default to current ISO-8601 time when omitted; recovery preserves suppression",
       "relatedSchemaSurfaces": [
-        "src/ama/companion-stop-wait.mjs","src/ama/dead-hammer-rearm.mjs", "src/ama/dispatch-closer.mjs", "src/ama-closure-orchestration.mjs", "src/closer-authored-stale.mjs", "src/ama/operator-hold-refund.mjs"],
+        "src/ama/companion-stop-wait.mjs",
+        "src/ama/dead-hammer-rearm.mjs",
+        "src/ama/dispatch-closer.mjs",
+        "src/ama-closure-orchestration.mjs",
+        "src/closer-authored-stale.mjs",
+        "src/ama/operator-hold-refund.mjs"
+      ],
       "owner": "AMA hammer dispatch retry and redrive caps",
-      "headContextFields": { "observedHeadSha": "optional string or null" },
-      "headContextRefusalReasons": ["dispatch-head-context-changed", "dispatch-head-context-unavailable"],
-      "nonExecutionRefundFields": ["unexecutedLaunchRequestIds", "noWorkRefunds"],
+      "headContextFields": {
+        "observedHeadSha": "optional string or null"
+      },
+      "headContextRefusalReasons": [
+        "dispatch-head-context-changed",
+        "dispatch-head-context-unavailable"
+      ],
+      "nonExecutionRefundFields": [
+        "unexecutedLaunchRequestIds",
+        "noWorkRefunds"
+      ],
       "nonExecutionRefundHistoryLimit": null,
       "nonExecutionRefundsLifetime": true,
-      "operatorHoldRefundFields": ["operatorHoldRefundStopKeys", "operatorHoldRefundedAt"],
+      "operatorHoldRefundFields": [
+        "operatorHoldRefundStopKeys",
+        "operatorHoldRefundedAt"
+      ],
       "operatorHoldRefundsLifetime": true,
       "leaseWaitExhausted": "green exact-head contention refunds failures and resumes next pass",
       "leaseDeferralHistoryLimit": 64,
@@ -794,26 +1236,53 @@
       "path": "docs/data-model/closer-authored-stale.md",
       "store": "data/closer-authored-stale/",
       "schemaSurface": "src/closer-authored-stale.mjs",
-      "relatedSchemaSurfaces": ["src/ama-closure-orchestration.mjs", "src/ama/hammer-head-validation.mjs", "src/ama/hammer-pushed-attestation.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/ama-closure-orchestration.mjs",
+        "src/ama/hammer-head-validation.mjs",
+        "src/ama/hammer-pushed-attestation.mjs"
+      ],
       "owner": "AMA closer-authored stale-head verdict carry-forward"
     },
     {
       "id": "ama-closer-dispatches",
-      "interruptedDispatchFields": ["hqProject", "interruptedAt"],
+      "interruptedDispatchFields": [
+        "hqProject",
+        "interruptedAt"
+      ],
       "interruptedDispatchState": "dispatch-interrupted",
-      "mergeCaptureReadDiagnostics": ["mergeCaptureReadReason", "mergeCaptureReadAt"],
+      "mergeCaptureReadDiagnostics": [
+        "mergeCaptureReadReason",
+        "mergeCaptureReadAt"
+      ],
       "dispatchAbsenceContract": "CLOSERDISPATCHDEAD-01: key and ticket/time recovery selectors carry project_ref and qualified repo, validated against an existing exact dispatch_reads pair. Successful unfiltered canonical zero-match queries produce selector-bound absence proof without a per-attempt entitlement; filtered emptiness, hidden matches, unknown identities, bounds and read failures retain ownership. Existing exact expiring operator proofs remain supported. Dead/reused watcher and submitter identities plus absence retire the intent and defer its pending lease in one pass; positive keyed receipts are adopted. SIGTERM/SIGINT stop background admission and synchronously persist dispatch-interrupted before abort/exit. Interrupted intents retain ownership and artifacts until the same fenced reconciliation proves absence or recovers a receipt. Retry refunds and launch CAS remain once-only. No grant/config provisioning, new CI check, live operation or new smoke promise.",
-      "noWorkFields": ["failure", "failureReason"],
+      "noWorkFields": [
+        "failure",
+        "failureReason"
+      ],
       "noWorkStatus": "failed",
       "terminalLaunchEvidence": "Wire-only terminal rows override stale active worker observations; succeeded maps to unverified-terminal-success until independent closure proof, failed remains failed.",
       "terminalEvidence": "Wire terminality is independent of status; missing terminal status uses success/failure fallback and explicit false success records failure. No merge authority.",
       "launchOwnership": "SDK 0.3.0 readDispatchStatus interprets public statusVocabulary and independent wire booleans; false wins, missing booleans use vocabulary, and legacy launch aliases remain unknown. Parked receipts and resumed launches retain PR ownership across terminal deferred leases, including rekeyed heads. The recovery probe persists known resolved statuses and the secondary probe persists newly parked statuses under matching receipt identity; unknown status or unreadable retry evidence cannot erase the ownership observation. Positive resumed execution restores fleet capacity accounting, including matching rekeyed deferred leases. Confirmed terminal launch/retry evidence restores existing settlement/retry policy.",
       "launchReadEvidence": "SDK dispatchLookup is grant-scoped; backend app-contract/source app-sdk; transient failures retain secret-free diagnostics and bounded receipt-owner retries. Reads default off until ADVERSARIAL_DISPATCH_READS_ENABLED=1 after verified release, producer and full grants. Retired --ledger-target is rejected; partial-grant emptiness is not global absence proof. Worker observations retain partial accounting through reviewer capture. Synchronous reads reuse only a matching registered SDK session or explicit token; no per-read registration.",
-      "preReceiptFields": ["dispatchIdempotencyKey", "dispatchPhase", "dispatchWatcher", "dispatchSubmitter", "preReceiptReconciliation"],
+      "preReceiptFields": [
+        "dispatchIdempotencyKey",
+        "dispatchPhase",
+        "dispatchWatcher",
+        "dispatchSubmitter",
+        "preReceiptReconciliation"
+      ],
       "preReceiptSemantics": "CLOSERPENDINGDEAD-01: first-poll early recovery requires a matching local pending lease, dead/reused watcher identity, absent submitter and key in a bounded complete process scan, then successful empty-key ledger evidence; unknown liveness retains the deadline. System PID 0 rows are accepted, while recorded handles remain positive. A scanned watcher overrides prior ESRCH: matching identity is live, verified reuse is gone, and unverified identity records watcher-identity-unverified. Process identities and bounded diagnostic evidence are persisted without command lines. CLOSERINTENT-01: query evidence includes bounded attempts, load-aware timeout, reason and detail for keyed and legacy reads; exact closer ticket required for adoption; absent/null ledger repository metadata is compatible, while supplied repository/head context must match; missing identity columns project as null; expired successful empty-key proof or audited empty closer-ticket proof settles keyed no-dispatch; new intents clear predecessor IDs. LAC-2081 / LEGACYINTENT-01: native fenced keyed receipt recovery or proof of no submission; legacy no-key attempts settle legacy-no-launch-proven only on a successful empty inclusive ticket/time ledger query recorded in preReceiptReconciliation.query; unresolved ownership holds only its PR/head, never fleet launch admission or capacity; keyless active listings retain stale/orphan escapes; authoritative closed/merged PR state retires intents as completed/pr-terminal without lease or budget changes; unreadable PR state holds without paging; inspection pages once per attempt; audited single-PR command defaults to dry-run",
-      "preReceiptAlertFields": ["preReceiptReconciliation.alertedAt"],
+      "preReceiptAlertFields": [
+        "preReceiptReconciliation.alertedAt"
+      ],
       "preReceiptTerminalStatus": "pr-terminal",
-      "preReceiptCounts": ["recovered", "noLaunch", "retired", "unknown", "held"],
+      "preReceiptCounts": [
+        "recovered",
+        "noLaunch",
+        "retired",
+        "unknown",
+        "held"
+      ],
       "reconciliation": "Terminal launch observation writes launch-terminal; same-PR no-merge settlement releases ownership under existing caps after the readable 60-second terminal grace, with armed auto-merge held only inside the fixed 30-minute dispatched-lease window unless a no-merge audit resolves it; explicit watcher snapshot excludes proven terminal launches and unreadable evidence reserves bounded pending capacity.",
       "title": "AMA Closer Dispatch Records",
       "path": "docs/data-model/ama-closer-dispatches.md",
@@ -834,40 +1303,69 @@
         "src/ama/prelaunch-refusal-retry.mjs"
       ],
       "owner": "AMA closer dispatch, live launch-capacity reconciliation, lifecycle settlement, stale-head redrive, and recovery",
-      "headContextFields": { "observedHeadSha": "optional string or null", "unresolvedForkHeadSince": "optional ISO timestamp or null" },
+      "headContextFields": {
+        "observedHeadSha": "optional string or null",
+        "unresolvedForkHeadSince": "optional ISO timestamp or null"
+      },
       "unresolvedForkHeadWindowMs": 21600000,
       "unresolvedForkHeadExpiry": "no-dispatch / live-head-fork-unresolved; needsOperator; no further same-head probes until operator record reset or a new reviewed head",
-      "headContextRefusalReasons": ["dispatch-head-context-changed", "dispatch-head-context-unavailable"],
-      "foreignLaunchEvidenceFields": ["unadoptedLaunchRequestId"],
+      "headContextRefusalReasons": [
+        "dispatch-head-context-changed",
+        "dispatch-head-context-unavailable"
+      ],
+      "foreignLaunchEvidenceFields": [
+        "unadoptedLaunchRequestId"
+      ],
       "foreignLaunchRefusalReason": "non-hammer-launch-not-adopted",
       "refusedAttemptSettlement": "Explicit foreign receipt: no-dispatch, superseded pending lease, prior retry count, unused artifacts removed. Live-claim retry probe unreadable or mismatched: dispatch-failed, pending lease removed, bounded failure charged, predecessor receipt/artifacts retained on original head for ordinary probing.",
       "drainDeferralState": "deferred-by-drain",
-      "drainDeferralFields": ["drainEpoch", "updatedAt"],
+      "drainDeferralFields": [
+        "drainEpoch",
+        "updatedAt"
+      ],
       "drainEpochParsing": "complete non-whitespace token up to comma or closing parenthesis, or null; requires exit 6 and anchored drain-in-effect diagnostic",
-      "drainHintHeadResolution": ["prMetadata.headSha", "reviewState.headSha", "dispatchContext.reviewedSha", "headSha"],
+      "drainHintHeadResolution": [
+        "prMetadata.headSha",
+        "reviewState.headSha",
+        "dispatchContext.reviewedSha",
+        "headSha"
+      ],
       "drainHintTtlMs": 300000,
       "drainHintRetirement": "lane expiry or either AMA kill switch; autonomous execution kill switch falls back to reviewed head when live head is unavailable; preserves existing lane debt",
       "drainDeferralResume": "first clear closer pass through normal admission and capacity; fresh confirmed drain hints alone bypass accounting",
       "fleetRetryRefusalReason": "dispatch-retry-live",
       "fleetRetryRefusalState": "dispatched",
       "fleetRetryRefusalRequires": "fresh live-descendant proof for a non-null ancestor LRQ",
-      "fleetRetryEvidenceFields": ["liveRetryLaunchRequestId", "retryOwnerHeadSha"],
+      "fleetRetryEvidenceFields": [
+        "liveRetryLaunchRequestId",
+        "retryOwnerHeadSha"
+      ],
       "fleetRetryIdentity": "restore original owning head; different target is no-dispatch without launch/artifact ownership; later admissions resolve retryOwnerHeadSha back to the owning launch",
       "unprovenFleetRetryRefusal": "charged dispatch-failed with existing bounded paged recovery",
       "fleetRetryLiveness": "transitive launch-ledger metadata.retryOf descendants",
       "promptOwnership": "unique path per dispatch attempt; invoked-closer refusal removes retired unlaunched prompts only within the PR's generated prompt namespace; interrupted admission retains predecessor artifacts",
       "refusedWakePromptIdentity": "an absent captured prompt may be populated by the same timestamp/target attempt; a non-empty captured path must match; matching reclaimable pending lease required",
-      "nonExecutionRefundFields": ["unexecutedRefundCount", "previousUnexecutedLaunchRequestId"],
-      "operatorLabelRefundFields": ["labelGateRefundedLaunchRequestId"],
+      "nonExecutionRefundFields": [
+        "unexecutedRefundCount",
+        "previousUnexecutedLaunchRequestId"
+      ],
+      "operatorLabelRefundFields": [
+        "labelGateRefundedLaunchRequestId"
+      ],
       "operatorLabelRefundsLifetime": false,
       "provisionSlotRefusalState": "dispatch-deferred-transient",
-      "prelaunchRetryKinds": ["branch-holder", "dispatch-refused", "non-execution"],
+      "prelaunchRetryKinds": [
+        "branch-holder",
+        "dispatch-refused",
+        "non-execution"
+      ],
       "prelaunchRetryFields": [
         "prelaunchRefusalSlowRetry.startedAt",
         "prelaunchRefusalSlowRetry.kind",
         "prelaunchRefusalSlowRetry.pagedAt",
         "prelaunchRefusalSlowRetry.exhaustedPagedAt"
-      ]
+      ],
+      "dispatchFilesEvidence": "SDK 0.12.0 launch/run-authorized sidecar and redacted logical log projections; independent workspace/host capabilities. Partial, foreign or unavailable evidence retains custody; no native fallback. See ama-closer-dispatches.md."
     },
     {
       "id": "hammer-stop-hold",
@@ -889,10 +1387,28 @@
       ],
       "owner": "AMA closer retry admission",
       "infrastructureRelease": "Only all-infrastructure holds retire with infrastructure-stop; cleanup without a current stop returns none. Packaging stops and deferrals preserve earlier deterministic refusals until success; packaging-only audit history reasserts an unreleased persisted refusal without writing or paging when inputs are unchanged, including ownerless recovery; changed inputs record release and the new baseline. Closer preflight evaluates cleanup without audit history. Unknown or transient predicates prevent pure infrastructure classification. Mixed reasons retain the deterministic refusal with packaging reasons stripped. Released infrastructure holds return none without rewriting state. Release write failures log and preserve the in-memory decision.",
-      "headRetention": { "clearOnCurrentHeadChange": true, "defensiveMaxEntries": 8, "ttl": null },
+      "headRetention": {
+        "clearOnCurrentHeadChange": true,
+        "defensiveMaxEntries": 8,
+        "ttl": null
+      },
       "baseline": "Comparable terminal audit head/base/mergeability readings, with mergeability trimmed and uppercased as for live metadata; other inputs, including the canonical closer review fingerprint, come from first observation or prior release, never synthetic eligibility-trace review fields. Review-required predicates additionally accept exact-head posted_at strictly after the terminal timestamp, including before first observation; this receipt requires a matching local posted row, so live bodies alone cannot provide posting-time release before SQLite reconciliation",
       "transientRecovery": "CLOSERSTOPTRANSIENT-01: only all-listed actionable reasons form a deterministic refusal. Other stops persist mode=transient, reasons and retryAfter for five-minute bounded retry admission; next-action projections carry deterministic=false. Legacy transient-only entries release once with transient-stop-upgrade, even without retained audit history (cleanup returns none). Releases log reasons and stopKey; no executed-attempt refunds or cap resets.",
-      "releaseDimensions": ["head", "base", "mergeability", "checks", "review", "conflicting", "primary-change-evidence", "hold-released", "github-gate-cleared", "infrastructure-stop", "ci-infrastructure-recovered", "transient-stop-backoff", "transient-stop-upgrade"]
+      "releaseDimensions": [
+        "head",
+        "base",
+        "mergeability",
+        "checks",
+        "review",
+        "conflicting",
+        "primary-change-evidence",
+        "hold-released",
+        "github-gate-cleared",
+        "infrastructure-stop",
+        "ci-infrastructure-recovered",
+        "transient-stop-backoff",
+        "transient-stop-upgrade"
+      ]
     },
     {
       "id": "ama-closer-leases",
@@ -905,10 +1421,21 @@
       "path": "docs/data-model/ama-closer-leases.md",
       "store": "data/ama-closer-leases/",
       "schemaSurface": "src/ama/closer-lease.mjs",
-      "relatedSchemaSurfaces": ["src/ama/dispatch-closer.mjs", "src/ama/closer-terminal-cancel.mjs", "bin/hammer-review-handoff.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/ama/dispatch-closer.mjs",
+        "src/ama/closer-terminal-cancel.mjs",
+        "bin/hammer-review-handoff.mjs"
+      ],
       "owner": "AMA closer ownership and terminal settlement",
-      "terminalSuccessHoldStatuses": ["succeeded"],
-      "statusValues": ["pending", "dispatched", "handed-to-review", "terminal"]
+      "terminalSuccessHoldStatuses": [
+        "succeeded"
+      ],
+      "statusValues": [
+        "pending",
+        "dispatched",
+        "handed-to-review",
+        "terminal"
+      ]
     },
     {
       "id": "ama-closure-waits",
@@ -916,13 +1443,36 @@
       "path": "docs/data-model/ama-closure-waits.md",
       "store": "data/ama-closure-waits/<sha256(repo#prNumber)>.db",
       "schemaSurface": "src/ama/closure-wait.mjs",
-      "relatedSchemaSurfaces": ["src/ama-closure-orchestration.mjs", "src/ama/dispatch-closer.mjs", "src/ama/closure-next-action.mjs", "src/reviewer-ci-admission.mjs", "src/ama/closure-refresh-loop.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/ama-closure-orchestration.mjs",
+        "src/ama/dispatch-closer.mjs",
+        "src/ama/closure-next-action.mjs",
+        "src/reviewer-ci-admission.mjs",
+        "src/ama/closure-refresh-loop.mjs"
+      ],
       "sharedDecisionAnchor": "anchor-only observations reuse bounded-wait started without reserving or delivering a page",
       "owner": "AMA bounded closure wait and exhaustion paging",
       "waitTable": "waits_by_class",
-      "waitColumns": ["head", "class", "started", "reason", "paged"],
-      "waitPrimaryKey": ["head", "class"],
-      "waitClasses": ["primary-change", "bounded-wait", "final-round", "lane-busy", "ci-regression-ownerless", "snapshot-refresh", "closure-decision-mismatch"],
+      "waitColumns": [
+        "head",
+        "class",
+        "started",
+        "reason",
+        "paged"
+      ],
+      "waitPrimaryKey": [
+        "head",
+        "class"
+      ],
+      "waitClasses": [
+        "primary-change",
+        "bounded-wait",
+        "final-round",
+        "lane-busy",
+        "ci-regression-ownerless",
+        "snapshot-refresh",
+        "closure-decision-mismatch"
+      ],
       "decisionMismatchCycleTable": "decision_mismatch_cycle(id INTEGER PRIMARY KEY CHECK(id=1), head TEXT NOT NULL, cycles INTEGER NOT NULL)",
       "decisionMismatchCycleContract": "First consumed mismatch permits one re-resolution; the second at the same head pages through closure-decision-mismatch and returns closure-decision-mismatch-escalated. Count saturates at two, survives restart, queue submissions and decision changes; a different head starts count one. No completion reset. Existing per-PR/head page receipt dedupes and refunds failed delivery.",
       "refreshCycleTable": "refresh_cycle(id INTEGER PRIMARY KEY CHECK(id=1), head TEXT NOT NULL, fingerprint TEXT NOT NULL, cycles INTEGER NOT NULL)",
@@ -937,7 +1487,10 @@
       "path": "docs/data-model/ama-closer-cancels.md",
       "store": "data/ama-closer-cancels/",
       "schemaSurface": "src/ama/closer-terminal-cancel.mjs",
-      "relatedSchemaSurfaces": ["src/pr-lifecycle-sync.mjs", "src/posted-review-row.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/pr-lifecycle-sync.mjs",
+        "src/posted-review-row.mjs"
+      ],
       "owner": "AMA lifecycle settlement"
     },
     {
@@ -971,31 +1524,80 @@
       "schemaSurface": "src/argus-security-queue.mjs",
       "recordContract": {
         "primaryKey": "jobId",
-        "uniqueIdentity": ["repo", "prNumber", "headSha"],
+        "uniqueIdentity": [
+          "repo",
+          "prNumber",
+          "headSha"
+        ],
         "artifactReviewBinding": {
-          "cachedReviewFields": ["baseSha", "evidenceFingerprint", "artifactBindings", "verifiedArtifactSources"],
-          "resultFields": ["headSha", "baseSha", "evidenceFingerprint", "artifactBindings"],
+          "cachedReviewFields": [
+            "baseSha",
+            "evidenceFingerprint",
+            "artifactBindings",
+            "verifiedArtifactSources"
+          ],
+          "resultFields": [
+            "headSha",
+            "baseSha",
+            "evidenceFingerprint",
+            "artifactBindings"
+          ],
           "sourceRecord": "vendor/argus-artifacts.json",
           "cacheContractVersion": 3,
-          "producerReceiptFields": ["merged", "mergeCommit", "baseRef", "defaultBranch"],
+          "producerReceiptFields": [
+            "merged",
+            "mergeCommit",
+            "baseRef",
+            "defaultBranch"
+          ],
           "producerAuthority": "exact merged commit into current default branch; head producer repository matches base",
-          "fingerprintExclusions": ["baseSha", "CI", "upstream release notes", "local-checkout usage text"],
+          "fingerprintExclusions": [
+            "baseSha",
+            "CI",
+            "upstream release notes",
+            "local-checkout usage text"
+          ],
           "legacyPolicy": "fingerprint-less and older-generation caches rerun; completed results retained"
         },
         "lastAutoadjudicationAttempt": {
-          "fields": ["schemaVersion", "decision", "reason", "inputs", "attemptedAt", "deferrals"],
-          "optionalFields": ["notBefore", "mergeDisposition", "mergeReason", "mergeReasons"],
+          "fields": [
+            "schemaVersion",
+            "decision",
+            "reason",
+            "inputs",
+            "attemptedAt",
+            "deferrals"
+          ],
+          "optionalFields": [
+            "notBefore",
+            "mergeDisposition",
+            "mergeReason",
+            "mergeReasons"
+          ],
           "deferralBudget": 18,
           "retryMilliseconds": 600000
         },
         "mergeWithheldRecovery": {
-          "fields": ["headSha", "reopenedAt", "inputs"],
+          "fields": [
+            "headSha",
+            "reopenedAt",
+            "inputs"
+          ],
           "maximumRecoveriesPerJob": 1,
           "headReference": "headSha"
         },
         "result.autoadjudication": {
-          "fields": ["schemaVersion", "decision", "reason", "inputs", "completedAt"],
-          "optionalFields": ["mergeDisposition", "mergeReasons"]
+          "fields": [
+            "schemaVersion",
+            "decision",
+            "reason",
+            "inputs",
+            "completedAt"
+          ],
+          "optionalFields": [
+            "mergeDisposition",
+            "mergeReasons"
+          ]
         }
       },
       "relatedSchemaSurfaces": [
@@ -1035,7 +1637,9 @@
       "path": "docs/data-model/follow-up-daemon-status.md",
       "store": "$HQ_ROOT/.adversarial-follow-up/config-status.json",
       "schemaSurface": "scripts/adversarial-follow-up-daemon.mjs",
-      "relatedSchemaSurfaces": ["src/review-pipeline-health.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/review-pipeline-health.mjs"
+      ],
       "owner": "follow-up daemon configuration and consume health"
     },
     {
@@ -1052,7 +1656,9 @@
       "path": "docs/data-model/follow-up-reaper-cursors.md",
       "store": "data/follow-up-jobs/finished-pr-reap-cursor.json, data/ama-closer-worktree-reaper-cursor.json",
       "schemaSurface": "src/follow-up-stuck-claim-sweep.mjs",
-      "relatedSchemaSurfaces": ["src/ama/closer-worktree-reaper.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/ama/closer-worktree-reaper.mjs"
+      ],
       "owner": "follow-up finished PR and closer worktree reapers"
     },
     {
@@ -1113,7 +1719,13 @@
     {
       "id": "ama-automated-recovery",
       "scopedSafetyRepair": "SAFETYSTOPOWNER-01: optional repairs[refusalKey] records reservedAt, dispatchKey and optional dispatched, launchRequestId, promptPath, reason; one coding/push attempt per head/key, reserved before submission under recovery flock and existing hammer caps; proven pre-submission holds, disabled execution, fleet stops, occupied/uncertain ownership and transient GitHub reads release only their recovery reservation/charge for next-poll admission without paging or hammer spend; ambiguous submissions stay charged; missing, non-deferred refused or exhausted repair pages immediately with safety-refusal:<key>; no merge or lease authority",
-      "ciInfrastructureRecovery": ["reason", "stopKey", "refundedAt", "attempts", "event"],
+      "ciInfrastructureRecovery": [
+        "reason",
+        "stopKey",
+        "refundedAt",
+        "attempts",
+        "event"
+      ],
       "title": "AMA Automated Recovery",
       "path": "docs/data-model/ama-automated-recovery.md",
       "store": "data/follow-up-jobs/ama-automated-recovery/<sha256>.{json,lock}",
@@ -1127,7 +1739,10 @@
         "src/ama/hammer-retry-cap.mjs"
       ],
       "owner": "AMA watcher recovery router",
-      "pageReceiptFields": ["paged", "pagedReasons"],
+      "pageReceiptFields": [
+        "paged",
+        "pagedReasons"
+      ],
       "pageDeduplication": "per head and exhaustion event.reason; legacy paged receipt migrates before event clearing"
     },
     {
@@ -1153,7 +1768,10 @@
       "attemptHoldReasonNormalization": "Explicit result holdReason takes precedence; otherwise extract the harness-hold: suffix from reason for outcomes and evidence summaries.",
       "sharedRereviewDecision": "rereview-exact-head queues once per head immediately when ownership is certainly absent; heads.evidence records action, reason and reasons; local queue failure refunds heads.rereview; both explicit decisions and selectedClosureOwner review/exact-head-review intents require matching distinct current/reviewed heads; selected intents execute before bounded-wait return while closureOwner stays wait/page until certain owner absence and successful queueing; selection is in-memory and the durable shape is unchanged",
       "recoveryAttemptLimit": 2,
-      "pagedTerminalReceiptStatuses": ["delivered", "dead-letter"]
+      "pagedTerminalReceiptStatuses": [
+        "delivered",
+        "dead-letter"
+      ]
     },
     {
       "id": "ham-primary-change-refusals",
@@ -1192,7 +1810,10 @@
         "src/reviewer-prompt.mjs"
       ],
       "owner": "AMA bounded finding disputes and reviewer context provenance",
-      "recoveryColumns": ["reserved_at", "paged"]
+      "recoveryColumns": [
+        "reserved_at",
+        "paged"
+      ]
     },
     {
       "id": "review-failure-decisions",
@@ -1216,7 +1837,11 @@
         "src/reviewer-harness.mjs"
       ],
       "owner": "reviewer prompt-budget evidence",
-      "elisionKindValues": ["+", "-", " "]
+      "elisionKindValues": [
+        "+",
+        "-",
+        " "
+      ]
     }
   ]
 }

@@ -232,7 +232,7 @@ export async function verifyTrailerOnlyHeadDelta({
   }
   let checkoutDir = null;
   try {
-    checkoutDir = await resolveLocalRepoCheckoutImpl(repoPath, hqRoot);
+    checkoutDir = await resolveLocalRepoCheckoutImpl(repoPath, hqRoot, {execFileImpl});
   } catch (err) {
     return { ...base, reason: 'checkout-resolve-failed', detail: err?.message || String(err) };
   }

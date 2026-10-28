@@ -1,3 +1,5 @@
+import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
+installDispatchFileProducerFixture();
 /* Routine SIGTERM must preserve in-flight reviewer
  * subprocesses. The next watcher reattaches them via
  * `reconcileReviewerSessions` (the `reviewer_reattach_alive` branch).

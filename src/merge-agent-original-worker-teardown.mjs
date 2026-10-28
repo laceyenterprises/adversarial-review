@@ -1,3 +1,4 @@
+import { readHostIdentitySync } from './dispatch-files-client.mjs';
 // ARC-19 wave9: original-worker teardown preflight for merge-agent dispatch.
 //
 // Extracted VERBATIM from follow-up-merge-agent.mjs. `prepareOriginalWorkerForMergeAgent`
@@ -18,8 +19,6 @@
 // remediation-reply-paths.mjs, and others.
 
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { loadRoleConfig } from './role-config.mjs';
@@ -28,7 +27,6 @@ import {
   isRecognizedOriginalWorkerId,
   isTerminalWorkerRunStatus,
   lookupOriginalWorkerRunStatus,
-  readJsonFileDetailed,
   readWorkerWorkspace,
   validateWorkerWorkspaceForBranch,
 } from './merge-agent-original-worker.mjs';
@@ -50,6 +48,7 @@ const DEFERRED_LOOKUP_FAILURE_REASONS = new Set([
   'worker-run-lookup-failed',
   'worker-run-lookup-threw',
   'missing-launch-request-id',
+  'dispatch-files-unavailable',
   'unsupported-ledger-backend',
   'malformed-ledger-target',
 ]);
@@ -72,31 +71,7 @@ function resolveHqRoot(env = {}) {
 }
 
 function resolveHqOwner(hqRoot) {
-  if (!hqRoot) return null;
-  const config = readJsonFileDetailed(join(hqRoot, '.hq', 'config.json'));
-  if (!config.ok) {
-    return {
-      ownerUser: null,
-      reason: 'hq-owner-unknown',
-      detail: config.error?.message || String(config.error),
-      code: config.error?.code || null,
-    };
-  }
-  const ownerUser = String(config.value?.ownerUser || '').trim();
-  if (!ownerUser) {
-    return {
-      ownerUser: null,
-      reason: 'hq-owner-unknown',
-      detail: 'ownerUser missing from .hq/config.json',
-      code: null,
-    };
-  }
-  return {
-    ownerUser,
-    reason: null,
-    detail: null,
-    code: null,
-  };
+  return readHostIdentitySync({hqRoot});
 }
 
 function resolveHqWorkerTearDownTimeoutMs(env = process.env, options = {}) {
@@ -155,21 +130,9 @@ async function prepareOriginalWorkerForMergeAgent({
       hqRoot: null,
     };
   }
-  const workerDir = join(hqRoot, 'workers', originalWorkerId);
-  const workspaceState = readWorkerWorkspace(workerDir);
+  const workspaceState = await readWorkerWorkspace(originalWorkerId, {env, hqRoot});
   const workspace = workspaceState.workspace || null;
-  const workspacePath = workspace?.workspacePath || workspace?.worktreePath || null;
-  const run = readJsonFileDetailed(join(workerDir, 'run.json'));
-  const runRecord = run.ok ? run.value : null;
-
-  if (!existsSync(workerDir) || (workspaceState.found && workspacePath && !existsSync(workspacePath))) {
-    return {
-      decision: 'ready',
-      reason: 'original-worker-already-torn-down',
-      originalWorkerId,
-      hqRoot,
-    };
-  }
+  const runRecord = workspaceState.runRecord || null;
   if (!workspaceState.found) {
     const event = workspaceState.reason === 'workspace-missing'
       ? 'merge_agent.workspace_missing'
@@ -192,6 +155,15 @@ async function prepareOriginalWorkerForMergeAgent({
       hqRoot,
     };
   }
+  if (workspace?.present === false) {
+    let observed;
+    try { observed = await lookupRunStatusImpl({workerId: originalWorkerId, hqRoot, env,
+      workspace, runRecord, launchRequestId: workspaceState.launchRequestId, runId: workspaceState.runId}); }
+    catch { return {decision: 'deferred', reason: 'worker-run-lookup-failed', originalWorkerId}; }
+    return observed?.found && isTerminalWorkerRunStatus(observed.status)
+      ? {decision: 'ready', reason: 'original-worker-already-torn-down', originalWorkerId, hqRoot}
+      : {decision: 'deferred', reason: observed?.found ? `worker-run-status-${observed.status}` : 'worker-run-lookup-failed', originalWorkerId, hqRoot};
+  }
   const workspaceValidation = validateWorkerWorkspaceForBranch(workspace, originalWorkerId, job?.branch);
   if (!workspaceValidation.ok) {
     mergeAgentLifecycleLog(logger, 'merge_agent.tear_down_skipped', {
@@ -213,13 +185,15 @@ async function prepareOriginalWorkerForMergeAgent({
   let runStatus;
   try {
     runStatus = await lookupRunStatusImpl({
-      workerDir,
+      workerId: originalWorkerId,
       hqRoot,
       env,
       job,
       originalWorkerId,
       workspace,
       runRecord,
+      launchRequestId: workspaceState.launchRequestId,
+      runId: workspaceState.runId,
     });
   } catch (err) {
     runStatus = {

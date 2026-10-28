@@ -1,3 +1,6 @@
+import {spawnReviewer} from './helpers/reviewer-quota-fixture.mjs';
+import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
+installDispatchFileProducerFixture();
 import { readCorporateCodexQuotaCooldown, recordCorporateCodexQuotaCooldown } from '../src/codex-account-routing.mjs';
 import { reviewerCredentialKey } from '../src/claude-account-routing.mjs';
 import { afhGroundingSnapshotFromStdout } from '../src/afh-reviewer-fallback.mjs';
@@ -17,7 +20,7 @@ import { beginReviewerPass, completeReviewerPass } from '../src/reviewer-pass-to
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 import { recordReviewerCredentialFailure, readReviewerCredentialOutage, readCascadeState } from '../src/reviewer-cascade.mjs';
 import { readGeminiQuotaCooldown } from '../src/gemini-quota-cooldown.mjs';
-import { spawnReviewer, settleReviewerAttempt } from '../src/reviewer-spawn-settle.mjs';
+import { settleReviewerAttempt } from '../src/reviewer-spawn-settle.mjs';
 import { infraRecoverableFailureClass } from '../src/reviewer-failure-classification.mjs';
 
 async function withStatusFile(state, fn, { invalidJson = false } = {}) {

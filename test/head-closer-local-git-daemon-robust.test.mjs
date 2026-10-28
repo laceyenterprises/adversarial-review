@@ -1,6 +1,6 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execGhWithRetry } from '../src/gh-cli.mjs';
@@ -70,6 +70,7 @@ function makeFakeGit({
   let shaFetchAttempts = 0;
   let pullRefFetchAttempts = 0;
   const impl = async (file, args) => {
+    if (args[0] === 'repo' && args[1] === 'list') { const root = args.includes('--root') ? args[args.indexOf('--root') + 1] : TEST_HQ_ROOT; return {stdout: JSON.stringify({repos: readdirSync(join(root, 'repos')).map(name => ({name, checkoutPath: join(root, 'repos', name)})), errors: []})}; }
     calls.push(args.join(' '));
     assert.equal(file, 'git');
     const joined = args.join(' ');

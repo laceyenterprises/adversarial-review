@@ -1,3 +1,6 @@
+import {spawnReviewer} from './helpers/reviewer-quota-fixture.mjs';
+import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
+installDispatchFileProducerFixture();
 import './helpers/worker-observation-fixture.mjs';
 import { openReviewStateDb } from '../src/review-state.mjs';
 import test from 'node:test';
@@ -6,7 +9,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { spawnReviewer, truncateCodePoints } from '../src/reviewer-spawn-settle.mjs';
+import { truncateCodePoints } from '../src/reviewer-spawn-settle.mjs';
 import { activeReviewerSpawns } from '../src/reviewer-session-registry.mjs';
 import {
   beginReviewerPass,
@@ -19,7 +22,7 @@ function currentHead(headRefOid) {
   return async () => ({ state: 'open', mergedAt: null, closedAt: null, headRefOid });
 }
 
-test('spawnReviewer reads default quota status files through either HQ root alias', async (t) => {
+test('spawnReviewer consumes public quota evidence with either transport root alias', async (t) => {
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'spawn-settle-quota-'));
   t.after(() => rmSync(hqRoot, { recursive: true, force: true }));
   mkdirSync(path.join(hqRoot, 'quota'));

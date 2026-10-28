@@ -1,3 +1,5 @@
+import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
+installDispatchFileProducerFixture();
 // Regression coverage for the `describeStaleDispatch` helper that
 // detects merge-agent dispatches recorded by the watcher but never
 // admitted by the agent-os dispatch daemon (BEG-00-era incident:

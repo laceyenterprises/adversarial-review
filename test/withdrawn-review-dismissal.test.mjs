@@ -156,6 +156,7 @@ esac
 ham_release_merge_lease() { HAM_MERGE_LEASE_HELD=0; }
 ham_acquire_merge_lease() { HAM_MERGE_LEASE_HELD=1; }
 ham_base_touches_pr_files() { return 1; }
+ham_capture_current_base_sha() { HAM_CAPTURED_BASE_SHA=${'b'.repeat(40)}; }
 ham_mark_merge_lease_retryable_abort() { :; }
 sleep() { :; }
 source "$1"

@@ -91,11 +91,22 @@ test('HAMRESUMEOWED-01: read-only closure probes leave stale receipts unchanged'
 });
 
 
-test('HAMRESUMEOWED-01: damaged audit cannot abort scheduling other PRs or authorize closure', t => {
+test('HAMRESUMEOWED-01: damaged audit cannot abort scheduling other PRs or authorize closure', async t => {
   const args = fixture(t), rootDir = args.hqRoot;
   writeFileSync(amaAuditFilePath(args.hqRoot, args.repo, args.prNumber, HEAD), 'invalid JSON');
   const gate = createNoProgressLaneGate({ rootDir, hqRoot: args.hqRoot, readReviewRow: () => null, logger: quiet });
   assert.equal(gate.evaluate({ repoPath: args.repo, prNumber: args.prNumber, headSha: HEAD }).run, true);
   assert.doesNotThrow(() => gate.evaluate({ repoPath: 'example/other', prNumber: 18, headSha: HEAD }));
   assert.throws(() => reconcileHammerResumes({ ...args, prState: 'OPEN', checks: 'SUCCESS' }));
+  const warnings = [];
+  const handler = { repoPath: args.repo, prNumber: args.prNumber, currentHeadSha: HEAD,
+    rootDir, env: { HQ_ROOT: args.hqRoot }, logger: { warn: message => warnings.push(message) } };
+  assert.deepEqual(await getStalePostedReviewAutoRereviewSuppression(handler), { suppressed: false, reason: null });
+  assert.match(warnings[0], /hammer resume audit unreadable/);
+  assert.deepEqual(await getStalePostedReviewAutoRereviewSuppression({ ...handler,
+    labelNames: ['merge-agent-dispatched'],
+    isMergeAgentDispatchActiveForHeadImpl: async () => ({ active: true, reason: 'active-dispatch' }),
+  }), { suppressed: true, reason: 'active-dispatch' }, 'independent suppression guards still run');
+  assert.deepEqual(await getStalePostedReviewAutoRereviewSuppression({ ...handler,
+    repoPath: 'example/other', prNumber: 18 }), { suppressed: false, reason: null });
 });

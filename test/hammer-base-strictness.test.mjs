@@ -88,3 +88,45 @@ exit $?
     assert.equal(result.status, expected, result.stdout + result.stderr);
   });
 }
+
+const mergeSource = readFileSync(new URL('../bin/hammer-merge.sh', import.meta.url), 'utf8');
+const clickBoundary = mergeSource.slice(mergeSource.indexOf('  # Repeat the live GitHub conflict/strict-BEHIND policy'),
+  mergeSource.indexOf("  # CI and merge-lease waits do not consume"));
+const captureBase = source.match(/^ham_capture_current_base_sha\(\) \{\n[\s\S]*?^\}/m)?.[0];
+for (const [state, strict] of [['CLEAN', 1], ['CLEAN', 0], ['BEHIND', 0]]) {
+  for (const previous of ['', 'c'.repeat(40)]) {
+    for (const fetchOk of [true, false]) test(`merge click captures base: ${state}, strict=${strict}, cached=${!!previous}, fetch=${fetchOk}`, t => {
+      const dir = mkdtempSync(join(tmpdir(), 'merge-base-capture-'));
+      t.after(() => rmSync(dir, { force: true, recursive: true }));
+      assert.ok(clickBoundary && captureBase);
+      const result = spawnSync('/bin/bash', ['-uc', `
+${needsRebase}
+${captureBase.replaceAll('<<RUN_DIR>>', dir)}
+BASE_BRANCH=main
+HAM_REQUIRES_UP_TO_DATE=${strict}
+HAM_CURRENT_BASE_SHA=${previous}
+HAM_GATE_JSON=unused
+HQ_LAUNCH_REQUEST_ID= AGENT_OS_WORKER_LRQ_ID= LAUNCH_REQUEST_ID=
+jq() { if [[ "$2" == *mergeStateStatus* ]]; then echo ${state}; else echo MERGEABLE; fi; }
+ham_fetch_base_with_retries() { return ${fetchOk ? 0 : 1}; }
+ham_is_full_sha() { [[ "$1" =~ ^[a-f0-9]{40}$ ]]; }
+git() { [ "$1" = rev-parse ] && echo ${'b'.repeat(40)}; }
+ham_append_terminal_audit() { echo "audit:$*"; }
+ham_mark_merge_lease_retryable_abort() { echo "abort:$*"; }
+ham_release_merge_lease() { echo released; }
+click() {
+${clickBoundary}
+echo "attempt:$HAM_MERGE_ATTEMPT_BASE_SHA"
+}
+click
+`], { encoding: 'utf8', timeout: 5000 });
+      assert.equal(result.status, fetchOk ? 0 : 1, result.stdout + result.stderr);
+      if (fetchOk) assert.equal(result.stdout.trim(), `attempt:${'b'.repeat(40)}`);
+      else {
+        assert.match(result.stdout, /audit:failed-without-merge github-gate-read-failed/);
+        assert.match(result.stdout, /abort:github-gate-read-failed\nreleased/);
+        assert.doesNotMatch(result.stdout, /attempt:/);
+      }
+    });
+  }
+}

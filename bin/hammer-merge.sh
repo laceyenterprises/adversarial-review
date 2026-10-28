@@ -1054,7 +1054,15 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
     ham_release_merge_lease
     return 1
   fi
-  HAM_MERGE_ATTEMPT_BASE_SHA="${HAM_CURRENT_BASE_SHA:-}"
+  # CLEAN and non-strict heads skip the rebase probe. Capture a fresh base for
+  # every click so a server conflict can distinguish concurrent base movement.
+  if ! ham_capture_current_base_sha; then
+    ham_append_terminal_audit failed-without-merge github-gate-read-failed || true
+    ham_mark_merge_lease_retryable_abort github-gate-read-failed
+    ham_release_merge_lease
+    return 1
+  fi
+  HAM_MERGE_ATTEMPT_BASE_SHA="$HAM_CAPTURED_BASE_SHA"
   # CI and merge-lease waits do not consume the legacy writer's 60s budget.
   HAM_LANE_WRITE_DEADLINE_MS=$(( ($(date +%s) + 60) * 1000 ))
   HAM_MERGE_EXECUTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)

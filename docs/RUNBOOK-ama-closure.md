@@ -6778,6 +6778,19 @@ only for a live GitHub conflict or BEHIND blocked by strict protection; unknown
 protection stays conservative for BEHIND. The final refreshed exact-head gate
 and `--match-head-commit` remain mandatory; never use `--admin`.
 
+Retaining a head does not skip base observation: immediately before every merge
+attempt, including CLEAN and non-strict BEHIND heads, the helper captures the
+current base SHA through the bounded base reader. A failed read stops that
+attempt as retryable `github-gate-read-failed`. A server rebase conflict is
+retryable as `base-advanced-during-server-rebase` only when a subsequent read
+proves movement from this fresh snapshot; an older validation snapshot is not
+evidence of movement during the merge attempt.
+
+A damaged resume audit logs a warning during stale automatic re-review
+suppression and supplies no resume-based suppression. Independent scoped
+merge-agent request/dispatch guards still run. The ordinary closure handler
+retains its fail-closed audit read; this fallback grants no merge authority.
+
 Synthetic incident shape (SEVDOCS-332): PR 17 stopped three times for
 `required-checks-pending` after repeated base updates restarted required CI.
 Each stop recorded `resumeOwed: true` for its new head; all required checks later

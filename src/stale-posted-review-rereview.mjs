@@ -28,9 +28,13 @@ export async function getStalePostedReviewAutoRereviewSuppression({
   logger = console,
   isMergeAgentDispatchActiveForHeadImpl = isMergeAgentDispatchActiveForHead,
 } = {}) {
-  if (readHammerResumes({ hqRoot: resolveHqRoot(env), repo: repoPath, prNumber })
-    .some(resume => resume.headSha === currentHeadSha)) {
-    return { suppressed: true, reason: 'hammer-resume-owed' };
+  try {
+    if (readHammerResumes({ hqRoot: resolveHqRoot(env), repo: repoPath, prNumber })
+      .some(resume => resume.headSha === currentHeadSha)) {
+      return { suppressed: true, reason: 'hammer-resume-owed' };
+    }
+  } catch (error) {
+    logger?.warn?.(`[watcher] hammer resume audit unreadable: ${error.message}`);
   }
   const normalizedLabelNames = new Set(
     (Array.isArray(labelNames) ? labelNames : [])

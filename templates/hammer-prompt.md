@@ -551,16 +551,13 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    `gh pr merge --match-head-commit <validated-post-remediation-sha>`, and only
    while holding the merge lease. No merge is allowed without the lease. Release
    the lease after the merge is confirmed or on any hard-block/terminal outcome.
-7. **Post a CLOSING comment after the merge confirms.** Once you have re-read
-   GitHub and confirmed the PR is merged at the validated head, post one final
-   comment on PR <<PR_URL>> that states `Hammer route: verified validated head`, the merge lease was held and released,
-   the base SHA rebased onto, the remote CI result
-   for the exact head, the merged SHA, the merge method, the counts of findings
-   remediated (blocking / non-blocking), the failing tests you fixed to keep
-   `main` green (or "suite already green"), and the
-   `Closed-By: hammer (adversarial-pipe-mode)` provenance. This closing comment is
-   the human-visible audit trail that an autonomous close happened — always post
-   it on a successful merge.
+7. **Post a CLOSING comment after the merge confirms.** Re-read GitHub to prove
+   the validated head merged, then post once on PR <<PR_URL>>. Include
+   `Hammer route: verified validated head`, lease held/released, base SHA rebased
+   onto, exact-head remote CI result, merged SHA, merge method, remediated counts
+   (blocking / non-blocking), failing tests fixed to keep `main` green (or
+   "suite already green"), and `Closed-By: hammer (adversarial-pipe-mode)`.
+   This audit is required after every successful autonomous merge.
 
 ## Required workflow
 
@@ -905,7 +902,7 @@ Do not merge unless all of these are true:
 
 In-lease merge:
 
-In the persistent merge-lease shell, `source "<<RUN_DIR>>/hammer-merge.sh"` after exporting the dispatch values above. The helper requires the successful audit-publish marker and an eligible predicate verdict for `POST_REMEDIATION_SHA`, then checks the live head and required checks before merging under the held lease. It appends a `failed-without-merge` audit and releases the lease if either prerequisite fails. The wrapper prints its bounded diagnostic tail, status, outcome, and lease state; a nonzero status requires the closing report from mandate 0b when the PR remains open, preserving retryable deferrals such as `lane-busy`.
+In the persistent merge-lease shell, `source "<<RUN_DIR>>/hammer-merge.sh"` with exported dispatch values. It requires successful audit publication and an eligible `POST_REMEDIATION_SHA` predicate, then rechecks live head/CI under lease. Either missing prerequisite appends `failed-without-merge` and releases the lease. The wrapper reports bounded diagnostics, status, outcome and lease state. Nonzero status on an open PR requires mandate 0b's report; preserve retryable deferrals such as `lane-busy`.
 
 
 After the merged audit append succeeds, emit the merge signal and then release

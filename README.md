@@ -1461,6 +1461,11 @@ OPDECPAGE-01: operator-decision notices observe closure ownership without changi
 lifecycle states or merge authority. In-flight hammer launches and pending retries
 hold delivery at any age; the idle backstop scales from 45 minutes with host load.
 Pages name `no-route`, `retry-cap`, `non-retryable: <outcome>` or `backstop`.
+NOTICEHOLD-01: a current next action owned by the remediator holds its notice
+only while a pending/in-progress remediation job exists. A stopped or missing
+job releases `no-route` immediately, with the recorded stop and decision needed.
+A retained `remediation-job-missing` route is ownerless for accounting; it cannot
+claim an active hammer lane. Closer-owned work with a live closer still holds.
 See [operator decision notices](docs/follow-up-runbook.md#operator-decision-notices-reviewnotice-01).
 
 ITP-11: Gemini logins are token holders for `gemini-reviewer`. Durable holder

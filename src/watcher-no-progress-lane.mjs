@@ -752,7 +752,8 @@ export function evaluateNoProgressLane(ledger, {
   }
   const noProgressTicks = normalizeCount(ledger.noProgressTicks);
   const selected = ledger.nextAction?.head === head ? ledger.nextAction : null;
-  if (selected ? !['operator-hold', 'done'].includes(selected.action) : ledger.hammerRouteActive === true) {
+  if (selected && selected.actor !== 'remediator'
+    ? !['operator-hold', 'done'].includes(selected.action) : ledger.hammerRouteActive === true) {
     return { ...base, noProgressTicks, reason: 'hammer-route-active' };
   }
   if (!selected && !hasOwn(ledger, 'progressClass')) {
@@ -766,7 +767,7 @@ export function evaluateNoProgressLane(ledger, {
       reason: 'legacy-progress-class-missing',
     };
   }
-  const progressClass = selected ? selected.action === 'operator-hold'
+  const progressClass = selected && selected.actor !== 'remediator' ? selected.action === 'operator-hold'
     ? PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED : PROGRESS_CLASS_SELF_RESOLVING
     : normalizeProgressClass(ledger.progressClass);
   if (progressClass === PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED) {
@@ -873,16 +874,19 @@ export function recordNoProgressLaneRun(rootDir, identity, {
   const selected = nextAction?.head === head ? nextAction : null;
   if (selected) {
     operatorHold = selected.action === 'operator-hold';
-    // Alerts and automatic stops retain an automated recovery workflow. Only
-    // explicit intent belongs in the operator lane; deadlines never stop work.
-    progressClass = selected.action === 'operator-hold'
-      ? PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED : PROGRESS_CLASS_SELF_RESOLVING;
-    hammerRouteActive = !['operator-hold', 'done'].includes(selected.action);
+    // A remediator action needs observed job activity; selecting it alone does
+    // not prove an actor exists. Other actions retain their recovery workflow.
+    if (selected.actor !== 'remediator') {
+      progressClass = selected.action === 'operator-hold'
+        ? PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED : PROGRESS_CLASS_SELF_RESOLVING;
+      hammerRouteActive = !['operator-hold', 'done'].includes(selected.action);
+    }
     if (selected.queue?.deferredBy === 'drain') escalate = false;
   }
   const existing = readNoProgressLane(rootDir, identity, { logger });
   const sameHead = normalizeHead(existing?.headSha) === head;
-  if (sameHead && !operatorHold && selected?.queue?.deferredBy === 'drain') {
+  if (sameHead && !operatorHold && selected?.queue?.deferredBy === 'drain'
+    && (selected.actor !== 'remediator' || hammerRouteActive)) {
     // Drain is a scheduling observation, never progress or a charged attempt.
     // Keep the pre-drain fingerprint, counters and first-progress clock intact.
     writeLedger(rootDir, identity, { ...existing, nextAction: selected,

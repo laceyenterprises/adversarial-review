@@ -51,6 +51,10 @@ for (const [name, observations, reason, requested] of [
     remediation: { roundsLeft: true, job: { status: 'pending', headSha: HEAD } } }, 'ci-red', false],
   ['DIRTY', { pr: { headSha: HEAD, state: 'OPEN', mergeable: 'MERGEABLE', mergeStateStatus: 'DIRTY' } }, 'conflict-rebase', true],
   ['blocking final adjudication', { reviews: { ...clean, verdict: 'request-changes', blockingFindingCount: 1 } }, 'review-findings-final', true],
+  ['NOTICEHOLD-01 stopped remediation retains remediator wake eligibility', {
+    reviews: { ...clean, verdict: 'request-changes', blockingFindingCount: 1 },
+    remediation: { roundsLeft: true, job: { status: 'stopped', headSha: HEAD } },
+  }, 'review-findings', false],
   ['proven suppressed push', { reviews: { ...clean, headSha: OLD },
     remediation: { finalPush: { headSha: HEAD, suppressed: true } } }, 'suppressed-final-push', true],
   ['unrelated push', { reviews: { ...clean, headSha: OLD },

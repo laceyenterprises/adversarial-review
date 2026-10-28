@@ -32,6 +32,27 @@ function latestDispatchReviewedSha(rootDir, identity) {
     .sort((a, b) => attemptedAt(b) - attemptedAt(a))[0]?.reviewedSha;
 }
 
+function liveRemediationJob(rootDir, identity) {
+  return ['pending', 'inProgress'].some(bucket => listFollowUpJobsInDir(rootDir, bucket, identity)
+    .some(({ job }) => job?.repo === identity.repo && Number(job.prNumber) === Number(identity.prNumber)
+      && ['pending', 'in-progress', 'in_progress'].includes(job.status)));
+}
+
+function remediatorOwns(outcome, headSha) {
+  return outcome?.nextAction?.head === headSha ? outcome.nextAction.actor === 'remediator'
+    : outcome?.reason === 'remediation-job-missing';
+}
+
+function remediationStop(rootDir, identity) {
+  const jobs = listFollowUpJobsInDir(rootDir, 'stopped', identity)
+    .map(({ job }) => job)
+    .filter(job => job?.repo === identity.repo && Number(job.prNumber) === Number(identity.prNumber)
+      && [job.headSha, job.revisionRef, job.reviewedHeadSha].includes(identity.headSha))
+    .sort((a, b) => (Date.parse(b.stoppedAt || b.updatedAt || b.createdAt) || 0)
+      - (Date.parse(a.stoppedAt || a.updatedAt || a.createdAt) || 0));
+  return jobs[0]?.remediationPlan?.stop;
+}
+
 // Observation only: never alters closer eligibility, ownership, or dispatch.
 export function recordOperatorNoticeCloserOutcome(rootDir, identity, result) {
   if (!identity.repo || !identity.prNumber || !identity.headSha) return;
@@ -78,10 +99,11 @@ export async function maybeDeliverOperatorDecisionNotice({ rootDir, repo, prNumb
   const backstopMs = loadAwareTimeoutMs(OPERATOR_DECISION_NOTICE_BACKSTOP_MS,
     { maxMs: Infinity, ...timeoutOptions });
   const pendingRetry = !operatorNeeded && operatorNoticePendingRetry(outcome, record);
-  const activeJob = [...listFollowUpJobsInDir(rootDir, 'pending', identity), ...listFollowUpJobsInDir(rootDir, 'inProgress', identity)]
-    .some(({ job }) => job?.repo === repo && Number(job.prNumber) === Number(prNumber));
-  const active = inFlight || (activeJob ? 'remediation-active'
-    : handoffAwaitingReview || (lease?.status === 'handed-to-review'
+  const activeJob = liveRemediationJob(rootDir, identity);
+  const remediationOwned = remediatorOwns(outcome, headSha);
+  const remediationMissing = remediationOwned && !activeJob;
+  const active = activeJob ? 'remediation-active' : remediationOwned ? null : inFlight || (
+    handoffAwaitingReview || (lease?.status === 'handed-to-review'
       && ['pending', 'pending-upstream', 'reviewing'].includes(reviewRow?.review_status)) ? 'handoff-review-active'
     : pendingRetry ? 'closer-route-available'
     : null);
@@ -92,11 +114,11 @@ export async function maybeDeliverOperatorDecisionNotice({ rootDir, repo, prNumb
     && (active || Object.hasOwn(state.observation, 'idleSince'));
   if (idleChanged) state.observation = { ...state.observation, idleSince };
   const backstopDue = !active && now - idleSince >= backstopMs;
-  const routeAvailable = outcome && !operatorNeeded
+  const routeAvailable = outcome && !operatorNeeded && !remediationOwned
     && ['hammer', 'conflict-rebase'].includes(outcome.closureOwner?.owner);
-  const held = active || (!backstopDue && (routeAvailable || (record?.outcome && !nonRetryable))
+  const held = active || (!remediationOwned && !backstopDue && (routeAvailable || (record?.outcome && !nonRetryable))
     && !operatorNeeded ? 'closer-route-available' : null);
-  const reason = held ? null : retryCap ? 'retry-cap' : operatorNeeded ? 'no-route'
+  const reason = held ? null : retryCap ? 'retry-cap' : operatorNeeded || remediationMissing ? 'no-route'
     : nonRetryable && !routeAvailable ? `non-retryable: ${nonRetryable}`
     : backstopDue ? 'backstop' : null;
   if (!reason) {
@@ -119,10 +141,11 @@ export async function maybeDeliverOperatorDecisionNotice({ rootDir, repo, prNumb
     const latestInFlight = await operatorNoticeInFlight(rootDir, identity, { readLaunchRequestStatusImpl, now });
     const latest = readState(rootDir, identity);
     const latestOutcome = latest.closer?.headSha === headSha ? latest.closer.result : null;
-    const restoredRoute = latestOutcome && !latestOutcome.needsOperator
+    const latestRemediationOwned = remediatorOwns(latestOutcome, headSha);
+    const restoredRoute = latestOutcome && !latestOutcome.needsOperator && !latestRemediationOwned
       && ['hammer', 'conflict-rebase'].includes(latestOutcome.closureOwner?.owner)
       && JSON.stringify(latest.closer) !== JSON.stringify(state.closer);
-    if (latestInFlight || restoredRoute
+    if (liveRemediationJob(rootDir, identity) || (!latestRemediationOwned && latestInFlight) || restoredRoute
       || operatorNoticePendingRetry(latestOutcome, readAmaCloserDispatchRecord(rootDir, identity))) {
       if (latest.observation?.headSha === headSha) {
         writeState(rootDir, identity, { ...latest, observation: { ...latest.observation, idleSince: null } });
@@ -131,15 +154,22 @@ export async function maybeDeliverOperatorDecisionNotice({ rootDir, repo, prNumb
     }
   }
   if (hasOperatorDecisionRequiredAlerted(rootDir, identity)) return;
+  const stop = remediationMissing ? remediationStop(rootDir, identity) : null;
+  const remediationDetail = remediationMissing
+    ? ` Remediation stop: ${stop?.code || 'remediation-job-missing'}. Decision needed: ` +
+      `${stop?.reason || decision.description || 'Inspect the unresolved review findings and decide how remediation may resume.'}`
+    : '';
   await deliverAlertFn(
     `Adversarial review needs an operator decision for ` +
     `${repo}#${prNumber}: ${decision.state || 'unknown state'} ` +
     `(${decision.reason || 'no reason provided'}). Reason: ${reason}. Findings are unresolved and ` +
     `no closer route is currently making progress. Inspect the closure outcome ` +
-    `and restore a closer route or resolve the blockers.`,
+    `and restore a closer route or resolve the blockers.${remediationDetail}`,
     { event: 'adversarial_review.operator_decision_required', payload: {
       repo, pr_number: prNumber, head_sha: headSha || null,
       gate_state: decision.state || null, gate_reason: decision.reason || null, reason,
+      ...(remediationMissing ? { remediation_stop_code: stop?.code || 'remediation-job-missing',
+        remediation_stop_reason: stop?.reason || decision.description || null } : {}),
       ...((record?.stopReason || record?.lastError)
         ? { hammer_stop_reason: record.stopReason || record.lastError } : {}),
     } },

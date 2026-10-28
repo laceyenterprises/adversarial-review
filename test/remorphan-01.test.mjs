@@ -384,6 +384,18 @@ test('HAMROUTE-01: observing a proof wait never adds a live ownership read to th
   assert.equal(calls.pages.length + calls.launches.length + calls.reviews.length, 0);
 });
 
+test('NOTICEHOLD-01 retained missing-remediation route accrues ownerless time', async t => {
+  const { args, tick, calls } = setup(t);
+  const result = { amaEnabled: true, reason: 'remediation-job-missing', recoveryWait: true,
+    retryAfterMs: 30_000, nextAction: { ...syntheticDecision(args.headSha),
+      action: 'remediate', actor: 'remediator', reason: 'review-findings' } };
+  assert.equal((await probeOrphanOwnership({ ...args, nextAction: result.nextAction })).owned, false);
+  await tick(0, { result });
+  const waiting = await tick(5, { result });
+  assert.equal(waiting.amaClosureResult.ownerlessIdleMs, 5 * 60_000);
+  assert.equal(calls.launches.length + calls.reviews.length + calls.pages.length, 0);
+});
+
 test('orphan review request normalizes an absent diagnostic reason', async t => {
   const { args, calls } = setup(t);
   const decision = { ...syntheticDecision(args.headSha), action: 'review', actor: 'reviewer', reason: undefined };

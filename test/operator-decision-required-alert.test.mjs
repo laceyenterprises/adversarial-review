@@ -14,7 +14,7 @@ import { processReviewSubject } from '../src/pollonce-phases.mjs';
 import { normalizePRSnapshot, stateFromSnapshot } from '../src/adapters/subject/github-pr/index.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 import { maybeFireOperatorDecisionRequiredAlert } from '../src/watcher-no-progress-lane.mjs';
-import { getFollowUpJobDir, writeFollowUpJob } from '../src/follow-up-jobs.mjs';
+import { FOLLOW_UP_JOB_SCHEMA_VERSION, getFollowUpJobDir, writeFollowUpJob } from '../src/follow-up-jobs.mjs';
 import {
   hasOperatorDecisionRequiredAlerted,
   markOperatorDecisionRequiredAlerted,
@@ -236,6 +236,106 @@ function noticeFixture(rootDir) {
     readLaunchRequestStatusImpl: async () => ({ ok: false, reason: 'synthetic-unavailable' }),
     logger: { log: line => logs.push(line) } } };
 }
+
+const remediatorWait = { dispatched: false, recoveryWait: true, retryAfterMs: 30_000,
+  reason: 'remediation-job-missing', closureOwner: { owner: 'remediation' },
+  nextAction: { head: HEAD, action: 'remediate', actor: 'remediator', reason: 'review-findings' } };
+
+for (const stopped of [false, true]) {
+  test(`NOTICEHOLD-01 releases remediator-owned notice with ${stopped ? 'stopped' : 'missing'} job`, async () => {
+    await withRootAsync(async root => {
+      const { alerts, logs, options } = noticeFixture(root);
+      if (stopped) writeFollowUpJob(join(getFollowUpJobDir(root, 'stopped'), 'o__r-pr-1-decision.json'), {
+        ...identity, schemaVersion: FOLLOW_UP_JOB_SCHEMA_VERSION, revisionRef: HEAD,
+        status: 'stopped', kind: 'adversarial-review-follow-up',
+        remediationPlan: { currentRound: 1, maxRounds: 3, stop: { code: 'live-pack-cross-edit',
+          reason: 'Decide whether to authorize the live pack edit with the existing operator-only label.' } },
+      });
+      recordOperatorNoticeCloserOutcome(root, identity, remediatorWait);
+      // A closer lease cannot act on a remediator-owned next action.
+      fixtureJSON(amaCloserLeaseFilePath(root, identity), { ...identity, status: 'pending' });
+      const readLivePR = async () => ({ state: 'OPEN', headRefOid: HEAD });
+      await maybeDeliverOperatorDecisionNotice({ ...options, readLivePR });
+      await maybeDeliverOperatorDecisionNotice({ ...options, readLivePR, now: 60_000 });
+      assert.equal(alerts.length, 1);
+      assert.equal(logs.length, 0);
+      assert.equal(alerts[0].meta.payload.reason, 'no-route');
+      assert.equal(alerts[0].meta.payload.remediation_stop_code,
+        stopped ? 'live-pack-cross-edit' : 'remediation-job-missing');
+      assert.match(alerts[0].text, /Decision needed:/);
+      if (stopped) assert.match(alerts[0].text, /existing operator-only label/);
+    });
+  });
+}
+
+for (const bucket of ['pending', 'inProgress']) {
+  test(`NOTICEHOLD-01 holds a remediator-owned notice for a live ${bucket} job`, async () => {
+    await withRootAsync(async root => {
+      const { alerts, options } = noticeFixture(root);
+      recordOperatorNoticeCloserOutcome(root, identity, remediatorWait);
+      writeFollowUpJob(join(getFollowUpJobDir(root, bucket), 'o__r-pr-1-live.json'), {
+        ...identity, status: bucket === 'pending' ? 'pending' : 'in-progress', kind: 'adversarial-review-follow-up',
+      });
+      await maybeDeliverOperatorDecisionNotice(options);
+      await maybeDeliverOperatorDecisionNotice({ ...options, now: 60 * 60_000 });
+      assert.equal(alerts.length, 0);
+    });
+  });
+}
+
+test('NOTICEHOLD-01 holds a closer-owned next action with a live closer', async () => {
+  await withRootAsync(async root => {
+    const { alerts, options } = noticeFixture(root);
+    recordOperatorNoticeCloserOutcome(root, identity, { closureOwner: { owner: 'hammer' },
+      nextAction: { head: HEAD, action: 'hammer', actor: 'hammer' } });
+    fixtureJSON(amaCloserLeaseFilePath(root, identity), { ...identity, status: 'pending' });
+    await maybeDeliverOperatorDecisionNotice({ ...options, now: 60 * 60_000 });
+    assert.equal(alerts.length, 0);
+  });
+});
+
+test('NOTICEHOLD-01 a new live remediation during PR lookup holds delivery', async () => {
+  await withRootAsync(async root => {
+    const { alerts, options } = noticeFixture(root);
+    recordOperatorNoticeCloserOutcome(root, identity, remediatorWait);
+    await maybeDeliverOperatorDecisionNotice({ ...options, readLivePR: async () => {
+      writeFollowUpJob(join(getFollowUpJobDir(root, 'pending'), 'o__r-pr-1-live.json'), {
+        ...identity, status: 'pending', kind: 'adversarial-review-follow-up',
+      });
+      return { state: 'OPEN', headRefOid: HEAD };
+    } });
+    assert.equal(alerts.length, 0);
+  });
+});
+
+test('NOTICEHOLD-01 a refreshed phantom route during PR lookup cannot hold delivery', async () => {
+  await withRootAsync(async root => {
+    const { alerts, options } = noticeFixture(root);
+    recordOperatorNoticeCloserOutcome(root, identity, remediatorWait);
+    await maybeDeliverOperatorDecisionNotice({ ...options, readLivePR: async () => {
+      recordOperatorNoticeCloserOutcome(root, identity, { ...remediatorWait,
+        closureOwner: { owner: 'hammer' }, retryAfterMs: 60_000 });
+      return { state: 'OPEN', headRefOid: HEAD };
+    } });
+    assert.equal(alerts.length, 1);
+    assert.equal(alerts[0].meta.payload.reason, 'no-route');
+  });
+});
+
+test('NOTICEHOLD-01 a live remediation ending releases its notice without an idle backstop', async () => {
+  await withRootAsync(async root => {
+    const { alerts, options } = noticeFixture(root);
+    recordOperatorNoticeCloserOutcome(root, identity, remediatorWait);
+    const path = join(getFollowUpJobDir(root, 'pending'), 'o__r-pr-1-live.json');
+    writeFollowUpJob(path, { ...identity, status: 'pending', kind: 'adversarial-review-follow-up' });
+    await maybeDeliverOperatorDecisionNotice(options);
+    assert.equal(alerts.length, 0);
+    rmSync(path);
+    await maybeDeliverOperatorDecisionNotice({ ...options, now: 60_000 });
+    assert.equal(alerts.length, 1);
+    assert.equal(alerts[0].meta.payload.reason, 'no-route');
+  });
+});
 
 for (const failure of ['corrupt-json', 'concurrent-unlink']) {
   test(`dispatch scanning skips ${failure} and retains readable PR records`, async t => {

@@ -970,6 +970,8 @@ async function dispatchAmaClosureFor({
   operationTimeoutMs = null,
   operationTracker = null,
 }) {
+  const snapshotObservedAt = Date.parse(passSnapshot?.observedAt || '');
+  const closureLagObservedAt = Number.isFinite(snapshotObservedAt) ? snapshotObservedAt : now();
   throwIfAborted(signal);
   let proofScope;
   // Ordinary current-head evaluations must not evict useful proofs by filling
@@ -2250,6 +2252,7 @@ async function dispatchAmaClosureFor({
   throwIfAborted(signal);
   try {
     if (!priorDaemonCleanMerge && !wouldUseDaemonPath) await observeClosureLag({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
+      open: String(candidate?.prState || '').toUpperCase() === 'OPEN', observedAt: closureLagObservedAt,
       eligible: !wouldUseDaemonPath && isEligibleForAmaClosure(reviewState, prMetadata, cfg).eligible,
       sloMs: cfg.closureLagSloMs, logger });
   } catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
@@ -2319,7 +2322,7 @@ async function dispatchAmaClosureFor({
   }
   if (!priorDaemonCleanMerge && daemonCleanMerge?.reason === 'not-eligible') {
     try { await observeClosureLag({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
-      eligible: false, reason: daemonCleanMerge.reason, logger }); }
+      eligible: false, observedAt: closureLagObservedAt, reason: daemonCleanMerge.reason, logger }); }
     catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
   }
   if (daemonCleanMerge?.needsOperator === true && daemonCleanMerge.reason === 'primary-change-needs-operator') {
@@ -2358,7 +2361,8 @@ async function dispatchAmaClosureFor({
     // the one that applied (foundry#35, 8.8h on `worker-identity-unresolved`).
     // Diagnostics only — nothing reads these records to decide a merge.
     if (daemonCleanMerge.disposition === DAEMON_MERGE_DISPOSITION.MERGED) {
-      try { await observeClosureLag({ rootDir, repo: repoPath, prNumber, merged: true, logger }); }
+      try { await observeClosureLag({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
+        merged: true, mergedAt: daemonCleanMerge.mergedAt, logger }); }
       catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
       clearDaemonMergePark({ rootDir, repo: repoPath, prNumber });
       clearDaemonRouteDisagreement(rootDir, { repo: repoPath, prNumber });

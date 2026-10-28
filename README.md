@@ -1,5 +1,14 @@
 # Adversarial Review
 
+CLOSURELAGFALSE-01: closure-lag diagnostics record inline merges at the shared
+merge boundary, preserve terminal entries against stale eligibility and backlog
+observations, and check live PR state before an undelivered per-PR breach page.
+Only newer OPEN evidence at a different known head re-arms a terminal entry.
+SLOs, p95 accounting and existing smoke promises remain unchanged. See the
+[closure-lag contract](docs/data-model/ama-closure-lag.md). Offline fixtures
+cover the transitions; deployed acceptance awaits read-only observation of
+organic merges after normal deployment.
+
 REMREPORTHUMAN-01: remediation reports reserve “Human intervention required”
 for human-owned blockers and name CI, AMA closer or review pipeline owners for
 informational waits. An explicit completed-remediation reply with only those

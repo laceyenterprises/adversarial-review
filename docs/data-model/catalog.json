@@ -274,7 +274,8 @@
       "path": "docs/data-model/ama-closure-lag.md",
       "store": "data/ama-closure-lag/state.json",
       "schemaSurface": "src/ama/closure-lag.mjs",
-      "relatedSchemaSurfaces": ["src/ama/dispatch-closer.mjs", "src/ama-closure-orchestration.mjs", "src/pr-lifecycle-sync.mjs", "src/daemon-clean-merge.mjs"],
+      "terminalContract": "Inline daemon and closer-recovery success is recorded at the common merge boundary. Terminal entries re-arm only with a newer OPEN observation at a different known head. Undelivered per-PR breaches receive one live state read outside the lock, fenced by wait/head; merged or closed suppresses delivery. Existing fields, p95 and SLO limits remain unchanged.",
+      "relatedSchemaSurfaces": ["src/ama/daemon-merge.mjs", "src/ama/dispatch-closer.mjs", "src/ama-closure-orchestration.mjs", "src/pr-lifecycle-sync.mjs", "src/daemon-clean-merge.mjs"],
       "owner": "AMA closure diagnostics and SLO paging",
       "breachSummary": { "maxBlockers": 5, "maxCompleted": 5, "omittedFields": ["blockers_omitted", "completed_omitted"], "maxPageCharacters": 3500 }
     },

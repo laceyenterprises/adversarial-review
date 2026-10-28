@@ -4264,9 +4264,17 @@ No eligible inline merge waits behind `ama-closer-launch-in-progress`.
 `ama.closure_lag` emits `eligible_at`, `merged_at`, and `lag_ms` once per PR;
 `ama.closure_queue_depth` emits the eligible unmerged queue depth and p95 lag.
 Observations persist under the runtime root in `data/ama-closure-lag/`. Lifecycle
-sync settles hammer merges from live terminal state, while inline merges settle
-at success. A rolling 24-hour p95 includes completed lags and pending eligible
-waits. Exceeding the configured SLO or any eligible wait over 60 minutes creates
+sync settles hammer merges from live terminal state. The common daemon merge
+boundary records every inline success, including closer recovery, before
+post-merge receipt verification. Terminal diagnostic entries survive stale
+eligibility and backlog observations; reopening requires a newer OPEN
+observation at a different known head. Before emitting or retrying an
+undelivered per-PR breach, the monitor reads that PR live once, independently of
+lifecycle sync's open-row list. Merged or closed state settles the entry and
+suppresses its page. Reads occur outside the state lock and cannot overwrite a
+concurrently changed wait/head. Unreadable state logs a warning and retains
+ordinary paging. There are no new configuration keys or SLO changes. A rolling
+24-hour p95 includes completed lags and pending eligible waits. Exceeding the configured SLO or any eligible wait over 60 minutes creates
 an automated `ama.closure_lag.slo_breach` SEV1 event naming blocking reasons.
 Pages are durable and deduplicated; delivery failures retry, and a recovered p95
 can start a new breach episode. PR-specific breach records are removed when

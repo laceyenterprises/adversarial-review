@@ -445,6 +445,7 @@ async function runDaemonCleanMergeAttemptInner({
   onGateSnapshot = null,
   getNextAction = () => null,
 } = {}) {
+  const closureLagObservedAt = Date.now();
   const reportGateSnapshot = gate => {
     onGateSnapshot?.(gate);
     return gate;
@@ -991,10 +992,12 @@ async function runDaemonCleanMergeAttemptInner({
   };
   reportGateSnapshot(initialGate);
   const daemonResult = await attemptDaemonCleanMergeImpl({
+    rootDir,
     getNextAction,
     onGateEvidenceImpl: reportGateSnapshot,
     onEligibleImpl: ({ headSha }) => observeClosureLag({ rootDir, repo: repoPath, prNumber,
-      headSha, eligible: true, sloMs: cfg.closureLagSloMs, logger }),
+      headSha, open: initialGate.prState === 'OPEN', observedAt: closureLagObservedAt,
+      eligible: true, sloMs: cfg.closureLagSloMs, logger }),
     repo: repoPath,
     prNumber,
     base,

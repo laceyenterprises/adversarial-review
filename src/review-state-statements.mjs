@@ -2,6 +2,25 @@ import { DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS } from './reviewer-lease.m
 import { operatorHeldSql } from './operator-hold-labels.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
 
+// PENDINGCLAIM-01: classification and retry CASes must accept the same failure
+// shapes. The classifier evaluates this value-only expression over its snapshot;
+// claims evaluate it over the durable row. Each caller supplies its existing
+// head/snapshot evidence (the bounce CAS retains its unconditional head fence).
+export function reviewerTerminalFailureSql(pendingEvidenceSql) {
+  return `(
+    review_status = 'failed' OR (
+      review_status = 'pending' AND NULLIF(failed_at, '') IS NOT NULL AND
+      (${pendingEvidenceSql})
+    )
+  )`;
+}
+
+export function prepareReviewRowInTerminalFailureState(db) {
+  return db.prepare(`SELECT ${reviewerTerminalFailureSql('reviewer_head_sha = current_head_sha')} AS terminal_failure
+    FROM (SELECT ? AS review_status, ? AS failed_at,
+                 ? AS reviewer_head_sha, ? AS current_head_sha)`);
+}
+
 // Settlement carries the dispatch identity; never infer the reviewed head from
 // a mutable delivery row or overwrite a replacement claim.
 // Both head parameters are the dispatched head: WHERE compares the existing
@@ -165,75 +184,10 @@ export const MARK_INFRA_AUTO_RECOVERY_ATTEMPT_STARTED_SQL =
          END
    WHERE repo = ?
      AND pr_number = ?
-     AND (
-       review_status = 'failed' OR
-       (
-         review_status = 'pending' AND
-         failed_at = ? AND
-         reviewer_head_sha = ?
-       )
-     )
+     AND ${reviewerTerminalFailureSql('failed_at = ? AND reviewer_head_sha = ?')}
      AND (COALESCE(infra_auto_recover_attempts, 0) < ? OR ? = 1)
-     AND CASE ?
-       WHEN 'cascade' THEN (
-         lower(COALESCE(failure_message, '')) LIKE '[cascade]%' OR
-         lower(COALESCE(failure_message, '')) LIKE '%litellm/upstream cascade%' OR
-         lower(COALESCE(failure_message, '')) LIKE '%watcher backoff engaged%'
-       )
-       WHEN 'provider-overloaded' THEN lower(COALESCE(failure_message, '')) LIKE '[provider-overloaded]%'
-       WHEN 'reviewer-timeout' THEN lower(COALESCE(failure_message, '')) LIKE '[reviewer-timeout]%'
-       WHEN 'reviewer-output' THEN lower(COALESCE(failure_message, '')) LIKE '[reviewer-output]%'
-       WHEN 'attestation-sign-failed' THEN lower(COALESCE(failure_message, '')) LIKE '[attestation-sign-failed]%'
-       WHEN 'hcp-unavailable' THEN lower(COALESCE(failure_message, '')) LIKE '[hcp-unavailable]%'
-       WHEN 'launchctl-bootstrap' THEN (
-         lower(COALESCE(failure_message, '')) LIKE '[launchctl-bootstrap]%' OR
-         lower(COALESCE(failure_message, '')) LIKE '%claude launchctl session bootstrap failed%' OR
-         lower(COALESCE(failure_message, '')) LIKE '%launchctlsessionerror%'
-       )
-      WHEN 'oauth-broken' THEN (
-        lower(COALESCE(failure_message, '')) LIKE '%[oauth-broken]%' OR
-        lower(COALESCE(failure_message, '')) LIKE '%bad credentials%' OR
-        lower(COALESCE(failure_message, '')) LIKE '%401%unauthorized%' OR
-        lower(COALESCE(failure_message, '')) LIKE '%requires authentication%'
-      )
-       WHEN 'token-refresh-pending' THEN (
-         lower(COALESCE(failure_message, '')) LIKE '[token-refresh-pending]%' OR
-         lower(COALESCE(failure_message, '')) LIKE '%broker claude reviewer token expires too soon for subprocess handoff%'
-       )
-       WHEN 'quota-exhausted' THEN lower(COALESCE(failure_message, '')) LIKE '[quota-exhausted]%'
-       WHEN 'agy-identity-unavailable' THEN lower(COALESCE(failure_message, '')) LIKE '[agy-identity-unavailable]%'
-       WHEN 'infra-runtime-missing-library' THEN (
-         lower(COALESCE(failure_message, '')) LIKE '[infra-runtime-missing-library]%' OR
-         lower(COALESCE(failure_message, '')) LIKE '%dyld: library not loaded%' OR
-         lower(COALESCE(failure_message, '')) LIKE '%dyld[%]: library not loaded%'
-       )
-       WHEN 'reviewer-command-failed' THEN (
-         (
-           lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed%' AND
-           lower(COALESCE(failure_message, '')) NOT LIKE '[unknown] command failed with code %'
-         ) OR
-         lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed with code %'
-       )
-       WHEN 'github-review-create-transient' THEN (
-         lower(COALESCE(failure_message, '')) LIKE '[github-review-create-transient]%' OR
-         (
-           (
-             lower(COALESCE(failure_message, '')) LIKE '%pulls/%/reviews%' OR
-             lower(COALESCE(failure_message, '')) LIKE '%create-a-review-for-a-pull-request%' OR
-             lower(COALESCE(failure_message, '')) LIKE '%review-create%'
-           ) AND
-           (
-             lower(COALESCE(failure_message, '')) LIKE '%http 403%' OR
-             lower(COALESCE(failure_message, '')) LIKE '%http 429%' OR
-             lower(COALESCE(failure_message, '')) LIKE '%status 403%' OR
-             lower(COALESCE(failure_message, '')) LIKE '%status 429%' OR
-             lower(COALESCE(failure_message, '')) LIKE '%http 5__%' OR
-             lower(COALESCE(failure_message, '')) LIKE '%status 5__%'
-           )
-         )
-       )
-       ELSE 0
-     END`;
+     -- JS alone decides recoverability. Claim only the failure it classified.
+     AND failure_message IS ?`;
 
 // Only the session whose exit and lack of a late post were confirmed may be
 // replaced. Admission and dispatch queueing can outlive that reconciliation.
@@ -253,7 +207,7 @@ export const MARK_DAEMON_BOUNCE_RECOVERY_ATTEMPT_STARTED_SQL =
          quota_reset_at_utc = NULL,
          infra_auto_recover_attempts = COALESCE(infra_auto_recover_attempts, 0) + 1
    WHERE repo = ? AND pr_number = ?
-     AND review_status IN ('failed', 'pending')
+     AND ${reviewerTerminalFailureSql('1')}
      AND reviewer_session_uuid IS ?
      AND reviewer_started_at IS ?
      AND failed_at IS ?
@@ -621,4 +575,71 @@ export function prepareReleaseReviewerClaim(db) {
       AND repo = ?
       AND pr_number = ?
       AND review_status = 'reviewing'`);
+}
+
+export function prepareMarkReviewPopulationRetryAttemptStarted(db) {
+  return db.prepare(`UPDATE reviewed_prs
+     SET review_status = 'reviewing',
+         last_attempted_at = ?,
+         reviewer_session_uuid = ?,
+         reviewer_started_at = NULL,
+         reviewer_head_sha = ?,
+         revision_ref = COALESCE(?, revision_ref),
+         reviewer_timeout_ms = ?,
+         reviewer_lease_expires_at = ?,
+         reviewer_pgid = NULL,
+         failed_at = NULL,
+         failure_message = NULL,
+         quota_reset_at_utc = NULL,
+         review_population_retry_attempts = CASE
+           WHEN COALESCE(review_population_retry_head_sha, '') = COALESCE(?, '') THEN review_population_retry_attempts + 1
+           ELSE 1
+         END,
+         review_population_retry_last_at = ?,
+         review_population_retry_head_sha = ?
+   WHERE repo = ?
+     AND pr_number = ?
+     AND ${reviewerTerminalFailureSql('reviewer_head_sha = ?')}
+     AND (
+       COALESCE(review_population_retry_head_sha, '') != COALESCE(?, '') OR
+       review_population_retry_attempts < ?
+     )
+     AND (
+       (
+         lower(COALESCE(failure_message, '')) LIKE '%reviewer session % is no longer alive%' AND
+         lower(COALESCE(failure_message, '')) LIKE '%no github review%found%'
+       ) OR
+       lower(COALESCE(failure_message, '')) LIKE '%no github review%found%' OR
+       lower(COALESCE(failure_message, '')) LIKE '%generated-but-not-posted%' OR
+       lower(COALESCE(failure_message, '')) LIKE '%generated but not posted%'
+     )`);
+}
+
+export function prepareMarkUnknownFailureRetryAttemptStarted(db) {
+  return db.prepare(`UPDATE reviewed_prs
+     SET review_status = 'reviewing',
+         last_attempted_at = ?,
+         reviewer_session_uuid = ?,
+         reviewer_started_at = NULL,
+         reviewer_head_sha = ?,
+         revision_ref = COALESCE(?, revision_ref),
+         reviewer_timeout_ms = ?,
+         reviewer_lease_expires_at = ?,
+         reviewer_pgid = NULL,
+         failed_at = NULL,
+         failure_message = NULL
+   WHERE repo = ?
+     AND pr_number = ?
+     AND ${reviewerTerminalFailureSql('reviewer_head_sha = ?')}
+     AND review_attempts < ?
+     AND (
+       lower(COALESCE(failure_message, '')) LIKE '%command failed with code %' OR
+       lower(COALESCE(failure_message, '')) LIKE '%command exited with code %' OR
+       lower(COALESCE(failure_message, '')) LIKE '%non-zero exit code %' OR
+       lower(COALESCE(failure_message, '')) LIKE '%non-zero exit %'
+     )
+     AND (
+       lower(COALESCE(failure_message, '')) LIKE '[unknown]%' OR
+       lower(COALESCE(failure_message, '')) NOT GLOB '[[]*[]]*'
+     )`);
 }

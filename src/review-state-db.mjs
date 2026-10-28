@@ -36,6 +36,9 @@ import {
   prepareMarkPosted,
   prepareReleaseUnsettledPostedReview,
   prepareMarkInfraAutoRecoveryAttemptStarted,
+  prepareMarkReviewPopulationRetryAttemptStarted,
+  prepareMarkUnknownFailureRetryAttemptStarted,
+  prepareReviewRowInTerminalFailureState,
   prepareMarkDaemonBounceRecoveryAttemptStarted,
   prepareMarkTokenRefreshRecoveryAttemptStarted,
   prepareMarkAttemptStarted,
@@ -111,71 +114,9 @@ export const stmtGetPendingFastMergeAudits = db.prepare(
 export const stmtMarkInfraAutoRecoveryAttemptStarted = prepareMarkInfraAutoRecoveryAttemptStarted(db);
 export const stmtMarkDaemonBounceRecoveryAttemptStarted = prepareMarkDaemonBounceRecoveryAttemptStarted(db);
 export const stmtMarkTokenRefreshRecoveryAttemptStarted = prepareMarkTokenRefreshRecoveryAttemptStarted(db);
-export const stmtMarkReviewPopulationRetryAttemptStarted = db.prepare(
-  `UPDATE reviewed_prs
-     SET review_status = 'reviewing',
-         last_attempted_at = ?,
-         reviewer_session_uuid = ?,
-         reviewer_started_at = NULL,
-         reviewer_head_sha = ?,
-         revision_ref = COALESCE(?, revision_ref),
-         reviewer_timeout_ms = ?,
-         reviewer_lease_expires_at = ?,
-         reviewer_pgid = NULL,
-         failed_at = NULL,
-         failure_message = NULL,
-         quota_reset_at_utc = NULL,
-         review_population_retry_attempts = CASE
-           WHEN COALESCE(review_population_retry_head_sha, '') = COALESCE(?, '') THEN review_population_retry_attempts + 1
-           ELSE 1
-         END,
-         review_population_retry_last_at = ?,
-         review_population_retry_head_sha = ?
-   WHERE repo = ?
-     AND pr_number = ?
-     AND review_status = 'failed'
-     AND (
-       COALESCE(review_population_retry_head_sha, '') != COALESCE(?, '') OR
-       review_population_retry_attempts < ?
-     )
-     AND (
-       (
-         lower(COALESCE(failure_message, '')) LIKE '%reviewer session % is no longer alive%' AND
-         lower(COALESCE(failure_message, '')) LIKE '%no github review%found%'
-       ) OR
-       lower(COALESCE(failure_message, '')) LIKE '%no github review%found%' OR
-       lower(COALESCE(failure_message, '')) LIKE '%generated-but-not-posted%' OR
-       lower(COALESCE(failure_message, '')) LIKE '%generated but not posted%'
-     )`
-);
-export const stmtMarkUnknownFailureRetryAttemptStarted = db.prepare(
-  `UPDATE reviewed_prs
-     SET review_status = 'reviewing',
-         last_attempted_at = ?,
-         reviewer_session_uuid = ?,
-         reviewer_started_at = NULL,
-         reviewer_head_sha = ?,
-         revision_ref = COALESCE(?, revision_ref),
-         reviewer_timeout_ms = ?,
-         reviewer_lease_expires_at = ?,
-         reviewer_pgid = NULL,
-         failed_at = NULL,
-         failure_message = NULL
-   WHERE repo = ?
-     AND pr_number = ?
-     AND review_status = 'failed'
-     AND review_attempts < ?
-     AND (
-       lower(COALESCE(failure_message, '')) LIKE '%command failed with code %' OR
-       lower(COALESCE(failure_message, '')) LIKE '%command exited with code %' OR
-       lower(COALESCE(failure_message, '')) LIKE '%non-zero exit code %' OR
-       lower(COALESCE(failure_message, '')) LIKE '%non-zero exit %'
-     )
-     AND (
-       lower(COALESCE(failure_message, '')) LIKE '[unknown]%' OR
-       lower(COALESCE(failure_message, '')) NOT GLOB '[[]*[]]*'
-     )`
-);
+export const stmtMarkReviewPopulationRetryAttemptStarted = prepareMarkReviewPopulationRetryAttemptStarted(db);
+export const stmtMarkUnknownFailureRetryAttemptStarted = prepareMarkUnknownFailureRetryAttemptStarted(db);
+export const stmtReviewRowInTerminalFailureState = prepareReviewRowInTerminalFailureState(db);
 export const stmtMarkFastMergeAuditPending = db.prepare(
   "UPDATE reviewed_prs SET fast_merge_audit_status = 'pending', fast_merge_audit_payload_json = ?, fast_merge_audit_error = NULL WHERE repo = ? AND pr_number = ?"
 );

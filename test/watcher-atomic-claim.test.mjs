@@ -84,7 +84,10 @@ function runInfraRecoveryClaim(db, attemptedAt, infraClass = 'oauth-broken', rep
   reviewerTimeoutMs = 20 * 60 * 1000,
   cap = 3,
   bypassCap = 0,
+  observedFailureMessage = readRow(db).failure_message,
 } = {}) {
+  // Admission has already selected the class; SQL receives the exact snapshot.
+  assert.equal(infraRecoverableFailureClass({ failure_message: observedFailureMessage }), infraClass);
   return prepareMarkInfraAutoRecoveryAttemptStarted(db).run(
     attemptedAt,
     sessionUuid,
@@ -98,7 +101,7 @@ function runInfraRecoveryClaim(db, attemptedAt, infraClass = 'oauth-broken', rep
     observedReviewerHeadSha,
     cap,
     bypassCap,
-    infraClass
+    observedFailureMessage
   );
 }
 
@@ -121,7 +124,7 @@ function runUnknownFailureRetryClaim(db, attemptedAt, repo = REPO, prNumber = PR
   );
 }
 
-const REPO = 'laceyenterprises/agent-os';
+const REPO = 'example-org/example-repo';
 const PR = 999;
 
 function setupDb() {
@@ -296,7 +299,7 @@ test('infra auto-recovery claim accepts untagged GitHub bad-credentials oauth fa
   const db = setupDb();
   seedReviewRow(db, {
     reviewStatus: 'failed',
-    failureMessage: 'Command failed: gh api repos/laceyenterprises/agent-os/pulls/6117\ngh: Bad credentials (HTTP 401)\n',
+    failureMessage: 'Command failed: gh api repos/example-org/example-repo/pulls/432\ngh: Bad credentials (HTTP 401)\n',
   });
 
   assert.equal(infraRecoverableFailureClass(readRow(db)), 'oauth-broken');
@@ -315,7 +318,7 @@ test('infra auto-recovery claim handles reviewer command-failed unknown rows', (
   const db = setupDb();
   seedReviewRow(db, {
     reviewStatus: 'failed',
-    failureMessage: '[unknown] Command failed with code 1\nstdout tail:\n[reviewer] Starting review: laceyenterprises/agent-os#2322',
+    failureMessage: '[unknown] Command failed with code 1\nstdout tail:\n[reviewer] Starting review: example-org/example-repo#432',
   });
 
   const claim = runInfraRecoveryClaim(db, '2026-05-02T18:10:00.000Z', 'reviewer-command-failed');
@@ -333,7 +336,7 @@ test('infra auto-recovery claim handles reviewer command-failed no-code rows wit
   const db = setupDb();
   seedReviewRow(db, {
     reviewStatus: 'failed',
-    failureMessage: '[unknown] Command failed\nstdout tail:\n[reviewer] Starting review: laceyenterprises/agent-os#2322',
+    failureMessage: '[unknown] Command failed\nstdout tail:\n[reviewer] Starting review: example-org/example-repo#432',
   });
 
   const claim = runInfraRecoveryClaim(db, '2026-05-02T18:10:00.000Z', 'reviewer-command-failed');
@@ -347,7 +350,7 @@ test('infra auto-recovery claim handles reviewer command-failed no-code rows wit
   assert.equal(row.infra_auto_recover_attempts, 1);
 });
 
-test('infra auto-recovery claim handles reviewer-output rows with one classifier bind', () => {
+test('infra auto-recovery claim handles reviewer-output rows with one snapshot bind', () => {
   const db = setupDb();
   seedReviewRow(db, {
     reviewStatus: 'failed',
@@ -423,7 +426,9 @@ test('stale infra auto-recovery observation cannot increment a row that is no lo
     "UPDATE reviewed_prs SET review_status = 'pending', failure_message = NULL WHERE repo = ? AND pr_number = ?"
   ).run(REPO, PR);
 
-  const claim = runInfraRecoveryClaim(db, '2026-05-02T18:10:00.000Z');
+  const claim = runInfraRecoveryClaim(db, '2026-05-02T18:10:00.000Z', 'oauth-broken', REPO, PR, {
+    observedFailureMessage: '[oauth-broken] reviewer spawn failed',
+  });
 
   assert.equal(claim.changes, 0);
   const row = readRow(db);
@@ -435,7 +440,9 @@ test('infra auto-recovery claim refuses a changed failure class', () => {
   const db = setupDb();
   seedReviewRow(db, { reviewStatus: 'failed', failureMessage: '[cascade] LiteLLM upstream cascade' });
 
-  const claim = runInfraRecoveryClaim(db, '2026-05-02T18:10:00.000Z', 'oauth-broken');
+  const claim = runInfraRecoveryClaim(db, '2026-05-02T18:10:00.000Z', 'oauth-broken', REPO, PR, {
+    observedFailureMessage: '[oauth-broken] reviewer spawn failed',
+  });
 
   assert.equal(claim.changes, 0);
   const row = readRow(db);
@@ -750,104 +757,32 @@ test('atomic claim refuses pending row from a different PR — repo/pr scoping i
   assert.equal(row.review_status, 'pending', 'unrelated row not touched');
 });
 
-// LAC-1359 follow-up (2026-06-21 review): the JS classifier
-// (infraRecoverableFailureClass) and the inline SQL infra-recovery claim
-// predicate are SEPARATE copies of the reviewer-command-failed message contract.
-// They happen to agree today, but nothing locks that — a future edit to one
-// (e.g. reverting the SQL no-code branch to an equality match) would silently
-// strand rows the classifier accepts, repeating a self-inconsistent
-// classify/claim decision every poll. This parity guard fails the moment they
-// drift, across all realistic stored-message shapes (single-space `[unknown]
-// Command failed ...` is what err.message yields; multiline carries stdout/stderr).
-test('classifier <-> SQL claim parity for reviewer-command-failed (no drift)', () => {
-  const cases = [
-    '[unknown] Command failed',
-    '[unknown] Command failed with code 1',
-    '[unknown] Command failed\nstdout tail:\n[reviewer] Starting review: laceyenterprises/agent-os#2322',
-    '[unknown] Command failed with code 137\nstderr tail:\nkilled',
-    '[unknown] reviewer produced malformed verdict json',
-    '[reviewer-timeout] exceeded 1800s',
-    '[forbidden-fallback] api-key fallback detected',
-    '[cascade] litellm/upstream cascade',
-  ];
-  for (const failureMessage of cases) {
-    const jsIsCommandFailed =
-      infraRecoverableFailureClass({ failure_message: failureMessage }) === 'reviewer-command-failed';
+// Legacy signals still classify in JS; every admitted snapshot claims in SQL.
+for (const [failureMessage, expectedClass] of [
+  ['[unknown] Command failed', 'reviewer-command-failed'],
+  ['[unknown] Command failed with code 1', 'reviewer-command-failed'],
+  ['[unknown] Command failed\nstdout tail:\nsynthetic reviewer startup', 'reviewer-command-failed'],
+  ['[unknown] Command failed with code 137\nstderr tail:\nkilled', 'reviewer-command-failed'],
+  ['[unknown] reviewer produced malformed verdict json', null],
+  ['[forbidden-fallback] api-key fallback detected', null],
+  ['[reviewer-timeout] exceeded 1800s', 'reviewer-timeout'],
+  ['[cascade] litellm/upstream cascade', 'cascade'],
+  ['[agy-identity-unavailable] no ready reviewer identity became free to lease\nSystem: infra auto-recovery cap exhausted (3/3).', 'agy-identity-unavailable'],
+  ['[infra-runtime-missing-library] Command failed with code null signal SIGABRT', 'infra-runtime-missing-library'],
+  ['[unknown] Command failed with code null signal SIGABRT\nstderr tail:\ndyld[12345]: Library not loaded: @rpath/libfixture.dylib', 'infra-runtime-missing-library'],
+  ['[unknown] Command failed\ndyld: Library not loaded: @rpath/libfixture.dylib', 'infra-runtime-missing-library'],
+  ['[unknown] Command failed\nlibrary not loaded yet, retrying', 'reviewer-command-failed'],
+]) {
+  test(`legacy classifier/admitted snapshot claim: ${JSON.stringify(failureMessage)}`, () => {
     const db = setupDb();
-    seedReviewRow(db, {
-      reviewStatus: 'failed',
-      failedAt: '2026-05-02T18:05:00.000Z',
-      failureMessage,
-    });
-    const claim = runInfraRecoveryClaim(db, '2026-05-02T18:10:00.000Z', 'reviewer-command-failed');
-    const sqlClaims = claim.changes === 1;
-    assert.equal(
-      sqlClaims,
-      jsIsCommandFailed,
-      `classifier/SQL disagree for ${JSON.stringify(failureMessage)}: JS=${jsIsCommandFailed} SQL=${sqlClaims}`,
-    );
-    db.close();
-  }
-});
-
-// CCX-08: the same drift guard for agy-identity-unavailable. JS classifies a
-// tagged failed row as recoverable, so the claim must match it too.
-test('classifier <-> SQL claim parity for agy-identity-unavailable (no drift)', () => {
-  const cases = [
-    '[agy-identity-unavailable] no ready agy reviewer identity became free to lease\nSystem: infra auto-recovery cap exhausted (3/3).',
-    '[unknown] Command failed with code 1',
-    '[cascade] litellm/upstream cascade',
-  ];
-  for (const failureMessage of cases) {
-    const jsIsUnavailable =
-      infraRecoverableFailureClass({ failure_message: failureMessage }) === 'agy-identity-unavailable';
-    const db = setupDb();
-    seedReviewRow(db, {
-      reviewStatus: 'failed',
-      failedAt: '2026-05-02T18:05:00.000Z',
-      failureMessage,
-    });
-    const claim = runInfraRecoveryClaim(db, '2026-05-02T18:10:00.000Z', 'agy-identity-unavailable');
-    assert.equal(
-      claim.changes === 1,
-      jsIsUnavailable,
-      `classifier/SQL disagree for ${JSON.stringify(failureMessage)}: JS=${jsIsUnavailable}`,
-    );
-    db.close();
-  }
-});
-
-// NODEPIN-01: the same drift guard for infra-runtime-missing-library. The
-// watcher claims with whatever class the JS classifier derived from the stored
-// row, so every row JS calls a dyld crash (tagged, or a legacy `[unknown]` row
-// whose stored stderr carries the dyld line) must also match the SQL branch;
-// otherwise the claim matches 0 rows and the PR stays stranded.
-test('classifier <-> SQL claim parity for infra-runtime-missing-library (no drift)', () => {
-  const cases = [
-    '[infra-runtime-missing-library] Command failed with code null signal SIGABRT\nSystem: infra auto-recovery cap exhausted (3/3).',
-    '[unknown] Command failed with code null signal SIGABRT\nstderr tail:\ndyld[48213]: Library not loaded: /opt/homebrew/opt/ada-url/lib/libada.3.dylib',
-    '[unknown] Command failed\ndyld: Library not loaded: @rpath/libnode.147.dylib',
-    '[unknown] Command failed with code 1',
-    '[unknown] Command failed\nlibrary not loaded yet, retrying',
-    '[reviewer-timeout] exceeded 1800s',
-    '[cascade] litellm/upstream cascade',
-  ];
-  for (const failureMessage of cases) {
-    const jsIsMissingLibrary =
-      infraRecoverableFailureClass({ failure_message: failureMessage }) === 'infra-runtime-missing-library';
-    const db = setupDb();
-    seedReviewRow(db, {
-      reviewStatus: 'failed',
-      failedAt: '2026-05-02T18:05:00.000Z',
-      failureMessage,
-    });
-    const claim = runInfraRecoveryClaim(db, '2026-05-02T18:10:00.000Z', 'infra-runtime-missing-library');
-    const sqlClaims = claim.changes === 1;
-    assert.equal(
-      sqlClaims,
-      jsIsMissingLibrary,
-      `classifier/SQL disagree for ${JSON.stringify(failureMessage)}: JS=${jsIsMissingLibrary} SQL=${sqlClaims}`,
-    );
-    db.close();
-  }
-});
+    try {
+      seedReviewRow(db, { reviewStatus: 'failed', failedAt: '2026-05-02T18:05:00.000Z', failureMessage });
+      assert.equal(infraRecoverableFailureClass(readRow(db)), expectedClass);
+      if (expectedClass) {
+        assert.equal(runInfraRecoveryClaim(db, '2026-05-02T18:10:00.000Z', expectedClass).changes, 1);
+      } else {
+        assert.equal(readRow(db).review_status, 'failed');
+      }
+    } finally { db.close(); }
+  });
+}

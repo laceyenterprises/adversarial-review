@@ -142,3 +142,18 @@ test('entitlement refusal stays terminal through subprocess classification, sett
   assert.equal(harness.retryable, false);
   assert.equal(harness.detail, 'host.observations.read');
 });
+
+
+test('stored recovery preserves the base allowlist and terminal configuration refusals', () => {
+  for (const [failureClass, expected] of [
+    ['reviewer-configuration-error', null],
+    ['reviewer-model-unavailable', null],
+    ['reviewer-output', 'reviewer-output'],
+    ['reviewer-model-unresolved', 'reviewer-model-unresolved'],
+    ['reviewer-empty-output', 'reviewer-empty-output'],
+  ]) {
+    const row = {failure_message: `[${failureClass}]`};
+    assert.equal(reviewerFailureClassFromStoredRow(row), failureClass);
+    assert.equal(infraRecoverableFailureClass(row), expected);
+  }
+});

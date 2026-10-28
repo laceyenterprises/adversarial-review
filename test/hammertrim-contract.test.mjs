@@ -396,7 +396,7 @@ test('bounded runner preserves exit status and caps combined output', () => {
   const childPidFile = join(tmpdir(), `bounded-child-${process.pid}.pid`);
   try {
     const children = run(path, ['--timeout', '1', '--', '/bin/sh', '-c', `sleep 30 & echo $! > ${childPidFile}; wait`]);
-    assert.equal(children.status, 124);
+    assert.equal(children.status, 124, children.stdout + children.stderr);
     const childPid = Number(readFileSync(childPidFile, 'utf8'));
     assert.throws(() => process.kill(childPid, 0), { code: 'ESRCH' });
   } finally { rmSync(childPidFile, { force: true }); }

@@ -117,7 +117,8 @@ const stopped = {
 
 test('STOPSTALE-01: newer eligible exact-head evidence supersedes the stop only for daemon merge', () => {
   for (const retryable of [undefined, true, false]) {
-    for (const hammerCap of [undefined, { lifetimeExhausted: true }, { headSha: HEAD, retryExhausted: true }]) {
+    for (const hammerCap of [undefined, { lifetimeExhausted: true }, { headSha: HEAD, retryExhausted: true },
+      { headSha: HEAD, operatorApprovalApplied: true }]) {
       const decision = nextAction(snap({ ...stopped, policy: { ...stopped.policy, hammerCap },
         launches: { closer: { status: 'succeeded', headSha: HEAD, outcome: 'no-merge', retryable, attempt: 2 } } }));
       assert.deepEqual(pick(decision), ['daemon-merge', 'daemon', 'clean-exact-head']);

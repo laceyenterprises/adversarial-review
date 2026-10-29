@@ -582,7 +582,7 @@ async function probeAmaLivePrForMergeDispatch({
 // (disk full / permissions), `alertEmitted` never lands on disk and every tick
 // would re-page — an alert storm. This process-local set suppresses the re-page
 // within the long-lived follow-up daemon even when the ledger write keeps failing.
-// A genuinely fresh review series (new jobKey) uses a new key and still alerts.
+// A fresh review series or consumed operator approval starts a new alert episode.
 // A daemon restart clears it, which at most re-pages once (not a storm) and
 // correctly re-surfaces a still-broken disk.
 const HAMMER_RETRY_CAP_ALERTED_SERIES = new Set();
@@ -641,11 +641,14 @@ async function suppressHammerRetryCapExhaustion({
     ? 'ama_closer.hammer_target_redrive_cap_exhausted'
     : 'ama_closer.hammer_retry_cap_exhausted';
   const effectiveCap = Number.isFinite(Number(cap)) ? Number(cap) : HAMMER_RETRY_CAP_TOTAL_DISPATCHES;
-  const alertSeriesKey = lifetime
+  const approval = readHammerRetryCapLedger(rootDir, identity)?.operatorApprovalRearms?.[headSha];
+  // A consumed approval is a new exhaustion episode, even in this process.
+  const approvalEpisode = approval?.state === 'consumed' ? `\0approval\0${headSha}` : '';
+  const alertSeriesKey = (lifetime
     ? `${repo}\0${prNumber}\0lifetime`
     : target
     ? `${repo}\0${prNumber}\0target\0${headSha || ''}`
-    : `${repo}\0${prNumber}\0${jobKey || ''}`;
+    : `${repo}\0${prNumber}\0${jobKey || ''}`) + approvalEpisode;
   const shouldEmitExhaustionEvent =
     !alertAlreadyEmitted && !HAMMER_RETRY_CAP_ALERTED_SERIES.has(alertSeriesKey);
   if (shouldEmitExhaustionEvent) {
@@ -4679,10 +4682,14 @@ async function maybeDispatchAmaCloserAttempt({
       repo: dispatchContext?.repo, prNumber, headSha: prMetadata?.headSha,
       reviewedSha: dispatchContext?.reviewedSha, logger,
     });
-    rearmOperatorApprovedCloser(dispatchContext?.rootDir || SUBMODULE_ROOT,
-      { repo: dispatchContext?.repo, prNumber }, { jobKey: reviewState.headSha,
-        headSha: prMetadata.headSha, stop, prMetadata, now: dispatchContext?.dispatchedAt,
-        lifetimeDispatchCeiling: cfg?.hammerLifetimeDispatchCeiling });
+    try {
+      rearmOperatorApprovedCloser(dispatchContext?.rootDir || SUBMODULE_ROOT,
+        { repo: dispatchContext?.repo, prNumber }, { jobKey: reviewState.headSha,
+          headSha: prMetadata.headSha, stop, prMetadata, now: dispatchContext?.dispatchedAt,
+          lifetimeDispatchCeiling: cfg?.hammerLifetimeDispatchCeiling });
+    } catch (error) {
+      logger?.warn?.(`[ama-closer] operator approval re-arm deferred for ${dispatchContext?.repo}#${prNumber}: ${error?.message || error}`);
+    }
     // GUARDREVERT-01: an unchanged deterministic terminal decision fences
     // every hammer route, including ownerless recovery and clean eligible
     // closures. Legacy transient evidence stops keep their recovery probes.

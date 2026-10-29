@@ -153,7 +153,8 @@ function deterministicRefusal(attempt, { repo, prNumber, headSha }) {
   const next = attempt.next || (reasons.includes('primary-change-reverted')
     ? 'Restore the uncited reverted regions, then push the repaired head.'
     : reasons.includes('stale-review-head') ? 'Revalidate the full range from the last reviewed head under a hammer lease.'
-      : `Supply the missing evidence for ${reasons[0]}.`);
+      : awaitedInputs.length ? `Apply the awaited approval label(s): ${awaitedInputs.map(input => input.label).join(', ')}.`
+        : `Supply the missing evidence for ${reasons[0]}.`);
   return { key, reasons, missingEvidence, next, ...(awaitedInputs.length ? { awaitedInputs } : {}),
     repairable: Boolean(String(attempt.next || '').trim()) || reasons.includes('primary-change-reverted') };
 }

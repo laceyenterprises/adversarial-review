@@ -130,7 +130,11 @@ Refusals may carry `awaitedInputs: [{ kind: "operator-label", label }]`.
 When every named label appears on the exact open head, the hold records
 `releasedBy: [operator-approval-applied]`. The event is independent of elapsed
 recovery deadlines. An unrelated label or removing a hold label cannot create
-this event. The refusal still records its reasons and missing evidence.
+this event. The refusal still records its reasons and missing evidence. Awaited-label stops
+are deterministic, including legacy activation requirements and typed-only
+inputs; adding awaited inputs changes legacy refusal keys/generations and may
+page again. Typed-only inputs default to an approval-specific next action.
+Watcher and closer exclude the pipeline gate context from their check baseline.
 The [retry ledger](hammer-retry-cap.md#operator-approval-re-arm-approvalrearm-01)
 provides a separate, durable one-time allowance when retries were exhausted;
 ordinary changed-input release continues to refund no executed attempt.

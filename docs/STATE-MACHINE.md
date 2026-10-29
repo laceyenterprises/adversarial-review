@@ -2744,4 +2744,9 @@ including after a lapsed recovery deadline. Confirmed launch atomically
 consumes the allowance while retaining/incrementing all dispatch charges.
 Consumed receipts survive head/series changes; a second refusal is capped.
 Unrelated labels and label removal never grant admission. Existing terminal,
-hold, safety, lease and merge predicates retain authority.
+hold, safety, lease and merge predicates retain authority. Awaited approvals
+reclassify legacy transient stops as deterministic holds with a new refusal
+generation. Ledger lock order consumes the next new charge regardless of
+clock precision; a consumed receipt starts one fresh cap-alert episode.
+Watcher and closer exclude the same gate status context. A pending grant
+cannot supersede the newer clean-review daemon path.

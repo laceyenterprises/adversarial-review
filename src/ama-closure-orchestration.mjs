@@ -1668,12 +1668,17 @@ async function dispatchAmaClosureFor({
     prNumber, headSha: currentPrHeadSha, reviewedSha: reviewState.headSha, logger });
   if (autonomousMergeExecutionEnabled && prMetadata.isOpen
     && operatorLabelInputs(recordedStop?.refusal || recordedStop).length) {
-    rearmOperatorApprovedCloser(rootDir, { repo: repoPath, prNumber }, {
-      jobKey: reviewState.headSha, headSha: currentPrHeadSha, stop: recordedStop,
-      prMetadata, now: new Date(now()).toISOString(), lifetimeDispatchCeiling: cfg.hammerLifetimeDispatchCeiling,
-    });
+    try {
+      rearmOperatorApprovedCloser(rootDir, { repo: repoPath, prNumber }, {
+        jobKey: reviewState.headSha, headSha: currentPrHeadSha, stop: recordedStop,
+        prMetadata, now: new Date(now()).toISOString(), lifetimeDispatchCeiling: cfg.hammerLifetimeDispatchCeiling,
+      });
+    } catch (error) {
+      logger?.warn?.(`[ama-closer] operator approval re-arm deferred for ${repoPath}#${prNumber}: ${error?.message || error}`);
+    }
     const wait = await evaluateHammerStopHoldImpl({ rootDir, hqRoot: resolveHqRoot(env), repo: repoPath, prNumber,
       headSha: currentPrHeadSha, reviewedSha: reviewState.headSha, prMetadata, reviewState,
+      excludeContexts: [requiredGateContext], requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
       logger, deliverAlertImpl, now: new Date(now()).toISOString() });
     if (wait.action === 'release') recordedStop = null;
   }

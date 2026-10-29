@@ -494,8 +494,9 @@ function recordHammerRetryDispatchUnlocked(rootDir, identity, {
     ].filter(key => Object.hasOwn(existing, key)).map(key => [key, existing[key]])) : {}),
   };
   const approval = existing?.operatorApprovalRearms?.[head];
-  if (approval?.state === 'pending' && approval.jobKey === doc.jobKey
-    && Date.parse(now || new Date().toISOString()) >= Date.parse(approval.grantedAt)) {
+  // The ledger lock orders the grant before this new charge. Producer clocks
+  // can differ in precision; duplicate/recovered charges already returned above.
+  if (approval?.state === 'pending' && approval.jobKey === doc.jobKey) {
     doc.operatorApprovalRearms = { ...existing.operatorApprovalRearms, [head]: { ...approval,
       state: 'consumed', consumedAt: now || new Date().toISOString(), launchRequestId, dispatchKey } };
   }
@@ -911,6 +912,9 @@ export function rearmOperatorApprovedCloser(rootDir, identity, {
 } = {}) {
   if (normalizeHammerLifetimeDispatchCeiling(lifetimeDispatchCeiling) === 0) return { granted: false };
   if (!awaitedOperatorLabelsApplied(stop, prMetadata, headSha)) return { granted: false };
+  // Avoid taking the writer lock on every approved poll. Recheck under lock
+  // below so concurrent first grants still serialize.
+  if (readHammerRetryCapLedger(rootDir, identity)?.operatorApprovalRearms?.[headSha]) return { granted: false };
   return mutateHammerLedger(rootDir, identity, () => {
     const ledger = readHammerRetryCapLedger(rootDir, identity);
     if (!ledger || ledger.__corrupt || !normalizeKey(jobKey) || ledger.jobKey !== jobKey

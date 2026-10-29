@@ -1,3 +1,7 @@
+import './helpers/rate-limit-state-isolation.mjs';
+import fsExt from 'fs-ext';
+import { openSync, closeSync } from 'node:fs';
+import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
 import { fetchMergeAgentCandidate } from '../src/follow-up-merge-agent.mjs';
 import { followUpJobFilePrefix } from '../src/follow-up-job-names.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
@@ -4386,7 +4390,7 @@ for (const reason of ['worker-observation-scope-denied','worker-observation-unav
   });
 }
 
-test('APPROVALREARM-01: an awaited activation approval dispatches once after two refusals, then caps again', async t => {
+test('APPROVALREARM-01: watcher approval consumes a truncated-clock launch once and pages a capped second refusal', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'approval-rearm-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   // All ticket-specific identities are fabricated.
@@ -4405,7 +4409,8 @@ test('APPROVALREARM-01: an awaited activation approval dispatches once after two
     reviewedSha: headSha, targetRemediationSha: headSha, state: 'failed-without-merge',
     workerClass: 'hammer', retryCount: 2, launchRequestId: 'fixture-prior-2', dispatchedAt: '2026-01-01T00:02:00Z' }));
   let launches = 0;
-  const deps = hammerDispatchDeps({ execFileImpl: async (_cmd, args) => {
+  const alerts = [];
+  const deps = hammerDispatchDeps({ deliverAlertImpl: async (text, options) => alerts.push({ text, options }), execFileImpl: async (_cmd, args) => {
     if (args[0] !== 'dispatch' || !args.includes('--pr')) return { stdout: '{}', stderr: '' };
     launches++;
     return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${identity.prNumber}`, dispatchId: 'fixture-dispatch',
@@ -4422,17 +4427,47 @@ test('APPROVALREARM-01: an awaited activation approval dispatches once after two
   assert.equal((await invoke(['fixture-unrelated'])).dispatched, false);
   assert.equal(launches, 0);
   assert.equal(readHammerRetryCapLedger(rootDir, identity).attemptCount, 2);
-  const approved = await invoke(['operator-approved']);
+  const invokeWatcher = () => maybeDispatchAmaClosureFor({
+    rootDir, repoPath: identity.repo, prNumber: identity.prNumber, currentRevisionRef: headSha,
+    env: { HQ_ROOT: hqRoot }, labelNames: ['operator-approved'], logger: deps.logger,
+    now: () => Date.parse('2026-01-01T04:00:00.500Z'),
+    reviewStateRow: { review_status: 'posted', reviewer: 'codex', reviewer_head_sha: headSha,
+      posted_at: '2026-01-01T00:00:00Z', review_body: '## Blocking issues\n- None.\n\n## Non-blocking issues\n- Fixture finding\n\n## Verdict\nComment only' },
+    dispatchJob: { remediationStopCode: 'max-rounds-reached' },
+    candidate: { headSha, riskClass: 'low', prState: 'OPEN', mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN',
+      statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'FAILURE' }] },
+    loadConfigImpl: () => ({ getMergeAuthorityConfig: () => hammerDispatchArgs(rootDir).cfg }),
+    fetchLatestHeadReviewBodiesImpl: async () => ['## Blocking issues\n- None.\n\n## Non-blocking issues\n- Fixture finding\n\n## Verdict\nComment only'],
+    fetchMergedProtectiveDependentsImpl: async () => [],
+    requestEligibleHammerWakeImpl: () => ({ requested: false }),
+    observeClosureWaitImpl: async () => ({ exhausted: true, retryAfterMs: 30000 }),
+    deliverAlertImpl: deps.deliverAlertImpl,
+    maybeDispatchAmaCloserImpl: args => maybeDispatchAmaCloser({ ...args, ...deps,
+      guardStackedBaseImpl: async () => null,
+      dispatchContext: { ...hammerDispatchArgs(rootDir).dispatchContext, ...args.dispatchContext,
+        hqRoot, dispatchedAt: '2026-01-01T04:00:00Z' } }),
+  });
+  // A real busy ledger must defer both production call sites without aborting.
+  const lock = openSync(hammerRetryCapFilePath(rootDir, identity) + '.lock', 'a');
+  try {
+    fsExt.flockSync(lock, 'exnb');
+    assert.equal((await invoke(['operator-approved'])).dispatched, false);
+    assert.equal((await invokeWatcher()).dispatched, false);
+  } finally { closeSync(lock); }
+  const approved = await invokeWatcher();
   assert.equal(approved.dispatched, true, JSON.stringify(approved));
   assert.equal(launches, 1);
   const ledger = readHammerRetryCapLedger(rootDir, identity);
+  assert.equal(ledger.operatorApprovalRearms[headSha].grantedAt, '2026-01-01T04:00:00.500Z');
   assert.equal(ledger.attemptCount, 3, 'approval does not erase executed attempts');
   assert.equal(ledger.operatorApprovalRearms[headSha].reason, 'operator-approval-applied');
   assert.equal(ledger.operatorApprovalRearms[headSha].state, 'consumed');
+  const alertsBeforeSecondRefusal = alerts.length;
   writeAmaAuditEntry({ hqRoot, ...identity, headSha, attempt: { ...refusal,
     launchRequestId: 'fixture-rearmed-launch' }, now: '2026-01-01T04:00:10Z' });
   for (const labels of [['operator-approved'], [], ['operator-approved', 'fixture-unrelated']]) {
     assert.equal((await invoke(labels)).dispatched, false);
   }
+  assert.equal(alerts.length, alertsBeforeSecondRefusal + 1, 'the re-armed refusal pages once even after the prior cap page');
   assert.equal(launches, 1, 'a second refusal and label toggles cannot replenish the grant');
 });

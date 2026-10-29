@@ -22,13 +22,15 @@ For an exhausted ledger on the last dispatched head and same review series,
 a pending receipt admits one extra dispatch through the series, target,
 lifetime and dispatch-record retry caps. Counters are never decremented: the
 confirmed launch increments them normally and atomically consumes the receipt.
-Historical charge recovery dated before the grant cannot consume it. A failed
+Ledger lock ordering, rather than producer timestamps, determines consumption;
+already recorded charge identities return before consumption. A failed
 pre-launch admission leaves the allowance pending. A second refusal is capped
 again. An unused receipt applies only to its exact head and review series;
 it cannot enable another head or enable a disabled hammer (ceiling zero).
 Ordinary terminal-state, operator hold, identity, lease, capacity, CI and merge
 predicates remain authoritative. Label presence grants retry admission only;
-the merge gate still checks operator authority. No config or label is added.
+a worker/bot-applied label may spend it, while the merge gate still checks
+operator authority. A consumed receipt also identifies a fresh cap-alert episode. No config or label is added.
 
 ## Companion wait credits (COMPANIONFLOAT-01)
 

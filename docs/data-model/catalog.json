@@ -773,7 +773,7 @@
     },
     {
       "id": "hammer-retry-cap",
-      "operatorApprovalRearms": "optional permanent head-SHA map: pending/consumed state, operator-approval-applied reason, jobKey, stopKey, awaitedInputs, grantedAt; consumedAt/launchRequestId/dispatchKey bind confirmed launch; one extra exhausted-cap admission per head without charge refunds",
+      "operatorApprovalRearms": "optional permanent head-SHA map: pending/consumed state, operator-approval-applied reason, jobKey, stopKey, awaitedInputs, grantedAt; consumedAt/launchRequestId/dispatchKey bind confirmed launch; one extra exhausted-cap admission per head without charge refunds; ledger lock order consumes new charges regardless of timestamp precision; consumed receipt identifies a fresh cap-alert episode",
       "companionWaitCredits": "dispatchCharges may carry companionWaitRefund stopKey/refundedAt; exact pure-wait launch credits share refundedBudgets and unexecutedLaunchRequestIds.",
       "ciInfrastructureRefund": "dispatchCharges[key].ciInfrastructureRefund = { reason: checks-executed-again, stopKey, refundedAt }; exact-charge per-budget credits survive series resets",
       "title": "Hammer Retry Cap Ledger",
@@ -883,7 +883,7 @@
     {
       "id": "hammer-stop-hold",
       "gateRevisionRecovery": "HOLDGATEVERSION-01: deterministic refusal holds record gateRevision with the audit reviewServiceRevision and optional gatePredicateVersion, falling back to the first known loaded service or predicate provenance for legacy stops; missing/all-null anchors defer until a known observation. Admission and skipped-subject sweeps durably install the baseline and predicate on version-1 records under existing persistence fences, preserving deadlines and delivery receipts. gate-revision-change releases on a known differing service or predicate version; missing readings do not prove change. Durable release receipts survive polls/restarts; new stops under the deployed revision hold again. Normal admission and skipped-subject sweeps share evaluation. Transient/companion waits, terminal guards, leases and head/series/lifetime caps remain authoritative; no refunds, new gates or config.",
-      "operatorApprovalRelease": "refusal.awaitedInputs operator-label entries release on exact-open-head label presence with operator-approval-applied; independent once-per-head retry-ledger grant",
+      "operatorApprovalRelease": "refusal.awaitedInputs operator-label entries release on exact-open-head label presence with operator-approval-applied; independent once-per-head retry-ledger grant; awaited inputs reclassify legacy transient stops as deterministic with a new refusal generation; typed-only inputs have approval-specific next action",
       "companionRecovery": "mode companion records companion identity/merge commit/path, phase events, deadline, owner and once-only escalation. Only base gitlink ancestry releases ordinary admission; pure-wait charges are credited once.",
       "ciInfrastructureRelease": "All recorded CI failures require shared zero-step or billing/quota evidence; fresh open/current-head successful replacements release with ci-infrastructure-recovered and credit exact infrastructure dispatch charges once. Real/mixed failures remain held.",
       "title": "Hammer Stop Hold",

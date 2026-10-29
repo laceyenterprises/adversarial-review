@@ -3954,6 +3954,10 @@ APPROVALREARM-01: a refusal's explicitly awaited operator approval re-arms a
 capped closer once for the same head. Its durable retry-ledger receipt is
 consumed by the next confirmed launch; another refusal remains capped.
 Unrelated labels grant nothing, and merge gates still verify authorization.
+Retry admission accepts unverified label presence. Awaited approvals upgrade
+legacy transient stops to deterministic holds with a new paging generation;
+confirmed charges consume grants under the ledger lock regardless of clock
+precision, and a subsequent refusal emits one fresh cap alert.
 Offline `operator-approval-rearm`, `ama-hammer-retry-cap`, `pr-next-action` and
 `closer-next-action` fixtures cover the contract. After normal deployment,
 SRE observes the next organic approval producing a closer launch with

@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import fsExt from 'fs-ext';
+import { openSync, closeSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { operatorLabelInputs } from '../src/ama/operator-label-inputs.mjs';
 import { writeAmaAuditEntry, readAmaAuditEntry } from '../src/ama/audit.mjs';
 import { evaluateHammerStopHold, readHammerStopForHead } from '../src/ama/hammer-stop-hold.mjs';
 import { recordHammerRetryDispatch, evaluateHammerRetryCap, readHammerRetryCapLedger,
-  rearmOperatorApprovedCloser, markHammerRetryCapExhausted } from '../src/ama/hammer-retry-cap.mjs';
+  hammerRetryCapFilePath, rearmOperatorApprovedCloser, markHammerRetryCapExhausted } from '../src/ama/hammer-retry-cap.mjs';
 
 const headSha = 'a'.repeat(40), otherHead = 'b'.repeat(40);
 const identity = { repo: 'fixture-owner/fixture-repo', prNumber: 900002 };
@@ -59,7 +60,7 @@ test('APPROVALREARM-01: hold releases only for the named approval on an open exa
 test('APPROVALREARM-01: durable grant survives suppression/review changes and is consumed once without refunds', t => {
   const args = fixture(t);
   const stop = readHammerStopForHead(args);
-  const options = { jobKey: headSha, headSha, stop, now, prMetadata: { ...args.prMetadata, labels: ['operator-approved'] } };
+  const options = { jobKey: headSha, headSha, stop, now: '2026-01-01T00:05:00.500Z', prMetadata: { ...args.prMetadata, labels: ['operator-approved'] } };
   const grant = overrides => rearmOperatorApprovedCloser(args.rootDir, identity, { ...options, ...overrides });
   assert.equal(grant({ prMetadata: { ...args.prMetadata, labels: ['fixture-unrelated'] } }).granted, false);
   assert.equal(grant({ headSha: otherHead }).granted, false);
@@ -102,4 +103,27 @@ test('APPROVALREARM-01: missing inputs, terminal heads, disabled dispatch and co
   assert.equal(evaluateHammerRetryCap({ ...ledger, __corrupt: true }, { jobKey: headSha, headSha }).operatorApprovalApplied, undefined);
   assert.equal(evaluateHammerRetryCap({ ...ledger, attemptCount: 'invalid' }, { jobKey: headSha, headSha }).operatorApprovalApplied, undefined);
   assert.equal(evaluateHammerRetryCap(ledger, { jobKey: otherHead, headSha }).operatorApprovalApplied, undefined);
+});
+
+
+test('APPROVALREARM-01: an existing receipt avoids the busy writer lock', t => {
+  const args = fixture(t);
+  const options = { jobKey: headSha, headSha, stop: readHammerStopForHead(args), now,
+    prMetadata: { ...args.prMetadata, labels: ['operator-approved'] } };
+  assert.equal(rearmOperatorApprovedCloser(args.rootDir, identity, options).granted, true);
+  const fd = openSync(hammerRetryCapFilePath(args.rootDir, identity) + '.lock', 'a');
+  try {
+    fsExt.flockSync(fd, 'exnb');
+    assert.equal(rearmOperatorApprovedCloser(args.rootDir, identity, options).granted, false);
+  } finally { closeSync(fd); }
+});
+
+test('APPROVALREARM-01: typed-only approvals have an actionable fallback', t => {
+  const args = fixture(t);
+  const stop = readHammerStopForHead({ ...args, readAuditImpl: () => ({ attempts: [{
+    head: headSha, path: 'hammer', outcome: 'failed-without-merge', startedAt: now,
+    awaitedInputs: [{ kind: 'operator-label', label: 'fixture-approval' }],
+  }] }) });
+  assert.deepEqual(stop.refusal.reasons, []);
+  assert.equal(stop.refusal.next, 'Apply the awaited approval label(s): fixture-approval.');
 });

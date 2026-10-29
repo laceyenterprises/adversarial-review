@@ -1634,6 +1634,15 @@ A retained `remediation-job-missing` route is ownerless for accounting; it canno
 claim an active hammer lane. Closer-owned work with a live closer still holds.
 See [operator decision notices](docs/follow-up-runbook.md#operator-decision-notices-reviewnotice-01).
 
+LIVEPACKREMEDIATE-01: registered waiver findings page immediately on the
+current open reviewed head, even while other findings have an active remediator.
+Reviews with ordinary blocking findings keep remediation ownership and preserve
+intended pack edits. Advisory notes do not prevent a hold when all blocking
+findings require waivers. Closure then parks as
+`operator-label-required:<label>` without waiting for a missing remediation job.
+A fresh review observing the waiver returns to ordinary closeout; real operator
+decision stops retain `remediation-stopped`. Existing smoke promises are unchanged.
+
 ITP-11: Gemini logins are token holders for `gemini-reviewer`. Durable holder
 claims fence independent watcher admission, retain live processes across
 restart and terminal run states, and preserve auth-probe backoff. Cleanup or drain

@@ -1606,6 +1606,14 @@ receipt owns one explanatory comment and page per head. Mixed reviews permit
 only ordinary fixes and preserve the gated changes. A fresh review observing
 the waiver clears the review finding; label presence alone cannot erase stale
 findings or waive red CI.
+LIVEPACKREMEDIATE-01 delivers the registered waiver notice immediately on the
+current open reviewed head, including while ordinary remediation is queued or
+active. Label-only classification considers blocking findings only; advisory
+non-blocking notes do not retain remediation ownership when all blockers require
+a waiver. After established ownership reconciliation, the shared closer selector
+parks that review as `operator-label-required:<label>` before remediation admission. The existing label receipt deduplicates watcher and closer delivery;
+the wrapper preserves operator ownership instead of selecting generic recovery.
+Real operator-decision stops remain `remediation-stopped`.
 A typed deferred hammer audit plus a matching live exact-head gate can refund
 series/target admission credit once per launch, retaining lifetime charges.
 `labelGateRefundedLaunchRequestId` prevents duplicate record/ordinary exit

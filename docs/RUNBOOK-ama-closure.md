@@ -2597,6 +2597,20 @@ clears. Independent CI classification and current-head authority still apply. Be
 resuming remediation after deployment, drain workers launched with older prompts;
 only newly composed prompts use the guarded remediation publisher.
 
+LIVEPACKREMEDIATE-01: the watcher delivers the waiver notice as soon as it
+observes the finding on the current open reviewed head, using the shared
+operator-label receipt even while addressable remediation runs. It does not wait
+for a closer route outcome. The remediator receives live-pack facts and an
+explicit instruction to preserve the PR's intended pack edits while repairing
+addressable blocking findings. Advisory non-blocking notes do not prevent a
+label-only hold when every blocking finding requires a waiver. The shared
+closure policy then selects
+`operator-label-required:<label>` before remediation admission, with the notice
+delivered and no `remediation-job-missing` wait. The wrapper keeps that operator
+ownership. A fresh review must observe the waiver before normal closeout resumes;
+real operator-decision stops keep `remediation-stopped`. No runtime rescue,
+service restart, label application or new smoke command is part of worker validation.
+
 The next closer pass releases the hold when live CI no longer classifies as
 label-only, without deleting historical receipts. A deferred hammer audit with
 a matching typed label reason can receive PR 1261 series/target retry credit

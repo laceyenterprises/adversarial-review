@@ -87,7 +87,8 @@ export const NEXT_ACTION_SHADOW_LAUNCH_READ_MS = 5_000;
 const pick = (value, keys) => (value && typeof value === 'object'
   ? Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]])) : null);
 const REVIEW_KEYS = ['verdict', 'headSha', 'riskClass', 'blockingFindingState', 'blockingFindingCount', 'nonBlockingFindingState',
-  'nonBlockingFindingCount', 'remediationPending', 'postedAt', 'commentOnlyFinalRoundPush', 'attestation', 'operatorApprovedEvidence'];
+  'nonBlockingFindingCount', 'remediationPending', 'postedAt', 'commentOnlyFinalRoundPush', 'attestation', 'operatorApprovedEvidence',
+  'operatorLabelFindings'];
 const LEASE_KEYS = ['status', 'lrqId', 'headSha', 'acquiredAt', 'updatedAt', 'terminalOutcome', 'deadlineAt'];
 
 // NXA-01's ledger observation as the `launches` source. Any confirmed terminal

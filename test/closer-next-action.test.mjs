@@ -402,6 +402,40 @@ function closureFixture(t, overrides = {}) {
   return { args, effects, waits };
 }
 
+for (const advisory of ['None.', '**Repair diagnostic** — name the failed input.']) {
+  test(`LIVEPACKREMEDIATE-01: label-only closure parks before remediation with advisory: ${advisory}`, async t => {
+    const body = `## Blocking issues\n- **[live_pack_cross_edit] Live pack** — operator waiver needed.\n## Non-blocking issues\n- ${advisory}\n## Verdict\nRequest changes`;
+    const pages = [];
+    const f = closureFixture(t, { dispatchJob: {}, fetchLatestHeadReviewBodiesImpl: async () => [body],
+      deliverAlertImpl: async (...args) => pages.push(args) });
+    f.args.reviewStateRow.review_body = body;
+    for (let poll = 0; poll < 2; poll++) {
+      const result = await maybeDispatchAmaClosureFor(f.args);
+      assert.equal(result.reason, 'operator-label-required:live-pack-edit-approved');
+      assert.equal(result.needsOperator, true);
+      assert.equal(result.nextAction.action, 'operator-hold');
+      assert.equal(result.nextAction.actor, 'operator');
+    }
+    assert.equal(pages.length, 1);
+    assert.deepEqual(f.waits, [], 'there is no missing remediation job to wait for');
+    assert.deepEqual(f.effects, [], 'a waiver cannot be repaired by a daemon or hammer');
+  });
+}
+
+test('LIVEPACKREMEDIATE-01: operator hold returned before shared owner initialization does not dereference the sink', async t => {
+  const hold = { dispatched: false, needsOperator: true, skipMergeAgent: true,
+    reason: 'operator-label-required:live-pack-edit-approved',
+    operatorLabelGates: [{ check: 'live-pack-cross-edit', label: 'live-pack-edit-approved',
+      reason: 'operator-label-required:live-pack-edit-approved' }] };
+  const f = closureFixture(t);
+  f.args.candidate.stackedBaseHold = hold;
+  const result = await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(result.needsOperator, true);
+  assert.equal(result.reason, hold.reason);
+  assert.deepEqual(f.effects, []);
+  assert.deepEqual(f.waits, []);
+});
+
 for (const prState of ['open', 'OPEN']) test(`COMPANIONFLOAT-01 orchestration normalizes ${prState} and fences clean daemon and hammer routes before cap/owner selection`, async t => {
   const f = closureFixture(t);
   f.args.candidate.prState = prState;

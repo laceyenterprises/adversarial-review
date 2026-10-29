@@ -10,6 +10,7 @@ import { operatorNoticeInFlight, operatorNoticeNonRetryableStop,
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { isActiveFollowUpJobStatus, listFollowUpJobsInDir } from './follow-up-jobs.mjs';
 import { hasOperatorDecisionRequiredAlerted, markOperatorDecisionRequiredAlerted } from './reviewer-cascade.mjs';
+import { holdForOperatorLabels } from './ama/operator-label-gates.mjs';
 
 export const OPERATOR_DECISION_NOTICE_BACKSTOP_MS = 45 * 60 * 1000;
 
@@ -73,6 +74,17 @@ export async function maybeDeliverOperatorDecisionNotice({ rootDir, repo, prNumb
   now = Date.now(), deliverAlertFn, readLivePR, logger = console,
   readLaunchRequestStatusImpl, timeoutOptions = {} }) {
   const identity = { repo, prNumber, headSha };
+  // Label waivers cannot be supplied by a remediator or closer. Deliver their
+  // own durable notice even while those actors repair the other findings.
+  if (!terminal && decision?.operatorLabelGates?.length) {
+    if (readLivePR) {
+      const live = await readLivePR();
+      if (String(live?.state).toUpperCase() !== 'OPEN' || live?.headRefOid !== headSha) return;
+    }
+    await holdForOperatorLabels({ rootDir, ...identity, gates: decision.operatorLabelGates,
+      deliverAlertImpl: deliverAlertFn, logger, now: new Date(now).toISOString() });
+    if (!decision.operatorDecisionRequired || decision.reason?.startsWith('operator-label-required:')) return;
+  }
   // Keep observation cleanup on non-alerting polls without blocking the watcher
   // on synchronous file reads (including the usual missing-state lookup).
   if (terminal || !decision?.operatorDecisionRequired) {

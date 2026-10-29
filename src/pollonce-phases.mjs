@@ -986,8 +986,8 @@ export async function processReviewSubject(entry, ctx) {
                 ? ' — NOT CONVERGED: findings unresolved, operator decision required'
                 : '')
           );
-          // Wait until the terminal closer route has also finished. Delivery errors
-          // remain fail-soft; the durable marker follows successful delivery only.
+          // Waiver labels page immediately alongside ordinary remediation;
+          // other decisions wait for the closer outcome. Delivery stays fail-soft.
           try {
             await maybeDeliverOperatorDecisionNotice({ rootDir: ROOT, repo: repoPath,
               prNumber, headSha: subject.headSha, decision: projected.decision, reviewRow,

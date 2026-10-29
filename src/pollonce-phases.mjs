@@ -3513,9 +3513,17 @@ export async function processReviewSubject(entry, ctx) {
                 ['review_status', 'reviewer_session_uuid', 'failed_at'].every(
                   field => afterClaim[field] === current[field]
                 );
-              console.log(unchangedShape
+              // PENDINGCLAIM-02: an unchanged row is only a mismatch signal
+              // when the snapshot had a shape targeted by the selected CAS.
+              const snapshotClaimable = claimBranch === 'pending'
+                ? ['pending', 'pending-upstream'].includes(current?.review_status)
+                : claimBranch === 'token-refresh'
+                  ? ['failed', 'pending-upstream'].includes(current?.review_status) ||
+                    (current?.review_status === 'pending' && Boolean(current.failed_at && current.reviewer_head_sha))
+                  : reviewRowInTerminalFailureState(current, reviewerHeadSha);
+              console.log(unchangedShape && snapshotClaimable
                 ? `[watcher] claim-shape-mismatch branch=${claimBranch} status=${afterClaim.review_status} repo=${repoPath} pr=${prNumber}`
-                : `[watcher] Lost claim race on ${repoPath}#${prNumber} — another watcher is handling this PR (or its row is now in a non-claimable state). Skipping.`
+                : `[watcher] Lost claim race on ${repoPath}#${prNumber} — another watcher is handling this PR (or its row is now in a non-claimable state). snapshot_status=${current?.review_status ?? 'missing'} Skipping.`
               );
               return { dispatched: false, reason: 'claim-race-lost' };
             }

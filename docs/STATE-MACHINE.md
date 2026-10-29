@@ -9,10 +9,14 @@ Moved heads retain the fresh pending claim and attempt reset; exhausted unknown
 failures retain parking. Session UUID and PGID remain on lease release because
 `reconcileReviewerCommandFailedBeforeRetry` needs the session/start evidence to
 reconcile late posted reviews before replacing a reviewer. Claims clear the old
-PGID and replace the session as before. A zero-row CAS re-reads the row: unchanged
-status, session and failure timestamp log `claim-shape-mismatch` with the branch
-and status; changed evidence retains the claim-race log. Neither diagnostic
-changes state or admission policy. Retry caps, defaults, failure classifiers,
+PGID and replace the session as before. A zero-row CAS re-reads the row:
+PENDINGCLAIM-02 limits `claim-shape-mismatch` to snapshots targeted by the chosen
+branch with unchanged status, session and failure timestamp. Retry branches use
+the shared failure-shape predicate; plain pending accepts `pending` and
+`pending-upstream`; token refresh also accepts `failed` and requires failure
+timestamp/head evidence for `pending`. Changed evidence or a snapshot outside
+the target shape retains the claim-race/non-claimable log with `snapshot_status`.
+Neither diagnostic changes state or admission policy. Retry caps, defaults, failure classifiers,
 token-refresh claims and merge guards retain their existing rules. The infra CAS
 fences the exact `failure_message` snapshot instead of maintaining a second
 failure-class list. The exported classifier vocabulary drives the invariant

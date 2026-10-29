@@ -312,7 +312,8 @@
         "src/ama/closing-keywords.mjs",
         "src/ama/no-ci-configured.mjs",
         "src/daemon-clean-merge.mjs",
-        "src/ama/hammer-stop-hold.mjs"
+        "src/ama/hammer-stop-hold.mjs",
+        "src/ama/hammer-resume.mjs"
       ],
       "pendingAttestationFields": ["attempts[].pendingAttestation.baseHead", "attempts[].pendingAttestation.validatedHead", "attempts[].pendingAttestation.identity", "attempts[].pendingAttestation.validationSummary"],
       "owner": "AMA merge authority",
@@ -320,9 +321,9 @@
       "guardReversalEntryFields": ["authorization", "paths", "failedCheckRun", "passingCheckRun", "failedHead", "passingHead"],
       "messageRewriteFields": ["closingKeywordRewrites", "attempts[].closingKeywordRewrites"],
       "waitEvidenceFields": { "attempts[].waitNote": "string", "attempts[].headWaitedSeconds": "non-negative integer seconds; 0 means not started", "attempts[].requiredChecksWaitedSeconds": "non-negative integer seconds; 0 means not started" },
-      "pendingCiResumeFields": ["attempts[].resumeOwed", "attempts[].resumeHead"],
+      "pendingCiResumeFields": ["attempts[].resumeOwed", "attempts[].resumeHead", "attempts[].resumeAttempt"],
       "unknownMergeabilityEvidence": { "reason": "pr-mergeability-unknown", "remoteCiStatus": ["mergeability-unknown", "mergeability-unknown-ci-timeout"], "checksConclusion": "attempts[].githubGate.checksConclusion" },
-      "pendingCiResumeConsumer": "audit-only; watcher independently evaluates closer ancestry and live CI",
+      "pendingCiResumeConsumer": "src/ama/hammer-resume.mjs; posted-review scheduler prioritizes pending debt every poll; closure resumes exact-head green through normal leased hammer gates",
       "leaseTimeoutEvidence": { "waited_s": "number or null when duration evidence is absent", "configured_s": "number" },
       "leaseAdmissionOutcomes": { "operator-hold": "deferred", "pr-is-draft": "deferred", "head-changed": "superseded", "pr-not-open": "failed-without-merge" },
       "stackedBaseHoldOutcomes": { "stacked-base-merged": "deferred", "stacked-base-read-failed": "deferred" },

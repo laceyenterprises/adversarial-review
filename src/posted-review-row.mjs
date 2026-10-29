@@ -1,3 +1,4 @@
+import { readHammerResumes, reconcileHammerResumes } from './ama/hammer-resume.mjs';
 import { withPostedReviewReadCache, closePostedReviewReadCache } from './posted-review-read-cache.mjs';
 import { companionOnlyStop } from './ama/companion-stop-wait.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
@@ -113,6 +114,16 @@ import {
   runPostedReviewHandlersFairly,
   postedReviewHandlerKey,
 } from './watcher-poll-fairness.mjs';
+
+// A damaged PR audit must reach its own fail-closed handler without aborting
+// scheduling for every other PR. Observation priority grants no dispatch right.
+function hammerResumeNeedsObservation(identity, logger) {
+  try { return readHammerResumes(identity).length > 0; }
+  catch (error) {
+    logger?.warn?.(`[watcher] hammer resume audit unreadable: ${error.message}`);
+    return true;
+  }
+}
 
 const execFileAsync = promisify(execFile);
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -594,6 +605,8 @@ async function handlePostedReviewRowWithinReadCache({
         },
       };
     }
+    reconcileHammerResumes({ hqRoot: resolveHqRoot(), repo: repoPath, prNumber,
+      headSha: candidate?.headSha, prState: candidate?.prState });
     // Own reservation cleanup outside closure dispatch: operator holds and
     // terminal/head changes can prevent the next daemon acquire entirely.
     const reservationBase = candidate?.baseBranch || existing?.base_ref || existing?.baseBranch;
@@ -1181,6 +1194,12 @@ export function createNoProgressLaneGate({
             retryAfterMs: due ? 0 : HAMMER_EVIDENCE_RECHECK_INTERVAL_MS - elapsedMs };
         }
       }
+      // CI can settle without changing reviews.db or producing a wake file.
+      // Outstanding receipts must reach the live closure gates every poll,
+      // including stale-head cleanup. Existing waits/caps bound execution.
+      if (hammerResumeNeedsObservation({ hqRoot, ...identity }, logger)) {
+        decision = { ...decision, lane: 'active', due: true, reason: 'hammer-resume-owed', backoffTicks: 0 };
+      }
       if (!decision.due && recordSkip) {
         recordNoProgressLaneSkip(rootDir, identity, {
           headSha: handler.headSha || null,
@@ -1528,6 +1547,8 @@ export async function runQueuedReviewAdoptionPhase({
       ...(Array.isArray(postedReviewPriorityTargets) ? postedReviewPriorityTargets
         : postedReviewPriorityTargets ? [postedReviewPriorityTargets] : []),
       ...pendingHammerTargets,
+      ...postedReviewHandlers.filter(handler => hammerResumeNeedsObservation({ hqRoot: resolveHqRoot(),
+        repo: handler.repoPath, prNumber: handler.prNumber }, logger)),
     ],
     logger,
   });

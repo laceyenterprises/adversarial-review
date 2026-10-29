@@ -439,6 +439,21 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
     return { row: 'R07-stop', action: 'hammer', actor: 'closure-recovery', reason: 'hammer-final-no-merge',
       deadlineKind: 'recovery', queue: 'reconcile', attempt: launch.attempt };
   }
+  // HAMRESUMEOWED-01: normal ownership, safety and cap rows above still win.
+  // Waiting must not spend another hammer launch. Green resumes validation and
+  // merge under the existing leases; this receipt never certifies remediation.
+  const resume = plain(progress?.hammerResume);
+  if (resume && sameHead(resume.headSha, head)) {
+    if (checks.state !== 'FAILURE' && (checks.state !== 'SUCCESS' || pr.mergeable === 'UNKNOWN')) {
+      return { row: 'R11-pending', action: 'wait-for-CI', actor: 'ci',
+        reason: checks.state === 'PENDING' ? 'checks-pending'
+          : checks.state !== 'SUCCESS' ? 'checks-unknown' : 'mergeability-unknown',
+        deadlineKind: 'observer', queue: 'observe', extraAnchorMs: [checks.progressMs] };
+    }
+    if (checks.state === 'SUCCESS') return { row: 'R08-resume', action: 'hammer', actor: 'hammer',
+      reason: 'required-checks-resume', deadlineKind: 'admission', queue: 'dispatch',
+      refs: [`hammer-resume:${resume.attemptNumber}`] };
+  }
   const handedToReview = leaseForHead && lease.status === 'handed-to-review';
   const terminalReview = progress?.terminalReview;
   const terminalHead = terminalReview?.validated === true && sameHead(terminalReview.headSha, head)

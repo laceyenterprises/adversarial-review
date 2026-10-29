@@ -592,7 +592,7 @@ two-path merge model** (operational reference:
   `ama-closer-dispatch-backgrounded`) immediately; the closer lease and
   dispatch record still prevent duplicate launches on later ticks. A queued
   entry checks the live PR state and head again before it launches. The
-  hammer remediates the findings, rebases onto the current base, holds
+  hammer remediates the findings, rebases when GitHub reports a conflict or strict BEHIND, holds
   the merge bar of required checks plus changed-surface tests, waits out
   GitHub required checks on the exact post-remediation head within a
   bounded remote-CI window, and merges under its own lease with
@@ -764,10 +764,10 @@ fixtures verify bounded retention, daemon preservation, mixed-role backoff, head
 changes, status ages and terminal cleanup. Both parking caps use the existing audit, closing-status and page path.
 Only confirmed dead same-host watcher identities permit early reservation pruning. Closers release
 before the first remote-CI wait, including read retries and UNKNOWN sampling, then
-reacquire and refresh the exact-head gate. LAC-2097 retains the exact validated
-head and CI across disjoint base advances when protection is explicitly
-non-strict. Strict/unknown protection requires complete base containment;
-overlap requires rebase even with CLEAN mergeability. LEASEFAIR-02 handles a
+reacquire and refresh the exact-head gate. HAMRESUMEOWED-01 retains CLEAN
+heads and known non-strict MERGEABLE BEHIND heads with their exact-head CI,
+including overlapping-file base advances. GitHub conflicts or BEHIND blocked
+by strict/unknown protection require rebase. LEASEFAIR-02 handles a
 required rebase in the same run, holds the reacquired
 lease through one CI wait capped by `HAM_CI_RETRY_WAIT_SECONDS` (default/minimum 120 wall-clock seconds) on the new head, then rebuilds its audit and
 predicate before merge. Both CI waits share one absolute deadline, set before
@@ -885,11 +885,11 @@ validation outside the lease, then re-enter verify-head before audit publication
 1. **Acquire the merge lease** for `(repo, base, PR)` — no merge happens without it.
 2. **Remediate all adversarial findings** the final review raised — blocking and
    non-blocking.
-3. **Rebase onto the base branch** if the head is behind, and confirm the rebased
+3. **Rebase onto the base branch** for a GitHub conflict or strict BEHIND, and confirm the rebased
    head is content-equivalent to the reviewed head (or re-validate it).
 4. **Push the validated head.**
 5. **Release while waiting for GitHub required checks**, then reacquire and
-   confirm the exact green head satisfies the strictness/overlap base policy.
+   confirm the exact green head satisfies the GitHub conflict/strict-BEHIND policy.
 6. **`gh pr merge --match-head-commit <validated head>`** while holding the lease.
 7. **Append the terminal audit and release the lease.**
 
@@ -2160,7 +2160,7 @@ admitted exact-head review within one poll without manual rescue. After normal
 deployment, observe a naturally capped non-closer head reaching its final hammer;
 no forced live state change or new smoke command is required.
 
-<a id="smv-handoff"></a>**smv-handoff:** OWNERUNREADABLE-01 verifies terminal ownership recovery after its anchored deadline selects hammer without re-review while unreadable retry evidence remains fenced. Focused offline fixtures also cover one-read placeholder replacement, bounded backoff, transient recovery, live retries and outage recovery. After deployment SRE observes the next natural R04 case exit within its budget and merge; no worker live operation is authorized. NXA-07 also verifies exact-head validated terminal HAM proof crossing retry selection into pending, failed or green CI gates; mismatched proof retains hammer retry ownership. NXA-07 verifies the common adapter matrix and retains lease/retry settlement; NXA-06 verifies daemon CI changes, operator-approved retry exhaustion selecting R08 hammer repair, live hammer ownership and remote-unconfirmed receipt recovery through the shared decision. NXA-05 verifies that drain/capacity observations
+<a id="smv-handoff"></a>**smv-handoff:** HAMRESUMEOWED-01 verifies pending-to-green hammer resume and idempotent audit settlement. Outstanding exact-head receipts receive closure priority each poll without an unrelated wake; red/head movement settle the debt for normal handling. Existing merge gates, leases and caps remain mandatory. After deployment SRE observes the next natural pending-CI stop merging its green recorded head without manual action; offline smoke alone does not establish this live receipt. OWNERUNREADABLE-01 verifies terminal ownership recovery after its anchored deadline selects hammer without re-review while unreadable retry evidence remains fenced. Focused offline fixtures also cover one-read placeholder replacement, bounded backoff, transient recovery, live retries and outage recovery. After deployment SRE observes the next natural R04 case exit within its budget and merge; no worker live operation is authorized. NXA-07 also verifies exact-head validated terminal HAM proof crossing retry selection into pending, failed or green CI gates; mismatched proof retains hammer retry ownership. NXA-07 verifies the common adapter matrix and retains lease/retry settlement; NXA-06 verifies daemon CI changes, operator-approved retry exhaustion selecting R08 hammer repair, live hammer ownership and remote-unconfirmed receipt recovery through the shared decision. NXA-05 verifies that drain/capacity observations
 retain hammer intent and its deadline, and current deterministic automatic stops retain
 closure-recovery ownership. STOPSTALE-01 verifies that a strictly newer eligible
 exact-head review can instead select daemon merge with

@@ -365,6 +365,22 @@ if (scenario === 'clean') {
     durableCleanupAndDrainFence: true, releaseReceiptRetained: true, terminalWithoutPgidReadmitted: true,
     immediateFailedReviewRecovery: true };
 } else if (scenario === 'handoff') {
+  const { writeAmaAuditEntry } = await import('../../src/ama/audit.mjs');
+  const { reconcileHammerResumes, readHammerResumes, settleHammerResume } = await import('../../src/ama/hammer-resume.mjs');
+  const resumeIdentity = { hqRoot: rootDir, repo: 'fixture/resume', prNumber: 17, headSha: 'a'.repeat(40) };
+  writeAmaAuditEntry({ ...resumeIdentity, attempt: { outcome: 'deferred', reason: 'required-checks-pending',
+    resumeOwed: true, resumeHead: resumeIdentity.headSha } });
+  for (const conclusion of ['PENDING', 'SUCCESS']) {
+    const resume = reconcileHammerResumes({ ...resumeIdentity, prState: 'OPEN', checks: conclusion });
+    const decision = matrixPair({ progress: { hammerResume: resume }, checks: { conclusion } }).decision;
+    assert.equal(decision.action, conclusion === 'PENDING' ? 'wait-for-CI' : 'hammer');
+    if (conclusion === 'SUCCESS') {
+      assert.equal(decision.reason, 'required-checks-resume');
+      for (let i = 0; i < 2; i++) settleHammerResume({ ...resumeIdentity, resume, reason: 'dispatched' });
+    }
+  }
+  assert.deepEqual(readHammerResumes(resumeIdentity), []);
+
   const terminalHead = 'a'.repeat(40), reviewedHead = 'b'.repeat(40);
   const terminalOptions = {
     reviews: { headSha: reviewedHead, verdict: 'request changes', blockingFindingState: 'known',

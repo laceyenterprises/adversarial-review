@@ -2,6 +2,7 @@ import './helpers/rate-limit-state-isolation.mjs';
 import { codexAccountFixture } from './helpers/codex-account-fixture.mjs';
 import { claudeAccountFixture, fleetStatusWithClaudeAccountEvidence } from './helpers/claude-account-fixture.mjs';
 import test from 'node:test';
+import { setImmediate } from 'node:timers/promises';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -12,6 +13,8 @@ import { spawnSync } from 'node:child_process';
 const REPO_ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const SUMMARY_MARKER = '@@WATCHER_CLAIM_LOOP_SUMMARY@@';
 
+// Flush completed synchronous fixtures before the validation idle deadline.
+test.beforeEach(() => setImmediate());
 
 function fixtureEnv(overrides = {}) {
   return {

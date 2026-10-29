@@ -483,9 +483,11 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    exact head that merges. The predicate accepts only a matched
    timeline comment whose author is the verified HAM commit author or an
    allowlisted hammer bot.
-5. Refresh the PR head; **CONFIRM THE REBASE HOLDS.** Strict/unknown protection
-   requires base containment; non-strict disjoint advances retain the exact
-   validated head. Conflicts/overlap require rebase even with CLEAN mergeability.
+5. Refresh the PR head; **CONFIRM THE REBASE HOLDS.** Retain a CLEAN head
+   and its exact-head CI. Rebase only for a live GitHub conflict or BEHIND
+   blocked by strict/unknown protection. A MERGEABLE BEHIND head under known
+   non-strict protection retains its SHA, even when main touched the same files.
+   Pending checks wait on that head; main movement alone never restarts CI.
    Release for initial CI, then reacquire through daemon priority. One required
    retry holds the lease for at most 120 seconds of CI within the original deadline; expiry forbids
    another mutation. Retry rebuilds audit/predicate.
@@ -528,7 +530,7 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    block refreshes the single marker comment in place, so re-entries never
    duplicate it), so it names this exact head, THEN re-run
    the closer eligibility predicate in SPEC §1.1.1 HAM terminal-remediation mode
-   for that same live head. Only a head satisfying the strictness/overlap base
+   for that same live head. Only a head satisfying the GitHub conflict/strict-BEHIND base
    policy whose GitHub required check bar is green may merge while holding the
    lease. For any blocking,
    stale-head, remediation-state, or bare verdict failure, the predicate must
@@ -549,16 +551,13 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    `gh pr merge --match-head-commit <validated-post-remediation-sha>`, and only
    while holding the merge lease. No merge is allowed without the lease. Release
    the lease after the merge is confirmed or on any hard-block/terminal outcome.
-7. **Post a CLOSING comment after the merge confirms.** Once you have re-read
-   GitHub and confirmed the PR is merged at the validated head, post one final
-   comment on PR <<PR_URL>> that states `Hammer route: verified validated head`, the merge lease was held and released,
-   the base SHA rebased onto, the remote CI result
-   for the exact head, the merged SHA, the merge method, the counts of findings
-   remediated (blocking / non-blocking), the failing tests you fixed to keep
-   `main` green (or "suite already green"), and the
-   `Closed-By: hammer (adversarial-pipe-mode)` provenance. This closing comment is
-   the human-visible audit trail that an autonomous close happened — always post
-   it on a successful merge.
+7. **Post a CLOSING comment after the merge confirms.** Re-read GitHub to prove
+   the validated head merged, then post once on PR <<PR_URL>>. Include
+   `Hammer route: verified validated head`, lease held/released, base SHA rebased
+   onto, exact-head remote CI result, merged SHA, merge method, remediated counts
+   (blocking / non-blocking), failing tests fixed to keep `main` green (or
+   "suite already green"), and `Closed-By: hammer (adversarial-pipe-mode)`.
+   This audit is required after every successful autonomous merge.
 
 ## Required workflow
 
@@ -903,7 +902,7 @@ Do not merge unless all of these are true:
 
 In-lease merge:
 
-In the persistent merge-lease shell, `source "<<RUN_DIR>>/hammer-merge.sh"` after exporting the dispatch values above. The helper requires the successful audit-publish marker and an eligible predicate verdict for `POST_REMEDIATION_SHA`, then checks the live head and required checks before merging under the held lease. It appends a `failed-without-merge` audit and releases the lease if either prerequisite fails. The wrapper prints its bounded diagnostic tail, status, outcome, and lease state; a nonzero status requires the closing report from mandate 0b when the PR remains open, preserving retryable deferrals such as `lane-busy`.
+In the persistent merge-lease shell, `source "<<RUN_DIR>>/hammer-merge.sh"` with exported dispatch values. It requires successful audit publication and an eligible `POST_REMEDIATION_SHA` predicate, then rechecks live head/CI under lease. Either missing prerequisite appends `failed-without-merge` and releases the lease. The wrapper reports bounded diagnostics, status, outcome and lease state. Nonzero status on an open PR requires mandate 0b's report; preserve retryable deferrals such as `lane-busy`.
 
 
 After the merged audit append succeeds, emit the merge signal and then release
@@ -958,10 +957,10 @@ hard-blocker report, and do not re-dispatch.
   floated current main instead of creating a gitlink-only PR.
 - No merging a superproject PR that is still blocked on an unmerged submodule
   fix PR.
-- No merging across overlapping base changes or absent base commits under
-  strict/unknown protection. Rebase and re-validate required checks on the new
-  exact head. Under explicitly non-strict protection, disjoint advances may keep
-  the validated head, with fresh live eligibility and head CAS still mandatory.
+- No merging a GitHub-conflicting head or BEHIND blocked by strict/unknown
+  protection. Rebase those heads and re-validate exact-head required checks.
+  Retain CLEAN heads and known non-strict MERGEABLE BEHIND heads; path overlap
+  alone is not a conflict. Fresh live eligibility and head CAS remain mandatory.
 - No hammer merge without holding the merge lease for `(<<REPO>>, base, PR <<PR_NUMBER>>)`
   and saving its `leaseId`; no cleanup path may release without
   `--lease-id "$HAM_MERGE_LEASE_ID"`.

@@ -44,18 +44,19 @@ function fixture(t, scenario) {
   const base = commit(initialDisjoint ? 'base-old\nbody\nhammer-old\n' : 'base-new\nbody\nhammer-old\n', ancestor, initialDisjoint);
   const rebased = initialDisjoint ? original : commit('base-new\nbody\nhammer-new\n', base);
   const foreign = commit('foreign\n', rebased);
+  const startsRebased = ['no-op', 'initial-lease-drift', 'ci-disjoint', 'ci-disjoint-conflict', 'ci-disjoint-lease-delay'].includes(scenario);
   const disjoint = scenario.startsWith('ci-disjoint') || ['ci-old-reply', 'local-validation-disjoint-base'].includes(scenario);
   const nextBase = commit(disjoint ? 'base-new\nbody\nhammer-old\n' : 'base-new\nadvanced\nhammer-old\n', base, disjoint);
   const nextRebased = commit(disjoint ? 'base-new\nbody\nhammer-new\n' : 'base-new\nadvanced\nhammer-new\n', nextBase, disjoint);
   git(['--git-dir', remote, 'update-ref', 'refs/heads/main', base]);
-  git(['--git-dir', remote, 'update-ref', 'refs/heads/topic', ['no-op', 'initial-lease-drift'].includes(scenario) ? rebased : original]);
+  git(['--git-dir', remote, 'update-ref', 'refs/heads/topic', startsRebased ? rebased : original]);
   git(['init', '--quiet']);
   git(['remote', 'add', 'origin', remote]);
   // Seed only A and its parent. B must be fetched by the production procedure.
-  const pack = execFileSync(realGit, ['--git-dir', remote, 'pack-objects', '--stdout', '--revs'], { env, input: (['no-op', 'initial-lease-drift'].includes(scenario) ? rebased : original) + '\n', timeout: 10000 });
+  const pack = execFileSync(realGit, ['--git-dir', remote, 'pack-objects', '--stdout', '--revs'], { env, input: (startsRebased ? rebased : original) + '\n', timeout: 10000 });
   execFileSync(realGit, ['unpack-objects'], { cwd: scratch, env, input: pack, timeout: 10000 });
-  git(['checkout', '--quiet', '--detach', ['no-op', 'initial-lease-drift'].includes(scenario) ? rebased : original]);
-  writeFileSync(join(dir, 'state.json'), JSON.stringify({ original, rebased, base, foreign, nextBase, nextRebased, head: ['no-op', 'initial-lease-drift'].includes(scenario) ? rebased : original, behind: true }));
+  git(['checkout', '--quiet', '--detach', startsRebased ? rebased : original]);
+  writeFileSync(join(dir, 'state.json'), JSON.stringify({ original, rebased, base, foreign, nextBase, nextRebased, head: startsRebased ? rebased : original, behind: true }));
   writeFileSync(join(dir, 'details'), 'Synthetic surface repaired.\n');
   writeFileSync(join(dir, 'terminal-remediation.json'), JSON.stringify({ active: true,
     commit: { sha: rebased }, auditComment: { body: 'synthetic', findings: [
@@ -334,8 +335,8 @@ for (const scenario of ['ci-touching', 'ci-disjoint', 'ci-disjoint-strict', 'ci-
       assert.ok(merges[0].value.includes(['ci-disjoint', 'ci-disjoint-lease-delay'].includes(scenario) ? f.rebased : f.nextRebased));
       if (['ci-disjoint', 'ci-disjoint-lease-delay'].includes(scenario)) {
         assert.equal(f.git(['rev-parse', 'HEAD']), f.rebased, 'unrelated non-strict advance retains the validated head');
-        assert.equal(events.filter(e => e.kind === 'gh' && e.value.some(arg => arg.includes('updatePullRequestBranch'))).length, 1,
-          'only the mandatory initial rebase; no CI restart');
+        assert.equal(events.filter(e => e.kind === 'gh' && e.value.some(arg => arg.includes('updatePullRequestBranch'))).length, 0,
+          'the already validated non-strict head needs no initial or CI rebase');
         assert.ok(checks.every(c => c.head === f.rebased));
         assert.equal(events.some(e => e.kind === 'predicate'), false, 'original head-bound authority stays intact');
         return;
@@ -533,5 +534,24 @@ for (const scenario of ['capped-conflict', 'capped-stable']) {
     assert.equal(readFileSync(join(f.dir, 'leases'), 'utf8'), 'recover-cap\n');
     assert.equal(JSON.parse(readFileSync(join(f.dir, 'gate-cap-recovery.json'))).owner,
       scenario === 'capped-conflict' ? 'hammer' : 'closure-recovery');
+  });
+}
+
+
+for (const scenario of ['ci-clean-overlap', 'ci-clean-pending']) {
+  test(`HAMRESUMEOWED-01: ${scenario} retains its checked head when main advances`, t => {
+    const f = fixture(t, scenario);
+    const result = f.run();
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(events.filter(e => e.kind === 'gh' && e.value.some(arg => arg.includes('updatePullRequestBranch'))).length, 1,
+      'initial required rebase only; a later CLEAN snapshot never restarts CI');
+    const checks = events.filter(e => e.kind === 'checks').map(e => e.value);
+    assert.ok(checks.every(check => check.head === f.rebased));
+    assert.ok(checks.some(check => check.conclusion === 'SUCCESS'));
+    if (scenario === 'ci-clean-pending') assert.equal(checks[0].conclusion, 'PENDING');
+    assert.equal(f.git(['rev-parse', 'HEAD']), f.rebased);
+    assert.notEqual(f.git(['merge-base', f.nextBase, f.rebased]), f.nextBase,
+      'main advanced without invalidating the mergeable exact head');
   });
 }

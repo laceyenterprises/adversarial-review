@@ -631,40 +631,22 @@ ham_settle_rebase_snapshot() {
 }
 
 ham_base_touches_pr_files() {
-  # Returns 0 (overlap → a rebase+revalidation is still required) when any file
-  # this PR changes is also touched by base commits that landed SINCE the base we
-  # last validated against. In validated-head mode use that exact head's fork
-  # point, not the mutable validation-base variable. Strict/unknown protection
-  # still requires complete containment; non-strict disjoint advances can retain
-  # the same head and its CI. A live CONFLICTING gate (second argument) always
-  # requires rebase, including directory/file conflicts with disjoint path names.
-  # Fail closed to 0 on any fetch/diff
-  # error so an undeterminable diff never lets us skip a rebase semantics needs.
+  # HAMRESUMEOWED-01: GitHub mergeability owns the rebase decision. Main
+  # touching the same file is not a conflict. Retain a CLEAN/mergeable exact
+  # head and its CI; only a conflict or a policy-blocked BEHIND needs a rewrite.
+  [ "${2:-}" != CONFLICTING ] || return 0
+  [ "${3:-}" = BEHIND ] || return 1
+  [ "${HAM_REQUIRES_UP_TO_DATE:-1}" -ne 0 ] || return 1
+  # Ignore a lagging BEHIND once containment is proved. Unknown containment
+  # under strict/unknown protection remains a rebase requirement.
   ham_bounded_git_sync "$BASE_BRANCH" >/dev/null 2>&1 || return 0
-  local current_base_sha comparison_base pr_ref pr_files base_files overlap
+  local current_base_sha comparison_base
   current_base_sha=$(git rev-parse FETCH_HEAD 2>/dev/null) || return 0
   ham_is_full_sha "$current_base_sha" || return 0
   HAM_CURRENT_BASE_SHA="$current_base_sha"
-  comparison_base="${HAM_VALIDATION_BASE_SHA:-}"
-  pr_ref=HEAD
-  if [ "${1:-}" = "validated-head" ]; then
-    pr_ref="$POST_REMEDIATION_SHA"
-    ham_is_full_sha "$pr_ref" || return 0
-    [ "${2:-}" != CONFLICTING ] || return 0
-    comparison_base=$(git merge-base "$pr_ref" "$current_base_sha" 2>/dev/null) || return 0
-    [ "$comparison_base" != "$current_base_sha" ] || return 1
-    [ "${HAM_REQUIRES_UP_TO_DATE:-1}" -eq 0 ] || return 0
-  fi
-  ham_is_full_sha "$comparison_base" || return 0
-  # Include both sides of renames: changing a renamed-away path also overlaps.
-  pr_files=$(git diff --no-renames --name-only "$comparison_base..$pr_ref" 2>/dev/null) || return 0
-  base_files=$(git diff --no-renames --name-only "$comparison_base..$current_base_sha" 2>/dev/null) || return 0
-  [ -n "$pr_files" ] || return 1
-  [ -n "$base_files" ] || return 1
-  pr_files=$(printf '%s\n' "$pr_files" | sort -u) || return 0
-  base_files=$(printf '%s\n' "$base_files" | sort -u) || return 0
-  overlap=$(comm -12 <(printf '%s\n' "$pr_files") <(printf '%s\n' "$base_files") 2>/dev/null) || return 0
-  [ -n "$overlap" ]
+  ham_is_full_sha "$POST_REMEDIATION_SHA" || return 0
+  comparison_base=$(git merge-base "$POST_REMEDIATION_SHA" "$current_base_sha" 2>/dev/null) || return 0
+  [ "$comparison_base" != "$current_base_sha" ]
 }
 
 # Shared by initial verification and the single in-run CI retry. GitHub publishes
@@ -819,7 +801,7 @@ while [ "$(jq -r '.mergeStateStatus // ""' "<<RUN_DIR>>/pr-after.json")" = "BEHI
   # first pass. This also handles a strict already-up-to-date head with
   # a lagging BEHIND snapshot; the final live gate must still settle green.
   if [ "$(jq -r '.mergeable // ""' "<<RUN_DIR>>/pr-after.json")" = "MERGEABLE" ] \
-     && ! ham_base_touches_pr_files validated-head; then
+     && ! ham_base_touches_pr_files validated-head MERGEABLE BEHIND; then
     echo "HAM: produced head covers the base policy; avoiding a redundant rebase." >&2
     break
   fi
@@ -883,7 +865,7 @@ else
   fi
 fi
 
-# CONFIRM THE REBASE HOLDS: the head satisfies the strictness/overlap policy. If
+# CONFIRM THE REBASE HOLDS: the head satisfies the GitHub conflict/strict-BEHIND policy. If
 # HAM_NEEDS_REVALIDATION is true, re-run the changed-surface tests (mandate step
 # 2b) outside the lease against THIS rebased $POST_REMEDIATION_SHA and fix anything
 # the rebase newly broke. Record the tested head/base before re-entry.

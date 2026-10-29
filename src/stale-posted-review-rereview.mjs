@@ -1,3 +1,5 @@
+import { readHammerResumes } from './ama/hammer-resume.mjs';
+import { resolveHqRoot } from './hq-root.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -26,6 +28,14 @@ export async function getStalePostedReviewAutoRereviewSuppression({
   logger = console,
   isMergeAgentDispatchActiveForHeadImpl = isMergeAgentDispatchActiveForHead,
 } = {}) {
+  try {
+    if (readHammerResumes({ hqRoot: resolveHqRoot(env), repo: repoPath, prNumber })
+      .some(resume => resume.headSha === currentHeadSha)) {
+      return { suppressed: true, reason: 'hammer-resume-owed' };
+    }
+  } catch (error) {
+    logger?.warn?.(`[watcher] hammer resume audit unreadable: ${error.message}`);
+  }
   const normalizedLabelNames = new Set(
     (Array.isArray(labelNames) ? labelNames : [])
       .map((label) => String(label || '').trim())

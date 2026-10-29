@@ -227,6 +227,8 @@ function stagedGitlinkPaths(cwd) {
 
 test('hammer prompt enforces the lease guarded GitHub-required-gate merge protocol (no local battery)', () => {
   assert.match(HAMMER_PROMPT, /do not\s+restart remediation/i);
+  assert.match(HAMMER_PROMPT, /Retain a CLEAN head/);
+  assert.doesNotMatch(HAMMER_PROMPT, /overlap require rebase even with CLEAN/);
   assert.match(HAMMER_PROMPT, /complete the merge\/closing-comment sequence idempotently/);
   assert.match(HAMMER_PROMPT, /final rebase→remote-CI→merge window/);
   assert.match(HAMMER_PROMPT, /HAM_MERGE_LEASE_WAIT_SECONDS="\$\{HAM_MERGE_LEASE_WAIT_SECONDS:-900\}"/);
@@ -264,7 +266,9 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.match(HAMMER_PROMPT, /--reason hammer-pr-eligible/);
   assert.match(HAMMER_PROMPT, /HAM_CAPTURED_BASE_SHA=\$\(git rev-parse FETCH_HEAD/);
   assert.match(HAMMER_PROMPT, /current_base_sha=\$\(git rev-parse FETCH_HEAD/);
-  assert.match(HAMMER_PROMPT, /base_files=\$\(git diff --no-renames --name-only "\$comparison_base\.\.\$current_base_sha"/);
+  assert.doesNotMatch(HAMMER_PROMPT, /base_files=\$\(git diff/);
+  assert.ok(HAMMER_PROMPT.includes('[ "${3:-}" = BEHIND ] || return 1'));
+  assert.ok(HAMMER_PROMPT.includes('[ "${HAM_REQUIRES_UP_TO_DATE:-1}" -ne 0 ] || return 1'));
   assert.match(HAMMER_PROMPT, /Never use retryable-abort for red/);
   assert.match(HAMMER_PROMPT, /trap ham_release_merge_lease EXIT/);
   // SEV1: the hammer no longer runs a local test battery or the PPH pre-push CI

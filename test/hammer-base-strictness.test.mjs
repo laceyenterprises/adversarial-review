@@ -53,3 +53,80 @@ echo "$HAM_REQUIRES_UP_TO_DATE"
     if (!protection) assert.match(readFileSync(join(dir, 'required-status-checks.stderr'), 'utf8'), /HTTP 40[34]/);
   });
 }
+
+const needsRebase = source.match(/^ham_base_touches_pr_files\(\) \{\n[\s\S]*?^\}/m)?.[0];
+for (const [state, mergeable, strict, expected] of [
+  ['CLEAN', 'MERGEABLE', 0, 1],
+  ['CLEAN', 'MERGEABLE', 1, 1],
+  ['BEHIND', 'MERGEABLE', 0, 1],
+  ['BEHIND', 'MERGEABLE', 1, 0],
+  ['CLEAN', 'CONFLICTING', 0, 0],
+  ['DIRTY', 'CONFLICTING', 1, 0],
+  ['UNKNOWN', 'UNKNOWN', 1, 1],
+]) {
+  for (const checks of ['SUCCESS', 'PENDING']) test(`HAMRESUMEOWED-01: ${state}/${mergeable}, strict=${strict}, checks=${checks}`, () => {
+    // The base advanced across the SAME path as this PR. GitHub's exact-head
+    // conflict/up-to-date gate, rather than a local overlap guess, owns rewrite.
+    const result = spawnSync('/bin/bash', ['-uc', `
+${needsRebase}
+BASE_BRANCH=main
+HAM_REQUIRES_UP_TO_DATE=${strict}
+POST_REMEDIATION_SHA=${'a'.repeat(40)}
+ham_bounded_git_sync() { return 0; }
+ham_is_full_sha() { return 0; }
+git() {
+  case "$1" in
+    rev-parse) echo ${'b'.repeat(40)} ;;
+    merge-base) echo ${'c'.repeat(40)} ;;
+    diff) echo shared.txt ;;
+    *) return 90 ;;
+  esac
+}
+ham_base_touches_pr_files validated-head ${mergeable} ${state}
+exit $?
+`], { encoding: 'utf8', timeout: 5000, env: { ...process.env, CHECKS: checks } });
+    assert.equal(result.status, expected, result.stdout + result.stderr);
+  });
+}
+
+const mergeSource = readFileSync(new URL('../bin/hammer-merge.sh', import.meta.url), 'utf8');
+const clickBoundary = mergeSource.slice(mergeSource.indexOf('  # Repeat the live GitHub conflict/strict-BEHIND policy'),
+  mergeSource.indexOf("  # CI and merge-lease waits do not consume"));
+const captureBase = source.match(/^ham_capture_current_base_sha\(\) \{\n[\s\S]*?^\}/m)?.[0];
+for (const [state, strict] of [['CLEAN', 1], ['CLEAN', 0], ['BEHIND', 0]]) {
+  for (const previous of ['', 'c'.repeat(40)]) {
+    for (const fetchOk of [true, false]) test(`merge click captures base: ${state}, strict=${strict}, cached=${!!previous}, fetch=${fetchOk}`, t => {
+      const dir = mkdtempSync(join(tmpdir(), 'merge-base-capture-'));
+      t.after(() => rmSync(dir, { force: true, recursive: true }));
+      assert.ok(clickBoundary && captureBase);
+      const result = spawnSync('/bin/bash', ['-uc', `
+${needsRebase}
+${captureBase.replaceAll('<<RUN_DIR>>', dir)}
+BASE_BRANCH=main
+HAM_REQUIRES_UP_TO_DATE=${strict}
+HAM_CURRENT_BASE_SHA=${previous}
+HAM_GATE_JSON=unused
+HQ_LAUNCH_REQUEST_ID= AGENT_OS_WORKER_LRQ_ID= LAUNCH_REQUEST_ID=
+jq() { if [[ "$2" == *mergeStateStatus* ]]; then echo ${state}; else echo MERGEABLE; fi; }
+ham_fetch_base_with_retries() { return ${fetchOk ? 0 : 1}; }
+ham_is_full_sha() { [[ "$1" =~ ^[a-f0-9]{40}$ ]]; }
+git() { [ "$1" = rev-parse ] && echo ${'b'.repeat(40)}; }
+ham_append_terminal_audit() { echo "audit:$*"; }
+ham_mark_merge_lease_retryable_abort() { echo "abort:$*"; }
+ham_release_merge_lease() { echo released; }
+click() {
+${clickBoundary}
+echo "attempt:$HAM_MERGE_ATTEMPT_BASE_SHA"
+}
+click
+`], { encoding: 'utf8', timeout: 5000 });
+      assert.equal(result.status, fetchOk ? 0 : 1, result.stdout + result.stderr);
+      if (fetchOk) assert.equal(result.stdout.trim(), `attempt:${'b'.repeat(40)}`);
+      else {
+        assert.match(result.stdout, /audit:failed-without-merge github-gate-read-failed/);
+        assert.match(result.stdout, /abort:github-gate-read-failed\nreleased/);
+        assert.doesNotMatch(result.stdout, /attempt:/);
+      }
+    });
+  }
+}

@@ -42,8 +42,9 @@ at mode `0640`.
 | `reconciliation.lastVerifiedAt` | ISO timestamp | Latest append time. Present on records auto-created by append. |
 | `closingKeywordRewrites` | optional array | Title and body rewrites computed by the daemon; absent on older records. Each item is `{original, referencedNumber, referencedRepo, replacement}`. |
 | `attempts[].closingKeywordRewrites` | optional array | Per-attempt message rewrites, including hammer shell attempts. Same item shape as the top-level field. |
-| `attempts[].resumeOwed` | optional boolean | Hammer terminal attempts set this to `true` only for `reason: required-checks-pending`; other reasons write `false`. Audit-only evidence that the bounded worker deferred for pending CI. Older and non-hammer attempts may omit it. |
-| `attempts[].resumeHead` | optional string or null | The exact validated head SHA when `resumeOwed` is `true`; otherwise `null`. Diagnostic evidence for operators, not a dispatch trigger or merge authorization. |
+| `attempts[].resumeOwed` | optional boolean | Hammer terminal attempts set this to `true` only for `reason: required-checks-pending`; other reasons write `false`. Durable merge-resume debt consumed by the watcher closure scheduler and `src/ama/hammer-resume.mjs` after the bounded worker defers for pending CI. Older and non-hammer attempts may omit it. |
+| `attempts[].resumeHead` | optional string or null | Producer attempts record the exact validated SHA when `resumeOwed` is `true`, otherwise `null`; settlement attempts retain the original SHA. The consumer resumes only while the live head equals this SHA. Routing intent only; never merge authorization. |
+| `attempts[].resumeAttempt` | optional positive integer | Settlement attempts link the immutable pending-CI producer by its `attemptNumber`; absent on producer and older attempts. |
 | `attempts[].waitNote` | optional string | Terminal hammer merge phase formats the published-head and required-check elapsed seconds into a diagnostic note on every terminal append. |
 | `attempts[].headWaitedSeconds` | optional non-negative integer | Elapsed published-head visibility wait in seconds, measured by verify-head and persisted by the terminal merge phase. `0` means the wait never started. |
 | `attempts[].requiredChecksWaitedSeconds` | optional non-negative integer | Elapsed exact-head required-check wait in seconds, measured and persisted by the merge phase. `0` means the wait never started. |
@@ -160,11 +161,28 @@ stop: retargeting can restore eligibility without changing the PR head.
 The hammer reads the CLI's last non-empty output line as the reason, preserving
 the merged-parent classification when preceding persistence diagnostics exist.
 
-`resumeOwed` / `resumeHead` have no runtime consumer. The watcher independently
-proves the closer-only ancestry from the reviewed head on each tick and reads
-live exact-head CI. Pending-only checks hold without charging automated recovery;
-green checks permit the normal leased resume, and failed checks reach the capped
-hammer repair lane. Missing audit markers do not suppress those evaluations.
+`src/ama/hammer-resume.mjs` reads outstanding `resumeOwed` / `resumeHead`
+receipts for each PR. The posted-review scheduler bypasses no-progress backoff
+and prioritizes these subjects every poll, so no unrelated wake is required.
+Automatic stale-review refresh also preserves the recorded hammer head. Closure
+reconciles the receipt against current PR state/head and shared exact-head CI:
+pending waits without another launch; green selects the normal leased hammer
+verify-and-merge path; red returns to normal remediation; head movement returns
+to normal head-change handling. The receipt carries no verdict or CI authority.
+Existing dispatch/target/lifetime limits, safety holds, live ownership and merge
+predicates still apply. Missing audit markers do not suppress normal evaluations.
+
+Settlement appends `attemptPhase: hammer-resume`, `resumeOwed: false`, the
+original `resumeHead`, and `resumeAttempt` (the producer's `attemptNumber`).
+`reason` is `resume-dispatched`, `resume-head-moved`, `resume-checks-red`, or
+`resume-pr-terminal`, or `resume-budget-exhausted`. Exhausted existing hammer budgets
+settle the debt and leave ordinary capped recovery ownership. Confirmed dispatch records `outcome: in_progress` and
+`launchRequestId`; other settlements record `outcome: superseded`. The immutable
+producer remains in history. `deliveryKey: hammer-resume:<resumeAttempt>` makes
+settlement idempotent under the audit writer's lock. A later terminal helper
+result supersedes older debt; a new pending stop creates a new bounded attempt.
+A refused/uncertain dispatch keeps the debt for ordinary recovery. Sticky success
+cannot be demoted.
 
 For primary-change evidence, a post-lease `primary-change-read-failed` or
 `primary-change-unknown` gate

@@ -613,7 +613,8 @@ test('appendAmaAuditAttempt reaps stale malformed lockfiles by mtime', () => {
     });
     const lockPath = `${filePath}.lock`;
     writeFileSync(lockPath, '', { mode: 0o640 });
-    const stale = new Date(Date.now() - 60_000);
+    // Remain stale even when host load inflates the production lock timeout.
+    const stale = new Date(0);
     utimesSync(lockPath, stale, stale);
     const { doc } = appendAmaAuditAttempt({
       hqRoot,

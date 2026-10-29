@@ -8,6 +8,8 @@ import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { acquireDaemonMergeLease, acquireMergeLease, releaseMergeLease, withDaemonMergeReservation, readMergeLeaseWaiters, readMergeLeaseAttempts } from '../src/ama/merge-lease.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
+import { migrationRenumberFixture } from './helpers/migration-renumber.mjs';
+import { proveMigrationRenumbers } from '../src/ama/migration-renumber.mjs';
 
 import {
   attemptDaemonCleanMerge,
@@ -1093,6 +1095,27 @@ test('OPSEV1-03 daemon records only verified exact-head actions and executed ref
   const unknown = makeHarness();
   await attemptDaemonCleanMerge(baseArgs(unknown, { writeMergeActionImpl: (receipt) => receipts.push(receipt) }));
   assert.equal(receipts.length, 2);
+});
+
+test('verified migration renumber reaches the daemon merge audit and action receipt', async () => {
+  const f = migrationRenumberFixture();
+  f.evidence.headSha = HEAD;
+  f.args.headSha = HEAD;
+  f.evidence.ciCost.headSha = HEAD;
+  f.evidence.migrationRenumberProofs = await proveMigrationRenumbers(f.args, f.evidence);
+  const gate = () => greenGate({ primaryChange: f.evidence });
+  const h = makeHarness({ liveGate: gate() });
+  const receipts = [];
+  h.deps.fetchLiveGateImpl = async () => ({ ...gate(), merged: h.calls.merge > 0 });
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    liveGate: gate(), writeMergeActionImpl: receipt => receipts.push(receipt),
+  }));
+  assert.equal(result.merged, true);
+  assert.equal(h.calls.merge, 1);
+  assert.deepEqual(result.derivedChanges, f.evidence.migrationRenumberProofs);
+  assert.deepEqual(h.calls.auditAppends.at(-1).attempt.derivedChanges, result.derivedChanges);
+  assert.equal(receipts.length, 1);
+  assert.deepEqual(receipts[0].derivedChanges, result.derivedChanges);
 });
 
 for (const failure of ['TLS handshake timeout', 'unrecognized merge error']) {

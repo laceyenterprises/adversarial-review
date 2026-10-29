@@ -15,6 +15,7 @@ import { parseBlockingFindingsSection, parseNonBlockingFindingsSection } from '.
 import { normalizeEffectiveReviewVerdict } from '../kernel/verdict.mjs';
 import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers, parseCommitTrailerValues } from './ham-provenance.mjs';
 import { proveDerivedArtifacts, proveGeneratedBlocks } from './derived-artifacts.mjs';
+import { proveMigrationRenumbers, verifiedMigrationRenumbers } from './migration-renumber.mjs';
 // HAMINTENT-01: trusted GitHub history, never the hammer's claimed intent.
 const SHA = /^[0-9a-f]{40}$/i;
 const isHammer = (commit) => /^hammer(?:-corp|-claude)?$/i.test(
@@ -643,6 +644,7 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
       .some(files => files?.length >= 300)) throw new Error('missing or capped file list');
     const authorizationCache = new Map();
     const guardReversals = verifiedGuardReversals(evidence, headSha);
+    const derivedChanges = verifiedMigrationRenumbers(evidence, headSha);
     const primary = preservationChanges(evidence.primaryFiles);
     // Only verified output in this exact merge-base/head pair is derived.
     // Keep marker lines, renames, opaque files and every outside unit protected.
@@ -679,6 +681,7 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
     };
     for (const [path, change] of primary) {
       if (guardReversals.some(proof => proof.path === path)) continue;
+      if (derivedChanges.some(proof => proof.path === change.filename || proof.registryPath === change.filename)) continue;
       const actual = final.get(path);
       if (change.derivedOnly && (!actual || actual.filename === change.filename) && actual?.status !== 'removed') continue;
       if (isTestPath(path) && isTestPath(change.filename)
@@ -747,6 +750,7 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
       }
     }
     return { ok: true, applicable: true, testRegionsChanged: testChanges, ...whitespaceEvidence,
+      ...(derivedChanges.length ? { derivedChanges } : {}),
       ...(guardReversals.length ? { guardReversals: guardReversals.map(({ authorization, path, failedRun, passingRun }) => ({
         authorization, paths: [path], failedCheckRun: failedRun.id, passingCheckRun: passingRun.id,
         failedHead: failedRun.head_sha, passingHead: passingRun.head_sha,
@@ -1329,6 +1333,7 @@ async function describeRevertedRegions(args, evidence, refusal) {
 export async function fetchPrimaryChange(args, {
   fetchCiCostImpl = fetchCiCost, proveDerivedArtifactsImpl = proveDerivedArtifacts,
   proveGeneratedBlocksImpl = proveGeneratedBlocks,
+  proveMigrationRenumbersImpl = proveMigrationRenumbers,
 } = {}) {
   let history;
   if (args.get.persistPrimaryChange && primaryChangeStoreOwned(primaryChangeRoot(args))) {
@@ -1361,6 +1366,8 @@ export async function fetchPrimaryChange(args, {
   const derivedArtifacts = await proveDerivedArtifactsImpl({ ...args, rootDir: primaryChangeRoot(args) }, history);
   const evidence = { ...history, ciCost, ...guardEvidence, ...(derivedArtifacts.length ? { derivedArtifacts } : {}) };
   const result = { ...evidence, ...await fetchGuardReviewSnapshots(args, evidence) };
+  const migrationRenumberProofs = await proveMigrationRenumbersImpl(args, result);
+  if (migrationRenumberProofs.length) result.migrationRenumberProofs = migrationRenumberProofs;
   // Outside the history cache: a missing sandbox/checkout is retryable optional
   // evidence, and an old cached refusal must benefit without manual invalidation.
   for (let attempt = 0; attempt < (result.primaryFiles?.length || 0); attempt++) {

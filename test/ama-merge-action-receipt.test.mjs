@@ -10,6 +10,38 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, wr
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { recordMergeActionBestEffort, writeMergeActionReceipt } from '../src/ama/merge-action-receipt.mjs';
+import { proveMigrationRenumbers } from '../src/ama/migration-renumber.mjs';
+import { migrationRenumberFixture } from './helpers/migration-renumber.mjs';
+
+test('migration renumber classification survives daemon and hammer receipt publication', async t => {
+  const f = migrationRenumberFixture();
+  const derivedChanges = await proveMigrationRenumbers(f.args, f.evidence);
+  const root = mkdtempSync(join(tmpdir(), 'migration-receipt-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, '.hq'));
+  writeFileSync(join(root, '.hq/config.json'), JSON.stringify({ ownerUser: userInfo().username }));
+  const args = { hqRoot: root, repo: f.args.repo, prNumber: 1, headSha: f.args.headSha, merged: true, derivedChanges };
+  const receipt = writeMergeActionReceipt(args);
+  assert.deepEqual(JSON.parse(readFileSync(receipt, 'utf8')).derivedChanges, derivedChanges);
+  assert.throws(() => writeMergeActionReceipt({ ...args, headSha: 'd'.repeat(40) }), /derived/);
+  const { spawnSync } = await import('node:child_process');
+  const executedAt = new Date().toISOString();
+  writeFileSync(join(root, 'gh'), '#!/bin/sh\ncat "$(dirname "$0")/pr.json"\n', { mode: 0o755 });
+  writeFileSync(join(root, 'pr.json'), JSON.stringify({ state: 'MERGED', headRefOid: f.args.headSha, mergedAt: executedAt }));
+  const gatePath = join(root, 'gate.json');
+  const gate = { ok: true, expectedHead: f.args.headSha, liveHead: f.args.headSha, derivedChanges };
+  writeFileSync(gatePath, JSON.stringify(gate));
+  const cliArgs = [new URL('../bin/merge-action-receipt.mjs', import.meta.url).pathname,
+    root, f.args.repo, '1', f.args.headSha, 'merged', '', executedAt, gatePath];
+  const env = { ...process.env, PATH: `${root}:${process.env.PATH}` };
+  const result = spawnSync(process.execPath, cliArgs, { env, encoding: 'utf8', timeout: 5000 });
+  assert.equal(result.status, 0, result.stderr);
+  const records = readdirSync(join(root, 'dispatch/audit/automation-merge-actions')).map(name =>
+    JSON.parse(readFileSync(join(root, 'dispatch/audit/automation-merge-actions', name), 'utf8')));
+  assert.deepEqual(records.find(record => record.producerClass === 'closer-hammer').derivedChanges, derivedChanges);
+  writeFileSync(gatePath, JSON.stringify({ ...gate, liveHead: 'd'.repeat(40) }));
+  assert.notEqual(spawnSync(process.execPath, cliArgs, { env, timeout: 5000 }).status, 0);
+});
 
 for (const operation of ['fchmodSync', 'fchownSync', 'writeFileSync', 'fsyncSync']) {
   test(`receipt closes its descriptor and removes temporary file when ${operation} fails`, (t) => {

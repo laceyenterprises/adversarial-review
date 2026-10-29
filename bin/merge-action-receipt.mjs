@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 // Workers append requests in their own sandbox. Only HQ-owner teardown publishes.
-import { chmodSync, chownSync, lstatSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, chownSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { isExecutedMergeRefusal, writeMergeActionReceipt } from '../src/ama/merge-action-receipt.mjs';
 import { execGhWithRetry } from '../src/gh-cli.mjs';
 
-const [hqRoot, repo, number, headSha, outcome, reason = '', executedAt = new Date().toISOString()] = process.argv.slice(2);
+const [hqRoot, repo, number, headSha, outcome, reason = '', executedAt = new Date().toISOString(), gatePath] = process.argv.slice(2);
 if (!['merged', 'refused'].includes(outcome)) throw new Error('Invalid receipt outcome');
 if (outcome === 'refused' && !isExecutedMergeRefusal(reason)) process.exit(0);
 const record = { repo, prNumber: Number(number), headSha, merged: outcome === 'merged',
@@ -22,6 +22,13 @@ if (record.merged) {
     || Math.abs(Date.parse(live.mergedAt) - Date.parse(record.executedAt)) > 120_000) {
     throw new Error('Merge-action requires a verified recent exact-head merge');
   }
+}
+if (record.merged && gatePath) {
+  const gate = JSON.parse(readFileSync(gatePath, 'utf8'));
+  if (gate.ok !== true || gate.expectedHead !== headSha || gate.liveHead !== headSha) {
+    throw new Error('Merge-action requires exact-head passing gate evidence');
+  }
+  if (gate.derivedChanges?.length) record.derivedChanges = gate.derivedChanges;
 }
 try {
   writeMergeActionReceipt({ hqRoot, ...record });

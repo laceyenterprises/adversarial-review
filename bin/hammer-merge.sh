@@ -50,7 +50,7 @@ ham_append_terminal_audit() {
   fi
   if [ -n "$ham_receipt_outcome" ]; then
     /usr/bin/perl -e 'alarm shift; exec @ARGV' 60 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-action-receipt.mjs \
-      <<HQ_ROOT>> <<REPO>> <<PR_NUMBER>> "$POST_REMEDIATION_SHA" "$ham_receipt_outcome" "$ham_audit_reason" "${HAM_MERGE_EXECUTED_AT:-}" \
+      <<HQ_ROOT>> <<REPO>> <<PR_NUMBER>> "$POST_REMEDIATION_SHA" "$ham_receipt_outcome" "$ham_audit_reason" "${HAM_MERGE_EXECUTED_AT:-}" "$HAM_GATE_JSON" \
       || echo "HAM warning: merge-action receipt unavailable; coverage remains pending" >&2
   fi
   if [ "$ham_audit_outcome" != succeeded ]; then
@@ -362,6 +362,7 @@ console.log(JSON.stringify({
   // REVERSALREBASE-01: the closing status names the one missing piece.
   primaryChangeMissingEvidence: primaryIntent?.missingEvidence || null,
   guardReversals: primaryIntent?.guardReversals || [],
+  derivedChanges: primaryIntent?.derivedChanges || [],
   state,
   open,
   headMatches,

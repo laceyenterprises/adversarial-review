@@ -151,7 +151,8 @@ export function observeDaemonGate(shared, live, passSnapshot = null) {
     { strictNonBlockingRemediation: (live.strictNonBlockingRemediation
       ?? shared.snapshot.observations.policy?.value?.strictNonBlockingRemediation) !== false }) : null;
   const progress = { ...shared.snapshot.observations.progress?.value,
-    ...(primary ? { primaryChange: { ok: primary.ok, reason: primary.reason, headSha: live.candidateHead } } : {}),
+    ...(primary ? { primaryChange: { ok: primary.ok, reason: primary.reason, headSha: live.candidateHead,
+      ...(primary.derivedChanges?.length ? { derivedChanges: primary.derivedChanges } : {}) } } : {}),
     ...(Object.hasOwn(live, 'terminalReviewValidated') ? { terminalReview: { validated: live.terminalReviewValidated === true,
       headSha: live.candidateHead, reviewedHeadSha: shared.snapshot.observations.reviews?.value?.headSha } } : {}) };
   return reviseClosureNextAction(shared, {

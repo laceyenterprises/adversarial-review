@@ -784,6 +784,7 @@ async function attemptDaemonCleanMergeInner({
   let attempts = 0;
   let merged = false;
   let guardReversals = [];
+  let derivedChanges = [];
   let terminal = null; // { reason, permanent, reasons }
 
   while (attempts < retryCap && !merged && !terminal) {
@@ -871,6 +872,7 @@ async function attemptDaemonCleanMergeInner({
     if (noCiEvidence) onGateEvidenceImpl?.({ ...live, requiredChecks: true });
     if (live.isDraft) { terminal = { reason: 'pr-is-draft', permanent: true }; break; }
     guardReversals = elig.guardReversals || [];
+    derivedChanges = elig.derivedChanges || [];
     // A revoked proof or newly appearing CI is a changing gate, not a permanent
     // rejection of this head. The next tick must evaluate the real rollup.
     const noCiRevoked = admittedWithNoCi && !noCiEvidence && !elig.eligible &&
@@ -1099,6 +1101,7 @@ async function attemptDaemonCleanMergeInner({
           path: closureAuthority,
           attemptPhase: 'daemon-merged',
           ...(guardReversals.length ? { guardReversals } : {}),
+          ...(derivedChanges.length ? { derivedChanges } : {}),
           reason: 'merged',
           ...(noCiEvidence ? { ciConfiguration: noCiEvidence } : {}),
           validatedHead,
@@ -1117,6 +1120,7 @@ async function attemptDaemonCleanMergeInner({
           path: closureAuthority,
           attemptPhase: terminal.closureHold ? 'daemon-deferred' : 'daemon-failed',
           ...(guardReversals.length ? { guardReversals } : {}),
+          ...(derivedChanges.length ? { derivedChanges } : {}),
           reason: terminal.reason,
           ...(terminal.historyReadError ? { historyReadError: terminal.historyReadError } : {}),
           permanent: Boolean(terminal.permanent),
@@ -1151,6 +1155,7 @@ async function attemptDaemonCleanMergeInner({
       disposition: DAEMON_MERGE_DISPOSITION.MERGED,
       reason: 'merged',
       merged: true,
+      ...(derivedChanges.length ? { derivedChanges } : {}),
       attempts,
       leaseAcquired: true,
       auditWritten,
@@ -1234,6 +1239,7 @@ export async function attemptDaemonCleanMerge(args = {}) {
         remoteMergedConfirmed = true;
         if (ownMergeExecuted) writer({ hqRoot: args.hqRoot, repo: args.repo, prNumber: args.prNumber,
           headSha: args.validatedHead, merged: true, executedAt,
+          ...(result.derivedChanges?.length ? { derivedChanges: result.derivedChanges } : {}),
           producerClass: args.receiptProducerClass || 'ama-daemon' }, args.logger);
       }
     } catch (error) { args.logger?.warn?.(`[merge-action] post-merge verification unavailable: ${error.message}`); }

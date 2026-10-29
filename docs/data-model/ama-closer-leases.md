@@ -3,7 +3,7 @@
 **Owner:** AMA closer ownership and terminal settlement
 **Store:** `data/ama-closer-leases/`
 **Source of truth:** `src/ama/closer-lease.mjs`
-**Runtime surface:** `src/ama/dispatch-closer.mjs`, `src/ama/closer-terminal-cancel.mjs`
+**Runtime surface:** `src/ama/dispatch-closer.mjs`, `src/ama/closer-terminal-cancel.mjs`, `src/ama/gsr-closer-lease.mjs`, `bin/gsr-closer-lease.mjs`
 
 ## Unreceipted intents (LAC-2081)
 
@@ -111,6 +111,24 @@ session) is non-terminal and not parked, named locally until the pinned SDK
 vocabulary carries it: its lease stays `dispatched` and held against every
 recovery tier at any holder or launch age, keeping its scratch, until the
 ledger releases it to `failed` (`suspended_abandoned` / `suspended_age_expired`).
+GSR-07 boot-time resume then hands the lease back (`src/ama/gsr-closer-lease.mjs`,
+`bin/gsr-closer-lease.mjs readopt|release`): a natively resumed launch re-adopts
+it in place (`updatedAt` refreshed); a launch re-dispatched as a successor
+(source `failed/suspended_redispatched`) rebinds `lrqId`, and the closer
+dispatch record's `launchRequestId`/`dispatchId` (adding `gsrRedispatchedFrom`),
+to the successor, record first; a launch that ended before resume is released
+as terminal `superseded` only when `launchRequestOwned` proves it no longer
+owns the PR, including its retry descendants. Parked, live and unknown launches
+retain the dispatched lease. Successor rebinding searches the current head,
+`rekeyedFromHeadSha` and all `supersededHeads` for the source launch's dispatch
+record, preserving records owned by other launches.
+Each write is a CAS on the observed lease; a concurrent owner wins (`busy`).
+The aggregate result reports `busy` when no lease changed and any mutation
+collided; successful changes retain precedence, with per-lease outcomes included.
+The release CLI prepares the dispatch-read context asynchronously before the
+synchronous ledger probe, using the existing app bootstrap/session contract.
+Bootstrap failure exits nonzero with a fixed diagnostic and leaves leases intact;
+`readopt` needs no ledger session. The exported CLI `main` returns a promise.
 The installed SDK 0.3.0 `readDispatchStatus` reader interprets its bundled
 public `statusVocabulary`. Each explicit boolean wins independently, including
 false; absent or invalid booleans use the vocabulary and malformed values carry

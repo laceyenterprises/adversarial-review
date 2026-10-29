@@ -1476,6 +1476,15 @@ Confirmed terminal ledger evidence overrides a stored parked observation;
 unknown ledger evidence preserves parked ownership.
 GSR-03 `suspended` launches are non-terminal and unparked: their closer lease stays
 `dispatched` and held until resume, operator abandon or the ledger age bound.
+GSR-07 boot-time resume re-adopts it for a resumed launch, rebinds it (and the
+dispatch record) to a re-dispatched successor, or releases it once the ledger
+proves the launch and its retries no longer own the PR (`bin/gsr-closer-lease.mjs`).
+Parked, live and unknown evidence retains the dispatched lease. Successor
+rebinding searches all retained lease heads for the source dispatch record.
+The release CLI prepares its authenticated dispatch-read session before probing;
+bootstrap failure preserves the lease and exits nonzero. Mutation collisions
+report aggregate `busy` when no lease changed. Targeted offline regressions are
+in `test/gsr-closer-lease.test.mjs`; existing smoke promises remain unchanged.
 Producer-terminal decision states retain ownership; wire-only live probes with
 no status string return an `unknown` wait reason without interrupting arbitration.
 The offline `test/hq-dispatch-status-json.test.mjs` uses public SDK serializer
@@ -2544,6 +2553,8 @@ stateDiagram-v2
     s0 --> [*]: closer-lease.09 expired pending lease reclaimed
     s1 --> [*]: closer-lease.10 superseded launch releases matching rekeyed lease; otherwise terminal launch aged out or unknown launch exceeded execution ceiling plus margin; live launch retained
     s3 --> [*]: closer-lease.11 non-merge terminal with ended or absent launch reclaimed; live or unproven launch retained; succeeded sticky
+    s1 --> s1: closer-lease.12 GSR-07 boot resume re-adopts a resumed launch's lease in place, or rebinds it and its dispatch record to the re-dispatched successor launch
+    s1 --> s3: closer-lease.13 GSR-07 boot resume releases (superseded) only once the ledger proves the suspended launch ended before it could resume
     s3 --> [*]
 ```
 

@@ -4204,6 +4204,10 @@ export async function processReviewSubject(entry, ctx) {
                   reviewerSessionUuid,
                   reviewerHeadSha,
                   builderTag: route.tag,
+                  onSizeFailureSettled: () => {
+                    releaseReviewerReservation();
+                    releaseAdmissionCapacity?.({ dispatched: true });
+                  },
                   env: process.env,
                   maxRemediationRounds,
                   reviewerModel: result.effectiveReviewerModel || route.reviewerModel,

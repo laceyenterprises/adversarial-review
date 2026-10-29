@@ -1517,6 +1517,7 @@ function settleReviewerAttempt({
   reviewerHeadSha = null,
   builderTag = null,
   dispatchSizeUpdateImpl,
+  onSizeFailureSettled = () => {},
   alertSizeFailureImpl,
   env = null,
   failureAt = new Date().toISOString(),
@@ -1745,7 +1746,16 @@ function settleReviewerAttempt({
       { label: `reviewer-size-terminal:${repoPath}#${prNumber}`, log },
     );
     log.warn(`[watcher] Terminal oversized review failure on ${repoPath} PR ${prNumber}: ${failureMessage}`);
-    if (marked?.changes === 0) return { posted: false, reason: 'size-failure-claim-mismatch' };
+    // This reviewer has exited. Capacity is independent of the awaited handoff;
+    // the per-head dispatch lease remains held by the caller until it finishes.
+    onSizeFailureSettled();
+    if (marked?.changes === 0) {
+      const current = statements.getReviewRow?.get(repoPath, prNumber);
+      if (current?.reviewer_head_sha === reviewerHeadSha && current.review_status !== 'failed') {
+        log.warn?.(`[watcher] size-failure-claim-mismatch repo=${repoPath} pr=${prNumber} head=${reviewerHeadSha} status=${current.review_status}; oversized result retained as a diagnostic; replacement claim unchanged`);
+      }
+      return { posted: false, reason: 'size-failure-claim-mismatch' };
+    }
     return ownReviewerSizeFailure({ rootDir, repo: repoPath, prNumber, headSha: reviewerHeadSha,
       builderTag, result, failureClass, failureAt, env: env || process.env, logger: log,
       dispatchImpl: dispatchSizeUpdateImpl, alertImpl: alertSizeFailureImpl });

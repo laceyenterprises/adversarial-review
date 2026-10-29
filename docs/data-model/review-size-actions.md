@@ -7,11 +7,26 @@
 
 Each terminal size failure creates `<key>.json`, where `key` is the SHA-256
 of `JSON.stringify([repo, prNumber, headSha])`. An atomic exclusive write
-reserves exactly one PR-update submission before dispatch. `<key>.md` is the
+reserves one PR-update identity before dispatch. `<key>.md` is the
 builder's brief, passed through the existing `hq dispatch --pr` path with
 branch-push completion and push outcome. The deterministic dispatch key is
 `shrink-diff-<key>`; transport failure or a lost acknowledgement retains the
-reservation and is reported in the existing oversized-review alert.
+reservation and is reported in the existing oversized-review alert. The transport
+retries transient timeout, I/O, spawn/connection, TLS and busy failures up to three
+times with 100/200 ms backoff and the same key (19 seconds per call, under one
+minute total). A receipt refusal or non-transient transport error is not retried.
+There is no later-pass automatic resubmission; exhausted uncertainty remains
+reserved for operator reconciliation.
+
+The lifetime ceiling is two reservations per `(repo, prNumber)` across all heads.
+Admission counts existing head JSON records, including legacy and unconfirmed
+submissions. Only records with `dispatch.error = shrink-diff-ceiling-exhausted`
+are uncharged: these prove no submission was attempted. Each caller exclusively
+reserves its head before counting, so concurrent arrivals can conservatively
+under-admit but cannot exceed the ceiling. Unreadable/corrupt record evidence
+refuses submission. Reaching the ceiling still persists the head's next action
+and sends the alert, with that exact dispatch error. Do not delete charged records
+for an open PR; head churn does not reset this budget.
 
 | Field | Contract |
 |---|---|
@@ -19,7 +34,7 @@ reservation and is reported in the existing oversized-review alert.
 | `failureClass`, `createdAt` | Terminal size class and settlement timestamp. |
 | `nextAction.action`, `actor`, `head` | `shrink-diff`, builder class from the title prefix, and failed head. |
 | `nextAction.facts` | `headSha`, total UTF-8 `diffBytes`, `promptBytes`, prompt budget `maxBytes`, chunk cap `maxChunks`, optional timeout `chunkPlan`, and `largestFiles`. Missing legacy diagnostic facts are null/empty. |
-| `largestFiles[]` | Up to ten paths sorted by decreasing `diffBytes`: their UTF-8 contribution including diff headers, not blob size. No raw file contents. |
+| `largestFiles[]` | Up to ten paths sorted by decreasing `diffBytes`: their UTF-8 contribution including diff headers, not blob size. No raw file contents. Control characters become `?`; paths are truncated to 128 characters and explicitly labelled untrusted data in the brief. |
 | `dispatch` | Deterministic `dispatchKey`, `reservedAt`, `dispatched`, optional `launchRequestId`, `promptPath` and `error`. An unconfirmed result never proves that a worker was not launched. Alert payloads may also carry `persistenceError` if receipt persistence failed. |
 
 Records are ownership and diagnostic evidence, never a verdict or merge
@@ -27,7 +42,15 @@ authorization. Review status stays terminal for that head. A new head gets
 ordinary review admission and does not inherit this action. Late old-head
 settlement cannot overwrite a replacement session. The existing alert carries
 the action and dispatch result after settlement; the reviewer child emits the
-head-bound size diagnostic rather than sending an incomplete duplicate alert.
+head-bound size diagnostic last, after the error/stack, to preserve it in the
+8 KiB CLI tail. Direct invocations without a watcher spawn token still alert.
+The HQ adapter obtains a bounded stderr tail via the public dispatch-file seam
+and carries parsed facts as `result.sizeFacts`; settlement validates the failed
+head before using that structured field or the legacy stderr diagnostic. Missing
+or unreadable evidence remains explicit null/empty, never grounds dispatch policy.
+A same-head claim mismatch logs the current status without dispatching or changing
+the replacement row. Reviewer admission capacity is released after the terminal
+CAS and before the awaited handoff; its per-head dispatch lease is retained.
 Reservation failure refuses dispatch and preserves the alert with its error;
 receipt persistence failure preserves the reserved record and includes the
 observed dispatch acknowledgement and storage error in the alert.

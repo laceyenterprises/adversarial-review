@@ -1,3 +1,4 @@
+import { reviewerSizeFactsLine, readSizeFacts } from '../src/reviewer-size-owner.mjs';
 import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
 installDispatchFileProducerFixture();
 import test from 'node:test';
@@ -3315,3 +3316,35 @@ for (const provider of ['codex', 'codex-corp']) {
     } finally { rmSync(rootDir, { recursive: true, force: true }); }
   });
 }
+
+
+test('agent-os-hq carries head-bound size facts from dispatch stderr instead of failureDetail', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot(process.env.USER || 'test-user');
+  const headSha = 'a'.repeat(40);
+  const facts = { headSha, promptBytes: 9000000, maxBytes: 8000000,
+    largestFiles: [{ path: 'data/generated.json', diffBytes: 8999000 }] };
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({ rootDir, hqBin: '/bin/hq', env: makeHqEnv(hqRoot),
+      readDispatchFilesImpl: (selector) => {
+        assert.equal(selector.launch_request_id, 'lrq_size_facts');
+        assert.equal(selector.stream, 'stderr');
+        assert.equal(selector.tail, true);
+        return { ok: true, log: { status: 'found', text: reviewerSizeFactsLine(facts) } };
+      },
+      execFileImpl: async (_command, args) => ({ stdout: JSON.stringify(args[1] === 'status'
+        ? { status: 'failed', failureClass: 'reviewer-prompt-too-large', failureDetail: 'oversized; no stderr here' }
+        : { launchRequestId: 'lrq_size_facts' }), stderr: '' }),
+    });
+    const result = await adapter.spawnReviewer({ model: 'gemini', prompt: 'Review the PR.',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 14,
+        linearTicketId: 'LAC-566', reviewerHeadSha: headSha }, timeoutMs: 1000, sessionUuid: 'hq-size-facts' });
+    assert.equal(result.ok, false);
+    assert.equal(result.stderr, 'oversized; no stderr here');
+    assert.deepEqual(result.sizeFacts, facts);
+    assert.deepEqual(readSizeFacts(result, headSha), facts);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});

@@ -1478,7 +1478,13 @@ GSR-03 `suspended` launches are non-terminal and unparked: their closer lease st
 `dispatched` and held until resume, operator abandon or the ledger age bound.
 GSR-07 boot-time resume re-adopts it for a resumed launch, rebinds it (and the
 dispatch record) to a re-dispatched successor, or releases it once the ledger
-proves the launch ended (`bin/gsr-closer-lease.mjs`).
+proves the launch and its retries no longer own the PR (`bin/gsr-closer-lease.mjs`).
+Parked, live and unknown evidence retains the dispatched lease. Successor
+rebinding searches all retained lease heads for the source dispatch record.
+The release CLI prepares its authenticated dispatch-read session before probing;
+bootstrap failure preserves the lease and exits nonzero. Mutation collisions
+report aggregate `busy` when no lease changed. Targeted offline regressions are
+in `test/gsr-closer-lease.test.mjs`; existing smoke promises remain unchanged.
 Producer-terminal decision states retain ownership; wire-only live probes with
 no status string return an `unknown` wait reason without interrupting arbitration.
 The offline `test/hq-dispatch-status-json.test.mjs` uses public SDK serializer

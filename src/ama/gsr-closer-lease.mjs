@@ -10,7 +10,7 @@
 //   record that names the source launch, are re-bound to the successor, so
 //   no second closer is dispatched while the successor carries the work;
 // - ended before it could resume: the lease is released (`superseded`), but
-//   only once the ledger proves the launch is no longer in flight.
+//   only once the ledger proves the launch no longer owns the PR.
 //
 // Leases in any other state are left alone: a terminal or handed-to-review
 // lease already settled its closer. Every mutation is a CAS on the observed
@@ -23,7 +23,8 @@ import {
   updateAmaCloserLease,
 } from './closer-lease.mjs';
 import { updateAmaCloserDispatchRecord } from './dispatch-closer.mjs';
-import { launchRequestInFlight } from './launch-request-status.mjs';
+import { readAmaCloserDispatchRecord } from './dispatch-record-read.mjs';
+import { launchRequestOwned } from './launch-request-status.mjs';
 import { readLaunchRequestStatusFromLedger } from '../session-ledger-read-adapter.mjs';
 
 const LEASE_DIR_SEGMENTS = ['data', 'ama-closer-leases'];
@@ -55,7 +56,8 @@ function mutate(lease, change) {
 
 function summary(launchRequestId, leases, extra = {}) {
   const changed = leases.filter(lease => ['re-adopted', 'released'].includes(lease.outcome));
-  return { launchRequestId, ...extra, outcome: changed.length ? changed[0].outcome : 'none', leases };
+  const outcome = changed[0]?.outcome || (leases.some(lease => lease.outcome === 'busy') ? 'busy' : 'none');
+  return { launchRequestId, ...extra, outcome, leases };
 }
 
 export function readoptSuspendedAmaCloserLeases(rootDir, {
@@ -71,15 +73,21 @@ export function readoptSuspendedAmaCloserLeases(rootDir, {
       if (lrqId !== launchRequestId) {
         // Record first: a retry still finds the lease under the source launch,
         // and an already re-bound record is left as it is. The record keys on
-        // the launch head, which a rekeyed lease keeps.
-        const recordIdentity = { ...identity(lease), headSha: lease.rekeyedFromHeadSha || lease.headSha };
-        updateAmaCloserDispatchRecord(rootDir, recordIdentity, current => (
-          current?.launchRequestId === launchRequestId ? {
-            ...current,
-            launchRequestId: lrqId,
-            dispatchId: current.dispatchId === launchRequestId ? lrqId : current.dispatchId,
-            gsrRedispatchedFrom: launchRequestId,
-          } : null));
+        // the launch head, which may precede several lease rekeys.
+        const heads = [...new Set([lease.headSha, lease.rekeyedFromHeadSha,
+          ...(lease.supersededHeads || [])].filter(Boolean))];
+        for (const headSha of heads) {
+          const recordIdentity = { ...identity(lease), headSha };
+          if (readAmaCloserDispatchRecord(rootDir, recordIdentity)?.launchRequestId !== launchRequestId) continue;
+          updateAmaCloserDispatchRecord(rootDir, recordIdentity, current => (
+            current?.launchRequestId === launchRequestId ? {
+              ...current,
+              launchRequestId: lrqId,
+              dispatchId: current.dispatchId === launchRequestId ? lrqId : current.dispatchId,
+              gsrRedispatchedFrom: launchRequestId,
+            } : null));
+          break;
+        }
       }
       updateAmaCloserLease({ rootDir, ...identity(lease), expectedLease: lease,
         status: AMA_CLOSER_LEASE_STATUS.DISPATCHED, lrqId, now });
@@ -101,8 +109,8 @@ export function releaseSuspendedAmaCloserLeases(rootDir, {
   try {
     probe = readLaunchRequestStatusImpl({ ...readOptions, launchRequestId, includeRetryChain: true });
   } catch { /* An unreadable launch keeps its lease. */ }
-  if (launchRequestInFlight(probe) !== false) {
-    // A live or unknown launch still owns its closer; the reapers decide later.
+  if (launchRequestOwned(probe) !== false) {
+    // Live, parked or unknown launches retain ownership; the reapers decide later.
     return summary(launchRequestId,
       leases.map(lease => ({ ...identity(lease), outcome: 'retained', reason: 'launch-not-proven-ended' })));
   }

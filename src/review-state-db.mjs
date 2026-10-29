@@ -34,6 +34,7 @@ import {
   prepareReleaseReviewerClaim,
   prepareReleaseLegacyStaleReviewerClaim,
   prepareMarkPosted,
+  prepareMarkSizeFailed,
   prepareReleaseUnsettledPostedReview,
   prepareMarkInfraAutoRecoveryAttemptStarted,
   prepareMarkReviewPopulationRetryAttemptStarted,
@@ -287,6 +288,8 @@ export const stmtMarkReviewerCommandFailedRecoveredPosted = prepareMarkReviewerC
 export const stmtMarkFailed = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, quota_reset_at_utc = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
 );
+// A deterministic size failure belongs only to the dispatched head/session.
+export const stmtMarkSizeFailed = prepareMarkSizeFailed(db);
 export const stmtFinalizePendingTerminalFailure = prepareFinalizePendingTerminalFailure(db);
 export const stmtReleaseReviewLease = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, quota_reset_at_utc = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"

@@ -4114,6 +4114,10 @@ export async function processReviewSubject(entry, ctx) {
               };
               if (admissionSettlementSplitEnabled && !pipelineEnabled) spawnReviewerArgs.onPostOperationSettled = (postedResult) => {
                 if (reviewRowSettled) return;
+                // Size failures include an awaited PR-update handoff. Leave
+                // those to the caller settlement path below, which retains
+                // the head reservation until the receipt and alert are saved.
+                if (!postedResult.ok && ['reviewer-prompt-too-large', 'reviewer-chunk-budget-exceeded'].includes(postedResult.failureClass)) return;
                 const rowSettlementStartedAt = Date.now();
                 const settlement = settleReviewerAttempt({
                   rootDir: ROOT,
@@ -4192,13 +4196,14 @@ export async function processReviewSubject(entry, ctx) {
               }
 
               if (!reviewRowSettled) {
-                const settlement = settleReviewerAttempt({
+                const settlement = await settleReviewerAttempt({
                   rootDir: ROOT,
                   repoPath,
                   prNumber,
                   result,
                   reviewerSessionUuid,
                   reviewerHeadSha,
+                  builderTag: route.tag,
                   env: process.env,
                   maxRemediationRounds,
                   reviewerModel: result.effectiveReviewerModel || route.reviewerModel,

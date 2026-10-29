@@ -1202,7 +1202,7 @@ mechanism (no shared configuration-schema keys):
 - `ADVERSARIAL_REVIEW_CHUNK_HARD_MAX_BYTES`: diff plus extra-context ceiling,
   default 8 MiB, measured on the raw diff plus extra context before elision.
   This bounds preprocessing work even for a single generated line; content
-  above it remains an operator-owned size refusal.
+  above it remains a terminal size refusal with a `shrink-diff` PR-update owner.
   `ADVERSARIAL_REVIEW_AGY_CHUNK_MAX_CHUNKS` bounds all chunked reviews (default 20).
 
 Set context allocations to the deployed model's supported input budget after
@@ -1210,6 +1210,18 @@ reserving space for tools and output. Every `hosted-reviewer-selection` event
 logs the checked model, full prompt bytes, and resolved budget, including
 prompts that fit. A new PR head or operator retrigger is
 required after a terminal size failure; lease recovery does not retry it.
+SIZEOWNER-02 records a `shrink-diff` next action once per failed head in
+`data/review-size-actions/` and dispatches a PR update through `hq dispatch --pr`
+using the builder class from the title prefix. Its brief preserves behaviour,
+requests compression/removal of generated diff content or a PR split, and
+requires a normal push without force-pushing. The existing oversized alert now
+includes the size facts, next action and dispatch receipt (or unconfirmed error).
+File sizes are UTF-8 diff contributions, including headers, for the ten largest
+changed files. A new head follows ordinary review admission. The terminal
+failure CAS fences the dispatched head and session; stale settlement cannot
+fail a replacement claim. Reservations survive ambiguous dispatch results and
+prevent a second submission for that head. See
+[the size-action record contract](docs/data-model/review-size-actions.md).
 Exhausted non-infrastructure failures create a durable, head-keyed decision in
 `data/review-failure-decisions/`. This is an informational failure record; it
 does not consume choices or change the gate. Use the existing retrigger,

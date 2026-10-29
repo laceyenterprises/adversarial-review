@@ -2,6 +2,16 @@
   "version": 1,
   "entries": [
     {
+      "id": "review-size-actions",
+      "title": "Terminal Review Size Actions",
+      "path": "docs/data-model/review-size-actions.md",
+      "store": "data/review-size-actions/",
+      "schemaSurface": "src/reviewer-size-owner.mjs",
+      "relatedSchemaSurfaces": ["src/reviewer-spawn-settle.mjs", "src/reviewer-alerts.mjs", "src/reviewer.mjs", "src/review-state-statements.mjs"],
+      "owner": "watcher reviewer settlement",
+      "compatibility": "Head-keyed shrink-diff action and exclusive dispatch reservation; ambiguous submission retains ownership. Existing failed review status, budgets and merge authority are unchanged."
+    },
+    {
       "id": "branch-rewrite-receipts",
       "title": "Successful Branch Rewrite Receipts",
       "path": "docs/data-model/branch-rewrite-receipts.md",

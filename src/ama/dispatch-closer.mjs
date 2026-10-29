@@ -1,3 +1,4 @@
+import { infrastructureOnlyFailures, recordedCiFailures } from '../ci-infrastructure.mjs';
 import { readWorkerDispatchFiles, readHostIdentitySync } from '../dispatch-files-client.mjs';
 import { loadAppSdkSync } from '../app-sdk-loader.mjs';
 import { prepareQueueCloserDispatch, renderQueueCloserPrompt, queueAdmissionCallback } from '../finalization/queue-closer.mjs';
@@ -198,6 +199,7 @@ import { resolveCloserPassAttempt } from './closer-pass-attempt.mjs';
 import { maybeRearmInfraDeadHammer } from './dead-hammer-rearm.mjs';
 import {
   evaluateHammerStopHold,
+  isInfrastructureStop,
   HAMMER_TRANSIENT_STOP_HOLD_REASON,
   HAMMER_STOP_HOLD_REASON,
   readHammerStopForHead,
@@ -1443,6 +1445,54 @@ function retireForeignCloserLaunch({ rootDir, repo, prNumber, identity, leaseIde
   } : null);
   finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity, terminalOutcome: 'superseded', launchRequestId, now, logger, repo, prNumber });
   return true;
+}
+
+// CIBLOCKRESUME-01: a legacy decision for an infrastructure-only stop is not
+// live PR ownership after recovery. Retire local custody, never answer/cancel
+// the HQ decision or grant merge authority. Unknown or running retries retain it.
+export async function releaseRecoveredCiInfrastructureOwner({ rootDir, hqRoot, repo, prNumber,
+  prMetadata, reviewedSha, requiredCheckContexts = [], excludeContexts = [], now = new Date().toISOString(),
+  readLaunchImpl = readLaunchRequestStatusFromLedgerAsync,
+  evaluateStopImpl = evaluateHammerStopHold, logger = console, env = process.env, signal } = {}) {
+  const headSha = prMetadata?.headSha;
+  if (!rootDir || !hqRoot || !headSha) return false;
+  const stop = readHammerStopForHead({ hqRoot, repo, prNumber, headSha, reviewedSha, logger });
+  if (!isInfrastructureStop(stop) || !infrastructureOnlyFailures(recordedCiFailures(stop))) return false;
+  const recovered = await evaluateStopImpl({ rootDir, hqRoot, repo, prNumber, headSha, reviewedSha,
+    prMetadata, requiredCheckContexts, excludeContexts, now, logger });
+  if (recovered.action !== 'release' || !recovered.changed?.includes('ci-infrastructure-recovered')) return false;
+  const stops = recovered.infrastructureStop?.refundStops || [];
+  let released = false;
+  for (const record of readAmaCloserDispatchRecordsForPR(rootDir, { repo, prNumber })) {
+    const launchRequestId = record.launchRequestId;
+    if (!launchRequestId || isPreReceiptIntent(record)
+      || !stops.some(stop => stop.ciInfrastructureOnly && stop.headSha === headSha
+        && stop.launchRequestId === launchRequestId)) continue;
+    const probe = await Promise.resolve().then(() => readLaunchImpl({ rootDir, hqRoot, launchRequestId,
+      includeRetryChain: true, env, signal })).catch(() => ({ ok: false }));
+    if (!probe?.ok || probe.retryChainUnreadable || probe.liveRetryLaunchRequestId
+      || probe.row?.launch_request_id !== launchRequestId
+      || probe.row?.status !== 'blocked_needs_decision'
+      || (probe.retryChain || []).some(row => !isTerminalLaunchRequestStatus(row))) continue;
+    const unlock = tryAcquireCloserIntentLock(rootDir, record);
+    if (!unlock) continue;
+    try {
+      const current = readAmaCloserDispatchRecord(rootDir, record);
+      if (current?.launchRequestId !== launchRequestId || isPreReceiptIntent(current)) continue;
+      const lease = readAmaCloserDispatchLease(rootDir, record);
+      if (lease && (lease.lrqId !== launchRequestId || lease.headSha !== headSha)) continue;
+      // A CAS deletion and the ordinary intent lock protect a replacement
+      // holder. No terminal remote status is invented for the parked launch.
+      if (lease && !deleteAmaCloserLeaseIfCurrent(rootDir, lease)) continue;
+      updateAmaCloserDispatchRecord(rootDir, record, live => live?.launchRequestId === launchRequestId
+        ? { ...live, state: 'no-dispatch', reason: 'ci-infrastructure-recovered',
+            recoveredLaunchRequestId: launchRequestId, launchRequestId: null, dispatchId: null,
+            lastObservedStatus: null, outcome: null, reconciledAt: now } : null,
+      { intentLock: unlock });
+      released = true;
+    } finally { unlock(); }
+  }
+  return released;
 }
 
 export function reconcileAmaCloserLease(args) { return runCloserStepsSync(reconcileAmaCloserLeaseSteps(args)); }
@@ -4562,6 +4612,13 @@ async function maybeDispatchAmaCloserAttempt({
   let earlyLaunchRequestProbe = null;
   const reconciliationRoot = dispatchContext?.rootDir;
   const reconciliationRepo = dispatchContext?.repo;
+  if (cfg.autonomousMergeExecutionEnabled !== false) {
+    await releaseRecoveredCiInfrastructureOwner({ rootDir: reconciliationRoot,
+      hqRoot: dispatchContext?.hqRoot, repo: reconciliationRepo, prNumber, prMetadata,
+      reviewedSha: reviewState?.headSha, excludeContexts: [dispatchContext?.requiredGateContext].filter(Boolean),
+      requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
+      readLaunchImpl: readLaunchRequestStatusImpl, env, signal, logger });
+  }
   if (reconciliationRoot && reconciliationRepo) {
     let held = null;
     try { held = findLiveAmaCloserLease(reconciliationRoot, { repo: reconciliationRepo, prNumber }); }

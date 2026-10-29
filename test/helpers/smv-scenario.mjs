@@ -1316,7 +1316,7 @@ if (scenario === 'clean') {
       if (args.includes('POST')) { infraPosts++; return { stdout: '' }; }
       if (args[0] === 'pr') return { stdout: JSON.stringify({ state: 'OPEN', headRefOid: headSha }) };
       if (args[1].includes('/jobs?')) return { stdout: JSON.stringify({ jobs: [{ id: 1,
-        head_sha: headSha, conclusion: 'failure', steps: [] }] }) };
+        head_sha: headSha, conclusion: 'failure', steps: [], annotations: [{ message: 'The job was not started because an Actions budget is preventing further use.' }] }] }) };
       return { stdout: JSON.stringify({ head_sha: headSha, status: 'completed', conclusion: 'failure', run_attempt: infraAttempt }) };
     } };
   await recoverInfrastructureChecks(rerunArgs); await recoverInfrastructureChecks(rerunArgs);
@@ -1324,6 +1324,32 @@ if (scenario === 'clean') {
   infraAttempt = 2;
   await recoverInfrastructureChecks(rerunArgs); await recoverInfrastructureChecks(rerunArgs);
   assert.equal(infraPosts, 1); assert.equal(infraPages, 1);
+
+  const { recordHammerCiStop } = await import('../../src/ama/hammer-ci-stop.mjs');
+  const { releaseRecoveredCiInfrastructureOwner } = await import('../../src/ama/dispatch-closer.mjs');
+  const { closureOwnerShadowEvidence } = await import('../../src/pr-next-action-consumer.mjs');
+  const capacityIdentity = { repo, prNumber: 52, headSha };
+  const capacityLaunch = 'lrq_synthetic-capacity';
+  const capacityStop = await recordHammerCiStop({ repo, prNumber: 52,
+    pr: { state: 'OPEN', headRefOid: headSha, statusCheckRollup: [infraFailure] },
+    env: { HAM_HQ_ROOT: ciRoot, HQ_LAUNCH_REQUEST_ID: capacityLaunch } });
+  assert.equal(capacityStop.reason, 'ci-infrastructure');
+  acquireAmaCloserLease({ rootDir: ciRoot, ...capacityIdentity });
+  updateAmaCloserLease({ rootDir: ciRoot, ...capacityIdentity, status: 'dispatched', lrqId: capacityLaunch });
+  updateAmaCloserDispatchRecord(ciRoot, capacityIdentity, () => ({ ...capacityIdentity,
+    state: 'dispatched', launchRequestId: capacityLaunch }));
+  assert.equal(await releaseRecoveredCiInfrastructureOwner({ rootDir: ciRoot, hqRoot: ciRoot, repo, prNumber: 52,
+    prMetadata: { isOpen: true, headSha, statusCheckRollup: greenGate.rollup }, logger: { log() {} },
+    readLaunchImpl: async () => ({ ok: true,
+      row: { status: 'blocked_needs_decision', launch_request_id: capacityLaunch }, retryChain: [] }) }), true);
+  assert.equal(readAmaCloserLease(ciRoot, capacityIdentity), null);
+  const recoveredOwner = closureOwnerShadowEvidence({ currentHead: headSha, lease: null,
+    launchRecord: readAmaCloserDispatchRecord(ciRoot, capacityIdentity), roundsLeft: false,
+    reviewState: { verdict: 'approved', headSha, blockingFindingState: 'known', blockingFindingCount: 0,
+      nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 } },
+    { rootDir: ciRoot, subjectKey: `${repo}#52`, autonomousMergeExecutionEnabled: true,
+      candidate: { headSha, prState: 'OPEN', isDraft: false, mergeable: 'MERGEABLE', labels: [] }, checksRollup: greenGate.rollup });
+  assert.equal(nextAction(deriveNextActionSnapshot(recoveredOwner)).row, 'R15-daemon');
 
   const ciJob = buildFollowUpJob({ repo, prNumber: 51, revisionRef: headSha, reviewBody: '## Verdict\nRequest changes' });
   ciJob.status = 'in_progress';
@@ -1505,7 +1531,7 @@ if (scenario === 'clean') {
   assert.equal(store.merged, false, 'required signed commits are enforced by fake GitHub');
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], base);
   await tick({ gateOverrides: { candidateHead: 'a'.repeat(40) } }); assert.equal(store.merged, false);
-  evidence = { ciInfrastructureRerunOnce: true, ciInfrastructureRepeatedBlockPaged: true, maxRoundsRefundRefused: true, ciInfrastructureWaitUncharged: true, ciInfrastructureStopRecovered: true, realCiFailureRetained: true, packagingPreservesRefusal: true, ownerlessRefusalFenced: true, refusalPages,
+  evidence = { ciCapacityDecisionRetired: true, ciCapacityCloserRearmed: true, ciInfrastructureRerunOnce: true, ciInfrastructureRepeatedBlockPaged: true, maxRoundsRefundRefused: true, ciInfrastructureWaitUncharged: true, ciInfrastructureStopRecovered: true, realCiFailureRetained: true, packagingPreservesRefusal: true, ownerlessRefusalFenced: true, refusalPages,
     fleetStopRefused: true, fleetStopReasons: ['fleet-stop-active', 'fleet-stop-merge-kill'], fileResumeObserved: true, staleLeaseRefused: true, pages, signedIdentityRequired: true, signedCommitPolicyRefused: true,
     exhaustedStop: result.reason, operatorLabelStop: held.reason, holdPages, holdComments, staleHeadRefused: true };
 } else throw new Error('unknown scenario');

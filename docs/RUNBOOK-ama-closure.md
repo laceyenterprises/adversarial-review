@@ -222,6 +222,26 @@ page, dispatch, restart or new smoke action is authorized by this change.
 
 ## Actions billing/quota blocks (CIBLOCKINFRA-01)
 
+CIBLOCKRESUME-01 makes `hammer-context` and the verify-head closing phase record
+`failed-without-merge` / `ci-infrastructure` with exact-head failed-check evidence
+and end the round before acquiring a merge lease. CI capacity is never an HQ
+decision. Successful replacements for all recorded failures plus the ordinary
+required-context classifier release the stop. In that same watcher pass, local
+custody for a matching legacy `blocked_needs_decision` launch is retired under
+the PR intent lock and lease CAS, then normal closure selection runs again.
+Unknown descendants, active retries, unrelated launches, moved heads, missing
+checks and real failures retain their existing safety behavior. This changes
+ownership only; every merge predicate and lease remains mandatory.
+
+The failed-job rerun requires fresh exact-head zero-step capacity annotation
+proof for every unsuccessful job in each affected workflow, including optional
+siblings, since `rerun-failed-jobs` affects the whole run. Annotation-only proof
+can come from the job's check-run annotations endpoint. Unannotated zero-step
+failures still wait as infrastructure but do not authorize a rerun. Incomplete
+job pages refuse recovery. The durable one-rerun workflow/head bound remains;
+a consumed retry is never replenished by capacity returning.
+
+
 A failed Actions job with proven zero executed steps is infrastructure;
 billing/quota annotations require that same zero-step proof. The shared classifier reuses job
 steps or performs at most one job-page read per inspection with a load-aware

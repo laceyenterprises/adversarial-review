@@ -177,7 +177,9 @@ export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, cand
     // Until the ledger resolves it, descendant liveness is explicitly unknown.
     launches: launchOwner && rootDir ? { state: 'complete', value: { closer: {
       launchRequestId: launchOwner.lrqId, headSha: head, retryChainUnreadable: true, retryChainReadState: 'unresolved',
-    } }, provenance: { sourceRef: lease === launchOwner ? 'closer-lease' : 'closer-dispatch-receipt' } } : undefined,
+    } }, provenance: { sourceRef: lease === launchOwner ? 'closer-lease' : 'closer-dispatch-receipt' } }
+      : launchRecord?.reason === 'ci-infrastructure-recovered' && launchRecord.recoveredLaunchRequestId
+        ? { closer: null } : undefined,
     checks: input.checks === undefined && checksRollup === undefined ? undefined
       : { conclusion: input.checks ?? null, ...(Array.isArray(checksRollup) ? { rollup: checksRollup } : {}) },
     policy: { strictMode: input.strictMode !== false, strictNonBlockingRemediation: input.strictNonBlockingRemediation !== false,

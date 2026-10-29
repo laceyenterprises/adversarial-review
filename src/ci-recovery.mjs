@@ -137,9 +137,10 @@ export async function recoverInfrastructureChecks(options) {
   for (const runId of new Set(targets.map(match => match[2]))) {
     const { stdout } = await execGhWithRetry({ execFileImpl, env, signal,
       args: ['api', `repos/${repo}/actions/runs/${runId}/jobs?filter=latest&per_page=100`] });
-    const jobs = JSON.parse(stdout).jobs;
+    const payload = JSON.parse(stdout);
+    const jobs = payload.jobs;
     if (!Array.isArray(jobs)) return false;
-    const total = JSON.parse(stdout).total_count;
+    const total = payload.total_count;
     if (Number.isInteger(total) && total > jobs.length) return false;
     const required = targets.filter(match => match[2] === runId);
     if (!required.every(match => jobs.some(job => String(job.id) === match[3]
@@ -151,7 +152,7 @@ export async function recoverInfrastructureChecks(options) {
       if (job.head_sha !== headSha || !infrastructureOnlyFailures([job])) return false;
       if (checkInfrastructureReason(job) !== 'actions-billing-quota') {
         const match = /^https:\/\/api\.github\.com\/(repos\/[^/]+\/[^/]+\/check-runs\/\d+)$/.exec(job.check_run_url || '');
-        if (!match || !match[1].startsWith(`repos/${repo}/check-runs/`)) return false;
+        if (!match || !match[1].toLowerCase().startsWith(`repos/${repo.toLowerCase()}/check-runs/`)) return false;
         const { stdout: annotations } = await execGhWithRetry({ execFileImpl, env, signal,
           args: ['api', `${match[1]}/annotations?per_page=100`] });
         if (checkInfrastructureReason({ ...job, annotations: JSON.parse(annotations) }) !== 'actions-billing-quota') return false;

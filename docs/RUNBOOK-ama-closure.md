@@ -236,7 +236,8 @@ ownership only; every merge predicate and lease remains mandatory.
 The failed-job rerun requires fresh exact-head zero-step capacity annotation
 proof for every unsuccessful job in each affected workflow, including optional
 siblings, since `rerun-failed-jobs` affects the whole run. Annotation-only proof
-can come from the job's check-run annotations endpoint. Unannotated zero-step
+can come from the job's check-run annotations endpoint; repository identity is
+matched case-insensitively, while endpoints for other repositories are refused. Unannotated zero-step
 failures still wait as infrastructure but do not authorize a rerun. Incomplete
 job pages refuse recovery. The durable one-rerun workflow/head bound remains;
 a consumed retry is never replenished by capacity returning.

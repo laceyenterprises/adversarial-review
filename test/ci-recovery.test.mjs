@@ -386,6 +386,8 @@ test('CIBLOCKRESUME-01 rerun requires capacity annotations for every failed job 
     ['foreign head', [{ ...job, head_sha: 'b'.repeat(40) }]],
     ['incomplete jobs', [job], 101],
     ['annotations endpoint', [{ ...job, annotations: [], check_run_url: `https://api.github.com/repos/${repo}/check-runs/99` }]],
+    ['mixed-case annotations endpoint', [{ ...job, annotations: [], check_run_url: `https://api.github.com/repos/${repo.toUpperCase()}/check-runs/99` }]],
+    ['foreign annotations endpoint', [{ ...job, annotations: [], check_run_url: 'https://api.github.com/repos/foreign/repo/check-runs/99' }]],
   ]) {
     const rootDir = fixture(t); let posts = 0;
     const execFileImpl = async (_bin, args) => {
@@ -396,7 +398,7 @@ test('CIBLOCKRESUME-01 rerun requires capacity annotations for every failed job 
       return { stdout: JSON.stringify({ head_sha: headSha, run_attempt: 1, conclusion: 'failure', status: 'completed' }) };
     };
     const args = { rootDir, repo, prNumber: 2, headSha, failedChecks: [check], execFileImpl };
-    const permitted = ['capacity', 'annotations endpoint'].includes(name);
+    const permitted = ['capacity', 'annotations endpoint', 'mixed-case annotations endpoint'].includes(name);
     assert.equal(await recoverInfrastructureChecks(args), permitted, name);
     if (permitted) await recoverInfrastructureChecks(args);
     assert.equal(posts, permitted ? 1 : 0, name);

@@ -145,6 +145,7 @@ function claimBindings(f, decision, head = HEAD) {
       reviewerHeadSha: head, pendingRevisionRef: head, reviewerTimeoutMs: 60000,
       reviewerLeaseExpiresAt: '2026-10-20T12:11:00.000Z', repoPath: REPO, prNumber: PR,
       INFRA_AUTO_RECOVER_CAP: 3, REVIEW_UNKNOWN_FAILURE_MAX_RETRIES: 3, cascadeRetryDue: false,
+      reviewRowInTerminalFailureState: f.predicate,
     },
   };
 }
@@ -304,6 +305,116 @@ for (const field of [null, 'review_status', 'reviewer_session_uuid', 'failed_at'
       if (field) assert.match(lines[0], /Lost claim race/);
       else assert.match(lines[0], /claim-shape-mismatch branch=unknown-failure status=pending/);
       assert.equal(f.read().review_attempts, 1);
+    } finally { f.db.close(); }
+  });
+}
+
+for (const [name, message, expectedClaim] of [
+  ...cases,
+  ['pending', null, 'stmtMarkAttemptStarted'],
+]) {
+  const unsupportedStatuses = ['reviewing', 'posted', 'failed-orphan', 'skipped',
+    ...(name === 'pending' ? ['failed'] : []),
+    ...(['pending', 'token refresh control'].includes(name) ? [] : ['pending-upstream'])];
+  const unsupportedSnapshots = unsupportedStatuses.map(status => [status, { review_status: status }]);
+  if (name !== 'pending') {
+    unsupportedSnapshots.push(['pending without failure timestamp', { failed_at: null }],
+      ['pending with empty failure timestamp', { failed_at: '' }]);
+  }
+  if (!['pending', 'daemon bounce'].includes(name)) {
+    unsupportedSnapshots.push(['pending without reviewer head', { reviewer_head_sha: null }]);
+  }
+  for (const [shape, overrides] of unsupportedSnapshots) {
+    test(`PENDINGCLAIM-02 non-claimable snapshot: ${name}, ${shape}`, () => {
+      const f = fixture({ failure_message: message });
+      try {
+        // Keep the branch decision, then supply a snapshot that its CAS does
+        // not target. This also models queue admission outliving a claim.
+        const decision = route(f);
+        f.db.prepare(`UPDATE reviewed_prs SET ${Object.keys(overrides).map(field => `${field} = ?`).join(', ')}`)
+          .run(...Object.values(overrides));
+        const snapshot = f.read();
+        const { bindings, selected } = claimBindings(f, decision);
+        const lines = [];
+        const result = execute(`${claimClosure}\n${claimAndFailureLog}`, {
+          ...bindings, holdReleaseId: null, reviewerPoolConfig: { enabled: false },
+          stmtGetReviewRow: { get: () => f.read() }, console: { log: line => lines.push(line) },
+        });
+        assert.deepEqual(selected, [expectedClaim]);
+        assert.deepEqual(result, { dispatched: false, reason: 'claim-race-lost' });
+        assert.equal(lines.length, 1);
+        assert.match(lines[0], /Lost claim race.*non-claimable state\)\. Skipping\.$/);
+        assert.ok(lines[0].includes(`snapshot_status=${snapshot.review_status}`));
+        assert.doesNotMatch(lines[0], /claim-shape-mismatch/);
+        assert.deepEqual(f.read(), snapshot, 'the refused claim changes no row fields');
+      } finally { f.db.close(); }
+    });
+  }
+  const supportedStatuses = name === 'pending' ? ['pending', 'pending-upstream']
+    : name === 'token refresh control' ? ['failed', 'pending', 'pending-upstream'] : ['failed', 'pending'];
+  for (const status of supportedStatuses) {
+    test(`PENDINGCLAIM-02 unchanged target shape still signals mismatch: ${name}, ${status}`, () => {
+      const f = fixture({ failure_message: message });
+      try {
+        const decision = route(f);
+        f.db.prepare('UPDATE reviewed_prs SET review_status = ?').run(status);
+        // Refuse the real production CAS without altering the target snapshot.
+        f.db.exec(`CREATE TRIGGER refuse_claim BEFORE UPDATE ON reviewed_prs
+          BEGIN SELECT RAISE(IGNORE); END`);
+        const snapshot = f.read();
+        const { bindings, selected } = claimBindings(f, decision);
+        const lines = [];
+        const result = execute(`${claimClosure}\n${claimAndFailureLog}`, {
+          ...bindings, holdReleaseId: null, reviewerPoolConfig: { enabled: false },
+          stmtGetReviewRow: { get: () => f.read() }, console: { log: line => lines.push(line) },
+        });
+        assert.deepEqual(selected, [expectedClaim]);
+        assert.deepEqual(result, { dispatched: false, reason: 'claim-race-lost' });
+        assert.equal(lines.length, 1);
+        assert.match(lines[0], /claim-shape-mismatch branch=/);
+        assert.ok(lines[0].includes(`status=${status}`));
+        assert.deepEqual(f.read(), snapshot);
+      } finally { f.db.close(); }
+    });
+  }
+}
+
+for (const [branch, status] of ['pending', 'token-refresh'].flatMap(branch =>
+  ['pending', 'pending-upstream'].map(status => [branch, status]))) {
+  test(`PENDINGCLAIM-02 ${branch} CAS targets moved-head ${status} snapshots`, () => {
+    const f = fixture({ failure_message: branch === 'token-refresh'
+      ? '[token-refresh-pending] synthetic hold' : null });
+    try {
+      // Token-refresh admission can outlive a head move. Its WHERE parameters
+      // fence the captured row head, while SET records the new reviewer head.
+      const head = 'b'.repeat(40);
+      const decision = branch === 'token-refresh' ? route(f) : route(f, head);
+      f.db.prepare('UPDATE reviewed_prs SET review_status = ?').run(status);
+      const { bindings, selected } = claimBindings(f, decision, head);
+      const snapshot = f.read();
+      const expectedClaim = branch === 'token-refresh'
+        ? 'stmtMarkTokenRefreshRecoveryAttemptStarted' : 'stmtMarkAttemptStarted';
+      const run = code => execute(code, {
+        ...bindings, holdReleaseId: null, reviewerPoolConfig: { enabled: false },
+        stmtGetReviewRow: { get: () => f.read() }, console: { log: line => lines.push(line) },
+      });
+      const lines = [];
+      // A forced zero-row result on this claimable snapshot must still expose
+      // a genuine mismatch; an active-head equality guard would hide it.
+      f.db.exec(`CREATE TRIGGER refuse_claim BEFORE UPDATE ON reviewed_prs
+        BEGIN SELECT RAISE(IGNORE); END`);
+      assert.deepEqual(run(`${claimClosure}\n${claimAndFailureLog}`),
+        { dispatched: false, reason: 'claim-race-lost' });
+      assert.deepEqual(lines, [
+        `[watcher] claim-shape-mismatch branch=${branch} status=${status} repo=${REPO} pr=${PR}`,
+      ]);
+      assert.deepEqual(f.read(), snapshot);
+      f.db.exec('DROP TRIGGER refuse_claim');
+      assert.equal(run(`${claimClosure}\nreturn claimReviewer();`).changes, 1);
+      assert.deepEqual(selected, [expectedClaim, expectedClaim]);
+      assert.equal(f.read().reviewer_head_sha, head);
+      assert.equal(f.read().review_status, 'reviewing');
+      assert.equal(f.read().review_attempts, branch === 'pending' && status === 'pending' ? 0 : 1);
     } finally { f.db.close(); }
   });
 }

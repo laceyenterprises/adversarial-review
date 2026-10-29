@@ -2164,7 +2164,8 @@ RECOVERYDEADLINE-01: every closure-recovery deadline is handled on its first due
 wake. Readable ownerless receipt/lease recovery enters hammer admission under
 existing caps and lease; input-dependent or unreadable evidence escalates once
 with row, reason and evidence. The handoff smoke and scoped recovery-deadline
-fixtures cover dispatch, escalation and duplicate protection. After deployment,
+fixtures cover dispatch, escalation, duplicate protection, retained recovery clocks
+and existing running notices for proven live closers. After deployment,
 SRE observes no open recovery deadline more than one wake overdue; see
 [the recovery runbook](docs/RUNBOOK-ama-closure.md#every-recovery-deadline-recoverydeadline-01)
 and SEVDOCS-333. No worker live action is authorized.

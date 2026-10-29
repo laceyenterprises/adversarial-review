@@ -2540,8 +2540,9 @@ safety refusals, caps, deferrals and unreadable ownership escalate through the
 existing durable per-head/row/action/actor/reason receipt, with row, reason,
 deadline and evidence in the message and payload. Failed delivery retries;
 acknowledged delivery does not repeat across wakes or restarts. A refused
-recovery dispatch also escalates on that wake. The final-round timer does not
-send a second recovery deadline page. New readable evidence can still resume
+recovery dispatch also escalates on that wake. The final-round timer retains its
+anchor without sending a second recovery deadline page; proven live closers
+retain their existing running notices. New readable evidence can still resume
 ordinary routing; expiry never licenses a duplicate live launch or a merge.
 After deployment, SRE verifies no open PR has a closure-recovery deadline more
 than one wake past due. This is read-only post-merge acceptance (SEVDOCS-333);

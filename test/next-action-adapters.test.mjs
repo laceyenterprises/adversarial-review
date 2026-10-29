@@ -13,6 +13,7 @@ import { requestEligibleHammerWake } from '../src/hammer-wake.mjs';
 import { hasHammerDispatchIntent, revalidateClosurePr } from '../src/ama/closure-next-action.mjs';
 import { recoverAmaAutomation } from '../src/ama/automated-recovery.mjs';
 import { recoverOrphan } from '../src/ama/orphan-watchdog.mjs';
+import { isClosureRecoveryDecision } from '../src/pr-next-action.mjs';
 import { recordNoProgressLaneRun, readNoProgressLane } from '../src/watcher-no-progress-lane.mjs';
 import { registerSharedNextAction, resolveSharedNextAction } from '../src/pr-next-action-shadow.mjs';
 
@@ -98,10 +99,14 @@ for (const [name, observations, action, actor] of cases) {
       now: AT, hasOwnerImpl: async () => ({ owned: false }),
       requestRereviewImpl: async () => { orphanEffects.push('review'); return { triggered: true }; },
       dispatchHammer: async () => { orphanEffects.push('hammer'); return { dispatched: true }; },
-      pageImpl: async () => { orphanEffects.push('page'); } };
+      pageImpl: async () => { orphanEffects.push('page'); return { queued: true }; } };
     await recoverOrphan(orphanArgs);
     if (action !== 'review') await recoverOrphan({ ...orphanArgs, now: '2026-01-01T00:16:00.000Z' });
-    assert.deepEqual(orphanEffects, unownedDispatch && ['review', 'hammer'].includes(action) ? [action] : []);
+    if (isClosureRecoveryDecision(decision) && !unownedDispatch) {
+      await recoverOrphan({ ...orphanArgs, now: '2026-01-01T00:17:00.000Z' });
+    }
+    assert.deepEqual(orphanEffects, unownedDispatch && ['review', 'hammer'].includes(action) ? [action]
+      : isClosureRecoveryDecision(decision) ? ['page'] : []);
   });
 }
 

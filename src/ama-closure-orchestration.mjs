@@ -844,7 +844,6 @@ async function maybeDispatchAmaClosureForInner({
       observeWaitImpl: options.observeClosureWaitImpl || observeClosureWait });
   } catch (error) { options.logger?.warn?.(`[watcher] snapshot-refresh loop observation failed: ${error.message}`); }
   if (finalRoundSink.value
-    && !isClosureRecoveryDecision(result?.nextAction)
     && result?.reason !== 'hammer-stop-awaiting-companion'
     && !(result?.boundedWait && ['review', 'remediate', 'wait-for-CI'].includes(result.nextAction?.action))
     && !result?.daemonCleanMerge?.reason?.startsWith('fleet-stop-')
@@ -857,6 +856,9 @@ async function maybeDispatchAmaClosureForInner({
       const launchAt = Date.parse(result?.closerProgressAt || '');
       const boundedWait = await (options.observeClosureWaitImpl || observeClosureWait)({ ...finalRoundSink.value,
         ...closureWaitProgress(result, finalRoundSink.value.startedAt),
+        // Recovery paging belongs to the watchdog; retain its clock and live-owner notices.
+        anchorOnly: isClosureRecoveryDecision(result?.nextAction)
+          && result?.closerLaunchAlive !== true && !result?.closerLaunchBoundMs,
         launchAlive: result?.closerLaunchAlive === true || Boolean(result?.closerLaunchBoundMs),
         reason: result?.nextAction
           ? `action=${result.nextAction.action} actor=${result.nextAction.actor} reason=${result.nextAction.reason} head=${result.nextAction.head} ageMs=${Math.max(0, observationTime - Date.parse(result.nextAction.deadline?.anchoredAt || observationTime))}; ${result?.reasons?.join(', ') || result?.reason || 'closure-pending'}`

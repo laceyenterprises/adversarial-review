@@ -634,7 +634,7 @@ function recoverLapsedRow(facts, selected) {
       && (lease.deadlineMs === null || facts.observedMs < lease.deadlineMs));
   const blocked = policy?.autonomousMergeExecutionEnabled !== true
     || controls?.safetyRefusal?.deterministic === true || controls?.stop?.deterministic === true
-    || (facts.labels || []).some(label => OPERATOR_HOLD_LABELS.includes(label.name))
+    || (facts.labels || []).some(label => OPERATOR_HOLD_LABELS.includes(label?.name || label))
     || facts.progress?.primaryChange?.ok === false || facts.progress?.diffEmpty === true
     || (launch.forHead && launch.outcome === 'no-merge' && launch.retryable === false)
     || cap?.lifetimeExhausted === true

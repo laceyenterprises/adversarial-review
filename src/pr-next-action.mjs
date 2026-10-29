@@ -409,17 +409,22 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
   // R07 variants share one daemon-only supersession path. The recursive
   // selection sets aside hammer history, never refunds it or admits dispatch.
   const stopped = (row, recordedMs, forHead = true) => {
-    const newerExactHeadReview = forHead && review.known && review.clean
-      && sameHead(review.reviewedHead, head) && recordedMs !== null
-      && review.postedMs !== null && review.postedMs > recordedMs;
-    if (!daemonAfterSupersededStop && newerExactHeadReview) {
-      const next = selectRow(facts, { daemonAfterSupersededStop: true });
-      if (next.action === 'daemon-merge' && next.actor === 'daemon') {
-        return { ...next, refs: [...(next.refs || []), ...(row.refs || []),
-          `stop-reason:${row.reason}`, 'stop-superseded-by-exact-head-review'] };
-      }
+    const notFired = reason => ({ ...row,
+      refs: [...(row.refs || []), `supersession-not-fired:${reason}`] });
+    if (daemonAfterSupersededStop) return notFired('stop-retained-during-reselection');
+    if (!forHead) return notFired('stop-not-applicable');
+    if (!review.known) return notFired('review-unknown');
+    if (!review.clean) return notFired('review-not-daemon-eligible');
+    if (!sameHead(review.reviewedHead, head)) return notFired('review-head-mismatch');
+    if (recordedMs === null) return notFired('stop-time-unknown');
+    if (review.postedMs === null) return notFired('review-time-unknown');
+    if (review.postedMs <= recordedMs) return notFired('review-not-newer');
+    const next = selectRow(facts, { daemonAfterSupersededStop: true });
+    if (next.action === 'daemon-merge' && next.actor === 'daemon') {
+      return { ...next, refs: [...(next.refs || []), ...(row.refs || []),
+        `stop-reason:${row.reason}`, 'stop-superseded-by-exact-head-review'] };
     }
-    return row;
+    return notFired(`reselected:${next.row}:${next.reason}`);
   };
   const stop = plain(controls?.stop);
   const automatedHold = (facts.labels || []).find(label => OPERATOR_HOLD_LABELS.includes(label.name));

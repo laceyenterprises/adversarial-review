@@ -273,6 +273,32 @@ function sanitizeLifetimeCount(rawValue, ceiling = HAMMER_RETRY_CAP_LIFETIME_TOT
   return Math.max(0, Math.trunc(n));
 }
 
+// STOPSTALE-03: alert delivery is an observation, not another hammer charge.
+// Complete confirmed accounting proves the lifetime budget was already spent
+// at the latest charge, even if an old writer later replaced the alert time.
+// Legacy/partial/unconfirmed accounting cannot provide this earlier anchor.
+function lifetimeChargeTime(ledger, ceiling) {
+  if (ledger?.__corrupt || ceiling <= 0 || !ledger?.lifetimeSuppressed
+    || !Number.isSafeInteger(ledger.lifetimeAttemptCount) || ledger.lifetimeAttemptCount < ceiling
+    || !ledger.dispatchCharges || typeof ledger.dispatchCharges !== 'object' || Array.isArray(ledger.dispatchCharges)) return null;
+  const charges = Object.values(ledger.dispatchCharges);
+  const launches = new Set();
+  let count = 0, latest = null;
+  for (const charge of charges) {
+    const at = Date.parse(charge?.chargedAt || '');
+    const launch = normalizeKey(charge?.launchRequestId);
+    if (!launch || launches.has(launch) || typeof charge?.chargedAt !== 'string' || !Number.isFinite(at)
+      || charge.consumerVersion !== 1 || charge.attempt !== 1
+      || !normalizeKey(charge.jobKey) || !normalizeKey(charge.headSha)
+      || !charge.refundedBudgets || typeof charge.refundedBudgets !== 'object' || Array.isArray(charge.refundedBudgets)
+      || (charge.refundedBudgets.lifetime !== undefined && typeof charge.refundedBudgets.lifetime !== 'boolean')) return null;
+    launches.add(launch);
+    if (charge.refundedBudgets.lifetime !== true) count++;
+    latest = Math.max(latest ?? at, at);
+  }
+  return count === ledger.lifetimeAttemptCount ? latest : null;
+}
+
 /**
  * Decide, without writing anything, whether a hammer dispatch for this PR is
  * within the retry cap.
@@ -368,13 +394,15 @@ export function evaluateHammerRetryCap(ledger, {
     && approval.jobKey === incomingJobKey && Number.isFinite(Date.parse(approval.grantedAt))
     && [ledger.attemptCount, ledger.lifetimeAttemptCount ?? ledger.attemptCount,
       ledger.targetAttemptCount ?? 0].every(count => Number.isSafeInteger(count) && count >= 0);
-  // Only durable alerts belonging to an active suppression prove when the
-  // cap was recorded. Missing evidence stays unknown; updatedAt also changes
-  // on repeat observations and is not a suppression timestamp.
+  // An exhausted lifetime budget with complete confirmed charge accounting
+  // predates any later re-alert. Otherwise require the active durable alert.
+  // updatedAt also changes on repeat observations and is never an anchor.
+  const lifetimeRecordedMs = lifetimeChargeTime(ledger, lifetimeCeiling);
   const capTimes = [
-    ...(alreadySuppressed || lifetimeAlreadySuppressed ? [ledger?.alertedAt] : []),
-    ...(targetAlreadySuppressed ? [ledger?.targetAlertedAt] : []),
-  ].map(value => Date.parse(value || ''));
+    ...(lifetimeRecordedMs !== null ? [lifetimeRecordedMs]
+      : alreadySuppressed || lifetimeAlreadySuppressed ? [Date.parse(ledger?.alertedAt || '')] : []),
+    ...(targetAlreadySuppressed ? [Date.parse(ledger?.targetAlertedAt || '')] : []),
+  ];
   const recordedAt = capTimes.length && capTimes.every(Number.isFinite)
     ? new Date(Math.max(...capTimes)).toISOString() : null;
   return {
@@ -600,13 +628,16 @@ function markHammerRetryCapExhaustedUnlocked(rootDir, identity, {
     suppressedAttemptCount: Number.isFinite(Number(attemptCount))
       ? Number(attemptCount)
       : Math.max(0, Number(existing?.attemptCount || 0)),
-    // Preserve a prior alertedAt so a repeat suppression tick that couldn't send
-    // the alert doesn't erase the record that it once succeeded.
+    // STOPSTALE-03: a repeated alert observes the same stop; it must not move
+    // the freshness boundary past a review posted after that stop. Lifetime
+    // suppression survives job-key changes; series/target anchors do not.
     alertedAt: !target && alertEmitted
-      ? (now || existing?.alertedAt || null)
+      ? ((lifetimeSuppressed ? existing?.lifetimeSuppressed : existing?.suppressed && !jobKeyChanged)
+          ? existing?.alertedAt || now || null : now || null)
       : (existing?.alertedAt || null),
     targetAlertedAt: target && alertEmitted
-      ? (now || existing?.targetAlertedAt || null)
+      ? ((existing?.targetSuppressed && !targetShaChanged)
+          ? existing?.targetAlertedAt || now || null : now || null)
       : (targetShaChanged ? null : (existing?.targetAlertedAt || null)),
     createdAt: existing?.createdAt || now || null,
     updatedAt: now || existing?.updatedAt || null,

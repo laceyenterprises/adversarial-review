@@ -25,6 +25,7 @@ const { maybeDispatchAmaCloser, readAmaCloserDispatchRecord, reconcileAmaCloserL
 const { reconcilePreReceiptIntent } = await import('../../src/ama/pre-receipt-intent.mjs');
 const { requestEligibleHammerWake } = await import('../../src/hammer-wake.mjs');
 const { deriveNextActionSnapshot, nextAction } = await import('../../src/pr-next-action.mjs');
+const { evaluateHammerRetryCap } = await import('../../src/ama/hammer-retry-cap.mjs');
 const { shadowNextAction } = await import('../../src/pr-next-action-shadow.mjs');
 const { routeCappedReviewToClosure } = await import('../../src/hamclose-review-admission.mjs');
 const { handoffHammerReview } = await import('../../bin/hammer-review-handoff.mjs');
@@ -867,7 +868,29 @@ if (scenario === 'clean') {
       observations: { checks: { conclusion: 'PENDING' } } }));
     assert.equal(pending.reason, reason);
     assert.equal(pending.actor, 'closure-recovery');
+    assert.ok(pending.evidenceRefs.some(ref => ref.startsWith('supersession-not-fired:reselected:R11-pending:')));
     assert.equal(JSON.stringify(snapshot), before);
+  }
+  {
+    // STOPSTALE-03: a legacy repeated alert cannot hide the earlier exhausted
+    // lifetime budget when every counted dispatch has a confirmed receipt.
+    const reviewedHead = retrySubject.headSha;
+    const ledger = { lifetimeSuppressed: true, suppressed: true, jobKey: 'b'.repeat(40),
+      alertedAt: '2026-01-01T00:02:00.000Z', lifetimeAttemptCount: 2,
+      dispatchCharges: Object.fromEntries([1, 2].map(i => [`synthetic-charge-${i}`, {
+        launchRequestId: `synthetic-launch-${i}`, consumerVersion: 1, attempt: 1,
+        jobKey: 'b'.repeat(40), headSha: reviewedHead, chargedAt: stopAt, refundedBudgets: {},
+      }])) };
+    const cap = evaluateHammerRetryCap(ledger, { jobKey: reviewedHead, headSha: reviewedHead, lifetimeDispatchCeiling: 2 });
+    assert.equal(cap.jobKeyChanged, true);
+    const recovered = nextAction(deriveNextActionSnapshot({ base: daemonSnapshot, observations: {
+      reviews: { ...daemonSnapshot.observations.reviews.value, verdict: 'comment-only',
+        nonBlockingFindingState: 'known', nonBlockingFindingCount: 2, postedAt: '2026-01-01T00:01:00.000Z' },
+      policy: { ...daemonSnapshot.observations.policy.value, strictMode: false,
+        hammerCap: { lifetimeExhausted: cap.lifetimeCapExhausted, recordedAt: cap.recordedAt } },
+    } }));
+    assert.equal(recovered.action, 'daemon-merge');
+    assert.ok(recovered.evidenceRefs.includes('stop-reason:lifetime-exhausted'));
   }
   const redDaemon = observeDaemonGate(daemonShared, { candidateHead: retrySubject.headSha,
     prState: 'OPEN', mergeable: 'MERGEABLE', requiredChecks: [{ name: 'unit', status: 'COMPLETED', conclusion: 'FAILURE' }] });

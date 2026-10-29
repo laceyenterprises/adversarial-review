@@ -143,12 +143,23 @@ Directory: `data/follow-up-jobs/hammer-retry-cap/`
 | `suppressedJobKey` | string or null | Job key associated with the suppression stamp. |
 | `suppressedHeadSha` | string or null | Head SHA associated with the suppression stamp. |
 | `suppressedAttemptCount` | non-negative integer or null | Per-series attempt count observed when suppression was stamped. |
-| `alertedAt` | string or null | ISO-8601 timestamp for the operator alert covering per-series or lifetime suppression. Preserved across repeat suppression ticks. |
-| `targetAlertedAt` | string or null | ISO-8601 timestamp for the operator alert covering target-redrive suppression. Reset when the target SHA changes. |
+| `alertedAt` | string or null | ISO-8601 timestamp for the first successful operator alert in the continuous per-series or lifetime suppression episode. Repeated successful alerts preserve it. Lifetime suppression preserves it across job-key changes; a new series or newly exhausted lifetime cap records a new time. |
+| `targetAlertedAt` | string or null | ISO-8601 timestamp for the first successful operator alert in a continuous target-redrive suppression episode. Repeated alerts preserve it; a target SHA change resets it. |
 | `createdAt` | string or null | ISO-8601 timestamp from the first write when available. |
 | `updatedAt` | string or null | ISO-8601 timestamp from the latest write when available. |
 
 ## Operational Contract
+
+STOPSTALE-03 projects a lifetime stop's freshness boundary from complete
+confirmed `dispatchCharges` when available: unique launch IDs, supported charge
+shape, valid charge times and an unrefunded count equal to
+`lifetimeAttemptCount` at or above the configured positive ceiling. The latest
+charge time, including refunded charges, bounds a superseding exact-head review.
+Otherwise `alertedAt` remains the fallback. An active target suppression still
+requires its own alert time. This read-only projection tolerates timestamps
+overwritten by older re-alert writers without modifying stored evidence or
+refunding any budget. R07 supersession remains daemon-only and retains all live
+merge gates. The schema and retention policy are unchanged.
 
 HOLDRELEASE-01 refunds only hold-only terminal stops on the last dispatched
 head and current audit job key, with a launch identity and explicit

@@ -238,6 +238,7 @@ for (const [reason, variant] of r07Variants) {
     assert.equal(decision.row, 'R07-stop');
     assert.equal(decision.queue.intent, 'reconcile');
     assert.ok(!decision.evidenceRefs.includes('stop-superseded-by-exact-head-review'));
+    assert.equal(decision.evidenceRefs.filter(ref => ref.startsWith('supersession-not-fired:')).length, 1);
   });
   for (const time of [null, 'invalid', AFTER_STOP, '2026-01-01T00:00:45Z']) {
     test(`STOPSTALE-02: ${reason} requires a trustworthy earlier recorded time (${time})`, () => {
@@ -258,6 +259,21 @@ test('STOPSTALE-02: terminal retries must all predate the exact-head review', ()
     changed.launches.closer.retryChain = [{ status: 'failed', terminal_at }];
     assert.equal(nextAction(stoppedVariant(changed)).reason, 'hammer-final-no-merge');
   }
+});
+
+for (const [expected, changes] of [
+  ['review-unknown', { states: { reviews: 'error' } }],
+  ['review-not-daemon-eligible', { policy: { strictMode: true } }],
+  ['review-head-mismatch', { reviews: { headSha: OTHER } }],
+  ['stop-time-unknown', { policy: { hammerCap: { lifetimeExhausted: true } } }],
+  ['review-time-unknown', { reviews: { postedAt: null } }],
+  ['review-not-newer', { reviews: { postedAt: ANCHOR } }],
+  ['reselected:R12-final-push:suppressed-final-push', { remediation: { finalPush: { suppressed: true, headSha: HEAD } } }],
+  ['reselected:R16-refresh:attestation-unknown', { reviews: { attestation: 'unknown' } }],
+]) test(`STOPSTALE-03: a non-firing supersession names ${expected}`, () => {
+  const decision = nextAction(stoppedVariant(r07Variants[1][1], changes));
+  assert.equal(decision.row, 'R07-stop');
+  assert.ok(decision.evidenceRefs.includes(`supersession-not-fired:${expected}`));
 });
 
 test('verified terminal HAM completion crosses the retry row only with matching heads and safety gates', () => {

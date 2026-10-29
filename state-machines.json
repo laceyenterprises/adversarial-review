@@ -1312,7 +1312,7 @@
           "id": "closure-owner.09",
           "from": "[*]",
           "to": "daemon-merge",
-          "trigger": "project shared next action: daemon-merge, including any R07 deterministic stop, retry cap, lifetime cap or final no-merge superseded by a strictly newer eligible exact-head review with trustworthy recorded time; hammer caps stay binding",
+          "trigger": "project shared next action: daemon-merge, including any R07 deterministic stop, retry cap, lifetime cap or final no-merge superseded by a strictly newer eligible exact-head review with trustworthy recorded time; hammer caps stay binding; continuous cap alerts preserve time, complete confirmed lifetime charges can recover the budget boundary, and non-firing supersessions name why",
           "codeSource": "src/ama/closure-next-action.mjs"
         },
         {

@@ -1,4 +1,5 @@
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { ownReviewerSizeFailure } from './reviewer-size-owner.mjs';
 import { readHostObservationSync } from './dispatch-files-client.mjs';
 import { execFile as execQuotaFile } from 'node:child_process';
 import { promisify as promisifyQuota } from 'node:util';
@@ -94,6 +95,7 @@ import {
   stmtMarkPosted,
   stmtReleaseUnsettledPostedReview,
   stmtMarkFailed,
+  stmtMarkSizeFailed,
   stmtReleaseReviewLease,
   stmtMarkFailedQuota,
   stmtReleaseReviewLeaseQuota,
@@ -1513,6 +1515,10 @@ function settleReviewerAttempt({
   result,
   reviewerSessionUuid = result?.reviewerSessionUuid ?? null,
   reviewerHeadSha = null,
+  builderTag = null,
+  dispatchSizeUpdateImpl,
+  onSizeFailureSettled = () => {},
+  alertSizeFailureImpl,
   env = null,
   failureAt = new Date().toISOString(),
   maxRemediationRounds,
@@ -1522,6 +1528,7 @@ function settleReviewerAttempt({
     markPosted: stmtMarkPosted,
     releaseUnsettledPostedReview: stmtReleaseUnsettledPostedReview,
     markFailed: stmtMarkFailed,
+    markSizeFailed: stmtMarkSizeFailed,
     releaseReviewerClaim: stmtReleaseReviewerClaim,
     releaseLegacyStaleReviewerClaim: stmtReleaseLegacyStaleReviewerClaim,
     releaseReviewLease: stmtReleaseReviewLease,
@@ -1732,12 +1739,26 @@ function settleReviewerAttempt({
   // A size ceiling is deterministic for this head; never release it to pending,
   // even during a coincident provider outage or with lease recovery enabled.
   if (failureClass === 'reviewer-prompt-too-large' || failureClass === 'reviewer-chunk-budget-exceeded') {
-    withSqliteBusyRetrySync(
-      () => statements.markFailed.run(failureAt, classifiedMessage, repoPath, prNumber),
+    const marked = withSqliteBusyRetrySync(
+      () => statements.markSizeFailed
+        ? statements.markSizeFailed.run(failureAt, classifiedMessage, repoPath, prNumber, reviewerHeadSha, reviewerSessionUuid)
+        : statements.markFailed.run(failureAt, classifiedMessage, repoPath, prNumber),
       { label: `reviewer-size-terminal:${repoPath}#${prNumber}`, log },
     );
     log.warn(`[watcher] Terminal oversized review failure on ${repoPath} PR ${prNumber}: ${failureMessage}`);
-    return;
+    // This reviewer has exited. Capacity is independent of the awaited handoff;
+    // the per-head dispatch lease remains held by the caller until it finishes.
+    onSizeFailureSettled();
+    if (marked?.changes === 0) {
+      const current = statements.getReviewRow?.get(repoPath, prNumber);
+      if (current?.reviewer_head_sha === reviewerHeadSha && current.review_status !== 'failed') {
+        log.warn?.(`[watcher] size-failure-claim-mismatch repo=${repoPath} pr=${prNumber} head=${reviewerHeadSha} status=${current.review_status}; oversized result retained as a diagnostic; replacement claim unchanged`);
+      }
+      return { posted: false, reason: 'size-failure-claim-mismatch' };
+    }
+    return ownReviewerSizeFailure({ rootDir, repo: repoPath, prNumber, headSha: reviewerHeadSha,
+      builderTag, result, failureClass, failureAt, env: env || process.env, logger: log,
+      dispatchImpl: dispatchSizeUpdateImpl, alertImpl: alertSizeFailureImpl });
   }
 
   let oauthCredentialState = null;

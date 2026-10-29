@@ -1,6 +1,7 @@
 import { ensureWorkerRegistryReady } from './adapters/agent-runtime/local/remediation.mjs';
 import { reviewerAttributionForModel, validateReviewerAttribution } from './reviewer-attribution.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { reviewerSizeFacts, reportReviewerSizeFailure } from './reviewer-size-owner.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 /**
@@ -25,7 +26,8 @@ import { filterGitHubBody } from './github-outbound-body.mjs';
  * process.
  * ────────────────────────────────────────────────────────────────────────────
  */
-import { assertReviewHeadCurrent, reviewerExecutionFailureExitCode, reviewerPostFailureExitCode } from './reviewer-outcomes.mjs';
+import { assertReviewHeadCurrent, reviewerExecutionFailureExitCode, reviewerPostFailureExitCode,
+  REVIEWER_PROMPT_TOO_LARGE_EXIT_CODE, REVIEWER_CHUNK_BUDGET_EXCEEDED_EXIT_CODE } from './reviewer-outcomes.mjs';
 import { execFile } from 'node:child_process';
 import {
   accessSync,
@@ -143,6 +145,7 @@ import { resolvePrOwnReviewDiff } from './reviewer-own-diff.mjs';
 import { groundBlockingFindingsAtHead, persistReviewGroundingMetadata } from './review-head-grounding.mjs';
 import {
   dispatchReviewerModel,
+  resolveAgyChunkMaxChunks,
   reviewAgyOversizedInChunks,
   resolveAgyOversizedReviewRoute,
   resolveGeminiRuntimeForReview,
@@ -2182,18 +2185,18 @@ async function main() {
       console.error(`[reviewer] Stopped: OAuth credentials unavailable for ${reviewerModel}`);
       process.exit(2); // exit code 2 = auth failure (distinct from other errors)
     }
-    if (oversizedAgyRoute?.oversized) {
-      await alertClioOversizedAgyFailure({
-        repo,
-        prNumber,
-        promptBytes: oversizedAgyRoute.promptBytes,
-        maxBytes: oversizedAgyRoute.maxBytes,
-        reason: err.message || String(err),
-        error: err,
-      });
-    }
     console.error(`[reviewer] AI review failed for ${repo}#${prNumber}:`, err.message);
     console.error(`[reviewer] ERROR STACK: ${err.stack}`);
+    if ([REVIEWER_PROMPT_TOO_LARGE_EXIT_CODE, REVIEWER_CHUNK_BUDGET_EXCEEDED_EXIT_CODE].includes(reviewerExecutionFailureExitCode(err))) {
+      await reportReviewerSizeFailure({ repo, prNumber, reason: err.message,
+        managedByWatcher: Boolean(reviewerSpawnToken),
+        failureClass: reviewerExecutionFailureExitCode(err) === REVIEWER_PROMPT_TOO_LARGE_EXIT_CODE
+          ? 'reviewer-prompt-too-large' : 'reviewer-chunk-budget-exceeded',
+        facts: reviewerSizeFacts({ diff, headSha: reviewerHeadSha || reviewerWorkspaceHeadSha,
+          promptBytes: oversizedAgyRoute?.promptBytes, maxBytes: oversizedAgyRoute?.maxBytes,
+          maxChunks: resolveAgyChunkMaxChunks(), chunkPlan: err.plan || null }),
+      });
+    }
     process.exit(reviewerExecutionFailureExitCode(err));
   }
 

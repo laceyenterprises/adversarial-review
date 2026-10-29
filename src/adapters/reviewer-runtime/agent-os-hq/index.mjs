@@ -1,3 +1,4 @@
+import { readSizeFacts } from '../../../reviewer-size-owner.mjs';
 import { readHostIdentitySync, readDispatchFilesSync } from '../../../dispatch-files-client.mjs';
 import { parseHqDispatchStatusOutput } from '../../../hq-dispatch-status-output.mjs';
 import { readDispatchReceipt, parseHqDispatchStatus } from '../../../producer-contracts/dispatch-receipt.mjs';
@@ -64,6 +65,7 @@ function result({
   reattachToken = null,
   error = null,
   configurationError = false,
+  sizeFacts = null,
 } = {}) {
   return {
     ok,
@@ -79,6 +81,7 @@ function result({
     reattachToken,
     error,
     configurationError,
+    sizeFacts,
     stderr: stderrTail,
     stdout: stdoutTail,
   };
@@ -327,6 +330,7 @@ function createAgentOsHqReviewerRuntimeAdapter({
   taskKind = 'analysis',
   execFileImpl = execFileAsync,
   sleepImpl = sleep,
+  readDispatchFilesImpl = readDispatchFilesSync,
   jitterImpl = defaultJitter,
   pollBaseMs = DEFAULT_POLL_BASE_MS,
   pollJitterMs = DEFAULT_POLL_JITTER_MS,
@@ -528,9 +532,24 @@ function createAgentOsHqReviewerRuntimeAdapter({
           state: status === 'canceled' ? 'cancelled' : 'failed',
           lastHeartbeatAt: now(),
         });
+        let sizeFacts = null;
+        if (['reviewer-prompt-too-large', 'reviewer-chunk-budget-exceeded'].includes(statusPayload.failureClass)) {
+          // HQ failureDetail is not the child stderr. Read its final diagnostic
+          // through the existing public file seam, bound to this dispatch/head.
+          sizeFacts = readSizeFacts({ sizeFacts: statusPayload.sizeFacts }, record.subjectContext?.reviewerHeadSha);
+          if (sizeFacts.diffBytes === null) {
+            try {
+              const files = readDispatchFilesImpl({ launch_request_id: dispatchId,
+                stream: 'stderr', tail: true, limit: 8192 }, { hqRoot: resolvedHqRoot, env: runtimeEnv, timeoutMs: 1000 });
+              sizeFacts = readSizeFacts({ stderr: files?.ok && files.log?.status === 'found' ? files.log.text : null },
+                record.subjectContext?.reviewerHeadSha);
+            } catch { /* Size evidence is diagnostic; retain the terminal class. */ }
+          }
+        }
         return result({
           ok: false,
           spawnedAt,
+          sizeFacts,
           failureClass: statusPayload.failureClass || 'unknown',
           stderrTail: statusPayload.failureDetail || `hq dispatch ${dispatchId} ended with status ${status}`,
           stdoutTail: tailText(stdout),

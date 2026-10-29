@@ -3939,6 +3939,7 @@ const __test__ = {
 };
 
 export {
+  resolveAgyChunkMaxChunks,
   resolveReviewerExecution,
   resolveReviewerExecutionAsync,
   dispatchReviewerModel,

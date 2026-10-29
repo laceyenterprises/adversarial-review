@@ -1,5 +1,27 @@
 # Adversarial Review State Machine Notes
 
+SIZEOWNER-02: terminal `reviewer-prompt-too-large` and
+`reviewer-chunk-budget-exceeded` still settle to `failed`, never `pending`.
+The size-failure writer now fences the dispatched head and session. Settlement
+records one durable `shrink-diff` next action and reserves a builder-class
+PR-update dispatch per head, using the existing branch-push/push path. Its
+receipt and size evidence accompany the existing oversized alert. Lost
+acknowledgements retain the reservation; new heads use ordinary review
+admission but share a two-reservation PR lifetime ceiling (legacy and unconfirmed
+records included). Exhaustion records `shrink-diff-ceiling-exhausted` and alerts.
+Transient HQ failures retry up to three times with one key within one minute;
+definite refusals return immediately and no later-pass resubmission is added.
+Size evidence prints last with bounded, explicitly untrusted paths; HQ reads
+its dispatch stderr into head-bound result facts. Direct invocations still alert,
+and same-head claim mismatches log without changing a replacement row. Reviewer
+reservation/admission capacity releases after the terminal CAS, before awaited
+handoff, while its per-head dispatch lease stays held. The synchronous early
+callback defers these failures to awaited settlement. No review budgets, chunk
+behaviour, merge authority or smoke promises
+change. Reviewed and refreshed affected source projection hashes using
+`digest(stateProjection(source))` from `test/helpers/smv-contracts.mjs`;
+the existing review-row states and transitions remain the same.
+
 PENDINGCLAIM-01: retry classification and the unknown, review-population,
 infrastructure and daemon-bounce claims share one SQL failure-shape expression.
 A lease-released `pending` failure with `failed_at`, accrued attempts (or an

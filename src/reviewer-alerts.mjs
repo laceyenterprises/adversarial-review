@@ -4,7 +4,7 @@
 // are self-contained: their only dependency is the shared alert bus.
 
 import { deliverAlert } from './alert-delivery.mjs';
-import { ReviewerPromptTooLargeError } from './reviewer-outcomes.mjs';
+import { ReviewerPromptTooLargeError, ReviewerChunkBudgetExceededError } from './reviewer-outcomes.mjs';
 
 /**
  * Alert the operator when OAuth credentials are unavailable.
@@ -44,11 +44,19 @@ async function alertClioOversizedAgyFailure({
   maxBytes,
   reason,
   error,
+  headSha,
+  failureClass,
+  nextAction,
+  dispatch,
 }, {
   deliverAlertImpl = deliverAlert,
 } = {}) {
-  if (!(error instanceof ReviewerPromptTooLargeError)) return null;
-  const msg = `Adversarial reviewer oversized prompt could not be reviewed.\n\nRepo: ${repo} PR #${prNumber}\nPrompt bytes: ${promptBytes ?? 'unknown'}\nReviewer prompt budget: ${maxBytes ?? 'unknown'}\nReason: ${reason}\n\nTerminal size failure: operator action is required because a full review could not fit and bounded chunk review was unavailable.`;
+  if (!(error instanceof ReviewerPromptTooLargeError) && !(error instanceof ReviewerChunkBudgetExceededError)
+    && !['reviewer-prompt-too-large', 'reviewer-chunk-budget-exceeded'].includes(failureClass)) return null;
+  const ownership = nextAction
+    ? `Next action: ${nextAction.action}; owner: ${nextAction.actor || 'unresolved'}; head: ${nextAction.head}\nSize facts: ${JSON.stringify(nextAction.facts)}\nPR update: ${JSON.stringify(dispatch)}`
+    : 'Terminal size failure: awaiting watcher settlement and shrink-diff ownership.';
+  const msg = `Adversarial reviewer oversized prompt could not be reviewed.\n\nRepo: ${repo} PR #${prNumber}\nPrompt bytes: ${promptBytes ?? 'unknown'}\nReviewer prompt budget: ${maxBytes ?? 'unknown'}\nReason: ${reason}\n\n${ownership}`;
   console.error(`[reviewer] ALERT: ${msg}`);
   try {
     // Same dead-hook fix as alertClioOAuthFailure above: this posted to the
@@ -56,7 +64,7 @@ async function alertClioOversizedAgyFailure({
     // and hooks token, and its queue+drain replaces the local curl retry loop.
     const result = await deliverAlertImpl(msg, {
       event: 'reviewer.oversized_agy_prompt',
-      payload: { repo, prNumber, promptBytes, maxBytes, reason },
+      payload: { repo, prNumber, promptBytes, maxBytes, reason, headSha, failureClass, nextAction, dispatch },
     });
     console.log(`[reviewer] oversized agy prompt alert queued via alert bus (id=${result?.id ?? 'unknown'})`);
     return result;

@@ -1202,7 +1202,7 @@ mechanism (no shared configuration-schema keys):
 - `ADVERSARIAL_REVIEW_CHUNK_HARD_MAX_BYTES`: diff plus extra-context ceiling,
   default 8 MiB, measured on the raw diff plus extra context before elision.
   This bounds preprocessing work even for a single generated line; content
-  above it remains an operator-owned size refusal.
+  above it remains a terminal size refusal with a `shrink-diff` PR-update owner.
   `ADVERSARIAL_REVIEW_AGY_CHUNK_MAX_CHUNKS` bounds all chunked reviews (default 20).
 
 Set context allocations to the deployed model's supported input budget after
@@ -1210,6 +1210,34 @@ reserving space for tools and output. Every `hosted-reviewer-selection` event
 logs the checked model, full prompt bytes, and resolved budget, including
 prompts that fit. A new PR head or operator retrigger is
 required after a terminal size failure; lease recovery does not retry it.
+SIZEOWNER-02 records a `shrink-diff` next action once per failed head in
+`data/review-size-actions/` and dispatches a PR update through `hq dispatch --pr`
+using the builder class from the title prefix. Its brief preserves behaviour,
+requests compression/removal of generated diff content with any deferred work
+left to an operator, and requires a normal push without force-pushing. The existing oversized alert now
+includes the size facts, next action and dispatch receipt (or unconfirmed error).
+File sizes are UTF-8 diff contributions, including headers, for the ten largest
+changed files. A new head follows ordinary review admission. The terminal
+failure CAS fences the dispatched head and session; stale settlement cannot
+fail a replacement claim. Reservations survive ambiguous dispatch results and
+prevent a second worker for that head. Across all heads, two durable reservations
+per PR is the lifetime ceiling, including legacy and unconfirmed submissions;
+ceiling exhaustion records `shrink-diff-ceiling-exhausted` and still alerts.
+The transport retries transient errors at most three times under the same
+idempotency key and one-minute budget; definite refusals return immediately.
+Exhausted/unconfirmed reservations require operator reconciliation, not automatic
+later-pass resubmission. Size diagnostics print last and bound each path to 128
+characters; the HQ adapter reads the dispatch stderr through the public file seam
+and carries head-bound facts in its result. Briefs mark paths as untrusted data.
+Reviewer reservation/admission capacity is released after terminal settlement,
+before awaiting the handoff; the per-head dispatch lease remains held. The
+pool-disabled poll still awaits this bounded handoff. Same-head claim mismatches
+log the still-current row without mutating a replacement claim; direct reviewer
+invocations retain their own alert. Existing lifecycle states and smoke promises
+are unchanged. After normal deployment, observe organic size failures read-only
+for a capped handoff, receipt and enriched alert; no synthetic live dispatch is
+authorized. See
+[the size-action record contract](docs/data-model/review-size-actions.md).
 Exhausted non-infrastructure failures create a durable, head-keyed decision in
 `data/review-failure-decisions/`. This is an informational failure record; it
 does not consume choices or change the gate. Use the existing retrigger,

@@ -2,6 +2,16 @@
   "version": 1,
   "entries": [
     {
+      "id": "review-size-actions",
+      "title": "Terminal Review Size Actions",
+      "path": "docs/data-model/review-size-actions.md",
+      "store": "data/review-size-actions/",
+      "schemaSurface": "src/reviewer-size-owner.mjs",
+      "relatedSchemaSurfaces": ["src/reviewer-spawn-settle.mjs", "src/reviewer-alerts.mjs", "src/reviewer.mjs", "src/review-state-statements.mjs", "src/adapters/reviewer-runtime/agent-os-hq/index.mjs"],
+      "owner": "watcher reviewer settlement",
+      "compatibility": "Head-keyed shrink-diff action, two-reservation per-PR lifetime ceiling including legacy/unconfirmed records, and bounded idempotent transient transport retries; ambiguous submission retains ownership. HQ results carry head-bound size facts, paths are bounded untrusted labels, and capacity releases before the awaited handoff. Existing failed review status, budgets and merge authority are unchanged."
+    },
+    {
       "id": "branch-rewrite-receipts",
       "title": "Successful Branch Rewrite Receipts",
       "path": "docs/data-model/branch-rewrite-receipts.md",

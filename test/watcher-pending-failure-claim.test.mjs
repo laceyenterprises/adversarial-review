@@ -379,8 +379,9 @@ for (const [name, message, expectedClaim] of [
   }
 }
 
-for (const branch of ['pending', 'token-refresh']) {
-  test(`PENDINGCLAIM-02 ${branch} CAS targets moved-head pending snapshots`, () => {
+for (const [branch, status] of ['pending', 'token-refresh'].flatMap(branch =>
+  ['pending', 'pending-upstream'].map(status => [branch, status]))) {
+  test(`PENDINGCLAIM-02 ${branch} CAS targets moved-head ${status} snapshots`, () => {
     const f = fixture({ failure_message: branch === 'token-refresh'
       ? '[token-refresh-pending] synthetic hold' : null });
     try {
@@ -388,6 +389,7 @@ for (const branch of ['pending', 'token-refresh']) {
       // fence the captured row head, while SET records the new reviewer head.
       const head = 'b'.repeat(40);
       const decision = branch === 'token-refresh' ? route(f) : route(f, head);
+      f.db.prepare('UPDATE reviewed_prs SET review_status = ?').run(status);
       const { bindings, selected } = claimBindings(f, decision, head);
       const snapshot = f.read();
       const expectedClaim = branch === 'token-refresh'
@@ -404,7 +406,7 @@ for (const branch of ['pending', 'token-refresh']) {
       assert.deepEqual(run(`${claimClosure}\n${claimAndFailureLog}`),
         { dispatched: false, reason: 'claim-race-lost' });
       assert.deepEqual(lines, [
-        `[watcher] claim-shape-mismatch branch=${branch} status=pending repo=${REPO} pr=${PR}`,
+        `[watcher] claim-shape-mismatch branch=${branch} status=${status} repo=${REPO} pr=${PR}`,
       ]);
       assert.deepEqual(f.read(), snapshot);
       f.db.exec('DROP TRIGGER refuse_claim');
@@ -412,7 +414,7 @@ for (const branch of ['pending', 'token-refresh']) {
       assert.deepEqual(selected, [expectedClaim, expectedClaim]);
       assert.equal(f.read().reviewer_head_sha, head);
       assert.equal(f.read().review_status, 'reviewing');
-      assert.equal(f.read().review_attempts, branch === 'pending' ? 0 : 1);
+      assert.equal(f.read().review_attempts, branch === 'pending' && status === 'pending' ? 0 : 1);
     } finally { f.db.close(); }
   });
 }

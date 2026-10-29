@@ -1348,6 +1348,28 @@ if (scenario === 'clean') {
   assert.equal((await evaluateHammerStopHold({ ...holdArgs,
     reviewServiceRevision: 'synthetic-deployment-B', deliverAlertImpl: refuse })).action, 'none',
   'retired packaging-only history cannot manufacture another release');
+  const { evaluateCloserHoldsForPoll } = await import('../../src/ama/closer-hold-records.mjs');
+  const legacyArgs = { ...holdArgs, prNumber: prNumber + 3, reviewServiceRevision: null };
+  writeAmaAuditEntry({ ...legacyArgs, now: '2026-01-01T00:02:00Z', attempt: {
+    outcome: 'failed-without-merge', reason: 'verdict-not-eligible', head: headSha, reviewServiceRevision: null } });
+  assert.equal((await evaluateHammerStopHold(legacyArgs)).action, 'hold');
+  const legacyPath = join(rootDir, 'data/follow-up-jobs/hammer-stop-hold',
+    `${repo.replace(/[^A-Za-z0-9._-]/g, '-')}-pr-${legacyArgs.prNumber}.json`);
+  const legacyDoc = JSON.parse(readFileSync(legacyPath, 'utf8'));
+  const legacyEntry = legacyDoc.heads[headSha];
+  assert.equal(legacyEntry.holdVersion, 1);
+  // Reproduce a version-1 record written with unavailable provenance.
+  legacyEntry.gateRevision = { serviceRevision: null, predicateVersion: null };
+  legacyEntry.awaits = legacyEntry.awaits.filter(p => p.kind !== 'gate-revision-change');
+  writeFileSync(legacyPath, JSON.stringify(legacyDoc));
+  const sweepArgs = { ...legacyArgs, subjects: [{ ...legacyArgs, holdMetadata: legacyArgs.prMetadata }] };
+  await evaluateCloserHoldsForPoll({ ...sweepArgs, reviewServiceRevision: 'synthetic-deployment-A' });
+  const anchoredLegacy = JSON.parse(readFileSync(legacyPath, 'utf8')).heads[headSha];
+  assert.equal(anchoredLegacy.gateRevision.serviceRevision, 'synthetic-deployment-A');
+  assert.equal(anchoredLegacy.releasedAt, undefined);
+  assert.equal(anchoredLegacy.deadline, legacyEntry.deadline);
+  await evaluateCloserHoldsForPoll({ ...sweepArgs, reviewServiceRevision: 'synthetic-deployment-B' });
+  assert.deepEqual(JSON.parse(readFileSync(legacyPath, 'utf8')).heads[headSha].releasedBy, ['gate-revision-change']);
   const { runDaemonCleanMergeAttempt } = await import('../../src/daemon-clean-merge.mjs');
   const haltDirectory = join(rootDir, 'hq', 'control', 'halt');
   mkdirSync(haltDirectory, { recursive: true });

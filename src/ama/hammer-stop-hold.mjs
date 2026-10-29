@@ -194,6 +194,27 @@ function readHoldState(rootDir, repo, prNumber) {
   }
 }
 
+// Both admission and skipped-subject sweeps upgrade legacy version-1 holds.
+// Unknown provenance is not an anchor: retry it on a later observation. Once
+// either component is known, preserve that baseline for this refusal.
+export function anchorHammerStopGateRevision(entry, stop, observed) {
+  if ((!stop?.refusal && !entry.refusal) || entry.mode === 'companion') return entry;
+  const known = value => typeof value === 'string' && Boolean(value.trim());
+  const keys = ['serviceRevision', 'predicateVersion'];
+  const baseline = keys.some(key => known(entry.gateRevision?.[key])) ? entry.gateRevision
+    : Object.fromEntries(keys.map(key => [key, stop?.refusal && known(stop.gateRevision?.[key]) ? stop.gateRevision[key]
+      : known(observed?.[key]) ? observed[key] : null]));
+  if (!keys.some(key => known(baseline[key]))) return entry;
+  const awaits = entry.awaits;
+  const predicates = awaits?.filter(p => p.kind === 'gate-revision-change');
+  const needsPredicate = awaits && (predicates.length !== 1
+    || keys.some(key => predicates[0].from?.[key] !== baseline[key]));
+  if (baseline === entry.gateRevision && !needsPredicate) return entry;
+  return { ...entry, gateRevision: baseline,
+    ...(needsPredicate ? { awaits: [...awaits.filter(p => p.kind !== 'gate-revision-change'),
+      { kind: 'gate-revision-change', from: baseline }] } : {}) };
+}
+
 export function normalizeHammerStopHold(entry, { repo, prNumber, headSha, now = new Date().toISOString() } = {}) {
   const firstObservedAt = entry.firstObservedAt || now;
   const companion = entry.mode === 'companion';
@@ -549,14 +570,16 @@ export async function evaluateHammerStopHold({
     if (prior?.refusal && !prior.releasedAt && deterministicRefusal({ ...prior,
       reasons: prior.refusal.reasons }, { repo, prNumber, headSha })) {
       const inputs = hammerStopInputs(prMetadata, { excludeContexts, reviewState });
-      const changed = evaluateHoldRecord(prior, { namespace: rootDir, now, inputs, gateRevision }).changed;
+      const entry = anchorHammerStopGateRevision(prior, stop, gateRevision);
+      const changed = evaluateHoldRecord(entry, { namespace: rootDir, now, inputs, gateRevision }).changed;
       const hammerStop = { headSha, predicate: prior.predicate, deterministic: true,
         refusal: prior.refusal, since: prior.firstObservedAt, paged: Boolean(prior.pagedAt) };
       if (changed.length > 0) {
-        persist({ ...prior, releasedAt: now, releasedBy: changed, releasedInputs: inputs,
+        persist({ ...entry, releasedAt: now, releasedBy: changed, releasedInputs: inputs,
           ...(changed.includes('gate-revision-change') ? { releasedGateRevision: gateRevision } : {}) });
         return { action: 'release', hammerStop, changed };
       }
+      if (entry !== prior) persist(entry);
       return { action: 'hold', hammerStop };
     }
     if (!isInfrastructureStop(prior) || prior.releasedAt) return { action: 'none' };
@@ -605,16 +628,11 @@ export async function evaluateHammerStopHold({
       pagedAt: stop.refusal ? null : prior?.pagedAt || null,
     };
   let dirty = !reuseEntry || prior.stopKey !== stop.stopKey || prior.holdVersion !== 1;
-  // Legacy stops have no code provenance. Anchor them at first observation,
+  // Legacy stops have no code provenance. Anchor them at first known observation,
   // rather than guessing which previous deployment made the decision. Preserve
   // that baseline across repeated audits of the same refusal and restarts.
-  if (stop.refusal && !entry.gateRevision) {
-    entry.gateRevision = {
-      serviceRevision: stop.gateRevision?.serviceRevision || gateRevision.serviceRevision,
-      predicateVersion: stop.gateRevision?.predicateVersion || gateRevision.predicateVersion,
-    };
-    dirty = true;
-  }
+  const anchored = anchorHammerStopGateRevision(entry, stop, gateRevision);
+  if (anchored !== entry) { entry = anchored; dirty = true; }
   if (!stop.refusal && !entry.retryAfter) {
     entry = { ...entry, mode: 'transient', reasons: classifiedStopReasons(stop),
       retryAfter: new Date(Date.parse(now) + HAMMER_TRANSIENT_STOP_BACKOFF_MS).toISOString() };
@@ -623,7 +641,7 @@ export async function evaluateHammerStopHold({
   entry = normalizeHammerStopHold(entry, { repo, prNumber, headSha, now });
   // Rebuild predicates from the current stop baseline, including legacy audit inputs.
   entry = createHoldRecord({ ...entry, excludeContexts, awaits: [...inputChangePredicates(stopBaseline(stop, entry.inputs)),
-    ...(stop.refusal ? [{ kind: 'gate-revision-change', from: entry.gateRevision }] : []),
+    ...(stop.refusal && entry.gateRevision ? [{ kind: 'gate-revision-change', from: entry.gateRevision }] : []),
     ...['hold-released', 'github-gate-cleared', 'primary-change-evidence', 'conflicting'].map(name => ({ kind: 'event', name, ...(name === 'conflicting' ? { fallback: true } : {}) })),
     ...(entry.retryAfter ? [{ kind: 'retry-at', at: entry.retryAfter, fallback: true, changed: 'transient-stop-backoff' }] : [])] });
   let evaluation;

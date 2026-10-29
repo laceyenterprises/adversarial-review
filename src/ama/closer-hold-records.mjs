@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { classifyCheckRollup } from '../checks-summary.mjs';
-import { hammerStopInputs, normalizeHammerStopHold, readHammerStopForHead, isInfrastructureStop } from './hammer-stop-hold.mjs';
+import { anchorHammerStopGateRevision, hammerStopInputs, normalizeHammerStopHold, readHammerStopForHead, isInfrastructureStop } from './hammer-stop-hold.mjs';
 import { normalizeOperatorLabelHold } from './operator-label-gates.mjs';
 import { normalizeStackedBaseHold } from './stacked-base.mjs';
 import { assertHoldRecord, evaluateHoldRecord, holdEvaluatedThisPoll, markHoldEscalated } from './hold-record.mjs';
@@ -58,7 +58,9 @@ export async function evaluateCloserHoldsForPoll({ rootDir, hqRoot = rootDir, su
       || (metadata.state && String(metadata.state).toUpperCase() !== 'OPEN')) continue;
     for (const stored of readCloserHoldRecords({ rootDir, repo, prNumber, headSha })) {
       if (stored.error) { logger.warn?.(`Closer hold unreadable: ${stored.error.code || 'invalid-record'}`); continue; }
-      const { record, path, raw, document, type } = stored;
+      const { path, raw, document, type } = stored;
+      let { record } = stored;
+      let revisionUpdated = false;
       if (holdEvaluatedThisPoll(record, rootDir)) continue;
       if (type === 'hammer-stop') {
         // A receipt cannot invent a stop after audit retention or success. The
@@ -66,6 +68,12 @@ export async function evaluateCloserHoldsForPoll({ rootDir, hqRoot = rootDir, su
         const stop = readHammerStopForHead({ hqRoot, repo, prNumber, headSha, reviewedSha: subject.reviewedSha, logger });
         const sameRefusal = record.refusal && record.refusal.key === stop?.refusal?.key;
         if (!stop || (stop.stopKey !== record.stopKey && !sameRefusal && !isInfrastructureStop(stop))) continue;
+        if (record.refusal) {
+          const anchored = anchorHammerStopGateRevision(record, stop, {
+            serviceRevision: reviewServiceRevision, predicateVersion: gatePredicateVersion });
+          revisionUpdated = anchored !== record;
+          record = anchored;
+        }
       }
       const inputs = hammerStopInputs(metadata, { excludeContexts: record.excludeContexts || [] });
       // Review fingerprints require the owner's complete review snapshot. Missing
@@ -82,7 +90,8 @@ export async function evaluateCloserHoldsForPoll({ rootDir, hqRoot = rootDir, su
       if ((metadata.baseBranch || metadata.baseRefName) && (metadata.baseBranch || metadata.baseRefName) === metadata.defaultBranch) events['stacked-base-cleared'] = true;
       const evaluation = evaluateHoldRecord(record, { now, namespace: rootDir, inputs, events,
         gateRevision: { serviceRevision: reviewServiceRevision, predicateVersion: gatePredicateVersion } });
-      if (evaluation.action !== 'release' && !evaluation.escalate) continue;
+      const canEscalate = evaluation.escalate && (type === 'stacked-base' || typeof deliverAlertImpl === 'function');
+      if (evaluation.action !== 'release' && !canEscalate && !revisionUpdated) continue;
       const lock = `${path}.lock`;
       let claimed = false;
       let claimedInode;
@@ -106,14 +115,13 @@ export async function evaluateCloserHoldsForPoll({ rootDir, hqRoot = rootDir, su
           updated.releasedInputs = inputs;
           if (evaluation.changed.includes('gate-revision-change')) updated.releasedGateRevision = {
             serviceRevision: reviewServiceRevision, predicateVersion: gatePredicateVersion };
-        } else {
+        } else if (canEscalate) {
           const text = `Closure hold ${repo} PR ${prNumber}: ${record.reason}; owner=${record.owner}; deadline=${record.deadline}; awaits=${JSON.stringify(record.awaits)}`;
           if (type === 'stacked-base') {
             // Its existing escalation is the retarget comment, owned by the
             // normal guard. Do not add a second external notification path.
             logger.warn?.(text);
           } else {
-            if (typeof deliverAlertImpl !== 'function') continue;
             await deliverAlertImpl(text, { event: record.onDeadline, payload: { repo, prNumber, headSha,
               owner: record.owner, reason: record.reason, deadline: record.deadline, awaits: record.awaits } });
             markHoldEscalated(record, rootDir);

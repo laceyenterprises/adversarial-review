@@ -79,6 +79,8 @@ const claimClosure = between('            const claimBranch = tokenRefreshRecove
   '            const claim = (holdReleaseId');
 const claimAndFailureLog = between('            const claim = (holdReleaseId',
   "            if (route.reviewerModel === 'codex')");
+const snapshotDiagnostic = between('              // PENDINGCLAIM-03:',
+  '              console.log(unchangedShape && snapshotClaimable');
 const parkUnknown = between('        if (unknownFailureClass) {\n          finalizePendingTerminalFailureState(current);',
   "        if (populationRetry.matched && populationRetry.action === 'exhausted')");
 
@@ -100,9 +102,16 @@ const cases = [
   ['token refresh control', '[token-refresh-pending] synthetic hold', 'stmtMarkTokenRefreshRecoveryAttemptStarted'],
 ];
 
-function fixture(overrides = {}) {
+function fixture(overrides = {}, { nullableStates = false } = {}) {
   const db = new Database(':memory:');
   ensureReviewStateSchema(db);
+  if (nullableStates) {
+    // Exercise legacy NULL states against the real CASes, including COALESCE.
+    // Only this empty in-memory table relaxes today's NOT NULL declarations.
+    const { sql } = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'reviewed_prs'").get();
+    db.exec('DROP TABLE reviewed_prs');
+    db.exec(sql.replace(/\b(pr_state|review_status)(\s+TEXT) NOT NULL/g, '$1$2'));
+  }
   const row = {
     repo: REPO, pr_number: PR, reviewed_at: FAILED_AT, reviewer: 'codex', pr_state: 'open',
     review_status: 'pending', review_attempts: 1, failed_at: FAILED_AT,
@@ -317,6 +326,9 @@ for (const [name, message, expectedClaim] of [
     ...(name === 'pending' ? ['failed'] : []),
     ...(['pending', 'token refresh control'].includes(name) ? [] : ['pending-upstream'])];
   const unsupportedSnapshots = unsupportedStatuses.map(status => [status, { review_status: status }]);
+  if (['pending', 'token refresh control', 'daemon bounce'].includes(name)) {
+    unsupportedSnapshots.push(['merged pending', { pr_state: 'merged' }]);
+  }
   if (name !== 'pending') {
     unsupportedSnapshots.push(['pending without failure timestamp', { failed_at: null }],
       ['pending with empty failure timestamp', { failed_at: '' }]);
@@ -415,6 +427,70 @@ for (const [branch, status] of ['pending', 'token-refresh'].flatMap(branch =>
       assert.equal(f.read().reviewer_head_sha, head);
       assert.equal(f.read().review_status, 'reviewing');
       assert.equal(f.read().review_attempts, branch === 'pending' && status === 'pending' ? 0 : 1);
+    } finally { f.db.close(); }
+  });
+}
+
+// Keep admission fixed while varying the captured row: queueing can outlive
+// admission. Run the exact production claim closure with its prepared CASes,
+// then evaluate the exact diagnostic on the pre-claim snapshot.
+for (const [name, message, expectedClaim] of [
+  ...cases,
+  ['pending', null, 'stmtMarkAttemptStarted'],
+]) {
+  test(`PENDINGCLAIM-03 snapshot/CAS parity: ${name}`, () => {
+    const f = fixture({ failure_message: message }, { nullableStates: true });
+    try {
+      const decision = route(f);
+      const original = f.read();
+      const fields = ['review_status', 'pr_state', 'failed_at', 'reviewer_head_sha',
+        'review_attempts', 'infra_auto_recover_attempts', 'review_population_retry_attempts',
+        'review_population_retry_head_sha', 'failure_message'];
+      const reset = f.db.prepare(`UPDATE reviewed_prs SET ${fields.map(field => `${field} = ?`).join(', ')}`);
+      const budgets = [
+        { review_attempts: 0 },
+        { review_attempts: 1 },
+        { review_attempts: 3, infra_auto_recover_attempts: 3,
+          review_population_retry_attempts: 1, review_population_retry_head_sha: HEAD },
+        { review_attempts: 4, infra_auto_recover_attempts: 4,
+          review_population_retry_attempts: 2, review_population_retry_head_sha: 'b'.repeat(40) },
+      ];
+      let checked = 0;
+      for (const review_status of ['pending', 'pending-upstream', 'failed', 'reviewing', 'posted', 'failed-orphan', 'skipped', null]) {
+        for (const pr_state of ['open', null, 'closed', 'merged']) {
+          for (const failed_at of [FAILED_AT, null, '']) {
+            for (const reviewer_head_sha of [HEAD, 'b'.repeat(40), null, '']) {
+              for (const budget of budgets) {
+                const row = { ...original, review_status, pr_state, failed_at, reviewer_head_sha, ...budget };
+                reset.run(...fields.map(field => row[field]));
+                const { bindings, selected } = claimBindings(f, decision);
+                const claimable = execute(`${claimClosure}\n${snapshotDiagnostic}\nreturn snapshotClaimable;`, bindings);
+                const result = execute(`${claimClosure}\nreturn claimReviewer();`, bindings);
+                assert.deepEqual(selected, [expectedClaim]);
+                assert.equal(claimable, result.changes === 1, JSON.stringify({ name, ...row }));
+                if (!claimable) assert.deepEqual(f.read(), bindings.current, 'refused CAS leaves row unchanged');
+                checked++;
+              }
+            }
+          }
+        }
+      }
+      assert.equal(checked, 1536);
+      // Message fences and the infra cascade bypass are also part of WHERE.
+      for (const failure_message of [message, null, '', '[other] Command failed with code 1',
+        'COMMAND EXITED WITH CODE 1', '[UNKNOWN] non-zero exit code 1', 'non-zero exit 1',
+        'no GitHub review was found', 'generated but not posted',
+        'broker claude reviewer token expires too soon for subprocess handoff']) {
+        for (const cascadeRetryDue of [false, true]) {
+          const row = { ...original, failure_message, infra_auto_recover_attempts: 3 };
+          reset.run(...fields.map(field => row[field]));
+          const { bindings } = claimBindings(f, decision);
+          bindings.cascadeRetryDue = cascadeRetryDue;
+          const claimable = execute(`${claimClosure}\n${snapshotDiagnostic}\nreturn snapshotClaimable;`, bindings);
+          const result = execute(`${claimClosure}\nreturn claimReviewer();`, bindings);
+          assert.equal(claimable, result.changes === 1, JSON.stringify({ name, failure_message, cascadeRetryDue }));
+        }
+      }
     } finally { f.db.close(); }
   });
 }

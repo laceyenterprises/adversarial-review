@@ -3513,16 +3513,38 @@ export async function processReviewSubject(entry, ctx) {
                 ['review_status', 'reviewer_session_uuid', 'failed_at'].every(
                   field => afterClaim[field] === current[field]
                 );
-              // PENDINGCLAIM-02: an unchanged row is only a mismatch signal
-              // when the snapshot had a shape targeted by the selected CAS.
-              // Plain pending allows moved heads; token refresh fences the
-              // snapshot head passed to its CAS, not reviewerHeadSha.
-              const snapshotClaimable = claimBranch === 'pending'
-                ? ['pending', 'pending-upstream'].includes(current?.review_status)
-                : claimBranch === 'token-refresh'
-                  ? ['failed', 'pending-upstream'].includes(current?.review_status) ||
-                    (current?.review_status === 'pending' && Boolean(current.failed_at && current.reviewer_head_sha))
-                  : reviewRowInTerminalFailureState(current, reviewerHeadSha);
+              // PENDINGCLAIM-03: mirror each selected CAS's WHERE, not the
+              // stricter admission classifier. These helpers affect logs only.
+              const terminalSnapshot = evidence => current?.review_status === 'failed' ||
+                (current?.review_status === 'pending' && Boolean(current.failed_at) && evidence);
+              const message = (current?.failure_message ?? '').toLowerCase();
+              const snapshotClaimableByBranch = {
+                pending: () => ['pending', 'pending-upstream'].includes(current?.review_status) &&
+                  current.pr_state !== 'merged',
+                'token-refresh': () => (
+                  ['failed', 'pending-upstream'].includes(current?.review_status) ||
+                  (current?.review_status === 'pending' && Boolean(current.failed_at && current.reviewer_head_sha))
+                ) && current.pr_state !== 'merged' && (
+                  message.startsWith('[token-refresh-pending]') ||
+                  message.includes('broker claude reviewer token expires too soon for subprocess handoff')
+                ),
+                'daemon-bounce': () => terminalSnapshot(true) && current.pr_state !== 'merged' &&
+                  message.startsWith('[daemon-bounce]') &&
+                  (current.infra_auto_recover_attempts ?? 0) < INFRA_AUTO_RECOVER_CAP,
+                infra: () => terminalSnapshot(Boolean(current?.failed_at && current?.reviewer_head_sha)) &&
+                  ((current.infra_auto_recover_attempts ?? 0) < INFRA_AUTO_RECOVER_CAP || cascadeRetryDue),
+                'review-population': () => terminalSnapshot(current?.reviewer_head_sha != null &&
+                  reviewerHeadSha != null && current.reviewer_head_sha === reviewerHeadSha) && (
+                  (current.review_population_retry_head_sha ?? '') !== (reviewerHeadSha ?? '') ||
+                  current.review_population_retry_attempts < reviewPopulationRetryConfig.maxAttempts
+                ) && /no github review[\s\S]*found|generated-but-not-posted|generated but not posted/.test(message),
+                'unknown-failure': () => terminalSnapshot(current?.reviewer_head_sha != null &&
+                  reviewerHeadSha != null && current.reviewer_head_sha === reviewerHeadSha) &&
+                  current.review_attempts < REVIEW_UNKNOWN_FAILURE_MAX_RETRIES &&
+                  /command failed with code |command exited with code |non-zero exit code |non-zero exit /.test(message) &&
+                  (message.startsWith('[unknown]') || !/^\[[\s\S]*\]/.test(message)),
+              };
+              const snapshotClaimable = snapshotClaimableByBranch[claimBranch]();
               console.log(unchangedShape && snapshotClaimable
                 ? `[watcher] claim-shape-mismatch branch=${claimBranch} status=${afterClaim.review_status} repo=${repoPath} pr=${prNumber}`
                 : `[watcher] Lost claim race on ${repoPath}#${prNumber} snapshot_status=${current?.review_status ?? 'missing'} — another watcher is handling this PR (or its row is now in a non-claimable state). Skipping.`

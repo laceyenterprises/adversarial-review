@@ -5,7 +5,7 @@ import { infrastructureOnlyFailures } from './ci-infrastructure.mjs';
 import { recoverInfrastructureChecks } from './ci-recovery.mjs';
 import { recoverInfrastructureCiStops } from './remediation-ci-infrastructure.mjs';
 import { evaluateHammerStopHold } from './ama/hammer-stop-hold.mjs';
-import { deriveNextActionSnapshot, hasLiveRemediationJob, nextAction } from './pr-next-action.mjs';
+import { deriveNextActionSnapshot, hasLiveRemediationJob, isClosureRecoveryDecision, nextAction } from './pr-next-action.mjs';
 import { withDaemonMergeReservation } from './ama/merge-lease.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { withClosureEvaluationReadCache } from './closure-evaluation-cache.mjs';
@@ -844,6 +844,7 @@ async function maybeDispatchAmaClosureForInner({
       observeWaitImpl: options.observeClosureWaitImpl || observeClosureWait });
   } catch (error) { options.logger?.warn?.(`[watcher] snapshot-refresh loop observation failed: ${error.message}`); }
   if (finalRoundSink.value
+    && !isClosureRecoveryDecision(result?.nextAction)
     && result?.reason !== 'hammer-stop-awaiting-companion'
     && !(result?.boundedWait && ['review', 'remediate', 'wait-for-CI'].includes(result.nextAction?.action))
     && !result?.daemonCleanMerge?.reason?.startsWith('fleet-stop-')
@@ -3048,9 +3049,10 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
     }
     return orphan;
   };
-  // A scoped operator request already has an executor below. Deadline recovery
-  // must not intercept that request; its safety and live-lease gates still apply.
-  if (!mergeAgentRequestedScoped && overdueNextAction(amaClosureResult?.nextAction, candidate?.headSha || currentRevisionRef,
+  // Ordinary scoped operator requests have an executor below. Recovery expiry
+  // must still dispatch or report its blocker; all safety/lease gates apply.
+  if ((!mergeAgentRequestedScoped || isClosureRecoveryDecision(amaClosureResult?.nextAction))
+    && overdueNextAction(amaClosureResult?.nextAction, candidate?.headSha || currentRevisionRef,
     orphanOptions.now, orphanOptions.env)) {
     const orphan = await recoverOwnerless();
     if (orphan) return orphan;

@@ -34,8 +34,8 @@ export const NEXT_ACTION_ACTORS = Object.freeze([
 
 // Proposed deadline targets (spec). The observer bound is the legacy pending-gate
 // bound and the live-owner windows are the closer-lease reclaim ages, unscaled:
-// the executing paths keep their own load-aware bounds. Deadlines report; they
-// never refuse work.
+// the executing paths keep their own load-aware bounds. Recovery expiry dispatches
+// or escalates through the existing admission/watchdog; it never refuses work.
 export const NEXT_ACTION_DEADLINE_MS = Object.freeze({
   refresh: 60_000,
   admission: 5 * 60_000,
@@ -620,6 +620,36 @@ function constraintFor(facts, selected) {
   return null;
 }
 
+// One expiry rule for every recovery row. Only recoveries with readable absence
+// and no input/safety blocker can enter hammer admission. All other rows retain
+// recovery ownership for the watchdog's once-per-transition escalation.
+function recoverLapsedRow(facts, selected) {
+  if (!facts.recoveryExpired || selected.actor !== 'closure-recovery') return selected;
+  const { lease, launch, policy, controls, remediation, review } = facts;
+  const cap = policy?.hammerCap;
+  const absent = lease.known && launch.known && (!launch.present || launch.owned === false)
+    && !launch.retryChainUnreadable && !remediation.jobLive && !review.live
+    && !(lease.present && ['pending', 'dispatched'].includes(lease.status)
+      && !(launch.forHead && launch.owned === false)
+      && (lease.deadlineMs === null || facts.observedMs < lease.deadlineMs));
+  const blocked = policy?.autonomousMergeExecutionEnabled !== true
+    || controls?.safetyRefusal?.deterministic === true || controls?.stop?.deterministic === true
+    || (facts.labels || []).some(label => OPERATOR_HOLD_LABELS.includes(label.name))
+    || facts.progress?.primaryChange?.ok === false || facts.progress?.diffEmpty === true
+    || (launch.forHead && launch.outcome === 'no-merge' && launch.retryable === false)
+    || cap?.lifetimeExhausted === true
+    || (cap?.retryExhausted === true && (!text(cap.headSha) || sameHead(cap.headSha, facts.head)));
+  // A read/structural refusal needs new evidence, and stops/caps need input.
+  // Never erase those facts merely because their recovery clock expired.
+  if (!absent || blocked || !['lease-expired', 'merge-receipt-unconfirmed'].includes(selected.reason)) return selected;
+  return { ...selected, action: 'hammer', actor: 'hammer', queue: 'dispatch',
+    refs: [...(selected.refs || []), 'recovery-deadline-lapsed'] };
+}
+
+export function isClosureRecoveryDecision(decision) {
+  return decision?.actor === 'closure-recovery' || decision?.deadline?.class === 'recovery';
+}
+
 /**
  * The shared decision contract.
  * @param {object} snapshot frozen NXA-01 pass snapshot
@@ -638,7 +668,7 @@ export function nextAction(snapshot) {
     const recovery = deadline(snapshot, facts, 'recovery');
     facts.recoveryExpired = facts.observedMs !== null && recovery.at !== null
       && facts.observedMs >= timeMs(recovery.at);
-    selected = selectRow(facts);
+    selected = recoverLapsedRow(facts, selectRow(facts));
   } catch {
     // Totality: malformed evidence is an owned refresh, never an exception.
     facts = snapshotFacts(null);

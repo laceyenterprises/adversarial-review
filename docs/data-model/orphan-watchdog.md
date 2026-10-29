@@ -22,7 +22,9 @@ clock as absence of an owner. A proven owner clears `idleSince`.
 `OWNERLESS_BOUND_MS` defaults to 15 minutes. `OWNERPROOF_IDLE_MINUTES` accepts a
 positive numeric override; invalid values retain the default. `ownership.idleSince` stores
 the first PR-wide observation without a proven owner, across head changes. Poll frequency does not affect
-the bound. Held, draft and terminal PRs do not enter recovery.
+the bound. Explicit operator-hold decisions, draft and terminal PRs do not enter
+recovery. A selected closure-recovery row under an automated hold still reports
+its expiry; any observed hold label always fences launch admission.
 
 A head-bound shared reviewer dispatch can execute before the idle bound after
 proving ownership absent. The existing `heads.rereview` reservation permits one
@@ -85,7 +87,15 @@ ledger and pager functions.
 
 ## Deadline-bound ownership (OWNERDEADLINE-01)
 
-For a matching-head shared next action overdue by `ownerlessBoundMs`, recovery
+For a matching-head closure-recovery action, RECOVERYDEADLINE-01 handles expiry
+on the first due wake, bypassing the additional `ownerlessBoundMs` grace and idle
+threshold. Recoverable receipts/expired leases select hammer through the shared
+policy and existing lease; unreadable/input-dependent evidence, deferrals and
+refused dispatches page once through `transition_pages`. The page includes
+evidence references as well as row, reason and deadline. Ordinary actions retain
+their existing grace. No schema or attempt-budget changes.
+
+For any other matching-head shared next action overdue by `ownerlessBoundMs`, recovery
 uses the earlier of `ownership.idleSince` and `nextAction.deadline.at`. A fresh
 request timestamp cannot extend this deadline. Current-head live processes,
 live launches/retries and fresh lease evidence still hold dispatch. A

@@ -41,7 +41,7 @@ Directory: `data/hammer-wakes/`
 | `prNumber` | positive integer | Pull request number. Invalid, zero, fractional, boolean, null, or blank values are rejected before reservation. |
 | `headSha` | string | Live PR head SHA admitted for the wake. |
 | `eligibilityReason` | string | `shared-next-action` for the adopted caller; retained legacy reasons continue to identify older records. |
-| `wakeAttemptKey` | optional string | Shared routing uses `initial`, or the completed launch receipt ID for a retryable no-merge decision (numeric decision attempt when no receipt ID is available); completed retry descendant IDs add a stable set digest because fleet retries reuse ancestor receipts. Independent of reason/deadline changes. |
+| `wakeAttemptKey` | optional string | Shared routing uses `initial`, or the completed launch receipt ID for a retryable no-merge decision (numeric decision attempt when no receipt ID is available); completed retry descendant IDs add a stable set digest because fleet retries reuse ancestor receipts. Independent of reason/deadline changes for ordinary retries. RECOVERYDEADLINE-01 recovery dispatch uses `recovery:<row>:<reason>:<anchoredAt>:<retry-identity-or-initial>` so an earlier initial wake cannot swallow expiry; repeated clocks preserve this key. |
 | `nextAction` | optional object | Shared action, actor, original reason, deadline, head, decision key, evidence references, queue intent/deferral, pass ID and generation. No raw evidence. |
 | `observedAt` | string | ISO-8601 time when the eligible snapshot was observed. |
 | `outcome` | string | `reserved`, `requested`, or `failed`. Returned events may also report `skipped` or `duplicate` without replacing a requested audit file. |
@@ -60,7 +60,7 @@ Directory: `data/hammer-wakes/`
   runner-less checks, drain/capacity, durable anchors and semantic rebase proof.
   Retained dispatch receipts supply launch evidence even after lease removal;
   retry descendants are read through the existing bounded ledger reader.
-  Sticky succeeded receipts select remote receipt reconciliation, not retry.
+  Sticky succeeded receipts select remote receipt reconciliation until the recovery deadline; readable ownerless expiry then selects leased hammer admission. Unreadable recovery wakes remain retryable without launch permission.
 - Shared latency events carry the original decision reason and `nextAction`
   projection. Only daemon-merge wakes end `clean_verdict_to_hammer_wake`;
   repair wakes remain in telemetry. Older events retain their existing filter.

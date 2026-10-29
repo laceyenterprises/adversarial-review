@@ -423,6 +423,37 @@ if (scenario === 'clean') {
     assert.equal(resolved.decision.row, 'R08-retry');
     assert.equal(resolved.decision.queue.intent, 'dispatch');
   } finally { dispatchReadTransport.lookup = originalLookup; }
+  // RECOVERYDEADLINE-01: non-R04 recovery uses the same deadline, lease and
+  // durable per-transition page receipt, including after repeated wakes.
+  const { recoverOrphan } = await import('../../src/ama/orphan-watchdog.mjs');
+  const deadlineRoot = join(rootDir, 'recovery-deadline');
+  const deadlineSnapshot = deriveNextActionSnapshot({ base: recovery, observations: {
+    leases: { closer: null }, launches: { closer: null },
+    progress: { mergeReceipt: { merged: true, headSha: terminalHead, path: 'hammer' } },
+  } });
+  const deadlineReceipt = nextAction(deadlineSnapshot);
+  assert.equal(deadlineReceipt.row, 'R06-merge-receipt');
+  assert.equal(deadlineReceipt.actor, 'hammer');
+  let deadlineLaunches = 0, deadlinePages = 0;
+  const deadlineArgs = { rootDir: deadlineRoot, repo: 'example/recovery', prNumber: 7,
+    headSha: terminalHead, candidate: { prState: 'OPEN' }, now: deadlineSnapshot.observedAt,
+    logger: { log() {}, info() {}, warn() {} },
+    dispatchHammer: async () => {
+      assert.equal(acquireAmaCloserLease({ rootDir: deadlineRoot, repo: 'example/recovery', prNumber: 7,
+        headSha: terminalHead, watcherPid: process.pid, now: deadlineSnapshot.observedAt }).acquired, true);
+      deadlineLaunches++;
+      return { dispatched: true };
+    }, pageImpl: async () => { deadlinePages++; return { queued: true }; } };
+  for (let wake = 0; wake < 2; wake++) await recoverOrphan({ ...deadlineArgs,
+    result: { amaEnabled: true, nextAction: deadlineReceipt } });
+  assert.deepEqual([deadlineLaunches, deadlinePages], [1, 0]);
+  const gateFailure = nextAction(deriveNextActionSnapshot({ base: deadlineSnapshot, observations: {
+    progress: { primaryChange: { ok: false, headSha: terminalHead, reason: 'history-read-failed' } },
+  } }));
+  for (let wake = 0; wake < 2; wake++) await recoverOrphan({ ...deadlineArgs,
+    hasOwnerImpl: async () => ({ owned: false }),
+    result: { amaEnabled: true, recoveryWait: true, nextAction: gateFailure } });
+  assert.deepEqual([deadlineLaunches, deadlinePages], [1, 1]);
   for (const [name, observations, action, actor] of actionCases) {
     const shared = matrixPair(observations);
     assert.deepEqual([shared.decision.action, shared.decision.actor], [action, actor], name);

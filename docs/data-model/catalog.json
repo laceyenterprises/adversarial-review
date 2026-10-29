@@ -283,6 +283,7 @@
     },
     {
       "id": "ama-audit",
+      "gateRevisionProvenance": "HOLDGATEVERSION-01: new attempts record reviewServiceRevision from loaded service code; optional producer gatePredicateVersion survives immutable append and hold projection.",
       "hammerCapturedBase": "rebasedOntoBase is empty after verification unless the captured base is proved an ancestor of the produced head; FIFO capture alone is not rebase provenance. Existing successful retry rebases retain their proved target.",
       "docsFastPathRange": "Terminal metadata records the latest eligible immutable base/head comparison on the same leased base branch; live gates precede attestation recording on every transport attempt. Record failures are deferred with exitCode, signal, stderrTail (redacted, at most 2000 characters), error, retryAfter, needsOperator and parkReason. Exact-head history permits three failures with 60s then 120s backoff and parks subsequent ticks without writes; legacy failure entries also count.",
       "docsFastPathFields": ["closureAuthority=docs-fast-path", "mergeAccountability=docs-fast-path", "docsFastPath.headSha", "docsFastPath.baseSha", "docsFastPath.baseBranch", "attempts[].reason=attestation-record-failed"],
@@ -879,6 +880,7 @@
     },
     {
       "id": "hammer-stop-hold",
+      "gateRevisionRecovery": "HOLDGATEVERSION-01: deterministic refusal holds record gateRevision with the audit reviewServiceRevision and optional gatePredicateVersion, falling back to the first known loaded service or predicate provenance for legacy stops; missing/all-null anchors defer until a known observation. Admission and skipped-subject sweeps durably install the baseline and predicate on version-1 records under existing persistence fences, preserving deadlines and delivery receipts. gate-revision-change releases on a known differing service or predicate version; missing readings do not prove change. Durable release receipts survive polls/restarts; new stops under the deployed revision hold again. Normal admission and skipped-subject sweeps share evaluation. Transient/companion waits, terminal guards, leases and head/series/lifetime caps remain authoritative; no refunds, new gates or config.",
       "companionRecovery": "mode companion records companion identity/merge commit/path, phase events, deadline, owner and once-only escalation. Only base gitlink ancestry releases ordinary admission; pure-wait charges are credited once.",
       "ciInfrastructureRelease": "All recorded CI failures require shared zero-step or billing/quota evidence; fresh open/current-head successful replacements release with ci-infrastructure-recovered and credit exact infrastructure dispatch charges once. Real/mixed failures remain held.",
       "title": "Hammer Stop Hold",
@@ -900,7 +902,7 @@
       "headRetention": { "clearOnCurrentHeadChange": true, "defensiveMaxEntries": 8, "ttl": null },
       "baseline": "Comparable terminal audit head/base/mergeability readings, with mergeability trimmed and uppercased as for live metadata; other inputs, including the canonical closer review fingerprint, come from first observation or prior release, never synthetic eligibility-trace review fields. Review-required predicates additionally accept exact-head posted_at strictly after the terminal timestamp, including before first observation; this receipt requires a matching local posted row, so live bodies alone cannot provide posting-time release before SQLite reconciliation",
       "transientRecovery": "CLOSERSTOPTRANSIENT-01: only all-listed actionable reasons form a deterministic refusal. Other stops persist mode=transient, reasons and retryAfter for five-minute bounded retry admission; next-action projections carry deterministic=false. Legacy transient-only entries release once with transient-stop-upgrade, even without retained audit history (cleanup returns none). Releases log reasons and stopKey; no executed-attempt refunds or cap resets.",
-      "releaseDimensions": ["head", "base", "mergeability", "checks", "review", "conflicting", "primary-change-evidence", "hold-released", "github-gate-cleared", "infrastructure-stop", "ci-infrastructure-recovered", "transient-stop-backoff", "transient-stop-upgrade"]
+      "releaseDimensions": ["head", "base", "mergeability", "checks", "review", "conflicting", "primary-change-evidence", "hold-released", "github-gate-cleared", "infrastructure-stop", "ci-infrastructure-recovered", "transient-stop-backoff", "transient-stop-upgrade", "gate-revision-change"]
     },
     {
       "id": "ama-closer-leases",

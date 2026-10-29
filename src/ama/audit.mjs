@@ -51,6 +51,7 @@ import { closeSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFi
 import { dirname, join } from 'node:path';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
+import { REVIEW_SERVICE_REVISION } from '../review-service-revision.mjs';
 
 const AUDIT_FILE_MODE = 0o640;
 const AUDIT_LOCK_RETRY_MS = 10;
@@ -166,7 +167,7 @@ function normalizedAttempts(existing) {
 }
 
 function buildAttempt(attemptNumber, timestamp, attempt) {
-  return { ...attempt, attemptNumber, startedAt: timestamp };
+  return { reviewServiceRevision: REVIEW_SERVICE_REVISION, ...attempt, attemptNumber, startedAt: timestamp };
 }
 
 function deriveReconciliation(existing, attempt, timestamp) {

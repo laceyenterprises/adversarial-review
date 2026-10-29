@@ -6,6 +6,7 @@ import { createHistoryReader } from './history-reader.mjs';
 import { HISTORY_READ_ERROR_LIMIT } from './history-read-policy.mjs';
 import { refundOperatorHeldHammerStop } from './operator-hold-refund.mjs';
 import { readLatestHoldRelease } from '../operator-hold-release.mjs';
+import { REVIEW_SERVICE_REVISION } from '../review-service-revision.mjs';
 import { companionOnlyStop, evaluateCompanionWait, COMPANION_FLOAT_WAIT_MS } from './companion-stop-wait.mjs';
 // CLOSERSTOPTRANSIENT-01: the historical input-change rule below applies only
 // to explicitly listed deterministic refusals. Other no-merge stops use a
@@ -193,6 +194,27 @@ function readHoldState(rootDir, repo, prNumber) {
   }
 }
 
+// Both admission and skipped-subject sweeps upgrade legacy version-1 holds.
+// Unknown provenance is not an anchor: retry it on a later observation. Once
+// either component is known, preserve that baseline for this refusal.
+export function anchorHammerStopGateRevision(entry, stop, observed) {
+  if ((!stop?.refusal && !entry.refusal) || entry.mode === 'companion') return entry;
+  const known = value => typeof value === 'string' && Boolean(value.trim());
+  const keys = ['serviceRevision', 'predicateVersion'];
+  const baseline = keys.some(key => known(entry.gateRevision?.[key])) ? entry.gateRevision
+    : Object.fromEntries(keys.map(key => [key, stop?.refusal && known(stop.gateRevision?.[key]) ? stop.gateRevision[key]
+      : known(observed?.[key]) ? observed[key] : null]));
+  if (!keys.some(key => known(baseline[key]))) return entry;
+  const awaits = entry.awaits;
+  const predicates = awaits?.filter(p => p.kind === 'gate-revision-change');
+  const needsPredicate = awaits && (predicates.length !== 1
+    || keys.some(key => predicates[0].from?.[key] !== baseline[key]));
+  if (baseline === entry.gateRevision && !needsPredicate) return entry;
+  return { ...entry, gateRevision: baseline,
+    ...(needsPredicate ? { awaits: [...awaits.filter(p => p.kind !== 'gate-revision-change'),
+      { kind: 'gate-revision-change', from: baseline }] } : {}) };
+}
+
 export function normalizeHammerStopHold(entry, { repo, prNumber, headSha, now = new Date().toISOString() } = {}) {
   const firstObservedAt = entry.firstObservedAt || now;
   const companion = entry.mode === 'companion';
@@ -203,6 +225,7 @@ export function normalizeHammerStopHold(entry, { repo, prNumber, headSha, now = 
     : entry.releasedAt && !entry.inputs && entry.releasedBy?.length
       ? entry.releasedBy.map(name => ({ kind: 'event', name, ...(name === 'conflicting' ? { fallback: true } : {}) }))
       : [...inputChangePredicates(entry.inputs),
+      ...(entry.refusal && entry.gateRevision ? [{ kind: 'gate-revision-change', from: entry.gateRevision }] : []),
       ...['hold-released', 'github-gate-cleared', 'primary-change-evidence', 'conflicting'].map(name => ({ kind: 'event', name, ...(name === 'conflicting' ? { fallback: true } : {}) })),
       ...(entry.retryAfter ? [{ kind: 'retry-at', at: entry.retryAfter, fallback: true, changed: 'transient-stop-backoff' }] : [])];
   return normalizeHoldRecord(entry, { holdType: 'hammer-stop', repo, prNumber, headSha,
@@ -359,6 +382,8 @@ export function readHammerStopForHead({
     reasons: stopReasons(attempt),
     refusal,
     deterministic: Boolean(refusal),
+    gateRevision: { serviceRevision: attempt?.reviewServiceRevision || null,
+      predicateVersion: attempt?.gatePredicateVersion || null },
     closingStatus: oneLine(attempt?.closingStatus, attempt?.reason === 'history-read-failed' ? HISTORY_READ_ERROR_LIMIT : TEXT_LIMIT),
     ...(attempt?.historyReadError || attempt?.githubGate?.primaryChangeReason
       ? { historyReadError: oneLine(attempt.historyReadError || attempt.githubGate.primaryChangeReason, HISTORY_READ_ERROR_LIMIT) } : {}),
@@ -459,6 +484,8 @@ export async function evaluateHammerStopHold({
   logger = console,
   now = new Date().toISOString(),
   readAuditImpl = readAmaAuditEntry,
+  reviewServiceRevision = REVIEW_SERVICE_REVISION,
+  gatePredicateVersion = null,
   fetchPrimaryChangeImpl = fetchPrimaryChange,
   execFileImpl = execFileAsync,
 } = {}) {
@@ -492,6 +519,7 @@ export async function evaluateHammerStopHold({
   }
   for (const [head, value] of Object.entries(state.heads)) state.heads[head] = normalizeHammerStopHold(value, { repo, prNumber, headSha: head, now });
   const prior = state.heads[headSha];
+  const gateRevision = { serviceRevision: reviewServiceRevision, predicateVersion: gatePredicateVersion };
   // External dependency events own this wait, before legacy transient upgrade,
   // changed-input, conflict and timer releases can widen closer admission.
   if (companionOnlyStop(stop)) return evaluateCompanionWait({ rootDir, repo, prNumber, headSha,
@@ -542,13 +570,16 @@ export async function evaluateHammerStopHold({
     if (prior?.refusal && !prior.releasedAt && deterministicRefusal({ ...prior,
       reasons: prior.refusal.reasons }, { repo, prNumber, headSha })) {
       const inputs = hammerStopInputs(prMetadata, { excludeContexts, reviewState });
-      const changed = evaluateHoldRecord(prior, { namespace: rootDir, now, inputs }).changed;
+      const entry = anchorHammerStopGateRevision(prior, stop, gateRevision);
+      const changed = evaluateHoldRecord(entry, { namespace: rootDir, now, inputs, gateRevision }).changed;
       const hammerStop = { headSha, predicate: prior.predicate, deterministic: true,
         refusal: prior.refusal, since: prior.firstObservedAt, paged: Boolean(prior.pagedAt) };
       if (changed.length > 0) {
-        persist({ ...prior, releasedAt: now, releasedBy: changed, releasedInputs: inputs });
+        persist({ ...entry, releasedAt: now, releasedBy: changed, releasedInputs: inputs,
+          ...(changed.includes('gate-revision-change') ? { releasedGateRevision: gateRevision } : {}) });
         return { action: 'release', hammerStop, changed };
       }
+      if (entry !== prior) persist(entry);
       return { action: 'hold', hammerStop };
     }
     if (!isInfrastructureStop(prior) || prior.releasedAt) return { action: 'none' };
@@ -597,6 +628,11 @@ export async function evaluateHammerStopHold({
       pagedAt: stop.refusal ? null : prior?.pagedAt || null,
     };
   let dirty = !reuseEntry || prior.stopKey !== stop.stopKey || prior.holdVersion !== 1;
+  // Legacy stops have no code provenance. Anchor them at first known observation,
+  // rather than guessing which previous deployment made the decision. Preserve
+  // that baseline across repeated audits of the same refusal and restarts.
+  const anchored = anchorHammerStopGateRevision(entry, stop, gateRevision);
+  if (anchored !== entry) { entry = anchored; dirty = true; }
   if (!stop.refusal && !entry.retryAfter) {
     entry = { ...entry, mode: 'transient', reasons: classifiedStopReasons(stop),
       retryAfter: new Date(Date.parse(now) + HAMMER_TRANSIENT_STOP_BACKOFF_MS).toISOString() };
@@ -605,6 +641,7 @@ export async function evaluateHammerStopHold({
   entry = normalizeHammerStopHold(entry, { repo, prNumber, headSha, now });
   // Rebuild predicates from the current stop baseline, including legacy audit inputs.
   entry = createHoldRecord({ ...entry, excludeContexts, awaits: [...inputChangePredicates(stopBaseline(stop, entry.inputs)),
+    ...(stop.refusal && entry.gateRevision ? [{ kind: 'gate-revision-change', from: entry.gateRevision }] : []),
     ...['hold-released', 'github-gate-cleared', 'primary-change-evidence', 'conflicting'].map(name => ({ kind: 'event', name, ...(name === 'conflicting' ? { fallback: true } : {}) })),
     ...(entry.retryAfter ? [{ kind: 'retry-at', at: entry.retryAfter, fallback: true, changed: 'transient-stop-backoff' }] : [])] });
   let evaluation;
@@ -660,16 +697,18 @@ export async function evaluateHammerStopHold({
       }
     }
     if (changed.length === 0 && !stop.refusal && stop.predicate !== 'history-read-failed' && hammerStopPrIsConflicting(prMetadata)) changed.push('conflicting');
-    evaluation = evaluateHoldRecord(entry, { now, namespace: rootDir, inputs: holdReleased || !inputsReadable ? stopBaseline(stop, entry.inputs) : inputs,
+    evaluation = evaluateHoldRecord(entry, { now, namespace: rootDir, gateRevision, inputs: holdReleased || !inputsReadable ? stopBaseline(stop, entry.inputs) : inputs,
       events: Object.fromEntries(changed.map(name => [name, true])) });
     changed = evaluation.changed;
     if (changed.length > 0) {
-      entry = { ...entry, releasedAt: now, releasedBy: changed, releasedInputs: inputs };
+      entry = { ...entry, releasedAt: now, releasedBy: changed, releasedInputs: inputs,
+        ...(changed.includes('gate-revision-change') ? { releasedGateRevision: gateRevision } : {}) };
       dirty = true;
       logger?.log?.(JSON.stringify({
         event: 'ama_closer.hammer_stop_hold_released',
         repo, prNumber, headSha, stopKey: stop.stopKey, predicate: stop.predicate,
         reasons: classifiedStopReasons(stop), changed,
+        ...(changed.includes('gate-revision-change') ? { decidedGateRevision: entry.gateRevision, observedGateRevision: gateRevision } : {}),
       }));
     }
   }
@@ -677,6 +716,7 @@ export async function evaluateHammerStopHold({
     headSha,
     stopKey: stop.stopKey,
     deterministic: Boolean(stop.refusal),
+    ...(entry.gateRevision ? { gateRevision: entry.gateRevision } : {}),
     ...(entry.retryAfter ? { retryAfter: entry.retryAfter } : {}),
     predicate: stop.predicate,
     ...(stop.refusal ? { refusal: stop.refusal } : {}),
@@ -705,7 +745,7 @@ export async function evaluateHammerStopHold({
       + (stop.refusal ? `Reasons: ${stop.refusal.reasons.join(', ')}. Missing evidence: ${JSON.stringify(stop.refusal.missingEvidence)}. Action: ${stop.refusal.next} `
         : 'Closure recovery rechecks the stopped workflow on the scheduled cadence. ')
       + (stop.refusal
-        ? 'No further hammer run on this head until its head, base, mergeability or checks change, or missing evidence becomes computable; the watcher re-checks on its scheduled cadence and re-dispatches once when one does.'
+        ? 'No further hammer run on this head until its head, base, mergeability, checks, review or gate revision changes, or missing evidence becomes computable; the watcher re-checks on its scheduled cadence and re-dispatches once when one does.'
         : `Transient stop; retry eligible at ${entry.retryAfter}, or sooner on changed inputs, within existing retry and lifetime caps.`);
     try {
       await deliverAlertImpl(text, {
@@ -738,7 +778,7 @@ export async function evaluateHammerStopHold({
       let record = normalizeHammerStopHold(holdEntry, { repo, prNumber, headSha, now });
       const named = new Set(record.awaits.map(predicate => predicate.name || predicate.changed));
       const releaseEvents = (holdEntry.releasedBy || []).filter(name => !named.has(name)
-        && !record.awaits.some(predicate => predicate.kind === `${name}-change`));
+        && !record.awaits.some(predicate => predicate.kind === name || predicate.kind === `${name}-change`));
       if (releaseEvents.length) record = createHoldRecord({ ...record,
         awaits: [...record.awaits, ...releaseEvents.map(name => ({ kind: 'event', name, ...(name === 'conflicting' ? { fallback: true } : {}) }))] });
       writeHoldState(rootDir, repo, prNumber, { ...state, currentHead: headSha, heads: { ...state.heads, [headSha]: record } });

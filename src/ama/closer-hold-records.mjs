@@ -4,10 +4,11 @@ import { join } from 'node:path';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { classifyCheckRollup } from '../checks-summary.mjs';
-import { hammerStopInputs, normalizeHammerStopHold, readHammerStopForHead, isInfrastructureStop } from './hammer-stop-hold.mjs';
+import { anchorHammerStopGateRevision, hammerStopInputs, normalizeHammerStopHold, readHammerStopForHead, isInfrastructureStop } from './hammer-stop-hold.mjs';
 import { normalizeOperatorLabelHold } from './operator-label-gates.mjs';
 import { normalizeStackedBaseHold } from './stacked-base.mjs';
 import { assertHoldRecord, evaluateHoldRecord, holdEvaluatedThisPoll, markHoldEscalated } from './hold-record.mjs';
+import { REVIEW_SERVICE_REVISION } from '../review-service-revision.mjs';
 
 // The same exports are usable by owner-resolution consumers. No directory scan,
 // remote read, dispatch or merge is needed to project the current subject's holds.
@@ -41,7 +42,7 @@ export function readCloserHoldRecords({ rootDir, repo, prNumber, headSha }) {
 // this poll are skipped. Backed-off subjects still get timer/head/base/check
 // evaluation; expensive evidence probes retain their existing owner cadence.
 export async function evaluateCloserHoldsForPoll({ rootDir, hqRoot = rootDir, subjects, now = new Date().toISOString(),
-  deliverAlertImpl, logger = console }) {
+  reviewServiceRevision = REVIEW_SERVICE_REVISION, gatePredicateVersion = null, deliverAlertImpl, logger = console }) {
   const seen = new Set();
   for (const subject of subjects) {
     const repo = subject.repoPath || subject.repo;
@@ -57,7 +58,9 @@ export async function evaluateCloserHoldsForPoll({ rootDir, hqRoot = rootDir, su
       || (metadata.state && String(metadata.state).toUpperCase() !== 'OPEN')) continue;
     for (const stored of readCloserHoldRecords({ rootDir, repo, prNumber, headSha })) {
       if (stored.error) { logger.warn?.(`Closer hold unreadable: ${stored.error.code || 'invalid-record'}`); continue; }
-      const { record, path, raw, document, type } = stored;
+      const { path, raw, document, type } = stored;
+      let { record } = stored;
+      let revisionUpdated = false;
       if (holdEvaluatedThisPoll(record, rootDir)) continue;
       if (type === 'hammer-stop') {
         // A receipt cannot invent a stop after audit retention or success. The
@@ -65,6 +68,12 @@ export async function evaluateCloserHoldsForPoll({ rootDir, hqRoot = rootDir, su
         const stop = readHammerStopForHead({ hqRoot, repo, prNumber, headSha, reviewedSha: subject.reviewedSha, logger });
         const sameRefusal = record.refusal && record.refusal.key === stop?.refusal?.key;
         if (!stop || (stop.stopKey !== record.stopKey && !sameRefusal && !isInfrastructureStop(stop))) continue;
+        if (record.refusal) {
+          const anchored = anchorHammerStopGateRevision(record, stop, {
+            serviceRevision: reviewServiceRevision, predicateVersion: gatePredicateVersion });
+          revisionUpdated = anchored !== record;
+          record = anchored;
+        }
       }
       const inputs = hammerStopInputs(metadata, { excludeContexts: record.excludeContexts || [] });
       // Review fingerprints require the owner's complete review snapshot. Missing
@@ -79,8 +88,10 @@ export async function evaluateCloserHoldsForPoll({ rootDir, hqRoot = rootDir, su
           excludeContexts: new Set(record.excludeContexts),
         }) === 'SUCCESS') events['operator-label-gates-cleared'] = true;
       if ((metadata.baseBranch || metadata.baseRefName) && (metadata.baseBranch || metadata.baseRefName) === metadata.defaultBranch) events['stacked-base-cleared'] = true;
-      const evaluation = evaluateHoldRecord(record, { now, namespace: rootDir, inputs, events });
-      if (evaluation.action !== 'release' && !evaluation.escalate) continue;
+      const evaluation = evaluateHoldRecord(record, { now, namespace: rootDir, inputs, events,
+        gateRevision: { serviceRevision: reviewServiceRevision, predicateVersion: gatePredicateVersion } });
+      const canEscalate = evaluation.escalate && (type === 'stacked-base' || typeof deliverAlertImpl === 'function');
+      if (evaluation.action !== 'release' && !canEscalate && !revisionUpdated) continue;
       const lock = `${path}.lock`;
       let claimed = false;
       let claimedInode;
@@ -102,14 +113,15 @@ export async function evaluateCloserHoldsForPoll({ rootDir, hqRoot = rootDir, su
           updated.releasedAt = now;
           updated.releasedBy = evaluation.changed;
           updated.releasedInputs = inputs;
-        } else {
+          if (evaluation.changed.includes('gate-revision-change')) updated.releasedGateRevision = {
+            serviceRevision: reviewServiceRevision, predicateVersion: gatePredicateVersion };
+        } else if (canEscalate) {
           const text = `Closure hold ${repo} PR ${prNumber}: ${record.reason}; owner=${record.owner}; deadline=${record.deadline}; awaits=${JSON.stringify(record.awaits)}`;
           if (type === 'stacked-base') {
             // Its existing escalation is the retarget comment, owned by the
             // normal guard. Do not add a second external notification path.
             logger.warn?.(text);
           } else {
-            if (typeof deliverAlertImpl !== 'function') continue;
             await deliverAlertImpl(text, { event: record.onDeadline, payload: { repo, prNumber, headSha,
               owner: record.owner, reason: record.reason, deadline: record.deadline, awaits: record.awaits } });
             markHoldEscalated(record, rootDir);

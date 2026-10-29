@@ -8,7 +8,7 @@ const deliveredEscalations = new Set();
 export const MAX_HOLD_ESCALATIONS = 10_000;
 const dimensions = { head: 'headSha', base: 'baseSha', mergeability: 'mergeability', checks: 'checks', review: 'review' };
 const kinds = new Set([...Object.keys(dimensions).map(name => `${name}-change`),
-  'event', 'retry-at', 'companion-merged', 'gitlink-contains-commit']);
+  'gate-revision-change', 'event', 'retry-at', 'companion-merged', 'gitlink-contains-commit']);
 const iso = value => typeof value === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?(?:Z|[+-]\d\d:\d\d)$/.test(value) && Number.isFinite(Date.parse(value));
 
 export function assertHoldRecord(record) {
@@ -87,7 +87,7 @@ export function holdEvaluatedThisPoll(record, namespace = '') {
   return Boolean(scope?.open && scope.results.has(JSON.stringify([namespace, holdRecordKey(record)])));
 }
 
-function evaluatePredicates(awaits, { now, inputs = {}, events = {}, companionWait, evidenceUnreadable = false }) {
+function evaluatePredicates(awaits, { now, inputs = {}, events = {}, companionWait, gateRevision, evidenceUnreadable = false }) {
   const changed = [];
   for (const predicate of awaits) {
     const dimension = predicate.kind.replace(/-change$/, '');
@@ -98,6 +98,11 @@ function evaluatePredicates(awaits, { now, inputs = {}, events = {}, companionWa
       fired = ['checks', 'review'].includes(dimension)
         ? typeof value === 'string' && typeof predicate.from === 'string' && value !== predicate.from
         : Boolean(value) && (dimension !== 'mergeability' || ['MERGEABLE', 'CONFLICTING'].includes(value)) && value !== predicate.from;
+    } else if (predicate.kind === 'gate-revision-change') {
+      fired = ['serviceRevision', 'predicateVersion'].some(key =>
+        typeof predicate.from?.[key] === 'string' && Boolean(predicate.from[key].trim())
+        && typeof gateRevision?.[key] === 'string' && Boolean(gateRevision[key].trim())
+        && gateRevision[key] !== predicate.from[key]);
     } else if (predicate.kind === 'event') fired = (!predicate.fallback || changed.length === 0) && events[predicate.name] === true;
     else if (predicate.kind === 'retry-at') fired = (!predicate.fallback || changed.length === 0) && Date.parse(now) >= Date.parse(predicate.at);
     else if (!evidenceUnreadable && companionWait) {
@@ -119,18 +124,18 @@ export function changedHoldInputs(previous, current) {
 }
 
 export function evaluateHoldRecord(record, { now = new Date().toISOString(), inputs = {}, events = {}, companionWait,
-  evidenceUnreadable = false, namespace = '' } = {}) {
+  gateRevision, evidenceUnreadable = false, namespace = '' } = {}) {
   assertHoldRecord(record);
   const scope = polls.getStore()?.open ? polls.getStore().results : null;
   const key = JSON.stringify([namespace, holdRecordKey(record)]);
   // Reuse only identical observations. Owners can collect fresh evidence or
   // persist a release/escalation receipt after an earlier evaluation this poll.
-  const signature = JSON.stringify([record, now, inputs, events, companionWait, evidenceUnreadable,
+  const signature = JSON.stringify([record, now, inputs, events, companionWait, gateRevision, evidenceUnreadable,
     holdEscalatedInProcess(record, namespace)]);
   const cached = scope?.get(key);
   if (cached?.signature === signature) return cached.result;
   const changed = record.releasedAt || record.clearedAt ? []
-    : evaluatePredicates(record.awaits, { now, inputs, events, companionWait, evidenceUnreadable });
+    : evaluatePredicates(record.awaits, { now, inputs, events, companionWait, gateRevision, evidenceUnreadable });
   const released = Boolean(record.releasedAt || record.clearedAt || changed.length);
   const result = { action: released ? 'release' : 'hold', changed: record.releasedBy || changed,
     escalate: !released && !record.escalatedAt && !record.pagedAt && !record.alertedAt && !(record.holdType === 'stacked-base' && record.commentedAt)

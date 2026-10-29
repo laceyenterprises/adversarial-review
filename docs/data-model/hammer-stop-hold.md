@@ -1,5 +1,41 @@
 # Data Model - Hammer Stop Hold
 
+## Deployment recovery (HOLDGATEVERSION-01)
+
+Deterministic refusals also record `gateRevision: { serviceRevision,
+predicateVersion }`. The terminal audit's `reviewServiceRevision` and optional
+`gatePredicateVersion` take precedence; missing legacy provenance is anchored
+at the first observation with a nonempty service or predicate revision. If both
+are unavailable, defer anchoring; an existing all-null anchor is retried on
+later observations. Repeated observations retain a known baseline. A missing
+revision cannot prove a deployment, and legacy holds without provenance require
+a subsequent observed revision change rather than a guessed historical revision.
+
+`awaits` adds `gate-revision-change` only for deterministic refusals. Either
+nonempty recorded component differing from its nonempty current observation
+releases the hold. `serviceRevision` is the service checkout commit captured
+when the process loads (`git:<sha>`), comparing canonical physical paths so
+symlinked checkouts retain Git provenance and accepting LF or CRLF stdout. It
+falls back to `package:<version>` for packaged deployments. The subject PR and Agent OS parent checkout are never
+revision sources. Updating files underneath a running process does not advance
+its loaded revision; normal deployment must load the new service code.
+Predicate versions are optional producer evidence, with no new config key.
+
+Normal admission and the skipped-subject poll sweep share anchoring and this
+predicate. Both upgrade existing `holdVersion: 1` refusals with missing or
+all-null provenance and install the predicate before evaluation. The sweep
+persists the upgrade under its existing lock and unchanged-file fence even
+when no release or alert is due, preserving deadlines and delivery receipts.
+A retained refusal behind packaging-only audit history uses the same upgrade;
+packaging provenance cannot become the refusal baseline.
+Release persists `releasedBy: ['gate-revision-change']`, `releasedAt`,
+`releasedGateRevision` and the ordinary released input baseline. Repeated polls
+and restarts retain one release receipt. A subsequent deterministic stop under
+the new revision starts a fresh hold. Existing leases fence duplicate dispatch;
+per-head, series and lifetime caps remain charged and can refuse re-dispatch.
+Transient and companion stops retain their existing recovery behavior. Release
+grants no merge authority and changes no merge predicate.
+
 
 ## Actions infrastructure recovery (CIBLOCKINFRA-01)
 

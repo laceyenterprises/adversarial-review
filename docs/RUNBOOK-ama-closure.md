@@ -2960,6 +2960,18 @@ forwards its optional `deliverAlertImpl` to companion escalation; omitted handle
 use the production alert deliverer. PR state is normalized from `candidate.prState`
 before applying the companion fence, accepting both `open` and `OPEN`.
 
+HOLDGATEVERSION-01 records the loaded review-service commit (or packaged
+version) and optional predicate version on deterministic refusal holds. A new
+nonempty revision releases with `gate-revision-change`, including in skipped
+subject sweeps. The release receipt survives polls and restarts; a subsequent
+stop under the new revision holds again. Legacy records without provenance
+anchor at the first known observation; unavailable provenance defers anchoring.
+Normal admission and skipped-subject sweeps durably upgrade version-1 records
+without resetting deadlines or delivery receipts. Transient and companion
+recovery, leases, exact-head merge gates and all retry caps retain their existing authority. After normal
+deployment, SRE observes the next organic gate fix releasing its held PRs without
+a head nudge; offline fixtures do not establish that live receipt.
+
 - **Hammer stop hold** (`src/ama/hammer-stop-hold.mjs`). When the hammer's
   latest terminal audit for the live head is `failed-without-merge` with an
   explicitly deterministic refusal, the closer

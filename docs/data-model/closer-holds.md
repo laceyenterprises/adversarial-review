@@ -28,6 +28,10 @@ persistence. Each migrated store validates active holds before atomic writes.
 Legacy normalization supplies an owner, predicates and the existing owner's
 paging horizon. A versioned record missing required fields is invalid rather
 than silently repaired. Readers preserve legacy release and delivery evidence.
+The hammer-stop owner explicitly upgrades valid version-1 deterministic holds
+with missing gate provenance or predicates before evaluation in admission and
+skipped-subject sweeps. Unknown provenance defers anchoring; upgrades preserve
+deadlines and delivery receipts and use the existing persistence fences.
 The hammer-hold read projection also reports `deadlineSource` from a stored
 deadline, retry/wait time, first observation or companion merge. It is read-only
 provenance: TTM cannot claim ownership from an unanchored normalization default.
@@ -43,6 +47,11 @@ Predicates are data, never executable expressions:
   successful stacked-base inspection and cleared operator-label gates. CI waits can also release on an observed
   check fingerprint change. Review-finding waits never use CI greenness as
   release evidence.
+- `gate-revision-change` compares `from: { serviceRevision, predicateVersion }`
+  against the owner's loaded service revision and optional predicate version.
+  Both readings of a component must be nonempty strings to prove a difference.
+  Deterministic hammer refusals alone await this predicate; a missing revision
+  does not release. The poll cache includes revision observations.
 - `retry-at` stores an absolute `at` timestamp. Transient hammer retries retain
   their five-minute bound and fallback precedence after other releases.
 - `companion-merged` observes a named dependency merge. Companion holds use

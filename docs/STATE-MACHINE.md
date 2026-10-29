@@ -1338,6 +1338,18 @@ Before routing another hammer, the closer holds an unchanged deterministic
 refusal keyed by head, sorted reasons and full missing evidence, and pages once
 with the unblock action. A changed head, review, check status or verified missing
 authority releases the hold through the existing stop-store path.
+HOLDGATEVERSION-01 records the loaded review-service commit (or packaged
+version) and optional predicate version on deterministic refusal holds. A new
+nonempty revision releases with `gate-revision-change`, including in skipped
+subject sweeps. The release receipt survives polls and restarts; a subsequent
+stop under the new revision holds again. Legacy records without provenance
+anchor at the first known observation; unavailable provenance defers anchoring.
+Normal admission and skipped-subject sweeps durably upgrade version-1 records
+without resetting deadlines or delivery receipts. Transient and companion
+recovery, leases, exact-head merge gates and all retry caps retain their existing authority. After normal
+deployment, SRE observes the next organic gate fix releasing its held PRs without
+a head nudge; offline fixtures do not establish that live receipt.
+
 CLOSERSTOPTRANSIENT-01 restricts input-change holds to the explicit audited
 `DETERMINISTIC_STOP_REASONS` allowlist. Finding and review-evidence refusals
 remain held; CI, lane contention, auth/environment and unclassified merge

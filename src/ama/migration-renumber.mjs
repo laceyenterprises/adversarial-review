@@ -85,9 +85,9 @@ function migrationBody(text, info) {
   // allowance to the first token, never arbitrary strings in the operations.
   const doc = list[0];
   if (/^(?:"""|''')/.test(doc?.value || '')) {
-    const normalized = doc.value.replace(/^(Revision ID:|Revises:)([ \t]*)([A-Za-z0-9_]+)([ \t]*)$/gm,
-      (line, label, space, value, tail) => revisionLiteral({ value: `"${value}"` }, info, label === 'Revises:')
-        ? `${label}${space}<revision>${tail}` : line);
+    const normalized = doc.value.replace(/^([ \t]*)(Revision ID:|Revises:)([ \t]*)([A-Za-z0-9_]+)([ \t]*)$/gm,
+      (line, indent, label, space, value, tail) => revisionLiteral({ value: `"${value}"` }, info, label === 'Revises:')
+        ? `${indent}${label}${space}<revision>${tail}` : line);
     edits.push({ ...doc, value: normalized });
   }
   return replace(text, edits);

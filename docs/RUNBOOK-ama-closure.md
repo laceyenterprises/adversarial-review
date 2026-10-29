@@ -3262,7 +3262,8 @@ name suffix and migrations directory (`migrations/` or `migrations/versions/`),
 increase its numeric prefix, and leave the old path absent. Hash-verified immutable
 blobs must match byte for byte after normalizing only module-level `revision` and
 `down_revision` literals, the numeric member of a `REVISION` tuple, and matching
-`Revision ID` / `Revises` lines in the initial module docstring. Predecessor
+`Revision ID` / `Revises` lines in the initial module docstring, including lines
+with leading spaces or tabs. That whitespace remains byte-protected. Predecessor
 identifiers must name the immediately preceding revision; operations, imports,
 comments, tuple descriptions and all other bytes remain protected.
 
@@ -3275,6 +3276,13 @@ other registry bytes must match the protected author snapshot. This does not
 exempt unrelated registry or source changes. Unsupported layouts, missing or
 unreadable blobs, ambiguous renames and unmatched registries supply no proof;
 the existing reversal authorization still applies.
+
+Registry comparison normalizes one candidate migration at a time. Multiple
+renumbers that change the same registry in one PR therefore supply no proof:
+each candidate sees the other tuple edits as protected byte changes. Such batches
+still require the existing reversal authorization. Batch normalization is a
+future enhancement; it must prove all participating migration bodies before
+allowing their registry edits together.
 
 Proofs are recomputed after history-cache lookup, without running migration code
 or a generator. They bind both paths, both migration blobs, both registry blobs,

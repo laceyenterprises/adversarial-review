@@ -36,6 +36,33 @@ test('shared production collector adds the proof outside history collection', as
   assert.equal(evidence.migrationRenumberProofs.length, 1);
 });
 
+for (const indent of ['    ', '\t']) {
+  test(`docstring revision metadata with ${JSON.stringify(indent)} indentation is derived`, async () => {
+    const original = migrationRenumberFixture();
+    const indentMetadata = body => body.replace(/^(Revision ID:|Revises:)/gm, `${indent}$1`);
+    const f = migrationRenumberFixture({
+      beforeBody: indentMetadata(original.original), afterBody: indentMetadata(original.final),
+    });
+    assert.equal((await prove(f)).ok, true);
+    // Indentation remains protected; only the revision identifiers may differ.
+    f.evidence.finalFiles[0].sha = f.blob(indentMetadata(original.final).replace(`${indent}Revises:`, 'Revises:'));
+    assert.equal((await prove(f)).reason, 'primary-change-reverted');
+  });
+}
+
+test('multiple renumbers sharing a registry retain reversal authorization requirements', async () => {
+  const f = migrationRenumberFixture();
+  const secondBody = (revision, predecessor) => f.body(revision, predecessor).replaceAll('create_sample', 'create_other');
+  f.evidence.primaryFiles.push({ ...f.evidence.primaryFiles[0], filename: 'app/migrations/043_create_other.py',
+    sha: f.blob(secondBody('043', '042')) });
+  f.evidence.finalFiles.push({ ...f.evidence.finalFiles[0], filename: 'app/migrations/044_create_other.py',
+    sha: f.blob(secondBody('044', '043')) });
+  f.evidence.primaryFiles[1].sha = f.blob(f.registry(42).replace(']\n', '    (43, "043_create_other"),\n]\n'));
+  f.evidence.finalFiles[1].sha = f.blob(f.registry(43).replace(']\n', '    (44, "044_create_other"),\n]\n'));
+  assert.equal((await prove(f)).reason, 'primary-change-reverted');
+  assert.deepEqual(f.evidence.migrationRenumberProofs, []);
+});
+
 for (const [name, modify] of [
   ['changed operation', f => { f.evidence.finalFiles[0].sha = f.blob(f.final.replace('create_table', 'drop_table')); }],
   ['deleted operation', f => { f.evidence.finalFiles[0].sha = f.blob(f.final.replace('    operations.create_table("sample")\n', '')); }],

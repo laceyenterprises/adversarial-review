@@ -1681,7 +1681,7 @@
     "src/adapters/reviewer-runtime/agent-runtime/index.mjs": "37a25e62f889f9d87e83a20495a9a3baef75f53db163ef6ed7638f7d6ac09f82",
     "src/adapters/reviewer-runtime/cli-direct/index.mjs": "b70bec4bfe7769e073439682fe3de1311fc4a67fb3e32316aeca12802fbc965a",
     "src/adapters/reviewer-runtime/run-state.mjs": "a9ceff855698891e3e7c37d6b552d06462a70e9972f7a23c50811a254a77965d",
-    "src/ama-closure-orchestration.mjs": "084a327a902dcde21814da0bc691847c009ae25b8d547a1e6598c14148df6fa7",
+    "src/ama-closure-orchestration.mjs": "9e4e0e0f7d75186853cd68b18e69f9ca5207bf0f4fb5e66eda80badaf6dc6c95",
     "src/ama/closer-lease.mjs": "c2aa021100d2cc5fc0ba2de3ca035dab42d46d416039853d0df4a69a8b2c3900",
     "src/ama/closure-owner.mjs": "2448cded95d11c7a03d85758d16bf1719a433daef79e8d7454c1696c6bfc079e",
     "src/ama/dispatch-closer.mjs": "3bdaaf2cb7883274820c3d1d7493e9a4410c4da59e5fd8bc00f5f6d097f859a2",

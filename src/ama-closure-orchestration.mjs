@@ -843,11 +843,12 @@ async function maybeDispatchAmaClosureForInner({
       now: options.now ? options.now() : Date.now(), env: options.env || process.env,
       observeWaitImpl: options.observeClosureWaitImpl || observeClosureWait });
   } catch (error) { options.logger?.warn?.(`[watcher] snapshot-refresh loop observation failed: ${error.message}`); }
-  if (finalRoundSink.value
+  const finalRoundObservable = finalRoundSink.value
     && result?.reason !== 'hammer-stop-awaiting-companion'
     && !(result?.boundedWait && ['review', 'remediate', 'wait-for-CI'].includes(result.nextAction?.action))
     && !result?.daemonCleanMerge?.reason?.startsWith('fleet-stop-')
-    && !(options.labelNames || []).some(label => OPERATOR_HOLD_LABELS.includes(label))) {
+    && !(options.labelNames || []).some(label => OPERATOR_HOLD_LABELS.includes(label));
+  const observeFinalRound = async (anchorOnly) => {
     try {
       const observationTime = options.now ? options.now() : Date.now();
       if (result?.closerLaunchBoundMs) result = { ...result, ...amaHammerBackgroundProgress({
@@ -856,9 +857,7 @@ async function maybeDispatchAmaClosureForInner({
       const launchAt = Date.parse(result?.closerProgressAt || '');
       const boundedWait = await (options.observeClosureWaitImpl || observeClosureWait)({ ...finalRoundSink.value,
         ...closureWaitProgress(result, finalRoundSink.value.startedAt),
-        // Recovery paging belongs to the watchdog; retain its clock and live-owner notices.
-        anchorOnly: isClosureRecoveryDecision(result?.nextAction)
-          && result?.closerLaunchAlive !== true && !result?.closerLaunchBoundMs,
+        anchorOnly,
         launchAlive: result?.closerLaunchAlive === true || Boolean(result?.closerLaunchBoundMs),
         reason: result?.nextAction
           ? `action=${result.nextAction.action} actor=${result.nextAction.actor} reason=${result.nextAction.reason} head=${result.nextAction.head} ageMs=${Math.max(0, observationTime - Date.parse(result.nextAction.deadline?.anchoredAt || observationTime))}; ${result?.reasons?.join(', ') || result?.reason || 'closure-pending'}`
@@ -869,6 +868,13 @@ async function maybeDispatchAmaClosureForInner({
       if (result?.closerLaunchBoundMs) result = { ...result, boundedWait, recoveryWait: true,
         ...(boundedWait.exhausted ? { needsOperator: true } : {}) };
     } catch (error) { options.logger?.warn?.(`[watcher] final-round wait observation failed: ${error.message}`); }
+  };
+  if (finalRoundObservable && (!isClosureRecoveryDecision(result?.nextAction)
+    || result?.closerLaunchAlive === true || result?.closerLaunchBoundMs)) {
+    await observeFinalRound(false);
+  } else if (finalRoundObservable) {
+    // Ownerless recovery keeps its clock; the watchdog owns escalation.
+    await observeFinalRound(true);
   }
   // NXA-02 observational shadow of this pass's final legacy owner; no effect.
   if (result?.closureOwner && closureOwnerSink.shadowInput) {

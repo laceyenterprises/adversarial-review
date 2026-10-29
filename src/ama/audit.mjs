@@ -1,3 +1,4 @@
+import { operatorLabelInputs } from './operator-label-inputs.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 /**
  * AMA-04 — provenance trailers + audit JSON writer.
@@ -167,7 +168,8 @@ function normalizedAttempts(existing) {
 }
 
 function buildAttempt(attemptNumber, timestamp, attempt) {
-  return { reviewServiceRevision: REVIEW_SERVICE_REVISION, ...attempt, attemptNumber, startedAt: timestamp };
+  const awaitedInputs = operatorLabelInputs(attempt);
+  return { reviewServiceRevision: REVIEW_SERVICE_REVISION, ...attempt, ...(awaitedInputs.length ? { awaitedInputs } : {}), attemptNumber, startedAt: timestamp };
 }
 
 function deriveReconciliation(existing, attempt, timestamp) {

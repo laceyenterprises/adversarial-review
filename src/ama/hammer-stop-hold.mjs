@@ -1,3 +1,4 @@
+import { operatorLabelInputs, awaitedOperatorLabelsApplied } from './operator-label-inputs.mjs';
 import { assertHoldRecord, createHoldRecord, normalizeHoldRecord, inputChangePredicates, changedHoldInputs, evaluateHoldRecord, markHoldEscalated, resetHoldEscalationsForTests } from './hold-record.mjs';
 import { refundCiInfrastructureHammerStops } from './ci-infrastructure-refund.mjs';
 import { CI_INFRASTRUCTURE_STOP_REASONS, infrastructureOnlyFailures, recordedCiFailures, checksExecutedAgain, enrichCiInfrastructureEvidence } from '../ci-infrastructure.mjs';
@@ -144,15 +145,17 @@ function stable(value) {
 function deterministicRefusal(attempt, { repo, prNumber, headSha }) {
   if (isInfrastructureStop(attempt)) return null;
   const reasons = classifiedStopReasons(attempt);
-  if (!reasons.length || !reasons.every(reason => DETERMINISTIC_STOP_REASONS.has(reason))) return null;
+  const awaitedInputs = operatorLabelInputs(attempt);
+  if (!awaitedInputs.length && (!reasons.length || !reasons.every(reason => DETERMINISTIC_STOP_REASONS.has(reason)))) return null;
   const missingEvidence = stable(attempt.missingEvidence || attempt.eligibilityTrace?.trace?.primaryChange?.missingEvidence
     || attempt.githubGate?.primaryChangeMissingEvidence || null);
-  const key = createHash('sha256').update(JSON.stringify({ repo, prNumber: Number(prNumber), headSha, reasons, missingEvidence })).digest('hex');
+  const key = createHash('sha256').update(JSON.stringify({ repo, prNumber: Number(prNumber), headSha, reasons, missingEvidence, ...(awaitedInputs.length ? { awaitedInputs } : {}) })).digest('hex');
   const next = attempt.next || (reasons.includes('primary-change-reverted')
     ? 'Restore the uncited reverted regions, then push the repaired head.'
     : reasons.includes('stale-review-head') ? 'Revalidate the full range from the last reviewed head under a hammer lease.'
-      : `Supply the missing evidence for ${reasons[0]}.`);
-  return { key, reasons, missingEvidence, next,
+      : awaitedInputs.length ? `Apply the awaited approval label(s): ${awaitedInputs.map(input => input.label).join(', ')}.`
+        : `Supply the missing evidence for ${reasons[0]}.`);
+  return { key, reasons, missingEvidence, next, ...(awaitedInputs.length ? { awaitedInputs } : {}),
     repairable: Boolean(String(attempt.next || '').trim()) || reasons.includes('primary-change-reverted') };
 }
 
@@ -226,7 +229,7 @@ export function normalizeHammerStopHold(entry, { repo, prNumber, headSha, now = 
       ? entry.releasedBy.map(name => ({ kind: 'event', name, ...(name === 'conflicting' ? { fallback: true } : {}) }))
       : [...inputChangePredicates(entry.inputs),
       ...(entry.refusal && entry.gateRevision ? [{ kind: 'gate-revision-change', from: entry.gateRevision }] : []),
-      ...['hold-released', 'github-gate-cleared', 'primary-change-evidence', 'conflicting'].map(name => ({ kind: 'event', name, ...(name === 'conflicting' ? { fallback: true } : {}) })),
+      ...['hold-released', 'operator-approval-applied', 'github-gate-cleared', 'primary-change-evidence', 'conflicting'].map(name => ({ kind: 'event', name, ...(name === 'conflicting' ? { fallback: true } : {}) })),
       ...(entry.retryAfter ? [{ kind: 'retry-at', at: entry.retryAfter, fallback: true, changed: 'transient-stop-backoff' }] : [])];
   return normalizeHoldRecord(entry, { holdType: 'hammer-stop', repo, prNumber, headSha,
     firstObservedAt, owner: 'closure-recovery', deadline, awaits,
@@ -642,13 +645,14 @@ export async function evaluateHammerStopHold({
   // Rebuild predicates from the current stop baseline, including legacy audit inputs.
   entry = createHoldRecord({ ...entry, excludeContexts, awaits: [...inputChangePredicates(stopBaseline(stop, entry.inputs)),
     ...(stop.refusal && entry.gateRevision ? [{ kind: 'gate-revision-change', from: entry.gateRevision }] : []),
-    ...['hold-released', 'github-gate-cleared', 'primary-change-evidence', 'conflicting'].map(name => ({ kind: 'event', name, ...(name === 'conflicting' ? { fallback: true } : {}) })),
+    ...['hold-released', 'operator-approval-applied', 'github-gate-cleared', 'primary-change-evidence', 'conflicting'].map(name => ({ kind: 'event', name, ...(name === 'conflicting' ? { fallback: true } : {}) })),
     ...(entry.retryAfter ? [{ kind: 'retry-at', at: entry.retryAfter, fallback: true, changed: 'transient-stop-backoff' }] : [])] });
   let evaluation;
   if (!entry.releasedAt) {
     const release = readLatestHoldRelease(rootDir, repo, prNumber, headSha);
     const holdReleased = release && Date.parse(release.released_at) > Date.parse(stop.recordedAt || entry.firstObservedAt);
     let changed = holdReleased ? ['hold-released'] : [];
+    if (awaitedOperatorLabelsApplied(stop, prMetadata, headSha)) changed.push('operator-approval-applied');
     let inputsReadable = true;
     // HAMUNKNOWN-02: the first hold snapshot may already have recovered from
     // the hammer's transient read. Re-evaluate the named gate on this pass's

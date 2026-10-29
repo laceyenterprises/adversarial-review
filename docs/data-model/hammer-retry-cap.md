@@ -1,5 +1,37 @@
 # Data Model - Hammer Retry Cap Ledger
 
+## Operator approval re-arm (APPROVALREARM-01)
+
+A terminal closer refusal records `awaitedInputs: [{ kind: "operator-label",
+label }]`. The audit writer extracts explicit `operator-label-required:<label>`
+reasons and the legacy activation-gate requirement for `operator-approved`;
+other producers may supply the typed input directly. Bare label mentions do
+not establish a requirement. All named inputs must appear on the same live,
+open head before the closer can re-arm.
+
+The existing PR ledger adds optional `operatorApprovalRearms`, keyed by exact
+head SHA. Each receipt records `state: pending | consumed`,
+`reason: operator-approval-applied`, the reviewed `jobKey`, refusal `stopKey`,
+`awaitedInputs` and `grantedAt`. A confirmed launch adds `consumedAt`,
+`launchRequestId` and `dispatchKey`. Creation uses the existing PR-scoped lock.
+Missing legacy maps mean no grants; corrupt ledgers/counters cannot grant.
+Receipts survive suppression writes, target changes and fresh review series,
+so label toggles and returning to an old head cannot replenish the allowance.
+
+For an exhausted ledger on the last dispatched head and same review series,
+a pending receipt admits one extra dispatch through the series, target,
+lifetime and dispatch-record retry caps. Counters are never decremented: the
+confirmed launch increments them normally and atomically consumes the receipt.
+Ledger lock ordering, rather than producer timestamps, determines consumption;
+already recorded charge identities return before consumption. A failed
+pre-launch admission leaves the allowance pending. A second refusal is capped
+again. An unused receipt applies only to its exact head and review series;
+it cannot enable another head or enable a disabled hammer (ceiling zero).
+Ordinary terminal-state, operator hold, identity, lease, capacity, CI and merge
+predicates remain authoritative. Label presence grants retry admission only;
+a worker/bot-applied label may spend it, while the merge gate still checks
+operator authority. A consumed receipt also identifies a fresh cap-alert episode. No config or label is added.
+
 ## Companion wait credits (COMPANIONFLOAT-01)
 
 `src/ama/companion-stop-wait.mjs` credits only exactly matched dispatch charges

@@ -117,7 +117,8 @@ const stopped = {
 
 test('STOPSTALE-01: newer eligible exact-head evidence supersedes the stop only for daemon merge', () => {
   for (const retryable of [undefined, true, false]) {
-    for (const hammerCap of [undefined, { lifetimeExhausted: true }, { headSha: HEAD, retryExhausted: true }]) {
+    for (const hammerCap of [undefined, { lifetimeExhausted: true }, { headSha: HEAD, retryExhausted: true },
+      { headSha: HEAD, operatorApprovalApplied: true }]) {
       const decision = nextAction(snap({ ...stopped, policy: { ...stopped.policy, hammerCap },
         launches: { closer: { status: 'succeeded', headSha: HEAD, outcome: 'no-merge', retryable, attempt: 2 } } }));
       assert.deepEqual(pick(decision), ['daemon-merge', 'daemon', 'clean-exact-head']);
@@ -787,4 +788,20 @@ test('CLOSURESPLIT-01: a passing predicate supersedes only its primary-change de
     assert.equal(revised.snapshot.observations.progress.value.daemonExecution === null, superseded);
     assert.equal(revised.decision.action === 'daemon-merge', superseded);
   }
+});
+
+
+test('APPROVALREARM-01: a same-head grant restores admission after spent caps and recovery deadline', () => {
+  const hammerCap = { headSha: HEAD, retryExhausted: false, lifetimeExhausted: false, operatorApprovalApplied: true };
+  const options = { policy: { hammerCap }, launches: { closer: { headSha: HEAD,
+    status: 'failed', outcome: 'no-merge', retryable: false } }, observedAt: '2026-01-02T00:00:00Z' };
+  assert.deepEqual(pick(nextAction(snap(options))), ['hammer', 'hammer', 'operator-approval-applied']);
+  assert.notEqual(nextAction(snap({ ...options, policy: { hammerCap: { ...hammerCap, headSha: OTHER } } })).actor, 'hammer');
+  for (const extra of [{ pr: { state: 'MERGED' } }, { pr: { state: 'CLOSED' } },
+    { policy: { hammerCap, autonomousMergeExecutionEnabled: false } },
+    { controls: { stop: STOP } }, { controls: { safetyRefusal: { deterministic: true, reason: 'fixture-safety' } } }]) {
+    assert.notEqual(nextAction(snap({ ...options, ...extra })).reason, 'operator-approval-applied');
+  }
+  const capped = nextAction(snap({ policy: { hammerCap: { headSha: HEAD, retryExhausted: true } } }));
+  assert.equal(capped.reason, 'retry-exhausted');
 });

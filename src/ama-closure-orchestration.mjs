@@ -1,3 +1,4 @@
+import { operatorLabelInputs } from './ama/operator-label-inputs.mjs';
 import { reconcileHammerResumes, settleHammerResume } from './ama/hammer-resume.mjs';
 import { hammerHeadOwnership } from './hammer-head-ownership.mjs';
 import { reviewCeilingOwner } from './review-ceiling-owner.mjs';
@@ -14,7 +15,7 @@ import { fleetStopReason } from './fleet-stop.mjs';
 import { recordOperatorNoticeCloserOutcome } from './operator-decision-notice.mjs';
 import { checkPrimaryChange, fetchPrimaryChange } from './ama/primary-change.mjs';
 import { readHammerStopForHead, readHammerStopHoldForHead, isInfrastructureStop, isLegacyReviewHandoffStop } from './ama/hammer-stop-hold.mjs';
-import { evaluateHammerRetryCap, readHammerRetryCapLedger } from './ama/hammer-retry-cap.mjs';
+import { evaluateHammerRetryCap, readHammerRetryCapLedger, rearmOperatorApprovedCloser } from './ama/hammer-retry-cap.mjs';
 import { resolveSharedNextAction } from './pr-next-action-shadow.mjs';
 import { createHistoryReader } from './ama/history-reader.mjs';
 import { hammerDispatchMismatch, bindClosureNextAction, readClosureNextAction, observeClosureOwnership, closureOwnerFromDecision, hasHammerDispatchIntent, observeClosureResult, observeDaemonGate as reviseDaemonGate, observeDaemonResult, revalidateClosurePr, resolveClosureNextAction, reviseClosureNextAction } from './ama/closure-next-action.mjs';
@@ -1665,6 +1666,22 @@ async function dispatchAmaClosureFor({
   }
   let recordedStop = readHammerStopForHeadImpl({ hqRoot: resolveHqRoot(env), repo: repoPath,
     prNumber, headSha: currentPrHeadSha, reviewedSha: reviewState.headSha, logger });
+  if (autonomousMergeExecutionEnabled && prMetadata.isOpen
+    && operatorLabelInputs(recordedStop?.refusal || recordedStop).length) {
+    try {
+      rearmOperatorApprovedCloser(rootDir, { repo: repoPath, prNumber }, {
+        jobKey: reviewState.headSha, headSha: currentPrHeadSha, stop: recordedStop,
+        prMetadata, now: new Date(now()).toISOString(), lifetimeDispatchCeiling: cfg.hammerLifetimeDispatchCeiling,
+      });
+    } catch (error) {
+      logger?.warn?.(`[ama-closer] operator approval re-arm deferred for ${repoPath}#${prNumber}: ${error?.message || error}`);
+    }
+    const wait = await evaluateHammerStopHoldImpl({ rootDir, hqRoot: resolveHqRoot(env), repo: repoPath, prNumber,
+      headSha: currentPrHeadSha, reviewedSha: reviewState.headSha, prMetadata, reviewState,
+      excludeContexts: [requiredGateContext], requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
+      logger, deliverAlertImpl, now: new Date(now()).toISOString() });
+    if (wait.action === 'release') recordedStop = null;
+  }
   if (autonomousMergeExecutionEnabled && prMetadata.isOpen && companionOnlyStop(recordedStop)) {
     const wait = await evaluateHammerStopHoldImpl({ rootDir, hqRoot: resolveHqRoot(env), repo: repoPath, prNumber,
       headSha: currentPrHeadSha, reviewedSha: reviewState.headSha, prMetadata,
@@ -1699,6 +1716,7 @@ async function dispatchAmaClosureFor({
     operatorLogins: cfg?.operatorLogins, operatorLabelActorEnforcement: cfg?.operatorLabelActorEnforcement,
     strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
     retryExhausted: ownerCap.capExhausted, lifetimeExhausted: ownerCap.lifetimeCapExhausted,
+    operatorApprovalApplied: ownerCap.operatorApprovalApplied === true,
     lease: handoffLease,
     launchRecord: amaDispatchCloser.readAmaCloserDispatchRecord(rootDir, { repo: repoPath, prNumber,
       headSha: handoffLease?.rekeyedFromHeadSha || currentPrHeadSha }),
@@ -1728,7 +1746,7 @@ async function dispatchAmaClosureFor({
     anchors: { postedAt: reviewState.postedAt || reviewStateRow?.posted_at || null, finalRoundCompletedAt },
     checksRollup: candidate?.statusCheckRollup,
     candidate: { ...candidate, ...mergeabilityForGate }, labels: prMetadata.labels });
-  let shared = resolvedNextAction || await resolveOwner();
+  let shared = (ownerCap.operatorApprovalApplied ? null : resolvedNextAction) || await resolveOwner();
   if (resolvedNextAction) shared = reviseClosureNextAction(shared, { progress: {
     ...shared.snapshot.observations.progress?.value, hammerResume,
   } }, passSnapshot);

@@ -432,6 +432,10 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
   if (checks.infrastructureOnly || checks.infrastructurePending) return { row: 'R11-pending', action: 'wait-for-CI', actor: 'ci',
     reason: checks.infrastructureOnly ? 'ci-infrastructure' : 'ci-infrastructure-evidence-pending', deadlineKind: 'observer', queue: 'observe' };
   const cap = plain(policy?.hammerCap);
+  if (!daemonAfterSupersededStop && cap?.operatorApprovalApplied === true && sameHead(cap.headSha, head)) {
+    return { row: 'R07-approval', action: 'hammer', actor: 'hammer', reason: 'operator-approval-applied',
+      deadlineKind: 'admission', queue: 'dispatch' };
+  }
   if (!daemonAfterSupersededStop && (cap?.lifetimeExhausted === true
     || (cap?.retryExhausted === true && (!text(cap.headSha) || sameHead(cap.headSha, head))))) {
     return { row: 'R07-stop', action: 'hammer', actor: 'closure-recovery',

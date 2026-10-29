@@ -1,3 +1,4 @@
+import { recordHammerRetryDispatch } from '../src/ama/hammer-retry-cap.mjs';
 import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -25,6 +26,7 @@ import { followUpJobFilePrefix } from '../src/follow-up-job-names.mjs';
 import { getFollowUpJobDir } from '../src/follow-up-jobs.mjs';
 import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import { evaluateHammerStopHold } from '../src/ama/hammer-stop-hold.mjs';
+import { maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
 import { recordNoProgressLaneRun, readNoProgressLane, evaluateNoProgressLane } from '../src/watcher-no-progress-lane.mjs';
 
 const HEAD = 'a'.repeat(40), OLD = 'b'.repeat(40), OTHER = 'c'.repeat(40);
@@ -1045,4 +1047,73 @@ test('OWNERUNREADABLE-02: mismatch recovery resolves the terminal placeholder an
   assert.equal(result.decisionReresolutions, 1);
   assert.equal(result.dispatched, true);
   assert.equal(dispatches, 1);
+});
+
+
+test('APPROVALREARM-01: orchestration clears an approval refusal before exhausted R07 selection', async t => {
+  const f = closureFixture(t);
+  f.args.env = { HQ_ROOT: f.args.rootDir };
+  f.args.deliverAlertImpl = async () => {};
+  f.args.maybeDispatchAmaCloserImpl = async args => {
+    if (!hasHammerDispatchIntent(args.sharedNextAction, identity)) return { dispatched: false, reason: 'fixture-cap-refusal' };
+    f.effects.push(['closer', args.sharedNextAction]);
+    return { dispatched: true, reason: 'dispatched', launchRequestId: 'fixture-approved-launch' };
+  };
+  for (let i = 1; i <= 2; i++) {
+    recordHammerRetryDispatch(f.args.rootDir, identity, { jobKey: HEAD, headSha: HEAD,
+      launchRequestId: `fixture-approval-prior-${i}`, now: AT });
+    writeAmaAuditEntry({ hqRoot: f.args.rootDir, ...identity, now: AT,
+      attempt: { outcome: 'failed-without-merge', attemptPhase: 'hammer-gh-pr-merge',
+        validatedHead: HEAD, reason: 'operator-label-required:operator-approved' } });
+  }
+  const held = await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(held.dispatched, false);
+  assert.equal(f.effects.filter(([kind]) => kind === 'closer').length, 0);
+  f.args.labelNames = ['operator-approved'];
+  const approved = await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(approved.dispatched, true, JSON.stringify(approved));
+  const selected = f.effects.find(([kind]) => kind === 'closer')?.[1];
+  assert.equal(selected.decision.row, 'R07-approval');
+  assert.equal(selected.decision.reason, 'operator-approval-applied');
+  assert.equal(selected.snapshot.observations.policy.value.hammerCap.retryExhausted, false);
+});
+
+
+test('APPROVALREARM-01: watcher and closer share the gate-excluded hold baseline', async t => {
+  const f = closureFixture(t);
+  f.args.env = { HQ_ROOT: f.args.rootDir };
+  f.args.deliverAlertImpl = async () => {};
+  f.args.candidate.statusCheckRollup.push({ __typename: 'StatusContext',
+    context: 'agent-os/adversarial-gate', state: 'PENDING' });
+  f.args.loadConfigImpl = () => ({ getMergeAuthorityConfig: () => ({ enabled: true,
+    requiredCheckContexts: ['unit'] }) });
+  writeAmaAuditEntry({ hqRoot: f.args.rootDir, ...identity, now: AT,
+    attempt: { outcome: 'failed-without-merge', attemptPhase: 'hammer-gh-pr-merge',
+      validatedHead: HEAD, reason: 'operator-label-required:operator-approved' } });
+  let watcherInputs;
+  f.args.evaluateHammerStopHoldImpl = async args => {
+    watcherInputs = args;
+    assert.deepEqual(args.excludeContexts, ['agent-os/adversarial-gate']);
+    assert.deepEqual(args.requiredCheckContexts, ['unit']);
+    return evaluateHammerStopHold(args);
+  };
+  let closerEvaluation;
+  f.args.maybeDispatchAmaCloserImpl = args => maybeDispatchAmaCloser({ ...args,
+    dispatchContext: { ...args.dispatchContext, hqRoot: f.args.rootDir, dispatchedAt: watcherInputs.now },
+    guardStackedBaseImpl: async () => null,
+    evaluateHammerStopHoldImpl: async inputs => {
+      closerEvaluation = await evaluateHammerStopHold(inputs);
+      return closerEvaluation;
+    },
+    execFileImpl: async () => assert.fail('held approval must not launch or fetch'),
+  });
+  const result = await maybeDispatchAmaClosureFor(f.args);
+  assert.ok(watcherInputs);
+  const closer = await evaluateHammerStopHold({ ...watcherInputs,
+    excludeContexts: ['agent-os/adversarial-gate'], requiredCheckContexts: ['unit'] });
+  assert.equal(closer.action, 'hold');
+  assert.equal(closer.changed, undefined, 'no spurious checks-change release without approval');
+  assert.equal(closerEvaluation?.action, 'hold');
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'hammer-stop-awaiting-input-change');
 });

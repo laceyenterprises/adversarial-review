@@ -31,6 +31,7 @@ at mode `0640`.
 | `attempts` | array | Immutable ordered attempt history. |
 | `appendedRecords` | optional array | Compatibility evidence recovered from trailing JSONL after the leading JSON document. Parsed lines retain their original shape; malformed lines become `{ unparsed: string }` with at most 2000 characters. Preserved by subsequent atomic rewrites, without changing `status` or numbering `attempts`. |
 | `attempts[].attemptNumber` | positive integer | Sequential, starting at `1`. |
+| `attempts[].awaitedInputs` | optional array of `{ kind: "operator-label", label }` | APPROVALREARM-01: exact approval inputs named by the refusal; normalized by the writer from typed inputs, explicit operator-label-required markers or a legacy activation-gate requirement. Bare label mentions grant nothing. The stop reader also normalizes legacy audit notes. |
 | `attempts[].startedAt` | ISO timestamp | Append time. |
 | `attempts[].reviewServiceRevision` | string or null | HOLDGATEVERSION-01: loaded review-service checkout commit (`git:<sha>`) or packaged version (`package:<version>`), captured by the audit writer unless supplied by the producer. Missing legacy provenance remains unknown. Deterministic stop holds retain this decision baseline across deployment. |
 | `attempts[].gatePredicateVersion` | optional string | Producer-supplied predicate version, retained by deterministic hold readers alongside the service revision. |

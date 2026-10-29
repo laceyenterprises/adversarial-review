@@ -2221,10 +2221,13 @@ and SEVDOCS-333. No worker live action is authorized.
 
 <a id="smv-handoff"></a>**smv-handoff:** OWNERUNREADABLE-02 verifies snapshot-only resolution of terminal lease/receipt placeholders, live retry ownership, failed/partial read fences and one deduplicated hammer wake. After ordinary deployment SRE checks that no terminal ledger launch remains in an R04 retry-chain-unreadable skip more than one wake past its deadline (SEVDOCS-335). HAMRESUMEOWED-01 verifies pending-to-green hammer resume and idempotent audit settlement. Outstanding exact-head receipts receive closure priority each poll without an unrelated wake; red/head movement settle the debt for normal handling. Existing merge gates, leases and caps remain mandatory. After deployment SRE observes the next natural pending-CI stop merging its green recorded head without manual action; offline smoke alone does not establish this live receipt. OWNERUNREADABLE-01 verifies terminal ownership recovery after its anchored deadline selects hammer without re-review while unreadable retry evidence remains fenced. Focused offline fixtures also cover one-read placeholder replacement, bounded backoff, transient recovery, live retries and outage recovery. After deployment SRE observes the next natural R04 case exit within its budget and merge; no worker live operation is authorized. NXA-07 also verifies exact-head validated terminal HAM proof crossing retry selection into pending, failed or green CI gates; mismatched proof retains hammer retry ownership. NXA-07 verifies the common adapter matrix and retains lease/retry settlement; NXA-06 verifies daemon CI changes, operator-approved retry exhaustion selecting R08 hammer repair, live hammer ownership and remote-unconfirmed receipt recovery through the shared decision. NXA-05 verifies that drain/capacity observations
 retain hammer intent and its deadline, and current deterministic automatic stops retain
-closure-recovery ownership. STOPSTALE-01 verifies that a strictly newer eligible
-exact-head review can instead select daemon merge with
-`stop-superseded-by-exact-head-review` in the decision refs, even after hammer
-caps or final-no-merge. A head needing repair retains its stop and cannot
+closure-recovery ownership. STOPSTALE-01 / STOPSTALE-02 verify that all four
+R07 variants (deterministic stop, retry cap, lifetime cap and final no-merge)
+share a daemon-only supersession path. A strictly newer eligible exact-head
+review with a trustworthy stop/cap/terminal timestamp can select daemon merge with
+`stop-superseded-by-exact-head-review` and the superseded reason in decision refs.
+Missing time fails closed; cap accounting stays unchanged. After deployment SRE
+observes daemon selection within one watcher pass and the stranded PR merging. A head needing repair retains its stop and cannot
 relaunch hammer. NXA-04 verifies one closeout successor through pending, green
 and red CI without another remediation round, plus durable re-review admission
 intent for a pending non-final round. NXA-03 verifies shared immutable
@@ -2605,7 +2608,7 @@ stateDiagram-v2
     [*] --> s3: closure-owner.06 project shared next action: remediation
     [*] --> s3: closure-owner.07 proven live remediation owner retained
     [*] --> s1: closure-owner.08 confirmed conflict selects capped repair with merge safety retained
-    [*] --> s4: closure-owner.09 project shared next action: daemon-merge, including a stop superseded by newer eligible exact-head review
+    [*] --> s4: closure-owner.09 project shared next action: daemon-merge, including any R07 deterministic stop, retry cap, lifetime cap or final no-merge superseded by a strictly newer eligible exact-head review with trustworthy recorded time; hammer caps stay binding
     s0 --> [*]: closure-owner.10 next bounded observation; every recovery deadline dispatches or escalates once with row reason and evidence
     [*] --> s5: closure-owner.11 explicit hold, draft or disabled execution intent
     [*] --> s6: closure-owner.12 confirmed merged or closed PR

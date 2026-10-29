@@ -61,6 +61,32 @@ const REVIEWED_HAMMER_WORKER_ID = `hammer-ama-pr-${PR_NUMBER}-${REVIEWED_HEAD.sl
 const ADVANCED_HAMMER_WORKER_ID = `hammer-ama-pr-${PR_NUMBER}-${ADVANCED_HEAD.slice(0, 12)}`;
 const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGNAME || 'unknown';
 
+test('STOPSTALE-02: cap freshness uses active durable alerts without changing accounting', () => {
+  const at = '2026-01-01T00:00:00.000Z';
+  const later = '2026-01-01T00:01:00.000Z';
+  for (const [fields, expected] of [
+    [{ lifetimeSuppressed: true, alertedAt: at }, at],
+    [{ suppressed: true, alertedAt: at }, at],
+    [{ targetSuppressed: true, targetAlertedAt: at }, at],
+    [{ lifetimeSuppressed: true, alertedAt: at, targetSuppressed: true, targetAlertedAt: later }, later],
+    [{ lifetimeSuppressed: true, alertedAt: null, updatedAt: later }, null],
+    [{ lifetimeSuppressed: true, alertedAt: 'invalid' }, null],
+    [{ alertedAt: at, updatedAt: later }, null],
+  ]) {
+    const ledger = { jobKey: REVIEWED_HEAD, targetRemediationSha: ADVANCED_HEAD,
+      attemptCount: 2, lifetimeAttemptCount: 6, ...fields };
+    const before = JSON.stringify(ledger);
+    const cap = evaluateHammerRetryCap(ledger, { jobKey: REVIEWED_HEAD, headSha: ADVANCED_HEAD });
+    assert.equal(cap.recordedAt, expected);
+    assert.equal(cap.capExhausted, true);
+    assert.equal(cap.lifetimeCapExhausted, true);
+    assert.equal(JSON.stringify(ledger), before);
+  }
+  const stale = evaluateHammerRetryCap({ jobKey: REVIEWED_HEAD, suppressed: true, alertedAt: at },
+    { jobKey: ADVANCED_HEAD, headSha: ADVANCED_HEAD });
+  assert.equal(stale.recordedAt, null, 'a reset series cannot lend its old alert time');
+});
+
 test('HAMLANEWAIT-01: two lane-busy launches back off without exhausting retries or arming a stop', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'lane-busy-recovery-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

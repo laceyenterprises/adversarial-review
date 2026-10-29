@@ -4846,7 +4846,7 @@ async function maybeDispatchAmaCloserAttempt({
     sharedNextAction = await resolveClosureNextAction({ input: {
       reviewState, currentHead: prMetadata.headSha, lease: reviewHandoffLease,
       checks: verdict.trace.ciGreen.conclusion, retryExhausted: cap.capExhausted,
-      lifetimeExhausted: cap.lifetimeCapExhausted,
+      lifetimeExhausted: cap.lifetimeCapExhausted, hammerCapRecordedAt: cap.recordedAt,
       operatorApprovalApplied: cap.operatorApprovalApplied === true,
       roundsLeft: typeof reviewState?.remediationPending === 'boolean'
         ? !terminalHammerReviewCycleExhausted(reviewState) : null,
@@ -6845,7 +6845,7 @@ async function maybeDispatchAmaCloserAttempt({
     sharedNextAction = reviseClosureNextAction(sharedNextAction, { policy: {
       ...sharedNextAction.snapshot.observations.policy?.value,
       hammerCap: { headSha: prMetadata.headSha, retryExhausted: hammerRetryCapDecision.capExhausted,
-        lifetimeExhausted: hammerRetryCapDecision.lifetimeCapExhausted,
+        lifetimeExhausted: hammerRetryCapDecision.lifetimeCapExhausted, recordedAt: hammerRetryCapDecision.recordedAt,
         ...(hammerRetryCapDecision.operatorApprovalApplied ? { operatorApprovalApplied: true } : {}) },
     } });
     observeSharedDecision(sharedNextAction);

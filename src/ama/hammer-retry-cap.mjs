@@ -368,7 +368,17 @@ export function evaluateHammerRetryCap(ledger, {
     && approval.jobKey === incomingJobKey && Number.isFinite(Date.parse(approval.grantedAt))
     && [ledger.attemptCount, ledger.lifetimeAttemptCount ?? ledger.attemptCount,
       ledger.targetAttemptCount ?? 0].every(count => Number.isSafeInteger(count) && count >= 0);
+  // Only durable alerts belonging to an active suppression prove when the
+  // cap was recorded. Missing evidence stays unknown; updatedAt also changes
+  // on repeat observations and is not a suppression timestamp.
+  const capTimes = [
+    ...(alreadySuppressed || lifetimeAlreadySuppressed ? [ledger?.alertedAt] : []),
+    ...(targetAlreadySuppressed ? [ledger?.targetAlertedAt] : []),
+  ].map(value => Date.parse(value || ''));
+  const recordedAt = capTimes.length && capTimes.every(Number.isFinite)
+    ? new Date(Math.max(...capTimes)).toISOString() : null;
   return {
+    recordedAt,
     ...(operatorApprovalApplied ? { operatorApprovalApplied: true } : {}),
     jobKeyChanged,
     priorAttemptCount,

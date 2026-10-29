@@ -194,6 +194,11 @@ function launchFacts(launches, head) {
     retryable: typeof closer.retryable === 'boolean' ? closer.retryable : null,
     attempt: finite(closer.attempt),
     launchRef: text(effective?.liveRetryLaunchRequestId) || text(closer.launchRequestId) || null,
+    // Every terminal retry must predate the review; a missing terminal time
+    // cannot prove freshness. Never substitute requested/updated/observed time.
+    terminalMs: [closer.terminalAt ?? effective?.row?.terminal_at,
+      ...(probe.retryChain || []).map(row => row.terminal_at)]
+      .map(timeMs).reduce((latest, at) => latest === null || at === null ? null : Math.max(latest, at), 0),
     deadlineMs: timeMs(closer.deadlineAt ?? closer.heartbeatDeadlineAt),
   };
 }
@@ -401,29 +406,29 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
       refs: [`receipt:${lower(receipt.path) || 'unknown-path'}`] };
   }
 
-  // R07: deterministic automatic stops and existing retry exhaustion keep a
-  // recovery owner. A newer eligible exact-head verdict may pass a stop only
-  // for daemon merge. Hammer dispatch remains stopped, including at real caps.
+  // R07 variants share one daemon-only supersession path. The recursive
+  // selection sets aside hammer history, never refunds it or admits dispatch.
+  const stopped = (row, recordedMs, forHead = true) => {
+    const newerExactHeadReview = forHead && review.known && review.clean
+      && sameHead(review.reviewedHead, head) && recordedMs !== null
+      && review.postedMs !== null && review.postedMs > recordedMs;
+    if (!daemonAfterSupersededStop && newerExactHeadReview) {
+      const next = selectRow(facts, { daemonAfterSupersededStop: true });
+      if (next.action === 'daemon-merge' && next.actor === 'daemon') {
+        return { ...next, refs: [...(next.refs || []), ...(row.refs || []),
+          `stop-reason:${row.reason}`, 'stop-superseded-by-exact-head-review'] };
+      }
+    }
+    return row;
+  };
   const stop = plain(controls?.stop);
   const automatedHold = (facts.labels || []).find(label => OPERATOR_HOLD_LABELS.includes(label.name));
   if ((!daemonAfterSupersededStop && stop?.deterministic === true) || automatedHold) {
-    const recordedMs = timeMs(stop?.recordedAt);
-    const newerExactHeadReview = stop?.deterministic === true && review.known && review.clean
-      && sameHead(review.reviewedHead, head) && (!text(stop.headSha) || sameHead(stop.headSha, head))
-      && recordedMs !== null && review.postedMs !== null && review.postedMs > recordedMs;
-    if (!daemonAfterSupersededStop && !automatedHold && newerExactHeadReview) {
-      // Re-run the normal gates with hammer history set aside, accepting only
-      // daemon ownership. A red/conflicting head, a daemon transport failure,
-      // or any other repair need keeps the stop: this can never restart hammer.
-      const next = selectRow(facts, { daemonAfterSupersededStop: true });
-      if (next.action === 'daemon-merge' && next.actor === 'daemon') {
-        return { ...next, refs: [...(next.refs || []), `stop:${text(stop.fingerprint) || 'unfingerprinted'}`,
-          'stop-superseded-by-exact-head-review'] };
-      }
-    }
-    return { row: 'R07-stop', action: 'hammer', actor: 'closure-recovery', reason: 'automated-stop',
+    return stopped({ row: 'R07-stop', action: 'hammer', actor: 'closure-recovery', reason: 'automated-stop',
       deadlineKind: 'recovery', queue: 'reconcile',
-      refs: [stop ? `stop:${text(stop.fingerprint) || 'unfingerprinted'}` : `label:${automatedHold.name}:automation`] };
+      refs: [stop ? `stop:${text(stop.fingerprint) || 'unfingerprinted'}` : `label:${automatedHold.name}:automation`] },
+    timeMs(stop?.recordedAt), !automatedHold && stop?.deterministic === true
+      && (!text(stop.headSha) || sameHead(stop.headSha, head)));
   }
   if ((checks.infrastructureOnly || checks.infrastructurePending)
     && (pr.mergeable === 'CONFLICTING' || pr.mergeState === 'DIRTY')) {
@@ -438,13 +443,14 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
   }
   if (!daemonAfterSupersededStop && (cap?.lifetimeExhausted === true
     || (cap?.retryExhausted === true && (!text(cap.headSha) || sameHead(cap.headSha, head))))) {
-    return { row: 'R07-stop', action: 'hammer', actor: 'closure-recovery',
-      reason: cap.lifetimeExhausted === true ? 'lifetime-exhausted' : 'retry-exhausted', deadlineKind: 'recovery', queue: 'reconcile' };
+    return stopped({ row: 'R07-stop', action: 'hammer', actor: 'closure-recovery',
+      reason: cap.lifetimeExhausted === true ? 'lifetime-exhausted' : 'retry-exhausted', deadlineKind: 'recovery', queue: 'reconcile' },
+    timeMs(cap.recordedAt));
   }
   if (!daemonAfterSupersededStop && launchForHead && launch.owned === false && launch.outcome === 'no-merge' && launch.retryable === false) {
     // The hammer's final adjudication on this head; a new head is new work.
-    return { row: 'R07-stop', action: 'hammer', actor: 'closure-recovery', reason: 'hammer-final-no-merge',
-      deadlineKind: 'recovery', queue: 'reconcile', attempt: launch.attempt };
+    return stopped({ row: 'R07-stop', action: 'hammer', actor: 'closure-recovery', reason: 'hammer-final-no-merge',
+      deadlineKind: 'recovery', queue: 'reconcile', attempt: launch.attempt }, launch.terminalMs);
   }
   // HAMRESUMEOWED-01: normal ownership, safety and cap rows above still win.
   // Waiting must not spend another hammer launch. Green resumes validation and

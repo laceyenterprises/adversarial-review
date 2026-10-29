@@ -844,6 +844,31 @@ if (scenario === 'clean') {
     observations: { leases: { closer: null }, launches: { closer: null } } });
   const daemonShared = { snapshot: daemonSnapshot, decision: nextAction(daemonSnapshot) };
   assert.equal(daemonShared.decision.actor, 'daemon');
+  // STOPSTALE-02: every R07 variant shares daemon-only supersession and
+  // retains recovery ownership when CI becomes pending, with caps untouched.
+  const stopAt = '2026-01-01T00:00:00.000Z';
+  for (const [reason, evidence] of [
+    ['automated-stop', { controls: { stop: { deterministic: true, recordedAt: stopAt } } }],
+    ['lifetime-exhausted', { policy: { hammerCap: { lifetimeExhausted: true, recordedAt: stopAt } } }],
+    ['retry-exhausted', { policy: { hammerCap: { retryExhausted: true, recordedAt: stopAt } } }],
+    ['hammer-final-no-merge', { launches: { closer: { status: 'failed', headSha: retrySubject.headSha,
+      outcome: 'no-merge', retryable: false, terminalAt: stopAt } } }],
+  ]) {
+    const snapshot = deriveNextActionSnapshot({ base: daemonSnapshot, observations: {
+      ...evidence, policy: { ...daemonSnapshot.observations.policy.value, ...evidence.policy },
+      reviews: { ...daemonSnapshot.observations.reviews.value, postedAt: '2026-01-01T00:01:00.000Z' },
+    } });
+    const before = JSON.stringify(snapshot);
+    const decision = nextAction(snapshot);
+    assert.equal(decision.actor, 'daemon');
+    assert.ok(decision.evidenceRefs.includes(`stop-reason:${reason}`));
+    assert.ok(decision.evidenceRefs.includes('stop-superseded-by-exact-head-review'));
+    const pending = nextAction(deriveNextActionSnapshot({ base: snapshot,
+      observations: { checks: { conclusion: 'PENDING' } } }));
+    assert.equal(pending.reason, reason);
+    assert.equal(pending.actor, 'closure-recovery');
+    assert.equal(JSON.stringify(snapshot), before);
+  }
   const redDaemon = observeDaemonGate(daemonShared, { candidateHead: retrySubject.headSha,
     prState: 'OPEN', mergeable: 'MERGEABLE', requiredChecks: [{ name: 'unit', status: 'COMPLETED', conclusion: 'FAILURE' }] });
   assert.equal(redDaemon.decision.actor, 'hammer');

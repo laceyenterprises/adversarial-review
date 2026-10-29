@@ -1123,12 +1123,18 @@ projection adds `operator-hold` and `done` evaluation outputs; durable launch,
 lease and review lifecycle states are unchanged. See the
 [adoption runbook](RUNBOOK-ama-closure.md#closer-and-recovery-adoption-nxa-05).
 
-STOPSTALE-01 permits daemon ownership after a deterministic automated stop
-only when a strictly newer, same-head settled review is eligible under the
-current findings policy and the ordinary daemon gates select merge. The
-decision records `stop-superseded-by-exact-head-review`. Stops with no qualifying
-review retain recovery ownership; lifetime/retry caps and final-no-merge remain
-binding for hammer dispatch. Durable lifecycle states are unchanged.
+STOPSTALE-01 / STOPSTALE-02 share one daemon-only supersession path for
+R07 deterministic stops, retry exhaustion, lifetime exhaustion and terminal
+hammer no-merge. A strictly newer exact-head settled review must pass the
+current findings policy (including strict mode) and ordinary daemon gates.
+Freshness uses the stop record time, an active cap's existing alert time, or
+the terminal launch/retry times; missing or invalid time retains R07. The
+decision records `stop-superseded-by-exact-head-review` and
+`stop-reason:<superseded reason>`. Red, pending, conflicting or unproven heads
+retain recovery ownership. Hammer caps and cap-ledger contents are unchanged;
+only the daemon may be selected. The daemon re-fetches primary-change evidence
+and requires its predicate before every merge attempt. Durable lifecycle states
+are unchanged.
 
 DOCSFASTPATH-01 admits an exact-head docs-only change directly to the existing
 inline daemon merge lane, before reviewer admission or closer dispatch. Every

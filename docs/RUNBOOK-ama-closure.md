@@ -465,7 +465,11 @@ failures) permits the normal `hq worker tear-down --force` request. Host
 ownership, process and credential-cleanup proofs still decide removal.
 Active runs remain unknown even with a dead PID on this fallback; multiple
 slot/run rows, mismatched identity or unreadable evidence retain custody.
-Known multiple worker-id rows also retain custody without this fallback.
+Known multiple worker-id rows also retain custody without this fallback; both
+synchronous and asynchronous dispatch-files readers preserve that row count.
+Slot launch IDs are trimmed before ledger lookup and identity comparison.
+Admission forwards its observation-reader override through both ordinary and
+settled no-launch reclaim paths, so isolated fixtures use the same custody checks.
 `closer_reclaim_deferred_unknown_run` records `reason` and the launch ID when
 known. A host teardown refusal logs its error and defers admission before any
 replacement launch is submitted. The no-launch orphan bridge above is unchanged.

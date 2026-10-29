@@ -42,7 +42,9 @@ export function readWorkerDispatchFilesSync(workerId, args = {}) {
   const observed = readWorkerObservationSync({observation: 'workers', worker_id: workerId}, args);
   // Worker slots are reused. Without a producer ordering contract, multiple runs
   // cannot identify the current slot safely, regardless of their status.
-  if (!observed.ok || observed.rows?.length !== 1) return unavailable();
+  if (!observed.ok || observed.rows?.length !== 1) return {
+    ...unavailable(), ...(observed.rows?.length > 1 ? {workerRunCount: observed.rows.length} : {}),
+  };
   const row = observed.rows[0];
   const result = readDispatchFilesSync({launch_request_id: row.launch_request_id, worker_run_id: row.run_id, tail: true}, args);
   if (result.ok && (result.metadata?.status !== 'found'

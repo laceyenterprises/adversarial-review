@@ -2928,7 +2928,7 @@ async function resolveSelfOwnedHammerCloserRunLiveness({
     if (!slots?.ok || !slots.rows?.length) return {live: null, unknown: true, reason};
     if (slots.rows.length !== 1) return {live: null, unknown: true, reason: 'ambiguous-slot-launch-identity'};
     const slot = slots.rows[0];
-    launchRequestId = slot.launch_request_id;
+    launchRequestId = typeof slot.launch_request_id === 'string' ? slot.launch_request_id.trim() : null;
     if (!launchRequestId) return {live: null, unknown: true, reason};
     if (slot.worker_id !== workerId || slot.directory_name !== 'agent-os'
       || slot.manifest_state !== 'available' || slot.present !== true
@@ -4547,6 +4547,7 @@ async function maybeDispatchAmaCloserAttempt({
   processKillImpl = process.kill,
   processExecFileImpl,
   readWorkerDispatchFilesImpl = readWorkerDispatchFiles,
+  readWorkerObservationImpl = readWorkerObservation,
   readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedgerAsync,
   observeCloserBacklogImpl = observeCloserBacklog,
   readTemplateImpl = null,
@@ -7277,7 +7278,7 @@ async function maybeDispatchAmaCloserAttempt({
       closerReclaim = await reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
         repo, prNumber, headSha: targetRemediationSha, noLaunchRecord,
         workerClass, workerId, hqPath, hqRoot, execFileImpl, logger, env,
-        readWorkerDispatchFilesImpl, readLatestWorkerRunStatusImpl, processKillImpl,
+        readWorkerDispatchFilesImpl, readWorkerObservationImpl, readLatestWorkerRunStatusImpl, processKillImpl,
         recordOrphanRefusalImpl: refusal => updateDispatchRecord(rootDir, targetDispatchIdentity,
           current => ({ ...current, preReceiptReconciliation: {
             ...current.preReceiptReconciliation, orphanReclaimRefusal: refusal,
@@ -7642,6 +7643,7 @@ async function maybeDispatchAmaCloserAttempt({
     logger,
     env,
     readWorkerDispatchFilesImpl,
+    readWorkerObservationImpl,
     readLatestWorkerRunStatusImpl,
     processKillImpl,
   });

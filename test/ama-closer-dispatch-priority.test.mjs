@@ -262,6 +262,18 @@ for (const status of ['succeeded', 'failed', 'cancelled']) {
   });
 }
 
+test('CLOSERDEADSLOT-02: padded slot launch identity matches the canonical terminal run', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-dead-slot-padded-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const f = deadSlotFixture(t, rootDir);
+  f.state.slotOverride.launch_request_id = ` \t${f.launchRequestId}\n `;
+  const result = await __testables__.resolveSelfOwnedHammerCloserRunLiveness(f.livenessArgs);
+  assert.equal(result.live, false);
+  assert.equal(result.unknown, false);
+  assert.equal(result.reason, 'slot-terminal-worker-run');
+  assert.equal(result.launchRequestId, f.launchRequestId);
+});
+
 for (const scenario of ['latest-row-only', 'ledger-threw', 'workspace-threw', 'multiple-slots']) {
   test(`CLOSERDEADSLOT-02: ${scenario} is insufficient terminal evidence`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'closer-dead-slot-evidence-'));
@@ -340,7 +352,15 @@ for (const refused of [false, true]) {
     const f = deadSlotFixture(t, rootDir);
     const deps = testDeps();
     const events = [];
+    let observationReads = 0;
     const input = { ...findingsRemediationArgs(rootDir), ...deps,
+      readWorkerObservationImpl: async (selector, options) => {
+        observationReads++;
+        assert.deepEqual(selector, { observation: 'workspaces', worker_id: f.workerId });
+        assert.equal(options.hqRoot, f.hqRoot);
+        return { ok: true, rows: [{ worker_id: f.workerId, directory_name: 'agent-os',
+          manifest_state: 'available', present: true, launch_request_id: f.launchRequestId }] };
+      },
       logger: { ...deps.logger, warn: line => { if (line.startsWith('{')) events.push(JSON.parse(line)); } },
       execFileImpl: async (cmd, argv, options) => {
         if (argv[0] === 'worker' && argv[1] === 'tear-down') {
@@ -354,6 +374,8 @@ for (const refused of [false, true]) {
       },
     };
     const result = await maybeDispatchAmaCloser(input);
+    assert.equal(observationReads, 1, 'ordinary admission must forward the observation reader');
+    assert.ok(f.state.calls.every(call => call.observation !== 'workspaces'));
     assert.equal(result.dispatched, !refused);
     const hostCalls = () => deps.calls.filter(call => ['worker', 'dispatch'].includes(call.args[0]));
     if (refused) {
@@ -384,7 +406,14 @@ for (const metadata of ['missing-id', 'unavailable', 'expired-key']) {
     mkdirSync(worktree, { recursive: true });
     const deps = testDeps();
     const events = [];
+    let observationReads = 0;
     const result = await maybeDispatchAmaCloser({ ...args, ...deps, ...f.options,
+      readWorkerObservationImpl: async (selector, options) => {
+        observationReads++;
+        assert.deepEqual(selector, { observation: 'workspaces', worker_id: 'hammer-ama-pr-404-aaaaaaaaaaaa' });
+        assert.equal(options.hqRoot, args.dispatchContext.hqRoot);
+        return { ok: true, rows: [] };
+      },
       readWorkerDispatchFilesImpl: async () => metadata === 'unavailable'
         ? { ok: false, reason: 'synthetic-unavailable' } : { ok: true, metadata: {} },
       readLatestWorkerRunStatusImpl: async () => assert.fail('no launch ID may query a run'),
@@ -401,6 +430,7 @@ for (const metadata of ['missing-id', 'unavailable', 'expired-key']) {
       },
     });
     assert.equal(result.dispatched, true);
+    assert.equal(observationReads, 1, 'settled no-launch admission must forward the observation reader');
     const hostCalls = deps.calls.filter(call => call.args[0] === 'worker' || call.args[0] === 'dispatch');
     assert.deepEqual(hostCalls.map(call => call.args[0]), ['worker', 'dispatch']);
     assert.ok(events.some(event => event.event === 'ama_closer.pre_receipt_reconciled'

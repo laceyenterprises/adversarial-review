@@ -1,4 +1,5 @@
 import { isPreReceiptIntent } from './dispatch-record-read.mjs';
+import { isClosureRecoveryDecision } from '../pr-next-action.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { isOperatorHeld } from '../operator-hold-labels.mjs';
 // REMORPHAN-01: dispatch admission only. HAM retains all live merge predicates.
@@ -28,7 +29,7 @@ const text = value => String(value || '').slice(0, 300);
 export function overdueNextAction(nextAction, headSha, now = new Date().toISOString(), env = process.env) {
   const deadline = Date.parse(nextAction?.deadline?.at);
   return nextAction?.head === headSha && Number.isFinite(deadline)
-    && Date.parse(now) - deadline >= ownerlessBoundMs(env);
+    && Date.parse(now) - deadline >= (isClosureRecoveryDecision(nextAction) ? 0 : ownerlessBoundMs(env));
 }
 
 // A proven publication chain can still lack a settled live verdict. Preserve
@@ -254,8 +255,9 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
   onOwnershipObserved = null,
   logger = console, signal = null, now = new Date().toISOString(), env = process.env,
   fsImpl = { existsSync, mkdirSync, openSync, closeSync }, DatabaseImpl = Database, flockSyncImpl = fsExt.flockSync }) {
+  const held = isOperatorHeld(labels);
   if (!headSha || candidate?.merged === true || String(candidate?.prState || '').toLowerCase() !== 'open'
-    || candidate?.isDraft || isOperatorHeld(labels) || !result?.amaEnabled) return null;
+    || candidate?.isDraft || (held && !isClosureRecoveryDecision(result?.nextAction)) || !result?.amaEnabled) return null;
   const dir = join(rootDir, 'data', 'follow-up-jobs', 'orphan-watchdog');
   const key = createHash('sha256').update(`${repo}#${prNumber}`).digest('hex');
   fsImpl.mkdirSync(dir, { recursive: true });
@@ -278,6 +280,7 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     const storedIdleSince = db.prepare('SELECT idleSince FROM ownership WHERE id=1').get().idleSince;
     let selected = result?.nextAction;
     const overdue = overdueNextAction(selected, headSha, now, env);
+    const recoveryExpired = overdue && isClosureRecoveryDecision(selected);
     const expiredAction = overdue ? selected : null;
     const idleSince = overdue && (!storedIdleSince || Date.parse(selected.deadline.at) < Date.parse(storedIdleSince))
       ? selected.deadline.at : storedIdleSince;
@@ -326,12 +329,12 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     }
     // The route already owns a proof/read/dispatch wait. Keep the ownerless
     // clock, but neither spend recovery nor page an exhausted launch budget.
-    if ((!overdue && isOrphanRecoveryWait(result)) || idleMs < ownerlessBoundMs(env)) return pending;
+    if ((!overdue && isOrphanRecoveryWait(result)) || (!recoveryExpired && idleMs < ownerlessBoundMs(env))) return pending;
     const pageTransition = async missingTransition => {
       const transition = JSON.stringify([expiredAction.row, expiredAction.action, expiredAction.actor, expiredAction.reason]);
       if (!db.prepare('SELECT 1 FROM transition_pages WHERE head=? AND transition=?').get(headSha, transition)) {
         try {
-          const receipt = await pageImpl(`SEV1 ownerless PR: ${repo} PR ${prNumber} head ${headSha}; missing transition ${missingTransition}; ${text(expiredAction.row)} ${text(expiredAction.action)} owner=${text(expiredAction.actor)} reason=${text(expiredAction.reason)} deadline=${text(expiredAction.deadline?.at)}`, {
+          const receipt = await pageImpl(`SEV1 ownerless PR: ${repo} PR ${prNumber} head ${headSha}; missing transition ${missingTransition}; ${text(expiredAction.row)} ${text(expiredAction.action)} owner=${text(expiredAction.actor)} reason=${text(expiredAction.reason)} deadline=${text(expiredAction.deadline?.at)}; evidence=${(expiredAction.evidenceRefs || []).map(text).join(', ')}`, {
             event: 'ama.orphan_recovery.missing-transition', payload: { severity: 'SEV1', repo, prNumber, headSha,
               missingTransition, nextAction: expiredAction, routeReason: text(result.reason), attempts: state.attempts } });
           if (receipt?.status === 'dead-letter') logger?.warn?.('Orphan transition page is dead-lettered; operator action required');
@@ -345,12 +348,12 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     const executor = selected?.action === 'review' && selected.actor === 'reviewer' ? requestRereviewImpl
       : selected?.action === 'hammer' && selected.actor === 'hammer' ? dispatchHammer
       : selected?.action === 'remediate' && selected.actor === 'remediator' ? dispatchRemediation : null;
-    const canDispatch = selected?.head === headSha && selected.queue?.intent === 'dispatch'
+    const canDispatch = !held && selected?.head === headSha && selected.queue?.intent === 'dispatch'
       && !selected.queue?.deferredBy && typeof executor === 'function';
     if (overdue && (ownership?.uncertain || !canDispatch || isOrphanRecoveryWait(result))) {
       return await pageTransition(ownership?.uncertain ? 'ownership-proof-unavailable'
         : isOrphanRecoveryWait(result) ? 'recovery-wait-expired'
-        : selected?.queue?.deferredBy || 'selected-owner-executor-unavailable');
+        : held ? 'hold-label' : selected?.queue?.deferredBy || 'selected-owner-executor-unavailable');
     }
     const previous = readEvidence(state.evidence);
     const outcomes = JSON.parse(state.outcomes || '[]');
@@ -423,6 +426,8 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     if (action === 'review') {
       return { ...pending, amaClosureResult: { ...pending.amaClosureResult, reviewRequest: retry } };
     }
-    return retry?.dispatched ? { outcome: 'ama-dispatched', amaClosureResult: retry } : pending;
+    if (retry?.dispatched) return { outcome: 'ama-dispatched', amaClosureResult: retry };
+    if (recoveryExpired) return await pageTransition(`dispatch-refused:${text(retry?.reason || 'no-receipt')}`);
+    return pending;
   } finally { try { db?.close(); } finally { fsImpl.closeSync(fd); } }
 }

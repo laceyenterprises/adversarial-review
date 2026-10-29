@@ -130,6 +130,8 @@ async function backgroundFinalRound(t, { dispatchOnly = false, lease = false, ti
     fetchLatestHeadReviewBodiesImpl: async () => [body],
     fetchCurrentPrStateImpl: async () => ({ state: 'OPEN', headSha, isDraft: false, mergeable: 'MERGEABLE' }),
     proveCloserAuthoredStaleHeadImpl: async () => ({ proven: false }),
+    // These timer fixtures use a synthetic head, so ownership needs no GitHub read.
+    resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: false }),
     probeClosureOwnershipImpl: async () => ({ owned: true, uncertain: false }),
     runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'not-taken', reason: 'not-eligible',
       reasons: ['non-blocking-findings-present'] }),
@@ -339,6 +341,8 @@ for (const [reason, age, expectedPages] of [
       resolveAmaHammerDispatchModeImpl: () => 'inline',
       fetchLatestHeadReviewBodiesImpl: async () => [body],
       proveCloserAuthoredStaleHeadImpl: async () => ({ proven: false }),
+      // These timer fixtures use a synthetic head, so ownership needs no GitHub read.
+      resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: false }),
       runDaemonCleanMergeAttemptImpl: async () => assert.fail('wait never grants merge authority'),
       maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, reason, closerProgressAt,
         closerLaunchAlive: reason === 'existing-dispatch-running' }),

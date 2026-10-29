@@ -171,7 +171,33 @@ primary-change merge gate.
 MIGRENUMBERDERIVED-02 extends these transient proofs to Alembic wrappers with
 paired revision modules and explicit module-name registries. Each proof binds
 `modulePath`, `moduleDestination`, `primaryModuleBlob`, `moduleBlob` and an
-observed monotonic `chain` of `{ headSha, path, blob }` entries from the
+observed `chain` of `{ headSha, path, blob }` entries from the
 protected author head. Every intermediate hammer snapshot is compared with
 that same author baseline. These proofs remain outside cached history and
 are retained in `derivedChanges` through merge receipts.
+
+MIGRENUMBERDERIVED-03 also returns transient `migrationRenumberDiagnostics`:
+up to 128 recent `{ proven: false, reason, headSha, path?, detail? }` records.
+The proof collector retains its array return while recording refusal reasons on
+the evidence passed to it. The predicate exposes them in `missingEvidence` and
+its bounded summary. These records are never stored in history. Collection uses
+one load-scaled 90-second deadline (180-second maximum), 64 distinct snapshots,
+512 reads, and complete directory trees capped at 10,000 entries.
+
+SQL-backed author proofs use `moduleOrigin: author-sql`, `sqlPath`,
+`sqlDestination`, `primarySqlBlob`, `sqlBlob`, `moduleDestination`, `moduleBlob`,
+`moduleIdentity` (the hash of the normalized literal data module), and
+`snapshotMergeBase`. Here `primaryRegistryBlob` names the snapshot-base registry;
+the author did not change that registry or own the paired ordinal module.
+The registry insertion must leave every base byte intact, and embedded SQL must
+match the author's SQL exactly. The predicate may exempt the protected wrapper
+and SQL path, while author-owned module/registry edits retain the original
+paired-module rules. Every intermediate module must have the same normalized
+identity; snapshots before module introduction still preserve the author SQL.
+
+Chains with mechanical filename resets additionally carry `rebased: true` and
+require evidence `migrationRenumberAncestry: { primaryHead, headSha, status:
+diverged }`, obtained from an immutable compare and bound to both heads. All
+observed bodies remain author-equivalent; only intermediate revision/slot
+metadata can differ. These fields are also outside cached history and flow with
+successful derived-change receipts. No cache identity or durable schema changes.

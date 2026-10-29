@@ -606,12 +606,16 @@ function missingReversalEvidence(evidence, path, missing, cache, regions) {
       + `${rejected.length ? `; rejected: ${rejected.map((entry) => `${entry.review} finding=${entry.finding} kind=${entry.kind} on ${String(entry.commit).slice(0, 12)} (${entry.reason}${entry.detail ? `: ${entry.detail}` : ''})`).join(', ')}` : ''})`
     : `the reverted ${path} change cannot be authorized by a finding (${missing})`
       + `${diagnosticTimeout ? '; region diagnostic time budget exhausted' : ''}`;
+  const migrationRenumberDiagnostics = evidence.migrationRenumberDiagnostics || [];
+  if (migrationRenumberDiagnostics.length) summary += '; migration renumber proof: '
+    + migrationRenumberDiagnostics.map(entry => entry.reason + (entry.detail ? ` (${entry.detail})` : '')).join('; ');
   const regionDiagnostics = [...(evidence.revertedRegionDiagnostics || []), ...(evidence.primaryPathChanges || [])]
     .filter(entry => entry.path === path);
   if (regionDiagnostics.length) summary += '; region history: ' + regionDiagnostics.map(entry =>
     `${entry.start === null ? 'file-level' : `${entry.start}-${entry.end}`}: ${entry.commits.map(commit =>
       `${commit.sha} author=${commit.author || 'unlinked'} pipeline-repair=${commit.pipelineRepair === true ? 'yes' : commit.pipelineRepair === false ? 'no' : 'unknown'}${commit.repairKind ? ` (${commit.repairKind})` : ''}`).join(', ') || 'unavailable'}${entry.error ? ` (${entry.error})` : ''}`).join('; ');
-  return { evidence: missing, path, accepted, rejected, summary: boundedReversalText(summary, 4096), regions, regionDiagnostics };
+  return { evidence: missing, path, accepted, rejected, summary: boundedReversalText(summary, 4096), regions, regionDiagnostics,
+    ...(migrationRenumberDiagnostics.length ? { migrationRenumberDiagnostics } : {}) };
 }
 
 // The exact-head re-review is the one automatic action that can supply a
@@ -682,7 +686,7 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
     for (const [path, change] of primary) {
       if (guardReversals.some(proof => proof.path === path)) continue;
       if (derivedChanges.some(proof => proof.path === change.filename || proof.registryPath === change.filename
-        || proof.modulePath === change.filename)) continue;
+        || proof.modulePath === change.filename || proof.sqlPath === change.filename)) continue;
       const actual = final.get(path);
       if (change.derivedOnly && (!actual || actual.filename === change.filename) && actual?.status !== 'removed') continue;
       if (isTestPath(path) && isTestPath(change.filename)
@@ -1367,6 +1371,8 @@ export async function fetchPrimaryChange(args, {
   const derivedArtifacts = await proveDerivedArtifactsImpl({ ...args, rootDir: primaryChangeRoot(args) }, history);
   const evidence = { ...history, ciCost, ...guardEvidence, ...(derivedArtifacts.length ? { derivedArtifacts } : {}) };
   const result = { ...evidence, ...await fetchGuardReviewSnapshots(args, evidence) };
+  // Failed optional attempts record structured diagnostics on this transient
+  // result as well; retain them through the predicate and refusal audits.
   const migrationRenumberProofs = await proveMigrationRenumbersImpl(args, result);
   if (migrationRenumberProofs.length) result.migrationRenumberProofs = migrationRenumberProofs;
   // Outside the history cache: a missing sandbox/checkout is retryable optional

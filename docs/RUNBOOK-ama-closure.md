@@ -7023,3 +7023,37 @@ retain its awaited-label audit, the `hammer_stop_hold_released` event naming
 `operator-approval-applied`, and the retry ledger's consumed receipt bound to
 the new launch. Publication and offline fixtures do not establish this live
 receipt. No worker label change, service action or forced dispatch is needed.
+
+## R07 stop supersession (STOPSTALE-02)
+
+`src/pr-next-action.mjs` routes deterministic automated stops, retry-exhausted,
+lifetime-exhausted and hammer-final-no-merge through one supersession helper.
+A strictly newer exact-head review must be merge-eligible under the current
+strict-mode policy. Normal row selection then runs with hammer history set
+aside, accepting only `daemon-merge` / `daemon`; any other result retains the
+original R07 reason, attempt and recovery ownership. Decision refs include
+`stop-superseded-by-exact-head-review` and `stop-reason:<original reason>`.
+
+Freshness is anchored to durable evidence: `controls.stop.recordedAt`, an
+active cap ledger's `alertedAt` / `targetAlertedAt` (latest when both apply),
+or terminal launch `terminal_at` including every observed retry. The cap
+reader projects alert time as snapshot-only `hammerCap.recordedAt`; it does
+not change ledger storage. Missing, invalid or non-earlier times fail closed.
+An observation clock or a repeatedly updated ledger timestamp grants no escape.
+Caps remain binding for hammer dispatch; selection neither resets nor refunds
+any budget. Automated hold labels and earlier safety/ownership rows still win.
+
+Daemon execution retains required checks, mergeability, exact-head review,
+strict findings policy, provenance and lease checks. In
+`src/daemon-clean-merge.mjs`, `readPrimaryChange` fetches head-bound evidence;
+`fetchLiveGateImpl` repeats that read and sets `requirePrimaryChange: true`
+before every attempt. `src/ama/daemon-merge.mjs` evaluates the fresh gate through
+`evaluateMergeEligibility`, whose shared primary-change predicate refuses
+unknown, unreadable or reverted evidence, including hammer-touched histories.
+A selected action is ownership, not permission to merge.
+
+After ordinary deployment, SRE observes the stranded PR selecting
+`daemon-merge` within one watcher pass and then merging. Offline synthetic
+fixtures cover all four stop variants, evidence projection, unchanged cap
+accounting and refusal cases. No worker live PR, service or ledger action is
+part of validation.

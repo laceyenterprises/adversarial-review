@@ -1716,6 +1716,7 @@ async function dispatchAmaClosureFor({
     operatorLogins: cfg?.operatorLogins, operatorLabelActorEnforcement: cfg?.operatorLabelActorEnforcement,
     strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
     retryExhausted: ownerCap.capExhausted, lifetimeExhausted: ownerCap.lifetimeCapExhausted,
+    hammerCapRecordedAt: ownerCap.recordedAt,
     operatorApprovalApplied: ownerCap.operatorApprovalApplied === true,
     lease: handoffLease,
     launchRecord: amaDispatchCloser.readAmaCloserDispatchRecord(rootDir, { repo: repoPath, prNumber,

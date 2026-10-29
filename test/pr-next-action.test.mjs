@@ -187,6 +187,79 @@ test('STOPSTALE-01: newer reviews alone cannot bypass lifetime or final-no-merge
   }
 });
 
+// STOPSTALE-02: a later non-hammer rebase is reviewed on its exact head
+// after hammer history has exhausted its budget. These fixtures mutate no ledger.
+const r07Variants = [
+  ['automated-stop', { controls: { stop: STOP } }],
+  ['lifetime-exhausted', { policy: { hammerCap: { lifetimeExhausted: true, headSha: OLD, recordedAt: ANCHOR } } }],
+  ['retry-exhausted', { policy: { hammerCap: { retryExhausted: true, headSha: HEAD, recordedAt: ANCHOR } } }],
+  ['hammer-final-no-merge', { launches: { closer: { status: 'failed', headSha: HEAD,
+    outcome: 'no-merge', retryable: false, attempt: 2, row: { status: 'failed', terminal_at: ANCHOR } } } }],
+];
+function stoppedVariant(variant, changes = {}) {
+  return snap({ ...stopped, controls: {}, ...variant, ...changes,
+    reviews: { ...stopped.reviews, ...changes.reviews },
+    policy: { ...stopped.policy, ...variant.policy, ...changes.policy },
+    progress: { hammerHead: { headSha: OLD }, primaryChange: { ok: true, headSha: HEAD }, ...changes.progress } });
+}
+for (const [reason, variant] of r07Variants) {
+  test(`STOPSTALE-02: ${reason} shares the exact-head daemon-only supersession path`, () => {
+    const snapshot = stoppedVariant(variant);
+    const before = JSON.stringify(snapshot);
+    const decision = nextAction(snapshot);
+    assert.deepEqual(pick(decision), ['daemon-merge', 'daemon', 'clean-exact-head']);
+    assert.equal(decision.queue.intent, 'daemon');
+    assert.ok(decision.evidenceRefs.includes('stop-superseded-by-exact-head-review'));
+    assert.ok(decision.evidenceRefs.includes(`stop-reason:${reason}`));
+    assert.deepEqual(nextAction(snapshot), decision);
+    assert.equal(JSON.stringify(snapshot), before);
+  });
+  for (const [name, changes] of [
+    ['no review time', { reviews: { postedAt: null } }],
+    ['older review', { reviews: { postedAt: '2025-12-31T23:59:00Z' } }],
+    ['equal review time', { reviews: { postedAt: ANCHOR } }],
+    ['invalid review time', { reviews: { postedAt: 'invalid' } }],
+    ['blocking finding', { reviews: { blockingFindingCount: 1 } }],
+    ['unknown findings', { reviews: { blockingFindingState: 'unknown' } }],
+    ['different head', { reviews: { headSha: OTHER } }],
+    ['strict mode', { policy: { strictMode: true } }],
+    ['red checks', { checks: { conclusion: 'FAILURE' } }],
+    ['pending checks', { checks: { conclusion: 'PENDING' } }],
+    ['unknown checks', { checks: { conclusion: null } }],
+    ['conflicting', { pr: { mergeable: 'CONFLICTING' } }],
+    ['dirty', { pr: { mergeStateStatus: 'DIRTY' } }],
+    ['unknown mergeability', { pr: { mergeable: 'UNKNOWN' } }],
+    ['unknown attestation', { reviews: { attestation: 'unknown' } }],
+    ['invalid attestation', { reviews: { attestation: 'invalid' } }],
+    ['daemon exhausted', { progress: { daemonExecution: { headSha: HEAD, reason: 'merge-retry-budget-exhausted' } } }],
+  ]) test(`STOPSTALE-02: ${reason} retains its R07 row with ${name}`, () => {
+    const decision = nextAction(stoppedVariant(variant, changes));
+    assert.deepEqual(pick(decision), ['hammer', 'closure-recovery', reason]);
+    assert.equal(decision.row, 'R07-stop');
+    assert.equal(decision.queue.intent, 'reconcile');
+    assert.ok(!decision.evidenceRefs.includes('stop-superseded-by-exact-head-review'));
+  });
+  for (const time of [null, 'invalid', AFTER_STOP, '2026-01-01T00:00:45Z']) {
+    test(`STOPSTALE-02: ${reason} requires a trustworthy earlier recorded time (${time})`, () => {
+      const changed = structuredClone(variant);
+      if (changed.controls) changed.controls.stop.recordedAt = time;
+      if (changed.policy) changed.policy.hammerCap.recordedAt = time;
+      if (changed.launches) changed.launches.closer.row.terminal_at = time;
+      const decision = nextAction(stoppedVariant(changed));
+      assert.deepEqual(pick(decision), ['hammer', 'closure-recovery', reason]);
+      assert.equal(decision.queue.intent, 'reconcile');
+    });
+  }
+}
+test('STOPSTALE-02: terminal retries must all predate the exact-head review', () => {
+  const variant = r07Variants[3][1];
+  for (const terminal_at of [null, 'invalid', AFTER_STOP, '2026-01-01T00:00:45Z']) {
+    const changed = structuredClone(variant);
+    changed.launches.closer.retryChain = [{ status: 'failed', terminal_at }];
+    assert.equal(nextAction(stoppedVariant(changed)).reason, 'hammer-final-no-merge');
+  }
+});
+
 test('verified terminal HAM completion crosses the retry row only with matching heads and safety gates', () => {
   const options = {
     reviews: { headSha: OLD, verdict: 'request changes', blockingFindingCount: 1 },

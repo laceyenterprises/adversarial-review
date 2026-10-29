@@ -151,7 +151,7 @@ function requestEligibleHammerWake({
   const retryIdentity = retryIds.length ? `${retryLaunch || 'retry'}:${createHash('sha256')
     .update(JSON.stringify(retryIds)).digest('hex')}` : retryLaunch;
   const wakeAttemptKey = recoveryDispatch
-    ? `recovery:${decision.row}:${decision.reason}:${decision.deadline?.anchoredAt}:${retryIdentity || 'initial'}`
+    ? `recovery:${decision.row}:${decision.reason}:${decision.deadline?.anchoredAt || decision.deadline?.at || 'unanchored'}:${retryIdentity || 'initial'}`
     : retryIdentity || (decision?.attempt != null ? `retry-${decision.attempt}` : 'initial');
   let eligibility = { eligible: false, reasons: [] };
   if (shared) {

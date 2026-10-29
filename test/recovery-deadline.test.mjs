@@ -1,7 +1,7 @@
 import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { deriveNextActionSnapshot, nextAction } from '../src/pr-next-action.mjs';
@@ -184,6 +184,43 @@ test('RECOVERYDEADLINE-01: expired launchless lease uses the same rule as a non-
   assert.equal(shared.decision.row, 'R04-ownership');
   assert.equal(shared.decision.reason, 'lease-expired');
   assert.equal(hasHammerDispatchIntent(shared, identity), true);
+});
+
+test('RECOVERYDEADLINE-01: string and object hold labels fence expired receipts and leases at selection', () => {
+  for (const source of ['pr', 'controls', 'candidate']) {
+    for (const label of ['do-not-merge', { name: 'do-not-merge' },
+      { name: 'do-not-merge', actorKind: 'automation' }]) {
+      for (const recovery of [{}, {
+        leases: { closer: { status: 'pending', headSha: HEAD, deadlineAt: AT } }, progress: {},
+      }]) {
+        const shared = pair({ ...recovery, [source]: { ...candidate, state: 'OPEN', labels: [label] } });
+        assert.equal(hasHammerDispatchIntent(shared, identity), false);
+        assert.equal(shared.decision.actor, label.actorKind ? 'closure-recovery' : 'operator');
+        if (label.actorKind) assert.equal(shared.decision.queue.intent, 'reconcile');
+        else assert.equal(shared.decision.reason, 'hold-label');
+      }
+    }
+  }
+});
+
+for (const [deadline, anchor] of [
+  [{ anchoredAt: AT, at: DUE }, AT],
+  [{ at: DUE }, DUE],
+  [{ anchoredAt: null, at: DUE }, DUE],
+  [{}, 'unanchored'],
+]) test(`RECOVERYDEADLINE-01: wake audit anchor falls back deterministically (${JSON.stringify(deadline)})`, t => {
+  const f = fixture(t), shared = pair();
+  const synthetic = { ...shared, decision: { ...shared.decision,
+    deadline: { class: 'recovery', ...deadline } } };
+  let wakes = 0;
+  const wake = () => requestEligibleHammerWake({ rootDir: f.rootDir, ...identity, shared: synthetic,
+    log: quiet, requestWatcherWakeImpl: () => { wakes++; return { requested: true }; } });
+  const result = wake();
+  assert.equal(result.outcome, 'requested');
+  const audit = JSON.parse(readFileSync(result.auditPath, 'utf8'));
+  assert.equal(audit.wakeAttemptKey, `recovery:R06-merge-receipt:merge-receipt-unconfirmed:${anchor}:initial`);
+  assert.equal(wake().outcome, 'duplicate');
+  assert.equal(wakes, 1);
 });
 
 test('RECOVERYDEADLINE-01: earlier ordinary wakes cannot swallow expiry, and completed recovery launches rearm once', t => {

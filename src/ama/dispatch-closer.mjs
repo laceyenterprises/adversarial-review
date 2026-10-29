@@ -1,4 +1,5 @@
 import { readWorkerDispatchFiles, readHostIdentitySync } from '../dispatch-files-client.mjs';
+import { readWorkerObservation } from '../dispatch-read-client.mjs';
 import { loadAppSdkSync } from '../app-sdk-loader.mjs';
 import { prepareQueueCloserDispatch, renderQueueCloserPrompt, queueAdmissionCallback } from '../finalization/queue-closer.mjs';
 import { routeFinalizationWriter } from '../finalization/queue-routing-boundary.mjs';
@@ -2902,6 +2903,7 @@ async function resolveSelfOwnedHammerCloserRunLiveness({
   env = process.env,
   readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedgerAsync,
   readWorkerDispatchFilesImpl = readWorkerDispatchFiles,
+  readWorkerObservationImpl = readWorkerObservation,
   processKillImpl = process.kill,
 } = {}) {
   const workerId = isSamePrHammerCloserWorkerId(workerIdOverride, prNumber)
@@ -2909,20 +2911,57 @@ async function resolveSelfOwnedHammerCloserRunLiveness({
     : hammerCloserWorkerId(prNumber);
   const root = String(hqRoot || '').trim();
   if (!workerId || !root) return { live: false, reason: 'invalid-worker-id-or-root' };
-  const files = await readWorkerDispatchFilesImpl(workerId, {env, hqRoot: root});
-  if (!files?.ok) return {live: null, unknown: true, reason: 'dispatch-files-unavailable'};
-  const launchRequestId = files.metadata?.launchRequestId;
-  if (!launchRequestId) return {live: null, unknown: true, reason: 'missing-launch-request-id'};
+  let files;
+  try { files = await readWorkerDispatchFilesImpl(workerId, {env, hqRoot: root}); }
+  catch { files = null; }
+  if (files?.workerRunCount > 1) return {live: null, unknown: true, reason: 'multiple-worker-runs'};
+  let launchRequestId = files?.ok ? files.metadata?.launchRequestId : null;
+  const slotFallback = !launchRequestId;
+  if (slotFallback) {
+    const reason = files?.ok ? 'missing-launch-request-id' : 'dispatch-files-unavailable';
+    let slots;
+    try {
+      // This public inventory reads the slot manifest independently of worker
+      // registration. Never read host sidecars directly or infer no launch.
+      slots = await readWorkerObservationImpl({observation: 'workspaces', worker_id: workerId}, {env, hqRoot: root});
+    } catch { /* Unreadable inventory cannot release custody. */ }
+    if (!slots?.ok || !slots.rows?.length) return {live: null, unknown: true, reason};
+    if (slots.rows.length !== 1) return {live: null, unknown: true, reason: 'ambiguous-slot-launch-identity'};
+    const slot = slots.rows[0];
+    launchRequestId = slot.launch_request_id;
+    if (!launchRequestId) return {live: null, unknown: true, reason};
+    if (slot.worker_id !== workerId || slot.directory_name !== 'agent-os'
+      || slot.manifest_state !== 'available' || slot.present !== true
+      || typeof launchRequestId !== 'string' || !launchRequestId.trim()) {
+      return {live: null, unknown: true, reason: 'slot-launch-identity-unavailable', launchRequestId};
+    }
+  }
   let result;
   try {
     result = await readLatestWorkerRunStatusImpl({ launchRequestId, env, hqRoot: root });
   } catch (err) {
-    return { live: null, unknown: true, reason: 'worker-run-lookup-threw', detail: err?.message || String(err) };
+    return { live: null, unknown: true, reason: 'worker-run-lookup-threw', launchRequestId, detail: err?.message || String(err) };
   }
   if (!result?.ok || !result.row) {
     return { live: null, unknown: true, reason: result?.reason || 'worker-run-lookup-failed', launchRequestId };
   }
   const workerStatus = normalizeWorkerRunStatus(result.row.status);
+  if (slotFallback) {
+    // A latest-row projection alone is not an inventory. Require exactly one
+    // run for this launch; never turn an active run's dead PID into authority.
+    if (!Array.isArray(result.rows) || result.rows.length !== 1) {
+      return {live: null, unknown: true, reason: 'ambiguous-slot-worker-runs', launchRequestId, workerStatus};
+    }
+    const run = result.rows[0];
+    if (!run.run_id || run.run_id !== result.row.run_id || run.launch_request_id !== launchRequestId
+      || result.row.launch_request_id !== launchRequestId || normalizeWorkerRunStatus(run.status) !== workerStatus
+      || (run.worker_id != null && run.worker_id !== workerId)) {
+      return {live: null, unknown: true, reason: 'slot-worker-run-identity-mismatch', launchRequestId, workerStatus};
+    }
+    const terminal = isTerminalBranchHolderWorkerRunStatus(workerStatus);
+    return {live: terminal ? false : null, unknown: !terminal, launchRequestId, workerStatus,
+      reason: terminal ? 'slot-terminal-worker-run' : 'slot-worker-run-not-terminal'};
+  }
   const active = AMA_CLOSER_ACTIVE_STATUSES.has(workerStatus);
   const pid = result.row.pid ?? result.row.worker_process_pid ?? null;
   const pidAlive = isPidAlive(pid, processKillImpl);
@@ -2969,6 +3008,7 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
   env = process.env,
   readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedgerAsync,
   readWorkerDispatchFilesImpl = readWorkerDispatchFiles,
+  readWorkerObservationImpl = readWorkerObservation,
   processKillImpl = process.kill,
 }) {
   if (!isHammerWorkerClass(workerClass)) {
@@ -3011,6 +3051,7 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
     env,
     readLatestWorkerRunStatusImpl,
     readWorkerDispatchFilesImpl,
+    readWorkerObservationImpl,
     processKillImpl,
   });
   const orphan = liveness.unknown && !liveness.launchRequestId
@@ -3025,6 +3066,7 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
       worktreeAgeMs,
       workerStatus: liveness.workerStatus,
       launchRequestId: liveness.launchRequestId,
+      reason: liveness.reason,
     });
     return {
       attempted: false,
@@ -3090,7 +3132,8 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
       transient: isTransientHqDispatchError(lastErr),
       attempts,
     }, { level: 'warn' });
-    return { attempted: true, ok: false, workerId, worktreePath, error };
+    return { attempted: true, ok: false, unknown: true,
+      reason: 'closer-reclaim-refused', workerId, worktreePath, error };
   }
 
   logAmaCloserDispatchEvent(logger, 'closer_provision_collision_reclaimed', {

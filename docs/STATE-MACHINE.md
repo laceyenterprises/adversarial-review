@@ -2487,6 +2487,17 @@ the pending lease defers before replacement intent publication, preserving the
 settled no-launch proof for later admission.
 Existing lifecycle states, transitions and smoke promises are unchanged.
 
+CLOSERDEADSLOT-02 also resolves a launch-bound self-owned slot when dispatch-files
+cannot supply its launch ID: the public workspace inventory must identify one
+present slot with an available manifest, and the exact launch ledger inventory
+must contain one matching terminal branch-holder run. This includes failed
+`spawn_never_registered` runs with no worker-id registration row. Active,
+ambiguous, mismatched and unreadable evidence retains custody; this fallback
+never uses a dead PID to release an active run. The normal host teardown remains
+authoritative, and a refusal prevents replacement dispatch. Deferred unknown-run
+events include the liveness reason and known launch ID. The no-launch orphan
+bridge and existing lifecycle states, transitions and smoke promises are unchanged.
+
 Settlement defers a matching pending lease and rolls back the intent retry
 increment once; retry ledgers and merge eligibility remain authoritative.
 

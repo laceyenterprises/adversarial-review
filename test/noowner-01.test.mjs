@@ -1592,6 +1592,30 @@ test('STOPHOLDREVIEW-01 a satisfied review predicate cannot bypass the per-PR re
   assert.ok(f.alerts.every(alert => alert.options.event !== 'ama_closer.hammer_stop_hold'));
 });
 
+for (const cap of ['available', 'series', 'lifetime']) {
+  test(`HOLDGATEVERSION-01 deploy re-arms one hammer with ${cap} retry budget`, async t => {
+    const f = reviewStopFixture(t, 'verdict-not-eligible', { reviewServiceRevision: 'synthetic-deployment-A' });
+    const identity = { repo: f.args.dispatchContext.repo, prNumber: 42 };
+    const count = cap === 'series' ? 2 : cap === 'lifetime' ? HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES : 0;
+    for (let i = 0; i < count; i++) recordHammerRetryDispatch(f.rootDir, identity, {
+      jobKey: cap === 'lifetime' ? `synthetic-series-${i}` : REVIEW_STOP_HEAD,
+      headSha: cap === 'lifetime' ? String(i).repeat(40) : REVIEW_STOP_HEAD, now: REVIEW_STOP_T0 });
+    const deps = closerDeps({ alerts: f.alerts });
+    // The real admission path observes the currently loaded service revision,
+    // different from the synthetic revision recorded by this historical stop.
+    const result = await maybeDispatchAmaCloser({ ...f.args, ...deps });
+    if (cap === 'available') {
+      assert.equal(result.dispatched, true, JSON.stringify(result));
+      await maybeDispatchAmaCloser({ ...f.args, ...deps });
+      assert.equal(hqLaunches(deps).length, 1, 'the normal lease fences repeated released ticks');
+    } else {
+      assert.equal(result.reason, cap === 'series' ? 'hammer-retry-cap-exhausted' : 'hammer-lifetime-ceiling-reached', JSON.stringify(result));
+      assert.equal(hqLaunches(deps).length, 0);
+      assert.equal(readHammerRetryCapLedger(f.rootDir, identity).lifetimeAttemptCount, count, 'deploy releases never refund attempts');
+    }
+  });
+}
+
 for (const legacy of ['exact-head-review-required', 'stale-review-head']) {
   test(`HAMNOREREVIEW-01 later ${legacy} cannot erase an earlier primary-change refusal`, async t => {
     const f = reviewStopFixture(t, 'primary-change-reverted');

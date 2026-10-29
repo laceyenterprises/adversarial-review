@@ -1342,6 +1342,12 @@ if (scenario === 'clean') {
   assert.equal(packagingHold.skipMergeAgent, true);
   assert.equal(packagingHold.hammerStop.paged, true);
   assert.equal(refusalPages, 1);
+  const deploymentRelease = await evaluateHammerStopHold({ ...holdArgs,
+    reviewServiceRevision: 'synthetic-deployment-B', deliverAlertImpl: refuse });
+  assert.deepEqual(deploymentRelease.changed, ['gate-revision-change']);
+  assert.equal((await evaluateHammerStopHold({ ...holdArgs,
+    reviewServiceRevision: 'synthetic-deployment-B', deliverAlertImpl: refuse })).action, 'none',
+  'retired packaging-only history cannot manufacture another release');
   const { runDaemonCleanMergeAttempt } = await import('../../src/daemon-clean-merge.mjs');
   const haltDirectory = join(rootDir, 'hq', 'control', 'halt');
   mkdirSync(haltDirectory, { recursive: true });

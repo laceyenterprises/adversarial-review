@@ -8,6 +8,7 @@ import { hammerStopInputs, normalizeHammerStopHold, readHammerStopForHead, isInf
 import { normalizeOperatorLabelHold } from './operator-label-gates.mjs';
 import { normalizeStackedBaseHold } from './stacked-base.mjs';
 import { assertHoldRecord, evaluateHoldRecord, holdEvaluatedThisPoll, markHoldEscalated } from './hold-record.mjs';
+import { REVIEW_SERVICE_REVISION } from '../review-service-revision.mjs';
 
 // The same exports are usable by owner-resolution consumers. No directory scan,
 // remote read, dispatch or merge is needed to project the current subject's holds.
@@ -41,7 +42,7 @@ export function readCloserHoldRecords({ rootDir, repo, prNumber, headSha }) {
 // this poll are skipped. Backed-off subjects still get timer/head/base/check
 // evaluation; expensive evidence probes retain their existing owner cadence.
 export async function evaluateCloserHoldsForPoll({ rootDir, hqRoot = rootDir, subjects, now = new Date().toISOString(),
-  deliverAlertImpl, logger = console }) {
+  reviewServiceRevision = REVIEW_SERVICE_REVISION, gatePredicateVersion = null, deliverAlertImpl, logger = console }) {
   const seen = new Set();
   for (const subject of subjects) {
     const repo = subject.repoPath || subject.repo;
@@ -79,7 +80,8 @@ export async function evaluateCloserHoldsForPoll({ rootDir, hqRoot = rootDir, su
           excludeContexts: new Set(record.excludeContexts),
         }) === 'SUCCESS') events['operator-label-gates-cleared'] = true;
       if ((metadata.baseBranch || metadata.baseRefName) && (metadata.baseBranch || metadata.baseRefName) === metadata.defaultBranch) events['stacked-base-cleared'] = true;
-      const evaluation = evaluateHoldRecord(record, { now, namespace: rootDir, inputs, events });
+      const evaluation = evaluateHoldRecord(record, { now, namespace: rootDir, inputs, events,
+        gateRevision: { serviceRevision: reviewServiceRevision, predicateVersion: gatePredicateVersion } });
       if (evaluation.action !== 'release' && !evaluation.escalate) continue;
       const lock = `${path}.lock`;
       let claimed = false;
@@ -102,6 +104,8 @@ export async function evaluateCloserHoldsForPoll({ rootDir, hqRoot = rootDir, su
           updated.releasedAt = now;
           updated.releasedBy = evaluation.changed;
           updated.releasedInputs = inputs;
+          if (evaluation.changed.includes('gate-revision-change')) updated.releasedGateRevision = {
+            serviceRevision: reviewServiceRevision, predicateVersion: gatePredicateVersion };
         } else {
           const text = `Closure hold ${repo} PR ${prNumber}: ${record.reason}; owner=${record.owner}; deadline=${record.deadline}; awaits=${JSON.stringify(record.awaits)}`;
           if (type === 'stacked-base') {

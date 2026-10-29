@@ -43,6 +43,11 @@ Predicates are data, never executable expressions:
   successful stacked-base inspection and cleared operator-label gates. CI waits can also release on an observed
   check fingerprint change. Review-finding waits never use CI greenness as
   release evidence.
+- `gate-revision-change` compares `from: { serviceRevision, predicateVersion }`
+  against the owner's loaded service revision and optional predicate version.
+  Both readings of a component must be nonempty strings to prove a difference.
+  Deterministic hammer refusals alone await this predicate; a missing revision
+  does not release. The poll cache includes revision observations.
 - `retry-at` stores an absolute `at` timestamp. Transient hammer retries retain
   their five-minute bound and fallback precedence after other releases.
 - `companion-merged` observes a named dependency merge. Companion holds use

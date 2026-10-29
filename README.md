@@ -1845,6 +1845,16 @@ Retryable UNKNOWN deferral requires an open PR at the validated head; moved
 heads and closed PRs retain their terminal refusal. A shared CI deadline reached
 before the next snapshot retains that classification from the last exact-head
 UNKNOWN snapshot; real hold reasons still receive their ordinary refusal.
+HOLDGATEVERSION-01 records the loaded review-service commit (or packaged
+version) and optional predicate version on deterministic refusal holds. A new
+nonempty revision releases with `gate-revision-change`, including in skipped
+subject sweeps. The release receipt survives polls and restarts; a subsequent
+stop under the new revision holds again. Legacy records without provenance
+anchor at first observation. Transient and companion recovery, leases, exact-head
+merge gates and all retry caps retain their existing authority. After normal
+deployment, SRE observes the next organic gate fix releasing its held PRs without
+a head nudge; offline fixtures do not establish that live receipt.
+
 CLOSERSTOPTRANSIENT-01 restricts input-change holds to the explicit audited
 `DETERMINISTIC_STOP_REASONS` allowlist. Finding and review-evidence refusals
 remain held; CI, lane contention, auth/environment and unclassified merge

@@ -32,6 +32,8 @@ at mode `0640`.
 | `appendedRecords` | optional array | Compatibility evidence recovered from trailing JSONL after the leading JSON document. Parsed lines retain their original shape; malformed lines become `{ unparsed: string }` with at most 2000 characters. Preserved by subsequent atomic rewrites, without changing `status` or numbering `attempts`. |
 | `attempts[].attemptNumber` | positive integer | Sequential, starting at `1`. |
 | `attempts[].startedAt` | ISO timestamp | Append time. |
+| `attempts[].reviewServiceRevision` | string or null | HOLDGATEVERSION-01: loaded review-service checkout commit (`git:<sha>`) or packaged version (`package:<version>`), captured by the audit writer unless supplied by the producer. Missing legacy provenance remains unknown. Deterministic stop holds retain this decision baseline across deployment. |
+| `attempts[].gatePredicateVersion` | optional string | Producer-supplied predicate version, retained by deterministic hold readers alongside the service revision. |
 | `attempts[].outcome` | string | `in_progress`, `deferred`, `superseded`, `succeeded`, or `failed-without-merge`. Other attempt fields carry caller evidence, including `closingStatus` for gate-cap parks. |
 | `attempts[].waited_s` | optional number or null | Merge-lease timeout elapsed seconds from the lease CLI; missing or null duration evidence is recorded as JSON `null` so the deferred audit remains valid. |
 | `attempts[].configured_s` | optional number | Procedure-enforced merge-lease wait budget in seconds for a timeout attempt. |

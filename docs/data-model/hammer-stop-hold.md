@@ -1,5 +1,32 @@
 # Data Model - Hammer Stop Hold
 
+## Deployment recovery (HOLDGATEVERSION-01)
+
+Deterministic refusals also record `gateRevision: { serviceRevision,
+predicateVersion }`. The terminal audit's `reviewServiceRevision` and optional
+`gatePredicateVersion` take precedence; missing legacy provenance is anchored
+at the first observation. Repeated observations retain that baseline. A missing
+revision cannot prove a deployment, and legacy holds without provenance require
+a subsequent observed revision change rather than a guessed historical revision.
+
+`awaits` adds `gate-revision-change` only for deterministic refusals. Either
+nonempty recorded component differing from its nonempty current observation
+releases the hold. `serviceRevision` is the service checkout commit captured
+when the process loads (`git:<sha>`), falling back to `package:<version>` for
+packaged deployments. The subject PR and Agent OS parent checkout are never
+revision sources. Updating files underneath a running process does not advance
+its loaded revision; normal deployment must load the new service code.
+Predicate versions are optional producer evidence, with no new config key.
+
+Normal admission and the skipped-subject poll sweep share this predicate.
+Release persists `releasedBy: ['gate-revision-change']`, `releasedAt`,
+`releasedGateRevision` and the ordinary released input baseline. Repeated polls
+and restarts retain one release receipt. A subsequent deterministic stop under
+the new revision starts a fresh hold. Existing leases fence duplicate dispatch;
+per-head, series and lifetime caps remain charged and can refuse re-dispatch.
+Transient and companion stops retain their existing recovery behavior. Release
+grants no merge authority and changes no merge predicate.
+
 
 ## Actions infrastructure recovery (CIBLOCKINFRA-01)
 

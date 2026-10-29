@@ -37,6 +37,14 @@ this so a lost outbox receipt or restart cannot double automation accounting.
 | `reason` | string or null | Required and non-empty for refusal; defaults to null for success. |
 | `executedAt` | timestamp string | Parseable date; defaults to the writer's current ISO timestamp. |
 | `deliveryKey` | string (optional) | Present only for stable-key outbox deliveries; see above. |
+| `derivedChanges` | array (optional) | MIGRENUMBERDERIVED-01 proof of `mechanical-migration-renumber`. At most eight entries, each containing `classification`, `path`, `destination`, `registryPath`, `primaryBlob`, `blob`, `primaryRegistryBlob`, `registryBlob`, `primaryHead`, `headSha`, `mergeBase`. All blobs/heads are Git SHAs and each `headSha` must equal the receipt head. Relative paths exclude traversal. |
+
+`derivedChanges` explains preservation under the shared primary-change contract;
+it grants no authority. The daemon copies the latest passing in-lease result.
+The hammer CLI accepts an optional final argument naming its gate JSON snapshot,
+requires a passing gate with matching `expectedHead` and `liveHead`, and retains
+the same evidence in owner receipts or isolated-worker requests. Existing
+exact-head recent-merge confirmation remains required.
 
 ## Receipt ownership and executed refusals
 

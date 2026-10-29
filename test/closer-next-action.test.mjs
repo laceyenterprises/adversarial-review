@@ -14,7 +14,9 @@ import classifyRescue from '../src/merge-agent-rescue-classifier.mjs';
 import { routeToHammerOwner } from '../src/hammer-owner-route.mjs';
 import { launchSource } from '../src/pr-next-action-consumer.mjs';
 import { closureOwnerFromDecision, hasHammerDispatchIntent, observeClosureResult, observeClosureOwnership,
-  resolveClosureNextAction, revalidateClosurePr, reviseClosureNextAction, readClosureNextAction } from '../src/ama/closure-next-action.mjs';
+  resolveClosureNextAction, revalidateClosurePr, reviseClosureNextAction, readClosureNextAction, observeDaemonGate } from '../src/ama/closure-next-action.mjs';
+import { migrationRenumberFixture } from './helpers/migration-renumber.mjs';
+import { proveMigrationRenumbers } from '../src/ama/migration-renumber.mjs';
 import { maybeDispatchAmaClosureFor, resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { reviewCeilingOwner } from '../src/review-ceiling-owner.mjs';
 import { observeClosureWait, CLOSURE_WAIT_BOUND_MS, CLOSURE_WAIT_RETRY_MS } from '../src/ama/closure-wait.mjs';
@@ -40,6 +42,21 @@ function base(observations = {}) {
 }
 const pair = snapshot => Object.freeze({ snapshot, decision: nextAction(snapshot) });
 const tuple = decision => [decision.action, decision.actor, decision.reason];
+
+test('a proven renumber replaces primary-change repair with an auditable passing observation', async () => {
+  const f = migrationRenumberFixture();
+  f.evidence.headSha = HEAD;
+  f.evidence.ciCost.headSha = HEAD;
+  f.evidence.migrationRenumberProofs = await proveMigrationRenumbers(f.args, f.evidence);
+  const selected = pair(base({ progress: { primaryChange: { ok: false,
+    reason: 'primary-change-reverted', headSha: HEAD } } }));
+  const fresh = observeDaemonGate(selected, { candidateHead: HEAD, prState: 'OPEN', mergeable: 'MERGEABLE',
+    mergeStateStatus: 'CLEAN', requiredChecks: true, labels: [], primaryChange: f.evidence });
+  const primary = fresh.snapshot.observations.progress.value.primaryChange;
+  assert.equal(primary.ok, true);
+  assert.deepEqual(primary.derivedChanges, f.evidence.migrationRenumberProofs);
+  assert.equal(fresh.decision.action, 'daemon-merge');
+});
 function root(t) {
   const value = mkdtempSync(join(tmpdir(), 'nxa-closer-'));
   t.after(() => rmSync(value, { recursive: true, force: true }));

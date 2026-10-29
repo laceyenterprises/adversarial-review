@@ -3254,6 +3254,41 @@ from a builder-renamed path may collect the same identical-blob hammer proof
 when both the intermediate path is absent and the merge-base name remains
 removed or renamed; restoring the merge-base name does not qualify.
 
+### Mechanical migration renumbers (MIGRENUMBERDERIVED-01)
+
+The shared primary-change collector recognizes an author-added Python migration
+renumber as `mechanical-migration-renumber`. A single destination must retain the
+name suffix and migrations directory (`migrations/` or `migrations/versions/`),
+increase its numeric prefix, and leave the old path absent. Hash-verified immutable
+blobs must match byte for byte after normalizing only module-level `revision` and
+`down_revision` literals, the numeric member of a `REVISION` tuple, and matching
+`Revision ID` / `Revises` lines in the initial module docstring. Predecessor
+identifiers must name the immediately preceding revision; operations, imports,
+comments, tuple descriptions and all other bytes remain protected.
+
+A matching registry tuple must also change in `migrations/__init__.py`,
+`migrations/registry.py` or `migrations/revisions.py`: a top-level `REVISIONS`,
+`MIGRATIONS`, `REVISION_REGISTRY` or `MIGRATION_REGISTRY` sequence (case-insensitive,
+optional leading underscore) contains exactly one `(number, "name")` entry for
+the migration. The string may be its suffix, numbered stem or filename. All
+other registry bytes must match the protected author snapshot. This does not
+exempt unrelated registry or source changes. Unsupported layouts, missing or
+unreadable blobs, ambiguous renames and unmatched registries supply no proof;
+the existing reversal authorization still applies.
+
+Proofs are recomputed after history-cache lookup, without running migration code
+or a generator. They bind both paths, both migration blobs, both registry blobs,
+the protected author head, candidate head and merge base. The predicate returns
+them as `derivedChanges`; eligibility, closure observations, daemon audits and
+merge-action receipts retain that classification. The hammer passes its last
+passing exact-head gate snapshot to receipt publication. No operator step is
+needed for a proven renumber; every other merge predicate still applies.
+
+Post-merge SRE evidence (SEVDOCS-333): inspect the next natural renumber's merge
+receipt for `derivedChanges[].classification: mechanical-migration-renumber`
+and confirm it merged without reversal authorization. This is live verification
+for SRE after deployment, not a worker action or a new check.
+
 ### Declared opaque build outputs (PRIMARYOPAQUE-01)
 
 Repositories opt in through the existing `scripts` object in a checked-in

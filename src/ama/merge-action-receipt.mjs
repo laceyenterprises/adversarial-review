@@ -23,7 +23,8 @@ function trusted(path, uid, directory = false, sharedParent = false) {
 }
 
 export function writeMergeActionReceipt({ hqRoot, repo, prNumber, headSha, producerClass = 'ama-daemon',
-  merged, reason = null, executedAt = new Date().toISOString(), action = 'gh pr merge', deliveryKey = null }) {
+  merged, reason = null, executedAt = new Date().toISOString(), action = 'gh pr merge', deliveryKey = null,
+  derivedChanges = [] }) {
   if (!hqRoot) throw new Error('Merge-action receipt requires HQ root');
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo) || !Number.isInteger(prNumber) || prNumber < 1
     || !/^[a-f0-9]{40}$/.test(headSha) || typeof merged !== 'boolean' || (!merged && !isExecutedMergeRefusal(reason))
@@ -31,6 +32,14 @@ export function writeMergeActionReceipt({ hqRoot, repo, prNumber, headSha, produ
     || !['gh pr merge', 'api merge'].includes(action) || !Number.isFinite(Date.parse(executedAt))
     || (deliveryKey !== null && (typeof deliveryKey !== 'string' || !/^[\w:.-]{1,200}$/.test(deliveryKey)))) {
     throw new Error('Invalid merge-action receipt');
+  }
+  if (!Array.isArray(derivedChanges) || derivedChanges.length > 8 || derivedChanges.some(proof =>
+    proof?.classification !== 'mechanical-migration-renumber' || proof.headSha !== headSha
+    || ['headSha', 'primaryHead', 'mergeBase', 'primaryBlob', 'blob', 'primaryRegistryBlob', 'registryBlob']
+      .some(key => !/^[a-f0-9]{40}$/i.test(proof[key] || ''))
+    || ['path', 'destination', 'registryPath'].some(key => typeof proof[key] !== 'string'
+      || !proof[key] || /[\\\x00-\x1f]/.test(proof[key]) || proof[key].split('/').some(part => !part || part === '.' || part === '..')))) {
+    throw new Error('Invalid derived merge-action evidence');
   }
   const identity = userInfo();
   const owner = readHostIdentitySync({hqRoot}).ownerUser;
@@ -44,6 +53,7 @@ export function writeMergeActionReceipt({ hqRoot, repo, prNumber, headSha, produ
   }
   const record = { actor: producerClass === 'ama-daemon' ? 'AMA' : 'hammer', action, merged,
     reason, repo, prNumber, headSha, executedAt, producerClass, receiptProtocol: 'OPSEV1-03',
+    ...(derivedChanges.length ? { derivedChanges } : {}),
     ...(deliveryKey ? { deliveryKey } : {}) };
   const temporary = join(directory, `.merge-action-${randomUUID()}`);
   // A stable delivery key names exactly one receipt; link(2) refuses a second.

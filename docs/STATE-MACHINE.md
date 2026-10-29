@@ -961,6 +961,17 @@ win. A receipt grants no review or merge authority. CLEAN and known non-strict
 MERGEABLE BEHIND heads retain their SHA and CI when main advances; only GitHub
 conflicts or strict BEHIND require rebase. See the pending-CI resume runbook.
 
+MIGRENUMBERDERIVED-01: the shared primary-change predicate accepts a mechanical
+Python migration renumber when immutable migration and registry blobs prove the
+same operations under a higher revision in the same migrations directory. It
+returns `derivedChanges` with classification `mechanical-migration-renumber`,
+bound to the protected author/head/base and source/destination/registry blobs.
+The closure's passing primary-change observation, daemon audit and merge-action
+receipt retain this evidence. Missing registry updates, changed operations and
+unmatched renames retain the existing reversal refusal. Proofs are transient
+and recomputed outside the history cache; lifecycle states and merge gates are
+unchanged. See the [renumber contract](RUNBOOK-ama-closure.md#mechanical-migration-renumbers-migrenumberderived-01).
+
 HOSTIDCACHE-01: uncached host-owner reads share one bounded retry budget and
 cache only success for the process lifetime. Transient timeout, spawn failure
 or unavailability returns a retryable closer defer, preserving the selected

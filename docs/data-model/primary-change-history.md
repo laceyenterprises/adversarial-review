@@ -61,6 +61,13 @@ snapshot diagnostics.
 File evidence and reversal citations use the collector's shapes in
 `src/ama/primary-change.mjs`.
 CI-cost evidence is collected live after history reuse and is never cached here.
+MIGRENUMBERDERIVED-01 `migrationRenumberProofs` are likewise transient, collected
+from hash-verified immutable blobs after cache reuse. Each contains
+`classification: mechanical-migration-renumber`, `path`, `destination`,
+`registryPath`, `primaryBlob`, `blob`, `primaryRegistryBlob`, `registryBlob`,
+`primaryHead`, `headSha` and `mergeBase`. The evaluator binds all identities to
+the current file comparisons and returns successful proofs as `derivedChanges`.
+They are never written into history records and require no cache version bump.
 PRIMARYOPAQUE-01 derived-artifact proofs are also collected after history reuse
 and never written into these records. Returned evidence may carry
 `derivedArtifacts`, an array of `{ path, primaryBlob, blob, directory, command,

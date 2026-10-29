@@ -12,6 +12,7 @@ import { deriveNextActionSnapshot, NEXT_ACTION_DEADLINE_MS, nextAction } from '.
 import { resolveSharedNextAction } from '../src/pr-next-action-shadow.mjs';
 import classifyRescue from '../src/merge-agent-rescue-classifier.mjs';
 import { routeToHammerOwner } from '../src/hammer-owner-route.mjs';
+import { dispatchReadTransport } from '../src/dispatch-read-client.mjs';
 import { launchSource } from '../src/pr-next-action-consumer.mjs';
 import { closureOwnerFromDecision, hasHammerDispatchIntent, observeClosureResult, observeClosureOwnership,
   resolveClosureNextAction, revalidateClosurePr, reviseClosureNextAction, readClosureNextAction } from '../src/ama/closure-next-action.mjs';
@@ -996,4 +997,35 @@ test('HAMRESUMEOWED-01: a recorded hammer head resumes validation across an unpr
   assert.equal(dispatchArgs.reviewState.headSha, OLD);
   assert.equal(result.dispatched, false, 'receipt cannot waive missing terminal evidence');
   assert.equal(result.nextAction.reason, 'required-checks-resume');
+});
+
+
+test('OWNERUNREADABLE-02: mismatch recovery resolves the terminal placeholder and dispatches its successor once', async t => {
+  const f = closureFixture(t);
+  const snapshot = deriveNextActionSnapshot({ base: base(), observedAt: '2026-01-01T04:00:00.000Z', observations: {
+    leases: { closer: { status: 'terminal', lrqId: 'synthetic-closer', headSha: HEAD } },
+    launches: { state: 'complete', provenance: { sourceRef: 'closer-lease' }, value: { closer: {
+      launchRequestId: 'synthetic-closer', headSha: HEAD, retryChainUnreadable: true, retryChainReadState: 'unresolved',
+    } } },
+  } });
+  let reads = 0, attempts = 0, dispatches = 0;
+  t.mock.method(dispatchReadTransport, 'lookup', async selector => {
+    reads++;
+    assert.equal(selector.include_retry_chain, true);
+    return { schema_version: 1, status: 'found', complete: true, roots: ['synthetic-closer'],
+      items: [{ launch_request_id: 'synthetic-closer', status: 'succeeded' }], retry_edges: [] };
+  });
+  f.args.maybeDispatchAmaCloserImpl = async args => {
+    attempts++;
+    if (attempts === 1) return { dispatched: false, reason: 'closure-decision-mismatch',
+      nextActionShared: pair(snapshot), decisionMismatch: { resolvedReason: 'ownership-unreadable' } };
+    assert.equal(args.sharedNextAction.decision.row, 'R08-retry');
+    dispatches++;
+    return { dispatched: true, reason: 'dispatched', launchRequestId: 'synthetic-successor' };
+  };
+  const result = await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(reads, 1);
+  assert.equal(result.decisionReresolutions, 1);
+  assert.equal(result.dispatched, true);
+  assert.equal(dispatches, 1);
 });

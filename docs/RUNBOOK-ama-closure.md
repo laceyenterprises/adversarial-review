@@ -893,6 +893,19 @@ its launch ID and head match. A complete SDK `found` reply containing the
 terminal root and empty `retry_edges` proves there are no retries; it is distinct
 from a grant-filtered empty `not_found` reply, which cannot prove absence.
 
+OWNERUNREADABLE-02 also resolves lease/receipt placeholders when closure
+reselects from the executor's snapshot after `closure-decision-mismatch`, and
+when the shadow receives that snapshot. These paths use the same bounded
+`readLaunchRequestObservationFromLedgerAsync` read with retry descendants.
+`retryChainReadState: unresolved` marks a reference awaiting its first read;
+`complete` marks readable ledger evidence and `failed` marks an unsuccessful or
+partial read. R04 reports `launch:retry-chain-unresolved` for a placeholder and
+reserves `launch:retry-chain-unreadable` for read evidence. Older unmarked,
+reference-only observations with lease/receipt provenance are also resolved.
+A placeholder remains fenced until resolved; it cannot count as a real failed
+read or as proof of absence. Terminal roots with empty retry chains reach R08;
+live or parked descendants retain R03. No elapsed deadline waives a failed read.
+
 After the anchored 300-second recovery deadline, a terminal lease and newly
 readable terminal launch with no live retries return ownership to the hammer,
 including a stale head with historical terminal validation. This selects R08

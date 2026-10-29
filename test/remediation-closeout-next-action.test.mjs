@@ -243,6 +243,10 @@ for (const malformed of [false, true]) test(`retained receipt never licenses spe
     leases: { closer: null } } });
   const shared = f.decide({ snapshot });
   assert.equal(shared.decision.reason, 'ownership-unreadable');
+  if (!malformed) {
+    assert.equal(shared.snapshot.observations.launches.value.closer.retryChainReadState, 'unresolved');
+    assert.ok(shared.decision.evidenceRefs.includes('launch:retry-chain-unresolved'));
+  }
   assert.equal(shared.decision.actor, 'closure-recovery');
   assert.equal(closeoutRereview(shared).requested, false);
   assert.ok(Object.isFrozen(shared.snapshot.observations));

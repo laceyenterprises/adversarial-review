@@ -806,7 +806,7 @@ async function maybeDispatchAmaClosureForInner({
     const mismatch = result.decisionMismatch;
     // Exactly one successor selection uses the executor's complete snapshot,
     // including primaryChange. Do not rebuild it from the older candidate.
-    const resolved = await resolveSharedNextAction({ snapshot: result.nextActionShared.snapshot });
+    const resolved = await resolveSharedNextAction({ snapshot: result.nextActionShared.snapshot, rootDir: options.rootDir || ROOT });
     if (resolved.decision.action === 'daemon-merge' || hasHammerDispatchIntent(resolved,
       { repo: options.repoPath, prNumber: options.prNumber, headSha: resolved.decision.head })) {
       result = await dispatchAmaClosureFor({ ...dispatchArgs, resolvedNextAction: resolved,

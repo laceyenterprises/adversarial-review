@@ -6,6 +6,7 @@
 // imports only the pure ceiling contract, so short-lived consumers do not pay
 // for the full policy module until they reach a shadow call.
 // Nothing here throws into a caller or changes a legacy decision.
+import { isUnresolvedLaunchReference } from './launch-reference.mjs';
 import { reviewCeilingOwner } from './review-ceiling-owner.mjs';
 
 // ── Legacy adapters: old outputs expressed as owned workflows ────────────────
@@ -101,6 +102,7 @@ export function launchSource(observation, lease, cap) {
   const terminalNoMerge = value.terminal === true;
   return { state: 'complete', provenance: { sourceRef: 'launch-requests' }, value: { closer: {
     row: value.launch, retryChain: value.retryChain ?? undefined, retryChainUnreadable: value.retryChainUnreadable === true,
+    retryChainReadState: value.retryChainUnreadable === true ? 'failed' : 'complete',
     launchRequestId: value.liveRetryLaunchRequestId || value.launchRequestId || null, headSha: lease?.headSha ?? null,
     attempt: value.launch?.attempt ?? value.attempt ?? null,
     outcome: terminalNoMerge ? 'no-merge' : null,
@@ -124,6 +126,15 @@ function boundedLaunchRead(rootDir, lease, cap) {
       .then(observation => launchSource(observation, lease, cap))
       .finally(() => clearTimeout(timer));
   };
+}
+
+export function snapshotLaunchReferenceRead(snapshot, rootDir) {
+  const launches = snapshot?.observations?.launches;
+  if (!rootDir || !isUnresolvedLaunchReference(launches)) return null;
+  const closer = launches.value.closer;
+  if (!closer.launchRequestId) return null;
+  return boundedLaunchRead(rootDir, { lrqId: closer.launchRequestId, headSha: closer.headSha || snapshot.head },
+    snapshot.observations.policy?.value?.hammerCap || {});
 }
 
 /**
@@ -164,7 +175,7 @@ export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, cand
     // A readable receipt proves a launch reference even when its lease is gone.
     // Until the ledger resolves it, descendant liveness is explicitly unknown.
     launches: launchOwner && rootDir ? { state: 'complete', value: { closer: {
-      launchRequestId: launchOwner.lrqId, headSha: head, retryChainUnreadable: true,
+      launchRequestId: launchOwner.lrqId, headSha: head, retryChainUnreadable: true, retryChainReadState: 'unresolved',
     } }, provenance: { sourceRef: lease === launchOwner ? 'closer-lease' : 'closer-dispatch-receipt' } } : undefined,
     checks: input.checks === undefined && checksRollup === undefined ? undefined
       : { conclusion: input.checks ?? null, ...(Array.isArray(checksRollup) ? { rollup: checksRollup } : {}) },

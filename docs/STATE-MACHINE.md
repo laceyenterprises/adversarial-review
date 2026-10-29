@@ -2500,6 +2500,14 @@ review invalidates the terminal proof for successor selection.
 Offline handoff smoke verifies the adapter matrix; organic rollout is separate
 operator/SRE acceptance. Source rollback is revision `4d06237c`.
 
+OWNERUNREADABLE-02: snapshot-only closure reselection and shadow observation
+resolve lease/receipt launch references through the bounded ledger reader before
+classifying R04. Unresolved placeholders carry `retryChainReadState: unresolved`
+and `launch:retry-chain-unresolved`; real failed or partial reads carry `failed`
+and remain `launch:retry-chain-unreadable`. Readable terminal launches with empty
+retry chains release ownership to the existing R08 dispatch path. Live/parked
+retries retain R03; failed reads retain R04 even after the recovery deadline.
+
 OWNERUNREADABLE-01: R04 ownership recovery never caches an unreadable
 closer-lease placeholder as a resolved launch. Closure refreshes retry failed
 observations with 100/200 ms backoff, at most three reads inside five seconds;

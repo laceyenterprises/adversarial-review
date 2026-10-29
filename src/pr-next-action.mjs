@@ -15,6 +15,7 @@ import { rollupInfrastructureOnly, rollupInfrastructureEvidencePending } from '.
 // Every caller projects this decision. Reason text is diagnostic evidence,
 // never an admission registry. Rollback uses a prior source revision.
 import { createHash } from 'node:crypto';
+import { isUnresolvedLaunchReference } from './launch-reference.mjs';
 import { classifyCheckRollup } from './checks-summary.mjs';
 import { hasOperatorApprovedOverride, SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
 import { isDaemonMergeReviewAllowed } from './ama/daemon-merge.mjs';
@@ -188,6 +189,7 @@ function launchFacts(launches, head) {
     // null: unknown. Unreadable retry descendants are unknown, never absence.
     owned: launchRequestOwned(probe),
     retryChainUnreadable: probe.retryChainUnreadable === true,
+    retryChainUnresolved: isUnresolvedLaunchReference({ value, provenance: { sourceRef: launches.sourceRef } }),
     outcome: lower(closer.outcome) || null,
     retryable: typeof closer.retryable === 'boolean' ? closer.retryable : null,
     attempt: finite(closer.attempt),
@@ -337,7 +339,8 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
   if (!lease.known) return reconcile('ownership-unreadable', ['lease:unreadable']);
   const leaseReferencesLaunch = leaseForHead && lease.lrqRef && ['pending', 'dispatched', 'terminal'].includes(lease.status);
   if ((launchForHead && launch.owned === null) || (leaseReferencesLaunch && !launch.known)) {
-    return reconcile('ownership-unreadable', [leaseRef, launch.retryChainUnreadable ? 'launch:retry-chain-unreadable' : 'launch:unreadable']);
+    return reconcile('ownership-unreadable', [leaseRef, launch.retryChainUnresolved ? 'launch:retry-chain-unresolved'
+      : launch.retryChainUnreadable ? 'launch:retry-chain-unreadable' : 'launch:unreadable']);
   }
   if (leaseInFlight && !(launchForHead && launch.owned === false)) {
     // In flight with no recorded launch: live until the lease window lapses.

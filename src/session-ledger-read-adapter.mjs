@@ -83,6 +83,7 @@ export async function readLaunchRequestObservationFromLedgerAsync({
       launch: launch?.row ?? null,
       retryChain: launch?.retryChain ?? null,
       retryChainUnreadable: !chainReadable,
+      retryChainReadState: chainReadable ? 'complete' : 'failed',
       effectiveLaunch: effective?.row ?? null,
       liveRetryLaunchRequestId: effective?.liveRetryLaunchRequestId ?? null,
       worker: worker?.ok ? worker.row : null,

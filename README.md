@@ -1636,8 +1636,9 @@ See [operator decision notices](docs/follow-up-runbook.md#operator-decision-noti
 
 LIVEPACKREMEDIATE-01: registered waiver findings page immediately on the
 current open reviewed head, even while other findings have an active remediator.
-Mixed reviews keep ordinary remediation ownership and preserve intended pack
-edits. When only waiver findings remain, closure parks as
+Reviews with ordinary blocking findings keep remediation ownership and preserve
+intended pack edits. Advisory notes do not prevent a hold when all blocking
+findings require waivers. Closure then parks as
 `operator-label-required:<label>` without waiting for a missing remediation job.
 A fresh review observing the waiver returns to ordinary closeout; real operator
 decision stops retain `remediation-stopped`. Existing smoke promises are unchanged.

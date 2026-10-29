@@ -107,11 +107,35 @@ test('LIVEPACKREMEDIATE-01: only the waiver remains: immediate notice and operat
   assert.equal(refreshed.decision.action, 'daemon-merge', 'a fresh waived review returns to ordinary closeout');
 });
 
-test('LIVEPACKREMEDIATE-01: non-blocking addressable work also retains remediation ownership', async () => {
+test('LIVEPACKREMEDIATE-01: advisory notes do not prevent a waiver-only blocking hold', async () => {
   const body = gated.replace('## Non-blocking issues\n- None.', '## Non-blocking issues\n- **Repair diagnostic** — name the failed input.');
-  assert.equal(classifyOperatorGatedFindings(body).allGated, false);
-  assert.equal((await select(body)).decision.actor, 'remediator');
+  assert.equal(classifyOperatorGatedFindings(body).allGated, true);
+  const selected = await select(body, { reviewState: { headSha: HEAD, verdict: 'request-changes',
+    blockingFindingState: 'known', blockingFindingCount: 1,
+    nonBlockingFindingState: 'known', nonBlockingFindingCount: 1,
+    operatorLabelFindings: classifyOperatorGatedFindings(body) } });
+  assert.equal(selected.decision.actor, 'operator');
+  assert.equal(selected.decision.reason, 'operator-label-required:live-pack-edit-approved');
+  const decision = pickAdversarialGateStatus({ reviewRow: { ...row, review_body: body }, headSha: HEAD,
+    latestJob: { status: 'stopped', revisionRef: HEAD, reviewBody: body,
+      remediationPlan: { stop: { code: 'operator-label-required:live-pack-edit-approved' } } } });
+  assert.equal(decision.reason, selected.decision.reason);
 });
+
+for (const reviewBody of [undefined, null, '']) {
+  test(`LIVEPACKREMEDIATE-01: active job with ${String(reviewBody)} body falls back to the current review row`, () => {
+    const decision = pickAdversarialGateStatus({ reviewRow: { ...row, review_body: mixed }, headSha: HEAD,
+      latestJob: { status: 'in_progress', revisionRef: HEAD, reviewBody, reviewText: mixed },
+      hasActiveSamePrRemediation: true });
+    assert.equal(decision.reason, 'remediation-in-progress');
+    assert.deepEqual(decision.operatorLabelGates, [{ check: 'live-pack-cross-edit',
+      label: 'live-pack-edit-approved', reason: 'operator-label-required:live-pack-edit-approved' }]);
+    const stale = pickAdversarialGateStatus({ reviewRow: { ...row, reviewer_head_sha: OTHER, review_body: mixed },
+      headSha: HEAD, latestJob: { status: 'in_progress', revisionRef: HEAD, reviewBody },
+      hasActiveSamePrRemediation: true });
+    assert.equal(stale.operatorLabelGates, undefined);
+  });
+}
 
 for (const [state, headRefOid] of [['CLOSED', HEAD], ['MERGED', HEAD], ['OPEN', OTHER]]) {
   test(`LIVEPACKREMEDIATE-01: no waiver notice for obsolete review ${state}/${headRefOid[0]}`, async t => {

@@ -385,9 +385,10 @@ LIVEPACKREMEDIATE-01: registered operator-label findings use the existing
 `ama_closer.operator_label_required` notice and durable label receipt immediately
 on the current open reviewed head. That notice runs alongside ordinary
 remediation, without waiting for any route outcome. Intended live-pack edits
-remain in place; mixed reviews keep their addressable remediation owner.
-A label-only review parks as `operator-label-required:<label>` instead of
-waiting for a missing remediation job. A fresh review observing the waiver
+remain in place; reviews with ordinary blocking findings keep their remediation
+owner. Advisory notes do not prevent a label-only hold when every blocking
+finding requires a waiver. Such a review parks as
+`operator-label-required:<label>` instead of waiting for a missing remediation job. A fresh review observing the waiver
 clears the finding; labels never waive independent CI or merge preflights.
 
 Before delivery, the watcher reads the live PR and requires it to remain open

@@ -2602,8 +2602,9 @@ observes the finding on the current open reviewed head, using the shared
 operator-label receipt even while addressable remediation runs. It does not wait
 for a closer route outcome. The remediator receives live-pack facts and an
 explicit instruction to preserve the PR's intended pack edits while repairing
-addressable findings. Addressable non-blocking work also prevents a label-only
-hold. When only waiver findings remain, the shared closure policy selects
+addressable blocking findings. Advisory non-blocking notes do not prevent a
+label-only hold when every blocking finding requires a waiver. The shared
+closure policy then selects
 `operator-label-required:<label>` before remediation admission, with the notice
 delivered and no `remediation-job-missing` wait. The wrapper keeps that operator
 ownership. A fresh review must observe the waiver before normal closeout resumes;

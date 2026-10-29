@@ -805,8 +805,8 @@ function pickAdversarialGateStatus({
   // LIVEPACKREMEDIATE-01: waivers remain visible during active remediation.
   const labelFindings = reviewStatus === 'posted' && headSha && reviewRowReviewerHeadSha(reviewRow) === headSha
     ? (settledReview?.reviewedHeadSha === headSha && settledReview?.operatorLabelFindings
-      || classifyOperatorGatedFindings(latestJob?.revisionRef === headSha
-        ? latestJob.reviewBody : extractReviewBodyFromRow(reviewRow))) : null;
+      || classifyOperatorGatedFindings((latestJob?.revisionRef === headSha && latestJob.reviewBody)
+        || extractReviewBodyFromRow(reviewRow))) : null;
   operatorLabelGates = labelFindings?.gated.map(({ check, label, reason }) => ({ check, label, reason })) || [];
   if (hasActiveSamePrRemediation) {
     return decide('pending', 'Remediation is in progress for this PR.', 'remediation-in-progress');

@@ -53,8 +53,10 @@ snapshot attribution, with the caller's effective strictness policy, a
 error; cancellation and transport/auth/read failures propagate. Capped snapshots
 are errors rather than evidence of a missing region. The range is stored in full;
 attribution results (`revertedRegionDiagnostics`) are returned to the operator and
-are not cached here. Shared `fetchPrimaryChange` and default CLI reads never
-collect diagnostic snapshots, including on repeated refused-head cache hits.
+are not cached here. Shared `fetchPrimaryChange` and default CLI reads do not
+collect refusal-attribution snapshots, including on repeated refused-head cache hits.
+MIGRENUMBERDERIVED-02 separately reads bounded immutable snapshots only when
+verifying an actual migration-renumber candidate, to retain its derived chain.
 They retain commit-file attribution gathered alongside rename proof instead.
 Production merge gates and their refusal audits do not pay for operator
 snapshot diagnostics.
@@ -165,3 +167,11 @@ migration or PR-closure deletion hook. Operators can inspect the `key`,
 `history.headSha`, optional boundary and filesystem UID/mode to diagnose a
 miss. Removing obsolete records causes a fresh read, never a waiver of the
 primary-change merge gate.
+
+MIGRENUMBERDERIVED-02 extends these transient proofs to Alembic wrappers with
+paired revision modules and explicit module-name registries. Each proof binds
+`modulePath`, `moduleDestination`, `primaryModuleBlob`, `moduleBlob` and an
+observed monotonic `chain` of `{ headSha, path, blob }` entries from the
+protected author head. Every intermediate hammer snapshot is compared with
+that same author baseline. These proofs remain outside cached history and
+are retained in `derivedChanges` through merge receipts.

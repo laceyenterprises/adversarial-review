@@ -3352,6 +3352,33 @@ merge-action receipts retain that classification. The hammer passes its last
 passing exact-head gate snapshot to receipt publication. No operator step is
 needed for a proven renumber; every other merge predicate still applies.
 
+MIGRENUMBERDERIVED-02 also recognizes `<package>/alembic/versions/NNN_<rest>.py`.
+Revision literals may carry the number as a prefix or suffix. A changed
+`down_revision` must name an existing lower-numbered wrapper's exact revision
+in the same directory at each immutable head; truncated trees or unreadable
+blobs decline proof. Only the leading timestamp in `SOURCE_NAME` may change;
+the remaining SQL identity, imports and upgrade/downgrade bodies remain byte
+protected. A leading timestamp in the wrapper filename may likewise change.
+
+This layout additionally requires an author-added
+`<package>/src/.../*revisions/rNNN.py` module paired with its higher-numbered
+rename. Only module-level revision metadata may differ; all operation bytes
+must match. The adjacent `__init__.py` must swap exactly one literal in a
+top-level `_MODULE_NAMES`, `REVISION_MODULES` or `MIGRATION_MODULES` sequence
+(case-insensitive, optional leading underscore). Every other registry byte is
+protected. A registry swap alone supplies no derived authority. Head pins in
+test files retain the existing test-region policy.
+
+The collector verifies every observed hammer snapshot against the protected
+author head, including successive renumbers, and retains a monotonic `chain`
+of `{ headSha, path, blob }` observations starting there. Repeated unchanged
+snapshots collapse into the latest observation. Module paths and blobs are
+bound alongside the wrapper and registry; the predicate exempts only these
+verified files. Receipts retain the class and complete chain. Collection is
+bounded to 64 hammer snapshots, 512 immutable reads, complete trees of at most
+10,000 entries and a shared fifteen-second deadline; unsupported or unavailable
+evidence retains the ordinary reversal refusal.
+
 Post-merge SRE evidence (SEVDOCS-333): inspect the next natural renumber's merge
 receipt for `derivedChanges[].classification: mechanical-migration-renumber`
 and confirm it merged without reversal authorization. This is live verification

@@ -1651,8 +1651,7 @@ async function main() {
   process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = resolveRateLimitSharedStatePath(process.env, ROOT);
   try {
     // CFG-02: warm public observations before validating worker routes and config.
-    if (process.env.ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED === '1'
-      || process.env.ADVERSARIAL_DISPATCH_READS_ENABLED === '1') {
+    if (process.env.ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED === '1' || process.env.ADVERSARIAL_DISPATCH_READS_ENABLED === '1') {
       const ready = await prepareDispatchReadContext({env: process.env});
       if (!ready.ok) console.warn('[public-observations] startup session unavailable; authoritative reads remain held');
     }

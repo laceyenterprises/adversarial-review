@@ -28,9 +28,11 @@ forced launch, ledger mutation or new smoke step is authorized by this change.
 
 RESCUEHOSTID-01: the watcher and the external rescue composition root share
 `prepareDispatchReadContext`. An activated watcher calls it at startup; rescue
-calls it before closer dispatch. The helper enables both dispatch reads and
-worker observations and registers the existing `adversarial-review` app using
-the SDK's existing bootstrap-credential resolution. It adds no grants or app
+calls it before closer dispatch. The helper registers the existing
+`adversarial-review` app using the SDK's existing bootstrap-credential resolution,
+then enables both dispatch reads and worker observations only after registration
+succeeds. Failed or timed-out registration preserves the caller's existing read
+switches, including absent values. It adds no grants or app
 identity. Synchronous observations, host services and launch lookups reuse the
 session only for the matching connection, and never register synchronously.
 Fixed bootstrap-failure details distinguish a missing/unreadable credential,

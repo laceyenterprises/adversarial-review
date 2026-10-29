@@ -191,10 +191,10 @@ export async function prepareWorkerObservationSession(args = {}) {
 // The watcher and cold rescue CLI must warm the same session before sync reads.
 export async function prepareDispatchReadContext(args = {}) {
   const env = args.env ?? process.env;
-  env.ADVERSARIAL_DISPATCH_READS_ENABLED = '1';
-  env.ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED = '1';
   try {
     await boundedCall(() => registeredSession(args), args);
+    env.ADVERSARIAL_DISPATCH_READS_ENABLED = '1';
+    env.ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED = '1';
     return {ok: true};
   } catch (error) {
     cachedSession = null;

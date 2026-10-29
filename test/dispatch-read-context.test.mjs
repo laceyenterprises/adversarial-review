@@ -106,3 +106,40 @@ test('bootstrap failures redact arbitrary endpoint and credential diagnostics', 
   assert.deepEqual(await prepareDispatchReadContext({ env: { APP_CONTRACT_ENDPOINT_URL: 'https://fixture.invalid/failure' } }),
     { ok: false, reason: 'dispatch-context-unavailable', detail: 'session-bootstrap-failed' });
 });
+
+for (const failure of ['rejection', 'timeout']) {
+  test(`bootstrap ${failure} preserves caller read switches and synchronous gates`, async t => {
+    const { dispatchReadTransport, prepareDispatchReadContext } = await import(client);
+    t.mock.method(dispatchReadTransport, 'sdk', () => ({
+      connect: () => failure === 'timeout' ? new Promise(() => {})
+        : Promise.reject(new Error('fixture registration failure')),
+      readDispatchLookupSync: () => 'enabled-read',
+      readWorkerObservationsSync: () => 'enabled-observation',
+    }));
+    for (const switches of [
+      {},
+      { ADVERSARIAL_DISPATCH_READS_ENABLED: '0', ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED: '0' },
+      { ADVERSARIAL_DISPATCH_READS_ENABLED: '1', ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED: '0' },
+      { ADVERSARIAL_DISPATCH_READS_ENABLED: '0', ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED: '1' },
+      { ADVERSARIAL_DISPATCH_READS_ENABLED: '1', ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED: '1' },
+    ]) {
+      const env = { APP_CONTRACT_ENDPOINT_URL: 'https://fixture.invalid/preserve', ...switches };
+      const before = { ...env };
+      const pending = prepareDispatchReadContext({ env, timeoutMs: 10 });
+      assert.deepEqual(env, before, 'registration must not enable reads while pending');
+      assert.deepEqual(await pending, { ok: false, reason: 'dispatch-context-unavailable',
+        detail: failure === 'timeout' ? 'session-bootstrap-timeout' : 'session-bootstrap-failed' });
+      assert.deepEqual(env, before, 'failed registration must preserve absent and explicit switches');
+      if (env.ADVERSARIAL_DISPATCH_READS_ENABLED === '1') {
+        assert.equal(dispatchReadTransport.lookupSync({}, { env }), 'enabled-read');
+      } else {
+        assert.throws(() => dispatchReadTransport.lookupSync({}, { env }), { code: 'DISPATCH_READ_DISABLED' });
+      }
+      if (env.ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED === '1') {
+        assert.equal(dispatchReadTransport.observationSync({}, { env }), 'enabled-observation');
+      } else {
+        assert.throws(() => dispatchReadTransport.observationSync({}, { env }), { code: 'WORKER_OBSERVATION_DISABLED' });
+      }
+    }
+  });
+}

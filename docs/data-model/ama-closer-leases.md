@@ -111,6 +111,14 @@ session) is non-terminal and not parked, named locally until the pinned SDK
 vocabulary carries it: its lease stays `dispatched` and held against every
 recovery tier at any holder or launch age, keeping its scratch, until the
 ledger releases it to `failed` (`suspended_abandoned` / `suspended_age_expired`).
+GSR-07 boot-time resume then hands the lease back (`src/ama/gsr-closer-lease.mjs`,
+`bin/gsr-closer-lease.mjs readopt|release`): a natively resumed launch re-adopts
+it in place (`updatedAt` refreshed); a launch re-dispatched as a successor
+(source `failed/suspended_redispatched`) rebinds `lrqId`, and the closer
+dispatch record's `launchRequestId`/`dispatchId` (adding `gsrRedispatchedFrom`),
+to the successor, record first; a launch that ended before resume is released
+as terminal `superseded` only when the ledger proves it is no longer in flight.
+Each write is a CAS on the observed lease; a concurrent owner wins (`busy`).
 The installed SDK 0.3.0 `readDispatchStatus` reader interprets its bundled
 public `statusVocabulary`. Each explicit boolean wins independently, including
 false; absent or invalid booleans use the vocabulary and malformed values carry

@@ -1,5 +1,6 @@
 {
   "suspendedCloserRecovery": "GSR-03: suspended launch/retry evidence is known, non-terminal and unparked even before the pinned SDK names it; explicit wire booleans retain precedence. A suspended closer keeps its dispatched lease, PR ownership and scratch across holder death and every age-based recovery tier until resume or ledger terminalization (suspended_abandoned / suspended_age_expired). No lease state, persistent field or merge authority is added.",
+  "suspendedCloserResume": "GSR-07: boot-time resume hands a suspended closer's dispatched lease back through src/ama/gsr-closer-lease.mjs (bin/gsr-closer-lease.mjs readopt|release). A natively resumed launch re-adopts its lease in place (updatedAt refreshed so the restart window is not charged against the reclaim age); a launch re-dispatched as a successor rebinds the lease and the dispatch record that names it, record first, so no second closer is dispatched; a launch that ended before resume releases its lease as superseded only when the ledger proves it is no longer in flight. Every mutation is a CAS on the observed lease; a concurrent owner wins and is reported busy. Settled or handed-to-review leases are untouched. Synthetic offline coverage is test/gsr-closer-lease.test.mjs; existing smoke promises are unchanged.",
   "pendingCiHammerResume": "HAMRESUMEOWED-01: the watcher consumes pending-CI resume debt on every poll with scheduler priority and no-progress bypass. Same-head pending waits; green selects normal leased hammer validation/merge; red or head movement explicitly settles the debt for normal remediation/head-change handling. Confirmed dispatch appends one idempotent hammer-resume settlement. Existing holds, ownership, caps and exact-head merge gates remain authoritative. CLEAN/non-strict MERGEABLE BEHIND heads retain their CI; only GitHub conflict or strict BEHIND requires rebase.",
   "pendingFailureClaims": "PENDINGCLAIM-01: review-row.07 includes bounded unknown, review-population, infra and daemon-bounce retry CASes for same-head lease-released pending failures. Classification and all four retry claims share reviewerTerminalFailureSql, including the failure timestamp and same-head match. The classifier retains attempt evidence and the uncharged bounce exception; CAS snapshot guards retain legacy incomplete-bounce compatibility. Population decisions normalize only proven failures. Moved heads use the existing plain pending claim and reset attempts; unknown cap exhaustion still parks. Released session UUID and PGID remain for late-post reconciliation. Zero-row claims re-read status/session/failure timestamp and distinguish claim-shape-mismatch from changed-row races without a new gate, state or alert. Token-refresh and plain pending claims, budgets and merge authority are unchanged. The infra CAS fences the exact failure_message snapshot rather than re-classifying it; the classifier exports the bounded-retry vocabulary. Offline invariants enumerate every recoverable class in both shapes and reject changed messages, including same-class changes. Registry resolution, empty output, dispatch failure and adapter spawn timeout retain bounded same-head retries. Offline regression: test/watcher-pending-failure-claim.test.mjs. PENDINGCLAIM-02: unchanged-shape diagnostics require a snapshot targeted by the selected CAS. Plain pending permits moved heads; token refresh compares the captured snapshot head. Claim-race logs retain the fixed state). Skipping. suffix with snapshot_status before the explanation. No state or transition changes.",
   "hostIdentityReads": "HOSTIDCACHE-01: every readHostIdentitySync consumer shares a process-lifetime success cache scoped by HQ root and endpoint. Failures are never cached; at most three attempts with 50/100ms backoff share the caller budget. Timeout, spawn-failure and unavailable closer reads defer without mutating the selected closure owner, lease, artifacts, anchored deadline or retry counters. Denied, definitive not-found, malformed identity and current-user mismatch refuse. Existing lease states, transitions, launch-token preference, nominal transport timeout and merge predicates remain unchanged.",
@@ -1078,7 +1079,8 @@
       "description": "CLOSERLEASEDEAD-01 records `abandoned-holder-dead` or `abandoned-timeout` for\nlaunch-less pending leases with a confirmed absent/reused same-host watcher PID\nor an elapsed dispatch timeout. CLAIMPIDSTALE-01 includes legacy leases without\nholderHost in local PID checks; dead owners leave the terminal receipt and\nabandonment log at startup or the next closure evaluation, even without a\ndispatch timeout. Dead hostless owners also enter pre-receipt reconciliation\nbefore the intent deadline; existing ledger proof must settle absence before\ndeferring the lease and refunding the intent retry once. Startup sweeps log\nreleases; closure resumes normal next-action admission that pass. Uncertain probes cannot refresh the\ndeadline. Existing submission fences, current-process leases, review handoffs,\nlaunch ownership and operator holds remain. Offline coverage is in the closer\nlease, finalclose, dispatch-priority and recovery-reaper suites; existing smoke\npromises are unchanged. After normal deployment, observe natural abandonment\nand next-owner admission read-only; no restart or manual recovery is part of\nthis change.",
       "owner": "watcher / closer",
       "codeSources": [
-        "src/ama/closer-lease.mjs"
+        "src/ama/closer-lease.mjs",
+        "src/ama/gsr-closer-lease.mjs"
       ],
       "states": [
         {
@@ -1189,6 +1191,20 @@
           "to": "[*]",
           "trigger": "non-merge terminal with ended or absent launch reclaimed; live or unproven launch retained; succeeded sticky",
           "codeSource": "src/ama/closer-lease.mjs"
+        },
+        {
+          "id": "closer-lease.12",
+          "from": "dispatched",
+          "to": "dispatched",
+          "trigger": "GSR-07 boot resume re-adopts a resumed launch's lease in place, or rebinds it and its dispatch record to the re-dispatched successor launch",
+          "codeSource": "src/ama/gsr-closer-lease.mjs"
+        },
+        {
+          "id": "closer-lease.13",
+          "from": "dispatched",
+          "to": "terminal",
+          "trigger": "GSR-07 boot resume releases (superseded) only once the ledger proves the suspended launch ended before it could resume",
+          "codeSource": "src/ama/gsr-closer-lease.mjs"
         }
       ]
     },
@@ -1699,7 +1715,8 @@
     "src/reviewer-reattach.mjs": "c52dcf0ea186716725d5916c0be5de3619cd44e011c5c06bf4999877369ebd39",
     "src/reviewer.mjs": "10b8e5b50611cebbcffabc5e5709ffcbf33ed856f469c2a946ed14d72c775e88",
     "src/watcher.mjs": "ea85b67f96d3c7cfeb1fd7c450ca82ab2a48e22c378bd155539dd88ce5dd713c",
-    "src/adapters/reviewer-runtime/fixture-stub/index.mjs": "551075e64dc0fba15d5411f1d79297bedec2d3e17accecc5c496c04dab3e26ad"
+    "src/adapters/reviewer-runtime/fixture-stub/index.mjs": "551075e64dc0fba15d5411f1d79297bedec2d3e17accecc5c496c04dab3e26ad",
+    "src/ama/gsr-closer-lease.mjs": "fea38cdec29edd83201cacbd0fb4134ac4f79156d98a385e647615b45406bff2"
   },
   "workerObservationReads": "DOG-10 / LAC-2118: worker/process/session/provenance observations use the immutable SDK 0.9.0 public HTTP boundary, separately gated by default-off ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED=1 (env only; no template activation). Already enabled ADVERSARIAL_DISPATCH_READS_ENABLED own-launch HCP reads remain independent. Disabled, unsupported, failed and successful-empty provenance permits existing title-based cross-model review intake with persisted builder_class_inconclusive; empty scope_complete:false evidence never certifies absence, merge identity, lease release or teardown. Positive head attestations remain valid independently; otherwise authoritative identity stays unknown without authorized evidence, with no private fallback. Default PR provenance means the single live pr_opened row; builder_identity permits later completions and is reserved for review routing. Ambiguous identity fails closed; branch provenance is diagnostic-only and cannot replace an opener hidden by grants. Cache identity excludes request_timeout_ms; public token-based HTTP reads receive per-call remaining physical deadlines and failed sessions are evicted. Reroute uses async provenance; cold backfill prepares one SDK registration before sync loops and fails readiness before writes. Partial accounting and zero/null meanings persist. No new lifecycle states or smoke authority.",
   "mergeLeaseGateAccounting": "GATECAPBASE-01: head/base-scoped refusal budgets refund base advances, server rebase conflicts, lane-busy, contention and planned yields under the release-identity fence. New heads and observed bases reset caps; stable-base predicate loops still stop. Capped admissible conflicts return to the existing hammer conflict procedure without a lease; other admissible heads page through durable closure-wait deduplication. Terminal, moved, held and draft heads retain admission fences. No operator reset is required. Synthetic merge-lease, recovery and rendered hammer fixtures cover these routes; existing lifecycle states, merge fences and smoke promises remain unchanged. Runtime owner may observe organic reasons and owner/page receipts read-only after normal deployment; no live worker action or new probe.",

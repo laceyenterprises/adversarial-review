@@ -142,12 +142,23 @@ function stable(value) {
   return value;
 }
 
+// Older audits put optional proof read failures into missingEvidence. They
+// remain diagnostic only, including when comparing a legacy refusal to a probe.
+function deterministicMissingEvidence(value) {
+  if (!value || typeof value !== 'object') return stable(value);
+  const { migrationRenumberDiagnostics, ...evidence } = value;
+  if (migrationRenumberDiagnostics && typeof evidence.summary === 'string') {
+    evidence.summary = evidence.summary.replace(/; migration renumber proof:.*?(?=; region history:|$)/s, '');
+  }
+  return stable(evidence);
+}
+
 function deterministicRefusal(attempt, { repo, prNumber, headSha }) {
   if (isInfrastructureStop(attempt)) return null;
   const reasons = classifiedStopReasons(attempt);
   const awaitedInputs = operatorLabelInputs(attempt);
   if (!awaitedInputs.length && (!reasons.length || !reasons.every(reason => DETERMINISTIC_STOP_REASONS.has(reason)))) return null;
-  const missingEvidence = stable(attempt.missingEvidence || attempt.eligibilityTrace?.trace?.primaryChange?.missingEvidence
+  const missingEvidence = deterministicMissingEvidence(attempt.missingEvidence || attempt.eligibilityTrace?.trace?.primaryChange?.missingEvidence
     || attempt.githubGate?.primaryChangeMissingEvidence || null);
   const key = createHash('sha256').update(JSON.stringify({ repo, prNumber: Number(prNumber), headSha, reasons, missingEvidence, ...(awaitedInputs.length ? { awaitedInputs } : {}) })).digest('hex');
   const next = attempt.next || (reasons.includes('primary-change-reverted')
@@ -692,7 +703,7 @@ export async function evaluateHammerStopHold({
           // the missing authority without a new SHA or verdict. Read it, but
           // retain the hold when the same deterministic refusal remains.
           if (answer.ok || (answer.reason === 'primary-change-reverted' && answer.missingEvidence
-            && JSON.stringify(stable(answer.missingEvidence)) !== JSON.stringify(stop.refusal.missingEvidence))) changed.push('primary-change-evidence');
+            && JSON.stringify(deterministicMissingEvidence(answer.missingEvidence)) !== JSON.stringify(deterministicMissingEvidence(stop.refusal.missingEvidence)))) changed.push('primary-change-evidence');
         } else if (!HAMMER_EVIDENCE_FAILURES.has(answer.reason)) changed.push('primary-change-evidence');
         else if (stop.predicate === 'history-read-failed' && !holdReleased) { changed.splice(0); inputsReadable = false; }
       } catch (err) {

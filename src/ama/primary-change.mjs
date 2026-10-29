@@ -675,6 +675,7 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
     const reverted = (path, missing = 'reversal-authorization') => {
       const diagnosticCache = new Map();
       return { ok: false, reason: 'primary-change-reverted', path, ...whitespaceEvidence,
+        ...(evidence.migrationRenumberDiagnostics?.length ? { migrationRenumberDiagnostics: evidence.migrationRenumberDiagnostics } : {}),
         testRegionsChanged: testChanges, missingEvidence: missingReversalEvidence(evidence, path, missing, authorizationCache,
           refusedRegions(primary.get(path), final.get(path), (unit, restoringDeletion) =>
             reversalAuthorized(evidence, path, unit, diagnosticCache, strictNonBlockingRemediation, restoringDeletion))) };
@@ -682,7 +683,7 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
     for (const [path, change] of primary) {
       if (guardReversals.some(proof => proof.path === path)) continue;
       if (derivedChanges.some(proof => proof.path === change.filename || proof.registryPath === change.filename
-        || proof.modulePath === change.filename)) continue;
+        || proof.modulePath === change.filename || proof.sqlPath === change.filename)) continue;
       const actual = final.get(path);
       if (change.derivedOnly && (!actual || actual.filename === change.filename) && actual?.status !== 'removed') continue;
       if (isTestPath(path) && isTestPath(change.filename)
@@ -1367,6 +1368,8 @@ export async function fetchPrimaryChange(args, {
   const derivedArtifacts = await proveDerivedArtifactsImpl({ ...args, rootDir: primaryChangeRoot(args) }, history);
   const evidence = { ...history, ciCost, ...guardEvidence, ...(derivedArtifacts.length ? { derivedArtifacts } : {}) };
   const result = { ...evidence, ...await fetchGuardReviewSnapshots(args, evidence) };
+  // Failed optional attempts record structured diagnostics on this transient
+  // result as well; retain them through the predicate and refusal audits.
   const migrationRenumberProofs = await proveMigrationRenumbersImpl(args, result);
   if (migrationRenumberProofs.length) result.migrationRenumberProofs = migrationRenumberProofs;
   // Outside the history cache: a missing sandbox/checkout is retryable optional

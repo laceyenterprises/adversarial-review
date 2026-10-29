@@ -452,6 +452,31 @@ No direct worktree deletion, process kill or new configuration is added.
 After normal deployment, the runtime owner may observe organic recovery and
 refusal events; source validation uses disposable synthetic fixtures only.
 
+CLOSERDEADSLOT-02: a never-registered closer can have no worker-id observation
+rows even though its slot files record a launch and its launch-keyed ledger run
+is terminal. The worker dispatch-files read returns `dispatch-files-unavailable`
+before inspecting `fileStates` in that shape. Only when dispatch-files cannot
+resolve a launch ID, custody resolution reads the existing public `workspaces`
+inventory for that exact worker slot. One present slot with an available
+manifest and recorded launch ID permits a ledger read for exactly that launch.
+Exactly one identity-matching run with a terminal branch-holder status
+(`succeeded`, `failed`, or `cancelled`, including `spawn_never_registered`
+failures) permits the normal `hq worker tear-down --force` request. Host
+ownership, process and credential-cleanup proofs still decide removal.
+Active runs remain unknown even with a dead PID on this fallback; multiple
+slot/run rows, mismatched identity or unreadable evidence retain custody.
+Known multiple worker-id rows also retain custody without this fallback; both
+synchronous and asynchronous dispatch-files readers preserve that row count.
+Slot launch IDs are trimmed before ledger lookup and identity comparison.
+Admission forwards its observation-reader override through both ordinary and
+settled no-launch reclaim paths, so isolated fixtures use the same custody checks.
+`closer_reclaim_deferred_unknown_run` records `reason` and the launch ID when
+known. A host teardown refusal logs its error and defers admission before any
+replacement launch is submitted. The no-launch orphan bridge above is unchanged.
+No new lifecycle state, config key or smoke command is introduced. Companion
+ticket CLOSERDEADSLOT-01 owns terminal slot credential/process release; after
+normal deployment, observe natural recovery or host refusal read-only.
+
 CLOSERINTENTRECON-01 makes closure orchestration and the recovery reaper invoke
 that same fenced reconciliation before deferring to an unresolved intent, at
 most once per named intent per pass and only for a dead/expired lease holder or

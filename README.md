@@ -1284,6 +1284,17 @@ replacement intent is written. Synthetic branch-holder and
 dispatch-priority fixtures cover recovery and refusal. Lifecycle states and
 smoke promises are unchanged; deployed recovery awaits natural observation.
 
+CLOSERDEADSLOT-02 resolves a self-owned closer's recorded slot launch through
+the public workspace inventory when dispatch-files cannot identify it. A single
+matching terminal ledger run permits ordinary host teardown, including a failed
+`spawn_never_registered` run missing from worker-id observations. Active,
+ambiguous, mismatched or unreadable evidence holds custody; deferred events name
+the liveness reason and known launch ID. Host teardown refusal prevents another
+dispatch into the retained slot. The no-launch orphan bridge is unchanged.
+Focused synthetic dispatch-priority fixtures cover release and refusal; no new
+lifecycle state or smoke promise is added. Natural deployed recovery remains an
+operator observation after normal deployment and companion CLOSERDEADSLOT-01.
+
 TIMEOUTSWEEP-01 scales nominal hammer/closer operation waits with host load.
 Timeouts retain unknown evidence and next-pass recovery; failed companion reads
 cannot reuse a stale closed/merged classification, and uncertain teardown cannot

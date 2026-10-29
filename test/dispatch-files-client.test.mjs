@@ -95,8 +95,11 @@ test('reused worker slots with multiple runs retain custody independent of order
     assert.equal(selector.observation, 'workers'); return reply();
   });
   for (let order = 0; order < 2; order++) {
-    assert.equal((await readWorkerDispatchFiles('hammer-ama-pr-1', {env: {ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED: '1'}})).ok, false);
-    assert.equal(readWorkerDispatchFilesSync('hammer-ama-pr-1', {env: {ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED: '1'}}).ok, false);
+    const unresolved = await readWorkerDispatchFiles('hammer-ama-pr-1', {env: {ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED: '1'}});
+    assert.equal(unresolved.ok, false);
+    assert.equal(unresolved.workerRunCount, 2, 'closer fallback must preserve known slot ambiguity');
+    const syncUnresolved = readWorkerDispatchFilesSync('hammer-ama-pr-1', {env: {ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED: '1'}});
+    assert.deepEqual(syncUnresolved, unresolved, 'sync readers must preserve the same ambiguity evidence');
     rows.reverse();
   }
 });

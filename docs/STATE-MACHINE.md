@@ -995,8 +995,13 @@ same operations under a higher revision in the same migrations directory. It
 returns `derivedChanges` with classification `mechanical-migration-renumber`,
 bound to the protected author/head/base and source/destination/registry blobs.
 Alembic wrapper/module/explicit-module-registry layouts also bind the paired
-revision module and retain the observed monotonic renumber chain from the
-protected author head. Every observed snapshot must preserve the original
+revision module and retain the observed renumber chain from the protected author
+head. MIGRENUMBERDERIVED-03 also binds author-SQL proofs to unchanged SQL and a
+literal module/registry insertion against each snapshot's base. Non-monotonic
+chains require head-bound divergence evidence, `rebased: true`, and no slot
+below the author slot; other chains remain strictly increasing. Optional proof
+diagnostics stay outside deterministic refusal identity and bounded region
+summaries. Every observed snapshot must preserve the original
 operations; a registry swap without its paired module supplies no proof.
 The closure's passing primary-change observation, daemon audit and merge-action
 receipt retain this evidence. Missing registry updates, changed operations and

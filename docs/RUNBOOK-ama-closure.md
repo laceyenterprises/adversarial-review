@@ -3374,7 +3374,9 @@ it outside the candidate head's ancestry. Each snapshot uses its own verified
 merge base, rather than requiring every merge base to equal the protected
 snapshot's old base. Numeric and `YYYYMMDDTHHMMSSZ` source timestamps receive
 the same narrow normalization. Complete repository trees larger than 10,000
-entries fall back to immutable directory walks; every walked directory remains
+entries fall back to immutable directory walks; after the first oversized or
+truncated recursive response, later heads in that collection use walks directly.
+Every walked directory remains
 complete and capped at 10,000 entries (at most 32 path components).
 
 An author snapshot may instead contain a wrapper and an added SQL source before
@@ -3382,11 +3384,14 @@ the ordinal Python module was introduced. This separate `moduleOrigin:
 author-sql` proof requires byte-identical author/final SQL, a strictly literal
 `PostgresMigration` declaration embedding that exact SQL, and exactly one module
 registry insertion relative to the snapshot's own immutable base registry. The
-new module slot must be absent from that base. No Python runs. This path cannot
-waive author-owned module or registry changes: those still require the paired
+new module slot must be absent from that base. Literal decoding accepts only
+escapes shared by JSON and Python; escaped slashes and Unicode surrogate escapes
+refuse proof. No Python runs. This path cannot waive author-owned module or registry changes: those still require the paired
 module and exact registry swap above. All observed module operation/downgrade
 bytes must match after revision/source timestamp normalization. Earlier snapshots
-may contain only the unchanged SQL-backed wrapper before module introduction.
+may contain only an author-equivalent SQL-backed wrapper and unchanged SQL
+before module introduction, including mechanical wrapper renames. Once a module
+is observed, later snapshots must retain a matching module proof.
 
 Every snapshot is checked against the original author bytes, including staged
 filename/revision repairs. Intermediate declared revisions can lie between the
@@ -3401,11 +3406,15 @@ proof, and repeated identical observations collapse to the latest head.
 `proveMigrationRenumbers` retains its array return and records failed attempts
 on the supplied transient evidence as `migrationRenumberDiagnostics`, with
 `{ proven: false, reason, headSha, path?, detail? }`. Refusal diagnostics include
-these records and their reason names in `missingEvidence`; deadline, read budget,
-range, snapshot, merge-base and chain failures no longer disappear into empty
-catches. The latest 128 records are retained, including the terminal reason.
-Collection has one nominal 90-second deadline, scaled once by the existing load
-helper up to 180 seconds, at most 64 distinct hammer snapshots and 512 cached
+these records as a sibling `migrationRenumberDiagnostics` field outside
+`missingEvidence` and its bounded summary. Deadline, read budget, range, snapshot,
+merge-base and chain failures remain visible without displacing region history
+or changing deterministic hammer-stop identity. Legacy missing-evidence diagnostics
+and their summary suffix are excluded from stop keys and probe comparisons.
+The latest 128 records are retained, including the terminal reason.
+PRs without migration candidates record no proof failures and skip timer/load
+sampling. Candidate collection has one nominal 90-second deadline, scaled once
+by the existing load helper up to 180 seconds, at most 64 distinct hammer snapshots and 512 cached
 immutable reads. Optional proof failures retain the ordinary reversal refusal.
 These proofs and diagnostics remain outside the history cache.
 

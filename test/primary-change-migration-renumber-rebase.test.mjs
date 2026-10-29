@@ -19,6 +19,7 @@ test('MIGRENUMBERDERIVED-03: diverged protected SQL author head, large tree and 
   assert.deepEqual(result.derivedChanges[0].chain.map(entry => Number(entry.path.match(/\/(\d+)_/)[1])), [309, 310, 311, 312]);
   assert.equal(result.derivedChanges[0].moduleOrigin, 'author-sql');
   assert.ok(f.calls.some(path => /\/git\/trees\/[a-f0-9]+$/.test(path)));
+  assert.equal(f.calls.filter(path => path.endsWith('?recursive=1')).length, 1);
 });
 
 for (const [name, modify] of [
@@ -36,7 +37,7 @@ for (const [name, modify] of [
   modify(f);
   const result = await prove(f);
   assert.equal(result.reason, 'primary-change-reverted');
-  assert.ok(result.missingEvidence.migrationRenumberDiagnostics.some(d => d.proven === false));
+  assert.ok(result.migrationRenumberDiagnostics.some(d => d.proven === false));
 });
 
 for (const field of ['primarySqlBlob', 'sqlBlob', 'moduleBlob', 'registryBlob', 'sqlDestination', 'moduleDestination']) {
@@ -57,8 +58,9 @@ test('slow reader records a deadline through collector and predicate diagnostics
     proveDerivedArtifactsImpl: async () => [], proveGeneratedBlocksImpl: async () => [] });
   const result = checkPrimaryChange(evidence, f.args.headSha);
   assert.equal(result.reason, 'primary-change-reverted');
-  assert.equal(result.missingEvidence.migrationRenumberDiagnostics.at(-1).reason, 'deadline-exceeded');
-  assert.match(result.missingEvidence.summary, /deadline-exceeded/);
+  assert.equal(result.migrationRenumberDiagnostics.at(-1).reason, 'deadline-exceeded');
+  assert.doesNotMatch(result.missingEvidence.summary, /deadline-exceeded/);
+  assert.equal(result.missingEvidence.migrationRenumberDiagnostics, undefined);
 });
 
 for (const [name, mutate] of [
@@ -173,4 +175,51 @@ test('SQL origin cannot replace a protected author module', async () => {
   const f = rebasedRenumberFixture();
   f.evidence.primaryFiles.push(f.file('sample/src/sample/schema_revisions/r309.py', f.moduleBody(309)));
   assert.equal((await prove(f)).reason, 'primary-change-reverted');
+});
+
+for (const [name, sql, encode] of [
+  ['escaped slash', '-- /\nCREATE TABLE sample (id int);\n', text => text.replace('/', '\\/')],
+  ['surrogate escape pair', '-- 😀\nCREATE TABLE sample (id int);\n', text => text.replace('😀', '\\ud83d\\ude00')],
+]) test(`SQL module refuses Python-incompatible JSON ${name}`, async () => {
+  const f = rebasedRenumberFixture({ sql });
+  f.evidence.finalFiles[2].sha = f.blob(encode(f.moduleBody(312)));
+  assert.equal((await prove(f)).reason, 'primary-change-reverted');
+});
+
+test('SQL modules preserve shared Python/JSON escapes and literal Unicode', async () => {
+  const f = rebasedRenumberFixture({ sql: '-- \\/ \\uD800 😀 \" \t\b\f\r\nCREATE TABLE sample (id int);\n' });
+  assert.equal((await prove(f)).ok, true);
+});
+
+for (const original of [false, true]) test(`SQL-only snapshot after module introduction is refused (original=${original})`, async () => {
+  const f = rebasedRenumberFixture();
+  f.snapshots[1].files = original ? f.evidence.primaryFiles : f.snapshots[1].files.slice(0, 2);
+  assert.equal((await prove(f)).reason, 'primary-change-reverted');
+  assert.equal(f.evidence.migrationRenumberDiagnostics.at(-1).reason, 'snapshot-proof-missing');
+});
+
+test('no migration candidates means no timer, reads or proof diagnostics', async t => {
+  const f = migrationRenumberFixture();
+  f.evidence.primaryFiles = [];
+  t.mock.method(globalThis, 'setTimeout', () => assert.fail('non-candidate must not size or start a timer'));
+  assert.deepEqual(await proveMigrationRenumbers(f.args, f.evidence), []);
+  assert.deepEqual(f.evidence.migrationRenumberDiagnostics, []);
+  assert.equal(f.calls.length, 0);
+});
+
+test('migration proof failures cannot crowd region history out of refusal evidence', () => {
+  const f = migrationRenumberFixture();
+  f.evidence.finalFiles = [];
+  const path = f.evidence.primaryFiles[0].filename;
+  f.evidence.primaryPathChanges = [{ path, start: 1, end: 2,
+    commits: [{ sha: 'e'.repeat(40), author: 'fixture-author', pipelineRepair: false }] }];
+  const baseline = checkPrimaryChange(f.evidence, f.args.headSha);
+  f.evidence.migrationRenumberDiagnostics = Array.from({ length: 128 }, () => ({
+    proven: false, reason: 'snapshot-read-failed', headSha: f.args.headSha, detail: 'transient read failure'.repeat(12),
+  }));
+  const result = checkPrimaryChange(f.evidence, f.args.headSha);
+  assert.equal(result.reason, 'primary-change-reverted');
+  assert.deepEqual(result.missingEvidence, baseline.missingEvidence);
+  assert.match(result.missingEvidence.summary, /region history:.*fixture-author/);
+  assert.equal(result.migrationRenumberDiagnostics.length, 128);
 });

@@ -97,10 +97,7 @@ test('primary-change CLI recovers TLS and HTTP 502 reads and emits complete evid
   const { ciCost: _cost, ...historyEvidence } = evidence;
   for (const key of ['primaryFiles', 'finalFiles']) for (const file of parsed[key]) { delete file.sha; file.patch = file.patch.trimEnd(); }
   assert.deepEqual(parsed, { ...historyEvidence, completeFileLists: true, testRegionsChanged: [],
-    diagnosticCommitRange: [{ sha: head }], migrationRenumberDiagnostics: [
-      { proven: false, reason: 'snapshot-no-candidates', headSha: head },
-      { proven: false, reason: 'final-snapshot-unproven', headSha: head },
-    ] });
+    diagnosticCommitRange: [{ sha: head }], migrationRenumberDiagnostics: [] });
   assert.deepEqual(result.calls, [prPath, prPath, prPath, comparePath, 'repos/fixture/repo/pulls/1208/reviews?per_page=100', comparePath,
     primaryPath, primaryPath, prPath, comparePath, 'repos/fixture/repo/pulls/1208/files?per_page=100&page=1', `repos/fixture/repo/commits/${head}/check-runs?per_page=100&page=1`, `repos/fixture/repo/commits/${head}/statuses?per_page=100&page=1`, prPath].map(path => ['api', path]));
 });

@@ -606,16 +606,12 @@ function missingReversalEvidence(evidence, path, missing, cache, regions) {
       + `${rejected.length ? `; rejected: ${rejected.map((entry) => `${entry.review} finding=${entry.finding} kind=${entry.kind} on ${String(entry.commit).slice(0, 12)} (${entry.reason}${entry.detail ? `: ${entry.detail}` : ''})`).join(', ')}` : ''})`
     : `the reverted ${path} change cannot be authorized by a finding (${missing})`
       + `${diagnosticTimeout ? '; region diagnostic time budget exhausted' : ''}`;
-  const migrationRenumberDiagnostics = evidence.migrationRenumberDiagnostics || [];
-  if (migrationRenumberDiagnostics.length) summary += '; migration renumber proof: '
-    + migrationRenumberDiagnostics.map(entry => entry.reason + (entry.detail ? ` (${entry.detail})` : '')).join('; ');
   const regionDiagnostics = [...(evidence.revertedRegionDiagnostics || []), ...(evidence.primaryPathChanges || [])]
     .filter(entry => entry.path === path);
   if (regionDiagnostics.length) summary += '; region history: ' + regionDiagnostics.map(entry =>
     `${entry.start === null ? 'file-level' : `${entry.start}-${entry.end}`}: ${entry.commits.map(commit =>
       `${commit.sha} author=${commit.author || 'unlinked'} pipeline-repair=${commit.pipelineRepair === true ? 'yes' : commit.pipelineRepair === false ? 'no' : 'unknown'}${commit.repairKind ? ` (${commit.repairKind})` : ''}`).join(', ') || 'unavailable'}${entry.error ? ` (${entry.error})` : ''}`).join('; ');
-  return { evidence: missing, path, accepted, rejected, summary: boundedReversalText(summary, 4096), regions, regionDiagnostics,
-    ...(migrationRenumberDiagnostics.length ? { migrationRenumberDiagnostics } : {}) };
+  return { evidence: missing, path, accepted, rejected, summary: boundedReversalText(summary, 4096), regions, regionDiagnostics };
 }
 
 // The exact-head re-review is the one automatic action that can supply a
@@ -679,6 +675,7 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
     const reverted = (path, missing = 'reversal-authorization') => {
       const diagnosticCache = new Map();
       return { ok: false, reason: 'primary-change-reverted', path, ...whitespaceEvidence,
+        ...(evidence.migrationRenumberDiagnostics?.length ? { migrationRenumberDiagnostics: evidence.migrationRenumberDiagnostics } : {}),
         testRegionsChanged: testChanges, missingEvidence: missingReversalEvidence(evidence, path, missing, authorizationCache,
           refusedRegions(primary.get(path), final.get(path), (unit, restoringDeletion) =>
             reversalAuthorized(evidence, path, unit, diagnosticCache, strictNonBlockingRemediation, restoringDeletion))) };

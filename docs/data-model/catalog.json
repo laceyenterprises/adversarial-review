@@ -207,7 +207,7 @@
       "rejectedReversalAuthorizationOptionalFields": ["detail"],
       "diagnosticCommitRangeEntryFields": ["sha"],
       "diagnosticCollection": "snapshot attribution is operator opt-in only, 20 commits and 15 seconds; shared reads retain commit-file attribution from rename proof reads, capped at 20 commits when no destination exists",
-      "transientMigrationProof": "MIGRENUMBERDERIVED-01: migrationRenumberProofs are hash-verified after history reuse, never cached; body-verified candidates sharing a registry normalize together with unique pair markers and exactly one tuple each; MIGRENUMBERDERIVED-02 also verifies Alembic wrappers, paired revision modules and explicit module registries at every observed hammer snapshot against the protected author head; evaluator returns head/base/blob-bound mechanical-migration-renumber derivedChanges with an observed monotonic chain"
+      "transientMigrationProof": "MIGRENUMBERDERIVED-01: migrationRenumberProofs are hash-verified after history reuse, never cached; body-verified candidates sharing a registry normalize together with unique pair markers and exactly one tuple each; MIGRENUMBERDERIVED-02 also verifies Alembic wrappers, paired revision modules and explicit module registries at every observed hammer snapshot against the protected author head; evaluator returns head/base/blob-bound mechanical-migration-renumber derivedChanges with an observed chain; MIGRENUMBERDERIVED-03 author-SQL proofs bind moduleOrigin, sqlPath/sqlDestination, primarySqlBlob/sqlBlob, moduleIdentity and snapshotMergeBase; rebased non-monotonic chains require head-bound transient migrationRenumberAncestry status=diverged and no slot below the author slot; diagnostics remain outside missingEvidence, its summary and stop identity; no candidates skips diagnostics and timer/load sampling"
     },
     {
       "id": "claude-corporate-quota-cooldown",
@@ -278,7 +278,7 @@
       ],
       "owner": "AMA merge execution evidence (OPSEV1-03)",
       "deliveryKey": "optional stable outbox key; deterministic key-<sha256 prefix> filename, identical replay returns the existing file, conflicting record refuses",
-      "derivedChanges": "optional array of at most eight mechanical-migration-renumber proofs bound to receipt head, author/base and migration/registry blobs, plus paired module paths/blobs and observed author-to-head chain for MIGRENUMBERDERIVED-02; daemon copies in-lease classification, hammer copies its passing exact-head gate"
+      "derivedChanges": "optional array of at most eight mechanical-migration-renumber proofs bound to receipt head, author/base and migration/registry blobs, plus paired module paths/blobs and observed author-to-head chain for MIGRENUMBERDERIVED-02; MIGRENUMBERDERIVED-03 adds moduleOrigin=author-sql, sqlPath, sqlDestination, primarySqlBlob, sqlBlob, moduleIdentity and snapshotMergeBase (primaryRegistryBlob is the snapshot-base registry); rebased=true permits non-monotonic chains only after evaluator verification of transient head-bound migrationRenumberAncestry status=diverged and no slot below the author slot; daemon copies in-lease classification, hammer copies its passing exact-head gate"
     },
     {
       "id": "ama-closure-lag",
@@ -892,6 +892,7 @@
     },
     {
       "id": "hammer-stop-hold",
+      "proofDiagnostics": "MIGRENUMBERDERIVED-03: optional migrationRenumberDiagnostics are outside missingEvidence; legacy diagnostics and migration-proof summary suffixes are excluded from refusal key hashing and probe change comparisons",
       "gateRevisionRecovery": "HOLDGATEVERSION-01: deterministic refusal holds record gateRevision with the audit reviewServiceRevision and optional gatePredicateVersion, falling back to the first known loaded service or predicate provenance for legacy stops; missing/all-null anchors defer until a known observation. Admission and skipped-subject sweeps durably install the baseline and predicate on version-1 records under existing persistence fences, preserving deadlines and delivery receipts. gate-revision-change releases on a known differing service or predicate version; missing readings do not prove change. Durable release receipts survive polls/restarts; new stops under the deployed revision hold again. Normal admission and skipped-subject sweeps share evaluation. Transient/companion waits, terminal guards, leases and head/series/lifetime caps remain authoritative; no refunds, new gates or config.",
       "operatorApprovalRelease": "refusal.awaitedInputs operator-label entries release on exact-open-head label presence with operator-approval-applied; independent once-per-head retry-ledger grant; awaited inputs reclassify legacy transient stops as deterministic with a new refusal generation; typed-only inputs have approval-specific next action",
       "companionRecovery": "mode companion records companion identity/merge commit/path, phase events, deadline, owner and once-only escalation. Only base gitlink ancestry releases ordinary admission; pure-wait charges are credited once.",

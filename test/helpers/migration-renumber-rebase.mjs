@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
 // Synthetic SQL-backed author snapshot and three rewritten hammer histories.
-export function rebasedRenumberFixture({ staged = false } = {}) {
+export function rebasedRenumberFixture({ staged = false, sql = '-- Synthetic operation.\nCREATE TABLE sample (id int);\n' } = {}) {
   const hash = text => createHash('sha1').update(text).digest('hex');
   const objects = new Map(), trees = new Map(), calls = [];
   const blob = text => {
@@ -20,7 +20,6 @@ export function rebasedRenumberFixture({ staged = false } = {}) {
   const name = n => `${timestamp(n)}_b7_create_sample.sql`;
   const wrapper = n => `${directory}${n}_${timestamp(n)}_b7_create_sample.py`;
   const sqlPath = n => `sample/src/sample/migrations/${name(n)}`;
-  const sql = '-- Synthetic operation.\nCREATE TABLE sample (id int);\n';
   const body = n => `revision = "create_sample_${n}"\ndown_revision = "prior_${n - 1}"\nSOURCE_NAME = "${name(n)}"\n\ndef upgrade():\n    upgrade_revision(op, SOURCE_NAME)\n\ndef downgrade():\n    downgrade_revision(op, SOURCE_NAME)\n`;
   const moduleBody = n => `from ._types import PostgresMigration\n\nMIGRATION = PostgresMigration(\n    revision="create_sample_${n}",\n    down_revision="prior_${n - 1}",\n    source_name="${name(n)}",\n    raw_sql=${JSON.stringify(sql)},\n    downgrade_sql=(\n        "DROP TABLE sample",\n    ),\n)\n`;
   const registry = n => `_MODULE_NAMES = (\n${Array.from({ length: n - 307 }, (_, i) => `    "r${308 + i}",\n`).join('')})\n`;

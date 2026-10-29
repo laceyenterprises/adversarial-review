@@ -194,6 +194,10 @@ function sqlModule(text, info, sourceName, sql) {
   const string = () => {
     const token = list[index++];
     try {
+      // JSON's escaped slash and UTF-16 surrogate escapes do not have the
+      // same value in Python. Decode only their shared string escape subset.
+      const escapes = token?.value.match(/\\(?:u[0-9a-fA-F]{4}|[\s\S])/g) || [];
+      if (escapes.some(escape => escape === '\\/' || /^\\u[dD][89a-fA-F]/.test(escape))) return null;
       const value = JSON.parse(token?.value);
       return typeof value === 'string' ? { token, value } : null;
     } catch { return null; }
@@ -354,9 +358,13 @@ function candidates(evidence, allowRetained = false) {
 // Prefer the existing complete small-tree response; large repositories fall
 // back to walking just the migration directory. Bounds apply to that directory,
 // rather than rejecting every migration in a repository with many files.
-async function migrationTree({ repo, get }, head, directory) {
-  const whole = await get(`repos/${repo}/git/trees/${head}?recursive=1`);
-  if (whole?.truncated === false && Array.isArray(whole.tree) && whole.tree.length <= 10000) return whole.tree;
+async function migrationTree({ repo, get, treePolicy }, head, directory) {
+  if (!treePolicy.walkOnly) {
+    const whole = await get(`repos/${repo}/git/trees/${head}?recursive=1`);
+    if (whole?.truncated === false && Array.isArray(whole.tree) && whole.tree.length <= 10000) return whole.tree;
+    // This policy is shared across pairs and snapshots in this collection only.
+    treePolicy.walkOnly = true;
+  }
   let ref = head;
   const parts = directory.replace(/\/$/, '').split('/');
   if (parts.length > 32) throw new Error('migration directory depth exceeded');
@@ -473,6 +481,7 @@ async function proveSnapshot(args, evidence) {
 export async function proveMigrationRenumbers(args, evidence) {
   const diagnostics = evidence.migrationRenumberDiagnostics = [];
   delete evidence.migrationRenumberAncestry;
+  if (Array.isArray(evidence.primaryFiles) && Array.isArray(evidence.finalFiles) && !candidates(evidence).length) return [];
   const record = (reason, headSha = evidence.headSha, path, detail) => {
     if (diagnostics.length === 128) diagnostics.shift();
     diagnostics.push({ proven: false, reason, headSha,
@@ -501,7 +510,7 @@ export async function proveMigrationRenumbers(args, evidence) {
     return cache.get(key);
   };
   args = { ...args, signal: deadline, record, proofHeadSha: evidence.headSha,
-    finalNumbers: new Map(), get: path => read(path, get),
+    finalNumbers: new Map(), treePolicy: { walkOnly: false }, get: path => read(path, get),
     metadata: path => read(path, get.metadata || get, `metadata:${path}`) };
   try {
     const range = evidence.diagnosticCommitRange || [{ sha: evidence.headSha }];
@@ -538,8 +547,15 @@ export async function proveMigrationRenumbers(args, evidence) {
       snapshots.push(batch);
     }
     const complete = proofs.filter(proof => {
-      if (snapshots.every(batch => batch.some(item => item.path === proof.path
-        && (proof.moduleOrigin !== 'author-sql' || item.unchangedAuthor === true || item.sqlOnly === true || item.moduleIdentity === proof.moduleIdentity)))) return true;
+      let moduleSeen = false;
+      if (snapshots.every(batch => batch.some(item => {
+        if (item.path !== proof.path) return false;
+        if (proof.moduleOrigin !== 'author-sql') return true;
+        if (item.unchangedAuthor === true || item.sqlOnly === true) return !moduleSeen;
+        if (item.moduleIdentity !== proof.moduleIdentity) return false;
+        moduleSeen = true;
+        return true;
+      }))) return true;
       record('snapshot-proof-missing', evidence.headSha, proof.path);
       return false;
     });

@@ -37,7 +37,18 @@ this so a lost outbox receipt or restart cannot double automation accounting.
 | `reason` | string or null | Required and non-empty for refusal; defaults to null for success. |
 | `executedAt` | timestamp string | Parseable date; defaults to the writer's current ISO timestamp. |
 | `deliveryKey` | string (optional) | Present only for stable-key outbox deliveries; see above. |
-| `derivedChanges` | array (optional) | MIGRENUMBERDERIVED-01 proof of `mechanical-migration-renumber`. At most eight entries, each containing `classification`, `path`, `destination`, `registryPath`, `primaryBlob`, `blob`, `primaryRegistryBlob`, `registryBlob`, `primaryHead`, `headSha`, `mergeBase`. MIGRENUMBERDERIVED-02 adds `chain` observations (`headSha`, `path`, `blob`) from protected author to candidate head. Alembic proofs also bind `modulePath`, `moduleDestination`, `primaryModuleBlob` and `moduleBlob`. All blobs/heads are Git SHAs and each `headSha` must equal the receipt head. Relative paths exclude traversal. |
+| `derivedChanges` | array (optional) | MIGRENUMBERDERIVED-01 proof of `mechanical-migration-renumber`. At most eight entries, each containing `classification`, `path`, `destination`, `registryPath`, `primaryBlob`, `blob`, `primaryRegistryBlob`, `registryBlob`, `primaryHead`, `headSha`, `mergeBase`. MIGRENUMBERDERIVED-02 adds `chain` observations (`headSha`, `path`, `blob`) from protected author to candidate head. Alembic proofs also bind `modulePath`, `moduleDestination`, `primaryModuleBlob` and `moduleBlob`. MIGRENUMBERDERIVED-03 author-SQL proofs instead carry `moduleOrigin: author-sql`, `sqlPath`, `sqlDestination`, `primarySqlBlob`, `sqlBlob`, `moduleDestination`, `moduleBlob`, `moduleIdentity` (normalized module blob hash), and `snapshotMergeBase`; `primaryRegistryBlob` is the snapshot-base registry, with no author-owned `modulePath` or `primaryModuleBlob`. All blobs/heads are Git SHAs and each `headSha` must equal the receipt head. Relative paths exclude traversal. |
+
+Chains normally increase strictly. A chain with mechanical filename resets
+carries `rebased: true`; every observed slot must remain at or above the author's
+original slot. The evaluator requires transient `migrationRenumberAncestry:
+{ primaryHead, headSha, status: diverged }` from an immutable compare bound to
+both heads before admitting that non-monotonic chain (for example
+309→310→311→309→312). The ancestry evidence itself is not copied into the receipt.
+Every observed wrapper, SQL and module body still requires author-equivalent
+proof. Receipt validation checks the legacy structural keys; the shared
+primary-change evaluator establishes these semantic guarantees before producers
+copy the proof.
 
 `derivedChanges` explains preservation under the shared primary-change contract;
 it grants no authority. The daemon copies the latest passing in-lease result.

@@ -340,7 +340,7 @@ test('infrastructure recovery revalidates jobs, deduplicates reruns and pages a 
     if (args.includes('POST')) { posts++; return { stdout: '' }; }
     if (args[0] === 'pr') return { stdout: JSON.stringify({ state: 'OPEN', headRefOid: headSha }) };
     if (args[1].includes('/jobs?')) return { stdout: JSON.stringify({ jobs: [
-      { id: 10, head_sha: headSha, conclusion: 'failure', steps },
+      { id: 10, head_sha: headSha, conclusion: 'failure', steps, annotations: [{ message: 'The job was not started because an Actions budget is preventing further use.' }] },
     ] }) };
     return { stdout: JSON.stringify({ head_sha: headSha, run_attempt: attempt, conclusion: 'failure', status: 'completed' }) };
   };
@@ -366,10 +366,41 @@ test('review admission owns infrastructure rerun while retaining the CI wait', a
     execFileImpl: async (_bin, args) => {
       if (args.includes('POST')) { posts++; return { stdout: '' }; }
       if (args[0] === 'pr') return { stdout: JSON.stringify({ state: 'OPEN', headRefOid: headSha }) };
-      if (args[1].includes('/jobs?')) return { stdout: JSON.stringify({ jobs: [{ id: 10, head_sha: headSha, conclusion: 'failure', steps: [] }] }) };
+      if (args[1].includes('/jobs?')) return { stdout: JSON.stringify({ jobs: [{ id: 10, head_sha: headSha, conclusion: 'failure', steps: [], annotations: [{ message: 'The job was not started because an Actions budget is preventing further use.' }] }] }) };
       return { stdout: JSON.stringify({ head_sha: headSha, run_attempt: 1, conclusion: 'failure', status: 'completed' }) };
     } });
   assert.equal(result.reason, 'ci-infrastructure');
   assert.equal(result.proceed, false);
   assert.equal(posts, 1);
+});
+
+test('CIBLOCKRESUME-01 rerun requires capacity annotations for every failed job and zero executed steps', async t => {
+  const annotation = { message: 'The job was not started because an Actions budget is preventing further use.' };
+  const job = { id: 10, head_sha: headSha, conclusion: 'failure', steps: [], annotations: [annotation] };
+  const check = { name: 'unit', state: 'FAILURE', steps: [], detailsUrl: `https://github.com/${repo}/actions/runs/1/job/10` };
+  for (const [name, jobs, total] of [
+    ['capacity', [job]],
+    ['no annotation', [{ ...job, annotations: [] }]],
+    ['executed', [{ ...job, steps: [{ conclusion: 'failure' }] }]],
+    ['sibling code failure', [job, { ...job, id: 11, steps: [{ conclusion: 'failure' }] }]],
+    ['foreign head', [{ ...job, head_sha: 'b'.repeat(40) }]],
+    ['incomplete jobs', [job], 101],
+    ['annotations endpoint', [{ ...job, annotations: [], check_run_url: `https://api.github.com/repos/${repo}/check-runs/99` }]],
+    ['mixed-case annotations endpoint', [{ ...job, annotations: [], check_run_url: `https://api.github.com/repos/${repo.toUpperCase()}/check-runs/99` }]],
+    ['foreign annotations endpoint', [{ ...job, annotations: [], check_run_url: 'https://api.github.com/repos/foreign/repo/check-runs/99' }]],
+  ]) {
+    const rootDir = fixture(t); let posts = 0;
+    const execFileImpl = async (_bin, args) => {
+      if (args.includes('POST')) { posts++; return { stdout: '' }; }
+      if (args[0] === 'pr') return { stdout: JSON.stringify({ state: 'OPEN', headRefOid: headSha }) };
+      if (args[1].includes('/jobs?')) return { stdout: JSON.stringify({ jobs, total_count: total ?? jobs.length }) };
+      if (args[1].includes('/annotations?')) return { stdout: JSON.stringify([annotation]) };
+      return { stdout: JSON.stringify({ head_sha: headSha, run_attempt: 1, conclusion: 'failure', status: 'completed' }) };
+    };
+    const args = { rootDir, repo, prNumber: 2, headSha, failedChecks: [check], execFileImpl };
+    const permitted = ['capacity', 'annotations endpoint', 'mixed-case annotations endpoint'].includes(name);
+    assert.equal(await recoverInfrastructureChecks(args), permitted, name);
+    if (permitted) await recoverInfrastructureChecks(args);
+    assert.equal(posts, permitted ? 1 : 0, name);
+  }
 });

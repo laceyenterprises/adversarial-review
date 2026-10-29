@@ -1690,12 +1690,21 @@ async function dispatchAmaClosureFor({
       recoveryWait: true, reason: 'hammer-stop-awaiting-companion', hammerStop: wait.hammerStop }, { amaEnabled: true });
     if (wait.action === 'release') recordedStop = null;
   }
+  let infrastructureOwnerReleased = false;
   if (isInfrastructureStop(recordedStop)) {
     const evaluatedStop = await evaluateHammerStopHold({ rootDir, hqRoot: resolveHqRoot(env), repo: repoPath, prNumber,
       headSha: currentPrHeadSha, reviewedSha: reviewState.headSha, prMetadata,
       excludeContexts: [requiredGateContext], requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
       logger, now: new Date(now()).toISOString() });
     recordedStop = evaluatedStop.infrastructureStop || recordedStop;
+    if (evaluatedStop.action === 'release' && autonomousMergeExecutionEnabled && prMetadata.isOpen) {
+      infrastructureOwnerReleased = await amaDispatchCloser.releaseRecoveredCiInfrastructureOwner({
+        rootDir, hqRoot: resolveHqRoot(env), repo: repoPath, prNumber, prMetadata, reviewedSha: reviewState.headSha,
+        excludeContexts: [requiredGateContext], requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
+        now: new Date(now()).toISOString(), logger, env, signal });
+      if (infrastructureOwnerReleased) handoffLease = readAmaCloserLease(rootDir, {
+        repo: repoPath, prNumber, headSha: currentPrHeadSha });
+    }
   }
   const ownerCap = evaluateHammerRetryCap(readHammerRetryCapLedger(rootDir, { repo: repoPath, prNumber }), {
     jobKey: reviewState.headSha, headSha: currentPrHeadSha,
@@ -1747,7 +1756,7 @@ async function dispatchAmaClosureFor({
     anchors: { postedAt: reviewState.postedAt || reviewStateRow?.posted_at || null, finalRoundCompletedAt },
     checksRollup: candidate?.statusCheckRollup,
     candidate: { ...candidate, ...mergeabilityForGate }, labels: prMetadata.labels });
-  let shared = (ownerCap.operatorApprovalApplied ? null : resolvedNextAction) || await resolveOwner();
+  let shared = (ownerCap.operatorApprovalApplied || infrastructureOwnerReleased ? null : resolvedNextAction) || await resolveOwner();
   if (resolvedNextAction) shared = reviseClosureNextAction(shared, { progress: {
     ...shared.snapshot.observations.progress?.value, hammerResume,
   } }, passSnapshot);

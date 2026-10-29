@@ -39,7 +39,7 @@ export function infrastructureOnlyFailures(checks) {
   return Array.isArray(checks) && checks.length > 0 && checks.every(check => checkInfrastructureReason(check));
 }
 
-function rollupFailures(rollup, { excludeContexts = ['agent-os/adversarial-gate'] } = {}) {
+export function rollupFailures(rollup, { excludeContexts = ['agent-os/adversarial-gate'] } = {}) {
   const excluded = new Set((Array.isArray(excludeContexts) ? excludeContexts : ['agent-os/adversarial-gate'])
     .map(value => String(value).trim().toLowerCase()));
   return latestCheckRollupItems(rollup).filter(item =>

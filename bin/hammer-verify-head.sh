@@ -9,6 +9,15 @@ ham_verify_head_phase() {
 HAM_PHASE_OUTCOME=verify-head-error
 ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > "<<RUN_DIR>>/pr-after.json" || return $?
 POST_REMEDIATION_SHA=$(jq -er '.headRefOid | select(type == "string") | select(test("^[0-9a-fA-F]{40}$"))' "<<RUN_DIR>>/pr-after.json") || { HAM_PHASE_OUTCOME=missing-pr-state; return 1; }
+# A capacity outage ends this round before the merge lease or any decision.
+# Context also applies this rule; recheck here after edits/pushes or CI changes.
+"${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-ci-stop.mjs "<<RUN_DIR>>/pr-after.json" || {
+  ham_ci_stop_exit=$?
+  HAM_PHASE_OUTCOME=ci-infrastructure-evidence-unavailable
+  if [ "$ham_ci_stop_exit" -eq 20 ]; then HAM_PHASE_OUTCOME=ci-infrastructure; fi
+  if declare -F ham_release_merge_lease >/dev/null; then ham_release_merge_lease || return 1; fi
+  return "$ham_ci_stop_exit"
+}
 # Wait only for read-after-push lag. A third head retains the ordinary race path.
 HAM_HEAD_WAITED_SECONDS="${HAM_HEAD_WAITED_SECONDS:-0}"
 HAM_REQUIRED_CHECKS_WAITED_SECONDS="${HAM_REQUIRED_CHECKS_WAITED_SECONDS:-0}"

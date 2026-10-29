@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { recordHammerCiStop } from '../src/ama/hammer-ci-stop.mjs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { reportHammerEarlyFailure } from '../src/ama/hammer-terminal-audit.mjs';
 // One bounded GitHub snapshot; no Agent OS installation or local daemon required.
 import { meteredExecFileSync } from '../src/metered-gh.mjs';
@@ -48,6 +51,12 @@ try {
   const checks = await fetchHammerPr(repo, number, {
     read: path => path === `repos/${repo}/pulls/${number}` ? pr : get(['api', path]),
   });
+  const infrastructureStop = await recordHammerCiStop({ pr: checks, repo, prNumber: Number(number),
+    execFileImpl: promisify(execFile) });
+  if (infrastructureStop) {
+    process.stdout.write(`${JSON.stringify({ head: checks.headRefOid, noMerge: true, ...infrastructureStop })}\n`);
+    process.exit(20);
+  }
   let protection;
   try { protection = get(['api', `repos/${repo}/branches/${encodeURIComponent(pr.base?.ref || 'main')}/protection`]); }
   catch { protection = { required_status_checks: null, unavailable: true }; }

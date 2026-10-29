@@ -36,6 +36,7 @@ async function fetchHammerPr(repo, prNumber, { withChecks = true, withReviews = 
           __typename: 'CheckRun', name: item.name, status: item.status ? String(item.status).toUpperCase() : null,
           conclusion: item.conclusion ? String(item.conclusion).toUpperCase() : null, detailsUrl: item.details_url,
           createdAt: item.created_at, startedAt: item.started_at, completedAt: item.completed_at,
+          output: item.output,
         } : {
           __typename: 'StatusContext', context: item.context, state: item.state ? String(item.state).toUpperCase() : null,
           createdAt: item.created_at, updatedAt: item.updated_at,

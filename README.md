@@ -1325,6 +1325,26 @@ failure distinction. Focused offline evidence is in
 refund reasons after normal deployment using the
 [runbook](docs/RUNBOOK-ama-closure.md#actions-billingquota-blocks-ciblockinfra-01).
 
+CIBLOCKRESUME-01 makes `hammer-context` and the verify-head closing phase record
+`failed-without-merge` / `ci-infrastructure` with exact-head failed-check evidence
+and end the round before acquiring a merge lease. CI capacity is never an HQ
+decision. Successful replacements for all recorded failures plus the ordinary
+required-context classifier release the stop. In that same watcher pass, local
+custody for a matching legacy `blocked_needs_decision` launch is retired under
+the PR intent lock and lease CAS, then normal closure selection runs again.
+Unknown descendants, active retries, unrelated launches, moved heads, missing
+checks and real failures retain their existing safety behavior. This changes
+ownership only; every merge predicate and lease remains mandatory.
+
+The failed-job rerun requires fresh exact-head zero-step capacity annotation
+proof for every unsuccessful job in each affected workflow, including optional
+siblings, since `rerun-failed-jobs` affects the whole run. Annotation-only proof
+can come from the job's check-run annotations endpoint. Unannotated zero-step
+failures still wait as infrastructure but do not authorize a rerun. Incomplete
+job pages refuse recovery. The durable one-rerun workflow/head bound remains;
+a consumed retry is never replenished by capacity returning.
+
+
 
 RCV-08 adds permanent no-work charge/refund receipts and serialized hammer budget
 accounting. The existing launch-terminal reconciliation edge now requires the
@@ -2359,7 +2379,10 @@ Disposable halt files return distinct
 restores eligibility without reloading. Fleet identity proof requires a valid
 GitHub signature (the signature metadata is faked, not cryptographically tested).
 A fake GitHub signed-commit policy refuses the unsigned head through the real
-daemon merge attempt. Infrastructure-only CI waits keep the round uncharged;
+daemon merge attempt. CIBLOCKRESUME-01 records a typed capacity stop without an
+HQ decision, retires matching legacy decision-blocked custody on exact-head green
+checks and reselects the ordinary closer in the same pass. The bounded rerun
+requires capacity-annotated zero-step workflow jobs. Infrastructure-only CI waits keep the round uncharged;
 successful replacements recover failed/stopped synthetic jobs, while executed
 failing steps retain ordinary CI failure classification. The real consumer stops exhausted rounds and operator-only
 findings; the latter page and comment once without spawning a remediator, after

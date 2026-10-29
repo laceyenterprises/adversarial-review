@@ -741,3 +741,21 @@ existing artifact provenance gate remains a hold until the producer merges.
 Then copy the exact merged artifact, verify its digest and update the consumer
 producer record with the authoritative merge commit, following the SDK
 coordinated-release procedure. Do not substitute a candidate revision.
+
+## Recovered capacity decision (CIBLOCKRESUME-01)
+
+An exact-head infrastructure-only stop released by `ci-infrastructure-recovered`
+may retire its positively identified `blocked_needs_decision` launch's local
+receipt. Under the PR intent lock, the writer compares the receipt identity,
+CAS-deletes its matching closer lease, then records existing `state: no-dispatch`,
+`reason: ci-infrastructure-recovered`, `recoveredLaunchRequestId` (the former
+owner), `reconciledAt`, and null `launchRequestId`, `dispatchId`,
+`lastObservedStatus` and `outcome`. Retry charges are refunded only through the
+existing infrastructure refund contract. No HQ launch status is fabricated and
+no decision is answered. If interrupted between writes, the retained receipt
+permits the next poll to finish retirement. A competing lease/receipt wins.
+
+The retired receipt explicitly clears the cached next-action launch observation
+within the same pass. Running, foreign or unreadable launches and live/unknown
+retry descendants retain custody. New closure still passes ordinary gates,
+retry budgets and lease admission; retirement cannot merge anything.

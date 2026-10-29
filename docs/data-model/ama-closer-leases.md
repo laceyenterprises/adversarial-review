@@ -183,3 +183,14 @@ same-head daemon eligibility or hammer resume, with existing deferral backoff,
 retry/lifetime limits and the exclusive acquisition CAS. No persistent fields
 or status values are added. The orphan watchdog uses the lease LRQ as liveness
 evidence even when its dispatch projection is missing.
+
+## Recovered capacity decision (CIBLOCKRESUME-01)
+
+A legacy decision-blocked closer's lease can be CAS-deleted under the PR intent
+lock after its exact-head infrastructure stop releases and a fresh launch read
+proves `blocked_needs_decision` with no live or unreadable retry descendants.
+The corresponding dispatch receipt retains `recoveredLaunchRequestId` and
+`reason: ci-infrastructure-recovered`; it clears live launch references. This
+exception does not apply to running or otherwise parked owners. It does not
+change the merge lease or authorize merge. See the
+[dispatch receipt contract](ama-closer-dispatches.md#recovered-capacity-decision-ciblockresume-01).

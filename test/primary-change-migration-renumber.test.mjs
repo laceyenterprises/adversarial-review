@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { proveMigrationRenumbers } from '../src/ama/migration-renumber.mjs';
+import { proveMigrationRenumbers, verifiedMigrationRenumbers } from '../src/ama/migration-renumber.mjs';
 import { checkPrimaryChange, fetchPrimaryChange } from '../src/ama/primary-change.mjs';
 import { evaluateMergeEligibility } from '../src/ama/merge-eligibility.mjs';
 import { migrationRenumberFixture, alembicRenumberFixture } from './helpers/migration-renumber.mjs';
@@ -69,6 +69,43 @@ test('multiple body-verified renumbers sharing a registry are derived together',
   assert.deepEqual(f.evidence.migrationRenumberProofs.map(proof => proof.path),
     [f.source, 'app/migrations/043_create_other.py']);
 });
+
+for (const bothRebased of [false, true]) {
+  for (const reversed of [false, true]) {
+    test(`sibling proofs share head ancestry (bothRebased=${bothRebased}, reversed=${reversed})`, async () => {
+      const f = batchFixture(), get = f.args.get;
+      const intermediateHead = 'd'.repeat(40), intermediate = structuredClone(f.evidence.finalFiles);
+      intermediate[0].filename = 'app/migrations/044_create_sample.py';
+      intermediate[0].sha = f.blob(f.body('044', '043'));
+      const other = bothRebased ? 45 : 43;
+      intermediate[2].filename = `app/migrations/0${other}_create_other.py`;
+      intermediate[2].sha = f.blob(f.body(`0${other}`, `0${other - 1}`).replaceAll('create_sample', 'create_other'));
+      intermediate[1].sha = f.blob(f.registry(44).replace(']\n', `    (${other}, "0${other}_create_other"),\n]\n`));
+      f.evidence.diagnosticCommitRange = [{ sha: intermediateHead }, { sha: f.args.headSha }];
+      if (reversed) f.evidence.primaryFiles.reverse();
+      let ancestryReads = 0;
+      f.args.get = async path => {
+        if (path.endsWith(`${f.evidence.primaryHead}...${f.args.headSha}`)) {
+          ancestryReads++;
+          return { status: 'diverged' };
+        }
+        if (path.endsWith(`${f.evidence.mergeBase}...${intermediateHead}`)) return {
+          files: intermediate, filesComplete: true, merge_base_commit: { sha: f.evidence.mergeBase },
+        };
+        return get(path);
+      };
+      assert.equal((await prove(f)).ok, true);
+      const proofs = verifiedMigrationRenumbers(f.evidence, f.args.headSha);
+      assert.equal(proofs.length, 2);
+      assert.equal(proofs.find(proof => proof.path === f.source).rebased, true);
+      assert.equal(proofs.find(proof => proof.path.endsWith('create_other.py')).rebased, bothRebased || undefined);
+      assert.equal(ancestryReads, 1);
+      assert.deepEqual(f.evidence.migrationRenumberAncestry, {
+        primaryHead: f.evidence.primaryHead, headSha: f.args.headSha, status: 'diverged',
+      });
+    });
+  }
+}
 
 for (const [name, modify] of [
   ['changed sibling operation', f => {

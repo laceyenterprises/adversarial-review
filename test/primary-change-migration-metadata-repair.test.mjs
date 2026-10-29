@@ -22,6 +22,7 @@ test('LAC-2127: actual immutable ancestral 309/310/311/309/312 history has indep
   assert.deepEqual(ancestry.commits.map(c => c.sha), f.evidence.diagnosticCommitRange.map(c => c.sha));
   assert.deepEqual(ancestry.commits.map(c => c.parents.map(p => p.sha)),
     [f.evidence.primaryHead, ...ancestry.commits.slice(0, -1).map(c => c.sha)].map(sha => [sha]));
+  f.calls.length = 0;
   const [proof] = await prove(f);
   assert.ok(proof, JSON.stringify(f.evidence.migrationRenumberDiagnostics));
   assert.equal(proof.metadataRepair, true);
@@ -32,6 +33,10 @@ test('LAC-2127: actual immutable ancestral 309/310/311/309/312 history has indep
   assert.ok(proof.parentOperations.every(parent => parent.operations.length === 2));
   assert.equal(checkPrimaryChange(f.evidence, f.args.headSha).ok, true);
   assert.ok(f.calls.length < 512);
+  for (const { sha } of f.snapshots) {
+    const comparison = `repos/${f.args.repo}/compare/${f.evidence.baseSha}...${sha}`;
+    assert.equal(f.calls.filter(path => path === comparison).length, 1, comparison);
+  }
 });
 
 test('same author filename with metadata-only repair before final increasing rename', async () => {
@@ -85,6 +90,29 @@ test('registry edit before module introduction is independently refused', async 
   f.replaceTreeFile(f.snapshots[0].sha, registry(f.evidence.finalFiles).filename, f.blob('_MODULE_NAMES = ()\n'));
   assert.deepEqual(await prove(f), []);
   assert.equal(f.evidence.migrationRenumberDiagnostics.at(-1).reason, 'repair-predecessor-unproven');
+});
+
+for (const revision of ['operator_directive_versions_309', 'operator_directive_versions_311',
+  'operator_directive_versions_313', 'unrelated_312', 'not_numeric']) {
+  test(`final wrapper refuses mismatched declared revision ${revision}`, async () => {
+    const f = migration9692Fixture(), file = wrapper(f.evidence.finalFiles);
+    const original = f.text(file.sha);
+    const changed = original.replace('revision = "operator_directive_versions_312"', `revision = "${revision}"`);
+    assert.notEqual(changed, original);
+    file.sha = f.blob(changed);
+    assert.deepEqual(await prove(f), []);
+    assert.equal(f.evidence.migrationRenumberDiagnostics[0].reason, 'snapshot-body-mismatch');
+  });
+}
+
+test('intermediate revision below the author slot cannot fall back to the filename', async () => {
+  const f = migration9692Fixture(), file = wrapper(f.snapshots[2].files);
+  const original = f.text(file.sha);
+  const changed = original.replace('revision = "operator_directive_versions_311"', 'revision = "operator_directive_versions_308"');
+  assert.notEqual(changed, original);
+  file.sha = f.blob(changed);
+  assert.deepEqual(await prove(f), []);
+  assert.ok(f.evidence.migrationRenumberDiagnostics.some(entry => entry.reason === 'snapshot-body-mismatch'));
 });
 
 for (const [name, mutate] of [

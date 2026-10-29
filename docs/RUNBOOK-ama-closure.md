@@ -3402,7 +3402,14 @@ updated. Every Alembic observation now retains its body-verified
 slot, or finish at a revision different from that slot, even after divergence.
 Filename resets after divergence still require head-bound `rebased: true` and
 `migrationRenumberAncestry.status: diverged`; no filename slot may fall below
-the author's original slot.
+the author's original slot. The ancestry record is scoped to the shared
+protected-primary/candidate-head pair, so sibling proofs read the same immutable
+status. `diverged` selects rebase authority and `ahead` selects ancestral repair;
+these modes cannot differ between proofs at the same head pair. Strictly
+increasing sibling proofs require neither exception. At the author and final
+heads, wrapper-body validation checks declared revision literals directly against
+the filename slot; only intermediate snapshots may override that slot number.
+An absent or out-of-bounds override still requires the strict body check.
 
 LAC-2127 additionally certifies a bounded ancestral metadata repair for
 `moduleOrigin: author-sql` only. The immutable author-to-final compare must be
@@ -3412,9 +3419,11 @@ one commit ahead of its predecessor, including the primary-to-first step.
 After all existing wrapper/SQL/module/registry proofs succeed, the proof also
 requires a unique selected predecessor wrapper in every snapshot and the
 protected primary. That wrapper, its SQL source and ordinal operation module
-must be byte-identical to each snapshot's independently selected base. Before
-module introduction, the entire registry must also equal that base. After
-introduction, the existing exact insertion and module-identity proof applies.
+must be byte-identical to each snapshot's independently selected base. Parent
+certification reuses the merge base already resolved by each snapshot proof,
+including SQL-only and unchanged-author observations, without a second compare
+read. Before module introduction, the entire registry must also equal that base.
+After introduction, the existing exact insertion and module-identity proof applies.
 Unreadable, absent, ambiguous or changed predecessor evidence refuses with
 `repair-predecessor-unproven` (read failures retain their existing diagnostics).
 

@@ -266,11 +266,9 @@ async function certifyParentOperations(args, evidence, proof, snapshots) {
       if (ancestry.status !== 'ahead' || ancestry.merge_base_commit?.sha !== previous || ancestry.total_commits !== 1) return null;
     }
     if (!parent || !parent.sourceName || parent.sourceName.includes('/')) return null;
-    let baseSha = observation.baseSha;
-    if (!baseSha) {
-      const comparison = await args.metadata(`repos/${args.repo}/compare/${evidence.baseSha || evidence.mergeBase}...${headSha}`);
-      baseSha = comparison.merge_base_commit?.sha;
-    }
+    // Reuse the base already selected while proving this snapshot, including
+    // SQL-only and unchanged-author observations before module introduction.
+    const baseSha = observation.baseSha || observation.snapshotMergeBase;
     if (!SHA.test(baseSha || '') || await fileAt(args, baseSha, parent.path) !== parent.blob) return null;
     // Before module introduction, no registry edit has derived authority.
     const registry = await fileAt(args, headSha, proof.registryPath);
@@ -462,6 +460,9 @@ async function proveSnapshot(args, evidence) {
         // Filename slots and declared revision numbers can temporarily differ
         // while a rebase repairs a collision. Only author-to-slot numbers are
         // mechanical, and the literal identity must still match the wrapper.
+        // Author/final heads get no override: migrationBody checks their
+        // declarations against the filename slot. An absent intermediate
+        // override likewise leaves that body check strict, never unchecked.
         const declared = scalarRevision(wrapper, 'revision');
         const revisionNumber = Number(/^(\d+)(?:_|$)/.exec(declared || '')?.[1] ?? /_(\d+)$/.exec(declared || '')?.[1]);
         if (head !== evidence.primaryHead && evidence.headSha !== args.proofHeadSha && Number.isSafeInteger(revisionNumber)
@@ -593,7 +594,7 @@ export async function proveMigrationRenumbers(args, evidence) {
             revisionNumber: migration(proof.path).number, parent: proof.authorParent, unchangedAuthor: true });
         }
       }
-      snapshots.push(batch);
+      snapshots.push(batch.map(item => ({ ...item, baseSha: snapshot.merge_base_commit.sha })));
     }
     const complete = proofs.filter(proof => {
       let moduleSeen = false;
@@ -633,6 +634,9 @@ export async function proveMigrationRenumbers(args, evidence) {
             if (!parentOperations) throw new Error('uncertified repair predecessor');
             metadataRepair = true;
           } else throw new Error('non-increasing renumber chain');
+          // Every proof uses this same immutable head-pair comparison. Its
+          // status selects either divergence or ancestral repair for all
+          // siblings; strictly increasing proofs need neither exception.
           evidence.migrationRenumberAncestry = { primaryHead: evidence.primaryHead, headSha: evidence.headSha, status: ancestry.status,
             ...(metadataRepair ? { mergeBase: ancestry.merge_base_commit.sha } : {}) };
         }

@@ -7043,6 +7043,31 @@ An observation clock or a repeatedly updated ledger timestamp grants no escape.
 Caps remain binding for hammer dispatch; selection neither resets nor refunds
 any budget. Automated hold labels and earlier safety/ownership rows still win.
 
+STOPSTALE-03 preserves `alertedAt` when an alert repeats during the same
+lifetime suppression, including across reviewed-head changes. Series and target
+alerts retain their times only within their respective continuous suppression
+episodes; a newly exhausted lifetime cap receives its own time. This prevents
+a repeated alert from moving the cap's freshness boundary past a newer review.
+For a lifetime stop whose alert time was already overwritten, complete confirmed
+`dispatchCharges` accounting can instead prove when the budget was spent.
+Every receipt must have a unique launch identity, supported charge shape and
+valid timestamp; its unrefunded lifetime charge count must equal the durable
+counter and reach the configured ceiling. The latest charge time (including
+refunded work) is the conservative boundary. Partial, unconfirmed, duplicate or
+malformed accounting retains the alert-time fallback. An independently active
+target cap still contributes its own time. This changes only the snapshot's
+`recordedAt`; it neither rewrites the ledger nor repairs an unknown original
+alert time. Zero lifetime ceilings remain disabled.
+
+Every evaluated supersession that retains its stop records
+`supersession-not-fired:<reason>` in decision refs. Reasons distinguish an
+inapplicable stop, unknown review, ineligible findings/verdict, head mismatch,
+unknown stop/review time, a review that is not newer, and
+`reselected:<row>:<reason>` when daemon-only reselection chooses another row.
+Earlier safety/ownership rows still take precedence and do not evaluate R07.
+After deployment, SRE observes the organic watcher selection and eventual merge;
+an offline replay or a daemon selection alone does not prove a live merge.
+
 Daemon execution retains required checks, mergeability, exact-head review,
 strict findings policy, provenance and lease checks. In
 `src/daemon-clean-merge.mjs`, `readPrimaryChange` fetches head-bound evidence;

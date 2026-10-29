@@ -2227,7 +2227,14 @@ share a daemon-only supersession path. A strictly newer eligible exact-head
 review with a trustworthy stop/cap/terminal timestamp can select daemon merge with
 `stop-superseded-by-exact-head-review` and the superseded reason in decision refs.
 Missing time fails closed; cap accounting stays unchanged. After deployment SRE
-observes daemon selection within one watcher pass and the stranded PR merging. A head needing repair retains its stop and cannot
+observes daemon selection within one watcher pass and the stranded PR merging.
+STOPSTALE-03 verifies that continuous cap alerts retain their first timestamp,
+and complete confirmed lifetime accounting recovers a budget boundary when an
+older writer overwrote the alert time. A newer comment-only exact-head review
+with non-blocking findings can select daemon merge under `strict_mode=false`;
+every evaluated supersession that keeps its stop names why in
+`supersession-not-fired:<reason>`. Partial accounting retains the alert fallback.
+A head needing repair retains its stop and cannot
 relaunch hammer. NXA-04 verifies one closeout successor through pending, green
 and red CI without another remediation round, plus durable re-review admission
 intent for a pending non-final round. NXA-03 verifies shared immutable
@@ -2608,7 +2615,7 @@ stateDiagram-v2
     [*] --> s3: closure-owner.06 project shared next action: remediation
     [*] --> s3: closure-owner.07 proven live remediation owner retained
     [*] --> s1: closure-owner.08 confirmed conflict selects capped repair with merge safety retained
-    [*] --> s4: closure-owner.09 project shared next action: daemon-merge, including any R07 deterministic stop, retry cap, lifetime cap or final no-merge superseded by a strictly newer eligible exact-head review with trustworthy recorded time; hammer caps stay binding
+    [*] --> s4: closure-owner.09 project shared next action: daemon-merge, including any R07 deterministic stop, retry cap, lifetime cap or final no-merge superseded by a strictly newer eligible exact-head review with trustworthy recorded time; hammer caps stay binding; continuous cap alerts preserve time, complete confirmed lifetime charges can recover the budget boundary, and non-firing supersessions name why
     s0 --> [*]: closure-owner.10 next bounded observation; every recovery deadline dispatches or escalates once with row reason and evidence
     [*] --> s5: closure-owner.11 explicit hold, draft or disabled execution intent
     [*] --> s6: closure-owner.12 confirmed merged or closed PR

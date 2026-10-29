@@ -87,6 +87,77 @@ test('STOPSTALE-02: cap freshness uses active durable alerts without changing ac
   assert.equal(stale.recordedAt, null, 'a reset series cannot lend its old alert time');
 });
 
+test('STOPSTALE-03: repeated lifetime suppression keeps its original anchor across reviewed heads', t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-anchor-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: REPO, prNumber: PR_NUMBER };
+  const first = '2026-01-01T00:00:00Z';
+  const later = '2026-01-01T00:02:00Z';
+  markHammerRetryCapExhausted(rootDir, identity, { jobKey: REVIEWED_HEAD,
+    headSha: REVIEWED_HEAD, lifetime: true, attemptCount: 6, alertEmitted: true, now: first });
+  const before = readHammerRetryCapLedger(rootDir, identity);
+  assert.equal(evaluateHammerRetryCap(before, { jobKey: ADVANCED_HEAD, headSha: ADVANCED_HEAD }).jobKeyChanged, true);
+  for (const alertEmitted of [false, true, true]) {
+    const ledger = markHammerRetryCapExhausted(rootDir, identity, { jobKey: ADVANCED_HEAD,
+      headSha: ADVANCED_HEAD, lifetime: true, attemptCount: 6, alertEmitted, now: later });
+    const cap = evaluateHammerRetryCap(ledger, { jobKey: ADVANCED_HEAD, headSha: ADVANCED_HEAD });
+    assert.equal(ledger.alertedAt, first);
+    assert.equal(cap.recordedAt, '2026-01-01T00:00:00.000Z');
+    assert.equal(cap.lifetimeCapExhausted, true);
+    assert.equal(ledger.lifetimeAttemptCount, before.lifetimeAttemptCount);
+    assert.equal(ledger.attemptCount, before.attemptCount);
+  }
+});
+
+test('STOPSTALE-03: series and target alerts preserve only their own continuous suppression episode', t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-episodes-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: REPO, prNumber: PR_NUMBER };
+  const mark = (fields, now) => markHammerRetryCapExhausted(rootDir, identity,
+    { jobKey: REVIEWED_HEAD, headSha: REVIEWED_HEAD, alertEmitted: true, ...fields, now });
+  const first = '2026-01-01T00:00:00Z', second = '2026-01-01T00:01:00Z', third = '2026-01-01T00:02:00Z';
+  mark({}, first);
+  assert.equal(mark({}, second).alertedAt, first);
+  assert.equal(mark({ jobKey: ADVANCED_HEAD }, second).alertedAt, second);
+  assert.equal(mark({ jobKey: ADVANCED_HEAD, lifetime: true }, third).alertedAt, third,
+    'a newly exhausted lifetime cap must not borrow the earlier series time');
+  assert.equal(mark({ target: true }, first).targetAlertedAt, first);
+  assert.equal(mark({ target: true }, second).targetAlertedAt, first);
+  assert.equal(mark({ target: true, headSha: ADVANCED_HEAD }, third).targetAlertedAt, third);
+});
+
+test('STOPSTALE-03: complete lifetime receipts recover an overwritten alert anchor; uncertain accounting does not', () => {
+  const first = '2026-01-01T00:00:00Z', later = '2026-01-01T00:02:00Z';
+  const ledger = { jobKey: REVIEWED_HEAD, lifetimeSuppressed: true, lifetimeAttemptCount: 2,
+    alertedAt: later, dispatchCharges: Object.fromEntries([1, 2].map(i => [`charge-${i}`, {
+      launchRequestId: `launch-${i}`, jobKey: REVIEWED_HEAD, headSha: REVIEWED_HEAD,
+      chargedAt: first, consumerVersion: 1, attempt: 1, refundedBudgets: {},
+    }])) };
+  const evaluate = value => evaluateHammerRetryCap(value, { jobKey: ADVANCED_HEAD,
+    headSha: ADVANCED_HEAD, lifetimeDispatchCeiling: 2 }).recordedAt;
+  assert.equal(evaluate(ledger), '2026-01-01T00:00:00.000Z');
+  for (const change of [
+    value => { delete value.dispatchCharges['charge-2']; },
+    value => { value.dispatchCharges['charge-2'].launchRequestId = 'launch-1'; },
+    value => { value.dispatchCharges['charge-2'].launchRequestId = null; },
+    value => { value.dispatchCharges['charge-2'].chargedAt = 'invalid'; },
+    value => { value.dispatchCharges['charge-2'].chargedAt = 123; },
+    value => { value.dispatchCharges['charge-2'].consumerVersion = 99; },
+    value => { value.dispatchCharges['charge-2'].refundedBudgets.lifetime = true; },
+    value => { value.dispatchCharges['charge-2'].refundedBudgets.lifetime = 'true'; },
+    value => { value.lifetimeAttemptCount = 3; },
+  ]) {
+    const uncertain = structuredClone(ledger);
+    change(uncertain);
+    assert.equal(evaluate(uncertain), '2026-01-01T00:02:00.000Z');
+  }
+  const refunded = structuredClone(ledger);
+  refunded.dispatchCharges['charge-3'] = { ...ledger.dispatchCharges['charge-1'],
+    launchRequestId: 'launch-3', chargedAt: later, refundedBudgets: { lifetime: true } };
+  assert.equal(evaluate(refunded), '2026-01-01T00:02:00.000Z', 'even refunded later work keeps a conservative boundary');
+  assert.equal(evaluateHammerRetryCap(ledger, { lifetimeDispatchCeiling: 0 }).capExhausted, true);
+});
+
 test('HAMLANEWAIT-01: two lane-busy launches back off without exhausting retries or arming a stop', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'lane-busy-recovery-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -957,7 +1028,7 @@ test('target remediation SHA cap pages exactly once per PR and target SHA', asyn
   const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
   assert.equal(ledger.targetSuppressed, true);
   assert.equal(ledger.alertedAt, null);
-  assert.equal(ledger.targetAlertedAt, '2026-07-17T12:11:00Z');
+  assert.equal(ledger.targetAlertedAt, '2026-07-17T12:10:00Z');
 
   markHammerRetryCapExhausted(rootDir, { repo: REPO, prNumber: PR_NUMBER }, {
     jobKey: 'fresh-review-blocked-2',
@@ -969,7 +1040,7 @@ test('target remediation SHA cap pages exactly once per PR and target SHA', asyn
   });
   assert.equal(
     readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER }).targetAlertedAt,
-    '2026-07-17T12:20:00Z',
+    '2026-07-17T12:10:00Z',
   );
   assert.equal(
     readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER }).alertedAt,

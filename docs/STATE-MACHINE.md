@@ -1136,6 +1136,18 @@ only the daemon may be selected. The daemon re-fetches primary-change evidence
 and requires its predicate before every merge attempt. Durable lifecycle states
 are unchanged.
 
+STOPSTALE-03 keeps the original alert time during a continuous cap suppression,
+including lifetime suppression across review heads. New series/target episodes
+and a newly exhausted lifetime cap retain separate freshness boundaries.
+Every evaluated but unsuccessful R07 supersession adds
+`supersession-not-fired:<reason>`; failed daemon-only reselection names its row
+and reason. Complete confirmed lifetime charge accounting may prove an earlier
+budget-exhaustion boundary when a re-alert overwrote the alert time; partial or
+unconfirmed accounting retains the alert-time fallback. The latest charge,
+including refunded work, bounds freshness. No observation clock supplies an
+anchor. SRE must verify organic daemon selection and merge after deployment;
+no lifecycle state, dispatch budget or merge predicate changes.
+
 DOCSFASTPATH-01 admits an exact-head docs-only change directly to the existing
 inline daemon merge lane, before reviewer admission or closer dispatch. Every
 old and new changed path must be under `docs/` and end in `.md` or an image

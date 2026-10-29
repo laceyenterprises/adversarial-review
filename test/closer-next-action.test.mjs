@@ -1,4 +1,5 @@
-import { recordHammerRetryDispatch, markHammerRetryCapExhausted, readHammerRetryCapLedger } from '../src/ama/hammer-retry-cap.mjs';
+import { recordHammerRetryDispatch, markHammerRetryCapExhausted, readHammerRetryCapLedger,
+  updateHammerRetryCapLedger } from '../src/ama/hammer-retry-cap.mjs';
 import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -742,6 +743,41 @@ test('STOPSTALE-02: launch-source terminal time survives the closure projection'
   assert.equal(shared.decision.action, 'daemon-merge');
   assert.ok(shared.decision.evidenceRefs.includes('stop-reason:hammer-final-no-merge'));
   assert.equal(hasHammerDispatchIntent(shared, identity), false);
+});
+
+for (const overwritten of [false, true]) test(`STOPSTALE-03: ${overwritten ? 'overwritten' : 'repeated'} older-job lifetime stop cannot overtake a newer comment-only exact-head review`, async t => {
+  const f = closureFixture(t);
+  f.args.passSnapshot = base({ progress: { hammerHead: { headSha: HEAD, reason: 'closer-commit-trailer' } } });
+  f.args.loadConfigImpl = () => ({ getMergeAuthorityConfig: () => ({ enabled: true, strictMode: false }) });
+  const first = '2025-12-31T23:59:00.000Z';
+  if (overwritten) {
+    for (let i = 1; i <= 6; i++) recordHammerRetryDispatch(f.args.rootDir, identity, {
+      jobKey: OLD, headSha: OLD, launchRequestId: `synthetic-launch-${i}`, now: first,
+    });
+  }
+  markHammerRetryCapExhausted(f.args.rootDir, identity, { jobKey: OLD, headSha: OLD,
+    lifetime: true, attemptCount: 6, alertEmitted: true, now: first });
+  markHammerRetryCapExhausted(f.args.rootDir, identity, { jobKey: HEAD, headSha: HEAD,
+    lifetime: true, attemptCount: 6, alertEmitted: true, now: '2026-01-01T00:02:00.000Z' });
+  if (overwritten) updateHammerRetryCapLedger(f.args.rootDir, identity,
+    ledger => ({ ...ledger, alertedAt: '2026-01-01T00:02:00.000Z' }));
+  const before = readHammerRetryCapLedger(f.args.rootDir, identity);
+  let daemonCalls = 0;
+  f.args.runDaemonCleanMergeAttemptImpl = async ({ sharedNextAction, reviewState }) => {
+    daemonCalls++;
+    assert.equal(reviewState.verdict, 'comment-only');
+    assert.equal(reviewState.blockingFindingCount, 0);
+    assert.ok(reviewState.nonBlockingFindingCount > 0);
+    assert.equal(sharedNextAction.snapshot.observations.policy.value.hammerCap.recordedAt, first);
+    assert.equal(sharedNextAction.decision.action, 'daemon-merge');
+    assert.ok(sharedNextAction.decision.evidenceRefs.includes('stop-reason:lifetime-exhausted'));
+    return { disposition: 'merged', reason: 'merged', merged: true, remoteMergedConfirmed: true };
+  };
+  const result = await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(daemonCalls, 1);
+  assert.equal(result.nextAction.action, 'done');
+  assert.ok(!f.effects.some(([kind]) => kind === 'closer'));
+  assert.deepEqual(readHammerRetryCapLedger(f.args.rootDir, identity), before);
 });
 
 test('STOPSTALE-01: orchestration reaches daemon merge after a recorded stop and newer non-blocking review', async t => {

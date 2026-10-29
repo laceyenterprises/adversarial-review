@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { dispatchReadTransport } from '../src/dispatch-read-client.mjs';
-import { closureOwnerShadowEvidence } from '../src/pr-next-action-consumer.mjs';
+import { closureOwnerShadowEvidence, snapshotLaunchReferenceRead } from '../src/pr-next-action-consumer.mjs';
 import { deriveNextActionSnapshot, nextAction } from '../src/pr-next-action.mjs';
 import { registerSharedNextAction, shadowNextAction, resolveSharedNextAction } from '../src/pr-next-action-shadow.mjs';
 import { requestEligibleHammerWake } from '../src/hammer-wake.mjs';
@@ -121,3 +121,36 @@ test('OWNERUNREADABLE-02: a registered unresolved snapshot is refreshed for the 
   assert.equal(observed.decision.row, 'R08-retry');
   assert.equal(nextAction(f.snapshot).row, 'R04-ownership', 'the original snapshot stays immutable');
 });
+
+test('OWNERUNREADABLE-02: a placeholder without a closer head uses the derived snapshot head', async t => {
+  const f = fixture(t);
+  const launches = structuredClone(f.snapshot.observations.launches);
+  delete launches.value.closer.headSha;
+  const snapshot = deriveNextActionSnapshot({ base: f.snapshot, observations: { launches } });
+  assert.equal(snapshot.head, HEAD);
+  assert.equal(snapshot.headSha, undefined);
+  assert.equal(snapshot.candidate, undefined);
+  let reads = 0;
+  t.mock.method(dispatchReadTransport, 'lookup', async () => { reads++; return wire(); });
+  const read = snapshotLaunchReferenceRead(snapshot, f.rootDir);
+  assert.equal(typeof read, 'function');
+  const resolved = await read();
+  assert.equal(reads, 1);
+  assert.equal(resolved.state, 'complete');
+  assert.equal(resolved.value.closer.headSha, HEAD);
+  assert.equal(resolved.value.closer.retryChainReadState, 'complete');
+});
+
+for (const receiptOnly of [false, true]) {
+  test(`OWNERUNREADABLE-02: direct nextAction classifies an unmarked ${receiptOnly ? 'receipt' : 'lease'} reference as unresolved`, t => {
+    const f = fixture(t, receiptOnly);
+    const launches = structuredClone(f.snapshot.observations.launches);
+    delete launches.value.closer.retryChainReadState;
+    assert.equal(launches.provenance.sourceRef, receiptOnly ? 'closer-dispatch-receipt' : 'closer-lease');
+    const snapshot = deriveNextActionSnapshot({ base: f.snapshot, observations: { launches } });
+    const decision = nextAction(snapshot);
+    assert.equal(decision.row, 'R04-ownership');
+    assert.ok(decision.evidenceRefs.includes('launch:retry-chain-unresolved'));
+    assert.ok(!decision.evidenceRefs.includes('launch:retry-chain-unreadable'));
+  });
+}

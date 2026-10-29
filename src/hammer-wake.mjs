@@ -17,6 +17,7 @@ import {
 import { requestWatcherWake } from './watcher-wake.mjs';
 import { writeFollowUpJob } from './follow-up-jobs.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { isClosureRecoveryDecision } from './pr-next-action.mjs';
 
 // Mirrors the definition in follow-up-remediation.mjs: the repo root is two
 // levels up from this module, not something either file imports.
@@ -139,7 +140,8 @@ function requestEligibleHammerWake({
 } = {}) {
   // A wake transports the selected workflow; it never selects an owner.
   const decision = shared?.decision;
-  const retryEvidence = decision?.row === 'R08-retry' || decision?.attempt != null
+  const recoveryDispatch = isClosureRecoveryDecision(decision) && decision.actor === 'hammer';
+  const retryEvidence = recoveryDispatch || decision?.row === 'R08-retry' || decision?.attempt != null
     ? shared.snapshot?.observations?.launches?.value?.closer : null;
   const retryLaunch = retryEvidence?.launchRequestId || null;
   // Fleet descendants reuse the ancestor receipt. Their completed IDs must
@@ -148,6 +150,9 @@ function requestEligibleHammerWake({
     .map(row => row?.launch_request_id || row?.launchRequestId || row?.id).filter(id => typeof id === 'string' && id))].sort();
   const retryIdentity = retryIds.length ? `${retryLaunch || 'retry'}:${createHash('sha256')
     .update(JSON.stringify(retryIds)).digest('hex')}` : retryLaunch;
+  const wakeAttemptKey = recoveryDispatch
+    ? `recovery:${decision.row}:${decision.reason}:${decision.deadline?.anchoredAt || decision.deadline?.at || 'unanchored'}:${retryIdentity || 'initial'}`
+    : retryIdentity || (decision?.attempt != null ? `retry-${decision.attempt}` : 'initial');
   let eligibility = { eligible: false, reasons: [] };
   if (shared) {
     const ownsWake = (decision?.action === 'hammer' && decision.actor === 'hammer'
@@ -164,8 +169,7 @@ function requestEligibleHammerWake({
     prNumber: Number(prNumber),
     headSha: String(headSha || '').trim(),
     eligibilityReason: String(eligibilityReason || '').trim(),
-    ...(shared ? { wakeAttemptKey: retryIdentity || (decision?.attempt != null
-      ? `retry-${decision.attempt}` : 'initial') } : {}),
+    ...(shared ? { wakeAttemptKey } : {}),
   };
   const eligibilityReasons = Array.isArray(eligibility?.reasons) ? eligibility.reasons : [];
   let outcome = 'skipped';
@@ -174,7 +178,7 @@ function requestEligibleHammerWake({
   let latencyEvent = { recorded: false, reason: 'not-attempted' };
   // Recovery re-reads on the next closure pass. A skipped wake must retain
   // that retry intent without requesting a launch from uncertain evidence.
-  let retryable = Boolean(decision?.row === 'R04-ownership' && decision.reason === 'ownership-unreadable'
+  let retryable = Boolean(isClosureRecoveryDecision(decision)
     && decision.head === headSha && shared.snapshot?.head === headSha);
 
   if (!identity.repo || !Number.isInteger(identity.prNumber) || identity.prNumber <= 0 || !identity.headSha || !identity.eligibilityReason) {

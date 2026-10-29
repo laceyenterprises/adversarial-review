@@ -26,6 +26,23 @@ forced launch, ledger mutation or new smoke step is authorized by this change.
 
 ## Host identity reads (HOSTIDCACHE-01)
 
+RESCUEHOSTID-01: the watcher and the external rescue composition root share
+`prepareDispatchReadContext`. An activated watcher calls it at startup; rescue
+calls it before closer dispatch. The helper registers the existing
+`adversarial-review` app using the SDK's existing bootstrap-credential resolution,
+then enables both dispatch reads and worker observations only after registration
+succeeds. Failed or timed-out registration preserves the caller's existing read
+switches, including absent values. It adds no grants or app
+identity. Synchronous observations, host services and launch lookups reuse the
+session only for the matching connection, and never register synchronously.
+Fixed bootstrap-failure details distinguish a missing/unreadable credential,
+timeout, and other registration failure without returning SDK messages.
+
+Deploy this helper before a rescue caller that requires it. After both consumer
+and service revisions deploy, SRE retains the LRQ from an authorized closer
+rescue apply as live acceptance. Synthetic endpoint fixtures prove the source
+contract; existing lifecycle states and automated smoke promises are unchanged.
+
 Every host-owner consumer shares `readHostIdentitySync`. A successful read is
 trimmed before returning and caching for the process lifetime, scoped by HQ
 root and transport endpoint. Explicit and environment HQ root paths are resolved
@@ -922,6 +939,25 @@ After ordinary deployment, SRE must observe the next natural R04 case leave
 recovery within its budget and merge, and verify no readable ownerless case stays
 in R04 beyond that budget. A continuing ledger outage remains fenced and requires
 service recovery. Worker validation performs no live rescue or service action.
+
+### Every recovery deadline (RECOVERYDEADLINE-01)
+
+RECOVERYDEADLINE-01 generalizes the lapsed-deadline handoff to every
+closure-recovery row. The existing anchored deadline is due on the first wake
+at or after expiry, without another ownerless grace period. Readable ownerless
+expired leases and remote-unconfirmed merge receipts select hammer admission
+under its existing lease. Structural/read failures, input-dependent stops,
+safety refusals, caps, deferrals and unreadable ownership escalate through the
+existing durable per-head/row/action/actor/reason receipt, with row, reason,
+deadline and evidence in the message and payload. Failed delivery retries;
+acknowledged delivery does not repeat across wakes or restarts. A refused
+recovery dispatch also escalates on that wake. The final-round timer retains its
+anchor without sending a second recovery deadline page; proven live closers
+retain their running notices. New readable evidence can still resume
+ordinary routing; expiry never licenses a duplicate live launch or a merge.
+After deployment, SRE verifies no open PR has a closure-recovery deadline more
+than one wake past due. This is read-only post-merge acceptance (SEVDOCS-333);
+worker fixtures never mutate production state.
 
 ### Hammer wake adoption (NXA-03)
 

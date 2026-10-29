@@ -2160,6 +2160,16 @@ admitted exact-head review within one poll without manual rescue. After normal
 deployment, observe a naturally capped non-closer head reaching its final hammer;
 no forced live state change or new smoke command is required.
 
+RECOVERYDEADLINE-01: every closure-recovery deadline is handled on its first due
+wake. Readable ownerless receipt/lease recovery enters hammer admission under
+existing caps and lease; input-dependent or unreadable evidence escalates once
+with row, reason and evidence. The handoff smoke and scoped recovery-deadline
+fixtures cover dispatch, escalation, duplicate protection, retained recovery clocks
+and existing running notices for proven live closers. After deployment,
+SRE observes no open recovery deadline more than one wake overdue; see
+[the recovery runbook](docs/RUNBOOK-ama-closure.md#every-recovery-deadline-recoverydeadline-01)
+and SEVDOCS-333. No worker live action is authorized.
+
 <a id="smv-handoff"></a>**smv-handoff:** OWNERUNREADABLE-02 verifies snapshot-only resolution of terminal lease/receipt placeholders, live retry ownership, failed/partial read fences and one deduplicated hammer wake. After ordinary deployment SRE checks that no terminal ledger launch remains in an R04 retry-chain-unreadable skip more than one wake past its deadline (SEVDOCS-335). HAMRESUMEOWED-01 verifies pending-to-green hammer resume and idempotent audit settlement. Outstanding exact-head receipts receive closure priority each poll without an unrelated wake; red/head movement settle the debt for normal handling. Existing merge gates, leases and caps remain mandatory. After deployment SRE observes the next natural pending-CI stop merging its green recorded head without manual action; offline smoke alone does not establish this live receipt. OWNERUNREADABLE-01 verifies terminal ownership recovery after its anchored deadline selects hammer without re-review while unreadable retry evidence remains fenced. Focused offline fixtures also cover one-read placeholder replacement, bounded backoff, transient recovery, live retries and outage recovery. After deployment SRE observes the next natural R04 case exit within its budget and merge; no worker live operation is authorized. NXA-07 also verifies exact-head validated terminal HAM proof crossing retry selection into pending, failed or green CI gates; mismatched proof retains hammer retry ownership. NXA-07 verifies the common adapter matrix and retains lease/retry settlement; NXA-06 verifies daemon CI changes, operator-approved retry exhaustion selecting R08 hammer repair, live hammer ownership and remote-unconfirmed receipt recovery through the shared decision. NXA-05 verifies that drain/capacity observations
 retain hammer intent and its deadline, and current deterministic automatic stops retain
 closure-recovery ownership. STOPSTALE-01 verifies that a strictly newer eligible
@@ -2539,13 +2549,13 @@ stateDiagram-v2
     [*] --> s1: closure-owner.01 empty-diff closure recovery until remote termination
     [*] --> s1: closure-owner.02 current automatic stops or exhaustion retain closure-recovery actor unless a newer eligible exact-head review selects daemon merge
     [*] --> s0: closure-owner.03 project shared next action: wait, including infrastructure-only CI without hammer or automated-stop charge
-    [*] --> s1: closure-owner.04 project shared next action: hammer (including exhausted CI-stopped stale reviewed head with terminal failed external CI)
+    [*] --> s1: closure-owner.04 project shared next action: hammer, including readable ownerless recovery at expiry under existing caps and lease
     [*] --> s2: closure-owner.05 project shared next action: review (including a head-bound shared rereview-exact-head decision before historical review ceiling or hammer ownership)
     [*] --> s3: closure-owner.06 project shared next action: remediation
     [*] --> s3: closure-owner.07 proven live remediation owner retained
     [*] --> s1: closure-owner.08 confirmed conflict selects capped repair with merge safety retained
     [*] --> s4: closure-owner.09 project shared next action: daemon-merge, including a stop superseded by newer eligible exact-head review
-    s0 --> [*]: closure-owner.10 next bounded observation; overdue reporting preserves the selected workflow
+    s0 --> [*]: closure-owner.10 next bounded observation; every recovery deadline dispatches or escalates once with row reason and evidence
     [*] --> s5: closure-owner.11 explicit hold, draft or disabled execution intent
     [*] --> s6: closure-owner.12 confirmed merged or closed PR
     s1 --> [*]
@@ -3925,3 +3935,5 @@ use the normal cascade. The Claude adapter owns launch eligibility, nested
 sandbox exclusions and rollback; the review service only accepts the key.
 Deploy this schema compatibility change before the companion Agent OS config
 activation. No reviewer lifecycle, journal or smoke promise changes.
+
+RESCUEHOSTID-01: watcher and rescue share app-contract dispatch-read context bootstrap with the existing review app credential and both read switches. Connection-scoped sync host/launch reads reuse that session; setup failure returns a named nonzero rescue result before dispatch work. Fresh-process synthetic endpoint and named-failure fixtures establish source behavior. Deploy the review-service companion before the Agent OS bridge, then SRE retains an authorized dispatch-closer rescue --apply receipt containing a closer LRQ. Existing lifecycle states and automated smoke promises are unchanged. This task authorizes no live rescue, dispatch, lease/config mutation or restart. See `post-merge-verify.json` and the rescue/closure runbook.

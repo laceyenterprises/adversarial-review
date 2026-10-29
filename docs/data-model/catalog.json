@@ -725,7 +725,7 @@
     },
     {
       "id": "hammer-wakes",
-      "retryIdentity": "Shared wakeAttemptKey binds initial or completed LRQ identity and a stable descendant-ID set digest; descendant IDs accept launch_request_id, launchRequestId, then id. retryOfLaunchRequestId records one re-wake per reconciled retryable no-merge attempt.",
+      "retryIdentity": "Shared wakeAttemptKey binds initial or completed LRQ identity and a stable descendant-ID set digest; descendant IDs accept launch_request_id, launchRequestId, then id. retryOfLaunchRequestId records one re-wake per reconciled retryable no-merge attempt. Recovery wake keys use deadline.anchoredAt, then deadline.at, then the explicit unanchored sentinel for their anchor component.",
       "title": "Hammer Wakes",
       "path": "docs/data-model/hammer-wakes.md",
       "store": "data/hammer-wakes/",
@@ -1154,7 +1154,7 @@
         "src/alert-delivery.mjs"
       ],
       "owner": "AMA ownerless recovery (OWNERPROOF-01 / OWNERDEADLINE-01)",
-      "deadlineRecovery": "Matching-head nextAction.deadline.at older than ownerlessBoundMs seeds the existing idle clock; live current-head owners still fence dispatch. transition_pages(head,transition) deduplicates pages by head and JSON tuple [row,action,actor,reason]. Discovery checks local lane evidence before admission and slow-lane deferral.",
+      "deadlineRecovery": "RECOVERYDEADLINE-01: closure-recovery deadlines act at expiry without an extra idle/grace period; readable ownerless recovery enters leased hammer admission, other rows and refused dispatches page once with evidence. Other matching-head nextAction.deadline.at older than ownerlessBoundMs seeds the existing idle clock; live current-head owners still fence dispatch. transition_pages(head,transition) deduplicates pages by head and JSON tuple [row,action,actor,reason]. Discovery checks local lane evidence before admission and slow-lane deferral.",
       "ownershipClock": "ownership.idleSince (singleton id=1; PR-wide across head changes)",
       "recoveryEvidenceFields": ["ownership.idleSince", "heads.idleSince", "heads.attempts", "heads.outcomes", "heads.evidence", "heads.paged", "heads.rereview", "transition_pages.head", "transition_pages.transition"],
       "attemptOutcomeFields": ["action", "reason", "holdReason", "at", "dispatched", "launchRequestId", "triggered"],

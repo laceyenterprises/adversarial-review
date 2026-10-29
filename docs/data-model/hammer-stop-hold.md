@@ -124,6 +124,17 @@ credited once per launch through the existing PR-scoped ledger lock. Mixed and
 genuine failures remain charged. The per-head dispatch bound subtracts these
 credits too; see [retry-cap accounting](hammer-retry-cap.md#companion-wait-credits-companionfloat-01).
 
+## Operator approval release (APPROVALREARM-01)
+
+Refusals may carry `awaitedInputs: [{ kind: "operator-label", label }]`.
+When every named label appears on the exact open head, the hold records
+`releasedBy: [operator-approval-applied]`. The event is independent of elapsed
+recovery deadlines. An unrelated label or removing a hold label cannot create
+this event. The refusal still records its reasons and missing evidence.
+The [retry ledger](hammer-retry-cap.md#operator-approval-re-arm-approvalrearm-01)
+provides a separate, durable one-time allowance when retries were exhausted;
+ordinary changed-input release continues to refund no executed attempt.
+
 ## Purpose
 
 SAFETYSTOPOWNER-01 adds `refusal.repairable`: true for an explicit nonempty
@@ -153,7 +164,7 @@ One atomically rewritten JSON object per `(repo, PR)` lives at
 | `heads` | object keyed by head SHA | Cleared in full on an observed `currentHead` change. The writer defensively caps legacy or pre-seeded state at eight entries, newest `firstObservedAt` first. |
 | `currentHead` | head SHA | GUARDREVERT-01 clears all prior head entries on an observed head change, including a force-push away and back. |
 | `refusalGeneration` | integer | Monotonic generation for new holds; keeps process-local page debounce scoped to the current refusal. |
-| `heads[sha].refusal` | optional object | `{ key, reasons, missingEvidence, next }`; SHA-256 identity over repository, PR, head, sorted unique reasons and recursively key-sorted full missing evidence. Repeated audit attempts with this same identity reuse the hold. |
+| `heads[sha].refusal` | optional object | `{ key, reasons, missingEvidence, next, awaitedInputs? }`; SHA-256 identity over repository, PR, head, sorted unique reasons and recursively key-sorted full missing evidence. Repeated audit attempts with this same identity reuse the hold. |
 | `heads[sha].refusalGeneration` | integer | Page generation for this hold. Persisted page receipts survive restart. A different refusal or a new stop after input release receives a new generation. |
 | `heads[sha].stopKey` | string | Audit file head, attempt number (or array index), and attempt start/timestamp identify the latest observed stop. Legacy stops use this identity; structured deterministic refusals use `refusal.key` across attempts. |
 | `heads[sha].predicate` | string | Recorded stop reason, normalized to one line and capped at 120 characters, or `reason-not-recorded`. |

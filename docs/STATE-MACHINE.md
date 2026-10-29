@@ -2735,3 +2735,13 @@ load-scaled thirty-minute base, exhaustion pages once per head/class and reports
 `needsOperator`; no expiry permits teardown or duplicate dispatch. Evidence is
 rechecked on later polls, so restoring observations resumes normal resolution.
 See the closure runbook's public evidence rollout limits.
+
+APPROVALREARM-01: an exact-head closer refusal with an awaited operator label
+releases on that label's appearance with `operator-approval-applied`. Closure
+selection re-evaluates this input before R07 retry exhaustion. A durable
+pending retry-ledger receipt selects `R07-approval` / hammer admission once,
+including after a lapsed recovery deadline. Confirmed launch atomically
+consumes the allowance while retaining/incrementing all dispatch charges.
+Consumed receipts survive head/series changes; a second refusal is capped.
+Unrelated labels and label removal never grant admission. Existing terminal,
+hold, safety, lease and merge predicates retain authority.

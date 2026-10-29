@@ -1,3 +1,4 @@
+import { recordHammerRetryDispatch } from '../src/ama/hammer-retry-cap.mjs';
 import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -1045,4 +1046,33 @@ test('OWNERUNREADABLE-02: mismatch recovery resolves the terminal placeholder an
   assert.equal(result.decisionReresolutions, 1);
   assert.equal(result.dispatched, true);
   assert.equal(dispatches, 1);
+});
+
+
+test('APPROVALREARM-01: orchestration clears an approval refusal before exhausted R07 selection', async t => {
+  const f = closureFixture(t);
+  f.args.env = { HQ_ROOT: f.args.rootDir };
+  f.args.deliverAlertImpl = async () => {};
+  f.args.maybeDispatchAmaCloserImpl = async args => {
+    if (!hasHammerDispatchIntent(args.sharedNextAction, identity)) return { dispatched: false, reason: 'fixture-cap-refusal' };
+    f.effects.push(['closer', args.sharedNextAction]);
+    return { dispatched: true, reason: 'dispatched', launchRequestId: 'fixture-approved-launch' };
+  };
+  for (let i = 1; i <= 2; i++) {
+    recordHammerRetryDispatch(f.args.rootDir, identity, { jobKey: HEAD, headSha: HEAD,
+      launchRequestId: `fixture-approval-prior-${i}`, now: AT });
+    writeAmaAuditEntry({ hqRoot: f.args.rootDir, ...identity, now: AT,
+      attempt: { outcome: 'failed-without-merge', attemptPhase: 'hammer-gh-pr-merge',
+        validatedHead: HEAD, reason: 'operator-label-required:operator-approved' } });
+  }
+  const held = await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(held.dispatched, false);
+  assert.equal(f.effects.filter(([kind]) => kind === 'closer').length, 0);
+  f.args.labelNames = ['operator-approved'];
+  const approved = await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(approved.dispatched, true, JSON.stringify(approved));
+  const selected = f.effects.find(([kind]) => kind === 'closer')?.[1];
+  assert.equal(selected.decision.row, 'R07-approval');
+  assert.equal(selected.decision.reason, 'operator-approval-applied');
+  assert.equal(selected.snapshot.observations.policy.value.hammerCap.retryExhausted, false);
 });

@@ -155,7 +155,8 @@ export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, cand
       : launchRecord?.launchRequestId ? { lrqId: launchRecord.launchRequestId, headSha: head } : null;
   const mergedReceipt = lease?.terminalOutcome === 'succeeded'
     || launchRecord?.terminalOutcome === 'succeeded' || launchRecord?.outcome === 'succeeded';
-  const cap = { headSha: head, retryExhausted: input.retryExhausted === true, lifetimeExhausted: input.lifetimeExhausted === true };
+  const cap = { headSha: head, retryExhausted: input.retryExhausted === true, lifetimeExhausted: input.lifetimeExhausted === true,
+    ...(input.operatorApprovalApplied === true ? { operatorApprovalApplied: true } : {}) };
   const explicitReview = input.closerAuthoredStale?.decision === 'rereview-exact-head'
     && head && input.reviewState?.headSha
     && input.closerAuthoredStale.currentHead === head

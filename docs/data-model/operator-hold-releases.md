@@ -87,3 +87,12 @@ The closer uses the latest non-cancelled exact-head release to unlock a hammer
 stop (including routed intents); see [Hammer Stop Hold](hammer-stop-hold.md).
 Refunds require separate proven non-execution evidence; current hammer audit
 producers do not provide it, as documented in [Hammer Retry Cap](hammer-retry-cap.md).
+
+## Awaited approval labels
+
+APPROVALREARM-01 handles addition of an approval explicitly awaited by a
+recorded closer refusal through `operator-approval-applied` in the hammer stop
+hold and a once-per-head retry-ledger allowance. This event does not write an
+`operator_hold_releases` row. Removing an unrelated label or toggling a hold
+still follows the existing rules above. See the
+[approval re-arm contract](hammer-retry-cap.md#operator-approval-re-arm-approvalrearm-01).

@@ -172,6 +172,7 @@ import {
   HAMMER_TARGET_REDRIVE_CAP_EXHAUSTED_REASON,
   HAMMER_TARGET_REDRIVE_CAP_SUPPRESSION_STATE,
   evaluateHammerRetryCap,
+  rearmOperatorApprovedCloser,
   evaluateHammerDeferralQueue,
   normalizeHammerLifetimeDispatchCeiling,
   markHammerRetryCapExhausted,
@@ -4678,6 +4679,10 @@ async function maybeDispatchAmaCloserAttempt({
       repo: dispatchContext?.repo, prNumber, headSha: prMetadata?.headSha,
       reviewedSha: dispatchContext?.reviewedSha, logger,
     });
+    rearmOperatorApprovedCloser(dispatchContext?.rootDir || SUBMODULE_ROOT,
+      { repo: dispatchContext?.repo, prNumber }, { jobKey: reviewState.headSha,
+        headSha: prMetadata.headSha, stop, prMetadata, now: dispatchContext?.dispatchedAt,
+        lifetimeDispatchCeiling: cfg?.hammerLifetimeDispatchCeiling });
     // GUARDREVERT-01: an unchanged deterministic terminal decision fences
     // every hammer route, including ownerless recovery and clean eligible
     // closures. Legacy transient evidence stops keep their recovery probes.
@@ -4799,6 +4804,16 @@ async function maybeDispatchAmaCloserAttempt({
     prNumber: prMetadata.prNumber, headSha: prMetadata.headSha, closed: true,
   });
 
+  const approvalCap = evaluateHammerRetryCap(readHammerRetryCapLedger(dispatchContext.rootDir || SUBMODULE_ROOT,
+    { repo: dispatchContext.repo, prNumber }), { jobKey: reviewState.headSha,
+    headSha: prMetadata.headSha, lifetimeDispatchCeiling: cfg?.hammerLifetimeDispatchCeiling });
+  if (approvalCap.operatorApprovalApplied && sharedNextAction) {
+    sharedNextAction = reviseClosureNextAction(sharedNextAction, { policy: {
+      ...sharedNextAction.snapshot.observations.policy?.value,
+      hammerCap: { headSha: prMetadata.headSha, retryExhausted: false, lifetimeExhausted: false,
+        operatorApprovalApplied: true },
+    } });
+  }
   // The eligibility predicate is the second gate.
   const selectedNextAction = sharedNextAction;
   // Missing raw evidence is not proof that a previously observed refusal is
@@ -4825,6 +4840,7 @@ async function maybeDispatchAmaCloserAttempt({
       reviewState, currentHead: prMetadata.headSha, lease: reviewHandoffLease,
       checks: verdict.trace.ciGreen.conclusion, retryExhausted: cap.capExhausted,
       lifetimeExhausted: cap.lifetimeCapExhausted,
+      operatorApprovalApplied: cap.operatorApprovalApplied === true,
       roundsLeft: typeof reviewState?.remediationPending === 'boolean'
         ? !terminalHammerReviewCycleExhausted(reviewState) : null,
       reviewCeilingReached: dispatchContext?.reviewCycleCapReached === true,
@@ -6670,6 +6686,7 @@ async function maybeDispatchAmaCloserAttempt({
     // `due`: fall through to one slow-cadence dispatch attempt.
   } else if (
     existingRecord
+    && !approvalCap.operatorApprovalApplied
     && Number(existingRecord.retryCount || 0) - Number(existingRecord.unexecutedRefundCount || 0)
       - companionWaitRefundCount(rootDir, { repo, prNumber }, existingRecord.headSha) >= AMA_CLOSER_REDISPATCH_BOUND
     && !existingRecordIsReclaimableInterruption
@@ -6821,7 +6838,8 @@ async function maybeDispatchAmaCloserAttempt({
     sharedNextAction = reviseClosureNextAction(sharedNextAction, { policy: {
       ...sharedNextAction.snapshot.observations.policy?.value,
       hammerCap: { headSha: prMetadata.headSha, retryExhausted: hammerRetryCapDecision.capExhausted,
-        lifetimeExhausted: hammerRetryCapDecision.lifetimeCapExhausted },
+        lifetimeExhausted: hammerRetryCapDecision.lifetimeCapExhausted,
+        ...(hammerRetryCapDecision.operatorApprovalApplied ? { operatorApprovalApplied: true } : {}) },
     } });
     observeSharedDecision(sharedNextAction);
     if (hammerRetryCapDecision.capExhausted) {

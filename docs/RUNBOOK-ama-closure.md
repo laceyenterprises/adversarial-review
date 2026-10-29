@@ -6908,3 +6908,29 @@ records `resume-dispatched`, and the normal leased helper merges without an
 operator action. Confirm the merged head matches the green head and no extra
 rebase occurred merely because main advanced. This live receipt is post-merge
 verification; offline synthetic fixtures do not establish it.
+
+## Awaited operator approval after exhausted retries (APPROVALREARM-01)
+
+A closer refusal must name its required approval as an audit
+`awaitedInputs` entry with `kind: operator-label` and the exact `label`.
+Explicit `operator-label-required:<label>` reasons and legacy activation-gate
+notes requiring `operator-approved` normalize to that entry. When the label
+appears on the same open head, the hold releases with
+`operator-approval-applied`. The PR retry ledger persists one pending allowance
+for that head and reviewed series, even after the retry cap or recovery
+deadline was spent. A confirmed closer launch consumes it and retains all
+previous charges. A second refusal is capped again; label toggles, unrelated
+labels and hold removals cannot replenish the grant. Every merge gate,
+operator-authority check, lease and terminal-state guard still applies.
+
+Synthetic incident example: fixture PR 900001 receives two activation-gate
+refusals, reaches attempt 2, then receives `operator-approved` hours later.
+The next evaluation selects `operator-approval-applied` and launches once,
+without a manual rebase or rescue dispatch. If that attempt refuses again,
+ordinary retry exhaustion applies.
+
+After normal deployment, SRE observes the next naturally approved capped PR:
+retain its awaited-label audit, the `hammer_stop_hold_released` event naming
+`operator-approval-applied`, and the retry ledger's consumed receipt bound to
+the new launch. Publication and offline fixtures do not establish this live
+receipt. No worker label change, service action or forced dispatch is needed.

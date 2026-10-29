@@ -3949,3 +3949,13 @@ Deploy this schema compatibility change before the companion Agent OS config
 activation. No reviewer lifecycle, journal or smoke promise changes.
 
 RESCUEHOSTID-01: watcher and rescue share app-contract dispatch-read context bootstrap with the existing review app credential and both read switches. Connection-scoped sync host/launch reads reuse that session; setup failure returns a named nonzero rescue result before dispatch work. Fresh-process synthetic endpoint and named-failure fixtures establish source behavior. Deploy the review-service companion before the Agent OS bridge, then SRE retains an authorized dispatch-closer rescue --apply receipt containing a closer LRQ. Existing lifecycle states and automated smoke promises are unchanged. This task authorizes no live rescue, dispatch, lease/config mutation or restart. See `post-merge-verify.json` and the rescue/closure runbook.
+
+APPROVALREARM-01: a refusal's explicitly awaited operator approval re-arms a
+capped closer once for the same head. Its durable retry-ledger receipt is
+consumed by the next confirmed launch; another refusal remains capped.
+Unrelated labels grant nothing, and merge gates still verify authorization.
+Offline `operator-approval-rearm`, `ama-hammer-retry-cap`, `pr-next-action` and
+`closer-next-action` fixtures cover the contract. After normal deployment,
+SRE observes the next organic approval producing a closer launch with
+`operator-approval-applied`, without a manual step. See the
+[operator runbook](docs/RUNBOOK-ama-closure.md#awaited-operator-approval-after-exhausted-retries-approvalrearm-01).

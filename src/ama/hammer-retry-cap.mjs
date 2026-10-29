@@ -1,3 +1,4 @@
+import { awaitedOperatorLabelsApplied, operatorLabelInputs } from './operator-label-inputs.mjs';
 // Hammer lifetime cap — a hard, per-PR ceiling on hammer re-dispatch.
 //
 // Why this exists (confirmed incident, 2026-07-05):
@@ -168,7 +169,7 @@ function writeHammerRetryCapLedger(rootDir, identity, doc) {
 
 // Permanent charge/refund identities survive every head/series reset.
 function durableChargeFields(ledger) {
-  return Object.fromEntries(['dispatchCharges', 'noWorkRefunds', 'pendingTransientCharge', 'targetChargeEpoch']
+  return Object.fromEntries(['dispatchCharges', 'noWorkRefunds', 'pendingTransientCharge', 'targetChargeEpoch', 'operatorApprovalRearms']
     .filter(key => ledger?.[key] !== undefined).map(key => [key, ledger[key]]));
 }
 
@@ -359,7 +360,16 @@ export function evaluateHammerRetryCap(ledger, {
     || nextAttemptCount > HAMMER_RETRY_CAP_TOTAL_DISPATCHES
     || targetRedriveCapExhausted
     || lifetimeCapExhausted;
+  const approval = ledger?.operatorApprovalRearms?.[incomingTargetSha];
+  const operatorApprovalApplied = !ledger?.__corrupt && lifetimeCeiling > 0
+    && Boolean(incomingTargetSha && incomingJobKey) && !jobKeyChanged
+    && ledger?.lastDispatchedHeadSha === incomingTargetSha
+    && approval?.state === 'pending' && approval.reason === 'operator-approval-applied'
+    && approval.jobKey === incomingJobKey && Number.isFinite(Date.parse(approval.grantedAt))
+    && [ledger.attemptCount, ledger.lifetimeAttemptCount ?? ledger.attemptCount,
+      ledger.targetAttemptCount ?? 0].every(count => Number.isSafeInteger(count) && count >= 0);
   return {
+    ...(operatorApprovalApplied ? { operatorApprovalApplied: true } : {}),
     jobKeyChanged,
     priorAttemptCount,
     nextAttemptCount,
@@ -370,11 +380,11 @@ export function evaluateHammerRetryCap(ledger, {
     lifetimeDispatchCeiling: lifetimeCeiling,
     alreadySuppressed,
     lifetimeAlreadySuppressed,
-    lifetimeCapExhausted,
+    lifetimeCapExhausted: operatorApprovalApplied ? false : lifetimeCapExhausted,
     targetShaChanged,
     targetAlreadySuppressed,
     targetRedriveCapExhausted,
-    capExhausted,
+    capExhausted: operatorApprovalApplied ? false : capExhausted,
     seriesAlertAlreadyEmitted,
     lifetimeAlertAlreadyEmitted,
     targetAlertAlreadyEmitted,
@@ -483,6 +493,12 @@ function recordHammerRetryDispatchUnlocked(rootDir, identity, {
       'suppressedJobKey', 'suppressedHeadSha', 'suppressedAttemptCount', 'alertedAt', 'targetAlertedAt',
     ].filter(key => Object.hasOwn(existing, key)).map(key => [key, existing[key]])) : {}),
   };
+  const approval = existing?.operatorApprovalRearms?.[head];
+  if (approval?.state === 'pending' && approval.jobKey === doc.jobKey
+    && Date.parse(now || new Date().toISOString()) >= Date.parse(approval.grantedAt)) {
+    doc.operatorApprovalRearms = { ...existing.operatorApprovalRearms, [head]: { ...approval,
+      state: 'consumed', consumedAt: now || new Date().toISOString(), launchRequestId, dispatchKey } };
+  }
   if (chargeKey) {
     const pending = existing?.pendingTransientCharge;
     const transient = pending?.headSha === head && pending.jobKey === doc.jobKey ? pending : null;
@@ -884,5 +900,30 @@ export function updateHammerRetryCapLedger(rootDir, identity, update) {
     if (!doc) return false;
     writeHammerRetryCapLedger(rootDir, identity, doc);
     return true;
+  });
+}
+
+// APPROVALREARM-01: one extra admission per exact head, independent of spent
+// retry budgets. Charges remain intact; a confirmed launch consumes the grant.
+export function rearmOperatorApprovedCloser(rootDir, identity, {
+  jobKey, headSha, stop, prMetadata, now,
+  lifetimeDispatchCeiling = HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES,
+} = {}) {
+  if (normalizeHammerLifetimeDispatchCeiling(lifetimeDispatchCeiling) === 0) return { granted: false };
+  if (!awaitedOperatorLabelsApplied(stop, prMetadata, headSha)) return { granted: false };
+  return mutateHammerLedger(rootDir, identity, () => {
+    const ledger = readHammerRetryCapLedger(rootDir, identity);
+    if (!ledger || ledger.__corrupt || !normalizeKey(jobKey) || ledger.jobKey !== jobKey
+      || ledger.lastDispatchedHeadSha !== headSha) return { granted: false };
+    if (![ledger.attemptCount, ledger.lifetimeAttemptCount ?? ledger.attemptCount,
+      ledger.targetAttemptCount ?? 0].every(count => Number.isSafeInteger(count) && count >= 0)) return { granted: false };
+    if (ledger.operatorApprovalRearms?.[headSha]) return { granted: false };
+    if (!evaluateHammerRetryCap(ledger, { jobKey, headSha, lifetimeDispatchCeiling }).capExhausted) return { granted: false };
+    const receipt = { state: 'pending', reason: 'operator-approval-applied', jobKey,
+      stopKey: stop.stopKey, awaitedInputs: operatorLabelInputs(stop.refusal || stop),
+      grantedAt: now || new Date().toISOString() };
+    writeHammerRetryCapLedger(rootDir, identity, { ...ledger,
+      operatorApprovalRearms: { ...ledger.operatorApprovalRearms, [headSha]: receipt } });
+    return { granted: true, reason: receipt.reason };
   });
 }

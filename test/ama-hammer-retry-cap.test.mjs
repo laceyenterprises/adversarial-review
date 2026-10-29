@@ -4324,7 +4324,7 @@ test('HAMVALIDORPHAN-01 worker_crashed after validation resumes under the existi
     execFileImpl: async (_cmd, args) => {
         if (args[0] === "build-completions" && args[1] === "record-merge") return {stdout: JSON.stringify({status:"recorded",event_id:"synthetic-event"}),stderr:""};
       if (args[0] === 'dispatch' && args[1] === 'status') return { stdout: '{"status":"failed"}', stderr: '' };
-      if (args[0] !== 'dispatch') return { stdout: '{}', stderr: '' };
+      if (args[0] !== 'dispatch' || !args.includes('--pr')) return { stdout: '{}', stderr: '' };
       launches++;
       return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`,
         dispatchId: `fixture-${launches}`, launchRequestId: `fixture-launch-${launches}` }), stderr: '' };
@@ -4385,3 +4385,54 @@ for (const reason of ['worker-observation-scope-denied','worker-observation-unav
       ? /merge-capture-read-scope-denied/ : /merge-capture-read-unavailable/);
   });
 }
+
+test('APPROVALREARM-01: an awaited activation approval dispatches once after two refusals, then caps again', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'approval-rearm-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  // All ticket-specific identities are fabricated.
+  const identity = { repo: 'fixture-owner/fixture-repo', prNumber: 900001 };
+  const headSha = 'd'.repeat(40);
+  const hqRoot = join(rootDir, 'hq-fixture');
+  const refusal = { outcome: 'failed-without-merge', attemptPhase: 'hammer-gh-pr-merge',
+    reason: 'operator-label-required:operator-approved', validatedHead: headSha };
+  for (let i = 1; i <= 2; i++) {
+    recordHammerRetryDispatch(rootDir, identity, { jobKey: headSha, headSha,
+      launchRequestId: `fixture-prior-${i}`, now: `2026-01-01T00:0${i}:00Z` });
+    writeAmaAuditEntry({ hqRoot, ...identity, headSha, attempt: { ...refusal, launchRequestId: `fixture-prior-${i}` },
+      now: `2026-01-01T00:0${i}:10Z` });
+  }
+  updateAmaCloserDispatchRecord(rootDir, { ...identity, headSha }, () => ({ ...identity, headSha,
+    reviewedSha: headSha, targetRemediationSha: headSha, state: 'failed-without-merge',
+    workerClass: 'hammer', retryCount: 2, launchRequestId: 'fixture-prior-2', dispatchedAt: '2026-01-01T00:02:00Z' }));
+  let launches = 0;
+  const deps = hammerDispatchDeps({ execFileImpl: async (_cmd, args) => {
+    if (args[0] !== 'dispatch' || !args.includes('--pr')) return { stdout: '{}', stderr: '' };
+    launches++;
+    return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${identity.prNumber}`, dispatchId: 'fixture-dispatch',
+      launchRequestId: 'fixture-rearmed-launch' }), stderr: '' };
+  } });
+  const invoke = labels => maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, { reviewState: { headSha, prAuthor: 'fixture-builder' },
+      prMetadata: { ...identity, headSha, labels, author: 'fixture-builder' },
+      dispatchContext: { ...identity, hqRoot, reviewedSha: headSha,
+        reviewedBy: 'fixture-reviewer', prUrl: `https://github.com/${identity.repo}/pull/${identity.prNumber}`,
+        dispatchedAt: '2026-01-01T04:00:00Z' } }), ...deps,
+  });
+  assert.equal((await invoke([])).dispatched, false);
+  assert.equal((await invoke(['fixture-unrelated'])).dispatched, false);
+  assert.equal(launches, 0);
+  assert.equal(readHammerRetryCapLedger(rootDir, identity).attemptCount, 2);
+  const approved = await invoke(['operator-approved']);
+  assert.equal(approved.dispatched, true, JSON.stringify(approved));
+  assert.equal(launches, 1);
+  const ledger = readHammerRetryCapLedger(rootDir, identity);
+  assert.equal(ledger.attemptCount, 3, 'approval does not erase executed attempts');
+  assert.equal(ledger.operatorApprovalRearms[headSha].reason, 'operator-approval-applied');
+  assert.equal(ledger.operatorApprovalRearms[headSha].state, 'consumed');
+  writeAmaAuditEntry({ hqRoot, ...identity, headSha, attempt: { ...refusal,
+    launchRequestId: 'fixture-rearmed-launch' }, now: '2026-01-01T04:00:10Z' });
+  for (const labels of [['operator-approved'], [], ['operator-approved', 'fixture-unrelated']]) {
+    assert.equal((await invoke(labels)).dispatched, false);
+  }
+  assert.equal(launches, 1, 'a second refusal and label toggles cannot replenish the grant');
+});

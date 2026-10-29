@@ -249,6 +249,45 @@ async function fileAt({ repo, get }, head, path) {
   return ref;
 }
 
+// A descendant can repair a stale filename while advancing its declared
+// revision. This extra authority is limited to SQL-origin wrappers: every
+// selected predecessor wrapper, SQL source and operation module must be
+// byte-identical to the snapshot's independently selected base.
+async function certifyParentOperations(args, evidence, proof, snapshots) {
+  if (proof.moduleOrigin !== 'author-sql') return null;
+  const observations = [{ headSha: evidence.primaryHead, baseSha: evidence.mergeBase, parent: proof.authorParent },
+    ...snapshots.map(batch => batch.find(item => item.path === proof.path))];
+  const certified = [];
+  for (const observation of observations) {
+    const { headSha, parent } = observation;
+    if (certified.length) {
+      const previous = observations[certified.length - 1].headSha;
+      const ancestry = await args.metadata(`repos/${args.repo}/compare/${previous}...${headSha}`);
+      if (ancestry.status !== 'ahead' || ancestry.merge_base_commit?.sha !== previous || ancestry.total_commits !== 1) return null;
+    }
+    if (!parent || !parent.sourceName || parent.sourceName.includes('/')) return null;
+    // Reuse the base already selected while proving this snapshot, including
+    // SQL-only and unchanged-author observations before module introduction.
+    const baseSha = observation.baseSha || observation.snapshotMergeBase;
+    if (!SHA.test(baseSha || '') || await fileAt(args, baseSha, parent.path) !== parent.blob) return null;
+    // Before module introduction, no registry edit has derived authority.
+    const registry = await fileAt(args, headSha, proof.registryPath);
+    if (observation.moduleOrigin !== 'author-sql'
+      && (!registry || registry !== await fileAt(args, baseSha, proof.registryPath))) return null;
+    if (observation.moduleOrigin === 'author-sql' && registry !== observation.registryBlob) return null;
+    const paths = [posix.join(posix.dirname(proof.sqlPath), parent.sourceName),
+      posix.join(posix.dirname(proof.moduleDestination), `r${parent.number}.py`)];
+    const operations = [];
+    for (const path of paths) {
+      const sha = await fileAt(args, headSha, path);
+      if (!sha || sha !== await fileAt(args, baseSha, path)) return null;
+      operations.push({ path, blob: sha });
+    }
+    certified.push({ headSha, baseSha, path: parent.path, blob: parent.blob, registryBlob: registry, operations });
+  }
+  return certified;
+}
+
 async function sqlModuleProof(args, evidence, { source, destination, before, after }, blob) {
   const root = before.directory.slice(0, -'alembic/versions/'.length);
   if (evidence.primaryFiles.some(file => file.filename.startsWith(`${root}src/`)
@@ -416,10 +455,14 @@ async function proveSnapshot(args, evidence) {
         [pair.after, evidence.headSha, pair.destination.filename]]) {
         const tree = await migrationTree(args, head, info.directory);
         info.predecessors = new Set();
+        const parents = [];
         const wrapper = await blob(head === evidence.primaryHead ? pair.source.sha : pair.destination.sha);
         // Filename slots and declared revision numbers can temporarily differ
         // while a rebase repairs a collision. Only author-to-slot numbers are
         // mechanical, and the literal identity must still match the wrapper.
+        // Author/final heads get no override: migrationBody checks their
+        // declarations against the filename slot. An absent intermediate
+        // override likewise leaves that body check strict, never unchecked.
         const declared = scalarRevision(wrapper, 'revision');
         const revisionNumber = Number(/^(\d+)(?:_|$)/.exec(declared || '')?.[1] ?? /_(\d+)$/.exec(declared || '')?.[1]);
         if (head !== evidence.primaryHead && evidence.headSha !== args.proofHeadSha && Number.isSafeInteger(revisionNumber)
@@ -435,9 +478,14 @@ async function proveSnapshot(args, evidence) {
         });
         if (entries.length > 8) throw new Error('ambiguous predecessor');
         for (const entry of entries) {
-          const revision = scalarRevision(await blob(entry.sha), 'revision');
-          if (revision === target && revisionLiteral({ value: `"${revision}"` }, migration(entry.path))) info.predecessors.add(revision);
+          const parentBody = await blob(entry.sha), revision = scalarRevision(parentBody, 'revision');
+          if (revision === target && revisionLiteral({ value: `"${revision}"` }, migration(entry.path))) {
+            info.predecessors.add(revision);
+            parents.push({ path: entry.path, blob: entry.sha, number,
+              sourceName: scalarRevision(parentBody, 'SOURCE_NAME') });
+          }
         }
+        if (parents.length === 1) info.parent = parents[0];
       }
     }
     const original = migrationBody(await blob(pair.source.sha), pair.before);
@@ -449,7 +497,8 @@ async function proveSnapshot(args, evidence) {
     if (before.directory.endsWith('alembic/versions/')) {
       const proof = await moduleProof(evidence, pair, blob)
         || await sqlModuleProof(args, evidence, pair, blob);
-      if (proof) proofs.push(proof);
+      if (proof) proofs.push({ ...proof, revisionNumber: pair.after.revisionNumber ?? pair.after.number,
+        parent: pair.after.parent, authorParent: pair.before.parent });
       else record('snapshot-module-registry-mismatch', evidence.headSha, source.filename);
       continue;
     }
@@ -541,10 +590,11 @@ export async function proveMigrationRenumbers(args, evidence) {
           posix.dirname(file.filename) === posix.dirname(proof.moduleDestination) && /\/r\d+\.py$/.test(file.filename) && file.status !== 'removed'))
           && originals.every(([path, sha]) => snapshot.files.some(file => file.filename === path
           && file.sha === sha && file.status === evidence.primaryFiles.find(source => source.filename === path)?.status))) {
-          batch.push({ path: proof.path, destination: proof.path, blob: proof.primaryBlob, headSha: entry.sha, unchangedAuthor: true });
+          batch.push({ path: proof.path, destination: proof.path, blob: proof.primaryBlob, headSha: entry.sha,
+            revisionNumber: migration(proof.path).number, parent: proof.authorParent, unchangedAuthor: true });
         }
       }
-      snapshots.push(batch);
+      snapshots.push(batch.map(item => ({ ...item, baseSha: snapshot.merge_base_commit.sha })));
     }
     const complete = proofs.filter(proof => {
       let moduleSeen = false;
@@ -561,31 +611,50 @@ export async function proveMigrationRenumbers(args, evidence) {
     });
     const result = [];
     for (const proof of complete) {
-      let rebased = false;
-      const chain = [{ headSha: evidence.primaryHead, path: proof.path, blob: proof.primaryBlob }];
+      let rebased = false, metadataRepair = false, parentOperations;
+      const alembic = migration(proof.path).directory.endsWith('alembic/versions/');
+      const chain = [{ headSha: evidence.primaryHead, path: proof.path, blob: proof.primaryBlob,
+        ...(alembic ? { revisionNumber: migration(proof.path).number } : {}) }];
       for (const batch of snapshots) {
         const item = batch.find(item => item.path === proof.path);
+        if (alembic && (!Number.isSafeInteger(item.revisionNumber)
+          || item.revisionNumber < chain.at(-1).revisionNumber
+          || item.revisionNumber > migration(proof.destination).number)) throw new Error('non-increasing renumber chain');
         if (chain.at(-1).path === item.destination && chain.at(-1).blob === item.blob) {
           if (chain.length > 1) chain.at(-1).headSha = item.headSha;
           continue;
         }
         const previous = migration(chain.at(-1).path), next = migration(item.destination);
-        if (next.number <= previous.number && !rebased) {
+        if (next.number <= previous.number && !rebased && !metadataRepair) {
           const ancestry = await args.metadata(`repos/${args.repo}/compare/${evidence.primaryHead}...${evidence.headSha}`);
-          if (ancestry.status !== 'diverged') throw new Error('non-increasing renumber chain');
-          rebased = true;
-          evidence.migrationRenumberAncestry = { primaryHead: evidence.primaryHead, headSha: evidence.headSha, status: 'diverged' };
+          if (ancestry.status === 'diverged') rebased = true;
+          else if (alembic && ancestry.status === 'ahead' && ancestry.merge_base_commit?.sha === evidence.primaryHead
+            && ancestry.total_commits === range.length) {
+            parentOperations = await certifyParentOperations(args, evidence, proof, snapshots);
+            if (!parentOperations) throw new Error('uncertified repair predecessor');
+            metadataRepair = true;
+          } else throw new Error('non-increasing renumber chain');
+          // Every proof uses this same immutable head-pair comparison. Its
+          // status selects either divergence or ancestral repair for all
+          // siblings; strictly increasing proofs need neither exception.
+          evidence.migrationRenumberAncestry = { primaryHead: evidence.primaryHead, headSha: evidence.headSha, status: ancestry.status,
+            ...(metadataRepair ? { mergeBase: ancestry.merge_base_commit.sha } : {}) };
         }
+        if (metadataRepair && (next.number === previous.number && item.destination !== chain.at(-1).path
+          || next.number < previous.number && item.revisionNumber <= chain.at(-1).revisionNumber)) throw new Error('non-increasing renumber chain');
         if (next.number < migration(proof.path).number) throw new Error('non-increasing renumber chain');
-        chain.push({ headSha: item.headSha, path: item.destination, blob: item.blob });
+        chain.push({ headSha: item.headSha, path: item.destination, blob: item.blob,
+          ...(alembic ? { revisionNumber: item.revisionNumber } : {}) });
       }
-      result.push({ ...proof, chain, ...(rebased ? { rebased: true } : {}) });
+      result.push({ ...proof, chain, ...(rebased ? { rebased: true } : {}),
+        ...(metadataRepair ? { metadataRepair: true, parentOperations } : {}) });
     }
     return result;
   } catch (error) {
     const reason = deadline.aborted ? (deadline.reason?.name === 'TimeoutError' ? 'deadline-exceeded' : 'aborted')
       : error?.message === 'migration read budget exhausted' ? 'read-budget-exhausted'
         : error?.message === 'non-increasing renumber chain' ? 'chain-non-increasing'
+          : error?.message === 'uncertified repair predecessor' ? 'repair-predecessor-unproven'
           : error?.message === 'invalid snapshot merge base' ? 'snapshot-merge-base-invalid'
             : error?.message === 'invalid migration blob' ? 'snapshot-blob-invalid'
               : error?.message === 'incomplete migration tree' ? 'snapshot-tree-incomplete' : 'snapshot-read-failed';
@@ -606,18 +675,51 @@ function verifiedSqlBinding(evidence, proof) {
     && evidence.finalFiles.some(file => file.filename === proof.registryPath && file.status === 'modified' && file.sha === proof.registryBlob);
 }
 
+function verifiedMetadataRepair(evidence, proof, headSha) {
+  const ancestry = evidence.migrationRenumberAncestry;
+  const range = evidence.diagnosticCommitRange || [{ sha: headSha }];
+  return proof.moduleOrigin === 'author-sql' && proof.rebased !== true
+    && ancestry?.status === 'ahead' && ancestry.primaryHead === proof.primaryHead && ancestry.headSha === headSha
+    && ancestry.mergeBase === proof.primaryHead
+    && Array.isArray(range) && range.length > 0 && range.every(entry => SHA.test(entry?.sha || ''))
+    && Array.isArray(proof.parentOperations) && proof.parentOperations.length === range.length + 1
+    && proof.parentOperations.at(-1)?.baseSha === proof.snapshotMergeBase
+    && proof.parentOperations.at(-1)?.registryBlob === proof.registryBlob
+    && proof.parentOperations.every((entry, index) => entry && entry.headSha === (index ? range[index - 1].sha : evidence.primaryHead)
+      && SHA.test(entry.baseSha || '') && SHA.test(entry.blob || '') && SHA.test(entry.registryBlob || '')
+      && migration(entry.path)?.directory === migration(proof.path)?.directory
+      && (!index ? entry.baseSha === evidence.mergeBase : true)
+      && Array.isArray(entry.operations) && entry.operations.length === 2
+      && entry.operations.every(operation => operation && typeof operation.path === 'string' && SHA.test(operation.blob || ''))
+      && posix.dirname(entry.operations[0].path) === posix.dirname(proof.sqlPath)
+      && entry.operations[1].path === posix.join(posix.dirname(proof.moduleDestination), `r${migration(entry.path).number}.py`));
+}
+
 export function verifiedMigrationRenumbers(evidence, headSha) {
   return (evidence.migrationRenumberProofs || []).filter(proof => proof.classification === CLASS
+    && migration(proof.path) && migration(proof.destination)
     && proof.headSha === headSha && proof.primaryHead === evidence.primaryHead && proof.mergeBase === evidence.mergeBase
     && (!migration(proof.path)?.directory.endsWith('alembic/versions/') || typeof proof.modulePath === 'string' || verifiedSqlBinding(evidence, proof))
     && Array.isArray(proof.chain) && proof.chain.length >= 2 && proof.chain.length <= 65
     && proof.chain[0].headSha === evidence.primaryHead && proof.chain[0].path === proof.path
     && proof.chain[0].blob === proof.primaryBlob && proof.chain.at(-1).path === proof.destination
     && proof.chain.at(-1).blob === proof.blob && proof.chain.at(-1).headSha === headSha
+    && (!migration(proof.path).directory.endsWith('alembic/versions/')
+      || proof.chain[0].revisionNumber === migration(proof.path).number
+        && proof.chain.at(-1).revisionNumber === migration(proof.destination).number)
+    && (proof.metadataRepair !== true || verifiedMetadataRepair(evidence, proof, headSha))
     && proof.chain.every((entry, index) => SHA.test(entry.headSha || '') && SHA.test(entry.blob || '')
       && migration(entry.path) && (!index || migration(entry.path).directory === migration(proof.path).directory
         && migration(entry.path).identity === migration(proof.path).identity
-        && (proof.rebased === true ? evidence.migrationRenumberAncestry?.status === 'diverged'
+        && (!migration(proof.path).directory.endsWith('alembic/versions/')
+          || Number.isSafeInteger(entry.revisionNumber) && entry.revisionNumber >= proof.chain[index - 1].revisionNumber
+            && entry.revisionNumber <= migration(proof.destination).number)
+        && (proof.metadataRepair === true ? migration(entry.path).number >= migration(proof.path).number
+          && (migration(entry.path).number > migration(proof.chain[index - 1].path).number
+            || entry.path === proof.chain[index - 1].path
+            || migration(entry.path).number < migration(proof.chain[index - 1].path).number
+              && entry.revisionNumber > proof.chain[index - 1].revisionNumber)
+          : proof.rebased === true ? evidence.migrationRenumberAncestry?.status === 'diverged'
           && evidence.migrationRenumberAncestry.primaryHead === proof.primaryHead
           && evidence.migrationRenumberAncestry.headSha === headSha
           && migration(entry.path).number >= migration(proof.path).number

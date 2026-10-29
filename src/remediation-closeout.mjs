@@ -31,8 +31,10 @@ export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha
     try {
       receipt = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, {
         repo: job.repo, prNumber: job.prNumber, headSha: lease?.rekeyedFromHeadSha || head }), 'utf8'));
-      launches = { closer: lease?.status !== 'handed-to-review' && receipt?.launchRequestId
-        ? { launchRequestId: receipt.launchRequestId, headSha: head, retryChainUnreadable: true } : null };
+      launches = { state: 'complete', provenance: { sourceRef: 'closer-dispatch-receipt' },
+        value: { closer: lease?.status !== 'handed-to-review' && receipt?.launchRequestId
+          ? { launchRequestId: receipt.launchRequestId, headSha: head, retryChainUnreadable: true,
+            retryChainReadState: 'unresolved' } : null } };
     } catch (error) {
       launches = { state: error.code === 'ENOENT' ? 'complete' : 'error', value: { closer: null },
         provenance: { sourceRef: 'closer-dispatch-receipt' } };

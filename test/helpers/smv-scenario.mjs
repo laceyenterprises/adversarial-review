@@ -406,6 +406,23 @@ if (scenario === 'clean') {
   } } } });
   assert.equal(nextAction(unreadableRecovery).reason, 'ownership-unreadable');
   assert.equal(nextAction(unreadableRecovery).queue.intent, 'reconcile');
+  // OWNERUNREADABLE-02: snapshot-only recovery resolves references before R04.
+  const { resolveSharedNextAction } = await import('../../src/pr-next-action-shadow.mjs');
+  const placeholder = deriveNextActionSnapshot({ base: recovery, observations: {
+    launches: { state: 'complete', provenance: { sourceRef: 'closer-lease' }, value: { closer: {
+      headSha: terminalHead, launchRequestId: 'synthetic-recovery', retryChainUnreadable: true,
+      retryChainReadState: 'unresolved',
+    } } },
+  } });
+  assert.ok(nextAction(placeholder).evidenceRefs.includes('launch:retry-chain-unresolved'));
+  const originalLookup = dispatchReadTransport.lookup;
+  try {
+    dispatchReadTransport.lookup = async () => ({ schema_version: 1, status: 'found', complete: true,
+      roots: ['synthetic-recovery'], items: [{ launch_request_id: 'synthetic-recovery', status: 'succeeded' }], retry_edges: [] });
+    const resolved = await resolveSharedNextAction({ snapshot: placeholder, rootDir });
+    assert.equal(resolved.decision.row, 'R08-retry');
+    assert.equal(resolved.decision.queue.intent, 'dispatch');
+  } finally { dispatchReadTransport.lookup = originalLookup; }
   for (const [name, observations, action, actor] of actionCases) {
     const shared = matrixPair(observations);
     assert.deepEqual([shared.decision.action, shared.decision.actor], [action, actor], name);

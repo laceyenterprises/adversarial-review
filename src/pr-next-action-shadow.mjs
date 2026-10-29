@@ -22,7 +22,7 @@ import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { join } from 'node:path';
 import { deriveNextActionSnapshot, nextAction } from './pr-next-action.mjs';
-import { fromLegacyClosureOwner, markNextActionShadowTestSink, NEXT_ACTION_SHADOW_LAUNCH_READ_MS } from './pr-next-action-consumer.mjs';
+import { fromLegacyClosureOwner, markNextActionShadowTestSink, snapshotLaunchReferenceRead, NEXT_ACTION_SHADOW_LAUNCH_READ_MS } from './pr-next-action-consumer.mjs';
 import { observeClosureWait } from './ama/closure-wait.mjs';
 import { checkPrimaryChange } from './ama/primary-change.mjs';
 
@@ -134,7 +134,10 @@ function primaryChangeObservation(input, progress) {
 // routing and observational callers share the exact pair for this generation;
 // Bare reads are provisional until closure evidence registers the shared pair;
 // Changed closure facts publish a new immutable generation of that pair.
-export function resolveSharedNextAction({ snapshot = null, passSnapshot = null, evidence = null, refreshEvidence = false } = {}) {
+export function resolveSharedNextAction({ snapshot = null, passSnapshot = null, evidence = null, refreshEvidence = false, rootDir = null } = {}) {
+  const snapshotRead = snapshotLaunchReferenceRead(snapshot, rootDir);
+  if (snapshotRead) return resolveSharedNextAction({ passSnapshot: snapshot, refreshEvidence: true,
+    evidence: { observations: { launches: snapshot.observations.launches }, readLaunches: snapshotRead } });
   if (refreshEvidence && evidence && passSnapshot && decisionsByPass.has(passSnapshot)) {
     const { readLaunches, ...fields } = evidence;
     const captured = { ...structuredClone(fields), readLaunches };
@@ -191,7 +194,7 @@ export function resolveSharedNextAction({ snapshot = null, passSnapshot = null, 
         // including after terminal lease removal. Keep unknown provenance.
         const resolved = launches.state !== 'complete' && reference?.value?.closer
           ? { ...reference, provenance: { ...reference.provenance, ledgerReadState: launches.state },
-            value: { closer: { ...reference.value.closer, retryChainUnreadable: true } } } : launches;
+            value: { closer: { ...reference.value.closer, retryChainUnreadable: true, retryChainReadState: 'failed' } } } : launches;
         final = deriveNextActionSnapshot({ base: derived, observations: { launches: resolved } });
       }
       return Object.freeze({ snapshot: final, decision: nextAction(final) });
@@ -266,7 +269,7 @@ export function shadowNextAction({ source, legacy = null, snapshot = null, passS
   try {
     if (inertUnderTest(sink, env)) return Promise.resolve(null);
     adapted = adaptLegacy(legacy);
-    sharedPromise = shared ? Promise.resolve(shared) : resolveSharedNextAction({ snapshot, passSnapshot,
+    sharedPromise = shared ? Promise.resolve(shared) : resolveSharedNextAction({ snapshot, passSnapshot, rootDir,
       evidence: typeof evidence === 'function' ? evidence() : evidence });
     if (!sharedPromise) return Promise.resolve(null);
   } catch {

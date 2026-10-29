@@ -681,7 +681,8 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
     };
     for (const [path, change] of primary) {
       if (guardReversals.some(proof => proof.path === path)) continue;
-      if (derivedChanges.some(proof => proof.path === change.filename || proof.registryPath === change.filename)) continue;
+      if (derivedChanges.some(proof => proof.path === change.filename || proof.registryPath === change.filename
+        || proof.modulePath === change.filename)) continue;
       const actual = final.get(path);
       if (change.derivedOnly && (!actual || actual.filename === change.filename) && actual?.status !== 'removed') continue;
       if (isTestPath(path) && isTestPath(change.filename)

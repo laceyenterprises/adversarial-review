@@ -967,11 +967,15 @@ win. A receipt grants no review or merge authority. CLEAN and known non-strict
 MERGEABLE BEHIND heads retain their SHA and CI when main advances; only GitHub
 conflicts or strict BEHIND require rebase. See the pending-CI resume runbook.
 
-MIGRENUMBERDERIVED-01: the shared primary-change predicate accepts a mechanical
+MIGRENUMBERDERIVED-01 / MIGRENUMBERDERIVED-02: the shared primary-change predicate accepts a mechanical
 Python migration renumber when immutable migration and registry blobs prove the
 same operations under a higher revision in the same migrations directory. It
 returns `derivedChanges` with classification `mechanical-migration-renumber`,
 bound to the protected author/head/base and source/destination/registry blobs.
+Alembic wrapper/module/explicit-module-registry layouts also bind the paired
+revision module and retain the observed monotonic renumber chain from the
+protected author head. Every observed snapshot must preserve the original
+operations; a registry swap without its paired module supplies no proof.
 The closure's passing primary-change observation, daemon audit and merge-action
 receipt retain this evidence. Missing registry updates, changed operations and
 unmatched renames retain the existing reversal refusal. Proofs are transient

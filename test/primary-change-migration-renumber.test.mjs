@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { proveMigrationRenumbers } from '../src/ama/migration-renumber.mjs';
 import { checkPrimaryChange, fetchPrimaryChange } from '../src/ama/primary-change.mjs';
 import { evaluateMergeEligibility } from '../src/ama/merge-eligibility.mjs';
-import { migrationRenumberFixture } from './helpers/migration-renumber.mjs';
+import { migrationRenumberFixture, alembicRenumberFixture } from './helpers/migration-renumber.mjs';
 
 async function prove(f) {
   f.evidence.migrationRenumberProofs = await proveMigrationRenumbers(f.args, f.evidence);
@@ -174,4 +174,100 @@ test('capped file evidence and corrupt hash responses supply no renumber authori
   const valid = migrationRenumberFixture();
   valid.args.get = async () => ({ encoding: 'base64', content: Buffer.from('corrupt').toString('base64'), size: 7 });
   assert.deepEqual(await proveMigrationRenumbers(valid.args, valid.evidence), []);
+});
+
+for (const steps of [1, 3]) {
+  test(`MIGRENUMBERDERIVED-02: Alembic four-file layout with ${steps} renumbers from protected author head`, async () => {
+    const f = alembicRenumberFixture({ steps });
+    assert.equal(checkPrimaryChange(f.evidence, f.args.headSha).reason, 'primary-change-reverted');
+    const result = await prove(f);
+    assert.equal(result.ok, true);
+    const [proof] = result.derivedChanges;
+    assert.equal(proof.classification, 'mechanical-migration-renumber');
+    assert.equal(proof.modulePath, f.modulePath);
+    assert.deepEqual(proof.chain.map(item => item.path), [f.source, ...f.snapshots.map(item => item.files[0].filename)]);
+    assert.equal(proof.chain[0].headSha, f.evidence.primaryHead);
+    const collected = await fetchPrimaryChange(f.args, { fetchCiCostImpl: async () => f.evidence.ciCost,
+      proveDerivedArtifactsImpl: async () => [], proveGeneratedBlocksImpl: async () => [] });
+    assert.equal(checkPrimaryChange(collected, f.args.headSha).ok, true);
+    assert.deepEqual(collected.migrationRenumberProofs[0].chain, proof.chain);
+  });
+}
+
+for (const [name, modify] of [
+  ['wrapper upgrade body change', f => { f.evidence.finalFiles[0].sha = f.blob(f.body(72).replace('upgrade_revision(op', 'apply_other(op')); }],
+  ['wrapper downgrade body change', f => { f.evidence.finalFiles[0].sha = f.blob(f.body(72).replace('downgrade_revision(op', 'undo_other(op')); }],
+  ['module operation change', f => { f.evidence.finalFiles[1].sha = f.blob(f.moduleBody(72).replace('CREATE TABLE', 'DROP TABLE')); }],
+  ['registry swap without module rename', f => { f.evidence.finalFiles.splice(1, 1); }],
+  ['unmatched module rename', f => { Object.assign(f.evidence.finalFiles[1], { status: 'renamed', previous_filename: 'sample/src/sample/schema_revisions/r99.py' }); }],
+  ['unrelated registry change', f => { f.evidence.finalFiles[2].sha = f.blob(f.registry(72).replace('r70', 'r69')); }],
+  ['duplicate registry module', f => { f.evidence.finalFiles[2].sha = f.blob(f.registry(72).replace('r70', 'r72')); }],
+  ['unrelated source name change', f => { f.evidence.finalFiles[0].sha = f.blob(f.body(72).replace('_b7_', '_c8_')); }],
+  ['nonexistent predecessor', f => { f.evidence.finalFiles[0].sha = f.blob(f.body(72).replaceAll('prior_elm_71', 'missing_71')); }],
+  ['operation string resembling metadata', f => { f.evidence.finalFiles[1].sha = f.blob(f.moduleBody(72) + '\nSQL = "revision = 72"\n'); }],
+]) test(`Alembic renumber refuses ${name}`, async () => {
+  const f = alembicRenumberFixture();
+  modify(f);
+  assert.equal((await prove(f)).reason, 'primary-change-reverted');
+  assert.deepEqual(f.evidence.migrationRenumberProofs, []);
+});
+
+test('an intermediate body change cannot hide in a subsequent renumber', async () => {
+  const f = alembicRenumberFixture({ steps: 3 });
+  f.snapshots[1].files[1].sha = f.blob(f.moduleBody(73).replace('CREATE TABLE', 'DROP TABLE'));
+  assert.equal((await prove(f)).reason, 'primary-change-reverted');
+});
+
+test('module proof binds both module blobs and rename presence', async () => {
+  for (const mutate of [
+    f => { f.evidence.finalFiles[1].sha = 'f'.repeat(40); },
+    f => { f.evidence.primaryFiles[1].sha = 'f'.repeat(40); },
+    f => { f.evidence.finalFiles.push(f.evidence.primaryFiles[1]); },
+  ]) {
+    const f = alembicRenumberFixture();
+    assert.equal((await prove(f)).ok, true);
+    mutate(f);
+    assert.equal(checkPrimaryChange(f.evidence, f.args.headSha).reason, 'primary-change-reverted');
+  }
+});
+
+test('Alembic prefix revision identifiers preserve the same wrapper/module proof', async () => {
+  const f = alembicRenumberFixture();
+  for (const [files, number] of [[f.evidence.primaryFiles, 71], [f.evidence.finalFiles, 72]]) {
+    files[0].sha = f.blob(f.body(number).replaceAll(`create_sample_${number}`, `${number}_create_sample`));
+  }
+  assert.equal((await prove(f)).ok, true);
+});
+
+test('unreadable or truncated predecessor evidence fails closed', async () => {
+  for (const response of [null, { truncated: true, tree: [] }]) {
+    const f = alembicRenumberFixture(), get = f.args.get;
+    f.args.get = path => path.includes('/git/trees/') ? Promise.resolve(response) : get(path);
+    assert.equal((await prove(f)).reason, 'primary-change-reverted');
+  }
+});
+
+test('a damaged chain or omitted module binding cannot waive preservation', async () => {
+  for (const mutate of [
+    proof => { delete proof.modulePath; },
+    proof => { proof.chain[0].headSha = 'f'.repeat(40); },
+    proof => { proof.chain[1].path = proof.chain[0].path; },
+  ]) {
+    const f = alembicRenumberFixture();
+    assert.equal((await prove(f)).ok, true);
+    mutate(f.evidence.migrationRenumberProofs[0]);
+    assert.equal(checkPrimaryChange(f.evidence, f.args.headSha).reason, 'primary-change-reverted');
+  }
+});
+
+test('unrelated remediation before the first renumber keeps the protected baseline', async () => {
+  const f = alembicRenumberFixture({ steps: 3 });
+  const initial = { sha: '9'.repeat(40), number: 71, files: [...f.evidence.primaryFiles,
+    f.file('sample/notes.txt', 'Remediated wording.\n')] };
+  f.snapshots.unshift(initial);
+  f.evidence.diagnosticCommitRange.unshift({ sha: initial.sha });
+  const result = await prove(f);
+  assert.equal(result.ok, true);
+  assert.equal(result.derivedChanges[0].chain[0].headSha, f.evidence.primaryHead);
+  assert.equal(result.derivedChanges[0].chain.length, 4);
 });

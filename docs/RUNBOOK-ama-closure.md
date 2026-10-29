@@ -26,6 +26,23 @@ forced launch, ledger mutation or new smoke step is authorized by this change.
 
 ## Host identity reads (HOSTIDCACHE-01)
 
+RESCUEHOSTID-01: the watcher and the external rescue composition root share
+`prepareDispatchReadContext`. An activated watcher calls it at startup; rescue
+calls it before closer dispatch. The helper registers the existing
+`adversarial-review` app using the SDK's existing bootstrap-credential resolution,
+then enables both dispatch reads and worker observations only after registration
+succeeds. Failed or timed-out registration preserves the caller's existing read
+switches, including absent values. It adds no grants or app
+identity. Synchronous observations, host services and launch lookups reuse the
+session only for the matching connection, and never register synchronously.
+Fixed bootstrap-failure details distinguish a missing/unreadable credential,
+timeout, and other registration failure without returning SDK messages.
+
+Deploy this helper before a rescue caller that requires it. After both consumer
+and service revisions deploy, SRE retains the LRQ from an authorized closer
+rescue apply as live acceptance. Synthetic endpoint fixtures prove the source
+contract; existing lifecycle states and automated smoke promises are unchanged.
+
 Every host-owner consumer shares `readHostIdentitySync`. A successful read is
 trimmed before returning and caching for the process lifetime, scoped by HQ
 root and transport endpoint. Explicit and environment HQ root paths are resolved

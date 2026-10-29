@@ -3515,6 +3515,8 @@ export async function processReviewSubject(entry, ctx) {
                 );
               // PENDINGCLAIM-02: an unchanged row is only a mismatch signal
               // when the snapshot had a shape targeted by the selected CAS.
+              // Plain pending allows moved heads; token refresh fences the
+              // snapshot head passed to its CAS, not reviewerHeadSha.
               const snapshotClaimable = claimBranch === 'pending'
                 ? ['pending', 'pending-upstream'].includes(current?.review_status)
                 : claimBranch === 'token-refresh'
@@ -3523,7 +3525,7 @@ export async function processReviewSubject(entry, ctx) {
                   : reviewRowInTerminalFailureState(current, reviewerHeadSha);
               console.log(unchangedShape && snapshotClaimable
                 ? `[watcher] claim-shape-mismatch branch=${claimBranch} status=${afterClaim.review_status} repo=${repoPath} pr=${prNumber}`
-                : `[watcher] Lost claim race on ${repoPath}#${prNumber} — another watcher is handling this PR (or its row is now in a non-claimable state). snapshot_status=${current?.review_status ?? 'missing'} Skipping.`
+                : `[watcher] Lost claim race on ${repoPath}#${prNumber} snapshot_status=${current?.review_status ?? 'missing'} — another watcher is handling this PR (or its row is now in a non-claimable state). Skipping.`
               );
               return { dispatched: false, reason: 'claim-race-lost' };
             }

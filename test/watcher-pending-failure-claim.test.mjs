@@ -343,7 +343,7 @@ for (const [name, message, expectedClaim] of [
         assert.deepEqual(selected, [expectedClaim]);
         assert.deepEqual(result, { dispatched: false, reason: 'claim-race-lost' });
         assert.equal(lines.length, 1);
-        assert.match(lines[0], /Lost claim race.*non-claimable state/);
+        assert.match(lines[0], /Lost claim race.*non-claimable state\)\. Skipping\.$/);
         assert.ok(lines[0].includes(`snapshot_status=${snapshot.review_status}`));
         assert.doesNotMatch(lines[0], /claim-shape-mismatch/);
         assert.deepEqual(f.read(), snapshot, 'the refused claim changes no row fields');
@@ -377,6 +377,44 @@ for (const [name, message, expectedClaim] of [
       } finally { f.db.close(); }
     });
   }
+}
+
+for (const branch of ['pending', 'token-refresh']) {
+  test(`PENDINGCLAIM-02 ${branch} CAS targets moved-head pending snapshots`, () => {
+    const f = fixture({ failure_message: branch === 'token-refresh'
+      ? '[token-refresh-pending] synthetic hold' : null });
+    try {
+      // Token-refresh admission can outlive a head move. Its WHERE parameters
+      // fence the captured row head, while SET records the new reviewer head.
+      const head = 'b'.repeat(40);
+      const decision = branch === 'token-refresh' ? route(f) : route(f, head);
+      const { bindings, selected } = claimBindings(f, decision, head);
+      const snapshot = f.read();
+      const expectedClaim = branch === 'token-refresh'
+        ? 'stmtMarkTokenRefreshRecoveryAttemptStarted' : 'stmtMarkAttemptStarted';
+      const run = code => execute(code, {
+        ...bindings, holdReleaseId: null, reviewerPoolConfig: { enabled: false },
+        stmtGetReviewRow: { get: () => f.read() }, console: { log: line => lines.push(line) },
+      });
+      const lines = [];
+      // A forced zero-row result on this claimable snapshot must still expose
+      // a genuine mismatch; an active-head equality guard would hide it.
+      f.db.exec(`CREATE TRIGGER refuse_claim BEFORE UPDATE ON reviewed_prs
+        BEGIN SELECT RAISE(IGNORE); END`);
+      assert.deepEqual(run(`${claimClosure}\n${claimAndFailureLog}`),
+        { dispatched: false, reason: 'claim-race-lost' });
+      assert.deepEqual(lines, [
+        `[watcher] claim-shape-mismatch branch=${branch} status=pending repo=${REPO} pr=${PR}`,
+      ]);
+      assert.deepEqual(f.read(), snapshot);
+      f.db.exec('DROP TRIGGER refuse_claim');
+      assert.equal(run(`${claimClosure}\nreturn claimReviewer();`).changes, 1);
+      assert.deepEqual(selected, [expectedClaim, expectedClaim]);
+      assert.equal(f.read().reviewer_head_sha, head);
+      assert.equal(f.read().review_status, 'reviewing');
+      assert.equal(f.read().review_attempts, branch === 'pending' ? 0 : 1);
+    } finally { f.db.close(); }
+  });
 }
 
 for (const name of ['UnknownFailure', 'ReviewPopulation', 'InfraAutoRecovery', 'DaemonBounceRecovery']) {

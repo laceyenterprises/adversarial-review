@@ -13,9 +13,11 @@ PGID and replace the session as before. A zero-row CAS re-reads the row:
 PENDINGCLAIM-02 limits `claim-shape-mismatch` to snapshots targeted by the chosen
 branch with unchanged status, session and failure timestamp. Retry branches use
 the shared failure-shape predicate; plain pending accepts `pending` and
-`pending-upstream`; token refresh also accepts `failed` and requires failure
-timestamp/head evidence for `pending`. Changed evidence or a snapshot outside
-the target shape retains the claim-race/non-claimable log with `snapshot_status`.
+`pending-upstream` even with a moved head. Token refresh also accepts `failed`
+and requires failure timestamp/head evidence for `pending`; its CAS fences the
+captured snapshot head, not the new reviewer head. Changed evidence or a snapshot
+outside the target shape retains the claim-race/non-claimable log with
+`snapshot_status` before the explanation and the fixed `state). Skipping.` suffix.
 Neither diagnostic changes state or admission policy. Retry caps, defaults, failure classifiers,
 token-refresh claims and merge guards retain their existing rules. The infra CAS
 fences the exact `failure_message` snapshot instead of maintaining a second

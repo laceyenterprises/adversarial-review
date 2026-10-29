@@ -3902,9 +3902,12 @@ and bounded unknown, population, infrastructure and daemon-bounce retry claims.
 Same-head lease-released `pending` failures remain retryable within their existing
 budgets. Moved heads retain fresh-review attempt reset; exhausted unknown failures
 still park. Released session evidence remains available for late-post
-reconciliation. A refused claim with unchanged status, session and failure time
-logs `claim-shape-mismatch branch=<name> status=<status>`; this adds no gate or
-alert. The synthetic offline regression is
+reconciliation. PENDINGCLAIM-02: a refused claim with unchanged status, session
+and failure time logs `claim-shape-mismatch branch=<name> status=<status>` only
+for snapshots targeted by the selected CAS. Plain pending permits moved heads;
+token refresh fences the captured snapshot head. Claim-race logs preserve the
+fixed `state). Skipping.` suffix, with `snapshot_status` before the explanation.
+This adds no gate, state, transition or alert. The synthetic offline regression is
 `test/watcher-pending-failure-claim.test.mjs`. Existing smoke promises remain;
 post-deployment acceptance is read-only observation of natural retry progress,
 with no restart or forced failure.

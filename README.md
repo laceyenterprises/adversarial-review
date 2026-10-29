@@ -3935,3 +3935,5 @@ use the normal cascade. The Claude adapter owns launch eligibility, nested
 sandbox exclusions and rollback; the review service only accepts the key.
 Deploy this schema compatibility change before the companion Agent OS config
 activation. No reviewer lifecycle, journal or smoke promise changes.
+
+RESCUEHOSTID-01: watcher and rescue share app-contract dispatch-read context bootstrap with the existing review app credential and both read switches. Connection-scoped sync host/launch reads reuse that session; setup failure returns a named nonzero rescue result before dispatch work. Fresh-process synthetic endpoint and named-failure fixtures establish source behavior. Deploy the review-service companion before the Agent OS bridge, then SRE retains an authorized dispatch-closer rescue --apply receipt containing a closer LRQ. Existing lifecycle states and automated smoke promises are unchanged. This task authorizes no live rescue, dispatch, lease/config mutation or restart. See `post-merge-verify.json` and the rescue/closure runbook.

@@ -40,6 +40,12 @@ function options(args) {
     endpoint_url: (args.env ?? process.env).APP_CONTRACT_ENDPOINT_URL,
     ...args.connectOptions, request_timeout_ms: args.timeoutMs ?? 8000 };
 }
+function synchronousOptions(args) {
+  const config = options(args);
+  const session = cachedSession?.key === sessionKey(config) ? cachedSession.session : null;
+  return { ...config, session_token: config.session_token || session?.sessionToken,
+    endpoint_url: config.endpoint_url || session?.endpoint_url };
+}
 function sessionKey(config) {
   return JSON.stringify(Object.fromEntries(Object.entries(config)
     .filter(([key]) => key !== 'request_timeout_ms')
@@ -77,14 +83,10 @@ export const dispatchReadTransport = {
   },
   observationSync(selector, args = {}) {
     if (!args.workerObservationSyncImpl) assertObservationsEnabled(args.env ?? process.env);
-    const config = options(args);
-    const session = cachedSession?.config && sessionKey(cachedSession.config) === sessionKey(config) ? cachedSession.session : null;
     // Reuse the SDK session established by async reads. Never register from a
     // synchronous accounting call or borrow a token from another endpoint.
-    const syncOptions = { ...config, session_token: config.session_token || session?.sessionToken,
-      endpoint_url: config.endpoint_url || session?.endpoint_url };
     return observeSynchronousChild('node', () =>
-      (args.workerObservationSyncImpl ?? dispatchReadTransport.sdk().readWorkerObservationsSync)(selector, syncOptions));
+      (args.workerObservationSyncImpl ?? dispatchReadTransport.sdk().readWorkerObservationsSync)(selector, synchronousOptions(args)));
   },
   async hostServices(request, args = {}) {
     const deadline = Date.now() + (args.timeoutMs ?? 8000);
@@ -148,16 +150,12 @@ export const dispatchReadTransport = {
       }
       return cached.reply;
     }
-    const config = options(args);
-    const session = cachedSession?.config && sessionKey(cachedSession.config) === sessionKey(config) ? cachedSession.session : null;
-    return dispatchReadTransport.sdk().readHostServicesSync(request, {...config,
-      session_token: config.session_token || session?.sessionToken,
-      endpoint_url: config.endpoint_url || session?.endpoint_url});
+    return dispatchReadTransport.sdk().readHostServicesSync(request, synchronousOptions(args));
   },
   lookupSync(selector, args = {}) {
     if (!args.dispatchLookupSyncImpl) assertReadsEnabled(args.env ?? process.env);
     return observeSynchronousChild('node', () =>
-      (args.dispatchLookupSyncImpl ?? dispatchReadTransport.sdk().readDispatchLookupSync)(selector, options(args)));
+      (args.dispatchLookupSyncImpl ?? dispatchReadTransport.sdk().readDispatchLookupSync)(selector, synchronousOptions(args)));
   },
 };
 async function registeredSession(args) {
@@ -187,6 +185,27 @@ export async function prepareWorkerObservationSession(args = {}) {
     await boundedCall(() => registeredSession(args), args);
     return {ok:true};
   } catch (error) { cachedSession = null; return unavailable(error); }
+}
+
+// Composition roots explicitly opt into the review app's existing read grants.
+// The watcher and cold rescue CLI must warm the same session before sync reads.
+export async function prepareDispatchReadContext(args = {}) {
+  const env = args.env ?? process.env;
+  env.ADVERSARIAL_DISPATCH_READS_ENABLED = '1';
+  env.ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED = '1';
+  try {
+    await boundedCall(() => registeredSession(args), args);
+    return {ok: true};
+  } catch (error) {
+    cachedSession = null;
+    // Never return SDK messages: they can carry credentials or response data.
+    const detail = error?.code === 'ENOENT'
+      || error?.message === 'agent-os mode requires a bootstrap token or bootstrap token file'
+      ? 'bootstrap-credential-missing'
+      : ['EACCES', 'EPERM'].includes(error?.code) ? 'bootstrap-credential-unreadable'
+        : error?.code === 'ETIMEDOUT' ? 'session-bootstrap-timeout' : 'session-bootstrap-failed';
+    return {ok: false, reason: 'dispatch-context-unavailable', detail};
+  }
 }
 
 export async function readDispatchLaunches(selector, args = {}) {

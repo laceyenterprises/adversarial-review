@@ -1,5 +1,5 @@
 import { ensureWorkerRegistryReady } from './adapters/agent-runtime/local/remediation.mjs';
-import { prepareWorkerObservationSession } from './dispatch-read-client.mjs';
+import { prepareDispatchReadContext } from './dispatch-read-client.mjs';
 import { shutdownAmaHammerBackgroundQueue } from './ama-hammer-background-dispatch.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { withHoldRecordPoll } from './ama/hold-record.mjs';
@@ -1651,8 +1651,9 @@ async function main() {
   process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = resolveRateLimitSharedStatePath(process.env, ROOT);
   try {
     // CFG-02: warm public observations before validating worker routes and config.
-    if (process.env.ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED === '1') {
-      const ready = await prepareWorkerObservationSession({env: process.env});
+    if (process.env.ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED === '1'
+      || process.env.ADVERSARIAL_DISPATCH_READS_ENABLED === '1') {
+      const ready = await prepareDispatchReadContext({env: process.env});
       if (!ready.ok) console.warn('[public-observations] startup session unavailable; authoritative reads remain held');
     }
     validateDefaultReviewerRouteConfig(process.env);

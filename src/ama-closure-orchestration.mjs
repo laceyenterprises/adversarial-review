@@ -1,4 +1,5 @@
 import { operatorLabelInputs } from './ama/operator-label-inputs.mjs';
+import { holdForOperatorLabels } from './ama/operator-label-gates.mjs';
 import { reconcileHammerResumes, settleHammerResume } from './ama/hammer-resume.mjs';
 import { hammerHeadOwnership } from './hammer-head-ownership.mjs';
 import { reviewCeilingOwner } from './review-ceiling-owner.mjs';
@@ -830,7 +831,9 @@ async function maybeDispatchAmaClosureForInner({
     result = publicResult;
     closureOwnerSink.shared = observeClosureResult(nextActionShared || executorShared || closureOwnerSink.shared,
       (isSafetyRecoveryHold({ ...result, needsOperator: false })
-        || (result.needsOperator && !result.primaryChangeRepair && !result.boundedWait?.exhausted))
+        || (result.needsOperator && !result.primaryChangeRepair && !result.boundedWait?.exhausted
+          && !(result.operatorLabelGates?.length && closureOwnerSink.shared.decision.action === 'operator-hold'
+            && result.reason === closureOwnerSink.shared.decision.reason)))
         ? { ...result, safetyRefusal: true } : result, options.passSnapshot);
     const selected = closureOwnerSink.shared.decision;
     result = { ...result, nextAction: selected, closureOwner: closureOwnerFromDecision(selected),
@@ -1786,6 +1789,13 @@ async function dispatchAmaClosureFor({
       reason: shared.decision.reason }, { amaEnabled: true });
   }
   if (shared.decision.action === 'operator-hold' && autonomousMergeExecutionEnabled) {
+    if (reviewState.operatorLabelFindings?.allGated
+      && shared.decision.reason === reviewState.operatorLabelFindings.gated[0]?.reason) {
+      return withAmaDispatchMetadata(await holdForOperatorLabels({ rootDir, repo: repoPath, prNumber,
+        headSha: currentPrHeadSha,
+        gates: reviewState.operatorLabelFindings.gated.map(({ check, label, reason }) => ({ check, label, reason })),
+        deliverAlertImpl, logger }), { amaEnabled: true });
+    }
     return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
       reason: shared.decision.reason }, { amaEnabled: true });
   }

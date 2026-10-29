@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 import { adversarialOwnCheckContexts, isAdversarialOwnStatusContext, checkItemState, latestCheckRollupItems, classifyCheckRollup, summarizeChecksConclusion } from '../checks-summary.mjs';
 import { execGhWithRetry } from '../gh-cli.mjs';
 import { deliverAlert } from '../alert-delivery.mjs';
-import { parseBlockingFindingsSection } from '../kernel/review-findings.mjs';
+import { parseBlockingFindingsSection, parseNonBlockingFindingsSection } from '../kernel/review-findings.mjs';
 
 // LABELGATE-01: label names come from these guards' refusal messages, not
 // PR labels. Presence of a label is never proof of authorization or green CI.
@@ -37,7 +37,8 @@ export function classifyOperatorGatedFindings(reviewBody) {
       reason: `operator-label-required:${gate.label}` });
     else actionable.push(finding);
   }
-  return { gated, actionable, allGated: findings?.length > 0 && actionable.length === 0 };
+  return { gated, actionable, allGated: findings?.length > 0 && actionable.length === 0
+    && !(parseNonBlockingFindingsSection(reviewBody)?.length > 0) };
 }
 
 export function operatorGatedRemediationInstructions(reviewBody, classification = classifyOperatorGatedFindings(reviewBody)) {

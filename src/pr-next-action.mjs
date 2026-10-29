@@ -142,6 +142,7 @@ function reviewFacts(reviews, head, policy, labels) {
     }, { headSha: head, labels }),
     attestation,
     live: value.reviewerLive === true,
+    operatorLabelFindings: value.operatorLabelFindings,
     suppressedFinalPush: value.commentOnlyFinalRoundPush === true,
     postedMs: timeMs(value.postedAt ?? value.posted_at),
   };
@@ -494,6 +495,14 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
     && (!terminalHead || terminalRecoveryExpired)) {
     return { row: 'R08-retry', action: 'hammer', actor: 'hammer', reason: 'retry-no-merge', deadlineKind: 'admission',
       queue: 'dispatch', attempt: launch.attempt !== null ? launch.attempt + 1 : null };
+  }
+
+  // A label-only review has no remediation actor to admit. Preserve established
+  // live owners above, but never invent a missing job for an operator waiver.
+  if (review.known && sameHead(review.reviewedHead, head)
+    && review.operatorLabelFindings?.allGated && review.operatorLabelFindings.gated?.length) {
+    return { row: 'R02-hold', action: 'operator-hold', actor: 'operator',
+      reason: review.operatorLabelFindings.gated[0].reason, deadlineKind: null, queue: 'none' };
   }
 
   // R09: live PR remediation, a new finding's bounded admission wait, or

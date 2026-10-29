@@ -574,7 +574,8 @@ function formatLivePackRemediationContext({ packs = [], error = null } = {}) {
 ## Trusted Live Build Pack Facts
 The orchestrator could not determine which build packs this PR touches are running (${error}). Treat every build pack under \`projects/\` as live.
 - ${REMEDIATION_RULE}
-- Leave guarded changes in place; do not restore them to base to satisfy an operator-label gate. Stop and report the required operator label.
+- Leave guarded changes in place; do not restore them to base to satisfy an operator-label gate. Report the required operator label in blockers[].
+- Do not revert or rewrite the PR's intended pack edits. Continue remediating addressable findings outside those guarded edits while the operator waiver is pending.
 - Never apply the \`${LIVE_PACK_EDIT_WAIVER_LABEL}\` label yourself; it is an operator waiver.
 `;
   }
@@ -599,6 +600,7 @@ ${fence}
 - ${REMEDIATION_RULE}
 - A pack is "another" pack when \`ownPack\` is false. Only its \`SPEC.md\`, \`SPEC.meta.json\`, \`plan.json\` and \`prompts/**\` are protected; do not re-stamp its specRef either.
 - A \`${LIVE_PACK_CROSS_EDIT_KIND}\` finding requires operator attention and the \`${LIVE_PACK_EDIT_WAIVER_LABEL}\` label. Leave the listed changes in place; never revert them to satisfy this finding.
+- Do not revert or rewrite the PR's intended pack edits. Continue remediating addressable findings outside those guarded edits while the operator waiver is pending.
 - Never apply the \`${LIVE_PACK_EDIT_WAIVER_LABEL}\` label yourself; it is an operator waiver.
 `;
 }

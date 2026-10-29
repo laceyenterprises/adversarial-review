@@ -665,6 +665,7 @@ function makeDecision(state, description, reason, context, extra = null) {
     // still standing, and consumers that conflate them merge over real findings.
     // `operatorDecisionRequired` is the machine-readable difference.
     operatorDecisionRequired: Boolean(extra?.operatorDecisionRequired),
+    ...(extra?.operatorLabelGates?.length ? { operatorLabelGates: extra.operatorLabelGates } : {}),
   };
 }
 
@@ -704,8 +705,11 @@ function pickAdversarialGateStatus({
   reviewCurrency = null,
 } = {}) {
   const context = resolveGateStatusContext(env);
+  let operatorLabelGates = [];
   const decide = (state, description, reason, extra = null) =>
-    makeDecision(state, description, reason, context, extra);
+    makeDecision(state, description, reason, context, {
+      ...(operatorLabelGates.length ? { operatorLabelGates } : {}), ...extra,
+    });
   if (reviewCurrency?.current === false) return decide('pending',
     `No merge: missing HAM provenance / patch proof ${reviewCurrency.reviewedHead} -> ${reviewCurrency.currentHead}`,
     'review-currency-unproven');
@@ -798,6 +802,12 @@ function pickAdversarialGateStatus({
   }
 
   const latestJobStatus = normalizeFollowUpJobStatus(latestJob?.status);
+  // LIVEPACKREMEDIATE-01: waivers remain visible during active remediation.
+  const labelFindings = reviewStatus === 'posted' && headSha && reviewRowReviewerHeadSha(reviewRow) === headSha
+    ? (settledReview?.reviewedHeadSha === headSha && settledReview?.operatorLabelFindings
+      || classifyOperatorGatedFindings(latestJob?.revisionRef === headSha
+        ? latestJob.reviewBody : extractReviewBodyFromRow(reviewRow))) : null;
+  operatorLabelGates = labelFindings?.gated.map(({ check, label, reason }) => ({ check, label, reason })) || [];
   if (hasActiveSamePrRemediation) {
     return decide('pending', 'Remediation is in progress for this PR.', 'remediation-in-progress');
   }
@@ -994,6 +1004,17 @@ function pickAdversarialGateStatus({
       `Unexpected adversarial review state: ${reviewStatus || 'missing'}.`,
       'review-state-unknown'
     );
+  }
+
+  // LIVEPACKREMEDIATE-01: a waiver is a parallel operator obligation, not a
+  // reason to stop ordinary remediation or wait for a closer outcome to page.
+  if (labelFindings) {
+    const realStop = ['stopped', 'failed'].includes(latestJobStatus)
+      && !latestJob?.remediationPlan?.stop?.code?.startsWith('operator-label-required:');
+    if (labelFindings.allGated && !hasActiveSamePrRemediation && !realStop) {
+      return decide('failure', 'Review requires an operator waiver label and a fresh review.',
+        operatorLabelGates[0].reason, { operatorDecisionRequired: true });
+    }
   }
 
   if (!latestJob) {

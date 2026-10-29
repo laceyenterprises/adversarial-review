@@ -402,6 +402,24 @@ function closureFixture(t, overrides = {}) {
   return { args, effects, waits };
 }
 
+test('LIVEPACKREMEDIATE-01: label-only closure pages and parks before a phantom remediation admission', async t => {
+  const body = '## Blocking issues\n- **[live_pack_cross_edit] Live pack** — operator waiver needed.\n## Non-blocking issues\n- None.\n## Verdict\nRequest changes';
+  const pages = [];
+  const f = closureFixture(t, { dispatchJob: {}, fetchLatestHeadReviewBodiesImpl: async () => [body],
+    deliverAlertImpl: async (...args) => pages.push(args) });
+  f.args.reviewStateRow.review_body = body;
+  for (let poll = 0; poll < 2; poll++) {
+    const result = await maybeDispatchAmaClosureFor(f.args);
+    assert.equal(result.reason, 'operator-label-required:live-pack-edit-approved');
+    assert.equal(result.needsOperator, true);
+    assert.equal(result.nextAction.action, 'operator-hold');
+    assert.equal(result.nextAction.actor, 'operator');
+  }
+  assert.equal(pages.length, 1);
+  assert.deepEqual(f.waits, [], 'there is no missing remediation job to wait for');
+  assert.deepEqual(f.effects, [], 'a waiver cannot be repaired by a daemon or hammer');
+});
+
 for (const prState of ['open', 'OPEN']) test(`COMPANIONFLOAT-01 orchestration normalizes ${prState} and fences clean daemon and hammer routes before cap/owner selection`, async t => {
   const f = closureFixture(t);
   f.args.candidate.prState = prState;

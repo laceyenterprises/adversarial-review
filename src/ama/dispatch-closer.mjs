@@ -6837,7 +6837,12 @@ async function maybeDispatchAmaCloserAttempt({
   const capReport = sharedNextAction.decision.row === 'R07-stop'
     && (sharedNextAction.snapshot.observations.policy?.value?.hammerCap?.retryExhausted
       || sharedNextAction.snapshot.observations.policy?.value?.hammerCap?.lifetimeExhausted);
-  if (!hasHammerDispatchIntent(sharedNextAction, decisionIdentity) && !resumeCertifiedPark && !capReport) {
+  // The shared selector can park a label-only review before hammer admission.
+  // Still reach its existing durable comment/page after ownership reconciliation.
+  const operatorLabelHold = sharedNextAction.decision.action === 'operator-hold'
+    && reviewState?.operatorLabelFindings?.allGated && reviewState.headSha === prMetadata?.headSha
+    && sharedNextAction.decision.reason === reviewState.operatorLabelFindings.gated[0]?.reason;
+  if (!hasHammerDispatchIntent(sharedNextAction, decisionIdentity) && !resumeCertifiedPark && !capReport && !operatorLabelHold) {
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
       ...(hammerDispatchMismatch(selectedNextAction, sharedNextAction, decisionIdentity) || { reason: sharedNextAction.decision.reason }), recoveryWait: true, eligibilityRejected: !verdict.eligible, nextActionShared: sharedNextAction });
   }

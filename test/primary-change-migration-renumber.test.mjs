@@ -50,7 +50,7 @@ for (const indent of ['    ', '\t']) {
   });
 }
 
-test('multiple renumbers sharing a registry retain reversal authorization requirements', async () => {
+function batchFixture() {
   const f = migrationRenumberFixture();
   const secondBody = (revision, predecessor) => f.body(revision, predecessor).replaceAll('create_sample', 'create_other');
   f.evidence.primaryFiles.push({ ...f.evidence.primaryFiles[0], filename: 'app/migrations/043_create_other.py',
@@ -59,9 +59,39 @@ test('multiple renumbers sharing a registry retain reversal authorization requir
     sha: f.blob(secondBody('044', '043')) });
   f.evidence.primaryFiles[1].sha = f.blob(f.registry(42).replace(']\n', '    (43, "043_create_other"),\n]\n'));
   f.evidence.finalFiles[1].sha = f.blob(f.registry(43).replace(']\n', '    (44, "044_create_other"),\n]\n'));
-  assert.equal((await prove(f)).reason, 'primary-change-reverted');
-  assert.deepEqual(f.evidence.migrationRenumberProofs, []);
+  return f;
+}
+
+test('multiple body-verified renumbers sharing a registry are derived together', async () => {
+  const f = batchFixture();
+  assert.equal((await prove(f)).ok, true);
+  assert.equal(f.evidence.migrationRenumberProofs.length, 2);
+  assert.deepEqual(f.evidence.migrationRenumberProofs.map(proof => proof.path),
+    [f.source, 'app/migrations/043_create_other.py']);
 });
+
+for (const [name, modify] of [
+  ['changed sibling operation', f => {
+    f.evidence.finalFiles[2].sha = f.blob(f.body('044', '043').replaceAll('create_sample', 'create_other')
+      .replace('operations.create_table', 'operations.drop_table'));
+  }],
+  ['unrelated registry edit', f => f.registry(43).replace('"sibling"', '"different"')
+    .replace(']\n', '    (44, "044_create_other"),\n]\n')],
+  ['duplicate candidate row', f => f.registry(43)
+    .replace(']\n', '    (44, "044_create_other"),\n    (44, "044_create_other"),\n]\n')],
+  ['missing sibling row', f => f.registry(43)],
+  ['reordered candidate rows', f => f.registry(43)
+    .replace('    (43, "043_create_sample"),\n', '')
+    .replace(']\n', '    (44, "044_create_other"),\n    (43, "043_create_sample"),\n]\n')],
+]) {
+  test(`multiple renumbers refuse ${name}`, async () => {
+    const f = batchFixture();
+    const registry = modify(f);
+    if (typeof registry === 'string') f.evidence.finalFiles[1].sha = f.blob(registry);
+    assert.equal((await prove(f)).reason, 'primary-change-reverted');
+    assert.deepEqual(f.evidence.migrationRenumberProofs, []);
+  });
+}
 
 for (const [name, modify] of [
   ['changed operation', f => { f.evidence.finalFiles[0].sha = f.blob(f.final.replace('create_table', 'drop_table')); }],

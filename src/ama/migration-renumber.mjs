@@ -93,8 +93,9 @@ function migrationBody(text, info) {
   return replace(text, edits);
 }
 
-function registryBody(text, info) {
+function registryBody(text, infos) {
   const list = tokens(text), edits = [];
+  const matches = infos.map(() => 0);
   const rows = new Set();
   for (let index = 0; index < list.length - 2; index++) {
     const declaration = list[index];
@@ -112,11 +113,17 @@ function registryBody(text, info) {
     const [open, number, comma, name, close] = list.slice(index, index + 5);
     const parsed = literal(name);
     if (!rows.has(index) || open.value !== '(' || comma.value !== ',' || close.value !== ')'
-      || !/^\d+$/.test(number.value) || Number(number.value) !== info.number || !parsed?.quote
-      || ![info.name, info.stem, `${info.stem}.py`].includes(parsed.value)) continue;
-    edits.push({ ...number, value: '<revision>' }, { ...name, value: `${parsed.quote}<migration>${parsed.quote}` });
+      || !/^\d+$/.test(number.value) || !parsed?.quote) continue;
+    const candidates = infos.flatMap((info, candidate) => Number(number.value) === info.number
+      && [info.name, info.stem, `${info.stem}.py`].includes(parsed.value) ? [candidate] : []);
+    if (!candidates.length) continue;
+    if (candidates.length !== 1) return null;
+    const candidate = candidates[0];
+    matches[candidate]++;
+    edits.push({ ...number, value: `<revision:${candidate}>` },
+      { ...name, value: `${parsed.quote}<migration:${candidate}>${parsed.quote}` });
   }
-  return edits.length === 2 ? replace(text, edits) : null;
+  return matches.every(count => count === 1) ? replace(text, edits) : null;
 }
 
 function candidates(evidence) {
@@ -167,9 +174,15 @@ export async function proveMigrationRenumbers({ repo, get, signal }, evidence) {
   };
   const proofs = [];
   try {
-    for (const { source, destination, before, after } of pairs) {
-      const original = migrationBody(await blob(source.sha), before);
-      if (original === null || original !== migrationBody(await blob(destination.sha), after)) continue;
+    // Only body-verified pairs may share registry normalization. A changed
+    // operation in a sibling migration must never gain registry authority.
+    const verified = [];
+    for (const pair of pairs) {
+      const original = migrationBody(await blob(pair.source.sha), pair.before);
+      if (original !== null && original === migrationBody(await blob(pair.destination.sha), pair.after)) verified.push(pair);
+    }
+    for (const { source, destination, before } of verified) {
+      const batch = verified.filter(pair => pair.before.directory === before.directory);
       const directory = before.directory.replace(/versions\/$/, '');
       const registries = (evidence.primaryFiles || []).filter(file =>
         posix.dirname(file.filename) + '/' === directory
@@ -178,8 +191,8 @@ export async function proveMigrationRenumbers({ repo, get, signal }, evidence) {
       for (const registry of registries) {
         const final = evidence.finalFiles.find(file => file.filename === registry.filename && file.status === registry.status && SHA.test(file.sha || ''));
         if (!final || final.sha === registry.sha) continue;
-        const initial = registryBody(await blob(registry.sha), before);
-        if (initial === null || initial !== registryBody(await blob(final.sha), after)) continue;
+        const initial = registryBody(await blob(registry.sha), batch.map(pair => pair.before));
+        if (initial === null || initial !== registryBody(await blob(final.sha), batch.map(pair => pair.after))) continue;
         proofs.push({ classification: CLASS, path: source.filename, destination: destination.filename,
           primaryBlob: source.sha, blob: destination.sha, registryPath: registry.filename,
           primaryRegistryBlob: registry.sha, registryBlob: final.sha,

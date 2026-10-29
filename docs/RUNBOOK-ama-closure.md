@@ -3277,12 +3277,11 @@ exempt unrelated registry or source changes. Unsupported layouts, missing or
 unreadable blobs, ambiguous renames and unmatched registries supply no proof;
 the existing reversal authorization still applies.
 
-Registry comparison normalizes one candidate migration at a time. Multiple
-renumbers that change the same registry in one PR therefore supply no proof:
-each candidate sees the other tuple edits as protected byte changes. Such batches
-still require the existing reversal authorization. Batch normalization is a
-future enhancement; it must prove all participating migration bodies before
-allowing their registry edits together.
+Registry comparison normalizes body-verified candidates in the same migrations
+directory together (at most eight candidates per proof collection). Each must
+have exactly one matching tuple in both registry snapshots. Pair-specific
+markers preserve tuple order and identity; duplicate or missing entries,
+changed operations and unrelated registry edits still supply no proof.
 
 Proofs are recomputed after history-cache lookup, without running migration code
 or a generator. They bind both paths, both migration blobs, both registry blobs,

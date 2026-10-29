@@ -197,7 +197,7 @@
       "rejectedReversalAuthorizationOptionalFields": ["detail"],
       "diagnosticCommitRangeEntryFields": ["sha"],
       "diagnosticCollection": "snapshot attribution is operator opt-in only, 20 commits and 15 seconds; shared reads retain commit-file attribution from rename proof reads, capped at 20 commits when no destination exists",
-      "transientMigrationProof": "MIGRENUMBERDERIVED-01: migrationRenumberProofs are hash-verified after history reuse, never cached; evaluator returns head/base/blob-bound mechanical-migration-renumber derivedChanges"
+      "transientMigrationProof": "MIGRENUMBERDERIVED-01: migrationRenumberProofs are hash-verified after history reuse, never cached; body-verified candidates sharing a registry normalize together with unique pair markers and exactly one tuple each; evaluator returns head/base/blob-bound mechanical-migration-renumber derivedChanges"
     },
     {
       "id": "claude-corporate-quota-cooldown",

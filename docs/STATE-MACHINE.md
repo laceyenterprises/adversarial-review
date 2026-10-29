@@ -25,6 +25,12 @@ failure-class list. The exported classifier vocabulary drives the invariant
 across both shapes, including changed-message refusal. Transient model resolution,
 empty output, dispatch failure and adapter spawn timeout retain bounded retries.
 
+PENDINGCLAIM-03: reviewed the per-branch snapshot claimability predicates used
+only to select the zero-row CAS log message. They add no state, status write or
+transition and leave claim admission, CAS SQL and retry budgets unchanged.
+Refreshed the `src/pollonce-phases.mjs` source projection hash for these diagnostic
+status comparisons; the reviewed graph and existing smoke promises are unchanged.
+
 REGISTRYSESSION-02: async entry points call the shared
 `ensureWorkerRegistryReady()` before synchronous governed model selection in
 that process, including reviewer/security children, quota grounding and fallback

@@ -3397,11 +3397,41 @@ Every snapshot is checked against the original author bytes, including staged
 filename/revision repairs. Intermediate declared revisions can lie between the
 author revision and final slot; the final declared revision must match its slot.
 An intermediate snapshot can retain the author filename while its metadata is
-updated. Non-increasing filename observations require a live immutable compare
-reporting divergence between the protected author and final heads, recorded as
-`migrationRenumberAncestry`; no slot may fall below the author's original slot.
-Otherwise chains remain strictly increasing. Every observed body still needs
-proof, and repeated identical observations collapse to the latest head.
+updated. Every Alembic observation now retains its body-verified
+`chain[].revisionNumber`: declared revisions cannot decrease, exceed the final
+slot, or finish at a revision different from that slot, even after divergence.
+Filename resets after divergence still require head-bound `rebased: true` and
+`migrationRenumberAncestry.status: diverged`; no filename slot may fall below
+the author's original slot.
+
+LAC-2127 additionally certifies a bounded ancestral metadata repair for
+`moduleOrigin: author-sql` only. The immutable author-to-final compare must be
+`ahead` with the protected primary as its merge base and a commit count equal
+to the full diagnostic range. Every adjacent snapshot must independently be
+one commit ahead of its predecessor, including the primary-to-first step.
+After all existing wrapper/SQL/module/registry proofs succeed, the proof also
+requires a unique selected predecessor wrapper in every snapshot and the
+protected primary. That wrapper, its SQL source and ordinal operation module
+must be byte-identical to each snapshot's independently selected base. Before
+module introduction, the entire registry must also equal that base. After
+introduction, the existing exact insertion and module-identity proof applies.
+Unreadable, absent, ambiguous or changed predecessor evidence refuses with
+`repair-predecessor-unproven` (read failures retain their existing diagnostics).
+
+Such proofs carry `metadataRepair: true`, head-bound `ahead` ancestry with the
+protected primary merge base, and ordered `parentOperations` bindings for the
+primary plus every diagnostic snapshot. Equal filename observations may change
+only independently proven metadata at the same path. A filename reset requires
+a strictly advancing declared revision. A real declared-revision decrease,
+reset without revision advancement, unexplained edit or skipped history still
+refuses. This does not authorize a general ancestral renumber rollback. Other
+chains retain their existing increasing filename rule. Repeated identical
+wrapper observations collapse to the latest head only after every snapshot has
+been independently checked; parent bindings retain every observation.
+
+The offline immutable PR9692 corpus and boundary tests are documented in
+[test/fixtures/migration-renumber-9692/README.md](../test/fixtures/migration-renumber-9692/README.md).
+See the [SEV3 RCA](postmortems/SEV3-LAC-2127-migration-metadata-repair-2026-10-29.md).
 
 `proveMigrationRenumbers` retains its array return and records failed attempts
 on the supplied transient evidence as `migrationRenumberDiagnostics`, with

@@ -1,5 +1,14 @@
 # Adversarial Review
 
+LAC-2127: SQL-origin migration proofs can certify an ancestral filename/metadata
+repair only after verifying every snapshot, monotonic declared revisions, exact
+adjacent ancestry and base-identical predecessor operations. The immutable
+PR9692 replay and negative boundaries remain offline. See the
+[renumber contract](docs/RUNBOOK-ama-closure.md#mechanical-migration-renumbers-migrenumberderived-01)
+and [SEV3 RCA](docs/postmortems/SEV3-LAC-2127-migration-metadata-repair-2026-10-29.md).
+Lifecycle states and existing smoke promises are unchanged. Reviewed source
+merge, normal deployment and organic queue recovery remain separate acceptance.
+
 CLOSURELAGFALSE-01: closure-lag diagnostics record inline merges at the shared
 merge boundary, preserve terminal entries against stale eligibility and backlog
 observations, and check live PR state before an undelivered per-PR breach page.

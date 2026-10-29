@@ -997,9 +997,16 @@ bound to the protected author/head/base and source/destination/registry blobs.
 Alembic wrapper/module/explicit-module-registry layouts also bind the paired
 revision module and retain the observed renumber chain from the protected author
 head. MIGRENUMBERDERIVED-03 also binds author-SQL proofs to unchanged SQL and a
-literal module/registry insertion against each snapshot's base. Non-monotonic
-chains require head-bound divergence evidence, `rebased: true`, and no slot
-below the author slot; other chains remain strictly increasing. Optional proof
+literal module/registry insertion against each snapshot's base. Declared Alembic
+revisions remain monotonic through every snapshot, including diverged histories.
+Filename resets require head-bound divergence evidence, `rebased: true`, and no
+slot below the author slot, or the SQL-origin ancestral metadata repair proof
+(LAC-2127): exact adjacent ancestry, an advancing declared revision on a filename
+reset, and independently base-identical predecessor wrapper/SQL/module operations
+in the primary and every snapshot. The latter carries `metadataRepair: true`,
+`ahead` ancestry and ordered `parentOperations`; same-path metadata corrections
+also require those certificates. Other filename chains remain strictly
+increasing. Optional proof
 diagnostics stay outside deterministic refusal identity and bounded region
 summaries. Every observed snapshot must preserve the original
 operations; a registry swap without its paired module supplies no proof.

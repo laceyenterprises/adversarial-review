@@ -1,10 +1,12 @@
+import { withRepositoryStateCycle } from '../repository-state-lock.mjs';
+import { canonicalRepositoryArguments } from '../repository-names.mjs';
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 // Refusals retain the merge hold. The closer owns scoped recovery; this store
 // only counts observations and deduplicates its SEV1 page.
-export async function recordPrimaryChangeRefusal({ rootDir, repo, prNumber, headSha, reasons }, {
+async function recordPrimaryChangeRefusalWithinRepositoryState({ rootDir, repo, prNumber, headSha, reasons }, {
   page, logger = console,
 }) {
   if (!rootDir || !repo || !headSha) return;
@@ -34,4 +36,9 @@ export async function recordPrimaryChangeRefusal({ rootDir, repo, prNumber, head
       }
     }
   } finally { db.close(); }
+}
+
+export async function recordPrimaryChangeRefusal(args = {}, ...rest) {
+  return withRepositoryStateCycle(args.rootDir, () =>
+    recordPrimaryChangeRefusalWithinRepositoryState(canonicalRepositoryArguments(args.rootDir, args), ...rest));
 }

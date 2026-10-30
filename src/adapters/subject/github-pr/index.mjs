@@ -211,6 +211,7 @@ function createGitHubPRSubjectAdapter({
   recordApiCall = null,
   env = process.env,
   prTrustGate = null,
+  observeRepository = null,
   log = console,
 } = {}) {
   // UNTRUSTEDPR-01: discovery is the single intake for every watcher path
@@ -314,11 +315,13 @@ function createGitHubPRSubjectAdapter({
         prNumber,
       }, () => readAdapterPullRequest(repo, prNumber, { execFileImpl, rootDir, env }));
       if (adapterPr) {
+        if (adapterPr.base?.repo?.id) observeRepository?.(adapterPr.base.repo);
         const snapshot = normalizePRSnapshot(repo, adapterPr);
         setCache(snapshot);
         return snapshot;
       }
-    } catch {
+    } catch (error) {
+      if (['REPOSITORY_STATE_BUSY', 'REPOSITORY_IDENTITY_CONFLICT'].includes(error.code)) throw error;
       // The common adapter is optional during rollout; fall back to Octokit.
     }
     if (!octokit?.rest?.pulls?.get) {
@@ -330,6 +333,7 @@ function createGitHubPRSubjectAdapter({
       repo: repoName,
       pull_number: prNumber,
     }));
+    if (data?.base?.repo?.id) observeRepository?.(data.base.repo);
     const snapshot = normalizePRSnapshot(repo, data);
     setCache(snapshot);
     return snapshot;
@@ -376,6 +380,7 @@ function createGitHubPRSubjectAdapter({
         let adapterPulls = null;
         const seenSubjectExternalIds = new Set();
         const appendSnapshot = async (pr) => {
+          if (pr.base?.repo?.id) observeRepository?.(pr.base.repo);
           const snapshot = normalizePRSnapshot(repoPath, pr);
           if (seenSubjectExternalIds.has(snapshot.subjectExternalId)) {
             const previous = snapshotBySubjectExternalId.get(snapshot.subjectExternalId);
@@ -439,6 +444,7 @@ function createGitHubPRSubjectAdapter({
             await appendSnapshot(pr);
           }
         } catch (err) {
+          if (['REPOSITORY_STATE_BUSY', 'REPOSITORY_IDENTITY_CONFLICT'].includes(err.code)) throw err;
           octokitListError = err;
           try {
             const data = await withApiTelemetry('pr_view', {

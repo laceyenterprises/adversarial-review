@@ -13,6 +13,13 @@ budgets across process restarts. All callers must supply the same watcher
 `rootDir`; `HQ_ROOT` is only the managed attestation root, never a budget root.
 Without a watcher root, recovery and paging do nothing.
 
+New records also store their complete unhashed `identity`. Repository rename
+replay moves that identity and its digest filename while retaining the budget.
+Older digest-only records resolve their exact historical key on access. If a
+historical name has been reused by another repository ID, ambiguous legacy
+evidence refuses recovery instead of combining the two repositories. See
+[repository identity](repository-identities.md).
+
 | Identity | Fields | Contract |
 |---|---|---|
 | `rerun:<lowercase repo>:<headSha>:<runId>:<trimmed lowercase check>` | `runId`, `attempt`, `headSha`, `check`, `requestedAt` | Records the first observed cancelled or infrastructure-failed run/attempt for a check/head. This observation alone does not consume the POST budget. |

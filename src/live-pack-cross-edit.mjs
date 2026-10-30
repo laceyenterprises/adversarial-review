@@ -696,7 +696,15 @@ async function applyLivePackCrossEditReview(reviewText, {
       );
     }
   } catch (err) {
-    findings = inconclusiveFindingsForDiff({ diffText: diff, labels: currentLabels, error: err });
+    // Build candidates without a waiver first so the audit records only actual
+    // guarded paths, never an unrelated diff that happens to carry the label.
+    const candidates = inconclusiveFindingsForDiff({ diffText: diff });
+    const waived = candidates.length > 0 && normalizeLabelNames(currentLabels).has(LIVE_PACK_EDIT_WAIVER_LABEL);
+    findings = waived ? [] : candidates;
+    if (waived) {
+      waiverAudit = `\n\n> Operator waiver observed by this fresh review: \`${LIVE_PACK_EDIT_WAIVER_LABEL}\` `
+        + `waived \`${LIVE_PACK_CROSS_EDIT_KIND}\` for ${candidates.length} pack(s).`;
+    }
     log?.error?.(
       `[reviewer] WARN: live-pack cross-edit check failed for ${repo}#${prNumber}; failing closed: ${err?.message || err}`,
     );

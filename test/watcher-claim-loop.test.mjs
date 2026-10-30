@@ -457,7 +457,7 @@ try {
   const octokit = {
     paginate: async (_fn, params) => {
       githubCalls.push({ kind: 'paginate', params });
-      return [{ name: 'adversarial-review', archived: false }];
+      return [{ id: 123, node_id: 'R_fixture123', name: 'adversarial-review', archived: false }];
     },
     rest: {
       repos: {
@@ -585,7 +585,7 @@ try {
   const octokit = {
     paginate: async (_fn, params) => {
       githubCalls.push({ kind: 'paginate', params });
-      return [{ name: 'adversarial-review', archived: false }];
+      return [{ id: 123, node_id: 'R_fixture123', name: 'adversarial-review', archived: false }];
     },
     rest: {
       repos: {
@@ -3678,8 +3678,8 @@ test('GHSCOPE-01: a rate-limited first discovery still fetches other repository 
         assert.ok(lists.some(repo => repo.endsWith('/gamma')), JSON.stringify(lists));
       `,
     });
-    runner = runner.replace("return [{ name: 'adversarial-review', archived: false }];",
-      "return ['alpha', 'beta', 'gamma'].map(name => ({ name, archived: false }));");
+    runner = runner.replace("return [{ id: 123, node_id: 'R_fixture123', name: 'adversarial-review', archived: false }];",
+      "return ['alpha', 'beta', 'gamma'].map((name, index) => ({ id: 123 + index, node_id: 'R_fixture' + index, name, archived: false }));");
     // Only rewrite fixture identities: the checkout path in import URLs may
     // itself contain the owner name (for example a remediation workspace).
     writeFileSync(runnerPath, runner.replaceAll("'laceyenterprises/adversarial-review'", "'example/adversarial-review'"));
@@ -3937,6 +3937,61 @@ for (const mode of ['dispatch', 'credential-hold', 'ceiling', 'expired', 'no-int
     } finally { rmSync(tmp, { recursive: true, force: true }); }
   });
 }
+
+test('REPORENAME-01: the next watcher cycle keeps the existing review after a stable-id rename', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'repository-poll-'));
+  const loaderPath = path.join(tmp, 'loader.mjs');
+  const registerPath = path.join(tmp, 'register.mjs');
+  const runnerPath = path.join(tmp, 'runner.mjs');
+  const synthetic = source => seatIdleSynthetic(source).replaceAll('example/review-fixture', 'example-org/alpha');
+  try {
+    let loader = buildLoaderSource({ discoveryHookSource: `
+      if (globalThis.__repositoryRenamed) {
+        for (const subject of subjects) subject.ref.subjectExternalId =
+          subject.ref.subjectExternalId.replace('example-org/alpha#', 'example-org/beta#');
+      }
+    ` });
+    loader = loader.replace('  return nextLoad(url, context);', `
+      if (url === ${JSON.stringify(fileUrl('src', 'watcher.mjs'))}) {
+        const loaded = await nextLoad(url, context);
+        return { ...loaded, source: loaded.source.toString().replace(
+          "const config = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'));",
+          "const config = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8')); config.org = null; config.repos = ['example-org/alpha'];"
+        ) };
+      }
+      return nextLoad(url, context);
+    `);
+    writeFileSync(loaderPath, synthetic(loader));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, synthetic(buildRunnerSource({ afterFirstPoll: `
+      const { observeRepositoryIdentity } = await import(${JSON.stringify(fileUrl('src', 'repository-identity.mjs'))});
+      db.prepare("UPDATE reviewed_prs SET review_status='posted', posted_at='2026-10-30' WHERE pr_number=101").run();
+      const before = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=101').get();
+      const passes = db.prepare('SELECT * FROM reviewer_passes WHERE pr_number=101').all();
+      const spawns = (globalThis.__watcherClaimLoopReviewerSpawns || []).length;
+      const identity = { db, rootDir: ${JSON.stringify(tmp)}, repository: { id: 123, full_name: 'example-org/alpha', node_id: 'R_fixture123' } };
+      observeRepositoryIdentity(identity);
+      observeRepositoryIdentity({ ...identity, repository: { ...identity.repository, full_name: 'example-org/beta' } });
+      globalThis.__repositoryRenamed = true;
+      await pollOnce(octokit, pollOptions);
+      const after = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=101').get();
+      assert.equal(after.repo, 'example-org/beta');
+      assert.equal(after.review_status, 'posted');
+      assert.equal(after.review_attempts, before.review_attempts);
+      assert.equal(db.prepare('SELECT count(*) AS n FROM reviewed_prs WHERE pr_number=101').get().n, 1);
+      assert.deepEqual(db.prepare('SELECT pass_id FROM reviewer_passes WHERE pr_number=101').all(),
+        passes.map(pass => ({ pass_id: pass.pass_id })));
+      assert.equal((globalThis.__watcherClaimLoopReviewerSpawns || []).length, spawns);
+    ` })));
+    const env = installGhFixture(tmp);
+    const ghPath = path.join(tmp, 'gh');
+    writeFileSync(ghPath, synthetic(readFileSync(ghPath, 'utf8')));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(env), timeout: 60000 });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
 
 for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 'unreadable', 'slow-settlement', 'durable-refill']) {
   test(stale === 'slow-settlement'

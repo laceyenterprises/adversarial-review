@@ -66,11 +66,13 @@ test('CI finding adds a missing blocking section and updates the actual verdict 
 });
 
 for (const status of ['in_progress', 'inProgress', 'pending']) {
-  test(`failed CI keeps ${status} remediation active without requeueing or warnings`, async () => {
+  test(`failed CI keeps ${status} remediation active without requeueing or warnings`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'active-ci-remediation-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     const job = { status };
     const ciGate = { state: 'failed', headSha: 'head-red', failedChecks: [{ name: 'check', state: 'FAILURE' }] };
     const result = await guardRereviewCiBeforeReviewer({
-      rootDir: '/unused', repo: 'fixture/repo', prNumber: 42, passKind: 'rereview', reviewerHeadSha: 'head-red',
+      rootDir, repo: 'fixture/repo', prNumber: 42, passKind: 'rereview', reviewerHeadSha: 'head-red',
       inspectCiImpl: async () => ciGate,
       latestJobFinder: () => ({ jobPath: '/unused/job.json', job }),
       requeueImpl: () => assert.fail('active remediation must bypass requeue'),
@@ -189,10 +191,12 @@ for (const finalRound of [true, false]) {
   });
 }
 
-test('suppression alone does not bypass failed-CI requeue', async () => {
+test('suppression alone does not bypass failed-CI requeue', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'suppression-ci-remediation-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   let requeued = false;
   const result = await guardRereviewCiBeforeReviewer({
-    rootDir: '/unused', repo: 'fixture/repo', prNumber: 42, passKind: 'rereview',
+    rootDir, repo: 'fixture/repo', prNumber: 42, passKind: 'rereview',
     reviewerHeadSha: 'head-red', log: silentLog(),
     inspectCiImpl: async () => ({ state: 'failed', headSha: 'head-red',
       failedChecks: [{ name: 'synthetic-ci', state: 'FAILURE' }] }),

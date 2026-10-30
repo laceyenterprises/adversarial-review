@@ -576,9 +576,9 @@ async function main(argv, {
 	}
   if (!targetRevisionRef) {
     try {
-      targetRevisionRef = resolveReviewHead(reviewRow) || await fetchCurrentHeadShaImpl({
+      targetRevisionRef = await fetchCurrentHeadShaImpl({
         repo: values.repo, prNumber: values.pr,
-      });
+      }) || resolveReviewHead(reviewRow);
       baseAudit.targetRevisionRef = targetRevisionRef;
     } catch (err) {
       stderr.write(`error: could not resolve re-review head: ${err.message}\n`);

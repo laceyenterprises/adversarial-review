@@ -479,11 +479,8 @@ test('posting-time labels revoke in-flight waivers and failed reads grant no wai
       });
       if (scenario === 'still-present') {
         assert.ok(body.startsWith(REVIEW_TEXT));
-        if (evaluationFails) assert.equal(body, REVIEW_TEXT);
-        else {
-          assert.match(body, /Operator waiver observed by this fresh review/);
-          assert.match(body, /`live-pack-edit-approved` waived `live_pack_cross_edit`/);
-        }
+        assert.match(body, /Operator waiver observed by this fresh review/);
+        assert.match(body, /`live-pack-edit-approved` waived `live_pack_cross_edit`/);
         assert.equal(reviewBodyHasLivePackCrossEditFinding(body), false);
       } else {
         assert.equal(normalizeEffectiveReviewVerdict(body, { log: null }), 'request-changes');
@@ -771,4 +768,19 @@ test('LIVEPACKSTAMP-01: only App ([bot]) logins of the post-merge-actions entitl
     log: { warn() {} },
   });
   assert.equal(unreadable.size, 0);
+});
+
+
+test('inconclusive fallback audits a fresh waiver only for guarded pack paths', async () => {
+  for (const guarded of [true, false]) {
+    const body = await applyLivePackCrossEditReview(REVIEW_TEXT, {
+      repo: REPO, prNumber: 7392,
+      diff: diffFor(guarded ? CROSS_EDIT_PATHS : ['src/unrelated.mjs']),
+      labels: [LIVE_PACK_EDIT_WAIVER_LABEL], log: null,
+      evaluateImpl: async () => { throw new Error('synthetic evaluation transport failure'); },
+    });
+    assert.equal(body.includes('Operator waiver observed by this fresh review'), guarded);
+    if (guarded) assert.match(body, /for 1 pack\(s\)/);
+    assert.equal(normalizeEffectiveReviewVerdict(body, { log: null }), normalizeEffectiveReviewVerdict(REVIEW_TEXT, { log: null }));
+  }
 });

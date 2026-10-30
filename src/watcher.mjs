@@ -1,3 +1,4 @@
+import { createRepositoryRefresher } from './watcher-repository-discovery.mjs';
 import { ensureWorkerRegistryReady } from './adapters/agent-runtime/local/remediation.mjs';
 import { prepareDispatchReadContext } from './dispatch-read-client.mjs';
 import { shutdownAmaHammerBackgroundQueue } from './ama-hammer-background-dispatch.mjs';
@@ -21,6 +22,10 @@ import { basename, dirname, join } from 'node:path';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import { normalizeGithubMergeability, resolveMergeabilityWithSampling } from './github-mergeability.mjs';
 import { createGitHubPRSubjectAdapter, parseSubjectExternalId } from './adapters/subject/github-pr/index.mjs';
+import {
+  canonicalRepositoryName, observeRepositoryIdentity, recoverRepositoryObservations,
+} from './repository-identity.mjs';
+import { withRepositoryStateCycle } from './repository-state-lock.mjs';
 import {
   FAST_MERGE_CATEGORY_BY_LABEL,
   buildFastMergeAuditEntry,
@@ -1074,69 +1079,15 @@ function createWatcherOperatorSurface() {
 // ── Org repo discovery ───────────────────────────────────────────────────────
 
 let activeRepos = config.repos ?? [];
-let lastRepoRefresh = 0;
 const adversarialGateBranchProtectionChecker = createBranchProtectionChecker({
   execFileImpl: execFileAsync,
 });
 
+const refreshRepositories = createRepositoryRefresher({ config, db, rootDir: ROOT,
+  additionalStateDir: ADVERSARIAL_REVIEW_STATE_DIR, recordApiCall, apiStatusFromResult,
+  apiStatusFromError, deliverAlert: defaultDeliverAlert });
 async function refreshOrgRepos(octokit) {
-  if (!config.org) return;
-
-  const now = Date.now();
-  const refreshInterval = config.repoRefreshIntervalMs ?? 3_600_000;
-  if (now - lastRepoRefresh < refreshInterval) return;
-
-  const repoLabel = config.org ? `${config.org}/*` : null;
-  const params = {
-    org: config.org,
-    type: 'all',
-    per_page: 100,
-  };
-
-  try {
-    const all = [];
-    if (typeof octokit.paginate?.iterator === 'function') {
-      for await (const response of octokit.paginate.iterator(octokit.rest.repos.listForOrg, params)) {
-        recordApiCall({
-          category: 'other',
-          repo: repoLabel,
-          status: apiStatusFromResult(response),
-          durationMs: null,
-        });
-        all.push(...(response?.data || []));
-      }
-    } else {
-      const startedAt = Date.now();
-      const repos = await octokit.paginate(octokit.rest.repos.listForOrg, params);
-      recordApiCall({
-        category: 'other',
-        repo: repoLabel,
-        status: 200,
-        durationMs: Date.now() - startedAt,
-      });
-      for (const repo of repos) all.push(repo);
-    }
-
-    const excluded = new Set(config.excludeRepos ?? []);
-    const discoveredRepos = all
-      .filter((r) => !r.archived && !excluded.has(r.name) && !excluded.has(`${config.org}/${r.name}`))
-      .map((r) => `${config.org}/${r.name}`);
-    activeRepos = [...new Set([...(config.repos || []), ...discoveredRepos])];
-
-    console.log(`[watcher] Org repos refreshed — watching ${activeRepos.length} repos: ${activeRepos.join(', ')}`);
-  } catch (err) {
-    recordApiCall({
-      category: 'other',
-      repo: repoLabel,
-      status: apiStatusFromError(err),
-      durationMs: null,
-    });
-    console.error(`[watcher] Failed to list org repos for ${config.org}:`, err.message);
-  } finally {
-    // Respect the refresh interval after failures too; retrying every poll tick
-    // amplifies outages and rate limiting into a tight API loop.
-    lastRepoRefresh = now;
-  }
+  activeRepos = await refreshRepositories(octokit, activeRepos);
 }
 
 // ── Lifecycle sync, post-review adoption phase, reviewer-timeout handoff ──────
@@ -1158,9 +1109,53 @@ async function refreshOrgRepos(octokit) {
  * operator sync or reviewer spawn.
  */
 let watcherLatencyMonitor;
+let repositoryGeneration = 0;
+function prepareReviewerAdmissionForPoll() {
+  const reviewerBurstController = createReviewerBurstController({ rootDir: ROOT, logger: console, readSpendUsd: readBurstScopedReviewerSpendUsd }), reviewerPoolConfig = resolveFirstPassReviewerPoolConfig({ watcherConfig: config, burstSlots: reviewerBurstController.slots() }); // RPL-07: burstSlots is 0 unless an operator lease is active, leaving steady-state capacity untouched
+  const reviewerDispatchSingleWaveSettleGraceMs = Math.max(
+    0,
+    Number.parseInt(
+      String(process.env.ADVERSARIAL_REVIEWER_DISPATCH_SINGLE_WAVE_SETTLE_GRACE_MS || ''),
+      10,
+    ) || 0,
+  ) || undefined;
+  const admissionSettlementSplitEnabled = !['0', 'false', 'no', 'off'].includes(String(process.env.ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT ?? '').trim().toLowerCase());
+  console.log(`[watcher] reviewer admission settlement split ${admissionSettlementSplitEnabled ? 'enabled' : 'disabled'} (ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT=${process.env.ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT ?? '<unset>'})`);
+  const firstPassSpilloverController = createFirstPassSpilloverController({ rootDir: ROOT, readHeld: countHeldOpenPrs, readDepth: countOpenPrsAwaitingReview, readRereviewDepth: countOpenPrsAwaitingReview, logger: console }); // RSP-01/RSPREREVIEW-01: disarmed unless CFG arms it
+  const drainReviewerDispatchCandidates = reviewerAdmission.drain;
+  reviewerAdmission.setDrain(createReviewerDispatchDrain({
+    reviewerPoolConfig, reviewerDispatchCandidates, firstPassSpilloverController,
+    detachedReviewerDispatchTracker, readWatcherDrainState,
+    resolveGeminiCredentialConcurrencyForDispatchCandidates,
+    singleWaveSettleGraceMs: reviewerDispatchSingleWaveSettleGraceMs,
+    splitPostReviewSettlement: admissionSettlementSplitEnabled,
+  }));
+  return { reviewerBurstController, reviewerPoolConfig, firstPassSpilloverController, admissionSettlementSplitEnabled, drainReviewerDispatchCandidates };
+}
+
 async function pollOnce(octokit, options = {}) {
+  await refreshWatcherAuthenticationForTick({ log: console });
+  recoverRepositoryObservations({ db, rootDir: ROOT, additionalStateDir: ADVERSARIAL_REVIEW_STATE_DIR });
+  const admission = await withRepositoryStateCycle(ROOT, async () => {
+    resetRoleConfigCache();
+    const prepared = prepareReviewerAdmissionForPoll();
+    const { drainReviewerDispatchCandidates } = prepared;
+    await drainReviewerDispatchCandidates('poll-start retained candidates');
+    return prepared;
+  });
+  await withGitHubBudgetScope({}, () => refreshOrgRepos(octokit));
+  activeRepos = [...new Set(activeRepos.map(name => canonicalRepositoryName(db, name)))];
+  const generation = db.prepare('SELECT count(*) AS n FROM repository_rename_audit').get().n;
+  if (generation !== repositoryGeneration) {
+    // Candidates capture closures with repo-specific policy and adapter caches.
+    // Durable pending rows refill them under the new identity on this tick.
+    reviewerDispatchCandidates.splice(0);
+    reviewerRefillContexts.clear();
+    startupReviewerAdmissionPending = true;
+    repositoryGeneration = generation;
+  }
   watcherLatencyMonitor ??= createWatcherLatencyMonitor();
-  return withHoldRecordPoll(() => watcherLatencyMonitor.poll(() => withGitHubAdapterReadTick(() => withClosureEvaluationReadCache(() => withGitHubBudgetScope({}, () => pollOnceWithinBudget(octokit, options))))));
+  return withRepositoryStateCycle(ROOT, () => withHoldRecordPoll(() => watcherLatencyMonitor.poll(() => withGitHubAdapterReadTick(() => withClosureEvaluationReadCache(() => withGitHubBudgetScope({}, () => pollOnceWithinBudget(octokit, options, admission)))))));
 }
 
 async function pollOnceWithinBudget(
@@ -1169,7 +1164,8 @@ async function pollOnceWithinBudget(
     healthProbe = watcherHealthProbe,
     ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
     afterClaim = null, wakePayload = null, consumeWakePayload = null,
-  } = {}
+  } = {},
+  { reviewerBurstController, reviewerPoolConfig, firstPassSpilloverController, admissionSettlementSplitEnabled, drainReviewerDispatchCandidates }
 ) {
   // CFG-09: per-tick boundary for the role-config cascade cache. Drop
   // the cached AgentOSConfig so this tick re-resolves env + config.yaml
@@ -1181,23 +1177,11 @@ async function pollOnceWithinBudget(
   resetRoleConfigCache();
   refreshReviewerRuntimeAdapter();
   assertReviewDbWritesRoundTrip(db);
-  await refreshWatcherAuthenticationForTick({ log: console });
   watcherHeartbeat?.markPollProgress?.();
   const wakePayloadForPoll = createWatcherWakePayloadAccessor({ initialPayload: wakePayload, consumeWakePayload });
   const healthTick = healthProbe?.beginTick?.();
-  const reviewerBurstController = createReviewerBurstController({ rootDir: ROOT, logger: console, readSpendUsd: readBurstScopedReviewerSpendUsd }), reviewerPoolConfig = resolveFirstPassReviewerPoolConfig({ watcherConfig: config, burstSlots: reviewerBurstController.slots() }); // RPL-07: burstSlots is 0 unless an operator lease is active, leaving steady-state capacity untouched
-  const reviewerDispatchSingleWaveSettleGraceMs = Math.max(
-    0,
-    Number.parseInt(
-      String(process.env.ADVERSARIAL_REVIEWER_DISPATCH_SINGLE_WAVE_SETTLE_GRACE_MS || ''),
-      10,
-    ) || 0,
-  ) || undefined;
-  const admissionSettlementSplitEnabled = !['0', 'false', 'no', 'off'].includes(String(process.env.ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT ?? '').trim().toLowerCase());
-  console.log(`[watcher] reviewer admission settlement split ${admissionSettlementSplitEnabled ? 'enabled' : 'disabled'} (ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT=${process.env.ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT ?? '<unset>'})`);
   const reviewerMemoryPressureConfig = resolveReviewerMemoryPressureConfig();
   const { retainedWatcherWakes, priorityDiscoveryPending } = createWatcherDispatchPriority({ rootDir: ROOT, db });
-  const firstPassSpilloverController = createFirstPassSpilloverController({ rootDir: ROOT, readHeld: countHeldOpenPrs, readDepth: countOpenPrsAwaitingReview, readRereviewDepth: countOpenPrsAwaitingReview, logger: console }); // RSP-01/RSPREREVIEW-01: disarmed unless CFG arms it
   const postedReviewHandlers = [], holdSubjects = [];
   const mergeAgentCandidateBranchProtectionCache = new Map();
   const postReviewMaintenanceHandlers = [], reviewerTickCaches = { fleetQuotaStatus: new Map() }, reviewerQuotaPoll = beginReviewerQuotaPoll(execFileAsync);
@@ -1208,20 +1192,11 @@ async function pollOnceWithinBudget(
   const getRoutingTierReadinessForTick = createRoutingTierReadinessProbeCache();
   const getHcpHealthzForTick = createTickHcpHealthzProbe();
   const reviewerCommandFailedReviewProbe = makeReviewPostedProbe(octokit);
-  const drainReviewerDispatchCandidates = reviewerAdmission.drain;
-  reviewerAdmission.setDrain(createReviewerDispatchDrain({
-    reviewerPoolConfig, reviewerDispatchCandidates, firstPassSpilloverController,
-    detachedReviewerDispatchTracker, readWatcherDrainState,
-    resolveGeminiCredentialConcurrencyForDispatchCandidates,
-    singleWaveSettleGraceMs: reviewerDispatchSingleWaveSettleGraceMs,
-    splitPostReviewSettlement: admissionSettlementSplitEnabled,
-  }));
   const drainReviewerDispatchCandidatesIfBatchReady = createWatcherDiscoveryBatchDrain({
     priorityDiscoveryPending, reviewerDispatchCandidates, batchSize: Math.max(1, reviewerPoolConfig.maxConcurrent || 1),
     countOpenPrsAwaitingFirstPassReview, drain: drainReviewerDispatchCandidates,
   });
   try {
-    await drainReviewerDispatchCandidates('poll-start retained candidates');
     watcherHeartbeat?.markPollProgress?.();
     if (await runLowBudgetWatcherPoll({ db, activeRepos, rootDir: ROOT,
       domainId: WATCHER_PRIMARY_DOMAIN_ID, execFileImpl: execFileAsync,
@@ -1237,7 +1212,6 @@ async function pollOnceWithinBudget(
       log: console,
     });
     const operatorSurface = createWatcherOperatorSurface();
-    await refreshOrgRepos(octokit);
     watcherHeartbeat?.markPollProgress?.();
     let watcherDrain = readWatcherDrainState();
   // Build domain/repo policy contexts before discovery so startup can refill
@@ -1273,6 +1247,8 @@ async function pollOnceWithinBudget(
       octokit,
       repos: [repoPath],
       rootDir: ROOT,
+      observeRepository: repository => observeRepositoryIdentity({ db, rootDir: ROOT,
+        additionalStateDir: ADVERSARIAL_REVIEW_STATE_DIR, repository }),
       execFileImpl: execFileAsync,
       recordApiCall,
       // ARC-19: inject workspace preparation lazily from the composition root.
@@ -1429,6 +1405,7 @@ async function pollOnceWithinBudget(
       subjectRefs = await subjectAdapter.discoverSubjects();
       watcherHeartbeat?.markPollProgress?.();
     } catch (err) {
+      if (['REPOSITORY_STATE_BUSY', 'REPOSITORY_IDENTITY_CONFLICT'].includes(err.code)) throw err;
       console.error(`[watcher] Failed to fetch PRs for ${repoPath}:`, err.message);
       reconcileWatcherPriorityDiscoveryPending(priorityDiscoveryPending, { repoPath, discoveredPrNumbers: new Set() });
       continue;
@@ -1446,6 +1423,7 @@ async function pollOnceWithinBudget(
         const { prNumber } = parseSubjectExternalId(subject.ref.subjectExternalId);
         return { subjectRef, subject, prNumber };
       } catch (err) {
+        if (['REPOSITORY_STATE_BUSY', 'REPOSITORY_IDENTITY_CONFLICT'].includes(err.code)) throw err;
         console.error(`[watcher] Failed to fetch subject state for ${subjectRef.subjectExternalId}:`, err.message);
         return null;
       }

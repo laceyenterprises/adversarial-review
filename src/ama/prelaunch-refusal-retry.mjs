@@ -1,3 +1,4 @@
+import { repositoryObservationCache } from '../repository-state-cache.mjs';
 // NOOWNER-01 (SEV1) — a hammer that never launched keeps an owner.
 //
 // On 2026-10-10 agent-os PRs 8005, 7997, 8025 and 8017 each hit a provisioning
@@ -33,7 +34,7 @@ const REFUSAL_TEXT_LIMIT = 600;
 // Process-local debounce, as for the hammer retry-cap page: if the record write
 // keeps failing, the persisted page marker never lands and every tick would
 // page again. A watcher restart clears it, which re-pages at most once.
-const PAGED_IN_PROCESS = new Set();
+const PAGED_IN_PROCESS = repositoryObservationCache(new Set());
 
 export function _resetPrelaunchRefusalPageDebounceForTests() {
   PAGED_IN_PROCESS.clear();

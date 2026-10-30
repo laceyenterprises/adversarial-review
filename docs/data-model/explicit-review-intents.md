@@ -36,8 +36,13 @@ refuses the request and posts a visible reason. Failed delivery retries across
 restart. Consumed/refused receipts cannot authorize another dispatch.
 Runtime dispatch failure moves the consumed receipt to refused and reports it
 visibly; it never rearms that request.
+Without an explicit `--head-sha`, the retrigger CLI resolves the live GitHub head
+before using an empty-response cache fallback. Lookup failures refuse the request
+without minting an intent. Explicit head requests retain their existing binding.
+
 The fresh review records an observed `live-pack-edit-approved` waiver in its
-body; historical findings and normal merge eligibility remain unchanged.
+body even when the live-pack evaluation throws, but only if guarded pack paths
+were actually waived. Historical findings and normal merge eligibility remain unchanged.
 
 Activation requires the watcher restart at deploy. SRE retains the next organic
 unchanged-head request's fresh-review and intent-consumed log receipt within the

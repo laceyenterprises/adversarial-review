@@ -1,3 +1,5 @@
+import { withRepositoryStateCycle } from '../repository-state-lock.mjs';
+import { canonicalRepositoryArguments } from '../repository-names.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -49,7 +51,7 @@ export function primaryChangeReadStatus({ rootDir, repo, prNumber, headSha }) {
   return entry ? `primary-change read still running, ${Math.floor((Date.now() - entry.startedAt) / 1000)} seconds` : null;
 }
 
-export async function storedPrimaryChange(args, compute) {
+async function storedPrimaryChangeWithinRepositoryState(args, compute) {
   const path = pathFor(args);
   assertStoreOwner(args.rootDir, path);
   try {
@@ -107,4 +109,11 @@ export function sweepPrimaryChangeStore(rootDir, { nowMs = Date.now() } = {}) {
     rmSync(entry.path, { force: true });
   }
   return expired.map(entry => entry.path);
+}
+
+export async function storedPrimaryChange(args = {}, ...rest) {
+  // Ownership refusal must precede even creation of the migration fence.
+  assertStoreOwner(args.rootDir, pathFor(args));
+  return withRepositoryStateCycle(args.rootDir, () =>
+    storedPrimaryChangeWithinRepositoryState(canonicalRepositoryArguments(args.rootDir, args), ...rest));
 }

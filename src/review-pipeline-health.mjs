@@ -58,6 +58,7 @@ import {
   reviewerDispatchPassKind,
 } from './watcher-reviewer-pool.mjs';
 import { hammerWakeAuditDir, readHammerWakeAudit } from './hammer-wake.mjs';
+import { expiredNextActionDeadline } from './next-action-deadline.mjs';
 import { summarizeArgusSecurityQueue } from './argus-security-health.mjs';
 import { summarizeReviewerBurst } from './reviewer-burst-lease.mjs';
 import { readReviewerCredentialOutage } from './reviewer-cascade.mjs';
@@ -3770,6 +3771,37 @@ function readAmaCloserLeases(rootDir, { nowMs, config, reviewRows = new Map() })
   return { total, stale, ignoredTerminalPrs };
 }
 
+// CLOSURERECOVERYEXEC-01: the watcher's no-progress lane ledger keeps the last
+// selected shared next action per PR head. Report every owner past its deadline
+// with its age at this snapshot (same rule as the watcher log). Snapshot-only:
+// the selected executor or closure-wait owns any escalation.
+const EXPIRED_NEXT_ACTION_REPORT_LIMIT = 50;
+export function readExpiredNextActions(rootDir, { nowMs = Date.now(), reviewRows = new Map() } = {}) {
+  const dir = join(rootDir, 'data', 'watcher-no-progress-lane');
+  const expired = [];
+  let total = 0;
+  let names;
+  try { names = readdirSync(dir); } catch { names = []; }
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue;
+    let ledger;
+    try { ledger = parseJson(readFileSync(join(dir, name), 'utf8'), null); } catch { continue; }
+    if (!ledger?.nextAction) continue;
+    const reviewRow = ledger.repo ? reviewRows.get(`${ledger.repo}#${Number(ledger.prNumber)}`) : null;
+    const prState = String(reviewRow?.pr_state || '').toLowerCase();
+    if (prState === 'closed' || prState === 'merged') continue;
+    total += 1;
+    const item = expiredNextActionDeadline(ledger.nextAction, { headSha: ledger.headSha, nowMs });
+    if (!item) continue;
+    expired.push({ repo: ledger.repo || null, prNumber: Number(ledger.prNumber) || null, ...item,
+      lane: ledger.lane || null, observedAt: ledger.lastRunAt || ledger.updatedAt || null });
+  }
+  expired.sort((a, b) => b.ageMs - a.ageMs);
+  return { total, expiredCount: expired.length,
+    closureRecoveryExpired: expired.filter(item => item.closureRecovery).length,
+    oldestAgeMs: expired[0]?.ageMs ?? null, expired: expired.slice(0, EXPIRED_NEXT_ACTION_REPORT_LIMIT) };
+}
+
 export function summarizeHammerEfficiency(db, { nowMs = Date.now(), windowMs = 30 * 24 * 60 * 60 * 1000 } = {}) {
   if (!db) return { runs: 0, merges: 0, inputTokens: 0, inputTokensPerMerge: null };
   const cutoff = new Date(nowMs - windowMs).toISOString();
@@ -6105,6 +6137,7 @@ function collectReviewPipelineHealth({
       env, rootDir, listOpenPrsSyncImpl,
     });
     const amaCloserLeases = readAmaCloserLeases(rootDir, { nowMs, config, reviewRows });
+    const expiredNextActions = readExpiredNextActions(rootDir, { nowMs, reviewRows });
     const hammerEfficiency = summarizeHammerEfficiency(db);
     const conflictingOpenPrs = attachConflictingPrOwnership(
       conflictingOpenPrsBase,
@@ -6288,6 +6321,7 @@ function collectReviewPipelineHealth({
       mergeStalls,
       conflictingOpenPrs,
       amaCloserLeases,
+      expiredNextActions,
       hammerEfficiency,
       daemonMergeParks,
       zombieReviewerPasses,

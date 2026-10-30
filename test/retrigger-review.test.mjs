@@ -1677,3 +1677,21 @@ test('retrigger-review refuses unknown review statuses by default', async () => 
   assert.equal(rc, 1);
   assert.match(err.text(), /unknown-status:orphaned/);
 });
+
+
+test('default retrigger binds its durable request to the live head rather than the cached review', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-live-head-'));
+  try {
+    insertReviewRow(rootDir, { revisionRef: 'cached-old-head', reviewerHeadSha: 'cached-old-head' });
+    const out = makeCaptureStream();
+    const rc = await main(['--repo', 'laceyenterprises/agent-os', '--pr', '238',
+      '--reason', 'refresh advanced PR', '--root-dir', rootDir, '--no-bump-budget'], {
+      stdout: out, stderr: makeCaptureStream(), fetchCurrentHeadShaImpl: async () => 'live-new-head',
+    });
+    assert.equal(rc, 0);
+    const db = openReviewStateDb(rootDir);
+    try {
+      assert.equal(db.prepare('SELECT head_sha FROM explicit_review_intents').get().head_sha, 'live-new-head');
+    } finally { db.close(); }
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});

@@ -1,11 +1,19 @@
 // Serialize terminal-job mutation with writers and the archive sweep.
 import { openSync, closeSync, mkdirSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import fsExt from 'fs-ext';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { withRepositoryStateRead } from './repository-state-lock.mjs';
+import { canonicalRepositoryArguments } from './repository-names.mjs';
 
 const held = new Set();
 export function withFollowUpJobLock(root, action) {
+  root = resolve(root);
+  const ownerRoot = root.endsWith('/data/follow-up-jobs') ? dirname(dirname(root)) : null;
+  return withRepositoryStateRead(ownerRoot, () => withJobLock(root, action));
+}
+
+function withJobLock(root, action) {
   if (held.has(root)) return action();
   mkdirSync(root, { recursive: true });
   const fd = openSync(join(root, '.write.lock'), 'a');
@@ -25,6 +33,7 @@ function jobRoot(path) {
 
 export function writeFollowUpJob(jobPath, job) {
   return withFollowUpJobLock(jobRoot(jobPath), () => {
+    job = canonicalRepositoryArguments(dirname(dirname(jobRoot(jobPath))), job);
     let current;
     try { current = JSON.parse(readFileSync(jobPath, 'utf8')); } catch (error) {
       if (error.code !== 'ENOENT') throw error;

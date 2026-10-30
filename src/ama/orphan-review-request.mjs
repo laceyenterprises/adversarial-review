@@ -1,3 +1,5 @@
+import { withRepositoryStateCycle } from '../repository-state-lock.mjs';
+import { canonicalRepositoryArguments } from '../repository-names.mjs';
 import Database from 'better-sqlite3';
 import fsExt from 'fs-ext';
 import { closeSync, mkdirSync, openSync } from 'node:fs';
@@ -7,7 +9,7 @@ import { createHash } from 'node:crypto';
 // Share REMORPHAN-01's durable guard and lock. Reserve before the external
 // local queue request so concurrent observers or interrupted processes cannot
 // spend it twice. A proven local queue failure refunds the reservation.
-export async function requestBoundedOrphanReview({ rootDir, repo, prNumber, headSha,
+async function requestBoundedOrphanReviewWithinRepositoryState({ rootDir, repo, prNumber, headSha,
   reviewStateRow, requestRereviewImpl, logger, db = null, decisionReasons = null }) {
   if (reviewStateRow?.review_status === 'failed' && reviewStateRow.reviewer_head_sha === headSha) return null;
   let ownedDb;
@@ -49,4 +51,9 @@ export async function requestBoundedOrphanReview({ rootDir, repo, prNumber, head
   } finally {
     try { ownedDb?.close(); } finally { if (fd !== undefined) closeSync(fd); }
   }
+}
+
+export async function requestBoundedOrphanReview(args = {}, ...rest) {
+  return withRepositoryStateCycle(args.rootDir, () =>
+    requestBoundedOrphanReviewWithinRepositoryState(canonicalRepositoryArguments(args.rootDir, args), ...rest));
 }

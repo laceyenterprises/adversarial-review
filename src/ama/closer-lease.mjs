@@ -1,3 +1,5 @@
+import { canonicalRepositoryArguments } from '../repository-names.mjs';
+import { withRepositoryStateRead } from '../repository-state-lock.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { captureCloserProcessSync } from './dispatch-submitter.mjs';
 /**
@@ -211,7 +213,15 @@ export async function isReclaimableDispatchedAmaCloserLeaseAsync(lease, {
 }
 
 // A status read must not retire a replacement owner installed while it yielded.
-export function isCurrentAmaCloserLease(rootDir, lease) {
+export function isCurrentAmaCloserLease(...args) {
+  const root = args[0];
+  return withRepositoryStateRead(root, () => {
+    args[1] = canonicalRepositoryArguments(root, args[1]);
+    return isCurrentAmaCloserLeaseWithinRepositoryState(...args);
+  });
+}
+
+function isCurrentAmaCloserLeaseWithinRepositoryState(rootDir, lease) {
   try {
     const current = readAmaCloserLease(rootDir, lease);
     return current?.status === lease.status && current?.lrqId === lease.lrqId
@@ -242,7 +252,15 @@ export function isReclaimableTerminalAmaCloserLease(lease, { launchStatusProbe, 
 
 // Revalidate after asynchronous evidence reads before retiring an observed owner.
 // Acquisition still uses the exclusive link CAS; a losing caller cannot dispatch.
-export function deleteAmaCloserLeaseIfCurrent(rootDir, lease) {
+export function deleteAmaCloserLeaseIfCurrent(...args) {
+  const root = args[0];
+  return withRepositoryStateRead(root, () => {
+    args[1] = canonicalRepositoryArguments(root, args[1]);
+    return deleteAmaCloserLeaseIfCurrentWithinRepositoryState(...args);
+  });
+}
+
+function deleteAmaCloserLeaseIfCurrentWithinRepositoryState(rootDir, lease) {
   const leasePath = amaCloserLeaseFilePath(rootDir, lease);
   const fd = openSync(`${leasePath}.reclaim.lock`, 'a', LEASE_FILE_MODE);
   try {
@@ -331,7 +349,12 @@ function sanitizeSegment(value) {
  * @param {string} identity.headSha
  * @returns {string} absolute lease file path
  */
-export function amaCloserLeaseFilePath(rootDir, { repo, prNumber, headSha } = {}) {
+export function amaCloserLeaseFilePath(...args) {
+  const root = args[0]; args[1] = canonicalRepositoryArguments(root, args[1]);
+  return amaCloserLeaseFilePathWithinRepositoryState(...args);
+}
+
+function amaCloserLeaseFilePathWithinRepositoryState(rootDir, { repo, prNumber, headSha } = {}) {
   if (!rootDir) {
     throw new Error('amaCloserLeaseFilePath: rootDir is required');
   }
@@ -375,17 +398,41 @@ function readLeaseFile(filePath) {
  * @param {object} identity
  * @returns {object|null}
  */
-export function readAmaCloserLease(rootDir, identity) {
+export function readAmaCloserLease(...args) {
+  const root = args[0];
+  return withRepositoryStateRead(root, () => {
+    args[1] = canonicalRepositoryArguments(root, args[1]);
+    return readAmaCloserLeaseWithinRepositoryState(...args);
+  });
+}
+
+function readAmaCloserLeaseWithinRepositoryState(rootDir, identity) {
   return readLeaseFile(amaCloserLeaseFilePath(rootDir, identity));
 }
 
 // Dispatch records keep the launch head. A rekeyed lease carries that head
 // and the same LRQ, so handoff can release the old record's PR reservation.
-export function listAmaCloserLeaseNames(rootDir) {
+export function listAmaCloserLeaseNames(...args) {
+  const root = args[0];
+  return withRepositoryStateRead(root, () => {
+    args[1] = canonicalRepositoryArguments(root, args[1]);
+    return listAmaCloserLeaseNamesWithinRepositoryState(...args);
+  });
+}
+
+function listAmaCloserLeaseNamesWithinRepositoryState(rootDir) {
   try { return readdirSync(join(rootDir, ...LEASE_DIR_SEGMENTS)); } catch { return []; }
 }
 
-export function readAmaCloserDispatchLease(rootDir, record, names = null) {
+export function readAmaCloserDispatchLease(...args) {
+  const root = args[0];
+  return withRepositoryStateRead(root, () => {
+    args[1] = canonicalRepositoryArguments(root, args[1]);
+    return readAmaCloserDispatchLeaseWithinRepositoryState(...args);
+  });
+}
+
+function readAmaCloserDispatchLeaseWithinRepositoryState(rootDir, record, names = null) {
   if (!record?.repo || !record?.headSha) return null;
   const exact = readAmaCloserLease(rootDir, record);
   if (exact) return exact;
@@ -403,7 +450,15 @@ export function readAmaCloserDispatchLease(rootDir, record, names = null) {
 }
 
 /** A current-head closer blocks a remediation claim until its existing lease expiry. */
-export function isHeldAmaCloserLease(rootDir, identity, {
+export function isHeldAmaCloserLease(...args) {
+  const root = args[0];
+  return withRepositoryStateRead(root, () => {
+    args[1] = canonicalRepositoryArguments(root, args[1]);
+    return isHeldAmaCloserLeaseWithinRepositoryState(...args);
+  });
+}
+
+function isHeldAmaCloserLeaseWithinRepositoryState(rootDir, identity, {
   now = new Date().toISOString(),
   pendingExpiryMs = loadAwareTimeoutMs(AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, { maxMs: Infinity }),
   dispatchedExpiryMs = AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS,
@@ -433,7 +488,15 @@ export function isHeldAmaCloserLease(rootDir, identity, {
  * @param {object} identity
  * @returns {string} deleted lease path
  */
-export function deleteAmaCloserLease(rootDir, identity) {
+export function deleteAmaCloserLease(...args) {
+  const root = args[0];
+  return withRepositoryStateRead(root, () => {
+    args[1] = canonicalRepositoryArguments(root, args[1]);
+    return deleteAmaCloserLeaseWithinRepositoryState(...args);
+  });
+}
+
+function deleteAmaCloserLeaseWithinRepositoryState(rootDir, identity) {
   const leasePath = amaCloserLeaseFilePath(rootDir, identity);
   rmSync(leasePath, { force: true });
   return leasePath;
@@ -468,7 +531,15 @@ export function deleteAmaCloserLease(rootDir, identity) {
  * @param {string=} args.now           ISO 8601 UTC; caller-provided so tests stay deterministic.
  * @returns {{ rekeyed: boolean, reason?: string, leasePath?: string, lease?: object }}
  */
-export function rekeyAmaCloserLease({
+export function rekeyAmaCloserLease(...args) {
+  const root = args[0]?.rootDir;
+  return withRepositoryStateRead(root, () => {
+    args[0] = canonicalRepositoryArguments(root, args[0]);
+    return rekeyAmaCloserLeaseWithinRepositoryState(...args);
+  });
+}
+
+function rekeyAmaCloserLeaseWithinRepositoryState({
   rootDir,
   repo,
   prNumber,
@@ -554,7 +625,15 @@ export function rekeyAmaCloserLease({
  *
  * @returns {{ headSha: string, leasePath: string, lease: object } | null}
  */
-export function findLiveAmaCloserLease(rootDir, { repo, prNumber } = {}) {
+export function findLiveAmaCloserLease(...args) {
+  const root = args[0];
+  return withRepositoryStateRead(root, () => {
+    args[1] = canonicalRepositoryArguments(root, args[1]);
+    return findLiveAmaCloserLeaseWithinRepositoryState(...args);
+  });
+}
+
+function findLiveAmaCloserLeaseWithinRepositoryState(rootDir, { repo, prNumber } = {}) {
   if (!repo) {
     throw new TypeError('findLiveAmaCloserLease: identity.repo is required');
   }
@@ -612,7 +691,15 @@ export function findLiveAmaCloserLease(rootDir, { repo, prNumber } = {}) {
  * @param {string=} args.now           ISO 8601 UTC for `acquiredAt`. Caller-provided so tests stay deterministic.
  * @returns {{ acquired: boolean, leasePath: string, lease: object, existingLease?: object }}
  */
-export function acquireAmaCloserLease({
+export function acquireAmaCloserLease(...args) {
+  const root = args[0]?.rootDir;
+  return withRepositoryStateRead(root, () => {
+    args[0] = canonicalRepositoryArguments(root, args[0]);
+    return acquireAmaCloserLeaseWithinRepositoryState(...args);
+  });
+}
+
+function acquireAmaCloserLeaseWithinRepositoryState({
   rootDir,
   repo,
   prNumber,
@@ -715,7 +802,15 @@ export function acquireAmaCloserLease({
  * @param {object=} args.expectedLease Complete observed lease snapshot; object key order is ignored.
  * @returns {{ leasePath: string, lease: object }}
  */
-export function updateAmaCloserLease({
+export function updateAmaCloserLease(...args) {
+  const root = args[0]?.rootDir;
+  return withRepositoryStateRead(root, () => {
+    args[0] = canonicalRepositoryArguments(root, args[0]);
+    return updateAmaCloserLeaseWithinRepositoryState(...args);
+  });
+}
+
+function updateAmaCloserLeaseWithinRepositoryState({
   rootDir,
   repo,
   prNumber,
@@ -831,7 +926,15 @@ export const AMA_CLOSER_LEASE_STATUS = Object.freeze({
 // The terminal receipt releases closer ownership, independently of the merge
 // write lease. The launch identity and complete snapshot fence late workers
 // against retiring a successor or a completed review handoff.
-export function releaseRetryableAmaCloserLease({ rootDir, repo, prNumber, headSha,
+export function releaseRetryableAmaCloserLease(...args) {
+  const root = args[0]?.rootDir;
+  return withRepositoryStateRead(root, () => {
+    args[0] = canonicalRepositoryArguments(root, args[0]);
+    return releaseRetryableAmaCloserLeaseWithinRepositoryState(...args);
+  });
+}
+
+function releaseRetryableAmaCloserLeaseWithinRepositoryState({ rootDir, repo, prNumber, headSha,
   launchRequestId, sourceHeadSha = headSha, attempt, now } = {}) {
   const terminalOutcome = retryableAmaCloserDeferralOutcome(attempt);
   if (!terminalOutcome || !launchRequestId) return false;

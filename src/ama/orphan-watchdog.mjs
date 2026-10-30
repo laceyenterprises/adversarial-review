@@ -1,3 +1,6 @@
+import { withRepositoryStateCycle } from '../repository-state-lock.mjs';
+import { followUpJobFileFilter } from '../follow-up-job-names.mjs';
+import { canonicalRepositoryArguments } from '../repository-names.mjs';
 import { isPreReceiptIntent } from './dispatch-record-read.mjs';
 import { isClosureRecoveryDecision } from '../pr-next-action.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
@@ -41,7 +44,11 @@ export function hasExactHeadReviewDecision(result, headSha) {
 }
 
 // Unknown evidence holds dispatch, but is distinct from a proven live owner.
-export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, reviewStateRow, labels = [],
+export async function probeOrphanOwnership(args = {}) {
+  return withRepositoryStateCycle(args.rootDir, () => probeOrphanOwnershipWithinRepositoryCycle(canonicalRepositoryArguments(args.rootDir, args)));
+}
+
+async function probeOrphanOwnershipWithinRepositoryCycle({ rootDir, repo, prNumber, headSha, reviewStateRow, labels = [],
   readStatusImpl = readLaunchRequestStatusFromLedgerAsync, timeoutMs = loadAwareTimeoutMs(5000), signal = null, reservationStartedAt = null,
   now = new Date().toISOString(), processKillImpl = process.kill, logger = console, reservationRecordHead = null,
   excludeWatcherPid = null, env = process.env, includeOwnerEvidence = false, nextAction = null }) {
@@ -78,7 +85,7 @@ export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, r
     && Number.isFinite(age) && age >= 0 && age < ownerlessBoundMs(env)) {
     return { owned: true, proof: 'bounded-review-request', ...(includeOwnerEvidence ? { actor: 'reviewer' } : {}) };
   }
-  const prefix = `${String(repo).replace(/\//g, '__').replace(/[^A-Za-z0-9._-]/g, '-')}-pr-${Number(prNumber)}-`;
+  const matchesName = followUpJobFileFilter({ rootDir, repo, prNumber, caseInsensitiveRepo: true });
   const deadline = Date.now() + (Number(timeoutMs) > 0 ? Number(timeoutMs) : loadAwareTimeoutMs(5000));
   const result = { owned: false, uncertain: false, reservationDispatched: false, reasons: [], launchIds: [] };
   const uncertain = reason => { result.uncertain = true; if (result.reasons.length < 5) result.reasons.push(text(reason)); };
@@ -91,7 +98,6 @@ export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, r
     if (error && error.code !== 'ENOENT') uncertain('dispatch-directory-unreadable');
     return names;
   };
-  const matchesName = name => name.toLowerCase().startsWith(prefix.toLowerCase());
   const sameRepo = value => String(value || '').toLowerCase() === String(repo).toLowerCase();
   const readRecord = (path, relevant = true) => {
     try { return JSON.parse(readFileSync(path, 'utf8')); }
@@ -228,7 +234,14 @@ function readEvidence(value) {
   throw new Error('orphan watchdog evidence is malformed');
 }
 
-export async function recoverOrphan(options) {
+export async function recoverOrphan(args = {}) {
+  // An operator hold requires no repository-state access or filesystem effects.
+  if (isOperatorHeld(args.labels || args.candidate?.labels || [])
+    && !isClosureRecoveryDecision(args.result?.nextAction)) return null;
+  return withRepositoryStateCycle(args.rootDir, () => recoverOrphanWithinRepositoryCycle(canonicalRepositoryArguments(args.rootDir, args)));
+}
+
+async function recoverOrphanWithinRepositoryCycle(options) {
   try { return await recoverOrphanWithStore(options); }
   catch (error) {
     if (options.signal?.aborted) throw error;

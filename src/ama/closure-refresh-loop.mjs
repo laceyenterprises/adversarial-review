@@ -1,3 +1,5 @@
+import { withRepositoryStateCycle } from '../repository-state-lock.mjs';
+import { canonicalRepositoryArguments } from '../repository-names.mjs';
 import Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
@@ -10,7 +12,7 @@ export const CLOSURE_REFRESH_CYCLE_LIMIT = 3;
 // Count consumed disagreements, including a second disagreement during the
 // one allowed successor attempt. Submissions and changed decision keys cannot
 // erase same-head debt. This is diagnostic evidence, never dispatch authority.
-export async function observeClosureDecisionMismatch({ rootDir, repo, prNumber, result,
+async function observeClosureDecisionMismatchWithinRepositoryState({ rootDir, repo, prNumber, result,
   now = Date.now(), env = process.env, observeWaitImpl = observeClosureWait }) {
   const shared = result?.nextActionShared;
   const headSha = shared?.decision?.head;
@@ -40,7 +42,7 @@ export async function observeClosureDecisionMismatch({ rootDir, repo, prNumber, 
 
 // Count settled refresh outcomes, never queue submissions or re-observations of
 // in-flight work. This diagnostic evidence grants no merge/dispatch authority.
-export async function observeClosureRefreshLoop({ rootDir, repo, prNumber, shared, result,
+async function observeClosureRefreshLoopWithinRepositoryState({ rootDir, repo, prNumber, shared, result,
   now = Date.now(), env = process.env, observeWaitImpl = observeClosureWait }) {
   if (!shared || !result || result.backgroundDispatch) return result;
   const { snapshot, decision } = shared;
@@ -83,4 +85,14 @@ export async function observeClosureRefreshLoop({ rootDir, repo, prNumber, share
     reason: closureBlocker, immediate: true, waitClass: 'snapshot-refresh' });
   return { ...result, closureBlocker, boundedWait, needsOperator: true, skipMergeAgent: true,
     recoveryWait: true };
+}
+
+export async function observeClosureDecisionMismatch(args = {}, ...rest) {
+  return withRepositoryStateCycle(args.rootDir, () =>
+    observeClosureDecisionMismatchWithinRepositoryState(canonicalRepositoryArguments(args.rootDir, args), ...rest));
+}
+
+export async function observeClosureRefreshLoop(args = {}, ...rest) {
+  return withRepositoryStateCycle(args.rootDir, () =>
+    observeClosureRefreshLoopWithinRepositoryState(canonicalRepositoryArguments(args.rootDir, args), ...rest));
 }

@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {dispatchReadTransport} from '../src/dispatch-read-client.mjs';
 import {readDispatchFilesSync, readHostObservationSync, readWorkerDispatchFiles, readWorkerDispatchFilesSync} from '../src/dispatch-files-client.mjs';
 
@@ -150,7 +153,9 @@ test('production spawnReviewer honors the public quota gate directly', async t =
   // Quota decision delegates to the real parser with a synthetic CLI boundary.
   const {readReviewerQuotaDecision} = await import('../src/reviewer-spawn-settle.mjs');
   let calls = 0;
-  const result = await spawnReviewer({rootDir: '/unused-fixture', repo: 'acme/fixture', prNumber: 1,
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewer-quota-fence-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const result = await spawnReviewer({rootDir, repo: 'acme/fixture', prNumber: 1,
     reviewerModel: 'claude-code', reviewerHeadSha: 'a'.repeat(40), reviewerSessionUuid: 'direct-quota',
     quotaCheckEnv: {}, beginReviewerPassImpl() {}, completeReviewerPassImpl() {},
     readReviewerQuotaDecisionImpl: args => readReviewerQuotaDecision({...args, execFileImpl: async () => {

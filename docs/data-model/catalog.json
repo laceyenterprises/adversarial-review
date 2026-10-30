@@ -16,6 +16,23 @@
       "compatibility": "Additive table; request identity and exact-head one-shot admission persist across restart. Pending requests expire under the existing rereview wait bound, default 900 seconds; normal ceilings and terminal fences remain enforced."
     },
     {
+      "id": "repository-identities",
+      "title": "Repository Identity and Rename Continuity",
+      "path": "docs/data-model/repository-identities.md",
+      "store": "data/reviews.db; data/repository-names.json; data/repository-renames/; service-owned repo state",
+      "schemaSurface": "src/repository-identity.mjs",
+      "relatedSchemaSurfaces": [
+        "src/repository-state-files.mjs",
+        "src/repository-state-lock.mjs",
+        "src/repository-names.mjs",
+        "src/watcher.mjs",
+        "src/ama/closer-lease.mjs",
+        "src/ama/merge-lease.mjs"
+      ],
+      "owner": "watcher discovery with reviewer, follow-up and AMA state owners",
+      "compatibility": "Stable GitHub numeric ID and node ID backfill from existing discovery; same-ID name changes use an audited immediate transaction per database and a fenced replay journal for files. Opaque owner IDs and signed evidence remain stable; reused names never inherit another repository identity. Control-state files use an audited directory allowlist and exact owner/filename recipes; telemetry/workspaces remain historical. Unchanged observations are read-only, and projection caches invalidate on atomic file identity. Name conflicts quarantine only their repository at ordinary discovery cadence; retiring a row cannot reassign prior PR state. Reviewer BUSY exit 78 releases an unclaimed attempt. HQ authority continuity belongs to REPORENAME-02."
+    },
+    {
       "id": "review-size-actions",
       "title": "Terminal Review Size Actions",
       "path": "docs/data-model/review-size-actions.md",
@@ -679,7 +696,8 @@
       "relatedSchemaSurfaces": [
         "src/posted-review-row.mjs",
         "src/operator-label-wake.mjs",
-        "src/ama/closure-next-action.mjs"
+        "src/ama/closure-next-action.mjs",
+        "src/review-pipeline-health.mjs"
       ],
       "optionalOwnershipFields": ["nextAction"],
       "owner": "watcher posted-review dispatch fairness",
@@ -961,13 +979,13 @@
       "path": "docs/data-model/ama-closure-waits.md",
       "store": "data/ama-closure-waits/<sha256(repo#prNumber)>.db",
       "schemaSurface": "src/ama/closure-wait.mjs",
-      "relatedSchemaSurfaces": ["src/ama-closure-orchestration.mjs", "src/ama/dispatch-closer.mjs", "src/ama/closure-next-action.mjs", "src/reviewer-ci-admission.mjs", "src/ama/closure-refresh-loop.mjs", "src/follow-up-merge-agent.mjs"],
+      "relatedSchemaSurfaces": ["src/ama-closure-orchestration.mjs", "src/ama/dispatch-closer.mjs", "src/ama/closure-next-action.mjs", "src/reviewer-ci-admission.mjs", "src/ama/closure-refresh-loop.mjs", "src/ama/closure-recovery.mjs", "src/follow-up-merge-agent.mjs"],
       "sharedDecisionAnchor": "anchor-only observations reuse bounded-wait started without reserving or delivering a page",
       "owner": "AMA bounded closure wait and exhaustion paging",
       "waitTable": "waits_by_class",
       "waitColumns": ["head", "class", "started", "reason", "paged"],
       "waitPrimaryKey": ["head", "class"],
-      "waitClasses": ["primary-change", "bounded-wait", "final-round", "lane-busy", "ci-regression-ownerless", "snapshot-refresh", "closure-decision-mismatch", "original-worker-evidence", "closer-worker-evidence"],
+      "waitClasses": ["primary-change", "bounded-wait", "final-round", "lane-busy", "ci-regression-ownerless", "snapshot-refresh", "closure-decision-mismatch", "closure-recovery-deadline", "original-worker-evidence", "closer-worker-evidence"],
       "decisionMismatchCycleTable": "decision_mismatch_cycle(id INTEGER PRIMARY KEY CHECK(id=1), head TEXT NOT NULL, cycles INTEGER NOT NULL)",
       "decisionMismatchCycleContract": "First consumed mismatch permits one re-resolution; the second at the same head pages through closure-decision-mismatch and returns closure-decision-mismatch-escalated. Count saturates at two, survives restart, queue submissions and decision changes; a different head starts count one. No completion reset. Existing per-PR/head page receipt dedupes and refunds failed delivery.",
       "refreshCycleTable": "refresh_cycle(id INTEGER PRIMARY KEY CHECK(id=1), head TEXT NOT NULL, fingerprint TEXT NOT NULL, cycles INTEGER NOT NULL)",

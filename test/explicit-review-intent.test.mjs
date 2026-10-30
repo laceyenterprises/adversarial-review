@@ -50,6 +50,7 @@ test('RETRIGGERDEDUP-01: CLI accepts the existing row head and creates a request
   const result = await retriggerReview(['--root-dir', f.rootDir, '--audit-root-dir', f.rootDir,
     '--repo', repo, '--pr', String(prNumber), '--reason', 'synthetic retry', '--no-bump-budget'], {
     stdout: { write() {} }, stderr: { write: text => errors.push(text) },
+    fetchCurrentHeadShaImpl: async () => headSha,
   });
   assert.equal(result, 0, errors.join(''));
   assert.equal(f.intent().head_sha, headSha);

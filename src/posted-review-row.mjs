@@ -1,3 +1,5 @@
+import { acquireRepositoryStateOwner } from './repository-state-lock.mjs';
+import { resolveRepositoryName } from './repository-names.mjs';
 import { readHammerResumes, reconcileHammerResumes } from './ama/hammer-resume.mjs';
 import { withPostedReviewReadCache, closePostedReviewReadCache } from './posted-review-read-cache.mjs';
 import { companionOnlyStop } from './ama/companion-stop-wait.mjs';
@@ -82,6 +84,7 @@ import { reportStalledRetriggerOutcomes, retryPendingRetriggerAckComments } from
 import { retryPendingRetriggerReviewAckComments } from './follow-up-retrigger-review-label.mjs';
 import { db, stmtGetLatestPostedReviewBody, stmtGetReviewRow } from './review-state-db.mjs';
 import { rereviewWakeBacklog, sweepRereviewWakeQueue } from './rereview-wake.mjs';
+import { expiredNextActionDeadline, formatExpiredNextActionDeadline } from './next-action-deadline.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import {
   evaluateNoProgressLane,
@@ -367,14 +370,21 @@ export async function handlePostedReviewRow(options = {}) {
     || !Number.isSafeInteger(Number(options.prNumber)) || Number(options.prNumber) <= 0) {
     throw new TypeError('handlePostedReviewRow requires a positive safe-integer prNumber');
   }
+  const releaseState = acquireRepositoryStateOwner(options.rootDir || ROOT);
+  try { options = { ...options, repoPath: resolveRepositoryName(options.rootDir || ROOT, options.repoPath) }; }
+  catch (error) { releaseState(); throw error; }
   const key = JSON.stringify([resolve(options.rootDir || ROOT), options.repoPath, Number(options.prNumber)]);
   if (postedReviewAttempts.has(key)) {
+    releaseState();
     return { handled: true, outcome: 'posted-review-in-flight' };
   }
   const snapshotPass = createMergeAgentSnapshotPass({ now: options.now });
   const attempt = { handlerActive: true, coexistenceActive: false,
     release() {
-      if (!this.handlerActive && !this.coexistenceActive) postedReviewAttempts.delete(key);
+      if (!this.handlerActive && !this.coexistenceActive) {
+        postedReviewAttempts.delete(key);
+        releaseState();
+      }
     } };
   postedReviewAttempts.set(key, attempt);
   try {
@@ -1292,6 +1302,13 @@ export function createNoProgressLaneGate({
         now: observedAt,
         logger,
       });
+      // CLOSURERECOVERYEXEC-01: an owner past its deadline is a visible state.
+      const expiredDeadline = expiredNextActionDeadline(selectedNextAction,
+        { headSha: handler.headSha || null, nowMs: observedAt });
+      if (expiredDeadline) {
+        logger?.warn?.(formatExpiredNextActionDeadline(expiredDeadline, { repo: handler.repoPath,
+          prNumber: handler.prNumber, outcome: value?.amaClosureResult?.reason || value?.outcome || null }));
+      }
       if (outcome?.decisionReset) {
         logger?.log?.(
           `[watcher] no-progress lane: ${handler.repoPath}#${handler.prNumber} handler decision ` +

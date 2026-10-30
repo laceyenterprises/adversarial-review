@@ -14,8 +14,46 @@ import {
   acquireAmaCloserLease,
   amaCloserLeaseFilePath,
   readAmaCloserLease,
+  restoreAmaCloserLeaseIfCurrent,
   updateAmaCloserLease,
 } from '../src/ama/closer-lease.mjs';
+
+test('CLOSERCUSTODYLRQ-01: durable launch identity and original dispatch time survive repeated promotion and terminalization', t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-receipt-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const owner = { repo: 'fixture/project', prNumber: 17, headSha: 'a'.repeat(40) };
+  const dispatchedAt = '2026-10-01T12:00:00Z';
+  acquireAmaCloserLease({ rootDir, ...owner, now: dispatchedAt });
+  for (const now of [dispatchedAt, '2026-10-01T12:01:00Z']) {
+    updateAmaCloserLease({ rootDir, ...owner, status: 'dispatched',
+      lrqId: 'synthetic-receipt', workerId: 'hammer-ama-pr-17',
+      dispatchedAt: now, now });
+  }
+  updateAmaCloserLease({ rootDir, ...owner, status: 'terminal',
+    terminalOutcome: 'failed-without-merge', now: '2026-10-01T13:00:00Z' });
+  const recovered = JSON.parse(readFileSync(amaCloserLeaseFilePath(rootDir, owner), 'utf8'));
+  assert.equal(recovered.lrqId, 'synthetic-receipt');
+  assert.equal(recovered.workerId, 'hammer-ama-pr-17');
+  assert.equal(recovered.dispatchedAt, dispatchedAt);
+  assert.equal(recovered.headSha, owner.headSha);
+});
+
+test('CLOSERCUSTODYLRQ-01: retained custody restores the predecessor lease only over the unchanged replacement', t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-restore-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const owner = { repo: 'fixture/project', prNumber: 17, headSha: 'a'.repeat(40) };
+  acquireAmaCloserLease({ rootDir, ...owner, now: '2026-10-01T12:00:00Z' });
+  const { lease: predecessor } = updateAmaCloserLease({ rootDir, ...owner, status: 'dispatched',
+    lrqId: 'synthetic-receipt', workerId: 'hammer-ama-pr-17', now: '2026-10-01T12:00:00Z' });
+  rmSync(amaCloserLeaseFilePath(rootDir, owner));
+  const { lease: replacement } = acquireAmaCloserLease({ rootDir, ...owner, now: '2026-10-01T13:00:00Z' });
+  const { lease: changed } = updateAmaCloserLease({ rootDir, ...owner, status: 'terminal',
+    terminalOutcome: 'deferred', now: '2026-10-01T13:01:00Z' });
+  assert.equal(restoreAmaCloserLeaseIfCurrent(rootDir, predecessor, { expectedLease: replacement }), false);
+  assert.deepEqual(readAmaCloserLease(rootDir, owner), changed);
+  assert.equal(restoreAmaCloserLeaseIfCurrent(rootDir, predecessor, { expectedLease: changed }), true);
+  assert.deepEqual(readAmaCloserLease(rootDir, owner), predecessor);
+});
 
 function freshRoot() {
   return mkdtempSync(join(tmpdir(), 'ama-lease-'));

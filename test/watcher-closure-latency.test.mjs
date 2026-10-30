@@ -558,6 +558,7 @@ test('synthetic posted-review pass pins GitHub and database read counts per step
   const shadowMigrationChecks = closure.database.migrationChecks['20261028_finalization_queue_shadow.sql'];
   const simplicityMigrationChecks = closure.database.migrationChecks['20261024_simplicity_batch.sql'];
   const noteLifecycleMigrationChecks = closure.database.migrationChecks['20261024_simplicity_batch_lifecycle.sql'];
+  const drainMigrationChecks = closure.database.migrationChecks['20261030_findings_batch_drain.sql'];
   assert.equal(findingMigrationChecks, 6);
   assert.equal(queueMigrationChecks, 6);
   assert.equal(handoffMigrationChecks, 6);
@@ -569,9 +570,10 @@ test('synthetic posted-review pass pins GitHub and database read counts per step
   assert.equal(routingMigrationChecks, 6);
   assert.equal(simplicityMigrationChecks, 6);
   assert.equal(noteLifecycleMigrationChecks, 6);
+  assert.equal(drainMigrationChecks, 6);
   assert.equal(closure.database.count - findingMigrationChecks - queueMigrationChecks - handoffMigrationChecks - backlogMigrationChecks
     - admissionMigrationChecks - checksMigrationChecks - mergeMigrationChecks - shadowMigrationChecks - routingMigrationChecks
-    - simplicityMigrationChecks - noteLifecycleMigrationChecks, 114,
+    - simplicityMigrationChecks - noteLifecycleMigrationChecks - drainMigrationChecks, 114,
     'round counter and wake telemetry reuse the connection; three decisions persist their first-actionable anchors');
   assert.equal(profile.steps['handler-overhead'].subprocesses.gh, undefined);
   assert.ok(profile.outcomes.every(result => result.handled && !result.terminal));

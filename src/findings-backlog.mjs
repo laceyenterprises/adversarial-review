@@ -46,6 +46,29 @@ export function summarizeFindingBacklog(db, now = Date.now()) {
       max(a.error) AS error FROM unresolved b LEFT JOIN finding_batches a USING(batch_id)
       GROUP BY b.repo,b.area ORDER BY b.repo,b.area`).all()
       .map(row => ({ ...row, oldestAgeMs: Math.max(0, now - Date.parse(row.oldestAt)) }));
-    return { available: true, areas };
+    const open = db.prepare(`SELECT count(*) AS openCount,min(captured_at) AS oldestOpenAt,
+      sum(batch_id IS NULL) AS unbatchedCount FROM finding_backlog WHERE outcome IS NULL`).get();
+    const perDay = db.prepare(`SELECT substr(resolved_at,1,10) AS day,
+      sum(outcome='applied') AS applied,sum(outcome='dropped') AS dropped
+      FROM finding_backlog WHERE outcome IS NOT NULL AND resolved_at IS NOT NULL
+      GROUP BY day ORDER BY day DESC`).all();
+    const batchErrors = db.prepare(`SELECT error,count(*) AS count FROM finding_batches
+      WHERE completed_at IS NULL AND error IS NOT NULL GROUP BY error ORDER BY error`).all();
+    return { available: true, areas, ...open, unbatchedCount: open.unbatchedCount || 0,
+      oldestOpenAgeMs: open.oldestOpenAt ? Math.max(0, now - Date.parse(open.oldestOpenAt)) : 0,
+      perDay, batchErrors };
   } catch (error) { return { available: false, error: error.message, areas: null }; }
+}
+
+export function findingBacklogAlert(backlog, maxAgeMs = 48 * 3600000) {
+  if (!backlog?.available || backlog.oldestOpenAgeMs <= maxAgeMs) return null;
+  return {
+    code: 'review:findings_backlog_overdue',
+    tier: 'ticket',
+    subject: 'Non-blocking findings backlog is overdue',
+    message: `${backlog.openCount} open findings; oldest is ${Math.floor(backlog.oldestOpenAgeMs / 3600000)} hours old`,
+    evidence: [`oldestOpenAt=${backlog.oldestOpenAt}`, `maxAgeMs=${maxAgeMs}`],
+    recommendedAction: 'Inspect batch errors, repair failed launches, and run the operator findings batch backfill.',
+    details: { ...backlog, maxAgeMs },
+  };
 }

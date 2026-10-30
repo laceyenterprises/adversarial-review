@@ -2089,6 +2089,9 @@ export async function load(url, context, nextLoad) {
             },
             prepare(sql) {
               const normalized = String(sql || '').replace(/\\s+/g, ' ').trim();
+              if (normalized === 'SELECT count(*) AS n FROM repository_rename_audit') {
+                return { get: () => ({ n: 0 }) };
+              }
               if (normalized.includes("FROM reviewed_prs") && normalized.includes("pr_state = 'open'")) {
                 return { all: () => rows.filter((row) => row.pr_state === 'open').map((row) => ({ ...row })) };
               }

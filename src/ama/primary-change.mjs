@@ -1,3 +1,4 @@
+import { followUpJobFileFilter } from '../follow-up-job-names.mjs';
 import { findingLocations } from '../kernel/finding-lines.mjs';
 import { readCompletedRemediationRounds, exactHammerValidation } from './hammer-head-validation.mjs';
 import { createHash } from 'node:crypto';
@@ -68,9 +69,9 @@ export function readPrimaryChangeLaunchHead(rootDir, repo, prNumber) {
     error.primaryChangeReadFailed = true;
     throw error;
   }
-  const prefix = `${repo.replace(/\//g, '__').replace(/[^A-Za-z0-9._-]/g, '-')}-pr-${Number(prNumber)}-`;
+  const matches = followUpJobFileFilter({ rootDir, repo, prNumber });
   const records = [];
-  for (const name of names.filter((entry) => entry.startsWith(prefix) && entry.endsWith('.json'))) {
+  for (const name of names.filter(matches)) {
     let text;
     try { text = readFileSync(join(directory, name), 'utf8'); } catch (error) {
       if (error.code === 'ENOENT') continue; // Atomic replacement raced the listing.

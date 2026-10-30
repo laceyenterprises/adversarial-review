@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { serviceFixtureExec, writeDummyCodexAuth } from './helpers/codex-service-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { dispatchReadTransport } from '../src/dispatch-read-client.mjs';
@@ -167,9 +171,12 @@ for (const [reviewer, recovery, available] of [
     const f = registry(t, `review-${reviewer}-${recovery}-${available}`, available
       ? { classes: { 'codex-reviewer': { defaultModel: 'synthetic-recovery-model', allowedModels: ['synthetic-recovery-model'] } } }
       : new Error('synthetic outage'));
+    const authRoot = mkdtempSync(join(tmpdir(), 'remodel-auth-'));
+    t.after(() => rmSync(authRoot, { recursive: true, force: true }));
+    const authPath = writeDummyCodexAuth(join(authRoot, 'auth.json'));
     const overrides = { ...f.env, AGENT_OS_CODEX_PER_WORKER_AUTH: '0',
       CODEX_BROKER_PROVIDER: 'codex', GEMINI_REVIEWER_MODEL: '',
-      CODEX_REVIEWER_AUTH_PROVIDER: '', CODEX_HOME: '', CODEX_AUTH_PATH: '' };
+      CODEX_REVIEWER_AUTH_PROVIDER: '', CODEX_HOME: '', CODEX_AUTH_PATH: authPath };
     const previous = Object.fromEntries(Object.keys(overrides).map(key => [key, process.env[key]]));
     Object.assign(process.env, overrides);
     t.after(() => {
@@ -209,8 +216,7 @@ for (const [reviewer, recovery, available] of [
     } else {
       result = await harness.reviewWithCodex('+synthetic diff', '', {
         log: f.log, codexCli: process.execPath, assertCodexOAuthImpl: async () => {},
-        execFileSyncImpl: () => JSON.stringify({ models: [{ slug: expected,
-          tool_mode: 'code_mode_only', supports_search_tool: true }] }),
+        execFileSyncImpl: serviceFixtureExec,
         spawnCodexReviewImpl: async ({ model }) => {
           invoked++;
           assert.equal(model, expected);

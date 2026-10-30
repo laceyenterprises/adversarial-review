@@ -415,7 +415,7 @@ test('operator legacy dry-run preserves intent, lease, budget and audit; apply a
   assert.equal(readFileSync(path, 'utf8'), before);
   assert.deepEqual(readAmaCloserLease(f.rootDir, identity), lease);
   assert.equal(readHammerRetryCapLedger(f.rootDir, identity), null);
-  assert.deepEqual(readdirSync(join(f.rootDir, 'data')).sort(), ['ama-closer-leases', 'follow-up-jobs']);
+  assert.deepEqual(readdirSync(join(f.rootDir, 'data')).sort(), ['.repository-state.lock', 'ama-closer-leases', 'follow-up-jobs']);
   const applied = await settleLegacyIntent(operatorArgs(f, ['--apply', '--reason', 'fixture recovery']), options);
   assert.equal(applied.conclusive, true);
   assert.equal(f.read().state, 'no-dispatch');
@@ -461,7 +461,7 @@ for (const mode of ['unavailable', 'foreign-owner']) test(`operator apply refuse
     assert.equal(readFileSync(amaCloserDispatchFilePath(f.rootDir, identity), 'utf8'), before);
     assert.deepEqual(readAmaCloserLease(f.rootDir, identity), lease);
     assert.equal(readHammerRetryCapLedger(f.rootDir, identity), null);
-    assert.deepEqual(readdirSync(join(f.rootDir, 'data')).sort(), ['ama-closer-leases', 'follow-up-jobs']);
+    assert.deepEqual(readdirSync(join(f.rootDir, 'data')).sort(), ['.repository-state.lock', 'ama-closer-leases', 'follow-up-jobs']);
   } finally {
     if (descriptor) Object.defineProperty(process, 'getuid', descriptor);
     else delete process.getuid;

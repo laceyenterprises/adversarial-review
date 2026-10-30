@@ -1,5 +1,51 @@
 # Adversarial Review State Machine Notes
 
+REPORENAME-01 keeps retained reviewer admission ahead of slow repository discovery.
+Admission preparation and the early drain execute under a shared repository-state
+cycle; discovery then obtains its ordinary exclusive migration fence, followed
+by the shared poll cycle. No fence is held across the exclusive migration, and
+no lifecycle state or producer projection changes for this ordering repair.
+
+LAC-2131 keeps the existing OAuth preflight failure and remediation lifecycle
+transitions. The new `liveness.state === "exited"` guard performs credential-only
+cleanup for a matching local service-home receipt; it cannot change job state,
+release a lease or authorize merge. Active/unknown/HQ workers and legacy receipts
+authorize no cleanup. Refreshed the follow-up-remediation source projection
+after reviewing that guard; the state graph and existing smoke commands are
+unchanged. See the [auth contract](RUNBOOK-reviewer-workspace.md).
+
+CLOSERCUSTODYLRQ-01 preserves the closer lifecycle graph and merge gates.
+Dispatch receipts and leases durably bind launch, worker slot, head and time.
+Before replacement intent publication, worktree custody probes the recorded
+launch with its retry chain. Terminal evidence releases custody subject to
+sanctioned host teardown and existing retry budgets. `--force` bypasses the
+open-PR guard while host custody checks remain mandatory. Live/parked
+launches retain it, and unavailable evidence retains the receipt and bounded
+wait/page. Legacy leases keep the public slot inventory fallback. Activate by
+watcher restart after deployment and observe natural terminal release and the
+next dispatch with a launch-bearing log receipt; no live repair is authorized.
+Reviewed the dispatch producer guards and refreshed its state projection: receipt
+identity, predecessor restoration and bounded unknown-evidence accounting retain
+the existing hammer-dispatch states and transitions. Closing-decision and CI
+ownership precedence remain unchanged.
+
+REPORENAME-01 changes repository identity keys without changing review, closer,
+remediation or merge lifecycle states. Shared owner fences exclude migration;
+the exclusive migration saves a recovery marker, rekeys files and commits one
+audited transaction per database before publishing the current name. A pending
+marker or payload observation prevents another cycle until recovery completes.
+Current-name replay is a no-op; reused names with new IDs remain distinct.
+See [the identity contract](data-model/repository-identities.md) and
+[operator verification](review-pipeline-health.md#repository-renames-reporename-01).
+Existing smoke promises and exact-head merge authority remain unchanged.
+Final remediation quarantines conflicting repositories during discovery while
+unrelated intake continues at the ordinary refresh cadence. Reviewer BUSY exits
+release their existing claim without consuming an attempt. Reviewed the watcher
+producer projection and refreshed its fingerprint; lifecycle states and
+transitions remain unchanged. Organization discovery now lives in
+`src/watcher-repository-discovery.mjs` to retain the watcher size ratchet.
+Operator holds short-circuit before opening a repository state fence.
+
 SIZEOWNER-02: terminal `reviewer-prompt-too-large` and
 `reviewer-chunk-budget-exceeded` still settle to `failed`, never `pending`.
 The size-failure writer now fences the dispatched head and session. Settlement
@@ -1075,6 +1121,8 @@ gates and launch-token preference remain unchanged. See the
 [host identity contract](RUNBOOK-ama-closure.md#host-identity-reads-hostidcache-01).
 
 CLOSURESPLIT-01: closure and background hammer dispatch carry the selected immutable next-action pair, including the decision key, generation and head-scoped primary-change result. A changed decision key returns closure-decision-mismatch with both keys/generations and the complete replacement snapshot. Closure re-resolves that snapshot once; a daemon successor enters the existing live merge gates, while waits retain the refreshed owner. PRIMARYREPAIRDISPATCH-01 durably counts consumed mismatches per PR/head; the second mismatch, including during that successor attempt or on a later background tick, pages through closure-wait and returns closure-decision-mismatch-escalated without another successor attempt. Inherited primary-change failures are recomputed at the current head and their raw evidence is passed into dispatcher eligibility; absent raw evidence cannot default an observed refusal to not-applicable. A passing predicate supersedes only the associated primary-change decline. When both selected and refreshed exact-subject/head decisions name R05 primary-change-repair, dispatch uses existing repair admission: comment-only verdicts, non-blocking findings and reverted/unknown primary change admit the hammer to restore author lines or perform a finding-cited authorized reversal. Unauthorized reversals still refuse merge; unrelated/permanent declines, R15 conditions, structural safety, retry caps and leases retain their protections. The additive decision_mismatch_cycle table in the closure-wait database records head and a count capped at two; lifecycle states are unchanged. Changed hammer decisions are reported before repair-admission refusal after primary validation passes; structural safety refusals remain in the replacement snapshot. Non-dispatch successors return the refreshed nextAction, reason and snapshot together, and primary refresh preserves unrelated progress metadata.
+
+CLOSURERECOVERYEXEC-01: an R04 closure-recovery reconciliation is admitted to the closer by both closure and background hammer dispatch (shared predicate `hasClosureRecoveryIntent`), never reported as closure-decision-mismatch. The closer's existing custody reconciliation dispatches when ownership resolves. Otherwise closure returns the closer's refusal with closureRecovery evidence until the decision deadline, then pages once through closure-wait class closure-recovery-deadline and returns closure-recovery-ownership-unresolved. The orphan watchdog does not repeat that page. Lifecycle states, merge gates and leases are unchanged.
 
 OWNERDEADLINE-01: every open PR needs one live owner with a next action and
 an anchored deadline. Once that deadline is at least the existing ownerless

@@ -1,3 +1,4 @@
+import { serviceFixtureExec } from './helpers/codex-service-fixture.mjs';
 import './helpers/registry-session-fixture.mjs';
 import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
 installDispatchFileProducerFixture();
@@ -82,6 +83,7 @@ test('router local mode routes consume through the local self-spawn runtime', as
 
     let spawnCalled = false;
     const consumed = await consumeNextFollowUpJob({
+    execFileSyncImpl: serviceFixtureExec,
     guardStackedBaseImpl: async () => null,
       rootDir,
       promptTemplate: 'Reply path: ${REPLY_PATH}',
@@ -170,6 +172,7 @@ test('router os mode routes consume through the os hq-dispatch runtime', async (
     });
 
     const result = await consumeNextFollowUpJob({
+    execFileSyncImpl: serviceFixtureExec,
     guardStackedBaseImpl: async () => null,
       rootDir,
       promptTemplate: 'You are a remediation worker.',
@@ -269,6 +272,7 @@ test('round-budget exhaustion stops the job before any port dispatch (v1 parity)
     });
 
     const result = await consumeNextFollowUpJob({
+    execFileSyncImpl: serviceFixtureExec,
     guardStackedBaseImpl: async () => null,
       rootDir,
       promptTemplate: 'noop',

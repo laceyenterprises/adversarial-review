@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { repositoryObservationCache } from './repository-state-cache.mjs';
 // HAMASYNC-01 — take AMA's hammer `hq dispatch` out of the serial posted-review
 // phase.
 //
@@ -171,6 +172,12 @@ export function createAmaHammerBackgroundQueue({
   let running = 0;
   let stopping = false;
   const runningPrKeys = new Set();
+  repositoryObservationCache({ clear() {
+    // Running dispatchers own a shared rename fence. Queued callbacks retain
+    // old arguments, so let the renamed durable intent refill them next tick.
+    for (const entry of entries.values()) if (entry.state === 'queued') abort(entry.key);
+    settled.clear();
+  } });
 
   function prKey(key) {
     const headSeparator = key.lastIndexOf('@');

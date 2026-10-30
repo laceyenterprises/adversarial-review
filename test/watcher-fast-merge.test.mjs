@@ -147,7 +147,7 @@ export async function load(url, context, nextLoad) {
     'fixture:watcher-memory-pressure': "export async function checkReviewerMemoryAdmission() { return { admit: true, reason: null, sample: { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }, projectedHeadroomMb: 999999, availableMb: 999999, swapUsedPct: 0, estimatedReviewerRssMb: 0, reservedMb: 0 }; } export function peakReviewerMemoryMbFor() { return 0; } export async function readMemoryPressureSample() { return { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }; }",
     'fixture:health-probe': "export function createWatcherHealthProbe() { return { beginTick() { return {}; }, recordOpenPending() {}, recordSpawn() {}, async finishTick() {} }; }",
     'fixture:hcp-health': "export async function checkHcpHealthz() { return { ready: true, reason: 'fixture' }; }",
-    'fixture:atomic-write': "globalThis.__fastMergeAuditWrites = []; export function writeFileAtomic(path, content, options) { if (globalThis.__fastMergeFailAuditWrites) { throw new Error('fixture audit write failed'); } globalThis.__fastMergeAuditWrites.push({ path, content, options }); }",
+    'fixture:atomic-write': "globalThis.__fastMergeAuditWrites = []; export function writeFileAtomic(path, content, options) { if (globalThis.__fastMergeFailAuditWrites && String(path).includes('fast-merge-audits')) { throw new Error('fixture audit write failed'); } globalThis.__fastMergeAuditWrites.push({ path, content, options }); }",
     // Fast-merge policy tests require known builder evidence; transport holds
     // are exercised by watcher-claim-loop and worker-observation-client.
     'fixture:session-ledger-read-adapter': ${JSON.stringify(`export * from '${fileUrl('src', 'session-ledger-read-adapter.mjs')}?actual'; export async function readPrBuilderProvenanceAsync() { return { ok: false, reason: 'missing-builder-provenance', deferClaim: false }; }`)},
@@ -243,7 +243,7 @@ const octokit = {
     if (method === octokit.rest.issues.listEventsForTimeline) {
       return scenario.timelineEvents?.[String(params.issue_number)] || [];
     }
-    return [{ name: 'agent-os', archived: false }];
+    return [{ id: 12345, name: 'agent-os', archived: false }];
   },
   rest: {
     repos: { listForOrg: async () => ({ data: [] }) },

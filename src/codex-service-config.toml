@@ -2,6 +2,7 @@
 # Matches the existing --dangerously-bypass-approvals-and-sandbox envelope.
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
+cli_auth_credentials_store = "file"
 
 [features]
 shell_tool = true

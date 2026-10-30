@@ -1,3 +1,5 @@
+import { withRepositoryStateCycle } from './repository-state-lock.mjs';
+import { canonicalRepositoryArguments } from './repository-names.mjs';
 import { ensureWorkerRegistryReady } from './adapters/agent-runtime/local/remediation.mjs';
 import { reviewerAttributionForModel, validateReviewerAttribution } from './reviewer-attribution.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
@@ -27,7 +29,7 @@ import { filterGitHubBody } from './github-outbound-body.mjs';
  * ────────────────────────────────────────────────────────────────────────────
  */
 import { assertReviewHeadCurrent, reviewerExecutionFailureExitCode, reviewerPostFailureExitCode,
-  REVIEWER_PROMPT_TOO_LARGE_EXIT_CODE, REVIEWER_CHUNK_BUDGET_EXCEEDED_EXIT_CODE } from './reviewer-outcomes.mjs';
+  REVIEWER_PROMPT_TOO_LARGE_EXIT_CODE, REVIEWER_CHUNK_BUDGET_EXCEEDED_EXIT_CODE, REPOSITORY_STATE_BUSY_EXIT_CODE } from './reviewer-outcomes.mjs';
 import { execFile } from 'node:child_process';
 import {
   accessSync,
@@ -1808,6 +1810,7 @@ async function main() {
     console.error('[reviewer] Invalid JSON args:', rawArgs);
     process.exit(1);
   }
+  args = canonicalRepositoryArguments(ROOT, args);
 
   const {
     repo,
@@ -2532,7 +2535,11 @@ export {
 };
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  main().catch((err) => {
+  withRepositoryStateCycle(ROOT, main).catch((err) => {
+    if (err.code === 'REPOSITORY_STATE_BUSY') {
+      console.warn(`[repository-state-busy] ${err.message}`);
+      process.exit(REPOSITORY_STATE_BUSY_EXIT_CODE);
+    }
     console.error('[reviewer] Unhandled error:', err);
     process.exit(1);
   });

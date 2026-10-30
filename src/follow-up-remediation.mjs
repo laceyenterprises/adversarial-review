@@ -1,3 +1,6 @@
+import { cleanupServiceCodexAuth } from './codex-service-home.mjs';
+
+import { withRepositoryStateCycle } from './repository-state-lock.mjs';
 import { codexToolHostLogEvidence, readDispatchCodexToolHostEvidence } from './codex-tool-host-failure.mjs';
 import { ensureWorkerRegistryReady } from './adapters/agent-runtime/local/remediation.mjs';
 import { prepareWorkerObservationSession } from './dispatch-read-client.mjs';
@@ -386,6 +389,7 @@ function createRemediationRuntime({
   // local handle below receive this concrete value without caller injection.
   execFileImpl = execFileAsync,
   spawnImpl,
+  execFileSyncImpl,
   env = process.env,
   now = () => new Date().toISOString(),
   processKillImpl = process.kill,
@@ -487,6 +491,7 @@ function createRemediationRuntime({
         enforceHarnessIdentity,
         auditSink: harnessIdentityAuditSink,
         spawnImpl,
+        execFileSyncImpl,
         sourceEnv: env,
         workerClass: ['codex', 'remediator-codex-corp'].includes(workerClass) ? workerClass : undefined,
         now,
@@ -1419,7 +1424,11 @@ async function failFollowUpJobForHqCancel({
   };
 }
 
-async function reconcileFollowUpJob({
+async function reconcileFollowUpJob(args = {}) {
+  return withRepositoryStateCycle(args.rootDir || ROOT, () => reconcileFollowUpJobWithinRepositoryCycle(args));
+}
+
+async function reconcileFollowUpJobWithinRepositoryCycle({
   rootDir = ROOT,
   job,
   jobPath,
@@ -1518,6 +1527,7 @@ async function reconcileFollowUpJob({
     workerTerminalEvent,
     workerTerminalReplyPath: paths?.replyPath || null,
   });
+  if (!isHqWorker && liveness.state === 'exited') cleanupServiceCodexAuth(worker);
   // A publication refusal wins over reply text, no-progress handling and
   // published-head recovery. It cannot authorize a re-review or empty close.
   if (liveness.state !== 'active') {
@@ -2904,7 +2914,11 @@ async function reconcileFollowUpJob({
   });
 }
 
-async function reconcileInProgressFollowUpJobs({
+async function reconcileInProgressFollowUpJobs(args = {}) {
+  return withRepositoryStateCycle(args.rootDir || ROOT, () => reconcileInProgressFollowUpJobsWithinRepositoryCycle(args));
+}
+
+async function reconcileInProgressFollowUpJobsWithinRepositoryCycle({
   rootDir = ROOT,
   now = () => new Date().toISOString(),
   isWorkerRunning = isWorkerProcessRunning,
@@ -3009,7 +3023,11 @@ async function reconcileInProgressFollowUpJobs({
   };
 }
 
-async function handleRemediationTelemetryEvent({
+async function handleRemediationTelemetryEvent(args = {}) {
+  return withRepositoryStateCycle(args.rootDir || ROOT, () => handleRemediationTelemetryEventWithinRepositoryCycle(args));
+}
+
+async function handleRemediationTelemetryEventWithinRepositoryCycle({
   rootDir = ROOT,
   topic,
   event,
@@ -3130,10 +3148,15 @@ async function connectFollowUpTelemetryListener({
   return listener;
 }
 
-async function consumeNextFollowUpJob({
+async function consumeNextFollowUpJob(args = {}) {
+  return withRepositoryStateCycle(args.rootDir || ROOT, () => consumeNextFollowUpJobWithinRepositoryCycle(args));
+}
+
+async function consumeNextFollowUpJobWithinRepositoryCycle({
   rootDir = ROOT,
   execFileImpl = execFileAsync,
   spawnImpl,
+  execFileSyncImpl,
   now = () => new Date().toISOString(),
   promptTemplate = loadFollowUpPromptTemplate(rootDir),
   resolvePRLifecycleImpl = resolvePRLifecycle,
@@ -3679,6 +3702,7 @@ async function consumeNextFollowUpJob({
       shouldStop,
       execFileImpl,
       spawnImpl,
+      execFileSyncImpl,
       env: jobEnv,
       now,
     });
@@ -3928,11 +3952,16 @@ async function consumeNextFollowUpJob({
   }
 }
 
-async function consumeFollowUpJobsUntilCapacity({
+async function consumeFollowUpJobsUntilCapacity(args = {}) {
+  return withRepositoryStateCycle(args.rootDir || ROOT, () => consumeFollowUpJobsUntilCapacityWithinRepositoryCycle(args));
+}
+
+async function consumeFollowUpJobsUntilCapacityWithinRepositoryCycle({
   rootDir = ROOT,
   maxConcurrent = resolveRemediationMaxConcurrentJobs(),
   execFileImpl = execFileAsync,
   spawnImpl,
+  execFileSyncImpl,
   now = () => new Date().toISOString(),
   promptTemplate = loadFollowUpPromptTemplate(rootDir),
   resolvePRLifecycleImpl = resolvePRLifecycle,
@@ -3978,6 +4007,7 @@ async function consumeFollowUpJobsUntilCapacity({
         rootDir,
         execFileImpl,
         spawnImpl,
+        execFileSyncImpl,
         now,
         promptTemplate,
         resolvePRLifecycleImpl,

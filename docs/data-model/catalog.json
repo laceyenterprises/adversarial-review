@@ -2,6 +2,23 @@
   "version": 1,
   "entries": [
     {
+      "id": "repository-identities",
+      "title": "Repository Identity and Rename Continuity",
+      "path": "docs/data-model/repository-identities.md",
+      "store": "data/reviews.db; data/repository-names.json; data/repository-renames/; service-owned repo state",
+      "schemaSurface": "src/repository-identity.mjs",
+      "relatedSchemaSurfaces": [
+        "src/repository-state-files.mjs",
+        "src/repository-state-lock.mjs",
+        "src/repository-names.mjs",
+        "src/watcher.mjs",
+        "src/ama/closer-lease.mjs",
+        "src/ama/merge-lease.mjs"
+      ],
+      "owner": "watcher discovery with reviewer, follow-up and AMA state owners",
+      "compatibility": "Stable GitHub numeric ID and node ID backfill from existing discovery; same-ID name changes use an audited immediate transaction per database and a fenced replay journal for files. Opaque owner IDs and signed evidence remain stable; reused names never inherit another repository identity. Control-state files use an audited directory allowlist and exact owner/filename recipes; telemetry/workspaces remain historical. Unchanged observations are read-only, and projection caches invalidate on atomic file identity. Name conflicts quarantine only their repository at ordinary discovery cadence; retiring a row cannot reassign prior PR state. Reviewer BUSY exit 78 releases an unclaimed attempt. HQ authority continuity belongs to REPORENAME-02."
+    },
+    {
       "id": "review-size-actions",
       "title": "Terminal Review Size Actions",
       "path": "docs/data-model/review-size-actions.md",
@@ -85,7 +102,7 @@
       "path": "docs/data-model/review-findings.md",
       "store": "data/reviews.db: review_findings, review_finding_replies, review_finding_remediations, review_finding_disputes, finding_backlog, finding_batches, finding_batch_notes",
       "schemaSurface": "migrations/20261021_review_findings.sql",
-      "relatedSchemaSurfaces": ["src/findings-backlog.mjs","src/findings-batch.mjs","migrations/20261024_findings_backlog.sql","migrations/20261024_simplicity_batch.sql","migrations/20261024_simplicity_batch_lifecycle.sql","src/review-finding-records.mjs","src/finding-commit-attribution.mjs","src/finding-remediation-capture.mjs","src/kernel/finding-lines.mjs","src/kernel/review-findings.mjs","src/kernel/remediation-reply.mjs"],
+      "relatedSchemaSurfaces": ["src/findings-backlog.mjs","src/findings-batch.mjs","migrations/20261024_findings_backlog.sql","migrations/20261030_findings_batch_drain.sql","migrations/20261024_simplicity_batch.sql","migrations/20261024_simplicity_batch_lifecycle.sql","src/review-finding-records.mjs","src/finding-commit-attribution.mjs","src/finding-remediation-capture.mjs","src/kernel/finding-lines.mjs","src/kernel/review-findings.mjs","src/kernel/remediation-reply.mjs"],
       "owner": "review-body capture and remediation completion observations"
     },
     {
@@ -358,7 +375,7 @@
     },
     {
       "id": "follow-up-jobs",
-      "codexServiceIsolation": "Optional remediationWorker.codexHome and configDigest identify a fresh service config home and SHA-256; local spawns retain codexSessionRoot at <codexHome>/sessions without ephemeral execution. HQ log classification uses workerClass with a legacy model fallback, and absent persisted workers defer settlement. Refunded in-run outages retain recordedOutcome.toolHostEvidence.allToolsFailedBeforeExecution from complete logs; unchanged live heads and existing caps still gate refunds.",
+      "codexServiceIsolation": "Optional remediationWorker.codexHome and configDigest identify a fresh service config home and SHA-256; local spawns retain codexSessionRoot at <codexHome>/sessions without ephemeral execution. HQ log classification uses workerClass with a legacy model fallback, and absent persisted workers defer settlement. Refunded in-run outages retain recordedOutcome.toolHostEvidence.allToolsFailedBeforeExecution from complete logs; unchanged live heads and existing caps still gate refunds. LAC-2131 adds optional remediationWorker.codexAuthOwnerId matching the temporary service-home receipt for credential-only cleanup after local exit; absent/mismatched receipts are no-ops. startupEvidence.resolvedStartup records effectiveAuthPath, authStore=file, authPreflight=cli-login-status and refreshOwner=broker; authPath remains source provenance. Snapshots contain only OAuth fields with a non-rotating refresh sentinel. No secret values are persisted in job evidence, and failed effective auth never yields a spawned worker.",
       "remediationModelSources": ["env-pin", "registry", "committed-seed", "non-blocking-config"],
       "operatorLabelSatisfactions": "remediationPlan.operatorLabelSatisfactions[] retains live required-label evidence: repo, prNumber, label, eventId, actor, appliedAt, observedAt, headSha. Presence and event are required; CI requeue binds the current head and adds an actionable finding without resetting rounds; its blocking section removes empty sentinels and its comment-only verdict becomes Request changes. Fenced examples and other sections are preserved. Active remediation bypasses requeue without failure warnings. Same-path terminal stops preserve their record (LABELSTOPOWNER-01).",
       "ciInfrastructureWait": { "fields": ["reason", "headSha", "failedChecks", "firstObservedAt", "deadline", "nextProbeAt", "parked", "evidencePending"], "probeMs": 300000, "parkAfterMs": 3600000, "refundCode": "ci-infrastructure-refund", "refundReason": "checks-executed-again" },
@@ -665,7 +682,8 @@
       "relatedSchemaSurfaces": [
         "src/posted-review-row.mjs",
         "src/operator-label-wake.mjs",
-        "src/ama/closure-next-action.mjs"
+        "src/ama/closure-next-action.mjs",
+        "src/review-pipeline-health.mjs"
       ],
       "optionalOwnershipFields": ["nextAction"],
       "owner": "watcher posted-review dispatch fairness",
@@ -819,6 +837,7 @@
     },
     {
       "id": "ama-closer-dispatches",
+      "recordedLaunchCustody": "CLOSERCUSTODYLRQ-01: durable dispatch receipts and optional lease workerId/dispatchedAt retain launch custody across restart. Before replacement intent publication, probe the recorded launch including retries; terminal evidence permits host teardown with `--force` to bypass the open-PR guard while host custody checks remain mandatory, live/parked owners retain custody, and unavailable evidence retains the receipt and bounded wait/page. Legacy public slot fallback and existing attempt/ceiling/merge gates remain. Activate by watcher restart after deploy; SRE observes a natural failed/succeeded launch release within one tick with launch ID/status/reason and the next budgeted dispatch. Synthetic tests only; no new smoke command.",
       "ciCapacityRecovery": "CIBLOCKRESUME-01: exact-head infrastructure recovery retires matching legacy decision-blocked local custody under the intent lock and lease CAS; recoveredLaunchRequestId retains provenance. Live/unknown retries and merge gates remain enforced.",
       "orphanWorktreeReclaim": "CLOSERORPHAN-01: settled exact-head empty-key no-launch proof permits non-force host teardown for missing launch metadata before replacement intent publication; refusal preserves proof and stores bounded preReceiptReconciliation.orphanReclaimRefusal.reason for unchanged-reason event deduplication across restart. Launch-bound and unproven runs retain custody.",
       "dispatchFilesEvidence": "SDK 0.12.0 launch/run-authorized sidecar and redacted logical log projections; independent workspace/host capabilities. Partial, foreign or unavailable evidence retains custody; no native fallback. See ama-closer-dispatches.md.",
@@ -923,6 +942,7 @@
     },
     {
       "id": "ama-closer-leases",
+      "recordedLaunchCustody": "CLOSERCUSTODYLRQ-01: durable dispatch receipts and optional lease workerId/dispatchedAt retain launch custody across restart. Before replacement intent publication, probe the recorded launch including retries; terminal evidence permits host teardown with `--force` to bypass the open-PR guard while host custody checks remain mandatory, live/parked owners retain custody, and unavailable evidence retains the receipt and bounded wait/page. Legacy public slot fallback and existing attempt/ceiling/merge gates remain. Activate by watcher restart after deploy; SRE observes a natural failed/succeeded launch release within one tick with launch ID/status/reason and the next budgeted dispatch. Synthetic tests only; no new smoke command.",
       "ciCapacityRecovery": "CIBLOCKRESUME-01: exact-head infrastructure recovery retires matching legacy decision-blocked local custody under the intent lock and lease CAS; recoveredLaunchRequestId retains provenance. Live/unknown retries and merge gates remain enforced.",
       "suspendedCloserResume": "GSR-07: re-adopt resumed leases or rebind a successor and source-owned dispatch record across all retained heads. Release as superseded only after launchRequestOwned proves no PR ownership, including retries; parked/live/unknown evidence retains the lease. CAS collisions report aggregate busy if nothing changed. Release CLI prepares the authenticated session before synchronous ledger reads; bootstrap failure preserves leases.",
       "retryableMergeRelease": "HAMLANEWAIT-02: retryable merge deferrals release closer ownership as terminal with retryable-<reason> (lane-busy, merge-lease-timeout, required-checks-pending, pr-mergeability-unknown). The audit CLI writes the receipt under the existing owner snapshot fence. In-run lease retries retain ownership. Closure/rescue and bounded startup/periodic sweeps reconcile terminal launches before admission; live launches, retries, parked owners and unreadable evidence retain their existing semantics. Ordinary same-head daemon eligibility or hammer admission schedules the retry through existing backoff, attempt and lifetime caps; terminal lease reclamation and exclusive acquisition prevent duplicate retries. Orphan ownership probes a dispatched lease LRQ even without its dispatch projection. No new lifecycle states, config keys, checks or smoke actions; deployment acceptance requires natural recovery observation.",
@@ -945,13 +965,13 @@
       "path": "docs/data-model/ama-closure-waits.md",
       "store": "data/ama-closure-waits/<sha256(repo#prNumber)>.db",
       "schemaSurface": "src/ama/closure-wait.mjs",
-      "relatedSchemaSurfaces": ["src/ama-closure-orchestration.mjs", "src/ama/dispatch-closer.mjs", "src/ama/closure-next-action.mjs", "src/reviewer-ci-admission.mjs", "src/ama/closure-refresh-loop.mjs", "src/follow-up-merge-agent.mjs"],
+      "relatedSchemaSurfaces": ["src/ama-closure-orchestration.mjs", "src/ama/dispatch-closer.mjs", "src/ama/closure-next-action.mjs", "src/reviewer-ci-admission.mjs", "src/ama/closure-refresh-loop.mjs", "src/ama/closure-recovery.mjs", "src/follow-up-merge-agent.mjs"],
       "sharedDecisionAnchor": "anchor-only observations reuse bounded-wait started without reserving or delivering a page",
       "owner": "AMA bounded closure wait and exhaustion paging",
       "waitTable": "waits_by_class",
       "waitColumns": ["head", "class", "started", "reason", "paged"],
       "waitPrimaryKey": ["head", "class"],
-      "waitClasses": ["primary-change", "bounded-wait", "final-round", "lane-busy", "ci-regression-ownerless", "snapshot-refresh", "closure-decision-mismatch", "original-worker-evidence", "closer-worker-evidence"],
+      "waitClasses": ["primary-change", "bounded-wait", "final-round", "lane-busy", "ci-regression-ownerless", "snapshot-refresh", "closure-decision-mismatch", "closure-recovery-deadline", "original-worker-evidence", "closer-worker-evidence"],
       "decisionMismatchCycleTable": "decision_mismatch_cycle(id INTEGER PRIMARY KEY CHECK(id=1), head TEXT NOT NULL, cycles INTEGER NOT NULL)",
       "decisionMismatchCycleContract": "First consumed mismatch permits one re-resolution; the second at the same head pages through closure-decision-mismatch and returns closure-decision-mismatch-escalated. Count saturates at two, survives restart, queue submissions and decision changes; a different head starts count one. No completion reset. Existing per-PR/head page receipt dedupes and refunds failed delivery.",
       "refreshCycleTable": "refresh_cycle(id INTEGER PRIMARY KEY CHECK(id=1), head TEXT NOT NULL, fingerprint TEXT NOT NULL, cycles INTEGER NOT NULL)",

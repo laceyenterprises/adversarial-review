@@ -34,6 +34,17 @@ held parks and stale closer leases do not raise stall findings. If a legacy
 ledger lacks `labels_json`, counting reads keep their unfiltered population and
 `held` is unknown (`null`), rather than silently reporting an empty queue.
 
+`expiredNextActions` (CLOSURERECOVERYEXEC-01) is a snapshot-only section. It
+reads the shared next action that the watcher's no-progress lane ledger
+(`data/watcher-no-progress-lane/*.json`) stores for each PR head. It reports
+every owner whose deadline has passed, except the `refresh` class, which is
+only a re-read cadence. Each item carries its age (`ageMs` past `deadlineAt`),
+action/actor/reason/row and a `closureRecovery` flag. Totals are
+`expiredCount`, `closureRecoveryExpired` and `oldestAgeMs`; at most 50 items
+are listed, oldest first. Closed or merged PRs are omitted. The section adds no
+finding, metric or page, because the selected executor and closure-wait own
+escalation.
+
 Run locally:
 
 ```sh
@@ -43,6 +54,52 @@ npm run pipeline-health -- --sentinel
 
 The Grafana dashboard lives at
 `observability/grafana/review-pipeline-health.json`.
+
+## Repository renames (REPORENAME-01)
+
+The watcher records GitHub's numeric repository ID and node ID from its normal
+organization listing. The same ID with a new `full_name`, for example
+`example-org/alpha` → `example-org/beta`, triggers migration before review
+intake. PR `base.repo` payloads (including redirected API responses) can also
+detect the change; discovery then retries at a migration boundary. Similar
+names never trigger migration. A new ID reusing an old name is distinct and
+produces a warning.
+
+Deploy the rename-aware watcher, reviewer and follow-up writers together
+through normal deployment before an operator-approved rename. An active owner
+defers migration until settlement. A durable pending marker fences cycles
+during interrupted migration; startup/next-poll recovery replays it safely.
+Do not delete the marker or manually merge colliding state. Inspect the
+reported collision or changed file if automatic recovery refuses.
+
+The watcher emits one structured line on a successful ordinary rename:
+
+```text
+[repository-rename] {"oldName":"example-org/alpha","newName":"example-org/beta","repositoryId":"123","rows":{"reviewed_prs":1,"reviewer_passes":1},"databases":{},"files":4,"at":"2026-10-30T12:00:00.000Z"}
+```
+
+Counts include all installed repo-bearing tables, including zero counts; this
+example abbreviates them. `repository_rename_audit` in `data/reviews.db` is the
+durable receipt. Console delivery can be lost if the process crashes just
+after commit; replay preserves the single durable receipt.
+
+After deployment and the separately approved rename, SRE verifies read-only:
+
+1. The stable ID points at the new name, the durable audit has one row for
+   this rename, and the watcher log has one corresponding audit line.
+2. An existing open PR has the same review row/pass IDs, attempt count and
+   review head under the new name. Subsequent polls request no new review for
+   that unchanged head. Its remediation round/job ID, closer lease ID and merge
+   ownership still match.
+3. No pending recovery marker remains. The next naturally opened new PR gets
+   its ordinary first review.
+
+Retain these observations as the live receipt; offline fixture tests do not
+prove deployment. HQ Control Plane attestation key continuity is handled by
+REPORENAME-02. This change preserves local attestation lookup keys and signed
+payloads; it grants no replacement merge authority. The complete
+[state audit and recovery contract](data-model/repository-identities.md)
+lists the database, file and cache participants.
 
 ## Metrics
 
@@ -377,6 +434,7 @@ can distinguish "never posted in window" from a null/corrupt timestamp column.
 | `review:terminal_but_unmerged` | settled/clean PR remains open and unmerged past the terminal threshold | ticket | the PR merges/closes or no longer has a settled clean terminal signature |
 | `review:daemon_merge_parked` | the AMA daemon clean-merge declined the same PR for the same reason for 3+ consecutive ticks (e.g. `worker-identity-unresolved`, `lease-not-held`; `verdict-not-eligible` routes to the capped hammer). A revoked `operator-approved` label holds one tick without recording a park. | ticket | the PR merges/closes, the daemon's decline reason changes, or the park is not refreshed for two pipeline-health ticks |
 | `review:ama_closer_lease_stale` | AMA closer lease is `pending`/`dispatched`, `terminalOutcome=null`, and older than 30m | ticket | the lease reaches terminal state or falls below the age threshold |
+| `review:findings_backlog_overdue` | The oldest captured open non-blocking finding exceeds `ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS` (default 48h). `nonBlockingBacklog` exposes open and unbatched counts, oldest age, applied/dropped per UTC day and unresolved batch error counts. | ticket | oldest open age returns below the bound or the backlog drains |
 | `review:reviewer_pass_zombie` | Legacy running pass exceeds 1.5 times `reviewer.running_pass_timeout_seconds` (default 90m). Heartbeat-aware passes exceed 1.5 times the reaper's idle threshold (default 930s + 50% = 23m15s since progress) or scaled ceiling plus 10m slack (default capped ceiling: 3h10m + 50% = 4h45m since start). The health override caps every effective threshold. Each row records its threshold and reason. A live process group may stay quiet through posting, throttling, or OAuth fallback; inspect liveness before triage. | ticket | no running reviewer pass exceeds its age threshold; the watcher timeout sweep should settle safely reapable rows as `failed` / `reviewer-timeout` |
 | `review:reviewer_pass_config_degraded` | Reviewer timeout configuration could not be loaded; health collection continues with safe defaults and reports the load error. | ticket | the reviewer timeout configuration loads successfully |
 | `review:stuck_retry_loop` | one or more open PRs remain `review_status='failed'` after infra auto-recovery exhausted its attempt cap (`infra_auto_recover_attempts` at/over the cap, default 3); when the dominant `failure_class` is `diff-too-large`, the failure is deterministic because GitHub refused to serve the PR diff | ticket | no open PR remains failed at/over the infra auto-recovery cap (the review reposts/succeeds, the oversized PR is split or otherwise reviewable by file list, or the PR merges/closes) |
@@ -677,3 +735,17 @@ rules or HCP-outage hold. Deploy the coordinated OS endpoint and consumer after
 both PRs converge; the one-shot adapter loads the deployed owner code each read.
 No daemon bounce or host activation was performed as validation. Offline
 producer coverage: `node --test test/review-observations.test.mjs`.
+
+### Rename hardening and deliberate parks
+
+Identity conflicts quarantine only the affected repository and emit a deduplicated
+SEV2 notice. Inspect the conflicting stable IDs and their retained state; do not
+remove a current-name row to make a recreated repository inherit old PRs.
+Other repositories continue at the normal discovery cadence. Chained renames
+vacate destinations first; interrupted migrations retain their recovery fence.
+
+REPORENAME-02 is a separate required owner-side dependency. Until its HQ
+`pr_opened`/worker-identity records resolve the new stable repository identity,
+an open renamed PR may intentionally park as `worker-identity-unresolved`.
+Expect that park during acceptance; do not waive attestation or identity gates.
+An ordinary rename's service-local continuity does not prove HQ cutover.

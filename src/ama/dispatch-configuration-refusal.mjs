@@ -1,3 +1,4 @@
+import { repositoryObservationCache } from '../repository-state-cache.mjs';
 import { createHash } from 'node:crypto';
 import { closeSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
@@ -9,7 +10,7 @@ export function dispatchConfigurationRefusal(error) {
   return /\brepo_unregistered\b/i.test(detail) ? 'repo_unregistered' : null;
 }
 
-const delivered = new Set();
+const delivered = repositoryObservationCache(new Set());
 export async function pageDispatchConfigurationRefusal({ rootDir, repo, refusal, deliverAlertImpl, logger, now }) {
   const dir = join(rootDir, 'data', 'ama-dispatch-configuration');
   const path = join(dir, `${createHash('sha256').update(repo.toLowerCase()).digest('hex')}.json`);

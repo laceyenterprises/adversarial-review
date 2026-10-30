@@ -42,7 +42,7 @@ test('watcher drains queued reviewer dispatches before merge-side handoffs', () 
   const subjectFifoSort = watcher.indexOf(
     'compareWatcherWakeSubjectEntries(wakePayloadForPoll(), repoPath, a, b, compareReviewerDispatchCandidates)',
   );
-  const orgRefresh = watcher.indexOf('await refreshOrgRepos(octokit);');
+  const orgRefresh = watcher.indexOf('await withGitHubBudgetScope({}, () => refreshOrgRepos(octokit));');
   const frontLifecycleCleanup = watcher.indexOf('await retryPendingMergeAgentLifecycleCleanups();', orgRefresh);
   const frontLifecycleSync = watcher.indexOf(
     'await syncPRLifecycle(octokit, operatorSurface, WATCHER_PRIMARY_DOMAIN_ID);',

@@ -1,3 +1,5 @@
+import { withRepositoryStateCycle } from '../repository-state-lock.mjs';
+import { canonicalRepositoryArguments } from '../repository-names.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
@@ -15,7 +17,11 @@ async function page(text, options) {
 
 // SQLite serializes observations across ticks/processes. Reserve the page before
 // sending it, refund on transport refusal, and keep the original wait deadline.
-export async function observeClosureWait({ rootDir, repo, prNumber, headSha, reason,
+export async function observeClosureWait(args = {}) {
+  return withRepositoryStateCycle(args.rootDir, () => observeClosureWaitWithinRepositoryCycle(canonicalRepositoryArguments(args.rootDir, args)));
+}
+
+async function observeClosureWaitWithinRepositoryCycle({ rootDir, repo, prNumber, headSha, reason,
   now = Date.now(), env = process.env, pageImpl = page, immediate = false, waitClass = null, startedAt = null, progress = false,
   launchWait = null, launchAlive = false, anchorOnly = false }) {
   const reasonClass = waitClass || (immediate ? 'primary-change' : 'bounded-wait');

@@ -29,6 +29,16 @@ export function hasHammerDispatchIntent(shared, identity) {
     && decision.actor === 'hammer' && decision.queue?.intent === 'dispatch';
 }
 
+// CLOSURERECOVERYEXEC-01: an R04 ownership reconciliation is not a hammer
+// mismatch. Closure and background hammer admission both hand it to the
+// closer's custody reconciliation, and closure enforces its deadline
+// (src/ama/closure-recovery.mjs). Both consult this one predicate.
+export function hasClosureRecoveryIntent(shared, identity) {
+  const decision = shared?.decision;
+  return closureDecisionMatches(shared, identity) && decision.row === 'R04-ownership'
+    && decision.actor === 'closure-recovery' && decision.queue?.intent === 'reconcile';
+}
+
 // A refreshed executor may invalidate queued intent, but cannot silently turn
 // a hammer request into an unrelated refresh. Return the exact replacement pair
 // so closure can select its successor once without rebuilding partial evidence.

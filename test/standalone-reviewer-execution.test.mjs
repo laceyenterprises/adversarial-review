@@ -279,6 +279,7 @@ for (const failure of ['denied', 'not-entitled', '401', '403', 'timeout', 'unava
     assert.equal(pinned.recoveries, 1);
     assert.equal(pinned.execution.model, pin);
     assert.equal(pinned.execution.modelSource, 'env-pin');
+    assert.equal(pinned.execution.harness, 'codex');
     assert.doesNotMatch(pinned.diagnostics, /WARNING.*modelSource=committed-seed/);
   });
 }

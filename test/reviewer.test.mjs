@@ -16,6 +16,7 @@ import { AgentOSConfigError } from '../src/config-loader.mjs';
 import { spawnCapturedProcessGroup } from '../src/process-group-spawn.mjs';
 import { beginReviewerPass } from '../src/reviewer-pass-tokens.mjs';
 import { extractReviewVerdict } from '../src/kernel/verdict.mjs';
+import { parseReviewFindings } from '../src/kernel/review-findings.mjs';
 import { parseReviewBody as parseRescueReviewBody } from '../src/merge-agent-rescue-classifier.mjs';
 import { readPendingReviewedAttestations } from '../src/reviewed-attestation.mjs';
 import {
@@ -1767,10 +1768,60 @@ test('stamped review preserves header, verdict and finding parsing', () => {
     execution: { harness: 'codex', model: 'gpt-6-sol', effort: 'high' },
     reviewText: '## Summary\nClean.\n\n## Blocking issues\n- None.\n\n## Verdict\nComment only',
   });
-  assert.match(body, /^## Adversarial Review — Codex \(codex-reviewer-lacey\)\n\n> Reviewer: codex · gpt-6-sol · high\n\n/);
+  assert.match(body, /^## Adversarial Review — Codex \(codex-reviewer-lacey\)\n\n> Reviewer: harness codex · model gpt-6-sol · effort high\n\n/);
   assert.equal(classifyReviewCommentHeader(body).verdictMode, VERDICT_MODE_ENFORCE);
   assert.equal(extractReviewVerdict(body), 'Comment only');
   assert.equal(parseRescueReviewBody(body).verdict, 'Comment only');
+});
+
+// REVIEWPROV-01: the stamp names the execution runtime and the requested
+// effort/thinking level with labelled fields; parsers still read the body.
+test('stamp labels harness, model and effort for every reviewer runtime', () => {
+  const stampOf = (displayName, execution) => buildReviewCommentBody({
+    reviewerMetadata: { displayName, reviewerIdentity: `${displayName.toLowerCase()}-reviewer-fixture` },
+    verdictMode: VERDICT_MODE_ENFORCE,
+    execution,
+    reviewText: '## Summary\nClean.\n\n## Verdict\nComment only',
+  }).split('\n')[2];
+  assert.equal(stampOf('Gemini', { harness: 'antigravity', model: 'Gemini 3.8 Flash (High)', effort: 'high' }),
+    '> Reviewer: harness antigravity · model Gemini 3.8 Flash (High) · effort high');
+  assert.equal(stampOf('Gemini', { harness: 'gemini-cli', model: 'gemini-2.5-pro', effort: null }),
+    '> Reviewer: harness gemini-cli · model gemini-2.5-pro · effort n/a');
+  assert.equal(stampOf('Claude', { harness: 'claude-code', model: 'claude-fixture', effort: 'max' }),
+    '> Reviewer: harness claude-code · model claude-fixture · effort max');
+  assert.equal(stampOf('Codex', { harness: 'codex', model: 'gpt-fixture', effort: 'xhigh' }),
+    '> Reviewer: harness codex · model gpt-fixture · effort xhigh');
+});
+
+test('labelled antigravity stamp keeps verdict and blocking-finding parsing', () => {
+  const body = buildReviewCommentBody({
+    reviewerMetadata: { displayName: 'Gemini', reviewerIdentity: 'gemini-reviewer-fixture' },
+    verdictMode: VERDICT_MODE_ENFORCE,
+    execution: { harness: 'antigravity', model: 'Gemini 3.8 Flash (High)', effort: 'high' },
+    reviewText: '## Summary\nOne defect.\n\n## Blocking issues\n- **Off-by-one in fixture loop**\n'
+      + '  - **File:** src/fixture.mjs\n  - **Lines:** 1-2\n  - **Problem:** skips the last item\n\n'
+      + '## Non-blocking issues\n- None.\n\n## Verdict\nRequest changes',
+  });
+  assert.match(body, /\n> Reviewer: harness antigravity · model Gemini 3\.8 Flash \(High\) · effort high\n/);
+  assert.equal(classifyReviewCommentHeader(body).verdictMode, VERDICT_MODE_ENFORCE);
+  assert.equal(extractReviewVerdict(body), 'Request changes');
+  assert.equal(parseRescueReviewBody(body).verdict, 'Request changes');
+  const findings = parseReviewFindings(body);
+  assert.equal(findings.blocking.state, 'known');
+  assert.equal(findings.blocking.count, 1);
+  assert.equal(findings.nonBlocking.count, 0);
+});
+
+test('reviewer execution harness names the runtime, not the model family', () => {
+  assert.equal(__test__.reviewerExecutionHarness('claude'), 'claude-code');
+  assert.equal(__test__.reviewerExecutionHarness('codex'), 'codex');
+  assert.equal(__test__.reviewerExecutionHarness('gemini', 'antigravity'), 'antigravity');
+  assert.equal(__test__.reviewerExecutionHarness('gemini', 'cli'), 'gemini-cli');
+  assert.throws(() => __test__.reviewerExecutionHarness('gemini', 'other'), /Unknown reviewer execution harness: gemini:other/);
+  assert.equal(__test__.geminiRequestedThinkingLevel('Gemini 3.8 Flash (High)', 'antigravity'), 'high');
+  assert.equal(__test__.geminiRequestedThinkingLevel('Gemini 3.8 Pro (Low)', 'antigravity'), 'low');
+  assert.equal(__test__.geminiRequestedThinkingLevel('Gemini 3.8 Pro', 'antigravity'), null);
+  assert.equal(__test__.geminiRequestedThinkingLevel('Gemini 3.8 Flash (High)', 'cli'), null);
 });
 
 test('review comment body skips prepending when reviewer output already has a title', () => {
@@ -3744,6 +3795,7 @@ test('reviewWithClaude retains a valid reply before more than 10 MiB of stream e
   assert.equal(result.reviewText, SYNTHETIC_CLAUDE_REVIEW);
   assert.equal(result.tokenUsage.output, 7);
   assert.equal(result.execution.replySelection.laterCandidates, 1);
+  assert.equal(result.execution.harness, 'claude-code');
 });
 
 test('reviewWithClaude retries one silent invocation on claude with freshly prepared auth', async () => {
@@ -4798,7 +4850,7 @@ test('reviewWithGemini happy path returns the captured review text', async () =>
   assert.deepEqual(result, {
     reviewText: 'BLOCKING: real finding\n\nVERDICT: blocked',
     tokenUsage: null,
-    execution: { harness: 'gemini', model: 'gemini-2.5-pro', modelSource: 'registry', effort: null },
+    execution: { harness: 'gemini-cli', model: 'gemini-2.5-pro', modelSource: 'registry', effort: null, effortSource: 'none' },
   });
   // The prompt fed to gemini carries the extra context and the diff fence.
   assert.equal(captured.length, 1);
@@ -4902,6 +4954,8 @@ test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scr
   // cli slug, and binds --model BEFORE --print with the prompt as the --print value.
   assert.equal(spawnCalls[0].model, 'Gemini 3.8 Flash (High)');
   assert.equal(result.execution.modelSource, 'runtime-display-token');
+  assert.equal(result.execution.harness, 'antigravity');
+  assert.equal(result.execution.effort, 'high');
   const aMi = spawnCalls[0].args.indexOf('--model');
   const aPi = spawnCalls[0].args.indexOf('--print');
   assert.ok(aMi >= 0 && aMi < aPi, '--model must be present and precede --print');
@@ -5764,7 +5818,8 @@ test('reviewWithGemini keeps successful antigravity review when spend report loo
     }));
 
     assert.deepEqual(result, { reviewText, tokenUsage: null,
-      execution: { harness: 'gemini', model: 'Gemini 3.8 Flash (High)', modelSource: 'runtime-display-token', effort: null } });
+      execution: { harness: 'antigravity', model: 'Gemini 3.8 Flash (High)', modelSource: 'runtime-display-token',
+        effort: 'high', effortSource: 'model-display-name' } });
     assert.equal(cleaned, true);
     assert.deepEqual(released, [{ checkoutId: 'co_spend_success_throw', quotaSignal: false }]);
     assert.equal(warnings.length, 1);
@@ -6122,7 +6177,7 @@ test('reviewWithGemini retries transient Gemini subprocess failures before succe
   });
 
   assert.deepEqual(result, { reviewText: '## Verdict\n\nComment only', tokenUsage: null,
-    execution: { harness: 'gemini', model: 'gemini-2.5-pro', modelSource: 'registry', effort: null } });
+    execution: { harness: 'gemini-cli', model: 'gemini-2.5-pro', modelSource: 'registry', effort: null, effortSource: 'none' } });
   assert.equal(attempts.length, 3);
   assert.deepEqual(sleeps, [0, 0]);
 });

@@ -4,7 +4,7 @@
 **Stores:** `data/reviews.db`, `data/repository-names.json`,
 `data/repository-renames/`, service-owned files under `data/` and the configured
 reviewer state directory  
-**Sources:** `src/repository-identity.mjs`, `src/repository-state-files.mjs`,
+**Source of truth:** `src/repository-identity.mjs`, `src/repository-state-files.mjs`,
 `src/repository-state-lock.mjs`, `src/repository-names.mjs`
 
 ## Identity and durable records
@@ -99,3 +99,35 @@ Local continuity never substitutes for a valid authoritative attestation.
 See [the operator procedure](../review-pipeline-health.md#repository-renames-reporename-01)
 and offline acceptance in `test/repository-identity.test.mjs` and
 `test/watcher-claim-loop.test.mjs`.
+
+## Final-review hardening
+
+Migration enumerates the explicit `STATE_DIRECTORIES` allowlist in
+`src/repository-state-files.mjs`, plus the explicitly configured reviewer state
+store. Workspace trees (including `*.trash` and directories containing `.git`),
+API logs and append-only telemetry such as `handoff-events` are outside the
+journal and retain historical names. Exact recipe delimiters and parsed record
+ownership protect sibling repository names. New control-state stores must be
+registered in that allowlist.
+
+Unchanged identity observations perform no database transaction or names-file
+rewrite. Name lookups cache the projection by device/inode, nanosecond
+timestamps and size; equal-sized atomic publication invalidates the cache.
+Follow-up job roots are normalized before selecting the shared fence.
+
+A reviewer encountering a pending rename exits 78 with the owned
+`[repository-state-busy]` marker. The direct adapter classifies that distinct
+refusal and settlement releases its claim without charging a review attempt.
+Canonicalization errors are separate from malformed JSON diagnostics.
+
+Discovery processes chained renames in destination-vacating order. A conflicting
+repository is quarantined and paged with a stable deduplication key; unrelated
+repositories continue at the ordinary refresh cadence. An interrupted journal
+still keeps the shared fence until replay completes. A deleted/recreated name
+with a different ID remains quarantined rather than reassigning the old
+repository's string-keyed PR state to the new owner. This deliberate operator
+gate preserves old evidence; retiring the identity row alone is insufficient.
+
+Legacy merge-attempt containers inherit ownership only from their exact holder,
+waiter or history family. A nonempty legacy attempt store with no provable owner
+refuses migration before a journal is published, preserving its consumed budget.

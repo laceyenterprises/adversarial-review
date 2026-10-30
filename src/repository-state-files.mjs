@@ -51,8 +51,10 @@ export function rekeyRepositoryValue(value, oldName, newName) {
 
 function filesUnder(directory) {
   if (!existsSync(directory)) return [];
+  if (existsSync(join(directory, '.git'))) return [];
   return readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
     const path = join(directory, entry.name);
+    if (entry.name.endsWith('.trash')) return [];
     if (entry.isSymbolicLink()) throw new Error(`Repository migration refuses symlink: ${path}`);
     if (entry.isDirectory()) {
       if (['repository-renames', 'api-cache', 'finalization-git', 'workspaces', 'node_modules', '.git'].includes(entry.name)) return [];
@@ -61,6 +63,37 @@ function filesUnder(directory) {
     return entry.isFile() ? [path] : [];
   });
 }
+
+// Only control-state owners participate. Append-only diagnostics/telemetry,
+// API logs and workspace trees remain historical evidence outside the journal.
+const STATE_DIRECTORIES = [
+  'ama-closer-cancels', 'ama-closer-dispatches', 'ama-closer-leases',
+  'ama-closure-lag', 'ama-closure-waits', 'ama-dispatch-configuration',
+  'ama-hammer-background', 'merge-leases', 'builder-routing', 'cascade-state',
+  'ci-recovery', 'closer-authored-stale', 'comment-delivery-claims',
+  'daemon-merge-parks', 'derived-artifact-receipts', 'duplicate-family-packets',
+  'finalization-queue-locks', 'finding-batches', 'follow-up-jobs', 'hammer-wakes',
+  'handoff-wake', 'operator-decision-notices', 'operator-label-holds',
+  'operator-label-wakes', 'operator-mutations', 'pr-lifecycle-reconcile',
+  'primary-change-history', 'replies', 'rereview-wakes', 'review-cancellations',
+  'review-elisions', 'review-failure-decisions', 'review-freshness',
+  'review-size-actions', 'reviewed-attestations', 'reviewer-runs',
+  'stacked-base-holds', 'ticket-pipeline-pauses', 'watcher-no-progress-lane',
+  'adversarial-gate-status', 'argus-security-jobs', 'fast-merge-audits',
+  'first-pass-ci-orphans', 'osg-remediator', 'recovery-reaper',
+  'reviewer-cleanup-findings', 'reviewer-fences', 'runtime-runs',
+];
+
+function recordOwner(record) {
+  const owner = record?.repo || record?.repository || record?.repoPath;
+  if (typeof owner === 'string') return owner.toLowerCase();
+  if (Array.isArray(record?.waiters) && record.waiters.length) {
+    const owners = new Set(record.waiters.map(recordOwner));
+    if (owners.size === 1) return [...owners][0];
+  }
+  return null;
+}
+const leaseFamily = path => path.replace(/(?:\.(?:attempts|waiters)\.json|\.history\.jsonl|\.json)$/, '');
 
 function addHashPair(pairs, before, after) {
   if (before === after) return;
@@ -158,7 +191,7 @@ export function identityHashes(pairs, record, oldName, newName) {
 export function planRepositoryStateFiles(rootDir, { oldName, newName, subjects = [], additionalStateDir }) {
   const hashes = new Map();
   addHashPair(hashes, oldName.toLowerCase(), newName.toLowerCase());
-  const files = [...new Set([...filesUnder(join(rootDir, 'data')),
+  const files = [...new Set([...STATE_DIRECTORIES.flatMap(name => filesUnder(join(rootDir, 'data', name))),
     ...(additionalStateDir && resolve(additionalStateDir) !== resolve(rootDir, 'data') ? filesUnder(additionalStateDir) : [])])];
   const parsed = new Map();
   for (const path of files) {
@@ -169,6 +202,13 @@ export function planRepositoryStateFiles(rootDir, { oldName, newName, subjects =
     parsed.set(path, { text, records });
   }
   collectRepositoryIdentityHashes(hashes, [...subjects, ...[...parsed.values()].flatMap(entry => entry.records)], oldName, newName);
+  // Legacy merge-attempt containers omit repo fields. Bind them to an exact
+  // sibling holder/waiter/history recipe that does carry the owner; never
+  // silently strand a retry budget under the old name.
+  const ownedLeaseFamilies = new Set([...parsed].filter(([path, entry]) =>
+    basename(dirname(path)) === 'merge-leases'
+    && entry.records.some(record => recordOwner(record) === oldName.toLowerCase()))
+    .map(([path]) => leaseFamily(path)));
   const encodings = [
     [encodeURIComponent(oldName), encodeURIComponent(newName)],
     [oldName.replaceAll('/', '__'), newName.replaceAll('/', '__')],
@@ -180,20 +220,31 @@ export function planRepositoryStateFiles(rootDir, { oldName, newName, subjects =
   const plan = [];
   for (const path of files) {
     let name = basename(path);
+    const entry = parsed.get(path);
     // Job IDs are referenced by telemetry and worker launches. Retain the
     // filename; readers use repository history to find these original IDs.
     const opaqueJob = jobNames.some(jobName => name === jobName || name.startsWith(`${jobName}.`));
     for (const [before, after] of opaqueJob ? [] : encodings) {
-      if (name === before || name.startsWith(before) && /[-_.]/.test(name[before.length] || '')) {
+      const suffix = name.slice(before.length);
+      const declaredOwners = entry?.records.map(recordOwner).filter(Boolean) || [];
+      const owned = declaredOwners.length ? declaredOwners.every(owner => owner === oldName.toLowerCase())
+        : basename(dirname(path)) === 'merge-leases' && ownedLeaseFamilies.has(leaseFamily(path));
+      // A sibling such as alpha-tools is never alpha's slot. Non-JSON stores
+      // use their audited identity digests below, not a guessed name prefix.
+      if (name.startsWith(before) && /^(?:-pr-\d+(?:-|\.)|__)/.test(suffix)
+        && owned) {
         name = after + name.slice(before.length);
         break;
+      }
+      if (name.startsWith(before + '__') && path.endsWith('.attempts.json')
+        && !owned && !declaredOwners.length && entry?.records.some(record => record.attempts?.length)) {
+        throw new Error(`Repository rename cannot prove legacy merge-attempt ownership: ${path}`);
       }
     }
     for (const [before, after] of hashes) {
       if (name.startsWith(before)) name = after + name.slice(before.length);
     }
     const target = join(dirname(path), name);
-    const entry = parsed.get(path);
     let after = entry?.text;
     if (entry) {
       const rewritten = entry.records.map(record => rekeyRepositoryValue(record, oldName, newName));

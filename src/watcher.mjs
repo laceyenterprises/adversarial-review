@@ -1125,18 +1125,23 @@ async function refreshOrgRepos(octokit) {
     const excluded = new Set(config.excludeRepos ?? []);
     const watched = all.filter(r => !r.archived && !excluded.has(r.name) && !excluded.has(r.full_name || `${config.org}/${r.name}`))
       .map(r => ({ ...r, full_name: r.full_name || `${config.org}/${r.name}` }));
-    observeRepositoryListing({ db, rootDir: ROOT, additionalStateDir: ADVERSARIAL_REVIEW_STATE_DIR, repositories: watched });
-    const discoveredRepos = all
-      .filter((r) => !r.archived && !excluded.has(r.name) && !excluded.has(`${config.org}/${r.name}`))
-      .map((r) => r.full_name || `${config.org}/${r.name}`);
-    activeRepos = [...new Set([...(config.repos || []).map(name => canonicalRepositoryName(db, name)), ...discoveredRepos])];
+    const observations = observeRepositoryListing({ db, rootDir: ROOT,
+      additionalStateDir: ADVERSARIAL_REVIEW_STATE_DIR, repositories: watched, logger: console });
+    const conflicts = observations.filter(row => row.conflict);
+    const quarantined = new Set(conflicts.map(row => row.fullName.toLowerCase()));
+    for (const conflict of conflicts) {
+      await defaultDeliverAlert(`Repository identity conflict: ${conflict.fullName}; intake quarantined for this repository. ${conflict.reason}`, {
+        source: 'adversarial-repository-identity', severity: 'SEV2',
+        dedupKey: `repository-identity-conflict:${conflict.repositoryId}:${conflict.fullName}`,
+      }).catch(error => console.warn(`[watcher] Repository conflict notice deferred: ${error.message}`));
+    }
+    const discoveredRepos = watched.map(r => r.full_name);
+    activeRepos = [...new Set([...(config.repos || []).map(name => canonicalRepositoryName(db, name)), ...discoveredRepos])]
+      .filter(name => !quarantined.has(name.toLowerCase()));
 
     console.log(`[watcher] Org repos refreshed — watching ${activeRepos.length} repos: ${activeRepos.join(', ')}`);
   } catch (err) {
-    if (['REPOSITORY_STATE_BUSY', 'REPOSITORY_IDENTITY_CONFLICT'].includes(err.code)) {
-      lastRepoRefresh = 0;
-      throw err;
-    }
+    if (err.code === 'REPOSITORY_STATE_BUSY') throw err;
     recordApiCall({
       category: 'other',
       repo: repoLabel,
@@ -1147,7 +1152,7 @@ async function refreshOrgRepos(octokit) {
   } finally {
     // Respect the refresh interval after failures too; retrying every poll tick
     // amplifies outages and rate limiting into a tight API loop.
-    if (lastRepoRefresh !== 0) lastRepoRefresh = now;
+    lastRepoRefresh = now;
   }
 }
 

@@ -12,7 +12,9 @@ import {
   rekeyRepositoryDigests, rekeyRepositoryValue, repositoryStateDigest,
 } from './repository-state-files.mjs';
 
+const initialized = new WeakSet();
 export function ensureRepositoryIdentitySchema(db) {
+  if (initialized.has(db)) return;
   db.exec(`
     CREATE TABLE IF NOT EXISTS repository_identities (
       repository_id TEXT PRIMARY KEY, node_id TEXT, full_name TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -27,6 +29,7 @@ export function ensureRepositoryIdentitySchema(db) {
       new_name TEXT NOT NULL, at TEXT NOT NULL, rows_json TEXT NOT NULL
     );
   `);
+  initialized.add(db);
 }
 
 function identityFrom(value) {
@@ -179,6 +182,9 @@ function observeIdentity({ db, rootDir, repository, additionalStateDir, logger =
   ensureRepositoryIdentitySchema(db);
   recoverRepositoryRename({ db, rootDir, logger, afterFile, afterDatabase });
   const known = db.prepare('SELECT * FROM repository_identities WHERE repository_id=?').get(identity.id);
+  if (known?.full_name === identity.fullName && (!identity.nodeId || identity.nodeId === known.node_id)) {
+    return withRepositoryStateRead(rootDir, () => ({ renamed: false, fullName: identity.fullName }));
+  }
   const occupant = db.prepare('SELECT * FROM repository_identities WHERE full_name=?').get(identity.fullName);
   if (occupant && occupant.repository_id !== identity.id) {
     throw new Error(`Repository name ${identity.fullName} is still owned by a different recorded id`);
@@ -260,10 +266,31 @@ export function canonicalRepositoryName(db, name) {
 
 export function observeRepositoryListing({ db, rootDir, repositories, ...options }) {
   ensureRepositoryIdentitySchema(db);
-  // Known ids move first, so a newly created repo may reuse the vacated name.
-  const ordered = [...repositories].sort((a, b) => Number(Boolean(db.prepare('SELECT 1 FROM repository_identities WHERE repository_id=?').get(String(b.id))))
-    - Number(Boolean(db.prepare('SELECT 1 FROM repository_identities WHERE repository_id=?').get(String(a.id)))));
-  return ordered.map(repository => observeRepositoryIdentity({ db, rootDir, repository, ...options }));
+  const owners = new Map(db.prepare('SELECT repository_id,full_name FROM repository_identities').all()
+    .map(row => [row.full_name.toLowerCase(), row.repository_id]));
+  const pending = [...repositories], results = [];
+  while (pending.length) {
+    // Vacate a destination first for chained renames. Cycles and stale owners
+    // remain per-repository conflicts rather than authorizing state reassignment.
+    const ready = pending.findIndex(repo => {
+      const owner = owners.get(repo.full_name.toLowerCase());
+      return !owner || owner === String(repo.id) || !pending.some(other => String(other.id) === owner);
+    });
+    const repository = pending.splice(ready < 0 ? 0 : ready, 1)[0];
+    try {
+      const result = observeRepositoryIdentity({ db, rootDir, repository, ...options });
+      for (const [name, id] of owners) if (id === String(repository.id)) owners.delete(name);
+      owners.set(repository.full_name.toLowerCase(), String(repository.id));
+      results.push(result);
+    } catch (error) {
+      // Once a migration has a journal, its global fence must finish recovery.
+      if (error.code === 'REPOSITORY_STATE_BUSY' || existsSync(repositoryRenamePendingPath(rootDir))) throw error;
+      results.push({ fullName: repository.full_name, repositoryId: String(repository.id),
+        conflict: true, reason: error.message });
+      options.logger?.warn?.(`[repository-rename] quarantined ${repository.full_name}: ${error.message}`);
+    }
+  }
+  return results;
 }
 
 export function recoverRepositoryObservations({ db, rootDir, ...options }) {

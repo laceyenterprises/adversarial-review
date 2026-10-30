@@ -302,7 +302,7 @@ test('spawnReviewer retries transient freshness probes before discarding stale a
   assert.deepEqual(posted, []);
 });
 
-test('settleReviewerAttempt releases stale-head reviewer claims without consuming review budget', async () => {
+for (const failureClass of ['stale-review-head', 'repository-state-busy']) test(`settleReviewerAttempt releases ${failureClass} claims without consuming review budget`, async () => {
   const released = [];
   const leaseReleased = [];
   const markedPosted = [];
@@ -313,7 +313,7 @@ test('settleReviewerAttempt releases stale-head reviewer claims without consumin
     prNumber: 140,
     result: {
       ok: false,
-      failureClass: 'stale-review-head',
+      failureClass,
       reviewerSessionUuid: 'stale-session',
       error: 'reviewer output targeted stale head',
     },

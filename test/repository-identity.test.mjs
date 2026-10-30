@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, statSync, symlinkSync, renameSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
@@ -13,7 +13,7 @@ import {
 import { repositoryStateDigest } from '../src/repository-state-files.mjs';
 import { withRepositoryStateCycle, withRepositoryStateRead } from '../src/repository-state-lock.mjs';
 import { acquireAmaCloserLease, readAmaCloserLease } from '../src/ama/closer-lease.mjs';
-import { acquireMergeLease, inspectMergeLease } from '../src/ama/merge-lease.mjs';
+import { acquireMergeLease, inspectMergeLease, readMergeLeaseAttempts } from '../src/ama/merge-lease.mjs';
 import { listFollowUpJobsInDir } from '../src/follow-up-jobs.mjs';
 import { handoffDigest } from '../src/finalization/queue-handoff.mjs';
 import { repositoryNames, resolveRepositoryName } from '../src/repository-names.mjs';
@@ -23,6 +23,7 @@ import { storedPrimaryChange } from '../src/ama/primary-change-store.mjs';
 import { readCompletedRemediationRounds } from '../src/ama/hammer-head-validation.mjs';
 import { ensureReviewCycleCapSchema, previewReviewCycleCount, recordReviewCycleVerdict } from '../src/review-cycle-cap.mjs';
 import { ensureTtmTrackerSchema } from '../src/ttm-tracker.mjs';
+import { withFollowUpJobLock } from '../src/follow-up-job-write.mjs';
 
 const oldName = 'example-org/alpha', newName = 'example-org/beta';
 const repository = full_name => ({ id: 123, node_id: 'R_fixture123', full_name });
@@ -51,6 +52,118 @@ function seedReview(db) {
     (repo,pr_number,attempt_number,reviewer_class,pass_kind,started_at,status)
     VALUES (?,7,1,'codex','first-pass','2026-10-30','completed')`).run(oldName).lastInsertRowid;
 }
+
+test('unchanged repository observations do not write the database or names projection', t => {
+  const { db, rootDir, options } = fixture(t);
+  observeRepositoryIdentity({ ...options, repository: repository(oldName) });
+  const path = join(rootDir, 'data', 'repository-names.json');
+  const before = statSync(path, { bigint: true });
+  const changes = db.prepare('SELECT total_changes() AS n').get().n;
+  for (let i = 0; i < 4; i++) observeRepositoryIdentity({ ...options, repository: repository(oldName) });
+  assert.equal(db.prepare('SELECT total_changes() AS n').get().n, changes);
+  assert.equal(statSync(path, { bigint: true }).mtimeNs, before.mtimeNs);
+});
+
+test('chained renames vacate destinations before their predecessor moves', t => {
+  const { db, options } = fixture(t);
+  observeRepositoryListing({ ...options, repositories: [repository(oldName), { id: 456, full_name: newName }] });
+  const result = observeRepositoryListing({ ...options, repositories: [repository(newName), { id: 456, full_name: 'example-org/gamma' }] });
+  assert.ok(result.every(row => !row.conflict));
+  assert.equal(canonicalRepositoryName(db, oldName), newName);
+  assert.equal(db.prepare('SELECT full_name FROM repository_identities WHERE repository_id=?').get('456').full_name, 'example-org/gamma');
+});
+
+test('a deleted and recreated name is quarantined without stopping unrelated intake or reassigning old state', t => {
+  const { db, options } = fixture(t);
+  seedReview(db);
+  observeRepositoryIdentity({ ...options, repository: repository(oldName) });
+  const results = observeRepositoryListing({ ...options, repositories: [
+    { id: 456, full_name: oldName }, { id: 789, full_name: 'example-org/healthy' },
+  ] });
+  assert.equal(results.find(row => row.fullName === oldName).conflict, true);
+  assert.equal(db.prepare('SELECT repository_id FROM repository_identities WHERE full_name=?').get(oldName).repository_id, '123');
+  assert.equal(db.prepare('SELECT full_name FROM repository_identities WHERE repository_id=?').get('789').full_name, 'example-org/healthy');
+  assert.equal(db.prepare('SELECT repo FROM reviewed_prs').get().repo, oldName);
+});
+
+test('rename excludes workspace trash, arbitrary data and append-only telemetry', t => {
+  const { rootDir, options, json } = fixture(t);
+  observeRepositoryIdentity({ ...options, repository: repository(oldName) });
+  const trash = join(rootDir, 'data', 'follow-up-jobs', 'workspaces.trash', 'checkout');
+  mkdirSync(trash, { recursive: true });
+  symlinkSync('/synthetic/nonexistent-target', join(trash, 'link'));
+  writeFileSync(join(trash, 'tsconfig.json'), '{ // deliberately not JSON\n}');
+  const arbitrary = json('unowned.json', { repo: oldName });
+  const telemetry = join(rootDir, 'data', 'handoff-events', '2026-10-30.jsonl');
+  mkdirSync(dirname(telemetry), { recursive: true });
+  writeFileSync(telemetry, JSON.stringify({ repo: oldName }) + '\n');
+  observeRepositoryIdentity({ ...options, repository: repository(newName), afterFile: () => {
+    writeFileSync(telemetry, 'concurrent append is outside the migration journal\n', { flag: 'a' });
+  } });
+  assert.equal(JSON.parse(readFileSync(arbitrary)).repo, oldName);
+  assert.match(readFileSync(telemetry, 'utf8'), /alpha/);
+});
+
+test('rename never moves sibling-prefix closer leases, merge leases or dispatch records', t => {
+  const { rootDir, options, json } = fixture(t);
+  observeRepositoryIdentity({ ...options, repository: repository(oldName) });
+  const sibling = oldName + '-tools';
+  const paths = [
+    json(`ama-closer-leases/example-org__alpha-tools-pr-7-${head}.json`, { repo: sibling, prNumber: 7 }),
+    json('merge-leases/example-org__alpha-tools__main.json', { repo: sibling, base: 'main' }),
+    json(`follow-up-jobs/ama-closer-dispatches/example-org__alpha-tools-pr-7-${head}.json`, { repo: sibling, prNumber: 7 }),
+  ];
+  observeRepositoryIdentity({ ...options, repository: repository(newName) });
+  for (const path of paths) assert.equal(JSON.parse(readFileSync(path)).repo, sibling);
+});
+
+test('legacy merge budgets move only with a provable exact lease family', t => {
+  const { rootDir, options, json } = fixture(t);
+  observeRepositoryIdentity({ ...options, repository: repository(oldName) });
+  assert.equal(acquireMergeLease({ rootDir, repo: oldName, base: 'main', holderPr: 7,
+    holderHead: head, holderPid: process.pid, deadlineSeconds: 3600 }).acquired, true);
+  json('merge-leases/example-org__alpha__main.attempts.json', {
+    schemaVersion: 1, attempts: [{ pr: 7, head, attempts: 3, retryable: 0 }],
+  });
+  const sibling = json('merge-leases/example-org__alpha__tools__main.attempts.json', {
+    repo: oldName + '__tools', attempts: [{ pr: 7, head, attempts: 2 }],
+  });
+  observeRepositoryIdentity({ ...options, repository: repository(newName) });
+  assert.equal(readMergeLeaseAttempts(rootDir, { repo: newName, base: 'main' })[0].attempts, 3);
+  assert.equal(JSON.parse(readFileSync(sibling)).attempts[0].attempts, 2);
+});
+
+test('unprovable nonempty legacy merge budgets stop rename before any identity change', t => {
+  const { db, rootDir, options, json } = fixture(t);
+  observeRepositoryIdentity({ ...options, repository: repository(oldName) });
+  json('merge-leases/example-org__alpha__main.attempts.json', { attempts: [{ pr: 7, head, attempts: 3 }] });
+  assert.throws(() => observeRepositoryIdentity({ ...options, repository: repository(newName) }), /cannot prove legacy merge-attempt ownership/);
+  assert.equal(canonicalRepositoryName(db, oldName), oldName);
+  assert.equal(existsSync(join(rootDir, 'data', 'repository-renames', 'pending.json')), false);
+});
+
+test('repository name cache observes equal-size atomic replacements with the same mtime', t => {
+  const { rootDir, options } = fixture(t);
+  observeRepositoryIdentity({ ...options, repository: repository(oldName) });
+  assert.equal(resolveRepositoryName(rootDir, oldName), oldName);
+  const path = join(rootDir, 'data', 'repository-names.json'), before = statSync(path);
+  const next = path + '.next';
+  const current = 'example-org/omega';
+  writeFileSync(next, JSON.stringify(JSON.parse(readFileSync(path)).map(row => ({ ...row, current }))));
+  utimesSync(next, before.atime, before.mtime);
+  renameSync(next, path);
+  assert.equal(statSync(path).size, before.size);
+  assert.equal(resolveRepositoryName(rootDir, oldName), current);
+});
+
+test('follow-up job locks normalize trailing slashes before enforcing the rename fence', t => {
+  const { rootDir, json } = fixture(t);
+  json('repository-renames/pending.json', {});
+  const root = join(rootDir, 'data', 'follow-up-jobs');
+  for (const path of [root, root + '/', root + '/../follow-up-jobs/']) {
+    assert.throws(() => withFollowUpJobLock(path, () => assert.fail('fence bypassed')), { code: 'REPOSITORY_STATE_BUSY' });
+  }
+});
 
 test('listing backfills stable identities and rename preserves review, remediation, closer and merge ownership', t => {
   const { db, rootDir, options, logs, json } = fixture(t);
@@ -142,8 +255,8 @@ for (const failure of ['file', 'database']) {
     const { db, rootDir, options, json, logs } = fixture(t);
     seedReview(db);
     observeRepositoryIdentity({ ...options, repository: repository(oldName) });
-    json('state-a.json', { repo: oldName, prNumber: 7 });
-    json('state-b.json', { repo: oldName, prNumber: 7 });
+    json('ci-recovery/state-a.json', { repo: oldName, prNumber: 7 });
+    json('ci-recovery/state-b.json', { repo: oldName, prNumber: 7 });
     const otherPath = join(rootDir, 'data', 'ham-primary-change-refusals.db');
     const other = new Database(otherPath);
     other.exec('CREATE TABLE refusals(repo TEXT, pr INTEGER)');
@@ -161,7 +274,7 @@ for (const failure of ['file', 'database']) {
     assert.equal(reopened.prepare('SELECT repo FROM refusals').get().repo, newName);
     assert.equal(reopened.prepare('SELECT count(*) AS n FROM repository_rename_audit').get().n, 1);
     reopened.close();
-    assert.equal(JSON.parse(readFileSync(join(rootDir, 'data', 'state-b.json'))).repo, newName);
+    assert.equal(JSON.parse(readFileSync(join(rootDir, 'data', 'ci-recovery', 'state-b.json'))).repo, newName);
     assert.equal(logs.length, 1);
     await withRepositoryStateCycle(rootDir, async () => {});
   });
@@ -235,7 +348,7 @@ test('unowned destination state or colliding constraints roll back before files 
   const { db, options, json } = fixture(t);
   seedReview(db);
   observeRepositoryIdentity({ ...options, repository: repository(oldName) });
-  const path = json('fixture.json', { repo: oldName });
+  const path = json('ci-recovery/fixture.json', { repo: oldName });
   db.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer) VALUES (?,7,'2026-10-30','codex')`).run(newName);
   assert.throws(() => observeRepositoryIdentity({ ...options, repository: repository(newName) }), /unowned state/);
   assert.equal(JSON.parse(readFileSync(path)).repo, oldName);
@@ -298,7 +411,7 @@ test('digest-only CI evidence under a reused name cannot be borrowed by its hist
 test('mixed-case repository identities rewrite keys without rewriting signed evidence or prose', t => {
   const { options, json } = fixture(t);
   observeRepositoryIdentity({ ...options, repository: repository('Example-Org/Alpha') });
-  const path = json('fixture.json', { repo: oldName, key: `${oldName}#7`, identity: `page:${oldName}:7:${head}:fixture`,
+  const path = json('ci-recovery/fixture.json', { repo: oldName, key: `${oldName}#7`, identity: `page:${oldName}:7:${head}:fixture`,
     body: `Review for ${oldName}`, attestation: { repo: oldName, signature: 'fixture' } });
   observeRepositoryIdentity({ ...options, repository: repository(newName) });
   const record = JSON.parse(readFileSync(path));

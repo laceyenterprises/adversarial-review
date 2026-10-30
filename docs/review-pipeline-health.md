@@ -724,3 +724,17 @@ rules or HCP-outage hold. Deploy the coordinated OS endpoint and consumer after
 both PRs converge; the one-shot adapter loads the deployed owner code each read.
 No daemon bounce or host activation was performed as validation. Offline
 producer coverage: `node --test test/review-observations.test.mjs`.
+
+### Rename hardening and deliberate parks
+
+Identity conflicts quarantine only the affected repository and emit a deduplicated
+SEV2 notice. Inspect the conflicting stable IDs and their retained state; do not
+remove a current-name row to make a recreated repository inherit old PRs.
+Other repositories continue at the normal discovery cadence. Chained renames
+vacate destinations first; interrupted migrations retain their recovery fence.
+
+REPORENAME-02 is a separate required owner-side dependency. Until its HQ
+`pr_opened`/worker-identity records resolve the new stable repository identity,
+an open renamed PR may intentionally park as `worker-identity-unresolved`.
+Expect that park during acceptance; do not waive attestation or identity gates.
+An ordinary rename's service-local continuity does not prove HQ cutover.

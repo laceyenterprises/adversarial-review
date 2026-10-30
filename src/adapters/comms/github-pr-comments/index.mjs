@@ -464,6 +464,7 @@ function createGitHubPRCommentsAdapter({
   }
 
   async function postWithDedupe({ key, body, event = null, roleId = null }) {
+    if (deliveryIdentityByRole && roleId) resolveDeliveryIdentity(roleId, deliveryIdentityByRole);
     return withRepositoryStateCycle(rootDir, () =>
       postCurrentWithDedupe({ key: currentKey(key), body, event, roleId }));
   }

@@ -1385,60 +1385,37 @@ focused offline fixtures cover observed sizing, saturation, allocated agy print
 timeouts, parent/lease budgets and ownership fencing. Read-only organic acceptance after normal deployment is
 declared in `post-merge-verify.json`; see the [RCA](docs/RCA-LAC-2100-chunk-budget-2026-10-24.md).
 
-FINDINGSBATCH-01 retains non-blocking findings in the existing SQLite review
-store. Findings move from pending to applied or dropped with a reason; daily
-batches move from prepared to launched to completed, with one active batch per
-repository/area. Strict-off reviews require durable capture before merge, and
-handed-off non-blocking-only reviews follow the same daemon policy. Current-head
-review, checks, leases and execution switches remain required. The daily
-decision-only worker
-re-checks current main and pushes tested fixes. FINDINGSSHAPE-01 leaves all-declined
-batches complete without a PR; provisional applied outcomes trigger one PR-shaped
-publication follow-up on the same pushed branch, batch ID and idempotency key.
-The publisher opens one normal-review PR through `hq pr open --spec-ref none`.
-Before GitHub publication reads, the collector requires the terminal preparation
-launch's `branch_pushed` milestone to be `done`; missing or failed push evidence
-records `batch-push-evidence-missing` locally without a GitHub request. Ref queries
-preserve branch path slashes while encoding each segment.
-Existing marked PRs, including terminal PRs, are recovered before dispatch; the
-launch ledger, a per-batch lock and durable submission intent fence duplicate
-publishers after restarts or lost receipts. Uncertain/failed publication retains
-its fence for recovery of that same launch. The outcome schema and merge-bound
-settlement stay unchanged. See the
-[batch recovery contract](docs/data-model/review-findings.md#non-blocking-backlog-findingsbatch-01).
-Collection reads
-the batch PR's body and merge state through the retrying GitHub transport;
-plain, bold or HTML-comment marker lines may include surrounding whitespace.
-A failed sweep startup or fleet-stop interruption retries on the next poll
-without advancing the daily deadline; claimed batches retain their dispatch keys
-and concurrent polls cannot overlap a sweep. Valid batch PR evidence clears any
-prior batch error while outcomes remain pending until merge. Hourly collection
-passes collect worker outcomes, dispatch publication follow-ups
-when needed, and observe batch PR merges without claiming new batches or repeating
-preparation launches.
-Dropped findings retain no result PR reference. Simplicity advice is a separate
-snapshot ledger with unassigned, dropped, assigned and completed applied/declined
-states. Only the final posted review of a source PR merged at or after the
-simplicity migration receipt can dispatch; historical backfill cannot launch old
-advice. Supersession, unmerged close and unverifiable/pre-cutoff merge timestamps
-record a dropped disposition on unassigned notes; reopen, receipt and metadata
-refreshes can restore current advice. Assigned snapshots remain immutable.
-Notes join a pending finding area or reserved `_simplicity`; advisory-only
-batches have no findings, and mixed-batch advice may touch its cited paths outside
-the finding area. Every note needs a boolean application outcome and nonempty
-reason, normalized to one line. Applied advice requires the same marked, merged
-batch PR as applied findings. Settlement retains only the validated outcome
-projection in `result_json`; backlog health includes waiting/assigned-unsettled
-notes, age and batch errors. No new smoke promise
-or CI gate is added; offline behavior cases cover capture, batch, closure and reporting.
-The SRE session verifies three merged captures before
-backing up config, disabling strict mode and bouncing the watcher, then confirms
-next-day batch PRs and complete applied/dropped coverage. Also observe advisory-only
-and mixed batches, historical-note exclusion, terminal note dispositions and
-normalized applied/declined results as declared in `post-merge-verify.json`.
-Read per-area size,
-age and batch errors through `pipeline-health` JSON (`nonBlockingBacklog`) or
-`node bin/review-findings.mjs backlog --db <existing-review-db>`.
+FINDINGSBATCH-02 retains non-blocking findings in the existing SQLite review
+store and cuts capped batches until all eligible open findings are assigned.
+There is no per-area active or daily ceiling. Severity and age determine priority;
+HQ normal-priority admission owns worker capacity and budget. Claims and
+collection run hourly by default; local environment settings configure cadence,
+size and the oldest-open alert bound. Applied findings require a marked result PR
+that is merged or open on a head attached to the review pipeline. Drops require
+a fixed reason code and current-main justification; already-fixed drops verify
+the merged fix PR and out-of-scope drops cite a ticket. Empty outcomes fail.
+
+Decision-only preparation pushes tested fixes; one PR-shaped follow-up publishes
+on that same branch. Nullable repository metadata and absent push milestones are
+handled using keyed launch evidence and the actual remote branch/head. Explicit
+failed pushes or failed preparation still refuse publication. Durable batch IDs,
+launch receipts, a per-batch lock and submission intent fence duplicate workers
+and publishers. Existing failed batches stay visible for same-launch repair.
+Simplicity advisories keep their final-review enrollment and validated outcome
+rules, sharing the cap and marked result PR with findings.
+
+After deployment, restart the watcher, then SRE runs
+`node bin/findings-batch-backfill.mjs --root <review-root> --db <review-root>/data/reviews.db --concurrency 2 --batch-size 100`.
+This is explicit and idempotent; concurrency bounds submissions while existing
+HQ admission bounds running workers. The backfill waits up to five seconds for a
+SQLite writer lock. No automatic deployment backfill runs.
+`pipeline-health` JSON `nonBlockingBacklog` exposes open and unbatched finding
+counts, oldest open age, applied/dropped by UTC day and batch error counts.
+The existing alert path reports findings older than 48 hours by default.
+Within 24 hours, SRE retains a receipt showing the open backlog trends down,
+visible applied/dropped daily counts and no evidence-format losses. See the
+[batch lifecycle and recovery contract](docs/data-model/review-findings.md#non-blocking-backlog-findingsbatch-01)
+and `post-merge-verify.json`. No new CI check or smoke step is added.
 
 DOCSFASTPATH-01 sends Markdown/image-only changes under `docs/` to the existing
 daemon merge lane, with a signed docs-fast-path attestation and green exact-head

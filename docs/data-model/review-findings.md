@@ -223,18 +223,33 @@ No historical full-corpus scan runs at deployment. Records are never pruned.
 The migration is `migrations/20261024_findings_backlog.sql`, installed by the
 existing review-state migration runner. All storage remains in `data/reviews.db`.
 
-`finding_batches` owns one active batch per repository and area (partial unique
-index), and at most one new batch per UTC date. An immediate SQLite transaction
-assigns up to 100 oldest findings from confirmed merged PRs. Ready-to-merge rows
-remain visible but cannot dispatch until merged. The watcher checks cached UTC
-midnight and hourly settlement deadlines after its ordinary poll. Only the daily
-sweep claims batches and dispatches preparation workers. Hourly collection passes
-collect worker manifests, dispatch the publication follow-up when needed, and
-observe batch PR merges, asynchronously from review admission. The deadline
-advances after successful sweep completion; startup failures and fleet-stop
-interruptions retry on the next poll with the existing claimed batches and dispatch
-keys. An in-flight sweep fences overlapping ticks. Claim/dispatch errors remain
-recorded for the next daily sweep; settlement errors retry on the hourly pass.
+FINDINGSBATCH-02 removes both the `(repo, area, day)` uniqueness and the
+one-active-batch-per-area index. Migration `20261030_findings_batch_drain.sql`
+preserves batch IDs, launch IDs, artifacts, results and child references. It adds
+`finding_backlog.resolved_at`; existing terminal findings inherit their batch
+completion time where available, while historical lifecycle drops with no dated
+receipt remain undated. Outcome transitions maintain this timestamp. Historical
+empty completed manifests become unresolved `batch-zero-outcomes` errors.
+
+An immediate SQLite transaction assigns **all** unassigned findings from confirmed
+merged source PRs to capped batches. Severity (`critical`/P0, `high`/P1,
+`medium`/P2, `low`/P3) sorts first where supplied, then capture age and ID;
+unclassified findings sort by age. Batches retain repository/area ownership, avoid mixing severity priorities, and
+use a hash of their manifest IDs as stable identity. Combined findings and
+advisories never exceed the cap. Repeating a claim, including on a later day,
+finds no already-assigned IDs. Existing unfinished batches never prevent another
+batch in that area. Claimed insertion order controls submission order.
+
+The watcher claims and collects hourly by default, checking deadlines after its
+ordinary poll. `ADVERSARIAL_FINDINGS_BATCH_INTERVAL_MS` and
+`ADVERSARIAL_FINDINGS_BATCH_SIZE` configure cadence and cap (defaults 3600000
+and 100); programmatic callers can supply `intervalMs` and `batchSize`.
+There is no dedicated findings-batch slot in the shared strict CFG schema, nor a
+previous named daily key: the old cadence and cap were literals. These local
+runtime settings follow the existing pipeline-health environment convention;
+this change adds no cross-repository schema key. Collection still runs at least
+hourly when the claim interval is longer. Startup failures and fleet stops retry
+on the next poll. An in-flight ticker fences overlapping polls.
 
 The sweep reuses `hq dispatch`, the configured remediation worker resolver and
 normal priority. It persists the batch before submission and uses its stable
@@ -250,10 +265,16 @@ no PR, push, or publication launch.
 
 For provisional applied findings or advice, the collector validates complete
 manifest coverage, waits for terminal preparation (including a launch parked at
-publication), and reads its branch from `hq dispatch status --json`. Before any
-GitHub publication read, its `branch_pushed` milestone must be `done`; otherwise
-the collector records `batch-push-evidence-missing` locally and retains the batch
-fence. It looks for PRs on that branch across all states before inspecting the
+publication), and reads its branch from `hq dispatch status --json`. The launch
+ID must match; a non-null status repository must match too. The keyed launch
+ledger must independently bind that launch to the repository and ticket. Status
+`repo` may be null in the producer contract. `git-safe` writes a branch-push
+projection (`status: pushed`, `reason: branch_pushed`), which does not guarantee a
+`branch_pushed` milestone in dispatch status. The collector therefore checks the
+remote branch SHA against the reported tested head, or recovers the marked PR.
+An explicit unsuccessful milestone still refuses publication, as does failed or
+unknown terminal preparation. Missing milestones alone no longer discard a
+successful push. It looks for PRs on that branch across all states before inspecting the
 remote ref, preserving branch slashes and percent-encoding each path segment. One
 same-repository PR with the exact marker is bound through ordinary settlement;
 an unmerged close stays unresolved and never starts another publisher. Foreign,
@@ -288,16 +309,19 @@ reapplying fixes or opening a duplicate PR. No runtime recovery is performed by
 this source change.
 
 Outcome JSON must cover every manifest ID exactly once. Applied outcomes
-require a merged PR in the same repository with the
-`Finding-Batch: <batch-id>` body marker; otherwise the batch stays unresolved.
+require a positive PR number (the existing SQLite CHECK), a commit SHA and the
+`Finding-Batch: <batch-id>` body marker. The PR must be merged, or open with a
+matching head enrolled in `reviewed_prs` in an active review-pipeline state.
+A closed unmerged PR, an unattached open PR or stale-head attachment stays
+unresolved.
 The collector reads body and merge state via `gh pr view` using the retrying
 GitHub transport. Marker lines accept surrounding whitespace, bold or HTML
 comments, while still requiring the exact batch ID. Normal review may rebase the batch PR;
-completion records the worker outcome and PR merge, without granting merge authority.
+completion records the live PR head and outcome, without granting merge authority.
 `outcome` is null, `applied` or `dropped`; terminal rows retain `reason` and
 `result_pr` (null for dropped findings). Batch failures retain `error` until valid manifest and batch PR
 evidence is confirmed, at which point even an unmerged PR clears the stale error
-without settling findings. Failures never discard findings or blindly repeat a
+when it is not yet eligible to settle. Failures never discard findings or blindly repeat a
 preparation/publication phase. Diagnose a missing artifact or failed worker before
 repairing its existing batch; no automatic timeout releases its fence.
 
@@ -311,9 +335,10 @@ Unassigned notes waiting for a source merge use `_simplicity` until assignment;
 assigned notes retain the owning batch's area. Missing schema/store reports
 `available: false`, never a healthy empty backlog. No new alert transport or per-item provider read is added.
 Ready captures superseded by the final merged review are retained as dropped
-with reason `superseded-final-review`; they cannot inflate a later batch.
+with reason `stale-code-changed: Final posted review superseded this finding`; they cannot inflate a later batch.
 Late posting receipts also enroll findings for already-observed merges.
-Ready captures closed without merge are dropped with `pr-closed-without-merge`;
+Ready captures closed without merge are dropped with
+`false-positive: Source PR closed without merge; reviewed changes did not land`;
 if reopened and merged with that same final finding, merge enrollment restores
 its pending outcome. This event-driven cleanup prevents abandoned merge attempts
 from becoming a permanent waiting-for-merge backlog.
@@ -322,3 +347,37 @@ The existing `show` CLI/read API also returns `backlog_outcome`, `backlog_reason
 `backlog_batch_id` and `backlog_result_pr` on the enrolled source finding. This
 left join adds no per-finding query and leaves historical reply/commit status
 semantics unchanged; use the backlog fields to audit batch application.
+
+Worker drops use `reason: "<code>: <justification line>"`, with code restricted to
+`stale-code-changed`, `already-fixed-in-<positive PR number>`, `not-reproducible`,
+`out-of-scope-with-ticket`, or `false-positive`. The worker must describe the
+current-main evidence; lack of time is not a drop. Already-fixed drops additionally
+require an independently fetched merged fix PR; out-of-scope drops must cite a
+ticket or ticket URL. Incomplete, duplicate, foreign, blank or invalid outcomes
+leave the entire batch unresolved. Empty finding/advisory manifests fail instead
+of completing. Advisory-only applied/declined manifests remain supported.
+
+Health also exposes finding-only `openCount`, `unbatchedCount`, `oldestOpenAt`,
+`oldestOpenAgeMs`, `perDay` (applied/dropped by UTC resolution date), and aggregated
+unresolved `batchErrors`. `review:findings_backlog_overdue` enters the existing
+pipeline-health/Sentinel findings path when oldest open age exceeds
+`ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS` (default 172800000, 48 hours).
+This is an operational alert, with no additional merge or CI gate.
+
+After deployment and watcher restart, SRE explicitly runs the one-shot drain:
+
+```sh
+node bin/findings-batch-backfill.mjs --root <review-root> \
+  --db <review-root>/data/reviews.db --concurrency 2 --batch-size 100
+```
+
+Both target and submission concurrency are required. The command cuts the whole
+eligible open backlog and submits at most the requested number of concurrent
+`hq dispatch` calls; HQ's existing normal-priority admission still owns running
+worker capacity and budget. It does not create a second admission mechanism.
+Rerunning retains batch IDs and launch/publication fences. Failed batches retain
+their findings and reported errors for repair of the existing launch/artifact;
+never clear ownership or open a duplicate PR to retry. No backfill runs at deploy
+or startup. Within 24 hours SRE records declining open count, dated applied/dropped
+outcomes and absence of evidence-format failures. This organic receipt is separate
+from offline synthetic tests.

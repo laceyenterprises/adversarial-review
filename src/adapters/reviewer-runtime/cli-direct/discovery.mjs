@@ -1,3 +1,5 @@
+import { prepareServiceCodexHome } from '../../../codex-service-home.mjs';
+import { ensureWorkerRegistryReady, resolveRemediationModel } from '../../agent-runtime/local/remediation.mjs';
 import { loadAwareTimeoutMs } from '../../../load-aware-timeout.mjs';
 import { constants } from 'node:fs';
 import { access, readFile } from 'node:fs/promises';
@@ -191,50 +193,66 @@ async function probeCodexCli({
   timeout = loadAwareTimeoutMs(30_000),
   execFileImpl = execFileAsync,
   requireMcpOAuth = false,
+  ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
 } = {}) {
   const codexCli = await resolveCliBinary({ binaryName: 'codex', envVar: 'CODEX_CLI', env });
-  await runProbe(codexCli, ['--version'], {
-    env,
-    cwd,
-    timeout,
-    execFileImpl,
-    layer: 'codex-cli-version',
-    label: 'Codex CLI version probe',
-  });
-
+  await ensureWorkerRegistryReadyImpl({ env });
+  const model = resolveRemediationModel('codex-reviewer', { env });
+  // Preserve the base home's OAuth lookup before redirecting config/session state.
+  const authPath = env.CODEX_AUTH_PATH || join(env.CODEX_HOME || join(env.HOME || homedir(), '.codex'), 'auth.json');
+  const home = prepareServiceCodexHome({ env: { ...env, CODEX_AUTH_PATH: authPath }, workspaceDir: cwd,
+    model: model.resolvedModel, effort: model.resolvedReasoningLevel });
+  env = home.env;
+  const probe = (command, args, options) => {
+    console.info(`[codex-service] CODEX_HOME=${home.codexHome} config_sha256=${home.configDigest} probe=${args.join(' ')}`);
+    return runProbe(command, args, options);
+  };
   try {
-    await runProbe(codexCli, ['sessions', 'list'], {
+    await probe(codexCli, ['--version'], {
       env,
       cwd,
       timeout,
       execFileImpl,
-      layer: 'codex-cli-oauth',
-      label: 'Codex CLI OAuth session probe',
+      layer: 'codex-cli-version',
+      label: 'Codex CLI version probe',
     });
-  } catch (err) {
-    if (!codexCliAuthFallbackAllowed(err)) throw err;
-    await runProbe(codexCli, ['login', 'status'], {
-      env,
-      cwd,
-      timeout,
-      execFileImpl,
-      layer: 'codex-cli-oauth',
-      label: 'Codex CLI OAuth login-status probe',
-    });
-  }
 
-  if (requireMcpOAuth) {
-    const mcpList = await runProbe(codexCli, ['mcp', 'list'], {
-      env,
-      cwd,
-      timeout,
-      execFileImpl,
-      layer: 'codex-mcp-oauth',
-      label: 'Codex MCP-server OAuth probe',
-    });
-    validateCodexMcpListOutput(mcpList?.stdout || '', mcpList?.stderr || '');
+    try {
+      await probe(codexCli, ['sessions', 'list'], {
+        env,
+        cwd,
+        timeout,
+        execFileImpl,
+        layer: 'codex-cli-oauth',
+        label: 'Codex CLI OAuth session probe',
+      });
+    } catch (err) {
+      if (!codexCliAuthFallbackAllowed(err)) throw err;
+      await probe(codexCli, ['login', 'status'], {
+        env,
+        cwd,
+        timeout,
+        execFileImpl,
+        layer: 'codex-cli-oauth',
+        label: 'Codex CLI OAuth login-status probe',
+      });
+    }
+
+    if (requireMcpOAuth) {
+      const mcpList = await probe(codexCli, ['mcp', 'list'], {
+        env,
+        cwd,
+        timeout,
+        execFileImpl,
+        layer: 'codex-mcp-oauth',
+        label: 'Codex MCP-server OAuth probe',
+      });
+      validateCodexMcpListOutput(mcpList?.stdout || '', mcpList?.stderr || '');
+    }
+    return { codexCli };
+  } finally {
+    home.cleanup();
   }
-  return { codexCli };
 }
 
 async function probeGeminiCli({

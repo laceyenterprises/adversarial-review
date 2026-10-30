@@ -35,14 +35,14 @@ export async function settleInfrastructureRemediationRound({
     refund = withFollowUpJobLock(join(rootDir, 'data', 'follow-up-jobs'), () => {
       // Exit events can land while the live-head lookup awaits; read their durable outcome.
       const current = readFollowUpJob(jobPath);
-      if (current.status !== 'in_progress' || current.remediationPlan?.currentRound !== job.remediationPlan?.currentRound
+      if (!current.remediationWorker || current.status !== 'in_progress' || current.remediationPlan?.currentRound !== job.remediationPlan?.currentRound
         || current.remediationWorker?.processId !== worker.processId) return { action: 'skipped', reason: 'already-terminal' };
       const currentRound = current.remediationPlan?.rounds?.find((entry) => entry.round === current.remediationPlan.currentRound);
       const currentStartHead = currentRound?.startHeadSha || current.revisionRef;
       const alreadyRetriedRound = (current.remediationPlan?.retryHistory || []).some((retry) =>
         retry.round === current.remediationPlan.currentRound && retry.retryMetadata?.code === 'infrastructure-refund');
       const recordedOutcome = current.remediationWorker?.recordedOutcome;
-      if (recordedOutcome) worker.recordedOutcome = recordedOutcome;
+      if (recordedOutcome) worker.recordedOutcome = { ...worker.recordedOutcome, ...recordedOutcome };
       let refundReason = liveness.state === 'exited' && !lifecycleStop && !alreadyRetriedRound
         ? infrastructureRefundReason({
           outcome: liveness.dispatchStatus || worker.recordedOutcome,
@@ -66,6 +66,11 @@ export async function settleInfrastructureRemediationRound({
           }
         }
         return null;
+      }
+      const evidenceOutcome = liveness.dispatchStatus || worker.recordedOutcome;
+      if (evidenceOutcome?.toolHostEvidence) {
+        current.remediationWorker.recordedOutcome = evidenceOutcome;
+        writeFollowUpJob(jobPath, current);
       }
       const requeued = requeueInProgressFollowUpJobForRetry({
         rootDir, jobPath, requeuedAt: completedAt,
@@ -104,7 +109,7 @@ export function recordLocalRemediationOutcome({ rootDir, jobPath, worker, log })
     try {
       withFollowUpJobLock(join(rootDir, 'data', 'follow-up-jobs'), () => {
         const current = readFollowUpJob(jobPath);
-        if (current.status !== 'in_progress' || current.remediationWorker?.processId !== worker.processId) return;
+        if (!current.remediationWorker || current.status !== 'in_progress' || current.remediationWorker.processId !== worker.processId) return;
         current.remediationWorker.recordedOutcome = { ...current.remediationWorker.recordedOutcome, ...outcome };
         writeFollowUpJob(jobPath, current);
       });

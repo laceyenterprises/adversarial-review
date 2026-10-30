@@ -1,5 +1,33 @@
 # Reviewer workspace snapshots and audit
 
+CODEXHOMEISO-01: every native Codex launch owned by the review service uses a
+fresh mode-0700 service directory as `CODEX_HOME`. Local remediation uses
+`spawnCodexRemediationWorker`; reviewer execution uses `spawnCodexReview`;
+reviewer discovery uses `probeCodexCli` for `--version`, `sessions list`, the
+`login status` compatibility fallback, and optional `mcp list`. HQ dispatch
+delegates process creation to the orchestrator's existing isolated worker home.
+
+`src/codex-service-config.toml` is the reviewed tooling template. Model and effort
+come from the existing service resolver. Approval and sandbox values match the
+existing bypass flags. The template pins shell/unified execution and code mode,
+disables app/plugin loading and hooks, and declares no MCP servers, marketplaces
+or desktop configuration. Each home trusts only its job workspace. No interactive
+config or project-trust history is imported. An explicit per-worker auth path
+remains `CODEX_AUTH_PATH`; config isolation never copies credentials. Discovery
+preserves an unset auth path as `auth.json` in the incoming `CODEX_HOME`, or `~/.codex` under the
+incoming `HOME` when no home override exists, before isolating configuration.
+Existing credential materialization, broker selection and OAuth-only rules apply.
+The reviewer retains `--ignore-user-config` and passes the same reviewed tooling
+pins as CLI overrides. Reviewer/probe homes are removed after use; remediation
+homes retain sessions under `<codexHome>/sessions` without `--ephemeral`,
+regardless of per-worker credential materialization. Preparation and spawn
+failures remove their config home. Logs include `CODEX_HOME` and `config_sha256` without auth data.
+
+After ordinary deployment, SRE should retain the next organic Codex remediation
+receipt showing shell execution, a re-review request, and the isolated home and
+digest in its spawn log. Publication and offline tests do not establish that live
+receipt. This change requires no config flip or new smoke command.
+
 Each one-shot `reviewer.mjs` process gives its model a read-only `git archive` snapshot of the repository's current default checkout HEAD. The PR diff is supplied separately. This snapshot is **not** the PR head or necessarily its merge base. The prompt names it accordingly.
 
 `prepareReviewerSnapshot` rejects a symbolic link that resolves outside that snapshot. Such a link is in the **base checkout**, so the reviewer queues an operator alert, exits with an infrastructure error, and posts no verdict about the PR. Repair the base checkout through its normal PR and deploy path, then retrigger the review. Do not ask the PR author to remove a link they did not introduce. Archive failures and validation failures also leave the PR without a synthetic review.

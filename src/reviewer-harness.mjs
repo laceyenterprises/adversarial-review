@@ -38,6 +38,7 @@ import { hostname, homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { promisify } from 'node:util';
+import { prepareServiceCodexHome, serviceCodexConfigArgs } from './codex-service-home.mjs';
 import { materializePerWorkerCodexAuth } from './codex-per-worker-auth.mjs';
 import { normalizeTokenUsage, readCodexTranscriptTokenUsage } from './reviewer-pass-tokens.mjs';
 import { ReviewerPromptTooLargeError } from './reviewer-outcomes.mjs';
@@ -1088,69 +1089,6 @@ const CODEX_EXEC_CONFIG_FORWARD_KEYS = [
   'model_reasoning_effort',
 ];
 
-function stripTomlInlineComment(rawValue) {
-  const text = String(rawValue || '');
-  let quote = null;
-  let escaped = false;
-  for (let index = 0; index < text.length; index += 1) {
-    const char = text[index];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (quote === '"' && char === '\\') {
-      escaped = true;
-      continue;
-    }
-    if ((char === '"' || char === '\'') && !quote) {
-      quote = char;
-      continue;
-    }
-    if (char === quote) {
-      quote = null;
-      continue;
-    }
-    if (char === '#' && !quote) return text.slice(0, index);
-  }
-  return text;
-}
-
-function parseCodexConfigLiteralString(rawValue) {
-  const value = String(rawValue || '').trim();
-  if (!value) return null;
-  const quote = value[0];
-  if ((quote === '"' || quote === '\'') && value.endsWith(quote)) {
-    const unquoted = value.slice(1, -1);
-    if (quote === '"') return unquoted.replaceAll('\\"', '"').replaceAll('\\\\', '\\');
-    return unquoted;
-  }
-  return value;
-}
-
-function readCodexConfigTopLevelValues(keys, {
-  configPath = join(process.env.CODEX_HOME || join(process.env.HOME || homedir(), '.codex'), 'config.toml'),
-} = {}) {
-  const keySet = new Set(keys);
-  const values = {};
-  if (!existsSync(configPath)) return values;
-  let currentSection = null;
-  for (const rawLine of readFileSync(configPath, 'utf8').split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith('#')) continue;
-    const sectionMatch = line.match(/^\[(.+)\]$/);
-    if (sectionMatch) {
-      currentSection = sectionMatch[1].trim() || null;
-      continue;
-    }
-    if (currentSection) continue;
-    const match = rawLine.match(/^\s*([A-Za-z0-9_-]+)\s*=\s*(.+?)\s*$/);
-    if (!match || !keySet.has(match[1])) continue;
-    const parsed = parseCodexConfigLiteralString(stripTomlInlineComment(match[2]));
-    if (parsed !== null) values[match[1]] = parsed;
-  }
-  return values;
-}
-
 function resolveReviewerExecution(harness, { env = process.env, fallbackEffort = null, modelPin = '', reasoningPin = '', seed, log = console } = {}) {
   const pin = modelPin || (harness === 'gemini' ? env.GEMINI_REVIEWER_MODEL : '');
   // Account routing changes the broker binding, not the governed reviewer role.
@@ -1172,17 +1110,14 @@ async function resolveReviewerExecutionAsync(harness, args = {}) {
 }
 
 function resolveCodexExecOverrides({ env = process.env, modelPin = '', reasoningPin = '', log = console } = {}) {
-  const values = readCodexConfigTopLevelValues(CODEX_EXEC_CONFIG_FORWARD_KEYS);
   const resolved = resolveReviewerExecution('codex', {
-    env, modelPin, reasoningPin, fallbackEffort: values.model_reasoning_effort || null, log,
+    env, modelPin, reasoningPin, log,
   });
-  const configOverrides = Object.entries(values)
-    .filter(([key]) => key !== 'model' && key !== 'model_reasoning_effort')
-    .map(([key, value]) => ({ key, value }));
+  const configOverrides = [];
   if (resolved.effort) configOverrides.push({ key: 'model_reasoning_effort', value: resolved.effort });
   return {
     model: resolved.model,
-    modelProvider: values.model_provider || null,
+    modelProvider: null,
     configOverrides,
     reasoningEffort: resolved.effort,
     modelSource: resolved.modelSource,
@@ -1209,6 +1144,7 @@ function buildCodexReviewArgs({
     ...(!persistSession ? ['--ephemeral'] : []),
     '--json',
   ];
+  args.push(...serviceCodexConfigArgs());
   if (model) args.push('--model', model);
   const overrides = Array.isArray(configOverrides)
     ? configOverrides
@@ -1253,19 +1189,26 @@ async function spawnCodexReview({
   maxBuffer = 10 * 1024 * 1024,
   spawnCapturedImpl = spawnCaptured,
   onStdoutData,
+  serviceHome = null,
 }) {
-  return spawnCapturedImpl(
-    codexCli,
-    buildCodexReviewArgs({ outputPath, prompt, model, modelProvider, configOverrides, persistSession }),
-    {
-      env,
-      cwd,
-      timeout,
-      progressTimeout: resolveReviewerIdleTimeoutSeconds(env) * 1000,
-      maxBuffer,
-      ...(onStdoutData ? { onStdoutData } : {}),
-    },
-  );
+  const home = serviceHome || prepareServiceCodexHome({ env, workspaceDir: cwd, model,
+    effort: configOverrides?.find((item) => item.key === 'model_reasoning_effort')?.value });
+  try {
+    return await spawnCapturedImpl(
+      codexCli,
+      buildCodexReviewArgs({ outputPath, prompt, model, modelProvider, configOverrides, persistSession }),
+      {
+        env: { ...env, CODEX_HOME: home.codexHome },
+        cwd,
+        timeout,
+        progressTimeout: resolveReviewerIdleTimeoutSeconds(env) * 1000,
+        maxBuffer,
+        ...(onStdoutData ? { onStdoutData } : {}),
+      },
+    );
+  } finally {
+    if (!serviceHome) home.cleanup();
+  }
 }
 
 /**
@@ -1318,31 +1261,35 @@ async function reviewWithCodex(diff, extraContext = '', {
     throw new OAuthError('codex', err.message);
   }
   const effectiveAuthPath = perWorkerAuth?.authPath || authPath;
-  const codexSessionHome = perWorkerAuth?.codexHome || process.env.CODEX_HOME || null;
+
   const outputPath = join(tmpdir(), `codex-review-${process.pid}-${Date.now()}.md`);
   await ensureWorkerRegistryReadyImpl({pin: modelPin});
   const codexExecOverrides = resolveCodexExecOverrides({ modelPin, reasoningPin, log });
-  const changedLines = countChangedLines(diff);
-  const effort = codexExecOverrides.reasoningEffort;
-  onProgress?.({ changedLines, effort });
-  const startedAt = new Date().toISOString();
-
-  const { env } = scrubOAuthFallbackEnv({
-    ...process.env,
-    PATH: '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
-    CODEX_AUTH_PATH: effectiveAuthPath,
-    ...(perWorkerAuth ? { CODEX_HOME: perWorkerAuth.codexHome } : {}),
-    HOME: process.env.HOME || homedir(),
-  });
-  const subprocessEnv = withReviewerSubprocessCwdEnv(env, reviewerSubprocessCwd);
-
+  const serviceHome = prepareServiceCodexHome({ env: process.env, workspaceDir: reviewerSubprocessCwd,
+    model: codexExecOverrides.model, effort: codexExecOverrides.reasoningEffort, log });
   try {
+    const codexSessionHome = serviceHome.codexHome;
+    const changedLines = countChangedLines(diff);
+    const effort = codexExecOverrides.reasoningEffort;
+    onProgress?.({ changedLines, effort });
+    const startedAt = new Date().toISOString();
+
+    const { env } = scrubOAuthFallbackEnv({
+      ...process.env,
+      PATH: '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+      CODEX_AUTH_PATH: effectiveAuthPath,
+      CODEX_HOME: serviceHome.codexHome,
+      HOME: process.env.HOME || homedir(),
+    });
+    const subprocessEnv = withReviewerSubprocessCwdEnv(env, reviewerSubprocessCwd);
+
     let stdout = '';
     let stderr = '';
     try {
       console.error('[reviewWithCodex] invoking native Codex CLI');
       const result = await spawnCodexReviewImpl({
         codexCli,
+        serviceHome,
         outputPath,
         prompt,
         model: codexExecOverrides.model,
@@ -1447,6 +1394,7 @@ async function reviewWithCodex(diff, extraContext = '', {
     // Always remove the codex temp file — including when spawnCodexReview throws
     // before the read block runs (its throw would otherwise skip cleanup).
     try { unlinkSync(outputPath); } catch {}
+    serviceHome.cleanup();
     perWorkerAuth?.cleanup();
   }
 }
@@ -3868,13 +3816,11 @@ const __test__ = {
   normalizeGeminiOauthCredsPayload,
   normalizeGeminiReviewerHostname,
   parseClaudeJsonOutput,
-  parseCodexConfigLiteralString,
   prepareClaudeOAuthEnv,
   previewText,
   purgeStaleGeminiReviewerSessionDirs,
   pushAgyChunk,
   quotaLimitFromEnv,
-  readCodexConfigTopLevelValues,
   readCqpBrokerSecret,
   readGeminiReviewerOwner,
   readJsonResponse,
@@ -3933,7 +3879,6 @@ const __test__ = {
   splitPatchHeaderAndBodyLines,
   stringifyGeminiBrokerReason,
   stripCodexRuntimeNoise,
-  stripTomlInlineComment,
   trackGeminiCheckoutForSignalRelease,
   withGeminiSubprocessRetry,
 };

@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { spawnDetachedCli } from '../../reviewer-runtime/cli-direct/process.mjs';
 import { isPgidAlive, verifyPgidIdentity } from '../../../process-group-identity.mjs';
+import { prepareServiceCodexHome } from '../../../codex-service-home.mjs';
 import { materializePerWorkerCodexAuth } from '../../../codex-per-worker-auth.mjs';
 import {
   GEMINI_REMEDIATION_WORKER_TRAILER_CLASS,
@@ -1138,7 +1139,7 @@ function spawnCodexRemediationWorker({
   const codexCli = resolveCodexCliPath(sourceEnv);
   // For codex, `workerClass` IS the physical harness class ('codex').
   const gitIdentity = remediationWorkerGitIdentity(workerClass);
-  const { env: baseEnv, startupEvidence, isolatedCodexHome } = prepareCodexRemediationStartupEnv({
+  const { env: baseEnv, startupEvidence } = prepareCodexRemediationStartupEnv({
     gitIdentity,
     perWorkerKey: jobId || launchRequestId || null,
     workerClass,
@@ -1172,6 +1173,10 @@ function spawnCodexRemediationWorker({
     reasoningPin: codexReasoningPin(env),
     log,
   });
+  const serviceHome = prepareServiceCodexHome({ env, workspaceDir,
+    model: modelResolution.resolvedModel, effort: modelResolution.resolvedReasoningLevel, log });
+  startupEvidence.resolvedStartup.codexHome = serviceHome.codexHome;
+  startupEvidence.resolvedStartup.configDigest = serviceHome.configDigest;
   const codexArgs = [
     'exec',
     '--model', modelResolution.resolvedModel,
@@ -1179,7 +1184,6 @@ function spawnCodexRemediationWorker({
       ? ['-c', `model_reasoning_effort=${modelResolution.resolvedReasoningLevel}`]
       : []),
     '--dangerously-bypass-approvals-and-sandbox',
-    ...(!isolatedCodexHome ? ['--ephemeral'] : []),
     '--json',
     '--output-last-message',
     outputPath,
@@ -1197,7 +1201,7 @@ function spawnCodexRemediationWorker({
       codexArgs,
       {
         cwd: workspaceDir,
-        env,
+        env: serviceHome.env,
         stdio: [promptFd, stdoutFd, stderrFd],
         spawnImpl,
         now,
@@ -1218,10 +1222,15 @@ function spawnCodexRemediationWorker({
       gitIdentity,
       startupEvidence,
       ...modelResolution,
-      codexSessionRoot: isolatedCodexHome ? join(isolatedCodexHome, 'sessions') : null,
+      codexHome: serviceHome.codexHome,
+      configDigest: serviceHome.configDigest,
+      codexSessionRoot: join(serviceHome.codexHome, 'sessions'),
       command: [codexCli, ...codexArgs],
       child,
     };
+  } catch (error) {
+    serviceHome.cleanup();
+    throw error;
   } finally {
     if (promptFd !== undefined) closeSyncImpl(promptFd);
     if (stdoutFd !== undefined) closeSyncImpl(stdoutFd);

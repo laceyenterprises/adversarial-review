@@ -1,3 +1,4 @@
+import { codexToolHostUnavailable } from '../codex-tool-host-failure.mjs';
 import { readExecutionVerdictsFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
 import { validNoWorkVerdict } from '../execution-verdict.mjs';
 // CLOSERREUSE-01: re-arm the closer after a hammer that died of an
@@ -83,8 +84,8 @@ export function classifyDeadHammerCause({ failureClass, failureDetail = '', stdo
 
 // Only durable harness fields count; quoted worker output is not evidence.
 export function unexecutedHammerReason(row = {}) {
-  if (row.failure_class === 'codex-tool-host-unavailable'
-    || row.failure_detail === 'codex-tool-host-unavailable') return 'codex-tool-host-unavailable';
+  if (codexToolHostUnavailable({ failure_class: row.failure_class,
+    failure_detail: row.failure_detail, toolHostEvidence: row.toolHostEvidence })) return 'codex-tool-host-unavailable';
   if (row.failure_class === 'worker_killed'
     && /\b(?:SIGTERM|SIGKILL)\b/.test(String(row.failure_detail || ''))) {
     return `worker_killed:${/\bSIGKILL\b/.test(String(row.failure_detail || '')) ? 'SIGKILL' : 'SIGTERM'}`;

@@ -1,3 +1,4 @@
+import { codexToolHostUnavailable } from './codex-tool-host-failure.mjs';
 // REMREFUND-01: only recorded worker outcomes and authoritative heads qualify.
 export const MAX_INFRASTRUCTURE_REFUNDS = 2;
 
@@ -7,12 +8,14 @@ export function recordedInfrastructureReason(outcome) {
   if (outcome?.status != null && outcome.status !== 'failed') return null;
   const reasons = [outcome?.failureReason, outcome?.failure_reason, outcome?.failureClass, outcome?.failure_class,
     outcome?.failureCode, outcome?.failure_code];
-  const reason = reasons.find((value) => ['codex-tool-host-unavailable', 'publish-blocked', 'boot-failed', 'boot-failure'].includes(value));
+  const reason = codexToolHostUnavailable(outcome) ? 'codex-tool-host-unavailable'
+    : reasons.find((value) => ['publish-blocked', 'boot-failed', 'boot-failure'].includes(value));
   // A signal/exit code has no provenance: operators and supervisors use these
   // same signals. Require an independent infrastructure reason even for 137/143.
-  // Local child outcomes have no status; only the recorded spawn error proves
-  // infrastructure failure there. Publish/tool-host reasons require HQ status.
-  return outcome?.status === 'failed' || reason === 'boot-failed' ? reason || null : null;
+  // Local children prove infrastructure failure through a spawn error or a
+  // complete tool-host log with no command execution. Other reasons need HQ status.
+  return outcome?.status === 'failed' || reason === 'boot-failed'
+    || (reason === 'codex-tool-host-unavailable' && outcome?.toolHostEvidence) ? reason || null : null;
 }
 
 export function infrastructureRefundReason({ outcome, startHead, endHead, refunds = 0, env = process.env }) {

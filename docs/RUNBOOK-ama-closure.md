@@ -2627,8 +2627,16 @@ automatic retention sweep; see
 
 `maybeDispatchAmaCloser` reconciles a terminal hammer before stale-lease
 settlement only when the session ledger reports `worker_killed` with `SIGTERM`
-or `SIGKILL` in `failure_detail`, or an exact `codex-tool-host-unavailable` in
-`failure_class` or `failure_detail`. A bare `succeeded` status is not
+or `SIGKILL` in `failure_detail`, or the canonical `codex-tool-host-unavailable` in
+`failure_class` or `failure_detail`, including the harness-prefixed form
+`boot_readiness_probe_error: codex-tool-host-unavailable: harness infrastructure failure`
+(CODEXHOMEISO-01). The diagnostic matcher also accepts service-derived complete
+in-run tool-host evidence with no executed command. Current hammer refund
+authority remains the persisted RCV-08 execution verdict described above;
+diagnostic matching alone cannot grant hammer credit. Remediation's bounded
+log-based refund contract is documented in
+[follow-up jobs](data-model/follow-up-jobs.md#infrastructure-round-refunds-remrefund-01).
+A bare `succeeded` status is not
 non-execution evidence. It remains on the normal terminal-success path,
 including the live `DISPATCHED` lease hold when merged evidence is unknown,
 and the one-refund-per-series HAMBG-02 grant when an exit without close is proven.

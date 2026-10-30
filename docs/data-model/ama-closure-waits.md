@@ -169,3 +169,11 @@ retry and once-only page reservation apply. `observeClosureWait` also returns
 At the ordinary closure-wait bound the result carries `needsOperator: true`.
 The watchdog cannot requeue this refused actor while the wait owns escalation.
 There is no new table, column, admission gate or configuration key.
+
+The pipeline-health expired-next-action reader defaults to the current clock
+when called without options. Its total counts ledgers with next actions except
+PRs known closed or merged in the supplied review-row snapshot; missing review
+rows remain included. Retained historical files do not inflate that active total.
+A matching recovery snapshot with unavailable observations still enforces the
+custody deadline, reporting an unknown launch identity without inventing one.
+These read-side rules add no store fields or merge/dispatch authority.

@@ -2,7 +2,7 @@
 // executor. Synthetic fixtures only: made-up repo, PR, heads and launch ids.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import './helpers/load-aware-timeout-fixture.mjs';
@@ -12,10 +12,10 @@ import { acquireAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-l
 import { maybeDispatchAmaClosureFor, resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { createAmaHammerBackgroundQueue } from '../src/ama-hammer-background-dispatch.mjs';
 import { observeClosureWait } from '../src/ama/closure-wait.mjs';
-import { CLOSURE_RECOVERY_ESCALATED_REASON, CLOSURE_RECOVERY_WAIT_CLASS } from '../src/ama/closure-recovery.mjs';
+import { CLOSURE_RECOVERY_ESCALATED_REASON, CLOSURE_RECOVERY_WAIT_CLASS, enforceClosureRecoveryDeadline } from '../src/ama/closure-recovery.mjs';
 import { hasClosureRecoveryIntent, hasHammerDispatchIntent, reviseClosureNextAction } from '../src/ama/closure-next-action.mjs';
 import { createNoProgressLaneGate } from '../src/posted-review-row.mjs';
-import { collectReviewPipelineHealth } from '../src/review-pipeline-health.mjs';
+import { collectReviewPipelineHealth, readExpiredNextActions } from '../src/review-pipeline-health.mjs';
 import { expiredNextActionDeadline } from '../src/next-action-deadline.mjs';
 
 const REPO = 'example-org/subject-41';
@@ -310,4 +310,54 @@ test('CLOSURERECOVERYEXEC-01: refresh cadence and other heads are not reported a
   assert.equal(expiredNextActionDeadline(admission, { nowMs: POSTED_MS + MINUTE }).ageMs, MINUTE);
   assert.equal(expiredNextActionDeadline(admission, { nowMs: POSTED_MS + MINUTE }).closureRecovery, false);
   assert.equal(expiredNextActionDeadline(admission, { headSha: 'd'.repeat(40), nowMs: POSTED_MS + MINUTE }), null);
+});
+
+
+function expiredLaneFixture(t, number = PR) {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'closure-final-review-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const dir = path.join(rootDir, 'data', 'watcher-no-progress-lane');
+  mkdirSync(dir, { recursive: true });
+  const nextAction = { action: 'hammer', actor: 'closure-recovery', row: 'R04-ownership',
+    reason: 'ownership-unreadable', head: HEAD, queue: { intent: 'reconcile' },
+    deadline: { at: new Date(DEADLINE_MS).toISOString(), class: 'recovery' } };
+  writeFileSync(path.join(dir, 'active.json'), JSON.stringify({ repo: REPO, prNumber: number,
+    headSha: HEAD, nextAction }));
+  return { rootDir, dir, nextAction };
+}
+
+test('final review: standalone expired-action reads default the clock and options', t => {
+  const { rootDir } = expiredLaneFixture(t);
+  t.mock.method(Date, 'now', () => DEADLINE_MS + MINUTE);
+  for (const options of [undefined, {}]) {
+    const health = readExpiredNextActions(rootDir, options);
+    assert.equal(health.total, 1);
+    assert.equal(health.expiredCount, 1);
+    assert.equal(health.oldestAgeMs, MINUTE);
+  }
+});
+
+test('final review: historical closed ledgers do not inflate the active total', t => {
+  const { rootDir, dir, nextAction } = expiredLaneFixture(t);
+  for (const number of [42, 43]) writeFileSync(path.join(dir, `${number}.json`),
+    JSON.stringify({ repo: REPO, prNumber: number, headSha: HEAD, nextAction }));
+  const reviewRows = new Map([[`${REPO}#42`, { pr_state: 'closed' }],
+    [`${REPO}#43`, { pr_state: 'merged' }]]);
+  const health = readExpiredNextActions(rootDir, { nowMs: DEADLINE_MS + MINUTE, reviewRows });
+  assert.equal(health.total, 1);
+  assert.equal(health.expiredCount, 1);
+  assert.equal(health.expired[0].prNumber, PR);
+});
+
+test('final review: missing snapshot observations still enforce the custody deadline', async t => {
+  const { rootDir, nextAction } = expiredLaneFixture(t);
+  let observed = 0;
+  const result = await enforceClosureRecoveryDeadline({ rootDir, ...IDENTITY,
+    shared: { snapshot: { subjectKey: `${REPO}#${PR}`, head: HEAD }, decision: nextAction },
+    result: { dispatched: false, reason: 'ownership-unreadable' }, now: DEADLINE_MS + MINUTE,
+    observeWaitImpl: async () => { observed += 1; return { notify: true }; }, logger: quiet });
+  assert.equal(observed, 1);
+  assert.equal(result.reason, CLOSURE_RECOVERY_ESCALATED_REASON);
+  assert.equal(result.closureRecovery.launchRequestId, null);
+  assert.equal(result.closureRecovery.outcome, 'escalated');
 });

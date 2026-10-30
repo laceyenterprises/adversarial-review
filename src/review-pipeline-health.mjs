@@ -3776,7 +3776,7 @@ function readAmaCloserLeases(rootDir, { nowMs, config, reviewRows = new Map() })
 // with its age at this snapshot (same rule as the watcher log). Snapshot-only:
 // the selected executor or closure-wait owns any escalation.
 const EXPIRED_NEXT_ACTION_REPORT_LIMIT = 50;
-export function readExpiredNextActions(rootDir, { nowMs, reviewRows = new Map() }) {
+export function readExpiredNextActions(rootDir, { nowMs = Date.now(), reviewRows = new Map() } = {}) {
   const dir = join(rootDir, 'data', 'watcher-no-progress-lane');
   const expired = [];
   let total = 0;
@@ -3787,12 +3787,12 @@ export function readExpiredNextActions(rootDir, { nowMs, reviewRows = new Map() 
     let ledger;
     try { ledger = parseJson(readFileSync(join(dir, name), 'utf8'), null); } catch { continue; }
     if (!ledger?.nextAction) continue;
-    total += 1;
-    const item = expiredNextActionDeadline(ledger.nextAction, { headSha: ledger.headSha, nowMs });
-    if (!item) continue;
     const reviewRow = ledger.repo ? reviewRows.get(`${ledger.repo}#${Number(ledger.prNumber)}`) : null;
     const prState = String(reviewRow?.pr_state || '').toLowerCase();
     if (prState === 'closed' || prState === 'merged') continue;
+    total += 1;
+    const item = expiredNextActionDeadline(ledger.nextAction, { headSha: ledger.headSha, nowMs });
+    if (!item) continue;
     expired.push({ repo: ledger.repo || null, prNumber: Number(ledger.prNumber) || null, ...item,
       lane: ledger.lane || null, observedAt: ledger.lastRunAt || ledger.updatedAt || null });
   }

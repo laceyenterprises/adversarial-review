@@ -24,8 +24,8 @@ const text = value => (typeof value === 'string' ? value.trim() : '');
 
 function unresolvedEvidence(shared) {
   const { decision, snapshot } = shared;
-  const launch = snapshot.observations.launches?.value?.closer;
-  const lease = snapshot.observations.leases?.value?.closer;
+  const launch = snapshot?.observations?.launches?.value?.closer;
+  const lease = snapshot?.observations?.leases?.value?.closer;
   const launchRequestId = text(launch?.launchRequestId) || text(lease?.lrqId) || null;
   const refs = (decision.evidenceRefs || []).filter(ref => /^(lease|launch):/.test(ref));
   return { launchRequestId, unresolved: refs };

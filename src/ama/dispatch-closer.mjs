@@ -133,7 +133,7 @@ import {
   isReclaimableDispatchedAmaCloserLease,
   isReclaimableDispatchedAmaCloserLeaseAsync,
   isReclaimableTerminalAmaCloserLease,
-  deleteAmaCloserLeaseIfCurrent,
+  deleteAmaCloserLeaseIfCurrent, restoreAmaCloserLeaseIfCurrent,
   acquireAmaCloserLease,
   deleteAmaCloserLease,
   readAmaCloserLease,
@@ -7396,7 +7396,11 @@ async function maybeDispatchAmaCloserAttempt({
       throw error;
     }
     if (closerReclaim.live || closerReclaim.unknown) {
-      updateAmaCloserLease({ rootDir, ...leaseIdentity, status: 'terminal',
+      // Retained custody must not erase a lease-held receipt: the next tick
+      // re-probes the same launch rather than falling back to worker evidence.
+      const restored = predecessorLease?.lrqId && predecessorLease.workerId === workerId
+        && restoreAmaCloserLeaseIfCurrent(rootDir, predecessorLease, { expectedLease: leaseResult.lease });
+      if (!restored) updateAmaCloserLease({ rootDir, ...leaseIdentity, status: 'terminal',
         expectedLease: leaseResult.lease,
         terminalOutcome: 'deferred', now: dispatchContext.dispatchedAt });
       if (closerReclaim.unknown) {

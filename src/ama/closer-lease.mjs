@@ -257,6 +257,28 @@ export function deleteAmaCloserLeaseIfCurrent(rootDir, lease) {
   } finally { closeSync(fd); }
 }
 
+// Put back a retired owner's exact snapshot when admission retains its launch
+// custody. CAS on the replacement lease; a concurrent mutation wins.
+export function restoreAmaCloserLeaseIfCurrent(rootDir, lease, { expectedLease } = {}) {
+  if (!lease || !expectedLease) return false;
+  const leasePath = amaCloserLeaseFilePath(rootDir, expectedLease);
+  if (leasePath !== amaCloserLeaseFilePath(rootDir, lease)) return false;
+  const fd = openSync(`${leasePath}.reclaim.lock`, 'a', LEASE_FILE_MODE);
+  try {
+    try { fsExt.flockSync(fd, 'exnb'); }
+    catch (error) {
+      if (!['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) throw error;
+      return false;
+    }
+    if (!isCurrentAmaCloserLease(rootDir, expectedLease)) return false;
+    writeFileAtomic(leasePath, `${JSON.stringify(lease, null, 2)}\n`, {
+      mode: LEASE_FILE_MODE,
+      overwrite: true,
+    });
+    return true;
+  } finally { closeSync(fd); }
+}
+
 export function amaCloserPendingLeaseExpiryMs(dispatchTimeoutMs) {
   // Persisted dispatchTimeoutMs is the effective subprocess budget, already sized
   // by the dispatcher. Only the nominal fallback needs load scaling here.

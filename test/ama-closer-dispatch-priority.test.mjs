@@ -303,6 +303,49 @@ for (const scenario of ['exhausted-findings', 'clean-red-ci']) test(`CLOSERCUSTO
   assert.ok(!events.some(event => event.event === 'closer_reclaim_deferred_unknown_run'));
 });
 
+for (const [status, probe] of [
+  ['live-retry', { ok: true, row: { status: 'failed', ticket_ref: 'AMA-PR-404' },
+    retryChain: [{ launch_request_id: 'synthetic-retry', status: 'running' }] }],
+  ['unavailable', { ok: false }],
+]) test(`CLOSERCUSTODYLRQ-01: ${status} recorded launch keeps the predecessor lease receipt`, async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-custody-retain-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = findingsRemediationArgs(rootDir);
+  const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+  const first = await maybeDispatchAmaCloser({ ...args, ...testDeps() });
+  assert.equal(first.dispatched, true);
+  const receipt = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
+  const lease = readAmaCloserLease(rootDir, identity);
+  mkdirSync(join(args.dispatchContext.hqRoot, 'workers', receipt.workerId, 'agent-os'), { recursive: true });
+  const nextDeps = testDeps();
+  const second = await maybeDispatchAmaCloser({ ...args, ...nextDeps,
+    dispatchContext: { ...args.dispatchContext, dispatchedAt: '2026-07-20T13:30:00Z' },
+    // Evidence changes after admission acquires its replacement lease: a retry
+    // spawns or the ledger becomes unreadable before the custody probe.
+    readLaunchRequestStatusImpl: async () => (readAmaCloserLease(rootDir, identity)?.status === 'pending'
+      ? probe : { ok: true, row: { status: 'failed', ticket_ref: 'AMA-PR-404' } }),
+    readExecutionVerdictsImpl: async () => ({ ok: true, verdicts: [] }),
+    readWorkerDispatchFilesImpl: () => assert.fail('recorded receipt owns custody resolution'),
+    readWorkerObservationImpl: () => assert.fail('recorded receipt owns custody resolution'),
+    deliverAlertImpl: async () => {},
+    execFileImpl: async (cmd, argv, options) => {
+      if (argv[0] === 'worker' || (argv[0] === 'dispatch' && argv[1] !== 'status')) {
+        assert.fail(`retained custody cannot ${argv[0]}`);
+      }
+      if (argv[0] === 'dispatch') return { stdout: JSON.stringify({ status: 'failed' }), stderr: '' };
+      return nextDeps.execFileImpl(cmd, argv, options);
+    },
+  });
+  assert.equal(second.reason, 'hammer-closer-in-flight', JSON.stringify(second));
+  const retained = readAmaCloserLease(rootDir, identity);
+  assert.notEqual(retained.status, 'pending');
+  assert.equal(retained.lrqId, lease.lrqId);
+  assert.equal(retained.workerId, receipt.workerId);
+  assert.equal(retained.dispatchedAt, lease.dispatchedAt);
+  assert.equal(JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8')).launchRequestId,
+    receipt.launchRequestId);
+});
+
 test('CLOSERCUSTODYLRQ-01: launch outage holds custody and preserves bounded once-only paging', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'closer-custody-outage-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

@@ -47,7 +47,10 @@ dispatcher returns a receipt; `headSha` already binds the lease to its head.
 Repeated promotion of the same launch retains its dispatch time, and
 terminalization/rekeying retain all receipt fields. Older leases may omit the
 new optional fields. Worktree custody uses a matching durable dispatch receipt
-or lease before worker observations, including after watcher restart.
+or lease before worker observations, including after watcher restart. When
+admission retains that custody (live, parked or unreadable launch), it puts the
+receipt-bearing predecessor lease back by CAS instead of leaving a receipt-less
+`deferred` replacement.
 Rekeys retain
 `rekeyedFromHeadSha` and `supersededHeads` so the current lease can identify
 the original dispatch record after the PR head changes.

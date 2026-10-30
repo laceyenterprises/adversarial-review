@@ -1110,9 +1110,39 @@ async function refreshOrgRepos(octokit) {
  */
 let watcherLatencyMonitor;
 let repositoryGeneration = 0;
+function prepareReviewerAdmissionForPoll() {
+  const reviewerBurstController = createReviewerBurstController({ rootDir: ROOT, logger: console, readSpendUsd: readBurstScopedReviewerSpendUsd }), reviewerPoolConfig = resolveFirstPassReviewerPoolConfig({ watcherConfig: config, burstSlots: reviewerBurstController.slots() }); // RPL-07: burstSlots is 0 unless an operator lease is active, leaving steady-state capacity untouched
+  const reviewerDispatchSingleWaveSettleGraceMs = Math.max(
+    0,
+    Number.parseInt(
+      String(process.env.ADVERSARIAL_REVIEWER_DISPATCH_SINGLE_WAVE_SETTLE_GRACE_MS || ''),
+      10,
+    ) || 0,
+  ) || undefined;
+  const admissionSettlementSplitEnabled = !['0', 'false', 'no', 'off'].includes(String(process.env.ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT ?? '').trim().toLowerCase());
+  console.log(`[watcher] reviewer admission settlement split ${admissionSettlementSplitEnabled ? 'enabled' : 'disabled'} (ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT=${process.env.ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT ?? '<unset>'})`);
+  const firstPassSpilloverController = createFirstPassSpilloverController({ rootDir: ROOT, readHeld: countHeldOpenPrs, readDepth: countOpenPrsAwaitingReview, readRereviewDepth: countOpenPrsAwaitingReview, logger: console }); // RSP-01/RSPREREVIEW-01: disarmed unless CFG arms it
+  const drainReviewerDispatchCandidates = reviewerAdmission.drain;
+  reviewerAdmission.setDrain(createReviewerDispatchDrain({
+    reviewerPoolConfig, reviewerDispatchCandidates, firstPassSpilloverController,
+    detachedReviewerDispatchTracker, readWatcherDrainState,
+    resolveGeminiCredentialConcurrencyForDispatchCandidates,
+    singleWaveSettleGraceMs: reviewerDispatchSingleWaveSettleGraceMs,
+    splitPostReviewSettlement: admissionSettlementSplitEnabled,
+  }));
+  return { reviewerBurstController, reviewerPoolConfig, firstPassSpilloverController, admissionSettlementSplitEnabled, drainReviewerDispatchCandidates };
+}
+
 async function pollOnce(octokit, options = {}) {
   await refreshWatcherAuthenticationForTick({ log: console });
   recoverRepositoryObservations({ db, rootDir: ROOT, additionalStateDir: ADVERSARIAL_REVIEW_STATE_DIR });
+  const admission = await withRepositoryStateCycle(ROOT, async () => {
+    resetRoleConfigCache();
+    const prepared = prepareReviewerAdmissionForPoll();
+    const { drainReviewerDispatchCandidates } = prepared;
+    await drainReviewerDispatchCandidates('poll-start retained candidates');
+    return prepared;
+  });
   await withGitHubBudgetScope({}, () => refreshOrgRepos(octokit));
   activeRepos = [...new Set(activeRepos.map(name => canonicalRepositoryName(db, name)))];
   const generation = db.prepare('SELECT count(*) AS n FROM repository_rename_audit').get().n;
@@ -1125,7 +1155,7 @@ async function pollOnce(octokit, options = {}) {
     repositoryGeneration = generation;
   }
   watcherLatencyMonitor ??= createWatcherLatencyMonitor();
-  return withRepositoryStateCycle(ROOT, () => withHoldRecordPoll(() => watcherLatencyMonitor.poll(() => withGitHubAdapterReadTick(() => withClosureEvaluationReadCache(() => withGitHubBudgetScope({}, () => pollOnceWithinBudget(octokit, options)))))));
+  return withRepositoryStateCycle(ROOT, () => withHoldRecordPoll(() => watcherLatencyMonitor.poll(() => withGitHubAdapterReadTick(() => withClosureEvaluationReadCache(() => withGitHubBudgetScope({}, () => pollOnceWithinBudget(octokit, options, admission)))))));
 }
 
 async function pollOnceWithinBudget(
@@ -1134,7 +1164,8 @@ async function pollOnceWithinBudget(
     healthProbe = watcherHealthProbe,
     ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
     afterClaim = null, wakePayload = null, consumeWakePayload = null,
-  } = {}
+  } = {},
+  { reviewerBurstController, reviewerPoolConfig, firstPassSpilloverController, admissionSettlementSplitEnabled, drainReviewerDispatchCandidates }
 ) {
   // CFG-09: per-tick boundary for the role-config cascade cache. Drop
   // the cached AgentOSConfig so this tick re-resolves env + config.yaml
@@ -1149,19 +1180,8 @@ async function pollOnceWithinBudget(
   watcherHeartbeat?.markPollProgress?.();
   const wakePayloadForPoll = createWatcherWakePayloadAccessor({ initialPayload: wakePayload, consumeWakePayload });
   const healthTick = healthProbe?.beginTick?.();
-  const reviewerBurstController = createReviewerBurstController({ rootDir: ROOT, logger: console, readSpendUsd: readBurstScopedReviewerSpendUsd }), reviewerPoolConfig = resolveFirstPassReviewerPoolConfig({ watcherConfig: config, burstSlots: reviewerBurstController.slots() }); // RPL-07: burstSlots is 0 unless an operator lease is active, leaving steady-state capacity untouched
-  const reviewerDispatchSingleWaveSettleGraceMs = Math.max(
-    0,
-    Number.parseInt(
-      String(process.env.ADVERSARIAL_REVIEWER_DISPATCH_SINGLE_WAVE_SETTLE_GRACE_MS || ''),
-      10,
-    ) || 0,
-  ) || undefined;
-  const admissionSettlementSplitEnabled = !['0', 'false', 'no', 'off'].includes(String(process.env.ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT ?? '').trim().toLowerCase());
-  console.log(`[watcher] reviewer admission settlement split ${admissionSettlementSplitEnabled ? 'enabled' : 'disabled'} (ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT=${process.env.ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT ?? '<unset>'})`);
   const reviewerMemoryPressureConfig = resolveReviewerMemoryPressureConfig();
   const { retainedWatcherWakes, priorityDiscoveryPending } = createWatcherDispatchPriority({ rootDir: ROOT, db });
-  const firstPassSpilloverController = createFirstPassSpilloverController({ rootDir: ROOT, readHeld: countHeldOpenPrs, readDepth: countOpenPrsAwaitingReview, readRereviewDepth: countOpenPrsAwaitingReview, logger: console }); // RSP-01/RSPREREVIEW-01: disarmed unless CFG arms it
   const postedReviewHandlers = [], holdSubjects = [];
   const mergeAgentCandidateBranchProtectionCache = new Map();
   const postReviewMaintenanceHandlers = [], reviewerTickCaches = { fleetQuotaStatus: new Map() }, reviewerQuotaPoll = beginReviewerQuotaPoll(execFileAsync);
@@ -1172,20 +1192,11 @@ async function pollOnceWithinBudget(
   const getRoutingTierReadinessForTick = createRoutingTierReadinessProbeCache();
   const getHcpHealthzForTick = createTickHcpHealthzProbe();
   const reviewerCommandFailedReviewProbe = makeReviewPostedProbe(octokit);
-  const drainReviewerDispatchCandidates = reviewerAdmission.drain;
-  reviewerAdmission.setDrain(createReviewerDispatchDrain({
-    reviewerPoolConfig, reviewerDispatchCandidates, firstPassSpilloverController,
-    detachedReviewerDispatchTracker, readWatcherDrainState,
-    resolveGeminiCredentialConcurrencyForDispatchCandidates,
-    singleWaveSettleGraceMs: reviewerDispatchSingleWaveSettleGraceMs,
-    splitPostReviewSettlement: admissionSettlementSplitEnabled,
-  }));
   const drainReviewerDispatchCandidatesIfBatchReady = createWatcherDiscoveryBatchDrain({
     priorityDiscoveryPending, reviewerDispatchCandidates, batchSize: Math.max(1, reviewerPoolConfig.maxConcurrent || 1),
     countOpenPrsAwaitingFirstPassReview, drain: drainReviewerDispatchCandidates,
   });
   try {
-    await drainReviewerDispatchCandidates('poll-start retained candidates');
     watcherHeartbeat?.markPollProgress?.();
     if (await runLowBudgetWatcherPoll({ db, activeRepos, rootDir: ROOT,
       domainId: WATCHER_PRIMARY_DOMAIN_ID, execFileImpl: execFileAsync,

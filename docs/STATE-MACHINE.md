@@ -1,5 +1,11 @@
 # Adversarial Review State Machine Notes
 
+REPORENAME-01 keeps retained reviewer admission ahead of slow repository discovery.
+Admission preparation and the early drain execute under a shared repository-state
+cycle; discovery then obtains its ordinary exclusive migration fence, followed
+by the shared poll cycle. No fence is held across the exclusive migration, and
+no lifecycle state or producer projection changes for this ordering repair.
+
 LAC-2131 keeps the existing OAuth preflight failure and remediation lifecycle
 transitions. The new `liveness.state === "exited"` guard performs credential-only
 cleanup for a matching local service-home receipt; it cannot change job state,

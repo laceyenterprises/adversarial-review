@@ -157,6 +157,7 @@ test('every production model-resolution importer has an async readiness owner', 
     {ecmaVersion: 'latest', sourceType: 'module'}).body.some(node => node.type === 'ImportDeclaration'
       && node.specifiers.some(spec => /^resolve(?:RemediationModel|NonBlockingCodexModel|(?:Claude|Codex|Gemini)RemediationModel|ConfiguredNonBlockingCodexModel|ReviewerExecution(?:Async)?)$/.test(spec.imported?.name))));
   const owners = [
+    'src/adapters/reviewer-runtime/cli-direct/discovery.mjs',
     'src/afh-reviewer-fallback.mjs', 'src/ama/harness-fallback.mjs',
     'src/follow-up-remediation.mjs', 'src/remediation-worker-class-fallback.mjs',
     'src/review-worker-class-fallback.mjs', 'src/reviewer-harness.mjs',

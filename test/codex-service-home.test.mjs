@@ -40,10 +40,13 @@ test('service home ignores interactive tooling and keeps explicit per-worker aut
 test('every Codex reviewer probe is isolated, including OAuth fallback and MCP list', async () => {
   const homes = [];
   const commands = [];
+  let ready = false;
   await probeCodexCli({ env: { CODEX_CLI: '/fixture/codex', HOME: '/fixture/home',
     CODEX_HOME: '/fixture/interactive', CODEX_AUTH_PATH: '/fixture/worker/auth.json' },
     cwd: '/fixture/workspace', requireMcpOAuth: true,
+    ensureWorkerRegistryReadyImpl: async () => { ready = true; },
     execFileImpl: async (_cmd, args, options) => {
+      assert.equal(ready, true);
       commands.push(args.join(' '));
       homes.push(options.env.CODEX_HOME);
       assert.notEqual(options.env.CODEX_HOME, '/fixture/interactive');
@@ -54,4 +57,12 @@ test('every Codex reviewer probe is isolated, including OAuth fallback and MCP l
     } });
   assert.deepEqual(commands, ['--version', 'sessions list', 'login status', 'mcp list']);
   assert.ok(homes.every((home) => !existsSync(home)));
+});
+
+test('Codex probes preserve registry readiness failures before spawning', async () => {
+  const failure = new Error('fixture registry failure');
+  await assert.rejects(probeCodexCli({ env: { CODEX_CLI: '/fixture/codex' },
+    ensureWorkerRegistryReadyImpl: async () => { throw failure; },
+    execFileImpl: async () => assert.fail('readiness failure must prevent the probe'),
+  }), (error) => error === failure);
 });

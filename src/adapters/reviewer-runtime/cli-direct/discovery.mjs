@@ -1,5 +1,5 @@
 import { prepareServiceCodexHome } from '../../../codex-service-home.mjs';
-import { resolveRemediationModel } from '../../agent-runtime/local/remediation.mjs';
+import { ensureWorkerRegistryReady, resolveRemediationModel } from '../../agent-runtime/local/remediation.mjs';
 import { loadAwareTimeoutMs } from '../../../load-aware-timeout.mjs';
 import { constants } from 'node:fs';
 import { access, readFile } from 'node:fs/promises';
@@ -193,8 +193,10 @@ async function probeCodexCli({
   timeout = loadAwareTimeoutMs(30_000),
   execFileImpl = execFileAsync,
   requireMcpOAuth = false,
+  ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
 } = {}) {
   const codexCli = await resolveCliBinary({ binaryName: 'codex', envVar: 'CODEX_CLI', env });
+  await ensureWorkerRegistryReadyImpl({ env });
   const model = resolveRemediationModel('codex-reviewer', { env });
   const home = prepareServiceCodexHome({ env, workspaceDir: cwd,
     model: model.resolvedModel, effort: model.resolvedReasoningLevel });

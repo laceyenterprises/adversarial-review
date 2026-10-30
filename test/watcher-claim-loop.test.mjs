@@ -3825,6 +3825,119 @@ function seatIdleSynthetic(source) {
     .replaceAll("name: 'adversarial-review'", "name: 'review-fixture'");
 }
 
+for (const mode of ['dispatch', 'credential-hold', 'ceiling', 'expired', 'no-intent', 'spawn-throw', 'spawn-refused']) {
+  test(`RETRIGGERDEDUP-01: real poll preserves same-head dedup and explicit intent (${mode})`, () => {
+    const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-explicit-intent-'));
+    try {
+      const loaderPath = path.join(tmp, 'loader.mjs');
+      const registerPath = path.join(tmp, 'register.mjs');
+      const runnerPath = path.join(tmp, 'runner.mjs');
+      let loader = buildLoaderSource(mode.startsWith('spawn-') ? {
+        reviewerRuntimeSource: `globalThis.__watcherClaimLoopReviewerSpawns = [];
+          export function createReviewerRuntimeAdapterForDomain() { return {
+            spawnReviewer: async payload => {
+              globalThis.__watcherClaimLoopReviewerSpawns.push(payload);
+              ${mode === 'spawn-throw' ? "throw new Error('synthetic spawn failure');" : "return { ok: false, stdout: '', stderr: 'synthetic spawn refusal' };"}
+            }, cancel: async () => {}, reattach: async () => ({})
+          }; }
+          export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); }
+          export function loadDomainConfig() { return {}; }
+          export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }`,
+      } : {})
+        .replace('export async function fetchSubmittedReviewsForHead() { return []; }',
+          "export async function fetchSubmittedReviewsForHead(_exec, _repo, prNumber, head) { return prNumber === 101 ? [{ id: 'synthetic-review', commitId: head, submittedAt: '2026-01-01T00:00:00Z' }] : []; }")
+        .replace('export function shouldPauseReviewerModel() { return { paused: false }; }',
+          "export function shouldPauseReviewerModel() { return { paused: Boolean(globalThis.explicitCredentialHold), reason: 'synthetic-credential-hold' }; }");
+      loader = loader.replace('export async function load(url, context, nextLoad) {', `
+        export async function load(url, context, nextLoad) {
+          if (url === ${JSON.stringify(fileUrl('src', 'watcher.mjs'))}) {
+            const result = await nextLoad(url, context);
+            result.source = String(result.source).replace(
+              "JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'))",
+              '({ org: "example", repos: ["example/review-fixture"] })');
+            return result;
+          }
+      `);
+      writeFileSync(loaderPath, seatIdleSynthetic(loader));
+      writeFileSync(registerPath, buildRegisterSource(loaderPath));
+      let runner = buildRunnerSource({
+        prePollSetup: `
+          const { requestReviewRereview } = await import(${JSON.stringify(fileUrl('src', 'review-state.mjs'))});
+          const fixtureRepo = 'example/review-fixture', fixtureHead = 'sha-happy-101';
+          db.prepare(\`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,
+            review_status,review_attempts,revision_ref,reviewer_head_sha,posted_at)
+            VALUES (?,101,?,'claude','open','posted',1,?,?,?)\`)
+            .run(fixtureRepo, new Date().toISOString(), fixtureHead, fixtureHead, new Date().toISOString());
+          for (let n = 1; n <= ${mode === 'ceiling' ? 3 : 1}; n++) {
+            db.prepare(\`INSERT INTO reviewer_passes(repo,pr_number,attempt_number,reviewer_class,
+              pass_kind,started_at,ended_at,status,head_sha,gh_comment_id)
+              VALUES (?,101,?,'claude',?, ?,?,'completed',?,?)\`)
+              .run(fixtureRepo,n,n === 1 ? 'first-pass' : 'rereview','2026-01-01T00:00:00Z',
+                '2026-01-01T00:01:00Z',fixtureHead,'synthetic-review-' + n);
+          }
+          if (${JSON.stringify(mode)} !== 'no-intent') {
+            const accepted = requestReviewRereview({ rootDir: ${JSON.stringify(REPO_ROOT)}, db, repo: fixtureRepo, prNumber: 101,
+              targetRevisionRef: fixtureHead, reason: 'retrigger-review: synthetic fixture',
+              explicitReviewRequest: { requestId: 'synthetic-request', actor: 'fixture-operator' } });
+            assert.equal(accepted.triggered,true,JSON.stringify(accepted));
+          } else db.prepare("UPDATE reviewed_prs SET review_status='pending', posted_at=NULL WHERE pr_number=101").run();
+          if (${JSON.stringify(mode)} === 'expired') db.prepare(
+            "UPDATE explicit_review_intents SET expires_at='2026-01-01T00:00:00Z'").run();
+          globalThis.explicitCredentialHold = ${mode === 'credential-hold'};
+        `,
+        afterFirstPoll: `
+          const spawns = () => (globalThis.__watcherClaimLoopReviewerSpawns || [])
+            .filter(payload => payload.subjectContext?.prNumber === 101);
+          const receipt = () => db.prepare('SELECT * FROM explicit_review_intents WHERE pr_number=101').get();
+          if (${JSON.stringify(mode)} === 'credential-hold') {
+            assert.equal(spawns().length,0);
+            assert.equal(receipt().state,'pending');
+            assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number=101').get().review_status,'pending');
+            const { stmtRestoreReviewedHeadDedupSuppressedReviewPosted } =
+              await import(${JSON.stringify(fileUrl('src', 'review-state-db.mjs'))});
+            assert.equal(stmtRestoreReviewedHeadDedupSuppressedReviewPosted.run(
+              new Date().toISOString(), 'sha-happy-101', 'example/review-fixture', 101, 'sha-happy-101').changes, 0,
+              'a stale duplicate observation cannot restore posted over an accepted pending request');
+            globalThis.explicitCredentialHold = false;
+            await pollOnce(octokit,pollOptions);
+          }
+          if (${JSON.stringify(['dispatch', 'credential-hold'].includes(mode))}) {
+            assert.equal(spawns().length,1);
+            assert.equal(receipt().state,'consumed');
+            assert.equal(db.prepare("SELECT pass_kind FROM reviewer_passes WHERE pr_number=101 ORDER BY pass_id DESC LIMIT 1").get().pass_kind,'rereview');
+            db.prepare("UPDATE reviewed_prs SET review_status='pending',reviewer_session_uuid=NULL WHERE pr_number=101").run();
+            await pollOnce(octokit,pollOptions);
+            assert.equal(spawns().length,1,'consumed request must never authorize a second dispatch');
+          } else {
+            assert.equal(spawns().length,${mode.startsWith('spawn-') ? 1 : 0});
+            if (${JSON.stringify(mode)} !== 'no-intent') {
+              assert.equal(receipt().state,'refused');
+              assert.ok(receipt().notified_at);
+              assert.ok(githubWrites.some(write => write.args[0].body.includes('Re-review could not run')));
+            }
+          }
+        `,
+      });
+      if (mode === 'spawn-throw') runner = runner.replace('await pollOnce(octokit, pollOptions);',
+        "await assert.rejects(pollOnce(octokit, pollOptions), /synthetic spawn failure/);");
+      runner = runner.replace("if (property === 'listLabelsOnIssue') {", `
+        if (property === 'createComment') return async (params) => {
+          githubWrites.push({ property, args: [params] });
+          return { data: { id: 71 } };
+        };
+        if (property === 'listLabelsOnIssue') {`);
+      writeFileSync(runnerPath, seatIdleSynthetic(runner));
+      const env = installGhFixture(tmp);
+      const ghPath = path.join(tmp, 'gh');
+      writeFileSync(ghPath, seatIdleSynthetic(readFileSync(ghPath, 'utf8')));
+      const result = spawnSync(process.execPath,
+        ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+        { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(env), timeout: 30_000 });
+      assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    } finally { rmSync(tmp, { recursive: true, force: true }); }
+  });
+}
+
 test('REPORENAME-01: the next watcher cycle keeps the existing review after a stable-id rename', () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'repository-poll-'));
   const loaderPath = path.join(tmp, 'loader.mjs');

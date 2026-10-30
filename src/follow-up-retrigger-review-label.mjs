@@ -133,6 +133,13 @@ function sanitizeAckCommentText(value, maxChars = 500) {
   return `${escapedHeadings.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`;
 }
 
+// An explicit request that coalesced onto a pending row still holds a pending
+// exact-head intent, so it is queued even though the row was not reset.
+function rereviewQueued(rereviewResult) {
+  return rereviewResult?.triggered === true
+    || (rereviewResult?.status === 'already-pending' && rereviewResult?.explicitReviewIntent?.state === 'pending');
+}
+
 function buildAckCommentBody({
   labelEventKey,
   labelEventActor,
@@ -142,14 +149,14 @@ function buildAckCommentBody({
   const marker = buildAckCommentMarker(labelEventKey);
   const safeActor = sanitizeAckCommentText(labelEventActor || 'unknown', 120) || 'unknown';
   const safeReason = reason ? sanitizeAckCommentText(reason, 500) : null;
-  const triggered = rereviewResult?.triggered === true;
+  const triggered = rereviewQueued(rereviewResult);
   const rerunReason = rereviewResult?.reason || (triggered ? 'review-status-reset' : 'unknown');
   const lines = [
     `<!-- ${marker} -->`,
     triggered ? '### Re-review queued' : '### Re-review label noted (already in review pipeline)',
     '',
     triggered
-      ? `The \`${RETRIGGER_REVIEW_LABEL}\` label was accepted by the adversarial-review watcher. The next watcher tick will run a fresh review on the current HEAD.`
+      ? `The \`${RETRIGGER_REVIEW_LABEL}\` label was accepted by the adversarial-review watcher. One fresh review is queued for the current HEAD, subject to normal admission and review ceilings. If it cannot dispatch before the re-review wait bound expires, the watcher will post the reason here.`
       : `The \`${RETRIGGER_REVIEW_LABEL}\` label was consumed, but the review row was not reset because: \`${sanitizeAckCommentText(rerunReason, 200)}\`. No fresh review will fire from this label event; the existing review pipeline state already covers this PR.`,
     '',
     `- Requested by: \`${safeActor}\``,
@@ -630,6 +637,7 @@ export async function tryRetriggerReviewFromLabel({
         prNumber,
         requestedAt: now(),
         targetRevisionRef: normalizedRevisionRef,
+        explicitReviewRequest: { requestId: labelEventKey, actor: labelEventActor },
         reason,
       });
   } catch (err) {
@@ -723,7 +731,7 @@ export async function tryRetriggerReviewFromLabel({
         labelEventActor,
         reason,
         rereviewResult: {
-          triggered: rereviewResult?.triggered === true,
+          triggered: rereviewQueued(rereviewResult),
           status: rereviewResult?.status || null,
           reason: rereviewResult?.reason || null,
         },
@@ -736,12 +744,13 @@ export async function tryRetriggerReviewFromLabel({
   };
   writeLabelConsumption(rootDir, labelEventKey, consumption);
 
+  const queued = rereviewQueued(rereviewResult);
   return {
-    outcome: rereviewResult?.triggered
+    outcome: queued
       ? 'review-retriggered'
       : `noop:${rereviewResult?.reason || 'unknown'}`,
-    detail: rereviewResult?.triggered
-      ? 'review row reset to pending; next watcher tick will re-review'
+    detail: queued
+      ? 'explicit re-review queued within the bounded dispatch window'
       : `review row not reset: ${rereviewResult?.reason || 'unknown'}`,
     rereviewResult,
     ackComment: consumption.ackComment,

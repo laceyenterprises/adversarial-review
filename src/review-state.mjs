@@ -1,5 +1,8 @@
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
+import {
+  ensureExplicitReviewIntentSchema, findExplicitReviewRequest, recordExplicitReviewIntent,
+} from './explicit-review-intent.mjs';
 import { hammerHandoffReviewBypass } from './hammer-handoff-review-bypass.mjs';
 import { isOperatorHeld } from './operator-hold-labels.mjs';
 import { observeHoldRelease } from './operator-hold-release.mjs';
@@ -105,6 +108,7 @@ const REVIEW_STATE_MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url))
 const execFileAsyncDefault = promisify(execFile);
 const REVIEW_STATE_TABLE_NAMES = new Set([
   'reviewed_prs',
+  'explicit_review_intents',
   'comment_deliveries',
   'reviewer_passes',
   'review_findings',
@@ -173,6 +177,8 @@ function openReviewStateDb(rootDir, { busyTimeoutMs = DEFAULT_BUSY_TIMEOUT_MS } 
 }
 
 function ensureReviewStateSchema(db) {
+  ensureExplicitReviewIntentSchema(db);
+
   ensureRepositoryIdentitySchema(db);
   db.exec(`CREATE TABLE IF NOT EXISTS ham_finding_disputes (
     repo TEXT NOT NULL, pr_number INTEGER NOT NULL, identity TEXT NOT NULL,
@@ -1158,6 +1164,7 @@ function requestReviewRereview({
   ownerlessRecovery = false,
   inTransaction = false,
   reviewerFamily = null,
+  explicitReviewRequest = null,
 }) {
   if (reviewerFamily !== null && !['claude', 'codex', 'gemini'].includes(reviewerFamily)) throw new Error('invalid reviewer family');
   const db = dbOverride || openReviewStateDb(rootDir);
@@ -1171,7 +1178,7 @@ function requestReviewRereview({
     if (!inTransaction) {
       return db.transaction(() => requestReviewRereview({
         rootDir, repo, prNumber, requestedAt, reason, targetRevisionRef,
-        allowFastMergeSkipped, db, logger, expectedFailedHead, automaticMalformedRecovery, automaticWithheldHeadRecovery, preserveBudgets, ownerlessRecovery, reviewerFamily, inTransaction: true,
+        allowFastMergeSkipped, db, logger, expectedFailedHead, automaticMalformedRecovery, automaticWithheldHeadRecovery, preserveBudgets, ownerlessRecovery, reviewerFamily, explicitReviewRequest, inTransaction: true,
       })).immediate();
     }
 
@@ -1180,6 +1187,34 @@ function requestReviewRereview({
     // resetting it here would let that pass overwrite the terminal verdict.
     // Read the captured pass body, not the mutable row's reviewer label.
     const currentRow = getReviewRow(db, { repo, prNumber });
+    if (explicitReviewRequest) {
+      if (!normalizedTargetRevisionRef || !explicitReviewRequest.requestId || !explicitReviewRequest.actor
+          || !Number.isFinite(Date.parse(requestedAt))) {
+        return buildBlockedRereviewResult('invalid-explicit-review-request', currentRow);
+      }
+      let receipt = findExplicitReviewRequest(db, { repo, prNumber, requestId: explicitReviewRequest.requestId });
+      if (receipt) {
+        if (receipt.head_sha !== normalizedTargetRevisionRef || receipt.actor !== explicitReviewRequest.actor) {
+          return buildBlockedRereviewResult('explicit-review-request-identity-mismatch', currentRow);
+        }
+        if (receipt.state === 'coalesced') receipt = findExplicitReviewRequest(db, {
+          repo, prNumber, requestId: receipt.reason.slice('coalesced:'.length),
+        });
+        return {
+          triggered: false,
+          status: receipt.state === 'pending' && receipt.expires_at > requestedAt ? 'already-pending' : 'blocked',
+          reason: `explicit-review-request-${receipt.state}`,
+          reviewRow: currentRow,
+          explicitReviewIntent: receipt,
+        };
+      }
+    }
+    const acceptExplicitRequest = result => {
+      if (!explicitReviewRequest) return result;
+      const intent = recordExplicitReviewIntent(db, { repo, prNumber, headSha: normalizedTargetRevisionRef,
+        ...explicitReviewRequest, requestedAt });
+      return { ...result, explicitReviewIntent: intent };
+    };
     // A claim exists before its child has a PGID/start timestamp. Only the
     // claim's settlement or lease reconciliation can release it; absence of a
     // process is not proof that ownerless recovery may erase the claim.
@@ -1291,12 +1326,12 @@ function requestReviewRereview({
             WHERE repo = ? AND pr_number = ? ORDER BY id DESC LIMIT 100
           )`).run(repo, prNumber, repo, prNumber);
       }
-      return {
+      return acceptExplicitRequest({
         triggered: true,
         status: 'pending',
         reason: 'review-status-reset',
         reviewRow: getReviewRow(db, { repo, prNumber }),
-      };
+      });
     }
 
     // CAS lost. Read the row and classify why so the caller gets a
@@ -1338,7 +1373,7 @@ function requestReviewRereview({
       const pendingRevisionRefMoved =
         normalizedTargetRevisionRef &&
         currentRevisionRef !== normalizedTargetRevisionRef;
-      if (operatorRequestedRereview || pendingRevisionRefMoved) {
+      if (operatorRequestedRereview || explicitReviewRequest || pendingRevisionRefMoved) {
         const pendingAssignments = [
           // RCA 2026-08-17: a lease-released row whose head/revision moved is
           // a legitimate fresh review and must not inherit the poisoned attempt
@@ -1375,7 +1410,7 @@ function requestReviewRereview({
         if (operatorRequestedRereview && !pendingRevisionRefMoved) {
           pendingAssignments.push('head_wait_started_at = NULL');
         }
-        if (operatorRequestedRereview || automaticWithheldHeadRecovery) {
+        if (operatorRequestedRereview || explicitReviewRequest || automaticWithheldHeadRecovery) {
           pendingAssignments.push('rereview_requested_at = ?');
           pendingAssignments.push('rereview_reason = ?');
           pendingParams.push(requestedAt, normalizedReason);
@@ -1394,12 +1429,12 @@ function requestReviewRereview({
         ).run(...pendingParams);
         reviewRow = getReviewRow(db, { repo, prNumber });
       }
-      return {
+      return acceptExplicitRequest({
         triggered: false,
         status: 'already-pending',
         reason: 'review-already-pending',
         reviewRow,
-      };
+      });
     }
     // Defensive: this branch is unreachable today (every status the
     // CAS rejects is enumerated above), but if a future review_status

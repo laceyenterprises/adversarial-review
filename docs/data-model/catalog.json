@@ -2,6 +2,20 @@
   "version": 1,
   "entries": [
     {
+      "id": "explicit-review-intents",
+      "title": "Explicit Re-review Intents",
+      "path": "docs/data-model/explicit-review-intents.md",
+      "store": "data/reviews.db: explicit_review_intents",
+      "schemaSurface": "src/explicit-review-intent.mjs",
+      "relatedSchemaSurfaces": [
+        "src/review-state.mjs",
+        "src/pollonce-phases.mjs",
+        "src/reviewed-head-dispatch-gate.mjs"
+      ],
+      "owner": "watcher review dispatch",
+      "compatibility": "Additive table; request identity and exact-head one-shot admission persist across restart. Pending requests expire under the existing rereview wait bound, default 900 seconds; normal ceilings and terminal fences remain enforced."
+    },
+    {
       "id": "repository-identities",
       "title": "Repository Identity and Rename Continuity",
       "path": "docs/data-model/repository-identities.md",

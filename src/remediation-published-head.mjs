@@ -125,6 +125,7 @@ export function completeWorkerPublishedHead({
             repo: job.repo, prNumber: job.prNumber, requestedAt: completedAt });
         } else {
           const outcome = requestReviewRereviewImpl({ rootDir, repo: job.repo, prNumber: job.prNumber,
+            explicitReviewRequest: { requestId: `remediation:${job.jobId}:${round.round}`, actor: 'remediation-watch' },
             requestedAt: completedAt, reason: reply?.reReview?.reason || null, targetRevisionRef: headSha });
           if (!outcome?.triggered && outcome?.status !== 'already-pending') shared = refusedCloseout(shared, outcome);
           reReview = { ...buildRereviewResult({ requested: true, reason: reply?.reReview?.reason || null,

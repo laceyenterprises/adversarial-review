@@ -1297,6 +1297,36 @@ if (scenario === 'clean') {
     refusedWakeTerminal: true, livePendingLeasePreserved: true, legacyLedgerSettlement: true,
     emptySameHeadVerdictRefused: true, unlaunchedPromptRemoved: true, merges: 0 };
 } else if (scenario === 'refusals') {
+  const { pendingExplicitReviewIntent, consumeExplicitReviewIntent, reconcileExplicitReviewIntents } =
+    await import('../../src/explicit-review-intent.mjs');
+  const intentRoot = join(rootDir, 'explicit-review-intents');
+  let intentDb = openReviewStateDb(intentRoot);
+  ensureReviewStateSchema(intentDb);
+  intentDb.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,
+    review_status,revision_ref,reviewer_head_sha) VALUES (?,71,?,'claude','open','posted',?,?)`)
+    .run(repo, new Date().toISOString(), headSha, headSha);
+  const requestIntent = requestId => requestReviewRereview({ db: intentDb, rootDir: intentRoot, repo, prNumber: 71,
+    targetRevisionRef: headSha, reason: 'retrigger-review: synthetic smoke',
+    explicitReviewRequest: { requestId, actor: 'fixture-operator' } });
+  assert.equal(requestIntent('smoke-first').triggered, true);
+  intentDb.close();
+  intentDb = openReviewStateDb(intentRoot);
+  const getIntent = () => pendingExplicitReviewIntent(intentDb, { repo, prNumber: 71, headSha });
+  const firstIntent = getIntent();
+  assert.ok(firstIntent, 'intent survives restart');
+  intentDb.prepare(`UPDATE reviewed_prs SET review_status='reviewing',
+    reviewer_session_uuid='smoke-session',reviewer_head_sha=? WHERE pr_number=71`).run(headSha);
+  assert.equal(consumeExplicitReviewIntent(intentDb, firstIntent, { headSha, sessionUuid: 'smoke-session' }), true);
+  assert.equal(consumeExplicitReviewIntent(intentDb, firstIntent, { headSha, sessionUuid: 'smoke-session' }), false);
+  intentDb.prepare("UPDATE reviewed_prs SET review_status='posted' WHERE pr_number=71").run();
+  assert.equal(requestIntent('smoke-expired').triggered, true);
+  const expiry = getIntent().expires_at;
+  let intentNotices = 0;
+  await reconcileExplicitReviewIntents(intentDb, { repo, prNumber: 71, headSha, now: expiry,
+    notify: async intent => { assert.equal(intent.reason, 'reviewer-unavailable-before-dispatch-deadline'); intentNotices++; } });
+  assert.equal(getIntent(), undefined);
+  assert.equal(intentNotices, 1);
+  intentDb.close();
   const { holdRemediationForCiInfrastructure, resumeCiInfrastructureRound, recoverInfrastructureCiStops } =
     await import('../../src/remediation-ci-infrastructure.mjs');
   const { isInfrastructureStop } = await import('../../src/ama/hammer-stop-hold.mjs');

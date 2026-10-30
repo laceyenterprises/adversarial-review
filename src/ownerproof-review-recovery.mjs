@@ -34,7 +34,8 @@ export async function recoverOverdueOwnership({ rootDir, repo, prNumber, subject
       if (candidate?.headSha !== subject.headSha || candidate.merged || String(candidate.prState).toLowerCase() !== 'open') {
         return { dispatched: false, reason: 'recovery-head-no-longer-open' };
       }
-      return dispatchImpl({ rootDir, repoPath: repo, prNumber, candidate, labelNames: candidate.labels,
+      return dispatchImpl({ rootDir, repoPath: repo, prNumber, candidate,
+        labelNames: (candidate.labels || []).map(label => typeof label === 'string' ? label : label.name),
         currentRevisionRef: candidate.headSha, reviewStateRow, domainId, orphanRecovery, logger });
     },
   });

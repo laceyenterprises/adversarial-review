@@ -44,6 +44,8 @@ for (const [name, patch] of [
   ['spaced vault identifier', { document_ref: 'op-document://Lacey Web/Google service account' }],
   ['unknown scope', { allowed_scopes: ['cloud-platform'] }],
   ['wrong project', { project_id: 'other-project' }],
+  ['wrong service account domain', { service_account_email: 'automation@other.iam.gserviceaccount.com' }],
+  ['malformed task lrq', { task_grants: [{ lrq: 'invalid-lrq', worker_class: 'codex', scopes: ['tagmanager.publish'] }] }],
   ['field reference', { document_ref: 'op://Fixture/item/credential' }],
   ['path injection', { document_ref: 'op-document://Fixture/item/field' }],
   ['secret field', { private_key: 'forbidden' }],

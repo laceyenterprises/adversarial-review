@@ -37,6 +37,11 @@ test('Google profile metadata accepted by all strict Node entrypoints with no am
 });
 
 for (const [name, patch] of [
+  ['empty read worker class', { read_worker_classes: [''] }],
+  ['blank read worker class', { read_worker_classes: ['  '] }],
+  ['empty grant worker class', { task_grants: [{ lrq: 'lrq-fixture', worker_class: '', scopes: [] }] }],
+  ['blank grant worker class', { task_grants: [{ lrq: 'lrq-fixture', worker_class: '\t', scopes: [] }] }],
+  ['spaced vault identifier', { document_ref: 'op-document://Lacey Web/Google service account' }],
   ['unknown scope', { allowed_scopes: ['cloud-platform'] }],
   ['wrong project', { project_id: 'other-project' }],
   ['field reference', { document_ref: 'op://Fixture/item/credential' }],

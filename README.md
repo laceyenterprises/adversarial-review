@@ -6,7 +6,13 @@ profiles, a 1Password Document reference, the `lacey-web` identity and six
 approved scopes, plus read-class and exact-LRQ task grants. It grants no access
 and performs no credential reads. Deploy this reader before the Agent OS
 companion adds the tracked profile; existing lifecycle and smoke promises
-are unchanged. `test/config-google-tokens.test.mjs` exercises the offline shape.
+are unchanged. `test/config-google-tokens.test.mjs` exercises the offline shape. Vault
+identifiers in `op-document://<vault>/<item>` must be UUIDs or whitespace-free
+names/slugs, matching the Python credential parser; vault titles with spaces are
+not supported. Item titles may contain spaces. Queries, fragments, percent
+escapes and extra path components are refused. Worker classes in both read and
+task grants must be non-empty identifiers using letters, digits, underscores or
+hyphens; display labels and whitespace are not worker-class identities.
 
 LAC-2127: SQL-origin migration proofs can certify an ancestral filename/metadata
 repair only after verifying every snapshot, monotonic declared revisions, exact

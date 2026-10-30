@@ -9,6 +9,7 @@ export const GOOGLE_TOKEN_SCOPES = [
 export function googleTokensSchema() {
   const record = keys => ({ __type: 'dict', __strict: true, __strict_always: true, __keys: keys });
   const text = pattern => ({ __type: 'string', __nullable: false, ...(pattern ? { __pattern: pattern } : {}) });
+  const workerClass = () => text('^[A-Za-z0-9_-]+$');
   const scopes = () => ({ __type: 'list', __item: { __type: 'string', __enum: GOOGLE_TOKEN_SCOPES }, __default: [] });
   const profile = record({
     enabled: { __type: 'bool', __default: false },
@@ -16,12 +17,12 @@ export function googleTokensSchema() {
     service_account_email: text('^[a-z0-9-]+@lacey-web[.]iam[.]gserviceaccount[.]com$'),
     project_id: { __type: 'string', __enum: ['lacey-web'] },
     allowed_scopes: scopes(),
-    read_worker_classes: { __type: 'list', __item: text(), __default: [] },
+    read_worker_classes: { __type: 'list', __item: workerClass(), __default: [] },
     task_grants: {
       __type: 'list', __default: [],
       __item: record({
         lrq: text('^lrq[_-][A-Za-z0-9_-]+$'),
-        worker_class: text(),
+        worker_class: workerClass(),
         scopes: scopes(),
       }),
     },

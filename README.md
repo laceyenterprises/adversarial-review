@@ -2551,6 +2551,15 @@ promise to reclaim uncertain ownership. Corrupt timestamps or unavailable
 liveness evidence can still prevent reclamation; proposed operator bound is
 1800 seconds with enforcement missing for those invalid-record cases.
 
+REMEDIATORLANE-01 uses follow-up-job.10 for a native orchestration-mode
+refusal: in_progress returns to pending before launch, without charging a round
+or recording worker failure. Routing falls through to a runnable declared lane
+when available; otherwise `remediation-lane-unrunnable-in-mode` and modeRefusals
+retain the hold diagnostics. OS mode is unchanged. Focused mode-routing fixtures
+verify the hold and fallthrough alongside the existing four smoke promises.
+After ordinary deployment and approved reload, SRE retains an organic native
+fallthrough/hold and OS-mode comparison; offline tests establish no live recovery.
+
 <!-- smv:diagrams:start -->
 
 ### explicit-review-intent
@@ -2652,7 +2661,7 @@ stateDiagram-v2
     s1 --> s3: follow-up-job.07 worker failure
     s1 --> s4: follow-up-job.08 lifecycle, budget or committed-unpublished stop
     s1 --> s5: follow-up-job.09 operator cancellation
-    s1 --> s0: follow-up-job.10 transient retry or unpublished infrastructure-only CI execution recovery without round charge
+    s1 --> s0: follow-up-job.10 transient retry, unpublished infrastructure-only CI recovery or orchestration-mode refusal hold without round charge
     s2 --> s0: follow-up-job.11 next round unless comment-only final hammer handoff
     s3 --> s0: follow-up-job.12 explicit retrigger or all-infrastructure CI stop with successful current-head replacement checks
     s4 --> s0: follow-up-job.13 allowlisted explicit retrigger or live satisfied required-label event with unchanged round cap; branch-unresolved resets lookup attempts; all-infrastructure CI stops except max-rounds recover on successful current-head replacements

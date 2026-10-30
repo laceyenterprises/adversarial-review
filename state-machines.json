@@ -902,7 +902,7 @@
           "id": "follow-up-job.10",
           "from": "in_progress",
           "to": "pending",
-          "trigger": "transient retry or unpublished infrastructure-only CI execution recovery without round charge",
+          "trigger": "transient retry, unpublished infrastructure-only CI recovery or orchestration-mode refusal hold without round charge",
           "codeSource": "src/follow-up-jobs.mjs"
         },
         {

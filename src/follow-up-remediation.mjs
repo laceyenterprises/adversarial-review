@@ -149,7 +149,7 @@ import { applyPreSpawnLifecycleGate } from './follow-up-stuck-claim-sweep.mjs';
 import { detectRemediationQuotaEvidence } from './remediation-quota-evidence.mjs';
 import { settleMissingRemediationArtifact } from './remediation-missing-artifact.mjs';
 import { settleQuotaExhaustedRemediation } from './remediation-quota-hold.mjs';
-import { normalizeRemediationWorkerClass, remediatorFallbackAudit, resolveClaimedRemediatorRouting, nextRoundReviewerModels, resolveRemediationWorkerClassWithFallback } from './remediation-worker-class-fallback.mjs';
+import { normalizeRemediationWorkerClass, remediationLaneModeRefusal, remediatorFallbackAudit, resolveClaimedRemediatorRouting, nextRoundReviewerModels, resolveRemediationWorkerClassWithFallback } from './remediation-worker-class-fallback.mjs';
 import {
   DEFAULT_REPLIES_ROOT,
   HQ_REMEDIATION_DISPATCH_TRIGGER,
@@ -3355,6 +3355,10 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
     // moves to a declared fallback class. The fleet read is wired only from the
     // daemon (`resolveRemediationWorkerClassImpl`), keeping the heavily-spied
     // consume path subprocess-free in unit tests (job-local evidence only).
+    // REMEDIATORLANE-01: the selection receives the mode that will run it, so
+    // it never returns a lane that mode refuses. A pooled proposal still forces
+    // OS mode below, and the pooled path selects before any refusal applies.
+    const runtimeMode = resolveRemediationRuntimeMode(claimed.job, { healthRouter, env: jobEnv });
     let remediatorRouting = await resolveClaimedRemediatorRouting({
       job: claimed.job,
       ensureWorkerRegistryReadyImpl,
@@ -3363,6 +3367,7 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
       nowMs: Date.parse(claimed.job.claimedAt),
       resolveImpl: resolveRemediationWorkerClassImpl,
       log,
+      remediationMode: runtimeMode,
     });
     workerClass = remediatorRouting.workerClass;
     if (!remediatorRouting.pooled) {
@@ -3381,10 +3386,7 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
     // Pooled accounts require dispatcher-owned selection, binding and leases.
     // A successful proposal selects that path even when local mode was chosen
     // by config or health routing; it must never become a repeating quota hold.
-    const remediationMode = remediatorRouting.pooled ? 'os' : resolveRemediationRuntimeMode(claimed.job, {
-      healthRouter,
-      env: jobEnv,
-    });
+    const remediationMode = remediatorRouting.pooled ? 'os' : runtimeMode;
     const remediationDispatchPath = remediationMode === 'os' ? 'hq' : 'bare';
     if (remediationMode === 'os') {
       remediatorRouting = await resolveOsgRemediatorRouteImpl({ current: remediatorRouting,
@@ -3493,8 +3495,11 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
     // Gemini HQ dispatch is broker-backed: the worker-pool adapter seeds
     // OAuth at dispatch time, so the local ~/.gemini gate applies only to
     // the direct CLI path.
-    if (workerClass === 'remediator-claude-corp' && !hqDispatchEnabled) {
-      throw new Error('corporate Claude remediation requires account-bound HQ dispatch');
+    // Backstop only: the selection above already skips a lane the mode refuses.
+    const laneModeRefusal = remediationLaneModeRefusal(workerClass, remediationMode);
+    if (laneModeRefusal) {
+      throw new Error(`corporate Claude remediation requires account-bound HQ dispatch `
+        + `(selected lane ${workerClass}, mode ${remediationMode}: ${laneModeRefusal})`);
     }
     if (!(hqDispatchEnabled && ['gemini', 'remediator-claude-corp'].includes(workerClass))) {
       await assertRemediationWorkerOAuth(workerClass, { execFileImpl,

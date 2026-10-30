@@ -744,12 +744,19 @@ round removed, `remediationPlan.retryAfter` set to the hold end and a
   refusal reason (such as `"accounts-unavailable"`); when a cap source is absent,
   hold formatting and this field use the routing reason, then pool status.
   Neither the hold message nor the retry record prints `undefined`.
-- `fallbackReason`: `"no-available-fallback"`, `"no-fallback-configured"` or
-  `"primary-resets-within-hold-window"`; absent a routing reason, the pool status
-  or resolved hold reason is retained.
+- `fallbackReason`: `"no-available-fallback"`, `"no-fallback-configured"`,
+  `"primary-resets-within-hold-window"` or `"remediation-lane-unrunnable-in-mode"`
+  (a lane was refused by the orchestration mode and nothing runnable remained);
+  absent a routing reason, the pool status or resolved hold reason is retained.
 - `skipped[]`: `{ workerClass, reason }` for each declared fallback class passed
   over (`provider-untracked`, `reviews-next-round:<reviewer>`,
-  `capped:<capSource>`, `resets-within-hold-window`, `unavailable:<state>`).
+  `capped:<capSource>`, `resets-within-hold-window`, `unavailable:<state>`,
+  `unrunnable-in-mode:<mode>`).
+- `modeRefusals[]` (optional, REMEDIATORLANE-01): `{ workerClass, mode, reason }`
+  for each lane the claim's orchestration mode cannot run. Native mode
+  (`"local"`) refuses `remediator-claude-corp` with
+  `"requires-account-bound-hq-dispatch"`; OS mode refuses nothing. A refused
+  pinned or routed primary carries `capSource: "remediation-lane-unrunnable-in-mode"`.
 - `noRespawn: true`: the claim gate releases the hold early only on a fleet
   probe whose `lastGoodAt` is newer than the entry's `requeuedAt`.
 
@@ -763,7 +770,10 @@ When the claim moves the job to a fallback class, the spawned
   fallback's fleet quota state, or `"unverified"` when the fleet status could
   not be read.
 
-A job run by its routed class has none of these fields. The fallback order is
+A job run by its routed class has none of these fields, except
+`remediationWorker.modeRefusals[]` (same shape as above), which is recorded
+whenever the mode refused a lane, including when the corporate Claude lane falls
+back to the personal Claude account under the same class. The fallback order is
 `roles.remediator_fallback` in `config.yaml`.
 
 ## Single-review jobs (SINGLEREVIEW-01)
@@ -835,3 +845,15 @@ The final pre-spawn gate evaluates existing lifecycle stops before DIRTY
 conflict repair. In particular `stale-drift` and `stale-review-head` win over a
 DIRTY merge state, preventing a stale job from repairing or launching a
 conflict hammer. Their existing stop and retrigger rules remain applicable.
+
+
+REMEDIATORLANE-01 final remediation: fallback candidates are checked for mode
+compatibility before account-family lookup, retaining the post-routing check as
+well. An explicitly refused corporate fallback records
+`unrunnable-in-mode:local` immediately and cannot become an undeclared personal
+fallback or an account-exhaustion diagnostic. Primary family routing and OS-mode
+account selection retain their existing contracts.
+
+REMEDIATORLANE-01 final diagnostic guard: an account already excluded by quota
+cannot acquire a mode-refusal attribution from unknown account evidence. Its
+existing quota/account hold diagnostics remain authoritative.

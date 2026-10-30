@@ -1,7 +1,7 @@
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { resolvePooledWorkerRouting } from './worker-token-pool.mjs';
 import { FLEET_QUOTA_STATUS_TIMEOUT_MS } from './fleet-quota-status.mjs';
-import { selectClaudeAccountLaneFromSnapshot } from './claude-account-routing.mjs';
+import { corporateClaudeLane, selectClaudeAccountLaneFromSnapshot } from './claude-account-routing.mjs';
 import { codexWorkerLaneFromSnapshot, isAutomaticCodexAccountPolicy } from './codex-account-routing.mjs';
 // LANEFAILOVER-01: automatic Codex claims use the configured account order
 // and hold on unknown evidence. Pins/non-Codex retain the cross-model fallback
@@ -89,6 +89,19 @@ export function normalizeRemediationWorkerClass(workerClassInput) {
     default:
       return null;
   }
+}
+
+// REMEDIATORLANE-01: the one capability check between lane selection and the
+// orchestration mode that must run it. The corporate Claude lane is
+// account-bound, and only HQ dispatch ('os') can bind a run to that account. In
+// native mode ('local') the selector skips it, and the consume path keeps the
+// same check as a backstop. An unknown mode refuses nothing, which keeps
+// direct callers' behaviour unchanged.
+const ACCOUNT_BOUND_REMEDIATION_WORKER_CLASSES = new Set(['remediator-claude-corp']);
+
+export function remediationLaneModeRefusal(workerClass, mode) {
+  return mode && mode !== 'os' && ACCOUNT_BOUND_REMEDIATION_WORKER_CLASSES.has(workerClass)
+    ? 'requires-account-bound-hq-dispatch' : null;
 }
 
 const execFileAsync = promisify(execFileCb);
@@ -182,12 +195,23 @@ async function readFleetQuotaStatuses({ env, hqPath, execFileImpl }) {
  * @param {string=} args.hqPath
  * @param {Function|null=} args.execFileImpl — DI for `hq fleet quota status --json`;
  *   null skips the fleet read so only job-local evidence applies.
+ * @param {'os'|'local'|null=} args.remediationMode — the orchestration mode that will run
+ *   the selection; a lane it refuses (remediationLaneModeRefusal) is never returned.
  * @returns {Promise<{ workerClass: string, fellBack: boolean, hold: boolean, reason: string,
  *   from?: string, to?: string, capSource?: string, primaryState?: string, resetAt?: string,
  *   holdUntil?: string, candidateState?: string,
- *   skipped?: Array<{ workerClass: string, reason: string }>, error?: string }>}
+ *   skipped?: Array<{ workerClass: string, reason: string }>, error?: string,
+ *   modeRefusals?: Array<{ workerClass: string, mode: string, reason: string }> }>}
  */
-export async function resolveRemediationWorkerClassWithFallback({
+export async function resolveRemediationWorkerClassWithFallback({ remediationMode = null, ...args } = {}) {
+  const modeRefusals = [];
+  const routing = await resolveModeRunnableWorkerClass({ ...args, remediationMode, modeRefusals });
+  return modeRefusals.length ? { ...routing, modeRefusals } : routing;
+}
+
+async function resolveModeRunnableWorkerClass({
+  remediationMode,
+  modeRefusals,
   primary,
   fallbackWorkerClasses,
   job = null,
@@ -261,15 +285,36 @@ export async function resolveRemediationWorkerClassWithFallback({
   }
   if (codexAccount) Object.assign(base, codexAccount);
 
-  const accountLane = (name) => snapshot ? selectClaudeAccountLaneFromSnapshot(snapshot, {
-    statuses,
-    blockedWorkerClasses: ['remediator-claude', 'remediator-claude-corp'].filter(name => capOf(name).capped),
-    workerClass: ['claude', 'claude-code'].includes(name) ? 'remediator-claude' : name,
-    model: modelOf(modelForClass, name),
-  }) : null;
+  // REMEDIATORLANE-01: each lane the mode refuses is recorded once, with why.
+  const refuseInMode = (workerClass) => {
+    const reason = remediationLaneModeRefusal(workerClass, remediationMode);
+    if (reason && !modeRefusals.some((entry) => entry.workerClass === workerClass)) {
+      modeRefusals.push({ workerClass, mode: remediationMode, reason });
+    }
+    return reason;
+  };
+  const accountLane = (name) => {
+    if (!snapshot) return null;
+    const workerClass = ['claude', 'claude-code'].includes(name) ? 'remediator-claude' : name;
+    const model = modelOf(modelForClass, name);
+    const blocked = ['remediator-claude', 'remediator-claude-corp'].filter(name => capOf(name).capped);
+    const select = (blockedWorkerClasses) => selectClaudeAccountLaneFromSnapshot(snapshot, {
+      statuses, blockedWorkerClasses, workerClass, model,
+    });
+    const lane = select(blocked);
+    // Selecting a lane the mode refuses, or holding on its unknown evidence,
+    // strands the job. Re-select without it: the existing account order then
+    // falls through to the next Claude account, or holds when none is ready.
+    const corporate = corporateClaudeLane(workerClass);
+    if (lane && corporate && ((lane.workerClass === corporate && !lane.hold)
+      || (lane.reason === 'claude-account-evidence-unknown' && !blocked.includes(corporate))) && refuseInMode(corporate)) {
+      return select([...blocked, corporate]);
+    }
+    return lane;
+  };
   const primaryAccount = accountLane(primaryClass);
   if (primaryAccount?.reason === 'claude-account-evidence-unknown'
-    || (!snapshot && primaryClass === 'remediator-claude-corp')) {
+    || (!snapshot && primaryClass === 'remediator-claude-corp' && !refuseInMode(primaryClass))) {
     return { ...base, hold: true, holdUntil: holdUntilFor(null, nowMs),
       reason: primaryAccount?.reason || 'fleet-quota-status-unavailable' };
   }
@@ -278,9 +323,13 @@ export async function resolveRemediationWorkerClassWithFallback({
     Object.assign(base, { workerClass: primaryClass, fellBack: primaryClass !== primary,
       from: primary, to: primaryClass });
   }
-  const primaryCap = primaryAccount?.hold
-    ? { ...capOf(primaryClass), capped: true, available: false, capSource: primaryAccount.reason }
-    : capOf(primaryClass);
+  // A routed or pinned primary the mode refuses is treated like a capped one:
+  // the declared fallbacks are tried, and the job holds if none can run.
+  const primaryCap = refuseInMode(primaryClass)
+    ? { ...capOf(primaryClass), capped: true, available: false, capSource: 'remediation-lane-unrunnable-in-mode' }
+    : primaryAccount?.hold
+      ? { ...capOf(primaryClass), capped: true, available: false, capSource: primaryAccount.reason }
+      : capOf(primaryClass);
   const lastRetry = job?.remediationPlan?.retryHistory?.findLast((entry) =>
     entry.round === job.remediationPlan.currentRound && entry.retryMetadata?.code === 'infrastructure-refund');
   const infrastructureFallback = lastRetry?.retryMetadata?.code === 'infrastructure-refund'
@@ -315,12 +364,22 @@ export async function resolveRemediationWorkerClassWithFallback({
   const skipped = [];
   for (let candidate of fallbacks) {
     if (candidate === primaryClass) continue;
+    // Refuse the declared identity before account-family routing can turn an
+    // unrunnable corporate fallback into an undeclared personal account.
+    if (refuseInMode(candidate)) {
+      skipped.push({ workerClass: candidate, reason: `unrunnable-in-mode:${remediationMode}` });
+      continue;
+    }
     const account = accountLane(candidate);
     if (account?.hold) {
       skipped.push({ workerClass: candidate, reason: account.reason });
       continue;
     }
     if (account) candidate = account.workerClass;
+    if (refuseInMode(candidate)) {
+      skipped.push({ workerClass: candidate, reason: `unrunnable-in-mode:${remediationMode}` });
+      continue;
+    }
     if (!providerForQuotaHarness(candidate)) {
       skipped.push({ workerClass: candidate, reason: 'provider-untracked' });
       continue;
@@ -374,11 +433,13 @@ export async function resolveRemediationWorkerClassWithFallback({
 
   // Nothing can take the job. Respawning the capped primary is a guaranteed
   // failure, so the caller holds it instead and re-resolves on the next claim.
+  // A lane refused by the mode names that as the reason (REMEDIATORLANE-01).
   return {
     ...base,
     hold: true,
     holdUntil: holdUntilFor(primaryCap, nowMs),
-    reason: fallbacks.some((candidate) => candidate !== primaryClass) ? 'no-available-fallback' : 'no-fallback-configured',
+    reason: modeRefusals.length ? 'remediation-lane-unrunnable-in-mode'
+      : fallbacks.some((candidate) => candidate !== primaryClass) ? 'no-available-fallback' : 'no-fallback-configured',
     capSource: primaryCap.capSource,
     primaryState: primaryCap.state,
     model: primaryCap.model || null,
@@ -442,6 +503,7 @@ export async function resolveClaimedRemediatorRouting({
   topPath,
   loaderImpl,
   log = console,
+  remediationMode = null,
 } = {}) {
   const resolver = resolveImpl
     || ((args) => resolveRemediationWorkerClassWithFallback({ ...args, execFileImpl: null }));
@@ -462,7 +524,14 @@ export async function resolveClaimedRemediatorRouting({
     env,
     modelForClass: (workerClass) => remediatorModelForClass(workerClass, { job, env }),
     reviewerModels: nextRoundReviewerModels(job, { env, topPath, loaderImpl }),
+    remediationMode,
   });
+  for (const refusal of routing?.modeRefusals || []) {
+    log.warn?.(
+      `[follow-up-remediation] remediation lane ${refusal.workerClass} refused in ${refusal.mode} mode ` +
+        `(${refusal.reason}); selected ${routing.hold ? `hold (${routing.reason})` : routing.workerClass}`
+    );
+  }
   if (routing?.fellBack && !routing.authPath) {
     log.warn?.(
       `[follow-up-remediation] remediation-worker-class cap-fallback: ` +
@@ -478,12 +547,17 @@ export async function resolveClaimedRemediatorRouting({
 // `remediationWorker` audit for a fallback spawn: the class it replaced, why,
 // and the candidates passed over. Pooled proposals are diagnostic only; the
 // dispatcher's account receipt, rather than this preflight, identifies the run.
+// Lanes the orchestration mode refused are recorded even without a class change
+// (the corporate twin falling back to the personal Claude account).
 export function remediatorFallbackAudit(routing) {
-  const proposal = routing?.pooled ? { accountProposal: {
-    identity: routing.identity, tokenAccountId: routing.tokenAccountId || null,
-    brokerProvider: routing.brokerProvider || null, reason: routing.reason,
-    evidenceGeneration: routing.evidenceGeneration || null,
-  } } : {};
+  const proposal = {
+    ...(routing?.pooled ? { accountProposal: {
+      identity: routing.identity, tokenAccountId: routing.tokenAccountId || null,
+      brokerProvider: routing.brokerProvider || null, reason: routing.reason,
+      evidenceGeneration: routing.evidenceGeneration || null,
+    } } : {}),
+    ...(routing?.modeRefusals?.length ? { modeRefusals: routing.modeRefusals } : {}),
+  };
   if (!routing?.fellBack) return proposal;
   return {
     ...proposal,

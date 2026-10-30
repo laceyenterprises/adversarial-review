@@ -2936,3 +2936,11 @@ generation. Ledger lock order consumes the next new charge regardless of
 clock precision; a consumed receipt starts one fresh cap-alert episode.
 Watcher and closer exclude the same gate status context. A pending grant
 cannot supersede the newer clean-review daemon path.
+
+REMEDIATORLANE-01 extends the existing follow-up-job.10 requeue trigger: a
+claimed native job whose remaining declared lanes require account-bound HQ
+dispatch returns from in_progress to pending before launch, with reason
+`remediation-lane-unrunnable-in-mode`, unchanged currentRound and modeRefusals
+audit. This is a budget-neutral hold, not worker failure. Personal/declared
+runnable fallthrough proceeds normally; OS mode is unchanged. Existing states,
+smoke steps, merge gates and proposed pending-state deadline remain unchanged.

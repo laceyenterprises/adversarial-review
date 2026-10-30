@@ -10,6 +10,10 @@ launches retain it, and unavailable evidence retains the receipt and bounded
 wait/page. Legacy leases keep the public slot inventory fallback. Activate by
 watcher restart after deployment and observe natural terminal release and the
 next dispatch with a launch-bearing log receipt; no live repair is authorized.
+Reviewed the dispatch producer guards and refreshed its state projection: receipt
+identity, predecessor restoration and bounded unknown-evidence accounting retain
+the existing hammer-dispatch states and transitions. Closing-decision and CI
+ownership precedence remain unchanged.
 
 SIZEOWNER-02: terminal `reviewer-prompt-too-large` and
 `reviewer-chunk-budget-exceeded` still settle to `failed`, never `pending`.

@@ -5,6 +5,7 @@ import {
   resolveCommentOnlyFinalRoundCompletion,
 } from '../src/comment-only-final-round-completion.mjs';
 import { normalizeCiPendingOnlyReply, validateRemediationReply } from '../src/kernel/remediation-reply.mjs';
+import taggedPendingCi from './fixtures/pending-ci-ownership/blocker.json' with { type: 'json' };
 
 const reviewedHead = '1'.repeat(40);
 const pushedHead = '2'.repeat(40);
@@ -139,6 +140,17 @@ test('a partial final round whose only blocker is pending CI completes with its 
     finalRoundOutcome: { completed: true, reason: 'ci-probe-pending-ci', ciState: 'pending', push: 'descendant' },
   });
   assert.equal(probes.length, 1, 'the CI state probe decides, not the reply text');
+});
+
+test('PENDINGCIOWNER-01 tagged CI with negated human prose completes only without an input request', async () => {
+  for (const needsHumanInput of [undefined, 'Grant repository access.']) {
+    const { result } = await resolve({
+      reply: { outcome: 'partial', blockers: [], operationalBlockers: [{ ...taggedPendingCi, needsHumanInput }] },
+    });
+    assert.equal(result.completed, !needsHumanInput);
+    assert.equal(result.completionFields.finalRoundOutcome.reason,
+      needsHumanInput ? 'operational-blocker-needs-human-input' : 'kind-pending-ci');
+  }
 });
 
 test('a blocked reply with an unrelated blocker does not complete the final round on pending CI', async () => {

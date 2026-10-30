@@ -9,6 +9,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import taggedPendingCi from './fixtures/pending-ci-ownership/blocker.json' with { type: 'json' };
 import {
   REMEDIATION_WORKER_TRAILER_CLASS,
   GEMINI_REMEDIATION_WORKER_TRAILER_CLASS,
@@ -13141,14 +13142,14 @@ for (const scenario of ['pushed', 'unchanged', 'other-blocker', 'normalized-rere
 }
 
 for (const scenario of ['pending-ci', 'legacy-ci', 'closer', 'pipeline-review', 'mixed', 'human-input',
-  'credential', 'operator-label', 'no-progress', 'unpublished', 'refused-review', 'audit-error', 'final-round', 'final-human']) {
+  'credential', 'operator-label', 'no-progress', 'unpublished', 'refused-review', 'audit-error', 'final-round', 'final-negated', 'final-human']) {
   test(`REMREPORTHUMAN-01 completion with ${scenario}`, async t => {
     const rootDir = mkdtempSync(path.join(tmpdir(), 'remediation-owner-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     const head = 'a'.repeat(40);
     const { claimed } = makeQueuedJob(rootDir, { repo: 'example/fixture', prNumber: 42,
       revisionRef: head, maxRemediationRounds: 2, reviewBody: '## Verdict\nComment only' });
-    const finalRound = ['final-round', 'final-human'].includes(scenario);
+    const finalRound = ['final-round', 'final-negated', 'final-human'].includes(scenario);
     if (finalRound) {
       claimed.job.finalRound = 'comment-only';
       writeFollowUpJob(claimed.jobPath, claimed.job);
@@ -13162,15 +13163,16 @@ for (const scenario of ['pending-ci', 'legacy-ci', 'closer', 'pipeline-review', 
     const human = { finding: 'An operator label is required.', reasoning: 'Approval requires a decision.' };
     const closer = { finding: 'The AMA closer retains closure authority.', reasoning: 'Awaiting closure.' };
     const operationalBlockers = scenario === 'legacy-ci' ? [{ ...pending, kind: undefined }]
+      : scenario === 'final-negated' ? [taggedPendingCi]
       : scenario === 'mixed' ? [pending, human]
       : scenario === 'human-input' ? [{ ...pending, needsHumanInput: 'Restore access.' }]
-      : scenario === 'final-human' ? [{ ...pending, reasoning: 'Credentials must be restored before CI can run.' }]
+      : scenario === 'final-human' ? [{ ...pending, reasoning: 'Credentials must be restored before CI can run.', needsHumanInput: 'Restore repository access.' }]
       : scenario === 'credential' ? [{ finding: 'Credentials are missing.', reasoning: 'Access must be restored.' }]
       : scenario === 'operator-label' ? [human]
       : ['closer', 'final-round'].includes(scenario) ? [closer]
       : scenario === 'pipeline-review' ? [{ finding: 'The pipeline will run the adversarial review.', reasoning: 'Awaiting review.' }]
       : [pending];
-    writeValidReply(replyPath, claimed.job, { outcome: 'blocked',
+    writeValidReply(replyPath, claimed.job, { outcome: scenario === 'final-negated' ? 'partial' : 'blocked',
       summary: scenario === 'no-progress' ? 'Remediation remains incomplete.'
         : scenario === 'unpublished' ? `Remediation is complete; commit ${'b'.repeat(40)} is unpublished.`
         : scenario === 'human-input' ? `Remediation is complete; pushed ${'b'.repeat(40)}.`
@@ -13221,8 +13223,14 @@ for (const scenario of ['pending-ci', 'legacy-ci', 'closer', 'pipeline-review', 
       assert.equal(result.job.remediationPlan.stop, null);
       assert.doesNotMatch(body, /Human intervention required|stopped.*no-progress/);
       assert.match(body, /Informational wait/);
-      assert.equal(requests.length, scenario === 'final-round' ? 0 : 1);
+      assert.equal(requests.length, finalRound ? 0 : 1);
       assert.ok(result.job.reReview.nextAction);
+      if (scenario === 'final-negated') {
+        assert.equal(result.job.reReview.suppressed, 'comment-only-final-round');
+        assert.equal(result.job.completion.finalRoundOutcome.reason, 'kind-pending-ci');
+        assert.equal(result.job.completion.pendingCiOnly, true);
+        assert.equal(result.job.reReview.nextAction.action, 'wait-for-CI');
+      }
     }
   });
 }

@@ -1,0 +1,6 @@
+{
+  "title": "PR-head CI pending",
+  "kind": "pending-ci",
+  "finding": "Both CI checks on published head bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb remained pending after the single bounded wait.",
+  "reasoning": "Remediation is published and targeted validation passed. Required CI runs 101 and 102 must finish green before the merge closer acts; no human finding decision or additional adversarial review is needed."
+}

@@ -3,16 +3,21 @@ import { isDeclaredOperationalBlockerCode } from './kernel/remediation-reply.mjs
 // Presentation and completion routing share this conservative classification.
 // Unknown blockers still need a person; worker text never grants merge authority.
 export function operationalBlockerOwner(entry) {
-  const text = [entry?.title, entry?.finding, entry?.reasoning].filter(Boolean).join(' ');
   const humanInput = String(entry?.needsHumanInput || '').trim();
   // Older workers used this field for the pipeline's CI -> review sequence.
   // Accept that entire sentence only, never an appended request for access.
   const legacyCiFollowup = /^Confirm (?:CI|[\w-]+|required checks?) (?:succeeds?|pass(?:es)?|completes?) for the pushed head, then request (?:another )?(?:adversarial )?review pass\.?$/i.test(humanInput);
-  if ((humanInput && !legacyCiFollowup) || isDeclaredOperationalBlockerCode(entry)
-    || /\b(?:credentials?|auth(?:entication|orization)?|permissions?|operator|human|decision|conflicting requirements?|approval|(?:auth|access|api|session|bearer|github)[ -]tokens?)\b/i.test(text)
-    || /\b(?:fetch|rebase|push)\b[^.]{0,30}\b(?:failed|rejected|conflict)\b/i.test(text)) return 'human';
+  if ((humanInput && !legacyCiFollowup) || isDeclaredOperationalBlockerCode(entry)) return 'human';
+  // Structured ownership is authoritative. Prose cannot override a pending-CI
+  // tag; an actual input request belongs in needsHumanInput (checked above).
   if (entry?.kind === 'pending-ci') return 'CI';
   if (entry?.kind !== undefined) return 'human';
+  const text = [entry?.title, entry?.finding, entry?.reasoning].filter(Boolean).join(' ');
+  // Legacy prose alone needs a conservative heuristic. Remove only explicit
+  // negated need phrases, never a whole sentence that could also request access.
+  const legacyNeeds = text.replace(/\bno (?:(?:additional|human|operator|finding|input|decision|approval|intervention|action|credentials?|permissions?|authentication|authorization|access|or|and|adversarial|review) )+(?:(?:is|are) )?(?:needed|required|necessary)\b/gi, '');
+  if (/\b(?:credentials?|auth(?:entication|orization)?|permissions?|operator|human|decision|conflicting requirements?|approval|(?:auth|access|api|session|bearer|github)[ -]tokens?)\b/i.test(legacyNeeds)
+    || /\b(?:fetch|rebase|push)\b[^.]{0,30}\b(?:failed|rejected|conflict)\b/i.test(text)) return 'human';
   if (legacyCiFollowup) return 'CI';
   // Legacy replies have no ownership field. Accept only explicit wait language.
   if (/\b(?:pending-ci|ci-pending|pr-head-ci-pending)\b/i.test(entry?.title || '')

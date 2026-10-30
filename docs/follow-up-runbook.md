@@ -1,5 +1,17 @@
 # Follow-Up Remediation Runbook
 
+LAC-2131: local Codex launch preparation bridges broker/per-worker OAuth into
+the isolated CLI file store and requires offline ChatGPT login recognition
+before catalog retrieval or execution. An effective-auth failure follows the
+existing `oauth-preflight-failure` path; do not retry it as an unauthenticated
+paid request or diagnose the secondary missing artifact as the cause.
+Broker refresh and provider routing remain unchanged. Owned staging is released
+after snapshot handoff or preparation failure; terminal local reconciliation
+uses `codexAuthOwnerId` to remove only its matching service credential, retaining
+sessions. Missing/foreign legacy receipts authorize no deletion. See the
+[workspace/auth contract](RUNBOOK-reviewer-workspace.md) and
+[worker evidence fields](data-model/follow-up-jobs.md).
+
 CIBLOCKINFRA-01: infrastructure holds follow proven-publication completion and
 committed-unpublished detection. A published legacy wait completes on green
 without requeuing a worker; moved/terminal heads clear its wait under lock.

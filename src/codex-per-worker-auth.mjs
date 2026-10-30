@@ -4,9 +4,11 @@ import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // WHY THIS EXISTS
 // ---------------
 // The adversarial-review reviewer and the remediation worker both spawn the
-// native Codex CLI pointed at a SHARED ChatGPT OAuth auth.json (via
-// CODEX_AUTH_PATH, default ~/.codex/auth.json which is the operator's single
-// credential). ChatGPT rotates the refresh_token on every refresh and
+// native Codex CLI from a selected ChatGPT OAuth auth.json (AR source selector
+// CODEX_AUTH_PATH, default ~/.codex/auth.json). The CLI consumes auth.json in
+// CODEX_HOME, not that environment variable; codex-service-home.mjs bridges the
+// selected source into its private file store. Historically this was shared.
+// ChatGPT rotates the refresh_token on every refresh and
 // server-side invalidates the prior value. When several codex processes run
 // concurrently (a review storm, or a reviewer racing the hq-dispatch worker
 // fleet) any one that refreshes the shared credential revokes everyone else's
@@ -28,7 +30,9 @@ import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // SAFETY
 // ------
 //   * Primary fail-safe: errors return null so the caller can use the shared
-//     CODEX_AUTH_PATH. Corporate auth requires a broker mint and fails closed.
+//     CODEX_AUTH_PATH as a source. Service-home still snapshots it with a
+//     placeholder refresh token and requires CLI login status before use.
+//     Corporate auth requires a broker mint and fails closed.
 //   * Kill-switch: AGENT_OS_CODEX_PER_WORKER_AUTH=0 disables materialization.
 //   * Contract-safe: the per-worker auth.json is materialized UNDER the source
 //     credential's operator home (/Users/<u>/...), so a consumer that derives

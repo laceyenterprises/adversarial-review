@@ -1,3 +1,5 @@
+import { serviceFixtureExec, writeDummyCodexAuth } from './helpers/codex-service-fixture.mjs';
+import { prepareServiceCodexHome } from '../src/codex-service-home.mjs';
 import { installDispatchFileProducerFixture, seedWorkerRegistry } from './helpers/dispatch-files-fixture.mjs';
 installDispatchFileProducerFixture();
 import './helpers/load-aware-timeout-fixture.mjs';
@@ -34,8 +36,8 @@ import {
   classifyHqDispatchFailure,
   connectFollowUpTelemetryListener,
   createQuotaHoldRevalidator,
-  consumeFollowUpJobsUntilCapacity,
-  consumeNextFollowUpJob,
+  consumeFollowUpJobsUntilCapacity as consumeFollowUpJobsUntilCapacityActual,
+  consumeNextFollowUpJob as consumeNextFollowUpJobActual,
   countPendingFollowUpJobsByRetryWindow,
   digestWorkerFinalMessage,
   dispatchRemediationViaHq,
@@ -74,9 +76,9 @@ import {
   resolveReplyStorageKey,
   resolveRemediationMaxConcurrentJobs,
   spawnClaudeCodeRemediationWorker,
-  spawnCodexRemediationWorker,
+  spawnCodexRemediationWorker as spawnCodexRemediationWorkerActual,
   spawnGeminiRemediationWorker,
-  createRemediationRuntime,
+  createRemediationRuntime as createRemediationRuntimeActual,
   resolveGeminiRemediationModel,
   resolveCodexRemediationModel,
   remediationWorkerTrailerClass,
@@ -3411,7 +3413,7 @@ for (const fetchFails of [false, true]) {
     const authPath = path.join(authDir, 'auth.json');
     const promptPath = path.join(workspaceDir, 'prompt.md');
     mkdirSync(authDir);
-    writeFileSync(authPath, JSON.stringify({ tokens: { access_token: 'synthetic-access' } }));
+    writeDummyCodexAuth(authPath);
     writeFileSync(promptPath, 'Synthetic remediation prompt.\n');
     const logs = [];
     const warnings = [];
@@ -3428,11 +3430,12 @@ for (const fetchFails of [false, true]) {
         log: { info: line => logs.push(line), warn: line => warnings.push(line) },
         execFileSyncImpl(command, args, { env }) {
           assert.equal(command, '/fixture/spawn-codex');
+          if (args[0] === 'login') return serviceFixtureExec(command, args, { env });
           assert.deepEqual(args, ['debug', 'models']);
-          assert.equal(env.CODEX_AUTH_PATH, authPath);
+          assert.equal(env.CODEX_AUTH_PATH, path.join(env.CODEX_HOME, 'auth.json'));
           seededHome = env.CODEX_HOME;
           assert.notEqual(seededHome, authDir);
-          assert.equal(existsSync(path.join(seededHome, 'auth.json')), false);
+          assert.equal(existsSync(path.join(seededHome, 'auth.json')), true);
           if (fetchFails) throw Object.assign(new Error('synthetic outage'), { code: 'ETIMEDOUT' });
           return JSON.stringify({ models: [{ slug: 'fixture-model',
             tool_mode: 'code_mode_only', supports_search_tool: true, context_window: 120000 }] });
@@ -5145,7 +5148,7 @@ test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt
     ]);
     assert.equal(spawnCalls[0].options.cwd, workspaceDir);
     assert.equal(spawnCalls[0].options.detached, true);
-    assert.equal(spawnCalls[0].options.env.CODEX_AUTH_PATH, authPath);
+    assert.equal(spawnCalls[0].options.env.CODEX_AUTH_PATH, path.join(worker.codexHome, 'auth.json'));
     assert.notEqual(spawnCalls[0].options.env.CODEX_HOME, codexHome);
     assert.equal(spawnCalls[0].options.env.CODEX_HOME, worker.codexHome);
     assert.equal(worker.codexSessionRoot, path.join(worker.codexHome, 'sessions'));
@@ -5232,7 +5235,7 @@ test('spawnCodexRemediationWorker closes an already-open descriptor when a later
   const authPath = path.join(codexHome, 'auth.json');
   mkdirSync(codexHome, { recursive: true });
   writeFileSync(promptPath, 'Fix the bug.\n', 'utf8');
-  writeFileSync(authPath, JSON.stringify({ auth_mode: 'chatgpt' }), 'utf8');
+  writeDummyCodexAuth(authPath);
 
   const previous = {
     HOME: process.env.HOME,
@@ -7445,6 +7448,37 @@ test('reconcileFollowUpJob stops exited workers for no-progress when the final a
   assert.equal(result.job.completion.finalMessageBytes, Buffer.byteLength('Implemented fix and ran npm test.\n', 'utf8'));
   assert.equal(result.job.completion.finalMessageDigest, digestWorkerFinalMessage('Implemented fix and ran npm test.\n'));
   assert.match(result.job.completion.finalMessageSummary, /Implemented fix and ran npm test/);
+});
+
+test('LAC-2131: daemon reconciliation cleans only an exited local worker credential and retains sessions', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const authPath = writeDummyCodexAuth(path.join(rootDir, '.codex', 'auth.json'));
+  const home = prepareServiceCodexHome({
+    env: { HOME: rootDir, CODEX_AUTH_PATH: authPath }, workspaceDir: rootDir,
+    model: 'synthetic-model', codexCli: 'synthetic-codex', execFileSyncImpl: serviceFixtureExec,
+    log: { info() {}, warn() {} },
+  });
+  try {
+    const sessionPath = path.join(home.codexHome, 'sessions', 'usage.jsonl');
+    mkdirSync(path.dirname(sessionPath));
+    writeFileSync(sessionPath, '{"synthetic":"usage"}');
+    const { claimed } = makeQueuedJob(rootDir, { maxRemediationRounds: 2 });
+    const spawned = markFollowUpJobSpawned({
+      jobPath: claimed.jobPath, spawnedAt: '2026-04-21T10:01:00.000Z',
+      worker: { processId: 8123, codexHome: home.codexHome, codexAuthOwnerId: home.codexAuthOwnerId },
+    });
+    // Read serialized state: no in-memory child or cleanup closure survives restart.
+    const job = readFollowUpJob(spawned.jobPath);
+    const opts = { rootDir, job, jobPath: spawned.jobPath,
+      now: () => '2026-04-21T10:02:00.000Z', resolvePRLifecycleImpl: async () => null };
+    const active = await reconcileFollowUpJob({ ...opts, isWorkerRunning: () => true });
+    assert.equal(active.action, 'active');
+    assert.ok(existsSync(home.authPath));
+    await reconcileFollowUpJob({ ...opts, isWorkerRunning: () => false });
+    assert.equal(existsSync(home.authPath), false);
+    assert.ok(existsSync(sessionPath));
+    assert.ok(existsSync(authPath));
+  } finally { home.cleanup(); rmSync(rootDir, { recursive: true, force: true }); }
 });
 
 test('reconcileFollowUpJob prefers max-rounds-reached when a no-progress exit also exhausts the cap', async () => {
@@ -13324,3 +13358,19 @@ test('CIBLOCKINFRA-01 no-progress completion waits on infrastructure-only CI wit
   assert.equal(result.job.remediationPlan.stop, null);
   assert.equal(summarizePRRemediationLedger(rootDir, result.job).completedRoundsForPR, 0);
 });
+
+function spawnCodexRemediationWorker(options) {
+  return spawnCodexRemediationWorkerActual({ execFileSyncImpl: serviceFixtureExec, ...options });
+}
+
+function createRemediationRuntime(options) {
+  return createRemediationRuntimeActual({ execFileSyncImpl: serviceFixtureExec, ...options });
+}
+
+function consumeNextFollowUpJob(options) {
+  return consumeNextFollowUpJobActual({ execFileSyncImpl: serviceFixtureExec, ...options });
+}
+
+function consumeFollowUpJobsUntilCapacity(options) {
+  return consumeFollowUpJobsUntilCapacityActual({ execFileSyncImpl: serviceFixtureExec, ...options });
+}

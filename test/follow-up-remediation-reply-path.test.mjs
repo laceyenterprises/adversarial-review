@@ -1,3 +1,4 @@
+import { serviceFixtureExec } from './helpers/codex-service-fixture.mjs';
 import './helpers/registry-session-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -206,6 +207,7 @@ test('consumeNextFollowUpJob exports the canonical reply env, pre-creates the HQ
 
     let capturedEnv;
     const result = await consumeNextFollowUpJob({
+    execFileSyncImpl: serviceFixtureExec,
     guardStackedBaseImpl: async () => null,
       rootDir,
       promptTemplate: 'Reply path: ${REPLY_PATH}',

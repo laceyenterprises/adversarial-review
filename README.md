@@ -1,5 +1,16 @@
 # Adversarial Review
 
+LAC-2131: native Codex reviewer, discovery and direct remediation homes expose
+OAuth through the CLI-supported file store and fail before provider requests
+when the effective store is unavailable. Config isolation, broker refresh
+ownership and retained remediation sessions remain intact; owned credentials
+are cleaned on exit or terminal reconciliation. Offline tests include dummy
+credentials against the deployed CLI and a supported file-store boundary.
+See the [service-home contract](docs/RUNBOOK-reviewer-workspace.md) and
+[SEV2 RCA](docs/postmortems/SEV2-LAC-2131-codex-service-home-auth-2026-10-30.md).
+Source review/merge, parent pointer, deployment and organic remediation success
+remain separate recovery proofs.
+
 LAC-2127: SQL-origin migration proofs can certify an ancestral filename/metadata
 repair only after verifying every snapshot, monotonic declared revisions, exact
 adjacent ancestry and base-identical predecessor operations. The immutable
@@ -1286,6 +1297,13 @@ CODEXHOMEISO-02 seeds each native spawn with a direct-tools catalog using that
 spawn's binary and staged auth. It removes code-mode routing and search-tool
 advertisements, pins the private catalog in config (and reviewer CLI overrides),
 and logs the path. Catalog failures warn and proceed with the server catalog.
+LAC-2131 requires the selected CLI to recognize ChatGPT auth in the isolated
+file store before catalog retrieval or execution; auth failure uses the existing
+OAuth preflight failure state. Broker refresh stays separate, staging ownership
+is preserved, and matching terminal-worker receipts remove service auth while
+retaining sessions. Dummy-only offline CLI/file-store and serialized-reconcile
+fixtures cover these boundaries. Source review/merge, parent pointer and
+deployment precede the separate organic recovery proof.
 Offline fixtures cover these boundaries and refund behavior. After ordinary deployment,
 SRE observes the next organic remediation's shell execution, re-review request,
 isolated `CODEX_HOME`, config digest and pinned catalog, with no code-mode host

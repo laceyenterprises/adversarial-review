@@ -349,9 +349,23 @@ The persisted accounting fields are:
   outcome. This is service-derived log evidence, never a reply assertion.
 - `remediationWorker.codexHome` and `configDigest`: optional isolated service
   config directory and SHA-256 digest for local Codex spawns. Legacy jobs lack
-  these fields; neither changes auth ownership or grants merge authority.
+  these fields; neither grants merge authority.
   New local spawns always record `codexSessionRoot` as `<codexHome>/sessions`
   and persist session evidence there, independent of credential materialization.
+- `remediationWorker.codexAuthOwnerId`: optional opaque cleanup receipt
+  (LAC-2131), matched against `.service-auth-owner` in that temporary
+  `codexHome`. Only an exited local worker may have its service-owned
+  `auth.json` removed during reconciliation; sessions remain. Missing or
+  mismatched legacy receipts authorize no cleanup. It never owns or deletes
+  the broker/per-worker source credential.
+- `remediationWorker.startupEvidence.resolvedStartup`: local Codex adds
+  `effectiveAuthPath` (`<codexHome>/auth.json`), `authStore: "file"`,
+  `authPreflight: "cli-login-status"` and `refreshOwner: "broker"`.
+  Existing `authPath` records source provenance and can name staging already
+  released by its owner after a successful independent snapshot. These paths,
+  the cleanup receipt and config digest contain no token values. CLI preflight
+  failure raises the existing OAuth failure before a worker is spawned; no
+  unauthenticated worker descriptor is persisted.
 - `remediationPlan.publishedRoundsForPR`: the ledger's count of rounds with
   `publishedHeadSha`, computed when a budget stop is recorded.
   It feeds budget-stop comments and cannot reconstruct historical publications.

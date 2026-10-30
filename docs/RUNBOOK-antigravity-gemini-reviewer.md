@@ -465,6 +465,22 @@ The review command's `--print-timeout` is sized from
 derived print timeout still leaves enough time for AGY to finish a real review;
 if it is raised, the AGY print timeout rises with it.
 
+## Review Provenance Stamp
+
+A posted Antigravity review carries a labelled stamp under its header:
+
+```text
+> Reviewer: harness antigravity · model Gemini 3.8 Flash (High) · effort high
+```
+
+`harness antigravity` means the review ran through `agy`; a direct Gemini CLI
+review stamps `harness gemini-cli`. agy has no separate effort flag, so the
+effort is the thinking level in the configured `reviewer.gemini.model` display
+name. A display name without a parenthesised level, and every Gemini CLI
+review, stamps `effort n/a`. The reviewer pass persists the same value as its
+`reasoning_effort`. See `docs/SPEC-adversarial-review-auto-remediation.md` for
+the stamp shape on every reviewer runtime.
+
 ## Oversized Prompt Fallback
 
 When an Antigravity prompt exceeds the argv budget, the reviewer first tries

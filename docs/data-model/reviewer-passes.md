@@ -116,6 +116,16 @@ execution. Historical metadata may omit this field. Failed resolution carries
 `modelSource=unresolved` on the retryable infrastructure error and log; it does
 not invent a model or successful execution record.
 
+REVIEWPROV-01 makes `reviewerExecution.harness` the runtime that executed the
+review rather than the model family: `claude-code`, `codex`, `antigravity` or
+`gemini-cli`. Historical rows carry `claude`, `codex` or `gemini`. An
+Antigravity Gemini pass now records the thinking level in its agy display-name
+model token (`Gemini 3.8 Flash (High)` gives `high`) as `reasoning_effort` and
+`reviewerExecution.effort`, with `effortSource=model-display-name`; a display
+name without a parenthesised level, and every Gemini CLI pass, keeps a null
+effort with `effortSource=none`. The reviewer pass ceiling reads this effort,
+and only `xhigh` changes it.
+
 REMODELFALLBACK-02 also preserves `modelSource=unresolved` for non-retryable
 configuration refusals naming `host.observations.read`, without a seed warning.
 Only retryable infrastructure failures permit seed defaults. Valid explicit pins

@@ -2881,6 +2881,29 @@ mode must classify the first line exactly: the parenthetical
 absence is enforce mode. The bold advisory disclaimer is human-facing context
 only and is not the primary machine classifier.
 
+When the reviewer knows how the review executed, a provenance stamp follows
+the header as a blockquote line (`src/review-comment-body.mjs`):
+
+```text
+> Reviewer: harness <harness> · model <model> · effort <effort>
+```
+
+- `harness` is the runtime that executed the review, never the model family:
+  `claude-code`, `codex`, `antigravity` (Gemini run through `agy`) or
+  `gemini-cli` (the direct Gemini CLI runtime).
+- `model` is the resolved model token passed to that runtime.
+- `effort` is the reasoning effort or thinking level that was actually
+  requested: the resolved effort for Claude and Codex, and for Antigravity the
+  thinking level in the agy display name (`Gemini 3.8 Flash (High)` gives
+  `high`). It prints `n/a` when the runtime was sent no effort, as for the
+  Gemini CLI runtime.
+
+The stamp is a human-facing provenance line. It is a blockquote, never a
+heading, so the `## Verdict` and `## Blocking issues` parsers are unaffected;
+no machine reader parses it. The same execution record is persisted on the
+reviewer pass (`reviewer_passes.reasoning_effort` and
+`metadata_json.reviewerExecution`).
+
 Advisory-only mode is intentionally not represented as an advisory durable job. `queueFollowUpForPostedReview` short-circuits before job creation, so persisted follow-up records keep `verdict_mode: "enforce"` as an enforcement-carrier compatibility field. Code that needs to know whether a review was advisory should use the reviewer post/header path and the `queueFollowUpForPostedReview` return reason `advisory-only-review`, not infer it from pending job records.
 
 Repeated reviewer no-output timeouts are infrastructure failures, not substantive review rounds. They must not increment the remediation round counter or make the next reviewer pass "final" by themselves. After two timeout-class failures for the same PR head, the watcher may switch to the alternate reviewer model for the next retry only when an operator explicitly opts in (`ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_MODEL=claude|codex`; the default is `off`). Timeout exhaustion is scoped to the head SHA that the timed-out reviewer attempted; a new PR head must not inherit the previous head's timeout budget. If the timeout budget is exhausted after a remediation round completed with `reReview.requested=true`, the watcher must not strand the PR behind a green-ish timeout gate: it routes the head through the same AMA/merge-agent coexistence matrix used by the normal watcher handoff. With AMA disabled, the `reviewer-timeout-exhausted` merge-agent trigger runs unchanged. With AMA enabled, the watcher first tries the AMA closer; true AMA eligibility misses still park at await-operator unless a fresh scoped `merge-agent-requested` event authorizes the operator-fallback lane, but settled AMA launch/status failures recover by dispatching merge-agent with `AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true` so a transient AMA outage does not become a durable manual park. An unresolved `dispatch-status-unknown` probe retains AMA ownership even after its lease expires because the hammer may still be running. The scoped operator-fallback lane requires the request label to remain present on the live candidate (GitHub label objects are normalized to names), no hard-stop label, and no `remediation_pending` row. Because the downstream timeout path still has no fresh review of the post-remediation diff, it parks at `skip-blocking-findings-unknown` unless a scoped `operator-approved` override explicitly accepts the head; standing blockers still park at `skip-blockers-present`. A non-mergeable or checks-blocked PR records a durable skip under `data/follow-up-jobs/merge-agent-skips/` with the timeout trigger so operators see a concrete mergeability/check blocker instead of an ambiguous stalled review.

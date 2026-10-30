@@ -575,6 +575,7 @@
       ],
       "deliveryHeadWaitFields": ["head_wait_started_at"],
       "reviewerExecutionModelSources": ["env-pin", "registry", "committed-seed", "runtime-display-token"],
+      "reviewerExecutionHarnesses": ["claude-code", "codex", "antigravity", "gemini-cli"],
       "claudeReplySelectionFields": ["candidateCount", "selectedCandidate", "selectedType", "laterCandidates", "contractValid"],
       "reviewerSettlementFailureMessage": { "successfulPass": null, "unsuccessfulPassPriority": ["error", "stderr", "stderrTail"] },
       "owner": "reviewer spawn, settle, and token attribution"

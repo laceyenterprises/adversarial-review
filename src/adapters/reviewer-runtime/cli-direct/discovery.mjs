@@ -1,4 +1,4 @@
-import { prepareServiceCodexHome } from '../../../codex-service-home.mjs';
+import { prepareServiceCodexHomeAsync } from '../../../codex-service-home.mjs';
 import { ensureWorkerRegistryReady, resolveRemediationModel } from '../../agent-runtime/local/remediation.mjs';
 import { loadAwareTimeoutMs } from '../../../load-aware-timeout.mjs';
 import { constants } from 'node:fs';
@@ -201,8 +201,10 @@ async function probeCodexCli({
   const model = resolveRemediationModel('codex-reviewer', { env });
   // Preserve the base home's OAuth lookup before redirecting config/session state.
   const authPath = env.CODEX_AUTH_PATH || join(env.CODEX_HOME || join(env.HOME || homedir(), '.codex'), 'auth.json');
-  const home = prepareServiceCodexHome({ env: { ...env, CODEX_AUTH_PATH: authPath }, workspaceDir: cwd,
-    model: model.resolvedModel, effort: model.resolvedReasoningLevel, codexCli, execFileSyncImpl });
+  const home = await prepareServiceCodexHomeAsync({ env: { ...env, CODEX_AUTH_PATH: authPath }, workspaceDir: cwd,
+    model: model.resolvedModel, effort: model.resolvedReasoningLevel, codexCli,
+    // Preserve the explicit fixture seam; production always uses async transport.
+    execFileImpl: execFileSyncImpl ? async (...args) => ({ stdout: execFileSyncImpl(...args) }) : execFileImpl });
   env = home.env;
   const probe = (command, args, options) => {
     console.info(`[codex-service] CODEX_HOME=${home.codexHome} config_sha256=${home.configDigest} model_catalog_json=${home.catalogPath || 'server'} probe=${args.join(' ')}`);

@@ -24,7 +24,7 @@ test('posted review capture persists the harness model and effort through token 
   updateReviewerPassBodyCapture(rootDir, {
     repo: 'laceyenterprises/adversarial-review', prNumber: 42, attemptNumber: 1,
     passKind: 'first-pass', verdict: 'comment-only',
-    bodyMd: '## Adversarial Review — Codex (codex-reviewer-lacey)\n\n> Reviewer: codex · gpt-6-sol · high\n\n## Verdict\nComment only',
+    bodyMd: '## Adversarial Review — Codex (codex-reviewer-lacey)\n\n> Reviewer: harness codex · model gpt-6-sol · effort high\n\n## Verdict\nComment only',
     execution: { harness: 'codex', model: 'gpt-6-sol', effort: 'high' },
   });
   completeReviewerPass(rootDir, {

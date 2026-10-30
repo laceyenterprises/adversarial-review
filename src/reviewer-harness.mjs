@@ -965,7 +965,7 @@ async function reviewWithClaude(diff, extraContext = '', {
   const raw = stdout.trim();
   const parsed = parseClaudeJsonOutput(raw, replySelection ?? undefined);
   return { reviewText: parsed.reviewText, tokenUsage: parsed.tokenUsage,
-    execution: { harness: 'claude', model: reviewerExecution.model, modelSource: reviewerExecution.modelSource, effort: reviewerExecution.effort,
+    execution: { harness: reviewerExecutionHarness('claude'), model: reviewerExecution.model, modelSource: reviewerExecution.modelSource, effort: reviewerExecution.effort,
       replySelection: parsed.replySelection } };
 }
 
@@ -1100,6 +1100,32 @@ function resolveReviewerExecution(harness, { env = process.env, fallbackEffort =
   const effortSource = resolution.resolvedReasoningLevel ? resolution.reasoningSource : (fallbackEffort ? 'host-config' : 'none');
   log.info?.(`[reviewer-harness] ${harness} model=${model} modelSource=${modelSource}; effort=${effort || 'none'} source=${effortSource}`);
   return { model, effort, modelSource, effortSource };
+}
+
+// REVIEWPROV-01: the review stamp names the runtime that executed the review,
+// never the model family. One table so the reviewer families cannot drift.
+const REVIEWER_EXECUTION_HARNESSES = Object.freeze({
+  claude: 'claude-code',
+  codex: 'codex',
+  'gemini:antigravity': 'antigravity',
+  'gemini:cli': 'gemini-cli',
+});
+
+function reviewerExecutionHarness(family, runtime = null) {
+  const key = family === 'gemini' ? `gemini:${runtime}` : family;
+  const harness = REVIEWER_EXECUTION_HARNESSES[key];
+  if (!harness) throw new Error(`Unknown reviewer execution harness: ${key}`);
+  return harness;
+}
+
+// agy has no effort flag: the thinking level is the display-name suffix it is
+// asked for (`Gemini 3.8 Flash (High)` -> `high`). The gemini CLI receives no
+// thinking level at all, so its effort is null (rendered `n/a`).
+function geminiRequestedThinkingLevel(model, runtime) {
+  if (runtime !== 'antigravity') return null;
+  const match = /\(([^()]+)\)\s*$/u.exec(String(model || ''));
+  const effort = match?.[1].trim().toLowerCase();
+  return ['low', 'medium', 'high', 'xhigh'].includes(effort) ? effort : null;
 }
 
 // Readiness is process-local and refreshes on expiry before any sync selection.
@@ -1329,7 +1355,7 @@ async function reviewWithCodex(diff, extraContext = '', {
             timeoutMs: resolveReviewerTimeoutMs(env),
             idleTimeoutMs: Math.max(resolveProgressTimeoutMs(env), 3 * 60 * 1000),
           });
-          return { ...recovered, execution: { harness: 'codex', model: codexExecOverrides.model, modelSource: codexExecOverrides.modelSource, effort: reasoningEffort } };
+          return { ...recovered, execution: { harness: reviewerExecutionHarness('codex'), model: codexExecOverrides.model, modelSource: codexExecOverrides.modelSource, effort: reasoningEffort } };
         } catch (fallbackErr) {
           throw new Error(
             `Native Codex made no progress and OAuth Responses recovery failed: `
@@ -1394,7 +1420,7 @@ async function reviewWithCodex(diff, extraContext = '', {
     return {
       reviewText: combined,
       tokenUsage,
-      execution: { harness: 'codex', model: codexExecOverrides.model, modelSource: codexExecOverrides.modelSource, effort: codexExecOverrides.reasoningEffort },
+      execution: { harness: reviewerExecutionHarness('codex'), model: codexExecOverrides.model, modelSource: codexExecOverrides.modelSource, effort: codexExecOverrides.reasoningEffort },
     };
   } finally {
     // Always remove the codex temp file — including when spawnCodexReview throws
@@ -3063,8 +3089,10 @@ async function reviewWithGemini(diff, extraContext = '', {
     : reviewPayload;
   if (!reviewText.trim()) throw new Error('Gemini returned empty response.');
 
+  const effort = geminiRequestedThinkingLevel(selectedModel, runtime);
   return { reviewText, tokenUsage: geminiUsage,
-    execution: { harness: 'gemini', model: selectedModel, modelSource: selectedModelSource, effort: null } };
+    execution: { harness: reviewerExecutionHarness('gemini', runtime), model: selectedModel, modelSource: selectedModelSource,
+      effort, effortSource: effort ? 'model-display-name' : 'none' } };
 }
 
 // ── Reviewer-model selection ──────────────────────────────────────────────────
@@ -3853,6 +3881,8 @@ const __test__ = {
   resolveCodexExecOverrides,
   resolveReviewerExecution,
   resolveReviewerExecutionAsync,
+  reviewerExecutionHarness,
+  geminiRequestedThinkingLevel,
   resolveCqpBrokerConfig,
   resolveGeminiAntigravityModel,
   resolveGeminiCheckoutConflictBackoffMs,

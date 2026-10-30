@@ -133,6 +133,13 @@ function sanitizeAckCommentText(value, maxChars = 500) {
   return `${escapedHeadings.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`;
 }
 
+// An explicit request that coalesced onto a pending row still holds a pending
+// exact-head intent, so it is queued even though the row was not reset.
+function rereviewQueued(rereviewResult) {
+  return rereviewResult?.triggered === true
+    || (rereviewResult?.status === 'already-pending' && rereviewResult?.explicitReviewIntent?.state === 'pending');
+}
+
 function buildAckCommentBody({
   labelEventKey,
   labelEventActor,
@@ -142,8 +149,7 @@ function buildAckCommentBody({
   const marker = buildAckCommentMarker(labelEventKey);
   const safeActor = sanitizeAckCommentText(labelEventActor || 'unknown', 120) || 'unknown';
   const safeReason = reason ? sanitizeAckCommentText(reason, 500) : null;
-  const triggered = rereviewResult?.triggered === true
-    || (rereviewResult?.status === 'already-pending' && rereviewResult?.explicitReviewIntent?.state === 'pending');
+  const triggered = rereviewQueued(rereviewResult);
   const rerunReason = rereviewResult?.reason || (triggered ? 'review-status-reset' : 'unknown');
   const lines = [
     `<!-- ${marker} -->`,
@@ -725,8 +731,7 @@ export async function tryRetriggerReviewFromLabel({
         labelEventActor,
         reason,
         rereviewResult: {
-          triggered: rereviewResult?.triggered === true
-            || (rereviewResult?.status === 'already-pending' && rereviewResult?.explicitReviewIntent?.state === 'pending'),
+          triggered: rereviewQueued(rereviewResult),
           status: rereviewResult?.status || null,
           reason: rereviewResult?.reason || null,
         },
@@ -739,11 +744,12 @@ export async function tryRetriggerReviewFromLabel({
   };
   writeLabelConsumption(rootDir, labelEventKey, consumption);
 
+  const queued = rereviewQueued(rereviewResult);
   return {
-    outcome: rereviewResult?.triggered
+    outcome: queued
       ? 'review-retriggered'
       : `noop:${rereviewResult?.reason || 'unknown'}`,
-    detail: rereviewResult?.triggered
+    detail: queued
       ? 'explicit re-review queued within the bounded dispatch window'
       : `review row not reset: ${rereviewResult?.reason || 'unknown'}`,
     rereviewResult,

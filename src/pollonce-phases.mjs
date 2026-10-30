@@ -816,16 +816,9 @@ export async function processReviewSubject(entry, ctx) {
         repo: repoPath, prNumber, headSha: subject.headSha,
       });
       // Observe the deadline even while every reviewer seat/credential is held.
-      await reconcileExplicitRequests();
-      if (db.prepare(`SELECT 1 FROM explicit_review_intents
-          WHERE repo = ? AND pr_number = ? AND state = 'pending' LIMIT 1`).get(repoPath, prNumber)) {
-        try {
-          const live = await fetchPullRequestHeadAndState(repoPath, prNumber, { execFileImpl: execFileAsync });
-          await reconcileExplicitRequests(live.headRefOid || null, live.state !== 'open' || Boolean(live.mergedAt));
-        } catch (error) {
-          console.warn(`[watcher] explicit re-review freshness deferred for ${repoPath}#${prNumber}: ${error.message}`);
-        }
-      }
+      // No per-tick GitHub read: head movement is reconciled against the live
+      // freshness read when dispatch is evaluated, or by the deadline.
+      await reconcileExplicitRequests(null, Boolean(subject.terminal));
       if (!subject.terminal) observeReviewLane({});
       // Drafts are intentional waits. Persist discovery evidence so they do
       // not inflate either spill lane, including a PR converted back to draft.
@@ -3165,9 +3158,9 @@ export async function processReviewSubject(entry, ctx) {
       const preflightInputs = () => {
         const ledger = summarizePRRemediationLedger(ROOT, { repo: repoPath, prNumber });
         const completedRemediationRounds = Math.max(0, Number(ledger.completedRoundsForPR) || 0);
-        const passKind = explicitIntentForHead() ? 'rereview' : reviewerSafetyPassKind({ current, hasPriorPostedReview: dispatchHasPriorPostedReview,
+        const passKind = reviewerSafetyPassKind({ current, hasPriorPostedReview: dispatchHasPriorPostedReview,
           hasPriorCompletedReview: Boolean(stmtHasCompletedReview.get(repoPath, prNumber)), completedRemediationRounds });
-        return { passKind };
+        return { passKind: explicitIntentForHead() ? 'rereview' : passKind };
       };
       const preflightTasks = () => ({
         freshness: () => fetchPullRequestHeadAndState(repoPath, prNumber, { execFileImpl: execFileAsync }),
@@ -3895,12 +3888,14 @@ export async function processReviewSubject(entry, ctx) {
               }
             }
             if (passKind === 'rereview') {
-              const explicitOperatorReviewRetrigger = !forcedReviewIntent && isExplicitOperatorReviewRetrigger(current);
+              // A durable explicit intent is subject to the normal ceilings, so
+              // its operator marker only bypasses closer-head suppression.
+              const explicitOperatorReviewRetrigger = isExplicitOperatorReviewRetrigger(current);
               const orphanHeadReview = isOrphanHeadReviewRequested(current, reviewerHeadSha);
               const handoffReviewBypass = !forcedReviewIntent && (orphanHeadReview || hammerHandoffReviewBypass({ db, rootDir: ROOT, repo: repoPath,
                 prNumber, headSha: reviewerHeadSha, row: current }));
               const closerHead = await readPreflight('closer');
-              if (closerHead?.suppressed && !isExplicitOperatorReviewRetrigger(current) && !orphanHeadReview && !handoffReviewBypass) {
+              if (closerHead?.suppressed && !explicitOperatorReviewRetrigger && !orphanHeadReview && !handoffReviewBypass) {
                 console.log(
                   `[watcher] Skipping re-review for ${repoPath}#${prNumber}: head ` +
                   `${String(reviewerHeadSha || '').slice(0, 12)} is a terminal closer commit ` +
@@ -3940,7 +3935,7 @@ export async function processReviewSubject(entry, ctx) {
               if (
                 !skipReviewerSpawnReason &&
                 priorReviewCount >= hardReviewCeiling &&
-                !explicitOperatorReviewRetrigger &&
+                (forcedReviewIntent || !explicitOperatorReviewRetrigger) &&
                 !fleetSelfRepairTrailerOnlyBypass && !handoffReviewBypass
               ) {
                 console.log(
@@ -3968,7 +3963,7 @@ export async function processReviewSubject(entry, ctx) {
               if (
                 !skipReviewerSpawnReason
                 && priorReviewAttemptCount >= hardReviewAttemptCeiling
-                && !explicitOperatorReviewRetrigger
+                && (forcedReviewIntent || !explicitOperatorReviewRetrigger)
                 && !fleetSelfRepairTrailerOnlyBypass && !handoffReviewBypass
               ) {
                 console.log(

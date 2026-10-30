@@ -189,3 +189,15 @@ test('RETRIGGERDEDUP-01: the rescue rereview mutation records the same durable i
   assert.equal((await dedup(f.intent())).alreadyReviewed, false);
   assert.equal(claimAndConsume(f, f.intent()), true);
 });
+
+test('RETRIGGERDEDUP-01: a label coalescing onto a pending intent reports a queued retrigger', async t => {
+  const f = fixture(t);
+  assert.equal(f.request().triggered, true);
+  const accepted = await tryRetriggerReviewFromLabel({ rootDir: f.rootDir, repo, prNumber, revisionRef: headSha,
+    labelActor: 'fixture-operator', labelEvent: { id: 'fixture-coalesced-event', actor: 'fixture-operator', createdAt: new Date().toISOString() },
+    execFileImpl: async () => ({ stdout: '', stderr: '' }), appendAuditRow() {}, findAuditRow() { return null; }, logger: quiet });
+  assert.equal(accepted.rereviewResult.status, 'already-pending');
+  assert.equal(accepted.rereviewResult.explicitReviewIntent.request_id, 'request-one');
+  assert.equal(accepted.outcome, 'review-retriggered');
+  assert.equal(accepted.detail, 'explicit re-review queued within the bounded dispatch window');
+});

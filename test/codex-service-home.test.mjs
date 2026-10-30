@@ -5,11 +5,11 @@ import { EventEmitter } from 'node:events';
 import { materializePerWorkerCodexAuth, prepareCorporateCodexReviewerAuth } from '../src/codex-per-worker-auth.mjs';
 import { spawnCodexRemediationWorker, waitForLocalRemediationExit } from '../src/adapters/agent-runtime/local/remediation.mjs';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cleanupServiceCodexAuth, prepareServiceCodexHome } from '../src/codex-service-home.mjs';
+import { cleanupServiceCodexAuth, prepareServiceCodexHome, serviceCodexConfigArgs } from '../src/codex-service-home.mjs';
 import { probeCodexCli } from '../src/adapters/reviewer-runtime/cli-direct/discovery.mjs';
 import { dummyCodexAuth, serviceFixtureExec, writeDummyCodexAuth } from './helpers/codex-service-fixture.mjs';
 
@@ -404,4 +404,45 @@ test('corporate reviewer discovery consumes its broker-staged credential in an i
     assert.ok(existsSync(f.authPath));
     f.cleanup();
   }
+});
+
+for (const code of ['ENOENT', 'EACCES']) {
+  test(`CLI launch failure ${code} is an infrastructure error, not an OAuth rejection`, () => {
+    const f = fixture();
+    let isolatedHome;
+    try {
+      assert.throws(() => prepare(f, { execFileSyncImpl(_cmd, args, { env }) {
+        isolatedHome = env.CODEX_HOME;
+        assert.deepEqual(args, ['login', 'status']);
+        throw Object.assign(new Error(`spawn /fixture/codex ${code}`), { code });
+      } }), error => error.name === 'CodexLaunchError' && error.code === code
+        && error.failureClass === 'infrastructure' && !/fixture\/codex/.test(error.message));
+      if (isolatedHome) assert.equal(existsSync(isolatedHome), false);
+    } finally { f.cleanup(); }
+  });
+}
+
+test('cleanupServiceCodexAuth removes owned auth through a symlinked home path', () => {
+  // A reconciling daemon may see the home through a different alias (for
+  // example /tmp versus /private/tmp, or another TMPDIR spelling).
+  const f = fixture();
+  const home = prepare(f);
+  const aliasRoot = mkdtempSync(join(tmpdir(), 'service-home-alias-'));
+  try {
+    const alias = join(aliasRoot, 'alias-home');
+    symlinkSync(home.codexHome, alias);
+    assert.ok(existsSync(home.authPath));
+    assert.equal(cleanupServiceCodexAuth({ codexHome: alias, codexAuthOwnerId: 'another-owner' }), false);
+    assert.ok(existsSync(home.authPath));
+    assert.equal(cleanupServiceCodexAuth({ codexHome: alias, codexAuthOwnerId: home.codexAuthOwnerId }), true);
+    assert.equal(existsSync(home.authPath), false);
+    assert.ok(existsSync(f.authPath));
+  } finally { home.cleanup(); rmSync(aliasRoot, { recursive: true, force: true }); f.cleanup(); }
+});
+
+test('reviewer CLI overrides pin the file credential store under --ignore-user-config', () => {
+  const args = serviceCodexConfigArgs();
+  const values = args.filter((_, index) => index % 2 === 1);
+  assert.ok(args.every((arg, index) => index % 2 === 1 || arg === '--config'));
+  assert.ok(values.includes('cli_auth_credentials_store="file"'));
 });

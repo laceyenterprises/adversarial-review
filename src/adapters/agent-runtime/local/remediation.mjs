@@ -795,7 +795,8 @@ function prepareCodexRemediationStartupEnv({
   try {
     const authPath = perWorkerAuth?.authPath || sharedAuthPath;
     const authHome = perWorkerAuth?.home || resolveCodexAuthHome(authPath);
-    const authOwner = perWorkerAuth ? authHome.split('/').filter(Boolean).at(-1) : resolveCodexAuthOwner(authPath);
+    const authOwner = resolveCodexAuthOwner(sharedAuthPath);
+    const sourceAuthHome = resolveCodexAuthHome(sharedAuthPath);
     const codexHome = dirname(authPath);
     const strippedEnv = [];
     const overriddenGitEnv = [];
@@ -810,10 +811,10 @@ function prepareCodexRemediationStartupEnv({
         resolvedValue: sourceEnv.CODEX_AUTH_PATH,
       }));
     }
-    if ((sourceEnv.HOME || homedir()) && resolve(sourceEnv.HOME || homedir()) !== resolve(authHome)) {
+    if ((sourceEnv.HOME || homedir()) && resolve(sourceEnv.HOME || homedir()) !== resolve(sourceAuthHome)) {
       policyViolations.push(buildCodexStartupPolicyViolation({
         reason: 'inherited HOME does not satisfy the requested local OAuth owner contract',
-        requestedValue: authHome,
+        requestedValue: sourceAuthHome,
         resolvedValue: sourceEnv.HOME || homedir(),
       }));
     }

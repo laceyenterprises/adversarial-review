@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { PER_WORKER_PLACEHOLDER_REFRESH_TOKEN } from './codex-per-worker-auth.mjs';
@@ -11,7 +11,8 @@ const template = readFileSync(new URL('./codex-service-config.toml', import.meta
 function runServiceCodexCommand(command, args, options) {
   if (args[0] !== 'login') return execFileSync(command, args, options);
   const result = spawnSync(command, args, options);
-  if (result.error || result.status !== 0) throw serviceAuthError();
+  if (result.error) throw serviceLaunchError(result.error) || serviceAuthError();
+  if (result.status !== 0) throw serviceAuthError();
   return `${result.stdout || ''}\n${result.stderr || ''}`;
 }
 
@@ -88,8 +89,8 @@ export function prepareServiceCodexHome({ env, workspaceDir, model, effort = nul
       // The default runner captures both stdout and stderr: deployed Codex
       // prints its successful status on stderr.
       if (!/Logged in using ChatGPT\b/i.test(status)) throw serviceAuthError();
-    } catch {
-      throw serviceAuthError();
+    } catch (error) {
+      throw serviceLaunchError(error) || serviceAuthError();
     }
     let catalogPath = null;
     let stage = 'fetch';
@@ -145,12 +146,12 @@ export function prepareServiceCodexHome({ env, workspaceDir, model, effort = nul
 export function cleanupServiceCodexAuth(worker = {}) {
   const codexHome = worker?.codexHome;
   const codexAuthOwnerId = worker?.codexAuthOwnerId;
-  if (!codexHome || !codexAuthOwnerId
-    || !basename(codexHome).startsWith('adversarial-codex-')
-    || resolve(dirname(codexHome)) !== resolve(tmpdir())) return false;
+  if (!codexHome || !codexAuthOwnerId) return false;
   try {
-    if (readFileSync(join(codexHome, '.service-auth-owner'), 'utf8') !== codexAuthOwnerId) return false;
-    rmSync(join(codexHome, 'auth.json'), { force: true });
+    const ownedHome = realpathSync(codexHome);
+    if (!basename(ownedHome).startsWith('adversarial-codex-')
+      || readFileSync(join(ownedHome, '.service-auth-owner'), 'utf8') !== codexAuthOwnerId) return false;
+    rmSync(join(ownedHome, 'auth.json'), { force: true });
     return true;
   } catch { return false; }
 }
@@ -161,5 +162,14 @@ function serviceAuthError() {
   error.isOAuthError = true;
   error.model = 'codex';
   error.failureClass = 'oauth-broken';
+  return error;
+}
+
+function serviceLaunchError(cause) {
+  if (!['ENOENT', 'EACCES'].includes(cause?.code)) return null;
+  const error = new Error(`Codex service CLI could not launch (${cause.code})`);
+  error.name = 'CodexLaunchError';
+  error.code = cause.code;
+  error.failureClass = 'infrastructure';
   return error;
 }

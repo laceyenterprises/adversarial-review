@@ -786,11 +786,35 @@ test('codex remediation startup violations report the shared path the guard test
       cleanup: () => { cleaned += 1; },
     }),
   }), (error) => {
+    // HOME is validated against the shared credential owner's home, never the
+    // freshly materialized staging home (LAC-2131 review finding).
     assert.deepEqual(error.startupEvidence.policy_violations.map((item) => item.requested_value),
-      ['/Users/operator/.codex']);
+      ['/Users/operator', '/Users/operator/.codex']);
     return true;
   });
   assert.equal(cleaned, 1);
+});
+
+test('corporate codex remediation accepts the operator HOME while auth is staged elsewhere', () => {
+  // Corp staging lives outside the operator home; the inherited HOME, CODEX_HOME
+  // and CODEX_AUTH_PATH still describe the shared store and must pass the gate.
+  let cleaned = 0;
+  const { startupEvidence } = prepareCodexRemediationStartupEnv({
+    workerClass: 'remediator-codex-corp',
+    sourceEnv: {
+      CODEX_AUTH_PATH: '/Users/operator/.codex/auth.json',
+      CODEX_HOME: '/Users/operator/.codex',
+      HOME: '/Users/operator',
+    },
+    materializePerWorkerCodexAuthImpl: () => ({
+      authPath: '/stage/remediation-x/.codex/auth.json',
+      home: '/stage/remediation-x',
+      cleanup: () => { cleaned += 1; },
+    }),
+  });
+  assert.deepEqual(startupEvidence.policy_violations, []);
+  assert.equal(startupEvidence.resolvedStartup.resolvedAuthOwner, 'operator');
+  assert.equal(cleaned, 0);
 });
 
 test('local remediation cancel ignores process exit races after identity verification', async () => {

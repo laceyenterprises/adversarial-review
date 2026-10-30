@@ -1717,7 +1717,7 @@
     "src/reviewer-ci-admission.mjs": "258c3a6d1089cb5d4a525f0b6a0836f979a79b27f6305895357180e18141fdbf",
     "src/reviewer-reattach.mjs": "c52dcf0ea186716725d5916c0be5de3619cd44e011c5c06bf4999877369ebd39",
     "src/reviewer.mjs": "10b8e5b50611cebbcffabc5e5709ffcbf33ed856f469c2a946ed14d72c775e88",
-    "src/watcher.mjs": "749c4ccc3a49eec658adca4989ee337358887e1edc25d77a92ee2019104b6ec5",
+    "src/watcher.mjs": "27f3e8901815677a48f01bd417d42b767f82653832ccd8fb90a8384eb2437e65",
     "src/adapters/reviewer-runtime/fixture-stub/index.mjs": "551075e64dc0fba15d5411f1d79297bedec2d3e17accecc5c496c04dab3e26ad",
     "src/ama/gsr-closer-lease.mjs": "fea38cdec29edd83201cacbd0fb4134ac4f79156d98a385e647615b45406bff2"
   },

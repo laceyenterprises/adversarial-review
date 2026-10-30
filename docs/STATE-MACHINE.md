@@ -17,6 +17,11 @@ Current-name replay is a no-op; reused names with new IDs remain distinct.
 See [the identity contract](data-model/repository-identities.md) and
 [operator verification](review-pipeline-health.md#repository-renames-reporename-01).
 Existing smoke promises and exact-head merge authority remain unchanged.
+Final remediation quarantines conflicting repositories during discovery while
+unrelated intake continues at the ordinary refresh cadence. Reviewer BUSY exits
+release their existing claim without consuming an attempt. Reviewed the watcher
+producer projection and refreshed its fingerprint; lifecycle states and
+transitions remain unchanged.
 
 SIZEOWNER-02: terminal `reviewer-prompt-too-large` and
 `reviewer-chunk-budget-exceeded` still settle to `failed`, never `pending`.

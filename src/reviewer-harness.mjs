@@ -1136,6 +1136,7 @@ function buildCodexReviewArgs({
   modelProvider = null,
   configOverrides = null,
   persistSession = false,
+  modelCatalogPath = null,
 }) {
   const args = [
     'exec',
@@ -1153,6 +1154,7 @@ function buildCodexReviewArgs({
     if (!override?.key) continue;
     args.push('--config', formatCodexConfigOverride(override));
   }
+  if (modelCatalogPath) args.push('--config', `model_catalog_json=${JSON.stringify(modelCatalogPath)}`);
   args.push(
     '--output-last-message',
     outputPath,
@@ -1190,13 +1192,15 @@ async function spawnCodexReview({
   spawnCapturedImpl = spawnCaptured,
   onStdoutData,
   serviceHome = null,
+  execFileSyncImpl,
 }) {
-  const home = serviceHome || prepareServiceCodexHome({ env, workspaceDir: cwd, model,
+  const home = serviceHome || prepareServiceCodexHome({ env, workspaceDir: cwd, model, codexCli, execFileSyncImpl,
     effort: configOverrides?.find((item) => item.key === 'model_reasoning_effort')?.value });
   try {
     return await spawnCapturedImpl(
       codexCli,
-      buildCodexReviewArgs({ outputPath, prompt, model, modelProvider, configOverrides, persistSession }),
+      buildCodexReviewArgs({ outputPath, prompt, model, modelProvider, configOverrides, persistSession,
+        modelCatalogPath: home.catalogPath }),
       {
         env: { ...env, CODEX_HOME: home.codexHome },
         cwd,
@@ -1226,6 +1230,7 @@ async function reviewWithCodex(diff, extraContext = '', {
   codexCli = CODEX_CLI,
   assertCodexOAuthImpl = assertCodexOAuth,
   spawnCodexReviewImpl = spawnCodexReview,
+  execFileSyncImpl,
   reviewWithCodexOAuthResponsesImpl = reviewWithCodexOAuthResponses,
   log = console,
 } = {}) {
@@ -1265,7 +1270,13 @@ async function reviewWithCodex(diff, extraContext = '', {
   const outputPath = join(tmpdir(), `codex-review-${process.pid}-${Date.now()}.md`);
   await ensureWorkerRegistryReadyImpl({pin: modelPin});
   const codexExecOverrides = resolveCodexExecOverrides({ modelPin, reasoningPin, log });
-  const serviceHome = prepareServiceCodexHome({ env: process.env, workspaceDir: reviewerSubprocessCwd,
+  const { env } = scrubOAuthFallbackEnv({
+    ...process.env,
+    PATH: '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+    CODEX_AUTH_PATH: effectiveAuthPath,
+    HOME: process.env.HOME || homedir(),
+  });
+  const serviceHome = prepareServiceCodexHome({ env, workspaceDir: reviewerSubprocessCwd, codexCli, execFileSyncImpl,
     model: codexExecOverrides.model, effort: codexExecOverrides.reasoningEffort, log });
   try {
     const codexSessionHome = serviceHome.codexHome;
@@ -1274,14 +1285,7 @@ async function reviewWithCodex(diff, extraContext = '', {
     onProgress?.({ changedLines, effort });
     const startedAt = new Date().toISOString();
 
-    const { env } = scrubOAuthFallbackEnv({
-      ...process.env,
-      PATH: '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
-      CODEX_AUTH_PATH: effectiveAuthPath,
-      CODEX_HOME: serviceHome.codexHome,
-      HOME: process.env.HOME || homedir(),
-    });
-    const subprocessEnv = withReviewerSubprocessCwdEnv(env, reviewerSubprocessCwd);
+    const subprocessEnv = withReviewerSubprocessCwdEnv(serviceHome.env, reviewerSubprocessCwd);
 
     let stdout = '';
     let stderr = '';

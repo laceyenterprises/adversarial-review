@@ -147,6 +147,7 @@ try {
   const fixtureBin = path.join(sandboxRoot, 'fixture-bin');
   mkdirSync(fixtureBin);
   writeFileSync(path.join(fixtureBin, 'gh'), '#!/bin/sh\necho "offline fixture: inject a GitHub executor or fake gh" >&2\nexit 78\n', { mode: 0o755 });
+  writeFileSync(path.join(fixtureBin, 'codex'), '#!/bin/sh\necho "offline fixture: inject a catalog executor or fake codex" >&2\nexit 78\n', { mode: 0o755 });
   // Home-derived defaults must not be bypassed by inherited auth/session or
   // config paths. Worker run-as users also belong to fixtures, not the host.
   // Refresh commands can mint credentials too, and a known expiry lets a closer

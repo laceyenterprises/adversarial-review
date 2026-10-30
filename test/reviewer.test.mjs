@@ -3249,7 +3249,7 @@ test('Codex review invocation uses the reviewer snapshot cwd and passes prompt a
   const outputPath = '/tmp/codex-last-message.md';
 
   await spawnCodexReview({
-    codexCli: '/usr/local/bin/codex',
+    codexCli: '/fixture/codex',
     outputPath,
     prompt,
     model: 'gpt-5.4',
@@ -3273,7 +3273,7 @@ test('Codex review invocation uses the reviewer snapshot cwd and passes prompt a
   delete calls[0].options.env.CODEX_HOME;
   assert.deepEqual(calls, [
     {
-      command: '/usr/local/bin/codex',
+      command: '/fixture/codex',
       args: buildCodexReviewArgs({
         outputPath,
         prompt,

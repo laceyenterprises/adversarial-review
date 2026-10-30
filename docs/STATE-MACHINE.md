@@ -166,6 +166,11 @@ isolated config homes, with unchanged auth, model pins and approval/sandbox
 envelopes. See [the workspace runbook](RUNBOOK-reviewer-workspace.md) and
 [refund evidence contract](data-model/follow-up-jobs.md#infrastructure-round-refunds-remrefund-01).
 
+CODEXHOMEISO-02 adds a per-spawn direct-tools catalog to those isolated homes
+after auth staging, with reviewer CLI overrides retaining the pin under
+`--ignore-user-config`. Fetch/parse/pin failures log and retain the server
+catalog; tool-host timeout classification and refund transitions are unchanged.
+
 ## Evidence-only completion (REVIEWEVIDENCE-01)
 
 The existing `in_progress -> completed` follow-up transition now also accepts a

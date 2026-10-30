@@ -193,6 +193,7 @@ async function probeCodexCli({
   timeout = loadAwareTimeoutMs(30_000),
   execFileImpl = execFileAsync,
   requireMcpOAuth = false,
+  execFileSyncImpl,
   ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
 } = {}) {
   const codexCli = await resolveCliBinary({ binaryName: 'codex', envVar: 'CODEX_CLI', env });
@@ -201,10 +202,10 @@ async function probeCodexCli({
   // Preserve the base home's OAuth lookup before redirecting config/session state.
   const authPath = env.CODEX_AUTH_PATH || join(env.CODEX_HOME || join(env.HOME || homedir(), '.codex'), 'auth.json');
   const home = prepareServiceCodexHome({ env: { ...env, CODEX_AUTH_PATH: authPath }, workspaceDir: cwd,
-    model: model.resolvedModel, effort: model.resolvedReasoningLevel });
+    model: model.resolvedModel, effort: model.resolvedReasoningLevel, codexCli, execFileSyncImpl });
   env = home.env;
   const probe = (command, args, options) => {
-    console.info(`[codex-service] CODEX_HOME=${home.codexHome} config_sha256=${home.configDigest} probe=${args.join(' ')}`);
+    console.info(`[codex-service] CODEX_HOME=${home.codexHome} config_sha256=${home.configDigest} model_catalog_json=${home.catalogPath || 'server'} probe=${args.join(' ')}`);
     return runProbe(command, args, options);
   };
   try {

@@ -1282,9 +1282,14 @@ isolated reviewed config homes with existing auth/model/security contracts.
 Discovery retains the base OAuth path, local sessions persist independently of
 credential materialization, and HQ log classification uses worker class. Missing
 worker records defer refunds; reviewer preparation errors clean service homes.
+CODEXHOMEISO-02 seeds each native spawn with a direct-tools catalog using that
+spawn's binary and staged auth. It removes code-mode routing and search-tool
+advertisements, pins the private catalog in config (and reviewer CLI overrides),
+and logs the path. Catalog failures warn and proceed with the server catalog.
 Offline fixtures cover these boundaries and refund behavior. After ordinary deployment,
 SRE observes the next organic remediation's shell execution, re-review request,
-isolated `CODEX_HOME` and config digest; publication is not that live receipt.
+isolated `CODEX_HOME`, config digest and pinned catalog, with no code-mode host
+errors; publication is not that live receipt.
 See [the workspace runbook](docs/RUNBOOK-reviewer-workspace.md). No new smoke
 command or CI check is added.
 

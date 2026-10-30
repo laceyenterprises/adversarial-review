@@ -3404,6 +3404,66 @@ test('prepareWorkspaceForJob does not pre-create remediation-reply.json in the w
   );
 });
 
+for (const fetchFails of [false, true]) {
+  test(`Codex remediation catalog seeding precedes spawn and fails open (fetchFails=${fetchFails})`, () => {
+    const workspaceDir = mkdtempSync(path.join(tmpdir(), 'remediation-catalog-fixture-'));
+    const authDir = path.join(workspaceDir, '.codex');
+    const authPath = path.join(authDir, 'auth.json');
+    const promptPath = path.join(workspaceDir, 'prompt.md');
+    mkdirSync(authDir);
+    writeFileSync(authPath, JSON.stringify({ tokens: { access_token: 'synthetic-access' } }));
+    writeFileSync(promptPath, 'Synthetic remediation prompt.\n');
+    const logs = [];
+    const warnings = [];
+    let seededHome;
+    let spawned = false;
+    try {
+      const worker = spawnCodexRemediationWorker({
+        workspaceDir, promptPath, outputPath: path.join(workspaceDir, 'output.md'),
+        logPath: path.join(workspaceDir, 'worker.log'), ...testReplyContext(),
+        enforceHarnessIdentity: false,
+        sourceEnv: { HOME: workspaceDir, CODEX_HOME: authDir, CODEX_AUTH_PATH: authPath,
+          CODEX_CLI_PATH: '/fixture/spawn-codex', PATH: process.env.PATH },
+        modelResolution: { resolvedModel: 'fixture-model', resolvedReasoningLevel: 'high' },
+        log: { info: line => logs.push(line), warn: line => warnings.push(line) },
+        execFileSyncImpl(command, args, { env }) {
+          assert.equal(command, '/fixture/spawn-codex');
+          assert.deepEqual(args, ['debug', 'models']);
+          assert.equal(env.CODEX_AUTH_PATH, authPath);
+          seededHome = env.CODEX_HOME;
+          assert.notEqual(seededHome, authDir);
+          assert.equal(existsSync(path.join(seededHome, 'auth.json')), false);
+          if (fetchFails) throw Object.assign(new Error('synthetic outage'), { code: 'ETIMEDOUT' });
+          return JSON.stringify({ models: [{ slug: 'fixture-model',
+            tool_mode: 'code_mode_only', supports_search_tool: true, context_window: 120000 }] });
+        },
+        spawnImpl(command, _args, { env }) {
+          spawned = true;
+          assert.equal(command, '/fixture/spawn-codex');
+          assert.equal(env.CODEX_HOME, seededHome);
+          const config = readFileSync(path.join(seededHome, 'config.toml'), 'utf8');
+          const catalogPath = path.join(seededHome, 'model-catalog.direct-tools.json');
+          if (fetchFails) assert.doesNotMatch(config, /model_catalog_json/);
+          else {
+            assert.ok(config.startsWith(`model_catalog_json = ${JSON.stringify(catalogPath)}\n`));
+            assert.deepEqual(JSON.parse(readFileSync(catalogPath, 'utf8')),
+              { models: [{ slug: 'fixture-model', context_window: 120000 }] });
+          }
+          return { pid: 999, unref() {} };
+        },
+      });
+      assert.equal(spawned, true);
+      assert.equal(worker.codexHome, seededHome);
+      assert.equal(worker.startupEvidence.resolvedStartup.configDigest, worker.configDigest);
+      assert.equal(warnings.filter(line => line.includes('direct-tools catalog not pinned')).length, fetchFails ? 1 : 0);
+      assert.ok(logs.some(line => line.includes(`model_catalog_json=${fetchFails ? 'server' : path.join(seededHome, 'model-catalog.direct-tools.json')}`)));
+    } finally {
+      if (seededHome) rmSync(seededHome, { recursive: true, force: true });
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
+  });
+}
+
 test('spawnCodexRemediationWorker sets WORKER_CLASS / WORKER_JOB_ID / WORKER_RUN_AT in spawn env', () => withAgentOsShimRoot(makeFakeAgentOsShimRoot(), () => {
   const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const promptPath = path.join(workspaceDir, 'prompt.md');

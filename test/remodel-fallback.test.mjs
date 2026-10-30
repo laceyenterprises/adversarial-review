@@ -209,6 +209,8 @@ for (const [reviewer, recovery, available] of [
     } else {
       result = await harness.reviewWithCodex('+synthetic diff', '', {
         log: f.log, codexCli: process.execPath, assertCodexOAuthImpl: async () => {},
+        execFileSyncImpl: () => JSON.stringify({ models: [{ slug: expected,
+          tool_mode: 'code_mode_only', supports_search_tool: true }] }),
         spawnCodexReviewImpl: async ({ model }) => {
           invoked++;
           assert.equal(model, expected);

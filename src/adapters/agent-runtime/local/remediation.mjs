@@ -1130,6 +1130,7 @@ function spawnCodexRemediationWorker({
   log = console,
   jobId = null,
   modelResolution: requestedModelResolution = null,
+  execFileSyncImpl,
   spawnImpl,
   sourceEnv = process.env,
   now = () => new Date().toISOString(),
@@ -1173,7 +1174,7 @@ function spawnCodexRemediationWorker({
     reasoningPin: codexReasoningPin(env),
     log,
   });
-  const serviceHome = prepareServiceCodexHome({ env, workspaceDir,
+  const serviceHome = prepareServiceCodexHome({ env, workspaceDir, codexCli, execFileSyncImpl,
     model: modelResolution.resolvedModel, effort: modelResolution.resolvedReasoningLevel, log });
   startupEvidence.resolvedStartup.codexHome = serviceHome.codexHome;
   startupEvidence.resolvedStartup.configDigest = serviceHome.configDigest;

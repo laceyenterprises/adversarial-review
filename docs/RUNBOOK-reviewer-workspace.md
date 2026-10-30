@@ -23,9 +23,28 @@ homes retain sessions under `<codexHome>/sessions` without `--ephemeral`,
 regardless of per-worker credential materialization. Preparation and spawn
 failures remove their config home. Logs include `CODEX_HOME` and `config_sha256` without auth data.
 
+CODEXHOMEISO-02: after auth is staged, shared service-home seeding runs the
+spawn's own Codex binary with `debug models`, its isolated home and the same
+auth environment (30-second timeout). It removes `tool_mode` and
+`supports_search_tool` from every model, preserving other metadata including
+`experimental_supported_tools`. Omitted search support defaults to false, so
+direct MCP tools remain available without advertising unsupported tool discovery.
+The private `model-catalog.direct-tools.json` must include the resolved model.
+Seeding writes the catalog before atomically setting the root
+`model_catalog_json` in `config.toml`; reviewers also pass that pin through
+`--config` because they retain `--ignore-user-config`. Probes share their seeded
+home across compatibility checks. No interactive catalog/cache is read.
+
+Catalog fetch, parse or pin failures warn and keep the server catalog so the
+spawn proceeds. Each spawn logs `model_catalog_json=<path>` (or `server` on
+fallback) with its home and final config digest. Existing tool-host timeout
+classification and bounded infrastructure refunds are unchanged.
+
 After ordinary deployment, SRE should retain the next organic Codex remediation
 receipt showing shell execution, a re-review request, and the isolated home and
-digest in its spawn log. Publication and offline tests do not establish that live
+digest in its spawn log. Also confirm that home contains the pinned catalog,
+the log names its path, and the round has no code-mode host errors.
+Publication and offline tests do not establish that live
 receipt. This change requires no config flip or new smoke command.
 
 Each one-shot `reviewer.mjs` process gives its model a read-only `git archive` snapshot of the repository's current default checkout HEAD. The PR diff is supplied separately. This snapshot is **not** the PR head or necessarily its merge base. The prompt names it accordingly.

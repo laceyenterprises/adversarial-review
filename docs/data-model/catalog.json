@@ -85,7 +85,7 @@
       "path": "docs/data-model/review-findings.md",
       "store": "data/reviews.db: review_findings, review_finding_replies, review_finding_remediations, review_finding_disputes, finding_backlog, finding_batches, finding_batch_notes",
       "schemaSurface": "migrations/20261021_review_findings.sql",
-      "relatedSchemaSurfaces": ["src/findings-backlog.mjs","src/findings-batch.mjs","migrations/20261024_findings_backlog.sql","migrations/20261024_simplicity_batch.sql","migrations/20261024_simplicity_batch_lifecycle.sql","src/review-finding-records.mjs","src/finding-commit-attribution.mjs","src/finding-remediation-capture.mjs","src/kernel/finding-lines.mjs","src/kernel/review-findings.mjs","src/kernel/remediation-reply.mjs"],
+      "relatedSchemaSurfaces": ["src/findings-backlog.mjs","src/findings-batch.mjs","migrations/20261024_findings_backlog.sql","migrations/20261030_findings_batch_drain.sql","migrations/20261024_simplicity_batch.sql","migrations/20261024_simplicity_batch_lifecycle.sql","src/review-finding-records.mjs","src/finding-commit-attribution.mjs","src/finding-remediation-capture.mjs","src/kernel/finding-lines.mjs","src/kernel/review-findings.mjs","src/kernel/remediation-reply.mjs"],
       "owner": "review-body capture and remediation completion observations"
     },
     {

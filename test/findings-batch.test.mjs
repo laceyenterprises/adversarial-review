@@ -68,7 +68,7 @@ test('batch jobs own advisory-only and mixed feedback, and durably record applie
       const notes = db.prepare('SELECT * FROM finding_batch_notes WHERE batch_id=?').all(batch.batch_id);
       assert.equal(notes.length, 1);
       const findings = db.prepare('SELECT finding_id FROM finding_backlog WHERE batch_id=?').all(batch.batch_id)
-        .map(f => ({ findingId: f.finding_id, outcome: 'dropped', reason: 'Already fixed on main' }));
+        .map(f => ({ findingId: f.finding_id, outcome: 'dropped', reason: 'not-reproducible: Already fixed on main' }));
       const result = { batchId: batch.batch_id, prNumber: applied ? 8 : null, headSha: applied ? head : null,
         findings, simplicityNotes: [{ noteId: notes[0].note_id, simplicityNoteApplied: applied,
           reason: applied ? 'Reused formatter and removed 20 lines' : 'Current helper changes behavior' }] };
@@ -253,13 +253,13 @@ test('mixed settlement normalizes note whitespace and persists only validated fi
   const { finding_id: findingId } = db.prepare('SELECT finding_id FROM finding_backlog WHERE batch_id=?').get(batch.batch_id);
   const { note_id: noteId } = db.prepare('SELECT note_id FROM finding_batch_notes WHERE batch_id=?').get(batch.batch_id);
   const result = { batchId: batch.batch_id, prNumber: { unvalidated: true }, headSha: 'irrelevant', extra: 'omit me',
-    findings: [{ findingId, outcome: 'dropped', reason: ' Already fixed ', extra: 'omit me' }],
+    findings: [{ findingId, outcome: 'dropped', reason: ' not-reproducible: Already fixed ', extra: 'omit me' }],
     simplicityNotes: [{ noteId, simplicityNoteApplied: false, reason: ' Already\r\n fixed\t on main ', extra: 'omit me' }] };
   assert.equal(settleFindingBatch(db, batch, result), true);
   assert.equal(db.prepare('SELECT outcome FROM finding_backlog').get().outcome, 'dropped');
   const stored = JSON.parse(db.prepare('SELECT result_json FROM finding_batches').get().result_json);
   assert.deepEqual(stored, { batchId: batch.batch_id, prNumber: null, headSha: null,
-    findings: [{ findingId, outcome: 'dropped', reason: 'Already fixed' }],
+    findings: [{ findingId, outcome: 'dropped', reason: 'not-reproducible: Already fixed' }],
     simplicityNotes: [{ noteId, simplicityNoteApplied: false, reason: 'Already fixed on main' }] });
 });
 
@@ -290,11 +290,11 @@ test('FINDINGSBATCH-01 capture enrolls only the final review, deduplicates and s
     assert.equal(rows[0].file, '`src/result.mjs`');
     assert.equal(rows[0].lines, '2');
     assert.equal(reopened.prepare("SELECT reason FROM finding_backlog WHERE outcome='dropped'").get().reason,
-      'superseded-final-review');
+      'stale-code-changed: Final posted review superseded this finding');
   } finally { reopened.close(); }
   db.prepare("UPDATE reviewed_prs SET pr_state='open'").run();
   db.prepare("UPDATE reviewed_prs SET pr_state='closed'").run();
-  assert.equal(db.prepare("SELECT count(*) n FROM finding_backlog WHERE reason='pr-closed-without-merge'").get().n, 1);
+  assert.equal(db.prepare("SELECT count(*) n FROM finding_backlog WHERE reason='false-positive: Source PR closed without merge; reviewed changes did not land'").get().n, 1);
   db.prepare("UPDATE reviewed_prs SET pr_state='open'").run();
   db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
   assert.equal(db.prepare('SELECT count(*) n FROM finding_backlog WHERE outcome IS NULL').get().n, 1);
@@ -351,19 +351,19 @@ test('FINDINGSBATCH-01 daily claims fence concurrent dispatch and outcomes requi
   const { readReviewFindings } = await import('../src/review-finding-records.mjs');
   assert.equal(readReviewFindings(db)[0].backlog_outcome, 'applied');
   assert.equal(readReviewFindings(db)[0].backlog_result_pr, 8);
-  // New findings cannot launch another worker for the area on the same day.
+  // New findings receive another capped batch on the same day.
   pass(2, body.replace('Explain the result', 'Explain another result'));
   db.prepare("UPDATE reviewed_prs SET pr_state='open'").run();
   db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
-  assert.deepEqual(claimFindingBatches(db, '2026-01-02'), []);
-  const [next] = claimFindingBatches(db, '2026-01-03');
+  const [next] = claimFindingBatches(db, '2026-01-02');
+  assert.deepEqual(claimFindingBatches(db, '2026-01-03'), []);
   const findingId = db.prepare('SELECT finding_id FROM finding_backlog WHERE batch_id=?').get(next.batch_id).finding_id;
   assert.throws(() => settleFindingBatch(db, next, { batchId: next.batch_id,
     findings: [{ findingId, outcome: 'dropped', reason: '' }] }));
   settleFindingBatch(db, next, { batchId: next.batch_id,
-    findings: [{ findingId, outcome: 'dropped', reason: 'Already described on current main' }] });
+    findings: [{ findingId, outcome: 'dropped', reason: 'not-reproducible: Already described on current main' }] });
   assert.equal(db.prepare('SELECT reason FROM finding_backlog WHERE batch_id=?').get(next.batch_id).reason,
-    'Already described on current main');
+    'not-reproducible: Already described on current main');
 });
 
 test('FINDINGSBATCH-01 report exposes size and oldest age per area and reports unavailable schema', async t => {
@@ -503,7 +503,7 @@ test('FINDINGSBATCH-01 ticker retries failed startup and fences overlapping poll
   await retry;
   await ticker.tick(now + 90_000);
   assert.equal(transactions, 2);
-  await ticker.tick(Date.parse('2026-01-03T00:00:00Z'));
+  await ticker.tick(now + 86400000);
   assert.equal(transactions, 3);
   assert.equal(launches, 1);
 });
@@ -515,7 +515,7 @@ test('FINDINGSBATCH-01 hourly settlement clears mixed outcomes without claiming 
   db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
   const { createFindingBatchTicker } = await import('../src/findings-batch.mjs');
   let launches = 0, reads = 0, merged = false;
-  const ticker = createFindingBatchTicker({ rootDir, db, env: { HQ_ROOT: rootDir },
+  const ticker = createFindingBatchTicker({ rootDir, db, env: { HQ_ROOT: rootDir }, intervalMs: 86400000,
     execFileImpl: async () => { launches++; return { stdout: '{"launchRequestId":"fixture-launch"}' }; },
     fetchPr: async () => {
       reads++;
@@ -527,7 +527,7 @@ test('FINDINGSBATCH-01 hourly settlement clears mixed outcomes without claiming 
   const rows = db.prepare('SELECT finding_id FROM finding_backlog ORDER BY finding_id').all();
   const dir = join(rootDir, 'data', 'finding-batches', batch.batch_id);
   writeFileSync(join(dir, 'outcomes.json'), JSON.stringify({ batchId: batch.batch_id, prNumber: 8, headSha: head,
-    findings: rows.map((r, i) => ({ findingId: r.finding_id, outcome: i ? 'dropped' : 'applied', reason: 'Checked current main' })) }));
+    findings: rows.map((r, i) => ({ findingId: r.finding_id, outcome: i ? 'dropped' : 'applied', reason: 'not-reproducible: Checked current main' })) }));
   await ticker.tick(now + 3600000);
   assert.equal(reads, 1);
   assert.equal(db.prepare('SELECT completed_at FROM finding_batches').get().completed_at, null);
@@ -545,7 +545,7 @@ test('FINDINGSBATCH-01 hourly settlement clears mixed outcomes without claiming 
   assert.ok(db.prepare('SELECT completed_at FROM finding_batches').get().completed_at);
   const outcomes = db.prepare('SELECT outcome,result_pr FROM finding_backlog WHERE batch_id=? ORDER BY finding_id').all(batch.batch_id);
   assert.deepEqual(outcomes, [{ outcome: 'applied', result_pr: 8 }, { outcome: 'dropped', result_pr: null }]);
-  await ticker.tick(Date.parse('2026-01-03T00:00:00Z'));
+  await ticker.tick(now + 86400000);
   assert.equal(launches, 2);
 });
 
@@ -648,7 +648,7 @@ test('FINDINGSSHAPE-01 dispatches decision-only preparation and one pr-shaped pu
 test('FINDINGSSHAPE-01 decline-only outcomes finish without PR, push, status probe or publisher', async t => {
   const f = await publicationFixture(t);
   f.result.headSha = null;
-  f.result.findings.forEach(outcome => { outcome.outcome = 'dropped'; outcome.reason = 'Already fixed on main'; });
+  f.result.findings.forEach(outcome => { outcome.outcome = 'dropped'; outcome.reason = 'not-reproducible: Already fixed on main'; });
   writeFileSync(f.outputPath, JSON.stringify(f.result));
   const unexpected = async () => assert.fail('declines require no external command');
   await f.run({ execFileImpl: unexpected, fetchPublication: unexpected, readLaunches: unexpected });
@@ -659,8 +659,8 @@ test('FINDINGSSHAPE-01 decline-only outcomes finish without PR, push, status pro
   assert.equal(f.dispatches.length, 1);
 });
 
-test('FINDINGSSHAPE-01 missing push milestone fails locally before publication reads', async t => {
-  for (const status of [undefined, 'pending', 'failed']) await t.test(`push=${status}`, async t => {
+test('FINDINGSSHAPE-01 explicit unsuccessful push milestone fails before publication reads', async t => {
+  for (const status of ['pending', 'failed']) await t.test(`push=${status}`, async t => {
     const f = await publicationFixture(t);
     f.status.milestones = status ? { branch_pushed: { status } } : {};
     let reads = 0;
@@ -723,7 +723,6 @@ test('FINDINGSSHAPE-01 publication holds on invalid manifests, live preparation 
     ['foreign launch', f => { f.status.launchRequestId = 'foreign'; }],
     ['foreign repo', f => { f.status.repo = 'other/service'; }],
     ['missing branch', f => { f.status.branch = null; }],
-    ['no push milestone', f => { f.status.milestones = {}; }],
     ['remote head mismatch', f => { f.publication.headSha = 'c'.repeat(40); }],
     ['missing ledger receipt', f => { f.launches.length = 0; }],
     ['foreign receipt', f => { f.launches[0].idempotency_key = 'foreign'; }],
@@ -840,4 +839,227 @@ test('FINDINGSSHAPE-01 unreadable command or ledger evidence preserves unresolve
     await f.run();
     assert.equal(f.dispatches.length, 2, 'a read failure must not persist a submission intent');
   });
+});
+
+test('FINDINGSBATCH-02 covers 1000 findings in capped priority batches without daily or active-area ceilings', async t => {
+  const { db, pass } = fixture(t);
+  pass();
+  db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
+  const source = db.prepare('SELECT * FROM review_findings LIMIT 1').get();
+  db.prepare('DELETE FROM finding_backlog').run();
+  const addFinding = db.prepare(`INSERT INTO review_findings
+    (finding_id,pass_id,ordinal,content_sha256,blocking,finding_json,head_sha,reviewer_identity,hammer_identity)
+    VALUES (?,?,?,?,0,?,?,'codex','synthetic-hammer')`);
+  const addBacklog = db.prepare(`INSERT OR REPLACE INTO finding_backlog
+    (finding_id,repo,pr_number,head_sha,content_sha256,reviewer_family,area,captured_at)
+    VALUES (?,?,7,?,?,'codex',?,?)`);
+  db.transaction(() => {
+    for (let i = 0; i < 1000; i++) {
+      const id = `synthetic-${i}`, severity = i % 2 ? 'high' : 'low';
+      addFinding.run(id, source.pass_id, i + 10, id, JSON.stringify({ severity }), head);
+      addBacklog.run(id, repo, head, id, `area-${i % 3}`, `2026-01-${i % 2 ? '02' : '01'}T00:00:00Z`);
+    }
+  })();
+  const { claimFindingBatches } = await import('../src/findings-batch.mjs');
+  const batches = claimFindingBatches(db, '2026-01-02', { batchSize: 37 });
+  assert.equal(db.prepare('SELECT count(*) n FROM finding_backlog WHERE batch_id IS NULL').get().n, 0);
+  assert.ok(batches.length > 27);
+  let previousSeverity = 'high';
+  for (const b of batches) {
+    const rows = db.prepare(`SELECT f.finding_json FROM finding_backlog b JOIN review_findings f USING(finding_id)
+      WHERE batch_id=?`).all(b.batch_id);
+    assert.ok(rows.length > 0 && rows.length <= 37);
+    const severities = rows.map(r => JSON.parse(r.finding_json).severity);
+    assert.ok(severities.every(s => s === severities[0]));
+    if (previousSeverity === 'low') assert.equal(severities[0], 'low');
+    previousSeverity = severities[0];
+  }
+  const first = db.prepare(`SELECT json_extract(f.finding_json,'$.severity') AS severity FROM finding_backlog b
+    JOIN review_findings f USING(finding_id) WHERE batch_id=?`).all(batches[0].batch_id);
+  assert.ok(first.every(r => r.severity === 'high'), 'severity outranks the older low-severity findings');
+  assert.deepEqual(claimFindingBatches(db, '2026-01-02', { batchSize: 37 }), []);
+  assert.deepEqual(claimFindingBatches(db, '2026-01-03', { batchSize: 37 }), []);
+  assert.equal(db.pragma('foreign_key_check').length, 0);
+});
+
+test('FINDINGSBATCH-02 null status repo and absent milestone use ledger plus remote pushed head', async t => {
+  for (const status of ['succeeded', 'blocked_needs_decision', 'failed']) await t.test(status, async t => {
+    const f = await publicationFixture(t);
+    Object.assign(f.status, { repo: null, status, terminal: true, succeeded: status === 'succeeded', milestones: {} });
+    await f.run();
+    assert.equal(f.dispatches.length, status === 'failed' ? 1 : 2);
+    if (status === 'failed') assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error, 'batch-preparation-failed');
+  });
+  for (const failure of ['repo', 'launch', 'head']) await t.test(failure, async t => {
+    const f = await publicationFixture(t);
+    f.status.repo = null;
+    f.status.milestones = {};
+    if (failure === 'repo') f.launches[0].target_repo = 'synthetic/foreign';
+    if (failure === 'launch') f.launches[0].launch_request_id = 'foreign';
+    if (failure === 'head') f.publication.headSha = 'c'.repeat(40);
+    await f.run();
+    assert.equal(f.dispatches.length, 1);
+    assert.equal(f.db.prepare('SELECT outcome FROM finding_backlog').get().outcome, null);
+  });
+});
+
+test('FINDINGSBATCH-02 strict dropped vocabulary, verified fix PR, ticket and zero-outcome failure', async t => {
+  const f = await publicationFixture(t);
+  const { settleFindingBatch } = await import('../src/findings-batch.mjs');
+  const result = { ...f.result, findings: f.result.findings.map(r => ({ ...r, outcome: 'dropped' })) };
+  for (const reason of ['No time', 'stale-code-changed', 'false-positive:', 'already-fixed-in-0: bad PR', 'unknown: text']) {
+    result.findings[0].reason = reason;
+    assert.throws(() => settleFindingBatch(f.db, f.batch, result), /invalid-dropped-reason/);
+  }
+  result.findings[0].reason = 'already-fixed-in-23: Removed the obsolete branch';
+  assert.throws(() => settleFindingBatch(f.db, f.batch, result), /batch-drop-pr-unverified/);
+  assert.throws(() => settleFindingBatch(f.db, f.batch, result, null, { 23: { state: 'OPEN' } }), /batch-drop-pr-unverified/);
+  result.findings[0].reason = 'out-of-scope-with-ticket: deferred';
+  assert.throws(() => settleFindingBatch(f.db, f.batch, result), /batch-drop-ticket-missing/);
+  result.findings[0].reason = 'out-of-scope-with-ticket: SYNTH-23 owns the broader refactor';
+  assert.equal(settleFindingBatch(f.db, f.batch, result), true);
+  f.db.prepare("INSERT INTO finding_batches(batch_id,repo,area,day) VALUES ('empty',?,'empty','2026-01-02')").run(repo);
+  const empty = f.db.prepare("SELECT * FROM finding_batches WHERE batch_id='empty'").get();
+  assert.throws(() => settleFindingBatch(f.db, empty, { batchId: 'empty', findings: [] }), /batch-zero-outcomes/);
+});
+
+test('FINDINGSBATCH-02 applied requires merge or an open current-head pipeline attachment', async t => {
+  const f = await publicationFixture(t);
+  const { settleFindingBatch } = await import('../src/findings-batch.mjs');
+  const result = { ...f.result, prNumber: 81 };
+  assert.equal(settleFindingBatch(f.db, f.batch, result, f.pr), false);
+  f.db.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,revision_ref,review_status)
+    VALUES (?,81,'2026-01-02','codex','open',?,'pending')`).run(repo, 'c'.repeat(40));
+  assert.equal(settleFindingBatch(f.db, f.batch, result, f.pr), false);
+  f.db.prepare('UPDATE reviewed_prs SET revision_ref=? WHERE pr_number=81').run(head);
+  assert.equal(settleFindingBatch(f.db, f.batch, result, f.pr), true);
+  assert.equal(f.db.prepare('SELECT result_pr FROM finding_backlog').get().result_pr, 81);
+});
+
+test('FINDINGSBATCH-02 health reports finding counts, outcome days, errors and overdue alert', async t => {
+  const f = await publicationFixture(t);
+  const { summarizeFindingBacklog, findingBacklogAlert } = await import('../src/findings-backlog.mjs');
+  f.db.prepare("UPDATE finding_backlog SET captured_at='2026-01-01T00:00:00Z'").run();
+  f.db.prepare("UPDATE finding_batches SET error='batch-preparation-failed'").run();
+  const health = summarizeFindingBacklog(f.db, Date.parse('2026-01-04T00:00:00Z'));
+  assert.equal(health.openCount, 1);
+  assert.equal(health.unbatchedCount, 0);
+  assert.equal(health.oldestOpenAgeMs, 72 * 3600000);
+  assert.deepEqual(health.batchErrors, [{ error: 'batch-preparation-failed', count: 1 }]);
+  assert.equal(findingBacklogAlert(health).code, 'review:findings_backlog_overdue');
+  assert.equal(findingBacklogAlert(health, 96 * 3600000), null);
+  f.db.prepare("UPDATE finding_backlog SET outcome='dropped',reason='false-positive: Current code already checks the input'").run();
+  f.db.prepare("UPDATE finding_backlog SET resolved_at='2026-01-03T00:00:00Z'").run();
+  const settled = summarizeFindingBacklog(f.db);
+  assert.equal(settled.openCount, 0);
+  assert.equal(settled.oldestOpenAgeMs, 0);
+  assert.deepEqual(settled.perDay, [{ day: '2026-01-03', applied: 0, dropped: 1 }]);
+});
+
+test('FINDINGSBATCH-02 configurable cadence claims newly captured findings within the same day', async t => {
+  const { db, rootDir, pass } = fixture(t);
+  pass();
+  db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
+  const { createFindingBatchTicker } = await import('../src/findings-batch.mjs');
+  let launches = 0;
+  const ticker = createFindingBatchTicker({ db, rootDir, env: { HQ_ROOT: rootDir, ADVERSARIAL_FINDINGS_BATCH_INTERVAL_MS: '60000' },
+    execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: `launch-${++launches}` }) }) });
+  const now = Date.parse('2026-01-02T00:00:00Z');
+  await ticker.tick(now);
+  pass(2, body.replace('Explain the result', 'Explain another result'));
+  await ticker.tick(now + 59999);
+  assert.equal(launches, 1);
+  await ticker.tick(now + 60000);
+  assert.equal(launches, 2);
+});
+
+test('FINDINGSBATCH-02 operator backfill is explicit, capped and idempotent with synthetic dispatch', async t => {
+  const { rootDir, db, pass } = fixture(t);
+  const finding = body.slice(body.indexOf('- **Explain'), body.indexOf('## Verdict'));
+  pass(1, body.replace(finding, Array.from({ length: 7 }, (_, i) => finding.replace('Explain the result', `Explain result ${i}`)).join('')));
+  db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
+  const { main } = await import('../bin/findings-batch-backfill.mjs');
+  await assert.rejects(main([]), /required/);
+  const args = ['--root', rootDir, '--db', join(rootDir, 'data', 'reviews.db'), '--concurrency', '2', '--batch-size', '1'];
+  let calls = 0, active = 0, peak = 0;
+  const dependencies = { env: { HQ_ROOT: rootDir }, execFileImpl: async () => {
+    const launch = ++calls;
+    peak = Math.max(peak, ++active);
+    await new Promise(resolve => setImmediate(resolve));
+    active--;
+    return { stdout: JSON.stringify({ launchRequestId: `synthetic-backfill-${launch}` }) };
+  } };
+  await main(args, dependencies);
+  await main(args, dependencies);
+  assert.equal(calls, 7);
+  assert.equal(peak, 2);
+  assert.equal(db.prepare('SELECT count(*) n FROM finding_batches').get().n, 7);
+});
+
+test('FINDINGSBATCH-02 migration preserves assigned parents with foreign keys enabled', async t => {
+  const { default: Database } = await import('better-sqlite3');
+  const db = new Database(':memory:');
+  t.after(() => db.close());
+  db.pragma('foreign_keys = ON');
+  db.exec(`CREATE TABLE finding_batches(batch_id TEXT PRIMARY KEY,repo TEXT,area TEXT,day TEXT,
+    launch_id TEXT,completed_at TEXT,error TEXT,result_json TEXT,UNIQUE(repo,area,day));
+    CREATE UNIQUE INDEX finding_batches_active ON finding_batches(repo,area) WHERE completed_at IS NULL;
+    CREATE TABLE finding_backlog(finding_id TEXT PRIMARY KEY,batch_id TEXT REFERENCES finding_batches(batch_id),outcome TEXT,reason TEXT);
+    CREATE TABLE reviewed_prs(repo TEXT,pr_number INTEGER,pr_state TEXT);
+    CREATE TABLE finding_batch_notes(note_id TEXT,batch_id TEXT REFERENCES finding_batches(batch_id));
+    INSERT INTO finding_batches VALUES ('retained','synthetic/service','src','2026-01-01','launch',NULL,'old error',NULL);
+    INSERT INTO finding_backlog VALUES ('retained-finding','retained',NULL,NULL);
+    INSERT INTO finding_batch_notes VALUES ('retained-note','retained');`);
+  const sql = readFileSync(new URL('../migrations/20261030_findings_batch_drain.sql', import.meta.url), 'utf8');
+  db.exec(`INSERT INTO finding_batches VALUES ('empty','synthetic/service','empty','2026-01-01',NULL,'2026-01-02',NULL,'{"findings":[]}');`);
+  db.transaction(() => db.exec(sql))();
+  assert.deepEqual(db.prepare("SELECT completed_at,error FROM finding_batches WHERE batch_id='empty'").get(),
+    { completed_at: null, error: 'batch-zero-outcomes' });
+  assert.equal(db.prepare('SELECT launch_id FROM finding_batches').get().launch_id, 'launch');
+  assert.equal(db.prepare('SELECT batch_id FROM finding_backlog').get().batch_id, 'retained');
+  assert.equal(db.prepare('SELECT batch_id FROM finding_batch_notes').get().batch_id, 'retained');
+  assert.deepEqual(db.pragma('foreign_key_check'), []);
+  db.prepare("INSERT INTO finding_batches(batch_id,repo,area,day) VALUES ('new','synthetic/service','src','2026-01-01')").run();
+});
+
+test('FINDINGSBATCH-02 pipeline health routes the configured backlog age alert without external reads', async t => {
+  const { db, rootDir, pass } = fixture(t);
+  pass();
+  db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
+  db.prepare("UPDATE finding_backlog SET captured_at='2026-01-01T00:00:00Z'").run();
+  const { collectReviewPipelineHealth, evaluateReviewPipelineFindings, resolveReviewPipelineHealthConfig }
+    = await import('../src/review-pipeline-health.mjs');
+  const snapshot = collectReviewPipelineHealth({ rootDir, hqRoot: rootDir, env: { HQ_ROOT: rootDir },
+    now: () => new Date('2026-01-04T00:00:00Z'), config: { hostChecksEnabled: false },
+    execFileSyncImpl: () => { throw Error('external reads prohibited'); }, listOpenPrsSyncImpl: () => [] });
+  assert.equal(snapshot.nonBlockingBacklog.openCount, 1);
+  assert.equal(snapshot.nonBlockingBacklog.oldestOpenAgeMs, 72 * 3600000);
+  assert.equal(snapshot.findings.filter(f => f.code === 'review:findings_backlog_overdue').length, 1);
+  const config = resolveReviewPipelineHealthConfig({ ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS: String(96 * 3600000) });
+  assert.equal(evaluateReviewPipelineFindings({ ...snapshot, config }, { observedAt: snapshot.observedAt })
+    .some(f => f.code === 'review:findings_backlog_overdue'), false);
+});
+
+test('FINDINGSBATCH-02 worker drop artifacts settle every justified vocabulary code', async t => {
+  for (const reason of ['stale-code-changed: Current function was replaced',
+    ' already-fixed-in-23: The merged fix removes the obsolete branch ',
+    'not-reproducible: The cited input passes the focused reproduction',
+    'out-of-scope-with-ticket: SYNTH-23 tracks the broader change',
+    'false-positive: Current validation rejects the cited input']) {
+    await t.test(reason.trim().split(':')[0], async t => {
+      const f = await publicationFixture(t);
+      writeFileSync(f.outputPath, JSON.stringify({ ...f.result,
+        findings: f.result.findings.map(row => ({ ...row, outcome: 'dropped', reason })) }));
+      const reads = [];
+      await f.run({ fetchPr: async (target, number) => {
+        reads.push([target, number]);
+        return { state: 'MERGED' };
+      } });
+      assert.deepEqual(reads, reason.includes('already-fixed') ? [[repo, 23]] : []);
+      assert.equal(f.db.prepare('SELECT outcome FROM finding_backlog').get().outcome, 'dropped');
+      assert.equal(f.db.prepare('SELECT result_pr FROM finding_backlog').get().result_pr, null);
+      assert.ok(f.db.prepare('SELECT completed_at FROM finding_batches').get().completed_at);
+      assert.equal(f.dispatches.length, 1);
+    });
+  }
 });

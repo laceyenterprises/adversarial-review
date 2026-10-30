@@ -3102,6 +3102,16 @@ the second Codex OAuth account. It keeps the hammer route and merge-capability
 identity. The fallback default remains `[hammer-claude]`; account fallback
 selection and activation are governed by credential-capacity-expansion CCX-13.
 
+### GTMGAWIRE-01 metadata completeness and empty grants
+
+The Node Google profile schema is a partial metadata mirror: enable-only or
+layered declarations remain accepted. It does not certify minting readiness;
+the host-owned `agent_os_config.google_tokens.validate_profile` requires the
+Document reference, service-account identity and project before authorization
+or credential I/O. Node consumers must not infer complete host metadata from
+`enabled: true`. Task-grant list records backfill omitted scopes to `[]`, which
+grants no permission and does not inherit profile or class read scopes.
+
 
 REVIEWPROV-01 final remediation: Antigravity display-name suffixes contribute
 thinking effort only for low, medium, high or xhigh (case-normalized). Release

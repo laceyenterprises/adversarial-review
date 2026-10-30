@@ -34,6 +34,7 @@ import { normalizeLaneRoutes } from './config-lane-routes.mjs';
 import { extendModuleSchema, freezeSchema } from './config-module-schema.mjs';
 import { MAX_WORKER_EXEC_TIMEOUT_SECONDS } from './worker-execution-limits.mjs';
 import { TOKEN_POOL_DECLARATION_PATHS, validateTokenPoolDeclarations } from './config-token-pools.mjs';
+import { googleTokensSchema } from './config-google-tokens.mjs';
 
 export const __testYamlHooks = {
   load: (...args) => yaml.load(...args),
@@ -1435,6 +1436,7 @@ function schemaV1() {
             __strict: true,
             __keys: {
               search: searchSchema(),
+              google_tokens: googleTokensSchema(),
               capability_vocabulary: {
                 __type: TYPE_LIST,
                 __item: { __type: TYPE_STRING },

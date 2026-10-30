@@ -1,5 +1,25 @@
 # Adversarial Review
 
+GTMGAWIRE-01 adds the strict `services.hcp.google_tokens.profiles` metadata
+schema, matching Agent OS's Python and shell readers. It accepts purpose-named
+profiles, a 1Password Document reference, the `lacey-web` identity and six
+approved scopes, plus read-class and exact-LRQ task grants. It grants no access
+and performs no credential reads. Deploy this reader before the Agent OS
+companion adds the tracked profile; existing lifecycle and smoke promises
+are unchanged. `test/config-google-tokens.test.mjs` exercises the offline shape. Vault
+identifiers in `op-document://<vault>/<item>` must be UUIDs or whitespace-free
+names/slugs, matching the Python credential parser; vault titles with spaces are
+not supported. Item titles may contain spaces. Queries, fragments, percent
+escapes and extra path components are refused. Worker classes in both read and
+task grants must be non-empty identifiers using letters, digits, underscores or
+hyphens; display labels and whitespace are not worker-class identities.
+This metadata mirror permits partial profile declarations, including enable-only
+overrides; `enabled: true` is not proof of a complete minting configuration. The
+host Google token service owns `validate_profile` and checks required identity
+fields before authorization or credential I/O. Node consumers must retain that
+boundary rather than treat schema acceptance as token eligibility. Omitted task
+grant scopes materialize `[]`, an empty grant with no ambient permission.
+
 LAC-2131: native Codex reviewer, discovery and direct remediation homes expose
 OAuth through the CLI-supported file store and fail before provider requests
 when the effective store is unavailable. Config isolation, broker refresh

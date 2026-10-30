@@ -1202,7 +1202,7 @@ async function spawnCodexReview({
       buildCodexReviewArgs({ outputPath, prompt, model, modelProvider, configOverrides, persistSession,
         modelCatalogPath: home.catalogPath }),
       {
-        env: { ...env, CODEX_HOME: home.codexHome },
+        env: { ...scrubOAuthFallbackEnv(env).env, CODEX_HOME: home.codexHome, CODEX_AUTH_PATH: home.authPath },
         cwd,
         timeout,
         progressTimeout: resolveReviewerIdleTimeoutSeconds(env) * 1000,
@@ -1230,6 +1230,7 @@ async function reviewWithCodex(diff, extraContext = '', {
   codexCli = CODEX_CLI,
   assertCodexOAuthImpl = assertCodexOAuth,
   spawnCodexReviewImpl = spawnCodexReview,
+  materializePerWorkerCodexAuthImpl = materializePerWorkerCodexAuth,
   execFileSyncImpl,
   reviewWithCodexOAuthResponsesImpl = reviewWithCodexOAuthResponses,
   log = console,
@@ -1257,7 +1258,7 @@ async function reviewWithCodex(diff, extraContext = '', {
   try {
     perWorkerAuth = process.env.CODEX_REVIEWER_AUTH_PROVIDER === 'codex-corp'
       && process.env.CODEX_BROKER_PROVIDER === 'codex-corp'
-      ? null : materializePerWorkerCodexAuth({
+      ? null : materializePerWorkerCodexAuthImpl({
       sharedAuthPath: authPath,
       provider: process.env.CODEX_BROKER_PROVIDER || 'codex',
       key: `reviewer-${process.pid}-${Date.now()}`,
@@ -1268,17 +1269,18 @@ async function reviewWithCodex(diff, extraContext = '', {
   const effectiveAuthPath = perWorkerAuth?.authPath || authPath;
 
   const outputPath = join(tmpdir(), `codex-review-${process.pid}-${Date.now()}.md`);
-  await ensureWorkerRegistryReadyImpl({pin: modelPin});
-  const codexExecOverrides = resolveCodexExecOverrides({ modelPin, reasoningPin, log });
-  const { env } = scrubOAuthFallbackEnv({
-    ...process.env,
-    PATH: '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
-    CODEX_AUTH_PATH: effectiveAuthPath,
-    HOME: process.env.HOME || homedir(),
-  });
-  const serviceHome = prepareServiceCodexHome({ env, workspaceDir: reviewerSubprocessCwd, codexCli, execFileSyncImpl,
-    model: codexExecOverrides.model, effort: codexExecOverrides.reasoningEffort, log });
+  let serviceHome;
   try {
+    await ensureWorkerRegistryReadyImpl({pin: modelPin});
+    const codexExecOverrides = resolveCodexExecOverrides({ modelPin, reasoningPin, log });
+    const { env } = scrubOAuthFallbackEnv({
+      ...process.env,
+      PATH: '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+      CODEX_AUTH_PATH: effectiveAuthPath,
+      HOME: process.env.HOME || homedir(),
+    });
+    serviceHome = prepareServiceCodexHome({ env, workspaceDir: reviewerSubprocessCwd, codexCli, execFileSyncImpl,
+      model: codexExecOverrides.model, effort: codexExecOverrides.reasoningEffort, log });
     const codexSessionHome = serviceHome.codexHome;
     const changedLines = countChangedLines(diff);
     const effort = codexExecOverrides.reasoningEffort;
@@ -1398,7 +1400,7 @@ async function reviewWithCodex(diff, extraContext = '', {
     // Always remove the codex temp file — including when spawnCodexReview throws
     // before the read block runs (its throw would otherwise skip cleanup).
     try { unlinkSync(outputPath); } catch {}
-    serviceHome.cleanup();
+    serviceHome?.cleanup();
     perWorkerAuth?.cleanup();
   }
 }

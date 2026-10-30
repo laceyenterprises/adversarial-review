@@ -1,3 +1,4 @@
+import { serviceFixtureExec } from './helpers/codex-service-fixture.mjs';
 import './helpers/registry-session-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -97,6 +98,7 @@ test('local-mode consume, prompt build, and reconcile agree on the same reply pa
 
     let capturedEnv;
     const consumed = await consumeNextFollowUpJob({
+    execFileSyncImpl: serviceFixtureExec,
     guardStackedBaseImpl: async () => null,
       rootDir,
       promptTemplate: 'Reply path: ${REPLY_PATH}',

@@ -1,3 +1,4 @@
+import { serviceFixtureExec, writeDummyCodexAuth } from './helpers/codex-service-fixture.mjs';
 import './helpers/dispatch-files-preload.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -24,7 +25,7 @@ import {
   readCommittedWorkerModelSeed,
   resolveNonBlockingCodexModel,
   spawnClaudeCodeRemediationWorker,
-  spawnCodexRemediationWorker,
+  spawnCodexRemediationWorker as spawnCodexRemediationWorkerActual,
   spawnGeminiRemediationWorker,
   waitForLocalRemediationExit,
 } from '../src/adapters/agent-runtime/local/remediation.mjs';
@@ -38,6 +39,7 @@ import {
 // Keep the auth path disposable and explicit so fake spawns never materialize
 // per-worker credentials in the operator home when TMPDIR is below /Users.
 function codexFixtureEnv(home) {
+  writeDummyCodexAuth(join(home, '.codex', 'auth.json'));
   const operatorHome = resolve(home).match(/^\/Users\/[^/]+/)?.[0] || home;
   return {
     HOME: operatorHome,
@@ -1034,3 +1036,7 @@ test('evaluateLocalAdmission short-circuits on the cheapest failing gate (budget
   assert.equal(decision.reason, 'budget_token_cap_exceeded');
   assert.equal(memoryProbed, false, 'must not sample memory once the budget gate has already refused');
 });
+
+function spawnCodexRemediationWorker(options) {
+  return spawnCodexRemediationWorkerActual({ execFileSyncImpl: serviceFixtureExec, ...options });
+}

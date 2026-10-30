@@ -1,3 +1,4 @@
+import { serviceFixtureExec, writeDummyCodexAuth } from './helpers/codex-service-fixture.mjs';
 import { reviewerSizeFactsLine, readSizeFacts } from '../src/reviewer-size-owner.mjs';
 import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
 installDispatchFileProducerFixture();
@@ -1317,6 +1318,9 @@ test('cli-direct does not classify generated stdout review prose as a bug', asyn
 
 test('cli-direct Codex preflight ignores ambient MCP OAuth unless the domain requires MCP', async () => {
   const calls = [];
+  const root = makeRoot();
+  const authPath = writeDummyCodexAuth(join(root, 'auth.json'));
+  const authProbe = { execFileSyncImpl: serviceFixtureExec, ensureWorkerRegistryReadyImpl: async () => {} };
   const execFileImpl = async (_command, args) => {
     calls.push(args);
     if (args[0] === '--version') return { stdout: 'codex 1.0.0\n', stderr: '' };
@@ -1326,7 +1330,7 @@ test('cli-direct Codex preflight ignores ambient MCP OAuth unless the domain req
   };
 
   await probeCodexCli({
-    env: { PATH: '/bin', CODEX_CLI: '/bin/codex' },
+    ...authProbe, env: { PATH: '/bin', CODEX_CLI: '/bin/codex', CODEX_AUTH_PATH: authPath },
     cwd: '/tmp',
     execFileImpl,
   });
@@ -1337,13 +1341,14 @@ test('cli-direct Codex preflight ignores ambient MCP OAuth unless the domain req
 
   await assert.rejects(
     () => probeCodexCli({
-      env: { PATH: '/bin', CODEX_CLI: '/bin/codex' },
+      ...authProbe, env: { PATH: '/bin', CODEX_CLI: '/bin/codex', CODEX_AUTH_PATH: authPath },
       cwd: '/tmp',
       execFileImpl,
       requireMcpOAuth: true,
     }),
     /Codex MCP-server OAuth state is broken/,
   );
+  rmSync(root, { recursive: true, force: true });
 });
 
 test('cli-direct derives Codex MCP OAuth requirement from adapter domainConfig', async () => {

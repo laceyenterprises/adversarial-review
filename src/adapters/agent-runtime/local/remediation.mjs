@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { spawnDetachedCli } from '../../reviewer-runtime/cli-direct/process.mjs';
 import { isPgidAlive, verifyPgidIdentity } from '../../../process-group-identity.mjs';
-import { prepareServiceCodexHome } from '../../../codex-service-home.mjs';
+import { cleanupServiceCodexAuth, prepareServiceCodexHome } from '../../../codex-service-home.mjs';
 import { materializePerWorkerCodexAuth } from '../../../codex-per-worker-auth.mjs';
 import {
   GEMINI_REMEDIATION_WORKER_TRAILER_CLASS,
@@ -781,110 +781,117 @@ function prepareCodexRemediationStartupEnv({
   workerClass = 'codex',
   requiresWorkflowPush = false,
   sourceEnv = process.env,
+  materializePerWorkerCodexAuthImpl = materializePerWorkerCodexAuth,
 } = {}) {
   const sharedAuthPath = resolveCodexAuthPath(sourceEnv);
   const perWorkerAuth = sourceEnv.CODEX_AUTH_PATH && workerClass !== 'remediator-codex-corp'
     ? null
-    : materializePerWorkerCodexAuth({
+    : materializePerWorkerCodexAuthImpl({
         sharedAuthPath,
         env: sourceEnv,
         provider: workerClass === 'remediator-codex-corp' ? 'codex-corp' : 'codex',
         key: perWorkerKey ? `remediation-${perWorkerKey}` : `remediation-${process.pid}-${Date.now()}`,
       });
-  const authPath = perWorkerAuth?.authPath || sharedAuthPath;
-  const authHome = resolveCodexAuthHome(authPath);
-  const authOwner = resolveCodexAuthOwner(authPath);
-  const codexHome = dirname(authPath);
-  const strippedEnv = [];
-  const overriddenGitEnv = [];
-  const policyViolations = [];
-  const scrubbed = scrubOAuthFallbackEnv(sourceEnv);
-  strippedEnv.push(...scrubbed.stripped);
+  try {
+    const authPath = perWorkerAuth?.authPath || sharedAuthPath;
+    const authHome = perWorkerAuth?.home || resolveCodexAuthHome(authPath);
+    const authOwner = perWorkerAuth ? authHome.split('/').filter(Boolean).at(-1) : resolveCodexAuthOwner(authPath);
+    const codexHome = dirname(authPath);
+    const strippedEnv = [];
+    const overriddenGitEnv = [];
+    const policyViolations = [];
+    const scrubbed = scrubOAuthFallbackEnv(sourceEnv);
+    strippedEnv.push(...scrubbed.stripped);
 
-  if (sourceEnv.CODEX_AUTH_PATH && resolve(sourceEnv.CODEX_AUTH_PATH) !== resolve(authPath)) {
-    policyViolations.push(buildCodexStartupPolicyViolation({
-      reason: 'inherited CODEX_AUTH_PATH does not satisfy the requested local OAuth contract',
-      requestedValue: authPath,
-      resolvedValue: sourceEnv.CODEX_AUTH_PATH,
-    }));
-  }
-  if ((sourceEnv.HOME || homedir()) && resolve(sourceEnv.HOME || homedir()) !== resolve(authHome)) {
-    policyViolations.push(buildCodexStartupPolicyViolation({
-      reason: 'inherited HOME does not satisfy the requested local OAuth owner contract',
-      requestedValue: authHome,
-      resolvedValue: sourceEnv.HOME || homedir(),
-    }));
-  }
-  if (sourceEnv.CODEX_HOME && resolve(sourceEnv.CODEX_HOME) !== resolve(codexHome)) {
-    policyViolations.push(buildCodexStartupPolicyViolation({
-      reason: 'inherited CODEX_HOME does not satisfy the requested local OAuth contract',
-      requestedValue: codexHome,
-      resolvedValue: sourceEnv.CODEX_HOME,
-    }));
-  }
-
-  const startupEvidence = {
-    stage: 'pre-side-effect-gate',
-    requestedContract: {
-      authMode: 'local-oauth',
-      authOwnerUser: authOwner,
-      authHome,
-      authPath,
-      forbiddenFallbacks: ['api-key', 'openai-api-key'],
-      forbiddenCalls: ['authenticate'],
-    },
-    resolvedStartup: {
-      resolvedAuthMode: 'local-oauth',
-      resolvedAuthOwner: authOwner,
-      authHome,
-      authPath,
-      codexHome,
-    },
-    sanitizedEnv: {
-      stripped: strippedEnv,
-      gitIdentityOverrides: overriddenGitEnv,
-    },
-    gitIdentity: gitIdentity ? { name: gitIdentity.name, email: gitIdentity.email } : null,
-    policy_violations: policyViolations,
-    policyViolations,
-  };
-
-  if (policyViolations.length) {
-    throw new StartupContractError(
-      policyViolations.map((item) => item.reason).join('; '),
-      {
-        requestedValue: policyViolations[0].requested_value,
-        resolvedValue: policyViolations[0].resolved_value,
-        startupEvidence,
-      },
-    );
-  }
-
-  const env = {
-    ...scrubbed.env,
-    PATH: buildInheritedPath(sourceEnv.PATH),
-    CODEX_AUTH_PATH: authPath,
-    CODEX_HOME: codexHome,
-    HOME: authHome,
-  };
-  delete env.WORKER_CLASS;
-  delete env.WORKER_JOB_ID;
-  delete env.WORKER_RUN_AT;
-
-  if (gitIdentity) {
-    for (const [key, value] of [
-      ['GIT_AUTHOR_NAME', gitIdentity.name],
-      ['GIT_AUTHOR_EMAIL', gitIdentity.email],
-      ['GIT_COMMITTER_NAME', gitIdentity.name],
-      ['GIT_COMMITTER_EMAIL', gitIdentity.email],
-    ]) {
-      if (sourceEnv[key] !== undefined && sourceEnv[key] !== value) overriddenGitEnv.push(key);
-      env[key] = value;
+    if (sourceEnv.CODEX_AUTH_PATH && resolve(sourceEnv.CODEX_AUTH_PATH) !== resolve(sharedAuthPath)) {
+      policyViolations.push(buildCodexStartupPolicyViolation({
+        reason: 'inherited CODEX_AUTH_PATH does not satisfy the requested local OAuth contract',
+        requestedValue: authPath,
+        resolvedValue: sourceEnv.CODEX_AUTH_PATH,
+      }));
     }
-  }
+    if ((sourceEnv.HOME || homedir()) && resolve(sourceEnv.HOME || homedir()) !== resolve(authHome)) {
+      policyViolations.push(buildCodexStartupPolicyViolation({
+        reason: 'inherited HOME does not satisfy the requested local OAuth owner contract',
+        requestedValue: authHome,
+        resolvedValue: sourceEnv.HOME || homedir(),
+      }));
+    }
+    if (sourceEnv.CODEX_HOME && resolve(sourceEnv.CODEX_HOME) !== resolve(dirname(sharedAuthPath))) {
+      policyViolations.push(buildCodexStartupPolicyViolation({
+        reason: 'inherited CODEX_HOME does not satisfy the requested local OAuth contract',
+        requestedValue: codexHome,
+        resolvedValue: sourceEnv.CODEX_HOME,
+      }));
+    }
 
-  startupEvidence.mergeAgentBroker = applyMergeAgentBrokerEnv(env, sourceEnv, { workerClass, requiresWorkflowPush });
-  return { authPath, env, startupEvidence, isolatedCodexHome: perWorkerAuth?.codexHome || null };
+    const startupEvidence = {
+      stage: 'pre-side-effect-gate',
+      requestedContract: {
+        authMode: 'local-oauth',
+        authOwnerUser: authOwner,
+        authHome,
+        authPath,
+        forbiddenFallbacks: ['api-key', 'openai-api-key'],
+        forbiddenCalls: ['authenticate'],
+      },
+      resolvedStartup: {
+        resolvedAuthMode: 'local-oauth',
+        resolvedAuthOwner: authOwner,
+        authHome,
+        authPath,
+        codexHome,
+      },
+      sanitizedEnv: {
+        stripped: strippedEnv,
+        gitIdentityOverrides: overriddenGitEnv,
+      },
+      gitIdentity: gitIdentity ? { name: gitIdentity.name, email: gitIdentity.email } : null,
+      policy_violations: policyViolations,
+      policyViolations,
+    };
+
+    if (policyViolations.length) {
+      throw new StartupContractError(
+        policyViolations.map((item) => item.reason).join('; '),
+        {
+          requestedValue: policyViolations[0].requested_value,
+          resolvedValue: policyViolations[0].resolved_value,
+          startupEvidence,
+        },
+      );
+    }
+
+    const env = {
+      ...scrubbed.env,
+      PATH: buildInheritedPath(sourceEnv.PATH),
+      CODEX_AUTH_PATH: authPath,
+      CODEX_HOME: codexHome,
+      HOME: authHome,
+    };
+    delete env.WORKER_CLASS;
+    delete env.WORKER_JOB_ID;
+    delete env.WORKER_RUN_AT;
+
+    if (gitIdentity) {
+      for (const [key, value] of [
+        ['GIT_AUTHOR_NAME', gitIdentity.name],
+        ['GIT_AUTHOR_EMAIL', gitIdentity.email],
+        ['GIT_COMMITTER_NAME', gitIdentity.name],
+        ['GIT_COMMITTER_EMAIL', gitIdentity.email],
+      ]) {
+        if (sourceEnv[key] !== undefined && sourceEnv[key] !== value) overriddenGitEnv.push(key);
+        env[key] = value;
+      }
+    }
+
+    startupEvidence.mergeAgentBroker = applyMergeAgentBrokerEnv(env, sourceEnv, { workerClass, requiresWorkflowPush });
+    return { authPath, env, startupEvidence, isolatedCodexHome: perWorkerAuth?.codexHome || null,
+      cleanup: () => perWorkerAuth?.cleanup() };
+  } catch (error) {
+    perWorkerAuth?.cleanup();
+    throw error;
+  }
 }
 
 function withReplyContext(env, { replyPath = null, hqRoot, launchRequestId, now, workerClass, jobId }) {
@@ -1131,6 +1138,7 @@ function spawnCodexRemediationWorker({
   jobId = null,
   modelResolution: requestedModelResolution = null,
   execFileSyncImpl,
+  materializePerWorkerCodexAuthImpl,
   spawnImpl,
   sourceEnv = process.env,
   now = () => new Date().toISOString(),
@@ -1140,102 +1148,123 @@ function spawnCodexRemediationWorker({
   const codexCli = resolveCodexCliPath(sourceEnv);
   // For codex, `workerClass` IS the physical harness class ('codex').
   const gitIdentity = remediationWorkerGitIdentity(workerClass);
-  const { env: baseEnv, startupEvidence } = prepareCodexRemediationStartupEnv({
+  const { env: baseEnv, startupEvidence, cleanup: cleanupStagedAuth } = prepareCodexRemediationStartupEnv({
     gitIdentity,
     perWorkerKey: jobId || launchRequestId || null,
     workerClass,
     requiresWorkflowPush,
     sourceEnv,
+    materializePerWorkerCodexAuthImpl,
   });
-  assertHarnessIdentityMatch({
-    workerClass,
-    gitIdentity,
-    brokerEvidence: startupEvidence.mergeAgentBroker,
-    enforce: enforceHarnessIdentity,
-    requiresWorkflowPush,
-    env: sourceEnv,
-    log,
-    auditSink,
-    now,
-  });
-  const { env, replyContext } = withReplyContext(baseEnv, {
-    replyPath,
-    hqRoot,
-    launchRequestId,
-    now,
-    workerClass: REMEDIATION_WORKER_TRAILER_CLASS,
-    jobId,
-  });
-  installWorkerAdapterEnv(env, sourceEnv, workerClass, REMEDIATION_WORKER_TRAILER_CLASS, repo, log, startupEvidence.mergeAgentBroker);
-  const modelResolution = requestedModelResolution || resolveRemediationModel('remediator-codex', {
-    env,
-    hqRoot: hqRoot || sourceEnv.HQ_ROOT,
-    pin: codexModelPin(env),
-    reasoningPin: codexReasoningPin(env),
-    log,
-  });
-  const serviceHome = prepareServiceCodexHome({ env, workspaceDir, codexCli, execFileSyncImpl,
-    model: modelResolution.resolvedModel, effort: modelResolution.resolvedReasoningLevel, log });
-  startupEvidence.resolvedStartup.codexHome = serviceHome.codexHome;
-  startupEvidence.resolvedStartup.configDigest = serviceHome.configDigest;
-  const codexArgs = [
-    'exec',
-    '--model', modelResolution.resolvedModel,
-    ...(CODEX_REASONING_LEVELS.has(modelResolution.resolvedReasoningLevel)
-      ? ['-c', `model_reasoning_effort=${modelResolution.resolvedReasoningLevel}`]
-      : []),
-    '--dangerously-bypass-approvals-and-sandbox',
-    '--json',
-    '--output-last-message',
-    outputPath,
-    '-',
-  ];
-  let promptFd;
-  let stdoutFd;
-  let stderrFd;
+  let serviceHome;
   try {
-    promptFd = openSyncImpl(promptPath, 'r');
-    stdoutFd = openSyncImpl(logPath, 'a');
-    stderrFd = openSyncImpl(logPath, 'a');
-    const child = spawnDetachedCli(
-      codexCli,
-      codexArgs,
-      {
-        cwd: workspaceDir,
-        env: serviceHome.env,
-        stdio: [promptFd, stdoutFd, stderrFd],
-        spawnImpl,
-        now,
-      },
-    );
-    return {
-      model: 'codex',
+    assertHarnessIdentityMatch({
       workerClass,
-      processId: child.pid,
-      processGroupId: child.pid,
-      spawnedAt: child.spawnedAt || now(),
-      workspaceDir,
-      promptPath,
-      outputPath,
-      logPath,
-      replyPath: replyContext.replyPath,
-      launchRequestId: replyContext.launchRequestId,
       gitIdentity,
-      startupEvidence,
-      ...modelResolution,
-      codexHome: serviceHome.codexHome,
-      configDigest: serviceHome.configDigest,
-      codexSessionRoot: join(serviceHome.codexHome, 'sessions'),
-      command: [codexCli, ...codexArgs],
-      child,
-    };
+      brokerEvidence: startupEvidence.mergeAgentBroker,
+      enforce: enforceHarnessIdentity,
+      requiresWorkflowPush,
+      env: sourceEnv,
+      log,
+      auditSink,
+      now,
+    });
+    const { env, replyContext } = withReplyContext(baseEnv, {
+      replyPath,
+      hqRoot,
+      launchRequestId,
+      now,
+      workerClass: REMEDIATION_WORKER_TRAILER_CLASS,
+      jobId,
+    });
+    installWorkerAdapterEnv(env, sourceEnv, workerClass, REMEDIATION_WORKER_TRAILER_CLASS, repo, log, startupEvidence.mergeAgentBroker);
+    const modelResolution = requestedModelResolution || resolveRemediationModel('remediator-codex', {
+      env,
+      hqRoot: hqRoot || sourceEnv.HQ_ROOT,
+      pin: codexModelPin(env),
+      reasoningPin: codexReasoningPin(env),
+      log,
+    });
+    serviceHome = prepareServiceCodexHome({ env, workspaceDir, codexCli, execFileSyncImpl,
+      model: modelResolution.resolvedModel, effort: modelResolution.resolvedReasoningLevel, log });
+    // The service owns its independent snapshot now; never retain a second
+    // materialized credential just for config isolation.
+    cleanupStagedAuth();
+    startupEvidence.resolvedStartup.codexHome = serviceHome.codexHome;
+    startupEvidence.resolvedStartup.configDigest = serviceHome.configDigest;
+    startupEvidence.resolvedStartup.effectiveAuthPath = serviceHome.authPath;
+    startupEvidence.resolvedStartup.authStore = 'file';
+    startupEvidence.resolvedStartup.authPreflight = 'cli-login-status';
+    startupEvidence.resolvedStartup.refreshOwner = 'broker';
+    const codexArgs = [
+      'exec',
+      '--model', modelResolution.resolvedModel,
+      ...(CODEX_REASONING_LEVELS.has(modelResolution.resolvedReasoningLevel)
+        ? ['-c', `model_reasoning_effort=${modelResolution.resolvedReasoningLevel}`]
+        : []),
+      '--dangerously-bypass-approvals-and-sandbox',
+      '--json',
+      '--output-last-message',
+      outputPath,
+      '-',
+    ];
+    let promptFd;
+    let stdoutFd;
+    let stderrFd;
+    try {
+      promptFd = openSyncImpl(promptPath, 'r');
+      stdoutFd = openSyncImpl(logPath, 'a');
+      stderrFd = openSyncImpl(logPath, 'a');
+      const child = spawnDetachedCli(
+        codexCli,
+        codexArgs,
+        {
+          cwd: workspaceDir,
+          env: serviceHome.env,
+          stdio: [promptFd, stdoutFd, stderrFd],
+          spawnImpl,
+          now,
+        },
+      );
+      // Keep sessions for usage reconciliation, but discard the service-owned
+      // credential once the detached CLI exits. No source credential is removed.
+      child.once?.('exit', serviceHome.cleanupAuth);
+      child.once?.('error', serviceHome.cleanup);
+      return {
+        model: 'codex',
+        workerClass,
+        processId: child.pid,
+        processGroupId: child.pid,
+        spawnedAt: child.spawnedAt || now(),
+        workspaceDir,
+        promptPath,
+        outputPath,
+        logPath,
+        replyPath: replyContext.replyPath,
+        launchRequestId: replyContext.launchRequestId,
+        gitIdentity,
+        startupEvidence,
+        ...modelResolution,
+        codexHome: serviceHome.codexHome,
+        codexAuthOwnerId: serviceHome.codexAuthOwnerId,
+        configDigest: serviceHome.configDigest,
+        codexSessionRoot: join(serviceHome.codexHome, 'sessions'),
+        command: [codexCli, ...codexArgs],
+        child,
+      };
+    } catch (error) {
+      serviceHome.cleanup();
+      throw error;
+    } finally {
+      if (promptFd !== undefined) closeSyncImpl(promptFd);
+      if (stdoutFd !== undefined) closeSyncImpl(stdoutFd);
+      if (stderrFd !== undefined) closeSyncImpl(stderrFd);
+    }
   } catch (error) {
-    serviceHome.cleanup();
+    serviceHome?.cleanup();
     throw error;
   } finally {
-    if (promptFd !== undefined) closeSyncImpl(promptFd);
-    if (stdoutFd !== undefined) closeSyncImpl(stdoutFd);
-    if (stderrFd !== undefined) closeSyncImpl(stderrFd);
+    cleanupStagedAuth();
   }
 }
 
@@ -1350,6 +1379,7 @@ async function waitForLocalRemediationExit(worker, {
   while (Number.isInteger(pgid) && pgid > 0 && isPgidAlive(pgid, processKillImpl)) {
     await sleepImpl(pollMs);
   }
+  cleanupServiceCodexAuth(worker);
   return toLocalRemediationResult(worker, { cancelled: cancelledRef.value });
 }
 

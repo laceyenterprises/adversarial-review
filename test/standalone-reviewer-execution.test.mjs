@@ -1,8 +1,9 @@
 // Each fresh process obtains its own app registry snapshot. Host config and
 // filesystem rosters cannot replace governed models or the committed seed.
+import { writeDummyCodexAuth } from './helpers/codex-service-fixture.mjs';
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -14,6 +15,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const PROBE = `
 const h = (await import(process.env.AR_ROOT + '/src/reviewer-harness.mjs')).__test__;
 const r = await import(process.env.AR_ROOT + '/src/adapters/agent-runtime/local/remediation.mjs');
+const { serviceFixtureExec } = await import(process.env.CODEX_TEST_HELPER);
 const quiet = { info() {}, warn(message) { console.warn(message); }, error() {} };
 const { dispatchReadTransport } = await import(process.env.AR_ROOT + '/src/dispatch-read-client.mjs');
 let connects = 0;
@@ -63,6 +65,7 @@ if (process.env.REGISTRY_ENTRY === 'main') {
     let spawns = 0, recoveries = 0;
     const result = await h.reviewWithCodex('+fixture', '', {
       modelPin: process.env.MODEL_PIN || '',
+      execFileSyncImpl: serviceFixtureExec,
       assertCodexOAuthImpl: async () => {}, codexCli: process.execPath, log: quiet,
       spawnCodexReviewImpl: async () => {
         spawns++;
@@ -135,12 +138,12 @@ function standaloneRun(t, { codexConfig = null, down = false, entry = 'reviewer'
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const arRoot = packagedRuntime(missingSeed);
   const home = path.join(root, 'home');
-  mkdirSync(path.join(home, '.codex'), { recursive: true });
+  writeDummyCodexAuth(path.join(home, '.codex', 'auth.json'));
   if (codexConfig) writeFileSync(path.join(home, '.codex', 'config.toml'), codexConfig);
   const probePath = path.join(root, 'probe.mjs');
   writeFileSync(probePath, PROBE);
   // Deliberately minimal env: nothing from an Agent OS host leaks in.
-  const env = { HOME: home, PATH: process.env.PATH, AR_ROOT: arRoot, TMPDIR: root,
+  const env = { CODEX_TEST_HELPER: new URL('./helpers/codex-service-fixture.mjs', import.meta.url).href, HOME: home, PATH: process.env.PATH, AR_ROOT: arRoot, TMPDIR: root,
     REGISTRY_DOWN: down ? '1' : '0', REGISTRY_ENTRY: entry, REVIEWER_CLASS: reviewer,
     REGISTRY_FAILURE: failure, MODEL_PIN: pin, GEMINI_REVIEWER_MODEL: reviewer === 'gemini' ? pin : '',
     AGENT_OS_CODEX_PER_WORKER_AUTH: '0', CODEX_BROKER_PROVIDER: 'codex' };

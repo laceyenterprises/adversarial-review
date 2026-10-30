@@ -1,10 +1,19 @@
-import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { basename, dirname, join, resolve } from 'node:path';
+import { PER_WORKER_PLACEHOLDER_REFRESH_TOKEN } from './codex-per-worker-auth.mjs';
+import { scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 
 const template = readFileSync(new URL('./codex-service-config.toml', import.meta.url), 'utf8');
+
+function runServiceCodexCommand(command, args, options) {
+  if (args[0] !== 'login') return execFileSync(command, args, options);
+  const result = spawnSync(command, args, options);
+  if (result.error || result.status !== 0) throw serviceAuthError();
+  return `${result.stdout || ''}\n${result.stderr || ''}`;
+}
 
 // The reviewer already uses --ignore-user-config as part of its security
 // envelope. Keep it, and apply this same reviewed template through CLI
@@ -24,18 +33,63 @@ export function serviceCodexConfigArgs() {
 
 // Config and credential ownership are separate contracts. In particular an
 // explicit broker/per-worker auth path must never select the config directory.
-// This function does not read, copy, or change any credentials or source config.
+// CODEX_AUTH_PATH is an AR source-selection contract, not a Codex CLI setting.
+// Present a private, non-refreshing snapshot at the CLI's supported auth.json
+// boundary. Never link to or write back to the broker/per-worker source.
 export function prepareServiceCodexHome({ env, workspaceDir, model, effort = null, codexCli,
-  execFileSyncImpl = execFileSync, log = console }) {
+  execFileSyncImpl = runServiceCodexCommand, log = console }) {
   if (!model) throw new Error('service Codex home requires a resolved model');
   const codexHome = mkdtempSync(join(tmpdir(), 'adversarial-codex-'));
   try {
+    const codexAuthOwnerId = randomUUID();
+    writeFileSync(join(codexHome, '.service-auth-owner'), codexAuthOwnerId, { mode: 0o600 });
+    const authSourcePath = env.CODEX_AUTH_PATH
+      || join(env.CODEX_HOME || join(env.HOME || homedir(), '.codex'), 'auth.json');
+    const authPath = join(codexHome, 'auth.json');
+    try {
+      const source = JSON.parse(readFileSync(authSourcePath, 'utf8'));
+      // The deployed CLI also accepts legacy token-bearing files with no
+      // auth_mode. Normalize those to explicit ChatGPT auth; never reinterpret
+      // an explicit API-key/other mode.
+      if ((source.auth_mode != null && source.auth_mode !== 'chatgpt')
+        || typeof source.tokens?.access_token !== 'string' || !source.tokens.access_token.trim()) {
+        throw new Error('missing ChatGPT OAuth credential');
+      }
+      // Allowlist the OAuth shape: never carry an embedded API key or unrelated
+      // source metadata into the service credential store.
+      writeFileSync(authPath, JSON.stringify({
+        auth_mode: 'chatgpt',
+        tokens: {
+          id_token: source.tokens.id_token,
+          access_token: source.tokens.access_token,
+          refresh_token: PER_WORKER_PLACEHOLDER_REFRESH_TOKEN,
+          account_id: source.tokens.account_id,
+        },
+        last_refresh: new Date().toISOString(),
+      }), { mode: 0o600 });
+    } catch {
+      throw serviceAuthError();
+    }
     let config = `model = ${JSON.stringify(model)}\n`
       + (effort ? `model_reasoning_effort = ${JSON.stringify(effort)}\n` : '')
       + template
       + `\n[projects.${JSON.stringify(resolve(workspaceDir))}]\ntrust_level = "trusted"\n`;
     writeFileSync(join(codexHome, 'config.toml'), config, { mode: 0o600 });
-    const nextEnv = { ...env, CODEX_HOME: codexHome };
+    const nextEnv = { ...scrubOAuthFallbackEnv(env).env, CODEX_HOME: codexHome,
+      CODEX_AUTH_PATH: authPath };
+    // Use the actual spawn binary and effective store before debug models (which
+    // may contact the provider) or exec. Suppress all credential/parser output.
+    try {
+      const status = execFileSyncImpl(codexCli, ['login', 'status'], {
+        env: nextEnv, cwd: workspaceDir, encoding: 'utf8', timeout: 30_000,
+        maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      // The default runner captures both stdout and stderr: deployed Codex
+      // prints its successful status on stderr.
+      if (!/Logged in using ChatGPT\b/i.test(status)) throw serviceAuthError();
+    } catch {
+      throw serviceAuthError();
+    }
     let catalogPath = null;
     let stage = 'fetch';
     try {
@@ -76,10 +130,33 @@ export function prepareServiceCodexHome({ env, workspaceDir, model, effort = nul
     }
     const configDigest = createHash('sha256').update(config).digest('hex');
     log.info?.(`[codex-service] CODEX_HOME=${codexHome} config_sha256=${configDigest} model_catalog_json=${catalogPath || 'server'}`);
-    return { env: nextEnv, codexHome, configDigest, catalogPath,
+    return { env: nextEnv, codexHome, configDigest, catalogPath, authSourcePath, authPath, codexAuthOwnerId,
+      cleanupAuth: () => cleanupServiceCodexAuth({ codexHome, codexAuthOwnerId }),
       cleanup: () => rmSync(codexHome, { recursive: true, force: true }) };
   } catch (error) {
     rmSync(codexHome, { recursive: true, force: true });
     throw error;
   }
+}
+
+// A persisted worker may be reconciled by a new daemon. Require the original
+// service's ownership receipt; legacy jobs and another worker's home are no-ops.
+export function cleanupServiceCodexAuth({ codexHome, codexAuthOwnerId } = {}) {
+  if (!codexHome || !codexAuthOwnerId
+    || !basename(codexHome).startsWith('adversarial-codex-')
+    || resolve(dirname(codexHome)) !== resolve(tmpdir())) return false;
+  try {
+    if (readFileSync(join(codexHome, '.service-auth-owner'), 'utf8') !== codexAuthOwnerId) return false;
+    rmSync(join(codexHome, 'auth.json'), { force: true });
+    return true;
+  } catch { return false; }
+}
+
+function serviceAuthError() {
+  const error = new Error('Codex service OAuth unavailable at effective CLI credential store (pre-side-effect)');
+  error.name = 'OAuthError';
+  error.isOAuthError = true;
+  error.model = 'codex';
+  error.failureClass = 'oauth-broken';
+  return error;
 }

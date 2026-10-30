@@ -235,6 +235,9 @@ function readEvidence(value) {
 }
 
 export async function recoverOrphan(args = {}) {
+  // An operator hold requires no repository-state access or filesystem effects.
+  if (isOperatorHeld(args.labels || args.candidate?.labels || [])
+    && !isClosureRecoveryDecision(args.result?.nextAction)) return null;
   return withRepositoryStateCycle(args.rootDir, () => recoverOrphanWithinRepositoryCycle(canonicalRepositoryArguments(args.rootDir, args)));
 }
 

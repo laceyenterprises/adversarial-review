@@ -4,7 +4,7 @@
 **Stores:** `data/reviews.db`, `data/repository-names.json`,
 `data/repository-renames/`, service-owned files under `data/` and the configured
 reviewer state directory  
-**Source of truth:** `src/repository-identity.mjs`, `src/repository-state-files.mjs`,
+**Source of truth:** `src/repository-identity.mjs`, `src/watcher-repository-discovery.mjs`, `src/repository-state-files.mjs`,
 `src/repository-state-lock.mjs`, `src/repository-names.mjs`
 
 ## Identity and durable records

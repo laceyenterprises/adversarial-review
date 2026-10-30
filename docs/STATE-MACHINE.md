@@ -21,7 +21,9 @@ Final remediation quarantines conflicting repositories during discovery while
 unrelated intake continues at the ordinary refresh cadence. Reviewer BUSY exits
 release their existing claim without consuming an attempt. Reviewed the watcher
 producer projection and refreshed its fingerprint; lifecycle states and
-transitions remain unchanged.
+transitions remain unchanged. Organization discovery now lives in
+`src/watcher-repository-discovery.mjs` to retain the watcher size ratchet.
+Operator holds short-circuit before opening a repository state fence.
 
 SIZEOWNER-02: terminal `reviewer-prompt-too-large` and
 `reviewer-chunk-budget-exceeded` still settle to `failed`, never `pending`.

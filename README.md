@@ -2514,6 +2514,26 @@ liveness evidence can still prevent reclamation; proposed operator bound is
 
 <!-- smv:diagrams:start -->
 
+### explicit-review-intent
+
+One durable receipt per request; only a pending exact-head receipt admits one dispatch. Refused receipts retain visible-notification debt across restart. Consumed requests are never rearmed. The existing rereview dispatch bound is 900 seconds by default.
+
+```mermaid
+stateDiagram-v2
+    state "pending" as s0
+    state "consumed" as s1
+    state "refused" as s2
+    state "coalesced" as s3
+    [*] --> s0: explicit-review-intent.01 accepted exact-head request
+    s0 --> s1: explicit-review-intent.02 claim and session CAS immediately before dispatch
+    s0 --> s2: explicit-review-intent.03 head changed, terminal PR, ceiling or dispatch deadline
+    [*] --> s3: explicit-review-intent.04 additional request joins original pending head without extending deadline
+    s1 --> s2: explicit-review-intent.05 runtime dispatch fails visibly without rearming
+    s1 --> [*]
+    s2 --> [*]
+    s3 --> [*]
+```
+
 ### review-row
 
 ```mermaid
@@ -4096,3 +4116,21 @@ Offline `operator-approval-rearm`, `ama-hammer-retry-cap`, `pr-next-action` and
 SRE observes the next organic approval producing a closer launch with
 `operator-approval-applied`, without a manual step. See the
 [operator runbook](docs/RUNBOOK-ama-closure.md#awaited-operator-approval-after-exhausted-retries-approvalrearm-01).
+
+## Explicit re-review dispatch (RETRIGGERDEDUP-01)
+
+An accepted `retrigger-review`, rescue `rereview`, or remediation request
+records a durable exact-head intent. It permits one fresh review even when
+the head already has a completed review, subject to existing rereview ceilings,
+reviewer claims and head leases. Implicit repeats remain deduplicated.
+Intents survive restart and expire under the existing rereview dispatch wait
+bound, **900 seconds by default**. Ceiling, head-change and deadline refusals
+receive a visible PR explanation. A fresh review records an observed live-pack
+waiver in its body.
+
+Deploy with the normal watcher restart. The disposable refusal smoke and
+targeted watcher tests cover this lifecycle. SRE then retains the next organic
+unchanged-head request's fresh-review receipt within the dispatch bound and the
+`explicit re-review intent consumed` log, or its visible refusal. No worker
+live action is needed. See [the state machine](docs/STATE-MACHINE.md) and
+[store contract](docs/data-model/explicit-review-intents.md).

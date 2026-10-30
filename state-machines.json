@@ -366,6 +366,75 @@
   ],
   "objects": [
     {
+      "id": "explicit-review-intent",
+      "owner": "watcher review dispatch",
+      "description": "One durable receipt per request; only a pending exact-head receipt admits one dispatch. Refused receipts retain visible-notification debt across restart. Consumed requests are never rearmed. The existing rereview dispatch bound is 900 seconds by default.",
+      "codeSources": [
+        "src/explicit-review-intent.mjs",
+        "src/review-state.mjs",
+        "src/pollonce-phases.mjs"
+      ],
+      "states": [
+        {
+          "name": "pending",
+          "terminal": false,
+          "exitOwner": "watcher review dispatch",
+          "maxDurationSeconds": 900,
+          "overdueRecipient": "requester via visible PR refusal",
+          "enforcement": "present"
+        },
+        {
+          "name": "consumed",
+          "terminal": true
+        },
+        {
+          "name": "refused",
+          "terminal": true
+        },
+        {
+          "name": "coalesced",
+          "terminal": true
+        }
+      ],
+      "transitions": [
+        {
+          "id": "explicit-review-intent.01",
+          "from": "[*]",
+          "to": "pending",
+          "trigger": "accepted exact-head request",
+          "codeSource": "src/explicit-review-intent.mjs"
+        },
+        {
+          "id": "explicit-review-intent.02",
+          "from": "pending",
+          "to": "consumed",
+          "trigger": "claim and session CAS immediately before dispatch",
+          "codeSource": "src/explicit-review-intent.mjs"
+        },
+        {
+          "id": "explicit-review-intent.03",
+          "from": "pending",
+          "to": "refused",
+          "trigger": "head changed, terminal PR, ceiling or dispatch deadline",
+          "codeSource": "src/explicit-review-intent.mjs"
+        },
+        {
+          "id": "explicit-review-intent.04",
+          "from": "[*]",
+          "to": "coalesced",
+          "trigger": "additional request joins original pending head without extending deadline",
+          "codeSource": "src/explicit-review-intent.mjs"
+        },
+        {
+          "id": "explicit-review-intent.05",
+          "from": "consumed",
+          "to": "refused",
+          "trigger": "runtime dispatch fails visibly without rearming",
+          "codeSource": "src/explicit-review-intent.mjs"
+        }
+      ]
+    },
+    {
       "id": "review-row",
       "owner": "watcher",
       "codeSources": [
@@ -1688,6 +1757,7 @@
     }
   ],
   "sourceProjectionSha256": {
+    "src/explicit-review-intent.mjs": "81ecd8080cdfc99417806579d80f75cfc1926eb21bc247ea3ea618bd539b3d6e",
     "src/follow-up-operator-label.mjs": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "src/closer-head-rereview-decline.mjs": "21b6becc81f55d341b989d878161c82ad25b25a1ab1e8136c8cdf264315882b8",
     "src/remediation-ci-infrastructure.mjs": "0473feae0f4eefa22a4bcd6474788963c9fa95f11a601fdd6340da1599841568",
@@ -1697,7 +1767,7 @@
     "src/ama/pre-receipt-intent.mjs": "4954d9ad52d99a9eff753b0b0a399c15aa3b6872e2d3462b8dde2ba5f7673e0d",
     "src/follow-up-branch.mjs": "637f2a18c5fb2a89d2d02c98d80587a713a188c10d70891941d77df847579a8d",
     "src/posted-review-head-repair.mjs": "ce761260224b7a82d152e5b289e8967bbf54026c427a17bdb5cff0a6556ff7d6",
-    "src/pollonce-phases.mjs": "65a418840304cf54445d395c77251cf0d68be65118d0fb52915201aee0a6276d",
+    "src/pollonce-phases.mjs": "00c0f9ce69a4aacb76d90865f8981131eab41c0cc4ec3bac79bb825ca943d5e9",
     "src/review-statuses.mjs": "e5b4f877397ccae443c0ea47babdad7c83d71b6f474a31ad92130b88382f6a7b",
     "src/adapters/reviewer-runtime/agent-os-hq/index.mjs": "8ecf105dc9f46ac09f6a8fb369c14ff7e9cfd1bc17a46da4d87fa146a1bf4d2d",
     "src/adapters/reviewer-runtime/agent-runtime/index.mjs": "37a25e62f889f9d87e83a20495a9a3baef75f53db163ef6ed7638f7d6ac09f82",
@@ -1712,9 +1782,9 @@
     "src/follow-up-remediation.mjs": "a6bfbec3da209969aa4b50235fca4936f3b384e5f4ae5f9843fbbea7fd22275f",
     "src/orphan-post-reconcile.mjs": "a4f21f7764d361da91bfa699ad5261e41a2f8348f13c6330ea113b3ae4dad826",
     "src/posted-review-row.mjs": "ae3be33e5c3812b6d421eae1fa19311767e966681da0f8a997ae93127a1f3a07",
-    "src/review-state-db.mjs": "43b805154de9ec704d3ed9961a899fb14fbaacf6b4bced5b6a0116955d8a7e35",
+    "src/review-state-db.mjs": "97959038d5e497b70eee07af65d2589f1c706f2ffb16648064317c7d5bf3d743",
     "src/review-state-statements.mjs": "b7cce8ac8bba20cc6c4673471e681aae46931d7338f63f751c7aeb419af1edf8",
-    "src/review-state.mjs": "5bfec4a0d80f6eba7b03a6783bf99ca952c13ac788ce481410e7993cf086c4e1",
+    "src/review-state.mjs": "14a346d9eb6af8101d68c164f0e2e4e07ea23aa6a0dafa3dbabd14feda933c1b",
     "src/reviewer-ci-admission.mjs": "258c3a6d1089cb5d4a525f0b6a0836f979a79b27f6305895357180e18141fdbf",
     "src/reviewer-reattach.mjs": "c52dcf0ea186716725d5916c0be5de3619cd44e011c5c06bf4999877369ebd39",
     "src/reviewer.mjs": "10b8e5b50611cebbcffabc5e5709ffcbf33ed856f469c2a946ed14d72c775e88",
@@ -1726,5 +1796,6 @@
   "mergeLeaseGateAccounting": "GATECAPBASE-01: head/base-scoped refusal budgets refund base advances, server rebase conflicts, lane-busy, contention and planned yields under the release-identity fence. New heads and observed bases reset caps; stable-base predicate loops still stop. Capped admissible conflicts return to the existing hammer conflict procedure without a lease; other admissible heads page through durable closure-wait deduplication. Terminal, moved, held and draft heads retain admission fences. No operator reset is required. Synthetic merge-lease, recovery and rendered hammer fixtures cover these routes; existing lifecycle states, merge fences and smoke promises remain unchanged. Runtime owner may observe organic reasons and owner/page receipts read-only after normal deployment; no live worker action or new probe.",
   "ownershipUnreadableRecovery": "OWNERUNREADABLE-02: snapshot-only closure reselection and shadow resolution read lease/receipt placeholders through the bounded ledger reader. retryChainReadState distinguishes unresolved, complete and failed reads; unresolved evidence never proves absence or real unreadability. Terminal roots with empty chains reach R08; live retries retain R03 and errors/partial reads retain R04. Synthetic fixtures pin one deduplicated wake. Post-merge SRE checks no terminal launch stays in R04 retry-chain-unreadable more than one wake past its deadline (SEVDOCS-335). OWNERUNREADABLE-01: closure refresh replaces unreadable closer-lease placeholders and failed launch observations; up to three reads use 100/200 ms backoff within one five-second deadline. A terminal root with a complete empty retry chain resolves ownership. After the anchored recovery deadline, a terminal lease and readable terminal launch return a historically validated stale head to R08 hammer dispatch without re-review. Live or parked retries, unknown status, unreadable evidence, holds and caps retain ownership fences. Skipped unreadable wakes remain retryable. Existing closure-owner.04 dispatch and merge authority are unchanged.",
   "recoveryDeadlines": "RECOVERYDEADLINE-01: every closure-recovery deadline acts at expiry: readable ownerless expired leases/remote-unconfirmed receipts select capped leased hammer admission; input/structural/read failures, stops, caps, deferrals and refused dispatches escalate once per head/row/action/actor/reason with evidence. Unreadable ownership never licenses a duplicate. SRE observes no open recovery deadline more than one wake overdue after normal deployment; SEVDOCS-333. Final-round observation retains the recovery clock without a duplicate deadline page; proven live closer launches retain their existing running notices.",
-  "reviewerSizeHandoff": "SIZEOWNER-02: terminal size failures retain the head/session CAS and existing failed state. Reviewer capacity releases after that CAS before awaited handoff while the per-head dispatch lease stays held. Two durable head reservations per PR, including legacy and unconfirmed records, cap shrink-diff dispatches across head churn; exhaustion persists shrink-diff-ceiling-exhausted and alerts. Transient transport retries use one key at most three times within one minute, with no later automatic resubmission. Head-bound HQ result evidence and final bounded stderr facts feed the untrusted-data brief. Same-head claim mismatch logs without replacing ownership; direct invocations alert. No lifecycle states, merge authority or smoke promises change."
+  "reviewerSizeHandoff": "SIZEOWNER-02: terminal size failures retain the head/session CAS and existing failed state. Reviewer capacity releases after that CAS before awaited handoff while the per-head dispatch lease stays held. Two durable head reservations per PR, including legacy and unconfirmed records, cap shrink-diff dispatches across head churn; exhaustion persists shrink-diff-ceiling-exhausted and alerts. Transient transport retries use one key at most three times within one minute, with no later automatic resubmission. Head-bound HQ result evidence and final bounded stderr facts feed the untrusted-data brief. Same-head claim mismatch logs without replacing ownership; direct invocations alert. No lifecycle states, merge authority or smoke promises change.",
+  "explicitReviewIntent": "RETRIGGERDEDUP-01: accepted label, rescue and remediation rereviews atomically persist a request receipt with the review reset. Pending receipts are scoped to repository, PR and exact head and coalesce without extending the dispatch deadline. Under the existing claim and head lease, pending becomes consumed once at dispatch; ordinary rereview budgets count that attempt. Head movement, terminal PR, ceiling exhaustion or the existing rereview wait deadline (default 900 seconds) moves pending to refused. Refusal notification debt persists until a visible comment succeeds. Same-head implicit redispatch stays deduplicated; row repair cannot restore posted over pending intent."
 }

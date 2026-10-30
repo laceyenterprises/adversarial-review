@@ -26,7 +26,7 @@ function main(args, options) {
   const isolatedArgs = args.includes('--audit-root-dir')
     ? args
     : [...args, '--audit-root-dir', isolatedAuditRoot];
-  return retriggerReviewMain(isolatedArgs, options);
+  return retriggerReviewMain(isolatedArgs, { fetchCurrentHeadShaImpl: fakeCurrentHeadSha, ...options });
 }
 
 function makeCaptureStream() {

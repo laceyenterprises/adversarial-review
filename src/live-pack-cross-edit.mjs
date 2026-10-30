@@ -667,6 +667,7 @@ async function applyLivePackCrossEditReview(reviewText, {
   const currentLabels = Array.isArray(labels) ? labels : [];
   let findings;
   let exemptions = [];
+  let waiverAudit = '';
   try {
     const review = await evaluateImpl({
       repo,
@@ -687,6 +688,8 @@ async function applyLivePackCrossEditReview(reviewText, {
       );
     }
     if (review.waived) {
+      waiverAudit = `\n\n> Operator waiver observed by this fresh review: \`${LIVE_PACK_EDIT_WAIVER_LABEL}\` `
+        + `waived \`${LIVE_PACK_CROSS_EDIT_KIND}\` for ${review.waivedFindings.length} pack(s).`;
       log?.error?.(
         `[reviewer] live-pack cross-edit waived by ${LIVE_PACK_EDIT_WAIVER_LABEL} for ${repo}#${prNumber}: ` +
           review.waivedFindings.map((finding) => finding.pack).join(', '),
@@ -704,7 +707,7 @@ async function applyLivePackCrossEditReview(reviewText, {
         `runs=${finding.run_ids.join(',') || '<inconclusive>'} files=${finding.touched_files.join(', ')}`,
     );
   }
-  return appendLivePackStampExemptions(applyLivePackCrossEditFindings(reviewText, findings), exemptions);
+  return appendLivePackStampExemptions(applyLivePackCrossEditFindings(reviewText, findings), exemptions) + waiverAudit;
 }
 
 // Remediation entry point for a follow-up job. `execFileImpl` is threaded to

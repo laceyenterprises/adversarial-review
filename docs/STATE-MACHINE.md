@@ -23,6 +23,21 @@ identity, predecessor restoration and bounded unknown-evidence accounting retain
 the existing hammer-dispatch states and transitions. Closing-decision and CI
 ownership precedence remain unchanged.
 
+## Explicit same-head re-review intent (RETRIGGERDEDUP-01)
+
+Accepted label, CLI, rescue and remediation requests atomically pair their row
+reset with a persistent exact-head request receipt. `pending` intent becomes
+`consumed` once immediately before reviewer dispatch under the existing claim
+and head lease. It spends the normal rereview budget. Concurrent request IDs
+coalesce without extending the deadline; replayed IDs cannot grant another pass.
+
+Credential and capacity holds retain pending intent. Head movement, terminal
+PR, exhausted ceilings or the existing rereview dispatch wait bound (900 seconds
+by default) produce `refused` intent and a visible explanation. Notice failures
+remain durable delivery debt. A valid pending intent prevents dedup row repair
+from restoring `posted`. Implicit same-head dispatch remains deduplicated.
+See [the store contract](data-model/explicit-review-intents.md).
+
 SIZEOWNER-02: terminal `reviewer-prompt-too-large` and
 `reviewer-chunk-budget-exceeded` still settle to `failed`, never `pending`.
 The size-failure writer now fences the dispatched head and session. Settlement

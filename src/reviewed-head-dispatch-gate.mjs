@@ -141,10 +141,18 @@ export async function resolveAlreadyReviewedHeadDedup({
   reviewerLogins = null,
   fetchReviewsForHeadImpl,
   logger = console,
+  explicitReviewIntent = null,
 } = {}) {
   const head = String(headSha || '').trim();
   if (!head) {
     return { alreadyReviewed: false, reviewId: null, reviewSubmittedAt: null, reason: 'missing-head-sha' };
+  }
+  if (explicitReviewIntent?.state === 'pending'
+      && explicitReviewIntent.repo === repoPath
+      && explicitReviewIntent.pr_number === Number(prNumber)
+      && explicitReviewIntent.head_sha === head
+      && explicitReviewIntent.expires_at > new Date().toISOString()) {
+    return { alreadyReviewed: false, reviewId: null, reviewSubmittedAt: null, reason: 'explicit-review-intent' };
   }
   if (typeof fetchReviewsForHeadImpl !== 'function') {
     return { alreadyReviewed: false, reviewId: null, reviewSubmittedAt: null, reason: 'no-fetch-impl' };

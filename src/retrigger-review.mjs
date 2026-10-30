@@ -574,6 +574,17 @@ async function main(argv, {
 			return EXIT_RUNTIME;
 		}
 	}
+  if (!targetRevisionRef) {
+    try {
+      targetRevisionRef = resolveReviewHead(reviewRow) || await fetchCurrentHeadShaImpl({
+        repo: values.repo, prNumber: values.pr,
+      });
+      baseAudit.targetRevisionRef = targetRevisionRef;
+    } catch (err) {
+      stderr.write(`error: could not resolve re-review head: ${err.message}\n`);
+      return EXIT_RUNTIME;
+    }
+  }
 
 	const exactHeadReviewRef = targetRevisionRef || resolveReviewHead(reviewRow);
 	if (values['exact-head-now'] && isStaleActiveFollowUpJob(latestJob, exactHeadReviewRef)) {
@@ -818,6 +829,7 @@ async function main(argv, {
       prNumber: values.pr,
       reason,
       targetRevisionRef,
+      explicitReviewRequest: { requestId: idempotencyKey, actor: operator },
     });
   } catch (err) {
     stderr.write(`error: rereview failed: ${err.message}\n`);

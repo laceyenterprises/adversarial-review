@@ -478,7 +478,13 @@ test('posting-time labels revoke in-flight waivers and failed reads grant no wai
         },
       });
       if (scenario === 'still-present') {
-        assert.equal(body, REVIEW_TEXT);
+        assert.ok(body.startsWith(REVIEW_TEXT));
+        if (evaluationFails) assert.equal(body, REVIEW_TEXT);
+        else {
+          assert.match(body, /Operator waiver observed by this fresh review/);
+          assert.match(body, /`live-pack-edit-approved` waived `live_pack_cross_edit`/);
+        }
+        assert.equal(reviewBodyHasLivePackCrossEditFinding(body), false);
       } else {
         assert.equal(normalizeEffectiveReviewVerdict(body, { log: null }), 'request-changes');
         assert.ok(reviewBodyHasLivePackCrossEditFinding(body));

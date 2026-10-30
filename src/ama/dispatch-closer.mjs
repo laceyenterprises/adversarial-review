@@ -7366,6 +7366,12 @@ async function maybeDispatchAmaCloserAttempt({
     });
   }
 
+  // Retained custody must not erase a lease-held receipt: the next tick
+  // re-probes the same launch rather than falling back to worker evidence.
+  const restorePredecessorCloserLease = () => Boolean(predecessorLease?.lrqId
+    && predecessorLease.workerId === workerId
+    && restoreAmaCloserLeaseIfCurrent(rootDir, predecessorLease, { expectedLease: leaseResult.lease }));
+
   // Allocate only for a lease-owning launch attempt.
   let scratchDir;
   let retainScratchDir = false;
@@ -7396,11 +7402,7 @@ async function maybeDispatchAmaCloserAttempt({
       throw error;
     }
     if (closerReclaim.live || closerReclaim.unknown) {
-      // Retained custody must not erase a lease-held receipt: the next tick
-      // re-probes the same launch rather than falling back to worker evidence.
-      const restored = predecessorLease?.lrqId && predecessorLease.workerId === workerId
-        && restoreAmaCloserLeaseIfCurrent(rootDir, predecessorLease, { expectedLease: leaseResult.lease });
-      if (!restored) updateAmaCloserLease({ rootDir, ...leaseIdentity, status: 'terminal',
+      if (!restorePredecessorCloserLease()) updateAmaCloserLease({ rootDir, ...leaseIdentity, status: 'terminal',
         expectedLease: leaseResult.lease,
         terminalOutcome: 'deferred', now: dispatchContext.dispatchedAt });
       if (closerReclaim.unknown) {
@@ -7765,6 +7767,7 @@ async function maybeDispatchAmaCloserAttempt({
     // (which collides on the worktree and force-kills the live worker) and do NOT
     // fall back to the merge-agent (which skips as remediation-active). Defer this
     // cycle; unknown evidence has a durable bounded page, never age-based teardown.
+    restorePredecessorCloserLease();
     logger.info?.(
       `[ama-closer] deferring dispatch: PR ${repo}#${prNumber} hammer closer custody is retained `
       + `(status=${closerReclaim.workerStatus || 'unknown'}); waiting for it to complete`,

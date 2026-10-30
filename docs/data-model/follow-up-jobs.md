@@ -853,3 +853,7 @@ well. An explicitly refused corporate fallback records
 `unrunnable-in-mode:local` immediately and cannot become an undeclared personal
 fallback or an account-exhaustion diagnostic. Primary family routing and OS-mode
 account selection retain their existing contracts.
+
+REMEDIATORLANE-01 final diagnostic guard: an account already excluded by quota
+cannot acquire a mode-refusal attribution from unknown account evidence. Its
+existing quota/account hold diagnostics remain authoritative.

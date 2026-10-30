@@ -193,3 +193,14 @@ for (const primary of ['ok', 'exhausted']) {
     assert.deepEqual(held.skipped, [{ workerClass: 'remediator-claude-corp', reason: 'unrunnable-in-mode:local' }]);
   });
 }
+
+
+test('a capped corporate account and unknown personal evidence do not create a mode refusal', async () => {
+  const held = await resolve(claudeAccountFixture({ corp: 'exhausted', primary: 'unknown' }), {
+    primary: 'codex', fallbackWorkerClasses: ['remediator-claude'], reviewerModels: ['codex'], remediationMode: 'local',
+  });
+  assert.equal(held.hold, true);
+  assert.equal(held.reason, 'no-available-fallback');
+  assert.equal(held.modeRefusals, undefined);
+  assert.deepEqual(held.skipped, [{ workerClass: 'remediator-claude', reason: 'no-ready-claude-account' }]);
+});

@@ -307,7 +307,7 @@ async function resolveModeRunnableWorkerClass({
     // falls through to the next Claude account, or holds when none is ready.
     const corporate = corporateClaudeLane(workerClass);
     if (lane && corporate && ((lane.workerClass === corporate && !lane.hold)
-      || lane.reason === 'claude-account-evidence-unknown') && refuseInMode(corporate)) {
+      || (lane.reason === 'claude-account-evidence-unknown' && !blocked.includes(corporate))) && refuseInMode(corporate)) {
       return select([...blocked, corporate]);
     }
     return lane;

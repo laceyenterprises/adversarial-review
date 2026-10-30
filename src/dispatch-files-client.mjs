@@ -24,6 +24,56 @@ export function readDispatchFilesSync(selector, args = {}) {
   }
   catch { return unavailable(); }
 }
+
+const STDOUT_PAGE_BYTES = 262144;
+export const MAX_DISPATCH_STDOUT_BYTES = 4 * 1024 * 1024;
+
+// A complete stdout fallback may span several public pages. Raw offsets (not
+// redacted text lengths) drive pagination. A stable generation and size fence
+// prevent stitching together rotated, growing or reset files as a full review.
+function* collectDispatchStdout(selector, args) {
+  let offset = 0, first = null, text = '';
+  const deadline = Date.now() + (args.timeoutMs ?? 8000);
+  for (let page = 0; page < 64; page++) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return unavailable();
+    const result = yield { selector: {...selector, tail:false, offset, limit:STDOUT_PAGE_BYTES},
+      args: {...args, timeoutMs:remaining} };
+    const log = result?.log;
+    if (!result?.ok || log?.status !== 'found' || log.redacted !== true || log.reset
+      || log.boundaryTruncated || log.offset !== offset || typeof log.text !== 'string'
+      || !Number.isSafeInteger(log.size) || log.size > MAX_DISPATCH_STDOUT_BYTES
+      || !Number.isSafeInteger(log.nextOffset) || log.nextOffset < offset || log.nextOffset > log.size) return unavailable();
+    if (first && (!first.log.generation || log.generation !== first.log.generation || log.size !== first.log.size)) return unavailable();
+    first ||= result;
+    text += log.text;
+    if (Buffer.byteLength(text) > MAX_DISPATCH_STDOUT_BYTES) return unavailable();
+    if (log.complete === true && !log.truncated && log.nextOffset === log.size) {
+      return {...result, log:{...log, offset:0, text}};
+    }
+    if (log.nextOffset <= offset || !log.generation) return unavailable();
+    offset = log.nextOffset;
+  }
+  return unavailable();
+}
+
+export async function readDispatchStdout(selector, args = {}) {
+  const pages = collectDispatchStdout(selector, args);
+  let step = pages.next();
+  while (!step.done) {
+    step = pages.next(await readDispatchFiles(step.value.selector, step.value.args));
+  }
+  return step.value;
+}
+export function readDispatchStdoutSync(selector, args = {}, readFiles = readDispatchFilesSync) {
+  const pages = collectDispatchStdout(selector, args);
+  let step = pages.next();
+  while (!step.done) {
+    step = pages.next(readFiles(step.value.selector, step.value.args));
+  }
+  return step.value;
+}
+
 export async function readWorkerDispatchFiles(workerId, args = {}) {
   const observed = await readWorkerObservation({observation: 'workers', worker_id: workerId}, args);
   // Worker slots are reused. Without a producer ordering contract, multiple runs

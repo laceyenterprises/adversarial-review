@@ -25,7 +25,7 @@ import { loadAwareTimeoutMs } from '../../../load-aware-timeout.mjs';
 // safe (§6.3).
 
 import { createHash } from 'node:crypto';
-import { readDispatchFiles } from '../../../dispatch-files-client.mjs';
+import { readDispatchStdout } from '../../../dispatch-files-client.mjs';
 import { loadAppSdkConnect } from '../../../app-sdk-loader.mjs';
 import {
   isExpiredAppContractSessionError,
@@ -717,7 +717,7 @@ function createOsDispatchAgentRuntime({
       const mapped = mapTerminalStatus(statusPayload);
       if (mapped) {
         return buildTerminalResult(mapped, statusPayload, role, artifactContext, {
-          dispatchFiles: await readDispatchFiles({launch_request_id: launchRequestRefStrict(statusPayload), limit: 262144}, {dispatchSession: activeSession, env}),
+          dispatchFiles: await readDispatchStdout({launch_request_id: launchRequestRefStrict(statusPayload)}, {dispatchSession: activeSession, env}),
         });
       }
       if (deadlineMs === null && Number.isFinite(boundedDurationMs) && boundedDurationMs > 0) {

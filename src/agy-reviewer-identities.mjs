@@ -622,17 +622,27 @@ function readBootstrapRecord(user, { env = process.env } = {}) {
 
 // Agent OS owns the comparison and fingerprint recipe. This command only
 // reads the world-readable pinned files; it never runs sudo or a helper.
+const pinnedCopyWarningReads = new WeakMap();
 async function readPinnedCopyWarnings({ env = process.env, runImpl = runBoundedProcess, loadConfigImpl = loadConfigCached } = {}) {
   const root = env.AGENT_OS_DEPLOY_CHECKOUT || loadConfigImpl({ env }).get('roots.deploy');
   if (!root || !isAbsolute(root)) throw new Error('pinned-copy currency requires an absolute deploy checkout');
-  const result = await runImpl(join(root, 'modules/worker-pool/bin/agy-reviewer-identities'), ['currency'], { env });
-  if (result.code !== 0 || result.timedOut || result.error) throw new Error(describeFailure('pinned-copy currency', result));
-  const warnings = JSON.parse(result.stdout);
-  if (!Array.isArray(warnings) || warnings.some(warning => warning?.code !== 'pinned-copy-stale'
-    || !/^[a-f0-9]{64}$/.test(warning.fingerprint) || !Array.isArray(warning.files) || !Array.isArray(warning.findings))) {
-    throw new Error('invalid pinned-copy currency response');
-  }
-  return warnings;
+  let byEnvironment = pinnedCopyWarningReads.get(runImpl);
+  if (!byEnvironment) { byEnvironment = new WeakMap(); pinnedCopyWarningReads.set(runImpl, byEnvironment); }
+  const at = Date.now();
+  const prior = byEnvironment.get(env);
+  if (prior?.root === root && at >= prior.at && at - prior.at < 30_000) return prior.promise;
+  const promise = (async () => {
+    const result = await runImpl(join(root, 'modules/worker-pool/bin/agy-reviewer-identities'), ['currency'], { env });
+    if (result.code !== 0 || result.timedOut || result.error) throw new Error(describeFailure('pinned-copy currency', result));
+    const warnings = JSON.parse(result.stdout);
+    if (!Array.isArray(warnings) || warnings.some(warning => warning?.code !== 'pinned-copy-stale'
+      || !/^[a-f0-9]{64}$/.test(warning.fingerprint) || !Array.isArray(warning.files) || !Array.isArray(warning.findings))) {
+      throw new Error('invalid pinned-copy currency response');
+    }
+    return warnings;
+  })();
+  byEnvironment.set(env, { root, at, promise });
+  return promise;
 }
 
 async function defaultCheckHqOwnerAuth({ env }) {

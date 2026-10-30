@@ -928,10 +928,17 @@ export const AMA_CLOSER_LEASE_STATUS = Object.freeze({
 // against retiring a successor or a completed review handoff.
 export function releaseRetryableAmaCloserLease(...args) {
   const root = args[0]?.rootDir;
-  return withRepositoryStateRead(root, () => {
-    args[0] = canonicalRepositoryArguments(root, args[0]);
-    return releaseRetryableAmaCloserLeaseWithinRepositoryState(...args);
-  });
+  try {
+    return withRepositoryStateRead(root, () => {
+      args[0] = canonicalRepositoryArguments(root, args[0]);
+      return releaseRetryableAmaCloserLeaseWithinRepositoryState(...args);
+    });
+  } catch (error) {
+    // The audit already committed. Settlement is best effort: a contended or
+    // changed lease must retain custody without failing the audit CLI contract.
+    (args[0]?.logger || console).warn?.(`[ama-closer] retryable lease release deferred: ${error.code || error.message}`);
+    return false;
+  }
 }
 
 function releaseRetryableAmaCloserLeaseWithinRepositoryState({ rootDir, repo, prNumber, headSha,

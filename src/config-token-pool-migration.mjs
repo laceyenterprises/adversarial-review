@@ -70,7 +70,8 @@ export function inspectLegacyPoolOverrides(cfg) {
     // Unresolved providers cannot prove agreement and must remain conflicts.
     const agrees = orders.every(order => order?.length > 0
       && order.every(provider => preferred.includes(provider))
-      && order.join(',') === preferred.filter(p => order.includes(p)).join(','));
+      && order.every((provider, index) => index === 0
+        || preferred.indexOf(order[index - 1]) <= preferred.indexOf(provider)));
     if (!agrees) conflicts.push(key);
     else redundant.push(key);
   }

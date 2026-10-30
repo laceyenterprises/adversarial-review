@@ -60,10 +60,10 @@ export function readReviewObservations({ rootDir, selector, repositories }) {
       const passFields = { body_md: 'review_body', verdict: 'verdict', ended_at: 'review_ended_at', attempt_number: 'attempt_number' };
       const closeFields = { closeout_body_md: 'closeout_body', closeout_posted_at: 'closeout_posted_at' };
       const passQuery = ['repo', 'pr_number', 'pass_id', 'status'].every(field => passCols.has(field))
-        ? db.prepare(`SELECT ${Object.entries(passFields).map(([field, alias]) => `${passCols.has(field) ? field : 'NULL'} AS ${alias}`).join(',')} FROM reviewer_passes WHERE lower(repo) = lower(?) AND pr_number = ? AND status = 'completed' ORDER BY pass_id DESC LIMIT 1`)
+        ? db.prepare(`SELECT ${Object.entries(passFields).map(([field, alias]) => `${passCols.has(field) ? field : 'NULL'} AS ${alias}`).join(',')} FROM reviewer_passes WHERE repo = ? COLLATE NOCASE AND pr_number = ? AND status = 'completed' ORDER BY pass_id DESC LIMIT 1`)
         : null;
       const closeoutQuery = ['repo', 'pr_number'].every(field => closeCols.has(field))
-        ? db.prepare(`SELECT ${Object.entries(closeFields).map(([field, alias]) => `${closeCols.has(field) ? field : 'NULL'} AS ${alias}`).join(',')} FROM pr_merge_closeouts WHERE lower(repo) = lower(?) AND pr_number = ? LIMIT 1`)
+        ? db.prepare(`SELECT ${Object.entries(closeFields).map(([field, alias]) => `${closeCols.has(field) ? field : 'NULL'} AS ${alias}`).join(',')} FROM pr_merge_closeouts WHERE repo = ? COLLATE NOCASE AND pr_number = ? ORDER BY ${closeCols.has('closeout_posted_at') ? 'closeout_posted_at DESC, ' : ''}rowid DESC LIMIT 1`)
         : null;
       for (const item of items) {
         const pass = passQuery?.get(item.repo, item.pr_number);

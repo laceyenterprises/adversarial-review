@@ -501,8 +501,13 @@ function resolveRemediationModel(className, {
   const rawModelPin = String(pin ?? '').trim();
   const modelPin = rawModelPin ? nonEmptyModelString(rawModelPin) : null;
   let registryFailure;
-  const fail = (reason) => {
+  const fail = (reason, invalidPin = false) => {
     const error = new RegistryUnavailableError(className, reason, registryFailure);
+    if (invalidPin) {
+      Object.assign(error, { failureClass: 'reviewer-configuration-error', reason: 'invalid-model-pin',
+        detail: 'correct or unset explicit model pin', category: 'configuration' });
+      error.message = `[reviewer-configuration-error] invalid model pin for ${className}: ${reason}`;
+    }
     log.error?.(`[worker-model] ${className} modelSource=unresolved: ${reason}`);
     throw error;
   };
@@ -520,7 +525,7 @@ function resolveRemediationModel(className, {
   const seedClasses = seed?.classes;
   const seedSpec = seedClasses && typeof seedClasses === 'object' && !Array.isArray(seedClasses)
     ? seedClasses[className] : null;
-  if (rawModelPin && !modelPin) fail('invalid explicit model pin; correct or unset pin');
+  if (rawModelPin && !modelPin) fail('invalid explicit model pin; correct or unset pin', true);
   // A registry allowlist remains authoritative for a pin even when that class
   // has no default. The seed must not reject a newer registry-approved pin.
   const useRegistry = registryAvailable;
@@ -532,7 +537,7 @@ function resolveRemediationModel(className, {
   for (const [candidate, authority] of [[registrySpec, 'registry'], [spec, source]]) {
     if (candidate?.allowedModels !== undefined
       && (!Array.isArray(candidate.allowedModels) || !candidate.allowedModels.includes(model))) {
-      fail(`resolved model ${JSON.stringify(model)} is outside ${authority} allowedModels${modelPin ? '; correct or unset explicit model pin' : ''}`);
+      fail(`resolved model ${JSON.stringify(model)} is outside ${authority} allowedModels${modelPin ? '; correct or unset explicit model pin' : ''}`, Boolean(modelPin));
     }
   }
   const pinnedReasoning = normalizeReasoningLevel(className, reasoningPin, 'env', nowMs);

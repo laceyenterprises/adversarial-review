@@ -292,10 +292,10 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     const state = db.prepare('SELECT * FROM heads WHERE head=?').get(headSha);
     const storedIdleSince = db.prepare('SELECT idleSince FROM ownership WHERE id=1').get().idleSince;
     let selected = result?.nextAction;
-    const overdue = overdueNextAction(selected, headSha, now, env);
-    const recoveryExpired = overdue && isClosureRecoveryDecision(selected);
-    const expiredAction = overdue ? selected : null;
-    const idleSince = overdue && (!storedIdleSince || Date.parse(selected.deadline.at) < Date.parse(storedIdleSince))
+    let overdue = overdueNextAction(selected, headSha, now, env);
+    let recoveryExpired = overdue && isClosureRecoveryDecision(selected);
+    const initiallyExpiredAction = overdue ? selected : null;
+    let idleSince = overdue && (!storedIdleSince || Date.parse(selected.deadline.at) < Date.parse(storedIdleSince))
       ? selected.deadline.at : storedIdleSince;
     let ownership;
     const exactHeadReview = hasExactHeadReviewDecision(result, headSha, reviewStateRow);
@@ -314,6 +314,13 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     catch (error) { logger?.warn?.(`Closure ownership observation failed: ${text(error.message)}`); }
     // Observation may replace the shared generation. Never dispatch its predecessor.
     selected = result?.nextAction;
+    overdue = overdueNextAction(selected, headSha, now, env);
+    recoveryExpired = overdue && isClosureRecoveryDecision(selected);
+    // A still-expired successor pages the transition whose deadline lapsed.
+    // A fresh successor has no expired transition to page on this pass.
+    const expiredAction = overdue ? initiallyExpiredAction || selected : null;
+    idleSince = overdue && (!storedIdleSince || Date.parse(selected.deadline.at) < Date.parse(storedIdleSince))
+      ? selected.deadline.at : storedIdleSince;
     if (ownership?.owned) {
       db.prepare('UPDATE ownership SET idleSince=NULL WHERE id=1').run();
       db.prepare('UPDATE heads SET idleSince=NULL WHERE head=?').run(headSha);

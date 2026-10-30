@@ -417,14 +417,19 @@ function checkedObservation(reply, selector, offset) {
 
 // Compatibility callers requesting the latest matching receipt do not claim a
 // complete inventory. Keep the page's completeness distinct from row validity.
-export async function readLatestReviewObservation(selector, args = {}) {
+export async function readWorkerObservationPage(selector, args = {}) {
+  const limit = selector.limit ?? 100;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) return {ok:false,reason:'worker-observation-unavailable'};
   try {
-    const reply=await boundedLookup({...selector,limit:1,offset:0},args);
-    const evidence=checkedObservation(reply,selector,0);
-    if(!evidence.ok) return evidence;
-    if(evidence.rows.length>1) return {ok:false,reason:'worker-observation-unavailable'};
-    return {...observationRows(evidence.rows,selector.observation),complete:reply.complete};
-  } catch(error) {cachedSession=null;return observationFailure(error);}
+    const reply = await boundedLookup({...selector, limit, offset:0}, args);
+    const evidence = checkedObservation(reply, selector, 0);
+    if (!evidence.ok) return evidence;
+    if (evidence.rows.length > limit) return {ok:false,reason:'worker-observation-unavailable'};
+    return {...observationRows(evidence.rows, selector.observation), complete:reply.complete};
+  } catch (error) { cachedSession=null; return observationFailure(error); }
+}
+export async function readLatestReviewObservation(selector, args = {}) {
+  return readWorkerObservationPage({...selector, limit:1}, args);
 }
 export function readLatestReviewObservationSync(selector, args = {}) {
   try {

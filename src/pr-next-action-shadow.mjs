@@ -151,7 +151,7 @@ export function resolveSharedNextAction({ snapshot = null, passSnapshot = null, 
         && existing.value?.closer?.retryChainUnreadable !== true
         && prior.decision.reason !== 'ownership-unreadable'
         && launch?.launchRequestId && launch.launchRequestId === existing?.value?.closer?.launchRequestId
-        && launch.headSha === existing.value.closer.headSha;
+        && (launch.headSha || passSnapshot.head) === existing.value.closer.headSha;
       // A registered pair may use the pass itself as its snapshot. Derive a
       // fresh base so recovery cannot wait on its own in-flight refresh.
       const base = deriveNextActionSnapshot({ base: { ...prior.snapshot,
@@ -270,7 +270,10 @@ export function shadowNextAction({ source, legacy = null, snapshot = null, passS
   try {
     if (inertUnderTest(sink, env)) return Promise.resolve(null);
     adapted = adaptLegacy(legacy);
-    sharedPromise = shared ? Promise.resolve(shared) : resolveSharedNextAction({ snapshot, passSnapshot, rootDir,
+    // Resolving a supplied snapshot is observational. Use a private identity so
+    // placeholder resolution cannot replace a registered routing generation.
+    sharedPromise = shared ? Promise.resolve(shared) : resolveSharedNextAction({
+      snapshot: snapshot ? deriveNextActionSnapshot({ base: snapshot }) : null, passSnapshot, rootDir,
       evidence: typeof evidence === 'function' ? evidence() : evidence });
     if (!sharedPromise) return Promise.resolve(null);
   } catch {

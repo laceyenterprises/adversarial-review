@@ -1,5 +1,5 @@
 import { readSizeFacts } from '../../../reviewer-size-owner.mjs';
-import { readHostIdentitySync, readDispatchFilesSync } from '../../../dispatch-files-client.mjs';
+import { readHostIdentitySync, readDispatchFilesSync, readDispatchStdoutSync } from '../../../dispatch-files-client.mjs';
 import { parseHqDispatchStatusOutput } from '../../../hq-dispatch-status-output.mjs';
 import { readDispatchReceipt, parseHqDispatchStatus } from '../../../producer-contracts/dispatch-receipt.mjs';
 import { readDispatchStatus } from '../../../producer-contracts/launch-status.mjs';
@@ -266,7 +266,7 @@ function readValidatedArtifact(artifactPath) {
 function readValidatedReviewOutput({ artifactPath, dispatchId, hqRoot, env, readDispatchFilesImpl = readDispatchFilesSync }) {
   try { return readValidatedArtifact(artifactPath); }
   catch (artifactErr) {
-    const result = readDispatchFilesImpl({launch_request_id: dispatchId, limit: 262144}, {hqRoot, env});
+    const result = readDispatchStdoutSync({launch_request_id: dispatchId}, {hqRoot, env}, readDispatchFilesImpl);
     if (!result?.ok || result.log?.status !== 'found' || result.log.truncated || result.log.complete !== true || result.log.boundaryTruncated) throw artifactErr;
     return validateReviewArtifact(result.log.text);
   }

@@ -820,7 +820,9 @@ export async function processReviewSubject(entry, ctx) {
             rootDir: ROOT, repo: repoPath, prNumber, subject, reviewStateRow: existing,
             domainId: effectiveDomainId, enabled: authority?.enabled, execFileImpl: execFileAsync, logger: console,
           });
-          if (recovered?.outcome === 'ama-dispatched') return;
+          // Pending review recovery and exhausted routes own this pass too;
+          // admission must not reuse the row captured before recovery acted.
+          if (recovered?.outcome != null) return;
         } catch (error) {
           console.warn(`[watcher] OWNERDEADLINE-01 deadline recovery deferred for ${repoPath} PR ${prNumber}: ${error.message}`);
         }

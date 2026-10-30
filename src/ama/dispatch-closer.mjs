@@ -219,6 +219,9 @@ const SUBMODULE_ROOT = resolve(__dirname, '..', '..');
 const AGENT_OS_ROOT = resolve(SUBMODULE_ROOT, '..', '..');
 
 const DEFAULT_HQ_PATH = '/Users/airlock/.local/bin/hq';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
+function resolveCloserHqPath(dispatchContext = {}, env = process.env) {
+  return dispatchContext.hqPath || env.HQ_BIN || DEFAULT_HQ_PATH;
+}
 const DEFAULT_HQ_ROOT = process.env.HQ_ROOT || process.env.AGENT_OS_HQ_ROOT || null;
 const DEFAULT_PROJECT = 'adversarial-merge-authority';
 const HAMMER_TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'hammer-prompt.md');
@@ -1140,6 +1143,7 @@ async function fetchMergeCommitShaBestEffort({
 
 async function emitWorkerGitMergeSignalBestEffort({
   execFileImpl,
+  hqPath,
   hqRoot,
   repo,
   prNumber,
@@ -1156,7 +1160,9 @@ async function emitWorkerGitMergeSignalBestEffort({
     await loadAppSdkSync().recordMergeSignal({hq_root:hqRoot, pr_number:Number(prNumber),
       launch_request_id:launchRequestId, ticket_ref:ticketRef, merge_commit_sha:mergeCommitSha,
       merged_by:mergedBy || 'ama-closer', mode:mode || 'squash'},
-    {execFile:execFileImpl, hq_bin:env.HQ_BIN || 'hq', env, timeout_ms:loadAwareTimeoutMs(15000)});
+    // Production callers pass the resolved daemon path. Retain the legacy
+    // PATH default for direct callers that do not supply a dispatch context.
+    {execFile:execFileImpl, hq_bin:hqPath || env.HQ_BIN || 'hq', env, timeout_ms:loadAwareTimeoutMs(15000)});
     return true;
   } catch (err) {
     logger?.warn?.(JSON.stringify({
@@ -3585,6 +3591,8 @@ export const __testables__ = Object.freeze({
   normalizeAmaLivePrProbeResult,
   fetchMergeCommitShaBestEffort,
   emitWorkerGitMergeSignalBestEffort,
+  resolveCloserHqPath,
+  mergeCaptureDiagnosticUpdate,
   readMergedBuildCompletionSignal,
   readMergedBuildCompletionSignalAsync,
 });
@@ -3828,6 +3836,8 @@ function* readMergedBuildCompletionSignalSteps({
   try { result = yield readBuildCompletionSignalForPrImpl(readArgs); }
   catch { result = {ok:false,reason:'worker-observation-unavailable'}; }
   const missingCapture = (failure) => {
+    // Local selector errors are not evidence of a producer/grant outage.
+    if (['missing-repo', 'missing-pr-number', 'missing-signal-kind'].includes(failure?.reason)) return failure;
     const readReason = failure?.reason === 'worker-observation-scope-denied'
       ? 'merge-capture-read-scope-denied' : 'merge-capture-read-unavailable';
     logger?.warn?.(JSON.stringify({event:'ama_closer.merge_capture_read_degraded',repo,prNumber,reason:readReason}));
@@ -3890,6 +3900,21 @@ function* readMergedBuildCompletionSignalSteps({
 
 function isCleanMissingMergedSignal(result) {
   return result?.ok === false && result.reason === 'missing-build-completion-signal' && !result.readReason;
+}
+
+function mergeCaptureDiagnosticUpdate(current, signal, observedAt) {
+  if (!current) return null;
+  if (signal?.readReason) {
+    if (current.mergeCaptureReadReason === signal.readReason) return null;
+    return { ...current, mergeCaptureReadReason: signal.readReason, mergeCaptureReadAt: observedAt };
+  }
+  if (!signal?.ok && !isCleanMissingMergedSignal(signal)
+    && signal?.reason !== 'missing-build-completion-producer-evidence') return null;
+  if (!Object.hasOwn(current, 'mergeCaptureReadReason') && !Object.hasOwn(current, 'mergeCaptureReadAt')) return null;
+  const next = { ...current };
+  delete next.mergeCaptureReadReason;
+  delete next.mergeCaptureReadAt;
+  return next;
 }
 
 function isUnknownMergedSignal(result) {
@@ -4548,7 +4573,7 @@ async function maybeDispatchAmaCloserWithinRepositoryCycle(args) {
     if (args.cfg?.enabled && isDrainDeferredAmaCloserRecord(deferred)) {
       try {
         const status = await (args.readDispatchDrainStatusImpl || readDispatchDrainStatus)({
-          hqPath: dispatchContext.hqPath || process.env.HQ_BIN || DEFAULT_HQ_PATH,
+          hqPath: resolveCloserHqPath(dispatchContext),
           hqRoot: dispatchContext.hqRoot || DEFAULT_HQ_ROOT,
           ledgerDbPath: dispatchContext.ledgerDbPath,
           execFileImpl: args.execFileImpl || execFileAsync, signal: args.signal, env: args.env || process.env,
@@ -5230,7 +5255,7 @@ async function maybeDispatchAmaCloserAttempt({
   const targetDispatchIdentity = { repo, prNumber, headSha: targetRemediationSha };
   const auditIdentity = { repo, prNumber, headSha: reviewedSha };
   const targetAuditIdentity = { repo, prNumber, headSha: targetRemediationSha };
-  const hqPath = dispatchContext.hqPath || process.env.HQ_BIN || DEFAULT_HQ_PATH;
+  const hqPath = resolveCloserHqPath(dispatchContext);
   const hqProject = dispatchContext.hqProject || DEFAULT_PROJECT;
   const reviewedHeadRecord = readAmaCloserDispatchRecord(rootDir, reviewedHeadDispatchIdentity);
   // HAMBG-02: reconcile this review series' newest hammer launch, not only the
@@ -5583,12 +5608,10 @@ async function maybeDispatchAmaCloserAttempt({
     readBuildCompletionProducerEvidenceImpl,
     readBuildCompletionSignalForPrImpl,
   });
-  if (mergedSignal?.readReason && existingRecord) {
+  if (existingRecord && mergeCaptureDiagnosticUpdate(existingRecord, mergedSignal, dispatchContext.dispatchedAt)) {
     try {
-      updateDispatchRecord(rootDir, existingDispatchIdentity, current => current ? {
-        ...current,mergeCaptureReadReason:mergedSignal.readReason,
-        mergeCaptureReadAt:dispatchContext.dispatchedAt,
-      } : null);
+      existingRecord = updateDispatchRecord(rootDir, existingDispatchIdentity,
+        current => mergeCaptureDiagnosticUpdate(current, mergedSignal, dispatchContext.dispatchedAt));
     } catch {
       logger?.warn?.(JSON.stringify({event:'ama_closer.merge_capture_diagnostic_unavailable',repo,prNumber,
         reason:mergedSignal.readReason}));
@@ -6277,6 +6300,8 @@ async function maybeDispatchAmaCloserAttempt({
           });
           const mergeSignalEmitted = await emitWorkerGitMergeSignalBestEffort({
             execFileImpl,
+            hqPath,
+            env,
             hqRoot,
             repo,
             prNumber,
@@ -6522,6 +6547,8 @@ async function maybeDispatchAmaCloserAttempt({
         });
         const mergeSignalEmitted = await emitWorkerGitMergeSignalBestEffort({
           execFileImpl,
+          hqPath,
+          env,
           hqRoot,
           repo,
           prNumber,

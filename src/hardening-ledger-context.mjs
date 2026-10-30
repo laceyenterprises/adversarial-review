@@ -1,4 +1,4 @@
-import { readWorkerObservation } from './dispatch-read-client.mjs';
+import { readWorkerObservation, readWorkerObservationPage } from './dispatch-read-client.mjs';
 import { parseDiffFiles } from './reviewer-util.mjs';
 
 const DEFAULT_RECORD_LIMIT = 8;
@@ -54,8 +54,12 @@ async function loadContractsFromSdk(args = {}) {
   return sdkRows({observation:'hardening_contracts',limit:100}, args);
 }
 async function listHardeningRecordsFromSdk(contractId, args = {}) {
-  const rows = await sdkRows({observation:'hardening_records',contract_id:contractId,limit:100}, args);
-  return rows.slice(0, args.limit ?? DEFAULT_RECORD_LIMIT);
+  const limit = Math.max(1, Math.min(100, Number.parseInt(args.limit, 10) || DEFAULT_RECORD_LIMIT));
+  // Context uses the producer's leading records, not an inventory/absence proof.
+  // Ordering belongs to the hardening_records producer; never page discarded rows.
+  const result = await readWorkerObservationPage({observation:'hardening_records',contract_id:contractId,limit}, args);
+  if (!result.ok) throw new Error('hardening evidence unavailable');
+  return result.rows;
 }
 async function getExposureRollupFromSdk(contractId, args = {}) {
   const rows = await sdkRows({observation:'hardening_exposure',contract_id:contractId,limit:100}, args);

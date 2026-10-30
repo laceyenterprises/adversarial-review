@@ -473,6 +473,24 @@ No direct worktree deletion, process kill or new configuration is added.
 After normal deployment, the runtime owner may observe organic recovery and
 refusal events; source validation uses disposable synthetic fixtures only.
 
+CLOSERCUSTODYLRQ-01: after normal deployment, restart the watcher to activate
+launch-first custody resolution. Dispatch persists the launch ID, worker ID,
+head and dispatch time in the receipt and lease. Admission reads that identity
+before replacing its intent; it probes the public launch reader including the
+retry chain before worker observations. Terminal launches release custody and
+request host teardown with `--force` to bypass the open-PR guard. The host
+still refuses live/unknown native or suspended ownership under its slot lock;
+any host refusal prevents replacement.
+Live/parked retries retain custody, and unreadable launch/retry evidence keeps
+the existing bounded evidence wait and page without losing the receipt.
+Existing attempt ceilings, success settlement and merge gates still apply.
+The SRE receipt is a natural failed or succeeded hammer without a merge:
+within one tick, `closer_provision_collision_reclaimed` names its launch ID,
+terminal status and `recorded-launch-terminal` reason, followed by another
+closer when budgets permit. There must be no unknown-run deferral for that
+recorded terminal launch. These are post-deploy observations; worker validation
+uses synthetic disposable state only.
+
 CLOSERDEADSLOT-02: a never-registered closer can have no worker-id observation
 rows even though its slot files record a launch and its launch-keyed ledger run
 is terminal. The worker dispatch-files read returns `dispatch-files-unavailable`

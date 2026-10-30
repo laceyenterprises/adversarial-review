@@ -1407,7 +1407,8 @@ rules, sharing the cap and marked result PR with findings.
 After deployment, restart the watcher, then SRE runs
 `node bin/findings-batch-backfill.mjs --root <review-root> --db <review-root>/data/reviews.db --concurrency 2 --batch-size 100`.
 This is explicit and idempotent; concurrency bounds submissions while existing
-HQ admission bounds running workers. No automatic deployment backfill runs.
+HQ admission bounds running workers. The backfill waits up to five seconds for a
+SQLite writer lock. No automatic deployment backfill runs.
 `pipeline-health` JSON `nonBlockingBacklog` exposes open and unbatched finding
 counts, oldest open age, applied/dropped by UTC day and batch error counts.
 The existing alert path reports findings older than 48 hours by default.

@@ -24,7 +24,7 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
   }
   const rootDir = resolve(options['--root']);
   if (resolve(options['--db']) !== join(rootDir, 'data', 'reviews.db')) throw Error('--db must match --root/data/reviews.db');
-  const db = new Database(resolve(options['--db']), { fileMustExist: true, timeout: 100 });
+  const db = new Database(resolve(options['--db']), { fileMustExist: true, timeout: 5000 });
   try {
     ensureReviewStateSchema(db);
     const result = await runFindingBatches({ ...dependencies, db, rootDir,

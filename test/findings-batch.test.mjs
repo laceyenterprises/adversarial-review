@@ -1,5 +1,6 @@
 import './helpers/dispatch-read-fixture.mjs';
 import test from 'node:test';
+import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -1062,4 +1063,38 @@ test('FINDINGSBATCH-02 worker drop artifacts settle every justified vocabulary c
       assert.equal(f.dispatches.length, 1);
     });
   }
+});
+
+
+test('operator backfill waits for a contending SQLite writer', async t => {
+  const { rootDir, db, pass } = fixture(t);
+  pass();
+  db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
+  const dbPath = join(rootDir, 'data', 'reviews.db');
+  const writer = spawn(process.execPath, ['--input-type=module', '-e', `
+    import Database from 'better-sqlite3';
+    const db = new Database(process.argv[1]);
+    db.exec('BEGIN IMMEDIATE');
+    process.stdout.write('locked');
+    setTimeout(() => { db.exec('COMMIT'); db.close(); }, 500);
+  `, dbPath], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+  let stderr = '';
+  writer.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+  const exited = new Promise((resolve, reject) => {
+    writer.once('error', reject);
+    writer.once('exit', (code, signal) => resolve({ code, signal }));
+  });
+  t.after(async () => { if (writer.exitCode === null) writer.kill(); await exited; });
+  await new Promise((resolve, reject) => {
+    writer.stdout.once('data', resolve);
+    writer.once('error', reject);
+    writer.once('exit', () => reject(new Error(`writer exited before locking: ${stderr}`)));
+  });
+  const { main } = await import('../bin/findings-batch-backfill.mjs');
+  await main(['--root', rootDir, '--db', dbPath, '--concurrency', '1'], {
+    env: { HQ_ROOT: rootDir },
+    execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'contended-backfill' }) }),
+  });
+  assert.deepEqual(await exited, { code: 0, signal: null }, stderr);
+  assert.equal(db.prepare('SELECT launch_id FROM finding_batches').get().launch_id, 'contended-backfill');
 });

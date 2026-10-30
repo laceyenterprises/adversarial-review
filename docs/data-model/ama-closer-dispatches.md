@@ -774,3 +774,8 @@ The retired receipt explicitly clears the cached next-action launch observation
 within the same pass. Running, foreign or unreadable launches and live/unknown
 retry descendants retain custody. New closure still passes ordinary gates,
 retry budgets and lease admission; retirement cannot merge anything.
+
+A dispatch-only legacy response keeps its compatibility launch ID alias and
+sets `launchRequestIdIsDispatchFallback: true`. That alias is not a launch-first
+custody key; its lease omits `workerId` so worker/slot evidence remains the
+reclaim source. Explicit `launchRequestId`/`lrq` responses keep launch-first custody.

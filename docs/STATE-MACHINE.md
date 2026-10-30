@@ -4,7 +4,8 @@ CLOSERCUSTODYLRQ-01 preserves the closer lifecycle graph and merge gates.
 Dispatch receipts and leases durably bind launch, worker slot, head and time.
 Before replacement intent publication, worktree custody probes the recorded
 launch with its retry chain. Terminal evidence releases custody subject to
-sanctioned non-force host teardown and existing retry budgets; live/parked
+sanctioned host teardown and existing retry budgets. `--force` bypasses the
+open-PR guard while host custody checks remain mandatory. Live/parked
 launches retain it, and unavailable evidence retains the receipt and bounded
 wait/page. Legacy leases keep the public slot inventory fallback. Activate by
 watcher restart after deployment and observe natural terminal release and the

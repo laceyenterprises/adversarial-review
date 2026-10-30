@@ -264,6 +264,7 @@ for (const scenario of ['exhausted-findings', 'clean-red-ci']) test(`CLOSERCUSTO
   mkdirSync(worktree, { recursive: true });
   const nextDeps = testDeps();
   const events = [];
+  let teardownCalls = 0;
   const second = await maybeDispatchAmaCloser({ ...args, ...nextDeps,
     dispatchContext: { ...args.dispatchContext, dispatchedAt: '2026-07-20T13:30:00Z' },
     readLaunchRequestStatusImpl: async () => ({ ok: true,
@@ -276,7 +277,12 @@ for (const scenario of ['exhausted-findings', 'clean-red-ci']) test(`CLOSERCUSTO
     } },
     execFileImpl: async (cmd, argv, options) => {
       if (argv[0] === 'worker') {
-        assert.deepEqual(argv, ['worker', 'tear-down', receipt.workerId, '--root', args.dispatchContext.hqRoot]);
+        // Early best-effort cleanup can be refused while host custody drains.
+        // Leave the slot for the launch-bound reclaim boundary under test.
+        if (++teardownCalls === 1) throw new Error('synthetic host ownership still draining');
+        // The real host refuses non-force teardown while this PR is open.
+        if (!argv.includes('--force')) throw new Error('worker has an open PR; rerun with --force');
+        assert.deepEqual(argv, ['worker', 'tear-down', receipt.workerId, '--force', '--root', args.dispatchContext.hqRoot]);
         nextDeps.calls.push({ args: argv });
         rmSync(worktree, { recursive: true });
         return { stdout: '', stderr: '' };
@@ -299,7 +305,7 @@ for (const scenario of ['exhausted-findings', 'clean-red-ci']) test(`CLOSERCUSTO
     .map(call => call.args[0]), ['worker', 'dispatch']);
   assert.ok(events.some(event => event.event === 'closer_provision_collision_reclaimed'
     && event.launchRequestId === receipt.launchRequestId && event.terminalStatus === 'failed'
-    && event.reason === 'recorded-launch-terminal'));
+    && event.reason === 'recorded-launch-terminal'), JSON.stringify(events));
   assert.ok(!events.some(event => event.event === 'closer_reclaim_deferred_unknown_run'));
 });
 
@@ -307,6 +313,7 @@ for (const [status, probe] of [
   ['live-retry', { ok: true, row: { status: 'failed', ticket_ref: 'AMA-PR-404' },
     retryChain: [{ launch_request_id: 'synthetic-retry', status: 'running' }] }],
   ['unavailable', { ok: false }],
+  ['reclaim-throws', { ok: false }],
 ]) test(`CLOSERCUSTODYLRQ-01: ${status} recorded launch keeps the predecessor lease receipt`, async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'closer-custody-retain-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -318,7 +325,7 @@ for (const [status, probe] of [
   const lease = readAmaCloserLease(rootDir, identity);
   mkdirSync(join(args.dispatchContext.hqRoot, 'workers', receipt.workerId, 'agent-os'), { recursive: true });
   const nextDeps = testDeps();
-  const second = await maybeDispatchAmaCloser({ ...args, ...nextDeps,
+  const pending = maybeDispatchAmaCloser({ ...args, ...nextDeps,
     dispatchContext: { ...args.dispatchContext, dispatchedAt: '2026-07-20T13:30:00Z' },
     // Evidence changes after admission acquires its replacement lease: a retry
     // spawns or the ledger becomes unreadable before the custody probe.
@@ -328,6 +335,11 @@ for (const [status, probe] of [
     readWorkerDispatchFilesImpl: () => assert.fail('recorded receipt owns custody resolution'),
     readWorkerObservationImpl: () => assert.fail('recorded receipt owns custody resolution'),
     deliverAlertImpl: async () => {},
+    logger: { ...nextDeps.logger, info: line => {
+      if (status === 'reclaim-throws' && line.includes('closer_reclaim_deferred_unknown_run')) {
+        throw new Error('synthetic reclaim exception');
+      }
+    } },
     execFileImpl: async (cmd, argv, options) => {
       if (argv[0] === 'worker' || (argv[0] === 'dispatch' && argv[1] !== 'status')) {
         assert.fail(`retained custody cannot ${argv[0]}`);
@@ -336,7 +348,11 @@ for (const [status, probe] of [
       return nextDeps.execFileImpl(cmd, argv, options);
     },
   });
-  assert.equal(second.reason, 'hammer-closer-in-flight', JSON.stringify(second));
+  if (status === 'reclaim-throws') await assert.rejects(pending, /synthetic reclaim exception/);
+  else {
+    const second = await pending;
+    assert.equal(second.reason, 'hammer-closer-in-flight', JSON.stringify(second));
+  }
   const retained = readAmaCloserLease(rootDir, identity);
   assert.notEqual(retained.status, 'pending');
   assert.equal(retained.lrqId, lease.lrqId);
@@ -375,7 +391,7 @@ test('CLOSERCUSTODYLRQ-01: launch outage holds custody and preserves bounded onc
     && event.reason === 'recorded-launch-unavailable'));
 });
 
-test('CLOSERCUSTODYLRQ-01: terminal receipt cannot force teardown of a slot the host still owns', async () => {
+test('CLOSERCUSTODYLRQ-01: host ownership refusal still prevents terminal-slot replacement', async () => {
   const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
     repo: 'acme/repo', prNumber: 404, workerClass: 'hammer',
     hqRoot: '/synthetic/root', hqPath: '/synthetic/bin/hq',
@@ -383,7 +399,7 @@ test('CLOSERCUSTODYLRQ-01: terminal receipt cannot force teardown of a slot the 
     existsSyncImpl: () => true, statSyncImpl: () => ({ mtimeMs: 0 }),
     readLaunchRequestStatusImpl: async () => ({ ok: true, row: { status: 'failed' } }),
     execFileImpl: async (cmd, args) => {
-      assert.ok(!args.includes('--force'));
+      assert.ok(args.includes('--force'));
       throw new Error('synthetic host still owns slot');
     },
     logger: { info() {}, warn() {} },
@@ -391,6 +407,49 @@ test('CLOSERCUSTODYLRQ-01: terminal receipt cannot force teardown of a slot the 
   assert.equal(result.ok, false);
   assert.equal(result.unknown, true);
   assert.equal(result.reason, 'closer-reclaim-refused');
+});
+
+test('CLOSERCUSTODYLRQ-01: admission charges a launch outage across three restarted ticks and pages once', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-custody-admission-outage-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = findingsRemediationArgs(rootDir);
+  const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+  assert.equal((await maybeDispatchAmaCloser({ ...args, ...testDeps() })).dispatched, true);
+  const predecessor = readAmaCloserLease(rootDir, identity);
+  const pages = [];
+  let previousWait = null;
+  for (const at of ['2026-07-20T13:30:00Z', '2026-07-21T13:30:00Z', '2026-07-22T13:30:00Z']) {
+    const deps = testDeps();
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      options: { env: { ADV_GATE_STATUS_CONTEXT: REQUIRED_GATE, AMA_CLOSURE_WAIT_BOUND_MS: '1' } },
+      dispatchContext: { ...args.dispatchContext, dispatchedAt: at },
+      readLaunchRequestStatusImpl: async () => ({ ok: false, reason: 'synthetic-outage' }),
+      deliverAlertImpl: async text => pages.push(text),
+      execFileImpl: async () => assert.fail('an unreadable recorded launch cannot authorize teardown or dispatch'),
+    });
+    assert.ok(result.evidenceWait, JSON.stringify(result));
+    if (previousWait) {
+      assert.equal(result.evidenceWait.startedAt, previousWait.startedAt);
+      assert.equal(result.evidenceWait.exhausted, true);
+    }
+    previousWait = result.evidenceWait;
+    assert.deepEqual(readAmaCloserLease(rootDir, identity), predecessor);
+  }
+  assert.equal(pages.length, 1);
+});
+
+test('CLOSERCUSTODYLRQ-01: dispatch-only receipts never become launch-bound lease custody', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-custody-dispatch-only-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deps = testDeps();
+  await maybeDispatchAmaCloser({ ...findingsRemediationArgs(rootDir), ...deps,
+    execFileImpl: async () => ({ stdout: JSON.stringify({ dispatchId: 'synthetic-dispatch-only', ticketRef: 'AMA-PR-404' }), stderr: '' }),
+  });
+  const lease = readAmaCloserLease(rootDir, { repo: 'acme/repo', prNumber: 404, headSha: HEAD });
+  assert.equal(lease.lrqId, 'synthetic-dispatch-only');
+  assert.equal(lease.workerId, undefined);
+  assert.equal(readAmaCloserDispatchRecord(rootDir, { repo: 'acme/repo', prNumber: 404, headSha: HEAD })
+    .launchRequestIdIsDispatchFallback, true);
 });
 
 // Synthetic producer: provisioning wrote launch identity to both slot files,

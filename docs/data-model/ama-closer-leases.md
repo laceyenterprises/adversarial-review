@@ -43,14 +43,17 @@ pending fallback and dispatched/unknown reclaim ages use the shared load-aware
 helper. Confirmed live launches still retain ownership at any age; no store
 fields or lifecycle states change. A dispatched lease carries `lrqId`.
 CLOSERCUSTODYLRQ-01 also records `workerId` and `dispatchedAt` when the
-dispatcher returns a receipt; `headSha` already binds the lease to its head.
+dispatcher returns a real `launchRequestId` receipt; a legacy `dispatchId`
+fallback does not populate `workerId` and cannot become launch-bound custody; `headSha` already binds the lease to its head.
 Repeated promotion of the same launch retains its dispatch time, and
 terminalization/rekeying retain all receipt fields. Older leases may omit the
 new optional fields. Worktree custody uses a matching durable dispatch receipt
 or lease before worker observations, including after watcher restart. When
 admission retains that custody (live, parked or unreadable launch), it puts the
 receipt-bearing predecessor lease back by CAS instead of leaving a receipt-less
-`deferred` replacement.
+`deferred` replacement, including when reclaim throws. A launch-read outage
+is charged through normal admission on every tick before the lease-held return;
+the original bounded wait and once-only page survive restart.
 Rekeys retain
 `rekeyedFromHeadSha` and `supersededHeads` so the current lease can identify
 the original dispatch record after the PR head changes.

@@ -3158,9 +3158,10 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
 
   // Orphan absence permits a request, never a force-kill. The host retains its
   // owner/process/git proofs and may refuse teardown.
-  // Launch terminality releases AMA custody, but cannot authorize killing a
-  // process still using a reused slot. Let sanctioned host teardown prove that.
-  const force = !orphan && liveness.reason !== 'recorded-launch-terminal';
+  // A terminal recorded launch (including its retry chain) permits bypassing
+  // the host's open-PR guard. The host still fences suspended/native live or
+  // unknown ownership under its slot lock, even with --force.
+  const force = !orphan;
   const args = ['worker', 'tear-down', workerId, ...(force ? ['--force'] : []), '--root', root];
   const maxAttempts = orphan ? 1 : 3;
   const retryBackoffMs = [250, 1000];
@@ -3738,6 +3739,7 @@ function normalizeDispatchIdentifiers(payload) {
     headSha: payload.head_sha || payload.headSha || payload.prHeadSha || null,
     dispatchId: String(payload.dispatchId || '').trim() || null,
     launchRequestId: String(evidence.rawIdentity || '').trim() || null,
+    launchRequestIdIsDispatchFallback: Boolean(evidence.rawIdentity && !String(payload.launchRequestId || payload.lrq || '').trim()),
     ...(evidence.identityDiagnostic || evidence.status.diagnostic ? { diagnostic: [evidence.identityDiagnostic, evidence.status.diagnostic].filter(Boolean).join('; ') } : {}),
   };
 }
@@ -4708,6 +4710,16 @@ async function maybeDispatchAmaCloserAttempt({
         ledgerDbPath: dispatchContext.ledgerDbPath, env, signal, includeRetryChain: true,
       })).catch(() => ({ ok: false }));
       earlyLaunchRequestProbe = { launchRequestId: held.lease.lrqId, probe: statusProbe };
+      if (held.lease.workerId && launchRequestInFlight(statusProbe) === null) {
+        // Charge the outage before admission can return lease-held. Keep the
+        // receipt untouched so every subsequent tick probes the same owner.
+        return { ...await deferUnknownCloserCustody({ rootDir: reconciliationRoot,
+          repo: reconciliationRepo, prNumber, headSha: held.headSha,
+          now: Date.parse(dispatchContext.dispatchedAt), env,
+          pageImpl: (message, options) => deliverAlertImpl(message, { ...options,
+            event: 'ama_closer.worker_evidence_wait_exhausted', payload: { repo: reconciliationRepo, prNumber } }) }),
+          launchRequestId: held.lease.lrqId, recoveryWait: true, preservePredecessorArtifacts: true };
+      }
       if (launchRequestParked(statusProbe)) {
         const current = readAmaCloserLease(reconciliationRoot,
           { repo: reconciliationRepo, prNumber, headSha: held.headSha });
@@ -7279,7 +7291,7 @@ async function maybeDispatchAmaCloserAttempt({
   // Capture predecessor ownership before terminal-lease reclamation and before
   // publishing a replacement intent can clear its launch receipt.
   const predecessorLease = readAmaCloserLease(rootDir, leaseIdentity);
-  const custodyLaunchRequestId = (existingRecord?.workerId === workerId
+  const custodyLaunchRequestId = (existingRecord?.workerId === workerId && !existingRecord.launchRequestIdIsDispatchFallback
     ? existingRecord.launchRequestId : null)
     || (predecessorLease?.workerId === workerId ? predecessorLease.lrqId : null);
   let leaseResult = acquireAmaCloserLease({
@@ -7396,7 +7408,7 @@ async function maybeDispatchAmaCloserAttempt({
           } })),
       });
     } catch (error) {
-      updateAmaCloserLease({ rootDir, ...leaseIdentity, status: 'terminal',
+      if (!restorePredecessorCloserLease()) updateAmaCloserLease({ rootDir, ...leaseIdentity, status: 'terminal',
         expectedLease: leaseResult.lease,
         terminalOutcome: 'deferred', now: dispatchContext.dispatchedAt });
       throw error;
@@ -7873,7 +7885,7 @@ async function maybeDispatchAmaCloserAttempt({
       updateAmaCloserLease({ rootDir, ...leaseIdentity,
         status: AMA_CLOSER_LEASE_STATUS.DISPATCHED,
         lrqId: parsed.launchRequestId || parsed.dispatchId || 'unknown',
-        workerId,
+        workerId: parsed.launchRequestId && !parsed.launchRequestIdIsDispatchFallback ? workerId : null,
         dispatchedAt: dispatchContext.dispatchedAt || new Date().toISOString(),
         now: dispatchContext.dispatchedAt });
       return null;
@@ -8155,6 +8167,7 @@ async function maybeDispatchAmaCloserAttempt({
           dispatchedAt: ambiguousLaunch ? dispatchContext.dispatchedAt : null,
           dispatchId: parsedFailure.dispatchId,
           launchRequestId: parsedFailure.launchRequestId,
+          launchRequestIdIsDispatchFallback: parsedFailure.launchRequestIdIsDispatchFallback,
           retryCount: budgetPreservingFailure
             ? priorRetryCount
             : Number(current?.retryCount || priorRetryCount + 1),
@@ -8244,6 +8257,7 @@ async function maybeDispatchAmaCloserAttempt({
         ...(dispatchWorkerClass !== workerClass ? { dispatchWorkerClass } : {}),
         dispatchId: parsedFailure.dispatchId || null,
         launchRequestId: parsedFailure.launchRequestId || null,
+        launchRequestIdIsDispatchFallback: parsedFailure.launchRequestIdIsDispatchFallback,
         promptPath,
         releasedPendingLease,
         ...(releasePendingLeaseError ? { releasePendingLeaseError } : {}),
@@ -8278,6 +8292,7 @@ async function maybeDispatchAmaCloserAttempt({
       dispatchedAt: dispatchContext.dispatchedAt,
       dispatchId: parsed.dispatchId,
       launchRequestId: parsed.launchRequestId,
+      launchRequestIdIsDispatchFallback: parsed.launchRequestIdIsDispatchFallback,
       retryCount: Number(current?.retryCount || priorRetryCount + 1),
       branchHolderBlockCount: 0,
       state: 'dispatched',

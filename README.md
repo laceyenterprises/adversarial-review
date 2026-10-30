@@ -1314,8 +1314,9 @@ smoke promises are unchanged; deployed recovery awaits natural observation.
 CLOSERCUSTODYLRQ-01 resolves self-owned closer custody from its durable launch
 receipt before worker observations or replacement intent publication. The
 lease also retains worker identity and dispatch time through terminalization.
-Terminal launch/retry evidence permits non-force host teardown and the next
-budgeted dispatch; live/parked launches retain custody and launch-read outages
+Terminal launch/retry evidence permits host teardown with `--force` to bypass
+the open-PR guard, followed by the next budgeted dispatch. Host custody checks
+remain mandatory; live/parked launches retain custody and launch-read outages
 keep the bounded wait/page and receipt across restart. After deployment,
 restart the watcher; SRE verifies a natural terminal hammer release within one
 tick, with launch ID/status/reason in the reclaim event and another dispatch

@@ -478,7 +478,9 @@ launch-first custody resolution. Dispatch persists the launch ID, worker ID,
 head and dispatch time in the receipt and lease. Admission reads that identity
 before replacing its intent; it probes the public launch reader including the
 retry chain before worker observations. Terminal launches release custody and
-request host teardown without `--force`; host refusal prevents replacement.
+request host teardown with `--force` to bypass the open-PR guard. The host
+still refuses live/unknown native or suspended ownership under its slot lock;
+any host refusal prevents replacement.
 Live/parked retries retain custody, and unreadable launch/retry evidence keeps
 the existing bounded evidence wait and page without losing the receipt.
 Existing attempt ceilings, success settlement and merge gates still apply.

@@ -649,6 +649,15 @@ leases, lifecycle states and smoke promises remain unchanged. See the
 Offline source acceptance is separate from read-only observation of natural
 recovery after normal deployment; no live verification action is added.
 
+CLOSURERECOVERYEXEC-01: an R04 `closure-recovery` next action now has an
+executor. Inline and background admission both hand it to the closer's custody
+reconciliation, which dispatches when ownership resolves. Unresolved ownership
+pages once at the decision deadline (`closure-recovery-ownership-unresolved`)
+instead of looping on `closure-decision-mismatch`. Expired next-action deadlines
+appear in the watcher log and in `pipeline-health` `expiredNextActions` with
+their age. See the
+[executor contract](docs/RUNBOOK-ama-closure.md#closure-recovery-executor-closurerecoveryexec-01).
+
 TERMLEASE-01: terminal non-merge closer leases (`superseded`,
 `failed-without-merge`, `deferred`) release on the same dispatch pass once ledger
 or matching dispatch evidence proves the launch ended or is absent. Live or

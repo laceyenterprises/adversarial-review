@@ -5086,7 +5086,14 @@ test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt
     assert.equal(spawnCalls[0].options.cwd, workspaceDir);
     assert.equal(spawnCalls[0].options.detached, true);
     assert.equal(spawnCalls[0].options.env.CODEX_AUTH_PATH, authPath);
-    assert.equal(spawnCalls[0].options.env.CODEX_HOME, codexHome);
+    assert.notEqual(spawnCalls[0].options.env.CODEX_HOME, codexHome);
+    assert.equal(spawnCalls[0].options.env.CODEX_HOME, worker.codexHome);
+    const serviceConfig = readFileSync(path.join(worker.codexHome, 'config.toml'), 'utf8');
+    assert.match(serviceConfig, /approval_policy = "never"/);
+    assert.match(serviceConfig, /sandbox_mode = "danger-full-access"/);
+    assert.match(serviceConfig, /shell_tool = true/);
+    assert.doesNotMatch(serviceConfig, /\[(?:plugins|marketplaces|desktop|mcp_servers)(?:\.|\])/);
+    assert.match(worker.configDigest, /^[a-f0-9]{64}$/);
     assert.equal(spawnCalls[0].options.env.HOME, workspaceDir);
     assert.equal(spawnCalls[0].options.env.GIT_EDITOR, 'true');
     assert.equal(spawnCalls[0].options.env.GIT_SEQUENCE_EDITOR, 'true');

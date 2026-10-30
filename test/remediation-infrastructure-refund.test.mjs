@@ -28,7 +28,8 @@ afterEach(() => {
 });
 
 for (const outcome of [
-  { status: 'failed', failureReason: 'codex-tool-host-unavailable' }, { status: 'failed', failureClass: 'publish-blocked' },
+  { status: 'failed', failureReason: 'codex-tool-host-unavailable' },
+  { status: 'failed', failureDetail: 'boot_readiness_probe_error: codex-tool-host-unavailable: harness infrastructure failure' }, { status: 'failed', failureClass: 'publish-blocked' },
   { status: 'failed', failureCode: 'boot-failure' }, { status: 'failed', failureReason: 'boot-failed' },
   { failure_class: 'boot-failed' },
 ]) {
@@ -50,6 +51,34 @@ test('narrative and generic worker failures cannot earn a refund', () => {
     { failureReason: 'boot-failure' }, null]) {
     assert.equal(infrastructureRefundReason({ outcome, startHead: 'a', endHead: 'a' }), null);
   }
+});
+
+test('reconcile refunds a local in-run code-mode outage before missing-reply no-progress handling', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'remrefund-local-host-'));
+  try {
+    createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'fixture/repo', prNumber: 1,
+      revisionRef: 'a'.repeat(40), reviewerModel: 'claude', reviewBody: 'Fix the bug.', critical: true });
+    const claimed = claimNextFollowUpJob({ rootDir });
+    const workspaceDir = join(fixtureHqRoot, 'adversarial-review', 'follow-up-workspaces', claimed.job.jobId);
+    mkdirSync(workspaceDir, { recursive: true });
+    const logPath = join(workspaceDir, 'worker.log');
+    writeFileSync(logPath, 'ERROR codex_core::tools::router: error=timed out negotiating with the code-mode host\n');
+    const spawned = markFollowUpJobSpawned({ rootDir, jobPath: claimed.jobPath, worker: {
+      model: 'codex', workerClass: 'codex', processId: 4321, workspaceDir, logPath,
+      recordedOutcome: { exitCode: 1 },
+    } });
+    const comments = [];
+    const result = await reconcileFollowUpJob({ rootDir, jobPath: spawned.jobPath, job: spawned.job,
+      isWorkerRunning: () => false,
+      resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: 'a'.repeat(40) }),
+      postCommentImpl: async ({ body }) => { comments.push(body); return { posted: false, error: 'offline fixture' }; },
+      log: { log() {}, warn() {}, error() {} },
+    });
+    assert.equal(result.action, 'requeued', result.reason);
+    assert.equal(result.reason, 'codex-tool-host-unavailable');
+    assert.equal(result.job.remediationPlan.currentRound, 0);
+    assert.ok(comments[0].includes('not charged: codex-tool-host-unavailable'));
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
 
 test('refund env override accepts only decimal integers and defaults invalid values to two', () => {
@@ -136,7 +165,8 @@ for (const reason of ['codex-tool-host-unavailable', 'publish-blocked', 'boot-fa
         isWorkerRunning: () => false,
         execFileImpl: async (_command, args) => {
           assert.ok(args.includes('--json'));
-          return { stdout: JSON.stringify({ status: 'failed', failureReason: reason }) };
+          return { stdout: JSON.stringify({ status: 'failed', failureReason: reason === 'codex-tool-host-unavailable'
+            ? 'boot_readiness_probe_error: codex-tool-host-unavailable: harness infrastructure failure' : reason }) };
         },
         resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: 'a'.repeat(40) }),
         postCommentImpl: async ({ body }) => { comments.push(body); return { posted: false, error: 'offline fixture' }; },

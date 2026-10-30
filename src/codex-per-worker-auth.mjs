@@ -234,6 +234,9 @@ export function materializePerWorkerCodexAuth({
   }
 }
 
+// Credential homes are not service config homes. Every CLI launch separately
+// seeds codex-service-config.toml through prepareServiceCodexHome; even an
+// explicit credential path or the auth kill switch cannot opt out of isolation.
 // Direct reviewer adapters prepare corporate auth before CLI OAuth preflight.
 // No inherited marker may claim that a primary/shared credential is corporate.
 export function prepareCorporateCodexReviewerAuth(env, sessionUuid, { materializeImpl = materializePerWorkerCodexAuth } = {}) {

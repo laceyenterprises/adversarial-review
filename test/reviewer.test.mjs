@@ -1,3 +1,4 @@
+import { serviceCodexConfigArgs } from '../src/codex-service-home.mjs';
 import './helpers/registry-session-fixture.mjs';
 import './helpers/dispatch-files-preload.mjs';
 import { appendScopeViolationFinding, evaluateAdditiveOnlyScope } from '../src/additive-only-scope.mjs';
@@ -3266,6 +3267,10 @@ test('Codex review invocation uses the reviewer snapshot cwd and passes prompt a
     },
   });
 
+  assert.notEqual(calls[0].options.env.CODEX_HOME, '/tmp/home/.codex');
+  assert.match(calls[0].options.env.CODEX_HOME, /adversarial-codex-/);
+  assert.equal(existsSync(calls[0].options.env.CODEX_HOME), false);
+  delete calls[0].options.env.CODEX_HOME;
   assert.deepEqual(calls, [
     {
       command: '/usr/local/bin/codex',
@@ -3293,6 +3298,7 @@ test('Codex review invocation uses the reviewer snapshot cwd and passes prompt a
     '--dangerously-bypass-approvals-and-sandbox',
     '--ephemeral',
     '--json',
+    ...serviceCodexConfigArgs(),
     '--model',
     'gpt-5.4',
     '--config',
@@ -3306,7 +3312,7 @@ test('Codex review invocation uses the reviewer snapshot cwd and passes prompt a
   ]);
 });
 
-test('resolveCodexExecOverrides uses registry model and keeps safe host provider settings', () => {
+test('resolveCodexExecOverrides uses service registry without interactive provider settings', () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'codex-config-'));
   const codexHome = join(rootDir, '.codex');
   mkdirSync(codexHome, { recursive: true });
@@ -3319,9 +3325,8 @@ test('resolveCodexExecOverrides uses registry model and keeps safe host provider
     const overrides = withEnv({ CODEX_HOME: codexHome, HOME: rootDir, HQ_ROOT: rootDir, AGENT_OS_DEPLOY_CHECKOUT: rootDir }, () => resolveCodexExecOverrides());
     assert.deepEqual(overrides, {
       model: 'gpt-5.5',
-      modelProvider: 'openai',
+      modelProvider: null,
       configOverrides: [
-        { key: 'model_provider', value: 'openai' },
         { key: 'model_reasoning_effort', value: 'high' },
       ],
       reasoningEffort: 'high',
@@ -3333,7 +3338,7 @@ test('resolveCodexExecOverrides uses registry model and keeps safe host provider
   }
 });
 
-test('resolveCodexExecOverrides preserves allowed scalar model tuning without forwarding project config', () => {
+test('resolveCodexExecOverrides ignores interactive scalar and project config', () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'codex-config-inline-comments-'));
   const codexHome = join(rootDir, '.codex');
   mkdirSync(codexHome, { recursive: true });
@@ -3354,9 +3359,8 @@ test('resolveCodexExecOverrides preserves allowed scalar model tuning without fo
     const overrides = withEnv({ CODEX_HOME: codexHome, HOME: rootDir, HQ_ROOT: rootDir, AGENT_OS_DEPLOY_CHECKOUT: rootDir }, () => resolveCodexExecOverrides());
     assert.deepEqual(overrides, {
       model: 'gpt-5.5',
-      modelProvider: 'openai',
+      modelProvider: null,
       configOverrides: [
-        { key: 'model_provider', value: 'openai' },
         { key: 'model_reasoning_effort', value: 'high' },
       ],
       reasoningEffort: 'high',
@@ -3370,7 +3374,7 @@ test('resolveCodexExecOverrides preserves allowed scalar model tuning without fo
         model: overrides.model,
         configOverrides: overrides.configOverrides,
       }).filter((value, index, args) => args[index - 1] === '--config'),
-      ['model_provider="openai"', 'model_reasoning_effort="high"'],
+      [...serviceCodexConfigArgs().filter((_, index) => index % 2 === 1), 'model_reasoning_effort="high"'],
     );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

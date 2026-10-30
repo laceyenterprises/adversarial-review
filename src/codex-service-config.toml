@@ -1,0 +1,16 @@
+# CODEXHOMEISO-01: reviewed service tooling; never seed from an interactive home.
+# Matches the existing --dangerously-bypass-approvals-and-sandbox envelope.
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+
+[features]
+shell_tool = true
+unified_exec = true
+apps = false
+plugins = false
+remote_plugin = false
+hooks = false
+skill_mcp_dependency_install = false
+
+[features.code_mode]
+enabled = true

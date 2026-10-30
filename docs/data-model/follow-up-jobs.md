@@ -308,8 +308,16 @@ authoritative live end heads, no lifecycle stop, and a recorded reason:
 `codex-tool-host-unavailable`, `publish-blocked`, `boot-failed` or `boot-failure`.
 HQ outcomes require `status: "failed"`; stale failure fields on `succeeded`,
 `superseded`, running or cancelled dispatches cannot qualify. Local outcomes
-without a status qualify only for `boot-failed`, recorded from a child spawn
-error. Narrative text and bare signal exits (including 137/143) cannot qualify.
+without a status qualify for `boot-failed`, recorded from a child spawn error,
+or complete local tool-host failure evidence (CODEXHOMEISO-01). The canonical
+tool-host code also matches the harness-prefixed production form
+`boot_readiness_probe_error: codex-tool-host-unavailable: harness infrastructure failure`
+in recorded failure fields. In-run negotiation timeouts require the complete
+worker log, no command execution event, and no successful tool result. Plain
+worker prose cannot establish an outage. HQ log reads require both complete,
+untruncated launch streams from offset zero; local reads use validated contained
+paths and an 8 MiB limit. Missing or partial evidence stays charged.
+Narrative text and bare signal exits (including 137/143) cannot qualify.
 Operator and supervisor cancels therefore do not earn a refund from their
 signal exit alone.
 
@@ -333,6 +341,12 @@ The persisted accounting fields are:
   Normalized events preserve SDK terminal/succeeded booleans, including explicit
   false. Status probes accept wire-only terminal evidence: missing status resolves
   to `succeeded` or `failed` only when terminality is confirmed.
+  Refunded in-run tool-host failures retain
+  `toolHostEvidence.allToolsFailedBeforeExecution: true` in the retry's worker
+  outcome. This is service-derived log evidence, never a reply assertion.
+- `remediationWorker.codexHome` and `configDigest`: optional isolated service
+  config directory and SHA-256 digest for local Codex spawns. Legacy jobs lack
+  these fields; neither changes auth ownership or grants merge authority.
 - `remediationPlan.publishedRoundsForPR`: the ledger's count of rounds with
   `publishedHeadSha`, computed when a budget stop is recorded.
   It feeds budget-stop comments and cannot reconstruct historical publications.

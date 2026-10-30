@@ -42,7 +42,7 @@ export async function settleInfrastructureRemediationRound({
       const alreadyRetriedRound = (current.remediationPlan?.retryHistory || []).some((retry) =>
         retry.round === current.remediationPlan.currentRound && retry.retryMetadata?.code === 'infrastructure-refund');
       const recordedOutcome = current.remediationWorker?.recordedOutcome;
-      if (recordedOutcome) worker.recordedOutcome = recordedOutcome;
+      if (recordedOutcome) worker.recordedOutcome = { ...worker.recordedOutcome, ...recordedOutcome };
       let refundReason = liveness.state === 'exited' && !lifecycleStop && !alreadyRetriedRound
         ? infrastructureRefundReason({
           outcome: liveness.dispatchStatus || worker.recordedOutcome,
@@ -66,6 +66,11 @@ export async function settleInfrastructureRemediationRound({
           }
         }
         return null;
+      }
+      const evidenceOutcome = liveness.dispatchStatus || worker.recordedOutcome;
+      if (evidenceOutcome?.toolHostEvidence) {
+        current.remediationWorker.recordedOutcome = evidenceOutcome;
+        writeFollowUpJob(jobPath, current);
       }
       const requeued = requeueInProgressFollowUpJobForRetry({
         rootDir, jobPath, requeuedAt: completedAt,

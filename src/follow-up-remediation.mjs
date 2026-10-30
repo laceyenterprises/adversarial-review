@@ -1,3 +1,4 @@
+import { codexToolHostLogEvidence, readDispatchCodexToolHostEvidence } from './codex-tool-host-failure.mjs';
 import { ensureWorkerRegistryReady } from './adapters/agent-runtime/local/remediation.mjs';
 import { prepareWorkerObservationSession } from './dispatch-read-client.mjs';
 import { readHostIdentitySync } from './dispatch-files-client.mjs';
@@ -17,7 +18,7 @@ import { logRoundBudgetDecision, settleInfrastructureRemediationRound, recordLoc
 import { recordedInfrastructureReason, localWorkerErrorOutcome } from './remediation-infrastructure-refund.mjs';
 import { preserveUnsafeWorkspaceMetadata } from './workspace-identity.mjs';
 import { execFile } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, statSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1662,6 +1663,24 @@ async function reconcileFollowUpJob({
   // Capture recovery evidence before ordinary exit accounting observes a changed head.
   const workerPublishedHead = lifecycle?.source === 'live' && lifecycle.prState === 'open' ? findWorkerPublishedHead({ rootDir, job, headSha: lifecycle.headSha }) : null;
   const completedAt = now();
+  // Local CLI failures do not have an HQ failure classifier. Inspect only the
+  // validated, complete worker log before no-progress/reply accounting.
+  if (!isHqWorker && liveness.state === 'exited' && worker.model === 'codex') {
+    try {
+      const checkedPaths = buildReconciliationPaths(rootDir, job);
+      const logPath = checkedPaths.logPath;
+      if (logPath && statSync(logPath).size <= 8 * 1024 * 1024) {
+        const evidence = codexToolHostLogEvidence(readFileSync(logPath, 'utf8'));
+        if (evidence) worker.recordedOutcome = { ...worker.recordedOutcome, toolHostEvidence: evidence };
+      }
+    } catch { /* Missing/oversized/unreadable evidence stays charged. */ }
+  }
+  if (isHqWorker && liveness.state === 'exited' && liveness.dispatchStatus?.status === 'failed'
+    && ['codex', 'remediator-codex', 'remediator-codex-corp'].includes(worker.model)
+    && !recordedInfrastructureReason(liveness.dispatchStatus)) {
+    const evidence = await readDispatchCodexToolHostEvidence(worker);
+    if (evidence) liveness.dispatchStatus = { ...liveness.dispatchStatus, toolHostEvidence: evidence };
+  }
   const refund = await settleInfrastructureRemediationRound({
     rootDir, job, jobPath, worker, liveness, lifecycle, lifecycleStop, completedAt,
     postOutcomeComment: postReconcileOutcomeCommentSafe, postCommentImpl, now, log,
@@ -3684,8 +3703,8 @@ async function consumeNextFollowUpJob({
       requiresWorkflowPush: Boolean(workflowPushPreflight?.workflowTouch?.touches),
       allowConflictedBase: conflictedBase?.allowConflictedBase === true,
     });
-    log.info?.(`[follow-up-remediation] spawn-preparation jobId=${claimed.job.jobId} env_ms=${envPreparationMs} workspace_ms=${workspacePreparationMs} pre_spawn_total_ms=${runtimeStartedMs - preparationStartedMs} runtime_spawn_ms=${Date.now() - runtimeStartedMs}`);
     const worker = runHandle.worker;
+    log.info?.(`[follow-up-remediation] spawn-preparation jobId=${claimed.job.jobId} env_ms=${envPreparationMs} workspace_ms=${workspacePreparationMs} pre_spawn_total_ms=${runtimeStartedMs - preparationStartedMs} runtime_spawn_ms=${Date.now() - runtimeStartedMs} CODEX_HOME=${worker.codexHome || 'n/a'} config_sha256=${worker.configDigest || 'n/a'}`);
     spawnedWorker = worker;
 
     const updated = markFollowUpJobSpawned({

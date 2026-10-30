@@ -2431,6 +2431,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
         }
         if (rereview.requested) {
           const outcome = requestReviewRereviewImpl({ rootDir, repo: job.repo, prNumber: job.prNumber,
+            explicitReviewRequest: { requestId: `remediation:${job.jobId}:${job.remediationPlan.currentRound}`, actor: 'remediation-watch' },
             requestedAt: completedAt, reason: reply.reReview.reason, targetRevisionRef: closeout.decision.head });
           rereview = { ...buildRereviewResult({ requested: true, reason: reply.reReview.reason,
             outcome: { ...outcome, requestedAt: completedAt } }), nextAction: closeout.decision };
@@ -2516,6 +2517,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
       if (!rereview.requested && job.finalRound === 'comment-only') rereview.suppressed = 'comment-only-final-round';
       if (rereview.requested) {
         const outcome = requestReviewRereviewImpl({ rootDir, repo: job.repo, prNumber: job.prNumber,
+          explicitReviewRequest: { requestId: `remediation:${job.jobId}:${job.remediationPlan.currentRound}`, actor: 'remediation-watch' },
           requestedAt: completedAt, reason: rereview.reason, targetRevisionRef: closeout.decision.head });
         rereview = { ...buildRereviewResult({ requested: true, reason: rereview.reason,
           outcome: { ...outcome, requestedAt: completedAt } }), nextAction: closeout.decision };

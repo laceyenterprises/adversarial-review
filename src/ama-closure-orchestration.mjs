@@ -20,9 +20,10 @@ import { readHammerStopForHead, readHammerStopHoldForHead, isInfrastructureStop,
 import { evaluateHammerRetryCap, readHammerRetryCapLedger, rearmOperatorApprovedCloser } from './ama/hammer-retry-cap.mjs';
 import { resolveSharedNextAction } from './pr-next-action-shadow.mjs';
 import { createHistoryReader } from './ama/history-reader.mjs';
-import { hammerDispatchMismatch, bindClosureNextAction, readClosureNextAction, observeClosureOwnership, closureOwnerFromDecision, hasHammerDispatchIntent, observeClosureResult, observeDaemonGate as reviseDaemonGate, observeDaemonResult, revalidateClosurePr, resolveClosureNextAction, reviseClosureNextAction } from './ama/closure-next-action.mjs';
+import { hammerDispatchMismatch, bindClosureNextAction, readClosureNextAction, observeClosureOwnership, closureOwnerFromDecision, hasClosureRecoveryIntent, hasHammerDispatchIntent, observeClosureResult, observeDaemonGate as reviseDaemonGate, observeDaemonResult, revalidateClosurePr, resolveClosureNextAction, reviseClosureNextAction } from './ama/closure-next-action.mjs';
 import { probeOrphanOwnership } from './ama/orphan-watchdog.mjs';
 import { observeClosureWait } from './ama/closure-wait.mjs';
+import { enforceClosureRecoveryDeadline } from './ama/closure-recovery.mjs';
 import { observeClosureDecisionMismatch, observeClosureRefreshLoop } from './ama/closure-refresh-loop.mjs';
 import { closureOwnerShadowEvidence, shadowNextActionLater } from './pr-next-action-consumer.mjs';
 import { hostname } from 'node:os';
@@ -841,6 +842,18 @@ async function maybeDispatchAmaClosureForInner({
       ...(selected.action === 'review' ? { selectedClosureOwner: {
         ...closureOwnerFromDecision(selected), reason: 'exact-head-review',
       } } : {}) };
+  }
+  // CLOSURERECOVERYEXEC-01: the closer's custody reconciliation did not
+  // resolve an R04 decision; its deadline is enforced here, once per pass.
+  if (result && closureOwnerSink.shared) {
+    try {
+      result = await enforceClosureRecoveryDeadline({ rootDir: options.rootDir || ROOT,
+        repo: options.repoPath, prNumber: options.prNumber,
+        headSha: options.candidate?.headSha || options.currentRevisionRef || null,
+        shared: closureOwnerSink.shared, result, now: options.now ? options.now() : Date.now(),
+        env: options.env || process.env, logger: options.logger,
+        observeWaitImpl: options.observeClosureWaitImpl || observeClosureWait });
+    } catch (error) { options.logger?.warn?.(`[watcher] closure-recovery deadline observation failed: ${error.message}`); }
   }
   try {
     result = await observeClosureRefreshLoop({ rootDir: options.rootDir || ROOT,
@@ -2756,7 +2769,11 @@ async function dispatchAmaClosureFor({
           if (live?.isDraft) return { dispatched: false, reason: 'background-pr-draft', ...changedDecision };
           const launchMismatch = hammerDispatchMismatch(shared, launchShared,
             { repo: repoPath, prNumber, headSha: live.headSha });
-          if (launchMismatch || !hasHammerDispatchIntent(launchShared, { repo: repoPath, prNumber, headSha: live.headSha })) {
+          // CLOSURERECOVERYEXEC-01: an R04 reconciliation is not a mismatch. Like
+          // the inline route, hand it to the closer, whose admission reconciles
+          // custody before its intent gate; closure enforces the deadline.
+          if (launchMismatch || !(hasHammerDispatchIntent(launchShared, { repo: repoPath, prNumber, headSha: live.headSha })
+            || hasClosureRecoveryIntent(launchShared, { repo: repoPath, prNumber, headSha: live.headSha }))) {
             return { ...(launchMismatch
               || { dispatched: false, reason: 'closure-decision-mismatch', ...changedDecision }), retryAfterMs: 30_000 };
           }
@@ -3098,7 +3115,10 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
   };
   // Ordinary scoped operator requests have an executor below. Recovery expiry
   // must still dispatch or report its blocker; all safety/lease gates apply.
-  if ((!mergeAgentRequestedScoped || isClosureRecoveryDecision(amaClosureResult?.nextAction))
+  // The closure-recovery executor already ran this pass and owns its one
+  // escalation (CLOSURERECOVERYEXEC-01); the watchdog must not page it again.
+  const recoveryExecuted = ['executing', 'pending', 'escalated'].includes(amaClosureResult?.closureRecovery?.outcome);
+  if (!recoveryExecuted && (!mergeAgentRequestedScoped || isClosureRecoveryDecision(amaClosureResult?.nextAction))
     && overdueNextAction(amaClosureResult?.nextAction, candidate?.headSha || currentRevisionRef,
     orphanOptions.now, orphanOptions.env)) {
     const orphan = await recoverOwnerless();
@@ -3170,7 +3190,7 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
     return { outcome: 'dispatch-merge-agent', amaClosureResult, coexistence,
       dispatchEnv: mergeAgentDispatchEnvForAction(coexistence.action) };
   }
-  if (!mergeAgentRequestedScoped) {
+  if (!mergeAgentRequestedScoped && !recoveryExecuted) {
     const orphan = await recoverOwnerless();
     if (orphan) return orphan;
   }

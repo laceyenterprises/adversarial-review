@@ -29,6 +29,21 @@ identity, predecessor restoration and bounded unknown-evidence accounting retain
 the existing hammer-dispatch states and transitions. Closing-decision and CI
 ownership precedence remain unchanged.
 
+## Explicit same-head re-review intent (RETRIGGERDEDUP-01)
+
+Accepted label, CLI, rescue and remediation requests atomically pair their row
+reset with a persistent exact-head request receipt. `pending` intent becomes
+`consumed` once immediately before reviewer dispatch under the existing claim
+and head lease. It spends the normal rereview budget. Concurrent request IDs
+coalesce without extending the deadline; replayed IDs cannot grant another pass.
+
+Credential and capacity holds retain pending intent. Head movement, terminal
+PR, exhausted ceilings or the existing rereview dispatch wait bound (900 seconds
+by default) produce `refused` intent and a visible explanation. Notice failures
+remain durable delivery debt. A valid pending intent prevents dedup row repair
+from restoring `posted`. Implicit same-head dispatch remains deduplicated.
+See [the store contract](data-model/explicit-review-intents.md).
+
 REPORENAME-01 changes repository identity keys without changing review, closer,
 remediation or merge lifecycle states. Shared owner fences exclude migration;
 the exclusive migration saves a recovery marker, rekeys files and commits one
@@ -1121,6 +1136,8 @@ gates and launch-token preference remain unchanged. See the
 [host identity contract](RUNBOOK-ama-closure.md#host-identity-reads-hostidcache-01).
 
 CLOSURESPLIT-01: closure and background hammer dispatch carry the selected immutable next-action pair, including the decision key, generation and head-scoped primary-change result. A changed decision key returns closure-decision-mismatch with both keys/generations and the complete replacement snapshot. Closure re-resolves that snapshot once; a daemon successor enters the existing live merge gates, while waits retain the refreshed owner. PRIMARYREPAIRDISPATCH-01 durably counts consumed mismatches per PR/head; the second mismatch, including during that successor attempt or on a later background tick, pages through closure-wait and returns closure-decision-mismatch-escalated without another successor attempt. Inherited primary-change failures are recomputed at the current head and their raw evidence is passed into dispatcher eligibility; absent raw evidence cannot default an observed refusal to not-applicable. A passing predicate supersedes only the associated primary-change decline. When both selected and refreshed exact-subject/head decisions name R05 primary-change-repair, dispatch uses existing repair admission: comment-only verdicts, non-blocking findings and reverted/unknown primary change admit the hammer to restore author lines or perform a finding-cited authorized reversal. Unauthorized reversals still refuse merge; unrelated/permanent declines, R15 conditions, structural safety, retry caps and leases retain their protections. The additive decision_mismatch_cycle table in the closure-wait database records head and a count capped at two; lifecycle states are unchanged. Changed hammer decisions are reported before repair-admission refusal after primary validation passes; structural safety refusals remain in the replacement snapshot. Non-dispatch successors return the refreshed nextAction, reason and snapshot together, and primary refresh preserves unrelated progress metadata.
+
+CLOSURERECOVERYEXEC-01: an R04 closure-recovery reconciliation is admitted to the closer by both closure and background hammer dispatch (shared predicate `hasClosureRecoveryIntent`), never reported as closure-decision-mismatch. The closer's existing custody reconciliation dispatches when ownership resolves. Otherwise closure returns the closer's refusal with closureRecovery evidence until the decision deadline, then pages once through closure-wait class closure-recovery-deadline and returns closure-recovery-ownership-unresolved. The orphan watchdog does not repeat that page. Lifecycle states, merge gates and leases are unchanged.
 
 OWNERDEADLINE-01: every open PR needs one live owner with a next action and
 an anchored deadline. Once that deadline is at least the existing ownerless
@@ -2919,3 +2936,11 @@ generation. Ledger lock order consumes the next new charge regardless of
 clock precision; a consumed receipt starts one fresh cap-alert episode.
 Watcher and closer exclude the same gate status context. A pending grant
 cannot supersede the newer clean-review daemon path.
+
+REMEDIATORLANE-01 extends the existing follow-up-job.10 requeue trigger: a
+claimed native job whose remaining declared lanes require account-bound HQ
+dispatch returns from in_progress to pending before launch, with reason
+`remediation-lane-unrunnable-in-mode`, unchanged currentRound and modeRefusals
+audit. This is a budget-neutral hold, not worker failure. Personal/declared
+runnable fallthrough proceeds normally; OS mode is unchanged. Existing states,
+smoke steps, merge gates and proposed pending-state deadline remain unchanged.

@@ -9,6 +9,10 @@ import { reviewerCredentialKey, selectClaudeAccountLaneFromSnapshot, readCorpora
 import { reviewerTimeoutBudget, REVIEWER_TIMEOUT_REPEATED_REASON } from './reviewer-timeout-budget.mjs';
 import { createReviewerQuotaBlockLogger } from './reviewer-quota-block-log.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
+import {
+  pendingExplicitReviewIntent, reconcileExplicitReviewIntents, explicitReviewRefusalBody,
+  settleExplicitReviewIntent, consumeExplicitReviewIntent, refuseFailedExplicitReviewDispatch,
+} from './explicit-review-intent.mjs';
 import { maybeDeliverOperatorDecisionNotice } from './operator-decision-notice.mjs';
 import { readAmaCloserLease } from './ama/closer-lease.mjs';
 import { observeClosureWait } from './ama/closure-wait.mjs';
@@ -803,6 +807,19 @@ export async function processReviewSubject(entry, ctx) {
       const observeReviewLane = decision => observeTtmReviewLane(db, {
         repo: repoPath, prNumber, headSha: subject.headSha, ...decision,
       });
+      const reconcileExplicitRequests = (headSha = null, terminal = false) => reconcileExplicitReviewIntents(db, {
+        repo: repoPath, prNumber, headSha, terminal,
+        notify: intent => postReviewCycleCapEscalation(octokit, {
+          repoPath, prNumber, body: explicitReviewRefusalBody(intent),
+        }),
+      });
+      const explicitIntentForHead = () => pendingExplicitReviewIntent(db, {
+        repo: repoPath, prNumber, headSha: subject.headSha,
+      });
+      // Observe the deadline even while every reviewer seat/credential is held.
+      // No per-tick GitHub read: head movement is reconciled against the live
+      // freshness read when dispatch is evaluated, or by the deadline.
+      await reconcileExplicitRequests(null, Boolean(subject.terminal));
       if (!subject.terminal) observeReviewLane({});
       // Drafts are intentional waits. Persist discovery evidence so they do
       // not inflate either spill lane, including a PR converted back to draft.
@@ -1439,7 +1456,7 @@ export async function processReviewSubject(entry, ctx) {
       });
       // CAPROUTE-01: route before generic failed-row retry admission. A cap
       // failure is an ownership handoff, including when revision_ref is stale.
-      if (!isExplicitOperatorReviewRetrigger(existing) && !isOrphanHeadReviewRequested(existing, subject.headSha)
+      if (!explicitIntentForHead() && !isExplicitOperatorReviewRetrigger(existing) && !isOrphanHeadReviewRequested(existing, subject.headSha)
         && !transferredHeadReview) {
         if ((await routeReviewCycleCapToHammer(stmtGetReviewRow.get(repoPath, prNumber))).handled) return;
       }
@@ -1471,7 +1488,7 @@ export async function processReviewSubject(entry, ctx) {
       // That suppression is state-aware rather than raw-label-based so stale
       // labels and `awaiting-rereview` handoffs still re-arm review.
       let cappedClosure = false;
-      if (effectiveDomainId === CODE_PR_DOMAIN_ID && existing?.reviewer_head_sha !== subject.headSha && !transferredHeadReview) {
+      if (!explicitIntentForHead() && effectiveDomainId === CODE_PR_DOMAIN_ID && existing?.reviewer_head_sha !== subject.headSha && !transferredHeadReview) {
         const ledger = summarizePRRemediationLedger(ROOT, { repo: repoPath, prNumber });
         const roundBudget = resolveRoundBudgetForJob({
           linearTicketId, riskClass: ledger.latestRiskClass,
@@ -1507,6 +1524,7 @@ export async function processReviewSubject(entry, ctx) {
       if (effectiveDomainId === CODE_PR_DOMAIN_ID && existing && !subject.terminal
         && ['posted', 'pending', 'pending-upstream', 'ci-blocked'].includes(existing.review_status)
         && (existing.review_status !== 'posted' || existing.reviewer_head_sha !== subject.headSha)
+        && !explicitIntentForHead()
         && !isExplicitOperatorReviewRetrigger(existing)
         && !isOrphanHeadReviewRequested(existing, subject.headSha) && !transferredHeadReview) {
         try {
@@ -2968,7 +2986,7 @@ export async function processReviewSubject(entry, ctx) {
         });
       };
 
-      if (!isExplicitOperatorReviewRetrigger(existing) && !isOrphanHeadReviewRequested(existing, subject.headSha)
+      if (!explicitIntentForHead() && !isExplicitOperatorReviewRetrigger(existing) && !isOrphanHeadReviewRequested(existing, subject.headSha)
         && !handoffReviewAdmission) {
         // The HAM head suppresses reviewers, not reconciliation of its owner.
         // The cap route still passes through the closer's eligibility/lease gates.
@@ -3058,6 +3076,11 @@ export async function processReviewSubject(entry, ctx) {
         now: new Date().toISOString(),
       });
       if (cycleCapDecision.escalate && !handoffReviewAdmission) {
+        const intent = explicitIntentForHead();
+        if (intent) {
+          settleExplicitReviewIntent(db, intent, 'review-cycle-cap-paused');
+          await reconcileExplicitRequests();
+        }
         const escalatedAt = new Date().toISOString();
         const recentVerdicts = recentReviewCycleVerdicts(db, {
           repo: repoPath,
@@ -3138,12 +3161,13 @@ export async function processReviewSubject(entry, ctx) {
         const completedRemediationRounds = Math.max(0, Number(ledger.completedRoundsForPR) || 0);
         const passKind = reviewerSafetyPassKind({ current, hasPriorPostedReview: dispatchHasPriorPostedReview,
           hasPriorCompletedReview: Boolean(stmtHasCompletedReview.get(repoPath, prNumber)), completedRemediationRounds });
-        return { passKind };
+        return { passKind: explicitIntentForHead() ? 'rereview' : passKind };
       };
       const preflightTasks = () => ({
         freshness: () => fetchPullRequestHeadAndState(repoPath, prNumber, { execFileImpl: execFileAsync }),
         dedup: () => resolveAlreadyReviewedHeadDedup({ repoPath, prNumber,
           headSha: subject?.headSha || null,
+          explicitReviewIntent: explicitIntentForHead(),
           reviewerLogins: amaAuthoritativeReviewerLoginsForModel(route.reviewerModel),
           fetchReviewsForHeadImpl: fetchReviewsForHeadForDedup, logger: console }),
         triage: () => operatorSurface.syncTriageStatus(
@@ -3312,6 +3336,7 @@ export async function processReviewSubject(entry, ctx) {
           let credentialProbeReservation = null;
           let credentialProbeKey = null;
           let reviewerProcessStarted = false;
+          let forcedReviewIntent = null;
           const releaseReviewerReservation = () => {
             if (!reservation?.admit || reservationReleased) return;
             reservationReleased = true;
@@ -3324,7 +3349,12 @@ export async function processReviewSubject(entry, ctx) {
             // — attestation consumption, and runs before any claim/spawn so a
             // duplicate consumes no attempt budget and no re-review ceiling.
             const reviewedHeadDedup = await readPreflight('dedup');
-            if (reviewedHeadDedup.alreadyReviewed) {
+            forcedReviewIntent = explicitIntentForHead();
+            if (reviewedHeadDedup.reason === 'explicit-review-intent' && !forcedReviewIntent) {
+              await reconcileExplicitRequests();
+              return { dispatched: false, reason: 'explicit-review-intent-expired' };
+            }
+            if (reviewedHeadDedup.alreadyReviewed && !forcedReviewIntent) {
               observeReviewLane({ suppressed: true, reason: 'same-head-already-reviewed' });
               console.log(buildDuplicateReviewSkipAudit({
                 repoPath,
@@ -3630,6 +3660,7 @@ export async function processReviewSubject(entry, ctx) {
               const freshPR = afterClaim
                 ? await fetchPullRequestHeadAndState(repoPath, prNumber, { execFileImpl: execFileAsync })
                 : await readPreflight('freshness');
+              await reconcileExplicitRequests(freshPR.headRefOid || null, freshPR.state !== 'open' || Boolean(freshPR.mergedAt));
               if (freshPR.mergedAt) {
                 console.log(
                   `[watcher] PR ${repoPath}#${prNumber} was merged since tick-start snapshot — marking row + skipping reviewer spawn`
@@ -3733,7 +3764,7 @@ export async function processReviewSubject(entry, ctx) {
             const completedRemediationRounds = Number.isFinite(Number(ledger.completedRoundsForPR))
               ? Math.max(0, Math.floor(Number(ledger.completedRoundsForPR)))
               : 0;
-            const passKind = reviewerSafetyPassKind({
+            const passKind = forcedReviewIntent ? 'rereview' : reviewerSafetyPassKind({
               current,
               hasPriorPostedReview: dispatchHasPriorPostedReview,
               hasPriorCompletedReview: Boolean(stmtHasCompletedReview.get(repoPath, prNumber)),
@@ -3848,11 +3879,22 @@ export async function processReviewSubject(entry, ctx) {
             //     reviews and must not spend (2), but they still need their own
             //     larger fuse so a broken reviewer path cannot retry forever.
             let skipReviewerSpawnReason = null;
+            if (forcedReviewIntent) {
+              const budget = resolveFirstPassReviewBudgetSuppression({
+                rootDir: ROOT, domainId, repoPath, prNumber, linearTicketId,
+                reviewRow: existing, currentHeadSha: reviewerHeadSha, labelNames: prLabelNames, db,
+              });
+              if (budget.suppressed && budget.reason !== 'same-head-already-reviewed') {
+                skipReviewerSpawnReason = budget.reason;
+              }
+            }
             if (passKind === 'rereview') {
+              // A durable explicit intent is subject to the normal ceilings, so
+              // its operator marker only bypasses closer-head suppression.
               const explicitOperatorReviewRetrigger = isExplicitOperatorReviewRetrigger(current);
               const orphanHeadReview = isOrphanHeadReviewRequested(current, reviewerHeadSha);
-              const handoffReviewBypass = orphanHeadReview || hammerHandoffReviewBypass({ db, rootDir: ROOT, repo: repoPath,
-                prNumber, headSha: reviewerHeadSha, row: current });
+              const handoffReviewBypass = !forcedReviewIntent && (orphanHeadReview || hammerHandoffReviewBypass({ db, rootDir: ROOT, repo: repoPath,
+                prNumber, headSha: reviewerHeadSha, row: current }));
               const closerHead = await readPreflight('closer');
               if (closerHead?.suppressed && !explicitOperatorReviewRetrigger && !orphanHeadReview && !handoffReviewBypass) {
                 console.log(
@@ -3875,7 +3917,7 @@ export async function processReviewSubject(entry, ctx) {
               // FSR-06B: a VERIFIED trailer-only re-review request (empty delta
               // from the reviewed head, checked against local git above) may
               // pass both fuses once, exactly like an operator retrigger.
-              const fleetSelfRepairTrailerOnlyBypass = fleetSelfRepairRereview.honored;
+              const fleetSelfRepairTrailerOnlyBypass = !forcedReviewIntent && fleetSelfRepairRereview.honored;
               const reviewCeilingBypassDetail = explicitOperatorReviewRetrigger
                 ? 'rereview_reason is an operator retrigger marker'
                 : 'rereview_reason is a verified FSR-06B trailer-only re-review request';
@@ -3894,7 +3936,7 @@ export async function processReviewSubject(entry, ctx) {
               if (
                 !skipReviewerSpawnReason &&
                 priorReviewCount >= hardReviewCeiling &&
-                !explicitOperatorReviewRetrigger &&
+                (forcedReviewIntent || !explicitOperatorReviewRetrigger) &&
                 !fleetSelfRepairTrailerOnlyBypass && !handoffReviewBypass
               ) {
                 console.log(
@@ -3922,7 +3964,7 @@ export async function processReviewSubject(entry, ctx) {
               if (
                 !skipReviewerSpawnReason
                 && priorReviewAttemptCount >= hardReviewAttemptCeiling
-                && !explicitOperatorReviewRetrigger
+                && (forcedReviewIntent || !explicitOperatorReviewRetrigger)
                 && !fleetSelfRepairTrailerOnlyBypass && !handoffReviewBypass
               ) {
                 console.log(
@@ -3942,6 +3984,10 @@ export async function processReviewSubject(entry, ctx) {
             }
 
             if (skipReviewerSpawnReason) {
+              if (forcedReviewIntent) {
+                settleExplicitReviewIntent(db, forcedReviewIntent, skipReviewerSpawnReason);
+                await reconcileExplicitRequests();
+              }
               stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
               console.log(
                 `[watcher] Released reviewer claim for ${repoPath}#${prNumber} after ` +
@@ -4150,6 +4196,18 @@ export async function processReviewSubject(entry, ctx) {
                   + `retained_wake=${Boolean(dispatchCandidate.retainedWakePriority)} `
                   + `wait_threshold_exceeded=${waitThresholdExceeded}`);
               }
+              if (forcedReviewIntent) {
+                const consumed = db.transaction(() => consumeExplicitReviewIntent(db, forcedReviewIntent, {
+                  headSha: reviewerHeadSha, sessionUuid: reviewerSessionUuid,
+                })).immediate();
+                if (!consumed) {
+                  stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
+                  await reconcileExplicitRequests();
+                  return { dispatched: false, reason: 'explicit-review-intent-no-longer-pending' };
+                }
+                console.log(`[watcher] explicit re-review intent consumed for ${repoPath}#${prNumber}`
+                  + ` head=${reviewerHeadSha} request=${forcedReviewIntent.request_id}`);
+              }
               reviewerSpawned = true;
               if (depthSpillReserved) {
                 firstPassSpilloverController?.commitSpill?.({ repo: repoPath, prNumber });
@@ -4171,6 +4229,10 @@ export async function processReviewSubject(entry, ctx) {
                   })
                   : await spawnReviewer(spawnReviewerArgs);
               } catch (error) {
+                if (forcedReviewIntent) {
+                  refuseFailedExplicitReviewDispatch(db, forcedReviewIntent, reviewerSessionUuid);
+                  await reconcileExplicitRequests();
+                }
                 if (!reviewerProcessStarted) dispatchCandidate.retainWakeForCapacity?.();
                 if (credentialProbeReservation?.probe && !reviewerProcessStarted) {
                   try {
@@ -4188,6 +4250,10 @@ export async function processReviewSubject(entry, ctx) {
               // A failed launch keeps even a fresh, already-consumed wake alive.
               if (result.ok) retainedWatcherWakes?.drop(wakeIdentity);
               else if (!reviewerProcessStarted) dispatchCandidate.retainWakeForCapacity?.();
+              if (!result.ok && !reviewerProcessStarted && forcedReviewIntent) {
+                refuseFailedExplicitReviewDispatch(db, forcedReviewIntent, reviewerSessionUuid);
+                await reconcileExplicitRequests();
+              }
               if (!result.ok && credentialProbeReservation?.probe && !reviewerProcessStarted) {
                 try {
                   releaseReviewerCredentialProbe(ROOT, credentialProbeKey, credentialProbeReservation);

@@ -94,8 +94,10 @@ function buildReviewCommentBody({
   // Blockquote lines only, never headings: the verdict and blocking-finding
   // parsers key on `## Verdict` / `## Blocking issues`, and a heading inserted
   // above them has broken parsing before (adversarial-review#521).
+  // Labelled fields (REVIEWPROV-01): harness is the execution runtime, and a
+  // runtime that was sent no effort/thinking level prints `n/a`, never `none`.
   const stamp = execution
-    ? `> Reviewer: ${execution.harness || reviewerMetadata?.displayName?.toLowerCase() || 'unknown'} · ${execution.model || 'unknown'} · ${execution.effort || 'none'}\n\n`
+    ? `> Reviewer: harness ${execution.harness || 'unknown'} · model ${execution.model || 'unknown'} · effort ${execution.effort || 'n/a'}\n\n`
     : '';
   const auditBlocks = `${stamp}${String(waiverAuditBlock || '')}${String(reviewModeAuditBlock || '')}`;
   if (startsWithReviewCommentHeader(text)) {

@@ -667,6 +667,7 @@ async function applyLivePackCrossEditReview(reviewText, {
   const currentLabels = Array.isArray(labels) ? labels : [];
   let findings;
   let exemptions = [];
+  let waiverAudit = '';
   try {
     const review = await evaluateImpl({
       repo,
@@ -687,13 +688,23 @@ async function applyLivePackCrossEditReview(reviewText, {
       );
     }
     if (review.waived) {
+      waiverAudit = `\n\n> Operator waiver observed by this fresh review: \`${LIVE_PACK_EDIT_WAIVER_LABEL}\` `
+        + `waived \`${LIVE_PACK_CROSS_EDIT_KIND}\` for ${review.waivedFindings.length} pack(s).`;
       log?.error?.(
         `[reviewer] live-pack cross-edit waived by ${LIVE_PACK_EDIT_WAIVER_LABEL} for ${repo}#${prNumber}: ` +
           review.waivedFindings.map((finding) => finding.pack).join(', '),
       );
     }
   } catch (err) {
-    findings = inconclusiveFindingsForDiff({ diffText: diff, labels: currentLabels, error: err });
+    // Build candidates without a waiver first so the audit records only actual
+    // guarded paths, never an unrelated diff that happens to carry the label.
+    const candidates = inconclusiveFindingsForDiff({ diffText: diff });
+    const waived = candidates.length > 0 && normalizeLabelNames(currentLabels).has(LIVE_PACK_EDIT_WAIVER_LABEL);
+    findings = waived ? [] : candidates;
+    if (waived) {
+      waiverAudit = `\n\n> Operator waiver observed by this fresh review: \`${LIVE_PACK_EDIT_WAIVER_LABEL}\` `
+        + `waived \`${LIVE_PACK_CROSS_EDIT_KIND}\` for ${candidates.length} pack(s).`;
+    }
     log?.error?.(
       `[reviewer] WARN: live-pack cross-edit check failed for ${repo}#${prNumber}; failing closed: ${err?.message || err}`,
     );
@@ -704,7 +715,7 @@ async function applyLivePackCrossEditReview(reviewText, {
         `runs=${finding.run_ids.join(',') || '<inconclusive>'} files=${finding.touched_files.join(', ')}`,
     );
   }
-  return appendLivePackStampExemptions(applyLivePackCrossEditFindings(reviewText, findings), exemptions);
+  return appendLivePackStampExemptions(applyLivePackCrossEditFindings(reviewText, findings), exemptions) + waiverAudit;
 }
 
 // Remediation entry point for a follow-up job. `execFileImpl` is threaded to

@@ -649,6 +649,15 @@ leases, lifecycle states and smoke promises remain unchanged. See the
 Offline source acceptance is separate from read-only observation of natural
 recovery after normal deployment; no live verification action is added.
 
+CLOSURERECOVERYEXEC-01: an R04 `closure-recovery` next action now has an
+executor. Inline and background admission both hand it to the closer's custody
+reconciliation, which dispatches when ownership resolves. Unresolved ownership
+pages once at the decision deadline (`closure-recovery-ownership-unresolved`)
+instead of looping on `closure-decision-mismatch`. Expired next-action deadlines
+appear in the watcher log and in `pipeline-health` `expiredNextActions` with
+their age. See the
+[executor contract](docs/RUNBOOK-ama-closure.md#closure-recovery-executor-closurerecoveryexec-01).
+
 TERMLEASE-01: terminal non-merge closer leases (`superseded`,
 `failed-without-merge`, `deferred`) release on the same dispatch pass once ledger
 or matching dispatch evidence proves the launch ended or is absent. Live or
@@ -2522,7 +2531,36 @@ promise to reclaim uncertain ownership. Corrupt timestamps or unavailable
 liveness evidence can still prevent reclamation; proposed operator bound is
 1800 seconds with enforcement missing for those invalid-record cases.
 
+REMEDIATORLANE-01 uses follow-up-job.10 for a native orchestration-mode
+refusal: in_progress returns to pending before launch, without charging a round
+or recording worker failure. Routing falls through to a runnable declared lane
+when available; otherwise `remediation-lane-unrunnable-in-mode` and modeRefusals
+retain the hold diagnostics. OS mode is unchanged. Focused mode-routing fixtures
+verify the hold and fallthrough alongside the existing four smoke promises.
+After ordinary deployment and approved reload, SRE retains an organic native
+fallthrough/hold and OS-mode comparison; offline tests establish no live recovery.
+
 <!-- smv:diagrams:start -->
+
+### explicit-review-intent
+
+One durable receipt per request; only a pending exact-head receipt admits one dispatch. Refused receipts retain visible-notification debt across restart. Consumed requests are never rearmed. The existing rereview dispatch bound is 900 seconds by default.
+
+```mermaid
+stateDiagram-v2
+    state "pending" as s0
+    state "consumed" as s1
+    state "refused" as s2
+    state "coalesced" as s3
+    [*] --> s0: explicit-review-intent.01 accepted exact-head request
+    s0 --> s1: explicit-review-intent.02 claim and session CAS immediately before dispatch
+    s0 --> s2: explicit-review-intent.03 head changed, terminal PR, ceiling or dispatch deadline
+    [*] --> s3: explicit-review-intent.04 additional request joins original pending head without extending deadline
+    s1 --> s2: explicit-review-intent.05 runtime dispatch fails visibly without rearming
+    s1 --> [*]
+    s2 --> [*]
+    s3 --> [*]
+```
 
 ### review-row
 
@@ -2603,7 +2641,7 @@ stateDiagram-v2
     s1 --> s3: follow-up-job.07 worker failure
     s1 --> s4: follow-up-job.08 lifecycle, budget or committed-unpublished stop
     s1 --> s5: follow-up-job.09 operator cancellation
-    s1 --> s0: follow-up-job.10 transient retry or unpublished infrastructure-only CI execution recovery without round charge
+    s1 --> s0: follow-up-job.10 transient retry, unpublished infrastructure-only CI recovery or orchestration-mode refusal hold without round charge
     s2 --> s0: follow-up-job.11 next round unless comment-only final hammer handoff
     s3 --> s0: follow-up-job.12 explicit retrigger or all-infrastructure CI stop with successful current-head replacement checks
     s4 --> s0: follow-up-job.13 allowlisted explicit retrigger or live satisfied required-label event with unchanged round cap; branch-unresolved resets lookup attempts; all-infrastructure CI stops except max-rounds recover on successful current-head replacements
@@ -4106,3 +4144,21 @@ Offline `operator-approval-rearm`, `ama-hammer-retry-cap`, `pr-next-action` and
 SRE observes the next organic approval producing a closer launch with
 `operator-approval-applied`, without a manual step. See the
 [operator runbook](docs/RUNBOOK-ama-closure.md#awaited-operator-approval-after-exhausted-retries-approvalrearm-01).
+
+## Explicit re-review dispatch (RETRIGGERDEDUP-01)
+
+An accepted `retrigger-review`, rescue `rereview`, or remediation request
+records a durable exact-head intent. It permits one fresh review even when
+the head already has a completed review, subject to existing rereview ceilings,
+reviewer claims and head leases. Implicit repeats remain deduplicated.
+Intents survive restart and expire under the existing rereview dispatch wait
+bound, **900 seconds by default**. Ceiling, head-change and deadline refusals
+receive a visible PR explanation. A fresh review records an observed live-pack
+waiver in its body.
+
+Deploy with the normal watcher restart. The disposable refusal smoke and
+targeted watcher tests cover this lifecycle. SRE then retains the next organic
+unchanged-head request's fresh-review receipt within the dispatch bound and the
+`explicit re-review intent consumed` log, or its visible refusal. No worker
+live action is needed. See [the state machine](docs/STATE-MACHINE.md) and
+[store contract](docs/data-model/explicit-review-intents.md).

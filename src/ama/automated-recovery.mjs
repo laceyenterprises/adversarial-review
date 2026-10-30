@@ -242,8 +242,9 @@ async function recoverAmaAutomationLocked({
       state.rereviewRequestedAt = now();
       save();
       const rereview = await requestRereviewImpl({ rootDir, repo, prNumber,
+        explicitReviewRequest: { requestId: `ama-rescue:${headSha}:${state.attempts}:${reviewStamp}`, actor: 'merge-agent-rescue' },
         targetRevisionRef: headSha, reason: `AMA automated recovery: ${selected.reason}`, logger });
-      state.rereviewPending = rereview?.triggered === true || rereview?.reason === 'already-pending';
+      state.rereviewPending = rereview?.triggered === true || rereview?.status === 'already-pending';
       if (state.rereviewPending) {
         state.rereviewRequested = true;
         if (rereview?.triggered === true) charge();

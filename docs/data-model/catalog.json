@@ -2,6 +2,20 @@
   "version": 1,
   "entries": [
     {
+      "id": "explicit-review-intents",
+      "title": "Explicit Re-review Intents",
+      "path": "docs/data-model/explicit-review-intents.md",
+      "store": "data/reviews.db: explicit_review_intents",
+      "schemaSurface": "src/explicit-review-intent.mjs",
+      "relatedSchemaSurfaces": [
+        "src/review-state.mjs",
+        "src/pollonce-phases.mjs",
+        "src/reviewed-head-dispatch-gate.mjs"
+      ],
+      "owner": "watcher review dispatch",
+      "compatibility": "Additive table; request identity and exact-head one-shot admission persist across restart. Pending requests expire under the existing rereview wait bound, default 900 seconds; normal ceilings and terminal fences remain enforced."
+    },
+    {
       "id": "repository-identities",
       "title": "Repository Identity and Rename Continuity",
       "path": "docs/data-model/repository-identities.md",
@@ -575,8 +589,10 @@
       ],
       "deliveryHeadWaitFields": ["head_wait_started_at"],
       "reviewerExecutionModelSources": ["env-pin", "registry", "committed-seed", "runtime-display-token"],
+      "reviewerExecutionHarnesses": ["claude-code", "codex", "antigravity", "gemini-cli"],
       "claudeReplySelectionFields": ["candidateCount", "selectedCandidate", "selectedType", "laterCandidates", "contractValid"],
       "reviewerSettlementFailureMessage": { "successfulPass": null, "unsuccessfulPassPriority": ["error", "stderr", "stderrTail"] },
+      "compatibility": "REVIEWPROV-01: missing execution harness stamps unknown, never a model family. Antigravity suffix effort accepts only low, medium, high or xhigh; release qualifiers remain null. Existing fields, nullability and lifecycle are unchanged.",
       "owner": "reviewer spawn, settle, and token attribution"
     },
     {
@@ -682,7 +698,8 @@
       "relatedSchemaSurfaces": [
         "src/posted-review-row.mjs",
         "src/operator-label-wake.mjs",
-        "src/ama/closure-next-action.mjs"
+        "src/ama/closure-next-action.mjs",
+        "src/review-pipeline-health.mjs"
       ],
       "optionalOwnershipFields": ["nextAction"],
       "owner": "watcher posted-review dispatch fairness",
@@ -964,13 +981,13 @@
       "path": "docs/data-model/ama-closure-waits.md",
       "store": "data/ama-closure-waits/<sha256(repo#prNumber)>.db",
       "schemaSurface": "src/ama/closure-wait.mjs",
-      "relatedSchemaSurfaces": ["src/ama-closure-orchestration.mjs", "src/ama/dispatch-closer.mjs", "src/ama/closure-next-action.mjs", "src/reviewer-ci-admission.mjs", "src/ama/closure-refresh-loop.mjs", "src/follow-up-merge-agent.mjs"],
+      "relatedSchemaSurfaces": ["src/ama-closure-orchestration.mjs", "src/ama/dispatch-closer.mjs", "src/ama/closure-next-action.mjs", "src/reviewer-ci-admission.mjs", "src/ama/closure-refresh-loop.mjs", "src/ama/closure-recovery.mjs", "src/follow-up-merge-agent.mjs"],
       "sharedDecisionAnchor": "anchor-only observations reuse bounded-wait started without reserving or delivering a page",
       "owner": "AMA bounded closure wait and exhaustion paging",
       "waitTable": "waits_by_class",
       "waitColumns": ["head", "class", "started", "reason", "paged"],
       "waitPrimaryKey": ["head", "class"],
-      "waitClasses": ["primary-change", "bounded-wait", "final-round", "lane-busy", "ci-regression-ownerless", "snapshot-refresh", "closure-decision-mismatch", "original-worker-evidence", "closer-worker-evidence"],
+      "waitClasses": ["primary-change", "bounded-wait", "final-round", "lane-busy", "ci-regression-ownerless", "snapshot-refresh", "closure-decision-mismatch", "closure-recovery-deadline", "original-worker-evidence", "closer-worker-evidence"],
       "decisionMismatchCycleTable": "decision_mismatch_cycle(id INTEGER PRIMARY KEY CHECK(id=1), head TEXT NOT NULL, cycles INTEGER NOT NULL)",
       "decisionMismatchCycleContract": "First consumed mismatch permits one re-resolution; the second at the same head pages through closure-decision-mismatch and returns closure-decision-mismatch-escalated. Count saturates at two, survives restart, queue submissions and decision changes; a different head starts count one. No completion reset. Existing per-PR/head page receipt dedupes and refunds failed delivery.",
       "refreshCycleTable": "refresh_cycle(id INTEGER PRIMARY KEY CHECK(id=1), head TEXT NOT NULL, fingerprint TEXT NOT NULL, cycles INTEGER NOT NULL)",

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFile, execFileSync, spawnSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import { mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -7,6 +8,7 @@ import { PER_WORKER_PLACEHOLDER_REFRESH_TOKEN } from './codex-per-worker-auth.mj
 import { scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 
 const template = readFileSync(new URL('./codex-service-config.toml', import.meta.url), 'utf8');
+const execFileAsync = promisify(execFile);
 
 function runServiceCodexCommand(command, args, options) {
   if (args[0] !== 'login') return execFileSync(command, args, options);
@@ -39,6 +41,38 @@ export function serviceCodexConfigArgs() {
 // boundary. Never link to or write back to the broker/per-worker source.
 export function prepareServiceCodexHome({ env, workspaceDir, model, effort = null, codexCli,
   execFileSyncImpl = runServiceCodexCommand, log = console }) {
+  const steps = serviceCodexHomeSteps({ env, workspaceDir, model, effort, codexCli, log });
+  let step = steps.next();
+  while (!step.done) {
+    let result;
+    try {
+      const { command, args, options } = step.value;
+      result = execFileSyncImpl(command, args, options);
+    } catch (error) { step = steps.throw(error); continue; }
+    step = steps.next(result);
+  }
+  return step.value;
+}
+
+// Readiness probes share the same credential staging, validation, catalog pins
+// and cleanup as execution, while yielding the event loop during CLI commands.
+export async function prepareServiceCodexHomeAsync({ execFileImpl = execFileAsync, ...options }) {
+  const steps = serviceCodexHomeSteps(options);
+  let step = steps.next();
+  while (!step.done) {
+    let result;
+    try {
+      const { command, args, options } = step.value;
+      const response = await execFileImpl(command, args, options);
+      result = args[0] === 'login'
+        ? `${response.stdout || ''}\n${response.stderr || ''}` : response.stdout;
+    } catch (error) { step = steps.throw(error); continue; }
+    step = steps.next(result);
+  }
+  return step.value;
+}
+
+function* serviceCodexHomeSteps({ env, workspaceDir, model, effort = null, codexCli, log = console }) {
   if (!model) throw new Error('service Codex home requires a resolved model');
   const codexHome = mkdtempSync(join(tmpdir(), 'adversarial-codex-'));
   try {
@@ -82,10 +116,10 @@ export function prepareServiceCodexHome({ env, workspaceDir, model, effort = nul
     // Use the actual spawn binary and effective store before debug models (which
     // may contact the provider) or exec. Suppress all credential/parser output.
     try {
-      const status = execFileSyncImpl(codexCli, ['login', 'status'], {
+      const status = yield { command: codexCli, args: ['login', 'status'], options: {
         env: nextEnv, cwd: workspaceDir, encoding: 'utf8', timeout: 30_000,
         maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
-      });
+      } };
       // The default runner captures both stdout and stderr: deployed Codex
       // prints its successful status on stderr.
       if (!/Logged in using ChatGPT\b/i.test(status)) throw serviceAuthError();
@@ -97,10 +131,10 @@ export function prepareServiceCodexHome({ env, workspaceDir, model, effort = nul
     try {
       // Fetch only through this spawn's binary, isolated config and staged auth.
       // Never read an interactive home's model cache or config.
-      const raw = execFileSyncImpl(codexCli, ['debug', 'models'], {
+      const raw = yield { command: codexCli, args: ['debug', 'models'], options: {
         env: nextEnv, cwd: workspaceDir, encoding: 'utf8', timeout: 30_000,
         maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'],
-      });
+      } };
       stage = 'parse';
       const catalog = JSON.parse(raw);
       if (!Array.isArray(catalog?.models) || !catalog.models.length

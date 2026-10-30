@@ -3553,6 +3553,11 @@ function requeueFollowUpJobForNextRound({
 // CIBLOCKINFRA-01: proof is revalidated under the queue writer lock.
 export function releaseInfrastructureCiStop({ rootDir, jobPath, repo, prNumber, headSha, now, recordedFailures, failedChecks }) {
   return withFollowUpJobLock(join(rootDir, 'data', 'follow-up-jobs'), () => {
+    if (['pending', 'inProgress'].some(key => listFollowUpJobsInDir(rootDir, key,
+      { repo, prNumber, caseInsensitiveRepo: true }).some(({ job }) =>
+      String(job.repo || '').toLowerCase() === String(repo || '').toLowerCase()
+      && Number(job.prNumber) === Number(prNumber)))) return null;
+    if (!existsSync(jobPath)) return null;
     const job = readFollowUpJob(jobPath);
     const code = job.remediationPlan?.stop?.code || job.failure?.code;
     const recordedHead = job.failure?.ciGate?.headSha || job.failure?.ciRegression?.headSha || job.ciGate?.headSha

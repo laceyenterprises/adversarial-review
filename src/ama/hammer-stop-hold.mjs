@@ -2,7 +2,7 @@ import { repositoryObservationCache } from '../repository-state-cache.mjs';
 import { operatorLabelInputs, awaitedOperatorLabelsApplied } from './operator-label-inputs.mjs';
 import { assertHoldRecord, createHoldRecord, normalizeHoldRecord, inputChangePredicates, changedHoldInputs, evaluateHoldRecord, markHoldEscalated, resetHoldEscalationsForTests } from './hold-record.mjs';
 import { refundCiInfrastructureHammerStops } from './ci-infrastructure-refund.mjs';
-import { CI_INFRASTRUCTURE_STOP_REASONS, infrastructureOnlyFailures, recordedCiFailures, checksExecutedAgain, enrichCiInfrastructureEvidence } from '../ci-infrastructure.mjs';
+import { CI_INFRASTRUCTURE_STOP_REASONS, infrastructureOnlyFailures, recordedCiFailures, checksExecutedAgain, enrichCiInfrastructureEvidence, hasMissingActionsEvidence } from '../ci-infrastructure.mjs';
 import { observeClosureResult } from './closure-next-action.mjs';
 import { createHistoryReader } from './history-reader.mjs';
 import { HISTORY_READ_ERROR_LIMIT } from './history-read-policy.mjs';
@@ -108,6 +108,11 @@ export function isInfrastructureStop(stop) {
   if (reasons.every(reason => INFRASTRUCTURE_STOP_REASONS.has(reason))) return true;
   return reasons.every(reason => CI_INFRASTRUCTURE_STOP_REASONS.has(reason))
     && infrastructureOnlyFailures(recordedCiFailures(stop));
+}
+
+export function canEnrichCiInfrastructureStop(stop, repo) {
+  return Boolean(stop?.failedChecks?.length) && hasMissingActionsEvidence(stop.failedChecks, repo) && !isInfrastructureStop(stop)
+    && [...(stop.reasons || []), stop.predicate].every(reason => CI_INFRASTRUCTURE_STOP_REASONS.has(reason));
 }
 
 const DETERMINISTIC_STOP_REASONS = new Set([
@@ -524,8 +529,7 @@ export async function evaluateHammerStopHold({
   const readStop = () => readHammerStopForHead({ hqRoot, repo, prNumber, headSha, reviewedSha,
     readAuditImpl: readSnapshot, logger });
   let stop = readStop();
-  if (stop?.failedChecks?.length && !isInfrastructureStop(stop)
-    && [...stop.reasons, stop.predicate].every(reason => CI_INFRASTRUCTURE_STOP_REASONS.has(reason))) {
+  if (canEnrichCiInfrastructureStop(stop, repo)) {
     const failedChecks = await enrichCiInfrastructureEvidence({ rollup: stop.failedChecks, repo, headSha, execFileImpl });
     stop.failedChecks.forEach((check, index) => {
       if (check && typeof check === 'object') Object.assign(check, failedChecks[index]);

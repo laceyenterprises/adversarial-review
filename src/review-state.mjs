@@ -15,6 +15,7 @@ import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
 import { ensureReviewCycleCapSchema } from './review-cycle-cap.mjs';
 import { duplicateFamilySchemaTableNames, ensureDuplicateFamilySchema } from './duplicate-family-state.mjs';
 import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
+import { ensureRepositoryIdentitySchema } from './repository-identity.mjs';
 import { isExplicitOperatorRetriggerReason } from './retrigger-review-reason.mjs';
 import { ensureTtmTrackerSchema } from './ttm-tracker.mjs';
 import { recordReviewLatencyEvent } from './review-latency-event-writer.mjs';
@@ -172,6 +173,7 @@ function openReviewStateDb(rootDir, { busyTimeoutMs = DEFAULT_BUSY_TIMEOUT_MS } 
 }
 
 function ensureReviewStateSchema(db) {
+  ensureRepositoryIdentitySchema(db);
   db.exec(`CREATE TABLE IF NOT EXISTS ham_finding_disputes (
     repo TEXT NOT NULL, pr_number INTEGER NOT NULL, identity TEXT NOT NULL,
     requests INTEGER NOT NULL DEFAULT 0, refusals INTEGER NOT NULL DEFAULT 0,

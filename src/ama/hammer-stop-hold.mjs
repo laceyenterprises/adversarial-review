@@ -1,3 +1,4 @@
+import { repositoryObservationCache } from '../repository-state-cache.mjs';
 import { operatorLabelInputs, awaitedOperatorLabelsApplied } from './operator-label-inputs.mjs';
 import { assertHoldRecord, createHoldRecord, normalizeHoldRecord, inputChangePredicates, changedHoldInputs, evaluateHoldRecord, markHoldEscalated, resetHoldEscalationsForTests } from './hold-record.mjs';
 import { refundCiInfrastructureHammerStops } from './ci-infrastructure-refund.mjs';
@@ -122,7 +123,7 @@ const DETERMINISTIC_STOP_REASONS = new Set([
   // required checks; its name is not evidence of a deterministic refusal.
 ]);
 // Process-local page debounce for a state file that cannot be written.
-const PAGED_IN_PROCESS = new Set();
+const PAGED_IN_PROCESS = repositoryObservationCache(new Set());
 
 export function _resetHammerStopHoldPageDebounceForTests() {
   PAGED_IN_PROCESS.clear();

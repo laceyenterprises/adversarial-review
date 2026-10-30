@@ -558,6 +558,16 @@ The full worked walkthrough is in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## The production pipeline (what runs every day)
 
+REPORENAME-01 preserves review, remediation and merge ownership when GitHub's
+stable repository ID appears under a new name. Discovery backfills IDs from
+the existing listing; an audited migration fences state owners and recovers
+interrupted file/database participants before another review cycle. Existing
+review lifecycle states, merge predicates and disposable smoke promises remain
+unchanged. See the [rename operator procedure](docs/review-pipeline-health.md#repository-renames-reporename-01)
+and [storage audit](docs/data-model/repository-identities.md). SRE records the
+post-deploy continuity receipt after the separately approved rename;
+HQ attestation identity continuity belongs to REPORENAME-02.
+
 For the GitHub-PR domain, the loop is wired through two long-running
 daemons on the maintainer's host:
 

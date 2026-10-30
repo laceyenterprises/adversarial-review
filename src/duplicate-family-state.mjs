@@ -1,3 +1,4 @@
+import { repositoryObservationCache } from './repository-state-cache.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { collectDuplicateContent } from './adapters/subject/github-pr/duplicate-content.mjs';
@@ -925,7 +926,7 @@ export function reconcileDuplicateFamiliesForRepo(db, subjectEntries, options = 
   return { families, familyIds };
 }
 
-const censusFailures = new Map();
+const censusFailures = repositoryObservationCache(new Map());
 export async function runDuplicateFamilyCensusForWatcher({
   db,
   subjectEntries,

@@ -1,3 +1,6 @@
+import { withRepositoryStateCycle } from '../repository-state-lock.mjs';
+import { canonicalRepositoryArguments } from '../repository-names.mjs';
+import { withRepositoryStateRead } from '../repository-state-lock.mjs';
 import { hasDeployIncidentMarker } from '../deploy-incident.mjs';
 import { loadAwareTimeoutMs, loadAwareTimeoutSeconds } from '../load-aware-timeout.mjs';
 import { meteredExecFile } from '../metered-gh.mjs';
@@ -66,7 +69,7 @@ export function acquireDaemonMergeLease({ acquireMergeLeaseImpl = acquireMergeLe
 
 // Drop obsolete heads before attempting any gates, and retain a reservation
 // only while the eligible exact head is actually waiting for the merge lane.
-export async function withDaemonMergeReservation({ rootDir, repo, base, pr, head, isAttemptActive = () => false }, attempt) {
+async function withDaemonMergeReservationWithinRepositoryState({ rootDir, repo, base, pr, head, isAttemptActive = () => false }, attempt) {
   if (!rootDir || !repo || !base || !pr || !head) return attempt();
   const prune = (keepHead) => {
     const obsolete = w => w.priority === 'daemon' && Number(w.pr) === Number(pr) && w.head !== keepHead;
@@ -521,13 +524,23 @@ export function deriveLeaseKey({ repo, base } = {}) {
   };
 }
 
-export function mergeLeaseFilePath(rootDir, identity = {}) {
+export function mergeLeaseFilePath(...args) {
+  const root = args[0]; args[1] = canonicalRepositoryArguments(root, args[1]);
+  return mergeLeaseFilePathWithinRepositoryState(...args);
+}
+
+function mergeLeaseFilePathWithinRepositoryState(rootDir, identity = {}) {
   validateIdentity({ rootDir, ...identity });
   const { fileSlug } = deriveLeaseKey(identity);
   return join(rootDir, ...LEASE_DIR_SEGMENTS, `${fileSlug}.json`);
 }
 
-export function mergeLeaseWaitersFilePath(rootDir, identity = {}) {
+export function mergeLeaseWaitersFilePath(...args) {
+  const root = args[0]; args[1] = canonicalRepositoryArguments(root, args[1]);
+  return mergeLeaseWaitersFilePathWithinRepositoryState(...args);
+}
+
+function mergeLeaseWaitersFilePathWithinRepositoryState(rootDir, identity = {}) {
   validateIdentity({ rootDir, ...identity });
   const { fileSlug } = deriveLeaseKey(identity);
   return join(rootDir, ...LEASE_DIR_SEGMENTS, `${fileSlug}.waiters.json`);
@@ -537,11 +550,24 @@ export function mergeLeaseWaitersFilePath(rootDir, identity = {}) {
 // Atomic replacement appends logically while retaining only a bounded tail;
 // readers never see a partial JSONL line after a process crash.
 export const MERGE_LEASE_HISTORY_LIMIT = 4096;
-export function mergeLeaseHistoryFilePath(rootDir, identity = {}) {
+export function mergeLeaseHistoryFilePath(...args) {
+  const root = args[0]; args[1] = canonicalRepositoryArguments(root, args[1]);
+  return mergeLeaseHistoryFilePathWithinRepositoryState(...args);
+}
+
+function mergeLeaseHistoryFilePathWithinRepositoryState(rootDir, identity = {}) {
   return mergeLeaseFilePath(rootDir, identity).replace(/\.json$/, '.history.jsonl');
 }
 
-export function readMergeLeaseHistory(rootDir, identity = {}) {
+export function readMergeLeaseHistory(...args) {
+  const root = args[0];
+  return withRepositoryStateRead(root, () => {
+    args[1] = canonicalRepositoryArguments(root, args[1]);
+    return readMergeLeaseHistoryWithinRepositoryState(...args);
+  });
+}
+
+function readMergeLeaseHistoryWithinRepositoryState(rootDir, identity = {}) {
   try {
     return readFileSync(mergeLeaseHistoryFilePath(rootDir, identity), 'utf8')
       .split('\n').filter(Boolean).map(line => JSON.parse(line));
@@ -566,7 +592,7 @@ function appendLeaseHistory(rootDir, lease, event, at, reason) {
     { mode: LEASE_FILE_MODE });
 }
 
-export async function assessMergeLeaseNeedsRevalidation({
+async function assessMergeLeaseNeedsRevalidationWithinRepositoryState({
   repoPath,
   base,
   validationBase,
@@ -695,13 +721,26 @@ export async function assessMergeLeaseNeedsRevalidation({
   });
 }
 
-export function mergeLeaseAttemptsFilePath(rootDir, identity = {}) {
+export function mergeLeaseAttemptsFilePath(...args) {
+  const root = args[0]; args[1] = canonicalRepositoryArguments(root, args[1]);
+  return mergeLeaseAttemptsFilePathWithinRepositoryState(...args);
+}
+
+function mergeLeaseAttemptsFilePathWithinRepositoryState(rootDir, identity = {}) {
   validateIdentity({ rootDir, ...identity });
   const { fileSlug } = deriveLeaseKey(identity);
   return join(rootDir, ...LEASE_DIR_SEGMENTS, `${fileSlug}.attempts.json`);
 }
 
-export function readMergeLeaseWaiters(rootDir, identity = {}) {
+export function readMergeLeaseWaiters(...args) {
+  const root = args[0];
+  return withRepositoryStateRead(root, () => {
+    args[1] = canonicalRepositoryArguments(root, args[1]);
+    return readMergeLeaseWaitersWithinRepositoryState(...args);
+  });
+}
+
+function readMergeLeaseWaitersWithinRepositoryState(rootDir, identity = {}) {
   const waitersPath = mergeLeaseWaitersFilePath(rootDir, identity);
   return readWaiterDoc(waitersPath).waiters;
 }
@@ -744,7 +783,15 @@ function refundAttemptUnlocked(attemptsPath, { pr, head, now }) {
   return { removed: refunded, attempts: sortedAttempts(attempts) };
 }
 
-export function refundMergeLeaseGateAttempt({ rootDir, repo, base, pr, head, now } = {}) {
+export function refundMergeLeaseGateAttempt(...args) {
+  const root = args[0]?.rootDir;
+  return withRepositoryStateRead(root, () => {
+    args[0] = canonicalRepositoryArguments(root, args[0]);
+    return refundMergeLeaseGateAttemptWithinRepositoryState(...args);
+  });
+}
+
+function refundMergeLeaseGateAttemptWithinRepositoryState({ rootDir, repo, base, pr, head, now } = {}) {
   validateIdentity({ rootDir, repo, base });
   return withAttemptMutationLock({ rootDir, repo, base }, () => refundAttemptUnlocked(
     mergeLeaseAttemptsFilePath(rootDir, { repo, base }), { pr, head, now },
@@ -789,12 +836,28 @@ function clearCloserArrivals(attempts, pr) {
   return attempts.map(r => Number(r.pr) === Number(pr) ? withoutCloserArrival(r) : r);
 }
 
-export function readMergeLeaseAttempts(rootDir, identity = {}) {
+export function readMergeLeaseAttempts(...args) {
+  const root = args[0];
+  return withRepositoryStateRead(root, () => {
+    args[1] = canonicalRepositoryArguments(root, args[1]);
+    return readMergeLeaseAttemptsWithinRepositoryState(...args);
+  });
+}
+
+function readMergeLeaseAttemptsWithinRepositoryState(rootDir, identity = {}) {
   const attemptsPath = mergeLeaseAttemptsFilePath(rootDir, identity);
   return sortedAttempts(readAttemptDoc(attemptsPath).attempts);
 }
 
-export function resetMergeLeaseGateAttempts({ rootDir, repo, base, pr, head, now } = {}) {
+export function resetMergeLeaseGateAttempts(...args) {
+  const root = args[0]?.rootDir;
+  return withRepositoryStateRead(root, () => {
+    args[0] = canonicalRepositoryArguments(root, args[0]);
+    return resetMergeLeaseGateAttemptsWithinRepositoryState(...args);
+  });
+}
+
+function resetMergeLeaseGateAttemptsWithinRepositoryState({ rootDir, repo, base, pr, head, now } = {}) {
   validateIdentity({ rootDir, repo, base });
   return withAttemptMutationLock({ rootDir, repo, base }, () => {
     const holder = readJsonFile(mergeLeaseFilePath(rootDir, { repo, base }), null);
@@ -838,7 +901,15 @@ function removeAttemptRecordsUnlocked(attemptsPath, { pr, head, now }) {
   return { removed, attempts: sortedAttempts(attempts) };
 }
 
-export function recordMergeLeaseGateAttempt({
+export function recordMergeLeaseGateAttempt(...args) {
+  const root = args[0]?.rootDir;
+  return withRepositoryStateRead(root, () => {
+    args[0] = canonicalRepositoryArguments(root, args[0]);
+    return recordMergeLeaseGateAttemptWithinRepositoryState(...args);
+  });
+}
+
+function recordMergeLeaseGateAttemptWithinRepositoryState({
   rootDir,
   repo,
   base,
@@ -907,7 +978,15 @@ export function recordMergeLeaseGateAttempt({
   });
 }
 
-export function upsertMergeLeaseWaiter({
+export function upsertMergeLeaseWaiter(...args) {
+  const root = args[0]?.rootDir;
+  return withRepositoryStateRead(root, () => {
+    args[0] = canonicalRepositoryArguments(root, args[0]);
+    return upsertMergeLeaseWaiterWithinRepositoryState(...args);
+  });
+}
+
+function upsertMergeLeaseWaiterWithinRepositoryState({
   rootDir,
   repo,
   base,
@@ -969,7 +1048,15 @@ export function upsertMergeLeaseWaiter({
   });
 }
 
-export function removeMergeLeaseWaiter({
+export function removeMergeLeaseWaiter(...args) {
+  const root = args[0]?.rootDir;
+  return withRepositoryStateRead(root, () => {
+    args[0] = canonicalRepositoryArguments(root, args[0]);
+    return removeMergeLeaseWaiterWithinRepositoryState(...args);
+  });
+}
+
+function removeMergeLeaseWaiterWithinRepositoryState({
   rootDir,
   repo,
   base,
@@ -993,7 +1080,15 @@ export function removeMergeLeaseWaiter({
   });
 }
 
-export function inspectMergeLease({
+export function inspectMergeLease(...args) {
+  const root = args[0]?.rootDir;
+  return withRepositoryStateRead(root, () => {
+    args[0] = canonicalRepositoryArguments(root, args[0]);
+    return inspectMergeLeaseWithinRepositoryState(...args);
+  });
+}
+
+function inspectMergeLeaseWithinRepositoryState({
   rootDir,
   repo,
   base,
@@ -1031,7 +1126,15 @@ export function inspectMergeLease({
   };
 }
 
-export function acquireMergeLease({
+export function acquireMergeLease(...args) {
+  const root = args[0]?.rootDir;
+  return withRepositoryStateRead(root, () => {
+    args[0] = canonicalRepositoryArguments(root, args[0]);
+    return acquireMergeLeaseWithinRepositoryState(...args);
+  });
+}
+
+function acquireMergeLeaseWithinRepositoryState({
   rootDir,
   repo,
   base,
@@ -1259,7 +1362,15 @@ const RETRYABLE_MERGE_OUTCOMES = new Set([
   'lease-contention', 'merge-lease-timeout',
 ]);
 
-export function releaseMergeLease({
+export function releaseMergeLease(...args) {
+  const root = args[0]?.rootDir;
+  return withRepositoryStateRead(root, () => {
+    args[0] = canonicalRepositoryArguments(root, args[0]);
+    return releaseMergeLeaseWithinRepositoryState(...args);
+  });
+}
+
+function releaseMergeLeaseWithinRepositoryState({
   rootDir,
   repo,
   base,
@@ -1333,7 +1444,15 @@ export function releaseMergeLease({
   return locked.value;
 }
 
-export function releaseMergeLeaseForRetryableAbort({
+export function releaseMergeLeaseForRetryableAbort(...args) {
+  const root = args[0]?.rootDir;
+  return withRepositoryStateRead(root, () => {
+    args[0] = canonicalRepositoryArguments(root, args[0]);
+    return releaseMergeLeaseForRetryableAbortWithinRepositoryState(...args);
+  });
+}
+
+function releaseMergeLeaseForRetryableAbortWithinRepositoryState({
   rootDir,
   repo,
   base,
@@ -1393,7 +1512,15 @@ export function releaseMergeLeaseForRetryableAbort({
   return locked.value;
 }
 
-export function renewMergeLease({
+export function renewMergeLease(...args) {
+  const root = args[0]?.rootDir;
+  return withRepositoryStateRead(root, () => {
+    args[0] = canonicalRepositoryArguments(root, args[0]);
+    return renewMergeLeaseWithinRepositoryState(...args);
+  });
+}
+
+function renewMergeLeaseWithinRepositoryState({
   rootDir,
   repo,
   base,
@@ -1442,7 +1569,15 @@ export function renewMergeLease({
   return locked.value;
 }
 
-export function reclaimIfStale({
+export function reclaimIfStale(...args) {
+  const root = args[0]?.rootDir;
+  return withRepositoryStateRead(root, () => {
+    args[0] = canonicalRepositoryArguments(root, args[0]);
+    return reclaimIfStaleWithinRepositoryState(...args);
+  });
+}
+
+function reclaimIfStaleWithinRepositoryState({
   rootDir,
   repo,
   base,
@@ -1524,7 +1659,7 @@ async function ghPrState({ repo, holderPr, execFileImpl, timeoutMs = loadAwareTi
   return String(parsed.state || '').toUpperCase();
 }
 
-export async function reconcileMergeLeases({
+async function reconcileMergeLeasesWithinRepositoryState({
   rootDir,
   repo,
   base,
@@ -1616,3 +1751,18 @@ export async function reconcileMergeLeases({
 export const MERGE_LEASE_SCHEMA_VERSION = LEASE_SCHEMA_VERSION;
 export const MERGE_LEASE_DEFAULT_DEADLINE_SECONDS = DEFAULT_DEADLINE_SECONDS;
 export const MERGE_LEASE_DEFAULT_MAX_GATE_ATTEMPTS = DEFAULT_MAX_GATE_ATTEMPTS;
+
+export async function withDaemonMergeReservation(args = {}, ...rest) {
+  return withRepositoryStateCycle(args.rootDir, () =>
+    withDaemonMergeReservationWithinRepositoryState(canonicalRepositoryArguments(args.rootDir, args), ...rest));
+}
+
+export async function reconcileMergeLeases(args = {}, ...rest) {
+  return withRepositoryStateCycle(args.rootDir, () =>
+    reconcileMergeLeasesWithinRepositoryState(canonicalRepositoryArguments(args.rootDir, args), ...rest));
+}
+
+export async function assessMergeLeaseNeedsRevalidation(args = {}, ...rest) {
+  return withRepositoryStateCycle(args.rootDir, () =>
+    assessMergeLeaseNeedsRevalidationWithinRepositoryState(canonicalRepositoryArguments(args.rootDir, args), ...rest));
+}

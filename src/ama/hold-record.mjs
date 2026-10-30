@@ -1,10 +1,11 @@
+import { repositoryObservationCache } from '../repository-state-cache.mjs';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 // Evidence collection stays with the existing owners. This module only decides
 // whether their observations satisfy a durable predicate. Evaluation performs no I/O.
 const polls = new AsyncLocalStorage();
-const deliveredEscalations = new Set();
+const deliveredEscalations = repositoryObservationCache(new Set());
 export const MAX_HOLD_ESCALATIONS = 10_000;
 const dimensions = { head: 'headSha', base: 'baseSha', mergeability: 'mergeability', checks: 'checks', review: 'review' };
 const kinds = new Set([...Object.keys(dimensions).map(name => `${name}-change`),

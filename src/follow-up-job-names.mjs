@@ -1,3 +1,5 @@
+import { repositoryNames } from './repository-names.mjs';
+
 export function sanitizeRepo(repo) {
   return String(repo ?? '').replace(/\//g, '__').replace(/[^a-zA-Z0-9_.-]/g, '-');
 }
@@ -9,8 +11,9 @@ export function followUpJobFilePrefix(repo, prNumber) {
 }
 
 export function followUpJobFileFilter(filter = {}) {
-  const prefix = filter.repo && filter.prNumber != null
-    ? followUpJobFilePrefix(filter.repo, filter.prNumber)
+  const prefixes = filter.repo && filter.prNumber != null
+    ? repositoryNames(filter.rootDir, filter.repo).map(repo => followUpJobFilePrefix(repo, filter.prNumber))
     : null;
-  return (name) => name.endsWith('.json') && (prefix === null || name.startsWith(prefix));
+  return (name) => name.endsWith('.json') && (prefixes === null || prefixes.some(prefix => filter.caseInsensitiveRepo
+    ? name.toLowerCase().startsWith(prefix.toLowerCase()) : name.startsWith(prefix)));
 }

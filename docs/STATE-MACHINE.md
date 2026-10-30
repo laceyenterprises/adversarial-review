@@ -1,5 +1,11 @@
 # Adversarial Review State Machine Notes
 
+REPORENAME-01 keeps retained reviewer admission ahead of slow repository discovery.
+Admission preparation and the early drain execute under a shared repository-state
+cycle; discovery then obtains its ordinary exclusive migration fence, followed
+by the shared poll cycle. No fence is held across the exclusive migration, and
+no lifecycle state or producer projection changes for this ordering repair.
+
 LAC-2131 keeps the existing OAuth preflight failure and remediation lifecycle
 transitions. The new `liveness.state === "exited"` guard performs credential-only
 cleanup for a matching local service-home receipt; it cannot change job state,
@@ -22,6 +28,23 @@ Reviewed the dispatch producer guards and refreshed its state projection: receip
 identity, predecessor restoration and bounded unknown-evidence accounting retain
 the existing hammer-dispatch states and transitions. Closing-decision and CI
 ownership precedence remain unchanged.
+
+REPORENAME-01 changes repository identity keys without changing review, closer,
+remediation or merge lifecycle states. Shared owner fences exclude migration;
+the exclusive migration saves a recovery marker, rekeys files and commits one
+audited transaction per database before publishing the current name. A pending
+marker or payload observation prevents another cycle until recovery completes.
+Current-name replay is a no-op; reused names with new IDs remain distinct.
+See [the identity contract](data-model/repository-identities.md) and
+[operator verification](review-pipeline-health.md#repository-renames-reporename-01).
+Existing smoke promises and exact-head merge authority remain unchanged.
+Final remediation quarantines conflicting repositories during discovery while
+unrelated intake continues at the ordinary refresh cadence. Reviewer BUSY exits
+release their existing claim without consuming an attempt. Reviewed the watcher
+producer projection and refreshed its fingerprint; lifecycle states and
+transitions remain unchanged. Organization discovery now lives in
+`src/watcher-repository-discovery.mjs` to retain the watcher size ratchet.
+Operator holds short-circuit before opening a repository state fence.
 
 SIZEOWNER-02: terminal `reviewer-prompt-too-large` and
 `reviewer-chunk-budget-exceeded` still settle to `failed`, never `pending`.

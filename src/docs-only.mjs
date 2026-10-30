@@ -1,9 +1,10 @@
+import { repositoryObservationCache } from './repository-state-cache.mjs';
 import { execGhWithRetry } from './gh-cli.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { isExplicitOperatorRetriggerReason } from './retrigger-review-reason.mjs';
 import { isOperatorHeld } from './operator-hold-labels.mjs';
 
-const revisions = new Map();
+const revisions = repositoryObservationCache(new Map());
 const SHA = /^[0-9a-f]{40}$/i;
 const docsPath = path => typeof path === 'string' && path.startsWith('docs/')
   && !path.split('/').some(part => ['.', '..', 'prompts', 'personas', 'identities'].includes(part.toLowerCase()))

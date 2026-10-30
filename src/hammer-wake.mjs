@@ -1,3 +1,4 @@
+import { repositoryObservationCache } from './repository-state-cache.mjs';
 // ARC-19: extracted from follow-up-remediation.mjs. The hammer wake is a
 // self-contained effect --- it takes a stopped follow-up job and turns it into
 // a watcher wake plus a latency event --- so it belongs beside the other
@@ -29,7 +30,7 @@ const HAMMER_WAKE_ELIGIBILITY_REASON = 'clean-current-head-ci-green-policy-eligi
 const HAMMER_WAKE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const HAMMER_WAKE_RETENTION_MAX_FILES = 5000;
 const HAMMER_WAKE_SWEEP_INTERVAL_MS = 60 * 1000;
-const hammerWakeSweeps = new Map();
+const hammerWakeSweeps = repositoryObservationCache(new Map());
 const HAMMER_WAKE_RETRY_ATTEMPTS = 3;
 const HAMMER_WAKE_STALE_RESERVATION_MS = 10 * 60 * 1000;
 

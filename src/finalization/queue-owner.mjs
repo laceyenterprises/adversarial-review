@@ -1,3 +1,4 @@
+import { withRepositoryStateCycle } from '../repository-state-lock.mjs';
 import fsExt from 'fs-ext';
 import { createHash } from 'node:crypto';
 import { closeSync, mkdirSync, openSync, realpathSync, utimesSync, watch } from 'node:fs';
@@ -95,6 +96,9 @@ export function createQueueOwner({ store, now = () => new Date().toISOString(), 
   const adapter = resolveQueueOwnerAdapter({ rootDir: store.rootDir, db: store.db });
   const db = store.db;
   async function locked(lane, action) {
+    return withRepositoryStateCycle(store.rootDir, () => lockedWithinRepositoryCycle(lane, action));
+  }
+  async function lockedWithinRepositoryCycle(lane, action) {
     lane = resolveLaneKey(lane);
     const release = adapter.tryLock(lane);
     if (!release) return { ok: false, reason: 'owner-operation-in-flight' };

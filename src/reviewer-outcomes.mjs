@@ -5,6 +5,7 @@ export const STALE_REVIEW_HEAD_EXIT_CODE = 75;
 // Reserved for our size preflight, never inferred from untrusted model output.
 export const REVIEWER_PROMPT_TOO_LARGE_EXIT_CODE = 76;
 export const REVIEWER_CHUNK_BUDGET_EXCEEDED_EXIT_CODE = 77;
+export const REPOSITORY_STATE_BUSY_EXIT_CODE = 78;
 
 export class ReviewerChunkBudgetExceededError extends Error {
   constructor(plan) {

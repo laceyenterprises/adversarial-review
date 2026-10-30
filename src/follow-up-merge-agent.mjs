@@ -1,3 +1,4 @@
+import { withRepositoryStateCycle } from './repository-state-lock.mjs';
 import { readHostIdentitySync, readHostObservationSync } from './dispatch-files-client.mjs';
 import { observeClosureWait } from './ama/closure-wait.mjs';
 import { readDispatchStatus } from './producer-contracts/launch-status.mjs';
@@ -475,7 +476,7 @@ function dispatchMatchesFilter(dispatch, { repo = null, prNumber = null } = {}) 
 
 function listMergeAgentDispatches(rootDir, filter = {}) {
   const dir = mergeAgentDispatchDir(rootDir);
-  const matchesJobFile = followUpJobFileFilter(filter);
+  const matchesJobFile = followUpJobFileFilter({ ...filter, rootDir });
   try {
     return readdirSync(dir)
       .filter(matchesJobFile)
@@ -2010,7 +2011,11 @@ function writeMergeAgentPrompt(rootDir, job, prompt, { dispatchedAt = isoNow() }
   return filePath;
 }
 
-async function dispatchMergeAgentForPR({
+async function dispatchMergeAgentForPR(args = {}) {
+  return withRepositoryStateCycle(args.rootDir, () => dispatchMergeAgentForPRWithinRepositoryCycle(args));
+}
+
+async function dispatchMergeAgentForPRWithinRepositoryCycle({
   rootDir,
   repo,
   prNumber,

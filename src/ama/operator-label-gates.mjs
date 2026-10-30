@@ -1,3 +1,4 @@
+import { repositoryObservationCache } from '../repository-state-cache.mjs';
 import { hammerStopInputs } from './hammer-stop-hold.mjs';
 import { createHoldRecord, normalizeHoldRecord, evaluateHoldRecord, writeHoldRecord, markHoldEscalated } from './hold-record.mjs';
 import { rememberCheckSteps } from '../ci-infrastructure.mjs';
@@ -175,7 +176,7 @@ export async function resolveOperatorLabelGateFailuresWithRetry(args, {
 
 // Separate from dispatch records: this hold must never look like a launch.
 // Persist successful delivery across daemon restarts, once per PR head.
-const alerted = new Set();
+const alerted = repositoryObservationCache(new Set());
 const MAX_ALERTED_ENTRIES = 512;
 const RECEIPT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 

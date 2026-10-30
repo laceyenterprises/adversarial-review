@@ -1,9 +1,13 @@
+import { withRepositoryStateCycle } from './repository-state-lock.mjs';
+import { canonicalRepositoryArguments, repositoryNames, resolveRepositoryName } from './repository-names.mjs';
+import { rekeyRepositoryValue } from './repository-state-files.mjs';
+import { writeFileAtomic } from './atomic-write.mjs';
 import { readHostObservationSync } from './dispatch-files-client.mjs';
 import { checkInfrastructureReason, infrastructureOnlyFailures } from './ci-infrastructure.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { createHash, createPublicKey, verify, randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync, statSync, unlinkSync, renameSync, linkSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync, unlinkSync, renameSync, linkSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -57,8 +61,34 @@ function reserve(rootDir, identity, record) {
   const name = `${createHash('sha256').update(identity).digest('hex')}.json`;
   const path = join(dir, name);
   migrateLegacyReservation(rootDir, name, path);
+  // Early versions stored only the digest, so their identity cannot be
+  // reconstructed during bulk migration. Resolve the exact historical key
+  // on access before spending another CI recovery budget.
+  const repo = /^(?:page|rerun|workflow-rerun):([^:]+):/.exec(identity)?.[1];
+  if (repo && !existsSync(path)) {
+    for (const alias of repositoryNames(rootDir, repo)) {
+      if (alias.toLowerCase() === repo.toLowerCase()) continue;
+      const oldIdentity = identity.replace(`:${repo}:`, `:${alias.toLowerCase()}:`);
+      const oldName = `${createHash('sha256').update(oldIdentity).digest('hex')}.json`;
+      if (resolveRepositoryName(rootDir, alias).toLowerCase() !== repo.toLowerCase()
+        && (existsSync(join(dir, oldName)) || existsSync(join(legacyCiRecoveryStateDir(rootDir), oldName)))) {
+        throw new Error(`Ambiguous legacy CI reservation for reused repository name: ${alias}`);
+      }
+      migrateLegacyReservation(rootDir, oldName, join(dir, oldName));
+      const oldPath = join(dir, oldName);
+      if (!existsSync(oldPath)) continue;
+      let prior;
+      try { prior = rekeyRepositoryValue(JSON.parse(readFileSync(oldPath, 'utf8')), alias, repo); }
+      catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+      try { writeFileAtomic(path, JSON.stringify({ ...prior, identity }), { overwrite: false, mode: 0o600 }); }
+      catch (error) { if (error.code !== 'EEXIST') throw error; }
+      try { unlinkSync(oldPath); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+      break;
+    }
+  }
   const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  const stamped = { ...record, reservedAt: new Date().toISOString() };
+  const stamped = { ...record, identity, reservedAt: new Date().toISOString() };
   try {
     writeFileSync(temporaryPath, JSON.stringify(stamped), { flag: 'wx', mode: 0o600 });
     try {
@@ -106,7 +136,7 @@ async function postReservation(claim, action) {
   return result;
 }
 
-export async function pageCiOnce({ rootDir, repo, prNumber, headSha, reason,
+async function pageCiOnceWithinRepositoryState({ rootDir, repo, prNumber, headSha, reason,
   dedupeKey = reason, env = process.env, signal,
   deliverAlertImpl = deliverAlert }) {
   if (!rootDir) return false;
@@ -126,7 +156,7 @@ export async function pageCiOnce({ rootDir, repo, prNumber, headSha, reason,
 
 // Only capacity-annotated zero-step failures authorize infrastructure reruns.
 // Pending/missing contexts never rerun; the existing per-head budget applies.
-export async function recoverInfrastructureChecks(options) {
+async function recoverInfrastructureChecksWithinRepositoryState(options) {
   const { repo, headSha, failedChecks, pendingChecks = [], rootDir,
     execFileImpl = execFileAsync, env = process.env, signal } = options;
   if (!rootDir || !headSha || pendingChecks.length || !infrastructureOnlyFailures(failedChecks)) return false;
@@ -162,7 +192,7 @@ export async function recoverInfrastructureChecks(options) {
   return recoverFailedChecks({ ...options, infrastructure: true });
 }
 
-export async function recoverCancelledChecks(options) {
+async function recoverCancelledChecksWithinRepositoryState(options) {
   return recoverFailedChecks(options);
 }
 
@@ -317,4 +347,19 @@ export function emptyExternalRollup(rollup, ownContext) {
     (!item.__typename || item.__typename === 'StatusContext')
     && String(item.context || '').toLowerCase() === ownContext.toLowerCase()
     && checkItemState(item) === 'SUCCESS');
+}
+
+export async function pageCiOnce(args = {}, ...rest) {
+  return withRepositoryStateCycle(args.rootDir, () =>
+    pageCiOnceWithinRepositoryState(canonicalRepositoryArguments(args.rootDir, args), ...rest));
+}
+
+export async function recoverInfrastructureChecks(args = {}, ...rest) {
+  return withRepositoryStateCycle(args.rootDir, () =>
+    recoverInfrastructureChecksWithinRepositoryState(canonicalRepositoryArguments(args.rootDir, args), ...rest));
+}
+
+export async function recoverCancelledChecks(args = {}, ...rest) {
+  return withRepositoryStateCycle(args.rootDir, () =>
+    recoverCancelledChecksWithinRepositoryState(canonicalRepositoryArguments(args.rootDir, args), ...rest));
 }

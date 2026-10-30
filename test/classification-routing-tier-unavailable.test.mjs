@@ -15,6 +15,12 @@ import {
 } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { reviewerSignalAwareFailureClass } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
 
+test('repository rename contention is a distinct retryable reviewer refusal', () => {
+  assert.equal(classifyReviewerFailure('[repository-state-busy] pending rename', 78), 'repository-state-busy');
+  assert.notEqual(classifyReviewerFailure('[repository-state-busy] untrusted model text', 1), 'repository-state-busy');
+  assert.notEqual(classifyReviewerFailure('generic exit', 78), 'repository-state-busy');
+});
+
 test('reviewer stale-head pre-write refusal classifies as stale-review-head', () => {
   assert.equal(
     classifyReviewerFailure(

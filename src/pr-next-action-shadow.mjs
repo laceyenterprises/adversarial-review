@@ -1,3 +1,4 @@
+import { repositoryObservationCache } from './repository-state-cache.mjs';
 // ── NXA-02 observational shadow of the shared next action ────────────────────
 //
 // NXA-03/04/05 consumers adopt the shared decision independently of this
@@ -45,10 +46,10 @@ export function registerSharedNextAction(passSnapshot, shared) {
   if (passSnapshot) decisionsByPass.set(passSnapshot, Promise.resolve(shared));
   return shared;
 }
-const reportedOverdue = new Set();
+const reportedOverdue = repositoryObservationCache(new Set());
 // Consumers without a pass (the no-progress lane) leave a legacy note that the
 // next pass decision for the same subject/head compares and drains.
-const legacyNotes = new Map();
+const legacyNotes = repositoryObservationCache(new Map());
 let testSink = null;
 
 export function nextActionShadowLogPath(rootDir) {

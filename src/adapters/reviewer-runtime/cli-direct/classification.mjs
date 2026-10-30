@@ -1,5 +1,5 @@
 import { PROGRESS_TIMEOUT_REASON_PREFIX } from '../../../reviewer-timeout-reason.mjs';
-import { REVIEWER_PROMPT_TOO_LARGE_EXIT_CODE, REVIEWER_CHUNK_BUDGET_EXCEEDED_EXIT_CODE } from '../../../reviewer-outcomes.mjs';
+import { REVIEWER_PROMPT_TOO_LARGE_EXIT_CODE, REVIEWER_CHUNK_BUDGET_EXCEEDED_EXIT_CODE, REPOSITORY_STATE_BUSY_EXIT_CODE } from '../../../reviewer-outcomes.mjs';
 import { hasProviderCapacitySignal } from '../../../provider-capacity-signal.mjs';
 import {
   QUOTA_EXHAUSTED_FAILURE_CLASS,
@@ -68,6 +68,9 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
   // identifies stale-head churn; an ordinary temporary failure keeps its class.
   const text = String(stderr || '');
   const lower = text.toLowerCase();
+  if (exitCode === REPOSITORY_STATE_BUSY_EXIT_CODE && /(?:^|\n)\[repository-state-busy\]/.test(lower)) {
+    return 'repository-state-busy';
+  }
   if (lower.includes('[reviewer-configuration-error]')) return 'reviewer-configuration-error';
   if (lower.includes('[reviewer-model-unresolved]')) return 'reviewer-model-unresolved';
   // Exit 77 is also sysexits EX_NOPERM, and this classifier also reads exit codes

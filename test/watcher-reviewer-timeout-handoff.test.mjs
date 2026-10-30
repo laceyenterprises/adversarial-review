@@ -439,7 +439,7 @@ globalThis.__capComments = [];
 globalThis.__capLabels = [];
 
 const octokit = {
-  paginate: async () => [{ name: 'adversarial-review', archived: false }],
+  paginate: async () => [{ id: 12345, name: 'adversarial-review', archived: false }],
   rest: {
     issues: {
       listComments: async () => ({ data: [] }),

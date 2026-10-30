@@ -44,6 +44,52 @@ npm run pipeline-health -- --sentinel
 The Grafana dashboard lives at
 `observability/grafana/review-pipeline-health.json`.
 
+## Repository renames (REPORENAME-01)
+
+The watcher records GitHub's numeric repository ID and node ID from its normal
+organization listing. The same ID with a new `full_name`, for example
+`example-org/alpha` → `example-org/beta`, triggers migration before review
+intake. PR `base.repo` payloads (including redirected API responses) can also
+detect the change; discovery then retries at a migration boundary. Similar
+names never trigger migration. A new ID reusing an old name is distinct and
+produces a warning.
+
+Deploy the rename-aware watcher, reviewer and follow-up writers together
+through normal deployment before an operator-approved rename. An active owner
+defers migration until settlement. A durable pending marker fences cycles
+during interrupted migration; startup/next-poll recovery replays it safely.
+Do not delete the marker or manually merge colliding state. Inspect the
+reported collision or changed file if automatic recovery refuses.
+
+The watcher emits one structured line on a successful ordinary rename:
+
+```text
+[repository-rename] {"oldName":"example-org/alpha","newName":"example-org/beta","repositoryId":"123","rows":{"reviewed_prs":1,"reviewer_passes":1},"databases":{},"files":4,"at":"2026-10-30T12:00:00.000Z"}
+```
+
+Counts include all installed repo-bearing tables, including zero counts; this
+example abbreviates them. `repository_rename_audit` in `data/reviews.db` is the
+durable receipt. Console delivery can be lost if the process crashes just
+after commit; replay preserves the single durable receipt.
+
+After deployment and the separately approved rename, SRE verifies read-only:
+
+1. The stable ID points at the new name, the durable audit has one row for
+   this rename, and the watcher log has one corresponding audit line.
+2. An existing open PR has the same review row/pass IDs, attempt count and
+   review head under the new name. Subsequent polls request no new review for
+   that unchanged head. Its remediation round/job ID, closer lease ID and merge
+   ownership still match.
+3. No pending recovery marker remains. The next naturally opened new PR gets
+   its ordinary first review.
+
+Retain these observations as the live receipt; offline fixture tests do not
+prove deployment. HQ Control Plane attestation key continuity is handled by
+REPORENAME-02. This change preserves local attestation lookup keys and signed
+payloads; it grants no replacement merge authority. The complete
+[state audit and recovery contract](data-model/repository-identities.md)
+lists the database, file and cache participants.
+
 ## Metrics
 
 - `review_pipeline_reviewer_attempts_total`: reviewer first-pass/rereview
@@ -678,3 +724,17 @@ rules or HCP-outage hold. Deploy the coordinated OS endpoint and consumer after
 both PRs converge; the one-shot adapter loads the deployed owner code each read.
 No daemon bounce or host activation was performed as validation. Offline
 producer coverage: `node --test test/review-observations.test.mjs`.
+
+### Rename hardening and deliberate parks
+
+Identity conflicts quarantine only the affected repository and emit a deduplicated
+SEV2 notice. Inspect the conflicting stable IDs and their retained state; do not
+remove a current-name row to make a recreated repository inherit old PRs.
+Other repositories continue at the normal discovery cadence. Chained renames
+vacate destinations first; interrupted migrations retain their recovery fence.
+
+REPORENAME-02 is a separate required owner-side dependency. Until its HQ
+`pr_opened`/worker-identity records resolve the new stable repository identity,
+an open renamed PR may intentionally park as `worker-identity-unresolved`.
+Expect that park during acceptance; do not waive attestation or identity gates.
+An ordinary rename's service-local continuity does not prove HQ cutover.

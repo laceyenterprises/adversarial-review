@@ -1,3 +1,4 @@
+import { withRepositoryStateCycle } from './repository-state-lock.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { ownReviewerSizeFailure } from './reviewer-size-owner.mjs';
 import { readHostObservationSync } from './dispatch-files-client.mjs';
@@ -552,7 +553,11 @@ function configuredHqOwner(pool) {
   }
 }
 
-async function spawnReviewer(args) {
+async function spawnReviewer(args = {}) {
+  return withRepositoryStateCycle(args.rootDir || ROOT, () => spawnReviewerWithinRepositoryCycle(args));
+}
+
+async function spawnReviewerWithinRepositoryCycle(args) {
   if (reviewerRefusesBuilder(args.builderTag, args.reviewerModel)) return spawnReviewerOnceWithAccount(args);
   if (normalizeReviewerModel(args.reviewerModel) !== 'gemini') return spawnReviewerOnce(args);
   const rootDir = args.rootDir || ROOT;
@@ -1638,7 +1643,7 @@ function settleReviewerAttempt({
 
   const routingRefusal = failureClass === 'bug'
     && (result.routingRefusal === true || result.error === CODEX_BUILDER_REVIEW_REFUSAL);
-  if (routingRefusal || failureClass === 'stale-review-head') {
+  if (routingRefusal || failureClass === 'stale-review-head' || failureClass === 'repository-state-busy') {
     // Claim identity comes from dispatch, not the runtime adapter's result.
     // Failure/lease statements charge attempts and cannot handle head churn.
     let releaseResult = typeof statements.releaseReviewerClaim?.run === 'function'
@@ -1655,9 +1660,9 @@ function settleReviewerAttempt({
       );
     }
     log.warn(
-      `[watcher] Reviewer ${routingRefusal ? 'routing refusal' : 'stale output'} for ${repoPath}#${prNumber}; ` +
+      `[watcher] Reviewer ${routingRefusal ? 'routing refusal' : failureClass === 'repository-state-busy' ? 'repository rename deferral' : 'stale output'} for ${repoPath}#${prNumber}; ` +
       `released claim=${releaseResult.changes === 1 ? 'yes' : 'no'} ` +
-      (routingRefusal ? 'deferred without charging review attempts' : 'for current-head re-review')
+      (routingRefusal || failureClass === 'repository-state-busy' ? 'deferred without charging review attempts' : 'for current-head re-review')
     );
     return;
   }

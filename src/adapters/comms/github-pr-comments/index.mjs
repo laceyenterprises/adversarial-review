@@ -1,6 +1,8 @@
 import { loadAwareTimeoutMs } from '../../../load-aware-timeout.mjs';
 import { meteredExecFile } from '../../../metered-gh.mjs';
 import { filterGitHubBody } from '../../../github-outbound-body.mjs';
+import { withRepositoryStateCycle } from '../../../repository-state-lock.mjs';
+import { resolveRepositoryName } from '../../../repository-names.mjs';
 /**
  * GitHub Pull Request comments implementation of the comms-channel adapter.
  *
@@ -355,6 +357,12 @@ function createGitHubPRCommentsAdapter({
   now = () => new Date(),
   log = console,
 } = {}) {
+  function currentKey(deliveryKey) {
+    const key = normalizeDeliveryKey(deliveryKey);
+    if (key.domainId !== CODE_PR_DOMAIN_ID) return key;
+    const { repo, prNumber } = parseSubjectExternalId(key.subjectExternalId);
+    return { ...key, subjectExternalId: `${resolveRepositoryName(rootDir, repo)}#${prNumber}` };
+  }
   async function postRawComment({ key, body, event = null, roleId = null }) {
     const { repo, prNumber } = parseSubjectExternalId(key.subjectExternalId);
     const safeBody = filterGitHubBody(redactPublicSafeText(body, 60_000), { repo, rootDir, env, reviewerHeadSha: key.revisionRef });
@@ -404,7 +412,10 @@ function createGitHubPRCommentsAdapter({
   }
 
   async function lookupExistingDeliveries(deliveryKey) {
-    const key = normalizeDeliveryKey(deliveryKey);
+    return withRepositoryStateCycle(rootDir, () => lookupCurrentDeliveries(currentKey(deliveryKey)));
+  }
+
+  async function lookupCurrentDeliveries(key) {
     const db = openDeliveryDb(rootDir);
     if (!db) return [];
     try {
@@ -453,6 +464,12 @@ function createGitHubPRCommentsAdapter({
   }
 
   async function postWithDedupe({ key, body, event = null, roleId = null }) {
+    if (deliveryIdentityByRole && roleId) resolveDeliveryIdentity(roleId, deliveryIdentityByRole);
+    return withRepositoryStateCycle(rootDir, () =>
+      postCurrentWithDedupe({ key: currentKey(key), body, event, roleId }));
+  }
+
+  async function postCurrentWithDedupe({ key, body, event = null, roleId = null }) {
     // Validate deterministic role configuration before entering the claim-wait
     // loop. A missing binding cannot become healthy while waiting for another
     // delivery owner, so fail immediately without consuming the wait budget.

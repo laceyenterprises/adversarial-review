@@ -66,3 +66,45 @@ test('Codex probes preserve registry readiness failures before spawning', async 
     execFileImpl: async () => assert.fail('readiness failure must prevent the probe'),
   }), (error) => error === failure);
 });
+
+for (const baseHome of [null, '/fixture/operator-codex']) {
+  test(`Codex discovery preserves default OAuth lookup with CODEX_HOME=${baseHome}`, async () => {
+    const sourceEnv = { CODEX_CLI: '/fixture/codex', HOME: '/fixture/user',
+      ...(baseHome ? { CODEX_HOME: baseHome } : {}) };
+    const calls = [];
+    await probeCodexCli({ env: sourceEnv, cwd: '/fixture/job', requireMcpOAuth: true,
+      ensureWorkerRegistryReadyImpl: async () => {},
+      execFileImpl: async (_command, args, { env }) => {
+        calls.push(args.join(' '));
+        assert.equal(env.CODEX_AUTH_PATH, join(baseHome || '/fixture/user/.codex', 'auth.json'));
+        assert.notEqual(env.CODEX_HOME, baseHome);
+        assert.equal(existsSync(join(env.CODEX_HOME, 'auth.json')), false);
+        if (args[0] === 'sessions') throw new Error("unrecognized subcommand 'sessions'");
+        return { stdout: 'fixture', stderr: '' };
+      } });
+    assert.deepEqual(calls, ['--version', 'sessions list', 'login status', 'mcp list']);
+    assert.equal(sourceEnv.CODEX_AUTH_PATH, undefined);
+  });
+}
+
+test('reviewWithCodex cleans its service home when preparation progress throws', async () => {
+  const { __test__: { reviewWithCodex } } = await import('../src/reviewer-harness.mjs');
+  const previous = process.env.AGENT_OS_CODEX_PER_WORKER_AUTH;
+  process.env.AGENT_OS_CODEX_PER_WORKER_AUTH = '0';
+  let home;
+  const failure = new Error('fixture progress callback failed');
+  try {
+    await assert.rejects(reviewWithCodex('+fixture', '', {
+      codexCli: process.execPath, assertCodexOAuthImpl: async () => {},
+      ensureWorkerRegistryReadyImpl: async () => {},
+      log: { info(line) { home = line.match(/CODEX_HOME=(.*?) config_sha256=/)?.[1]; }, warn() {} },
+      onProgress() { assert.ok(existsSync(home)); throw failure; },
+      spawnCodexReviewImpl: async () => assert.fail('preparation error must prevent spawn'),
+    }), error => error === failure);
+    assert.ok(home);
+    assert.equal(existsSync(home), false);
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_OS_CODEX_PER_WORKER_AUTH;
+    else process.env.AGENT_OS_CODEX_PER_WORKER_AUTH = previous;
+  }
+});

@@ -198,7 +198,9 @@ async function probeCodexCli({
   const codexCli = await resolveCliBinary({ binaryName: 'codex', envVar: 'CODEX_CLI', env });
   await ensureWorkerRegistryReadyImpl({ env });
   const model = resolveRemediationModel('codex-reviewer', { env });
-  const home = prepareServiceCodexHome({ env, workspaceDir: cwd,
+  // Preserve the base home's OAuth lookup before redirecting config/session state.
+  const authPath = env.CODEX_AUTH_PATH || join(env.CODEX_HOME || join(env.HOME || homedir(), '.codex'), 'auth.json');
+  const home = prepareServiceCodexHome({ env: { ...env, CODEX_AUTH_PATH: authPath }, workspaceDir: cwd,
     model: model.resolvedModel, effort: model.resolvedReasoningLevel });
   env = home.env;
   const probe = (command, args, options) => {

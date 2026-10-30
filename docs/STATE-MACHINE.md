@@ -157,6 +157,10 @@ CODEXHOMEISO-01 extends the existing bounded infrastructure-refund transition:
 prefixed harness tool-host failures and complete in-run negotiation failures
 with no executed command requeue the same remediation round without charging it.
 Known equal live heads, terminal-PR fences and existing refund caps still apply.
+HQ log classification uses worker class independently of resolved model IDs;
+missing persisted workers defer settlement. Local Codex sessions persist under
+the isolated home regardless of credential materialization. Discovery preserves
+the base OAuth auth path, and reviewer cleanup covers preparation callbacks.
 Local Codex remediation, reviewer execution and discovery probes use reviewed
 isolated config homes, with unchanged auth, model pins and approval/sandbox
 envelopes. See [the workspace runbook](RUNBOOK-reviewer-workspace.md) and

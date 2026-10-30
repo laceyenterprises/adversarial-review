@@ -1139,7 +1139,7 @@ function spawnCodexRemediationWorker({
   const codexCli = resolveCodexCliPath(sourceEnv);
   // For codex, `workerClass` IS the physical harness class ('codex').
   const gitIdentity = remediationWorkerGitIdentity(workerClass);
-  const { env: baseEnv, startupEvidence, isolatedCodexHome } = prepareCodexRemediationStartupEnv({
+  const { env: baseEnv, startupEvidence } = prepareCodexRemediationStartupEnv({
     gitIdentity,
     perWorkerKey: jobId || launchRequestId || null,
     workerClass,
@@ -1184,7 +1184,6 @@ function spawnCodexRemediationWorker({
       ? ['-c', `model_reasoning_effort=${modelResolution.resolvedReasoningLevel}`]
       : []),
     '--dangerously-bypass-approvals-and-sandbox',
-    ...(!isolatedCodexHome ? ['--ephemeral'] : []),
     '--json',
     '--output-last-message',
     outputPath,
@@ -1225,7 +1224,7 @@ function spawnCodexRemediationWorker({
       ...modelResolution,
       codexHome: serviceHome.codexHome,
       configDigest: serviceHome.configDigest,
-      codexSessionRoot: isolatedCodexHome ? join(serviceHome.codexHome, 'sessions') : null,
+      codexSessionRoot: join(serviceHome.codexHome, 'sessions'),
       command: [codexCli, ...codexArgs],
       child,
     };

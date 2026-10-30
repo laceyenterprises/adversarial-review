@@ -1267,22 +1267,22 @@ async function reviewWithCodex(diff, extraContext = '', {
   const codexExecOverrides = resolveCodexExecOverrides({ modelPin, reasoningPin, log });
   const serviceHome = prepareServiceCodexHome({ env: process.env, workspaceDir: reviewerSubprocessCwd,
     model: codexExecOverrides.model, effort: codexExecOverrides.reasoningEffort, log });
-  const codexSessionHome = serviceHome.codexHome;
-  const changedLines = countChangedLines(diff);
-  const effort = codexExecOverrides.reasoningEffort;
-  onProgress?.({ changedLines, effort });
-  const startedAt = new Date().toISOString();
-
-  const { env } = scrubOAuthFallbackEnv({
-    ...process.env,
-    PATH: '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
-    CODEX_AUTH_PATH: effectiveAuthPath,
-    CODEX_HOME: serviceHome.codexHome,
-    HOME: process.env.HOME || homedir(),
-  });
-  const subprocessEnv = withReviewerSubprocessCwdEnv(env, reviewerSubprocessCwd);
-
   try {
+    const codexSessionHome = serviceHome.codexHome;
+    const changedLines = countChangedLines(diff);
+    const effort = codexExecOverrides.reasoningEffort;
+    onProgress?.({ changedLines, effort });
+    const startedAt = new Date().toISOString();
+
+    const { env } = scrubOAuthFallbackEnv({
+      ...process.env,
+      PATH: '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+      CODEX_AUTH_PATH: effectiveAuthPath,
+      CODEX_HOME: serviceHome.codexHome,
+      HOME: process.env.HOME || homedir(),
+    });
+    const subprocessEnv = withReviewerSubprocessCwdEnv(env, reviewerSubprocessCwd);
+
     let stdout = '';
     let stderr = '';
     try {

@@ -1676,7 +1676,7 @@ async function reconcileFollowUpJob({
     } catch { /* Missing/oversized/unreadable evidence stays charged. */ }
   }
   if (isHqWorker && liveness.state === 'exited' && liveness.dispatchStatus?.status === 'failed'
-    && ['codex', 'remediator-codex', 'remediator-codex-corp'].includes(worker.model)
+    && ['codex', 'remediator-codex', 'remediator-codex-corp'].includes(worker.workerClass || worker.model)
     && !recordedInfrastructureReason(liveness.dispatchStatus)) {
     const evidence = await readDispatchCodexToolHostEvidence(worker);
     if (evidence) liveness.dispatchStatus = { ...liveness.dispatchStatus, toolHostEvidence: evidence };

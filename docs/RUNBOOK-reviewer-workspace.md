@@ -13,12 +13,15 @@ existing bypass flags. The template pins shell/unified execution and code mode,
 disables app/plugin loading and hooks, and declares no MCP servers, marketplaces
 or desktop configuration. Each home trusts only its job workspace. No interactive
 config or project-trust history is imported. An explicit per-worker auth path
-remains `CODEX_AUTH_PATH`; config isolation never copies credentials. Existing
-credential materialization, broker selection and OAuth-only rules still apply.
+remains `CODEX_AUTH_PATH`; config isolation never copies credentials. Discovery
+preserves an unset auth path as `auth.json` in the incoming `CODEX_HOME`, or `~/.codex` under the
+incoming `HOME` when no home override exists, before isolating configuration.
+Existing credential materialization, broker selection and OAuth-only rules apply.
 The reviewer retains `--ignore-user-config` and passes the same reviewed tooling
 pins as CLI overrides. Reviewer/probe homes are removed after use; remediation
-homes remain temporary job artifacts for session evidence. Spawn failures remove
-their config home. Logs include `CODEX_HOME` and `config_sha256` without auth data.
+homes retain sessions under `<codexHome>/sessions` without `--ephemeral`,
+regardless of per-worker credential materialization. Preparation and spawn
+failures remove their config home. Logs include `CODEX_HOME` and `config_sha256` without auth data.
 
 After ordinary deployment, SRE should retain the next organic Codex remediation
 receipt showing shell execution, a re-review request, and the isolated home and

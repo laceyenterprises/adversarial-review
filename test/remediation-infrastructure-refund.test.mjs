@@ -1,3 +1,5 @@
+import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
+installDispatchFileProducerFixture();
 import test, { beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, openSync, closeSync } from 'node:fs';
@@ -366,6 +368,7 @@ test('settlement preserves concurrent disk updates and skips a missing job', asy
     const claimed = claimNextFollowUpJob({ rootDir });
     const current = readFollowUpJob(claimed.jobPath);
     current.concurrentEvidence = 'keep';
+    current.remediationWorker = {};
     writeFollowUpJob(claimed.jobPath, current);
     const args = { rootDir, job: claimed.job, jobPath: claimed.jobPath, worker: {},
       liveness: { state: 'exited' }, lifecycle: { source: 'live', headSha: 'b' } };
@@ -385,6 +388,7 @@ test('refund marker does not stamp or overwrite an immediately claimed pending j
     createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'fixture/repo', prNumber: 1, revisionRef: 'a',
       reviewerModel: 'claude', reviewBody: 'Fix.', critical: true });
     const claimed = claimNextFollowUpJob({ rootDir });
+    markFollowUpJobSpawned({ rootDir, jobPath: claimed.jobPath, worker: {} });
     const result = await settleInfrastructureRemediationRound({ rootDir, job: claimed.job,
       jobPath: claimed.jobPath, worker: {}, liveness: { state: 'exited',
         dispatchStatus: { status: 'failed', failureReason: 'publish-blocked' } },
@@ -432,4 +436,55 @@ test('contention defers settlement and retries local boot outcome writes', async
     if (fd !== undefined) closeSync(fd);
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+for (const [workerClass, model] of [['remediator-codex', 'gpt-5.5'], ['remediator-codex-corp', 'gpt-6.1-sol'], [null, 'codex']]) {
+  test(`HQ ${workerClass || model} refunds complete log evidence with resolved model ${model}`, async () => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'remrefund-hq-class-'));
+    try {
+      createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'fixture/repo', prNumber: 1,
+        revisionRef: 'a'.repeat(40), reviewerModel: 'claude', reviewBody: 'Fix.', critical: true });
+      const claimed = claimNextFollowUpJob({ rootDir });
+      const launchRequestId = 'lrq_fixture_codex';
+      const dispatchDir = join(fixtureHqRoot, 'dispatch', launchRequestId);
+      mkdirSync(dispatchDir, { recursive: true });
+      writeFileSync(join(dispatchDir, 'stdout.log'), '');
+      writeFileSync(join(dispatchDir, 'stderr.log'), 'ERROR codex_core::tools::router: error=timed out negotiating with the code-mode host\n');
+      const spawned = markFollowUpJobSpawned({ rootDir, jobPath: claimed.jobPath, worker: {
+        model, workerClass, dispatchMode: 'hq', dispatchId: 'fixture', launchRequestId, hqRoot: fixtureHqRoot,
+      } });
+      const result = await reconcileFollowUpJob({ rootDir, jobPath: spawned.jobPath, job: spawned.job,
+        execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'failed' }) }),
+        resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: 'a'.repeat(40) }),
+        postCommentImpl: async () => ({ posted: false, error: 'offline fixture' }),
+        log: { log() {}, warn() {}, error() {} },
+      });
+      assert.equal(result.action, 'requeued', result.reason);
+      assert.equal(result.reason, 'codex-tool-host-unavailable');
+      assert.equal(result.job.remediationPlan.currentRound, 0);
+    } finally { rmSync(rootDir, { recursive: true, force: true }); }
+  });
+}
+
+test('missing persisted worker cannot settle or record infrastructure evidence', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'remrefund-missing-worker-'));
+  try {
+    createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'fixture/repo', prNumber: 1,
+      revisionRef: 'a', reviewerModel: 'claude', reviewBody: 'Fix.', critical: true });
+    const claimed = claimNextFollowUpJob({ rootDir });
+    const current = readFollowUpJob(claimed.jobPath);
+    delete current.remediationWorker;
+    writeFollowUpJob(claimed.jobPath, current);
+    const result = await settleInfrastructureRemediationRound({ rootDir, job: current, jobPath: claimed.jobPath,
+      worker: {}, liveness: { state: 'exited', dispatchStatus: { status: 'failed',
+        toolHostEvidence: { allToolsFailedBeforeExecution: true } } },
+      lifecycle: { source: 'live', headSha: 'a' },
+    });
+    assert.equal(result.action, 'skipped');
+    const child = new EventEmitter();
+    recordLocalRemediationOutcome({ rootDir, jobPath: claimed.jobPath, worker: { child },
+      log: { warn(message) { assert.fail(message); } } });
+    child.emit('exit', 1, null);
+    assert.deepEqual(readFollowUpJob(claimed.jobPath), current);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });

@@ -316,7 +316,10 @@ in recorded failure fields. In-run negotiation timeouts require the complete
 worker log, no command execution event, and no successful tool result. Plain
 worker prose cannot establish an outage. HQ log reads require both complete,
 untruncated launch streams from offset zero; local reads use validated contained
-paths and an 8 MiB limit. Missing or partial evidence stays charged.
+paths and an 8 MiB limit. HQ Codex classification uses `workerClass`, falling
+back to legacy `model` only when the class is absent; resolved model IDs do not
+disable log inspection. Settlement skips records without a persisted worker.
+Missing or partial evidence stays charged.
 Narrative text and bare signal exits (including 137/143) cannot qualify.
 Operator and supervisor cancels therefore do not earn a refund from their
 signal exit alone.
@@ -347,6 +350,8 @@ The persisted accounting fields are:
 - `remediationWorker.codexHome` and `configDigest`: optional isolated service
   config directory and SHA-256 digest for local Codex spawns. Legacy jobs lack
   these fields; neither changes auth ownership or grants merge authority.
+  New local spawns always record `codexSessionRoot` as `<codexHome>/sessions`
+  and persist session evidence there, independent of credential materialization.
 - `remediationPlan.publishedRoundsForPR`: the ledger's count of rounds with
   `publishedHeadSha`, computed when a budget stop is recorded.
   It feeds budget-stop comments and cannot reconstruct historical publications.

@@ -5077,7 +5077,6 @@ test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt
       '--model',
       'gpt-5.5',
       '--dangerously-bypass-approvals-and-sandbox',
-      '--ephemeral',
       '--json',
       '--output-last-message',
       outputPath,
@@ -5088,6 +5087,8 @@ test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt
     assert.equal(spawnCalls[0].options.env.CODEX_AUTH_PATH, authPath);
     assert.notEqual(spawnCalls[0].options.env.CODEX_HOME, codexHome);
     assert.equal(spawnCalls[0].options.env.CODEX_HOME, worker.codexHome);
+    assert.equal(worker.codexSessionRoot, path.join(worker.codexHome, 'sessions'));
+    assert.equal(existsSync(worker.codexHome), true);
     const serviceConfig = readFileSync(path.join(worker.codexHome, 'config.toml'), 'utf8');
     assert.match(serviceConfig, /approval_policy = "never"/);
     assert.match(serviceConfig, /sandbox_mode = "danger-full-access"/);

@@ -1279,7 +1279,10 @@ CODEXHOMEISO-01 keeps the existing bounded infrastructure-refund transition for
 prefixed Codex tool-host failures and complete in-run timeout evidence with no
 executed command. Native Codex remediation, reviewer and discovery processes use
 isolated reviewed config homes with existing auth/model/security contracts.
-Offline fixtures cover isolation and refund behavior. After ordinary deployment,
+Discovery retains the base OAuth path, local sessions persist independently of
+credential materialization, and HQ log classification uses worker class. Missing
+worker records defer refunds; reviewer preparation errors clean service homes.
+Offline fixtures cover these boundaries and refund behavior. After ordinary deployment,
 SRE observes the next organic remediation's shell execution, re-review request,
 isolated `CODEX_HOME` and config digest; publication is not that live receipt.
 See [the workspace runbook](docs/RUNBOOK-reviewer-workspace.md). No new smoke

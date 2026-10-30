@@ -961,6 +961,16 @@ It means:
   round intentionally suppressed re-review and handed ownership to the hammer
 - the watcher can pick the PR up again or route the final-round handoff
 
+PENDINGCIOWNER-01: operational ownership uses the structured kind before prose.
+A `pending-ci` entry without a declared non-CI operational code or a non-empty
+human-input request is CI-owned even if its prose mentions human decisions or
+operator approval. The complete legacy CI-to-review follow-up sentence is still
+accepted in `needsHumanInput`; appending an access request fails closed. Other
+tagged kinds remain human-owned, and only untagged legacy entries use the prose
+heuristic, ignoring explicit negated need phrases. Final-round completion still
+requires independent publication proof and a matching CI probe without failures
+before the existing hammer handoff. No states, durable fields or merge gates change.
+
 ---
 
 ## Rereview contract

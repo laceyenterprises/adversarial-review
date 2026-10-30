@@ -1921,6 +1921,14 @@ replacement claim cannot be posted by an older reconciliation.
 The suppressed comment-only final round hands its recorded worker-pushed head
 to the hammer. A green-CI wake accepts that exact head despite the older review;
 merge still requires HAM terminal validation. Unrecorded pushes stay stale.
+PENDINGCIOWNER-01: a `kind: "pending-ci"` operational blocker is CI-owned
+regardless of prose, including negated human decisions, unless it carries a
+declared non-CI code or an explicit `needsHumanInput` request. Only the complete
+legacy CI-to-review sentence is accepted in that field; appended access requests
+remain human-owned. Other tagged kinds remain human-owned. Offline ownership,
+final-round, follow-up and comment fixtures cover completion and CI handoff.
+After normal deployment, SRE observes the next natural comment-only final round
+waiting on CI handing off rather than stopping for human input.
 HAMREDCI-01 also resumes that proven final-round handoff when CI fails: the
 hammer owns check repair before exact-head green CI and merge, even with zero
 remaining findings or strict non-blocking remediation disabled. Non-conflicting

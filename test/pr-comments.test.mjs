@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import taggedPendingCi from './fixtures/pending-ci-ownership/blocker.json' with { type: 'json' };
 
 import {
   REMEDIATION_COMMENT_MARKER_PREFIX,
@@ -22,6 +23,7 @@ process.env.AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY = '0';
 
 for (const [name, operationalBlockers, blockers, humanRequired, owners] of [
   ['structured CI', [{ kind: 'pending-ci', finding: 'Required checks have not finished.' }], [], false, ['CI']],
+  ['structured CI negates human decision', [taggedPendingCi], [], false, ['CI']],
   ['legacy CI', [{ finding: 'Required CI is pending after one bounded wait.' }], [], false, ['CI']],
   ['legacy CI followup', [{ title: 'ci-pending', finding: 'Checks remain pending.', needsHumanInput: 'Confirm required checks pass for the pushed head, then request another adversarial review pass.' }], [], false, ['CI']],
   ['legacy CI with real input', [{ title: 'ci-pending', finding: 'Checks remain pending.', needsHumanInput: 'Confirm required checks pass for the pushed head, then request another adversarial review pass. Restore access first.' }], [], true, []],
@@ -29,10 +31,10 @@ for (const [name, operationalBlockers, blockers, humanRequired, owners] of [
   ['review', [{ finding: 'The pipeline will run the adversarial review.' }], [], false, ['review pipeline']],
   ['operator label', [{ finding: 'The operator must apply an approval label.' }], [], true, []],
   ['credential', [{ finding: 'Credentials are missing while CI is pending.' }], [], true, []],
-  ['auth token', [{ kind: 'pending-ci', finding: 'The GitHub token expired while CI is pending.' }], [], true, []],
+  ['auth token', [{ kind: 'pending-ci', finding: 'The GitHub token expired while CI is pending.', needsHumanInput: 'Restore repository access.' }], [], true, []],
   ['explicit human input', [{ kind: 'pending-ci', finding: 'CI is pending.', needsHumanInput: 'Restore access.' }], [], true, []],
   ['declared failure', [{ kind: 'pending-ci', title: 'push-lease-rejected', finding: 'CI is pending.' }], [], true, []],
-  ['text failure', [{ kind: 'pending-ci', finding: 'CI is pending. Push failed before publication.' }], [], true, []],
+  ['text failure', [{ finding: 'CI is pending. Push failed before publication.' }], [], true, []],
   ['unknown kind', [{ kind: 'unknown', finding: 'CI is pending.' }], [], true, []],
   ['ambiguous wait', [{ finding: 'Waiting for a dependency.' }], [], true, []],
   ['mixed', [{ kind: 'pending-ci', finding: 'CI is pending.' }, { finding: 'Credentials are missing.' }], [], true, ['CI']],

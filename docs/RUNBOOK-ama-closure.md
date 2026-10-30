@@ -84,6 +84,37 @@ including during the successor attempt or on a later background tick, pages
 immediately through the existing closure-wait path and returns
 `closure-decision-mismatch-escalated`. It does not start another successor attempt.
 
+### Closure-recovery executor (CLOSURERECOVERYEXEC-01)
+
+An R04 `closure-recovery` next action (ownership reconciliation, for example
+`ownership-unreadable`) is not a hammer-dispatch mismatch. Both the inline route
+and background hammer admission hand the decision to the closer, so neither
+reports `closure-decision-mismatch` for it on an unchanged head. The closer
+reconciles the recorded launch/lease custody through its existing readers, so
+a resolved launch is admitted through the ordinary gates, lease CAS and custody
+checks. Before the deadline, an unresolved reconciliation returns the closer's
+refusal (for example `ownership-unreadable`) with a `closureRecovery` record:
+the decision key, the deadline, `ageMs`, the closer's reason, the launch id and
+unresolved `lease:`/`launch:` evidence. At the deadline, closure pages once
+through closure-wait class `closure-recovery-deadline`. It returns
+`closure-recovery-ownership-unresolved` with `closerReason`, `closureBlocker`
+and `needsOperator`. A refused delivery is retried on a later pass, and every
+pass re-runs the closer, so readable custody still dispatches. The orphan
+watchdog does not page again for a pass that this executor owns. Other closer
+refusals keep their own reason and owner. Merge-agent rescue `--apply`
+(`orphanRecovery.closerHead`) uses this same path. It either dispatches and
+returns the launch id, or names the refusal and the unresolved evidence.
+
+Expired next-action deadlines (any class except `refresh`, which is only a
+re-read cadence) are visible in two places. Each watcher lane walk logs
+`[watcher] next-action deadline expired ... age_ms=<n> route=<reason>`.
+`pipeline-health` reports `expiredNextActions` (`expiredCount`,
+`closureRecoveryExpired`, `oldestAgeMs`, per-PR items with `deadlineAt` and
+`ageMs`), read from the lane ledger's `nextAction`. Activation is the normal
+watcher restart at deploy. To check the live receipt, look in the watcher log:
+every `class=recovery` expired line should show a dispatch or a
+`closure-recovery-ownership-unresolved` route, with one page for each PR/head.
+
 After primary-change validation or selected R05 repair admission, a changed hammer decision is reported
 before repair-admission refusal. Structural admission refusals remain in the
 replacement snapshot and cannot authorize daemon merge; zero findings alone do

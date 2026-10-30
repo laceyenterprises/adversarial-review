@@ -2,7 +2,7 @@
 
 **Owner:** AMA bounded closure wait and exhaustion paging (HAMCLOSE-01)
 **Store:** `data/ama-closure-waits/<sha256(repo#prNumber)>.db`
-**Source of truth:** `src/ama/closure-wait.mjs`, `src/ama/closure-refresh-loop.mjs`
+**Source of truth:** `src/ama/closure-wait.mjs`, `src/ama/closure-refresh-loop.mjs`, `src/ama/closure-recovery.mjs`
 **Runtime surfaces:** `src/reviewer-ci-admission.mjs`, `src/ama-closure-orchestration.mjs`, `src/ama/dispatch-closer.mjs`, `src/follow-up-merge-agent.mjs`
 
 ## Purpose and schema
@@ -16,7 +16,7 @@ daemon owns these databases. `CREATE TABLE IF NOT EXISTS` initializes
 | Column | SQLite definition | Meaning |
 | --- | --- | --- |
 | `head` | `TEXT` | Exact PR head SHA. |
-| `class` | `TEXT` | `primary-change` for immediate primary-change pages, `final-round` for final-round stalls and cap exhaustion, `lane-busy` for the third repeated legacy lane-busy launch on a head, `ci-regression-ownerless` for immediate failed-CI remediation refusals, and `bounded-wait` for other waits. Lane-busy pages are immediate, retain contention refunds/backoff, retry failed delivery, and dedupe per PR/head across restarts. Primary-change receipts remain independent of final-round receipts. |
+| `class` | `TEXT` | `primary-change` for immediate primary-change pages, `final-round` for final-round stalls and cap exhaustion, `lane-busy` for the third repeated legacy lane-busy launch on a head, `ci-regression-ownerless` for immediate failed-CI remediation refusals, `closure-recovery-deadline` for the one escalation of an R04 ownership reconciliation still unresolved at its next-action deadline (CLOSURERECOVERYEXEC-01), and `bounded-wait` for other waits. Lane-busy pages are immediate, retain contention refunds/backoff, retry failed delivery, and dedupe per PR/head across restarts. Primary-change receipts remain independent of final-round receipts. |
 | `started` | `INTEGER NOT NULL` | First observation or latest launch/head progress in epoch milliseconds. |
 | `reason` | `TEXT` | Latest wait reason, refreshed on every observation. |
 | `paged` | `INTEGER DEFAULT 0` | Exhaustion page reservation: 0 available, 1 reserved/sent. |

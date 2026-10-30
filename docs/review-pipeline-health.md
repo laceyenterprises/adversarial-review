@@ -34,6 +34,17 @@ held parks and stale closer leases do not raise stall findings. If a legacy
 ledger lacks `labels_json`, counting reads keep their unfiltered population and
 `held` is unknown (`null`), rather than silently reporting an empty queue.
 
+`expiredNextActions` (CLOSURERECOVERYEXEC-01) is a snapshot-only section. It
+reads the shared next action that the watcher's no-progress lane ledger
+(`data/watcher-no-progress-lane/*.json`) stores for each PR head. It reports
+every owner whose deadline has passed, except the `refresh` class, which is
+only a re-read cadence. Each item carries its age (`ageMs` past `deadlineAt`),
+action/actor/reason/row and a `closureRecovery` flag. Totals are
+`expiredCount`, `closureRecoveryExpired` and `oldestAgeMs`; at most 50 items
+are listed, oldest first. Closed or merged PRs are omitted. The section adds no
+finding, metric or page, because the selected executor and closure-wait own
+escalation.
+
 Run locally:
 
 ```sh

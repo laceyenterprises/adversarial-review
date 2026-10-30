@@ -49,7 +49,7 @@ Required fields:
 | `generationResets` | number, optional | Cumulative count of startup generation resets for this PR, retained across walks. |
 | `generationHistory` | array, optional | Last ten startup resets, retaining the prior generation, lane, no-progress/skip/decision-reset counters, first no-progress timestamp and reset timestamp. |
 | `hammerRouteActive` | boolean, optional | Final-review hammer ownership keeps this head active regardless of unchanged review state. A subsequent operator hold clears it. |
-| `nextAction` | object, optional | NXA-05 selected shared decision for this head, including action, actor, reason, deadline, evidence references, key and queue intent. Automatic stops and cap/deadline reports retain recovery ownership. Explicit operator hold alone selects the operator lane when this field is supplied. |
+| `nextAction` | object, optional | NXA-05 selected shared decision for this head, including action, actor, reason, deadline, evidence references, key and queue intent. Automatic stops and cap/deadline reports retain recovery ownership. Explicit operator hold alone selects the operator lane when this field is supplied. CLOSURERECOVERYEXEC-01: the pipeline-health `expiredNextActions` snapshot reads this field (read-only) and reports a non-`refresh` deadline that has passed, with its age. |
 | `progressClass` | string | `self-resolving` or `operator-decision-required`. |
 | `noProgressTicks` | number | Consecutive walked ticks with the same fingerprint. |
 | `skippedTicks` | number | Deferred ticks counted toward the current backoff window. |

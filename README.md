@@ -1,5 +1,13 @@
 # Adversarial Review
 
+GTMGAWIRE-01 adds the strict `services.hcp.google_tokens.profiles` metadata
+schema, matching Agent OS's Python and shell readers. It accepts purpose-named
+profiles, a 1Password Document reference, the `lacey-web` identity and six
+approved scopes, plus read-class and exact-LRQ task grants. It grants no access
+and performs no credential reads. Deploy this reader before the Agent OS
+companion adds the tracked profile; existing lifecycle and smoke promises
+are unchanged. `test/config-google-tokens.test.mjs` exercises the offline shape.
+
 LAC-2127: SQL-origin migration proofs can certify an ancestral filename/metadata
 repair only after verifying every snapshot, monotonic declared revisions, exact
 adjacent ancestry and base-identical predecessor operations. The immutable

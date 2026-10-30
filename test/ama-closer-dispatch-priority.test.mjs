@@ -6,6 +6,7 @@ import { poolConflictFixture } from './helpers/pool-conflict-fixture.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import Database from 'better-sqlite3';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, readdirSync, statSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { hostname, tmpdir, userInfo } from 'node:os';
@@ -186,6 +187,284 @@ function flagValue(args, flag) {
   const idx = args.indexOf(flag);
   return idx === -1 ? undefined : args[idx + 1];
 }
+
+for (const status of ['failed', 'succeeded', 'canceled', 'cancelled', 'superseded']) {
+  test(`CLOSERCUSTODYLRQ-01: recorded ${status} launch outranks unavailable worker observations`, async () => {
+    const result = await __testables__.resolveSelfOwnedHammerCloserRunLiveness({
+      prNumber: 404, hqRoot: '/synthetic/root', env: {},
+      launchRequestId: 'synthetic-custody-launch',
+      readLaunchRequestStatusImpl: async args => {
+        assert.equal(args.launchRequestId, 'synthetic-custody-launch');
+        assert.equal(args.includeRetryChain, true);
+        return { ok: true, row: { status } };
+      },
+      readWorkerDispatchFilesImpl: () => assert.fail('receipt must precede worker observations'),
+      readWorkerObservationImpl: () => assert.fail('receipt must precede inventory'),
+    });
+    assert.equal(result.live, false);
+    assert.equal(result.unknown, false);
+    assert.equal(result.reason, 'recorded-launch-terminal');
+    assert.equal(result.workerStatus, status === 'cancelled' ? 'canceled' : status);
+  });
+}
+
+for (const [scenario, probe, live, unknown] of [
+  ['live', { ok: true, row: { status: 'running' } }, true, false],
+  ['live-retry', { ok: true, row: { status: 'failed' },
+    retryChain: [{ launch_request_id: 'synthetic-retry', status: 'running' }] }, true, false],
+  ['cancelled-live-wire', { ok: true, row: { status: 'cancelled', terminal: false } }, true, false],
+  ['cancelled-live-retry', { ok: true, row: { status: 'cancelled' },
+    retryChain: [{ launch_request_id: 'synthetic-retry', status: 'running' }] }, true, false],
+  ['cancelled-terminal-retry', { ok: true, row: { status: 'failed' },
+    retryChain: [{ launch_request_id: 'synthetic-retry', status: 'cancelled' }] }, false, false],
+  ['cancelled-prefetched-retry', { ok: true, row: { status: 'cancelled' },
+    liveRetryLaunchRequestId: 'synthetic-cancelled-retry', retryChain: [
+      { launch_request_id: 'synthetic-cancelled-retry', status: 'cancelled' },
+      { launch_request_id: 'synthetic-live-retry', status: 'running' },
+    ] }, true, false],
+  ['parked', { ok: true, row: { status: 'blocked_needs_decision' } }, true, false],
+  ['unreadable', { ok: false }, null, true],
+  ['unreadable-retry', { ok: true, row: { status: 'failed' }, retryChainUnreadable: true }, null, true],
+  ['unknown-status', { ok: true, row: { status: 'synthetic-unknown' } }, null, true],
+]) {
+  test(`CLOSERCUSTODYLRQ-01: ${scenario} resolves recorded launch custody`, async () => {
+    const result = await __testables__.resolveSelfOwnedHammerCloserRunLiveness({
+      prNumber: 404, hqRoot: '/synthetic/root', launchRequestId: 'synthetic-custody-launch',
+      readLaunchRequestStatusImpl: async () => probe,
+      readWorkerDispatchFilesImpl: () => assert.fail('worker evidence cannot override launch ownership'),
+    });
+    assert.equal(result.live, live);
+    assert.equal(result.unknown, unknown);
+  });
+}
+
+for (const scenario of ['exhausted-findings', 'clean-red-ci']) test(`CLOSERCUSTODYLRQ-01: ${scenario} receipt survives restart and releases failed hammer before redispatch`, async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-custody-restart-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = scenario === 'exhausted-findings' ? findingsRemediationArgs(rootDir)
+    : cleanValidateAndClickArgs(rootDir, { prMetadata: {
+      statusCheckRollup: [
+        { __typename: 'CheckRun', name: REQUIRED_GATE, conclusion: 'SUCCESS' },
+        { __typename: 'CheckRun', name: 'ci/test', conclusion: 'FAILURE' },
+      ],
+      branchProtection: { requiredContexts: [REQUIRED_GATE, 'ci/test'] },
+    } });
+  const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+  const deps = testDeps();
+  const first = await maybeDispatchAmaCloser({ ...args, ...deps });
+  assert.equal(first.dispatched, true);
+  const receipt = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
+  const lease = JSON.parse(readFileSync(amaCloserLeaseFilePath(rootDir, identity), 'utf8'));
+  assert.equal(lease.lrqId, first.launchRequestId);
+  assert.equal(lease.workerId, receipt.workerId);
+  assert.equal(lease.dispatchedAt, args.dispatchContext.dispatchedAt);
+  assert.equal(lease.headSha, HEAD);
+  // Emulate a fresh watcher with only on-disk ownership and unavailable worker
+  // registration. No in-memory dispatch result supplies the old launch ID.
+  const worktree = join(args.dispatchContext.hqRoot, 'workers', receipt.workerId, 'agent-os');
+  mkdirSync(worktree, { recursive: true });
+  const nextDeps = testDeps();
+  const events = [];
+  let teardownCalls = 0;
+  const second = await maybeDispatchAmaCloser({ ...args, ...nextDeps,
+    dispatchContext: { ...args.dispatchContext, dispatchedAt: '2026-07-20T13:30:00Z' },
+    readLaunchRequestStatusImpl: async () => ({ ok: true,
+      row: { status: 'failed', ticket_ref: 'AMA-PR-404' } }),
+    readExecutionVerdictsImpl: async () => ({ ok: true, verdicts: [] }),
+    readWorkerDispatchFilesImpl: () => assert.fail('recorded receipt owns custody resolution'),
+    readWorkerObservationImpl: () => assert.fail('recorded receipt owns custody resolution'),
+    logger: { ...nextDeps.logger, info: line => {
+      if (line.startsWith('{')) events.push(JSON.parse(line));
+    } },
+    execFileImpl: async (cmd, argv, options) => {
+      if (argv[0] === 'worker') {
+        // Early best-effort cleanup can be refused while host custody drains.
+        // Leave the slot for the launch-bound reclaim boundary under test.
+        if (++teardownCalls === 1) throw new Error('synthetic host ownership still draining');
+        // The real host refuses non-force teardown while this PR is open.
+        if (!argv.includes('--force')) throw new Error('worker has an open PR; rerun with --force');
+        assert.deepEqual(argv, ['worker', 'tear-down', receipt.workerId, '--force', '--root', args.dispatchContext.hqRoot]);
+        nextDeps.calls.push({ args: argv });
+        rmSync(worktree, { recursive: true });
+        return { stdout: '', stderr: '' };
+      }
+      if (argv[0] === 'dispatch' && argv[1] === 'status') {
+        return { stdout: JSON.stringify({ status: 'failed' }), stderr: '' };
+      }
+      if (argv[0] === 'dispatch') {
+        nextDeps.calls.push({ args: argv });
+        return { stdout: JSON.stringify({ ticketRef: 'AMA-PR-404',
+          dispatchId: 'synthetic-next-launch', launchRequestId: 'synthetic-next-launch' }), stderr: '' };
+      }
+      return nextDeps.execFileImpl(cmd, argv, options);
+    },
+  });
+  assert.equal(second.dispatched, true, JSON.stringify(second));
+  assert.equal(second.launchRequestId, 'synthetic-next-launch');
+  assert.equal(readAmaCloserLease(rootDir, identity).lrqId, second.launchRequestId);
+  assert.deepEqual(nextDeps.calls.filter(call => ['worker', 'dispatch'].includes(call.args[0]))
+    .map(call => call.args[0]), ['worker', 'dispatch']);
+  assert.ok(events.some(event => event.event === 'closer_provision_collision_reclaimed'
+    && event.launchRequestId === receipt.launchRequestId && event.terminalStatus === 'failed'
+    && event.reason === 'recorded-launch-terminal'), JSON.stringify(events));
+  assert.ok(!events.some(event => event.event === 'closer_reclaim_deferred_unknown_run'));
+});
+
+for (const [status, probe] of [
+  ['live-retry', { ok: true, row: { status: 'failed', ticket_ref: 'AMA-PR-404' },
+    retryChain: [{ launch_request_id: 'synthetic-retry', status: 'running' }] }],
+  ['unavailable', { ok: false }],
+  ['reclaim-throws', { ok: false }],
+]) test(`CLOSERCUSTODYLRQ-01: ${status} recorded launch keeps the predecessor lease receipt`, async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-custody-retain-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = findingsRemediationArgs(rootDir);
+  const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+  const first = await maybeDispatchAmaCloser({ ...args, ...testDeps() });
+  assert.equal(first.dispatched, true);
+  const receipt = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
+  const lease = readAmaCloserLease(rootDir, identity);
+  mkdirSync(join(args.dispatchContext.hqRoot, 'workers', receipt.workerId, 'agent-os'), { recursive: true });
+  const nextDeps = testDeps();
+  const pending = maybeDispatchAmaCloser({ ...args, ...nextDeps,
+    dispatchContext: { ...args.dispatchContext, dispatchedAt: '2026-07-20T13:30:00Z' },
+    // Evidence changes after admission acquires its replacement lease: a retry
+    // spawns or the ledger becomes unreadable before the custody probe.
+    readLaunchRequestStatusImpl: async () => (readAmaCloserLease(rootDir, identity)?.status === 'pending'
+      ? probe : { ok: true, row: { status: 'failed', ticket_ref: 'AMA-PR-404' } }),
+    readExecutionVerdictsImpl: async () => ({ ok: true, verdicts: [] }),
+    readWorkerDispatchFilesImpl: () => assert.fail('recorded receipt owns custody resolution'),
+    readWorkerObservationImpl: () => assert.fail('recorded receipt owns custody resolution'),
+    deliverAlertImpl: async () => {},
+    logger: { ...nextDeps.logger, info: line => {
+      if (status === 'reclaim-throws' && line.includes('closer_reclaim_deferred_unknown_run')) {
+        throw new Error('synthetic reclaim exception');
+      }
+    } },
+    execFileImpl: async (cmd, argv, options) => {
+      if (argv[0] === 'worker' || (argv[0] === 'dispatch' && argv[1] !== 'status')) {
+        assert.fail(`retained custody cannot ${argv[0]}`);
+      }
+      if (argv[0] === 'dispatch') return { stdout: JSON.stringify({ status: 'failed' }), stderr: '' };
+      return nextDeps.execFileImpl(cmd, argv, options);
+    },
+  });
+  if (status === 'reclaim-throws') await assert.rejects(pending, /synthetic reclaim exception/);
+  else {
+    const second = await pending;
+    assert.equal(second.reason, 'hammer-closer-in-flight', JSON.stringify(second));
+  }
+  const retained = readAmaCloserLease(rootDir, identity);
+  assert.notEqual(retained.status, 'pending');
+  assert.equal(retained.lrqId, lease.lrqId);
+  assert.equal(retained.workerId, receipt.workerId);
+  assert.equal(retained.dispatchedAt, lease.dispatchedAt);
+  assert.equal(JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8')).launchRequestId,
+    receipt.launchRequestId);
+});
+
+test('CLOSERCUSTODYLRQ-01: launch outage holds custody and preserves bounded once-only paging', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-custody-outage-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const pages = [];
+  const events = [];
+  for (const now of [1000, 86_401_000, 172_801_000]) {
+    const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+      repo: 'acme/repo', prNumber: 404, workerClass: 'hammer',
+      hqRoot: rootDir, hqPath: '/synthetic/bin/hq',
+      launchRequestId: 'synthetic-unreadable-launch',
+      existsSyncImpl: () => true, statSyncImpl: () => ({ mtimeMs: 0 }),
+      readLaunchRequestStatusImpl: async () => { throw new Error('synthetic outage'); },
+      readWorkerDispatchFilesImpl: () => assert.fail('cannot downgrade launch evidence'),
+      execFileImpl: () => assert.fail('outage cannot authorize teardown'),
+      logger: { info: line => events.push(JSON.parse(line)) },
+    });
+    assert.equal(result.unknown, true);
+    const deferred = await __testables__.deferUnknownCloserCustody({
+      rootDir, repo: 'acme/repo', prNumber: 404, headSha: HEAD, now,
+      env: { AMA_CLOSURE_WAIT_BOUND_MS: '1' }, pageImpl: async text => pages.push(text),
+    });
+    assert.equal(deferred.needsOperator, now !== 1000);
+  }
+  assert.equal(pages.length, 1);
+  assert.ok(events.every(event => event.event === 'closer_reclaim_deferred_unknown_run'
+    && event.launchRequestId === 'synthetic-unreadable-launch'
+    && event.reason === 'recorded-launch-unavailable'));
+});
+
+test('CLOSERCUSTODYLRQ-01: host ownership refusal still prevents terminal-slot replacement', async () => {
+  const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+    repo: 'acme/repo', prNumber: 404, workerClass: 'hammer',
+    hqRoot: '/synthetic/root', hqPath: '/synthetic/bin/hq',
+    launchRequestId: 'synthetic-ended-launch',
+    existsSyncImpl: () => true, statSyncImpl: () => ({ mtimeMs: 0 }),
+    readLaunchRequestStatusImpl: async () => ({ ok: true, row: { status: 'failed' } }),
+    execFileImpl: async (cmd, args) => {
+      assert.ok(args.includes('--force'));
+      throw new Error('synthetic host still owns slot');
+    },
+    logger: { info() {}, warn() {} },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.unknown, true);
+  assert.equal(result.reason, 'closer-reclaim-refused');
+});
+
+test('CLOSERCUSTODYLRQ-01: admission charges a launch outage across three restarted ticks and pages once', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-custody-admission-outage-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = findingsRemediationArgs(rootDir);
+  const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+  assert.equal((await maybeDispatchAmaCloser({ ...args, ...testDeps() })).dispatched, true);
+  const predecessor = readAmaCloserLease(rootDir, identity);
+  const pages = [];
+  let previousWait = null;
+  let tick = 0;
+  for (const at of ['2026-07-20T13:30:00Z', '2026-07-20T13:31:00Z', '2026-07-22T13:30:00Z']) {
+    const deps = testDeps();
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      options: { env: { ADV_GATE_STATUS_CONTEXT: REQUIRED_GATE, AMA_CLOSURE_WAIT_BOUND_MS: '600000' } },
+      dispatchContext: { ...args.dispatchContext, dispatchedAt: at },
+      readLaunchRequestStatusImpl: async () => ({ ok: false, reason: 'synthetic-outage' }),
+      deliverAlertImpl: async text => pages.push(text),
+      execFileImpl: async (cmd, argv) => {
+        if (argv[0] === 'dispatch' && argv[1] === 'status') return { stdout: JSON.stringify({ status: 'unknown' }), stderr: '' };
+        assert.fail('an unreadable recorded launch cannot authorize teardown or dispatch');
+      },
+    });
+    assert.equal(result.dispatched, false);
+    const waitDir = join(rootDir, 'data', 'ama-closure-waits');
+    const waitPath = readdirSync(waitDir).find(name => name.endsWith('.db'));
+    const db = new Database(join(waitDir, waitPath));
+    const wait = db.prepare("SELECT started,paged FROM waits_by_class WHERE class='closer-worker-evidence'").get();
+    db.close();
+    if (previousWait) {
+      assert.equal(wait.started, previousWait.started);
+    }
+    assert.equal(wait.paged, tick === 2 ? 1 : 0);
+    tick++;
+    previousWait = wait;
+    const retained = readAmaCloserLease(rootDir, identity);
+    for (const key of ['lrqId', 'workerId', 'headSha', 'dispatchedAt', 'acquiredAt']) {
+      assert.equal(retained[key], predecessor[key]);
+    }
+  }
+  assert.equal(pages.length, 1);
+});
+
+test('CLOSERCUSTODYLRQ-01: dispatch-only receipts never become launch-bound lease custody', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-custody-dispatch-only-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deps = testDeps();
+  await maybeDispatchAmaCloser({ ...findingsRemediationArgs(rootDir), ...deps,
+    execFileImpl: async () => ({ stdout: JSON.stringify({ dispatchId: 'synthetic-dispatch-only', ticketRef: 'AMA-PR-404' }), stderr: '' }),
+  });
+  const lease = readAmaCloserLease(rootDir, { repo: 'acme/repo', prNumber: 404, headSha: HEAD });
+  assert.equal(lease.lrqId, 'synthetic-dispatch-only');
+  assert.equal(lease.workerId, undefined);
+  assert.equal(readAmaCloserDispatchRecord(rootDir, { repo: 'acme/repo', prNumber: 404, headSha: HEAD })
+    .launchRequestIdIsDispatchFallback, true);
+});
 
 // Synthetic producer: provisioning wrote launch identity to both slot files,
 // but registration never published a worker-id lookup row. Launch-keyed ledger

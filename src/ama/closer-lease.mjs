@@ -257,6 +257,28 @@ export function deleteAmaCloserLeaseIfCurrent(rootDir, lease) {
   } finally { closeSync(fd); }
 }
 
+// Put back a retired owner's exact snapshot when admission retains its launch
+// custody. CAS on the replacement lease; a concurrent mutation wins.
+export function restoreAmaCloserLeaseIfCurrent(rootDir, lease, { expectedLease } = {}) {
+  if (!lease || !expectedLease) return false;
+  const leasePath = amaCloserLeaseFilePath(rootDir, expectedLease);
+  if (leasePath !== amaCloserLeaseFilePath(rootDir, lease)) return false;
+  const fd = openSync(`${leasePath}.reclaim.lock`, 'a', LEASE_FILE_MODE);
+  try {
+    try { fsExt.flockSync(fd, 'exnb'); }
+    catch (error) {
+      if (!['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) throw error;
+      return false;
+    }
+    if (!isCurrentAmaCloserLease(rootDir, expectedLease)) return false;
+    writeFileAtomic(leasePath, `${JSON.stringify(lease, null, 2)}\n`, {
+      mode: LEASE_FILE_MODE,
+      overwrite: true,
+    });
+    return true;
+  } finally { closeSync(fd); }
+}
+
 export function amaCloserPendingLeaseExpiryMs(dispatchTimeoutMs) {
   // Persisted dispatchTimeoutMs is the effective subprocess budget, already sized
   // by the dispatcher. Only the nominal fallback needs load scaling here.
@@ -686,6 +708,8 @@ export function acquireAmaCloserLease({
  * @param {string} args.headSha
  * @param {string} args.status
  * @param {string=} args.lrqId
+ * @param {string=} args.workerId Dispatch slot identity, retained through terminalization.
+ * @param {string=} args.dispatchedAt Original dispatch timestamp.
  * @param {string=} args.terminalOutcome
  * @param {string=} args.now
  * @param {object=} args.expectedLease Complete observed lease snapshot; object key order is ignored.
@@ -698,6 +722,8 @@ export function updateAmaCloserLease({
   headSha,
   status,
   lrqId,
+  workerId,
+  dispatchedAt,
   terminalOutcome,
   now,
   expectedLease,
@@ -774,7 +800,14 @@ export function updateAmaCloserLease({
     ...existing,
     status,
     updatedAt,
-    ...(status === DISPATCHED ? { lrqId: String(lrqId) } : {}),
+    ...(status === DISPATCHED ? {
+      lrqId: String(lrqId),
+      ...(workerId ? { workerId: String(workerId) } : {}),
+      ...((dispatchedAt || existing.dispatchedAt) ? {
+        dispatchedAt: existing.lrqId === String(lrqId)
+          ? existing.dispatchedAt || dispatchedAt : dispatchedAt || updatedAt,
+      } : {}),
+    } : {}),
     ...(status === TERMINAL ? { terminalOutcome: String(terminalOutcome) } : {}),
   };
   writeFileAtomic(leasePath, `${JSON.stringify(next, null, 2)}\n`, {

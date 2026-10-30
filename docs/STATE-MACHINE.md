@@ -8,6 +8,21 @@ authorize no cleanup. Refreshed the follow-up-remediation source projection
 after reviewing that guard; the state graph and existing smoke commands are
 unchanged. See the [auth contract](RUNBOOK-reviewer-workspace.md).
 
+CLOSERCUSTODYLRQ-01 preserves the closer lifecycle graph and merge gates.
+Dispatch receipts and leases durably bind launch, worker slot, head and time.
+Before replacement intent publication, worktree custody probes the recorded
+launch with its retry chain. Terminal evidence releases custody subject to
+sanctioned host teardown and existing retry budgets. `--force` bypasses the
+open-PR guard while host custody checks remain mandatory. Live/parked
+launches retain it, and unavailable evidence retains the receipt and bounded
+wait/page. Legacy leases keep the public slot inventory fallback. Activate by
+watcher restart after deployment and observe natural terminal release and the
+next dispatch with a launch-bearing log receipt; no live repair is authorized.
+Reviewed the dispatch producer guards and refreshed its state projection: receipt
+identity, predecessor restoration and bounded unknown-evidence accounting retain
+the existing hammer-dispatch states and transitions. Closing-decision and CI
+ownership precedence remain unchanged.
+
 SIZEOWNER-02: terminal `reviewer-prompt-too-large` and
 `reviewer-chunk-budget-exceeded` still settle to `failed`, never `pending`.
 The size-failure writer now fences the dispatched head and session. Settlement

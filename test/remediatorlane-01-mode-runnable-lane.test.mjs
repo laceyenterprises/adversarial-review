@@ -181,3 +181,15 @@ test('the native-mode refusal stays as a backstop that names the lane and the mo
     /requires account-bound HQ dispatch \(selected lane remediator-claude-corp, mode local: requires-account-bound-hq-dispatch\)/);
   assert.match(error.followUpJobPath, /follow-up-jobs\/failed\//);
 });
+
+
+for (const primary of ['ok', 'exhausted']) {
+  test(`native mode refuses an explicit corporate fallback before account resolution (${primary} personal)`, async () => {
+    const held = await resolve(claudeAccountFixture({ primary }), { primary: 'codex',
+      fallbackWorkerClasses: ['remediator-claude-corp'], reviewerModels: ['codex'], remediationMode: 'local' });
+    assert.equal(held.hold, true);
+    assert.equal(held.workerClass, 'codex');
+    assert.equal(held.reason, 'remediation-lane-unrunnable-in-mode');
+    assert.deepEqual(held.skipped, [{ workerClass: 'remediator-claude-corp', reason: 'unrunnable-in-mode:local' }]);
+  });
+}

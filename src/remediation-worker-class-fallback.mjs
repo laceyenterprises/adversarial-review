@@ -364,6 +364,12 @@ async function resolveModeRunnableWorkerClass({
   const skipped = [];
   for (let candidate of fallbacks) {
     if (candidate === primaryClass) continue;
+    // Refuse the declared identity before account-family routing can turn an
+    // unrunnable corporate fallback into an undeclared personal account.
+    if (refuseInMode(candidate)) {
+      skipped.push({ workerClass: candidate, reason: `unrunnable-in-mode:${remediationMode}` });
+      continue;
+    }
     const account = accountLane(candidate);
     if (account?.hold) {
       skipped.push({ workerClass: candidate, reason: account.reason });

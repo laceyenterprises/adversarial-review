@@ -845,3 +845,11 @@ The final pre-spawn gate evaluates existing lifecycle stops before DIRTY
 conflict repair. In particular `stale-drift` and `stale-review-head` win over a
 DIRTY merge state, preventing a stale job from repairing or launching a
 conflict hammer. Their existing stop and retrigger rules remain applicable.
+
+
+REMEDIATORLANE-01 final remediation: fallback candidates are checked for mode
+compatibility before account-family lookup, retaining the post-routing check as
+well. An explicitly refused corporate fallback records
+`unrunnable-in-mode:local` immediately and cannot become an undeclared personal
+fallback or an account-exhaustion diagnostic. Primary family routing and OS-mode
+account selection retain their existing contracts.

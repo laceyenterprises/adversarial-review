@@ -1,12 +1,48 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { readReviewObservations } from '../src/review-observations.mjs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { beginReviewerPass, completeReviewerPass } from '../src/reviewer-pass-tokens.mjs';
+
+test('CLI projects valid stdin and rejects malformed, oversized and unauthorized requests', t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'review-cli-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  mkdirSync(join(rootDir, 'data'));
+  const db = new Database(join(rootDir, 'data/reviews.db'));
+  ensureReviewStateSchema(db);
+  db.close();
+  const request = { rootDir, selector: { kind: 'reviews' }, repositories: ['example/repo'] };
+  const run = input => spawnSync(process.execPath, [
+    fileURLToPath(new URL('../src/review-observations-cli.mjs', import.meta.url)),
+  ], { input, encoding: 'utf8', timeout: 10_000, env: { PATH: process.env.PATH } });
+  const valid = JSON.stringify(request);
+  // Pin both sides of the 32768-character transport limit.
+  for (const input of [valid, valid.padEnd(32768, ' ')]) {
+    const result = run(input);
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, '');
+    const { observed_at: observedAt, ...reply } = JSON.parse(result.stdout);
+    const { observed_at: _expectedTime, ...expected } = readReviewObservations(request);
+    assert.ok(Number.isFinite(Date.parse(observedAt)));
+    assert.deepEqual(reply, expected);
+  }
+  for (const input of ['', '{private-invalid-json', 'null', valid.padEnd(32769, ' '),
+    JSON.stringify({ ...request, repositories: ['*'] }),
+    JSON.stringify({ ...request, selector: { kind: 'reviews', sql: 'select private' } })]) {
+    const result = run(input);
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr, 'review evidence unavailable\n');
+  }
+});
 
 test('real producer schema: scoped pages, latest completed pass, nullable closeout and end cutoff', () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'review-projection-'));

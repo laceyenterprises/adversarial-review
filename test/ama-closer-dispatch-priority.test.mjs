@@ -2151,6 +2151,55 @@ for (const scenario of [
   });
 }
 
+for (const failure of ['scope_denied', 'unavailable', 'throw']) {
+  test(`closer retains a charged launch through merge capture ${failure} and settles from remote merge evidence`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closer-capture-failure-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const deps = testDeps();
+    const exec = deps.execFileImpl;
+    deps.execFileImpl = async (command, argv, options) => {
+      if (argv[0] === 'dispatch' && argv[1] === 'status') return { stdout: '{"status":"running"}' };
+      if (command === 'gh') return { stdout: JSON.stringify({ state: 'OPEN', headRefOid: HEAD, headRefName: 'codex/live' }) };
+      return exec(command, argv, options);
+    };
+    const args = findingsRemediationArgs(rootDir);
+    const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+    assert.equal((await maybeDispatchAmaCloser({ ...args, ...deps })).dispatched, true);
+    const before = readAmaCloserDispatchRecord(rootDir, identity);
+    const chargedLease = readAmaCloserLease(rootDir, identity);
+    const readCapture = () => {
+      if (failure === 'throw') throw new Error('synthetic capture outage');
+      return { ok: false, reason: `worker-observation-${failure.replace('_', '-')}` };
+    };
+    // The hammer can finish its remote side effect before the capture service
+    // becomes readable. A still-running launch retains custody across polls.
+    for (let poll = 0; poll < 2; poll++) {
+      const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+        readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'running' } }),
+        readBuildCompletionSignalForPrImpl: readCapture,
+      });
+      assert.equal(result.dispatched, false);
+      const record = readAmaCloserDispatchRecord(rootDir, identity);
+      assert.equal(record.mergeCaptureReadReason, failure === 'scope_denied'
+        ? 'merge-capture-read-scope-denied' : 'merge-capture-read-unavailable');
+      assert.equal(record.retryCount, before.retryCount, 'capture failure cannot refund the dispatch');
+      assert.equal(record.launchRequestId, before.launchRequestId);
+      assert.equal(readAmaCloserLease(rootDir, identity).lrqId, chargedLease.lrqId);
+    }
+    const dispatchCount = () => deps.calls.filter(call => call.args[0] === 'dispatch').length;
+    assert.equal(dispatchCount(), 1, 'capture failure cannot dispatch a second hammer');
+    assert.equal(reconcileAmaCloserLease({ rootDir, ...identity, hqRoot: rootDir, now: args.dispatchContext.dispatchedAt,
+      logger: deps.logger,
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
+      readBuildCompletionSignalForPrImpl: readCapture,
+      readPullRequestStateImpl: () => ({ state: 'MERGED', headRefOid: HEAD }),
+    }), true);
+    assert.equal(readAmaCloserLease(rootDir, identity).terminalOutcome, 'succeeded');
+    assert.equal(readAmaCloserDispatchRecord(rootDir, identity).retryCount, before.retryCount);
+    assert.equal(dispatchCount(), 1);
+  });
+}
+
 for (const evidence of ['merged signal', 'terminal audit', 'terminal audit without hqRoot']) {
   test(`CLOSERLEASE-01: success hold settles when delayed ${evidence} arrives`, t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'closerlease-delayed-'));

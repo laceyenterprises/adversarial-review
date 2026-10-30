@@ -7890,6 +7890,11 @@ test('CLAUDESTEERON-01 mirrors batch steering activation, rollback and launch ov
       for (const loader of [loadConfig, loadConfigRuntime]) {
         assert.equal(loader({ topPath, env: {} }).get(key), value);
         assert.equal(loader({ topPath, env: { HQ_CLAUDE_BATCH_STEER: value ? '0' : '1' } }).get(key), !value);
+        const canonical = { AGENT_OS_WORKER_POOL_DISPATCH_CLAUDE_BATCH_STEER_ENABLED: value ? '0' : '1' };
+        assert.equal(loader({ topPath, env: canonical }).get(key), !value);
+        assert.equal(loader({ topPath, env: { ...canonical, HQ_CLAUDE_BATCH_STEER: value ? '0' : '1' } }).get(key), !value);
+        assert.throws(() => loader({ topPath, env: { ...canonical, HQ_CLAUDE_BATCH_STEER: value ? '1' : '0' } }),
+          { name: 'AgentOSConfigError', key });
       }
     }
     for (const value of ['true', 1, null, [], {}]) {

@@ -1,6 +1,9 @@
 import './helpers/dispatch-read-fixture.mjs';
 import test from 'node:test';
 import { spawn } from 'node:child_process';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import os from 'node:os';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -557,8 +560,10 @@ async function publicationFixture(t, { advice = false } = {}) {
   const { runFindingBatches } = await import('../src/findings-batch.mjs');
   const env = { HQ_ROOT: f.rootDir };
   const dispatches = [];
+  const dispatchTimeouts = [];
   await runFindingBatches({ ...f, env, day: '2026-01-02', execFileImpl: async (_bin, args, options) => {
     assert.ok(options.timeout >= 900_000);
+    dispatchTimeouts.push(options.timeout);
     dispatches.push(args);
     return { stdout: '{"launchRequestId":"fixture-initial"}' };
   } });
@@ -598,15 +603,31 @@ async function publicationFixture(t, { advice = false } = {}) {
       // Model provisioning that takes 496 seconds without a real wall-clock
       // wait. Both submissions must survive the former fixed 60-second kill.
       assert.ok(options.timeout >= 900_000);
+      dispatchTimeouts.push(options.timeout);
       dispatches.push(args);
       launches.push({ ...launch, launch_request_id: 'fixture-publish', status: 'running' });
       return { stdout: '{"launchRequestId":"fixture-publish"}' };
     } };
   const pr = { number: 81, state: 'OPEN', headRefOid: head, headRefName: status.branch,
     isCrossRepository: false, body: `Finding-Batch: ${batch.batch_id}` };
-  return { ...f, batch, outputPath, result, status, dispatches, launches, publication, options, pr,
+  return { ...f, batch, outputPath, result, status, dispatches, dispatchTimeouts, launches, publication, options, pr,
     run: overrides => runFindingBatches({ ...options, ...overrides }) };
 }
+
+test('finding preparation and publication scale dispatch timeouts beyond the default clamp under load', async t => {
+  t.mock.method(os, 'loadavg', () => [os.cpus().length * 3, 0, 0]);
+  t.mock.method(childProcess, 'execFileSync', (command, args) => {
+    assert.equal(command, '/bin/ps');
+    assert.deepEqual(args, ['-A', '-o', '%cpu=']);
+    return `${os.cpus().length * 100}\n`;
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const f = await publicationFixture(t);
+  await f.run();
+  assert.deepEqual(f.dispatchTimeouts, [5_400_000, 5_400_000]);
+  assert.equal(f.dispatches.length, 2);
+});
 
 test('FINDINGSSHAPE-01 dispatches decision-only preparation and one pr-shaped publisher on the pushed branch', async t => {
   for (const advice of [false, true]) await t.test(`advice-only=${advice}`, async t => {

@@ -3244,18 +3244,22 @@ test('Claude review invocation passes prompt off argv in cli-direct shape', asyn
   ]);
 });
 
-test('Codex review invocation uses the reviewer snapshot cwd and passes prompt as argv', async () => {
+test('Codex review invocation pins the direct-tools catalog, snapshot cwd and prompt argv', async t => {
   const calls = [];
   const source = mkdtempSync(join(tmpdir(), 'review-invocation-'));
+  t.after(() => rmSync(source, { recursive: true, force: true }));
   const authPath = writeDummyCodexAuth(join(source, 'auth.json'));
+  let catalogPath;
   const prompt = 'review this codex diff';
   const outputPath = '/tmp/codex-last-message.md';
 
   await spawnCodexReview({
     codexCli: '/fixture/codex',
     execFileSyncImpl: (command, args, options) => {
-      if (args[0] !== 'login') throw new Error('catalog unavailable');
-      return serviceFixtureExec(command, args, options);
+      const output = serviceFixtureExec(command, args, options);
+      return args[0] === 'login' ? output : JSON.stringify({
+        models: [{ slug: 'gpt-5.4', tool_mode: 'code_mode', supports_search_tool: true }],
+      });
     },
     outputPath,
     prompt,
@@ -3269,6 +3273,11 @@ test('Codex review invocation uses the reviewer snapshot cwd and passes prompt a
     timeout: 12_345,
     maxBuffer: 999,
     spawnCapturedImpl: async (command, args, options) => {
+      catalogPath = join(options.env.CODEX_HOME, 'model-catalog.direct-tools.json');
+      assert.deepEqual(JSON.parse(readFileSync(catalogPath, 'utf8')), {
+        models: [{ slug: 'gpt-5.4' }],
+      });
+      assert.ok(args.includes(`model_catalog_json=${JSON.stringify(catalogPath)}`));
       calls.push({ command, args, options });
       return { stdout: '', stderr: '' };
     },
@@ -3290,6 +3299,7 @@ test('Codex review invocation uses the reviewer snapshot cwd and passes prompt a
         configOverrides: [
           { key: 'model_provider', value: 'openai' },
           { key: 'model_reasoning_effort', value: 'high' },
+          { key: 'model_catalog_json', value: catalogPath },
         ],
       }),
       options: {
@@ -3314,6 +3324,8 @@ test('Codex review invocation uses the reviewer snapshot cwd and passes prompt a
     'model_provider="openai"',
     '--config',
     'model_reasoning_effort="high"',
+    '--config',
+    `model_catalog_json=${JSON.stringify(catalogPath)}`,
     '--output-last-message',
     outputPath,
     '--',

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readWorkerObservation, dispatchReadTransport} from '../src/dispatch-read-client.mjs';
 import {readBuildCompletionSignalForPr,readBuildCompletionSignalForPrAsync,
   readBuildCompletionProducerEvidence,readBuildCompletionProducerEvidenceAsync,readActiveDagRunsForPlan,readActiveDagRunsForPlanAsync,
+  LIVE_DAG_RUN_STATES, readExecutionVerdictsFromLedger,
   readExecutionVerdictsFromLedgerAsync} from '../src/session-ledger-read-adapter.mjs';
 
 const page = (observation,items,more={}) => ({schema_version:1,observation,
@@ -65,16 +66,48 @@ test('completion repo/PR/head/signal selectors use SDK, retaining all companion 
   assert.equal(sync.row.completion_id,'completion');
 });
 
-test('completion capture failure after remote acceptance remains missing; an opened PR is no merge',async()=>{
-  let remoteMerges=0;
-  const remoteAccept=()=>{remoteMerges++;return {state:'MERGED'};};
-  const remote=remoteAccept();
-  const result=await readBuildCompletionSignalForPrAsync({repo:'example/repo',prNumber:1,
-    dispatchSession:{dispatchLookup:async()=>page('completions',[])}});
-  assert.equal(result.ok,false);
-  assert.equal(result.reason,'missing-build-completion-signal');
-  assert.equal(remote.state,'MERGED');
-  assert.equal(remoteMerges,1);
+test('merged completion reads require a merged signal selector in sync and async paths',async()=>{
+  const lookup = selector => {
+    assert.equal(selector.signal_kind, 'merged');
+    return page('completions', []);
+  };
+  const args = {repo:'example/repo',prNumber:1,
+    workerObservationSyncImpl:lookup,dispatchSession:{dispatchLookup:async selector => lookup(selector)}};
+  for (const result of [readBuildCompletionSignalForPr(args), await readBuildCompletionSignalForPrAsync(args)]) {
+    assert.equal(result.ok,false);
+    assert.equal(result.reason,'missing-build-completion-signal');
+  }
+});
+
+test('DAG reads reject absent plan identities before any producer call', async () => {
+  const forbidden = () => assert.fail('missing plan must never issue an unscoped observation');
+  for (const planId of [undefined, null, '', ' \t ']) {
+    const args = {planId, workerObservationSyncImpl:forbidden, dispatchSession:{dispatchLookup:forbidden}};
+    for (const result of [readActiveDagRunsForPlan(args), await readActiveDagRunsForPlanAsync(args)]) {
+      assert.deepEqual(result, {ok:false,reason:'missing-plan-id'});
+    }
+  }
+});
+
+test('DAG defaults pin live states and sync execution verdicts use the public observation', async () => {
+  assert.deepEqual(LIVE_DAG_RUN_STATES, ['pending','running','parked','awaiting-merge']);
+  const lookup = selector => {
+    if (selector.observation === 'dag_runs') {
+      assert.equal(selector.plan_id, 'example-plan');
+      assert.deepEqual(selector.states, LIVE_DAG_RUN_STATES);
+      return page('dag_runs', []);
+    }
+    assert.equal(selector.observation, 'execution_verdicts');
+    return page('execution_verdicts', [{verdictId:'verdict',launchRequestId:'launch',verdict:'no_work',schemaVersion:1}]);
+  };
+  const args = {planId:'example-plan',workerObservationSyncImpl:lookup,
+    dispatchSession:{dispatchLookup:async selector => lookup(selector)}};
+  assert.equal(readActiveDagRunsForPlan(args).ok, true);
+  assert.equal((await readActiveDagRunsForPlanAsync(args)).ok, true);
+  const sync = readExecutionVerdictsFromLedger(args);
+  assert.equal(sync.ok, true);
+  assert.equal(sync.verdicts[0].verdict, 'no_work');
+  assert.deepEqual(sync, await readExecutionVerdictsFromLedgerAsync(args));
 });
 
 test('partial multi-repository pages are collected and later failure discards early evidence',async()=>{

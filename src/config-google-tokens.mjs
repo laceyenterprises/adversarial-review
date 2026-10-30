@@ -20,11 +20,11 @@ export function googleTokensSchema() {
     read_worker_classes: { __type: 'list', __item: workerClass(), __default: [] },
     task_grants: {
       __type: 'list', __default: [],
-      __item: record({
+      __item: { ...record({
         lrq: text('^lrq[_-][A-Za-z0-9_-]+$'),
         worker_class: workerClass(),
         scopes: scopes(),
-      }),
+      }), __default_when_present: true },
     },
   });
   return record({

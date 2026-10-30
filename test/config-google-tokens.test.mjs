@@ -56,3 +56,19 @@ for (const [name, patch] of [
     assert.throws(() => validateSchema(doc), AgentOSConfigError);
   });
 }
+
+
+test('omitted task-grant scopes materialize an empty grant, never ambient permission', () => {
+  const doc = { version: 1, services: { hcp: { google_tokens: { profiles: { fixture: {
+    ...profile, task_grants: [{ lrq: 'lrq-fixture', worker_class: 'codex' }],
+  } } } } } };
+  const validated = validateSchema(doc);
+  assert.deepEqual(validated.services.hcp.google_tokens.profiles.fixture.task_grants[0].scopes, []);
+});
+
+test('partial host metadata remains permitted by the metadata-only mirror', () => {
+  const doc = { version: 1, services: { hcp: { google_tokens: { profiles: { fixture: { enabled: true } } } } } };
+  const validated = validateSchema(doc);
+  assert.equal(validated.services.hcp.google_tokens.profiles.fixture.enabled, true);
+  assert.equal(validated.services.hcp.google_tokens.profiles.fixture.document_ref, undefined);
+});

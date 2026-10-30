@@ -13,6 +13,12 @@ not supported. Item titles may contain spaces. Queries, fragments, percent
 escapes and extra path components are refused. Worker classes in both read and
 task grants must be non-empty identifiers using letters, digits, underscores or
 hyphens; display labels and whitespace are not worker-class identities.
+This metadata mirror permits partial profile declarations, including enable-only
+overrides; `enabled: true` is not proof of a complete minting configuration. The
+host Google token service owns `validate_profile` and checks required identity
+fields before authorization or credential I/O. Node consumers must retain that
+boundary rather than treat schema acceptance as token eligibility. Omitted task
+grant scopes materialize `[]`, an empty grant with no ambient permission.
 
 LAC-2131: native Codex reviewer, discovery and direct remediation homes expose
 OAuth through the CLI-supported file store and fail before provider requests

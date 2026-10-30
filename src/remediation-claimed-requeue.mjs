@@ -121,6 +121,7 @@ export function holdClaimedJobForCappedRemediator({
             capSource: holdReason,
             fallbackReason: routing.reason || routing.status || holdReason,
             skipped: routing.skipped || [],
+            ...(routing.modeRefusals?.length ? { modeRefusals: routing.modeRefusals } : {}),
             noRespawn: true,
             maxUnvalidatedHoldMs: MAX_QUOTA_HOLD_WINDOW_MS,
           },

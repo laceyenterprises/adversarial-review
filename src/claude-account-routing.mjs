@@ -15,6 +15,11 @@ const LANES = Object.freeze({
   'claude-reviewer': 'claude-reviewer-corp',
 });
 
+// The corporate twin of a Claude lane (either name of the pair), else null.
+export function corporateClaudeLane(workerClass) {
+  return LANES[String(workerClass || '').replace(/-corp$/, '')] || null;
+}
+
 export function resolveClaudeBrokerProvider(env = process.env) {
   const provider = String(env.CLAUDE_BROKER_PROVIDER || 'claude-code').trim();
   if (!['claude-code', 'claude-code-corp'].includes(provider)) {

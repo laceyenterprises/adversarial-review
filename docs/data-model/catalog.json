@@ -391,7 +391,7 @@
       "path": "docs/data-model/follow-up-jobs.md",
       "store": "data/follow-up-jobs/{pending,in-progress,completed,failed,stopped,single-review-voids,missing-label-events}/*.json",
       "accountProposalField": "remediationWorker.accountProposal; diagnostic only, dispatcher binding is authoritative",
-      "remediatorHoldReasons": "retryMetadata.capSource retains the cap source, routing reason or pool status; fallbackReason retains the routing reason or status. Hold messages use the same reason. ITPREMEDHOLD-01 pooled holds require positive all-account exhaustion; missing usable identity evidence keeps legacy class routing.",
+      "remediatorHoldReasons": "retryMetadata.capSource retains the cap source, routing reason or pool status; fallbackReason retains the routing reason or status. Hold messages use the same reason. ITPREMEDHOLD-01 pooled holds require positive all-account exhaustion; missing usable identity evidence keeps legacy class routing. REMEDIATORLANE-01 adds fallbackReason remediation-lane-unrunnable-in-mode and optional modeRefusals[] { workerClass, mode, reason } on holds and remediationWorker when the orchestration mode refuses a lane.",
       "schemaSurface": "src/follow-up-jobs.mjs",
       "relatedSchemaSurfaces": [
         "src/follow-up-branch.mjs",

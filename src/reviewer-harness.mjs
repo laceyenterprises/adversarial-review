@@ -1124,7 +1124,8 @@ function reviewerExecutionHarness(family, runtime = null) {
 function geminiRequestedThinkingLevel(model, runtime) {
   if (runtime !== 'antigravity') return null;
   const match = /\(([^()]+)\)\s*$/u.exec(String(model || ''));
-  return match ? match[1].trim().toLowerCase() || null : null;
+  const effort = match?.[1].trim().toLowerCase();
+  return ['low', 'medium', 'high', 'xhigh'].includes(effort) ? effort : null;
 }
 
 // Readiness is process-local and refreshes on expiry before any sync selection.

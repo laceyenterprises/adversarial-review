@@ -97,7 +97,7 @@ function buildReviewCommentBody({
   // Labelled fields (REVIEWPROV-01): harness is the execution runtime, and a
   // runtime that was sent no effort/thinking level prints `n/a`, never `none`.
   const stamp = execution
-    ? `> Reviewer: harness ${execution.harness || reviewerMetadata?.displayName?.toLowerCase() || 'unknown'} · model ${execution.model || 'unknown'} · effort ${execution.effort || 'n/a'}\n\n`
+    ? `> Reviewer: harness ${execution.harness || 'unknown'} · model ${execution.model || 'unknown'} · effort ${execution.effort || 'n/a'}\n\n`
     : '';
   const auditBlocks = `${stamp}${String(waiverAuditBlock || '')}${String(reviewModeAuditBlock || '')}`;
   if (startsWithReviewCommentHeader(text)) {

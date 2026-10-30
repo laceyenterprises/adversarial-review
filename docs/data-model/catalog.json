@@ -578,6 +578,7 @@
       "reviewerExecutionHarnesses": ["claude-code", "codex", "antigravity", "gemini-cli"],
       "claudeReplySelectionFields": ["candidateCount", "selectedCandidate", "selectedType", "laterCandidates", "contractValid"],
       "reviewerSettlementFailureMessage": { "successfulPass": null, "unsuccessfulPassPriority": ["error", "stderr", "stderrTail"] },
+      "compatibility": "REVIEWPROV-01: missing execution harness stamps unknown, never a model family. Antigravity suffix effort accepts only low, medium, high or xhigh; release qualifiers remain null. Existing fields, nullability and lifecycle are unchanged.",
       "owner": "reviewer spawn, settle, and token attribution"
     },
     {

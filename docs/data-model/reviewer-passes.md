@@ -389,3 +389,11 @@ Builder routing uses its existing `data/builder-routing/<repo>-<pr>-<head>.json`
 audit: `builder_class_inconclusive` records unavailable or successful-empty
 provenance while retaining the title-based review route. These app-owned findings
 are review intake observations, never certified worker absence or merge identity.
+
+
+REVIEWPROV-01 final remediation: Antigravity display-name suffixes contribute
+thinking effort only for low, medium, high or xhigh (case-normalized). Release
+qualifiers such as Preview, Exp 1206 or Thinking are not reasoning levels and
+remain null. An incomplete execution object stamps an unknown harness; model
+family/display names never fill an absent runtime identity. Existing null effort
+renders n/a, with unchanged verdict headings, persistence fields and lifecycle.

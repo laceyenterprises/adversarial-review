@@ -3101,3 +3101,11 @@ CCX-11 (2026-09-30): `hammer-corp` is an accepted primary/fallback hammer class 
 the second Codex OAuth account. It keeps the hammer route and merge-capability
 identity. The fallback default remains `[hammer-claude]`; account fallback
 selection and activation are governed by credential-capacity-expansion CCX-13.
+
+
+REVIEWPROV-01 final remediation: Antigravity display-name suffixes contribute
+thinking effort only for low, medium, high or xhigh (case-normalized). Release
+qualifiers such as Preview, Exp 1206 or Thinking are not reasoning levels and
+remain null. An incomplete execution object stamps an unknown harness; model
+family/display names never fill an absent runtime identity. Existing null effort
+renders n/a, with unchanged verdict headings, persistence fields and lifecycle.

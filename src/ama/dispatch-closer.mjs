@@ -4713,12 +4713,13 @@ async function maybeDispatchAmaCloserAttempt({
       if (held.lease.workerId && launchRequestInFlight(statusProbe) === null) {
         // Charge the outage before admission can return lease-held. Keep the
         // receipt untouched so every subsequent tick probes the same owner.
-        return { ...await deferUnknownCloserCustody({ rootDir: reconciliationRoot,
+        await deferUnknownCloserCustody({ rootDir: reconciliationRoot,
           repo: reconciliationRepo, prNumber, headSha: held.headSha,
           now: Date.parse(dispatchContext.dispatchedAt), env,
           pageImpl: (message, options) => deliverAlertImpl(message, { ...options,
-            event: 'ama_closer.worker_evidence_wait_exhausted', payload: { repo: reconciliationRepo, prNumber } }) }),
-          launchRequestId: held.lease.lrqId, recoveryWait: true, preservePredecessorArtifacts: true };
+            event: 'ama_closer.worker_evidence_wait_exhausted', payload: { repo: reconciliationRepo, prNumber } }) });
+        // Preserve existing closing-decision, merge-proof and retry precedence.
+        // Observing the debt must not replace those independent dispositions.
       }
       if (launchRequestParked(statusProbe)) {
         const current = readAmaCloserLease(reconciliationRoot,
@@ -7302,6 +7303,7 @@ async function maybeDispatchAmaCloserAttempt({
     watcherPid: typeof process !== 'undefined' ? process.pid : null,
     now: dispatchContext.dispatchedAt,
   });
+  let terminalCustodyUnknown = false;
   if (!leaseResult.acquired) {
     const existingLease = leaseResult.existingLease || readAmaCloserLease(rootDir, leaseIdentity);
     if (existingLease?.status === AMA_CLOSER_LEASE_STATUS.TERMINAL
@@ -7317,6 +7319,8 @@ async function maybeDispatchAmaCloserAttempt({
           ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath,
           includeRetryChain: true,
         })).catch(() => ({ ok: false })) : null;
+      terminalCustodyUnknown = Boolean(existingLease.workerId === workerId && existingLease.lrqId
+        && launchRequestInFlight(probe) === null);
       throwIfAborted(signal);
       const record = listAmaCloserDispatchRecordsForPr(rootDir, { repo, prNumber })
         .find(record => record.launchRequestId === existingLease.lrqId
@@ -7369,6 +7373,10 @@ async function maybeDispatchAmaCloserAttempt({
     }
   }
   if (!leaseResult.acquired) {
+    if (terminalCustodyUnknown) await deferUnknownCloserCustody({ rootDir, repo, prNumber,
+      headSha: targetRemediationSha, now: Date.parse(dispatchContext.dispatchedAt), env,
+      pageImpl: (message, options) => deliverAlertImpl(message, { ...options,
+        event: 'ama_closer.worker_evidence_wait_exhausted', payload: { repo, prNumber } }) });
     // The competing launch owns its record as well as its pending lease.
     return noAmaDispatch({
       dispatched: false,

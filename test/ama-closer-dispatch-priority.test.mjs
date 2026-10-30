@@ -6,6 +6,7 @@ import { poolConflictFixture } from './helpers/pool-conflict-fixture.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import Database from 'better-sqlite3';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, readdirSync, statSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { hostname, tmpdir, userInfo } from 'node:os';
@@ -418,22 +419,35 @@ test('CLOSERCUSTODYLRQ-01: admission charges a launch outage across three restar
   const predecessor = readAmaCloserLease(rootDir, identity);
   const pages = [];
   let previousWait = null;
-  for (const at of ['2026-07-20T13:30:00Z', '2026-07-21T13:30:00Z', '2026-07-22T13:30:00Z']) {
+  let tick = 0;
+  for (const at of ['2026-07-20T13:30:00Z', '2026-07-20T13:31:00Z', '2026-07-22T13:30:00Z']) {
     const deps = testDeps();
     const result = await maybeDispatchAmaCloser({ ...args, ...deps,
-      options: { env: { ADV_GATE_STATUS_CONTEXT: REQUIRED_GATE, AMA_CLOSURE_WAIT_BOUND_MS: '1' } },
+      options: { env: { ADV_GATE_STATUS_CONTEXT: REQUIRED_GATE, AMA_CLOSURE_WAIT_BOUND_MS: '600000' } },
       dispatchContext: { ...args.dispatchContext, dispatchedAt: at },
       readLaunchRequestStatusImpl: async () => ({ ok: false, reason: 'synthetic-outage' }),
       deliverAlertImpl: async text => pages.push(text),
-      execFileImpl: async () => assert.fail('an unreadable recorded launch cannot authorize teardown or dispatch'),
+      execFileImpl: async (cmd, argv) => {
+        if (argv[0] === 'dispatch' && argv[1] === 'status') return { stdout: JSON.stringify({ status: 'unknown' }), stderr: '' };
+        assert.fail('an unreadable recorded launch cannot authorize teardown or dispatch');
+      },
     });
-    assert.ok(result.evidenceWait, JSON.stringify(result));
+    assert.equal(result.dispatched, false);
+    const waitDir = join(rootDir, 'data', 'ama-closure-waits');
+    const waitPath = readdirSync(waitDir).find(name => name.endsWith('.db'));
+    const db = new Database(join(waitDir, waitPath));
+    const wait = db.prepare("SELECT started,paged FROM waits_by_class WHERE class='closer-worker-evidence'").get();
+    db.close();
     if (previousWait) {
-      assert.equal(result.evidenceWait.startedAt, previousWait.startedAt);
-      assert.equal(result.evidenceWait.exhausted, true);
+      assert.equal(wait.started, previousWait.started);
     }
-    previousWait = result.evidenceWait;
-    assert.deepEqual(readAmaCloserLease(rootDir, identity), predecessor);
+    assert.equal(wait.paged, tick === 2 ? 1 : 0);
+    tick++;
+    previousWait = wait;
+    const retained = readAmaCloserLease(rootDir, identity);
+    for (const key of ['lrqId', 'workerId', 'headSha', 'dispatchedAt', 'acquiredAt']) {
+      assert.equal(retained[key], predecessor[key]);
+    }
   }
   assert.equal(pages.length, 1);
 });

@@ -550,10 +550,10 @@ for (const evidenceReason of ['missing-build-completion-producer-evidence', 'led
         readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'synthetic-unreadable' }),
         readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: evidenceReason }),
       });
-      assert.equal(result.reason, 'hammer-closer-in-flight', JSON.stringify(result));
-      assert.equal(result.launchRequestId, LRQ_FIRST);
-      assert.equal(result.recoveryWait, true, 'independent unreadable launch ownership still holds this PR');
-      assert.ok(result.evidenceWait, 'launch outage retains a bounded wait rather than silently holding forever');
+      assert.equal(result.reason, evidenceReason === 'missing-build-completion-producer-evidence'
+        ? 'existing-dispatch-succeeded' : 'ownership-unreadable', JSON.stringify(result));
+      if (evidenceReason === 'missing-build-completion-producer-evidence') assert.equal(result.launchRequestId, LRQ_FIRST);
+      else assert.equal(result.recoveryWait, true, 'independent unreadable launch ownership still holds this PR');
       assert.equal(deps.launches.length, 0, 'unknown evidence cannot authorize a second hammer');
       const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
       assert.equal(ledger.attemptCount, 1);

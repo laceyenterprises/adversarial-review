@@ -17,6 +17,26 @@ import {
   updateAmaCloserLease,
 } from '../src/ama/closer-lease.mjs';
 
+test('CLOSERCUSTODYLRQ-01: durable launch identity and original dispatch time survive repeated promotion and terminalization', t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-receipt-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const owner = { repo: 'fixture/project', prNumber: 17, headSha: 'a'.repeat(40) };
+  const dispatchedAt = '2026-10-01T12:00:00Z';
+  acquireAmaCloserLease({ rootDir, ...owner, now: dispatchedAt });
+  for (const now of [dispatchedAt, '2026-10-01T12:01:00Z']) {
+    updateAmaCloserLease({ rootDir, ...owner, status: 'dispatched',
+      lrqId: 'synthetic-receipt', workerId: 'hammer-ama-pr-17',
+      dispatchedAt: now, now });
+  }
+  updateAmaCloserLease({ rootDir, ...owner, status: 'terminal',
+    terminalOutcome: 'failed-without-merge', now: '2026-10-01T13:00:00Z' });
+  const recovered = JSON.parse(readFileSync(amaCloserLeaseFilePath(rootDir, owner), 'utf8'));
+  assert.equal(recovered.lrqId, 'synthetic-receipt');
+  assert.equal(recovered.workerId, 'hammer-ama-pr-17');
+  assert.equal(recovered.dispatchedAt, dispatchedAt);
+  assert.equal(recovered.headSha, owner.headSha);
+});
+
 function freshRoot() {
   return mkdtempSync(join(tmpdir(), 'ama-lease-'));
 }

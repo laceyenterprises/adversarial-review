@@ -686,6 +686,8 @@ export function acquireAmaCloserLease({
  * @param {string} args.headSha
  * @param {string} args.status
  * @param {string=} args.lrqId
+ * @param {string=} args.workerId Dispatch slot identity, retained through terminalization.
+ * @param {string=} args.dispatchedAt Original dispatch timestamp.
  * @param {string=} args.terminalOutcome
  * @param {string=} args.now
  * @param {object=} args.expectedLease Complete observed lease snapshot; object key order is ignored.
@@ -698,6 +700,8 @@ export function updateAmaCloserLease({
   headSha,
   status,
   lrqId,
+  workerId,
+  dispatchedAt,
   terminalOutcome,
   now,
   expectedLease,
@@ -774,7 +778,14 @@ export function updateAmaCloserLease({
     ...existing,
     status,
     updatedAt,
-    ...(status === DISPATCHED ? { lrqId: String(lrqId) } : {}),
+    ...(status === DISPATCHED ? {
+      lrqId: String(lrqId),
+      ...(workerId ? { workerId: String(workerId) } : {}),
+      ...((dispatchedAt || existing.dispatchedAt) ? {
+        dispatchedAt: existing.lrqId === String(lrqId)
+          ? existing.dispatchedAt || dispatchedAt : dispatchedAt || updatedAt,
+      } : {}),
+    } : {}),
     ...(status === TERMINAL ? { terminalOutcome: String(terminalOutcome) } : {}),
   };
   writeFileAtomic(leasePath, `${JSON.stringify(next, null, 2)}\n`, {

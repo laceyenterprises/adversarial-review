@@ -41,7 +41,14 @@ scaling or adding retry overhead. Dispatch-record expiry retains its existing
 retry and token-poll window. Nominal
 pending fallback and dispatched/unknown reclaim ages use the shared load-aware
 helper. Confirmed live launches still retain ownership at any age; no store
-fields or lifecycle states change. A dispatched lease carries `lrqId`. Rekeys retain
+fields or lifecycle states change. A dispatched lease carries `lrqId`.
+CLOSERCUSTODYLRQ-01 also records `workerId` and `dispatchedAt` when the
+dispatcher returns a receipt; `headSha` already binds the lease to its head.
+Repeated promotion of the same launch retains its dispatch time, and
+terminalization/rekeying retain all receipt fields. Older leases may omit the
+new optional fields. Worktree custody uses a matching durable dispatch receipt
+or lease before worker observations, including after watcher restart.
+Rekeys retain
 `rekeyedFromHeadSha` and `supersededHeads` so the current lease can identify
 the original dispatch record after the PR head changes.
 

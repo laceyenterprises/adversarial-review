@@ -1,5 +1,15 @@
 # Adversarial Review State Machine Notes
 
+CLOSERCUSTODYLRQ-01 preserves the closer lifecycle graph and merge gates.
+Dispatch receipts and leases durably bind launch, worker slot, head and time.
+Before replacement intent publication, worktree custody probes the recorded
+launch with its retry chain. Terminal evidence releases custody subject to
+sanctioned non-force host teardown and existing retry budgets; live/parked
+launches retain it, and unavailable evidence retains the receipt and bounded
+wait/page. Legacy leases keep the public slot inventory fallback. Activate by
+watcher restart after deployment and observe natural terminal release and the
+next dispatch with a launch-bearing log receipt; no live repair is authorized.
+
 SIZEOWNER-02: terminal `reviewer-prompt-too-large` and
 `reviewer-chunk-budget-exceeded` still settle to `failed`, never `pending`.
 The size-failure writer now fences the dispatched head and session. Settlement

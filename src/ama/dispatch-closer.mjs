@@ -24,7 +24,7 @@ import { hammerDispatchMismatch, closureDecisionMatches, hasHammerDispatchIntent
 import { createHistoryReader } from './history-reader.mjs';
 import { exactHammerValidation, fetchHammerHeadRange } from './hammer-head-validation.mjs';
 import { OPERATOR_LABEL_GATES, operatorGatedRemediationInstructions, resolveOperatorLabelGateFailuresWithRetry, holdForOperatorLabels, sweepOperatorLabelHolds } from './operator-label-gates.mjs';
-import { AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES, isTerminalLaunchRequestStatus, withLiveLaunchRetry, launchRequestParked, launchRequestMeaning, launchRequestOwned } from './launch-request-status.mjs';
+import { AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES, isTerminalLaunchRequestStatus, withLiveLaunchRetry, launchRequestParked, launchRequestMeaning, launchRequestOwned, launchRequestInFlight } from './launch-request-status.mjs';
 import { probeOrphanOwnership, ownerlessBoundMs } from './orphan-watchdog.mjs';
 import { isOperatorHeld } from '../operator-hold-labels.mjs';
 import { observeCloserBacklog } from './closure-lag.mjs';
@@ -2937,20 +2937,18 @@ function auditHolderDecision({ hqRoot, logger, record }) {
   }
 }
 
-// Whether the self-owned hammer closer for this PR is a GENUINELY live in-flight
-// run — an active ledger status backed by a still-alive OS process — versus a
-// terminal / phantom-active (active status, dead pid) / lookup-unresolvable run
-// that is safe to reclaim. This is the guard that stops the reclaim from
-// SIGKILLing a healthy closer mid-planning (the `worker_killed ~36s into
-// planning` churn: each poll re-provisions and kills the live closer, so a PR
-// burns 2-3 runs before one survives a whole poll interval). Deliberately
-// conservative: confirmed active status plus a live PID is live. Unavailable
-// identity remains an explicit hold; it never authorizes reclaim.
+// Resolve the self-owned closer's launch before consulting legacy worker
+// projections. Live launches and retries retain custody regardless of PID
+// observations. Unavailable identity remains a hold; terminal evidence permits
+// a host teardown request whose process/slot safety checks still apply.
 async function resolveSelfOwnedHammerCloserRunLiveness({
   prNumber,
   hqRoot,
+  launchRequestId: recordedLaunchRequestId = null,
   workerId: workerIdOverride = null,
   env = process.env,
+  readLaunchRequestStatusImpl = readLaunchRequestStatusFromLedgerAsync,
+  launchReadOptions = {},
   readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedgerAsync,
   readWorkerDispatchFilesImpl = readWorkerDispatchFiles,
   readWorkerObservationImpl = readWorkerObservation,
@@ -2961,6 +2959,28 @@ async function resolveSelfOwnedHammerCloserRunLiveness({
     : hammerCloserWorkerId(prNumber);
   const root = String(hqRoot || '').trim();
   if (!workerId || !root) return { live: false, reason: 'invalid-worker-id-or-root' };
+  if (recordedLaunchRequestId && recordedLaunchRequestId !== 'unknown') {
+    // Our durable receipt survives missing worker registration and stale slot
+    // projections. Never downgrade an unreadable launch to worker/PID evidence.
+    const launchRequestId = recordedLaunchRequestId;
+    const rawProbe = await Promise.resolve().then(() => readLaunchRequestStatusImpl({
+      ...launchReadOptions, launchRequestId, env, hqRoot: root, includeRetryChain: true,
+    })).catch(() => ({ ok: false }));
+    // Custody accepts the legacy cancellation spelling without widening the
+    // separate per-PR retry-admission vocabulary. Keep explicit wire booleans.
+    const canonicalRow = row => typeof row?.status === 'string'
+      && row.status.trim().toLowerCase() === 'cancelled' ? { ...row, status: 'canceled' } : row;
+    // Re-evaluate retry selection after canonicalizing every row.
+    const probe = { ...rawProbe, row: canonicalRow(rawProbe?.row), liveRetryLaunchRequestId: null,
+      ...(Array.isArray(rawProbe?.retryChain) ? { retryChain: rawProbe.retryChain.map(canonicalRow) } : {}) };
+    const inFlight = launchRequestInFlight(probe);
+    const workerStatus = probe?.ok ? withLiveLaunchRetry(probe).row?.status : null;
+    const live = launchRequestParked(probe) || inFlight === true;
+    return { live: live ? true : inFlight === false ? false : null,
+      unknown: !live && inFlight === null, launchRequestId, workerStatus,
+      reason: live ? 'recorded-launch-live' : inFlight === false
+        ? 'recorded-launch-terminal' : 'recorded-launch-unavailable' };
+  }
   let files;
   try { files = await readWorkerDispatchFilesImpl(workerId, {env, hqRoot: root}); }
   catch { files = null; }
@@ -3044,6 +3064,9 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
   prNumber,
   headSha,
   noLaunchRecord = null,
+  launchRequestId = null,
+  readLaunchRequestStatusImpl = readLaunchRequestStatusFromLedgerAsync,
+  launchReadOptions = {},
   recordOrphanRefusalImpl = () => {},
   workerClass,
   workerId: workerIdOverride = null,
@@ -3098,6 +3121,9 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
     prNumber,
     hqRoot: root,
     workerId,
+    launchRequestId,
+    readLaunchRequestStatusImpl,
+    launchReadOptions,
     env,
     readLatestWorkerRunStatusImpl,
     readWorkerDispatchFilesImpl,
@@ -3132,7 +3158,10 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
 
   // Orphan absence permits a request, never a force-kill. The host retains its
   // owner/process/git proofs and may refuse teardown.
-  const args = ['worker', 'tear-down', workerId, ...(orphan ? [] : ['--force']), '--root', root];
+  // Launch terminality releases AMA custody, but cannot authorize killing a
+  // process still using a reused slot. Let sanctioned host teardown prove that.
+  const force = !orphan && liveness.reason !== 'recorded-launch-terminal';
+  const args = ['worker', 'tear-down', workerId, ...(force ? ['--force'] : []), '--root', root];
   const maxAttempts = orphan ? 1 : 3;
   const retryBackoffMs = [250, 1000];
   let lastErr = null;
@@ -3176,7 +3205,7 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
       workerId,
       worktreePath,
       action: 'hq-worker-tear-down',
-      force: true,
+      force,
       status: 'failed',
       error,
       transient: isTransientHqDispatchError(lastErr),
@@ -3192,9 +3221,14 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
     workerId,
     worktreePath,
     action: 'hq-worker-tear-down',
-    force: !orphan,
+    force,
     status: 'reclaimed',
     worktreeAgeMs,
+    ...(liveness.reason === 'recorded-launch-terminal' ? {
+      launchRequestId: liveness.launchRequestId,
+      terminalStatus: liveness.workerStatus,
+      reason: liveness.reason,
+    } : {}),
   });
   return { attempted: true, ok: true, workerId, worktreePath, worktreeAgeMs,
     ...(orphan ? { orphan: true } : {}) };
@@ -7242,6 +7276,12 @@ async function maybeDispatchAmaCloserAttempt({
       return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'lane-transfer-required' });
     }
   }
+  // Capture predecessor ownership before terminal-lease reclamation and before
+  // publishing a replacement intent can clear its launch receipt.
+  const predecessorLease = readAmaCloserLease(rootDir, leaseIdentity);
+  const custodyLaunchRequestId = (existingRecord?.workerId === workerId
+    ? existingRecord.launchRequestId : null)
+    || (predecessorLease?.workerId === workerId ? predecessorLease.lrqId : null);
   let leaseResult = acquireAmaCloserLease({
     rootDir,
     fromReviewHandoff: reviewHandoffFindings,
@@ -7334,13 +7374,16 @@ async function maybeDispatchAmaCloserAttempt({
   // Re-read under the PR lock before a new intent overwrites the settled proof.
   // A refusal leaves that proof available for the next ordinary admission.
   const noLaunchRecord = readAmaCloserDispatchRecord(rootDir, targetDispatchIdentity);
-  if (provenNoLaunchCloserRecord(noLaunchRecord, { repo, prNumber,
+  if (custodyLaunchRequestId || provenNoLaunchCloserRecord(noLaunchRecord, { repo, prNumber,
     headSha: targetRemediationSha, workerId })) {
     try {
       closerReclaim = await reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
         repo, prNumber, headSha: targetRemediationSha, noLaunchRecord,
         workerClass, workerId, hqPath, hqRoot, execFileImpl, logger, env,
         readWorkerDispatchFilesImpl, readWorkerObservationImpl, readLatestWorkerRunStatusImpl, processKillImpl,
+        launchRequestId: custodyLaunchRequestId, readLaunchRequestStatusImpl,
+        launchReadOptions: { rootDir, signal,
+          ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath },
         recordOrphanRefusalImpl: refusal => updateDispatchRecord(rootDir, targetDispatchIdentity,
           current => ({ ...current, preReceiptReconciliation: {
             ...current.preReceiptReconciliation, orphanReclaimRefusal: refusal,
@@ -7708,6 +7751,10 @@ async function maybeDispatchAmaCloserAttempt({
     readWorkerObservationImpl,
     readLatestWorkerRunStatusImpl,
     processKillImpl,
+    launchRequestId: custodyLaunchRequestId,
+    readLaunchRequestStatusImpl,
+    launchReadOptions: { rootDir, signal,
+      ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath },
   });
   if (closerReclaim?.live || closerReclaim?.unknown) {
     // Retain custody for a live closer or unavailable liveness evidence. Do NOT re-provision
@@ -7819,6 +7866,8 @@ async function maybeDispatchAmaCloserAttempt({
       updateAmaCloserLease({ rootDir, ...leaseIdentity,
         status: AMA_CLOSER_LEASE_STATUS.DISPATCHED,
         lrqId: parsed.launchRequestId || parsed.dispatchId || 'unknown',
+        workerId,
+        dispatchedAt: dispatchContext.dispatchedAt || new Date().toISOString(),
         now: dispatchContext.dispatchedAt });
       return null;
     } catch (err) {

@@ -7,6 +7,21 @@
 
 ## Terminal launch observations
 
+CLOSERCUSTODYLRQ-01: the receipt's `launchRequestId`, `workerId`, `headSha`
+and `dispatchedAt` bind worktree custody to the dispatched launch. Admission
+captures that identity before reclaiming a terminal lease and resolves it
+before publishing a replacement intent. A matching lease supplies the receipt
+if the dispatch projection is absent. An unavailable launch read preserves the
+receipt for the next tick and the existing bounded evidence wait/page.
+The public launch reader includes retry descendants: terminal evidence
+releases custody, live/parked descendants retain it, and unreadable retry
+evidence remains unknown. Successful host teardown still precedes replacement
+submission under existing retry and ceiling budgets. Recorded-launch teardown
+does not use `--force`, leaving process and reused-slot safety to the host.
+Legacy records without a launch ID retain the dispatch-files path and public
+workspace inventory fallback. Release logs include launch ID, terminal status
+and reason, without response bodies.
+
 Both preflight ledger reads and dispatch-status probes preserve wire terminality.
 A confirmed terminal payload without a status string records `state: launch-terminal`
 and `terminalLaunchStatus: succeeded` or `failed` from its success evidence.

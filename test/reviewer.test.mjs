@@ -1,3 +1,4 @@
+import { serviceFixtureExec, writeDummyCodexAuth } from './helpers/codex-service-fixture.mjs';
 import { serviceCodexConfigArgs } from '../src/codex-service-home.mjs';
 import './helpers/registry-session-fixture.mjs';
 import './helpers/dispatch-files-preload.mjs';
@@ -3245,11 +3246,17 @@ test('Claude review invocation passes prompt off argv in cli-direct shape', asyn
 
 test('Codex review invocation uses the reviewer snapshot cwd and passes prompt as argv', async () => {
   const calls = [];
+  const source = mkdtempSync(join(tmpdir(), 'review-invocation-'));
+  const authPath = writeDummyCodexAuth(join(source, 'auth.json'));
   const prompt = 'review this codex diff';
   const outputPath = '/tmp/codex-last-message.md';
 
   await spawnCodexReview({
     codexCli: '/fixture/codex',
+    execFileSyncImpl: (command, args, options) => {
+      if (args[0] !== 'login') throw new Error('catalog unavailable');
+      return serviceFixtureExec(command, args, options);
+    },
     outputPath,
     prompt,
     model: 'gpt-5.4',
@@ -3257,7 +3264,7 @@ test('Codex review invocation uses the reviewer snapshot cwd and passes prompt a
       { key: 'model_provider', value: 'openai' },
       { key: 'model_reasoning_effort', value: 'high' },
     ],
-    env: { HOME: '/tmp/home', PATH: process.env.PATH },
+    env: { HOME: '/tmp/home', CODEX_AUTH_PATH: authPath, PATH: process.env.PATH },
     cwd: '/tmp/reviewer-state/reviewer-snapshots/agent-os/head-sha',
     timeout: 12_345,
     maxBuffer: 999,
@@ -3271,6 +3278,8 @@ test('Codex review invocation uses the reviewer snapshot cwd and passes prompt a
   assert.match(calls[0].options.env.CODEX_HOME, /adversarial-codex-/);
   assert.equal(existsSync(calls[0].options.env.CODEX_HOME), false);
   delete calls[0].options.env.CODEX_HOME;
+  delete calls[0].options.env.CODEX_AUTH_PATH;
+  rmSync(source, { recursive: true, force: true });
   assert.deepEqual(calls, [
     {
       command: '/fixture/codex',

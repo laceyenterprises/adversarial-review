@@ -2,7 +2,8 @@ import { readHostIdentitySync, readHostObservationSync } from './dispatch-files-
 import { readWorkerObservationSync } from './dispatch-read-client.mjs';
 import { openReviewStateReadOnlyDb } from './pipeline-health-db.mjs';
 import { collectLaneLivenessEvidence } from './lane-liveness-evidence.mjs';
-import { summarizeFindingBacklog } from './findings-backlog.mjs';
+import { summarizeFindingBacklog, findingBacklogAlert } from './findings-backlog.mjs';
+import { findingBatchOptions } from './findings-batch.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { meteredExecFileSync } from './metered-gh.mjs';
@@ -405,6 +406,14 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
 // published reviews stop while open PRs wait; no collector finding may create
 // a second, differently-worded page for the same or an unrelated condition.
 const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
+  {
+    code: 'review:findings_backlog_overdue',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: 'ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS',
+    defaultThreshold: 48 * 3600000,
+    thresholdDescription: 'The oldest captured open non-blocking finding exceeds this age in milliseconds.',
+  },
   {
     code: 'review:review_state_ledger_unreadable',
     tier: 'ticket',
@@ -922,6 +931,10 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
   }
   const conflictingPrRepoConfig = resolveConflictingPrRepos(env, overrides);
   return {
+    findingsBacklogMaxAgeMs: parsePositiveInteger(
+      overrides.findingsBacklogMaxAgeMs ?? env.ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS,
+      findingBatchOptions({}).maxAgeMs
+    ),
     hostChecksEnabled: parseBoolean(
       overrides.hostChecksEnabled
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS,
@@ -4585,6 +4598,8 @@ function buildFinding({ code, tier, subject, message, evidence, recommendedActio
 function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
   const findings = [];
   const { config } = snapshot;
+  const backlogAlert = findingBacklogAlert(snapshot.nonBlockingBacklog, config.findingsBacklogMaxAgeMs);
+  if (backlogAlert) findings.push(buildFinding({ code: 'review:findings_backlog_overdue', ...backlogAlert, observedAt }));
 
   if (config?.reviewerPassConfigError) {
     findings.push(buildFinding({

@@ -1,3 +1,4 @@
+import { serviceFixtureExec, writeDummyCodexAuth } from './helpers/codex-service-fixture.mjs';
 import './helpers/dispatch-files-preload.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -24,7 +25,7 @@ import {
   readCommittedWorkerModelSeed,
   resolveNonBlockingCodexModel,
   spawnClaudeCodeRemediationWorker,
-  spawnCodexRemediationWorker,
+  spawnCodexRemediationWorker as spawnCodexRemediationWorkerActual,
   spawnGeminiRemediationWorker,
   waitForLocalRemediationExit,
 } from '../src/adapters/agent-runtime/local/remediation.mjs';
@@ -38,6 +39,7 @@ import {
 // Keep the auth path disposable and explicit so fake spawns never materialize
 // per-worker credentials in the operator home when TMPDIR is below /Users.
 function codexFixtureEnv(home) {
+  writeDummyCodexAuth(join(home, '.codex', 'auth.json'));
   const operatorHome = resolve(home).match(/^\/Users\/[^/]+/)?.[0] || home;
   return {
     HOME: operatorHome,
@@ -767,6 +769,54 @@ for (const [home, authDir, owner] of [
   });
 }
 
+test('codex remediation startup violations report the shared path the guard tested', () => {
+  // A corp worker stages per-worker auth; the guard still compares against the
+  // shared store, so the diagnostic must name it rather than the staging path.
+  let cleaned = 0;
+  assert.throws(() => prepareCodexRemediationStartupEnv({
+    workerClass: 'remediator-codex-corp',
+    sourceEnv: {
+      CODEX_AUTH_PATH: '/Users/operator/.codex/auth.json',
+      CODEX_HOME: '/Users/operator/elsewhere',
+      HOME: '/stage/remediation-x',
+    },
+    materializePerWorkerCodexAuthImpl: () => ({
+      authPath: '/stage/remediation-x/.codex/auth.json',
+      home: '/stage/remediation-x',
+      cleanup: () => { cleaned += 1; },
+    }),
+  }), (error) => {
+    // HOME is validated against the shared credential owner's home, never the
+    // freshly materialized staging home (LAC-2131 review finding).
+    assert.deepEqual(error.startupEvidence.policy_violations.map((item) => item.requested_value),
+      ['/Users/operator', '/Users/operator/.codex']);
+    return true;
+  });
+  assert.equal(cleaned, 1);
+});
+
+test('corporate codex remediation accepts the operator HOME while auth is staged elsewhere', () => {
+  // Corp staging lives outside the operator home; the inherited HOME, CODEX_HOME
+  // and CODEX_AUTH_PATH still describe the shared store and must pass the gate.
+  let cleaned = 0;
+  const { startupEvidence } = prepareCodexRemediationStartupEnv({
+    workerClass: 'remediator-codex-corp',
+    sourceEnv: {
+      CODEX_AUTH_PATH: '/Users/operator/.codex/auth.json',
+      CODEX_HOME: '/Users/operator/.codex',
+      HOME: '/Users/operator',
+    },
+    materializePerWorkerCodexAuthImpl: () => ({
+      authPath: '/stage/remediation-x/.codex/auth.json',
+      home: '/stage/remediation-x',
+      cleanup: () => { cleaned += 1; },
+    }),
+  });
+  assert.deepEqual(startupEvidence.policy_violations, []);
+  assert.equal(startupEvidence.resolvedStartup.resolvedAuthOwner, 'operator');
+  assert.equal(cleaned, 0);
+});
+
 test('local remediation cancel ignores process exit races after identity verification', async () => {
   for (const code of ['ESRCH', 'EPERM']) {
     const signals = [];
@@ -1034,3 +1084,7 @@ test('evaluateLocalAdmission short-circuits on the cheapest failing gate (budget
   assert.equal(decision.reason, 'budget_token_cap_exceeded');
   assert.equal(memoryProbed, false, 'must not sample memory once the budget gate has already refused');
 });
+
+function spawnCodexRemediationWorker(options) {
+  return spawnCodexRemediationWorkerActual({ execFileSyncImpl: serviceFixtureExec, ...options });
+}

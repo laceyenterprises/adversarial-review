@@ -1,3 +1,4 @@
+import { serviceFixtureExec } from './helpers/codex-service-fixture.mjs';
 import './helpers/registry-session-fixture.mjs';
 // REMFALLBACK-01 item 5 — replay of SEV3 agent-os#7327 through the real consume
 // and reconcile paths.
@@ -191,6 +192,7 @@ function refusingSpawn() {
 
 async function consumeAt(now, { resolveRemediationWorkerClassImpl, spawnImpl, quotaHoldRevalidator } = {}) {
   return consumeNextFollowUpJob({
+    execFileSyncImpl: serviceFixtureExec,
     guardStackedBaseImpl: async () => null,
     rootDir,
     spawnImpl,

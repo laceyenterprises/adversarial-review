@@ -1,5 +1,13 @@
 # Adversarial Review State Machine Notes
 
+LAC-2131 keeps the existing OAuth preflight failure and remediation lifecycle
+transitions. The new `liveness.state === "exited"` guard performs credential-only
+cleanup for a matching local service-home receipt; it cannot change job state,
+release a lease or authorize merge. Active/unknown/HQ workers and legacy receipts
+authorize no cleanup. Refreshed the follow-up-remediation source projection
+after reviewing that guard; the state graph and existing smoke commands are
+unchanged. See the [auth contract](RUNBOOK-reviewer-workspace.md).
+
 CLOSERCUSTODYLRQ-01 preserves the closer lifecycle graph and merge gates.
 Dispatch receipts and leases durably bind launch, worker slot, head and time.
 Before replacement intent publication, worktree custody probes the recorded

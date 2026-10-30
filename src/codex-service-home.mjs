@@ -63,7 +63,8 @@ export function prepareServiceCodexHome({ env, workspaceDir, model, effort = nul
           id_token: source.tokens.id_token,
           access_token: source.tokens.access_token,
           refresh_token: PER_WORKER_PLACEHOLDER_REFRESH_TOKEN,
-          account_id: source.tokens.account_id,
+          // Older/alternate stores keep the account id outside tokens.account_id.
+          account_id: source.tokens.account_id ?? source.account_id ?? source.tokens.chatgpt_account_id,
         },
         last_refresh: new Date().toISOString(),
       }), { mode: 0o600 });
@@ -141,7 +142,9 @@ export function prepareServiceCodexHome({ env, workspaceDir, model, effort = nul
 
 // A persisted worker may be reconciled by a new daemon. Require the original
 // service's ownership receipt; legacy jobs and another worker's home are no-ops.
-export function cleanupServiceCodexAuth({ codexHome, codexAuthOwnerId } = {}) {
+export function cleanupServiceCodexAuth(worker = {}) {
+  const codexHome = worker?.codexHome;
+  const codexAuthOwnerId = worker?.codexAuthOwnerId;
   if (!codexHome || !codexAuthOwnerId
     || !basename(codexHome).startsWith('adversarial-codex-')
     || resolve(dirname(codexHome)) !== resolve(tmpdir())) return false;

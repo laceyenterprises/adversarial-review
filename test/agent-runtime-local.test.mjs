@@ -769,6 +769,30 @@ for (const [home, authDir, owner] of [
   });
 }
 
+test('codex remediation startup violations report the shared path the guard tested', () => {
+  // A corp worker stages per-worker auth; the guard still compares against the
+  // shared store, so the diagnostic must name it rather than the staging path.
+  let cleaned = 0;
+  assert.throws(() => prepareCodexRemediationStartupEnv({
+    workerClass: 'remediator-codex-corp',
+    sourceEnv: {
+      CODEX_AUTH_PATH: '/Users/operator/.codex/auth.json',
+      CODEX_HOME: '/Users/operator/elsewhere',
+      HOME: '/stage/remediation-x',
+    },
+    materializePerWorkerCodexAuthImpl: () => ({
+      authPath: '/stage/remediation-x/.codex/auth.json',
+      home: '/stage/remediation-x',
+      cleanup: () => { cleaned += 1; },
+    }),
+  }), (error) => {
+    assert.deepEqual(error.startupEvidence.policy_violations.map((item) => item.requested_value),
+      ['/Users/operator/.codex']);
+    return true;
+  });
+  assert.equal(cleaned, 1);
+});
+
 test('local remediation cancel ignores process exit races after identity verification', async () => {
   for (const code of ['ESRCH', 'EPERM']) {
     const signals = [];

@@ -83,6 +83,26 @@ test('isolates config and CLI auth without changing source ownership or refresh 
   } finally { home.cleanup(); f.cleanup(); }
 });
 
+for (const [label, source] of [
+  ['root', { account_id: 'synthetic-account' }],
+  ['chatgpt', { tokens: { chatgpt_account_id: 'synthetic-account' } }],
+]) {
+  test(`snapshot keeps the account id from the ${label} location`, () => {
+    const f = fixture();
+    const { account_id: _omitted, ...tokens } = dummyCodexAuth.tokens;
+    writeFileSync(f.authPath, JSON.stringify({ ...dummyCodexAuth, ...source,
+      tokens: { ...tokens, ...source.tokens } }));
+    const home = prepare(f);
+    try {
+      assert.equal(JSON.parse(readFileSync(home.authPath, 'utf8')).tokens.account_id, 'synthetic-account');
+    } finally { home.cleanup(); f.cleanup(); }
+  });
+}
+
+test('cleanupServiceCodexAuth is a no-op for a missing worker', () => {
+  for (const worker of [null, undefined, {}]) assert.equal(cleanupServiceCodexAuth(worker), false);
+});
+
 for (const lookup of ['explicit', 'codex-home', 'default-home', 'legacy-oauth']) {
   test(`source lookup ${lookup} is resolved before home replacement`, () => {
     const f = fixture();

@@ -806,7 +806,7 @@ function prepareCodexRemediationStartupEnv({
     if (sourceEnv.CODEX_AUTH_PATH && resolve(sourceEnv.CODEX_AUTH_PATH) !== resolve(sharedAuthPath)) {
       policyViolations.push(buildCodexStartupPolicyViolation({
         reason: 'inherited CODEX_AUTH_PATH does not satisfy the requested local OAuth contract',
-        requestedValue: authPath,
+        requestedValue: sharedAuthPath,
         resolvedValue: sourceEnv.CODEX_AUTH_PATH,
       }));
     }
@@ -820,7 +820,7 @@ function prepareCodexRemediationStartupEnv({
     if (sourceEnv.CODEX_HOME && resolve(sourceEnv.CODEX_HOME) !== resolve(dirname(sharedAuthPath))) {
       policyViolations.push(buildCodexStartupPolicyViolation({
         reason: 'inherited CODEX_HOME does not satisfy the requested local OAuth contract',
-        requestedValue: codexHome,
+        requestedValue: dirname(sharedAuthPath),
         resolvedValue: sourceEnv.CODEX_HOME,
       }));
     }

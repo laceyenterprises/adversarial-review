@@ -8,6 +8,16 @@ authorize no cleanup. Refreshed the follow-up-remediation source projection
 after reviewing that guard; the state graph and existing smoke commands are
 unchanged. See the [auth contract](RUNBOOK-reviewer-workspace.md).
 
+REPORENAME-01 changes repository identity keys without changing review, closer,
+remediation or merge lifecycle states. Shared owner fences exclude migration;
+the exclusive migration saves a recovery marker, rekeys files and commits one
+audited transaction per database before publishing the current name. A pending
+marker or payload observation prevents another cycle until recovery completes.
+Current-name replay is a no-op; reused names with new IDs remain distinct.
+See [the identity contract](data-model/repository-identities.md) and
+[operator verification](review-pipeline-health.md#repository-renames-reporename-01).
+Existing smoke promises and exact-head merge authority remain unchanged.
+
 SIZEOWNER-02: terminal `reviewer-prompt-too-large` and
 `reviewer-chunk-budget-exceeded` still settle to `failed`, never `pending`.
 The size-failure writer now fences the dispatched head and session. Settlement

@@ -1,15 +1,15 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { followUpJobFilePrefix } from '../follow-up-job-names.mjs';
+import { followUpJobFileFilter } from '../follow-up-job-names.mjs';
 
 /** Read the two durable active-job buckets without coupling AMA to the daemon module. */
 export function findActiveRemediationJob(rootDir, { repo, prNumber }, { logger = console, now = new Date().toISOString() } = {}) {
-  const prefix = followUpJobFilePrefix(repo, prNumber).toLowerCase();
+  const matches = followUpJobFileFilter({ rootDir, repo, prNumber, caseInsensitiveRepo: true });
   for (const bucket of ['pending', 'in-progress']) {
     const dir = join(rootDir, 'data', 'follow-up-jobs', bucket);
     let names;
     try {
-      names = readdirSync(dir).filter((name) => name.endsWith('.json') && name.toLowerCase().startsWith(prefix));
+      names = readdirSync(dir).filter(matches);
     } catch (err) {
       if (err?.code === 'ENOENT') continue;
       throw err;

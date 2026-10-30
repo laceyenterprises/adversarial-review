@@ -4,7 +4,7 @@ import { MAX_BRANCH_RESOLUTION_ATTEMPTS, resolveFollowUpBranch } from './follow-
 import { requiredFollowUpOperatorLabel, readFollowUpOperatorLabel, operatorLabelSatisfiesStop } from './follow-up-operator-label.mjs';
 import { captureFindingRemediationSafe } from './finding-remediation-capture.mjs';
 import { writeFollowUpJob, withFollowUpJobLock } from './follow-up-job-write.mjs';
-import { followUpJobFilePrefix, sanitizeRepo } from './follow-up-job-names.mjs';
+import { followUpJobFileFilter, sanitizeRepo } from './follow-up-job-names.mjs';
 import {
   existsSync,
   mkdirSync,
@@ -1040,12 +1040,11 @@ function findInProgressFollowUpJobByLaunchRequestId(rootDir, launchRequestId) {
 function listFollowUpJobsInDir(rootDir, key, { repo, prNumber, caseInsensitiveRepo = false } = {}) {
   const dir = getFollowUpJobDir(rootDir, key);
   if (!existsSync(dir)) return [];
-  const prefix = repo != null && prNumber != null ? followUpJobFilePrefix(repo, prNumber) : null;
+  const matches = followUpJobFileFilter({ rootDir, repo, prNumber, caseInsensitiveRepo });
 
   const jobs = [];
   for (const name of readdirSync(dir)
-    .filter((name) => name.endsWith('.json') && (prefix === null || (caseInsensitiveRepo
-      ? name.toLowerCase().startsWith(prefix.toLowerCase()) : name.startsWith(prefix))))
+    .filter(matches)
     .sort()) {
     const jobPath = join(dir, name);
     try {
@@ -1714,7 +1713,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
   if (!targetRepo || !Number.isFinite(targetPr)) {
     return { completedRoundsForPR: 0, consecutiveNonBlockingRounds: 0, latestMaxRounds: null, latestJobId: null };
   }
-  const prefix = followUpJobFilePrefix(targetRepo, targetPr);
+  const matches = followUpJobFileFilter({ rootDir, repo: targetRepo, prNumber: targetPr });
 
   let completedRoundsForPR = 0;
   const infrastructureRefunds = new Set();
@@ -1795,7 +1794,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
     let names;
     try {
       names = readdirSync(dir).filter((name) => name.endsWith('.json')
-        && name.startsWith(prefix));
+        && matches(name));
     } catch (err) {
       console.error(
         `[follow-up-jobs] Failed to list ${key} directory while summarizing ` +

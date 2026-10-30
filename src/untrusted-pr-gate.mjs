@@ -1,3 +1,4 @@
+import { repositoryObservationCache } from './repository-state-cache.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 // UNTRUSTEDPR-01 — the one intake predicate that keeps the review watcher, the
 // remediators and the hammer from ever acting on a PR from a fork or from an
@@ -37,7 +38,7 @@ export const TRUSTED_AUTHOR_ASSOCIATIONS = Object.freeze(['OWNER', 'MEMBER', 'CO
 const WRITE_PERMISSIONS = new Set(['admin', 'maintain', 'write']);
 const DEFAULT_PERMISSION_TTL_MS = 10 * 60 * 1000;
 // Process-wide: the watcher builds a fresh subject adapter per repo per poll.
-const sharedPermissionCache = new Map();
+const sharedPermissionCache = repositoryObservationCache(new Map());
 
 /**
  * Canonical lower-case login. GitHub renders one App account three ways:
@@ -197,7 +198,7 @@ export function createRepoPermissionResolver({
   };
 }
 
-const auditedSkips = new Set();
+const auditedSkips = repositoryObservationCache(new Set());
 
 /** One audit line per (subject, head, reason) per process. */
 export function auditUntrustedSkip({ repo, prNumber, headSha = null, actor = null, reason, surface }, { log = console } = {}) {

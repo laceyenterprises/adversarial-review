@@ -1,3 +1,4 @@
+import { withRepositoryStateCycle } from './repository-state-lock.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { ownReviewerSizeFailure } from './reviewer-size-owner.mjs';
 import { readHostObservationSync } from './dispatch-files-client.mjs';
@@ -552,7 +553,11 @@ function configuredHqOwner(pool) {
   }
 }
 
-async function spawnReviewer(args) {
+async function spawnReviewer(args = {}) {
+  return withRepositoryStateCycle(args.rootDir || ROOT, () => spawnReviewerWithinRepositoryCycle(args));
+}
+
+async function spawnReviewerWithinRepositoryCycle(args) {
   if (reviewerRefusesBuilder(args.builderTag, args.reviewerModel)) return spawnReviewerOnceWithAccount(args);
   if (normalizeReviewerModel(args.reviewerModel) !== 'gemini') return spawnReviewerOnce(args);
   const rootDir = args.rootDir || ROOT;

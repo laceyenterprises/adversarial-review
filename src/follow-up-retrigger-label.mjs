@@ -1,3 +1,4 @@
+import { repositoryObservationCache } from './repository-state-cache.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 // PR-side operator surface for the `retrigger-remediation` label.
@@ -615,7 +616,7 @@ const OUTCOME_COMMENT_MARKER_PREFIX = 'adversarial-review-retrigger-remediation-
 const OUTCOME_SWEEP_BUDGET_PER_TICK = 5;
 // Keep enumeration progress across ticks, including malformed and young files,
 // so the read budget cannot starve later records. Settled receipts are immutable.
-const outcomeScans = new Map();
+const outcomeScans = repositoryObservationCache(new Map());
 const OUTCOME_DONE_CACHE_LIMIT = 1024;
 
 function rememberDoneOutcome(scan, name) {

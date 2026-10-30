@@ -22,6 +22,10 @@ import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import { normalizeGithubMergeability, resolveMergeabilityWithSampling } from './github-mergeability.mjs';
 import { createGitHubPRSubjectAdapter, parseSubjectExternalId } from './adapters/subject/github-pr/index.mjs';
 import {
+  canonicalRepositoryName, observeRepositoryIdentity, observeRepositoryListing, recoverRepositoryObservations,
+} from './repository-identity.mjs';
+import { withRepositoryStateCycle } from './repository-state-lock.mjs';
+import {
   FAST_MERGE_CATEGORY_BY_LABEL,
   buildFastMergeAuditEntry,
   evaluateFastMergeDiffShape,
@@ -1093,6 +1097,7 @@ async function refreshOrgRepos(octokit) {
     per_page: 100,
   };
 
+  lastRepoRefresh = now;
   try {
     const all = [];
     if (typeof octokit.paginate?.iterator === 'function') {
@@ -1118,13 +1123,20 @@ async function refreshOrgRepos(octokit) {
     }
 
     const excluded = new Set(config.excludeRepos ?? []);
+    const watched = all.filter(r => !r.archived && !excluded.has(r.name) && !excluded.has(r.full_name || `${config.org}/${r.name}`))
+      .map(r => ({ ...r, full_name: r.full_name || `${config.org}/${r.name}` }));
+    observeRepositoryListing({ db, rootDir: ROOT, additionalStateDir: ADVERSARIAL_REVIEW_STATE_DIR, repositories: watched });
     const discoveredRepos = all
       .filter((r) => !r.archived && !excluded.has(r.name) && !excluded.has(`${config.org}/${r.name}`))
-      .map((r) => `${config.org}/${r.name}`);
-    activeRepos = [...new Set([...(config.repos || []), ...discoveredRepos])];
+      .map((r) => r.full_name || `${config.org}/${r.name}`);
+    activeRepos = [...new Set([...(config.repos || []).map(name => canonicalRepositoryName(db, name)), ...discoveredRepos])];
 
     console.log(`[watcher] Org repos refreshed — watching ${activeRepos.length} repos: ${activeRepos.join(', ')}`);
   } catch (err) {
+    if (['REPOSITORY_STATE_BUSY', 'REPOSITORY_IDENTITY_CONFLICT'].includes(err.code)) {
+      lastRepoRefresh = 0;
+      throw err;
+    }
     recordApiCall({
       category: 'other',
       repo: repoLabel,
@@ -1135,7 +1147,7 @@ async function refreshOrgRepos(octokit) {
   } finally {
     // Respect the refresh interval after failures too; retrying every poll tick
     // amplifies outages and rate limiting into a tight API loop.
-    lastRepoRefresh = now;
+    if (lastRepoRefresh !== 0) lastRepoRefresh = now;
   }
 }
 
@@ -1158,9 +1170,23 @@ async function refreshOrgRepos(octokit) {
  * operator sync or reviewer spawn.
  */
 let watcherLatencyMonitor;
+let repositoryGeneration = 0;
 async function pollOnce(octokit, options = {}) {
+  await refreshWatcherAuthenticationForTick({ log: console });
+  recoverRepositoryObservations({ db, rootDir: ROOT, additionalStateDir: ADVERSARIAL_REVIEW_STATE_DIR });
+  await withGitHubBudgetScope({}, () => refreshOrgRepos(octokit));
+  activeRepos = [...new Set(activeRepos.map(name => canonicalRepositoryName(db, name)))];
+  const generation = db.prepare('SELECT count(*) AS n FROM repository_rename_audit').get().n;
+  if (generation !== repositoryGeneration) {
+    // Candidates capture closures with repo-specific policy and adapter caches.
+    // Durable pending rows refill them under the new identity on this tick.
+    reviewerDispatchCandidates.splice(0);
+    reviewerRefillContexts.clear();
+    startupReviewerAdmissionPending = true;
+    repositoryGeneration = generation;
+  }
   watcherLatencyMonitor ??= createWatcherLatencyMonitor();
-  return withHoldRecordPoll(() => watcherLatencyMonitor.poll(() => withGitHubAdapterReadTick(() => withClosureEvaluationReadCache(() => withGitHubBudgetScope({}, () => pollOnceWithinBudget(octokit, options))))));
+  return withRepositoryStateCycle(ROOT, () => withHoldRecordPoll(() => watcherLatencyMonitor.poll(() => withGitHubAdapterReadTick(() => withClosureEvaluationReadCache(() => withGitHubBudgetScope({}, () => pollOnceWithinBudget(octokit, options)))))));
 }
 
 async function pollOnceWithinBudget(
@@ -1181,7 +1207,6 @@ async function pollOnceWithinBudget(
   resetRoleConfigCache();
   refreshReviewerRuntimeAdapter();
   assertReviewDbWritesRoundTrip(db);
-  await refreshWatcherAuthenticationForTick({ log: console });
   watcherHeartbeat?.markPollProgress?.();
   const wakePayloadForPoll = createWatcherWakePayloadAccessor({ initialPayload: wakePayload, consumeWakePayload });
   const healthTick = healthProbe?.beginTick?.();
@@ -1237,7 +1262,6 @@ async function pollOnceWithinBudget(
       log: console,
     });
     const operatorSurface = createWatcherOperatorSurface();
-    await refreshOrgRepos(octokit);
     watcherHeartbeat?.markPollProgress?.();
     let watcherDrain = readWatcherDrainState();
   // Build domain/repo policy contexts before discovery so startup can refill
@@ -1273,6 +1297,8 @@ async function pollOnceWithinBudget(
       octokit,
       repos: [repoPath],
       rootDir: ROOT,
+      observeRepository: repository => observeRepositoryIdentity({ db, rootDir: ROOT,
+        additionalStateDir: ADVERSARIAL_REVIEW_STATE_DIR, repository }),
       execFileImpl: execFileAsync,
       recordApiCall,
       // ARC-19: inject workspace preparation lazily from the composition root.
@@ -1429,6 +1455,7 @@ async function pollOnceWithinBudget(
       subjectRefs = await subjectAdapter.discoverSubjects();
       watcherHeartbeat?.markPollProgress?.();
     } catch (err) {
+      if (['REPOSITORY_STATE_BUSY', 'REPOSITORY_IDENTITY_CONFLICT'].includes(err.code)) throw err;
       console.error(`[watcher] Failed to fetch PRs for ${repoPath}:`, err.message);
       reconcileWatcherPriorityDiscoveryPending(priorityDiscoveryPending, { repoPath, discoveredPrNumbers: new Set() });
       continue;
@@ -1446,6 +1473,7 @@ async function pollOnceWithinBudget(
         const { prNumber } = parseSubjectExternalId(subject.ref.subjectExternalId);
         return { subjectRef, subject, prNumber };
       } catch (err) {
+        if (['REPOSITORY_STATE_BUSY', 'REPOSITORY_IDENTITY_CONFLICT'].includes(err.code)) throw err;
         console.error(`[watcher] Failed to fetch subject state for ${subjectRef.subjectExternalId}:`, err.message);
         return null;
       }

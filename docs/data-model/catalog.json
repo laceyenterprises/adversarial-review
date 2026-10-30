@@ -2,6 +2,23 @@
   "version": 1,
   "entries": [
     {
+      "id": "repository-identities",
+      "title": "Repository Identity and Rename Continuity",
+      "path": "docs/data-model/repository-identities.md",
+      "store": "data/reviews.db; data/repository-names.json; data/repository-renames/; service-owned repo state",
+      "schemaSurface": "src/repository-identity.mjs",
+      "relatedSchemaSurfaces": [
+        "src/repository-state-files.mjs",
+        "src/repository-state-lock.mjs",
+        "src/repository-names.mjs",
+        "src/watcher.mjs",
+        "src/ama/closer-lease.mjs",
+        "src/ama/merge-lease.mjs"
+      ],
+      "owner": "watcher discovery with reviewer, follow-up and AMA state owners",
+      "compatibility": "Stable GitHub numeric ID and node ID backfill from existing discovery; same-ID name changes use an audited immediate transaction per database and a fenced replay journal for files. Opaque owner IDs and signed evidence remain stable; reused names never inherit another repository identity. HQ authority continuity belongs to REPORENAME-02."
+    },
+    {
       "id": "review-size-actions",
       "title": "Terminal Review Size Actions",
       "path": "docs/data-model/review-size-actions.md",

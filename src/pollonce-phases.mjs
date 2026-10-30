@@ -1,3 +1,4 @@
+import { repositoryObservationCache } from './repository-state-cache.mjs';
 import { observeTtmReviewLane } from './ttm-owner.mjs';
 import { maybeRunDocsFastPath } from './docs-fast-path.mjs';
 import { applyReviewerArm, applyReviewerArmEffectiveRoute, reviewerArmExecution } from './osg-reviewer-arm.mjs';
@@ -613,7 +614,7 @@ function emitReviewCacheLatencyEvent(event, { reviewDb = db, logger = console } 
 const defaultAfhReviewerGroundingForTick = createAfhReviewerGroundingCache({
   emitCacheEvent: (event) => emitReviewCacheLatencyEvent(event),
 });
-const previousAfhGroundingByProbeKey = new Map();
+const previousAfhGroundingByProbeKey = repositoryObservationCache(new Map());
 const logReviewerQuotaBlock = createReviewerQuotaBlockLogger();
 
 // A terminal reviewer failure does NOT always land as review_status='failed'.

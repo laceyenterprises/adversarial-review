@@ -1,3 +1,5 @@
+import { withRepositoryStateCycle } from './repository-state-lock.mjs';
+import { canonicalRepositoryArguments } from './repository-names.mjs';
 import { ensureWorkerRegistryReady } from './adapters/agent-runtime/local/remediation.mjs';
 import { reviewerAttributionForModel, validateReviewerAttribution } from './reviewer-attribution.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
@@ -1803,7 +1805,7 @@ async function main() {
 
   let args;
   try {
-    args = JSON.parse(rawArgs);
+    args = canonicalRepositoryArguments(ROOT, JSON.parse(rawArgs));
   } catch {
     console.error('[reviewer] Invalid JSON args:', rawArgs);
     process.exit(1);
@@ -2532,7 +2534,7 @@ export {
 };
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  main().catch((err) => {
+  withRepositoryStateCycle(ROOT, main).catch((err) => {
     console.error('[reviewer] Unhandled error:', err);
     process.exit(1);
   });

@@ -1,3 +1,5 @@
+import { repositoryObservationCache } from '../repository-state-cache.mjs';
+import { withRepositoryStateCycle } from '../repository-state-lock.mjs';
 import { infrastructureOnlyFailures, recordedCiFailures } from '../ci-infrastructure.mjs';
 import { readWorkerDispatchFiles, readHostIdentitySync } from '../dispatch-files-client.mjs';
 import { readWorkerObservation } from '../dispatch-read-client.mjs';
@@ -588,7 +590,7 @@ async function probeAmaLivePrForMergeDispatch({
 // A fresh review series or consumed operator approval starts a new alert episode.
 // A daemon restart clears it, which at most re-pages once (not a storm) and
 // correctly re-surfaces a still-broken disk.
-const HAMMER_RETRY_CAP_ALERTED_SERIES = new Set();
+const HAMMER_RETRY_CAP_ALERTED_SERIES = repositoryObservationCache(new Set());
 
 export function _resetHammerRetryCapAlertDebounceForTests() {
   HAMMER_RETRY_CAP_ALERTED_SERIES.clear();
@@ -1252,7 +1254,7 @@ export function isStaleWorktreeRegistrationError(detail) {
 }
 
 const AMA_CLOSER_TEARDOWN_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000];
-const branchHolderRefusalCounts = new Map();
+const branchHolderRefusalCounts = repositoryObservationCache(new Map());
 const AMA_CLOSER_LEASELESS_LAUNCH_GRACE_MS = 30_000;
 
 function amaCloserPendingLeaseReclaimAgeMs(record = null) {
@@ -1755,13 +1757,7 @@ function readJsonFile(filePath) {
 // directory listing is shared with listActiveAmaCloserDispatches and re-read
 // only when the directory changed (listSettledJsonNames).
 function listAmaCloserDispatchRecordsForPr(rootDir, { repo, prNumber } = {}) {
-  const sentinel = 'H';
-  const sample = basename(amaCloserDispatchFilePath(rootDir, { repo, prNumber, headSha: sentinel }));
-  const prefix = sample.slice(0, sample.length - `${sentinel}.json`.length);
-  return listSettledJsonNames(amaCloserDispatchDir(rootDir))
-    .filter((name) => name.startsWith(prefix))
-    .map((name) => readJsonFile(join(amaCloserDispatchDir(rootDir), name)))
-    .filter((record) => record && Number(record.prNumber) === Number(prNumber) && record.repo === repo);
+  return readAmaCloserDispatchRecordsForPR(rootDir, { repo, prNumber });
 }
 
 // Epoch ms of the most recent moment this dispatch record was touched, or
@@ -4437,7 +4433,11 @@ async function acquireLaunchAdmission(rootDir) {
 // Delay predecessor deletion until admission finishes: a dispatcher retry can
 // acquire the live logical-job claim after our ledger snapshot. Its refusal
 // must still leave every predecessor helper and prompt intact.
-export async function maybeDispatchAmaCloser(args) {
+export async function maybeDispatchAmaCloser(args = {}) {
+  return withRepositoryStateCycle(args.dispatchContext?.rootDir || args.rootDir || SUBMODULE_ROOT, () => maybeDispatchAmaCloserWithinRepositoryCycle(args));
+}
+
+async function maybeDispatchAmaCloserWithinRepositoryCycle(args) {
   const pendingCleanup = new Map();
   const targetRepo = args.dispatchContext?.repo || args.prMetadata?.repo || args.repo;
   const targetPrNumber = args.dispatchContext?.prNumber ?? args.prMetadata?.prNumber ?? args.prNumber;

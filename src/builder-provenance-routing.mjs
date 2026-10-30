@@ -1,3 +1,4 @@
+import { repositoryObservationCache } from './repository-state-cache.mjs';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
@@ -40,7 +41,7 @@ export function resolveBuilderProvenanceRouting(subject, {
   return finishBuilderProvenanceRouting(subject, provenance, { repo, prNumber, rootDir });
 }
 
-const routingFindings = new Map();
+const routingFindings = repositoryObservationCache(new Map());
 function finishBuilderProvenanceRouting(subject, provenance, { repo, prNumber, rootDir }) {
   const result = reconcileBuilderClass(subject, provenance);
   const key = `${rootDir}:${repo}:${prNumber}:${subject.headSha}`;

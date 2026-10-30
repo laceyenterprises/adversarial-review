@@ -1,3 +1,4 @@
+import { repositoryObservationCache } from './repository-state-cache.mjs';
 import { operatorLabelInputs } from './ama/operator-label-inputs.mjs';
 import { holdForOperatorLabels } from './ama/operator-label-gates.mjs';
 import { reconcileHammerResumes, settleHammerResume } from './ama/hammer-resume.mjs';
@@ -180,7 +181,7 @@ const {
 } = amaDispatchCloser;
 
 const PROTECTIVE_DEPENDENT_LOOKUP_CACHE_MS = 60_000;
-const mergedProtectiveDependentsCache = new Map();
+const mergedProtectiveDependentsCache = repositoryObservationCache(new Map());
 
 function githubSearchPhrase(value) {
   const phrase = String(value || '').replace(/"/gu, ' ').replace(/\s+/gu, ' ').trim();

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { withRepositoryStateCycle } from '../src/repository-state-lock.mjs';
 // In-process tick loop for the follow-up remediation daemon.
 //
 // Why this exists (changed 2026-05-02): the previous design ran a
@@ -621,7 +622,11 @@ function resolveTelemetryListenerStartTimeoutMs(env = process.env) {
     : TELEMETRY_LISTENER_START_TIMEOUT_DEFAULT_MS;
 }
 
-async function runFollowUpDaemonIteration({
+async function runFollowUpDaemonIteration(args = {}) {
+  return withRepositoryStateCycle(ROOT, () => runFollowUpDaemonIterationWithinRepositoryCycle(args));
+}
+
+async function runFollowUpDaemonIterationWithinRepositoryCycle({
   env = process.env,
   refreshFollowUpGithubTokenImpl = refreshFollowUpGithubToken,
   refreshReviewerBrokerTokensImpl = refreshReviewerBrokerTokens,

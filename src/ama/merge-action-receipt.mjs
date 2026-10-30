@@ -1,3 +1,4 @@
+import { repositoryObservationCache } from '../repository-state-cache.mjs';
 import { readHostIdentitySync } from '../dispatch-files-client.mjs';
 /** Append-only OPSEV1-03 evidence. Receipt failure never changes merge authority. */
 import { createHash, randomUUID } from 'node:crypto';
@@ -85,7 +86,7 @@ export function writeMergeActionReceipt({ hqRoot, repo, prNumber, headSha, produ
   return target;
 }
 
-const publicationFailures = new Map();
+const publicationFailures = repositoryObservationCache(new Map());
 
 export function recordMergeActionBestEffort(args, logger = console) {
   try {

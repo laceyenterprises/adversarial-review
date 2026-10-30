@@ -1,3 +1,5 @@
+import { repositoryObservationCache } from './repository-state-cache.mjs';
+import { followUpJobFileFilter } from './follow-up-job-names.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // A completed comment-only remediation may hand a descendant head to AMA.
 // The job's reviewed head must still be the settled verdict head; an unrelated
@@ -165,7 +167,7 @@ export async function proveFinalRoundWorkerPush({
 // Directory metadata changes on the atomic rename used by job writes and moves.
 // Cache parsed, PR-scoped records until that changes so watcher ticks do not
 // repeatedly JSON-parse the (potentially large) completed job directory.
-const jobScanCache = new Map();
+const jobScanCache = repositoryObservationCache(new Map());
 const JOB_SCAN_CACHE_LIMIT = 128;
 
 // Also the PR-scoped job scan behind one-follow-up-per-review (follow-up-review-claim.mjs).
@@ -186,10 +188,10 @@ function scanCommentOnlyJobs(rootDir, status, repo, prNumber, log) {
   const key = `${dir}:${repo}:${Number(prNumber)}`;
   const cached = jobScanCache.get(key);
   if (cached?.stamp === stamp) return cached.jobs;
-  const prefix = `${String(repo || '').replace(/\//gu, '__').replace(/[^a-zA-Z0-9_.-]/gu, '-')}-pr-${Number(prNumber)}-`;
+  const matches = followUpJobFileFilter({ rootDir, repo, prNumber });
   let names;
   try {
-    names = readdirSync(dir).filter((name) => name.startsWith(prefix) && name.endsWith('.json'));
+    names = readdirSync(dir).filter(matches);
   } catch (err) {
     if (err?.code === 'ENOENT') return [];
     throw err;

@@ -1,3 +1,4 @@
+import { followUpJobFileFilter } from '../follow-up-job-names.mjs';
 import { isTransientGhError } from '../gh-cli.mjs';
 import { proveReviewedRebase } from './reviewed-rebase.mjs';
 import { opendir, readFile } from 'node:fs/promises';
@@ -80,10 +81,10 @@ export async function readCompletedRemediationRounds(rootDir, repo, prNumber) {
   const rounds = [];
   try {
     const dir = join(rootDir, 'data', 'follow-up-jobs', 'completed');
-    const prefix = `${String(repo).replace(/\//g, '__').replace(/[^a-zA-Z0-9_.-]/g, '-')}-pr-${prNumber}-`.toLowerCase();
+    const matches = followUpJobFileFilter({ rootDir, repo, prNumber, caseInsensitiveRepo: true });
     for await (const entry of await opendir(dir)) {
       const name = entry.name;
-      if (!name.endsWith('.json') || !name.toLowerCase().startsWith(prefix)) continue;
+      if (!matches(name)) continue;
       try {
         const job = JSON.parse(await readFile(join(dir, name), 'utf8'));
         if (String(job.repo).toLowerCase() !== String(repo).toLowerCase()

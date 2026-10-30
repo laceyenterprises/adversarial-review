@@ -1,4 +1,6 @@
 import { cleanupServiceCodexAuth } from './codex-service-home.mjs';
+
+import { withRepositoryStateCycle } from './repository-state-lock.mjs';
 import { codexToolHostLogEvidence, readDispatchCodexToolHostEvidence } from './codex-tool-host-failure.mjs';
 import { ensureWorkerRegistryReady } from './adapters/agent-runtime/local/remediation.mjs';
 import { prepareWorkerObservationSession } from './dispatch-read-client.mjs';
@@ -1422,7 +1424,11 @@ async function failFollowUpJobForHqCancel({
   };
 }
 
-async function reconcileFollowUpJob({
+async function reconcileFollowUpJob(args = {}) {
+  return withRepositoryStateCycle(args.rootDir || ROOT, () => reconcileFollowUpJobWithinRepositoryCycle(args));
+}
+
+async function reconcileFollowUpJobWithinRepositoryCycle({
   rootDir = ROOT,
   job,
   jobPath,
@@ -2908,7 +2914,11 @@ async function reconcileFollowUpJob({
   });
 }
 
-async function reconcileInProgressFollowUpJobs({
+async function reconcileInProgressFollowUpJobs(args = {}) {
+  return withRepositoryStateCycle(args.rootDir || ROOT, () => reconcileInProgressFollowUpJobsWithinRepositoryCycle(args));
+}
+
+async function reconcileInProgressFollowUpJobsWithinRepositoryCycle({
   rootDir = ROOT,
   now = () => new Date().toISOString(),
   isWorkerRunning = isWorkerProcessRunning,
@@ -3013,7 +3023,11 @@ async function reconcileInProgressFollowUpJobs({
   };
 }
 
-async function handleRemediationTelemetryEvent({
+async function handleRemediationTelemetryEvent(args = {}) {
+  return withRepositoryStateCycle(args.rootDir || ROOT, () => handleRemediationTelemetryEventWithinRepositoryCycle(args));
+}
+
+async function handleRemediationTelemetryEventWithinRepositoryCycle({
   rootDir = ROOT,
   topic,
   event,
@@ -3134,7 +3148,11 @@ async function connectFollowUpTelemetryListener({
   return listener;
 }
 
-async function consumeNextFollowUpJob({
+async function consumeNextFollowUpJob(args = {}) {
+  return withRepositoryStateCycle(args.rootDir || ROOT, () => consumeNextFollowUpJobWithinRepositoryCycle(args));
+}
+
+async function consumeNextFollowUpJobWithinRepositoryCycle({
   rootDir = ROOT,
   execFileImpl = execFileAsync,
   spawnImpl,
@@ -3934,7 +3952,11 @@ async function consumeNextFollowUpJob({
   }
 }
 
-async function consumeFollowUpJobsUntilCapacity({
+async function consumeFollowUpJobsUntilCapacity(args = {}) {
+  return withRepositoryStateCycle(args.rootDir || ROOT, () => consumeFollowUpJobsUntilCapacityWithinRepositoryCycle(args));
+}
+
+async function consumeFollowUpJobsUntilCapacityWithinRepositoryCycle({
   rootDir = ROOT,
   maxConcurrent = resolveRemediationMaxConcurrentJobs(),
   execFileImpl = execFileAsync,

@@ -478,7 +478,9 @@ REVIEWERFLOOR-01 applies the effective personal Anthropic reserve floor to
 reviewer selection, including native and pooled Claude routes. Fresh measured
 weekly capacity at or below `reserveFloors.anthropic-oauth.remainingPct`
 grounds the personal Claude reviewer for that attempt. Corporate Claude remains
-independent. The candidate order is corporate-first Codex account selection,
+independent with account routing enabled. AFH rollback skips Claude account
+proposals, so it conservatively applies the personal floor even when the spawn
+pool could offer corporate Claude. The candidate order is corporate-first Codex account selection,
 then enabled and available Gemini, with all existing builder-family refusals.
 Thus a `[codex]` PR uses Gemini; when no eligible alternative exists it retains
 the quota hold. Stale or unknown floor evidence does not ground Claude.
@@ -487,7 +489,13 @@ floor. Protected hammer, remediation, responder and merge roles retain their
 existing reserve policy. No state or claim transition changes.
 
 The existing fallback log and pass/run `afhReviewerFallback` metadata retain
-the floor reason, measured remaining percentage and configured threshold.
+the stable `personal-anthropic-reserve-floor` reason and separate measured
+remaining percentage and effective threshold. All personal pool accounts share
+the producer's single `anthropic-oauth` projection; there is no account-ID floor.
+The reviewer-specific weekly `<=` comparison ignores dispatch exemptions and
+short-window hold flags. Sustained floor holds currently have transition logs
+but no dedicated durable health alert; the review-pipeline health owner retains
+that follow-up. This adds no lifecycle transition or smoke command.
 After deployment, SRE should observe an organic review at or below the floor,
 confirm its selected family/account and the reserve reason, and verify that
 personal Claude selection returns when capacity rises above the floor.

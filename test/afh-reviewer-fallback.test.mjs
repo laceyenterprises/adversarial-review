@@ -83,7 +83,7 @@ test('REVIEWERFLOOR-01 above the floor keeps personal Claude; equality and below
     assert.equal(route.quotaBlocked, false);
     assert.match(route.afhReviewerFallback.reason, /personal-anthropic-reserve-floor/);
     assert.deepEqual(route.afhReviewerFallback.reserveFloor, {
-      reason: `personal-anthropic-reserve-floor:remaining=${remaining}<=floor=80`,
+      reason: 'personal-anthropic-reserve-floor',
       remainingPct: remaining, floorPct: 80, source: 'hq-fleet-quota-status',
     });
     const decision = afhReviewerFallbackDecision({ builderClass: 'gemini',
@@ -174,6 +174,26 @@ test('REVIEWERFLOOR-01 pooled personal Claude and AFH pins cannot bypass measure
     assert.equal(route.codexBrokerProvider, 'codex-corp');
     assert.match(route.afhReviewerFallback.reason, /personal-anthropic-reserve-floor/);
   }
+});
+
+test('REVIEWERFLOOR-01 rollback conservatively applies the floor even with a ready corporate pool', async () => {
+  const payload = reviewerFloorFixture();
+  const proposed = [];
+  const grounding = await readAfhReviewerGrounding({
+    env: { ADVERSARIAL_AFH_REVIEWER_FALLBACK: '0' },
+    includeFleetQuotaStatus: true,
+    execFileImpl: async () => ({ stdout: JSON.stringify(payload) }),
+    ensureWorkerRegistryReadyImpl: async () => {},
+    selectReviewerTokenAccountImpl: async ({ reviewerModel }) => {
+      proposed.push(reviewerModel);
+      return reviewerModel === 'claude'
+        ? { pooled: true, hold: false, provider: 'claude-code-corp', brokerProvider: 'claude-code-corp' } : null;
+    },
+  });
+  assert.deepEqual(proposed, ['codex'], 'rollback must not add a Claude pool read');
+  assert.equal(grounding.claudeAccountSelection, null);
+  assert.equal(floorRoute(grounding).reviewerModel, 'codex');
+  assert.equal(floorRoute(grounding, { builderClass: 'codex', mode: 'off' }).quotaBlocked, true);
 });
 
 test('REVIEWERFLOOR-01 floor reason reaches the review pass and runtime record context', async t => {

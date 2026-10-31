@@ -30,7 +30,9 @@ family-selection decision.
 Reviewer selection now reads the same fleet quota projection used by quota
 status: the personal Anthropic reserve threshold and measured weekly remaining
 capacity. At or below a positive configured floor, personal Claude is excluded
-for that attempt. An admitted corporate Claude account remains independent.
+for that attempt. An admitted corporate Claude account remains independent
+with account routing enabled. AFH rollback deliberately skips Claude proposals
+and conservatively treats Claude as personal, even with a corporate-bearing pool.
 Otherwise selection tries Codex through its existing corporate-first account
 policy, then enabled and available Gemini. Builder-family refusal still applies:
 a Codex-built PR uses Gemini, and holds if no eligible alternative is available.
@@ -49,6 +51,21 @@ and unknown evidence, corporate account independence, pooled personal selection,
 effective threshold changes, automatic recovery, family refusal and protected
 roles. Existing routing cases remain in the scoped suites. No CI job or gate
 was added.
+
+The personal reserve is shared across every `claude-code` pool account because
+the producer exposes only one `anthropic-oauth` projection. The reviewer-specific
+weekly comparison intentionally overrides dispatch reviewer exemptions; producer
+`active`/`paused` flags can instead reflect a shorter window. Public export
+fixtures test this distinction and local boundary mutations pin the weekly
+`<=` rule; they do not establish parity with a producer reviewer-scoped verdict,
+which is not currently exported. An account-specific projection and producer
+reviewer verdict remain producer-owner follow-ups.
+
+Floor hold reasons are stable while measured percentages remain structured
+metadata and diagnostic text. There is no dedicated sustained-floor-hold alert;
+the pipeline health owner should add durable deduplication and bounded
+escalation separately. Until then, inspect `reviewer-route DEFERRED` warnings
+and Gemini eligibility when Codex-family reviews stall.
 
 After deployment, SRE must capture an organic review while personal Claude is
 at or below the floor. Verify the selected family/account and the

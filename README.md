@@ -343,13 +343,32 @@ Anthropic reserve floor from `hq fleet quota status --json`. Fresh measured
 weekly capacity at or below that floor selects corporate-first Codex when
 the builder family permits it, then enabled and available Gemini. A `[codex]`
 PR therefore uses Gemini or holds for eligible capacity. Ready corporate Claude
-remains independent. Stale or unknown floor evidence adds no refusal, and
+remains independent when account routing is enabled. Under AFH rollback,
+selection deliberately skips Claude account proposals and conservatively treats
+Claude as personal for this floor, even if spawn could acquire a corporate
+pool account. Stale or unknown floor evidence adds no refusal, and
 protected operational roles retain their existing exemptions. Reviewer pins
 and the AFH hop rollback do not waive a measured floor. The watcher log and
 review pass/run `afhReviewerFallback` record the reason and percentages.
 After deployment SRE should observe an organic floor crossing and recovery;
 offline tests do not establish that live receipt. Lifecycle states, claim
 ownership and smoke commands remain unchanged.
+
+The producer exposes one `anthropic-oauth` reserve for all personal `claude-code`
+pool accounts; reviewer selection applies it to every such account. Independent
+personal-account reserves require a producer projection keyed by account ID.
+`remainingPct` is the effective threshold; `weeklyMeasurement.percentRemaining`
+is the measured capacity. The reviewer-only `<=` comparison deliberately ignores
+dispatch `protectedClasses` exemptions and short-window `active`/`paused` flags.
+The stable reason is `personal-anthropic-reserve-floor`; current percentages
+remain in structured `reserveFloor` metadata and diagnostic text.
+
+A floor hold with no eligible alternative currently emits a transition-only
+`reviewer-route DEFERRED` warning, with no dedicated sustained-hold alert.
+It can last until weekly capacity recovers or resets. SRE should inspect that
+reason and Gemini eligibility when Codex-family reviews stop progressing;
+do not waive builder-family refusals. A durable, deduplicated sustained-hold
+health signal remains follow-up work for the review-pipeline health owner.
 
 When Claude account selection reports a hold, AFH skips Claude as a fallback
 candidate, including when corporate account evidence is unknown or stale. Unknown

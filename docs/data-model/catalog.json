@@ -594,6 +594,7 @@
       "reviewerExecutionEffortSources": ["env", "registry", "committed-seed", "host-config", "transport-default", "model-display-name", "none"],
       "claudeReplySelectionFields": ["candidateCount", "selectedCandidate", "selectedType", "laterCandidates", "contractValid"],
       "reviewerReserveFloorFields": ["reason", "remainingPct", "floorPct", "source"],
+      "reviewerReserveFloorReason": "personal-anthropic-reserve-floor; historical percentage-bearing reasons remain readable",
       "reviewerSettlementFailureMessage": { "successfulPass": null, "unsuccessfulPassPriority": ["error", "stderr", "stderrTail"] },
       "compatibility": "REVIEWPROV-01: missing execution harness stamps unknown, never a model family. Antigravity suffix effort accepts only low, medium, high or xhigh; release qualifiers remain null. Existing fields, nullability and lifecycle are unchanged.",
       "owner": "reviewer spawn, settle, and token attribution"
@@ -1161,6 +1162,7 @@
       "path": "docs/data-model/reviewer-run-records.md",
       "store": "data/reviewer-runs/<sessionUuid>.json",
       "schemaSurface": "src/adapters/reviewer-runtime/run-state.mjs",
+      "reviewerReserveFloorReason": "personal-anthropic-reserve-floor; historical percentage-bearing reasons remain readable",
       "relatedSchemaSurfaces": [
         "src/afh-reviewer-fallback.mjs",
         "src/reviewer-reserve-floor.mjs",

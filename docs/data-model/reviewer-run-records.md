@@ -28,8 +28,10 @@ free-form `subjectContext`.
 [reviewer passes](reviewer-passes.md#launch-and-reattach-identity).
 REVIEWERFLOOR-01 adds optional `reserveFloor: { reason, remainingPct, floorPct,
 source }` to that object for a personal Anthropic reserve fallback. Its source
-is `hq-fleet-quota-status`; its reason also names the measured percentage and
-effective threshold. Historical records omit it.
+is `hq-fleet-quota-status`; its stable reason is
+`personal-anthropic-reserve-floor`, with measured capacity in `remainingPct`
+and the effective threshold in `floorPct`. Older reasons embedded those
+percentages; readers must accept both forms. Historical records omit it.
 
 ITP-11 adds `subjectContext.agyHolderLease` to leased Gemini reviews. It
 contains the canonical `identity: gemini-reviewer`, `tokenAccountId`, holder

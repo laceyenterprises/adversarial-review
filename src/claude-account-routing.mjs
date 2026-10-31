@@ -6,9 +6,10 @@ import { writeFileAtomic } from './atomic-write.mjs';
 import { resolveAdversarialReviewStateDir } from './reviewer-fence.mjs';
 import { normalizeReviewerModel } from './adapters/subject/github-pr/routing.mjs';
 import { personalClaudeReviewerFloor } from './reviewer-reserve-floor.mjs';
-// Account selection consumes the canonical fleet projection. Freshness and
-// reserve arithmetic stay in quota_reserve; reviewers additionally bind its
-// projected weekly capacity to the projected personal reserve threshold.
+// Account selection consumes the canonical fleet projection. quota_reserve owns
+// freshness, weekly-window selection and the effective reserve threshold.
+// Reviewer-only policy compares projected weekly capacity <= that threshold;
+// dispatch protectedClasses exemptions do not waive this additional check.
 import { harnessCapFromStatuses, quotaStatusesFromSnapshot, parseHqFleetQuotaSnapshot, reserveFloorWeeklyMeasurement, quotaAccountDiagnostics } from './fleet-quota-status.mjs';
 
 const LANES = Object.freeze({

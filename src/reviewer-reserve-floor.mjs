@@ -2,6 +2,11 @@ import { reserveFloorWeeklyMeasurement } from './fleet-quota-status.mjs';
 
 // Reviewer-only policy over the canonical fleet projection. Do not change the
 // reserve owner's protected-class exemptions for hammers/responders/builders.
+// The producer projects one personal anthropic-oauth reserve, shared by every
+// pooled claude-code account; it does not expose an account-id-specific floor.
+// remainingPct is the effective threshold, not measured remaining capacity.
+// This weekly <= policy deliberately does not consume the producer's short-
+// window active/paused flags or its dispatch protectedClasses exemptions.
 export function personalClaudeReviewerFloor(payload, { workerClass = 'claude-reviewer' } = {}) {
   if (workerClass !== 'claude-reviewer') return null;
   const floor = payload?.reserveFloors?.['anthropic-oauth'];
@@ -19,7 +24,7 @@ export function personalClaudeReviewerFloor(payload, { workerClass = 'claude-rev
     || !Number.isFinite(weekly.percentRemaining)
     || weekly.percentRemaining < 0 || weekly.percentRemaining > threshold) return null;
   return {
-    reason: `personal-anthropic-reserve-floor:remaining=${weekly.percentRemaining}<=floor=${threshold}`,
+    reason: 'personal-anthropic-reserve-floor',
     remainingPct: weekly.percentRemaining,
     floorPct: threshold,
     source: 'hq-fleet-quota-status',

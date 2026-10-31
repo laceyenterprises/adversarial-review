@@ -716,7 +716,8 @@ export function reviewerModelGrounding(grounding, reviewerModel) {
     : null;
   if (reserveFloor) {
     return { ...base, state: 'reserve-floor', grounded: true, known: true,
-      reserveFloor, source: reserveFloor.source };
+      reserveFloor, source: reserveFloor.source,
+      diagnostics: [`reserveFloor.remainingPct=${reserveFloor.remainingPct}`, `reserveFloor.floorPct=${reserveFloor.floorPct}`] };
   }
   if (model === 'gemini' && grounding?.geminiPoolAvailability) {
     const status = grounding.geminiPoolAvailability;
@@ -1043,6 +1044,8 @@ export function describeAfhReviewerFallback(decision) {
     `afh-reviewer-fallback ${decision.from} -> ${decision.to} ` +
     `(${decision.reason}; provider=${decision.primary?.provider || 'unknown'}; ` +
     `state=${decision.primary?.state || 'unknown'})` +
+    (decision.primary?.reserveFloor
+      ? ` reserveFloor remaining=${decision.primary.reserveFloor.remainingPct}<=floor=${decision.primary.reserveFloor.floorPct}` : '') +
     (skipped ? ` skipped=[${skipped}]` : '') +
     (decision.lastResort
       ? ' — LAST RESORT: same-model as builder, cross-model review diversity is lost for this attempt'

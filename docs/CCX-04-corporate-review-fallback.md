@@ -23,6 +23,12 @@ an account.
 
 The hammer follows the role-declared order. The loader accepts
 `[hammer-corp, hammer-claude]`; its default remains `[hammer-claude]`.
+HHRCLAUDECORP-01 also accepts the corporate Claude hammer
+`hammer-claude-corp` as a fallback entry (not as the primary
+`worker_class`), so a host can declare
+`[hammer-corp, hammer-claude, hammer-claude-corp]`. HHR gates it on the
+corporate Claude account (`anthropic` / `oauth-corp`), so personal Claude
+exhaustion does not ground it.
 CCX-05 owns changing the host value. If every declared candidate is capped,
 closure defers without launching a capped worker or spending a retry attempt.
 

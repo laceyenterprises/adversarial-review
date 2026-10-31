@@ -763,7 +763,20 @@ for manual merge, without ever loosening a safety gate:
   capped hammer instead of parking. The hammer re-validates the required
   gate at the post-remediation head and merges under its own lease.
   *Non-*remediable gates still fail closed (no blind merge-clicker):
-  `worker-identity-unresolved`, `verdict-not-eligible`, `lease-not-held`.
+  `verdict-not-eligible`, `lease-not-held`.
+- **Daemon accountability hand-off (FAILCLOSEDHAMMER-01).** When the
+  daemon fails closed on its own accountability gate
+  (`worker-identity-unresolved`, not a transient identity read) on a
+  clean, exact-head, green, MERGEABLE PR, the shared next action selects
+  the hammer (`daemon-failed-closed`). The hammer merges under its own
+  merge lease and terminal audit, never with `--admin`, and every other
+  predicate (exact head, required checks, findings, strict-mode
+  non-blocking rules) still applies. On any other head the identity
+  refusal stays a refusal; it never licenses CI, conflict or findings
+  repair. If the hammer refuses the hand-off (its own merge eligibility,
+  or a fresh decision handing the head back to the daemon), the PR gets
+  the terminal named reason `daemon-failed-closed-hammer-refused` and
+  one operator page per head instead of a daemon/hammer loop.
   Every hammer dispatch, this fallback included, is bounded by the per-PR
   hammer-retry-cap (per-head 2, lifetime 6) and fails loud with a GBI
   operator alert at the ceiling.
@@ -780,8 +793,8 @@ for manual merge, without ever loosening a safety gate:
   merge audit.
 
 Accountability is never absent from an autonomous merge: it comes from a
-resolved worker identity, a remediable-gate hammer under the cap, or an
-explicit operator approval at the exact head.
+resolved worker identity, a capped hammer under its own lease and terminal
+audit, or an explicit operator approval at the exact head.
 
 The older `merge-agent` worker class survives as the operator fallback
 lane: a fresh current-head `merge-agent-requested` label dispatches it

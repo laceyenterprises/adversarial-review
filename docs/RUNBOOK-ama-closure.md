@@ -2537,6 +2537,18 @@ takeover; rescue archives and decisions are recorded under `rescues/holder-adopt
 
 ### `worker-identity-unresolved` on daemon clean-merge
 
+FAILCLOSEDHAMMER-01 (SEV1): on a clean, exact-head, green, MERGEABLE PR this
+decline hands the close to the hammer (`action=hammer reason=daemon-failed-closed`),
+which merges under its own merge lease and terminal audit. No operator step is
+needed and the identity gate is not relaxed for the daemon. Expect the
+`ama.daemon_clean_fail_closed.hammer_fallback` event, then a hammer launch on
+the next closer pass. If the hammer refuses the hand-off, the PR carries
+`daemon-failed-closed-hammer-refused` as its named reason and pages once per
+head; the closure blocker names the hammer's reason. Clear that gate, or apply
+a head-scoped `operator-approved`/`merge-agent-requested` label. On a head that
+is not merge-ready (red or pending checks, conflict, findings, stale review) the
+decline remains a safety refusal and the guidance below applies.
+
 The daemon resolves attributable identity through an existing valid produced
 head attestation or the public SDK's default PR provenance selector (the single
 latest authorized, non-superseded `pr_opened` record). A head-independent retry

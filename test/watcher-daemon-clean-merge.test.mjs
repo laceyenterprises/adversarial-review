@@ -3517,8 +3517,9 @@ test('Deliverable 1 SAFETY: operator approval substitutes for identity ONLY — 
 // A REMEDIABLE gate (ci-not-green / pr-not-mergeable / stale-head) on an
 // attributed (identity-resolved) clean PR routes to the SAME capped
 // `maybeDispatchAmaCloser` hammer the not-taken path uses instead of parking.
-// NON-remediable gates (worker-identity-unresolved, verdict-not-eligible,
-// lease-not-held) STILL park.
+// NON-remediable gates (verdict-not-eligible, lease-not-held) STILL park.
+// FAILCLOSEDHAMMER-01: worker-identity-unresolved on a clean, green exact head
+// hands the close to the hammer; on any other head it remains a refusal.
 // ─────────────────────────────────────────────────────────────────────────────
 
 test('Deliverable 2: daemon fail-closed stale-head routes to the capped hammer (fresh head gets its own hammer)', async () => {
@@ -3812,11 +3813,11 @@ test('labels-only eligibility read failure holds without a manual-close page', a
   }
 });
 
-test('Deliverable 2: worker-identity-unresolved fail-closed is NOT hammer-remediable → parks (no merge-clicker for un-attributed PRs)', async () => {
+test('FAILCLOSEDHAMMER-01: worker-identity-unresolved fail-closed on a clean green exact head hands the close to the capped hammer', async () => {
   const rootDir = tempRoot();
   try {
     const logs = [];
-    let closerCalls = 0;
+    const decisions = [];
     const result = await maybeDispatchAmaClosureFor({
       ...baseArgs(rootDir),
       logger: { log: (m) => logs.push(String(m)), warn() {} },
@@ -3825,12 +3826,41 @@ test('Deliverable 2: worker-identity-unresolved fail-closed is NOT hammer-remedi
         reason: 'worker-identity-unresolved', reasons: ['missing-build-completion-signal'],
         merged: false, attempts: 0,
       }),
+      maybeDispatchAmaCloserImpl: async ({ sharedNextAction }) => {
+        decisions.push(sharedNextAction.decision);
+        return { dispatched: true };
+      },
+    });
+    // The hammer merges under its own lease and head attestation; it does not
+    // need the daemon's build identity. Every other merge predicate still holds.
+    assert.equal(decisions.length, 1, 'the identity refusal reaches exactly one capped hammer admission');
+    assert.deepEqual([decisions[0].action, decisions[0].actor, decisions[0].reason], ['hammer', 'hammer', 'daemon-failed-closed']);
+    assert.equal(result.dispatched, true);
+    const parsed = logs.map((l) => { try { return JSON.parse(l); } catch { return null; } });
+    assert.equal(parsed.find((d) => d?.event === 'ama.daemon_clean_fail_closed.hammer_fallback')?.hammerFallback, true);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('FAILCLOSEDHAMMER-01: worker-identity-unresolved with red CI stays a refusal (no repair around identity)', async () => {
+  const rootDir = tempRoot();
+  try {
+    let closerCalls = 0;
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+        reason: 'worker-identity-unresolved', reasons: ['missing-build-completion-signal'],
+        merged: false, attempts: 0,
+        liveGate: { candidateHead: 'head-live', prState: 'OPEN', mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN',
+          requiredChecks: [{ name: 'unit', status: 'COMPLETED', conclusion: 'FAILURE' }] },
+      }),
       maybeDispatchAmaCloserImpl: async () => { closerCalls += 1; return { dispatched: true }; },
     });
-    assert.equal(closerCalls, 0, 'un-attributed PRs never get a blind merge-clicker hammer');
+    assert.equal(closerCalls, 0, 'an un-attributed red head never gets a hammer through the identity hand-off');
     assert.equal(result.skipMergeAgent, true);
-    const parsed = logs.map((l) => { try { return JSON.parse(l); } catch { return null; } });
-    assert.equal(parsed.find((d) => d?.event === 'ama.daemon_clean_fail_closed.hammer_fallback'), undefined);
+    assert.equal(result.reason, `daemon-${DAEMON_MERGE_DISPOSITION.FAILED_CLOSED}`);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

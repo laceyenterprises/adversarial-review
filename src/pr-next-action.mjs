@@ -46,6 +46,9 @@ export const NEXT_ACTION_DEADLINE_MS = Object.freeze({
 });
 
 const AUTOMATION_ACTOR_KINDS = new Set(['automation', 'bot', 'app', 'watcher', 'hammer']);
+// Daemon fail-closed reasons that concern only the daemon's own merge
+// accountability. The hammer does not need it: it merges under its own lease.
+const HAMMER_CLOSABLE_DAEMON_FAILURES = new Set(['worker-identity-unresolved']);
 const SEMANTIC_PROOF_KINDS = new Set(['context-only-rebase']);
 
 const text = value => (typeof value === 'string' ? value.trim() : '');
@@ -378,8 +381,16 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
     'duplicate-family-unresolved', 'operator-approval-no-longer-current',
     'permanent-merge-rejection', 'unclassified-merge-failure',
   ].includes(reason) || PROTECTIVE_PREDECESSOR_HOLD_REASONS.has(reason));
-  const identityRefusal = execution?.reason === 'worker-identity-unresolved'
-    && !isTransientDaemonDecline(execution);
+  // FAILCLOSEDHAMMER-01 (SEV1): a daemon-only accountability failure on a
+  // clean, green, MERGEABLE exact head hands the close to the hammer, which
+  // merges under its own lease and head attestation. Anywhere else it remains a
+  // refusal: it never licenses CI, conflict or findings repair around identity.
+  const cleanExactHead = review.known && review.clean && sameHead(review.reviewedHead, head)
+    && !['invalid', 'unknown'].includes(review.attestation)
+    && checks.state === 'SUCCESS' && pr.mergeable === 'MERGEABLE' && pr.mergeState !== 'DIRTY';
+  const daemonFailure = Boolean(execution && HAMMER_CLOSABLE_DAEMON_FAILURES.has(execution.reason)
+    && !isTransientDaemonDecline(execution));
+  const identityRefusal = daemonFailure && !cleanExactHead;
   if ((refusal && refusal.deterministic === true) || safetyReason || identityRefusal) {
     return { row: 'R05-structural', action: 'hammer', actor: 'closure-recovery', reason: 'safety-refusal',
       deadlineKind: 'recovery', queue: 'reconcile', refs: [`refusal:${text(refusal?.reason) || safetyReason || execution?.reason || 'unnamed'}`] };
@@ -550,6 +561,13 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
   // R13: an unproven head gets an exact-head review. Context-only rebase proof
   // must be semantic; ancestry, inherited trailers or ticket ownership are not.
   if (!review.known) return refresh('reviews-unknown');
+  // Earlier rows retain ownership, holds, caps, safety refusals and CI repair.
+  // The daemon already refused this exact head, so neither daemon row below may
+  // select it again in this pass: that was the ownerless loop.
+  if (daemonFailure && cleanExactHead) {
+    return { row: 'R15-daemon-failed-closed', action: 'hammer', actor: 'hammer', reason: 'daemon-failed-closed',
+      deadlineKind: 'admission', queue: 'dispatch', refs: [`daemon:${execution.reason}`] };
+  }
   // Preserve the daemon's existing attributable, exact-head approval lane.
   // Earlier ownership, stops, caps, structural and CI rows still take priority;
   // the executor revalidates the live approval under the same actor policy.

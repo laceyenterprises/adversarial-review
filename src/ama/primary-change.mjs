@@ -2,7 +2,7 @@ import { followUpJobFileFilter } from '../follow-up-job-names.mjs';
 import { findingLocations } from '../kernel/finding-lines.mjs';
 import { readCompletedRemediationRounds, exactHammerValidation } from './hammer-head-validation.mjs';
 import { createHash } from 'node:crypto';
-import { storedPrimaryChange, primaryChangeStoreOwned } from './primary-change-store.mjs';
+import { storedPrimaryChange, primaryChangeStoreOwned, verifiedReversalRecord } from './primary-change-store.mjs';
 import { createHistoryReader } from './history-reader.mjs';
 import { historyReadFailureReason } from './history-read-policy.mjs';
 import { fetchCiCost, checkCiCost } from './ci-cost.mjs';
@@ -453,6 +453,12 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
       return citations.some((cite) => {
         if (![review.node_id, review.html_url].filter(Boolean).includes(cite[1])) return false;
         citation = cite;
+        if (authorization.verifiedRegions && (!Array.isArray(authorization.verifiedRegions)
+          || !authorization.verifiedRegions.length || !authorization.originalAuthorization
+          || verifiedReversalIdentity(commit, cite[1])
+            !== verifiedReversalIdentity(authorization.originalAuthorization.commit, cite[1]))) {
+          return reject('verified-reversal-patch-differs');
+        }
         // Unqualified legacy citations retain their blocking-section meaning.
         const kind = cite[3] || 'blocking';
         if (kind === 'non-blocking' ? strictNonBlockingRemediation !== true
@@ -465,26 +471,43 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
         }
         if (locations.some(location => location.ranges.some(({ start, end }) => !Number.isSafeInteger(start)
           || !Number.isSafeInteger(end) || start < 1 || end < start))) return reject('finding-lines-invalid');
-        const reviewed = rebased === true
+        const reviewed = authorization.verifiedRegions ? null : rebased === true
           ? projectRebasedRegion(parentFiles, reviewedFiles, path, region, cache)
           : projectRegion(reviewedFiles, path, region, cache);
-        if (rebased) {
+        if (rebased && !authorization.verifiedRegions) {
           if (reversalPatchIdentity(reviewedFiles, cache) !== reversalPatchIdentity(parentFiles, cache)) return reject('reviewed-parent-patch-differs');
         }
         // Direct ancestry already establishes shared base coordinates. Earlier
         // HAM repairs may change the segment; whole-segment equality cannot
         // attribute those changes to the author. Retain finding coverage and
         // the authorizing HAM patch's parent-state content proof below.
-        if (!locations.some(location => location.path === reviewed.filename
+        if (reviewed && !locations.some(location => location.path === reviewed.filename
           && location.ranges.some(cited => cited.start <= reviewed.start && cited.end >= reviewed.end))) {
           return reject('not-covered-by-cited-finding');
         }
         if (authorization.originalAuthorization) {
           // Evaluate the same unit against the immutable original HAM patch,
           // in the reviewed merge-base coordinates, with the ordinary guards.
-          const originalFiles = authorization.originalAuthorization.rebased
+          const originalFiles = authorization.verifiedRegions ? authorization.originalAuthorization.parentFiles
+            : authorization.originalAuthorization.rebased
             ? authorization.originalAuthorization.parentFiles : reviewedFiles;
-          const originalRegion = rebasedRegion(parentFiles, originalFiles, path, region, cache);
+          // An unchanged immutable parent/base keeps exact coordinates, even
+          // with duplicate segments elsewhere. Rewritten parents need the
+          // ordinary unique content mapping.
+          const original = authorization.originalAuthorization;
+          const sameParent = authorization.verifiedRegions && SHA.test(authorization.mergeBase || '')
+            && authorization.mergeBase === original.mergeBase
+            && commit.parents?.[0]?.sha === original.commit.parents?.[0]?.sha;
+          const originalRegion = sameParent ? region : rebasedRegion(parentFiles, originalFiles, path, region, cache);
+          if (authorization.verifiedRegions) {
+            if (!cache.has(authorization.verifiedRegions)) cache.set(authorization.verifiedRegions,
+              new Set(authorization.verifiedRegions.map(entry =>
+                JSON.stringify([entry.path, entry.start, entry.end, entry.restoringDeletion]))));
+            if (!cache.get(authorization.verifiedRegions).has(
+              JSON.stringify([path, originalRegion.start, originalRegion.end, restoringDeletion]))) {
+              return reject('region-not-previously-verified');
+            }
+          }
           if (!reversalAuthorized({ primaryFiles: originalFiles, reversalAuthorizations: [authorization.originalAuthorization] },
             path, originalRegion, new Map(), strictNonBlockingRemediation, restoringDeletion)) {
             return reject('original-authorization-does-not-cover-region');
@@ -812,6 +835,26 @@ function reversalCommitPatchIdentity(files) {
   }).sort((a, b) => a[0].localeCompare(b[0])));
 }
 
+function verifiedReversalIdentity(commit, reviewRef) {
+  return JSON.stringify([reviewRef, reversalTrailerIdentity(commit), reversalCommitPatchIdentity(commit.files)]);
+}
+
+function verifiedReversalRegions(primaryFiles, authorization) {
+  const regions = [];
+  const cache = new Map();
+  for (const [path, change] of preservationChanges(primaryFiles)) {
+    if (isTestPath(path) || change.opaque) continue;
+    for (const region of change.regions) for (const unit of regionUnits(region)) {
+      for (const restoringDeletion of [false, true]) {
+        if (reversalAuthorized({ reversalAuthorizations: [authorization] }, path, unit, cache, true, restoringDeletion)) {
+          regions.push({ path, ...unit, restoringDeletion });
+        }
+      }
+    }
+  }
+  return regions;
+}
+
 function boundedReversalText(text, limit = 1200) {
   return text.length > limit ? `${text.slice(0, limit - 3)}...` : text;
 }
@@ -987,7 +1030,7 @@ async function recordedReversalAuthorization(args) {
 }
 
 // get is an injected bounded JSON API reader. Compare caps are errors, not empty diffs.
-async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir, builderHead }) {
+async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir, builderHead, persistAuthorizations = false }) {
   // Reuse only within this evaluation. The in-lease evaluation must re-read live state.
   const responses = new Map();
   const read = (path) => {
@@ -1151,18 +1194,40 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
             ...(detail ? { detail } : {}) });
         };
         try {
-          const review = reviews.find((entry) => cite && [entry.node_id, entry.html_url].filter(Boolean).includes(cite[1]));
+          const commit = await readCommit(`repos/${repo}/commits/${candidate.sha}`);
+          const stored = persistAuthorizations
+            ? await verifiedReversalRecord({ rootDir, repo, prNumber }, verifiedReversalIdentity(commit, cite[1])) : null;
+          const review = stored?.authorization?.review
+            || reviews.find((entry) => cite && [entry.node_id, entry.html_url].filter(Boolean).includes(cite[1]));
           if (!review) { reject(reviews === reviewList ? 'review-not-on-this-pull-request' : 'review-list-unreadable'); continue; }
           if (review.commit_id !== trailers['reviewed-head']) { reject('reviewed-head-mismatch'); continue; }
           const pair = `${candidate.sha}:${review.node_id || review.html_url}`;
           if (authorizedPairs.has(pair)) continue;
           authorizedPairs.add(pair);
-          const commit = await readCommit(`repos/${repo}/commits/${candidate.sha}`);
           const recommitted = isRecommittedHammer(commit);
           if (commit.sha !== candidate.sha || commit.commit?.message !== candidate.commit.message
             || (!hamCommitIdentityMatches(commit) && !recommitted)
             || commit.parents?.length !== 1 || !SHA.test(commit.parents[0].sha)) { reject('commit-provenance'); continue; }
           const parentSha = commit.parents[0].sha;
+          if (stored?.regions?.length) {
+            const original = stored.authorization;
+            if (verifiedReversalIdentity(original.commit, cite[1]) !== verifiedReversalIdentity(commit, cite[1])) {
+              reject('verified-reversal-patch-differs'); continue;
+            }
+            const ancestry = await metadata(`repos/${repo}/compare/${primaryHead}...${parentSha}`);
+            const parent = await read(`repos/${repo}/compare/${mergeBase}...${parentSha}`);
+            if (!['ahead', 'identical'].includes(ancestry.status)
+              || parent.merge_base_commit?.sha !== mergeBase) { reject('review-outside-closure'); continue; }
+            if (!commit.author?.login) {
+              if (!await attestedReversal(commit, repo, read, prNumber)) { reject('commit-provenance'); continue; }
+              commit.reversalAppAttested = true;
+            }
+            reversalAuthorizations.push({ commit, review, mergeBase, parentFiles: parent.files, reviewedFiles: original.reviewedFiles,
+              rebased: true, originalAuthorization: original, verifiedRegions: stored.regions,
+              completeFileLists: commit.filesComplete === true && parent.filesComplete === true
+                && original.completeFileLists === true });
+            continue;
+          }
           let rebased = false;
           let superseding;
           if (!await isCurrentAuthoritativeFamilyReview(review, reviews, parentSha,
@@ -1212,10 +1277,16 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
               reject('parent-is-not-reviewed-head-rebase'); continue;
             }
           }
-          reversalAuthorizations.push({ commit, review, reviewedFiles: reviewed.files, parentFiles: parent.files,
+          const authorization = { commit, review, mergeBase, reviewedFiles: reviewed.files, parentFiles: parent.files,
             completeFileLists: reviewed.filesComplete === true && parent.filesComplete === true && commit.filesComplete === true,
             ...(originalAuthorization ? { originalAuthorization } : {}),
-            ...(rebased ? { rebased: true } : {}) });
+            ...(rebased ? { rebased: true } : {}) };
+          reversalAuthorizations.push(authorization);
+          if (persistAuthorizations) {
+            const regions = verifiedReversalRegions(primary.files, authorization);
+            if (regions.length) await verifiedReversalRecord({ rootDir, repo, prNumber },
+              verifiedReversalIdentity(commit, cite[1]), { authorization, regions });
+          }
         } catch (error) {
           if (error?.primaryChangeReadFailed === true || error?.authOutage === true
             || error?.name === 'AbortError' || error?.code === 'ABORT_ERR' || isTransientGhError(error)) throw error;
@@ -1365,14 +1436,14 @@ export async function fetchPrimaryChange(args, {
       const comparison = await args.get.metadata(`repos/${args.repo}/compare/${pr.base.sha}...${args.headSha}`);
       if (!SHA.test(comparison.merge_base_commit?.sha || '')) throw new Error('missing merge base');
       // Reviews and dispatcher provenance can change without a head move.
-      // Include them so stored finding waivers cannot survive supersession.
+      // Include them so unverified finding waivers cannot survive supersession.
       const reviewsPath = `repos/${args.repo}/pulls/${args.prNumber}/reviews?per_page=100`;
       const reviews = await args.get(reviewsPath);
       const reviewKey = createHash('sha256').update(JSON.stringify(reviews)).digest('hex');
       const launchHead = readPrimaryChangeLaunchHead(primaryChangeRoot(args), args.repo, args.prNumber);
       history = await storedPrimaryChange({ ...args, rootDir: primaryChangeRoot(args),
         baseSha: pr.base.sha, mergeBase: comparison.merge_base_commit.sha, reviewKey, launchHead },
-      () => fetchPrimaryChangeHistory({ ...args, get: Object.assign(
+      () => fetchPrimaryChangeHistory({ ...args, rootDir: primaryChangeRoot(args), persistAuthorizations: true, get: Object.assign(
         path => path === `repos/${args.repo}/pulls/${args.prNumber}` ? Promise.resolve(pr) : path === reviewsPath ? Promise.resolve(reviews) : args.get(path),
         { metadata: args.get.metadata, commitVerification: args.get.commitVerification }) }));
     } catch (error) {

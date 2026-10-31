@@ -3976,7 +3976,22 @@ that restoration does not require deleting the retained author additions.
 Opaque files and rename checks remain
 fail-closed. Other merge safety checks remain unchanged.
 
-**Rebased reversals (REVERSALREBASE-01).** A rebase or conflict-owner rebase
+**Verified historical reversals (REVERSALPROOF-01).** The canonical collector
+records a reversal only after the shared region evaluator proves its cited
+finding, review authority, HAM provenance and parent-state patch. Durable
+`verified-*.json` observations in `data/primary-change-history/` survive the
+disposable cache sweep and later review/head/base changes. Reuse rechecks the
+live commit and maps its parent region to the recorded segment by unique patch
+content, then re-evaluates the original citation and current removal/restoration
+coverage. A context-only rebase or superseding review cannot erase verified
+historical authority. Changed/ambiguous content and never-verified citations
+still refuse; non-blocking citations still require effective strict policy.
+Current-head review, CI and other merge gates remain required. These observations
+are historical evidence: do not delete them as disposable cache entries.
+See the [record shape and retention contract](data-model/primary-change-history.md#durable-verified-reversal-observations-reversalproof-01).
+
+**Rebased reversals (REVERSALREBASE-01).** Without a durable verified observation,
+a rebase or conflict-owner rebase
 rewrites the HAM commit, so its parent no longer descends from the cited
 `Reviewed-Head` and the reviewed head keeps an older merge base. When the
 compare from the cited review head to the HAM parent is exactly `diverged`, the

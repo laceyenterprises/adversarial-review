@@ -17,7 +17,7 @@ const directory = rootDir => join(rootDir, 'data', 'primary-change-history');
 // LAC-2101: recompute historical snapshot refusals made before literal
 // secondary/brace finding paths could cover the original HAM reversal.
 // SAFETYSTOPOWNER-01: discard refusals based only on the first superseding snapshot.
-const identity = args => [args.repo, Number(args.prNumber), args.baseSha, args.headSha, args.mergeBase, args.reviewKey || null, args.launchHead || null, 'reversalprov-v5'];
+const identity = args => [args.repo, Number(args.prNumber), args.baseSha, args.headSha, args.mergeBase, args.reviewKey || null, args.launchHead || null, 'reversalproof-v6'];
 const pathFor = args => join(directory(args.rootDir), `${createHash('sha256').update(JSON.stringify(identity(args))).digest('hex')}.json`);
 
 // Atomic replacement inherits the writer's UID. Never let a worker replace
@@ -43,6 +43,36 @@ function assertStoreOwner(rootDir, path = null) {
 export function primaryChangeStoreOwned(rootDir) {
   try { assertStoreOwner(rootDir); return true; }
   catch { return false; } // No store reads or writes by this caller.
+}
+
+// REVERSALPROOF-01: these are verified observations, not head/review caches.
+// Keep them outside cache expiry, scoped to this repository, PR and patch.
+export async function verifiedReversalRecord(args, patchIdentity, record) {
+  assertStoreOwner(args.rootDir);
+  return withRepositoryStateCycle(args.rootDir, () => {
+    const canonical = canonicalRepositoryArguments(args.rootDir, args);
+    const key = [canonical.repo, Number(canonical.prNumber), patchIdentity, 'verified-reversal-v1'];
+    const digest = createHash('sha256').update(JSON.stringify(key)).digest('hex');
+    const path = join(directory(args.rootDir), `verified-${digest}.json`);
+    assertStoreOwner(args.rootDir, path);
+    if (record === undefined) {
+      try {
+        const stored = JSON.parse(readFileSync(path, 'utf8'));
+        if (!stored || typeof stored !== 'object') return null;
+        return JSON.stringify(stored.key) === JSON.stringify(key) ? stored.record : null;
+      } catch (error) {
+        if (error.code === 'ENOENT' || error instanceof SyntaxError) return null;
+        throw error;
+      }
+    }
+    mkdirSync(directory(args.rootDir), { recursive: true });
+    const temporary = `${path}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(temporary, JSON.stringify({ key, record }), { mode: 0o600, flag: 'wx' });
+      renameSync(temporary, path);
+    } finally { rmSync(temporary, { force: true }); }
+    return record;
+  });
 }
 
 export function primaryChangeReadStatus({ rootDir, repo, prNumber, headSha }) {
@@ -96,7 +126,7 @@ export function sweepPrimaryChangeStore(rootDir, { nowMs = Date.now() } = {}) {
     if (error.code === 'ENOENT') return [];
     throw error;
   }
-  const entries = names.flatMap(name => {
+  const entries = names.filter(name => !/^verified-[a-f0-9]{64}\.json$/.test(name)).flatMap(name => {
     const path = join(directory(rootDir), name);
     try { return [{ path, modified: statSync(path).mtimeMs }]; } catch (error) {
       if (error.code === 'ENOENT') return [];

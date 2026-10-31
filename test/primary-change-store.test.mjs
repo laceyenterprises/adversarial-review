@@ -5,7 +5,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { storedPrimaryChange, primaryChangeReadStatus, sweepPrimaryChangeStore } from '../src/ama/primary-change-store.mjs';
+import { storedPrimaryChange, primaryChangeReadStatus, sweepPrimaryChangeStore, verifiedReversalRecord } from '../src/ama/primary-change-store.mjs';
 
 function fixture(t) {
   const rootDir = mkdtempSync(join(tmpdir(), 'pccslow-'));
@@ -96,7 +96,7 @@ test('pre-deploy reversal refusals recompute once at an unchanged head and revie
   const args = { ...fixture(t), reviewKey: 'unchanged-reviews' };
   const dir = join(args.rootDir, 'data', 'primary-change-history');
   mkdirSync(dir, { recursive: true });
-  const key = [args.repo, args.prNumber, args.baseSha, args.headSha, args.mergeBase, args.reviewKey, null, 'reversalprov-v4'];
+  const key = [args.repo, args.prNumber, args.baseSha, args.headSha, args.mergeBase, args.reviewKey, null, 'reversalprov-v5'];
   const legacyPath = join(dir, `${createHash('sha256').update(JSON.stringify(key)).digest('hex')}.json`);
   writeFileSync(legacyPath, JSON.stringify({ key, history: { ...evidence(args),
     rejectedReversalAuthorizations: [{ reason: 'original-reversal-not-proven-before-supersession', detail: 'no candidate with the same commit message' }] } }));
@@ -106,9 +106,43 @@ test('pre-deploy reversal refusals recompute once at an unchanged head and revie
   assert.equal(calls, 1);
   assert.deepEqual(await storedPrimaryChange(args, () => assert.fail('must reuse refreshed history')), refreshed);
   const currentPath = join(dir, readdirSync(dir).find(name => join(dir, name) !== legacyPath));
-  assert.equal(JSON.parse(readFileSync(currentPath, 'utf8')).key.at(-1), 'reversalprov-v5');
+  assert.equal(JSON.parse(readFileSync(currentPath, 'utf8')).key.at(-1), 'reversalproof-v6');
   const catalog = JSON.parse(readFileSync(new URL('../docs/data-model/catalog.json', import.meta.url), 'utf8'));
-  assert.equal(catalog.entries.find(entry => entry.id === 'primary-change-history').identityVersion, 'reversalprov-v5');
+  assert.equal(catalog.entries.find(entry => entry.id === 'primary-change-history').identityVersion, 'reversalproof-v6');
+});
+
+test('REVERSALPROOF-01: verified observations survive cache expiry and remain PR/patch scoped', async t => {
+  const args = fixture(t);
+  const record = { authorization: { review: { node_id: 'PRR_synthetic' } }, regions: [{ path: 'src/example.mjs' }] };
+  await verifiedReversalRecord(args, 'synthetic-patch-identity', record);
+  const dir = join(args.rootDir, 'data', 'primary-change-history');
+  const path = join(dir, readdirSync(dir).find(name => name.startsWith('verified-')));
+  assert.equal(statSync(path).mode & 0o777, 0o600);
+  utimesSync(path, new Date(0), new Date(0));
+  assert.deepEqual(sweepPrimaryChangeStore(args.rootDir), []);
+  assert.deepEqual(await verifiedReversalRecord(args, 'synthetic-patch-identity'), record);
+  assert.equal(await verifiedReversalRecord({ ...args, prNumber: 2 }, 'synthetic-patch-identity'), null);
+  assert.equal(await verifiedReversalRecord({ ...args, repo: 'other/repo' }, 'synthetic-patch-identity'), null);
+  assert.equal(await verifiedReversalRecord(args, 'changed-patch-identity'), null);
+  writeFileSync(path, '{broken');
+  assert.equal(await verifiedReversalRecord(args, 'synthetic-patch-identity'), null);
+});
+
+test('verified reversal reads treat malformed and non-object JSON as missing evidence', async t => {
+  const args = fixture(t);
+  const patchIdentity = 'synthetic-patch-identity';
+  const record = { authorization: {}, regions: [] };
+  await verifiedReversalRecord(args, patchIdentity, record);
+  const dir = join(args.rootDir, 'data', 'primary-change-history');
+  const path = join(dir, readdirSync(dir).find(name => name.startsWith('verified-')));
+  for (const contents of ['', '{broken', 'null', 'true', 'false', '42', '"text"', '[]', '{}']) {
+    await t.test(JSON.stringify(contents), async () => {
+      writeFileSync(path, contents);
+      assert.equal(await verifiedReversalRecord(args, patchIdentity), null);
+    });
+  }
+  await verifiedReversalRecord(args, patchIdentity, record);
+  assert.deepEqual(await verifiedReversalRecord(args, patchIdentity), record);
 });
 
 test('timed out caller leaves a single read running, completion persists and next attempt reuses it', async t => {

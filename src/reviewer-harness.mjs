@@ -84,6 +84,7 @@ import {
   resolveAgyAuthProbeTimeoutMs,
 } from './agy-reviewer-auth.mjs';
 import { resolveGeminiRuntime, resolveGeminiAntigravityModel } from './role-config.mjs';
+import { agyStreamEvidence, readAgyUsage } from './agy-usage.mjs';
 import {
   AGY_REVIEWER_PINNED_AGY,
   PINNED_COMMAND_ENV,
@@ -2417,6 +2418,7 @@ function buildAgyReviewArgs({
 }) {
   const args = [
     '--model', model,
+    '--output-format', 'stream-json',
     '--print-timeout', formatAgyPrintTimeout(printTimeoutMs),
     '--sandbox',
   ];
@@ -2609,6 +2611,24 @@ function resolveGeminiRuntimeForReview(resolveGeminiRuntimeImpl, log = console) 
     }
     throw err;
   }
+}
+
+async function captureAgyReviewUsage({ stdout, model, env, identity }) {
+  let requestCounts = null;
+  const conversationId = agyStreamEvidence(stdout).conversationId;
+  if (identity && /^[A-Za-z0-9][A-Za-z0-9_-]{0,94}$/u.test(conversationId || '')) {
+    try {
+      const pinned = buildPinnedCommand({
+        user: identity.user, command: 'agy-reviewer-workspace-helper',
+        args: ['usage', conversationId],
+      });
+      const captured = await execFileAsync(pinned.command, pinned.args, {
+        env: { ...PINNED_COMMAND_ENV }, timeout: 10_000, maxBuffer: 64 * 1024,
+      });
+      requestCounts = JSON.parse(captured.stdout);
+    } catch { /* An older helper or absent transcript retains the fallback. */ }
+  }
+  return readAgyUsage({ stdout, model, env, requestCounts });
 }
 
 async function spawnGeminiReview({
@@ -2893,6 +2913,7 @@ async function reviewWithGemini(diff, extraContext = '', {
   signal = signal ? AbortSignal.any([signal, callController.signal]) : callController.signal;
   let stdout = '';
   let stderr = '';
+  let agyMeasuredUsage = null;
   let selectedModel = null;
   let selectedModelSource = null;
   let subprocessStarted = false;
@@ -2973,11 +2994,16 @@ async function reviewWithGemini(diff, extraContext = '', {
       );
     stdout = result.stdout || '';
     stderr = result.stderr || '';
+    if (runtime === 'antigravity') {
+      agyMeasuredUsage = await captureAgyReviewUsage({
+        stdout, model: selectedModel, env: reviewEnv, identity: addedIdentity,
+      });
+    }
     if (runtime === 'antigravity' && checkout?.credentialId) {
       try {
         await reportGeminiCredentialSpend({
           checkout,
-          tokenUsage: result.tokenUsage || null,
+          tokenUsage: agyMeasuredUsage || result.tokenUsage || null,
           env,
           log,
         });
@@ -3059,8 +3085,9 @@ async function reviewWithGemini(diff, extraContext = '', {
     throw new Error(`Gemini returned empty output.${hint}`);
   }
 
-  let geminiUsage = null;
-  let reviewPayload = combined;
+  let geminiUsage = agyMeasuredUsage;
+  let reviewPayload = runtime === 'antigravity'
+    ? agyStreamEvidence(stdout).response || combined : combined;
   if (runtime !== 'antigravity' && combined.startsWith('{')) {
     try {
       const doc = JSON.parse(combined);
@@ -3087,7 +3114,7 @@ async function reviewWithGemini(diff, extraContext = '', {
     }
   }
   const reviewText = runtime === 'antigravity'
-    ? sanitizeAgyReviewOutput(combined)
+    ? sanitizeAgyReviewOutput(reviewPayload)
     : reviewPayload;
   if (!reviewText.trim()) throw new Error('Gemini returned empty response.');
 

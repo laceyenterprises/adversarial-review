@@ -1,7 +1,7 @@
 import './helpers/worker-observation-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -37,6 +37,23 @@ import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.
 import { persistHostedReviewerExecution } from '../src/reviewer-execution-pass.mjs';
 
 const HERMETIC_CONFIG_ENV = { AGENT_OS_CONFIG_PATH: '/dev/null' };
+
+test('agy measured passes retain inclusive totals, reconciliation and unknown pricing', (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const key = { repo: 'synthetic/repo', prNumber: 1, attemptNumber: 1, passKind: 'first-pass' };
+  beginReviewerPass(rootDir, { ...key, reviewerClass: 'gemini', reviewerModel: 'unknown' });
+  const pass = completeReviewerPass(rootDir, {
+    ...key, status: 'completed',
+    tokenUsage: { input: 100, output: 20, reasoning: 8, cacheRead: 500, model: 'unknown',
+      source: 'agy-measured', agyConversationId: 'synthetic-conversation',
+      agySessionTotal: 119, agyRequestTotal: 120, agyUsageMismatch: true },
+  });
+  assert.equal(pass.token_total, 120);
+  assert.equal(pass.token_cost_usd, null);
+  assert.equal(pass.token_source, 'agy-measured');
+  assert.equal(JSON.parse(pass.metadata_json).agyUsageMismatch, true);
+});
 
 function tempRoot() {
   return mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));

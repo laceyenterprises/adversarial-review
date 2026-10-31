@@ -403,10 +403,11 @@ function completeReviewerPass(rootDir, {
         const table = pricingTable !== undefined ? pricingTable : defaultReviewerPricingTable();
         const derived = deriveReviewerTokenCost({
           usage,
-          model: existing?.reviewer_model || existing?.reviewer_class,
+          model: usage.source === 'agy-measured' ? usage.model
+            : existing?.reviewer_model || existing?.reviewer_class,
           pricingTable: table,
         });
-        if (derived != null) {
+        if (derived != null && !(usage.source === 'agy-measured' && derived.estimated)) {
           derivedCost = derived.costUSD;
           tokenCostSource = 'derived-pricing';
           tokenCostEstimated = derived.estimated;
@@ -422,6 +423,12 @@ function completeReviewerPass(rootDir, {
         }
       : {};
     if (usage?.partial) tokenMetadata.tokenUsageState = 'partial';
+    if (usage?.source === 'agy-measured') {
+      tokenMetadata.agyConversationId = usage.agyConversationId;
+      tokenMetadata.agySessionTotal = usage.agySessionTotal;
+      tokenMetadata.agyRequestTotal = usage.agyRequestTotal;
+      tokenMetadata.agyUsageMismatch = usage.agyUsageMismatch;
+    }
     const mergedMetadata = {
       ...existingMeta,
       ...tokenMetadata,
@@ -550,7 +557,7 @@ function normalizeTokenUsage(tokenUsage) {
             : model.includes('gemini') ? 'gemini' : null;
   let fallbackTotal = null;
   if (input !== null || output !== null || reasoning !== null || cacheRead !== null || cacheWrite !== null || toolContext !== null) {
-    if (provider === 'codex') {
+    if (provider === 'codex' || source === 'agy-measured') {
       fallbackTotal = (input || 0) + (output || 0);
     } else if (provider === 'claude') {
       fallbackTotal = (input || 0) + (output || 0) + (cacheRead || 0) + (cacheWrite || 0);
@@ -571,6 +578,12 @@ function normalizeTokenUsage(tokenUsage) {
     guardrail,
     costUSD,
     source: tokenUsage.source || null,
+    ...(tokenUsage.source === 'agy-measured' ? {
+      agyConversationId: tokenUsage.agyConversationId,
+      agySessionTotal: tokenUsage.agySessionTotal,
+      agyRequestTotal: tokenUsage.agyRequestTotal,
+      agyUsageMismatch: tokenUsage.agyUsageMismatch,
+    } : {}),
     ...(normalizeReviewerModel(tokenUsage.model) ? { model: normalizeReviewerModel(tokenUsage.model) } : {}),
     ...(tokenUsage.partial ? { partial: true } : {}),
     ...(Array.isArray(tokenUsage.rateLimits) && tokenUsage.rateLimits.length > 0

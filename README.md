@@ -1,3 +1,13 @@
+AGYTELEMETRY-01: Gemini/agy reviewers request stream JSON and join the unique
+`conversation_id` to the CLI planner transcript. Measured counters use
+`agy-measured`; request/session disagreement is retained in pass metadata.
+Dedicated reviewer accounts return counters through the pinned workspace
+helper's `usage CONVERSATION_ID` verb. A missing helper or transcript keeps
+the existing estimate available. Deploy the matching Agent OS pinned helper
+before reloading reviewer consumers. SRE observes natural measured passes and
+the Google/agy quota evidence basis after deployment; source tests are not
+the live receipt.
+
 CLOSERDEADLOCK-01 keeps completed comment-only final-round push heads in the
 posted closer lane and restores already queued heads without an operator label.
 Each pass logs `owning lane=closer` and observes normal closure gates, including

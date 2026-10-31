@@ -129,26 +129,31 @@ for (const versioned of [false, true]) {
   });
 }
 
-for (const mode of ['top', 'module', 'local']) {
+for (const mode of ['top', 'module', 'module-alias', 'local']) {
   for (const oauth of [
     { identity_token_pools: { future_role: ['synthetic-redaction-sentinel'] } },
     { token_accounts: { ...vectors.declarations[0].oauth.token_accounts,
       future_account: { future_field: 'synthetic-redaction-sentinel' } } },
   ]) {
-    test(`ITP-01 runtime deliberately refuses future declaration vocabulary in ${mode} (${Object.keys(oauth)[0]})`, () => {
+    test(`ITP-01 startup and runtime refuse future declaration vocabulary in ${mode} (${Object.keys(oauth)[0]})`, () => {
       const dir = mkdtempSync(join(tmpdir(), 'itp-runtime-'));
       try {
         const topPath = join(dir, 'config.yaml');
         const layer = join(dir, mode === 'local' ? 'config.local.yaml' : 'module.yaml');
         writeFileSync(topPath, JSON.stringify({ version: 1, ...(mode === 'top' ? { oauth } : {}) }));
-        if (mode !== 'top') writeFileSync(layer, JSON.stringify({ oauth }));
-        assert.throws(() => loadConfigRuntime({ topPath, modulePaths: mode === 'module' ? [layer] : [], env: {} }), error => {
-          assert.ok(error instanceof AgentOSConfigError);
-          assert.match(error.message, /unknown (canonical role|descriptor field)/);
-          assert.ok(!error.message.includes('synthetic-redaction-sentinel'));
-          assert.ok(!JSON.stringify(error).includes('synthetic-redaction-sentinel'));
-          return true;
-        });
+        if (mode !== 'top') writeFileSync(layer, JSON.stringify(mode === 'module-alias' ? {
+          __aliases: { declaration: `oauth.${Object.keys(oauth)[0]}` },
+          declaration: Object.values(oauth)[0],
+        } : { oauth }));
+        for (const loader of [loadConfig, loadConfigRuntime]) {
+          assert.throws(() => loader({ topPath, modulePaths: mode.startsWith('module') ? [layer] : [], env: {} }), error => {
+            assert.ok(error instanceof AgentOSConfigError);
+            assert.match(error.message, /unknown (canonical role|descriptor field)/);
+            assert.ok(!error.message.includes('synthetic-redaction-sentinel'));
+            assert.ok(!JSON.stringify(error).includes('synthetic-redaction-sentinel'));
+            return true;
+          });
+        }
       } finally { rmSync(dir, { recursive: true, force: true }); }
     });
   }

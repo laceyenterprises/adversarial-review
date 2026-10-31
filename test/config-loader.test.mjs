@@ -5407,24 +5407,27 @@ test('empty-string env var for bool coerces to false', () => {
 
 // -------- __aliases canonical key must exist in schema --------------------
 
-test('module __aliases to unread canonical keys are ignored', () => {
+for (const alias of ['roles.reviewer', 'roles']) {
+test(`module __aliases to unread canonical keys filter ${alias} before validation`, () => {
   const tmp = freshTmp();
   try {
     const mod = join(tmp, 'mod.yaml');
     writeFile(mod, `
       __aliases:
-        foo.bar: roles.nonexistent
-      foo:
-        bar: codex
+        ${alias}: roles.nonexistent
+      roles:
+        reviewer: codex
     `);
     const top = join(tmp, 'no_top.yaml');
     const cfg = loadConfig({ topPath: top, modulePaths: [mod], env: {} });
     assert.equal(cfg.get('roles.nonexistent'), null);
-    assert.equal(cfg.get('foo.bar'), null);
+    // This is a supported path: schema stripping cannot hide a missing filter.
+    assert.equal(cfg.get('roles.reviewer'), 'adversarial');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+}
 
 test('module __aliases targeting submodules subtree is accepted (non-strict)', () => {
   const tmp = freshTmp();

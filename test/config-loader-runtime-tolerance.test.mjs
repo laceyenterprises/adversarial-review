@@ -128,3 +128,37 @@ test('startup load ignores a foreign nested key under a shared root', () => {
     },
   );
 });
+
+test('runtime metadata-key tolerance remains reachable and debug notes are emitted once', () => {
+  withTempTopConfig(
+    'version: 1\nroots:\n  hq: /from-top\n  __future_runtime_home: /newer-than-loader\n',
+    (topPath) => {
+      assert.throws(() => loadConfig({ topPath, env: {} }), /roots\.__future_runtime_home: unknown key/);
+      const priorDebug = process.env.ADVERSARIAL_CONFIG_DEBUG;
+      const priorWrite = process.stderr.write;
+      const notes = [];
+      resetRuntimeUnknownWarningCacheForTests();
+      process.env.ADVERSARIAL_CONFIG_DEBUG = '1';
+      process.stderr.write = (chunk) => {
+        notes.push(String(chunk));
+        return true;
+      };
+      try {
+        for (let i = 0; i < 2; i++) {
+          const cfg = loadConfigRuntime({ topPath, env: {} });
+          assert.equal(cfg.get('roots.hq'), '/from-top');
+          assert.equal(cfg.get('roots.__future_runtime_home'), null);
+          assert.deepEqual(cfg.runtimeDroppedUnknownKeys, [
+            { key: 'roots.__future_runtime_home', source: topPath, hint: '' },
+          ]);
+        }
+        assert.equal(notes.filter(note => note.includes('roots.__future_runtime_home')).length, 1);
+      } finally {
+        process.stderr.write = priorWrite;
+        if (priorDebug === undefined) delete process.env.ADVERSARIAL_CONFIG_DEBUG;
+        else process.env.ADVERSARIAL_CONFIG_DEBUG = priorDebug;
+        resetRuntimeUnknownWarningCacheForTests();
+      }
+    },
+  );
+});

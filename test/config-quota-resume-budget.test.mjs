@@ -29,3 +29,13 @@ for (const key of Object.keys(defaults)) {
     assert.throws(() => loadConfig({ topPath, env: {} }), AgentOSConfigError);
   }));
 }
+for (const [key, max] of Object.entries({
+  budget_seconds: 60, max_attempts: 20, backoff_seconds: 86400, max_backoff_seconds: 86400,
+})) {
+  test(`quota recovery accepts maximum ${key} and rejects values above it`, () => fixture((topPath) => {
+    writeFileSync(topPath, `version: 1\nworker_pool:\n  quota:\n    resume:\n      ${key}: ${max}\n`);
+    assert.equal(loadConfig({ topPath, env: {} }).get(`${prefix}.${key}`), max);
+    writeFileSync(topPath, `version: 1\nworker_pool:\n  quota:\n    resume:\n      ${key}: ${max + 1}\n`);
+    assert.throws(() => loadConfig({ topPath, env: {} }), AgentOSConfigError);
+  }));
+}

@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { once } from 'node:events';
+import { EventEmitter, once } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
-import { nativeControllerIdentity } from '../src/controller-process-census.mjs';
+import { createControllerCensus, nativeControllerIdentity } from '../src/controller-process-census.mjs';
 import { currentProcessGroupId } from '../src/process-group-identity.mjs';
 
 const python = process.env.HQ_PYTHON3 || process.env.AGENT_OS_PY || 'python3';
@@ -99,4 +100,136 @@ test('Darwin group census reads members that exec a root-owned setuid tool', { s
     const members = nativeControllerIdentity('group', group.pid, { execFileSyncImpl });
     assert.ok(members.some(member => member.pid === group.pid));
   }
+});
+
+// A synthetic serve-mode helper: `answer` maps each request line to raw output.
+function fakeHelpers(answer) {
+  const spawned = [];
+  const spawnImpl = (bin, args, options) => {
+    const helper = Object.assign(new EventEmitter(), { bin, args, options, stdin: new PassThrough(),
+      stdout: new PassThrough(), exitCode: null, signalCode: null, requests: [], kills: [], unref() {},
+      kill(signal) { this.kills.push(signal); this.signalCode = signal; setImmediate(() => this.emit('exit', null, signal)); return true; } });
+    let buffered = '';
+    helper.stdin.on('data', chunk => {
+      buffered += chunk;
+      for (let end; (end = buffered.indexOf('\n')) >= 0;) {
+        const line = buffered.slice(0, end); buffered = buffered.slice(end + 1);
+        helper.requests.push(line);
+        answer(line, helper, spawned.length);
+      }
+    });
+    spawned.push(helper);
+    return helper;
+  };
+  return { spawned, spawnImpl };
+}
+
+test('round census keeps one helper and re-reads the kernel on every request', async () => {
+  let reads = 0;
+  const { spawned, spawnImpl } = fakeHelpers((line, helper) => {
+    reads += 1;
+    helper.stdout.write(`${JSON.stringify({ ok: [{ pid: 42, birth: `100.00000${reads}` }] })}\n`);
+  });
+  const census = createControllerCensus({ spawnImpl, env: { HQ_PYTHON3: 'fixture-python' } });
+  const births = [];
+  for (let tick = 0; tick < 5; tick += 1) births.push((await census.group(42))[0].birth);
+  census.close();
+  assert.equal(spawned.length, 1);
+  assert.equal(spawned[0].bin, 'fixture-python');
+  assert.deepEqual(spawned[0].args.slice(0, 2), ['-I', '-B']);
+  assert.deepEqual(spawned[0].args.slice(-1), ['serve']);
+  assert.deepEqual(spawned[0].requests, Array(5).fill('group 42'));
+  // Five distinct answers: nothing was served from an earlier request.
+  assert.deepEqual(births, [1, 2, 3, 4, 5].map(read => `100.00000${read}`));
+  assert.deepEqual(spawned[0].kills, ['SIGKILL']);
+});
+
+test('round census fails closed on every unreadable answer and replaces the helper', async () => {
+  const cases = [
+    ['refusal', (helper) => helper.stdout.write('{"error":"EPERM"}\n'), 'EPERM', 'EPERM'],
+    ['not json', (helper) => helper.stdout.write('not json\n'), 'EMALFORMED', 'EMALFORMED'],
+    ['bad member', (helper) => helper.stdout.write('{"ok":[{"pid":42}]}\n'), 'EMALFORMED', 'EMALFORMED'],
+    ['duplicate member', (helper) => helper.stdout.write(`${JSON.stringify({ ok: [{ pid: 42, birth: '1.000001' },
+      { pid: 42, birth: '1.000001' }] })}\n`), 'EMALFORMED', 'EMALFORMED'],
+    ['two answers', (helper) => helper.stdout.write('{"ok":[]}\n{"ok":[]}\n'), 'EMALFORMED', 'EMALFORMED'],
+    ['no answer key', (helper) => helper.stdout.write('{}\n'), 'EMALFORMED', 'EMALFORMED'],
+    ['helper exit', (helper) => { helper.exitCode = 2; helper.emit('exit', 2, null); }, undefined, 'exit 2'],
+    ['spawn error', (helper) => helper.emit('error', Object.assign(new Error('spawn fixture ENOENT'), { code: 'ENOENT' })),
+      'ENOENT', 'ENOENT'],
+    ['silence', () => {}, 'ETIMEDOUT', 'ETIMEDOUT'],
+  ];
+  for (const [label, misbehave, code, detail] of cases) {
+    const { spawned, spawnImpl } = fakeHelpers((line, helper, count) => {
+      if (count === 1) misbehave(helper);
+      else helper.stdout.write('{"ok":[{"pid":42,"birth":"123.000001"}]}\n');
+    });
+    const census = createControllerCensus({ spawnImpl, timeoutMs: 50 });
+    await assert.rejects(census.group(42), error => error.code === code && unavailable(detail).test(error.message), label);
+    // The failed helper is retired; the next tick starts a fresh one.
+    if (label !== 'helper exit') assert.deepEqual(spawned[0].kills, ['SIGKILL'], label);
+    assert.deepEqual(await census.group(42), [{ pid: 42, birth: '123.000001' }], label);
+    assert.equal(spawned.length, 2, label);
+    census.close();
+  }
+});
+
+test('round census refuses overlapping requests, unsolicited output and cancels on close', async () => {
+  const { spawned, spawnImpl } = fakeHelpers(() => {});
+  const census = createControllerCensus({ spawnImpl, timeoutMs: 5000 });
+  const first = census.group(42);
+  await assert.rejects(census.group(42), error => error.code === 'EBUSY');
+  census.close();
+  await assert.rejects(first, error => error.code === 'ECANCELED');
+  assert.deepEqual(spawned[0].kills, ['SIGKILL']);
+  await assert.rejects(census.group(1), /invalid controller census identity/);
+
+  const chatty = fakeHelpers((line, helper) => helper.stdout.write('{"ok":[]}\n'));
+  const second = createControllerCensus({ spawnImpl: chatty.spawnImpl });
+  assert.deepEqual(await second.group(42), []);
+  chatty.spawned[0].stdout.write('{"ok":[{"pid":42,"birth":"1.000001"}]}\n');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(chatty.spawned[0].kills, ['SIGKILL']);
+  assert.deepEqual(await second.group(42), []);
+  assert.equal(chatty.spawned.length, 2);
+  second.close();
+});
+
+test('round census with an absent interpreter fails closed naming the mechanism', async () => {
+  const census = createControllerCensus({ env: { HQ_PYTHON3: '/nonexistent/python3' } });
+  await assert.rejects(census.group(42), error => error.code === 'ENOENT' && unavailable('ENOENT').test(error.message));
+  census.close();
+});
+
+test('serve-mode helper answers pgid refusals over the real interpreter', async () => {
+  const helper = fileURLToPath(new URL('../src/controller_process_census.py', import.meta.url));
+  const result = spawnSync(python, ['-I', '-B', helper, 'serve'],
+    { input: 'pgid 1\nbogus\npgid 2147483646\n', encoding: 'utf8', timeout: 5000 });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0);
+  assert.deepEqual(result.stdout.trim().split('\n').map(line => JSON.parse(line)),
+    [{ error: 'EINVAL' }, { error: 'EINVAL' }, { error: 'ESRCH' }]);
+  const census = createControllerCensus();
+  await assert.rejects(census.pgid(2 ** 31 - 2), error => error.code === 'ESRCH');
+  assert.equal(await census.pgid(process.pid), nativeControllerIdentity('pgid', process.pid));
+  census.close();
+});
+
+test('Darwin round census matches the one-shot census for the same live group', { skip: process.platform !== 'darwin', timeout: 20000 }, async t => {
+  const group = spawn('/bin/bash', ['-c', 'echo ready; sleep 30 & sleep 30 & wait'],
+    { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
+  t.after(() => { try { process.kill(-group.pid, 'SIGKILL'); } catch { /* already drained */ } });
+  await once(group.stdout, 'data');
+  const execFileSyncImpl = (bin, args, options) => execFileSync(bin, args, { ...options, timeout: 10000 });
+  const census = createControllerCensus({ timeoutMs: 10000 });
+  t.after(() => census.close());
+  const order = members => [...members].sort((a, b) => a.pid - b.pid);
+  for (let index = 0; index < 5; index += 1) {
+    const oneShot = order(nativeControllerIdentity('group', group.pid, { execFileSyncImpl }));
+    const round = order(await census.group(group.pid));
+    if (oneShot.length !== round.length) continue; // A member was still starting between the two reads.
+    assert.deepEqual(round, oneShot);
+    assert.ok(round.some(member => member.pid === group.pid));
+    return;
+  }
+  assert.fail('the one-shot and round census never observed the same group');
 });

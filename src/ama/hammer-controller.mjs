@@ -12,7 +12,7 @@ import { launchRequestMeaning } from './launch-request-status.mjs';
 import { inspectMergeLease, releaseMergeLease } from './merge-lease.mjs';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { currentProcessGroupId } from '../process-group-identity.mjs';
-import { nativeControllerIdentity } from '../controller-process-census.mjs';
+import { createControllerCensus, nativeControllerIdentity } from '../controller-process-census.mjs';
 import { resolveHqRoot } from '../hq-root.mjs';
 
 // A slow or failed ledger read is not a cancellation. Only a readable terminal,
@@ -136,6 +136,16 @@ export function controllerGroupSnapshot(pgid, { execFileSyncImpl = execFileSync,
   });
 }
 
+// The round's census: one fresh group read per call. Darwin keeps a single
+// helper for the round instead of starting one per tick; every answer is still
+// a new kernel read, so a signal is never gated on an earlier tick's members.
+export function createControllerGroupCensus({ platform = process.platform, env = process.env,
+  createCensusImpl = createControllerCensus } = {}) {
+  if (platform !== 'darwin') return { snapshot: pgid => controllerGroupSnapshot(pgid, { platform }), close() {} };
+  const census = createCensusImpl({ env });
+  return { snapshot: pgid => census.group(pgid), close: () => census.close() };
+}
+
 // A group number alone is never a signal capability after leader exit. Keep
 // witnessed member births, and refuse a group containing only new identities.
 export function groupStillOwned(members, witnessed, leaderLive, pgid) {
@@ -183,7 +193,7 @@ export async function runHammerController(script, args = [], {
   readLaunchImpl = readLaunchRequestStatusFromLedgerAsync,
   readTimeoutImpl = launchReadTimeoutMs,
   nowImpl = () => performance.now(), delayImpl = delay,
-  snapshotImpl = controllerGroupSnapshot,
+  snapshotImpl, groupCensusImpl = createControllerGroupCensus,
   releaseImpl = releaseControllerLease,
   spawnImpl = spawn,
   signalGroupImpl = (pid, signal) => process.kill(pid, signal),
@@ -194,6 +204,8 @@ export async function runHammerController(script, args = [], {
     throw new Error('source inputs.sh before starting the hammer controller');
   }
   env = controllerLaunchEnvironment(env);
+  const census = snapshotImpl ? null : groupCensusImpl({ env });
+  snapshotImpl ??= census.snapshot;
   // Reads abandoned at exit must not hold the process open until they time out.
   const closing = new AbortController();
   const launchReads = { failures: 0, firstFailureAt: null, lastError: null, source: null };
@@ -233,6 +245,7 @@ export async function runHammerController(script, args = [], {
   }
   if (startRead !== 'permitted') {
     closing.abort();
+    census?.close();
     throw new Error('HQ launch is terminal, parked or unreadable; refusing controller start');
   }
   const token = randomUUID();
@@ -314,7 +327,7 @@ export async function runHammerController(script, args = [], {
     writeFileAtomic(recordPath, `${JSON.stringify(withReads(), null, 2)}\n`, { mode: 0o600, overwrite: false });
     child.stdin.on('error', () => stop('bootstrap-failed'));
     // Check introspection before permitting any script/lease side effects.
-    const initialMembers = snapshotImpl(child.pid);
+    const initialMembers = await snapshotImpl(child.pid);
     if (!initialMembers.some(member => member.pid === child.pid)) throw new Error('controller shell identity unavailable');
     for (const member of initialMembers) witnessed.set(member.pid, member.birth);
     child.stdin.end('ready\n');
@@ -329,8 +342,10 @@ export async function runHammerController(script, args = [], {
           && now - lastPermitted.at >= unreadableAfter()) stop('launch-unreadable');
       if (now - begun >= timeoutMs) stop('controller-timeout');
       if (exited) stop('shell-exited');
+      // Judge only a validator request that arrived before this census began.
+      const validator = pendingValidator;
       let members;
-      try { members = snapshotImpl(child.pid); }
+      try { members = await snapshotImpl(child.pid); }
       catch (error) {
         if (!record.probeError) console.error(`hammer-controller: ${error.message}`);
         record.probeError = error.code || 'unknown'; stop('process-probe-unreadable');
@@ -341,11 +356,11 @@ export async function runHammerController(script, args = [], {
       // event. An empty group grants no signal authority; wait for that event
       // before deciding whether the completed script succeeded.
       if (members?.length && !owned) stop('process-identity-unconfirmed');
-      if (pendingValidator) {
-        const clear = !reason && owned && members.some(member => member.pid === pendingValidator.pid)
-          && members.every(member => member.pid === child.pid || member.pid === pendingValidator.pid);
+      if (validator && validator === pendingValidator) {
+        const clear = !reason && owned && members.some(member => member.pid === validator.pid)
+          && members.every(member => member.pid === child.pid || member.pid === validator.pid);
         if (!clear) stop('validation-descendants-or-probe-unconfirmed');
-        child.stdio[4].write(`${clear ? 'clear' : 'blocked'}:${pendingValidator.token}\n`);
+        child.stdio[4].write(`${clear ? 'clear' : 'blocked'}:${validator.token}\n`);
         pendingValidator = undefined;
       }
       if (pendingGate) {
@@ -405,6 +420,7 @@ export async function runHammerController(script, args = [], {
     return 125;
   } finally {
     closing.abort();
+    census?.close();
     for (const [signal, handler] of handlers) process.off(signal, handler);
     child.stdio[4].destroy();
     // On unknown drain retain the private receipt and canonical HQ markers.

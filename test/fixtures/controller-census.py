@@ -3,8 +3,11 @@
 import ctypes
 import errno
 import importlib.util
+import io
+import json
 from pathlib import Path
 import unittest
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location(
     "census", Path(__file__).resolve().parents[2] / "src/controller_process_census.py"
@@ -90,6 +93,47 @@ class CensusTests(unittest.TestCase):
                 with self.assertRaises(OSError) as raised:
                     census.group_snapshot(100, sysctl)
                 self.assertEqual(raised.exception.errno, code)
+
+    def test_serve_rereads_every_request_and_never_replays_an_answer(self):
+        class Changing(Sysctl):
+            def __call__(self, *args):
+                self.records = [GROUP[:1], GROUP[:2], []][self.calls]
+                return super().__call__(*args)
+
+        sysctl, replies = Changing(), io.StringIO()
+        with mock.patch.object(census.sys, "platform", "darwin"):
+            census.serve(["group 100\n"] * 3, replies, sysctl=sysctl)
+        answers = [json.loads(line)["ok"] for line in replies.getvalue().splitlines()]
+        self.assertEqual([len(answer) for answer in answers], [1, 2, 0])
+        self.assertEqual(sysctl.calls, 3)
+
+    def test_serve_reports_refusals_and_invalid_requests_by_errno_name(self):
+        replies = io.StringIO()
+        census.serve(
+            ["pgid 1\n", "bogus\n", "pgid 2147483646\n", "unsupported 42\n"], replies
+        )
+        self.assertEqual(
+            [json.loads(line) for line in replies.getvalue().splitlines()],
+            [
+                {"error": "EINVAL"},
+                {"error": "EINVAL"},
+                {"error": "ESRCH"},
+                {"error": "EINVAL"},
+            ],
+        )
+
+    def test_serve_reports_a_denied_group_census_without_ending(self):
+        replies = io.StringIO()
+        with mock.patch.object(census.sys, "platform", "darwin"):
+            census.serve(
+                ["group 100\n", "group 100\n"],
+                replies,
+                sysctl=Sysctl(error=errno.EPERM, result=-1),
+            )
+        self.assertEqual(
+            [json.loads(line) for line in replies.getvalue().splitlines()],
+            [{"error": "EPERM"}, {"error": "EPERM"}],
+        )
 
 
 unittest.main()

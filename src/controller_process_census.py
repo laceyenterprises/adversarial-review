@@ -66,30 +66,61 @@ def group_snapshot(pgid, sysctl):
     return members
 
 
-def main():
-    verb, value = sys.argv[1:]
+def darwin_sysctl():
+    if ctypes.sizeof(ctypes.c_void_p) != 8:
+        raise OSError(errno.ENOTSUP, "kinfo_proc ABI requires LP64")
+    libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+    libc.sysctl.argtypes = [
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.c_uint,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+    ]
+    libc.sysctl.restype = ctypes.c_int
+    return libc.sysctl
+
+
+def census(verb, value, sysctl_loader=darwin_sysctl):
     pid = int(value)
     if pid <= 1:
         raise ValueError("invalid process identity")
     if verb == "pgid":
-        result = os.getpgid(pid)
-    elif verb == "group" and sys.platform == "darwin":
-        if ctypes.sizeof(ctypes.c_void_p) != 8:
-            raise OSError(errno.ENOTSUP, "kinfo_proc ABI requires LP64")
-        libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
-        libc.sysctl.argtypes = [
-            ctypes.POINTER(ctypes.c_int),
-            ctypes.c_uint,
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_size_t),
-            ctypes.c_void_p,
-            ctypes.c_size_t,
-        ]
-        libc.sysctl.restype = ctypes.c_int
-        result = group_snapshot(pid, libc.sysctl)
-    else:
-        raise ValueError("unsupported census operation")
-    print(json.dumps(result))
+        return os.getpgid(pid)
+    if verb == "group" and sys.platform == "darwin":
+        return group_snapshot(pid, sysctl_loader())
+    raise ValueError("unsupported census operation")
+
+
+def serve(requests, replies, sysctl=None):
+    # One answer per request line. Every request re-reads the kernel; only the
+    # libc binding outlives a request, never a census result.
+    binding = [sysctl] if sysctl else []
+
+    def loader():
+        if not binding:
+            binding.append(darwin_sysctl())
+        return binding[0]
+
+    for line in requests:
+        try:
+            verb, value = line.split()
+            reply = {"ok": census(verb, value, loader)}
+        except ValueError:
+            reply = {"error": "EINVAL"}
+        except OSError as error:
+            reply = {"error": errno.errorcode.get(error.errno, "EIO")}
+        replies.write(json.dumps(reply) + "\n")
+        replies.flush()
+
+
+def main():
+    if sys.argv[1:] == ["serve"]:
+        serve(sys.stdin, sys.stdout)
+        return
+    verb, value = sys.argv[1:]
+    print(json.dumps(census(verb, value)))
 
 
 if __name__ == "__main__":

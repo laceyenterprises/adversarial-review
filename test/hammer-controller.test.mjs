@@ -11,10 +11,11 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, renam
 import { tmpdir, hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { assertHammerController, controllerGroupSnapshot, controllerLaunchId, controllerLaunchEnvironment, controllerLedgerTarget, groupStillOwned, releaseControllerLease, runHammerController,
+import { assertHammerController, controllerGroupSnapshot, createControllerGroupCensus, controllerLaunchId, controllerLaunchEnvironment, controllerLedgerTarget, groupStillOwned, releaseControllerLease, runHammerController,
   LAUNCH_POLL_MS, LAUNCH_READ_ATTEMPTS, LAUNCH_UNREADABLE_GRACE_MS } from '../src/ama/hammer-controller.mjs';
 import { acquireMergeLease, inspectMergeLease, releaseMergeLease, mergeLeaseFilePath } from '../src/ama/merge-lease.mjs';
 import { readLaunchRequestStatusFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
+import { createControllerCensus, nativeControllerIdentity } from '../src/controller-process-census.mjs';
 import Database from 'better-sqlite3';
 
 const root = resolve(import.meta.dirname, '..');
@@ -702,6 +703,96 @@ function simulate(t, { reads, onTick = () => {}, env = {}, ...options }) {
   return { ...sim, done: run.then(status => ({ status, receipt: f.receipt() })) };
 }
 const unreadable = () => ({ ok: false, reason: 'fixture-read-timeout' });
+
+// A synthetic serve-mode census helper whose answers come from `members`.
+function censusHelpers(members) {
+  const spawned = [], requests = [];
+  const spawnImpl = () => {
+    const helper = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(),
+      exitCode: null, signalCode: null, kill(signal) { this.signalCode = signal; return true; }, unref() {} });
+    helper.stdin.on('data', chunk => {
+      for (const line of String(chunk).split('\n').filter(Boolean)) {
+        requests.push(line);
+        helper.stdout.write(`${JSON.stringify({ ok: members() })}\n`);
+      }
+    });
+    spawned.push(helper);
+    return helper;
+  };
+  const groupCensusImpl = ({ env }) => createControllerGroupCensus({ platform: 'darwin', env,
+    createCensusImpl: options => createControllerCensus({ ...options, spawnImpl }) });
+  return { spawned, requests, groupCensusImpl };
+}
+
+test('QCP-08: a round starts one census helper instead of one child per tick, with the same decisions', async t => {
+  const ticks = 8;
+  const round = async census => {
+    let finished = false, reads = 0;
+    const members = () => (finished ? [] : [{ pid: 4242, birth: '100.000001' }]);
+    const sim = simulate(t, { reads: () => launch('running'), snapshotImpl: undefined, ...census(members),
+      onTick: s => { if (++reads >= ticks && !finished) { finished = true; s.exit(0); } } });
+    const { status, receipt } = await sim.done;
+    return { status, reason: receipt.reason, state: receipt.state, drained: receipt.drained, signals: sim.signals };
+  };
+  // Before: the one-shot census starts a helper child for every tick.
+  const legacy = [];
+  const before = await round(members => ({ snapshotImpl: pgid => controllerGroupSnapshot(pgid, { platform: 'darwin',
+    nativeImpl: (verb, pid) => nativeControllerIdentity(verb, pid, { execFileSyncImpl(bin, args) {
+      legacy.push(args.slice(-2)); return JSON.stringify(members());
+    } }) }) }));
+  // After: one helper serves the round; it still answers one fresh read per tick.
+  let helpers;
+  const after = await round(members => { helpers = censusHelpers(members); return { groupCensusImpl: helpers.groupCensusImpl }; });
+  assert.deepEqual(after, before);
+  assert.deepEqual(before, { status: 0, reason: 'shell-exited', state: 'quiescent', drained: true, signals: [] });
+  assert.ok(legacy.length > ticks, `one census per tick: ${legacy.length}`);
+  assert.deepEqual(legacy, Array(legacy.length).fill(['group', '4242']));
+  assert.equal(helpers.spawned.length, 1);
+  assert.deepEqual(helpers.requests, Array(legacy.length).fill('group 4242'));
+  // The round closed its helper; nothing outlives the controller.
+  assert.equal(helpers.spawned[0].signalCode, 'SIGKILL');
+});
+
+test('QCP-08: a census refused mid-round never authorizes a group signal', async t => {
+  let calls = 0;
+  const census = { snapshot: async pgid => {
+    assert.equal(pgid, 4242);
+    if (++calls <= 2) return [{ pid: 4242, birth: '100.000001' }];
+    throw Object.assign(new Error('fixture census refused'), { code: 'EPERM' });
+  }, closed: false, close() { this.closed = true; } };
+  const sim = simulate(t, { reads: () => launch('running'), snapshotImpl: undefined, groupCensusImpl: () => census });
+  const { status, receipt } = await sim.done;
+  assert.equal(status, 125);
+  assert.deepEqual(sim.signals, []);
+  assert.equal(receipt.reason, 'process-probe-unreadable');
+  assert.equal(receipt.probeError, 'EPERM');
+  assert.equal(receipt.directTermSent, true);
+  assert.equal(receipt.directKillSent, true);
+  assert.equal(receipt.state, 'cleanup-unconfirmed');
+  assert.equal(census.closed, true);
+});
+
+test('QCP-08: a validator request that lands during a census is judged by the next census', async t => {
+  const token = '22222222-2222-4222-8222-222222222222';
+  let calls = 0, sim;
+  const shell = { pid: 4242, birth: '100.000001' }, validator = { pid: 999, birth: '100.000002' };
+  const descendant = { pid: 1000, birth: '100.000003' };
+  sim = simulate(t, { reads: () => launch('running'), snapshotImpl: async () => {
+    calls += 1;
+    if (sim?.signals.length) return [];
+    if (calls === 3) {
+      // The descendant forks after this census began; the request arrives before it answers.
+      sim.control.push(`complete:999:${token}\n`);
+      await new Promise(resolve => setImmediate(resolve));
+      return [shell, validator];
+    }
+    return calls > 3 ? [shell, validator, descendant] : [shell];
+  } });
+  const { receipt } = await sim.done;
+  assert.deepEqual(sim.answers, [`blocked:${token}\n`]);
+  assert.equal(receipt.reason, 'validation-descendants-or-probe-unconfirmed');
+});
+
 const gateToken = '11111111-1111-4111-8111-111111111111';
 const gateRequest = `launch:123:${gateToken}\n`;
 const gateReplies = sim => sim.answers.filter(answer => !answer.startsWith('wait:'));

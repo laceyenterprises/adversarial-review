@@ -200,7 +200,7 @@ the default one-hour policy cap, but remain bounded by the platform timer limit.
 | `src/github-auth-recovery.mjs:363` | `15000 ms` | retryGithubAuthPushOnce |
 | `src/github-auth-recovery.mjs:519` | `600000 ms` | retryGithubAuthPushOnce |
 | `src/guard-forbidden-paths.mjs:24` | `15000 ms` | resolveGuardBaseRef |
-| `src/hammer-pr-read.mjs:13` | `30000 ms` | fetchHammerPr |
+| `src/hammer-pr-read.mjs:90` | `30000 ms` | fetchHammerPr |
 | `src/hcp-health.mjs:15` | `DEFAULT_HCP_HEALTHZ_TIMEOUT_MS = 8000 ms` | checkHcpHealthz |
 | `src/head-closer-commit-suppression.mjs:163` | `LOCAL_GIT_TIMEOUT_MS = 5000 ms` | fetchVerifiedCommitFromLocalGit |
 | `src/live-pack-merge-check.mjs:16` | `15000 ms` | checkLivePackMerge |

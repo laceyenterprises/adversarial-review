@@ -58,7 +58,7 @@ case "${phase}:$ham_phase_exit" in
   hammer-verify-head:21|hammer-merge:21)
     echo 'HAM next: Appendix D — Resolving merge conflicts. Query/release lease, repair, publish commit, revalidate; re-enter verify-head.' >&2 ;;
   hammer-publish:0)
-    if [ "\${HAM_COMMIT_PUBLICATION_ONLY:-0}" -eq 1 ]; then
+    if [ "\${HAM_COMMIT_PUBLICATION_ONLY:-0}" = "1" ]; then
       echo 'HAM next: unset HAM_COMMIT_PUBLICATION_ONLY; refresh context; run verify-head (Appendix C).' >&2
     else
       echo 'HAM next: Appendix E exact-head predicate, then merge.' >&2

@@ -10,6 +10,7 @@ export function hammerLeaseState({ rootDir, repo, base, pr, head }, {
   if (!Number.isSafeInteger(pr) || pr <= 0 || !/^[a-f0-9]{40}$/i.test(head || '')) {
     throw new Error('invalid PR/head');
   }
+  const normalizedHead = String(head).toLowerCase();
   const { holder } = inspect({ rootDir, repo, base });
   if (holder) {
     if (!Number.isSafeInteger(holder.holderPr) || holder.holderPr <= 0
@@ -22,7 +23,8 @@ export function hammerLeaseState({ rootDir, repo, base, pr, head }, {
     if (holder.holderPr === pr) return 'held';
   }
   const latest = history(rootDir, { repo, base })
-    .filter(row => row.holderPr === pr && row.holderHead === head).at(-1);
+    .filter(row => row.holderPr === pr && typeof row.holderHead === 'string'
+      && row.holderHead.toLowerCase() === normalizedHead).at(-1);
   return latest?.releasedAt ? 'released' : 'none';
 }
 

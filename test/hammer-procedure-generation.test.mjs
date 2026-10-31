@@ -78,6 +78,9 @@ test('HAMPROMPT-01: rendered outcome routing names an action without changing ph
     ['hammer-verify-head', 1, 0, /stop with fixture-refusal/],
     ['hammer-publish', 0, 1, /unset HAM_COMMIT_PUBLICATION_ONLY.*run verify-head/],
     ['hammer-publish', 0, 0, /Appendix E exact-head predicate/],
+    ['hammer-publish', 0, 'true', /Appendix E exact-head predicate/],
+    ['hammer-publish', 0, 'yes', /Appendix E exact-head predicate/],
+    ['hammer-publish', 0, '', /Appendix E exact-head predicate/],
     ['hammer-publish', 1, 0, /stop with fixture-refusal/],
     ['hammer-merge', 0, 0, /confirmed-merge closing audit/],
     ['hammer-merge', 21, 0, /Appendix D.*re-enter verify-head/],
@@ -97,6 +100,28 @@ test('HAMPROMPT-01: rendered outcome routing names an action without changing ph
     assert.ifError(result.error);
     assert.equal(result.status, status, result.stderr);
     assert.match(result.stderr, next);
-    assert.doesNotMatch(result.stderr, /sed -n|rg |grep /);
+    assert.doesNotMatch(result.stderr, /sed -n|rg |grep |integer expression expected/);
+  }
+});
+
+test('publication dispatch treats non-numeric flags as ordinary audit publication without shell errors', () => {
+  const source = readFileSync(new URL('../bin/hammer-publish.sh', import.meta.url), 'utf8');
+  const dispatch = source.slice(source.indexOf('# Called before the hammer'));
+  assert.ok(dispatch.length < source.length, 'exercise the production publication dispatch');
+  for (const flag of ['true', 'yes', '', '0']) {
+    const result = spawnSync('/bin/bash', ['-uc', `
+ham_publish_phase() { echo audit-publication; }
+publish() {
+${dispatch.replaceAll(/<<[A-Z_]+>>/g, 'fixture')}
+}
+publish
+`], {
+      encoding: 'utf8', timeout: 5000,
+      env: { PATH: process.env.PATH, HAM_COMMIT_PUBLICATION_ONLY: flag },
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, 'audit-publication\n');
+    assert.equal(result.stderr, '');
   }
 });

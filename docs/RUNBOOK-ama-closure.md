@@ -115,7 +115,9 @@ For current PR/head lease observation, run
 from the deployed checkout (or pass its `--root-dir`). It reports `held` for
 any unreleased holder belonging to this PR, including across rebase head changes.
 Otherwise it reports `released` when retained release history names this PR/head,
-or `none`. Expiry does not establish release. Read/validation failures print
+or `none`. Head hashes are matched without regard to hex letter case.
+The CLI also supports direct execution as `./bin/hammer-lease-state.mjs`.
+Expiry does not establish release. Read/validation failures print
 `lease-state-unavailable` and exit nonzero without a state. This command never
 acquires, releases or reclaims a lease and grants no merge authority.
 
@@ -126,6 +128,10 @@ validate outside the lease and re-enter verify-head. For a hand-written JSON map
 take the union only after proving both sides only added keys; keep distinct-key
 values and ordering, validate JSON/unique keys, and never overwrite conflicting
 same-key values. Rebuild the audit and exact-head predicate before merge.
+
+Only `HAM_COMMIT_PUBLICATION_ONLY=1` selects commit-only publication and its
+verify-head next action. Other values, including `true` and `yes`, retain the
+ordinary audit-publication path without shell integer-comparison diagnostics.
 
 If the closer announces the same next action twice without executing it, it
 must execute it or stop with a named terminal audit reason. The detailed safety

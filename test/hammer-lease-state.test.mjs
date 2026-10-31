@@ -17,6 +17,10 @@ test('lease query observes PR/head releases and conservatively reports an unrele
   });
   assert.equal(query(null), 'none');
   assert.equal(query(null, [receipt]), 'released');
+  assert.equal(query(null, [receipt], { head: head.toUpperCase() }), 'released');
+  assert.equal(query(null, [{ ...receipt, holderHead: head.toUpperCase() }]), 'released');
+  assert.equal(query(null, [{ ...receipt, holderHead: `Aa${head.slice(2)}` }],
+    { head: `aA${head.slice(2)}` }), 'released');
   assert.equal(query(null, [{ ...receipt, holderHead: 'b'.repeat(40) }]), 'none');
   assert.equal(query(null, [{ ...receipt, holderPr: 99 }]), 'none');
   assert.equal(query(holder, [receipt]), 'held', 'current holder outranks old release evidence');
@@ -25,6 +29,8 @@ test('lease query observes PR/head releases and conservatively reports an unrele
   assert.equal(query({ ...holder, holderPr: 99 }), 'none', 'another PR is not our held lease');
   assert.equal(query({ ...holder, holderPr: 99 }, [receipt]), 'released');
   assert.equal(query(null, [receipt, { ...holder, event: 'grant', releasedAt: null }]), 'none');
+  assert.equal(query(null, [receipt, { ...holder, holderHead: head.toUpperCase(),
+    event: 'grant', releasedAt: null }]), 'none', 'latest matching event wins across hex case');
   assert.throws(() => query({}), /invalid holder/);
   assert.throws(() => query(null, [], { head: 'short' }), /invalid PR\/head/);
   assert.throws(() => query(null, [], { pr: 0 }), /invalid PR\/head/);
@@ -52,6 +58,12 @@ test('lease-state CLI reads isolated lease files without changing them and fails
   const released = run();
   assert.equal(released.status, 0, released.stderr);
   assert.equal(released.stdout, 'released\n');
+  const direct = spawnSync(args[0], [...args.slice(1, -1), head.toUpperCase()], {
+    encoding: 'utf8', timeout: 5000,
+  });
+  assert.ifError(direct.error);
+  assert.equal(direct.status, 0, direct.stderr);
+  assert.equal(direct.stdout, 'released\n');
   rmSync(history);
   assert.equal(run().stdout, 'none\n');
   writeFileSync(file, '{broken');

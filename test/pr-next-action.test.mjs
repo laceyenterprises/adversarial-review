@@ -82,7 +82,65 @@ for (const execution of [
 ]) test(`CLOSERREFRESHLOOP-01: terminal or unknown ${JSON.stringify(execution)} retains its owner`, () => {
   const selected = nextAction(snap({ progress: { daemonExecution: { headSha: HEAD, ...execution } } }));
   assert.notEqual(selected.action, 'daemon-merge');
-  assert.ok(['snapshot-refresh', 'safety-refusal'].includes(selected.reason));
+  // FAILCLOSEDHAMMER-01: a missing build identity on this clean exact head is
+  // the hammer's close; the daemon is never reselected for the same refusal.
+  assert.deepEqual(execution.reason === 'worker-identity-unresolved' ? pick(selected) : null,
+    execution.reason === 'worker-identity-unresolved' ? ['hammer', 'hammer', 'daemon-failed-closed'] : null);
+  if (execution.reason !== 'worker-identity-unresolved') {
+    assert.ok(['snapshot-refresh', 'safety-refusal'].includes(selected.reason));
+  }
+});
+
+// FAILCLOSEDHAMMER-01 (SEV1): a daemon clean-merge that failed closed on its
+// own accountability gate hands an exact-head, green, clean PR to the hammer.
+// Every other merge condition keeps its existing owner.
+test('FAILCLOSEDHAMMER-01: daemon identity fail-closed on a clean green exact head selects a hammer dispatch', () => {
+  const progress = { daemonExecution: { headSha: HEAD, reason: 'worker-identity-unresolved',
+    reasons: ['missing-build-completion-signal'], disposition: 'failed-closed' } };
+  const selected = nextAction(snap({ progress }));
+  assert.deepEqual(pick(selected), ['hammer', 'hammer', 'daemon-failed-closed']);
+  assert.equal(selected.row, 'R15-daemon-failed-closed');
+  assert.equal(selected.queue.intent, 'dispatch');
+  assert.ok(selected.evidenceRefs.includes('daemon:worker-identity-unresolved'));
+  // An operator-approved head cannot reselect the daemon that just refused it.
+  const approved = nextAction(snap({ progress, pr: { labels: [{ name: 'operator-approved', actorKind: 'user' }] },
+    reviews: { operatorApprovedEvidence: { applied: true, headSha: HEAD, actor: 'operator-1' } },
+    policy: { operatorLogins: ['operator-1'] } }));
+  assert.notEqual(approved.action, 'daemon-merge');
+});
+
+for (const [name, changed, expected] of [
+  ['blocking finding', { reviews: { verdict: 'request-changes', blockingFindingCount: 1 } }, 'safety-refusal'],
+  ['strict non-blocking finding', { reviews: { verdict: 'comment-only', nonBlockingFindingCount: 1 } }, 'safety-refusal'],
+  ['red required checks', { checks: { conclusion: 'FAILURE' } }, 'safety-refusal'],
+  ['pending required checks', { checks: { conclusion: 'PENDING' } }, 'safety-refusal'],
+  ['conflict', { pr: { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' } }, 'safety-refusal'],
+  ['stale reviewed head', { reviews: { headSha: OLD } }, 'safety-refusal'],
+  ['invalid attestation', { reviews: { attestation: 'invalid' } }, 'safety-refusal'],
+]) test(`FAILCLOSEDHAMMER-01: identity fail-closed with ${name} is not a hammer close`, () => {
+  const progress = { daemonExecution: { headSha: HEAD, reason: 'worker-identity-unresolved',
+    reasons: ['missing-build-completion-signal'], disposition: 'failed-closed' } };
+  const selected = nextAction(snap({ progress, ...changed }));
+  assert.notEqual(selected.reason, 'daemon-failed-closed');
+  assert.notEqual(selected.action, 'daemon-merge');
+  assert.equal(selected.reason, expected);
+});
+
+test('FAILCLOSEDHAMMER-01: blocking findings without a daemon attempt remediate as before', () => {
+  const selected = nextAction(snap({ reviews: { verdict: 'request-changes', blockingFindingCount: 1 } }));
+  assert.deepEqual(pick(selected), ['remediate', 'remediator', 'review-findings']);
+});
+
+test('FAILCLOSEDHAMMER-01: a hammer outcome on this head outranks the daemon hand-off', () => {
+  const progress = { daemonExecution: { headSha: HEAD, reason: 'worker-identity-unresolved',
+    reasons: ['missing-build-completion-signal'], disposition: 'failed-closed' } };
+  const live = nextAction(snap({ progress, launches: { closer: { headSha: HEAD, launchRequestId: 'lrq-1',
+    row: { status: 'running' } } } }));
+  assert.deepEqual(pick(live), ['hammer', 'hammer', 'live-owner']);
+  const finalNoMerge = nextAction(snap({ progress, launches: { closer: { headSha: HEAD, launchRequestId: 'lrq-1',
+    row: { status: 'succeeded' }, retryChain: [], outcome: 'no-merge', retryable: false } } }));
+  assert.equal(finalNoMerge.reason, 'hammer-final-no-merge');
+  assert.equal(finalNoMerge.actor, 'closure-recovery');
 });
 
 test('HAMLANEWAIT-01: repeated lane-busy audits leave next action retryable; a real refusal still stops', () => {

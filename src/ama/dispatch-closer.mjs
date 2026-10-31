@@ -277,9 +277,10 @@ try {
 //     the load cap like any other coding worker).
 //
 // NOTE: a fully-clean, eligible, green, mergeable PR is closed inline by the
-// daemon path BEFORE this dispatch surface is reached (`daemon-clean-route`), so
-// every dispatch here is either a findings remediation or a mechanical-gate
-// repair — there is no cheaper sub-class to carve out on the critical side.
+// daemon path BEFORE this dispatch surface is reached (`daemon-clean-route`).
+// The exception is the daemon's own accountability refusal
+// (FAILCLOSEDHAMMER-01, `daemon-failed-closed`), which the shared decision
+// hands here as a selected hammer under the same caps and lease.
 const CLOSER_VALIDATE_AND_CLICK_DISPATCH_PRIORITY = 'critical';
 const CLOSER_FINDINGS_REMEDIATION_DISPATCH_PRIORITY = 'normal';
 const AMA_LIVE_PR_PROBE_TIMEOUT_MS = 30_000;

@@ -39,12 +39,18 @@ const PARK_REMEDIES = Object.freeze(Object.assign(Object.create(null), {
   'primary-change-reverted': 'Restore the primary change; inspect bin/primary-change-context.mjs. Region preservation alone cannot prove semantic intent.',
   'primary-change-needs-operator': 'Inspect bin/primary-change-context.mjs and the author intent before an operator decision.',
   'worker-identity-unresolved':
-    'The PR has no `pr_opened` build-completion identity row, so both merge routes '
-    + 'fail closed by design. If an interactive session opened this PR outside '
+    'The PR has no `pr_opened` build-completion identity row, so the daemon fails '
+    + 'closed. On a clean, green, MERGEABLE exact head the hammer closes it under its '
+    + 'own lease (FAILCLOSEDHAMMER-01); this park means the head is not merge-ready. '
+    + 'If an interactive session opened this PR outside '
     + '`hq pr open`, sign it: `hq pr sign --worker-class <class> --pr <n> --repo '
     + '<owner/repo> --head-sha <head> --branch <branch>`. Otherwise apply a '
     + 'head-scoped operator merge label so it closes under an operator-accountable '
     + 'lease. Do NOT relax the identity gate.',
+  'daemon-failed-closed-hammer-refused':
+    'The daemon failed closed on its own accountability gate and the hammer refused '
+    + 'the clean exact-head hand-off. Read the closure blocker for the hammer reason, '
+    + 'clear that gate, or apply a head-scoped operator merge label. A new head is new work.',
   'verdict-not-eligible':
     'The settled verdict is not daemon-mergeable (blocking findings, or non-blocking '
     + 'findings while strict_mode=true). Expect the hammer to remediate; if no hammer '

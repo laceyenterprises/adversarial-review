@@ -677,6 +677,18 @@ function formatAmaResultReasons(result) {
   return Array.isArray(result?.reasons) ? ` reasons=[${result.reasons.join(',')}]` : '';
 }
 
+// FAILCLOSEDHAMMER-01 (SEV1): the hammer refused a daemon fail-closed hand-off
+// of a clean exact head. Its own merge-eligibility refusal, or a fresh decision
+// that hands the head back to the daemon, would repeat daemon -> hammer every
+// pass with no actor. Live launches, waits, drain and capacity keep their own
+// owners, and an outcome that already escalated keeps its own page.
+export const DAEMON_FAILED_CLOSED_HAMMER_REFUSED = 'daemon-failed-closed-hammer-refused';
+function isDaemonHandoffRefusal(result) {
+  if (!result || result.dispatched === true || result.backgroundDispatch || result.needsOperator === true) return false;
+  return result.safetyRefusal === true || result.decisionMismatch?.resolvedAction === 'daemon-merge'
+    || result.nextActionShared?.decision?.action === 'daemon-merge';
+}
+
 function withAmaDispatchMetadata(result, { amaEnabled }) {
   if (!result || typeof result !== 'object') return result;
   const wrapped = {
@@ -2423,6 +2435,7 @@ async function dispatchAmaClosureFor({
     }, { amaEnabled: true });
   }
 
+  let daemonFailedClosedHandoff = false;
   if (!orphanRecovery?.ownerProof && daemonCleanMerge?.disposition && daemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) {
     const daemonHeadShort = String(gateSnapshot?.reviewedHeadSha || '').slice(0, 12);
     logger?.log?.(
@@ -2457,6 +2470,9 @@ async function dispatchAmaClosureFor({
       repo: repoPath, prNumber, headSha: currentPrHeadSha,
     });
     if (hammerRemediableFallback) {
+      // FAILCLOSEDHAMMER-01: a daemon-only accountability refusal on a clean
+      // exact head is the hammer's close; a hammer refusal of it escalates below.
+      daemonFailedClosedHandoff = shared.decision.reason === 'daemon-failed-closed';
       clearDaemonMergePark({ rootDir, repo: repoPath, prNumber });
       const fallbackReasons = Array.isArray(daemonCleanMerge.reasons) ? daemonCleanMerge.reasons : [];
       logger?.log?.(JSON.stringify({
@@ -2890,6 +2906,30 @@ async function dispatchAmaClosureFor({
     } catch (error) { logger?.warn?.(`[watcher] primary-change page delivery failed: ${error.message}`); }
     if (closureOwnerSink) closureOwnerSink.value = { owner: 'page', reason: result.reason };
     return withAmaDispatchMetadata(result, { amaEnabled: true });
+  }
+
+  if (daemonFailedClosedHandoff && isDaemonHandoffRefusal(result)) {
+    const closerReason = result.reason || 'unknown';
+    const closureBlocker = `${DAEMON_FAILED_CLOSED_HAMMER_REFUSED}: daemon=${daemonCleanMerge.reason} `
+      + `hammer=${closerReason}${formatAmaResultReasons(result)}`;
+    recordDaemonMergePark({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha || null,
+      reason: DAEMON_FAILED_CLOSED_HAMMER_REFUSED });
+    // closure-wait reserves one page per PR/head/class; later passes re-observe
+    // the same named reason without paging again. A new head is new work.
+    let boundedWait = null;
+    try {
+      boundedWait = await observeWait({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha, env,
+        immediate: true, waitClass: DAEMON_FAILED_CLOSED_HAMMER_REFUSED, reason: closureBlocker });
+    } catch (error) {
+      logger?.warn?.(`[watcher] ${DAEMON_FAILED_CLOSED_HAMMER_REFUSED} page delivery failed for ${repoPath}#${prNumber}: ${error.message}`);
+    }
+    logger?.warn?.(`[watcher] AMA ${closureBlocker} for ${repoPath}#${prNumber}@${String(currentPrHeadSha || '').slice(0, 12)}; `
+      + 'escalated to operator intervention once instead of returning the head to the daemon');
+    if (closureOwnerSink) closureOwnerSink.value = { owner: 'page', reason: DAEMON_FAILED_CLOSED_HAMMER_REFUSED };
+    return withAmaDispatchMetadata({ ...result, dispatched: false, skipMergeAgent: true,
+      reason: DAEMON_FAILED_CLOSED_HAMMER_REFUSED, namedReason: DAEMON_FAILED_CLOSED_HAMMER_REFUSED,
+      closerReason, closureBlocker, needsOperator: true, ...(boundedWait ? { boundedWait } : {}),
+      retryAfterMs: boundedWait?.retryAfterMs || 30_000 }, { amaEnabled: true });
   }
 
   // AMA-06N — expose `amaEnabled` so the watcher's coexistence

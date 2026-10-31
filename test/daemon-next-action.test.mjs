@@ -114,7 +114,11 @@ for (const result of [
   if (result.reasons?.includes('head-attestation-chain-read-failed')) assert.equal(shared.decision.reason, 'snapshot-refresh');
   if (result.reasons?.includes('build-completion-read-failed')) assert.equal(shared.decision.reason, 'snapshot-refresh');
   if (result.reasons?.includes('identity-read-transient')) assert.equal(shared.decision.reason, 'snapshot-refresh');
-  if (result.reasons?.includes('missing-produced-head-attestation')) assert.equal(shared.decision.actor, 'closure-recovery');
+  // FAILCLOSEDHAMMER-01: the clean green exact head is the hammer's close.
+  if (result.reasons?.includes('missing-produced-head-attestation')) {
+    assert.deepEqual([shared.decision.action, shared.decision.actor, shared.decision.reason],
+      ['hammer', 'hammer', 'daemon-failed-closed']);
+  }
   if (result.reason === 'unrecognized-synthetic-reason') assert.equal(shared.decision.actor, 'watcher');
   if (result.reasons?.some(reason => ['branch-protection-missing-gate', 'duplicate-family-unresolved'].includes(reason))
     || result.reason === 'protective-predecessor-state-unreadable') {
@@ -131,9 +135,13 @@ test('identity recovery requires explicit read failures and never clears missing
     ['identity-read-transient', 'unconfirmed-pr-opener-provenance']]) {
     const execution = { headSha: HEAD, reason: 'worker-identity-unresolved', reasons };
     assert.equal(isTransientDaemonDecline(execution), false);
+    // Missing provenance never becomes a daemon retry. On this clean green exact
+    // head the hammer closes it (FAILCLOSEDHAMMER-01); a red gate stays refused.
     const refused = pair({ progress: { daemonExecution: execution } });
-    assert.equal(refused.decision.reason, 'safety-refusal');
-    assert.equal(observeDaemonGate(refused, gate()).decision.reason, 'safety-refusal');
+    assert.equal(refused.decision.reason, 'daemon-failed-closed');
+    assert.equal(observeDaemonGate(refused, gate()).decision.reason, 'daemon-failed-closed');
+    assert.equal(observeDaemonGate(refused, gate({ requiredChecks: [{ name: 'unit', status: 'COMPLETED',
+      conclusion: 'FAILURE' }] })).decision.reason, 'safety-refusal');
     assert.equal(isTransientDaemonDecline({ reason: 'gate-not-eligible', reasons }), false);
   }
   for (const reasons of [['head-attestation-chain-read-failed'], ['build-completion-read-failed'],

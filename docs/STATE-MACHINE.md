@@ -1178,6 +1178,21 @@ ambiguous opener evidence, disabled reads and scope denial retain fail-closed
 recovery. Existing identity, exact-head, CI and lease predicates still authorize
 every execution; lifecycle states and smoke promises are unchanged.
 
+FAILCLOSEDHAMMER-01 (SEV1): a non-transient `worker-identity-unresolved`
+daemon decline on a clean, exact-head, green, MERGEABLE head is no longer an
+R05 safety refusal that nothing executes. The shared decision selects
+`R15-daemon-failed-closed` (hammer / hammer / `daemon-failed-closed`) ahead of
+both daemon rows, so the daemon is not reselected in the same pass. The
+existing fail-closed hammer fallback admits it; the hammer merges under its own
+lease and terminal audit without `--admin`. Live owners, holds, caps, stops,
+safety refusals and CI/conflict rows keep precedence; on any other head the
+decline stays an R05 refusal and never licenses repair around identity. When
+the hammer refuses the hand-off (its own merge-eligibility refusal, or a fresh
+decision handing the head back to the daemon), closure returns the terminal
+named reason `daemon-failed-closed-hammer-refused` with `needsOperator`,
+records it as the park reason and pages once per head through closure-wait.
+Owner states and edges are unchanged (the existing `[*] -> hammer` edge).
+
 SAFETYSTOPOWNER-01 supplies an executor for existing R05 closure recovery:
 an audited deterministic refusal with a concrete `next` gets one scoped coding
 PR update per head/refusal key. The recovery receipt and existing hammer ledger

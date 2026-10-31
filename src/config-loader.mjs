@@ -35,6 +35,7 @@ import { extendModuleSchema, freezeSchema } from './config-module-schema.mjs';
 import { MAX_WORKER_EXEC_TIMEOUT_SECONDS } from './worker-execution-limits.mjs';
 import { TOKEN_POOL_DECLARATION_PATHS, validateTokenPoolDeclarations } from './config-token-pools.mjs';
 import { googleTokensSchema } from './config-google-tokens.mjs';
+import { cloudAccessConfigSchema } from './cloud-access-config-schema.mjs';
 
 export const __testYamlHooks = {
   load: (...args) => yaml.load(...args),
@@ -458,6 +459,7 @@ function schemaV1() {
     __strict: true,
     __keys: {
       version: { __type: TYPE_INT, __required: true, __enum: [1] },
+      cloud_access: cloudAccessConfigSchema(),
       // APPLEBUILD-01: shared CFG-01 toolchain selection, owned by Apple tools.
       apple: {
         __type: TYPE_DICT,

@@ -43,11 +43,12 @@ In a mixed region it kept the blank line's unit on purpose. The concern was
 that added content "may belong to any removed line", so dropping the blank's
 unit might stop protecting content that replaced it.
 
-That concern was valid only for regions whose removed lines are all blank.
-When the region also removes content, the content units already carry its
-protection, and the blank's unit protects nothing but layout. Keeping that unit
-made "the formatter restored a blank line" look exactly like "the hammer
-reverted the author's change".
+That concern applies when no other content-bearing units remain after
+whitespace normalization, including when adjacent content differs only in
+trailing whitespace. Otherwise the content units already carry its protection,
+and the blank's unit protects nothing but layout. Keeping that layout unit made
+"the formatter restored a blank line" look exactly like "the hammer reverted
+the author's change".
 
 ## Correction
 
@@ -57,12 +58,17 @@ reverted the author's change".
 - Content removals in the same region keep their units and their
   removed-text multiset checks, exactly as before. A reverted content line
   still yields `primary-change-reverted`.
-- A region that removes only blank lines but adds content keeps protecting
-  that content as one insertion unit over the blank span. A final head that
-  inserts at either edge of the span, or anywhere inside it, still covers that
+- A region that adds content but loses all original units to blank-removal
+  and trailing-only filtering keeps protecting that content over the remaining
+  blank span. A final head that inserts at either edge of the span, or anywhere
+  inside it, still covers that
   content. This applies when a formatter restores the blank before or after it.
   A final head that returns the region to base, or only changes some other
   line, still refuses.
+- Preservation coverage uses that shared span, while reversal authorization
+  retains the original per-line coordinates. Separate precise findings can
+  authorize each line of an equal-length blank-to-content replacement; a
+  missing citation, invalid provenance or incomplete HAM patch still refuses.
 - The final (closer) diff is unchanged. Its blank-line units only add coverage,
   so this fix adds no new refusals.
 - Reversal authorization, rebase proofs and the unit coordinates they use are
@@ -79,10 +85,18 @@ Synthetic fixtures in `test/primary-change.test.mjs` (BLANKLINEREVERT-01):
   content line is reverted, whether the blank is also restored, stays removed,
   or an unrelated line elsewhere changes;
 - content that replaced a blank survives a blank restored before or after it,
-  or a pure re-insertion, and still refuses when it is reverted.
+  or a pure re-insertion, and still refuses when it is reverted;
+- content replacing a blank beside a trailing-only edit still refuses full
+  restoration or retention of only the trailing-only edit, in either order;
+- multiple blank replacements retain coverage at both edges and inside their
+  span. `test/primary-change-lines.test.mjs` verifies separate citations for
+  each replaced blank, including rebased coordinates, and retains the citation,
+  identity and HAM-content refusal boundaries.
 
-All three fail on the previous code. The existing REVERSALBLANK-01
-whitespace-only and trailing-only cases are unchanged. The primary-change and
+The first three cases fail before the correction. The adjacent trailing-only
+and separate-citation regressions fail on its initial implementation and pass
+after remediation. The existing REVERSALBLANK-01 whitespace-only and
+trailing-only cases are unchanged. The targeted primary-change and
 merge-eligibility suites pass.
 
 ## Follow-up

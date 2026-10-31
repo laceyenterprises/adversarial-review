@@ -239,18 +239,21 @@ function preservationChanges(files, paths = null, aliases = new Map(), { ignoreB
         && line.content.trimEnd() === region.addedLines[index].trimEnd()).map(line => line.position));
       // BLANKLINEREVERT-01: a removed blank line is layout, never a protected
       // unit, even beside content: a formatter may restore it. Content
-      // removals keep their own units. Content added over only blank
-      // removals is protected as an insertion at that span instead.
+      // removals keep their own units. If only layout units were removed,
+      // retain protection for the content added over the remaining blank span.
       const blankRemovalsOnly = ignoreBlankRemovals || region.addedLines.every(line => line.trim() === '');
       const blankPositions = new Set(region.removedLines.filter(line => !line.text).map(line => line.position));
       const kept = whitespaceOnly || trailingOnly ? []
         : units.filter(unit => !trailingPositions.has(unit.start)
           && (!blankRemovalsOnly || !blankPositions.has(unit.start)));
-      const blankReplacement = ignoreBlankRemovals && !whitespaceOnly && !trailingOnly
-        && region.removedLines.length > 0 && blankPositions.size === region.removedLines.length
-        && region.addedLines.some(line => line.trim() !== '');
+      const blankReplacement = ignoreBlankRemovals && !whitespaceOnly && !trailingOnly && kept.length === 0;
+      const contentUnits = units.filter(unit => !trailingPositions.has(unit.start));
+      const preservationSpan = blankReplacement
+        ? { start: contentUnits[0].start, end: contentUnits.at(-1).end } : null;
+      // Coverage may span restored blanks, but reversal citations must still
+      // authorize each original base-line unit independently.
       region.preservationUnits = blankReplacement
-        ? [{ start: region.start, end: region.end, blankReplacement: true }] : kept;
+        ? contentUnits.map(unit => ({ ...unit, preservationSpan })) : kept;
       change.whitespaceOnlyUnitsIgnored += units.length - kept.length;
       region.removedLines = whitespaceOnly || trailingOnly ? []
         : region.removedLines.filter(line => line.text && !trailingPositions.has(line.position));
@@ -384,9 +387,10 @@ function projectRebasedRegion(parentFiles, reviewedFiles, path, region, cache) {
 // A final insertion beside or between restored blank lines still carries the
 // content that replaced them. Other units need an overlapping final change.
 function unitCovered(unit, other) {
-  if (unit.start === unit.end) return other.start <= unit.start && other.end >= unit.start;
-  return (other.start < unit.end && other.end > unit.start) || (unit.blankReplacement === true
-    && other.start === other.end && other.start >= unit.start && other.start <= unit.end);
+  const { start, end } = unit.preservationSpan || unit;
+  if (start === end) return other.start <= start && other.end >= start;
+  return (other.start < end && other.end > start) || (unit.preservationSpan
+    && other.start === other.end && other.start >= start && other.start <= end);
 }
 
 function regionUnits(region) {

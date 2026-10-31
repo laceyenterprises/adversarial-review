@@ -3303,11 +3303,15 @@ counts exclude blank lines. Mixed regions retain their content-bearing units;
 a blank removal cannot waive content added by the same replacement.
 BLANKLINEREVERT-01: a removed blank line is never itself a protected unit, even
 inside a mixed region, so a formatter re-adding it is not a reversal. Content
-removals in that region stay protected. Content that replaces only blank lines
-is protected as an insertion over that span. A final insertion beside or
-between the restored blanks preserves it, and returning to base still refuses. Original
-patches still bind reversal authorization and rebase proofs. When author units
-are skipped, the evaluator evidence (including the audit's `trace.primaryChange`)
+removals in that region stay protected. If filtering blank removals and
+trailing-only replacements leaves no content-bearing units, added content
+retains protection over the remaining blank span. A final insertion beside or
+between those restored blanks preserves it, and returning to base still refuses.
+This preservation span does not collapse authorization units: each original
+base line still needs its own finding coverage, so separate findings may
+authorize separate lines of an equal-length replacement. Original patches
+still bind reversal authorization, HAM content checks and rebase proofs. When
+author units are skipped, the evaluator evidence (including the audit's `trace.primaryChange`)
 includes `whitespaceOnlyUnitsIgnored`, counting skipped base-line units or
 insertion anchors. Renames, opaque files, test-path rules and required-guard
 proofs retain their existing rules. No configuration or operator override is

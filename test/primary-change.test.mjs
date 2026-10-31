@@ -160,6 +160,42 @@ test('BLANKLINEREVERT-01: content replacing only blanks survives a restored blan
   }
 });
 
+test('BLANKLINEREVERT-01: content replacing a blank beside a trailing-only edit stays protected', () => {
+  for (const trailingFirst of [false, true]) {
+    const evidence = primaryChangeFixture(head);
+    evidence.primaryFiles = [{ filename: 'src/a.mjs', status: 'modified', additions: 2, deletions: 2,
+      patch: trailingFirst
+        ? '@@ -10,2 +10,2 @@\n-run();\n-\n+run(); \n+checkPermission();'
+        : '@@ -10,2 +10,2 @@\n-\n-run();\n+checkPermission();\n+run(); ' }];
+    const position = trailingFirst ? 11 : 10;
+    for (const finalFiles of [[], [{ filename: 'src/a.mjs', status: 'modified', additions: 1, deletions: 1,
+      patch: `@@ -${trailingFirst ? 10 : 11} +${trailingFirst ? 10 : 11} @@\n-run();\n+run(); ` }]]) {
+      evidence.finalFiles = finalFiles;
+      const refused = checkPrimaryChange(evidence, head);
+      assert.equal(refused.reason, 'primary-change-reverted', JSON.stringify({ trailingFirst, finalFiles }));
+      assert.deepEqual(refused.missingEvidence.regions, [{ start: position, end: position + 1 }]);
+      assert.equal(predicate(evidence).eligible, false);
+    }
+    // Restoring layout while retaining the new permission check is allowed.
+    evidence.finalFiles = [{ filename: 'src/a.mjs', status: 'modified', additions: 1, deletions: 1,
+      patch: `@@ -${position} +${position} @@\n-\n+checkPermission();` }];
+    assert.equal(checkPrimaryChange(evidence, head).ok, true);
+  }
+});
+
+test('BLANKLINEREVERT-01: multiple blank replacements retain span coverage at both edges and inside', () => {
+  const evidence = primaryChangeFixture(head);
+  evidence.primaryFiles = [{ filename: 'src/a.mjs', status: 'modified', additions: 2, deletions: 2,
+    patch: '@@ -10,2 +10,2 @@\n-\n-\n+checkPermission();\n+run();' }];
+  for (const anchor of [9, 10, 11]) {
+    evidence.finalFiles = [{ filename: 'src/a.mjs', status: 'modified', additions: 2, deletions: 0,
+      patch: `@@ -${anchor},0 +${anchor + 1},2 @@\n+checkPermission();\n+run();` }];
+    assert.equal(checkPrimaryChange(evidence, head).ok, true, `insertion after base line ${anchor}`);
+  }
+  evidence.finalFiles = [];
+  assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+});
+
 test('REVERSALBLANK-01: a whitespace-only final edit cannot cover reverted author content', () => {
   const evidence = primaryChangeFixture(head);
   evidence.primaryFiles = [{ filename: 'README.md', status: 'modified', additions: 1, deletions: 0,

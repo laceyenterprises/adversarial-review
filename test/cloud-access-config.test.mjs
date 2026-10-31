@@ -5,6 +5,39 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig, loadConfigRuntime } from '../src/config-loader.mjs';
 
+test('AFA AWS strict schema is disabled by default and accepts private overlay pins', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'afa-cfg-'));
+  try {
+    const topPath = join(dir, 'config.yaml');
+    writeFileSync(topPath, 'version: 1\n');
+    assert.equal(loadConfig({ topPath, env: {} }).get('cloud_access.aws.enabled'), false);
+    assert.equal(loadConfig({ topPath, env: {} }).get('cloud_access.aws.region'), 'us-east-2');
+    const aws = {
+      enabled: true, project_ref: 'fixture-project', budget_topic_arn: '<private-topic>',
+      role_arn: '<private-role>', default_profile_arn: '<private-default-profile>',
+      trust_anchor_arn: '<private-anchor>', helper_path: '<private-helper>',
+      signed_helper_sha256: '<private-pin>', materialization_directory: '<private-materialization>',
+      client_ref: '<private-resolver-ref>', host_uri: '<private-host-identity>',
+      ca_fingerprint: '<private-ca-pin>',
+      budget_name: 'fixture-budget', activation_receipt_path: '<private-receipt>',
+      activation_public_key_path: '<private-public-key>',
+    };
+    writeFileSync(join(dir, 'config.local.yaml'), JSON.stringify({ cloud_access: { aws } }));
+    for (const loader of [loadConfig, loadConfigRuntime]) {
+      for (const [key, value] of Object.entries(aws)) {
+        assert.equal(loader({ topPath, env: {} }).get(`cloud_access.aws.${key}`), value);
+      }
+    }
+    rmSync(join(dir, 'config.local.yaml'));
+    for (const aws of [{ region: 'us-east-1' }, { enabled: 'true' }, { typo: true }]) {
+      writeFileSync(topPath, JSON.stringify({ version: 1, cloud_access: { aws } }));
+      assert.throws(() => loadConfig({ topPath, env: {} }), { name: 'AgentOSConfigError' });
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('ZFA host overlay parses all foundation leaves with flags disabled', () => {
   const dir = mkdtempSync(join(tmpdir(), 'zfa-cfg-'));
   try {

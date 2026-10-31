@@ -5,6 +5,24 @@ export function cloudAccessConfigSchema() {
   const text = () => ({ __type: 'string' });
   return object({
     enabled: { __type: 'bool', __default: false },
+    aws: object({
+      enabled: { __type: 'bool', __default: false },
+      region: { __type: 'string', __enum: ['us-east-2'], __default: 'us-east-2' },
+      project_ref: text(),
+      role_arn: text(),
+      default_profile_arn: text(),
+      trust_anchor_arn: text(),
+      helper_path: text(),
+      signed_helper_sha256: text(),
+      materialization_directory: text(),
+      client_ref: text(),
+      host_uri: text(),
+      ca_fingerprint: text(),
+      budget_topic_arn: text(),
+      budget_name: text(),
+      activation_receipt_path: text(),
+      activation_public_key_path: text(),
+    }),
     azure: object({
       enabled: { __type: 'bool', __default: false },
       tenant_id: text(),

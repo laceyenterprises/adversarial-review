@@ -474,6 +474,24 @@ unknown enrollment holds. This does not add a delivery status.
 
 ### Reviewer run-state ledger
 
+REVIEWERFLOOR-01 applies the effective personal Anthropic reserve floor to
+reviewer selection, including native and pooled Claude routes. Fresh measured
+weekly capacity at or below `reserveFloors.anthropic-oauth.remainingPct`
+grounds the personal Claude reviewer for that attempt. Corporate Claude remains
+independent. The candidate order is corporate-first Codex account selection,
+then enabled and available Gemini, with all existing builder-family refusals.
+Thus a `[codex]` PR uses Gemini; when no eligible alternative exists it retains
+the quota hold. Stale or unknown floor evidence does not ground Claude.
+Reviewer pins and AFH degradation rollback do not waive a measured reserve
+floor. Protected hammer, remediation, responder and merge roles retain their
+existing reserve policy. No state or claim transition changes.
+
+The existing fallback log and pass/run `afhReviewerFallback` metadata retain
+the floor reason, measured remaining percentage and configured threshold.
+After deployment, SRE should observe an organic review at or below the floor,
+confirm its selected family/account and the reserve reason, and verify that
+personal Claude selection returns when capacity rises above the floor.
+
 The delivery row also retains `codex_broker_provider` (`codex`, `codex-corp`,
 or `NULL` for non-Codex/legacy rows). The watcher writes it after winning the
 claim, guarded by that session UUID, before dispatch. Corporate Codex is preferred

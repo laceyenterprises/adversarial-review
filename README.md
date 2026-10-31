@@ -336,7 +336,20 @@ per attempt, so it auto-reverts the moment the provider recovers — there is
 nothing to un-pin. Every failure of the quota read (missing `hq`, non-zero exit,
 timeout, unparseable JSON, absent verdict) fails open to the configured
 primary/Gemini route with a degraded-read breadcrumb; it never blocks a tick.
-Set `ADVERSARIAL_AFH_REVIEWER_FALLBACK=0` to disable the hop entirely.
+Set `ADVERSARIAL_AFH_REVIEWER_FALLBACK=0` to disable the provider-grounding hop.
+
+REVIEWERFLOOR-01 separately binds personal Claude reviewers to the effective
+Anthropic reserve floor from `hq fleet quota status --json`. Fresh measured
+weekly capacity at or below that floor selects corporate-first Codex when
+the builder family permits it, then enabled and available Gemini. A `[codex]`
+PR therefore uses Gemini or holds for eligible capacity. Ready corporate Claude
+remains independent. Stale or unknown floor evidence adds no refusal, and
+protected operational roles retain their existing exemptions. Reviewer pins
+and the AFH hop rollback do not waive a measured floor. The watcher log and
+review pass/run `afhReviewerFallback` record the reason and percentages.
+After deployment SRE should observe an organic floor crossing and recovery;
+offline tests do not establish that live receipt. Lifecycle states, claim
+ownership and smoke commands remain unchanged.
 
 When Claude account selection reports a hold, AFH skips Claude as a fallback
 candidate, including when corporate account evidence is unknown or stale. Unknown

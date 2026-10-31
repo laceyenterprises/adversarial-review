@@ -24,6 +24,13 @@ The run-state machine (`launching`, `heartbeating`, `spawned`, `completed`,
 `spawnedAt`, `lastHeartbeatAt`, `reattachToken`, `adoptedAfterBounce`, and a
 free-form `subjectContext`.
 
+`subjectContext.afhReviewerFallback` mirrors the pass metadata documented in
+[reviewer passes](reviewer-passes.md#launch-and-reattach-identity).
+REVIEWERFLOOR-01 adds optional `reserveFloor: { reason, remainingPct, floorPct,
+source }` to that object for a personal Anthropic reserve fallback. Its source
+is `hq-fleet-quota-status`; its reason also names the measured percentage and
+effective threshold. Historical records omit it.
+
 ITP-11 adds `subjectContext.agyHolderLease` to leased Gemini reviews. It
 contains the canonical `identity: gemini-reviewer`, `tokenAccountId`, holder
 `user`, `hqOwner`, `reviewId`, unique lease `generation`, declaration

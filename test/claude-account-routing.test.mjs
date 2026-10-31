@@ -11,6 +11,26 @@ import { resolveRemediationWorkerClassWithFallback } from '../src/remediation-wo
 import { isHammerWorkerClass } from '../src/ama/hammer-worker-class.mjs';
 import { isCrossModelReviewWaived, reviewerRefusesBuilder, routePR } from '../src/adapters/subject/github-pr/routing.mjs';
 import { claudeAccountFixture } from './helpers/claude-account-fixture.mjs';
+import { personalClaudeReviewerFloor } from '../src/reviewer-reserve-floor.mjs';
+
+test('REVIEWERFLOOR-01 only personal reviewer roles become floor-bound', () => {
+  const fixture = claudeAccountFixture({ corp: 'exhausted' });
+  const floor = fixture.reserveFloors['anthropic-oauth'];
+  Object.assign(floor, { remainingPct: 80, active: false, paused: false, nearCap: false,
+    protectedClasses: ['hammer*', 'remediator*', 'sre*', '*-responder', 'merge-agent*', 'ama*', '*reviewer*'] });
+  floor.weeklyMeasurement.percentRemaining = 80;
+  assert.equal(selectClaudeAccountLane(JSON.stringify(fixture), { workerClass: 'claude-reviewer' }).hold, true);
+  for (const workerClass of ['hammer-claude', 'remediator-claude']) {
+    const account = selectClaudeAccountLane(JSON.stringify(fixture), { workerClass });
+    assert.equal(account.provider, 'claude-code');
+    assert.equal(account.hold, false);
+  }
+  for (const workerClass of ['sre', 'incident-responder', 'merge-agent', 'ama', 'claude-code', 'claude-reviewer-corp']) {
+    assert.equal(personalClaudeReviewerFloor(fixture, { workerClass }), null);
+  }
+  floor.weeklyMeasurement.percentRemaining = 81;
+  assert.equal(selectClaudeAccountLane(JSON.stringify(fixture), { workerClass: 'claude-reviewer' }).provider, 'claude-code');
+});
 
 for (const workerClass of ['hammer-claude', 'remediator-claude', 'claude-reviewer']) {
   for (const [label, options, suffix] of [

@@ -575,6 +575,7 @@
         "src/review-state-db.mjs",
         "src/reviewer-route-selection.mjs",
         "src/afh-reviewer-fallback.mjs",
+        "src/reviewer-reserve-floor.mjs",
         "src/reviewer-failure-classification.mjs",
         "src/review-body-capture.mjs",
         "src/follow-up-jobs.mjs",
@@ -592,6 +593,7 @@
       "reviewerExecutionHarnesses": ["claude-code", "codex", "antigravity", "gemini-cli"],
       "reviewerExecutionEffortSources": ["env", "registry", "committed-seed", "host-config", "transport-default", "model-display-name", "none"],
       "claudeReplySelectionFields": ["candidateCount", "selectedCandidate", "selectedType", "laterCandidates", "contractValid"],
+      "reviewerReserveFloorFields": ["reason", "remainingPct", "floorPct", "source"],
       "reviewerSettlementFailureMessage": { "successfulPass": null, "unsuccessfulPassPriority": ["error", "stderr", "stderrTail"] },
       "compatibility": "REVIEWPROV-01: missing execution harness stamps unknown, never a model family. Antigravity suffix effort accepts only low, medium, high or xhigh; release qualifiers remain null. Existing fields, nullability and lifecycle are unchanged.",
       "owner": "reviewer spawn, settle, and token attribution"
@@ -1160,6 +1162,8 @@
       "store": "data/reviewer-runs/<sessionUuid>.json",
       "schemaSurface": "src/adapters/reviewer-runtime/run-state.mjs",
       "relatedSchemaSurfaces": [
+        "src/afh-reviewer-fallback.mjs",
+        "src/reviewer-reserve-floor.mjs",
         "src/reviewer-attribution.mjs",
         "src/reviewer-token-pool.mjs",
         "src/reviewer-reattach.mjs",

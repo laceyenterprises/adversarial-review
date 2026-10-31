@@ -45,7 +45,167 @@ import {
 import { applyGeminiReviewerRoute, routeSubject } from '../src/adapters/subject/github-pr/routing.mjs';
 import { selectReviewerRouteForAttempt } from '../src/reviewer-route-selection.mjs';
 import { parseHqFleetQuotaStatus } from '../src/fleet-quota-status.mjs';
-import { fleetStatusWithCodexAccountEvidence } from './helpers/codex-account-fixture.mjs';
+import { fleetStatusWithCodexAccountEvidence, codexAccountFixture } from './helpers/codex-account-fixture.mjs';
+import { claudeAccountFixture } from './helpers/claude-account-fixture.mjs';
+
+function reviewerFloorFixture(remaining = 80) {
+  const claude = claudeAccountFixture({ corp: 'exhausted' });
+  const codex = codexAccountFixture();
+  const payload = {
+    providerStatuses: [...claude.providerStatuses.filter(row => row.provider === 'anthropic'), ...codex.providerStatuses],
+    reserveFloors: { ...claude.reserveFloors, ...codex.reserveFloors },
+    brokerAuth: { provider_states: { ...claude.brokerAuth.provider_states, ...codex.brokerAuth.provider_states } },
+  };
+  const floor = payload.reserveFloors['anthropic-oauth'];
+  // Independent weekly capacity may differ from the short-window flags.
+  Object.assign(floor, { remainingPct: 80, active: false, paused: false, nearCap: false });
+  floor.weeklyMeasurement.percentRemaining = remaining;
+  return payload;
+}
+
+function floorRoute(grounding, { builderClass = 'gemini', mode = 'fallback', ...pins } = {}) {
+  return applyAfhReviewerFallback({ builderClass,
+    baseRoute: { reviewerModel: 'claude', botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN', builderClass, ...pins },
+    grounding, geminiReviewerMode: mode });
+}
+
+test('REVIEWERFLOOR-01 above the floor keeps personal Claude; equality and below use corporate Codex', () => {
+  for (const remaining of [85, 80, 79, 5, 0]) {
+    const grounding = afhGroundingSnapshotFromStdout(JSON.stringify(reviewerFloorFixture(remaining)));
+    const route = floorRoute(grounding);
+    assert.equal(route.reviewerModel, remaining > 80 ? 'claude' : 'codex');
+    if (remaining > 80) {
+      assert.equal(route.afhReviewerFallback, undefined);
+      continue;
+    }
+    assert.equal(route.codexBrokerProvider, 'codex-corp');
+    assert.equal(route.botTokenEnv, 'GH_CODEX_REVIEWER_TOKEN');
+    assert.equal(route.quotaBlocked, false);
+    assert.match(route.afhReviewerFallback.reason, /personal-anthropic-reserve-floor/);
+    assert.deepEqual(route.afhReviewerFallback.reserveFloor, {
+      reason: `personal-anthropic-reserve-floor:remaining=${remaining}<=floor=80`,
+      remainingPct: remaining, floorPct: 80, source: 'hq-fleet-quota-status',
+    });
+    const decision = afhReviewerFallbackDecision({ builderClass: 'gemini',
+      baseRoute: { reviewerModel: 'claude' }, grounding, geminiReviewerMode: 'fallback' });
+    assert.match(describeAfhReviewerFallback(decision), new RegExp(`remaining=${remaining}<=floor=80`));
+  }
+});
+
+test('REVIEWERFLOOR-01 Codex-family authors use Gemini or hold, preserving family refusal', () => {
+  const grounding = afhGroundingSnapshotFromStdout(JSON.stringify(reviewerFloorFixture()));
+  for (const builderClass of ['codex', 'clio-agent']) {
+    const route = floorRoute(grounding, { builderClass });
+    assert.equal(route.reviewerModel, 'gemini');
+    assert.match(route.afhReviewerFallback.reason, /personal-anthropic-reserve-floor/);
+    assert.ok(route.afhReviewerFallback.considered.some(row => row.reviewerModel === 'codex'
+      && row.reason === 'codex-builder-integrity-guard'));
+    const held = floorRoute(grounding, { builderClass, mode: 'off' });
+    assert.equal(held.quotaBlocked, true);
+    assert.match(held.quotaGrounding.reason, /personal-anthropic-reserve-floor/);
+    const grounded = { ...grounding, geminiPoolAvailability: { available: false, state: 'unavailable' } };
+    assert.equal(floorRoute(grounded, { builderClass }).quotaBlocked, true);
+  }
+});
+
+test('REVIEWERFLOOR-01 reads the effective threshold each attempt and automatically returns to Claude', () => {
+  const payload = reviewerFloorFixture(61);
+  payload.reserveFloors['anthropic-oauth'].remainingPct = 60;
+  const select = () => floorRoute(afhGroundingSnapshotFromStdout(JSON.stringify(payload)));
+  assert.equal(select().reviewerModel, 'claude');
+  payload.reserveFloors['anthropic-oauth'].weeklyMeasurement.percentRemaining = 60;
+  assert.equal(select().reviewerModel, 'codex');
+  payload.reserveFloors['anthropic-oauth'].weeklyMeasurement.percentRemaining = 61;
+  assert.equal(select().reviewerModel, 'claude');
+});
+
+test('REVIEWERFLOOR-01 stale, unknown, disabled or invalid floor evidence does not ground Claude', () => {
+  for (const mutate of [
+    payload => { delete payload.reserveFloors; },
+    payload => { payload.reserveFloors['anthropic-oauth'].weeklyMeasurement = null; },
+    payload => { payload.reserveFloors['anthropic-oauth'].weeklyMeasurement.status = 'stale'; },
+    payload => { payload.reserveFloors['anthropic-oauth'].weeklyMeasurement.confidence = 'stale'; },
+    payload => { payload.reserveFloors['anthropic-oauth'].weeklyMeasurement.inferred = true; },
+    payload => { payload.reserveFloors['anthropic-oauth'].weeklyMeasurement.percentRemaining = null; },
+    payload => { payload.reserveFloors['anthropic-oauth'].remainingPct = 0; },
+    payload => { payload.reserveFloors['anthropic-oauth'].remainingPct = '80'; },
+    payload => { payload.providerStatuses[0].cachedEvidenceStale = true; },
+  ]) {
+    const payload = reviewerFloorFixture();
+    // Legacy personal-only routes have no independent account-admission hold.
+    payload.providerStatuses = payload.providerStatuses.filter(row => row.provider !== 'anthropic' || row.authPath !== 'oauth-corp');
+    delete payload.brokerAuth.provider_states['claude-code-corp'];
+    mutate(payload);
+    const grounding = afhGroundingSnapshotFromStdout(JSON.stringify(payload));
+    assert.equal(floorRoute(grounding).reviewerModel, 'claude');
+    assert.equal(reviewerModelGrounding(grounding, 'claude').reserveFloor, undefined);
+  }
+  const grounding = afhGroundingSnapshotFromStdout(JSON.stringify(reviewerFloorFixture()));
+  for (const stale of [{ staleIfError: {} }, { fleetQuotaStatus: { stale: true } }, { fleetQuotaStatus: { error: true } }]) {
+    // The quota cache converts a stale account proposal into an unknown hold.
+    assert.equal(floorRoute({ ...grounding, ...stale,
+      claudeAccountSelection: { hold: true, reason: 'claude-account-evidence-unknown' },
+    }).reviewerModel, 'claude');
+  }
+});
+
+test('REVIEWERFLOOR-01 a ready corporate Claude account is independent of the personal floor', () => {
+  const payload = reviewerFloorFixture();
+  payload.providerStatuses.find(row => row.provider === 'anthropic' && row.authPath === 'oauth-corp').state = 'ok';
+  const grounding = afhGroundingSnapshotFromStdout(JSON.stringify(payload));
+  assert.equal(grounding.claudeAccountSelection.provider, 'claude-code-corp');
+  assert.equal(floorRoute(grounding).reviewerModel, 'claude');
+  assert.equal(reviewerModelGrounding(grounding, 'claude').reserveFloor, undefined);
+});
+
+test('REVIEWERFLOOR-01 pooled personal Claude and AFH pins cannot bypass measured floor policy', async () => {
+  const payload = reviewerFloorFixture();
+  for (const disabled of [false, true]) {
+    const grounding = await readAfhReviewerGrounding({
+      env: disabled ? { ADVERSARIAL_AFH_REVIEWER_FALLBACK: 'off' } : {},
+      includeFleetQuotaStatus: true,
+      execFileImpl: async () => ({ stdout: JSON.stringify(payload) }),
+      ensureWorkerRegistryReadyImpl: async () => {},
+      selectReviewerTokenAccountImpl: async ({ reviewerModel }) => reviewerModel === 'claude'
+        ? { pooled: true, hold: false, provider: 'claude-code', brokerProvider: 'claude-code' } : null,
+    });
+    const route = floorRoute(grounding, { operatorPinnedReviewer: true });
+    assert.equal(route.reviewerModel, 'codex');
+    assert.equal(route.codexBrokerProvider, 'codex-corp');
+    assert.match(route.afhReviewerFallback.reason, /personal-anthropic-reserve-floor/);
+  }
+});
+
+test('REVIEWERFLOOR-01 floor reason reaches the review pass and runtime record context', async t => {
+  const { spawnReviewer } = await import('../src/reviewer-spawn-settle.mjs');
+  const root = mkdtempSync(join(tmpdir(), 'reviewer-floor-record-'));
+  const route = floorRoute(afhGroundingSnapshotFromStdout(JSON.stringify(reviewerFloorFixture())));
+  let pass, context;
+  const logs = [];
+  t.mock.method(console, 'log', line => logs.push(line));
+  try {
+    await spawnReviewer({
+      rootDir: root, repo: 'sample/project', prNumber: 17, builderTag: 'gemini',
+      reviewerModel: route.reviewerModel, botTokenEnv: route.botTokenEnv,
+      codexBrokerProvider: route.codexBrokerProvider, afhReviewerFallback: route.afhReviewerFallback,
+      quotaCheckEnv: {}, selectReviewerTokenAccountImpl: async () => null,
+      readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'ok' }),
+      reviewerRuntimeAdapterOverride: { async spawnReviewer(request) {
+        context = request.subjectContext;
+        return { ok: false, failureClass: 'reviewer-command-failed', error: 'synthetic runtime failure' };
+      } },
+      beginReviewerPassImpl(_root, record) { pass = record; },
+      completeReviewerPassImpl() {},
+      readBestReviewerEvidenceTokenUsageImpl: async () => null,
+      ledgerLookupSleepImpl: async () => {},
+    });
+    assert.equal(context.codexBrokerProvider, 'codex-corp');
+    assert.deepEqual(pass.metadata.afhReviewerFallback, route.afhReviewerFallback);
+    assert.deepEqual(context.afhReviewerFallback, route.afhReviewerFallback);
+    assert.match(context.afhReviewerFallback.reason, /personal-anthropic-reserve-floor/);
+    assert.ok(logs.some(line => /codex_account=corporate/.test(line)));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test('fleet quota retry completes when its delay is the only remaining event-loop work', () => {
   const moduleUrl = new URL('../src/afh-reviewer-fallback.mjs', import.meta.url).href;

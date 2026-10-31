@@ -6373,6 +6373,37 @@ test('roles.remediator_fallback is declared config: schema default, file overrid
   }
 });
 
+test('roles.remediator_fallback normalizes the corporate alias in YAML and env lists', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      roles:
+        remediator_fallback: [claude-code, codex-corp, remediator-codex-corp, codex]
+    `);
+    for (const load of [loadConfig, loadConfigRuntime]) {
+      assert.deepEqual(
+        load({ topPath: top, env: {} }).get('roles.remediator_fallback'),
+        ['claude-code', 'remediator-codex-corp', 'remediator-codex-corp', 'codex'],
+      );
+      for (const name of [
+        'AGENT_OS_ROLES_REMEDIATOR_FALLBACK',
+        'ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK',
+      ]) {
+        const cfg = load({ topPath: top, env: { [name]: 'gemini, codex-corp, codex' } });
+        assert.deepEqual(
+          cfg.get('roles.remediator_fallback'),
+          ['gemini', 'remediator-codex-corp', 'codex'],
+        );
+        assert.equal(cfg.resolutionTrace('roles.remediator_fallback').at(-1).source, `env:${name}`);
+      }
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('AMA merge_authority worker_class_fallback defaults to [hammer-claude] (HHR)', () => {
   const tmp = freshTmp();
   try {

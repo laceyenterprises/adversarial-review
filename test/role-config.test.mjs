@@ -9,6 +9,7 @@ import { strict as assert } from 'node:assert';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { loadConfig } from '../src/config-loader.mjs';
 
 import {
   DEFAULT_ROLE_TOP_PATH,
@@ -27,6 +28,34 @@ function makeTmp() {
 
 function writeYaml(path, body) {
   writeFileSync(path, body, { encoding: 'utf8' });
+}
+
+for (const pin of ['remediator-codex-corp', 'codex-corp']) {
+  test(`REMEDIATORCORP-01 accepts and normalizes ${pin} in files and env aliases`, t => {
+    const dir = makeTmp();
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const topPath = join(dir, 'config.yaml');
+    const localPath = join(dir, 'config.local.yaml');
+    const modulePath = join(dir, 'module.yaml');
+    const options = { topPath, modulePaths: [modulePath], env: {},
+      loaderImpl: args => loadConfig({ ...args, modulePaths: [modulePath] }) };
+    for (const path of [topPath, modulePath, localPath]) {
+      writeYaml(topPath, 'version: 1\n');
+      writeYaml(modulePath, '{}\n');
+      writeYaml(localPath, '{}\n');
+      writeYaml(path, `${path === topPath ? 'version: 1\n' : ''}roles:\n  remediator: ${pin}\n`
+        + (path === localPath ? '  unrelated_future_key: true\n' : ''));
+      assert.equal(loadRoleConfig(options).get('roles.remediator'), 'remediator-codex-corp');
+      assert.equal(resolveDefaultRemediator(options), 'remediator-codex-corp');
+      validateStartupRoleConfig(options);
+    }
+    writeYaml(localPath, '{}\n');
+    writeYaml(topPath, 'version: 1\nroles:\n  remediator: codex\n');
+    for (const envName of ['AGENT_OS_ROLES_REMEDIATOR', 'ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR']) {
+      assert.equal(resolveDefaultRemediator({ ...options, env: { [envName]: pin } }),
+        'remediator-codex-corp');
+    }
+  });
 }
 
 test('ITPPOOLCONFLICT-01 startup returns an empty warning list for clean role config', t => {

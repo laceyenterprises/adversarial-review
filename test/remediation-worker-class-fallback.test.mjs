@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { poolConflictFixture } from './helpers/pool-conflict-fixture.mjs';
 import { selectWorkerTokenAccount } from '../src/worker-token-pool.mjs';
+import { pickRemediationWorkerClass } from '../src/remediation-worker-routing.mjs';
 
 import {
   nextRoundReviewerModels,
@@ -19,6 +20,32 @@ function fleetStatusStub(rows) {
   // Shape parsed by parseHqFleetQuotaStatus: { providerStatuses: [{provider, authPath, state}] }
   const stdout = JSON.stringify({ providerStatuses: rows });
   return async () => ({ stdout });
+}
+
+for (const pin of ['remediator-codex-corp', 'codex-corp']) {
+  for (const capped of [false, true]) {
+    test(`REMEDIATORCORP-01 ${pin} keeps corporate affinity; corporate capped=${capped}`, async () => {
+      const env = { AGENT_OS_CONFIG_PATH: '/dev/null', AGENT_OS_ROLES_REMEDIATOR: pin };
+      const primary = pickRemediationWorkerClass({ builderTag: 'codex' }, { env });
+      assert.equal(primary, 'remediator-codex-corp');
+      assert.equal(pickRemediationWorkerClass({ builderTag: 'codex' }, { env,
+        loaderImpl: () => ({ get: key => key === 'roles.remediator' ? pin : undefined }),
+      }), primary);
+      const result = await resolveRemediationWorkerClassWithFallback({
+        primary, env, fallbackWorkerClasses: ['gemini'],
+        modelForClass: () => 'synthetic-model',
+        selectAccountImpl: () => assert.fail('corporate pins must bypass account substitution'),
+        execFileImpl: fleetStatusStub([
+          { provider: 'openai', authPath: 'oauth', state: 'ok' },
+          { provider: 'openai', authPath: 'oauth-corp', state: capped ? 'exhausted' : 'ok' },
+          { provider: 'google', authPath: 'oauth', state: 'ok' },
+        ]),
+      });
+      assert.equal(result.workerClass, capped ? 'gemini' : 'remediator-codex-corp');
+      assert.equal(result.fellBack, capped);
+      assert.equal(result.hold, false);
+    });
+  }
 }
 
 test('ITPPOOLCONFLICT-01 declared remediator with conflicting policy keeps its class route', async t => {

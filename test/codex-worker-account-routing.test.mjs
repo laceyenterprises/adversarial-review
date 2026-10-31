@@ -222,7 +222,10 @@ for (const [label, mutate, reason] of [
   assert.ok(decision.diagnostics.length > 0);
 });
 
-for (const account of ['personal', 'corporate', 'unknown']) test(`real remediation claim: ${account}`, async t => {
+for (const [account, pin] of [
+  ['personal', 'adversarial'], ['corporate', 'adversarial'], ['unknown', 'adversarial'],
+  ['corporate', 'remediator-codex-corp'], ['corporate', 'codex-corp'],
+]) test(`real remediation claim: ${account}, pin=${pin}`, async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'codex-remediator-dispatch-'));
   const hqRoot = join(rootDir, 'hq');
   const authHome = join(rootDir, '.codex');
@@ -230,7 +233,7 @@ for (const account of ['personal', 'corporate', 'unknown']) test(`real remediati
   for (const dir of [hqRoot, authHome, workspaceDir]) mkdirSync(dir);
   writeFileSync(join(authHome, 'auth.json'), JSON.stringify({ auth_mode: 'chatgpt',
     tokens: { access_token: 'synthetic-access', refresh_token: 'synthetic-refresh' } }));
-  const overrides = { ...env, AGENT_OS_ROLES_REMEDIATOR: 'adversarial',
+  const overrides = { ...env, AGENT_OS_ROLES_REMEDIATOR: pin,
     ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: undefined,
     AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'native', ADV_WITH_HQ_INTEGRATION: '1',
     AGENT_OS_DEPLOY_CHECKOUT: join(rootDir, 'deploy'),
@@ -244,7 +247,8 @@ for (const account of ['personal', 'corporate', 'unknown']) test(`real remediati
   };
   restore(overrides);
   t.after(() => { restore(previous); rmSync(rootDir, { recursive: true, force: true }); });
-  createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'sample/project', prNumber: 42, builderTag: 'claude-code',
+  createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'sample/project', prNumber: 42,
+    builderTag: pin === 'adversarial' ? 'claude-code' : 'codex',
     reviewerModel: 'gemini', reviewBody: '## Verdict\nRequest changes', critical: true,
     reviewPostedAt: '2026-10-19T00:00:00Z' });
   const snapshot = account === 'unknown' ? {} : codexAccountFixture({ corp: account === 'personal' ? 'exhausted' : 'ok' });
@@ -285,7 +289,8 @@ for (const account of ['personal', 'corporate', 'unknown']) test(`real remediati
     assert.equal(dispatches[0].env.CODEX_BROKER_PROVIDER, account === 'corporate' ? 'codex-corp' : 'codex');
     const choices = logs.filter(line => line.includes('codex_account='));
     assert.equal(choices.length, 1);
-    const reason = account === 'personal' ? 'corporate-unavailable-personal-ready' : 'corporate-ready';
+    const reason = pin !== 'adversarial' ? 'primary-available'
+      : account === 'personal' ? 'corporate-unavailable-personal-ready' : 'corporate-ready';
     assert.match(choices[0], new RegExp(`codex_account=${account} .*reason=${reason}$`));
   }
 });

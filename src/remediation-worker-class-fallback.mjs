@@ -76,6 +76,8 @@ export function normalizeRemediationWorkerClass(workerClassInput) {
     case 'remediator-claude':
     case 'remediator-claude-corp':
       return workerClass;
+    case 'codex-corp':
+      return 'remediator-codex-corp';
     case 'codex':
     case 'codex-remediation':
       return 'codex';

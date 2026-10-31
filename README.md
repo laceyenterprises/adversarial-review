@@ -1,5 +1,16 @@
 # Adversarial Review
 
+ZFA-01 adds a parse-only strict mirror of `cloud_access.azure` foundation
+inputs in `src/cloud-access-config-schema.mjs`, consumed by the shared loader.
+Both enablement flags default false; the region is `eastus2`; private identity,
+certificate-path and budget choices have no defaults. No cloud operation or
+reviewer consumer is added. `test/cloud-access-config.test.mjs` covers host
+overlay parsing and refusals. Deploy this reader before the Agent OS companion's
+host-overlay keys are used. `cloud_access.azure.infrastructure.budget_start_date`
+is a string; the Node reader preserves quoted and unquoted YAML ISO timestamps
+such as `2026-10-01T00:00:00Z` as strings. Existing lifecycle/smoke promises are
+unchanged.
+
 GTMGAWIRE-01 adds the strict `services.hcp.google_tokens.profiles` metadata
 schema, matching Agent OS's Python and shell readers. It accepts purpose-named
 profiles, a 1Password Document reference, the `lacey-web` identity and six

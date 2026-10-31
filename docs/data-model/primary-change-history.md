@@ -20,7 +20,7 @@ Each completed history read is an atomic JSON record named
 | 4 | Live merge-base SHA |
 | 5 | Review-response SHA-256 digest (`reviewKey`), or `null` |
 | 6 | Trusted dispatcher launch head (`launchHead`), or `null` |
-| 7 | History proof cache identity version: `reversalprov-v5` |
+| 7 | History proof cache identity version: `reversalproof-v6` |
 
 The JSON object contains `key` and `history`; there is no schema-version field.
 `history.headSha` is the requested head and `hasHammerCommits` is a boolean.
@@ -161,12 +161,59 @@ files count toward the bounds. A file removed between enumeration and stat is
 skipped individually; other stat errors propagate. Missing directories are
 empty stores. Sweeping refuses deletion of a foreign-owned record.
 
-The store is disposable derived evidence, not an audit ledger. New heads,
+The head-keyed history records are disposable derived evidence. New heads,
 bases, review digests or launch heads produce new filenames; there is no
 migration or PR-closure deletion hook. Operators can inspect the `key`,
 `history.headSha`, optional boundary and filesystem UID/mode to diagnose a
 miss. Removing obsolete records causes a fresh read, never a waiver of the
 primary-change merge gate.
+
+## Durable verified reversal observations (REVERSALPROOF-01)
+
+The same owned directory also holds `verified-<digest>.json` observations.
+These are separate from disposable history records and excluded from their
+seven-day/512-entry sweep. There is no automatic expiry: deleting one removes
+historical proof and can make an already authorized reversal unprovable.
+They use the same canonical repository mapping, repository-state migration
+fence, UID/symlink checks and atomic mode-0600 publication.
+
+Their ordered `key` is `[repo, numeric PR, patchIdentity, 'verified-reversal-v1']`;
+`digest` is SHA-256 of its JSON. `patchIdentity` is JSON containing the cited
+review reference, sorted commit trailer values, and the existing ordered
+commit-patch identity (paths, statuses, changed lines, context-run/hunk
+boundaries and newline markers; context text and absolute offsets may differ).
+The value `record` contains `authorization` (the verified review, commit,
+reviewed/parent file snapshots, completeness and any original-proof evidence)
+including the parent snapshot's `mergeBase`, and `regions`:
+`{ path, start, end, restoringDeletion }` entries in that
+authorization's parent merge-base coordinates. Review/finding references
+remain in the commit's verified citations. Separate cited reviews on one commit
+have separate keys.
+
+Only the canonical persistent collector publishes an observation, after the
+ordinary region evaluator has verified provenance, current review authority,
+finding kind/coverage, closure ancestry and parent-state patch content.
+Non-blocking observations are evaluated under strict policy; reuse still
+requires the caller's effective strict policy. A trailer without a verified
+region creates no observation. Collection records each direction separately:
+removing introduced content versus restoring deleted base content.
+
+On a later review/head/base, the collector looks up the live commit's patch
+and trailers, rereads its provenance and protected-closure parent snapshot,
+then maps each candidate region to the recorded parent segment by unique,
+content-equivalent patch segments. An unchanged immutable parent and merge base
+retain exact coordinates, including beside duplicate content elsewhere.
+It requires a recorded region/direction,
+re-evaluates the original authorization against its stored review and parent,
+and checks live HAM patch coverage at the current parent's coordinates.
+Unrelated parent changes do not invalidate this region proof. Changed content,
+ambiguous duplicates, uncited units and changed reversal patches still refuse.
+Superseding reviews do not revoke an already verified historical observation;
+they remain mandatory for the independent current-head review gates.
+Missing/corrupt records supply no authority and use the existing live/snapshot
+proof path. Foreign-owned/unreadable state cannot supply proof.
+The `reversalproof-v6` history identity recomputes older records once so current
+verified authorizations are recorded without manual cache invalidation.
 
 MIGRENUMBERDERIVED-02 extends these transient proofs to Alembic wrappers with
 paired revision modules and explicit module-name registries. Each proof binds

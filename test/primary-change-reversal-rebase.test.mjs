@@ -5,9 +5,146 @@ import assert from 'node:assert/strict';
 import { checkPrimaryChange, fetchPrimaryChange, fetchPrimaryChangeContext,
   primaryChangeExactReviewEvidence } from '../src/ama/primary-change.mjs';
 import { recoverStrandedCloserHead } from '../src/ama/closer-head-recovery.mjs';
+import { evaluateMergeEligibility } from '../src/ama/merge-eligibility.mjs';
+import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const sha = (c) => c.repeat(40);
 const oldBase = sha('0'), base = sha('b'), reviewedHead = sha('1'), author = sha('2'), head = sha('c');
+
+async function durableReversal(t, options = {}, { rebase = false, nextOptions = {}, transform = (_path, value) => value } = {}) {
+  const rootDir = mkdtempSync(join(tmpdir(), 'verified-reversal-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const run = async (options, rewritten = false) => {
+    const { transport } = await collect(options);
+    const mapping = rewritten ? [[base, sha('a')], [author, sha('7')], [head, sha('e')]] : [];
+    const currentHead = rewritten ? sha('e') : head;
+    const get = Object.assign(async path => {
+      let originalPath = path;
+      for (const [before, after] of mapping) originalPath = originalPath.replaceAll(after, before);
+      let response = await transport(originalPath);
+      if (rewritten) {
+        let json = JSON.stringify(response);
+        for (const [before, after] of mapping) json = json.replaceAll(before, after);
+        response = JSON.parse(json);
+      }
+      return transform(path, response);
+    }, { persistPrimaryChange: true });
+    get.metadata = get;
+    const evidence = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 8088, headSha: currentHead, rootDir, get },
+      { fetchCiCostImpl: async ({ headSha }) => ({ headSha, ok: true, failedCheck: false }) });
+    return { evidence, result: checkPrimaryChange(evidence, currentHead, { strictNonBlockingRemediation: true }) };
+  };
+  const initial = await run(options);
+  const stored = readdirSync(join(rootDir, 'data', 'primary-change-history')).filter(name => name.startsWith('verified-'));
+  const later = review({ node_id: 'PRR_superseding', commit_id: sha('f'),
+    body: '## Blocking issues\n- None.\n## Verdict\nComment only' });
+  const next = await run({ ...options, ...(rebase ? { shift: 12 } : {}),
+    reviews: [...(options.reviews || [review()]), later], ...nextOptions }, rebase);
+  return { initial, stored, next };
+}
+
+test('REVERSALPROOF-01: a verified reversal survives a superseding review without an original snapshot', async t => {
+  const { initial, stored, next } = await durableReversal(t);
+  assert.equal(initial.result.ok, true);
+  assert.equal(stored.length, 1);
+  assert.equal(next.result.ok, true, JSON.stringify(next.result));
+  assert.ok(next.evidence.reversalAuthorizations[0].verifiedRegions.length);
+  const merged = evaluateMergeEligibility({ verdict: 'settled-success', prState: 'OPEN',
+    requiredChecks: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }],
+    mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', candidateHead: head, validatedHead: head,
+    branchProtectionRequired: true, requiredGateContext: 'agent-os/adversarial-gate',
+    branchProtectionRequiredContexts: ['agent-os/adversarial-gate'],
+    leaseHeld: true, labels: [], primaryChange: next.evidence });
+  assert.equal(merged.eligible, true, JSON.stringify(merged));
+  const closure = isEligibleForAmaClosure({ headSha: head, verdict: 'approved', riskClass: 'low',
+    remediationPending: false, blockingFindingState: 'known', blockingFindingCount: 0,
+    nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 },
+  { headSha: head, isOpen: true, mergeableState: 'MERGEABLE', labels: [],
+    statusCheckRollup: [{ name: 'test', conclusion: 'SUCCESS' }] },
+  { enabled: true, eligibility: { riskClasses: ['low'] }, branchProtection: { required: false } },
+  { primaryChange: next.evidence });
+  assert.equal(closure.eligible, true, JSON.stringify(closure));
+  for (const mutate of [
+    authorization => { delete authorization.originalAuthorization; },
+    authorization => { authorization.commit.files[0].patch = authorization.commit.files[0].patch.replace('+start()', '+other()'); },
+    authorization => { authorization.commit.author.login = 'fixture-builder'; },
+  ]) {
+    const changed = structuredClone(next.evidence);
+    mutate(changed.reversalAuthorizations[0]);
+    assert.equal(checkPrimaryChange(changed, changed.headSha).reason, 'primary-change-reverted');
+  }
+});
+
+test('REVERSALPROOF-01: unchanged parent coordinates preserve proof beside duplicate segments', async t => {
+  const { initial, next } = await durableReversal(t, { shift: 0, reviewHead: author, reviewToParent: 'identical',
+    reviews: [review({ commit_id: author })], duplicatePrimary: true }, {
+    transform: (path, response) => path.endsWith(`${base}...${head}`) ? { ...response,
+      files: [{ filename: 'src/a.mjs', status: 'modified', additions: 2, deletions: 1,
+        patch: '@@ -45 +45,2 @@\n-start()\n+start_unsafe()\n+log_startup()' }] } : response,
+  });
+  assert.equal(initial.result.ok, true, JSON.stringify(initial.result));
+  assert.equal(next.result.ok, true, JSON.stringify(next.result));
+});
+
+test('REVERSALPROOF-01: durable region proof recomputes equivalence after a context-only rebase', async t => {
+  for (const supersede of [false, true]) {
+    const { initial, next } = await durableReversal(t, {}, { rebase: true, nextOptions: {
+      parentContext: '\n new_context()', reviewedContext: '\n old_context()', parentExtraHunk: true,
+      ...(!supersede ? { reviews: [review()] } : {}),
+    }, transform: (path, response) => path.endsWith(`${sha('a')}...${sha('e')}`)
+      ? { ...response, files: [{ filename: 'src/a.mjs', status: 'modified', additions: 1, deletions: 1,
+        patch: '@@ -40 +40 @@\n-other\n+extra' }] } : response });
+    assert.equal(initial.result.ok, true);
+    assert.equal(next.result.ok, true, JSON.stringify(next.result));
+    assert.notEqual(next.evidence.headSha, initial.evidence.headSha);
+    assert.notEqual(next.evidence.mergeBase, initial.evidence.mergeBase);
+  }
+});
+
+test('REVERSALPROOF-01: changed region or reversal content cannot reuse a verified proof', async t => {
+  for (const nextOptions of [{ rebasedAdded: '+changed_content()' },
+    { reviewedAdded: '+unverified_review_content()', rebasedAdded: '+changed_content()' }]) {
+    const { initial, next } = await durableReversal(t, {}, { rebase: true, nextOptions });
+    assert.equal(initial.result.ok, true);
+    assert.equal(next.result.reason, 'primary-change-reverted');
+  }
+  // Keep the reversal patch identical, but change its parent-state region.
+  const { next } = await durableReversal(t, {}, { rebase: true, transform: (path, response) => {
+    if (path.endsWith(`${sha('a')}...${sha('7')}`)) return { ...response, files: response.files.map(file => ({
+      ...file, patch: file.patch.replace('start_unsafe()', 'changed_parent_content()'),
+    })) };
+    return response;
+  } });
+  assert.equal(next.result.reason, 'primary-change-reverted');
+});
+
+test('REVERSALPROOF-01: a never-verified authorization is never persisted or revived', async t => {
+  for (const options of [{ cites: [] }, { reviews: [review({ body: review().body.replace('`10-11`', '`30-31`') })] },
+    { hammerLogin: 'fixture-builder' }, { rebasedAdded: '+unreviewed_content()' }]) {
+    const { initial, stored, next } = await durableReversal(t, options, { rebase: true });
+    assert.equal(initial.result.reason, 'primary-change-reverted');
+    assert.equal(stored.length, 0);
+    assert.equal(next.result.reason, 'primary-change-reverted');
+  }
+});
+
+test('REVERSALPROOF-01: persisted non-blocking proof still needs strict policy and the cited region', async t => {
+  const nonBlocking = review({ state: 'COMMENTED',
+    body: review().body.replace('## Blocking issues', '## Non-blocking issues')
+      .replace('## Non-blocking issues\n- None.', '').replace('Request changes', 'Comment only') });
+  const { initial, next } = await durableReversal(t, { reviews: [nonBlocking],
+    cites: ['PRR_cited finding=1 kind=non-blocking'] }, { rebase: true });
+  assert.equal(initial.result.ok, true);
+  assert.equal(next.result.ok, true, JSON.stringify(next.result));
+  assert.equal(checkPrimaryChange(next.evidence, next.evidence.headSha).reason, 'primary-change-reverted');
+  const authorization = next.evidence.reversalAuthorizations[0];
+  authorization.verifiedRegions = authorization.verifiedRegions.map(region => ({ ...region, start: 999, end: 1000 }));
+  assert.equal(checkPrimaryChange(next.evidence, next.evidence.headSha,
+    { strictNonBlockingRemediation: true }).reason, 'primary-change-reverted');
+});
 
 async function snapshotReversal({ transform = (_path, response) => response,
   read = (path, transport) => transport(path), ...options } = {}) {

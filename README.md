@@ -1995,6 +1995,15 @@ account admission. Runtime adapters with no declared ID hold leased accounts jus
 like other unsupported runtimes. These repairs retain the existing smoke promises;
 the offline reviewer-account consumer tests cover these refusal paths.
 ITP-14 uses the same selection owner for declared hammer/remediator pools.
+REMEDIATORCORP-01: `roles.remediator: remediator-codex-corp` explicitly pins the
+corporate Codex account. `codex-corp` is an alias normalized by the config loader,
+including `AGENT_OS_ROLES_REMEDIATOR` and `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR`.
+The pin bypasses pooled and automatic personal-account substitution, including
+when personal Codex is ready; declared `roles.remediator_fallback` entries remain
+eligible when corporate is capped. Offline coverage includes role config,
+worker routing and real remediation-claim fixtures. After both config readers
+deploy, an operator can set the host overlay and observe the next natural
+remediation dispatch's worker class and corporate broker provider.
 ITPREMEDHOLD-01 keeps remediators on the legacy class path when their pool is
 undeclared or has no usable evidence; a selected account takes managed dispatch
 even when config or health routing selects local execution. Only positive pool

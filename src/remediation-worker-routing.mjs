@@ -129,7 +129,7 @@ function resolveRoleRegistryRemediator({ env = process.env, topPath, loaderImpl,
 
 function pickRemediationWorkerClass(job, { env = process.env, topPath, loaderImpl } = {}) {
   const envOverride = defaultRemediatorWorkerClassFromEnv(env, { topPath, loaderImpl });
-  if (envOverride) return envOverride;
+  if (envOverride) return normalizeRemediationWorkerClass(envOverride) || envOverride;
   const builderTag = String(job?.builderTag || '').trim().toLowerCase();
   if (builderTag && Object.prototype.hasOwnProperty.call(REMEDIATION_WORKER_BY_BUILDER_TAG, builderTag)) {
     return REMEDIATION_WORKER_BY_BUILDER_TAG[builderTag];

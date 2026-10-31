@@ -144,7 +144,7 @@ export function resetRuntimeUnknownWarningCacheForTests() {
 // -------- Schema declaration -----------------------------------------------
 
 const ENUM_ROLES_REVIEWER = ['claude-code', 'codex', 'claude', 'gemini', 'adversarial'];
-const ENUM_ROLES_REMEDIATOR = ['claude-code', 'codex', 'gemini', 'adversarial'];
+const ENUM_ROLES_REMEDIATOR = ['claude-code', 'codex', 'gemini', 'remediator-codex-corp', 'codex-corp', 'adversarial'];
 export const ENUM_CODEX_WORKER_ACCOUNT_ORDER = Object.freeze(['personal-first', 'corporate-first']);
 // REMFALLBACK-01: the concrete remediator worker classes a capped remediator can
 // fall back to. `adversarial` is a routing mode, not a class, so it is excluded.
@@ -2056,6 +2056,7 @@ function schemaV1() {
             __type: TYPE_STRING,
             __default: 'adversarial',
             __enum: ENUM_ROLES_REMEDIATOR,
+            __normalize: { 'codex-corp': 'remediator-codex-corp' },
           },
           codex_worker_account_order: {
             __type: TYPE_STRING,
@@ -4345,6 +4346,7 @@ export const ENV_ALIASES = {
   },
   'roles.remediator': {
     canonical: 'AGENT_OS_ROLES_REMEDIATOR',
+    // YAML and both env names share the schema's corporate alias normalization.
     aliases: [['ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR', identity]],
   },
   // The legacy env toggle from AR#859 stays honored as an alias, comma-separated.

@@ -14,14 +14,16 @@ test('milestones are fixed, durable, run-bound and do not move on repetition', (
   try {
     const env = { HQ_ROOT: root, HQ_LAUNCH_REQUEST_ID: 'lrq_fixture', HQ_WORKER_RUN_ID: 'wrun_fixture' };
     for (const milestone of HAMMER_PROGRESS_MILESTONES) {
-      recordHammerProgress(milestone, { env, reason: 'checks-red', now: new Date('2026-01-01T00:00:00Z') });
-      recordHammerProgress(milestone, { env, reason: 'checks-red', now: new Date('2026-01-02T00:00:00Z') });
+      const first = recordHammerProgress(milestone, { env, reason: 'checks-red', now: new Date('2026-01-01T00:00:00Z') });
+      const repeated = recordHammerProgress(milestone, { env, reason: 'merge-error', now: new Date('2026-01-02T00:00:00Z') });
       const receipt = JSON.parse(readFileSync(join(root, 'dispatch/lrq_fixture/hammer-progress/wrun_fixture',
         `${milestone}.json`)));
       assert.equal(receipt.at, '2026-01-01T00:00:00.000Z');
       assert.equal(receipt.runId, 'wrun_fixture');
       assert.equal(receipt.launchRequestId, 'lrq_fixture');
       assert.equal(receipt.milestone, milestone);
+      assert.deepEqual(first, receipt);
+      assert.deepEqual(repeated, receipt);
     }
     assert.throws(() => recordHammerProgress('tool-call', { env }));
     assert.throws(() => recordHammerProgress('terminal-stop', { env }));

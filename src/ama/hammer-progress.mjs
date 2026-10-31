@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { controllerLaunchId } from './hammer-controller.mjs';
 import { resolveHqRoot } from '../hq-root.mjs';
@@ -22,10 +22,12 @@ export function recordHammerProgress(milestone, { env = process.env, reason, now
   mkdirSync(directory, { recursive: true });
   const receipt = { schemaVersion: 1, launchRequestId, runId, milestone, at: now.toISOString(),
     ...(milestone === 'terminal-stop' ? { reason } : {}) };
+  const path = join(directory, `${milestone}.json`);
   try {
-    writeFileSync(join(directory, `${milestone}.json`), JSON.stringify(receipt), { flag: 'wx', mode: 0o600 });
+    writeFileSync(path, JSON.stringify(receipt), { flag: 'wx', mode: 0o600 });
   } catch (error) {
     if (error.code !== 'EEXIST') throw error;
+    return JSON.parse(readFileSync(path, 'utf8'));
   }
   return receipt;
 }

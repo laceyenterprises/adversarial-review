@@ -40,7 +40,7 @@ ham_append_terminal_audit() {
   ham_audit_outcome="$1"
   ham_audit_reason="$2"
   if [ "$ham_audit_outcome" != succeeded ]; then
-    "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-progress.mjs" terminal-stop "$ham_audit_reason" || echo 'HAM progress receipt unavailable' >&2
+    "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-progress.mjs" terminal-stop "$ham_audit_reason" || true
   fi
   # Record confirmed execution or a refusal before other bookkeeping can fail.
   # The CLI filters refusal reasons to known decisions, excluding read failures.

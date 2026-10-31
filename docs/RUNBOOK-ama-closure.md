@@ -6,7 +6,10 @@ through `bin/hammer-progress.mjs` into
 root. `HQ_WORKER_RUN_ID` and the unambiguous launch identity bind the producer.
 Only completed verify-head, changed-head publication (including server rebase),
 merge invocation and named terminal stop emit receipts. Repetition preserves the
-first receipt. Reading scripts or making tool calls emits nothing.
+first receipt, and the producer returns that durable receipt on duplicate calls.
+The metered merge hook accepts `-R` / `--repo` before `pr merge`, including
+attached option values. Receipt failures emit one warning and leave the phase's
+core operation running. Reading scripts or making tool calls emits nothing.
 
 The Agent OS supervisor ingests receipts into `hammerProgress` metadata and
 owns enforcement: 60 minutes from first life to a push, merge attempt or named

@@ -117,18 +117,22 @@ for (const reason of [null, 'quota_resume_retry_enqueued']) {
   });
 }
 
-test('HAMSCRATCHRESUME-01: settled quota retry no longer protects terminal scratch', async t => {
-  const f = fixture(t);
-  const path = f.scratch();
-  f.record(path);
-  await sweepHammerScratchDirs(f.root, { ...f.options,
-    readLaunchRequestStatusImpl: () => ({ ok: true, row: {
-      launch_request_id: 'synthetic-lrq', status: 'failed', failure_class: 'worker_killed',
-      worker_killed_cause: 'provider_quota_exhausted', last_admit_refusal_reason: 'quota_resume_retry_enqueued',
-    }, retryChain: [{ launch_request_id: 'synthetic-retry', status: 'succeeded' }] }),
-  });
-  assert.equal(existsSync(path), false);
-});
+for (const reason of [null, 'quota_resume_retry_enqueued']) {
+  for (const status of ['succeeded', 'failed', 'canceled']) {
+    test(`HAMSCRATCHRESUME-01: settled quota retry releases scratch (${reason}, ${status})`, async t => {
+      const f = fixture(t);
+      const path = f.scratch();
+      f.record(path);
+      await sweepHammerScratchDirs(f.root, { ...f.options,
+        readLaunchRequestStatusImpl: () => ({ ok: true, row: {
+          launch_request_id: 'synthetic-lrq', status: 'failed', failure_class: 'worker_killed',
+          worker_killed_cause: 'provider_quota_exhausted', last_admit_refusal_reason: reason,
+        }, retryChain: [{ launch_request_id: 'synthetic-retry', status }] }),
+      });
+      assert.equal(existsSync(path), false);
+    });
+  }
+}
 
 test('HAMSCRATCHRESUME-01: explicit cancellation resolves an unpublished resume intent', async t => {
   const f = fixture(t);

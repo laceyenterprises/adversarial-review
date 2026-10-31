@@ -93,8 +93,12 @@ function dispatchArgs(root) {
   };
 }
 
-for (const reason of ['quota-resume-phase-inputs-missing', 'dispatch-phase-scripts-missing']) {
-  test(`HAMSCRATCHRESUME-01: ${reason} replaces broken inputs once through normal closer dispatch`, async t => {
+for (const [reason, status] of [
+  ['quota-resume-phase-inputs-missing', 'failed'],
+  ['quota-resume-phase-inputs-missing', 'canceled'],
+  ['dispatch-phase-scripts-missing', 'failed'],
+]) {
+  test(`HAMSCRATCHRESUME-01: ${reason} (${status}) replaces broken inputs once through normal closer dispatch`, async t => {
     const root = fixture(t);
     const args = dispatchArgs(root);
     const identity = { repo: 'fixture/repo', prNumber: 42, headSha: head };
@@ -114,8 +118,10 @@ for (const reason of ['quota-resume-phase-inputs-missing', 'dispatch-phase-scrip
     rmSync(original.scratchDir, { recursive: true, force: true });
     let currentLaunch = original.launchRequestId;
     const readLaunchRequestStatusImpl = ({ launchRequestId }) => ({ ok: true, retryChain: [],
-      row: { launch_request_id: launchRequestId, status: launchRequestId === currentLaunch ? 'failed' : 'running',
-        ...(reason.startsWith('quota-') ? { failure_class: reason } : {}) } });
+      row: { launch_request_id: launchRequestId, status: launchRequestId === currentLaunch ? status : 'running',
+        ...(reason.startsWith('quota-') ? { failure_class: reason,
+          worker_killed_cause: 'provider_quota_exhausted',
+          last_admit_refusal_reason: 'quota_resume_retry_enqueued' } : {}) } });
     const audit = () => recordHammerEarlyFailure(reason, { env: {
       HAM_HQ_ROOT: args.dispatchContext.hqRoot, HAM_REPO: identity.repo,
       HAM_PR_NUMBER: '42', HAM_TARGET_REMEDIATION_SHA: head, HQ_LAUNCH_REQUEST_ID: currentLaunch,

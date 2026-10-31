@@ -354,6 +354,10 @@ bounded `readDispatchLookupSync` compatibility reader. `dispatch-read-client.mjs
 adapts the producer's `schema_version: 1`, `roots`, ordered `items`, `retry_edges`
 and completeness evidence. The historical launch-reader export names remain
 compatibility aliases; they contain no launch SQL or backend resolution.
+With retry traversal requested, launch probes preserve `retry_edges` as
+`retryEdges` alongside `retryChain`. AMA uses the parent/child identities to
+settle historical quota intents without dismissing an unresolved quota-killed
+leaf; producer item ordering is not treated as retry ancestry.
 The controller also stops interpreting canonical/standby database settings.
 
 Operator-provisioned app grants must explicitly name each project and

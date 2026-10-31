@@ -7301,9 +7301,13 @@ part of validation.
 
 Pending quota resume owns the existing scratch even though the killed execution
 is failed. The sweep and terminal reconciler hold until the intent is resolved
-or a live retry owns it. If the worker pool cancels with
+or a live retry owns it. A published successor resolves its parent's quota
+intent even without an enqueue marker; retry edges keep an unresolved
+quota-killed leaf protected independently. If the worker pool cancels with
 `quota-resume-phase-inputs-missing`, AMA replaces the terminal chain once through
-ordinary closer dispatch. A hammer finding missing procedures records
+ordinary closer dispatch, including when the row retains its quota cause and
+enqueue marker. An omitted/null single-attempt retry chain is empty for input
+recovery unless explicitly unreadable. A hammer finding missing procedures records
 `dispatch-phase-scripts-missing` with the terminal-audit helper before stopping.
 The same bounded repair gives it a fresh scratch and lease, with one PR/head
 credit and the lifetime ceiling retained. A second missing-input failure

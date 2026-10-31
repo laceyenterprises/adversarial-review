@@ -13,6 +13,10 @@ unknown/live descendants and a second broken replacement refuse recovery.
 Monotonic dispatch-record `retryCount` is retained; `unexecutedRefundCount`
 accounts for the one dispatch repair. This is an input repair, not a no-work
 execution verdict.
+For a single-attempt adapter response, an omitted or null retry chain is treated
+as empty unless explicitly marked unreadable. The launch identity and terminal
+audit/refusal evidence are still required; live or unreadable retries refuse
+replacement.
 
 ## Operator approval re-arm (APPROVALREARM-01)
 

@@ -11,6 +11,13 @@ See [the closure runbook](docs/RUNBOOK-ama-closure.md).
 
 # Adversarial Review
 
+AFA-07 mirrors disabled-by-default `cloud_access.aws.enabled`, the fixed
+`us-east-2` region and private project/budget/activation-receipt inputs in the
+same strict schema. Identifiers and file paths have no defaults. This is
+parse-only, with no cloud consumer, operation, state or smoke change.
+Deploy this reader before the Agent OS companion uses its host-overlay keys;
+`test/cloud-access-config.test.mjs` covers defaults, overlay and refusals.
+
 ZFA-01 adds a parse-only strict mirror of `cloud_access.azure` foundation
 inputs in `src/cloud-access-config-schema.mjs`, consumed by the shared loader.
 Both enablement flags default false; the region is `eastus2`; private identity,

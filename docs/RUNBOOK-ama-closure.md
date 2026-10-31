@@ -1,3 +1,31 @@
+## Outcome progress receipts (HAMPROGRESS-01)
+
+The phase scripts and metered merge invocation emit fixed, version-1 receipts
+through `bin/hammer-progress.mjs` into
+`dispatch/<lrq>/hammer-progress/<run-id>/<milestone>.json` under the resolved HQ
+root. `HQ_WORKER_RUN_ID` and the unambiguous launch identity bind the producer.
+Only completed verify-head, changed-head publication (including server rebase),
+merge invocation and named terminal stop emit receipts. Repetition preserves the
+first receipt, and the producer returns that durable receipt on duplicate calls.
+The metered merge hook accepts `-R` / `--repo` before `pr merge`, including
+attached option values. Receipt failures emit one warning and leave the phase's
+core operation running. Reading scripts or making tool calls emits nothing.
+
+The Agent OS supervisor ingests receipts into `hammerProgress` metadata and
+owns enforcement: 60 minutes from first life to a push, merge attempt or named
+stop, three hours from start, and 40 million total tokens by default. Knobs are
+positive integers in `worker_pool.hammer_limits`. Verify-head alone earns no
+outcome credit. A stop requests the existing termination/drain path, releases
+custody after drain and keeps the existing per-PR lifetime charge. It grants no
+merge authority or refund. The phase/prompt instruction repair is a separate
+change.
+
+Deploy this producer and schema before activating the supervisor companion.
+After normal reload, observe natural runs read-only for receipts, named stops,
+released custody and a fresh closer on the next normal AMA cycle, subject to
+existing ceilings. Do not create a synthetic live closer for verification.
+Existing exact-head, strict/check and lease fences remain unchanged.
+
 ## Controller dispatch-read activation (DOGREADSFLAG-02)
 
 New closers require both the reviewed Agent OS adapter activation policy and

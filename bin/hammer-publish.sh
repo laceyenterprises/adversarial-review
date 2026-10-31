@@ -325,6 +325,9 @@ if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" -eq 1 ]; then
   # Attest that exact result, then stop: local HEAD is not synchronized and
   # must never overwrite the known remote commit through the git fallback.
   HAM_API_KNOWN_PUSHED_HEAD=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.pushedHead // empty')
+  if [ -n "$HAM_API_KNOWN_PUSHED_HEAD" ] && [ "$HAM_API_KNOWN_PUSHED_HEAD" != "$HAM_PUSHED_FROM_HEAD" ]; then
+    "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-progress.mjs" remediation-pushed || true
+  fi
   if [ -n "$HAM_API_KNOWN_PUSHED_HEAD" ]; then
     if ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-pushed-attestation.mjs \
       <<REPO>> <<PR_NUMBER>> "$HAM_PUSHED_FROM_HEAD" "$HAM_API_KNOWN_PUSHED_HEAD"; then
@@ -378,6 +381,7 @@ if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" -eq 1 ]; then
   # Provenance belongs to publication, before any CI/credential/lease stop.
   # This grants no CI validation or merge authority.
   if [ -n "$HAM_PUSHED_HEAD" ] && [ "$HAM_PUSHED_HEAD" != "$HAM_PUSHED_FROM_HEAD" ]; then
+    "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-progress.mjs" remediation-pushed || true
     if ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-pushed-attestation.mjs \
       <<REPO>> <<PR_NUMBER>> "$HAM_PUSHED_FROM_HEAD" "$HAM_PUSHED_HEAD"; then
       HAM_PHASE_OUTCOME=pushed-attestation-unavailable

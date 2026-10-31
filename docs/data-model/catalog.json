@@ -2,6 +2,18 @@
   "version": 1,
   "entries": [
     {
+      "id": "hammer-progress",
+      "title": "Hammer Progress Receipts",
+      "path": "docs/data-model/hammer-progress.md",
+      "store": "<HQ root>/dispatch/<launchRequestId>/hammer-progress/<runId>/<milestone>.json",
+      "schemaSurface": "src/ama/hammer-progress.mjs",
+      "relatedSchemaSurfaces": ["bin/hammer-progress.mjs", "bin/metered-gh.mjs", "src/ama/hammer-terminal-audit.mjs", "bin/hammer-verify-head.sh", "bin/hammer-publish.sh"],
+      "owner": "active HAM worker run",
+      "primaryKey": ["launchRequestId", "runId", "milestone"],
+      "fields": ["schemaVersion", "launchRequestId", "runId", "milestone", "at", "reason"],
+      "compatibility": "Version 1 exclusive-create filesystem records; duplicate milestones return the original receipt. Terminal stops require a named reason. Best-effort observation grants no merge authority, CI validation or budget refund; no expiry or cleanup is introduced."
+    },
+    {
       "id": "explicit-review-intents",
       "title": "Explicit Re-review Intents",
       "path": "docs/data-model/explicit-review-intents.md",

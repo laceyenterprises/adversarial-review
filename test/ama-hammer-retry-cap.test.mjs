@@ -61,6 +61,43 @@ const REVIEWED_HAMMER_WORKER_ID = `hammer-ama-pr-${PR_NUMBER}-${REVIEWED_HEAD.sl
 const ADVANCED_HAMMER_WORKER_ID = `hammer-ama-pr-${PR_NUMBER}-${ADVANCED_HEAD.slice(0, 12)}`;
 const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGNAME || 'unknown';
 
+for (const failureClass of ['hammer-no-outcome-progress', 'hammer-wall-clock-exceeded',
+  'hammer-token-ceiling-exceeded']) {
+  test(`HAMPROGRESS-01: ${failureClass} automatically replaces the closer and retains charges`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closer-outcome-stop-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    let stoppedLaunch = null;
+    let launches = 0;
+    const deps = hammerDispatchDeps({
+      readLaunchRequestStatusImpl: ({ launchRequestId }) => ({ ok: true, row: {
+        status: launchRequestId === stoppedLaunch ? 'failed' : 'running',
+        failure_class: launchRequestId === stoppedLaunch ? failureClass : null,
+      } }),
+      execFileImpl: async (_cmd, argv) => {
+        if (argv[0] === 'dispatch' && argv[1] === 'status') {
+          return { stdout: JSON.stringify({ status: stoppedLaunch ? 'failed' : 'running', failure_class: failureClass }) };
+        }
+        if (argv[0] === 'dispatch' && argv[1] === '--priority') {
+          return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`,
+            launchRequestId: `lrq_fixture-${++launches}`, dispatchId: `fixture-${launches}` }) };
+        }
+        return { stdout: '{}' };
+      },
+    });
+    const first = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...deps });
+    assert.equal(first.dispatched, true, JSON.stringify(first));
+    const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD };
+    stoppedLaunch = readAmaCloserDispatchRecord(rootDir, identity).launchRequestId;
+    const replacement = await maybeDispatchAmaCloser({
+      ...hammerDispatchArgs(rootDir, { dispatchContext: { dispatchedAt: '2026-07-06T13:01:00Z' } }), ...deps,
+    });
+    assert.equal(replacement.dispatched, true, JSON.stringify(replacement));
+    assert.equal(launches, 2);
+    assert.notEqual(readAmaCloserDispatchRecord(rootDir, identity).launchRequestId, stoppedLaunch);
+    assert.equal(readHammerRetryCapLedger(rootDir, identity).lifetimeAttemptCount, 2);
+  });
+}
+
 test('STOPSTALE-02: cap freshness uses active durable alerts without changing accounting', () => {
   const at = '2026-01-01T00:00:00.000Z';
   const later = '2026-01-01T00:01:00.000Z';

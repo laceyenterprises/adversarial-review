@@ -1,3 +1,10 @@
+HAMPROGRESS-01 adds run-bound closer phase receipts for the supervisor's outcome,
+wall-clock and total-token limits. Existing terminal/drain and AMA replacement
+edges retain lifetime charges. Merge safety and existing smoke promises are
+unchanged. Deploy the receipt/schema companion before supervisor activation;
+passive SRE acceptance observes natural named stops and bounded replacement.
+See [the closure runbook](RUNBOOK-ama-closure.md).
+
 # Adversarial Review State Machine Notes
 
 HAMSCRATCHRESUME-01 retains the existing closer states and bounded replacement

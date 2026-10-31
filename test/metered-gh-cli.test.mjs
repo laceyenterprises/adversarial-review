@@ -2,7 +2,7 @@ import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,6 +28,42 @@ for (const code of [0, 7]) {
     assert.equal(result.status, code);
     assert.equal(result.stdout, 'fixture output');
     assert.equal(result.stderr, 'fixture diagnostic');
+  });
+}
+
+for (const prefix of [[], ['-R', 'fixture/repo'], ['--repo', 'fixture/repo'],
+  ['--repo=fixture/repo'], ['-Rfixture/repo']]) {
+  test(`hammer merge receipt accepts repository prefix ${JSON.stringify(prefix)}`, t => {
+    const env = fixture(t, "process.stdout.write(JSON.stringify(process.argv.slice(2)));");
+    env.HAM_HQ_ROOT = env.PATH;
+    env.HQ_LAUNCH_REQUEST_ID = 'lrq_fixture';
+    env.AGENT_OS_WORKER_LRQ_ID = 'lrq_fixture';
+    env.HQ_WORKER_RUN_ID = 'wrun_fixture';
+    const args = [...prefix, 'pr', 'merge', '42', '--squash'];
+    const result = spawnSync(process.execPath, [helper, 'exec-hammer', ...args],
+      { env, encoding: 'utf8', timeout: 5000 });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), args);
+    const receipt = JSON.parse(readFileSync(join(env.HAM_HQ_ROOT,
+      'dispatch/lrq_fixture/hammer-progress/wrun_fixture/merge-attempted.json'), 'utf8'));
+    assert.equal(receipt.milestone, 'merge-attempted');
+  });
+}
+
+for (const args of [['api', 'pr', 'merge'], ['--repo', 'pr', 'merge'],
+  ['pr', 'view', '42'], ['pr', 'view', '--template', 'pr', 'merge']]) {
+  test(`non-merge arguments emit no receipt: ${JSON.stringify(args)}`, t => {
+    const env = fixture(t, "process.stdout.write('done');");
+    env.HAM_HQ_ROOT = env.PATH;
+    env.HQ_LAUNCH_REQUEST_ID = 'lrq_fixture';
+    env.AGENT_OS_WORKER_LRQ_ID = 'lrq_fixture';
+    env.HQ_WORKER_RUN_ID = 'wrun_fixture';
+    const result = spawnSync(process.execPath, [helper, 'exec-hammer', ...args],
+      { env, encoding: 'utf8', timeout: 5000 });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(existsSync(join(env.HAM_HQ_ROOT, 'dispatch')), false);
   });
 }
 

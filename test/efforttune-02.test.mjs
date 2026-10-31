@@ -121,6 +121,35 @@ for (const recovery of [false, true]) {
   });
 }
 
+test('OAuth recovery without resolved effort records the medium transport default and its source', async t => {
+  const f = registry(t, 'codex-transport-default', { classes: {
+    'codex-reviewer': { defaultModel: 'gpt-6-sol', allowedModels: ['gpt-6-sol'] },
+  } });
+  const authRoot = mkdtempSync(join(tmpdir(), 'efforttune-auth-'));
+  t.after(() => rmSync(authRoot, { recursive: true, force: true }));
+  withProcessEnv(t, { ...f.env, AGENT_OS_CODEX_PER_WORKER_AUTH: '0', CODEX_BROKER_PROVIDER: 'codex',
+    CODEX_REVIEWER_AUTH_PROVIDER: '', CODEX_HOME: '', CODEX_AUTH_PATH: writeDummyCodexAuth(join(authRoot, 'auth.json')) });
+  assert.equal(await ensureWorkerRegistryReady(), true);
+  assert.equal(harness.resolveCodexExecOverrides({ log: quiet }).reasoningEffort, null);
+  let recoveryCalls = 0;
+  const result = await harness.reviewWithCodex('+synthetic diff', '', {
+    log: quiet, codexCli: process.execPath, assertCodexOAuthImpl: async () => {},
+    execFileSyncImpl: serviceFixtureExec,
+    spawnCodexReviewImpl: async ({ configOverrides }) => {
+      assert.equal(configOverrides.some(item => item.key === 'model_reasoning_effort'), false);
+      throw Object.assign(new Error('synthetic no progress'), { progressTimedOut: true });
+    },
+    reviewWithCodexOAuthResponsesImpl: async (_prompt, { reasoningEffort }) => {
+      recoveryCalls += 1;
+      assert.equal(reasoningEffort, 'medium');
+      return { reviewText: review, tokenUsage: null };
+    },
+  });
+  assert.equal(recoveryCalls, 1);
+  assert.equal(result.execution.effort, 'medium');
+  assert.equal(result.execution.effortSource, 'transport-default');
+});
+
 test('Claude review execution records its unchanged effort and its source', async t => {
   const f = registry(t, 'claude', new Error('synthetic outage'));
   withProcessEnv(t, f.env);

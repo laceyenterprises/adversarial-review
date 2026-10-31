@@ -104,6 +104,18 @@ test('LVR-02: launch-bound refusal is terminal and repeated reporting preserves 
   assert.equal(audit().attempts[0].reason, 'early-refusal');
 });
 
+test('HAMPROGRESS-01: named early refusal also leaves the first run-bound progress receipt', t => {
+  const { env } = fixture(t);
+  env.HQ_WORKER_RUN_ID = 'wrun_synthetic';
+  env.AGENT_OS_WORKER_LRQ_ID = env.LAUNCH_REQUEST_ID = env.HQ_LAUNCH_REQUEST_ID;
+  reportHammerEarlyFailure('early-refusal', { env });
+  reportHammerEarlyFailure('later-wrapper-failure', { env });
+  const receipt = JSON.parse(readFileSync(join(env.HAM_HQ_ROOT,
+    'dispatch/lrq_synthetic/hammer-progress/wrun_synthetic/terminal-stop.json'), 'utf8'));
+  assert.equal(receipt.reason, 'early-refusal');
+  assert.equal(receipt.runId, 'wrun_synthetic');
+});
+
 test('LVR-02: unkeyed manual refusals preserve the first reason without suppressing new launches', t => {
   const { env, audit } = fixture(t);
   delete env.HQ_LAUNCH_REQUEST_ID;

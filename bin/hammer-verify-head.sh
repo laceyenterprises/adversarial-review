@@ -886,6 +886,7 @@ fi
 # Do not proceed past this point with a red applicable suite, a red required
 # check, or a still-BEHIND mergeStateStatus under strict/unknown protection.
 HAM_PHASE_OUTCOME=verified
+"$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-progress.mjs" verify-head || echo 'HAM progress receipt unavailable' >&2
 return 0
 }
 ham_verify_head_phase

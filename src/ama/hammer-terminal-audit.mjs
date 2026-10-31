@@ -1,9 +1,11 @@
 import { appendAmaAuditAttempt, readAmaAuditEntry } from './audit.mjs';
+import { reportHammerProgress } from './hammer-progress.mjs';
 
 // Failure recording must work before any GitHub read or merge-lease acquisition.
 // Reasons are fixed codes, never transport output (which can contain secrets).
 export function recordHammerEarlyFailure(reason, { env = process.env, headSha } = {}) {
   if (!/^[a-z][a-z0-9:-]*$/.test(reason || '')) throw new TypeError('invalid hammer failure reason');
+  reportHammerProgress('terminal-stop', { env, reason });
   const identity = {
     hqRoot: env.HAM_HQ_ROOT || env.HQ_ROOT,
     repo: env.HAM_REPO,

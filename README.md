@@ -1,3 +1,10 @@
+HAMPROGRESS-01 adds run-bound closer phase receipts for the supervisor's outcome,
+wall-clock and total-token limits. Existing terminal/drain and AMA replacement
+edges retain lifetime charges. Merge safety and existing smoke promises are
+unchanged. Deploy the receipt/schema companion before supervisor activation;
+passive SRE acceptance observes natural named stops and bounded replacement.
+See [the closure runbook](docs/RUNBOOK-ama-closure.md).
+
 HAMSCRATCHRESUME-01: pending quota resume retains hammer scratch through the
 sweep and terminal reconciliation. A named terminal missing-phase outcome
 permits one fresh closer with a new scratch and lease, crediting its PR/head

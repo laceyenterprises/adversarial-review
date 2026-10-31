@@ -1698,6 +1698,27 @@
             "__default": 120
           }
         }
+      },
+      "hammer_limits": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "outcome_seconds": {
+            "__type": "int",
+            "__default": 3600,
+            "__min": 1
+          },
+          "wall_seconds": {
+            "__type": "int",
+            "__default": 10800,
+            "__min": 1
+          },
+          "tokens": {
+            "__type": "int",
+            "__default": 40000000,
+            "__min": 1
+          }
+        }
       }
     }
   },

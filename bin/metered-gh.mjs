@@ -3,6 +3,7 @@ import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { constants } from 'node:os';
 import { meteredExecFile } from '../src/metered-gh.mjs';
+import { reportHammerProgress } from '../src/ama/hammer-progress.mjs';
 import { awaitThrottleIfNeeded, recordResponseRateLimit, recordRateLimitedCall } from '../src/rate-limit-throttle.mjs';
 
 const [action, ...args] = process.argv.slice(2);
@@ -16,6 +17,9 @@ if (action === 'wait' || action === 'record' || action === 'limited') {
 } else if (action === 'exec' || action === 'exec-hammer' || action === 'exec-git') {
   let terminationSignal;
   const execute = (command, argv, options) => new Promise((resolve, reject) => {
+    if (action === 'exec-hammer' && command === 'gh' && argv[0] === 'pr' && argv[1] === 'merge') {
+      reportHammerProgress('merge-attempted');
+    }
     const child = execFile(command, argv, options, (err, stdout, stderr) => {
       for (const [signal, cancel] of cancellations) process.removeListener(signal, cancel);
       if (err) reject(Object.assign(err, { stdout, stderr }));

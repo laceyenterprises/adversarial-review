@@ -21,6 +21,9 @@ test('custody compression config mirrors Python and tolerates shared local overl
     assert.equal(cfg.get('retention.ephemeral.token_transcripts_compress_after_days'), 21);
     rmSync(join(dir, 'config.local.yaml'));
     writeFileSync(topPath, 'version: 1\nretention:\n  ephemeral:\n    token_transcripts_compress_after_days: 0\n');
-    assert.throws(() => loadConfig({ topPath, env: {} }));
+    assert.throws(
+      () => loadConfig({ topPath, env: {} }),
+      /retention\.ephemeral\.token_transcripts_compress_after_days: value 0 below minimum 1/,
+    );
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

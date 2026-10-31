@@ -1,18 +1,25 @@
 // CLOSURERECOVERYEXEC-01: an R04 `closure-recovery` next action has an
 // executor. Synthetic fixtures only: made-up repo, PR, heads and launch ids.
 import test from 'node:test';
+import './helpers/rate-limit-state-isolation.mjs';
 import assert from 'node:assert/strict';
+import Database from 'better-sqlite3';
+import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import path from 'node:path';
 import './helpers/load-aware-timeout-fixture.mjs';
 import { dispatchReadTransport } from '../src/dispatch-read-client.mjs';
 import { proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
-import { acquireAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { acquireAmaCloserLease, readAmaCloserLease, updateAmaCloserLease, deleteAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
+import { deriveNextActionSnapshot, nextAction } from '../src/pr-next-action.mjs';
+import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import { maybeDispatchAmaClosureFor, resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { createAmaHammerBackgroundQueue } from '../src/ama-hammer-background-dispatch.mjs';
 import { observeClosureWait } from '../src/ama/closure-wait.mjs';
-import { CLOSURE_RECOVERY_ESCALATED_REASON, CLOSURE_RECOVERY_WAIT_CLASS, enforceClosureRecoveryDeadline } from '../src/ama/closure-recovery.mjs';
+import { CLOSURE_RECOVERY_ESCALATED_REASON, CLOSURE_RECOVERY_WAIT_CLASS, CLOSURE_RECOVERY_REPAGE_MS,
+  enforceClosureRecoveryDeadline, refreshClosureRecoveryCustody } from '../src/ama/closure-recovery.mjs';
 import { hasClosureRecoveryIntent, hasHammerDispatchIntent, reviseClosureNextAction } from '../src/ama/closure-next-action.mjs';
 import { createNoProgressLaneGate } from '../src/posted-review-row.mjs';
 import { collectReviewPipelineHealth, readExpiredNextActions } from '../src/review-pipeline-health.mjs';
@@ -194,7 +201,7 @@ test('CLOSURERECOVERYEXEC-01: unreadable ownership escalates exactly once; 10 ti
   assert.match(pages[0].message, /closure-recovery-ownership-unresolved: action=hammer actor=closure-recovery reason=ownership-unreadable/);
   assert.match(pages[0].message, /closer=ownership-unreadable unresolved=lease:terminal:lrq-synthetic-closer-41,launch:retry-chain-unreadable/);
   assert.equal(pages[0].metadata.severity, 'SEV1');
-  assert.equal(pages[0].metadata.dedupKey, `hamclose:${REPO}:${PR}:${HEAD}:${CLOSURE_RECOVERY_WAIT_CLASS}`);
+  assert.equal(pages[0].metadata.dedupKey, `hamclose:${REPO}:${PR}:${HEAD}:${CLOSURE_RECOVERY_WAIT_CLASS}:${DEADLINE_MS + MINUTE}`);
 });
 
 test('CLOSURERECOVERYEXEC-01: a refused escalation page is retried, then delivered once', async t => {
@@ -360,4 +367,251 @@ test('final review: missing snapshot observations still enforce the custody dead
   assert.equal(result.reason, CLOSURE_RECOVERY_ESCALATED_REASON);
   assert.equal(result.closureRecovery.launchRequestId, null);
   assert.equal(result.closureRecovery.outcome, 'escalated');
+});
+
+function recoveryDispatchFixture(t, { status = 'failed', pending = false,
+  observedAt = new Date(DEADLINE_MS + MINUTE).toISOString() } = {}) {
+  const { rootDir } = expiredLaneFixture(t);
+  acquireAmaCloserLease({ rootDir, ...IDENTITY, watcherPid: 424242, dispatchTimeoutMs: MINUTE,
+    now: new Date(POSTED_MS - (pending ? 60 * MINUTE : 0)).toISOString() });
+  if (!pending) {
+    updateAmaCloserLease({ rootDir, ...IDENTITY, status: 'dispatched', lrqId: LRQ,
+      now: new Date(POSTED_MS).toISOString() });
+    updateAmaCloserLease({ rootDir, ...IDENTITY, status: 'terminal', terminalOutcome: 'failed-without-merge',
+      now: new Date(POSTED_MS).toISOString() });
+  }
+  const snapshot = deriveNextActionSnapshot({ subjectKey: `${REPO}#${PR}`, head: HEAD,
+    observedAt,
+    anchors: { firstActionableAt: new Date(POSTED_MS).toISOString() }, observations: {
+      pr: { state: 'OPEN', headSha: HEAD, mergeable: 'MERGEABLE', labels: [] },
+      reviews: { verdict: 'comment-only', headSha: HEAD, blockingFindingState: 'known', blockingFindingCount: 0,
+        nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 },
+      checks: { conclusion: 'SUCCESS' }, remediation: { roundsLeft: false },
+      policy: { autonomousMergeExecutionEnabled: true, strictMode: true },
+      leases: { state: 'unknown', value: null },
+      launches: { state: 'unknown', value: null },
+    } });
+  const shared = { snapshot, decision: nextAction(snapshot) };
+  assert.equal(shared.decision.reason, 'ownership-unreadable');
+  let launches = 0;
+  const events = [];
+  const args = { sharedNextAction: shared,
+    reviewState: { verdict: 'comment-only', headSha: HEAD, riskClass: 'low', remediationPending: false,
+      reviewCycleExhausted: true, blockingFindingState: 'known', blockingFindingCount: 0,
+      nonBlockingFindingState: 'known', nonBlockingFindingCount: 0, prAuthor: 'synthetic-builder' },
+    prMetadata: { prNumber: PR, headSha: HEAD, isOpen: true, isDraft: false, mergeableState: 'MERGEABLE',
+      labels: [], branchProtection: { requiredContexts: [] },
+      statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] },
+    cfg: { enabled: true, workerClass: 'hammer', mergeMethod: 'squash',
+      eligibility: { riskClasses: ['low'], highRiskRequiresTwoKey: false }, branchProtection: { required: false } },
+    dispatchContext: { rootDir, repo: REPO, prUrl: `https://github.com/${REPO}/pull/${PR}`,
+      reviewedSha: HEAD, riskClass: 'low', reviewedBy: 'synthetic-reviewer', reviewer: 'codex',
+      hqPath: '/bin/synthetic-hq', hqRoot: path.join(rootDir, 'hq'), hqOwnerUser: userInfo().username,
+      currentUser: userInfo().username, parentSession: 'synthetic-watcher',
+      dispatchedAt: new Date(DEADLINE_MS + MINUTE).toISOString(), closerTokenRollupPollDelaysMs: [],
+      livePrProbeImpl: async () => ({ state: 'OPEN', headBranchExists: true, headRefName: 'synthetic/branch' }) },
+    guardStackedBaseImpl: async () => null,
+    deliverAlertImpl: async () => {},
+    fetchPrimaryChangeImpl: async ({ headSha }) => primaryChangeFixture(headSha),
+    readLaunchRequestStatusImpl: async ({ launchRequestId }) => ({ ok: true,
+      row: { status: launchRequestId === LRQ ? status : 'running', launch_request_id: launchRequestId }, retryChain: [] }),
+    readTemplateImpl: () => 'Synthetic closer <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
+    writeFileImpl: () => {},
+    resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
+    readPullRequestStateImpl: async () => null,
+    readBuildCompletionSignalForPrImpl: async () => ({ ok: false }),
+    readBuildCompletionProducerEvidenceImpl: async () => ({ ok: false }),
+    fetchPullRequestRollupImpl: async () => ({ state: 'OPEN', comments: [] }),
+    processKillImpl: () => { throw Object.assign(new Error('synthetic dead process'), { code: 'ESRCH' }); },
+    execFileImpl: async (_cmd, argv) => {
+      if (argv[0] === 'dispatch' && argv[1] === '--priority') {
+        const lease = readAmaCloserLease(rootDir, IDENTITY);
+        assert.equal(lease.status, 'pending', 'release and exclusive reacquisition precede submission');
+        assert.equal(lease.lrqId, null);
+        launches++;
+        return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR}`,
+          launchRequestId: `${LRQ}-fresh`, dispatchId: 'synthetic-dispatch' }) };
+      }
+      return { stdout: '{}' };
+    },
+    logger: { ...quiet, info: message => events.push(message) },
+  };
+  return { rootDir, shared, args, launches: () => launches, events };
+}
+
+test('RECOVERYSTALL-01: a pre-deadline snapshot advances its observation clock before terminal recovery', async t => {
+  const observedAt = new Date(POSTED_MS).toISOString();
+  const f = recoveryDispatchFixture(t, { observedAt });
+  const recovery = await refreshClosureRecoveryCustody({ rootDir: f.rootDir, ...IDENTITY,
+    shared: f.shared, now: DEADLINE_MS + MINUTE, readLaunchImpl: f.args.readLaunchRequestStatusImpl });
+  assert.equal(recovery.shared.snapshot.observedAt, new Date(DEADLINE_MS + MINUTE).toISOString());
+  assert.deepEqual(recovery.shared.snapshot.anchors, f.shared.snapshot.anchors);
+  assert.equal(f.shared.snapshot.observedAt, observedAt, 'the original snapshot remains immutable');
+  assert.equal(hasHammerDispatchIntent(recovery.shared, IDENTITY), true);
+  assert.equal((await maybeDispatchAmaCloser(f.args)).dispatched, true);
+  assert.equal(f.launches(), 1);
+});
+
+for (const failure of ['directory', 'open', 'schema', 'write']) {
+  test(`RECOVERYSTALL-01: diagnostic ${failure} failure preserves fresh custody and closer admission`, async t => {
+    const f = recoveryDispatchFixture(t);
+    const dir = path.join(f.rootDir, 'data', 'ama-closure-waits');
+    const key = createHash('sha256').update(`${REPO}#${PR}`).digest('hex');
+    if (failure === 'directory') writeFileSync(dir, 'synthetic path collision');
+    else {
+      mkdirSync(dir, { recursive: true });
+      if (failure === 'open') mkdirSync(path.join(dir, `${key}.db`));
+      if (failure === 'schema') writeFileSync(path.join(dir, `${key}.db`), 'synthetic corrupt database');
+      if (failure === 'write') {
+        const prepare = Database.prototype.prepare;
+        t.mock.method(Database.prototype, 'prepare', function (sql, ...args) {
+          if (sql.includes('INSERT INTO recovery_custody')) throw new Error('synthetic disk exhaustion');
+          return prepare.call(this, sql, ...args);
+        });
+      }
+    }
+    const warnings = [];
+    const logger = { ...quiet, warn: message => warnings.push(message) };
+    const recovery = await refreshClosureRecoveryCustody({ rootDir: f.rootDir, ...IDENTITY,
+      shared: f.shared, now: DEADLINE_MS + MINUTE, readLaunchImpl: f.args.readLaunchRequestStatusImpl, logger });
+    assert.equal(hasHammerDispatchIntent(recovery.shared, IDENTITY), true);
+    assert.equal(recovery.closureRecovery, undefined, 'failed persistence must not invent durable attempts');
+    assert.match(warnings[0], /closure-recovery diagnostic persistence failed/);
+    assert.equal((await maybeDispatchAmaCloser({ ...f.args, logger })).dispatched, true);
+    assert.equal(f.launches(), 1);
+    assert.equal(warnings.filter(message => message.includes('closure-recovery diagnostic persistence failed')).length,
+      2, 'both direct refresh and production admission warn');
+  });
+}
+
+test('RECOVERYSTALL-01: health reads custody only for the 50 oldest reported deadlines', t => {
+  const { rootDir, dir, nextAction } = expiredLaneFixture(t);
+  const custodyDir = path.join(rootDir, 'data', 'ama-closure-waits');
+  mkdirSync(custodyDir, { recursive: true });
+  // The original fixture adds one more expired entry with a younger deadline.
+  for (let number = 1; number <= 60; number++) {
+    const deadlineAt = new Date(DEADLINE_MS - number * MINUTE).toISOString();
+    writeFileSync(path.join(dir, `${number}.json`), JSON.stringify({ repo: REPO, prNumber: number,
+      headSha: HEAD, nextAction: { ...nextAction, deadline: { ...nextAction.deadline, at: deadlineAt } } }));
+    const key = createHash('sha256').update(`${REPO}#${number}`).digest('hex');
+    const db = new Database(path.join(custodyDir, `${key}.db`));
+    try {
+      db.exec('CREATE TABLE recovery_custody (head TEXT PRIMARY KEY, attempts INTEGER, deadline TEXT, observed INTEGER, evidence TEXT)');
+      db.prepare('INSERT INTO recovery_custody VALUES (?, ?, ?, ?, ?)').run(HEAD, number, deadlineAt, POSTED_MS, '{}');
+    } finally { db.close(); }
+  }
+  const prepare = Database.prototype.prepare;
+  let custodyReads = 0;
+  t.mock.method(Database.prototype, 'prepare', function (sql, ...args) {
+    if (sql.includes('SELECT * FROM recovery_custody')) custodyReads++;
+    return prepare.call(this, sql, ...args);
+  });
+  const health = readExpiredNextActions(rootDir, { nowMs: DEADLINE_MS + MINUTE });
+  assert.equal(health.total, 61);
+  assert.equal(health.expiredCount, 61);
+  assert.equal(health.closureRecoveryExpired, 61, 'aggregate counts cover the full population');
+  assert.equal(health.oldestAgeMs, 61 * MINUTE);
+  assert.equal(health.expired.length, 50);
+  assert.deepEqual(health.expired.map(item => item.prNumber), Array.from({ length: 50 }, (_, i) => 60 - i));
+  assert.equal(custodyReads, 50);
+  for (const item of health.expired) assert.equal(item.recoveryCustody.attempts, item.prNumber);
+});
+
+for (const pending of [false, true]) test(`RECOVERYSTALL-01: overdue ${pending ? 'dead pending' : 'terminal recorded launch without receipt'} custody releases before exactly one dispatch`, async t => {
+  const f = recoveryDispatchFixture(t, { pending });
+  const results = await Promise.all([maybeDispatchAmaCloser(f.args), maybeDispatchAmaCloser(f.args)]);
+  assert.equal(results.filter(result => result.dispatched).length, 1, JSON.stringify(results));
+  assert.equal(f.launches(), 1);
+  assert.equal(readAmaCloserLease(f.rootDir, IDENTITY).lrqId, `${LRQ}-fresh`);
+  assert.equal((await maybeDispatchAmaCloser(f.args)).dispatched, false);
+  assert.equal(f.launches(), 1);
+  const recovered = results.find(result => result.dispatched).closureRecovery;
+  assert.equal(recovered.deadlineAt, new Date(DEADLINE_MS).toISOString());
+  assert.ok(recovered.attempts >= 1);
+  assert.equal(recovered.lastEvidence.readable, true);
+  if (!pending) assert.ok(f.events.some(event => event.includes('terminal-custody-confirmed')));
+});
+
+for (const status of ['running', 'suspended', 'waiting_input']) test(`RECOVERYSTALL-01: overdue custody with ${status} worker cannot dispatch`, async t => {
+  const f = recoveryDispatchFixture(t, { status });
+  const result = await maybeDispatchAmaCloser(f.args);
+  assert.equal(result.dispatched, false);
+  assert.equal(f.launches(), 0);
+  assert.equal(readAmaCloserLease(f.rootDir, IDENTITY).lrqId, LRQ);
+  assert.equal(result.closureRecovery.lastEvidence.owned, true);
+});
+
+for (const [name, probe] of [
+  ['live retry', { ok: true, row: { status: 'failed' },
+    retryChain: [{ launch_request_id: 'synthetic-live-retry', status: 'running' }] }],
+  ['missing retry chain', { ok: true, row: { status: 'failed' } }],
+  ['unreadable retries', { ok: true, row: { status: 'failed' }, retryChain: [], retryChainUnreadable: true }],
+]) test(`RECOVERYSTALL-01: ${name} retains custody past the deadline`, async t => {
+  const f = recoveryDispatchFixture(t);
+  const result = await maybeDispatchAmaCloser({ ...f.args, readLaunchRequestStatusImpl: async () => probe });
+  assert.equal(result.dispatched, false);
+  assert.equal(f.launches(), 0);
+  assert.equal(readAmaCloserLease(f.rootDir, IDENTITY).lrqId, LRQ);
+});
+
+test('RECOVERYSTALL-01: ledger outage re-pages after six hours, retains attempts across restart, then recovers', async t => {
+  const f = recoveryDispatchFixture(t);
+  const held = await maybeDispatchAmaCloser({ ...f.args,
+    readLaunchRequestStatusImpl: async () => { throw new Error('synthetic outage'); } });
+  assert.equal(held.dispatched, false);
+  assert.equal(f.launches(), 0);
+  const pages = [];
+  let now = DEADLINE_MS + MINUTE;
+  const refresh = () => refreshClosureRecoveryCustody({ rootDir: f.rootDir, ...IDENTITY,
+    shared: f.shared, now, readLaunchImpl: async () => { throw new Error('synthetic outage'); } });
+  const observe = async () => {
+    const recovery = await refresh();
+    const result = await enforceClosureRecoveryDeadline({ rootDir: f.rootDir, ...IDENTITY,
+      shared: recovery.shared, result: { dispatched: false, reason: 'ownership-unreadable',
+        closureRecovery: recovery.closureRecovery }, now,
+      observeWaitImpl: options => observeClosureWait({ ...options,
+        pageImpl: async (_message, metadata) => pages.push(metadata.dedupKey) }) });
+    assert.equal(result.dispatched, false);
+    assert.equal(result.reason, CLOSURE_RECOVERY_ESCALATED_REASON);
+    assert.equal(result.closureRecovery.lastEvidence.readable, false);
+    return result;
+  };
+  assert.equal((await observe()).closureRecovery.attempts, 2);
+  now += CLOSURE_RECOVERY_REPAGE_MS - 1;
+  await observe();
+  assert.equal(pages.length, 1);
+  now++;
+  assert.equal((await observe()).closureRecovery.attempts, 4);
+  assert.equal(pages.length, 2);
+  assert.notEqual(pages[0], pages[1], 'delivery dedup must allow the later reminder');
+  assert.equal(readAmaCloserLease(f.rootDir, IDENTITY).lrqId, LRQ);
+  const status = readExpiredNextActions(f.rootDir, { nowMs: now }).expired[0].recoveryCustody;
+  assert.equal(status.attempts, 4, 'existing next-action health output exposes persisted attempts');
+  assert.equal(status.deadlineAt, new Date(DEADLINE_MS).toISOString());
+  assert.equal(status.lastEvidence.readable, false);
+  assert.equal((await maybeDispatchAmaCloser(f.args)).dispatched, true);
+});
+
+test('RECOVERYSTALL-01: replacement custody during the read never retires the new owner', async t => {
+  const f = recoveryDispatchFixture(t);
+  const result = await refreshClosureRecoveryCustody({ rootDir: f.rootDir, ...IDENTITY, shared: f.shared,
+    now: DEADLINE_MS + MINUTE, readLaunchImpl: async () => {
+      deleteAmaCloserLease(f.rootDir, IDENTITY);
+      acquireAmaCloserLease({ rootDir: f.rootDir, ...IDENTITY, watcherPid: process.pid });
+      return { ok: true, row: { status: 'failed' }, retryChain: [] };
+    } });
+  assert.equal(result.shared.decision.reason, 'ownership-unreadable');
+  assert.equal(result.closureRecovery.lastEvidence.reason, 'lease-changed-during-recovery');
+  assert.equal(readAmaCloserLease(f.rootDir, IDENTITY).status, 'pending');
+});
+
+test('RECOVERYSTALL-01: custody refresh preserves a recorded non-retryable terminal decision', async t => {
+  const f = recoveryDispatchFixture(t);
+  const shared = reviseClosureNextAction(f.shared, { launches: { state: 'unknown', value: {
+    closer: { headSha: HEAD, launchRequestId: LRQ, retryable: false, attempt: 3 },
+  } } });
+  const result = await maybeDispatchAmaCloser({ ...f.args, sharedNextAction: shared });
+  assert.equal(result.dispatched, false);
+  assert.equal(f.launches(), 0);
+  assert.equal(readAmaCloserLease(f.rootDir, IDENTITY).lrqId, LRQ);
 });

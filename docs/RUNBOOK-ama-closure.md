@@ -95,8 +95,27 @@ a resolved launch is admitted through the ordinary gates, lease CAS and custody
 checks. Before the deadline, an unresolved reconciliation returns the closer's
 refusal (for example `ownership-unreadable`) with a `closureRecovery` record:
 the decision key, the deadline, `ageMs`, the closer's reason, the launch id and
-unresolved `lease:`/`launch:` evidence. At the deadline, closure pages once
-through closure-wait class `closure-recovery-deadline`. It returns
+unresolved `lease:`/`launch:` evidence. RECOVERYSTALL-01 adds an explicit
+deadline custody refresh: re-read the exact-head lease and its referenced
+launch including retry descendants, even when no dispatch receipt survives.
+A successful refresh advances the snapshot observation time to the current
+pass while preserving its original deadline anchor, including snapshots
+retained from before expiry.
+A lease changed during the read retains recovery ownership. Newly readable
+terminal custody or an expired ownerless lease returns to normal next-action
+admission; retirement and exclusive reacquisition occur under the existing
+per-PR intent lock. The retirement event names `terminal-custody-confirmed`.
+Sticky success, live/parked/suspended workers, retry chains, caps, strict mode,
+required checks and every merge predicate retain their existing protections.
+The `closureRecovery` output includes durable `attempts`, `lastAttemptAt`,
+`lastEvidence` and `deadlineAt`; the blocker detail includes attempts and the
+last evidence reason. At the deadline, closure pages
+through closure-wait class `closure-recovery-deadline`, repeating every six
+hours while custody stays unknowable. The page reservation timestamp persists
+across restarts, and each cadence receives its own delivery deduplication key.
+Custody diagnostic storage failures warn and retain the refreshed decision for
+ordinary admission; unavailable persistence omits the durable attempt record.
+It returns
 `closure-recovery-ownership-unresolved` with `closerReason`, `closureBlocker`
 and `needsOperator`. A refused delivery is retried on a later pass, and every
 pass re-runs the closer, so readable custody still dispatches. The orphan
@@ -1033,7 +1052,11 @@ closer finished earlier but whose cached placeholder kept it in R04 for hours.
 After ordinary deployment, SRE must observe the next natural R04 case leave
 recovery within its budget and merge, and verify no readable ownerless case stays
 in R04 beyond that budget. A continuing ledger outage remains fenced and requires
-service recovery. Worker validation performs no live rescue or service action.
+service recovery and receives six-hour reminders (RECOVERYSTALL-01).
+Worker validation performs no live rescue or service action. After normal
+deployment, SRE records that no open PR shows
+`closure-recovery-ownership-unresolved` with a deadline more than one recovery
+cycle overdue; an ongoing ledger outage remains an explicit unresolved incident.
 
 ### Every recovery deadline (RECOVERYDEADLINE-01)
 

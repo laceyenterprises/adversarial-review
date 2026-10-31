@@ -12,6 +12,7 @@ import Database from 'better-sqlite3';
 import { listPipelineOpenPrs, readPipelineGithub } from './pipeline-health-github.mjs';
 import { collectDagAutowalkHealth } from './dag-autowalk-health.mjs';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
@@ -3776,6 +3777,18 @@ function readAmaCloserLeases(rootDir, { nowMs, config, reviewRows = new Map() })
 // with its age at this snapshot (same rule as the watcher log). Snapshot-only:
 // the selected executor or closure-wait owns any escalation.
 const EXPIRED_NEXT_ACTION_REPORT_LIMIT = 50;
+function readRecoveryCustodyStatus(rootDir, repo, prNumber, headSha) {
+  const key = createHash('sha256').update(`${repo}#${prNumber}`).digest('hex');
+  let db;
+  try {
+    db = new Database(join(rootDir, 'data', 'ama-closure-waits', `${key}.db`),
+      { readonly: true, fileMustExist: true });
+    const row = db.prepare('SELECT * FROM recovery_custody WHERE head=?').get(headSha);
+    return row ? { deadlineAt: row.deadline, attempts: row.attempts,
+      lastAttemptAt: new Date(row.observed).toISOString(), lastEvidence: parseJson(row.evidence, null) } : null;
+  } catch { return null; } finally { db?.close(); }
+}
+
 export function readExpiredNextActions(rootDir, { nowMs = Date.now(), reviewRows = new Map() } = {}) {
   const dir = join(rootDir, 'data', 'watcher-no-progress-lane');
   const expired = [];
@@ -3799,7 +3812,12 @@ export function readExpiredNextActions(rootDir, { nowMs = Date.now(), reviewRows
   expired.sort((a, b) => b.ageMs - a.ageMs);
   return { total, expiredCount: expired.length,
     closureRecoveryExpired: expired.filter(item => item.closureRecovery).length,
-    oldestAgeMs: expired[0]?.ageMs ?? null, expired: expired.slice(0, EXPIRED_NEXT_ACTION_REPORT_LIMIT) };
+    oldestAgeMs: expired[0]?.ageMs ?? null,
+    expired: expired.slice(0, EXPIRED_NEXT_ACTION_REPORT_LIMIT).map(item => {
+      const recoveryCustody = item.closureRecovery
+        ? readRecoveryCustodyStatus(rootDir, item.repo, item.prNumber, item.head) : null;
+      return recoveryCustody ? { ...item, recoveryCustody } : item;
+    }) };
 }
 
 export function summarizeHammerEfficiency(db, { nowMs = Date.now(), windowMs = 30 * 24 * 60 * 60 * 1000 } = {}) {

@@ -16,10 +16,11 @@ daemon owns these databases. `CREATE TABLE IF NOT EXISTS` initializes
 | Column | SQLite definition | Meaning |
 | --- | --- | --- |
 | `head` | `TEXT` | Exact PR head SHA. |
-| `class` | `TEXT` | `primary-change` for immediate primary-change pages, `final-round` for final-round stalls and cap exhaustion, `lane-busy` for the third repeated legacy lane-busy launch on a head, `ci-regression-ownerless` for immediate failed-CI remediation refusals, `closure-recovery-deadline` for the one escalation of an R04 ownership reconciliation still unresolved at its next-action deadline (CLOSURERECOVERYEXEC-01), and `bounded-wait` for other waits. Lane-busy pages are immediate, retain contention refunds/backoff, retry failed delivery, and dedupe per PR/head across restarts. Primary-change receipts remain independent of final-round receipts. |
+| `class` | `TEXT` | `primary-change` for immediate primary-change pages, `final-round` for final-round stalls and cap exhaustion, `lane-busy` for the third repeated legacy lane-busy launch on a head, `ci-regression-ownerless` for immediate failed-CI remediation refusals, `closure-recovery-deadline` for deadline escalation and six-hour reminders of unresolved R04 custody (RECOVERYSTALL-01), and `bounded-wait` for other waits. Lane-busy pages are immediate, retain contention refunds/backoff, retry failed delivery, and dedupe per PR/head across restarts. Primary-change receipts remain independent of final-round receipts. |
 | `started` | `INTEGER NOT NULL` | First observation or latest launch/head progress in epoch milliseconds. |
 | `reason` | `TEXT` | Latest wait reason, refreshed on every observation. |
 | `paged` | `INTEGER DEFAULT 0` | Exhaustion page reservation: 0 available, 1 reserved/sent. |
+| `last_paged` | `INTEGER` | Nullable epoch milliseconds of the latest page reservation. Added transactionally to existing stores; used for opt-in periodic reminders. |
 
 ## Lifecycle and recovery
 
@@ -84,7 +85,40 @@ delivery. The alert names repo, PR, head and reason, with source
 A thrown delivery error resets `paged` to 0 so a later observation can retry
 without restarting the deadline. An interrupted process after reservation can
 leave `paged=1` without a delivered alert; this store has no automatic reservation
-expiry. Operators must verify delivery before resetting that head/class reservation.
+expiry for ordinary once-only classes. Operators must verify delivery before
+resetting that head/class reservation.
+
+RECOVERYSTALL-01 opts `closure-recovery-deadline` into `repeatAfterMs=21600000`.
+An immediate transaction reserves a reminder when `paged=0`, `last_paged` is
+missing on a legacy receipt, or six hours have passed since that timestamp.
+The first upgraded observation of a legacy paged receipt can therefore emit
+one immediate reminder. Reservation does not move `started` or the recovery
+deadline. Delivery deduplication keys for this class append the reservation
+timestamp, so the previous delivered alert cannot suppress a later reminder.
+A thrown delivery restores the previous reservation values only if this
+reservation is still current. An interrupted reservation becomes eligible again
+after six hours. Other classes retain their once-only behavior.
+
+The same database initializes `recovery_custody` for expired R04 execution:
+`head TEXT PRIMARY KEY`, `attempts INTEGER NOT NULL`, `deadline TEXT`,
+`observed INTEGER NOT NULL`, `evidence TEXT NOT NULL`. One atomic upsert increments
+attempts per custody refresh, retaining the original decision deadline and the
+latest observation time and JSON evidence. Evidence contains lease status,
+launch identity/status when known, tri-state ownership, readability and a named
+reason; it contains no PR content. Reads revalidate the lease after yielding.
+This table records diagnosis only: retirement and replacement dispatch still
+use the existing per-PR intent lock and lease CAS. Rows persist across restarts
+and are not pruned. Closure status exposes these fields as `closureRecovery`
+deadline, attempts, lastAttemptAt and lastEvidence.
+Directory creation, database open, schema, write or close failures emit a warning
+and return the freshly reconciled decision without a `closureRecovery` diagnostic
+record. Unavailable diagnostics cannot prevent closer admission or establish
+custody; the lease and launch observations remain authoritative.
+The existing pipeline-health expired-next-action entries expose the same
+persisted evidence as `recoveryCustody`, read without creating or mutating a
+database; absent or unreadable diagnostic stores leave that optional field absent.
+These database reads run only after sorting and selecting the oldest 50 entries;
+aggregate expired counts still cover all eligible lane records.
 
 The transition from the legacy `waits` table deliberately accepts a one-time
 reset: existing rows are not migrated, and the old table remains on disk but

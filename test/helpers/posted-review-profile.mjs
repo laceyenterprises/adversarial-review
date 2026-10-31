@@ -52,8 +52,9 @@ export async function profilePostedReviews(modules, { prCount = 15, delayMs = 20
         const entry = bucket().database;
         const start = performance.now();
         entry.count++;
-        if (sql === 'SELECT 1 FROM schema_migrations WHERE id = ?') {
-          const migration = args[0];
+        const migration = sql === 'SELECT 1 FROM schema_migrations WHERE id = ?' ? args[0]
+          : sql === 'PRAGMA table_info(waits_by_class)' ? 'waits_by_class.last_paged' : null;
+        if (migration) {
           entry.migrationChecks[migration] = (entry.migrationChecks[migration] || 0) + 1;
         }
         try { return value.apply(target, args); }

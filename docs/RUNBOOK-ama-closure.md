@@ -6525,7 +6525,9 @@ group signal is still gated on that tick's census. A timeout (two seconds per
 request), helper exit, errno refusal, unsolicited output or malformed reply
 rejects the census with the same codes as before (`ETIMEDOUT`, `exit N`, the
 errno name, `EMALFORMED`). The controller then fails closed exactly as for a
-one-shot refusal, and the next tick starts a new helper. A validator request
+one-shot refusal, and the next tick starts a new helper. A helper that exits or
+errors while idle between ticks is retired at once, so the next tick starts a
+new helper rather than waiting out the request timeout. A validator request
 that arrives while a census is in flight is judged by the next census, never by
 one that began before it. Owner assertion (`getpgid`) keeps the one-shot helper
 because it runs in a separate short-lived process. Other platforms keep the

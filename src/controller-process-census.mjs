@@ -91,8 +91,10 @@ export function createControllerCensus({ spawnImpl = spawn, env = process.env, t
       catch (error) { settle(undefined, error); return; }
       settle(result);
     });
-    child.on('error', error => { if (child === helper) fail(undefined, error); });
-    child.on('exit', code => { if (child === helper) fail(undefined, { status: code }); });
+    // A helper that dies between requests is retired too, so the next request
+    // starts a fresh one instead of writing to a dead pipe until its timeout.
+    child.on('error', error => { if (child === helper) { fail(undefined, error); retire(); } });
+    child.on('exit', code => { if (child === helper) { fail(undefined, { status: code }); retire(); } });
     child.stdin.on('error', () => { /* the exit or spawn error names the failure */ });
     return child;
   };

@@ -173,6 +173,25 @@ test('round census fails closed on every unreadable answer and replaces the help
   }
 });
 
+test('round census retires a helper that exits or errors while idle between ticks', async () => {
+  for (const [label, die] of [
+    ['idle exit', helper => { helper.exitCode = 1; helper.emit('exit', 1, null); }],
+    ['idle error', helper => helper.emit('error', Object.assign(new Error('fixture EPIPE'), { code: 'EPIPE' }))],
+  ]) {
+    const { spawned, spawnImpl } = fakeHelpers((line, helper) => helper.stdout.write('{"ok":[]}\n'));
+    // A long timeout: a dead helper left in place would stall the next tick here.
+    const census = createControllerCensus({ spawnImpl, timeoutMs: 5000 });
+    assert.deepEqual(await census.group(42), [], label);
+    die(spawned[0]);
+    const started = Date.now();
+    assert.deepEqual(await census.group(42), [], label);
+    assert.ok(Date.now() - started < 1000, label);
+    assert.equal(spawned.length, 2, label);
+    assert.deepEqual(spawned[1].requests, ['group 42'], label);
+    census.close();
+  }
+});
+
 test('round census refuses overlapping requests, unsolicited output and cancels on close', async () => {
   const { spawned, spawnImpl } = fakeHelpers(() => {});
   const census = createControllerCensus({ spawnImpl, timeoutMs: 5000 });

@@ -126,6 +126,16 @@ name without a parenthesised level, and every Gemini CLI pass, keeps a null
 effort with `effortSource=none`. The reviewer pass ceiling reads this effort,
 and only `xhigh` changes it.
 
+EFFORTTUNE-02 records `reviewerExecution.effortSource` for Claude and both
+native and OAuth-recovered Codex passes, not only Gemini, so outcomes can be
+compared by the effort that actually ran. The value is the resolver's reasoning
+source: `env` (explicit pin), `registry`, `committed-seed`, `host-config`, or
+`none`. A Codex OAuth recovery with no resolved effort sends the codex
+reviewer default (`medium`) and records `transport-default`. The packaged
+`codex-reviewer` seed default is now `medium`; the Claude and Gemini reviewer
+seeds are unchanged. A governed registry level or explicit pin still wins.
+Historical metadata may omit `effortSource`; `reasoning_effort` is unchanged.
+
 REMODELFALLBACK-02 also preserves `modelSource=unresolved` for non-retryable
 configuration refusals naming `host.observations.read`, without a seed warning.
 Only retryable infrastructure failures permit seed defaults. Valid explicit pins

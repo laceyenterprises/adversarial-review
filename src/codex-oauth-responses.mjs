@@ -12,6 +12,10 @@ import { readFileSync } from 'node:fs';
 const DEFAULT_CODEX_RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/responses';
 const DEFAULT_DIRECT_TIMEOUT_MS = 20 * 60 * 1000;
 const DEFAULT_DIRECT_IDLE_TIMEOUT_MS = 3 * 60 * 1000;
+// EFFORTTUNE-02: the codex reviewer's effort when its class supplies none.
+// Bench results put medium ahead of high and xhigh on review recall, at lower
+// token cost. Matches the codex-reviewer seed default.
+const CODEX_REVIEWER_DEFAULT_EFFORT = 'medium';
 
 function parseJwtClaims(token) {
   const payload = String(token || '').split('.')[1];
@@ -42,7 +46,7 @@ function readCodexOAuthCredential(authPath, { readFileImpl = readFileSync } = {}
   };
 }
 
-function codexOAuthRequestBody({ prompt, model, reasoningEffort = 'high' }) {
+function codexOAuthRequestBody({ prompt, model, reasoningEffort = CODEX_REVIEWER_DEFAULT_EFFORT }) {
   return {
     model,
     instructions: 'Follow the review request exactly and return only the requested review artifact.',
@@ -166,7 +170,7 @@ async function consumeCodexOAuthSse(response, {
 async function reviewWithCodexOAuthResponses(prompt, {
   authPath,
   model,
-  reasoningEffort = 'high',
+  reasoningEffort = CODEX_REVIEWER_DEFAULT_EFFORT,
   endpoint = DEFAULT_CODEX_RESPONSES_URL,
   fetchImpl = globalThis.fetch,
   timeoutMs = loadAwareTimeoutMs(DEFAULT_DIRECT_TIMEOUT_MS, { maxMs: Infinity }),
@@ -211,6 +215,7 @@ async function reviewWithCodexOAuthResponses(prompt, {
 }
 
 export {
+  CODEX_REVIEWER_DEFAULT_EFFORT,
   DEFAULT_CODEX_RESPONSES_URL,
   codexOAuthRequestBody,
   consumeCodexOAuthSse,

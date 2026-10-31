@@ -30,7 +30,7 @@
         "gpt-6.1-sol",
         "gpt-6-luna"
       ],
-      "defaultReasoningLevel": "high"
+      "defaultReasoningLevel": "medium"
     },
     "claude-reviewer": {
       "defaultModel": "claude-opus-5-5",

@@ -590,6 +590,7 @@
       "deliveryHeadWaitFields": ["head_wait_started_at"],
       "reviewerExecutionModelSources": ["env-pin", "registry", "committed-seed", "runtime-display-token"],
       "reviewerExecutionHarnesses": ["claude-code", "codex", "antigravity", "gemini-cli"],
+      "reviewerExecutionEffortSources": ["env", "registry", "committed-seed", "host-config", "transport-default", "model-display-name", "none"],
       "claudeReplySelectionFields": ["candidateCount", "selectedCandidate", "selectedType", "laterCandidates", "contractValid"],
       "reviewerSettlementFailureMessage": { "successfulPass": null, "unsuccessfulPassPriority": ["error", "stderr", "stderrTail"] },
       "compatibility": "REVIEWPROV-01: missing execution harness stamps unknown, never a model family. Antigravity suffix effort accepts only low, medium, high or xhigh; release qualifiers remain null. Existing fields, nullability and lifecycle are unchanged.",

@@ -43,7 +43,7 @@ import { materializePerWorkerCodexAuth } from './codex-per-worker-auth.mjs';
 import { normalizeTokenUsage, readCodexTranscriptTokenUsage } from './reviewer-pass-tokens.mjs';
 import { ReviewerPromptTooLargeError } from './reviewer-outcomes.mjs';
 import { CHUNK_HEAD_LEGEND, annotateRemovedDiffLines, buildPostImageContext, splitHunkPostImages } from './reviewer-chunk-context.mjs';
-import { reviewWithCodexOAuthResponses } from './codex-oauth-responses.mjs';
+import { CODEX_REVIEWER_DEFAULT_EFFORT, reviewWithCodexOAuthResponses } from './codex-oauth-responses.mjs';
 import {
   AGY_PRINT_TIMEOUT_SUBPROCESS_SLACK_MS,
   resolveAgyPrintTimeoutMs,
@@ -966,7 +966,7 @@ async function reviewWithClaude(diff, extraContext = '', {
   const parsed = parseClaudeJsonOutput(raw, replySelection ?? undefined);
   return { reviewText: parsed.reviewText, tokenUsage: parsed.tokenUsage,
     execution: { harness: reviewerExecutionHarness('claude'), model: reviewerExecution.model, modelSource: reviewerExecution.modelSource, effort: reviewerExecution.effort,
-      replySelection: parsed.replySelection } };
+      effortSource: reviewerExecution.effortSource, replySelection: parsed.replySelection } };
 }
 
 // Retain at most the latest result and latest valid reply, even for streams
@@ -1347,7 +1347,8 @@ async function reviewWithCodex(diff, extraContext = '', {
         console.error('[reviewWithCodex] native CLI made no progress; retrying through OAuth Responses transport');
         try {
           const reasoningEffort = codexExecOverrides.configOverrides
-            .find((override) => override.key === 'model_reasoning_effort')?.value || 'high';
+            .find((override) => override.key === 'model_reasoning_effort')?.value || CODEX_REVIEWER_DEFAULT_EFFORT;
+          const effortSource = codexExecOverrides.reasoningEffort ? codexExecOverrides.effortSource : 'transport-default';
           const recovered = await reviewWithCodexOAuthResponsesImpl(prompt, {
             authPath: effectiveAuthPath,
             model: codexExecOverrides.model,
@@ -1355,7 +1356,7 @@ async function reviewWithCodex(diff, extraContext = '', {
             timeoutMs: resolveReviewerTimeoutMs(env),
             idleTimeoutMs: Math.max(resolveProgressTimeoutMs(env), 3 * 60 * 1000),
           });
-          return { ...recovered, execution: { harness: reviewerExecutionHarness('codex'), model: codexExecOverrides.model, modelSource: codexExecOverrides.modelSource, effort: reasoningEffort } };
+          return { ...recovered, execution: { harness: reviewerExecutionHarness('codex'), model: codexExecOverrides.model, modelSource: codexExecOverrides.modelSource, effort: reasoningEffort, effortSource } };
         } catch (fallbackErr) {
           throw new Error(
             `Native Codex made no progress and OAuth Responses recovery failed: `
@@ -1420,7 +1421,8 @@ async function reviewWithCodex(diff, extraContext = '', {
     return {
       reviewText: combined,
       tokenUsage,
-      execution: { harness: reviewerExecutionHarness('codex'), model: codexExecOverrides.model, modelSource: codexExecOverrides.modelSource, effort: codexExecOverrides.reasoningEffort },
+      execution: { harness: reviewerExecutionHarness('codex'), model: codexExecOverrides.model, modelSource: codexExecOverrides.modelSource,
+        effort: codexExecOverrides.reasoningEffort, effortSource: codexExecOverrides.effortSource },
     };
   } finally {
     // Always remove the codex temp file — including when spawnCodexReview throws

@@ -1,0 +1,151 @@
+{
+  "__type": "dict",
+  "__strict": true,
+  "__keys": {
+    "mode": {
+      "__type": "string",
+      "__default": "shadow",
+      "__enum": [
+        "off",
+        "shadow",
+        "enforce"
+      ]
+    },
+    "enforce": {
+      "__type": "dict",
+      "__strict": true,
+      "__keys": {
+        "build": {
+          "__type": "bool",
+          "__default": false
+        },
+        "remediation": {
+          "__type": "bool",
+          "__default": false
+        },
+        "review": {
+          "__type": "bool",
+          "__default": false
+        }
+      }
+    },
+    "kill_switch": {
+      "__type": "bool",
+      "__default": false
+    },
+    "config_cache_seconds": {
+      "__type": "int",
+      "__default": 60,
+      "__min": 0,
+      "__max": 60,
+      "__enforce_max": true
+    },
+    "tier_policy": {
+      "__type": "string",
+      "__default": "modules/worker-pool/mes-tier-policy.v1.json",
+      "__pattern": "^.+$"
+    },
+    "jev": {
+      "__type": "dict",
+      "__strict": true,
+      "__keys": {
+        "enabled": {
+          "__type": "bool",
+          "__default": true
+        },
+        "timeout_seconds": {
+          "__type": "float",
+          "__default": 3,
+          "__min": 0.001,
+          "__max": 10,
+          "__enforce_max": true
+        },
+        "min_confidence": {
+          "__type": "float",
+          "__default": 0.6,
+          "__min": 0,
+          "__max": 1,
+          "__enforce_max": true
+        },
+        "downgrade_confidence": {
+          "__type": "float",
+          "__default": 0.8,
+          "__min": 0,
+          "__max": 1,
+          "__enforce_max": true
+        },
+        "monthly_share_pct": {
+          "__type": "float",
+          "__default": 50,
+          "__min": 0,
+          "__max": 100,
+          "__enforce_max": true
+        },
+        "daily_usd": {
+          "__type": "float",
+          "__default": 1,
+          "__min": 0,
+          "__max": 30,
+          "__enforce_max": true
+        }
+      }
+    },
+    "escalation": {
+      "__type": "dict",
+      "__strict": true,
+      "__keys": {
+        "remediation_findings_threshold": {
+          "__type": "int",
+          "__default": 3,
+          "__min": 0,
+          "__max": 10000,
+          "__enforce_max": true
+        },
+        "max_steps": {
+          "__type": "int",
+          "__default": 2,
+          "__min": 0,
+          "__max": 2,
+          "__enforce_max": true
+        }
+      }
+    },
+    "report": {
+      "__type": "dict",
+      "__strict": true,
+      "__keys": {
+        "min_cell_n": {
+          "__type": "int",
+          "__default": 30,
+          "__min": 1,
+          "__max": 1000000,
+          "__enforce_max": true
+        }
+      }
+    },
+    "alerts": {
+      "__type": "dict",
+      "__strict": true,
+      "__keys": {
+        "regression_pct": {
+          "__type": "float",
+          "__default": 50,
+          "__min": 0,
+          "__max": 10000,
+          "__enforce_max": true
+        }
+      }
+    },
+    "feedback": {
+      "__type": "dict",
+      "__strict": true,
+      "__keys": {
+        "schedule": {
+          "__type": "string",
+          "__default": "weekly",
+          "__pattern": "^.+$"
+        }
+      }
+    }
+  }
+}

@@ -315,6 +315,8 @@ function buildRoleFallbackEnvAliases() {
   );
 }
 
+const MES_SCHEMA = JSON.parse(readFileSync(new URL('./mes-config-schema.v1.json', import.meta.url), 'utf8'));
+
 const OSG_SCHEMA = JSON.parse(readFileSync(new URL('./osg-config-schema.v1.json', import.meta.url), 'utf8'));
 
 // Python-owned strict module fields absent from this reader's consumer schema.
@@ -2039,6 +2041,7 @@ function schemaV1() {
         __keys: {},
       },
       osg: OSG_SCHEMA,
+      mes: MES_SCHEMA,
       roles: {
         __type: TYPE_DICT,
         __strict: true,

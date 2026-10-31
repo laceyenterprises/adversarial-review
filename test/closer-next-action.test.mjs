@@ -47,6 +47,31 @@ function base(observations = {}) {
 const pair = snapshot => Object.freeze({ snapshot, decision: nextAction(snapshot) });
 const tuple = decision => [decision.action, decision.actor, decision.reason];
 
+test('RECOVERYSTALL-01: closure-wait migrates a paged receipt, serializes reminders and refunds failed delivery', async t => {
+  const rootDir = root(t), dir = join(rootDir, 'data', 'ama-closure-waits');
+  mkdirSync(dir, { recursive: true });
+  const key = createHash('sha256').update(`${identity.repo}#${identity.prNumber}`).digest('hex');
+  const db = new Database(join(dir, `${key}.db`));
+  db.exec('CREATE TABLE waits_by_class (head TEXT, class TEXT, started INTEGER NOT NULL, reason TEXT, paged INTEGER DEFAULT 0, PRIMARY KEY(head,class))');
+  db.prepare('INSERT INTO waits_by_class VALUES (?,?,?,?,1)').run(HEAD, 'closure-recovery-deadline', 0, 'synthetic');
+  db.close();
+  let now = 1000, fail = false, pages = 0;
+  const observe = () => observeClosureWait({ rootDir, ...identity, now, immediate: true,
+    waitClass: 'closure-recovery-deadline', reason: 'synthetic unreadable custody', repeatAfterMs: 6000,
+    pageImpl: async () => { if (fail) throw Error('synthetic refused page'); pages++; } });
+  await Promise.all([observe(), observe()]);
+  assert.equal(pages, 1);
+  now += 5999;
+  assert.equal((await observe()).notify, false);
+  now++;
+  fail = true;
+  await assert.rejects(observe(), /synthetic refused page/);
+  fail = false;
+  assert.equal((await observe()).notify, true);
+  assert.equal((await observe()).notify, false);
+  assert.equal(pages, 2);
+});
+
 test('a proven renumber replaces primary-change repair with an auditable passing observation', async () => {
   const f = migrationRenumberFixture();
   f.evidence.headSha = HEAD;

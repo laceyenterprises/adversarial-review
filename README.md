@@ -2365,6 +2365,16 @@ SRE observes no open recovery deadline more than one wake overdue; see
 [the recovery runbook](docs/RUNBOOK-ama-closure.md#every-recovery-deadline-recoverydeadline-01)
 and SEVDOCS-333. No worker live action is authorized.
 
+RECOVERYSTALL-01 adds focused offline custody recovery coverage: overdue R04
+re-reads the exact-head lease and launch/retries even without a receipt, then
+uses ordinary locked admission for one replacement closer. Live or unreadable
+custody stays fenced. Durable attempts, deadline and last evidence appear in
+closure status; unresolved recovery pages every six hours. Existing smoke
+promises remain unchanged. After ordinary deployment, SRE records no open PR
+with `closure-recovery-ownership-unresolved` more than one recovery cycle past
+its deadline; a persistent ledger outage remains an explicit unresolved incident.
+No worker live action is authorized.
+
 <a id="smv-handoff"></a>**smv-handoff:** OWNERUNREADABLE-02 verifies snapshot-only resolution of terminal lease/receipt placeholders, live retry ownership, failed/partial read fences and one deduplicated hammer wake. After ordinary deployment SRE checks that no terminal ledger launch remains in an R04 retry-chain-unreadable skip more than one wake past its deadline (SEVDOCS-335). HAMRESUMEOWED-01 verifies pending-to-green hammer resume and idempotent audit settlement. Outstanding exact-head receipts receive closure priority each poll without an unrelated wake; red/head movement settle the debt for normal handling. Existing merge gates, leases and caps remain mandatory. After deployment SRE observes the next natural pending-CI stop merging its green recorded head without manual action; offline smoke alone does not establish this live receipt. OWNERUNREADABLE-01 verifies terminal ownership recovery after its anchored deadline selects hammer without re-review while unreadable retry evidence remains fenced. Focused offline fixtures also cover one-read placeholder replacement, bounded backoff, transient recovery, live retries and outage recovery. After deployment SRE observes the next natural R04 case exit within its budget and merge; no worker live operation is authorized. NXA-07 also verifies exact-head validated terminal HAM proof crossing retry selection into pending, failed or green CI gates; mismatched proof retains hammer retry ownership. NXA-07 verifies the common adapter matrix and retains lease/retry settlement; NXA-06 verifies daemon CI changes, operator-approved retry exhaustion selecting R08 hammer repair, live hammer ownership and remote-unconfirmed receipt recovery through the shared decision. NXA-05 verifies that drain/capacity observations
 retain hammer intent and its deadline, and current deterministic automatic stops retain
 closure-recovery ownership. STOPSTALE-01 / STOPSTALE-02 verify that all four

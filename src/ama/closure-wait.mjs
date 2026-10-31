@@ -23,7 +23,7 @@ export async function observeClosureWait(args = {}) {
 
 async function observeClosureWaitWithinRepositoryCycle({ rootDir, repo, prNumber, headSha, reason,
   now = Date.now(), env = process.env, pageImpl = page, immediate = false, waitClass = null, startedAt = null, progress = false,
-  launchWait = null, launchAlive = false, anchorOnly = false }) {
+  launchWait = null, launchAlive = false, anchorOnly = false, repeatAfterMs = null }) {
   const reasonClass = waitClass || (immediate ? 'primary-change' : 'bounded-wait');
   const requested = Number(env.AMA_CLOSURE_WAIT_BOUND_MS);
   const baseMs = Number.isFinite(requested) && requested > 0 ? requested : CLOSURE_WAIT_BOUND_MS;
@@ -34,6 +34,11 @@ async function observeClosureWaitWithinRepositoryCycle({ rootDir, repo, prNumber
   const db = new Database(join(dir, `${key}.db`));
   try {
     db.exec('CREATE TABLE IF NOT EXISTS waits_by_class (head TEXT, class TEXT, started INTEGER NOT NULL, reason TEXT, paged INTEGER DEFAULT 0, PRIMARY KEY(head, class))');
+    db.transaction(() => {
+      if (!db.prepare('PRAGMA table_info(waits_by_class)').all().some(column => column.name === 'last_paged')) {
+        db.exec('ALTER TABLE waits_by_class ADD COLUMN last_paged INTEGER');
+      }
+    }).immediate();
     const result = db.transaction(() => {
       if (reasonClass === 'final-round') {
         // One receipt per PR: a new head is progress, not a new page budget.
@@ -64,8 +69,14 @@ async function observeClosureWaitWithinRepositoryCycle({ rootDir, repo, prNumber
       const exhausted = immediate || (launching
         ? now - launchWait.startedAt >= launchWait.boundMs
         : !progress && now - row.started >= boundMs);
-      const notify = !anchorOnly && exhausted && db.prepare('UPDATE waits_by_class SET paged=1 WHERE head=? AND class=? AND paged=0').run(headSha, reasonClass).changes === 1;
+      const repeating = Number.isFinite(repeatAfterMs) && repeatAfterMs > 0;
+      const pageDue = !row.paged || (repeating && (row.last_paged === null || now - row.last_paged >= repeatAfterMs));
+      const notify = !anchorOnly && exhausted && pageDue;
+      if (notify) db.prepare('UPDATE waits_by_class SET paged=1, last_paged=? WHERE head=? AND class=?')
+        .run(now, headSha, reasonClass);
       return { exhausted, notify, firstObserved, startedAt: launching ? launchWait.startedAt : progress ? now : row.started,
+        previousPaged: row.paged, previousLastPaged: row.last_paged,
+        lastPagedAt: notify ? now : row.last_paged,
         boundedMs: launching ? launchWait.boundMs : boundMs };
     }).immediate();
     if (result.notify) {
@@ -74,14 +85,19 @@ async function observeClosureWaitWithinRepositoryCycle({ rootDir, repo, prNumber
           ? `closure still running after ${Math.floor((now - result.startedAt) / 60_000)} minutes`
           : 'closure wait exhausted';
         await pageImpl(`HAMCLOSE-01 ${notice}: ${repo} PR ${prNumber}@${headSha}: ${reason}`, {
-          source: 'hamclose-closure-wait', severity: 'SEV1', dedupKey: `hamclose:${repo}:${prNumber}:${headSha}:${reasonClass}`,
+          source: 'hamclose-closure-wait', severity: 'SEV1', dedupKey: `hamclose:${repo}:${prNumber}:${headSha}:${reasonClass}`
+            + (Number.isFinite(repeatAfterMs) && repeatAfterMs > 0 ? `:${now}` : ''),
         });
       } catch (error) {
         if (reasonClass === 'final-round') db.prepare('UPDATE waits_by_class SET paged=0 WHERE class=?').run(reasonClass);
-        else db.prepare('UPDATE waits_by_class SET paged=0 WHERE head=? AND class=?').run(headSha, reasonClass);
+        else db.prepare('UPDATE waits_by_class SET paged=?, last_paged=? WHERE head=? AND class=? AND last_paged=?')
+          .run(result.previousPaged, result.previousLastPaged, headSha, reasonClass, now);
         throw error;
       }
     }
-    return { ...result, retryAfterMs: CLOSURE_WAIT_RETRY_MS, reason };
+    const publicResult = { ...result };
+    delete publicResult.previousPaged;
+    delete publicResult.previousLastPaged;
+    return { ...publicResult, retryAfterMs: CLOSURE_WAIT_RETRY_MS, reason };
   } finally { db.close(); }
 }

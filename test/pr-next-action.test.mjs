@@ -53,6 +53,26 @@ function snap({ pr = {}, checks = {}, reviews = {}, remediation = {}, launches =
 
 const pick = decision => [decision.action, decision.actor, decision.reason];
 
+test('RECOVERYSTALL-01: overdue ownership needs fresh terminal evidence; time alone cannot authorize dispatch', () => {
+  const options = { observedAt: '2026-01-01T12:00:00.000Z',
+    reviews: { verdict: 'comment-only' }, remediation: { roundsLeft: false },
+    leases: { closer: { headSha: HEAD, status: 'terminal', lrqId: 'synthetic-previous' } } };
+  const unknown = nextAction(snap({ ...options, states: { launches: 'unknown' } }));
+  assert.equal(unknown.reason, 'ownership-unreadable');
+  assert.equal(unknown.actor, 'closure-recovery');
+  for (const status of ['failed', 'succeeded']) {
+    const terminal = nextAction(snap({ ...options, launches: { closer: { headSha: HEAD,
+      launchRequestId: 'synthetic-previous', probe: { ok: true, row: { status }, retryChain: [] },
+      outcome: 'no-merge', retryable: true } } }));
+    assert.equal(terminal.actor, 'hammer');
+    assert.equal(terminal.queue.intent, 'dispatch');
+  }
+  const retry = nextAction(snap({ ...options, launches: { closer: { headSha: HEAD,
+    probe: { ok: true, row: { status: 'failed' }, retryChain: [{ status: 'running' }] } } } }));
+  assert.equal(retry.reason, 'live-owner');
+  assert.equal(retry.queue.intent, 'owned');
+});
+
 for (const reason of ['pending-required-checks', 'pending-mergeability',
   'gate-read-failed', 'live-head-refresh-failed', 'live-head-unresolved']) {
   test(`CLOSERREFRESHLOOP-01: unchanged transient ${reason} retains snapshot refresh`, () => {

@@ -12,6 +12,7 @@ import { resolveOsgRemediatorRoute } from '../osg-remediator.mjs';
 import { randomUUID } from 'node:crypto';
 import { captureCloserProcess } from './dispatch-submitter.mjs';
 import { closerLaunchMatches, isPreReceiptIntent, isTerminalCloserPullRequest, reconcilePreReceiptIntent, tryAcquireCloserIntentLock, withCloserIntentWriteLock } from './pre-receipt-intent.mjs';
+import { refreshClosureRecoveryCustody } from './closure-recovery.mjs';
 import { loadAwareTimeoutMs, timerDelayMs, progressingOperationTimeoutMs } from '../load-aware-timeout.mjs';
 import { readDispatchReceipt, parseDispatchJsonOutput } from '../producer-contracts/dispatch-receipt.mjs';
 import { isHamWorkerTicket } from './ham-provenance.mjs';
@@ -4580,7 +4581,15 @@ async function maybeDispatchAmaCloserWithinRepositoryCycle(args) {
       retireAmaCloserDrainHint(dispatchContext.rootDir, drainIdentity, { logger: args.logger });
     }
     const readStatus = args.readLaunchRequestStatusImpl || readLaunchRequestStatusFromLedgerDefault;
-    const result = await maybeDispatchAmaCloserAttempt({ ...args, dispatchContext,
+    const recovery = args.cfg?.enabled && args.cfg?.autonomousMergeExecutionEnabled !== false && dispatchContext?.rootDir
+      ? await refreshClosureRecoveryCustody({ rootDir: dispatchContext.rootDir,
+        repo: targetRepo, prNumber: targetPrNumber, headSha: targetHead, shared: args.sharedNextAction,
+        now: Date.parse(dispatchContext.dispatchedAt) || Date.now(), readLaunchImpl: readStatus,
+        readOptions: { hqRoot: dispatchContext.hqRoot, ledgerTarget: dispatchContext.ledgerTarget,
+          ledgerDbPath: dispatchContext.ledgerDbPath, env: args.env || process.env, signal: args.signal } })
+      : { shared: args.sharedNextAction };
+    decisionSink.value = recovery.shared;
+    const result = await maybeDispatchAmaCloserAttempt({ ...args, dispatchContext, sharedNextAction: recovery.shared,
       observeSharedDecision: shared => { decisionSink.value = shared; },
       prMetadata: { ...args.prMetadata, prNumber: targetPrNumber },
       // Preserve the production snapshot contract through the retry wrapper.
@@ -4593,6 +4602,7 @@ async function maybeDispatchAmaCloserWithinRepositoryCycle(args) {
         } else if (record?.scratchDir) pendingCleanup.set(record.scratchDir, { record, logger });
       },
     });
+    if (recovery.closureRecovery) result.closureRecovery = recovery.closureRecovery;
     preservePredecessor = ['dispatch-retry-live', 'existing-dispatch-unknown'].includes(result.reason)
       || result.preservePredecessorArtifacts === true;
     admissionCompleted = true;
@@ -7330,7 +7340,7 @@ async function maybeDispatchAmaCloserAttempt({
         && deleteAmaCloserLeaseIfCurrent(rootDir, existingLease)) {
         logAmaCloserDispatchEvent(logger, 'ama_closer.terminal_lease_reclaimed', {
           repo, prNumber, headSha: existingLease.headSha, launchRequestId: existingLease.lrqId,
-          terminalOutcome: existingLease.terminalOutcome,
+          terminalOutcome: existingLease.terminalOutcome, reason: 'terminal-custody-confirmed',
         });
         leaseResult = acquireAmaCloserLease({ rootDir, ...leaseIdentity, dispatchTimeoutMs,
           watcherPid: process.pid, now: dispatchContext.dispatchedAt });

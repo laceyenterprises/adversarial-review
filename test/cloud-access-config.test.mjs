@@ -29,10 +29,12 @@ test('AFA AWS strict schema is disabled by default and accepts private overlay p
       }
     }
     rmSync(join(dir, 'config.local.yaml'));
-    for (const aws of [{ region: 'us-east-1' }, { enabled: 'true' }, { typo: true }]) {
+    for (const aws of [{ region: 'us-east-1' }, { enabled: 'true' }]) {
       writeFileSync(topPath, JSON.stringify({ version: 1, cloud_access: { aws } }));
       assert.throws(() => loadConfig({ topPath, env: {} }), { name: 'AgentOSConfigError' });
     }
+    writeFileSync(topPath, JSON.stringify({ version: 1, cloud_access: { aws: { future_example: true } } }));
+    assert.equal(loadConfig({ topPath, env: {} }).get('cloud_access.aws.future_example'), null);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -89,7 +91,7 @@ test('ZFA host overlay parses all foundation leaves with flags disabled', () => 
       assert.throws(() => loadConfig({ topPath, env: {} }), error);
     }
     writeFileSync(topPath, JSON.stringify({ version: 1, cloud_access: { azure: { typo: true } } }));
-    assert.throws(() => loadConfig({ topPath, env: {} }), /unknown key/);
+    assert.equal(loadConfig({ topPath, env: {} }).get('cloud_access.azure.typo'), null);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

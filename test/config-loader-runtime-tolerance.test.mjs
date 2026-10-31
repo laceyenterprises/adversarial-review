@@ -11,10 +11,8 @@ import {
   resetRuntimeUnknownWarningCacheForTests,
 } from '../src/config-loader.mjs';
 
-// Regression coverage for CFT-02: runtime callers must tolerate checked-in
-// config.yaml keys that are newer than this loader, warn once per config
-// file/key, and drop the unknown key. The strict public loadConfig() entrypoint
-// must keep failing loud so CI and authoring paths still catch schema drift.
+// CFGREADERSCOPE-01: startup and runtime loads share a reader-scoped contract.
+// Unknown sibling-reader keys are dropped silently by default in every layer.
 
 function withTempTopConfig(contents, fn) {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'cfg-runtime-tolerance-'));
@@ -59,7 +57,7 @@ function captureWarns(fn) {
   return warnings;
 }
 
-test('runtime load tolerates an unknown checked-in top-level key and strict load still rejects it', () => {
+test('runtime load tolerates an unknown checked-in top-level key and startup load also tolerates it', () => {
   withTempTopConfig(
     `version: 1
 roots:
@@ -82,21 +80,14 @@ roots:
           },
         ]);
       });
-      assert.equal(warnings.filter((line) => line.includes('roots.future_runtime_home')).length, 1);
+      assert.equal(warnings.filter((line) => line.includes('roots.future_runtime_home')).length, 0);
 
-      assert.throws(
-        () => loadConfig({ topPath, modulePaths: [], env: {} }),
-        (err) => {
-          assert.match(String(err.message), /unknown key \(strict schema\)/);
-          assert.match(String(err.message), /roots\.future_runtime_home/);
-          return true;
-        },
-      );
+      assert.doesNotThrow(() => loadConfig({ topPath, modulePaths: [], env: {} }));
     },
   );
 });
 
-test('runtime load tolerates an unknown checked-in module key and warns once per file/key', () => {
+test('runtime load tolerates an unknown checked-in module key without warnings', () => {
   withTempConfigPair(
     {
       topContents: 'version: 1\n',
@@ -121,39 +112,19 @@ test('runtime load tolerates an unknown checked-in module key and warns once per
           },
         ]);
       });
-      assert.equal(warnings.filter((line) => line.includes('roles.future_worker_role')).length, 1);
+      assert.equal(warnings.filter((line) => line.includes('roles.future_worker_role')).length, 0);
 
-      assert.throws(
-        () => loadConfig({ topPath, modulePaths: [modulePath], env: {} }),
-        (err) => {
-          assert.match(String(err.message), /unknown key \(strict schema\)/);
-          assert.match(String(err.message), /roles\.future_worker_role/);
-          return true;
-        },
-      );
+      assert.doesNotThrow(() => loadConfig({ topPath, modulePaths: [modulePath], env: {} }));
     },
   );
 });
 
-test('strict loadConfig still fails loud on a foreign nested key under a shared root', () => {
+test('startup load ignores a foreign nested key under a shared root', () => {
   withTempTopConfig(
-    `version: 1
-main_catchup:
-  poll_interval_seconds: 300
-  some_future_sibling_module_key: true
-`,
+    'version: 1\nmain_catchup:\n  some_future_sibling_module_key: true\n',
     (topPath) => {
-    assert.throws(
-      () => loadConfig({ topPath, modulePaths: [], env: {} }),
-      (err) => {
-        assert.match(String(err.message), /unknown key \(strict schema\)/);
-        assert.match(
-          String(err.message),
-          /some_future_sibling_module_key/,
-        );
-        return true;
-      },
-    );
+      const cfg = loadConfig({ topPath, env: {} });
+      assert.equal(cfg.get('main_catchup.some_future_sibling_module_key'), null);
     },
   );
 });

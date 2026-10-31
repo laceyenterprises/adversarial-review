@@ -6,9 +6,10 @@
 // do. The conformance suite in `test/config-loader.test.mjs` exercises the
 // same fixture cases as the Python `tests/test_loader.py`.
 //
-// This file aims for behavior-equivalence with the Python sibling, NOT
-// byte-equivalence. Deliberate divergences from the current Python sibling
-// (each one strictly tightens the contract; tracked for alignment in the
+// Shared supported keys aim for behavior-equivalence with the Python sibling,
+// NOT byte-equivalence. Unknown sibling-reader keys are outside this reader's
+// contract (see ownership below). Other deliberate divergences
+// (tracked for alignment in the
 // agent-os PR landing the Python helper):
 //   1. Explicit `~` / null on non-nullable keys: this loader fails the
 //      schema; the Python sibling reverts to defaults.
@@ -23,6 +24,19 @@
 //      the Python sibling currently checks only the nullable string type.
 // LOADER-CONTRACT.md should land these as the canonical contract on the
 // agent-os side so the divergences narrow back to zero.
+
+// Reader ownership (CFGREADERSCOPE-01): Python owns the full Agent OS schema;
+// this reader owns review/remediation/watcher settings and the shared leaves
+// registered below for its supported get()/role-config surface. worker_pool,
+// services, roles and other shared namespaces may contain sibling-reader keys.
+// Unknown keys at ANY depth are ignored with ADVERSARIAL_CONFIG_DEBUG logging,
+// in checked-in files as well as local overlays. Never mirror a sibling-only
+// addition just to make this service start. A companion schema edit is required
+// when this service starts reading a key (including new fields of an atomic
+// policy/declaration it consumes); retain type, range and allowlist parity for
+// that shared read. Existing registered leaves remain a compatibility surface.
+// __strict_always marks consumed atomic policies/declarations: their complete
+// shape is meaningful, so unknown fields there still fail closed.
 
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -101,12 +115,6 @@ function isFalseyDeprecatedEnvValue(value) {
   return lower === '' || lower === 'false' || lower === '0';
 }
 
-function isLocalYamlSource(source) {
-  if (typeof source !== 'string' || !source) return false;
-  const name = basename(source);
-  return name.endsWith('.local.yaml') || name.endsWith('.local.yml');
-}
-
 // Silent by default. We deliberately do NOT console.warn unknown-key drops:
 // agent-os#1738 showed a config-loader warning leaking onto stderr can corrupt
 // positional config captures downstream. Opt in with ADVERSARIAL_CONFIG_DEBUG.
@@ -131,8 +139,8 @@ function warnRuntimeUnknownKeyOnce(keyPath, source, hint = '') {
   if (_RUNTIME_UNKNOWN_WARNED_KEYS.has(warnedKey)) return;
   _RUNTIME_UNKNOWN_WARNED_KEYS.add(warnedKey);
   const suffix = hint ? ` — ${hint.trim()}` : '';
-  console.warn(
-    `[adversarial-config] ignoring unknown key ${JSON.stringify(keyPath)} ` +
+  configDebugLog(
+    `ignoring unknown key ${JSON.stringify(keyPath)} ` +
       `in runtime config ${warningSource}${suffix} (not in this reader's schema)`,
   );
 }
@@ -169,73 +177,7 @@ const ENUM_REVIEWER_GEMINI_RUNTIME = ['cli', 'antigravity'];
 // HAMASYNC-01 — where AMA's hammer dispatch runs relative to the posted-review
 // phase (`watcher.ama_hammer_dispatch_mode`); see ama-hammer-background-dispatch.mjs.
 const ENUM_WATCHER_AMA_HAMMER_DISPATCH_MODE = ['inline', 'background'];
-const FOREIGN_TOP_LEVEL_SECTIONS = new Set([
-  // LOADER-CONTRACT §2 permits each reader to ignore only root sections
-  // explicitly foreign to that reader in top-level config.local.yaml.
-  //
-  // `worker_pool` is no longer listed here: as of the deep-reconcile CFG knob
-  // (2026-06-19) this reader carries a PARTIAL `worker_pool` schema (only
-  // `dag.autowalk.deep_reconcile`) so the watcher tolerates that key in the
-  // canonical config.yaml. worker_pool is therefore a known (not foreign) root;
-  // its other keys are still Python-owned and are tolerated-dropped per-key in
-  // config.local.yaml via the nested-unknown drop. Re-add a root here only if a
-  // whole top-level section is genuinely owned by another reader and unmirrored.
-  //
-  // `email_archive` (agent-os#5556, EAR-02) qualifies on both counts. Its two
-  // keys — `dsn` and `database_name` — are declared in the Python schema
-  // authority (`agent_os_config/schema_v1/email_archive.py`), are consumed only
-  // by `modules/email-archive`, and have no meaning to this reader: nothing in
-  // adversarial-review connects to the email archive. Mirroring the block here
-  // would create a second place to keep a Python-owned schema in step; ignoring
-  // the root is the honest description of this reader's relationship to it.
-  //
-  // Without this entry the root is not foreign, so it falls through to the
-  // strict schema and raises `email_archive: unknown key` — under
-  // loadConfigRuntime as well as loadConfig — which crash-loops the
-  // adversarial-watcher. That is the 2026-06-13 fleet-wide outage and the
-  // `config-schema.multi-loader-parity` failure mode. EAR-02 shipped with
-  // env (`AGENT_OS_EMAIL_ARCHIVE_DSN`) as the only supported operator surface
-  // precisely because this entry did not exist yet.
-  'email_archive',
-  //
-  // `resident` (agent-os#5813, RTR-00) qualifies on the same two counts. The
-  // root is declared in the Python schema authority
-  // (`agent_os_config/schema_v1/misc.py`) and the shell loader, is consumed by
-  // the resident supervisor, and has no meaning to this reader: nothing in
-  // adversarial-review reads resident token state.
-  //
-  // Without this entry an operator who sets `resident.token_refresh.enabled` in
-  // config.local.yaml — the documented way to enforce that flag — takes the
-  // watcher down the `email_archive` path above: not foreign, falls through to
-  // the strict schema, `resident: unknown key`, crash-loop. Registering it as
-  // foreign is the honest description and costs nothing to keep in step,
-  // whereas mirroring the block would create a second copy of a Python-owned
-  // schema.
-  'resident',
-  // MMD-01: Python and shell own the media_generation library destination.
-  // The Node reviewer never reads it, but an operator may set it in
-  // config.local.yaml. Without this entry the watcher rejects it on startup.
-  'media_generation',
-  // CFGFOREIGN-01: `comms.ingressMode` is declared by the authoritative Python
-  // schema, but ingress selection belongs to another reader. Rejecting this
-  // documented local override crash-loops the watcher on an unknown root.
-  'comms',
-  // The same audit of all authoritative schema roots found these unmirrored,
-  // externally owned sections. None is consumed by this reader; keep them
-  // foreign rather than duplicating their schemas. The complete root snapshot
-  // is in test/fixtures/config-schema-roots.json (config-schema.multi-loader-parity).
-  'submodule_float', // Submodule float signing configuration.
-  'assessment_cadence', // Assessment scheduler configuration.
-  'argus', // Argus daemon configuration, separate from reviewer routing here.
-  'searchlight', // Searchlight OSS configuration.
-  'timeouts', // Shared timeouts; this reader uses adversarial.reviewer.load_aware.
-]);
-// Keep this per-role fallback surface in lockstep with the Python
-// agent_os_config schema. The child dicts are intentionally strict so a
-// Python-only key must not land without adding the same key here first.
-// Role-class keys are hyphenated to mirror worker class tokens, while older
-// role-level knobs remain snake_case. Strict-schema errors should keep nearest
-// key suggestions useful for operator typos across both shapes.
+// Role-class keys are hyphenated to mirror worker class tokens.
 const ROLE_FALLBACK_CLASSES = [
   'claude-code',
   'codex',
@@ -1804,23 +1746,15 @@ function schemaV1() {
           },
         },
       },
-      // LCR-01 — strict Node mirror of the Agent OS Local CI Runner routing
-      // subtree. The watcher does not route CI itself, but every strict CFG
-      // consumer must accept the same checked-in surface.
+      // Historical parse-only registrations retained for compatibility.
+      // CI routing and spend are owned by the sibling reader; new sibling
+      // fields no longer require extending this block.
       ci: {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
-          // CI spend tracking against a monthly budget (agent-os #6343).
-          // 5th occurrence of the CFG-01 multi-loader drift bug: the key was
-          // added to the canonical agent-os `config.yaml`, which this reader
-          // parses STRICTLY (the tolerant drop path is gated on
-          // `isLocalYamlSource`, so it covers config.local.yaml only). Every
-          // `loadConfig()` therefore threw `ci.billing: unknown key (strict
-          // schema)` and merge authority never initialized -- 9 clean PRs sat
-          // unmerged for hours on 2026-09-06 while reviews kept posting.
-          // Keep in lockstep with the Python schema at
-          // `platform/agent-os-config/src/agent_os_config/schema_v1/oauth_github_ci.py`.
+          // Previously a missing mirror here prevented startup. Reader-scoped
+          // unknown-key handling now prevents that coupling for future fields.
           billing: {
             __type: TYPE_DICT,
             __strict: true,
@@ -5282,6 +5216,20 @@ function validateDictPresentKeysOnly(
         const near = nearestValidKey(rawKey, Object.keys(allowed));
         const full = keyPath ? `${keyPath}.${rawKey}` : rawKey;
         const hint = near ? ` did you mean ${keyPath ? keyPath + '.' : ''}${JSON.stringify(near)}?` : '';
+        if (!schema.__strict_always && !rawKey.startsWith('__')) {
+          if (Array.isArray(droppedUnknownKeys)) {
+            droppedUnknownKeys.push({
+              key: full,
+              source: runtimeWarningSource(warningSource || source),
+              hint: hint.trim(),
+            });
+          }
+          configDebugLog(
+            `ignoring unknown key ${JSON.stringify(full)}` +
+              `${source ? ` from ${source}` : ''} — owned by another config reader`,
+          );
+          continue;
+        }
         if (tolerateUnknown && (keyPath || tolerateTopLevelUnknown)) {
           // Operator-local override (config.local.yaml / module *.local.yaml):
           // a NESTED unknown key under a root this reader owns is dropped, not
@@ -5398,7 +5346,6 @@ function validateSchemaLayer(
   {
     source = null,
     rawText = null,
-    tolerateForeignTopLevelSections = false,
     tolerateNestedUnknownLocalKeys = false,
     tolerateUnknownTopLevelKeys = false,
     warnUnknownOnce = false,
@@ -5432,13 +5379,9 @@ function validateSchemaLayer(
     );
   }
   if (Object.hasOwn(doc, 'osg')) validateOsgShape(doc.osg, source);
-  const knownTop = schema.__keys || {};
-  const filtered = filterForeignTopLevelSections(doc, knownTop, {
-    source,
-    tolerateForeignTopLevelSections,
-  });
+
   return validateDictPresentKeysOnly(
-    filtered,
+    doc,
     schema,
     '',
     source,
@@ -5451,37 +5394,6 @@ function validateSchemaLayer(
       droppedUnknownKeys,
     },
   );
-}
-
-function filterForeignTopLevelSections(
-  doc,
-  knownTop,
-  { source = null, tolerateForeignTopLevelSections = false } = {},
-) {
-  // Tolerant top-level is scoped to Layer-4 multi-reader local siblings.
-  // The public validator and checked-in Layer-3 config.yaml remain strict so
-  // this reader cannot silently diverge from sibling CFG loaders.
-  const filtered = {};
-  for (const topKey of Object.keys(doc || {})) {
-    if (topKey === 'version' || topKey in knownTop) {
-      filtered[topKey] = doc[topKey];
-    } else if (
-      tolerateForeignTopLevelSections &&
-      isLocalYamlSource(source) &&
-      FOREIGN_TOP_LEVEL_SECTIONS.has(topKey)
-    ) {
-      if (typeof console !== 'undefined' && console.warn) {
-        console.warn(
-          `[adversarial-config] ignoring unknown top-level key ${JSON.stringify(topKey)}` +
-            `${source ? ` from ${source}` : ''} — not in this reader's schema ` +
-            `(owned by another config reader)`,
-        );
-      }
-    } else {
-      filtered[topKey] = doc[topKey];
-    }
-  }
-  return filtered;
 }
 
 // -------- Module file validation -------------------------------------------
@@ -5580,7 +5492,6 @@ function validateModuleDoc(
   source,
   rawText,
   {
-    tolerateForeignTopLevelSections = false,
     tolerateNestedUnknownLocalKeys = false,
     preserveEmptyMaps = false,
     tolerateUnknownTopLevelKeys = false,
@@ -5602,15 +5513,7 @@ function validateModuleDoc(
     );
   }
   const schema = schemaV1();
-  const moduleTop = {};
-  for (const [k, v] of Object.entries(schema.__keys)) {
-    if (k !== 'version') moduleTop[k] = v;
-  }
-  const filteredDoc = filterForeignTopLevelSections(doc, moduleTop, {
-    source,
-    tolerateForeignTopLevelSections,
-  });
-  const aliasesRaw = filteredDoc.__aliases || {};
+  const aliasesRaw = doc.__aliases || {};
   if (typeof aliasesRaw !== 'object' || Array.isArray(aliasesRaw)) {
     throw new AgentOSConfigError(
       `${source}: __aliases must be a mapping`,
@@ -5618,6 +5521,7 @@ function validateModuleDoc(
     );
   }
   const aliases = {};
+  const unreadAliases = new Set();
   const schemaForAliasCheck = schemaV1();
   for (const [moduleKey, canonicalKey] of Object.entries(aliasesRaw)) {
     if (typeof moduleKey !== 'string' || typeof canonicalKey !== 'string') {
@@ -5627,6 +5531,16 @@ function validateModuleDoc(
       );
     }
     if (!isValidSchemaPath(schemaForAliasCheck, canonicalKey)) {
+      const parts = canonicalKey.split('.');
+      const consumedAtomicPath = [...TOKEN_POOL_DECLARATION_PATHS]
+        .some(path => canonicalKey.startsWith(`${path}.`))
+        || parts.some((_, index) =>
+          schemaLeaf(schemaForAliasCheck, parts.slice(0, index + 1).join('.'))?.__strict_always);
+      if (!consumedAtomicPath) {
+        unreadAliases.add(moduleKey);
+        configDebugLog(`ignoring alias ${JSON.stringify(moduleKey)} to unread key ${JSON.stringify(canonicalKey)}`);
+        continue;
+      }
       throw new AgentOSConfigError(
         `${source}: __aliases canonical key ${JSON.stringify(canonicalKey)} (target of ${JSON.stringify(moduleKey)}) is not in the schema`,
         {
@@ -5641,7 +5555,7 @@ function validateModuleDoc(
   }
 
   const body = {};
-  for (const [k, v] of Object.entries(filteredDoc)) {
+  for (const [k, v] of Object.entries(doc)) {
     if (k !== '__aliases') body[k] = v;
   }
 
@@ -5683,6 +5597,7 @@ function validateModuleDoc(
 
   const canonicalFlat = {};
   for (const [key, value] of Object.entries(rawFlat)) {
+    if ([...unreadAliases].some(alias => key === alias || key.startsWith(`${alias}.`))) continue;
     const canonical = aliases[key] || key;
     canonicalFlat[canonical] = value;
   }
@@ -6437,7 +6352,7 @@ function loadConfigImpl({
       localSources.push({ path: moduleLocal, kind: 'module' });
     }
   }
-  for (const { path: local, kind } of localSources) {
+  for (const { path: local } of localSources) {
     const { doc: localDoc, rawText: localRaw } = loadLayerFile(local);
     if (localDoc === null || localDoc === undefined || isEmptyDoc(localDoc)) continue;
     let validatedLocal;
@@ -6450,12 +6365,10 @@ function loadConfigImpl({
       validatedLocal = validateSchemaLayer(localDoc, {
         source: local,
         rawText: localRaw,
-        tolerateForeignTopLevelSections: true,
         tolerateNestedUnknownLocalKeys: true,
       });
     } else {
       const { validated, aliases } = validateModuleDoc(localDoc, local, localRaw, {
-        tolerateForeignTopLevelSections: kind === 'top',
         tolerateNestedUnknownLocalKeys: true,
         preserveEmptyMaps: true,
       });
@@ -6776,9 +6689,9 @@ function _ensureFreshConfig({ topPath, modulePaths, env, legacyGeminiReviewer = 
     // a key to the shared top-level config.yaml (2026-07-17 watcher outage:
     // main_catchup.pg_schema_gate_allow_destructive_revisions landed via the
     // parent repo and every cached load — watcher, role-config, getConfig —
-    // fail-louded at startup for ~1h). Unknown nested keys under shared roots
-    // are warn-once dropped; the strict loadConfig() stays the contract for
-    // tests and validation tooling so genuine module-file drift still fails CI.
+    // fail-louded at startup for ~1h). Startup and cached runtime readers now
+    // share unknown-key scoping; supported values and consumed atomic policies
+    // retain strict validation. Runtime additionally records dropped paths.
     const fresh = loadConfigImpl({ topPath, modulePaths, env, tolerateCheckedInUnknown: true, legacyGeminiReviewer });
     _configCache.set(cacheKey, fresh);
     _configSignatures.set(cacheKey, sig);

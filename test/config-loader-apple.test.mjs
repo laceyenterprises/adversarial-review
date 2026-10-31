@@ -34,10 +34,16 @@ test('Apple developer directory accepts a path and canonical environment overrid
   });
 });
 
-for (const body of ['developer_dir: null', 'developer_dir: false', 'developer_dir: 42', 'developer_dir: []', 'typo: ""']) {
+for (const body of ['developer_dir: null', 'developer_dir: false', 'developer_dir: 42', 'developer_dir: []']) {
   test(`Apple strict schema rejects ${body}`, () => {
     fixture(`apple:\n  ${body}\n`, (topPath) => {
       assert.throws(() => loadConfig({ topPath, env: {} }), AgentOSConfigError);
     });
   });
 }
+
+test('Apple sibling-reader fields are ignored', () => {
+  fixture('apple:\n  future_example: true\n', topPath => {
+    assert.equal(loadConfig({ topPath, env: {} }).get('apple.future_example'), null);
+  });
+});

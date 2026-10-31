@@ -25,13 +25,22 @@ test('session resume automatic policy defaults off and accepts explicit cells', 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('session resume checked-in schema rejects malformed or unknown leaves', () => {
+test('session resume checked-in schema rejects malformed supported leaves', () => {
   const dir = mkdtempSync(join(tmpdir(), 'resume-policy-invalid-'));
   try {
     const topPath = join(dir, 'config.yaml');
-    for (const leaf of ['enabled: invalid', 'cells: true', 'cells: [1]', 'other: true']) {
+    for (const leaf of ['enabled: invalid', 'cells: true', 'cells: [1]']) {
       writeFileSync(topPath, 'version: 1\nworker_pool:\n  session_resume:\n    automatic:\n      ' + leaf + '\n');
       assert.throws(() => loadConfig({ topPath, env: {} }), { name: 'AgentOSConfigError' });
     }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('session resume ignores unread policy leaves', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'resume-policy-unread-'));
+  try {
+    const topPath = join(dir, 'config.yaml');
+    writeFileSync(topPath, 'version: 1\nworker_pool:\n  session_resume:\n    automatic:\n      future_example: true\n');
+    assert.equal(loadConfig({ topPath, env: {} }).get('worker_pool.session_resume.automatic.future_example'), null);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

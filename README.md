@@ -363,12 +363,13 @@ dispatch `protectedClasses` exemptions and short-window `active`/`paused` flags.
 The stable reason is `personal-anthropic-reserve-floor`; current percentages
 remain in structured `reserveFloor` metadata and diagnostic text.
 
-A floor hold with no eligible alternative currently emits a transition-only
-`reviewer-route DEFERRED` warning, with no dedicated sustained-hold alert.
-It can last until weekly capacity recovers or resets. SRE should inspect that
-reason and Gemini eligibility when Codex-family reviews stop progressing;
-do not waive builder-family refusals. A durable, deduplicated sustained-hold
-health signal remains follow-up work for the review-pipeline health owner.
+A floor hold with no eligible alternative emits a transition-only
+`reviewer-route DEFERRED` warning. After 15 minutes of continuous observations,
+the watcher emits one error-level `reviewer-reserve-floor SUSTAINED_HOLD` health
+signal per PR, re-armed by recovery or a different quota hold. Tracking is
+process-local and resets on watcher restart; existing pipeline freshness paging
+remains responsible for operator pages. SRE should inspect reserve capacity and
+Gemini eligibility; do not waive builder-family refusals.
 
 When Claude account selection reports a hold, AFH skips Claude as a fallback
 candidate, including when corporate account evidence is unknown or stale. Unknown

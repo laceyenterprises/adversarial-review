@@ -493,9 +493,11 @@ the stable `personal-anthropic-reserve-floor` reason and separate measured
 remaining percentage and effective threshold. All personal pool accounts share
 the producer's single `anthropic-oauth` projection; there is no account-ID floor.
 The reviewer-specific weekly `<=` comparison ignores dispatch exemptions and
-short-window hold flags. Sustained floor holds currently have transition logs
-but no dedicated durable health alert; the review-pipeline health owner retains
-that follow-up. This adds no lifecycle transition or smoke command.
+short-window hold flags. After 15 minutes of continuously observed floor holds,
+the watcher emits one error-level `reviewer-reserve-floor SUSTAINED_HOLD`
+health signal per PR. Recovery or another quota hold re-arms it. This
+process-local clock resets on restart; existing freshness paging owns pages.
+This adds no lifecycle transition or smoke command.
 After deployment, SRE should observe an organic review at or below the floor,
 confirm its selected family/account and the reserve reason, and verify that
 personal Claude selection returns when capacity rises above the floor.

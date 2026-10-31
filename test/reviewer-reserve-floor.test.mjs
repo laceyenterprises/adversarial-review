@@ -4,11 +4,46 @@ import assert from 'node:assert/strict';
 import { exportedReserveFloors } from './helpers/reserve-floor-fixture.mjs';
 import { personalClaudeReviewerFloor } from '../src/reviewer-reserve-floor.mjs';
 import { afhGroundingSnapshotFromStdout, applyAfhReviewerFallback } from '../src/afh-reviewer-fallback.mjs';
-import { createReviewerQuotaBlockLogger } from '../src/reviewer-quota-block-log.mjs';
+import { createReviewerQuotaBlockLogger, REVIEWER_FLOOR_HOLD_SIGNAL_MS } from '../src/reviewer-quota-block-log.mjs';
 
 const snapshot = scenario => ({
   providerStatuses: [{ provider: 'anthropic', authPath: 'oauth', state: 'ok' }],
   reserveFloors: exportedReserveFloors(scenario),
+});
+
+test('sustained floor holds emit one bounded health signal and recovery re-arms it', () => {
+  let observedAt = 0;
+  const signals = [];
+  const log = createReviewerQuotaBlockLogger({ now: () => observedAt });
+  const route = { quotaBlocked: true, quotaGrounding: {
+    reviewer: 'claude', reason: 'primary-personal-anthropic-reserve-floor:no-eligible-reviewer',
+  } };
+  const observe = (prNumber = 1, selectedRoute = route) => log({
+    repoPath: 'owner/repo', prNumber, route: selectedRoute,
+    logger: { warn() {}, error: message => signals.push(message) },
+  });
+  observe();
+  observedAt = REVIEWER_FLOOR_HOLD_SIGNAL_MS - 1;
+  observe();
+  assert.equal(signals.length, 0);
+  observedAt++;
+  observe();
+  assert.equal(signals.length, 1);
+  assert.match(signals[0], /SUSTAINED_HOLD.*pr=1.*heldMs=900000/);
+  observedAt += REVIEWER_FLOOR_HOLD_SIGNAL_MS;
+  observe();
+  observe(2);
+  assert.equal(signals.length, 1, 'deduplicated and each PR has its own hold clock');
+  observe(1, { quotaBlocked: false });
+  observe();
+  observedAt += REVIEWER_FLOOR_HOLD_SIGNAL_MS;
+  observe();
+  observe(2);
+  assert.equal(signals.length, 3, 'recovery and a distinct PR each permit a new signal');
+  observe(1, { quotaBlocked: true, quotaGrounding: { reason: 'other-quota-hold' } });
+  observedAt += REVIEWER_FLOOR_HOLD_SIGNAL_MS;
+  observe(1, { quotaBlocked: true, quotaGrounding: { reason: 'other-quota-hold' } });
+  assert.equal(signals.length, 3, 'unrelated quota holds do not emit floor signals');
 });
 
 test('public producer examples distinguish weekly reviewer policy from short-window dispatch holds', () => {

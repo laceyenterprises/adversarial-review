@@ -62,10 +62,11 @@ which is not currently exported. An account-specific projection and producer
 reviewer verdict remain producer-owner follow-ups.
 
 Floor hold reasons are stable while measured percentages remain structured
-metadata and diagnostic text. There is no dedicated sustained-floor-hold alert;
-the pipeline health owner should add durable deduplication and bounded
-escalation separately. Until then, inspect `reviewer-route DEFERRED` warnings
-and Gemini eligibility when Codex-family reviews stall.
+metadata and diagnostic text. After 15 minutes of continuous floor holds, a
+deduplicated error-level `reviewer-reserve-floor SUSTAINED_HOLD` health signal
+names the affected PR. Recovery or a different hold re-arms it; watcher restart
+resets this process-local clock. Existing freshness paging owns operator pages.
+Inspect reserve capacity and Gemini eligibility when Codex-family reviews stall.
 
 After deployment, SRE must capture an organic review while personal Claude is
 at or below the floor. Verify the selected family/account and the

@@ -121,11 +121,11 @@
     {
       "name": "accept-config_cache_seconds",
       "config": {
-        "config_cache_seconds": 60
+        "config_cache_seconds": 15
       },
       "valid": true,
       "key": "config_cache_seconds",
-      "expected": 60
+      "expected": 15
     },
     {
       "name": "reject-config_cache_seconds",
@@ -138,6 +138,13 @@
       "name": "bound-config_cache_seconds",
       "config": {
         "config_cache_seconds": 61
+      },
+      "valid": false
+    },
+    {
+      "name": "lower-bound-config_cache_seconds",
+      "config": {
+        "config_cache_seconds": -1
       },
       "valid": false
     },
@@ -181,12 +188,12 @@
       "name": "accept-jev.timeout_seconds",
       "config": {
         "jev": {
-          "timeout_seconds": 3
+          "timeout_seconds": 5
         }
       },
       "valid": true,
       "key": "jev.timeout_seconds",
-      "expected": 3
+      "expected": 5
     },
     {
       "name": "reject-jev.timeout_seconds",
@@ -207,15 +214,24 @@
       "valid": false
     },
     {
+      "name": "lower-bound-jev.timeout_seconds",
+      "config": {
+        "jev": {
+          "timeout_seconds": 0
+        }
+      },
+      "valid": false
+    },
+    {
       "name": "accept-jev.min_confidence",
       "config": {
         "jev": {
-          "min_confidence": 0.6
+          "min_confidence": 0.75
         }
       },
       "valid": true,
       "key": "jev.min_confidence",
-      "expected": 0.6
+      "expected": 0.75
     },
     {
       "name": "reject-jev.min_confidence",
@@ -236,15 +252,24 @@
       "valid": false
     },
     {
+      "name": "lower-bound-jev.min_confidence",
+      "config": {
+        "jev": {
+          "min_confidence": -1
+        }
+      },
+      "valid": false
+    },
+    {
       "name": "accept-jev.downgrade_confidence",
       "config": {
         "jev": {
-          "downgrade_confidence": 0.8
+          "downgrade_confidence": 0.9
         }
       },
       "valid": true,
       "key": "jev.downgrade_confidence",
-      "expected": 0.8
+      "expected": 0.9
     },
     {
       "name": "reject-jev.downgrade_confidence",
@@ -265,15 +290,24 @@
       "valid": false
     },
     {
+      "name": "lower-bound-jev.downgrade_confidence",
+      "config": {
+        "jev": {
+          "downgrade_confidence": -1
+        }
+      },
+      "valid": false
+    },
+    {
       "name": "accept-jev.monthly_share_pct",
       "config": {
         "jev": {
-          "monthly_share_pct": 50
+          "monthly_share_pct": 25
         }
       },
       "valid": true,
       "key": "jev.monthly_share_pct",
-      "expected": 50
+      "expected": 25
     },
     {
       "name": "reject-jev.monthly_share_pct",
@@ -294,15 +328,24 @@
       "valid": false
     },
     {
+      "name": "lower-bound-jev.monthly_share_pct",
+      "config": {
+        "jev": {
+          "monthly_share_pct": -1
+        }
+      },
+      "valid": false
+    },
+    {
       "name": "accept-jev.daily_usd",
       "config": {
         "jev": {
-          "daily_usd": 1
+          "daily_usd": 2
         }
       },
       "valid": true,
       "key": "jev.daily_usd",
-      "expected": 1
+      "expected": 2
     },
     {
       "name": "reject-jev.daily_usd",
@@ -323,15 +366,24 @@
       "valid": false
     },
     {
+      "name": "lower-bound-jev.daily_usd",
+      "config": {
+        "jev": {
+          "daily_usd": -1
+        }
+      },
+      "valid": false
+    },
+    {
       "name": "accept-escalation.remediation_findings_threshold",
       "config": {
         "escalation": {
-          "remediation_findings_threshold": 3
+          "remediation_findings_threshold": 4
         }
       },
       "valid": true,
       "key": "escalation.remediation_findings_threshold",
-      "expected": 3
+      "expected": 4
     },
     {
       "name": "reject-escalation.remediation_findings_threshold",
@@ -352,15 +404,24 @@
       "valid": false
     },
     {
+      "name": "lower-bound-escalation.remediation_findings_threshold",
+      "config": {
+        "escalation": {
+          "remediation_findings_threshold": -1
+        }
+      },
+      "valid": false
+    },
+    {
       "name": "accept-escalation.max_steps",
       "config": {
         "escalation": {
-          "max_steps": 2
+          "max_steps": 1
         }
       },
       "valid": true,
       "key": "escalation.max_steps",
-      "expected": 2
+      "expected": 1
     },
     {
       "name": "reject-escalation.max_steps",
@@ -381,15 +442,24 @@
       "valid": false
     },
     {
+      "name": "lower-bound-escalation.max_steps",
+      "config": {
+        "escalation": {
+          "max_steps": -1
+        }
+      },
+      "valid": false
+    },
+    {
       "name": "accept-report.min_cell_n",
       "config": {
         "report": {
-          "min_cell_n": 30
+          "min_cell_n": 10
         }
       },
       "valid": true,
       "key": "report.min_cell_n",
-      "expected": 30
+      "expected": 10
     },
     {
       "name": "reject-report.min_cell_n",
@@ -410,15 +480,24 @@
       "valid": false
     },
     {
+      "name": "lower-bound-report.min_cell_n",
+      "config": {
+        "report": {
+          "min_cell_n": 0
+        }
+      },
+      "valid": false
+    },
+    {
       "name": "accept-alerts.regression_pct",
       "config": {
         "alerts": {
-          "regression_pct": 50
+          "regression_pct": 25
         }
       },
       "valid": true,
       "key": "alerts.regression_pct",
-      "expected": 50
+      "expected": 25
     },
     {
       "name": "reject-alerts.regression_pct",
@@ -439,15 +518,24 @@
       "valid": false
     },
     {
+      "name": "lower-bound-alerts.regression_pct",
+      "config": {
+        "alerts": {
+          "regression_pct": -1
+        }
+      },
+      "valid": false
+    },
+    {
       "name": "accept-feedback.schedule",
       "config": {
         "feedback": {
-          "schedule": "weekly"
+          "schedule": "daily"
         }
       },
       "valid": true,
       "key": "feedback.schedule",
-      "expected": "weekly"
+      "expected": "daily"
     },
     {
       "name": "reject-feedback.schedule",

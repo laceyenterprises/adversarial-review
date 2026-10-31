@@ -37,13 +37,51 @@ test('ZFA host overlay parses all foundation leaves with flags disabled', () => 
         assert.deepEqual(cfg.get(`cloud_access.azure.infrastructure.${key}`), value);
       }
     }
-    for (const azure of [{ region: 'global' }, { enabled: 'true' }, { infrastructure: { budget_amount: -1 } }]) {
+    for (const [azure, error] of [
+      [{ region: 'global' }, {
+        name: 'AgentOSConfigError', key: 'cloud_access.azure.region',
+        message: /value "global" not in allowlist \["eastus2"\]/,
+      }],
+      [{ enabled: 'true' }, {
+        name: 'AgentOSConfigError', key: 'cloud_access.azure.enabled',
+        message: /expected bool, got string/,
+      }],
+      [{ infrastructure: { budget_amount: -1 } }, {
+        name: 'AgentOSConfigError', key: 'cloud_access.azure.infrastructure.budget_amount',
+        message: /value -1 below minimum 0\.01/,
+      }],
+    ]) {
       writeFileSync(topPath, JSON.stringify({ version: 1, cloud_access: { azure } }));
       rmSync(join(dir, 'config.local.yaml'), { force: true });
-      assert.throws(() => loadConfig({ topPath, env: {} }));
+      assert.throws(() => loadConfig({ topPath, env: {} }), error);
     }
     writeFileSync(topPath, JSON.stringify({ version: 1, cloud_access: { azure: { typo: true } } }));
     assert.throws(() => loadConfig({ topPath, env: {} }), /unknown key/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ZFA budget_start_date preserves quoted and unquoted YAML timestamps as strings', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'zfa-cfg-date-'));
+  try {
+    const topPath = join(dir, 'config.yaml');
+    const localPath = join(dir, 'config.local.yaml');
+    const timestamp = '2026-10-01T00:00:00Z';
+    for (const path of [topPath, localPath]) {
+      writeFileSync(topPath, 'version: 1\n');
+      for (const scalar of [`"${timestamp}"`, `'${timestamp}'`, timestamp]) {
+        writeFileSync(path, `${path === topPath ? 'version: 1\n' : ''}cloud_access:
+  azure:
+    infrastructure:
+      budget_start_date: ${scalar}
+`);
+        for (const loader of [loadConfig, loadConfigRuntime]) {
+          assert.equal(loader({ topPath, env: {} })
+            .get('cloud_access.azure.infrastructure.budget_start_date'), timestamp);
+        }
+      }
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

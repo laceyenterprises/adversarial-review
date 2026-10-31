@@ -58,6 +58,7 @@ export async function verifiedReversalRecord(args, patchIdentity, record) {
     if (record === undefined) {
       try {
         const stored = JSON.parse(readFileSync(path, 'utf8'));
+        if (!stored || typeof stored !== 'object') return null;
         return JSON.stringify(stored.key) === JSON.stringify(key) ? stored.record : null;
       } catch (error) {
         if (error.code === 'ENOENT' || error instanceof SyntaxError) return null;

@@ -128,6 +128,23 @@ test('REVERSALPROOF-01: verified observations survive cache expiry and remain PR
   assert.equal(await verifiedReversalRecord(args, 'synthetic-patch-identity'), null);
 });
 
+test('verified reversal reads treat malformed and non-object JSON as missing evidence', async t => {
+  const args = fixture(t);
+  const patchIdentity = 'synthetic-patch-identity';
+  const record = { authorization: {}, regions: [] };
+  await verifiedReversalRecord(args, patchIdentity, record);
+  const dir = join(args.rootDir, 'data', 'primary-change-history');
+  const path = join(dir, readdirSync(dir).find(name => name.startsWith('verified-')));
+  for (const contents of ['', '{broken', 'null', 'true', 'false', '42', '"text"', '[]', '{}']) {
+    await t.test(JSON.stringify(contents), async () => {
+      writeFileSync(path, contents);
+      assert.equal(await verifiedReversalRecord(args, patchIdentity), null);
+    });
+  }
+  await verifiedReversalRecord(args, patchIdentity, record);
+  assert.deepEqual(await verifiedReversalRecord(args, patchIdentity), record);
+});
+
 test('timed out caller leaves a single read running, completion persists and next attempt reuses it', async t => {
   const args = fixture(t);
   let finish;

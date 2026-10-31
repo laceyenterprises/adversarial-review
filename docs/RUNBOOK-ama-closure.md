@@ -6492,6 +6492,29 @@ rollback restores prior source revision `4d06237c`, including its matching
 owner declarations and tests; there is no second permanent policy switch.
 
 
+## Conditional hammer PR reads (QCP-08)
+
+`fetchHammerPr` (`src/hammer-pr-read.mjs`) reads the PR, its head's check runs
+and its commit statuses with `gh api <path> -i`, and keeps each URL's ETag with
+the body it came with. Later reads send `If-None-Match`. A `304` returns that
+stored body; gh reports a 304 as a non-zero exit with the headers still on
+stdout, and the reader handles both forms. GitHub does not charge a 304 to the
+primary rate limit, and the existing meter still records the 304's own
+`X-RateLimit-*` headers. A PR read that names a new head drops the old head's
+check and status entries. Any answer other than 200 or 304 drops that URL's
+entry, so the next read is unconditional. An ETag outside the quoted-token
+shape is never stored or sent. Output without an HTTP envelope is treated as an
+unconditional 200 with no ETag.
+
+The hammer starts `bin/hammer-pr-read.mjs` as a new process for each poll, so
+inside a hammer run (`HAM_RUN_DIR` set) the entries live in one private
+`pr-read-etags-<hash>.json` file per PR in that run directory, written
+atomically with mode 0600. A failed write only costs a full read on the next
+poll. Other callers, such as the watcher's low-budget closing tick, keep entries
+in memory for at most 64 PRs. Decisions are unchanged: a 304 body is the same
+representation GitHub would have returned with a 200. The poll cadence and the
+number of `gh` children per poll are also unchanged.
+
 ## Worker process census contract (LAC-2108)
 
 A mandatory controller needs read-only PID, PGID, zombie status and birth data
@@ -6515,6 +6538,21 @@ errno on the controller's stderr and states that no operator
 process-introspection change is needed; the receipt keeps the errno code. Other platforms retain the existing `ps`
 provider. The two-second probe timeout, 1 MiB output ceiling, controller grace,
 ledger adapter, launch ownership and lease-generation fences remain in force.
+
+QCP-08: a controller round starts the helper once in `serve` mode and sends one
+`group <pgid>` request per tick, instead of starting a new Python child every
+tick. Each request is a fresh kernel read; no answer is cached or replayed, so a
+group signal is still gated on that tick's census. A timeout (two seconds per
+request), helper exit, errno refusal, unsolicited output or malformed reply
+rejects the census with the same codes as before (`ETIMEDOUT`, `exit N`, the
+errno name, `EMALFORMED`). The controller then fails closed exactly as for a
+one-shot refusal, and the next tick starts a new helper. A helper that exits or
+errors while idle between ticks is retired at once, so the next tick starts a
+new helper rather than waiting out the request timeout. A validator request
+that arrives while a census is in flight is judged by the next census, never by
+one that began before it. Owner assertion (`getpgid`) keeps the one-shot helper
+because it runs in a separate short-lived process. Other platforms keep the
+per-tick `ps` provider.
 
 `controllerGroupSnapshot` forwards an injected `execFileSyncImpl` to the native
 helper on Darwin as well as to `ps` on other platforms. Invalid helper argument

@@ -33,7 +33,8 @@ for (const names of [['hold', 'do-not-merge', 'operator-approved', 'retrigger-re
     const labels = names.map(name => ({ node_id: `LA_${name}`, name, color: 'ff0000' }));
     writeFileSync(join(rootDir, 'gh'), `#!${process.execPath}
 import assert from 'node:assert/strict';
-assert.deepEqual(process.argv.slice(2), ['api', 'repos/fixture/repo/pulls/42']);
+// QCP-08: reads ask for headers (-i) so a later poll can send If-None-Match.
+assert.deepEqual(process.argv.slice(2), ['api', 'repos/fixture/repo/pulls/42', '-i']);
 console.log(${JSON.stringify(JSON.stringify({ state: 'open', head: { sha: head }, labels }))});
 `, { mode: 0o755 });
     const row = { repo: 'fixture/repo', pr_number: 42, reviewer_head_sha: head, review_status: 'posted' };

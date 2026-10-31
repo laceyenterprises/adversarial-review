@@ -1591,7 +1591,9 @@ names the helper and states that no operator process-introspection change is
 needed. Python resolves through the existing `HQ_PYTHON3` / `AGENT_OS_PY` /
 `python3` convention with isolated imports. Both operations retain a two-second
 bound; denied, incomplete or inconsistent evidence fails closed. Other hosts
-retain `ps`. No sandbox or ledger policy changes. Actual-provider offline tests
+retain `ps`. QCP-08 keeps one helper per controller round: each tick sends it a
+request and gets a fresh kernel read, so the round no longer starts a Python child
+per tick. No sandbox or ledger policy changes. Actual-provider offline tests
 cover readiness, exit 7 and complete matching-group drain; [RCA and acceptance](docs/validation/lac-2108.md)
 separate those fixtures from loaded organic worker proof. Existing lifecycle
 states and the `smv-handoff` smoke promise are unchanged.

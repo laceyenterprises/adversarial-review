@@ -33,6 +33,8 @@
     "codex-reviewer": "codex",
     "hammer": "codex",
     "remediator-codex": "codex",
+    "sre": "codex",
+    "sre-responder": "codex",
     "claude-code": "claude",
     "claude-reviewer": "claude",
     "hammer-claude": "claude",

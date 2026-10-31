@@ -57,6 +57,24 @@ for (const [name, mutate] of [
   });
 }
 
+test('SRERESPONDERPOOL-02 sre and sre-responder pools accept codex accounts and refuse other families', () => {
+  const accounts = vectors.declarations[0].oauth.token_accounts;
+  const pools = { 'sre-responder': ['openai-corporate', 'openai-primary'], sre: ['openai-primary'] };
+  assert.deepEqual(validateSchema({ version: 1, oauth: { token_accounts: accounts, identity_token_pools: pools } }).oauth,
+    { token_accounts: accounts, identity_token_pools: pools });
+  const dir = mkdtempSync(join(tmpdir(), 'itp-sre-'));
+  try {
+    const topPath = join(dir, 'config.yaml');
+    writeFileSync(topPath, JSON.stringify({ version: 1, oauth: { token_accounts: accounts } }));
+    writeFileSync(join(dir, 'config.local.yaml'), JSON.stringify({ oauth: { identity_token_pools: pools } }));
+    assert.deepEqual(loadConfig({ topPath, env: {} }).get('oauth.identity_token_pools'), pools);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+  const mixed = { ...accounts, ...vectors.declarations.find(vector => vector.name === 'claude-role-orders').oauth.token_accounts };
+  assert.throws(() => validateSchema({ version: 1, oauth: {
+    token_accounts: mixed, identity_token_pools: { 'sre-responder': ['openai-corporate', 'anthropic-corporate'] },
+  } }), /oauth\.identity_token_pools\.sre-responder.*cross-family membership/);
+});
+
 test('ITP-01 public validation rejects scalar maps', () => {
   assert.throws(() => validateSchema({ version: 1, oauth: { token_accounts: 'garbage' } }),
     /oauth.token_accounts: expected mapping/);

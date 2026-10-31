@@ -3,6 +3,7 @@ import { FLEET_QUOTA_STATUS_TIMEOUT_MS } from './fleet-quota-status.mjs';
 import { selectCodexReviewerAccount } from './codex-account-routing.mjs';
 import { selectClaudeAccountLaneFromSnapshot } from './claude-account-routing.mjs';
 import { selectReviewerTokenAccount } from './reviewer-token-pool.mjs';
+import { personalClaudeReviewerFloor } from './reviewer-reserve-floor.mjs';
 // AFH-04 — reviewer ordered fallback: codex-reviewer → gemini-reviewer →
 // claude-reviewer (LAST RESORT).
 //
@@ -330,6 +331,7 @@ export function afhGroundingSnapshotFromStdout(stdout, { codexModel = null, clau
     codexAccountModel: codexModel,
     codexAccountSelection: selectCodexReviewerAccount(payload, { model: codexModel, statuses: rows }),
     claudeAccountSnapshot: payload,
+    reviewerReserveSnapshot: payload,
     claudeAccountModel: claudeModel,
     claudeAccountSelection: selectClaudeAccountLaneFromSnapshot(payload, {
       workerClass: 'claude-reviewer', model: claudeModel, statuses: rows,
@@ -704,6 +706,19 @@ export function reviewerModelGrounding(grounding, reviewerModel) {
     softVerdict: null,
     known: false,
   };
+  const claudeAccount = grounding?.claudeAccountSelection;
+  const corporateClaude = claudeAccount?.hold === false
+    && (claudeAccount.brokerProvider === 'claude-code-corp'
+      || claudeAccount.provider === 'claude-code-corp' || claudeAccount.authPath === 'oauth-corp');
+  const reserveFloor = model === 'claude' && !corporateClaude && !grounding?.staleIfError
+    && !grounding?.fleetQuotaStatus?.stale && !grounding?.fleetQuotaStatus?.error
+    ? personalClaudeReviewerFloor(grounding?.reviewerReserveSnapshot || grounding?.claudeAccountSnapshot)
+    : null;
+  if (reserveFloor) {
+    return { ...base, state: 'reserve-floor', grounded: true, known: true,
+      reserveFloor, source: reserveFloor.source,
+      diagnostics: [`reserveFloor.remainingPct=${reserveFloor.remainingPct}`, `reserveFloor.floorPct=${reserveFloor.floorPct}`] };
+  }
   if (model === 'gemini' && grounding?.geminiPoolAvailability) {
     const status = grounding.geminiPoolAvailability;
     return {
@@ -778,6 +793,7 @@ export function reviewerModelGrounding(grounding, reviewerModel) {
 }
 
 function groundedReason(status) {
+  if (status.reserveFloor) return status.reserveFloor.reason;
   if (status.hardGrounded && status.softGrounded) return 'hard+soft-grounded';
   if (status.hardGrounded) return `hard-grounded:${status.state}`;
   if (status.softGrounded) return `soft-grounded:${status.softVerdict?.reason || 'afh'}`;
@@ -867,21 +883,20 @@ export function afhReviewerFallbackDecision({
   if (!baseRoute || baseRoute.configBroken) return notApplied('no-route');
   const currentModel = normalizeReviewerModel(baseRoute.reviewerModel);
   if (!currentModel) return notApplied('unknown-reviewer-model');
-  if (grounding?.reason === 'afh-reviewer-fallback-disabled') {
+  const primary = reviewerModelGrounding(grounding, currentModel);
+  if (grounding?.reason === 'afh-reviewer-fallback-disabled' && !primary.reserveFloor) {
     return notApplied('afh-grounding-unavailable:afh-reviewer-fallback-disabled', {
       primary: currentModel === 'codex' ? reviewerModelGrounding(grounding, currentModel) : null,
     });
   }
-  // An explicit operator reviewer pin outranks the AFH degradation path, exactly
-  // as it outranks the gemini default layer. The grounded-pin case is logged by
-  // the caller so the operator can see why reviews stopped.
-  if (baseRoute.operatorPinnedReviewer) return notApplied('operator-pinned-reviewer', { primary: reviewerModelGrounding(grounding, currentModel) });
+  // An explicit reviewer pin outranks AFH provider degradation, as it does the
+  // gemini default layer. It cannot waive the personal reviewer reserve floor.
+  if (baseRoute.operatorPinnedReviewer && !primary.reserveFloor) return notApplied('operator-pinned-reviewer', { primary });
 
-  const primary = reviewerModelGrounding(grounding, currentModel);
   // Fail open: an unreadable/absent/disabled AFH signal keeps the configured
   // primary + gemini behavior exactly as it is today unless a local runtime
   // probe conclusively grounded the current reviewer itself.
-  if (!grounding?.available && !primary.localRuntimeGrounded && !primary.poolGrounded) {
+  if (!grounding?.available && !primary.localRuntimeGrounded && !primary.poolGrounded && !primary.reserveFloor) {
     return notApplied(`afh-grounding-unavailable:${grounding?.reason || 'absent'}`, { primary });
   }
   if (!primary.grounded) {
@@ -899,11 +914,12 @@ export function afhReviewerFallbackDecision({
   );
 
   const considered = [];
-  for (const candidate of orderedFallbackCandidates({
+  const candidates = primary.reserveFloor ? ['codex', 'gemini'] : orderedFallbackCandidates({
     currentModel,
     crossModelPrimaryModel,
     builderClass: normalizedBuilder,
-  })) {
+  });
+  for (const candidate of candidates) {
     if (candidate === 'gemini') {
       const eligibility = geminiFallbackEligibility({
         builderClass: normalizedBuilder,
@@ -951,7 +967,9 @@ export function afhReviewerFallbackDecision({
     };
   }
 
-  return notApplied('all-candidates-grounded', { considered, primary });
+  return notApplied(primary.reserveFloor
+    ? `primary-${groundedReason(primary)}:no-eligible-reviewer`
+    : 'all-candidates-grounded', { considered, primary });
 }
 
 /**
@@ -1003,6 +1021,7 @@ export function applyAfhReviewerFallbackDecision(baseRoute, decision) {
       primaryState: decision.primary?.state || null,
       primaryHardGrounded: Boolean(decision.primary?.hardGrounded),
       primarySoftGrounded: Boolean(decision.primary?.softGrounded),
+      ...(decision.primary?.reserveFloor ? { reserveFloor: decision.primary.reserveFloor } : {}),
       considered: decision.considered,
     },
   };
@@ -1025,6 +1044,8 @@ export function describeAfhReviewerFallback(decision) {
     `afh-reviewer-fallback ${decision.from} -> ${decision.to} ` +
     `(${decision.reason}; provider=${decision.primary?.provider || 'unknown'}; ` +
     `state=${decision.primary?.state || 'unknown'})` +
+    (decision.primary?.reserveFloor
+      ? ` reserveFloor remaining=${decision.primary.reserveFloor.remainingPct}<=floor=${decision.primary.reserveFloor.floorPct}` : '') +
     (skipped ? ` skipped=[${skipped}]` : '') +
     (decision.lastResort
       ? ' — LAST RESORT: same-model as builder, cross-model review diversity is lost for this attempt'

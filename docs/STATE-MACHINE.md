@@ -474,6 +474,34 @@ unknown enrollment holds. This does not add a delivery status.
 
 ### Reviewer run-state ledger
 
+REVIEWERFLOOR-01 applies the effective personal Anthropic reserve floor to
+reviewer selection, including native and pooled Claude routes. Fresh measured
+weekly capacity at or below `reserveFloors.anthropic-oauth.remainingPct`
+grounds the personal Claude reviewer for that attempt. Corporate Claude remains
+independent with account routing enabled. AFH rollback skips Claude account
+proposals, so it conservatively applies the personal floor even when the spawn
+pool could offer corporate Claude. The candidate order is corporate-first Codex account selection,
+then enabled and available Gemini, with all existing builder-family refusals.
+Thus a `[codex]` PR uses Gemini; when no eligible alternative exists it retains
+the quota hold. Stale or unknown floor evidence does not ground Claude.
+Reviewer pins and AFH degradation rollback do not waive a measured reserve
+floor. Protected hammer, remediation, responder and merge roles retain their
+existing reserve policy. No state or claim transition changes.
+
+The existing fallback log and pass/run `afhReviewerFallback` metadata retain
+the stable `personal-anthropic-reserve-floor` reason and separate measured
+remaining percentage and effective threshold. All personal pool accounts share
+the producer's single `anthropic-oauth` projection; there is no account-ID floor.
+The reviewer-specific weekly `<=` comparison ignores dispatch exemptions and
+short-window hold flags. After 15 minutes of continuously observed floor holds,
+the watcher emits one error-level `reviewer-reserve-floor SUSTAINED_HOLD`
+health signal per PR. Recovery or another quota hold re-arms it. This
+process-local clock resets on restart; existing freshness paging owns pages.
+This adds no lifecycle transition or smoke command.
+After deployment, SRE should observe an organic review at or below the floor,
+confirm its selected family/account and the reserve reason, and verify that
+personal Claude selection returns when capacity rises above the floor.
+
 The delivery row also retains `codex_broker_provider` (`codex`, `codex-corp`,
 or `NULL` for non-Codex/legacy rows). The watcher writes it after winning the
 claim, guarded by that session UUID, before dispatch. Corporate Codex is preferred

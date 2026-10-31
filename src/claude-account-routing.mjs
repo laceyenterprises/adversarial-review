@@ -5,8 +5,11 @@ import { join } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { resolveAdversarialReviewStateDir } from './reviewer-fence.mjs';
 import { normalizeReviewerModel } from './adapters/subject/github-pr/routing.mjs';
-// Account selection consumes the canonical fleet projection. Weekly thresholds,
-// freshness and reserve arithmetic stay in quota_reserve, not in this service.
+import { personalClaudeReviewerFloor } from './reviewer-reserve-floor.mjs';
+// Account selection consumes the canonical fleet projection. quota_reserve owns
+// freshness, weekly-window selection and the effective reserve threshold.
+// Reviewer-only policy compares projected weekly capacity <= that threshold;
+// dispatch protectedClasses exemptions do not waive this additional check.
 import { harnessCapFromStatuses, quotaStatusesFromSnapshot, parseHqFleetQuotaSnapshot, reserveFloorWeeklyMeasurement, quotaAccountDiagnostics } from './fleet-quota-status.mjs';
 
 const LANES = Object.freeze({
@@ -65,7 +68,8 @@ export function selectClaudeAccountLaneFromSnapshot(payload, { workerClass, mode
       && weekly.percentRemaining >= 0 && weekly.percentRemaining <= 100;
     const exhausted = locallyBlocked || cap.capped || (measured && weekly.percentRemaining === 0);
     const reserveAllows = lane === corporate
-      || (policy?.active === false && policy?.paused === false && policy?.nearCap === false);
+      || (policy?.active === false && policy?.paused === false && policy?.nearCap === false
+        && !personalClaudeReviewerFloor(payload, { workerClass: primary }));
     if (!exhausted && cap.available && row?.cachedEvidenceStale !== true && measured && reserveAllows
       && ready?.ready === true && ready?.can_serve === true) {
       return { workerClass: lane, provider, authPath, hold: false, reason: 'claude-account-ready' };

@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildMergeAgentPrompt, FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER } from '../src/merge-agent-prompt.mjs';
+import { composeCloserPrompt, composeCloserReference } from '../src/ama/dispatch-closer.mjs';
 
 import {
   BRANCH_NOT_PROTECTED_STDERR,
@@ -23,6 +24,166 @@ const HAMMER_PROMPT = HAMMER_TEMPLATE.replace(
   /In (?:the persistent merge-lease shell,|the same shell with dispatch values exported,) `source "<<RUN_DIR>>\/(hammer-[a-z-]+)\.sh"`[^\n]*\n/g,
   (_, phase) => `\`\`\`bash\n${readFileSync(join(REPO_ROOT, 'bin', `${phase}.sh`), 'utf8')}\`\`\`\n`,
 );
+
+test('HAMPROMPT-01: rendered operating core directs execution, observable state and bounded stopping', () => {
+  const inputs = { templateBody: HAMMER_TEMPLATE,
+    repo: 'fixture/repo', prNumber: 42, prUrl: 'https://example.invalid/pull/42',
+    reviewedSha: 'a'.repeat(40), rootDir: '/fixture/deployed', scratchDir: '/fixture/run',
+    hqRoot: '/fixture/hq', hqOwnerUser: 'fixture', auditPath: '/fixture/audit.json',
+    riskClass: 'low', mergeMethod: 'squash', amaTrailers: 'Worker-Class: hammer' };
+  const prompt = composeCloserPrompt(inputs);
+  const reference = composeCloserReference(inputs);
+  const core = prompt.split('## Appendix A —')[0];
+  assert.ok(core.split('\n').length <= 150, 'the operating core must fit the first ~150 lines');
+  assert.match(core, /The phase scripts ARE the procedure/);
+  assert.match(core, /Do not read, grep or analyze their source/);
+  assert.match(core, /test -f "\/fixture\/run\/hammer-verify-head.sh" -a -f "\/fixture\/run\/hammer-publish.sh" -a -f "\/fixture\/run\/hammer-merge.sh"/);
+  assert.match(core, /test -f "\/fixture\/run\/inputs.sh"/);
+  assert.match(core, /hammer-lease-state.mjs.*--pr "42".*--head/);
+  for (const code of ['0', '20', '21', 'other']) {
+    assert.ok(core.includes(`| verify-head | ${code} |`));
+  }
+  assert.match(core, /verify-head \| 21 \| Run \*\*Appendix D — Resolving merge conflicts\*\*.*re-enter \*\*verify-head\*\*/);
+  assert.match(core, /publish \(publication-only\) \| 0/);
+  assert.match(core, /publish \(audit\) \| 0/);
+  assert.match(core, /publish \(either mode\) \| nonzero/);
+  assert.match(core, /merge \| 21/);
+  assert.match(core, /same next step twice without executing it, execute it\nnow/);
+  assert.match(core, /hammer-terminal-audit.mjs.*procedure-stalled/s);
+  assert.doesNotMatch(prompt, /check phase scripts/);
+  assert.match(prompt, /committed-generated-files registry/);
+  assert.match(prompt, /both sides only ADD keys/);
+  assert.match(prompt, /take the union of keys/);
+  assert.match(prompt, /Different values for the\nsame key/);
+  assert.match(prompt, /Validate JSON \(including unique object\nkeys\)/);
+  assert.match(prompt, /Source verify-head again/);
+  assert.ok(Buffer.byteLength(prompt) <= 60 * 1024);
+  assert.doesNotMatch(prompt + reference, /<<[A-Z_]+>>|<!-- \/?hammer-reference:/);
+  for (const name of ['B1', 'B2', 'B3', 'B4', 'E1']) {
+    assert.ok(prompt.includes(`Read **Appendix ${name}** in \`/fixture/run/hammer-reference.md\``));
+    const original = HAMMER_TEMPLATE.match(new RegExp(`<!-- hammer-reference:${name} -->\\n([\\s\\S]*?)\\n<!-- /hammer-reference:${name} -->`))[1];
+    // Every safety rule in the extracted source still renders byte-for-byte,
+    // with dispatch placeholders substituted, in its named reference appendix.
+    const expected = composeCloserPrompt({ ...inputs, templateBody: original });
+    assert.ok(reference.includes(expected), `lost reference content for ${name}`);
+  }
+  assert.match(reference, /may not|Only exit 0 records withdrawal/);
+  assert.match(reference, /update the affected declarations/);
+  assert.match(reference, /At most one re-author per run/);
+  assert.match(reference, /strict-non-blocking lane/);
+  assert.match(reference, /No silent red exits/);
+});
+
+test('HAMPROMPT-01: conflict preflight executes only after observed release and reports named refusals', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-conflict-lease-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const helper = join(dir, 'node');
+  writeFileSync(helper, `#!/bin/sh
+case "$1" in
+  */hammer-lease-state.mjs) if [ "$QUERY_FAIL" = 1 ]; then exit 1; fi; cat "$STATE_FILE" ;;
+  */hammer-terminal-audit.mjs) echo "AUDIT:$2" ;;
+  *) exit 99 ;;
+esac
+`, { mode: 0o755 });
+  const section = HAMMER_TEMPLATE.slice(HAMMER_TEMPLATE.indexOf('## Resolving merge conflicts'));
+  const block = section.match(/```bash\n([\s\S]*?)\n```/)[1];
+  const stateFile = join(dir, 'state');
+  for (const [state, own, queryFail, expected, reason] of [
+    ['none', false, false, 0, 'CONFLICT_ALLOWED'],
+    ['released', false, false, 0, 'CONFLICT_ALLOWED'],
+    ['held', false, false, 1, 'AUDIT:merge-lease-owner-shell-required'],
+    ['held', true, false, 0, 'CONFLICT_ALLOWED'],
+    ['none', false, true, 1, 'AUDIT:lease-state-unavailable'],
+  ]) {
+    writeFileSync(stateFile, `${state}\n`);
+    const setup = `ham_pr() { echo main; }\n${own ? `HAM_MERGE_LEASE_HELD=1 HAM_MERGE_LEASE_ID=fixture\nham_release_merge_lease() { echo released > "$STATE_FILE"; }\n` : ''}`;
+    const result = spawnSync('/bin/bash', ['-c', `${setup}${block}\necho CONFLICT_ALLOWED`], {
+      encoding: 'utf8', timeout: 5000, env: {
+        ...process.env, HAM_NODE_BIN: helper, STATE_FILE: stateFile, QUERY_FAIL: queryFail ? '1' : '0',
+        HAM_MERGE_LEASE_HELD: '0', HAM_MERGE_LEASE_ID: '',
+      },
+    });
+    assert.equal(result.status, expected, result.stderr);
+    assert.match(result.stdout, new RegExp(reason));
+    if (expected) assert.doesNotMatch(result.stdout, /CONFLICT_ALLOWED/);
+  }
+});
+
+test('HAMPROMPT-01: phase existence block checks files without executing their source', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-existence-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const phases = ['hammer-verify-head', 'hammer-publish', 'hammer-merge'];
+  for (const phase of phases) writeFileSync(join(dir, `${phase}.sh`), 'exit 99\n');
+  const node = join(dir, 'node');
+  writeFileSync(node, '#!/bin/sh\nprintf "%s\\n" "$2"\n', { mode: 0o755 });
+  const block = [...HAMMER_TEMPLATE.matchAll(/```bash\n([\s\S]*?)\n```/g)]
+    .find(([, body]) => body.includes('dispatch-phase-scripts-missing'))?.[1];
+  assert.ok(block);
+  const script = block.replaceAll('<<RUN_DIR>>', dir);
+  const run = () => spawnSync('/bin/bash', ['-c', script], { encoding: 'utf8', timeout: 5000,
+    env: { ...process.env, HAM_NODE_BIN: node } });
+  assert.equal(run().status, 0);
+  for (const phase of phases) {
+    rmSync(join(dir, `${phase}.sh`));
+    const missing = run();
+    assert.equal(missing.status, 1);
+    assert.equal(missing.stdout.trim(), 'dispatch-phase-scripts-missing');
+    writeFileSync(join(dir, `${phase}.sh`), 'exit 99\n');
+  }
+});
+
+test('HAMPROMPT-01: synthetic append-only map conflict preserves both additions through a real rebase', t => {
+  const fixture = JSON.parse(readFileSync(join(REPO_ROOT, 'test/fixtures/hammer-append-only-map.json'), 'utf8'));
+  const example = HAMMER_TEMPLATE.match(/Synthetic example \(alphabetical keys\):\n\n```json\n([\s\S]*?)\n```/);
+  assert.ok(example);
+  assert.deepEqual(JSON.parse(example[1]), fixture, 'the executable fixture and prompt example agree');
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-map-rebase-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const git = (...args) => {
+    const result = spawnSync('git', args, { cwd: dir, encoding: 'utf8', timeout: 5000,
+      env: { ...process.env, GIT_EDITOR: 'true', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } });
+    assert.ifError(result.error);
+    return result;
+  };
+  const ok = (...args) => {
+    const result = git(...args);
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  const write = value => writeFileSync(join(dir, 'catalog.json'), `${JSON.stringify(value, null, 2)}\n`);
+  ok('init', '-b', 'main');
+  ok('config', 'user.name', 'Synthetic Fixture');
+  ok('config', 'user.email', 'fixture@example.invalid');
+  write(fixture.base);
+  ok('add', 'catalog.json');
+  ok('commit', '-m', 'Synthetic base');
+  ok('checkout', '-b', 'feature');
+  write(fixture.ours);
+  ok('commit', '-am', 'Synthetic alpha addition');
+  ok('checkout', 'main');
+  write(fixture.theirs);
+  ok('commit', '-am', 'Synthetic beta addition');
+  ok('checkout', 'feature');
+  assert.equal(git('rebase', 'main').status, 1);
+  assert.match(readFileSync(join(dir, 'catalog.json'), 'utf8'), /<<<<<<< /);
+  // Apply the prompt's manual playbook to the actual unmerged stage blobs.
+  const [base, ours, theirs] = [1, 2, 3].map(stage => JSON.parse(ok('show', `:${stage}:catalog.json`)));
+  for (const side of [ours, theirs]) {
+    for (const [key, value] of Object.entries(base)) assert.deepEqual(side[key], value);
+  }
+  const union = { ...ours };
+  for (const [key, value] of Object.entries(theirs)) {
+    if (Object.hasOwn(union, key)) assert.deepEqual(union[key], value, 'same-key values cannot be overwritten');
+    union[key] = value;
+  }
+  write(Object.fromEntries(Object.entries(union).sort(([a], [b]) => a.localeCompare(b))));
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'catalog.json'), 'utf8')), fixture.resolved);
+  ok('add', 'catalog.json');
+  ok('rebase', '--continue');
+  assert.equal(ok('status', '--porcelain'), '');
+  assert.deepEqual(JSON.parse(ok('show', 'HEAD:catalog.json')), fixture.resolved);
+  assert.deepEqual(JSON.parse(ok('show', 'main:catalog.json')), fixture.theirs);
+});
 
 test('merge-agent controller setup and launch blocks execute without prose or path punctuation', t => {
   const root = mkdtempSync(join(tmpdir(), 'merge-controller-prompt-'));

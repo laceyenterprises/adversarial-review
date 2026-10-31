@@ -7,13 +7,16 @@ import { loadConfig } from '../src/config-loader.mjs';
 
 const vectors = JSON.parse(readFileSync(new URL('./fixtures/mes-config.v1.json', import.meta.url)));
 for (const vector of vectors.cases) {
-  test(`MES-01 strict loader: ${vector.name}`, () => {
+  test(`MES-01 Node reader: ${vector.name}`, () => {
     const dir = mkdtempSync(join(tmpdir(), 'mes-config-'));
     try {
       const topPath = join(dir, 'config.yaml');
       writeFileSync(topPath, JSON.stringify({ version: 1, mes: vector.config }));
-      if (vector.valid) {
+      // Shared vectors describe the full owner schema; unread fields are
+      // outside this reader's validation surface (CFGREADERSCOPE-01).
+      if (vector.valid || vector.name === 'unknown-key') {
         const cfg = loadConfig({ topPath, env: {} });
+        if (vector.name === 'unknown-key') assert.equal(cfg.get('mes.typo'), null);
         const expected = { ...vectors.defaults };
         if (vector.key) expected[vector.key] = vector.expected;
         for (const [key, value] of Object.entries(expected)) {

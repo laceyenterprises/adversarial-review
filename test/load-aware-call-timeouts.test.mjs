@@ -227,7 +227,7 @@ test('invalid local config degrades timeout sizing and caches failure until reco
   t.mock.method(__testYamlHooks, 'load', (...args) => { reads++; return originalLoad(...args); });
   const localPath = join(dirname(process.env.AGENT_OS_CONFIG_PATH), 'config.local.yaml');
   const opts = { loadAvg1m: 12, cpuCount: 4, cpuBusyPercent: 100 };
-  writeFileSync(localPath, 'unrelated_invalid_key: true\n');
+  writeFileSync(localPath, 'adversarial: [\n'); // Malformed YAML, not an unread sibling key.
   assert.equal(loadAwareTimeoutMs(200, opts), 1200);
   const failedReads = reads;
   for (let i = 0; i < 100; i++) {

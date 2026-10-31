@@ -209,23 +209,23 @@ test('the config loader accepts the roles.registry subtree and routing flag', ()
   assert.equal(cfg.get('roles.routing.never-review-own-builder-class'), false);
 });
 
-test('the config loader rejects an unknown key inside a role entry (typo protection)', () => {
+test('the config loader drops an unread key inside a role entry', () => {
   const { topPath, modulePath } = writeCascade({
     module: [
       'roles:',
       '  registry:',
       '    r:',
       '      promptSet: code-pr',
-      '      workerclass: codex', // wrong case → unknown key
+      '      workerClass: gemini',
+      '      workerclass: codex', // Unread key cannot override the supported leaf.
       '      taskKind: review',
       '      completionShape: decision-only',
       '',
     ].join('\n'),
   });
-  assert.throws(
-    () => loadConfig({ topPath, modulePaths: [modulePath], env: {} }),
-    /unknown key/,
-  );
+  const entry = loadConfig({ topPath, modulePaths: [modulePath], env: {} }).get('roles.registry').r;
+  assert.equal(entry.workerclass, undefined);
+  assert.equal(entry.workerClass, 'gemini');
 });
 
 test('loadRoleRegistry validates through the cascade with an injected roster', () => {

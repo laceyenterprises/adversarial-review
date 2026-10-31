@@ -6,14 +6,27 @@ import { join } from 'node:path';
 import { loadConfig } from '../src/config-loader.mjs';
 
 const vectors = JSON.parse(readFileSync(new URL('./fixtures/osg-config.v1.json', import.meta.url)));
+// Shared vectors remain authoritative for their owner. This reader ignores
+// these unread fields while still validating registered values.
+const unreadPaths = new Map([
+  ['unknown', ['enabled']],
+  ['unknown-arm', ['arms', 0, 'token']],
+  ['policy-unknown', ['policy', 'path']],
+  ['budget-unknown', ['budget', 'extra']],
+  ['double-blind-invalid-extra-1', ['double_blind', 'extra']],
+  ['router-extra', ['router', 'extra']],
+]);
 for (const vector of vectors.cases) {
-  test(`OSG-01 strict loader: ${vector.name}`, () => {
+  test(`OSG-01 Node reader: ${vector.name}`, () => {
     const dir = mkdtempSync(join(tmpdir(), 'osg-config-'));
     try {
       const topPath = join(dir, 'config.yaml');
       writeFileSync(topPath, JSON.stringify({ version: 1, osg: vector.config }));
-      if (vector.valid) {
+      if (vector.valid || unreadPaths.has(vector.name)) {
         const cfg = loadConfig({ topPath, env: {} });
+        if (unreadPaths.has(vector.name)) {
+          assert.equal(unreadPaths.get(vector.name).reduce((value, key) => value?.[key], cfg.get('osg')), undefined);
+        }
         assert.equal(cfg.get('osg.mode'), vector.config.mode ?? 'off');
         assert.equal(cfg.get('osg.sample_rate'), vector.config.sample_rate ?? 0.5);
         assert.equal(cfg.get('osg.policy.enabled'), vector.config.policy?.enabled ?? false);

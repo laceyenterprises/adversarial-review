@@ -1,0 +1,469 @@
+{
+  "schemaVersion": 1,
+  "defaults": {
+    "mode": "shadow",
+    "enforce.build": false,
+    "enforce.remediation": false,
+    "enforce.review": false,
+    "kill_switch": false,
+    "config_cache_seconds": 60,
+    "tier_policy": "modules/worker-pool/mes-tier-policy.v1.json",
+    "jev.enabled": true,
+    "jev.timeout_seconds": 3,
+    "jev.min_confidence": 0.6,
+    "jev.downgrade_confidence": 0.8,
+    "jev.monthly_share_pct": 50,
+    "jev.daily_usd": 1,
+    "escalation.remediation_findings_threshold": 3,
+    "escalation.max_steps": 2,
+    "report.min_cell_n": 30,
+    "alerts.regression_pct": 50,
+    "feedback.schedule": "weekly"
+  },
+  "cases": [
+    {
+      "name": "defaults",
+      "config": {},
+      "valid": true
+    },
+    {
+      "name": "accept-mode",
+      "config": {
+        "mode": "enforce"
+      },
+      "valid": true,
+      "key": "mode",
+      "expected": "enforce"
+    },
+    {
+      "name": "reject-mode",
+      "config": {
+        "mode": "invalid"
+      },
+      "valid": false
+    },
+    {
+      "name": "accept-enforce.build",
+      "config": {
+        "enforce": {
+          "build": true
+        }
+      },
+      "valid": true,
+      "key": "enforce.build",
+      "expected": true
+    },
+    {
+      "name": "reject-enforce.build",
+      "config": {
+        "enforce": {
+          "build": "invalid"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "accept-enforce.remediation",
+      "config": {
+        "enforce": {
+          "remediation": true
+        }
+      },
+      "valid": true,
+      "key": "enforce.remediation",
+      "expected": true
+    },
+    {
+      "name": "reject-enforce.remediation",
+      "config": {
+        "enforce": {
+          "remediation": "invalid"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "accept-enforce.review",
+      "config": {
+        "enforce": {
+          "review": true
+        }
+      },
+      "valid": true,
+      "key": "enforce.review",
+      "expected": true
+    },
+    {
+      "name": "reject-enforce.review",
+      "config": {
+        "enforce": {
+          "review": "invalid"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "accept-kill_switch",
+      "config": {
+        "kill_switch": true
+      },
+      "valid": true,
+      "key": "kill_switch",
+      "expected": true
+    },
+    {
+      "name": "reject-kill_switch",
+      "config": {
+        "kill_switch": "invalid"
+      },
+      "valid": false
+    },
+    {
+      "name": "accept-config_cache_seconds",
+      "config": {
+        "config_cache_seconds": 60
+      },
+      "valid": true,
+      "key": "config_cache_seconds",
+      "expected": 60
+    },
+    {
+      "name": "reject-config_cache_seconds",
+      "config": {
+        "config_cache_seconds": "invalid"
+      },
+      "valid": false
+    },
+    {
+      "name": "bound-config_cache_seconds",
+      "config": {
+        "config_cache_seconds": 61
+      },
+      "valid": false
+    },
+    {
+      "name": "accept-tier_policy",
+      "config": {
+        "tier_policy": "fixture/policy.json"
+      },
+      "valid": true,
+      "key": "tier_policy",
+      "expected": "fixture/policy.json"
+    },
+    {
+      "name": "reject-tier_policy",
+      "config": {
+        "tier_policy": false
+      },
+      "valid": false
+    },
+    {
+      "name": "accept-jev.enabled",
+      "config": {
+        "jev": {
+          "enabled": false
+        }
+      },
+      "valid": true,
+      "key": "jev.enabled",
+      "expected": false
+    },
+    {
+      "name": "reject-jev.enabled",
+      "config": {
+        "jev": {
+          "enabled": "invalid"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "accept-jev.timeout_seconds",
+      "config": {
+        "jev": {
+          "timeout_seconds": 3
+        }
+      },
+      "valid": true,
+      "key": "jev.timeout_seconds",
+      "expected": 3
+    },
+    {
+      "name": "reject-jev.timeout_seconds",
+      "config": {
+        "jev": {
+          "timeout_seconds": "invalid"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "bound-jev.timeout_seconds",
+      "config": {
+        "jev": {
+          "timeout_seconds": 11
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "accept-jev.min_confidence",
+      "config": {
+        "jev": {
+          "min_confidence": 0.6
+        }
+      },
+      "valid": true,
+      "key": "jev.min_confidence",
+      "expected": 0.6
+    },
+    {
+      "name": "reject-jev.min_confidence",
+      "config": {
+        "jev": {
+          "min_confidence": "invalid"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "bound-jev.min_confidence",
+      "config": {
+        "jev": {
+          "min_confidence": 2
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "accept-jev.downgrade_confidence",
+      "config": {
+        "jev": {
+          "downgrade_confidence": 0.8
+        }
+      },
+      "valid": true,
+      "key": "jev.downgrade_confidence",
+      "expected": 0.8
+    },
+    {
+      "name": "reject-jev.downgrade_confidence",
+      "config": {
+        "jev": {
+          "downgrade_confidence": "invalid"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "bound-jev.downgrade_confidence",
+      "config": {
+        "jev": {
+          "downgrade_confidence": 2
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "accept-jev.monthly_share_pct",
+      "config": {
+        "jev": {
+          "monthly_share_pct": 50
+        }
+      },
+      "valid": true,
+      "key": "jev.monthly_share_pct",
+      "expected": 50
+    },
+    {
+      "name": "reject-jev.monthly_share_pct",
+      "config": {
+        "jev": {
+          "monthly_share_pct": "invalid"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "bound-jev.monthly_share_pct",
+      "config": {
+        "jev": {
+          "monthly_share_pct": 101
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "accept-jev.daily_usd",
+      "config": {
+        "jev": {
+          "daily_usd": 1
+        }
+      },
+      "valid": true,
+      "key": "jev.daily_usd",
+      "expected": 1
+    },
+    {
+      "name": "reject-jev.daily_usd",
+      "config": {
+        "jev": {
+          "daily_usd": "invalid"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "bound-jev.daily_usd",
+      "config": {
+        "jev": {
+          "daily_usd": 31
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "accept-escalation.remediation_findings_threshold",
+      "config": {
+        "escalation": {
+          "remediation_findings_threshold": 3
+        }
+      },
+      "valid": true,
+      "key": "escalation.remediation_findings_threshold",
+      "expected": 3
+    },
+    {
+      "name": "reject-escalation.remediation_findings_threshold",
+      "config": {
+        "escalation": {
+          "remediation_findings_threshold": "invalid"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "bound-escalation.remediation_findings_threshold",
+      "config": {
+        "escalation": {
+          "remediation_findings_threshold": 10001
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "accept-escalation.max_steps",
+      "config": {
+        "escalation": {
+          "max_steps": 2
+        }
+      },
+      "valid": true,
+      "key": "escalation.max_steps",
+      "expected": 2
+    },
+    {
+      "name": "reject-escalation.max_steps",
+      "config": {
+        "escalation": {
+          "max_steps": "invalid"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "bound-escalation.max_steps",
+      "config": {
+        "escalation": {
+          "max_steps": 3
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "accept-report.min_cell_n",
+      "config": {
+        "report": {
+          "min_cell_n": 30
+        }
+      },
+      "valid": true,
+      "key": "report.min_cell_n",
+      "expected": 30
+    },
+    {
+      "name": "reject-report.min_cell_n",
+      "config": {
+        "report": {
+          "min_cell_n": "invalid"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "bound-report.min_cell_n",
+      "config": {
+        "report": {
+          "min_cell_n": 1000001
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "accept-alerts.regression_pct",
+      "config": {
+        "alerts": {
+          "regression_pct": 50
+        }
+      },
+      "valid": true,
+      "key": "alerts.regression_pct",
+      "expected": 50
+    },
+    {
+      "name": "reject-alerts.regression_pct",
+      "config": {
+        "alerts": {
+          "regression_pct": "invalid"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "bound-alerts.regression_pct",
+      "config": {
+        "alerts": {
+          "regression_pct": 10001
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "accept-feedback.schedule",
+      "config": {
+        "feedback": {
+          "schedule": "weekly"
+        }
+      },
+      "valid": true,
+      "key": "feedback.schedule",
+      "expected": "weekly"
+    },
+    {
+      "name": "reject-feedback.schedule",
+      "config": {
+        "feedback": {
+          "schedule": false
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "unknown-key",
+      "config": {
+        "typo": true
+      },
+      "valid": false
+    }
+  ]
+}

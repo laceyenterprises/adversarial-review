@@ -4222,3 +4222,14 @@ unchanged-head request's fresh-review receipt within the dispatch bound and the
 `explicit re-review intent consumed` log, or its visible refusal. No worker
 live action is needed. See [the state machine](docs/STATE-MACHINE.md) and
 [store contract](docs/data-model/explicit-review-intents.md).
+
+### MES-01 strict configuration mirror
+
+The packaged `src/mes-config-schema.v1.json` mirrors Agent OS MES keys and
+`test/config-mes.test.mjs` exercises the shared synthetic key vectors. Defaults
+are shadow mode, enforcement false per kind and kill switch false. The
+`mes.tier_policy` string references the Agent OS module fragment; this reader
+resolves configuration only and neither reads nor applies the policy. No review
+or remediation resolver hook changes in MES-01. Deploy this companion before the
+Agent OS config defaults; any service restart is an operator action. Existing
+review lifecycle states and smoke promises are unchanged.

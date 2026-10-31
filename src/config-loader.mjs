@@ -2793,6 +2793,16 @@ function schemaV1() {
             __type: TYPE_DICT,
             __strict: true,
             __keys: {
+              resume: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  budget_seconds: { __type: TYPE_FLOAT, __default: 15, __min: 0.001, __max: 60, __enforceMax: true },
+                  max_attempts: { __type: TYPE_INT, __default: 3, __min: 1, __max: 20, __enforceMax: true },
+                  backoff_seconds: { __type: TYPE_FLOAT, __default: 60, __min: 1, __max: 86400, __enforceMax: true },
+                  max_backoff_seconds: { __type: TYPE_FLOAT, __default: 3600, __min: 1, __max: 86400, __enforceMax: true },
+                },
+              },
               reserve_floor: {
                 __type: TYPE_DICT,
                 __strict: true,

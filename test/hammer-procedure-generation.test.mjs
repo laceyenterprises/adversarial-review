@@ -22,7 +22,10 @@ test('rendered phase receipts are emitted by phase outcomes without changing mer
     const values = Object.fromEntries([...source.matchAll(/<<([A-Z_]+)>>/g)].map(([, key]) => [key, 'fixture']));
     const rendered = renderHammerProcedure(phase, values);
     assert.ok(rendered.includes('/bin/hammer-progress.mjs'));
-    if (phase === 'hammer-verify-head') assert.match(rendered, /HAM_PHASE_OUTCOME=verified\n.*verify-head/);
+    if (phase === 'hammer-verify-head') {
+      assert.match(rendered, /HAM_PHASE_OUTCOME=verified\n.*verify-head/);
+      assert.match(rendered, /export HAM_PUSHED_FROM_HEAD HAM_PUSHED_HEAD\n.*remediation-pushed/);
+    }
     if (phase === 'hammer-publish') assert.match(rendered, /remediation-pushed/);
     if (phase === 'hammer-merge') {
       assert.match(rendered, /terminal-stop/);

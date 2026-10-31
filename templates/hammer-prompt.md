@@ -27,7 +27,7 @@ Use live PR/review and named inputs; without GraphQL quota use
 `ham_gh api repos/<<REPO>>/pulls/<<PR_NUMBER>>/reviews` or run files.
 
 Use `ham_bounded_git_sync` (load-aware, one transient retry).
-No fixed alarms around Git sync: interrupted ref updates orphan locks.
+Do not wrap `git fetch` or other Git sync in your own fixed alarm: interrupted ref updates orphan locks.
 
 Before reads, each shell:
 ```bash
@@ -48,7 +48,7 @@ done
 
 ## Cost and context discipline
 
-Before reads at start and after **each push**, run `node <<ROOT_DIR>>/bin/hammer-context.mjs <<REPO>> <<PR_NUMBER>>` once; fetch full review if `review.findingsTruncated` or `review.simplicityNoteTruncated`.
+Before reads at start and after **each push**, run `node <<ROOT_DIR>>/bin/hammer-context.mjs <<REPO>> <<PR_NUMBER>>` once; fetch the full review if `review.findingsTruncated` or `review.simplicityNoteTruncated`.
 
 Context/verify-head exit 20 with `ci-infrastructure`: stop without merge or HQ
 decision. Recovery resumes after exact-head checks pass.
@@ -80,7 +80,7 @@ Codex and Claude: no background tests or "still waiting" narration.
 
 ## Versioned helper inputs
 
-Before edits capture base head ONCE; never recapture after edits/push.
+Before edits, capture base head ONCE; never recapture after edits/push.
 Source `<<RUN_DIR>>/inputs.sh` each shell; persist audits there.
 
 
@@ -115,7 +115,7 @@ Write close-out to `<<RUN_DIR>>/close-controller.sh`; run in foreground:
 Before lease acquisition; preserve HQ/controller env and FD 4.
 No direct/detached shell or nested controller; validators share its group.
 
-Before the lease, write audit markdown under `<<RUN_DIR>>`; export
+Before the lease, write the complete audit markdown to a file under `<<RUN_DIR>>`; export
 `HAM_AUDIT_DETAILS_FILE`. Include `**Findings addressed**` and one single-line
 bullet per finding: exact title, blocking class, changed files and fix.
 Export decimal `HAM_AUDIT_REMEDIATED_TOTAL`, `HAM_AUDIT_REMEDIATED_BLOCKING`,
@@ -130,7 +130,7 @@ values in the same shell for the merge audit.
 
 Use `"<<RUN_DIR>>/hammer-merge.sh"` for bounded required-check waits.
 GitHub calls: `ham_gh` or `ham_pr`. No `--watch` or polling loops.
-Helpers refresh per call, then refresh/retry once on credential rejection.
+Helpers refresh per call, then refresh and retry once on a credential rejection.
 Never read or print raw token variables.
 
 For each phase, in that shell, set `PHASE` to `hammer-verify-head`, `hammer-publish`, or `hammer-merge` and run:

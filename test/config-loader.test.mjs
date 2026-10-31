@@ -156,6 +156,8 @@ const RETENTION_DEFAULTS = {
     disk_free_gb_floor: 300,
     gc_report_only: true,
     worker_worktrees_per_run_limit: 200,
+    token_transcripts_compression_enabled: true,
+    token_transcripts_compress_after_days: 7,
     worker_worktrees_hourly_drain_enabled: true,
     worker_worktrees_failed_slot_salvage_after_hours: 168,
     worker_worktrees_bulk_delete_ack_threshold: 200,

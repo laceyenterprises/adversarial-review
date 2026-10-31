@@ -1998,6 +1998,9 @@ ITP-14 uses the same selection owner for declared hammer/remediator pools.
 REMEDIATORCORP-01: `roles.remediator: remediator-codex-corp` explicitly pins the
 corporate Codex account. `codex-corp` is an alias normalized by the config loader,
 including `AGENT_OS_ROLES_REMEDIATOR` and `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR`.
+The Node loader also normalizes `codex-corp` in `roles.remediator_fallback`
+items, including `AGENT_OS_ROLES_REMEDIATOR_FALLBACK` and
+`ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK`, to `remediator-codex-corp`.
 The pin bypasses pooled and automatic personal-account substitution, including
 when personal Codex is ready; declared `roles.remediator_fallback` entries remain
 eligible when corporate is capped. Offline coverage includes role config,

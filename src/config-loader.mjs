@@ -148,7 +148,7 @@ const ENUM_ROLES_REMEDIATOR = ['claude-code', 'codex', 'gemini', 'remediator-cod
 export const ENUM_CODEX_WORKER_ACCOUNT_ORDER = Object.freeze(['personal-first', 'corporate-first']);
 // REMFALLBACK-01: the concrete remediator worker classes a capped remediator can
 // fall back to. `adversarial` is a routing mode, not a class, so it is excluded.
-const ENUM_ROLES_REMEDIATOR_FALLBACK = ['claude-code', 'codex', 'gemini', 'remediator-codex-corp', 'remediator-claude'];
+const ENUM_ROLES_REMEDIATOR_FALLBACK = ['claude-code', 'codex', 'gemini', 'remediator-codex-corp', 'codex-corp', 'remediator-claude'];
 // `hammer` is the universal end-of-budget rescue worker (codex-backed, runs under
 // the merge-agent app identity); allowed here so the budget-exhausted final pass
 // can dispatch it. See worker-pool hq_resolve_worker_identity (merge-agent-lacey).
@@ -2076,6 +2076,7 @@ function schemaV1() {
             __item: {
               __type: TYPE_STRING,
               __enum: ENUM_ROLES_REMEDIATOR_FALLBACK,
+              __normalize: { 'codex-corp': 'remediator-codex-corp' },
             },
             __default: ['remediator-codex-corp', 'remediator-claude', 'codex'],
           },

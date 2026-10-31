@@ -4115,6 +4115,7 @@ test('buildAgyReviewArgs binds --model before --print and carries the prompt as 
   // value-bearing flag (incl. --model) must precede --print so it binds.
   assert.deepEqual(args, [
     '--model', 'Gemini 3.8 Flash (High)',
+    '--output-format', 'stream-json',
     '--print-timeout', '1140s',
     '--sandbox',
     '--add-dir', '/tmp/reviewer-checkout',
@@ -4212,6 +4213,7 @@ test('spawnAgyReview delivers the prompt on argv (as the --print value) so the m
   assert.equal(calls[0].command, '/usr/local/bin/agy');
   assert.deepEqual(calls[0].args, [
     '--model', 'Gemini 3.8 Flash (High)',
+    '--output-format', 'stream-json',
     '--print-timeout', '9s',
     '--sandbox',
     '--add-dir', '/tmp/repo',

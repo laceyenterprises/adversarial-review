@@ -595,6 +595,7 @@
         "src/pollonce-phases.mjs",
         "src/reviewer-pass-tokens.mjs",
         "src/reviewer-harness.mjs",
+        "src/agy-usage.mjs",
         "src/reviewer-pass-reaper.mjs",
         "src/daemon-bounce-posted-review.mjs",
         "src/orphan-post-reconcile.mjs",
@@ -608,6 +609,16 @@
       "claudeReplySelectionFields": ["candidateCount", "selectedCandidate", "selectedType", "laterCandidates", "contractValid"],
       "reviewerReserveFloorFields": ["reason", "remainingPct", "floorPct", "source"],
       "reviewerReserveFloorReason": "personal-anthropic-reserve-floor; historical percentage-bearing reasons remain readable",
+      "agyMeasuredUsage": {
+        "source": "agy-measured",
+        "input": "prompt minus cache read",
+        "total": "input + cache read + output; reasoning included in output",
+        "metadataFields": ["agyConversationId", "agySessionTotal", "agyRequestTotal", "agyUsageMismatch"],
+        "chunkedReconciliation": "per-conversation metadata omitted; agreement unknown",
+        "pricingModel": "usage.model",
+        "estimatedPricing": "token_cost_usd remains null",
+        "transcriptMaxBytes": 8388608
+      },
       "reviewerSettlementFailureMessage": { "successfulPass": null, "unsuccessfulPassPriority": ["error", "stderr", "stderrTail"] },
       "compatibility": "REVIEWPROV-01: missing execution harness stamps unknown, never a model family. Antigravity suffix effort accepts only low, medium, high or xhigh; release qualifiers remain null. Existing fields, nullability and lifecycle are unchanged.",
       "owner": "reviewer spawn, settle, and token attribution"

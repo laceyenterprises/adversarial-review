@@ -557,7 +557,9 @@ function normalizeTokenUsage(tokenUsage) {
             : model.includes('gemini') ? 'gemini' : null;
   let fallbackTotal = null;
   if (input !== null || output !== null || reasoning !== null || cacheRead !== null || cacheWrite !== null || toolContext !== null) {
-    if (provider === 'codex' || source === 'agy-measured') {
+    if (source === 'agy-measured') {
+      fallbackTotal = (input || 0) + (cacheRead || 0) + (output || 0);
+    } else if (provider === 'codex') {
       fallbackTotal = (input || 0) + (output || 0);
     } else if (provider === 'claude') {
       fallbackTotal = (input || 0) + (output || 0) + (cacheRead || 0) + (cacheWrite || 0);

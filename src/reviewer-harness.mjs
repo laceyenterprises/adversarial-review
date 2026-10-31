@@ -84,7 +84,7 @@ import {
   resolveAgyAuthProbeTimeoutMs,
 } from './agy-reviewer-auth.mjs';
 import { resolveGeminiRuntime, resolveGeminiAntigravityModel } from './role-config.mjs';
-import { agyStreamEvidence, readAgyUsage } from './agy-usage.mjs';
+import { agyReviewText, agyStreamEvidence, readAgyUsage } from './agy-usage.mjs';
 import {
   AGY_REVIEWER_PINNED_AGY,
   PINNED_COMMAND_ENV,
@@ -2415,10 +2415,11 @@ function buildAgyReviewArgs({
   prompt,
   printTimeoutMs = resolveAgyPrintTimeoutMs(),
   workspaceDir = null,
+  streamJson = true,
 }) {
   const args = [
     '--model', model,
-    '--output-format', 'stream-json',
+    ...(streamJson ? ['--output-format', 'stream-json'] : []),
     '--print-timeout', formatAgyPrintTimeout(printTimeoutMs),
     '--sandbox',
   ];
@@ -2682,7 +2683,9 @@ async function spawnAgyReview({
   // binds. Refuse if it would blow the argv budget rather than silently
   // reverting to stdin (which unbinds the model — the bug this fixes).
   assertAgyPromptFitsArgv(prompt, { maxBytes: resolveAgyArgvMaxBytes(env) });
-  const agyArgs = buildAgyReviewArgs({ model, prompt, printTimeoutMs, workspaceDir: identity ? identity.workspaceDir : cwd });
+  const argsFor = (streamJson) => buildAgyReviewArgs({
+    model, prompt, printTimeoutMs, workspaceDir: identity ? identity.workspaceDir : cwd, streamJson,
+  });
   if (geminiTerminationPending) throw new Error('review termination in progress');
   const controller = new AbortController();
   const childSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
@@ -2690,29 +2693,45 @@ async function spawnAgyReview({
   activeAgyControllers.add(controller);
   armGeminiCheckoutSignalRelease();
   try {
-    if (identity) {
-      return await spawnAgyIdentityReview({ identity, agyArgs, timeout: effectiveTimeout, signal: childSignal, maxBuffer, spawnWithInputImpl });
+    const deadline = Date.now() + effectiveTimeout;
+    const run = async (streamJson) => {
+      childSignal.throwIfAborted();
+      const remainingMs = streamJson ? effectiveTimeout : deadline - Date.now();
+      if (remainingMs <= 0) throw new Error('Antigravity agy subprocess timeout');
+      const agyArgs = argsFor(streamJson);
+      if (identity) {
+        return spawnAgyIdentityReview({ identity, agyArgs, timeout: remainingMs, signal: childSignal, maxBuffer, spawnWithInputImpl });
+      }
+      return spawnWithInputImpl(
+        agyCli,
+        agyArgs,
+        {
+          env,
+          cwd,
+          // Prompt is delivered on argv (see buildAgyReviewArgs); stdin is closed.
+          input: '',
+          timeout: remainingMs,
+          progressTimeout: remainingMs,
+          signal: childSignal,
+          killGraceMs: 0,
+          maxBuffer,
+          // agy leaves a long-lived language-server child holding our stdout/stderr
+          // pipes; without this the capture never sees EOF and every review stalls
+          // until the progress/wall timeout SIGKILLs it. `reapGroupOnExit`
+          // treats main-process exit as authoritative and reaps descendants.
+          reapGroupOnExit: true,
+        },
+      );
+    };
+    try {
+      return await run(true);
+    } catch (err) {
+      const diagnostic = `${err.message || ''}\n${err.stdout || ''}\n${err.stderr || ''}`;
+      // Only a parser rejection of this optional telemetry flag authorizes
+      // replay. Auth, model, review and transport failures retain their routing.
+      if (!/(?:unknown|unrecognized|unsupported|unexpected|invalid)\s+(?:option|flag|argument)[^\n]*--output-format/iu.test(diagnostic)) throw err;
+      return await run(false);
     }
-    return await spawnWithInputImpl(
-      agyCli,
-      agyArgs,
-      {
-        env,
-        cwd,
-        // Prompt is delivered on argv (see buildAgyReviewArgs); stdin is closed.
-        input: '',
-        timeout: effectiveTimeout,
-        progressTimeout: effectiveTimeout,
-        signal: childSignal,
-        killGraceMs: 0,
-        maxBuffer,
-        // agy leaves a long-lived language-server child holding our stdout/stderr
-        // pipes; without this the capture never sees EOF and every review stalls
-        // until the progress/wall timeout SIGKILLs it. `reapGroupOnExit`
-        // treats main-process exit as authoritative and reaps descendants.
-        reapGroupOnExit: true,
-      },
-    );
   } finally {
     activeAgyControllers.delete(controller);
     disarmGeminiCheckoutSignalRelease();
@@ -3019,7 +3038,7 @@ async function reviewWithGemini(diff, extraContext = '', {
     stdout = err.stdout || '';
     stderr = err.stderr || '';
     quotaSignal = runtime === 'antigravity' && looksLikeGeminiQuotaError(err, stdout, stderr);
-    const msg = `${err.message || ''}\n${stdout}\n${stderr}`;
+    const msg = `${err.message || ''}\n${runtime === 'antigravity' ? agyReviewText(stdout) : stdout}\n${stderr}`;
     if (!subprocessStarted) {
       throw err;
     }
@@ -3087,7 +3106,7 @@ async function reviewWithGemini(diff, extraContext = '', {
 
   let geminiUsage = agyMeasuredUsage;
   let reviewPayload = runtime === 'antigravity'
-    ? agyStreamEvidence(stdout).response || combined : combined;
+    ? agyReviewText(stdout) || combined : combined;
   if (runtime !== 'antigravity' && combined.startsWith('{')) {
     try {
       const doc = JSON.parse(combined);

@@ -45,7 +45,7 @@ test('agy measured passes retain inclusive totals, reconciliation and unknown pr
   beginReviewerPass(rootDir, { ...key, reviewerClass: 'gemini', reviewerModel: 'unknown' });
   const pass = completeReviewerPass(rootDir, {
     ...key, status: 'completed',
-    tokenUsage: { input: 100, output: 20, reasoning: 8, cacheRead: 500, model: 'unknown',
+    tokenUsage: { input: 50, output: 20, reasoning: 8, cacheRead: 50, model: 'unknown',
       source: 'agy-measured', agyConversationId: 'synthetic-conversation',
       agySessionTotal: 119, agyRequestTotal: 120, agyUsageMismatch: true },
   });

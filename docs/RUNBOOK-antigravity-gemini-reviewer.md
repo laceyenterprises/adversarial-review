@@ -436,8 +436,20 @@ HQ-owner Gemini CLI login therefore blocks only HQ-owner reviews.
 
 ## Output Guard And Timeout Behavior
 
-`agy --print` does not expose a quiet, JSON, or final-message-only flag. In
-agentic mode it can print planning/tool narration before the final answer. The
+The harness requests `--output-format stream-json` before `--print <prompt>`.
+When supported, it extracts the final `result.response` for review validation
+and joins the unique `conversation_id` to usage evidence. The pinned CLI and
+root-owned `agy-reviewer-agy` wrapper's flag support still require deployed
+verification; offline fixtures do not establish a minimum supported version.
+If either rejects `--output-format` as an unknown, unrecognized, unsupported,
+unexpected or invalid option/flag/argument, the harness retries once without
+that flag, retaining the model, prompt, identity and original subprocess
+deadline. Other failures never trigger this compatibility retry.
+Plain output retains the existing usage estimate when measured evidence is
+absent. Stream events without `result.response` have their error, message,
+text and content fields decoded before timeout/model-unavailable classification.
+
+In plain agentic mode agy can print planning/tool narration before the final answer. The
 bad failure shape seen on PR #2435 was two concatenated attempts under the
 Gemini review heading, each made of "I will..." exploration text, one ending in
 `Error: timed out waiting for response`, and neither containing `## Verdict`.
@@ -453,6 +465,17 @@ The reviewer therefore validates captured AGY output before posting:
   from the review heading or first real `##` section is posted
 - inline verdict headings such as `## Verdict: Comment only` are normalized to
   the downstream parser's canonical two-line form before posting
+
+Telemetry is fail-open. The dedicated-account helper's `usage CONVERSATION_ID`
+result must contain non-negative safe integer input/output/cache-read counters,
+positive input + output and cache-read no greater than input. Invalid or zero
+helper counters fall back to stream session totals. Local transcript reads use
+`$GEMINI_HOME/antigravity-cli` when set, otherwise
+`$HOME/.gemini/antigravity-cli`; the checkout materializer sets `GEMINI_HOME`.
+Only complete, valid `PLANNER_RESPONSE` counters are reconciled. Files larger
+than 8 MiB, changing files and missing/unreadable transcripts use session totals;
+the reader never loads an unbounded transcript. Dedicated OS users use the
+pinned helper rather than the caller's filesystem privileges.
 
 This is intentionally the same operational class as a Claude/Codex subprocess
 failure before posting a verdict: the watcher retry and attempt-budget handling

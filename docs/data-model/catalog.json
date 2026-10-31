@@ -1,4 +1,5 @@
 {
+  "hammerQuotaScratchRecoveryContract": "HAMSCRATCHRESUME-01: quota-resume-phase-inputs-missing cancels a hammer before retry enqueue. Public launch reads expose latest worker_killed_cause and last_admit_refusal_reason for pending quota ownership. AMA phaseInputsReplacement is one durable PR receipt {launchRequestId, refundedAt, budgets:{pr,head}}, preserved across series/target resets; matching dispatch charge budgets are credited once, with lifetime still charged. See worker-pool/dispatch and hammer-retry-cap/scratch-sweep domain docs; no new table or lifecycle enum.",
   "version": 1,
   "entries": [
     {

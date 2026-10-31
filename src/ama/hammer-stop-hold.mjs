@@ -93,6 +93,7 @@ const execFileAsync = promisify(execFile);
 const STOP_OUTCOMES = new Set(['failed-without-merge', 'no-merge']);
 const STOP_REASON_WRAPPERS = new Set(['predicate-not-eligible', 'not-eligible', 'reason-not-recorded']);
 const INFRASTRUCTURE_STOP_REASONS = new Set([
+  'dispatch-phase-scripts-missing',
   // Dispatch-owned scratch scripts disappeared; fresh dispatch renders them again.
   'missing-dispatch-phase-scripts',
   // Dispatch left template placeholders in the phase-script paths.

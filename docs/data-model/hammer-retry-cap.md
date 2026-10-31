@@ -1,5 +1,19 @@
 # Data Model - Hammer Retry Cap Ledger
 
+## Missing phase input replacement (HAMSCRATCHRESUME-01)
+
+The optional PR-scoped `phaseInputsReplacement` receipt stores
+`{ launchRequestId, refundedAt, budgets: { pr, head } }`. It survives target
+and review-series changes. A complete terminal launch chain with the named
+quota-resume failure or a matching launch-bound missing-phase audit authorizes
+one fresh closer. The exact `dispatchCharges` entry must exist. Matching PR and
+head/epoch counters are credited once and `refundedBudgets` prevents overlapping
+credits. The lifetime ceiling remains charged. Missing/corrupt accounting,
+unknown/live descendants and a second broken replacement refuse recovery.
+Monotonic dispatch-record `retryCount` is retained; `unexecutedRefundCount`
+accounts for the one dispatch repair. This is an input repair, not a no-work
+execution verdict.
+
 ## Operator approval re-arm (APPROVALREARM-01)
 
 A terminal closer refusal records `awaitedInputs: [{ kind: "operator-label",

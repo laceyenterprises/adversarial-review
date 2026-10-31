@@ -18,6 +18,8 @@ import {
   maybeDispatchAmaCloser, reconcileAmaCloserDispatches, reconcileAmaCloserLease, substituteTemplate, updateAmaCloserDispatchRecord,
 } from '../src/ama/dispatch-closer.mjs';
 import { acquireAmaCloserLease, amaCloserLeaseFilePath, deleteAmaCloserLease, readAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { recordHammerEarlyFailure } from '../src/ama/hammer-terminal-audit.mjs';
+import { readHammerRetryCapLedger, refundHammerRetryDispatch } from '../src/ama/hammer-retry-cap.mjs';
 
 const repoRoot = resolve(new URL('..', import.meta.url).pathname);
 const head = 'b'.repeat(40);
@@ -89,6 +91,53 @@ function dispatchArgs(root) {
     readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
     logger,
   };
+}
+
+for (const reason of ['quota-resume-phase-inputs-missing', 'dispatch-phase-scripts-missing']) {
+  test(`HAMSCRATCHRESUME-01: ${reason} replaces broken inputs once through normal closer dispatch`, async t => {
+    const root = fixture(t);
+    const args = dispatchArgs(root);
+    const identity = { repo: 'fixture/repo', prNumber: 42, headSha: head };
+    const launches = [];
+    const execFileImpl = async (_cmd, argv) => {
+      if (argv[0] === 'dispatch' && argv[1] !== 'status') {
+        const id = `synthetic-launch-${launches.length + 1}`;
+        launches.push(id);
+        return { stdout: JSON.stringify({ ticketRef: 'AMA-PR-42', launchRequestId: id }) };
+      }
+      return { stdout: '{}' };
+    };
+    const path = amaCloserDispatchFilePath(root, identity);
+    const readRecord = () => JSON.parse(readFileSync(path));
+    assert.equal((await maybeDispatchAmaCloser({ ...args, execFileImpl })).dispatched, true);
+    const original = readRecord();
+    rmSync(original.scratchDir, { recursive: true, force: true });
+    let currentLaunch = original.launchRequestId;
+    const readLaunchRequestStatusImpl = ({ launchRequestId }) => ({ ok: true, retryChain: [],
+      row: { launch_request_id: launchRequestId, status: launchRequestId === currentLaunch ? 'failed' : 'running',
+        ...(reason.startsWith('quota-') ? { failure_class: reason } : {}) } });
+    const audit = () => recordHammerEarlyFailure(reason, { env: {
+      HAM_HQ_ROOT: args.dispatchContext.hqRoot, HAM_REPO: identity.repo,
+      HAM_PR_NUMBER: '42', HAM_TARGET_REMEDIATION_SHA: head, HQ_LAUNCH_REQUEST_ID: currentLaunch,
+    } });
+    if (!reason.startsWith('quota-')) audit();
+    const result = await maybeDispatchAmaCloser({ ...args, readLaunchRequestStatusImpl, execFileImpl });
+    assert.equal(result.dispatched, true, JSON.stringify(result));
+    const replacement = readRecord();
+    assert.notEqual(replacement.scratchDir, original.scratchDir);
+    assert.ok(HAMMER_PHASES.every(phase => existsSync(join(replacement.scratchDir, `${phase}.sh`))));
+    assert.notEqual(readAmaCloserLease(root, identity).lrqId, original.launchRequestId);
+    assert.equal(readHammerRetryCapLedger(root, identity).attemptCount, 1, 'invalid inputs do not spend the PR retry cap');
+    assert.equal(refundHammerRetryDispatch(root, identity, {
+      jobKey: head, headSha: head, launchRequestId: original.launchRequestId,
+    }).reason, 'already-refunded', 'sibling refund cannot credit the same dispatch again');
+    // Re-observing a broken replacement cannot grant another repair.
+    currentLaunch = replacement.launchRequestId;
+    if (!reason.startsWith('quota-')) audit();
+    const again = await maybeDispatchAmaCloser({ ...args, readLaunchRequestStatusImpl, execFileImpl });
+    assert.equal(again.dispatched, false, JSON.stringify(again));
+    assert.equal(launches.length, 2);
+  });
 }
 
 for (const clock of ['wall', 'timestamp', 'function']) {

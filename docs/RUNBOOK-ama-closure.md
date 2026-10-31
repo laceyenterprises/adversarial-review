@@ -7297,3 +7297,20 @@ After ordinary deployment, SRE observes the stranded PR selecting
 fixtures cover all four stop variants, evidence projection, unchanged cap
 accounting and refusal cases. No worker live PR, service or ledger action is
 part of validation.
+# Hammer scratch quota recovery (HAMSCRATCHRESUME-01)
+
+Pending quota resume owns the existing scratch even though the killed execution
+is failed. The sweep and terminal reconciler hold until the intent is resolved
+or a live retry owns it. If the worker pool cancels with
+`quota-resume-phase-inputs-missing`, AMA replaces the terminal chain once through
+ordinary closer dispatch. A hammer finding missing procedures records
+`dispatch-phase-scripts-missing` with the terminal-audit helper before stopping.
+The same bounded repair gives it a fresh scratch and lease, with one PR/head
+credit and the lifetime ceiling retained. A second missing-input failure
+requires operator attention and cannot loop. Current-head, required checks,
+strict-mode and merge-lease predicates still apply.
+
+After both repositories deploy and the services reload normally, SRE passively
+observes the next natural quota-kill/resume closing or being replaced by a
+closer that closes without a missing-phase comment. Do not induce a live quota
+kill or mutate ledger/leases to test this path.

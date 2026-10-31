@@ -1,3 +1,11 @@
+HAMSCRATCHRESUME-01: pending quota resume retains hammer scratch through the
+sweep and terminal reconciliation. A named terminal missing-phase outcome
+permits one fresh closer with a new scratch and lease, crediting its PR/head
+charge once while keeping the lifetime ceiling. Existing lifecycle enum values
+and smoke commands remain unchanged. SRE acceptance is passive observation of
+the next natural quota recovery after both repositories deploy and reload.
+See [the closure runbook](docs/RUNBOOK-ama-closure.md).
+
 # Adversarial Review
 
 ZFA-01 adds a parse-only strict mirror of `cloud_access.azure` foundation

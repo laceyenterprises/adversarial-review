@@ -169,7 +169,7 @@ function writeHammerRetryCapLedger(rootDir, identity, doc) {
 
 // Permanent charge/refund identities survive every head/series reset.
 function durableChargeFields(ledger) {
-  return Object.fromEntries(['dispatchCharges', 'noWorkRefunds', 'pendingTransientCharge', 'targetChargeEpoch', 'operatorApprovalRearms']
+  return Object.fromEntries(['dispatchCharges', 'noWorkRefunds', 'pendingTransientCharge', 'targetChargeEpoch', 'operatorApprovalRearms', 'phaseInputsReplacement']
     .filter(key => ledger?.[key] !== undefined).map(key => [key, ledger[key]]));
 }
 
@@ -683,7 +683,8 @@ function refundHammerRetryDispatchUnlocked(rootDir, identity, {
   const incomingJobKey = normalizeKey(jobKey);
   if (ledgerJobKey && incomingJobKey && ledgerJobKey !== incomingJobKey) return refuse('series-changed');
   if (launch && (refundedLaunches.includes(launch) || existing.deferralLaunches?.includes(launch) || existing.leaseWaitLaunches?.includes(launch)
-    || existing.unexecutedLaunchRequestIds?.includes(launch))) return refuse('already-refunded');
+    || existing.unexecutedLaunchRequestIds?.includes(launch)
+    || existing.phaseInputsReplacement?.launchRequestId === launch)) return refuse('already-refunded');
   if (existing.suppressed || existing.lifetimeSuppressed || existing.targetSuppressed) return refuse('suppressed');
   const attemptCount = Math.max(0, Math.trunc(Number(existing.attemptCount) || 0));
   if (attemptCount === 0) return refuse('no-charged-attempt');
@@ -719,6 +720,7 @@ function refundUnexecutedHammerDispatchUnlocked(rootDir, identity, { jobKey, hea
   if (!launch) return { refunded: false, reason: 'no-launch' };
   const launches = ledger.unexecutedLaunchRequestIds || [];
   if (launches.includes(launch)) return { refunded: false, reason: 'already-refunded' };
+  if (ledger.phaseInputsReplacement?.launchRequestId === launch) return { refunded: false, reason: 'already-refunded' };
   // An older refund must not subtract the same dispatch twice.
   if (ledger.retryableLaunchRequestIds?.includes(launch) || ledger.deferralLaunches?.includes(launch) || ledger.leaseWaitLaunches?.includes(launch)) {
     return { refunded: false, reason: 'already-refunded' };
@@ -848,7 +850,8 @@ function deferHammerRetryDispatchUnlocked(rootDir, identity, { jobKey, launchReq
   const launches = leaseWaitExhausted ? (fields.leaseWaitLaunches || []) : fields.deferralLaunches;
   if (fields.deferralLaunches.includes(launchRequestId) || fields.leaseWaitLaunches?.includes(launchRequestId)) return ledger;
   const alreadyRefunded = ledger.retryableLaunchRequestIds?.includes(launchRequestId) === true
-    || ledger.unexecutedLaunchRequestIds?.includes(launchRequestId) === true;
+    || ledger.unexecutedLaunchRequestIds?.includes(launchRequestId) === true
+    || ledger.phaseInputsReplacement?.launchRequestId === launchRequestId;
   const refund = !alreadyRefunded && (leaseWaitExhausted || launches.length < HAMMER_DEFERRAL_LAUNCH_LIMIT) && ledger.attemptCount > 0;
   const lifetimeRefund = refund && (leaseWaitExhausted || fields.lifetimeDeferralRefundCount < LIFETIME_DEFERRAL_REFUND_BUDGET);
   const deferredAt = now || new Date().toISOString();
@@ -922,6 +925,37 @@ export function refundHammerRetryDispatch(rootDir, identity, options = {}) {
 
 export function refundUnexecutedHammerDispatch(rootDir, identity, options = {}) {
   return mutateHammerLedger(rootDir, identity, () => refundUnexecutedHammerDispatchUnlocked(rootDir, identity, options));
+}
+
+// One repair per PR, durable across head/series changes. This repairs invalid
+// dispatch inputs; it does not assert that the quota-killed worker did no work.
+// Keep the lifetime ceiling charged, so repeated infrastructure failures still
+// stop. Only the PR/head retry budgets receive this bounded credit.
+export function refundMissingPhaseInputsDispatch(rootDir, identity, { launchRequestId, now } = {}) {
+  return mutateHammerLedger(rootDir, identity, () => {
+    const ledger = readHammerRetryCapLedger(rootDir, identity);
+    if (!ledger || ledger.__corrupt) return { refunded: false, reason: 'no-ledger' };
+    if (ledger.phaseInputsReplacement) return {
+      refunded: false, reason: ledger.phaseInputsReplacement.launchRequestId === launchRequestId
+        ? 'already-refunded' : 'phase-inputs-replacement-exhausted',
+    };
+    const charge = Object.values(ledger.dispatchCharges || {}).find(value => value.launchRequestId === launchRequestId);
+    if (!charge || ![ledger.attemptCount, ledger.targetAttemptCount, ledger.lifetimeAttemptCount]
+      .every(value => Number.isSafeInteger(value) && value >= 0)) {
+      return { refunded: false, reason: 'charge-unproven' };
+    }
+    const pr = ledger.jobKey === charge.jobKey && !charge.refundedBudgets?.pr;
+    const head = ledger.targetRemediationSha === charge.headSha
+      && ledger.targetChargeEpoch === charge.targetEpoch && !charge.refundedBudgets?.head;
+    const doc = { ...ledger,
+      ...(pr ? { attemptCount: Math.max(0, ledger.attemptCount - 1), suppressed: false } : {}),
+      ...(head ? { targetAttemptCount: Math.max(0, ledger.targetAttemptCount - 1), targetSuppressed: false } : {}),
+      phaseInputsReplacement: { launchRequestId, refundedAt: now, budgets: { pr, head } },
+    };
+    creditHammerDispatchBudgets(doc, launchRequestId, { pr, head });
+    writeHammerRetryCapLedger(rootDir, identity, doc);
+    return { refunded: true, reason: 'phase-inputs-replacement' };
+  });
 }
 
 export function grantTransientHammerRetry(rootDir, identity, options = {}) {

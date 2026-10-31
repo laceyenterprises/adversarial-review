@@ -36,6 +36,19 @@ export HAM_REPO='<<REPO>>' HAM_PR_NUMBER='<<PR_NUMBER>>' HAM_HQ_ROOT='<<HQ_ROOT>
 ```
 `node <<ROOT_DIR>>/bin/hammer-terminal-audit.mjs early-refusal` before manual refusal. Never print secrets.
 
+Before any PR read or edit, check the dispatch phase scripts. If a file is
+missing, run the named terminal audit below and stop; AMA replaces this broken
+dispatch once with freshly rendered inputs and a new lease.
+
+```bash
+for phase in hammer-verify-head hammer-publish hammer-merge; do
+  if [ ! -f "<<RUN_DIR>>/$phase.sh" ]; then
+    node "<<ROOT_DIR>>/bin/hammer-terminal-audit.mjs" dispatch-phase-scripts-missing
+    exit 1
+  fi
+done
+```
+
 ## Cost and context discipline
 
 At start and after **each push**, before reads, run `node <<ROOT_DIR>>/bin/hammer-context.mjs <<REPO>> <<PR_NUMBER>>` once; fetch the full review if `review.findingsTruncated` or `review.simplicityNoteTruncated`.

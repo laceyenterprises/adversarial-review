@@ -26,7 +26,8 @@ import { hammerDispatchMismatch, closureDecisionMatches, hasHammerDispatchIntent
 import { createHistoryReader } from './history-reader.mjs';
 import { exactHammerValidation, fetchHammerHeadRange } from './hammer-head-validation.mjs';
 import { OPERATOR_LABEL_GATES, operatorGatedRemediationInstructions, resolveOperatorLabelGateFailuresWithRetry, holdForOperatorLabels, sweepOperatorLabelHolds } from './operator-label-gates.mjs';
-import { AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES, isTerminalLaunchRequestStatus, withLiveLaunchRetry, launchRequestParked, launchRequestMeaning, launchRequestOwned, launchRequestInFlight } from './launch-request-status.mjs';
+import { AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES, isTerminalLaunchRequestStatus, withLiveLaunchRetry, launchRequestParked, launchRequestMeaning, launchRequestOwned, launchRequestInFlight, launchRequestQuotaResumePending } from './launch-request-status.mjs';
+import { missingPhaseInputsOutcome } from './phase-inputs-recovery.mjs';
 import { probeOrphanOwnership, ownerlessBoundMs } from './orphan-watchdog.mjs';
 import { isOperatorHeld } from '../operator-hold-labels.mjs';
 import { observeCloserBacklog } from './closure-lag.mjs';
@@ -183,6 +184,7 @@ import {
   readHammerRetryCapLedger,
   recordHammerRetryDispatch,
   refundUnexecutedHammerDispatch,
+  refundMissingPhaseInputsDispatch,
   deferHammerRetryDispatch,
   refundHammerRetryDispatch,
 } from './hammer-retry-cap.mjs';
@@ -1533,6 +1535,7 @@ function* reconcileAmaCloserLeaseSteps({
     })));
     throwIfAborted(signal);
     if (!probe?.ok || probe.retryChainUnreadable) return false;
+    if (launchRequestQuotaResumePending(probe)) return false;
     // Async evidence can outlive the owner we started probing. Revalidate
     // before even the foreign-launch retirement branch mutates ownership.
     const ownerAfterProbe = readAmaCloserLease(rootDir, { repo, prNumber, headSha: held.headSha });
@@ -2091,6 +2094,7 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
         }
         continue;
       }
+      if (launchRequestQuotaResumePending(probe)) continue;
       if (observedTerminal) {
         if (!probe?.ok) continue;
       } else if (probe?.ok && status) {
@@ -5380,6 +5384,11 @@ async function maybeDispatchAmaCloserAttempt({
       ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath, env, signal, includeRetryChain: true,
     })).catch(() => ({ ok: false }));
     const probe = prefetchedLaunchRequestProbe;
+    if (launchRequestQuotaResumePending(probe)) return noAmaDispatch({
+      dispatched: false, skipMergeAgent: true, inFlight: true,
+      reason: 'dispatch-quota-resume-pending', preservePredecessorArtifacts: true,
+      launchRequestId: existingRecord.launchRequestId,
+    });
     if (launchRequestParked(probe)) {
       updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, current =>
         current?.launchRequestId === existingRecord.launchRequestId && current.state === existingRecord.state
@@ -5401,6 +5410,32 @@ async function maybeDispatchAmaCloserAttempt({
         record: existingRecord, launchRequestId: existingRecord.launchRequestId,
         now: dispatchContext.dispatchedAt, logger });
       return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'non-hammer-launch-not-adopted' });
+    }
+  }
+  if (existingRecord?.launchRequestId && isHammerWorkerClass(existingRecord.workerClass || workerClass)) {
+    const reason = missingPhaseInputsOutcome(prefetchedLaunchRequestProbe, existingRecord,
+      readAmaAuditEntry(hqRoot, repo, prNumber, existingRecord.headSha));
+    if (reason) {
+      const previousLaunch = existingRecord.launchRequestId;
+      const refund = refundMissingPhaseInputsDispatch(rootDir, { repo, prNumber }, {
+        launchRequestId: previousLaunch, now: dispatchContext.dispatchedAt,
+      });
+      if (!refund.refunded && refund.reason !== 'already-refunded') return noAmaDispatch({
+        dispatched: false, skipMergeAgent: true, needsOperator: true, reason: refund.reason,
+      });
+      // The terminal chain proves no owner remains. Normal dispatch below
+      // obtains a new lease, renders into mkdtemp, and re-proves every gate.
+      finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity: existingRecordLeaseIdentity,
+        terminalOutcome: 'failed-without-merge', launchRequestId: previousLaunch,
+        now: dispatchContext.dispatchedAt, logger, repo, prNumber });
+      existingRecord = updateDispatchRecord(rootDir, existingDispatchIdentity, current =>
+        current?.launchRequestId === previousLaunch ? {
+          ...current, launchRequestId: null, dispatchId: null, state: 'dispatch-failed',
+          lastError: reason, previousPhaseInputsLaunchRequestId: previousLaunch,
+          unexecutedRefundCount: Number(current.unexecutedRefundCount || 0) + 1,
+        } : null);
+      existingLeaseBeforeDispatch = readAmaCloserLease(rootDir, existingDispatchLeaseIdentity);
+      prefetchedLaunchRequestProbe = null;
     }
   }
   // HAMREFUND-01: reconcile terminal launches before the stale-lease tombstone

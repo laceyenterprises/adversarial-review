@@ -4584,7 +4584,7 @@ async function maybeDispatchAmaCloserWithinRepositoryCycle(args) {
     const recovery = args.cfg?.enabled && args.cfg?.autonomousMergeExecutionEnabled !== false && dispatchContext?.rootDir
       ? await refreshClosureRecoveryCustody({ rootDir: dispatchContext.rootDir,
         repo: targetRepo, prNumber: targetPrNumber, headSha: targetHead, shared: args.sharedNextAction,
-        now: Date.parse(dispatchContext.dispatchedAt) || Date.now(), readLaunchImpl: readStatus,
+        now: Date.parse(dispatchContext.dispatchedAt) || Date.now(), readLaunchImpl: readStatus, logger: args.logger,
         readOptions: { hqRoot: dispatchContext.hqRoot, ledgerTarget: dispatchContext.ledgerTarget,
           ledgerDbPath: dispatchContext.ledgerDbPath, env: args.env || process.env, signal: args.signal } })
       : { shared: args.sharedNextAction };

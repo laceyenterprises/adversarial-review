@@ -98,6 +98,9 @@ the decision key, the deadline, `ageMs`, the closer's reason, the launch id and
 unresolved `lease:`/`launch:` evidence. RECOVERYSTALL-01 adds an explicit
 deadline custody refresh: re-read the exact-head lease and its referenced
 launch including retry descendants, even when no dispatch receipt survives.
+A successful refresh advances the snapshot observation time to the current
+pass while preserving its original deadline anchor, including snapshots
+retained from before expiry.
 A lease changed during the read retains recovery ownership. Newly readable
 terminal custody or an expired ownerless lease returns to normal next-action
 admission; retirement and exclusive reacquisition occur under the existing
@@ -110,6 +113,8 @@ last evidence reason. At the deadline, closure pages
 through closure-wait class `closure-recovery-deadline`, repeating every six
 hours while custody stays unknowable. The page reservation timestamp persists
 across restarts, and each cadence receives its own delivery deduplication key.
+Custody diagnostic storage failures warn and retain the refreshed decision for
+ordinary admission; unavailable persistence omits the durable attempt record.
 It returns
 `closure-recovery-ownership-unresolved` with `closerReason`, `closureBlocker`
 and `needsOperator`. A refused delivery is retried on a later pass, and every

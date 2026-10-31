@@ -3806,16 +3806,18 @@ export function readExpiredNextActions(rootDir, { nowMs = Date.now(), reviewRows
     total += 1;
     const item = expiredNextActionDeadline(ledger.nextAction, { headSha: ledger.headSha, nowMs });
     if (!item) continue;
-    const recoveryCustody = item.closureRecovery
-      ? readRecoveryCustodyStatus(rootDir, ledger.repo, ledger.prNumber, ledger.headSha) : null;
     expired.push({ repo: ledger.repo || null, prNumber: Number(ledger.prNumber) || null, ...item,
-      ...(recoveryCustody ? { recoveryCustody } : {}),
       lane: ledger.lane || null, observedAt: ledger.lastRunAt || ledger.updatedAt || null });
   }
   expired.sort((a, b) => b.ageMs - a.ageMs);
   return { total, expiredCount: expired.length,
     closureRecoveryExpired: expired.filter(item => item.closureRecovery).length,
-    oldestAgeMs: expired[0]?.ageMs ?? null, expired: expired.slice(0, EXPIRED_NEXT_ACTION_REPORT_LIMIT) };
+    oldestAgeMs: expired[0]?.ageMs ?? null,
+    expired: expired.slice(0, EXPIRED_NEXT_ACTION_REPORT_LIMIT).map(item => {
+      const recoveryCustody = item.closureRecovery
+        ? readRecoveryCustodyStatus(rootDir, item.repo, item.prNumber, item.head) : null;
+      return recoveryCustody ? { ...item, recoveryCustody } : item;
+    }) };
 }
 
 export function summarizeHammerEfficiency(db, { nowMs = Date.now(), windowMs = 30 * 24 * 60 * 60 * 1000 } = {}) {

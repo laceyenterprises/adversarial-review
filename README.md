@@ -2370,7 +2370,11 @@ re-reads the exact-head lease and launch/retries even without a receipt, then
 uses ordinary locked admission for one replacement closer. Live or unreadable
 custody stays fenced. Durable attempts, deadline and last evidence appear in
 closure status; unresolved recovery pages every six hours. Existing smoke
-promises remain unchanged. After ordinary deployment, SRE records no open PR
+promises remain unchanged. Refresh advances retained snapshots to the current
+observation time without moving their deadline anchor. Diagnostic database
+failures warn while preserving the refreshed decision for admission; health
+reads custody evidence only for the oldest 50 reported deadlines.
+After ordinary deployment, SRE records no open PR
 with `closure-recovery-ownership-unresolved` more than one recovery cycle past
 its deadline; a persistent ledger outage remains an explicit unresolved incident.
 No worker live action is authorized.

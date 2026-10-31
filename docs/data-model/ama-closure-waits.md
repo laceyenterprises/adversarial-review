@@ -110,9 +110,15 @@ This table records diagnosis only: retirement and replacement dispatch still
 use the existing per-PR intent lock and lease CAS. Rows persist across restarts
 and are not pruned. Closure status exposes these fields as `closureRecovery`
 deadline, attempts, lastAttemptAt and lastEvidence.
+Directory creation, database open, schema, write or close failures emit a warning
+and return the freshly reconciled decision without a `closureRecovery` diagnostic
+record. Unavailable diagnostics cannot prevent closer admission or establish
+custody; the lease and launch observations remain authoritative.
 The existing pipeline-health expired-next-action entries expose the same
 persisted evidence as `recoveryCustody`, read without creating or mutating a
 database; absent or unreadable diagnostic stores leave that optional field absent.
+These database reads run only after sorting and selecting the oldest 50 entries;
+aggregate expired counts still cover all eligible lane records.
 
 The transition from the legacy `waits` table deliberately accepts a one-time
 reset: existing rows are not migrated, and the old table remains on disk but

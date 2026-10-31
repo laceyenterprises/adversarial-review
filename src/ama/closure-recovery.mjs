@@ -36,7 +36,7 @@ const text = value => (typeof value === 'string' ? value.trim() : '');
 // This only supplies evidence. Retirement/reacquisition stays under the normal
 // per-PR intent lock, followed by all existing dispatch and merge predicates.
 export async function refreshClosureRecoveryCustody({ rootDir, repo, prNumber, headSha, shared,
-  now = Date.now(), readLaunchImpl, readOptions = {} }) {
+  now = Date.now(), readLaunchImpl, readOptions = {}, logger = console }) {
   if (!hasClosureRecoveryIntent(shared, { repo, prNumber, headSha })) return { shared };
   const deadlineAt = shared.decision.deadline?.at;
   const due = Date.parse(deadlineAt);
@@ -73,25 +73,31 @@ export async function refreshClosureRecoveryCustody({ rootDir, repo, prNumber, h
       } : null } },
     });
     // The original anchor remains fixed; only the observation clock advances.
-    const snapshot = deriveNextActionSnapshot({ base: fresh.snapshot, observedAt: new Date(now).toISOString() });
+    const snapshot = deriveNextActionSnapshot({ base: { ...fresh.snapshot, observedAt: new Date(now).toISOString() } });
     fresh = Object.freeze({ snapshot, decision: nextAction(snapshot) });
   } catch (error) {
     evidence = { leaseStatus: lease?.status || 'unknown', launchRequestId, readable: false,
       reason: text(error?.message) === 'lease-changed-during-recovery'
         ? 'lease-changed-during-recovery' : 'custody-read-failed' };
   }
-  const dir = join(rootDir, 'data', 'ama-closure-waits');
-  mkdirSync(dir, { recursive: true });
-  const key = createHash('sha256').update(`${repo}#${prNumber}`).digest('hex');
-  const db = new Database(join(dir, `${key}.db`));
   let attempts;
   try {
-    db.exec('CREATE TABLE IF NOT EXISTS recovery_custody (head TEXT PRIMARY KEY, attempts INTEGER NOT NULL, deadline TEXT, observed INTEGER NOT NULL, evidence TEXT NOT NULL)');
-    attempts = db.prepare(`INSERT INTO recovery_custody VALUES (?,1,?,?,?)
-      ON CONFLICT(head) DO UPDATE SET attempts=attempts+1, deadline=excluded.deadline,
-      observed=excluded.observed, evidence=excluded.evidence RETURNING attempts`)
-      .get(headSha, deadlineAt || null, now, JSON.stringify(evidence)).attempts;
-  } finally { db.close(); }
+    const dir = join(rootDir, 'data', 'ama-closure-waits');
+    mkdirSync(dir, { recursive: true });
+    const key = createHash('sha256').update(`${repo}#${prNumber}`).digest('hex');
+    const db = new Database(join(dir, `${key}.db`));
+    try {
+      db.exec('CREATE TABLE IF NOT EXISTS recovery_custody (head TEXT PRIMARY KEY, attempts INTEGER NOT NULL, deadline TEXT, observed INTEGER NOT NULL, evidence TEXT NOT NULL)');
+      attempts = db.prepare(`INSERT INTO recovery_custody VALUES (?,1,?,?,?)
+        ON CONFLICT(head) DO UPDATE SET attempts=attempts+1, deadline=excluded.deadline,
+        observed=excluded.observed, evidence=excluded.evidence RETURNING attempts`)
+        .get(headSha, deadlineAt || null, now, JSON.stringify(evidence)).attempts;
+    } finally { db.close(); }
+  } catch (error) {
+    // Persistence is diagnostic only; retain the independently refreshed custody.
+    logger?.warn?.(`[watcher] closure-recovery diagnostic persistence failed for ${repo}#${prNumber}: ${error.message}`);
+    return { shared: fresh };
+  }
   return { shared: fresh, closureRecovery: { deadlineAt: deadlineAt || null, attempts,
     lastAttemptAt: new Date(now).toISOString(), lastEvidence: evidence,
     outcome: evidence.readable ? 'reconciled' : 'unresolved' } };

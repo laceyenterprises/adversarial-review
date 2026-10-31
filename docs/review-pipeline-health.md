@@ -44,6 +44,8 @@ action/actor/reason/row and a `closureRecovery` flag. Totals are
 are listed, oldest first. Closed or merged PRs are omitted. The section adds no
 finding, metric or page, because the selected executor and closure-wait own
 escalation.
+Only the selected 50 entries can open read-only custody diagnostic databases
+to populate optional `recoveryCustody` evidence; counts cover all expired entries.
 
 Run locally:
 

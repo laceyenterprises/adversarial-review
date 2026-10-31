@@ -3,6 +3,8 @@
 import test from 'node:test';
 import './helpers/rate-limit-state-isolation.mjs';
 import assert from 'node:assert/strict';
+import Database from 'better-sqlite3';
+import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import path from 'node:path';
@@ -367,7 +369,8 @@ test('final review: missing snapshot observations still enforce the custody dead
   assert.equal(result.closureRecovery.outcome, 'escalated');
 });
 
-function recoveryDispatchFixture(t, { status = 'failed', pending = false } = {}) {
+function recoveryDispatchFixture(t, { status = 'failed', pending = false,
+  observedAt = new Date(DEADLINE_MS + MINUTE).toISOString() } = {}) {
   const { rootDir } = expiredLaneFixture(t);
   acquireAmaCloserLease({ rootDir, ...IDENTITY, watcherPid: 424242, dispatchTimeoutMs: MINUTE,
     now: new Date(POSTED_MS - (pending ? 60 * MINUTE : 0)).toISOString() });
@@ -378,7 +381,7 @@ function recoveryDispatchFixture(t, { status = 'failed', pending = false } = {})
       now: new Date(POSTED_MS).toISOString() });
   }
   const snapshot = deriveNextActionSnapshot({ subjectKey: `${REPO}#${PR}`, head: HEAD,
-    observedAt: new Date(DEADLINE_MS + MINUTE).toISOString(),
+    observedAt,
     anchors: { firstActionableAt: new Date(POSTED_MS).toISOString() }, observations: {
       pr: { state: 'OPEN', headSha: HEAD, mergeable: 'MERGEABLE', labels: [] },
       reviews: { verdict: 'comment-only', headSha: HEAD, blockingFindingState: 'known', blockingFindingCount: 0,
@@ -435,6 +438,84 @@ function recoveryDispatchFixture(t, { status = 'failed', pending = false } = {})
   };
   return { rootDir, shared, args, launches: () => launches, events };
 }
+
+test('RECOVERYSTALL-01: a pre-deadline snapshot advances its observation clock before terminal recovery', async t => {
+  const observedAt = new Date(POSTED_MS).toISOString();
+  const f = recoveryDispatchFixture(t, { observedAt });
+  const recovery = await refreshClosureRecoveryCustody({ rootDir: f.rootDir, ...IDENTITY,
+    shared: f.shared, now: DEADLINE_MS + MINUTE, readLaunchImpl: f.args.readLaunchRequestStatusImpl });
+  assert.equal(recovery.shared.snapshot.observedAt, new Date(DEADLINE_MS + MINUTE).toISOString());
+  assert.deepEqual(recovery.shared.snapshot.anchors, f.shared.snapshot.anchors);
+  assert.equal(f.shared.snapshot.observedAt, observedAt, 'the original snapshot remains immutable');
+  assert.equal(hasHammerDispatchIntent(recovery.shared, IDENTITY), true);
+  assert.equal((await maybeDispatchAmaCloser(f.args)).dispatched, true);
+  assert.equal(f.launches(), 1);
+});
+
+for (const failure of ['directory', 'open', 'schema', 'write']) {
+  test(`RECOVERYSTALL-01: diagnostic ${failure} failure preserves fresh custody and closer admission`, async t => {
+    const f = recoveryDispatchFixture(t);
+    const dir = path.join(f.rootDir, 'data', 'ama-closure-waits');
+    const key = createHash('sha256').update(`${REPO}#${PR}`).digest('hex');
+    if (failure === 'directory') writeFileSync(dir, 'synthetic path collision');
+    else {
+      mkdirSync(dir, { recursive: true });
+      if (failure === 'open') mkdirSync(path.join(dir, `${key}.db`));
+      if (failure === 'schema') writeFileSync(path.join(dir, `${key}.db`), 'synthetic corrupt database');
+      if (failure === 'write') {
+        const prepare = Database.prototype.prepare;
+        t.mock.method(Database.prototype, 'prepare', function (sql, ...args) {
+          if (sql.includes('INSERT INTO recovery_custody')) throw new Error('synthetic disk exhaustion');
+          return prepare.call(this, sql, ...args);
+        });
+      }
+    }
+    const warnings = [];
+    const logger = { ...quiet, warn: message => warnings.push(message) };
+    const recovery = await refreshClosureRecoveryCustody({ rootDir: f.rootDir, ...IDENTITY,
+      shared: f.shared, now: DEADLINE_MS + MINUTE, readLaunchImpl: f.args.readLaunchRequestStatusImpl, logger });
+    assert.equal(hasHammerDispatchIntent(recovery.shared, IDENTITY), true);
+    assert.equal(recovery.closureRecovery, undefined, 'failed persistence must not invent durable attempts');
+    assert.match(warnings[0], /closure-recovery diagnostic persistence failed/);
+    assert.equal((await maybeDispatchAmaCloser({ ...f.args, logger })).dispatched, true);
+    assert.equal(f.launches(), 1);
+    assert.equal(warnings.filter(message => message.includes('closure-recovery diagnostic persistence failed')).length,
+      2, 'both direct refresh and production admission warn');
+  });
+}
+
+test('RECOVERYSTALL-01: health reads custody only for the 50 oldest reported deadlines', t => {
+  const { rootDir, dir, nextAction } = expiredLaneFixture(t);
+  const custodyDir = path.join(rootDir, 'data', 'ama-closure-waits');
+  mkdirSync(custodyDir, { recursive: true });
+  // The original fixture adds one more expired entry with a younger deadline.
+  for (let number = 1; number <= 60; number++) {
+    const deadlineAt = new Date(DEADLINE_MS - number * MINUTE).toISOString();
+    writeFileSync(path.join(dir, `${number}.json`), JSON.stringify({ repo: REPO, prNumber: number,
+      headSha: HEAD, nextAction: { ...nextAction, deadline: { ...nextAction.deadline, at: deadlineAt } } }));
+    const key = createHash('sha256').update(`${REPO}#${number}`).digest('hex');
+    const db = new Database(path.join(custodyDir, `${key}.db`));
+    try {
+      db.exec('CREATE TABLE recovery_custody (head TEXT PRIMARY KEY, attempts INTEGER, deadline TEXT, observed INTEGER, evidence TEXT)');
+      db.prepare('INSERT INTO recovery_custody VALUES (?, ?, ?, ?, ?)').run(HEAD, number, deadlineAt, POSTED_MS, '{}');
+    } finally { db.close(); }
+  }
+  const prepare = Database.prototype.prepare;
+  let custodyReads = 0;
+  t.mock.method(Database.prototype, 'prepare', function (sql, ...args) {
+    if (sql.includes('SELECT * FROM recovery_custody')) custodyReads++;
+    return prepare.call(this, sql, ...args);
+  });
+  const health = readExpiredNextActions(rootDir, { nowMs: DEADLINE_MS + MINUTE });
+  assert.equal(health.total, 61);
+  assert.equal(health.expiredCount, 61);
+  assert.equal(health.closureRecoveryExpired, 61, 'aggregate counts cover the full population');
+  assert.equal(health.oldestAgeMs, 61 * MINUTE);
+  assert.equal(health.expired.length, 50);
+  assert.deepEqual(health.expired.map(item => item.prNumber), Array.from({ length: 50 }, (_, i) => 60 - i));
+  assert.equal(custodyReads, 50);
+  for (const item of health.expired) assert.equal(item.recoveryCustody.attempts, item.prNumber);
+});
 
 for (const pending of [false, true]) test(`RECOVERYSTALL-01: overdue ${pending ? 'dead pending' : 'terminal recorded launch without receipt'} custody releases before exactly one dispatch`, async t => {
   const f = recoveryDispatchFixture(t, { pending });

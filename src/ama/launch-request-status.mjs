@@ -48,11 +48,33 @@ export function withLiveLaunchRetry(probe) {
     liveRetryLaunchRequestId: live.launch_request_id } : probe;
 }
 
+// A quota kill is terminal execution evidence, but not permission to dispose
+// of inputs before recovery has either published a retry or declined it.
+export function launchRequestQuotaResumePending(probe) {
+  if (!probe?.ok || probe.retryChainUnreadable) return false;
+  const retries = Array.isArray(probe.retryChain) ? probe.retryChain : [];
+  const rows = [probe.row, ...retries].filter(Boolean);
+  return rows.some(row => {
+    if (row.status !== 'failed' || row.failure_class !== 'worker_killed'
+      || row.worker_killed_cause !== 'provider_quota_exhausted'
+      || ['quota_operator_dismissed', 'origin_owned_retry_policy'].includes(row.last_admit_refusal_reason)) return false;
+    // Publication settles this kill's resume intent. Its successor's status
+    // (including another quota kill) now supplies ownership independently.
+    const successor = probe.retryEdges?.some(edge => edge.parent === row.launch_request_id
+      && edge.child !== row.launch_request_id
+      && rows.some(child => child.launch_request_id === edge.child))
+      || (row === probe.row && retries.some(child => child?.launch_request_id
+        && child.launch_request_id !== row.launch_request_id));
+    return !successor;
+  });
+}
+
 // Tri-state scheduling liveness. Parked workers retain ownership separately;
 // unknown evidence cannot prove that a launch has stopped.
 export function launchRequestInFlight(probe) {
   const effective = withLiveLaunchRetry(probe);
   if (!effective?.ok || !effective.row) return null;
+  if (launchRequestQuotaResumePending(probe)) return true;
   const meaning = launchRequestMeaning(effective.row);
   if (meaning.parked) return false;
   if (!meaning.status && typeof effective.row.terminal !== 'boolean') return null;

@@ -1653,14 +1653,14 @@
           "id": "hammer-dispatch.09",
           "from": "dispatched",
           "to": "launch-terminal",
-          "trigger": "terminal chain observed on PR decision path or shared capacity snapshot (no live retry)",
+          "trigger": "terminal chain observed on PR decision path or shared capacity snapshot (no live retry or unresolved quota intent)",
           "codeSource": "src/ama/dispatch-closer.mjs"
         },
         {
           "id": "hammer-dispatch.10",
           "from": "dispatched",
           "to": "dispatch-failed",
-          "trigger": "failed outcome reconciled",
+          "trigger": "failed outcome reconciled; terminal named missing-phase refusal or launch-bound audit clears receipt for one bounded input replacement",
           "codeSource": "src/ama/dispatch-closer.mjs"
         },
         {
@@ -1688,7 +1688,7 @@
           "id": "hammer-dispatch.14",
           "from": "dispatch-failed",
           "to": "dispatching",
-          "trigger": "bounded retry or changed context",
+          "trigger": "bounded retry or changed context; missing-phase replacement obtains fresh scratch/lease after exact-charge PR/head credit once, retaining lifetime ceiling",
           "codeSource": "src/ama/dispatch-closer.mjs"
         },
         {
@@ -1777,7 +1777,7 @@
     "src/ama-closure-orchestration.mjs": "72c102744de8b490debdab7ff5829642b964f4ac00bee5566c840000172b5d74",
     "src/ama/closer-lease.mjs": "c2aa021100d2cc5fc0ba2de3ca035dab42d46d416039853d0df4a69a8b2c3900",
     "src/ama/closure-owner.mjs": "2448cded95d11c7a03d85758d16bf1719a433daef79e8d7454c1696c6bfc079e",
-    "src/ama/dispatch-closer.mjs": "be528d35ad47b0cc0b06261dfa07fa1317c1214667b204de66001c8679f1826d",
+    "src/ama/dispatch-closer.mjs": "0ee8bab1c1b1f9394da94aac3147ff43935d883f720b85158eb8eeee8fb49c21",
     "src/fast-merge-processing.mjs": "2bb4cfe6ab2b4479285e1c48aaf1b0a7a4019a9e95437ba0a1a73a1af73a461b",
     "src/follow-up-jobs.mjs": "2b9daa25ce7f61a615c8d35e1e92954ddffff68bebdb6e2a5a090c3e2e15392d",
     "src/follow-up-remediation.mjs": "a6bfbec3da209969aa4b50235fca4936f3b384e5f4ae5f9843fbbea7fd22275f",
@@ -1799,5 +1799,6 @@
   "recoveryDeadlines": "RECOVERYDEADLINE-01: every closure-recovery deadline acts at expiry: readable ownerless expired leases/remote-unconfirmed receipts select capped leased hammer admission; input/structural/read failures, stops, caps, deferrals and refused dispatches escalate once per head/row/action/actor/reason with evidence. Unreadable ownership never licenses a duplicate. SRE observes no open recovery deadline more than one wake overdue after normal deployment; SEVDOCS-333. Final-round observation retains the recovery clock without a duplicate deadline page; proven live closer launches retain their existing running notices.",
   "reviewerSizeHandoff": "SIZEOWNER-02: terminal size failures retain the head/session CAS and existing failed state. Reviewer capacity releases after that CAS before awaited handoff while the per-head dispatch lease stays held. Two durable head reservations per PR, including legacy and unconfirmed records, cap shrink-diff dispatches across head churn; exhaustion persists shrink-diff-ceiling-exhausted and alerts. Transient transport retries use one key at most three times within one minute, with no later automatic resubmission. Head-bound HQ result evidence and final bounded stderr facts feed the untrusted-data brief. Same-head claim mismatch logs without replacing ownership; direct invocations alert. No lifecycle states, merge authority or smoke promises change.",
   "explicitReviewIntent": "RETRIGGERDEDUP-01: accepted label, rescue and remediation rereviews atomically persist a request receipt with the review reset. Pending receipts are scoped to repository, PR and exact head and coalesce without extending the dispatch deadline. Under the existing claim and head lease, pending becomes consumed once at dispatch; ordinary rereview budgets count that attempt. Head movement, terminal PR, ceiling exhaustion or the existing rereview wait deadline (default 900 seconds) moves pending to refused. Refusal notification debt persists until a visible comment succeeds. Same-head implicit redispatch stays deduplicated; row repair cannot restore posted over pending intent.",
-  "repositoryRenameContinuity": "REPORENAME-01: stable GitHub repository IDs are backfilled from existing listings; known IDs under new names rekey local service state behind shared/exclusive owner flocks, one audited transaction per database and a recoverable file journal. Pending migrations or authoritative payload observations fence intake until replay completes. Review/pass/job/session/lease IDs, attempts and existing lifecycle states remain stable; reused names with new IDs remain distinct. Local attestation lookups move while signed evidence remains intact; HQ Control Plane identity continuity belongs to REPORENAME-02. Scoped synthetic rename, crash, duplicate-claim and lease fixtures establish source behavior only. After normal deployment of all state writers and the separately operator-approved rename, SRE retains one rename audit, unchanged open-PR review/remediation/closer ownership without another review, and normal first review on the next natural new PR. No new smoke step, check, live rename or restart is authorized."
+  "repositoryRenameContinuity": "REPORENAME-01: stable GitHub repository IDs are backfilled from existing listings; known IDs under new names rekey local service state behind shared/exclusive owner flocks, one audited transaction per database and a recoverable file journal. Pending migrations or authoritative payload observations fence intake until replay completes. Review/pass/job/session/lease IDs, attempts and existing lifecycle states remain stable; reused names with new IDs remain distinct. Local attestation lookups move while signed evidence remains intact; HQ Control Plane identity continuity belongs to REPORENAME-02. Scoped synthetic rename, crash, duplicate-claim and lease fixtures establish source behavior only. After normal deployment of all state writers and the separately operator-approved rename, SRE retains one rename audit, unchanged open-PR review/remediation/closer ownership without another review, and normal first review on the next natural new PR. No new smoke step, check, live rename or restart is authorized.",
+  "hammerQuotaScratchRecovery": "HAMSCRATCHRESUME-01: before quota retry enqueue, missing hammer phase procedures cancel the parent with quota-resume-phase-inputs-missing and a single audit. AMA owns one normal fresh dispatch with new scratch and lease. Public dispatch reads include latest worker_killed_cause and last_admit_refusal_reason so pending quota recovery retains scratch. Public retry edges settle each historical quota intent when its successor is published; unresolved quota-killed leaves retain ownership. Named missing-input terminal outcomes resolve intent despite retained quota metadata. Omitted/null single-attempt retry chains permit launch-bound audit recovery unless explicitly unreadable. Existing lifecycle enum values and smoke commands remain unchanged. After both repositories deploy and owners reload normally, SRE passively observes the next natural quota kill/resume closing or being replaced once by a closer that closes without dispatch-phase-scripts-missing. No synthetic live dispatch, ledger mutation, cleanup or restart is authorized."
 }

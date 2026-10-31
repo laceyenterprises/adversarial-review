@@ -35,6 +35,7 @@ test('sync and async readers preserve producer identity, failure detail and cycl
   const sync = readLaunchRequestStatusFromLedger(args);
   assert.deepEqual(await readLaunchRequestStatusFromLedgerAsync(args), sync);
   assert.deepEqual(sync.retryChain.map(row=>row.launch_request_id), ['leaf', 'retry']);
+  assert.deepEqual(sync.retryEdges, capture().retry_edges);
   const live = withLiveLaunchRetry(sync);
   assert.equal(live.row.head_sha, 'head');
   assert.equal(live.row.target_repo, 'example/repo');

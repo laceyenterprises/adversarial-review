@@ -253,7 +253,10 @@ export function launchProbe(result, launchRequestId, includeRetryChain) {
   if (!result.ok) return result;
   const row = result.rows.find(row => row.launch_request_id === launchRequestId);
   if (!row) return { ...unprovenAbsence(), launchRequestId };
-  return { ok: true, row, target: result.target, ...(includeRetryChain ? { retryChain: dispatchReadTransport.sdk().dispatchRetryDescendants(result.rows, result.retryEdges, launchRequestId) } : {}) };
+  return { ok: true, row, target: result.target, ...(includeRetryChain ? {
+    retryChain: dispatchReadTransport.sdk().dispatchRetryDescendants(result.rows, result.retryEdges, launchRequestId),
+    retryEdges: result.retryEdges,
+  } : {}) };
 }
 
 // Bound caller settlement across registration and lookup. SDK HTTP requests

@@ -1,5 +1,12 @@
 # Adversarial Review State Machine Notes
 
+HAMSCRATCHRESUME-01 retains the existing closer states and bounded replacement
+transition. Public retry edges settle historical quota intent at successor
+publication while unresolved quota-killed leaves retain ownership. Named
+missing-input terminal outcomes resolve intent despite retained quota metadata;
+single-attempt omitted/null chains permit launch-bound audit recovery unless
+explicitly unreadable. Existing merge gates and smoke promises are unchanged.
+
 REPORENAME-01 keeps retained reviewer admission ahead of slow repository discovery.
 Admission preparation and the early drain execute under a shared repository-state
 cycle; discovery then obtains its ordinary exclusive migration fence, followed

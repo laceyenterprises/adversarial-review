@@ -5,7 +5,7 @@ import { readLaunchRequestStatusFromLedgerAsync } from '../src/session-ledger-re
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, lutimesSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import os, { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { amaCloserDispatchFilePath, createHammerScratchDir } from '../src/ama/dispatch-closer.mjs';
 import { createHammerScratchSweepTicker, HAMMER_SCRATCH_MAX_AGE_MS,
@@ -15,6 +15,9 @@ const nowMs = Date.parse('2026-10-16T12:00:00Z');
 const old = new Date(nowMs - HAMMER_SCRATCH_MAX_AGE_MS - 60_000);
 const identity = { repo: 'fixture/repo', prNumber: 42, headSha: 'synthetic-head' };
 let freshImport = 0;
+
+// Fixed-clock timeout tests must not inherit the production host's load.
+test.beforeEach(t => t.mock.method(os, 'loadavg', () => [0, 0, 0]));
 
 async function freshSweeper() {
   // A fresh module has no in-memory record index, as after a watcher restart.
@@ -97,6 +100,52 @@ function sweepSummary(f) {
   assert.equal(summaries.length, 1, 'one reason-count summary per sweep');
   return summaries[0];
 }
+
+for (const reason of [null, 'quota_resume_retry_enqueued']) {
+  test(`HAMSCRATCHRESUME-01: keeps quota scratch before retry publication (${reason})`, async t => {
+    const f = fixture(t);
+    const path = f.scratch();
+    f.record(path, { lastObservedStatus: 'failed' });
+    const result = await sweepHammerScratchDirs(f.root, { ...f.options,
+      readLaunchRequestStatusImpl: () => ({ ok: true, retryChain: [], row: {
+        launch_request_id: 'synthetic-lrq', status: 'failed', failure_class: 'worker_killed',
+        worker_killed_cause: 'provider_quota_exhausted', last_admit_refusal_reason: reason,
+      } }),
+    });
+    assert.deepEqual(result, []);
+    assert.equal(existsSync(path), true);
+  });
+}
+
+for (const reason of [null, 'quota_resume_retry_enqueued']) {
+  for (const status of ['succeeded', 'failed', 'canceled']) {
+    test(`HAMSCRATCHRESUME-01: settled quota retry releases scratch (${reason}, ${status})`, async t => {
+      const f = fixture(t);
+      const path = f.scratch();
+      f.record(path);
+      await sweepHammerScratchDirs(f.root, { ...f.options,
+        readLaunchRequestStatusImpl: () => ({ ok: true, row: {
+          launch_request_id: 'synthetic-lrq', status: 'failed', failure_class: 'worker_killed',
+          worker_killed_cause: 'provider_quota_exhausted', last_admit_refusal_reason: reason,
+        }, retryChain: [{ launch_request_id: 'synthetic-retry', status }] }),
+      });
+      assert.equal(existsSync(path), false);
+    });
+  }
+}
+
+test('HAMSCRATCHRESUME-01: explicit cancellation resolves an unpublished resume intent', async t => {
+  const f = fixture(t);
+  const path = f.scratch();
+  f.record(path);
+  await sweepHammerScratchDirs(f.root, { ...f.options,
+    readLaunchRequestStatusImpl: () => ({ ok: true, retryChain: [], row: {
+      launch_request_id: 'synthetic-lrq', status: 'canceled', failure_class: 'worker_killed',
+      worker_killed_cause: 'provider_quota_exhausted', last_admit_refusal_reason: 'quota_resume_retry_enqueued',
+    } }),
+  });
+  assert.equal(existsSync(path), false);
+});
 
 function terminalCandidates(f, count) {
   const paths = [];

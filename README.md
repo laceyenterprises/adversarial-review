@@ -1,3 +1,14 @@
+HAMSCRATCHRESUME-01: pending quota resume retains hammer scratch through the
+sweep and terminal reconciliation. A named terminal missing-phase outcome
+permits one fresh closer with a new scratch and lease, crediting its PR/head
+charge once while keeping the lifetime ceiling. Existing lifecycle enum values
+and smoke commands remain unchanged. Retry edges settle historical quota kills
+after successor publication while unresolved quota-killed leaves retain ownership.
+Named missing-input cancellations recover despite retained quota metadata.
+SRE acceptance is passive observation of
+the next natural quota recovery after both repositories deploy and reload.
+See [the closure runbook](docs/RUNBOOK-ama-closure.md).
+
 # Adversarial Review
 
 ZFA-01 adds a parse-only strict mirror of `cloud_access.azure` foundation
@@ -2856,12 +2867,12 @@ stateDiagram-v2
     s0 --> s8: hammer-dispatch.06 explicit launch failure, including unreadable/mismatched refusal-time retry probe: release new pending lease, charge bounded failure, preserve predecessor receipt/artifacts on original head; later wake refusal cannot settle an earlier interrupted intent
     s0 --> s10: hammer-dispatch.07 explicit foreign receipt: supersede new pending lease, refund attempt and clean unused artifacts without adopting foreign launch
     s0 --> s11: hammer-dispatch.08 launch result: completed
-    s2 --> s3: hammer-dispatch.09 terminal chain observed on PR decision path or shared capacity snapshot (no live retry)
-    s2 --> s8: hammer-dispatch.10 failed outcome reconciled
+    s2 --> s3: hammer-dispatch.09 terminal chain observed on PR decision path or shared capacity snapshot (no live retry or unresolved quota intent)
+    s2 --> s8: hammer-dispatch.10 failed outcome reconciled; terminal named missing-phase refusal or launch-bound audit clears receipt for one bounded input replacement
     s3 --> s0: hammer-dispatch.11 bounded same-head retry or changed context; green lease exhaustion resumes next pass without failure charge; legacy lane-busy refunds failure credit with 2-minute exponential backoff capped at 30 minutes and durable third-launch same-head page; only succeeded/failed rewrite for uncertified repair; merged success stays sticky
     s5 --> s0: hammer-dispatch.12 bounded retry, next-poll branch confirmation or changed context
     s6 --> s0: hammer-dispatch.13 bounded retry or changed context
-    s8 --> s0: hammer-dispatch.14 bounded retry or changed context
+    s8 --> s0: hammer-dispatch.14 bounded retry or changed context; missing-phase replacement obtains fresh scratch/lease after exact-charge PR/head credit once, retaining lifetime ceiling
     s10 --> s0: hammer-dispatch.15 bounded retry or changed context
     s2 --> s10: hammer-dispatch.16 foreign ticket retires mistaken ownership and charge
     s3 --> s10: hammer-dispatch.17 foreign ticket corrects terminal launch attribution

@@ -2231,9 +2231,12 @@ function schemaV1() {
                   // back).
                   worker_class_fallback: {
                     __type: TYPE_LIST,
+                    // The corporate Claude hammer is fallback-only: a host
+                    // may append it after the personal one. The default and
+                    // the primary `worker_class` enum are unchanged.
                     __item: {
                       __type: TYPE_STRING,
-                      __enum: ['codex', 'claude-code', 'hammer', 'hammer-corp', 'hammer-claude', 'gemini'],
+                      __enum: ['codex', 'claude-code', 'hammer', 'hammer-corp', 'hammer-claude', 'hammer-claude-corp', 'gemini'],
                     },
                     __default: ['hammer-claude'],
                   },

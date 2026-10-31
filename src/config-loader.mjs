@@ -1595,6 +1595,8 @@ function schemaV1() {
               disk_free_gb_floor: { __type: TYPE_FLOAT, __default: 300, __nullable: true, __min: 0 },
               gc_report_only: { __type: TYPE_BOOL, __default: true },
               worker_worktrees_per_run_limit: { __type: TYPE_INT, __default: 200, __min: 1 },
+              token_transcripts_compression_enabled: { __type: TYPE_BOOL, __default: true },
+              token_transcripts_compress_after_days: { __type: TYPE_INT, __default: 7, __min: 1 },
               worker_worktrees_hourly_drain_enabled: { __type: TYPE_BOOL, __default: true },
               worker_worktrees_failed_slot_salvage_after_hours: { __type: TYPE_INT, __default: 168, __min: 1 },
               worker_worktrees_bulk_delete_ack_threshold: { __type: TYPE_INT, __default: 200, __min: 0 },

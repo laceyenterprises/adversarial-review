@@ -4244,3 +4244,12 @@ resolves configuration only and neither reads nor applies the policy. No review
 or remediation resolver hook changes in MES-01. Deploy this companion before the
 Agent OS config defaults; any service restart is an operator action. Existing
 review lifecycle states and smoke promises are unchanged.
+
+### Custody compression config parity
+
+TRANSCRIPTCOMPRESS-01 mirrors core's optional
+`retention.ephemeral.token_transcripts_compression_enabled` (boolean, default
+true) and `token_transcripts_compress_after_days` (integer, default 7, minimum
+1). This is schema parity only; the existing Agent OS maintenance owner performs
+compression. Shared local overlays remain tolerant of unknown sibling keys.
+Deploy this reader before activating these keys in core's checked-in config.

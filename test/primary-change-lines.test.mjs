@@ -35,6 +35,37 @@ function refused(evidence, reason) {
   assert.ok(result.missingEvidence.rejected.some(entry => entry.reason === reason), JSON.stringify(result));
 }
 
+test('BLANKLINEREVERT-01: separate finding citations authorize each blank-to-content reversal', async () => {
+  const card = line => `- **Unsafe line ${line}**\n  - **File:** \`src/a.mjs\`\n  - **Lines:** \`${line}-${line}\`\n  - **Problem:** Unsafe call.\n  - **Recommended fix:** Restore the blank.`;
+  for (const rebased of [false, true]) {
+    const body = `## Blocking issues\n${card(10)}\n${card(11)}\n## Non-blocking issues\n- None.\n## Verdict\nRequest changes`;
+    const { evidence } = await collect({ shift: rebased ? 5 : 0, reviews: [review({ body })],
+      cites: ['PRR_cited finding=1 kind=blocking', 'PRR_cited finding=2 kind=blocking'] });
+    const authorization = evidence.reversalAuthorizations[0];
+    authorization.rebased = rebased;
+    const file = line => ({ filename: 'src/a.mjs', status: 'modified', additions: 2, deletions: 2,
+      patch: `@@ -${line},2 +${line},2 @@\n-\n-\n+checkPermission();\n+run();` });
+    const line = rebased ? 15 : 10;
+    evidence.primaryFiles = [file(line)];
+    authorization.parentFiles = [file(line)];
+    authorization.reviewedFiles = [file(10)];
+    authorization.commit.files = [{ ...file(line),
+      patch: `@@ -${line},2 +${line},2 @@\n-checkPermission();\n-run();\n+\n+` }];
+    assert.equal(checkPrimaryChange(evidence, head).ok, true, JSON.stringify({ rebased }));
+    for (const mutate of [
+      e => { e.reversalAuthorizations[0].commit.commit.message =
+        e.reversalAuthorizations[0].commit.commit.message.replace('\nReversal-Authorized-By: PRR_cited finding=2 kind=blocking', ''); },
+      e => { e.reversalAuthorizations[0].commit.author.login = 'foreign-author'; },
+      e => { e.reversalAuthorizations[0].commit.files[0] = { ...file(line), additions: 1, deletions: 1,
+        patch: `@@ -${line} +${line} @@\n-checkPermission();\n+` }; },
+    ]) {
+      const bad = structuredClone(evidence);
+      mutate(bad);
+      assert.equal(checkPrimaryChange(bad, head).reason, 'primary-change-reverted', JSON.stringify({ rebased, bad }));
+    }
+  }
+});
+
 for (const lines of [
   'L10-L11', 'lines 10-11', 'line 10-11', 'src/a.mjs:10-11', '10..11',
   '10-11', '`10-11`', '10–11', '`~10-11`', '~10–11',

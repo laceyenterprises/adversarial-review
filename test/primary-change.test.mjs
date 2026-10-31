@@ -93,6 +93,109 @@ test('REVERSALBLANK-01: replacing a blank with content or content with a blank r
   }
 });
 
+// Synthetic base: First entry / <blank> / Old content / Last entry. The
+// author removes the blank in the same hunk as a content change.
+const mixedBlankPrimary = () => [{ filename: 'README.md', status: 'modified', additions: 1, deletions: 2,
+  patch: '@@ -1,4 +1,3 @@\n First entry\n-\n-Old content\n+New content\n Last entry' }];
+
+test('BLANKLINEREVERT-01: a formatter re-adding a blank removed in a mixed hunk is not a reversal', () => {
+  const evidence = primaryChangeFixture(head);
+  evidence.primaryFiles = mixedBlankPrimary();
+  evidence.finalFiles = [{ filename: 'README.md', status: 'modified', additions: 1, deletions: 1,
+    patch: '@@ -1,4 +1,4 @@\n First entry\n \n-Old content\n+New content\n Last entry' }];
+  const result = checkPrimaryChange(evidence, head);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.whitespaceOnlyUnitsIgnored, 1);
+  const verdict = predicate(evidence);
+  assert.equal(verdict.eligible, true);
+  assert.equal(verdict.trace.primaryChange.whitespaceOnlyUnitsIgnored, 1);
+});
+
+test('BLANKLINEREVERT-01: reverting the content line of that mixed hunk still refuses', () => {
+  for (const finalFiles of [
+    // Blank restored and content restored: the whole region returned to base.
+    [],
+    // Blank still removed, content restored.
+    [{ filename: 'README.md', status: 'modified', additions: 0, deletions: 1,
+      patch: '@@ -1,4 +1,3 @@\n First entry\n-\n Old content\n Last entry' }],
+    // Blank restored, content restored, an unrelated line changed elsewhere.
+    [{ filename: 'README.md', status: 'modified', additions: 1, deletions: 1,
+      patch: '@@ -1,4 +1,4 @@\n First entry\n \n Old content\n-Last entry\n+Final entry' }],
+  ]) {
+    const evidence = primaryChangeFixture(head);
+    evidence.primaryFiles = mixedBlankPrimary();
+    evidence.finalFiles = finalFiles;
+    const refused = checkPrimaryChange(evidence, head);
+    assert.equal(refused.reason, 'primary-change-reverted', JSON.stringify(finalFiles));
+    assert.equal(refused.whitespaceOnlyUnitsIgnored, 1);
+    assert.deepEqual(refused.missingEvidence.regions, [{ start: 3, end: 4 }]);
+    assert.equal(predicate(evidence).eligible, false);
+  }
+});
+
+test('BLANKLINEREVERT-01: content replacing only blanks survives a restored blank beside it', () => {
+  // Synthetic base: First entry / <blank> / Last entry. The author replaces
+  // the blank with content; the formatter puts a blank back on either side.
+  const primaryFiles = [{ filename: 'README.md', status: 'modified', additions: 1, deletions: 1,
+    patch: '@@ -1,3 +1,3 @@\n First entry\n-\n+Middle entry\n Last entry' }];
+  for (const patch of ['@@ -1,3 +1,5 @@\n First entry\n \n+Middle entry\n+\n Last entry',
+    '@@ -1,3 +1,5 @@\n First entry\n+\n+Middle entry\n \n Last entry',
+    '@@ -1,3 +1,4 @@\n First entry\n+Middle entry\n \n Last entry']) {
+    const evidence = primaryChangeFixture(head);
+    evidence.primaryFiles = primaryFiles;
+    const additions = patch.split('\n').filter(line => line.startsWith('+')).length;
+    evidence.finalFiles = [{ filename: 'README.md', status: 'modified', additions, deletions: 0, patch }];
+    const result = checkPrimaryChange(evidence, head);
+    assert.equal(result.ok, true, patch);
+    assert.equal(result.whitespaceOnlyUnitsIgnored, 1);
+  }
+  for (const finalFiles of [[], [{ filename: 'README.md', status: 'modified', additions: 1, deletions: 1,
+    patch: '@@ -1,3 +1,3 @@\n First entry\n \n-Last entry\n+Final entry' }]]) {
+    const evidence = primaryChangeFixture(head);
+    evidence.primaryFiles = primaryFiles;
+    evidence.finalFiles = finalFiles;
+    const refused = checkPrimaryChange(evidence, head);
+    assert.equal(refused.reason, 'primary-change-reverted', JSON.stringify(finalFiles));
+    assert.deepEqual(refused.missingEvidence.regions, [{ start: 2, end: 3 }]);
+  }
+});
+
+test('BLANKLINEREVERT-01: content replacing a blank beside a trailing-only edit stays protected', () => {
+  for (const trailingFirst of [false, true]) {
+    const evidence = primaryChangeFixture(head);
+    evidence.primaryFiles = [{ filename: 'src/a.mjs', status: 'modified', additions: 2, deletions: 2,
+      patch: trailingFirst
+        ? '@@ -10,2 +10,2 @@\n-run();\n-\n+run(); \n+checkPermission();'
+        : '@@ -10,2 +10,2 @@\n-\n-run();\n+checkPermission();\n+run(); ' }];
+    const position = trailingFirst ? 11 : 10;
+    for (const finalFiles of [[], [{ filename: 'src/a.mjs', status: 'modified', additions: 1, deletions: 1,
+      patch: `@@ -${trailingFirst ? 10 : 11} +${trailingFirst ? 10 : 11} @@\n-run();\n+run(); ` }]]) {
+      evidence.finalFiles = finalFiles;
+      const refused = checkPrimaryChange(evidence, head);
+      assert.equal(refused.reason, 'primary-change-reverted', JSON.stringify({ trailingFirst, finalFiles }));
+      assert.deepEqual(refused.missingEvidence.regions, [{ start: position, end: position + 1 }]);
+      assert.equal(predicate(evidence).eligible, false);
+    }
+    // Restoring layout while retaining the new permission check is allowed.
+    evidence.finalFiles = [{ filename: 'src/a.mjs', status: 'modified', additions: 1, deletions: 1,
+      patch: `@@ -${position} +${position} @@\n-\n+checkPermission();` }];
+    assert.equal(checkPrimaryChange(evidence, head).ok, true);
+  }
+});
+
+test('BLANKLINEREVERT-01: multiple blank replacements retain span coverage at both edges and inside', () => {
+  const evidence = primaryChangeFixture(head);
+  evidence.primaryFiles = [{ filename: 'src/a.mjs', status: 'modified', additions: 2, deletions: 2,
+    patch: '@@ -10,2 +10,2 @@\n-\n-\n+checkPermission();\n+run();' }];
+  for (const anchor of [9, 10, 11]) {
+    evidence.finalFiles = [{ filename: 'src/a.mjs', status: 'modified', additions: 2, deletions: 0,
+      patch: `@@ -${anchor},0 +${anchor + 1},2 @@\n+checkPermission();\n+run();` }];
+    assert.equal(checkPrimaryChange(evidence, head).ok, true, `insertion after base line ${anchor}`);
+  }
+  evidence.finalFiles = [];
+  assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+});
+
 test('REVERSALBLANK-01: a whitespace-only final edit cannot cover reverted author content', () => {
   const evidence = primaryChangeFixture(head);
   evidence.primaryFiles = [{ filename: 'README.md', status: 'modified', additions: 1, deletions: 0,

@@ -220,7 +220,8 @@ function changes(files, paths = null, aliases = new Map()) {
 
 // Normalize preservation comparisons only. Authorization and rebase proofs
 // continue to use the original patch, including whitespace and multiplicity.
-function preservationChanges(files, paths = null, aliases = new Map()) {
+// The final side keeps mixed-region blank units: they only add coverage.
+function preservationChanges(files, paths = null, aliases = new Map(), { ignoreBlankRemovals = true } = {}) {
   const result = changes(files, paths, aliases);
   for (const change of result.values()) {
     if (change.opaque) continue;
@@ -236,14 +237,24 @@ function preservationChanges(files, paths = null, aliases = new Map()) {
         region.removedLines.length === region.addedLines.length
         && line.content !== region.addedLines[index]
         && line.content.trimEnd() === region.addedLines[index].trimEnd()).map(line => line.position));
-      // In a mixed replacement, added content may belong to any removed line.
-      // Keep those units protected rather than assigning content to a blank.
-      const blankRemovalsOnly = region.addedLines.every(line => line.trim() === '');
+      // BLANKLINEREVERT-01: a removed blank line is layout, never a protected
+      // unit, even beside content: a formatter may restore it. Content
+      // removals keep their own units. If only layout units were removed,
+      // retain protection for the content added over the remaining blank span.
+      const blankRemovalsOnly = ignoreBlankRemovals || region.addedLines.every(line => line.trim() === '');
       const blankPositions = new Set(region.removedLines.filter(line => !line.text).map(line => line.position));
-      region.preservationUnits = whitespaceOnly || trailingOnly ? []
+      const kept = whitespaceOnly || trailingOnly ? []
         : units.filter(unit => !trailingPositions.has(unit.start)
           && (!blankRemovalsOnly || !blankPositions.has(unit.start)));
-      change.whitespaceOnlyUnitsIgnored += units.length - region.preservationUnits.length;
+      const blankReplacement = ignoreBlankRemovals && !whitespaceOnly && !trailingOnly && kept.length === 0;
+      const contentUnits = units.filter(unit => !trailingPositions.has(unit.start));
+      const preservationSpan = blankReplacement
+        ? { start: contentUnits[0].start, end: contentUnits.at(-1).end } : null;
+      // Coverage may span restored blanks, but reversal citations must still
+      // authorize each original base-line unit independently.
+      region.preservationUnits = blankReplacement
+        ? contentUnits.map(unit => ({ ...unit, preservationSpan })) : kept;
+      change.whitespaceOnlyUnitsIgnored += units.length - kept.length;
       region.removedLines = whitespaceOnly || trailingOnly ? []
         : region.removedLines.filter(line => line.text && !trailingPositions.has(line.position));
       for (const { text } of region.removedLines) change.removed.set(text, (change.removed.get(text) || 0) + 1);
@@ -371,6 +382,15 @@ function rebasedRegion(parentFiles, reviewedFiles, path, region, cache) {
 
 function projectRebasedRegion(parentFiles, reviewedFiles, path, region, cache) {
   return projectRegion(reviewedFiles, path, rebasedRegion(parentFiles, reviewedFiles, path, region, cache), cache);
+}
+
+// A final insertion beside or between restored blank lines still carries the
+// content that replaced them. Other units need an overlapping final change.
+function unitCovered(unit, other) {
+  const { start, end } = unit.preservationSpan || unit;
+  if (start === end) return other.start <= start && other.end >= start;
+  return (other.start < end && other.end > start) || (unit.preservationSpan
+    && other.start === other.end && other.start >= start && other.start <= end);
 }
 
 function regionUnits(region) {
@@ -580,14 +600,12 @@ function refusedRegions(primary, final, authorized) {
   const finalUnits = final?.regions.flatMap(regionUnits);
   for (const region of primary.regions) {
     for (const unit of regionUnits(region)) {
-      const overlaps = finalUnits?.some(other => unit.start === unit.end
-        ? other.start <= unit.start && other.end >= unit.start
-        : other.start < unit.end && other.end > unit.start);
+      const overlaps = finalUnits?.some(other => unitCovered(unit, other));
       const lostRemoval = region.removedLines.some(line => line.position === unit.start
         && (final?.removed.get(line.text) || 0) < primary.removed.get(line.text));
       if (overlaps && !lostRemoval) continue;
-      try { if (!authorized(unit, lostRemoval)) result.push(unit); }
-      catch { result.push(unit); } // Diagnostic uncertainty cannot change the verdict.
+      try { if (!authorized(unit, lostRemoval)) result.push({ start: unit.start, end: unit.end }); }
+      catch { result.push({ start: unit.start, end: unit.end }); } // Diagnostic uncertainty cannot change the verdict.
     }
   }
   return result;
@@ -666,7 +684,8 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
       change.derivedOnly = blocks.length > 0 && change.regions.every(region => regionUnits(region).length === 0);
     }
     const aliases = new Map([...primary].map(([path, change]) => [change.filename, path]));
-    const final = preservationChanges(evidence.finalFiles, evidencePaths(primary, evidence.finalFiles), aliases);
+    const final = preservationChanges(evidence.finalFiles, evidencePaths(primary, evidence.finalFiles), aliases,
+      { ignoreBlankRemovals: false });
     const ignored = [...primary.values()].reduce((count, change) => count + (change.whitespaceOnlyUnitsIgnored || 0), 0);
     const whitespaceEvidence = ignored ? { whitespaceOnlyUnitsIgnored: ignored } : {};
     if (![...primary.values()].some(({ regions, renamed, opaque }) => regions.length > 0 || renamed || opaque)) {
@@ -743,9 +762,7 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
       for (const region of change.regions) {
         for (const unit of regionUnits(region)) {
           if (!unchanged.has(unit.start) && !authorizedRestorations.has(unit.start)
-            && !actualUnits.some((other) => unit.start === unit.end
-            ? other.start <= unit.start && other.end >= unit.start
-            : other.start < unit.end && other.end > unit.start)
+            && !actualUnits.some((other) => unitCovered(unit, other))
             && !reversalAuthorized(evidence, path, unit, authorizationCache, strictNonBlockingRemediation)) {
             return reverted(path);
           }

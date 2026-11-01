@@ -155,14 +155,21 @@ function holdUntilFor(cap, nowMs) {
   return new Date(Number.isFinite(resetMs) && resetMs > nowMs ? Math.min(resetMs, ceilingMs) : ceilingMs).toISOString();
 }
 
-function modelOf(modelForClass, workerClass) {
+// REMGEMINI-01: a class whose governed model or registry entry cannot be
+// resolved cannot run this launch. Its typed fault is recorded so the selection
+// skips that one candidate and tries the next; it never aborts the selection.
+function modelOf(modelForClass, workerClass, unresolved = null) {
   if (typeof modelForClass !== 'function') return null;
   try {
     return modelForClass(workerClass) || null;
   } catch (error) {
-    if (error.code === 'registry-unavailable') throw error;
+    if (error.code === 'registry-unavailable') unresolved?.set(workerClass, error);
     return null;
   }
+}
+
+function modelUnresolvedSkip(workerClass, error) {
+  return { workerClass, reason: 'model-unresolvable', detail: String(error?.message || error) };
 }
 
 async function readFleetQuotaStatuses({ env, hqPath, execFileImpl }) {
@@ -202,7 +209,7 @@ async function readFleetQuotaStatuses({ env, hqPath, execFileImpl }) {
  * @returns {Promise<{ workerClass: string, fellBack: boolean, hold: boolean, reason: string,
  *   from?: string, to?: string, capSource?: string, primaryState?: string, resetAt?: string,
  *   holdUntil?: string, candidateState?: string,
- *   skipped?: Array<{ workerClass: string, reason: string }>, error?: string,
+ *   skipped?: Array<{ workerClass: string, reason: string, detail?: string }>, error?: string,
  *   modeRefusals?: Array<{ workerClass: string, mode: string, reason: string }> }>}
  */
 export async function resolveRemediationWorkerClassWithFallback({ remediationMode = null, ...args } = {}) {
@@ -257,11 +264,17 @@ async function resolveModeRunnableWorkerClass({
   const evidence = remediatorQuotaEvidence(job, { nowMs });
   const { statuses, snapshot, error } = await readFleetQuotaStatuses({ env, hqPath, execFileImpl });
   await ensureWorkerRegistryReadyImpl({env});
+  const unresolvedModels = new Map();
+  const modelFor = (workerClass) => modelOf(modelForClass, workerClass, unresolvedModels);
+  const unresolvedModel = (workerClass) => {
+    modelFor(workerClass);
+    return unresolvedModels.get(workerClass) || null;
+  };
   // Model lookups only matter against fleet `models[]` rows.
   const capOf = (workerClass) => classCapState(workerClass, {
     evidence,
     statuses,
-    model: statuses ? modelOf(modelForClass, workerClass) : null,
+    model: statuses ? modelFor(workerClass) : null,
   });
 
   const automaticCodex = isAutomaticCodexAccountPolicy(codexAccountPolicy)
@@ -271,7 +284,7 @@ async function resolveModeRunnableWorkerClass({
   const codexAccount = automaticCodex
     ? codexWorkerLaneFromSnapshot(snapshot, {
       workerClass: primaryClass, policy: codexAccountPolicy,
-      ...(statuses ? { statuses } : {}), model: modelOf(modelForClass, primaryClass),
+      ...(statuses ? { statuses } : {}), model: modelFor(primaryClass),
       // Only job-local exhaustion supplements the shared selector. Re-projecting
       // fleet caps here would turn stale quota into fresh exhaustion evidence.
       personalExhausted: personalCap.capSource === 'provider-reset-past-hold-window'
@@ -298,7 +311,7 @@ async function resolveModeRunnableWorkerClass({
   const accountLane = (name) => {
     if (!snapshot) return null;
     const workerClass = ['claude', 'claude-code'].includes(name) ? 'remediator-claude' : name;
-    const model = modelOf(modelForClass, name);
+    const model = modelFor(name);
     const blocked = ['remediator-claude', 'remediator-claude-corp'].filter(name => capOf(name).capped);
     const select = (blockedWorkerClasses) => selectClaudeAccountLaneFromSnapshot(snapshot, {
       statuses, blockedWorkerClasses, workerClass, model,
@@ -325,13 +338,17 @@ async function resolveModeRunnableWorkerClass({
     Object.assign(base, { workerClass: primaryClass, fellBack: primaryClass !== primary,
       from: primary, to: primaryClass });
   }
-  // A routed or pinned primary the mode refuses is treated like a capped one:
-  // the declared fallbacks are tried, and the job holds if none can run.
+  // A routed or pinned primary the mode refuses, or whose model cannot be
+  // resolved, is treated like a capped one: the declared fallbacks are tried,
+  // and the job holds (or defers on the model fault) if none can run.
+  const primaryUnresolved = refuseInMode(primaryClass) ? null : unresolvedModel(primaryClass);
   const primaryCap = refuseInMode(primaryClass)
     ? { ...capOf(primaryClass), capped: true, available: false, capSource: 'remediation-lane-unrunnable-in-mode' }
-    : primaryAccount?.hold
-      ? { ...capOf(primaryClass), capped: true, available: false, capSource: primaryAccount.reason }
-      : capOf(primaryClass);
+    : primaryUnresolved
+      ? { ...capOf(primaryClass), capped: true, available: false, capSource: 'model-unresolvable' }
+      : primaryAccount?.hold
+        ? { ...capOf(primaryClass), capped: true, available: false, capSource: primaryAccount.reason }
+        : capOf(primaryClass);
   const lastRetry = job?.remediationPlan?.retryHistory?.findLast((entry) =>
     entry.round === job.remediationPlan.currentRound && entry.retryMetadata?.code === 'infrastructure-refund');
   const infrastructureFallback = lastRetry?.retryMetadata?.code === 'infrastructure-refund'
@@ -363,6 +380,9 @@ async function resolveModeRunnableWorkerClass({
     };
   }
 
+  // REMGEMINI-01: every launch walks the configured order from the top. A
+  // candidate that cannot run now is skipped for this launch only; the order
+  // itself is never rewritten, so a recovered candidate wins the next launch.
   const skipped = [];
   for (let candidate of fallbacks) {
     if (candidate === primaryClass) continue;
@@ -372,14 +392,26 @@ async function resolveModeRunnableWorkerClass({
       skipped.push({ workerClass: candidate, reason: `unrunnable-in-mode:${remediationMode}` });
       continue;
     }
+    if (unresolvedModel(candidate)) {
+      skipped.push(modelUnresolvedSkip(candidate, unresolvedModel(candidate)));
+      continue;
+    }
     const account = accountLane(candidate);
     if (account?.hold) {
       skipped.push({ workerClass: candidate, reason: account.reason });
       continue;
     }
+    // Account selection can replace the declared identity with its corporate
+    // twin. That identity needs its own mode and model checks before launch.
     if (account) candidate = account.workerClass;
+    // For an unchanged identity this repeats the checks above at no cost:
+    // unresolvedModel reads its cache and refuseInMode records a lane once.
     if (refuseInMode(candidate)) {
       skipped.push({ workerClass: candidate, reason: `unrunnable-in-mode:${remediationMode}` });
+      continue;
+    }
+    if (unresolvedModel(candidate)) {
+      skipped.push(modelUnresolvedSkip(candidate, unresolvedModel(candidate)));
       continue;
     }
     if (!providerForQuotaHarness(candidate)) {
@@ -432,6 +464,10 @@ async function resolveModeRunnableWorkerClass({
   if (infrastructureFallback && !primaryCap.capped && !primaryCap.resetsWithinHoldWindow) {
     return { ...base, reason: 'infrastructure-fallback-unavailable', primaryState: primaryCap.state, skipped };
   }
+
+  // An unresolvable primary with nothing to take its place keeps the typed
+  // model deferral the consume path already requeues on.
+  if (primaryUnresolved) throw primaryUnresolved;
 
   // Nothing can take the job. Respawning the capped primary is a guaranteed
   // failure, so the caller holds it instead and re-resolves on the next claim.

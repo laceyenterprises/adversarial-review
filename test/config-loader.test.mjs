@@ -6071,6 +6071,19 @@ test('roles.remediator_fallback is declared config: schema default, file overrid
       ['claude-code', 'gemini'],
     );
 
+    // REMGEMINI-01: Gemini, then Grok when connected, then Claude. The Python
+    // loader's _ENUM_ROLES_REMEDIATOR_FALLBACK carries the same members.
+    const operatorOrder = join(tmp, 'operator-order.yaml');
+    writeFile(operatorOrder, `
+      version: 1
+      roles:
+        remediator_fallback: [gemini, remediator-grok, claude-code]
+    `);
+    for (const load of [loadConfig, loadConfigRuntime]) {
+      assert.deepEqual(load({ topPath: operatorOrder, env: {} }).get('roles.remediator_fallback'),
+        ['gemini', 'remediator-grok', 'claude-code']);
+    }
+
     const off = join(tmp, 'off.yaml');
     writeFile(off, `
       version: 1

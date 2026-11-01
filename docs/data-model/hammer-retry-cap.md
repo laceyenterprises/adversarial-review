@@ -13,6 +13,13 @@ case-insensitively). Commit trailers and author
 fields are never read. The closure orchestration calls it before evaluating the
 owner cap, under the existing PR-scoped lock.
 
+The reset's `jobKey` is the proof's reviewed head (`originalReviewedHead`, the
+review row's `reviewer_head_sha`), because the proof compared that head and
+dispatch recorded the hammer series under it. The owner cap is evaluated under
+`reviewState.headSha`, the gate's evidence head. When the two differ, the cap
+already starts a fresh series for the evidence head, so the reset has nothing to
+clear there.
+
 A reset sets `attemptCount: 0` and `dispatchHeads: []`, clears the series
 suppression fields (`suppressed`, `suppressedJobKey`, `suppressedHeadSha`,
 `suppressedAttemptCount`, `alertedAt`) and drops the series `retryable`

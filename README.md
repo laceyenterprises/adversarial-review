@@ -4360,6 +4360,8 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- Make agy print-timeout conversion tests deterministic under CI load while retaining the separate deadline-cancellation test.
+
 PRIMARYDEADCODE-01 permits derived dead-code reversal only for author-added
 single-line imports and module-private literal/None bindings in a closed
 Python/JS/TS declaration grammar. Transient, unpersisted content reads must

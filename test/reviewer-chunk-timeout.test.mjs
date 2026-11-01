@@ -201,6 +201,8 @@ for (const scenario of [
   { name: 'no explicit allocation', allocation: null, printSeconds: 1140 },
 ]) {
   test(`LAC-2100: agy print timeout respects ${scenario.name}`, async t => {
+    // These cases check budget conversion; the deadline test above exercises expiry.
+    t.mock.timers.enable({ apis: ['setTimeout'] });
     if (scenario.observedLoad) underObservedLoad(t);
     else underMaxLoad(t, { maxMultiplier: 1 });
     let calls = 0;

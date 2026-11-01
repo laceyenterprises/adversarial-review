@@ -156,7 +156,9 @@ const ENUM_ROLES_REMEDIATOR = ['claude-code', 'codex', 'gemini', 'remediator-cod
 export const ENUM_CODEX_WORKER_ACCOUNT_ORDER = Object.freeze(['personal-first', 'corporate-first']);
 // REMFALLBACK-01: the concrete remediator worker classes a capped remediator can
 // fall back to. `adversarial` is a routing mode, not a class, so it is excluded.
-const ENUM_ROLES_REMEDIATOR_FALLBACK = ['claude-code', 'codex', 'gemini', 'remediator-codex-corp', 'codex-corp', 'remediator-claude'];
+// REMGEMINI-01: `remediator-grok` reserves the Grok slot. Until that class can
+// run, the fallback selection skips it for the launch and tries the next one.
+const ENUM_ROLES_REMEDIATOR_FALLBACK = ['claude-code', 'codex', 'gemini', 'remediator-codex-corp', 'codex-corp', 'remediator-claude', 'remediator-grok'];
 // `hammer` is the universal end-of-budget rescue worker (codex-backed, runs under
 // the merge-agent app identity); allowed here so the budget-exhausted final pass
 // can dispatch it. See worker-pool hq_resolve_worker_identity (merge-agent-lacey).
@@ -908,6 +910,7 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          broker_instances: { __type: 'any', __default: {} },
           token_accounts: { __type: 'any', __default: {} },
           identity_token_pools: { __type: 'any', __default: {} },
           // Preserve existing Python OAuth children when mirroring this root:
@@ -6274,6 +6277,7 @@ function loadConfigImpl({
   // flatten() intentionally omits empty dictionaries. These new override maps
   // have an observable empty-map default, so retain it in the resolved config.
   for (const dotted of [
+    'oauth.broker_instances',
     'oauth.token_accounts',
     'oauth.identity_token_pools',
     'worker_pool.dispatch.codex_exec_timeout_by_worker_class',

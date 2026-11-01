@@ -19,6 +19,7 @@ import {
 } from '../../../remediation-worker-provenance.mjs';
 import { requireWorkerReplyContext } from '../../../remediation-reply-paths.mjs';
 import { scrubOAuthFallbackEnv, OAUTH_ENV_STRIP_LIST } from '../../../secret-source/env.mjs';
+import { resolveAgyPrintTimeoutMs } from '../../../reviewer-timeout.mjs';
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
@@ -101,6 +102,37 @@ function resolveClaudeCodeCliPath(env = process.env) {
 
 function resolveGeminiCliPath(env = process.env) {
   return resolveReviewCliPath('gemini', env);
+}
+
+// REMGEMINI-01: Gemini remediation runs on the Antigravity harness, the same
+// managed `agy` the Gemini reviewer and the worker-pool `gemini` class run.
+function resolveAgyCliPath(env = process.env) {
+  return resolveReviewCliPath('agy', env);
+}
+
+// agy binds `--model` only when the prompt is the `--print` ARGUMENT, so every
+// value-taking flag precedes `--print` (the reviewer harness and the worker-pool
+// gemini adapter use the same order). The observed agy argv budget is 262144
+// bytes; an oversized prompt is refused rather than sent on stdin, which would
+// unbind the model and silently run agy's persisted default.
+const DEFAULT_AGY_ARGV_MAX_BYTES = 262_144;
+
+function buildAgyRemediationArgs({ model, prompt, printTimeoutMs, workspaceDir, env = process.env }) {
+  const raw = env.ADVERSARIAL_REVIEW_AGY_ARGV_MAX_BYTES || env.AGY_ARGV_MAX_BYTES;
+  const parsed = Number(raw);
+  const maxBytes = Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_AGY_ARGV_MAX_BYTES;
+  const bytes = Buffer.byteLength(String(prompt ?? ''), 'utf8');
+  if (bytes > maxBytes) {
+    throw new Error(`Antigravity agy remediation prompt is ${bytes} bytes, exceeding the ${maxBytes}-byte argv budget; `
+      + 'refusing rather than sending it on stdin, which unbinds --model.');
+  }
+  return [
+    '--model', model,
+    '--print-timeout', `${Math.max(1, Math.floor(Math.max(1_000, Number(printTimeoutMs) || 0) / 1000))}s`,
+    '--dangerously-skip-permissions',
+    '--add-dir', workspaceDir,
+    '--print', String(prompt ?? ''),
+  ];
 }
 
 function resolveCodexAuthPath(env = process.env) {
@@ -1041,8 +1073,9 @@ function spawnGeminiRemediationWorker({
   now = () => new Date().toISOString(),
   openSyncImpl = openSync,
   closeSyncImpl = closeSync,
+  readFileSyncImpl = readFileSync,
 }) {
-  const geminiCli = resolveGeminiCliPath(sourceEnv);
+  const agyCli = resolveAgyCliPath(sourceEnv);
   const gitIdentity = remediationWorkerGitIdentity('gemini');
   const { env: baseEnv, startupEvidence } = prepareGeminiRemediationStartupEnv({
     gitIdentity,
@@ -1079,21 +1112,25 @@ function spawnGeminiRemediationWorker({
     pin: geminiModelPin(env),
     log,
   });
-  const geminiArgs = ['--approval-mode', 'yolo', '--skip-trust', '-m', modelResolution.resolvedModel];
-  let promptFd;
+  const agyArgs = buildAgyRemediationArgs({
+    model: modelResolution.resolvedModel,
+    prompt: readFileSyncImpl(promptPath, 'utf8'),
+    printTimeoutMs: resolveAgyPrintTimeoutMs(env),
+    workspaceDir,
+    env,
+  });
   let stdoutFd;
   let stderrFd;
   try {
-    promptFd = openSyncImpl(promptPath, 'r');
     stdoutFd = openSyncImpl(outputPath, 'w');
     stderrFd = openSyncImpl(logPath, 'a');
     const child = spawnDetachedCli(
-      geminiCli,
-      geminiArgs,
+      agyCli,
+      agyArgs,
       {
         cwd: workspaceDir,
         env,
-        stdio: [promptFd, stdoutFd, stderrFd],
+        stdio: ['ignore', stdoutFd, stderrFd],
         spawnImpl,
         now,
       },
@@ -1113,11 +1150,12 @@ function spawnGeminiRemediationWorker({
       gitIdentity,
       startupEvidence,
       ...modelResolution,
-      command: [geminiCli, ...geminiArgs],
+      runtime: 'antigravity',
+      // The prompt rides on argv for agy; the persisted command records its path.
+      command: [agyCli, ...agyArgs.slice(0, -1), `<prompt:${promptPath}>`],
       child,
     };
   } finally {
-    if (promptFd !== undefined) closeSyncImpl(promptFd);
     if (stdoutFd !== undefined) closeSyncImpl(stdoutFd);
     if (stderrFd !== undefined) closeSyncImpl(stderrFd);
   }
@@ -1436,6 +1474,8 @@ export {
   resolveCodexAuthPath,
   resolveCodexCliPath,
   resolveCodexRemediationModel,
+  resolveAgyCliPath,
+  buildAgyRemediationArgs,
   resolveGeminiCliPath,
   resolveGeminiRemediationModel,
   resolveRemediationModel,

@@ -6,9 +6,9 @@ import { readFileSync } from 'node:fs';
 const contract = JSON.parse(readFileSync(new URL('./identity-token-pools.v1.json', import.meta.url)));
 const mapping = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 validateContract(contract);
-const idPattern = new RegExp(`^(?:${contract.id_pattern})$`);
-const modelPattern = new RegExp(`^(?:${contract.model_pattern})$`);
-export const TOKEN_POOL_DECLARATION_PATHS = new Set(['oauth.token_accounts', 'oauth.identity_token_pools']);
+const idPattern = new RegExp(`^(?:${contract.id_pattern})$(?![\\s\\S])`);
+const modelPattern = new RegExp(`^(?:${contract.model_pattern})$(?![\\s\\S])`);
+export const TOKEN_POOL_DECLARATION_PATHS = new Set(['oauth.token_accounts', 'oauth.identity_token_pools', 'oauth.broker_instances']);
 function validateContract(value) {
   const requireField = (condition, field) => {
     if (!condition) throw new Error(`invalid ITP-01 vocabulary: ${field}`);
@@ -20,12 +20,15 @@ function validateContract(value) {
       items.every(item => typeof item === 'string' && item.length > 0) &&
       new Set(items).size === items.length, key);
   }
-  requireField(value.families.length === 3 &&
-    ['codex', 'claude', 'gemini'].every(family => value.families.includes(family)), 'families');
+  requireField(value.families.length === 4 &&
+    ['codex', 'claude', 'gemini', 'grok'].every(family => value.families.includes(family)), 'families');
   requireField(['family', 'allowed_models', 'concurrency'].every(key => value.required_fields.includes(key)) &&
     value.required_fields.every(key => value.account_fields.includes(key)) &&
     ['broker_provider', 'holder_user'].every(key => value.account_fields.includes(key)), 'account_fields / required_fields');
-  for (const key of ['max_concurrency', 'max_models', 'max_pool_accounts']) {
+  requireField(mapping(value.provider_kinds) && value.provider_kinds.grok === 'oauth'
+    && value.provider_kinds['grok-api'] === 'api-key', 'provider_kinds');
+  requireField(Array.isArray(value.instance_fields) && ['provider', 'custody_dir', 'op_ref'].every(key => value.instance_fields.includes(key)), 'instance_fields');
+  for (const key of ['max_concurrency', 'max_models', 'max_pool_accounts', 'max_broker_instances']) {
     requireField(Number.isSafeInteger(value[key]) && value[key] > 0, key);
   }
   for (const key of ['id_pattern', 'model_pattern']) {
@@ -49,10 +52,40 @@ function identifier(value, path) {
 }
 
 export function validateTokenPoolDeclarations(oauth) {
+  requireValue(mapping(oauth), 'oauth', 'expected mapping');
   const accounts = oauth.token_accounts === undefined ? {} : oauth.token_accounts;
   const pools = oauth.identity_token_pools === undefined ? {} : oauth.identity_token_pools;
   requireValue(mapping(accounts), 'oauth.token_accounts', 'expected mapping');
   requireValue(mapping(pools), 'oauth.identity_token_pools', 'expected mapping');
+  const instances = oauth.broker_instances === undefined ? {} : oauth.broker_instances;
+  requireValue(mapping(instances), 'oauth.broker_instances', 'expected mapping');
+  requireValue(Object.keys(instances).length <= contract.max_broker_instances, 'oauth.broker_instances', 'too many instances');
+  const custody = [], secrets = new Set();
+  for (const [instanceId, instance] of Object.entries(instances)) {
+    let path = 'oauth.broker_instances';
+    identifier(instanceId, path);
+    path += `.${instanceId}`;
+    requireValue(mapping(instance), path, 'expected instance descriptor');
+    requireValue(Object.keys(instance).every(key => contract.instance_fields.includes(key)), path, 'unknown instance field');
+    requireValue(Object.hasOwn(contract.provider_kinds, instance.provider), path, 'unknown instance provider');
+    const field = instance.provider === 'grok' ? 'custody_dir' : 'op_ref';
+    requireValue(Object.keys(instance).length === 2 && Object.hasOwn(instance, field), path, 'expected provider-compatible custody binding');
+    const binding = instance[field];
+    requireValue(typeof binding === 'string' && binding.length <= 4096, path, 'expected custody binding');
+    const normalized = binding.toLowerCase();
+    if (field === 'custody_dir') {
+      requireValue(binding.startsWith('/') && binding !== '/' && !binding.startsWith('//')
+        && !binding.slice(1).split('/').some(part => ['', '.', '..'].includes(part))
+        && !/[\\\x00-\x1f]/.test(binding), path, 'expected canonical absolute custody directory');
+      requireValue(!custody.some(old => normalized === old || normalized.startsWith(`${old}/`)
+        || old.startsWith(`${normalized}/`)), path, 'duplicate or overlapping custody binding');
+      custody.push(normalized);
+    } else {
+      requireValue(/^op:\/\/[^/\x00-\x1f]+\/[^/\x00-\x1f]+\/[^/\x00-\x1f]+$(?![\s\S])/.test(binding), path, 'expected secret reference');
+      requireValue(!secrets.has(normalized), path, 'duplicate secret binding');
+      secrets.add(normalized);
+    }
+  }
   const bindings = new Set();
   for (const [accountId, account] of Object.entries(accounts)) {
     let path = 'oauth.token_accounts';
@@ -77,7 +110,17 @@ export function validateTokenPoolDeclarations(oauth) {
     } else {
       requireValue(contract.broker_families[binding] === family, `${path}.broker_provider`, 'provider family mismatch');
     }
-    const identity = `${bindingKey}:${binding}`;
+    let identity;
+    if (family === 'grok') {
+      requireValue(account.kind === contract.provider_kinds[binding], path, 'account kind/provider mismatch');
+      identifier(account.broker_instance, `${path}.broker_instance`);
+      requireValue(Object.hasOwn(instances, account.broker_instance), path, 'unknown broker instance');
+      requireValue(instances[account.broker_instance].provider === binding, path, 'instance provider mismatch');
+      identity = `broker_instance:${account.broker_instance}`;
+    } else {
+      requireValue(!Object.hasOwn(account, 'kind') && !Object.hasOwn(account, 'broker_instance'), path, 'instance fields require grok family');
+      identity = `${bindingKey}:${binding}`;
+    }
     requireValue(!bindings.has(identity), path, 'duplicate provider or holder binding');
     bindings.add(identity);
   }

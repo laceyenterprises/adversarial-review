@@ -75,12 +75,18 @@ export async function resolvePooledWorkerRouting({ primary, fallbackWorkerClasse
   const identity = canonical(primary);
   if (!Object.hasOwn(FAMILIES, identity)
     || (kind === 'hammer' ? !identity.startsWith('hammer') : !identity.startsWith('remediator-'))) return null;
-  const select = async role => {
+  const select = async (role, { fallback = false } = {}) => {
     let account;
     try { account = await selectAccountImpl({ identity: role, model: modelForClass?.(role), env, ...options }); }
     catch (error) {
       // Model infrastructure faults belong to the caller's typed deferral,
-      // including undeclared pools. Preserve other account-evidence holds.
+      // including undeclared pools. A remediator fallback candidate's fault
+      // skips only that candidate for this launch (REMGEMINI-01); closers keep
+      // the deferral. Preserve other account-evidence holds.
+      if (error?.code === 'registry-unavailable' && fallback && kind === 'remediator') {
+        return { identity: role, workerClass: role, pooled: true, hold: false,
+          status: 'unresolvable', reason: 'model-unresolvable', detail: String(error?.message || error) };
+      }
       if (error?.code === 'registry-unavailable') throw error;
       account = { identity: role, workerClass: role, pooled: true,
         hold: true, status: 'held', reason: 'evidence-unknown' };
@@ -111,7 +117,11 @@ export async function resolvePooledWorkerRouting({ primary, fallbackWorkerClasse
       skipped.push({ workerClass: candidate, reason: 'reviews-next-round' });
       continue;
     }
-    const fallback = await select(candidate);
+    const fallback = await select(candidate, { fallback: true });
+    if (fallback?.status === 'unresolvable') {
+      skipped.push({ workerClass: candidate, reason: fallback.reason, detail: fallback.detail });
+      continue;
+    }
     if (kind === 'remediator' && (!fallback || fallback.status !== 'selected')) {
       skipped.push({ workerClass: candidate, reason: fallback?.reason || fallback?.status || 'pool-undeclared' });
       continue;

@@ -606,6 +606,40 @@ Claude Code OAuth is stored in the macOS Keychain (`Claude Code-credentials`), n
 
 ---
 
+## Remediator fallback order (REMGEMINI-01)
+
+`roles.remediator_fallback` is the ordered list of classes that take a job when
+the routed remediator cannot. Every claim walks the list from the top. A
+candidate that cannot run now is skipped for that launch only and recorded in
+`skipped[]`; the next candidate is tried. The configured order is never
+rewritten, so a candidate that recovers is chosen again on the next launch.
+
+A candidate is skipped when it is:
+
+- busy or quota-held: its provider's fleet quota row is not `ok`
+  (`unavailable:<state>`), it is capped (`capped:<capSource>`), or its own
+  quota hold resets inside the hold window (`resets-within-hold-window`);
+- refused by the orchestration mode (`unrunnable-in-mode:<mode>`);
+- unresolvable: its governed model or registry entry cannot be resolved
+  (`model-unresolvable`, with the registry fault in `detail`), or it has no
+  tracked provider yet (`provider-untracked`);
+- the family that reviews the next round (`reviews-next-round:<reviewer>`).
+
+One unresolvable candidate never aborts the selection. When every candidate is
+skipped, the job holds as before. An unresolvable routed primary with nothing
+to replace it keeps its typed registry deferral.
+
+`gemini` runs on the Antigravity harness. Locally the daemon spawns the managed
+`agy` binary with the `remediator-gemini` registry model as `--model` and the
+prompt as the `--print` argument; the pre-flight probes agy's keychain
+credential. Through HQ dispatch the job runs on the agy-backed `gemini` worker
+class. Either way the worker commits under the `gemini-remediation` trailer.
+
+To add a Grok remediator once its class can run, list `remediator-grok` in the
+order (for example `[gemini, remediator-grok, claude-code]`). Both config
+loaders already accept it; until the class is connected it is skipped as
+`provider-untracked`.
+
 ## Remediation round budgets
 
 New follow-up jobs derive their default remediation budget from the linked spec ticket's `riskClass`:

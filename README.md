@@ -2979,6 +2979,42 @@ account order. Personal-first declarations for hammer/Codex remediators and
 corporate-first declarations for other in-scope Codex/Claude roles are operator
 conventions; this loader does not validate account order or change runtime routing.
 
+
+GRK-03 extends these declarations with family `grok` and canonical roles `grok`,
+`grok-reviewer`, `remediator-grok`, and `hammer-grok`. Grok accounts additionally
+require `kind` (`oauth` or `api-key`) and `broker_instance`; `broker_provider`
+remains a provider type (`grok` for OAuth, `grok-api` for keys). Legacy account
+fields and fixed provider mappings remain unchanged.
+
+`oauth.broker_instances` is a third atomic map, empty by default. Each opaque
+instance names exactly `provider` plus `custody_dir` (OAuth) or `op_ref` (key).
+Custody directories must be canonical absolute paths; duplicate and nested
+paths, compared case-insensitively, refuse. Secret references must have the
+`op://vault/item/field` shape and be unique case-insensitively. Validation is
+lexical and performs no credential or filesystem I/O; provisioning must also
+prevent filesystem aliases such as symlinks from sharing custody. One account
+may bind an instance; multiple distinct instances may use the same Grok provider
+type. At most 64 instances are accepted. Descriptor errors omit binding values.
+All three maps replace prior layers as a whole and validate together after the
+cascade, including non-strict local overrides. Shell loading exposes them only
+through the JSON reader, never flattened environment variables.
+
+Raw config retains declared order. Typed readers stably put OAuth members before
+API-key members for each Grok role, preserving order within each kind. The shared
+selector applies account-specific readiness, requested-model evidence, quota,
+reserve and active lease counts against concurrency; stale or unknown evidence
+still holds. Exhausted subscriptions fall through to the key in the same role;
+the next eligible attempt prefers a recovered subscription. Kind, instance and
+custody binding participate in declaration generation, invalidating observations
+when the auth path changes. Legacy generation encoding is unchanged.
+
+Activation: both repository changes must merge before importing Grok declarations.
+Configuration pickup uses the existing next config read/reload path; this slice
+does not enable a Grok lane or instantiate a broker. GRK-04 consumes the instance
+contract; GRK-16 imports configured accounts, checks effective pool order and
+account-scoped metadata, and captures live MODEL-TURN receipts for both auth kinds.
+No live credential, HOME/GROK_HOME or service change occurs in GRK-03.
+
 The same strict `oauth` root also mirrors the existing `litellm_vk_*` `op_ref`
 children declared by `schema_v1/core.py::_oauth_litellm_vk_schema_keys` and wired
 by `schema_v1/oauth_github_ci.py` in the Python `agent_os_config` owner. These
@@ -3020,6 +3056,11 @@ the owner's `selected`, `hold` or `unavailable` outcome without running a
 second selection policy. A selection result is a proposal for a new attempt,
 not an execution lease, an attestation or merge authority. Consumers must still
 acquire/revalidate through the existing lease/admission owner before dispatch.
+
+`readIdentityTokenPools(oauth)` always returns `token_accounts`,
+`identity_token_pools` and `broker_instances` mappings. Omitted or empty broker
+instance declarations project as a detached, frozen `{}`, so consumers can
+enumerate the mapping directly even with legacy-only configuration.
 
 `readAccountSelection(result, { oauth, request })` consumes the Python
 `SelectionResult.to_dict()` wire value alongside its original request and
@@ -4318,6 +4359,32 @@ compression. Shared local overlays remain tolerant of unknown sibling keys.
 Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
+
+- Make agy print-timeout conversion tests deterministic under CI load while retaining the separate deadline-cancellation test.
+
+PRIMARYDEADCODE-01 permits derived dead-code reversal only for author-added
+single-line imports and module-private literal/None bindings in a closed
+Python/JS/TS declaration grammar. Transient, unpersisted content reads must
+prove every parent-file reference is covered by the same commit's authorized
+deletion, with no surviving head references or dynamic namespace hazards.
+See the [proof contract](docs/RUNBOOK-ama-closure.md).
+
+REMGEMINI-01 follow-up: pooled fallback skips retain the registry fault in
+`skipped[].detail`, matching standalone routing. An offline regression verifies
+that account substitution still checks the selected corporate class's model
+before launch.
+
+REMGEMINI-01: Gemini remediation runs on the Antigravity harness. The local
+spawn runs the managed `agy` with the `remediator-gemini` registry model and
+the prompt as the `--print` argument, and the pre-flight probes agy's keychain
+credential instead of the legacy CLI's `oauth_creds.json`. Remediator fallback
+skips a busy, quota-held, mode-refused or unresolvable candidate for that launch
+(`skipped[]` reason `model-unresolvable` for a registry fault) and tries the
+next; one unresolvable candidate no longer aborts the selection.
+`roles.remediator_fallback` accepts `remediator-grok` for the future Grok lane.
+
+- GRK-03 remediation: always project a frozen `broker_instances` mapping, including empty and legacy-only declarations; cover the stable snapshot shape in offline reader and role-config tests.
+- GRK-03: mirror account-scoped Grok OAuth/API-key declarations, reject duplicate custody/secret bindings, and retain subscription-first order and instance metadata through typed readers. Activation and both auth-kind MODEL-TURN receipts remain with GRK-16.
 
 CLOSERPROOF-01: the hammer retry-cap series follows the heads the closer
 authored. `proveCloserAuthoredStaleHead` also reports `currentHeadHammerAttested`

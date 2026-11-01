@@ -73,6 +73,11 @@ They are never written into history records and require no cache version bump.
 For a shared registry, only candidates whose migration bodies have already
 matched may be normalized together. Each pair needs exactly one tuple in each
 snapshot; pair identity, tuple order and every unrelated byte remain protected.
+PRIMARYDEADCODE-01 `deadCodeSources` (`{ path, ref, text }` or
+`{ path, ref, error }`) are transient content reads of a refused path at each
+authorizing commit's parent and at the head, collected after history reuse.
+They are never written into history records; successful proofs are returned
+as `derivedDeadCode`.
 PRIMARYOPAQUE-01 derived-artifact proofs are also collected after history reuse
 and never written into these records. Returned evidence may carry
 `derivedArtifacts`, an array of `{ path, primaryBlob, blob, directory, command,

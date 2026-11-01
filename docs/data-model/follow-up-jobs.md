@@ -127,7 +127,7 @@ replay. Factual-dispute admission is the explicit closure exception described be
 
 **Owner:** follow-up remediation queue
 **Store:** `data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json`, `data/follow-up-jobs/single-review-voids/*.json`, `data/follow-up-jobs/missing-label-events/*.json`
-**Source of truth:** `src/follow-up-jobs.mjs`, `src/follow-up-branch.mjs`, `src/remediation-unpublished.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`, `src/remediation-closeout.mjs`, `src/remediation-job-ownership.mjs`
+**Source of truth:** `src/follow-up-jobs.mjs`, `src/follow-up-branch.mjs`, `src/remediation-unpublished.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/worker-token-pool.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`, `src/remediation-closeout.mjs`, `src/remediation-job-ownership.mjs`
 **Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`, `src/adapters/comms/github-pr-comments/comment-delivery.mjs`, `src/reviewer-ci-admission.mjs`
 
 ## Simplicity advisory (REVIEWSIMPLE-01)
@@ -764,7 +764,13 @@ round removed, `remediationPlan.retryAfter` set to the hold end and a
 - `skipped[]`: `{ workerClass, reason }` for each declared fallback class passed
   over (`provider-untracked`, `reviews-next-round:<reviewer>`,
   `capped:<capSource>`, `resets-within-hold-window`, `unavailable:<state>`,
-  `unrunnable-in-mode:<mode>`).
+  `unrunnable-in-mode:<mode>`, `model-unresolvable`). A `model-unresolvable`
+  entry (REMGEMINI-01) also carries `detail` in pooled and standalone routing,
+  the typed registry fault rendered as a string: the
+  class's governed model or registry entry could not be resolved, so it was
+  skipped for this launch only. A routed primary in that state carries
+  `capSource: "model-unresolvable"`; when no fallback can run, the claim keeps
+  the typed registry deferral instead of a quota hold.
 - `modeRefusals[]` (optional, REMEDIATORLANE-01): `{ workerClass, mode, reason }`
   for each lane the claim's orchestration mode cannot run. Native mode
   (`"local"`) refuses `remediator-claude-corp` with
@@ -787,7 +793,8 @@ A job run by its routed class has none of these fields, except
 `remediationWorker.modeRefusals[]` (same shape as above), which is recorded
 whenever the mode refused a lane, including when the corporate Claude lane falls
 back to the personal Claude account under the same class. The fallback order is
-`roles.remediator_fallback` in `config.yaml`.
+`roles.remediator_fallback` in `config.yaml`. Each claim walks it from the top,
+so a candidate skipped on one launch is tried again first on the next.
 
 ## Single-review jobs (SINGLEREVIEW-01)
 

@@ -519,7 +519,9 @@ test('remediation spawners use governed models and reasoning from the public reg
       spawnGeminiRemediationWorker,
     ]) {
       const record = spawn(shared);
-      assert.deepEqual(record.command, calls.at(-1));
+      // agy carries the prompt on argv; the persisted command records its path.
+      assert.deepEqual(record.command, spawn === spawnGeminiRemediationWorker
+        ? [...calls.at(-1).slice(0, -1), `<prompt:${promptPath}>`] : calls.at(-1));
       assert.equal(record.modelSource, 'registry');
       assert.equal(record.reasoningSource, spawn === spawnGeminiRemediationWorker
         ? 'unsupported' : 'registry');
@@ -529,7 +531,9 @@ test('remediation spawners use governed models and reasoning from the public reg
     }
     assert.deepEqual(calls[0].slice(1, 6), ['exec', '--model', 'gpt-6-sol', '-c', 'model_reasoning_effort=xhigh']);
     assert.deepEqual(calls[1].slice(-4), ['--model', 'claude-opus-5-5', '--effort', 'xhigh']);
-    assert.deepEqual(calls[2].slice(-2), ['-m', 'gemini-3-pro']);
+    assert.match(calls[2][0], /\/agy$/);
+    assert.deepEqual(calls[2].slice(1, 3), ['--model', 'gemini-3-pro']);
+    assert.deepEqual(calls[2].slice(-2), ['--print', 'fix the PR']);
     const brokerDefaultOnly = spawnClaudeCodeRemediationWorker({
       ...shared,
       sourceEnv: { ...shared.sourceEnv, CLAUDE_MODEL_ID: 'broker-default' },

@@ -4039,7 +4039,7 @@ function setupGeminiSpawn(promptBody = 'Fix the bug. SENSITIVE-DIFF-BODY-MARKER\
   return { workspaceDir, promptPath, outputPath, logPath, geminiHome, promptBody };
 }
 
-test('spawnGeminiRemediationWorker builds the gemini headless argv and never embeds the prompt body', () => {
+test('spawnGeminiRemediationWorker runs the Antigravity harness with the prompt as the --print value', () => {
   const { workspaceDir, promptPath, outputPath, logPath, promptBody } = setupGeminiSpawn();
 
   const prevHome = process.env.HOME;
@@ -4068,38 +4068,30 @@ test('spawnGeminiRemediationWorker builds the gemini headless argv and never emb
     else process.env.HOME = prevHome;
   }
 
-  assert.match(capturedCli, /gemini/);
-  // `--approval-mode yolo` (headless auto-approve) + `--skip-trust` (fresh
-  // workspace trust bypass) + `-m <model>`; the prompt is delivered through
-  // stdin, so it must NOT appear on argv.
-  assert.deepEqual(capturedArgs, [
-    '--approval-mode',
-    'yolo',
-    '--skip-trust',
-    '-m',
-    'gemini-2.5-pro',
-  ]);
+  // REMGEMINI-01: the managed agy binary, never the legacy gemini CLI. agy binds
+  // --model only when the prompt is the --print argument, so it rides on argv.
+  assert.match(capturedCli, /\/agy$/);
+  assert.deepEqual(capturedArgs.slice(0, 2), ['--model', 'gemini-2.5-pro']);
+  assert.equal(capturedArgs[2], '--print-timeout');
+  assert.match(capturedArgs[3], /^\d+s$/);
+  assert.deepEqual(capturedArgs.slice(4, -1), ['--dangerously-skip-permissions', '--add-dir', workspaceDir, '--print']);
+  assert.equal(capturedArgs.at(-1), promptBody);
+  for (const legacy of ['--approval-mode', 'yolo', '--skip-trust', '-m']) {
+    assert.equal(capturedArgs.includes(legacy), false, legacy);
+  }
   assert.equal(result.model, 'gemini');
+  assert.equal(result.runtime, 'antigravity');
   assert.equal(result.workerClass, 'gemini');
   assert.equal(result.launchRequestId, TEST_LAUNCH_REQUEST_ID);
   assert.equal(
     result.replyPath,
     resolveHqReplyPath({ hqRoot: TEST_HQ_ROOT, launchRequestId: TEST_LAUNCH_REQUEST_ID }).replyPath
   );
-  assert.deepEqual(result.command, [
-    capturedCli,
-    '--approval-mode',
-    'yolo',
-    '--skip-trust',
-    '-m',
-    'gemini-2.5-pro',
-  ]);
-
-  // The full prompt/diff body never leaks into the process argv.
-  const joinedArgs = capturedArgs.join('\n');
-  assert.equal(joinedArgs.includes('SENSITIVE-DIFF-BODY-MARKER'), false);
-  assert.equal(joinedArgs.includes(promptBody.trim()), false);
-  assert.equal(capturedArgs.includes(promptPath), false);
+  // The persisted command records the prompt path, never the prompt/diff body.
+  assert.deepEqual(result.command, [capturedCli, ...capturedArgs.slice(0, -1), `<prompt:${promptPath}>`]);
+  const persisted = result.command.join('\n');
+  assert.equal(persisted.includes('SENSITIVE-DIFF-BODY-MARKER'), false);
+  assert.equal(persisted.includes(promptBody.trim()), false);
 });
 
 test('spawnGeminiRemediationWorker closes an already-open descriptor when a later open fails', () => {
@@ -4160,13 +4152,7 @@ test('spawnGeminiRemediationWorker honors a pinned gemini model in argv', () => 
     }
   }
 
-  assert.deepEqual(capturedArgs, [
-    '--approval-mode',
-    'yolo',
-    '--skip-trust',
-    '-m',
-    'gemini-2.5-flash',
-  ]);
+  assert.deepEqual(capturedArgs.slice(0, 2), ['--model', 'gemini-2.5-flash']);
 });
 
 test('spawnGeminiRemediationWorker stamps the gemini-remediation provenance trailer class', () => withAgentOsShimRoot(makeFakeAgentOsShimRoot(), () => {
@@ -4311,14 +4297,9 @@ test('remediation runtime local mode dispatches "gemini" to spawnGeminiRemediati
   }
 
   assert.equal(result.model, 'gemini');
-  assert.match(invokedCli, /gemini/);
-  assert.deepEqual(invokedArgs, [
-    '--approval-mode',
-    'yolo',
-    '--skip-trust',
-    '-m',
-    'gemini-2.5-pro',
-  ]);
+  assert.match(invokedCli, /\/agy$/);
+  assert.deepEqual(invokedArgs.slice(0, 2), ['--model', 'gemini-2.5-pro']);
+  assert.equal(invokedArgs.at(-2), '--print');
 });
 
 test('remediationWorkerTrailerClass maps each worker class to its provenance trailer', () => {
@@ -4413,38 +4394,38 @@ test('resolveCodexRemediationModel honors explicit hqRoot for display parity wit
   }
 });
 
-test('assertRemediationWorkerOAuth routes gemini to the gemini OAuth pre-flight', async () => {
-  const { workspaceDir } = setupGeminiSpawn();
-  const prevHome = process.env.HOME;
-  process.env.HOME = workspaceDir;
+test('assertRemediationWorkerOAuth routes gemini to the Antigravity agy auth probe', async () => {
+  const calls = [];
   try {
-    // Credential present (written by setupGeminiSpawn) → passes.
-    await assertRemediationWorkerOAuth('gemini');
+    await assertRemediationWorkerOAuth('gemini', { env: { HOME: '/synthetic-home' },
+      agyAuthImpl: async (request) => { calls.push(request); return { ok: true }; } });
+    assert.deepEqual(calls, [{ env: { HOME: '/synthetic-home' } }]);
   } finally {
     resetOAuthPreflightCache('gemini');
-    if (prevHome === undefined) delete process.env.HOME;
-    else process.env.HOME = prevHome;
   }
 });
 
-test('assertRemediationWorkerOAuth fails with an OAuthError when the gemini credential is missing', async () => {
-  const emptyHome = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  const prevHome = process.env.HOME;
-  process.env.HOME = emptyHome;
+test('assertRemediationWorkerOAuth fails with an OAuthError when the agy credential is unusable, and does not cache it', async () => {
+  let probes = 0;
+  const agyAuthImpl = async () => {
+    probes += 1;
+    return { ok: false, reason: 'keychain-missing', detail: 'synthetic keychain miss' };
+  };
   try {
-    await assert.rejects(
-      () => assertRemediationWorkerOAuth('gemini'),
-      (err) => {
-        assert.equal(err.isOAuthError, true);
-        assert.equal(err.model, 'gemini');
-        assert.match(err.message, /oauth_creds\.json missing/);
-        return true;
-      }
-    );
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await assert.rejects(
+        () => assertRemediationWorkerOAuth('gemini', { env: {}, agyAuthImpl }),
+        (err) => {
+          assert.equal(err.isOAuthError, true);
+          assert.equal(err.model, 'gemini');
+          assert.match(err.message, /Antigravity agy auth failed \(keychain-missing\)/);
+          return true;
+        }
+      );
+    }
+    assert.equal(probes, 2);
   } finally {
     resetOAuthPreflightCache('gemini');
-    if (prevHome === undefined) delete process.env.HOME;
-    else process.env.HOME = prevHome;
   }
 });
 

@@ -50,7 +50,7 @@ test('Claude remediator fallback vectors degrade the preferred corporate account
 for (const [index, vector] of vectors.cases.entries()) {
   test(`ITP-10 consumes Python outcome: ${vector.name}`, () => {
     assert.equal(typeof reader.readAccountSelection, 'function');
-    const value = merge(vectors.defaults, vector.patch ?? {});
+    const value = merge(vector.defaults === 'grok' ? vectors.grok_defaults : vectors.defaults, vector.patch ?? {});
     const before = structuredClone(value);
     const outcome = outcomes.cases[index];
     if (vector.error) {
@@ -87,6 +87,20 @@ test('snapshot reader copies and freezes evidence; missing components stay missi
   assert.ok(Object.isFrozen(snapshot.accounts['openai-corporate']));
 });
 
+for (const oauth of [{}, { broker_instances: {} }]) {
+  test(`pool reader projects a frozen empty broker mapping when ${Object.hasOwn(oauth, 'broker_instances') ? 'empty' : 'omitted'}`, () => {
+    const snapshot = reader.readIdentityTokenPools(oauth);
+    assert.deepEqual(snapshot, { token_accounts: {}, identity_token_pools: {}, broker_instances: {} });
+    assert.deepEqual(Object.keys(snapshot.broker_instances), []);
+    assert.ok(Object.isFrozen(snapshot.broker_instances));
+    if (oauth.broker_instances) {
+      assert.notEqual(snapshot.broker_instances, oauth.broker_instances);
+      oauth.broker_instances.later = {};
+      assert.deepEqual(snapshot.broker_instances, {});
+    }
+  });
+}
+
 for (const mutate of [
   value => { value.request.snapshot.version = 2; },
   value => { value.oauth.token_accounts.other = { ...value.oauth.token_accounts['agy-login-a'] }; },
@@ -113,7 +127,7 @@ test('legacy Gemini holders must agree with the new ordered declaration', () => 
     assert.throws(() => reader.readIdentityTokenPools(oauth, { legacyGeminiHolders: holders }), /reviewer.gemini.identities/);
   }
   assert.deepEqual(reader.readIdentityTokenPools({}, { legacyGeminiHolders: ['agy-a'] }),
-    { token_accounts: {}, identity_token_pools: {} });
+    { token_accounts: {}, identity_token_pools: {}, broker_instances: {} });
 });
 
 test('role config reads effective declarations without changing routing or pin provenance', () => {
@@ -122,7 +136,7 @@ test('role config reads effective declarations without changing routing or pin p
     'reviewer.gemini.identities': ['agy-a', 'agy-b'] };
   const resolved = resolveIdentityTokenPools({ env: {}, topPath: '/unused', modulePaths: [],
     loaderImpl: () => ({ get: (key, fallback) => values[key] ?? fallback }) });
-  assert.deepEqual(resolved, oauth);
+  assert.deepEqual(resolved, { ...oauth, broker_instances: {} });
 });
 
 test('role config normalizes legacy Gemini holder scalars like the legacy resolver', () => {
@@ -136,7 +150,7 @@ test('role config normalizes legacy Gemini holder scalars like the legacy resolv
   const options = { env: {}, topPath: '/unused', modulePaths: [],
     loaderImpl: () => ({ get: (key, fallback) => values[key] ?? fallback }) };
   assert.deepEqual(roles.resolveGeminiReviewerIdentities(options), ['true', 'false']);
-  assert.deepEqual(resolveIdentityTokenPools(options), oauth);
+  assert.deepEqual(resolveIdentityTokenPools(options), { ...oauth, broker_instances: {} });
   values['reviewer.gemini.identities'] = [false, true];
   assert.throws(() => resolveIdentityTokenPools(options), /conflicting legacy\/new declaration/);
   oauth.token_accounts['agy-login-a'].holder_user = '101';
@@ -153,11 +167,12 @@ test('temporary effective config rejects old/new holder conflict and retains leg
   const options = { topPath, modulePaths: [], env: {} };
   try {
     write(oauth, ['agy-a', 'agy-b']);
-    assert.deepEqual(resolveIdentityTokenPools(options), oauth);
+    assert.deepEqual(resolveIdentityTokenPools(options), { ...oauth, broker_instances: {} });
     write(oauth, ['agy-b', 'agy-a']);
     assert.throws(() => resolveIdentityTokenPools(options), /conflicting legacy\/new declaration/);
     write({}, ['agy-a']);
-    assert.deepEqual(resolveIdentityTokenPools(options), { token_accounts: {}, identity_token_pools: {} });
+    assert.deepEqual(resolveIdentityTokenPools(options),
+      { token_accounts: {}, identity_token_pools: {}, broker_instances: {} });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -248,3 +263,17 @@ for (const [name, mutate] of [
     });
   });
 }
+
+
+test('Grok typed reader retains instance metadata and subscription-first role order', () => {
+  const oauth = structuredClone(vectors.grok_defaults.oauth);
+  const result = reader.readIdentityTokenPools(oauth);
+  for (const role of ['grok', 'grok-reviewer', 'remediator-grok', 'hammer-grok']) {
+    assert.deepEqual(result.identity_token_pools[role], ['subscription-b', 'subscription-a', 'key-c']);
+  }
+  assert.deepEqual(result.broker_instances, oauth.broker_instances);
+  assert.ok(Object.isFrozen(result.broker_instances['subscription-a']));
+  const values = Object.fromEntries(Object.entries(oauth).map(([key, value]) => [`oauth.${key}`, value]));
+  assert.deepEqual(resolveIdentityTokenPools({ env: {}, topPath: '/unused', modulePaths: [],
+    loaderImpl: () => ({ get: (key, fallback) => values[key] ?? fallback }) }), result);
+});

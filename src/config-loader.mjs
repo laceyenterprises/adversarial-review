@@ -908,6 +908,7 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          broker_instances: { __type: 'any', __default: {} },
           token_accounts: { __type: 'any', __default: {} },
           identity_token_pools: { __type: 'any', __default: {} },
           // Preserve existing Python OAuth children when mirroring this root:
@@ -6274,6 +6275,7 @@ function loadConfigImpl({
   // flatten() intentionally omits empty dictionaries. These new override maps
   // have an observable empty-map default, so retain it in the resolved config.
   for (const dotted of [
+    'oauth.broker_instances',
     'oauth.token_accounts',
     'oauth.identity_token_pools',
     'worker_pool.dispatch.codex_exec_timeout_by_worker_class',

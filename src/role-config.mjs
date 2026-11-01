@@ -529,6 +529,7 @@ export function resolveIdentityTokenPools({ identity, ...options } = {}) {
   const rawLegacy = cfg.get('reviewer.gemini.identities', null);
   const legacy = Array.isArray(rawLegacy) ? rawLegacy.map(String) : rawLegacy;
   return readIdentityTokenPools({
+    broker_instances: cfg.get('oauth.broker_instances', {}),
     token_accounts: cfg.get('oauth.token_accounts', {}),
     identity_token_pools: cfg.get('oauth.identity_token_pools', {}),
   }, { legacyGeminiHolders: legacy === null ? undefined : legacy });
@@ -554,6 +555,7 @@ export function resolveGeminiReviewerTokenPools({ log = console, ...options } = 
     });
   }
   return readIdentityTokenPools({
+    broker_instances: cfg.get('oauth.broker_instances', {}),
     token_accounts: cfg.get('oauth.token_accounts', {}), identity_token_pools: pools,
   }, { legacyGeminiHolders: legacy === null ? undefined : legacy.map(String) });
 }

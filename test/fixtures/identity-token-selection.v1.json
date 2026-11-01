@@ -5017,6 +5017,1720 @@
         }
       },
       "error": "duplicate exemption"
+    },
+    {
+      "name": "grok-preferred",
+      "patch": {
+        "request": {}
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "grok",
+        "account_id": "subscription-b",
+        "reason": "preferred-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "grok-first-exhausted",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "subscription-b": {
+                "quota": {
+                  "state": "exhausted",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "grok",
+        "account_id": "subscription-a",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "subscription-a",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "grok-subscriptions-exhausted",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "subscription-a": {
+                "quota": {
+                  "state": "exhausted",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              },
+              "subscription-b": {
+                "quota": {
+                  "state": "exhausted",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "grok",
+        "account_id": "key-c",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "subscription-a",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "key-c",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "grok-recovered",
+      "patch": {
+        "request": {}
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "grok",
+        "account_id": "subscription-b",
+        "reason": "preferred-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "grok-all-exhausted",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "subscription-a": {
+                "quota": {
+                  "state": "exhausted",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              },
+              "subscription-b": {
+                "quota": {
+                  "state": "exhausted",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              },
+              "key-c": {
+                "quota": {
+                  "state": "exhausted",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "unavailable",
+        "identity": "grok",
+        "account_id": null,
+        "reason": "accounts-unavailable",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "subscription-a",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "key-c",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "grok-model-denied",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "subscription-a": {
+                "model": {
+                  "state": "denied",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              },
+              "subscription-b": {
+                "model": {
+                  "state": "denied",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "grok",
+        "account_id": "key-c",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "subscription-a",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "key-c",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "grok-capacity",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "subscription-a": {
+                "capacity": {
+                  "state": "measured",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110,
+                  "active_leases": 2
+                }
+              },
+              "subscription-b": {
+                "capacity": {
+                  "state": "measured",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110,
+                  "active_leases": 2
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "grok",
+        "account_id": "key-c",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "subscription-a",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "key-c",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "grok-not-ready",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "subscription-a": {
+                "readiness": {
+                  "state": "not-ready",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              },
+              "subscription-b": {
+                "readiness": {
+                  "state": "not-ready",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "grok",
+        "account_id": "key-c",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "subscription-a",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "key-c",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "grok-reviewer-preferred",
+      "patch": {
+        "request": {
+          "identity": "grok-reviewer",
+          "snapshot": {
+            "identity": "grok-reviewer"
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "grok-reviewer",
+        "account_id": "subscription-b",
+        "reason": "preferred-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "grok-reviewer-first-exhausted",
+      "patch": {
+        "request": {
+          "identity": "grok-reviewer",
+          "snapshot": {
+            "identity": "grok-reviewer",
+            "accounts": {
+              "subscription-b": {
+                "quota": {
+                  "state": "exhausted",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "grok-reviewer",
+        "account_id": "subscription-a",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "subscription-a",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "grok-reviewer-subscriptions-exhausted",
+      "patch": {
+        "request": {
+          "identity": "grok-reviewer",
+          "snapshot": {
+            "identity": "grok-reviewer",
+            "accounts": {
+              "subscription-a": {
+                "quota": {
+                  "state": "exhausted",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              },
+              "subscription-b": {
+                "quota": {
+                  "state": "exhausted",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "grok-reviewer",
+        "account_id": "key-c",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "subscription-a",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "key-c",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "grok-reviewer-recovered",
+      "patch": {
+        "request": {
+          "identity": "grok-reviewer",
+          "snapshot": {
+            "identity": "grok-reviewer"
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "grok-reviewer",
+        "account_id": "subscription-b",
+        "reason": "preferred-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "grok-reviewer-all-exhausted",
+      "patch": {
+        "request": {
+          "identity": "grok-reviewer",
+          "snapshot": {
+            "identity": "grok-reviewer",
+            "accounts": {
+              "subscription-a": {
+                "quota": {
+                  "state": "exhausted",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              },
+              "subscription-b": {
+                "quota": {
+                  "state": "exhausted",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              },
+              "key-c": {
+                "quota": {
+                  "state": "exhausted",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "unavailable",
+        "identity": "grok-reviewer",
+        "account_id": null,
+        "reason": "accounts-unavailable",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "subscription-a",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "key-c",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "grok-reviewer-model-denied",
+      "patch": {
+        "request": {
+          "identity": "grok-reviewer",
+          "snapshot": {
+            "identity": "grok-reviewer",
+            "accounts": {
+              "subscription-a": {
+                "model": {
+                  "state": "denied",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              },
+              "subscription-b": {
+                "model": {
+                  "state": "denied",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "grok-reviewer",
+        "account_id": "key-c",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "subscription-a",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "key-c",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "grok-reviewer-capacity",
+      "patch": {
+        "request": {
+          "identity": "grok-reviewer",
+          "snapshot": {
+            "identity": "grok-reviewer",
+            "accounts": {
+              "subscription-a": {
+                "capacity": {
+                  "state": "measured",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110,
+                  "active_leases": 2
+                }
+              },
+              "subscription-b": {
+                "capacity": {
+                  "state": "measured",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110,
+                  "active_leases": 2
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "grok-reviewer",
+        "account_id": "key-c",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "subscription-a",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "key-c",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "grok-reviewer-not-ready",
+      "patch": {
+        "request": {
+          "identity": "grok-reviewer",
+          "snapshot": {
+            "identity": "grok-reviewer",
+            "accounts": {
+              "subscription-a": {
+                "readiness": {
+                  "state": "not-ready",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              },
+              "subscription-b": {
+                "readiness": {
+                  "state": "not-ready",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "grok-reviewer",
+        "account_id": "key-c",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "subscription-a",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "key-c",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "remediator-grok-preferred",
+      "patch": {
+        "request": {
+          "identity": "remediator-grok",
+          "snapshot": {
+            "identity": "remediator-grok"
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "remediator-grok",
+        "account_id": "subscription-b",
+        "reason": "preferred-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "remediator-grok-first-exhausted",
+      "patch": {
+        "request": {
+          "identity": "remediator-grok",
+          "snapshot": {
+            "identity": "remediator-grok",
+            "accounts": {
+              "subscription-b": {
+                "quota": {
+                  "state": "exhausted",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "remediator-grok",
+        "account_id": "subscription-a",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "subscription-a",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "remediator-grok-subscriptions-exhausted",
+      "patch": {
+        "request": {
+          "identity": "remediator-grok",
+          "snapshot": {
+            "identity": "remediator-grok",
+            "accounts": {
+              "subscription-a": {
+                "quota": {
+                  "state": "exhausted",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              },
+              "subscription-b": {
+                "quota": {
+                  "state": "exhausted",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "remediator-grok",
+        "account_id": "key-c",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "subscription-a",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "key-c",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "remediator-grok-recovered",
+      "patch": {
+        "request": {
+          "identity": "remediator-grok",
+          "snapshot": {
+            "identity": "remediator-grok"
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "remediator-grok",
+        "account_id": "subscription-b",
+        "reason": "preferred-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "remediator-grok-all-exhausted",
+      "patch": {
+        "request": {
+          "identity": "remediator-grok",
+          "snapshot": {
+            "identity": "remediator-grok",
+            "accounts": {
+              "subscription-a": {
+                "quota": {
+                  "state": "exhausted",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              },
+              "subscription-b": {
+                "quota": {
+                  "state": "exhausted",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              },
+              "key-c": {
+                "quota": {
+                  "state": "exhausted",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "unavailable",
+        "identity": "remediator-grok",
+        "account_id": null,
+        "reason": "accounts-unavailable",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "subscription-a",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "key-c",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "remediator-grok-model-denied",
+      "patch": {
+        "request": {
+          "identity": "remediator-grok",
+          "snapshot": {
+            "identity": "remediator-grok",
+            "accounts": {
+              "subscription-a": {
+                "model": {
+                  "state": "denied",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              },
+              "subscription-b": {
+                "model": {
+                  "state": "denied",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "remediator-grok",
+        "account_id": "key-c",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "subscription-a",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "key-c",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "remediator-grok-capacity",
+      "patch": {
+        "request": {
+          "identity": "remediator-grok",
+          "snapshot": {
+            "identity": "remediator-grok",
+            "accounts": {
+              "subscription-a": {
+                "capacity": {
+                  "state": "measured",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110,
+                  "active_leases": 2
+                }
+              },
+              "subscription-b": {
+                "capacity": {
+                  "state": "measured",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110,
+                  "active_leases": 2
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "remediator-grok",
+        "account_id": "key-c",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "subscription-a",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "key-c",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "remediator-grok-not-ready",
+      "patch": {
+        "request": {
+          "identity": "remediator-grok",
+          "snapshot": {
+            "identity": "remediator-grok",
+            "accounts": {
+              "subscription-a": {
+                "readiness": {
+                  "state": "not-ready",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              },
+              "subscription-b": {
+                "readiness": {
+                  "state": "not-ready",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "remediator-grok",
+        "account_id": "key-c",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "subscription-a",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "key-c",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "hammer-grok-preferred",
+      "patch": {
+        "request": {
+          "identity": "hammer-grok",
+          "snapshot": {
+            "identity": "hammer-grok"
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "hammer-grok",
+        "account_id": "subscription-b",
+        "reason": "preferred-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "hammer-grok-first-exhausted",
+      "patch": {
+        "request": {
+          "identity": "hammer-grok",
+          "snapshot": {
+            "identity": "hammer-grok",
+            "accounts": {
+              "subscription-b": {
+                "quota": {
+                  "state": "exhausted",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "hammer-grok",
+        "account_id": "subscription-a",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "subscription-a",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "hammer-grok-subscriptions-exhausted",
+      "patch": {
+        "request": {
+          "identity": "hammer-grok",
+          "snapshot": {
+            "identity": "hammer-grok",
+            "accounts": {
+              "subscription-a": {
+                "quota": {
+                  "state": "exhausted",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              },
+              "subscription-b": {
+                "quota": {
+                  "state": "exhausted",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "hammer-grok",
+        "account_id": "key-c",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "subscription-a",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "key-c",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "hammer-grok-recovered",
+      "patch": {
+        "request": {
+          "identity": "hammer-grok",
+          "snapshot": {
+            "identity": "hammer-grok"
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "hammer-grok",
+        "account_id": "subscription-b",
+        "reason": "preferred-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "hammer-grok-all-exhausted",
+      "patch": {
+        "request": {
+          "identity": "hammer-grok",
+          "snapshot": {
+            "identity": "hammer-grok",
+            "accounts": {
+              "subscription-a": {
+                "quota": {
+                  "state": "exhausted",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              },
+              "subscription-b": {
+                "quota": {
+                  "state": "exhausted",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              },
+              "key-c": {
+                "quota": {
+                  "state": "exhausted",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "unavailable",
+        "identity": "hammer-grok",
+        "account_id": null,
+        "reason": "accounts-unavailable",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "subscription-a",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "key-c",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "hammer-grok-model-denied",
+      "patch": {
+        "request": {
+          "identity": "hammer-grok",
+          "snapshot": {
+            "identity": "hammer-grok",
+            "accounts": {
+              "subscription-a": {
+                "model": {
+                  "state": "denied",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              },
+              "subscription-b": {
+                "model": {
+                  "state": "denied",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "hammer-grok",
+        "account_id": "key-c",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "subscription-a",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "key-c",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "hammer-grok-capacity",
+      "patch": {
+        "request": {
+          "identity": "hammer-grok",
+          "snapshot": {
+            "identity": "hammer-grok",
+            "accounts": {
+              "subscription-a": {
+                "capacity": {
+                  "state": "measured",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110,
+                  "active_leases": 2
+                }
+              },
+              "subscription-b": {
+                "capacity": {
+                  "state": "measured",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110,
+                  "active_leases": 2
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "hammer-grok",
+        "account_id": "key-c",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "subscription-a",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "key-c",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
+    },
+    {
+      "name": "hammer-grok-not-ready",
+      "patch": {
+        "request": {
+          "identity": "hammer-grok",
+          "snapshot": {
+            "identity": "hammer-grok",
+            "accounts": {
+              "subscription-a": {
+                "readiness": {
+                  "state": "not-ready",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              },
+              "subscription-b": {
+                "readiness": {
+                  "state": "not-ready",
+                  "generation": "cfg-7",
+                  "observed_at": 90,
+                  "expires_at": 110
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "identity": "hammer-grok",
+        "account_id": "key-c",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "subscription-b",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "subscription-a",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "key-c",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      },
+      "defaults": "grok"
     }
-  ]
+  ],
+  "grok_defaults": {
+    "oauth": {
+      "broker_instances": {
+        "subscription-a": {
+          "provider": "grok",
+          "custody_dir": "/synthetic/custody/a"
+        },
+        "subscription-b": {
+          "provider": "grok",
+          "custody_dir": "/synthetic/custody/b"
+        },
+        "key-c": {
+          "provider": "grok-api",
+          "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+        }
+      },
+      "token_accounts": {
+        "subscription-a": {
+          "family": "grok",
+          "kind": "oauth",
+          "broker_provider": "grok",
+          "broker_instance": "subscription-a",
+          "allowed_models": [
+            "grok-build"
+          ],
+          "concurrency": 2
+        },
+        "subscription-b": {
+          "family": "grok",
+          "kind": "oauth",
+          "broker_provider": "grok",
+          "broker_instance": "subscription-b",
+          "allowed_models": [
+            "grok-build"
+          ],
+          "concurrency": 2
+        },
+        "key-c": {
+          "family": "grok",
+          "kind": "api-key",
+          "broker_provider": "grok-api",
+          "broker_instance": "key-c",
+          "allowed_models": [
+            "grok-build"
+          ],
+          "concurrency": 2
+        }
+      },
+      "identity_token_pools": {
+        "grok": [
+          "key-c",
+          "subscription-b",
+          "subscription-a"
+        ],
+        "grok-reviewer": [
+          "key-c",
+          "subscription-b",
+          "subscription-a"
+        ],
+        "remediator-grok": [
+          "key-c",
+          "subscription-b",
+          "subscription-a"
+        ],
+        "hammer-grok": [
+          "key-c",
+          "subscription-b",
+          "subscription-a"
+        ]
+      }
+    },
+    "request": {
+      "identity": "grok",
+      "family": "grok",
+      "identity_models": [
+        "grok-build"
+      ],
+      "requested_models": [
+        "grok-build"
+      ],
+      "generation": "cfg-7",
+      "now": 100,
+      "snapshot": {
+        "identity": "grok",
+        "requested_models": [
+          "grok-build"
+        ],
+        "accounts": {
+          "subscription-a": {
+            "declaration": {
+              "state": "enabled",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "readiness": {
+              "state": "ready",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "quota": {
+              "state": "available",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "reserve": {
+              "state": "admit",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "model": {
+              "state": "authorized",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "capacity": {
+              "state": "measured",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110,
+              "active_leases": 0
+            }
+          },
+          "subscription-b": {
+            "declaration": {
+              "state": "enabled",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "readiness": {
+              "state": "ready",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "quota": {
+              "state": "available",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "reserve": {
+              "state": "admit",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "model": {
+              "state": "authorized",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "capacity": {
+              "state": "measured",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110,
+              "active_leases": 0
+            }
+          },
+          "key-c": {
+            "declaration": {
+              "state": "enabled",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "readiness": {
+              "state": "ready",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "quota": {
+              "state": "available",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "reserve": {
+              "state": "admit",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "model": {
+              "state": "authorized",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "capacity": {
+              "state": "measured",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110,
+              "active_leases": 0
+            }
+          }
+        },
+        "version": 1,
+        "generation": "cfg-7",
+        "reserve_exemptions": []
+      }
+    }
+  }
 }

@@ -59,6 +59,6 @@ for (const legacy of ['fixture-holder', 42, {}]) {
 for (const legacy of [null, ['fixture-holder']]) {
   test(`declared reviewer accepts nullable/array legacy identities: ${JSON.stringify(legacy)}`, t => {
     const options = fixture(t, { oauth, reviewer: { gemini: { identities: legacy } } });
-    assert.deepEqual(resolveGeminiReviewerTokenPools(options), oauth);
+    assert.deepEqual(resolveGeminiReviewerTokenPools(options), { ...oauth, broker_instances: {} });
   });
 }

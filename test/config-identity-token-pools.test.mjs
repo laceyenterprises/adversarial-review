@@ -114,6 +114,7 @@ for (const versioned of [false, true]) {
         assert.deepEqual(error.declarationSources, {
           'oauth.token_accounts': { source: `local:${local}`, path: local },
           'oauth.identity_token_pools': { source: `module:${module}`, path: module },
+          'oauth.broker_instances': { source: 'code-default', path: null },
         });
         assert.ok(error.message.includes(local));
         assert.ok(error.message.includes(module));

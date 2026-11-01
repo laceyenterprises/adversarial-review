@@ -1416,6 +1416,2416 @@
       },
       "valid": false,
       "error": "expected mapping"
+    },
+    {
+      "name": "grok-two-subscriptions-and-key",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/a"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/b"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "grok-duplicate-custody",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/a"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/a"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "duplicate or overlapping custody binding"
+    },
+    {
+      "name": "grok-overlapping-custody",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/a"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/a/child"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "duplicate or overlapping custody binding"
+    },
+    {
+      "name": "grok-case-alias-custody",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/a"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/SYNTHETIC/custody/A"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "duplicate or overlapping custody binding"
+    },
+    {
+      "name": "grok-duplicate-secret",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/a"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/b"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+          },
+          "other": {
+            "provider": "grok-api",
+            "op_ref": "op://syntheticvault/syntheticitem/API-KEY"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "duplicate secret binding"
+    },
+    {
+      "name": "grok-invalid-custody-41",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/../a"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/b"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "expected canonical absolute custody directory"
+    },
+    {
+      "name": "grok-invalid-custody-42",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok",
+            "custody_dir": "/synthetic//a"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/b"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "expected canonical absolute custody directory"
+    },
+    {
+      "name": "grok-invalid-custody-43",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/a/"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/b"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "expected canonical absolute custody directory"
+    },
+    {
+      "name": "grok-invalid-custody-44",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok",
+            "custody_dir": "//synthetic/a"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/b"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "expected canonical absolute custody directory"
+    },
+    {
+      "name": "grok-invalid-custody-45",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok",
+            "custody_dir": "relative/a"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/b"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "expected canonical absolute custody directory"
+    },
+    {
+      "name": "grok-invalid-custody-46",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok",
+            "custody_dir": "/"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/b"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "expected canonical absolute custody directory"
+    },
+    {
+      "name": "grok-invalid-kind-47",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/a"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/b"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "account kind/provider mismatch"
+    },
+    {
+      "name": "grok-invalid-kind-48",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/a"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/b"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": null,
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "account kind/provider mismatch"
+    },
+    {
+      "name": "grok-invalid-family-49",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/a"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/b"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "codex",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "provider family mismatch"
+    },
+    {
+      "name": "grok-invalid-broker_provider-50",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/a"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/b"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok-api",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "account kind/provider mismatch"
+    },
+    {
+      "name": "grok-invalid-broker_instance-51",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/a"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/b"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "missing",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "unknown broker instance"
+    },
+    {
+      "name": "grok-invalid-broker_instance-52",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/a"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/b"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "duplicate provider or holder binding"
+    },
+    {
+      "name": "grok-invalid-concurrency-53",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/a"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/b"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 65
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "expected bounded positive integer"
+    },
+    {
+      "name": "grok-invalid-allowed_models-54",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/a"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/b"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "expected nonempty bounded model list"
+    },
+    {
+      "name": "grok-invalid-allowed_models-55",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/a"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/b"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "bad model"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "expected model IDs"
+    },
+    {
+      "name": "grok-instance-type-mismatch",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/Other/api-key"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/b"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "instance provider mismatch"
+    },
+    {
+      "name": "grok-instance-credential-field",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/a",
+            "access_token": "synthetic-placeholder"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/b"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "unknown instance field"
+    },
+    {
+      "name": "grok-legacy-instance-type",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "codex",
+            "custody_dir": "/synthetic/custody/a"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/b"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "unknown instance provider"
+    },
+    {
+      "name": "grok-secret-reference-spaces",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/a"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/b"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://Synthetic Vault/Synthetic Item/api-key"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "grok-null-instances",
+      "oauth": {
+        "broker_instances": null,
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "expected mapping"
+    },
+    {
+      "name": "grok-empty-instances",
+      "oauth": {
+        "broker_instances": {},
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "unknown broker instance"
+    },
+    {
+      "name": "grok-secret-control",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/a"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/b"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://Synthetic/Item/key\n"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "expected secret reference"
+    },
+    {
+      "name": "grok-model-newline",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/a"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/b"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build\n"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "expected model IDs"
+    },
+    {
+      "name": "grok-instances-bounded",
+      "oauth": {
+        "broker_instances": {
+          "subscription-a": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/a"
+          },
+          "subscription-b": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/custody/b"
+          },
+          "key-c": {
+            "provider": "grok-api",
+            "op_ref": "op://SyntheticVault/SyntheticItem/api-key"
+          },
+          "instance-0": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-0"
+          },
+          "instance-1": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-1"
+          },
+          "instance-2": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-2"
+          },
+          "instance-3": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-3"
+          },
+          "instance-4": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-4"
+          },
+          "instance-5": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-5"
+          },
+          "instance-6": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-6"
+          },
+          "instance-7": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-7"
+          },
+          "instance-8": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-8"
+          },
+          "instance-9": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-9"
+          },
+          "instance-10": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-10"
+          },
+          "instance-11": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-11"
+          },
+          "instance-12": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-12"
+          },
+          "instance-13": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-13"
+          },
+          "instance-14": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-14"
+          },
+          "instance-15": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-15"
+          },
+          "instance-16": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-16"
+          },
+          "instance-17": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-17"
+          },
+          "instance-18": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-18"
+          },
+          "instance-19": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-19"
+          },
+          "instance-20": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-20"
+          },
+          "instance-21": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-21"
+          },
+          "instance-22": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-22"
+          },
+          "instance-23": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-23"
+          },
+          "instance-24": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-24"
+          },
+          "instance-25": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-25"
+          },
+          "instance-26": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-26"
+          },
+          "instance-27": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-27"
+          },
+          "instance-28": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-28"
+          },
+          "instance-29": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-29"
+          },
+          "instance-30": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-30"
+          },
+          "instance-31": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-31"
+          },
+          "instance-32": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-32"
+          },
+          "instance-33": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-33"
+          },
+          "instance-34": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-34"
+          },
+          "instance-35": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-35"
+          },
+          "instance-36": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-36"
+          },
+          "instance-37": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-37"
+          },
+          "instance-38": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-38"
+          },
+          "instance-39": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-39"
+          },
+          "instance-40": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-40"
+          },
+          "instance-41": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-41"
+          },
+          "instance-42": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-42"
+          },
+          "instance-43": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-43"
+          },
+          "instance-44": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-44"
+          },
+          "instance-45": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-45"
+          },
+          "instance-46": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-46"
+          },
+          "instance-47": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-47"
+          },
+          "instance-48": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-48"
+          },
+          "instance-49": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-49"
+          },
+          "instance-50": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-50"
+          },
+          "instance-51": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-51"
+          },
+          "instance-52": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-52"
+          },
+          "instance-53": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-53"
+          },
+          "instance-54": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-54"
+          },
+          "instance-55": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-55"
+          },
+          "instance-56": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-56"
+          },
+          "instance-57": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-57"
+          },
+          "instance-58": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-58"
+          },
+          "instance-59": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-59"
+          },
+          "instance-60": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-60"
+          },
+          "instance-61": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-61"
+          },
+          "instance-62": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-62"
+          },
+          "instance-63": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-63"
+          },
+          "instance-64": {
+            "provider": "grok",
+            "custody_dir": "/synthetic/instance-64"
+          }
+        },
+        "token_accounts": {
+          "subscription-a": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-a",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "subscription-b": {
+            "family": "grok",
+            "kind": "oauth",
+            "broker_provider": "grok",
+            "broker_instance": "subscription-b",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          },
+          "key-c": {
+            "family": "grok",
+            "kind": "api-key",
+            "broker_provider": "grok-api",
+            "broker_instance": "key-c",
+            "allowed_models": [
+              "grok-build"
+            ],
+            "concurrency": 2
+          }
+        },
+        "identity_token_pools": {
+          "grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "grok-reviewer": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "remediator-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ],
+          "hammer-grok": [
+            "key-c",
+            "subscription-b",
+            "subscription-a"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "too many instances"
     }
   ],
   "model_subsets": [

@@ -4360,6 +4360,13 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+PRIMARYDEADCODE-01 permits derived dead-code reversal only for author-added
+single-line imports and module-private literal/None bindings in a closed
+Python/JS/TS declaration grammar. Transient, unpersisted content reads must
+prove every parent-file reference is covered by the same commit's authorized
+deletion, with no surviving head references or dynamic namespace hazards.
+See the [proof contract](docs/RUNBOOK-ama-closure.md).
+
 REMGEMINI-01 follow-up: pooled fallback skips retain the registry fault in
 `skipped[].detail`, matching standalone routing. An offline regression verifies
 that account substitution still checks the selected corporate class's model

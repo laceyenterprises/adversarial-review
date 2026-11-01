@@ -1,3 +1,4 @@
+import { resolveReviewCliPath } from './review-cli-resolver.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { readBrokerProvider } from './producer-contracts/broker-evidence.mjs';
 import { resolveClaudeBrokerProvider } from './claude-account-routing.mjs';
@@ -10,13 +11,7 @@ import { resolveClaudeBrokerProvider } from './claude-account-routing.mjs';
 // pre-flight cache all three share. `assertRemediationWorkerOAuth` is the
 // dispatch entry point the reconcile/dispatch orchestration calls.
 //
-// The small CLI/auth-path resolvers below (`resolveCodexCliPath`,
-// `resolveCodexAuthPath`, `resolveGeminiCliPath`, `resolveGeminiAuthPath`) are
-// behavior-preserving PRIVATE copies of the resolvers still defined in
-// follow-up-remediation.mjs. The codex/gemini worker-spawn + startup-env path
-// there is a live SEV0 fix and keeps its own copies verbatim; duplicating these
-// pure env-reads here (matching the existing leaves' precedent for trivial
-// primitives) keeps that spawn path completely untouched.
+// CLI selection delegates to the installed review consumer profile.
 import { execFile } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
@@ -28,8 +23,8 @@ import { scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 
 const execFileAsync = promisify(execFile);
 
-function resolveCodexCliPath() {
-  return process.env.CODEX_CLI_PATH || process.env.CODEX_CLI || 'codex';
+function resolveCodexCliPath(env = process.env) {
+  return resolveReviewCliPath('codex', env);
 }
 
 function resolveCodexAuthPath() {
@@ -41,8 +36,8 @@ function resolveCodexAuthPath() {
   return join(codexHome, 'auth.json');
 }
 
-function resolveGeminiCliPath() {
-  return process.env.GEMINI_CLI_PATH || process.env.GEMINI_CLI || 'gemini';
+function resolveGeminiCliPath(env = process.env) {
+  return resolveReviewCliPath('gemini', env);
 }
 
 function resolveGeminiAuthPath() {

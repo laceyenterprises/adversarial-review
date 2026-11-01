@@ -1,3 +1,4 @@
+import './helpers/review-cli-resolver-fixture.mjs';
 import { serviceFixtureExec, writeDummyCodexAuth } from './helpers/codex-service-fixture.mjs';
 import './helpers/dispatch-files-preload.mjs';
 import test from 'node:test';

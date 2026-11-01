@@ -1,3 +1,4 @@
+import { fixtureCliPath } from './helpers/review-cli-resolver-fixture.mjs';
 import './helpers/registry-session-fixture.mjs';
 // CCX-08 — multi-identity agy reviewer (credential-capacity-expansion SPEC
 // §2b, §3 CCX-08). The pinned commands CCX-07 installs are root-owned and
@@ -1205,7 +1206,7 @@ test('CCX-08: an added identity gets the HQ-owner path\'s effective settings, on
       }
     }
     assert.equal(hqSpawns.length, 1);
-    assert.equal(hqSpawns[0].command, harness.AGY_CLI, 'the HQ-owner path runs agy directly');
+    assert.equal(hqSpawns[0].command, fixtureCliPath('agy'), 'the HQ-owner path runs agy directly');
     const sudoCall = fake.spawnCalls.find((call) => call.command === AGY_REVIEWER_SUDO);
     assert.ok(sudoCall, 'the added identity goes through sudo');
     // Pinned args: sudo flags, the pinned command, then exactly the agy args
@@ -1930,7 +1931,7 @@ test('CCX-08: with a single identity the spawn path is byte-identical to before'
     printTimeoutMs: 30_000,
     spawnWithInputImpl: async (command, argv, opts) => { calls.push({ command, argv, opts }); return { stdout: '', stderr: '' }; },
   });
-  assert.equal(calls[0].command, harness.AGY_CLI);
+  assert.equal(calls[0].command, fixtureCliPath('agy'));
   assert.deepEqual(calls[0].argv, harness.buildAgyReviewArgs({ model: 'Gemini 3.1 Pro (High)', prompt: 'review this', printTimeoutMs: 30_000, workspaceDir: '/tmp/snapshot' }));
   assert.equal(calls[0].opts.env, env);
   assert.equal(calls[0].opts.cwd, '/tmp/snapshot');

@@ -1,3 +1,4 @@
+import { resolveReviewCliPath } from './review-cli-resolver.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { resolveClaudeBrokerProvider } from './claude-account-routing.mjs';
 // Reviewer model-execution harness.
@@ -194,20 +195,19 @@ async function spawnCaptured(command, args, {
 // Claude Code CLI — runs as the current user.
 // Must NOT have ANTHROPIC_API_KEY in env when validating or invoking,
 // otherwise the CLI may report API-key auth instead of its native login state.
-const DEFAULT_CLAUDE_CLI = '/opt/homebrew/bin/claude';
-const CLAUDE_CLI = resolveClaudeCliPath();
+const CLAUDE_CLI = 'claude'; // Registry identity only; resolve at the execution boundary.
 const LAUNCHCTL = '/bin/launchctl';
 const ENV_BIN = '/usr/bin/env';
 const CLAUDE_STRIPPED_ENV_VARS = OAUTH_ENV_STRIP_LIST;
 
-// Raw Codex CLI is still used only for login-status probing.
-const CODEX_CLI = resolveCodexCliPath();
+// Registry identities are safe to export without resolving at module import.
+const CODEX_CLI = 'codex';
 
 // Native Gemini CLI — used for adversarial reviews when reviewerModel='gemini'.
 // Like Claude/Codex, it MUST authenticate via OAuth (~/.gemini/oauth_creds.json);
 // GEMINI_API_KEY / GOOGLE_API_KEY are scrubbed from the env before invoking.
-const GEMINI_CLI = resolveGeminiCliPath();
-const AGY_CLI = resolveAgyCliPath();
+const GEMINI_CLI = 'gemini';
+const AGY_CLI = 'agy';
 
 // OPENAI_API_KEY is stripped from env so Codex cannot fall back to API-key auth.
 
@@ -216,28 +216,20 @@ function resolveClaudeAuthProbeTimeoutMs(env = process.env) {
   return loadAwareTimeoutMs(Number.isFinite(parsed) && parsed > 0 ? parsed : 60_000);
 }
 
-function findOnPath(binaryName, pathValue = process.env.PATH || '') {
-  for (const dir of pathValue.split(':').filter(Boolean)) {
-    const candidate = join(dir, binaryName);
-    if (existsSync(candidate)) return candidate;
-  }
-  return null;
-}
-
 function resolveClaudeCliPath(env = process.env) {
-  return env.CLAUDE_CLI_PATH || env.CLAUDE_CLI || findOnPath('claude', env.PATH) || DEFAULT_CLAUDE_CLI;
+  return resolveReviewCliPath('claude', env);
 }
 
 function resolveCodexCliPath(env = process.env) {
-  return env.CODEX_CLI_PATH || env.CODEX_CLI || findOnPath('codex', env.PATH) || 'codex';
+  return resolveReviewCliPath('codex', env);
 }
 
 function resolveGeminiCliPath(env = process.env) {
-  return env.GEMINI_CLI_PATH || env.GEMINI_CLI || findOnPath('gemini', env.PATH) || 'gemini';
+  return resolveReviewCliPath('gemini', env);
 }
 
 function resolveAgyCliPath(env = process.env) {
-  return env.AGY_CLI_PATH || env.AGY_CLI || findOnPath('agy', env.PATH) || 'agy';
+  return resolveReviewCliPath('agy', env);
 }
 
 // ── OAuth credential checks ──────────────────────────────────────────────────
@@ -410,7 +402,6 @@ async function assertClaudeOAuth({
   spawnClaudeImpl = spawnClaude,
   retryDelaysMs,
   sleepImpl,
-  existsSyncImpl = existsSync,
   resolveClaudeLaunchctlUidImpl = resolveClaudeLaunchctlUidFromConfig,
   prepareClaudeOAuthEnvImpl = prepareClaudeOAuthEnv,
   fetchImpl = globalThis.fetch,
@@ -418,10 +409,6 @@ async function assertClaudeOAuth({
   logger = console,
   platform = process.platform,
 } = {}) {
-  if (spawnClaudeImpl === spawnClaude && !existsSyncImpl(CLAUDE_CLI)) {
-    throw new OAuthError('claude', `claude CLI not found at ${CLAUDE_CLI}`);
-  }
-
   const auth = await prepareClaudeOAuthEnvImpl({
     ...(model ? { model } : {}),
     sourceEnv: process.env,
@@ -477,6 +464,7 @@ async function spawnClaude(args, options = {}) {
     useLaunchctl = true,
     ...execOptions
   } = options;
+  const claudeCli = resolveClaudeCliPath(execOptions.env || process.env);
 
   return auditReviewerSubprocess(async ({ onSpawn }) => {
     if (platform === 'darwin' && useLaunchctl) {
@@ -491,7 +479,7 @@ async function spawnClaude(args, options = {}) {
           String(uid),
           ENV_BIN,
           ...CLAUDE_STRIPPED_ENV_VARS.flatMap((name) => ['-u', name]),
-          CLAUDE_CLI,
+          claudeCli,
           ...args,
         ];
         if (execFileImpl === execFileAsync) {
@@ -508,9 +496,9 @@ async function spawnClaude(args, options = {}) {
     }
 
     if (execFileImpl === execFileAsync) {
-      return spawnCapturedProcessGroup(CLAUDE_CLI, args, { ...execOptions, onSpawn });
+      return spawnCapturedProcessGroup(claudeCli, args, { ...execOptions, onSpawn });
     }
-    return execFileImpl(CLAUDE_CLI, args, execOptions);
+    return execFileImpl(claudeCli, args, execOptions);
   });
 }
 
@@ -582,10 +570,8 @@ function assertCodexAuthReadable() {
   return authPath;
 }
 
-async function assertCodexOAuth() {
-  if (!existsSync(CODEX_CLI)) {
-    throw new OAuthError('codex', `codex CLI not found at ${CODEX_CLI}`);
-  }
+async function assertCodexOAuth({ codexCli = null } = {}) {
+  if (!codexCli) resolveCodexCliPath();
 
   // Verify auth.json is readable and contains valid OAuth tokens.
   // This is more reliable than CLI probes, which may not support `login status`.
@@ -638,21 +624,20 @@ function assertGeminiAuthReadable(env = process.env) {
   return credsPath;
 }
 
-async function assertGeminiOAuth(env = process.env) {
-  if (!existsSync(GEMINI_CLI)) {
-    throw new OAuthError('gemini', `gemini CLI not found at ${GEMINI_CLI}`);
-  }
+async function assertGeminiOAuth(env = process.env, geminiCli = null) {
+  if (!geminiCli) resolveGeminiCliPath(env);
 
   // Verify oauth_creds.json is readable and carries an access token.
   assertGeminiAuthReadable(env);
 }
 
 async function assertAgyReviewerAuth({
-  agyCli = AGY_CLI,
+  agyCli = null,
   env = process.env,
   checkAuthImpl = checkAgyReviewerAuth,
   timeoutMs = resolveAgyAuthProbeTimeoutMs(env),
 } = {}) {
+  agyCli ||= resolveAgyCliPath(env);
   const result = await checkAuthImpl({ agyCli, env, timeoutMs });
   if (!result?.ok) {
     const reason = result?.reason || 'agy-probe-failed';
@@ -1205,7 +1190,7 @@ function shouldRecoverCodexWithOAuth(err, modelProvider) {
 }
 
 async function spawnCodexReview({
-  codexCli = CODEX_CLI,
+  codexCli = null,
   outputPath,
   prompt,
   model = null,
@@ -1221,6 +1206,7 @@ async function spawnCodexReview({
   serviceHome = null,
   execFileSyncImpl,
 }) {
+  codexCli ||= resolveCodexCliPath(env || process.env);
   const home = serviceHome || prepareServiceCodexHome({ env, workspaceDir: cwd, model, codexCli, execFileSyncImpl,
     effort: configOverrides?.find((item) => item.key === 'model_reasoning_effort')?.value });
   try {
@@ -1254,7 +1240,7 @@ async function reviewWithCodex(diff, extraContext = '', {
   promptOverride = null,
   modelPin = '', reasoningPin = '',
   ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
-  codexCli = CODEX_CLI,
+  codexCli = null,
   assertCodexOAuthImpl = assertCodexOAuth,
   spawnCodexReviewImpl = spawnCodexReview,
   materializePerWorkerCodexAuthImpl = materializePerWorkerCodexAuth,
@@ -1265,8 +1251,9 @@ async function reviewWithCodex(diff, extraContext = '', {
   await ensureWorkerRegistryReadyImpl({pin: modelPin});
   // Resolve infrastructure before probing credentials; refresh again after auth.
   resolveReviewerExecution('codex', { modelPin, reasoningPin, log });
+  codexCli ||= resolveCodexCliPath();
   console.error('[reviewWithCodex] asserting OAuth...');
-  await assertCodexOAuthImpl();
+  await assertCodexOAuthImpl({ codexCli });
   console.error('[reviewWithCodex] OAuth OK');
 
   if (!existsSync(codexCli)) {
@@ -2633,7 +2620,7 @@ async function captureAgyReviewUsage({ stdout, model, env, identity }) {
 }
 
 async function spawnGeminiReview({
-  geminiCli = GEMINI_CLI,
+  geminiCli = null,
   prompt,
   model = resolveGeminiReviewerModel(),
   env,
@@ -2643,6 +2630,7 @@ async function spawnGeminiReview({
   maxBuffer = 10 * 1024 * 1024,
   spawnWithInputImpl = spawnWithInput,
 }) {
+  geminiCli ||= resolveGeminiCliPath(env || process.env);
   // Prompt content is delivered on stdin only — see buildGeminiReviewArgs.
   return spawnWithInputImpl(
     geminiCli,
@@ -2659,7 +2647,7 @@ async function spawnGeminiReview({
 }
 
 async function spawnAgyReview({
-  agyCli = AGY_CLI,
+  agyCli = null,
   prompt,
   model = resolveGeminiAntigravityModel(),
   env,
@@ -2675,6 +2663,7 @@ async function spawnAgyReview({
   // args, everything else comes from the root-owned settings file.
   identity = null,
 }) {
+  if (!identity) agyCli ||= resolveAgyCliPath(env || process.env);
   const effectiveTimeout = resolveAgyReviewerSubprocessTimeoutMs(env, {
     reviewerTimeoutMs: timeout,
     printTimeoutMs,
@@ -2938,14 +2927,16 @@ async function reviewWithGemini(diff, extraContext = '', {
   let subprocessStarted = false;
   try {
     reviewEnv = withReviewerSubprocessCwdEnv(reviewEnv, reviewerSubprocessCwd);
+    const runtimeCli = addedIdentity ? null : (runtime === 'antigravity'
+      ? resolveAgyCliPath(reviewEnv) : resolveGeminiCliPath(reviewEnv));
     if (addedIdentity) {
       identityRun = { user: addedIdentity.user, reviewId: addedIdentity.reviewId, cwd: null, workspaceDir: null };
       await prepareAgyIdentityReviewImpl(identityRun, { sourceDir: reviewerSubprocessCwd });
       console.error(`[reviewWithGemini] agy identity=${identityRun.user} review=${identityRun.reviewId} scratch=${identityRun.workspaceDir}`);
     } else if (runtime === 'antigravity') {
-      await assertAgyAuthImpl({ agyCli: AGY_CLI, env: reviewEnv });
+      await assertAgyAuthImpl({ agyCli: runtimeCli, env: reviewEnv });
     } else {
-      await assertOAuthImpl(reviewEnv);
+      await assertOAuthImpl(reviewEnv, runtimeCli);
     }
     console.error('[reviewWithGemini] OAuth OK');
 
@@ -2981,7 +2972,7 @@ async function reviewWithGemini(diff, extraContext = '', {
     const result = runtime === 'antigravity'
       ? await withGeminiSubprocessRetry(
         () => spawnAgyReviewImpl({
-          agyCli: AGY_CLI,
+          agyCli: runtimeCli,
           prompt,
           model,
           env: reviewEnv,
@@ -3000,7 +2991,7 @@ async function reviewWithGemini(diff, extraContext = '', {
       )
       : await withGeminiSubprocessRetry(
         () => spawnGeminiReviewImpl({
-          geminiCli: GEMINI_CLI,
+          geminiCli: runtimeCli,
           prompt,
           model,
           env: reviewEnv,
@@ -3820,7 +3811,6 @@ const __test__ = {
   CROSS_MODEL_PRIMARY_BY_BUILDER_CLASS,
   DEFAULT_AGY_ARGV_MAX_BYTES,
   DEFAULT_AGY_CHUNK_MAX_CHUNKS,
-  DEFAULT_CLAUDE_CLI,
   DEFAULT_CQP_BROKER_URL,
   DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_BACKOFF_MS,
   DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_RETRIES,
@@ -3872,7 +3862,6 @@ const __test__ = {
   extractClaudeJsonText,
   extractMarkdownIssueList,
   fetchWithTimeout,
-  findOnPath,
   formatAgyPrintTimeout,
   formatChildProcessFailureDetails,
   formatCodexConfigOverride,

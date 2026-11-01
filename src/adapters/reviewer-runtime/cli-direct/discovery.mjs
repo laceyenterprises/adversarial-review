@@ -1,3 +1,4 @@
+import { resolveReviewCliPath } from '../../../review-cli-resolver.mjs';
 import { prepareServiceCodexHome } from '../../../codex-service-home.mjs';
 import { ensureWorkerRegistryReady, resolveRemediationModel } from '../../agent-runtime/local/remediation.mjs';
 import { loadAwareTimeoutMs } from '../../../load-aware-timeout.mjs';
@@ -9,12 +10,6 @@ import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
 
 const execFileAsync = promisify(execFile);
-
-const INSTALL_HINTS = Object.freeze({
-  claude: 'Install Claude Code CLI: https://docs.anthropic.com/en/docs/claude-code/setup',
-  codex: 'Install Codex CLI: https://developers.openai.com/codex/cli',
-  gemini: 'Install Gemini CLI and run `gemini auth` to create OAuth credentials.',
-});
 
 class CliDirectPreflightError extends Error {
   constructor(message, {
@@ -36,47 +31,12 @@ class CliDirectPreflightError extends Error {
   }
 }
 
-async function isExecutable(candidate) {
-  try {
-    await access(candidate, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function findOnPath(binaryName, pathValue = process.env.PATH || '') {
-  for (const dir of String(pathValue || '').split(':').filter(Boolean)) {
-    const candidate = join(dir, binaryName);
-    if (await isExecutable(candidate)) return candidate;
-  }
-  return null;
-}
-
-async function resolveCliBinary({
-  binaryName,
-  envVar,
-  env = process.env,
-} = {}) {
-  const override = String(env?.[envVar] || '').trim();
-  if (override) return override;
-  const fromPath = await findOnPath(binaryName, env?.PATH || '');
-  if (fromPath) return fromPath;
-  throw new CliDirectPreflightError(
-    `${binaryName} CLI not found. Set ${envVar} to the CLI path or put ${binaryName} on PATH. ${INSTALL_HINTS[binaryName] || ''}`.trim(),
-    { layer: `${binaryName}-path`, command: `which ${binaryName}` },
-  );
+async function resolveCliBinary({ binaryName, env = process.env } = {}) {
+  return resolveReviewCliPath(binaryName, env);
 }
 
 async function resolveGeminiCliBinary({ env = process.env } = {}) {
-  const override = String(env?.GEMINI_CLI_PATH || env?.GEMINI_CLI || '').trim();
-  if (override) return override;
-  const fromPath = await findOnPath('gemini', env?.PATH || '');
-  if (fromPath) return fromPath;
-  throw new CliDirectPreflightError(
-    `gemini CLI not found. Set GEMINI_CLI_PATH or GEMINI_CLI to the CLI path or put gemini on PATH. ${INSTALL_HINTS.gemini}`.trim(),
-    { layer: 'gemini-path', command: 'which gemini' },
-  );
+  return resolveReviewCliPath('gemini', env);
 }
 
 function resolveGeminiOAuthCredsPath(env = process.env) {
@@ -295,7 +255,6 @@ async function probeReviewerCliOAuth({
 
 export {
   CliDirectPreflightError,
-  findOnPath,
   probeClaudeCli,
   probeCodexCli,
   probeGeminiCli,

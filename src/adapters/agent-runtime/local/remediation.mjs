@@ -1,3 +1,4 @@
+import { resolveReviewCliPath } from '../../../review-cli-resolver.mjs';
 import { readHostObservation, readHostObservationSync } from '../../../dispatch-files-client.mjs';
 import { hostObservationFailure } from '../../../dispatch-read-client.mjs';
 import { execFile } from 'node:child_process';
@@ -91,15 +92,15 @@ function installWorkerAdapterEnv(env, sourceEnv, physicalClass, trailerClass, re
 }
 
 function resolveCodexCliPath(env = process.env) {
-  return env.CODEX_CLI_PATH || env.CODEX_CLI || 'codex';
+  return resolveReviewCliPath('codex', env);
 }
 
 function resolveClaudeCodeCliPath(env = process.env) {
-  return env.CLAUDE_CODE_CLI_PATH || env.CLAUDE_CLI || 'claude';
+  return resolveReviewCliPath('claude', env);
 }
 
 function resolveGeminiCliPath(env = process.env) {
-  return env.GEMINI_CLI_PATH || env.GEMINI_CLI || 'gemini';
+  return resolveReviewCliPath('gemini', env);
 }
 
 function resolveCodexAuthPath(env = process.env) {

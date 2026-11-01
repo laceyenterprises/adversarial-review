@@ -1,3 +1,4 @@
+import './helpers/review-cli-resolver-fixture.mjs';
 import { serviceFixtureExec, writeDummyCodexAuth } from './helpers/codex-service-fixture.mjs';
 import { reviewerSizeFactsLine, readSizeFacts } from '../src/reviewer-size-owner.mjs';
 import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
@@ -2354,7 +2355,7 @@ test('cli-direct path discovery honors env override, PATH fallback, and clear mi
         envVar: 'CODEX_CLI',
         env: { PATH: '' },
       }),
-      /codex CLI not found.*CODEX_CLI.*developers\.openai\.com\/codex\/cli/i,
+      /review CLI resolution unavailable for codex/,
     );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

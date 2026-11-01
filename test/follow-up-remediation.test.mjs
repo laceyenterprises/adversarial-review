@@ -1,3 +1,4 @@
+import './helpers/review-cli-resolver-fixture.mjs';
 import { serviceFixtureExec, writeDummyCodexAuth } from './helpers/codex-service-fixture.mjs';
 import { prepareServiceCodexHome } from '../src/codex-service-home.mjs';
 import { installDispatchFileProducerFixture, seedWorkerRegistry } from './helpers/dispatch-files-fixture.mjs';
@@ -4086,7 +4087,7 @@ test('spawnGeminiRemediationWorker builds the gemini headless argv and never emb
     resolveHqReplyPath({ hqRoot: TEST_HQ_ROOT, launchRequestId: TEST_LAUNCH_REQUEST_ID }).replyPath
   );
   assert.deepEqual(result.command, [
-    'gemini',
+    capturedCli,
     '--approval-mode',
     'yolo',
     '--skip-trust',
@@ -7871,8 +7872,7 @@ test('consumeNextFollowUpJob threads claimed jobId through to the spawned worker
   process.env.HOME = rootDir;
   process.env.CODEX_HOME = codexHome;
   process.env.CODEX_AUTH_PATH = authPath;
-  // Use a name without slashes so assertCodexOAuth's existsSync gate is skipped
-  // — production resolves a real CLI; tests just need the OAuth assertion to pass.
+  // The fake installed resolver maps this legacy name to its disposable CLI.
   process.env.CODEX_CLI_PATH = 'codex';
 
   let capturedSpawnEnv;
@@ -8345,7 +8345,7 @@ test('consumeNextFollowUpJob dispatches remediation through hq branch-push when 
               stderr: '',
             };
           }
-          if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+          if (command === process.env.HQ_BIN && args[0] === 'dispatch' && args[1] === 'status') {
             assert.ok(args.includes('--json'), 'status probes must request JSON');
             return {
               stdout: JSON.stringify({
@@ -8355,7 +8355,7 @@ test('consumeNextFollowUpJob dispatches remediation through hq branch-push when 
               stderr: '',
             };
           }
-          if (command === 'hq' && args[0] === 'dispatch') {
+          if (command === process.env.HQ_BIN && args[0] === 'dispatch') {
             return {
               stdout: JSON.stringify({
                 launchRequestId: 'lrq_arp04_dispatch',
@@ -8380,8 +8380,8 @@ test('consumeNextFollowUpJob dispatches remediation through hq branch-push when 
       assert.equal(result.job.remediationWorker.auditRef, `agent-os://audit/${result.job.jobId}`);
       assert.equal(result.job.remediationWorker.completionShape, 'branch-push');
       assert.equal(result.job.branch, 'codex/fix-pr-71');
-      assert.equal(commands.some((entry) => entry[0] === 'hq'), false);
-      assert.equal(commands.some((entry) => entry[0] === 'hq' && entry[1] === 'dispatch' && entry[2] !== 'status'), false);
+      assert.equal(commands.some((entry) => entry[0] === process.env.HQ_BIN), false);
+      assert.equal(commands.some((entry) => entry[0] === process.env.HQ_BIN && entry[1] === 'dispatch' && entry[2] !== 'status'), false);
       const dispatchRequest = requests.find((entry) => entry.url === '/v1/dispatch');
       assert.ok(dispatchRequest);
       assert.equal(dispatchRequest.body.request_id, result.job.jobId);
@@ -8738,7 +8738,7 @@ test('consumeNextFollowUpJob dispatches gemini through broker-backed hq without 
               stderr: '',
             };
           }
-          if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+          if (command === process.env.HQ_BIN && args[0] === 'dispatch' && args[1] === 'status') {
             assert.ok(args.includes('--json'), 'status probes must request JSON');
             return {
               stdout: JSON.stringify({
@@ -8748,7 +8748,7 @@ test('consumeNextFollowUpJob dispatches gemini through broker-backed hq without 
               stderr: '',
             };
           }
-          if (command === 'hq' && args[0] === 'dispatch') {
+          if (command === process.env.HQ_BIN && args[0] === 'dispatch') {
             return {
               stdout: JSON.stringify({
                 launchRequestId: 'lrq_gem_dispatch',
@@ -8766,7 +8766,7 @@ test('consumeNextFollowUpJob dispatches gemini through broker-backed hq without 
 
       assert.equal(result.consumed, true);
       assert.equal(result.job.remediationWorker.dispatchMode, 'hq');
-      assert.equal(commands.some((entry) => entry[0] === 'hq' && entry[1] === 'dispatch' && entry[2] !== 'status'), false);
+      assert.equal(commands.some((entry) => entry[0] === process.env.HQ_BIN && entry[1] === 'dispatch' && entry[2] !== 'status'), false);
       const dispatchRequest = requests.find((entry) => entry.url === '/v1/dispatch');
       assert.ok(dispatchRequest);
       // hq-dispatch accepts gemini as the worker class (already allowlisted in
@@ -8826,7 +8826,7 @@ test('reconcileFollowUpJob keeps HQ-dispatched remediation active across daemon 
       jobPath: spawned.jobPath,
       now: () => '2026-04-21T10:10:00.000Z',
       execFileImpl: async (command, args) => {
-        if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+        if (command === process.env.HQ_BIN && args[0] === 'dispatch' && args[1] === 'status') {
           assert.ok(args.includes('--json'), 'status probes must request JSON');
           return {
             stdout: JSON.stringify({
@@ -8852,7 +8852,7 @@ test('reconcileFollowUpJob keeps HQ-dispatched remediation active across daemon 
       jobPath: spawned.jobPath,
       now: () => '2026-04-21T10:25:00.000Z',
       execFileImpl: async (command, args) => {
-        if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+        if (command === process.env.HQ_BIN && args[0] === 'dispatch' && args[1] === 'status') {
           assert.ok(args.includes('--json'), 'status probes must request JSON');
           return {
             stdout: JSON.stringify({
@@ -9010,7 +9010,7 @@ test('health.worker.terminal succeeded topic waits for durable reply before trea
     },
     now: () => '2026-04-21T10:25:00.000Z',
     execFileImpl: async (command, args) => {
-      if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+      if (command === process.env.HQ_BIN && args[0] === 'dispatch' && args[1] === 'status') {
         assert.ok(args.includes('--json'), 'status probes must request JSON');
         statusPolls += 1;
         return {
@@ -9071,7 +9071,7 @@ test('health.worker.terminal failed topic event polls HQ status when failureClas
     },
     now: () => '2026-04-21T10:25:00.000Z',
     execFileImpl: async (command, args) => {
-      if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+      if (command === process.env.HQ_BIN && args[0] === 'dispatch' && args[1] === 'status') {
         assert.ok(args.includes('--json'), 'status probes must request JSON');
         statusPolls += 1;
         return {
@@ -9391,7 +9391,7 @@ test('reconcileFollowUpJob requeues a dead HQ remediation worker when dispatch s
       jobPath: spawned.jobPath,
       now: () => '2026-04-21T10:25:00.000Z',
       execFileImpl: async (command, args) => {
-        if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+        if (command === process.env.HQ_BIN && args[0] === 'dispatch' && args[1] === 'status') {
           assert.ok(args.includes('--json'), 'status probes must request JSON');
           return {
             stdout: JSON.stringify({
@@ -9466,7 +9466,7 @@ test('reconcileFollowUpJob fails HQ transient dispatches once the retry budget i
         jobPath: spawned.jobPath,
         now: () => '2026-04-21T10:25:00.000Z',
         execFileImpl: async (command, args) => {
-          if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+          if (command === process.env.HQ_BIN && args[0] === 'dispatch' && args[1] === 'status') {
             assert.ok(args.includes('--json'), 'status probes must request JSON');
             return {
               stdout: JSON.stringify({
@@ -9537,7 +9537,7 @@ test('reconcileFollowUpJob still terminalizes non-transient HQ dispatch failures
       jobPath: spawned.jobPath,
       now: () => '2026-04-21T10:25:00.000Z',
       execFileImpl: async (command, args) => {
-        if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+        if (command === process.env.HQ_BIN && args[0] === 'dispatch' && args[1] === 'status') {
           assert.ok(args.includes('--json'), 'status probes must request JSON');
           return {
             stdout: JSON.stringify({
@@ -9600,7 +9600,7 @@ test('reconcileFollowUpJob resolves the HQ workspace from dispatch status when t
       jobPath: spawned.jobPath,
       now: () => '2026-04-21T10:25:00.000Z',
       execFileImpl: async (command, args) => {
-        if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+        if (command === process.env.HQ_BIN && args[0] === 'dispatch' && args[1] === 'status') {
           assert.ok(args.includes('--json'), 'status probes must request JSON');
           return {
             stdout: JSON.stringify({
@@ -9702,7 +9702,7 @@ test('consumeNextFollowUpJob falls back to the legacy local spawner when HQ disp
     assert.equal(result.consumed, true);
     assert.equal(spawnCalls, 1);
     assert.equal(result.job.remediationWorker.dispatchMode, undefined);
-    assert.equal(commands.some((entry) => entry[0] === 'hq' && entry[1] === 'dispatch'), false);
+    assert.equal(commands.some((entry) => entry[0] === process.env.HQ_BIN && entry[1] === 'dispatch'), false);
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];
@@ -9748,7 +9748,7 @@ test('consumeNextFollowUpJob routes agentos remediation through HQ branch-push d
               stderr: '',
             };
           }
-          if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+          if (command === process.env.HQ_BIN && args[0] === 'dispatch' && args[1] === 'status') {
             assert.ok(args.includes('--json'), 'status probes must request JSON');
             return {
               stdout: JSON.stringify({
@@ -9758,7 +9758,7 @@ test('consumeNextFollowUpJob routes agentos remediation through HQ branch-push d
               stderr: '',
             };
           }
-          if (command === 'hq' && args[0] === 'dispatch') {
+          if (command === process.env.HQ_BIN && args[0] === 'dispatch') {
             return {
               stdout: JSON.stringify({
                 launchRequestId: 'lrq_aom03_agentos',
@@ -9775,7 +9775,7 @@ test('consumeNextFollowUpJob routes agentos remediation through HQ branch-push d
         },
       });
 
-      const dispatchCommand = commands.find((entry) => entry[0] === 'hq' && entry[1] === 'dispatch' && !['status', 'cancel'].includes(entry[2]));
+      const dispatchCommand = commands.find((entry) => entry[0] === process.env.HQ_BIN && entry[1] === 'dispatch' && !['status', 'cancel'].includes(entry[2]));
       assert.equal(result.consumed, true);
       assert.equal(spawnCalls, 0);
       assert.equal(result.job.remediationPlan.dispatchPath, 'hq');
@@ -9810,7 +9810,7 @@ test('dispatchRemediationViaHq reuses the stable job request_id through the SDK'
     const commands = [];
     const execFileImpl = async (command, args) => {
       commands.push([command, ...args]);
-      if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+      if (command === process.env.HQ_BIN && args[0] === 'dispatch' && args[1] === 'status') {
         assert.ok(args.includes('--json'), 'status probes must request JSON');
         return {
           stdout: JSON.stringify({
@@ -9846,7 +9846,7 @@ test('dispatchRemediationViaHq reuses the stable job request_id through the SDK'
     assert.equal(second.dispatchId, first.dispatchId);
     assert.equal(dispatches.size, 1);
     assert.equal(requests.filter((entry) => entry.url === '/v1/dispatch').length, 2);
-    assert.equal(commands.some((entry) => entry[0] === 'hq'), false);
+    assert.equal(commands.some((entry) => entry[0] === process.env.HQ_BIN), false);
   });
 });
 
@@ -10338,7 +10338,7 @@ test('consumeNextFollowUpJob keeps native remediation on the bare spawner withou
       assert.equal(spawnCalls, 1);
       assert.equal(result.job.remediationPlan.dispatchPath, 'bare');
       assert.equal(result.job.remediationWorker.dispatchMode, undefined);
-      assert.equal(commands.some((entry) => entry[0] === 'hq' && entry[1] === 'dispatch'), false);
+      assert.equal(commands.some((entry) => entry[0] === process.env.HQ_BIN && entry[1] === 'dispatch'), false);
     });
   });
 });
@@ -10380,7 +10380,7 @@ test('consumeNextFollowUpJob lets legacy HQ flag override native orchestration m
               stderr: '',
             };
           }
-          if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+          if (command === process.env.HQ_BIN && args[0] === 'dispatch' && args[1] === 'status') {
             assert.ok(args.includes('--json'), 'status probes must request JSON');
             return {
               stdout: JSON.stringify({
@@ -10390,7 +10390,7 @@ test('consumeNextFollowUpJob lets legacy HQ flag override native orchestration m
               stderr: '',
             };
           }
-          if (command === 'hq' && args[0] === 'dispatch') {
+          if (command === process.env.HQ_BIN && args[0] === 'dispatch') {
             return {
               stdout: JSON.stringify({
                 launchRequestId: 'lrq_aom03_override',
@@ -10406,7 +10406,7 @@ test('consumeNextFollowUpJob lets legacy HQ flag override native orchestration m
         },
       });
 
-      const dispatchCommand = commands.find((entry) => entry[0] === 'hq' && entry[1] === 'dispatch' && !['status', 'cancel'].includes(entry[2]));
+      const dispatchCommand = commands.find((entry) => entry[0] === process.env.HQ_BIN && entry[1] === 'dispatch' && !['status', 'cancel'].includes(entry[2]));
       assert.equal(result.consumed, true);
       assert.equal(result.job.remediationPlan.dispatchPath, 'hq');
       assert.equal(result.job.remediationWorker.dispatchMode, 'hq');
@@ -10516,11 +10516,11 @@ test('reconcileFollowUpJob cancels an active HQ dispatch before stopping on PR l
     now: () => '2026-04-21T10:15:00.000Z',
     execFileImpl: async (command, args) => {
       commands.push([command, ...args]);
-      if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+      if (command === process.env.HQ_BIN && args[0] === 'dispatch' && args[1] === 'status') {
         assert.ok(args.includes('--json'), 'status probes must request JSON');
         return { stdout: JSON.stringify({ status: 'running', health: 'healthy' }), stderr: '' };
       }
-      if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'cancel') {
+      if (command === process.env.HQ_BIN && args[0] === 'dispatch' && args[1] === 'cancel') {
         return { stdout: JSON.stringify({ status: 'cancelled' }), stderr: '' };
       }
       throw new Error(`unexpected command: ${command} ${args.join(' ')}`);
@@ -10535,7 +10535,7 @@ test('reconcileFollowUpJob cancels an active HQ dispatch before stopping on PR l
   assert.equal(result.action, 'stopped');
   assert.equal(result.reason, 'pr-closed');
   assert.ok(
-    commands.some((entry) => entry[0] === 'hq' && entry[1] === 'dispatch' && entry[2] === 'cancel' && entry[3] === 'dispatch_arp04_cancel'),
+    commands.some((entry) => entry[0] === process.env.HQ_BIN && entry[1] === 'dispatch' && entry[2] === 'cancel' && entry[3] === 'dispatch_arp04_cancel'),
   );
 });
 
@@ -10802,7 +10802,7 @@ test('mixed-mode cutover keeps legacy in-progress ownership and dispatches newly
               stderr: '',
             };
           }
-          if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+          if (command === process.env.HQ_BIN && args[0] === 'dispatch' && args[1] === 'status') {
             assert.ok(args.includes('--json'), 'status probes must request JSON');
             return {
               stdout: JSON.stringify({
@@ -10812,7 +10812,7 @@ test('mixed-mode cutover keeps legacy in-progress ownership and dispatches newly
               stderr: '',
             };
           }
-          if (command === 'hq' && args[0] === 'dispatch') {
+          if (command === process.env.HQ_BIN && args[0] === 'dispatch') {
             return {
               stdout: JSON.stringify({
                 launchRequestId: 'lrq_arp04_mixed',

@@ -4388,6 +4388,15 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+EXHAUSTEDHEADOWNER-01 final remediation: proven completed final-round pushes
+retain closer ownership at exhaustion; returning reviewed commits share the
+watcher/closure delivered-pass predicate. Probe and pager failures stay local
+to their PR/observer, and stale-head admission shares its remediation-budget
+snapshot with capped closure. Offline regressions restore closer wake-drain
+coverage. The closure runbook records the possible first-deploy SEV1 backlog
+burst and read-only verification; existing lifecycle states and smoke promises
+are unchanged.
+
 - **LABELREARM-01 final remediation:** waiver observation shares asynchronous label reads after cached presence checks, preserves stopped-job budgets and provenance, and clears backoff only for newly accepted intent. Offline coverage now proves one exact-head reviewer spawn and no duplicate on the next poll; pre-review labels require removal and reapplication.
 
 - **LABELREARM-01:** registered operator-label evidence on an already-reviewed, waiver-only hold now requests one exact-head waiver-observation review through the shared evidence predicate, retaining stopped follow-ups for the fresh review to supersede. Accepted intent exits operator backoff. The fresh review still decides; no label bypasses findings or merge checks.

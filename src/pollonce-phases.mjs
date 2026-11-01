@@ -48,7 +48,7 @@ import { reviewerRuntimeState } from './reviewer-runtime-adapter.mjs';
 import { recordNoProgressLaneRun, maybeFireOperatorDecisionRequiredAlert } from './watcher-no-progress-lane.mjs';
 import {
   recoverWithheldFinalRoundHead, withheldHeadRecoveryCandidates,
-  findFinalRemediationPushJob, isCompletedCommentOnlyFinalRoundJob,
+  findFinalRemediationPushJob, isCompletedCommentOnlyFinalRoundJob, isCompletedFinalRemediationJob,
 } from './comment-only-final-round.mjs';
 import { parkExhaustedReview } from './review-retry-exhaustion.mjs';
 import { createLabelControlObservationCache, observeOperatorLabelWakes } from './operator-label-wake.mjs';
@@ -1462,15 +1462,29 @@ export async function processReviewSubject(entry, ctx) {
         execFileImpl: execFileAsync,
         logger: console,
       });
+      // Both exhausted-head admission and capped closure use the same snapshot.
+      let remediationBudget = null;
+      const resolveRemediationBudget = () => {
+        if (!remediationBudget) {
+          const ledger = summarizePRRemediationLedger(ROOT, { repo: repoPath, prNumber });
+          const budget = resolveRoundBudgetForJob({ linearTicketId, riskClass: ledger.latestRiskClass }, { rootDir: ROOT });
+          remediationBudget = { ledger, effectiveRoundBudget: resolveMaxRemediationRounds({
+            roundBudget: budget.roundBudget, latestMaxRounds: ledger.latestMaxRounds,
+          }) };
+        }
+        return remediationBudget;
+      };
+      const finalRemediationPush = effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal
+        ? findFinalRemediationPushJob(ROOT, { repo: repoPath, prNumber, headSha: subject.headSha }) : null;
       // EXHAUSTEDHEADOWNER-01: one delivered verdict per distinct builder head.
       // The request CAS coalesces ticks and refuses to overwrite a live claim.
       if (effectiveDomainId === CODE_PR_DOMAIN_ID && existing?.reviewer_head_sha
         && existing.reviewer_head_sha !== subject.headSha && !subject.terminal
-        && !isExhaustedHeadVerdictRequested(existing, subject.headSha)) {
-        const ledger = summarizePRRemediationLedger(ROOT, { repo: repoPath, prNumber });
-        const budget = resolveRoundBudgetForJob({ linearTicketId, riskClass: ledger.latestRiskClass }, { rootDir: ROOT });
+        && !isExhaustedHeadVerdictRequested(existing, subject.headSha)
+        && !isCompletedFinalRemediationJob(finalRemediationPush)) {
+        const { ledger, effectiveRoundBudget } = resolveRemediationBudget();
         const exhausted = reviewCycleExhaustedFromRounds({
-          effectiveRoundBudget: resolveMaxRemediationRounds({ roundBudget: budget.roundBudget, latestMaxRounds: ledger.latestMaxRounds }),
+          effectiveRoundBudget,
           completedRemediationRounds: ledger.completedRoundsForPR,
           completedRereviewRounds: countCompletedReviewerRereviewRounds({ db, rootDir: ROOT, repoPath, prNumber }),
         });
@@ -1480,15 +1494,20 @@ export async function processReviewSubject(entry, ctx) {
         const lifetimeExhausted = evaluateHammerRetryCap(readHammerRetryCapLedger(ROOT, { repo: repoPath, prNumber }), {
           jobKey: subject.headSha, headSha: subject.headSha, lifetimeDispatchCeiling: authority.hammerLifetimeDispatchCeiling,
         }).lifetimeCapExhausted;
-        existing = await admitExhaustedHeadVerdict({
-          lifetimeExhausted,
-          exhausted: exhausted || isReviewCycleCapRoutedToHammer({ db, repoPath, prNumber, reviewRow: existing, labelNames: prLabelNames }),
-          headSha: subject.headSha, row: existing,
-          countDelivered: () => countReviewCeilingUnits({ db, rootDir: ROOT, repoPath, prNumber, headSha: subject.headSha }),
-          classifyCloser: resolveHeadCloserCommitSuppression,
-          request: args => requestReviewRereview({ rootDir: ROOT, db, repo: repoPath, prNumber, ...args }),
-          readRow: () => stmtGetReviewRow.get(repoPath, prNumber),
-        });
+        try {
+          existing = await admitExhaustedHeadVerdict({
+            lifetimeExhausted,
+            exhausted: exhausted || isReviewCycleCapRoutedToHammer({ db, repoPath, prNumber, reviewRow: existing, labelNames: prLabelNames }),
+            headSha: subject.headSha, row: existing,
+            countDelivered: () => countReviewCeilingUnits({ db, rootDir: ROOT, repoPath, prNumber, headSha: subject.headSha }),
+            classifyCloser: resolveHeadCloserCommitSuppression,
+            request: args => requestReviewRereview({ rootDir: ROOT, db, repo: repoPath, prNumber, ...args }),
+            readRow: () => stmtGetReviewRow.get(repoPath, prNumber),
+          });
+        } catch (error) {
+          console.warn(`[watcher] exhausted-head verdict admission unresolved for ${repoPath}#${prNumber}: ${error?.message || error}`);
+          return;
+        }
       }
       const exhaustedHeadVerdict = isExhaustedHeadVerdictRequested(existing, subject.headSha);
       const cycleCapConfig = resolveReviewCycleCapConfig({
@@ -1544,15 +1563,10 @@ export async function processReviewSubject(entry, ctx) {
       // labels and `awaiting-rereview` handoffs still re-arm review.
       let cappedClosure = false;
       if (!explicitIntentForHead() && effectiveDomainId === CODE_PR_DOMAIN_ID && existing?.reviewer_head_sha !== subject.headSha && !transferredHeadReview && !exhaustedHeadVerdict) {
-        const ledger = summarizePRRemediationLedger(ROOT, { repo: repoPath, prNumber });
-        const roundBudget = resolveRoundBudgetForJob({
-          linearTicketId, riskClass: ledger.latestRiskClass,
-        }, { rootDir: ROOT });
+        const { effectiveRoundBudget } = resolveRemediationBudget();
         cappedClosure = routeCappedReviewToClosure({ db, stmtGetReviewRow, repo: repoPath,
           prNumber, headSha: subject.headSha, row: existing,
-          ceiling: resolveHardReviewCeiling(resolveMaxRemediationRounds({
-            roundBudget: roundBudget.roundBudget, latestMaxRounds: ledger.latestMaxRounds,
-          })) });
+          ceiling: resolveHardReviewCeiling(effectiveRoundBudget) });
       }
       if (cappedClosure) {
         existing = stmtGetReviewRow.get(repoPath, prNumber);
@@ -1574,9 +1588,7 @@ export async function processReviewSubject(entry, ctx) {
         && ['posted', 'pending', 'pending-upstream', 'ci-blocked'].includes(existing.review_status)
         && !explicitIntentForHead() && !isExactHeadReviewRecoveryRequested(existing)
         && !isOrphanHeadReviewRequested(existing, subject.headSha) && !transferredHeadReview && !exhaustedHeadVerdict) {
-        const finalPush = findFinalRemediationPushJob(ROOT, {
-          repo: repoPath, prNumber, headSha: subject.headSha,
-        });
+        const finalPush = finalRemediationPush;
         const handoff = finalPush?.reReview?.nextAction;
         const deadlineMs = Date.parse(handoff?.deadline?.at || '');
         const overdueHandoff = finalPush?.status === 'completed' && handoff?.action === 'hammer'

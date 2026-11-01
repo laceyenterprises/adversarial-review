@@ -1,6 +1,9 @@
 # Operator-owned organic receipt; this plan executes no service action or probe.
 operator_steps:
   - description: >-
+      Before rollout, inspect the existing exhausted-PR backlog read-only and
+      account for immediate SEV1 HAMCLOSE-01 pages: one per PR, per head for
+      retry exhaustion. Verify successful delivery deduplication after restart.
       After normal deployment, SRE restarts the watcher through the documented
       service registry and observes the affected current builder head receiving
       one exact-head verdict review, then closer dispatch or daemon merge,

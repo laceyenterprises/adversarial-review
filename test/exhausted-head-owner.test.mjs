@@ -18,8 +18,8 @@ import { queueFollowUpForRecoveredPostedReview } from '../src/reviewer-pass-reap
 const old = 'a'.repeat(40), head = 'b'.repeat(40), newer = 'c'.repeat(40);
 const now = '2026-01-01T12:00:00.000Z';
 const complete = value => ({ state: 'complete', value });
-function decision({ reviewedHead = old, verdict = 'comment-only', findings = 1, lifetime = false, spent = true } = {}) {
-  const input = { currentHead: head, reviewState: { headSha: reviewedHead, verdict,
+function decision({ reviewedHead = old, verdict = 'comment-only', findings = 1, lifetime = false, spent = true, deliveredReviews = 0 } = {}) {
+  const input = { currentHead: head, deliveredReviews, reviewState: { headSha: reviewedHead, verdict,
     reviewCycleExhausted: true, blockingFindingState: 'known', blockingFindingCount: 0,
     nonBlockingFindingState: 'known', nonBlockingFindingCount: findings, postedAt: now },
   reviewCeilingReached: true, roundsLeft: false, retryExhausted: spent, lifetimeExhausted: lifetime,
@@ -53,6 +53,11 @@ test('EXHAUSTEDHEADOWNER-01: one admitted verdict per builder head, including re
     request: () => assert.fail('lifetime stop must select escalation'), readRow: () => row });
   assert.deepEqual(launches, [head, newer]);
   assert.deepEqual([decision().action, decision().actor], ['review', 'reviewer']);
+});
+
+test('returning to a delivered commit keeps closure and watcher ownership aligned', () => {
+  const result = decision({ deliveredReviews: 1 });
+  assert.deepEqual([result.action, result.actor, result.reason], ['hammer', 'hammer', 'review-ceiling']);
 });
 
 test('verdict-only live and recovered reviews never enqueue a remediation round', () => {

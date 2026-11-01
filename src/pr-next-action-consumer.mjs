@@ -163,6 +163,7 @@ export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, cand
     exhausted: input.reviewState?.reviewCycleExhausted === true,
     headSha: head, reviewedHeadSha: input.reviewState?.headSha,
     closerAuthored: !staleBuilderHead,
+    deliveredReviews: input.deliveredReviews,
   });
   const cap = { headSha: staleBuilderHead ? input.reviewState.headSha : head, recordedAt: input.hammerCapRecordedAt ?? null, retryExhausted: input.retryExhausted === true, lifetimeExhausted: input.lifetimeExhausted === true,
     ...(input.operatorApprovalApplied === true ? { operatorApprovalApplied: true } : {}) };

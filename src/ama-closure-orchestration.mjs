@@ -136,6 +136,7 @@ import { resolveOrchestrationMode } from './pr-lifecycle-sync.mjs';
 import { dismissSupersededBlockingVerdictAtRemediatedHead } from './superseded-blocking-verdict-dismissal.mjs';
 import {
   countCompletedReviewerRereviewRounds,
+  countReviewCeilingUnits,
   reviewCycleExhaustedFromRounds,
 } from './review-ceiling-metrics.mjs';
 
@@ -858,10 +859,12 @@ async function maybeDispatchAmaClosureForInner({
         ...closureOwnerFromDecision(selected), reason: 'exact-head-review',
       } } : {}) };
   }
-  result = await escalateClosureBudget({ result, rootDir: options.rootDir || ROOT,
-    repo: options.repoPath, prNumber: options.prNumber,
-    now: options.now ? options.now() : Date.now(), env: options.env || process.env,
-    observeWaitImpl: options.observeClosureWaitImpl || observeClosureWait });
+  try {
+    result = await escalateClosureBudget({ result, rootDir: options.rootDir || ROOT,
+      repo: options.repoPath, prNumber: options.prNumber,
+      now: options.now ? options.now() : Date.now(), env: options.env || process.env,
+      observeWaitImpl: options.observeClosureWaitImpl || observeClosureWait });
+  } catch (error) { options.logger?.warn?.(`[watcher] closure-budget escalation observation failed: ${error.message}`); }
   // CLOSURERECOVERYEXEC-01: the closer's custody reconciliation did not
   // resolve an R04 decision; its deadline is enforced here, once per pass.
   if (result && closureOwnerSink.shared) {
@@ -1777,6 +1780,8 @@ async function dispatchAmaClosureFor({
     ...(recordedTerminalReview ? { terminalReview: { validated: true,
       headSha: currentPrHeadSha, reviewedHeadSha: reviewState.headSha } } : {}),
     rootDir, reviewState, reviewAdmissionRow: reviewStateRow,
+    deliveredReviews: currentPrHeadSha && currentPrHeadSha !== reviewState.headSha
+      ? countReviewCeilingUnits({ db: reviewStateDb, rootDir, repoPath, prNumber, headSha: currentPrHeadSha }) : 0,
     currentHead: currentPrHeadSha, strictMode, closerAuthoredStale, hammerHead, hammerResume,
     operatorLogins: cfg?.operatorLogins, operatorLabelActorEnforcement: cfg?.operatorLabelActorEnforcement,
     strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,

@@ -111,6 +111,7 @@ import {
 import { parseCodexJsonTokenUsage } from './reviewer-model-detection.mjs';
 import { countChangedLines, resolveReviewerCeilingSeconds, resolveReviewerIdleTimeoutSeconds } from './reviewer-timeout-model.mjs';
 import { resolveClaudeLaunchctlUidFromConfig } from './claude-launchctl-uid.mjs';
+import { recordReviewMesShadow } from './mes-shadow-hook.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -766,12 +767,12 @@ async function reviewWithClaude(diff, extraContext = '', {
   // ARGUSDRAIN-01: a caller with its own rubric (the Argus security drain)
   // supplies the whole prompt and keeps the rest of this harness.
   promptOverride = null,
-  modelPin = '', reasoningPin = '',
+  modelPin = '', reasoningPin = '', mes = null,
   ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
 } = {}) {
   const readNowMs = () => (typeof nowMs === 'function' ? nowMs() : Date.now());
   const claudeStartedAtMs = readNowMs();
-  const reviewerExecution = await resolveReviewerExecutionAsync('claude', { modelPin, reasoningPin, log: logger, ensureWorkerRegistryReadyImpl });
+  const reviewerExecution = await resolveReviewerExecutionAsync('claude', { modelPin, reasoningPin, mes, log: logger, ensureWorkerRegistryReadyImpl });
   const auth = await assertClaudeOAuthImpl({ resolveClaudeLaunchctlUidImpl, logger, platform,
     model: reviewerExecution.model });
 
@@ -1118,7 +1119,15 @@ function geminiRequestedThinkingLevel(model, runtime) {
 async function resolveReviewerExecutionAsync(harness, args = {}) {
   const { ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady } = args;
   await ensureWorkerRegistryReadyImpl({env: args.env ?? process.env, pin: args.modelPin});
-  return resolveReviewerExecution(harness, args);
+  return withReviewerMesShadow(harness, resolveReviewerExecution(harness, args), args);
+}
+
+// MES-06: only a review pass supplies `mes`, so each pass records one shadow
+// decision for the execution chosen above. That execution is returned
+// unchanged. The hook is bounded and never throws.
+async function withReviewerMesShadow(harness, execution, { mes = null, log = console } = {}) {
+  if (mes) await recordReviewMesShadow({ log, ...mes, harness, execution });
+  return execution;
 }
 
 function resolveCodexExecOverrides({ env = process.env, modelPin = '', reasoningPin = '', log = console } = {}) {
@@ -1238,7 +1247,7 @@ async function reviewWithCodex(diff, extraContext = '', {
   reviewerSubprocessCwd = process.cwd(),
   onProgress = null,
   promptOverride = null,
-  modelPin = '', reasoningPin = '',
+  modelPin = '', reasoningPin = '', mes = null,
   ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
   codexCli = null,
   assertCodexOAuthImpl = assertCodexOAuth,
@@ -1250,7 +1259,7 @@ async function reviewWithCodex(diff, extraContext = '', {
 } = {}) {
   await ensureWorkerRegistryReadyImpl({pin: modelPin});
   // Resolve infrastructure before probing credentials; refresh again after auth.
-  resolveReviewerExecution('codex', { modelPin, reasoningPin, log });
+  await withReviewerMesShadow('codex', resolveReviewerExecution('codex', { modelPin, reasoningPin, log }), { mes, log });
   codexCli ||= await resolveReviewCliPathAsync('codex');
   console.error('[reviewWithCodex] asserting OAuth...');
   await assertCodexOAuthImpl({ codexCli });
@@ -2835,6 +2844,7 @@ async function reviewWithGemini(diff, extraContext = '', {
   prepareAgyIdentityReviewImpl = prepareAgyIdentityReview,
   finishAgyIdentityReviewImpl = finishAgyIdentityReview,
   ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
+  mes = null,
 } = {}) {
   await ensureWorkerRegistryReadyImpl();
   resolveReviewerExecution('gemini', { log });
@@ -2953,7 +2963,7 @@ async function reviewWithGemini(diff, extraContext = '', {
     // (e.g. "Gemini 3.8 Flash (High)"). Feeding the cli slug to agy is the bug
     // that previously left the model unbound — agy ignores an unknown token and
     // falls back to its persisted default (Flash).
-    const reviewerExecution = await resolveReviewerExecutionAsync('gemini', { env: reviewEnv, log, ensureWorkerRegistryReadyImpl });
+    const reviewerExecution = await resolveReviewerExecutionAsync('gemini', { env: reviewEnv, mes, log, ensureWorkerRegistryReadyImpl });
     // agy requires a display-name token; the registry's Gemini CLI slug is
     // invalid for that runtime and would silently select its persisted default.
     const model = runtime === 'antigravity' && !/^Gemini\s/u.test(reviewerExecution.model || '')
@@ -3547,14 +3557,19 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
   onProgress = null,
   signal,
   reviewerArm = null,
+  mes = null,
   reviewWithClaudeImpl = reviewWithClaude,
   reviewWithCodexImpl = reviewWithCodex,
   reviewWithGeminiImpl = reviewWithGemini,
 } = {}) {
   const pins = reviewerArm?.harness === effectiveModel
     ? { modelPin: reviewerArm.model, reasoningPin: reviewerArm.effort === 'default' ? '' : reviewerArm.effort } : {};
+  // MES-06 shadow context: absent unless the review pass supplies it. Gemini
+  // never receives arm pins below, so only Claude/Codex pins are the arm's.
+  const armPinned = effectiveModel !== 'gemini' && reviewerArm?.harness === effectiveModel;
+  const mesOption = mes ? { mes: { ...mes, reviewerArm: armPinned } } : {};
   if (effectiveModel === 'claude') {
-    const claudeResult = await reviewWithClaudeImpl(diff, extraContext, { promptStage, reviewerSubprocessCwd, onProgress, ...pins });
+    const claudeResult = await reviewWithClaudeImpl(diff, extraContext, { promptStage, reviewerSubprocessCwd, onProgress, ...pins, ...mesOption });
     // reviewWithClaude now returns { reviewText, tokenUsage } (from --output-format
     // json). Tolerate a bare string too (legacy / mocked impls) so callers and
     // tests that predate the json capture keep working.
@@ -3568,7 +3583,7 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
       execution: typeof claudeResult === 'string' ? null : claudeResult?.execution, needsSanitize: false };
   }
   if (effectiveModel === 'gemini') {
-    const result = await reviewWithGeminiImpl(diff, extraContext, { promptStage, reviewerSubprocessCwd, ...(signal ? { signal } : {}) });
+    const result = await reviewWithGeminiImpl(diff, extraContext, { promptStage, reviewerSubprocessCwd, ...(signal ? { signal } : {}), ...mesOption });
     return {
       rawReviewText: result.reviewText,
       reviewText: sanitizeReviewPayloadBestEffort(result.reviewText),
@@ -3577,7 +3592,7 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
       needsSanitize: false,
     };
   }
-  const codexResult = await reviewWithCodexImpl(diff, extraContext, { promptStage, reviewerSubprocessCwd, onProgress, ...pins });
+  const codexResult = await reviewWithCodexImpl(diff, extraContext, { promptStage, reviewerSubprocessCwd, onProgress, ...pins, ...mesOption });
   return {
     rawReviewText: codexResult.reviewText,
     reviewText: null,
@@ -3660,6 +3675,7 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
   onRejectedCodexOutput = null,
   onChunkPlan = null,
   signal,
+  mes = null,
 } = {}) {
   const configuredHardMaxBytes = Number(env.ADVERSARIAL_REVIEW_CHUNK_HARD_MAX_BYTES);
   const hardMaxBytes = Number.isFinite(configuredHardMaxBytes) && configuredHardMaxBytes > 0
@@ -3732,9 +3748,12 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
         ? `${baseChunkContext}${buildPostImageContext(splitHunkPostImages(splitRecord), {
           fits: (postImage) => chunkPromptBytes(chunk.diff, `${baseChunkContext}${postImage}`) <= maxBytes })}`
         : baseChunkContext;
+      // MES-06: one shadow decision per pass, from the first chunk's resolution.
+      // The context carries the whole pass diff, so signals never see one chunk.
+      const mesOption = mes && index === 0 ? { mes } : {};
       const result = reviewerModel === 'gemini'
-        ? await reviewWithGeminiImpl(chunk.diff, chunkContext, { promptStage, reviewerSubprocessCwd, signal: chunkSignal, timeoutMs: timeoutPlan.perChunkTimeoutMs })
-        : await dispatchReviewerModelImpl(reviewerModel, chunk.diff, chunkContext, { promptStage, reviewerSubprocessCwd });
+        ? await reviewWithGeminiImpl(chunk.diff, chunkContext, { promptStage, reviewerSubprocessCwd, signal: chunkSignal, timeoutMs: timeoutPlan.perChunkTimeoutMs, ...mesOption })
+        : await dispatchReviewerModelImpl(reviewerModel, chunk.diff, chunkContext, { promptStage, reviewerSubprocessCwd, ...mesOption });
       if (result.needsSanitize) {
         try {
           result.reviewText = sanitizeCodexReviewPayload(result.rawReviewText);

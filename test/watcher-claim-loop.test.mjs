@@ -3231,19 +3231,26 @@ test('HAMCLOSE-02 budget resolution preserves only integer increases', async () 
   ]) assert.equal(resolveMaxRemediationRounds({ roundBudget: 2, latestMaxRounds }), expected);
 });
 
-for (const postedCount of [3, 5]) test(`HAMCLOSE-02 raised maxRounds: ${postedCount} delivered reviews`, () => {
+for (const scenario of ['under-budget', 'exhausted-builder', 'exhausted-closer', 'probe-error']) test(`HAMCLOSE-02 raised maxRounds: ${scenario}`, () => {
+  const postedCount = scenario === 'under-budget' ? 3 : 5;
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-hamclose-raised-budget-'));
   try {
     const head = 'b'.repeat(40), reviewedHead = 'a'.repeat(40);
     const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs'), runnerPath = path.join(tmp, 'runner.mjs');
-    const followUpJobsSource = DEFAULT_FOLLOW_UP_JOBS_SOURCE.replace('latestMaxRounds: 1', 'latestMaxRounds: 4');
+    const followUpJobsSource = DEFAULT_FOLLOW_UP_JOBS_SOURCE.replace('latestMaxRounds: 1', 'latestMaxRounds: 4')
+      .replace('summarizePRRemediationLedger() {', 'summarizePRRemediationLedger(_root, { prNumber }) { (globalThis.ceilingLedgerReads ||= {})[prNumber] = (globalThis.ceilingLedgerReads[prNumber] || 0) + 1;');
     // Automatic stale-head requests omit db in production. Bind this replay
     // to the fixture DB so its re-review reset and claim share the same state.
     const phaseSource = readFileSync(path.join(REPO_ROOT, 'src/pollonce-phases.mjs'), 'utf8').replace(
       'export async function processReviewSubject(entry, ctx) {',
-      'export async function processReviewSubject(entry, ctx) { ctx = { ...ctx, ...globalThis.__ceilingLoggingContext };',
+      'export async function processReviewSubject(entry, ctx) { if (globalThis.probeFailed) (globalThis.subjectsAfterProbeFailure ||= []).push(entry.prNumber); ctx = { ...ctx, ...globalThis.__ceilingLoggingContext };',
     );
-    writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { 101: head }, followUpJobsSource }).replace(
+    writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { 101: head }, followUpJobsSource })
+      .replace('createHeadCloserCommitSuppressionResolver()', 'createHeadCloserCommitSuppressionResolver({ prNumber })')
+      .replace('return async () => ({ suppressed: false, reason: \'fixture\' });',
+        scenario === 'probe-error' ? "return async () => { if (prNumber === 101) { globalThis.probeFailed = true; throw new Error('synthetic commit probe outage'); } return { suppressed: false }; };"
+          : scenario === 'exhausted-closer' ? "return async () => ({ suppressed: true, reason: 'closer-commit-trailer' });"
+            : 'return async () => ({ suppressed: false, reason: \'fixture\' });').replace(
       'return actual.requestReviewRereview(options);',
       'return actual.requestReviewRereview({ ...options, db: options.db || db });',
     ).replace('  return nextLoad(url, context);', `
@@ -3258,11 +3265,25 @@ for (const postedCount of [3, 5]) test(`HAMCLOSE-02 raised maxRounds: ${postedCo
         review_attempts,revision_ref,reviewer_head_sha,posted_at)
         VALUES ('laceyenterprises/adversarial-review',101,'2026-10-12T04:45:00Z','claude','open','posted',?,?,?,
         '2026-10-12T05:00:00Z')\`).run(${postedCount}, ${JSON.stringify(reviewedHead)}, ${JSON.stringify(reviewedHead)});
+      if (${JSON.stringify(scenario)} === 'probe-error') db.prepare(\`UPDATE reviewed_prs SET review_status='pending', rereview_requested_at='2026-10-12T05:01:00Z', rereview_reason='auto-refresh: posted review on stale head' WHERE pr_number=101\`).run();
       for (let attempt = 1; attempt <= ${postedCount}; attempt++) db.prepare(\`INSERT INTO reviewer_passes(repo,pr_number,
         attempt_number,reviewer_class,pass_kind,started_at,ended_at,status,head_sha,gh_comment_id)
         VALUES ('laceyenterprises/adversarial-review',101,?,'claude','rereview','2026-10-12T04:45:00Z',
         '2026-10-12T05:00:00Z','completed',?,?)\`).run(attempt, ${JSON.stringify(reviewedHead)}, 'posted-' + attempt);
-      const wakeModule = await import(${JSON.stringify(fileUrl('src', 'rereview-wake.mjs'))});
+      globalThis.ceilingDrains = [];
+      globalThis.ceilingWarnings = [];
+      globalThis.ceilingLog = { warn() {} };
+      globalThis.__ceilingLoggingContext = {
+        log: globalThis.ceilingLog,
+        warn: message => globalThis.ceilingWarnings.push(message),
+        consumeRereviewWakesImpl: args => {
+          if (args.prNumber === 101) {
+            globalThis.ceilingDrains.push(args);
+            throw new Error('synthetic wake drain failure');
+          }
+        },
+      };
+
     `, afterFirstPoll: postedCount < 5 ? `
       const spawns = (globalThis.__watcherClaimLoopReviewerSpawns || []).filter(spawn => spawn.subjectContext?.prNumber === 101);
       assert.equal(spawns.length, 1, 'raised budget admits the moved head');
@@ -3274,6 +3295,17 @@ for (const postedCount of [3, 5]) test(`HAMCLOSE-02 raised maxRounds: ${postedCo
       assert.equal(row.reviewer_head_sha, ${JSON.stringify(head)});
       assert.notEqual(row.rereview_reason, 'system-review-ceiling-closure');
       assert.match(row.rereview_reason, /auto-refresh: posted review on stale head/);
+    ` : scenario === 'exhausted-closer' ? `
+      assert.equal((globalThis.__watcherClaimLoopReviewerSpawns || []).filter(s => s.subjectContext?.prNumber === 101).length, 0);
+      assert.equal(globalThis.ceilingLedgerReads[101], 1, 'admission and capped closure share one ledger scan');
+      assert.equal(globalThis.ceilingDrains.length, 1, 'closer head drains the ceiling wake');
+      assert.equal(globalThis.ceilingDrains[0].reviewRow.rereview_reason, 'system-review-ceiling-closure');
+      assert.equal(globalThis.ceilingDrains[0].log, globalThis.ceilingLog, 'configured log sink reaches drain');
+      assert.match(globalThis.ceilingWarnings[0], /ceiling closeout wake drain failed.*synthetic wake drain failure/);
+    ` : scenario === 'probe-error' ? `
+      assert.ok(!(globalThis.__watcherClaimLoopReviewerSpawns || []).some(s => s.subjectContext?.prNumber === 101));
+      assert.ok(globalThis.subjectsAfterProbeFailure?.includes(102), 'later subject is processed after admission probe fails');
+      assert.ok((globalThis.__watcherClaimLoopReviewerSpawns || []).some(s => s.subjectContext?.prNumber === 102), 'later subject still spawns');
     ` : `
       const spawns = (globalThis.__watcherClaimLoopReviewerSpawns || []).filter(spawn => spawn.subjectContext?.prNumber === 101);
       assert.equal(spawns.length, 1, 'exhausted cycle still admits the new builder head');
@@ -3292,6 +3324,7 @@ fi`));
     const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
       { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(env), timeout: 60000 });
     assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+    if (scenario === 'probe-error') assert.match(result.stdout + result.stderr, /exhausted-head verdict admission unresolved.*synthetic commit probe outage/);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
@@ -4920,7 +4953,7 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
         writeFileSync(dir + '/' + jobId + '.json', JSON.stringify({
           jobId, repo: 'example/project', prNumber: 101, status: 'completed', finalRound: 'comment-only',
           revisionRef: '${reviewed}', reviewBody: ${JSON.stringify(body)}, completedAt,
-          remediationPlan: { currentRound: 1, maxRounds: 2 },
+          remediationPlan: { currentRound: 2, maxRounds: 2 },
           completion: { finalRemediationPush: true, workerPushedHeadSha: '${pushed}' },
           reReview: { requested: false, suppressed: '${initialStatus}' === 'expired-hammer-handoff' ? 'shared-next-action' : 'comment-only-final-round', nextAction: {
             action: '${initialStatus}' === 'expired-hammer-handoff' ? 'hammer' : 'wait-for-CI',
@@ -4940,7 +4973,7 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
           .run('${initialStatus}' === 'sequence' ? 'posted' : ['parked-green', 'expired-hammer-handoff'].includes('${initialStatus}') ? 'pending' : '${initialStatus}',
             ['posted', 'sequence'].includes('${initialStatus}') ? null : completedAt);
         globalThis.finalRoundArmed = true;
-        globalThis.finalRoundLedger = { completedRoundsForPR: 1, latestRiskClass: 'medium', latestMaxRounds: 2,
+        globalThis.finalRoundLedger = { completedRoundsForPR: 2, latestRiskClass: 'medium', latestMaxRounds: 2,
           commentOnlyFinalRoundRevisionRefs: ['${reviewed}'],
           commentOnlyFinalRoundPushedHeads: [{ reviewedHead: '${reviewed}', workerPushedHeadSha: '${pushed}', status: 'completed', completedAt }] };
         globalThis.finalRoundSettled = { verdict: 'comment-only', remediationPending: false,

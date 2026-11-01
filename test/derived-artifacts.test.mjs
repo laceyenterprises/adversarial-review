@@ -267,14 +267,14 @@ test('native sandbox rebuilds archives and denies network, host file reads and w
   }
   assert.equal(probe.status, 0, probe.stderr || probe.error?.message || `sandbox exited with signal ${probe.signal}`);
   assert.equal((await proveDerivedArtifacts(f.args, f.evidence)).length, 1);
-  // Linux creates the scratch root's parent inside its private mount namespace.
-  // A write directly there can succeed without touching the host. Probe a
-  // sibling host directory that is neither mounted nor created in the sandbox.
-  const hostRoot = mkdtempSync(join(tmpdir(), 'derived-host-'));
-  const sentinel = join(hostRoot, 'write');
-  const secret = join(hostRoot, 'secret');
+  // bwrap creates the build root's parent inside its private filesystem. That
+  // empty directory can accept new files without writing to the host. Put the
+  // host probes in a sibling directory that is never mounted into the sandbox.
+  const host = mkdtempSync(join(tmpdir(), 'derived-host-'));
+  const sentinel = join(host, 'sentinel');
+  const secret = join(host, 'secret');
   writeFileSync(secret, 'host secret');
-  t.after(() => rmSync(hostRoot, { recursive: true, force: true }));
+  t.after(() => rmSync(host, { recursive: true, force: true }));
   for (const command of [
     `node -e 'require("fs").writeFileSync(${JSON.stringify(sentinel)}, "bad")'`,
     `node -e 'require("fs").readFileSync(${JSON.stringify(secret)})'`,

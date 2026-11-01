@@ -89,6 +89,7 @@ test('sourced phase wrapper reports terminal outcomes and keeps its shell alive'
     assert.match(result.stdout, new RegExp(diagnostic));
     assert.match(result.stdout, new RegExp(`outcome=${outcome}`));
     assert.match(result.stdout, /SHELL_SURVIVED/);
+    assert.match(result.stdout, /HAM next: stop with .*Do not read phase source/);
     if (phase === 'hammer-verify-head') {
       assert.equal(readFileSync(join(dir, 'patched'), 'utf8').trim(), 'patched');
       assert.match(result.stderr, /LEASE_PROGRESS/);

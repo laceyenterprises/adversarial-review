@@ -96,6 +96,49 @@ classes, retry/deadline bounds, owner mismatch and unchanged custody across
 polls. After normal deployment, natural dispatch logs can establish runtime
 recovery; source tests alone do not. No restart or forced dispatch is required.
 
+## Hammer execution instructions (HAMPROMPT-01)
+
+`templates/hammer-prompt.md` starts with an operating core: existence checks,
+the phase exit-code table, a read-only lease-state query, stop conditions and
+the act-or-stop rule. Run the dispatched phase scripts; do not inspect their
+source to choose the next action. The renderer repeats the applicable prompt
+appendix in phase stderr without changing exit status.
+Dispatch renders the full dispute (B1), documentation-currency (B2),
+base/provenance (B3), check-failure/dependency repair (B4) and identity-repair (E1) procedures into the private
+`RUN_DIR/hammer-reference.md` with mode `0600`. The main prompt keeps their
+mandatory rules and named consultation conditions within its existing 60 KiB
+budget. Reference content retains every original rule with dispatch values
+substituted; ordinary scratch cleanup owns its lifetime.
+
+For current PR/head lease observation, run
+`node bin/hammer-lease-state.mjs --repo OWNER/REPO --base BASE --pr N --head SHA`
+from the deployed checkout (or pass its `--root-dir`). It reports `held` for
+any unreleased holder belonging to this PR, including across rebase head changes.
+Otherwise it reports `released` when retained release history names this PR/head,
+or `none`. Head hashes are matched without regard to hex letter case.
+The CLI also supports direct execution as `./bin/hammer-lease-state.mjs`.
+Expiry does not establish release. Read/validation failures print
+`lease-state-unavailable` and exit nonzero without a state. This command never
+acquires, releases or reclaims a lease and grants no merge authority.
+
+Exit 21 from verify-head or merge enters Appendix D's conflict block: observe
+and release the lease using the owning shell, resolve sources, use the deployed
+committed-generated-files resolver for registered outputs, publish the commit,
+validate outside the lease and re-enter verify-head. For a hand-written JSON map,
+take the union only after proving both sides only added keys; keep distinct-key
+values and ordering, validate JSON/unique keys, and never overwrite conflicting
+same-key values. Rebuild the audit and exact-head predicate before merge.
+
+Only `HAM_COMMIT_PUBLICATION_ONLY=1` selects commit-only publication and its
+verify-head next action. Other values, including `true` and `yes`, retain the
+ordinary audit-publication path without shell integer-comparison diagnostics.
+
+If the closer announces the same next action twice without executing it, it
+must execute it or stop with a named terminal audit reason. The detailed safety
+rules remain in the prompt appendices; exact-head checks, lease ownership,
+strict-mode policy, preservation and provenance are unchanged. No lifecycle
+state, merge eligibility rule or runtime timeout changes here.
+
 ## Shared closure/hammer decision (CLOSURESPLIT-01)
 
 Closure passes its immutable next-action snapshot and decision key/generation to

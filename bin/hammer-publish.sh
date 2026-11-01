@@ -313,7 +313,7 @@ return 0
 }
 # Called before the hammer's ordinary git publication. The audit phase remains
 # separate, under the merge lease, after remote CI validates the published SHA.
-if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" -eq 1 ]; then
+if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" = "1" ]; then
   HAM_PUBLICATION_PREVIOUS_HEAD="${POST_REMEDIATION_SHA:-${HAM_BASE_HEAD:-}}"
   HAM_API_PUBLISH_RESULT=$(/usr/bin/perl -e 'alarm shift; exec @ARGV' 120 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-api-publish.mjs <<REPO>> <<PR_URL>>) || HAM_API_PUBLISH_RESULT='{"route":"re-review","reason":"API publication timed out"}'
   printf '%s\n' "$HAM_API_PUBLISH_RESULT"

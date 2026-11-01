@@ -5,6 +5,25 @@ import { createHash } from 'node:crypto';
 
 export const HAMMER_PHASES = ['hammer-verify-head', 'hammer-publish', 'hammer-merge'];
 
+// Keep rare procedures byte-for-byte in a private reference file. The main
+// prompt retains the rule and the condition for consulting each appendix.
+export function splitHammerPrompt(template) {
+  const appendices = [];
+  const prompt = template.replace(
+    /<!-- hammer-reference:([A-Z][0-9]+) -->\n([\s\S]*?)\n<!-- \/hammer-reference:\1 -->/g,
+    (_match, name, content) => {
+      appendices.push(`## Appendix ${name}\n\n${content}`);
+      return `Read **Appendix ${name}** in \`<<RUN_DIR>>/hammer-reference.md\` when the condition above applies.`;
+    },
+  );
+  if (/<!-- \/?hammer-reference:/.test(prompt)) {
+    throw new Error('malformed hammer reference appendix');
+  }
+  return { prompt, reference: appendices.length
+    ? `# Hammer reference appendices\n\nConsult only the appendix named by the operating prompt or phase outcome.\n\n${appendices.join('\n\n')}\n`
+    : '' };
+}
+
 export function renderHammerProcedure(phase, values) {
   if (!HAMMER_PHASES.includes(phase)) throw new Error(`unknown hammer phase: ${phase}`);
   const path = fileURLToPath(new URL(`../bin/${phase}.sh`, import.meta.url));
@@ -32,6 +51,23 @@ trap - ERR
 eval "$ham_phase_previous_err_trap"
 if [ "$ham_phase_previous_errtrace" -eq 0 ]; then set +E; fi
 if [ "$ham_phase_exit" -ne 0 ]; then ham_record_phase_failure; fi
+# HAMPROMPT-01: outcomes name prompt appendices, never script source to inspect.
+case "${phase}:$ham_phase_exit" in
+  hammer-verify-head:0)
+    echo 'HAM next: Appendix C revalidation if HAM_NEEDS_REVALIDATION=true; otherwise Appendix E audit/predicate/merge.' >&2 ;;
+  hammer-verify-head:21|hammer-merge:21)
+    echo 'HAM next: Appendix D — Resolving merge conflicts. Query/release lease, repair, publish commit, revalidate; re-enter verify-head.' >&2 ;;
+  hammer-publish:0)
+    if [ "\${HAM_COMMIT_PUBLICATION_ONLY:-0}" = "1" ]; then
+      echo 'HAM next: unset HAM_COMMIT_PUBLICATION_ONLY; refresh context; run verify-head (Appendix C).' >&2
+    else
+      echo 'HAM next: Appendix E exact-head predicate, then merge.' >&2
+    fi ;;
+  hammer-merge:0)
+    echo 'HAM next: Appendix E confirmed-merge closing audit.' >&2 ;;
+  *)
+    echo "HAM next: stop with \${HAM_PHASE_OUTCOME:-${phase}-failed}; preserve deferrals and authoritative terminal state (Appendix B mandate 0b / Appendix E). Do not read phase source." >&2 ;;
+esac
 return "$ham_phase_exit"
 `;
   // These defaults belong to the versioned procedure, never the renderer's

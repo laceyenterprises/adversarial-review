@@ -1,0 +1,6 @@
+{
+  "base": { "seed": 1 },
+  "ours": { "alpha": 2, "seed": 1 },
+  "theirs": { "beta": 3, "seed": 1 },
+  "resolved": { "alpha": 2, "beta": 3, "seed": 1 }
+}

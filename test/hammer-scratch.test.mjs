@@ -438,6 +438,16 @@ test('HAMTMP-02: dispatch snapshots deployed phases and the prompt sources only 
   const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(root,
     { repo: 'fixture/repo', prNumber: 42, headSha: head })));
   const prompt = readFileSync(result.promptPath, 'utf8');
+  const referencePath = join(record.scratchDir, 'hammer-reference.md');
+  const reference = readFileSync(referencePath, 'utf8');
+  assert.equal(statSync(referencePath).mode & 0o777, 0o600);
+  assert.doesNotMatch(reference, /<<[A-Z_]+>>|<!-- \/?hammer-reference:/);
+  assert.ok(prompt.includes(referencePath));
+  for (const name of ['B1', 'B2', 'B3', 'B4', 'E1']) {
+    assert.ok(reference.includes(`## Appendix ${name}\n`), `missing deployed appendix ${name}`);
+  }
+  assert.match(reference, /Only exit 0 records withdrawal/);
+  assert.match(reference, /At most one re-author per run/);
   assert.doesNotMatch(prompt, /hammer-procedure\.mjs|--render|\/tmp\/ham-/);
   assert.doesNotMatch(prompt, /(?:^|[\s`'"])bin\/(?:hammer-|run-bounded)/m);
   assert.match(prompt, /Fresh shells reset state and cwd/);

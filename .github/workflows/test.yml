@@ -28,7 +28,8 @@ permissions:
 jobs:
   test:
     name: npm test (Node ${{ matrix.node }})
-    runs-on: ubuntu-latest
+    # Move back to the newer image after ARSANDBOXLINUX-01 fixes Linux bwrap isolation.
+    runs-on: ubuntu-24.04
     strategy:
       # Run the suite against every Node major the package.json `engines`
       # range advertises support for. If a version starts failing here, the

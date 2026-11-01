@@ -501,7 +501,7 @@ function createRemediationRuntime({
         spawnedWorker.recordedOutcome = localWorkerErrorOutcome(spawnedWorker, error);
       });
       // MES-06: shadow record of this round's resolved model; unawaited, bounded, never throws.
-      if (request.mesJob) void recordRemediationMesShadow({ job: request.mesJob, workerClass, worker: spawnedWorker, workspaceDir: request.workspaceDir, env });
+      if (request.mesJob) void recordRemediationMesShadow({ job: request.mesJob, workerClass, worker: spawnedWorker, modelResolution: request.modelResolution, workspaceDir: request.workspaceDir, env });
       return createLocalRemediationHandle({
         runRef: String(
           request.idempotencyKey || spawnedWorker.launchRequestId || spawnedWorker.processId || '',

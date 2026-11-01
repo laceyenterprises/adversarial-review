@@ -357,3 +357,34 @@ test('remediation: real review-body classification, explicit sources and failure
     log: quiet, worker: { resolvedModel: 'gpt-6-luna', resolvedReasoningLevel: 'low', source: 'osg-remediator' } });
   assert.equal(osg.calls.find(call => call.request).request.actual.source, 'osg-apply');
 });
+
+test('remediation: request resolution fallback, binary numstat file count and uppercase head normalization', async () => {
+  const exec = fakeExec((_n, args) => (args[0] === '--no-optional-locks'
+    ? { stdout: '3\t1\tsrc/a.mjs\n-\t-\tassets/logo.png\n' } : { stdout: JSON.stringify(decision()) }));
+  // A process-handle-shaped worker without resolution fields falls back to the request's resolution whole.
+  await recordRemediationMesShadow({ job: remediationJob({ revisionRef: 'A'.repeat(40) }), workerClass: 'codex',
+    worker: { launchRequestId: 'local-reply-key', processId: 1 }, modelResolution: codexWorker,
+    workspaceDir: '/synthetic/workspace', env: {}, execFileImpl: exec.impl, log: quiet,
+    classifyFindingsImpl: async () => ({}) });
+  const { request } = exec.calls.find(call => call.request);
+  assert.deepEqual(request.actual, { workerClass: 'remediator-codex', model: 'gpt-6.1-sol', effort: 'medium',
+    source: 'registry' });
+  assert.equal(request.signals.diff_lines, null, 'a binary file leaves line counts unknown');
+  assert.equal(request.signals.file_count, 2, 'a binary file still counts as a changed file');
+  assert.equal(request.headSha, HEAD, 'an uppercase head is normalized to git lowercase hex');
+
+  // A descriptor that carries its own resolution wins; fields are never mixed with the request's.
+  const own = fakeExec(() => ({ stdout: JSON.stringify(decision()) }));
+  await recordRemediationMesShadow({ job: remediationJob(), workerClass: 'codex', env: {}, execFileImpl: own.impl,
+    log: quiet, worker: { resolvedModel: 'gpt-6-luna', modelSource: 'env-pin' }, modelResolution: codexWorker });
+  assert.deepEqual(own.calls.find(call => call.request).request.actual,
+    { workerClass: 'remediator-codex', model: 'gpt-6-luna', effort: null, source: 'env' });
+
+  const review = fakeExec(() => ({ stdout: JSON.stringify(decision()) }));
+  await recordReviewMesShadow({ harness: 'codex', repo: 'o/r', prNumber: 1, headSha: 'A'.repeat(40), diff: '',
+    restrictedPatterns: [], env: {}, execFileImpl: review.impl, log: quiet,
+    execution: { model: 'gpt-6.1-sol', effort: 'high', modelSource: 'registry', effortSource: 'registry' } });
+  const reviewRequest = review.calls.find(call => call.request).request;
+  assert.equal(reviewRequest.headSha, HEAD);
+  assert.equal(reviewRequest.subjectKey, `o/r/pr/1/review/${HEAD}`);
+});

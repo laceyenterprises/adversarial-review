@@ -3578,13 +3578,14 @@ test('active remediation rollback does not recreate a deleted dispatch record', 
   const originalRead = fs.readFileSync;
   let appeared = false;
   let removed = false;
+  const pendingAt = new Date(Date.now() - 1000).toISOString();
   // Inject the actual race boundaries deterministically: a job arrives after
   // the intent write, then its record disappears immediately before rollback.
   t.mock.method(fs, 'readdirSync', (path, ...args) => {
     if (String(path) === pendingDir && fs.existsSync(recordPath) && !appeared) {
       appeared = true;
       writeFileSync(join(pendingDir, `${followUpJobFilePrefix(REPO, PR_NUMBER)}active.json`), JSON.stringify({
-        repo: REPO, prNumber: PR_NUMBER, status: 'pending', lastHeartbeatAt: new Date().toISOString(),
+        repo: REPO, prNumber: PR_NUMBER, status: 'pending', pendingAt,
       }));
     }
     return originalList(path, ...args);

@@ -5048,7 +5048,7 @@ async function maybeDispatchAmaCloserAttempt({
     },
     ...(reviewState.remediationPending === true ? { remediation: {
       ...sharedNextAction.snapshot.observations.remediation?.value,
-      job: { status: 'in_progress', headSha: prMetadata.headSha },
+      job: { status: 'in_progress', live: true, headSha: prMetadata.headSha },
     } } : {}),
     progress: { ...sharedNextAction.snapshot.observations.progress?.value,
       primaryChange: { ...verdict.trace.primaryChange, headSha: prMetadata.headSha },

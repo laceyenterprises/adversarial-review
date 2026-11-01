@@ -4,7 +4,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { findActiveRemediationJob } from '../src/ama/active-remediation-job.mjs';
-import { remediationJobOwnership, REMEDIATION_HEARTBEAT_GRACE_MS } from '../src/remediation-job-ownership.mjs';
+import { remediationJobOwnership, REMEDIATION_HEARTBEAT_GRACE_MS,
+  REMEDIATION_PRESPAWN_GRACE_MS } from '../src/remediation-job-ownership.mjs';
 
 const NOW = '2026-01-01T01:00:00.000Z';
 const subject = { repo: 'example/project', prNumber: 42 };
@@ -47,12 +48,50 @@ test('fresh progress heartbeat retains a remote worker only for the bounded grac
   assert.equal(remediationJobOwnership(job, { now: now + REMEDIATION_HEARTBEAT_GRACE_MS }).live, false);
   assert.equal(remediationJobOwnership({ ...job, status: 'completed' }, { now }).live, false);
   assert.equal(remediationJobOwnership({ ...job, remediationWorker: { state: 'completed' } }, { now }).live, false);
+  assert.equal(remediationJobOwnership({ status: 'in_progress', lastHeartbeatAt: NOW }, { now }).live, true);
+  assert.equal(remediationJobOwnership({ status: 'pending', lastHeartbeatAt: NOW }, { now }).live, true);
 });
 
-test('PID reuse, missing process evidence, a queued job and a future heartbeat cannot retain ownership', () => {
+for (const [status, timestamp, reason] of [
+  ['pending', 'createdAt', 'fresh-pending-job'],
+  ['pending', 'pendingAt', 'fresh-pending-job'],
+  ['in_progress', 'claimedAt', 'fresh-unspawned-claim'],
+]) test(`${status} retains bounded pre-spawn custody from ${timestamp}`, () => {
+  const now = Date.parse(NOW);
+  const job = { status, createdAt: '2025-12-01T00:00:00Z', [timestamp]: NOW };
+  assert.deepEqual(remediationJobOwnership(job, { now }), { live: true, reason });
+  assert.equal(remediationJobOwnership(job, { now: now + REMEDIATION_PRESPAWN_GRACE_MS }).live, false);
+  assert.equal(remediationJobOwnership(job, { now: now - 1 }).live, false);
+  assert.equal(remediationJobOwnership({ ...job, [timestamp]: 'invalid' }, { now }).live, false);
+});
+
+test('a pending retry uses its new queue timestamp instead of its finished worker', () => {
+  const job = { status: 'pending', pendingAt: NOW, createdAt: '2025-12-01T00:00:00Z',
+    remediationWorker: { state: 'completed' } };
+  assert.equal(remediationJobOwnership(job, { now: NOW }).live, true);
+  assert.equal(remediationJobOwnership({ ...job, status: 'in_progress', claimedAt: NOW }, { now: NOW }).live, false);
+});
+
+test('the active-job reader retains a queued job until its pre-spawn grace expires', t => {
+  const root = mkdtempSync(join(tmpdir(), 'remediation-pending-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const dir = join(root, 'data', 'follow-up-jobs', 'pending');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'example__project-pr-42-pending.json'), JSON.stringify({
+    ...subject, jobId: 'queued-job', status: 'pending', createdAt: NOW,
+  }));
+  assert.equal(findActiveRemediationJob(root, subject, { now: NOW })?.jobId, 'queued-job');
+  assert.equal(findActiveRemediationJob(root, subject, {
+    now: Date.parse(NOW) + REMEDIATION_PRESPAWN_GRACE_MS,
+  }), null);
+});
+
+test('PID reuse, missing queue/process evidence and a future heartbeat cannot retain ownership', () => {
   for (const job of [
     { status: 'in_progress', remediationWorker: { processId: 123, spawnedAt: '2026-01-01T00:00:00Z' } },
     { status: 'pending', workspaceDir: '/synthetic/workspace' },
+    { status: 'in_progress', claimedAt: NOW,
+      remediationWorker: { state: 'spawned', spawnedAt: '2025-12-01T00:00:00Z' } },
     { status: 'in_progress', lastHeartbeatAt: '2026-01-01T02:00:00Z' },
   ]) {
     assert.equal(remediationJobOwnership(job, { now: NOW, verifyIdentityImpl: () => ({ match: false }) }).live, false);

@@ -142,6 +142,22 @@ test('failed CI without publish or review-head proof retains the active retry ow
   assert.equal(terminal.decision.action, 'hammer', 'a terminal job cannot claim active retry ownership');
 });
 
+for (const state of ['completed', 'failed', 'stopped', 'cancelled', 'exited']) {
+  test(`unpublished failed-CI retry projects successor custody after worker ${state}`, t => {
+    const f = fixture(t);
+    const job = { ...f.job, remediationWorker: { ...f.job.remediationWorker, state },
+      lastHeartbeatAt: '2025-12-01T00:00:00.000Z',
+      remediationPlan: { ...f.job.remediationPlan, currentRound: 1 } };
+    const shared = f.decide({ job, workerPushedHeadSha: null,
+      ciGate: { headSha: HEAD, state: 'failed' } });
+    assert.equal(shared.snapshot.observations.remediation.value.job.live, true);
+    assert.equal(shared.decision.action, 'remediate');
+    assert.equal(shared.decision.actor, 'remediator');
+    const published = f.decide({ job, ciGate: { headSha: HEAD, state: 'failed' } });
+    assert.equal(published.snapshot.observations.remediation.value.job.live, false);
+  });
+}
+
 test('delivery contention changes no records; retry retains one successor and one wake', t => {
   const f = fixture(t);
   const path = join(f.rootDir, 'data', 'follow-up-jobs', 'completed', `${f.job.jobId}.json`);

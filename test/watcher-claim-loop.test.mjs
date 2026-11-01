@@ -4911,7 +4911,7 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
               assert.equal(green, true, 'pending CI stays in the existing wait');
               assert.equal(args.dispatchContext.targetRemediationSha, '${pushed}');
               assert.equal(args.reviewState.headSha, '${reviewed}');
-              globalThis.finalRoundDispatches = (globalThis.finalRoundDispatches || 0) + 1;
+              globalThis.finalRoundClosureAdmissions = (globalThis.finalRoundClosureAdmissions || 0) + 1;
               return { dispatched: true, launchRequestId: 'synthetic-closer' };
             }, logger: { log() {}, warn() {} },
           });
@@ -4981,7 +4981,11 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
         assert.ok(globalThis.finalRoundDecisions?.length >= 1, 'pending CI must reach the closer in this pass');
         assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number=101').get().review_status, 'posted');
         if (['parked-green', 'expired-hammer-handoff'].includes('${initialStatus}')) {
-          assert.equal(globalThis.finalRoundDispatches, 1, 'already green parked head reaches closure exactly once in its first pass');
+          // Startup refill may also observe closure before the posted phase.
+          // This stub counts admissions; the real executor's lease/launch
+          // reconciliation, not this stub, deduplicates launches.
+          assert.ok([1, 2].includes(globalThis.finalRoundClosureAdmissions),
+            'green parked head reaches closure in the posted phase and optionally startup refill');
         } else {
           // Replay the historical requestReviewRereview durable transition.
           // Current request admission already refuses some new final-round
@@ -4997,7 +5001,7 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
           }
           globalThis.finalRoundGreen = true;
           await pollOnce(octokit, pollOptions);
-          assert.equal(globalThis.finalRoundDispatches, 1, 'first green pass makes one closer decision');
+          assert.ok([1, 2].includes(globalThis.finalRoundClosureAdmissions), 'first green pass reaches each due closure observation');
         }
         assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.length, 0);
       ` }).replaceAll('laceyenterprises/adversarial-review', 'example/project')

@@ -114,10 +114,16 @@ immediately through the existing closure-wait path and returns
 
 ### Closure-recovery executor (CLOSURERECOVERYEXEC-01)
 
-REMJOBPHANTOM-01: remediation blocks closure only for a non-terminal job
-with a matching local PID/start identity or a progress heartbeat less than five
-minutes old. The gate projection, shared next-action input and closer admission
-use the same predicate. Completed records, stale locks and leftover workspaces
+REMJOBPHANTOM-01: pending jobs retain pre-spawn custody for five minutes
+from `pendingAt`, falling back to initial `createdAt`. An `in_progress` claim
+without a worker record retains five minutes from `claimedAt`. Invalid, future
+or expired queue/claim timestamps cannot supply custody. A requeued pending
+job uses its new queue timestamp even if its predecessor worker is terminal.
+Once spawned, a non-terminal worker needs a matching local PID/start identity
+or a progress heartbeat less than five minutes old. The gate projection, shared
+next-action input and closer admission use the same predicate. Closer admission
+retains `live: true` when projecting the gate's proven remediation owner. Completed
+records, stale locks and leftover workspaces
 grant no ownership. A stale active-bucket record is ignored without mutating it;
 each observation logs the owning lane and the reclaim reason.
 

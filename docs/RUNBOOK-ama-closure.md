@@ -3466,6 +3466,28 @@ insertion anchors. Renames, opaque files, test-path rules and required-guard
 proofs retain their existing rules. No configuration or operator override is
 needed for whitespace normalization.
 
+PRIMARYDEADCODE-01: a finding-authorized deletion can leave an author-added
+import or module binding dead outside the cited lines. Its reversal is part of
+that deletion only when file contents prove it. The unit must be a pure author
+insertion, removed by the authorizing HAM commit, in a Python (`import x`,
+`from m import x [as y]`, private `_NAME = <literal or None>`) or JS/TS
+(`import ... from`, top-level `const`/`let NAME = <literal>`) file. In that
+commit's parent file every other spelling of each bound symbol, in code,
+strings or comments, must lie on a line the same commit removes inside a unit
+it authorizes under its citation, and at least one such reference must exist.
+The head file must not spell the symbol and must not use dynamic namespace
+access (`globals()`, `sys.modules`, `eval`, ...). `__init__.py`, public Python
+bindings, multi-line or star imports and `export` declarations keep the
+ordinary rule. A candidate that fails names `dead-code-proof-failed:<why>` in
+`missingEvidence.rejected` (`reference-outside`, `string-reference`,
+`all-export`, `dynamic-reference`, `re-export`, `reference-remains`,
+`no-authorized-reference`, `public-binding`, `source-unavailable`,
+`source-mismatch`, `unparseable`). An accepted proof is returned as
+`derivedDeadCode: [{ path, line, symbol, commit, referencesCovered }]` in
+parent-file lines. Content is read through the contents API only for a refused
+declaration-only insertion. Blank-line, renumber, generated-content and
+reversal-authorization rules are unchanged.
+
 HAMENOBUFS-01: every production history reader projects compare metadata and
 commit identity into pages of 100 without compare patches. Because GitHub caps
 compare files at 300 with no file pagination, complete file evidence comes from

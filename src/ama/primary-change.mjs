@@ -17,6 +17,7 @@ import { normalizeEffectiveReviewVerdict } from '../kernel/verdict.mjs';
 import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers, parseCommitTrailerValues } from './ham-provenance.mjs';
 import { proveDerivedArtifacts, proveGeneratedBlocks } from './derived-artifacts.mjs';
 import { proveMigrationRenumbers, verifiedMigrationRenumbers } from './migration-renumber.mjs';
+import { classifyOccurrence, deadCodeLanguage, dynamicHazard, parseDeadCodeDeclaration, symbolOccurrences } from './dead-code-symbols.mjs';
 // HAMINTENT-01: trusted GitHub history, never the hammer's claimed intent.
 const SHA = /^[0-9a-f]{40}$/i;
 const isHammer = (commit) => /^hammer(?:-corp|-claude)?$/i.test(
@@ -564,6 +565,137 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
   });
 }
 
+function deadCodeSource(evidence, path, ref) {
+  return (evidence.deadCodeSources || []).find(source => source.path === path && source.ref === ref);
+}
+
+// PRIMARYDEADCODE-01: a finding-authorized deletion can leave an import or
+// module binding dead outside the cited lines. The removal of that insertion
+// is part of the authorized deletion only when the files prove it: in the
+// pre-change file every other reference lies in a unit the same commit
+// removes under its citation, and the head file no longer names the symbol.
+// Lines outside the declaration grammar return false without a reason.
+function deadCodeAuthorized(evidence, path, unit, primary, cache, strictNonBlockingRemediation) {
+  const change = primary.get(path);
+  const language = deadCodeLanguage(path);
+  if (!language || !change || change.opaque || change.renamed || change.status !== 'modified'
+    || !change.regions.some(region => region.start === region.end && region.start === unit.start && unit.end === unit.start)) return false;
+  return (evidence.reversalAuthorizations || []).some((authorization) => {
+    const { commit, parentFiles } = authorization;
+    const cite = isHammer(commit) && commit?.commit?.message ? reversalCitations(commit.commit.message)[0] : null;
+    if (!cite || !Array.isArray(parentFiles) || !Array.isArray(commit.files)) return false;
+    let line = null;
+    const reject = (why, symbol) => {
+      if (!cache.has('rejectedReversals')) cache.set('rejectedReversals', new Map());
+      const entry = { commit: commit.sha, review: cite[1], finding: Number(cite[2]), kind: cite[3] || 'blocking',
+        reason: `dead-code-proof-failed:${why}`, ...(line ? { detail: `${path}:${line}${symbol ? ` ${symbol}` : ''}` } : {}) };
+      cache.get('rejectedReversals').set(JSON.stringify(entry), entry);
+      return false;
+    };
+    try {
+      // The dead unit is a pure author insertion in the commit's parent too.
+      const segment = protectedSegment(parentFiles, path, unit, cache);
+      if (!segment || segment.lines.some(entry => entry.startsWith('-'))) return false;
+      const removedByCommit = new Map();
+      for (const entry of patchSegments(commit.files, path, cache).segments) {
+        let old = entry.old;
+        for (const text of entry.lines) if (text.startsWith('-')) removedByCommit.set(old++, text.slice(1));
+      }
+      const span = Array.from({ length: segment.nextEnd - segment.next }, (_, index) => segment.next + index);
+      if (!span.length || span.some(position => !removedByCommit.has(position))) return false;
+      const declarations = [];
+      for (const position of span) {
+        const text = removedByCommit.get(position);
+        if (!text.trim()) continue;
+        const parsed = parseDeadCodeDeclaration(language, text);
+        if (!parsed) return false;
+        line = position;
+        if (parsed.error) return reject(parsed.error);
+        declarations.push({ line: position, symbols: parsed.symbols });
+      }
+      if (!declarations.length) return false;
+      line = declarations[0].line;
+      if (/(^|\/)__init__\.pyi?$/.test(path)) return reject('re-export');
+      const before = deadCodeSource(evidence, path, commit.parents?.[0]?.sha);
+      const finalName = evidence.finalFiles.find(file => (file.previous_filename || file.filename) === path)?.filename || path;
+      const after = deadCodeSource(evidence, finalName, evidence.headSha);
+      if (!before || !after) return reject('source-unavailable');
+      if (typeof before.text !== 'string' || typeof after.text !== 'string') return reject(before.error || after.error || 'unparseable');
+      const beforeLines = before.text.split('\n');
+      if (span.some(position => beforeLines[position - 1] !== removedByCommit.get(position))) return reject('source-mismatch');
+      if (dynamicHazard(language, after.text)) return reject('dynamic-reference');
+      // Authorized lines: removed by this commit inside a unit it authorizes.
+      if (!cache.has('deadCodeAuthorizationCache')) cache.set('deadCodeAuthorizationCache', new Map());
+      const proofCache = cache.get('deadCodeAuthorizationCache');
+      const units = change.regions.flatMap(regionUnits).filter(other => other.start !== unit.start || other.end !== unit.end);
+      const covered = position => removedByCommit.has(position) && units.some(other => {
+        const projected = projectRegion(parentFiles, path, other, proofCache);
+        return projected.start <= position && position <= projected.end
+          && reversalAuthorized({ ...evidence, reversalAuthorizations: [authorization] }, path, other, proofCache,
+            strictNonBlockingRemediation);
+      });
+      const afterLines = after.text.split('\n');
+      const proofs = [];
+      for (const declaration of declarations) {
+        line = declaration.line;
+        for (const symbol of declaration.symbols) {
+          const references = symbolOccurrences(beforeLines, symbol).filter(position => !span.includes(position));
+          const outside = references.find(position => !covered(position));
+          if (outside) {
+            line = outside;
+            return reject(classifyOccurrence(beforeLines[outside - 1], symbol), symbol);
+          }
+          if (!references.length) return reject('no-authorized-reference', symbol);
+          if (symbolOccurrences(afterLines, symbol).length) return reject('reference-remains', symbol);
+          proofs.push({ path, line: declaration.line, symbol, commit: commit.sha, referencesCovered: references });
+        }
+      }
+      if (!cache.has('derivedDeadCode')) cache.set('derivedDeadCode', new Map());
+      for (const proof of proofs) cache.get('derivedDeadCode').set(JSON.stringify(proof), proof);
+      return true;
+    } catch (error) { return reject(`unparseable: ${String(error?.message || error).slice(0, 200)}`); }
+  });
+}
+
+// Content reads for the dead-code proof: each authorizing commit's parent
+// and the head. Returns only new reads; failures are recorded, not thrown.
+export async function fetchDeadCodeSources({ repo, get, signal }, evidence, path, regions = null) {
+  const language = deadCodeLanguage(path);
+  if (!language || !SHA.test(evidence.headSha || '')) return [];
+  if (regions) {
+    // Read nothing unless a refused unit is a declaration-only insertion.
+    const change = changes(evidence.primaryFiles).get(path);
+    const candidate = change?.regions.some(region => region.start === region.end
+      && regions.some(entry => entry.start === region.start && entry.end === region.end)
+      && region.addedLines.some(line => line.trim())
+      && region.addedLines.every(line => !line.trim() || parseDeadCodeDeclaration(language, line)));
+    if (!candidate) return [];
+  }
+  const finalName = (evidence.finalFiles || []).find(file => (file.previous_filename || file.filename) === path)?.filename || path;
+  const wanted = [[finalName, evidence.headSha]];
+  for (const { commit } of evidence.reversalAuthorizations || []) {
+    const parent = commit?.parents?.[0]?.sha;
+    if (SHA.test(parent || '') && commit.files?.some(file => file.filename === path && !file.previous_filename)) wanted.push([path, parent]);
+  }
+  const sources = [];
+  for (const [name, ref] of wanted) {
+    if (deadCodeSource(evidence, name, ref) || sources.some(source => source.path === name && source.ref === ref)) continue;
+    signal?.throwIfAborted();
+    try {
+      const data = await get(`repos/${repo}/contents/${name.split('/').map(encodeURIComponent).join('/')}?ref=${ref}`);
+      const text = data?.type === 'file' && data.encoding === 'base64' && typeof data.content === 'string'
+        ? Buffer.from(data.content, 'base64').toString('utf8') : null;
+      sources.push(text === null || text.includes('\0') || text.includes('�')
+        ? { path: name, ref, error: 'unparseable' } : { path: name, ref, text });
+    } catch (error) {
+      signal?.throwIfAborted();
+      if (error?.authOutage === true) throw error;
+      sources.push({ path: name, ref, error: 'source-unavailable' });
+    }
+  }
+  return sources;
+}
+
 // A replacement hunk can delete/re-add unchanged base lines (GitHub's
 // three-line clone command is one such hunk). Exact context at the same base
 // coordinate in the final patch proves those lines were never reversed. Do
@@ -715,13 +847,17 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
       throw new Error('empty primary change');
     }
     const testChanges = testRegionsChanged(primary, final);
+    // Restorations of author deletions never qualify as derived dead code.
+    const authorized = (path, unit, cache, restoringDeletion = false) =>
+      reversalAuthorized(evidence, path, unit, cache, strictNonBlockingRemediation, restoringDeletion)
+      || (!restoringDeletion && deadCodeAuthorized(evidence, path, unit, primary, cache, strictNonBlockingRemediation));
     const reverted = (path, missing = 'reversal-authorization') => {
       const diagnosticCache = new Map();
       return { ok: false, reason: 'primary-change-reverted', path, ...whitespaceEvidence,
         ...(evidence.migrationRenumberDiagnostics?.length ? { migrationRenumberDiagnostics: evidence.migrationRenumberDiagnostics } : {}),
         testRegionsChanged: testChanges, missingEvidence: missingReversalEvidence(evidence, path, missing, authorizationCache,
           refusedRegions(primary.get(path), final.get(path), (unit, restoringDeletion) =>
-            reversalAuthorized(evidence, path, unit, diagnosticCache, strictNonBlockingRemediation, restoringDeletion))) };
+            authorized(path, unit, diagnosticCache, restoringDeletion))) };
     };
     for (const [path, change] of primary) {
       if (guardReversals.some(proof => proof.path === path)) continue;
@@ -740,7 +876,7 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
         || (change.status === 'added' && actual && !actual.opaque && actual.regions.length === 0) || (!actual
         && !(change.regions.length > 0 && !change.opaque && !change.renamed
           && (change.status !== 'added' || change.removed.size > 0)
-          && change.regions.every((region) => regionUnits(region).every((unit) => reversalAuthorized(evidence, path, unit, authorizationCache, strictNonBlockingRemediation)))))) {
+          && change.regions.every((region) => regionUnits(region).every((unit) => authorized(path, unit, authorizationCache)))))) {
         return reverted(path, change.renamed ? 'rename-preservation' : change.opaque ? 'opaque-file-preservation' : 'reversal-authorization');
       }
       if (!actual) continue;
@@ -786,14 +922,16 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
         for (const unit of regionUnits(region)) {
           if (!unchanged.has(unit.start) && !authorizedRestorations.has(unit.start)
             && !actualUnits.some((other) => unitCovered(unit, other))
-            && !reversalAuthorized(evidence, path, unit, authorizationCache, strictNonBlockingRemediation)) {
+            && !authorized(path, unit, authorizationCache)) {
             return reverted(path);
           }
         }
       }
     }
+    const derivedDeadCode = [...(authorizationCache.get('derivedDeadCode')?.values() || [])];
     return { ok: true, applicable: true, testRegionsChanged: testChanges, ...whitespaceEvidence,
       ...(derivedChanges.length ? { derivedChanges } : {}),
+      ...(derivedDeadCode.length ? { derivedDeadCode } : {}),
       ...(guardReversals.length ? { guardReversals: guardReversals.map(({ authorization, path, failedRun, passingRun }) => ({
         authorization, paths: [path], failedCheckRun: failedRun.id, passingCheckRun: passingRun.id,
         failedHead: failedRun.head_sha, passingHead: passingRun.head_sha,
@@ -1425,6 +1563,7 @@ export async function fetchPrimaryChange(args, {
   fetchCiCostImpl = fetchCiCost, proveDerivedArtifactsImpl = proveDerivedArtifacts,
   proveGeneratedBlocksImpl = proveGeneratedBlocks,
   proveMigrationRenumbersImpl = proveMigrationRenumbers,
+  fetchDeadCodeSourcesImpl = fetchDeadCodeSources,
 } = {}) {
   let history;
   if (args.get.persistPrimaryChange && primaryChangeStoreOwned(primaryChangeRoot(args))) {
@@ -1472,6 +1611,15 @@ export async function fetchPrimaryChange(args, {
     const added = proofs.filter(proof => !previous.some(entry => JSON.stringify(entry) === JSON.stringify(proof)));
     if (!added.length) break;
     result.generatedBlockProofs = [...previous, ...added];
+  }
+  // PRIMARYDEADCODE-01: content for the derived dead-code proof, read only
+  // for a path the coverage check still refuses. No new read ends the loop.
+  for (let attempt = 0; attempt < (result.primaryFiles?.length || 0); attempt++) {
+    const refusal = checkPrimaryChange(result, args.headSha, { strictNonBlockingRemediation: true });
+    if (refusal.reason !== 'primary-change-reverted' || refusal.missingEvidence?.evidence !== 'reversal-authorization') break;
+    const sources = await fetchDeadCodeSourcesImpl(args, result, refusal.path, refusal.missingEvidence.regions || []);
+    if (!sources.length) break;
+    result.deadCodeSources = [...(result.deadCodeSources || []), ...sources];
   }
   return result;
 }

@@ -2353,6 +2353,25 @@ current-head wake rule. Verify after deployment that the next suppressed
 comment-only worker push wakes and reaches the hammer on the first green-CI
 watcher pass, without a manual re-review request.
 
+CLOSERDEADLOCK-01: the watcher explicitly keeps completed comment-only
+final-round push heads in the posted closer lane, suppressing stale-review
+auto-refresh before reviewer admission. It matches the current head against
+`findFinalRemediationPushJob` and requires a completed comment-only final round.
+Rows already parked in `pending`, `pending-upstream` or `ci-blocked` recover on
+the next normal watcher pass without a label: the existing request
+compare-and-swap restores the job's original delivered review head only while it
+is still the latest delivered review. Active reviewers and explicit review
+recovery retain their existing behavior.
+
+Each pass logs `owning lane=closer` with the PR and full head, and keeps the
+normal closure observation due across unchanged review fingerprints. Pending CI
+and deadline observations therefore keep reaching the closer; the first green
+pass reaches the usual daemon/hammer decision. Blocking findings and all
+exact-head validation, lease and dispatch caps remain enforced by that decision.
+After deployment, verify the ownership log repeats while CI is pending and the
+next green pass records the closer decision. No migration or operator label is
+required.
+
 A proven comment-only final-round handoff also resumes when CI fails
 (HAMREDCI-01), including when the reviewed head is stale, with or without
 remaining non-blocking findings or strict non-blocking remediation enabled. The

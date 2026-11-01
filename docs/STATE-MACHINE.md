@@ -1128,6 +1128,19 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+CLOSERDEADLOCK-01: an exact head recorded by a completed comment-only final
+round with `completion.finalRemediationPush = true` and a head-bound suppressed
+re-review handoff stays in the posted closer lane. The watcher suppresses stale
+posted-review refresh explicitly. Already queued `pending`, `pending-upstream`
+and `ci-blocked` rows recover to the job's delivered review head through the
+existing request compare-and-swap, provided that head is still the latest
+delivered review. Explicit review recovery and active reviewers retain their
+existing admission. Every pass logs `owning lane=closer` and makes the normal
+closure observer due, even when the review fingerprint is unchanged. CI waits
+and their deadlines are re-evaluated there; green CI reaches normal daemon or
+hammer selection. This scheduling handoff grants no merge authority and changes
+no blocking-finding, exact-head, lease, round-budget or dispatch-cap gate.
+
 HAMRESUMEOWED-01: a pending-only hammer exit owes closure for its exact
 `resumeHead`. The posted-review scheduler consumes this debt every poll,
 bypassing no-progress backoff and prioritizing its normal closure handler.

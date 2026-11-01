@@ -242,6 +242,26 @@ const WAITING_ROLLUPS = [
   { name: 'only the pipeline gate', rollup: [{ __typename: 'StatusContext', context: 'agent-os/adversarial-gate', state: 'PENDING' }] },
 ];
 
+test('CLOSERDEADLOCK-01: a live blocking verdict on a green final-round push cannot authorize daemon merge', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'final-round-blocking-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  seedFinalRound(rootDir);
+  const result = await maybeDispatchAmaClosureFor(closureArgs(rootDir, {
+    loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({
+      enabled: true, autonomousMergeExecutionEnabled: true,
+    }) }),
+    fetchLatestHeadReviewBodiesImpl: async () => [REQUEST_CHANGES_BODY],
+    runDaemonCleanMergeAttemptImpl: async () => assert.fail('a blocking verdict cannot enter daemon merge'),
+    maybeDispatchAmaCloserImpl: async (args) => {
+      assert.equal(args.reviewState.verdict, 'request-changes');
+      assert.ok(args.reviewState.blockingFindingCount > 0);
+      assert.equal(isEligibleForAmaClosure(args.reviewState, args.prMetadata, args.cfg, { env: {} }).eligible, false);
+      return { dispatched: false, skipMergeAgent: true, reason: 'not-eligible', reasons: ['blocking-findings-present'] };
+    },
+  }));
+  assert.equal(result.dispatched, false);
+});
+
 test('NXA-04: a blocking final-push handoff retains its shared observer until CI settles', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'final-successor-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

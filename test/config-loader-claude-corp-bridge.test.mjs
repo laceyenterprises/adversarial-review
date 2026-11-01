@@ -53,7 +53,12 @@ test('canonical overrides and legacy aliases match Python', () => fixture((topPa
   assert.equal(cfg.get(`${prefix}.secret_mirror_source`), '/private/var/db/synthetic/bearer-secret');
 }));
 
-for (const body of ['port: 80', 'port: 65536', 'port: nope', 'port: true', 'primary_url: null', 'audit_context: null', 'audit_context: 42', 'audit_context: true', 'audit_context: []', 'audit_context: {}', 'typo: true']) {
+test('corporate bridge ignores unread sibling fields', () => fixture((topPath) => {
+  writeFileSync(topPath, 'version: 1\noauth_broker:\n  claude_code_corp_bridge:\n    typo: true\n');
+  assert.deepEqual(loadConfig({ topPath, env: {} }).get(prefix), defaults);
+}));
+
+for (const body of ['port: 80', 'port: 65536', 'port: nope', 'port: true', 'primary_url: null', 'audit_context: null', 'audit_context: 42', 'audit_context: true', 'audit_context: []', 'audit_context: {}']) {
   test(`corporate schema rejects ${body}`, () => fixture((topPath) => {
     writeFileSync(topPath, `version: 1\noauth_broker:\n  claude_code_corp_bridge:\n    ${body}\n`);
     assert.throws(() => loadConfig({ topPath, env: {} }), AgentOSConfigError);

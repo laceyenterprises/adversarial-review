@@ -44,7 +44,7 @@ test('recovery role preserves the owning reader defaults, types and allowlists',
     }
     for (const [key, invalid] of [
       ['worker_class', 'unknown-worker'], ['worker_class', 1],
-      ['fallback_path', 'unknown-fallback'], ['fallback_path', true], ['unknown', false],
+      ['fallback_path', 'unknown-fallback'], ['fallback_path', true],
     ]) {
       assert.throws(() => validateSchema({ version: 1, roles: {
         merge_agent_failure_recovery: { [key]: invalid },
@@ -59,10 +59,11 @@ test('recovery role preserves the owning reader defaults, types and allowlists',
   });
 });
 
-test('packaged Python module mirror preserves strict objects and leaf constraints', () => {
+test('packaged compatibility mirror ignores unread fields and preserves leaf constraints', () => {
   for (const path of strictObjects({ __keys: mirror })) {
-    assert.throws(() => validateSchema({ version: 1, ...nested([...path, 'unknown_field'], true) }),
-      { name: 'AgentOSConfigError', key: [...path, 'unknown_field'].join('.') });
+    const validated = validateSchema({ version: 1, ...nested([...path, 'unknown_field'], true) });
+    const parent = path.reduce((doc, key) => doc?.[key], validated);
+    assert.equal(parent?.unknown_field, undefined);
   }
   for (const [path, invalid] of [
     [['roles', 'oss-local', 'litellm_base_url'], 1],

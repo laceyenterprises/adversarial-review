@@ -18,6 +18,17 @@ See [the closure runbook](docs/RUNBOOK-ama-closure.md).
 
 # Adversarial Review
 
+CFGREADERSCOPE-01: the shared configuration is an overlay. The Node reader
+validates its registered read surface and ignores unknown sibling-reader keys
+at every depth, including in checked-in files and local overlays. Set
+`ADVERSARIAL_CONFIG_DEBUG=1` for ignored-key notes. Adding an unrelated
+`worker_pool.*` key requires no companion schema edit here. Extend this reader
+when it starts supporting a key; keep shared supported values and consumed
+atomic declarations in parity. Historical parse-only registrations remain
+supported for compatibility. See the ownership rule in
+[`src/config-loader.mjs`](src/config-loader.mjs) and the
+[SEV2 report](docs/postmortems/SEV2-every-new-config-key-forced-workers-to-provision-the-review-service-repo-2026-10-31.md).
+
 AFA-07 mirrors disabled-by-default `cloud_access.aws.enabled`, the fixed
 `us-east-2` region and private project/budget/activation-receipt inputs in the
 same strict schema. Identifiers and file paths have no defaults. This is

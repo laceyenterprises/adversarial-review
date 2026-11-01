@@ -8,7 +8,8 @@ import { loadConfig, loadConfigRuntime, validateSchema } from '../src/config-loa
 
 // Names only, captured from a committed authoritative schema, including roots
 // absent from its default config.yaml. No live config or sibling repo is read
-// by this suite. Refresh this snapshot when the shared schema changes.
+// by this suite. It is a historical sample, not an allowlist to maintain when
+// another reader adds a root.
 const { roots } = JSON.parse(readFileSync(new URL('./fixtures/config-schema-roots.json', import.meta.url), 'utf8'));
 
 function withConfig(fn) {
@@ -64,23 +65,21 @@ test('CFGFOREIGN-01: shared timeouts override does not change this reader\'s loa
   });
 });
 
-test('CFGFOREIGN-01: unknown roots still fail strict and runtime local loads', () => {
+test('CFGFOREIGN-01: unknown roots are ignored by startup and runtime local loads', () => {
   withConfig(({ topPath, localPath }) => {
     for (const version of ['', 'version: 1\n']) {
       writeFileSync(localPath, `${version}unknown_example_root:\n  enabled: true\n`);
       for (const loader of [loadConfig, loadConfigRuntime]) {
-        assert.throws(() => loader({ topPath, env: {} }), {
-          name: 'AgentOSConfigError', key: 'unknown_example_root',
-        });
+        assert.equal(loader({ topPath, env: {} }).get('unknown_example_root'), null);
       }
     }
   });
 });
 
-test('CFGFOREIGN-01: new foreign sections keep checked-in config strict', () => {
+test('CFGFOREIGN-01: new foreign sections are ignored in checked-in config', () => {
   for (const root of ['comms', 'submodule_float', 'assessment_cadence', 'argus', 'searchlight', 'timeouts']) {
-    assert.throws(() => validateSchema({ version: 1, [root]: {} }, {
-      source: '/tmp/config.yaml', tolerateForeignTopLevelSections: true,
-    }), { name: 'AgentOSConfigError', key: root });
+    assert.deepEqual(validateSchema({ version: 1, [root]: {} }, {
+      source: '/tmp/config.yaml',
+    }), { version: 1 });
   }
 });

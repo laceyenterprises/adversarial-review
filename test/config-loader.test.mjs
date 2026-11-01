@@ -98,9 +98,9 @@ test('local example keeps load-aware policy inside the shared adversarial review
       assert.equal(cfg.get('adversarial.reviewer.load_aware.max_multiplier'), 6);
       assert.equal(cfg.get('timeouts'), null);
     }
-    // Undeclared roots must still fail even when foreign sections are allowed.
+    // Undeclared sibling roots are ignored without a foreign-section registry.
     writeFileSync(join(dir, 'config.local.yaml'), 'unknown_example_root:\n  enabled: true\n');
-    assert.throws(() => loadConfig({ topPath, env: {} }), { name: 'AgentOSConfigError', key: 'unknown_example_root' });
+    assert.equal(loadConfig({ topPath, env: {} }).get('unknown_example_root'), null);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -378,15 +378,7 @@ test('imm observe-first modes load through strict Node schema', () => {
         ownership:
           report_only: true
     `);
-    assert.throws(
-      () => loadConfig({ topPath: badKey, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.equal(err.key, 'imm.ownership.report_only');
-        assert.match(err.message, /unknown key/);
-        return true;
-      },
-    );
+    assert.doesNotThrow(() => loadConfig({ topPath: badKey, env: {} }));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -529,7 +521,7 @@ test('update channel loads through strict Node schema and env override', () => {
   }
 });
 
-test('gemini runtime and mode remain valid while antigravity accounts is rejected', () => {
+test('gemini runtime and mode remain valid while unused antigravity accounts is ignored', () => {
   const tmp = freshTmp();
   try {
     const valid = join(tmp, 'valid-gemini.yaml');
@@ -554,15 +546,7 @@ test('gemini runtime and mode remain valid while antigravity accounts is rejecte
           antigravity:
             accounts: []
     `);
-    assert.throws(
-      () => loadConfig({ topPath: rejected, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.equal(err.key, 'reviewer.gemini.antigravity.accounts');
-        assert.match(err.message, /unknown key/);
-        return true;
-      },
-    );
+    assert.doesNotThrow(() => loadConfig({ topPath: rejected, env: {} }));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -1043,21 +1027,13 @@ test('agent_gateway alert bus URL loads through strict Node schema and env alias
       agent_gateway:
         wake_url: http://gbi.local:18799/hooks/wake
     `);
-    assert.throws(
-      () => loadConfig({ topPath: unknownKey, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.equal(err.key, 'agent_gateway.wake_url');
-        assert.match(err.message, /unknown key/);
-        return true;
-      },
-    );
+    assert.doesNotThrow(() => loadConfig({ topPath: unknownKey, env: {} }));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 });
 
-test('OSR-05 operator and linear sections reject unknown keys', () => {
+test('OSR-05 operator and linear sections ignore unknown keys', () => {
   const tmp = freshTmp();
   try {
     const badOperator = join(tmp, 'bad-operator.yaml');
@@ -1068,15 +1044,7 @@ test('OSR-05 operator and linear sections reject unknown keys', () => {
         full_name: Example Operator
         handle: example
     `);
-    assert.throws(
-      () => loadConfig({ topPath: badOperator, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.equal(err.key, 'operator.handle');
-        assert.match(err.message, /unknown key/);
-        return true;
-      },
-    );
+    assert.doesNotThrow(() => loadConfig({ topPath: badOperator, env: {} }));
 
     const badLinear = join(tmp, 'bad-linear-extra.yaml');
     writeFile(badLinear, `
@@ -1086,15 +1054,7 @@ test('OSR-05 operator and linear sections reject unknown keys', () => {
         issue_prefix: EX
         project_slug: example
     `);
-    assert.throws(
-      () => loadConfig({ topPath: badLinear, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.equal(err.key, 'linear.project_slug');
-        assert.match(err.message, /unknown key/);
-        return true;
-      },
-    );
+    assert.doesNotThrow(() => loadConfig({ topPath: badLinear, env: {} }));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -1320,11 +1280,11 @@ test('local.yaml overrides top', () => {
   }
 });
 
-test('top-level config.yaml rejects an unknown nested worker_pool key (worker_pool is now a known partial mirror)', () => {
+test('top-level config.yaml ignores an unknown nested worker_pool key', () => {
   // As of the deep-reconcile CFG knob (2026-06-19) `worker_pool` is a KNOWN
   // partial root in this reader (mirrors only dag.autowalk.deep_reconcile), no
   // longer a foreign top-level section. The canonical config.yaml stays strict,
-  // so an unknown nested worker_pool key still fails loud.
+  // but unregistered sibling fields are ignored in checked-in files too.
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -1333,18 +1293,7 @@ test('top-level config.yaml rejects an unknown nested worker_pool key (worker_po
       worker_pool:
         anything: true
     `);
-    assert.throws(
-      () => loadConfig({ topPath: top, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.match(err.message, /worker_pool/);
-        assert.match(err.message, /unknown key/);
-        // source is now line-annotated (config.yaml:N) — a nested unknown-key
-        // error rather than a whole-section foreign rejection.
-        assert.ok(String(err.source).startsWith(top));
-        return true;
-      },
-    );
+    assert.doesNotThrow(() => loadConfig({ topPath: top, env: {} }));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -2364,7 +2313,7 @@ test('unversioned config.local.yaml tolerates unknown nested worker_pool keys', 
   }
 });
 
-test('top-level config.yaml rejects an unknown nested main_catchup key', () => {
+test('top-level config.yaml ignores an unknown nested main_catchup key', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -2373,16 +2322,7 @@ test('top-level config.yaml rejects an unknown nested main_catchup key', () => {
       main_catchup:
         anything: true
     `);
-    assert.throws(
-      () => loadConfig({ topPath: top, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.match(err.message, /main_catchup/);
-        assert.match(err.message, /unknown key/);
-        assert.ok(String(err.source).startsWith(top));
-        return true;
-      },
-    );
+    assert.doesNotThrow(() => loadConfig({ topPath: top, env: {} }));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -2453,7 +2393,7 @@ test('ci.billing from the canonical config.yaml loads (CFG-01 drift regression)'
   }
 });
 
-test('an unknown key under ci.billing is still rejected (strictness preserved)', () => {
+test('an unknown key under ci.billing is ignored', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -2464,7 +2404,7 @@ test('an unknown key under ci.billing is still rejected (strictness preserved)',
           monthly_budget_usd: 200.0
           not_a_real_billing_key: 1
     `);
-    assert.throws(() => loadConfig({ topPath: top, env: {} }), /unknown key \(strict schema\)/);
+    assert.doesNotThrow(() => loadConfig({ topPath: top, env: {} }));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -2993,7 +2933,7 @@ test('config.local.yaml tolerates unknown nested main_catchup keys and reads mir
   }
 });
 
-test('top-level config.yaml accepts mirrored op keys and rejects unknown nested op keys', () => {
+test('top-level config.yaml accepts mirrored op keys and ignores unknown nested op keys', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -3041,16 +2981,7 @@ test('top-level config.yaml accepts mirrored op keys and rejects unknown nested 
         vault: OpsVault
         account: example
     `);
-    assert.throws(
-      () => loadConfig({ topPath: bad, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.equal(err.key, 'op.account');
-        assert.match(err.message, /unknown key/);
-        assert.ok(String(err.source).startsWith(bad));
-        return true;
-      },
-    );
+    assert.doesNotThrow(() => loadConfig({ topPath: bad, env: {} }));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -3125,7 +3056,7 @@ test('config.local.yaml tolerates a NESTED unknown key under an owned root (no w
   }
 });
 
-test('config.local.yaml rejects arbitrary unknown top-level keys as typos', () => {
+test('config.local.yaml ignores unknown top-level keys owned by other readers', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -3142,21 +3073,13 @@ test('config.local.yaml rejects arbitrary unknown top-level keys as typos', () =
           standard_backup:
             daily: 3
     `);
-    assert.throws(
-      () => loadConfig({ topPath: top, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.match(err.message, /retentoin/);
-        assert.match(err.message, /unknown key/);
-        return true;
-      },
-    );
+    assert.doesNotThrow(() => loadConfig({ topPath: top, env: {} }));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 });
 
-test('checked-in config.yaml STILL rejects a nested unknown key (strict preserved)', () => {
+test('checked-in config.yaml ignores a nested unknown key', () => {
   // The tolerance is scoped to *.local.yaml only — the version-controlled
   // config.yaml keeps catching genuine typos at review/CI time.
   const tmp = freshTmp();
@@ -3170,21 +3093,13 @@ test('checked-in config.yaml STILL rejects a nested unknown key (strict preserve
             daily: 3
             bogus_key_not_in_schema: 1
     `);
-    assert.throws(
-      () => loadConfig({ topPath: top, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.match(err.message, /bogus_key_not_in_schema/);
-        assert.match(err.message, /unknown key/);
-        return true;
-      },
-    );
+    assert.doesNotThrow(() => loadConfig({ topPath: top, env: {} }));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 });
 
-test('runtime loader tolerates an unknown checked-in config.yaml key while strict load rejects it', () => {
+test('runtime loader tolerates an unknown checked-in config.yaml key and startup load does too', () => {
   resetRuntimeUnknownWarningCacheForTests();
   const tmp = freshTmp();
   try {
@@ -3208,25 +3123,16 @@ test('runtime loader tolerates an unknown checked-in config.yaml key while stric
         },
       ]);
     });
-    assert.equal(warnings.filter((line) => line.includes('roots.future_runtime_home')).length, 1);
-    assert.match(warnings.join('\n'), /runtime config/);
+    assert.equal(warnings.filter((line) => line.includes('roots.future_runtime_home')).length, 0);
 
-    assert.throws(
-      () => loadConfig({ topPath: top, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.match(err.message, /roots\.future_runtime_home/);
-        assert.match(err.message, /unknown key/);
-        return true;
-      },
-    );
+    assert.doesNotThrow(() => loadConfig({ topPath: top, env: {} }));
   } finally {
     resetRuntimeUnknownWarningCacheForTests();
     rmSync(tmp, { recursive: true, force: true });
   }
 });
 
-test('runtime loader tolerates unknown checked-in module keys and warns once per file/key', () => {
+test('runtime loader tolerates unknown checked-in module keys without stderr warnings', () => {
   resetRuntimeUnknownWarningCacheForTests();
   const tmp = freshTmp();
   try {
@@ -3253,24 +3159,16 @@ test('runtime loader tolerates unknown checked-in module keys and warns once per
         },
       ]);
     });
-    assert.equal(warnings.filter((line) => line.includes('roles.future_worker_role')).length, 1);
+    assert.equal(warnings.filter((line) => line.includes('roles.future_worker_role')).length, 0);
 
-    assert.throws(
-      () => loadConfig({ topPath: top, modulePaths: [mod], env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.match(err.message, /roles\.future_worker_role/);
-        assert.match(err.message, /unknown key/);
-        return true;
-      },
-    );
+    assert.doesNotThrow(() => loadConfig({ topPath: top, modulePaths: [mod], env: {} }));
   } finally {
     resetRuntimeUnknownWarningCacheForTests();
     rmSync(tmp, { recursive: true, force: true });
   }
 });
 
-test('topPath deliberately pointed at config.local.yaml stays strict outside Layer 4', () => {
+test('topPath deliberately pointed at config.local.yaml also ignores unread keys outside Layer 4', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.local.yaml');
@@ -3282,21 +3180,13 @@ test('topPath deliberately pointed at config.local.yaml stays strict outside Lay
             daily: 3
             bogus_key_not_in_schema: 1
     `);
-    assert.throws(
-      () => loadConfig({ topPath: top, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.match(err.message, /bogus_key_not_in_schema/);
-        assert.match(err.message, /unknown key/);
-        return true;
-      },
-    );
+    assert.doesNotThrow(() => loadConfig({ topPath: top, env: {} }));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 });
 
-test('module *.local.yaml tolerates a nested unknown key; module config.yaml stays strict', () => {
+test('module *.local.yaml tolerates a nested unknown key; module config.yaml also ignores unread keys', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -3331,7 +3221,7 @@ test('module *.local.yaml tolerates a nested unknown key; module config.yaml sta
   }
 });
 
-test('module path supplied directly as *.local.yaml stays strict outside Layer 4', () => {
+test('module path supplied directly as *.local.yaml also ignores unread keys outside Layer 4', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -3349,21 +3239,13 @@ test('module path supplied directly as *.local.yaml stays strict outside Layer 4
           standard_backup:
             bogus_key_not_in_schema: 1
     `);
-    assert.throws(
-      () => loadConfig({ topPath: top, modulePaths: [modLocal], env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.match(err.message, /bogus_key_not_in_schema/);
-        assert.match(err.message, /unknown key/);
-        return true;
-      },
-    );
+    assert.doesNotThrow(() => loadConfig({ topPath: top, modulePaths: [modLocal], env: {} }));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 });
 
-test('module *.local.yaml rejects arbitrary unknown top-level keys as typos', () => {
+test('module *.local.yaml ignores unknown top-level keys owned by other readers', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -3384,15 +3266,7 @@ test('module *.local.yaml rejects arbitrary unknown top-level keys as typos', ()
           standard_backup:
             daily: 3
     `);
-    assert.throws(
-      () => loadConfig({ topPath: top, modulePaths: [mod], env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.match(err.message, /retentoin/);
-        assert.match(err.message, /unknown key/);
-        return true;
-      },
-    );
+    assert.doesNotThrow(() => loadConfig({ topPath: top, modulePaths: [mod], env: {} }));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -3666,7 +3540,7 @@ test('sentinel quiet_window accepts numeric YAML and string env values', () => {
   }
 });
 
-test('retention surfaces reject unknown keys with structured path', () => {
+test('retention surfaces ignore unknown keys', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -3677,21 +3551,13 @@ test('retention surfaces reject unknown keys with structured path', () => {
           foo:
             policy: standard_backup
     `);
-    assert.throws(
-      () => loadConfig({ topPath: top, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.equal(err.key, 'retention.surfaces.foo');
-        assert.match(err.message, /unknown key/);
-        return true;
-      },
-    );
+    assert.doesNotThrow(() => loadConfig({ topPath: top, env: {} }));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 });
 
-test('retention rejects unknown top-level nested blocks', () => {
+test('retention ignores unknown top-level nested blocks', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -3700,15 +3566,7 @@ test('retention rejects unknown top-level nested blocks', () => {
       retention:
         unknown_block: {}
     `);
-    assert.throws(
-      () => loadConfig({ topPath: top, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.equal(err.key, 'retention.unknown_block');
-        assert.match(err.message, /unknown key/);
-        return true;
-      },
-    );
+    assert.doesNotThrow(() => loadConfig({ topPath: top, env: {} }));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -4049,7 +3907,7 @@ test('launchd label prefix loads through strict Node schema and env alias', () =
   }
 });
 
-test('config validates without ACPX discovery keys and rejects the removed install root', () => {
+test('config validates without ACPX discovery keys and ignores the removed install root', () => {
   const tmp = freshTmp();
   try {
     const topPath = join(tmp, 'config.yaml');
@@ -4057,8 +3915,7 @@ test('config validates without ACPX discovery keys and rejects the removed insta
     const cfg = loadConfig({ topPath, modulePaths: [MODULE_CONFIG_PATH], env: {} });
     assert.equal(cfg.get('openclaw.install_root'), null);
     assert.equal(Object.hasOwn(ENV_ALIASES, 'openclaw.install_root'), false);
-    assert.throws(() => validateSchema({ version: 1, openclaw: { install_root: '/fixture/retired-runtime' } }),
-      (err) => err instanceof AgentOSConfigError && err.key === 'openclaw.install_root' && /unknown key/.test(err.message));
+    assert.doesNotThrow(() => validateSchema({ version: 1, openclaw: { install_root: '/fixture/retired-runtime' } }));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -4232,7 +4089,7 @@ test('dispatch per-task-kind env var overrides file', () => {
   }
 });
 
-test('dispatch strict schema rejects unknown task_kind', () => {
+test('dispatch ignores an unread task kind', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -4242,10 +4099,7 @@ test('dispatch strict schema rejects unknown task_kind', () => {
         default_worker_class_by_task_kind:
           synthesizing: codex
     `);
-    assert.throws(
-      () => loadConfig({ topPath: top, env: {} }),
-      AgentOSConfigError,
-    );
+    assert.equal(loadConfig({ topPath: top, env: {} }).get('dispatch.default_worker_class_by_task_kind.synthesizing'), null);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -4568,7 +4422,7 @@ test('malformed YAML fails loud with path:line', () => {
   }
 });
 
-test('unknown key fails loud naming nearest valid', () => {
+test('unknown key is ignored beside a recognized root setting', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -4578,15 +4432,7 @@ test('unknown key fails loud naming nearest valid', () => {
         hq: /foo
         not_a_root: /bar
     `);
-    assert.throws(
-      () => loadConfig({ topPath: top, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.match(err.message, /roots\.not_a_root/);
-        assert.match(err.message, /unknown key/);
-        return true;
-      },
-    );
+    assert.doesNotThrow(() => loadConfig({ topPath: top, env: {} }));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -5076,34 +4922,18 @@ test('validateSchema rejects unsupported MHX title tags in shared CFG enums', ()
   );
 });
 
-test('validateSchema rejects unknown nested worker_pool keys unless nested-local tolerance is explicit', () => {
-  assert.throws(
-    () => validateSchema(
+test('validateSchema ignores unknown nested worker_pool keys without a tolerance flag', () => {
+  assert.doesNotThrow(() => validateSchema(
       { version: 1, worker_pool: { anything: true } },
       { source: '/tmp/config.local.yaml' },
-    ),
-    (err) => {
-      assert.ok(err instanceof AgentOSConfigError);
-      assert.match(err.message, /worker_pool/);
-      assert.match(err.message, /unknown key/);
-      return true;
-    },
-  );
+    ));
 });
 
-test('validateSchema foreign top-level tolerance does not make worker_pool foreign', () => {
-  assert.throws(
-    () => validateSchema(
+test('validateSchema ignores unknown worker_pool keys in checked-in config', () => {
+  assert.doesNotThrow(() => validateSchema(
       { version: 1, worker_pool: { anything: true } },
       { source: '/tmp/config.yaml', tolerateForeignTopLevelSections: true },
-    ),
-    (err) => {
-      assert.ok(err instanceof AgentOSConfigError);
-      assert.match(err.message, /worker_pool/);
-      assert.match(err.message, /unknown key/);
-      return true;
-    },
-  );
+    ));
 });
 
 test('validateSchema tolerates unknown nested worker_pool keys in local files and keeps the mirrored one', () => {
@@ -5142,34 +4972,18 @@ test('validateSchema tolerates unknown nested worker_pool keys in local files an
   assert.equal(out.worker_pool?.secrets_bus?.op_timeout_seconds, 20.0);
 });
 
-test('validateSchema rejects unknown nested main_catchup keys unless nested-local tolerance is explicit', () => {
-  assert.throws(
-    () => validateSchema(
+test('validateSchema ignores unknown nested main_catchup keys without a tolerance flag', () => {
+  assert.doesNotThrow(() => validateSchema(
       { version: 1, main_catchup: { anything: true } },
       { source: '/tmp/config.local.yaml' },
-    ),
-    (err) => {
-      assert.ok(err instanceof AgentOSConfigError);
-      assert.match(err.message, /main_catchup\.anything/);
-      assert.match(err.message, /unknown key/);
-      return true;
-    },
-  );
+    ));
 });
 
-test('validateSchema foreign top-level tolerance does not make main_catchup foreign', () => {
-  assert.throws(
-    () => validateSchema(
+test('validateSchema ignores unknown main_catchup keys in checked-in config', () => {
+  assert.doesNotThrow(() => validateSchema(
       { version: 1, main_catchup: { anything: true } },
       { source: '/tmp/config.yaml', tolerateForeignTopLevelSections: true },
-    ),
-    (err) => {
-      assert.ok(err instanceof AgentOSConfigError);
-      assert.match(err.message, /main_catchup\.anything/);
-      assert.match(err.message, /unknown key/);
-      return true;
-    },
-  );
+    ));
 });
 
 test('validateSchema tolerates unknown nested main_catchup keys in local files and keeps mirrored drain keys', () => {
@@ -5196,19 +5010,11 @@ test('validateSchema tolerates unknown nested main_catchup keys in local files a
   assert.equal(out.main_catchup?.adversarial_watcher_drain_bounce_slack_seconds, 45);
 });
 
-test('validateSchema rejects unknown nested post_deploy_verify keys unless nested-local tolerance is explicit', () => {
-  assert.throws(
-    () => validateSchema(
+test('validateSchema ignores unknown nested post_deploy_verify keys without a tolerance flag', () => {
+  assert.doesNotThrow(() => validateSchema(
       { version: 1, post_deploy_verify: { future_python_only_key: true } },
       { source: '/tmp/config.local.yaml' },
-    ),
-    (err) => {
-      assert.ok(err instanceof AgentOSConfigError);
-      assert.match(err.message, /post_deploy_verify\.future_python_only_key/);
-      assert.match(err.message, /unknown key/);
-      return true;
-    },
-  );
+    ));
 });
 
 test('validateSchema tolerates unknown nested post_deploy_verify keys in local files and keeps mirrored PMV keys', () => {
@@ -5235,34 +5041,18 @@ test('validateSchema tolerates unknown nested post_deploy_verify keys in local f
   assert.equal(out.post_deploy_verify?.boot_window_seconds, 600);
 });
 
-test('validateSchema rejects unknown nested op keys unless nested-local tolerance is explicit', () => {
-  assert.throws(
-    () => validateSchema(
+test('validateSchema ignores unknown nested op keys without a tolerance flag', () => {
+  assert.doesNotThrow(() => validateSchema(
       { version: 1, op: { vault: 'OpsVault', account: 'example' } },
       { source: '/tmp/config.local.yaml' },
-    ),
-    (err) => {
-      assert.ok(err instanceof AgentOSConfigError);
-      assert.match(err.message, /op\.account/);
-      assert.match(err.message, /unknown key/);
-      return true;
-    },
-  );
+    ));
 });
 
-test('validateSchema foreign top-level tolerance does not make op foreign', () => {
-  assert.throws(
-    () => validateSchema(
+test('validateSchema ignores unknown op keys in checked-in config', () => {
+  assert.doesNotThrow(() => validateSchema(
       { version: 1, op: { vault: 'OpsVault', account: 'example' } },
       { source: '/tmp/config.yaml', tolerateForeignTopLevelSections: true },
-    ),
-    (err) => {
-      assert.ok(err instanceof AgentOSConfigError);
-      assert.match(err.message, /op\.account/);
-      assert.match(err.message, /unknown key/);
-      return true;
-    },
-  );
+    ));
 });
 
 test('validateSchema tolerates unknown nested op keys in local files and keeps mirrored vault', () => {
@@ -5288,9 +5078,7 @@ test('validateSchema tolerates unknown nested op keys in local files and keeps m
 test('validateSchema drops the Python-owned email_archive root from a local file', () => {
   // agent-os#5556 (EAR-02). The root is declared in the Python schema authority
   // and consumed only by modules/email-archive; this reader has no use for it.
-  // Without the FOREIGN_TOP_LEVEL_SECTIONS entry it raises `unknown key` and
-  // crash-loops the adversarial-watcher — the config-schema.multi-loader-parity
-  // failure mode.
+  // Reader scoping ignores this root without a foreign-section registry.
   const out = validateSchema(
     {
       version: 1,
@@ -5308,22 +5096,14 @@ test('validateSchema drops the Python-owned email_archive root from a local file
   assert.equal(out.email_archive, undefined, 'foreign root dropped, not adopted');
 });
 
-test('validateSchema keeps the canonical config.yaml strict about email_archive', () => {
+test('validateSchema ignores email_archive in checked-in config', () => {
   // Foreign-root tolerance is scoped to Layer-4 multi-reader local siblings. The
   // checked-in Layer-3 file stays strict so this reader cannot silently diverge
   // from its sibling CFG loaders, and EAR-02 keeps the root out of that file.
-  assert.throws(
-    () => validateSchema(
+  assert.doesNotThrow(() => validateSchema(
       { version: 1, email_archive: { dsn: 'postgresql://localhost/agent_os_email' } },
       { source: '/tmp/config.yaml', tolerateForeignTopLevelSections: true },
-    ),
-    (err) => {
-      assert.ok(err instanceof AgentOSConfigError);
-      assert.match(err.message, /email_archive/);
-      assert.match(err.message, /unknown key/);
-      return true;
-    },
-  );
+    ));
 });
 
 test('validateSchema drops the Python-owned resident root from a local file', () => {
@@ -5351,21 +5131,13 @@ test('validateSchema drops the Python-owned resident root from a local file', ()
   assert.equal(out.resident, undefined, 'foreign root dropped, not adopted');
 });
 
-test('validateSchema keeps the canonical config.yaml strict about resident', () => {
+test('validateSchema ignores resident in checked-in config', () => {
   // Same scoping as email_archive: tolerance is for Layer-4 local siblings only,
   // so this reader cannot silently diverge from its sibling CFG loaders.
-  assert.throws(
-    () => validateSchema(
+  assert.doesNotThrow(() => validateSchema(
       { version: 1, resident: { token_refresh: { enabled: true } } },
       { source: '/tmp/config.yaml', tolerateForeignTopLevelSections: true },
-    ),
-    (err) => {
-      assert.ok(err instanceof AgentOSConfigError);
-      assert.match(err.message, /resident/);
-      assert.match(err.message, /unknown key/);
-      return true;
-    },
-  );
+    ));
 });
 
 test('validateSchema drops the Python-owned media_generation root from a local file', () => {
@@ -5377,14 +5149,11 @@ test('validateSchema drops the Python-owned media_generation root from a local f
   assert.equal(out.media_generation, undefined);
 });
 
-test('validateSchema keeps canonical config.yaml strict about media_generation', () => {
-  assert.throws(
-    () => validateSchema(
+test('validateSchema ignores media_generation in checked-in config', () => {
+  assert.doesNotThrow(() => validateSchema(
       { version: 1, media_generation: { library_dir: '/tmp/media-library' } },
       { source: '/tmp/config.yaml', tolerateForeignTopLevelSections: true },
-    ),
-    (err) => err instanceof AgentOSConfigError && /media_generation.*unknown key/.test(err.message),
-  );
+    ));
 });
 
 test('top-level config.yaml accepts mirrored surface_harness timeout', () => {
@@ -5395,19 +5164,11 @@ test('top-level config.yaml accepts mirrored surface_harness timeout', () => {
   assert.equal(out.surface_harness.timeout_seconds, 96);
 });
 
-test('surface_harness strict mirror rejects unknown nested keys', () => {
-  assert.throws(
-    () => validateSchema(
+test('surface_harness ignores unknown nested keys', () => {
+  assert.doesNotThrow(() => validateSchema(
       { version: 1, surface_harness: { timeout_seconds: 96, surprise: true } },
       { source: '/tmp/config.yaml', tolerateForeignTopLevelSections: true },
-    ),
-    (err) => {
-      assert.ok(err instanceof AgentOSConfigError);
-      assert.match(err.message, /surface_harness\.surprise/);
-      assert.match(err.message, /unknown key/);
-      return true;
-    },
-  );
+    ));
 });
 
 test('top-level config.yaml accepts mirrored frc off-LAN transport keys', () => {
@@ -5472,35 +5233,19 @@ test('frc off-LAN transport env aliases override file layers and validate range'
   }
 });
 
-test('validateSchema rejects arbitrary unknown top-level keys as typos', () => {
-  assert.throws(
-    () => validateSchema(
+test('validateSchema ignores unknown top-level keys owned by other readers', () => {
+  assert.doesNotThrow(() => validateSchema(
       { version: 1, not_a_section: { anything: true } },
       { source: '/tmp/config.local.yaml' },
-    ),
-    (err) => {
-      assert.ok(err instanceof AgentOSConfigError);
-      assert.match(err.message, /not_a_section/);
-      assert.match(err.message, /unknown key/);
-      return true;
-    },
-  );
+    ));
 });
 
-test('validateSchema stays strict on unknown keys INSIDE a known section', () => {
-  // Public validation stays strict even when the source filename looks like a
-  // local override; Layer-4 callers must opt in after discovering a real sibling.
-  assert.throws(
-    () => validateSchema(
+test('validateSchema ignores unread keys inside a known section', () => {
+  // Unknown sibling-reader fields are ignored in every file layer.
+  assert.doesNotThrow(() => validateSchema(
       { version: 1, remediation: { max_concur_jobs: 10 } },
       { source: '/tmp/config.local.yaml' },
-    ),
-    (err) => {
-      assert.ok(err instanceof AgentOSConfigError);
-      assert.match(err.message, /max_concur_jobs/);
-      return true;
-    },
-  );
+    ));
 });
 
 test('validateSchema rejects schema metadata keys in instance data', () => {
@@ -5662,30 +5407,27 @@ test('empty-string env var for bool coerces to false', () => {
 
 // -------- __aliases canonical key must exist in schema --------------------
 
-test('module __aliases targeting unknown canonical key fails loud', () => {
+for (const alias of ['roles.reviewer', 'roles']) {
+test(`module __aliases to unread canonical keys filter ${alias} before validation`, () => {
   const tmp = freshTmp();
   try {
     const mod = join(tmp, 'mod.yaml');
     writeFile(mod, `
       __aliases:
-        foo.bar: roles.nonexistent
-      foo:
-        bar: codex
+        ${alias}: roles.nonexistent
+      roles:
+        reviewer: codex
     `);
     const top = join(tmp, 'no_top.yaml');
-    assert.throws(
-      () => loadConfig({ topPath: top, modulePaths: [mod], env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.match(err.message, /roles\.nonexistent/);
-        assert.match(err.message, /__aliases/);
-        return true;
-      },
-    );
+    const cfg = loadConfig({ topPath: top, modulePaths: [mod], env: {} });
+    assert.equal(cfg.get('roles.nonexistent'), null);
+    // This is a supported path: schema stripping cannot hide a missing filter.
+    assert.equal(cfg.get('roles.reviewer'), 'adversarial');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+}
 
 test('module __aliases targeting submodules subtree is accepted (non-strict)', () => {
   const tmp = freshTmp();
@@ -7138,7 +6880,7 @@ test('apps.<id> YAML entry with prototype-like segment cannot pollute prototypes
   }
 });
 
-test('apps.<id> rejects an unknown key via the strict child schema', () => {
+test('apps.<id> ignores an unread child key', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -7149,14 +6891,7 @@ test('apps.<id> rejects an unknown key via the strict child schema', () => {
           mode: standalone
           bogus: 1
     `);
-    assert.throws(
-      () => loadConfig({ topPath: top, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.match(err.message, /bogus/);
-        return true;
-      },
-    );
+    assert.equal(loadConfig({ topPath: top, env: {} }).get('apps.bar.bogus'), null);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -7441,7 +7176,7 @@ test('oauth broker credential-decay keys preserve strict Python Node env parity'
   }
 });
 
-test('oauth_broker keychain auto-unlock strict mirror accepts only the fixed shape', () => {
+test('oauth_broker keychain auto-unlock mirror ignores unread fields', () => {
   const tmp = freshTmp();
   try {
     const ok = join(tmp, 'keychain-auto-unlock-ok.yaml');
@@ -7482,13 +7217,7 @@ test('oauth_broker keychain auto-unlock strict mirror accepts only the fixed sha
             enabled: true
             password_ref: op://vault/admin/password
     `);
-    assert.throws(
-      () => loadConfig({ topPath: bad, env: {} }),
-      (err) => {
-        assert.match(String(err.key), /oauth_broker\.keychain_bridge\.auto_unlock/);
-        return true;
-      },
-    );
+    assert.equal(loadConfig({ topPath: bad, env: {} }).get('oauth_broker.keychain_bridge.auto_unlock.password_ref'), null);
   } finally {
     resetConfigCache();
     rmSync(tmp, { recursive: true, force: true });
@@ -7500,8 +7229,8 @@ test('oauth_broker keychain auto-unlock strict mirror accepts only the fixed sha
 // resolved by modules/worker-pool/lib/hq-gh.sh; the authoritative CFG contract
 // lives in agent-os platform/agent-os-config + projects/adversarial-merge-authority/SPEC.md).
 // The mirror exists so the strict loader does not crash on shared config that
-// carries these keys. Prove valid values parse AND unknown nested keys still fail.
-test('oauth_broker.merge_agent strict mirror: valid keys parse; unknown nested key rejected', () => {
+// carries these keys. Valid values parse and unread sibling fields are ignored.
+test('oauth_broker.merge_agent: valid keys parse; unread nested key ignored', () => {
   const tmp = freshTmp();
   try {
     const ok = join(tmp, 'merge-agent-ok.yaml');
@@ -7530,15 +7259,7 @@ test('oauth_broker.merge_agent strict mirror: valid keys parse; unknown nested k
         merge_agent:
           secret_file: /tmp/x
     `);
-    assert.throws(
-      () => loadConfig({ topPath: bad, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.match(err.message, /unknown key/);
-        assert.match(String(err.key), /oauth_broker\.merge_agent/);
-        return true;
-      },
-    );
+    assert.doesNotThrow(() => loadConfig({ topPath: bad, env: {} }));
   } finally {
     resetConfigCache();
     rmSync(tmp, { recursive: true, force: true });
@@ -7670,16 +7391,7 @@ test('oauth_broker.github_app_providers permissive mirror: numeric IDs + future 
           hammer:
             provider: hammer
     `);
-    assert.throws(
-      () => loadConfig({ topPath: badBroker, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.match(err.message, /unknown key/);
-        assert.equal(err.key, 'oauth_broker.github_apps');
-        assert.match(String(err.expected), /github_app_providers/);
-        return true;
-      },
-    );
+    assert.doesNotThrow(() => loadConfig({ topPath: badBroker, env: {} }));
   } finally {
     resetConfigCache();
     rmSync(tmp, { recursive: true, force: true });
@@ -7841,8 +7553,6 @@ test('reserve floor mirrors every credential and rejects invalid strict policy',
     }
     for (const policy of [
       'openai-oauth: {remaining_pct: -1}',
-      'openai-api: {remaining_pct: 10}',
-      'openai-oauth: {enabled: true}',
       'openai-oauth: {protected_classes: [1]}',
       'openai-oauth: {reroute_held: 1}',
     ]) {
@@ -7891,7 +7601,7 @@ test('RCV-01 recovery shared synthetic reader acceptance and rejection', () => {
     writeFileSync(topPath, JSON.stringify({version:1, worker_pool:{recovery:fixture.valid}}));
     const cfg = loadConfig({topPath, modulePaths:[], env:{}});
     for (const [key,value] of Object.entries(fixture.valid)) assert.equal(cfg.get(`worker_pool.recovery.${key}`), value);
-    for (const invalid of fixture.invalid) {
+    for (const invalid of fixture.invalid.filter(value => !Object.hasOwn(value, 'unknown'))) {
       writeFileSync(topPath, JSON.stringify({version:1, worker_pool:{recovery:invalid}}));
       assert.throws(() => loadConfig({topPath, modulePaths:[], env:{}}), AgentOSConfigError);
     }
@@ -7929,5 +7639,75 @@ test('CLAUDESTEERON-01 mirrors batch steering activation, rollback and launch ov
       writeFileSync(topPath, JSON.stringify({ version: 1, worker_pool: { dispatch: { claude_batch_steer_enabled: value } } }));
       assert.throws(() => loadConfig({ topPath, env: {} }), { name: 'AgentOSConfigError', key });
     }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// CFGREADERSCOPE-01: these synthetic keys have never appeared in any schema.
+// Exercise all overlay layers, including module aliases' canonicalization.
+for (const loader of [loadConfig, loadConfigRuntime]) {
+  for (const layer of ['top', 'module', 'versioned-local', 'local', 'module-local']) {
+    test(`${loader.name}: sibling worker_pool keys are ignored in ${layer}`, () => {
+      const dir = freshTmp();
+      try {
+        const topPath = join(dir, 'config.yaml');
+        const modulePath = join(dir, 'module.yaml');
+        writeFile(topPath, 'version: 1\n');
+        const target = { top: topPath, module: modulePath,
+          'versioned-local': join(dir, 'config.local.yaml'),
+          local: join(dir, 'config.local.yaml'),
+          'module-local': join(dir, 'module.local.yaml') }[layer];
+        const doc = { worker_pool: { future_example: { values: [1, false, null] },
+          dispatch: { future_backoff_example: 'a sibling-only value' } },
+          roles: { reviewer: 'codex' } };
+        if (layer === 'top' || layer === 'versioned-local') doc.version = 1;
+        writeFile(target, JSON.stringify(doc));
+        const cfg = loader({ topPath, modulePaths: [modulePath], env: {} });
+        assert.equal(cfg.get('worker_pool.future_example'), null);
+        assert.equal(cfg.get('worker_pool.dispatch.future_backoff_example'), null);
+        assert.deepEqual(cfg.resolutionTrace('worker_pool.dispatch.future_backoff_example'), []);
+        assert.equal(cfg.get('roles.reviewer'), 'codex');
+        doc.roles.reviewer = 'invalid-example-class';
+        writeFile(target, JSON.stringify(doc));
+        assert.throws(() => loader({ topPath, modulePaths: [modulePath], env: {} }),
+          { name: 'AgentOSConfigError', key: 'roles.reviewer' });
+        doc.roles.reviewer = 42;
+        writeFile(target, JSON.stringify(doc));
+        assert.throws(() => loader({ topPath, modulePaths: [modulePath], env: {} }),
+          { name: 'AgentOSConfigError', key: 'roles.reviewer' });
+      } finally { rmSync(dir, { recursive: true, force: true }); }
+    });
+  }
+}
+
+test('ignored sibling keys log only when config debugging is enabled', () => {
+  const priorDebug = process.env.ADVERSARIAL_CONFIG_DEBUG;
+  const priorWrite = process.stderr.write;
+  const output = [];
+  const dir = freshTmp();
+  try {
+    const topPath = join(dir, 'config.yaml');
+    writeFile(topPath, 'version: 1\nworker_pool:\n  future_example: true\n');
+    process.stderr.write = chunk => { output.push(String(chunk)); return true; };
+    delete process.env.ADVERSARIAL_CONFIG_DEBUG;
+    loadConfig({ topPath, env: {} });
+    assert.deepEqual(output, []);
+    process.env.ADVERSARIAL_CONFIG_DEBUG = '1';
+    loadConfig({ topPath, env: {} });
+    assert.match(output.join(''), /ignoring unknown key "worker_pool.future_example"/);
+  } finally {
+    process.stderr.write = priorWrite;
+    if (priorDebug === undefined) delete process.env.ADVERSARIAL_CONFIG_DEBUG;
+    else process.env.ADVERSARIAL_CONFIG_DEBUG = priorDebug;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('aliases cannot introduce unknown fields into consumed atomic search policy', () => {
+  const dir = freshTmp();
+  try {
+    const modulePath = join(dir, 'module.yaml');
+    writeFile(modulePath, '__aliases:\n  future_example: services.hcp.search.future_example\nfuture_example: true\n');
+    assert.throws(() => loadConfig({ topPath: join(dir, 'missing.yaml'), modulePaths: [modulePath], env: {} }),
+      { name: 'AgentOSConfigError', key: 'services.hcp.search.future_example' });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

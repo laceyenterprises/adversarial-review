@@ -61,7 +61,6 @@ worker_pool:
     ['service_account_token_ref', 123],
     ['shared_vault_optin', 'wrong'],
     ['shared_vault_optin', [123]],
-    ['misspelled', 'value'],
     ['service_account_token_ref', 'plain-token'],
     ['service_account_token_ref', 'op://ExampleVault/worker'],
     ['service_account_token_ref', 'https://ExampleVault/worker/credential'],
@@ -134,10 +133,16 @@ worker_pool:
 `, () => {}), AgentOSConfigError);
 });
 
-test('strict Node loader still refuses misspelled secrets keys', () => {
-  assert.throws(() => fixture(`version: 1
+test('unread secrets fields are ignored without adopting vault declarations', () => {
+  assert.doesNotThrow(() => fixture(`version: 1
 worker_pool:
   secrets:
     worker_class_vault: {}
-`, () => {}), AgentOSConfigError);
+`, cfg => assert.equal(cfg.get('worker_pool.secrets.worker_class_vault'), null)));
+});
+
+test('vault entries ignore unread sibling metadata', () => {
+  fixture('version: 1\nworker_pool:\n  secrets:\n    worker_class_vaults:\n      research:\n        future_example: true\n', cfg => {
+    assert.equal(cfg.get('worker_pool.secrets.worker_class_vaults.research.future_example'), null);
+  });
 });

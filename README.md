@@ -3057,6 +3057,11 @@ second selection policy. A selection result is a proposal for a new attempt,
 not an execution lease, an attestation or merge authority. Consumers must still
 acquire/revalidate through the existing lease/admission owner before dispatch.
 
+`readIdentityTokenPools(oauth)` always returns `token_accounts`,
+`identity_token_pools` and `broker_instances` mappings. Omitted or empty broker
+instance declarations project as a detached, frozen `{}`, so consumers can
+enumerate the mapping directly even with legacy-only configuration.
+
 `readAccountSelection(result, { oauth, request })` consumes the Python
 `SelectionResult.to_dict()` wire value alongside its original request and
 effective declarations. Unavailable and pool-level capacity-saturated results
@@ -4355,6 +4360,7 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- GRK-03 remediation: always project a frozen `broker_instances` mapping, including empty and legacy-only declarations; cover the stable snapshot shape in offline reader and role-config tests.
 - GRK-03: mirror account-scoped Grok OAuth/API-key declarations, reject duplicate custody/secret bindings, and retain subscription-first order and instance metadata through typed readers. Activation and both auth-kind MODEL-TURN receipts remain with GRK-16.
 
 HAMTERMSTOP-01: the hammer's `terminal-stop` progress receipt is recorded only

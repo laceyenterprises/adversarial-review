@@ -50,7 +50,7 @@ test('Claude remediator fallback vectors degrade the preferred corporate account
 for (const [index, vector] of vectors.cases.entries()) {
   test(`ITP-10 consumes Python outcome: ${vector.name}`, () => {
     assert.equal(typeof reader.readAccountSelection, 'function');
-    const value = merge(vectors.defaults, vector.patch ?? {});
+    const value = merge(vector.defaults === 'grok' ? vectors.grok_defaults : vectors.defaults, vector.patch ?? {});
     const before = structuredClone(value);
     const outcome = outcomes.cases[index];
     if (vector.error) {
@@ -248,3 +248,17 @@ for (const [name, mutate] of [
     });
   });
 }
+
+
+test('Grok typed reader retains instance metadata and subscription-first role order', () => {
+  const oauth = structuredClone(vectors.grok_defaults.oauth);
+  const result = reader.readIdentityTokenPools(oauth);
+  for (const role of ['grok', 'grok-reviewer', 'remediator-grok', 'hammer-grok']) {
+    assert.deepEqual(result.identity_token_pools[role], ['subscription-b', 'subscription-a', 'key-c']);
+  }
+  assert.deepEqual(result.broker_instances, oauth.broker_instances);
+  assert.ok(Object.isFrozen(result.broker_instances['subscription-a']));
+  const values = Object.fromEntries(Object.entries(oauth).map(([key, value]) => [`oauth.${key}`, value]));
+  assert.deepEqual(resolveIdentityTokenPools({ env: {}, topPath: '/unused', modulePaths: [],
+    loaderImpl: () => ({ get: (key, fallback) => values[key] ?? fallback }) }), result);
+});

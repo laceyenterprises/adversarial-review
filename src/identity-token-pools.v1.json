@@ -5,14 +5,17 @@
   "families": [
     "codex",
     "claude",
-    "gemini"
+    "gemini",
+    "grok"
   ],
   "account_fields": [
     "family",
     "broker_provider",
     "holder_user",
     "allowed_models",
-    "concurrency"
+    "concurrency",
+    "kind",
+    "broker_instance"
   ],
   "required_fields": [
     "family",
@@ -26,7 +29,9 @@
     "codex": "codex",
     "codex-corp": "codex",
     "claude-code": "claude",
-    "claude-code-corp": "claude"
+    "claude-code-corp": "claude",
+    "grok": "grok",
+    "grok-api": "grok"
   },
   "role_families": {
     "codex": "codex",
@@ -39,6 +44,20 @@
     "claude-reviewer": "claude",
     "hammer-claude": "claude",
     "remediator-claude": "claude",
-    "gemini-reviewer": "gemini"
-  }
+    "gemini-reviewer": "gemini",
+    "grok": "grok",
+    "grok-reviewer": "grok",
+    "remediator-grok": "grok",
+    "hammer-grok": "grok"
+  },
+  "instance_fields": [
+    "provider",
+    "custody_dir",
+    "op_ref"
+  ],
+  "provider_kinds": {
+    "grok": "oauth",
+    "grok-api": "api-key"
+  },
+  "max_broker_instances": 64
 }

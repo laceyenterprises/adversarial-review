@@ -71,7 +71,11 @@ export function readIdentityTokenPools(oauth, { legacyGeminiHolders } = {}) {
       throw error;
     }
   }
-  return frozenCopy({ token_accounts: accounts, identity_token_pools: pools });
+  // Stable partition matches the Python typed reader; raw config order is retained.
+  const ordered = Object.fromEntries(Object.entries(pools).map(([role, members]) =>
+    [role, [...members].sort((left, right) => Number(accounts[left].kind === 'api-key') - Number(accounts[right].kind === 'api-key'))]));
+  return frozenCopy({ token_accounts: accounts, identity_token_pools: ordered,
+    ...(Object.keys(oauth.broker_instances ?? {}).length ? { broker_instances: oauth.broker_instances } : {}) });
 }
 
 export function readSelectionSnapshot(value, oauth) {

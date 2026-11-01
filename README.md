@@ -3408,6 +3408,56 @@ claim-loop, ITP account, spawn/settlement and reviewed-attestation fixtures. The
 assigned/default fixture compares the real posting path's verdict and attestation
 payload with injected effects; it never calls GitHub, a signer or a provider.
 
+### Model/Effort Selector shadow hook (MES-06)
+
+`src/mes-shadow-hook.mjs` records one Agent OS MES decision per review pass and
+per local remediation round through the stable `hq mes decide --record --json`
+contract (MES-03, `schemaVersion: 1`). It runs after the resolver has chosen
+the execution and reports that execution as `actual`. It is shadow only: the
+CLI's `choice` and `apply` fields are never read back into a launch, so the
+reviewer or remediator runs exactly as it did before.
+
+- **Review.** `resolveReviewerExecutionAsync` (Claude, Gemini) and the Codex
+  pass-level `resolveReviewerExecution` call record when `reviewer.mjs`
+  supplies the pass's `mes` context through `dispatchReviewerModel`. Other
+  resolver callers (OAuth preparation, OSG arm selection, fallbacks) pass no
+  context and record nothing. An oversized-diff chunked pass records once,
+  from its first chunk, using the whole pass diff. The subject is
+  `<owner/repo>/pr/<n>/review/<head>`.
+- **Local remediation.** After the local worker spawns, the runtime records the
+  spawned worker's `modelResolution`, without awaiting it, so the spawned-job
+  record never waits on MES. The subject is
+  `<owner/repo>/pr/<n>/remediation/round-<r>`. Remediation dispatched through
+  `hq` is recorded by the dispatch-path hook (MES-05), not here.
+- **Signals.** Review: diff lines and file count from the reviewed diff, risk
+  paths matched against `worker_pool.scope.restricted_paths`, and the change
+  kind and builder prefix from the title. Remediation: blocking and
+  non-blocking finding counts from the review body, `git --no-optional-locks
+  diff --numstat origin/<base>...HEAD` in the workspace, and rounds so far
+  against `remediationPlan.maxRounds`. Only numbers, closed enumerations and
+  booleans are sent. No title, path, prompt or finding text crosses the
+  process boundary. A signal that cannot be computed is `null`, never `0`.
+- **Sources.** `registry` stays `registry` and `committed-seed` maps to
+  `static-default`. Env model/effort pins and the non-blocking remediation
+  config map to `env`, the OSG reviewer arm to `reviewerArm`, and the OSG
+  remediator arm to `osg-apply`. Agent OS records each explicit source as
+  `overridden_by`. A host-config fallback effort is a default fill, not a pin.
+- **Bounds.** The CLI call has a 5 s ceiling (`MES_DECIDE_TIMEOUT_MS`,
+  SIGKILL), and the remediation `git` read has 2 s. A `duplicate` refusal for a
+  re-review of the same head, or a respawned round, is retried as the next
+  `attempt`, at most four times inside the same ceiling. The ledger's unique
+  `(work_kind, subject_key, attempt)` key decides which attempt is recorded.
+- **Failure.** A missing CLI, a timeout, garbage output or a CLI/ledger error
+  logs one `[mes-shadow] <kind> decision not recorded reason=<reason>;
+  execution unchanged` line to stderr and returns. The hook never throws.
+  Offline tests (`NODE_TEST_CONTEXT` or the runner sandbox) never reach a host
+  `hq` unless they inject an exec; the Codex resolver fixture's `HQ_BIN` stays
+  in force.
+
+This adds no configuration key, review state, lease state, transition or smoke
+promise. Enforcement (MES-09) is a later ticket. Offline validation is
+`test/mes-shadow-hook.test.mjs`.
+
 Run selected suites through `node test/run-tests.mjs <test files>` to isolate
 production state from the checkout. Restricted workers can set
 `ADVERSARIAL_REVIEW_TEST_TEMP_BASE` to an owned temporary parent; this disables
@@ -4318,6 +4368,11 @@ compression. Shared local overlays remain tolerant of unknown sibling keys.
 Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
+
+MES-06: the review service records one shadow Model/Effort Selector decision
+per review pass and per local remediation round through `hq mes decide --record
+--json`. The CLI call is bounded and fails open, and it never changes the
+execution the resolver chose. See "Model/Effort Selector shadow hook (MES-06)".
 
 HAMTERMSTOP-01: the hammer's `terminal-stop` progress receipt is recorded only
 on the closer's explicit final exit (`bin/hammer-terminal-audit.mjs --final`).

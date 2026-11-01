@@ -9,10 +9,16 @@ export const HAMMER_PROGRESS_MILESTONES = Object.freeze([
 
 // Fixed-size receipts are run-scoped. Tool activity and script inspection never
 // emit one. They grant no merge authority, CI validation or budget refund.
-export function recordHammerProgress(milestone, { env = process.env, reason, now = new Date() } = {}) {
+// terminal-stop means the run is ending: the supervisor allows only a short exit
+// grace after it, so only the explicit final run exit may record it, never a
+// deferred or retryable outcome the closer may still act on in this run.
+export function recordHammerProgress(milestone, { env = process.env, reason, final = false, now = new Date() } = {}) {
   if (!HAMMER_PROGRESS_MILESTONES.includes(milestone)) throw new TypeError('invalid hammer milestone');
   if (milestone === 'terminal-stop' && !/^[a-z][a-z0-9:-]*$/.test(reason || '')) {
     throw new TypeError('terminal milestone requires a named reason');
+  }
+  if (milestone === 'terminal-stop' && final !== true) {
+    throw new TypeError('terminal milestone requires the final run exit');
   }
   const launchRequestId = controllerLaunchId(env);
   const runId = env.HQ_WORKER_RUN_ID;

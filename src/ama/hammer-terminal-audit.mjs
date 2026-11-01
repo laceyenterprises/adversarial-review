@@ -3,9 +3,11 @@ import { reportHammerProgress } from './hammer-progress.mjs';
 
 // Failure recording must work before any GitHub read or merge-lease acquisition.
 // Reasons are fixed codes, never transport output (which can contain secrets).
-export function recordHammerEarlyFailure(reason, { env = process.env, headSha } = {}) {
+// The terminal-stop progress receipt is written only when the caller declares
+// the run's final exit; helper failures the closer may still retry write none.
+export function recordHammerEarlyFailure(reason, { env = process.env, headSha, final = false } = {}) {
   if (!/^[a-z][a-z0-9:-]*$/.test(reason || '')) throw new TypeError('invalid hammer failure reason');
-  reportHammerProgress('terminal-stop', { env, reason });
+  if (final === true) reportHammerProgress('terminal-stop', { env, reason, final });
   const identity = {
     hqRoot: env.HAM_HQ_ROOT || env.HQ_ROOT,
     repo: env.HAM_REPO,

@@ -104,6 +104,10 @@ cleanup, run `"${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-terminal-audit.mj
 Appendix B mandate 0b. Preserve retryable deferrals; never post a no-merge status
 after confirmed merge. Audit delivery failures retain the original reason and
 pushed provenance. Do not invent a new dispatch, gate waiver, or reviewer round.
+Only when this run is ending, with no retry, requeue wait, remediation or further
+phase left, run `"${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-terminal-audit.mjs"
+--final <printed-reason>` as the run's last command. It records the run's one
+terminal progress stop; the supervisor ends a run that keeps working after it.
 
 Merge requires the exact live validated head, green required checks, the held
 matching lease/id, the live HAM predicate, strict-mode remediation policy,

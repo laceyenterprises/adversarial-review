@@ -6745,6 +6745,9 @@ that identity exported before exiting. Audit writes need no network or lease.
 Repeated manual reports without `HQ_LAUNCH_REQUEST_ID` retain the first unkeyed
 early-exit reason per repo/PR/head; distinct launch IDs retain separate attempts.
 Do not put credential values or raw command errors into a reason.
+These audits write no `terminal-stop` progress receipt. Only the closer's last
+command on a run that is ending, `bin/hammer-terminal-audit.mjs --final <reason>`,
+records it; the supervisor ends a run that keeps working after that receipt.
 
 An open PR without a terminal close audit is observed as failed with
 `failure: no_work_done`; the compatibility outcome remains

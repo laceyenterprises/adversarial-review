@@ -25,14 +25,16 @@ test('rendered phase receipts are emitted by phase outcomes without changing mer
     const source = readFileSync(new URL(`../bin/${phase}.sh`, import.meta.url), 'utf8');
     const values = Object.fromEntries([...source.matchAll(/<<([A-Z_]+)>>/g)].map(([, key]) => [key, 'fixture']));
     const rendered = renderHammerProcedure(phase, values);
-    assert.ok(rendered.includes('/bin/hammer-progress.mjs'));
+    // A no-merge merge outcome can be retried in-run, so phases never record terminal-stop.
+    assert.doesNotMatch(rendered, /terminal-stop/);
+    if (phase !== 'hammer-merge') assert.ok(rendered.includes('/bin/hammer-progress.mjs'));
     if (phase === 'hammer-verify-head') {
       assert.match(rendered, /HAM_PHASE_OUTCOME=verified\n.*verify-head/);
       assert.match(rendered, /export HAM_PUSHED_FROM_HEAD HAM_PUSHED_HEAD\n.*remediation-pushed/);
     }
     if (phase === 'hammer-publish') assert.match(rendered, /remediation-pushed/);
     if (phase === 'hammer-merge') {
-      assert.match(rendered, /terminal-stop/);
+      assert.doesNotMatch(rendered, /\/bin\/hammer-progress\.mjs/);
       assert.match(rendered, /--match-head-commit "\$POST_REMEDIATION_SHA"/);
     }
   }
@@ -45,7 +47,7 @@ test('phase receipt failures warn once and preserve execution under errexit', ()
     values.ROOT_DIR = fileURLToPath(new URL('../', import.meta.url));
     const rendered = renderHammerProcedure(phase, values);
     const calls = rendered.split('\n').filter(line => line.includes('/bin/hammer-progress.mjs'));
-    assert.ok(calls.length > 0);
+    assert.ok(phase === 'hammer-merge' || calls.length > 0);
     for (const call of calls) {
       const result = spawnSync('/bin/bash', ['--noprofile', '--norc', '-euc', `${call}\nprintf 'continued'`], {
         env: { ...process.env, HAM_NODE_BIN: process.execPath, ham_audit_reason: 'checks-red',

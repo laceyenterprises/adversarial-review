@@ -6,6 +6,16 @@ ham_gh() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec-hammer "
 ham_pr() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-pr-read.mjs <<REPO>> <<PR_NUMBER>> "$@"; }
 
 ham_merge_phase() {
+local ham_wait_only=0
+local ham_ci_retry_needs_validation=0
+if [ "${1:-}" = --wait-ci ]; then
+  ham_wait_only=1
+  # Unchanged heads keep the existing path, including its final live check.
+  if [ -z "${HAM_PUSHED_HEAD:-}" ] || [ "$HAM_PUSHED_HEAD" = "${HAM_PUSHED_FROM_HEAD:-}" ]; then
+    HAM_PHASE_OUTCOME=ci-wait-not-needed
+    return 0
+  fi
+fi
 HAM_PHASE_OUTCOME=merge-error
 HAM_CLOSING_KEYWORD_REWRITES='[]'
 HAM_OWN_MERGE_EXECUTED=0
@@ -80,7 +90,7 @@ ham_append_terminal_audit() {
     --argjson mergeAttempts "${HAM_MERGE_ATTEMPTS:-0}" \
     --argjson rebaseAttempts "${HAM_REBASE_ATTEMPTS:-0}" \
     --argjson preMergeEligible "${HAM_PRE_MERGE_ELIGIBLE:-0}" \
-    --argjson eligibilityTrace "$([ -s "$HAM_VERDICT_FILE" ] && cat "$HAM_VERDICT_FILE" || printf '{}')" \
+    --argjson eligibilityTrace "$([ -s "${HAM_VERDICT_FILE:-}" ] && cat "$HAM_VERDICT_FILE" || printf '{}')" \
     --argjson githubGate "$([ -s "$HAM_GATE_JSON" ] && cat "$HAM_GATE_JSON" || printf '{}')" \
     '{
       waitNote: $waitNote,
@@ -138,6 +148,9 @@ if [ "${1:-}" = --history-read-abort ]; then
   return 1
 fi
 
+# Wait-only mode establishes no merge authority. The full predicate remains
+# mandatory on the subsequent normal invocation.
+if [ "$ham_wait_only" -eq 0 ]; then
 # ama-check exits zero for both eligible and ineligible verdicts. Require its
 # exact-head decision and the successful in-lease audit publish independently.
 if [ -z "${HAM_VERDICT_FILE:-}" ] || [ "${HAM_VERDICT_READY_FILE:-}" != "$HAM_VERDICT_FILE" ] || [ ! -f "$HAM_VERDICT_FILE" ] || [ ! -O "$HAM_VERDICT_FILE" ]; then
@@ -178,6 +191,12 @@ if [ "$HAM_BRANCH_PROTECTION_REQUIRED" != true ] && [ "$HAM_BRANCH_PROTECTION_RE
   echo "HAM hard-blocker: predicate did not resolve branch protection requirement" >&2
   ham_release_merge_lease
   return 20
+fi
+
+else
+  # Protection is resolved by the caller's subsequent exact-head predicate.
+  # A CI-only wait must not add a synthetic missing-protection refusal.
+  HAM_BRANCH_PROTECTION_REQUIRED=false
 fi
 
 ham_emit_git_merge_signal() {
@@ -541,15 +560,21 @@ ham_validate_ci_retry() {
 # localCiStatus audit-JSON sites populate an honest value.
 HAM_LOCAL_CI_STATUS=local-battery-skipped-github-required-gate-authoritative
 
-HAM_CI_BASE_RETRY=0
+if [ "${HAM_CI_WAIT_HEAD:-}" != "$POST_REMEDIATION_SHA" ]; then
+  HAM_REMOTE_CI_STARTED_AT=""
+  HAM_CI_BASE_RETRY=0
+fi
 HAM_CI_WAIT_ACTIVE=0
-# Scale once and share one absolute deadline across both waits and the rebase.
+# Scale once and share one absolute deadline across pre-predicate/merge and rebase.
+if [ -z "${HAM_REMOTE_CI_STARTED_AT:-}" ]; then
 HAM_REMOTE_CI_EFFECTIVE_WAIT_SECONDS=$("$HAM_NODE_BIN" <<ROOT_DIR>>/bin/load-aware-timeout.mjs "$HAM_REMOTE_CI_WAIT_SECONDS" 2>/dev/null || true)
 case "$HAM_REMOTE_CI_EFFECTIVE_WAIT_SECONDS" in
   ''|*[!0-9]*|0) HAM_REMOTE_CI_EFFECTIVE_WAIT_SECONDS="$HAM_REMOTE_CI_WAIT_SECONDS" ;;
 esac
 HAM_REMOTE_CI_STARTED_AT=$(date +%s)
 HAM_REMOTE_CI_DEADLINE=$(( HAM_REMOTE_CI_STARTED_AT + HAM_REMOTE_CI_EFFECTIVE_WAIT_SECONDS ))
+fi
+HAM_CI_WAIT_HEAD="$POST_REMEDIATION_SHA"
 while :; do
 HAM_REMOTE_CI_STATUS=waiting
 HAM_CI_WAIT_ACTIVE=1
@@ -557,7 +582,9 @@ HAM_REMOTE_CI_GATE_READ_FAILURES=0
 # The first wait is lease-free. The single retry retains its acquired lease
 # through CI so another cooperating merger cannot overtake it.
 HAM_ALREADY_MERGED_VALIDATED_HEAD=0
-if [ "$HAM_CI_BASE_RETRY" -eq 0 ]; then ham_release_merge_lease --yield || return 1; fi
+if [ "$HAM_CI_BASE_RETRY" -eq 0 ] && [ "${HAM_CI_SETTLED_HEAD:-}" != "$POST_REMEDIATION_SHA" ]; then
+  ham_release_merge_lease --yield || return 1
+fi
 while :; do
   if [ "$(date +%s)" -ge "$HAM_REMOTE_CI_DEADLINE" ]; then
     ham_ci_timeout
@@ -616,7 +643,7 @@ while :; do
     ham_release_merge_lease
     return 20
   fi
-  if ham_required_gate_ok || { [ "$HAM_CI_BASE_RETRY" -eq 0 ] &&
+  if { [ "$ham_wait_only" -eq 1 ] && jq -e '.state == "OPEN" and .headMatches == true and .checksConclusion == "SUCCESS"' "$HAM_GATE_JSON" >/dev/null; } || ham_required_gate_ok || { [ "$HAM_CI_BASE_RETRY" -eq 0 ] &&
     jq -e '.state == "OPEN" and .headMatches == true and .checksConclusion == "SUCCESS" and
       (.mergeStateStatus == "BEHIND" or .mergeable == "CONFLICTING") and
       (.reasons | length > 0 and all(.[]; . == "pr-not-mergeable"))' "$HAM_GATE_JSON" >/dev/null &&
@@ -689,6 +716,7 @@ if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && ham_base_touches_pr_files v
   echo "HAM base advanced during first CI wait; rebasing and validating once under the merge lease" >&2
   HAM_REBASED_ONTO_BASE_SHA="${HAM_CURRENT_BASE_SHA:-}"
   if ham_rebase_head --ci-retry; then
+    ham_ci_retry_needs_validation=1
     if ! ham_renew_ci_retry_lease; then
       ham_append_terminal_audit failed-without-merge merge-lease-lost || true
       ham_release_merge_lease
@@ -721,7 +749,17 @@ if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && ham_base_touches_pr_files v
 fi
 break
 done
-if [ "$HAM_CI_BASE_RETRY" -eq 1 ] && [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ]; then
+HAM_CI_WAIT_HEAD="$POST_REMEDIATION_SHA"
+if [ "$ham_wait_only" -eq 1 ]; then
+  # The caller refreshes all predicate inputs and re-publishes the audit if
+  # the shared base retry established a different head.
+  ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > "<<RUN_DIR>>/pr-after.json" || { HAM_PHASE_OUTCOME=ci-wait-pr-refresh-failed; return 1; }
+  rm -f "$HAM_MERGE_STDOUT" "$HAM_MERGE_STDERR" "$HAM_GATE_JSON" "$HAM_POST_MERGE_JSON" "$HAM_POST_MERGE_STDERR"
+  HAM_CI_SETTLED_HEAD="$POST_REMEDIATION_SHA"
+  HAM_PHASE_OUTCOME=ci-settled
+  return 0
+fi
+if [ "$ham_ci_retry_needs_validation" -eq 1 ] && [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ]; then
   if ! ham_validate_ci_retry; then
     ham_append_terminal_audit failed-without-merge "$HAM_PHASE_OUTCOME" || true
     ham_release_merge_lease

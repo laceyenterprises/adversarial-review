@@ -6,7 +6,8 @@ ham_gh() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec-hammer "
 ham_pr() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-pr-read.mjs <<REPO>> <<PR_NUMBER>> "$@"; }
 
 ham_verify_head_phase() {
-HAM_PHASE_OUTCOME=verify-head-error
+HAM_PHASE_OUTCOME=verify-head-pr-read-failed
+export POST_REMEDIATION_SHA HAM_PRODUCED_HEAD HAM_PUSHED_HEAD HAM_PUSHED_FROM_HEAD
 ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > "<<RUN_DIR>>/pr-after.json" || return $?
 POST_REMEDIATION_SHA=$(jq -er '.headRefOid | select(type == "string") | select(test("^[0-9a-fA-F]{40}$"))' "<<RUN_DIR>>/pr-after.json") || { HAM_PHASE_OUTCOME=missing-pr-state; return 1; }
 # A capacity outage ends this round before the merge lease or any decision.
@@ -45,15 +46,17 @@ ham_wait_for_published_head() {
     if [ "$remaining" -le 0 ]; then continue; fi
     probe_timeout="$remaining"
     if [ "$probe_timeout" -gt 30 ]; then probe_timeout=30; fi
+    HAM_PHASE_OUTCOME=published-head-probe-directory-failed
     probe_dir=$(mktemp -d "<<RUN_DIR>>/head-probe.XXXXXX") || return 1
     if /usr/bin/perl -e 'alarm shift; exec @ARGV' "$probe_timeout" "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-pr-read.mjs <<REPO>> <<PR_NUMBER>> \
       --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,author,baseRefName \
       > "$probe_dir/pr.json" 2> "$probe_dir/stderr"; then
       if ! probe_head=$(jq -er '.headRefOid | select(type == "string") | select(test("^[0-9a-fA-F]{40}$"))' "$probe_dir/pr.json"); then
         rm -rf "$probe_dir"
+        HAM_PHASE_OUTCOME=published-head-probe-invalid
         return 1
       fi
-      mv "$probe_dir/pr.json" "<<RUN_DIR>>/pr-after.json" || { rm -rf "$probe_dir"; return 1; }
+      mv "$probe_dir/pr.json" "<<RUN_DIR>>/pr-after.json" || { rm -rf "$probe_dir"; HAM_PHASE_OUTCOME=published-head-snapshot-write-failed; return 1; }
       POST_REMEDIATION_SHA="$probe_head"
       rm -rf "$probe_dir"
     else
@@ -65,6 +68,7 @@ ham_wait_for_published_head() {
         continue
       fi
       rm -rf "$probe_dir"
+      HAM_PHASE_OUTCOME=published-head-probe-failed
       return "$probe_exit"
     fi
     HAM_HEAD_WAITED_SECONDS=$(( $(date +%s) - started ))
@@ -84,6 +88,7 @@ HAM_MERGE_LEASE_HELD="${HAM_MERGE_LEASE_HELD:-0}"
 HAM_MERGE_LEASE_RETRYABLE_ABORT="${HAM_MERGE_LEASE_RETRYABLE_ABORT:-0}"
 HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON="${HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON:-}"
 if [ "$HAM_MERGE_LEASE_HELD" -eq 1 ] && [ -z "$HAM_MERGE_LEASE_ID" ]; then
+  HAM_PHASE_OUTCOME=merge-lease-id-missing
   echo 'HAM hard-blocker: held merge lease has no id' >&2
   return 1
 fi
@@ -95,6 +100,7 @@ if [ -z "$HAM_NODE_BIN" ] && [ -x /usr/local/bin/node ]; then
   HAM_NODE_BIN="/usr/local/bin/node"
 fi
 if [ -z "$HAM_NODE_BIN" ]; then
+  HAM_PHASE_OUTCOME=node-runtime-unavailable
   echo "HAM hard-blocker: node runtime not found; cannot run AMA lease, predicate, or audit helpers" >&2
   return 1
 fi
@@ -108,8 +114,8 @@ ham_release_merge_lease() {
   # During cancellation only the outer controller can establish group drain.
   # Keep the acquisition receipt for its generation-fenced fallback release.
   if [ -n "${HAM_CONTROLLER_RECORD:-}" ]; then
-    if [ "${HAM_CONTROLLER_CANCELLED:-0}" -eq 1 ]; then return 125; fi
-    "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-controller.mjs" assert-owner || return 125
+    if [ "${HAM_CONTROLLER_CANCELLED:-0}" -eq 1 ]; then HAM_PHASE_OUTCOME=controller-cancelled; return 125; fi
+    "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-controller.mjs" assert-owner || { HAM_PHASE_OUTCOME=controller-owner-lost; return 125; }
   fi
   if [ "${HAM_MERGE_LEASE_HELD:-0}" -eq 1 ] && [ -n "${HAM_MERGE_LEASE_ID:-}" ]; then
     local ham_release_retryable_args=()
@@ -144,11 +150,13 @@ ham_release_merge_lease() {
       cat "<<RUN_DIR>>/merge-lease-release.json" >&2 || true
       if [ "$ham_release_attempt" -ge "$HAM_MERGE_LEASE_RELEASE_RETRY_CAP" ]; then
         echo "AMG-04 hard-blocker: merge lease release failed after ${HAM_MERGE_LEASE_RELEASE_RETRY_CAP} attempts; do not continue while the lease is unconfirmed" >&2
+        HAM_PHASE_OUTCOME=merge-lease-release-unconfirmed
         return "$HAM_MERGE_LEASE_RELEASE_EXIT"
       fi
       sleep $((ham_release_attempt * 2))
       ham_release_attempt=$((ham_release_attempt + 1))
     done
+    HAM_PHASE_OUTCOME=merge-lease-release-unconfirmed
     return 1
   fi
 }
@@ -157,7 +165,7 @@ ham_release_merge_lease() {
 ham_lease_pr_view() {
   local attempt=1 err rc
   HAM_LEASE_PROBE_TRANSIENT=0
-  err=$(mktemp "${TMPDIR:-/tmp}/ham-lease-probe.XXXXXX") || return 1
+  err=$(mktemp "${TMPDIR:-/tmp}/ham-lease-probe.XXXXXX") || { HAM_PHASE_OUTCOME=merge-lease-probe-directory-failed; return 1; }
   while true; do
     if ham_pr "$@" 2>"$err"; then
       HAM_LEASE_PROBE_TRANSIENT=0
@@ -172,10 +180,13 @@ ham_lease_pr_view() {
     else
       HAM_LEASE_PROBE_TRANSIENT=0
       rm -f "$err"
+      HAM_PHASE_OUTCOME=merge-lease-probe-failed
       return "$rc"
     fi
     if [ "$attempt" -ge 3 ]; then
       rm -f "$err"
+      HAM_LEASE_PROBE_TRANSIENT=0
+      HAM_PHASE_OUTCOME=merge-lease-probe-failed
       return "$rc"
     fi
     sleep "$attempt"
@@ -184,6 +195,7 @@ ham_lease_pr_view() {
 }
 
 ham_acquire_merge_lease() {
+  HAM_PHASE_OUTCOME=merge-lease-admission-failed
   # HQ cancellation only owns the recorded worker group. Dispatched closers
   # must enter the versioned, launch-bound controller before taking a lease,
   # and take it only on a fresh permitted launch read.
@@ -265,6 +277,7 @@ NODE
   # callers without that descriptor still receive progress on stderr.
   local ham_lease_progress_fd=2
   if ( : >&3 ) 2>/dev/null; then ham_lease_progress_fd=3; fi
+  HAM_PHASE_OUTCOME=merge-lease-base-read-failed
   ham_capture_current_base_sha || return 1
   if "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-lease.mjs acquire \
     --repo <<REPO>> \
@@ -281,6 +294,7 @@ NODE
   else
     HAM_MERGE_LEASE_ACQUIRE_EXIT=$?
   fi
+  HAM_PHASE_OUTCOME=merge-lease-response-invalid
   if [ "$HAM_MERGE_LEASE_ACQUIRE_EXIT" -eq 70 ] \
     && [ "$(jq -r '.parked // false' "<<RUN_DIR>>/merge-lease-acquire.json")" = "true" ]; then
     HAM_PARK_REASON=$(jq -r '.reason // "merge-lease-parked"' "<<RUN_DIR>>/merge-lease-acquire.json")
@@ -399,6 +413,7 @@ $HAM_GATE_CAP_COMMENT"
       if [ "$ham_lease_wait_retry" -lt 2 ]; then ham_lease_wait_retrying=true; fi
     fi
     echo "AMG-04 deferred: $(jq -r '.closingStatus // "lease wait exhausted behind unknown holders"' "<<RUN_DIR>>/merge-lease-acquire.json"); waited ${HAM_PARK_WAITED}s; in-run retry=${ham_lease_wait_retrying}" >&2
+    HAM_PHASE_OUTCOME=merge-lease-deferral-audit-failed
     cp "<<RUN_DIR>>/merge-lease-acquire.json" "<<RUN_DIR>>/merge-lease-wait-${ham_lease_wait_retry}.json" || return 1
     ham_park_json=$(mktemp "${TMPDIR:-/tmp}/ham-lease-park.XXXXXX") || return 1
     jq --argjson waited_s "$HAM_PARK_WAITED" --argjson configured_s "$HAM_MERGE_LEASE_WAIT_SECONDS" \
@@ -597,6 +612,7 @@ ham_settle_rebase_snapshot() {
           return 20
         fi
         mv "<<RUN_DIR>>/pr-after.snapshot.json" "<<RUN_DIR>>/pr-after.json" || {
+          HAM_PHASE_OUTCOME=rebase-snapshot-write-failed
           ham_release_merge_lease || return 1
           return 1
         }
@@ -607,6 +623,7 @@ ham_settle_rebase_snapshot() {
       if [ "$async_result" -eq 1 ] && [ "$snapshot_head" = "$from" ] \
         && git merge-base --is-ancestor "$base" "$from"; then
         mv "<<RUN_DIR>>/pr-after.snapshot.json" "<<RUN_DIR>>/pr-after.json" || {
+          HAM_PHASE_OUTCOME=rebase-snapshot-write-failed
           ham_release_merge_lease || return 1
           return 1
         }
@@ -797,6 +814,7 @@ ham_resolve_base_strictness
 
 # Keep this identity across verify/publish/merge in the persistent shell. Only
 # our successful publication or server-side rebase may replace it.
+HAM_PHASE_OUTCOME=produced-head-read-failed
 HAM_PRODUCED_HEAD=$(git rev-parse HEAD) || return 1
 export HAM_PRODUCED_HEAD
 while [ "$(jq -r '.mergeStateStatus // ""' "<<RUN_DIR>>/pr-after.json")" = "BEHIND" ]; do
@@ -816,13 +834,27 @@ while [ "$(jq -r '.mergeStateStatus // ""' "<<RUN_DIR>>/pr-after.json")" = "BEHI
     break
   fi
   if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then
-    ham_acquire_merge_lease || return $?
+    ham_acquire_merge_lease || {
+      ham_acquire_exit=$?
+      if [ "${HAM_LEASE_PROBE_TRANSIENT:-0}" -eq 1 ]; then
+        HAM_PHASE_OUTCOME=parked:merge-lease-timeout
+        return 20
+      fi
+      return "$ham_acquire_exit"
+    }
   fi
   ham_rebase_head || return $?
 done
 
 if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then
-  ham_acquire_merge_lease || return $?
+  ham_acquire_merge_lease || {
+    ham_acquire_exit=$?
+    if [ "${HAM_LEASE_PROBE_TRANSIENT:-0}" -eq 1 ]; then
+      HAM_PHASE_OUTCOME=parked:merge-lease-timeout
+      return 20
+    fi
+    return "$ham_acquire_exit"
+  }
 fi
 
 # A successful outside-lease validation may supersede the parallel-phase base

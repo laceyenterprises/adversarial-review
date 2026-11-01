@@ -18,7 +18,7 @@ const log = (kind, value) => appendFileSync(join(dir, 'events.jsonl'), JSON.stri
 const git = (...args) => execFileSync(process.env.REAL_GIT, args, { encoding: 'utf8' }).trim();
 const localHead = () => git('rev-parse', 'HEAD');
 const args = process.argv.slice(2);
-const retryScenario = process.env.SCENARIO.startsWith('ci-');
+const retryScenario = process.env.SCENARIO.startsWith('ci-') || process.env.SCENARIO === 'prepredicate-base-retry';
 
 if (args[0] === 'advance-base') {
   git('--git-dir', join(dir, 'remote.git'), 'update-ref', 'refs/heads/main', state.nextBase, state.base);
@@ -61,7 +61,9 @@ if (args[0] === 'advance-base') {
   const retryReads = state.retried ? (state.retryReads = (state.retryReads || 0) + 1) : 0;
   const now = Number(readFileSync(join(dir, 'clock'), 'utf8'));
   if (state.retried && !state.retryStartedAt) state.retryStartedAt = now;
-  const pending = (state.retried && process.env.SCENARIO === 'ci-slow-green' && now - state.retryStartedAt < 300) ||
+  const pending = (process.env.SCENARIO === 'prepredicate-timeout') ||
+    (process.env.SCENARIO === 'prepredicate-green' && now < 1700000060) ||
+    (state.retried && process.env.SCENARIO === 'ci-slow-green' && now - state.retryStartedAt < 300) ||
     (['pending', 'ci-clean-pending'].includes(process.env.SCENARIO) && state.checkReads === 1) ||
     (process.env.SCENARIO === 'ci-shared-deadline' && state.checkReads === 1) ||
     (retryScenario && state.retried && (retryReads === 1 || ['ci-pending', 'ci-shared-deadline'].includes(process.env.SCENARIO)));
@@ -72,7 +74,7 @@ if (args[0] === 'advance-base') {
   const mergeStateStatus = process.env.SCENARIO.startsWith('ci-clean-') ? 'CLEAN' : state.behind ? 'BEHIND' : 'CLEAN';
   const mergeable = !state.retried && process.env.SCENARIO === 'ci-disjoint-conflict' ? 'CONFLICTING' : 'MERGEABLE';
   const verdict = evaluateMergeEligibility({ verdict: 'settled-success', leaseHeld: true,
-    requiredChecks: checks, branchProtectionRequired: false, mergeable,
+    requiredChecks: checks, branchProtectionRequired: process.env.HAM_BRANCH_PROTECTION_REQUIRED === 'true', mergeable,
     requiresUpToDateBranch: process.env.HAM_REQUIRES_UP_TO_DATE !== '0',
     mergeStateStatus, prState: 'OPEN', labels: [], candidateHead: state.head, validatedHead: expected });
   log('checks', { at: Number(readFileSync(join(dir, 'clock'), 'utf8')), head: expected, held: existsSync(join(dir, 'lease-held')), conclusion: classifyCheckRollup(checks) });
@@ -80,6 +82,13 @@ if (args[0] === 'advance-base') {
   console.log(JSON.stringify({ ok: verdict.eligible, reasons: verdict.reasons, state: 'OPEN',
     headMatches: state.head === expected, liveHead: state.head, expectedHead: expected,
     checksConclusion: classifyCheckRollup(checks), mergeable, mergeStateStatus }));
+} else if (args[0] === 'initial-predicate') {
+  const at = Number(readFileSync(join(dir, 'clock'), 'utf8'));
+  if (process.env.SCENARIO === 'prepredicate-green') assert.ok(at >= 1700000060);
+  assert.ok(existsSync(join(dir, 'lease-held')));
+  log('initial-predicate', { at, head: state.head });
+  console.log(JSON.stringify({ eligible: true,
+    trace: { headMatch: { current: state.head }, branchProtection: { required: false } } }));
 } else if (args[0] === 'predicate') {
   const claim = JSON.parse(readFileSync(args[args.indexOf('--ham-terminal-remediation') + 1]));
   assert.equal(claim.commit.sha, state.nextRebased);
@@ -132,6 +141,14 @@ if (args[0] === 'advance-base') {
     save();
     console.log(JSON.stringify({ data: { updatePullRequestBranch: { pullRequest: { headRefOid: process.env.SCENARIO.includes('old-reply') ? previous : target } } } }));
   } else if (args[0] === 'pr' && args[1] === 'view') {
+    if (args.includes('body,headRefOid,state,isDraft,labels,statusCheckRollup') &&
+      (process.env.SCENARIO === 'lease-probe-exhausted' ||
+        (process.env.SCENARIO === 'prepredicate-probe-exhausted' && state.checkReads))) {
+      state.leaseProbeFailures = (state.leaseProbeFailures || 0) + 1;
+      save();
+      console.error('HTTP 502: synthetic lease probe failure');
+      process.exit(1);
+    }
     if (args.includes('id') && args.includes('--jq')) {
       state.idReads = (state.idReads || 0) + 1;
       if (state.checkReads && process.env.SCENARIO === 'ci-id-deadline') writeFileSync(join(dir, 'clock'), '1700000900');

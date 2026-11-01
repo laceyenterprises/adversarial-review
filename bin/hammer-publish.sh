@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # GitHub credentials refresh inside metered-gh immediately before each call.
+export POST_REMEDIATION_SHA HAM_PRODUCED_HEAD HAM_PUSHED_HEAD HAM_PUSHED_FROM_HEAD
+export HAM_AUDIT_COMMENT_BODY
 export HAM_ROOT_DIR='<<ROOT_DIR>>'
 # HAMMERTRIM-01: rendered by bin/hammer-procedure.mjs with trusted dispatch values.
 ham_gh() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec-hammer "$@"; }

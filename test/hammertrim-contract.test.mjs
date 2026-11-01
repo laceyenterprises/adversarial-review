@@ -748,10 +748,9 @@ close() { ${block}
  echo REACQUIRED; }
 close
 `], env);
-    assert.equal(result.status, scenario === 'recover' ? 0 : scenario === 'exhaust' ? 20 : 1, result.stderr);
+    assert.equal(result.status, scenario === 'recover' ? 0 : 1, result.stderr);
     assert.equal(readFileSync(join(dir, 'calls'), 'utf8').trim(), scenario === 'recover' ? '2' : scenario === 'exhaust' ? '3' : '1');
-    if (scenario === 'exhaust') assert.match(result.stdout, /AUDIT:deferred merge-lease-timeout/);
-    else assert.doesNotMatch(result.stdout, /AUDIT:/);
+    assert.doesNotMatch(result.stdout, /AUDIT:/);
   });
 }
 
@@ -941,7 +940,9 @@ exit "$rc"`], env);
       assert.equal(JSON.parse(readFileSync(join(dir, 'pr-after.json'), 'utf8')).headRefOid, before);
     } else if (['permanent error', 'permanent numbered URL', 'malformed JSON', 'missing head', 'invalid head'].includes(scenario)) {
       assert.equal(result.status, 1, result.stderr);
-      assert.match(result.stdout, /OUTCOME=verify-head-error rc=1/);
+      const outcome = ['missing head', 'invalid head'].includes(scenario)
+        ? 'published-head-probe-invalid' : 'published-head-probe-failed';
+      assert.match(result.stdout, new RegExp(`OUTCOME=${outcome} rc=1`));
       assert.doesNotMatch(result.stdout, /CONTINUE_TO_CHECKS/);
       assert.equal(Number(readFileSync(join(dir, 'polls'), 'utf8')), 2);
       assert.equal(JSON.parse(readFileSync(join(dir, 'pr-after.json'), 'utf8')).headRefOid, before);

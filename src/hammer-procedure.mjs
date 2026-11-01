@@ -54,17 +54,21 @@ if [ "$ham_phase_exit" -ne 0 ]; then ham_record_phase_failure; fi
 # HAMPROMPT-01: outcomes name prompt appendices, never script source to inspect.
 case "${phase}:$ham_phase_exit" in
   hammer-verify-head:0)
-    echo 'HAM next: Appendix C revalidation if HAM_NEEDS_REVALIDATION=true; otherwise Appendix E audit/predicate/merge.' >&2 ;;
+    echo 'HAM next: Appendix C revalidation if HAM_NEEDS_REVALIDATION=true; otherwise Appendix E publish, wait for exact-head checks, predicate, merge.' >&2 ;;
   hammer-verify-head:21|hammer-merge:21)
     echo 'HAM next: Appendix D — Resolving merge conflicts. Query/release lease, repair, publish commit, revalidate; re-enter verify-head.' >&2 ;;
   hammer-publish:0)
     if [ "\${HAM_COMMIT_PUBLICATION_ONLY:-0}" = "1" ]; then
       echo 'HAM next: unset HAM_COMMIT_PUBLICATION_ONLY; refresh context; run verify-head (Appendix C).' >&2
     else
-      echo 'HAM next: Appendix E exact-head predicate, then merge.' >&2
+      echo 'HAM next: Appendix E wait for exact-head checks, then predicate, then merge.' >&2
     fi ;;
   hammer-merge:0)
-    echo 'HAM next: Appendix E confirmed-merge closing audit.' >&2 ;;
+    if [ "\${HAM_PHASE_OUTCOME:-}" = ci-settled ] || [ "\${HAM_PHASE_OUTCOME:-}" = ci-wait-not-needed ]; then
+      echo 'HAM next: Appendix E refresh exact-head inputs, predicate, then hammer-merge.sh.' >&2
+    else
+      echo 'HAM next: Appendix E confirmed-merge closing audit.' >&2
+    fi ;;
   *)
     echo "HAM next: stop with \${HAM_PHASE_OUTCOME:-${phase}-failed}; preserve deferrals and authoritative terminal state (Appendix B mandate 0b / Appendix E). Do not read phase source." >&2 ;;
 esac

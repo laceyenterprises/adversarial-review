@@ -4360,6 +4360,10 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- Correct the post-CI lease probe regression assertion: exhausted GitHub transport retries retain their probe failure and do not emit a lease-contention audit.
+
+- **CLOSERCIWAIT-01 final remediation:** bind claims to the exported exact-head audit body, preserve the settled lease and consumed retry budget through merge, and distinguish pending CI and transport-probe failures from terminal refusals and lease contention. Offline regressions cover these paths; lifecycle states and smoke commands are unchanged, and organic post-deploy acceptance remains pending.
+
 - Make agy print-timeout conversion tests deterministic under CI load while retaining the separate deadline-cancellation test.
 
 PRIMARYDEADCODE-01 permits derived dead-code reversal only for author-added
@@ -4368,6 +4372,7 @@ Python/JS/TS declaration grammar. Transient, unpersisted content reads must
 prove every parent-file reference is covered by the same commit's authorized
 deletion, with no surviving head references or dynamic namespace hazards.
 See the [proof contract](docs/RUNBOOK-ama-closure.md).
+- **CLOSERCIWAIT-01:** published-head CI settles before the closer predicate using the existing bounded lease-yield/reacquire wait. Phase head values are exported, claim binding uses a deployed helper, and verification/terminal failures name the failed operation. Existing smoke commands remain unchanged; post-deploy acceptance is an organic remediation push merging in the same closer run, still pending.
 
 REMGEMINI-01 follow-up: pooled fallback skips retain the registry fault in
 `skipped[].detail`, matching standalone routing. An offline regression verifies

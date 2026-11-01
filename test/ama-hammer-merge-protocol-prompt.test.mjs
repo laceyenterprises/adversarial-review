@@ -908,3 +908,13 @@ test('GATECAPBASE-01: prompt preserves recovery ownership after merge-lease caps
   assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort server-rebase-conflict/);
   assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort base-advanced-during-server-rebase/);
 });
+
+// CLOSERCIWAIT-01: the executable pre-predicate wait is visible in both the
+// operating instructions and the detailed predicate appendix.
+test('published-head CI settles before Appendix E predicate evaluation', () => {
+  const appendix = HAMMER_TEMPLATE.slice(HAMMER_TEMPLATE.indexOf('## Appendix E'));
+  assert.match(appendix, /hammer-merge\.sh" --wait-ci/);
+  assert.ok(appendix.indexOf('--wait-ci') < appendix.indexOf('bin/ama-check.mjs'));
+  assert.match(appendix, /bin\/hammer-claim-head\.mjs/);
+  assert.match(HAMMER_TEMPLATE, /HAM_PROCEDURE_STEP=claim-build/);
+});

@@ -7,6 +7,12 @@ import { reportHammerProgress } from './hammer-progress.mjs';
 // the run's final exit; helper failures the closer may still retry write none.
 export function recordHammerEarlyFailure(reason, { env = process.env, headSha, final = false } = {}) {
   if (!/^[a-z][a-z0-9:-]*$/.test(reason || '')) throw new TypeError('invalid hammer failure reason');
+  // A later controller step must not terminalize with its previous phase's
+  // success. The procedure exports a step identity before non-phase commands.
+  if (['published', 'verified', 'ci-settled', 'ci-wait-not-needed'].includes(reason)) {
+    const step = env.HAM_PROCEDURE_STEP;
+    reason = /^[a-z][a-z0-9-]*$/.test(step || '') ? `${step}-failed` : 'procedure-step-failed';
+  }
   if (final === true) reportHammerProgress('terminal-stop', { env, reason, final });
   const identity = {
     hqRoot: env.HAM_HQ_ROOT || env.HQ_ROOT,

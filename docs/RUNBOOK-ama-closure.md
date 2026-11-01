@@ -7496,3 +7496,42 @@ After both repositories deploy and the services reload normally, SRE passively
 observes the next natural quota-kill/resume closing or being replaced by a
 closer that closes without a missing-phase comment. Do not induce a live quota
 kill or mutate ledger/leases to test this path.
+
+### Published-head closure order (CLOSERCIWAIT-01)
+
+After commit publication and verify-head/revalidation, publish the audit under
+lease, then source the deployed `hammer-merge.sh --wait-ci` before constructing
+the exact-head predicate. This mode shares the existing load-scaled CI budget,
+yields the first wait and reacquires through AMG-04; it cannot merge. With no
+changed head published by this run, it returns `ci-wait-not-needed` immediately.
+After `ci-settled`, refresh PR/check/review/protection/timeline/commit inputs and
+bind the claim with `hammer-claim-head.mjs`. If the bounded base retry established
+a new head, publish that head's audit again. Then evaluate the unchanged predicate
+and source `hammer-merge.sh` without arguments. The normal phase retains the
+original deadline and repeats the live exact-head gate before merging.
+The CI-only pass leaves protection admission to that subsequent predicate,
+preserves its reacquired lease through the predicate and final green gate, and
+retains the consumed base-retry budget. Only a new rebase in the merge invocation
+requires internal audit/predicate regeneration; a retry already settled by
+`--wait-ci` uses the caller's refreshed evidence. If checks become pending again,
+the ordinary lease-yield rules still apply.
+
+Publication exports `HAM_AUDIT_COMMENT_BODY`. The claim binder copies this body
+alongside the exported head, preserving findings and doc-currency claims, and
+refuses an exported body without exactly one matching `HAM-Validated-Head` line.
+
+Pending checks at the deadline retain `required-checks-pending` and
+`remote-ci-timeout`; no premature predicate refusal consumes the run. Head values
+(`POST_REMEDIATION_SHA`, `HAM_PRODUCED_HEAD`, `HAM_PUSHED_HEAD`,
+`HAM_PUSHED_FROM_HEAD`) are exported by their phases. Verification transport,
+probe, lease-admission and runtime failures carry stage outcomes; exhausted lease
+contention retains `parked:merge-lease-timeout`, while exhausted transport probes
+retain `merge-lease-probe-failed`. A controller must name every
+failing non-phase step through `HAM_PROCEDURE_STEP` and an explicit failure
+reason. A stale phase success passed to the terminal helper becomes the named
+step failure, falling back to `procedure-step-failed`. The retry cap, supervisor
+limits, preservation proof, attestation and lease fences are unchanged.
+
+After deployment, SRE must observe a remediation-publishing closer waiting for
+its exact head's checks, evaluating the predicate after green, and merging in the
+same run. Offline fixtures establish ordering, not a live receipt.

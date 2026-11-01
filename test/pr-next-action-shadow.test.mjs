@@ -168,7 +168,7 @@ for (const [name, evidence, primaryChange, reason] of [
 
 test('round enrichment preserves the original pass remediation owner with failed CI', async () => {
   const pass = base({ observations: { remediation: {
-    job: { status: 'in_progress', headSha: HEAD }, completedRounds: 1, maxRounds: 3,
+    job: { status: 'in_progress', live: true, headSha: HEAD }, completedRounds: 1, maxRounds: 3,
   } } });
   const run = (followUpJob, passSnapshot = pass) => shadowNextAction({ source: 'closure-orchestration', passSnapshot, env,
     evidence: closureOwnerShadowEvidence({ currentHead: HEAD, lease: null, checks: 'FAILURE', roundsLeft: true,

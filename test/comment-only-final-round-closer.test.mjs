@@ -152,8 +152,10 @@ function closureArgs(rootDir, overrides = {}) {
   };
 }
 
-for (const { name, conclusion, mergeable, mergeStateStatus, blocker, reviewBody = COMMENT_ONLY_BODY, strictNonBlockingRemediation = true } of [
+for (const { name, conclusion, mergeable, mergeStateStatus, blocker, handoff = false, reviewBody = COMMENT_ONLY_BODY, strictNonBlockingRemediation = true } of [
   { name: 'green', conclusion: 'SUCCESS' },
+  { name: 'expired shared hammer handoff', conclusion: 'SUCCESS', handoff: true },
+  { name: 'expired shared hammer handoff with blocking findings', conclusion: 'SUCCESS', handoff: true, reviewBody: REQUEST_CHANGES_BODY },
   { name: 'red', conclusion: 'FAILURE' },
   { name: 'red without findings', conclusion: 'FAILURE', reviewBody: ZERO_FINDINGS_BODY },
   { name: 'red BLOCKED without findings', conclusion: 'FAILURE', mergeable: '', mergeStateStatus: 'BLOCKED', reviewBody: ZERO_FINDINGS_BODY },
@@ -165,7 +167,24 @@ for (const { name, conclusion, mergeable, mergeStateStatus, blocker, reviewBody 
   test(`AMA final-round handoff: ${name} CI retains terminal validation gates`, async (t) => {
     const rootDir = mkdtempSync(join(tmpdir(), 'final-round-ama-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-    seedFinalRound(rootDir, { reviewBody });
+    const id = seedFinalRound(rootDir, { reviewBody });
+    if (handoff) {
+      const jobPath = join(rootDir, 'data', 'follow-up-jobs', 'completed', `${id}.json`);
+      const job = JSON.parse(readFileSync(jobPath, 'utf8'));
+      delete job.finalRound;
+      job.completion.finalRemediationPush = true;
+      job.reReview = { requested: false, status: 'suppressed', suppressed: 'shared-next-action',
+        nextAction: { action: 'hammer', actor: 'hammer', reason: 'suppressed-final-push', head: PUSHED,
+          deadline: { class: 'admission', budgetMs: 300000, at: new Date(PUSHED_AT_MS + 300000).toISOString() } } };
+      writeFileSync(jobPath, JSON.stringify(job));
+      mkdirSync(join(rootDir, 'data', 'follow-up-jobs', 'workspaces', id), { recursive: true });
+      const staleDir = join(rootDir, 'data', 'follow-up-jobs', 'in-progress');
+      mkdirSync(staleDir, { recursive: true });
+      writeFileSync(join(staleDir, `${id}-stale.json`), JSON.stringify({
+        ...job, status: 'in_progress', lastHeartbeatAt: job.completedAt,
+        remediationWorker: { dispatchMode: 'hq', state: 'spawned', spawnedAt: job.completedAt },
+      }));
+    }
     const liveHeads = [];
     let payload = null;
     const result = await maybeDispatchAmaClosureFor(closureArgs(rootDir, {
@@ -177,18 +196,23 @@ for (const { name, conclusion, mergeable, mergeStateStatus, blocker, reviewBody 
       maybeDispatchAmaCloserImpl: async (args) => { payload = args; return { dispatched: true, launchRequestId: 'lrq_hammer' }; },
     }));
     assert.equal(result.dispatched, true);
-    assert.deepEqual(liveHeads, [REVIEWED], 'live reconcile reads the reviewed head, not the pushed one');
-    assert.equal(payload.reviewState.verdict, 'comment-only');
+    assert.deepEqual(liveHeads, reviewBody === REQUEST_CHANGES_BODY ? [] : handoff ? [PUSHED, PUSHED] : [REVIEWED],
+      'a general handoff reconciles the current head; a final-round proof reconciles the reviewed head');
+    assert.equal(payload.reviewState.verdict, reviewBody === REQUEST_CHANGES_BODY ? 'request-changes' : handoff ? '' : 'comment-only');
     assert.equal(payload.reviewState.headSha, REVIEWED);
     assert.equal(payload.sharedNextAction.decision.action, 'hammer');
     assert.equal(payload.dispatchContext.targetRemediationSha, PUSHED);
-    assert.equal(payload.reviewState.nonBlockingFindingCount, reviewBody === ZERO_FINDINGS_BODY ? 0 : 1);
+    assert.equal(payload.reviewState.nonBlockingFindingCount, handoff && reviewBody !== REQUEST_CHANGES_BODY
+      ? 0 : reviewBody === ZERO_FINDINGS_BODY ? 0 : 1);
+    if (handoff && reviewBody !== REQUEST_CHANGES_BODY) {
+      assert.equal(payload.reviewState.blockingFindingState, 'unknown', 'a general final push grants no merge proof');
+    }
     assert.notEqual(payload.reviewState.headSha, payload.prMetadata.headSha);
     assert.equal(result.commentOnlyFinalRoundAwaitingCi, undefined);
 
     // The real closer admits exactly that payload as terminal remediation.
     const execCalls = [];
-    const dispatched = await maybeDispatchAmaCloser({
+    const closerArgs = {
       ...payload,
       reviewState: { ...payload.reviewState,
         ...(blocker === 'present' ? { blockingFindingCount: 1 } : {}),
@@ -209,12 +233,18 @@ for (const { name, conclusion, mergeable, mergeStateStatus, blocker, reviewBody 
       readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
       readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
       logger: { log() {}, info() {}, warn() {}, error() {} },
-    });
+    };
+    const dispatched = await maybeDispatchAmaCloser(closerArgs);
     // Findings are repair admission, including on the final round. They remain
     // forbidden merge authority without exact-head HAM validation.
     assert.equal(isEligibleForAmaClosure(payload.reviewState, payload.prMetadata,
       payload.cfg, { env: {} }).eligible, false);
     assert.equal(dispatched.dispatched, true, JSON.stringify(dispatched));
+    if (handoff) {
+      const repeated = await maybeDispatchAmaCloser({ ...closerArgs,
+        readLaunchRequestStatusImpl: async () => ({ ok: true, row: { status: 'running' }, retryChain: [] }) });
+      assert.equal(repeated.dispatched, false, 'the existing closer retains the handoff on a repeated pass');
+    }
     const hammerDispatches = execCalls.filter(({ args }) => args[0] === 'dispatch' && args.includes('hammer'));
     assert.equal(hammerDispatches.length, 1, 'exactly one hammer dispatch');
     assert.ok(!execCalls.some(({ cmd, args }) => cmd === 'gh' && args[0] === 'pr' && args[1] === 'merge'), 'no merge is attempted on the proof alone');

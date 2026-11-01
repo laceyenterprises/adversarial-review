@@ -4876,7 +4876,7 @@ test('OWNERDEADLINE-01: every open subject visits deadline recovery before revie
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
-for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocked', 'sequence', 'parked-green']) {
+for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocked', 'sequence', 'parked-green', 'expired-hammer-handoff']) {
   test(`CLOSERDEADLOCK-01 ${initialStatus} final-round push remains in the closer lane`, () => {
     const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-final-round-owner-'));
     const reviewed = '1'.repeat(40), pushed = '2'.repeat(40);
@@ -4898,7 +4898,7 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
               branchProtection: { requiredContexts: [] },
               statusCheckRollup: [{ __typename: 'CheckRun', name: 'unit',
                 status: green ? 'COMPLETED' : 'IN_PROGRESS', conclusion: green ? 'SUCCESS' : null }] },
-            now: () => Date.parse(globalThis.finalRoundCompletedAt) + 60000,
+            now: () => Date.parse(globalThis.finalRoundCompletedAt) + (${JSON.stringify(initialStatus)} === 'expired-hammer-handoff' ? 360000 : 60000),
             loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true }), getOrchestrationMode: () => 'native' }),
             resolveAmaHammerDispatchModeImpl: () => 'inline',
             fetchLatestHeadReviewBodiesImpl: async () => [${JSON.stringify(body)}],
@@ -4941,7 +4941,7 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
       writeFileSync(registerPath, buildRegisterSource(loaderPath));
       writeFileSync(runnerPath, buildRunnerSource({ freshHeads: { 101: pushed }, afterFirstPoll: `
         const { mkdirSync, writeFileSync } = await import('node:fs');
-        const completedAt = new Date().toISOString();
+        const completedAt = new Date(Date.now() - ('${initialStatus}' === 'expired-hammer-handoff' ? 360000 : 0)).toISOString();
         globalThis.finalRoundCompletedAt = completedAt;
         const dir = ${JSON.stringify(path.join(tmp, 'data', 'follow-up-jobs', 'completed'))};
         mkdirSync(dir, { recursive: true });
@@ -4951,10 +4951,13 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
           revisionRef: '${reviewed}', reviewBody: ${JSON.stringify(body)}, completedAt,
           remediationPlan: { currentRound: 1, maxRounds: 2 },
           completion: { finalRemediationPush: true, workerPushedHeadSha: '${pushed}' },
-          reReview: { requested: false, suppressed: 'comment-only-final-round', nextAction: {
-            action: 'wait-for-CI', actor: 'ci', reason: 'checks-pending', head: '${pushed}',
-            deadline: { at: new Date(Date.parse(completedAt) + 1800000).toISOString(), anchoredAt: completedAt } } },
+          reReview: { requested: false, suppressed: '${initialStatus}' === 'expired-hammer-handoff' ? 'shared-next-action' : 'comment-only-final-round', nextAction: {
+            action: '${initialStatus}' === 'expired-hammer-handoff' ? 'hammer' : 'wait-for-CI',
+            actor: '${initialStatus}' === 'expired-hammer-handoff' ? 'hammer' : 'ci',
+            reason: 'suppressed-final-push', head: '${pushed}',
+            deadline: { at: new Date(Date.parse(completedAt) + ('${initialStatus}' === 'expired-hammer-handoff' ? 300000 : 1800000)).toISOString(), anchoredAt: completedAt } } },
         }));
+        mkdirSync(${JSON.stringify(path.join(tmp, 'data', 'follow-up-jobs', 'workspaces'))} + '/' + jobId, { recursive: true });
         const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=101').get();
         db.prepare(\`INSERT INTO reviewer_passes(repo,pr_number,attempt_number,reviewer_class,pass_kind,
           started_at,ended_at,status,head_sha,gh_comment_id,body_md,body_captured_at)
@@ -4963,7 +4966,7 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
         db.prepare(\`UPDATE reviewed_prs SET review_status=?,reviewer_head_sha='${reviewed}',revision_ref='${pushed}',
           rereview_requested_at=?,rereview_reason='auto-refresh: posted review on stale head',
           reviewer_session_uuid=NULL,reviewer_lease_expires_at=NULL WHERE pr_number=101\`)
-          .run('${initialStatus}' === 'sequence' ? 'posted' : '${initialStatus}' === 'parked-green' ? 'pending' : '${initialStatus}',
+          .run('${initialStatus}' === 'sequence' ? 'posted' : ['parked-green', 'expired-hammer-handoff'].includes('${initialStatus}') ? 'pending' : '${initialStatus}',
             ['posted', 'sequence'].includes('${initialStatus}') ? null : completedAt);
         globalThis.finalRoundArmed = true;
         globalThis.finalRoundLedger = { completedRoundsForPR: 1, latestRiskClass: 'medium', latestMaxRounds: 2,
@@ -4973,12 +4976,12 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
           blockingFindingState: 'known', blockingFindingCount: 0, nonBlockingFindingState: 'known', nonBlockingFindingCount: 1,
           reviewedHeadSha: '${reviewed}', commentOnlyFinalRoundPush: true };
         globalThis.__watcherClaimLoopReviewerSpawns = [];
-        globalThis.finalRoundGreen = '${initialStatus}' === 'parked-green';
+        globalThis.finalRoundGreen = ['parked-green', 'expired-hammer-handoff'].includes('${initialStatus}');
         await pollOnce(octokit, pollOptions);
         assert.ok(globalThis.finalRoundDecisions?.length >= 1, 'pending CI must reach the closer in this pass');
         assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number=101').get().review_status, 'posted');
-        if ('${initialStatus}' === 'parked-green') {
-          assert.ok(globalThis.finalRoundDispatches >= 1, 'already green parked head reaches closure in its first pass');
+        if (['parked-green', 'expired-hammer-handoff'].includes('${initialStatus}')) {
+          assert.equal(globalThis.finalRoundDispatches, 1, 'already green parked head reaches closure exactly once in its first pass');
         } else {
           // Replay the historical requestReviewRereview durable transition.
           // Current request admission already refuses some new final-round
@@ -5006,8 +5009,8 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
         { cwd: REPO_ROOT, encoding: 'utf8', env, timeout: 30000 });
       const output = `${result.stdout}${result.stderr}`;
       assert.equal(result.status, 0, output);
-      assert.ok((output.match(/owning lane=closer.*completed-comment-only-final-round/g) || []).length
-        >= (initialStatus === 'parked-green' ? 1 : initialStatus === 'sequence' ? 2 : 10), 'every pass names the closer owner, including startup refill');
+      assert.ok((output.match(/owning lane=closer.*(?:completed-comment-only-final-round|expired-remediation-handoff)/g) || []).length
+        >= (['parked-green', 'expired-hammer-handoff'].includes(initialStatus) ? 1 : initialStatus === 'sequence' ? 2 : 10), 'every pass names the closer owner, including startup refill');
     } finally { rmSync(tmp, { recursive: true, force: true }); }
   });
 }

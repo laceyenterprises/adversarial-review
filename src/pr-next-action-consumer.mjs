@@ -8,6 +8,7 @@
 // Nothing here throws into a caller or changes a legacy decision.
 import { isUnresolvedLaunchReference } from './launch-reference.mjs';
 import { reviewCeilingOwner } from './review-ceiling-owner.mjs';
+import { remediationJobOwnership } from './remediation-job-ownership.mjs';
 
 // ── Legacy adapters: old outputs expressed as owned workflows ────────────────
 // Faithful translation, not correction: a legacy page stays an operator hold
@@ -82,7 +83,7 @@ export function fromLegacyNoProgressLane(lane) {
 // The watcher's handed-to-review wake: its legacy effect is the bounded wait.
 export const handoffWakeLegacy = headSha => fromLegacyClosureOwner({ owner: 'wait', reason: `handed-to-review:${headSha}` });
 
-// ── Evidence builders (values the consumer already holds; no reads) ─────────
+// ── Evidence builders (held values plus bounded worker identity probes) ─────
 export const NEXT_ACTION_SHADOW_LAUNCH_READ_MS = 5_000;
 const pick = (value, keys) => (value && typeof value === 'object'
   ? Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]])) : null);
@@ -171,6 +172,7 @@ export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, cand
       ...(input.finalPush ? { finalPush: input.finalPush } : {}),
       ...(input.followUpJob !== undefined ? { job: input.followUpJob ? {
         ...pick(input.followUpJob, ['status', 'clean', 'headSha', 'createdAt']),
+        live: remediationJobOwnership(input.followUpJob).live,
         headSha: input.followUpJob.headSha || input.followUpJob.revisionRef || null,
       } : null } : {}) },
     leases: input.lease === undefined ? undefined : { closer: lease },

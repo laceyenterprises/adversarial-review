@@ -16,6 +16,7 @@ import { launchRequestOwned, launchRequestMeaning } from './launch-request-statu
 import { readAmaCloserLease, amaCloserPendingLeaseExpiryMs } from './closer-lease.mjs';
 import { listSettledJsonNames } from './dispatch-dir-names.mjs';
 import { requestBoundedOrphanReview } from './orphan-review-request.mjs';
+import { remediationJobOwnership } from '../remediation-job-ownership.mjs';
 
 // Only immutable terminal ledger results are cached; bound fleet memory usage.
 const terminalLaunches = new Map();
@@ -135,9 +136,17 @@ async function probeOrphanOwnershipWithinRepositoryCycle({ rootDir, repo, prNumb
       if (signal?.aborted || Date.now() >= deadline) { uncertain('ownership-probe-timeout'); return result; }
       const record = readRecord(join(dir, name), !queue || matchesName(name));
       if (!record || !sameRepo(record.repo) || Number(record.prNumber) !== Number(prNumber)) continue;
-      if (overdue && ![record.targetRemediationSha, record.headSha, record.reviewedSha].includes(headSha)) continue;
+      // A same-PR remediation worker owns the branch even after its input head
+      // moved. Only closer/merge receipts are scoped to this recovery head.
+      if (overdue && !queue && ![record.targetRemediationSha, record.headSha, record.reviewedSha].includes(headSha)) continue;
       if (bucket === 'merge-agent-dispatches') mergeRecordSeen = true;
-      if (queue && alive(record.remediationWorker?.processId)) return { ...result, owned: true, proof: 'live-remediator', ...(includeOwnerEvidence ? { actor: 'remediator' } : {}) };
+      if (queue) {
+        const owner = remediationJobOwnership(record, { now });
+        if (owner.live) return { ...result, owned: true, proof: 'live-remediator',
+          ...(includeOwnerEvidence ? { actor: 'remediator' } : {}) };
+        logger.log?.(`[ama-closer] owning lane=closer for ${repo}#${prNumber}: stale-remediation-job-reclaimed reason=${owner.reason} job=${record.jobId || 'unknown'}`);
+        continue;
+      }
       const launchRequestId = record.remediationWorker?.launchRequestId || record.launchRequestId || record.dispatchId;
       if (isPreReceiptIntent(record) && !launchRequestId) {
         uncertain('dispatching-without-launch-id');

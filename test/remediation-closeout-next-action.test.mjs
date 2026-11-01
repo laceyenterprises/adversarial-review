@@ -130,6 +130,7 @@ test('missing head and unreadable checks retain an observer without throwing', t
 test('failed CI without publish or review-head proof retains the active retry owner', t => {
   const f = fixture(t);
   const job = { ...f.job, revisionRef: null, reviewBody: 'Legacy review',
+    lastHeartbeatAt: AT,
     remediationPlan: { ...f.job.remediationPlan, currentRound: 1 } };
   const shared = f.decide({ job, workerPushedHeadSha: null,
     ciGate: { headSha: HEAD, state: 'failed' } });

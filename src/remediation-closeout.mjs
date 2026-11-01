@@ -10,6 +10,7 @@ import { loadConfigCached } from './config-loader.mjs';
 import { loadDomainConfig } from './domain-config.mjs';
 import { resolveMergeAuthorityConfigFromDomain } from './domain-policy.mjs';
 import { join } from 'node:path';
+import { remediationJobOwnership } from './remediation-job-ownership.mjs';
 
 export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha = null,
   lifecycle = null, ciGate = null, completedAt, snapshot = null }) {
@@ -87,7 +88,8 @@ export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha
       pr,
       reviews,
       remediation: { completedRounds: round, maxRounds: max, roundsLeft,
-        job: { status: retryActiveJob ? 'in_progress' : 'completed', headSha: head },
+        job: { status: retryActiveJob ? 'in_progress' : 'completed', headSha: head,
+          live: retryActiveJob && remediationJobOwnership(job, { now: completedAt }).live },
         ...(final && workerPushedHeadSha === head ? { finalPush: { headSha: head, suppressed: true } } : {}) },
       checks, leases, launches, policy,
       ...((lease?.terminalOutcome === 'succeeded' || receipt?.terminalOutcome === 'succeeded' || receipt?.outcome === 'succeeded')

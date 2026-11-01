@@ -1,9 +1,10 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { followUpJobFileFilter } from '../follow-up-job-names.mjs';
+import { remediationJobOwnership } from '../remediation-job-ownership.mjs';
 
 /** Read the two durable active-job buckets without coupling AMA to the daemon module. */
-export function findActiveRemediationJob(rootDir, { repo, prNumber }, { logger = console, now = new Date().toISOString() } = {}) {
+export function findActiveRemediationJob(rootDir, { repo, prNumber }, { logger = console, now = new Date().toISOString(), ...liveness } = {}) {
   const matches = followUpJobFileFilter({ rootDir, repo, prNumber, caseInsensitiveRepo: true });
   for (const bucket of ['pending', 'in-progress']) {
     const dir = join(rootDir, 'data', 'follow-up-jobs', bucket);
@@ -28,7 +29,12 @@ export function findActiveRemediationJob(rootDir, { repo, prNumber }, { logger =
       if (bucket === 'pending' && Number.isFinite(retryAfterMs) && retryAfterMs > Date.parse(now)) continue;
       if (String(job?.repo || '').toLowerCase() === String(repo).toLowerCase()
         && Number(job?.prNumber) === Number(prNumber)) {
-        return job;
+        const ownership = remediationJobOwnership(job, { now, ...liveness });
+        if (ownership.live) {
+          logger.log?.(`[ama-closer] owning lane=remediation for ${repo}#${prNumber}: ${ownership.reason} job=${job.jobId || 'unknown'}`);
+          return job;
+        }
+        logger.log?.(`[ama-closer] owning lane=closer for ${repo}#${prNumber}: stale-remediation-job-reclaimed reason=${ownership.reason} job=${job.jobId || 'unknown'}`);
       }
     }
   }

@@ -1234,6 +1234,7 @@ function queueFollowUpForPostedReview({
   signalFollowUpDaemonWakeImpl = signalFollowUpDaemonWake,
   scopeViolationFinding = null,
   singleReview = null,
+  verdictOnly = false,
 }) {
   const normalizedVerdictMode = normalizeVerdictMode(verdictMode);
   if (normalizedVerdictMode === VERDICT_MODE_ADVISORY_ONLY) {
@@ -1253,6 +1254,7 @@ function queueFollowUpForPostedReview({
     throw new Error('baseBranch is required to queue a follow-up handoff');
   }
 
+  if (verdictOnly) return { queued: false, reason: 'exhausted-head-verdict-only' };
   const priorLedger = summarizePRRemediationLedgerImpl(rootDir, { repo, prNumber });
   if (suppressFinalRoundFollowUp(priorLedger.commentOnlyFinalRoundPushedHeads, revisionRef, reviewPostedAt)) return { queued: false, reason: 'comment-only-final-round-completed' };
   const tierResolution = resolveRoundBudgetForJob({ linearTicketId }, { rootDir, preferPersisted: false });
@@ -1824,6 +1826,7 @@ async function main() {
     reviewDbAttemptNumber,
     completedRemediationRounds,
     maxRemediationRounds,
+    verdictOnly = false,
     passKind,
     reviewerSessionUuid,
     reviewerSpawnToken,
@@ -1862,7 +1865,7 @@ async function main() {
   const reviewerCompletedRemediationRounds = completedRemediationRounds ?? (
     Number.isFinite(Number(reviewAttemptNumber)) ? Number(reviewAttemptNumber) - 1 : undefined
   );
-  const reviewerPromptStage = (
+  const reviewerPromptStage = verdictOnly ? 'last' : (
     reviewAttemptNumber === undefined &&
     completedRemediationRounds === undefined &&
     maxRemediationRounds === undefined
@@ -2406,7 +2409,7 @@ async function main() {
       linearTicketId,
       reviewText: fullComment,
       reviewPostedAt,
-      critical, verdictMode, singleReview: reviewModeDecision.singleReview,
+      critical, verdictMode, verdictOnly, singleReview: reviewModeDecision.singleReview,
       scopeViolationFinding,
     });
     if (queued.queued) {

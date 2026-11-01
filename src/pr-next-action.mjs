@@ -591,9 +591,9 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
   // request for review here, including an explicit head-bound closer decision
   // or invalid attestation, must have an actor that admission can actually run.
   const exactHeadReview = reason => ({ row: 'R13-review',
-    action: policy?.reviewCeilingReached === true ? 'hammer' : 'review',
-    actor: policy?.reviewCeilingReached === true ? 'hammer' : 'reviewer',
-    reason: policy?.reviewCeilingReached === true ? 'review-ceiling' : reason,
+    action: policy?.reviewCeilingReached === true && !policy?.exhaustedBuilderHead ? 'hammer' : 'review',
+    actor: policy?.reviewCeilingReached === true && !policy?.exhaustedBuilderHead ? 'hammer' : 'reviewer',
+    reason: policy?.reviewCeilingReached === true && !policy?.exhaustedBuilderHead ? 'review-ceiling' : reason,
     deadlineKind: 'admission', queue: 'dispatch' });
   if (review.attestation === 'invalid') {
     return exactHeadReview('attestation-invalid');
@@ -790,7 +790,7 @@ export function deriveNextActionSnapshot({ base = null, subjectKey = null, head 
     generation: base?.generation ?? null,
     observedAt: base?.observedAt ?? observedAt,
     derivedFrom: base ? { passId: base.passId ?? null, generation: base.generation ?? null } : null,
-    anchors: { ...(plain(base?.anchors) || {}), ...(plain(anchors) || {}) },
+    anchors: { ...(head && base?.head && head !== base.head ? {} : plain(base?.anchors) || {}), ...(plain(anchors) || {}) },
     observations: merged,
   });
 }

@@ -4405,6 +4405,11 @@ prove every parent-file reference is covered by the same commit's authorized
 deletion, with no surviving head references or dynamic namespace hazards.
 See the [proof contract](docs/RUNBOOK-ama-closure.md).
 - **CLOSERCIWAIT-01:** published-head CI settles before the closer predicate using the existing bounded lease-yield/reacquire wait. Phase head values are exported, claim binding uses a deployed helper, and verification/terminal failures name the failed operation. Existing smoke commands remain unchanged; post-deploy acceptance is an organic remediation push merging in the same closer run, still pending.
+EXHAUSTEDHEADOWNER-01: a new builder head after cycle exhaustion receives one
+verdict-only review. Findings retain final closer ownership; head-scoped retry
+and deadline evidence cannot strand a new head. Spent budgets page once, with
+lifetime escalation deduplicated across head changes. See the
+[closure ownership contract](docs/RUNBOOK-ama-closure.md#exhausted-cycles-and-new-builder-heads-exhaustedheadowner-01).
 
 REMGEMINI-01 follow-up: pooled fallback skips retain the registry fault in
 `skipped[].detail`, matching standalone routing. An offline regression verifies

@@ -3075,3 +3075,39 @@ dispatch returns from in_progress to pending before launch, with reason
 audit. This is a budget-neutral hold, not worker failure. Personal/declared
 runnable fallthrough proceeds normally; OS mode is unchanged. Existing states,
 smoke steps, merge gates and proposed pending-state deadline remain unchanged.
+
+## Exhausted cycles and new builder heads (EXHAUSTEDHEADOWNER-01)
+
+Cycle exhaustion ends remediation rounds. A later builder-authored head still
+owes one exact-head verdict review. Admission classifies the live commit, checks
+the delivered-pass journal, and records `system-exhausted-head-verdict:<head>`
+through the existing review-request CAS. Repeated ticks coalesce; a delivered
+review of that commit prevents another automatic verdict, including after a
+push away from and back to that commit. Closer-authored or hammer-validated
+heads retain their existing closure ownership and do not receive this review.
+
+The reviewer uses the final-round prompt and captures `metadata_json.verdictOnly`
+in its pass journal. Both normal completion and recovered posting suppress new
+remediation jobs. Findings route to final hammer adjudication; a clean exact-head
+verdict uses the existing daemon path, including strict mode, green required
+checks, mergeability, primary-change preservation, attestation and merge authority.
+
+The shared closure projection binds retry exhaustion to the reviewed-head series
+that spent it. A new builder head receives a verdict owner before any closer
+retry. Once reviewed, its new series receives the existing per-head budget.
+Same-head and PR-lifetime caps remain unchanged; closer head churn cannot refund
+its series. Head changes discard previous next-action deadline anchors. A
+builder head awaiting review uses its persisted per-head wait anchor, never an
+older head's posting or final-round timestamp.
+
+A spent closure budget selects a named operator escalation: `closure-retry-exhausted`
+or `closure-lifetime-exhausted`. The existing wait store reserves delivery once
+per episode and refunds a failed page. Lifetime exhaustion retains its page
+reservation across head changes. Decision mismatch retains the existing bounded
+refresh/reselection and no-progress escalation; it cannot authorize a merge.
+
+After normal deployment and a watcher restart by the runtime owner, observe an
+organic exhausted-cycle builder head receiving one exact-head verdict and then
+either a closer dispatch or daemon merge. Verify that the verdict creates no
+remediation round and that repeated ticks do not schedule another review.
+The worker's offline fixtures do not constitute this live receipt.

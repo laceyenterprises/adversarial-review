@@ -1,3 +1,4 @@
+import { escalateClosureBudget } from './ama/closure-budget-escalation.mjs';
 import { repositoryObservationCache } from './repository-state-cache.mjs';
 import { operatorLabelInputs } from './ama/operator-label-inputs.mjs';
 import { holdForOperatorLabels } from './ama/operator-label-gates.mjs';
@@ -857,6 +858,10 @@ async function maybeDispatchAmaClosureForInner({
         ...closureOwnerFromDecision(selected), reason: 'exact-head-review',
       } } : {}) };
   }
+  result = await escalateClosureBudget({ result, rootDir: options.rootDir || ROOT,
+    repo: options.repoPath, prNumber: options.prNumber,
+    now: options.now ? options.now() : Date.now(), env: options.env || process.env,
+    observeWaitImpl: options.observeClosureWaitImpl || observeClosureWait });
   // CLOSURERECOVERYEXEC-01: the closer's custody reconciliation did not
   // resolve an R04 decision; its deadline is enforced here, once per pass.
   if (result && closureOwnerSink.shared) {

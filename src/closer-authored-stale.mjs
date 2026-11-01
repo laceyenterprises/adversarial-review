@@ -14,7 +14,9 @@ import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // watcher fixtures stub (`fixture:head-closer-commit-suppression`).
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { hammerAttestationChain, readCompletedRemediationRounds } from './ama/hammer-head-validation.mjs';
+import {
+  hammerAttestationChain, hammerProvenanceEdge, readCompletedRemediationRounds,
+} from './ama/hammer-head-validation.mjs';
 import { execGhWithRetry } from './gh-cli.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 
@@ -40,6 +42,12 @@ function sha(value) {
  * current SHA must end with a hammer edge. Commit trailers, author fields and
  * builder/remediator anchor heads confer no merge authority.
  * Read failures propagate for bounded recovery; tests supply comment fixtures.
+ *
+ * CLOSERPROOF-01: once comments are read, `currentHeadHammerAttested` says
+ * whether any authenticated hammer edge ends at the exact current SHA, whatever
+ * its base. The retry cap keys its series to heads by this bit, so a closer push
+ * keeps the series and a non-closer push (such as a rebased hammer commit) does
+ * not inherit it. It is absent when no comments were read: unknown, never false.
  */
 export async function proveCloserAuthoredStaleHead({
   reviewedHead, currentHead, maxCommits = 8, comments = null,
@@ -67,9 +75,11 @@ export async function proveCloserAuthoredStaleHead({
   }
   const rounds = await readCompletedRemediationRounds(options.rootDir, options.repoPath, options.prNumber);
   const chain = hammerAttestationChain(comments, reviewed, current, rounds);
-  if (!chain) return { ...base, reason: 'hammer-app-attestation-missing' };
-  if (chain.length > maxCommits) return { ...base, reason: 'closer-chain-too-long' };
-  return { ...base, proven: true, anchorHead: reviewed, closerCommits: [...chain].reverse(),
+  const read = { ...base,
+    currentHeadHammerAttested: comments.some(comment => hammerProvenanceEdge(comment)?.head === current) };
+  if (!chain) return { ...read, reason: 'hammer-app-attestation-missing' };
+  if (chain.length > maxCommits) return { ...read, reason: 'closer-chain-too-long' };
+  return { ...read, proven: true, anchorHead: reviewed, closerCommits: [...chain].reverse(),
     reason: 'hammer-app-attestation-chain' };
 }
 

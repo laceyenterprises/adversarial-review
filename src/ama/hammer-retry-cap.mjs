@@ -169,7 +169,7 @@ function writeHammerRetryCapLedger(rootDir, identity, doc) {
 
 // Permanent charge/refund identities survive every head/series reset.
 function durableChargeFields(ledger) {
-  return Object.fromEntries(['dispatchCharges', 'noWorkRefunds', 'pendingTransientCharge', 'targetChargeEpoch', 'operatorApprovalRearms', 'phaseInputsReplacement']
+  return Object.fromEntries(['dispatchCharges', 'noWorkRefunds', 'pendingTransientCharge', 'targetChargeEpoch', 'operatorApprovalRearms', 'phaseInputsReplacement', 'nonCloserHeadResets']
     .filter(key => ledger?.[key] !== undefined).map(key => [key, ledger[key]]));
 }
 
@@ -964,6 +964,69 @@ export function grantTransientHammerRetry(rootDir, identity, options = {}) {
 
 export function deferHammerRetryDispatch(rootDir, identity, options = {}) {
   return mutateHammerLedger(rootDir, identity, () => deferHammerRetryDispatchUnlocked(rootDir, identity, options));
+}
+
+// CLOSERPROOF-01: a retry-cap series belongs to the heads the closer authored.
+// A head the closer did not author (no authenticated hammer edge ends at it;
+// for example another worker rebased the hammer's commit) does not inherit the
+// series exhaustion recorded for an earlier head: it gets the normal series
+// budget. Trailers and author fields are not consulted; only the shared
+// attestation proof decides. The lifetime count and lifetime suppression are
+// never touched, so the per-PR ceiling still bounds every head. Each head
+// resets at most once (`nonCloserHeadResets` survives every later write), and a
+// closer push on the same attested chain never resets. Unknown proof, a proof
+// anchored elsewhere, a head the hammer was dispatched for, a corrupt ledger or
+// nothing spent all leave the ledger unchanged.
+export function resetHammerSeriesForNonCloserHead(rootDir, identity, { jobKey, headSha, headProof, now } = {}) {
+  const refuse = reason => ({ reset: false, reason });
+  const head = normalizeKey(headSha);
+  const anchor = normalizeKey(jobKey);
+  if (!head || !anchor || !headProof || headProof.proven === true
+    || headProof.reason !== 'hammer-app-attestation-missing'
+    || headProof.currentHeadHammerAttested !== false
+    || normalizeKey(headProof.currentHead) !== head || normalizeKey(headProof.reviewedHead) !== anchor) {
+    return refuse('closer-authorship-not-disproven');
+  }
+  const unchanged = ledger => {
+    if (!ledger) return 'no-ledger';
+    if (ledger.__corrupt) return 'corrupt-ledger';
+    if (normalizeKey(ledger.jobKey) !== anchor) return 'series-anchor-mismatch';
+    if (ledger.lifetimeSuppressed) return 'lifetime-suppressed';
+    if (ledger.nonCloserHeadResets?.[head]) return 'already-reset';
+    if ([ledger.lastDispatchedHeadSha, ledger.suppressedHeadSha, ...(Array.isArray(ledger.dispatchHeads)
+      ? ledger.dispatchHeads : [])].some(value => normalizeKey(value) === head)) return 'closer-dispatched-head';
+    if (!ledger.suppressed && !(Number(ledger.attemptCount) > 0)) return 'series-unspent';
+    return null;
+  };
+  // Avoid the writer lock on every observation of an untouched head.
+  const observed = unchanged(readHammerRetryCapLedger(rootDir, identity));
+  if (observed) return refuse(observed);
+  return mutateHammerLedger(rootDir, identity, () => {
+    const ledger = readHammerRetryCapLedger(rootDir, identity);
+    const reason = unchanged(ledger);
+    if (reason) return refuse(reason);
+    const at = now || new Date().toISOString();
+    const receipt = { resetAt: at, jobKey: anchor, reason: headProof.reason,
+      priorAttemptCount: Math.max(0, Number(ledger.attemptCount) || 0), priorSuppressed: Boolean(ledger.suppressed),
+      priorSuppressedHeadSha: normalizeKey(ledger.suppressedHeadSha) };
+    const doc = { ...ledger,
+      attemptCount: 0,
+      dispatchHeads: [],
+      suppressed: false,
+      suppressionState: ledger.targetSuppressed ? ledger.suppressionState : null,
+      suppressedJobKey: null,
+      suppressedHeadSha: null,
+      suppressedAttemptCount: null,
+      alertedAt: null,
+      nonCloserHeadResets: { ...ledger.nonCloserHeadResets, [head]: receipt },
+      updatedAt: at,
+    };
+    // Refunded exits belong to the series, like attemptCount.
+    delete doc.retryable;
+    delete doc.retryableLaunchRequestIds;
+    writeHammerRetryCapLedger(rootDir, identity, doc);
+    return { reset: true, reason: 'non-closer-head', receipt };
+  });
 }
 
 // Shared by sibling hold-stop refunds: the updater and verified atomic write

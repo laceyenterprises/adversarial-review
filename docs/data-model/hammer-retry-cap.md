@@ -1,5 +1,31 @@
 # Data Model - Hammer Retry Cap Ledger
 
+## Non-closer head series reset (CLOSERPROOF-01)
+
+A series belongs to the heads the closer authored. When the PR head moves to a
+commit the closer did not author, such as another worker's rebase of the
+hammer's commit, the series exhaustion recorded for an earlier head does not
+carry over. `resetHammerSeriesForNonCloserHead` decides this only from the
+shared proof (`proveCloserAuthoredStaleHead`): `hammer-app-attestation-missing`
+anchored at the ledger's `jobKey`, with `currentHeadHammerAttested: false`
+(no authenticated hammer edge ends at the exact SHA). Commit trailers and author
+fields are never read. The closure orchestration calls it before evaluating the
+owner cap, under the existing PR-scoped lock.
+
+A reset sets `attemptCount: 0` and `dispatchHeads: []`, clears the series
+suppression fields (`suppressed`, `suppressedJobKey`, `suppressedHeadSha`,
+`suppressedAttemptCount`, `alertedAt`) and drops the series `retryable`
+refunds. `suppressionState` is cleared unless a target suppression is still in
+force. Lifetime counts, lifetime suppression, target fields and charge receipts
+are unchanged.
+The optional `nonCloserHeadResets` map, keyed by head SHA, records
+`{ resetAt, jobKey, reason, priorAttemptCount, priorSuppressed,
+priorSuppressedHeadSha }`. It survives every later write, so each head resets at
+most once. Nothing resets for a proven or unknown proof, a proof anchored at
+another head, a head the hammer was dispatched for, a lifetime-suppressed or
+corrupt ledger, or a series with nothing spent. A hammer push on top of the new
+head is attested, so it never resets.
+
 ## Missing phase input replacement (HAMSCRATCHRESUME-01)
 
 The optional PR-scoped `phaseInputsReplacement` receipt stores

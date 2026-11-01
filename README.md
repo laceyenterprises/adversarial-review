@@ -4319,6 +4319,14 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+CLOSERPROOF-01: the hammer retry-cap series follows the heads the closer
+authored. `proveCloserAuthoredStaleHead` also reports `currentHeadHammerAttested`
+(an authenticated hammer edge ends at the exact SHA). The closure pass resets
+the series once for a head with no such edge, such as another worker's rebase of
+the hammer's commit, so that head is not stopped by an exhaustion recorded for
+an earlier head. Trailers are never read. The lifetime ceiling is unchanged, and
+a hammer push on the same attested chain keeps the cap.
+
 HAMTERMSTOP-01: the hammer's `terminal-stop` progress receipt is recorded only
 on the closer's explicit final exit (`bin/hammer-terminal-audit.mjs --final`).
 Merge-phase deferred and retryable no-merge outcomes, and helper early failures,

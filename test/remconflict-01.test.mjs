@@ -1,3 +1,4 @@
+import { fixtureHq } from './helpers/review-cli-resolver-fixture.mjs';
 import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
 installDispatchFileProducerFixture();
 // REMCONFLICT-01 (SEV1, 2026-10-10): remediation can start on a CONFLICTING PR,
@@ -75,7 +76,7 @@ async function withHqRemediationEnv(rootDir, { orchestrationMode = 'native' } = 
     HQ_ROOT: hqRoot,
     HQ_PARENT_SESSION: 'sess_parent_remconflict',
     HQ_PROJECT: 'adversarial-review',
-    HQ_BIN: undefined,
+    HQ_BIN: fixtureHq,
     APP_CONTRACT_ENDPOINT_URL: undefined,
   };
   const previous = Object.fromEntries(Object.keys(overrides).map((key) => [key, process.env[key]]));
@@ -121,25 +122,25 @@ function hqStub({ calls, hqRoot, prNumber, mergeability, helpText = HELP_WITH_FL
     if (command === 'gh' && args[0] === 'pr' && args[1] === 'view' && args.includes('mergeable,mergeStateStatus')) {
       return { stdout: JSON.stringify(mergeability), stderr: '' };
     }
-    if (command === 'hq' && args[0] === 'dispatch' && args[1] === '--help') {
+    if ((command === 'hq' || command === fixtureHq) && args[0] === 'dispatch' && args[1] === '--help') {
       return { stdout: helpText, stderr: '' };
     }
-    if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+    if ((command === 'hq' || command === fixtureHq) && args[0] === 'dispatch' && args[1] === 'status') {
       return {
         stdout: JSON.stringify({ status: 'queued', workspacePath: path.join(hqRoot, 'workers', `lrq_pr_${prNumber}`) }),
         stderr: '',
       };
     }
-    if (command === 'hq' && args[0] === 'dispatch') {
+    if ((command === 'hq' || command === fixtureHq) && args[0] === 'dispatch') {
       return { stdout: JSON.stringify({ launchRequestId: `lrq_pr_${prNumber}`, dispatchId: `dispatch_pr_${prNumber}` }), stderr: '' };
     }
     return { stdout: '', stderr: '' };
   };
 }
 
-const hqLaunchArgv = (calls) => calls.filter((call) => call[0] === 'hq' && call[1] === 'dispatch'
+const hqLaunchArgv = (calls) => calls.filter((call) => (call[0] === 'hq' || call[0] === fixtureHq) && call[1] === 'dispatch'
   && call[2] !== 'status' && call[2] !== '--help');
-const helpProbes = (calls) => calls.filter((call) => call[0] === 'hq' && call[2] === '--help');
+const helpProbes = (calls) => calls.filter((call) => (call[0] === 'hq' || call[0] === fixtureHq) && call[2] === '--help');
 const mergeabilityReads = (calls) => calls.filter((call) => call[0] === 'gh' && call.includes('mergeable,mergeStateStatus'));
 const gate = (args) => gateRemediationConflictedBase({ ...args, sleepImpl: NO_SLEEP });
 
@@ -259,7 +260,7 @@ test('UNKNOWN mergeability is re-read and never dispatched as clean: an unresolv
 
   // Without hq support an unresolved read keeps the pre-REMCONFLICT-01 argv rather than strand the job.
   _resetConflictedBaseSupportCacheForTests();
-  const unsupported = async (command) => (command === 'hq'
+  const unsupported = async (command) => ((command === 'hq' || command === fixtureHq)
     ? { stdout: HELP_WITHOUT_FLAG, stderr: '' }
     : { stdout: JSON.stringify({ mergeable: 'UNKNOWN' }), stderr: '' });
   const decision = await resolveRemediationConflictedBase({
@@ -296,7 +297,7 @@ test('a failed hq dispatch --help probe is retried once and never cached; a CONF
   _resetConflictedBaseSupportCacheForTests();
   let probes = 0;
   const failingHq = async (command) => {
-    if (command === 'hq') {
+    if ((command === 'hq' || command === fixtureHq)) {
       probes += 1;
       throw Object.assign(new Error('hq: command not found'), { code: 'ENOENT' });
     }
@@ -308,7 +309,7 @@ test('a failed hq dispatch --help probe is retried once and never cached; a CONF
   assert.equal(decision.stopCode, CONFLICTED_BASE_UNSUPPORTED_STOP_CODE);
   assert.match(decision.stopReason, /could not be confirmed/);
   assert.equal(probes, 2);
-  const healthyHq = async (command) => (command === 'hq'
+  const healthyHq = async (command) => ((command === 'hq' || command === fixtureHq)
     ? { stdout: HELP_WITH_FLAG, stderr: '' }
     : { stdout: JSON.stringify({ mergeable: 'CONFLICTING' }), stderr: '' });
   const recovered = await resolveRemediationConflictedBase({ job, env: {}, execFileImpl: healthyHq, sleepImpl: NO_SLEEP });
@@ -326,7 +327,7 @@ for (const diagnostic of [
     let probes = 0;
     const job = { repo: REPO, prNumber: 8017 };
     const execFileImpl = async (command) => {
-      if (command === 'hq') {
+      if ((command === 'hq' || command === fixtureHq)) {
         probes += 1;
         if (probes === 1) throw error;
         return { stdout: HELP_WITH_FLAG };
@@ -355,7 +356,7 @@ test('a transient probe requeues the same round with backoff and operator overri
       prNumber: 8017,
       mergeability: { mergeable: 'CONFLICTING' },
       gateImpl: (args) => gate({ ...args, execFileImpl: async (command, ...rest) => {
-        if (command === 'hq') throw error;
+        if ((command === 'hq' || command === fixtureHq)) throw error;
         return args.execFileImpl(command, ...rest);
       } }),
     });
@@ -383,7 +384,7 @@ test('transient probe exhaustion fails with its diagnostic instead of claiming h
     await assert.rejects(consumeOnce(rootDir, hqRoot, {
       prNumber: 8017, mergeability: { mergeable: 'CONFLICTING' },
       gateImpl: (args) => gate({ ...args, execFileImpl: async (command, ...rest) => {
-        if (command === 'hq') throw Object.assign(new Error('probe timed out'), { code: 'ETIMEDOUT' });
+        if ((command === 'hq' || command === fixtureHq)) throw Object.assign(new Error('probe timed out'), { code: 'ETIMEDOUT' });
         return args.execFileImpl(command, ...rest);
       } }),
       postCommentImpl: async () => ({ posted: true }),

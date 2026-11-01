@@ -56,7 +56,10 @@ tool output. `test/review-cli-resolver.test.mjs` covers protocol validation,
 managed/override/fallback responses, argv/environment forwarding, unknown errors
 and timeout, sibling resolver routing, and Codex helper/exec immutability across
 a version flip and spawn failure. Existing reviewer, discovery and remediation
-spawn suites use a synthetic installed resolver.
+spawn suites use a synthetic installed resolver. Usage probes, portable-install
+checks, account routing, remediation replies and conflict/fallback replay suites
+also install that fixture; their mocked HQ dispatch accepts the fixture's absolute
+path. These offline tests must never depend on an `hq` executable on the host.
 Implementation validation ran under netguard through bounded
 `cwp_dispatch.worker_validation`: 1,052/1,052 tests across the 13 scoped resolver,
 reviewer, remediation, discovery, Codex-home and agy suites passed. `npm run lint`

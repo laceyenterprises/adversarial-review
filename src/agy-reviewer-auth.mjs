@@ -297,6 +297,7 @@ async function checkAgyReviewerAuthOnce({
   timeoutMs = resolveAgyAuthProbeTimeoutMs(env),
   securityCli = 'security',
 } = {}) {
+  agyCli ||= await resolveReviewCliPathAsync('agy', env);
   try {
     await runProbe(securityCli, agyKeychainProbeArgs(env), {
       execFileImpl,

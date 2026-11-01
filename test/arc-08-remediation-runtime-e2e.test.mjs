@@ -1,3 +1,4 @@
+import { fixtureHq } from './helpers/review-cli-resolver-fixture.mjs';
 import { serviceFixtureExec } from './helpers/codex-service-fixture.mjs';
 import './helpers/registry-session-fixture.mjs';
 import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
@@ -189,7 +190,7 @@ test('router os mode routes consume through the os hq-dispatch runtime', async (
             stderr: '',
           };
         }
-        if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+        if ((command === 'hq' || command === fixtureHq) && args[0] === 'dispatch' && args[1] === 'status') {
           return {
             stdout: JSON.stringify({
               status: 'queued',
@@ -198,7 +199,7 @@ test('router os mode routes consume through the os hq-dispatch runtime', async (
             stderr: '',
           };
         }
-        if (command === 'hq' && args[0] === 'dispatch') {
+        if ((command === 'hq' || command === fixtureHq) && args[0] === 'dispatch') {
           return {
             stdout: JSON.stringify({
               launchRequestId: 'lrq_arc08',

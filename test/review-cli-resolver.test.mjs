@@ -5,13 +5,13 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { resolveReviewCli } from '../src/review-cli-resolver.mjs';
+import { resolveReviewCli, resolveReviewCliAsync } from '../src/review-cli-resolver.mjs';
 import { checkAgyReviewerAuth } from '../src/agy-reviewer-auth.mjs';
 import { __test__ as reviewer } from '../src/reviewer-harness.mjs';
 import {
   resolveClaudeCodeCliPath, resolveCodexCliPath, resolveGeminiCliPath,
 } from '../src/adapters/agent-runtime/local/remediation.mjs';
-import { resolveCliBinary } from '../src/adapters/reviewer-runtime/cli-direct/discovery.mjs';
+import { CliDirectPreflightError, probeReviewerCliOAuth, resolveCliBinary } from '../src/adapters/reviewer-runtime/cli-direct/discovery.mjs';
 import { serviceFixtureExec, writeDummyCodexAuth } from './helpers/codex-service-fixture.mjs';
 
 function fixture(t) {
@@ -164,4 +164,78 @@ test('Codex auth, direct-tools catalog and exec keep the resolved version after 
   assert.equal(f.events.at(-1).binarySha256, nextDigest);
   assert.equal(f.events.at(-1).version, 'synthetic-2');
   assert.equal(f.events.at(-1).selectedPath, f.selected);
+});
+
+test('async resolution yields to the event loop and retains protocol evidence', async (t) => {
+  const f = fixture(t);
+  for (const source of ['managed', 'override', 'fallback']) {
+    f.set({ ...f.response, source });
+    let yielded = false;
+    setImmediate(() => { yielded = true; });
+    const result = await resolveReviewCliAsync('codex', { env: f.env, log: f.log });
+    assert.equal(yielded, true);
+    assert.equal(result.source, source);
+    assert.equal(result.realPath, f.binary);
+    assert.equal(result.binarySha256, f.response.binarySha256);
+    assert.ok(Object.isFrozen(result));
+    assert.deepEqual(f.events.at(-1), result);
+    assert.deepEqual(JSON.parse(readFileSync(f.requestFile, 'utf8')).args,
+      ['cli', 'resolve', '--cli', 'codex', '--consumer', 'review', '--json']);
+  }
+});
+
+test('async resolution fails closed on missing hq, malformed protocol, selection errors and timeout', async (t) => {
+  const f = fixture(t);
+  for (const doc of [
+    { mode: 'invalid-json' }, { ...f.response, schemaVersion: 2 },
+    { ...f.response, realPath: 'relative' }, { mode: 'error' }, { mode: 'timeout' },
+  ]) {
+    f.set(doc);
+    await assert.rejects(resolveReviewCliAsync('codex', {
+      env: f.env, log: f.log, timeoutMs: doc.mode === 'timeout' ? 200 : 5000,
+    }), (err) => err.binaryResolution.status === 'unknown');
+  }
+  await assert.rejects(resolveReviewCliAsync('codex', {
+    env: { HQ_BIN: join(f.root, 'absent') }, log: f.log,
+  }), (err) => err.binaryResolution.reason === 'ENOENT');
+  assert.ok(f.events.every((event) => event.status === 'unknown'));
+});
+
+test('public agy auth probe resolves an omitted CLI and preserves explicit paths', async (t) => {
+  const f = fixture(t);
+  for (const agyCli of [undefined, '/synthetic/pinned-agy']) {
+    const calls = [];
+    const result = await checkAgyReviewerAuth({
+      agyCli, env: f.env,
+      execFileImpl: async (command) => {
+        calls.push(command);
+        return { stdout: 'synthetic models' };
+      },
+    });
+    assert.equal(result.ok, true);
+    assert.deepEqual(calls, ['security', agyCli || f.binary]);
+  }
+  assert.equal(JSON.parse(readFileSync(f.requestFile, 'utf8')).args[3], 'agy');
+});
+
+test('discovery translates resolver failures into typed path preflight errors before probing auth', async (t) => {
+  const f = fixture(t);
+  for (const model of ['claude', 'codex', 'gemini']) {
+    for (const mode of ['missing-hq', 'error', 'invalid-json']) {
+      f.set({ mode });
+      const env = mode === 'missing-hq' ? { HQ_BIN: join(f.root, 'absent') } : f.env;
+      let probes = 0;
+      await assert.rejects(probeReviewerCliOAuth({
+        model, env,
+        execFileImpl: async () => { probes += 1; },
+      }), (err) => {
+        assert.ok(err instanceof CliDirectPreflightError);
+        assert.equal(err.failureClass, 'oauth-broken');
+        assert.equal(err.layer, `${model}-path`);
+        assert.equal(err.cause.binaryResolution.status, 'unknown');
+        return true;
+      });
+      assert.equal(probes, 0);
+    }
+  }
 });

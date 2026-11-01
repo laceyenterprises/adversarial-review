@@ -1,4 +1,4 @@
-import { resolveReviewCliPath } from './review-cli-resolver.mjs';
+import { resolveReviewCliPath, resolveReviewCliPathAsync } from './review-cli-resolver.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { resolveClaudeBrokerProvider } from './claude-account-routing.mjs';
 // Reviewer model-execution harness.
@@ -464,7 +464,7 @@ async function spawnClaude(args, options = {}) {
     useLaunchctl = true,
     ...execOptions
   } = options;
-  const claudeCli = resolveClaudeCliPath(execOptions.env || process.env);
+  const claudeCli = await resolveReviewCliPathAsync('claude', execOptions.env || process.env);
 
   return auditReviewerSubprocess(async ({ onSpawn }) => {
     if (platform === 'darwin' && useLaunchctl) {
@@ -571,7 +571,7 @@ function assertCodexAuthReadable() {
 }
 
 async function assertCodexOAuth({ codexCli = null } = {}) {
-  if (!codexCli) resolveCodexCliPath();
+  if (!codexCli) await resolveReviewCliPathAsync('codex');
 
   // Verify auth.json is readable and contains valid OAuth tokens.
   // This is more reliable than CLI probes, which may not support `login status`.
@@ -625,7 +625,7 @@ function assertGeminiAuthReadable(env = process.env) {
 }
 
 async function assertGeminiOAuth(env = process.env, geminiCli = null) {
-  if (!geminiCli) resolveGeminiCliPath(env);
+  if (!geminiCli) await resolveReviewCliPathAsync('gemini', env);
 
   // Verify oauth_creds.json is readable and carries an access token.
   assertGeminiAuthReadable(env);
@@ -637,7 +637,7 @@ async function assertAgyReviewerAuth({
   checkAuthImpl = checkAgyReviewerAuth,
   timeoutMs = resolveAgyAuthProbeTimeoutMs(env),
 } = {}) {
-  agyCli ||= resolveAgyCliPath(env);
+  agyCli ||= await resolveReviewCliPathAsync('agy', env);
   const result = await checkAuthImpl({ agyCli, env, timeoutMs });
   if (!result?.ok) {
     const reason = result?.reason || 'agy-probe-failed';
@@ -1206,7 +1206,7 @@ async function spawnCodexReview({
   serviceHome = null,
   execFileSyncImpl,
 }) {
-  codexCli ||= resolveCodexCliPath(env || process.env);
+  codexCli ||= await resolveReviewCliPathAsync('codex', env || process.env);
   const home = serviceHome || prepareServiceCodexHome({ env, workspaceDir: cwd, model, codexCli, execFileSyncImpl,
     effort: configOverrides?.find((item) => item.key === 'model_reasoning_effort')?.value });
   try {
@@ -1251,7 +1251,7 @@ async function reviewWithCodex(diff, extraContext = '', {
   await ensureWorkerRegistryReadyImpl({pin: modelPin});
   // Resolve infrastructure before probing credentials; refresh again after auth.
   resolveReviewerExecution('codex', { modelPin, reasoningPin, log });
-  codexCli ||= resolveCodexCliPath();
+  codexCli ||= await resolveReviewCliPathAsync('codex');
   console.error('[reviewWithCodex] asserting OAuth...');
   await assertCodexOAuthImpl({ codexCli });
   console.error('[reviewWithCodex] OAuth OK');
@@ -2630,7 +2630,7 @@ async function spawnGeminiReview({
   maxBuffer = 10 * 1024 * 1024,
   spawnWithInputImpl = spawnWithInput,
 }) {
-  geminiCli ||= resolveGeminiCliPath(env || process.env);
+  geminiCli ||= await resolveReviewCliPathAsync('gemini', env || process.env);
   // Prompt content is delivered on stdin only — see buildGeminiReviewArgs.
   return spawnWithInputImpl(
     geminiCli,
@@ -2663,7 +2663,7 @@ async function spawnAgyReview({
   // args, everything else comes from the root-owned settings file.
   identity = null,
 }) {
-  if (!identity) agyCli ||= resolveAgyCliPath(env || process.env);
+  if (!identity) agyCli ||= await resolveReviewCliPathAsync('agy', env || process.env);
   const effectiveTimeout = resolveAgyReviewerSubprocessTimeoutMs(env, {
     reviewerTimeoutMs: timeout,
     printTimeoutMs,
@@ -2927,8 +2927,8 @@ async function reviewWithGemini(diff, extraContext = '', {
   let subprocessStarted = false;
   try {
     reviewEnv = withReviewerSubprocessCwdEnv(reviewEnv, reviewerSubprocessCwd);
-    const runtimeCli = addedIdentity ? null : (runtime === 'antigravity'
-      ? resolveAgyCliPath(reviewEnv) : resolveGeminiCliPath(reviewEnv));
+    const runtimeCli = addedIdentity ? null : await resolveReviewCliPathAsync(
+      runtime === 'antigravity' ? 'agy' : 'gemini', reviewEnv);
     if (addedIdentity) {
       identityRun = { user: addedIdentity.user, reviewId: addedIdentity.reviewId, cwd: null, workspaceDir: null };
       await prepareAgyIdentityReviewImpl(identityRun, { sourceDir: reviewerSubprocessCwd });

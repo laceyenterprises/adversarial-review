@@ -17,6 +17,14 @@ only when the producer returns it. Invalid explicit or managed selections refuse
 launch. Missing hq, malformed/incomplete JSON, nonzero exit or the bounded
 10-second resolver timeout produce `status: unknown`, never managed health.
 
+Async reviewer launches, OAuth probes and cli-direct discovery await nonblocking
+resolver subprocesses. Legacy synchronous path exports and local remediation
+spawn contracts retain bounded synchronous resolution. Both clients validate and log the same protocol evidence
+before helpers or execution. Discovery translates unknown resolution into
+`CliDirectPreflightError` with `failureClass: oauth-broken` and the CLI's
+`<name>-path` layer, retaining resolver evidence on the cause; the runtime adapter
+returns its existing preflight failure result without spawning a reviewer.
+
 Before any helper or exec, `[review-cli-resolution]` logs the validated
 `schemaVersion`, registry `cli`, `consumer`, `status`, `source`, `selectedPath`,
 immutable `realPath`, `version`, `binarySha256` and UTC `timestamp`. Service/worker

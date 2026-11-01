@@ -1,4 +1,4 @@
-import { resolveReviewCliPath } from '../../../review-cli-resolver.mjs';
+import { resolveReviewCliPathAsync } from '../../../review-cli-resolver.mjs';
 import { prepareServiceCodexHome } from '../../../codex-service-home.mjs';
 import { ensureWorkerRegistryReady, resolveRemediationModel } from '../../agent-runtime/local/remediation.mjs';
 import { loadAwareTimeoutMs } from '../../../load-aware-timeout.mjs';
@@ -32,11 +32,17 @@ class CliDirectPreflightError extends Error {
 }
 
 async function resolveCliBinary({ binaryName, env = process.env } = {}) {
-  return resolveReviewCliPath(binaryName, env);
+  try {
+    return await resolveReviewCliPathAsync(binaryName, env);
+  } catch (cause) {
+    throw new CliDirectPreflightError(cause.message, {
+      layer: `${binaryName}-path`, cause,
+    });
+  }
 }
 
 async function resolveGeminiCliBinary({ env = process.env } = {}) {
-  return resolveReviewCliPath('gemini', env);
+  return resolveCliBinary({ binaryName: 'gemini', env });
 }
 
 function resolveGeminiOAuthCredsPath(env = process.env) {

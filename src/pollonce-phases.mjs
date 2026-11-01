@@ -3584,37 +3584,41 @@ export async function processReviewSubject(entry, ctx) {
                 );
               // PENDINGCLAIM-03: mirror each selected CAS's WHERE, not the
               // stricter admission classifier. These helpers affect logs only.
-              const terminalSnapshot = evidence => current?.review_status === 'failed' ||
-                (current?.review_status === 'pending' && Boolean(current.failed_at) && evidence);
+              // PENDINGCLAIM-04: row columns come from the post-CAS re-read; the
+              // snapshot predates the reviewer wait, during which the PR can
+              // merge. The branch and its failure message stay the snapshot's.
+              const row = afterClaim;
+              const terminalRow = evidence => row?.review_status === 'failed' ||
+                (row?.review_status === 'pending' && Boolean(row.failed_at) && evidence);
               const message = (current?.failure_message ?? '').toLowerCase();
-              const snapshotClaimableByBranch = {
-                pending: () => ['pending', 'pending-upstream'].includes(current?.review_status) &&
-                  current.pr_state !== 'merged',
+              const claimableByBranch = {
+                pending: () => ['pending', 'pending-upstream'].includes(row?.review_status) &&
+                  row.pr_state !== 'merged',
                 'token-refresh': () => (
-                  ['failed', 'pending-upstream'].includes(current?.review_status) ||
-                  (current?.review_status === 'pending' && Boolean(current.failed_at && current.reviewer_head_sha))
-                ) && current.pr_state !== 'merged' && (
+                  ['failed', 'pending-upstream'].includes(row?.review_status) ||
+                  (row?.review_status === 'pending' && Boolean(row.failed_at && row.reviewer_head_sha))
+                ) && row.pr_state !== 'merged' && (
                   message.startsWith('[token-refresh-pending]') ||
                   message.includes('broker claude reviewer token expires too soon for subprocess handoff')
                 ),
-                'daemon-bounce': () => terminalSnapshot(true) && current.pr_state !== 'merged' &&
+                'daemon-bounce': () => terminalRow(true) && row.pr_state !== 'merged' &&
                   message.startsWith('[daemon-bounce]') &&
-                  (current.infra_auto_recover_attempts ?? 0) < INFRA_AUTO_RECOVER_CAP,
-                infra: () => terminalSnapshot(Boolean(current?.failed_at && current?.reviewer_head_sha)) &&
-                  ((current.infra_auto_recover_attempts ?? 0) < INFRA_AUTO_RECOVER_CAP || cascadeRetryDue),
-                'review-population': () => terminalSnapshot(current?.reviewer_head_sha != null &&
-                  reviewerHeadSha != null && current.reviewer_head_sha === reviewerHeadSha) && (
-                  (current.review_population_retry_head_sha ?? '') !== (reviewerHeadSha ?? '') ||
-                  current.review_population_retry_attempts < reviewPopulationRetryConfig.maxAttempts
+                  (row.infra_auto_recover_attempts ?? 0) < INFRA_AUTO_RECOVER_CAP,
+                infra: () => terminalRow(Boolean(row?.failed_at && row?.reviewer_head_sha)) &&
+                  ((row.infra_auto_recover_attempts ?? 0) < INFRA_AUTO_RECOVER_CAP || cascadeRetryDue),
+                'review-population': () => terminalRow(row?.reviewer_head_sha != null &&
+                  reviewerHeadSha != null && row.reviewer_head_sha === reviewerHeadSha) && (
+                  (row.review_population_retry_head_sha ?? '') !== (reviewerHeadSha ?? '') ||
+                  row.review_population_retry_attempts < reviewPopulationRetryConfig.maxAttempts
                 ) && /no github review[\s\S]*found|generated-but-not-posted|generated but not posted/.test(message),
-                'unknown-failure': () => terminalSnapshot(current?.reviewer_head_sha != null &&
-                  reviewerHeadSha != null && current.reviewer_head_sha === reviewerHeadSha) &&
-                  current.review_attempts < REVIEW_UNKNOWN_FAILURE_MAX_RETRIES &&
+                'unknown-failure': () => terminalRow(row?.reviewer_head_sha != null &&
+                  reviewerHeadSha != null && row.reviewer_head_sha === reviewerHeadSha) &&
+                  row.review_attempts < REVIEW_UNKNOWN_FAILURE_MAX_RETRIES &&
                   /command failed with code |command exited with code |non-zero exit code |non-zero exit /.test(message) &&
                   (message.startsWith('[unknown]') || !/^\[[\s\S]*\]/.test(message)),
               };
-              const snapshotClaimable = snapshotClaimableByBranch[claimBranch]();
-              console.log(unchangedShape && snapshotClaimable
+              const stillClaimable = claimableByBranch[claimBranch]();
+              console.log(unchangedShape && stillClaimable
                 ? `[watcher] claim-shape-mismatch branch=${claimBranch} status=${afterClaim.review_status} repo=${repoPath} pr=${prNumber}`
                 : `[watcher] Lost claim race on ${repoPath}#${prNumber} snapshot_status=${current?.review_status ?? 'missing'} — another watcher is handling this PR (or its row is now in a non-claimable state). Skipping.`
               );

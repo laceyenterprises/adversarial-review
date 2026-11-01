@@ -75,8 +75,10 @@ export async function proveCloserAuthoredStaleHead({
   }
   const rounds = await readCompletedRemediationRounds(options.rootDir, options.repoPath, options.prNumber);
   const chain = hammerAttestationChain(comments, reviewed, current, rounds);
-  const read = { ...base,
-    currentHeadHammerAttested: comments.some(comment => hammerProvenanceEdge(comment)?.head === current) };
+  // Hex case is not identity: a non-lowercase edge head still attests, so the
+  // bit can only err toward keeping the retry cap in force.
+  const read = { ...base, currentHeadHammerAttested: comments.some(comment =>
+    sha(hammerProvenanceEdge(comment)?.head).toLowerCase() === current.toLowerCase()) };
   if (!chain) return { ...read, reason: 'hammer-app-attestation-missing' };
   if (chain.length > maxCommits) return { ...read, reason: 'closer-chain-too-long' };
   return { ...read, proven: true, anchorHead: reviewed, closerCommits: [...chain].reverse(),

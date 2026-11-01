@@ -1740,6 +1740,10 @@ async function dispatchAmaClosureFor({
   // CLOSERPROOF-01: a head the closer did not author does not inherit the
   // series exhaustion recorded for an earlier head. The same shared proof that
   // decided closer authorship above decides it here; the lifetime ceiling stays.
+  // The anchor is deliberately `originalReviewedHead`, not `reviewState.headSha`:
+  // the proof compared that head, and the hammer series was recorded under it.
+  // `reviewState.headSha` follows the gate's evidence head, which can differ;
+  // a differing jobKey already makes the cap below start a fresh series.
   try {
     const seriesReset = resetHammerSeriesForNonCloserHead(rootDir, { repo: repoPath, prNumber }, {
       jobKey: originalReviewedHead, headSha: currentPrHeadSha, headProof: closerHeadProof,

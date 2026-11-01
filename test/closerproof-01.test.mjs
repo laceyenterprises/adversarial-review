@@ -67,6 +67,10 @@ test('the shared proof reports whether an authenticated hammer edge ends at the 
   assert.equal(onRebased.proven, false);
   assert.equal(onRebased.currentHeadHammerAttested, true);
 
+  // Hex case is not identity: an uppercase edge head still attests the head.
+  const upper = await prove(REBASED, [...COMMENTS, edge(HAMMER_2, REBASED.toUpperCase())]);
+  assert.equal(upper.currentHeadHammerAttested, true);
+
   // No comment read: unknown, never false.
   const unread = await proveCloserAuthoredStaleHead({ reviewedHead: REVIEWED, currentHead: REBASED });
   assert.equal(unread.currentHeadHammerAttested, undefined);

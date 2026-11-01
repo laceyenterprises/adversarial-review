@@ -8,7 +8,8 @@ hammer's commit, the series exhaustion recorded for an earlier head does not
 carry over. `resetHammerSeriesForNonCloserHead` decides this only from the
 shared proof (`proveCloserAuthoredStaleHead`): `hammer-app-attestation-missing`
 anchored at the ledger's `jobKey`, with `currentHeadHammerAttested: false`
-(no authenticated hammer edge ends at the exact SHA). Commit trailers and author
+(no authenticated hammer edge ends at the exact SHA, compared
+case-insensitively). Commit trailers and author
 fields are never read. The closure orchestration calls it before evaluating the
 owner cap, under the existing PR-scoped lock.
 

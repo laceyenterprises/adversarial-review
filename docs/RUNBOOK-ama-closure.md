@@ -7509,13 +7509,24 @@ bind the claim with `hammer-claim-head.mjs`. If the bounded base retry establish
 a new head, publish that head's audit again. Then evaluate the unchanged predicate
 and source `hammer-merge.sh` without arguments. The normal phase retains the
 original deadline and repeats the live exact-head gate before merging.
+The CI-only pass leaves protection admission to that subsequent predicate,
+preserves its reacquired lease through the predicate and final green gate, and
+retains the consumed base-retry budget. Only a new rebase in the merge invocation
+requires internal audit/predicate regeneration; a retry already settled by
+`--wait-ci` uses the caller's refreshed evidence. If checks become pending again,
+the ordinary lease-yield rules still apply.
+
+Publication exports `HAM_AUDIT_COMMENT_BODY`. The claim binder copies this body
+alongside the exported head, preserving findings and doc-currency claims, and
+refuses an exported body without exactly one matching `HAM-Validated-Head` line.
 
 Pending checks at the deadline retain `required-checks-pending` and
 `remote-ci-timeout`; no premature predicate refusal consumes the run. Head values
 (`POST_REMEDIATION_SHA`, `HAM_PRODUCED_HEAD`, `HAM_PUSHED_HEAD`,
 `HAM_PUSHED_FROM_HEAD`) are exported by their phases. Verification transport,
 probe, lease-admission and runtime failures carry stage outcomes; exhausted lease
-contention retains `parked:merge-lease-timeout`. A controller must name every
+contention retains `parked:merge-lease-timeout`, while exhausted transport probes
+retain `merge-lease-probe-failed`. A controller must name every
 failing non-phase step through `HAM_PROCEDURE_STEP` and an explicit failure
 reason. A stale phase success passed to the terminal helper becomes the named
 step failure, falling back to `procedure-step-failed`. The retry cap, supervisor

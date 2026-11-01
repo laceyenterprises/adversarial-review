@@ -7,6 +7,7 @@ ham_pr() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-pr-read.mjs <<REPO>> 
 
 ham_merge_phase() {
 local ham_wait_only=0
+local ham_ci_retry_needs_validation=0
 if [ "${1:-}" = --wait-ci ]; then
   ham_wait_only=1
   # Unchanged heads keep the existing path, including its final live check.
@@ -193,7 +194,9 @@ if [ "$HAM_BRANCH_PROTECTION_REQUIRED" != true ] && [ "$HAM_BRANCH_PROTECTION_RE
 fi
 
 else
-  HAM_BRANCH_PROTECTION_REQUIRED=true
+  # Protection is resolved by the caller's subsequent exact-head predicate.
+  # A CI-only wait must not add a synthetic missing-protection refusal.
+  HAM_BRANCH_PROTECTION_REQUIRED=false
 fi
 
 ham_emit_git_merge_signal() {
@@ -579,7 +582,9 @@ HAM_REMOTE_CI_GATE_READ_FAILURES=0
 # The first wait is lease-free. The single retry retains its acquired lease
 # through CI so another cooperating merger cannot overtake it.
 HAM_ALREADY_MERGED_VALIDATED_HEAD=0
-if [ "$HAM_CI_BASE_RETRY" -eq 0 ]; then ham_release_merge_lease --yield || return 1; fi
+if [ "$HAM_CI_BASE_RETRY" -eq 0 ] && [ "${HAM_CI_SETTLED_HEAD:-}" != "$POST_REMEDIATION_SHA" ]; then
+  ham_release_merge_lease --yield || return 1
+fi
 while :; do
   if [ "$(date +%s)" -ge "$HAM_REMOTE_CI_DEADLINE" ]; then
     ham_ci_timeout
@@ -711,6 +716,7 @@ if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && ham_base_touches_pr_files v
   echo "HAM base advanced during first CI wait; rebasing and validating once under the merge lease" >&2
   HAM_REBASED_ONTO_BASE_SHA="${HAM_CURRENT_BASE_SHA:-}"
   if ham_rebase_head --ci-retry; then
+    ham_ci_retry_needs_validation=1
     if ! ham_renew_ci_retry_lease; then
       ham_append_terminal_audit failed-without-merge merge-lease-lost || true
       ham_release_merge_lease
@@ -749,10 +755,11 @@ if [ "$ham_wait_only" -eq 1 ]; then
   # the shared base retry established a different head.
   ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > "<<RUN_DIR>>/pr-after.json" || { HAM_PHASE_OUTCOME=ci-wait-pr-refresh-failed; return 1; }
   rm -f "$HAM_MERGE_STDOUT" "$HAM_MERGE_STDERR" "$HAM_GATE_JSON" "$HAM_POST_MERGE_JSON" "$HAM_POST_MERGE_STDERR"
+  HAM_CI_SETTLED_HEAD="$POST_REMEDIATION_SHA"
   HAM_PHASE_OUTCOME=ci-settled
   return 0
 fi
-if [ "$HAM_CI_BASE_RETRY" -eq 1 ] && [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ]; then
+if [ "$ham_ci_retry_needs_validation" -eq 1 ] && [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ]; then
   if ! ham_validate_ci_retry; then
     ham_append_terminal_audit failed-without-merge "$HAM_PHASE_OUTCOME" || true
     ham_release_merge_lease

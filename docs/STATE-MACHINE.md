@@ -1136,6 +1136,13 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+CLOSERCIWAIT-01 final remediation retains the settled exact-head lease through
+the caller predicate and final live gate. Consumed base retries remain charged;
+only a new merge-phase rebase regenerates audit/predicate evidence internally.
+Pending-only CI remains deferred, and exhausted transport probes retain
+`merge-lease-probe-failed` rather than a contention park. No lifecycle state,
+retry allowance, merge fence or existing smoke command changes.
+
 REMJOBPHANTOM-01: pending jobs retain five minutes of pre-spawn custody from
 `pendingAt` or initial `createdAt`; a claim without a worker record retains
 five minutes from `claimedAt`. Invalid or future timestamps grant no custody.

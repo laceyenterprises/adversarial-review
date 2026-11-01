@@ -1057,7 +1057,10 @@ API-publish one single-parent commit above fetched remote HEAD; rebased/multi-co
 }
 ```
 
-Bind the claim with the deployed helper; never write interpreter glue to read phase variables:
+Bind the claim with the deployed helper; never write interpreter glue to read phase variables.
+Publication exports `HAM_AUDIT_COMMENT_BODY`; the helper copies it only when its
+single `HAM-Validated-Head` line matches the exported head, preserving the claim's
+findings and doc-currency evidence:
 
 ```bash
 export HAM_PROCEDURE_STEP=claim-build

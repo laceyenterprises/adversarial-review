@@ -4360,6 +4360,8 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- **CLOSERCIWAIT-01 final remediation:** bind claims to the exported exact-head audit body, preserve the settled lease and consumed retry budget through merge, and distinguish pending CI and transport-probe failures from terminal refusals and lease contention. Offline regressions cover these paths; lifecycle states and smoke commands are unchanged, and organic post-deploy acceptance remains pending.
+
 - Make agy print-timeout conversion tests deterministic under CI load while retaining the separate deadline-cancellation test.
 
 PRIMARYDEADCODE-01 permits derived dead-code reversal only for author-added

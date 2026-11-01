@@ -205,6 +205,10 @@ if [[ "$SCENARIO" = prepredicate-* ]]; then
   echo "wait=$status outcome=$HAM_PHASE_OUTCOME remote=\${HAM_REMOTE_CI_STATUS:-} held=$HAM_MERGE_LEASE_HELD"
   [ "$status" -eq 0 ] || exit "$status"
   "$REAL_NODE" -e 'require("node:fs").writeFileSync(process.env.FIXTURE_DIR+"/exported-head", process.env.POST_REMEDIATION_SHA)'
+  if [ "$HAM_PUBLISHED_AUDIT_HEAD" != "$POST_REMEDIATION_SHA" ]; then source "$FIXTURE_DIR/hammer-publish.sh" || exit $?; fi
+  "$REAL_NODE" "${root}/bin/hammer-claim-head.mjs" "$FIXTURE_DIR/terminal-remediation.json" || exit $?
+  printf '%s' "$HAM_CI_BASE_RETRY" > "$FIXTURE_DIR/ci-base-retry"
+  cp "$FIXTURE_DIR/leases" "$FIXTURE_DIR/leases-before-predicate"
   "$REAL_NODE" "$FIXTURE_HELPER" initial-predicate > "$FIXTURE_DIR/verdict" || exit $?
 else
 printf '{"eligible":true,"trace":{"headMatch":{"current":"%s"},"branchProtection":{"required":false}}}' "$HAM_PRODUCED_HEAD" > "$FIXTURE_DIR/verdict"
@@ -583,7 +587,7 @@ for (const scenario of ['ci-clean-overlap', 'ci-clean-pending']) {
   });
 }
 
-for (const scenario of ['prepredicate-green', 'prepredicate-timeout', 'prepredicate-unchanged', 'prepredicate-contention']) {
+for (const scenario of ['prepredicate-green', 'prepredicate-timeout', 'prepredicate-unchanged', 'prepredicate-contention', 'prepredicate-base-retry']) {
   test(`CLOSERCIWAIT-01: ${scenario}`, t => {
     const f = fixture(t, scenario);
     const result = f.run();
@@ -607,17 +611,47 @@ for (const scenario of ['prepredicate-green', 'prepredicate-timeout', 'prepredic
     }
     assert.equal(result.status, 0, output);
     assert.equal(predicates.length, 1);
-    assert.equal(readFileSync(join(f.dir, 'exported-head'), 'utf8'), f.rebased);
+    const head = scenario === 'prepredicate-base-retry' ? f.nextRebased : f.rebased;
+    assert.equal(readFileSync(join(f.dir, 'exported-head'), 'utf8'), head);
+    const claim = JSON.parse(readFileSync(join(f.dir, 'terminal-remediation.json')));
+    assert.equal(claim.commit.sha, head);
+    assert.match(claim.auditComment.body, new RegExp(`HAM-Validated-Head: ${head}`));
     assert.match(output, /outcome=merged/);
     if (scenario === 'prepredicate-unchanged') {
       assert.match(output, /outcome=ci-wait-not-needed/);
       assert.equal(events.findIndex(e => e.kind === 'checks') > events.findIndex(e => e.kind === 'initial-predicate'), true);
-    } else {
+    } else if (scenario === 'prepredicate-green') {
       const checks = events.filter(e => e.kind === 'checks');
       assert.equal(checks[0].value.conclusion, 'PENDING');
       assert.equal(checks[0].value.held, false);
       assert.ok(predicates[0].value.at - checks[0].value.at >= 60);
       assert.equal(readFileSync(join(f.dir, 'wait-scales'), 'utf8').trim().split('\n').length, 1);
     }
+    if (scenario !== 'prepredicate-unchanged') {
+      const before = readFileSync(join(f.dir, 'leases-before-predicate'), 'utf8');
+      assert.equal(readFileSync(join(f.dir, 'leases'), 'utf8'), before + 'release\n',
+        'the settled lease survives predicate and merge until final release');
+      assert.equal(events.filter(e => e.kind === 'predicate').length, 0,
+        'normal merge must not overwrite the caller predicate');
+      assert.equal(events.filter(e => e.kind === 'gh' && e.value[1] === 'comment').length,
+        scenario === 'prepredicate-base-retry' ? 2 : 1, 'only changed heads need another audit');
+    }
+    if (scenario === 'prepredicate-base-retry') {
+      assert.equal(readFileSync(join(f.dir, 'ci-base-retry'), 'utf8'), '1',
+        'the consumed base retry budget must survive the caller predicate');
+    }
+  });
+}
+
+for (const scenario of ['lease-probe-exhausted', 'prepredicate-probe-exhausted']) {
+  test(`exhausted transport probes retain their failure outcome: ${scenario}`, t => {
+    const f = fixture(t, scenario);
+    const result = f.run();
+    const output = result.stdout + result.stderr;
+    assert.equal(result.status, 1, output);
+    assert.match(output, /outcome=merge-lease-probe-failed/);
+    assert.doesNotMatch(output, /parked:merge-lease-timeout/);
+    assert.equal(JSON.parse(readFileSync(join(f.dir, 'state.json'))).leaseProbeFailures, 3);
+    assert.equal(existsSync(join(f.dir, 'lease-held')), false);
   });
 }

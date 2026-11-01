@@ -128,7 +128,9 @@ for (const gate of ['operator-hold', 'pr-is-draft']) {
       repo: 'fixture/repo', prNumber: 42, headSha: head, prMetadata: openPr,
       logger: { log() {}, error() {} }, deliverAlertImpl: () => assert.fail('false SEV1 page') });
     assert.equal(decision.action, 'none');
-    assert.match(run(openPr).stdout, /exit:0 outcome: held:1$/);
+    // This extracted helper has not returned through the full verify phase;
+    // its intermediate diagnostic is not the phase's successful outcome.
+    assert.match(run(openPr).stdout, /exit:0 outcome:[^ ]* held:1$/);
   });
 }
 
@@ -148,7 +150,7 @@ test('admission audit failure cannot acquire a lease or report a successful refu
   const result = run({ ...openPr, isDraft: true });
   assert.equal(result.error, undefined);
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /exit:70 outcome: held:$/);
+  assert.match(result.stdout, /exit:70 outcome:merge-lease-admission-failed held:$/);
   assert.equal(existsSync(join(dir, 'data', 'merge-leases')), false);
 });
 
@@ -161,7 +163,7 @@ for (const liveState of ['OPEN', 'MERGED']) {
     assert.equal(result.error, undefined);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, liveState === 'MERGED'
-      ? /exit:20 outcome:already-merged held:$/ : /exit:1 outcome: held:$/);
+      ? /exit:20 outcome:already-merged held:$/ : /exit:1 outcome:merge-lease-admission-failed held:$/);
     assert.equal(readAmaAuditEntry(dir, 'fixture/repo', 42, head).status, 'succeeded');
     assert.equal(existsSync(join(dir, 'data', 'merge-leases')), false);
   });
@@ -189,7 +191,7 @@ for (const change of ['base', 'conflicting', 'lease-timeout']) {
     const result = run(openPr);
     assert.equal(result.error, undefined);
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /exit:0 outcome: held:1$/);
+    assert.match(result.stdout, /exit:0 outcome:[^ ]* held:1$/);
     assert.equal(readAmaAuditEntry(dir, 'fixture/repo', 42, head).status, 'in_progress');
   });
 }

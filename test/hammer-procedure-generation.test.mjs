@@ -144,8 +144,10 @@ test('CLOSERCIWAIT-01: deployed claim binder reads the exported phase head and p
   writeFileSync(path, JSON.stringify(original));
   const head = 'a'.repeat(40);
   const helper = fileURLToPath(new URL('../bin/hammer-claim-head.mjs', import.meta.url));
+  const env = { ...process.env, POST_REMEDIATION_SHA: head };
+  delete env.HAM_AUDIT_COMMENT_BODY;
   const result = spawnSync(process.execPath, [helper, path], {
-    env: { ...process.env, POST_REMEDIATION_SHA: head }, encoding: 'utf8', timeout: 5000,
+    env, encoding: 'utf8', timeout: 5000,
   });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(readFileSync(path)), { ...original, commit: { ...original.commit, sha: head } });
@@ -155,4 +157,28 @@ test('CLOSERCIWAIT-01: deployed claim binder reads the exported phase head and p
   assert.equal(failed.status, 1);
   assert.match(failed.stderr, /claim-build-failed/);
   assert.equal(JSON.parse(readFileSync(path)).commit.sha, head);
+});
+
+test('claim binder refreshes the published audit body and refuses stale or ambiguous head evidence without writing', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-claim-audit-'));
+  t.after(() => rmSync(dir, { force: true, recursive: true }));
+  const path = join(dir, 'claim.json');
+  const head = 'a'.repeat(40), oldHead = 'b'.repeat(40);
+  const original = { commit: { sha: oldHead }, auditComment: {
+    body: `HAM-Validated-Head: ${oldHead}`, findings: ['keep finding'], docCurrency: { status: 'updated' },
+  } };
+  const helper = fileURLToPath(new URL('../bin/hammer-claim-head.mjs', import.meta.url));
+  for (const body of ['', `HAM-Validated-Head: ${oldHead}`,
+    `HAM-Validated-Head: ${head}\nHAM-Validated-Head: ${head}`,
+    `Audit details\nHAM-Validated-Head: ${head}`]) {
+    writeFileSync(path, JSON.stringify(original));
+    const result = spawnSync(process.execPath, [helper, path], {
+      env: { ...process.env, POST_REMEDIATION_SHA: head, HAM_AUDIT_COMMENT_BODY: body },
+      encoding: 'utf8', timeout: 5000,
+    });
+    const valid = body === `Audit details\nHAM-Validated-Head: ${head}`;
+    assert.equal(result.status, valid ? 0 : 1, result.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(path)), valid
+      ? { commit: { sha: head }, auditComment: { ...original.auditComment, body } } : original);
+  }
 });

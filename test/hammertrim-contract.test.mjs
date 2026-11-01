@@ -941,7 +941,9 @@ exit "$rc"`], env);
       assert.equal(JSON.parse(readFileSync(join(dir, 'pr-after.json'), 'utf8')).headRefOid, before);
     } else if (['permanent error', 'permanent numbered URL', 'malformed JSON', 'missing head', 'invalid head'].includes(scenario)) {
       assert.equal(result.status, 1, result.stderr);
-      assert.match(result.stdout, /OUTCOME=verify-head-error rc=1/);
+      const outcome = ['missing head', 'invalid head'].includes(scenario)
+        ? 'published-head-probe-invalid' : 'published-head-probe-failed';
+      assert.match(result.stdout, new RegExp(`OUTCOME=${outcome} rc=1`));
       assert.doesNotMatch(result.stdout, /CONTINUE_TO_CHECKS/);
       assert.equal(Number(readFileSync(join(dir, 'polls'), 'utf8')), 2);
       assert.equal(JSON.parse(readFileSync(join(dir, 'pr-after.json'), 'utf8')).headRefOid, before);

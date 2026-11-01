@@ -161,7 +161,8 @@ run() {
 });
  test('merge phase clears inherited rewrite evidence before any refusal', () => {
   const source = readFileSync('bin/hammer-merge.sh', 'utf8');
-  const prefix = source.slice(source.indexOf('HAM_PHASE_OUTCOME='), source.indexOf('if [ "${HAM_MERGE_LEASE_HELD'));
+  const prefix = source.slice(source.indexOf('HAM_PHASE_OUTCOME=merge-error'), source.indexOf('if [ "${HAM_MERGE_LEASE_HELD'));
   const result = spawnSync('bash', ['-c', prefix + `\nprintf '%s' "$HAM_CLOSING_KEYWORD_REWRITES"`], { encoding: 'utf8', env: { ...process.env, HAM_CLOSING_KEYWORD_REWRITES: 'invalid' } });
+  assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, '[]');
 });

@@ -185,6 +185,7 @@ ham_lease_pr_view() {
     fi
     if [ "$attempt" -ge 3 ]; then
       rm -f "$err"
+      HAM_LEASE_PROBE_TRANSIENT=0
       HAM_PHASE_OUTCOME=merge-lease-probe-failed
       return "$rc"
     fi

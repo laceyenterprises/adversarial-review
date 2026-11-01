@@ -138,13 +138,13 @@ function compileRepoPattern(pattern) {
   if (typeof pattern !== 'string') return null;
   const separator = pattern.indexOf(':');
   if (separator <= 0) return null;
-  const owner = pattern.slice(0, separator);
-  if (owner !== '*' && !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(owner)) return null;
+  const repoName = pattern.slice(0, separator);
+  if (repoName !== '*' && !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(repoName)) return null;
   const globs = canonicalRelative(pattern.slice(separator + 1).toLowerCase());
   if (!globs) return null;
   const compiled = globs.map((glob) => (glob === '**' ? '**' : componentRegExp(glob)));
   if (compiled.includes(null)) return null;
-  return { owner: owner === '*' ? null : owner.toLowerCase(), compiled };
+  return { repoName: repoName === '*' ? null : repoName.toLowerCase(), compiled };
 }
 
 function matchComponents(parts, compiled) {
@@ -169,15 +169,15 @@ function matchComponents(parts, compiled) {
  * patterns (the same contract cwp_dispatch.mes_signals.review_signals reads).
  */
 export function mesRiskPathCount(paths, patterns, repo) {
-  const owner = typeof repo === 'string' && repo ? repo.split('/').pop().toLowerCase() : null;
-  if (!owner || !Array.isArray(paths) || !Array.isArray(patterns)) return null;
+  const repoName = typeof repo === 'string' && repo ? repo.split('/').pop().toLowerCase() : null;
+  if (!repoName || !Array.isArray(paths) || !Array.isArray(patterns)) return null;
   const compiled = patterns.map(compileRepoPattern);
   if (compiled.includes(null)) return null;
   const touched = new Set();
   for (const path of paths) {
     const parts = canonicalRelative(String(path).toLowerCase());
     if (!parts) return null;
-    if (compiled.some((pattern) => (pattern.owner === null || pattern.owner === owner)
+    if (compiled.some((pattern) => (pattern.repoName === null || pattern.repoName === repoName)
       && matchComponents(parts, pattern.compiled))) touched.add(parts.join('/'));
   }
   return touched.size;

@@ -764,7 +764,12 @@ round removed, `remediationPlan.retryAfter` set to the hold end and a
 - `skipped[]`: `{ workerClass, reason }` for each declared fallback class passed
   over (`provider-untracked`, `reviews-next-round:<reviewer>`,
   `capped:<capSource>`, `resets-within-hold-window`, `unavailable:<state>`,
-  `unrunnable-in-mode:<mode>`).
+  `unrunnable-in-mode:<mode>`, `model-unresolvable`). A `model-unresolvable`
+  entry (REMGEMINI-01) also carries `detail`, the typed registry fault: the
+  class's governed model or registry entry could not be resolved, so it was
+  skipped for this launch only. A routed primary in that state carries
+  `capSource: "model-unresolvable"`; when no fallback can run, the claim keeps
+  the typed registry deferral instead of a quota hold.
 - `modeRefusals[]` (optional, REMEDIATORLANE-01): `{ workerClass, mode, reason }`
   for each lane the claim's orchestration mode cannot run. Native mode
   (`"local"`) refuses `remediator-claude-corp` with
@@ -787,7 +792,8 @@ A job run by its routed class has none of these fields, except
 `remediationWorker.modeRefusals[]` (same shape as above), which is recorded
 whenever the mode refused a lane, including when the corporate Claude lane falls
 back to the personal Claude account under the same class. The fallback order is
-`roles.remediator_fallback` in `config.yaml`.
+`roles.remediator_fallback` in `config.yaml`. Each claim walks it from the top,
+so a candidate skipped on one launch is tried again first on the next.
 
 ## Single-review jobs (SINGLEREVIEW-01)
 

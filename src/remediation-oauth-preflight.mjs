@@ -20,6 +20,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { resolveClaudeCodeCliPath } from './remediation-claude-code-worker.mjs';
 import { scrubOAuthFallbackEnv } from './secret-source/env.mjs';
+import { checkAgyReviewerAuth } from './agy-reviewer-auth.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -34,18 +35,6 @@ function resolveCodexAuthPath() {
 
   const codexHome = process.env.CODEX_HOME || join(process.env.HOME || homedir(), '.codex');
   return join(codexHome, 'auth.json');
-}
-
-function resolveGeminiCliPath(env = process.env) {
-  return resolveReviewCliPath('gemini', env);
-}
-
-function resolveGeminiAuthPath() {
-  if (process.env.GEMINI_AUTH_PATH) {
-    return process.env.GEMINI_AUTH_PATH;
-  }
-  const geminiHome = process.env.GEMINI_HOME || join(process.env.HOME || homedir(), '.gemini');
-  return join(geminiHome, 'oauth_creds.json');
 }
 
 class OAuthError extends Error {
@@ -670,55 +659,27 @@ async function assertClaudeCodeOAuth({
   // "Throws or resolves" is the whole contract, for both transports.
 }
 
-async function assertGeminiOAuth() {
-  // Per-process pre-flight cache, identical contract to assertCodexOAuth:
-  // null = unchecked, true = passed, OAuthError = cached failure. Reading
-  // `~/.gemini/oauth_creds.json` on each consume tick would otherwise trip
-  // macOS TCC prompts the same way the codex/claude auth reads do.
-  const cached = __oauthPreflightCache.gemini;
-  if (cached === true) return;
-  if (cached instanceof OAuthError) throw cached;
-
-  const geminiCli = resolveGeminiCliPath();
-
+// REMGEMINI-01: local Gemini remediation runs on the Antigravity harness, whose
+// credential is agy's keychain item, not the legacy CLI's oauth_creds.json. The
+// probe is the reviewer's (keychain read + `agy models`). Like the claude-code
+// broker transport, only success is cached: agy probe failures include
+// transient ones, and caching them would hold the lane for the daemon lifetime.
+async function assertGeminiOAuth({ env = process.env, checkAuthImpl = checkAgyReviewerAuth } = {}) {
+  if (__oauthPreflightCache.gemini === true) return;
+  let result;
   try {
-    if (geminiCli.includes('/') && !existsSync(geminiCli)) {
-      throw new OAuthError('gemini', `gemini CLI not found at ${geminiCli}`);
-    }
-
-    const authPath = resolveGeminiAuthPath();
-    if (!existsSync(authPath)) {
-      throw new OAuthError('gemini', `OAuth oauth_creds.json missing: ${authPath}`);
-    }
-
-    let raw;
-    try {
-      raw = readFileSync(authPath, 'utf8');
-    } catch (err) {
-      throw new OAuthError('gemini', `cannot read ${authPath}: ${err.message}`);
-    }
-
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (err) {
-      throw new OAuthError('gemini', `invalid oauth_creds.json at ${authPath}: ${err.message}`);
-    }
-
-    if (!parsed?.access_token && !parsed?.refresh_token) {
-      throw new OAuthError('gemini', `Gemini auth file missing OAuth tokens: ${authPath}`);
-    }
-
-    __oauthPreflightCache.gemini = true;
+    result = await checkAuthImpl({ env });
   } catch (err) {
-    if (err instanceof OAuthError) {
-      __oauthPreflightCache.gemini = err;
-    }
-    throw err;
+    result = { ok: false, reason: 'agy-probe-failed', detail: err?.message || String(err) };
   }
+  if (!result?.ok) {
+    const detail = result?.detail ? `: ${result.detail}` : '';
+    throw new OAuthError('gemini', `Antigravity agy auth failed (${result?.reason || 'agy-probe-failed'})${detail}`);
+  }
+  __oauthPreflightCache.gemini = true;
 }
 
-async function assertRemediationWorkerOAuth(workerClass, { execFileImpl, fetchImpl, env, delegatedPool = false } = {}) {
+async function assertRemediationWorkerOAuth(workerClass, { execFileImpl, fetchImpl, env, delegatedPool = false, agyAuthImpl } = {}) {
   // Canonical privileged workers get their account only at managed admission.
   // A daemon-local primary credential probe cannot validate that account.
   if (delegatedPool && ['remediator-codex', 'remediator-claude'].includes(workerClass)) return;
@@ -727,7 +688,7 @@ async function assertRemediationWorkerOAuth(workerClass, { execFileImpl, fetchIm
     case 'codex':       return assertCodexOAuth();
     case 'remediator-claude':
     case 'claude-code': return assertClaudeCodeOAuth({ execFileImpl, fetchImpl, env });
-    case 'gemini':      return assertGeminiOAuth();
+    case 'gemini':      return assertGeminiOAuth({ env, ...(agyAuthImpl ? { checkAuthImpl: agyAuthImpl } : {}) });
     default:
       throw new Error(`unknown remediation worker class: ${workerClass}`);
   }

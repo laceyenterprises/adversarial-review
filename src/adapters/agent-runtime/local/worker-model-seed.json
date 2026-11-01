@@ -17,10 +17,14 @@
       "defaultReasoningLevel": "high"
     },
     "remediator-gemini": {
-      "defaultModel": "gemini-2.5-pro",
+      "defaultModel": "Gemini 3.8 Flash (High)",
       "allowedModels": [
-        "gemini-2.5-pro",
-        "gemini-2.5-flash"
+        "Gemini 3.8 Flash (High)",
+        "Gemini 3.8 Flash (Medium)",
+        "Gemini 3.8 Flash (Low)",
+        "Gemini 4 Argon (Low)",
+        "Gemini 4 Argon (Medium)",
+        "Gemini 4 Argon (High)"
       ]
     },
     "codex-reviewer": {
@@ -40,10 +44,14 @@
       "defaultReasoningLevel": "high"
     },
     "gemini-reviewer": {
-      "defaultModel": "gemini-2.5-pro",
+      "defaultModel": "Gemini 3.8 Flash (High)",
       "allowedModels": [
-        "gemini-2.5-pro",
-        "gemini-2.5-flash"
+        "Gemini 3.8 Flash (High)",
+        "Gemini 3.8 Flash (Medium)",
+        "Gemini 3.8 Flash (Low)",
+        "Gemini 4 Argon (Low)",
+        "Gemini 4 Argon (Medium)",
+        "Gemini 4 Argon (High)"
       ]
     }
   }

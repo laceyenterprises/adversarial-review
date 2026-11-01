@@ -4360,6 +4360,15 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+REMGEMINI-01: Gemini remediation runs on the Antigravity harness. The local
+spawn runs the managed `agy` with the `remediator-gemini` registry model and
+the prompt as the `--print` argument, and the pre-flight probes agy's keychain
+credential instead of the legacy CLI's `oauth_creds.json`. Remediator fallback
+skips a busy, quota-held, mode-refused or unresolvable candidate for that launch
+(`skipped[]` reason `model-unresolvable` for a registry fault) and tries the
+next; one unresolvable candidate no longer aborts the selection.
+`roles.remediator_fallback` accepts `remediator-grok` for the future Grok lane.
+
 - GRK-03 remediation: always project a frozen `broker_instances` mapping, including empty and legacy-only declarations; cover the stable snapshot shape in offline reader and role-config tests.
 - GRK-03: mirror account-scoped Grok OAuth/API-key declarations, reject duplicate custody/secret bindings, and retain subscription-first order and instance metadata through typed readers. Activation and both auth-kind MODEL-TURN receipts remain with GRK-16.
 

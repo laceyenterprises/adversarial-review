@@ -54,8 +54,12 @@ test('packaged seed: codex reviewer defaults to medium; Claude and Gemini review
   assert.deepEqual(seed.classes['claude-reviewer'], {
     defaultModel: 'claude-opus-5-5', allowedModels: ['claude-opus-5-5'], defaultReasoningLevel: 'high',
   });
+  // REMGEMINI-01 moved the Gemini reviewer seed to the Antigravity display
+  // tokens it runs; it still declares no reasoning level.
   assert.deepEqual(seed.classes['gemini-reviewer'], {
-    defaultModel: 'gemini-2.5-pro', allowedModels: ['gemini-2.5-pro', 'gemini-2.5-flash'],
+    defaultModel: 'Gemini 3.8 Flash (High)',
+    allowedModels: ['Gemini 3.8 Flash (High)', 'Gemini 3.8 Flash (Medium)', 'Gemini 3.8 Flash (Low)',
+      'Gemini 4 Argon (Low)', 'Gemini 4 Argon (Medium)', 'Gemini 4 Argon (High)'],
   });
   // Remediators are not reviewers; their effort stays where it was.
   assert.equal(seed.classes['remediator-codex'].defaultReasoningLevel, 'high');
@@ -72,7 +76,7 @@ test('registry outage: codex reviewer resolves medium, Claude and Gemini resolve
     model: 'claude-opus-5-5', effort: 'high', modelSource: 'committed-seed', effortSource: 'committed-seed',
   });
   assert.deepEqual(resolveReviewerExecution('gemini', { env: f.env, log: quiet }), {
-    model: 'gemini-2.5-pro', effort: null, modelSource: 'committed-seed', effortSource: 'none',
+    model: 'Gemini 3.8 Flash (High)', effort: null, modelSource: 'committed-seed', effortSource: 'none',
   });
 });
 

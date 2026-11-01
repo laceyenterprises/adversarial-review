@@ -128,6 +128,14 @@ transition and leave claim admission, CAS SQL and retry budgets unchanged.
 Refreshed the `src/pollonce-phases.mjs` source projection hash for these diagnostic
 status comparisons; the reviewed graph and existing smoke promises are unchanged.
 
+PENDINGCLAIM-04: the same zero-row CAS log predicates now read row columns from
+the row re-read right after the CAS instead of the pre-wait snapshot, so a PR
+that merges during the reviewer wait logs the claim-race line, not
+`claim-shape-mismatch`. They still add no state, status write or transition, and
+leave every CAS, branch selection, retry cap and both log texts unchanged.
+Refreshed the `src/pollonce-phases.mjs` source projection hash; the reviewed
+graph and existing smoke promises are unchanged.
+
 REGISTRYSESSION-02: async entry points call the shared
 `ensureWorkerRegistryReady()` before synchronous governed model selection in
 that process, including reviewer/security children, quota grounding and fallback

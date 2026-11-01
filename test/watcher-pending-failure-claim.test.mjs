@@ -80,7 +80,7 @@ const claimClosure = between('            const claimBranch = tokenRefreshRecove
 const claimAndFailureLog = between('            const claim = (holdReleaseId',
   "            if (route.reviewerModel === 'codex')");
 const snapshotDiagnostic = between('              // PENDINGCLAIM-03:',
-  '              console.log(unchangedShape && snapshotClaimable');
+  '              console.log(unchangedShape && stillClaimable');
 const parkUnknown = between('        if (unknownFailureClass) {\n          finalizePendingTerminalFailureState(current);',
   "        if (populationRetry.matched && populationRetry.action === 'exhausted')");
 
@@ -149,7 +149,9 @@ function claimBindings(f, decision, head = HEAD) {
   return {
     selected,
     bindings: {
-      ...decision, ...statements, current: f.read(), tokenRefreshRecovery: decision.infraRecoveryClass === 'token-refresh-pending',
+      // Before any CAS runs, the post-CAS re-read the diagnostic judges is the
+      // captured row itself; claimAndFailureLog shadows this with a real re-read.
+      ...decision, ...statements, current: f.read(), afterClaim: f.read(), tokenRefreshRecovery: decision.infraRecoveryClass === 'token-refresh-pending',
       DAEMON_BOUNCE_FAILURE_CLASS, attemptAt: ATTEMPT_AT, reviewerSessionUuid: 'replacement-session',
       reviewerHeadSha: head, pendingRevisionRef: head, reviewerTimeoutMs: 60000,
       reviewerLeaseExpiresAt: '2026-10-20T12:11:00.000Z', repoPath: REPO, prNumber: PR,
@@ -464,7 +466,7 @@ for (const [name, message, expectedClaim] of [
                 const row = { ...original, review_status, pr_state, failed_at, reviewer_head_sha, ...budget };
                 reset.run(...fields.map(field => row[field]));
                 const { bindings, selected } = claimBindings(f, decision);
-                const claimable = execute(`${claimClosure}\n${snapshotDiagnostic}\nreturn snapshotClaimable;`, bindings);
+                const claimable = execute(`${claimClosure}\n${snapshotDiagnostic}\nreturn stillClaimable;`, bindings);
                 const result = execute(`${claimClosure}\nreturn claimReviewer();`, bindings);
                 assert.deepEqual(selected, [expectedClaim]);
                 assert.equal(claimable, result.changes === 1, JSON.stringify({ name, ...row }));
@@ -486,11 +488,72 @@ for (const [name, message, expectedClaim] of [
           reset.run(...fields.map(field => row[field]));
           const { bindings } = claimBindings(f, decision);
           bindings.cascadeRetryDue = cascadeRetryDue;
-          const claimable = execute(`${claimClosure}\n${snapshotDiagnostic}\nreturn snapshotClaimable;`, bindings);
+          const claimable = execute(`${claimClosure}\n${snapshotDiagnostic}\nreturn stillClaimable;`, bindings);
           const result = execute(`${claimClosure}\nreturn claimReviewer();`, bindings);
           assert.equal(claimable, result.changes === 1, JSON.stringify({ name, failure_message, cascadeRetryDue }));
         }
       }
+    } finally { f.db.close(); }
+  });
+}
+
+// PENDINGCLAIM-04: the snapshot is read before the reviewer dispatch wait. A
+// PR that merges during that wait is correctly refused by its CAS; the
+// diagnostic must judge the re-read row, not the stale open snapshot.
+const lostRaceLine = status => `[watcher] Lost claim race on ${REPO}#${PR} snapshot_status=${status}`
+  + ' — another watcher is handling this PR (or its row is now in a non-claimable state). Skipping.';
+for (const [name, message, expectedClaim] of [
+  ...cases.filter(([name]) => ['daemon bounce', 'token refresh control'].includes(name)),
+  ['pending', null, 'stmtMarkAttemptStarted'],
+]) {
+  test(`PENDINGCLAIM-04 merge during the reviewer wait logs a lost race: ${name}`, () => {
+    const f = fixture({ failure_message: message });
+    try {
+      const { bindings, selected } = claimBindings(f, route(f));
+      const snapshot = bindings.current;
+      assert.equal(snapshot.pr_state, 'open');
+      // The lifecycle sync records the merge after the snapshot, before the CAS.
+      f.db.prepare("UPDATE reviewed_prs SET pr_state = 'merged'").run();
+      const lines = [];
+      const result = execute(`${claimClosure}\n${claimAndFailureLog}`, {
+        ...bindings, holdReleaseId: null, reviewerPoolConfig: { enabled: false },
+        stmtGetReviewRow: { get: () => f.read() }, console: { log: line => lines.push(line) },
+      });
+      assert.deepEqual(selected, [expectedClaim]);
+      assert.deepEqual(result, { dispatched: false, reason: 'claim-race-lost' });
+      assert.deepEqual(lines, [lostRaceLine('pending')]);
+      assert.deepEqual(f.read(), { ...snapshot, pr_state: 'merged' }, 'the real CAS refused the merged row');
+    } finally { f.db.close(); }
+  });
+}
+
+for (const [name, message, expectedClaim, branch] of [
+  ...cases.map(([name, message, claim]) => [name, message, claim, {
+    unknown: 'unknown-failure', population: 'review-population', infra: 'infra',
+    'tagged command failure': 'infra', 'daemon bounce': 'daemon-bounce',
+    'token refresh control': 'token-refresh',
+  }[name]]),
+  ['pending', null, 'stmtMarkAttemptStarted', 'pending'],
+]) {
+  test(`PENDINGCLAIM-04 unchanged claimable re-read after a zero-change CAS signals mismatch: ${name}`, () => {
+    const f = fixture({ failure_message: message });
+    try {
+      const { bindings, selected } = claimBindings(f, route(f));
+      const snapshot = bindings.current;
+      const lines = [];
+      const result = execute(`${claimClosure}\n${claimAndFailureLog}`, {
+        ...bindings,
+        // Force the zero-change result the regression signal exists to catch.
+        [expectedClaim]: { run() { selected.push(expectedClaim); return { changes: 0 }; } },
+        holdReleaseId: null, reviewerPoolConfig: { enabled: false },
+        stmtGetReviewRow: { get: () => f.read() }, console: { log: line => lines.push(line) },
+      });
+      assert.deepEqual(selected, [expectedClaim]);
+      assert.deepEqual(result, { dispatched: false, reason: 'claim-race-lost' });
+      assert.deepEqual(lines, [
+        `[watcher] claim-shape-mismatch branch=${branch} status=pending repo=${REPO} pr=${PR}`,
+      ]);
+      assert.deepEqual(f.read(), snapshot);
     } finally { f.db.close(); }
   });
 }

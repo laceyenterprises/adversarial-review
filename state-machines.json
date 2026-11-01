@@ -1770,7 +1770,7 @@
     "src/ama/pre-receipt-intent.mjs": "4954d9ad52d99a9eff753b0b0a399c15aa3b6872e2d3462b8dde2ba5f7673e0d",
     "src/follow-up-branch.mjs": "637f2a18c5fb2a89d2d02c98d80587a713a188c10d70891941d77df847579a8d",
     "src/posted-review-head-repair.mjs": "ce761260224b7a82d152e5b289e8967bbf54026c427a17bdb5cff0a6556ff7d6",
-    "src/pollonce-phases.mjs": "3ef4ce9d0a1e7d45cb9ca24e5df81496ba5831c8ac4f289740ccf18e994db105",
+    "src/pollonce-phases.mjs": "4765bbcb08c629e79cbec9945e3727710751fd453ae78347d2f1af1556e34761",
     "src/review-statuses.mjs": "e5b4f877397ccae443c0ea47babdad7c83d71b6f474a31ad92130b88382f6a7b",
     "src/adapters/reviewer-runtime/agent-os-hq/index.mjs": "8ecf105dc9f46ac09f6a8fb369c14ff7e9cfd1bc17a46da4d87fa146a1bf4d2d",
     "src/adapters/reviewer-runtime/agent-runtime/index.mjs": "37a25e62f889f9d87e83a20495a9a3baef75f53db163ef6ed7638f7d6ac09f82",

@@ -4308,6 +4308,10 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+READMEFIX-01 restores the README title and introduction at the top and keeps
+change notes in this section, newest first. Conflict resolution retains the
+REMJOBPHANTOM-01 note added on main alongside the relocated notes.
+
 AGYTELEMETRY-01: Gemini/agy reviewers request stream JSON and join the unique
 `conversation_id` to the CLI planner transcript. Measured counters use
 `agy-measured`; request/session disagreement is retained in pass metadata.

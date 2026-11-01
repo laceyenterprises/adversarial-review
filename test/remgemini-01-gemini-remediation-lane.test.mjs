@@ -206,6 +206,9 @@ test('remediator-gemini resolves from the registry and spawns the Antigravity ha
     enforceHarnessIdentity: false,
     sourceEnv: { HQ_ROOT: root, HOME: root, PATH: '/usr/bin:/bin', AGY_CLI_PATH: agyStub },
   });
+  // The launcher unrefs its detached child; re-ref it so the test runner's
+  // event loop stays alive until the stub exits (Node 22 otherwise cancels).
+  worker.child.ref();
   await new Promise((resolve, reject) => {
     worker.child.once('exit', resolve);
     worker.child.once('error', reject);

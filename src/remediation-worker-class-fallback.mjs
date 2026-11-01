@@ -404,6 +404,8 @@ async function resolveModeRunnableWorkerClass({
     // Account selection can replace the declared identity with its corporate
     // twin. That identity needs its own mode and model checks before launch.
     if (account) candidate = account.workerClass;
+    // For an unchanged identity this repeats the checks above at no cost:
+    // unresolvedModel reads its cache and refuseInMode records a lane once.
     if (refuseInMode(candidate)) {
       skipped.push({ workerClass: candidate, reason: `unrunnable-in-mode:${remediationMode}` });
       continue;

@@ -1,3 +1,4 @@
+import './helpers/review-cli-resolver-fixture.mjs';
 // EFFORTTUNE-02: the codex reviewer defaults to medium reasoning effort; the
 // Claude and Gemini reviewer defaults do not move. The review execution record
 // carries the effective effort and where it came from, so review outcomes can

@@ -1,4 +1,5 @@
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { resolveReviewCliPathAsync } from './review-cli-resolver.mjs';
 import { spawn } from 'node:child_process';
 
 const DEFAULT_SAFE_EXEC_MAX_BUFFER = 1024 * 1024;
@@ -290,12 +291,13 @@ function clearAgyReviewerAuthCache() {
 }
 
 async function checkAgyReviewerAuthOnce({
-  agyCli = 'agy',
+  agyCli,
   env = process.env,
   execFileImpl = safeExecFile,
   timeoutMs = resolveAgyAuthProbeTimeoutMs(env),
   securityCli = 'security',
 } = {}) {
+  agyCli ||= await resolveReviewCliPathAsync('agy', env);
   try {
     await runProbe(securityCli, agyKeychainProbeArgs(env), {
       execFileImpl,
@@ -335,7 +337,7 @@ async function checkAgyReviewerAuthOnce({
 }
 
 async function checkAgyReviewerAuth({
-  agyCli = 'agy',
+  agyCli = null,
   env = process.env,
   execFileImpl = safeExecFile,
   timeoutMs = resolveAgyAuthProbeTimeoutMs(env),
@@ -347,6 +349,7 @@ async function checkAgyReviewerAuth({
   cacheSuccess,
   nowMs = Date.now(),
 } = {}) {
+  agyCli ||= await resolveReviewCliPathAsync('agy', env);
   const attempts = Math.max(1, maxAttempts);
   const useSuccessCache = (cacheSuccess ?? execFileImpl === safeExecFile) && successTtlMs > 0;
   const cacheKey = useSuccessCache

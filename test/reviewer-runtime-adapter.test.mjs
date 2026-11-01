@@ -1,3 +1,4 @@
+import './helpers/review-cli-resolver-fixture.mjs';
 import { serviceFixtureExec, writeDummyCodexAuth } from './helpers/codex-service-fixture.mjs';
 import { reviewerSizeFactsLine, readSizeFacts } from '../src/reviewer-size-owner.mjs';
 import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
@@ -29,7 +30,7 @@ import {
 } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
 import { resolveReviewerRuntimeCutover } from '../src/reviewer-runtime-cutover.mjs';
 import { domainRequiresMcpOAuth } from '../src/adapters/reviewer-runtime/domain-mcp-oauth.mjs';
-import { probeCodexCli, resolveCliBinary } from '../src/adapters/reviewer-runtime/cli-direct/discovery.mjs';
+import { probeCodexCli, probeReviewerCliOAuth, resolveCliBinary } from '../src/adapters/reviewer-runtime/cli-direct/discovery.mjs';
 import {
   readActiveReviewerRunRecords,
   readRecoverableReviewerRunRecords,
@@ -2354,7 +2355,7 @@ test('cli-direct path discovery honors env override, PATH fallback, and clear mi
         envVar: 'CODEX_CLI',
         env: { PATH: '' },
       }),
-      /codex CLI not found.*CODEX_CLI.*developers\.openai\.com\/codex\/cli/i,
+      /review CLI resolution unavailable for codex/,
     );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -2455,6 +2456,35 @@ test('cli-direct preflight failures are oauth-broken and prevent reviewer spawn'
     assert.equal(result.failureClass, 'oauth-broken');
     assert.match(result.stderrTail, /not logged in/);
     assert.equal(spawnCount, 0);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('cli-direct returns oauth-broken when the installed CLI resolver is missing', async () => {
+  const rootDir = makeRoot();
+  try {
+    for (const model of ['claude', 'codex', 'gemini']) {
+      let spawnCount = 0;
+      const adapter = createCliDirectReviewerRuntimeAdapter({
+        rootDir,
+        preflightImpl: () => probeReviewerCliOAuth({
+          model, env: { HQ_BIN: join(rootDir, 'missing-hq') },
+        }),
+        prepareCorporateCodexReviewerAuthImpl: () => null,
+        spawnCapturedImpl: async () => { spawnCount += 1; },
+        logger: { log() {} },
+      });
+      const result = await adapter.spawnReviewer({
+        model, sessionUuid: `missing-cli-${model}`, prompt: '',
+        subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 3 },
+        forbiddenFallbacks: ['api-key'],
+      });
+      assert.equal(result.ok, false);
+      assert.equal(result.failureClass, 'oauth-broken');
+      assert.match(result.stderrTail, new RegExp(`review CLI resolution unavailable for ${model}`));
+      assert.equal(spawnCount, 0);
+    }
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

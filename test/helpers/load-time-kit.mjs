@@ -14,6 +14,7 @@ import {
 export { MAX_TIMER_DELAY_MS };
 const realSetTimeout = hostSetTimeout;
 const realClearTimeout = hostClearTimeout;
+const realExecFileSync = childProcess.execFileSync;
 
 function nonnegative(value, name) {
   if (!Number.isFinite(value) || value < 0) throw new RangeError(`${name} must be finite and nonnegative`);
@@ -33,7 +34,10 @@ export function underMaxLoad(t, { maxMultiplier = MAX_MULTIPLIER } = {}) {
   writeFileSync(configPath, `version: 1\nadversarial:\n  reviewer:\n    load_aware:\n      enabled: true\n      max_multiplier: ${maxMultiplier}\n`);
   const cores = os.cpus().length || 1;
   const loadMock = t.mock.method(os, 'loadavg', () => [cores * (1 + 2 * maxMultiplier), 0, 0]);
-  const cpuMock = t.mock.method(childProcess, 'execFileSync', command => {
+  const cpuMock = t.mock.method(childProcess, 'execFileSync', (command, args, options) => {
+    if (command === process.env.HQ_BIN && command.includes('/review-resolver-fixture-')) {
+      return realExecFileSync(command, args, options);
+    }
     assert.equal(command, '/bin/ps', 'inject all other subprocess transports');
     return `${cores * 100}\n`;
   });

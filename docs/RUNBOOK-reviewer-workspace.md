@@ -1,5 +1,72 @@
 # Reviewer workspace snapshots and audit
 
+## Managed CLI resolution (HUP-05N)
+
+The review service calls the trusted installed command through `HQ_BIN` (default
+`hq` on the installation PATH), using an argv array:
+`hq cli resolve --cli <registry-name> --consumer review --json`.
+Claude Code uses `claude`; native Codex, Gemini and direct agy use their registry
+names. Reviewer execution, cli-direct discovery, remediation OAuth preflight and
+local remediation all consume protocol v1 through `src/review-cli-resolver.mjs`.
+HQ-owner agy startup/readiness probes resolve through the same client, and their
+success-cache identity includes that immutable executable path.
+There is no local binary precedence or resolver-error fallback. The producer's
+review profile owns existing explicit environment overrides, managed current,
+and caller legacy fallbacks; an absent managed installation permits fallback
+only when the producer returns it. Invalid explicit or managed selections refuse
+launch. Missing hq, malformed/incomplete JSON, nonzero exit or the bounded
+10-second resolver timeout produce `status: unknown`, never managed health.
+
+Async reviewer launches, OAuth probes and cli-direct discovery await nonblocking
+resolver subprocesses. Legacy synchronous path exports and local remediation
+spawn contracts retain bounded synchronous resolution. Both clients validate and log the same protocol evidence
+before helpers or execution. Discovery translates unknown resolution into
+`CliDirectPreflightError` with `failureClass: oauth-broken` and the CLI's
+`<name>-path` layer, retaining resolver evidence on the cause; the runtime adapter
+returns its existing preflight failure result without spawning a reviewer.
+
+Before any helper or exec, `[review-cli-resolution]` logs the validated
+`schemaVersion`, registry `cli`, `consumer`, `status`, `source`, `selectedPath`,
+immutable `realPath`, `version`, `binarySha256` and UTC `timestamp`. Service/worker
+logs retain that pre-exec JSON even when auth, catalog preparation or spawn
+fails. Unknown events retain the CLI, timestamp and bounded reason; arbitrary
+resolver output is not logged. These records are version-scoped observations,
+not a successful tool-event receipt. No review database shape or lifecycle state
+changes. Exported legacy `*_CLI` constants identify registry names only; runtime
+selection happens at the execution boundary.
+
+Codex auth and model-catalog preparation use the same `realPath` as exec,
+including after a managed-current or Homebrew symlink changes. A subsequent
+launch resolves afresh. Catalog fallback remains governed by CODEXHOMEISO-02;
+it never selects another executable. Added agy holders still use their existing
+root-owned pinned-command boundary; this change does not alter privileged
+commands, sudo policy or holder deployment.
+
+HUP-09 must deploy the reviewed service and HUP-05 installed resolver together
+through the normal administrator installation procedure, then refresh/restart
+the review services and verify their loaded builds. Follow convergence review
+and normal gate-keeper review/merge rules. Retain the next organic managed
+review consumer record, its pre-exec source/path/version/digest observation,
+and a real tool event tied to that launch/root outcome. Source merge and
+synthetic tests alone do not establish activation or live acceptance. No worker
+host install, service restart, Homebrew operation or live canary is authorized.
+
+Offline evidence uses disposable synthetic resolver executables and fabricated
+tool output. `test/review-cli-resolver.test.mjs` covers protocol validation,
+managed/override/fallback responses, argv/environment forwarding, unknown errors
+and timeout, sibling resolver routing, and Codex helper/exec immutability across
+a version flip and spawn failure. Existing reviewer, discovery and remediation
+spawn suites use a synthetic installed resolver. Usage probes, portable-install
+checks, account routing, remediation replies and conflict/fallback replay suites
+also install that fixture; their mocked HQ dispatch accepts the fixture's absolute
+path. These offline tests must never depend on an `hq` executable on the host.
+Implementation validation ran under netguard through bounded
+`cwp_dispatch.worker_validation`: 1,052/1,052 tests across the 13 scoped resolver,
+reviewer, remediation, discovery, Codex-home and agy suites passed. `npm run lint`
+had zero errors; `npm run typecheck:contracts` and
+`bash demo/research-finding-walkthrough.sh` passed. Full platform suites and live
+consumer verification are outside this source-validation evidence.
+
 CODEXHOMEISO-01: every native Codex launch owned by the review service uses a
 fresh mode-0700 service directory as `CODEX_HOME`. Local remediation uses
 `spawnCodexRemediationWorker`; reviewer execution uses `spawnCodexReview`;

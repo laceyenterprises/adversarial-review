@@ -1,3 +1,4 @@
+import './helpers/review-cli-resolver-fixture.mjs';
 import './helpers/worker-observation-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';

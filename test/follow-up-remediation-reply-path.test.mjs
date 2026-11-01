@@ -1,3 +1,4 @@
+import './helpers/review-cli-resolver-fixture.mjs';
 import { serviceFixtureExec } from './helpers/codex-service-fixture.mjs';
 import './helpers/registry-session-fixture.mjs';
 import test from 'node:test';

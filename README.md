@@ -79,6 +79,17 @@ See the [service-home contract](docs/RUNBOOK-reviewer-workspace.md) and
 Source review/merge, parent pointer, deployment and organic remediation success
 remain separate recovery proofs.
 
+HUP-05N: reviewer, cli-direct discovery and local remediation CLI selection use
+the installed `hq cli resolve --cli <name> --consumer review --json` protocol.
+`HQ_BIN` selects the installed command. HUP-05 centrally owns explicit override,
+managed-current and review legacy fallback precedence (`claude` is the registry
+key for Claude Code). Unknown resolver outcomes prevent launch. Each resolution
+logs path, version and digest before execution; Codex auth, direct-tools catalog
+and exec share the returned immutable path. See the
+[resolver rollout contract](docs/RUNBOOK-reviewer-workspace.md#managed-cli-resolution-hup-05n).
+HUP-09 owns administrator deployment, service refresh/restart and the live
+managed review consumer receipt with a real tool event; merge is source evidence.
+
 LAC-2127: SQL-origin migration proofs can certify an ancestral filename/metadata
 repair only after verifying every snapshot, monotonic declared revisions, exact
 adjacent ancestry and base-identical predecessor operations. The immutable

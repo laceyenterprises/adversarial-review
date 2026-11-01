@@ -1,3 +1,4 @@
+import { fixtureHq } from './helpers/review-cli-resolver-fixture.mjs';
 // Each fresh process obtains its own app registry snapshot. Host config and
 // filesystem rosters cannot replace governed models or the committed seed.
 import { writeDummyCodexAuth } from './helpers/codex-service-fixture.mjs';
@@ -143,7 +144,7 @@ function standaloneRun(t, { codexConfig = null, down = false, entry = 'reviewer'
   const probePath = path.join(root, 'probe.mjs');
   writeFileSync(probePath, PROBE);
   // Deliberately minimal env: nothing from an Agent OS host leaks in.
-  const env = { CODEX_TEST_HELPER: new URL('./helpers/codex-service-fixture.mjs', import.meta.url).href, HOME: home, PATH: process.env.PATH, AR_ROOT: arRoot, TMPDIR: root,
+  const env = { HQ_BIN: fixtureHq, CODEX_TEST_HELPER: new URL('./helpers/codex-service-fixture.mjs', import.meta.url).href, HOME: home, PATH: process.env.PATH, AR_ROOT: arRoot, TMPDIR: root,
     REGISTRY_DOWN: down ? '1' : '0', REGISTRY_ENTRY: entry, REVIEWER_CLASS: reviewer,
     REGISTRY_FAILURE: failure, MODEL_PIN: pin, GEMINI_REVIEWER_MODEL: reviewer === 'gemini' ? pin : '',
     AGENT_OS_CODEX_PER_WORKER_AUTH: '0', CODEX_BROKER_PROVIDER: 'codex' };

@@ -1,3 +1,4 @@
+import './helpers/review-cli-resolver-fixture.mjs';
 import { serviceFixtureExec, writeDummyCodexAuth } from './helpers/codex-service-fixture.mjs';
 import { serviceCodexConfigArgs } from '../src/codex-service-home.mjs';
 import './helpers/registry-session-fixture.mjs';
@@ -10,7 +11,7 @@ import Database from 'better-sqlite3';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CLAUDE_CLI, GEMINI_CLI, AGY_CLI, __test__ } from '../src/reviewer.mjs';
+import { __test__ } from '../src/reviewer.mjs';
 import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
 import { AgentOSConfigError } from '../src/config-loader.mjs';
 import { spawnCapturedProcessGroup } from '../src/process-group-spawn.mjs';
@@ -24,6 +25,10 @@ import {
   clearAgyReviewerAuthCache,
   safeExecFile,
 } from '../src/agy-reviewer-auth.mjs';
+
+const CLAUDE_CLI = __test__.resolveClaudeCliPath();
+const GEMINI_CLI = __test__.resolveGeminiCliPath();
+const AGY_CLI = __test__.resolveAgyCliPath();
 
 function readReviewerPassRow(rootDir, { repo, prNumber, attemptNumber, passKind }) {
   const db = new Database(join(rootDir, 'data', 'reviews.db'));
@@ -1258,7 +1263,7 @@ test('postGitHubReviewWithCapture emits a reviewed attestation for the reviewed 
     });
 
     assert.equal(attestCalls.length, 2);
-    assert.equal(attestCalls[0].command, 'hq');
+    assert.equal(attestCalls[0].command, process.env.HQ_BIN);
     assert.deepEqual(attestCalls[0].args.slice(0, 10), [
       'attest', 'sign', '--repo', 'laceyenterprises/demo', '--pr', '42',
       '--head-sha', 'reviewed-head-sha', '--kind', 'reviewed',
@@ -6581,13 +6586,13 @@ test('resolveGeminiOAuthCredsPath honors explicit override, GEMINI_HOME, then HO
 test('resolveGeminiCliPath prefers GEMINI_CLI_PATH / GEMINI_CLI overrides', () => {
   assert.equal(resolveGeminiCliPath({ GEMINI_CLI_PATH: '/a/gemini', PATH: '' }), '/a/gemini');
   assert.equal(resolveGeminiCliPath({ GEMINI_CLI: '/b/gemini', PATH: '' }), '/b/gemini');
-  assert.equal(resolveGeminiCliPath({ PATH: '' }), 'gemini');
+  assert.throws(() => resolveGeminiCliPath({ PATH: '' }), /resolution unavailable/);
 });
 
 test('resolveAgyCliPath prefers AGY_CLI_PATH / AGY_CLI overrides', () => {
   assert.equal(resolveAgyCliPath({ AGY_CLI_PATH: '/a/agy', PATH: '' }), '/a/agy');
   assert.equal(resolveAgyCliPath({ AGY_CLI: '/b/agy', PATH: '' }), '/b/agy');
-  assert.equal(resolveAgyCliPath({ PATH: '' }), 'agy');
+  assert.throws(() => resolveAgyCliPath({ PATH: '' }), /resolution unavailable/);
 });
 
 test('GEMINIQUOTA-01: checkout quota_exhausted preserves an optional broker reset in diagnostics', async () => {

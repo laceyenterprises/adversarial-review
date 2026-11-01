@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { seedWorkerRegistry } from './helpers/dispatch-files-fixture.mjs';
+import { claudeAccountFixture } from './helpers/claude-account-fixture.mjs';
 import {
   RegistryUnavailableError,
   readCommittedWorkerModelSeed,
@@ -140,17 +141,39 @@ test('an unresolvable routed primary falls back, and keeps its typed deferral wh
 });
 
 test('a pooled fallback whose model is unresolvable is skipped, not thrown', async () => {
+  const error = withdrawnGeminiError();
   const result = await resolvePooledWorkerRouting({
     primary: 'codex', fallbackWorkerClasses: ['remediator-claude'], kind: 'remediator', env: {},
     modelForClass: (role) => {
-      if (role === 'remediator-claude') throw withdrawnGeminiError();
+      if (role === 'remediator-claude') throw error;
       return 'synthetic-model';
     },
     selectAccountImpl: async ({ identity }) => ({ identity, pooled: true, hold: true,
       status: 'unavailable', reason: 'accounts-unavailable' }),
   });
   assert.equal(result.hold, true);
-  assert.deepEqual(result.skipped, [{ workerClass: 'remediator-claude', reason: 'model-unresolvable' }]);
+  assert.deepEqual(result.skipped, [{
+    workerClass: 'remediator-claude', reason: 'model-unresolvable', detail: error.message,
+  }]);
+});
+
+test('account substitution rechecks the selected corporate fallback model before launch', async () => {
+  const error = new RegistryUnavailableError('remediator-claude-corp', 'readable registry has no class');
+  const snapshot = claudeAccountFixture();
+  snapshot.providerStatuses.push(GOOGLE_OK);
+  const result = await launch({
+    fallbackWorkerClasses: ['claude-code', 'gemini'],
+    modelForClass: workerClass => {
+      if (workerClass === 'remediator-claude-corp') throw error;
+      return 'synthetic-model';
+    },
+    execFileImpl: async () => ({ stdout: JSON.stringify(snapshot) }),
+  });
+  assert.equal(result.workerClass, 'gemini');
+  assert.equal(result.hold, false);
+  assert.deepEqual(result.skipped, [{
+    workerClass: 'remediator-claude-corp', reason: 'model-unresolvable', detail: error.message,
+  }]);
 });
 
 test('the committed remediator-gemini seed names an Antigravity display-name model', () => {

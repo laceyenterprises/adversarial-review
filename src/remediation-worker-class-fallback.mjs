@@ -209,7 +209,7 @@ async function readFleetQuotaStatuses({ env, hqPath, execFileImpl }) {
  * @returns {Promise<{ workerClass: string, fellBack: boolean, hold: boolean, reason: string,
  *   from?: string, to?: string, capSource?: string, primaryState?: string, resetAt?: string,
  *   holdUntil?: string, candidateState?: string,
- *   skipped?: Array<{ workerClass: string, reason: string }>, error?: string,
+ *   skipped?: Array<{ workerClass: string, reason: string, detail?: string }>, error?: string,
  *   modeRefusals?: Array<{ workerClass: string, mode: string, reason: string }> }>}
  */
 export async function resolveRemediationWorkerClassWithFallback({ remediationMode = null, ...args } = {}) {
@@ -401,6 +401,8 @@ async function resolveModeRunnableWorkerClass({
       skipped.push({ workerClass: candidate, reason: account.reason });
       continue;
     }
+    // Account selection can replace the declared identity with its corporate
+    // twin. That identity needs its own mode and model checks before launch.
     if (account) candidate = account.workerClass;
     if (refuseInMode(candidate)) {
       skipped.push({ workerClass: candidate, reason: `unrunnable-in-mode:${remediationMode}` });

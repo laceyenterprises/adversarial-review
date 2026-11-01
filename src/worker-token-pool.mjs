@@ -85,7 +85,7 @@ export async function resolvePooledWorkerRouting({ primary, fallbackWorkerClasse
       // the deferral. Preserve other account-evidence holds.
       if (error?.code === 'registry-unavailable' && fallback && kind === 'remediator') {
         return { identity: role, workerClass: role, pooled: true, hold: false,
-          status: 'unresolvable', reason: 'model-unresolvable' };
+          status: 'unresolvable', reason: 'model-unresolvable', detail: String(error?.message || error) };
       }
       if (error?.code === 'registry-unavailable') throw error;
       account = { identity: role, workerClass: role, pooled: true,
@@ -119,7 +119,7 @@ export async function resolvePooledWorkerRouting({ primary, fallbackWorkerClasse
     }
     const fallback = await select(candidate, { fallback: true });
     if (fallback?.status === 'unresolvable') {
-      skipped.push({ workerClass: candidate, reason: fallback.reason });
+      skipped.push({ workerClass: candidate, reason: fallback.reason, detail: fallback.detail });
       continue;
     }
     if (kind === 'remediator' && (!fallback || fallback.status !== 'selected')) {

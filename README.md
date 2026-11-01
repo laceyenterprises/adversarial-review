@@ -4360,6 +4360,11 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+REMGEMINI-01 follow-up: pooled fallback skips retain the registry fault in
+`skipped[].detail`, matching standalone routing. An offline regression verifies
+that account substitution still checks the selected corporate class's model
+before launch.
+
 REMGEMINI-01: Gemini remediation runs on the Antigravity harness. The local
 spawn runs the managed `agy` with the `remediator-gemini` registry model and
 the prompt as the `--print` argument, and the pre-flight probes agy's keychain

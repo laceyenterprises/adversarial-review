@@ -127,7 +127,7 @@ replay. Factual-dispute admission is the explicit closure exception described be
 
 **Owner:** follow-up remediation queue
 **Store:** `data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json`, `data/follow-up-jobs/single-review-voids/*.json`, `data/follow-up-jobs/missing-label-events/*.json`
-**Source of truth:** `src/follow-up-jobs.mjs`, `src/follow-up-branch.mjs`, `src/remediation-unpublished.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`, `src/remediation-closeout.mjs`, `src/remediation-job-ownership.mjs`
+**Source of truth:** `src/follow-up-jobs.mjs`, `src/follow-up-branch.mjs`, `src/remediation-unpublished.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/worker-token-pool.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`, `src/remediation-closeout.mjs`, `src/remediation-job-ownership.mjs`
 **Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`, `src/adapters/comms/github-pr-comments/comment-delivery.mjs`, `src/reviewer-ci-admission.mjs`
 
 ## Simplicity advisory (REVIEWSIMPLE-01)
@@ -765,7 +765,8 @@ round removed, `remediationPlan.retryAfter` set to the hold end and a
   over (`provider-untracked`, `reviews-next-round:<reviewer>`,
   `capped:<capSource>`, `resets-within-hold-window`, `unavailable:<state>`,
   `unrunnable-in-mode:<mode>`, `model-unresolvable`). A `model-unresolvable`
-  entry (REMGEMINI-01) also carries `detail`, the typed registry fault: the
+  entry (REMGEMINI-01) also carries `detail` in pooled and standalone routing,
+  the typed registry fault rendered as a string: the
   class's governed model or registry entry could not be resolved, so it was
   skipped for this launch only. A routed primary in that state carries
   `capSource: "model-unresolvable"`; when no fallback can run, the claim keeps

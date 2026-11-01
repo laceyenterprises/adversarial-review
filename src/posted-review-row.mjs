@@ -1210,6 +1210,11 @@ export function createNoProgressLaneGate({
       if (hammerResumeNeedsObservation({ hqRoot, ...identity }, logger)) {
         decision = { ...decision, lane: 'active', due: true, reason: 'hammer-resume-owed', backoffTicks: 0 };
       }
+      if (handler.finalRoundCloserOwned === true) {
+        // The watcher proved this terminal push owns closure. CI and its
+        // deadline can advance without changing the posted review fingerprint.
+        decision = { ...decision, lane: 'active', due: true, reason: 'final-round-closure-owed', backoffTicks: 0 };
+      }
       if (!decision.due && recordSkip) {
         recordNoProgressLaneSkip(rootDir, identity, {
           headSha: handler.headSha || null,

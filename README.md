@@ -1,3 +1,12 @@
+CLOSERDEADLOCK-01 keeps completed comment-only final-round push heads in the
+posted closer lane and restores already queued heads without an operator label.
+Each pass logs `owning lane=closer` and observes normal closure gates, including
+CI changes and deadlines, despite an unchanged review fingerprint. The existing
+handoff smoke covers closure observation across no-progress backoff; offline
+watcher fixtures cover parked-row recovery and the first green pass. After
+normal deployment, observe those logs on a natural final-round push. Merge
+gates, leases, round budgets and per-PR caps remain unchanged.
+
 HAMPROGRESS-01 adds run-bound closer phase receipts for the supervisor's outcome,
 wall-clock and total-token limits. Existing terminal/drain and AMA replacement
 edges retain lifetime charges. Merge safety and existing smoke promises are
@@ -2741,9 +2750,9 @@ stateDiagram-v2
     s5 --> s0: review-row.31 recovered post cannot settle its reviewed head; no charge
     s6 --> s0: review-row.32 recovered post cannot match its claim; no charge
     s2 --> s2: review-row.33 defer rereview request while claim is in flight
-    s0 --> s4: review-row.34 automatic hammer-owned-head request restored to delivered review identity with request CAS
-    s1 --> s4: review-row.35 automatic hammer-owned-head request restored to delivered review identity with request CAS
-    s3 --> s4: review-row.36 automatic hammer-owned-head request restored for closure CI evaluation with request CAS
+    s0 --> s4: review-row.34 automatic hammer-owned-head or completed final-round push request restored to delivered review identity with request CAS
+    s1 --> s4: review-row.35 automatic hammer-owned-head or completed final-round push request restored to delivered review identity with request CAS
+    s3 --> s4: review-row.36 automatic hammer-owned-head or completed final-round push request restored for closure CI evaluation with request CAS
     s4 --> [*]
     s5 --> [*]
     s6 --> [*]

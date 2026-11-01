@@ -719,6 +719,9 @@ if (scenario === 'clean') {
     for (let i = 0; i < 6; i++) await laneGate.record(handler);
     assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).state, 'no-dispatch');
     assert.equal(laneGate.evaluate(handler).run, false);
+    // A completed final-round push still owes live CI/deadline observation
+    // while its delivered review and no-progress fingerprint stay put.
+    assert.equal(laneGate.evaluate({ ...handler, finalRoundCloserOwned: true }).run, true);
     updateAmaCloserDispatchRecord(rootDir, identity(), () => ({ ...drainRecord,
       state: 'dispatch-deferred-transient', updatedAt: new Date(Date.now() - 300_001).toISOString() }));
     assert.equal(laneGate.evaluate(handler).run, false);

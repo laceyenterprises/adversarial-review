@@ -44,7 +44,10 @@ import { transferReviewerFallbackSession } from './reviewer-fallback-session.mjs
 import { readReviewerGeminiPoolAvailability, readReviewerGeminiQuotaCooldown } from './agy-reviewer-identities.mjs';
 import { reviewerRuntimeState } from './reviewer-runtime-adapter.mjs';
 import { recordNoProgressLaneRun, maybeFireOperatorDecisionRequiredAlert } from './watcher-no-progress-lane.mjs';
-import { recoverWithheldFinalRoundHead, withheldHeadRecoveryCandidates } from './comment-only-final-round.mjs';
+import {
+  recoverWithheldFinalRoundHead, withheldHeadRecoveryCandidates,
+  findFinalRemediationPushJob, isCompletedCommentOnlyFinalRoundJob,
+} from './comment-only-final-round.mjs';
 import { parkExhaustedReview } from './review-retry-exhaustion.mjs';
 import { createLabelControlObservationCache, observeOperatorLabelWakes } from './operator-label-wake.mjs';
 import { randomUUID } from 'node:crypto';
@@ -109,6 +112,7 @@ import {
   fetchReviewsForHeadForDedup,
   getStalePostedReviewBudgetSuppression,
   isExplicitOperatorReviewRetrigger,
+  isExactHeadReviewRecoveryRequested,
   isOrphanHeadReviewRequested,
   resolveFirstPassReviewBudgetSuppression,
 } from './first-pass-review-suppression.mjs';
@@ -1518,10 +1522,36 @@ export async function processReviewSubject(entry, ctx) {
         execFileImpl: execFileAsync,
         logger: console,
       });
+      // A completed final-round push owes closure, not another reviewer.
+      // Restore queued rows too: an earlier stale-head refresh may already
+      // have parked this head behind the final-push reviewer suppression.
+      let finalRoundCloserOwned = false;
+      if (effectiveDomainId === CODE_PR_DOMAIN_ID && existing && !subject.terminal
+        && ['posted', 'pending', 'pending-upstream', 'ci-blocked'].includes(existing.review_status)
+        && !explicitIntentForHead() && !isExactHeadReviewRecoveryRequested(existing)
+        && !isOrphanHeadReviewRequested(existing, subject.headSha) && !transferredHeadReview) {
+        const finalPush = findFinalRemediationPushJob(ROOT, {
+          repo: repoPath, prNumber, headSha: subject.headSha,
+        });
+        if (isCompletedCommentOnlyFinalRoundJob(finalPush) && finalPush.revisionRef) {
+          if (existing.review_status !== 'posted'
+            && latestReviewedHeadSha({ db, repoPath, prNumber }) === finalPush.revisionRef) {
+            restoreHammerOwnedReview({ db, repoPath, prNumber, reviewRow: existing,
+              reviewedHeadSha: finalPush.revisionRef, headSha: subject.headSha });
+            existing = stmtGetReviewRow.get(repoPath, prNumber);
+          }
+          finalRoundCloserOwned = existing?.review_status === 'posted'
+            && existing.reviewer_head_sha === finalPush.revisionRef;
+          if (finalRoundCloserOwned) {
+            console.log(`[watcher] owning lane=closer for ${repoPath}#${prNumber}@${subject.headSha}: ` +
+              'completed-comment-only-final-round; re-evaluating normal closure gates');
+          }
+        }
+      }
       // Resolve ownership before review refresh, CI admission, quota and budgets.
       // Queued rows must reach the same posted-review closeout in this poll.
       let hammerSuppression = null;
-      if (effectiveDomainId === CODE_PR_DOMAIN_ID && existing && !subject.terminal
+      if (!finalRoundCloserOwned && effectiveDomainId === CODE_PR_DOMAIN_ID && existing && !subject.terminal
         && ['posted', 'pending', 'pending-upstream', 'ci-blocked'].includes(existing.review_status)
         && (existing.review_status !== 'posted' || existing.reviewer_head_sha !== subject.headSha)
         && !explicitIntentForHead()
@@ -1551,7 +1581,9 @@ export async function processReviewSubject(entry, ctx) {
           repo: repoPath, prNumber, reviewedHead: existing.reviewer_head_sha,
         });
       let stalePostedReviewSuppression = { suppressed: false, reason: null };
-      let stalePostedReviewCloserSuppression = hammerSuppression || { suppressed: false, reason: null };
+      const finalRoundSuppression = finalRoundCloserOwned
+        ? { suppressed: true, reason: 'completed-comment-only-final-round' } : null;
+      let stalePostedReviewCloserSuppression = finalRoundSuppression || hammerSuppression || { suppressed: false, reason: null };
       try {
         const recoveryMatches = !subject.terminal ? withheldHeadRecoveryCandidates(ROOT, {
           repo: repoPath, prNumber, headSha: subject.headSha, reviewRow: existing,
@@ -1563,7 +1595,7 @@ export async function processReviewSubject(entry, ctx) {
             existing?.reviewer_head_sha === subject.headSha);
         });
         const needsRecoveryProbes = withheldHeadRecovery && !recoveryArmed;
-        stalePostedReviewSuppression = postedReviewHeadMoved || needsRecoveryProbes
+        stalePostedReviewSuppression = !finalRoundCloserOwned && (postedReviewHeadMoved || needsRecoveryProbes)
           ? await getStalePostedReviewAutoRereviewSuppression({
             rootDir: ROOT,
             repoPath,
@@ -1578,7 +1610,7 @@ export async function processReviewSubject(entry, ctx) {
             logger: console,
           })
           : { suppressed: false, reason: null };
-        stalePostedReviewCloserSuppression = hammerSuppression || (
+        stalePostedReviewCloserSuppression = finalRoundSuppression || hammerSuppression || (
           (postedReviewHeadMoved || needsRecoveryProbes) && !stalePostedReviewSuppression.suppressed
             ? await resolveHeadCloserCommitSuppression()
             : { suppressed: false, reason: null });
@@ -1709,6 +1741,7 @@ export async function processReviewSubject(entry, ctx) {
         postedReviewHandlers.push({
           repoPath,
           prNumber,
+          finalRoundCloserOwned,
           // WPS-01: the head this handoff was queued against. The no-progress
           // lane keys its series on (repo, pr, head) so a new push always resets
           // the series and a PR that starts moving is never held back.
@@ -1730,7 +1763,7 @@ export async function processReviewSubject(entry, ctx) {
                   'verdict-not-settled-success': {
                     exists: false,
                     reason: `auto-refresh-suppressed:${stalePostedReviewCloserSuppression.reason}`,
-                    source: 'head-closer-commit-suppression',
+                    source: finalRoundCloserOwned ? 'comment-only-final-round' : 'head-closer-commit-suppression',
                   },
                 },
               }

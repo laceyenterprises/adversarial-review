@@ -53,8 +53,8 @@ explicit conflict or deferred paths in this table.
 4. **Verify head:** source `hammer-verify-head.sh`; act on the table below.
 5. **Publish audit:** with revalidation complete and the lease held, source
    `hammer-publish.sh` without publication-only mode. Prepare audit inputs in
-   Appendix A, then build and run Appendix E's exact-head predicate.
-6. **Merge:** source `hammer-merge.sh` only after that predicate succeeds;
+   Appendix A. Run Appendix E's bounded exact-head CI wait, then build and run its predicate.
+6. **Merge:** source `hammer-merge.sh` without arguments only after that predicate succeeds;
    confirm the live merged head and finish Appendix E's closing audit.
 
 ### Phase → exit code → next action
@@ -97,6 +97,8 @@ If you have announced the same next step twice without executing it, execute it
 now. If you cannot, stop with a named terminal reason via
 `hammer-terminal-audit.mjs` (for example `procedure-stalled`). Repeating a plan
 is not progress. Never spend more than a few commands reading procedure files.
+
+Before every non-phase procedure step, export `HAM_PROCEDURE_STEP` to that step's name (for example `claim-build`) and set `HAM_PHASE_OUTCOME=claim-build-failed` before executing it. A controller `stop()` must take the failing step's explicit reason; never default to the previous phase's success (`published`, `verified`, or `ci-settled`). The terminal helper normalizes stale success reasons to `<HAM_PROCEDURE_STEP>-failed`, or `procedure-step-failed` when no step was named.
 
 On any terminal refusal, release the held lease through its existing owner
 cleanup, run `"${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-terminal-audit.mjs"
@@ -247,7 +249,7 @@ docs when applicable. The publication step renders Doc-currency; omit it from
 the details file. Missing or placeholder inputs release the lease. Keep these
 values in the same shell for the merge audit.
 
-Use `"<<RUN_DIR>>/hammer-merge.sh"` for bounded required-check waits.
+Use `source "<<RUN_DIR>>/hammer-merge.sh" --wait-ci` after publication and before the predicate for bounded exact-head required-check waits.
 GitHub calls: `ham_gh` or `ham_pr`. No `--watch` or polling loops.
 Helpers refresh per call, then refresh and retry once on a credential rejection.
 Never read or print raw token variables.
@@ -279,7 +281,7 @@ printf '\nHAM phase %s: status=%s outcome=%s lease-held=%s\n' \
 [ "$HAM_PHASE_STATUS" -eq 0 ]
 ```
 
-Before `hammer-merge`, build the terminal-remediation claim JSON and run the
+Before `hammer-merge` without arguments, wait for published-head CI, build the terminal-remediation claim JSON and run the
 predicate. Source phases in one persistent Bash shell/tool invocation; otherwise
 stop before acquiring a lease. Use dispatch's deployed scripts unchanged; never
 render copies. A failed source follows the operating-core exit-code table;
@@ -959,8 +961,14 @@ Post the PR audit comment. Use `ham_gh` with refreshed entitled credentials. Inc
 
 In the persistent merge-lease shell, `source "<<RUN_DIR>>/hammer-publish.sh"` with the exported dispatch values. Publish the validation audit under lease. If the captured starting base cannot be proven, the procedure sets `HAM_BASE_HEAD=<<REVIEWED_SHA>>` and audits the full reviewed-to-built range. Nonzero status blocks continuation and releases for a later hammer pass; it never requests review.
 
+Before building claim/predicate inputs, run `source "<<RUN_DIR>>/hammer-merge.sh" --wait-ci` in the same shell. It waits only when this run published a changed head (including a server rebase), yields the first CI wait, and reacquires under the existing lease rules. Pending checks exhaust the existing CI deadline with `required-checks-pending` / `remote-ci-timeout`, never `predicate-failed`. A run with no publication returns `ci-wait-not-needed`. This mode cannot merge and needs no predicate verdict. The normal merge invocation retains the same deadline and all merge fences.
+
+On success, refresh all exact-head inputs below. If the wait's bounded base retry changed `POST_REMEDIATION_SHA`, re-source `hammer-publish.sh` under the reacquired lease to publish the new head's audit before constructing the predicate. Phase head variables are exported for child processes.
 
 ```bash
+export HAM_PROCEDURE_STEP=predicate-input-refresh
+HAM_PHASE_OUTCOME=predicate-input-refresh-failed
+ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > "$HAM_RUN_DIR/pr-after.json"
 ham_pr --json reviews > "$HAM_RUN_DIR/reviews.json"
 
 base_enc=$(printf '%s' "$(jq -r '.baseRefName' "$HAM_RUN_DIR/pr-after.json")" | jq -sRr @uri)
@@ -1049,9 +1057,19 @@ API-publish one single-parent commit above fetched remote HEAD; rebased/multi-co
 }
 ```
 
+Bind the claim with the deployed helper; never write interpreter glue to read phase variables:
+
+```bash
+export HAM_PROCEDURE_STEP=claim-build
+HAM_PHASE_OUTCOME=claim-build-failed
+"$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-claim-head.mjs" "$HAM_RUN_DIR/terminal-remediation.json" || exit 1
+```
+
 Validate the live post-remediation head after publishing the audit. Export the owned, run-scoped verdict file for the merge helper. Remove both owned files after merge:
 
 ```bash
+export HAM_PROCEDURE_STEP=predicate
+HAM_PHASE_OUTCOME=predicate-build-failed
 HAM_PRIMARY_CHANGE_FILE=$(mktemp "${TMPDIR:-/tmp}/ham-primary-change.XXXXXX") || exit 1
 trap 'rm -f "$HAM_PRIMARY_CHANGE_FILE" "${HAM_VERDICT_FILE:-}" "${HAM_VERDICT_READY_FILE:-}"' EXIT
 chmod 600 "$HAM_PRIMARY_CHANGE_FILE"

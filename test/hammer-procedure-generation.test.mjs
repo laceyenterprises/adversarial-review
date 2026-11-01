@@ -84,10 +84,10 @@ test('HAMPROMPT-01: rendered outcome routing names an action without changing ph
     ['hammer-verify-head', 21, 0, /Appendix D.*re-enter verify-head/],
     ['hammer-verify-head', 1, 0, /stop with fixture-refusal/],
     ['hammer-publish', 0, 1, /unset HAM_COMMIT_PUBLICATION_ONLY.*run verify-head/],
-    ['hammer-publish', 0, 0, /Appendix E exact-head predicate/],
-    ['hammer-publish', 0, 'true', /Appendix E exact-head predicate/],
-    ['hammer-publish', 0, 'yes', /Appendix E exact-head predicate/],
-    ['hammer-publish', 0, '', /Appendix E exact-head predicate/],
+    ['hammer-publish', 0, 0, /Appendix E wait for exact-head checks/],
+    ['hammer-publish', 0, 'true', /Appendix E wait for exact-head checks/],
+    ['hammer-publish', 0, 'yes', /Appendix E wait for exact-head checks/],
+    ['hammer-publish', 0, '', /Appendix E wait for exact-head checks/],
     ['hammer-publish', 1, 0, /stop with fixture-refusal/],
     ['hammer-merge', 0, 0, /confirmed-merge closing audit/],
     ['hammer-merge', 21, 0, /Appendix D.*re-enter verify-head/],
@@ -134,4 +134,25 @@ publish
     assert.equal(result.stdout, 'audit-publication\n');
     assert.equal(result.stderr, '');
   }
+});
+
+test('CLOSERCIWAIT-01: deployed claim binder reads the exported phase head and preserves claims', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-claim-head-'));
+  t.after(() => rmSync(dir, { force: true, recursive: true }));
+  const path = join(dir, 'claim.json');
+  const original = { active: true, commit: { sha: 'old', parentSha: 'parent' }, auditComment: { findings: ['synthetic finding'] } };
+  writeFileSync(path, JSON.stringify(original));
+  const head = 'a'.repeat(40);
+  const helper = fileURLToPath(new URL('../bin/hammer-claim-head.mjs', import.meta.url));
+  const result = spawnSync(process.execPath, [helper, path], {
+    env: { ...process.env, POST_REMEDIATION_SHA: head }, encoding: 'utf8', timeout: 5000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(path)), { ...original, commit: { ...original.commit, sha: head } });
+  const failed = spawnSync(process.execPath, [helper, path], {
+    env: { ...process.env, POST_REMEDIATION_SHA: '' }, encoding: 'utf8', timeout: 5000,
+  });
+  assert.equal(failed.status, 1);
+  assert.match(failed.stderr, /claim-build-failed/);
+  assert.equal(JSON.parse(readFileSync(path)).commit.sha, head);
 });

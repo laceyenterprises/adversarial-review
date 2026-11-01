@@ -181,3 +181,14 @@ test('supervisor stops remain charged to the per-PR lifetime ceiling across fres
       lifetimeDispatchCeiling: 3 }).lifetimeCapExhausted, true);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test('CLOSERCIWAIT-01: a failure after publication records its step, not published', async t => {
+  const { recordHammerEarlyFailure } = await import('../src/ama/hammer-terminal-audit.mjs');
+  const root = mkdtempSync(join(tmpdir(), 'hammer-stop-step-'));
+  t.after(() => rmSync(root, { force: true, recursive: true }));
+  const env = { HQ_ROOT: root, HQ_LAUNCH_REQUEST_ID: 'lrq_fixture', HQ_WORKER_RUN_ID: 'wrun_fixture',
+    HAM_PROCEDURE_STEP: 'claim-build' };
+  recordHammerEarlyFailure('published', { env, final: true });
+  const receipt = JSON.parse(readFileSync(join(root, 'dispatch/lrq_fixture/hammer-progress/wrun_fixture/terminal-stop.json')));
+  assert.equal(receipt.reason, 'claim-build-failed');
+});

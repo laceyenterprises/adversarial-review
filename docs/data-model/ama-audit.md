@@ -317,3 +317,16 @@ retention followed by base advancement while waiting for the lease. Capturing a
 base tip alone is not evidence of a rebase. The merge phase's own successful
 server-side rebase continues to record its proved target. This tightens evidence
 semantics without changing the audit schema or granting merge authority.
+
+## Published-head CI and step outcomes (CLOSERCIWAIT-01)
+
+No store shape changes. `hammer-merge.sh --wait-ci` shares the ordinary CI wait
+and absolute deadline before the final predicate. Its successful phase outcomes
+are `ci-settled` and `ci-wait-not-needed`; these are not terminal-stop reasons.
+A pending deadline retains the existing deferred `required-checks-pending`
+attempt, `remoteCiStatus: remote-ci-timeout`, and exact-head resume evidence.
+Lease contention retains `parked:merge-lease-timeout`. Verify-head failures name
+the failed probe/admission/runtime operation instead of `verify-head-error`.
+The terminal helper normalizes stale phase successes to the exported
+`HAM_PROCEDURE_STEP` plus `-failed`, or `procedure-step-failed` if absent. Explicit
+failure reasons and existing authoritative terminal outcomes retain their meaning.

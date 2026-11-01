@@ -61,7 +61,9 @@ if (args[0] === 'advance-base') {
   const retryReads = state.retried ? (state.retryReads = (state.retryReads || 0) + 1) : 0;
   const now = Number(readFileSync(join(dir, 'clock'), 'utf8'));
   if (state.retried && !state.retryStartedAt) state.retryStartedAt = now;
-  const pending = (state.retried && process.env.SCENARIO === 'ci-slow-green' && now - state.retryStartedAt < 300) ||
+  const pending = (process.env.SCENARIO === 'prepredicate-timeout') ||
+    (process.env.SCENARIO === 'prepredicate-green' && now < 1700000060) ||
+    (state.retried && process.env.SCENARIO === 'ci-slow-green' && now - state.retryStartedAt < 300) ||
     (['pending', 'ci-clean-pending'].includes(process.env.SCENARIO) && state.checkReads === 1) ||
     (process.env.SCENARIO === 'ci-shared-deadline' && state.checkReads === 1) ||
     (retryScenario && state.retried && (retryReads === 1 || ['ci-pending', 'ci-shared-deadline'].includes(process.env.SCENARIO)));
@@ -80,6 +82,13 @@ if (args[0] === 'advance-base') {
   console.log(JSON.stringify({ ok: verdict.eligible, reasons: verdict.reasons, state: 'OPEN',
     headMatches: state.head === expected, liveHead: state.head, expectedHead: expected,
     checksConclusion: classifyCheckRollup(checks), mergeable, mergeStateStatus }));
+} else if (args[0] === 'initial-predicate') {
+  const at = Number(readFileSync(join(dir, 'clock'), 'utf8'));
+  if (process.env.SCENARIO === 'prepredicate-green') assert.ok(at >= 1700000060);
+  assert.ok(existsSync(join(dir, 'lease-held')));
+  log('initial-predicate', { at, head: state.head });
+  console.log(JSON.stringify({ eligible: true,
+    trace: { headMatch: { current: state.head }, branchProtection: { required: false } } }));
 } else if (args[0] === 'predicate') {
   const claim = JSON.parse(readFileSync(args[args.indexOf('--ham-terminal-remediation') + 1]));
   assert.equal(claim.commit.sha, state.nextRebased);

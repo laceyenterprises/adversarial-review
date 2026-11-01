@@ -27,6 +27,9 @@ function fixture(t, scenario) {
     GIT_ALLOW_PROTOCOL: 'file', GIT_AUTHOR_NAME: 'Fixture', GIT_COMMITTER_NAME: 'Fixture',
     GIT_AUTHOR_EMAIL: 'fixture@example.invalid', GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
     FIXTURE_DIR: dir, SCENARIO: scenario, REAL_NODE: process.execPath, REAL_GIT: realGit,
+    HAM_CONTROLLER_RECORD: '', HAM_CONTROLLER_CANCELLED: '0',
+    HQ_LAUNCH_REQUEST_ID: '', AGENT_OS_WORKER_LRQ_ID: '', LAUNCH_REQUEST_ID: '',
+    HAM_HQ_ROOT: dir, HAM_PROGRESS_FILE: '',
     FIXTURE_HELPER: helper, PATH: `${bin}:${process.env.PATH}` };
   const git = (args, input) => execFileSync(realGit, args, { cwd: scratch, env, input, encoding: 'utf8', timeout: 10000 }).trim();
   git(['init', '--bare', '--quiet', remote]);
@@ -83,6 +86,10 @@ case "$1" in
   */merge-lease.mjs)
     case "$2" in
       acquire)
+        if [ "$SCENARIO" = prepredicate-contention ] && [ -f "$FIXTURE_DIR/leases" ]; then
+          echo '{"timedOut":true,"waited_s":900,"holders":[{"holderPr":7}],"closingStatus":"synthetic holder deadline exhausted"}'
+          exit 75
+        fi
         if [[ "$SCENARIO" = capped-* ]]; then
           echo '{"parked":true,"reason":"max-gate-attempts","closingStatus":"HAM closing status — no merge: recovery owns the capped head."}'
           exit 70
@@ -103,8 +110,11 @@ case "$1" in
     esac ;;
   --input-type=module)
     if [ -n "\${HAM_RETRY_LEASE_ID:-}" ]; then cat >/dev/null; [ -f "$FIXTURE_DIR/lease-held" ];
+    elif [ -n "\${HAM_ADMISSION_ROOT:-}\${HAM_CHECKS_ROOT:-}" ]; then exec "$REAL_NODE" "$@";
     elif [ -n "\${POST_REMEDIATION_SHA:-}" ]; then cat >/dev/null; exec "$REAL_NODE" "$FIXTURE_HELPER" gate;
     else exec "$REAL_NODE" "$@"; fi ;;
+  */hammer-progress.mjs|*/hammer-terminal-audit.mjs) echo '{}' ;;
+  */hammer-ci-stop.mjs) exit 0 ;;
   */ama-check.mjs) exec "$REAL_NODE" "$FIXTURE_HELPER" predicate "$@" ;;
   */primary-change-context.mjs) echo '{}' ;;
   */load-aware-timeout.mjs) if [ "$2" = 900 ]; then echo scale >> "$FIXTURE_DIR/wait-scales"; fi; echo "$2" ;;
@@ -181,7 +191,24 @@ source "$FIXTURE_DIR/hammer-publish.sh"
 status=$?
 echo "publish=$status outcome=$HAM_PHASE_OUTCOME held=$HAM_MERGE_LEASE_HELD"
 [ "$status" -eq 0 ] || exit "$status"
+if [[ "$SCENARIO" = prepredicate-* ]]; then
+  if [ "$SCENARIO" = prepredicate-contention ]; then
+    ham_release_merge_lease --yield || exit $?
+    source "$FIXTURE_DIR/hammer-verify-head.sh"
+    status=$?
+    echo "postpublish-verify=$status outcome=$HAM_PHASE_OUTCOME held=$HAM_MERGE_LEASE_HELD"
+    exit "$status"
+  fi
+  if [ "$SCENARIO" = prepredicate-unchanged ]; then unset HAM_PUSHED_HEAD HAM_PUSHED_FROM_HEAD; fi
+  source "$FIXTURE_DIR/hammer-merge.sh" --wait-ci
+  status=$?
+  echo "wait=$status outcome=$HAM_PHASE_OUTCOME remote=\${HAM_REMOTE_CI_STATUS:-} held=$HAM_MERGE_LEASE_HELD"
+  [ "$status" -eq 0 ] || exit "$status"
+  "$REAL_NODE" -e 'require("node:fs").writeFileSync(process.env.FIXTURE_DIR+"/exported-head", process.env.POST_REMEDIATION_SHA)'
+  "$REAL_NODE" "$FIXTURE_HELPER" initial-predicate > "$FIXTURE_DIR/verdict" || exit $?
+else
 printf '{"eligible":true,"trace":{"headMatch":{"current":"%s"},"branchProtection":{"required":false}}}' "$HAM_PRODUCED_HEAD" > "$FIXTURE_DIR/verdict"
+fi
 HAM_VERDICT_FILE="$FIXTURE_DIR/verdict"
 HAM_VERDICT_READY_FILE="$HAM_VERDICT_FILE"
 if [ "$SCENARIO" = ci-touching ]; then HAM_REBASE_ATTEMPTS="$HAM_REBASE_ATTEMPT_CAP"; fi
@@ -553,5 +580,44 @@ for (const scenario of ['ci-clean-overlap', 'ci-clean-pending']) {
     assert.equal(f.git(['rev-parse', 'HEAD']), f.rebased);
     assert.notEqual(f.git(['merge-base', f.nextBase, f.rebased]), f.nextBase,
       'main advanced without invalidating the mergeable exact head');
+  });
+}
+
+for (const scenario of ['prepredicate-green', 'prepredicate-timeout', 'prepredicate-unchanged', 'prepredicate-contention']) {
+  test(`CLOSERCIWAIT-01: ${scenario}`, t => {
+    const f = fixture(t, scenario);
+    const result = f.run();
+    const output = result.stdout + result.stderr;
+    assert.equal(result.signal, null, output);
+    assert.doesNotMatch(output, /predicate-failed|verify-head-error/);
+    if (scenario === 'prepredicate-contention') {
+      assert.equal(result.status, 20, output);
+      assert.match(output, /publish=0 outcome=published/);
+      assert.match(output, /postpublish-verify=20 outcome=parked:merge-lease-timeout/);
+      return;
+    }
+    const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    const predicates = events.filter(e => e.kind === 'initial-predicate');
+    if (scenario === 'prepredicate-timeout') {
+      assert.equal(result.status, 20, output);
+      assert.match(output, /outcome=required-checks-pending remote=remote-ci-timeout/);
+      assert.equal(predicates.length, 0);
+      assert.equal(events.some(e => e.kind === 'gh' && e.value[1] === 'merge'), false);
+      return;
+    }
+    assert.equal(result.status, 0, output);
+    assert.equal(predicates.length, 1);
+    assert.equal(readFileSync(join(f.dir, 'exported-head'), 'utf8'), f.rebased);
+    assert.match(output, /outcome=merged/);
+    if (scenario === 'prepredicate-unchanged') {
+      assert.match(output, /outcome=ci-wait-not-needed/);
+      assert.equal(events.findIndex(e => e.kind === 'checks') > events.findIndex(e => e.kind === 'initial-predicate'), true);
+    } else {
+      const checks = events.filter(e => e.kind === 'checks');
+      assert.equal(checks[0].value.conclusion, 'PENDING');
+      assert.equal(checks[0].value.held, false);
+      assert.ok(predicates[0].value.at - checks[0].value.at >= 60);
+      assert.equal(readFileSync(join(f.dir, 'wait-scales'), 'utf8').trim().split('\n').length, 1);
+    }
   });
 }

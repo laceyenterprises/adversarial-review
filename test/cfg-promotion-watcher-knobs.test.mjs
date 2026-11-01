@@ -8,7 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import os, { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { AgentOSConfigError, loadConfig, ENV_ALIASES } from '../src/config-loader.mjs';
@@ -25,6 +25,10 @@ import {
   resolveWatcherDrainMaxMs,
 } from '../src/watcher.mjs';
 import { resetRoleConfigCache } from '../src/role-config.mjs';
+
+// The reviewer and HQ-dispatch timeout resolvers scale by live host load, so a
+// busy host would inflate the exact values asserted below. Pin an idle host.
+test.beforeEach(t => t.mock.method(os, 'loadavg', () => [0, 0, 0]));
 
 const ALL_NEW_FLAT_KEYS = Object.freeze([
   'remediation.max_concurrent_jobs',

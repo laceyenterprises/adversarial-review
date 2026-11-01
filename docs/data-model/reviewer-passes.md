@@ -2,6 +2,9 @@
 
 **Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `src/review-state.mjs`, `src/review-state-statements.mjs`, `src/review-state-db.mjs`, `src/reviewer-route-selection.mjs`, `src/reviewer-pass-tokens.mjs`, `src/reviewer-harness.mjs`, `src/ama/closer-pass-attempt.mjs`, `src/reviewer-pass-reaper.mjs`, `src/reviewer-spawn-settle.mjs`, `src/pollonce-phases.mjs`, `src/daemon-bounce-posted-review.mjs`, `src/orphan-post-reconcile.mjs`, and `src/follow-up-jobs.mjs`
 
+AGYTELEMETRY-01 counter decoding and reconciliation additionally use
+`src/agy-usage.mjs` as a source of truth.
+
 ## Ownership
 
 - Store: `data/reviews.db`
@@ -169,11 +172,46 @@ each chunk's provider usage and sums the existing token and cost fields into
 one pass. Provider totals are summed without adding overlapping component
 buckets again. Missing usage on some chunks marks the aggregate partial;
 missing usage on every chunk leaves usage absent for the existing fallback.
+Chunked Antigravity passes sum measured counters and retain `agy-measured`
+provenance, but omit per-conversation `agyConversationId`, `agySessionTotal`,
+`agyRequestTotal` and `agyUsageMismatch`. Those fields describe one invocation,
+not an aggregate; their absence on chunked passes is unknown reconciliation
+evidence, never proof that request and session totals agreed.
+
+AGYTELEMETRY-01 adds `token_source='agy-measured'` for conversation-bound
+Antigravity counters. Request totals from valid planner rows (or the dedicated
+account helper) take precedence over stream session totals; missing, invalid,
+zero helper or oversized/unreadable transcript evidence falls back to measured
+session totals. If neither is available, the existing estimate remains.
+The transcript byte cap is 8 MiB. Local roots honor the checkout's `GEMINI_HOME`,
+otherwise `$HOME/.gemini`; dedicated users return counters through the helper.
+
+For these rows, `token_input` excludes cached prompt tokens:
+raw prompt input minus `token_cache_read`; `token_output` includes reasoning.
+`token_total` is input + cache read + output, equivalent to the raw inclusive
+prompt + output total. Reasoning remains reported separately and is not added
+again. Cache reads are therefore billed only at their cache rate, rather than
+at both input and cache rates. Gemini's prompt counter includes cached content
+([provider contract](https://googleapis.github.io/js-genai/release_docs/interfaces/types.UsageMetadata.html)).
+`metadata_json` additionally stores:
+
+- `agyConversationId`: the unique conversation ID used to join evidence.
+- `agySessionTotal`: stream-reported inclusive total, or null when absent.
+- `agyRequestTotal`: summed inclusive prompt + output request counters, or null
+  when reconciliation evidence is unavailable.
+- `agyUsageMismatch`: true when both totals exist and differ; false alone does
+  not prove reconciliation when either total is null.
+
+Derived pricing uses the normalized model from usage, even when the hosted
+`reviewer_model` stamp retains its display token. An estimated/fallback price
+leaves `token_cost_usd` NULL for `agy-measured`; only a non-estimated price can
+derive cost. Authoritative `costUSD` evidence retains its existing precedence.
 
 `token_total` preserves a provider-reported total when present. Without one,
 Codex uses input + output because reasoning is included in output; Claude uses
 input + output + cache read + cache write because its input bucket excludes
-cache traffic and thinking is included in output; Gemini uses prompt input +
+cache traffic and thinking is included in output; `agy-measured` uses uncached
+input + cache read + inclusive output; other Gemini sources use prompt input +
 candidate output + thoughts + tool context. Other sources fall back to input +
 output + reasoning. Cache and reasoning columns remain available for analysis
 even when they overlap a provider total. Schema convergence does not recompute

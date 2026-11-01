@@ -445,3 +445,11 @@ qualifiers such as Preview, Exp 1206 or Thinking are not reasoning levels and
 remain null. An incomplete execution object stamps an unknown harness; model
 family/display names never fill an absent runtime identity. Existing null effort
 renders n/a, with unchanged verdict headings, persistence fields and lifecycle.
+
+## Exhausted-cycle verdict capture
+
+`metadata_json.verdictOnly: true` records a final verdict for a new builder head
+after review-cycle exhaustion. The runtime subject context also carries this
+boolean. Normal posting and pass recovery both suppress remediation job creation.
+The existing delivered-pass journal, keyed by repository, PR and head, bounds
+automatic admission to one delivered verdict per distinct builder commit.

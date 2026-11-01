@@ -18,6 +18,8 @@ import {
   stmtRestoreSameHeadSuppressedReviewPosted,
 } from './review-state-db.mjs';
 
+import { isExhaustedHeadVerdictRequested } from './exhausted-head-verdict.mjs';
+
 const execFileAsync = promisify(execFile);
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -47,6 +49,7 @@ export function resolveFirstPassReviewBudgetSuppression({
   hasCompletedReviewerRereviewAfterImpl = hasCompletedReviewerRereviewAfter,
 } = {}) {
   const normalizedLabelNames = new Set(normalizeLabelNames(labelNames));
+  if (isExhaustedHeadVerdictRequested(reviewRow, currentHeadSha)) return { suppressed: false, reason: 'exhausted-head-verdict' };
   if (
     normalizedLabelNames.has(REVIEWER_CYCLE_CAP_REACHED_LABEL) ||
     isAutomaticReviewCycleCapPause(reviewRow)

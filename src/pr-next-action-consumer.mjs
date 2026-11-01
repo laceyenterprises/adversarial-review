@@ -1,3 +1,4 @@
+import { owesExhaustedHeadVerdict, hasUnreviewedBuilderHead } from './exhausted-head-verdict.mjs';
 // ── NXA-02 consumer seam for the next-action shadow ──────────────────────────
 //
 // What the current closure consumers import: faithful legacy adapters, evidence
@@ -157,7 +158,13 @@ export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, cand
       : launchRecord?.launchRequestId ? { lrqId: launchRecord.launchRequestId, headSha: head } : null;
   const mergedReceipt = lease?.terminalOutcome === 'succeeded'
     || launchRecord?.terminalOutcome === 'succeeded' || launchRecord?.outcome === 'succeeded';
-  const cap = { headSha: head, recordedAt: input.hammerCapRecordedAt ?? null, retryExhausted: input.retryExhausted === true, lifetimeExhausted: input.lifetimeExhausted === true,
+  const staleBuilderHead = hasUnreviewedBuilderHead({ ...input, currentHead: head });
+  const exhaustedBuilderHead = owesExhaustedHeadVerdict({
+    exhausted: input.reviewState?.reviewCycleExhausted === true,
+    headSha: head, reviewedHeadSha: input.reviewState?.headSha,
+    closerAuthored: !staleBuilderHead,
+  });
+  const cap = { headSha: staleBuilderHead ? input.reviewState.headSha : head, recordedAt: input.hammerCapRecordedAt ?? null, retryExhausted: input.retryExhausted === true, lifetimeExhausted: input.lifetimeExhausted === true,
     ...(input.operatorApprovalApplied === true ? { operatorApprovalApplied: true } : {}) };
   const explicitReview = input.closerAuthoredStale?.decision === 'rereview-exact-head'
     && head && input.reviewState?.headSha
@@ -188,6 +195,7 @@ export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, cand
     policy: { strictMode: input.strictMode !== false, strictNonBlockingRemediation: input.strictNonBlockingRemediation !== false,
       ...(input.operatorLogins ? { operatorLogins: input.operatorLogins } : {}),
       ...(input.operatorLabelActorEnforcement ? { operatorLabelActorEnforcement: input.operatorLabelActorEnforcement } : {}),
+      exhaustedBuilderHead,
       reviewCeilingReached: reviewCeilingOwner({ row: input.reviewAdmissionRow, headSha: head,
         ...(typeof input.reviewCeilingReached === 'boolean' ? { ceilingReached: input.reviewCeilingReached } : {}) }) === 'hammer', hammerCap: cap,
       ...(typeof autonomousMergeExecutionEnabled === 'boolean' ? { autonomousMergeExecutionEnabled } : {}) },

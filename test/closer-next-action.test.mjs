@@ -1250,3 +1250,25 @@ test('APPROVALREARM-01: watcher and closer share the gate-excluded hold baseline
   assert.equal(result.dispatched, false);
   assert.equal(result.reason, 'hammer-stop-awaiting-input-change');
 });
+
+
+test('EXHAUSTEDHEADOWNER-01: closure refresh owns the new builder head without old retry debt or deadlines', async t => {
+  const rootDir = root(t);
+  const observedAt = '2026-01-02T00:00:00.000Z';
+  const passSnapshot = deriveNextActionSnapshot({ base: base(), anchors: { postedAt: AT } });
+  const options = { rootDir, passSnapshot, subjectKey: identity.repo + '#' + identity.prNumber, observedAt,
+    candidate: { headSha: HEAD, prState: 'OPEN', mergeable: 'MERGEABLE' },
+    autonomousMergeExecutionEnabled: true,
+    input: { currentHead: HEAD, reviewState: { ...clean, headSha: OLD, postedAt: AT, reviewCycleExhausted: true },
+      retryExhausted: true, reviewCeilingReached: true, roundsLeft: false, checks: 'SUCCESS', lease: null } };
+  const first = await resolveClosureNextAction(options);
+  assert.equal(first.decision.actor, 'reviewer');
+  assert.equal(first.decision.deadline.anchoredAt, observedAt);
+  assert.deepEqual(first.snapshot.anchors, { firstActionableAt: observedAt });
+  const later = await resolveClosureNextAction({ ...options, observedAt: '2026-01-02T01:00:00.000Z' });
+  assert.equal(later.decision.deadline.anchoredAt, observedAt, 'ticks cannot extend this head budget');
+  const findings = await resolveClosureNextAction({ ...options, input: { ...options.input, retryExhausted: false,
+    reviewState: { ...clean, reviewCycleExhausted: true, verdict: 'comment-only', nonBlockingFindingCount: 1 } } });
+  assert.equal(findings.decision.actor, 'hammer');
+  assert.equal(hasHammerDispatchIntent(findings, identity), true);
+});

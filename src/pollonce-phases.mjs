@@ -1,4 +1,5 @@
 import { observeOperatorLabelReviewWake } from './operator-label-review-wake.mjs';
+import { readHammerRetryCapLedger, evaluateHammerRetryCap } from './ama/hammer-retry-cap.mjs';
 import { repositoryObservationCache } from './repository-state-cache.mjs';
 import { observeTtmReviewLane } from './ttm-owner.mjs';
 import { maybeRunDocsFastPath } from './docs-fast-path.mjs';
@@ -152,6 +153,8 @@ import {
   quotaHoldDecision,
 } from './quota-exhaustion.mjs';
 import {
+  countCompletedReviewerRereviewRounds,
+  reviewCycleExhaustedFromRounds,
   countReviewCeilingAttempts,
   countReviewCeilingUnits,
 } from './review-ceiling-metrics.mjs';
@@ -269,7 +272,8 @@ import {
   spawnReviewer,
 } from './reviewer-spawn-settle.mjs';
 import { maybeDispatchReviewerTimeoutExhaustedMergeAgent } from './reviewer-timeout-exhausted-dispatch.mjs';
-import { maybeRouteReviewCycleCapToHammer } from './review-cycle-cap-hammer.mjs';
+import { admitExhaustedHeadVerdict, isExhaustedHeadVerdictRequested } from './exhausted-head-verdict.mjs';
+import { isReviewCycleCapRoutedToHammer, maybeRouteReviewCycleCapToHammer } from './review-cycle-cap-hammer.mjs';
 import { latestReviewedHeadSha, maybeRouteCiBlockedToHammer } from './ci-blocked-hammer.mjs';
 import { hammerHeadOwnership } from './hammer-head-ownership.mjs';
 import { restoreHammerOwnedReview, declineSuppressedAmaRecoveryRereview } from './closer-head-rereview-decline.mjs';
@@ -1451,6 +1455,42 @@ export async function processReviewSubject(entry, ctx) {
         }
       }
 
+      const resolveHeadCloserCommitSuppression = createHeadCloserCommitSuppressionResolver({
+        repoPath,
+        prNumber,
+        headSha: subject.headSha,
+        execFileImpl: execFileAsync,
+        logger: console,
+      });
+      // EXHAUSTEDHEADOWNER-01: one delivered verdict per distinct builder head.
+      // The request CAS coalesces ticks and refuses to overwrite a live claim.
+      if (effectiveDomainId === CODE_PR_DOMAIN_ID && existing?.reviewer_head_sha
+        && existing.reviewer_head_sha !== subject.headSha && !subject.terminal
+        && !isExhaustedHeadVerdictRequested(existing, subject.headSha)) {
+        const ledger = summarizePRRemediationLedger(ROOT, { repo: repoPath, prNumber });
+        const budget = resolveRoundBudgetForJob({ linearTicketId, riskClass: ledger.latestRiskClass }, { rootDir: ROOT });
+        const exhausted = reviewCycleExhaustedFromRounds({
+          effectiveRoundBudget: resolveMaxRemediationRounds({ roundBudget: budget.roundBudget, latestMaxRounds: ledger.latestMaxRounds }),
+          completedRemediationRounds: ledger.completedRoundsForPR,
+          completedRereviewRounds: countCompletedReviewerRereviewRounds({ db, rootDir: ROOT, repoPath, prNumber }),
+        });
+        const loaded = loadConfigCached();
+        const authority = resolveMergeAuthorityConfigFromDomain(loadDomainConfig(ROOT, effectiveDomainId),
+          loaded.getMergeAuthorityConfig(), { fallbackSources: loaded.sources || {} });
+        const lifetimeExhausted = evaluateHammerRetryCap(readHammerRetryCapLedger(ROOT, { repo: repoPath, prNumber }), {
+          jobKey: subject.headSha, headSha: subject.headSha, lifetimeDispatchCeiling: authority.hammerLifetimeDispatchCeiling,
+        }).lifetimeCapExhausted;
+        existing = await admitExhaustedHeadVerdict({
+          lifetimeExhausted,
+          exhausted: exhausted || isReviewCycleCapRoutedToHammer({ db, repoPath, prNumber, reviewRow: existing, labelNames: prLabelNames }),
+          headSha: subject.headSha, row: existing,
+          countDelivered: () => countReviewCeilingUnits({ db, rootDir: ROOT, repoPath, prNumber, headSha: subject.headSha }),
+          classifyCloser: resolveHeadCloserCommitSuppression,
+          request: args => requestReviewRereview({ rootDir: ROOT, db, repo: repoPath, prNumber, ...args }),
+          readRow: () => stmtGetReviewRow.get(repoPath, prNumber),
+        });
+      }
+      const exhaustedHeadVerdict = isExhaustedHeadVerdictRequested(existing, subject.headSha);
       const cycleCapConfig = resolveReviewCycleCapConfig({
         loadConfigImpl: loadConfigCached,
         logger: console,
@@ -1472,7 +1512,7 @@ export async function processReviewSubject(entry, ctx) {
       // CAPROUTE-01: route before generic failed-row retry admission. A cap
       // failure is an ownership handoff, including when revision_ref is stale.
       if (!explicitIntentForHead() && !isExplicitOperatorReviewRetrigger(existing) && !isOrphanHeadReviewRequested(existing, subject.headSha)
-        && !transferredHeadReview) {
+        && !transferredHeadReview && !exhaustedHeadVerdict) {
         if ((await routeReviewCycleCapToHammer(stmtGetReviewRow.get(repoPath, prNumber))).handled) return;
       }
 
@@ -1503,7 +1543,7 @@ export async function processReviewSubject(entry, ctx) {
       // That suppression is state-aware rather than raw-label-based so stale
       // labels and `awaiting-rereview` handoffs still re-arm review.
       let cappedClosure = false;
-      if (!explicitIntentForHead() && effectiveDomainId === CODE_PR_DOMAIN_ID && existing?.reviewer_head_sha !== subject.headSha && !transferredHeadReview) {
+      if (!explicitIntentForHead() && effectiveDomainId === CODE_PR_DOMAIN_ID && existing?.reviewer_head_sha !== subject.headSha && !transferredHeadReview && !exhaustedHeadVerdict) {
         const ledger = summarizePRRemediationLedger(ROOT, { repo: repoPath, prNumber });
         const roundBudget = resolveRoundBudgetForJob({
           linearTicketId, riskClass: ledger.latestRiskClass,
@@ -1526,13 +1566,6 @@ export async function processReviewSubject(entry, ctx) {
           (ctx.warn || console.warn)(`[watcher] ceiling closeout wake drain failed for ${repoPath}#${prNumber}: ${error?.message || error}`);
         }
       }
-      const resolveHeadCloserCommitSuppression = createHeadCloserCommitSuppressionResolver({
-        repoPath,
-        prNumber,
-        headSha: subject.headSha,
-        execFileImpl: execFileAsync,
-        logger: console,
-      });
       // A completed final-round push owes closure, not another reviewer.
       // Restore queued rows too: an earlier stale-head refresh may already
       // have parked this head behind the final-push reviewer suppression.
@@ -1540,7 +1573,7 @@ export async function processReviewSubject(entry, ctx) {
       if (effectiveDomainId === CODE_PR_DOMAIN_ID && existing && !subject.terminal
         && ['posted', 'pending', 'pending-upstream', 'ci-blocked'].includes(existing.review_status)
         && !explicitIntentForHead() && !isExactHeadReviewRecoveryRequested(existing)
-        && !isOrphanHeadReviewRequested(existing, subject.headSha) && !transferredHeadReview) {
+        && !isOrphanHeadReviewRequested(existing, subject.headSha) && !transferredHeadReview && !exhaustedHeadVerdict) {
         const finalPush = findFinalRemediationPushJob(ROOT, {
           repo: repoPath, prNumber, headSha: subject.headSha,
         });
@@ -1572,7 +1605,7 @@ export async function processReviewSubject(entry, ctx) {
         && (existing.review_status !== 'posted' || existing.reviewer_head_sha !== subject.headSha)
         && !explicitIntentForHead()
         && !isExplicitOperatorReviewRetrigger(existing)
-        && !isOrphanHeadReviewRequested(existing, subject.headSha) && !transferredHeadReview) {
+        && !isOrphanHeadReviewRequested(existing, subject.headSha) && !transferredHeadReview && !exhaustedHeadVerdict) {
         try {
           hammerSuppression = await resolveHeadCloserCommitSuppression();
           observeReviewLane(hammerSuppression);
@@ -2992,7 +3025,8 @@ export async function processReviewSubject(entry, ctx) {
 
       // HAMATTEST-02: the bounded exact-head recovery request must reach an
       // actor even when earlier heads exhausted the ordinary review budget.
-      const handoffReviewAdmission = isOrphanHeadReviewRequested(current, subject.headSha)
+      const handoffReviewAdmission = isExhaustedHeadVerdictRequested(current, subject.headSha)
+        || isOrphanHeadReviewRequested(current, subject.headSha)
         || hammerHandoffReviewBypass({ db, rootDir: ROOT,
         repo: repoPath, prNumber, headSha: subject.headSha, row: current });
       const roundBudgetDecision = evaluateRoundBudgetForReview({
@@ -3946,7 +3980,7 @@ export async function processReviewSubject(entry, ctx) {
               // its operator marker only bypasses closer-head suppression.
               const explicitOperatorReviewRetrigger = isExplicitOperatorReviewRetrigger(current);
               const orphanHeadReview = isOrphanHeadReviewRequested(current, reviewerHeadSha);
-              const handoffReviewBypass = !forcedReviewIntent && (orphanHeadReview || hammerHandoffReviewBypass({ db, rootDir: ROOT, repo: repoPath,
+              const handoffReviewBypass = !forcedReviewIntent && (isExhaustedHeadVerdictRequested(current, reviewerHeadSha) || orphanHeadReview || hammerHandoffReviewBypass({ db, rootDir: ROOT, repo: repoPath,
                 prNumber, headSha: reviewerHeadSha, row: current }));
               const closerHead = await readPreflight('closer');
               if (closerHead?.suppressed && !explicitOperatorReviewRetrigger && !orphanHeadReview && !handoffReviewBypass) {
@@ -4018,7 +4052,7 @@ export async function processReviewSubject(entry, ctx) {
                 !skipReviewerSpawnReason
                 && priorReviewAttemptCount >= hardReviewAttemptCeiling
                 && (forcedReviewIntent || !explicitOperatorReviewRetrigger)
-                && !fleetSelfRepairTrailerOnlyBypass && !handoffReviewBypass
+                && !fleetSelfRepairTrailerOnlyBypass && (!handoffReviewBypass || isExhaustedHeadVerdictRequested(current, reviewerHeadSha))
               ) {
                 console.log(
                   `[watcher] Skipping re-review for ${repoPath}#${prNumber}: hard review ` +
@@ -4097,6 +4131,7 @@ export async function processReviewSubject(entry, ctx) {
               // Share the refreshed account with both fallback selection stages.
               afhGrounding = { ...afhGrounding, codexAccountSelection: refreshCodexAccount() };
               const spawnReviewerArgs = {
+                verdictOnly: isExhaustedHeadVerdictRequested(current, reviewerHeadSha),
                 ...reviewerArmExecution(route),
                 ...(route.reviewerArmDefaultRoute ? { reviewerArmDefaultRoute: route.reviewerArmDefaultRoute } : {}),
                 branch: subject.headRefName || subject.branch || null,

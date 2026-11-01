@@ -51,6 +51,30 @@ test('terminal-stop is recorded only by the explicit final run exit', () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test('the progress CLI takes --final in any position and rejects malformed calls with usage', () => {
+  const root = mkdtempSync(join(tmpdir(), 'hammer-progress-cli-'));
+  try {
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+      !/TOKEN|CREDENTIAL|^HAM_|^HQ_|^AGENT_OS_|^LAUNCH_REQUEST_ID$/.test(key)));
+    Object.assign(env, { HQ_ROOT: root, HQ_LAUNCH_REQUEST_ID: 'lrq_fixture', HQ_WORKER_RUN_ID: 'wrun_fixture' });
+    const cli = (...args) => spawnSync(process.execPath, [join(repoRoot, 'bin/hammer-progress.mjs'), ...args],
+      { env, encoding: 'utf8', timeout: 30_000 });
+    const path = join(root, 'dispatch/lrq_fixture/hammer-progress/wrun_fixture/terminal-stop.json');
+    for (const args of [[], ['not-a-milestone'], ['terminal-stop', 'checks-red'], ['terminal-stop', '--final']]) {
+      const result = cli(...args);
+      assert.equal(result.status, 64, args.join(' '));
+      assert.match(result.stderr, /^usage: hammer-progress /);
+    }
+    assert.equal(existsSync(path), false);
+    const leading = cli('--final', 'terminal-stop', 'checks-red');
+    assert.equal(leading.status, 0, leading.stderr);
+    assert.equal(JSON.parse(readFileSync(path, 'utf8')).reason, 'checks-red');
+    assert.equal(cli('terminal-stop', '--final', 'later-reason').status, 0);
+    assert.equal(JSON.parse(readFileSync(path, 'utf8')).reason, 'checks-red');
+    assert.equal(cli('verify-head').status, 0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 // Runs the merge phase's own terminal-audit helper, then the closer exit helper,
 // as one closer run would; every host side effect except the receipt is stubbed.
 function closerRun(t) {

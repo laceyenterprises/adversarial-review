@@ -8,6 +8,7 @@ import { readHostIdentitySync } from './dispatch-files-client.mjs';
 import { recoverInfrastructureChecks } from './ci-recovery.mjs';
 import { holdRemediationForCiInfrastructure, resumeCiInfrastructureRound, deferCiInfrastructureProbe, clearCiInfrastructureWait } from './remediation-ci-infrastructure.mjs';
 import { resolveOsgRemediatorRoute } from './osg-remediator.mjs';
+import { recordRemediationMesShadow } from './mes-shadow-hook.mjs';
 import { readDispatchStatus } from './producer-contracts/launch-status.mjs';
 import { findCommittedUnpublishedWork } from './remediation-unpublished.mjs';
 import { remediationCloseout, closeoutRereview, refusedCloseout } from './remediation-closeout.mjs';
@@ -499,6 +500,8 @@ function createRemediationRuntime({
       spawnedWorker.child?.once?.('error', (error) => {
         spawnedWorker.recordedOutcome = localWorkerErrorOutcome(spawnedWorker, error);
       });
+      // MES-06: shadow record of this round's resolved model; unawaited, bounded, never throws.
+      if (request.mesJob) void recordRemediationMesShadow({ job: request.mesJob, workerClass, worker: spawnedWorker, workspaceDir: request.workspaceDir, env });
       return createLocalRemediationHandle({
         runRef: String(
           request.idempotencyKey || spawnedWorker.launchRequestId || spawnedWorker.processId || '',
@@ -3729,7 +3732,7 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
       replyPath,
       hqRoot,
       launchRequestId: replyStorageKey,
-      jobId: claimed.job.jobId,
+      jobId: claimed.job.jobId, mesJob: claimed.job, // MES-06 shadow input, local mode only
       modelResolution: remediatorRouting.modelResolution || codexModelResolution || claudeModelResolution,
       requiresWorkflowPush: Boolean(workflowPushPreflight?.workflowTouch?.touches),
       allowConflictedBase: conflictedBase?.allowConflictedBase === true,

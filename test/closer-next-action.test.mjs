@@ -876,7 +876,7 @@ function redCiFixture(t, { findings = true, elapsed = 60_000, jobStatus = null, 
     const dir = getFollowUpJobDir(f.args.rootDir, key);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, `${followUpJobFilePrefix(jobRepo, 5)}synthetic.json`), JSON.stringify({
-      repo: jobRepo, prNumber: 5, revisionRef: jobHead, status: jobStatus, createdAt: jobCreatedAt, reviewBody: body,
+      repo: jobRepo, prNumber: 5, revisionRef: jobHead, status: jobStatus, lastHeartbeatAt: new Date().toISOString(), createdAt: jobCreatedAt, reviewBody: body,
     }));
   }
   return f;
@@ -930,7 +930,7 @@ test('missing remediation job is named truthfully and admission expires across p
 
 test('a missing queue job replaces a stale pass owner before red-CI routing', async t => {
   const f = redCiFixture(t, { findings: false });
-  f.args.passSnapshot = base({ remediation: { roundsLeft: true, job: { status: 'in_progress', headSha: HEAD } } });
+  f.args.passSnapshot = base({ remediation: { roundsLeft: true, job: { status: 'in_progress', live: true, headSha: HEAD } } });
   const result = await maybeDispatchAmaClosureFor(f.args);
   assert.deepEqual(tuple(result.nextAction), ['hammer', 'hammer', 'ci-red-clean-verdict']);
   assert.equal(result.dispatched, true);

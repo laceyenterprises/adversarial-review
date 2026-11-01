@@ -286,7 +286,7 @@ test('active remediation scan skips corrupt and quota-held pending jobs', (t) =>
   writeFileSync(join(dir, 'o__r-pr-1-corrupt.json'), '{');
   writeFileSync(join(dir, 'o__r-pr-1-held.json'), JSON.stringify({ repo: 'o/r', prNumber: 1,
     remediationPlan: { retryAfter: '2026-10-01T00:00:00Z' } }));
-  writeFileSync(join(dir, 'o__r-pr-2-active.json'), JSON.stringify({ repo: 'o/r', prNumber: 2 }));
+  writeFileSync(join(dir, 'o__r-pr-2-active.json'), JSON.stringify({ repo: 'o/r', prNumber: 2, status: 'in_progress', lastHeartbeatAt: '2026-09-27T00:00:00Z' }));
   const logger = { warn() {} };
   assert.equal(findActiveRemediationJob(rootDir, { repo: 'o/r', prNumber: 1 },
     { logger, now: '2026-09-27T00:00:00Z' }), null);

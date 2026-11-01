@@ -1128,6 +1128,24 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+REMJOBPHANTOM-01: pending jobs retain five minutes of pre-spawn custody from
+`pendingAt` or initial `createdAt`; a claim without a worker record retains
+five minutes from `claimedAt`. Invalid or future timestamps grant no custody.
+Spawned workers require a non-terminal job/worker and either matching local
+PID/start identity or a progress heartbeat younger than five minutes. Failed-CI
+closeout without proven publication projects the selected retry successor as
+live independently of its predecessor worker; reconciliation still enforces
+the existing retry budget before requeue. Terminal records and stale liveness
+evidence release closure admission without job-file mutation; workspace and
+lock existence never prove a worker.
+The shared remediation observation records the evaluated `job.live` boolean.
+An overdue, exact-head final-push hammer/closer handoff restores parked review
+rows through the existing request CAS and makes the normal closer observer due.
+Normal intent locking, launch reconciliation, dead-lease release, lease CAS,
+budgets, caps and blocking-finding gates remain authoritative. Every observed
+stale job names its reclaim reason and successor lane. No lifecycle state or
+parallel dispatch path is added.
+
 CLOSERDEADLOCK-01: an exact head recorded by a completed comment-only final
 round with `completion.finalRemediationPush = true` and a head-bound suppressed
 re-review handoff stays in the posted closer lane. The watcher suppresses stale

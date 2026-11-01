@@ -1533,7 +1533,12 @@ export async function processReviewSubject(entry, ctx) {
         const finalPush = findFinalRemediationPushJob(ROOT, {
           repo: repoPath, prNumber, headSha: subject.headSha,
         });
-        if (isCompletedCommentOnlyFinalRoundJob(finalPush) && finalPush.revisionRef) {
+        const handoff = finalPush?.reReview?.nextAction;
+        const deadlineMs = Date.parse(handoff?.deadline?.at || '');
+        const overdueHandoff = finalPush?.status === 'completed' && handoff?.action === 'hammer'
+          && ['hammer', 'closer'].includes(handoff.actor)
+          && Number.isFinite(deadlineMs) && deadlineMs <= Date.now();
+        if ((isCompletedCommentOnlyFinalRoundJob(finalPush) || overdueHandoff) && finalPush.revisionRef) {
           if (existing.review_status !== 'posted'
             && latestReviewedHeadSha({ db, repoPath, prNumber }) === finalPush.revisionRef) {
             restoreHammerOwnedReview({ db, repoPath, prNumber, reviewRow: existing,
@@ -1544,7 +1549,7 @@ export async function processReviewSubject(entry, ctx) {
             && existing.reviewer_head_sha === finalPush.revisionRef;
           if (finalRoundCloserOwned) {
             console.log(`[watcher] owning lane=closer for ${repoPath}#${prNumber}@${subject.headSha}: ` +
-              'completed-comment-only-final-round; re-evaluating normal closure gates');
+              `${overdueHandoff ? 'expired-remediation-handoff' : 'completed-comment-only-final-round'}; re-evaluating normal closure gates`);
           }
         }
       }

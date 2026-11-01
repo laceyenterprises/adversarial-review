@@ -14,6 +14,19 @@ before reloading reviewer consumers. SRE observes natural measured passes and
 the Google/agy quota evidence basis after deployment; source tests are not
 the live receipt.
 
+REMJOBPHANTOM-01 grants queued jobs five minutes of pre-spawn custody from
+`pendingAt` (or initial `createdAt`), and unspawned claims five minutes from
+`claimedAt`. Spawned workers require matching process identity or a progress
+heartbeat younger than five minutes. A failed-CI closeout without proven
+publication projects its selected retry successor independently of the finished
+worker. Terminal jobs, workspaces and stale locks cannot retain closure.
+Expired exact-head final-push hammer handoffs restore parked rows through the
+existing request CAS and reach
+normal leased closure on the next watcher pass. Offline fixtures cover reclaim,
+live-worker retention, handoff scheduling and blocking-finding safety. After
+normal deployment, passively observe reclaim reasons and normal closure
+decisions; existing smoke commands and merge gates remain unchanged.
+
 CLOSERDEADLOCK-01 keeps completed comment-only final-round push heads in the
 posted closer lane and restores already queued heads without an operator label.
 Each pass logs `owning lane=closer` and observes normal closure gates, including

@@ -87,7 +87,10 @@ export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha
       pr,
       reviews,
       remediation: { completedRounds: round, maxRounds: max, roundsLeft,
-        job: { status: retryActiveJob ? 'in_progress' : 'completed', headSha: head },
+        job: { status: retryActiveJob ? 'in_progress' : 'completed', headSha: head,
+          // This is the selected retry successor, not the finished worker's
+          // liveness. Reconciliation requeues it through the bounded retry path.
+          live: retryActiveJob },
         ...(final && workerPushedHeadSha === head ? { finalPush: { headSha: head, suppressed: true } } : {}) },
       checks, leases, launches, policy,
       ...((lease?.terminalOutcome === 'succeeded' || receipt?.terminalOutcome === 'succeeded' || receipt?.outcome === 'succeeded')

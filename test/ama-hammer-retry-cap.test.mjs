@@ -3578,13 +3578,14 @@ test('active remediation rollback does not recreate a deleted dispatch record', 
   const originalRead = fs.readFileSync;
   let appeared = false;
   let removed = false;
+  const pendingAt = new Date(Date.now() - 1000).toISOString();
   // Inject the actual race boundaries deterministically: a job arrives after
   // the intent write, then its record disappears immediately before rollback.
   t.mock.method(fs, 'readdirSync', (path, ...args) => {
     if (String(path) === pendingDir && fs.existsSync(recordPath) && !appeared) {
       appeared = true;
       writeFileSync(join(pendingDir, `${followUpJobFilePrefix(REPO, PR_NUMBER)}active.json`), JSON.stringify({
-        repo: REPO, prNumber: PR_NUMBER, status: 'pending',
+        repo: REPO, prNumber: PR_NUMBER, status: 'pending', pendingAt,
       }));
     }
     return originalList(path, ...args);
@@ -4024,7 +4025,7 @@ test('LABELGATE-01: typed hammer stop refunds a recorded launch once through PR 
 });
 
 
-test('LABELGATE-01: a hammer-written refusal without a matching live gate stays charged', async t => {
+test('LABELGATE-01: a refusal without a matching live gate keeps its charge when ownerless closure retries', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'labelgate-unproven-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const args = hammerDispatchArgs(rootDir, { reviewState: { remediationPending: true },
@@ -4039,9 +4040,10 @@ test('LABELGATE-01: a hammer-written refusal without a matching live gate stays 
   writeAmaAuditEntry({ hqRoot: args.dispatchContext.hqRoot, ...identity, headSha: REVIEWED_HEAD,
     attempt: { outcome: 'deferred', reason: 'operator-label-required:allow-submodule-pointer-bump' },
     now: '2026-07-06T11:30:00Z' });
-  await maybeDispatchAmaCloser({ ...args, ...hammerDispatchDeps() });
-  assert.equal(readHammerRetryCapLedger(rootDir, identity).attemptCount, 1);
-  assert.equal(readAmaCloserDispatchRecord(rootDir, { ...identity, headSha: REVIEWED_HEAD }).unexecutedRefundCount, undefined);
+  const result = await maybeDispatchAmaCloser({ ...args, ...hammerDispatchDeps() });
+  assert.equal(result.dispatched, true, 'a remediation flag without a live worker cannot retain ownership');
+  assert.equal(readHammerRetryCapLedger(rootDir, identity).attemptCount, 2, 'both the prior refusal and the new dispatch stay charged');
+  assert.equal(readAmaCloserDispatchRecord(rootDir, { ...identity, headSha: REVIEWED_HEAD }).unexecutedRefundCount ?? 0, 0);
 });
 
 for (const status of ['running', 'succeeded']) {

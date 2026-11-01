@@ -192,10 +192,31 @@ test('queue row, remediation flag and reviewing status alone are not ownership',
   const owner = await probeOrphanOwnership({ ...args, reviewStateRow: { review_status: 'reviewing', remediation_pending: true } });
   assert.equal(owner.owned, false);
 });
-test('live remediation process proves ownership', async t => {
+test('fresh remediation heartbeat proves ownership', async t => {
   const { args, record } = setup(t);
-  record('in-progress', { remediationWorker: { processId: 123 } });
+  record('in-progress', { status: 'in_progress', lastHeartbeatAt: new Date().toISOString() });
   assert.equal((await probeOrphanOwnership({ ...args, processKillImpl: () => {} })).owned, true);
+});
+for (const status of ['completed', 'in_progress']) {
+  test(`a ${status} remediation record with stale liveness cannot retain watchdog ownership`, async t => {
+    const { args, record, calls } = setup(t);
+    record('in-progress', { status, lastHeartbeatAt: '2026-01-01T00:00:00Z',
+      remediationWorker: { processId: 123, dispatchMode: 'hq', launchRequestId: 'synthetic-stale-launch' } });
+    const owner = await probeOrphanOwnership({ ...args, now: '2026-01-01T01:00:00Z',
+      processKillImpl: () => {}, readStatusImpl: () => assert.fail('a stale job reference grants no live worker proof') });
+    assert.equal(owner.owned, false);
+    assert.equal(owner.uncertain, false);
+    assert.ok(calls.logs.some(line => line.includes('stale-remediation-job-reclaimed')));
+  });
+}
+test('an overdue handoff cannot displace a live same-PR remediator at an older input head', async t => {
+  const { args, record } = setup(t);
+  record('in-progress', { status: 'in_progress', headSha: 'older-input',
+    lastHeartbeatAt: '2026-10-11T16:00:00Z' });
+  const owner = await probeOrphanOwnership({ ...args, now: '2026-10-11T16:00:00Z',
+    nextAction: expiredDecision(), includeOwnerEvidence: true });
+  assert.equal(owner.owned, true);
+  assert.equal(owner.actor, 'remediator');
 });
 test('review request ownership is bounded and head-specific', async t => {
   const { args } = setup(t);
@@ -468,7 +489,7 @@ for (const bucket of ['in-progress', 'ama-closer-dispatches']) {
       const { args, record } = setup(t);
       record(bucket, { targetRemediationSha: 'target', headSha: 'dispatch', reviewedSha: 'reviewed',
         [matchingField]: args.headSha,
-        ...(bucket === 'in-progress' ? { remediationWorker: { processId: 123 } }
+        ...(bucket === 'in-progress' ? { status: 'in_progress', lastHeartbeatAt: '2026-10-11T16:00:00Z' }
           : { launchRequestId: 'synthetic-multi-head' }) });
       let probes = 0;
       const result = await probeOrphanOwnership({ ...args, nextAction: expiredDecision(),

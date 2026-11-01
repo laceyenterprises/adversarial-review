@@ -46,7 +46,9 @@ import {
   isFleetSelfRepairTrailerOnlyRereviewReason,
   parseFleetSelfRepairTrailerOnlyRereviewReason,
 } from './fleet-self-repair-rereview.mjs';
-import { isSettledReviewJob, listFollowUpJobsInDir } from './follow-up-jobs.mjs';
+import { isSettledReviewJob } from './follow-up-jobs.mjs';
+import { findActiveRemediationJob } from './ama/active-remediation-job.mjs';
+import { remediationJobOwnership } from './remediation-job-ownership.mjs';
 import { findCommentOnlyFinalRoundPushJob } from './comment-only-final-round.mjs';
 import {
   blockingFindingIdentitiesFromBody,
@@ -480,7 +482,7 @@ function resolveCommentOnlyFinalRoundVerdict(rootDir, {
   if (!finalRoundJob) return null;
   const pendingJob = latestJobFinder(rootDir, { repo, prNumber, revisionRef: currentHeadSha });
   const pendingStatus = normalizeFollowUpJobStatus(pendingJob?.status);
-  if (pendingStatus === 'pending' || pendingStatus === 'in-progress') {
+  if ((pendingStatus === 'pending' || pendingStatus === 'in-progress') && remediationJobOwnership(pendingJob).live) {
     return { verdict: '', remediationPending: true, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
   }
   // The live reconcile fetches the latest review on the REVIEWED head: a later
@@ -578,7 +580,7 @@ function resolveSettledReviewVerdict(
   }
   const latestJob = latestJobFinder(rootDir, latestJobQuery);
   const latestJobStatus = normalizeFollowUpJobStatus(latestJob?.status);
-  if (latestJobStatus === 'pending' || latestJobStatus === 'in-progress') {
+  if ((latestJobStatus === 'pending' || latestJobStatus === 'in-progress') && remediationJobOwnership(latestJob).live) {
     return { verdict: '', remediationPending: true, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
   }
   const currentHeadCapturedPass = (
@@ -1139,13 +1141,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
   // Branch ownership is PR-scoped, even when a parked row or a head move has
   // made review evidence unsettled. Operator retriggers can queue a worker
   // without resetting ci-blocked; neither row status nor job recency waives it.
-  let activeFollowUpJob = null;
-  for (const dir of ['pending', 'inProgress']) {
-    activeFollowUpJob = listFollowUpJobsInDir(rootDir, dir, { repo, prNumber, caseInsensitiveRepo: true })
-      .find(({ job }) => String(job?.repo || '').toLowerCase() === String(repo || '').toLowerCase()
-        && Number(job?.prNumber) === Number(prNumber))?.job || null;
-    if (activeFollowUpJob) break;
-  }
+  const activeFollowUpJob = findActiveRemediationJob(rootDir, { repo, prNumber });
   const hasActiveSamePrRemediation = activeFollowUpJob !== null;
   // ASR-06. Resolved for EVERY gated head, not only for rows Argus owns,
   // because a `high` finding blocks a routable PR too: a human PR that touches a

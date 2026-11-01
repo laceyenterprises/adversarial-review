@@ -32,6 +32,13 @@ re-review suppression.
 When publication is unproven and CI has failed, an active non-final job retains
 its existing retry ownership, including legacy jobs without a review head.
 Reconciliation requeues that job instead of completing its owner prematurely.
+The closeout snapshot describes the selected retry successor as live even if
+the finished worker is terminal or its heartbeat is old. This projection grants
+no retry budget; the existing bounded retry path still decides requeue.
+Queued jobs then retain five minutes of pre-spawn custody from `pendingAt`
+(or initial `createdAt`), and claims without worker records retain five minutes
+from `claimedAt`. Spawned workers require process identity or fresh heartbeat
+proof. Invalid, future or expired queue timestamps cannot retain closure.
 
 Before claiming a remediation job, the daemon checks for a live AMA closer
 lease for the same PR at any head, including a rekeyed hammer head. An active

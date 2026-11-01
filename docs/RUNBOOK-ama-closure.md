@@ -114,6 +114,30 @@ immediately through the existing closure-wait path and returns
 
 ### Closure-recovery executor (CLOSURERECOVERYEXEC-01)
 
+REMJOBPHANTOM-01: pending jobs retain pre-spawn custody for five minutes
+from `pendingAt`, falling back to initial `createdAt`. An `in_progress` claim
+without a worker record retains five minutes from `claimedAt`. Invalid, future
+or expired queue/claim timestamps cannot supply custody. A requeued pending
+job uses its new queue timestamp even if its predecessor worker is terminal.
+Once spawned, a non-terminal worker needs a matching local PID/start identity
+or a progress heartbeat less than five minutes old. The gate projection, shared
+next-action input and closer admission use the same predicate. Closer admission
+retains `live: true` when projecting the gate's proven remediation owner. Completed
+records, stale locks and leftover workspaces
+grant no ownership. A stale active-bucket record is ignored without mutating it;
+each observation logs the owning lane and the reclaim reason.
+
+A completed final push with an exact-head `nextAction` for the hammer or closer
+returns to the posted closer lane when its recorded deadline expires.
+Already parked requests recover through `restoreHammerOwnedReview` and its
+existing request CAS, preserving the latest delivered review identity.
+The normal closer observer becomes due every pass; its existing per-PR intent
+lock, live-launch reconciliation, dead-lease release, lease acquisition, caps
+and merge predicates still decide admission. This adds no dispatch path or
+merge authority. After normal deployment, passively observe stale-job reclaim
+reasons and a normal closure decision on the next watcher pass for a natural
+overdue handoff. No migration, label or live test job is required.
+
 An R04 `closure-recovery` next action (ownership reconciliation, for example
 `ownership-unreadable`) is not a hammer-dispatch mismatch. Both the inline route
 and background hammer admission hand the decision to the closer, so neither

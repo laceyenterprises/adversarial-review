@@ -11,6 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, readdirSync, statSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { hostname, tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
+import { followUpJobFilePrefix } from '../src/follow-up-job-names.mjs';
 
 import {
   __testables__,
@@ -63,6 +64,14 @@ import {
 
 const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGNAME || 'unknown';
 const HEAD = 'a'.repeat(40);
+
+function seedLiveRemediator(rootDir) {
+  const dir = join(rootDir, 'data', 'follow-up-jobs', 'in-progress');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${followUpJobFilePrefix('acme/repo', 404)}live.json`), JSON.stringify({
+    repo: 'acme/repo', prNumber: 404, status: 'in_progress', lastHeartbeatAt: new Date().toISOString(),
+  }));
+}
 const REQUIRED_GATE = 'agent-os/adversarial-gate';
 
 function testDeps() {
@@ -1931,6 +1940,7 @@ test('LABELGATE-01: ineligible PRs neither read jobs nor page', async t => {
     { reviewState: { remediationPending: true } },
   ]) {
     const args = findingsRemediationArgs(rootDir);
+    if (overrides.reviewState?.remediationPending) seedLiveRemediator(rootDir);
     const result = await maybeDispatchAmaCloser({ ...args, ...testDeps(),
       reviewState: { ...args.reviewState, ...overrides.reviewState },
       prMetadata: { ...args.prMetadata, statusCheckRollup: [
@@ -2063,6 +2073,7 @@ for (const status of ['succeeded-open', 'succeeded', 'failed', 'running', 'start
       reviewState: { remediationPending: true },
       prMetadata: { statusCheckRollup: [{ __typename: 'CheckRun', name: REQUIRED_GATE, conclusion: 'FAILURE' }] },
     });
+    seedLiveRemediator(rootDir);
     const identity = { rootDir, repo: args.dispatchContext.repo, prNumber: 404, headSha: HEAD };
     const pending = status.startsWith('pending');
     const localWatcher = status === 'pending-dead' || status === 'pending-live';
@@ -2099,15 +2110,15 @@ for (const status of ['succeeded-open', 'succeeded', 'failed', 'running', 'start
       },
     });
     // Fresh foreign/live pending leases retain ownership before eligibility.
-    // Dead local and age-expired leases reach the red-CI refusal without launch.
+    // Reconciled terminal leases reach the live remediator without a competing launch.
     const heldPending = status === 'pending' || status === 'pending-live';
     if (heldPending) assert.equal(result.reason, 'closer-lease-held-by-other-process');
     else assert.equal(result.dispatched, false);
-    assert.notEqual(result.reason, 'active-remediation-job');
     assert.ok(reads <= 2, 'reconciliation reuses its observed ledger evidence');
     assert.equal(pidProbes, localWatcher ? 1 : 0);
     const lease = readAmaCloserLease(rootDir, identity);
     const terminal = ['failed', 'succeeded', 'succeeded-open'].includes(status);
+    if (terminal) assert.equal(result.reason, 'live-owner', 'lease reconciliation precedes shared live-remediator refusal');
     assert.equal(lease.status, terminal ? 'terminal' : pending ? 'pending' : 'dispatched');
     assert.equal(lease.terminalOutcome, terminal ? 'failed-without-merge' : null);
     if (pending) assert.deepEqual(lease, beforeLease, 'refused admission must not mutate pending ownership');

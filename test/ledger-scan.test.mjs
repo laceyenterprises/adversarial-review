@@ -75,7 +75,7 @@ for (const refundsOnly of [false, true]) {
 function writeJob(root, bucket, repo, prNumber, suffix, overrides = {}) {
   const job = { ...buildFollowUpJob({ repo, prNumber, reviewerModel: 'codex',
     reviewBody: '## Verdict\nRequest changes', reviewPostedAt: '2026-01-01T00:00:00.000Z' }),
-    status: bucket, ...overrides };
+    status: bucket, lastHeartbeatAt: new Date().toISOString(), ...overrides };
   const dir = getFollowUpJobDir(root, bucket);
   mkdirSync(dir, { recursive: true });
   const jobPath = join(dir, `${followUpJobFilePrefix(repo, prNumber)}${suffix}.json`);

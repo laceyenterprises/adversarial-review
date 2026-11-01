@@ -168,6 +168,7 @@ function remediationFacts(remediation) {
     // Remediation observations belong to this PR; a head move or retrigger
     // with no revision does not release its live worker's ownership.
     jobLive: remediation.state === 'complete'
+      && job?.live === true
       && ['pending', 'in_progress'].includes(lower(job?.status)),
     jobClean: job?.clean === true,
     jobHead: text(job?.headSha) || null,

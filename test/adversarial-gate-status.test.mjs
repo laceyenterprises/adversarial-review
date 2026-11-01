@@ -398,6 +398,7 @@ test('a newer clean pending job cannot release the gate over same-PR active reme
   const prefix = followUpJobFilePrefix(makeJob().repo, makeJob().prNumber);
   writeFileSync(path.join(base, 'in-progress', `${prefix}active.json`), JSON.stringify(makeJob({
     status: 'in_progress',
+    lastHeartbeatAt: new Date().toISOString(),
     claimedAt: '2026-04-21T08:00:00.000Z',
   })));
   writeFileSync(path.join(base, 'pending', `${prefix}new-clean.json`), JSON.stringify(makeJob({

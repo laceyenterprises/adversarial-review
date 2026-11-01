@@ -127,7 +127,7 @@ replay. Factual-dispute admission is the explicit closure exception described be
 
 **Owner:** follow-up remediation queue
 **Store:** `data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json`, `data/follow-up-jobs/single-review-voids/*.json`, `data/follow-up-jobs/missing-label-events/*.json`
-**Source of truth:** `src/follow-up-jobs.mjs`, `src/follow-up-branch.mjs`, `src/remediation-unpublished.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`, `src/remediation-closeout.mjs`
+**Source of truth:** `src/follow-up-jobs.mjs`, `src/follow-up-branch.mjs`, `src/remediation-unpublished.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`, `src/remediation-closeout.mjs`, `src/remediation-job-ownership.mjs`
 **Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`, `src/adapters/comms/github-pr-comments/comment-delivery.mjs`, `src/reviewer-ci-admission.mjs`
 
 ## Simplicity advisory (REVIEWSIMPLE-01)
@@ -480,6 +480,19 @@ the sweep continues to the existing signal-and-requeue path. A reply file
 therefore cannot reserve a hung worker's slot indefinitely.
 
 ## Shared remediation closeout successor (NXA-04)
+
+REMJOBPHANTOM-01: `pendingAt` (falling back to initial `createdAt`) anchors
+five minutes of pending-job custody. `claimedAt` anchors five minutes for an
+`in_progress` job without a worker record. Invalid, future and expired
+timestamps grant no pre-spawn custody; the timestamps are never refreshed by
+observation. A pending retry may retain its predecessor's terminal worker,
+which does not invalidate the new queue timestamp. Spawned workers retain the
+existing process-identity or five-minute heartbeat requirement.
+For failed CI without proven publication and with rounds remaining, closeout
+projects `remediation.job.live: true` for the selected retry successor, even
+when the preceding worker is terminal. The existing retry-budget check still
+controls actual requeue. Terminal jobs and proven published heads do not gain
+this retry claim. No persistent field or lifecycle state is added.
 
 Normal completion and recovered publication use `src/remediation-closeout.mjs`
 to derive one immutable snapshot and call the shared `nextAction` policy.

@@ -14,10 +14,11 @@ import { deriveNextActionSnapshot, nextAction } from '../src/pr-next-action.mjs'
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
+import { followUpJobFilePrefix } from '../src/follow-up-job-names.mjs';
 
 import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
@@ -399,6 +400,11 @@ test('cap route never preempts a remediator that still owns the reviewed head', 
   const rootDir = tempRoot(t, 'cyclecapham-codex-first-');
   const args = closerArgs(rootDir);
   const deps = closerDeps();
+  const queue = join(rootDir, 'data', 'follow-up-jobs', 'in-progress');
+  mkdirSync(queue, { recursive: true });
+  writeFileSync(join(queue, `${followUpJobFilePrefix(REPO, PR_NUMBER)}live.json`), JSON.stringify({
+    repo: REPO, prNumber: PR_NUMBER, status: 'in_progress', lastHeartbeatAt: new Date().toISOString(),
+  }));
   const result = await maybeDispatchAmaCloser({
     ...args,
     reviewState: { ...args.reviewState, remediationPending: true },

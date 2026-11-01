@@ -162,7 +162,7 @@ test('AMA defers closer dispatch while a remediation job is pending or in progre
     mkdirSync(dir, { recursive: true });
     const identity = closerArgs(rootDir, 'sample/project');
     writeFileSync(join(dir, 'sample__project-pr-2-active.json'), JSON.stringify({
-      jobId: 'sample__project-pr-2-active', repo: 'sample/project', prNumber: 2, status,
+      jobId: 'sample__project-pr-2-active', repo: 'sample/project', prNumber: 2, status, lastHeartbeatAt: new Date().toISOString(),
     }));
     const deps = testDeps();
     const result = await maybeDispatchAmaCloser({

@@ -73,7 +73,7 @@ test('an in-progress remediation is remediation-pending, not settled', () => {
     repo: 'acme/agent-os',
     prNumber: 3,
     reviewRow: { review_status: 'posted' },
-    latestJobFinder: finder({ status: 'in-progress', reviewBody: '## Verdict\n\nComment only' }),
+    latestJobFinder: finder({ status: 'in-progress', lastHeartbeatAt: new Date().toISOString(), reviewBody: '## Verdict\n\nComment only' }),
   });
   assert.equal(res.verdict, '');
   assert.equal(res.remediationPending, true);
@@ -110,7 +110,7 @@ test('a pending remediation is remediation-pending, not settled', () => {
     repo: 'acme/agent-os',
     prNumber: 4,
     reviewRow: { review_status: 'posted' },
-    latestJobFinder: finder({ status: 'pending', reviewBody: '## Verdict\n\nApproved' }),
+    latestJobFinder: finder({ status: 'pending', lastHeartbeatAt: new Date().toISOString(), reviewBody: '## Verdict\n\nApproved' }),
   });
   assert.equal(res.verdict, '');
   assert.equal(res.remediationPending, true);
@@ -533,7 +533,7 @@ test('remediation-pending fails CLOSED on blocking-findings (unknown)', () => {
     repo: 'acme/agent-os',
     prNumber: 1863,
     reviewRow: { review_status: 'posted' },
-    latestJobFinder: finder({ status: 'in-progress', reviewBody: REVIEW_BODY('Comment only', '- None.') }),
+    latestJobFinder: finder({ status: 'in-progress', lastHeartbeatAt: new Date().toISOString(), reviewBody: REVIEW_BODY('Comment only', '- None.') }),
   });
   assert.equal(res.remediationPending, true);
   assert.equal(res.blockingFindingState, 'unknown');

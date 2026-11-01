@@ -12,7 +12,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -39,6 +39,7 @@ import { latestReviewedHeadSha, maybeRouteCiBlockedToHammer } from '../src/ci-bl
 import { guardRereviewCiBeforeReviewer } from '../src/reviewer-ci-admission.mjs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from '../src/review-statuses.mjs';
+import { followUpJobFilePrefix } from '../src/follow-up-job-names.mjs';
 
 const REPO = 'laceyenterprises/agent-os';
 const PR_NUMBER = 8007;
@@ -70,6 +71,14 @@ function tempRoot(t, prefix) {
   const rootDir = mkdtempSync(join(tmpdir(), prefix));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   return rootDir;
+}
+
+function liveRemediation(rootDir, repo, prNumber) {
+  const queue = join(rootDir, 'data', 'follow-up-jobs', 'pending');
+  mkdirSync(queue, { recursive: true });
+  writeFileSync(join(queue, `${followUpJobFilePrefix(repo, prNumber)}live.json`), JSON.stringify({
+    repo, prNumber, status: 'pending', pendingAt: new Date(Date.now() - 1000).toISOString(),
+  }));
 }
 
 function guard(overrides = {}) {
@@ -401,6 +410,7 @@ test('the CI-blocked route never preempts a remediator that still owns the revie
   _resetHammerRetryCapAlertDebounceForTests();
   const rootDir = tempRoot(t, 'ciblockham-codex-first-');
   const args = closerArgs(rootDir);
+  liveRemediation(rootDir, REPO, PR_NUMBER);
   const deps = closerDeps();
   const result = await maybeDispatchAmaCloser({
     ...args,
@@ -669,7 +679,10 @@ for (const state of ['failed', 'timed-out', 'cancelled', 'startup-failure', 'act
     }
     if (state === 'hard-stop') args.prMetadata.labels = ['do-not-merge'];
     if (state === 'draft') args.prMetadata.isDraft = true;
-    if (state === 'live-remediation') args.reviewState.remediationPending = true;
+    if (state === 'live-remediation') {
+      args.reviewState.remediationPending = true;
+      liveRemediation(rootDir, args.dispatchContext.repo, args.prMetadata.prNumber);
+    }
     const deps = closerDeps({ workerStatus: 'running' });
     if (state === 'failed') {
       const ordinary = await maybeDispatchAmaCloser({ ...args, ...deps,

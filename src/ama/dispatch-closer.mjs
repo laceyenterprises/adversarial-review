@@ -5048,7 +5048,10 @@ async function maybeDispatchAmaCloserAttempt({
     },
     ...(reviewState.remediationPending === true ? { remediation: {
       ...sharedNextAction.snapshot.observations.remediation?.value,
-      job: { status: 'in_progress', headSha: prMetadata.headSha },
+      // A legacy pending flag cannot create custody without durable liveness.
+      job: { status: 'in_progress', live: Boolean(findActiveRemediationJob(
+        dispatchContext.rootDir || SUBMODULE_ROOT, { repo: dispatchContext.repo, prNumber })),
+      headSha: prMetadata.headSha },
     } } : {}),
     progress: { ...sharedNextAction.snapshot.observations.progress?.value,
       primaryChange: { ...verdict.trace.primaryChange, headSha: prMetadata.headSha },

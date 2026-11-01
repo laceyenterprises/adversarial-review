@@ -212,7 +212,7 @@ export function observeClosureOwnership(shared, owner, passSnapshot = null) {
   }, passSnapshot);
   if (owner.owned && owner.actor === 'remediator') return reviseClosureNextAction(shared, {
     remediation: { ...shared.snapshot.observations.remediation?.value,
-      job: { status: 'in_progress', headSha: shared.decision.head } },
+      job: { status: 'in_progress', live: true, headSha: shared.decision.head } },
   }, passSnapshot);
   return reviseClosureNextAction(shared, { leases: { state: 'unknown', value: null,
     provenance: { sourceRef: 'watchdog-ownership' } } }, passSnapshot);

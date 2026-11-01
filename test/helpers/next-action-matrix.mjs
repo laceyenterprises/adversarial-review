@@ -17,7 +17,7 @@ const cases = [
   ['failed CI remaining round without a job or findings', { checks: { conclusion: 'FAILURE' },
     remediation: { roundsLeft: true } }, 'hammer', 'hammer'],
   ['failed CI remaining round with a pending PR job', { checks: { conclusion: 'FAILURE' },
-    remediation: { roundsLeft: true, job: { status: 'pending', headSha: OLD } } }, 'remediate', 'remediator'],
+    remediation: { roundsLeft: true, job: { status: 'pending', live: true, headSha: OLD } } }, 'remediate', 'remediator'],
   ['failed CI completed non-final pushed head', { checks: { conclusion: 'FAILURE' },
     reviews: { ...clean, headSha: OLD }, remediation: { roundsLeft: true,
       job: { status: 'completed', headSha: HEAD } } }, 'remediate', 'remediator'],

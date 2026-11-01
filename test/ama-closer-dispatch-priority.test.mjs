@@ -2118,7 +2118,7 @@ for (const status of ['succeeded-open', 'succeeded', 'failed', 'running', 'start
     assert.equal(pidProbes, localWatcher ? 1 : 0);
     const lease = readAmaCloserLease(rootDir, identity);
     const terminal = ['failed', 'succeeded', 'succeeded-open'].includes(status);
-    if (terminal) assert.equal(result.reason, 'active-remediation-job', 'lease reconciliation precedes worker ownership refusal');
+    if (terminal) assert.equal(result.reason, 'live-owner', 'lease reconciliation precedes shared live-remediator refusal');
     assert.equal(lease.status, terminal ? 'terminal' : pending ? 'pending' : 'dispatched');
     assert.equal(lease.terminalOutcome, terminal ? 'failed-without-merge' : null);
     if (pending) assert.deepEqual(lease, beforeLease, 'refused admission must not mutate pending ownership');

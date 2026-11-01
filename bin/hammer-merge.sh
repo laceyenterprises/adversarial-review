@@ -39,9 +39,8 @@ ham_append_terminal_audit() {
   HAM_NO_MERGE_NOTE="Waited ${HAM_HEAD_WAITED_SECONDS:-0}s for the published head and ${HAM_REQUIRED_CHECKS_WAITED_SECONDS:-0}s for required checks on that exact head."
   ham_audit_outcome="$1"
   ham_audit_reason="$2"
-  if [ "$ham_audit_outcome" != succeeded ]; then
-    "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-progress.mjs" terminal-stop "$ham_audit_reason" || true
-  fi
+  # No terminal progress receipt here: a no-merge outcome may be deferred,
+  # requeued or remediated in this run. The closer's final exit records it.
   # Record confirmed execution or a refusal before other bookkeeping can fail.
   # The CLI filters refusal reasons to known decisions, excluding read failures.
   ham_receipt_outcome=

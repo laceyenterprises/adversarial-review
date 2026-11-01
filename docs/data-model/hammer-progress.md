@@ -41,4 +41,11 @@ does not add expiry or cleanup.
 The phase scripts record head verification and successful remediation
 publication. `bin/metered-gh.mjs` records an actual HAM `pr merge` invocation
 after known repository flags are parsed; script inspection emits no receipt.
-`src/ama/hammer-terminal-audit.mjs` records named early terminal stops.
+
+`terminal-stop` means the run is ending: the supervisor allows only a short exit
+grace after it. `recordHammerProgress` refuses it unless the caller passes
+`final: true`, and only the closer's explicit final exit,
+`bin/hammer-terminal-audit.mjs --final <reason>`, does so. Deferred, requeued
+or retryable no-merge outcomes from the merge phase, and helper early failures
+the closer may still retry, keep their AMA terminal audits and merge-action
+receipts but write no `terminal-stop`.

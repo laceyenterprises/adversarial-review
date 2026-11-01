@@ -4319,6 +4319,12 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+HAMTERMSTOP-01: the hammer's `terminal-stop` progress receipt is recorded only
+on the closer's explicit final exit (`bin/hammer-terminal-audit.mjs --final`).
+Merge-phase deferred and retryable no-merge outcomes, and helper early failures,
+no longer mark a still-working run terminal; their AMA terminal audits and
+merge-action receipts are unchanged.
+
 READMEFIX-01 restores the README title and introduction at the top and keeps
 change notes in this section, newest first. Conflict resolution retains the
 REMJOBPHANTOM-01 note added on main alongside the relocated notes.

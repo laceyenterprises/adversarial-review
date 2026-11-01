@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,7 +11,7 @@ const execute = promisify(execFile);
 const cli = fileURLToPath(new URL('../bin/hammer-base-head.mjs', import.meta.url));
 const head = 'a'.repeat(40);
 
-test('invalid starting-head arguments record a terminal receipt and return usage without GitHub calls', async t => {
+test('invalid starting-head arguments return usage without GitHub calls or a terminal progress receipt', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-base-usage-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(join(dir, 'gh'), '#!/bin/sh\necho unexpected GitHub call >&2\nexit 99\n', { mode: 0o755 });
@@ -22,9 +22,8 @@ test('invalid starting-head arguments record a terminal receipt and return usage
         HQ_LAUNCH_REQUEST_ID: 'lrq_fixture', AGENT_OS_WORKER_LRQ_ID: 'lrq_fixture',
         HQ_WORKER_RUN_ID: 'wrun_fixture', HAM_REPO: '', HAM_PR_NUMBER: '' }, timeout: 5000,
     }), error => error.code === 64 && error.stdout === '' && error.stderr === 'usage: hammer-base-head PR_URL\n');
-    const receipt = JSON.parse(readFileSync(join(dir,
-      'dispatch/lrq_fixture/hammer-progress/wrun_fixture/terminal-stop.json'), 'utf8'));
-    assert.equal(receipt.reason, 'invalid-pr-reference');
+    // Only the closer's explicit final exit records terminal-stop.
+    assert.equal(existsSync(join(dir, 'dispatch/lrq_fixture/hammer-progress/wrun_fixture/terminal-stop.json')), false);
   }
 });
 

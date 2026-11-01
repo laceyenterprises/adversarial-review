@@ -1,60 +1,23 @@
-AGYTELEMETRY-01: Gemini/agy reviewers request stream JSON and join the unique
-`conversation_id` to the CLI planner transcript. Measured counters use
-`agy-measured`; request/session disagreement is retained in pass metadata.
-Dedicated reviewer accounts return counters through the pinned workspace
-helper's `usage CONVERSATION_ID` verb. A missing helper or transcript keeps
-the stream session totals, or the existing estimate when no measured totals
-exist. Invalid/zero helper counters and transcripts over 8 MiB also fall back.
-Cached input is separated from uncached input for pricing; reasoning is already
-included in output. Chunked passes omit per-conversation reconciliation metadata.
-An unsupported stream flag retries once as plain output within the original
-deadline; stream errors are decoded before failure classification.
-Deploy the matching Agent OS pinned helper
-before reloading reviewer consumers. SRE observes natural measured passes and
-the Google/agy quota evidence basis after deployment; source tests are not
-the live receipt.
-
-REMJOBPHANTOM-01 grants queued jobs five minutes of pre-spawn custody from
-`pendingAt` (or initial `createdAt`), and unspawned claims five minutes from
-`claimedAt`. Spawned workers require matching process identity or a progress
-heartbeat younger than five minutes. A failed-CI closeout without proven
-publication projects its selected retry successor independently of the finished
-worker. Terminal jobs, workspaces and stale locks cannot retain closure.
-Expired exact-head final-push hammer handoffs restore parked rows through the
-existing request CAS and reach
-normal leased closure on the next watcher pass. Offline fixtures cover reclaim,
-live-worker retention, handoff scheduling and blocking-finding safety. After
-normal deployment, passively observe reclaim reasons and normal closure
-decisions; existing smoke commands and merge gates remain unchanged.
-
-CLOSERDEADLOCK-01 keeps completed comment-only final-round push heads in the
-posted closer lane and restores already queued heads without an operator label.
-Each pass logs `owning lane=closer` and observes normal closure gates, including
-CI changes and deadlines, despite an unchanged review fingerprint. The existing
-handoff smoke covers closure observation across no-progress backoff; offline
-watcher fixtures cover parked-row recovery and the first green pass. After
-normal deployment, observe those logs on a natural final-round push. Merge
-gates, leases, round budgets and per-PR caps remain unchanged.
-
-HAMPROGRESS-01 adds run-bound closer phase receipts for the supervisor's outcome,
-wall-clock and total-token limits. Existing terminal/drain and AMA replacement
-edges retain lifetime charges. Merge safety and existing smoke promises are
-unchanged. Deploy the receipt/schema companion before supervisor activation;
-passive SRE acceptance observes natural named stops and bounded replacement.
-See [the closure runbook](docs/RUNBOOK-ama-closure.md).
-
-HAMSCRATCHRESUME-01: pending quota resume retains hammer scratch through the
-sweep and terminal reconciliation. A named terminal missing-phase outcome
-permits one fresh closer with a new scratch and lease, crediting its PR/head
-charge once while keeping the lifetime ceiling. Existing lifecycle enum values
-and smoke commands remain unchanged. Retry edges settle historical quota kills
-after successor publication while unresolved quota-killed leaves retain ownership.
-Named missing-input cancellations recover despite retained quota metadata.
-SRE acceptance is passive observation of
-the next natural quota recovery after both repositories deploy and reload.
-See [the closure runbook](docs/RUNBOOK-ama-closure.md).
-
 # Adversarial Review
+
+```
+           /\                                                 /\
+ _         )( ______________________   ______________________ )(         _
+(_)///////(**)______________________> <______________________(**)\\\\\\\(_)
+           )(                                                 )(
+           \/                                                 \/
+```
+
+**A cross-model review loop for agent-generated work.** The agent that
+*builds* the artifact is never the agent that *reviews* it. The reviewer
+runs an adversarial prompt against the builder's output, a remediation
+worker fixes the findings, and the reviewer re-checks until the work
+converges or the configured round budget is spent.
+
+Same-model self-review is a rubber stamp. This project exists to make
+the rubber stamp expensive enough to fail loud.
+
+---
 
 CFGREADERSCOPE-01: the shared configuration is an overlay. The Node reader
 validates its registered read surface and ignores unknown sibling-reader keys
@@ -201,25 +164,6 @@ publication. Run the focused regressions with:
 ```bash
 node test/run-tests.mjs cli-output-lifecycle.test.mjs
 ```
-
-```
-           /\                                                 /\
- _         )( ______________________   ______________________ )(         _
-(_)///////(**)______________________> <______________________(**)\\\\\\\(_)
-           )(                                                 )(
-           \/                                                 \/
-```
-
-**A cross-model review loop for agent-generated work.** The agent that
-*builds* the artifact is never the agent that *reviews* it. The reviewer
-runs an adversarial prompt against the builder's output, a remediation
-worker fixes the findings, and the reviewer re-checks until the work
-converges or the configured round budget is spent.
-
-Same-model self-review is a rubber stamp. This project exists to make
-the rubber stamp expensive enough to fail loud.
-
----
 
 ## The thesis, in one paragraph
 
@@ -4361,3 +4305,61 @@ true) and `token_transcripts_compress_after_days` (integer, default 7, minimum
 1). This is schema parity only; the existing Agent OS maintenance owner performs
 compression. Shared local overlays remain tolerant of unknown sibling keys.
 Deploy this reader before activating these keys in core's checked-in config.
+
+## Change notes
+
+AGYTELEMETRY-01: Gemini/agy reviewers request stream JSON and join the unique
+`conversation_id` to the CLI planner transcript. Measured counters use
+`agy-measured`; request/session disagreement is retained in pass metadata.
+Dedicated reviewer accounts return counters through the pinned workspace
+helper's `usage CONVERSATION_ID` verb. A missing helper or transcript keeps
+the stream session totals, or the existing estimate when no measured totals
+exist. Invalid/zero helper counters and transcripts over 8 MiB also fall back.
+Cached input is separated from uncached input for pricing; reasoning is already
+included in output. Chunked passes omit per-conversation reconciliation metadata.
+An unsupported stream flag retries once as plain output within the original
+deadline; stream errors are decoded before failure classification.
+Deploy the matching Agent OS pinned helper
+before reloading reviewer consumers. SRE observes natural measured passes and
+the Google/agy quota evidence basis after deployment; source tests are not
+the live receipt.
+
+REMJOBPHANTOM-01 grants queued jobs five minutes of pre-spawn custody from
+`pendingAt` (or initial `createdAt`), and unspawned claims five minutes from
+`claimedAt`. Spawned workers require matching process identity or a progress
+heartbeat younger than five minutes. A failed-CI closeout without proven
+publication projects its selected retry successor independently of the finished
+worker. Terminal jobs, workspaces and stale locks cannot retain closure.
+Expired exact-head final-push hammer handoffs restore parked rows through the
+existing request CAS and reach
+normal leased closure on the next watcher pass. Offline fixtures cover reclaim,
+live-worker retention, handoff scheduling and blocking-finding safety. After
+normal deployment, passively observe reclaim reasons and normal closure
+decisions; existing smoke commands and merge gates remain unchanged.
+
+CLOSERDEADLOCK-01 keeps completed comment-only final-round push heads in the
+posted closer lane and restores already queued heads without an operator label.
+Each pass logs `owning lane=closer` and observes normal closure gates, including
+CI changes and deadlines, despite an unchanged review fingerprint. The existing
+handoff smoke covers closure observation across no-progress backoff; offline
+watcher fixtures cover parked-row recovery and the first green pass. After
+normal deployment, observe those logs on a natural final-round push. Merge
+gates, leases, round budgets and per-PR caps remain unchanged.
+
+HAMPROGRESS-01 adds run-bound closer phase receipts for the supervisor's outcome,
+wall-clock and total-token limits. Existing terminal/drain and AMA replacement
+edges retain lifetime charges. Merge safety and existing smoke promises are
+unchanged. Deploy the receipt/schema companion before supervisor activation;
+passive SRE acceptance observes natural named stops and bounded replacement.
+See [the closure runbook](docs/RUNBOOK-ama-closure.md).
+
+HAMSCRATCHRESUME-01: pending quota resume retains hammer scratch through the
+sweep and terminal reconciliation. A named terminal missing-phase outcome
+permits one fresh closer with a new scratch and lease, crediting its PR/head
+charge once while keeping the lifetime ceiling. Existing lifecycle enum values
+and smoke commands remain unchanged. Retry edges settle historical quota kills
+after successor publication while unresolved quota-killed leaves retain ownership.
+Named missing-input cancellations recover despite retained quota metadata.
+SRE acceptance is passive observation of
+the next natural quota recovery after both repositories deploy and reload.
+See [the closure runbook](docs/RUNBOOK-ama-closure.md).

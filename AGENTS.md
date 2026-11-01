@@ -8,6 +8,8 @@ test suite that runs fully offline with no GitHub token, network, or Agent OS
 host. A bug here can wave bad code into every downstream repo, so hold every
 change to maximum rigor and keep the offline test property intact.
 
+Change notes go under `## Change notes` in README.md, newest first; never above the title.
+
 ## Where code belongs
 
 | Path | What lives there |

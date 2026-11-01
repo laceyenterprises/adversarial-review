@@ -35,7 +35,9 @@ const BUILDER_PREFIXES = new Set(['codex', 'claude-code', 'clio-agent', 'gemini'
 const TITLE_KIND_RE = /^\s*(?:\[[^\]]+\]\s*)?(?:\(([A-Za-z][A-Za-z-]*)\)|([A-Za-z][A-Za-z-]*)\s*:)/;
 // session_ledger.mes._token: the subject key and every other ledger token.
 const LEDGER_TOKEN_RE = /^[A-Za-z0-9][A-Za-z0-9_./:@+-]{0,255}$/;
-const HEAD_SHA_RE = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
+const HEAD_SHA_RE = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
+// Git emits lowercase hex; normalize so an uppercase input keys the same subject.
+const normalizeHeadSha = (value) => (HEAD_SHA_RE.test(String(value || '')) ? String(value).toLowerCase() : null);
 
 // Resolver provenance -> session_ledger.mes SOURCES. Defaults are the implicit
 // fill MES may later replace; everything else is an explicit source that wins.
@@ -385,7 +387,7 @@ export function recordReviewMesShadow({
     const actual = mesActualExecution({ workerClass: `${harness}-reviewer`, model: execution?.model,
       effort: execution?.effort, modelSource: execution?.modelSource, effortSource: execution?.effortSource,
       reviewerArm });
-    const head = HEAD_SHA_RE.test(String(headSha || '')) ? headSha : null;
+    const head = normalizeHeadSha(headSha);
     const key = head && subjectKey(repo, Number(prNumber), `review/${head}`);
     if (!actual) return { reason: 'unmapped-source' };
     if (!key) return { reason: 'invalid-subject' };
@@ -414,16 +416,21 @@ async function readWorkspaceDiffStats({ workspaceDir, baseBranch, env, execFileI
   let addedLines = 0;
   let deletedLines = 0;
   let fileCount = 0;
+  let linesKnown = true;
   for (const line of output.split('\n')) {
     if (!line.trim()) continue;
     const [added, deleted] = line.split('\t');
     fileCount += 1;
-    // Binary files report '-'; their line count is unknown, not zero.
-    if (!/^\d+$/.test(added) || !/^\d+$/.test(deleted)) return { addedLines: null, deletedLines: null, fileCount: null };
+    // Binary files report '-'; their line count is unknown, not zero. The
+    // file itself still counts.
+    if (!/^\d+$/.test(added) || !/^\d+$/.test(deleted)) {
+      linesKnown = false;
+      continue;
+    }
     addedLines += Number(added);
     deletedLines += Number(deleted);
   }
-  return { addedLines, deletedLines, fileCount };
+  return linesKnown ? { addedLines, deletedLines, fileCount } : { addedLines: null, deletedLines: null, fileCount };
 }
 
 async function classifyReviewFindings(reviewBody) {
@@ -438,21 +445,24 @@ async function classifyReviewFindings(reviewBody) {
 
 /**
  * Local remediation round: one decision per round. `worker` is the spawned
- * worker descriptor, which carries the resolver's modelResolution unchanged.
+ * worker descriptor, which carries the resolver's modelResolution unchanged;
+ * `modelResolution` is the request's resolution, used whole only when the
+ * descriptor carries no resolved model (fields are never mixed across the two).
  * The caller does not await this: the worker is already running, and the
  * spawned-job record must not wait on MES. The git read is bounded by
  * GIT_NUMSTAT_TIMEOUT_MS and the CLI by `timeoutMs`. Remediation launched
  * through hq dispatch is recorded by the dispatch-path hook (MES-05), not here.
  */
 export function recordRemediationMesShadow({
-  job, workerClass, worker, workspaceDir = null, env = process.env, execFileImpl = null,
+  job, workerClass, worker, modelResolution = null, workspaceDir = null, env = process.env, execFileImpl = null,
   classifyFindingsImpl = classifyReviewFindings, timeoutMs = MES_DECIDE_TIMEOUT_MS, log = console,
 } = {}) {
   return recordShadow('remediation', async () => {
     const registryClass = REMEDIATION_REGISTRY_CLASSES[workerClass] || null;
-    const actual = registryClass && mesActualExecution({ workerClass: registryClass, model: worker?.resolvedModel,
-      effort: worker?.resolvedReasoningLevel, modelSource: worker?.modelSource,
-      effortSource: worker?.reasoningSource, source: worker?.source });
+    const resolution = worker?.resolvedModel ? worker : modelResolution;
+    const actual = registryClass && mesActualExecution({ workerClass: registryClass, model: resolution?.resolvedModel,
+      effort: resolution?.resolvedReasoningLevel, modelSource: resolution?.modelSource,
+      effortSource: resolution?.reasoningSource, source: resolution?.source });
     const round = Number(job?.remediationPlan?.currentRound);
     const key = Number.isInteger(round) && round > 0 && subjectKey(job?.repo, Number(job?.prNumber), `remediation/round-${round}`);
     if (!actual) return { reason: registryClass ? 'unmapped-source' : 'unmapped-worker-class' };
@@ -460,7 +470,7 @@ export function recordRemediationMesShadow({
     const findings = await classifyFindingsImpl(job?.reviewBody).catch(() => ({}));
     const diff = await readWorkspaceDiffStats({ workspaceDir, baseBranch: job?.baseBranch, env, execFileImpl,
       timeoutMs: GIT_NUMSTAT_TIMEOUT_MS });
-    const head = HEAD_SHA_RE.test(String(job?.revisionRef || '')) ? job.revisionRef : null;
+    const head = normalizeHeadSha(job?.revisionRef);
     return {
       workKind: 'remediation', subjectKey: key, prNumber: Number(job.prNumber), headSha: head,
       signals: remediationMesSignals({ ...findings, ...diff, roundsSoFar: round - 1,

@@ -3426,7 +3426,8 @@ reviewer or remediator runs exactly as it did before.
   `<owner/repo>/pr/<n>/review/<head>`.
 - **Local remediation.** After the local worker spawns, the runtime records the
   spawned worker's `modelResolution`, without awaiting it, so the spawned-job
-  record never waits on MES. The subject is
+  record never waits on MES. A descriptor without a resolved model falls back
+  to the request's whole `modelResolution`; fields are never mixed. The subject is
   `<owner/repo>/pr/<n>/remediation/round-<r>`. Remediation dispatched through
   `hq` is recorded by the dispatch-path hook (MES-05), not here.
 - **Signals.** Review: diff lines and file count from the reviewed diff, risk
@@ -3436,7 +3437,9 @@ reviewer or remediator runs exactly as it did before.
   diff --numstat origin/<base>...HEAD` in the workspace, and rounds so far
   against `remediationPlan.maxRounds`. Only numbers, closed enumerations and
   booleans are sent. No title, path, prompt or finding text crosses the
-  process boundary. A signal that cannot be computed is `null`, never `0`.
+  process boundary. A signal that cannot be computed is `null`, never `0`; a
+  binary file nulls the remediation line count but still counts as a file.
+  Head SHAs are matched case-insensitively and keyed in lowercase.
 - **Sources.** `registry` stays `registry` and `committed-seed` maps to
   `static-default`. Env model/effort pins and the non-blocking remediation
   config map to `env`, the OSG reviewer arm to `reviewerArm`, and the OSG

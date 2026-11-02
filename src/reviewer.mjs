@@ -99,7 +99,6 @@ import {
 import { normalizeEffectiveReviewVerdict, sanitizeCodexReviewPayload } from './kernel/verdict.mjs';
 import { assertReviewerReply } from './kernel/review-reply.mjs';
 import { suppressFinalRoundFollowUp } from './comment-only-final-round.mjs';
-import { pickReviewerStage } from './kernel/prompt-stage.mjs';
 import { createLinearTriageAdapter } from './adapters/operator/linear-triage/index.mjs';
 import { getConfig } from './config-loader.mjs';
 import { parseCodexJsonTokenUsage } from './reviewer-model-detection.mjs';
@@ -175,6 +174,7 @@ import {
   buildPromptForReviewerModel,
   buildAgyReviewerPromptPrefix,
   isFinalReviewRound,
+  selectReviewerPromptStage,
 } from './reviewer-prompt.mjs';
 const CRITICAL_WORDS = ['critical', 'vulnerability', 'security', 'injection'];
 
@@ -1862,20 +1862,8 @@ async function main() {
   // the watcher. Backward-compat: if either is missing (old watcher
   // calling new reviewer), default to non-final-round behavior so we
   // don't accidentally downgrade reviews on older deployments.
-  const reviewerCompletedRemediationRounds = completedRemediationRounds ?? (
-    Number.isFinite(Number(reviewAttemptNumber)) ? Number(reviewAttemptNumber) - 1 : undefined
-  );
-  const reviewerPromptStage = verdictOnly ? 'last' : (
-    reviewAttemptNumber === undefined &&
-    completedRemediationRounds === undefined &&
-    maxRemediationRounds === undefined
-  )
-    ? 'first'
-    : pickReviewerStage({
-        reviewAttemptNumber,
-        completedRemediationRounds: reviewerCompletedRemediationRounds,
-        maxRemediationRounds,
-      });
+  const reviewerPromptStage = selectReviewerPromptStage({ verdictOnly,
+    reviewAttemptNumber, completedRemediationRounds, maxRemediationRounds });
   const isFinalRound = reviewerPromptStage === 'last';
 
   console.log(

@@ -27,7 +27,6 @@ import { hasClosureRecoveryIntent, hasHammerDispatchIntent, reviseClosureNextAct
 import { createNoProgressLaneGate } from '../src/posted-review-row.mjs';
 import { collectReviewPipelineHealth, readExpiredNextActions } from '../src/review-pipeline-health.mjs';
 import { expiredNextActionDeadline } from '../src/next-action-deadline.mjs';
-import { markHammerRetryCapExhausted } from '../src/ama/hammer-retry-cap.mjs';
 
 const REPO = 'example-org/subject-41';
 const PR = 41;

@@ -51,6 +51,17 @@ const ADVERSARIAL_PROMPT_FINAL_ROUND_ADDENDUM = readFileSync(
   'utf8',
 ).trim();
 
+// Compatibility for older watchers lives with prompt-stage selection.
+export function selectReviewerPromptStage({ verdictOnly = false, reviewAttemptNumber,
+  completedRemediationRounds, maxRemediationRounds } = {}) {
+  if (verdictOnly) return 'last';
+  if (reviewAttemptNumber === undefined && completedRemediationRounds === undefined
+    && maxRemediationRounds === undefined) return 'first';
+  const rounds = completedRemediationRounds ?? (Number.isFinite(Number(reviewAttemptNumber))
+    ? Number(reviewAttemptNumber) - 1 : undefined);
+  return pickReviewerStage({ reviewAttemptNumber, completedRemediationRounds: rounds, maxRemediationRounds });
+}
+
 function buildReviewerPromptPrefix({
   isFinalRound = false,
   stage,

@@ -2777,7 +2777,7 @@ test('EXHAUSTEDHEADOWNER-01: capped stale builder head reaches verdict-only admi
     const loaderPath = path.join(tmp, 'loader.mjs');
     const registerPath = path.join(tmp, 'register.mjs');
     const runnerPath = path.join(tmp, 'runner.mjs');
-    writeFileSync(loaderPath, buildLoaderSource({ capRouteSource: `
+    writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { '101': 'b'.repeat(40) }, capRouteSource: `
       globalThis.capRoutes = [];
       export function isReviewCycleCapRoutedToHammer({reviewRow}) { return reviewRow?.failure_message?.startsWith('[review-cycle-cap]') === true; }
       export async function maybeRouteReviewCycleCapToHammer(args) {
@@ -2787,10 +2787,10 @@ test('EXHAUSTEDHEADOWNER-01: capped stale builder head reaches verdict-only admi
       }` }));
     writeFileSync(registerPath, buildRegisterSource(loaderPath));
     writeFileSync(runnerPath, buildRunnerSource({
-      prePollSetup: `db.prepare(\`INSERT INTO reviewed_prs
+      prePollSetup: `globalThis.__watcherClaimLoopFreshHeads = { '101': '${'b'.repeat(40)}' }; db.prepare(\`INSERT INTO reviewed_prs
         (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts,
          reviewer_head_sha, revision_ref, failure_message)
-        VALUES (?, 101, ?, 'codex', 'open', 'failed', 9, 'old-head', 'old-head', '[review-cycle-cap] capped')\`)
+        VALUES (?, 101, ?, 'codex', 'open', 'failed', 9, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '[review-cycle-cap] capped')\`)
         .run('laceyenterprises/adversarial-review', '2026-05-15T12:00:00Z');`,
       afterFirstPoll: `
         assert.deepEqual(globalThis.capRoutes, []);

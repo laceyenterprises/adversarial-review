@@ -114,6 +114,39 @@ that receipt.
 The [operator handoff plan](../modules/worker-pool/post-merge-actions/verifyheadtransient-01-recovery-receipt.yaml)
 records this receipt requirement and executes no live action or probe.
 
+### BASEFETCH-01 — verify-head base capture and diagnostics
+
+Verify-head fetches only `refs/heads/$BASE_BRANCH`, with explicit destinations
+for a unique temporary `refs/ham-basefetch/…` ref and the existing
+`refs/remotes/origin/$BASE_BRANCH` freshness check. It resolves the temporary
+ref as a commit, then deletes it on success or failure. Competing fetches can
+replace `FETCH_HEAD`; no verify-head base consumer reads it anymore. Configured
+wildcard refmaps, pruning and tag following are disabled for this read. The
+ordinary exact-head synchronization still uses the existing bounded wrapper.
+
+The shared load-aware helper and its ceiling still size every attempt. A failed
+CPU sample already falls back to the `os.loadavg()` curve, with the existing
+last-good sample policy; the warning alone does not imply a nominal deadline.
+`fetch-base.stderr` now retains that warning, each chosen deadline and Git child
+stderr on successful as well as failed attempts. Failed-fetch stderr was already
+forwarded; successful stderr and load-helper warnings had been discarded.
+
+Revalidation still fails closed, but its existing JSON reason is now
+`validation-base-sha-invalid` for invalid validation evidence or
+`validation-base-fetch-failed` for capture failure. If both fail, the fetch
+reason takes precedence. A protection API 403 remains separate: branch metadata
+can establish an unprotected base; protected/unreadable metadata retains the
+existing strictness policy. The 403 alone does not enter the base-read or
+revalidation decision, and configured required-check policy is unchanged.
+
+Synthetic local Git fixtures reproduce the shared `FETCH_HEAD` race and verify
+isolation, bounded stalled-fetch cleanup, load-average fallback, narrow fetches,
+diagnostics and 403 separation. They do not establish which defect caused any
+particular historical failure. After the build manager confirms the express
+float and watcher restart, observe a day of natural closer runs: expect zero
+`merge-lease-base-read-failed` outcomes, or preserved stderr identifying the
+remaining cause. No new state, gate, lease or outcome classification is added.
+
 ## Host identity reads (HOSTIDCACHE-01)
 
 RESCUEHOSTID-01: the watcher and the external rescue composition root share
@@ -5687,7 +5720,11 @@ Run optional changed-surface validation outside the lease. Save the produced
 head and captured current base before `ham_release_merge_lease --yield local-validation`;
 run the registered validator, then only on success with the same local HEAD set
 `HAM_LOCALLY_VALIDATED_HEAD` and `HAM_LOCALLY_VALIDATED_BASE_SHA` to that saved pair.
-Source verify-head before publishing the audit. It uses the local validation base
+Source verify-head before publishing the audit. BASEFETCH-01 captures the live
+base through a private temporary ref instead of mutable `FETCH_HEAD`; see the
+[change note](#basefetch-01--verify-head-base-capture-and-diagnostics) for fetch
+scope, stderr and the two explicit capture/validation failure reasons.
+It uses the local validation base
 only for the exact tested head and checks drift again; the original parallel-phase
 `HAM_VALIDATION_BASE_SHA` remains unchanged. Invalid evidence or overlapping base
 drift still needs validation; a new head cannot borrow the prior head's evidence.

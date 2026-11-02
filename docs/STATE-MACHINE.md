@@ -1183,6 +1183,13 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+BASEFETCH-01 isolates verify-head base capture in a unique temporary ref while
+retaining the existing origin/base freshness check. Invalid validation evidence
+and failed base capture still force revalidation, with distinct
+`validation-base-sha-invalid` and `validation-base-fetch-failed` reasons. Shared
+load-aware deadlines, merge authority, lifecycle states and retry budgets remain
+unchanged. Natural-traffic acceptance is recorded in the closure runbook.
+
 CLOSERCIWAIT-01 final remediation retains the settled exact-head lease through
 the caller predicate and final live gate. Consumed base retries remain charged;
 only a new merge-phase rebase regenerates audit/predicate evidence internally.

@@ -608,6 +608,83 @@ async function publicationFixture(t, { advice = false } = {}) {
     run: overrides => runFindingBatches({ ...options, ...overrides }) };
 }
 
+async function nativePublicationFixture(t) {
+  const f = await publicationFixture(t);
+  const native = JSON.parse(readFileSync(new URL('./fixtures/findings-custody/native-status.json', import.meta.url), 'utf8'));
+  Object.assign(f.status, native.status);
+  f.batch.launch_id = native.status.launchRequestId;
+  f.db.prepare('UPDATE finding_batches SET launch_id=?').run(f.batch.launch_id);
+  Object.assign(f.launches[0], native.launch, {
+    idempotency_key: `findings-batch-${f.batch.batch_id}`, ticket_ref: `FINDINGS-${f.batch.batch_id}`,
+  });
+  return f;
+}
+
+test('FINDINGSBATCHCUSTODY-01 native owner status publishes once and retains artifact custody', async t => {
+  const f = await nativePublicationFixture(t);
+  const original = readFileSync(f.outputPath, 'utf8');
+  await f.run();
+  assert.equal(f.dispatches.length, 2);
+  assert.equal(f.dispatches[1][f.dispatches[1].indexOf('--branch') + 1], f.status.branch);
+  await f.run();
+  assert.equal(f.dispatches.length, 2);
+  assert.equal(readFileSync(f.outputPath, 'utf8'), original);
+  assert.equal(f.db.prepare('SELECT completed_at,error FROM finding_batches').get().error, null);
+  assert.equal(f.db.prepare('SELECT outcome FROM finding_backlog').get().outcome, null);
+});
+
+test('FINDINGSBATCHCUSTODY-01 native workspace requires independent exact owner evidence', async t => {
+  const cases = [
+    ['foreign workspace, same basename', f => { f.status.repo = '/foreign/workers/other/service'; }],
+    ['foreign workspace in both status fields', f => {
+      f.status.repo = f.status.workspacePath = '/foreign/workers/other/service';
+    }],
+    ['foreign worktree', f => { f.status.workspacePath = '/foreign/service'; }],
+    ['foreign launch worktree', f => { f.launches[0].target_worktree = '/foreign/service'; }],
+    ['foreign repository, same short name', f => { f.launches[0].target_repo = 'other/service'; }],
+    ['foreign ticket', f => { f.launches[0].ticket_ref = 'FINDINGS-other'; }],
+    ['foreign key', f => { f.launches[0].idempotency_key = 'findings-batch-other'; }],
+    ['missing workspace', f => { delete f.status.workspacePath; }],
+    ['missing launch worktree', f => { delete f.launches[0].target_worktree; }],
+    ['relative launch worktree', f => { f.launches[0].target_worktree = 'service'; }],
+    ['failed preparation', f => { f.status.status = 'failed'; f.status.succeeded = false; }],
+    ['explicit unsuccessful push', f => { f.status.milestones.branch_pushed.status = 'not_started'; }],
+    ['wrong remote head', f => { f.publication.headSha = 'c'.repeat(40); }],
+    ['unmarked result PR', f => { f.publication.prs = [{ ...f.pr, body: 'foreign' }]; }],
+  ];
+  for (const [name, mutate] of cases) await t.test(name, async t => {
+    const f = await nativePublicationFixture(t);
+    const original = readFileSync(f.outputPath, 'utf8');
+    mutate(f);
+    await f.run();
+    assert.equal(f.dispatches.length, 1);
+    const stored = f.db.prepare('SELECT completed_at,error FROM finding_batches').get();
+    assert.equal(stored.completed_at, null);
+    assert.ok(stored.error);
+    assert.equal(f.db.prepare('SELECT outcome FROM finding_backlog').get().outcome, null);
+    assert.equal(readFileSync(f.outputPath, 'utf8'), original);
+  });
+});
+
+test('FINDINGSBATCHCUSTODY-01 invalid historical outcomes retain every finding and artifact', async t => {
+  for (const [outcome, reason, error] of [
+    ['dropped', 'This looks stale', 'invalid-dropped-reason'],
+    ['resolved', 'Fixed in the prepared branch', 'invalid-finding-outcome'],
+    ['applied', '', 'invalid-finding-outcome'],
+  ]) await t.test(error + ':' + outcome, async t => {
+    const f = await nativePublicationFixture(t);
+    Object.assign(f.result.findings[0], { outcome, reason });
+    writeFileSync(f.outputPath, JSON.stringify(f.result));
+    const original = readFileSync(f.outputPath, 'utf8');
+    await f.run();
+    assert.equal(f.dispatches.length, 1);
+    assert.deepEqual(f.db.prepare('SELECT completed_at,error FROM finding_batches').get(),
+      { completed_at: null, error });
+    assert.equal(f.db.prepare('SELECT outcome FROM finding_backlog').get().outcome, null);
+    assert.equal(readFileSync(f.outputPath, 'utf8'), original);
+  });
+});
+
 test('FINDINGSSHAPE-01 dispatches decision-only preparation and one pr-shaped publisher on the pushed branch', async t => {
   for (const advice of [false, true]) await t.test(`advice-only=${advice}`, async t => {
     const f = await publicationFixture(t, { advice });

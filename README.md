@@ -1557,7 +1557,11 @@ the merged fix PR and out-of-scope drops cite a ticket. Empty outcomes fail.
 
 Decision-only preparation pushes tested fixes; one PR-shaped follow-up publishes
 on that same branch. Nullable repository metadata and absent push milestones are
-handled using keyed launch evidence and the actual remote branch/head. Explicit
+handled using keyed launch evidence and the actual remote branch/head. Native
+absolute workspace repository projections additionally require exact agreement
+with the preparation launch ledger `target_worktree` and status `workspacePath`.
+Missing workspace proof remains unresolved. Historical invalid outcomes require
+owner adjudication under the [bounded recovery procedure](docs/follow-up-runbook.md#findings-batch-publication-custody-findingsbatchcustody-01). Explicit
 failed pushes or failed preparation still refuse publication. Durable batch IDs,
 launch receipts, a per-batch lock and submission intent fence duplicate workers
 and publishers. Existing failed batches stay visible for same-launch repair.
@@ -4458,6 +4462,10 @@ compression. Shared local overlays remain tolerant of unknown sibling keys.
 Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
+
+- FINDINGSBATCHCUSTODY-01 (LAC-2143): bind native findings publication workspace
+  paths to the preparation launch ledger, retain foreign-repository and publication
+  fences, and document separate owner recovery for invalid historical outcomes.
 
 - REVIEWSTALL-01 HAM validation repair: align the Codex invocation regression
   with ceiling-capped stall deadlines and reviewer metadata, and refresh the

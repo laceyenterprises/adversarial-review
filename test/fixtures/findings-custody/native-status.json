@@ -1,0 +1,60 @@
+{
+  "status": {
+    "launchRequestId": "lrq_findings-custody-fixture",
+    "dispatchId": "lrq_findings-custody-fixture",
+    "workerRunId": "wrun_findings-custody-fixture",
+    "ticketRef": "FINDINGS-fixture",
+    "repo": "/synthetic/hq/workers/codex-findings/service",
+    "workspacePath": "/synthetic/hq/workers/codex-findings/service",
+    "branch": "fixture/findings",
+    "status": "succeeded",
+    "terminal": true,
+    "succeeded": true,
+    "milestones": {
+      "branch_created": {
+        "status": "not_started",
+        "at": null,
+        "detail": null
+      },
+      "files_changed": {
+        "status": "not_started",
+        "at": null,
+        "detail": null
+      },
+      "tests_passed": {
+        "status": "not_started",
+        "at": null,
+        "detail": null
+      },
+      "commit_created": {
+        "status": "not_started",
+        "at": null,
+        "detail": null
+      },
+      "branch_pushed": {
+        "status": "done",
+        "at": "2026-11-02T00:00:50Z",
+        "detail": "Disposable fixture push evidence; no real push"
+      },
+      "pr_opened": {
+        "status": "not_started",
+        "at": null,
+        "detail": null
+      }
+    }
+  },
+  "worker": {
+    "run_id": "wrun_findings-custody-fixture",
+    "launch_request_id": "lrq_findings-custody-fixture",
+    "repo_path": "/synthetic/hq/workers/codex-findings/service",
+    "worktree_path": "/synthetic/hq/workers/codex-findings/service"
+  },
+  "launch": {
+    "launch_request_id": "lrq_findings-custody-fixture",
+    "idempotency_key": "findings-batch-fixture",
+    "target_repo": "sample/service",
+    "target_worktree": "/synthetic/hq/workers/codex-findings/service",
+    "status": "succeeded",
+    "ticket_ref": "FINDINGS-fixture"
+  }
+}

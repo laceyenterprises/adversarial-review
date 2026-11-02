@@ -266,7 +266,12 @@ no PR, push, or publication launch.
 For provisional applied findings or advice, the collector validates complete
 manifest coverage, waits for terminal preparation (including a launch parked at
 publication), and reads its branch from `hq dispatch status --json`. The launch
-ID must match; a non-null status repository must match too. The keyed launch
+ID must match; a non-null slug/short-name status repository must match too.
+For an absolute native workspace repository, the preparation launch ledger row
+must supply an absolute `target_worktree` exactly equal to status `repo` and
+`workspacePath`; missing worktree proof remains unresolved. No path basename
+identifies a repository. See FINDINGSBATCHCUSTODY-01 in the follow-up runbook.
+The keyed launch
 ledger must independently bind that launch to the repository and ticket. Status
 `repo` may be null in the producer contract. `git-safe` writes a branch-push
 projection (`status: pushed`, `reason: branch_pushed`), which does not guarantee a
@@ -303,7 +308,7 @@ The publisher reuses the pushed branch and checks for an existing PR again,
 opens the single PR through `hq pr open --spec-ref none` with the exact batch
 marker, and atomically updates only `prNumber` and `headSha` in the outcome
 artifact. For an older parked batch, retain its original batch row and launch ID,
-restore a complete provisional manifest from its prepared fixes if needed, and
+retain its complete provisional manifest without inferring or rewriting decisions, and
 retain its pushed branch. Collection follows the same recovery path without
 reapplying fixes or opening a duplicate PR. No runtime recovery is performed by
 this source change.

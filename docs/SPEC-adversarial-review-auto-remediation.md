@@ -1,5 +1,27 @@
 # SPEC - Adversarial Review Auto-Remediation
 
+## FINDINGSBATCHCUSTODY-01: publication repository custody
+
+`publishFindingBatch` treats native dispatch `repo` as a workspace projection
+when it is absolute. The status receipt must still identify the preparation LRQ.
+The complete keyed launch read must bind every returned launch to the original
+`findings-batch-<batchId>` key, `FINDINGS-<batchId>` ticket and exact repository
+slug or registered short name. The preparation launch's absolute `target_worktree`
+must equal both status `repo` and `workspacePath` byte for byte. A basename,
+path normalization, local Git remote or a publisher's worktree cannot establish
+that binding. Missing preparation worktree evidence reports
+`batch-workspace-evidence-unavailable`; conflicting evidence reports
+`batch-launch-evidence-mismatch`. Legacy slug/short-name and null status `repo`
+retain their existing keyed-ledger validation.
+
+Terminal successful or publication-blocked preparation, any explicit push milestone,
+remote tested head, exact batch marker, same-repository PR and active-pipeline or
+merged settlement predicates remain authoritative. No new completion state,
+retry, timeout release or automatic historical outcome conversion is introduced.
+Invalid outcome/reason artifacts retain their entire batch unresolved. See the
+[bounded recovery procedure](follow-up-runbook.md#findings-batch-publication-custody-findingsbatchcustody-01)
+and [incident qualification](postmortems/SEV3-findings-batch-publication-custody-2026-11-02.md).
+
 _Status: Living contract_
 _Related: `SPEC.md`, `docs/follow-up-runbook.md`_
 

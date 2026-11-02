@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 import { pickRemediationWorkerClass } from './remediation-worker-routing.mjs';
 import { parseDispatchJsonOutput, readDispatchReceipt, parseHqDispatchStatus } from './producer-contracts/dispatch-receipt.mjs';
@@ -258,8 +258,10 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
       ['dispatch', 'status', batch.launch_id, '--json', '--root', resolveHqRoot(env)],
       { env, timeout: 15_000, maxBuffer: 1024 * 1024 });
     const status = parseHqDispatchStatus(stdout, { normalize: false });
-    if (readDispatchReceipt(status).launchRequestId !== batch.launch_id
-      || (status.repo != null && ![batch.repo, batch.repo.split('/').at(-1)].includes(status.repo))) throw Error('batch-launch-evidence-mismatch');
+    if (readDispatchReceipt(status).launchRequestId !== batch.launch_id) throw Error('batch-launch-evidence-mismatch');
+    const workspaceRepo = typeof status.repo === 'string' && isAbsolute(status.repo);
+    if (status.repo != null && !workspaceRepo
+      && ![batch.repo, batch.repo.split('/').at(-1)].includes(status.repo)) throw Error('batch-launch-evidence-mismatch');
     const meaning = readDispatchStatus(status);
     if (!meaning.terminal) return;
     // A publication-blocked decision launch may have pushed successfully.
@@ -274,7 +276,17 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
     if (probe.rows.some(row => row.idempotency_key !== key || row.ticket_ref !== `FINDINGS-${batch.batch_id}`
       || ![batch.repo, batch.repo.split('/').at(-1)].includes(row.target_repo)
       || typeof row.launch_request_id !== 'string' || !row.launch_request_id)) throw Error('batch-publish-receipt-mismatch');
-    if (!probe.rows.some(row => row.launch_request_id === batch.launch_id)) throw Error('batch-launch-evidence-mismatch');
+    const preparation = probe.rows.find(row => row.launch_request_id === batch.launch_id);
+    if (!preparation) throw Error('batch-launch-evidence-mismatch');
+    if (workspaceRepo) {
+      // Native status serializes worker_runs.repo_path as repo. It is not a
+      // repository slug. Bind the exact workspace to this launch's worktree;
+      // the keyed launch ledger above remains the repository/ticket authority.
+      // Never infer repository ownership from a path basename or local Git.
+      if (typeof preparation.target_worktree !== 'string' || !isAbsolute(preparation.target_worktree)) throw Error('batch-workspace-evidence-unavailable');
+      if (status.repo !== preparation.target_worktree
+        || status.workspacePath !== preparation.target_worktree) throw Error('batch-launch-evidence-mismatch');
+    }
     // git-safe records a branch push projection, not necessarily an HQ
     // branch_pushed milestone. Bind the launch through the ledger above and
     // verify the actual remote branch/head below instead of guessing a format.

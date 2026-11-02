@@ -1,0 +1,22 @@
+# Operator-owned organic receipt; no automated service action or recovery.
+operator_steps:
+  - description: >-
+      After ordinary review, merge and normal deployment, the runtime owner
+      records the deployed SHA and actual running build on LAC-2143. Follow
+      docs/follow-up-runbook.md FINDINGSBATCHCUSTODY-01 to qualify one existing
+      owned batch read-only, including exact preparation target_worktree,
+      repository, LRQ, ticket, key, terminal, push, head and marker evidence.
+      Retain the next organic hourly collection receipt. Missing evidence,
+      failed publisher or ambiguous intent remains unresolved pending a
+      separately reviewed batch-scoped owner repair. Historical invalid reasons
+      and outcomes require separate evidence-backed owner adjudication with
+      original artifacts retained. This handoff authorizes no restart, backfill,
+      mass redispatch, store edit, artifact rewrite or synthetic production
+      canary. The command only displays this handoff and proves no recovery.
+    run_as: designated dispatch/review runtime owner
+    command: >-
+      /usr/bin/printf '%s\n' 'FINDINGSBATCHCUSTODY-01: retain deployed/running build identity and one existing batch organic custody receipt on LAC-2143; follow docs/follow-up-runbook.md and preserve unresolved historical artifact gates.'
+actions: []
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

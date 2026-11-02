@@ -2038,3 +2038,65 @@ Existing smoke promises remain; no live operation is part of validation.
 
 
 REMGEMINI-01 loader parity: `roles.remediator_fallback` accepts both the `gemini` route and concrete `remediator-gemini` class. Deploy this companion with Agent OS #10087 before using the concrete spelling. Defaults and dispatch/provider selection remain unchanged.
+
+
+## Findings-batch publication custody (FINDINGSBATCHCUSTODY-01)
+
+This procedure qualifies one already-owned batch. It grants no backfill, restart,
+redispatch or store-edit authority. Keep source, deployed build and runtime
+receipts separate: a merged fix is not evidence that the watcher runs it, and an
+offline fixture is not evidence that historical findings are resolved.
+
+1. The runtime owner selects one batch from the read-only `pipeline-health`
+   `nonBlockingBacklog.batchErrors` report and records batch ID, repository,
+   area, finding/note IDs, original preparation LRQ and error on LAC-2143.
+   Record the deployed source SHA and loaded process/build identity through the
+   normal deployment owner. Do not restart the service for this investigation.
+2. Preserve a read-only evidence copy and hashes of that batch's original
+   manifest/prompt, `outcomes.json`, `publish-intent.json`, publisher prompt and
+   existing launch/PR receipts. Retain the `publish.lock` inode and original
+   batch/key/branch ownership. Confirm no preparation/publisher or recovery
+   owner is live before any separately authorized owner repair.
+3. Read `hq dispatch status <preparation-LRQ> --json` and the public keyed launch
+   ledger for `findings-batch-<batchId>`, including terminal rows. Require the
+   exact LRQ, target repository, ticket and key. An absolute status `repo` needs
+   the preparation row's absolute `target_worktree` equal to both status paths;
+   a same-basename path or an unrelated launch's workspace is insufficient.
+   Missing worktree evidence is an explicit unresolved gate, not permission to
+   populate the ledger from the status or rewrite an artifact.
+4. Require successful/publication-blocked terminal preparation and complete,
+   valid manifest coverage. An explicit push milestone other than `done` still
+   refuses publication. Read PRs on the original branch across all states before
+   the remote ref: recover only one same-repository PR with the exact batch
+   marker. Without that PR, require the remote head equal to the tested pushed
+   `headSha`. A closed unmerged PR remains unresolved. Preserve every finding
+   and advisory decision; publication only updates PR number/head.
+5. After the fix is deployed normally, let the existing hourly collector process
+   eligible artifacts. Do not invoke the whole-queue `resolutionOnly` API as a
+   single-batch command: it scans every unresolved batch. An existing publisher
+   receipt fences another publisher even if failed; ambiguous submission intent
+   remains fenced. There is no supported automatic intent reset or failed-launch
+   replacement here. For missing evidence, failed publisher or ambiguous intent,
+   the exact next action is for the dispatch/review runtime owner to reconcile
+   that existing LRQ/intent from authoritative acceptance and PR evidence and
+   propose a separately reviewed, batch-scoped repair. Retain custody meanwhile.
+6. Record the next organic collection receipt: unchanged unresolved/error state
+   or the sole marked PR with current-head pipeline attachment/merge evidence.
+   Report health counts and age as observed; never infer the backlog cleared.
+
+Qualify the two artifact failures separately:
+
+| Error | What is proven | Required owner action |
+| --- | --- | --- |
+| `invalid-dropped-reason` | A dropped row does not satisfy the current code/justification syntax. It does not prove staleness or noise. | Preserve the original bytes and identify each rejected row. The findings owner must re-check the cited current-main code/behavior, record new evidence and decide whether a valid drop is justified. A merged-fix reason requires an independently read merged PR; an out-of-scope reason requires the actual follow-up ticket. |
+| `invalid-finding-outcome` | An ID is duplicate/foreign, the outcome is outside `applied`/`dropped`, or its reason is absent/blank. It does not prove application. | Reconcile every finding ID against the immutable manifest and original worker evidence. The findings owner must adjudicate ambiguous/missing decisions; applied claims need the tested pushed head and marked PR/pipeline evidence. Never translate `resolved`, add IDs, or manufacture a reason from the error. |
+
+No safe automatic conversion of either historical error family is established.
+A new owner-adjudicated outcome artifact, if needed, requires separate explicit
+runtime authorization, an audit preserving the original artifact/hash and fresh
+per-item evidence, complete finding/advisory coverage and atomic group-readable
+publication. This ticket does not perform or authorize that live rewrite. If no
+supported owner repair surface exists, keep the batch unresolved and request a
+reviewed batch-scoped recovery change. Do not delete/rename the original artifact,
+clear DB ownership/error fields, release locks/intents, mass redispatch, or run the
+one-shot whole-backlog drain as a recovery shortcut.

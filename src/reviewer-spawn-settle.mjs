@@ -1308,7 +1308,7 @@ async function spawnReviewerOnceWithAccount({
             passKind,
             reviewerClass: normalizedReviewerClass,
             reviewerModel,
-            status: result.ok ? 'completed' : (result.failureClass === 'cancelled' ? 'cancelled' : 'failed'),
+            status: result.ok ? 'completed' : (['cancelled', 'reviewer-stalled'].includes(result.failureClass) ? 'cancelled' : 'failed'),
             startedAt,
             endedAt,
             tokenUsage,
@@ -1339,7 +1339,7 @@ async function spawnReviewerOnceWithAccount({
         prNumber,
         attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
         passKind,
-        status: result.ok ? 'completed' : (result.failureClass === 'cancelled' ? 'cancelled' : 'failed'),
+        status: result.ok ? 'completed' : (['cancelled', 'reviewer-stalled'].includes(result.failureClass) ? 'cancelled' : 'failed'),
         endedAt,
         tokenUsage,
         tokenSource: tokenUsage?.source || 'unknown',
@@ -1559,6 +1559,21 @@ function settleReviewerAttempt({
   markReviewHeartbeat = () => {},
 }) {
   reviewerModel = result.effectiveReviewerModel || reviewerModel;
+  if (!result.ok && result.failureClass === 'reviewer-stalled') {
+    // Stall says nothing about the PR. Keep its existing owner and scheduling,
+    // release only this claim, and charge neither review nor recovery budgets.
+    try {
+      recordCascadeFailure(rootDir, {
+        repo: repoPath, prNumber, failedAt: failureAt, failureClass: 'reviewer-stalled',
+        failureReason: result.error || 'reviewer made no progress', reviewerModel,
+      });
+    } catch { log.warn('[watcher] reviewer stall backoff persistence failed'); }
+    withSqliteBusyRetrySync(
+      () => statements.releaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber),
+      { label: `reviewer-stall-release:${repoPath}#${prNumber}`, log },
+    );
+    return;
+  }
   if (result.failureClass === 'reviewer-account-held') {
     reviewerSessionUuid = result.reviewerSessionUuid || reviewerSessionUuid;
     log.warn(`[watcher] reviewer-account-held repo=${repoPath} pr=${prNumber} reason=${result.error || 'unknown'}`);

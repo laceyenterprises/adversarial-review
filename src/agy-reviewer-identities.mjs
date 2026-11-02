@@ -1412,6 +1412,7 @@ function createAgyReviewerIdentityPool({
 // identity-scoped durable cooldown instead of readiness isolation.
 const NON_ISOLATING_FAILURE_CLASSES = new Set([
   'cancelled',
+  'reviewer-stalled',
   'reviewer-timeout',
   'reviewer-chunk-budget-exceeded',
   'stale-review-head',

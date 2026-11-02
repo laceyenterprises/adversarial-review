@@ -68,6 +68,7 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
   // identifies stale-head churn; an ordinary temporary failure keeps its class.
   const text = String(stderr || '');
   const lower = text.toLowerCase();
+  if (details?.reviewerStalled === true || text.includes('[reviewer-stalled]')) return 'reviewer-stalled';
   if (exitCode === REPOSITORY_STATE_BUSY_EXIT_CODE && /(?:^|\n)\[repository-state-busy\]/.test(lower)) {
     return 'repository-state-busy';
   }

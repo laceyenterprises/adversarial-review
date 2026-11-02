@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import './helpers/review-cli-resolver-fixture.mjs';
 import { serviceFixtureExec, writeDummyCodexAuth } from './helpers/codex-service-fixture.mjs';
 import { reviewerSizeFactsLine, readSizeFacts } from '../src/reviewer-size-owner.mjs';
@@ -53,6 +54,30 @@ const noopPreflight = async ({ model }) => (
     ? { codexCli: '/tmp/fake-codex' }
     : { claudeCli: '/tmp/fake-claude' }
 );
+
+test('REVIEWSTALL-01: stall marker crosses the reviewer child boundary as cancelled', async () => {
+  const rootDir = makeRoot();
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir, preflightImpl: noopPreflight,
+      spawnCapturedImpl: async () => {
+        // The parent sees stderr from the child, not its Error object.
+        throw Object.assign(new Error('Command failed with code 1'), {
+          stderr: '[reviewer-stalled] no first output; previous diagnostic: provider overloaded',
+          exitCode: 1,
+        });
+      },
+    });
+    const result = await adapter.spawnReviewer({
+      model: 'claude', prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'fixture-owner/demo', prNumber: 1 },
+      timeoutMs: 5000, sessionUuid: 'fixture-stall', forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.failureClass, 'reviewer-stalled');
+    assert.equal(readReviewerRunRecord(rootDir, 'fixture-stall').state, 'cancelled');
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
 const TEST_HQ_PARENT_SESSION = 'session:test:hq';
 const TEST_HQ_PROJECT = 'adversarial-review';
 const AGENT_RUNTIME_CUTOVER_READY_NOW = () => new Date('2026-08-04T10:00:00.000Z');
@@ -507,7 +532,8 @@ test('agent-os-hq reports owner mismatch as configuration error without invoking
     const result = await adapter.spawnReviewer({
       model: 'codex',
       prompt: '',
-      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 14 },
+      // Reach owner validation with the required subject identity supplied.
+      subjectContext: { domainId: 'code-pr', repo: 'fixture-owner/demo', prNumber: 14, subjectExternalId: 'fixture-subject' },
       timeoutMs: 100,
       sessionUuid: 'agent-hq-owner-mismatch',
       forbiddenFallbacks: ['api-key'],

@@ -4459,6 +4459,21 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- REVIEWSTALL-01 HAM validation repair: align the Codex invocation regression
+  with ceiling-capped stall deadlines and reviewer metadata, and refresh the
+  reviewer runtime state-source fingerprint for the existing cancellation path.
+
+- REVIEWSTALL-01 final comment-only remediation: `spawnWithInput` and
+  `spawnCaptured` forward custom `onStall` receipt sinks; omitted sinks retain
+  the stderr fallback. Stall classification accepts raw strings as well as
+  Error objects. Focused offline regressions cover both wrappers and input
+  shapes; lifecycle states and smoke promises are unchanged.
+
+- REVIEWSTALL-01: native reviewer calls use load-aware first-output and
+  no-progress deadlines within the existing wall ceiling. Stalls emit a
+  timing receipt, release the seat, and return to the existing queue without
+  spending review or recovery attempts.
+
 - HAMGITTOKEN-01 final rescue: the outer 120-second submodule-sync bound owns its child timeout and waits for lock cleanup; bounded snapshot and publication proofs accept unset or empty `HAM_NODE_BIN` consistently. Credential refresh classification and exact-head merge predicates remain intact.
 
 - Preserve the API-published head and starting head before attestation so a failed attestation retains exact publication provenance for closure recovery; cover the failure with an offline regression.

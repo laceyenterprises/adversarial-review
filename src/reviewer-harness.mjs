@@ -1,5 +1,6 @@
 import { resolveReviewCliPath, resolveReviewCliPathAsync } from './review-cli-resolver.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { reviewerStallOptions, isReviewerStall } from './reviewer-stall.mjs';
 import { resolveClaudeBrokerProvider } from './claude-account-routing.mjs';
 // Reviewer model-execution harness.
 //
@@ -109,7 +110,7 @@ import {
   buildAgyReviewerPromptPrefix,
 } from './reviewer-prompt.mjs';
 import { parseCodexJsonTokenUsage } from './reviewer-model-detection.mjs';
-import { countChangedLines, resolveReviewerCeilingSeconds, resolveReviewerIdleTimeoutSeconds } from './reviewer-timeout-model.mjs';
+import { countChangedLines, resolveReviewerCeilingSeconds } from './reviewer-timeout-model.mjs';
 import { resolveClaudeLaunchctlUidFromConfig } from './claude-launchctl-uid.mjs';
 import { recordReviewMesShadow } from './mes-shadow-hook.mjs';
 
@@ -143,6 +144,9 @@ async function spawnWithInput(command, args, {
   signal,
   reapGroupOnExit = false,
   onStdoutData,
+  firstOutputTimeout = 0,
+  stallReviewer,
+  onStall,
   // Side-channel capture files and the hard settle deadline; see
   // spawnCapturedProcessGroup. Only passed when set, so other callers are
   // unchanged.
@@ -162,6 +166,9 @@ async function spawnWithInput(command, args, {
     reapGroupOnExit,
     onSpawn,
     onStdoutData,
+    firstOutputTimeout,
+    ...(stallReviewer ? { stallReviewer } : {}),
+    ...(onStall ? { onStall } : {}),
     ...(stdoutPath ? { stdoutPath } : {}),
     ...(stderrPath ? { stderrPath } : {}),
     ...(settleAfterKillMs ? { settleAfterKillMs } : {}),
@@ -177,6 +184,9 @@ async function spawnCaptured(command, args, {
   maxBuffer = 10 * 1024 * 1024,
   signal,
   onStdoutData,
+  firstOutputTimeout = 0,
+  stallReviewer,
+  onStall,
 } = {}) {
   return spawnWithInput(command, args, {
     env,
@@ -188,6 +198,9 @@ async function spawnCaptured(command, args, {
     maxBuffer,
     signal,
     onStdoutData,
+    firstOutputTimeout,
+    ...(stallReviewer ? { stallReviewer } : {}),
+    ...(onStall ? { onStall } : {}),
   });
 }
 
@@ -860,9 +873,8 @@ async function reviewWithClaude(diff, extraContext = '', {
         input: prompt,
         cwd: reviewerSubprocessCwd,
         timeout: reviewerTimeoutMs,
-        progressTimeout: resolveReviewerIdleTimeoutSeconds(subprocessEnv) * 1000,
+        ...reviewerStallOptions(reviewerTimeoutMs, { model: reviewerExecution.model, runtime: 'claude' }),
         progressOnStdoutOnly: true,
-        firstOutputTimeout: 0,
         onStdoutData: noteStreamEvents,
         stdoutCapture: 'tail',
         maxBuffer: 10 * 1024 * 1024,
@@ -872,6 +884,7 @@ async function reviewWithClaude(diff, extraContext = '', {
     ));
   } catch (err) {
     await tokenProxy?.close();
+    if (isReviewerStall(err)) throw err;
     if (err?.isLaunchctlSessionError) {
       throw err;
     }
@@ -1237,7 +1250,7 @@ async function spawnCodexReview({
         env: { ...scrubOAuthFallbackEnv(env).env, CODEX_HOME: home.codexHome, CODEX_AUTH_PATH: home.authPath },
         cwd,
         timeout,
-        progressTimeout: resolveReviewerIdleTimeoutSeconds(env) * 1000,
+        ...reviewerStallOptions(timeout, { model, runtime: 'codex' }),
         maxBuffer,
         ...(onStdoutData ? { onStdoutData } : {}),
       },
@@ -1347,6 +1360,7 @@ async function reviewWithCodex(diff, extraContext = '', {
       stdout = result.stdout || '';
       stderr = result.stderr || '';
     } catch (err) {
+      if (isReviewerStall(err)) throw err;
       stdout = err.stdout || '';
       stderr = err.stderr || '';
       const msg = `${err.message || ''}\n${stdout}\n${stderr}`;
@@ -2538,6 +2552,7 @@ function sanitizeAgyReviewOutput(rawOutput) {
 }
 
 function isRetryableGeminiSubprocessError(err) {
+  if (isReviewerStall(err)) return false;
   const detail = buildGhErrorDetail(err);
   if (parseReviewerModelUnavailable(detail)) return false;
   return /\b(etimedout|econnreset|econnrefused|ehostunreach|eai_again|enotfound|epipe|eagain|eio|tls)\b/.test(detail)
@@ -2662,6 +2677,7 @@ async function spawnGeminiReview({
       cwd,
       input: prompt,
       timeout,
+      ...reviewerStallOptions(timeout, { model, runtime: 'gemini' }),
       signal,
       maxBuffer,
     },
@@ -2711,7 +2727,7 @@ async function spawnAgyReview({
       if (remainingMs <= 0) throw new Error('Antigravity agy subprocess timeout');
       const agyArgs = argsFor(streamJson);
       if (identity) {
-        return spawnAgyIdentityReview({ identity, agyArgs, timeout: remainingMs, signal: childSignal, maxBuffer, spawnWithInputImpl });
+        return spawnAgyIdentityReview({ identity, model, agyArgs, timeout: remainingMs, signal: childSignal, maxBuffer, spawnWithInputImpl });
       }
       return spawnWithInputImpl(
         agyCli,
@@ -2722,7 +2738,7 @@ async function spawnAgyReview({
           // Prompt is delivered on argv (see buildAgyReviewArgs); stdin is closed.
           input: '',
           timeout: remainingMs,
-          progressTimeout: remainingMs,
+          ...reviewerStallOptions(remainingMs, { model, runtime: 'antigravity' }),
           signal: childSignal,
           killGraceMs: 0,
           maxBuffer,
@@ -2737,6 +2753,7 @@ async function spawnAgyReview({
     try {
       return await run(true);
     } catch (err) {
+      if (isReviewerStall(err)) throw err;
       const diagnostic = `${err.message || ''}\n${err.stdout || ''}\n${err.stderr || ''}`;
       // Only a parser rejection of this optional telemetry flag authorizes
       // replay. Auth, model, review and transport failures retain their routing.
@@ -2787,7 +2804,7 @@ function readCapturedFile(path, maxBytes) {
 // and `settleAfterKillMs` settles even if sudo itself outlives the kill. What
 // survives is the watcher's to handle: the identity is not leased again while
 // any process still runs as that user.
-async function spawnAgyIdentityReview({ identity, agyArgs, timeout, signal, maxBuffer, spawnWithInputImpl }) {
+async function spawnAgyIdentityReview({ identity, model, agyArgs, timeout, signal, maxBuffer, spawnWithInputImpl }) {
   const printIndex = agyArgs.indexOf('--print');
   const prompt = agyArgs[printIndex + 1];
   const safeArgs = [...agyArgs];
@@ -2812,7 +2829,7 @@ async function spawnAgyIdentityReview({ identity, agyArgs, timeout, signal, maxB
       stdoutPath,
       stderrPath,
       settleAfterKillMs: AGY_IDENTITY_SETTLE_AFTER_KILL_MS,
-      progressTimeout: timeout,
+      ...reviewerStallOptions(timeout, { model, runtime: 'antigravity', identity: identity.user }),
       // sudo relays SIGTERM to the pinned agy command but cannot relay SIGKILL;
       // give it a moment to forward the TERM before the group is killed.
       killGraceMs: AGY_IDENTITY_KILL_GRACE_MS,
@@ -2886,6 +2903,7 @@ async function reviewWithGemini(diff, extraContext = '', {
   let fallbackLock = null;
   let quotaSignal = false;
   let spendReported = false;
+  let stalled = false;
   signal?.throwIfAborted();
   console.error('[reviewWithGemini] asserting OAuth...');
   if (runtime === 'antigravity' && !addedIdentity) {
@@ -3048,6 +3066,10 @@ async function reviewWithGemini(diff, extraContext = '', {
     }
   } catch (err) {
     if (signal.aborted) throw signal.reason;
+    if (isReviewerStall(err)) {
+      stalled = true;
+      throw err;
+    }
     if (err.failureClass === 'reviewer-model-unavailable') throw err;
     stdout = err.stdout || '';
     stderr = err.stderr || '';
@@ -3073,7 +3095,7 @@ async function reviewWithGemini(diff, extraContext = '', {
       await finishAgyIdentityReviewImpl(identityRun, { log });
     }
     if (runtime === 'antigravity') {
-      if (checkout?.credentialId && !quotaSignal && !spendReported && subprocessStarted) {
+      if (checkout?.credentialId && !quotaSignal && !spendReported && subprocessStarted && !stalled) {
         try {
           await reportGeminiCredentialSpend({
             checkout,

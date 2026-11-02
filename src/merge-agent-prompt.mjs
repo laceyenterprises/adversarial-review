@@ -198,6 +198,8 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
       + ' walkthrough/README section edits satisfies walkthrough currency.'
       + ' Reviewers accept the fragment; the walkthrough need not change when its'
       + ' existing text needs no correction. Follow `docs/walkthroughs/README.md` when available.'
+      + ' If that guide is absent, include Summary, Interface changes (or none), and'
+      + ' Verification with commands and observed results; explain the operational change rather than leave an empty fragment.'
       + ' Do not append ticket sections to walkthroughs or READMEs or shared README change-note entries.'
       + ' An end-of-file ticket section is at most a non-blocking style note, never a blocking finding.'
       + ' This adds no blocking condition.'

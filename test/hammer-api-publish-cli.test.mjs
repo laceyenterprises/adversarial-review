@@ -205,8 +205,8 @@ console.log(JSON.stringify({ head: { ref: 'worker', sha: ${JSON.stringify(remote
   assert.equal((await git('ls-remote', 'origin', 'refs/heads/worker')).stdout.split(/\s/)[0], remoteHead);
 });
 
-for (const route of ['api', 'git-explicit', 'git-tracking', 'api-timeout', 'api-reset', 'api-tree', 'api-recover', 'api-credential']) {
-  const stops = ['api-timeout', 'api-reset', 'api-tree', 'api-credential'].includes(route);
+for (const route of ['api', 'git-explicit', 'git-tracking', 'api-timeout', 'api-reset', 'api-tree', 'api-recover', 'api-credential', 'api-attestation']) {
+  const stops = ['api-timeout', 'api-reset', 'api-tree', 'api-credential', 'api-attestation'].includes(route);
   test(stops ? `LAC-2086: ${route} preserves publication and stops without a stale push or review`
     : `HAMPREDICATE-01: ${route} publication and rendered audit pass the whole CLI predicate`, async t => {
     const apiRoute = route.startsWith('api');
@@ -346,7 +346,7 @@ cp.execFileSync = (command, args, options) => {
     appendFileSync(${JSON.stringify(scratchCalls)}, JSON.stringify(args) + '\\n');
     if (args[0] === 'fetch' && args[2] !== ${JSON.stringify(reviewed)}) {
       fetches++;
-      if (route === 'api-credential') {
+      if (['api-credential', 'api-attestation'].includes(route)) {
         return original(process.execPath, [${JSON.stringify(failureChild)}, 'credential'], options);
       }
       if (route === 'api-timeout' || (route === 'api-recover' && fetches === 1)) {
@@ -368,6 +368,8 @@ if [[ "$1" == */bin/merge-lease.mjs ]]; then
   echo '{"holder":{"leaseId":"test-lease","holderPr":${pr},"pastDeadline":false,"holderPidLive":true,"ageSeconds":1}}'
 elif [[ "$1" == */bin/hammer-api-publish.mjs ]]; then
   exec ${JSON.stringify(process.execPath)} --import ${JSON.stringify(faultLoader)} "$@"
+elif [[ "$1" == */bin/hammer-pushed-attestation.mjs && ${JSON.stringify(route)} == api-attestation ]]; then
+  exit 1
 else
   exec ${JSON.stringify(process.execPath)} "$@"
 fi
@@ -421,16 +423,18 @@ exit "$rc"
       assert.equal(result.fallbackHead, remoteHead);
       assert.ok(result.reason.length <= 512);
       assert.doesNotMatch(result.reason, /Maximum call stack|repeated finding/);
-      assert.match(result.reason, route === 'api-credential' ? /git-credential-refresh-failed/ : route === 'api-timeout' ? /ETIMEDOUT/ : route === 'api-reset' ? /scratch reset refused/ : /fetched tree mismatch/);
-      assert.match(publication.stdout, new RegExp(`STATE=1\\|${route === 'api-credential' ? 'git-credential-refresh-failed' : 'published-head-sync-failed'}\\|0\\|${reviewed}\\|${remoteHead}\\|0`));
+      assert.match(result.reason, ['api-credential', 'api-attestation'].includes(route) ? /git-credential-refresh-failed/ : route === 'api-timeout' ? /ETIMEDOUT/ : route === 'api-reset' ? /scratch reset refused/ : /fetched tree mismatch/);
+      assert.match(publication.stdout, new RegExp(`STATE=1\\|${route === 'api-attestation' ? 'pushed-attestation-unavailable' : route === 'api-credential' ? 'git-credential-refresh-failed' : 'published-head-sync-failed'}\\|0\\|${reviewed}\\|${remoteHead}\\|0`));
       assert.match(publication.stdout, new RegExp(`HAM-Base-Head: ${reviewed}\nHAM-Pushed-Head: ${remoteHead}\nHAM-CI-Validated: false`));
       assert.ok(publication.stdout.length < 2500, publication.stdout);
       assert.doesNotMatch(publication.stderr, /repeated finding|Maximum call stack/);
       assert.ok(publication.stderr.length < 1024, publication.stderr);
-      const comments = JSON.parse(readFileSync(commentsPath, 'utf8'));
-      assert.equal(comments.length, 1, 'only publication provenance is posted');
+      const comments = existsSync(commentsPath) ? JSON.parse(readFileSync(commentsPath, 'utf8')) : [];
+      assert.equal(comments.length, route === 'api-attestation' ? 0 : 1, 'only publication provenance is posted');
+      if (comments.length) {
       assert.match(comments[0].body, new RegExp(`HAM-Base-Head: ${reviewed}\nHAM-Pushed-Head: ${remoteHead}`));
       assert.doesNotMatch(comments[0].body, /HAM-Validated-Head:/);
+      }
       assert.equal(existsSync(pushAttempts), false, 'no fallback force push may run');
       const calls = JSON.parse(readFileSync(callsPath, 'utf8'));
       assert.equal(calls.filter(args => args[1] === 'graphql' && args.includes('--input')).length, 1);

@@ -343,6 +343,8 @@ if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" = "1" ]; then
     "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-progress.mjs" remediation-pushed || true
   fi
   if [ -n "$HAM_API_KNOWN_PUSHED_HEAD" ]; then
+    HAM_PUSHED_HEAD="$HAM_API_KNOWN_PUSHED_HEAD"
+    export HAM_PUSHED_FROM_HEAD HAM_PUSHED_HEAD
     if ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-pushed-attestation.mjs \
       <<REPO>> <<PR_NUMBER>> "$HAM_PUSHED_FROM_HEAD" "$HAM_API_KNOWN_PUSHED_HEAD"; then
       HAM_PHASE_OUTCOME=pushed-attestation-unavailable
@@ -357,8 +359,6 @@ if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" = "1" ]; then
     if [ "$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.phaseOutcome // empty')" = git-credential-refresh-failed ]; then
       HAM_PHASE_OUTCOME=git-credential-refresh-failed
     fi
-    HAM_PUSHED_HEAD="$HAM_API_KNOWN_PUSHED_HEAD"
-    export HAM_PUSHED_FROM_HEAD HAM_PUSHED_HEAD
     printf -v HAM_NO_MERGE_NOTE '%s\nHAM-Base-Head: %s\nHAM-Pushed-Head: %s\nHAM-CI-Validated: false' \
       'HAM closing status — no merge. API publication and provenance succeeded, but scratch synchronization failed; preserve the remote head. Stop this run without another push or source review.' \
       "$HAM_PUSHED_FROM_HEAD" "$HAM_PUSHED_HEAD"

@@ -4459,6 +4459,8 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- Preserve the API-published head and starting head before attestation so a failed attestation retains exact publication provenance for closure recovery; cover the failure with an offline regression.
+
 - **HAMGITTOKEN-01 test fixture:** Inject the metered Git execution seam into
   rebased-head coverage tests and assert Hammer credential mode. This restores
   offline coverage of bounded fetch retries after the Git wrapper change.

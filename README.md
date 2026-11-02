@@ -4459,6 +4459,8 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+REMGEMINI-01 parity: both Node config readers accept `remediator-gemini` as well as `gemini` in the fallback list. This expands validation only; defaults, fallback order, and selected provider do not change. Paired with Agent OS #10087.
+
 - HAM: retain explicit bug-fix-only freeze contracts in the MLR-03 documentation,
   including the merge-agent scope and promotion boundary, while preserving the
   live-PR-only exception policy.

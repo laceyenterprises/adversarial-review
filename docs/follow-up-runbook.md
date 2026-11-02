@@ -2035,3 +2035,6 @@ leases and artifacts until receipt adoption or conclusive no-launch proof.
 Live owners and once-only launch/refund fences remain authoritative. See the
 [recovery contract](dispatch-absence-recovery.md) for fields, deployment order and offline evidence.
 Existing smoke promises remain; no live operation is part of validation.
+
+
+REMGEMINI-01 loader parity: `roles.remediator_fallback` accepts both the `gemini` route and concrete `remediator-gemini` class. Deploy this companion with Agent OS #10087 before using the concrete spelling. Defaults and dispatch/provider selection remain unchanged.

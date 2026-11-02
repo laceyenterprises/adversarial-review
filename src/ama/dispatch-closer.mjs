@@ -6814,7 +6814,8 @@ async function maybeDispatchAmaCloserAttempt({
       finalizeAmaCloserLeaseBestEffort({
         rootDir,
         leaseIdentity: existingRecordLeaseIdentity,
-        terminalOutcome: laneBusyPark ? 'deferred' : terminalLaunchLeaseOutcome({ status,
+        terminalOutcome: infrastructureReadPark ? `retryable-${parkReason}`
+          : laneBusyPark ? 'deferred' : terminalLaunchLeaseOutcome({ status,
           headAdvanced: existingDispatchHeadAdvanced && !hammerEndedWithoutMerge }),
         launchRequestId: existingRecord.launchRequestId,
         now: dispatchContext.dispatchedAt,

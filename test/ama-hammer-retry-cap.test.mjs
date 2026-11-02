@@ -482,8 +482,9 @@ for (const reason of HAMMER_RETRYABLE_READ_OUTCOMES) {
     });
     let launches = 0, endedLaunch = null;
     const events = [];
+    const warnings = [];
     const deps = hammerDispatchDeps({
-      logger: { log() {}, warn() {}, error() {}, info: message => events.push(message) },
+      logger: { log() {}, warn: message => warnings.push(message), error() {}, info: message => events.push(message) },
       readLaunchRequestStatusImpl: ({ launchRequestId }) => ({ ok: true, row: {
         status: launchRequestId === endedLaunch ? 'succeeded' : 'running' } }),
       fetchPullRequestRollupImpl: async () => assert.fail('a retryable audit outranks no-merge comment prose'),
@@ -520,6 +521,8 @@ for (const reason of HAMMER_RETRYABLE_READ_OUTCOMES) {
       assert.equal(readHammerStopForHead({ hqRoot: join(rootDir, 'hq-root'), ...identity }), null);
     }
     assert.equal(launches, 3);
+    assert.equal(warnings.some(message => message.includes('ama_closer.lease_terminal_finalize_failed')),
+      false, 'retryable infrastructure leases must not be finalized with a conflicting terminal outcome');
     assert.ok(events.some(message => {
       const event = JSON.parse(message);
       return event.event === 'ama_closer.hammer_ended_without_merge'

@@ -18,7 +18,7 @@
         "prNumber",
         "attempts"
       ],
-      "compatibility": "Additive version 1 store; attempts never expire or refund lifetime budget."
+      "compatibility": "Additive version 1 store; repository validation and path identity are case-insensitive while stored spelling is preserved. Attempts never expire or refund lifetime budget."
     },
     {
       "id": "hammer-progress",

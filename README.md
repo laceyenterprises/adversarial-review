@@ -4388,6 +4388,12 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- **CAPREHEAD-01 final remediation:** ledger validation matches repository casing
+  consistently with its path key, retaining reservations and lifetime charges
+  across casing changes. Added a test-only counter reset and isolated offline
+  regressions for both findings. Store fields, lifecycle states and existing
+  smoke promises are unchanged.
+
 ### CAPREHEAD-01 — bounded recovery after closer retry exhaustion
 
 A settled clean or comment-only PR whose hammer wake reports `retry-exhausted`

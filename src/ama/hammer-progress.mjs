@@ -48,15 +48,16 @@ export function reportHammerProgress(milestone, options) {
   }
 }
 
-// Observe Git, never model prose: only a descendant commit above the reviewed
-// head earns local remediation credit. Repetition cannot refresh its receipt.
+// Observe Git, never model prose: only a descendant commit above the dispatch
+// target (or legacy reviewed head) earns credit. Repetition cannot refresh it.
 export function reportRemediationCommit({ env = process.env, cwd = process.cwd(), execImpl = execFileSync } = {}) {
-  if (!/^[a-f0-9]{40}$/.test(env.HAM_REVIEWED_SHA || '')) return null;
+  const baseline = env.HAM_TARGET_REMEDIATION_SHA || env.HAM_REVIEWED_SHA;
+  if (!/^[a-f0-9]{40}$/.test(baseline || '')) return null;
   try {
     const options = { cwd, env, encoding: 'utf8', timeout: loadAwareTimeoutMs(5000), stdio: ['ignore', 'pipe', 'pipe'] };
     const head = execImpl('git', ['rev-parse', 'HEAD'], options).trim();
-    if (!/^[a-f0-9]{40}$/.test(head) || head === env.HAM_REVIEWED_SHA) return null;
-    execImpl('git', ['merge-base', '--is-ancestor', env.HAM_REVIEWED_SHA, head], options);
+    if (!/^[a-f0-9]{40}$/.test(head) || head === baseline) return null;
+    execImpl('git', ['merge-base', '--is-ancestor', baseline, head], options);
     return reportHammerProgress('remediation-committed', { env });
   } catch { return null; }
 }

@@ -198,7 +198,8 @@ test('commit receipt requires Git proof above the reviewed head', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-local-commit-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const env = { ...process.env, HQ_ROOT: dir, HAM_HQ_ROOT: dir, HQ_LAUNCH_REQUEST_ID: 'lrq_fixture',
-    AGENT_OS_WORKER_LRQ_ID: 'lrq_fixture', HQ_WORKER_RUN_ID: 'wrun_fixture', HAM_REVIEWED_SHA: 'a'.repeat(40) };
+    AGENT_OS_WORKER_LRQ_ID: 'lrq_fixture', HQ_WORKER_RUN_ID: 'wrun_fixture', HAM_REVIEWED_SHA: 'a'.repeat(40),
+    HAM_TARGET_REMEDIATION_SHA: '' };
   const options = { env, cwd: dir };
   assert.equal(reportRemediationCommit({ ...options, execImpl: () => `${env.HAM_REVIEWED_SHA}\n` }), null);
   assert.equal(reportRemediationCommit({ ...options, execImpl: () => { throw new Error('missing reviewed commit'); } }), null);
@@ -211,6 +212,49 @@ test('commit receipt requires Git proof above the reviewed head', async t => {
   } });
   assert.equal(calls, 2);
   assert.equal(receipt.milestone, 'remediation-committed');
+});
+
+test('head-advanced validation earns commit credit only after a commit above the dispatch target', async t => {
+  const { reportRemediationCommit } = await import('../src/ama/hammer-progress.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-head-advanced-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+    !/TOKEN|CREDENTIAL|^HAM_|^HQ_|^AGENT_OS_|^LAUNCH_REQUEST_ID$|^GIT_/.test(key)));
+  Object.assign(env, { HQ_ROOT: dir, HQ_LAUNCH_REQUEST_ID: 'lrq_fixture', HQ_WORKER_RUN_ID: 'wrun_fixture' });
+  const git = (...args) => {
+    const result = spawnSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false',
+      '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', ...args],
+    { cwd: dir, env, encoding: 'utf8', timeout: 5000 });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  git('init');
+  git('commit', '--allow-empty', '-m', 'reviewed');
+  env.HAM_REVIEWED_SHA = git('rev-parse', 'HEAD');
+  git('commit', '--allow-empty', '-m', 'dispatch target advanced by another writer');
+  env.HAM_TARGET_REMEDIATION_SHA = git('rev-parse', 'HEAD');
+  assert.notEqual(env.HAM_REVIEWED_SHA, env.HAM_TARGET_REMEDIATION_SHA);
+  const receiptPath = join(dir, 'dispatch/lrq_fixture/hammer-progress/wrun_fixture/remediation-committed.json');
+  const validate = () => {
+    const result = spawnSync(process.execPath, [join(repoRoot, 'bin/hammer-validate.mjs'), '--',
+      process.execPath, '-e', 'process.exit(0)'], { cwd: dir, env, encoding: 'utf8', timeout: 30_000 });
+    assert.equal(result.status, 0, result.stderr);
+  };
+  validate();
+  assert.equal(existsSync(receiptPath), false, 'validation at the dispatch target must not consume commit credit');
+  assert.equal(reportRemediationCommit({ cwd: dir, env: { ...env, HAM_TARGET_REMEDIATION_SHA: 'invalid' } }), null);
+  git('commit', '--allow-empty', '-m', 'closer remediation');
+  validate();
+  const receipt = readFileSync(receiptPath, 'utf8');
+  assert.equal(JSON.parse(receipt).milestone, 'remediation-committed');
+  validate();
+  assert.equal(readFileSync(receiptPath, 'utf8'), receipt, 'repetition preserves the first receipt');
+  // A descendant of the reviewed head on a sibling branch is not target remediation.
+  env.HQ_WORKER_RUN_ID = 'wrun_sibling';
+  git('checkout', '--detach', env.HAM_REVIEWED_SHA);
+  git('commit', '--allow-empty', '-m', 'unrelated descendant');
+  assert.equal(reportRemediationCommit({ cwd: dir, env }), null);
+  assert.equal(existsSync(join(dir, 'dispatch/lrq_fixture/hammer-progress/wrun_sibling/remediation-committed.json')), false);
 });
 
 for (const code of [0, 1, 124]) {

@@ -830,7 +830,7 @@ fi
 
 ```
 
-The commit helper verifies a local descendant of the reviewed head before recording `remediation-committed`. The bounded validation helper records `validation-passed` or `validation-failed` for completed commands; timeouts remain unknown. Each receipt kind earns one bounded outcome slice per run; repeating it earns no additional time.
+The commit helper requires `HEAD` to differ from and descend from `HAM_TARGET_REMEDIATION_SHA || HAM_REVIEWED_SHA` before recording `remediation-committed`; an already-advanced dispatch target earns no credit by itself. The bounded validation helper records `validation-passed` or `validation-failed` for completed commands (exit 0 or 1–123); timeouts remain unknown. These validation receipts are advisory liveness signals, not proof tests ran or passed. Each receipt kind earns one bounded outcome slice per run; repeating it earns no additional time.
 
 Before head validation, export `HAM_COMMIT_PUBLICATION_ONLY=1` and `source "<<RUN_DIR>>/hammer-publish.sh"`. Stop on failure; unset the flag on success. Ordinary remediation retains the conflict-repair guards.
 

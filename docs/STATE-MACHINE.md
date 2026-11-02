@@ -4,13 +4,17 @@ active seconds); an unsuperseded final terminal stop receives a load-aware
 nominal 60-second grace and retains its reason as `closer-terminal:<reason>`.
 Wall/token ceilings are unchanged. Process census deadlines scale with load;
 unavailable ownership observation remains a refusal, separately classified from
-owner loss. SRE owns the twelve-hour post-deploy natural-traffic receipt.
+owner loss on merge-lease release only. Commit credit requires ancestry above
+the dispatch target (legacy fallback: reviewed SHA); validation receipts are
+advisory completed-command signals, not proof tests ran. SRE owns the
+twelve-hour post-deploy natural-traffic receipt.
 
 HAMPROGRESS-01 adds run-bound closer phase receipts for the supervisor's outcome,
 wall-clock and total-token limits. Existing terminal/drain and AMA replacement
 edges retain lifetime charges. Merge safety and existing smoke promises are
-unchanged. Deploy the receipt/schema companion before supervisor activation;
-passive SRE acceptance observes natural named stops and bounded replacement.
+unchanged. For the seven-kind expansion, deploy the supervisor consumer before
+or together with the producer/schema; older-consumer tolerance is unverified.
+Passive SRE acceptance observes natural named stops and bounded replacement.
 See [the closure runbook](RUNBOOK-ama-closure.md).
 
 # Adversarial Review State Machine Notes

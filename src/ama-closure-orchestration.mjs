@@ -1,3 +1,4 @@
+import { maybeDispatchCapRehead, capReheadCounters } from './ama/cap-rehead.mjs';
 import { repositoryObservationCache } from './repository-state-cache.mjs';
 import { operatorLabelInputs } from './ama/operator-label-inputs.mjs';
 import { holdForOperatorLabels } from './ama/operator-label-gates.mjs';
@@ -159,7 +160,7 @@ export function finalReviewHammerLatencySummary(now = Date.now()) {
   }
   finalReviewHammerLatencies.length = retained;
   const values = finalReviewHammerLatencies.map(s => s.latencyMs).sort((a, b) => a - b);
-  return { window_ms: 86400000, samples: values.length,
+  return { cap_rehead: capReheadCounters(), window_ms: 86400000, samples: values.length,
     p50_ms: values.length ? values[Math.ceil(values.length * 0.5) - 1] : null,
     p95_ms: values.length ? values[Math.ceil(values.length * 0.95) - 1] : null };
 }
@@ -988,6 +989,7 @@ async function dispatchAmaClosureFor({
     dismissSupersededBlockingVerdictAtRemediatedHead,
   writeAutonomousMergeDisabledAuditImpl = writeAutonomousMergeDisabledAudit,
   requestEligibleHammerWakeImpl = requestEligibleHammerWake,
+  maybeDispatchCapReheadImpl = maybeDispatchCapRehead,
   fetchMergedProtectiveDependentsImpl = fetchMergedProtectiveDependentsForPr,
   fetchProtectivePredecessorStateImpl = fetchProtectivePredecessorStateForPr,
   emitProtectivePredecessorFindingImpl = null,
@@ -1040,6 +1042,7 @@ async function dispatchAmaClosureFor({
     );
     cfg = {
       ...cfg,
+      defaultBuilder: loadedConfig.get?.('roles.build_pack_default_worker_class', 'codex') ?? 'codex',
       amaCloserMaxConcurrentLaunches: loadedConfig.get?.('watcher.ama_closer_max_concurrent_launches', 3) ?? 3,
     };
     orchestrationMode = resolveOrchestrationMode({
@@ -1093,6 +1096,7 @@ async function dispatchAmaClosureFor({
   // Mirrors evaluateRoundBudgetForReview's budget resolution. Fail-safe: any
   // error leaves the signal false (AMA keeps its normal strict gates).
   let reviewCycleExhausted = false;
+  let reviewCycleKnown = true;
   let finalRoundCompletedAt = null;
   let completedRemediationRoundsForPR = null;
   let completedRereviewRoundsForPR = null;
@@ -1115,6 +1119,7 @@ async function dispatchAmaClosureFor({
         repoPath,
         prNumber,
       }) || {};
+      reviewCycleKnown = typeof resolved.reviewCycleExhausted === 'boolean';
       reviewCycleExhausted = resolved.reviewCycleExhausted === true;
       ledgerRiskClass = resolved.ledgerRiskClass || resolved.riskClass || null;
       completedRemediationRevisionRefsForPR = Array.isArray(resolved.completedRemediationRevisionRefs)
@@ -1163,6 +1168,7 @@ async function dispatchAmaClosureFor({
           countCompletedReviewerRereviewRounds({ db: reviewStateDb, rootDir, repoPath, prNumber }),
         );
       } catch (rereviewErr) {
+        reviewCycleKnown = false;
         console.warn(
           `[watcher] AMA final-hammer re-review-round probe failed for ${repoPath}#${prNumber}; ` +
             `falling back to remediation-round exhaustion only: ${rereviewErr?.message || rereviewErr}`,
@@ -1175,6 +1181,7 @@ async function dispatchAmaClosureFor({
       });
     }
   } catch (err) {
+    reviewCycleKnown = false;
     console.warn(
       `[watcher] AMA final-hammer round-budget probe failed for ${repoPath}#${prNumber}; ` +
         `treating cycle as NOT exhausted: ${err?.message || err}`,
@@ -2045,6 +2052,22 @@ async function dispatchAmaClosureFor({
       shared,
       log: logger,
     });
+    const capRehead = await maybeDispatchCapReheadImpl({
+      rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
+      branch: candidate?.branch, title: candidate?.title, wake,
+      reviewState: { ...reviewState, reviewCycleExhausted: reviewCycleKnown ? reviewCycleExhausted : null },
+      requiredChecks: candidate?.statusCheckRollup,
+      requiredCheckContexts: [...resolveRequiredCheckContextsFromCfg(cfg),
+        ...(candidate?.branchProtection?.requiredContexts || [])],
+      mergeable: closureGateMergeability(mergeabilityForGate || {}),
+      lifetimeExhausted: ownerCap.lifetimeCapExhausted, cfg, defaultBuilder: cfg.defaultBuilder,
+      reviewStateRow, env, signal, logger, readCurrentPrImpl: fetchCurrentPrStateImpl,
+    });
+    if (capRehead) return withAmaDispatchMetadata({ dispatched: false,
+      skipMergeAgent: true, recoveryWait: true, capRehead,
+      reason: `cap-rehead-${capRehead.dispatched ? 'dispatched' : capRehead.reason}`,
+      closureBlocker: `cap-rehead-${capRehead.reason}`,
+    }, { amaEnabled: true });
     if (hammerWakeSink && ciBlockedHammerOwner && orchestrationMode === 'native') {
       hammerWakeSink.value = { rootDir, identity, intent, wake };
     }
@@ -3124,6 +3147,7 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
       ? { outcome: 'pr-terminal', terminalReason: 'merged', amaClosureResult }
       : { outcome: 'ama-pending', amaClosureResult };
   }
+  if (amaClosureResult?.capRehead) return { outcome: 'ama-pending', amaClosureResult };
   const admissionDisagreement = await observeReviewAdmissionContract({ rootDir, repo: repoPath, prNumber,
     headSha: candidate?.headSha || currentRevisionRef, reviewStateRow, result: amaClosureResult, logger,
     now: typeof orphanOptions.now === 'number' ? orphanOptions.now

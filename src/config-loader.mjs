@@ -2203,6 +2203,8 @@ function schemaV1() {
                     __type: TYPE_BOOL,
                     __default: true,
                   },
+                  cap_rehead_enabled: { __type: TYPE_BOOL, __default: true },
+                  cap_rehead_lifetime_cap: { __type: TYPE_INT, __default: 2, __min: 0 },
                   merge_capability_enforcement: {
                     __type: TYPE_STRING,
                     __default: 'observe',
@@ -4328,6 +4330,12 @@ export const ENV_ALIASES = {
     canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_AUTONOMOUS_MERGE_EXECUTION_ENABLED',
     aliases: [],
   },
+  'roles.adversarial.merge_authority.cap_rehead_enabled': {
+    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_CAP_REHEAD_ENABLED', aliases: [],
+  },
+  'roles.adversarial.merge_authority.cap_rehead_lifetime_cap': {
+    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_CAP_REHEAD_LIFETIME_CAP', aliases: [],
+  },
   'roles.adversarial.merge_authority.merge_capability_enforcement': {
     canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_MERGE_CAPABILITY_ENFORCEMENT',
     aliases: [['MERGE_CAPABILITY_ENFORCEMENT', identity]],
@@ -6141,6 +6149,8 @@ export class AgentOSConfig {
         'roles.adversarial.merge_authority.autonomous_merge_execution_enabled',
         true,
       ),
+      capReheadEnabled: this.get('roles.adversarial.merge_authority.cap_rehead_enabled', true),
+      capReheadLifetimeCap: this.get('roles.adversarial.merge_authority.cap_rehead_lifetime_cap', 2),
       mergeCapabilityEnforcement: this.get(
         'roles.adversarial.merge_authority.merge_capability_enforcement',
         'observe',

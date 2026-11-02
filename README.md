@@ -4388,6 +4388,43 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+### CAPREHEAD-01 — bounded recovery after closer retry exhaustion
+
+A settled clean or comment-only PR whose hammer wake reports `retry-exhausted`
+can receive one builder PR-update per current head, up to two attempts per PR.
+Recovery requires a non-exhausted review cycle, green required checks (including
+when mergeability is `CONFLICTING`), and proven absence of live closer,
+remediator, builder and PR-update ownership. Missing or unreadable ownership
+observations retain the blocker. Existing operator holds, autonomous execution
+kill switch and hammer lifetime ceiling still apply.
+
+`roles.adversarial.merge_authority.cap_rehead_enabled` defaults to `true`;
+`cap_rehead_lifetime_cap` in the same subtree defaults to `2` (`0` disables
+attempts). Their canonical environment variables end in `CAP_REHEAD_ENABLED`
+and `CAP_REHEAD_LIFETIME_CAP` under
+`AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_`. Domain `mergeAuthority` also accepts
+`capReheadEnabled` and `capReheadLifetimeCap`. The existing builder default
+`roles.build_pack_default_worker_class` applies when the creation title has no
+recognized builder class. Hammer classes are refused.
+
+The committed `templates/cap-rehead-prompt.md` requires a merge of `origin/main`,
+conflict resolution preserving both sides, generator-driven file regeneration,
+affected tests and a fast-forward push. It grants no merge authority and adds
+no closer trailers or attestations. The normal review → closer path handles
+the resulting head. A head/PR reservation is fsynced before dispatch; failed,
+refused or unacknowledged launches spend the lifetime budget and never loop.
+The dispatch uses `origin-owned` fleet retry policy.
+A launch without an acknowledged ID conservatively retains custody across later heads.
+See [the durable record](docs/data-model/cap-rehead.md).
+
+`ama.cap_rehead.dispatched` and `ama.cap_rehead.skipped` expose reasons including
+`cycle-exhausted`, `live-owner`, `blocking-findings`, `checks-red`,
+`already-attempted` and `lifetime-cap`. The existing
+`ama.final_review_to_hammer_launch.summary` metrics include cumulative
+process-local `cap_rehead.dispatched` / `cap_rehead.skipped` counters. A cycle
+exhaustion remains an explicit closure blocker; CAPREHEAD never advances it.
+
+
 - **LABELREARM-01 final remediation:** waiver observation shares asynchronous label reads after cached presence checks, preserves stopped-job budgets and provenance, and clears backoff only for newly accepted intent. Offline coverage now proves one exact-head reviewer spawn and no duplicate on the next poll; pre-review labels require removal and reapplication.
 
 - **LABELREARM-01:** registered operator-label evidence on an already-reviewed, waiver-only hold now requests one exact-head waiver-observation review through the shared evidence predicate, retaining stopped follow-ups for the fresh review to supersede. Accepted intent exits operator backoff. The fresh review still decides; no label bypasses findings or merge checks.

@@ -9,6 +9,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import path from 'node:path';
 import './helpers/load-aware-timeout-fixture.mjs';
+import { maybeDispatchCapRehead } from '../src/ama/cap-rehead.mjs';
+import { recordHammerRetryDispatch, markHammerRetryCapExhausted } from '../src/ama/hammer-retry-cap.mjs';
+import { requestEligibleHammerWake } from '../src/hammer-wake.mjs';
 import { dispatchReadTransport } from '../src/dispatch-read-client.mjs';
 import { proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
 import { acquireAmaCloserLease, readAmaCloserLease, updateAmaCloserLease, deleteAmaCloserLease } from '../src/ama/closer-lease.mjs';
@@ -614,4 +617,61 @@ test('RECOVERYSTALL-01: custody refresh preserves a recorded non-retryable termi
   assert.equal(result.dispatched, false);
   assert.equal(f.launches(), 0);
   assert.equal(readAmaCloserLease(f.rootDir, IDENTITY).lrqId, LRQ);
+});
+
+test('CAPREHEAD capped wake returns bounded recovery and bypasses closer dispatch', async t => {
+  let recoveries = 0;
+  const args = closerHeadArgs(t, {
+    requestEligibleHammerWakeImpl: () => ({ outcome: 'skipped', reason: 'retry-exhausted' }),
+    maybeDispatchCapReheadImpl: async input => {
+      recoveries++;
+      assert.equal(input.headSha, HEAD);
+      assert.equal(input.reviewState.reviewCycleExhausted, false);
+      assert.equal(input.mergeable, 'MERGEABLE');
+      assert.equal(input.cfg.defaultBuilder, 'codex');
+      return { dispatched: true, reason: 'retry-exhausted', launchRequestId: 'synthetic-rehead' };
+    },
+    maybeDispatchAmaCloserImpl: () => { throw new Error('unexpected closer launch'); },
+  });
+  const result = await maybeDispatchAmaClosureFor(args);
+  assert.equal(recoveries, 1);
+  assert.equal(result.capRehead.dispatched, true);
+  assert.equal(result.skipMergeAgent, true);
+  assert.equal(result.reason, 'cap-rehead-dispatched');
+});
+
+test('CAPREHEAD blocker survives watcher coexistence without orphan dispatch', async t => {
+  const args = closerHeadArgs(t);
+  const result = await resolveMergeAgentCoexistenceForWatcher({ ...args,
+    maybeDispatchAmaClosureForImpl: async () => ({ amaEnabled: true, dispatched: false,
+      capRehead: { dispatched: false, reason: 'cycle-exhausted' },
+      closureBlocker: 'cap-rehead-cycle-exhausted', skipMergeAgent: true }),
+    recoverOrphanImpl: () => { throw new Error('unexpected orphan dispatch'); },
+  });
+  assert.equal(result.outcome, 'ama-pending');
+  assert.equal(result.amaClosureResult.closureBlocker, 'cap-rehead-cycle-exhausted');
+});
+
+for (const exhausted of [false, true]) test(`CAPREHEAD real retry-cap decision across repeated watcher ticks (cycle exhausted=${exhausted})`, async t => {
+  let launches = 0;
+  const args = closerHeadArgs(t, { requestEligibleHammerWakeImpl: requestEligibleHammerWake,
+    resolveReviewCycleExhaustionImpl: () => ({ riskClass: 'low', reviewCycleExhausted: exhausted }) });
+  deleteAmaCloserLease(args.rootDir, { repo: REPO, prNumber: PR, headSha: HEAD });
+  args.candidate.branch = 'feature/synthetic';
+  args.candidate.title = '[codex] Synthetic update';
+  const identity = { repo: REPO, prNumber: PR };
+  for (let index = 0; index < 2; index++) recordHammerRetryDispatch(args.rootDir, identity,
+    { jobKey: REVIEWED, headSha: HEAD, launchRequestId: `synthetic-prior-${index}` });
+  markHammerRetryCapExhausted(args.rootDir, identity, { jobKey: REVIEWED, headSha: HEAD, attemptCount: 2 });
+  args.maybeDispatchCapReheadImpl = input => maybeDispatchCapRehead({ ...input,
+    readCurrentPrImpl: async () => ({ state: 'OPEN', headSha: HEAD, isDraft: false,
+      statusCheckRollup: args.candidate.statusCheckRollup, mergeable: 'MERGEABLE', labels: [] }),
+    probeOwnershipImpl: async () => ({ owned: false, uncertain: false }),
+    execFileImpl: async () => { launches++; return { stdout: JSON.stringify({ launchRequestId: 'synthetic-rehead', status: 'running' }) }; },
+  });
+  const first = await maybeDispatchAmaClosureFor(args);
+  assert.equal(first.capRehead?.dispatched, !exhausted, JSON.stringify(first));
+  const second = await maybeDispatchAmaClosureFor(args);
+  assert.equal(second.capRehead?.reason, exhausted ? 'cycle-exhausted' : 'already-attempted');
+  assert.equal(launches, exhausted ? 0 : 1);
 });

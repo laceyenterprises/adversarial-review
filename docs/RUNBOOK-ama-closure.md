@@ -7705,9 +7705,33 @@ count once per completed census. A timeout during custody recovery is retained a
 After deployment, SRE restarts the watcher through its registered restart path
 and observes closer wakes within two passes. Workers do not perform that live step.
 
+## Change notes
+
+### CAPREHEAD-02 — exhausted-cycle builder recovery
+
+A known exhausted cycle is eligible for capped-PR maintenance: the shared
+`owesExhaustedHeadVerdict` contract describes the promised new builder head.
+The daemon still classifies history, then selects squash for exhausted cycles,
+including builder-only histories that would otherwise select merge-main. The
+worker produces one fresh builder commit above main, without closer/hammer
+trailers, copied attestations or final-round provenance. The watcher classifies
+that actual new head before `admitExhaustedHeadVerdict` requests its one verdict
+with budgets preserved. The new head starts a separate per-head closer episode;
+the existing lifetime ceilings still apply. No new persisted field, budget,
+lease or gate is introduced. CAPREHEAD remains interim pending MLR.
+
+Unknown cycle evidence fails closed with `cycle-unknown`. A dispatch or proven
+live closer/builder/CAPREHEAD custody suppresses the R07 budget page for that
+pass. Unknown custody, failed dispatch and all other refusals retain escalation.
+
+After merge, the build manager confirms express float and watcher restart.
+Acceptance requires natural traffic: `ama.cap_rehead.dispatched`, the new head's
+`system-exhausted-head-verdict:<sha>` admission, and merge without operator
+intervention. Offline fixtures do not constitute that live receipt.
+
 ### CAPREHEAD final recovery semantics
 
-Terminal/ineligible CAPREHEAD skips, including disabled, cycle/lifetime caps,
+Terminal/ineligible CAPREHEAD skips, including disabled, unknown cycles, lifetime caps,
 red checks and unreadable evidence, fall through to existing overdue R07
 recovery/escalation. A positively live canonical CAPREHEAD launch (including a
 live retry) retains custody at any head; terminal or unknown evidence cannot

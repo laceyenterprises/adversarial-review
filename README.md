@@ -4441,6 +4441,13 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- CAPREHEAD-02: a capped PR with a known exhausted cycle can receive a single
+  builder squash update under the existing exhausted-head verdict obligation.
+  Unknown cycles report `cycle-unknown`; lifetime limits and custody remain
+  authoritative. Dispatch or proven live custody suppresses the budget page;
+  ineligible or uncertain recovery retains escalation. This interim recovery
+  retains its planned MLR sunset.
+
 - MLR-01 final remediation: status grouping and journal episodes prefer the same subject identity; invalid CLI arguments print usage and return 2. Detached/unreadable Git inspection preserves verified worker liveness. Terminal dirty custody is head-bound and cannot override a current live owner. Focused offline fixtures cover these cases; observation fields, lifecycle states and existing smoke promises are unchanged.
 
 - MLR-01: `merge-lane status [--root <data-root>] [--json]` reads live open-PR inventory and NXA shadow observations. It reports current-head decisions, capped load-scaled deadlines, stable overdue episodes, observed ownerless minutes and clean-verdict-to-merge receipts. Observation/cursor journals are bounded and rotation-safe; matching-head terminal dirty branches provide ownerless evidence when no live owner exists. PRAGE in agent-os is the single overdue pager; the optional NXA overdue alert flag is now inert. Coordinate both repository merges and operator-owned activation before claiming deployment. Closure policy and execution remain unchanged.
@@ -4493,8 +4500,8 @@ The daemon selects the strategy with its canonical provenance root, reusing
 the existing `isHammerCommit` detection through [`primary-change.mjs`](src/ama/primary-change.mjs).
 A range containing hammer commits becomes one new builder commit on current
 `origin/main` via `git merge --squash <old-head>` and an explicit
-force-with-lease push. A builder-only range retains merge-main and a
-fast-forward push. Both preserve both sides' behavior, regenerate generated
+force-with-lease push. A non-exhausted builder-only range retains merge-main
+and a fast-forward push. Both preserve both sides' behavior, regenerate generated
 files, keep the PR open and add no closer trailers or attestations.
 
 Merging main after hammer commits advances only the final merge base; the
@@ -4502,8 +4509,8 @@ first hammer's parent still selects the old primary head. Primary-change then
 returns unknown because the merge bases differ. The squash removes hammer
 ancestry and the non-closer head receives full fresh review of the entire diff.
 The selector identifies hammer history before merge-base and artifact proofs. Unreadable history is reported instead of guessed.
-All dispatch preconditions remain unchanged, including
-`reviewCycleExhausted === false`, one attempt per head and the lifetime cap.
+CAPREHEAD-02 supersedes the original non-exhausted-cycle requirement below;
+one attempt per head and the lifetime cap remain unchanged.
 
 - **CAPREHEAD-01 final remediation:** ledger validation matches repository casing
   consistently with its path key, retaining reservations and lifetime charges
@@ -4515,7 +4522,7 @@ All dispatch preconditions remain unchanged, including
 
 A settled approved or comment-only PR whose hammer wake reports `retry-exhausted`
 can receive one builder PR-update per current head, up to two attempts per PR.
-Recovery requires a non-exhausted review cycle, green required checks (including
+Recovery requires a known review cycle, green required checks (including
 when mergeability is `CONFLICTING`), and proven absence of live closer,
 remediator, builder and PR-update ownership. Missing or unreadable ownership
 observations retain the blocker. Existing operator holds, autonomous execution
@@ -4531,9 +4538,9 @@ and `CAP_REHEAD_LIFETIME_CAP` under
 recognized builder class. Hammer classes are refused.
 
 The daemon classifies complete PR history from the canonical runtime, selects
-the squash refresh above for hammer histories or a merge of `origin/main` for
-builder-only histories, and writes an owned dynamic prompt binding repo, PR,
-branch, old head and update mode. The worker needs no local AR checkout. The
+the squash refresh above for exhausted cycles or hammer histories, or a merge
+of `origin/main` for non-exhausted builder-only histories, and writes an owned
+dynamic prompt binding repo, PR, branch, old head and update mode. The worker needs no local AR checkout. The
 prompt requires preserving both sides of conflicts, generator-driven file
 regeneration, affected tests and the selected push strategy.
 It grants no merge authority and adds
@@ -4545,11 +4552,12 @@ A launch without an acknowledged ID conservatively retains custody across later 
 See [the durable record](docs/data-model/cap-rehead.md).
 
 `ama.cap_rehead.dispatched` and `ama.cap_rehead.skipped` expose reasons including
-`cycle-exhausted`, `live-owner`, `blocking-findings`, `checks-red`,
+`cycle-unknown`, `live-owner`, `blocking-findings`, `checks-red`,
 `already-attempted` and `lifetime-cap`. The existing
 `ama.final_review_to_hammer_launch.summary` metrics include cumulative
-process-local `cap_rehead.dispatched` / `cap_rehead.skipped` counters. A cycle
-exhaustion remains an explicit closure blocker; CAPREHEAD never advances it.
+process-local `cap_rehead.dispatched` / `cap_rehead.skipped` counters. An exhausted
+cycle retains its budgets while the new builder head receives one classified
+verdict through the existing exhausted-head owner.
 
 
 EXHAUSTEDHEADOWNER-01 final remediation: proven completed final-round pushes

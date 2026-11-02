@@ -6,6 +6,11 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { maybeDispatchCapRehead, capReheadLedgerPath, probeCapReheadOwnership, capReheadCounters, resetCapReheadCountersForTesting } from '../src/ama/cap-rehead.mjs';
+import { admitExhaustedHeadVerdict, hasUnreviewedBuilderHead } from '../src/exhausted-head-verdict.mjs';
+import { evaluateHammerRetryCap } from '../src/ama/hammer-retry-cap.mjs';
+import { escalateClosureBudget } from '../src/ama/closure-budget-escalation.mjs';
+import { closureOwnerShadowEvidence } from '../src/pr-next-action-consumer.mjs';
+import { nextAction } from '../src/pr-next-action.mjs';
 import { loadConfig } from '../src/config-loader.mjs';
 import { operatorNoticeInFlight } from '../src/ama/operator-notice-route.mjs';
 import { hammerOwnerRouteFinalOutcome } from '../src/ama/review-cycle-cap-route.mjs';
@@ -78,7 +83,8 @@ test('counter reset clears both metrics without changing returned snapshots', as
 });
 
 for (const [reason, changes] of [
-  ['cycle-exhausted', { reviewState: { reviewCycleExhausted: true } }],
+  ['cycle-unknown', { reviewState: { reviewCycleExhausted: null } }],
+  ['cycle-unknown', { reviewState: {} }],
   ['blocking-findings', { reviewState: { verdict: 'request-changes', reviewCycleExhausted: false } }],
   ['blocking-findings', { reviewState: { verdict: 'comment-only', blockingFindingState: 'unknown', reviewCycleExhausted: false } }],
   ['checks-red', { requiredChecks: [] }],
@@ -327,4 +333,99 @@ test('a later cycle cap retains an already running CAPREHEAD owner', async t => 
   const live = await f.run({ reviewState: { reviewCycleExhausted: true },
     readLaunchImpl: async () => ({ ok: true, row: { status: 'running' } }) });
   assert.equal(live.custody, true); assert.equal(f.calls.length, 1);
+});
+
+
+test('CAPREHEAD-02: exhausted closer cap dispatches once, admits builder verdict and releases the old head cap', async t => {
+  const f = fixture(t);
+  f.args.reviewState.reviewCycleExhausted = true;
+  const capRehead = await f.run();
+  assert.equal(capRehead.dispatched, true);
+  assert.equal((await f.run()).reason, 'already-attempted');
+  assert.equal(f.calls.length, 1);
+  const argv = f.calls[0].argv;
+  const prompt = readFileSync(argv[argv.indexOf('--prompt') + 1], 'utf8');
+  assert.match(prompt, /"updateMode":"squash"/);
+  assert.match(prompt, /never a final-round remediation push/);
+  const old = f.args.headSha, head = 'b'.repeat(40), now = '2026-01-01T00:00:00Z';
+  let row = { reviewer_head_sha: old, revision_ref: old, review_status: 'posted',
+    review_round: 3, remediation_round: 2 };
+  let requests = 0;
+  const admit = () => admitExhaustedHeadVerdict({ exhausted: true, headSha: head, row,
+    countDelivered: () => 0, classifyCloser: async () => ({ suppressed: false }),
+    request: args => {
+      requests++;
+      assert.equal(args.preserveBudgets, true);
+      assert.equal(args.reason, `system-exhausted-head-verdict:${head}`);
+      row = { ...row, revision_ref: head, rereview_requested_at: now, rereview_reason: args.reason };
+    }, readRow: () => row });
+  row = await admit(); row = await admit();
+  assert.equal(requests, 1);
+  assert.equal(row.review_round, 3); assert.equal(row.remediation_round, 2);
+  assert.equal(hasUnreviewedBuilderHead({ currentHead: head, reviewState: { headSha: old }, reviewAdmissionRow: row }), true);
+  const cap = evaluateHammerRetryCap({ jobKey: old, suppressed: true, capRecordedAt: now }, { jobKey: head, headSha: head });
+  assert.equal(cap.capExhausted, false);
+  const evidence = closureOwnerShadowEvidence({ currentHead: head, reviewAdmissionRow: row,
+    reviewState: { ...f.args.reviewState, headSha: old }, reviewCeilingReached: true,
+    roundsLeft: false, retryExhausted: cap.capExhausted, lifetimeExhausted: false,
+    lease: null, followUpJob: null, checks: 'SUCCESS' },
+  { subjectKey: 'example/project#17', observedAt: now, autonomousMergeExecutionEnabled: true,
+    candidate: { headSha: head, prState: 'OPEN', mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' } });
+  evidence.observations.launches = { closer: null }; evidence.observations.controls = {};
+  const decision = nextAction({ subjectKey: evidence.subjectKey, head, observedAt: now, anchors: {},
+    observations: Object.fromEntries(Object.entries(evidence.observations).filter(([, v]) => v !== undefined)
+      .map(([key, value]) => [key, { state: 'complete', value }])) });
+  assert.equal(decision.action, 'review');
+  assert.notEqual(decision.reason, 'retry-exhausted');
+  await escalateClosureBudget({ result: { capRehead, nextAction: { row: 'R07-stop', reason: 'retry-exhausted', head: old } },
+    observeWaitImpl: () => assert.fail('dispatched recovery must not page') });
+});
+
+for (const owner of ['closer', 'builder']) test(`CAPREHEAD-02: live ${owner} custody on exhausted cycle never reheads or pages`, async t => {
+  const f = fixture(t);
+  f.args.reviewState.reviewCycleExhausted = true;
+  f.args.probeOwnershipImpl = args => probeCapReheadOwnership(args, {
+    probeImpl: async () => owner === 'closer' ? { owned: true, uncertain: false } : { owned: false, uncertain: false },
+    readWorkspacesImpl: async () => ({ ok: true, rows: [{ repo: args.repo, branch: args.branch,
+      present: true, manifest_state: 'available', launch_request_id: 'synthetic-builder' }] }),
+    readLaunchImpl: async () => ({ ok: true, row: { status: 'running' } }),
+  });
+  const capRehead = await f.run();
+  assert.equal(capRehead.reason, 'live-owner'); assert.equal(capRehead.custody, true);
+  assert.equal(f.calls.length, 0);
+  await escalateClosureBudget({ result: { capRehead, nextAction: { row: 'R07-stop', reason: 'retry-exhausted', head: f.args.headSha } },
+    observeWaitImpl: () => assert.fail('live recovery owner must not page') });
+});
+
+for (const reason of ['cycle-unknown', 'lifetime-cap', 'blocking-findings', 'checks-red', 'mergeability-unknown']) {
+  test(`CAPREHEAD-02: ${reason} retains budget escalation`, async t => {
+    const f = fixture(t);
+    f.args.reviewState.reviewCycleExhausted = true;
+    if (reason === 'cycle-unknown') f.args.reviewState.reviewCycleExhausted = null;
+    if (reason === 'lifetime-cap') f.args.cfg = { capReheadLifetimeCap: 0 };
+    if (reason === 'blocking-findings') f.args.reviewState.blockingFindingCount = 1;
+    if (reason === 'checks-red') f.args.requiredChecks = [];
+    if (reason === 'mergeability-unknown') f.args.mergeable = 'UNKNOWN';
+    const capRehead = await f.run();
+    assert.equal(capRehead.reason, reason); assert.equal(f.calls.length, 0);
+    let pages = 0;
+    const result = await escalateClosureBudget({ ...f.args,
+      result: { capRehead, nextAction: { row: 'R07-stop', reason: 'retry-exhausted', head: f.args.headSha } },
+      observeWaitImpl: async args => { pages++; assert.equal(args.headSha, f.args.headSha); return { exhausted: true }; } });
+    assert.equal(pages, 1); assert.equal(result.needsOperator, true);
+  });
+}
+
+
+test('CAPREHEAD-02: uncertain base custody refuses rehead without suppressing escalation', async t => {
+  const f = fixture(t);
+  f.args.probeOwnershipImpl = args => probeCapReheadOwnership(args, {
+    probeImpl: async () => ({ owned: false, uncertain: true }),
+  });
+  const capRehead = await f.run();
+  assert.equal(capRehead.reason, 'live-owner'); assert.equal(capRehead.custody, false);
+  const result = await escalateClosureBudget({ result: { capRehead,
+    nextAction: { row: 'R07-stop', reason: 'retry-exhausted', head: f.args.headSha } },
+    observeWaitImpl: async () => ({ exhausted: true }) });
+  assert.equal(result.needsOperator, true);
 });

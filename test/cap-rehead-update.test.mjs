@@ -5,6 +5,8 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { isTerminalCloserCommitIdentity } from '../src/head-closer-commit-suppression.mjs';
+import { admitExhaustedHeadVerdict } from '../src/exhausted-head-verdict.mjs';
 import { capReheadUpdateMode } from '../src/ama/cap-rehead-update.mjs';
 import { fetchPrimaryChange, checkPrimaryChange } from '../src/ama/primary-change.mjs';
 
@@ -105,6 +107,19 @@ test('merge-main strands primary evidence; one builder squash preserves the tree
   assert.equal(f.git('rev-list', '--count', `${currentMain}..${squashed}`), '1');
   assert.equal(f.git('rev-parse', `${squashed}^`), currentMain);
   assert.doesNotMatch(f.git('show', '-s', '--format=%B', squashed), /hammer|closer|attestation/i);
+  const classification = isTerminalCloserCommitIdentity({
+    commit: { message: f.git('show', '-s', '--format=%B', squashed) },
+  });
+  assert.equal(classification.suppressed, false);
+  let row = { reviewer_head_sha: hammer, revision_ref: hammer };
+  row = await admitExhaustedHeadVerdict({ exhausted: true, headSha: squashed, row,
+    countDelivered: () => 0, classifyCloser: async () => classification,
+    request: args => {
+      assert.equal(args.reason, `system-exhausted-head-verdict:${squashed}`);
+      assert.equal(args.preserveBudgets, true);
+      row = { ...row, revision_ref: squashed, rereview_reason: args.reason };
+    }, readRow: () => row });
+  assert.equal(row.revision_ref, squashed);
   const fresh = await fetchPrimaryChange(f.args(currentMain, squashed), options);
   assert.equal(fresh.hasHammerCommits, false);
   assert.deepEqual(checkPrimaryChange(fresh, squashed), { ok: true, applicable: false });

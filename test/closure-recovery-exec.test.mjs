@@ -692,7 +692,7 @@ test('CAPREHEAD capped wake returns bounded recovery and bypasses closer dispatc
   assert.equal(result.reason, 'cap-rehead-dispatched');
 });
 
-for (const reason of ['cycle-exhausted', 'disabled', 'lifetime-cap', 'ledger-unreadable', 'checks-red']) {
+for (const reason of ['cycle-unknown', 'disabled', 'lifetime-cap', 'ledger-unreadable', 'checks-red']) {
   test(`CAPREHEAD terminal skip ${reason} preserves overdue recovery escalation`, async t => {
     let recoveries = 0;
     const args = closerHeadArgs(t);
@@ -711,7 +711,9 @@ for (const reason of ['cycle-exhausted', 'disabled', 'lifetime-cap', 'ledger-unr
 
 for (const exhausted of [false, true]) test(`CAPREHEAD real retry-cap decision across repeated watcher ticks (cycle exhausted=${exhausted})`, async t => {
   let launches = 0;
+  const { pages, observeClosureWaitImpl } = pageRecorder();
   const args = closerHeadArgs(t, { requestEligibleHammerWakeImpl: requestEligibleHammerWake,
+    now: () => DEADLINE_MS + MINUTE, observeClosureWaitImpl,
     resolveReviewCycleExhaustionImpl: () => ({ riskClass: 'low', reviewCycleExhausted: exhausted }) });
   deleteAmaCloserLease(args.rootDir, { repo: REPO, prNumber: PR, headSha: HEAD });
   args.candidate.branch = 'feature/synthetic';
@@ -725,11 +727,16 @@ for (const exhausted of [false, true]) test(`CAPREHEAD real retry-cap decision a
       statusCheckRollup: args.candidate.statusCheckRollup, mergeable: 'MERGEABLE', labels: [] }),
     probeOwnershipImpl: async () => ({ owned: false, uncertain: false }),
     classifyUpdateModeImpl: async () => 'merge-main',
+    readLaunchImpl: async () => ({ ok: true, row: { status: 'running' } }),
     execFileImpl: async () => { launches++; return { stdout: JSON.stringify({ launchRequestId: 'synthetic-rehead', status: 'running' }) }; },
   });
   const first = await maybeDispatchAmaClosureFor(args);
-  assert.equal(first.capRehead?.dispatched, exhausted ? undefined : true, JSON.stringify(first));
+  assert.equal(first.capRehead?.dispatched, true, JSON.stringify(first));
+  assert.notEqual(first.needsOperator, true);
   const second = await maybeDispatchAmaClosureFor(args);
-  assert.equal(second.capRehead?.reason, undefined, 'terminal skip falls through to ordinary recovery');
-  assert.equal(launches, exhausted ? 0 : 1);
+  assert.equal(second.capRehead?.reason, 'live-owner');
+  assert.equal(second.capRehead?.custody, true);
+  assert.notEqual(second.needsOperator, true);
+  assert.equal(pages.length, 0, 'neither dispatch nor live custody pages the spent budget');
+  assert.equal(launches, 1);
 });

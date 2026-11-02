@@ -1,5 +1,51 @@
 # Data Model - Hammer Retry Cap Ledger
 
+## Non-closer head series reset (CLOSERPROOF-01)
+
+A series belongs to the heads the closer authored. When the PR head moves to a
+commit the closer did not author, such as another worker's rebase of the
+hammer's commit, the series exhaustion recorded for an earlier head does not
+carry over. `resetHammerSeriesForNonCloserHead` decides this only from the
+shared proof (`proveCloserAuthoredStaleHead`): `hammer-app-attestation-missing`
+anchored at the ledger's `jobKey`, with `currentHeadHammerAttested: false`
+(no authenticated hammer edge ends at the exact SHA, compared
+case-insensitively). Commit trailers and author
+fields are never read. The closure orchestration calls it before evaluating the
+owner cap, under the existing PR-scoped lock.
+
+The reset's `jobKey` is the proof's reviewed head (`originalReviewedHead`, the
+review row's `reviewer_head_sha`), because the proof compared that head and
+dispatch recorded the hammer series under it. The owner cap is evaluated under
+`reviewState.headSha`, the gate's evidence head. When the two differ, the cap
+already starts a fresh series for the evidence head, so the reset has nothing to
+clear there.
+
+A reset sets `attemptCount: 0`, `dispatchHeads: []` and
+`closerDispatchedHeads: []`, clears the series suppression fields
+(`suppressed`, `suppressedJobKey`, `suppressedHeadSha`,
+`suppressedAttemptCount`, `alertedAt`) and drops the series `retryable`
+refunds. `suppressionState` is cleared unless a target suppression is still in
+force. Before clearing the series it persists the effective lifetime count
+(`lifetimeAttemptCount`, which legacy ledgers derive from `attemptCount`), so a
+reset never refunds lifetime budget. Lifetime suppression, target fields and
+charge receipts are unchanged.
+
+"A head the hammer was dispatched for" means confirmed dispatch evidence: a
+`dispatchCharges` entry whose `headSha` is that head, or the head in
+`closerDispatchedHeads`. The dispatch recorder alone appends to
+`closerDispatchedHeads` (per series, like `dispatchHeads`); the cap-suppression
+writer carries it unchanged. `dispatchHeads`, `lastDispatchedHeadSha` and
+`suppressedHeadSha` are not dispatch evidence, because the suppression writer
+also stamps a head the closer merely refused. A non-closer head that was only
+refused therefore still gets its one reset.
+The optional `nonCloserHeadResets` map, keyed by head SHA, records
+`{ resetAt, jobKey, reason, priorAttemptCount, priorSuppressed,
+priorSuppressedHeadSha }`. It survives every later write, so each head resets at
+most once. Nothing resets for a proven or unknown proof, a proof anchored at
+another head, a head the hammer was dispatched for, a lifetime-suppressed or
+corrupt ledger, or a series with nothing spent. A hammer push on top of the new
+head is attested, so it never resets.
+
 ## Missing phase input replacement (HAMSCRATCHRESUME-01)
 
 The optional PR-scoped `phaseInputsReplacement` receipt stores

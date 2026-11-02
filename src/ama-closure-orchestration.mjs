@@ -17,7 +17,9 @@ import { fleetStopReason } from './fleet-stop.mjs';
 import { recordOperatorNoticeCloserOutcome } from './operator-decision-notice.mjs';
 import { checkPrimaryChange, fetchPrimaryChange } from './ama/primary-change.mjs';
 import { readHammerStopForHead, readHammerStopHoldForHead, isInfrastructureStop, isLegacyReviewHandoffStop } from './ama/hammer-stop-hold.mjs';
-import { evaluateHammerRetryCap, readHammerRetryCapLedger, rearmOperatorApprovedCloser } from './ama/hammer-retry-cap.mjs';
+import {
+  evaluateHammerRetryCap, readHammerRetryCapLedger, rearmOperatorApprovedCloser, resetHammerSeriesForNonCloserHead,
+} from './ama/hammer-retry-cap.mjs';
 import { resolveSharedNextAction } from './pr-next-action-shadow.mjs';
 import { createHistoryReader } from './ama/history-reader.mjs';
 import { hammerDispatchMismatch, bindClosureNextAction, readClosureNextAction, observeClosureOwnership, closureOwnerFromDecision, hasClosureRecoveryIntent, hasHammerDispatchIntent, observeClosureResult, observeDaemonGate as reviseDaemonGate, observeDaemonResult, revalidateClosurePr, resolveClosureNextAction, reviseClosureNextAction } from './ama/closure-next-action.mjs';
@@ -1734,6 +1736,26 @@ async function dispatchAmaClosureFor({
       if (infrastructureOwnerReleased) handoffLease = readAmaCloserLease(rootDir, {
         repo: repoPath, prNumber, headSha: currentPrHeadSha });
     }
+  }
+  // CLOSERPROOF-01: a head the closer did not author does not inherit the
+  // series exhaustion recorded for an earlier head. The same shared proof that
+  // decided closer authorship above decides it here; the lifetime ceiling stays.
+  // The anchor is deliberately `originalReviewedHead`, not `reviewState.headSha`:
+  // the proof compared that head, and the hammer series was recorded under it.
+  // `reviewState.headSha` follows the gate's evidence head, which can differ;
+  // a differing jobKey already makes the cap below start a fresh series.
+  try {
+    const seriesReset = resetHammerSeriesForNonCloserHead(rootDir, { repo: repoPath, prNumber }, {
+      jobKey: originalReviewedHead, headSha: currentPrHeadSha, headProof: closerHeadProof,
+      now: new Date(now()).toISOString(),
+    });
+    if (seriesReset.reset) {
+      logger?.log?.(`[watcher] hammer retry series reset for non-closer head ${repoPath}#${prNumber}`
+        + `@${String(currentPrHeadSha).slice(0, 12)} (prior attempts ${seriesReset.receipt.priorAttemptCount})`);
+    }
+  } catch (err) {
+    // A busy or unwritable ledger keeps the recorded cap; the next pass retries.
+    logger?.warn?.(`[watcher] hammer retry series reset skipped for ${repoPath}#${prNumber}: ${err?.message || err}`);
   }
   const ownerCap = evaluateHammerRetryCap(readHammerRetryCapLedger(rootDir, { repo: repoPath, prNumber }), {
     jobKey: reviewState.headSha, headSha: currentPrHeadSha,

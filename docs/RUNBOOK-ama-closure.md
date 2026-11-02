@@ -2935,6 +2935,23 @@ To inspect a PR: the watcher log carries `ama_closer.hammer_exited_without_close
 `data/follow-up-jobs/hammer-retry-cap/<repo>-pr-<n>.json` shows `retryable` and
 `retryableLaunchRequestIds`.
 
+### A non-closer head does not inherit the retry cap (CLOSERPROOF-01)
+
+The retry-cap series follows the heads the closer authored, as the shared
+attestation proof (`proveCloserAuthoredStaleHead`) defines them. A head pushed
+by someone else, such as a rebase of the hammer's commit, keeps the hammer's
+commit trailers but has no authenticated hammer edge. AMA therefore routes it
+to `rereview-exact-head`. Before the owner cap is evaluated, the closure pass
+resets the series once for that head, so the next closer gets the normal series
+budget instead of a `hammer-retry-cap-exhausted` stop recorded for an earlier
+head. The lifetime ceiling and lifetime suppression are unchanged. A hammer
+push on the same attested chain, or on top of the new head, never resets. The
+watcher log line is `hammer retry series reset for non-closer head`. The ledger
+records each reset under `nonCloserHeadResets`; see
+[Hammer Retry Cap](data-model/hammer-retry-cap.md#non-closer-head-series-reset-closerproof-01).
+To update a hammer-tipped branch outside the closer, prefer merging the base
+branch (a merge commit) over rebasing the hammer's commit. Either way is safe.
+
 ### Review cycle cap → hammer final adjudication (CYCLECAPHAM-01)
 
 Operator decision, 2026-10-10: "Hammers judgement is final". A PR that hits the

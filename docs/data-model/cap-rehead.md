@@ -6,6 +6,9 @@ The adjacent `.lock` uses an exclusive OS advisory lock for the whole
 read/check/reserve/dispatch/update transaction. Process death releases the lock.
 
 Schema version 1 contains `repo`, `prNumber` and append-only `attempts`.
+`repo` must be a string matching the caller's repository case-insensitively,
+consistent with the lowercase path key. Stored spelling is preserved; casing
+changes cannot reset head reservations or lifetime charges.
 Each attempt has `headSha`, `workerClass`, `recordedAt` and `status`:
 `reserved` precedes the external dispatch, `dispatched` adds `launchRequestId`,
 and `unacknowledged` retains a failed/refused/unknown command outcome, preserving

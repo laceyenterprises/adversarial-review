@@ -1,13 +1,15 @@
 import './helpers/rate-limit-state-isolation.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
-import test from 'node:test';
+import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { maybeDispatchCapRehead, capReheadLedgerPath, probeCapReheadOwnership, capReheadCounters } from '../src/ama/cap-rehead.mjs';
+import { maybeDispatchCapRehead, capReheadLedgerPath, probeCapReheadOwnership, capReheadCounters, resetCapReheadCountersForTesting } from '../src/ama/cap-rehead.mjs';
 import { loadConfig } from '../src/config-loader.mjs';
 import { resolveMergeAuthorityConfigFromDomain } from '../src/domain-policy.mjs';
+
+beforeEach(resetCapReheadCountersForTesting);
 
 function fixture(t, overrides = {}) {
   const rootDir = mkdtempSync(join(tmpdir(), 'cap-rehead-'));
@@ -35,7 +37,8 @@ function fixture(t, overrides = {}) {
 }
 
 test('capped clean green head reserves once, emits metrics, and uses a builder PR-update', async t => {
-  const f = fixture(t), before = capReheadCounters();
+  const f = fixture(t);
+  assert.deepEqual(capReheadCounters(), { dispatched: 0, skipped: 0 });
   assert.equal((await f.run()).dispatched, true);
   assert.equal((await f.run()).reason, 'already-attempted');
   assert.equal(f.calls.length, 1);
@@ -52,7 +55,18 @@ test('capped clean green head reserves once, emits metrics, and uses a builder P
   assert.match(prompt, /no hammer or closer trailers/i);
   assert.equal(f.events[0].event, 'ama.cap_rehead.dispatched');
   assert.equal(f.events[1].event, 'ama.cap_rehead.skipped');
-  assert.equal(capReheadCounters().dispatched, before.dispatched + 1);
+  assert.deepEqual(capReheadCounters(), { dispatched: 1, skipped: 1 });
+});
+
+test('counter reset clears both metrics without changing returned snapshots', async t => {
+  const f = fixture(t);
+  await f.run();
+  await f.run();
+  const snapshot = capReheadCounters();
+  resetCapReheadCountersForTesting();
+  assert.deepEqual(capReheadCounters(), { dispatched: 0, skipped: 0 });
+  assert.deepEqual(snapshot, { dispatched: 1, skipped: 1 });
+  assert.equal((await f.run()).reason, 'already-attempted', 'metrics reset preserves durable reservations');
 });
 
 for (const [reason, changes] of [
@@ -89,6 +103,20 @@ test('lifetime cap holds across heads and fresh process reads', async t => {
   assert.equal((await f.run()).dispatched, true);
   assert.equal((await f.run({ headSha: 'b'.repeat(40) })).dispatched, true);
   assert.equal((await maybeDispatchCapRehead({ ...f.args, headSha: 'c'.repeat(40) })).reason, 'lifetime-cap');
+  assert.equal(f.calls.length, 2);
+});
+
+for (const [storedRepo, callerRepo] of [
+  ['example/project', 'Example/Project'],
+  ['Example/Project', 'example/project'],
+]) test(`repository casing preserves reservations and lifetime cap: ${storedRepo} -> ${callerRepo}`, async t => {
+  const f = fixture(t, { repo: storedRepo });
+  assert.equal(capReheadLedgerPath(f.args.rootDir, storedRepo, 17),
+    capReheadLedgerPath(f.args.rootDir, callerRepo, 17));
+  assert.equal((await f.run()).dispatched, true);
+  assert.equal((await f.run({ repo: callerRepo })).reason, 'already-attempted');
+  assert.equal((await f.run({ repo: callerRepo, headSha: 'b'.repeat(40) })).dispatched, true);
+  assert.equal((await f.run({ repo: storedRepo, headSha: 'c'.repeat(40) })).reason, 'lifetime-cap');
   assert.equal(f.calls.length, 2);
 });
 
@@ -179,6 +207,18 @@ test('unreadable and malformed reservation stores never become a fresh budget', 
   for (const content of ['{', JSON.stringify({ schemaVersion: 1, repo: f.args.repo, prNumber: 17,
     attempts: [{ headSha: 'old', status: 'invented' }] })]) {
     writeFileSync(file, content);
+    assert.equal((await f.run({ headSha: 'b'.repeat(40) })).reason, 'ledger-unreadable');
+  }
+  assert.equal(f.calls.length, 1);
+});
+
+test('invalid or foreign repository metadata fails closed without dispatching', async t => {
+  const f = fixture(t);
+  await f.run();
+  const file = capReheadLedgerPath(f.args.rootDir, f.args.repo, 17);
+  const ledger = JSON.parse(readFileSync(file));
+  for (const repo of [null, 17, {}, ['example/project'], undefined, 'example/other']) {
+    writeFileSync(file, JSON.stringify({ ...ledger, repo }));
     assert.equal((await f.run({ headSha: 'b'.repeat(40) })).reason, 'ledger-unreadable');
   }
   assert.equal(f.calls.length, 1);

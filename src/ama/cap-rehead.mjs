@@ -22,6 +22,10 @@ const execFileAsync = promisify(execFile);
 const PROMPT = fileURLToPath(new URL('../../templates/cap-rehead-prompt.md', import.meta.url));
 const counts = { dispatched: 0, skipped: 0 };
 export function capReheadCounters() { return { ...counts }; }
+export function resetCapReheadCountersForTesting() {
+  counts.dispatched = 0;
+  counts.skipped = 0;
+}
 export function capReheadLedgerPath(rootDir, repo, prNumber) {
   const key = createHash('sha256').update(JSON.stringify([repo.toLowerCase(), Number(prNumber)])).digest('hex');
   return join(rootDir, 'data', 'follow-up-jobs', 'cap-rehead', `${key}.json`);
@@ -100,7 +104,8 @@ export async function maybeDispatchCapRehead({ rootDir, repo, prNumber, headSha,
       if (error.code !== 'ENOENT') return report(false, 'ledger-unreadable');
       ledger = { schemaVersion: 1, repo, prNumber, attempts: [] };
     }
-    if (ledger.schemaVersion !== 1 || ledger.repo !== repo || ledger.prNumber !== prNumber
+    if (ledger.schemaVersion !== 1 || typeof ledger.repo !== 'string'
+      || ledger.repo.toLowerCase() !== repo.toLowerCase() || ledger.prNumber !== prNumber
       || !Array.isArray(ledger.attempts) || ledger.attempts.some(a => typeof a?.headSha !== 'string' || !a.headSha
         || !['reserved', 'dispatched', 'unacknowledged'].includes(a.status)
         || typeof a.workerClass !== 'string' || !Number.isFinite(Date.parse(a.recordedAt))

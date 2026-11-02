@@ -4394,6 +4394,12 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 - CLOSERSCANREAD-01: closer launch scans fall back from failed batch snapshots to bounded individual reads, defer fairly at a load-aware pass deadline, and report snapshot timing and fallback counts. Dispatch lookup deadlines now scale with load; unreadable ownership still holds custody.
 
+- **CAPREHEAD-01 final remediation:** ledger validation matches repository casing
+  consistently with its path key, retaining reservations and lifetime charges
+  across casing changes. Added a test-only counter reset and isolated offline
+  regressions for both findings. Store fields, lifecycle states and existing
+  smoke promises are unchanged.
+
 ### CAPREHEAD-01 — bounded recovery after closer retry exhaustion
 
 A settled clean or comment-only PR whose hammer wake reports `retry-exhausted`

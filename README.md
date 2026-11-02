@@ -4506,9 +4506,11 @@ and `CAP_REHEAD_LIFETIME_CAP` under
 `roles.build_pack_default_worker_class` applies when the creation title has no
 recognized builder class. Hammer classes are refused.
 
-The committed `templates/cap-rehead-prompt.md` selects the squash refresh above
-for hammer histories and a merge of `origin/main` for builder-only histories.
-It requires conflict resolution preserving both sides, generator-driven file
+The daemon classifies complete PR history from the canonical runtime, selects
+the squash refresh above for hammer histories or a merge of `origin/main` for
+builder-only histories, and writes an owned dynamic prompt binding repo, PR,
+branch, old head and update mode. The worker needs no local AR checkout. The
+prompt requires preserving both sides of conflicts, generator-driven file
 regeneration, affected tests and the selected push strategy.
 It grants no merge authority and adds
 no closer trailers or attestations. The normal review → closer path handles

@@ -146,6 +146,7 @@ async function spawnWithInput(command, args, {
   onStdoutData,
   firstOutputTimeout = 0,
   stallReviewer,
+  onStall,
   // Side-channel capture files and the hard settle deadline; see
   // spawnCapturedProcessGroup. Only passed when set, so other callers are
   // unchanged.
@@ -167,6 +168,7 @@ async function spawnWithInput(command, args, {
     onStdoutData,
     firstOutputTimeout,
     ...(stallReviewer ? { stallReviewer } : {}),
+    ...(onStall ? { onStall } : {}),
     ...(stdoutPath ? { stdoutPath } : {}),
     ...(stderrPath ? { stderrPath } : {}),
     ...(settleAfterKillMs ? { settleAfterKillMs } : {}),
@@ -184,6 +186,7 @@ async function spawnCaptured(command, args, {
   onStdoutData,
   firstOutputTimeout = 0,
   stallReviewer,
+  onStall,
 } = {}) {
   return spawnWithInput(command, args, {
     env,
@@ -197,6 +200,7 @@ async function spawnCaptured(command, args, {
     onStdoutData,
     firstOutputTimeout,
     ...(stallReviewer ? { stallReviewer } : {}),
+    ...(onStall ? { onStall } : {}),
   });
 }
 

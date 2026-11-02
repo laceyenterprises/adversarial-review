@@ -4459,6 +4459,12 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- REVIEWSTALL-01 final comment-only remediation: `spawnWithInput` and
+  `spawnCaptured` forward custom `onStall` receipt sinks; omitted sinks retain
+  the stderr fallback. Stall classification accepts raw strings as well as
+  Error objects. Focused offline regressions cover both wrappers and input
+  shapes; lifecycle states and smoke promises are unchanged.
+
 - REVIEWSTALL-01: native reviewer calls use load-aware first-output and
   no-progress deadlines within the existing wall ceiling. Stalls emit a
   timing receipt, release the seat, and return to the existing queue without

@@ -4,9 +4,42 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { reviewerStallOptions } from '../src/reviewer-stall.mjs';
+import { isReviewerStall, reviewerStallOptions } from '../src/reviewer-stall.mjs';
+import { __test__ as harness } from '../src/reviewer-harness.mjs';
 import { spawnCapturedProcessGroup } from '../src/process-group-spawn.mjs';
 import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
+
+test('REVIEWSTALL-01: stall classification accepts errors and raw log strings', () => {
+  for (const error of [
+    { reviewerStalled: true },
+    new Error('[reviewer-stalled] no first output'),
+    '[reviewer-stalled] no first output',
+  ]) {
+    assert.equal(isReviewerStall(error), true);
+  }
+  for (const error of [undefined, null, '', {}, new Error('other failure'), 'other failure']) {
+    assert.equal(isReviewerStall(error), false);
+  }
+});
+
+for (const wrapper of ['spawnWithInput', 'spawnCaptured']) {
+  test(`REVIEWSTALL-01: ${wrapper} forwards the custom stall receipt sink`, async () => {
+    const receipts = [];
+    await assert.rejects(harness[wrapper](process.execPath, ['-e',
+      'setInterval(() => {}, 1000);',
+    ], {
+      timeout: 5000,
+      firstOutputTimeout: 500,
+      progressTimeout: 700,
+      killGraceMs: 30,
+      stallReviewer: { model: 'fixture-model', identity: wrapper },
+      onStall: receipt => receipts.push(receipt),
+    }), isReviewerStall);
+    assert.equal(receipts.length, 1);
+    assert.equal(receipts[0].reason, 'first-output');
+    assert.equal(receipts[0].reviewer.identity, wrapper);
+  });
+}
 
 test('REVIEWSTALL-01: both load-aware budgets scale once and respect the call ceiling', () => {
   for (const multiplier of [1, 3, 6]) {

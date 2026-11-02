@@ -20,5 +20,5 @@ export function reviewerStallOptions(ceilingMs, reviewer, {
 
 export function isReviewerStall(error) {
   return error?.reviewerStalled === true
-    || /\[reviewer-stalled\]/.test(String(error?.message || ''));
+    || /\[reviewer-stalled\]/.test(String(error?.message || error || ''));
 }

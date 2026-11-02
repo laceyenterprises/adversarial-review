@@ -4388,6 +4388,8 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- CLOSERSCANREAD-01 comment-only follow-up: strict unhandled-rejection regressions verify that snapshot and individual reads can reject after their timeout without crashing or mutating ownership. `Promise.race` already retains rejection handlers after settlement; runtime behavior is unchanged.
+
 - CLOSERSCANREAD-01 final remediation: isolate the census cursor from capacity checks, exclude inactive records before budget deferral, require a complete census for missing-row retirement, and preserve individual failure and timeout evidence. Focused offline regressions cover these guards; lifecycle values and existing smoke promises are unchanged.
 
 - CLOSERSCANREAD-01: closer launch scans fall back from failed batch snapshots to bounded individual reads, defer fairly at a load-aware pass deadline, and report snapshot timing and fallback counts. Dispatch lookup deadlines now scale with load; unreadable ownership still holds custody.

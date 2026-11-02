@@ -350,6 +350,45 @@ test('snapshot timeout falls back to individual reads and isolates failure', asy
   assert.deepEqual(result.active.map(item => item.prNumber), [2]);
 });
 
+for (const branch of ['snapshot', 'individual']) {
+  test(`${branch} read rejection after timeout remains handled`, t => {
+    const root = fixture(t, `late-rejection-${branch}`);
+    const path = dispatchRecord(root, 1);
+    const before = readFileSync(path, 'utf8');
+    // Strict mode makes an unhandled rejection fatal, without a listener that
+    // could mask it. Reject only after reconciliation proves the timer won.
+    execFileSync(process.execPath, ['--unhandled-rejections=strict', '--input-type=module', '--eval', `
+      import ${JSON.stringify(new URL('./helpers/load-aware-timeout-fixture.mjs', import.meta.url).href)};
+      import ${JSON.stringify(new URL('./helpers/dispatch-read-fixture.mjs', import.meta.url).href)};
+      import assert from 'node:assert/strict';
+      import { setImmediate } from 'node:timers/promises';
+      import { reconcileAmaCloserDispatches } from ${JSON.stringify(new URL('../src/ama/dispatch-closer.mjs', import.meta.url).href)};
+      let rejectRead;
+      const lateRead = () => new Promise((resolve, reject) => { rejectRead = reject; });
+      const snapshot = ${JSON.stringify(branch)} === 'snapshot';
+      const result = await reconcileAmaCloserDispatches(${JSON.stringify(root)}, {
+        now: ${JSON.stringify(NOW)}, scanBudgetMs: Infinity,
+        snapshotTimeoutMs: 1, launchReadTimeoutMs: 1,
+        useLaunchSnapshot: snapshot,
+        readLaunchRequestSnapshotImpl: lateRead,
+        readLaunchRequestStatusImpl: snapshot
+          ? () => ({ ok: true, row: { status: 'running' }, retryChain: [] })
+          : lateRead,
+      });
+      assert.equal(typeof rejectRead, 'function');
+      assert.equal(result.snapshot.outcome, snapshot ? 'timeout' : 'unused');
+      assert.equal(result.unreadable, snapshot ? 0 : 1);
+      assert.equal(result.changed, 0);
+      assert.deepEqual(result.active.map(item => [item.prNumber, item.holdsCapacity]), [[1, true]]);
+      // Promise.race retains its input rejection handlers after settlement.
+      rejectRead(new Error('reader rejected after scan timeout'));
+      await setImmediate();
+      await setImmediate();
+    `], { encoding: 'utf8', timeout: 10000, stdio: 'pipe' });
+    assert.equal(readFileSync(path, 'utf8'), before, 'late failure must not mutate ownership');
+  });
+}
+
 test('snapshot timeout preserves definitive missing evidence from individual reads', async t => {
   const root = fixture(t, 'snapshot-missing');
   const missing = dispatchRecord(root, 1, { lastAttemptedAt: '2020-01-01T00:00:00Z' });

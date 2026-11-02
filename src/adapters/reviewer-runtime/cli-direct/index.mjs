@@ -83,6 +83,7 @@ function stdoutLooksLikeFailureSignal(value) {
 }
 
 function reviewerSignalAwareFailureClass(err, classificationText, exitCode, details = {}) {
+  if (err?.reviewerStalled || String(classificationText).includes('[reviewer-stalled]')) return 'reviewer-stalled';
   const stdoutTail = tailText(err?.stdout || '');
   const stderrTail = tailText(err?.stderr || '');
   const messageTail = tailText(err?.message || '');
@@ -702,7 +703,7 @@ function createCliDirectReviewerRuntimeAdapter({
       record = updateReviewerRunRecord(rootDir, record, {
         state: terminalSpawnTerminationError
           ? 'failed'
-          : (cancelled || failureClass === 'daemon-bounce' ? 'cancelled' : 'failed'),
+          : (cancelled || ['daemon-bounce', 'reviewer-stalled'].includes(failureClass) ? 'cancelled' : 'failed'),
         lastHeartbeatAt: now(),
       });
       activeRun.record = record;

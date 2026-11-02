@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 /* REVIEW-DEDUP — the hard re-review ceiling counts DISTINCT reviewed head SHAs.
  *
  * Live evidence 2026-07-13: agent-os PR #3655 got FOUR reviews of ONE unchanged
@@ -24,6 +25,25 @@ import {
 function makeTempRoot() {
   return mkdtempSync(path.join(tmpdir(), 'review-dedup-ceiling-'));
 }
+
+test('REVIEWSTALL-01: cancelled stalls spend neither review nor retry fuse', () => {
+  const rootDir = makeTempRoot();
+  try {
+    const db = openReviewStateDb(rootDir);
+    ensureReviewStateSchema(db);
+    for (let attempt = 1; attempt <= 8; attempt += 1) {
+      insertPass(db, { repoPath: 'fixture-owner/demo', prNumber: 1,
+        attemptNumber: attempt, passKind: 'first-pass', headSha: 'current', status: 'cancelled' });
+    }
+    db.prepare('UPDATE reviewer_passes SET metadata_json = ?').run(JSON.stringify({ failureClass: 'reviewer-stalled' }));
+    const args = { db, rootDir, repoPath: 'fixture-owner/demo', prNumber: 1, headSha: 'current', fallbackReviewAttempts: 99 };
+    assert.equal(countReviewCeilingAttempts(args), 0);
+    assert.equal(countReviewCeilingUnits(args), 0);
+    insertPass(db, { repoPath: args.repoPath, prNumber: 1, attemptNumber: 9,
+      passKind: 'first-pass', headSha: 'current', status: 'failed' });
+    assert.equal(countReviewCeilingAttempts(args), 1, 'ordinary failures still spend retries');
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
 
 function insertPass(
   db,

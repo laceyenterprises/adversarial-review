@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import { fixtureCliPath } from './helpers/review-cli-resolver-fixture.mjs';
 import './helpers/registry-session-fixture.mjs';
 // CCX-08 — multi-identity agy reviewer (credential-capacity-expansion SPEC
@@ -1046,9 +1047,10 @@ test('CCX-08: a failed review isolates only its identity, and a passing readines
     assert.match(log.lines.join('\n'), new RegExp(`identity=${REVIEWER_A} re-admitted`));
 
     // A cancelled review, or a provider-wide failure, says nothing about the identity.
-    for (const failureClass of ['cancelled', 'cascade', 'provider-overloaded', 'quota-exhausted']) {
+    for (const failureClass of ['cancelled', 'cascade', 'provider-overloaded', 'quota-exhausted', 'reviewer-stalled']) {
       await runWithAgyReviewerIdentity({ reviewerModel: 'gemini', adapter, pool, log }, async () => ({ ok: false, failureClass }));
       assert.equal(pool.readyCount(), 3, failureClass);
+      assert.equal(pool.snapshot().every((state) => !state.leased), true, failureClass);
     }
     // A thrown reviewer isolates the identity it ran on (here the HQ owner) and still releases the lease.
     await assert.rejects(runWithAgyReviewerIdentity({ reviewerModel: 'gemini', adapter, pool, log }, async () => { throw new Error('boom'); }), /boom/);

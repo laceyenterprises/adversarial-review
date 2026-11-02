@@ -4459,6 +4459,11 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- REVIEWSTALL-01: native reviewer calls use load-aware first-output and
+  no-progress deadlines within the existing wall ceiling. Stalls emit a
+  timing receipt, release the seat, and return to the existing queue without
+  spending review or recovery attempts.
+
 - HAMGITTOKEN-01 final rescue: the outer 120-second submodule-sync bound owns its child timeout and waits for lock cleanup; bounded snapshot and publication proofs accept unset or empty `HAM_NODE_BIN` consistently. Credential refresh classification and exact-head merge predicates remain intact.
 
 - Preserve the API-published head and starting head before attestation so a failed attestation retains exact publication provenance for closure recovery; cover the failure with an offline regression.

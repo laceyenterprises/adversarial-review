@@ -13,8 +13,49 @@ import { tmpdir } from 'node:os';
 import { infraRecoverableFailureClass } from '../src/reviewer-failure-classification.mjs';
 import { underMaxLoad, MAX_TIMER_DELAY_MS } from './helpers/load-time-kit.mjs';
 import os from 'node:os';
+import { spawnCapturedProcessGroup } from '../src/process-group-spawn.mjs';
+import { reviewerStallOptions } from '../src/reviewer-stall.mjs';
 
 const diff = 'diff --git a/sample.mjs b/sample.mjs\n--- a/sample.mjs\n+++ b/sample.mjs\n@@ -0,0 +1,9000 @@\n' + '+synthetic content\n'.repeat(9000);
+
+test('REVIEWSTALL-01: silent agy releases its credential without an in-process retry', async () => {
+  let releases = 0;
+  let calls = 0;
+  const receipts = [];
+  await assert.rejects(reviewWithGemini('+synthetic', '', {
+    timeoutMs: 5000, agyIdentity: null,
+    resolveGeminiRuntimeImpl: () => 'antigravity',
+    purgeStaleGeminiReviewerSessionDirsImpl: () => {},
+    checkoutGeminiCredentialImpl: async () => ({ checkoutId: 'synthetic-checkout' }),
+    materializeGeminiCheckoutSessionImpl: () => ({ env: process.env, cleanup() {} }),
+    assertAgyAuthImpl: async () => {},
+    releaseGeminiCredentialCheckoutImpl: async () => { releases += 1; },
+    retryDelaysMs: [1, 1],
+    spawnAgyReviewImpl: options => harness.spawnAgyReview({ ...options,
+      spawnWithInputImpl: (_command, _args, spawnOptions) => {
+        calls += 1;
+        assert.deepEqual({
+          firstOutputTimeout: spawnOptions.firstOutputTimeout,
+          progressTimeout: spawnOptions.progressTimeout,
+        }, { firstOutputTimeout: spawnOptions.timeout, progressTimeout: spawnOptions.timeout },
+        'production helper clamps both budgets to the resolved subprocess ceiling');
+        return spawnCapturedProcessGroup(process.execPath, ['-e', 'setInterval(() => {},1000);'], {
+          ...spawnOptions, input: null, killGraceMs: 30,
+          ...reviewerStallOptions(5000, spawnOptions.stallReviewer, {
+            loadAwareTimeoutMsImpl: nominal => nominal / 240,
+          }),
+          onStall: receipt => receipts.push(receipt),
+        });
+      },
+    }),
+  }), err => {
+    assert.equal(err.reviewerStalled, true);
+    return true;
+  });
+  assert.equal(calls, 1);
+  assert.equal(releases, 1);
+  assert.equal(receipts.length, 1);
+});
 
 function underObservedLoad(t) {
   underMaxLoad(t);

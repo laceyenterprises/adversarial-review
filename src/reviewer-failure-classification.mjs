@@ -70,7 +70,8 @@ function reviewerFailureClassFromStoredRow(reviewRow) {
   if (tagMatch) return tagMatch[1];
   const legacyClass = classifyReviewerFailure(rawMessage, null);
   if (
-    legacyClass === 'reviewer-model-unresolved'
+    legacyClass === 'reviewer-stalled'
+    || legacyClass === 'reviewer-model-unresolved'
     || legacyClass === 'reviewer-model-unavailable'
     || legacyClass === 'cascade'
     || legacyClass === 'reviewer-timeout'

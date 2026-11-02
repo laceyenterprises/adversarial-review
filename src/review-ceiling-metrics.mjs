@@ -239,6 +239,9 @@ export function countReviewCeilingAttempts({
         'oauth-broken',
       ]);
       return rows.reduce((count, row) => {
+        // A stalled provider call is cancelled without spending a retry. Keep
+        // other cancelled/running passes visible to the deterministic fuse.
+        if (reviewerFailureClassFromStoredRow(row) === 'reviewer-stalled') return count;
         if (row?.status !== 'failed') return count + 1;
         const failureClass = reviewerFailureClassFromStoredRow(row);
         if (transientFleetInfraClasses.has(failureClass)) return count;

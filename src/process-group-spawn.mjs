@@ -29,6 +29,8 @@ const SUPPORTED_OPTIONS = new Set([
   'stdoutPath',
   'stdoutCapture',
   'timeout',
+  'stallReviewer',
+  'onStall',
 ]);
 
 function tailText(value, maxBytes = DEFAULT_FAILURE_TAIL_BYTES) {
@@ -139,6 +141,8 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     // progressTimeout this is armed once and cleared permanently on first
     // output, never re-armed. Legacy non-streaming CLI callers may disable it.
     firstOutputTimeout = 0,
+    stallReviewer = null,
+    onStall = receipt => console.error(`[reviewer-stall] ${JSON.stringify(receipt)}`),
     killGraceMs = DEFAULT_KILL_GRACE_MS,
     maxBuffer = 10 * 1024 * 1024,
     onSpawn,
@@ -191,6 +195,8 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     let firstOutputTimer = null;
     let settleTimer = null;
     let sawFirstOutput = false;
+    let firstOutputAt = null;
+    let lastProgressAt = startedAt;
     let fileProgressTimer = null;
     let lastStdoutSize = 0;
     let lastStderrSize = 0;
@@ -219,6 +225,24 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
 
     const requestKill = (reason) => {
       if (settled) return;
+      if (!timeoutReason && stallReviewer && (
+        reason.startsWith(PROGRESS_TIMEOUT_REASON_PREFIX)
+        || reason.startsWith(FIRST_OUTPUT_TIMEOUT_REASON_PREFIX)
+      )) {
+        const receipt = {
+          reviewer: stallReviewer,
+          startedAt: new Date(startedAt).toISOString(),
+          firstOutputAt: firstOutputAt === null ? null : new Date(firstOutputAt).toISOString(),
+          lastProgressAt: new Date(lastProgressAt).toISOString(),
+          stalledAt: new Date().toISOString(),
+          firstOutputBudgetMs: firstOutputTimeout,
+          noProgressWindowMs: progressTimeout,
+          ceilingMs: wallTimeoutMs,
+          reason: reason.startsWith(FIRST_OUTPUT_TIMEOUT_REASON_PREFIX) ? 'first-output' : 'no-progress',
+        };
+        // A receipt sink must not prevent termination or release of the seat.
+        try { onStall(receipt); } catch { /* best-effort telemetry */ }
+      }
       if (!timeoutReason) timeoutReason = reason;
       if (!child.pid) {
         pendingKill = true;
@@ -238,6 +262,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
 
     const armProgressTimer = () => {
       if (progressTimer) clearTimeout(progressTimer);
+      lastProgressAt = Date.now();
       if (progressTimeout > 0) {
         progressTimer = setTimeout(() => {
           requestKill(`${PROGRESS_TIMEOUT_REASON_PREFIX} ${progressTimeout}ms`);
@@ -259,6 +284,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     const noteFirstOutput = () => {
       if (sawFirstOutput) return;
       sawFirstOutput = true;
+      firstOutputAt = Date.now();
       if (firstOutputTimer) clearTimeout(firstOutputTimer);
       firstOutputTimer = null;
     };
@@ -350,15 +376,15 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     if (timeout > 0) armWallTimer();
     armProgressTimer();
     armFirstOutputTimer();
-    // Only poll side-channel sizes when there's a reason to: either we need
-    // to re-arm the no-progress kill (progressTimeout > 0) or we need to
-    // enforce maxBuffer mid-flight (Number.isFinite(maxBuffer)). When both
+    // Poll side-channel sizes to observe first output, re-arm the no-progress
+    // kill, or enforce maxBuffer mid-flight. When these are all
     // are disabled — agent-os-hq paths sometimes set progressTimeout=0 with
     // maxBuffer=Infinity — the previous always-on timer was hot for no
     // reason 99% of the time.
-    if ((stdoutPath || stderrPath) && (progressTimeout > 0 || Number.isFinite(maxBuffer))) {
-      const intervalMs = progressTimeout > 0
-        ? Math.max(25, Math.min(1_000, Math.floor(progressTimeout / 4)))
+    if ((stdoutPath || stderrPath) && (firstOutputTimeout > 0 || progressTimeout > 0 || Number.isFinite(maxBuffer))) {
+      const outputBudgetMs = Math.min(firstOutputTimeout || Infinity, progressTimeout || Infinity);
+      const intervalMs = Number.isFinite(outputBudgetMs)
+        ? Math.max(25, Math.min(1_000, Math.floor(outputBudgetMs / 4)))
         : 250;
       fileProgressTimer = setInterval(() => {
         if (settled) return;
@@ -484,7 +510,12 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       }
       const details = formatCapturedFailureDetails({ stdout, stderr, maxBytes: failureTailBytes });
       const reason = timeoutReason || `failed with code ${code}${closeSignal ? ` signal ${closeSignal}` : ''}`;
-      const err = new Error(`Command ${reason}${note ? ` (${note})` : ''}${details ? `\n${details}` : ''}`);
+      const reviewerStalled = Boolean(stallReviewer && (
+        timeoutReason?.startsWith(PROGRESS_TIMEOUT_REASON_PREFIX)
+        || timeoutReason?.startsWith(FIRST_OUTPUT_TIMEOUT_REASON_PREFIX)
+      ));
+      const err = new Error(`${reviewerStalled ? '[reviewer-stalled] ' : ''}Command ${reason}${note ? ` (${note})` : ''}${details ? `\n${details}` : ''}`);
+      err.reviewerStalled = reviewerStalled;
       err.code = timeoutReason === 'aborted' ? 'ABORT_ERR' : code;
       err.exitCode = code;
       err.signal = closeSignal;

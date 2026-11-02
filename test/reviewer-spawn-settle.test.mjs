@@ -1,7 +1,10 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import './helpers/dispatch-files-preload.mjs';
 import {spawnReviewer} from './helpers/reviewer-quota-fixture.mjs';
 import './helpers/worker-observation-fixture.mjs';
-import { openReviewStateDb } from '../src/review-state.mjs';
+import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
+import { prepareReleaseReviewerClaim } from '../src/review-state-statements.mjs';
+import { settleReviewerAttempt } from '../src/reviewer-spawn-settle.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -20,6 +23,45 @@ import { createSessionLedgerDb } from './helpers/session-ledger-fixtures.mjs';
 function currentHead(headRefOid) {
   return async () => ({ state: 'open', mergedAt: null, closedAt: null, headRefOid });
 }
+
+test('REVIEWSTALL-01: stalled pass is cancelled and claim requeued without spending budgets', async t => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'stall-settle-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const db = openReviewStateDb(rootDir);
+  ensureReviewStateSchema(db);
+  db.prepare(`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer,
+    review_status, reviewer_session_uuid, reviewer_head_sha, review_attempts, infra_auto_recover_attempts)
+    VALUES ('fixture-owner/demo', 1, '2026-01-01', 'gemini', 'reviewing', 'fixture-stall', 'current', 2, 3)`).run();
+  const passes = [];
+  const result = await spawnReviewer({
+    rootDir, repo: 'fixture-owner/demo', prNumber: 1, reviewerModel: 'gemini',
+    reviewerHeadSha: 'current', reviewerSessionUuid: 'fixture-stall',
+    reviewAttemptNumber: 3, maxRemediationRounds: 4,
+    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
+    reviewerRuntimeAdapterOverride: {
+      async spawnReviewer() { return { ok: false, failureClass: 'reviewer-stalled', error: '[reviewer-stalled] no first output' }; },
+    },
+    beginReviewerPassImpl() {},
+    completeReviewerPassImpl: (_root, pass) => passes.push(pass),
+    readBestReviewerEvidenceTokenUsageImpl: async () => null,
+    ledgerLookupSleepImpl: async () => {},
+    postGitHubReviewWithCaptureImpl: async () => assert.fail('stall cannot post a verdict'),
+  });
+  assert.equal(passes[0].status, 'cancelled');
+  assert.equal(passes[0].metadata.failureClass, 'reviewer-stalled');
+  settleReviewerAttempt({
+    rootDir, repoPath: 'fixture-owner/demo', prNumber: 1, result,
+    reviewerSessionUuid: 'fixture-stall', reviewerModel: 'gemini',
+    statements: { releaseReviewerClaim: prepareReleaseReviewerClaim(db) },
+    log: { warn() {} },
+  });
+  const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=1').get();
+  assert.equal(row.review_status, 'pending');
+  assert.equal(row.reviewer_session_uuid, null);
+  assert.equal(row.reviewer, 'gemini', 'existing review owner retained');
+  assert.equal(row.review_attempts, 2);
+  assert.equal(row.infra_auto_recover_attempts, 3);
+});
 
 test('spawnReviewer consumes public quota evidence with either transport root alias', async (t) => {
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'spawn-settle-quota-'));

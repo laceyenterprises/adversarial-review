@@ -4388,6 +4388,9 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- Preserve the Hammer controller shell exit status when the shell exits during
+  an awaited empty process census; cover successful and failed exits offline.
+
 - HAMMERNOPROGRESS-01 final remediation: commit receipts require ancestry above
   the dispatch target, with an offline head-advanced regression. Document all
   seven receipt kinds and bounded reasons, advisory validation signals,

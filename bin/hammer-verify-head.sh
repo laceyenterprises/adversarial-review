@@ -115,7 +115,12 @@ ham_release_merge_lease() {
   # Keep the acquisition receipt for its generation-fenced fallback release.
   if [ -n "${HAM_CONTROLLER_RECORD:-}" ]; then
     if [ "${HAM_CONTROLLER_CANCELLED:-0}" -eq 1 ]; then HAM_PHASE_OUTCOME=controller-cancelled; return 125; fi
-    "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-controller.mjs" assert-owner || { HAM_PHASE_OUTCOME=controller-owner-lost; return 125; }
+    "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-controller.mjs" assert-owner || {
+      local ham_owner_status=$?
+      if [ "$ham_owner_status" -eq 75 ]; then HAM_PHASE_OUTCOME=controller-observation-unavailable
+      else HAM_PHASE_OUTCOME=controller-owner-lost; fi
+      return 125
+    }
   fi
   if [ "${HAM_MERGE_LEASE_HELD:-0}" -eq 1 ] && [ -n "${HAM_MERGE_LEASE_ID:-}" ]; then
     local ham_release_retryable_args=()

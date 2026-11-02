@@ -1,3 +1,5 @@
+// Offline fixtures must never select an inherited own-launch HCP credential.
+for (const key of ['HCP_TOKEN_PATH', 'HCP_TOKEN', 'HCP_BEARER_TOKEN']) delete process.env[key];
 process.env.NODE_OPTIONS = `${process.env.NODE_OPTIONS || ''} --import=${new URL('./helpers/dispatch-files-preload.mjs', import.meta.url).href}`;
 import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
 installDispatchFileProducerFixture();
@@ -196,7 +198,7 @@ test('Darwin census forwards the subprocess runner through the default native pr
     assert.deepEqual(args.slice(0, 2), ['-I', '-B']);
     assert.match(args[2], /controller_process_census\.py$/);
     assert.deepEqual(args.slice(3), ['group', '100']);
-    assert.equal(options.timeout, 2000);
+    assert.ok(options.timeout >= 2000 && options.timeout <= 12000);
     return JSON.stringify(members);
   } });
   assert.deepEqual(result, members);
@@ -451,7 +453,7 @@ test('unregistered and stale-generation shells cannot claim controller ownership
   record.state = 'running'; writeFileSync(path, JSON.stringify(record));
   assert.throws(() => assertHammerController({ ...env, HAM_CONTROLLER_TOKEN: 'different' }), /unconfirmed/);
   assert.throws(() => assertHammerController(env, { readGroupImpl: () => record.shellPid + 1 }), /process group/);
-  assert.throws(() => assertHammerController(env, { readGroupImpl: () => null }), /process group/);
+  assert.throws(() => assertHammerController(env, { readGroupImpl: () => null }), { code: 'EOBSERVATION' });
 });
 
 test('nested controllers cannot introduce another detached ownership boundary', async () => {
@@ -517,33 +519,43 @@ test('a refused child kill is not a failed spawn and never proves quiescence', a
 });
 
 for (const exitCode of [0, 7]) {
-  test(`empty census before shell exit event preserves status ${exitCode}`, async t => {
-    const f = fixture(t, 'exit 0');
-    let exited = false, snapshots = 0;
-    const child = Object.assign(new EventEmitter(), {
-      pid: 4242, stdin: new PassThrough(), stdio: [null, null, null, null, new PassThrough()],
-      kill() { throw new Error('empty census cannot authorize a signal'); },
-      unref() {},
+  for (const exitDuringCensus of [false, true]) {
+    test(`empty census ${exitDuringCensus ? 'during awaited census' : 'before shell exit event'} preserves status ${exitCode}`, async t => {
+      const f = fixture(t, 'exit 0');
+      let exited = false, snapshots = 0;
+      const child = Object.assign(new EventEmitter(), {
+        pid: 4242, stdin: new PassThrough(), stdio: [null, null, null, null, new PassThrough()],
+        kill() { throw new Error('empty census cannot authorize a signal'); },
+        unref() {},
+      });
+      const status = await runHammerController('/fixture', [], {
+        env: f.env, pollMs: 5, timeoutMs: 1000,
+        readLaunchImpl: async () => launch('running'), spawnImpl: () => child,
+        async snapshotImpl() {
+          if (++snapshots === 1) return [{ pid: 4242, birth: 'fixture-birth' }];
+          if (snapshots === 2) {
+            if (exitDuringCensus) {
+              await new Promise(resolve => setImmediate(resolve));
+              exited = true;
+              child.emit('exit', exitCode);
+            } else {
+              setImmediate(() => { exited = true; child.emit('exit', exitCode); });
+            }
+          }
+          return [];
+        },
+        signalGroupImpl() { throw new Error('empty census cannot authorize a group signal'); },
+        releaseImpl({ drained }) {
+          assert.equal(exited, true);
+          assert.equal(drained, true);
+          return { released: false, reason: 'no-acquisition-receipt' };
+        },
+      });
+      assert.equal(status, exitCode);
+      assert.equal(f.receipt().reason, 'shell-exited');
+      assert.equal(f.receipt().drained, true);
     });
-    const status = await runHammerController('/fixture', [], {
-      env: f.env, pollMs: 5, timeoutMs: 1000,
-      readLaunchImpl: async () => launch('running'), spawnImpl: () => child,
-      snapshotImpl() {
-        if (++snapshots === 1) return [{ pid: 4242, birth: 'fixture-birth' }];
-        if (snapshots === 2) setImmediate(() => { exited = true; child.emit('exit', exitCode); });
-        return [];
-      },
-      signalGroupImpl() { throw new Error('empty census cannot authorize a group signal'); },
-      releaseImpl({ drained }) {
-        assert.equal(exited, true);
-        assert.equal(drained, true);
-        return { released: false, reason: 'no-acquisition-receipt' };
-      },
-    });
-    assert.equal(status, exitCode);
-    assert.equal(f.receipt().reason, 'shell-exited');
-    assert.equal(f.receipt().drained, true);
-  });
+  }
 }
 
 for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {

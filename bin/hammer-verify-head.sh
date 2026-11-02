@@ -3,6 +3,12 @@
 export HAM_ROOT_DIR='<<ROOT_DIR>>'
 # HAMMERTRIM-01: rendered by bin/hammer-procedure.mjs with trusted dispatch values.
 ham_gh() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec-hammer "$@"; }
+ham_git() {
+  local ham_git_exit=0
+  "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec-git "$@" || ham_git_exit=$?
+  if [ "$ham_git_exit" -eq 76 ]; then HAM_PHASE_OUTCOME=git-credential-refresh-failed; fi
+  return "$ham_git_exit"
+}
 ham_pr() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-pr-read.mjs <<REPO>> <<PR_NUMBER>> "$@"; }
 
 ham_verify_head_phase() {
@@ -495,16 +501,8 @@ ham_is_full_sha() {
 }
 
 HAM_GIT_SYNC_NOMINAL_SECONDS="${HAM_GIT_SYNC_NOMINAL_SECONDS:-120}"
-ham_bounded_git_sync() {
-  ham_git_sync_attempt=1
-  while [ "$ham_git_sync_attempt" -le 2 ]; do
-    ham_git_sync_timeout=$("$HAM_NODE_BIN" <<ROOT_DIR>>/bin/load-aware-timeout.mjs "$HAM_GIT_SYNC_NOMINAL_SECONDS" || true)
-    case "$ham_git_sync_timeout" in
-      ''|*[!0-9]*|0) ham_git_sync_timeout="$HAM_GIT_SYNC_NOMINAL_SECONDS" ;;
-    esac
-    echo "HAM: git fetch attempt=$ham_git_sync_attempt deadline=${ham_git_sync_timeout}s" >&2
-    ham_git_sync_stderr=$(mktemp "${TMPDIR:-/tmp}/ham-git-sync-<<PR_NUMBER>>.XXXXXX") || return 1
-    if /usr/bin/perl -e '
+ham_bounded_git_operation() {
+  /usr/bin/perl -e '
       use Errno qw(EINTR);
       my $seconds = shift;
       my $child = fork();
@@ -523,7 +521,19 @@ ham_bounded_git_sync() {
       my $status = $?;
       alarm 0;
       exit($timed_out ? 124 : ($status & 127 ? 128 + ($status & 127) : $status >> 8));
-    ' "$ham_git_sync_timeout" git fetch --no-prune --no-tags origin "$@" 2>"$ham_git_sync_stderr"; then
+    ' "$@"
+}
+
+ham_bounded_git_sync() {
+  ham_git_sync_attempt=1
+  while [ "$ham_git_sync_attempt" -le 2 ]; do
+    ham_git_sync_timeout=$("${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/load-aware-timeout.mjs "$HAM_GIT_SYNC_NOMINAL_SECONDS" || true)
+    case "$ham_git_sync_timeout" in
+      ''|*[!0-9]*|0) ham_git_sync_timeout="$HAM_GIT_SYNC_NOMINAL_SECONDS" ;;
+    esac
+    echo "HAM: git fetch attempt=$ham_git_sync_attempt deadline=${ham_git_sync_timeout}s" >&2
+    ham_git_sync_stderr=$(mktemp "${TMPDIR:-/tmp}/ham-git-sync-<<PR_NUMBER>>.XXXXXX") || return 1
+    if ham_bounded_git_operation "$ham_git_sync_timeout" env HAM_GIT_SYNC_BOUNDED=1 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec-git fetch --no-prune --no-tags origin "$@" 2>"$ham_git_sync_stderr"; then
       cat "$ham_git_sync_stderr" >&2
       rm -f "$ham_git_sync_stderr"
       return 0
@@ -531,7 +541,11 @@ ham_bounded_git_sync() {
       ham_git_sync_exit=$?
     fi
     cat "$ham_git_sync_stderr" >&2
-    if [ "$ham_git_sync_exit" -eq 124 ]; then
+    if [ "$ham_git_sync_exit" -eq 76 ]; then
+      HAM_PHASE_OUTCOME=git-credential-refresh-failed
+      rm -f "$ham_git_sync_stderr"
+      return 76
+    elif [ "$ham_git_sync_exit" -eq 124 ]; then
       echo "git fetch timed out after ${ham_git_sync_timeout}s; SIGTERM cleanup completed" >&2
     elif ! ham_update_branch_transient "$ham_git_sync_stderr"; then
       rm -f "$ham_git_sync_stderr"
@@ -545,6 +559,13 @@ ham_bounded_git_sync() {
     ham_git_sync_attempt=$((ham_git_sync_attempt + 1))
   done
   return 1
+}
+
+ham_bounded_submodule_sync() {
+  local ham_submodule_sync_exit=0
+  ham_bounded_git_operation 120 env HAM_GIT_SYNC_BOUNDED=1 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec-git submodule update --recursive || ham_submodule_sync_exit=$?
+  if [ "$ham_submodule_sync_exit" -eq 76 ]; then HAM_PHASE_OUTCOME=git-credential-refresh-failed; fi
+  return "$ham_submodule_sync_exit"
 }
 
 ham_fetch_base_with_retries() {
@@ -630,9 +651,9 @@ ham_settle_rebase_snapshot() {
       if ham_is_full_sha "$snapshot_head" && [ "$snapshot_head" != "$from" ]; then
         if [ "$async_result" -eq 1 ]; then
           if ! ham_bounded_git_sync "$snapshot_head" \
-            || ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-rebase-result.mjs" \
+            || ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-rebase-result.mjs" \
               "$from" "$snapshot_head" "$base" > "<<RUN_DIR>>/rebase-result-proof.json"; then
-            HAM_PHASE_OUTCOME=rebase-result-unproven
+            if [ "${HAM_PHASE_OUTCOME:-}" != git-credential-refresh-failed ]; then HAM_PHASE_OUTCOME=rebase-result-unproven; fi
             ham_release_merge_lease || return 1
             return 20
           fi
@@ -710,9 +731,17 @@ ham_base_touches_pr_files() {
 # Shared by initial verification and the single in-run CI retry. GitHub publishes
 # the rebased head atomically; fetch that exact result into the scratch checkout.
 ham_rebase_head() {
+  if [ "${HAM_PHASE_OUTCOME:-}" = git-credential-refresh-failed ]; then
+    ham_release_merge_lease || return 1
+    return 76
+  fi
   local ham_rebase_from="$POST_REMEDIATION_SHA" ham_rebase_base ham_async_result=0 ham_rebase_ci_deadline=""
   if [ "${1:-}" = --ci-retry ]; then ham_rebase_ci_deadline="${HAM_REMOTE_CI_DEADLINE:-}"; fi
   if ! ham_capture_current_base_sha; then
+    if [ "${HAM_PHASE_OUTCOME:-}" = git-credential-refresh-failed ]; then
+      ham_release_merge_lease || return 1
+      return 76
+    fi
     HAM_PHASE_OUTCOME=rebase-base-unavailable
     ham_release_merge_lease || return 1
     return 1
@@ -775,7 +804,7 @@ ham_rebase_head() {
     HAM_PUSHED_HEAD="$POST_REMEDIATION_SHA"
     export HAM_PUSHED_FROM_HEAD HAM_PUSHED_HEAD
     "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-progress.mjs" remediation-pushed || true
-    if ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-pushed-attestation.mjs \
+    if ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-pushed-attestation.mjs \
       <<REPO>> <<PR_NUMBER>> "$HAM_PUSHED_FROM_HEAD" "$HAM_PUSHED_HEAD"; then
       HAM_PHASE_OUTCOME=pushed-attestation-unavailable
       printf -v HAM_NO_MERGE_NOTE '%s\nHAM-Base-Head: %s\nHAM-Pushed-Head: %s\nHAM-CI-Validated: false' \
@@ -795,10 +824,10 @@ ham_rebase_head() {
     || ! git diff --quiet || ! git diff --cached --quiet \
     || ! ham_bounded_git_sync "$POST_REMEDIATION_SHA" \
     || ! git checkout --detach "$POST_REMEDIATION_SHA" \
-    || ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 120 git submodule update --recursive \
+    || ! ham_bounded_submodule_sync \
     || [ "$(git rev-parse HEAD)" != "$POST_REMEDIATION_SHA" ]; then
     echo "HAM hard-blocker: cannot sync scratch checkout to the server-rebased head" >&2
-    HAM_PHASE_OUTCOME=rebased-head-sync-failed
+    if [ "${HAM_PHASE_OUTCOME:-}" != git-credential-refresh-failed ]; then HAM_PHASE_OUTCOME=rebased-head-sync-failed; fi
     ham_release_merge_lease || return 1
     return 1
   fi
@@ -910,6 +939,10 @@ if ham_capture_current_base_sha; then
     HAM_REBASED_ONTO_BASE_SHA="$HAM_CAPTURED_BASE_SHA"
   fi
 else
+  if [ "${HAM_PHASE_OUTCOME:-}" = git-credential-refresh-failed ]; then
+    ham_release_merge_lease || return 1
+    return 76
+  fi
   HAM_CURRENT_BASE_SHA=""
   HAM_REBASED_ONTO_BASE_SHA=""
   HAM_FORCE_REVALIDATION=1

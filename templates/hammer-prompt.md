@@ -219,6 +219,12 @@ export HAM_ROOT_DIR='<<ROOT_DIR>>' HAM_HQ_ROOT='<<HQ_ROOT>>' HAM_HQ_OWNER='<<HQ_
 export HAM_AUDIT_PATH='<<AUDIT_PATH>>' HAM_REVIEWER='<<REVIEWER>>'
 export HAM_AMA_TRAILERS=<<AMA_TRAILERS_SHELL>>
 ham_gh() { "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/metered-gh.mjs" exec-hammer "$@"; }
+ham_git() {
+  local ham_git_exit=0
+  "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/metered-gh.mjs" exec-git "$@" || ham_git_exit=$?
+  if [ "$ham_git_exit" -eq 76 ]; then HAM_PHASE_OUTCOME=git-credential-refresh-failed; fi
+  return "$ham_git_exit"
+}
 ham_pr() { "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-pr-read.mjs" "$HAM_REPO" "$HAM_PR_NUMBER" "$@"; }
 HAM_INPUTS
 source "<<RUN_DIR>>/inputs.sh"
@@ -251,7 +257,10 @@ values in the same shell for the merge audit.
 
 Use `source "<<RUN_DIR>>/hammer-merge.sh" --wait-ci` after publication and before the predicate for bounded exact-head required-check waits.
 GitHub calls: `ham_gh` or `ham_pr`. No `--watch` or polling loops.
-Helpers refresh per call, then refresh and retry once on a credential rejection.
+API helpers refresh per call, then refresh and retry once on a credential rejection.
+Git inherits the controller's refresh-on-request credential helper; use `ham_git`
+for remote operations and `ham_bounded_git_sync` for bounded fetches. A failed
+Git credential mint stops with retryable `git-credential-refresh-failed`.
 Never read or print raw token variables.
 
 For each phase, in that shell, set `PHASE` to `hammer-verify-head`, `hammer-publish`, or `hammer-merge` and run:
@@ -1150,7 +1159,7 @@ At most one re-author per run, in the same persistent lease shell:
    trailer are byte-identical (compare the entire saved commit message), and
    the parent is unchanged. If verification fails, stop without pushing.
 3. Push in the foreground with
-   `git push origin "HEAD:refs/heads/$branch" --force-with-lease="$branch:$old_head"`,
+   `ham_git push origin "HEAD:refs/heads/$branch" --force-with-lease="$branch:$old_head"`,
    where `old_head` is the exact saved SHA, never a refreshed tracking ref.
    A failed lease push stops the repair; never retry with a weaker lease.
 4. Re-run `node <<ROOT_DIR>>/bin/hammer-context.mjs <<REPO>> <<PR_NUMBER>>` once.

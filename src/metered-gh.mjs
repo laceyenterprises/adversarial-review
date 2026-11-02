@@ -1,4 +1,4 @@
-import { hammerGitOptions, withHammerToken, withHammerTokenSync } from './hammer-token.mjs';
+import { withHammerGit, withHammerGitSync, withHammerToken, withHammerTokenSync } from './hammer-token.mjs';
 import { readAdmissionChecks } from './watcher-admission-read-cache.mjs';
 import { observeSynchronousChild } from './watcher-latency.mjs';
 // The only gh execution seam. GH_DEBUG captures headers even for high-level
@@ -145,7 +145,7 @@ async function finish(result, { failed = false, resource = 'core', credential = 
 function meteredExecFile(execFileImpl = execFileAsync, command, args, options = {}) {
   if (command !== 'gh') {
     if (command === 'git' && options.hammerToken) {
-      return withHammerToken(active => execFileImpl(command, args, hammerGitOptions(active)), options);
+      return withHammerGit(active => execFileImpl(command, args, active), options);
     }
     return execFileImpl(command, args, options);
   }
@@ -197,7 +197,7 @@ function meteredExecFileSync(execFileImpl, command, args, options = {}) {
 function executeFileSync(execFileImpl, command, args, options = {}) {
   if (command !== 'gh') {
     if (command === 'git' && options.hammerToken) {
-      return withHammerTokenSync(active => execFileImpl(command, args, hammerGitOptions(active)), options);
+      return withHammerGitSync(active => execFileImpl(command, args, active), options);
     }
     return execFileImpl(command, args, options);
   }

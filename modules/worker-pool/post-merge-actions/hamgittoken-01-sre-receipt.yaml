@@ -1,0 +1,19 @@
+# Operator-owned deployment and organic receipt; no automated live action.
+operator_steps:
+  - description: >-
+      After merge, SRE floats the owned submodule and bounces the closer
+      processes through the existing deployment procedure. Retain a natural
+      closer run lasting longer than one hour whose verify-head base fetch
+      succeeds, then confirm zero subsequent Invalid username or token
+      occurrences in fetch-base.stderr. Record the loaded revision and receipt
+      in the companion incident report before acknowledging completion.
+      Workers must not restart processes, dispatch runs, change labels or edit
+      host configuration or credential stores. The command only displays the
+      handoff and does not satisfy the receipt.
+    run_as: designated SRE operator
+    command: >-
+      /usr/bin/printf '%s\n' 'HAMGITTOKEN-01: follow the SRE deployment and organic receipt in docs/RUNBOOK-ama-closure.md; retain a successful verify-head base fetch from a closer lasting over one hour and confirm no subsequent expired-token authentication errors before acknowledgement.'
+actions: []
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

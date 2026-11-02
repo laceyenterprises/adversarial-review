@@ -5,7 +5,12 @@ export HAM_AUDIT_COMMENT_BODY
 export HAM_ROOT_DIR='<<ROOT_DIR>>'
 # HAMMERTRIM-01: rendered by bin/hammer-procedure.mjs with trusted dispatch values.
 ham_gh() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec-hammer "$@"; }
-ham_git() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec-git "$@"; }
+ham_git() {
+  local ham_git_exit=0
+  "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec-git "$@" || ham_git_exit=$?
+  if [ "$ham_git_exit" -eq 76 ]; then HAM_PHASE_OUTCOME=git-credential-refresh-failed; fi
+  return "$ham_git_exit"
+}
 ham_pr() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-pr-read.mjs <<REPO>> <<PR_NUMBER>> "$@"; }
 
 ham_entitled_gh() { ham_gh "$@"; }
@@ -174,11 +179,15 @@ fi
 # HAMNOREREVIEW-01: validation covers the whole built head. A missing round
 # record widens responsibility to the review's own proven head, never review.
 ham_prove_audit_range() {
+  local ham_range_exit=0
   /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-head-context.mjs \
     <<REPO>> <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" --pr <<PR_URL>> \
-    > "<<RUN_DIR>>/range.json"
+    > "<<RUN_DIR>>/range.json" || ham_range_exit=$?
+  if [ "$ham_range_exit" -eq 76 ]; then HAM_PHASE_OUTCOME=git-credential-refresh-failed; fi
+  return "$ham_range_exit"
 }
 if ! ham_is_full_sha "${HAM_BASE_HEAD:-}" || ! ham_prove_audit_range; then
+  if [ "${HAM_PHASE_OUTCOME:-}" = git-credential-refresh-failed ]; then ham_publish_abort 76; return 76; fi
   if ! ham_is_full_sha "<<REVIEWED_SHA>>"; then
     HAM_PHASE_OUTCOME=reviewed-head-unavailable
     HAM_NO_MERGE_NOTE="HAM closing status — no merge. Reviewed starting base SHA was invalid or unavailable; released for the next hammer pass."
@@ -334,6 +343,8 @@ if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" = "1" ]; then
     "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-progress.mjs" remediation-pushed || true
   fi
   if [ -n "$HAM_API_KNOWN_PUSHED_HEAD" ]; then
+    HAM_PUSHED_HEAD="$HAM_API_KNOWN_PUSHED_HEAD"
+    export HAM_PUSHED_FROM_HEAD HAM_PUSHED_HEAD
     if ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-pushed-attestation.mjs \
       <<REPO>> <<PR_NUMBER>> "$HAM_PUSHED_FROM_HEAD" "$HAM_API_KNOWN_PUSHED_HEAD"; then
       HAM_PHASE_OUTCOME=pushed-attestation-unavailable
@@ -345,8 +356,9 @@ if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" = "1" ]; then
       return 1
     fi
     HAM_PHASE_OUTCOME=published-head-sync-failed
-    HAM_PUSHED_HEAD="$HAM_API_KNOWN_PUSHED_HEAD"
-    export HAM_PUSHED_FROM_HEAD HAM_PUSHED_HEAD
+    if [ "$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.phaseOutcome // empty')" = git-credential-refresh-failed ]; then
+      HAM_PHASE_OUTCOME=git-credential-refresh-failed
+    fi
     printf -v HAM_NO_MERGE_NOTE '%s\nHAM-Base-Head: %s\nHAM-Pushed-Head: %s\nHAM-CI-Validated: false' \
       'HAM closing status — no merge. API publication and provenance succeeded, but scratch synchronization failed; preserve the remote head. Stop this run without another push or source review.' \
       "$HAM_PUSHED_FROM_HEAD" "$HAM_PUSHED_HEAD"
@@ -355,6 +367,11 @@ if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" = "1" ]; then
   fi
 
   if [ "$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.route')" = re-review ]; then
+    if [ "$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.phaseOutcome // empty')" = git-credential-refresh-failed ]; then
+      HAM_PHASE_OUTCOME=git-credential-refresh-failed
+      if declare -F ham_release_merge_lease >/dev/null; then ham_release_merge_lease; fi
+      return 76
+    fi
     # Preserve the existing lease-protected git route. Validation and the audit
     # cover the full reviewed-to-built range when starting-base proof is absent.
     HAM_API_PUBLISH_FALLBACK=1

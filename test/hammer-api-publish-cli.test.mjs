@@ -42,6 +42,7 @@ const fail = message => { process.stderr.write(message); process.exit(1); };
 if (scenario === 'recover' && ['pr', 'mutation', 'verification', 'fetch-before', 'fetch-published'].includes(key) && attempt === 1)
   fail(command === 'git' ? 'fatal: early EOF' : 'TLS handshake timeout');
 if (key === target) {
+  if (scenario === 'credential') fail('git-credential-refresh-failed\\n');
   if (scenario === 'exhaust') fail('HTTP 503 Service Unavailable');
   if (scenario === 'permanent') fail(command === 'git' ? 'fatal: Authentication failed' : 'HTTP 403 Forbidden');
   if (scenario === 'ambiguous' && attempt === 1) fail('TLS handshake timeout');
@@ -65,9 +66,16 @@ if (command === 'gh') {
 }
 `, { mode: 0o755 });
   }
+  const fixtureEnv = { ...process.env, PATH: `${root}:${process.env.PATH}` };
+  for (const name of [
+    'GH_TOKEN', 'GITHUB_TOKEN', 'HAMMER_LACEY_GH_TOKEN', 'MERGE_AGENT_GH_TOKEN',
+    'HAMMER_LACEY_GH_TOKEN_EXPIRES_AT', 'MERGE_AGENT_GH_TOKEN_EXPIRES_AT',
+    'HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND', 'MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND',
+    'HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND',
+  ]) delete fixtureEnv[name];
   return {
     run: async (env = {}) => JSON.parse((await exec(process.execPath, [cli, 'fixture/repo', '1'], {
-      env: { ...process.env, PATH: `${root}:${process.env.PATH}`, ...env }, timeout: 20000,
+      env: { ...fixtureEnv, ...env }, timeout: 20000,
     })).stdout),
     calls: () => JSON.parse(readFileSync(callsFile, 'utf8')),
   };
@@ -79,8 +87,10 @@ test('API publisher refreshes the entitled credential for Git fetch as well as G
     HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: 'printf synthetic-refreshed-hammer',
     GH_TOKEN: 'synthetic-ambient-worker' })).route, 'published');
   for (const call of f.calls().filter(call => ['pr', 'mutation', 'verification'].includes(call.key) || call.key.startsWith('fetch-'))) {
-    assert.equal(call.freshCredential, true, call.key);
-    if (call.key.startsWith('fetch-')) assert.equal(call.helper, '!gh auth git-credential');
+    if (call.key.startsWith('fetch-')) {
+      assert.equal(call.freshCredential, false, 'Git receives no token in its environment');
+      assert.match(call.helper, /hammer-git-credential/);
+    } else assert.equal(call.freshCredential, true, call.key);
   }
 });
 
@@ -111,6 +121,17 @@ for (const target of ['pr', 'mutation', 'verification', 'fetch-before', 'fetch-p
         'scratch fetch failure must retain the verified API publication for provenance');
     });
   }
+}
+
+for (const target of ['fetch-before', 'fetch-published']) {
+  test(`HAMGITTOKEN-01: ${target} refresh failure keeps its phase and publication provenance`, async t => {
+    const f = fixture(t, 'credential', target);
+    const result = await f.run();
+    assert.equal(result.phaseOutcome, 'git-credential-refresh-failed');
+    assert.equal(f.calls().filter(call => call.key === target).length, 1);
+    assert.ok(!f.calls().some(call => call.key === 'reset'));
+    assert.equal(result.pushedHead, target === 'fetch-published' ? 'published' : undefined);
+  });
 }
 
 test('an ambiguous mutation retains the original CAS and rejects unsafe publication', async t => {
@@ -184,8 +205,8 @@ console.log(JSON.stringify({ head: { ref: 'worker', sha: ${JSON.stringify(remote
   assert.equal((await git('ls-remote', 'origin', 'refs/heads/worker')).stdout.split(/\s/)[0], remoteHead);
 });
 
-for (const route of ['api', 'git-explicit', 'git-tracking', 'api-timeout', 'api-reset', 'api-tree', 'api-recover']) {
-  const stops = ['api-timeout', 'api-reset', 'api-tree'].includes(route);
+for (const route of ['api', 'git-explicit', 'git-tracking', 'api-timeout', 'api-reset', 'api-tree', 'api-recover', 'api-credential', 'api-attestation']) {
+  const stops = ['api-timeout', 'api-reset', 'api-tree', 'api-credential', 'api-attestation'].includes(route);
   test(stops ? `LAC-2086: ${route} preserves publication and stops without a stale push or review`
     : `HAMPREDICATE-01: ${route} publication and rendered audit pass the whole CLI predicate`, async t => {
     const apiRoute = route.startsWith('api');
@@ -223,7 +244,8 @@ for (const route of ['api', 'git-explicit', 'git-tracking', 'api-timeout', 'api-
     // A local fake hosting service reconstructs the API tree from the actual
     // mutation payload. Every git operation uses the temporary local remote.
     writeFileSync(join(bin, 'gh'), `#!${process.execPath}
-const fs = require('node:fs'), cp = require('node:child_process');
+import fs from 'node:fs';
+import cp from 'node:child_process';
 const work = ${JSON.stringify(work)}, remote = ${JSON.stringify(remote)}, base = ${JSON.stringify(base)};
 const commentsPath = ${JSON.stringify(commentsPath)}, callsPath = ${JSON.stringify(callsPath)};
 const args = process.argv.slice(2), route = ${JSON.stringify(route)};
@@ -307,7 +329,7 @@ else if (args[1] === 'graphql') {
     const faultLoader = join(root, 'scratch-fault.mjs');
     const failureChild = join(root, 'scratch-child.mjs');
     writeFileSync(failureChild, `
-process.stderr.write((process.argv[2] === 'timeout' ? 'scratch fetch timed out' : 'scratch reset refused') + '\\n' + 'repeated finding\\n'.repeat(1000));
+process.stderr.write((process.argv[2] === 'credential' ? 'git-credential-refresh-failed' : process.argv[2] === 'timeout' ? 'scratch fetch timed out' : 'scratch reset refused') + '\\n' + 'repeated finding\\n'.repeat(1000));
 if (process.argv[2] === 'timeout') setTimeout(() => {}, 3000);
 else process.exitCode = 7;
 `);
@@ -324,6 +346,9 @@ cp.execFileSync = (command, args, options) => {
     appendFileSync(${JSON.stringify(scratchCalls)}, JSON.stringify(args) + '\\n');
     if (args[0] === 'fetch' && args[2] !== ${JSON.stringify(reviewed)}) {
       fetches++;
+      if (['api-credential', 'api-attestation'].includes(route)) {
+        return original(process.execPath, [${JSON.stringify(failureChild)}, 'credential'], options);
+      }
       if (route === 'api-timeout' || (route === 'api-recover' && fetches === 1)) {
         return original(process.execPath, [${JSON.stringify(failureChild)}, 'timeout'], { ...options, timeout: 100 });
       }
@@ -343,6 +368,8 @@ if [[ "$1" == */bin/merge-lease.mjs ]]; then
   echo '{"holder":{"leaseId":"test-lease","holderPr":${pr},"pastDeadline":false,"holderPidLive":true,"ageSeconds":1}}'
 elif [[ "$1" == */bin/hammer-api-publish.mjs ]]; then
   exec ${JSON.stringify(process.execPath)} --import ${JSON.stringify(faultLoader)} "$@"
+elif [[ "$1" == */bin/hammer-pushed-attestation.mjs && ${JSON.stringify(route)} == api-attestation ]]; then
+  exit 1
 else
   exec ${JSON.stringify(process.execPath)} "$@"
 fi
@@ -366,9 +393,9 @@ fi
     // credential and inline helper through Git's ordinary pre-push hook.
     writeFileSync(join(work, '.git', 'hooks', 'pre-push'), `#!/bin/sh
 printf 'push\\n' >> ${JSON.stringify(pushAttempts)}
-[ "$GH_TOKEN" = synthetic-token ] || exit 71
-[ "$GITHUB_TOKEN" = synthetic-token ] || exit 72
-[ "$GIT_CONFIG_VALUE_1" = '!gh auth git-credential' ] || exit 73
+[ -z "$GH_TOKEN" ] || exit 71
+[ -z "$GITHUB_TOKEN" ] || exit 72
+case "$GIT_CONFIG_VALUE_1" in *hammer-git-credential.mjs*) ;; *) exit 73 ;; esac
 `, { mode: 0o755 });
     const run = (command, args, extra = {}) => exec(command, args, { cwd: work, env, timeout: 20000, ...extra });
     const publication = await run('/bin/bash', ['-c', `
@@ -396,16 +423,18 @@ exit "$rc"
       assert.equal(result.fallbackHead, remoteHead);
       assert.ok(result.reason.length <= 512);
       assert.doesNotMatch(result.reason, /Maximum call stack|repeated finding/);
-      assert.match(result.reason, route === 'api-timeout' ? /ETIMEDOUT/ : route === 'api-reset' ? /scratch reset refused/ : /fetched tree mismatch/);
-      assert.match(publication.stdout, new RegExp(`STATE=1\\|published-head-sync-failed\\|0\\|${reviewed}\\|${remoteHead}\\|0`));
+      assert.match(result.reason, ['api-credential', 'api-attestation'].includes(route) ? /git-credential-refresh-failed/ : route === 'api-timeout' ? /ETIMEDOUT/ : route === 'api-reset' ? /scratch reset refused/ : /fetched tree mismatch/);
+      assert.match(publication.stdout, new RegExp(`STATE=1\\|${route === 'api-attestation' ? 'pushed-attestation-unavailable' : route === 'api-credential' ? 'git-credential-refresh-failed' : 'published-head-sync-failed'}\\|0\\|${reviewed}\\|${remoteHead}\\|0`));
       assert.match(publication.stdout, new RegExp(`HAM-Base-Head: ${reviewed}\nHAM-Pushed-Head: ${remoteHead}\nHAM-CI-Validated: false`));
       assert.ok(publication.stdout.length < 2500, publication.stdout);
       assert.doesNotMatch(publication.stderr, /repeated finding|Maximum call stack/);
       assert.ok(publication.stderr.length < 1024, publication.stderr);
-      const comments = JSON.parse(readFileSync(commentsPath, 'utf8'));
-      assert.equal(comments.length, 1, 'only publication provenance is posted');
+      const comments = existsSync(commentsPath) ? JSON.parse(readFileSync(commentsPath, 'utf8')) : [];
+      assert.equal(comments.length, route === 'api-attestation' ? 0 : 1, 'only publication provenance is posted');
+      if (comments.length) {
       assert.match(comments[0].body, new RegExp(`HAM-Base-Head: ${reviewed}\nHAM-Pushed-Head: ${remoteHead}`));
       assert.doesNotMatch(comments[0].body, /HAM-Validated-Head:/);
+      }
       assert.equal(existsSync(pushAttempts), false, 'no fallback force push may run');
       const calls = JSON.parse(readFileSync(callsPath, 'utf8'));
       assert.equal(calls.filter(args => args[1] === 'graphql' && args.includes('--input')).length, 1);

@@ -1,6 +1,7 @@
 import { reportHammerEarlyFailure } from './ama/hammer-terminal-audit.mjs';
 import { execFileSync } from 'node:child_process';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { fileURLToPath } from 'node:url';
 
 const ENTITLED_VARS = ['HAMMER_LACEY_GH_TOKEN', 'MERGE_AGENT_GH_TOKEN'];
 
@@ -77,13 +78,47 @@ function tokenContext(options) {
 // select an ambient worker identity ahead of the entitled gh credential.
 export function hammerGitOptions(options) {
   const env = { ...(options.env || process.env) };
+  const { variable, command } = tokenContext(options);
+  // Git and hooks must not inherit a launch token. Only the credential helper
+  // mints it, in memory, when the transport actually requests authentication.
+  for (const key of ['GH_TOKEN', 'GITHUB_TOKEN', ...ENTITLED_VARS]) delete env[key];
+  for (const key of [...ENTITLED_VARS, 'HQ_ENTITLEMENT_GH_TOKEN']) delete env[`${key}_REFRESH_COMMAND`];
+  if (command) env[`${ENTITLED_VARS.includes(variable) ? variable : 'HQ_ENTITLEMENT_GH_TOKEN'}_REFRESH_COMMAND`] = command;
+  for (const key of Object.keys(env)) if (/^GIT_TRACE|^GIT_CURL_VERBOSE$/.test(key)) delete env[key];
+  env.GIT_TERMINAL_PROMPT = '0';
+  env.GIT_ASKPASS = '/usr/bin/false';
   const count = Number(env.GIT_CONFIG_COUNT || 0);
   env.GIT_CONFIG_COUNT = String(count + 2);
   env[`GIT_CONFIG_KEY_${count}`] = 'credential.helper';
   env[`GIT_CONFIG_VALUE_${count}`] = '';
   env[`GIT_CONFIG_KEY_${count + 1}`] = 'credential.helper';
-  env[`GIT_CONFIG_VALUE_${count + 1}`] = '!gh auth git-credential';
+  const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
+  env[`GIT_CONFIG_VALUE_${count + 1}`] = `!${quote(process.execPath)} ${quote(fileURLToPath(new URL('../bin/hammer-git-credential.mjs', import.meta.url)))}`;
   return { ...options, env, stdio: 'pipe' };
+}
+
+export const GIT_CREDENTIAL_REFRESH_FAILED = 'git-credential-refresh-failed';
+export const GIT_CREDENTIAL_REFRESH_EXIT = 76;
+export function classifyHammerGitResult(result) {
+  if (String(result?.stderr || '').split(/\r?\n/).includes(GIT_CREDENTIAL_REFRESH_FAILED)) {
+    result.code = GIT_CREDENTIAL_REFRESH_EXIT;
+    result.status = GIT_CREDENTIAL_REFRESH_EXIT;
+    result.gitCredentialRefreshFailed = true;
+  }
+  return result;
+}
+
+// Keep the existing returned-error redaction boundary for inherited secrets,
+// without preparing a token in Git's environment or retrying a failed mint.
+export async function withHammerGit(execute, options) {
+  const session = hammerTokenSession(options);
+  try { return session.redact(classifyHammerGitResult(await execute(hammerGitOptions(options)))); }
+  catch (error) { throw session.redact(classifyHammerGitResult(error)); }
+}
+export function withHammerGitSync(execute, options) {
+  const session = hammerTokenSession(options);
+  try { return session.redact(classifyHammerGitResult(execute(hammerGitOptions(options)))); }
+  catch (error) { throw session.redact(classifyHammerGitResult(error)); }
 }
 
 export function hammerTokenSession(options = {}) {
@@ -182,6 +217,17 @@ export function hammerTokenSession(options = {}) {
   }
   return {
     managed,
+    // Credential protocol callers require a fresh mint even if a held token
+    // claims a distant expiry. Never use the API path's held-token fallback.
+    gitCredential() {
+      try {
+        if (!command) throw failure('unavailable (no launch refresh command)');
+        return refresh()?.token;
+      } catch {
+        reportHammerEarlyFailure(GIT_CREDENTIAL_REFRESH_FAILED, { env: credentialEnv });
+        throw new Error(GIT_CREDENTIAL_REFRESH_FAILED);
+      }
+    },
     // Exercise the same refresh/parser without held-token fallback or a GitHub
     // request. Only this allowlisted projection may cross the check boundary.
     checkRefresh(now = Date.now) {

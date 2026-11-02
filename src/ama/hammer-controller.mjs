@@ -16,6 +16,7 @@ import { createControllerCensus, nativeControllerIdentity } from '../controller-
 import { resolveHqRoot } from '../hq-root.mjs';
 import { readAmaAuditEntry } from './audit.mjs';
 import { HAMMER_RETRYABLE_READ_OUTCOMES } from './hammer-phase-outcome.mjs';
+import { hammerGitOptions } from '../hammer-token.mjs';
 
 // A slow or failed ledger read is not a cancellation. Only a readable terminal,
 // parked or foreign row stops a round at once; reads that fail stop it only
@@ -267,7 +268,7 @@ export async function runHammerController(script, args = [], {
   const token = randomUUID();
   const recordPath = join(env.HAM_RUN_DIR, `controller-${token}.json`);
   const startedAt = new Date().toISOString();
-  const childEnv = { ...env, HAM_CONTROLLER_PID: String(process.pid), HAM_CONTROLLER_TOKEN: token,
+  const childEnv = { ...hammerGitOptions({ env }).env, HAM_CONTROLLER_PID: String(process.pid), HAM_CONTROLLER_TOKEN: token,
     HAM_CONTROLLER_RECORD: recordPath, HAM_CONTROLLER_FD: '4' };
   // Gate exec on durable registration; no lease or validator can run first.
   const child = spawnImpl('/bin/bash', ['-c',

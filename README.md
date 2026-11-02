@@ -4459,6 +4459,28 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- HAMGITTOKEN-01 final rescue: the outer 120-second submodule-sync bound owns its child timeout and waits for lock cleanup; bounded snapshot and publication proofs accept unset or empty `HAM_NODE_BIN` consistently. Credential refresh classification and exact-head merge predicates remain intact.
+
+- Preserve the API-published head and starting head before attestation so a failed attestation retains exact publication provenance for closure recovery; cover the failure with an offline regression.
+
+- **HAMGITTOKEN-01 test fixture:** Inject the metered Git execution seam into
+  rebased-head coverage tests and assert Hammer credential mode. This restores
+  offline coverage of bounded fetch retries after the Git wrapper change.
+  Isolate CLI credential fixtures from worker credentials and use explicit ESM
+  imports in the API publication fixture for Node 26 compatibility.
+
+- **HAMGITTOKEN-01 final remediation:** Bounded rebased-head submodule sync uses
+  the Git outcome classifier, preserving `git-credential-refresh-failed` before
+  lease release. Bounded fetches accept an unset or empty `HAM_NODE_BIN`, and the
+  credential helper is executable. Offline regressions also verify that API
+  publication already preserves its pushed head and provenance after a refresh
+  failure. Existing lifecycle states, retry budgets and smoke promises are unchanged.
+
+- **HAMGITTOKEN-01:** Closer Git transports mint credentials on request through
+  the existing launch refresh command. Base fetches, publication, history reads
+  and controller descendants share the helper; mint failures retain retry
+  ownership as `git-credential-refresh-failed`.
+
 - CONFLICTHOTSPOT-01 final comment-only remediation: root README change notes
   remain required in this repository; per-ticket fragments apply to module
   documentation. The hammer prompt explicitly creates or updates module fragments.

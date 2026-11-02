@@ -1,0 +1,118 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { mkdtemp, mkdir, readdir, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { collect } from '../src/merge-lane-inventory.mjs';
+const OPERATOR_HOLD_LABELS = ['no-merge-hold', 'do-not-merge', 'merge-agent-skip'];
+
+test('one PR list invocation per watched repository, actual review hold policy', async () => {
+  const calls = [];
+  const result = await collect('unused-code', 'unused-data', {
+    holdLabels: OPERATOR_HOLD_LABELS,
+    config: { org: 'org', repos: ['org/explicit'], excludeRepos: ['excluded'] },
+    run: async (args) => {
+      calls.push(args);
+      if (args[0] === 'api') return [[
+        { name: 'repo', full_name: 'org/repo' },
+        { name: 'archived', full_name: 'org/archived', archived: true },
+        { name: 'excluded', full_name: 'org/excluded' },
+        { name: 'missing-full-name' },
+        { name: 'null-full-name', full_name: null },
+        { name: 'empty-full-name', full_name: '' },
+        null,
+      ]];
+      return [];
+    },
+  });
+  assert.deepEqual(Object.keys(result.repositories), ['org/explicit', 'org/repo']);
+  assert.deepEqual(result.holdLabels, OPERATOR_HOLD_LABELS);
+  assert.equal(calls.filter(args => args[0] === 'pr').length, 2);
+  assert.deepEqual(result.errors, []);
+  assert.ok(calls.every(args => args[0] === 'api' || args[1] === 'list'));
+});
+
+test('GitHub errors and truncated/malformed reads remain probe errors', async () => {
+  for (const response of [null, Array(10000).fill({}), new Error('GitHub unavailable')]) {
+    const result = await collect('unused-code', 'unused-data', { holdLabels: [], config: { repos: ['org/repo'] },
+      run: async () => { if (response instanceof Error) throw response; return response; } });
+    assert.equal(result.errors.length, 1);
+    assert.deepEqual(result.repositories, {});
+  }
+});
+
+test('discovery failure stays visible while explicit repositories are probed', async () => {
+  const result = await collect('unused-code', 'unused-data', { holdLabels: [], config: { org: 'org', repos: ['org/explicit'] },
+    run: async (args) => { if (args[0] === 'api') throw new Error('read failed'); return []; } });
+  assert.equal(result.errors.length, 1);
+  assert.deepEqual(result.repositories, { 'org/explicit': [] });
+});
+
+
+test('boundary reads modules and config from code root with an empty HQ data root', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'pr-age-review-service-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const codeRoot = join(root, 'deploy/tools/adversarial-review');
+  const dataRoot = join(root, 'hq/adversarial-review');
+  await mkdir(join(codeRoot, 'src'), { recursive: true });
+  await mkdir(dataRoot, { recursive: true });
+  await writeFile(join(codeRoot, 'config.json'), JSON.stringify({ repos: ['fixture/repo'] }));
+  await writeFile(join(codeRoot, 'src/operator-hold-labels.mjs'),
+    "export const OPERATOR_HOLD_LABELS = ['Fixture-Hold'];");
+  await writeFile(join(codeRoot, 'src/metered-gh.mjs'), `
+    import assert from 'node:assert/strict';
+    export async function meteredExecFile(subject, executable, args, options) {
+      assert.equal(subject, undefined);
+      assert.equal(executable, 'gh');
+      assert.deepEqual(args.slice(0, 7), ['pr', 'list', '--repo', 'fixture/repo', '--state', 'open', '--limit']);
+      assert.ok(options.timeout >= 60000 && options.timeout <= 360000);
+      assert.equal(options.maxBuffer, 25 * 1024 * 1024);
+      assert.equal(options.env, process.env);
+      return { stdout: JSON.stringify([{ number: 42 }]) };
+    }
+  `);
+  assert.deepEqual(await collect(codeRoot, dataRoot), {
+    holdLabels: ['Fixture-Hold'],
+    repositories: { 'fixture/repo': [{ number: 42 }] },
+    errors: [],
+  });
+  assert.deepEqual(await readdir(dataRoot), []);
+});
+
+
+test('missing code-root config names its expected path without calling GitHub', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'pr-age-missing-config-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const codeRoot = join(root, 'code');
+  const dataRoot = join(root, 'data');
+  await mkdir(join(codeRoot, 'src'), { recursive: true });
+  await mkdir(dataRoot);
+  await writeFile(join(codeRoot, 'src/metered-gh.mjs'), `
+    export async function meteredExecFile() { throw new Error('GitHub must not be called'); }
+  `);
+  await writeFile(join(codeRoot, 'src/operator-hold-labels.mjs'),
+    'export const OPERATOR_HOLD_LABELS = [];');
+  await assert.rejects(collect(codeRoot, dataRoot), error => error.message.includes(join(codeRoot, 'config.json')));
+});
+
+
+test('missing code reports the named root before reading config or calling GitHub', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'pr-age-missing-code-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await assert.rejects(collect(root, join(root, 'missing-data')), {
+    message: `review service code root ${root} has no src/metered-gh.mjs`,
+  });
+});
+
+test('missing hold-label module names the file before reading config or calling GitHub', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'pr-age-missing-holds-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'src'));
+  await writeFile(join(root, 'src/metered-gh.mjs'), `
+    export async function meteredExecFile() { throw new Error('GitHub must not be called'); }
+  `);
+  await assert.rejects(collect(root, join(root, 'missing-data')), {
+    message: `review service code root ${root} has no src/operator-hold-labels.mjs`,
+  });
+});
+

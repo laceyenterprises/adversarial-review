@@ -128,9 +128,10 @@
       "id": "next-action-shadow",
       "title": "Next Action Shadow Observations",
       "path": "docs/data-model/next-action-shadow.md",
-      "store": "<watcher root>/data/next-action-shadow/disagreements.jsonl and .jsonl.1",
+      "store": "<watcher root>/data/next-action-shadow/{disagreements,observations}.jsonl, their .1 rotations, and episodes.json",
       "schemaSurface": "src/pr-next-action-shadow.mjs",
-      "relatedSchemaSurfaces": ["src/pr-next-action.mjs", "src/pr-next-action-consumer.mjs", "src/next-action-disagreements.mjs", "src/ama/closure-next-action.mjs", "src/ama/closure-owner.mjs"],
+      "relatedSchemaSurfaces": ["src/pr-next-action.mjs", "src/pr-next-action-consumer.mjs", "src/next-action-disagreements.mjs", "src/ama/closure-next-action.mjs", "src/ama/closure-owner.mjs", "src/merge-lane-journal.mjs", "src/merge-lane-observation.mjs", "src/merge-lane-status.mjs"],
+      "mergeLaneEvidence": "MLR-01: episode and status keys prefer subjectKey over repo#prNumber. Detached/unreadable refs leave branch null while status inspection continues; Git failures preserve verified process liveness. Terminal dirty custody is head-bound (legacy missing head accepted) and cannot override a current live owner. Existing v1 fields and lifecycle states are unchanged.",
       "owner": "NXA-02 closure observation and rollout owner"
     },
     {

@@ -35,6 +35,7 @@ Usage:
   adversarial-review duplicate-family abandon <family-id> --reason <text>
   adversarial-review handoff status [--repo <owner/repo>] [--window <24h>] [--root <dir>] [--json]
   adversarial-review handoff trace <owner/repo#pr> [--root <dir>] [--json]
+  adversarial-review merge-lane status [--root <dir>] [--json]
   adversarial-review runtime status [--root <dir>] [--window <24h>] [--json]
   adversarial-review sdk-cutover check --repo <owner/repo> --pr <number> [--json]
   adversarial-review finalization shadow-report [--days <7>] [--root <dir>] [--json]
@@ -193,6 +194,10 @@ async function main(argv, io = {}) {
   }
   if (command === 'handoff') {
     return handoffMain(rest, io);
+  }
+  if (command === 'merge-lane') {
+    const { mergeLaneMain } = await import('./merge-lane-status.mjs');
+    return mergeLaneMain(rest, io);
   }
   if (command === 'runtime') {
     return runtimeMain(rest, io);

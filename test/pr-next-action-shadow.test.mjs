@@ -8,7 +8,6 @@ import { noteNextActionLegacy, resolveSharedNextAction, setNextActionShadowSinkF
   NEXT_ACTION_OVERDUE_ALERTS_ENV } from '../src/pr-next-action-shadow.mjs';
 import { closureOwnerShadowEvidence, launchSource, settleNextActionShadowsForTesting,
   shadowNextActionLater } from '../src/pr-next-action-consumer.mjs';
-import { observeClosureWait } from '../src/ama/closure-wait.mjs';
 import { classifyClosureOwnership } from '../src/merge-agent-rescue-classifier.mjs';
 import { handlePostedReviewRow } from '../src/posted-review-row.mjs';
 import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
@@ -267,35 +266,14 @@ test('the NXA-01 ledger observation maps to launch evidence: exit zero on an ope
   assert.deepEqual(launchSource({ state: 'error' }, lease, cap).state, 'error');
 });
 
-test('overdue alerts use the closure-wait path only when enabled, and a failed delivery retries once', async (t) => {
-  const rootDir = mkdtempSync(join(tmpdir(), 'nxa-shadow-'));
-  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const snapshot = base({ subjectKey: 'example/synthetic#5' });
-  const now = () => Date.parse('2026-01-01T02:00:00.000Z');
-  let observed = 0;
-  await shadowNextAction({ source: 'synthetic', snapshot, sink: () => {}, env, rootDir, repo: 'example/synthetic', prNumber: 5,
-    now, observeOverdueImpl: async () => { observed++; } });
-  assert.equal(observed, 0, 'alerts are off unless the rollout owner enables them');
-  setNextActionShadowSinkForTesting(null);
-  const pages = [];
-  let fail = true;
-  const pageImpl = async (text) => {
-    if (fail) { fail = false; throw new Error('synthetic transport refusal'); }
-    pages.push(text);
-  };
-  const enabled = { ...env, [NEXT_ACTION_OVERDUE_ALERTS_ENV]: '1' };
-  const deliver = () => shadowNextAction({ source: 'synthetic', snapshot, sink: () => {}, env: enabled, rootDir,
-    repo: 'example/synthetic', prNumber: 5, now, observeOverdueImpl: observeClosureWait, overduePageImpl: pageImpl });
-  const refused = await deliver();
-  assert.equal(refused.alert.error.message, 'synthetic transport refusal');
-  const delivered = await deliver();
-  assert.equal(delivered.alert.notify, true);
-  assert.equal(pages.length, 1);
-  assert.match(pages[0], /NXA-02 next action overdue: action=review actor=reviewer reason=stale-verdict head=aaaaaaaaaaaa age_minutes=115/);
-  setNextActionShadowSinkForTesting(null);
-  const repeat = await deliver();
-  assert.equal(repeat.alert.notify, false, 'closure-wait debounces a delivered page');
-  assert.equal(pages.length, 1);
+test('PRAGE owns paging even when the legacy overdue-alert switch is enabled', async () => {
+  let pages = 0;
+  const outcome = await shadowNextAction({ source: 'synthetic', snapshot: base(), sink: () => {},
+    env: { ...env, [NEXT_ACTION_OVERDUE_ALERTS_ENV]: '1' }, rootDir: 'unused', repo: 'example/synthetic', prNumber: 5,
+    now: () => Date.parse('2026-01-01T02:00:00Z'), observeOverdueImpl: () => { pages++; } });
+  assert.ok(outcome.overdue);
+  assert.equal(outcome.alert, null);
+  assert.equal(pages, 0);
 });
 
 test('rescue projection preserves the shared answer with a failing shadow sink', async () => {

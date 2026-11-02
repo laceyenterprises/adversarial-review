@@ -111,3 +111,19 @@ names the reviewed-head series that spent the budget. A builder head with a stal
 review uses its own persisted wait anchor; immutable snapshot derivation drops
 base anchors when the head changes. These observations grant verdict admission
 only; executor merge predicates remain authoritative.
+
+## Change notes
+
+### MLR-01: bounded read-model journals
+
+This supersedes the uncoordinated best-effort retention and optional paging description above. `src/merge-lane-journal.mjs` owns appends to both `disagreements.jsonl` and `observations.jsonl`. Each active journal and its one `.1` rotation is capped at 16 MiB, each record at 256 KiB. A nonblocking kernel lock serializes rotation/appends; contention drops the sample. File errors never affect closure decisions. No additional pager runs in the review service.
+
+`observations.jsonl` records `merge-lane-observation/v1`: subject/repository/PR/head, pass generation, observation time, PR state, NXA action/actor/row/reason/deadline, and tri-state launch liveness/branch custody/ownerless evidence. Process birth time is corroborated against the producer's registration timestamp; mismatches and failed reads remain unknown because registration time is not a guaranteed birth fingerprint. Retry descendants use their own process/custody record. Git inspection is read-only. Detached or unreadable refs leave `branch: null` while status inspection still runs. An unreadable status leaves custody unknown without discarding verified process liveness. Terminal dirty custody supplies ownerless evidence only for a matching head (or a legacy closer without a head), and a current live owner always takes precedence over dirty custody.
+
+`episodes.json` is an atomic, bounded 8 MiB map keyed by SHA-256 subject identity. Each entry has the NXA fingerprint, episode start and last observation time. The same journal lock serializes cursor changes. Older samples cannot rewind it. Entries do not expire merely because observation pauses: rotation, restart and idle gaps cannot re-arm the same episode. At the size limit new observations fail closed to missing/stale telemetry; they do not reset receipts. The cursor is diagnostic and grants no dispatch authority.
+
+The read model combines both journal rotations with fresh live inventory. Journal episode keys and status grouping both prefer `subjectKey`, falling back to `repo#prNumber` only when it is absent. Missing/stale evidence is explicit, terminal inventory wins, and only the current head supplies PR deadlines. Observed anchors use the cursor; non-owner budgets and page grace use shared capped load scaling. Owner deadlines remain authoritative. Ownerless minutes integrate known intervals only, capped by freshness; gaps remain unobserved. The separate Sentinel PRAGE producer owns durable page dedupe, not these files.
+
+`merge-lane status [--root <dir>] [--json]` rejects invalid arguments with usage on stderr and exit code 2 before inventory reads.
+
+The flow object reports `pages24h: null` and `pagesAvailability: aggregate-not-exposed`: the existing scoped read contract does not expose page-history aggregates. The human renderer prints this absence explicitly.

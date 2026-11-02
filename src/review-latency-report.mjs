@@ -603,6 +603,22 @@ function percentile(sortedValues, percentileValue) {
   return sortedValues[Math.max(0, Math.min(sortedValues.length - 1, index))];
 }
 
+// Reuse the existing event fold, including merged_at receipts. For each merge,
+// use the most recent clean verdict preceding it, not an earlier review cycle.
+function mergeLaneFlow(subjects, sinceMs) {
+  const greenToMergedSeconds = [];
+  let merged = 0;
+  for (const subject of subjects.values()) {
+    const events = [...subject.events].sort((a, b) => a.atMs - b.atMs);
+    const merge = events.find(e => e.eventType === 'merge_completed' && e.atMs >= sinceMs);
+    if (!merge) continue;
+    merged++;
+    const clean = events.filter(e => e.eventType === 'clean_verdict' && e.atMs <= merge.atMs).at(-1);
+    if (clean) greenToMergedSeconds.push((merge.atMs - clean.atMs) / 1000);
+  }
+  return { merged, greenToMergedSeconds };
+}
+
 function summarizeStages(subjects) {
   return STAGE_DEFINITIONS.map((definition) => {
     const samples = [];
@@ -1030,6 +1046,7 @@ function collectReviewLatencyReport({
       eventTypes: EVENT_TYPES,
       surfaces,
       stages,
+      mergeLaneFlow: mergeLaneFlow(subjects, sinceMs),
       queue,
       topWaitingReasons: topWaitingReasons(queue),
       reviewerSlots: db

@@ -126,3 +126,9 @@ idempotency key.
 event time. `idx_review_latency_events_at` supports the latency report's primary
 time-window scan. `idx_review_latency_events_type_at` supports type/window scans
 used by route-state diagnostics and event-type filtering.
+
+## Change notes
+
+### MLR-01: merge-lane flow projection
+
+`collectReviewLatencyReport` additionally returns `mergeLaneFlow.merged` and `greenToMergedSeconds` using its existing 24-hour fold. For each merged PR receipt it pairs the latest preceding clean-verdict event; samples with no green receipt in the available fold are omitted. These are clean-verdict-to-merge observations, not a new CI eligibility decision. The close-pipeline exporter publishes a trailing-window histogram; no new table, event writer or closure authority is introduced.

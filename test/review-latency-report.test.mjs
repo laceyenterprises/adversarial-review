@@ -601,3 +601,15 @@ test('shared repair wakes do not end clean-verdict latency; daemon wakes do', ()
   assert.equal(stage.sampleCount, 1);
   assert.equal(stage.p50Ms, 5 * 60 * 1000);
 });
+
+test('MLR-01 clean-to-merged flow reuses durable event receipts', () => {
+  const rootDir = tempRoot();
+  const db = openDb(rootDir);
+  for (const [eventType, at] of [['clean_verdict', '2026-01-02T10:00:00Z'], ['clean_verdict', '2026-01-02T11:00:00Z'], ['merge_completed', '2026-01-02T11:30:00Z']]) {
+    recordReviewLatencyEvent(db, { repo: 'fixture/repo', prNumber: 314, eventType, at, source: 'synthetic' });
+  }
+  db.close();
+  const report = collectReviewLatencyReport({ rootDir, now: () => new Date('2026-01-02T12:00:00Z') });
+  assert.equal(report.mergeLaneFlow.merged, 1);
+  assert.deepEqual(report.mergeLaneFlow.greenToMergedSeconds, [1800]);
+});

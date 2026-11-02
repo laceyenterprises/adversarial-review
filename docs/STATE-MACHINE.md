@@ -7,6 +7,13 @@ See [the closure runbook](RUNBOOK-ama-closure.md).
 
 # Adversarial Review State Machine Notes
 
+CLOSERSCANREAD-01 final remediation keeps the existing closer states and
+transitions. Missing-row retirement now requires a complete census without
+deferred records as well as the existing absence quorum. Capacity checks preserve
+the census cursor and skip inactive history before budget deferral; fallback
+reads retain their own missing/error evidence and mark actual timeouts.
+The source projection, merge predicates and existing smoke promises are unchanged.
+
 HAMSCRATCHRESUME-01 retains the existing closer states and bounded replacement
 transition. Public retry edges settle historical quota intent at successor
 publication while unresolved quota-killed leaves retain ownership. Named

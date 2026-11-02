@@ -1,3 +1,11 @@
+HAMMERNOPROGRESS-01 retains existing lifecycle and charge edges. Seven bounded
+first-write receipt kinds earn finite load-aware outcome slices (nominal 3600
+active seconds); an unsuperseded final terminal stop receives a load-aware
+nominal 60-second grace and retains its reason as `closer-terminal:<reason>`.
+Wall/token ceilings are unchanged. Process census deadlines scale with load;
+unavailable ownership observation remains a refusal, separately classified from
+owner loss. SRE owns the twelve-hour post-deploy natural-traffic receipt.
+
 HAMPROGRESS-01 adds run-bound closer phase receipts for the supervisor's outcome,
 wall-clock and total-token limits. Existing terminal/drain and AMA replacement
 edges retain lifetime charges. Merge safety and existing smoke promises are

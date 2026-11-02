@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process';
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { fileURLToPath } from 'node:url';
 
 const helperPath = fileURLToPath(new URL('./controller_process_census.py', import.meta.url));
@@ -13,13 +14,13 @@ function censusUnavailable(verb, interpreter, cause, code = cause?.code) {
     + `controller_process_census.py via ${interpreter} failed (${detail}); ${NO_OPERATOR_CHANGE}`), { code });
 }
 
-export function nativeControllerIdentity(verb, pid, { execFileSyncImpl = execFileSync, env = process.env } = {}) {
+export function nativeControllerIdentity(verb, pid, { execFileSyncImpl = execFileSync, env = process.env, timeoutImpl = loadAwareTimeoutMs } = {}) {
   if (!Number.isInteger(pid) || pid <= 1) throw new Error('invalid controller census identity');
   const interpreter = env.HQ_PYTHON3 || env.AGENT_OS_PY || 'python3';
   let result;
   try {
     const output = execFileSyncImpl(interpreter, ['-I', '-B', helperPath, verb, String(pid)], {
-      encoding: 'utf8', timeout: 2000, maxBuffer: 1024 * 1024, env, stdio: ['ignore', 'pipe', 'pipe'],
+      encoding: 'utf8', timeout: timeoutImpl(2000), maxBuffer: 1024 * 1024, env, stdio: ['ignore', 'pipe', 'pipe'],
     });
     result = JSON.parse(output);
   } catch (error) {
@@ -49,7 +50,7 @@ function validatedIdentity(verb, interpreter, result) {
 // request is a fresh kernel read: no answer outlives its request. Any timeout,
 // exit, refusal or malformed reply rejects, and the next request starts a new
 // helper. Requests never overlap; the controller awaits each census.
-export function createControllerCensus({ spawnImpl = spawn, env = process.env, timeoutMs = 2000 } = {}) {
+export function createControllerCensus({ spawnImpl = spawn, env = process.env, timeoutMs, timeoutImpl = loadAwareTimeoutMs } = {}) {
   const interpreter = env.HQ_PYTHON3 || env.AGENT_OS_PY || 'python3';
   let helper, pending;
   const retire = () => {
@@ -102,7 +103,7 @@ export function createControllerCensus({ spawnImpl = spawn, env = process.env, t
     if (!Number.isInteger(pid) || pid <= 1) return Promise.reject(new Error('invalid controller census identity'));
     if (pending) return Promise.reject(censusUnavailable(verb, interpreter, null, 'EBUSY'));
     return new Promise((resolve, reject) => {
-      pending = { resolve, reject, verb, timer: setTimeout(() => fail('ETIMEDOUT'), timeoutMs) };
+      pending = { resolve, reject, verb, timer: setTimeout(() => fail('ETIMEDOUT'), timeoutMs ?? timeoutImpl(2000)) };
       try {
         helper ??= start();
         helper.stdin.write(`${verb} ${pid}\n`);

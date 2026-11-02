@@ -1,3 +1,5 @@
+// Offline fixtures must never select an inherited own-launch HCP credential.
+for (const key of ['HCP_TOKEN_PATH', 'HCP_TOKEN', 'HCP_BEARER_TOKEN']) delete process.env[key];
 process.env.NODE_OPTIONS = `${process.env.NODE_OPTIONS || ''} --import=${new URL('./helpers/dispatch-files-preload.mjs', import.meta.url).href}`;
 import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
 installDispatchFileProducerFixture();
@@ -196,7 +198,7 @@ test('Darwin census forwards the subprocess runner through the default native pr
     assert.deepEqual(args.slice(0, 2), ['-I', '-B']);
     assert.match(args[2], /controller_process_census\.py$/);
     assert.deepEqual(args.slice(3), ['group', '100']);
-    assert.equal(options.timeout, 2000);
+    assert.ok(options.timeout >= 2000 && options.timeout <= 12000);
     return JSON.stringify(members);
   } });
   assert.deepEqual(result, members);
@@ -451,7 +453,7 @@ test('unregistered and stale-generation shells cannot claim controller ownership
   record.state = 'running'; writeFileSync(path, JSON.stringify(record));
   assert.throws(() => assertHammerController({ ...env, HAM_CONTROLLER_TOKEN: 'different' }), /unconfirmed/);
   assert.throws(() => assertHammerController(env, { readGroupImpl: () => record.shellPid + 1 }), /process group/);
-  assert.throws(() => assertHammerController(env, { readGroupImpl: () => null }), /process group/);
+  assert.throws(() => assertHammerController(env, { readGroupImpl: () => null }), { code: 'EOBSERVATION' });
 });
 
 test('nested controllers cannot introduce another detached ownership boundary', async () => {

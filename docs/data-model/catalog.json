@@ -2,6 +2,25 @@
   "version": 1,
   "entries": [
     {
+      "id": "cap-rehead",
+      "title": "CAPREHEAD Dispatch Reservations",
+      "path": "docs/data-model/cap-rehead.md",
+      "store": "data/follow-up-jobs/cap-rehead/<pr-key>.json",
+      "schemaSurface": "src/ama/cap-rehead.mjs",
+      "owner": "AMA closure orchestration",
+      "primaryKey": [
+        "repo",
+        "prNumber"
+      ],
+      "fields": [
+        "schemaVersion",
+        "repo",
+        "prNumber",
+        "attempts"
+      ],
+      "compatibility": "Additive version 1 store; attempts never expire or refund lifetime budget."
+    },
+    {
       "id": "hammer-progress",
       "title": "Hammer Progress Receipts",
       "path": "docs/data-model/hammer-progress.md",

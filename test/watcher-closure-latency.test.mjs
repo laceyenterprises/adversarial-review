@@ -316,13 +316,13 @@ test('launch latency percentiles count confirmed samples, expire after a day, an
   for (let i = 1; i <= 20; i++) recordFinalReviewHammerLatency(i * 1000, now);
   recordFinalReviewHammerLatency(-1, now);
   assert.deepEqual(finalReviewHammerLatencySummary(now), {
-    window_ms: 86400000, samples: 20, p50_ms: 10000, p95_ms: 19000,
+    cap_rehead: { dispatched: 0, skipped: 0 }, window_ms: 86400000, samples: 20, p50_ms: 10000, p95_ms: 19000,
   });
   assert.equal(finalReviewHammerLatencySummary(now + 86400001).samples, 0);
   recordFinalReviewHammerLatency(1000, now);
   resetFinalReviewHammerLatenciesForTesting();
   assert.deepEqual(finalReviewHammerLatencySummary(now), {
-    window_ms: 86400000, samples: 0, p50_ms: null, p95_ms: null,
+    cap_rehead: { dispatched: 0, skipped: 0 }, window_ms: 86400000, samples: 0, p50_ms: null, p95_ms: null,
   });
 });
 
@@ -334,10 +334,10 @@ test('latency eviction retains boundary samples despite out-of-order timestamps 
   for (let i = 0; i < 9998; i++) recordFinalReviewHammerLatency(9000, now - 86400001);
   recordFinalReviewHammerLatency(2000, now);
   assert.deepEqual(finalReviewHammerLatencySummary(now), {
-    window_ms: 86400000, samples: 2, p50_ms: 1000, p95_ms: 2000,
+    cap_rehead: { dispatched: 0, skipped: 0 }, window_ms: 86400000, samples: 2, p50_ms: 1000, p95_ms: 2000,
   });
   assert.deepEqual(finalReviewHammerLatencySummary(now + 1), {
-    window_ms: 86400000, samples: 1, p50_ms: 2000, p95_ms: 2000,
+    cap_rehead: { dispatched: 0, skipped: 0 }, window_ms: 86400000, samples: 1, p50_ms: 2000, p95_ms: 2000,
   });
 });
 

@@ -4447,6 +4447,10 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- CONFLICTHOTSPOT-01 final comment-only remediation: root README change notes
+  remain required in this repository; per-ticket fragments apply to module
+  documentation. The hammer prompt explicitly creates or updates module fragments.
+
 - CAPREHEAD-02 final comment-only remediation: exhausted-verdict projection uses
   a canonical 40-character hex placeholder distinct from the source head,
   including an all-zero source. Focused offline tests enforce SHA format and
@@ -4463,9 +4467,7 @@ Deploy this reader before activating these keys in core's checked-in config.
 - VERIFYHEADTRANSIENT-01 final remediation: terminal fallback preserves the resolved infrastructure retry outcome; lease model documentation and README state/smoke declarations now match the retry contract. Refreshed the reviewed closer guard fingerprint to resolve CI drift; the lifecycle graph and smoke commands are unchanged.
 
 - VERIFYHEADTRANSIENT-01: explicit closer infrastructure read failures use the existing retryable deferral and lease release path. They refund retry accounting and retain the closer retry owner and load-aware deadline; adjudicated no-merge decisions remain final. See the closure runbook change note for the required live receipt.
-- CONFLICTHOTSPOT-01 final comment-only remediation: root README change notes
-  remain required in this repository; per-ticket fragments apply to module
-  documentation. The hammer prompt explicitly creates or updates module fragments.
+
 
 - BASEFETCH-01 final comment-only remediation: the offline real-Git failed-fetch
   fixture now asserts empty cleanup diagnostics alongside the preserved fetch

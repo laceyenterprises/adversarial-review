@@ -612,6 +612,9 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
      walkthrough/README section edits satisfies walkthrough currency. Reviewers
      accept the fragment; the walkthrough need not change when its existing text
      needs no correction. Follow `docs/walkthroughs/README.md` when available.
+     If that guide is absent, include Summary, Interface changes (or none), and
+     Verification with the commands run and their observed results. A fragment
+     must explain the operational change rather than be empty.
      Do not append ticket sections to walkthroughs or READMEs or shared README
      change-note entries. An end-of-file ticket section is at most a non-blocking
      style note, never a blocking finding. This adds no blocking condition.

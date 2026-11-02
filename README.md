@@ -4459,6 +4459,10 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- CONFLICTHOTSPOT-01 final comment-only remediation: root README change notes
+  remain required in this repository; per-ticket fragments apply to module
+  documentation. The hammer prompt explicitly creates or updates module fragments.
+
 REMGEMINI-01 parity: both Node config readers accept `remediator-gemini` as well as `gemini` in the fallback list. This expands validation only; defaults, fallback order, and selected provider do not change. Paired with Agent OS #10087.
 
 - HAM: retain explicit bug-fix-only freeze contracts in the MLR-03 documentation,
@@ -4488,6 +4492,7 @@ REMGEMINI-01 parity: both Node config readers accept `remediator-gemini` as well
 - VERIFYHEADTRANSIENT-01 final remediation: terminal fallback preserves the resolved infrastructure retry outcome; lease model documentation and README state/smoke declarations now match the retry contract. Refreshed the reviewed closer guard fingerprint to resolve CI drift; the lifecycle graph and smoke commands are unchanged.
 
 - VERIFYHEADTRANSIENT-01: explicit closer infrastructure read failures use the existing retryable deferral and lease release path. They refund retry accounting and retain the closer retry owner and load-aware deadline; adjudicated no-merge decisions remain final. See the closure runbook change note for the required live receipt.
+
 
 - BASEFETCH-01 final comment-only remediation: the offline real-Git failed-fetch
   fixture now asserts empty cleanup diagnostics alongside the preserved fetch

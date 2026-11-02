@@ -581,9 +581,10 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    Keep genuine remediation failures out of companion-only stops.
 2c. **Canonical documentation currency is required and in scope.** Before
    landing schema, module-interface/dispatch, state/smoke or migration changes,
-   read Appendix B2 and update the affected existing data-model docs/catalog,
-   module walkthroughs, owner declarations/README/smoke harness and generated
-   state index. Preserve SQLite/Postgres migration parity, including companion
+   read Appendix B2, update the affected existing data-model docs/catalog,
+   owner declarations/README/smoke harness and generated state index, and
+   create or update affected module change-note fragments alongside any needed
+   in-place walkthrough/README edits. Preserve SQLite/Postgres migration parity, including companion
    repository changes. Missing in-repo docs or parity block landing; report
    owed superproject docs in the audit when those surfaces are absent here.
 
@@ -606,8 +607,17 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
      it passes — a red validator counts as a failing check under 2b.
    - **Module surface / behaviour change → module explainer.** If the diff
      changes a module's public interface, dispatch flow, or operational contract
-     and a `modules/<name>/<name>-walkthrough.md` exists for that module, update
-     it to match.
+     and a `modules/<name>/<name>-walkthrough.md` exists for that module, a
+     `<module dir>/changes/<TICKET-ID>.md` fragment plus any needed in-place
+     walkthrough/README section edits satisfies walkthrough currency. Reviewers
+     accept the fragment; the walkthrough need not change when its existing text
+     needs no correction. Follow `docs/walkthroughs/README.md` when available.
+     If that guide is absent, include Summary, Interface changes (or none), and
+     Verification with the commands run and their observed results. A fragment
+     must explain the operational change rather than be empty.
+     Do not append ticket sections to walkthroughs or READMEs or shared README
+     change-note entries. An end-of-file ticket section is at most a non-blocking
+     style note, never a blocking finding. This adds no blocking condition.
    - **State/smoke contract change → owner declarations.** When the diff changes an
      owner's lifecycle states, transitions, durable status values, smoke-verified
      promises or post-deploy verification steps, and that owner declares
@@ -1258,7 +1268,8 @@ hard-blocker report, and do not re-dispatch.
   except for the narrow strict-non-blocking `.active` lane described above.
 - No landing a schema or module change that leaves an in-repo data-model doc
   (`docs/data-model/`, incl. `catalog.json`) or module walkthrough
-  (`modules/<name>/<name>-walkthrough.md`) or affected state/smoke declarations
+  (`modules/<name>/<name>-walkthrough.md`; per-ticket fragments plus needed
+  in-place edits satisfy currency under mandate 2c) or affected state/smoke declarations
   (`state-machines.json`, `post-merge-verify.json`) stale (mandate 2c).
 
 <!-- hq:closeout:pr -->

@@ -918,3 +918,24 @@ test('published-head CI settles before Appendix E predicate evaluation', () => {
   assert.match(appendix, /bin\/hammer-claim-head\.mjs/);
   assert.match(HAMMER_TEMPLATE, /HAM_PROCEDURE_STEP=claim-build/);
 });
+
+
+test('hammer documentation currency accepts ticket fragments without shared append edits', () => {
+  const normalized = HAMMER_TEMPLATE.replace(/\s+/g, ' ');
+  assert.match(normalized, /<module dir>\/changes\/<TICKET-ID>\.md/);
+  assert.match(normalized, /needed in-place walkthrough\/README section edits satisfies walkthrough currency/);
+  assert.match(normalized, /walkthrough need not change when its existing text needs no correction/);
+  assert.match(normalized, /non-blocking style note, never a blocking finding/);
+  assert.match(normalized, /This adds no blocking condition/);
+  const dispatched = buildMergeAgentPrompt({ repo: 'fixture/repo', prNumber: 42, baseBranch: 'main' });
+  for (const prompt of [normalized, dispatched]) {
+    assert.match(prompt, /If that guide is absent, include Summary, Interface changes \(or none\), and/);
+    assert.match(prompt, /Verification with (?:the )?commands/);
+    assert.match(prompt, /observed results/);
+  }
+});
+
+test('the final fragment-policy change note is first in the repository log', () => {
+  const notes = readFileSync(join(REPO_ROOT, 'README.md'), 'utf8').split('## Change notes\n')[1];
+  assert.match(notes.trimStart(), /^- CONFLICTHOTSPOT-01 final comment-only remediation:/);
+});

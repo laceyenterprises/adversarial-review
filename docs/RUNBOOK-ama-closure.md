@@ -2754,8 +2754,14 @@ prompt-driven worker behavior, not predicate gates — the audit comment and the
    `docs/data-model/catalog.json`, then runs
    `node scripts/validate-data-model-catalog.mjs`; a red validator is a red
    check. When the diff changes a module surface or operational contract and
-   `modules/<name>/<name>-walkthrough.md` exists, the hammer updates that
-   walkthrough. If the PR repository lacks those docs because they belong to a
+   `modules/<name>/<name>-walkthrough.md` exists, accept a
+   `<module dir>/changes/<TICKET-ID>.md` fragment plus any needed in-place
+   walkthrough/README section edits as satisfying walkthrough currency. The
+   walkthrough need not change when its existing text needs no correction. Follow
+   `docs/walkthroughs/README.md` when available. Do not append ticket sections or
+   shared README change-note entries. An end-of-file ticket section is at most a
+   non-blocking style note, never a blocking finding. This adds no blocking condition.
+   If the PR repository lacks those docs because they belong to a
    superproject or submodule boundary, the hammer leaves the repo-local surface
    alone and notes the skipped superproject-doc obligation in its audit comment.
    When a diff changes an owner's lifecycle states, transitions, durable status

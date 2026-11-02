@@ -117,6 +117,11 @@ test('reviewer prompts check data-model and module explainer doc currency', () =
     assert.match(prompt, /Source of truth:/);
     assert.match(prompt, /docs\/data-model\/catalog\.json/);
     assert.match(prompt, /modules\/<name>\/<name>-walkthrough\.md/);
+    assert.match(prompt, /<module dir>\/changes\/<TICKET-ID>\.md/);
+    assert.match(prompt, /needed in-place/);
+    assert.match(prompt, /walkthrough need not\s+change when its existing text needs no correction/);
+    assert.match(prompt, /non-blocking style note, never a blocking finding/);
+    assert.match(prompt, /This adds no blocking condition/);
     assert.match(prompt, /stale data-model docs are contract drift, not a nit/);
     assert.match(prompt, /skipped superproject-doc obligation/);
   }
@@ -210,6 +215,11 @@ test('remediator prompts treat data-model and module explainer doc currency as i
     assert.match(prompt, /node scripts\/validate-data-model-catalog\.mjs/);
     assert.match(prompt, /do not treat that absence as a failing\s+check by itself/);
     assert.match(prompt, /modules\/<name>\/<name>-walkthrough\.md/);
+    assert.match(prompt, /<module dir>\/changes\/<TICKET-ID>\.md/);
+    assert.match(prompt, /needed in-place/);
+    assert.match(prompt, /walkthrough need not\s+change when its existing text needs no correction/);
+    assert.match(prompt, /non-blocking style note, never a blocking finding/);
+    assert.match(prompt, /This adds no blocking condition/);
     assert.match(prompt, /skipped superproject-doc obligation/);
   }
 });

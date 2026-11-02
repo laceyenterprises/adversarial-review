@@ -9,6 +9,9 @@ host. A bug here can wave bad code into every downstream repo, so hold every
 change to maximum rigor and keep the offline test property intact.
 
 Change notes go under `## Change notes` in README.md, newest first; never above the title.
+This repository's root README change notes remain required. The per-ticket
+fragment convention and guidance against shared README change-note entries
+apply to module-level documentation; they do not replace this repository-level log.
 
 ## Where code belongs
 

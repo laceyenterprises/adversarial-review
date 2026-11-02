@@ -2720,8 +2720,14 @@ merge-agent must update the matching `docs/data-model/NN-*.md` domain doc and
 `node scripts/validate-data-model-catalog.mjs`; a failing catalog validator is a
 merge-blocking check. If the diff changes a module's public interface, dispatch
 flow, or operational contract and the affected module has
-`modules/<name>/<name>-walkthrough.md`, the merge-agent must update that
-walkthrough. Repositories without those documentation surfaces are exempt; if a
+`modules/<name>/<name>-walkthrough.md`, accept a
+`<module dir>/changes/<TICKET-ID>.md` fragment plus any needed in-place
+walkthrough/README section edits as satisfying walkthrough currency. The
+walkthrough need not change when its existing text needs no correction. Follow
+`docs/walkthroughs/README.md` when available. Do not append ticket sections or
+shared README change-note entries. An end-of-file ticket section is at most a
+non-blocking style note, never a blocking finding. This adds no blocking condition.
+Repositories without those documentation surfaces are exempt; if a
 submodule change owes documentation in a superproject, the merge-agent records
 the skipped superproject-doc obligation in its audit or closing comment instead
 of inventing local docs.

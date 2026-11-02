@@ -4453,7 +4453,8 @@ and reason; custody and merge admission remain authoritative.
 After deployment, the SRE owner floats the revision, confirms the watcher restart,
 and observes one full pass for zero `closure-decision-mismatch`, zero shadow
 R04 `ownership-unreadable`, and natural closer launches. See the
-[AMA closure runbook](docs/RUNBOOK-ama-closure.md#unreadable-ownership-recovery-ownerunreadable-01).
+[AMA closure runbook](docs/RUNBOOK-ama-closure.md#unreadable-ownership-recovery-ownerunreadable-01)
+and the [manual SRE plan](modules/worker-pool/post-merge-actions/nxaownerread-01.yaml).
 
 - CAPREHEAD-01 rescue: terminal skips and the disabled switch preserve ordinary
   overdue recovery escalation. Only a dispatched or positively live CAPREHEAD

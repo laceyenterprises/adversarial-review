@@ -352,7 +352,7 @@ export async function runHammerController(script, args = [], {
         if (!record.probeError) console.error(`hammer-controller: ${error.message}`);
         record.probeError = error.code || 'unknown'; stop('process-probe-unreadable');
       }
-      if (members?.length === 0 && exited) { drained = true; break; }
+      if (members?.length === 0 && exited) { stop('shell-exited'); drained = true; break; }
       const owned = members && groupStillOwned(members, witnessed, !exited, child.pid);
       // A census can observe the shell's exit before Node delivers its exit
       // event. An empty group grants no signal authority; wait for that event

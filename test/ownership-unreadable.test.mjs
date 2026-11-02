@@ -1,3 +1,4 @@
+import { readOwnershipObservation } from '../src/ownership-read.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -198,25 +199,28 @@ test('OWNERUNREADABLE-01: the anchored deadline survives same-pass refresh and t
   assert.equal(after.decision.deadline.anchoredAt, AT);
 });
 
-test('OWNERUNREADABLE-01: a stalled read shares one deadline and cannot retry after abort', { timeout: 7000 }, async t => {
+test('OWNERUNREADABLE-01: a stalled read shares one deadline and cannot retry after abort', async t => {
   const f = fixture(t, { observedAt: LATER });
-  const keepAlive = setTimeout(() => {}, 6500);
-  t.after(() => clearTimeout(keepAlive));
-  let reads = 0, signal;
-  const started = Date.now();
-  const shared = await f.resolve({ readLaunches: options => {
-    reads++;
+  let sourceReads = 0, resolverReads = 0, signal;
+  // Synthetic expiry exercises the shared bound without sleeping through a
+  // host-load-scaled production deadline or raising this test's wall clock.
+  const observation = await readOwnershipObservation(options => {
+    sourceReads++;
     signal = options.signal;
     return new Promise(resolve => signal.addEventListener('abort', () => resolve({ state: 'unknown', value: null }), { once: true }));
+  }, { scanBudgetMs: 1, launchReadTimeoutMs: 1 });
+  const shared = await f.resolve({ readLaunches: () => {
+    resolverReads++;
+    return observation;
   } });
-  assert.ok(Date.now() - started < 6500, 'all attempts share the five-second budget');
-  assert.equal(reads, 1);
+  assert.equal(sourceReads, 1, 'the stalled source read exhausts its deadline after one attempt');
+  assert.equal(resolverReads, 3, 'the resolver bounds attempts to refresh the unknown observation');
   assert.equal(signal.aborted, true);
   assert.equal(shared.decision.reason, 'ownership-unreadable');
   assert.equal(f.wake(shared).outcome, 'skipped');
   assert.equal(f.wakes(), 0);
-  await new Promise(resolve => setTimeout(resolve, 250));
-  assert.equal(reads, 1, 'no delayed attempt survives the deadline');
+  assert.equal(sourceReads, 1, 'resolver retries do not restart the expired source read');
+  assert.equal(resolverReads, 3, 'the wake does not trigger another resolver read');
 });
 
 for (const cap of ['retryExhausted', 'lifetimeExhausted']) {

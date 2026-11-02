@@ -85,7 +85,6 @@ export function fromLegacyNoProgressLane(lane) {
 export const handoffWakeLegacy = headSha => fromLegacyClosureOwner({ owner: 'wait', reason: `handed-to-review:${headSha}` });
 
 // ── Evidence builders (held values plus bounded worker identity probes) ─────
-export const NEXT_ACTION_SHADOW_LAUNCH_READ_MS = 5_000;
 const pick = (value, keys) => (value && typeof value === 'object'
   ? Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]])) : null);
 const REVIEW_KEYS = ['verdict', 'headSha', 'riskClass', 'blockingFindingState', 'blockingFindingCount', 'nonBlockingFindingState',
@@ -99,7 +98,7 @@ const LEASE_KEYS = ['status', 'lrqId', 'headSha', 'acquiredAt', 'updatedAt', 'te
 export function launchSource(observation, lease, cap) {
   if (observation?.state !== 'complete' || !observation.value) {
     return { state: observation?.state === 'error' ? 'error' : 'unknown', value: null,
-      provenance: { sourceRef: 'launch-requests' } };
+      provenance: { sourceRef: 'launch-requests', ...observation?.provenance } };
   }
   const value = observation.value;
   const terminalNoMerge = value.terminal === true;
@@ -113,21 +112,13 @@ export function launchSource(observation, lease, cap) {
   } } };
 }
 
-// Bounded NXA-01 ledger read. The seam loads lazily so the shadow can never
-// break a consumer's module graph. Each SDK read shares the recovery deadline
-// and abort signal; a failed read remains unreadable ownership evidence.
-function boundedLaunchRead(rootDir, lease, cap) {
-  return ({ signal = null, timeoutMs = NEXT_ACTION_SHADOW_LAUNCH_READ_MS } = {}) => {
-    const controller = new AbortController();
-    const readSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    timer.unref?.();
-    return import('./session-ledger-read-adapter.mjs')
-      .then(({ readLaunchRequestObservationFromLedgerAsync: read }) => read({ rootDir, launchRequestId: lease.lrqId,
-        timeoutMs, signal: readSignal }))
-      .then(observation => (readSignal.aborted ? { state: 'unknown', value: null } : observation))
-      .then(observation => launchSource(observation, lease, cap))
-      .finally(() => clearTimeout(timer));
+// The shared ownership reader supplies the effective deadline and abort signal.
+// Keep the SDK lazy for short-lived consumers.
+function launchReferenceRead(rootDir, lease, cap) {
+  return async options => {
+    const { readLaunchRequestObservationFromLedgerAsync: read } = await import('./session-ledger-read-adapter.mjs');
+    const observation = await read({ ...options, rootDir, launchRequestId: lease.lrqId });
+    return launchSource(observation, lease, cap);
   };
 }
 
@@ -136,7 +127,7 @@ export function snapshotLaunchReferenceRead(snapshot, rootDir) {
   if (!rootDir || !isUnresolvedLaunchReference(launches)) return null;
   const closer = launches.value.closer;
   if (!closer.launchRequestId) return null;
-  return boundedLaunchRead(rootDir, { lrqId: closer.launchRequestId, headSha: closer.headSha || snapshot.head },
+  return launchReferenceRead(rootDir, { lrqId: closer.launchRequestId, headSha: closer.headSha || snapshot.head },
     snapshot.observations.policy?.value?.hammerCap || {});
 }
 
@@ -220,7 +211,7 @@ export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, cand
   // A retained receipt can outlive its lease. Explicit review handoff stays
   // with review; historical hammer receipts cannot take it back.
   const readLaunches = launchOwner && rootDir
-    ? boundedLaunchRead(rootDir, launchOwner, cap) : null;
+    ? launchReferenceRead(rootDir, launchOwner, cap) : null;
   const primaryChangeInput = input.primaryChange ? { evidence: input.primaryChange, head,
     strictNonBlockingRemediation: input.strictNonBlockingRemediation !== false } : null;
   return { subjectKey, head, observedAt, anchors, observations, readLaunches, primaryChangeInput };

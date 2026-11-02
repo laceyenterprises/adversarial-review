@@ -1188,9 +1188,14 @@ not a gate, and it is not authorized by NXA-02.
 ### Unreadable ownership recovery (OWNERUNREADABLE-01)
 
 R04 retries failed, unknown or thrown reads of the referenced closer launch and
-its retry chain up to three times with 100/200 ms backoff inside one five-second
-read deadline. Complete observations return immediately, including unreadable
-payloads, which retain recovery ownership until a later closure pass. A same-pass
+its retry chain up to three times with 100/200 ms backoff. NXAOWNERREAD-01
+removes the separate fixed deadline: census, pass/reference, consumer, shadow
+and wake reads use `src/ownership-read.mjs`, extracted from CLOSERSCANREAD-01.
+The nominal pass/snapshot/individual budgets remain 30/10/8 seconds, each scaled
+once by the shared load-aware multiplier and its ceiling. Failed census
+snapshots never replace individual fallback evidence. Complete observations
+return immediately, including unreadable payloads, which retain recovery ownership
+until a later closure pass. A same-pass
 refresh may reuse a complete readable retry chain, but cannot reuse the closer-lease
 placeholder's `retryChainUnreadable: true` or a failed observation merely because
 its launch ID and head match. A complete SDK `found` reply containing the
@@ -1209,6 +1214,18 @@ reference-only observations with lease/receipt provenance are also resolved.
 A placeholder remains fenced until resolved; it cannot count as a real failed
 read or as proof of absence. Terminal roots with empty retry chains reach R08;
 live or parked descendants retain R03. No elapsed deadline waives a failed read.
+
+NXAOWNERREAD-01: a same-head hammer refresh whose route changes only because
+ownership is unknown returns `ownership-read-deferred`, without dispatch or a
+mismatch cycle. Restoring only the unread ownership evidence must reproduce
+the selected decision key; known changed leases, live owners, head changes and
+other routing changes still invalidate selection. No custody fence is released.
+Each such deferral emits one `ama.closure.transient_ownership_refresh` structured
+event with `count: 1`, reason, subject, head and selected key. SRE acceptance after
+the normal float and confirmed watcher restart observes a complete natural pass:
+zero closure decision mismatches, zero shadow R04 ownership-unreadable decisions,
+and closer launches for previously deferred synthetic-equivalent cases. Persistent
+read unavailability remains recovery work; elapsed time never proves absence.
 
 After the anchored 300-second recovery deadline, a terminal lease and newly
 readable terminal launch with no live retries return ownership to the hammer,

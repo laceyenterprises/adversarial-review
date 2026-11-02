@@ -1,3 +1,4 @@
+import { readOwnershipObservation } from './ownership-read.mjs';
 import { repositoryObservationCache } from './repository-state-cache.mjs';
 // ── NXA-02 observational shadow of the shared next action ────────────────────
 //
@@ -20,10 +21,9 @@ import { repositoryObservationCache } from './repository-state-cache.mjs';
 // sets AMA_NEXT_ACTION_OVERDUE_ALERTS=1; a deadline never gates execution.
 import { appendFile, mkdir, rename, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { setTimeout as delay } from 'node:timers/promises';
 import { join } from 'node:path';
 import { deriveNextActionSnapshot, nextAction } from './pr-next-action.mjs';
-import { fromLegacyClosureOwner, markNextActionShadowTestSink, snapshotLaunchReferenceRead, NEXT_ACTION_SHADOW_LAUNCH_READ_MS } from './pr-next-action-consumer.mjs';
+import { fromLegacyClosureOwner, markNextActionShadowTestSink, snapshotLaunchReferenceRead } from './pr-next-action-consumer.mjs';
 import { observeClosureWait } from './ama/closure-wait.mjs';
 import { checkPrimaryChange } from './ama/primary-change.mjs';
 
@@ -91,34 +91,6 @@ export function caseKeyOf(record) {
   return createHash('sha256').update(JSON.stringify([record.subjectKey, record.head,
     record.legacy?.action, record.legacy?.actor, record.legacy?.reason,
     record.next?.action, record.next?.actor, record.next?.reason])).digest('hex').slice(0, 24);
-}
-
-function boundedLaunchReads(readLaunches) {
-  const controller = new AbortController();
-  const deadline = Date.now() + NEXT_ACTION_SHADOW_LAUNCH_READ_MS;
-  const unknown = { state: 'unknown', value: null, provenance: { sourceRef: 'launch-requests', timedOut: true } };
-  let timer;
-  const reads = async () => {
-    let result;
-    // R04 is recovery work. Retry failed observations as well as thrown reads,
-    // sharing one physical deadline and stopping after 100/200ms backoff.
-    // Complete observations, even unreadable payloads, need no immediate retry.
-    for (let attempt = 0; attempt < 3; attempt++) {
-      controller.signal.throwIfAborted();
-      if (Date.now() >= deadline) return unknown;
-      result = await Promise.resolve().then(() => readLaunches({ signal: controller.signal,
-        timeoutMs: Math.max(1, deadline - Date.now()) }))
-        .catch(() => ({ state: 'error', value: null, provenance: { sourceRef: 'launch-requests' } }));
-      controller.signal.throwIfAborted();
-      if (result?.state === 'complete') return result;
-      if (attempt < 2) await delay(100 * 2 ** attempt, undefined, { signal: controller.signal });
-    }
-    return result;
-  };
-  return Promise.race([reads(), new Promise(resolve => {
-    timer = setTimeout(() => { controller.abort(); resolve(unknown); }, NEXT_ACTION_SHADOW_LAUNCH_READ_MS);
-    timer.unref?.();
-  })]).catch(() => unknown).finally(() => { clearTimeout(timer); controller.abort(); });
 }
 
 // Raw primary-change evidence goes through the shared pure helper.
@@ -189,12 +161,12 @@ export function resolveSharedNextAction({ snapshot = null, passSnapshot = null, 
     const shared = (async () => {
       let final = derived;
       if (readLaunches) {
-        const launches = await boundedLaunchReads(readLaunches);
+        const launches = await readOwnershipObservation(readLaunches);
         const reference = derived.observations?.launches;
         // Failed descendant reads cannot erase an independently read receipt,
         // including after terminal lease removal. Keep unknown provenance.
         const resolved = launches.state !== 'complete' && reference?.value?.closer
-          ? { ...reference, provenance: { ...reference.provenance, ledgerReadState: launches.state },
+          ? { ...reference, provenance: { ...reference.provenance, ...launches.provenance, ledgerReadState: launches.state },
             value: { closer: { ...reference.value.closer, retryChainUnreadable: true, retryChainReadState: 'failed' } } } : launches;
         final = deriveNextActionSnapshot({ base: derived, observations: { launches: resolved } });
       }

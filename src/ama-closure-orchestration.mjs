@@ -2840,7 +2840,7 @@ async function dispatchAmaClosureFor({
           }
           if (live?.isDraft) return { dispatched: false, reason: 'background-pr-draft', ...changedDecision };
           const launchMismatch = hammerDispatchMismatch(shared, launchShared,
-            { repo: repoPath, prNumber, headSha: live.headSha });
+            { repo: repoPath, prNumber, headSha: live.headSha }, { logger });
           // CLOSURERECOVERYEXEC-01: an R04 reconciliation is not a mismatch. Like
           // the inline route, hand it to the closer, whose admission reconciles
           // custody before its intent gate; closure enforces the deadline.

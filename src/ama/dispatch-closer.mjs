@@ -1,3 +1,4 @@
+import { ownershipReadBudgets as closerScanBudgets, boundedOwnershipRead as boundedCloserScanRead } from '../ownership-read.mjs';
 import { repositoryObservationCache } from '../repository-state-cache.mjs';
 import { withRepositoryStateCycle } from '../repository-state-lock.mjs';
 import { infrastructureOnlyFailures, recordedCiFailures } from '../ci-infrastructure.mjs';
@@ -1969,29 +1970,7 @@ export function listActiveAmaCloserDispatches(rootDir, options = {}) {
 
 // A pass yields fairly without persisting an ownership verdict for unread records.
 const closerScanCursors = new Map();
-// Nominal idle budgets: 30s/pass, 10s/snapshot, 8s/individual read.
-export function closerScanBudgets(options = {}) {
-  const load = options.loadOptions || {};
-  return {
-    pass: options.scanBudgetMs ?? loadAwareTimeoutMs(30_000, load),
-    snapshot: options.snapshotTimeoutMs ?? loadAwareTimeoutMs(10_000, load),
-    launch: options.launchReadTimeoutMs ?? loadAwareTimeoutMs(8_000, load),
-  };
-}
-async function boundedCloserScanRead(read, timeoutMs, signal) {
-  let timer;
-  try {
-    return await Promise.race([
-      Promise.resolve().then(read),
-      new Promise(resolve => { timer = setTimeout(() => resolve({ ok: false,
-        reason: 'scan-read-timeout', timedOut: true }), timeoutMs); }),
-    ]);
-  } catch (error) {
-    throwIfAborted(signal);
-    if (error?.code === 'ETIMEDOUT') return { ok: false, reason: 'scan-read-timeout', timedOut: true };
-    return { ok: false, reason: 'scan-read-error' };
-  } finally { clearTimeout(timer); }
-}
+export { ownershipReadBudgets as closerScanBudgets } from '../ownership-read.mjs';
 
 // Reconcile launch liveness only; terminal launch success is not proof of merge.
 // Never release either closer or merge leases here.
@@ -5104,11 +5083,11 @@ async function maybeDispatchAmaCloserAttempt({
     checksRollup: prMetadata.statusCheckRollup, rootDir: dispatchContext.rootDir || SUBMODULE_ROOT,
     candidate: { headSha: prMetadata.headSha, prState: prMetadata.isOpen === true ? 'OPEN' : null,
       isDraft: prMetadata.isDraft, mergeable: prMetadata.mergeableState }, labels: prMetadata.labels,
-    readLaunches: reviewHandoffLease?.lrqId ? async () => {
+    readLaunches: reviewHandoffLease?.lrqId ? async ({ signal: readSignal, timeoutMs } = {}) => {
       const probe = earlyLaunchRequestProbe?.launchRequestId === reviewHandoffLease.lrqId
         ? earlyLaunchRequestProbe.probe : await readLaunchRequestStatusImpl({
           rootDir: dispatchContext.rootDir || SUBMODULE_ROOT,
-          launchRequestId: reviewHandoffLease.lrqId, includeRetryChain: true, signal });
+          launchRequestId: reviewHandoffLease.lrqId, includeRetryChain: true, signal: readSignal, timeoutMs });
       return { state: probe?.ok ? 'complete' : 'unknown', value: { closer: {
         headSha: prMetadata.headSha, launchRequestId: reviewHandoffLease.lrqId,
         probe, outcome: launchRequestOwned(probe) === false ? 'no-merge' : null, retryable: true,
@@ -5159,7 +5138,7 @@ async function maybeDispatchAmaCloserAttempt({
   observeSharedDecision(sharedNextAction);
   // Report changed routing before enforcing hammer-only admission. The fresh
   // snapshot retains structural safety refusals for successor resolution.
-  const mismatch = hammerDispatchMismatch(selectedNextAction, sharedNextAction, decisionIdentity);
+  const mismatch = hammerDispatchMismatch(selectedNextAction, sharedNextAction, decisionIdentity, { logger });
   if (mismatch) return noAmaDispatch(mismatch);
   if (!verdict.repairAdmission.ok) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
     reason: 'not-eligible', reasons: verdict.reasons, eligibilityRejected: true, safetyRefusal: true, nextActionShared: sharedNextAction });
@@ -7020,7 +6999,7 @@ async function maybeDispatchAmaCloserAttempt({
     && sharedNextAction.decision.reason === reviewState.operatorLabelFindings.gated[0]?.reason;
   if (!hasHammerDispatchIntent(sharedNextAction, decisionIdentity) && !resumeCertifiedPark && !capReport && !operatorLabelHold) {
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-      ...(hammerDispatchMismatch(selectedNextAction, sharedNextAction, decisionIdentity) || { reason: sharedNextAction.decision.reason }), recoveryWait: true, eligibilityRejected: !verdict.eligible, nextActionShared: sharedNextAction });
+      ...(hammerDispatchMismatch(selectedNextAction, sharedNextAction, decisionIdentity, { logger }) || { reason: sharedNextAction.decision.reason }), recoveryWait: true, eligibilityRejected: !verdict.eligible, nextActionShared: sharedNextAction });
   }
 
   // A same-PR remediation worker owns the branch. Check before the append-only
@@ -7182,7 +7161,7 @@ async function maybeDispatchAmaCloserAttempt({
 
   if (!hasHammerDispatchIntent(sharedNextAction, decisionIdentity) && !resumeCertifiedPark) {
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
-      ...(hammerDispatchMismatch(selectedNextAction, sharedNextAction, decisionIdentity) || { reason: sharedNextAction.decision.reason }), nextActionShared: sharedNextAction });
+      ...(hammerDispatchMismatch(selectedNextAction, sharedNextAction, decisionIdentity, { logger }) || { reason: sharedNextAction.decision.reason }), nextActionShared: sharedNextAction });
   }
 
   // Persist the prompt under watcher-owned repo state and pass that path

@@ -1,0 +1,11 @@
+# Manual SRE work only; this plan declares no executable actions.
+operator_steps:
+  - description: >-
+      From the managed Agent OS superproject, float the merged review service.
+      Confirm the watcher restarted after the float, then observe one complete
+      natural pass with zero closure-decision-mismatch and zero NXA-shadow R04
+      ownership-unreadable decisions, and confirm natural closer launches for
+      previously stuck PRs. Record the receipt before acknowledging completion.
+      Follow docs/RUNBOOK-ama-closure.md, Unreadable ownership recovery.
+    run_as: SRE operator
+    command: hq submodule float tools/adversarial-review

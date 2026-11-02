@@ -615,3 +615,18 @@ test('RECOVERYSTALL-01: custody refresh preserves a recorded non-retryable termi
   assert.equal(f.launches(), 0);
   assert.equal(readAmaCloserLease(f.rootDir, IDENTITY).lrqId, LRQ);
 });
+
+
+test('CLOSERSCANREAD-01: a timeout is named and a fresh terminal read resolves custody', async t => {
+  const f = recoveryDispatchFixture(t);
+  const failed = await refreshClosureRecoveryCustody({ rootDir: f.rootDir, ...IDENTITY,
+    shared: f.shared, now: DEADLINE_MS + MINUTE,
+    readLaunchImpl: async () => ({ ok: false, timedOut: true }) });
+  assert.equal(failed.closureRecovery.lastEvidence.reason, 'scan-snapshot-timeout');
+  assert.equal(failed.shared.decision.reason, 'ownership-unreadable');
+  const recovered = await refreshClosureRecoveryCustody({ rootDir: f.rootDir, ...IDENTITY,
+    shared: failed.shared, now: DEADLINE_MS + 2 * MINUTE,
+    readLaunchImpl: f.args.readLaunchRequestStatusImpl });
+  assert.equal(recovered.closureRecovery.lastEvidence.reason, 'custody-resolved');
+  assert.equal((await maybeDispatchAmaCloser(f.args)).dispatched, true);
+});

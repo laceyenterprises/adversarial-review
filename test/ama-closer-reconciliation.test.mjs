@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { main } from '../bin/reconcile-ama-closer-dispatches.mjs';
-import { AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, amaCloserDispatchFilePath, updateAmaCloserDispatchRecord, findActiveAmaCloserLaunches, reconcileAmaCloserDispatches } from '../src/ama/dispatch-closer.mjs';
+import { closerScanBudgets, AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, amaCloserDispatchFilePath, updateAmaCloserDispatchRecord, findActiveAmaCloserLaunches, reconcileAmaCloserDispatches } from '../src/ama/dispatch-closer.mjs';
 
 test('CLI dry-run preserves bytes; terminal reconciliation is idempotent', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'amacap-reconcile-'));
@@ -176,7 +176,7 @@ function dispatchRecord(root, prNumber, overrides = {}) {
 
 const NOW = '2026-10-03T00:00:00Z';
 
-test('dispatch scan stops ledger probes after the first unreadable result', async (t) => {
+test('dispatch scan isolates individual unreadable results', async (t) => {
   const root = fixture(t, 'breaker');
   for (let i = 1; i <= 4; i += 1) dispatchRecord(root, i);
   let probes = 0;
@@ -185,7 +185,7 @@ test('dispatch scan stops ledger probes after the first unreadable result', asyn
     return { ok: false, reason: 'query-failed' };
   } };
   assert.equal((await findActiveAmaCloserLaunches(root, options)).length, 4);
-  assert.equal(probes, 1);
+  assert.equal(probes, 4);
   options.readLaunchRequestStatusImpl = () => ({ ok: true, row: { status: 'failed' } });
   assert.equal((await findActiveAmaCloserLaunches(root, options)).length, 0,
     'the next scan retries after the ledger recovers');
@@ -318,34 +318,62 @@ test('scan budget stops additional queries and reconciliation logs safe metadata
   assert.equal(probes, 0);
   const events = [];
   await reconcileAmaCloserDispatches(root, { now: NOW, log: { info: event => events.push(JSON.parse(event)) }, ledgerTarget: { backend: 'postgres', source: 'fixture', dsn: 'secret' }, readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'failed' } }) });
-  assert.equal(events.length, 2);
+  assert.equal(events.length, 3);
   assert.equal(events[0].event, 'ama_closer.launch_capacity_reconciled');
   assert.equal(JSON.stringify(events).includes('secret'), false);
 });
 
-for (const snapshotRows of [undefined, []]) {
-  test(`scan budget applies to per-launch probes, not snapshot rows (${snapshotRows ? 'snapshot' : 'sqlite'})`, async t => {
-    const root = fixture(t, 'snapshot-budget');
-    dispatchRecord(root, 1);
-    dispatchRecord(root, 2);
-    let probes = 0;
-    const result = await reconcileAmaCloserDispatches(root, {
-      now: NOW, scanBudgetMs: 0, useLaunchSnapshot: true,
-      readLaunchRequestSnapshotImpl: ({ launchRequestIds }) => {
-        assert.deepEqual(launchRequestIds, ['lrq-1', 'lrq-2']);
-        return { ok: true, ...(snapshotRows ? { rows: snapshotRows } : {}),
-          target: { backend: snapshotRows ? 'postgres' : 'sqlite' } };
-      },
-      readLaunchRequestStatusImpl: () => {
-        probes += 1;
-        return { ok: true, row: { status: 'failed' } };
-      },
-    });
-    assert.equal(probes, snapshotRows ? 2 : 0);
-    assert.equal(result.changed, snapshotRows ? 2 : 0);
-    assert.equal(result.active.length, snapshotRows ? 0 : 2);
+test('snapshot timeout falls back to individual reads and isolates failure', async t => {
+  const root = fixture(t, 'snapshot-timeout');
+  for (let i = 1; i <= 3; i++) dispatchRecord(root, i);
+  const readIds = [];
+  const result = await reconcileAmaCloserDispatches(root, {
+    now: NOW, useLaunchSnapshot: true, snapshotTimeoutMs: 1,
+    readLaunchRequestSnapshotImpl: () => new Promise(() => {}),
+    readLaunchRequestStatusImpl: ({ launchRequestId, launchSnapshot, timeoutMs }) => {
+      assert.equal(launchSnapshot, null);
+      assert.ok(timeoutMs > 0);
+      readIds.push(launchRequestId);
+      return launchRequestId === 'lrq-2' ? { ok: false } : {
+        ok: true, row: { status: 'succeeded' }, retryChain: [],
+      };
+    },
   });
-}
+  assert.deepEqual(readIds, ['lrq-1', 'lrq-2', 'lrq-3']);
+  assert.equal(result.snapshot.outcome, 'timeout');
+  assert.equal(result.individualReads, 3);
+  assert.equal(result.changed, 2);
+  assert.equal(result.unreadable, 1);
+  assert.deepEqual(result.active.map(item => item.prNumber), [2]);
+});
+
+test('total pass budget defers untouched records and resumes fairly', async t => {
+  const root = fixture(t, 'fair-budget');
+  for (let i = 1; i <= 3; i++) dispatchRecord(root, i);
+  let clock = 0;
+  const reads = [];
+  const options = { now: NOW, nowMs: () => clock, scanBudgetMs: 10,
+    readLaunchRequestStatusImpl: ({ launchRequestId }) => {
+      reads.push(launchRequestId);
+      clock += 10;
+      return { ok: true, row: { status: 'running' }, retryChain: [] };
+    } };
+  const first = await reconcileAmaCloserDispatches(root, options);
+  assert.equal(first.deferred, 2);
+  assert.equal(first.unreadable, 0);
+  assert.equal(first.changed, 0);
+  assert.equal(first.active.filter(item => item.scanDeferred).length, 2);
+  const second = await reconcileAmaCloserDispatches(root, options);
+  assert.equal(second.deferred, 2);
+  assert.deepEqual(reads, ['lrq-1', 'lrq-2']);
+});
+
+test('all scan budgets scale with synthetic host load', () => {
+  const idle = closerScanBudgets({ loadOptions: { loadAvg1m: 0, cpuCount: 1, cpuBusyPercent: 100 } });
+  const busy = closerScanBudgets({ loadOptions: { loadAvg1m: 6, cpuCount: 1, cpuBusyPercent: 100 } });
+  assert.deepEqual(idle, { pass: 30_000, snapshot: 10_000, launch: 8_000 });
+  for (const key of Object.keys(idle)) assert.ok(busy[key] > idle[key]);
+});
 
 test('CLI apply refuses a foreign directory owner while dry-run remains available', async (t) => {
   const root = fixture(t, 'owner');

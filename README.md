@@ -4360,6 +4360,8 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- CLOSERSCANREAD-01: closer launch scans fall back from failed batch snapshots to bounded individual reads, defer fairly at a load-aware pass deadline, and report snapshot timing and fallback counts. Dispatch lookup deadlines now scale with load; unreadable ownership still holds custody.
+
 - Correct the post-CI lease probe regression assertion: exhausted GitHub transport retries retain their probe failure and do not emit a lease-contention audit.
 
 - **CLOSERCIWAIT-01 final remediation:** bind claims to the exported exact-head audit body, preserve the settled lease and consumed retry budget through merge, and distinguish pending CI and transport-probe failures from terminal refusals and lease contention. Offline regressions cover these paths; lifecycle states and smoke commands are unchanged, and organic post-deploy acceptance remains pending.

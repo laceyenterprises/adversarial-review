@@ -7535,3 +7535,26 @@ limits, preservation proof, attestation and lease fences are unchanged.
 After deployment, SRE must observe a remediation-publishing closer waiting for
 its exact head's checks, evaluating the predicate after green, and merging in the
 same run. Offline fixtures establish ordering, not a live receipt.
+
+
+### Closer scan deadlines (CLOSERSCANREAD-01)
+
+The launch census uses nominal idle budgets of 30 seconds per pass, 10 seconds
+for its batch snapshot, and 8 seconds per individual launch read. All three
+scale through `loadAwareTimeoutMs`; the snapshot receives at most half the
+remaining pass to preserve fallback time. A failed or timed-out batch is never
+passed to the individual reader as evidence. Each launch receives its own bounded
+read, including retry descendants. Unreadable ownership continues to refuse dispatch.
+
+The total budget defers untouched records without changing their durable state.
+An in-process cursor starts the next census at the first deferred record; restart
+starts a fresh scan. Deferred records retain the existing bounded capacity hold
+and remain same-PR ownership reservations. The all-missing/read-failure safety
+quorum still prevents speculative retirement of missing launches.
+
+`ama_closer.launch_scan` logs snapshot outcome (`ok`, `timeout`, `error`, or
+`unused`), elapsed milliseconds, row count, individual read count and deferred
+count once per completed census. A timeout during custody recovery is retained as
+`scan-snapshot-timeout` diagnostic evidence; it does not authorize a closer.
+After deployment, SRE restarts the watcher through its registered restart path
+and observes closer wakes within two passes. Workers do not perform that live step.

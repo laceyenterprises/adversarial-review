@@ -99,6 +99,8 @@ import {
   readLaunchRequestStatusFromLedger,
   readLaunchRequestStatusFromLedgerAsync,
   readLaunchRequestSnapshotFromLedgerAsync,
+  readLaunchRequestByIdempotencyKeyAsync,
+  readLaunchRequestsForTicketSinceAsync,
 } from '../session-ledger-read-adapter.mjs';
 import {
   dismissStandingChangesRequestedReviewsForHead,
@@ -1965,6 +1967,31 @@ export function listActiveAmaCloserDispatches(rootDir, options = {}) {
   return activeDispatches;
 }
 
+// A pass yields fairly without persisting an ownership verdict for unread records.
+const closerScanCursors = new Map();
+// Nominal idle budgets: 30s/pass, 10s/snapshot, 8s/individual read.
+export function closerScanBudgets(options = {}) {
+  const load = options.loadOptions || {};
+  return {
+    pass: options.scanBudgetMs ?? loadAwareTimeoutMs(30_000, load),
+    snapshot: options.snapshotTimeoutMs ?? loadAwareTimeoutMs(10_000, load),
+    launch: options.launchReadTimeoutMs ?? loadAwareTimeoutMs(8_000, load),
+  };
+}
+async function boundedCloserScanRead(read, timeoutMs, signal) {
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(read),
+      new Promise(resolve => { timer = setTimeout(() => resolve({ ok: false,
+        reason: 'scan-read-timeout' }), timeoutMs); }),
+    ]);
+  } catch (error) {
+    throwIfAborted(signal);
+    return { ok: false, reason: error?.code === 'ETIMEDOUT' ? 'scan-read-timeout' : 'scan-read-error' };
+  } finally { clearTimeout(timer); }
+}
+
 // Reconcile launch liveness only; terminal launch success is not proof of merge.
 // Never release either closer or merge leases here.
 export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
@@ -1972,9 +1999,16 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
   const readStatus = options.readLaunchRequestStatusImpl || readLaunchRequestStatusFromLedgerDefault;
   const counts = { scanned: 0, terminal: 0, missing: 0, unreadable: 0, changed: 0 };
   const active = [];
-  let ledgerUnreadable = false;
+  let missingEvidenceIncomplete = false;
   let launchSnapshot = null;
-  const scanStarted = Date.now();
+  let snapshotAttempted = false;
+  const clock = options.nowMs || Date.now;
+  const scanStarted = clock();
+  const budgets = closerScanBudgets(options);
+  const remaining = () => budgets.pass - (clock() - scanStarted);
+  const snapshotEvidence = { outcome: 'unused', elapsedMs: 0, count: 0 };
+  let individualReads = 0;
+  let deferred = 0;
   const missingCandidates = [];
   let probes = 0;
   let missingProbes = 0;
@@ -2007,7 +2041,7 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
     return true;
     } finally { release(); }
   };
-  const records = listSettledJsonNames(amaCloserDispatchDir(rootDir)).flatMap(name => {
+  let records = listSettledJsonNames(amaCloserDispatchDir(rootDir)).flatMap(name => {
     throwIfAborted(options.signal);
     const dispatchPath = join(amaCloserDispatchDir(rootDir), name);
     const record = readJsonFile(dispatchPath);
@@ -2019,11 +2053,22 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
     catch { /* Preserve the existing lease-less liveness rules. */ }
     return [{ dispatchPath, record, prNumber, lease }];
   });
+  const cursor = closerScanCursors.get(rootDir);
+  const offset = records.findIndex(item => item.dispatchPath === cursor);
+  if (offset > 0) records = [...records.slice(offset), ...records.slice(0, offset)];
+  closerScanCursors.delete(rootDir);
   const launchRequestIds = records.filter(({ record, lease }) => record.state === 'dispatched'
     && (!options.capacityOnly || isAmaCloserLaunchInProgress(record, { ...options, now, lease })))
     .map(({ record }) => record.launchRequestId).filter(Boolean);
   for (const { dispatchPath, record, prNumber, lease } of records) {
     throwIfAborted(options.signal);
+    if (remaining() <= 0) {
+      if (!deferred) closerScanCursors.set(rootDir, dispatchPath);
+      deferred += 1;
+      active.push({ ...record, prNumber, dispatchPath, scanDeferred: true,
+        holdsCapacity: holdsPendingCapacity(record) });
+      continue;
+    }
     counts.scanned += 1;
     const progressOptions = { ...options, now, lease };
     const inProgress = isAmaCloserLaunchInProgress(record, progressOptions);
@@ -2035,9 +2080,14 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
     if (isPreReceiptIntent(record)) {
       const recovery = await reconcilePreReceiptIntent(rootDir, record, { ...options, now,
         logger: options.logger || options.log,
-        ...(Date.now() - scanStarted >= (options.scanBudgetMs ?? 1000)
-          ? { readIntentReceiptImpl: () => ({ ok: false, reason: 'scan-budget-exhausted' }),
-            readLegacyIntentLaunchesImpl: () => ({ ok: false, reason: 'scan-budget-exhausted' }) } : {}),
+        readIntentReceiptImpl: args => boundedCloserScanRead(() =>
+          (options.readIntentReceiptImpl || readLaunchRequestByIdempotencyKeyAsync)(
+            { ...args, timeoutMs: Math.min(budgets.launch, Math.max(1, remaining())) }),
+        Math.min(budgets.launch, Math.max(1, remaining())), options.signal),
+        readLegacyIntentLaunchesImpl: args => boundedCloserScanRead(() =>
+          (options.readLegacyIntentLaunchesImpl || readLaunchRequestsForTicketSinceAsync)(
+            { ...args, timeoutMs: Math.min(budgets.launch, Math.max(1, remaining())) }),
+        Math.min(budgets.launch, Math.max(1, remaining())), options.signal),
       });
       if (recovery.changed) counts.changed += 1;
       counts.preReceipt ||= { recovered: 0, noLaunch: 0, retired: 0, unknown: 0, held: 0 };
@@ -2064,20 +2114,36 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
       throwIfAborted(options.signal);
       // The production reader shares a PostgreSQL snapshot of just these
       // launches and retry descendants. SQLite is already in-process.
-      if ((options.useLaunchSnapshot ?? !options.readLaunchRequestStatusImpl) && !launchSnapshot) {
-        launchSnapshot = await (options.readLaunchRequestSnapshotImpl || readLaunchRequestSnapshotFromLedgerAsync)({ ...options, rootDir, launchRequestIds });
+      if ((options.useLaunchSnapshot ?? !options.readLaunchRequestStatusImpl) && !snapshotAttempted) {
+        snapshotAttempted = true;
+        const started = clock();
+        // Leave at least half the pass for fallback; failure is never reusable evidence.
+        const timeoutMs = Math.min(budgets.snapshot, remaining() / 2);
+        launchSnapshot = await boundedCloserScanRead(() =>
+          (options.readLaunchRequestSnapshotImpl || readLaunchRequestSnapshotFromLedgerAsync)(
+            { ...options, timeoutMs, rootDir, launchRequestIds: [...new Set(launchRequestIds)].slice(0, 100) }),
+        timeoutMs, options.signal);
+        snapshotEvidence.elapsedMs = clock() - started;
+        snapshotEvidence.outcome = launchSnapshot?.ok && Array.isArray(launchSnapshot.rows) ? 'ok'
+          : launchSnapshot?.reason === 'scan-read-timeout' || launchSnapshot?.timedOut ? 'timeout' : 'error';
+        snapshotEvidence.count = launchSnapshot?.rows?.length || 0;
         throwIfAborted(options.signal);
       }
-      const budgetExpired = !Array.isArray(launchSnapshot?.rows) && Date.now() - scanStarted >= (options.scanBudgetMs ?? 1000);
-      if (budgetExpired && !observedTerminal) ledgerUnreadable = true;
-      probe = ledgerUnreadable || budgetExpired ? { ok: false, reason: 'scan-ledger-unreadable' } : withLiveLaunchRetry(await readStatus({
-        includeRetryChain: true, launchSnapshot,
+      const usableSnapshot = launchSnapshot?.ok && Array.isArray(launchSnapshot.rows)
+        && launchSnapshot.roots?.includes(record.launchRequestId) ? launchSnapshot : null;
+      const timeoutMs = Math.min(budgets.launch, Math.max(1, remaining()));
+      if (!usableSnapshot) individualReads += 1;
+      probe = withLiveLaunchRetry(await boundedCloserScanRead(() => readStatus({
+        includeRetryChain: true, launchSnapshot: usableSnapshot, timeoutMs,
         launchRequestId: record.launchRequestId,
         rootDir, hqRoot: options.hqRoot, signal: options.signal,
         ledgerTarget: options.ledgerTarget, ledgerDbPath: options.ledgerDbPath,
         env: options.env || process.env,
-      }));
-      if (!ledgerUnreadable && !budgetExpired && !observedTerminal) probes += 1;
+      }), timeoutMs, options.signal));
+      if (!probe?.ok && snapshotEvidence.outcome === 'timeout') {
+        probe = { ...probe, reason: 'scan-snapshot-timeout' };
+      }
+      if (!observedTerminal) probes += 1;
       throwIfAborted(options.signal);
       if (probe?.ok && probe.row?.ticket_ref && !isAmaHammerLaunchTicket(probe.row.ticket_ref, prNumber)) continue;
       const status = String(probe?.row?.status || '').trim().toLowerCase();
@@ -2111,7 +2177,7 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
         }
       } else {
         counts.unreadable += 1;
-        ledgerUnreadable = true;
+        missingEvidenceIncomplete = true;
       }
     } else if (!observedTerminal && record.state === 'dispatched' && isAmaCloserMissingLrqTimedOut(record, { now })) {
       terminalStatus = 'not-found';
@@ -2132,12 +2198,18 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
         ? launchHoldsCloserCapacity(probe.row, options.processKillImpl)
         : holdsPendingCapacity(record) });
   }
+  // Preserve the existing absence quorum: an incomplete census cannot prove
+  // missing-row retirement. This never suppresses another launch's own read.
   const allMissing = probes > 0 && missingProbes === probes;
   for (const candidate of missingCandidates) {
-    if (!allMissing && !ledgerUnreadable) applyTerminal(candidate.record, candidate.dispatchPath, 'not-found', candidate.probe);
+    if (!allMissing && !missingEvidenceIncomplete) applyTerminal(candidate.record, candidate.dispatchPath, 'not-found', candidate.probe);
     else if (isAmaCloserLaunchInProgress(candidate.record, { ...options, now })) active.push({ ...candidate.record, prNumber: candidate.prNumber, dispatchPath: candidate.dispatchPath, holdsCapacity: holdsPendingCapacity(candidate.record) });
   }
-  return { ...counts, allMissing, active };
+  logAmaCloserDispatchEvent(options.log || options.logger, 'ama_closer.launch_scan', {
+    snapshot: snapshotEvidence.outcome, snapshotElapsedMs: snapshotEvidence.elapsedMs,
+    snapshotCount: snapshotEvidence.count, individualReads, deferred, elapsedMs: clock() - scanStarted,
+  });
+  return { ...counts, allMissing, active, deferred, individualReads, snapshot: snapshotEvidence };
 }
 
 export async function findActiveAmaCloserLaunches(rootDir, options = {}) {

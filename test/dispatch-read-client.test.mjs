@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, symlinkSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -122,6 +122,7 @@ test('caller abort and timeout bound unresolved reads without accepting late abs
   const timedOut = await readDispatchLaunches({}, { dispatchSession, timeoutMs: 5 });
   assert.equal(timedOut.ok, false);
   assert.equal(timedOut.transient, true);
+  assert.equal(timedOut.timedOut, true);
   resolve(absent);
   const aborted = await readDispatchLaunches({}, { dispatchSession: { dispatchLookup: offline }, signal: controller.signal });
   assert.equal(aborted.ok, false);
@@ -228,9 +229,13 @@ test('an actual SDK 0.4.0 deployment loads the dispatch module and fails unavail
   for (const name of ['dispatch-read-client', 'app-sdk-loader', 'app-contract-retry', 'watcher-latency']) {
     copyFileSync(new URL(`../src/${name}.mjs`, import.meta.url), join(root, `src/${name}.mjs`));
   }
+  symlinkSync(fileURLToPath(new URL('../src/load-aware-timeout.mjs', import.meta.url)),
+    join(root, 'src/load-aware-timeout.mjs'));
   execFileSync('tar', ['-xzf', fileURLToPath(new URL('../vendor/agent-os-app-sdk-0.4.0.tgz', import.meta.url)),
     '-C', sdkDir, '--strip-components=1'], { timeout: 5000 });
-  execFileSync(process.execPath, ['--input-type=module', '-e', `
+  // Resolve the timeout helper's own dependencies beside its real source,
+  // even when the outer test runner preserves symlinks for sandbox isolation.
+  execFileSync(process.execPath, ['--no-preserve-symlinks', '--input-type=module', '-e', `
     import assert from 'node:assert/strict';
     import { readDispatchLaunchesSync } from './src/dispatch-read-client.mjs';
     const result = readDispatchLaunchesSync({ launch_request_ids: ['synthetic'] },

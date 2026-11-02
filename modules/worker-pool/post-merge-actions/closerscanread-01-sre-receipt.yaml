@@ -1,0 +1,19 @@
+# Operator-owned recovery receipt; no automated live action.
+operator_steps:
+  - description: >-
+      Merge the adversarial-review companion first or together with agent-os.
+      After normal deployment, SRE reloads the watcher through its registered
+      restart path and retains the next one or two natural census pass logs.
+      Confirm snapshot outcome, elapsed time, row count, individual reads and
+      deferred count, then requested closer wakes for the six previously
+      ownership-unreadable PRs without rescue. Unknown custody must still
+      refuse dispatch. Record the loaded revisions and receipt in the incident
+      report before acknowledging this step. Workers must not perform this
+      live restart or alter leases. The command only displays the handoff.
+    run_as: designated SRE operator
+    command: >-
+      /usr/bin/printf '%s\n' 'CLOSERSCANREAD-01: follow the SRE recovery receipt in docs/RUNBOOK-ama-closure.md; retain natural pass logs and requested closer wakes before acknowledgement.'
+actions: []
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

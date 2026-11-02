@@ -47,3 +47,21 @@ were actually waived. Historical findings and normal merge eligibility remain un
 Activation requires the watcher restart at deploy. SRE retains the next organic
 unchanged-head request's fresh-review and intent-consumed log receipt within the
 dispatch bound, or its visible refusal. Worker validation uses temporary stores.
+
+LABELREARM-01 also records waiver-observation requests here. `request_id` is
+`operator-waiver-observation:` plus the JSON array of current head and sorted
+`[label, eventId]` pairs. `actor` retains the corresponding actor logins. The
+review row reason is `operator-waiver-observation: <labels>`. Only a latest
+delivered current-head review with exclusively registered gated blockers and
+live label applications after that review can create this intent. A transaction
+rechecks the posted review snapshot before resetting it. Existing receipt
+states, expiry, claim consumption and retention apply without schema changes.
+
+The waiver observer checks cached label presence before sharing the discovery
+cycle's asynchronous operator observation. Present labels are reobserved each
+cycle to detect new event IDs; accepted intent remains durably deduplicated.
+Only newly accepted intent clears lane and alert state. Refused, spent and
+already-pending requests preserve both. The observer never requeues an old
+stopped job or changes its stop provenance or round budget. Labels applied
+before the gated review require removal and reapplication. No store shape or
+receipt lifecycle changes are introduced.

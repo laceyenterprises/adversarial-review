@@ -1,3 +1,4 @@
+import { observeOperatorLabelReviewWake } from './operator-label-review-wake.mjs';
 import { repositoryObservationCache } from './repository-state-cache.mjs';
 import { observeTtmReviewLane } from './ttm-owner.mjs';
 import { maybeRunDocsFastPath } from './docs-fast-path.mjs';
@@ -1299,6 +1300,16 @@ export async function processReviewSubject(entry, ctx) {
       const transferredHeadReview = hammerHandoffReviewBypass({ db, rootDir: ROOT,
         repo: repoPath, prNumber, headSha: subject.headSha, row: existing });
       const observeLabelControl = createLabelControlObservationCache(operatorSurface);
+      if (effectiveDomainId === CODE_PR_DOMAIN_ID) {
+        try {
+          await observeOperatorLabelReviewWake({ rootDir: ROOT, db, repo: repoPath, prNumber,
+            headSha: subject.headSha, labelNames: prLabelNames, subjectRef: subject.ref,
+            observeLabelControlImpl: observeLabelControl });
+        } catch (error) {
+          console.warn(`[watcher] operator waiver observation deferred for ${repoPath}#${prNumber}: ${error.message}`);
+        }
+        existing = stmtGetReviewRow.get(repoPath, prNumber) || existing;
+      }
       try {
         await observeOperatorLabelWakes({
           rootDir: ROOT, repo: repoPath, prNumber, subjectRef: subject.ref,

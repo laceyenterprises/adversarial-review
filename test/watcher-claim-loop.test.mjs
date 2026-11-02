@@ -5018,3 +5018,50 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
     } finally { rmSync(tmp, { recursive: true, force: true }); }
   });
 }
+
+
+test('LABELREARM-01: discovery arms a fresh exact-head review from an operator-gated posted pass', () => {
+  const wakeUrl = fileUrl('src', 'operator-label-review-wake.mjs');
+  const body = '## Blocking issues\n- **[live-pack-cross-edit]** operator-label-required:live-pack-edit-approved\n\n## Verdict\nChanges requested';
+  runHoldReleaseRegression({
+    transformRunner: source => source.replaceAll('laceyenterprises/adversarial-review', 'example/project')
+      .replace("name: 'adversarial-review', archived: false", "name: 'project', full_name: 'example/project', archived: false"),
+    transformLoader: source => source.replace('  return nextLoad(url, context);', `
+      if (url === ${JSON.stringify(wakeUrl)}) return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+        import { observeOperatorLabelReviewWake as observe } from ${JSON.stringify(wakeUrl + '?actual')};
+        export function observeOperatorLabelReviewWake(args) {
+          return observe({ ...args, observeLabelControlImpl: async () => ({
+            applied: true, observedRevisionRef: args.headSha, eventId: 'synthetic-label-event', actor: 'fixture-operator',
+            observedAt: new Date(Date.now() - 1000).toISOString(),
+          }) });
+        }
+      `)} };
+      return nextLoad(url, context);
+    `),
+    setup: `
+      globalThis.__holdReleaseLabels = ['risk:medium', 'live-pack-edit-approved'];
+      const reviewed = new Date(Date.now() - 3600000).toISOString();
+      db.prepare(\`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,review_status,
+        review_attempts,reviewer_head_sha,revision_ref,posted_at)
+        VALUES (?,101,?,'claude','open','posted',1,'sha-happy-101','sha-happy-101',?)\`)
+        .run('example/project', reviewed, reviewed);
+      db.prepare(\`INSERT INTO reviewer_passes(repo,pr_number,attempt_number,reviewer_class,pass_kind,
+        started_at,ended_at,status,head_sha,gh_comment_id,body_md,body_captured_at)
+        VALUES (?,101,1,'claude','first-pass',?,?,'completed','sha-happy-101','synthetic-review',?,?)\`)
+        .run('example/project', reviewed, reviewed, ${JSON.stringify(body)}, reviewed);
+    `,
+    verify: `
+      const intents = () => db.prepare('SELECT * FROM explicit_review_intents WHERE pr_number=101').all();
+      assert.equal(intents().length, 1);
+      assert.equal(intents()[0].head_sha, 'sha-happy-101');
+      assert.match(intents()[0].request_id, /^operator-waiver-observation:/);
+      const spawns = () => (globalThis.__watcherClaimLoopReviewerSpawns || [])
+        .filter(s => s.subjectContext.prNumber === 101);
+      assert.equal(spawns().length, 1);
+      assert.equal(spawns()[0].subjectContext.reviewerHeadSha, 'sha-happy-101');
+      await pollOnce(octokit, pollOptions);
+      assert.equal(intents().length, 1);
+      assert.equal(spawns().length, 1, 'second poll must not spawn another reviewer');
+    `,
+  });
+});

@@ -4,21 +4,34 @@ The phase scripts and metered merge invocation emit fixed, version-1 receipts
 through `bin/hammer-progress.mjs` into
 `dispatch/<lrq>/hammer-progress/<run-id>/<milestone>.json` under the resolved HQ
 root. `HQ_WORKER_RUN_ID` and the unambiguous launch identity bind the producer.
-Only completed verify-head, changed-head publication (including server rebase),
-merge invocation and named terminal stop emit receipts. Repetition preserves the
-first receipt, and the producer returns that durable receipt on duplicate calls.
+Receipts cover completed `verify-head`, Git-proven `remediation-committed`,
+`validation-passed`/`validation-failed`, changed-head publication, merge invocation
+and final named terminal stop. `hammer-validate.mjs` observes the local commit
+before validation and records the completed validation result afterward. Exit
+124 (timeout), cleanup uncertainty, signals and spawn failures remain unknown.
+The general progress CLI refuses validation receipt names. Repetition preserves
+the first receipt, and duplicate calls return that durable receipt.
 The metered merge hook accepts `-R` / `--repo` before `pr merge`, including
 attached option values. Receipt failures emit one warning and leave the phase's
 core operation running. Reading scripts or making tool calls emits nothing.
 
 The Agent OS supervisor ingests receipts into `hammerProgress` metadata and
-owns enforcement: 60 minutes from first life to a push, merge attempt or named
-stop, three hours from start, and 40 million total tokens by default. Knobs are
-positive integers in `worker_pool.hammer_limits`. Verify-head alone earns no
-outcome credit. A stop requests the existing termination/drain path, releases
-custody after drain and keeps the existing per-PR lifetime charge. It grants no
-merge authority or refund. The phase/prompt instruction repair is a separate
-change.
+owns enforcement: a nominal 3600-active-second outcome slice and nominal
+60-active-second final exit grace, both sized by the shared load-aware helper.
+Each timely first receipt kind, including verify-head, extends the deadline
+by at most one slice from its timestamp. Repeated or late receipts earn nothing;
+seven fixed receipt names bound renewal. The independent three-hour active wall
+ceiling and 40-million-token ceiling retain precedence and are unchanged.
+`worker_pool.hammer_limits` remains a shared overlay with existing positive
+integer knobs; no new configuration is required. A final terminal stop expires
+as `closer-terminal:<reason>`, preserving existing attempt and lifetime charges.
+A later progress receipt supersedes legacy premature stops (HAMTERMSTOP-01).
+
+HAMMERNOPROGRESS-01 also repairs fixed two-second process census deadlines:
+both one-shot and persistent census reads use `loadAwareTimeoutMs(2000)`.
+Unavailable group observations refuse merge as `controller-observation-unavailable`;
+only actual owner mismatches retain `controller-owner-lost`. No observation
+failure grants merge authority, releases custody early or refunds an attempt.
 
 Deploy this producer and schema before activating the supervisor companion.
 After normal reload, observe natural runs read-only for receipts, named stops,

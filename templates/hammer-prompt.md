@@ -825,9 +825,12 @@ Closed-By: hammer (adversarial-pipe-mode)
 Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking)"
 # Verify the block is contiguous before moving on:
   git log -1 --format=%B | tail -n 6
+  "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-progress.mjs" remediation-committed || true
 fi
 
 ```
+
+The commit helper verifies a local descendant of the reviewed head before recording `remediation-committed`. The bounded validation helper records `validation-passed` or `validation-failed` for completed commands; timeouts remain unknown. Each receipt kind earns one bounded outcome slice per run; repeating it earns no additional time.
 
 Before head validation, export `HAM_COMMIT_PUBLICATION_ONLY=1` and `source "<<RUN_DIR>>/hammer-publish.sh"`. Stop on failure; unset the flag on success. Ordinary remediation retains the conflict-repair guards.
 

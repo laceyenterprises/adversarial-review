@@ -4388,6 +4388,12 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- HAMMERNOPROGRESS-01: verified local commits and completed bounded validation
+  emit finite run-bound progress receipts before first push. Controller process
+  census deadlines scale with load; unavailable observations remain merge
+  refusals without claiming owner loss. See the closure runbook for the
+  companion supervisor's load-aware windows and terminal classifications.
+
 - **LABELREARM-01 final remediation:** waiver observation shares asynchronous label reads after cached presence checks, preserves stopped-job budgets and provenance, and clears backoff only for newly accepted intent. Offline coverage now proves one exact-head reviewer spawn and no duplicate on the next poll; pre-review labels require removal and reapplication.
 
 - **LABELREARM-01:** registered operator-label evidence on an already-reviewed, waiver-only hold now requests one exact-head waiver-observation review through the shared evidence predicate, retaining stopped follow-ups for the fresh review to supersede. Accepted intent exits operator backoff. The fresh review still decides; no label bypasses findings or merge checks.

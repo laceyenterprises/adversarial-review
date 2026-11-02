@@ -192,3 +192,66 @@ test('CLOSERCIWAIT-01: a failure after publication records its step, not publish
   const receipt = JSON.parse(readFileSync(join(root, 'dispatch/lrq_fixture/hammer-progress/wrun_fixture/terminal-stop.json')));
   assert.equal(receipt.reason, 'claim-build-failed');
 });
+
+test('commit receipt requires Git proof above the reviewed head', async t => {
+  const { reportRemediationCommit } = await import('../src/ama/hammer-progress.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-local-commit-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const env = { ...process.env, HQ_ROOT: dir, HAM_HQ_ROOT: dir, HQ_LAUNCH_REQUEST_ID: 'lrq_fixture',
+    AGENT_OS_WORKER_LRQ_ID: 'lrq_fixture', HQ_WORKER_RUN_ID: 'wrun_fixture', HAM_REVIEWED_SHA: 'a'.repeat(40) };
+  const options = { env, cwd: dir };
+  assert.equal(reportRemediationCommit({ ...options, execImpl: () => `${env.HAM_REVIEWED_SHA}\n` }), null);
+  assert.equal(reportRemediationCommit({ ...options, execImpl: () => { throw new Error('missing reviewed commit'); } }), null);
+  let calls = 0;
+  const receipt = reportRemediationCommit({ ...options, execImpl(_bin, args) {
+    calls++;
+    if (args[0] === 'rev-parse') return `${'b'.repeat(40)}\n`;
+    assert.deepEqual(args, ['merge-base', '--is-ancestor', env.HAM_REVIEWED_SHA, 'b'.repeat(40)]);
+    return '';
+  } });
+  assert.equal(calls, 2);
+  assert.equal(receipt.milestone, 'remediation-committed');
+});
+
+for (const code of [0, 1, 124]) {
+  test(`validation helper records completed result ${code}, leaving timeout unknown`, t => {
+    const dir = mkdtempSync(join(tmpdir(), 'hammer-validation-receipt-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+      !/TOKEN|CREDENTIAL|^HAM_|^HQ_|^AGENT_OS_|^LAUNCH_REQUEST_ID$/.test(key)));
+    Object.assign(env, { HQ_ROOT: dir, HQ_LAUNCH_REQUEST_ID: 'lrq_fixture', HQ_WORKER_RUN_ID: 'wrun_fixture' });
+    const result = spawnSync(process.execPath, [join(repoRoot, 'bin/hammer-validate.mjs'), '--',
+      process.execPath, '-e', `process.exit(${code})`], { cwd: dir, env, encoding: 'utf8', timeout: 30_000 });
+    assert.equal(result.status, code, result.stderr);
+    const path = join(dir, 'dispatch/lrq_fixture/hammer-progress/wrun_fixture');
+    assert.equal(existsSync(join(path, 'validation-passed.json')), code === 0);
+    assert.equal(existsSync(join(path, 'validation-failed.json')), code === 1);
+    const fabricated = spawnSync(process.execPath, [join(repoRoot, 'bin/hammer-progress.mjs'), 'validation-passed'],
+      { cwd: dir, env, encoding: 'utf8', timeout: 30_000 });
+    assert.equal(fabricated.status, 64);
+  });
+}
+
+test('terminal classifications remain charged no-merge attempts', () => {
+  for (const reason of ['ci-not-green', 'targeted-validation-failed', 'published', 'controller-owner-lost']) {
+    assert.equal(classifyDeadHammerCause({ failureClass: `closer-terminal:${reason}` }).infra, false);
+  }
+});
+
+test('merge release distinguishes unavailable ownership observation from owner loss', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-release-observation-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const source = readFileSync(join(repoRoot, 'bin/hammer-verify-head.sh'), 'utf8');
+  const start = source.indexOf('ham_release_merge_lease() {');
+  const helper = source.slice(start, source.indexOf('\n}\n', start) + 3).replaceAll('<<ROOT_DIR>>', dir).replace(/<<[A-Z_]+>>/g, 'fixture');
+  assert.ok(start >= 0 && helper.endsWith('}\n'));
+  const node = join(dir, 'owner-fixture');
+  writeFileSync(node, '#!/bin/sh\nexit "$FIXTURE_OWNER_STATUS"\n', { mode: 0o755 });
+  for (const [code, reason] of [[75, 'controller-observation-unavailable'], [125, 'controller-owner-lost']]) {
+    const result = spawnSync('/bin/bash', ['-c', `${helper}\nham_release_merge_lease; status=$?; echo "$status $HAM_PHASE_OUTCOME"`],
+      { env: { PATH: process.env.PATH, HAM_CONTROLLER_RECORD: '/fixture', HAM_NODE_BIN: node,
+        FIXTURE_OWNER_STATUS: String(code) }, encoding: 'utf8', timeout: 5000 });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), `125 ${reason}`);
+  }
+});

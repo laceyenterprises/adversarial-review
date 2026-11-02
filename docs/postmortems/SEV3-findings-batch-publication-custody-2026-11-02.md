@@ -43,7 +43,9 @@ against disposable SQLite, `resolve_status`, and the actual SDK producer view
 paths exactly as production does. All terminal/push states and identities are
 explicitly synthetic. See the [fixture provenance](../../test/fixtures/findings-custody/README.md).
 
-Validation includes the actual public projection, successful single-publisher
+Rescue validation: the unfixed consumer failed four of 99 cases against the actual
+public projection; the repaired consumer passed all 99. Lint has zero errors
+(153 existing warnings), contracts and the offline demo pass. Coverage includes the actual public projection, successful single-publisher
 recovery, relocated display paths, negative repository/LRQ/ticket/key/remote
 cases, restart and duplicate fences, and byte-preserving invalid artifacts.
 Hosted full Node 22/26 suites must complete on the published head before merge.

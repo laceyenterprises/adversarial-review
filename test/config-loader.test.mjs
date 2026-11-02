@@ -6128,6 +6128,24 @@ test('roles.remediator_fallback is declared config: schema default, file overrid
   }
 });
 
+test('roles.remediator_fallback accepts the Gemini route and concrete class in both readers', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gemini-fallback-parity-'));
+  try {
+    const top = join(dir, 'config.yaml');
+    for (const value of ['gemini', 'remediator-gemini']) {
+      writeFileSync(top, `version: 1\nroles:\n  remediator_fallback: [${value}, claude-code]\n`);
+      for (const load of [loadConfig, loadConfigRuntime]) {
+        assert.deepEqual(load({ topPath: top, env: {} }).get('roles.remediator_fallback'), [value, 'claude-code']);
+        writeFileSync(top, 'version: 1\n');
+        assert.deepEqual(load({ topPath: top, env: { AGENT_OS_ROLES_REMEDIATOR_FALLBACK: `${value},claude-code` } }).get('roles.remediator_fallback'), [value, 'claude-code']);
+        writeFileSync(top, `version: 1\nroles:\n  remediator_fallback: [${value}, claude-code]\n`);
+      }
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('roles.remediator_fallback normalizes the corporate alias in YAML and env lists', () => {
   const tmp = freshTmp();
   try {

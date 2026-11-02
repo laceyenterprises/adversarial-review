@@ -3119,3 +3119,6 @@ qualifiers such as Preview, Exp 1206 or Thinking are not reasoning levels and
 remain null. An incomplete execution object stamps an unknown harness; model
 family/display names never fill an absent runtime identity. Existing null effort
 renders n/a, with unchanged verdict headings, persistence fields and lifecycle.
+
+
+REMGEMINI-01 loader parity: both strict and runtime Node configuration readers accept `gemini` and concrete `remediator-gemini` in `roles.remediator_fallback`, coordinated with Agent OS #10087. This changes accepted spelling only; defaults, ordered fallback selection, admission and activation remain unchanged. No persistent schema or lifecycle contract changes.

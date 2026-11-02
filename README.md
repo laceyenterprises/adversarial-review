@@ -4388,6 +4388,15 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- CAPREHEAD-01 rescue: terminal skips and the disabled switch preserve ordinary
+  overdue recovery escalation. Only a dispatched or positively live CAPREHEAD
+  launch retains closure custody and suppresses retry-cap notices. The daemon
+  classifies history using its canonical runtime root and binds the chosen mode
+  plus exact PR coordinates into the prompt; workers need no helper checkout.
+  Dispatch shares the bounded coexistence deadline. Canonical settled verdicts
+  are `approved` and `comment-only`; all existing merge and lifetime gates remain.
+
+
 - CLOSERSCANREAD-01 comment-only follow-up: strict unhandled-rejection regressions verify that snapshot and individual reads can reject after their timeout without crashing or mutating ownership. `Promise.race` already retains rejection handlers after settlement; runtime behavior is unchanged.
 
 - CLOSERSCANREAD-01 final remediation: isolate the census cursor from capacity checks, exclude inactive records before budget deferral, require a complete census for missing-row retirement, and preserve individual failure and timeout evidence. Focused offline regressions cover these guards; lifecycle values and existing smoke promises are unchanged.
@@ -4397,15 +4406,14 @@ Deploy this reader before activating these keys in core's checked-in config.
 ### CAPREHEAD update classification and executable prompt
 
 Branch maintenance classifies complete PR history without running merge proofs
-or inspecting artifacts in a different repository checkout. The dispatch prompt
-binds the repository, PR number and helper path from its verified context.
+or inspecting artifacts in a different repository checkout. The daemon binds repository, PR number, exact source head and selected update
+mode into the dispatch prompt using its canonical launch-provenance root.
 
 
 ### CAPREHEAD-01 correction — squash histories containing hammer commits
 
-The PR-update worker now selects its strategy with
-`bin/cap-rehead-update-mode.mjs`, reusing the existing `isHammerCommit`
-detection through [`primary-change.mjs`](src/ama/primary-change.mjs).
+The daemon selects the strategy with its canonical provenance root, reusing
+the existing `isHammerCommit` detection through [`primary-change.mjs`](src/ama/primary-change.mjs).
 A range containing hammer commits becomes one new builder commit on current
 `origin/main` via `git merge --squash <old-head>` and an explicit
 force-with-lease push. A builder-only range retains merge-main and a
@@ -4428,7 +4436,7 @@ All dispatch preconditions remain unchanged, including
 
 ### CAPREHEAD-01 — bounded recovery after closer retry exhaustion
 
-A settled clean or comment-only PR whose hammer wake reports `retry-exhausted`
+A settled approved or comment-only PR whose hammer wake reports `retry-exhausted`
 can receive one builder PR-update per current head, up to two attempts per PR.
 Recovery requires a non-exhausted review cycle, green required checks (including
 when mergeability is `CONFLICTING`), and proven absence of live closer,
@@ -4573,3 +4581,10 @@ Named missing-input cancellations recover despite retained quota metadata.
 SRE acceptance is passive observation of
 the next natural quota recovery after both repositories deploy and reload.
 See [the closure runbook](docs/RUNBOOK-ama-closure.md).
+
+CAPREHEAD configuration rollout: the Node reader registers `cap_rehead_enabled`
+and `cap_rehead_lifetime_cap` first. A superproject Python/shell strict-loader
+companion must land before either key is placed in shared YAML. Until then use
+`AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_CAP_REHEAD_ENABLED=false` for the
+review-service kill switch; this PR writes no live setting. Normal deployment
+and loaded-service verification precede organic custody/escalation acceptance.

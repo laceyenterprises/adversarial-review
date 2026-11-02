@@ -145,3 +145,8 @@ test('hammer classification needs no commit proofs or target repository checkout
   assert.equal(mode, 'squash');
   assert.equal(calls.length, 2);
 });
+
+
+test('worker-side classifier refuses an absent canonical provenance root', async () => {
+  await assert.rejects(capReheadUpdateMode({}), /Canonical runtime root/);
+});

@@ -2052,7 +2052,8 @@ async function dispatchAmaClosureFor({
       shared,
       log: logger,
     });
-    const capRehead = await maybeDispatchCapReheadImpl({
+    const capRehead = await runCoexistenceOperation('cap-rehead',
+      ({ signal: operationSignal }) => maybeDispatchCapReheadImpl({
       rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
       branch: candidate?.branch, title: candidate?.title, wake,
       reviewState: { ...reviewState, reviewCycleExhausted: reviewCycleKnown ? reviewCycleExhausted : null },
@@ -2061,9 +2062,9 @@ async function dispatchAmaClosureFor({
         ...(candidate?.branchProtection?.requiredContexts || [])],
       mergeable: closureGateMergeability(mergeabilityForGate || {}),
       lifetimeExhausted: ownerCap.lifetimeCapExhausted, cfg, defaultBuilder: cfg.defaultBuilder,
-      reviewStateRow, env, signal, logger, readCurrentPrImpl: fetchCurrentPrStateImpl,
-    });
-    if (capRehead) return withAmaDispatchMetadata({ dispatched: false,
+      reviewStateRow, env, signal: operationSignal, operationTimeoutMs, logger, readCurrentPrImpl: fetchCurrentPrStateImpl,
+    }), { timeoutMs: operationTimeoutMs, parentSignal: signal, operationTracker, logger, repoPath, prNumber });
+    if (capRehead?.dispatched || capRehead?.custody === true) return withAmaDispatchMetadata({ dispatched: false,
       skipMergeAgent: true, recoveryWait: true, capRehead,
       reason: `cap-rehead-${capRehead.dispatched ? 'dispatched' : capRehead.reason}`,
       closureBlocker: `cap-rehead-${capRehead.reason}`,
@@ -3147,7 +3148,7 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
       ? { outcome: 'pr-terminal', terminalReason: 'merged', amaClosureResult }
       : { outcome: 'ama-pending', amaClosureResult };
   }
-  if (amaClosureResult?.capRehead) return { outcome: 'ama-pending', amaClosureResult };
+  if (amaClosureResult?.capRehead?.dispatched || amaClosureResult?.capRehead?.custody === true) return { outcome: 'ama-pending', amaClosureResult };
   const admissionDisagreement = await observeReviewAdmissionContract({ rootDir, repo: repoPath, prNumber,
     headSha: candidate?.headSha || currentRevisionRef, reviewStateRow, result: amaClosureResult, logger,
     now: typeof orphanOptions.now === 'number' ? orphanOptions.now

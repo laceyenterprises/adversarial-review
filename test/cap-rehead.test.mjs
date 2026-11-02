@@ -7,6 +7,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { maybeDispatchCapRehead, capReheadLedgerPath, probeCapReheadOwnership, capReheadCounters, resetCapReheadCountersForTesting } from '../src/ama/cap-rehead.mjs';
 import { loadConfig } from '../src/config-loader.mjs';
+import { operatorNoticeInFlight } from '../src/ama/operator-notice-route.mjs';
+import { hammerOwnerRouteFinalOutcome } from '../src/ama/review-cycle-cap-route.mjs';
 import { resolveMergeAuthorityConfigFromDomain } from '../src/domain-policy.mjs';
 
 beforeEach(resetCapReheadCountersForTesting);
@@ -18,9 +20,10 @@ function fixture(t, overrides = {}) {
   const args = { rootDir, repo: 'example/project', prNumber: 17, headSha: 'a'.repeat(40),
     branch: 'feature/synthetic', title: '[codex] Synthetic change',
     wake: { outcome: 'skipped', reason: 'retry-exhausted' },
-    reviewState: { verdict: 'clean', blockingFindingState: 'known', blockingFindingCount: 0, reviewCycleExhausted: false },
+    reviewState: { verdict: 'comment-only', blockingFindingState: 'known', blockingFindingCount: 0, reviewCycleExhausted: false },
     requiredChecks: [{ name: 'tests', status: 'COMPLETED', conclusion: 'SUCCESS' }],
     requiredCheckContexts: ['tests'], mergeable: 'MERGEABLE', env: {},
+    classifyUpdateModeImpl: async input => { assert.equal(input.rootDir, rootDir); return 'merge-main'; },
     probeOwnershipImpl: async () => ({ owned: false, uncertain: false }),
     readLaunchImpl: async () => ({ ok: true, row: { status: 'succeeded' } }),
     logger: { info: line => events.push(JSON.parse(line)) },
@@ -54,7 +57,9 @@ test('capped clean green head reserves once, emits metrics, and uses a builder P
   assert.match(prompt, /fast-forward/);
   assert.match(prompt, /git merge --squash/);
   assert.match(prompt, /--force-with-lease=/);
-  assert.match(prompt, /cap-rehead-update-mode\.mjs/);
+  assert.match(prompt, /\"updateMode\":\"merge-main\"/);
+  assert.match(prompt, /\"repo\":\"example\/project\"/);
+  assert.match(prompt, /no helper checkout/);
   assert.match(prompt, /no hammer or closer trailers/i);
   assert.equal(f.events[0].event, 'ama.cap_rehead.dispatched');
   assert.equal(f.events[1].event, 'ama.cap_rehead.skipped');
@@ -75,7 +80,7 @@ test('counter reset clears both metrics without changing returned snapshots', as
 for (const [reason, changes] of [
   ['cycle-exhausted', { reviewState: { reviewCycleExhausted: true } }],
   ['blocking-findings', { reviewState: { verdict: 'request-changes', reviewCycleExhausted: false } }],
-  ['blocking-findings', { reviewState: { verdict: 'clean', blockingFindingState: 'unknown', reviewCycleExhausted: false } }],
+  ['blocking-findings', { reviewState: { verdict: 'comment-only', blockingFindingState: 'unknown', reviewCycleExhausted: false } }],
   ['checks-red', { requiredChecks: [] }],
   ['checks-red', { requiredCheckContexts: ['missing'] }],
   ['checks-red', { mergeable: 'CONFLICTING', requiredChecks: [{ name: 'tests', conclusion: 'FAILURE' }] }],
@@ -88,7 +93,8 @@ for (const [reason, changes] of [
   ['builder-unavailable', { title: 'Unknown', defaultBuilder: 'hammer' }],
 ]) test(`skips ${reason}: ${JSON.stringify(changes)}`, async t => {
   const f = fixture(t, changes);
-  assert.equal((await f.run()).reason, reason);
+  const result = await f.run();
+  assert.equal(result?.reason ?? (result === null ? 'disabled' : undefined), reason);
   assert.equal(f.calls.length, 0);
   assert.equal(f.events[0].reason, reason);
 });
@@ -127,7 +133,7 @@ test('refused dispatch is durably charged, never retried, and unknown receipt re
   const f = fixture(t);
   f.args.execFileImpl = async () => { f.calls.push('refused'); throw new Error('synthetic refusal'); };
   assert.equal((await f.run()).reason, 'dispatch-refused');
-  assert.equal((await f.run()).reason, 'already-attempted');
+  assert.equal((await f.run()).reason, 'live-owner');
   assert.equal((await f.run({ headSha: 'b'.repeat(40) })).reason, 'live-owner');
   assert.equal(f.calls.length, 1);
   const ledger = JSON.parse(readFileSync(capReheadLedgerPath(f.args.rootDir, f.args.repo, 17)));
@@ -185,7 +191,8 @@ for (const [reason, live] of [
   ['preflight-unavailable', null],
 ]) test(`fresh preflight refuses ${reason}`, async t => {
   const f = fixture(t, { readCurrentPrImpl: async () => live });
-  assert.equal((await f.run()).reason, reason);
+  const result = await f.run();
+  assert.equal(result?.reason ?? (result === null ? 'disabled' : undefined), reason);
   assert.equal(f.calls.length, 0);
 });
 
@@ -259,4 +266,65 @@ test('offline callers cannot reach the real dispatch transport', async t => {
   const f = fixture(t);
   assert.equal((await f.run({ execFileImpl: undefined })).reason, 'offline-transport-required');
   assert.equal(f.calls.length, 0);
+});
+
+
+for (const verdict of ['approved', 'comment-only']) test(`canonical settled verdict admits: ${verdict}`, async t => {
+  const f = fixture(t); f.args.reviewState.verdict = verdict;
+  assert.equal((await f.run()).dispatched, true);
+});
+
+test('daemon binds squash mode and exact source context without a worker helper', async t => {
+  const f = fixture(t, { classifyUpdateModeImpl: async input => {
+    assert.equal(input.repo, 'example/project'); assert.equal(input.prNumber, 17);
+    assert.equal(input.headSha, 'a'.repeat(40)); assert.ok(input.rootDir); return 'squash';
+  } });
+  assert.equal((await f.run()).dispatched, true);
+  const prompt = readFileSync(f.calls[0].argv[f.calls[0].argv.indexOf('--prompt') + 1], 'utf8');
+  assert.match(prompt, /"updateMode":"squash"/);
+  const ledger = JSON.parse(readFileSync(capReheadLedgerPath(f.args.rootDir, f.args.repo, 17)));
+  assert.equal(ledger.attempts[0].updateMode, 'squash');
+});
+
+test('unreadable history does not reserve or dispatch a maintenance attempt', async t => {
+  const f = fixture(t, { classifyUpdateModeImpl: async () => { throw new Error('synthetic'); } });
+  assert.equal((await f.run()).reason, 'history-unavailable'); assert.equal(f.calls.length, 0);
+  assert.throws(() => readFileSync(capReheadLedgerPath(f.args.rootDir, f.args.repo, 17)), { code: 'ENOENT' });
+});
+
+test('dispatch uses the coexistence budget and preserves uncertain receipt custody', async t => {
+  const f = fixture(t, { operationTimeoutMs: 37, execFileImpl: async (_bin, _argv, options) => {
+    assert.equal(options.timeout, 37); throw new Error('synthetic transport timeout');
+  } });
+  assert.equal((await f.run()).reason, 'dispatch-refused');
+  const ledger = JSON.parse(readFileSync(capReheadLedgerPath(f.args.rootDir, f.args.repo, 17)));
+  assert.equal(ledger.attempts[0].status, 'unacknowledged');
+});
+
+
+for (const status of ['requested', 'running', 'suspended', 'succeeded', 'failed']) {
+  test(`notification custody follows the canonical CAPREHEAD launch: ${status}`, async t => {
+    const f = fixture(t); await f.run();
+    const held = await operatorNoticeInFlight(f.args.rootDir, f.args, {
+      readLaunchRequestStatusImpl: async () => ({ ok: true, row: { status } }),
+    });
+    assert.equal(held, ['requested', 'running', 'suspended'].includes(status) ? 'cap-rehead-in-flight' : null);
+  });
+}
+
+test('live CAPREHEAD custody prevents a duplicate attempt and retry-cap page projection', async t => {
+  const f = fixture(t); await f.run();
+  const live = await f.run({ readLaunchImpl: async () => ({ ok: true, row: { status: 'running' } }) });
+  assert.equal(live.custody, true); assert.equal(f.calls.length, 1);
+  const decision = { actor: 'closure-recovery', reason: 'retry-exhausted', queue: { intent: 'reconcile' } };
+  assert.equal(hammerOwnerRouteFinalOutcome({ capRehead: live, nextAction: decision }), null);
+  assert.equal(hammerOwnerRouteFinalOutcome({ capRehead: { dispatched: false, reason: 'lifetime-cap' }, nextAction: decision }), 'hammer-cap-exhausted');
+});
+
+
+test('a later cycle cap retains an already running CAPREHEAD owner', async t => {
+  const f = fixture(t); await f.run();
+  const live = await f.run({ reviewState: { reviewCycleExhausted: true },
+    readLaunchImpl: async () => ({ ok: true, row: { status: 'running' } }) });
+  assert.equal(live.custody, true); assert.equal(f.calls.length, 1);
 });

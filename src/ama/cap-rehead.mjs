@@ -6,6 +6,10 @@ import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fsExt from 'fs-ext';
+import { SETTLED_SUCCESS_VERDICTS } from './eligibility.mjs';
+import { capReheadUpdateMode } from './cap-rehead-update.mjs';
+import { createHistoryReader } from './history-reader.mjs';
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { classifyCheckRollup } from '../checks-summary.mjs';
 import { probeOrphanOwnership } from './orphan-watchdog.mjs';
@@ -65,6 +69,7 @@ export async function maybeDispatchCapRehead({ rootDir, repo, prNumber, headSha,
   env = process.env, signal, logger = console,
   readCurrentPrImpl = null, probeOwnershipImpl = probeCapReheadOwnership, execFileImpl = execFileAsync,
   readLaunchImpl = readLaunchRequestStatusFromLedgerAsync,
+  classifyUpdateModeImpl = capReheadUpdateMode, operationTimeoutMs = null,
   now = () => new Date().toISOString(),
 } = {}) {
   if (wake?.outcome !== 'skipped' || !['retry-exhausted', 'hammer-retry-cap-exhausted'].includes(wake.reason)) return null;
@@ -76,9 +81,12 @@ export async function maybeDispatchCapRehead({ rootDir, repo, prNumber, headSha,
     })); } catch { /* Observability cannot change dispatch authority. */ }
     return result;
   };
-  if (cfg.capReheadEnabled === false) return report(false, 'disabled');
+  if (await capReheadInFlight(rootDir, { repo, prNumber, headSha }, readLaunchImpl)) {
+    return report(false, 'live-owner', { custody: true });
+  }
+  if (cfg.capReheadEnabled === false) { report(false, 'disabled'); return null; }
   if (reviewState?.reviewCycleExhausted !== false) return report(false, 'cycle-exhausted');
-  if (!['clean', 'comment-only'].includes(reviewState.verdict)
+  if (!SETTLED_SUCCESS_VERDICTS.has(reviewState.verdict)
     || reviewState.blockingFindingState !== 'known' || reviewState.blockingFindingCount !== 0) return report(false, 'blocking-findings');
   if (classifyCheckRollup(requiredChecks, { requiredContexts: requiredCheckContexts }) !== 'SUCCESS') return report(false, 'checks-red');
   if (!['MERGEABLE', 'CONFLICTING'].includes(mergeable)) return report(false, 'mergeability-unknown');
@@ -104,26 +112,32 @@ export async function maybeDispatchCapRehead({ rootDir, repo, prNumber, headSha,
       if (error.code !== 'ENOENT') return report(false, 'ledger-unreadable');
       ledger = { schemaVersion: 1, repo, prNumber, attempts: [] };
     }
-    if (ledger.schemaVersion !== 1 || typeof ledger.repo !== 'string'
+    if (!ledger || typeof ledger !== 'object' || ledger.schemaVersion !== 1 || typeof ledger.repo !== 'string'
       || ledger.repo.toLowerCase() !== repo.toLowerCase() || ledger.prNumber !== prNumber
       || !Array.isArray(ledger.attempts) || ledger.attempts.some(a => typeof a?.headSha !== 'string' || !a.headSha
         || !['reserved', 'dispatched', 'unacknowledged'].includes(a.status)
         || typeof a.workerClass !== 'string' || !Number.isFinite(Date.parse(a.recordedAt))
         || (a.status === 'dispatched' && (typeof a.launchRequestId !== 'string' || !a.launchRequestId)))) return report(false, 'ledger-unreadable');
-    if (ledger.attempts.some(a => a.headSha === headSha)) return report(false, 'already-attempted');
-    if (ledger.attempts.length >= cap) return report(false, 'lifetime-cap');
     const args = { rootDir, repo, prNumber, headSha, branch, reviewStateRow, env, signal, timeoutMs: 8000 };
     // A previous dispatch owns the PR across head moves. A crash before its
     // acknowledgement stays uncertain; do not infer that no worker launched.
     for (const attempt of ledger.attempts) {
       if (!attempt.launchRequestId) return report(false, 'live-owner');
       const launch = await readLaunchImpl({ ...args, launchRequestId: attempt.launchRequestId, includeRetryChain: true });
-      if (launchRequestOwned(launch) !== false) return report(false, 'live-owner');
+      if (launchRequestOwned(launch) !== false) return report(false, 'live-owner', { custody: launchRequestOwned(launch) === true });
     }
+    if (ledger.attempts.some(a => a.headSha === headSha)) return report(false, 'already-attempted');
+    if (ledger.attempts.length >= cap) return report(false, 'lifetime-cap');
     let owner;
     try { owner = await probeOwnershipImpl(args); }
     catch { return report(false, 'live-owner'); }
     if (!owner || owner.owned !== false || owner.uncertain !== false) return report(false, 'live-owner');
+    let updateMode;
+    try {
+      updateMode = await classifyUpdateModeImpl({ rootDir, repo, prNumber, headSha,
+        get: createHistoryReader({ env, signal }) });
+      if (!['squash', 'merge-main'].includes(updateMode)) throw new Error('invalid update mode');
+    } catch { return report(false, 'history-unavailable'); }
     // Ownership reads can yield while a builder pushes or an operator holds
     // the PR. Reserve only against a fresh, still eligible current head.
     let live;
@@ -136,11 +150,13 @@ export async function maybeDispatchCapRehead({ rootDir, repo, prNumber, headSha,
     if (classifyCheckRollup(live.statusCheckRollup, { requiredContexts: requiredCheckContexts }) !== 'SUCCESS') return report(false, 'checks-red');
     if (!['MERGEABLE', 'CONFLICTING'].includes(live.mergeable)) return report(false, 'mergeability-unknown');
     if (signal?.aborted) return report(false, 'aborted');
-    const attempt = { headSha, workerClass, status: 'reserved', recordedAt: now() };
+    const attempt = { headSha, workerClass, updateMode, status: 'reserved', recordedAt: now() };
     ledger.attempts.push(attempt);
     const save = () => writeFileAtomic(file, JSON.stringify(ledger, null, 2) + '\n');
     save(); // fsynced before calling hq; failures/refusals spend this attempt.
     const idempotencyKey = `cap-rehead:${createHash('sha256').update(JSON.stringify([repo, prNumber, headSha])).digest('hex')}`;
+    const promptPath = file.replace(/\.json$/, `-${headSha}.prompt.md`);
+    writeFileAtomic(promptPath, `Verified dispatch context (retain the exact source head):\n${JSON.stringify({ repo, prNumber, oldHead: headSha, branch, updateMode })}\n\n${readFileSync(PROMPT, 'utf8')}`);
     const argv = ['dispatch', '--idempotency-key', idempotencyKey,
       '--worker-class', workerClass, '--task-kind', 'coding',
       '--completion-shape', 'branch-push', '--required-outcome', 'push',
@@ -148,11 +164,11 @@ export async function maybeDispatchCapRehead({ rootDir, repo, prNumber, headSha,
       '--project', 'adversarial-merge-authority', '--repo', repo.split('/').at(-1),
       '--pr', String(prNumber), '--ticket', `CAPREHEAD-PR-${prNumber}`,
       '--parent-session', env.HQ_PARENT_SESSION || 'session:unknown:watcher',
-      '--prompt', PROMPT, '--root', resolveHqRoot(env)];
+      '--prompt', promptPath, '--root', resolveHqRoot(env)];
     if (live.mergeable === 'CONFLICTING') argv.push('--allow-conflicted-base');
     let receipt;
     try {
-      const { stdout } = await execFileImpl(resolveHqBin(env), argv, { env, signal, timeout: 120000, maxBuffer: 1024 * 1024 });
+      const { stdout } = await execFileImpl(resolveHqBin(env), argv, { env, signal, timeout: operationTimeoutMs || loadAwareTimeoutMs(8000), maxBuffer: 1024 * 1024 });
       receipt = readDispatchReceipt(parseDispatchJsonOutput(stdout));
       if (receipt.status.terminal && !receipt.status.succeeded) throw new Error('dispatch refused');
       if (!receipt.launchRequestId) throw new Error('missing dispatch acknowledgement');
@@ -169,4 +185,24 @@ export async function maybeDispatchCapRehead({ rootDir, repo, prNumber, headSha,
     save();
     return report(true, 'retry-exhausted', { workerClass, launchRequestId: receipt.launchRequestId });
   } finally { closeSync(fd); }
+}
+
+
+// Notification only: a known live/retry successor retains custody at any head.
+// Unknown and terminal attempts do not suppress the existing recovery page.
+export async function capReheadInFlight(rootDir, identity, readLaunchImpl = readLaunchRequestStatusFromLedgerAsync) {
+  let ledger;
+  try { ledger = JSON.parse(readFileSync(capReheadLedgerPath(rootDir, identity.repo, identity.prNumber), 'utf8')); }
+  catch { return false; }
+  if (!ledger || typeof ledger !== 'object' || ledger.schemaVersion !== 1 || typeof ledger.repo !== 'string' || ledger.repo.toLowerCase() !== identity.repo?.toLowerCase()
+    || ledger.prNumber !== Number(identity.prNumber) || !Array.isArray(ledger.attempts)) return false;
+  for (const attempt of ledger.attempts) {
+    if (!attempt || typeof attempt.launchRequestId !== 'string' || !attempt.launchRequestId || attempt.status !== 'dispatched') continue;
+    try {
+      const launch = await readLaunchImpl({ rootDir, ...identity, launchRequestId: attempt.launchRequestId,
+        includeRetryChain: true, timeoutMs: loadAwareTimeoutMs(1000) });
+      if (launchRequestOwned(launch) === true) return true;
+    } catch { /* Missing evidence grants no page suppression. */ }
+  }
+  return false;
 }

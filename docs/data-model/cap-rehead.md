@@ -23,11 +23,12 @@ Attempts without a launch ID retain uncertain custody indefinitely.
 No receipt is evidence of a merge or review approval. `hq` receives a stable
 PR/head idempotency key. Normal review and closer eligibility own the new head.
 
-The prompt selects branch maintenance using `bin/cap-rehead-update-mode.mjs`.
+The daemon selects branch maintenance with its canonical runtime root.
 Its complete-history evidence comes from `src/ama/primary-change.mjs` and its
 existing `isHammerCommit` predicate. Classification stops before merge-gate proofs
 or local artifact inspection.
-The dispatch prompt binds its arguments and helper path from verified context.
+The dispatch prompt binds mode and exact repository/PR/branch/head coordinates;
+workers need no helper checkout.
 Hammer histories (including an already
 divergent primary/final merge base) are squashed onto current main as
 one builder commit and pushed with an explicit old-head force-with-lease.
@@ -35,3 +36,11 @@ Builder-only histories retain merge-main and a fast-forward push. Neither
 variant changes this store, refunds an attempt, or advances an exhausted
 review cycle. A squash carries no closer provenance and receives fresh review
 of the whole diff.
+
+Rescue closeout: each new attempt optionally retains `updateMode` (`squash` or
+`merge-main`), resolved with canonical daemon provenance before reservation. Old
+records without it remain valid. The corresponding `<key>-<head>.prompt.md`
+binds repository, PR, branch and old head with the selected mode. Existing
+reserved/dispatched/unacknowledged states and permanent charges are unchanged.
+Only a positively live dispatched launch or retry suppresses cap notifications;
+terminal/unknown evidence and terminal skip reasons retain ordinary escalation.

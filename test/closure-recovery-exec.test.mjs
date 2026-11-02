@@ -656,17 +656,22 @@ test('CAPREHEAD capped wake returns bounded recovery and bypasses closer dispatc
   assert.equal(result.reason, 'cap-rehead-dispatched');
 });
 
-test('CAPREHEAD blocker survives watcher coexistence without orphan dispatch', async t => {
-  const args = closerHeadArgs(t);
-  const result = await resolveMergeAgentCoexistenceForWatcher({ ...args,
-    maybeDispatchAmaClosureForImpl: async () => ({ amaEnabled: true, dispatched: false,
-      capRehead: { dispatched: false, reason: 'cycle-exhausted' },
-      closureBlocker: 'cap-rehead-cycle-exhausted', skipMergeAgent: true }),
-    recoverOrphanImpl: () => { throw new Error('unexpected orphan dispatch'); },
+for (const reason of ['cycle-exhausted', 'disabled', 'lifetime-cap', 'ledger-unreadable', 'checks-red']) {
+  test(`CAPREHEAD terminal skip ${reason} preserves overdue recovery escalation`, async t => {
+    let recoveries = 0;
+    const args = closerHeadArgs(t);
+    const result = await resolveMergeAgentCoexistenceForWatcher({ ...args,
+      orphanOptions: { now: new Date(DEADLINE_MS + MINUTE).toISOString() },
+      maybeDispatchAmaClosureForImpl: async () => ({ amaEnabled: true, dispatched: false,
+        capRehead: { dispatched: false, reason }, skipMergeAgent: true,
+        nextAction: { row: 'R07-stop', action: 'hammer', actor: 'closure-recovery', reason: 'retry-exhausted',
+          head: HEAD, queue: { intent: 'reconcile' },
+          deadline: { at: new Date(DEADLINE_MS).toISOString(), class: 'recovery' } } }),
+      recoverOrphanImpl: async () => { recoveries++; return { outcome: 'operator-page' }; },
+    });
+    assert.equal(recoveries, 1); assert.equal(result.outcome, 'operator-page');
   });
-  assert.equal(result.outcome, 'ama-pending');
-  assert.equal(result.amaClosureResult.closureBlocker, 'cap-rehead-cycle-exhausted');
-});
+}
 
 for (const exhausted of [false, true]) test(`CAPREHEAD real retry-cap decision across repeated watcher ticks (cycle exhausted=${exhausted})`, async t => {
   let launches = 0;
@@ -683,11 +688,12 @@ for (const exhausted of [false, true]) test(`CAPREHEAD real retry-cap decision a
     readCurrentPrImpl: async () => ({ state: 'OPEN', headSha: HEAD, isDraft: false,
       statusCheckRollup: args.candidate.statusCheckRollup, mergeable: 'MERGEABLE', labels: [] }),
     probeOwnershipImpl: async () => ({ owned: false, uncertain: false }),
+    classifyUpdateModeImpl: async () => 'merge-main',
     execFileImpl: async () => { launches++; return { stdout: JSON.stringify({ launchRequestId: 'synthetic-rehead', status: 'running' }) }; },
   });
   const first = await maybeDispatchAmaClosureFor(args);
-  assert.equal(first.capRehead?.dispatched, !exhausted, JSON.stringify(first));
+  assert.equal(first.capRehead?.dispatched, exhausted ? undefined : true, JSON.stringify(first));
   const second = await maybeDispatchAmaClosureFor(args);
-  assert.equal(second.capRehead?.reason, exhausted ? 'cycle-exhausted' : 'already-attempted');
+  assert.equal(second.capRehead?.reason, undefined, 'terminal skip falls through to ordinary recovery');
   assert.equal(launches, exhausted ? 0 : 1);
 });

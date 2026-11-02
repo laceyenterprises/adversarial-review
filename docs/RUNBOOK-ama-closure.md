@@ -7609,3 +7609,30 @@ count once per completed census. A timeout during custody recovery is retained a
 `scan-snapshot-timeout` diagnostic evidence; it does not authorize a closer.
 After deployment, SRE restarts the watcher through its registered restart path
 and observes closer wakes within two passes. Workers do not perform that live step.
+
+### CAPREHEAD final recovery semantics
+
+Terminal/ineligible CAPREHEAD skips, including disabled, cycle/lifetime caps,
+red checks and unreadable evidence, fall through to existing overdue R07
+recovery/escalation. A positively live canonical CAPREHEAD launch (including a
+live retry) retains custody at any head; terminal or unknown evidence cannot
+suppress the existing page. Notification reads recheck that launch before
+delivery. No skip grants merge, review, retry or lease authority.
+
+The daemon resolves `squash` or `merge-main` with its canonical runtime root
+before reserving and binds mode/repo/PR/branch/oldHead into an owned prompt.
+A worker with a moved public head stops without publishing. It never needs a
+review-module checkout or its dependencies. The optional diagnostic CLI requires
+`--root-dir CANONICAL_RUNTIME_ROOT`; unknown provenance refuses classification.
+Submission shares the coexistence operation deadline and retains an unacknowledged
+reservation after ambiguous failure. Canonical settled verdicts are `approved`
+and `comment-only`. No additional retry budget or review waiver is introduced.
+
+Node schema comes first. Before placing either CAPREHEAD leaf in shared YAML,
+land the matching Python/shell strict-reader companion in agent-os. Until then
+the review-service environment kill switch is
+`AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_CAP_REHEAD_ENABLED=false`.
+After ordinary submodule deployment/restart, observe one natural active-builder
+notice suppression and a terminal skip reaching the existing overdue page.
+No synthetic production launch, settings flip or manual reservation repair is
+part of this source change.

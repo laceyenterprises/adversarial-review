@@ -82,6 +82,7 @@ const FAILED_CHECKS_LIMIT = 20;
 // Anything else (dispatched, in flight, waiting on CI, a structural hold) is
 // not a page.
 export function hammerOwnerRouteFinalOutcome(amaClosureResult) {
+  if (amaClosureResult?.capRehead?.dispatched || amaClosureResult?.capRehead?.custody === true) return null;
   // Reporting projection only; this never selects or rearms a workflow.
   const selected = amaClosureResult?.nextAction;
   if (selected?.actor === 'closure-recovery' && selected.queue?.intent === 'reconcile') {

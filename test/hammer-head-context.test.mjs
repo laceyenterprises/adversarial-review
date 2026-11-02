@@ -34,6 +34,10 @@ test(`REBASEPROV-01 coverage fetch retries=${failures} (${failureMessage}) befor
     isTransientGhError, setTimeout: (resolve, ms) => { delays.push(ms); resolve(); },
     reviewedHead, repo: 'fixture/repo', rebaseModule: { proveReviewedRebase },
     fileURLToPath, URL, cliUrl: new URL('../bin/hammer-head-context.mjs', import.meta.url).href,
+    meteredExecFile: (execute, command, args, options) => {
+      assert.equal(options.hammerToken, true);
+      return execute(command, args, options);
+    },
     execFile: null, promisify: () => async (command, args) => {
       if (command === 'python3') {
         assert.deepEqual(Array.from(args.slice(1, 3)), ['--trusted-root', '/trusted/install']);
@@ -153,10 +157,18 @@ if (scenario === 'activity' && args[1] === 'repos/fixture/repo/pulls/1') {
     commit: { verification: { verified: scenario !== 'spoof', reason: 'valid' } } }] }));
 } else fail('unexpected API call');
 `, { mode: 0o755 });
+  const fixtureEnv = { ...process.env, HAM_BASE_HEAD: '', HAM_PR_NUMBER: '', HAM_ROOT_DIR: root, PATH: `${root}:${process.env.PATH}` };
+  for (const name of [
+    'GH_TOKEN', 'GITHUB_TOKEN', 'HAMMER_LACEY_GH_TOKEN', 'MERGE_AGENT_GH_TOKEN',
+    'HAMMER_LACEY_GH_TOKEN_EXPIRES_AT', 'MERGE_AGENT_GH_TOKEN_EXPIRES_AT',
+    'HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND', 'MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND',
+    'HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND',
+  ]) delete fixtureEnv[name];
   return {
+    env: fixtureEnv,
     run: (baseArgs = ['--pr', 'https://github.com/fixture/repo/pull/1'], env = {}) => exec(process.execPath,
       [cli, 'fixture/repo', 'reviewed', 'head', ...baseArgs], {
-        env: { ...process.env, HAM_BASE_HEAD: '', HAM_PR_NUMBER: '', HAM_ROOT_DIR: root, PATH: `${root}:${process.env.PATH}`, ...env }, timeout: 15000,
+        env: { ...fixtureEnv, ...env }, timeout: 15000,
       }),
     root,
     calls: () => JSON.parse(readFileSync(callsFile, 'utf8')),
@@ -255,7 +267,7 @@ test('dispatched prompt exports the daemon root used by completed-round verifica
   const exportLine = prompt.split('\n').find(line => line.startsWith('export HAM_ROOT_DIR='));
   assert.ok(exportLine);
   const { stdout } = await exec('bash', ['-c', `${exportLine}\nexec "$HAM_TEST_NODE" "$HAM_TEST_CLI" fixture/repo reviewed head --pr https://github.com/fixture/repo/pull/1`], {
-    env: { ...process.env, HAM_ROOT_DIR: '', HAM_BASE_HEAD: 'head', HAM_PR_NUMBER: '',
+    env: { ...f.env, HAM_ROOT_DIR: '', HAM_BASE_HEAD: 'head', HAM_PR_NUMBER: '',
       HAM_TEST_NODE: process.execPath, HAM_TEST_CLI: cli, PATH: `${f.root}:${process.env.PATH}` }, timeout: 15000,
   });
   assert.equal(JSON.parse(stdout).proof, 'completed-remediation-round-chain');

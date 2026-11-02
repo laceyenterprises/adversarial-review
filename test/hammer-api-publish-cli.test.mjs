@@ -66,9 +66,16 @@ if (command === 'gh') {
 }
 `, { mode: 0o755 });
   }
+  const fixtureEnv = { ...process.env, PATH: `${root}:${process.env.PATH}` };
+  for (const name of [
+    'GH_TOKEN', 'GITHUB_TOKEN', 'HAMMER_LACEY_GH_TOKEN', 'MERGE_AGENT_GH_TOKEN',
+    'HAMMER_LACEY_GH_TOKEN_EXPIRES_AT', 'MERGE_AGENT_GH_TOKEN_EXPIRES_AT',
+    'HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND', 'MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND',
+    'HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND',
+  ]) delete fixtureEnv[name];
   return {
     run: async (env = {}) => JSON.parse((await exec(process.execPath, [cli, 'fixture/repo', '1'], {
-      env: { ...process.env, PATH: `${root}:${process.env.PATH}`, ...env }, timeout: 20000,
+      env: { ...fixtureEnv, ...env }, timeout: 20000,
     })).stdout),
     calls: () => JSON.parse(readFileSync(callsFile, 'utf8')),
   };
@@ -237,7 +244,8 @@ for (const route of ['api', 'git-explicit', 'git-tracking', 'api-timeout', 'api-
     // A local fake hosting service reconstructs the API tree from the actual
     // mutation payload. Every git operation uses the temporary local remote.
     writeFileSync(join(bin, 'gh'), `#!${process.execPath}
-const fs = require('node:fs'), cp = require('node:child_process');
+import fs from 'node:fs';
+import cp from 'node:child_process';
 const work = ${JSON.stringify(work)}, remote = ${JSON.stringify(remote)}, base = ${JSON.stringify(base)};
 const commentsPath = ${JSON.stringify(commentsPath)}, callsPath = ${JSON.stringify(callsPath)};
 const args = process.argv.slice(2), route = ${JSON.stringify(route)};

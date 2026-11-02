@@ -4459,6 +4459,12 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- **HAMGITTOKEN-01 test fixture:** Inject the metered Git execution seam into
+  rebased-head coverage tests and assert Hammer credential mode. This restores
+  offline coverage of bounded fetch retries after the Git wrapper change.
+  Isolate CLI credential fixtures from worker credentials and use explicit ESM
+  imports in the API publication fixture for Node 26 compatibility.
+
 - **HAMGITTOKEN-01 final remediation:** Bounded rebased-head submodule sync uses
   the Git outcome classifier, preserving `git-credential-refresh-failed` before
   lease release. Bounded fetches accept an unset or empty `HAM_NODE_BIN`, and the

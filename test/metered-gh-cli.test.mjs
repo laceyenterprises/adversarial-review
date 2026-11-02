@@ -13,11 +13,17 @@ function fixture(t, script) {
   const dir = mkdtempSync(join(tmpdir(), 'metered-gh-cli-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   if (script !== null) writeFileSync(join(dir, 'gh'), `#!${process.execPath}\n${script}\n`, { mode: 0o755 });
-  return {
+  const env = {
     ...process.env,
     PATH: dir,
     GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json'),
   };
+  for (const key of ['GH_TOKEN', 'GITHUB_TOKEN', 'HAMMER_LACEY_GH_TOKEN',
+    'MERGE_AGENT_GH_TOKEN', 'HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND',
+    'MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND', 'HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND']) {
+    delete env[key];
+  }
+  return env;
 }
 
 for (const code of [0, 7]) {

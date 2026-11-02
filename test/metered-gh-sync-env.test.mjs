@@ -24,6 +24,11 @@ function fixture(t) {
   });
   const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`,
     GHO_RATE_LIMIT_SHARED_STATE_PATH: explicit, GHO_RATE_LIMIT_THROTTLE_FLOOR: '50' };
+  for (const key of ['GH_TOKEN', 'GITHUB_TOKEN', 'HAMMER_LACEY_GH_TOKEN',
+    'MERGE_AGENT_GH_TOKEN', 'HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND',
+    'MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND', 'HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND']) {
+    delete env[key];
+  }
   return { dir, ambient, explicit, env };
 }
 

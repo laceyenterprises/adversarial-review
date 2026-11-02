@@ -4388,6 +4388,26 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+### CAPREHEAD-01 correction — squash histories containing hammer commits
+
+The PR-update worker now selects its strategy with
+`bin/cap-rehead-update-mode.mjs`, reusing the existing `isHammerCommit`
+detection through [`primary-change.mjs`](src/ama/primary-change.mjs).
+A range containing hammer commits becomes one new builder commit on current
+`origin/main` via `git merge --squash <old-head>` and an explicit
+force-with-lease push. A builder-only range retains merge-main and a
+fast-forward push. Both preserve both sides' behavior, regenerate generated
+files, keep the PR open and add no closer trailers or attestations.
+
+Merging main after hammer commits advances only the final merge base; the
+first hammer's parent still selects the old primary head. Primary-change then
+returns unknown because the merge bases differ. The squash removes hammer
+ancestry and the non-closer head receives full fresh review of the entire diff.
+The selector also recognizes that existing differing-merge-base refusal as
+hammer history. Unreadable history is reported instead of guessed.
+All dispatch preconditions remain unchanged, including
+`reviewCycleExhausted === false`, one attempt per head and the lifetime cap.
+
 - **CAPREHEAD-01 final remediation:** ledger validation matches repository casing
   consistently with its path key, retaining reservations and lifetime charges
   across casing changes. Added a test-only counter reset and isolated offline
@@ -4413,9 +4433,11 @@ and `CAP_REHEAD_LIFETIME_CAP` under
 `roles.build_pack_default_worker_class` applies when the creation title has no
 recognized builder class. Hammer classes are refused.
 
-The committed `templates/cap-rehead-prompt.md` requires a merge of `origin/main`,
-conflict resolution preserving both sides, generator-driven file regeneration,
-affected tests and a fast-forward push. It grants no merge authority and adds
+The committed `templates/cap-rehead-prompt.md` selects the squash refresh above
+for hammer histories and a merge of `origin/main` for builder-only histories.
+It requires conflict resolution preserving both sides, generator-driven file
+regeneration, affected tests and the selected push strategy.
+It grants no merge authority and adds
 no closer trailers or attestations. The normal review → closer path handles
 the resulting head. A head/PR reservation is fsynced before dispatch; failed,
 refused or unacknowledged launches spend the lifetime budget and never loop.

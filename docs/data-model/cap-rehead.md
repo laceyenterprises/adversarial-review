@@ -22,3 +22,13 @@ must have terminal launch/retry evidence before another head can dispatch;
 Attempts without a launch ID retain uncertain custody indefinitely.
 No receipt is evidence of a merge or review approval. `hq` receives a stable
 PR/head idempotency key. Normal review and closer eligibility own the new head.
+
+The prompt selects branch maintenance using `bin/cap-rehead-update-mode.mjs`.
+Its complete-history evidence comes from `src/ama/primary-change.mjs` and its
+existing `isHammerCommit` predicate. Hammer histories (including an already
+divergent primary/final merge-base refusal) are squashed onto current main as
+one builder commit and pushed with an explicit old-head force-with-lease.
+Builder-only histories retain merge-main and a fast-forward push. Neither
+variant changes this store, refunds an attempt, or advances an exhausted
+review cycle. A squash carries no closer provenance and receives fresh review
+of the whole diff.

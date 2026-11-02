@@ -52,6 +52,9 @@ test('capped clean green head reserves once, emits metrics, and uses a builder P
   assert.match(prompt, /git merge --no-ff origin\/main/);
   assert.match(prompt, /Never rebase/);
   assert.match(prompt, /fast-forward/);
+  assert.match(prompt, /git merge --squash/);
+  assert.match(prompt, /--force-with-lease=/);
+  assert.match(prompt, /cap-rehead-update-mode\.mjs/);
   assert.match(prompt, /no hammer or closer trailers/i);
   assert.equal(f.events[0].event, 'ama.cap_rehead.dispatched');
   assert.equal(f.events[1].event, 'ama.cap_rehead.skipped');

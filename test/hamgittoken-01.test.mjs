@@ -163,3 +163,47 @@ test('HAMGITTOKEN-01: controller environment covers direct git calls without inh
   assert.equal(f.count(), 2);
   f.noLeaks(result);
 });
+
+test('HAMGITTOKEN-01: credential helper supports direct executable invocation', t => {
+  const f = fixture(t);
+  const result = spawnSync(resolve('bin/hammer-git-credential.mjs'), ['get'], {
+    env: f.env, encoding: 'utf8', timeout: 10000,
+    input: 'protocol=https\nhost=github.com\n\n',
+  });
+  assert.equal(result.status, 0, result.error?.message || result.stderr);
+  assert.match(result.stdout, /^username=x-access-token\npassword=synthetic-mint-0-1\n\n$/);
+  assert.equal(f.count(), 1);
+  f.noLeaks({ stdout: '', stderr: result.stderr });
+});
+
+for (const fail of ['', '1', 'invalid']) {
+  test(`HAMGITTOKEN-01: rebased submodule sync ${fail || 'success'} preserves classification before lease release`, t => {
+    const f = fixture(t);
+    const rebase = verify.match(/^ham_rebase_head\(\) \{[\s\S]*?^\}/m)[0]
+      .replaceAll('<<REPO>>', 'fixture/repo').replaceAll('<<PR_URL>>', 'https://github.com/fixture/repo/pull/42');
+    const result = f.run(`${bounded}
+${rebase}
+POST_REMEDIATION_SHA=${head}
+HAM_PHASE_OUTCOME=verify-head
+HAM_REBASE_ATTEMPTS=0
+HAM_REBASE_ATTEMPT_CAP=3
+ham_capture_current_base_sha() { HAM_CAPTURED_BASE_SHA=${head}; }
+ham_update_branch_with_retries() { HAM_REBASE_PUBLISHED_HEAD=${head}; }
+ham_settle_rebase_snapshot() { :; }
+ham_is_full_sha() { :; }
+ham_bounded_git_sync() { :; }
+ham_release_merge_lease() { printf 'release:%s\\n' "$HAM_PHASE_OUTCOME"; }
+ham_rebase_head
+status=$?
+printf '%s:%s' "$status" "$HAM_PHASE_OUTCOME"`, { FAIL_REFRESH: fail });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, fail
+      ? 'release:git-credential-refresh-failed\n1:git-credential-refresh-failed'
+      : 'remote accepted\n0:verify-head');
+    assert.equal(f.count(), 1);
+    assert.ok(HAMMER_RETRYABLE_READ_OUTCOMES.has('git-credential-refresh-failed'));
+    assert.deepEqual(JSON.parse(readFileSync(join(f.dir, 'remote.log'), 'utf8')).args,
+      ['submodule', 'update', '--recursive']);
+    f.noLeaks(result);
+  });
+}

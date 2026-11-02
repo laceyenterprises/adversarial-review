@@ -6731,6 +6731,13 @@ existing retryable-abort path. Publication preserves any already-published
 head and its provenance before stopping. Authentication rejection after a
 successful mint remains a Git transport failure. The bounded fetch retains its
 load-aware deadline, transient retry and SIGTERM cleanup before escalation.
+Rebased-head submodule synchronization also uses the classified Git wrapper,
+under its existing 120-second timeout, so mint failure retains the retryable
+reason before lease release. API commit publication runs only with
+`HAM_COMMIT_PUBLICATION_ONLY=1`; its known-published-head branch records the
+pushed attestation, exports both head SHAs and retains the no-merge provenance
+note before stopping on scratch refresh failure. Ordinary audit publication
+does not call the API commit publisher.
 
 After merge, SRE floats the owned submodule and bounces the relevant processes.
 Acceptance requires a closer run exceeding one hour whose verify-head base

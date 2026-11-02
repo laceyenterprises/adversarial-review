@@ -4459,6 +4459,13 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- **HAMGITTOKEN-01 final remediation:** Bounded rebased-head submodule sync uses
+  the Git outcome classifier, preserving `git-credential-refresh-failed` before
+  lease release. Bounded fetches accept an unset or empty `HAM_NODE_BIN`, and the
+  credential helper is executable. Offline regressions also verify that API
+  publication already preserves its pushed head and provenance after a refresh
+  failure. Existing lifecycle states, retry budgets and smoke promises are unchanged.
+
 - **HAMGITTOKEN-01:** Closer Git transports mint credentials on request through
   the existing launch refresh command. Base fetches, publication, history reads
   and controller descendants share the helper; mint failures retain retry

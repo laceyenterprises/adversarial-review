@@ -12,7 +12,7 @@ const SYNC_FUNCTIONS = PROMPT.slice(
   PROMPT.indexOf('ham_fetch_base_with_retries() {'),
 ).replaceAll('<<ROOT_DIR>>', resolve('.')).replaceAll('<<PR_NUMBER>>', '1234');
 
-function runSync(mode) {
+function runSync(mode, nodeBin = process.execPath) {
   const root = mkdtempSync(join(tmpdir(), 'ham-bounded-git-sync-'));
   try {
     const binDir = join(root, 'bin');
@@ -40,14 +40,15 @@ while :; do /bin/sleep 0.1; done
     const fakeSleep = join(binDir, 'sleep');
     writeFileSync(fakeSleep, '#!/bin/sh\nexit 0\n');
     chmodSync(fakeSleep, 0o755);
-    const result = spawnSync('/bin/bash', ['-c', `${SYNC_FUNCTIONS}\nham_bounded_git_sync main`], {
+    const result = spawnSync('/bin/bash', ['-c', `${nodeBin === null ? 'unset HAM_NODE_BIN' : ''}
+${SYNC_FUNCTIONS}\nham_bounded_git_sync main`], {
       cwd: root,
       encoding: 'utf8',
       timeout: 30_000,
       env: {
         ...process.env,
         PATH: `${binDir}:${process.env.PATH}`,
-        HAM_NODE_BIN: process.execPath,
+        HAM_NODE_BIN: nodeBin ?? '',
         HAM_GIT_SYNC_NOMINAL_SECONDS: '1',
         HAM_TEST_MODE: mode,
         HAM_TEST_COUNT: countPath,
@@ -69,6 +70,15 @@ test('bounded git sync gives a timed-out fetch SIGTERM and waits for lock cleanu
   assert.equal(result.lockExists, false);
   assert.match(result.stderr, /git fetch timed out/);
 });
+
+for (const nodeBin of ['', null]) {
+  test(`bounded git sync falls back to node with ${nodeBin === null ? 'unset' : 'empty'} HAM_NODE_BIN`, () => {
+    const result = runSync('transient', nodeBin);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.calls, 2);
+    assert.doesNotMatch(result.stderr, /command not found|exec failed/);
+  });
+}
 
 test('bounded git sync retries transient fetch errors but returns immediately on fatal errors', () => {
   const transient = runSync('transient');

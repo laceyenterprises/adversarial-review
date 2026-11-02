@@ -504,7 +504,7 @@ HAM_GIT_SYNC_NOMINAL_SECONDS="${HAM_GIT_SYNC_NOMINAL_SECONDS:-120}"
 ham_bounded_git_sync() {
   ham_git_sync_attempt=1
   while [ "$ham_git_sync_attempt" -le 2 ]; do
-    ham_git_sync_timeout=$("$HAM_NODE_BIN" <<ROOT_DIR>>/bin/load-aware-timeout.mjs "$HAM_GIT_SYNC_NOMINAL_SECONDS" || true)
+    ham_git_sync_timeout=$("${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/load-aware-timeout.mjs "$HAM_GIT_SYNC_NOMINAL_SECONDS" || true)
     case "$ham_git_sync_timeout" in
       ''|*[!0-9]*|0) ham_git_sync_timeout="$HAM_GIT_SYNC_NOMINAL_SECONDS" ;;
     esac
@@ -529,7 +529,7 @@ ham_bounded_git_sync() {
       my $status = $?;
       alarm 0;
       exit($timed_out ? 124 : ($status & 127 ? 128 + ($status & 127) : $status >> 8));
-    ' "$ham_git_sync_timeout" env HAM_GIT_SYNC_BOUNDED=1 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/metered-gh.mjs exec-git fetch --no-prune --no-tags origin "$@" 2>"$ham_git_sync_stderr"; then
+    ' "$ham_git_sync_timeout" env HAM_GIT_SYNC_BOUNDED=1 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec-git fetch --no-prune --no-tags origin "$@" 2>"$ham_git_sync_stderr"; then
       cat "$ham_git_sync_stderr" >&2
       rm -f "$ham_git_sync_stderr"
       return 0
@@ -555,6 +555,13 @@ ham_bounded_git_sync() {
     ham_git_sync_attempt=$((ham_git_sync_attempt + 1))
   done
   return 1
+}
+
+ham_bounded_submodule_sync() {
+  local ham_submodule_sync_exit=0
+  /usr/bin/perl -e 'alarm shift; exec @ARGV' 120 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec-git submodule update --recursive || ham_submodule_sync_exit=$?
+  if [ "$ham_submodule_sync_exit" -eq 76 ]; then HAM_PHASE_OUTCOME=git-credential-refresh-failed; fi
+  return "$ham_submodule_sync_exit"
 }
 
 ham_fetch_base_with_retries() {
@@ -813,7 +820,7 @@ ham_rebase_head() {
     || ! git diff --quiet || ! git diff --cached --quiet \
     || ! ham_bounded_git_sync "$POST_REMEDIATION_SHA" \
     || ! git checkout --detach "$POST_REMEDIATION_SHA" \
-    || ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 120 git submodule update --recursive \
+    || ! ham_bounded_submodule_sync \
     || [ "$(git rev-parse HEAD)" != "$POST_REMEDIATION_SHA" ]; then
     echo "HAM hard-blocker: cannot sync scratch checkout to the server-rebased head" >&2
     if [ "${HAM_PHASE_OUTCOME:-}" != git-credential-refresh-failed ]; then HAM_PHASE_OUTCOME=rebased-head-sync-failed; fi

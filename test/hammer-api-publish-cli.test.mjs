@@ -198,8 +198,8 @@ console.log(JSON.stringify({ head: { ref: 'worker', sha: ${JSON.stringify(remote
   assert.equal((await git('ls-remote', 'origin', 'refs/heads/worker')).stdout.split(/\s/)[0], remoteHead);
 });
 
-for (const route of ['api', 'git-explicit', 'git-tracking', 'api-timeout', 'api-reset', 'api-tree', 'api-recover']) {
-  const stops = ['api-timeout', 'api-reset', 'api-tree'].includes(route);
+for (const route of ['api', 'git-explicit', 'git-tracking', 'api-timeout', 'api-reset', 'api-tree', 'api-recover', 'api-credential']) {
+  const stops = ['api-timeout', 'api-reset', 'api-tree', 'api-credential'].includes(route);
   test(stops ? `LAC-2086: ${route} preserves publication and stops without a stale push or review`
     : `HAMPREDICATE-01: ${route} publication and rendered audit pass the whole CLI predicate`, async t => {
     const apiRoute = route.startsWith('api');
@@ -321,7 +321,7 @@ else if (args[1] === 'graphql') {
     const faultLoader = join(root, 'scratch-fault.mjs');
     const failureChild = join(root, 'scratch-child.mjs');
     writeFileSync(failureChild, `
-process.stderr.write((process.argv[2] === 'timeout' ? 'scratch fetch timed out' : 'scratch reset refused') + '\\n' + 'repeated finding\\n'.repeat(1000));
+process.stderr.write((process.argv[2] === 'credential' ? 'git-credential-refresh-failed' : process.argv[2] === 'timeout' ? 'scratch fetch timed out' : 'scratch reset refused') + '\\n' + 'repeated finding\\n'.repeat(1000));
 if (process.argv[2] === 'timeout') setTimeout(() => {}, 3000);
 else process.exitCode = 7;
 `);
@@ -338,6 +338,9 @@ cp.execFileSync = (command, args, options) => {
     appendFileSync(${JSON.stringify(scratchCalls)}, JSON.stringify(args) + '\\n');
     if (args[0] === 'fetch' && args[2] !== ${JSON.stringify(reviewed)}) {
       fetches++;
+      if (route === 'api-credential') {
+        return original(process.execPath, [${JSON.stringify(failureChild)}, 'credential'], options);
+      }
       if (route === 'api-timeout' || (route === 'api-recover' && fetches === 1)) {
         return original(process.execPath, [${JSON.stringify(failureChild)}, 'timeout'], { ...options, timeout: 100 });
       }
@@ -410,8 +413,8 @@ exit "$rc"
       assert.equal(result.fallbackHead, remoteHead);
       assert.ok(result.reason.length <= 512);
       assert.doesNotMatch(result.reason, /Maximum call stack|repeated finding/);
-      assert.match(result.reason, route === 'api-timeout' ? /ETIMEDOUT/ : route === 'api-reset' ? /scratch reset refused/ : /fetched tree mismatch/);
-      assert.match(publication.stdout, new RegExp(`STATE=1\\|published-head-sync-failed\\|0\\|${reviewed}\\|${remoteHead}\\|0`));
+      assert.match(result.reason, route === 'api-credential' ? /git-credential-refresh-failed/ : route === 'api-timeout' ? /ETIMEDOUT/ : route === 'api-reset' ? /scratch reset refused/ : /fetched tree mismatch/);
+      assert.match(publication.stdout, new RegExp(`STATE=1\\|${route === 'api-credential' ? 'git-credential-refresh-failed' : 'published-head-sync-failed'}\\|0\\|${reviewed}\\|${remoteHead}\\|0`));
       assert.match(publication.stdout, new RegExp(`HAM-Base-Head: ${reviewed}\nHAM-Pushed-Head: ${remoteHead}\nHAM-CI-Validated: false`));
       assert.ok(publication.stdout.length < 2500, publication.stdout);
       assert.doesNotMatch(publication.stderr, /repeated finding|Maximum call stack/);

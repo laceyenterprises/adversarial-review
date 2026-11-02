@@ -1183,6 +1183,12 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+HAMGITTOKEN-01 final remediation routes bounded rebased-head submodule sync
+through the shared Git classifier. Mint failures retain
+`git-credential-refresh-failed` before lease release and follow the existing
+deferred infrastructure retry path. No lifecycle state, retry budget or existing
+smoke promise changes.
+
 BASEFETCH-01 isolates verify-head base capture in a unique temporary ref while
 retaining the existing origin/base freshness check. Invalid validation evidence
 and failed base capture still force revalidation, with distinct

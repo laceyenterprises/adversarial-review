@@ -4838,6 +4838,11 @@ test('buildMergeAgentPrompt rescue mandate requires keeping data-model + module-
     assert.ok(prompt.includes('docs/data-model/catalog.json'), `catalog.json ref missing for trigger=${trigger}`);
     assert.ok(prompt.includes('validate-data-model-catalog.mjs'), `validator ref missing for trigger=${trigger}`);
     assert.ok(prompt.includes('-walkthrough.md'), `module walkthrough ref missing for trigger=${trigger}`);
+    assert.match(prompt, /<module dir>\/changes\/<TICKET-ID>\.md/);
+    assert.match(prompt, /needed in-place walkthrough\/README section edits satisfies walkthrough currency/);
+    assert.match(prompt, /walkthrough need not change when its existing text needs no correction/);
+    assert.match(prompt, /non-blocking style note, never a blocking finding/);
+    assert.match(prompt, /This adds no blocking condition/);
     assert.ok(
       prompt.includes('skipped superproject-doc obligation'),
       `superproject-doc skip audit missing for trigger=${trigger}`,

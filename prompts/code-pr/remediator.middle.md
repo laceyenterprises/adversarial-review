@@ -28,7 +28,14 @@ check. If the validator script is absent, do not treat that absence as a failing
 check by itself; record the missing validator in your reply so an operator can
 follow up on the repo layout. If your remediation diff changes a module's
 public interface, dispatch flow, or operational contract and that module has
-`modules/<name>/<name>-walkthrough.md`, update the walkthrough too.
+`modules/<name>/<name>-walkthrough.md`, a `<module dir>/changes/<TICKET-ID>.md`
+fragment plus any needed in-place walkthrough/README section edits satisfies
+walkthrough currency. Reviewers accept the fragment; the walkthrough need not
+change when its existing text needs no correction. Follow the convention in
+`docs/walkthroughs/README.md` when available. Do not append ticket sections to
+walkthroughs or READMEs or add shared README change-note entries. An end-of-file
+ticket section is at most a non-blocking style note, never a blocking finding.
+This adds no blocking condition.
 
 If your remediation diff changes an owner's lifecycle states, transitions,
 durable status values, smoke-verified promises or post-deploy verification steps,

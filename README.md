@@ -3483,28 +3483,32 @@ claim-loop, ITP account, spawn/settlement and reviewed-attestation fixtures. The
 assigned/default fixture compares the real posting path's verdict and attestation
 payload with injected effects; it never calls GitHub, a signer or a provider.
 
-### Model/Effort Selector shadow hook (MES-06)
+### Model/Effort Selector review-service hook (MES-06, MES-09)
 
 `src/mes-shadow-hook.mjs` records one Agent OS MES decision per review pass and
-per local remediation round through the stable `hq mes decide --record --json`
-contract (MES-03, `schemaVersion: 1`). It runs after the resolver has chosen
-the execution and reports that execution as `actual`. It is shadow only: the
-CLI's `choice` and `apply` fields are never read back into a launch, so the
-reviewer or remediator runs exactly as it did before.
+per local remediation round through `hq mes decide --record --json`
+(`schemaVersion: 1`). A recorded `apply: true` response can replace the implicit
+model/effort pair. Precedence is service env pins, OSG reviewer/remediator arm,
+MES, then the registry default. An explicit model or effort prevents MES from
+replacing either field. Explicit sources are reported to the CLI for
+`overridden_by`; no runtime policy is read from project files.
 
-- **Review.** `resolveReviewerExecutionAsync` (Claude, Gemini) and the Codex
-  pass-level `resolveReviewerExecution` call record when `reviewer.mjs`
-  supplies the pass's `mes` context through `dispatchReviewerModel`. Other
-  resolver callers (OAuth preparation, OSG arm selection, fallbacks) pass no
-  context and record nothing. An oversized-diff chunked pass records once,
-  from its first chunk, using the whole pass diff. The subject is
+- **Review.** Claude and Codex decide before authentication so model-bound auth
+  uses the selected model. Codex revalidates against the refreshed registry after
+  auth. Oversized chunked passes decide once with the whole diff and reuse the
+  chosen pair. Gemini remains observational. The subject is
   `<owner/repo>/pr/<n>/review/<head>`.
-- **Local remediation.** After the local worker spawns, the runtime records the
-  spawned worker's `modelResolution`, without awaiting it, so the spawned-job
-  record never waits on MES. A descriptor without a resolved model falls back
-  to the request's whole `modelResolution`; fields are never mixed. The subject is
-  `<owner/repo>/pr/<n>/remediation/round-<r>`. Remediation dispatched through
-  `hq` is recorded by the dispatch-path hook (MES-05), not here.
+- **Local remediation.** The runtime awaits the bounded decision before model
+  auth and spawn, then passes the whole resolution to the worker. Claude broker
+  minting uses that final model. The subject is
+  `<owner/repo>/pr/<n>/remediation/round-<r>`. HQ dispatch owns its separate MES
+  hook; round budgets and account routing are unchanged.
+- **Validation.** Applied choices must match the existing non-corporate role,
+  its live registry `allowedModels`, and its per-model
+  `reasoningLevelsByModel`, with effort in `low`, `medium`, `high`, `xhigh`.
+  The outage seed cannot authorize a new MES choice. Invalid policy logs
+  `invalid-policy`; resolver errors log `resolver-error`, retaining the static
+  execution. Codex receives `model_reasoning_effort`; Claude receives `--effort`.
 - **Signals.** Review: diff lines and file count from the reviewed diff, risk
   paths matched against `worker_pool.scope.restricted_paths`, and the change
   kind and builder prefix from the title. Remediation: blocking and
@@ -3533,8 +3537,16 @@ reviewer or remediator runs exactly as it did before.
   in force.
 
 This adds no configuration key, review state, lease state, transition or smoke
-promise. Enforcement (MES-09) is a later ticket. Offline validation is
-`test/mes-shadow-hook.test.mjs`.
+promise. `apply: false` is checked on every launch; decisions are never cached.
+Offline validation is `test/mes-shadow-hook.test.mjs` and
+`test/mes-enforcement.test.mjs`. The provisioned CLI currently returns
+`apply: false` (`enforcement-unregistered`); synthetic enforcement evidence does
+not establish live activation. After normal deployment, the runtime owner can
+inspect natural decision reasons and execution provenance read-only. Enabling
+MES or restarting services remains an operator step for MES-12/MES-13.
+See [the consumer contract](docs/data-model/mes-review-enforcement.md).
+The [operator handoff](modules/worker-pool/post-merge-actions/mes-09-review-enforcement.yaml)
+declares deployment and read-only acceptance without automated activation.
 
 Run selected suites through `node test/run-tests.mjs <test files>` to isolate
 production state from the checkout. Restricted workers can set
@@ -4488,9 +4500,24 @@ Deploy this reader before activating these keys in core's checked-in config.
   cover competing local fetches, stalled transport under simulated load and the
   existing branch-protection 403 fallback; merge authority is unchanged.
 
+- HAM CI repair: align offline test expectations with Claude's explicit high
+  effort argument and the shared `CODEX_MODEL_ID` reviewer/remediator pin.
+
+- MES-09 final comment-only remediation: standalone local Codex/Claude runtime
+  calls resolve implicit defaults before model auth and pass the same pair to
+  spawn. Environment pin checks accept raw `codex` and `claude-code` aliases.
+  Focused offline regressions cover defaults, explicit pairs and pin aliases;
+  lifecycle states and existing smoke promises are unchanged.
+
 - MLR-01 final remediation: status grouping and journal episodes prefer the same subject identity; invalid CLI arguments print usage and return 2. Detached/unreadable Git inspection preserves verified worker liveness. Terminal dirty custody is head-bound and cannot override a current live owner. Focused offline fixtures cover these cases; observation fields, lifecycle states and existing smoke promises are unchanged.
 
 - MLR-01: `merge-lane status [--root <data-root>] [--json]` reads live open-PR inventory and NXA shadow observations. It reports current-head decisions, capped load-scaled deadlines, stable overdue episodes, observed ownerless minutes and clean-verdict-to-merge receipts. Observation/cursor journals are bounded and rotation-safe; matching-head terminal dirty branches provide ownerless evidence when no live owner exists. PRAGE in agent-os is the single overdue pager; the optional NXA overdue alert flag is now inert. Coordinate both repository merges and operator-owned activation before claiming deployment. Closure policy and execution remain unchanged.
+
+MES-09: consume recorded MES apply decisions for implicit Codex/Claude review
+and local remediation defaults. Preserve env and OSG pins, validate role/model/
+effort against the live registry, and retain static execution on optional CLI
+or policy failures. Model-bound auth and launch arguments share the final pair;
+operator activation and live evidence remain pending.
 
 - NXAOWNERREAD-01 final comment-only remediation: the closer launch-reader callback
   accepts omitted options. The stalled-read fixture counts resolver invocations
@@ -4679,7 +4706,7 @@ a hammer push on the same attested chain keeps the cap.
 MES-06: the review service records one shadow Model/Effort Selector decision
 per review pass and per local remediation round through `hq mes decide --record
 --json`. The CLI call is bounded and fails open, and it never changes the
-execution the resolver chose. See "Model/Effort Selector shadow hook (MES-06)".
+execution the resolver chose. See "Model/Effort Selector review-service hook (MES-06, MES-09)".
 
 HAMTERMSTOP-01: the hammer's `terminal-stop` progress receipt is recorded only
 on the closer's explicit final exit (`bin/hammer-terminal-audit.mjs --final`).

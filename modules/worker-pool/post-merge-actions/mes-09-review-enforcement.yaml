@@ -1,0 +1,21 @@
+# Operator handoff only; no automated deployment, restart or activation.
+operator_steps:
+  - description: >-
+      Let the merged adversarial-review revision reach Agent OS through the
+      normal submodule float and managed review-service deployment. Any
+      privileged service refresh remains operator-owned. Keep activation
+      decisions with MES-12/MES-13; this plan does not authorize a config flip.
+      After deployment and separately authorized activation, retain read-only
+      evidence from natural review/remediation decisions: decision reason,
+      overridden_by, and final model/effort provenance. Confirm explicit pins
+      retain priority and apply false retains defaults. Live application and
+      post-application ledger reconciliation remain unverified: the provisioned
+      producer returns apply false with enforcement-unregistered. Record the
+      loaded revision and observations before acknowledging this handoff.
+      The command reads MES status only; it does not deploy or activate.
+    run_as: designated runtime operator
+    command: hq mes status --json
+actions: []
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

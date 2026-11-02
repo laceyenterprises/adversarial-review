@@ -413,6 +413,11 @@ function claudeReasoningPin(env = process.env) {
   ]);
 }
 
+export function hasRemediationEnvironmentPin(className, env = process.env) {
+  return Boolean(['codex', 'codex-reviewer', 'remediator-codex', 'remediator-codex-corp'].includes(className) ? codexModelPin(env) || codexReasoningPin(env)
+    : ['claude-code', 'claude-reviewer', 'remediator-claude', 'remediator-claude-corp'].includes(className) ? claudeModelPin(env) || claudeReasoningPin(env) : false);
+}
+
 function allowedReasoningLevelsForClass(className) {
   if (className === 'remediator-codex' || className === 'codex-reviewer') return CODEX_REASONING_LEVELS;
   if (className === 'remediator-claude' || className === 'claude-reviewer') return CLAUDE_REASONING_LEVELS;
@@ -527,11 +532,16 @@ function resolveRemediationModel(className, {
   hqRoot = env.HQ_ROOT,
   pin = '',
   reasoningPin = '',
+  mesDecision = null,
   nowMs = Date.now(),
   seed = readCommittedWorkerModelSeed(),
   log = console,
 } = {}) {
-  const rawModelPin = String(pin ?? '').trim();
+  const envModelPin = ['codex-reviewer', 'remediator-codex', 'remediator-codex-corp'].includes(className) ? codexModelPin(env)
+    : ['claude-reviewer', 'remediator-claude', 'remediator-claude-corp'].includes(className) ? claudeModelPin(env) : '';
+  const envReasoningPin = ['codex-reviewer', 'remediator-codex', 'remediator-codex-corp'].includes(className) ? codexReasoningPin(env)
+    : ['claude-reviewer', 'remediator-claude', 'remediator-claude-corp'].includes(className) ? claudeReasoningPin(env) : '';
+  const rawModelPin = String(envModelPin || pin || '').trim();
   const modelPin = rawModelPin ? nonEmptyModelString(rawModelPin) : null;
   let registryFailure;
   const fail = (reason) => {
@@ -559,8 +569,8 @@ function resolveRemediationModel(className, {
   const useRegistry = registryAvailable;
   const spec = useRegistry ? registrySpec : seedSpec;
   const source = useRegistry ? 'registry' : 'committed-seed';
-  const model = modelPin || nonEmptyModelString(spec?.defaultModel);
-  const modelSource = modelPin ? 'env-pin' : source;
+  let model = modelPin || nonEmptyModelString(spec?.defaultModel);
+  let modelSource = modelPin ? 'env-pin' : source;
   if (!model) fail('registry and committed seed have no valid class defaultModel');
   for (const [candidate, authority] of [[registrySpec, 'registry'], [spec, source]]) {
     if (candidate?.allowedModels !== undefined
@@ -568,10 +578,30 @@ function resolveRemediationModel(className, {
       fail(`resolved model ${JSON.stringify(model)} is outside ${authority} allowedModels${modelPin ? '; correct or unset explicit model pin' : ''}`);
     }
   }
-  const pinnedReasoning = normalizeReasoningLevel(className, reasoningPin, 'env', nowMs);
-  const reasoning = modelPin || pinnedReasoning.resolvedReasoningLevel !== null
+  const pinnedReasoning = normalizeReasoningLevel(className, envReasoningPin || reasoningPin, 'env', nowMs);
+  let reasoning = modelPin || pinnedReasoning.resolvedReasoningLevel !== null
     ? pinnedReasoning
     : normalizeReasoningLevel(className, spec?.defaultReasoningLevel, source, nowMs);
+  // MES replaces only an implicit pair. Never let a malformed response turn
+  // optional policy into a launch failure or use the outage seed as authority.
+  if (mesDecision?.recorded === true && mesDecision.decision?.apply === true
+    && !rawModelPin && !envReasoningPin && !String(reasoningPin || '').trim()) {
+    const choice = mesDecision.decision.choice;
+    const valid = registryAvailable && !className.includes('gemini') && !className.includes('corp')
+      && choice?.workerClass === className
+      && typeof choice.model === 'string' && nonEmptyModelString(choice.model) === choice.model
+      && Array.isArray(registrySpec?.allowedModels) && registrySpec.allowedModels.includes(choice.model)
+      && ['low', 'medium', 'high', 'xhigh'].includes(choice.effort)
+      && Array.isArray(registrySpec?.reasoningLevelsByModel?.[choice.model])
+      && registrySpec.reasoningLevelsByModel[choice.model].includes(choice.effort);
+    if (valid) {
+      model = choice.model;
+      modelSource = 'mes';
+      reasoning = { resolvedReasoningLevel: choice.effort, reasoningSource: 'mes' };
+    } else {
+      try { log.warn?.('[mes] invalid-policy; execution unchanged'); } catch { /* optional logging */ }
+    }
+  }
   if (modelSource === 'committed-seed') {
     warnRateLimited(`model-seed:${className}`, nowMs,
       `[worker-model] WARNING: ${className} modelSource=committed-seed model=${model}; governed registry unavailable`, log);

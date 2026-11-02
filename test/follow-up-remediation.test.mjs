@@ -3919,6 +3919,8 @@ test('remediation runtime local mode preserves the claude-code-remediation prove
     '--dangerously-skip-permissions',
     '--model',
     'claude-opus-5-5',
+    '--effort',
+    'high',
   ]);
 });
 

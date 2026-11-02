@@ -1299,16 +1299,17 @@ export async function processReviewSubject(entry, ctx) {
 
       const transferredHeadReview = hammerHandoffReviewBypass({ db, rootDir: ROOT,
         repo: repoPath, prNumber, headSha: subject.headSha, row: existing });
+      const observeLabelControl = createLabelControlObservationCache(operatorSurface);
       if (effectiveDomainId === CODE_PR_DOMAIN_ID) {
         try {
-          observeOperatorLabelReviewWake({ rootDir: ROOT, db, repo: repoPath, prNumber, headSha: subject.headSha });
+          await observeOperatorLabelReviewWake({ rootDir: ROOT, db, repo: repoPath, prNumber,
+            headSha: subject.headSha, labelNames: prLabelNames, subjectRef: subject.ref,
+            observeLabelControlImpl: observeLabelControl });
         } catch (error) {
           console.warn(`[watcher] operator waiver observation deferred for ${repoPath}#${prNumber}: ${error.message}`);
         }
-        // The intent may have committed before a follow-up re-arm read failed.
         existing = stmtGetReviewRow.get(repoPath, prNumber) || existing;
       }
-      const observeLabelControl = createLabelControlObservationCache(operatorSurface);
       try {
         await observeOperatorLabelWakes({
           rootDir: ROOT, repo: repoPath, prNumber, subjectRef: subject.ref,

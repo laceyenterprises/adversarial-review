@@ -2503,20 +2503,28 @@ retains the lease inside the 30-minute bound and releases for retry at expiry;
 unreadable fresh receipted launch reservations retain fleet capacity.
 
 LABELREARM-01: when the latest delivered exact-head review has only registered
-operator-gated blocking findings, discovery reads each required label through
-`readFollowUpOperatorLabel`. Every label must still be present, with an event ID,
-actor and application time strictly after that review. The shared evidence
-predicate also authorizes stopped follow-up rearming; its writer rechecks live
-presence and head before requeue. Missing, removed, stale or incomplete evidence
-retains the hold. Mixed actionable blockers retain normal remediation.
+operator-gated blocking findings, discovery first checks that every required
+label appears in the cached PR labels. It then shares the asynchronous operator
+label observation cache with the generic wake and retrigger consumers, without
+additional synchronous GitHub reads. Every label must still be present, with an
+event ID, actor, matching head and application time strictly after that review.
+Missing, removed, stale or incomplete evidence retains the hold. If a label was
+applied before the gated review, remove and reapply it to request observation.
+Mixed actionable blockers retain normal remediation. Present labels are observed
+once per discovery cycle so a new remove/reapply event remains visible; no
+cross-cycle cache hides new gestures.
 
 Discovery requests one `operator-waiver-observation` exact-head review through
 `requestReviewRereview`, atomically recording an existing explicit-review intent
 keyed by head and label event IDs. The receipt survives restarts and prevents an
 unchanged gesture from requesting another review, even after refusal or
-consumption. No new budget or merge override is granted. Accepted intent clears
-the operator-blocked lane before posted-row admission. The fresh reviewer reads
-live labels again; historical findings are never erased by label presence.
+consumption. No new budget or merge override is granted. Only newly accepted
+intent clears the operator-blocked lane and alert debounce before posted-row
+admission; spent, refused or already-pending requests leave both intact. Stopped
+follow-up jobs retain their stop code and round count, including at the cap:
+the fresh review determines subsequent work rather than requeueing an old gated
+review body. The fresh reviewer reads live labels again; historical findings
+are never erased by label presence.
 After ordinary deployment, SRE observes the next natural label application on
 an already-reviewed gate-held PR scheduling review within one watcher cycle,
 without a head change or rescue. This live receipt remains pending; no worker
@@ -4380,7 +4388,9 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
-- **LABELREARM-01:** registered operator-label evidence on an already-reviewed, waiver-only hold now requests one exact-head waiver-observation review and re-arms an eligible stopped follow-up through the shared evidence predicate. Accepted intent exits operator backoff. The fresh review still decides; no label bypasses findings or merge checks.
+- **LABELREARM-01 final remediation:** waiver observation shares asynchronous label reads after cached presence checks, preserves stopped-job budgets and provenance, and clears backoff only for newly accepted intent. Offline coverage now proves one exact-head reviewer spawn and no duplicate on the next poll; pre-review labels require removal and reapplication.
+
+- **LABELREARM-01:** registered operator-label evidence on an already-reviewed, waiver-only hold now requests one exact-head waiver-observation review through the shared evidence predicate, retaining stopped follow-ups for the fresh review to supersede. Accepted intent exits operator backoff. The fresh review still decides; no label bypasses findings or merge checks.
 
 - Correct the post-CI lease probe regression assertion: exhausted GitHub transport retries retain their probe failure and do not emit a lease-contention audit.
 

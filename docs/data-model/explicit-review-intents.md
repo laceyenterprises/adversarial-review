@@ -56,3 +56,12 @@ delivered current-head review with exclusively registered gated blockers and
 live label applications after that review can create this intent. A transaction
 rechecks the posted review snapshot before resetting it. Existing receipt
 states, expiry, claim consumption and retention apply without schema changes.
+
+The waiver observer checks cached label presence before sharing the discovery
+cycle's asynchronous operator observation. Present labels are reobserved each
+cycle to detect new event IDs; accepted intent remains durably deduplicated.
+Only newly accepted intent clears lane and alert state. Refused, spent and
+already-pending requests preserve both. The observer never requeues an old
+stopped job or changes its stop provenance or round budget. Labels applied
+before the gated review require removal and reapplication. No store shape or
+receipt lifecycle changes are introduced.

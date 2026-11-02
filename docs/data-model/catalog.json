@@ -21,6 +21,7 @@
       "schemaSurface": "src/explicit-review-intent.mjs",
       "relatedSchemaSurfaces": [
         "src/review-state.mjs",
+        "src/operator-label-review-wake.mjs",
         "src/pollonce-phases.mjs",
         "src/reviewed-head-dispatch-gate.mjs"
       ],

@@ -16,15 +16,14 @@ import { repositoryObservationCache } from './repository-state-cache.mjs';
 // returns at once, never throws, and its promise never rejects. Sink, alert and
 // evidence failures are swallowed. It prints nothing: CLI stdout stays the
 // caller's, and the JSONL log is the only record. Under the offline test runner it is inert
-// unless a test installs a sink. Overdue decisions reach the existing
-// closure-wait alert path (debounce, refund, retry) only when the rollout owner
-// sets AMA_NEXT_ACTION_OVERDUE_ALERTS=1; a deadline never gates execution.
-import { appendFile, mkdir, rename, stat } from 'node:fs/promises';
+// unless a test installs a sink. PRAGE-01 owns overdue paging; the legacy
+// AMA_NEXT_ACTION_OVERDUE_ALERTS switch is inert. Deadlines never gate execution.
+import { appendShadowRecord } from './merge-lane-journal.mjs';
+import { captureMergeLaneObservation } from './merge-lane-observation.mjs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { deriveNextActionSnapshot, nextAction } from './pr-next-action.mjs';
 import { fromLegacyClosureOwner, markNextActionShadowTestSink, snapshotLaunchReferenceRead } from './pr-next-action-consumer.mjs';
-import { observeClosureWait } from './ama/closure-wait.mjs';
 import { checkPrimaryChange } from './ama/primary-change.mjs';
 
 export const NEXT_ACTION_SHADOW_SCHEMA = 'nxa-shadow/v1';
@@ -71,21 +70,11 @@ function remember(set, key) {
 }
 
 async function appendBounded(rootDir, record) {
-  const dir = join(rootDir, 'data', 'next-action-shadow');
-  const file = nextActionShadowLogPath(rootDir);
-  await mkdir(dir, { recursive: true });
-  const size = await stat(file).then(info => info.size, () => 0);
-  // One rotation keeps the log under twice the limit.
-  if (size >= NEXT_ACTION_SHADOW_MAX_BYTES) await rename(file, `${file}.1`);
-  await appendFile(file, `${JSON.stringify(record)}\n`);
+  return appendShadowRecord(rootDir, 'disagreements.jsonl', record);
 }
 
 const inertUnderTest = (sink, env) => !sink && !testSink && Boolean(env?.NODE_TEST_CONTEXT);
 
-async function deliverOverdue(text, options) {
-  const { deliverAlert } = await import('./alert-delivery.mjs');
-  return deliverAlert(text, { payload: { source: 'nxa-next-action-overdue', dedupKey: options?.dedupKey ?? null } });
-}
 
 export function caseKeyOf(record) {
   return createHash('sha256').update(JSON.stringify([record.subjectKey, record.head,
@@ -236,7 +225,7 @@ export function noteNextActionLegacy({ source, subjectKey, head, legacy, env = p
  */
 export function shadowNextAction({ source, legacy = null, snapshot = null, passSnapshot = null, evidence = null, shared = null,
   repo = null, prNumber = null, rootDir = null, now = Date.now, env = process.env,
-  sink = null, observeOverdueImpl = observeClosureWait, overduePageImpl = deliverOverdue } = {}) {
+  sink = null } = {}) {
   let sharedPromise;
   let adapted;
   try {
@@ -253,6 +242,11 @@ export function shadowNextAction({ source, legacy = null, snapshot = null, passS
     const shared = await sharedPromise;
     const observedMs = now();
     const { decision } = shared;
+    // Observation is independent of disagreement sinks and never affects routing.
+    if (rootDir && !env?.NODE_TEST_CONTEXT) {
+      try { await captureMergeLaneObservation({ rootDir, shared, repo, prNumber, observedMs }); }
+      catch { /* Missing samples remain missing evidence. */ }
+    }
     const outcome = { decision, disagreement: null, notes: [], overdue: null, sinkError: null, alert: null };
     outcome.disagreement = compare(source, adapted, shared, observedMs);
     const noteKey = `${shared.snapshot?.subjectKey}@${decision.head}`;
@@ -271,21 +265,6 @@ export function shadowNextAction({ source, legacy = null, snapshot = null, passS
     for (const entry of [outcome.disagreement, ...outcome.notes, outcome.overdue]) {
       if (!entry || !write) continue;
       try { await write(entry); } catch (error) { outcome.sinkError = error; }
-    }
-    const overdue = outcome.overdue;
-    if (overdue && env?.[NEXT_ACTION_OVERDUE_ALERTS_ENV] === '1' && rootDir && repo && prNumber != null && overdue.head) {
-      const next = overdue.next;
-      try {
-        outcome.alert = await observeOverdueImpl({ rootDir, repo, prNumber, headSha: overdue.head,
-          reason: `NXA-02 next action overdue: action=${next.action} actor=${next.actor} reason=${next.reason} ` +
-            `head=${overdue.head.slice(0, 12)} age_minutes=${Math.floor(overdue.ageMs / 60_000)} decision=${next.decisionKey}`,
-          waitClass: `next-action-overdue:${next.action}:${next.reason}`, immediate: true,
-          pageImpl: overduePageImpl, env, now: observedMs });
-      } catch (error) {
-        // closure-wait refunded its reservation; the next pass retries delivery.
-        reportedOverdue.delete(overdueKey);
-        outcome.alert = { error };
-      }
     }
     return outcome;
   })().catch(() => null);

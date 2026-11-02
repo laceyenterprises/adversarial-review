@@ -4441,6 +4441,8 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- MLR-01: `merge-lane status [--root <data-root>] [--json]` reads live open-PR inventory and NXA shadow observations. It reports current-head decisions, capped load-scaled deadlines, stable overdue episodes, observed ownerless minutes and clean-verdict-to-merge receipts. Observation/cursor journals are bounded and rotation-safe; terminal launch dirty branches remain ownerless. PRAGE in agent-os is the single overdue pager; the optional NXA overdue alert flag is now inert. Coordinate both repository merges and operator-owned activation before claiming deployment. Closure policy and execution remain unchanged.
+
 - NXAOWNERREAD-01 final comment-only remediation: the closer launch-reader callback
   accepts omitted options. The stalled-read fixture counts resolver invocations
   separately from source reads, verifying the bounded refresh attempts without

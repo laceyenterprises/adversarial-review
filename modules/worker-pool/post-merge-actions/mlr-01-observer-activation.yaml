@@ -1,0 +1,23 @@
+# Operator-only coordinated activation; no automatic restart or live probe.
+operator_steps:
+  - description: >-
+      Verify both declared MLR-01 repository PRs merged before acknowledging completion.
+      Allow normal reintegration to deploy both revisions, including the public worker
+      custody projection before its review-service consumer. Identify affected service
+      owners and registered restart paths in scripts/os-restart.sh; SRE alone performs
+      any required reload, restart or alert provisioning. Then retain read-only
+      hq merge-lane status --json output with non-null source.generation, prs array and
+      flow.ownerlessMinutes24h. Compare natural observer passes with exporter metrics,
+      observed-interval coverage and PRAGE-01 receipts. Verify maintenance drains
+      suppress pages and unchanged overdue episodes retain one receipt when naturally
+      observed; record unexercised conditions honestly. Do not inject synthetic pages.
+      Page totals remain unavailable through the existing aggregate read contract.
+      Attach both merged revisions and the read-only evidence before acknowledgement.
+      The command displays this handoff only.
+    run_as: designated SRE operator
+    command: >-
+      /usr/bin/printf '%s\n' 'MLR-01: verify both repository merges and coordinated deployment, then retain hq merge-lane status --json and natural exporter/PRAGE evidence; service activation belongs to SRE.'
+actions: []
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

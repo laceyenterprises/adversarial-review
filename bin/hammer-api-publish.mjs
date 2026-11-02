@@ -52,5 +52,7 @@ try {
   }
   process.stdout.write(`${JSON.stringify({ ...result, previousHead })}\n`);
 } catch (error) {
-  process.stdout.write(`${JSON.stringify({ route: 're-review', reason: hammerPublicationFailureReason(error), ...fallback, previousHead })}\n`);
+  process.stdout.write(`${JSON.stringify({ route: 're-review', reason: hammerPublicationFailureReason(error),
+    ...(error.gitCredentialRefreshFailed ? { phaseOutcome: 'git-credential-refresh-failed' } : {}),
+    ...fallback, previousHead })}\n`);
 }

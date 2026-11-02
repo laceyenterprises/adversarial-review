@@ -29,26 +29,32 @@ if (action === 'wait' || action === 'record' || action === 'limited') {
   }
 } else if (action === 'exec' || action === 'exec-hammer' || action === 'exec-git') {
   let terminationSignal;
+  let terminationTimer;
   const execute = (command, argv, options) => new Promise((resolve, reject) => {
     if (action === 'exec-hammer' && command === 'gh' && isPrMerge(argv)) {
       reportHammerProgress('merge-attempted');
     }
     const child = execFile(command, argv, options, (err, stdout, stderr) => {
       for (const [signal, cancel] of cancellations) process.removeListener(signal, cancel);
+      clearTimeout(terminationTimer);
       if (err) reject(Object.assign(err, { stdout, stderr }));
       else resolve({ stdout, stderr });
     });
     const cancellations = ['SIGTERM', 'SIGINT'].map(signal => [signal, () => {
       // Preserve the interruption cause even though cleanup escalates to SIGKILL.
       terminationSignal ||= signal;
-      child.kill('SIGKILL');
+      child.kill(action === 'exec-git' ? signal : 'SIGKILL');
+      // Finish Git cleanup before the bounded shell's five-second escalation.
+      if (action === 'exec-git' && !terminationTimer) terminationTimer = setTimeout(() => child.kill('SIGKILL'), 4000);
     }]);
     for (const [signal, cancel] of cancellations) process.on(signal, cancel);
   });
   try {
     const result = await meteredExecFile(execute, action === 'exec-git' ? 'git' : 'gh', args, {
       ...(action !== 'exec' ? { hammerToken: true } : {}),
-      timeout: 30_000, killSignal: 'SIGKILL', encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+      // The bounded shell fetch owns its load-aware deadline and TERM cleanup.
+      timeout: action === 'exec-git' && process.env.HAM_GIT_SYNC_BOUNDED === '1' ? 0 : 30_000,
+      killSignal: 'SIGKILL', encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
     });
     process.stdout.write(result.stdout || '');
     process.stderr.write(result.stderr || '');

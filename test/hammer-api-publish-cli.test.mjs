@@ -42,6 +42,7 @@ const fail = message => { process.stderr.write(message); process.exit(1); };
 if (scenario === 'recover' && ['pr', 'mutation', 'verification', 'fetch-before', 'fetch-published'].includes(key) && attempt === 1)
   fail(command === 'git' ? 'fatal: early EOF' : 'TLS handshake timeout');
 if (key === target) {
+  if (scenario === 'credential') fail('git-credential-refresh-failed\\n');
   if (scenario === 'exhaust') fail('HTTP 503 Service Unavailable');
   if (scenario === 'permanent') fail(command === 'git' ? 'fatal: Authentication failed' : 'HTTP 403 Forbidden');
   if (scenario === 'ambiguous' && attempt === 1) fail('TLS handshake timeout');
@@ -79,8 +80,10 @@ test('API publisher refreshes the entitled credential for Git fetch as well as G
     HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: 'printf synthetic-refreshed-hammer',
     GH_TOKEN: 'synthetic-ambient-worker' })).route, 'published');
   for (const call of f.calls().filter(call => ['pr', 'mutation', 'verification'].includes(call.key) || call.key.startsWith('fetch-'))) {
-    assert.equal(call.freshCredential, true, call.key);
-    if (call.key.startsWith('fetch-')) assert.equal(call.helper, '!gh auth git-credential');
+    if (call.key.startsWith('fetch-')) {
+      assert.equal(call.freshCredential, false, 'Git receives no token in its environment');
+      assert.match(call.helper, /hammer-git-credential/);
+    } else assert.equal(call.freshCredential, true, call.key);
   }
 });
 
@@ -111,6 +114,17 @@ for (const target of ['pr', 'mutation', 'verification', 'fetch-before', 'fetch-p
         'scratch fetch failure must retain the verified API publication for provenance');
     });
   }
+}
+
+for (const target of ['fetch-before', 'fetch-published']) {
+  test(`HAMGITTOKEN-01: ${target} refresh failure keeps its phase and publication provenance`, async t => {
+    const f = fixture(t, 'credential', target);
+    const result = await f.run();
+    assert.equal(result.phaseOutcome, 'git-credential-refresh-failed');
+    assert.equal(f.calls().filter(call => call.key === target).length, 1);
+    assert.ok(!f.calls().some(call => call.key === 'reset'));
+    assert.equal(result.pushedHead, target === 'fetch-published' ? 'published' : undefined);
+  });
 }
 
 test('an ambiguous mutation retains the original CAS and rejects unsafe publication', async t => {
@@ -366,9 +380,9 @@ fi
     // credential and inline helper through Git's ordinary pre-push hook.
     writeFileSync(join(work, '.git', 'hooks', 'pre-push'), `#!/bin/sh
 printf 'push\\n' >> ${JSON.stringify(pushAttempts)}
-[ "$GH_TOKEN" = synthetic-token ] || exit 71
-[ "$GITHUB_TOKEN" = synthetic-token ] || exit 72
-[ "$GIT_CONFIG_VALUE_1" = '!gh auth git-credential' ] || exit 73
+[ -z "$GH_TOKEN" ] || exit 71
+[ -z "$GITHUB_TOKEN" ] || exit 72
+case "$GIT_CONFIG_VALUE_1" in *hammer-git-credential.mjs*) ;; *) exit 73 ;; esac
 `, { mode: 0o755 });
     const run = (command, args, extra = {}) => exec(command, args, { cwd: work, env, timeout: 20000, ...extra });
     const publication = await run('/bin/bash', ['-c', `

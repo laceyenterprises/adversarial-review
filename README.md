@@ -4459,6 +4459,11 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- **HAMGITTOKEN-01:** Closer Git transports mint credentials on request through
+  the existing launch refresh command. Base fetches, publication, history reads
+  and controller descendants share the helper; mint failures retain retry
+  ownership as `git-credential-refresh-failed`.
+
 - CONFLICTHOTSPOT-01 final comment-only remediation: root README change notes
   remain required in this repository; per-ticket fragments apply to module
   documentation. The hammer prompt explicitly creates or updates module fragments.

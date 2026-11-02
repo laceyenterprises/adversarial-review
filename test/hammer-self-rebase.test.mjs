@@ -80,7 +80,7 @@ echo $((value + increment)) > "$FIXTURE_DIR/clock"
 `);
   executable('node-fixture', `#!/bin/bash
 case "$1" in
-  */metered-gh.mjs) shift 2; exec gh "$@" ;;
+  */metered-gh.mjs) if [ "$2" = exec-git ]; then shift 2; exec git "$@"; fi; shift 2; exec gh "$@" ;;
   */hammer-pr-read.mjs) shift 3; exec gh pr view "$@" ;;
   */legacy-lane-write.mjs) shift; exec "$REAL_NODE" "$FIXTURE_HELPER" legacy "$@" ;;
   */merge-lease.mjs)

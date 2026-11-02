@@ -82,6 +82,10 @@ forced launch, ledger mutation or new smoke step is authorized by this change.
 
 ## Change notes
 
+- **HAMGITTOKEN-01:** Refresh-on-request Git authentication replaces the
+  startup-token helper. A failed mint produces the existing retryable
+  infrastructure abort with reason `git-credential-refresh-failed`.
+
 ### VERIFYHEADTRANSIENT-01 — retry infrastructure observations
 
 An explicit infrastructure read failure in verify-head, publication or merge
@@ -6699,18 +6703,46 @@ or `SETENV` permission is required, and caller-provided commands never execute
 as the database owner. This one-shot handoff places the token in the `env`
 arguments; never print the command array or enable shell tracing.
 
-Git publication uses the same credential session: `hammer-publish.sh` invokes
-`bin/metered-gh.mjs exec-git` through `ham_git`, and `hammer-api-publish.mjs`
-explicitly enables hammer credentials for its Git fetches. Each child receives
-fresh `GH_TOKEN` and `GITHUB_TOKEN` plus an inline `!gh auth git-credential`
-helper, after resetting inherited credential helpers and preserving other
-inline Git configuration. Authentication rejection refreshes and retries once
-with the original Git arguments, including the exact-head push lease. Any other
-failure is rethrown as the same error with secrets redacted, keeping its `code`,
-`signal` and `status`, so a child timeout or missing binary keeps the kind that
-retry routing reads (HAMREDACT-01). LAC-2086 replaces recursive traversal with
-an iterative visited-object walk, including deep nested errors and cyclic output
-arrays, preserving object identity and the code/signal/status used for retries.
+Closer Git authentication uses `bin/hammer-git-credential.mjs` (HAMGITTOKEN-01).
+The controller installs this helper in its child's inline Git configuration,
+resetting inherited credential helpers. `ham_git`, bounded verify-head fetches,
+API-publication fetches and history reads use the same helper through
+`hammerGitOptions`. Direct descendant Git operations, including `ls-remote`
+and submodule network reads, inherit it as well. Repository remotes and host
+credential stores are not changed.
+
+Each HTTPS GitHub credential request runs the existing entitled refresh command
+and parses its result with the same parser as API calls. Git never receives a
+launch or minted token in its environment or arguments. The helper mints
+the fresh token in memory and passes it through Git's credential protocol pipe;
+`store` and `erase` persist nothing. Git tracing is disabled in this environment.
+Do not enable shell tracing or print the credential protocol. Unlike the API
+optimisation above, Git always mints when asked, regardless of a held expiry,
+and never falls back to a held token when minting fails. No credentials, scopes,
+configuration keys or merge authority are added.
+
+A missing, failed, timed-out or malformed refresh reports the fixed reason
+`git-credential-refresh-failed`; refresh stdout, stderr and command diagnostics
+are discarded. The Git wrapper returns exit 76 and the phase retains that
+reason rather than `merge-lease-base-read-failed`. The existing
+VERIFYHEADTRANSIENT-01 classifier records a deferred infrastructure abort,
+retains the closer retry owner and releases a held merge lease through its
+existing retryable-abort path. Publication preserves any already-published
+head and its provenance before stopping. Authentication rejection after a
+successful mint remains a Git transport failure. The bounded fetch retains its
+load-aware deadline, transient retry and SIGTERM cleanup before escalation.
+
+After merge, SRE floats the owned submodule and bounces the relevant processes.
+Acceptance requires a closer run exceeding one hour whose verify-head base
+fetch succeeds, followed by no `Invalid username or token` in subsequent
+`fetch-base.stderr` files. Offline fixtures simulate token age and verify that
+base fetch, push and remote probes mint independently without leaking tokens
+in arguments, environment dumps, remote URLs, output or written fixture files.
+This change does not itself perform that live receipt.
+
+Non-credential failures retain their original code, signal and status. Returned
+output and errors still redact inherited token values using the iterative,
+cycle-safe error walk (HAMREDACT-01 / LAC-2086).
 The original failure path was post-publication fetch timeout -> the Node
 `execFileSync` error's self-referential `.error` -> token redaction -> stack
 overflow -> nontransient publication failure. HAMREDACT-01 fixed the self-cycle;

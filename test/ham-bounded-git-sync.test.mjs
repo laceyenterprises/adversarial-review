@@ -1,15 +1,16 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import test from 'node:test';
 
 const PROMPT = readFileSync(new URL('../bin/hammer-verify-head.sh', import.meta.url), 'utf8');
 const SYNC_FUNCTIONS = PROMPT.slice(
   PROMPT.indexOf('ham_update_branch_transient() {'),
   PROMPT.indexOf('ham_fetch_base_with_retries() {'),
-).replaceAll('<<ROOT_DIR>>', '/unavailable').replaceAll('<<PR_NUMBER>>', '1234');
+).replaceAll('<<ROOT_DIR>>', resolve('.')).replaceAll('<<PR_NUMBER>>', '1234');
 
 function runSync(mode) {
   const root = mkdtempSync(join(tmpdir(), 'ham-bounded-git-sync-'));
@@ -20,6 +21,7 @@ function runSync(mode) {
     mkdirSync(binDir);
     const fakeGit = join(binDir, 'git');
     writeFileSync(fakeGit, `#!/bin/bash
+[ "$1" = fetch ] || exit 0
 printf 'call\\n' >> "$HAM_TEST_COUNT"
 case "$HAM_TEST_MODE" in
   fatal) echo 'fatal: repository not found' >&2; exit 128 ;;
@@ -41,11 +43,11 @@ while :; do /bin/sleep 0.1; done
     const result = spawnSync('/bin/bash', ['-c', `${SYNC_FUNCTIONS}\nham_bounded_git_sync main`], {
       cwd: root,
       encoding: 'utf8',
-      timeout: 12_000,
+      timeout: 30_000,
       env: {
         ...process.env,
         PATH: `${binDir}:${process.env.PATH}`,
-        HAM_NODE_BIN: '/bin/false',
+        HAM_NODE_BIN: process.execPath,
         HAM_GIT_SYNC_NOMINAL_SECONDS: '1',
         HAM_TEST_MODE: mode,
         HAM_TEST_COUNT: countPath,
@@ -74,6 +76,6 @@ test('bounded git sync retries transient fetch errors but returns immediately on
   assert.equal(transient.calls, 2);
   const fatal = runSync('fatal');
   assert.equal(fatal.status, 1, fatal.stderr);
-  assert.equal(fatal.calls, 1);
+  assert.equal(fatal.calls, 1, fatal.stderr);
   assert.match(fatal.stderr, /repository not found/);
 });

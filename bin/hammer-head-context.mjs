@@ -4,6 +4,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { execGhWithRetry, isTransientGhError } from '../src/gh-cli.mjs';
 import { fetchHammerHeadRange, readCompletedRemediationRounds } from '../src/ama/hammer-head-validation.mjs';
+import { meteredExecFile } from '../src/metered-gh.mjs';
 const [repo, reviewedHead, currentHead, baseArg, prUrl] = process.argv.slice(2);
 if (!repo || !reviewedHead || !currentHead || !baseArg || (baseArg === '--pr' && !prUrl)) {
   throw new Error('usage: hammer-head-context REPO REVIEWED HEAD BASE | REPO REVIEWED HEAD --pr PR_URL');
@@ -27,7 +28,8 @@ const loadRebaseCoverage = async ({ base, head }) => {
   if (![reviewedHead, head, base].every(sha => /^[a-f0-9]{40}$/.test(sha))) return null;
   const { proveReviewedRebase } = await import('../src/ama/reviewed-rebase.mjs');
   const execute = promisify(execFile);
-  const git = async args => (await execute('git', args, { timeout: 15000, maxBuffer: 16 * 1024 * 1024 })).stdout;
+  const git = async args => (await meteredExecFile(execute, 'git', args,
+    { hammerToken: true, timeout: 15000, maxBuffer: 16 * 1024 * 1024 })).stdout;
   const transientGitError = error => isTransientGhError(error)
     || /could not resolve (?:host|hostname)|failed to connect|connection (?:refused|closed|timed out)|(?:TLS|SSL).*handshake|remote end hung up unexpectedly|early EOF|HTTP\/2 stream.*(?:closed|reset)/i
       .test(String(error.stderr || error.message || ''));
@@ -44,6 +46,7 @@ const loadRebaseCoverage = async ({ base, head }) => {
       for (let attempt = 0; ; attempt++) {
         try { await git(['fetch', '--no-tags', 'origin', sha]); break; }
         catch (error) {
+          if (error.gitCredentialRefreshFailed) throw Object.assign(error, { hammerHistoryReadFailed: true });
           if (!transientGitError(error)) return null;
           if (attempt === 2) throw Object.assign(error, { hammerHistoryReadFailed: true });
           await new Promise(resolve => setTimeout(resolve, 500 * 2 ** attempt));
@@ -102,7 +105,10 @@ const loadActivityPage = async path => {
 };
 const range = await fetchHammerHeadRange({ loadRebaseBase, loadRebaseCoverage, repo, reviewedHead, currentHead, baseRef, loadComments, loadTimelinePage, loadActivityPage, prNumber, hammerBaseHead: process.env.HAM_BASE_HEAD,
   remediationRounds: await readCompletedRemediationRounds(process.env.HAM_ROOT_DIR, repo, prNumber),
-  get: async path => JSON.parse((await execGhWithRetry({ hammerToken: true, args: ['api', path], timeoutMs: 15000 })).stdout) });
+  get: async path => JSON.parse((await execGhWithRetry({ hammerToken: true, args: ['api', path], timeoutMs: 15000 })).stdout) }).catch(error => {
+  if (error.gitCredentialRefreshFailed) process.exit(76);
+  throw error;
+});
 if (!range) {
   process.stderr.write('hammer starting base or responsibility range could not be proven\n');
   process.exit(65);

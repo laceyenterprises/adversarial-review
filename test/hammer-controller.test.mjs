@@ -348,6 +348,26 @@ test('normal script preserves real failure and releases only its matching lease'
   assert.equal(inspectMergeLease({ rootDir: f.dir, repo: 'fixture/repo', base: 'main' }).holder, null);
 });
 
+test('HAMGITTOKEN-01: controller shells inherit the refresh helper without launch tokens', { timeout: 12000 }, async t => {
+  const f = fixture(t, `"${process.execPath}" -e '
+    const e = process.env;
+    require("node:fs").writeFileSync(e.HAM_RUN_DIR + "/git-env.json", JSON.stringify({
+      token: e.GH_TOKEN, entitled: e.HAMMER_LACEY_GH_TOKEN,
+      helper: e["GIT_CONFIG_VALUE_" + (Number(e.GIT_CONFIG_COUNT) - 1)],
+      trace: e.GIT_TRACE_CURL, refresh: e.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND
+    }));'`);
+  Object.assign(f.env, { GH_TOKEN: 'synthetic-stale', HAMMER_LACEY_GH_TOKEN: 'synthetic-stale',
+    HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: 'printf synthetic-fresh', GIT_TRACE_CURL: '1' });
+  const p = f.start();
+  assert.equal((await p.closed)[0], 0, p.output());
+  const observed = JSON.parse(readFileSync(join(f.dir, 'git-env.json'), 'utf8'));
+  assert.equal(observed.token, undefined);
+  assert.equal(observed.entitled, undefined);
+  assert.equal(observed.trace, undefined);
+  assert.equal(observed.refresh, 'printf synthetic-fresh');
+  assert.match(observed.helper, /hammer-git-credential/);
+});
+
 for (const kind of ['terminal', 'unreadable', 'malformed', 'different-launch']) {
   test(`${kind} ownership stops shell, validator and TERM-ignoring test after detach`, { timeout: 15000 }, async t => {
     const f = fixture(t, `

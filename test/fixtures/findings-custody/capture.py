@@ -14,6 +14,7 @@ os.environ.update(
 from cwp_dispatch import watch
 from session_ledger import MIGRATIONS_DIR
 from session_ledger.db import LedgerDatabase
+from session_ledger.canonical_views.app_dispatch_reads import fetch_app_dispatch_reads
 from session_ledger.models import (
     LaunchRequestRecord,
     WorkerRunRecord,
@@ -111,12 +112,12 @@ with tempfile.TemporaryDirectory(prefix="findings-native-contract-") as director
                 "SELECT run_id,launch_request_id,repo_path,worktree_path FROM worker_runs"
             ).fetchone()
         )
-        launch = dict(
-            conn.execute(
-                "SELECT launch_request_id,idempotency_key,target_repo,target_worktree,status FROM launch_requests"
-            ).fetchone()
-        )
-    launch["ticket_ref"] = "FINDINGS-fixture"
+    projection = fetch_app_dispatch_reads(
+        db.conn, selector={"launch_request_ids": [lrq]}, registry_ids=[lrq], hq_root=root
+    )
+    assert projection["status"] == "found" and len(projection["items"]) == 1
+    launch = projection["items"][0]
+    assert "target_worktree" not in launch
     print(
         json.dumps(
             {

@@ -2059,11 +2059,11 @@ offline fixture is not evidence that historical findings are resolved.
    owner is live before any separately authorized owner repair.
 3. Read `hq dispatch status <preparation-LRQ> --json` and the public keyed launch
    ledger for `findings-batch-<batchId>`, including terminal rows. Require the
-   exact LRQ, target repository, ticket and key. An absolute status `repo` needs
-   the preparation row's absolute `target_worktree` equal to both status paths;
-   a same-basename path or an unrelated launch's workspace is insufficient.
-   Missing worktree evidence is an explicit unresolved gate, not permission to
-   populate the ledger from the status or rewrite an artifact.
+   exact LRQ, target repository, ticket and key. Absolute status repository and
+   workspace paths are display metadata, not repository authority. Never infer a
+   repository from a basename or populate a public receipt with a private field.
+   The public launch projection omits worktree paths; remote tested-head/marked-PR
+   checks below independently bind publication to the intended repository.
 4. Require successful/publication-blocked terminal preparation and complete,
    valid manifest coverage. An explicit push milestone other than `done` still
    refuses publication. Read PRs on the original branch across all states before

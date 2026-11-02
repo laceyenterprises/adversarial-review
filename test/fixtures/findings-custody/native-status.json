@@ -52,9 +52,17 @@
   "launch": {
     "launch_request_id": "lrq_findings-custody-fixture",
     "idempotency_key": "findings-batch-fixture",
-    "target_repo": "sample/service",
-    "target_worktree": "/synthetic/hq/workers/codex-findings/service",
     "status": "succeeded",
-    "ticket_ref": "FINDINGS-fixture"
+    "requested_at": "2026-11-02T00:00:00Z",
+    "updated_at": "2026-11-02T00:01:00Z",
+    "terminal_at": "2026-11-02T00:01:00Z",
+    "failure_class": null,
+    "failure_detail": null,
+    "last_admit_refusal_reason": null,
+    "worker_killed_cause": null,
+    "ticket_ref": "FINDINGS-fixture",
+    "head_sha": null,
+    "target_repo": "sample/service",
+    "identity_ambiguous": false
   }
 }

@@ -276,17 +276,11 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
     if (probe.rows.some(row => row.idempotency_key !== key || row.ticket_ref !== `FINDINGS-${batch.batch_id}`
       || ![batch.repo, batch.repo.split('/').at(-1)].includes(row.target_repo)
       || typeof row.launch_request_id !== 'string' || !row.launch_request_id)) throw Error('batch-publish-receipt-mismatch');
-    const preparation = probe.rows.find(row => row.launch_request_id === batch.launch_id);
-    if (!preparation) throw Error('batch-launch-evidence-mismatch');
-    if (workspaceRepo) {
-      // Native status serializes worker_runs.repo_path as repo. It is not a
-      // repository slug. Bind the exact workspace to this launch's worktree;
-      // the keyed launch ledger above remains the repository/ticket authority.
-      // Never infer repository ownership from a path basename or local Git.
-      if (typeof preparation.target_worktree !== 'string' || !isAbsolute(preparation.target_worktree)) throw Error('batch-workspace-evidence-unavailable');
-      if (status.repo !== preparation.target_worktree
-        || status.workspacePath !== preparation.target_worktree) throw Error('batch-launch-evidence-mismatch');
-    }
+    if (!probe.rows.some(row => row.launch_request_id === batch.launch_id)) throw Error('batch-launch-evidence-mismatch');
+    // Native absolute repo/workspace paths are display metadata, not repository
+    // authority. The public launch projection intentionally omits worktree paths.
+    // The exact LRQ plus keyed repository/ticket checks above and the independent
+    // remote tested-head / marked-PR checks below establish publication custody.
     // git-safe records a branch push projection, not necessarily an HQ
     // branch_pushed milestone. Bind the launch through the ledger above and
     // verify the actual remote branch/head below instead of guessing a format.

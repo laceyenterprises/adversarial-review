@@ -611,6 +611,7 @@ async function publicationFixture(t, { advice = false } = {}) {
 async function nativePublicationFixture(t) {
   const f = await publicationFixture(t);
   const native = JSON.parse(readFileSync(new URL('./fixtures/findings-custody/native-status.json', import.meta.url), 'utf8'));
+  assert.equal('target_worktree' in native.launch, false, 'replay the actual public projection');
   Object.assign(f.status, native.status);
   f.batch.launch_id = native.status.launchRequestId;
   f.db.prepare('UPDATE finding_batches SET launch_id=?').run(f.batch.launch_id);
@@ -633,20 +634,11 @@ test('FINDINGSBATCHCUSTODY-01 native owner status publishes once and retains art
   assert.equal(f.db.prepare('SELECT outcome FROM finding_backlog').get().outcome, null);
 });
 
-test('FINDINGSBATCHCUSTODY-01 native workspace requires independent exact owner evidence', async t => {
+test('FINDINGSBATCHCUSTODY-01 native publication requires independent exact repository and launch evidence', async t => {
   const cases = [
-    ['foreign workspace, same basename', f => { f.status.repo = '/foreign/workers/other/service'; }],
-    ['foreign workspace in both status fields', f => {
-      f.status.repo = f.status.workspacePath = '/foreign/workers/other/service';
-    }],
-    ['foreign worktree', f => { f.status.workspacePath = '/foreign/service'; }],
-    ['foreign launch worktree', f => { f.launches[0].target_worktree = '/foreign/service'; }],
     ['foreign repository, same short name', f => { f.launches[0].target_repo = 'other/service'; }],
     ['foreign ticket', f => { f.launches[0].ticket_ref = 'FINDINGS-other'; }],
     ['foreign key', f => { f.launches[0].idempotency_key = 'findings-batch-other'; }],
-    ['missing workspace', f => { delete f.status.workspacePath; }],
-    ['missing launch worktree', f => { delete f.launches[0].target_worktree; }],
-    ['relative launch worktree', f => { f.launches[0].target_worktree = 'service'; }],
     ['failed preparation', f => { f.status.status = 'failed'; f.status.succeeded = false; }],
     ['explicit unsuccessful push', f => { f.status.milestones.branch_pushed.status = 'not_started'; }],
     ['wrong remote head', f => { f.publication.headSha = 'c'.repeat(40); }],
@@ -664,6 +656,18 @@ test('FINDINGSBATCHCUSTODY-01 native workspace requires independent exact owner 
     assert.equal(f.db.prepare('SELECT outcome FROM finding_backlog').get().outcome, null);
     assert.equal(readFileSync(f.outputPath, 'utf8'), original);
   });
+});
+
+test('FINDINGSBATCHCUSTODY-01 workspace display paths do not grant repository authority', async t => {
+  for (const path of ['/foreign/workers/other/service', '/synthetic/relocated/service']) {
+    await t.test(path, async t => {
+      const f = await nativePublicationFixture(t);
+      f.status.repo = path;
+      delete f.status.workspacePath;
+      await f.run();
+      assert.equal(f.dispatches.length, 2, 'keyed producer identity and remote tested head authorize publication');
+    });
+  }
 });
 
 test('FINDINGSBATCHCUSTODY-01 invalid historical outcomes retain every finding and artifact', async t => {

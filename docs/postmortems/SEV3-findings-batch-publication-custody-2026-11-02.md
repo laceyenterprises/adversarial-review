@@ -1,111 +1,72 @@
-# SEV3: findings-batch publication custody rejected native workspace repositories
+# SEV3: findings-batch publication rejected native workspace display paths
 
 Contract: FINDINGSBATCHCUSTODY-01. Ticket: LAC-2143. Date: 2026-11-02.
-Status: source fix qualified offline; ordinary review, deployment and organic
-runtime recovery remain gates. No live recovery was performed.
+Status: source qualification; ordinary review, exact-head CI, merge, deployment
+and organic recovery remain separate gates. The backlog is not cleared.
 
-## Impact and evidence limits
+## Impact and root cause
 
-The ticket's canonical health observation at 22:32 UTC reported 2,315 unresolved
-non-blocking findings, oldest 228h, and `batch-launch-evidence-mismatch`,
-`invalid-dropped-reason` and `invalid-finding-outcome` batch errors. These are the
-reported incident totals, not a new measurement or a count attributed entirely
-to one defect. The worker did not read or mutate the production review database,
-queue, leases or outcome artifacts. No backlog-clearance claim is supported.
+Canonical health reported 2,315 unresolved findings at 22:32 UTC and 2,329 at
+23:21 UTC, oldest 229 hours. Errors included `batch-launch-evidence-mismatch`,
+`invalid-dropped-reason` and `invalid-finding-outcome`. These totals describe the
+backlog, not findings attributed entirely to this one defect.
 
-A read-only `hq dispatch status` of this worker's own LRQ on November 2 returned
-`repo` and `workspacePath` equal to its provisioned absolute worktree. It was a
-running launch; that observation establishes wire shape, not terminal publication
-eligibility. The owner-scoped HCP launch identity matched the assigned LRQ,
-branch and workspace. Open-PR search for LAC-2143 returned no active PR before
-publication. HCP memory searches for publication-custody and native workspace
-mismatch returned no matching records. Linear shared field-note discovery was
-unavailable (`Tool get_agent_context not found`), not evidence of absent notes.
+Native `hq dispatch status` serializes a provisioned worktree into `repo` and
+`workspacePath`. The consumer treated non-null `repo` only as a repository slug
+or short name, rejecting the native absolute path before independently keyed
+launch and remote publication evidence could establish repository custody.
 
-The public dispatch SDK launch snapshot was unavailable in this worker even
-after read-context preparation. Therefore the presence/correctness of historical
-`target_worktree` evidence remains a runtime qualification gate; no historical
-launch fields were guessed. The implementation deliberately refuses missing
-worktree proof. The public worker observation's recorded contract omits workspace
-paths, so the fix does not invent a dependency on those unavailable fields.
+The original RCA worker preserved commit
+`260b0802a53b0ab5e9df094b4d9ce427bca1be09` but exited without a PR; the owner
+correctly marked that launch `failed/no_work_done`, despite exit zero. Rescue
+preserved the commit in an isolated worktree and found its proposed fix depended
+on `target_worktree`, which the public dispatch projection intentionally omits.
+The original synthetic launch fixture had selected that private field directly
+from SQLite, so its passing tests did not prove the consumer contract worked.
+No failed worker completion evidence was manufactured during recovery.
 
-## Root cause and reproduction
+## Repair and qualification
 
-`publishFindingBatch` accepted non-null status `repo` only as the full repository
-slug or its short name. Native `cwp_dispatch.watch.resolve_status` constructs
-that field from `worker_runs.repo_path`, falling back to launch `target_repo`;
-`workspacePath` comes from `worktree_path`, falling back to `target_worktree`.
-A normal provisioned absolute worktree consequently failed the consumer's slug
-comparison before its independently keyed launch ledger could establish custody.
-The existing null/slug/foreign-slug policy fixtures missed this producer shape.
+Absolute native repository/workspace paths are display metadata and confer no
+repository identity. The consumer accepts that wire shape while retaining the
+exact preparation LRQ and every keyed row's repository, ticket and idempotency
+checks. Successful/publication-blocked terminal preparation, complete manifest,
+explicit successful push evidence where present, independent remote tested
+head or unique same-repository marked PR, and normal pipeline/merge settlement
+remain required. Foreign slugs, foreign keyed identities and bad remote evidence
+still refuse publication. No path basename or private workspace field grants
+repository authority. No public API scope, schema or permission changed.
 
-`test/fixtures/findings-custody/capture.py` uses native public ledger models,
-`WorkerObservability`, `resolve_status` and its serializer against disposable
-SQLite only. Its checked-in projection preserves the real terminal-success
-status shape, exact synthetic workspace paths and an explicit done push
-milestone. Repository, ticket, LRQ and key are synthetic fixture inputs. See its
-[provenance and reproduction](../../test/fixtures/findings-custody/README.md).
-The old predicate rejects this generated `status.repo`; the regression replays
-it through the actual collector and verifies one same-branch publisher.
+The fixture generator now uses native public ledger models and worker APIs
+against disposable SQLite, `resolve_status`, and the actual SDK producer view
+`fetch_app_dispatch_reads`. The generated public launch fixture omits worktree
+paths exactly as production does. All terminal/push states and identities are
+explicitly synthetic. See the [fixture provenance](../../test/fixtures/findings-custody/README.md).
 
-## Repair and preserved authority
+Validation includes the actual public projection, successful single-publisher
+recovery, relocated display paths, negative repository/LRQ/ticket/key/remote
+cases, restart and duplicate fences, and byte-preserving invalid artifacts.
+Hosted full Node 22/26 suites must complete on the published head before merge.
+The earlier worker's full local sweep did not return within its 900-second
+wrapper bound; this is incomplete coverage, not a passing suite or a demonstrated
+baseline failure. Rescue publication obtains the required hosted matrix and
+ordinary cross-model review; publication itself grants no merge authority.
 
-The keyed launch read still validates every row's target repository, ticket and
-idempotency and must contain the preparation LRQ. Absolute status repository
-paths additionally require the preparation row's absolute `target_worktree` to
-match both status paths exactly. No basename, path normalization, local remote,
-publisher workspace or another LRQ grants repository authority. Missing proof
-reports `batch-workspace-evidence-unavailable`; conflicting proof reports the
-existing `batch-launch-evidence-mismatch`. Legacy null/slug cases are retained.
+## Historical artifacts and runtime closure
 
-The collector still requires terminal successful/publication-blocked preparation,
-a valid complete manifest, successful explicit push milestone, tested remote
-head or a unique same-repository marked PR, and normal pipeline/merge settlement.
-It retains the batch ID, key, original launch, lock and intent fences across
-failures/restarts. Publication does not resolve findings by itself. No merge,
-configuration, schema, admission or terminal-PR authority changed. Existing
-terminal and duplicate-publication regressions remain part of validation.
+Invalid dropped reasons do not prove a finding is stale. Invalid outcomes or
+missing/duplicate/foreign IDs do not prove repair. The collector retains original
+artifact bytes, null outcomes and unresolved batch custody on those failures.
+No safe automatic conversion to a drop or applied outcome is established.
 
-## Separate artifact failure qualification
+The [bounded runbook](../follow-up-runbook.md#findings-batch-publication-custody-findingsbatchcustody-01)
+requires original hashes, exact public launch custody, original branch and remote
+PR/head evidence, and fresh per-item owner decisions. Failed or ambiguous
+publisher intent stays fenced; there is no mass redispatch, intent reset, raw
+store edit, whole-backlog drain or manufactured outcome in this fix.
 
-`invalid-dropped-reason` is a vocabulary/justification rejection, not proof that
-a finding is stale. `invalid-finding-outcome` covers invalid or duplicate/foreign
-IDs, unsupported outcomes and blank/missing reasons; it is not proof of repair.
-An earlier worker's nonconforming output authorizes neither conversion to a drop
-nor rewriting results. Regression cases retain the original artifact bytes,
-null outcomes and unresolved batch on each rejection. No safe automatic
-historical conversion has been demonstrated.
-
-The [runbook](../follow-up-runbook.md#findings-batch-publication-custody-findingsbatchcustody-01)
-requires original artifact hashes, immutable manifest coverage, exact owner and
-launch receipts, live branch/PR evidence and fresh per-item owner adjudication.
-Missing worktree evidence or failed/ambiguous publisher custody requires the
-runtime owner to reconcile the existing LRQ/intent and propose a separately
-reviewed batch-scoped repair. No reset, mass redispatch, backfill, manufactured
-outcomes, restart or live artifact rewrite is authorized by this source fix.
-
-## Rollout and closure gates
-
-Worker validation on November 2 passed the focused findings suite (103 tests),
-ESLint (zero errors; 153 warnings), contract typechecking, the byte-stable
-research walkthrough, fixture-generator Ruff checks and JSON/YAML parsing.
-The required full `npm test` invocation through `worker_validation` did not
-return a suite result after its configured 900-second bound. The worker
-interrupted its confirmed wrapper, which exited 130 with `KeyboardInterrupt`
-in `process_group_runner` / `subprocess.communicate`. That is an incomplete
-validation gate, not a test pass or an established baseline failure. Publication
-must wait for a bounded full-suite result; no bypass or partial PR is authorized.
-
-1. Ordinary adversarial review and CI on the published head must settle before
-   merge. No self approval or administrative merge.
-2. Normal deployment owner records the deployed SHA and actual running build;
-   source merge alone proves neither. This worker changes no host process.
-3. Runtime owner selects one already-owned batch, verifies preparation
-   `target_worktree` availability and all custody evidence, then records its next
-   organic hourly collection result. There is no batch-scoped CLI collector in
-   this change; `resolutionOnly` scans all unresolved batches and is unsuitable
-   as a one-batch recovery shortcut.
-4. Historical invalid artifacts remain unresolved pending evidence-backed owner
-   decisions and separately authorized supported repair. Record actual counts,
-   age and error distributions; do not equate offline success with draining the
-   reported backlog.
+After ordinary merge and normal native deployment, the runtime owner records the
+actual loaded build and observes the next organic hourly collection of one
+already-owned batch. Source merge and offline fixtures establish neither that
+receipt nor backlog clearance. Historical invalid artifacts require a separately
+reviewed, batch-scoped owner repair with original evidence retained.

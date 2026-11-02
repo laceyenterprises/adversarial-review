@@ -2,17 +2,14 @@
 
 ## FINDINGSBATCHCUSTODY-01: publication repository custody
 
-`publishFindingBatch` treats native dispatch `repo` as a workspace projection
-when it is absolute. The status receipt must still identify the preparation LRQ.
-The complete keyed launch read must bind every returned launch to the original
-`findings-batch-<batchId>` key, `FINDINGS-<batchId>` ticket and exact repository
-slug or registered short name. The preparation launch's absolute `target_worktree`
-must equal both status `repo` and `workspacePath` byte for byte. A basename,
-path normalization, local Git remote or a publisher's worktree cannot establish
-that binding. Missing preparation worktree evidence reports
-`batch-workspace-evidence-unavailable`; conflicting evidence reports
-`batch-launch-evidence-mismatch`. Legacy slug/short-name and null status `repo`
-retain their existing keyed-ledger validation.
+`publishFindingBatch` recognizes absolute native dispatch `repo` paths as display
+metadata, never as repository identity. It neither derives a repository from a
+path basename nor requires private workspace fields omitted from the public
+launch projection. Exact preparation LRQ, keyed target repository, ticket and
+idempotency evidence plus independent remote tested-head/marked-PR checks retain
+publication authority. Foreign slugs and mismatched repository/LRQ/ticket/key or
+remote evidence still fail closed. Legacy slug/short-name and null status `repo`
+retain their existing validation.
 
 Terminal successful or publication-blocked preparation, any explicit push milestone,
 remote tested head, exact batch marker, same-repository PR and active-pipeline or

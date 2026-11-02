@@ -267,10 +267,10 @@ For provisional applied findings or advice, the collector validates complete
 manifest coverage, waits for terminal preparation (including a launch parked at
 publication), and reads its branch from `hq dispatch status --json`. The launch
 ID must match; a non-null slug/short-name status repository must match too.
-For an absolute native workspace repository, the preparation launch ledger row
-must supply an absolute `target_worktree` exactly equal to status `repo` and
-`workspacePath`; missing worktree proof remains unresolved. No path basename
-identifies a repository. See FINDINGSBATCHCUSTODY-01 in the follow-up runbook.
+Absolute native repository/workspace paths are display metadata and supply no
+repository authority. The public launch projection intentionally omits worktree
+paths; no extra workspace field or path-based fallback is required. See
+FINDINGSBATCHCUSTODY-01 in the follow-up runbook.
 The keyed launch
 ledger must independently bind that launch to the repository and ticket. Status
 `repo` may be null in the producer contract. `git-safe` writes a branch-push

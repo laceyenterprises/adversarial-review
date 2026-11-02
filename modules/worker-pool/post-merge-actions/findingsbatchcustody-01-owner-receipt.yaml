@@ -4,8 +4,9 @@ operator_steps:
       After ordinary review, merge and normal deployment, the runtime owner
       records the deployed SHA and actual running build on LAC-2143. Follow
       docs/follow-up-runbook.md FINDINGSBATCHCUSTODY-01 to qualify one existing
-      owned batch read-only, including exact preparation target_worktree,
+      owned batch read-only, including exact public preparation
       repository, LRQ, ticket, key, terminal, push, head and marker evidence.
+      Treat absolute workspace paths as display metadata, never authority.
       Retain the next organic hourly collection receipt. Missing evidence,
       failed publisher or ambiguous intent remains unresolved pending a
       separately reviewed batch-scoped owner repair. Historical invalid reasons

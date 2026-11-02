@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { assertHammerController, confirmControllerLaunch, runHammerController } from '../src/ama/hammer-controller.mjs';
+import { HAMMER_RETRYABLE_READ_OUTCOMES } from '../src/ama/hammer-phase-outcome.mjs';
 
 try {
   const [verb, ...args] = process.argv.slice(2);
@@ -15,5 +16,6 @@ try {
   }
 } catch (error) {
   console.error(`hammer-controller: ${error.message}`);
-  process.exitCode = error.code === 'EOBSERVATION' ? 75 : 125;
+  process.exitCode = error.code === 'EOBSERVATION'
+    || HAMMER_RETRYABLE_READ_OUTCOMES.has(error.phaseOutcome) ? 75 : 125;
 }

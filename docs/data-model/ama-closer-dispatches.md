@@ -7,6 +7,13 @@
 
 ## Terminal launch observations
 
+CLOSERSCANREAD-01: a missing launch can retire as `launch-terminal` /
+`not-found` only after a complete census with no deferred records and the
+existing non-all-missing, readable-evidence quorum. A batch timeout cannot
+overwrite an individual read's definitive missing result. Capacity checks leave
+the census cursor intact and exclude inactive history before budget deferral.
+The cursor and timeout flags are in-process evidence; the store shape is unchanged.
+
 CLOSERCUSTODYLRQ-01: the receipt's `launchRequestId`, `workerId`, `headSha`
 and `dispatchedAt` bind worktree custody to the dispatched launch. Admission
 captures that identity before reclaiming a terminal lease and resolves it

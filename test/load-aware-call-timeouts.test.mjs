@@ -1,6 +1,6 @@
 import './helpers/load-aware-timeout-fixture.mjs';
 import './helpers/registry-session-fixture.mjs';
-import test from 'node:test';
+import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import childProcess from 'node:child_process';
@@ -25,6 +25,10 @@ import { resolvePostedReviewPhaseBudgetMs, runPostedReviewHandlersFairly } from 
 
 const busyLoad = { enabled: true, maxMultiplier: 6, cpuCount: 4, cpuBusyPercent: 100 };
 const quiet = { log() {}, warn() {}, error() {} };
+
+// Registry preparation sizes reads before each test; start policy/cache-clock
+// assertions without that preparation's cached timeout policy.
+beforeEach(() => resetLoadAwareTimeoutCachesForTesting());
 
 function syntheticBusyHost(t) {
   t.mock.method(os, 'loadavg', () => [os.cpus().length * 3, 0, 0]);

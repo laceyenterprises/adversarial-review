@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // Read-only app boundary. No local ledger or filesystem fallback is permitted.
 import { loadAppSdkSync } from './app-sdk-loader.mjs';
 import { isTransientAppContractError, withAppContractTransientRetry } from './app-contract-retry.mjs';
@@ -38,7 +39,7 @@ function registryFresh(key, session, now = Date.now()) {
 function options(args) {
   return { app_id: 'adversarial-review', mode: 'agent-os',
     endpoint_url: (args.env ?? process.env).APP_CONTRACT_ENDPOINT_URL,
-    ...args.connectOptions, request_timeout_ms: args.timeoutMs ?? 8000 };
+    ...args.connectOptions, request_timeout_ms: args.timeoutMs ?? loadAwareTimeoutMs(8_000) };
 }
 function synchronousOptions(args) {
   const config = options(args);
@@ -67,9 +68,9 @@ export const dispatchReadTransport = {
       && (env.HCP_TOKEN_PATH || env.HCP_TOKEN || env.HCP_BEARER_TOKEN)) {
       return dispatchReadTransport.sdk().readHcpDispatchLookup(selector, {token_path:env.HCP_TOKEN_PATH,
         token:env.HCP_TOKEN || env.HCP_BEARER_TOKEN, endpoint_url:env.HCP_BASE_URL,
-        request_timeout_ms:args.timeoutMs ?? 8000});
+        request_timeout_ms:args.timeoutMs ?? loadAwareTimeoutMs(8_000)});
     }
-    const deadline = Date.now() + (args.timeoutMs ?? 8000);
+    const deadline = Date.now() + (args.timeoutMs ?? loadAwareTimeoutMs(8_000));
     if (args.dispatchSession) return args.dispatchSession.dispatchLookup(selector);
     const session = await registeredSession(args);
     const remaining = deadline - Date.now();
@@ -89,7 +90,7 @@ export const dispatchReadTransport = {
       (args.workerObservationSyncImpl ?? dispatchReadTransport.sdk().readWorkerObservationsSync)(selector, synchronousOptions(args)));
   },
   async hostServices(request, args = {}) {
-    const deadline = Date.now() + (args.timeoutMs ?? 8000);
+    const deadline = Date.now() + (args.timeoutMs ?? loadAwareTimeoutMs(8_000));
     const read = async () => {
       if (args.dispatchSession) return args.dispatchSession.hostServices(request.action, request);
       const session = await registeredSession(args);
@@ -265,7 +266,7 @@ export function launchProbe(result, launchRequestId, includeRetryChain) {
 // One retry shares the caller's original deadline, including registration and
 // retry delay. Never grant another full timeout or retry after abort/expiry.
 async function retryingDispatchLookup(selector, args) {
-  const deadline = Date.now() + (args.timeoutMs ?? 8000);
+  const deadline = Date.now() + (args.timeoutMs ?? loadAwareTimeoutMs(8_000));
   return boundedCall(() => withAppContractTransientRetry(async () => {
     args.signal?.throwIfAborted();
     const remaining = deadline - Date.now();
@@ -290,7 +291,7 @@ async function boundedCall(call, args) {
     onAbort = () => reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
     signal?.addEventListener('abort', onAbort, { once: true });
     timer = setTimeout(() => reject(Object.assign(new Error('dispatch lookup timed out'),
-      { code: 'ETIMEDOUT' })), args.timeoutMs ?? 8000);
+      { code: 'ETIMEDOUT' })), args.timeoutMs ?? loadAwareTimeoutMs(8_000));
   });
   try { return await Promise.race([call(), stopped]); }
   finally { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); }
@@ -299,6 +300,7 @@ function unavailable(error) {
   const transient = isTransientAppContractError(error);
   // Error messages can contain endpoint credentials or producer response data.
   return { ok: false, reason: 'dispatch-read-unavailable', transient,
+    timedOut: error?.code === 'ETIMEDOUT',
     detail: error?.code === 'WORKER_OBSERVATION_DISABLED' ? 'worker observations disabled'
       : error?.code === 'DISPATCH_READ_DISABLED' ? 'dispatch lookup disabled'
       : error?.name === 'AbortError' ? 'dispatch lookup aborted'
@@ -351,7 +353,7 @@ export async function readWorkerObservation(selector, args = {}) {
   try {
     const rows = [];
     let offset = 0;
-    const deadline = Date.now() + (args.timeoutMs ?? 8000);
+    const deadline = Date.now() + (args.timeoutMs ?? loadAwareTimeoutMs(8_000));
     for (let page = 0; page < 10; page++) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) return {ok:false,reason:'worker-observation-unavailable'};
@@ -370,7 +372,7 @@ export function readWorkerObservationSync(selector, args = {}) {
   try {
     const rows = [];
     let offset = 0;
-    const deadline = Date.now() + (args.timeoutMs ?? 8000);
+    const deadline = Date.now() + (args.timeoutMs ?? loadAwareTimeoutMs(8_000));
     for (let page = 0; page < 10; page++) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) return {ok:false,reason:'worker-observation-unavailable'};

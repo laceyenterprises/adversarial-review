@@ -63,7 +63,8 @@ export async function refreshClosureRecoveryCustody({ rootDir, repo, prNumber, h
       && !probe.retryChainUnreadable);
     evidence = { leaseStatus: lease?.status || 'absent', launchRequestId,
       launchStatus: probe?.row?.status || null, owned, readable,
-      reason: readable ? owned ? 'live-custody' : 'custody-resolved' : 'ledger-unreadable' };
+      reason: readable ? owned ? 'live-custody' : 'custody-resolved' : probe?.timedOut || probe?.reason === 'scan-snapshot-timeout'
+        ? 'scan-snapshot-timeout' : 'ledger-unreadable' };
     fresh = reviseClosureNextAction(shared, {
       leases: { closer: lease },
       launches: { state: readable ? 'complete' : 'unknown', value: { closer: launchRequestId ? {

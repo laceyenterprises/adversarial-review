@@ -118,6 +118,8 @@ function preferredScalar(fallbackValue, domainValue, dottedKey = null, options =
 
 const MERGE_AUTHORITY_KEYS = Object.freeze({
   enabled: 'roles.adversarial.merge_authority.enabled',
+  capReheadEnabled: 'roles.adversarial.merge_authority.cap_rehead_enabled',
+  capReheadLifetimeCap: 'roles.adversarial.merge_authority.cap_rehead_lifetime_cap',
   workerClass: 'roles.adversarial.merge_authority.worker_class',
   workerClassFallback: 'roles.adversarial.merge_authority.worker_class_fallback',
   mergeMethod: 'roles.adversarial.merge_authority.merge_method',
@@ -154,6 +156,8 @@ export function resolveMergeAuthorityConfigFromDomain(domainConfig, fallbackCfg 
     amaCloserConcurrentLaunchCeiling: policy.amaCloserConcurrentLaunchCeiling ?? fallbackCfg.amaCloserConcurrentLaunchCeiling ?? 32,
     closureLagSloMs: policy.closureLagSloMs ?? fallbackCfg.closureLagSloMs ?? 1800000,
     enabled: preferredScalar(fallbackCfg.enabled, policy.enabled, MERGE_AUTHORITY_KEYS.enabled, options),
+    capReheadEnabled: preferredScalar(fallbackCfg.capReheadEnabled, policy.capReheadEnabled, MERGE_AUTHORITY_KEYS.capReheadEnabled, options),
+    capReheadLifetimeCap: preferredScalar(fallbackCfg.capReheadLifetimeCap, policy.capReheadLifetimeCap, MERGE_AUTHORITY_KEYS.capReheadLifetimeCap, options),
     workerClass: preferredScalar(
       fallbackCfg.workerClass,
       str(policy.workerClass) || undefined,

@@ -99,7 +99,6 @@ import {
 import { normalizeEffectiveReviewVerdict, sanitizeCodexReviewPayload } from './kernel/verdict.mjs';
 import { assertReviewerReply } from './kernel/review-reply.mjs';
 import { suppressFinalRoundFollowUp } from './comment-only-final-round.mjs';
-import { pickReviewerStage } from './kernel/prompt-stage.mjs';
 import { createLinearTriageAdapter } from './adapters/operator/linear-triage/index.mjs';
 import { getConfig } from './config-loader.mjs';
 import { parseCodexJsonTokenUsage } from './reviewer-model-detection.mjs';
@@ -175,6 +174,7 @@ import {
   buildPromptForReviewerModel,
   buildAgyReviewerPromptPrefix,
   isFinalReviewRound,
+  selectReviewerPromptStage,
 } from './reviewer-prompt.mjs';
 const CRITICAL_WORDS = ['critical', 'vulnerability', 'security', 'injection'];
 
@@ -1234,6 +1234,7 @@ function queueFollowUpForPostedReview({
   signalFollowUpDaemonWakeImpl = signalFollowUpDaemonWake,
   scopeViolationFinding = null,
   singleReview = null,
+  verdictOnly = false,
 }) {
   const normalizedVerdictMode = normalizeVerdictMode(verdictMode);
   if (normalizedVerdictMode === VERDICT_MODE_ADVISORY_ONLY) {
@@ -1253,6 +1254,7 @@ function queueFollowUpForPostedReview({
     throw new Error('baseBranch is required to queue a follow-up handoff');
   }
 
+  if (verdictOnly) return { queued: false, reason: 'exhausted-head-verdict-only' };
   const priorLedger = summarizePRRemediationLedgerImpl(rootDir, { repo, prNumber });
   if (suppressFinalRoundFollowUp(priorLedger.commentOnlyFinalRoundPushedHeads, revisionRef, reviewPostedAt)) return { queued: false, reason: 'comment-only-final-round-completed' };
   const tierResolution = resolveRoundBudgetForJob({ linearTicketId }, { rootDir, preferPersisted: false });
@@ -1824,6 +1826,7 @@ async function main() {
     reviewDbAttemptNumber,
     completedRemediationRounds,
     maxRemediationRounds,
+    verdictOnly = false,
     passKind,
     reviewerSessionUuid,
     reviewerSpawnToken,
@@ -1859,20 +1862,8 @@ async function main() {
   // the watcher. Backward-compat: if either is missing (old watcher
   // calling new reviewer), default to non-final-round behavior so we
   // don't accidentally downgrade reviews on older deployments.
-  const reviewerCompletedRemediationRounds = completedRemediationRounds ?? (
-    Number.isFinite(Number(reviewAttemptNumber)) ? Number(reviewAttemptNumber) - 1 : undefined
-  );
-  const reviewerPromptStage = (
-    reviewAttemptNumber === undefined &&
-    completedRemediationRounds === undefined &&
-    maxRemediationRounds === undefined
-  )
-    ? 'first'
-    : pickReviewerStage({
-        reviewAttemptNumber,
-        completedRemediationRounds: reviewerCompletedRemediationRounds,
-        maxRemediationRounds,
-      });
+  const reviewerPromptStage = selectReviewerPromptStage({ verdictOnly,
+    reviewAttemptNumber, completedRemediationRounds, maxRemediationRounds });
   const isFinalRound = reviewerPromptStage === 'last';
 
   console.log(
@@ -2407,7 +2398,7 @@ async function main() {
       linearTicketId,
       reviewText: fullComment,
       reviewPostedAt,
-      critical, verdictMode, singleReview: reviewModeDecision.singleReview,
+      critical, verdictMode, verdictOnly, singleReview: reviewModeDecision.singleReview,
       scopeViolationFinding,
     });
     if (queued.queued) {

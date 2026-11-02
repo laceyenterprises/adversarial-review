@@ -570,11 +570,13 @@ if (process.env.FIXTURE_CI_MULTI_TICK) {
   assert.equal(globalThis.__ciBlockedCloserCalls.length, 3, 'terminal worker reconciliation remains reachable');
 }
 
-const row = db.prepare('SELECT review_status, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?')
+const row = db.prepare('SELECT review_status, failure_message, rereview_reason, revision_ref FROM reviewed_prs WHERE repo = ? AND pr_number = ?')
   .get('laceyenterprises/adversarial-review', 164);
 console.log(${JSON.stringify(SUMMARY_MARKER)} + JSON.stringify({
   reviewStatus: row.review_status,
   failureMessage: row.failure_message,
+  rereviewReason: row.rereview_reason,
+  revisionRef: row.revision_ref,
   closerCalls: globalThis.__timeoutHandoffCloserCalls || [],
   ciBlockedCloserCalls: globalThis.__ciBlockedCloserCalls || [],
   ciInspections: globalThis.__ciInspections || 0,

@@ -129,6 +129,9 @@ function queueFollowUpForRecoveredPostedReview({
     return { queued: false, reason: queueDecision.reason };
   }
 
+  if (parseMetadataJson(row.metadata_json).verdictOnly === true) {
+    return { queued: false, reason: 'exhausted-head-verdict-only' };
+  }
   const repo = row.repo;
   const prNumber = Number(row.pr_number);
   const reviewBody = String(row.body_md || '');

@@ -4506,9 +4506,11 @@ and `CAP_REHEAD_LIFETIME_CAP` under
 `roles.build_pack_default_worker_class` applies when the creation title has no
 recognized builder class. Hammer classes are refused.
 
-The committed `templates/cap-rehead-prompt.md` selects the squash refresh above
-for hammer histories and a merge of `origin/main` for builder-only histories.
-It requires conflict resolution preserving both sides, generator-driven file
+The daemon classifies complete PR history from the canonical runtime, selects
+the squash refresh above for hammer histories or a merge of `origin/main` for
+builder-only histories, and writes an owned dynamic prompt binding repo, PR,
+branch, old head and update mode. The worker needs no local AR checkout. The
+prompt requires preserving both sides of conflicts, generator-driven file
 regeneration, affected tests and the selected push strategy.
 It grants no merge authority and adds
 no closer trailers or attestations. The normal review → closer path handles
@@ -4525,6 +4527,15 @@ See [the durable record](docs/data-model/cap-rehead.md).
 process-local `cap_rehead.dispatched` / `cap_rehead.skipped` counters. A cycle
 exhaustion remains an explicit closure blocker; CAPREHEAD never advances it.
 
+
+EXHAUSTEDHEADOWNER-01 final remediation: proven completed final-round pushes
+retain closer ownership at exhaustion; returning reviewed commits share the
+watcher/closure delivered-pass predicate. Probe and pager failures stay local
+to their PR/observer, and stale-head admission shares its remediation-budget
+snapshot with capped closure. Offline regressions restore closer wake-drain
+coverage. The closure runbook records the possible first-deploy SEV1 backlog
+burst and read-only verification; existing lifecycle states and smoke promises
+are unchanged.
 
 - **LABELREARM-01 final remediation:** waiver observation shares asynchronous label reads after cached presence checks, preserves stopped-job budgets and provenance, and clears backoff only for newly accepted intent. Offline coverage now proves one exact-head reviewer spawn and no duplicate on the next poll; pre-review labels require removal and reapplication.
 
@@ -4543,6 +4554,11 @@ prove every parent-file reference is covered by the same commit's authorized
 deletion, with no surviving head references or dynamic namespace hazards.
 See the [proof contract](docs/RUNBOOK-ama-closure.md).
 - **CLOSERCIWAIT-01:** published-head CI settles before the closer predicate using the existing bounded lease-yield/reacquire wait. Phase head values are exported, claim binding uses a deployed helper, and verification/terminal failures name the failed operation. Existing smoke commands remain unchanged; post-deploy acceptance is an organic remediation push merging in the same closer run, still pending.
+EXHAUSTEDHEADOWNER-01: a new builder head after cycle exhaustion receives one
+verdict-only review. Findings retain final closer ownership; head-scoped retry
+and deadline evidence cannot strand a new head. Spent budgets page once, with
+lifetime escalation deduplicated across head changes. See the
+[closure ownership contract](docs/RUNBOOK-ama-closure.md#exhausted-cycles-and-new-builder-heads-exhaustedheadowner-01).
 
 REMGEMINI-01 follow-up: pooled fallback skips retain the registry fault in
 `skipped[].detail`, matching standalone routing. An offline regression verifies

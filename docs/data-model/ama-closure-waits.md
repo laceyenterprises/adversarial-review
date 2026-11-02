@@ -211,3 +211,11 @@ rows remain included. Retained historical files do not inflate that active total
 A matching recovery snapshot with unavailable observations still enforces the
 custody deadline, reporting an unknown launch identity without inventing one.
 These read-side rules add no store fields or merge/dispatch authority.
+
+## Exhausted closure budgets
+
+`closure-retry-exhausted` uses the existing head/class page reservation.
+`closure-lifetime-exhausted` carries that reservation across heads, as the
+existing final-round class does, because the lifetime cap belongs to the PR.
+Both page immediately after shared selection proves no automatic budget owner.
+Failed delivery refunds the reserved page. No table or lifecycle enum changes.

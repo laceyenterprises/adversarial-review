@@ -1410,7 +1410,7 @@ function requestReviewRereview({
         if (operatorRequestedRereview && !pendingRevisionRefMoved) {
           pendingAssignments.push('head_wait_started_at = NULL');
         }
-        if (operatorRequestedRereview || explicitReviewRequest || automaticWithheldHeadRecovery) {
+        if (operatorRequestedRereview || explicitReviewRequest || automaticWithheldHeadRecovery || ownerlessRecovery) {
           pendingAssignments.push('rereview_requested_at = ?');
           pendingAssignments.push('rereview_reason = ?');
           pendingParams.push(requestedAt, normalizedReason);

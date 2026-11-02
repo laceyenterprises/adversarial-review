@@ -34,9 +34,19 @@ export function readFollowUpOperatorLabel({ repo, prNumber, label }, {
     observedAt: new Date().toISOString() };
 }
 
+// Shared by stopped-job rearming and review-only waiver observation. Presence
+// comes from the live reader; cached labels cannot satisfy this predicate.
+export function operatorLabelEvidenceSatisfies({ repo, prNumber, label, headSha = null, after = null }, evidence) {
+  const applied = Date.parse(evidence?.appliedAt);
+  const boundary = after === null ? null : Date.parse(after);
+  return Boolean(label && evidence?.label === label && evidence.repo === repo
+    && Number(evidence.prNumber) === Number(prNumber) && evidence.eventId
+    && evidence.actor && Number.isFinite(applied) && evidence.observedAt
+    && (!headSha || evidence.headSha === headSha)
+    && (after === null || (Number.isFinite(boundary) && applied > boundary)));
+}
+
 export function operatorLabelSatisfiesStop(job, evidence) {
-  const label = requiredFollowUpOperatorLabel(job);
-  return Boolean(label && evidence?.label === label && evidence.repo === job.repo
-    && Number(evidence.prNumber) === Number(job.prNumber) && evidence.eventId
-    && evidence.actor && evidence.appliedAt && evidence.observedAt);
+  return operatorLabelEvidenceSatisfies({ repo: job.repo, prNumber: job.prNumber,
+    label: requiredFollowUpOperatorLabel(job) }, evidence);
 }

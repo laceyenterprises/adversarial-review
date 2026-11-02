@@ -677,3 +677,15 @@ for (const present of [true, false]) test(`LABELSTOPOWNER-01: live label reader 
   if (!present) assert.equal(result, null);
   else { assert.equal(result.eventId, '7'); assert.equal(result.headSha, 'current-head'); }
 });
+
+test('LABELREARM-01: stopped-job predicate shares the review wake provenance contract', async () => {
+  const { operatorLabelEvidenceSatisfies, operatorLabelSatisfiesStop } = await import('../src/follow-up-operator-label.mjs');
+  const scope = { repo: 'fixture/repo', prNumber: 42, label: 'live-pack-edit-approved' };
+  const job = { ...scope, status: 'stopped', remediationPlan: { stop: { code: `operator-label-required:${scope.label}` } } };
+  const evidence = { ...scope, eventId: 'synthetic-event', actor: 'fixture-operator',
+    appliedAt: '2026-01-01T11:00:00Z', observedAt: '2026-01-01T12:00:00Z' };
+  for (const observed of [evidence, null, { ...evidence, actor: null }, { ...evidence, appliedAt: 'invalid' }]) {
+    assert.equal(operatorLabelSatisfiesStop(job, observed), operatorLabelEvidenceSatisfies(scope, observed));
+  }
+  assert.equal(operatorLabelSatisfiesStop(job, evidence), true);
+});

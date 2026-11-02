@@ -349,6 +349,26 @@ suppression instead of registering this non-final admission intent.
 
 ---
 
+LABELREARM-01: when the latest delivered exact-head review has only registered
+operator-gated blocking findings, discovery reads each required label through
+`readFollowUpOperatorLabel`. Every label must still be present, with an event ID,
+actor and application time strictly after that review. The shared evidence
+predicate also authorizes stopped follow-up rearming; its writer rechecks live
+presence and head before requeue. Missing, removed, stale or incomplete evidence
+retains the hold. Mixed actionable blockers retain normal remediation.
+
+Discovery requests one `operator-waiver-observation` exact-head review through
+`requestReviewRereview`, atomically recording an existing explicit-review intent
+keyed by head and label event IDs. The receipt survives restarts and prevents an
+unchanged gesture from requesting another review, even after refusal or
+consumption. No new budget or merge override is granted. Accepted intent clears
+the operator-blocked lane before posted-row admission. The fresh reviewer reads
+live labels again; historical findings are never erased by label presence.
+After ordinary deployment, SRE observes the next natural label application on
+an already-reviewed gate-held PR scheduling review within one watcher cycle,
+without a head change or rescue. This live receipt remains pending; no worker
+service restart, label mutation or synthetic production traffic is authorized.
+
 LABELSTOPOWNER-01: a follow-up stopped as
 `operator-label-required:<label>` can requeue only after a live label read
 confirms presence and an attributable application event. The round plan durably retains

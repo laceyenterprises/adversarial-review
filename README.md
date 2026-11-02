@@ -4447,6 +4447,10 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- HAM: retain explicit bug-fix-only freeze contracts in the MLR-03 documentation,
+  including the merge-agent scope and promotion boundary, while preserving the
+  live-PR-only exception policy.
+
 - MLR-03: [Merge Authority v2 spec v1.0](docs/SPEC-merge-authority-v2.md)
   proposes owned recovery, one subject budget, capped load-aware deadlines and
   all 61 MLR-02 inheritance obligations. The [v1 freeze](src/ama/FREEZE.md) now

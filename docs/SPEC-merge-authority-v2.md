@@ -5,7 +5,8 @@ approval or a claim that the implementation satisfies this revision.
 **Spec:** `merge-lane-rebuild@a0b63d32143a`, MLR-03, dependent on MLR-02.
 **Scope:** the code-pr finalization port of
 [SPEC-adversarial-review-v2-app-architecture.md](SPEC-adversarial-review-v2-app-architecture.md).
-The [v1 freeze](../src/ama/FREEZE.md) permits live-PR unblocks only until cutover.
+The [v1 freeze](../src/ama/FREEZE.md) remains bug-fix-only until v2 is promoted,
+permitting live-PR unblocks only until operator-approved cutover.
 
 ## Change notes
 

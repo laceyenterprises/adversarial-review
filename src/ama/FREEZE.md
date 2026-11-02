@@ -11,8 +11,10 @@ with a synthetic scenario. No new guard, check, label or runtime gate is added.
 
 ## What is frozen
 
-`src/ama/*`, `src/follow-up-*.mjs`, `src/pollonce-phases.mjs`, daemon clean-merge
-and their Agent OS closure coupling remain v1. Until cutover, a v1 fix is allowed
+`src/ama/*`, `src/follow-up-*.mjs` (including `follow-up-merge-agent.mjs`),
+`src/pollonce-phases.mjs`, daemon clean-merge
+and their Agent OS closure coupling remain v1: bug-fix-only, with no new capabilities.
+Until cutover, a v1 fix is allowed
 only when it unblocks an identified live PR. Record the blocked condition,
 existing owner/next action, why this narrow repair is needed and its validation
 in the repair PR. General hardening and new capabilities belong in the v2 port.

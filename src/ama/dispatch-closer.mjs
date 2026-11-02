@@ -5083,7 +5083,7 @@ async function maybeDispatchAmaCloserAttempt({
     checksRollup: prMetadata.statusCheckRollup, rootDir: dispatchContext.rootDir || SUBMODULE_ROOT,
     candidate: { headSha: prMetadata.headSha, prState: prMetadata.isOpen === true ? 'OPEN' : null,
       isDraft: prMetadata.isDraft, mergeable: prMetadata.mergeableState }, labels: prMetadata.labels,
-    readLaunches: reviewHandoffLease?.lrqId ? async ({ signal: readSignal, timeoutMs }) => {
+    readLaunches: reviewHandoffLease?.lrqId ? async ({ signal: readSignal, timeoutMs } = {}) => {
       const probe = earlyLaunchRequestProbe?.launchRequestId === reviewHandoffLease.lrqId
         ? earlyLaunchRequestProbe.probe : await readLaunchRequestStatusImpl({
           rootDir: dispatchContext.rootDir || SUBMODULE_ROOT,

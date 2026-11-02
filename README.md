@@ -4441,6 +4441,11 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- NXAOWNERREAD-01 final comment-only remediation: the closer launch-reader callback
+  accepts omitted options. The stalled-read fixture counts resolver invocations
+  separately from source reads, verifying the bounded refresh attempts without
+  implying that a precomputed source-read count measures resolver retries.
+
 ### NXAOWNERREAD-01 — shared ownership reads at launch
 
 The AMA closure scan, next-action evidence, shadow and hammer wake now share

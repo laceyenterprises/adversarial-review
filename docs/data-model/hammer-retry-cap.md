@@ -20,12 +20,24 @@ dispatch recorded the hammer series under it. The owner cap is evaluated under
 already starts a fresh series for the evidence head, so the reset has nothing to
 clear there.
 
-A reset sets `attemptCount: 0` and `dispatchHeads: []`, clears the series
-suppression fields (`suppressed`, `suppressedJobKey`, `suppressedHeadSha`,
+A reset sets `attemptCount: 0`, `dispatchHeads: []` and
+`closerDispatchedHeads: []`, clears the series suppression fields
+(`suppressed`, `suppressedJobKey`, `suppressedHeadSha`,
 `suppressedAttemptCount`, `alertedAt`) and drops the series `retryable`
 refunds. `suppressionState` is cleared unless a target suppression is still in
-force. Lifetime counts, lifetime suppression, target fields and charge receipts
-are unchanged.
+force. Before clearing the series it persists the effective lifetime count
+(`lifetimeAttemptCount`, which legacy ledgers derive from `attemptCount`), so a
+reset never refunds lifetime budget. Lifetime suppression, target fields and
+charge receipts are unchanged.
+
+"A head the hammer was dispatched for" means confirmed dispatch evidence: a
+`dispatchCharges` entry whose `headSha` is that head, or the head in
+`closerDispatchedHeads`. The dispatch recorder alone appends to
+`closerDispatchedHeads` (per series, like `dispatchHeads`); the cap-suppression
+writer carries it unchanged. `dispatchHeads`, `lastDispatchedHeadSha` and
+`suppressedHeadSha` are not dispatch evidence, because the suppression writer
+also stamps a head the closer merely refused. A non-closer head that was only
+refused therefore still gets its one reset.
 The optional `nonCloserHeadResets` map, keyed by head SHA, records
 `{ resetAt, jobKey, reason, priorAttemptCount, priorSuppressed,
 priorSuppressedHeadSha }`. It survives every later write, so each head resets at

@@ -486,6 +486,12 @@ function recordHammerRetryDispatchUnlocked(rootDir, identity, {
   const dispatchHeads = head && !priorHeads.includes(head)
     ? [...priorHeads, head]
     : priorHeads;
+  const priorDispatched = (!existing || decision.jobKeyChanged)
+    ? []
+    : (Array.isArray(existing.closerDispatchedHeads) ? existing.closerDispatchedHeads : []);
+  const closerDispatchedHeads = head && !priorDispatched.includes(head)
+    ? [...priorDispatched, head]
+    : priorDispatched;
   const doc = {
     ...durableChargeFields(existing),
     schemaVersion: HAMMER_RETRY_CAP_SCHEMA_VERSION,
@@ -506,6 +512,7 @@ function recordHammerRetryDispatchUnlocked(rootDir, identity, {
     ...(existing?.operatorHoldRefundStopKeys ? { operatorHoldRefundStopKeys: existing.operatorHoldRefundStopKeys } : {}),
     ...(existing?.operatorHoldRefundedAt ? { operatorHoldRefundedAt: existing.operatorHoldRefundedAt } : {}),
     dispatchHeads,
+    closerDispatchedHeads,
     ...(dispatchKey || existing?.chargedDispatchKeys ? {
       chargedDispatchKeys: [...(existing?.chargedDispatchKeys || []), ...(dispatchKey ? [dispatchKey] : [])],
     } : {}),
@@ -616,6 +623,9 @@ function markHammerRetryCapExhaustedUnlocked(rootDir, identity, {
     ...(existing?.operatorHoldRefundStopKeys ? { operatorHoldRefundStopKeys: existing.operatorHoldRefundStopKeys } : {}),
     ...(existing?.operatorHoldRefundedAt ? { operatorHoldRefundedAt: existing.operatorHoldRefundedAt } : {}),
     dispatchHeads,
+    // A refusal is not a dispatch: carry the dispatch-only list unchanged.
+    ...(Array.isArray(existing?.closerDispatchedHeads) && !jobKeyChanged
+      ? { closerDispatchedHeads: existing.closerDispatchedHeads } : {}),
     lastDispatchedHeadSha: head || existing?.lastDispatchedHeadSha || null,
     suppressed: true,
     suppressionState: lifetimeSuppressed
@@ -966,6 +976,19 @@ export function deferHammerRetryDispatch(rootDir, identity, options = {}) {
   return mutateHammerLedger(rootDir, identity, () => deferHammerRetryDispatchUnlocked(rootDir, identity, options));
 }
 
+// Only a real dispatch proves the closer worked a head. The suppression writer
+// also appends to dispatchHeads/lastDispatchedHeadSha and stamps
+// suppressedHeadSha, so those fields cannot tell a dispatched head from one
+// that was merely refused. Dispatch charges (every launch-bound dispatch) and
+// closerDispatchedHeads (written only by the dispatch recorder) can.
+function closerWasDispatchedForHead(ledger, head) {
+  const charged = Object.values(ledger.dispatchCharges || {})
+    .some(charge => normalizeKey(charge?.headSha) === head);
+  const recorded = Array.isArray(ledger.closerDispatchedHeads)
+    && ledger.closerDispatchedHeads.some(value => normalizeKey(value) === head);
+  return charged || recorded;
+}
+
 // CLOSERPROOF-01: a retry-cap series belongs to the heads the closer authored.
 // A head the closer did not author (no authenticated hammer edge ends at it;
 // for example another worker rebased the hammer's commit) does not inherit the
@@ -993,8 +1016,7 @@ export function resetHammerSeriesForNonCloserHead(rootDir, identity, { jobKey, h
     if (normalizeKey(ledger.jobKey) !== anchor) return 'series-anchor-mismatch';
     if (ledger.lifetimeSuppressed) return 'lifetime-suppressed';
     if (ledger.nonCloserHeadResets?.[head]) return 'already-reset';
-    if ([ledger.lastDispatchedHeadSha, ledger.suppressedHeadSha, ...(Array.isArray(ledger.dispatchHeads)
-      ? ledger.dispatchHeads : [])].some(value => normalizeKey(value) === head)) return 'closer-dispatched-head';
+    if (closerWasDispatchedForHead(ledger, head)) return 'closer-dispatched-head';
     if (!ledger.suppressed && !(Number(ledger.attemptCount) > 0)) return 'series-unspent';
     return null;
   };
@@ -1010,8 +1032,12 @@ export function resetHammerSeriesForNonCloserHead(rootDir, identity, { jobKey, h
       priorAttemptCount: Math.max(0, Number(ledger.attemptCount) || 0), priorSuppressed: Boolean(ledger.suppressed),
       priorSuppressedHeadSha: normalizeKey(ledger.suppressedHeadSha) };
     const doc = { ...ledger,
+      // Legacy ledgers derive the lifetime count from attemptCount; persist the
+      // effective value first so clearing the series never refunds lifetime budget.
+      lifetimeAttemptCount: sanitizeLifetimeCount(ledger.lifetimeAttemptCount ?? ledger.attemptCount),
       attemptCount: 0,
       dispatchHeads: [],
+      closerDispatchedHeads: [],
       suppressed: false,
       suppressionState: ledger.targetSuppressed ? ledger.suppressionState : null,
       suppressedJobKey: null,

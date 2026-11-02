@@ -6,7 +6,7 @@ import './helpers/rate-limit-state-isolation.mjs';
 // normal series budget; a closer push on the same attested chain does not.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -14,6 +14,7 @@ import { proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
 import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
 import {
   evaluateHammerRetryCap,
+  hammerRetryCapFilePath,
   markHammerRetryCapExhausted,
   readHammerRetryCapLedger,
   recordHammerRetryDispatch,
@@ -145,6 +146,64 @@ test('unknown, mis-anchored or lifetime-exhausted cases never reset the series',
   assert.equal(resetHammerSeriesForNonCloserHead(lifetimeRoot, IDENTITY, {
     jobKey: REVIEWED, headSha: REBASED, headProof: proof }).reason, 'lifetime-suppressed');
   assert.equal(evaluate(lifetimeRoot, REBASED).lifetimeCapExhausted, true);
+});
+
+test('a non-closer head that was only refused, never dispatched, still gets its reset', async t => {
+  const rootDir = exhaustedLedger(t);
+  // The closer refused head B on the exhausted series: the suppression writer
+  // records B in dispatchHeads/lastDispatchedHeadSha/suppressedHeadSha without
+  // any launch, so B must still recover once its non-closer proof is known.
+  markHammerRetryCapExhausted(rootDir, IDENTITY, { jobKey: REVIEWED, headSha: REBASED, attemptCount: 2,
+    alertEmitted: true, now: '2026-11-01T00:10:00Z' });
+  const refused = readHammerRetryCapLedger(rootDir, IDENTITY);
+  assert.ok(refused.dispatchHeads.includes(REBASED));
+  assert.equal(refused.suppressedHeadSha, REBASED);
+  const result = resetHammerSeriesForNonCloserHead(rootDir, IDENTITY, {
+    jobKey: REVIEWED, headSha: REBASED, headProof: await prove(REBASED), now: '2026-11-01T01:00:00Z',
+  });
+  assert.equal(result.reset, true);
+  assert.equal(evaluate(rootDir, REBASED).capExhausted, false);
+});
+
+test('a non-closer head the closer was actually dispatched for is still refused', async t => {
+  const rootDir = exhaustedLedger(t);
+  recordHammerRetryDispatch(rootDir, IDENTITY, { jobKey: REVIEWED, headSha: REBASED,
+    launchRequestId: 'lrq_fixture_dispatched_b', now: '2026-11-01T00:20:00Z' });
+  markHammerRetryCapExhausted(rootDir, IDENTITY, { jobKey: REVIEWED, headSha: REBASED, attemptCount: 3,
+    alertEmitted: true, now: '2026-11-01T00:21:00Z' });
+  assert.ok(readHammerRetryCapLedger(rootDir, IDENTITY).closerDispatchedHeads.includes(REBASED));
+  assert.equal(resetHammerSeriesForNonCloserHead(rootDir, IDENTITY, {
+    jobKey: REVIEWED, headSha: REBASED, headProof: await prove(REBASED) }).reason, 'closer-dispatched-head');
+
+  // A chargeless legacy dispatch is still proven by the dispatch-only list.
+  const chargeless = mkdtempSync(join(tmpdir(), 'closerproof-01-chargeless-'));
+  t.after(() => rmSync(chargeless, { recursive: true, force: true }));
+  for (const at of ['2026-11-01T00:00:00Z', '2026-11-01T00:01:00Z']) {
+    recordHammerRetryDispatch(chargeless, IDENTITY, { jobKey: REVIEWED, headSha: REBASED, now: at });
+  }
+  markHammerRetryCapExhausted(chargeless, IDENTITY, { jobKey: REVIEWED, headSha: REBASED, attemptCount: 2 });
+  assert.equal(resetHammerSeriesForNonCloserHead(chargeless, IDENTITY, {
+    jobKey: REVIEWED, headSha: REBASED, headProof: await prove(REBASED) }).reason, 'closer-dispatched-head');
+});
+
+test('a reset never refunds the lifetime count of a legacy ledger', async t => {
+  for (const legacy of ['absent', 'null']) {
+    const rootDir = exhaustedLedger(t);
+    const file = hammerRetryCapFilePath(rootDir, IDENTITY);
+    const doc = JSON.parse(readFileSync(file, 'utf8'));
+    if (legacy === 'absent') delete doc.lifetimeAttemptCount;
+    else doc.lifetimeAttemptCount = null;
+    writeFileSync(file, `${JSON.stringify(doc, null, 2)}\n`);
+    assert.equal(evaluate(rootDir, REBASED).priorLifetimeCount, 2);
+    const result = resetHammerSeriesForNonCloserHead(rootDir, IDENTITY, {
+      jobKey: REVIEWED, headSha: REBASED, headProof: await prove(REBASED), now: '2026-11-01T01:00:00Z',
+    });
+    assert.equal(result.reset, true, legacy);
+    const ledger = readHammerRetryCapLedger(rootDir, IDENTITY);
+    assert.equal(ledger.attemptCount, 0, legacy);
+    assert.equal(ledger.lifetimeAttemptCount, 2, legacy);
+    assert.equal(evaluate(rootDir, REBASED).priorLifetimeCount, 2, legacy);
+  }
 });
 
 // The closure orchestration applies the reset with the same proof it used to

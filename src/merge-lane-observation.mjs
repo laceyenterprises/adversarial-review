@@ -30,9 +30,15 @@ export async function readBranchCustody(launchRequestId, { readWorker = readLate
   const path = worker?.ok && (worker.row?.worktree_path || worker.row?.worktreePath);
   if (!path) return { state: 'unknown', branch: null, dirty: null, live };
   const options = { cwd: path, timeout: timeoutMs, maxBuffer: 256 * 1024, env: { ...globalThis.process.env, GIT_OPTIONAL_LOCKS: '0' } };
-  const branch = (await git('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], options)).stdout.trim();
-  const status = await git('git', ['status', '--porcelain=v1', '--untracked-files=normal'], options);
-  return { state: 'complete', branch, dirty: status.stdout.length > 0, live };
+  let branch = null, dirty = null;
+  try {
+    branch = (await git('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], options)).stdout.trim();
+  } catch { /* Detached or unreadable refs do not prevent status inspection. */ }
+  try {
+    const status = await git('git', ['status', '--porcelain=v1', '--untracked-files=normal'], options);
+    dirty = status.stdout.length > 0;
+  } catch { /* Unreadable custody does not discard verified process liveness. */ }
+  return { state: dirty == null ? 'unknown' : 'complete', branch, dirty, live };
 }
 
 export async function captureMergeLaneObservation({ rootDir, shared, repo, prNumber, observedMs,
@@ -48,8 +54,9 @@ export async function captureMergeLaneObservation({ rootDir, shared, repo, prNum
     const effective = withLiveLaunchRetry(probe);
     const scheduling = launchRequestInFlight(probe);
     try { custody = await custodyRead(effective.liveRetryLaunchRequestId || closer.launchRequestId, { rootDir }); } catch { /* explicit unknown */ }
-    terminalDirtyCustody = scheduling === false && custody.state === 'complete' && custody.dirty === true;
-    if (!closer.headSha || closer.headSha === decision.head) live = scheduling === false ? false : custody.live ?? null;
+    const matchesHead = !closer.headSha || closer.headSha === decision.head;
+    terminalDirtyCustody = matchesHead && scheduling === false && custody.state === 'complete' && custody.dirty === true;
+    if (matchesHead) live = scheduling === false ? false : custody.live ?? null;
   }
   if (decision.actor === 'reviewer') live = snapshot.observations?.reviews?.value?.reviewerLive ?? null;
   else if (decision.actor === 'remediator') live = snapshot.observations?.remediation?.value?.job?.live ?? null;
@@ -60,7 +67,7 @@ export async function captureMergeLaneObservation({ rootDir, shared, repo, prNum
     observedAt: new Date(observedMs).toISOString(), state: snapshot.observations?.pr?.value?.state ?? 'unknown',
     next: { action: decision.action, actor: decision.actor, row: decision.row, reason: decision.reason,
       deadline: decision.deadline, decisionKey: decision.decisionKey },
-    ownership: { live, custody, ownerless: terminalDirtyCustody || live === false ? true
-      : live === true ? false : null } };
+    ownership: { live, custody, ownerless: live === true ? false
+      : terminalDirtyCustody || live === false ? true : null } };
   return write(rootDir, 'observations.jsonl', record);
 }

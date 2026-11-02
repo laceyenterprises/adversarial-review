@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildMergeLaneStatus, readMergeLaneRecords, renderMergeLaneStatus } from '../src/merge-lane-status.mjs';
+import { buildMergeLaneStatus, mergeLaneMain, readMergeLaneRecords, renderMergeLaneStatus } from '../src/merge-lane-status.mjs';
 import { appendShadowRecord } from '../src/merge-lane-journal.mjs';
 import { captureMergeLaneObservation, readBranchCustody } from '../src/merge-lane-observation.mjs';
 const NOW = Date.parse('2026-01-02T12:00:00Z');
@@ -27,6 +28,35 @@ test('one row per live open PR; terminal inventory wins over historical snapshot
   assert.equal(status.source.generation, 4);
   assert.equal(status.flow.ownerlessMinutes24h, 2);
   assert.match(renderMergeLaneStatus(status), /MERGE LANE — 4 open/);
+});
+
+test('status and journal episodes prefer subject identity over a bare repo name', t => {
+  const root = mkdtempSync(join(tmpdir(), 'merge-identity-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  appendShadowRecord(root, 'observations.jsonl', record(1, { observedAt: ago(2) }));
+  appendShadowRecord(root, 'observations.jsonl', record(1, { repo: 'repo' }));
+  const status = buildMergeLaneStatus({ records: readMergeLaneRecords(root).records, inventory, now: NOW, loadOptions });
+  assert.equal(status.prs[0].evidenceState, 'complete');
+  assert.equal(status.prs[0].observedAt, ago(1));
+  assert.equal(status.flow.ownerlessMinutes24h, 2, 'one identity must not double-count overlapping intervals');
+  assert.equal(status.prs[0].episode, buildMergeLaneStatus({
+    records: [record(1, { observedAt: ago(2) })], inventory, now: NOW, loadOptions,
+  }).prs[0].episode);
+  const { subjectKey: _subjectKey, ...legacy } = record(2);
+  assert.equal(buildMergeLaneStatus({ records: [legacy], inventory, now: NOW, loadOptions }).prs[1].evidenceState, 'complete');
+});
+
+test('invalid merge-lane arguments return usage and code 2 without collecting inventory', async () => {
+  for (const argv of [[], ['invalid'], ['status', '--invalid'], ['status', '--root'], ['status', '--root', '--json']]) {
+    let stderr = '', stdout = '';
+    const code = await mergeLaneMain([...argv], {
+      stderr: { write: text => { stderr += text; } },
+      stdout: { write: text => { stdout += text; } },
+    });
+    assert.equal(code, 2);
+    assert.equal(stderr, 'Usage: merge-lane status [--root <dir>] [--json]\n');
+    assert.equal(stdout, '');
+  }
 });
 
 test('load scales proposed deadlines and page patience with a ceiling; owner deadlines stay authoritative', () => {
@@ -124,6 +154,38 @@ test('process birth identity verifies liveness; failed probes stay unknown and r
   assert.equal(selected, 'child');
 });
 
+test('detached HEAD preserves live process proof and still inspects worktree dirtiness', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'merge-detached-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const git = args => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  git(['init', '--quiet']);
+  git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'core.hooksPath=/dev/null',
+    'commit', '--quiet', '--allow-empty', '-m', 'fixture']);
+  git(['checkout', '--quiet', '--detach']);
+  const read = () => readBranchCustody('synthetic', {
+    readWorker: async () => ({ ok: true, row: { worktree_path: root,
+      process: { pid: 123, started_at: '2026-01-02T12:00:00Z' } } }),
+    git: async (exe, args) => ({ stdout: exe === 'ps' ? 'Fri Jan  2 12:00:00 2026\n' : git(args) }),
+  });
+  assert.deepEqual(await read(), { state: 'complete', branch: null, dirty: false, live: true });
+  writeFileSync(join(root, 'untracked'), 'fixture');
+  assert.deepEqual(await read(), { state: 'complete', branch: null, dirty: true, live: true });
+});
+
+test('unreadable git refs or status preserve independently verified liveness', async () => {
+  for (const live of [true, false]) {
+    const custody = await readBranchCustody('synthetic', {
+      readWorker: async () => ({ ok: true, row: { worktree_path: '/synthetic/unreadable',
+        process: live ? { pid: 123, started_at: '2026-01-02T12:00:00Z' } : { exited_at: '2026-01-02T12:00:00Z' } } }),
+      git: async exe => {
+        if (exe === 'ps') return { stdout: 'Fri Jan  2 12:00:00 2026\n' };
+        throw new Error('synthetic unreadable worktree');
+      },
+    });
+    assert.deepEqual(custody, { state: 'unknown', branch: null, dirty: null, live });
+  }
+});
+
 test('out-of-order samples cannot reset an episode and idle gaps do not expire it', t => {
   const root = mkdtempSync(join(tmpdir(), 'merge-order-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -135,15 +197,18 @@ test('out-of-order samples cannot reset an episode and idle gaps do not expire i
 });
 
 
-test('a completed clean closer does not displace the current reviewer owner', async () => {
-  let observation;
-  await captureMergeLaneObservation({ rootDir: 'unused', repo: 'fixture/repo', prNumber: 1, observedMs: NOW,
-    shared: { snapshot: { observations: { reviews: { state: 'complete', value: { reviewerLive: true } },
-      launches: { state: 'complete', value: { closer: { launchRequestId: 'old', headSha: 'previous',
-        probe: { ok: true, row: { status: 'failed' }, retryChain: [] } } } } } },
-      decision: { ...record(1).next, actor: 'reviewer', head: 'h' } },
-    custodyRead: async () => ({ state: 'complete', dirty: false, live: false }),
-    write: (_root, _name, row) => { observation = row; } });
-  assert.equal(observation.ownership.live, true);
-  assert.equal(observation.ownership.ownerless, false);
+test('terminal closer custody is head-bound and cannot displace a live reviewer', async () => {
+  for (const headSha of ['previous', 'h', undefined]) for (const dirty of [false, true]) for (const reviewerLive of [true, null]) {
+    let observation;
+    await captureMergeLaneObservation({ rootDir: 'unused', repo: 'fixture/repo', prNumber: 1, observedMs: NOW,
+      shared: { snapshot: { observations: { reviews: { state: 'complete', value: { reviewerLive } },
+        launches: { state: 'complete', value: { closer: { launchRequestId: 'old', headSha,
+          probe: { ok: true, row: { status: 'failed' }, retryChain: [] } } } } } },
+        decision: { ...record(1).next, actor: 'reviewer', head: 'h' } },
+      custodyRead: async () => ({ state: 'complete', dirty, live: false }),
+      write: (_root, _name, row) => { observation = row; } });
+    assert.equal(observation.ownership.live, reviewerLive);
+    assert.equal(observation.ownership.ownerless, reviewerLive === true ? false
+      : dirty && headSha !== 'previous' ? true : null, JSON.stringify({ headSha, dirty, reviewerLive }));
+  }
 });

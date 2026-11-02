@@ -8,7 +8,7 @@ import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { collect as inventory } from './merge-lane-inventory.mjs';
 import { collectReviewLatencyReport } from './review-latency-report.mjs';
 const DAY = 86_400_000;
-const keyOf = r => r.repo && r.prNumber ? `${r.repo}#${r.prNumber}` : r.subjectKey;
+const keyOf = r => r.subjectKey || (r.repo && r.prNumber ? `${r.repo}#${r.prNumber}` : null);
 const at = r => Date.parse(r.observedAt);
 
 export function buildMergeLaneStatus({ records = [], inventory: input, now = Date.now(), loadOptions = {}, latency = null } = {}) {
@@ -114,11 +114,15 @@ export function renderMergeLaneStatus(status) {
 
 export async function mergeLaneMain(argv, io = {}) {
   let rootDir = process.cwd(), json = false;
-  if (argv.shift() !== 'status') throw new Error('Usage: merge-lane status [--root <dir>] [--json]');
+  const usage = () => {
+    (io.stderr || process.stderr).write('Usage: merge-lane status [--root <dir>] [--json]\n');
+    return 2;
+  };
+  if (argv.shift() !== 'status') return usage();
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--json') json = true;
-    else if (argv[i] === '--root' && argv[i + 1]) rootDir = argv[++i];
-    else throw new Error('Usage: merge-lane status [--root <dir>] [--json]');
+    else if (argv[i] === '--root' && argv[i + 1] && !argv[i + 1].startsWith('-')) rootDir = argv[++i];
+    else return usage();
   }
   const status = await collectMergeLaneStatus({ rootDir });
   (io.stdout || process.stdout).write(`${json ? JSON.stringify(status) : renderMergeLaneStatus(status)}\n`);

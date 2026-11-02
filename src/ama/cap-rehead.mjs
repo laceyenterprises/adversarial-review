@@ -7,6 +7,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fsExt from 'fs-ext';
 import { SETTLED_SUCCESS_VERDICTS } from './eligibility.mjs';
+import { owesExhaustedHeadVerdict } from '../exhausted-head-verdict.mjs';
 import { capReheadUpdateMode } from './cap-rehead-update.mjs';
 import { createHistoryReader } from './history-reader.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
@@ -42,7 +43,9 @@ export async function probeCapReheadOwnership(args, {
   readLaunchImpl = readLaunchRequestStatusFromLedgerAsync,
 } = {}) {
   const owner = await probeImpl(args);
-  if (!owner || owner.owned !== false || owner.uncertain !== false) return { owned: true };
+  if (!owner || owner.owned !== false || owner.uncertain !== false) {
+    return { owned: true, uncertain: owner?.owned !== true || owner?.uncertain === true };
+  }
   if (!args.branch) return { uncertain: true };
   const observed = await readWorkspacesImpl({ observation: 'workspaces' }, args);
   if (!observed?.ok || !Array.isArray(observed.rows)) return { uncertain: true };
@@ -70,6 +73,7 @@ export async function maybeDispatchCapRehead({ rootDir, repo, prNumber, headSha,
   readCurrentPrImpl = null, probeOwnershipImpl = probeCapReheadOwnership, execFileImpl = execFileAsync,
   readLaunchImpl = readLaunchRequestStatusFromLedgerAsync,
   classifyUpdateModeImpl = capReheadUpdateMode, operationTimeoutMs = null,
+  owesExhaustedHeadVerdictImpl = owesExhaustedHeadVerdict,
   now = () => new Date().toISOString(),
 } = {}) {
   if (wake?.outcome !== 'skipped' || !['retry-exhausted', 'hammer-retry-cap-exhausted'].includes(wake.reason)) return null;
@@ -85,7 +89,7 @@ export async function maybeDispatchCapRehead({ rootDir, repo, prNumber, headSha,
     return report(false, 'live-owner', { custody: true });
   }
   if (cfg.capReheadEnabled === false) { report(false, 'disabled'); return null; }
-  if (reviewState?.reviewCycleExhausted !== false) return report(false, 'cycle-exhausted');
+  if (typeof reviewState?.reviewCycleExhausted !== 'boolean') return report(false, 'cycle-unknown');
   if (!SETTLED_SUCCESS_VERDICTS.has(reviewState.verdict)
     || reviewState.blockingFindingState !== 'known' || reviewState.blockingFindingCount !== 0) return report(false, 'blocking-findings');
   if (classifyCheckRollup(requiredChecks, { requiredContexts: requiredCheckContexts }) !== 'SUCCESS') return report(false, 'checks-red');
@@ -94,6 +98,15 @@ export async function maybeDispatchCapRehead({ rootDir, repo, prNumber, headSha,
   const cap = cfg.capReheadLifetimeCap ?? 2;
   if (!Number.isInteger(cap) || cap < 0) return report(false, 'lifetime-cap');
   if (!repo || !Number.isInteger(prNumber) || prNumber <= 0 || !headSha || !branch) return report(false, 'identity-unavailable');
+  // Project the promised fresh builder commit, not the currently capped head.
+  // Use a canonical SHA distinct from the source, including an all-zero source.
+  // The watcher still classifies the actual SHA before admitting its verdict.
+  const exhaustedBuilderHead = owesExhaustedHeadVerdictImpl({
+    exhausted: reviewState.reviewCycleExhausted,
+    headSha: (headSha === '0'.repeat(40) ? '1' : '0').repeat(40), reviewedHeadSha: headSha,
+    closerAuthored: false, deliveredReviews: 0,
+  });
+  if (reviewState.reviewCycleExhausted && !exhaustedBuilderHead) return report(false, 'cycle-exhausted');
   const workerClass = builderClassFromTitle(title) || defaultBuilder;
   if (!KNOWN_TAGS.includes(workerClass) && workerClass !== 'codex-corp') return report(false, 'builder-unavailable');
   if (process.env.NODE_TEST_CONTEXT && execFileImpl === execFileAsync) {
@@ -131,12 +144,17 @@ export async function maybeDispatchCapRehead({ rootDir, repo, prNumber, headSha,
     let owner;
     try { owner = await probeOwnershipImpl(args); }
     catch { return report(false, 'live-owner'); }
-    if (!owner || owner.owned !== false || owner.uncertain !== false) return report(false, 'live-owner');
+    if (!owner || owner.owned !== false || owner.uncertain !== false) {
+      return report(false, 'live-owner', { custody: owner?.owned === true && owner?.uncertain !== true });
+    }
     let updateMode;
     try {
       updateMode = await classifyUpdateModeImpl({ rootDir, repo, prNumber, headSha,
         get: createHistoryReader({ env, signal }) });
       if (!['squash', 'merge-main'].includes(updateMode)) throw new Error('invalid update mode');
+      // An exhausted cycle needs a distinct builder commit even if main already
+      // contains the change. Squash removes inherited closer/final-round history.
+      if (exhaustedBuilderHead) updateMode = 'squash';
     } catch { return report(false, 'history-unavailable'); }
     // Ownership reads can yield while a builder pushes or an operator holds
     // the PR. Reserve only against a fresh, still eligible current head.

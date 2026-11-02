@@ -12,17 +12,20 @@ maintenance after the closer retry cap, with no merge authority.
    launch provenance before dispatch; no helper checkout or Node dependencies
    are required in this worker. If the live head differs from `oldHead`, stop
    without publishing and report the moved head. Never guess another mode.
-2. When the mode is `squash` (ANY hammer/closer commit in the PR range), reset the
-   branch to current `origin/main` with `git reset --hard origin/main`, then run
+2. When the mode is `squash` (an exhausted review cycle OR ANY hammer/closer
+   commit in the PR range), reset the branch to current `origin/main` with `git reset --hard origin/main`, then run
    `git merge --squash "$old_head"`. The result must become ONE new builder
    commit containing the entire PR change applied to current main. Do not copy
-   commit messages, hammer or closer trailers, or attestations.
+   commit messages, hammer or closer trailers, or attestations. Use a fresh
+   builder message, for example `Refresh PR branch against main`, with no
+   `Closed-By`, hammer `Worker-Class`, `HAM-*`, or final-round markers. This
+   coding launch is a builder PR update, never a final-round remediation push.
    Do not merge main into the old hammer history: `src/ama/primary-change.mjs`
    derives the primary head from the first hammer's first parent; a later main
    merge can make primary and final merge bases differ forever. The single
    builder commit removes that history and requires full fresh review of the diff.
-3. When the mode is `merge-main` (NO hammer/closer commits), keep the existing
-   history: run `git merge --no-ff origin/main`. Never rebase or amend.
+3. When the mode is `merge-main` (non-exhausted cycle and NO hammer/closer
+   commits), keep the existing history: run `git merge --no-ff origin/main`. Never rebase or amend.
    If main is already merged, report
    no change; do not manufacture a commit.
 4. Resolve conflicts keeping both sides' intended behavior. Regenerate generated

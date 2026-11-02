@@ -11,12 +11,16 @@ It requires `launchProvenance.launchRequestId` to match its unambiguous launch i
 It replaces any caller-exported `ADVERSARIAL_DISPATCH_READS_ENABLED` with the
 value in that adapter-owned record. Dispatch-file lookup retries up to
 `LAUNCH_READ_ATTEMPTS` with a fresh `launchReadTimeoutMs()` budget per read.
+This synchronous path retries back-to-back without delay or backoff; fast
+failures can exhaust immediately and defer startup to the next closer retry.
 Exhausted lookup (`launch-environment-read-unavailable`) and absent legacy
 `launchEnvironment` (`launch-environment-missing-legacy-dispatch`) refuse
 startup with exit 75 and a deferred launch-bound audit under the existing
 VERIFYHEADTRANSIENT-01 retry/refund contract. A present malformed activation
 (`controller-launch-environment-malformed`) or foreign identity
 (`controller-launch-environment-identity-unconfirmed`) hard-stops with exit 125.
+Retryable startup failures emit no `terminal-stop` progress receipt; malformed
+or foreign startup failures retain that final receipt. No receipt field changes.
 Absent or non-string/non-`"1"` activation in the adapter file remains disabled by
 the unchanged reader. This file supplies environment provenance only: launch
 status still comes exclusively from the SDK/HCP own-launch read. The Agent OS

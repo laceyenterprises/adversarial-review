@@ -350,7 +350,7 @@ test('CLOSERLAUNCHENV-01: a transient environment read retries before controller
 
 test('CLOSERLAUNCHENV-01: three unavailable reads record a deferred startup without spawning', async t => {
   const f = fixture(t, 'exit 0');
-  const env = { ...f.env, HAM_REVIEWED_SHA: head };
+  const env = { ...f.env, HAM_REVIEWED_SHA: head, HQ_WORKER_RUN_ID: 'wrun_environment-test' };
   let reads = 0;
   await assert.rejects(runHammerController('/does-not-run', [], {
     env, readTimeoutImpl: () => 77,
@@ -367,6 +367,8 @@ test('CLOSERLAUNCHENV-01: three unavailable reads record a deferred startup with
   assert.equal(audit.status, 'deferred');
   assert.equal(audit.attempts.at(-1).reason, 'launch-environment-read-unavailable');
   assert.equal(audit.attempts.at(-1).launchRequestId, 'lrq_controller-test');
+  assert.equal(existsSync(join(f.dir, 'dispatch', 'lrq_controller-test',
+    'hammer-progress', env.HQ_WORKER_RUN_ID, 'terminal-stop.json')), false);
 });
 
 test('CLOSERLAUNCHENV-01: readable legacy, malformed and foreign records have distinct outcomes', () => {
@@ -413,6 +415,7 @@ test('CLOSERLAUNCHENV-01: CLI preserves named deferred and hard-stop startup aud
     ['unavailable', 'launch-environment-read-unavailable', 75],
     ['legacy', 'launch-environment-missing-legacy-dispatch', 75],
     ['malformed', 'controller-launch-environment-malformed', 125],
+    ['foreign', 'controller-launch-environment-identity-unconfirmed', 125],
   ]) {
     const f = fixture(t, 'exit 0');
     const preload = join(f.dir, 'environment-preload.mjs');
@@ -421,18 +424,28 @@ test('CLOSERLAUNCHENV-01: CLI preserves named deferred and hard-stop startup aud
       dispatchReadTransport.observationSync = () => ({});
       dispatchReadTransport.sdk = () => ({readDispatchFiles: () => ({
         available: ${kind !== 'unavailable'}, found: true,
-        metadata: {launchRequestId: 'lrq_controller-test',
+        metadata: {launchRequestId: ${JSON.stringify(kind === 'foreign' ? 'lrq_foreign' : 'lrq_controller-test')},
           ...(${JSON.stringify(kind)} === 'legacy' ? {} : {launchEnvironment: {dispatchReadsEnabled: 'bad'}})}
       })});
     `);
     assert.throws(() => execFileSync(process.execPath, ['--import', preload,
       join(root, 'bin/hammer-controller.mjs'), 'run', '/does-not-run'], {
-      env: { ...f.env, HAM_REVIEWED_SHA: head }, timeout: 10000, stdio: 'pipe',
+      env: { ...f.env, HAM_REVIEWED_SHA: head, HQ_WORKER_RUN_ID: 'wrun_environment-test' },
+      timeout: 10000, stdio: 'pipe',
     }), error => error.status === status && error.stderr.toString().includes(reason));
     const audit = readAmaAuditEntry(f.dir, 'fixture/repo', 42, head);
     assert.equal(audit.status, status === 75 ? 'deferred' : 'failed-without-merge');
     assert.equal(audit.attempts.at(-1).reason, reason);
     assert.equal(readdirSync(f.dir).some(name => /^controller-.*\.json$/.test(name)), false);
+    const terminalPath = join(f.dir, 'dispatch', 'lrq_controller-test',
+      'hammer-progress', 'wrun_environment-test', 'terminal-stop.json');
+    assert.equal(existsSync(terminalPath), status === 125);
+    if (status === 125) {
+      const receipt = JSON.parse(readFileSync(terminalPath, 'utf8'));
+      assert.equal(receipt.reason, reason);
+      assert.equal(receipt.launchRequestId, 'lrq_controller-test');
+      assert.equal(receipt.runId, 'wrun_environment-test');
+    }
   }
 });
 

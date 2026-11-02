@@ -72,6 +72,12 @@ or merge-lease acquisition. An identity-matching older dispatch record with
 no `launchEnvironment` records `launch-environment-missing-legacy-dispatch`;
 it also refuses execution with retryable exit 75 and requires the adapter
 producer revision on the next launch. Neither case adopts a shell export.
+These synchronous lookups run back-to-back without delay or backoff. Each
+lookup receives its own timeout; fast failures can exhaust immediately and
+defer to the existing uncharged closer retry rather than wait for a writer.
+Both retryable outcomes write no `terminal-stop` progress receipt, so the
+supervisor's final-stop grace cannot convert their deferred audit into a
+charged terminal stop.
 A present value without boolean `dispatchReadsEnabled` records
 `controller-launch-environment-malformed` and hard-stops with exit 125.
 A foreign launch identity retains
@@ -105,6 +111,8 @@ launch-bound deferred audit; the existing VERIFYHEADTRANSIENT-01 reconciliation
 retains the hammer retry owner and load-aware deadline and refunds series,
 target and lifetime closer accounting. Malformed values and foreign identities
 remain final. No state, cap, gate, lease or persisted field is added.
+Malformed and foreign startup failures still emit a final `terminal-stop`
+receipt; retryable startup failures emit only their deferred audit.
 
 After merge, the deployment owner floats the submodule, deploys and bounces
 the service. Retain natural-traffic evidence of zero identity-unconfirmed

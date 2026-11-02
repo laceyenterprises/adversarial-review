@@ -54,6 +54,9 @@ export function controllerLaunchEnvironment(env = process.env, {
 } = {}) {
   const launchRequestId = controllerLaunchId(env);
   let result;
+  // This synchronous compatibility path retries back-to-back, without backoff.
+  // Each lookup has a load-aware timeout; fast failures may exhaust immediately
+  // and defer startup to the existing uncharged closer retry path.
   for (let attempt = 1; attempt <= LAUNCH_READ_ATTEMPTS; attempt += 1) {
     try {
       result = readDispatchFilesImpl({launch_request_id: launchRequestId}, {env, timeoutMs: readTimeoutImpl()});
@@ -235,7 +238,9 @@ export async function runHammerController(script, args = [], {
   try {
     env = controllerLaunchEnvironment(env, { readDispatchFilesImpl, readTimeoutImpl });
   } catch (error) {
-    if (error.phaseOutcome) reportHammerEarlyFailure(error.phaseOutcome, { env, final: true });
+    if (error.phaseOutcome) reportHammerEarlyFailure(error.phaseOutcome, {
+      env, final: !HAMMER_RETRYABLE_READ_OUTCOMES.has(error.phaseOutcome),
+    });
     throw error;
   }
   const census = snapshotImpl ? null : groupCensusImpl({ env });

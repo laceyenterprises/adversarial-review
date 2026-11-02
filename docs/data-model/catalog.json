@@ -604,7 +604,8 @@
         "src/daemon-bounce-posted-review.mjs",
         "src/orphan-post-reconcile.mjs",
         "src/reviewer-spawn-settle.mjs",
-        "src/ama/closer-pass-attempt.mjs"
+        "src/ama/closer-pass-attempt.mjs",
+        "src/exhausted-head-verdict.mjs"
       ],
       "deliveryHeadWaitFields": ["head_wait_started_at"],
       "reviewerExecutionModelSources": ["env-pin", "registry", "committed-seed", "runtime-display-token"],
@@ -1016,7 +1017,7 @@
       "path": "docs/data-model/ama-closure-waits.md",
       "store": "data/ama-closure-waits/<sha256(repo#prNumber)>.db",
       "schemaSurface": "src/ama/closure-wait.mjs",
-      "relatedSchemaSurfaces": ["src/ama-closure-orchestration.mjs", "src/ama/dispatch-closer.mjs", "src/ama/closure-next-action.mjs", "src/reviewer-ci-admission.mjs", "src/ama/closure-refresh-loop.mjs", "src/ama/closure-recovery.mjs", "src/follow-up-merge-agent.mjs"],
+      "relatedSchemaSurfaces": ["src/ama-closure-orchestration.mjs", "src/ama/dispatch-closer.mjs", "src/ama/closure-next-action.mjs", "src/reviewer-ci-admission.mjs", "src/ama/closure-refresh-loop.mjs", "src/ama/closure-recovery.mjs", "src/follow-up-merge-agent.mjs", "src/ama/closure-budget-escalation.mjs"],
       "sharedDecisionAnchor": "anchor-only observations reuse bounded-wait started without reserving or delivering a page",
       "owner": "AMA bounded closure wait and exhaustion paging",
       "waitTable": "waits_by_class",

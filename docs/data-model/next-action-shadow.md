@@ -102,3 +102,12 @@ reason, head, anchored deadline, decision key and queue intent. Diagnostic reaso
 text is not an eligibility registry. Automatic stops and unreadable evidence
 retain recovery ownership; only explicit hold/draft/disabled intent selects the
 operator. Existing durable attempt, lease, request and terminal fences remain.
+
+## Exhausted builder-head ownership
+
+The closure evidence policy projects `exhaustedBuilderHead` from cycle exhaustion,
+current/reviewed head identity and closer ownership. Its retry-cap observation
+names the reviewed-head series that spent the budget. A builder head with a stale
+review uses its own persisted wait anchor; immutable snapshot derivation drops
+base anchors when the head changes. These observations grant verdict admission
+only; executor merge predicates remain authoritative.

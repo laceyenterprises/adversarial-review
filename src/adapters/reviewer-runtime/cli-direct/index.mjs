@@ -224,6 +224,7 @@ function buildReviewerProcessArgs(subjectContext = {}) {
     reviewAttemptNumber: subjectContext.reviewAttemptNumber,
     reviewDbAttemptNumber: subjectContext.reviewDbAttemptNumber,
     completedRemediationRounds: subjectContext.completedRemediationRounds,
+    verdictOnly: subjectContext.verdictOnly === true,
     maxRemediationRounds: subjectContext.maxRemediationRounds,
     passKind: subjectContext.passKind,
     advisoryFindings: subjectContext.advisoryFindings,

@@ -1,4 +1,5 @@
 import { isExplicitOperatorRetriggerReason } from './retrigger-review-reason.mjs';
+import { isExhaustedHeadVerdictRequested } from './exhausted-head-verdict.mjs';
 import { isOrphanHeadReviewRequested } from './orphan-head-review-requested.mjs';
 
 // Ceiling ownership only, not merge permission or reviewer liveness. Callers
@@ -8,6 +9,6 @@ import { isOrphanHeadReviewRequested } from './orphan-head-review-requested.mjs'
 export function reviewCeilingOwner({ row, headSha, ceilingReached = row?.rereview_reason === 'system-review-ceiling-closure' } = {}) {
   const explicitReview = Boolean(row?.rereview_requested_at
     && isExplicitOperatorRetriggerReason(row.rereview_reason))
-    || isOrphanHeadReviewRequested(row, headSha);
+    || isOrphanHeadReviewRequested(row, headSha) || isExhaustedHeadVerdictRequested(row, headSha);
   return ceilingReached && !explicitReview ? 'hammer' : 'reviewer';
 }

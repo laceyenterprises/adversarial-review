@@ -24,6 +24,7 @@ import { hasClosureRecoveryIntent, hasHammerDispatchIntent, reviseClosureNextAct
 import { createNoProgressLaneGate } from '../src/posted-review-row.mjs';
 import { collectReviewPipelineHealth, readExpiredNextActions } from '../src/review-pipeline-health.mjs';
 import { expiredNextActionDeadline } from '../src/next-action-deadline.mjs';
+import { markHammerRetryCapExhausted } from '../src/ama/hammer-retry-cap.mjs';
 
 const REPO = 'example-org/subject-41';
 const PR = 41;
@@ -94,6 +95,42 @@ function pageRecorder() {
   return { pages, observeClosureWaitImpl: options => observeClosureWait({ ...options,
     pageImpl: async (message, metadata) => { pages.push({ message, metadata }); } }) };
 }
+
+test('budget page failure retains R07, runs final-round observation and retries refunded delivery', async t => {
+  const warnings = [], waits = [];
+  let pageAttempts = 0;
+  const args = closerHeadArgs(t, {
+    now: () => DEADLINE_MS,
+    logger: { ...quiet, warn: message => warnings.push(message) },
+    dispatchJob: { remediationStopCode: 'max-rounds-reached' },
+    loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true,
+      branchProtection: { required: false }, eligibility: { riskClasses: ['low'] } }) }),
+    maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, skipMergeAgent: true,
+      reason: 'hammer-retry-cap-exhausted' }),
+    observeClosureWaitImpl: options => {
+      waits.push(options.waitClass);
+      return observeClosureWait({ ...options, pageImpl: async () => {
+        if (options.waitClass !== 'closure-retry-exhausted') return;
+        pageAttempts++;
+        if (pageAttempts === 1) throw new Error('synthetic pager outage');
+      } });
+    },
+  });
+  args.candidate = { ...args.candidate, headSha: REVIEWED };
+  args.currentRevisionRef = REVIEWED;
+  markHammerRetryCapExhausted(args.rootDir, { repo: REPO, prNumber: PR }, {
+    jobKey: REVIEWED, headSha: REVIEWED, attemptCount: 3,
+  });
+  const result = await maybeDispatchAmaClosureFor(args);
+  assert.equal(result.nextAction.reason, 'retry-exhausted', JSON.stringify(result));
+  assert.match(warnings.join('\n'), /closure-budget escalation observation failed: synthetic pager outage/);
+  assert.ok(waits.includes('final-round'), 'pager failure cannot skip later final-round bookkeeping');
+  const retried = await maybeDispatchAmaClosureFor(args);
+  assert.equal(retried.operatorReason, 'closure-retry-exhausted');
+  assert.equal(pageAttempts, 2, 'failed delivery refunded the durable page reservation');
+  await maybeDispatchAmaClosureFor(args);
+  assert.equal(pageAttempts, 2, 'successful delivery remains deduplicated');
+});
 
 // The snapshot's ledger read is down for the whole test: the route selects R04.
 function ledgerOutage(t) {

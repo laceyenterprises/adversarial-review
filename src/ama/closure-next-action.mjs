@@ -1,3 +1,4 @@
+import { hasUnreviewedBuilderHead } from '../exhausted-head-verdict.mjs';
 import { deriveNextActionSnapshot, nextAction } from '../pr-next-action.mjs';
 import { closureOwnerShadowEvidence } from '../pr-next-action-consumer.mjs';
 import { registerSharedNextAction, resolveSharedNextAction } from '../pr-next-action-shadow.mjs';
@@ -56,18 +57,20 @@ export function hammerDispatchMismatch(selected, fresh, identity) {
 }
 
 export async function resolveClosureNextAction({ input, passSnapshot = null, readLaunches, ...options }) {
-  const evidence = closureOwnerShadowEvidence(input, options);
+  const staleBuilderHead = hasUnreviewedBuilderHead(input);
+  const evidence = closureOwnerShadowEvidence(input, { ...options,
+    ...(staleBuilderHead ? { anchors: { firstActionableAt: options.observedAt } } : {}) });
   if (readLaunches) evidence.readLaunches = readLaunches;
   const shared = await resolveSharedNextAction({ passSnapshot, evidence, refreshEvidence: true });
-  if (options.rootDir && shared.decision.deadline?.anchorSource === 'observed') {
+  if (options.rootDir && (staleBuilderHead || shared.decision.deadline?.anchorSource === 'observed')) {
     try {
       const separator = shared.snapshot.subjectKey.lastIndexOf('#');
       const anchor = await observeClosureWait({ rootDir: options.rootDir,
         repo: shared.snapshot.subjectKey.slice(0, separator), prNumber: Number(shared.snapshot.subjectKey.slice(separator + 1)),
-        headSha: shared.decision.head, now: Date.parse(shared.snapshot.observedAt),
+        headSha: shared.decision.head, now: Date.parse(options.observedAt || shared.snapshot.observedAt),
         reason: `action=${shared.decision.action} actor=${shared.decision.actor} reason=${shared.decision.reason}`,
         anchorOnly: true });
-      const snapshot = deriveNextActionSnapshot({ base: shared.snapshot,
+      const snapshot = deriveNextActionSnapshot({ base: staleBuilderHead ? { ...shared.snapshot, observedAt: options.observedAt || shared.snapshot.observedAt, anchors: {} } : shared.snapshot,
         anchors: { firstActionableAt: new Date(anchor.startedAt).toISOString() } });
       return registerSharedNextAction(passSnapshot, Object.freeze({ snapshot, decision: nextAction(snapshot) }));
     } catch { /* Anchor persistence cannot refuse an otherwise authorized action. */ }

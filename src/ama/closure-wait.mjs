@@ -40,7 +40,7 @@ async function observeClosureWaitWithinRepositoryCycle({ rootDir, repo, prNumber
       }
     }).immediate();
     const result = db.transaction(() => {
-      if (reasonClass === 'final-round') {
+      if (['final-round', 'closure-lifetime-exhausted'].includes(reasonClass)) {
         // One receipt per PR: a new head is progress, not a new page budget.
         const previous = db.prepare('SELECT head FROM waits_by_class WHERE class=? ORDER BY started DESC LIMIT 1').get(reasonClass);
         if (previous && previous.head !== headSha) {
@@ -56,7 +56,7 @@ async function observeClosureWaitWithinRepositoryCycle({ rootDir, repo, prNumber
       // Retained launches carry durable progress timestamps. Apply them to an
       // existing final-round wait too. Ignore future timestamps here so clock
       // skew cannot turn each poll into fresh progress.
-      if (reasonClass === 'final-round' && Number.isFinite(startedAt) && startedAt <= now) {
+      if (['final-round', 'closure-lifetime-exhausted'].includes(reasonClass) && Number.isFinite(startedAt) && startedAt <= now) {
         db.prepare('UPDATE waits_by_class SET started=MAX(started, ?) WHERE head=? AND class=?')
           .run(startedAt, headSha, reasonClass);
       }
@@ -64,7 +64,7 @@ async function observeClosureWaitWithinRepositoryCycle({ rootDir, repo, prNumber
       if (progress) db.prepare('UPDATE waits_by_class SET started=? WHERE head=? AND class=?').run(now, headSha, reasonClass);
       // A running background launch borrows its own execution window without
       // erasing the original wait debt. Refusal or restart removes this credit.
-      const launching = reasonClass === 'final-round' && Number.isFinite(launchWait?.startedAt)
+      const launching = ['final-round', 'closure-lifetime-exhausted'].includes(reasonClass) && Number.isFinite(launchWait?.startedAt)
         && launchWait.startedAt <= now && Number.isFinite(launchWait.boundMs) && launchWait.boundMs > 0;
       const exhausted = immediate || (launching
         ? now - launchWait.startedAt >= launchWait.boundMs
@@ -89,7 +89,7 @@ async function observeClosureWaitWithinRepositoryCycle({ rootDir, repo, prNumber
             + (Number.isFinite(repeatAfterMs) && repeatAfterMs > 0 ? `:${now}` : ''),
         });
       } catch (error) {
-        if (reasonClass === 'final-round') db.prepare('UPDATE waits_by_class SET paged=0 WHERE class=?').run(reasonClass);
+        if (['final-round', 'closure-lifetime-exhausted'].includes(reasonClass)) db.prepare('UPDATE waits_by_class SET paged=0 WHERE class=?').run(reasonClass);
         else db.prepare('UPDATE waits_by_class SET paged=?, last_paged=? WHERE head=? AND class=? AND last_paged=?')
           .run(result.previousPaged, result.previousLastPaged, headSha, reasonClass, now);
         throw error;

@@ -369,6 +369,7 @@ function subjectContentFrom(req, {
 }
 
 function reviewPromptStage(ctx = {}) {
+  if (ctx.verdictOnly === true) return 'last';
   return pickReviewerStage({
     reviewAttemptNumber: ctx.reviewAttemptNumber,
     completedRemediationRounds: ctx.completedRemediationRounds,

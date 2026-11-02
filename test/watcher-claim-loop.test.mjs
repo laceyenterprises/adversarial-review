@@ -2771,7 +2771,7 @@ test('REVIEWSPILL-01 production admission spills overdue requests before Gemini 
   assert.equal(summary.depthDiagnostics.report?.engagementSpilloverReviews, 2);
 });
 
-test('CAPROUTE-01: failed capped row with an old revision reaches the hammer before retry admission on every new head', () => {
+test('EXHAUSTEDHEADOWNER-01: capped stale builder head reaches verdict-only admission', () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'caproute-claim-'));
   try {
     const loaderPath = path.join(tmp, 'loader.mjs');
@@ -2779,6 +2779,7 @@ test('CAPROUTE-01: failed capped row with an old revision reaches the hammer bef
     const runnerPath = path.join(tmp, 'runner.mjs');
     writeFileSync(loaderPath, buildLoaderSource({ capRouteSource: `
       globalThis.capRoutes = [];
+      export function isReviewCycleCapRoutedToHammer({reviewRow}) { return reviewRow?.failure_message?.startsWith('[review-cycle-cap]') === true; }
       export async function maybeRouteReviewCycleCapToHammer(args) {
         if (!args.existing?.failure_message?.startsWith('[review-cycle-cap]')) return { handled: false };
         globalThis.capRoutes.push(args.currentRevisionRef);
@@ -2792,11 +2793,12 @@ test('CAPROUTE-01: failed capped row with an old revision reaches the hammer bef
         VALUES (?, 101, ?, 'codex', 'open', 'failed', 9, 'old-head', 'old-head', '[review-cycle-cap] capped')\`)
         .run('laceyenterprises/adversarial-review', '2026-05-15T12:00:00Z');`,
       afterFirstPoll: `
-        assert.deepEqual(globalThis.capRoutes, ['sha-happy-101']);
-        globalThis.__watcherClaimLoopSubjectHead = 'next-head';
+        assert.deepEqual(globalThis.capRoutes, []);
+        const verdictSpawns = globalThis.__watcherClaimLoopReviewerSpawns.filter(spawn => spawn.subjectContext.prNumber === 101);
+        assert.equal(verdictSpawns.length, 1);
+        assert.equal(verdictSpawns[0].subjectContext.verdictOnly, true);
         await pollOnce(octokit, pollOptions);
-        assert.deepEqual(globalThis.capRoutes, ['sha-happy-101', 'next-head']);
-        assert.ok(!claims.some((claim) => claim.prNumber === 101));`,
+        assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.filter(spawn => spawn.subjectContext.prNumber === 101).length, 1);`,
     }));
     const result = spawnSync(process.execPath,
       ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
@@ -3229,19 +3231,26 @@ test('HAMCLOSE-02 budget resolution preserves only integer increases', async () 
   ]) assert.equal(resolveMaxRemediationRounds({ roundBudget: 2, latestMaxRounds }), expected);
 });
 
-for (const postedCount of [3, 5]) test(`HAMCLOSE-02 raised maxRounds: ${postedCount} delivered reviews`, () => {
+for (const scenario of ['under-budget', 'exhausted-builder', 'exhausted-closer', 'probe-error']) test(`HAMCLOSE-02 raised maxRounds: ${scenario}`, () => {
+  const postedCount = scenario === 'under-budget' ? 3 : 5;
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-hamclose-raised-budget-'));
   try {
     const head = 'b'.repeat(40), reviewedHead = 'a'.repeat(40);
     const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs'), runnerPath = path.join(tmp, 'runner.mjs');
-    const followUpJobsSource = DEFAULT_FOLLOW_UP_JOBS_SOURCE.replace('latestMaxRounds: 1', 'latestMaxRounds: 4');
+    const followUpJobsSource = DEFAULT_FOLLOW_UP_JOBS_SOURCE.replace('latestMaxRounds: 1', 'latestMaxRounds: 4')
+      .replace('summarizePRRemediationLedger() {', 'summarizePRRemediationLedger(_root, { prNumber }) { (globalThis.ceilingLedgerReads ||= {})[prNumber] = (globalThis.ceilingLedgerReads[prNumber] || 0) + 1;');
     // Automatic stale-head requests omit db in production. Bind this replay
     // to the fixture DB so its re-review reset and claim share the same state.
     const phaseSource = readFileSync(path.join(REPO_ROOT, 'src/pollonce-phases.mjs'), 'utf8').replace(
       'export async function processReviewSubject(entry, ctx) {',
-      'export async function processReviewSubject(entry, ctx) { ctx = { ...ctx, ...globalThis.__ceilingLoggingContext };',
+      'export async function processReviewSubject(entry, ctx) { if (globalThis.probeFailed) (globalThis.subjectsAfterProbeFailure ||= []).push(entry.prNumber); ctx = { ...ctx, ...globalThis.__ceilingLoggingContext };',
     );
-    writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { 101: head }, followUpJobsSource }).replace(
+    writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { 101: head }, followUpJobsSource })
+      .replace('createHeadCloserCommitSuppressionResolver()', 'createHeadCloserCommitSuppressionResolver({ prNumber })')
+      .replace('return async () => ({ suppressed: false, reason: \'fixture\' });',
+        scenario === 'probe-error' ? "return async () => { if (prNumber === 101) { globalThis.probeFailed = true; throw new Error('synthetic commit probe outage'); } return { suppressed: false }; };"
+          : scenario === 'exhausted-closer' ? "return async () => ({ suppressed: true, reason: 'closer-commit-trailer' });"
+            : 'return async () => ({ suppressed: false, reason: \'fixture\' });').replace(
       'return actual.requestReviewRereview(options);',
       'return actual.requestReviewRereview({ ...options, db: options.db || db });',
     ).replace('  return nextLoad(url, context);', `
@@ -3256,31 +3265,25 @@ for (const postedCount of [3, 5]) test(`HAMCLOSE-02 raised maxRounds: ${postedCo
         review_attempts,revision_ref,reviewer_head_sha,posted_at)
         VALUES ('laceyenterprises/adversarial-review',101,'2026-10-12T04:45:00Z','claude','open','posted',?,?,?,
         '2026-10-12T05:00:00Z')\`).run(${postedCount}, ${JSON.stringify(reviewedHead)}, ${JSON.stringify(reviewedHead)});
+      if (${JSON.stringify(scenario)} === 'probe-error') db.prepare(\`UPDATE reviewed_prs SET review_status='pending', rereview_requested_at='2026-10-12T05:01:00Z', rereview_reason='auto-refresh: posted review on stale head' WHERE pr_number=101\`).run();
       for (let attempt = 1; attempt <= ${postedCount}; attempt++) db.prepare(\`INSERT INTO reviewer_passes(repo,pr_number,
         attempt_number,reviewer_class,pass_kind,started_at,ended_at,status,head_sha,gh_comment_id)
         VALUES ('laceyenterprises/adversarial-review',101,?,'claude','rereview','2026-10-12T04:45:00Z',
         '2026-10-12T05:00:00Z','completed',?,?)\`).run(attempt, ${JSON.stringify(reviewedHead)}, 'posted-' + attempt);
-      const wakeModule = await import(${JSON.stringify(fileUrl('src', 'rereview-wake.mjs'))});
-      const ceilingLog = { warn() {} }, ceilingWarnings = [];
-      let ceilingDrainCount = 0;
-      if (${postedCount} === 5) globalThis.__ceilingLoggingContext = {
-        log: ceilingLog, warn: message => ceilingWarnings.push(message),
-        consumeRereviewWakesImpl(payload) {
-          assert.equal(payload.log, ceilingLog, 'closeout drain receives the configured sink');
-          if (++ceilingDrainCount === 2) throw new Error('synthetic closeout drain failure');
-          return wakeModule.consumeRereviewWakes({ ...payload, rootDir: ${JSON.stringify(tmp)} });
+      globalThis.ceilingDrains = [];
+      globalThis.ceilingWarnings = [];
+      globalThis.ceilingLog = { warn() {} };
+      globalThis.__ceilingLoggingContext = {
+        log: globalThis.ceilingLog,
+        warn: message => globalThis.ceilingWarnings.push(message),
+        consumeRereviewWakesImpl: args => {
+          if (args.prNumber === 101) {
+            globalThis.ceilingDrains.push(args);
+            throw new Error('synthetic wake drain failure');
+          }
         },
       };
-      const wakeRepo = db.prepare('SELECT repo FROM reviewed_prs WHERE pr_number=101').get().repo;
-      if (${postedCount} === 5) {
-        // Settled wakes suppress duplicate requests; keep this replay's queue
-        // separate from prior runs as well as from the watcher's real queue.
-        const wakeRequest = wakeModule.requestRereviewWake({
-          rootDir: ${JSON.stringify(tmp)}, db, repo: wakeRepo, prNumber: 101,
-          headSha: ${JSON.stringify(head)}, reason: 'remediation-closeout',
-          requestWatcherWakeImpl: () => ({ requested: true }) });
-        assert.equal(wakeRequest.requested, true, 'fixture enqueues a fresh closeout wake');
-      }
+
     `, afterFirstPoll: postedCount < 5 ? `
       const spawns = (globalThis.__watcherClaimLoopReviewerSpawns || []).filter(spawn => spawn.subjectContext?.prNumber === 101);
       assert.equal(spawns.length, 1, 'raised budget admits the moved head');
@@ -3292,24 +3295,24 @@ for (const postedCount of [3, 5]) test(`HAMCLOSE-02 raised maxRounds: ${postedCo
       assert.equal(row.reviewer_head_sha, ${JSON.stringify(head)});
       assert.notEqual(row.rereview_reason, 'system-review-ceiling-closure');
       assert.match(row.rereview_reason, /auto-refresh: posted review on stale head/);
+    ` : scenario === 'exhausted-closer' ? `
+      assert.equal((globalThis.__watcherClaimLoopReviewerSpawns || []).filter(s => s.subjectContext?.prNumber === 101).length, 0);
+      assert.equal(globalThis.ceilingLedgerReads[101], 1, 'admission and capped closure share one ledger scan');
+      assert.equal(globalThis.ceilingDrains.length, 1, 'closer head drains the ceiling wake');
+      assert.equal(globalThis.ceilingDrains[0].reviewRow.rereview_reason, 'system-review-ceiling-closure');
+      assert.equal(globalThis.ceilingDrains[0].log, globalThis.ceilingLog, 'configured log sink reaches drain');
+      assert.match(globalThis.ceilingWarnings[0], /ceiling closeout wake drain failed.*synthetic wake drain failure/);
+    ` : scenario === 'probe-error' ? `
+      assert.ok(!(globalThis.__watcherClaimLoopReviewerSpawns || []).some(s => s.subjectContext?.prNumber === 101));
+      assert.ok(globalThis.subjectsAfterProbeFailure?.includes(102), 'later subject is processed after admission probe fails');
+      assert.ok((globalThis.__watcherClaimLoopReviewerSpawns || []).some(s => s.subjectContext?.prNumber === 102), 'later subject still spawns');
     ` : `
-      assert.ok(!claims.some(claim => claim.prNumber === 101));
-      assert.ok(!(globalThis.__watcherClaimLoopReviewerSpawns || []).some(spawn => spawn.subjectContext?.prNumber === 101));
-      const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=101').get();
-      assert.equal(row.review_status, 'posted');
-      assert.equal(row.reviewer_head_sha, ${JSON.stringify(reviewedHead)});
-      assert.equal(row.rereview_reason, 'system-review-ceiling-closure');
-      const pending = wakeModule.rereviewWakeBacklog({ rootDir: ${JSON.stringify(tmp)} });
-      assert.equal(pending.pending, 0, 'CEILINGPUSH-01 posted lane drains the closeout wake');
-      const events = db.prepare("SELECT reason FROM review_latency_events WHERE event_type='rereview_wake'").all();
-      assert.ok(events.some(event => event.reason === 'review-ceiling-hammer-owned'));
+      const spawns = (globalThis.__watcherClaimLoopReviewerSpawns || []).filter(spawn => spawn.subjectContext?.prNumber === 101);
+      assert.equal(spawns.length, 1, 'exhausted cycle still admits the new builder head');
+      assert.equal(spawns[0].subjectContext.reviewerHeadSha, ${JSON.stringify(head)});
+      assert.equal(spawns[0].subjectContext.verdictOnly, true);
       await pollOnce(octokit, pollOptions);
-      assert.equal(ceilingDrainCount, 2);
-      assert.equal(ceilingWarnings.length, 1);
-      assert.match(ceilingWarnings[0], /ceiling closeout wake drain failed.*synthetic closeout drain failure/);
-      assert.equal(db.prepare('SELECT rereview_reason FROM reviewed_prs WHERE pr_number=101').get().rereview_reason,
-        'system-review-ceiling-closure');
-      assert.ok(!claims.some(claim => claim.prNumber === 101));
+      assert.equal((globalThis.__watcherClaimLoopReviewerSpawns || []).filter(spawn => spawn.subjectContext?.prNumber === 101).length, 1);
     ` }));
     const env = installGhFixture(tmp);
     const ghPath = path.join(tmp, 'gh');
@@ -3321,6 +3324,7 @@ fi`));
     const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
       { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(env), timeout: 60000 });
     assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+    if (scenario === 'probe-error') assert.match(result.stdout + result.stderr, /exhausted-head verdict admission unresolved.*synthetic commit probe outage/);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
@@ -4949,7 +4953,7 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
         writeFileSync(dir + '/' + jobId + '.json', JSON.stringify({
           jobId, repo: 'example/project', prNumber: 101, status: 'completed', finalRound: 'comment-only',
           revisionRef: '${reviewed}', reviewBody: ${JSON.stringify(body)}, completedAt,
-          remediationPlan: { currentRound: 1, maxRounds: 2 },
+          remediationPlan: { currentRound: 2, maxRounds: 2 },
           completion: { finalRemediationPush: true, workerPushedHeadSha: '${pushed}' },
           reReview: { requested: false, suppressed: '${initialStatus}' === 'expired-hammer-handoff' ? 'shared-next-action' : 'comment-only-final-round', nextAction: {
             action: '${initialStatus}' === 'expired-hammer-handoff' ? 'hammer' : 'wait-for-CI',
@@ -4969,7 +4973,7 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
           .run('${initialStatus}' === 'sequence' ? 'posted' : ['parked-green', 'expired-hammer-handoff'].includes('${initialStatus}') ? 'pending' : '${initialStatus}',
             ['posted', 'sequence'].includes('${initialStatus}') ? null : completedAt);
         globalThis.finalRoundArmed = true;
-        globalThis.finalRoundLedger = { completedRoundsForPR: 1, latestRiskClass: 'medium', latestMaxRounds: 2,
+        globalThis.finalRoundLedger = { completedRoundsForPR: 2, latestRiskClass: 'medium', latestMaxRounds: 2,
           commentOnlyFinalRoundRevisionRefs: ['${reviewed}'],
           commentOnlyFinalRoundPushedHeads: [{ reviewedHead: '${reviewed}', workerPushedHeadSha: '${pushed}', status: 'completed', completedAt }] };
         globalThis.finalRoundSettled = { verdict: 'comment-only', remediationPending: false,

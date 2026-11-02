@@ -978,3 +978,17 @@ test('APPROVALREARM-01: a same-head grant restores admission after spent caps an
   const capped = nextAction(snap({ policy: { hammerCap: { headSha: HEAD, retryExhausted: true } } }));
   assert.equal(capped.reason, 'retry-exhausted');
 });
+
+
+test('EXHAUSTEDHEADOWNER-01: a new exhausted builder head still owes review while same-head caps remain terminal', () => {
+  const snapshot = snap({ reviews: { headSha: OLD }, remediation: { roundsLeft: false },
+    policy: { reviewCeilingReached: true, exhaustedBuilderHead: true,
+      hammerCap: { headSha: OLD, retryExhausted: true } } });
+  assert.equal(nextAction(snapshot).actor, 'reviewer');
+  const spent = deriveNextActionSnapshot({ base: snapshot,
+    observations: { policy: complete({ ...snapshot.observations.policy.value, hammerCap: { headSha: HEAD, retryExhausted: true } }) } });
+  assert.equal(nextAction(spent).reason, 'retry-exhausted');
+  const lifetime = deriveNextActionSnapshot({ base: snapshot,
+    observations: { policy: complete({ ...snapshot.observations.policy.value, hammerCap: { headSha: OLD, lifetimeExhausted: true } }) } });
+  assert.equal(nextAction(lifetime).reason, 'lifetime-exhausted');
+});

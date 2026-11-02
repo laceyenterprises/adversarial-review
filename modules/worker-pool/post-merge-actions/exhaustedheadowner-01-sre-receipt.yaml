@@ -1,0 +1,20 @@
+# Operator-owned organic receipt; this plan executes no service action or probe.
+operator_steps:
+  - description: >-
+      Before rollout, inspect the existing exhausted-PR backlog read-only and
+      account for immediate SEV1 HAMCLOSE-01 pages: one per PR, per head for
+      retry exhaustion. Verify successful delivery deduplication after restart.
+      After normal deployment, SRE restarts the watcher through the documented
+      service registry and observes the affected current builder head receiving
+      one exact-head verdict review, then closer dispatch or daemon merge,
+      without a new remediation round or operator rescue. Retain the organic
+      receipt with the companion Agent OS incident report. Confirm same-head
+      retry caps and the PR lifetime ceiling remain enforced; a spent lifetime
+      budget must have one named escalation owner. The command below displays
+      this handoff only and does not satisfy the live receipt.
+    run_as: designated SRE operator
+    command: >-
+      /usr/bin/printf '%s\n' 'Follow the EXHAUSTEDHEADOWNER-01 organic receipt in docs/RUNBOOK-ama-closure.md after normal deployment and a documented watcher restart; attach the observed exact-head verdict and closure outcome to the companion Agent OS incident report.'
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

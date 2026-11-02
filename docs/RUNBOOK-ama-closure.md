@@ -139,6 +139,56 @@ rules remain in the prompt appendices; exact-head checks, lease ownership,
 strict-mode policy, preservation and provenance are unchanged. No lifecycle
 state, merge eligibility rule or runtime timeout changes here.
 
+## Exhausted cycles and new builder heads (EXHAUSTEDHEADOWNER-01)
+
+Cycle exhaustion ends remediation rounds. A later builder-authored head still
+owes one exact-head verdict review. Admission classifies the live commit, checks
+the delivered-pass journal, and records `system-exhausted-head-verdict:<head>`
+through the existing review-request CAS. Repeated ticks coalesce; a delivered
+review of that commit prevents another automatic verdict, including after a
+push away from and back to that commit. Closer-authored or hammer-validated
+heads and proven completed comment-only final-round push heads retain their
+existing closure ownership and do not receive this review, even at exhaustion.
+A failed live-commit ownership probe defers only that PR until the next tick.
+Watcher admission and closure use the same delivered-pass count for the live
+head, including a return to a previously reviewed commit.
+
+The reviewer uses the final-round prompt and captures `metadata_json.verdictOnly`
+in its pass journal. Both normal completion and recovered posting suppress new
+remediation jobs. Findings route to final hammer adjudication; a clean exact-head
+verdict uses the existing daemon path, including strict mode, green required
+checks, mergeability, primary-change preservation, attestation and merge authority.
+
+The shared closure projection binds retry exhaustion to the reviewed-head series
+that spent it. A new builder head receives a verdict owner before any closer
+retry. Once reviewed, its new series receives the existing per-head budget.
+Same-head and PR-lifetime caps remain unchanged; closer head churn cannot refund
+its series. Head changes discard previous next-action deadline anchors. A
+builder head awaiting review uses its persisted per-head wait anchor, never an
+older head's posting or final-round timestamp.
+
+A spent closure budget selects a named operator escalation: `closure-retry-exhausted`
+or `closure-lifetime-exhausted`. The existing wait store reserves delivery once
+per episode and refunds a failed page. Lifetime exhaustion retains its page
+reservation across head changes. A pager failure is logged without rejecting
+the closure pass; deadline and final-round observers still run, and the refunded
+page is retried on the next tick. Decision mismatch retains the existing bounded
+refresh/reselection and no-progress escalation; it cannot authorize a merge.
+
+After normal deployment and a watcher restart by the runtime owner, observe an
+organic exhausted-cycle builder head receiving one exact-head verdict and then
+either a closer dispatch or daemon merge. Verify that the verdict creates no
+remediation round and that repeated ticks do not schedule another review.
+The worker's offline fixtures do not constitute this live receipt.
+
+On the first tick after rollout, every pre-existing open PR at `retry-exhausted`
+or `lifetime-exhausted` is eligible for an immediate SEV1 `HAMCLOSE-01` page.
+Expect a backlog burst of one page per PR (per head for retry exhaustion);
+lifetime pages stay deduplicated across heads. Before deployment, the runtime
+owner should inspect the existing exhausted-PR backlog read-only, account for
+its expected channel volume, and verify successful-page deduplication after
+restart. This rollout does not seed reservations or suppress existing stops.
+
 ## Shared closure/hammer decision (CLOSURESPLIT-01)
 
 Closure passes its immutable next-action snapshot and decision key/generation to

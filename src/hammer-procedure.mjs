@@ -2,6 +2,7 @@
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { HAMMER_RETRYABLE_READ_OUTCOMES } from './ama/hammer-phase-outcome.mjs';
 
 export const HAMMER_PHASES = ['hammer-verify-head', 'hammer-publish', 'hammer-merge'];
 
@@ -34,7 +35,17 @@ export function renderHammerProcedure(phase, values) {
   // errexit failures through ERR without replacing the lease's EXIT trap.
   source = source.replace(/^(#![^\n]*\n)?/, `$1export HAM_REPO='<<REPO>>' HAM_PR_NUMBER='<<PR_NUMBER>>'
 export HAM_HQ_ROOT='<<HQ_ROOT>>' HAM_TARGET_REMEDIATION_SHA='<<TARGET_REMEDIATION_SHA>>'
+ham_phase_read_retryable() {
+  case "\${HAM_PHASE_OUTCOME:-}" in
+    ${[...HAMMER_RETRYABLE_READ_OUTCOMES].join('|')}) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 ham_record_phase_failure() {
+  if ham_phase_read_retryable; then
+    HAM_MERGE_LEASE_RETRYABLE_ABORT=1
+    HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON="$HAM_PHASE_OUTCOME"
+  fi
   "\${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-terminal-audit.mjs "\${HAM_PHASE_OUTCOME:-${phase}-failed}" "\${POST_REMEDIATION_SHA:-<<TARGET_REMEDIATION_SHA>>}" || echo 'HAM terminal failure audit unavailable' >&2
 }
 ham_run_rendered_phase() {
@@ -70,7 +81,11 @@ case "${phase}:$ham_phase_exit" in
       echo 'HAM next: Appendix E confirmed-merge closing audit.' >&2
     fi ;;
   *)
-    echo "HAM next: stop with \${HAM_PHASE_OUTCOME:-${phase}-failed}; preserve deferrals and authoritative terminal state (Appendix B mandate 0b / Appendix E). Do not read phase source." >&2 ;;
+    if ham_phase_read_retryable; then
+      echo "HAM next: stop with retryable infrastructure abort \${HAM_PHASE_OUTCOME}; the existing closer retry owns the next attempt. This is not final for this head. Do not read phase source." >&2
+    else
+      echo "HAM next: stop with \${HAM_PHASE_OUTCOME:-${phase}-failed}; preserve deferrals and authoritative terminal state (Appendix B mandate 0b / Appendix E). Do not read phase source." >&2
+    fi ;;
 esac
 return "$ham_phase_exit"
 `;

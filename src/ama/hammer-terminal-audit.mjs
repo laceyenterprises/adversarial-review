@@ -1,5 +1,6 @@
 import { appendAmaAuditAttempt, readAmaAuditEntry } from './audit.mjs';
 import { reportHammerProgress } from './hammer-progress.mjs';
+import { HAMMER_RETRYABLE_READ_OUTCOMES, hammerPhaseAttempt } from './hammer-phase-outcome.mjs';
 
 // Failure recording must work before any GitHub read or merge-lease acquisition.
 // Reasons are fixed codes, never transport output (which can contain secrets).
@@ -24,14 +25,20 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
   if (!identity.hqRoot || !identity.repo || !identity.prNumber || !identity.headSha) return null;
   const launchRequestId = env.HQ_LAUNCH_REQUEST_ID || null;
   const existing = readAmaAuditEntry(identity.hqRoot, identity.repo, identity.prNumber, identity.headSha);
-  if (existing?.attempts?.some(attempt =>
+  const prior = existing?.attempts?.findLast(attempt =>
     (launchRequestId ? attempt.launchRequestId === launchRequestId
       : !attempt.launchRequestId && attempt.attemptPhase === 'hammer-early-exit') &&
-    ['succeeded', 'failed-without-merge', 'superseded', 'deferred'].includes(attempt.outcome))) return existing;
+    ['succeeded', 'failed-without-merge', 'superseded', 'deferred'].includes(attempt.outcome));
+  // A later authoritative fence overrides an observation failure. Generic
+  // wrapper exits still preserve the phase's original failure receipt.
+  const authoritativeFence = ['controller-cancelled', 'controller-owner-lost', 'head-changed',
+    'rebase-conflict', 'github-gate-red', 'predicate-not-eligible'].includes(reason);
+  if (prior && !(authoritativeFence && prior.outcome === 'deferred'
+    && HAMMER_RETRYABLE_READ_OUTCOMES.has(prior.reason))) return existing;
   return appendAmaAuditAttempt({
     ...identity,
-    attempt: { outcome: 'failed-without-merge', reason, launchRequestId,
-      attemptPhase: 'hammer-early-exit' },
+    attempt: hammerPhaseAttempt({ outcome: 'failed-without-merge', reason, launchRequestId,
+      attemptPhase: 'hammer-early-exit' }),
     metadata: { closureAuthority: 'ham-terminal-remediation' },
   });
 }

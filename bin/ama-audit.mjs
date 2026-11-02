@@ -27,6 +27,7 @@
  */
 
 import { releaseRetryableAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { hammerPhaseAttempt } from '../src/ama/hammer-phase-outcome.mjs';
 import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { pathToFileURL } from 'node:url';
@@ -130,8 +131,10 @@ function runInitOrAppend(subcommand, argv) {
     }
   }
   const attemptBase = loadAttemptJson(values['attempt-json']);
-  const attempt = { ...attemptBase, outcome: values.outcome,
+  const rawAttempt = { ...attemptBase, outcome: values.outcome,
     ...(process.env.HQ_LAUNCH_REQUEST_ID ? { launchRequestId: process.env.HQ_LAUNCH_REQUEST_ID } : {}) };
+  const attempt = values['closure-authority'] === 'ham-terminal-remediation'
+    ? hammerPhaseAttempt(rawAttempt) : rawAttempt;
   const metadata = Object.fromEntries([
     ['closureAuthority', values['closure-authority']],
     ['reviewer', values.reviewer],

@@ -4453,6 +4453,7 @@ Deploy this reader before activating these keys in core's checked-in config.
   authoritative. Dispatch or proven live custody suppresses the budget page;
   ineligible or uncertain recovery retains escalation. This interim recovery
   retains its planned MLR sunset.
+- VERIFYHEADTRANSIENT-01: explicit closer infrastructure read failures use the existing retryable deferral and lease release path. They refund retry accounting and retain the closer retry owner and load-aware deadline; adjudicated no-merge decisions remain final. See the closure runbook change note for the required live receipt.
 
 - MLR-01 final remediation: status grouping and journal episodes prefer the same subject identity; invalid CLI arguments print usage and return 2. Detached/unreadable Git inspection preserves verified worker liveness. Terminal dirty custody is head-bound and cannot override a current live owner. Focused offline fixtures cover these cases; observation fields, lifecycle states and existing smoke promises are unchanged.
 

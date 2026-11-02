@@ -955,7 +955,7 @@ while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" 
   if [ "$HAM_PROTECTIVE_PREDECESSOR_READ_STATUS" -ne 0 ]; then
     echo "HAM hard-blocker: protective predecessor body read failed; refusing merge" >&2
     if [ "$HAM_PROTECTIVE_PREDECESSOR_READ_STATUS" -eq 1 ]; then
-      ham_append_terminal_audit failed-without-merge protective-predecessor-state-unreadable || true
+      ham_append_terminal_audit failed-without-merge protective-predecessor-read-failed || true
       ham_mark_merge_lease_retryable_abort protective-predecessor-read-failed
       ham_release_merge_lease
       return 1
@@ -985,7 +985,7 @@ while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" 
       if [ "$HAM_PROTECTOR_STATE_READ_STATUS" -ne 0 ]; then
         echo "HAM hard-blocker: protective predecessor state unreadable for PR #$HAM_PROTECTOR_PR; refusing merge" >&2
         if [ "$HAM_PROTECTOR_STATE_READ_STATUS" -eq 1 ]; then
-          ham_append_terminal_audit failed-without-merge protective-predecessor-state-unreadable || true
+          ham_append_terminal_audit failed-without-merge protective-predecessor-read-failed || true
           ham_mark_merge_lease_retryable_abort protective-predecessor-read-failed
           ham_release_merge_lease
           return 1
@@ -996,7 +996,7 @@ while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" 
       fi
       if [ -z "$HAM_PROTECTOR_STATE" ]; then
         echo "HAM hard-blocker: protective predecessor state empty for PR #$HAM_PROTECTOR_PR; refusing merge" >&2
-        ham_append_terminal_audit failed-without-merge protective-predecessor-state-unreadable || true
+        ham_append_terminal_audit failed-without-merge protective-predecessor-read-failed || true
         ham_mark_merge_lease_retryable_abort protective-predecessor-read-failed
         ham_release_merge_lease
         return 1
@@ -1088,12 +1088,16 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
   fi
   # A canceled or parked launch never merges. The controller clears this click
   # only on a fresh permitted launch read, taking one first when its newest is stale.
-  if [ -n "${HQ_LAUNCH_REQUEST_ID:-${AGENT_OS_WORKER_LRQ_ID:-${LAUNCH_REQUEST_ID:-}}}" ] \
-    && ! "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-controller.mjs" assert-launch; then
-    ham_append_terminal_audit failed-without-merge launch-read-unconfirmed || true
-    ham_mark_merge_lease_retryable_abort launch-read-unconfirmed
-    ham_release_merge_lease
-    return 1
+  if [ -n "${HQ_LAUNCH_REQUEST_ID:-${AGENT_OS_WORKER_LRQ_ID:-${LAUNCH_REQUEST_ID:-}}}" ]; then
+    local ham_launch_status=0 ham_launch_reason=controller-owner-lost
+    "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-controller.mjs" assert-launch || ham_launch_status=$?
+    if [ "$ham_launch_status" -ne 0 ]; then
+      if [ "$ham_launch_status" -eq 75 ]; then ham_launch_reason=controller-observation-unavailable; fi
+      HAM_PHASE_OUTCOME="$ham_launch_reason"
+      ham_append_terminal_audit failed-without-merge "$ham_launch_reason" || true
+      ham_release_merge_lease
+      return 1
+    fi
   fi
   # CLEAN and non-strict heads skip the rebase probe. Capture a fresh base for
   # every click so a server conflict can distinguish concurrent base movement.

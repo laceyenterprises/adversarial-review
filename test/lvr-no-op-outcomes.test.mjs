@@ -72,7 +72,7 @@ for (const phase of ['hammer-verify-head', 'hammer-publish', 'hammer-merge']) {
     assert.match(result.stdout, /settled:/);
     if (phase === 'hammer-merge') assert.equal(existsSync(env.GH_CALL_LOG), false);
     const doc = audit();
-    assert.equal(doc.status, 'failed-without-merge');
+    assert.equal(doc.status, phase === 'hammer-verify-head' ? 'deferred' : 'failed-without-merge');
     assert.equal(doc.attempts[0].reason, {
       'hammer-verify-head': 'missing-pr-state', 'hammer-publish': 'hammer-publish-error',
       'hammer-merge': 'merge-lease-not-held',

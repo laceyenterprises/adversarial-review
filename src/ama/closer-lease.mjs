@@ -49,6 +49,7 @@ import { basename, dirname, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
+import { HAMMER_RETRYABLE_READ_OUTCOMES } from './hammer-phase-outcome.mjs';
 
 const LEASE_DIR_SEGMENTS = ['data', 'ama-closer-leases'];
 const LEASE_FILE_MODE = 0o640;
@@ -62,6 +63,7 @@ const HANDED_TO_REVIEW = 'handed-to-review';
 const VALID_STATUSES = new Set([PENDING, DISPATCHED, HANDED_TO_REVIEW, TERMINAL]);
 export const AMA_CLOSER_RETRYABLE_DEFERRAL_REASONS = new Set([
   'lane-busy', 'merge-lease-timeout', 'required-checks-pending', 'pr-mergeability-unknown',
+  ...HAMMER_RETRYABLE_READ_OUTCOMES,
 ]);
 export function retryableAmaCloserDeferralOutcome(attempt) {
   return attempt?.outcome === 'deferred' && attempt.inRunRetry !== true && AMA_CLOSER_RETRYABLE_DEFERRAL_REASONS.has(attempt.reason)

@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { maybeDispatchCapRehead, capReheadLedgerPath, probeCapReheadOwnership, capReheadCounters, resetCapReheadCountersForTesting } from '../src/ama/cap-rehead.mjs';
-import { admitExhaustedHeadVerdict, hasUnreviewedBuilderHead } from '../src/exhausted-head-verdict.mjs';
+import { admitExhaustedHeadVerdict, hasUnreviewedBuilderHead, owesExhaustedHeadVerdict } from '../src/exhausted-head-verdict.mjs';
 import { evaluateHammerRetryCap } from '../src/ama/hammer-retry-cap.mjs';
 import { escalateClosureBudget } from '../src/ama/closure-budget-escalation.mjs';
 import { closureOwnerShadowEvidence } from '../src/pr-next-action-consumer.mjs';
@@ -335,6 +335,25 @@ test('a later cycle cap retains an already running CAPREHEAD owner', async t => 
   assert.equal(live.custody, true); assert.equal(f.calls.length, 1);
 });
 
+
+for (const headSha of ['a'.repeat(40), '0'.repeat(40), '1'.repeat(40), 'F'.repeat(40)]) {
+  test(`CAPREHEAD-02: exhausted projection survives strict SHA validation for ${headSha}`, async t => {
+    let projections = 0;
+    const f = fixture(t, { headSha, owesExhaustedHeadVerdictImpl: input => {
+      projections++;
+      assert.match(input.headSha, /^[0-9a-f]{40}$/i);
+      assert.notEqual(input.headSha.toLowerCase(), headSha.toLowerCase());
+      assert.equal(input.reviewedHeadSha, headSha);
+      return owesExhaustedHeadVerdict(input);
+    } });
+    f.args.reviewState.reviewCycleExhausted = true;
+    assert.equal((await f.run()).dispatched, true);
+    assert.equal(projections, 1);
+    const ledger = JSON.parse(readFileSync(capReheadLedgerPath(f.args.rootDir, f.args.repo, 17)));
+    assert.equal(ledger.attempts[0].headSha, headSha, 'reservation retains the actual source head');
+    assert.equal(ledger.attempts[0].updateMode, 'squash');
+  });
+}
 
 test('CAPREHEAD-02: exhausted closer cap dispatches once, admits builder verdict and releases the old head cap', async t => {
   const f = fixture(t);

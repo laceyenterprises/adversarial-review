@@ -4441,6 +4441,12 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- CAPREHEAD-02 final comment-only remediation: exhausted-verdict projection uses
+  a canonical 40-character hex placeholder distinct from the source head,
+  including an all-zero source. Focused offline tests enforce SHA format and
+  preserve the actual head in dispatch reservations; lifecycle and smoke
+  promises are unchanged.
+
 - CAPREHEAD-02: a capped PR with a known exhausted cycle can receive a single
   builder squash update under the existing exhausted-head verdict obligation.
   Unknown cycles report `cycle-unknown`; lifetime limits and custody remain

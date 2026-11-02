@@ -73,6 +73,7 @@ export async function maybeDispatchCapRehead({ rootDir, repo, prNumber, headSha,
   readCurrentPrImpl = null, probeOwnershipImpl = probeCapReheadOwnership, execFileImpl = execFileAsync,
   readLaunchImpl = readLaunchRequestStatusFromLedgerAsync,
   classifyUpdateModeImpl = capReheadUpdateMode, operationTimeoutMs = null,
+  owesExhaustedHeadVerdictImpl = owesExhaustedHeadVerdict,
   now = () => new Date().toISOString(),
 } = {}) {
   if (wake?.outcome !== 'skipped' || !['retry-exhausted', 'hammer-retry-cap-exhausted'].includes(wake.reason)) return null;
@@ -98,10 +99,11 @@ export async function maybeDispatchCapRehead({ rootDir, repo, prNumber, headSha,
   if (!Number.isInteger(cap) || cap < 0) return report(false, 'lifetime-cap');
   if (!repo || !Number.isInteger(prNumber) || prNumber <= 0 || !headSha || !branch) return report(false, 'identity-unavailable');
   // Project the promised fresh builder commit, not the currently capped head.
+  // Use a canonical SHA distinct from the source, including an all-zero source.
   // The watcher still classifies the actual SHA before admitting its verdict.
-  const exhaustedBuilderHead = owesExhaustedHeadVerdict({
+  const exhaustedBuilderHead = owesExhaustedHeadVerdictImpl({
     exhausted: reviewState.reviewCycleExhausted,
-    headSha: `cap-rehead:${headSha}`, reviewedHeadSha: headSha,
+    headSha: (headSha === '0'.repeat(40) ? '1' : '0').repeat(40), reviewedHeadSha: headSha,
     closerAuthored: false, deliveredReviews: 0,
   });
   if (reviewState.reviewCycleExhausted && !exhaustedBuilderHead) return report(false, 'cycle-exhausted');

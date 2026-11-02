@@ -7,11 +7,11 @@
       "path": "docs/data-model/hammer-progress.md",
       "store": "<HQ root>/dispatch/<launchRequestId>/hammer-progress/<runId>/<milestone>.json",
       "schemaSurface": "src/ama/hammer-progress.mjs",
-      "relatedSchemaSurfaces": ["bin/hammer-progress.mjs", "bin/metered-gh.mjs", "src/ama/hammer-terminal-audit.mjs", "bin/hammer-verify-head.sh", "bin/hammer-publish.sh"],
+      "relatedSchemaSurfaces": ["bin/hammer-progress.mjs", "bin/hammer-validate.mjs", "templates/hammer-prompt.md", "bin/metered-gh.mjs", "src/ama/hammer-terminal-audit.mjs", "bin/hammer-verify-head.sh", "bin/hammer-publish.sh"],
       "owner": "active HAM worker run",
       "primaryKey": ["launchRequestId", "runId", "milestone"],
       "fields": ["schemaVersion", "launchRequestId", "runId", "milestone", "at", "reason"],
-      "compatibility": "Version 1 exclusive-create filesystem records; duplicate milestones return the original receipt. Terminal stops require a named reason. Best-effort observation grants no merge authority, CI validation or budget refund; no expiry or cleanup is introduced."
+      "compatibility": "Version 1 exclusive-create records with seven milestone names; duplicate milestones return the original receipt. Terminal reasons match ^[a-z][a-z0-9:-]{0,95}$ (1–96 characters). Commit receipts require a Git descendant above the dispatch target (legacy fallback: reviewed SHA). Validation receipts are advisory completed-command signals, not proof tests ran. Deploy the seven-kind consumer before or together with the producer; older-consumer unknown-name tolerance is unverified. Observation grants no merge authority, CI validation or budget refund; no expiry or cleanup is introduced."
     },
     {
       "id": "explicit-review-intents",

@@ -7,6 +7,8 @@ import { runBounded } from '../src/ama/bounded-command.mjs';
 import { LEASE_VALIDATION_IDLE_MS, pytestValidationEnvironment } from '../src/ama/lease-validation.mjs';
 import { loadAwareTimeoutSeconds } from '../src/load-aware-timeout.mjs';
 
+import { reportHammerProgress, reportRemediationCommit } from '../src/ama/hammer-progress.mjs';
+
 const args = process.argv.slice(2);
 let pytest = false;
 let nominalSeconds = 360;
@@ -26,11 +28,16 @@ if (!valid || args.shift() !== '--' || !args.length) {
 } else {
   const scratch = await mkdtemp(join(tmpdir(), 'ham-validation-'));
   try {
+    reportRemediationCommit();
     const env = pytest ? pytestValidationEnvironment(process.env, scratch,
       join(dirname(fileURLToPath(import.meta.url)), 'pytest')) : process.env;
     process.exitCode = await runBounded(pytest ? 'python3' : args.shift(),
       pytest ? ['-u', '-m', 'pytest', '-p', 'ham_pytest_progress', ...args] : args,
       { env, timeoutMs: loadAwareTimeoutSeconds(nominalSeconds) * 1000, idleMs: LEASE_VALIDATION_IDLE_MS });
+    // Timeouts, cleanup uncertainty, signals and spawn failures are unknown.
+    if (process.env.HQ_WORKER_RUN_ID && process.exitCode >= 0 && process.exitCode < 124) {
+      reportHammerProgress(process.exitCode === 0 ? 'validation-passed' : 'validation-failed');
+    }
   } finally {
     if (process.exitCode === undefined || process.exitCode === 125) {
       console.error(`hammer-validate: scratch retained for canonical cleanup: ${scratch}`);

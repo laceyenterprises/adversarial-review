@@ -1,10 +1,12 @@
+import { execFileSync } from 'node:child_process';
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { controllerLaunchId } from './hammer-controller.mjs';
 import { resolveHqRoot } from '../hq-root.mjs';
 
 export const HAMMER_PROGRESS_MILESTONES = Object.freeze([
-  'verify-head', 'remediation-pushed', 'merge-attempted', 'terminal-stop',
+  'verify-head', 'remediation-committed', 'validation-passed', 'validation-failed', 'remediation-pushed', 'merge-attempted', 'terminal-stop',
 ]);
 
 // Fixed-size receipts are run-scoped. Tool activity and script inspection never
@@ -14,7 +16,7 @@ export const HAMMER_PROGRESS_MILESTONES = Object.freeze([
 // deferred or retryable outcome the closer may still act on in this run.
 export function recordHammerProgress(milestone, { env = process.env, reason, final = false, now = new Date() } = {}) {
   if (!HAMMER_PROGRESS_MILESTONES.includes(milestone)) throw new TypeError('invalid hammer milestone');
-  if (milestone === 'terminal-stop' && !/^[a-z][a-z0-9:-]*$/.test(reason || '')) {
+  if (milestone === 'terminal-stop' && !/^[a-z][a-z0-9:-]{0,95}$/.test(reason || '')) {
     throw new TypeError('terminal milestone requires a named reason');
   }
   if (milestone === 'terminal-stop' && final !== true) {
@@ -44,4 +46,18 @@ export function reportHammerProgress(milestone, options) {
     process.stderr.write('HAM progress receipt unavailable\n');
     return null;
   }
+}
+
+// Observe Git, never model prose: only a descendant commit above the dispatch
+// target (or legacy reviewed head) earns credit. Repetition cannot refresh it.
+export function reportRemediationCommit({ env = process.env, cwd = process.cwd(), execImpl = execFileSync } = {}) {
+  const baseline = env.HAM_TARGET_REMEDIATION_SHA || env.HAM_REVIEWED_SHA;
+  if (!/^[a-f0-9]{40}$/.test(baseline || '')) return null;
+  try {
+    const options = { cwd, env, encoding: 'utf8', timeout: loadAwareTimeoutMs(5000), stdio: ['ignore', 'pipe', 'pipe'] };
+    const head = execImpl('git', ['rev-parse', 'HEAD'], options).trim();
+    if (!/^[a-f0-9]{40}$/.test(head) || head === baseline) return null;
+    execImpl('git', ['merge-base', '--is-ancestor', baseline, head], options);
+    return reportHammerProgress('remediation-committed', { env });
+  } catch { return null; }
 }

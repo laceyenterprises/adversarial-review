@@ -10,11 +10,11 @@ import { currentProcessGroupId } from '../src/process-group-identity.mjs';
 const python = process.env.HQ_PYTHON3 || process.env.AGENT_OS_PY || 'python3';
 
 test('native census validates the wire shape and retains timeout and isolation budgets', () => {
-  const result = nativeControllerIdentity('group', 42, { execFileSyncImpl(bin, args, options) {
+  const result = nativeControllerIdentity('group', 42, { timeoutImpl: nominal => { assert.equal(nominal, 2000); return 12000; }, execFileSyncImpl(bin, args, options) {
     assert.equal(bin, python);
     assert.deepEqual(args.slice(0, 2), ['-I', '-B']);
     assert.deepEqual(args.slice(-2), ['group', '42']);
-    assert.equal(options.timeout, 2000);
+    assert.equal(options.timeout, 12000);
     assert.equal(options.maxBuffer, 1024 * 1024);
     return '[{"pid":42,"birth":"123.000001"}]';
   } });
@@ -251,4 +251,26 @@ test('Darwin round census matches the one-shot census for the same live group', 
     return;
   }
   assert.fail('the one-shot and round census never observed the same group');
+});
+
+test('a slow ownership census survives within its load-aware budget', () => {
+  const observe = timeoutImpl => nativeControllerIdentity('pgid', 42, { timeoutImpl,
+    execFileSyncImpl(_bin, _args, options) {
+      if (options.timeout < 3000) throw Object.assign(new Error('slow scheduler'), { code: 'ETIMEDOUT' });
+      return '42';
+    } });
+  assert.throws(() => observe(base => base), { code: 'ETIMEDOUT' });
+  assert.equal(observe(base => base * 3), 42);
+});
+
+test('persistent census sizes every request with the shared load-aware deadline', async () => {
+  const f = fakeHelpers((_line, helper) => helper.stdout.write('{"ok":42}\n'));
+  let sizes = 0;
+  const census = createControllerCensus({ spawnImpl: f.spawnImpl,
+    timeoutImpl: base => { assert.equal(base, 2000); sizes++; return base * 3; } });
+  try {
+    assert.equal(await census.pgid(42), 42);
+    assert.equal(await census.pgid(42), 42);
+    assert.equal(sizes, 2);
+  } finally { census.close(); }
 });

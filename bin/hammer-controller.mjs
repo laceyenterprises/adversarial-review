@@ -15,5 +15,5 @@ try {
   }
 } catch (error) {
   console.error(`hammer-controller: ${error.message}`);
-  process.exitCode = 125;
+  process.exitCode = error.code === 'EOBSERVATION' ? 75 : 125;
 }

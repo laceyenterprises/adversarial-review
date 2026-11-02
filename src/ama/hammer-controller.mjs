@@ -65,7 +65,9 @@ export function assertHammerController(env = process.env, { readGroupImpl = curr
       || process.ppid !== record.shellPid) {
     throw new Error('hammer controller ownership unconfirmed');
   }
-  if (readGroupImpl() !== record.shellPid) throw new Error('hammer controller process group unconfirmed');
+  const group = readGroupImpl();
+  if (group === null) throw Object.assign(new Error('hammer controller process group observation unavailable'), { code: 'EOBSERVATION' });
+  if (group !== record.shellPid) throw new Error('hammer controller process group unconfirmed');
   process.kill(record.controllerPid, 0);
   if (env.HAM_CONTROLLER_FD !== '4') throw new Error('hammer controller cancellation pipe missing');
   const pipe = fstatSync(4);
@@ -108,7 +110,7 @@ export function confirmControllerValidation() {
   // The controller probes from outside the test group. Do not accept a test
   // while background descendants remain, even if they closed both output pipes.
   // Allow one poll and bounded process census to complete.
-  return controllerHandshake('complete', 10_000);
+  return controllerHandshake('complete', loadAwareTimeoutMs(10_000));
 }
 
 // Lease acquisition and merge proceed only on a fresh permitted launch read.
@@ -124,7 +126,7 @@ export function controllerGroupSnapshot(pgid, { execFileSyncImpl = execFileSync,
   nativeImpl = nativeControllerIdentity } = {}) {
   if (platform === 'darwin') return nativeImpl('group', pgid, { execFileSyncImpl });
   const output = execFileSyncImpl('/bin/ps', ['-axo', 'pid=,pgid=,stat=,lstart='], {
-    encoding: 'utf8', timeout: 2000, maxBuffer: 1024 * 1024,
+    encoding: 'utf8', timeout: loadAwareTimeoutMs(2000), maxBuffer: 1024 * 1024,
     env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' },
   });
   if (!output.trim()) throw new Error('empty process census');
@@ -350,7 +352,7 @@ export async function runHammerController(script, args = [], {
         if (!record.probeError) console.error(`hammer-controller: ${error.message}`);
         record.probeError = error.code || 'unknown'; stop('process-probe-unreadable');
       }
-      if (members?.length === 0 && exited) { drained = true; break; }
+      if (members?.length === 0 && exited) { stop('shell-exited'); drained = true; break; }
       const owned = members && groupStillOwned(members, witnessed, !exited, child.pid);
       // A census can observe the shell's exit before Node delivers its exit
       // event. An empty group grants no signal authority; wait for that event

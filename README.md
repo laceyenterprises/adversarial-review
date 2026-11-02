@@ -4388,6 +4388,22 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- Preserve the Hammer controller shell exit status when the shell exits during
+  an awaited empty process census; cover successful and failed exits offline.
+
+- HAMMERNOPROGRESS-01 final remediation: commit receipts require ancestry above
+  the dispatch target, with an offline head-advanced regression. Document all
+  seven receipt kinds and bounded reasons, advisory validation signals,
+  release-only observation diagnostics and consumer-first expansion rollout.
+  Refresh the census timeout inventory and lifecycle observation declarations;
+  lifecycle states and existing smoke promises remain unchanged.
+
+- HAMMERNOPROGRESS-01: verified local commits and completed bounded validation
+  emit finite run-bound progress receipts before first push. Controller process
+  census deadlines scale with load; lease release distinguishes unavailable
+  observations from owner loss. See the closure runbook for the
+  companion supervisor's load-aware windows and terminal classifications.
+
 - **LABELREARM-01 final remediation:** waiver observation shares asynchronous label reads after cached presence checks, preserves stopped-job budgets and provenance, and clears backoff only for newly accepted intent. Offline coverage now proves one exact-head reviewer spawn and no duplicate on the next poll; pre-review labels require removal and reapplication.
 
 - **LABELREARM-01:** registered operator-label evidence on an already-reviewed, waiver-only hold now requests one exact-head waiver-observation review through the shared evidence predicate, retaining stopped follow-ups for the fresh review to supersede. Accepted intent exits operator backoff. The fresh review still decides; no label bypasses findings or merge checks.
@@ -4482,8 +4498,9 @@ gates, leases, round budgets and per-PR caps remain unchanged.
 HAMPROGRESS-01 adds run-bound closer phase receipts for the supervisor's outcome,
 wall-clock and total-token limits. Existing terminal/drain and AMA replacement
 edges retain lifetime charges. Merge safety and existing smoke promises are
-unchanged. Deploy the receipt/schema companion before supervisor activation;
-passive SRE acceptance observes natural named stops and bounded replacement.
+unchanged. For the seven-kind expansion, deploy the supervisor consumer before
+or together with the producer/schema; older-consumer tolerance is unverified.
+Passive SRE acceptance observes natural named stops and bounded replacement.
 See [the closure runbook](docs/RUNBOOK-ama-closure.md).
 
 HAMSCRATCHRESUME-01: pending quota resume retains hammer scratch through the

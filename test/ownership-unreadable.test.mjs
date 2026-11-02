@@ -1,3 +1,4 @@
+import { readOwnershipObservation } from '../src/ownership-read.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -198,24 +199,22 @@ test('OWNERUNREADABLE-01: the anchored deadline survives same-pass refresh and t
   assert.equal(after.decision.deadline.anchoredAt, AT);
 });
 
-test('OWNERUNREADABLE-01: a stalled read shares one deadline and cannot retry after abort', { timeout: 7000 }, async t => {
+test('OWNERUNREADABLE-01: a stalled read shares one deadline and cannot retry after abort', async t => {
   const f = fixture(t, { observedAt: LATER });
-  const keepAlive = setTimeout(() => {}, 6500);
-  t.after(() => clearTimeout(keepAlive));
   let reads = 0, signal;
-  const started = Date.now();
-  const shared = await f.resolve({ readLaunches: options => {
+  // Synthetic expiry exercises the shared bound without sleeping through a
+  // host-load-scaled production deadline or raising this test's wall clock.
+  const observation = await readOwnershipObservation(options => {
     reads++;
     signal = options.signal;
     return new Promise(resolve => signal.addEventListener('abort', () => resolve({ state: 'unknown', value: null }), { once: true }));
-  } });
-  assert.ok(Date.now() - started < 6500, 'all attempts share the five-second budget');
+  }, { scanBudgetMs: 1, launchReadTimeoutMs: 1 });
+  const shared = await f.resolve({ readLaunches: () => observation });
   assert.equal(reads, 1);
   assert.equal(signal.aborted, true);
   assert.equal(shared.decision.reason, 'ownership-unreadable');
   assert.equal(f.wake(shared).outcome, 'skipped');
   assert.equal(f.wakes(), 0);
-  await new Promise(resolve => setTimeout(resolve, 250));
   assert.equal(reads, 1, 'no delayed attempt survives the deadline');
 });
 

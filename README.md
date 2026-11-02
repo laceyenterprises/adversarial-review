@@ -4441,6 +4441,20 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+### NXAOWNERREAD-01 — shared ownership reads at launch
+
+The AMA closure scan, next-action evidence, shadow and hammer wake now share
+bounded, load-aware ownership reads. When unknown ownership alone masks a
+selected same-head hammer route, refresh returns `ownership-read-deferred`
+without spending a decision-mismatch cycle or dispatching another owner.
+A real live owner or changed route still invalidates selection. Each suppressed
+transient mismatch emits `ama.closure.transient_ownership_refresh` with count
+and reason; custody and merge admission remain authoritative.
+After deployment, the SRE owner floats the revision, confirms the watcher restart,
+and observes one full pass for zero `closure-decision-mismatch`, zero shadow
+R04 `ownership-unreadable`, and natural closer launches. See the
+[AMA closure runbook](docs/RUNBOOK-ama-closure.md#unreadable-ownership-recovery-ownerunreadable-01).
+
 - CAPREHEAD-01 rescue: terminal skips and the disabled switch preserve ordinary
   overdue recovery escalation. Only a dispatched or positively live CAPREHEAD
   launch retains closure custody and suppresses retry-cap notices. The daemon

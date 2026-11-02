@@ -43,10 +43,34 @@ export function hasClosureRecoveryIntent(shared, identity) {
 // A refreshed executor may invalidate queued intent, but cannot silently turn
 // a hammer request into an unrelated refresh. Return the exact replacement pair
 // so closure can select its successor once without rebuilding partial evidence.
-export function hammerDispatchMismatch(selected, fresh, identity) {
+export function hammerDispatchMismatch(selected, fresh, identity, { logger = console } = {}) {
   if (!hasHammerDispatchIntent(selected, identity)
     || (hasHammerDispatchIntent(fresh, identity)
       && selected.decision.decisionKey === fresh.decision.decisionKey)) return null;
+  // Unknown ownership is absence of evidence, not a replacement decision.
+  // Prove that ownership alone masked the selected route; retain every other
+  // fresh fact so a changed head, gate, hold or live owner still invalidates it.
+  if (hasClosureRecoveryIntent(fresh, identity) && fresh.decision.reason === 'ownership-unreadable') {
+    const observations = fresh.snapshot.observations;
+    const leases = observations.leases;
+    const priorLeases = selected.snapshot.observations.leases;
+    const sameLease = leases?.state !== 'complete'
+      || JSON.stringify(leases.value) === JSON.stringify(priorLeases?.value);
+    const restored = deriveNextActionSnapshot({ base: fresh.snapshot, observations: {
+      launches: selected.snapshot.observations.launches,
+      ...(leases?.state !== 'complete' ? { leases: priorLeases } : {}),
+    } });
+    if (sameLease && nextAction(restored).decisionKey === selected.decision.decisionKey) {
+      const provenance = observations.launches?.provenance;
+      const reason = provenance?.reason || provenance?.launchReadReason
+        || provenance?.retryReadReason || leases?.provenance?.reason || fresh.decision.reason;
+      logger?.log?.(JSON.stringify({ event: 'ama.closure.transient_ownership_refresh', count: 1,
+        reason, subjectKey: fresh.snapshot.subjectKey, headSha: identity.headSha,
+        selectedKey: selected.decision.decisionKey }));
+      return { dispatched: false, skipMergeAgent: true, recoveryWait: true,
+        reason: 'ownership-read-deferred', nextActionShared: fresh };
+    }
+  }
   return { dispatched: false, skipMergeAgent: true, recoveryWait: true,
     reason: 'closure-decision-mismatch', nextActionShared: fresh,
     decisionMismatch: {

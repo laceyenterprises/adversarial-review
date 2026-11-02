@@ -1,3 +1,4 @@
+import { boundedOwnershipRead, ownershipReadBudgets } from './ownership-read.mjs';
 // Compatibility names for review policy callers; every observation uses the public SDK.
 import { readDispatchLaunches, readDispatchLaunchesSync, launchProbe,
   readWorkerObservation, readWorkerObservationSync, readLatestReviewObservation, readLatestReviewObservationSync } from './dispatch-read-client.mjs';
@@ -60,7 +61,18 @@ export async function readLaunchRequestStatusFromLedgerAsync(args = {}) {
 // Collection seam only. Reuse the bounded public observation reader;
 // terminal launch evidence outranks a stale worker projection. Neither process
 // success nor a wake supplies evidence of a remote merge.
-export async function readLaunchRequestObservationFromLedgerAsync({
+export async function readLaunchRequestObservationFromLedgerAsync(args = {}) {
+  const timeoutMs = args.timeoutMs ?? ownershipReadBudgets(args).launch;
+  const controller = new AbortController();
+  const signal = args.signal ? AbortSignal.any([args.signal, controller.signal]) : controller.signal;
+  try {
+    const result = await boundedOwnershipRead(() => launchRequestObservation({ ...args, signal, timeoutMs }), timeoutMs, signal);
+    return result?.state ? result : { state: result?.reason === 'scan-read-error' ? 'error' : 'unknown', value: null,
+      provenance: { sourceRef: 'launch-requests', reason: result?.reason, timedOut: result?.timedOut === true } };
+  } finally { controller.abort(); }
+}
+
+async function launchRequestObservation({
   readLaunchRequestStatusImpl = readLaunchRequestStatusFromLedgerAsync,
   readWorkerStatusImpl = readLatestWorkerRunStatusFromLedgerAsync,
   ...args

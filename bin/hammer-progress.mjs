@@ -14,5 +14,6 @@ if (!HAMMER_PROGRESS_MILESTONES.includes(milestone)
   if (!reportRemediationCommit()) process.exitCode = 70;
 } else if (milestone.startsWith('validation-')) {
   // Validation receipts belong exclusively to the bounded validation helper.
+  process.stderr.write('Validation milestones require hammer-validate.mjs; run the validation command through that helper.\n');
   process.exitCode = 64;
 } else if (!reportHammerProgress(milestone, { reason, final })) process.exitCode = 70;

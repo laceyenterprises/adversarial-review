@@ -4537,6 +4537,9 @@ coverage. The closure runbook records the possible first-deploy SEV1 backlog
 burst and read-only verification; existing lifecycle states and smoke promises
 are unchanged.
 
+- Explain validation-milestone CLI refusals with the required helper and verify
+  that unavailable controller observations remain charged no-merge attempts.
+
 - Preserve the Hammer controller shell exit status when the shell exits during
   an awaited empty process census; cover successful and failed exits offline.
 

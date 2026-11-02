@@ -273,11 +273,12 @@ for (const code of [0, 1, 124]) {
     const fabricated = spawnSync(process.execPath, [join(repoRoot, 'bin/hammer-progress.mjs'), 'validation-passed'],
       { cwd: dir, env, encoding: 'utf8', timeout: 30_000 });
     assert.equal(fabricated.status, 64);
+  assert.match(fabricated.stderr, /hammer-validate\.mjs/);
   });
 }
 
 test('terminal classifications remain charged no-merge attempts', () => {
-  for (const reason of ['ci-not-green', 'targeted-validation-failed', 'published', 'controller-owner-lost']) {
+  for (const reason of ['ci-not-green', 'targeted-validation-failed', 'published', 'controller-owner-lost', 'controller-observation-unavailable']) {
     assert.equal(classifyDeadHammerCause({ failureClass: `closer-terminal:${reason}` }).infra, false);
   }
 });

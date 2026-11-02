@@ -1168,7 +1168,7 @@ async function recordedReversalAuthorization(args) {
 }
 
 // get is an injected bounded JSON API reader. Compare caps are errors, not empty diffs.
-async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir, builderHead, persistAuthorizations = false }) {
+async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir, builderHead, persistAuthorizations = false, historyOnly = false }) {
   // Reuse only within this evaluation. The in-lease evaluation must re-read live state.
   const responses = new Map();
   const read = (path) => {
@@ -1237,6 +1237,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
     const first = history.commits.find((commit, index) => isHammerCommit(commit,
       launchIndex >= 0 && index > launchIndex));
     if (!first) return { headSha, hasHammerCommits: false };
+    if (historyOnly) return { headSha, hasHammerCommits: true };
     if (first && (!first.parents?.length || first.parents.length > 2
       || !SHA.test(first.parents[0].sha))) return unknown('missing or unsupported first hammer parents');
     if (first && first.parents.length === 2) {
@@ -1555,6 +1556,11 @@ async function describeRevertedRegions(args, evidence, refusal) {
     for (const region of diagnostics) region.error = String(error.message || error);
   }
   return diagnostics;
+}
+
+// Branch maintenance needs only complete-history classification, without merge proofs.
+export async function fetchPrimaryChangeHistoryClassification(args) {
+  return fetchPrimaryChangeHistory({ ...args, historyOnly: true });
 }
 
 // Every production primary-change read also proves the independent cost gate.

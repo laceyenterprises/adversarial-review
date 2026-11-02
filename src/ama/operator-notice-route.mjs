@@ -1,3 +1,4 @@
+import { capReheadInFlight } from './cap-rehead.mjs';
 import { isPreReceiptIntent } from './dispatch-record-read.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { findLiveAmaCloserLease } from './closer-lease.mjs';
@@ -48,6 +49,7 @@ export async function operatorNoticeInFlight(rootDir, identity, {
   readLaunchRequestStatusImpl = readLaunchRequestStatusFromLedgerAsync,
   now = Date.now(),
 } = {}) {
+  if (await capReheadInFlight(rootDir, identity, readLaunchRequestStatusImpl)) return 'cap-rehead-in-flight';
   if (findLiveAmaCloserLease(rootDir, identity)) return 'live-closer-lease';
   for (const record of readAmaCloserDispatchRecordsForPR(rootDir, identity)) {
     // A replacement can still carry the previous launch ID and terminal status

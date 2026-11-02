@@ -4441,11 +4441,90 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- CAPREHEAD-01 rescue: terminal skips and the disabled switch preserve ordinary
+  overdue recovery escalation. Only a dispatched or positively live CAPREHEAD
+  launch retains closure custody and suppresses retry-cap notices. The daemon
+  classifies history using its canonical runtime root and binds the chosen mode
+  plus exact PR coordinates into the prompt; workers need no helper checkout.
+  Dispatch shares the bounded coexistence deadline. Canonical settled verdicts
+  are `approved` and `comment-only`; all existing merge and lifetime gates remain.
+
+
 - CLOSERSCANREAD-01 comment-only follow-up: strict unhandled-rejection regressions verify that snapshot and individual reads can reject after their timeout without crashing or mutating ownership. `Promise.race` already retains rejection handlers after settlement; runtime behavior is unchanged.
 
 - CLOSERSCANREAD-01 final remediation: isolate the census cursor from capacity checks, exclude inactive records before budget deferral, require a complete census for missing-row retirement, and preserve individual failure and timeout evidence. Focused offline regressions cover these guards; lifecycle values and existing smoke promises are unchanged.
 
 - CLOSERSCANREAD-01: closer launch scans fall back from failed batch snapshots to bounded individual reads, defer fairly at a load-aware pass deadline, and report snapshot timing and fallback counts. Dispatch lookup deadlines now scale with load; unreadable ownership still holds custody.
+
+### CAPREHEAD update classification and executable prompt
+
+Branch maintenance classifies complete PR history without running merge proofs
+or inspecting artifacts in a different repository checkout. The daemon binds repository, PR number, exact source head and selected update
+mode into the dispatch prompt using its canonical launch-provenance root.
+
+
+### CAPREHEAD-01 correction — squash histories containing hammer commits
+
+The daemon selects the strategy with its canonical provenance root, reusing
+the existing `isHammerCommit` detection through [`primary-change.mjs`](src/ama/primary-change.mjs).
+A range containing hammer commits becomes one new builder commit on current
+`origin/main` via `git merge --squash <old-head>` and an explicit
+force-with-lease push. A builder-only range retains merge-main and a
+fast-forward push. Both preserve both sides' behavior, regenerate generated
+files, keep the PR open and add no closer trailers or attestations.
+
+Merging main after hammer commits advances only the final merge base; the
+first hammer's parent still selects the old primary head. Primary-change then
+returns unknown because the merge bases differ. The squash removes hammer
+ancestry and the non-closer head receives full fresh review of the entire diff.
+The selector identifies hammer history before merge-base and artifact proofs. Unreadable history is reported instead of guessed.
+All dispatch preconditions remain unchanged, including
+`reviewCycleExhausted === false`, one attempt per head and the lifetime cap.
+
+- **CAPREHEAD-01 final remediation:** ledger validation matches repository casing
+  consistently with its path key, retaining reservations and lifetime charges
+  across casing changes. Added a test-only counter reset and isolated offline
+  regressions for both findings. Store fields, lifecycle states and existing
+  smoke promises are unchanged.
+
+### CAPREHEAD-01 — bounded recovery after closer retry exhaustion
+
+A settled approved or comment-only PR whose hammer wake reports `retry-exhausted`
+can receive one builder PR-update per current head, up to two attempts per PR.
+Recovery requires a non-exhausted review cycle, green required checks (including
+when mergeability is `CONFLICTING`), and proven absence of live closer,
+remediator, builder and PR-update ownership. Missing or unreadable ownership
+observations retain the blocker. Existing operator holds, autonomous execution
+kill switch and hammer lifetime ceiling still apply.
+
+`roles.adversarial.merge_authority.cap_rehead_enabled` defaults to `true`;
+`cap_rehead_lifetime_cap` in the same subtree defaults to `2` (`0` disables
+attempts). Their canonical environment variables end in `CAP_REHEAD_ENABLED`
+and `CAP_REHEAD_LIFETIME_CAP` under
+`AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_`. Domain `mergeAuthority` also accepts
+`capReheadEnabled` and `capReheadLifetimeCap`. The existing builder default
+`roles.build_pack_default_worker_class` applies when the creation title has no
+recognized builder class. Hammer classes are refused.
+
+The committed `templates/cap-rehead-prompt.md` selects the squash refresh above
+for hammer histories and a merge of `origin/main` for builder-only histories.
+It requires conflict resolution preserving both sides, generator-driven file
+regeneration, affected tests and the selected push strategy.
+It grants no merge authority and adds
+no closer trailers or attestations. The normal review → closer path handles
+the resulting head. A head/PR reservation is fsynced before dispatch; failed,
+refused or unacknowledged launches spend the lifetime budget and never loop.
+The dispatch uses `origin-owned` fleet retry policy.
+A launch without an acknowledged ID conservatively retains custody across later heads.
+See [the durable record](docs/data-model/cap-rehead.md).
+
+`ama.cap_rehead.dispatched` and `ama.cap_rehead.skipped` expose reasons including
+`cycle-exhausted`, `live-owner`, `blocking-findings`, `checks-red`,
+`already-attempted` and `lifetime-cap`. The existing
+`ama.final_review_to_hammer_launch.summary` metrics include cumulative
+process-local `cap_rehead.dispatched` / `cap_rehead.skipped` counters. A cycle
+exhaustion remains an explicit closure blocker; CAPREHEAD never advances it.
+
 
 - **LABELREARM-01 final remediation:** waiver observation shares asynchronous label reads after cached presence checks, preserves stopped-job budgets and provenance, and clears backoff only for newly accepted intent. Offline coverage now proves one exact-head reviewer spawn and no duplicate on the next poll; pre-review labels require removal and reapplication.
 
@@ -4560,3 +4639,10 @@ Named missing-input cancellations recover despite retained quota metadata.
 SRE acceptance is passive observation of
 the next natural quota recovery after both repositories deploy and reload.
 See [the closure runbook](docs/RUNBOOK-ama-closure.md).
+
+CAPREHEAD configuration rollout: the Node reader registers `cap_rehead_enabled`
+and `cap_rehead_lifetime_cap` first. A superproject Python/shell strict-loader
+companion must land before either key is placed in shared YAML. Until then use
+`AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_CAP_REHEAD_ENABLED=false` for the
+review-service kill switch; this PR writes no live setting. Normal deployment
+and loaded-service verification precede organic custody/escalation acceptance.

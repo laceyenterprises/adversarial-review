@@ -101,10 +101,12 @@ if [ -z "${HAMMER_LACEY_GH_TOKEN:-${HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND:-${MER
 fi
 if ! ham_audit_retry "<<RUN_DIR>>/audit-head" "$HAM_AUDIT_PR_VIEW_STDERR" \
   ham_pr --json headRefOid --jq '.headRefOid'; then
+  HAM_PHASE_OUTCOME=publish-head-read-failed
   ham_publish_abort 1; return 1
 fi
 POST_REMEDIATION_SHA=$(cat "<<RUN_DIR>>/audit-head")
 if ! ham_is_full_sha "$POST_REMEDIATION_SHA"; then
+  HAM_PHASE_OUTCOME=publish-head-read-failed
   echo "HAM hard-blocker: unable to resolve post-remediation head before audit comment" >&2
   ham_publish_abort 1; return 1
 fi
@@ -122,6 +124,7 @@ if [ "$POST_REMEDIATION_SHA" != "$HAM_PRODUCED_HEAD" ]; then
 fi
 if ! ham_audit_retry "<<RUN_DIR>>/audit-identity.json" "$HAM_AUDIT_PR_VIEW_STDERR" \
   ham_entitled_gh api graphql -f 'query={ viewer { login databaseId } }' --jq '.data.viewer'; then
+  HAM_PHASE_OUTCOME=publish-identity-read-failed
   ham_publish_abort 1; return 1
 fi
 # Deliver a previous run's exact edge before evaluating starting-base provenance.

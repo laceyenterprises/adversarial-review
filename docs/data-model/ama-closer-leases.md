@@ -182,6 +182,13 @@ same-pass hammer admission.
 `status: terminal` is the store's released state. `terminalOutcome` additionally
 accepts `retryable-lane-busy`, `retryable-merge-lease-timeout`,
 `retryable-required-checks-pending` and `retryable-pr-mergeability-unknown`.
+VERIFYHEADTRANSIENT-01 also permits `retryable-<reason>` for every explicit
+infrastructure read reason in `HAMMER_RETRYABLE_READ_OUTCOMES`, defined in
+`src/ama/hammer-phase-outcome.mjs` (25 reasons at introduction). That allowlist
+is authoritative; free-text errors, red checks, conflicts, moved heads,
+cancellation and proven owner loss do not qualify. Terminal fallback
+finalization uses the same resolved `retryable-<reason>` receipt, preserving
+an already settled retryable lease.
 These are reclaimable outcomes under the existing launch-liveness checks.
 The terminal audit CLI settles the matching launch's current or original-head
 lease under the complete expected snapshot/reclaim flock. Intermediate audit

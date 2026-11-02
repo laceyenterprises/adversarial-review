@@ -111,6 +111,9 @@ ham_mark_merge_lease_retryable_abort() {
 }
 
 ham_release_merge_lease() {
+  if declare -F ham_phase_read_retryable >/dev/null && ham_phase_read_retryable; then
+    ham_mark_merge_lease_retryable_abort "$HAM_PHASE_OUTCOME"
+  fi
   # During cancellation only the outer controller can establish group drain.
   # Keep the acquisition receipt for its generation-fenced fallback release.
   if [ -n "${HAM_CONTROLLER_RECORD:-}" ]; then
@@ -205,7 +208,13 @@ ham_acquire_merge_lease() {
   # must enter the versioned, launch-bound controller before taking a lease,
   # and take it only on a fresh permitted launch read.
   if [ -n "${HQ_LAUNCH_REQUEST_ID:-${AGENT_OS_WORKER_LRQ_ID:-${LAUNCH_REQUEST_ID:-}}}" ]; then
-    "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-controller.mjs" assert-launch || return 125
+    local ham_launch_status=0
+    "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-controller.mjs" assert-launch || ham_launch_status=$?
+    if [ "$ham_launch_status" -ne 0 ]; then
+      if [ "$ham_launch_status" -eq 75 ]; then HAM_PHASE_OUTCOME=controller-observation-unavailable
+      else HAM_PHASE_OUTCOME=controller-owner-lost; fi
+      return 125
+    fi
   fi
   local ham_lease_wait_retry=${1:-0}
   if ! [[ "$POST_REMEDIATION_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
@@ -213,6 +222,7 @@ ham_acquire_merge_lease() {
     return 1
   fi
   local ham_required_checks_green_args=()
+  HAM_PHASE_OUTCOME=verify-head-pr-read-failed
   ham_lease_pr_view --json body,headRefOid,state,isDraft,labels,statusCheckRollup \
     > "<<RUN_DIR>>/pre-acquire-checks.json" || return 1
   # Live holds/terminal state fence the lane. Historical stops were already
@@ -226,6 +236,7 @@ const pr = JSON.parse(readFileSync(process.argv[3], 'utf8'));
 console.log(mergeLeaseAdmissionReason(pr, process.argv[2]) || '');
 NODE
   ) || return 1
+  HAM_PHASE_OUTCOME=merge-lease-admission-failed
   if [ -n "$ham_admission_reason" ]; then
     if [ "$ham_admission_reason" = pr-merged ]; then
       HAM_PHASE_OUTCOME=already-merged

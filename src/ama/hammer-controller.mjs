@@ -9,11 +9,13 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { readLaunchRequestStatusFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { launchRequestMeaning } from './launch-request-status.mjs';
-import { inspectMergeLease, releaseMergeLease } from './merge-lease.mjs';
+import { inspectMergeLease, releaseMergeLease, releaseMergeLeaseForRetryableAbort } from './merge-lease.mjs';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { currentProcessGroupId } from '../process-group-identity.mjs';
 import { createControllerCensus, nativeControllerIdentity } from '../controller-process-census.mjs';
 import { resolveHqRoot } from '../hq-root.mjs';
+import { readAmaAuditEntry } from './audit.mjs';
+import { HAMMER_RETRYABLE_READ_OUTCOMES } from './hammer-phase-outcome.mjs';
 
 // A slow or failed ledger read is not a cancellation. Only a readable terminal,
 // parked or foreign row stops a round at once; reads that fail stop it only
@@ -158,8 +160,9 @@ export function groupStillOwned(members, witnessed, leaderLive, pgid) {
   return true;
 }
 
-export function releaseControllerLease({ env, shellPid, startedAt, drained,
-  inspectImpl = inspectMergeLease, releaseImpl = releaseMergeLease } = {}) {
+export function releaseControllerLease({ env, shellPid, startedAt, drained, terminationReason,
+  inspectImpl = inspectMergeLease, releaseImpl = releaseMergeLease,
+  releaseRetryableImpl = releaseMergeLeaseForRetryableAbort } = {}) {
   if (!drained) return { released: false, reason: 'process-drain-unconfirmed' };
   let acquired;
   try { acquired = JSON.parse(readFileSync(join(env.HAM_RUN_DIR, 'merge-lease-acquire.json'), 'utf8')); }
@@ -184,8 +187,19 @@ export function releaseControllerLease({ env, shellPid, startedAt, drained,
       || lease.holderHead !== acquired.holderHead || lease.acquiredAt !== acquired.acquiredAt) {
     return { released: false, reason: 'lease-not-owned' };
   }
-  return releaseImpl({ ...identity, leaseId: lease.leaseId, holderPr: lease.holderPr,
-    holderHead: lease.holderHead, acquiredAt: lease.acquiredAt, reason: 'controller-drained' });
+  let attempt;
+  if (['shell-exited', 'launch-unreadable'].includes(terminationReason)) {
+    attempt = readAmaAuditEntry(env.HAM_HQ_ROOT || resolveHqRoot(env),
+      env.HAM_REPO, acquired.holder, acquired.holderHead)?.attempts?.at(-1);
+  }
+  const retryableAbort = attempt?.outcome === 'deferred'
+    && attempt.launchRequestId === controllerLaunchId(env)
+    && HAMMER_RETRYABLE_READ_OUTCOMES.has(attempt.reason);
+  const releaseArgs = { ...identity, leaseId: lease.leaseId, holderPr: lease.holderPr,
+    holderHead: lease.holderHead, acquiredAt: lease.acquiredAt };
+  return retryableAbort
+    ? releaseRetryableImpl({ ...releaseArgs, retryableAbortReason: attempt.reason })
+    : releaseImpl({ ...releaseArgs, reason: 'controller-drained' });
 }
 
 export async function runHammerController(script, args = [], {
@@ -403,7 +417,7 @@ export async function runHammerController(script, args = [], {
     record.termSent = termSent;
     record.killSent = killSent;
     record.drained = drained;
-    try { record.leaseCleanup = releaseImpl({ env, shellPid: child.pid, startedAt, drained }); }
+    try { record.leaseCleanup = releaseImpl({ env, shellPid: child.pid, startedAt, drained, terminationReason: reason }); }
     catch { record.leaseCleanup = { released: false, reason: 'lease-cleanup-failed' }; }
     persist();
     if (record.leaseCleanup.reason === 'lease-cleanup-failed' || record.leaseCleanup.reason === 'mutation-lock-busy') return 125;

@@ -1,4 +1,5 @@
 import './helpers/rate-limit-state-isolation.mjs';
+import { HAMMER_RETRYABLE_READ_OUTCOMES, hammerPhaseAttempt } from '../src/ama/hammer-phase-outcome.mjs';
 import fsExt from 'fs-ext';
 import { openSync, closeSync } from 'node:fs';
 import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
@@ -467,6 +468,67 @@ function hammerDispatchDeps(overrides = {}) {
     logger: { log() {}, info() {}, warn() {}, error() {} },
     ...overrides,
   };
+}
+
+for (const reason of HAMMER_RETRYABLE_READ_OUTCOMES) {
+  test(`VERIFYHEADTRANSIENT-01: repeated ${reason} refunds the unchanged head and retries`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'verifyheadtransient-retry-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD };
+    const chargedAttempts = reason === 'merge-lease-base-read-failed' ? 2 : 1;
+    if (chargedAttempts === 2) recordHammerRetryDispatch(rootDir, identity, {
+      jobKey: REVIEWED_HEAD, headSha: REVIEWED_HEAD, launchRequestId: 'synthetic-prior-adjudication',
+      now: '2025-12-31T23:59:00Z',
+    });
+    let launches = 0, endedLaunch = null;
+    const events = [];
+    const warnings = [];
+    const deps = hammerDispatchDeps({
+      logger: { log() {}, warn: message => warnings.push(message), error() {}, info: message => events.push(message) },
+      readLaunchRequestStatusImpl: ({ launchRequestId }) => ({ ok: true, row: {
+        status: launchRequestId === endedLaunch ? 'succeeded' : 'running' } }),
+      fetchPullRequestRollupImpl: async () => assert.fail('a retryable audit outranks no-merge comment prose'),
+      execFileImpl: async (_cmd, argv) => {
+        if (argv[0] === 'dispatch' && argv[1] === 'status') return { stdout: JSON.stringify({ status: 'succeeded' }) };
+        if (argv[0] === 'dispatch' && argv[1] === '--priority') return { stdout: JSON.stringify({
+          ticketRef: `AMA-PR-${PR_NUMBER}`, launchRequestId: `synthetic-infra-${++launches}`,
+          dispatchId: `synthetic-infra-dispatch-${launches}` }) };
+        return { stdout: '{}' };
+      },
+      deliverAlertImpl: async () => assert.fail('infrastructure observations must not exhaust the cap'),
+    });
+    const run = dispatchedAt => maybeDispatchAmaCloser({
+      ...hammerDispatchArgs(rootDir, { dispatchContext: { dispatchedAt } }), ...deps,
+    });
+    assert.equal((await run('2026-01-01T00:00:00Z')).dispatched, true);
+    for (let i = 1; i <= 2; i++) {
+      const record = readAmaCloserDispatchRecord(rootDir, identity);
+      endedLaunch = record.launchRequestId;
+      writeAmaAuditEntry({ hqRoot: join(rootDir, 'hq-root'), ...identity,
+        attempt: hammerPhaseAttempt({ outcome: 'failed-without-merge', reason, launchRequestId: endedLaunch }),
+        now: `2026-01-01T00:0${i}:00Z` });
+      const result = await run(`2026-01-01T00:0${i}:30Z`);
+      assert.equal(result.dispatched, true, JSON.stringify(result));
+      assert.notEqual(result.reason, 'hammer-final-no-merge');
+      const owner = readAmaCloserLease(rootDir, identity);
+      assert.equal(owner.status, 'dispatched');
+      assert.equal(owner.lrqId, result.launchRequestId);
+      const ledger = readHammerRetryCapLedger(rootDir, identity);
+      assert.equal(ledger.attemptCount, chargedAttempts, 'replacement retains only genuine prior charges');
+      assert.equal(ledger.targetAttemptCount, chargedAttempts);
+      assert.equal(ledger.lifetimeAttemptCount, chargedAttempts);
+      assert.equal(ledger.leaseWaitLaunches.length, i);
+      assert.equal(readHammerStopForHead({ hqRoot: join(rootDir, 'hq-root'), ...identity }), null);
+    }
+    assert.equal(launches, 3);
+    assert.equal(warnings.some(message => message.includes('ama_closer.lease_terminal_finalize_failed')),
+      false, 'retryable infrastructure leases must not be finalized with a conflicting terminal outcome');
+    assert.ok(events.some(message => {
+      const event = JSON.parse(message);
+      return event.event === 'ama_closer.hammer_ended_without_merge'
+        && event.retryable === true && event.phaseOutcome === reason;
+    }));
+  });
 }
 
 function seedExhaustedHammerCap(rootDir, identity = { repo: REPO, prNumber: PR_NUMBER }) {

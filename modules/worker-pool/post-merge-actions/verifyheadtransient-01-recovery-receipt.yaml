@@ -1,0 +1,19 @@
+# Operator-owned recovery receipt; no automated live action or probe.
+operator_steps:
+  - description: >-
+      The build manager confirms the express float and watcher restart through
+      the existing deployment process. Retain the first organic retryable
+      verify-head abort with its explicit phase outcome, retryable outcome
+      event, retry wake, owner and load-aware deadline. Confirm that the
+      unchanged head avoids hammer-final-no-merge and then merges without
+      operator action. Attach the loaded revision and receipt to the companion
+      incident report before acknowledging completion. Workers must not perform
+      the float, restart, dispatch or any synthetic live failure. The command
+      only displays this handoff and does not satisfy the recovery receipt.
+    run_as: designated build manager
+    command: >-
+      /usr/bin/printf '%s\n' 'VERIFYHEADTRANSIENT-01: confirm express float and watcher restart, then retain the organic retryable verify-head abort, owned retry wake with deadline, and merge without operator action described in docs/RUNBOOK-ama-closure.md.'
+actions: []
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

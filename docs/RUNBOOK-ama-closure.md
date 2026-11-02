@@ -80,6 +80,40 @@ forced launch, ledger mutation or new smoke step is authorized by this change.
 
 # RUNBOOK — AMA closure pipeline
 
+## Change notes
+
+### VERIFYHEADTRANSIENT-01 — retry infrastructure observations
+
+An explicit infrastructure read failure in verify-head, publication or merge
+records a retryable no-merge through the existing `deferred` audit outcome.
+The allowlist is `HAMMER_RETRYABLE_READ_OUTCOMES` in
+`src/ama/hammer-phase-outcome.mjs`; it includes base/PR reads, published-head
+probes and timeouts, controller observation and CI evidence reads. Free text
+never determines retryability.
+
+The closer lease settles as `retryable-<phase outcome>` and the merge lease
+releases with `--retryable-abort`. If controller observation prevents shell
+release, the controller may perform the same generation-fenced release only
+after process drain and a matching launch/head audit. Authoritative merged
+state still takes precedence over an abort.
+
+These observations reuse the existing uncharged lease-wait refund, including
+series, target and lifetime accounting. A second abort on the unchanged head
+remains eligible for the existing closer retry wake and its load-aware
+admission deadline. The existing `ama_closer.hammer_ended_without_merge` event
+includes `retryable: true` and `phaseOutcome`. They must never become
+`hammer-final-no-merge`, including when a no-merge comment is present.
+
+Red required checks, findings, conflicts, another writer's head change,
+controller cancellation and proven ownership loss retain their existing
+adjudication and cap accounting. No persisted field or lifecycle state is added.
+The build manager confirms the express float and watcher restart. The live
+receipt is a retryable verify-head abort followed by a retry wake with owner
+and deadline, then a merge without operator action; deployment alone is not
+that receipt.
+The [operator handoff plan](../modules/worker-pool/post-merge-actions/verifyheadtransient-01-recovery-receipt.yaml)
+records this receipt requirement and executes no live action or probe.
+
 ## Host identity reads (HOSTIDCACHE-01)
 
 RESCUEHOSTID-01: the watcher and the external rescue composition root share

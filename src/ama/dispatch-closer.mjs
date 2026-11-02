@@ -1,4 +1,5 @@
 import { ownershipReadBudgets as closerScanBudgets, boundedOwnershipRead as boundedCloserScanRead } from '../ownership-read.mjs';
+import { HAMMER_RETRYABLE_READ_OUTCOMES } from './hammer-phase-outcome.mjs';
 import { repositoryObservationCache } from '../repository-state-cache.mjs';
 import { withRepositoryStateCycle } from '../repository-state-lock.mjs';
 import { infrastructureOnlyFailures, recordedCiFailures } from '../ci-infrastructure.mjs';
@@ -1576,7 +1577,8 @@ function* reconcileAmaCloserLeaseSteps({
     if (record && !recordTerminalCloserLaunch(rootDir, dispatchIdentity, launchRequestId, status, now, cleanupScratchImpl)) return false;
     const deferral = [identity, dispatchIdentity].map(key =>
       readAmaAuditEntry(hqRoot || rootDir, key.repo, key.prNumber, key.headSha)?.attempts?.at(-1))
-      .find(attempt => attempt?.launchRequestId === launchRequestId && retryableAmaCloserDeferralOutcome(attempt));
+      .find(attempt => attempt?.launchRequestId === launchRequestId && retryableAmaCloserDeferralOutcome(attempt)
+        && (!HAMMER_RETRYABLE_READ_OUTCOMES.has(attempt.reason) || ['succeeded', 'failed'].includes(status)));
     const auditOutcome = retryableAmaCloserDeferralOutcome(deferral) || readAmaAuditTerminalOutcome(hqRoot || rootDir, identity)
       || readAmaAuditTerminalOutcome(hqRoot || rootDir, dispatchIdentity);
     // A merged completion proves success only for this lease head.
@@ -3821,6 +3823,10 @@ async function hasNoMergeAuditForCurrentHead({
   execFileImpl,
 }) {
   if (!headSha) return false;
+  const audit = readAmaAuditEntry(hqRoot, repo, prNumber, headSha);
+  const attempt = audit?.attempts?.at(-1);
+  if (HAMMER_RETRYABLE_READ_OUTCOMES.has(attempt?.reason)
+    && retryableAmaCloserDeferralOutcome(attempt)) return false;
   if (readAmaAuditTerminalOutcome(hqRoot, { repo, prNumber, headSha }) === 'failed-without-merge') {
     return true;
   }
@@ -5151,7 +5157,8 @@ async function maybeDispatchAmaCloserAttempt({
       queuedParkAudit = readAmaAuditEntry(dispatchContext.hqRoot || DEFAULT_HQ_ROOT,
         dispatchContext.repo, prNumber, prMetadata.headSha);
       if (verdict.trace?.hamTerminalRemediation?.ok !== true
-        && queuedParkAudit?.attempts?.at(-1)?.reason !== 'lane-busy') queuedParkAudit = null;
+        && queuedParkAudit?.attempts?.at(-1)?.reason !== 'lane-busy'
+        && !HAMMER_RETRYABLE_READ_OUTCOMES.has(queuedParkAudit?.attempts?.at(-1)?.reason)) queuedParkAudit = null;
     } catch (error) {
       logger?.warn?.(`[ama-closer] park audit unreadable: ${error?.message || error}`);
       if (verdict.trace?.hamTerminalRemediation?.ok === true) {
@@ -5162,6 +5169,7 @@ async function maybeDispatchAmaCloserAttempt({
   const queuedParkReason = queuedParkAudit?.status === 'deferred'
     ? queuedParkAudit.attempts?.at(-1)?.reason : null;
   const certifiedContentionPark = verdict.trace?.hamTerminalRemediation?.ok === true
+    && !HAMMER_RETRYABLE_READ_OUTCOMES.has(queuedParkReason)
     && AMA_CLOSER_RETRYABLE_DEFERRAL_REASONS.has(queuedParkReason);
   // Certification and parking are execution evidence. The shared workflow
   // determines whether this attempt observes, resumes the daemon, or repairs.
@@ -5394,7 +5402,9 @@ async function maybeDispatchAmaCloserAttempt({
   const parkReason = parkAttempt?.reason;
   const deferredPark = parkAudit?.status === 'deferred'
     && AMA_CLOSER_RETRYABLE_DEFERRAL_REASONS.has(parkReason)
+    && (!parkAttempt?.launchRequestId || parkAttempt.launchRequestId === existingRecord?.launchRequestId)
     && Date.parse(parkAttempt?.startedAt) >= Date.parse(existingRecord?.dispatchedAt);
+  const infrastructureReadPark = deferredPark && HAMMER_RETRYABLE_READ_OUTCOMES.has(parkReason);
   const certifiedPark = resumeCertifiedPark && deferredPark;
   const laneBusyPark = deferredPark && parkReason === 'lane-busy';
   if (!ownerProofRecovery && certifiedContentionPark && (!existingRecord || !existingRecord.launchRequestId)) {
@@ -5402,15 +5412,33 @@ async function maybeDispatchAmaCloserAttempt({
       reason: 'current-head-ham-terminal-remediation-needs-operator', needsOperator: true });
   }
   let parkLedger = null;
-  if (deferredPark && existingRecord?.launchRequestId) {
+  // A later authoritative cancellation/ownership loss must not borrow an
+  // earlier read-abort refund. Unknown or live launch state keeps custody.
+  const infrastructureAbortProbe = infrastructureReadPark && existingRecord?.launchRequestId
+    ? await Promise.resolve().then(() => readLaunchRequestStatusImpl({
+      launchRequestId: existingRecord.launchRequestId, rootDir, hqRoot,
+      ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath,
+      env, signal, includeRetryChain: true,
+    })).catch(() => ({ ok: false })) : null;
+  const refundableReadAbort = infrastructureAbortProbe?.ok
+    && !infrastructureAbortProbe.retryChainUnreadable && !infrastructureAbortProbe.liveRetryLaunchRequestId
+    && (!infrastructureAbortProbe.row?.ticket_ref
+      || isAmaHammerLaunchTicket(infrastructureAbortProbe.row.ticket_ref, prNumber))
+    && ['succeeded', 'failed'].includes(infrastructureAbortProbe.row?.status);
+  if (deferredPark && existingRecord?.launchRequestId && (!infrastructureReadPark || refundableReadAbort)) {
     parkLedger = deferHammerRetryDispatch(rootDir, { repo, prNumber }, {
       jobKey: reviewedSha, headSha: existingRecord.headSha,
       // Lane-lock contention issued no merge; reuse the lease-wait refund so
       // repeated busy passes cannot consume the failure or lifetime budget.
       laneBusy: parkReason === 'lane-busy', laneBusyHeadSha: prMetadata.headSha,
       leaseWaitExhausted: parkReason === 'lane-busy'
+        || infrastructureReadPark
         || (parkReason === 'merge-lease-timeout' && parkAttempt?.leaseWaitExhausted === true),
       launchRequestId: existingRecord.launchRequestId, now: dispatchContext.dispatchedAt,
+    });
+    if (infrastructureReadPark) logAmaCloserDispatchEvent(logger, 'ama_closer.hammer_ended_without_merge', {
+      repo, prNumber, headSha: queuedHead, launchRequestId: existingRecord.launchRequestId,
+      outcome: 'no-merge', retryable: true, phaseOutcome: parkReason,
     });
   }
   if (certifiedPark && !parkLedger) {
@@ -5448,8 +5476,9 @@ async function maybeDispatchAmaCloserAttempt({
     existingLeaseBeforeDispatch = targetLeaseBeforeDispatch;
     targetLeaseBeforeDispatch = null;
   }
-  let prefetchedLaunchRequestProbe = earlyLaunchRequestProbe && earlyLaunchRequestProbe.launchRequestId === existingRecord?.launchRequestId
-    ? earlyLaunchRequestProbe.probe : null;
+  let prefetchedLaunchRequestProbe = infrastructureAbortProbe
+    || (earlyLaunchRequestProbe && earlyLaunchRequestProbe.launchRequestId === existingRecord?.launchRequestId
+      ? earlyLaunchRequestProbe.probe : null);
   if (existingRecord?.launchRequestId) {
     prefetchedLaunchRequestProbe ||= await Promise.resolve().then(() => readLaunchRequestStatusImpl({
       launchRequestId: existingRecord.launchRequestId, rootDir, hqRoot,
@@ -6008,7 +6037,7 @@ async function maybeDispatchAmaCloserAttempt({
     // A timed-out legacy lock wait never issued a merge. Even without current
     // HAM certification, a settled launch must re-enter ordinary repair/admission
     // rather than being classified as a final no-merge or an exit without close.
-    if (laneBusyPark && !certifiedPark && ['succeeded', 'failed'].includes(status)) {
+    if ((laneBusyPark || infrastructureReadPark) && !certifiedPark && ['succeeded', 'failed'].includes(status)) {
       status = 'failed';
       existingDispatchStatus = status;
     }
@@ -6020,7 +6049,7 @@ async function maybeDispatchAmaCloserAttempt({
     if (AMA_CLOSER_ACTIVE_STATUSES.has(status) || AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || (certifiedPark && status === 'failed') || reportedNoWork) {
       if (
         (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || reportedNoWork)
-        && !laneBusyPark
+        && !laneBusyPark && !infrastructureReadPark
         && auditTerminalOutcome !== 'succeeded'
         // HAMBG-02: the validated-HAM exemption holds only while the same-head
         // daemon merge below can act on it. With a readable merged signal it
@@ -6785,7 +6814,8 @@ async function maybeDispatchAmaCloserAttempt({
       finalizeAmaCloserLeaseBestEffort({
         rootDir,
         leaseIdentity: existingRecordLeaseIdentity,
-        terminalOutcome: laneBusyPark ? 'deferred' : terminalLaunchLeaseOutcome({ status,
+        terminalOutcome: infrastructureReadPark ? `retryable-${parkReason}`
+          : laneBusyPark ? 'deferred' : terminalLaunchLeaseOutcome({ status,
           headAdvanced: existingDispatchHeadAdvanced && !hammerEndedWithoutMerge }),
         launchRequestId: existingRecord.launchRequestId,
         now: dispatchContext.dispatchedAt,

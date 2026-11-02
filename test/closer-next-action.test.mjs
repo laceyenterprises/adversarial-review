@@ -1259,7 +1259,8 @@ test('EXHAUSTEDHEADOWNER-01: closure refresh owns the new builder head without o
   const options = { rootDir, passSnapshot, subjectKey: identity.repo + '#' + identity.prNumber, observedAt,
     candidate: { headSha: HEAD, prState: 'OPEN', mergeable: 'MERGEABLE' },
     autonomousMergeExecutionEnabled: true,
-    input: { currentHead: HEAD, reviewState: { ...clean, headSha: OLD, postedAt: AT, reviewCycleExhausted: true },
+    input: { currentHead: HEAD, reviewAdmissionRow: { revision_ref: HEAD, rereview_requested_at: observedAt,
+      rereview_reason: `system-exhausted-head-verdict:${HEAD}` }, reviewState: { ...clean, headSha: OLD, postedAt: AT, reviewCycleExhausted: true },
       retryExhausted: true, reviewCeilingReached: true, roundsLeft: false, checks: 'SUCCESS', lease: null } };
   const first = await resolveClosureNextAction(options);
   assert.equal(first.decision.actor, 'reviewer');

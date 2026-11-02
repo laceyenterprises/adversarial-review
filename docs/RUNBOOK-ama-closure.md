@@ -7686,3 +7686,9 @@ After ordinary submodule deployment/restart, observe one natural active-builder
 notice suppression and a terminal skip reaching the existing overdue page.
 No synthetic production launch, settings flip or manual reservation repair is
 part of this source change.
+
+Rescue qualification for EXHAUSTEDHEADOWNER-01: closure consumes the exact-head
+`system-exhausted-head-verdict:<sha>` admission receipt after watcher provenance
+classification. A missing closer carry-forward proof alone is not builder
+provenance. Final-round handoffs and existing closer attempts keep their owner;
+returning delivered heads retain recorded same-head/lifetime caps.

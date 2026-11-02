@@ -1,10 +1,15 @@
 // Shared closure evidence: only a new builder head gets a new review/budget
 // episode. A closer's pushed head stays in its existing reviewed-head series.
 export function hasUnreviewedBuilderHead(input = {}) {
-  return Boolean(input.currentHead && input.reviewState?.headSha
+  // A missing closer proof is not builder provenance. Only the watcher
+  // admission receipt proves it classified this exact new head; final-round
+  // pushes and existing closer series must retain their owner.
+  return Boolean(isExhaustedHeadVerdictRequested(input.reviewAdmissionRow, input.currentHead)
+    && input.currentHead && input.reviewState?.headSha
     && input.currentHead !== input.reviewState.headSha
     && !(input.hammerHead || input.closerAuthoredStale?.hammerHead)
-    && !input.closerAuthoredStale?.carryForward && input.attested !== true);
+    && !input.closerAuthoredStale?.carryForward && input.attested !== true
+    && !(input.finalPush?.suppressed === true && input.finalPush.headSha === input.currentHead));
 }
 
 // Exhaustion ends remediation rounds, not the obligation to review a builder's
@@ -26,6 +31,9 @@ export function isExhaustedHeadVerdictRequested(row, headSha) {
 // later push away from, and back to, the same commit.
 export async function admitExhaustedHeadVerdict({ exhausted, headSha, row,
   countDelivered, classifyCloser, request, readRow, lifetimeExhausted = false }) {
+  // Code-PR revision references must survive the canonical SHA normalizer.
+  // Refuse malformed input before mutating the review row.
+  if (typeof headSha !== 'string' || !/^[0-9a-f]{40}$/i.test(headSha)) return row;
   if (isExhaustedHeadVerdictRequested(row, headSha)) return row;
   if (lifetimeExhausted || !exhausted || !headSha || !row || row.reviewer_head_sha === headSha
     || countDelivered() !== 0) return row;

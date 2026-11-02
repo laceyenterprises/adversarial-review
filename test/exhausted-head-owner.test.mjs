@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { admitExhaustedHeadVerdict, isExhaustedHeadVerdictRequested } from '../src/exhausted-head-verdict.mjs';
+import { admitExhaustedHeadVerdict, hasUnreviewedBuilderHead, isExhaustedHeadVerdictRequested } from '../src/exhausted-head-verdict.mjs';
 import { closureOwnerShadowEvidence } from '../src/pr-next-action-consumer.mjs';
 import { deriveNextActionSnapshot, nextAction } from '../src/pr-next-action.mjs';
 import { evaluateHammerRetryCap } from '../src/ama/hammer-retry-cap.mjs';
@@ -19,7 +19,8 @@ const old = 'a'.repeat(40), head = 'b'.repeat(40), newer = 'c'.repeat(40);
 const now = '2026-01-01T12:00:00.000Z';
 const complete = value => ({ state: 'complete', value });
 function decision({ reviewedHead = old, verdict = 'comment-only', findings = 1, lifetime = false, spent = true, deliveredReviews = 0 } = {}) {
-  const input = { currentHead: head, deliveredReviews, reviewState: { headSha: reviewedHead, verdict,
+  const input = { currentHead: head, deliveredReviews, reviewAdmissionRow: deliveredReviews === 0 ? { revision_ref: head,
+    rereview_requested_at: now, rereview_reason: `system-exhausted-head-verdict:${head}` } : null, reviewState: { headSha: reviewedHead, verdict,
     reviewCycleExhausted: true, blockingFindingState: 'known', blockingFindingCount: 0,
     nonBlockingFindingState: 'known', nonBlockingFindingCount: findings, postedAt: now },
   reviewCeilingReached: true, roundsLeft: false, retryExhausted: spent, lifetimeExhausted: lifetime,
@@ -56,8 +57,10 @@ test('EXHAUSTEDHEADOWNER-01: one admitted verdict per builder head, including re
 });
 
 test('returning to a delivered commit keeps closure and watcher ownership aligned', () => {
-  const result = decision({ deliveredReviews: 1 });
+  const result = decision({ deliveredReviews: 1, spent: false });
   assert.deepEqual([result.action, result.actor, result.reason], ['hammer', 'hammer', 'review-ceiling']);
+  assert.equal(decision({ deliveredReviews: 1 }).reason, 'retry-exhausted',
+    'a returning delivered head cannot erase its recorded same-head cap');
 });
 
 test('verdict-only live and recovered reviews never enqueue a remediation round', () => {
@@ -98,4 +101,24 @@ test('head changes drop old deadlines; a lifetime stop has one named page across
     }
     assert.equal(pages, 1);
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+// Exhausted closure must consume the classified admission, never infer a
+// builder from absence of a carry-forward proof or an older verdict alone.
+test('rescue: only exact admitted builder heads start a new closure review episode', () => {
+  const input = { currentHead: head, reviewState: { headSha: old },
+    reviewAdmissionRow: { revision_ref: head, rereview_requested_at: now,
+      rereview_reason: `system-exhausted-head-verdict:${head}` } };
+  assert.equal(hasUnreviewedBuilderHead(input), true);
+  assert.equal(hasUnreviewedBuilderHead({ ...input, reviewAdmissionRow: null }), false);
+  assert.equal(hasUnreviewedBuilderHead({ ...input, reviewAdmissionRow: { ...input.reviewAdmissionRow, revision_ref: newer } }), false);
+  assert.equal(hasUnreviewedBuilderHead({ ...input, finalPush: { suppressed: true, headSha: head } }), false);
+  assert.equal(hasUnreviewedBuilderHead({ ...input, hammerHead: { headSha: head } }), false);
+});
+
+test('rescue: malformed code head cannot leave a pending row without a normalized revision', async () => {
+  const row = { reviewer_head_sha: old, review_status: 'posted' };
+  assert.equal(await admitExhaustedHeadVerdict({ exhausted: true, headSha: 'fixture-invalid-head', row,
+    classifyCloser: () => assert.fail('no proof read for a malformed SHA'),
+    request: () => assert.fail('no unusable admission mutation') }), row);
 });

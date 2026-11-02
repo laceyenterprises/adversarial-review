@@ -57,7 +57,7 @@ test('sourced phase wrapper reports terminal outcomes and keeps its shell alive'
   mkdirSync(bin);
   // The phase captures its produced head even when the lease is parked. Keep
   // this boundary synthetic so the fixture also works outside a Git checkout.
-  writeFileSync(join(bin, 'git'), '#!/bin/sh\ncase "$*" in\n  "rev-parse HEAD"|"rev-parse FETCH_HEAD") echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;\n  fetch*) exit 0 ;;\n  *) exit 1 ;;\nesac\n', { mode: 0o755 });
+  writeFileSync(join(bin, 'git'), '#!/bin/sh\ncase "$*" in\n  "rev-parse HEAD"|"rev-parse --verify refs/ham-basefetch/"*) echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;\n  fetch*|update-ref*) exit 0 ;;\n  *) exit 1 ;;\nesac\n', { mode: 0o755 });
   const gh = join(bin, 'gh');
   writeFileSync(gh, '#!/bin/sh\ncase "$*" in\n  "pr view"*) echo \'{"headRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","baseRefName":"main","mergeStateStatus":"CLEAN","state":"OPEN","isDraft":false,"labels":[]}\' ;;\n  "api --paginate"*) echo \'{"id":42,"body":"<!-- hq:ham-terminal-remediation:audit --> HAM-Terminal-Remediation-Head: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\' ;;\n  "api --method PATCH"*) echo patched > "$TMPDIR/patched" ;;\n  *) echo \'{"strict":false}\' ;;\nesac\n');
   chmodSync(gh, 0o755);

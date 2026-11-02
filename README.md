@@ -1411,6 +1411,12 @@ records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
 
+BASEFETCH-01 preserves closer states and merge gates while isolating base
+capture and distinguishing invalid validation evidence from fetch failure.
+Existing smoke commands are unchanged. After the build manager confirms float
+and watcher restart, natural-traffic acceptance follows the closure runbook's
+verify-head change note; offline fixtures do not establish runtime recovery.
+
 CODEXHOMEISO-01 keeps the existing bounded infrastructure-refund transition for
 prefixed Codex tool-host failures and complete in-run timeout evidence with no
 executed command. Native Codex remediation, reviewer and discovery processes use
@@ -4457,6 +4463,19 @@ Deploy this reader before activating these keys in core's checked-in config.
 - VERIFYHEADTRANSIENT-01 final remediation: terminal fallback preserves the resolved infrastructure retry outcome; lease model documentation and README state/smoke declarations now match the retry contract. Refreshed the reviewed closer guard fingerprint to resolve CI drift; the lifecycle graph and smoke commands are unchanged.
 
 - VERIFYHEADTRANSIENT-01: explicit closer infrastructure read failures use the existing retryable deferral and lease release path. They refund retry accounting and retain the closer retry owner and load-aware deadline; adjudicated no-merge decisions remain final. See the closure runbook change note for the required live receipt.
+
+- BASEFETCH-01 final comment-only remediation: the offline real-Git failed-fetch
+  fixture now asserts empty cleanup diagnostics alongside the preserved fetch
+  error. Deleting an absent private ref succeeds silently; unconditional cleanup
+  and merge behavior remain unchanged. The validated-closer queue fixture loads
+  the new base-capture helpers so strict rebase checks exercise real local fetches.
+
+- BASEFETCH-01: verify-head captures each base fetch through a private temporary
+  ref, disables pruning/tag following and configured wildcard refmaps for that
+  read, and preserves fetch and load-helper diagnostics. Revalidation receipts
+  distinguish invalid validation SHAs from failed base fetches. Offline fixtures
+  cover competing local fetches, stalled transport under simulated load and the
+  existing branch-protection 403 fallback; merge authority is unchanged.
 
 - MLR-01 final remediation: status grouping and journal episodes prefer the same subject identity; invalid CLI arguments print usage and return 2. Detached/unreadable Git inspection preserves verified worker liveness. Terminal dirty custody is head-bound and cannot override a current live owner. Focused offline fixtures cover these cases; observation fields, lifecycle states and existing smoke promises are unchanged.
 

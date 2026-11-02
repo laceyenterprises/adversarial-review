@@ -498,10 +498,11 @@ HAM_GIT_SYNC_NOMINAL_SECONDS="${HAM_GIT_SYNC_NOMINAL_SECONDS:-120}"
 ham_bounded_git_sync() {
   ham_git_sync_attempt=1
   while [ "$ham_git_sync_attempt" -le 2 ]; do
-    ham_git_sync_timeout=$("$HAM_NODE_BIN" <<ROOT_DIR>>/bin/load-aware-timeout.mjs "$HAM_GIT_SYNC_NOMINAL_SECONDS" 2>/dev/null || true)
+    ham_git_sync_timeout=$("$HAM_NODE_BIN" <<ROOT_DIR>>/bin/load-aware-timeout.mjs "$HAM_GIT_SYNC_NOMINAL_SECONDS" || true)
     case "$ham_git_sync_timeout" in
       ''|*[!0-9]*|0) ham_git_sync_timeout="$HAM_GIT_SYNC_NOMINAL_SECONDS" ;;
     esac
+    echo "HAM: git fetch attempt=$ham_git_sync_attempt deadline=${ham_git_sync_timeout}s" >&2
     ham_git_sync_stderr=$(mktemp "${TMPDIR:-/tmp}/ham-git-sync-<<PR_NUMBER>>.XXXXXX") || return 1
     if /usr/bin/perl -e '
       use Errno qw(EINTR);
@@ -522,7 +523,8 @@ ham_bounded_git_sync() {
       my $status = $?;
       alarm 0;
       exit($timed_out ? 124 : ($status & 127 ? 128 + ($status & 127) : $status >> 8));
-    ' "$ham_git_sync_timeout" git fetch --prune origin "$@" 2>"$ham_git_sync_stderr"; then
+    ' "$ham_git_sync_timeout" git fetch --no-prune --no-tags origin "$@" 2>"$ham_git_sync_stderr"; then
+      cat "$ham_git_sync_stderr" >&2
       rm -f "$ham_git_sync_stderr"
       return 0
     else
@@ -546,17 +548,31 @@ ham_bounded_git_sync() {
 }
 
 ham_fetch_base_with_retries() {
-  ham_bounded_git_sync "$BASE_BRANCH" \
+  # Explicit destinations keep configured wildcard refmaps out of this read.
+  # Retain origin/base for the existing merge-lease freshness check.
+  ham_bounded_git_sync --no-write-fetch-head --refmap= \
+    "+refs/heads/$BASE_BRANCH:$1" \
+    "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH" \
     > "<<RUN_DIR>>/fetch-base.stdout" \
     2> "<<RUN_DIR>>/fetch-base.stderr"
 }
 
 ham_capture_current_base_sha() {
-  if ! ham_fetch_base_with_retries; then
-    return 1
+  local ham_base_token ham_base_ref ham_base_exit=0
+  HAM_CAPTURED_BASE_SHA=""
+  ham_base_token=$(mktemp "${TMPDIR:-/tmp}/ham-basefetch.XXXXXX") || return 1
+  ham_base_ref="refs/ham-basefetch/${ham_base_token##*/}"
+  # FETCH_HEAD is mutable workspace state shared with other fetches.
+  # Resolve only the private destination written by this fetch.
+  if ham_fetch_base_with_retries "$ham_base_ref"; then
+    HAM_CAPTURED_BASE_SHA=$(git rev-parse --verify "$ham_base_ref^{commit}" 2>"<<RUN_DIR>>/rev-parse-base.stderr" || true)
+    ham_is_full_sha "$HAM_CAPTURED_BASE_SHA" || ham_base_exit=1
+  else
+    ham_base_exit=1
   fi
-  HAM_CAPTURED_BASE_SHA=$(git rev-parse FETCH_HEAD 2>"<<RUN_DIR>>/rev-parse-base.stderr" || true)
-  ham_is_full_sha "$HAM_CAPTURED_BASE_SHA"
+  git update-ref -d "$ham_base_ref" 2>>"<<RUN_DIR>>/rev-parse-base.stderr" || ham_base_exit=1
+  rm -f "$ham_base_token"
+  return "$ham_base_exit"
 }
 
 ham_update_branch_with_retries() {
@@ -681,9 +697,9 @@ ham_base_touches_pr_files() {
   [ "${HAM_REQUIRES_UP_TO_DATE:-1}" -ne 0 ] || return 1
   # Ignore a lagging BEHIND once containment is proved. Unknown containment
   # under strict/unknown protection remains a rebase requirement.
-  ham_bounded_git_sync "$BASE_BRANCH" >/dev/null 2>&1 || return 0
+  ham_capture_current_base_sha || return 0
   local current_base_sha comparison_base
-  current_base_sha=$(git rev-parse FETCH_HEAD 2>/dev/null) || return 0
+  current_base_sha="$HAM_CAPTURED_BASE_SHA"
   ham_is_full_sha "$current_base_sha" || return 0
   HAM_CURRENT_BASE_SHA="$current_base_sha"
   ham_is_full_sha "$POST_REMEDIATION_SHA" || return 0
@@ -883,6 +899,7 @@ if ham_is_full_sha "${HAM_LOCALLY_VALIDATED_HEAD:-}" \
 fi
 if ! ham_is_full_sha "$HAM_EFFECTIVE_VALIDATION_BASE_SHA"; then
   HAM_FORCE_REVALIDATION=1
+  HAM_REVALIDATION_REASON=validation-base-sha-invalid
 fi
 if ham_capture_current_base_sha; then
   HAM_CURRENT_BASE_SHA="$HAM_CAPTURED_BASE_SHA"
@@ -896,9 +913,10 @@ else
   HAM_CURRENT_BASE_SHA=""
   HAM_REBASED_ONTO_BASE_SHA=""
   HAM_FORCE_REVALIDATION=1
+  HAM_REVALIDATION_REASON=validation-base-fetch-failed
 fi
 if [ "$HAM_FORCE_REVALIDATION" -eq 1 ]; then
-  printf '{"needsRevalidation":true,"reason":"validation-base-unavailable"}\n' > "<<RUN_DIR>>/merge-lease-revalidation.json"
+  printf '{"needsRevalidation":true,"reason":"%s"}\n' "$HAM_REVALIDATION_REASON" > "<<RUN_DIR>>/merge-lease-revalidation.json"
   HAM_NEEDS_REVALIDATION=true
 else
   if "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-lease.mjs needs-revalidation \

@@ -72,7 +72,7 @@ ${needsRebase}
 BASE_BRANCH=main
 HAM_REQUIRES_UP_TO_DATE=${strict}
 POST_REMEDIATION_SHA=${'a'.repeat(40)}
-ham_bounded_git_sync() { return 0; }
+ham_capture_current_base_sha() { HAM_CAPTURED_BASE_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; return 0; }
 ham_is_full_sha() { return 0; }
 git() {
   case "$1" in
@@ -110,7 +110,7 @@ HQ_LAUNCH_REQUEST_ID= AGENT_OS_WORKER_LRQ_ID= LAUNCH_REQUEST_ID=
 jq() { if [[ "$2" == *mergeStateStatus* ]]; then echo ${state}; else echo MERGEABLE; fi; }
 ham_fetch_base_with_retries() { return ${fetchOk ? 0 : 1}; }
 ham_is_full_sha() { [[ "$1" =~ ^[a-f0-9]{40}$ ]]; }
-git() { [ "$1" = rev-parse ] && echo ${'b'.repeat(40)}; }
+git() { case "$1" in rev-parse) echo ${'b'.repeat(40)} ;; update-ref) return 0 ;; *) return 1 ;; esac; }
 ham_append_terminal_audit() { echo "audit:$*"; }
 ham_mark_merge_lease_retryable_abort() { echo "abort:$*"; }
 ham_release_merge_lease() { echo released; }

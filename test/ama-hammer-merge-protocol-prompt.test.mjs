@@ -425,8 +425,8 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.match(HAMMER_PROMPT, /ham_fire_watcher_merge_wake\(\)/);
   assert.match(HAMMER_PROMPT, /bin\/watcher-wake\.mjs/);
   assert.match(HAMMER_PROMPT, /--reason hammer-pr-eligible/);
-  assert.match(HAMMER_PROMPT, /HAM_CAPTURED_BASE_SHA=\$\(git rev-parse FETCH_HEAD/);
-  assert.match(HAMMER_PROMPT, /current_base_sha=\$\(git rev-parse FETCH_HEAD/);
+  assert.match(HAMMER_PROMPT, /HAM_CAPTURED_BASE_SHA=\$\(git rev-parse --verify "\$ham_base_ref\^\{commit\}"/);
+  assert.match(HAMMER_PROMPT, /current_base_sha="\$HAM_CAPTURED_BASE_SHA"/);
   assert.doesNotMatch(HAMMER_PROMPT, /base_files=\$\(git diff/);
   assert.ok(HAMMER_PROMPT.includes('[ "${3:-}" = BEHIND ] || return 1'));
   assert.ok(HAMMER_PROMPT.includes('[ "${HAM_REQUIRES_UP_TO_DATE:-1}" -ne 0 ] || return 1'));

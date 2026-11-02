@@ -35,10 +35,14 @@ export function exerciseValidatedCloserQueue(rootDir, { strict = false, samePath
   const source = readFileSync(new URL('../../bin/hammer-verify-head.sh', import.meta.url), 'utf8');
   const policy = source.slice(source.indexOf('ham_base_touches_pr_files() {'), source.indexOf('# Shared by initial verification'));
   assert.ok(policy.startsWith('ham_base_touches_pr_files() {') && policy.trimEnd().endsWith('}'));
+  const baseCapture = source.slice(source.indexOf('ham_fetch_base_with_retries() {'),
+    source.indexOf('ham_update_branch_with_retries() {')).replaceAll('<<RUN_DIR>>', rootDir);
+  assert.ok(baseCapture.includes('ham_capture_current_base_sha() {'));
   const needsRebase = (head, strict, mergeable = 'MERGEABLE', failComparison = false, mergeState = 'BEHIND') => {
     const result = spawnSync('/bin/bash', ['-c', `
 ham_is_full_sha() { [[ "$1" =~ ^[a-f0-9]{40}$ ]]; }
 ham_bounded_git_sync() { git fetch -q origin "$@"; }
+${baseCapture}
 ${policy}
 if [ "$4" = true ]; then ham_bounded_git_sync() { return 2; }; fi
 BASE_BRANCH=main

@@ -104,6 +104,7 @@ import {
   parseDiffFiles,
 } from './reviewer-util.mjs';
 import {
+  selectReviewerRubric,
   buildReviewerPromptPrefix,
   buildReviewerPrompt,
   buildPromptForReviewerModel,
@@ -766,7 +767,7 @@ function isClaudeLoggedOutStatus(text) {
  * the broker/Keychain path used by the live stack.
  */
 async function reviewWithClaude(diff, extraContext = '', {
-  promptStage = 'first', reviewerSubprocessCwd = process.cwd(), assertClaudeOAuthImpl = assertClaudeOAuth,
+  promptStage = 'first', reviewKind = selectReviewerRubric(diff), reviewerSubprocessCwd = process.cwd(), assertClaudeOAuthImpl = assertClaudeOAuth,
   spawnClaudeImpl = spawnClaude, launchctlRetryDelaysMs, sleepImpl,
   resolveClaudeLaunchctlUidImpl = resolveClaudeLaunchctlUidFromConfig,
   logger = console,
@@ -790,7 +791,7 @@ async function reviewWithClaude(diff, extraContext = '', {
     model: reviewerExecution.model });
 
   const prompt = promptOverride ?? buildReviewerPrompt({
-    promptPrefix: withSnapshotBoundaryPrompt(buildReviewerPromptPrefix({ stage: promptStage })), extraContext, diff,
+    promptPrefix: withSnapshotBoundaryPrompt(buildReviewerPromptPrefix({ stage: promptStage, reviewKind })), extraContext, diff,
   });
 
   // Strip API key from env — Claude CLI falls back to OAuth when it's absent
@@ -905,7 +906,7 @@ async function reviewWithClaude(diff, extraContext = '', {
         `credentials (${silentRetryAttempts} retry remaining)`,
       );
       return reviewWithClaude(diff, extraContext, {
-        promptStage,
+        promptStage, reviewKind,
         reviewerSubprocessCwd,
         assertClaudeOAuthImpl,
         spawnClaudeImpl,
@@ -1266,7 +1267,7 @@ async function spawnCodexReview({
  * uses its stored OAuth credentials only.
  */
 async function reviewWithCodex(diff, extraContext = '', {
-  promptStage = 'first',
+  promptStage = 'first', reviewKind = selectReviewerRubric(diff),
   reviewerSubprocessCwd = process.cwd(),
   onProgress = null,
   promptOverride = null,
@@ -1293,7 +1294,7 @@ async function reviewWithCodex(diff, extraContext = '', {
   }
 
   const prompt = promptOverride ?? buildReviewerPrompt({
-    promptPrefix: withSnapshotBoundaryPrompt(buildReviewerPromptPrefix({ stage: promptStage })), extraContext, diff,
+    promptPrefix: withSnapshotBoundaryPrompt(buildReviewerPromptPrefix({ stage: promptStage, reviewKind })), extraContext, diff,
   });
   const authPath = resolveCodexAuthPath();
   // Per-worker codex credential (burst OAuth-cascade fix). Each reviewer spawn
@@ -2850,7 +2851,7 @@ async function spawnAgyIdentityReview({ identity, model, agyArgs, timeout, signa
  * argv). Structured JSON output carries the review and per-model usage.
  */
 async function reviewWithGemini(diff, extraContext = '', {
-  promptStage = 'first',
+  promptStage = 'first', reviewKind = selectReviewerRubric(diff),
   reviewerSubprocessCwd = process.cwd(),
   assertOAuthImpl = assertGeminiOAuth,
   spawnGeminiReviewImpl = spawnGeminiReview,
@@ -2983,8 +2984,8 @@ async function reviewWithGemini(diff, extraContext = '', {
 
     const prompt = promptOverride ?? buildReviewerPrompt({
       promptPrefix: withSnapshotBoundaryPrompt(runtime === 'antigravity'
-        ? buildAgyReviewerPromptPrefix({ stage: promptStage })
-        : buildReviewerPromptPrefix({ stage: promptStage })),
+        ? buildAgyReviewerPromptPrefix({ stage: promptStage, reviewKind })
+        : buildReviewerPromptPrefix({ stage: promptStage, reviewKind })),
       extraContext,
       diff,
     });
@@ -3237,13 +3238,13 @@ function reviewerPromptBudget(model, env = process.env, runtime = 'antigravity')
 function resolveAgyOversizedReviewRoute({
   env = process.env,
   reviewerModel, botTokenEnv, builderTag, diff, extraContext = '',
-  promptStage = 'first', geminiRuntime = 'cli', maxBytes = resolveAgyArgvMaxBytes(env),
+  promptStage = 'first', reviewKind = selectReviewerRubric(diff), geminiRuntime = 'cli', maxBytes = resolveAgyArgvMaxBytes(env),
 } = {}) {
   const model = String(reviewerModel || '').trim().toLowerCase();
   const isAgy = model === 'gemini' && geminiRuntime === 'antigravity';
   const budget = isAgy ? Math.max(1, Math.min(maxBytes, reviewerPromptBudget(model, env)) - 1024) : reviewerPromptBudget(model, env, geminiRuntime);
   const bytesFor = (target) => agyPromptBytes(buildPromptForReviewerModel(target, diff, extraContext, {
-    promptStage, runtime: target === 'gemini' ? geminiRuntime : undefined,
+    promptStage, reviewKind, runtime: target === 'gemini' ? geminiRuntime : undefined,
   }));
   const promptBytes = bytesFor(model);
   const diffBytes = agyPromptBytes(diff);
@@ -3260,14 +3261,14 @@ function resolveAgyOversizedReviewRoute({
 function pushAgyChunk(chunks, chunkDiff, {
   reviewerModel = 'gemini',
   extraContext,
-  promptStage,
+  promptStage, reviewKind,
   maxBytes,
   maxChunks,
 }) {
   const diff = String(chunkDiff || '');
   if (diff === '') return { ok: true };
   const prompt = buildPromptForReviewerModel(reviewerModel, diff, extraContext, {
-    promptStage,
+    promptStage, reviewKind,
     runtime: reviewerModel === 'gemini' ? 'antigravity' : undefined,
   });
   const bytes = agyPromptBytes(prompt);
@@ -3296,7 +3297,7 @@ function splitOversizedPatchByLines(patch, {
   reviewerModel = 'gemini',
   extraContext,
   chunkContextBudgetSuffix = '',
-  promptStage,
+  promptStage, reviewKind,
   maxBytes,
   maxChunks,
   chunks,
@@ -3310,7 +3311,7 @@ function splitOversizedPatchByLines(patch, {
   const { headerLines } = splitPatchHeaderAndBodyLines(lines);
   const budgetExtraContext = `${extraContext || ''}${chunkContextBudgetSuffix || ''}`;
   const promptOverheadBytes = agyPromptBytes(buildPromptForReviewerModel(reviewerModel, '', budgetExtraContext, {
-    promptStage,
+    promptStage, reviewKind,
     runtime: reviewerModel === 'gemini' ? 'antigravity' : undefined,
   }));
   const headerText = headerLines.join('\n');
@@ -3376,7 +3377,7 @@ function splitOversizedPatchByLines(patch, {
     const pushed = pushAgyChunk(chunks, joinPatchLines(headerLines, currentLines), {
       reviewerModel,
       extraContext: budgetExtraContext,
-      promptStage,
+      promptStage, reviewKind,
       maxBytes,
       maxChunks,
     });
@@ -3394,7 +3395,7 @@ function splitOversizedPatchByLines(patch, {
     const pushed = pushAgyChunk(chunks, joinPatchLines(headerLines, currentLines), {
       reviewerModel,
       extraContext: budgetExtraContext,
-      promptStage,
+      promptStage, reviewKind,
       maxBytes,
       maxChunks,
     });
@@ -3408,7 +3409,7 @@ function splitDiffForAgyChunks(diff, {
   reviewerModel = 'gemini',
   extraContext = '',
   chunkContextBudgetSuffix = '',
-  promptStage = 'first',
+  promptStage = 'first', reviewKind = selectReviewerRubric(diff),
   maxBytes = resolveAgyArgvMaxBytes(),
   maxChunks = resolveAgyChunkMaxChunks(),
   elideOptions = null,
@@ -3430,7 +3431,7 @@ function splitDiffForAgyChunks(diff, {
   const canFitUnit = (unit) => pushAgyChunk([], unit, {
     reviewerModel,
     extraContext: budgetExtraContext,
-    promptStage,
+    promptStage, reviewKind,
     maxBytes,
     maxChunks: 1,
   }).ok;
@@ -3439,7 +3440,7 @@ function splitDiffForAgyChunks(diff, {
     const pushed = pushAgyChunk(chunks, pendingUnit, {
       reviewerModel,
       extraContext: budgetExtraContext,
-      promptStage,
+      promptStage, reviewKind,
       maxBytes,
       maxChunks,
     });
@@ -3482,7 +3483,7 @@ function splitDiffForAgyChunks(diff, {
       reviewerModel,
       extraContext,
       chunkContextBudgetSuffix,
-      promptStage,
+      promptStage, reviewKind,
       maxBytes,
       maxChunks,
       chunks,
@@ -3587,7 +3588,7 @@ function mergeChunkedAgyReviews(chunkReviews, { truncated = false, promptBytes =
  * returned ready to post.
  */
 async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
-  promptStage = 'first',
+  promptStage = 'first', reviewKind = selectReviewerRubric(diff),
   reviewerSubprocessCwd = process.cwd(),
   onProgress = null,
   signal,
@@ -3604,7 +3605,7 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
   const armPinned = effectiveModel !== 'gemini' && reviewerArm?.harness === effectiveModel;
   const mesOption = mes ? { mes: { ...mes, reviewerArm: armPinned } } : {};
   if (effectiveModel === 'claude') {
-    const claudeResult = await reviewWithClaudeImpl(diff, extraContext, { promptStage, reviewerSubprocessCwd, onProgress, ...pins, ...mesOption });
+    const claudeResult = await reviewWithClaudeImpl(diff, extraContext, { promptStage, reviewKind, reviewerSubprocessCwd, onProgress, ...pins, ...mesOption });
     // reviewWithClaude now returns { reviewText, tokenUsage } (from --output-format
     // json). Tolerate a bare string too (legacy / mocked impls) so callers and
     // tests that predate the json capture keep working.
@@ -3618,7 +3619,7 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
       execution: typeof claudeResult === 'string' ? null : claudeResult?.execution, needsSanitize: false };
   }
   if (effectiveModel === 'gemini') {
-    const result = await reviewWithGeminiImpl(diff, extraContext, { promptStage, reviewerSubprocessCwd, ...(signal ? { signal } : {}), ...mesOption });
+    const result = await reviewWithGeminiImpl(diff, extraContext, { promptStage, reviewKind, reviewerSubprocessCwd, ...(signal ? { signal } : {}), ...mesOption });
     return {
       rawReviewText: result.reviewText,
       reviewText: sanitizeReviewPayloadBestEffort(result.reviewText),
@@ -3627,7 +3628,7 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
       needsSanitize: false,
     };
   }
-  const codexResult = await reviewWithCodexImpl(diff, extraContext, { promptStage, reviewerSubprocessCwd, onProgress, ...pins, ...mesOption });
+  const codexResult = await reviewWithCodexImpl(diff, extraContext, { promptStage, reviewKind, reviewerSubprocessCwd, onProgress, ...pins, ...mesOption });
   return {
     rawReviewText: codexResult.reviewText,
     reviewText: null,
@@ -3701,7 +3702,7 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
   env = process.env,
   reviewerModel = 'gemini',
   dispatchReviewerModelImpl = dispatchReviewerModel,
-  promptStage = 'first',
+  promptStage = 'first', reviewKind = selectReviewerRubric(diff),
   reviewerSubprocessCwd = process.cwd(),
   promptBytes = null,
   maxBytes = resolveAgyArgvMaxBytes(env),
@@ -3728,14 +3729,14 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
     reviewerModel,
     extraContext,
     chunkContextBudgetSuffix: agyOversizedChunkContextBudgetSuffix(maxChunks),
-    promptStage,
+    promptStage, reviewKind,
     maxBytes,
     maxChunks,
     elideOptions: { thresholdBytes, edgeBytes: Math.max(1, Math.min(1024, Math.floor(thresholdBytes / 8))) },
   };
   const annotatedDiff = annotateRemovedDiffLines(diff, { maxLineBytes: thresholdBytes - 16 });
   const chunkPromptBytes = (chunkDiff, context) => agyPromptBytes(buildPromptForReviewerModel(reviewerModel, chunkDiff, context, {
-    promptStage, runtime: reviewerModel === 'gemini' ? 'antigravity' : undefined }));
+    promptStage, reviewKind, runtime: reviewerModel === 'gemini' ? 'antigravity' : undefined }));
   const diffBudgetBytes = maxBytes - chunkPromptBytes('', `${extraContext}${splitOptions.chunkContextBudgetSuffix}${CHUNK_HEAD_LEGEND}`);
   let split;
   let splitRecords;
@@ -3789,8 +3790,8 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
         : mes && execution?.modelSource === 'mes' ? { reviewerArm: { harness: reviewerModel,
           model: execution.model, effort: execution.effort } } : {};
       const result = reviewerModel === 'gemini'
-        ? await reviewWithGeminiImpl(chunk.diff, chunkContext, { promptStage, reviewerSubprocessCwd, signal: chunkSignal, timeoutMs: timeoutPlan.perChunkTimeoutMs, ...mesOption })
-        : await dispatchReviewerModelImpl(reviewerModel, chunk.diff, chunkContext, { promptStage, reviewerSubprocessCwd, ...mesOption });
+        ? await reviewWithGeminiImpl(chunk.diff, chunkContext, { promptStage, reviewKind, reviewerSubprocessCwd, signal: chunkSignal, timeoutMs: timeoutPlan.perChunkTimeoutMs, ...mesOption })
+        : await dispatchReviewerModelImpl(reviewerModel, chunk.diff, chunkContext, { promptStage, reviewKind, reviewerSubprocessCwd, ...mesOption });
       if (result.needsSanitize) {
         try {
           result.reviewText = sanitizeCodexReviewPayload(result.rawReviewText);

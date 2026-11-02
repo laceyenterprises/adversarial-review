@@ -4459,6 +4459,8 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- ARCH-03: ARR-only PRs select the architecture rubric across reviewer stages and runtimes; mixed PRs retain the code rubric. Verdicts, attestation, remediation and merge behavior are unchanged. See [change details](src/changes/ARCH-03.md).
+
 - REVIEWSTALL-01 HAM validation repair: align the Codex invocation regression
   with ceiling-capped stall deadlines and reviewer metadata, and refresh the
   reviewer runtime state-source fingerprint for the existing cancellation path.

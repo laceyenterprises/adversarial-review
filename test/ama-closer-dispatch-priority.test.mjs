@@ -1135,7 +1135,7 @@ test('HAMRETRY-01: wrapped per-launch readers fail closed at fleet cap on unread
   const result = await maybeDispatchAmaCloser({ ...args, ...deps,
     readLaunchRequestStatusImpl: () => { probes++; return { ok: false, reason: 'query-failed' }; },
   });
-  assert.equal(probes, 1, 'the first unreadable result stops per-launch probes');
+  assert.equal(probes, 3, 'each launch receives its own read despite another unreadable result');
   assert.equal(result.dispatched, false);
   assert.equal(result.reason, 'ama-closer-launch-in-progress');
   assert.equal(deps.calls.length, 0);

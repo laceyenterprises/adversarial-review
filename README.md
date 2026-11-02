@@ -4360,6 +4360,8 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- CLOSERSCANREAD-01 final remediation: isolate the census cursor from capacity checks, exclude inactive records before budget deferral, require a complete census for missing-row retirement, and preserve individual failure and timeout evidence. Focused offline regressions cover these guards; lifecycle values and existing smoke promises are unchanged.
+
 - CLOSERSCANREAD-01: closer launch scans fall back from failed batch snapshots to bounded individual reads, defer fairly at a load-aware pass deadline, and report snapshot timing and fallback counts. Dispatch lookup deadlines now scale with load; unreadable ownership still holds custody.
 
 - Correct the post-CI lease probe regression assertion: exhausted GitHub transport retries retain their probe failure and do not emit a lease-contention audit.

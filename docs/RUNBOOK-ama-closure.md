@@ -7545,12 +7545,18 @@ scale through `loadAwareTimeoutMs`; the snapshot receives at most half the
 remaining pass to preserve fallback time. A failed or timed-out batch is never
 passed to the individual reader as evidence. Each launch receives its own bounded
 read, including retry descendants. Unreadable ownership continues to refuse dispatch.
+Individual failures retain their own reason; a batch timeout cannot turn a
+definitively missing launch into an unreadable result. Both a bounded read expiry
+and a thrown `ETIMEDOUT` carry `timedOut: true`.
 
 The total budget defers untouched records without changing their durable state.
 An in-process cursor starts the next census at the first deferred record; restart
-starts a fresh scan. Deferred records retain the existing bounded capacity hold
-and remain same-PR ownership reservations. The all-missing/read-failure safety
-quorum still prevents speculative retirement of missing launches.
+starts a fresh scan. Synchronous capacity checks neither consume nor change this
+census cursor and exclude inactive historical records before evaluating the pass
+budget. Deferred eligible records retain the existing bounded capacity hold and
+remain same-PR ownership reservations. The all-missing/read-failure safety quorum
+still prevents speculative retirement of missing launches; any deferred record
+also prevents missing-row retirement until a complete census proves it safe.
 
 `ama_closer.launch_scan` logs snapshot outcome (`ok`, `timeout`, `error`, or
 `unused`), elapsed milliseconds, row count, individual read count and deferred

@@ -1984,11 +1984,12 @@ async function boundedCloserScanRead(read, timeoutMs, signal) {
     return await Promise.race([
       Promise.resolve().then(read),
       new Promise(resolve => { timer = setTimeout(() => resolve({ ok: false,
-        reason: 'scan-read-timeout' }), timeoutMs); }),
+        reason: 'scan-read-timeout', timedOut: true }), timeoutMs); }),
     ]);
   } catch (error) {
     throwIfAborted(signal);
-    return { ok: false, reason: error?.code === 'ETIMEDOUT' ? 'scan-read-timeout' : 'scan-read-error' };
+    if (error?.code === 'ETIMEDOUT') return { ok: false, reason: 'scan-read-timeout', timedOut: true };
+    return { ok: false, reason: 'scan-read-error' };
   } finally { clearTimeout(timer); }
 }
 
@@ -2053,28 +2054,30 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
     catch { /* Preserve the existing lease-less liveness rules. */ }
     return [{ dispatchPath, record, prNumber, lease }];
   });
-  const cursor = closerScanCursors.get(rootDir);
-  const offset = records.findIndex(item => item.dispatchPath === cursor);
-  if (offset > 0) records = [...records.slice(offset), ...records.slice(0, offset)];
-  closerScanCursors.delete(rootDir);
+  if (!options.capacityOnly) {
+    const cursor = closerScanCursors.get(rootDir);
+    const offset = records.findIndex(item => item.dispatchPath === cursor);
+    if (offset > 0) records = [...records.slice(offset), ...records.slice(0, offset)];
+    closerScanCursors.delete(rootDir);
+  }
   const launchRequestIds = records.filter(({ record, lease }) => record.state === 'dispatched'
     && (!options.capacityOnly || isAmaCloserLaunchInProgress(record, { ...options, now, lease })))
     .map(({ record }) => record.launchRequestId).filter(Boolean);
   for (const { dispatchPath, record, prNumber, lease } of records) {
     throwIfAborted(options.signal);
+    const progressOptions = { ...options, now, lease };
+    const inProgress = isAmaCloserLaunchInProgress(record, progressOptions);
+    // Historical records do not belong on the synchronous dispatch hot path.
+    // The operator CLI can still reconcile them outside that path.
+    if (options.capacityOnly && !inProgress) continue;
     if (remaining() <= 0) {
-      if (!deferred) closerScanCursors.set(rootDir, dispatchPath);
+      if (!options.capacityOnly && !deferred) closerScanCursors.set(rootDir, dispatchPath);
       deferred += 1;
       active.push({ ...record, prNumber, dispatchPath, scanDeferred: true,
         holdsCapacity: holdsPendingCapacity(record) });
       continue;
     }
     counts.scanned += 1;
-    const progressOptions = { ...options, now, lease };
-    const inProgress = isAmaCloserLaunchInProgress(record, progressOptions);
-    // Historical records do not belong on the synchronous dispatch hot path.
-    // The operator CLI can still reconcile them outside that path.
-    if (options.capacityOnly && !inProgress) continue;
     // Same-head retries may carry a predecessor LRQ. Use attempt-key evidence
     // or, for legacy intents, the ticket/time ledger query.
     if (isPreReceiptIntent(record)) {
@@ -2140,7 +2143,8 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
         ledgerTarget: options.ledgerTarget, ledgerDbPath: options.ledgerDbPath,
         env: options.env || process.env,
       }), timeoutMs, options.signal));
-      if (!probe?.ok && snapshotEvidence.outcome === 'timeout') {
+      if (!probe?.ok && snapshotEvidence.outcome === 'timeout'
+        && (probe?.reason === 'scan-read-timeout' || probe?.timedOut)) {
         probe = { ...probe, reason: 'scan-snapshot-timeout' };
       }
       if (!observedTerminal) probes += 1;
@@ -2202,7 +2206,7 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
   // missing-row retirement. This never suppresses another launch's own read.
   const allMissing = probes > 0 && missingProbes === probes;
   for (const candidate of missingCandidates) {
-    if (!allMissing && !missingEvidenceIncomplete) applyTerminal(candidate.record, candidate.dispatchPath, 'not-found', candidate.probe);
+    if (!allMissing && !missingEvidenceIncomplete && deferred === 0) applyTerminal(candidate.record, candidate.dispatchPath, 'not-found', candidate.probe);
     else if (isAmaCloserLaunchInProgress(candidate.record, { ...options, now })) active.push({ ...candidate.record, prNumber: candidate.prNumber, dispatchPath: candidate.dispatchPath, holdsCapacity: holdsPendingCapacity(candidate.record) });
   }
   logAmaCloserDispatchEvent(options.log || options.logger, 'ama_closer.launch_scan', {

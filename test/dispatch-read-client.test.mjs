@@ -233,7 +233,9 @@ test('an actual SDK 0.4.0 deployment loads the dispatch module and fails unavail
     join(root, 'src/load-aware-timeout.mjs'));
   execFileSync('tar', ['-xzf', fileURLToPath(new URL('../vendor/agent-os-app-sdk-0.4.0.tgz', import.meta.url)),
     '-C', sdkDir, '--strip-components=1'], { timeout: 5000 });
-  execFileSync(process.execPath, ['--input-type=module', '-e', `
+  // Resolve the timeout helper's own dependencies beside its real source,
+  // even when the outer test runner preserves symlinks for sandbox isolation.
+  execFileSync(process.execPath, ['--no-preserve-symlinks', '--input-type=module', '-e', `
     import assert from 'node:assert/strict';
     import { readDispatchLaunchesSync } from './src/dispatch-read-client.mjs';
     const result = readDispatchLaunchesSync({ launch_request_ids: ['synthetic'] },

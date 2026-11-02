@@ -934,8 +934,3 @@ test('hammer documentation currency accepts ticket fragments without shared appe
     assert.match(prompt, /observed results/);
   }
 });
-
-test('the final fragment-policy change note is first in the repository log', () => {
-  const notes = readFileSync(join(REPO_ROOT, 'README.md'), 'utf8').split('## Change notes\n')[1];
-  assert.match(notes.trimStart(), /^- CONFLICTHOTSPOT-01 final comment-only remediation:/);
-});

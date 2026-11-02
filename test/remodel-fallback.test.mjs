@@ -400,8 +400,14 @@ for (const [className, resolve, names] of [
       assert.equal(await ensureWorkerRegistryReady({env}), false);
       const result = resolve(env);
       assert.equal(typeof result === 'string' ? result : result.resolvedModel, model);
-      assert.throws(() => resolveRemediationModel('codex-reviewer', {env, log: f.log}),
-        {retryable: false, category: 'configuration', modelSource: 'unresolved'});
+      if (className === 'remediator-codex') {
+        const reviewer = resolveRemediationModel('codex-reviewer', {env, log: f.log});
+        assert.equal(reviewer.resolvedModel, model);
+        assert.equal(reviewer.modelSource, 'env-pin');
+      } else {
+        assert.throws(() => resolveRemediationModel('codex-reviewer', {env, log: f.log}),
+          {retryable: false, category: 'configuration', modelSource: 'unresolved'});
+      }
     }
     assert.equal(warnings.length, 0);
   });

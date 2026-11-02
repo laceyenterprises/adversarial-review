@@ -94,7 +94,7 @@ import {
   prepareAgyIdentityReview,
   resolveAgyReviewIdentityFromEnv,
 } from './agy-reviewer-identities.mjs';
-import { ensureWorkerRegistryReady, RegistryUnavailableError, resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
+import { ensureWorkerRegistryReady, hasRemediationEnvironmentPin, RegistryUnavailableError, resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
 import {
   REVIEW_POST_RETRY_DELAYS_MS,
   WAKE_HOOK_RETRY_DELAYS_MS,
@@ -1076,11 +1076,11 @@ const CODEX_EXEC_CONFIG_FORWARD_KEYS = [
   'model_reasoning_effort',
 ];
 
-function resolveReviewerExecution(harness, { env = process.env, fallbackEffort = null, modelPin = '', reasoningPin = '', seed, log = console } = {}) {
+function resolveReviewerExecution(harness, { env = process.env, fallbackEffort = null, modelPin = '', reasoningPin = '', mesDecision = null, seed, log = console } = {}) {
   const pin = modelPin || (harness === 'gemini' ? env.GEMINI_REVIEWER_MODEL : '');
   // Account routing changes the broker binding, not the governed reviewer role.
   const className = `${harness}-reviewer`;
-  const resolution = resolveRemediationModel(className, { env, pin, reasoningPin, seed, log });
+  const resolution = resolveRemediationModel(className, { env, pin, reasoningPin, mesDecision, seed, log });
   const model = resolution.resolvedModel;
   const effort = resolution.resolvedReasoningLevel || fallbackEffort;
   const modelSource = resolution.modelSource;
@@ -1122,16 +1122,26 @@ async function resolveReviewerExecutionAsync(harness, args = {}) {
   return withReviewerMesShadow(harness, resolveReviewerExecution(harness, args), args);
 }
 
-// MES-06: only a review pass supplies `mes`, so each pass records one shadow
-// decision for the execution chosen above. That execution is returned
-// unchanged. The hook is bounded and never throws.
-async function withReviewerMesShadow(harness, execution, { mes = null, log = console } = {}) {
-  if (mes) await recordReviewMesShadow({ log, ...mes, harness, execution });
+// MES-09: decide once per pass; only an implicit registry pair can be replaced.
+// Optional policy failures retain the already resolved execution.
+async function withReviewerMesShadow(harness, execution, args = {}) {
+  const { mes = null, log = console } = args;
+  if (!mes) return execution;
+  const outcome = await recordReviewMesShadow({ env: args.env, ...mes, reviewerArm: Boolean(mes.reviewerArm) && !hasRemediationEnvironmentPin(`${harness}-reviewer`, args.env ?? process.env), log, harness, execution });
+  if (outcome.recorded && outcome.decision?.apply === true && harness !== 'gemini'
+    && ['registry', 'committed-seed'].includes(execution.modelSource)
+    && !['env', 'env-pin'].includes(execution.effortSource)) {
+    try {
+      return resolveReviewerExecution(harness, { ...args, mesDecision: outcome });
+    } catch {
+      try { log.warn?.('[mes] resolver-error; execution unchanged'); } catch { /* optional logging */ }
+    }
+  }
   return execution;
 }
 
-function resolveCodexExecOverrides({ env = process.env, modelPin = '', reasoningPin = '', log = console } = {}) {
-  const resolved = resolveReviewerExecution('codex', {
+function resolveCodexExecOverrides({ env = process.env, modelPin = '', reasoningPin = '', execution = null, log = console } = {}) {
+  const resolved = execution || resolveReviewerExecution('codex', {
     env, modelPin, reasoningPin, log,
   });
   const configOverrides = [];
@@ -1259,7 +1269,7 @@ async function reviewWithCodex(diff, extraContext = '', {
 } = {}) {
   await ensureWorkerRegistryReadyImpl({pin: modelPin});
   // Resolve infrastructure before probing credentials; refresh again after auth.
-  await withReviewerMesShadow('codex', resolveReviewerExecution('codex', { modelPin, reasoningPin, log }), { mes, log });
+  const execution = await withReviewerMesShadow('codex', resolveReviewerExecution('codex', { modelPin, reasoningPin, log }), { modelPin, reasoningPin, mes, log });
   codexCli ||= await resolveReviewCliPathAsync('codex');
   console.error('[reviewWithCodex] asserting OAuth...');
   await assertCodexOAuthImpl({ codexCli });
@@ -1295,7 +1305,10 @@ async function reviewWithCodex(diff, extraContext = '', {
   let serviceHome;
   try {
     await ensureWorkerRegistryReadyImpl({pin: modelPin});
-    const codexExecOverrides = resolveCodexExecOverrides({ modelPin, reasoningPin, log });
+    const refreshedExecution = resolveReviewerExecution('codex', { modelPin, reasoningPin, log,
+      mesDecision: execution.modelSource === 'mes' ? { recorded: true, decision: { apply: true,
+        choice: { workerClass: 'codex-reviewer', model: execution.model, effort: execution.effort } } } : null });
+    const codexExecOverrides = resolveCodexExecOverrides({ execution: refreshedExecution, log });
     const { env } = scrubOAuthFallbackEnv({
       ...process.env,
       PATH: '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
@@ -3748,9 +3761,11 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
         ? `${baseChunkContext}${buildPostImageContext(splitHunkPostImages(splitRecord), {
           fits: (postImage) => chunkPromptBytes(chunk.diff, `${baseChunkContext}${postImage}`) <= maxBytes })}`
         : baseChunkContext;
-      // MES-06: one shadow decision per pass, from the first chunk's resolution.
+      // MES-09: one decision per pass; retain the selected pair across chunks.
       // The context carries the whole pass diff, so signals never see one chunk.
-      const mesOption = mes && index === 0 ? { mes } : {};
+      const mesOption = mes && index === 0 ? { mes }
+        : mes && execution?.modelSource === 'mes' ? { reviewerArm: { harness: reviewerModel,
+          model: execution.model, effort: execution.effort } } : {};
       const result = reviewerModel === 'gemini'
         ? await reviewWithGeminiImpl(chunk.diff, chunkContext, { promptStage, reviewerSubprocessCwd, signal: chunkSignal, timeoutMs: timeoutPlan.perChunkTimeoutMs, ...mesOption })
         : await dispatchReviewerModelImpl(reviewerModel, chunk.diff, chunkContext, { promptStage, reviewerSubprocessCwd, ...mesOption });

@@ -1,9 +1,6 @@
-// MES-06: review-service shadow hook for the agent-os Model/Effort Selector.
-//
-// After the review or remediation resolver has chosen an execution, record one
-// MES decision through the `hq mes decide --record --json` contract. Shadow
-// only: nothing here changes, delays past a fixed bound, or fails the chosen
-// execution. Every failure is caught and logged with a fixed reason.
+// MES-06/MES-09: bounded review-service MES decision hook and local consumer.
+// Record the resolved execution; apply only validated implicit-default choices.
+// Optional policy failures retain execution and log a fixed reason.
 //
 // Only value-free data leaves this process: counts, closed enumerations and
 // booleans. No titles, paths, prompts or finding text.
@@ -270,7 +267,7 @@ function runDecide(execFileImpl, hqBin, args, { env, timeoutMs }) {
         if (error?.code === 'ENOENT') return finish({ reason: 'cli-absent' });
         if (error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return finish({ reason: 'garbage-output' });
         if (error && (error.killed || error.signal)) return finish({ reason: 'timeout' });
-        finish({ stdout: String(stdout ?? '') });
+        finish({ stdout: String(stdout ?? ''), failed: Boolean(error) });
       });
       child?.stdin?.end?.();
     } catch (error) {
@@ -293,7 +290,7 @@ function parseDecision(stdout) {
 /**
  * Run `hq mes decide --record --json` for one request. Never throws. Resolves to
  * `{ recorded, reason, decisionId, attempt, decision }`; `decision` is the CLI's
- * parsed response and is evidence only (shadow never applies it).
+ * parsed response; callers validate any applied pair against their registry.
  */
 export async function recordMesDecision(request, {
   env = process.env,
@@ -316,6 +313,7 @@ export async function recordMesDecision(request, {
       if (outcome.reason) return { recorded: false, reason: outcome.reason, attempt };
       const decision = parseDecision(outcome.stdout);
       if (!decision) return { recorded: false, reason: 'garbage-output', attempt };
+      if ((outcome.failed || decision.error || decision.recordError) && decision.recorded === true) return { recorded: false, reason: 'cli-error', attempt };
       if (decision.recorded === true && typeof decision.decisionId === 'string') {
         return { recorded: true, reason: decision.reason ?? null, decisionId: decision.decisionId, attempt, decision };
       }
@@ -401,8 +399,7 @@ export function recordReviewMesShadow({
 
 async function readWorkspaceDiffStats({ workspaceDir, baseBranch, env, execFileImpl, timeoutMs }) {
   if (!workspaceDir || !baseBranch || (!execFileImpl && isTestContext(env))) return null;
-  // Commit-to-commit numstat with --no-optional-locks: the just-spawned worker
-  // owns the index, and this read must never take its lock.
+  // Commit-to-commit numstat with --no-optional-locks never takes the index lock.
   const output = await new Promise((resolve) => {
     try {
       (execFileImpl || execFile)('git', ['--no-optional-locks', '-C', workspaceDir, 'diff', '--numstat',
@@ -444,14 +441,9 @@ async function classifyReviewFindings(reviewBody) {
 }
 
 /**
- * Local remediation round: one decision per round. `worker` is the spawned
- * worker descriptor, which carries the resolver's modelResolution unchanged;
- * `modelResolution` is the request's resolution, used whole only when the
- * descriptor carries no resolved model (fields are never mixed across the two).
- * The caller does not await this: the worker is already running, and the
- * spawned-job record must not wait on MES. The git read is bounded by
- * GIT_NUMSTAT_TIMEOUT_MS and the CLI by `timeoutMs`. Remediation launched
- * through hq dispatch is recorded by the dispatch-path hook (MES-05), not here.
+ * Local remediation round: one bounded decision before spawn. The optional
+ * worker descriptor remains supported for observational callers. Resolution
+ * fields are never mixed. HQ dispatch owns its separate MES hook.
  */
 export function recordRemediationMesShadow({
   job, workerClass, worker, modelResolution = null, workspaceDir = null, env = process.env, execFileImpl = null,
@@ -478,4 +470,31 @@ export function recordRemediationMesShadow({
       actual,
     };
   }, { env, execFileImpl, timeoutMs, log });
+}
+
+/** Decide once before a local launch, preserving explicit request and env pins. */
+export async function resolveLocalRemediationMes({
+  workerClass, modelResolution = null, job, workspaceDir, env = process.env,
+  execFileImpl = null, timeoutMs, log = console,
+} = {}) {
+  const className = REMEDIATION_REGISTRY_CLASSES[workerClass];
+  if (!className) return modelResolution;
+  const { hasRemediationEnvironmentPin, resolveRemediationModel } = await import('./adapters/agent-runtime/local/remediation.mjs');
+  const execution = hasRemediationEnvironmentPin(className, env)
+    ? resolveRemediationModel(className, { env, pin: modelResolution?.resolvedModel,
+      reasoningPin: modelResolution?.resolvedReasoningLevel, log })
+    : modelResolution || resolveRemediationModel(className, { env, log });
+  const outcome = await recordRemediationMesShadow({ job, workerClass, modelResolution: execution,
+    workspaceDir, env, execFileImpl, timeoutMs, log });
+  const actual = mesActualExecution({ workerClass: className, model: execution.resolvedModel,
+    effort: execution.resolvedReasoningLevel, modelSource: execution.modelSource,
+    effortSource: execution.reasoningSource, source: execution.source });
+  if (!actual || !['registry', 'static-default'].includes(actual.source)
+    || !outcome.recorded || outcome.decision?.apply !== true) return execution;
+  try {
+    return resolveRemediationModel(className, { env, mesDecision: outcome, log });
+  } catch {
+    try { log.warn?.('[mes] resolver-error; execution unchanged'); } catch { /* optional logging */ }
+    return execution;
+  }
 }

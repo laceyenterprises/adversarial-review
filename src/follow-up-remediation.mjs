@@ -2,13 +2,13 @@ import { cleanupServiceCodexAuth } from './codex-service-home.mjs';
 
 import { withRepositoryStateCycle } from './repository-state-lock.mjs';
 import { codexToolHostLogEvidence, readDispatchCodexToolHostEvidence } from './codex-tool-host-failure.mjs';
-import { ensureWorkerRegistryReady } from './adapters/agent-runtime/local/remediation.mjs';
+import { ensureWorkerRegistryReady, resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
 import { prepareWorkerObservationSession } from './dispatch-read-client.mjs';
 import { readHostIdentitySync } from './dispatch-files-client.mjs';
 import { recoverInfrastructureChecks } from './ci-recovery.mjs';
 import { holdRemediationForCiInfrastructure, resumeCiInfrastructureRound, deferCiInfrastructureProbe, clearCiInfrastructureWait } from './remediation-ci-infrastructure.mjs';
 import { resolveOsgRemediatorRoute } from './osg-remediator.mjs';
-import { recordRemediationMesShadow } from './mes-shadow-hook.mjs';
+import { resolveLocalRemediationMes } from './mes-shadow-hook.mjs';
 import { readDispatchStatus } from './producer-contracts/launch-status.mjs';
 import { findCommittedUnpublishedWork } from './remediation-unpublished.mjs';
 import { remediationCloseout, closeoutRereview, refusedCloseout } from './remediation-closeout.mjs';
@@ -107,7 +107,6 @@ import {
   prepareCodexRemediationStartupEnv,
   prepareGeminiRemediationStartupEnv,
   resolveClaudeCodeCliPath,
-  resolveClaudeRemediationModel,
   resolveCodexAuthPath,
   resolveCodexCliPath,
   resolveCodexRemediationModel,
@@ -397,6 +396,8 @@ function createRemediationRuntime({
   waitForExitImpl,
   sleepImpl,
   pollMs,
+  mesExecFileImpl = null,
+  prepareLocalModelAuth = async () => {},
 } = {}) {
   async function run(request = {}) {
     const mode = request.mode;
@@ -475,6 +476,16 @@ function createRemediationRuntime({
           // Audit delivery must never mask the enforcement decision.
         }
       };
+      // Standalone calls still need one concrete pair shared by auth and spawn.
+      const defaultModelClass = worker === spawnClaudeCodeRemediationWorker ? 'remediator-claude'
+        : worker === spawnCodexRemediationWorker ? 'remediator-codex' : null;
+      const modelResolution = request.mesJob ? await resolveLocalRemediationMes({
+        job: request.mesJob, workerClass, modelResolution: request.modelResolution,
+        workspaceDir: request.workspaceDir, env, execFileImpl: mesExecFileImpl,
+      }) : request.modelResolution || (defaultModelClass ? resolveRemediationModel(defaultModelClass, { env }) : null);
+      if (shouldStop()) throw Object.assign(new Error('remediation stopped before local auth'), {code: 'remediation-shutting-down'});
+      await prepareLocalModelAuth(modelResolution);
+      if (shouldStop()) throw Object.assign(new Error('remediation stopped before local spawn'), {code: 'remediation-shutting-down'});
       const spawnedWorker = worker({
         workspaceDir: request.workspaceDir,
         repo: request.repo,
@@ -485,7 +496,7 @@ function createRemediationRuntime({
         hqRoot: request.hqRoot,
         launchRequestId: request.launchRequestId,
         jobId: request.jobId,
-        modelResolution: request.modelResolution,
+        modelResolution,
         requiresWorkflowPush: Boolean(request.requiresWorkflowPush),
         enforceHarnessIdentity,
         auditSink: harnessIdentityAuditSink,
@@ -498,8 +509,6 @@ function createRemediationRuntime({
       spawnedWorker.child?.once?.('error', (error) => {
         spawnedWorker.recordedOutcome = localWorkerErrorOutcome(spawnedWorker, error);
       });
-      // MES-06: shadow record of this round's resolved model; unawaited, bounded, never throws.
-      if (request.mesJob) void recordRemediationMesShadow({ job: request.mesJob, workerClass, worker: spawnedWorker, modelResolution: request.modelResolution, workspaceDir: request.workspaceDir, env });
       return createLocalRemediationHandle({
         runRef: String(
           request.idempotencyKey || spawnedWorker.launchRequestId || spawnedWorker.processId || '',
@@ -3283,7 +3292,6 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
   let spawnAttempted = false;
   let spawnedWorker = null;
   let workflowPushPreflight = null;
-  let claudeModelResolution = null;
   let codexModelResolution = null;
   const jobEnv = { ...process.env };
   const preparationStartedMs = Date.now(); let envPreparationMs = 0; let workspacePreparationMs = 0;
@@ -3444,34 +3452,6 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
         delegatedPool: hqDispatchEnabled && remediatorRouting.pooled });
     }
 
-    // Bare-mode claude-code remediators authenticate with a broker-vended
-    // ANTHROPIC_AUTH_TOKEN (bearer OAuth, NOT the api-key/bedrock/vertex mode
-    // the startup contract scrubs) -- the same source os-mode uses via
-    // adapter-broker-token.sh. The bare spawn env-prep only PRESERVES a token;
-    // it mints nothing, so without this a local claude-code remediation spawns
-    // with no model auth and dies "Not logged in" (#5546). Gated behind an
-    // injectable impl (null in the heavily-spied consume unit tests; wired to
-    // mintClaudeCodeRemediationBrokerToken only at the production daemon) so the
-    // consume hot path stays network-free under test. Keychain transport or an
-    // already-present token is left untouched by the mint helper.
-    if (!hqDispatchEnabled && ['claude-code', 'remediator-claude'].includes(workerClass) && mintClaudeCodeRemediationTokenImpl) {
-      await ensureWorkerRegistryReadyImpl({env: jobEnv});
-      claudeModelResolution = resolveClaudeRemediationModel(jobEnv);
-      // Pass `log` so the mint's bounded transient-retry ladder surfaces a
-      // broker bounce in the daemon log instead of retrying silently.
-      const brokerToken = await mintClaudeCodeRemediationTokenImpl({
-        env: jobEnv,
-        model: claudeModelResolution.resolvedModel,
-        log,
-      });
-      if (brokerToken?.injected && brokerToken.token) {
-        jobEnv.ANTHROPIC_AUTH_TOKEN = brokerToken.token;
-        log.info?.(
-          `[follow-up-remediation] claude-code bare remediation: injected broker-vended ` +
-            `ANTHROPIC_AUTH_TOKEN (url=${brokerToken.brokerUrl}, expiresAt=${brokerToken.expiresAt || 'n/a'})`
-        );
-      }
-    }
     const shouldApplyOssReadinessBeforeSpawn = jobHasOssReadinessAuditFailure(claimed.job);
     envPreparationMs = Date.now() - preparationStartedMs;
     const workspaceRootDir = resolveRemediationWorkspaceRoot({ rootDir, env: jobEnv });
@@ -3643,6 +3623,17 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
     // ARC-08: the health-routed AgentRuntime handles OS or local dispatch and
     // returns the worker descriptor. The subject adapter owns git workspace prep.
     const remediationRuntime = createRemediationRuntime({
+      // MES-09: mint against the final pair after policy selection, before spawn.
+      prepareLocalModelAuth: async (resolution) => {
+        if (!['claude-code', 'remediator-claude'].includes(workerClass) || !mintClaudeCodeRemediationTokenImpl) return;
+        const brokerToken = await mintClaudeCodeRemediationTokenImpl({
+          env: jobEnv, model: resolution?.resolvedModel, log,
+        });
+        if (brokerToken?.injected && brokerToken.token) {
+          jobEnv.ANTHROPIC_AUTH_TOKEN = brokerToken.token;
+          log.info?.('[follow-up-remediation] claude-code bare remediation: injected broker-vended auth for selected model');
+        }
+      },
       ensureWorkerRegistryReadyImpl,
       shouldStop,
       execFileImpl,
@@ -3667,8 +3658,8 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
       replyPath,
       hqRoot,
       launchRequestId: replyStorageKey,
-      jobId: claimed.job.jobId, mesJob: claimed.job, // MES-06 shadow input, local mode only
-      modelResolution: remediatorRouting.modelResolution || codexModelResolution || claudeModelResolution,
+      jobId: claimed.job.jobId, mesJob: claimed.job, // MES-09 decision input, local mode only
+      modelResolution: remediatorRouting.modelResolution || codexModelResolution,
       requiresWorkflowPush: Boolean(workflowPushPreflight?.workflowTouch?.touches),
       allowConflictedBase: conflictedBase?.allowConflictedBase === true,
     });

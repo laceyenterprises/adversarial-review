@@ -2,6 +2,35 @@
   "version": 1,
   "entries": [
     {
+      "id": "mes-review-enforcement",
+      "title": "MES Review-service Consumer",
+      "path": "docs/data-model/mes-review-enforcement.md",
+      "store": "Agent OS MES ledger (owned by stable CLI; no new local store)",
+      "schemaSurface": "src/mes-shadow-hook.mjs",
+      "relatedSchemaSurfaces": [
+        "src/reviewer-harness.mjs",
+        "src/adapters/agent-runtime/local/remediation.mjs",
+        "src/follow-up-remediation.mjs"
+      ],
+      "owner": "review and local remediation runtime",
+      "primaryKey": [
+        "work_kind",
+        "subject_key",
+        "attempt"
+      ],
+      "fields": [
+        "schemaVersion",
+        "recorded",
+        "decisionId",
+        "apply",
+        "choice",
+        "actual",
+        "overriddenBy",
+        "reason"
+      ],
+      "compatibility": "Version 1 CLI consumer; only recorded apply true admits registry-validated implicit defaults. Explicit sources, CLI failure and apply false preserve execution. No local persistent schema change or activation."
+    },
+    {
       "id": "cap-rehead",
       "title": "CAPREHEAD Dispatch Reservations",
       "path": "docs/data-model/cap-rehead.md",

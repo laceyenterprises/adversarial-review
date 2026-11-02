@@ -4394,6 +4394,13 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 - CLOSERSCANREAD-01: closer launch scans fall back from failed batch snapshots to bounded individual reads, defer fairly at a load-aware pass deadline, and report snapshot timing and fallback counts. Dispatch lookup deadlines now scale with load; unreadable ownership still holds custody.
 
+### CAPREHEAD update classification and executable prompt
+
+Branch maintenance classifies complete PR history without running merge proofs
+or inspecting artifacts in a different repository checkout. The dispatch prompt
+binds the repository, PR number and helper path from its verified context.
+
+
 ### CAPREHEAD-01 correction — squash histories containing hammer commits
 
 The PR-update worker now selects its strategy with
@@ -4409,8 +4416,7 @@ Merging main after hammer commits advances only the final merge base; the
 first hammer's parent still selects the old primary head. Primary-change then
 returns unknown because the merge bases differ. The squash removes hammer
 ancestry and the non-closer head receives full fresh review of the entire diff.
-The selector also recognizes that existing differing-merge-base refusal as
-hammer history. Unreadable history is reported instead of guessed.
+The selector identifies hammer history before merge-base and artifact proofs. Unreadable history is reported instead of guessed.
 All dispatch preconditions remain unchanged, including
 `reviewCycleExhausted === false`, one attempt per head and the lifetime cap.
 

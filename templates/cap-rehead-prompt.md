@@ -7,10 +7,14 @@ maintenance after the closer retry cap, with no merge authority.
    Record the exact remote PR head as
    `old_head` and the branch as `pr_branch`. Read every PR commit since its base,
    including earlier closer commits even when the current tip is builder-authored.
-   Run `node bin/cap-rehead-update-mode.mjs OWNER/REPO PR "$old_head"` from
-   the adversarial-review checkout. It reuses `primary-change.mjs`'s existing
-   `isHammerCommit` detection and complete-history reader, including recovery
-   of the differing-merge-base case. Do not invent a trailer/login detector or
+   Set `repo` and `pr_number` from the repository and PR number in this
+   dispatch's verified context. Set `update_helper` to the absolute path of
+   `bin/cap-rehead-update-mode.mjs` in the adversarial-review checkout (or
+   `tools/adversarial-review/bin/cap-rehead-update-mode.mjs` in a superproject).
+   Run `node "$update_helper" "$repo" "$pr_number" "$old_head"`.
+   It reuses `primary-change.mjs`'s bounded complete-history reader and existing
+   `isHammerCommit` detection without running merge-gate proofs or local Git
+   artifact inspection. Do not invent a trailer/login detector or
    classify just the tip. If history cannot be read, report the error; do not
    guess a variant. If the remote head changes, fetch and inspect again.
 2. When the mode is `squash` (ANY hammer/closer commit in the PR range), reset the

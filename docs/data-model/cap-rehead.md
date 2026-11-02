@@ -25,8 +25,11 @@ PR/head idempotency key. Normal review and closer eligibility own the new head.
 
 The prompt selects branch maintenance using `bin/cap-rehead-update-mode.mjs`.
 Its complete-history evidence comes from `src/ama/primary-change.mjs` and its
-existing `isHammerCommit` predicate. Hammer histories (including an already
-divergent primary/final merge-base refusal) are squashed onto current main as
+existing `isHammerCommit` predicate. Classification stops before merge-gate proofs
+or local artifact inspection.
+The dispatch prompt binds its arguments and helper path from verified context.
+Hammer histories (including an already
+divergent primary/final merge base) are squashed onto current main as
 one builder commit and pushed with an explicit old-head force-with-lease.
 Builder-only histories retain merge-main and a fast-forward push. Neither
 variant changes this store, refunds an attempt, or advances an exhausted

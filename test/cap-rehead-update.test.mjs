@@ -57,11 +57,11 @@ function repository(t) {
 
 test('builder-only history selects the existing merge-main variant', async t => {
   const f = repository(t);
-  assert.equal(await capReheadUpdateMode(f.args(f.originalBase, f.builder), options), 'merge-main');
+  assert.equal(await capReheadUpdateMode(f.args(f.originalBase, f.builder)), 'merge-main');
   f.git('checkout', '-q', 'main');
   const main = f.commitFile('main.txt', 'upstream\n', 'Synthetic upstream repair\n\nWorker-Class: hammer');
   f.git('checkout', '-q', 'feature');
-  assert.equal(await capReheadUpdateMode(f.args(main, f.builder), options), 'merge-main');
+  assert.equal(await capReheadUpdateMode(f.args(main, f.builder)), 'merge-main');
   f.git('merge', '--no-ff', '-m', 'Synthetic merge-main', 'main');
   const merged = f.git('rev-parse', 'HEAD');
   assert.equal(f.git('show', '-s', '--format=%P', merged).split(' ').length, 2);
@@ -75,9 +75,9 @@ test('hammer history, including a later builder tip, selects squash using existi
   // Worker-Class alone is recognized by primary-change's isHammerCommit; do
   // not narrow strategy selection to authenticated terminal closer commits.
   const hammer = f.commitFile('repair.txt', 'repair\n', 'Synthetic repair\n\nWorker-Class: hammer');
-  assert.equal(await capReheadUpdateMode(f.args(f.originalBase, hammer), options), 'squash');
+  assert.equal(await capReheadUpdateMode(f.args(f.originalBase, hammer)), 'squash');
   const tip = f.commitFile('after.txt', 'after\n', 'Synthetic builder follow-up');
-  assert.equal(await capReheadUpdateMode(f.args(f.originalBase, tip), options), 'squash');
+  assert.equal(await capReheadUpdateMode(f.args(f.originalBase, tip)), 'squash');
 });
 
 test('merge-main strands primary evidence; one builder squash preserves the tree and clears it', async t => {
@@ -95,7 +95,7 @@ test('merge-main strands primary evidence; one builder squash preserves the tree
   assert.equal(stranded.hasHammerCommits, null);
   assert.equal(stranded.reason, 'primary and final merge bases are missing or differ');
   assert.equal(checkPrimaryChange(stranded, merged).reason, 'primary-change-unknown');
-  assert.equal(await capReheadUpdateMode(f.args(currentMain, merged), options), 'squash');
+  assert.equal(await capReheadUpdateMode(f.args(currentMain, merged)), 'squash');
 
   f.git('reset', '--hard', currentMain);
   f.git('merge', '--squash', merged);
@@ -108,7 +108,7 @@ test('merge-main strands primary evidence; one builder squash preserves the tree
   const fresh = await fetchPrimaryChange(f.args(currentMain, squashed), options);
   assert.equal(fresh.hasHammerCommits, false);
   assert.deepEqual(checkPrimaryChange(fresh, squashed), { ok: true, applicable: false });
-  assert.equal(await capReheadUpdateMode(f.args(currentMain, squashed), options), 'merge-main');
+  assert.equal(await capReheadUpdateMode(f.args(currentMain, squashed)), 'merge-main');
   // The original, not-yet-merged hammer head produces the same refresh tree.
   f.git('reset', '--hard', currentMain);
   f.git('merge', '--squash', hammer);
@@ -121,5 +121,27 @@ test('unreadable or incomplete history is never mistaken for a builder-only rang
   const read = args.get;
   args.get = async path => path.includes('/compare/')
     ? { ...(await read(path)), total_commits: 2 } : read(path);
-  await assert.rejects(capReheadUpdateMode(args, options), /missing, malformed or capped commit history/);
+  await assert.rejects(capReheadUpdateMode(args), /missing, malformed or capped commit history/);
+});
+
+
+test('hammer classification needs no commit proofs or target repository checkout', async () => {
+  const headSha = 'a'.repeat(40);
+  const base = 'b'.repeat(40);
+  const calls = [];
+  const mode = await capReheadUpdateMode({
+    repo: 'synthetic/other-repository', prNumber: 1, headSha,
+    rootDir: '/nonexistent/cap-rehead-checkout',
+    get: async path => {
+      calls.push(path);
+      if (path.endsWith('/pulls/1')) return { base: { sha: base }, head: { sha: headSha } };
+      if (path.includes('/compare/')) return {
+        total_commits: 1,
+        commits: [{ sha: headSha, commit: { message: 'Repair\n\nWorker-Class: hammer' } }],
+      };
+      throw new Error(`Unexpected proof read: ${path}`);
+    },
+  });
+  assert.equal(mode, 'squash');
+  assert.equal(calls.length, 2);
 });

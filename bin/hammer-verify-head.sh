@@ -501,16 +501,8 @@ ham_is_full_sha() {
 }
 
 HAM_GIT_SYNC_NOMINAL_SECONDS="${HAM_GIT_SYNC_NOMINAL_SECONDS:-120}"
-ham_bounded_git_sync() {
-  ham_git_sync_attempt=1
-  while [ "$ham_git_sync_attempt" -le 2 ]; do
-    ham_git_sync_timeout=$("${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/load-aware-timeout.mjs "$HAM_GIT_SYNC_NOMINAL_SECONDS" || true)
-    case "$ham_git_sync_timeout" in
-      ''|*[!0-9]*|0) ham_git_sync_timeout="$HAM_GIT_SYNC_NOMINAL_SECONDS" ;;
-    esac
-    echo "HAM: git fetch attempt=$ham_git_sync_attempt deadline=${ham_git_sync_timeout}s" >&2
-    ham_git_sync_stderr=$(mktemp "${TMPDIR:-/tmp}/ham-git-sync-<<PR_NUMBER>>.XXXXXX") || return 1
-    if /usr/bin/perl -e '
+ham_bounded_git_operation() {
+  /usr/bin/perl -e '
       use Errno qw(EINTR);
       my $seconds = shift;
       my $child = fork();
@@ -529,7 +521,19 @@ ham_bounded_git_sync() {
       my $status = $?;
       alarm 0;
       exit($timed_out ? 124 : ($status & 127 ? 128 + ($status & 127) : $status >> 8));
-    ' "$ham_git_sync_timeout" env HAM_GIT_SYNC_BOUNDED=1 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec-git fetch --no-prune --no-tags origin "$@" 2>"$ham_git_sync_stderr"; then
+    ' "$@"
+}
+
+ham_bounded_git_sync() {
+  ham_git_sync_attempt=1
+  while [ "$ham_git_sync_attempt" -le 2 ]; do
+    ham_git_sync_timeout=$("${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/load-aware-timeout.mjs "$HAM_GIT_SYNC_NOMINAL_SECONDS" || true)
+    case "$ham_git_sync_timeout" in
+      ''|*[!0-9]*|0) ham_git_sync_timeout="$HAM_GIT_SYNC_NOMINAL_SECONDS" ;;
+    esac
+    echo "HAM: git fetch attempt=$ham_git_sync_attempt deadline=${ham_git_sync_timeout}s" >&2
+    ham_git_sync_stderr=$(mktemp "${TMPDIR:-/tmp}/ham-git-sync-<<PR_NUMBER>>.XXXXXX") || return 1
+    if ham_bounded_git_operation "$ham_git_sync_timeout" env HAM_GIT_SYNC_BOUNDED=1 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec-git fetch --no-prune --no-tags origin "$@" 2>"$ham_git_sync_stderr"; then
       cat "$ham_git_sync_stderr" >&2
       rm -f "$ham_git_sync_stderr"
       return 0
@@ -559,7 +563,7 @@ ham_bounded_git_sync() {
 
 ham_bounded_submodule_sync() {
   local ham_submodule_sync_exit=0
-  /usr/bin/perl -e 'alarm shift; exec @ARGV' 120 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec-git submodule update --recursive || ham_submodule_sync_exit=$?
+  ham_bounded_git_operation 120 env HAM_GIT_SYNC_BOUNDED=1 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec-git submodule update --recursive || ham_submodule_sync_exit=$?
   if [ "$ham_submodule_sync_exit" -eq 76 ]; then HAM_PHASE_OUTCOME=git-credential-refresh-failed; fi
   return "$ham_submodule_sync_exit"
 }
@@ -647,7 +651,7 @@ ham_settle_rebase_snapshot() {
       if ham_is_full_sha "$snapshot_head" && [ "$snapshot_head" != "$from" ]; then
         if [ "$async_result" -eq 1 ]; then
           if ! ham_bounded_git_sync "$snapshot_head" \
-            || ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-rebase-result.mjs" \
+            || ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-rebase-result.mjs" \
               "$from" "$snapshot_head" "$base" > "<<RUN_DIR>>/rebase-result-proof.json"; then
             if [ "${HAM_PHASE_OUTCOME:-}" != git-credential-refresh-failed ]; then HAM_PHASE_OUTCOME=rebase-result-unproven; fi
             ham_release_merge_lease || return 1
@@ -800,7 +804,7 @@ ham_rebase_head() {
     HAM_PUSHED_HEAD="$POST_REMEDIATION_SHA"
     export HAM_PUSHED_FROM_HEAD HAM_PUSHED_HEAD
     "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-progress.mjs" remediation-pushed || true
-    if ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-pushed-attestation.mjs \
+    if ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-pushed-attestation.mjs \
       <<REPO>> <<PR_NUMBER>> "$HAM_PUSHED_FROM_HEAD" "$HAM_PUSHED_HEAD"; then
       HAM_PHASE_OUTCOME=pushed-attestation-unavailable
       printf -v HAM_NO_MERGE_NOTE '%s\nHAM-Base-Head: %s\nHAM-Pushed-Head: %s\nHAM-CI-Validated: false' \

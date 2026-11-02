@@ -4459,6 +4459,8 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- HAMGITTOKEN-01 final rescue: the outer 120-second submodule-sync bound owns its child timeout and waits for lock cleanup; bounded snapshot and publication proofs accept unset or empty `HAM_NODE_BIN` consistently. Credential refresh classification and exact-head merge predicates remain intact.
+
 - Preserve the API-published head and starting head before attestation so a failed attestation retains exact publication provenance for closure recovery; cover the failure with an offline regression.
 
 - **HAMGITTOKEN-01 test fixture:** Inject the metered Git execution seam into

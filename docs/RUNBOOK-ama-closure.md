@@ -7877,3 +7877,7 @@ Rescue qualification for EXHAUSTEDHEADOWNER-01: closure consumes the exact-head
 classification. A missing closer carry-forward proof alone is not builder
 provenance. Final-round handoffs and existing closer attempts keep their owner;
 returning delivered heads retain recorded same-head/lifetime caps.
+
+HAMGITTOKEN-01 final timeout ownership: bounded submodule sync exports `HAM_GIT_SYNC_BOUNDED=1` only for its child, so the metered Git wrapper yields its default 30-second timeout to the existing outer 120-second bound. Snapshot and pushed-attestation proof calls resolve `${HAM_NODE_BIN:-node}` consistently; the main procedure still validates its runtime before general authority operations. No merge, credential or cancellation predicate changes.
+
+Both bounded Git paths use the same TERM/wait/KILL deadline owner. Submodule expiry waits for child cleanup before returning 124, rather than replacing the deadline owner with Node and losing child cleanup to SIGALRM. An offline shortened-deadline fixture verifies lock removal before return; the production submodule bound remains 120 seconds.

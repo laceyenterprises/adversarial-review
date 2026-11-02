@@ -2078,6 +2078,7 @@ async function main() {
   let tokenUsage = null;
   let reviewerExecution = null;
   const reviewerStartedAt = new Date().toISOString();
+  const mes = { repo, prNumber, headSha: reviewerHeadSha || reviewerWorkspaceHeadSha, title: prContext?.title, diff }; // MES-06 shadow context
   // CHUNKTIME-01: the Gemini reviewer bounds its own run; see reviewer-process-deadline.mjs.
   const geminiDeadline = createGeminiReviewerProcessDeadline();
   if (effectiveModel === 'gemini' || useAgyChunkFallback) geminiDeadline.arm();
@@ -2095,10 +2096,10 @@ async function main() {
             promptBytes: oversizedAgyRoute?.promptBytes,
             maxBytes: oversizedAgyRoute?.maxBytes,
             onRejectedCodexOutput: (rejected) => persistRejectedCodexOutput({ repo, prNumber, ...rejected }),
-            signal: geminiDeadline.signal, onChunkPlan: geminiDeadline.extendForPlan,
+            signal: geminiDeadline.signal, onChunkPlan: geminiDeadline.extendForPlan, mes,
           })
         : await dispatchReviewerModel(effectiveModel, diff, extraContext, {
-            reviewerArm,
+            reviewerArm, mes,
             promptStage: reviewModeDecision.promptStage,
             reviewerSubprocessCwd,
             signal: effectiveModel === 'gemini' ? geminiDeadline.signal : undefined,

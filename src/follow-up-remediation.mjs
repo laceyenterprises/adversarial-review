@@ -8,6 +8,7 @@ import { readHostIdentitySync } from './dispatch-files-client.mjs';
 import { recoverInfrastructureChecks } from './ci-recovery.mjs';
 import { holdRemediationForCiInfrastructure, resumeCiInfrastructureRound, deferCiInfrastructureProbe, clearCiInfrastructureWait } from './remediation-ci-infrastructure.mjs';
 import { resolveOsgRemediatorRoute } from './osg-remediator.mjs';
+import { recordRemediationMesShadow } from './mes-shadow-hook.mjs';
 import { readDispatchStatus } from './producer-contracts/launch-status.mjs';
 import { findCommittedUnpublishedWork } from './remediation-unpublished.mjs';
 import { remediationCloseout, closeoutRereview, refusedCloseout } from './remediation-closeout.mjs';
@@ -136,6 +137,7 @@ import {
 import { OAUTH_ENV_STRIP_LIST } from './secret-source/env.mjs';
 import { cloneRemediationWorkspace } from './remediation-workspace-clone.mjs';
 import { drainRemediationJobs } from './remediation-parallel-drain.mjs';
+import { DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS, REMEDIATION_MAX_CONCURRENT_JOBS_ENV, normalizeMaxConcurrentFollowUpJobs, resolveRemediationMaxConcurrentJobs } from './remediation-concurrency.mjs';
 import { holdClaimedJobForCappedRemediator, requeueClaimedFollowUpJobBeforeSpawn, requeueClaimedJobForConflictedBaseProbe } from './remediation-claimed-requeue.mjs';
 import {
   loadRoleConfig,
@@ -274,10 +276,7 @@ function isHarnessIdentityEnforcementEnabled(env = process.env, options = {}) {
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
 const VALID_GITHUB_REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
-const REMEDIATION_MAX_CONCURRENT_JOBS_ENV = 'ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS';
 const REMEDIATION_WORKSPACE_ROOT_ENV = 'ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT';
-const DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS = 1;
-const MAX_REMEDIATION_MAX_CONCURRENT_JOBS = 8;
 const DEFAULT_DEPLOY_CHECKOUT = '/Users/airlock/agent-os';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 const HQ_REMEDIATION_WORKSPACE_SEGMENTS = ['adversarial-review', 'follow-up-workspaces'];
 
@@ -499,6 +498,8 @@ function createRemediationRuntime({
       spawnedWorker.child?.once?.('error', (error) => {
         spawnedWorker.recordedOutcome = localWorkerErrorOutcome(spawnedWorker, error);
       });
+      // MES-06: shadow record of this round's resolved model; unawaited, bounded, never throws.
+      if (request.mesJob) void recordRemediationMesShadow({ job: request.mesJob, workerClass, worker: spawnedWorker, modelResolution: request.modelResolution, workspaceDir: request.workspaceDir, env });
       return createLocalRemediationHandle({
         runRef: String(
           request.idempotencyKey || spawnedWorker.launchRequestId || spawnedWorker.processId || '',
@@ -686,69 +687,6 @@ async function dispatchRemediationViaHq({
     auditRef: typeof ticket?.audit_ref === 'string' ? ticket.audit_ref : ticket?.auditRef,
     ...(appMode === 'agent-os' ? {} : { command: [hqBin, ...legacyHqArgs] }),
   };
-}
-
-function _resolveRemediationCfgCeiling(env = process.env, options = {}) {
-  // CFG-01 anchor: `remediation.max_concurrent_jobs_ceiling` promoted
-  // 2026-06-09. Default 8 — unchanged from MAX_REMEDIATION_MAX_CONCURRENT_JOBS.
-  const cfgValue = loadRoleConfig({
-    env,
-    topPath: options.topPath,
-    modulePaths: options.modulePaths,
-    loaderImpl: options.loaderImpl,
-    contextKey: 'remediation.max_concurrent_jobs_ceiling',
-  }).get(
-    'remediation.max_concurrent_jobs_ceiling',
-    MAX_REMEDIATION_MAX_CONCURRENT_JOBS
-  );
-  const parsed = Number(cfgValue);
-  if (!Number.isInteger(parsed) || parsed < 1) {
-    return MAX_REMEDIATION_MAX_CONCURRENT_JOBS;
-  }
-  return parsed;
-}
-
-function normalizeMaxConcurrentFollowUpJobs(value, {
-  fallback = DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS,
-  max = null,
-  env = process.env,
-  onClamp = null,
-  topPath,
-  modulePaths,
-  loaderImpl,
-} = {}) {
-  // `max` resolved at call time so the CFG ceiling is consulted lazily and
-  // tests can override via options.max without standing up a config loader.
-  const effectiveMax = max ?? _resolveRemediationCfgCeiling(env, { topPath, modulePaths, loaderImpl });
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    return fallback;
-  }
-  if (parsed > effectiveMax) {
-    onClamp?.({
-      requested: parsed,
-      clamped: effectiveMax,
-    });
-    return effectiveMax;
-  }
-  return parsed;
-}
-
-function resolveRemediationMaxConcurrentJobs(env = process.env, options = {}) {
-  // CFG-01 anchor for the floor: `remediation.max_concurrent_jobs`.
-  // Legacy env names are resolved by ENV_ALIASES in the loader so
-  // canonical-vs-legacy conflicts fail loud before runtime clamping.
-  const cfgValue = loadRoleConfig({
-    env,
-    topPath: options.topPath,
-    modulePaths: options.modulePaths,
-    loaderImpl: options.loaderImpl,
-    contextKey: 'remediation.max_concurrent_jobs',
-  }).get('remediation.max_concurrent_jobs', null);
-  return normalizeMaxConcurrentFollowUpJobs(
-    cfgValue,
-    { ...options, env: options.env ?? env }
-  );
 }
 
 function buildInheritedPath(currentPath = process.env.PATH || '') {
@@ -3729,7 +3667,7 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
       replyPath,
       hqRoot,
       launchRequestId: replyStorageKey,
-      jobId: claimed.job.jobId,
+      jobId: claimed.job.jobId, mesJob: claimed.job, // MES-06 shadow input, local mode only
       modelResolution: remediatorRouting.modelResolution || codexModelResolution || claudeModelResolution,
       requiresWorkflowPush: Boolean(workflowPushPreflight?.workflowTouch?.touches),
       allowConflictedBase: conflictedBase?.allowConflictedBase === true,

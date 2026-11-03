@@ -1742,5 +1742,163 @@
         }
       }
     }
+  },
+  "architecture_review": {
+    "__type": "dict",
+    "__strict": true,
+    "__keys": {
+      "thresholds": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "scars": {
+            "__type": "int",
+            "__min": 0,
+            "__default": 30
+          },
+          "scar_growth_30d": {
+            "__type": "int",
+            "__min": 0,
+            "__default": 10
+          },
+          "chain": {
+            "__type": "int",
+            "__min": 0,
+            "__default": 3
+          },
+          "cross_modules": {
+            "__type": "int",
+            "__min": 0,
+            "__default": 3
+          },
+          "detector_days": {
+            "__type": "int",
+            "__min": 1,
+            "__default": 7
+          },
+          "dark_days": {
+            "__type": "int",
+            "__min": 0,
+            "__default": 30
+          },
+          "freeze_growth_percent": {
+            "__type": "int",
+            "__min": 0,
+            "__default": 10
+          },
+          "hand_actions_baseline": {
+            "__type": "int",
+            "__min": 0,
+            "__default": 0
+          }
+        }
+      },
+      "detectors": {
+        "__type": "list",
+        "__default": [],
+        "__item": {
+          "__type": "dict",
+          "__strict": true,
+          "__keys": {
+            "id": {
+              "__type": "string"
+            },
+            "paths": {
+              "__type": "list",
+              "__item": {
+                "__type": "string"
+              }
+            },
+            "scope": {
+              "__type": "string",
+              "__enum": [
+                "repo",
+                "deploy",
+                "hq"
+              ],
+              "__default": "deploy"
+            },
+            "kind": {
+              "__type": "string",
+              "__enum": [
+                "nxa",
+                "sentinel-state"
+              ]
+            },
+            "path": {
+              "__type": "string"
+            },
+            "consumers": {
+              "__type": "list",
+              "__item": {
+                "__type": "string"
+              }
+            }
+          }
+        }
+      },
+      "dark_components": {
+        "__type": "list",
+        "__default": [],
+        "__item": {
+          "__type": "dict",
+          "__strict": true,
+          "__keys": {
+            "id": {
+              "__type": "string"
+            },
+            "paths": {
+              "__type": "list",
+              "__item": {
+                "__type": "string"
+              }
+            },
+            "scope": {
+              "__type": "string",
+              "__enum": [
+                "repo",
+                "deploy",
+                "hq"
+              ],
+              "__default": "deploy"
+            },
+            "source_path": {
+              "__type": "string"
+            },
+            "database": {
+              "__type": "string"
+            },
+            "tables": {
+              "__type": "list",
+              "__item": {
+                "__type": "string"
+              }
+            }
+          }
+        }
+      },
+      "rescue_audit_paths": {
+        "__type": "list",
+        "__default": [],
+        "__item": {
+          "__type": "dict",
+          "__strict": true,
+          "__keys": {
+            "scope": {
+              "__type": "string",
+              "__enum": [
+                "repo",
+                "deploy",
+                "hq"
+              ],
+              "__default": "deploy"
+            },
+            "path": {
+              "__type": "string"
+            }
+          }
+        }
+      }
+    }
   }
 }

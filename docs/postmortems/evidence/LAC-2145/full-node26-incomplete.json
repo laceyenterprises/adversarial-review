@@ -1,0 +1,24 @@
+{
+  "node": "v26.10.0",
+  "platform": "darwin",
+  "command": "npm test",
+  "exit": 1,
+  "terminalError": "Test suite timed out after 900 seconds",
+  "counts": {
+    "tests": 12773,
+    "pass": 12533,
+    "fail": 6,
+    "cancelled": 228,
+    "skipped": 6,
+    "duration_ms": 899886.158791
+  },
+  "firstFailureNames": [
+    "\u2716 build cancellation kills background descendants before returning (553.426208ms)",
+    "\u2716 cold composition registers the existing review app before authenticated synchronous reads (683.113125ms)",
+    "\u2716 a missing existing bootstrap credential yields a fixed named failure in a fresh process (237.585916ms)",
+    "\u2716 HAMLANEWAIT-01: release in another process wakes the bounded native lane waiter (3397.340833ms)",
+    "\u2716 HAMLANEWAIT-01: waking rechecks lane transfer and never invokes the old legacy route (3028.824958ms)",
+    "\u2716 LEASEFAIR-02: ci-disjoint-strict (49312.925125ms)"
+  ],
+  "note": "Incomplete run; not green and not attributed to baseline."
+}

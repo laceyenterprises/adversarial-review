@@ -2027,6 +2027,11 @@ no live push, PR rescue, worker-slot change or service action.
 
 ## Dead dispatch submitters (CLOSERDISPATCHDEAD-01)
 
+Pending-owner offline fixtures must supply both PID liveness and raw process
+start evidence consistent with their clock. Keep PID-reuse rejection and
+unreadable-evidence custody in the regression cases; see the
+[LEASECIPROOF-01 qualification record](postmortems/LAC-2145-pending-owner-proof-qualification.md).
+
 Scoped project/repository selectors use the existing paired grant and require
 canonical absence before retiring dead submissions. Asynchronous lease
 abandonment reconciles the intent in the same pass. SIGTERM/SIGINT synchronously

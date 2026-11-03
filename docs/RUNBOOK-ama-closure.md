@@ -7270,6 +7270,17 @@ exit after publication: the next eligible poll should retain closure ownership
 and dispatch a successor or report its bounded wait/escalation. Source validation
 performs no live rescue, restart, ledger operation or PR mutation.
 
+## Pending-owner fixture qualification (LEASECIPROOF-01)
+
+Synthetic pending-lease owners must pair their injected PID liveness with
+raw process-start evidence from the same fixture clock. The consumer also
+checks PID reuse through `captureCloserProcessSync`; a real host process
+table mixed with a fixed fixture timestamp makes ownership assertions
+host-dependent. Preserve the real parser, native lease writer and lease
+predicate, including a newer-process negative case. See the
+[LAC-2145 SEV/RCA and bounded replay](postmortems/LAC-2145-pending-owner-proof-qualification.md).
+This qualification does not establish a production custody failure or recovery.
+
 ## Exact operator absence evidence (LAC-2120)
 
 See [the recovery contract](dispatch-absence-recovery.md) for the exact expiring producer

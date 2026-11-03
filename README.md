@@ -4463,6 +4463,8 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- LAC-2145 / LEASECIPROOF-01: pair synthetic pending-owner PIDs with raw process-start fixtures and qualify all three intermittent assertions with counted trials. See the [SEV/RCA evidence and limitations](docs/postmortems/LAC-2145-pending-owner-proof-qualification.md). Production ownership fences are unchanged.
+
 - FINDINGSBATCHCUSTODY-01 (LAC-2143): accept native workspace display paths
   without deriving repository authority from them; replay the actual public
   launch projection and retain keyed identity and publication fences. Historical

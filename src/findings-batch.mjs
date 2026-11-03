@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 import { pickRemediationWorkerClass } from './remediation-worker-routing.mjs';
 import { parseDispatchJsonOutput, readDispatchReceipt, parseHqDispatchStatus } from './producer-contracts/dispatch-receipt.mjs';
@@ -258,8 +258,10 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
       ['dispatch', 'status', batch.launch_id, '--json', '--root', resolveHqRoot(env)],
       { env, timeout: 15_000, maxBuffer: 1024 * 1024 });
     const status = parseHqDispatchStatus(stdout, { normalize: false });
-    if (readDispatchReceipt(status).launchRequestId !== batch.launch_id
-      || (status.repo != null && ![batch.repo, batch.repo.split('/').at(-1)].includes(status.repo))) throw Error('batch-launch-evidence-mismatch');
+    if (readDispatchReceipt(status).launchRequestId !== batch.launch_id) throw Error('batch-launch-evidence-mismatch');
+    const workspaceRepo = typeof status.repo === 'string' && isAbsolute(status.repo);
+    if (status.repo != null && !workspaceRepo
+      && ![batch.repo, batch.repo.split('/').at(-1)].includes(status.repo)) throw Error('batch-launch-evidence-mismatch');
     const meaning = readDispatchStatus(status);
     if (!meaning.terminal) return;
     // A publication-blocked decision launch may have pushed successfully.
@@ -275,6 +277,10 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
       || ![batch.repo, batch.repo.split('/').at(-1)].includes(row.target_repo)
       || typeof row.launch_request_id !== 'string' || !row.launch_request_id)) throw Error('batch-publish-receipt-mismatch');
     if (!probe.rows.some(row => row.launch_request_id === batch.launch_id)) throw Error('batch-launch-evidence-mismatch');
+    // Native absolute repo/workspace paths are display metadata, not repository
+    // authority. The public launch projection intentionally omits worktree paths.
+    // The exact LRQ plus keyed repository/ticket checks above and the independent
+    // remote tested-head / marked-PR checks below establish publication custody.
     // git-safe records a branch push projection, not necessarily an HQ
     // branch_pushed milestone. Bind the launch through the ledger above and
     // verify the actual remote branch/head below instead of guessing a format.

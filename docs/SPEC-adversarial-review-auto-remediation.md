@@ -1,5 +1,24 @@
 # SPEC - Adversarial Review Auto-Remediation
 
+## FINDINGSBATCHCUSTODY-01: publication repository custody
+
+`publishFindingBatch` recognizes absolute native dispatch `repo` paths as display
+metadata, never as repository identity. It neither derives a repository from a
+path basename nor requires private workspace fields omitted from the public
+launch projection. Exact preparation LRQ, keyed target repository, ticket and
+idempotency evidence plus independent remote tested-head/marked-PR checks retain
+publication authority. Foreign slugs and mismatched repository/LRQ/ticket/key or
+remote evidence still fail closed. Legacy slug/short-name and null status `repo`
+retain their existing validation.
+
+Terminal successful or publication-blocked preparation, any explicit push milestone,
+remote tested head, exact batch marker, same-repository PR and active-pipeline or
+merged settlement predicates remain authoritative. No new completion state,
+retry, timeout release or automatic historical outcome conversion is introduced.
+Invalid outcome/reason artifacts retain their entire batch unresolved. See the
+[bounded recovery procedure](follow-up-runbook.md#findings-batch-publication-custody-findingsbatchcustody-01)
+and [incident qualification](postmortems/SEV3-findings-batch-publication-custody-2026-11-02.md).
+
 _Status: Living contract_
 _Related: `SPEC.md`, `docs/follow-up-runbook.md`_
 

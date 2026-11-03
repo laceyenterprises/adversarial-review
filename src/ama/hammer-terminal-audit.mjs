@@ -1,3 +1,4 @@
+import { recordHammerPhase } from './hammer-outcome.mjs';
 import { appendAmaAuditAttempt, readAmaAuditEntry } from './audit.mjs';
 import { reportHammerProgress } from './hammer-progress.mjs';
 import { HAMMER_RETRYABLE_READ_OUTCOMES, hammerPhaseAttempt } from './hammer-phase-outcome.mjs';
@@ -14,6 +15,7 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
     const step = env.HAM_PROCEDURE_STEP;
     reason = /^[a-z][a-z0-9-]*$/.test(step || '') ? `${step}-failed` : 'procedure-step-failed';
   }
+  try { recordHammerPhase(reason, { env }); } catch { /* Diagnostic capture cannot block the original failure. */ }
   if (final === true) reportHammerProgress('terminal-stop', { env, reason, final });
   const identity = {
     hqRoot: env.HAM_HQ_ROOT || env.HQ_ROOT,

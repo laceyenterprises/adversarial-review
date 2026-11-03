@@ -28,13 +28,13 @@ for (const fixture of [migrationRenumberFixture, () => alembicRenumberFixture({ 
     const { spawnSync } = await import('node:child_process');
     const executedAt = new Date().toISOString();
     writeFileSync(join(root, 'gh'), '#!/bin/sh\ncat "$(dirname "$0")/pr.json"\n', { mode: 0o755 });
-    writeFileSync(join(root, 'pr.json'), JSON.stringify({ state: 'MERGED', headRefOid: f.args.headSha, mergedAt: executedAt }));
+    writeFileSync(join(root, 'pr.json'), JSON.stringify({ mergeCommit: { oid: 'b'.repeat(40) }, state: 'MERGED', headRefOid: f.args.headSha, mergedAt: executedAt }));
     const gatePath = join(root, 'gate.json');
     const gate = { ok: true, expectedHead: f.args.headSha, liveHead: f.args.headSha, derivedChanges };
     writeFileSync(gatePath, JSON.stringify(gate));
     const cliArgs = [new URL('../bin/merge-action-receipt.mjs', import.meta.url).pathname,
       root, f.args.repo, '1', f.args.headSha, 'merged', '', executedAt, gatePath];
-    const env = { ...process.env, PATH: `${root}:${process.env.PATH}` };
+    const env = { ...process.env, HQ_LAUNCH_REQUEST_ID: 'lrq_fixture', HQ_WORKER_RUN_ID: 'wrun_fixture', PATH: `${root}:${process.env.PATH}` };
     const result = spawnSync(process.execPath, cliArgs, { env, encoding: 'utf8', timeout: 5000 });
     assert.equal(result.status, 0, result.stderr);
     const records = readdirSync(join(root, 'dispatch/audit/automation-merge-actions')).map(name =>
@@ -102,11 +102,11 @@ test('hammer CLI verifies stub gh and writes merge/refusal or isolated-worker re
     writeFileSync(join(root, '.hq/config.json'), JSON.stringify({ ownerUser: userInfo().username }));
     const gh = join(root, 'gh');
     writeFileSync(gh, '#!/bin/sh\ncat "$(dirname "$0")/pr.json"\n', { mode: 0o755 });
-    writeFileSync(join(root, 'pr.json'), JSON.stringify({ state: 'MERGED', headRefOid: 'a'.repeat(40), mergedAt: new Date().toISOString() }));
+    writeFileSync(join(root, 'pr.json'), JSON.stringify({ mergeCommit: { oid: 'b'.repeat(40) }, state: 'MERGED', headRefOid: 'a'.repeat(40), mergedAt: new Date().toISOString() }));
     const issuedAt = new Date(Date.now() - 180_000).toISOString();
-    const env = { ...process.env, PATH: `${root}:${process.env.PATH}` };
+    const env = { ...process.env, HQ_LAUNCH_REQUEST_ID: 'lrq_fixture', HQ_WORKER_RUN_ID: 'wrun_fixture', PATH: `${root}:${process.env.PATH}` };
     const args = [cli.pathname, root, 'test/repo', '7', 'a'.repeat(40)];
-    writeFileSync(join(root, 'pr.json'), JSON.stringify({ state: 'MERGED', headRefOid: 'a'.repeat(40), mergedAt: issuedAt }));
+    writeFileSync(join(root, 'pr.json'), JSON.stringify({ mergeCommit: { oid: 'b'.repeat(40) }, state: 'MERGED', headRefOid: 'a'.repeat(40), mergedAt: issuedAt }));
     assert.equal(spawnSync(process.execPath, [...args, 'merged', '', issuedAt], { env, timeout: 5000 }).status, 0);
     assert.equal(spawnSync(process.execPath, [...args, 'refused', 'primary-change-reverted'], { env }).status, 0);
     assert.equal(readdirSync(join(root, 'dispatch/audit/automation-merge-actions')).length, 2);
@@ -136,7 +136,7 @@ test('API merge seam records verified merges and refused exact-head writes', asy
     let refuse = false;
     const options = { env: { HQ_ROOT: root, GHA_ADAPTER_BIN: '/fixture/github-adapter' },
       execFileImpl: async (bin) => {
-        if (bin === 'gh') return { stdout: JSON.stringify({ state: 'MERGED', headRefOid: 'a'.repeat(40), mergedAt: new Date().toISOString() }) };
+        if (bin === 'gh') return { stdout: JSON.stringify({ mergeCommit: { oid: 'b'.repeat(40) }, state: 'MERGED', headRefOid: 'a'.repeat(40), mergedAt: new Date().toISOString() }) };
         if (refuse) throw Object.assign(new Error('head mismatch'), {
           stderr: JSON.stringify({ ok: false, failureClass: 'permanent', error: 'head mismatch' }),
         });
@@ -162,7 +162,7 @@ for (const scenario of [
     try {
       mkdirSync(join(root, '.hq'));
       writeFileSync(join(root, '.hq/config.json'), JSON.stringify({ ownerUser: userInfo().username }));
-      writeFileSync(join(root, 'pr.json'), JSON.stringify({ state: 'MERGED', headRefOid: 'a'.repeat(40), mergedAt: new Date().toISOString() }));
+      writeFileSync(join(root, 'pr.json'), JSON.stringify({ mergeCommit: { oid: 'b'.repeat(40) }, state: 'MERGED', headRefOid: 'a'.repeat(40), mergedAt: new Date().toISOString() }));
       writeFileSync(join(root, 'failure'), scenario.failure);
       writeFileSync(join(root, 'gh'), `#!/bin/sh
 cd "$(dirname "$0")" || exit 1
@@ -175,7 +175,7 @@ cat pr.json
 `, { mode: 0o755 });
       const result = spawnSync(process.execPath, [new URL('../bin/merge-action-receipt.mjs', import.meta.url).pathname,
         root, 'test/repo', '7', 'a'.repeat(40), 'merged'], {
-        env: { ...process.env, PATH: `${root}:${process.env.PATH}` }, timeout: 10_000,
+        env: { ...process.env, HQ_LAUNCH_REQUEST_ID: 'lrq_fixture', HQ_WORKER_RUN_ID: 'wrun_fixture', PATH: `${root}:${process.env.PATH}` }, timeout: 10_000,
       });
       assert.equal(result.error, undefined);
       assert.equal(result.status === 0, scenario.receipts === 1, String(result.stderr));
@@ -211,7 +211,7 @@ for (const scenario of [
           assert.deepEqual(args, ['pr', 'view', '7', '--repo', 'test/repo', '--json', 'state,headRefOid,mergedAt']);
           assert.equal(options.timeout, 15_000);
           if (viewCalls <= scenario.failures) throw Object.assign(new Error('injected read failure'), { code: scenario.code });
-          return { stdout: JSON.stringify({ state: 'MERGED', headRefOid: scenario.headSha || 'a'.repeat(40), mergedAt: new Date().toISOString() }) };
+          return { stdout: JSON.stringify({ mergeCommit: { oid: 'b'.repeat(40) }, state: 'MERGED', headRefOid: scenario.headSha || 'a'.repeat(40), mergedAt: new Date().toISOString() }) };
         },
       });
       assert.equal(result.payload.ok, true);

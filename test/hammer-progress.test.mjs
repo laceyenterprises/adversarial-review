@@ -141,7 +141,7 @@ test('a retried no-merge writes none and the final failing exit writes exactly o
   assert.equal(final.status, 0, final.stderr);
   assert.equal(run.exit('--final', 'later-wrapper-failure').status, 0);
   const receipts = readdirSync(join(run.dir, 'dispatch/lrq_fixture/hammer-progress/wrun_fixture'));
-  assert.deepEqual(receipts, ['terminal-stop.json']);
+  assert.deepEqual(receipts, ['last-phase.json', 'terminal-stop.json']);
   const receipt = JSON.parse(readFileSync(run.receipt, 'utf8'));
   assert.equal(receipt.reason, 'merge-retry-budget-exhausted');
   assert.equal(receipt.runId, 'wrun_fixture');

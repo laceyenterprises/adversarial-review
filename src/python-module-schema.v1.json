@@ -1717,6 +1717,16 @@
             "__type": "int",
             "__default": 40000000,
             "__min": 1
+          },
+          "non_merge_alert_runs": {
+            "__type": "int",
+            "__default": 6,
+            "__min": 1
+          },
+          "non_merge_alert_tokens": {
+            "__type": "int",
+            "__default": 120000000,
+            "__min": 1
           }
         }
       }

@@ -4483,6 +4483,11 @@ true) and `token_transcripts_compress_after_days` (integer, default 7, minimum
 compression. Shared local overlays remain tolerant of unknown sibling keys.
 Deploy this reader before activating these keys in core's checked-in config.
 
+Hammer terminal merge evidence is documented in
+[the closure runbook](docs/RUNBOOK-ama-closure.md#hammer-terminal-outcome-evidence).
+The ledger receipt distinguishes a proven merge by this run from remediation,
+refusal, cancellation and unknown exits; process success alone proves no merge.
+
 ## Change notes
 
 - LAC-2133 final comment remediation: accept camelCase launch request time and identity in the live closer inspection handoff, including its diagnostic timestamp, while retaining snake_case precedence and custody fences. Offline regressions cover alias timing, identity mismatches and incomplete snapshots; the existing subject/head guard already rejects a missing snapshot.

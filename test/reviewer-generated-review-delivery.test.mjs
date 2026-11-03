@@ -277,6 +277,44 @@ test('REVPOSTSTALL-01: tampered bodies and invalid attribution are not reused', 
   assert.equal(delivery(rootDir, { sessionUuid: 'bad-attribution' }).readReusable(), null);
 });
 
+for (const [label, mutate] of [
+  ['changed processed text', (record) => ({ ...record, reviewText: `${record.reviewText}injected` })],
+  ['missing processed digest', (record) => { const next = { ...record }; delete next.reviewTextSha256; return next; }],
+  ['wrong processed digest', (record) => ({ ...record, reviewTextSha256: '0'.repeat(64) })],
+  ['null processed text replacing a string', (record) => ({ ...record, reviewText: null })],
+  ['non-string processed text', (record) => ({ ...record, reviewText: [] })],
+]) {
+  test(`REVPOSTSTALL-01: ${label} never reuses cached publication text`, (t) => {
+    const rootDir = tempRoot(t);
+    preserveOriginal(rootDir, {});
+    const [{ name, record }] = records(rootDir);
+    const changed = mutate(record);
+    assert.equal(changed.rawReviewText, RAW_REVIEW, 'the original model body stays intact');
+    assert.equal(changed.rawReviewSha256, record.rawReviewSha256);
+    writeFileSync(join(rootDir, 'data', 'reviewer-generated-reviews', name), JSON.stringify(changed));
+    assert.equal(delivery(rootDir, { sessionUuid: RETRY_SESSION }).readReusable(), null);
+  });
+}
+
+test('REVPOSTSTALL-01: intact processed text may differ from the intact raw model reply', (t) => {
+  const rootDir = tempRoot(t);
+  const original = delivery(rootDir);
+  const processed = RAW_REVIEW.trim();
+  assert.equal(original.preserve({ rawReviewText: RAW_REVIEW, dispatch: { reviewText: processed, needsSanitize: false } }), true);
+  const reused = delivery(rootDir, { sessionUuid: RETRY_SESSION }).readReusable();
+  assert.equal(reused.reviewText, processed);
+  assert.equal(reused.rawReviewText, RAW_REVIEW);
+});
+
+test('REVPOSTSTALL-01: a raw-only record still returns through the sanitizer', (t) => {
+  const rootDir = tempRoot(t);
+  assert.equal(delivery(rootDir).preserve({ rawReviewText: RAW_REVIEW, dispatch: { needsSanitize: true } }), true);
+  const reused = delivery(rootDir, { sessionUuid: RETRY_SESSION }).readReusable();
+  assert.equal(reused.reviewText, undefined);
+  assert.equal(reused.rawReviewText, RAW_REVIEW);
+  assert.equal(reused.needsSanitize, true);
+});
+
 test('REVPOSTSTALL-01: the fallback producer is bound, not the pre-dispatch route', async (t) => {
   const rootDir = tempRoot(t);
   const routed = delivery(rootDir, { reviewerModel: 'codex', botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN' });

@@ -34,8 +34,12 @@ SHA-256 of the exact diff given to the model). `reviewerModel` and `botTokenEnv`
 record the producer that actually ran. An oversized-route fallback that
 switched reviewer family therefore never matches the pre-dispatch route.
 
-`rawReviewText` must also match `rawReviewSha256`, and stored attribution must
-validate again. Otherwise the record is not reused. Mismatched records are left
+`rawReviewText` must also match `rawReviewSha256`. A string `reviewText` must
+match its separate `reviewTextSha256`; a raw-only record must carry null for
+both cached-text fields and returns through the sanitizer. Missing digests,
+invalid cached-text types and mismatches fail closed, including older records
+without the cached digest. Stored attribution must validate again. Otherwise
+the record is not reused. Mismatched records are left
 in place as evidence. The newest matching reusable record wins.
 
 ## Fields
@@ -48,7 +52,8 @@ in place as evidence. The newest matching reusable record wins.
 | `generatedAt` | ISO-8601 | When the reply passed the posting contract. |
 | `deliveryState` | `pending-delivery`, `deferred`, `write-started`, `delivered` | See lifecycle. |
 | `rawReviewText`, `rawReviewSha256` | string, hex | Model reply and its digest. |
-| `reviewText`, `needsSanitize`, `chunked`, `elisions` | as produced by dispatch | Replayed through the same sanitize/reply-contract path on redelivery. |
+| `reviewText`, `reviewTextSha256` | string and hex, or both null | Cached processed payload and its digest; checked independently of the raw model reply before reuse. |
+| `needsSanitize`, `chunked`, `elisions` | as produced by dispatch | Replayed through the same sanitize/reply-contract path on redelivery. |
 | `execution` | object or null | Original execution metadata; posted review attribution stays with the original run. |
 | `reviewerAttribution` | object or null | Validated original attribution; a redelivery posts with this value, never the retry session's. |
 | `deferrals[]` | `{sessionUuid, at, phase, elapsedMs, deadlineMs}` | One entry per delivery deadline expiry before a GitHub write. |

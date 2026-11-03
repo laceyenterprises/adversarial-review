@@ -1388,6 +1388,10 @@
         "src/reviewer-process-deadline.mjs"
       ],
       "owner": "hosted reviewer delivery (REVPOSTSTALL-01)",
+      "bodyDigestFields": [
+        "rawReviewSha256",
+        "reviewTextSha256"
+      ],
       "deliveryStateValues": ["pending-delivery", "deferred", "write-started", "delivered"]
     }
   ]

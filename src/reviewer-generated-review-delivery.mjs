@@ -212,6 +212,13 @@ function createGeneratedReviewDelivery({
         log.warn?.(`[reviewer] REVPOSTSTALL-01: preserved review ${name} failed its body digest; not reused`);
         continue;
       }
+      const cachedTextValid = record.reviewText === null
+        ? record.reviewTextSha256 === null
+        : typeof record.reviewText === 'string' && sha256(record.reviewText) === record.reviewTextSha256;
+      if (!cachedTextValid) {
+        log.warn?.(`[reviewer] REVPOSTSTALL-01: preserved review ${name} failed its cached text digest; not reused`);
+        continue;
+      }
       if (record.reviewerAttribution && !safeAttribution(record.reviewerAttribution)) {
         log.warn?.(`[reviewer] REVPOSTSTALL-01: preserved review ${name} carries invalid attribution; not reused`);
         continue;
@@ -272,6 +279,7 @@ function createGeneratedReviewDelivery({
         rawReviewText,
         rawReviewSha256: sha256(rawReviewText),
         reviewText: typeof dispatch.reviewText === 'string' ? dispatch.reviewText : null,
+        reviewTextSha256: typeof dispatch.reviewText === 'string' ? sha256(dispatch.reviewText) : null,
         needsSanitize: dispatch.needsSanitize === true,
         chunked: dispatch.chunked === true,
         elisions: Array.isArray(dispatch.elisions) ? dispatch.elisions : [],

@@ -206,3 +206,34 @@ test('recovery replay: the deployed watcher composition resumes intake while the
     delete process.env.GH_TOKEN;
   }
 });
+
+test('review post: the posting bot token is admitted past a poisoned anonymous bucket; its own low budget still defers', async () => {
+  const { __test__: reviewer } = await import('../src/reviewer.mjs');
+  await seed('fake-lac2075-operator-p', 0);
+  const post = async (token) => {
+    const calls = [];
+    const run = scoped(() => reviewer.postGitHubReview('fixture/repo', 42, 'review body', 'GH_CODEX_REVIEWER_TOKEN',
+      async (command, args, options = {}) => {
+        calls.push({ command, token: options.env?.GH_TOKEN });
+        return { stdout: JSON.stringify({ id: 4242, commit_id: 'reviewed-head-sha' }) };
+      }, {
+        rootDir: stateDir,
+        env: { GH_CODEX_REVIEWER_TOKEN: token, GITHUB_TOKEN: 'fake-lac2075-operator-p', PATH: '/usr/bin', HOME: stateDir },
+        reviewerIdentity: 'codex-reviewer-lacey',
+        reviewerHeadSha: 'reviewed-head-sha',
+        prepareReviewWrite: async () => {},
+        log: { warn() {}, error() {}, log() {}, info() {} },
+      }));
+    return { run, calls };
+  };
+  assert.ok(bucket(null).remaining < 200);
+  const healthy = await post('fake-lac2075-reviewer-healthy');
+  assert.deepEqual(await healthy.run, { reviewArtifact: { id: '4242', commitId: 'reviewed-head-sha' } });
+  assert.deepEqual(healthy.calls, [{ command: 'gh', token: 'fake-lac2075-reviewer-healthy' }]);
+
+  await seed('fake-lac2075-reviewer-low', 4);
+  const low = await post('fake-lac2075-reviewer-low');
+  await assert.rejects(low.run, err => err.budgetDeferred === true
+    && err.observation.credential === githubCredential({ token: 'fake-lac2075-reviewer-low' }));
+  assert.equal(low.calls.length, 0, 'a genuinely low posting token must not reach the GitHub write');
+});

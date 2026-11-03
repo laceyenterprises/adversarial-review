@@ -35,8 +35,9 @@ row. Waiting for the next reset does not restore intake.
   were watcher intake discovery (`github-pr` subject adapter `withApiTelemetry`),
   the watcher's own `withApiTelemetry`, `execGhJson` (read preflight plus
   success and error header parsing), the `github-api` adapter-read wrapper,
-  comment dedup lookup and comment write, review-body capture, the live PR
-  lifecycle lookup, and the raw-blob diff fetch. In a scoped poll, a
+  comment dedup lookup and comment write, the reviewer's pre-write review-post
+  preflight, review-body capture, the live PR lifecycle lookup, and the
+  raw-blob diff fetch. In a scoped poll, a
   `default/core` balance below the floor therefore deferred authenticated
   requests whose own budget was healthy or unknown.
 - **The watcher's own token was not shown to be low.** In the same polls,
@@ -45,7 +46,7 @@ row. Waiting for the next reset does not restore intake.
   one authenticated bucket, `graphql` with 4,862 remaining, and no
   authenticated `core` bucket below the floor.
 - **Offline reproduction.** `test/github-budget-credential-scope.test.mjs`
-  uses disposable fake tokens and an isolated state file. All eight scenarios
+  uses disposable fake tokens and an isolated state file. All nine scenarios
   fail on `origin/main` and pass with this fix.
 
 ## Unproven
@@ -75,23 +76,26 @@ contract is recorded in
 - Adapter reads use the new `githubAdapterReadCredential`. It is extracted from
   the label executor's existing derivation: a bound `--pat-env` token, otherwise
   `adapter:<selector>`.
-- Comment writes use the selected bot token. They never use the parent's
-  operator `GITHUB_TOKEN`.
+- Comment writes and the `reviewer.mjs` `postGitHubReview` pre-write
+  preflight use the posting bot token. The review post reads the mutable
+  `token` at call time, so a post retried after an auth refresh is admitted
+  against the refreshed token. Neither path uses the parent's operator
+  `GITHUB_TOKEN`.
 
 The change adds no new throttle layer. The floor (200), the urgent-scope
 reserve, zero-balance deferral, fail-closed review gates, exact-head
 publication and identity attribution are unchanged. Requests that send no token
 still use `default`.
 
-**Deferred sibling.** The pre-write preflight in `reviewer.mjs`
-`postGitHubReview` still calls `awaitThrottleIfNeeded()`, which uses the
-`default` bucket. Open PR 1702 (LAC-2151) inserts its write-boundary hook on the
-next line, and its regression anchors that exact text. Editing the line here
-would conflict with that PR and break its test. Once PR 1702 merges, a one-line
-follow-up should pass `githubCredential({ token })`. Until then, an unscoped
-review post can still wait on the anonymous bucket. Reads after the review is
-generated, such as `fetchPullRequestHeadAndState`, go through the repaired
-`github-api` paths.
+**Integration with PR 1702 (LAC-2151).** Without the review-post fix, a
+restored intake would generate new reviews and then stall their writes behind
+the anonymous bucket again. This PR therefore changes the `reviewer.mjs`
+pre-write preflight line in place, with no change to the line count (ARC-10).
+Open PR 1702 inserts its `opts.onBeforeReviewWrite?.()` write-boundary hook
+directly after that line, and its regression anchors the old
+`await awaitThrottleIfNeeded();` text. Whichever PR lands second must keep both
+changes: the credential-bound preflight, followed by the hook. That PR's anchor
+must also be updated to the new text. This PR does not edit PR 1702's branch.
 
 ## Recursive-recovery rationale
 

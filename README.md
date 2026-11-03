@@ -4490,7 +4490,7 @@ refusal, cancellation and unknown exits; process success alone proves no merge.
 
 ## Change notes
 
-- LAC-2075: GitHub budget preflights and header observations now name the credential that sends the request. A low anonymous `default` bucket can no longer defer watcher intake or other authenticated reads and writes, and one token cannot borrow another's budget or poison it. A low or zero budget for the sending token still defers. The floor, urgent reserve and fail-closed gates are unchanged. The `reviewer.mjs` post preflight follows after PR 1702 merges. See the [SEV3 report](docs/postmortems/SEV3-LAC-2075-authenticated-github-reads-deferred-by-the-anonymous-budget-2026-11-03.md).
+- LAC-2075: GitHub budget preflights and header observations now name the credential that sends the request. A low anonymous `default` bucket can no longer defer watcher intake or other authenticated reads and writes, and one token cannot borrow another's budget or poison it. A low or zero budget for the sending token still defers. This also covers the `reviewer.mjs` review-post preflight. The floor, urgent reserve and fail-closed gates are unchanged. See the [SEV3 report](docs/postmortems/SEV3-LAC-2075-authenticated-github-reads-deferred-by-the-anonymous-budget-2026-11-03.md).
 
 - PR #1701 final comment remediation: strengthen offline fixtures to assert that the known-published-head stop emits one progress call and that successful merges persist run-scoped exact-head proof from the post-merge JSON read. The outcome classifier always returns an object, including for missing live state; production behavior, persistent shapes, lifecycle states and smoke promises remain unchanged.
 

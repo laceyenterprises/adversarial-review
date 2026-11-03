@@ -23,7 +23,7 @@ the child environment it receives: `buildGhEnv` passes `GH_TOKEN` before
 Watcher Octokit calls use `GITHUB_TOKEN`, which is the dynamic provider's
 source. Adapter reads use the token that the watcher broker signal binds through
 `--pat-env`; without one they use `adapter:<selector>`. Bot-authored comment
-writes use the selected bot token. Only a request that sends no token uses the
+and review writes use the posting bot token. Only a request that sends no token uses the
 anonymous `default` bucket; an authenticated request never waits on that bucket
 or charges it. A low or zero balance for the sending credential still defers
 that request. Ambient `gh` login without an environment token also resolves to

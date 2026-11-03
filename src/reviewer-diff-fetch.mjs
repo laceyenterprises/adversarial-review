@@ -4,8 +4,8 @@ import { promisify } from 'node:util';
 
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
 import { getCachedDiff, putCachedDiff } from './diff-cache.mjs';
-import { GH_LOOKUP_TIMEOUT_MS, execGhWithRetry } from './gh-cli.mjs';
-import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
+import { GH_LOOKUP_TIMEOUT_MS, buildAllowlistedGhEnv, execGhWithRetry } from './gh-cli.mjs';
+import { awaitThrottleIfNeeded, githubCredential } from './rate-limit-throttle.mjs';
 import { buildGhErrorDetail } from './reviewer-util.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -189,7 +189,8 @@ async function fetchRawAddedFileForDiff(repo, prNumber, file, {
   const startedAt = Date.now();
   const blobSha = String(file?.sha || '').trim();
   try {
-    await awaitThrottleIfNeededImpl('core');
+    // execGhWithRetry sends process.env's token; admit against it (LAC-2075).
+    await awaitThrottleIfNeededImpl('core', githubCredential({ env: buildAllowlistedGhEnv(process.env) }));
     const { stdout } = await execGhWithRetryImpl({
       execFileImpl: async (command, args, options) => execFileImpl(
         command,

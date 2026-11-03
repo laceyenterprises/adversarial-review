@@ -380,7 +380,7 @@ import {
 } from './watcher-poll-starvation-signal.mjs';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
 import {
-  awaitThrottleIfNeeded,
+  awaitThrottleIfNeeded, githubCredential,
   extractRateLimitObservation,
   recordResponseRateLimit,
   resolveRateLimitSharedStatePath,
@@ -552,11 +552,11 @@ function apiStatusFromResult(result, fallback = 200) {
 }
 
 async function withApiTelemetry(category, { repo = null, prNumber = null, successStatus = 200 } = {}, action) {
-  const startedAt = Date.now();
+  const startedAt = Date.now(), credential = githubCredential({ token: process.env.GITHUB_TOKEN || null }); // the watcher Octokit's token, never anonymous (LAC-2075)
   try {
-    await awaitThrottleIfNeeded();
+    await awaitThrottleIfNeeded('core', credential);
     const result = await action();
-    await recordResponseRateLimit(extractRateLimitObservation(result?.headers));
+    await recordResponseRateLimit({ ...extractRateLimitObservation(result?.headers), credential });
     recordApiCall({
       category,
       repo,
@@ -566,7 +566,7 @@ async function withApiTelemetry(category, { repo = null, prNumber = null, succes
     });
     return result;
   } catch (err) {
-    await recordResponseRateLimit(extractRateLimitObservation(err?.response?.headers));
+    await recordResponseRateLimit({ ...extractRateLimitObservation(err?.response?.headers), credential });
     recordApiCall({
       category,
       repo,

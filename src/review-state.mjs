@@ -14,7 +14,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { CODE_PR_DOMAIN_ID, makeCodePrSubjectExternalId } from './identity-shapes.mjs';
-import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
+import { awaitThrottleIfNeeded, githubCredential } from './rate-limit-throttle.mjs';
 import { ensureReviewCycleCapSchema } from './review-cycle-cap.mjs';
 import { duplicateFamilySchemaTableNames, ensureDuplicateFamilySchema } from './duplicate-family-state.mjs';
 import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
@@ -965,7 +965,8 @@ async function fetchLivePRLifecycle({
   let stdout;
   try {
     if (signal?.aborted) return null;
-    await awaitThrottleImpl();
+    // The lookup's gh subprocess inherits process.env; admit against that token (LAC-2075).
+    await awaitThrottleImpl('core', githubCredential({ env: process.env }));
     // A bounded caller may abandon this lookup during shared backoff.
     if (signal?.aborted) return null;
     const result = await meteredExecFile(execFileImpl,

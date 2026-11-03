@@ -31,7 +31,7 @@ import {
   adapterUnsupportedError,
   writeAdapterIssueComment,
 } from '../../../github-adapter-client.mjs';
-import { awaitThrottleIfNeeded } from '../../../rate-limit-throttle.mjs';
+import { awaitThrottleIfNeeded, githubCredential } from '../../../rate-limit-throttle.mjs';
 import { redactBulletList, redactPathlikeText, redactPublicSafeText, redactSensitiveText } from './redaction.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -1046,7 +1046,8 @@ async function findExistingRemediationComment({
 }) {
   if (!marker) return { found: false };
   try {
-    await awaitThrottleIfNeeded();
+    // Budget admission follows the token this lookup sends (LAC-2075).
+    await awaitThrottleIfNeeded('core', githubCredential({ env }));
     const { stdout } = await meteredExecFile(execFileImpl,
       'gh',
       [
@@ -1215,7 +1216,9 @@ async function postRemediationOutcomeComment({
   }
 
   try {
-    await awaitThrottleIfNeeded();
+    // The write spends the selected bot token's budget, not the anonymous or
+    // the parent's operator bucket (LAC-2075).
+    await awaitThrottleIfNeeded('core', githubCredential({ token }));
     let ghResult = null;
     let adapterHandled = false;
     try {

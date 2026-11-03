@@ -15,12 +15,13 @@ import { performance } from 'node:perf_hooks';
 import { promisify } from 'node:util';
 import { apiStatusFromError } from '../../../api-telemetry.mjs';
 import {
+  githubAdapterReadCredential,
   readAdapterOpenPullRequests,
   readAdapterPullRequest,
   readAdapterPullRequestDiff,
   resolveGitHubAdapterBin,
 } from '../../../github-adapter-client.mjs';
-import { awaitThrottleIfNeeded, extractRateLimitObservation, recordResponseRateLimit } from '../../../rate-limit-throttle.mjs';
+import { awaitThrottleIfNeeded, extractRateLimitObservation, githubCredential, recordResponseRateLimit } from '../../../rate-limit-throttle.mjs';
 import { auditUntrustedSkip, createPrTrustGate, createRepoPermissionResolver } from '../../../untrusted-pr-gate.mjs';
 import { builderClassFromTitle } from './title-tagging.mjs';
 
@@ -260,17 +261,21 @@ function createGitHubPRSubjectAdapter({
     return Boolean(resolveGitHubAdapterBin({ env, rootDir }));
   }
 
+  // Budget admission and header observations follow the requesting credential
+  // (LAC-2075): the watcher Octokit authenticates with GITHUB_TOKEN, and adapter
+  // reads with their bound token or selector. Never the anonymous bucket.
   async function withApiTelemetry(category, {
     repo = null,
     prNumber = null,
     extra = null,
     recordNullResult = true,
+    credential = githubCredential({ token: env?.GITHUB_TOKEN || null }),
   } = {}, action) {
     const startedAt = monotonicNowMs();
     try {
-      await awaitThrottleIfNeeded();
+      await awaitThrottleIfNeeded('core', credential);
       const result = await action();
-      await recordResponseRateLimit(extractRateLimitObservation(result?.headers));
+      await recordResponseRateLimit({ ...extractRateLimitObservation(result?.headers), credential });
       if (recordNullResult || (result !== null && result !== undefined)) {
         recordApiCall?.({
           category,
@@ -283,7 +288,7 @@ function createGitHubPRSubjectAdapter({
       }
       return result;
     } catch (err) {
-      await recordResponseRateLimit(extractRateLimitObservation(err?.response?.headers));
+      await recordResponseRateLimit({ ...extractRateLimitObservation(err?.response?.headers), credential });
       recordApiCall?.({
         category,
         repo,
@@ -302,6 +307,7 @@ function createGitHubPRSubjectAdapter({
       ...details,
       extra: { transport: 'github-adapter' },
       recordNullResult: false,
+      credential: githubAdapterReadCredential(env),
     }, action);
   }
 

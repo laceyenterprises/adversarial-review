@@ -8,6 +8,11 @@ import { fileURLToPath } from 'node:url';
 import { recordApiCall } from './api-telemetry.mjs';
 
 const DEFAULT_THROTTLE_FLOOR = 200;
+// A floor may never exceed what a bucket can hold. The anonymous quota (limit
+// 60) can never reach a 200 floor, so an uncapped floor deferred every
+// anonymous admission until reset, then again on the next observation
+// (WATCHERANONBUCKET-01). This fraction of the observed limit caps the floor.
+const LIMIT_FLOOR_FRACTION = 0.1;
 const MIN_THROTTLE_FLOOR = 50;
 const MAX_THROTTLE_FLOOR = 1000;
 const LOCK_RETRY_MS = 50;
@@ -60,14 +65,34 @@ function isGitHubRateLimitError(err) {
       [err?.message, err?.stderr, err?.stdout, err?.response?.data?.message].join('\n'));
 }
 
+// The effective floor for one bucket: the configured floor, capped by a
+// fraction of the bucket's observed limit (never below 1, so a zero balance
+// still defers). A bucket without a recorded limit keeps the configured floor.
+function githubBudgetFloor(observation, configuredFloor = DEFAULT_THROTTLE_FLOOR) {
+  const limit = Number(observation?.limit);
+  if (!Number.isInteger(limit) || limit <= 0) return configuredFloor;
+  return Math.min(configuredFloor, Math.max(1, Math.floor(limit * LIMIT_FLOOR_FRACTION)));
+}
+
+function githubBudgetBelowFloor(observation, configuredFloor = DEFAULT_THROTTLE_FLOOR) {
+  return Boolean(observation) && observation.remaining < githubBudgetFloor(observation, configuredFloor);
+}
+
+// The message names the bucket that deferred (`default`, `token-<digest>`,
+// `adapter:<selector>`), so an operator can tell an anonymous deferral from a
+// genuinely low authenticated one. Tokens never appear: only their digest key.
 class GitHubBudgetDeferredError extends Error {
-  constructor(observation) {
+  constructor(observation, { credential = observation?.credential || 'default', floor = null } = {}) {
     observation = { ...observation, resetAt: normalizeTimestamp(observation.resetAt)
       || new Date(Date.now() + UNKNOWN_RATE_LIMIT_RESET_MS).toISOString() };
-    super(`GitHub ${observation.resource} budget deferred until ${observation.resetAt}`);
+    const balance = Number.isInteger(observation.remaining)
+      ? `; remaining=${observation.remaining}${Number.isInteger(observation.limit) ? `/${observation.limit}` : ''}` : '';
+    super(`GitHub ${observation.resource} budget deferred until ${observation.resetAt} `
+      + `(credential=${credential}${balance}${Number.isInteger(floor) ? `; floor=${floor}` : ''})`);
     this.name = 'GitHubBudgetDeferredError';
     this.rateLimited = true;
     this.budgetDeferred = true;
+    this.credential = credential;
     this.observation = observation;
   }
 }
@@ -123,6 +148,7 @@ function normalizeObservation(observation = null) {
     resource = DEFAULT_RESOURCE,
   } = observation;
   const normalizedRemaining = Number.parseInt(String(remaining ?? ''), 10);
+  const normalizedLimit = Number.parseInt(String(observation.limit ?? ''), 10);
   const normalizedResetAt = normalizeTimestamp(resetAt);
   const normalizedObservedAt = normalizeTimestamp(observedAt);
   if (!Number.isInteger(normalizedRemaining) || normalizedRemaining < 0) return null;
@@ -132,6 +158,7 @@ function normalizeObservation(observation = null) {
     ...(observation.credential && observation.credential !== 'default' ? { credential: observation.credential } : {}),
     ...(observation.credentialSelector ? { credentialSelector: observation.credentialSelector } : {}),
     remaining: normalizedRemaining,
+    ...(Number.isInteger(normalizedLimit) && normalizedLimit > 0 ? { limit: normalizedLimit } : {}),
     resetAt: normalizedResetAt,
     observedAt: normalizedObservedAt,
     ...(Number.isInteger(observation.rateLimitedCalls) && observation.rateLimitedCalls > 0
@@ -182,6 +209,7 @@ function mergeResourceObservations(current, incoming, nowMs = Date.now()) {
     ...(left.credential ? { credential: left.credential } : {}),
     ...(right.credentialSelector || left.credentialSelector ? { credentialSelector: right.credentialSelector || left.credentialSelector } : {}),
     remaining: Math.min(left.remaining, right.remaining),
+    ...(right.limit || left.limit ? { limit: right.limit || left.limit } : {}),
     ...(left.resetUnknown === true && right.resetUnknown === true ? { resetUnknown: true } : {}),
     resetAt: left.resetAt,
     observedAt: observationObservedAtMs(right) > observationObservedAtMs(left)
@@ -362,6 +390,7 @@ function extractRateLimitObservation(headers, { observedAt = new Date().toISOStr
   return normalizeObservation({
     resource: lookup('x-ratelimit-resource') || resource,
     remaining: rateLimited ? 0 : lookup('x-ratelimit-remaining'),
+    limit: lookup('x-ratelimit-limit'),
     resetAt: (rateLimited && retryReset) || lookup('x-ratelimit-reset') || retryReset,
     observedAt,
   });
@@ -466,29 +495,31 @@ function createRateLimitThrottle({
     const key = githubBudgetKey(resource, credential);
     const scope = currentGitHubBudgetScope();
     const limited = scopedGitHubRateLimit(resource, credential, nowMs());
-    if (limited) throw new GitHubBudgetDeferredError(limited);
+    if (limited) throw new GitHubBudgetDeferredError(limited, { credential });
     // Scoped callers must decide independently of another caller's sleep or
     // deferral. Only un-scoped callers share the in-flight wait below.
     if (scope) {
       const floor = resolveThrottleFloor(env, logger);
       const currentObservations = mergeObservationMaps(inMemoryObservations, await readSharedState(), nowMs());
       const current = currentObservations[key] || null;
-      if (!current || current.remaining >= floor) return false;
+      // An unknown bucket admits: unknown is not low.
+      if (!githubBudgetBelowFloor(current, floor)) return false;
       // Reserve remaining capacity for an already-ready close; zero cannot
       // serve any request, urgent or otherwise.
       if (scope.urgent && current.remaining > 0) return false;
       scope.deferred = true;
-      throw new GitHubBudgetDeferredError(current);
+      throw new GitHubBudgetDeferredError(current, { credential, floor: githubBudgetFloor(current, floor) });
     }
     if (activeThrottlePromises.has(key)) {
       return activeThrottlePromises.get(key);
     }
     const activePromise = (async () => {
       try {
-        const floor = resolveThrottleFloor(env, logger);
+        const configuredFloor = resolveThrottleFloor(env, logger);
         const currentObservations = mergeObservationMaps(inMemoryObservations, await readSharedState(), nowMs());
         const current = currentObservations[key] || null;
-        if (!current || current.remaining >= floor) return false;
+        if (!githubBudgetBelowFloor(current, configuredFloor)) return false;
+        const floor = githubBudgetFloor(current, configuredFloor);
         const waitMs = Math.max(0, observationResetAtMs(current) - nowMs());
         const resolvedSharedStatePath = resolveSharedStatePathNow();
         recordApiCallImpl?.({
@@ -506,6 +537,7 @@ function createRateLimitThrottle({
         if (waitMs > 0) {
           await writeThrottleStatusFile(resolvedSharedStatePath, {
             resource: normalizedResource,
+            credential,
             remaining: current.remaining,
             floor,
             throttledUntil: current.resetAt,
@@ -579,6 +611,7 @@ function readGitHubBudgetStatus({ rootDir = TOOL_ROOT, env = process.env, nowMs 
     [resource, buckets[githubBudgetKey(resource, credential)]])) };
   return Object.fromEntries([...new Set(['core', 'graphql', ...Object.keys(buckets)])].map(resource => [resource, {
     remaining: buckets[resource]?.remaining ?? null,
+    ...(buckets[resource]?.limit ? { limit: buckets[resource].limit } : {}),
     resetAt: buckets[resource]?.resetAt ?? null,
     rateLimitedCalls: buckets[resource]?.rateLimitedCalls || 0,
     ...(buckets[resource]?.credential ? { credential: buckets[resource].credential } : {}),
@@ -592,6 +625,8 @@ export {
   GitHubBudgetDeferredError,
   isGitHubRateLimitError,
   markGitHubRateLimited,
+  githubBudgetBelowFloor,
+  githubBudgetFloor,
   githubCredential,
   githubBudgetKey,
   scopedGitHubRateLimit,

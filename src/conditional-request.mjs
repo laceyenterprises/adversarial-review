@@ -100,6 +100,7 @@ async function fetchConditionalRestPage({
     await recordResponseRateLimit({
       credential,
       remaining: getResponseHeader(response?.headers, 'x-ratelimit-remaining'),
+      limit: getResponseHeader(response?.headers, 'x-ratelimit-limit'),
       resetAt: getResponseHeader(response?.headers, 'x-ratelimit-reset'),
       observedAt: new Date().toISOString(),
     });
@@ -138,6 +139,7 @@ async function fetchConditionalRestPage({
     await recordResponseRateLimit({
       credential,
       remaining: getResponseHeader(err?.response?.headers, 'x-ratelimit-remaining'),
+      limit: getResponseHeader(err?.response?.headers, 'x-ratelimit-limit'),
       resetAt: getResponseHeader(err?.response?.headers, 'x-ratelimit-reset'),
       observedAt: new Date().toISOString(),
     });

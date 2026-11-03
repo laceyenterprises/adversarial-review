@@ -255,8 +255,8 @@
       "schemaSurface": "src/rate-limit-throttle.mjs",
       "storeVersion": 2,
       "bucketKey": "githubBudgetKey(resource, credential): token-<sha256-prefix-24>/<resource> for the sending token, adapter:<selector>/<resource> for unbound adapter auth, or bare resource for default (no token sent)",
-      "optionalBucketFields": ["credential", "credentialSelector", "rateLimitedCalls"],
-      "relatedSchemaSurfaces": ["src/metered-gh.mjs", "bin/metered-gh.mjs", "src/runtime-status.mjs", "src/github-api.mjs", "src/github-adapter-client.mjs", "src/adapters/subject/github-pr/index.mjs", "src/conditional-request.mjs"],
+      "optionalBucketFields": ["credential", "credentialSelector", "limit", "rateLimitedCalls"],
+      "relatedSchemaSurfaces": ["src/metered-gh.mjs", "bin/metered-gh.mjs", "src/runtime-status.mjs", "src/github-api.mjs", "src/github-adapter-client.mjs", "src/adapters/subject/github-pr/index.mjs", "src/conditional-request.mjs", "src/watcher-github-budget.mjs"],
       "owner": "shared GitHub request throttle"
     },
     {

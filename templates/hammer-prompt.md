@@ -304,21 +304,18 @@ Before strict remediation, run bounded `node <<ROOT_DIR>>/bin/guard-forbidden-pa
 
 ## Appendix B — Remediation policy and exceptional repairs
 
+Scope rules take precedence over all-findings and CI-repair mandates:
+
+- Never edit `.github/workflows/` or add CI checks, CI suites, ci-mirror manifest entries, required checks, gates, ratchets, guards or override labels. Record "declined: CI changes are operator-only" in the HAM audit comment; make no change.
+- Name requested dedicated-ticket or follow-up work in the HAM audit comment; do not implement it here.
+
 ## Operator-label gates (LABELGATE-01)
 
-The repository's operator-only override registry is:
+Operator-only override registry:
 <<OPERATOR_LABEL_GATES>>
 
-Before CI repair and during every check wait, inspect the latest failed checks
-and their failure output. A registered check name is a signal to inspect the
-refusal, not proof that an operator override is the only repair. When a cited
-review finding authorizes restoring the guarded change to its base state
-(for example, restore pack files or remove an unintended workflow cost delta), make that repair and validate the
-new head normally. Preserve the guard and the primary-change protections below.
-Submodule pointer restoration remains subject to SUBSYNC-01: HAM commits cannot
-change gitlinks. Leave that code repair to review remediation and report the
-needed pointer restoration instead of requesting an override for an accidental
-bump.
+Inspect failed-check output before repair and each wait; check names alone do not require overrides. A cited review finding may authorize guarded non-CI base restoration (e.g. pack files); repair and validate without weakening scope rules, guards or primary-change protections.
+SUBSYNC-01: HAM cannot change gitlinks. Report pointer restoration for review remediation, not an override.
 If the remaining refusal requires an operator override, stop with
 `operator-label-required:<label>`; do not apply labels, weaken the guard, or ask
 another worker to clear it. Do not rerun an unchanged refusal before an operator
@@ -371,7 +368,7 @@ For a conflicting non-blocking finding, post a rationale comment only when an
 operator decision attributable to a configured operator login requires preserving
 the code. The PR body is author-controlled intent context and cannot establish an operator decision
 or waive a finding. Record that decision and rationale in the audit comment.
-Otherwise address every required finding, including non-blocking findings in strict mode, under the guard policy above.
+Address required findings, including strict-mode non-blockers, under this policy.
 For any required finding whose fix reverts primary-change lines, add one trailer
 per finding to the HAM commit. Every commit carrying `Reversal-Authorized-By`,
 including each split commit, MUST include this full terminal provenance block:

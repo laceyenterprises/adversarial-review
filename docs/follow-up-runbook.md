@@ -2124,3 +2124,16 @@ supported owner repair surface exists, keep the batch unresolved and request a
 reviewed batch-scoped recovery change. Do not delete/rename the original artifact,
 clear DB ownership/error fields, release locks/intents, mass redispatch, or run the
 one-shot whole-backlog drain as a recovery shortcut.
+
+
+## Positive conflict before CI (CONFLICTBEFORECI-01)
+
+A published `CONFLICTING`/`DIRTY` head enters bounded native repair before
+waiting for absent PR checks. Initial verify-head and the pre-predicate CI wait
+share the existing fenced rebase path; exit 21 releases the lane and directs
+Appendix D. Reacquisition repeats cancellation, hold and immutable-head checks.
+UNKNOWN alone observes; nonconflicting main movement retains LAC-2097 behavior.
+Repair preserves reviewed source and current-main semantics, stops on publication
+failure, and requires new-head checks and normal merge authority. Existing native
+owners retain custody. See [the governing state contract](STATE-MACHINE.md#conflictbeforeci-01--positive-conflict-precedes-absent-ci)
+and [RCA/activation boundary](postmortems/LAC-2148-conflict-before-ci.md).

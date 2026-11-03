@@ -68,11 +68,12 @@ if (args[0] === 'advance-base') {
     (process.env.SCENARIO === 'ci-shared-deadline' && state.checkReads === 1) ||
     (retryScenario && state.retried && (retryReads === 1 || ['ci-pending', 'ci-shared-deadline'].includes(process.env.SCENARIO)));
   const red = state.retried && process.env.SCENARIO === 'ci-red';
-  if (state.retried && process.env.SCENARIO === 'ci-head-moved') state.head = state.foreign;
-  const checks = [{ name: 'fixture-test', status: pending ? 'IN_PROGRESS' : 'COMPLETED',
+  if ((state.retried && process.env.SCENARIO === 'ci-head-moved') || process.env.SCENARIO === 'ci-absent-conflict-moved') state.head = state.foreign;
+  const absentConflict = process.env.SCENARIO.startsWith('ci-absent-conflict');
+  const checks = absentConflict || process.env.SCENARIO === 'initial-unknown' ? [] : [{ name: 'fixture-test', status: pending ? 'IN_PROGRESS' : 'COMPLETED',
     conclusion: pending ? null : red ? 'FAILURE' : 'SUCCESS' }];
-  const mergeStateStatus = process.env.SCENARIO.startsWith('ci-clean-') ? 'CLEAN' : state.behind ? 'BEHIND' : 'CLEAN';
-  const mergeable = !state.retried && process.env.SCENARIO === 'ci-disjoint-conflict' ? 'CONFLICTING' : 'MERGEABLE';
+  const mergeStateStatus = process.env.SCENARIO === 'initial-unknown' ? 'UNKNOWN' : process.env.SCENARIO.startsWith('ci-clean-') ? 'CLEAN' : state.behind ? 'BEHIND' : 'CLEAN';
+  const mergeable = process.env.SCENARIO === 'initial-unknown' ? 'UNKNOWN' : !state.retried && (process.env.SCENARIO === 'ci-disjoint-conflict' || absentConflict) ? 'CONFLICTING' : 'MERGEABLE';
   const verdict = evaluateMergeEligibility({ verdict: 'settled-success', leaseHeld: true,
     requiredChecks: checks, branchProtectionRequired: process.env.HAM_BRANCH_PROTECTION_REQUIRED === 'true', mergeable,
     requiresUpToDateBranch: process.env.HAM_REQUIRES_UP_TO_DATE !== '0',
@@ -122,7 +123,7 @@ if (args[0] === 'advance-base') {
     assert.ok(args.includes('id=synthetic-pr'));
     assert.equal(localHead(), state.head);
     assert.ok(existsSync(join(dir, 'lease-held')));
-    if (process.env.SCENARIO === 'conflict' || (state.checkReads && ['ci-conflict', 'ci-disjoint-conflict'].includes(process.env.SCENARIO))) {
+    if (['conflict', 'initial-absent-conflict', 'initial-dirty-conflict'].includes(process.env.SCENARIO) || (state.checkReads && ['ci-conflict', 'ci-disjoint-conflict', 'ci-absent-conflict'].includes(process.env.SCENARIO))) {
       console.error('synthetic rebase conflict: resolve conflicts');
       process.exit(1);
     }
@@ -195,8 +196,8 @@ if (args[0] === 'advance-base') {
     else if (args.includes('reviews')) console.log('{"reviews":[]}');
     else if (args.includes('title')) console.log('Repair synthetic surface');
     else console.log(JSON.stringify({ number: 42, headRefOid: state.head, baseRefName: 'main',
-      state: state.merged ? 'MERGED' : state.checkReads && process.env.SCENARIO === 'ci-closed' ? 'CLOSED' : 'OPEN', isDraft: false, mergeable: 'MERGEABLE',
-      mergeStateStatus: state.behind ? 'BEHIND' : 'CLEAN', labels: state.checkReads && process.env.SCENARIO === 'ci-canceled' ? [{ name: 'no-merge-hold' }] : [], statusCheckRollup: [],
+      state: state.merged ? 'MERGED' : state.checkReads && process.env.SCENARIO === 'ci-closed' ? 'CLOSED' : 'OPEN', isDraft: false, mergeable: process.env.SCENARIO === 'initial-unknown' ? 'UNKNOWN' : process.env.SCENARIO === 'initial-absent-conflict' ? 'CONFLICTING' : 'MERGEABLE',
+      mergeStateStatus: ['initial-unknown', 'initial-absent-conflict'].includes(process.env.SCENARIO) ? 'UNKNOWN' : process.env.SCENARIO === 'initial-dirty-conflict' ? 'DIRTY' : state.behind ? 'BEHIND' : 'CLEAN', labels: state.checkReads && ['ci-canceled', 'ci-absent-conflict-canceled'].includes(process.env.SCENARIO) ? [{ name: 'no-merge-hold' }] : [], statusCheckRollup: [],
       mergedAt: state.merged ? '2026-01-01T00:00:00Z' : null, mergeCommit: { oid: state.base } }));
   } else if (args[0] === 'api' && args.includes('graphql')) {
     console.log(JSON.stringify({ login: 'hammer-worker', databaseId: 77 }));
@@ -207,6 +208,10 @@ if (args[0] === 'advance-base') {
   } else if (args[0] === 'api' && args.includes('--paginate')) {
     console.log('[]');
   } else if (args[0] === 'pr' && args[1] === 'comment') {
+    if (process.env.SCENARIO === 'ci-absent-conflict-publish-failed') {
+      console.error('synthetic publication failure');
+      process.exit(1);
+    }
     if (process.env.SCENARIO.startsWith('capped-')) {
       assert.equal(existsSync(join(dir, 'lease-held')), false);
       assert.match(args[args.indexOf('--body') + 1], /HAM closing status/);

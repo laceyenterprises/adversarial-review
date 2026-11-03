@@ -4463,6 +4463,12 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- PR #1693 HAM remediation: cache the produced-head snapshot fields once in the retention guard and remove the unreachable conflict alternative from the downstream green-CI branch. Offline regression tests retain conflict-first repair and base-policy behavior.
+
+- LAC-2148 final comment remediation: pass snapshot mergeability and merge state into the verify-head base-policy helper so its conflict guards remain authoritative at the produced-head retention call. Focused offline tests cover the snapshot arguments.
+
+- 2026-11-02 — LAC-2148 / CONFLICTBEFORECI-01: route positively conflicting published heads through bounded conflict repair before absent-CI waits; retain unknown observation, LAC-2097 head retention and existing custody/merge gates. See [RCA](docs/postmortems/LAC-2148-conflict-before-ci.md).
+
 - LAC-2146 final remediation: the qualification in [PR #1691](https://github.com/laceyenterprises/adversarial-review/pull/1691) covers unresolved unpooled fallback attribution in `skipped[]`, including an absent resolver and exhausted or successful subsequent routes.
 
 - GEMREMEDIATORCLASS-01 / LAC-2146: [PR #1691](https://github.com/laceyenterprises/adversarial-review/pull/1691) implements concrete HQ `remediator-gemini` routing while preserving the logical remediation route, registered model policy, entitlements and dedicated builder isolation. The paired [Agent OS #10117](https://github.com/laceyenterprises/agent-os/pull/10117) release and live adoption remain separately gated by [LAC-2146](https://linear.app/laceyenterprises/issue/LAC-2146).
@@ -4477,6 +4483,7 @@ Deploy this reader before activating these keys in core's checked-in config.
   that synchronous dispatch-file retries run back-to-back without backoff.
 
 - LAC-2145 / LEASECIPROOF-01: pair synthetic pending-owner PIDs with raw process-start fixtures and qualify all three intermittent assertions with counted trials. See the [SEV/RCA evidence and limitations](docs/postmortems/LAC-2145-pending-owner-proof-qualification.md). Production ownership fences are unchanged.
+
 
 - FINDINGSBATCHCUSTODY-01 (LAC-2143): accept native workspace display paths
   without deriving repository authority from them; replay the actual public

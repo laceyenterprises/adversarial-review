@@ -643,9 +643,17 @@ while :; do
     ham_release_merge_lease
     return 20
   fi
+  # CONFLICTBEFORECI-01: admit positive conflict to the existing bounded
+  # repair path before absent CI can stall it. Reacquisition below repeats
+  # cancellation, hold and exact-head fences before any source mutation.
+  if [ "$HAM_CI_BASE_RETRY" -eq 0 ] && jq -e '.state == "OPEN" and .headMatches == true and
+    (.mergeable == "CONFLICTING" or .mergeStateStatus == "DIRTY")' "$HAM_GATE_JSON" >/dev/null; then
+    HAM_REMOTE_CI_STATUS=conflict-before-ci
+    break
+  fi
   if { [ "$ham_wait_only" -eq 1 ] && jq -e '.state == "OPEN" and .headMatches == true and .checksConclusion == "SUCCESS"' "$HAM_GATE_JSON" >/dev/null; } || ham_required_gate_ok || { [ "$HAM_CI_BASE_RETRY" -eq 0 ] &&
     jq -e '.state == "OPEN" and .headMatches == true and .checksConclusion == "SUCCESS" and
-      (.mergeStateStatus == "BEHIND" or .mergeable == "CONFLICTING") and
+      .mergeStateStatus == "BEHIND" and
       (.reasons | length > 0 and all(.[]; . == "pr-not-mergeable"))' "$HAM_GATE_JSON" >/dev/null &&
     ham_base_touches_pr_files validated-head "$(jq -r '.mergeable // empty' "$HAM_GATE_JSON")" "$(jq -r '.mergeStateStatus // empty' "$HAM_GATE_JSON")"; }; then
     HAM_REMOTE_CI_STATUS=remote-ci-green

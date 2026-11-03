@@ -714,6 +714,7 @@ ham_base_touches_pr_files() {
   # touching the same file is not a conflict. Retain a CLEAN/mergeable exact
   # head and its CI; only a conflict or a policy-blocked BEHIND needs a rewrite.
   [ "${2:-}" != CONFLICTING ] || return 0
+  [ "${3:-}" != DIRTY ] || return 0
   [ "${3:-}" = BEHIND ] || return 1
   [ "${HAM_REQUIRES_UP_TO_DATE:-1}" -ne 0 ] || return 1
   # Ignore a lagging BEHIND once containment is proved. Unknown containment
@@ -878,7 +879,10 @@ ham_resolve_base_strictness
 HAM_PHASE_OUTCOME=produced-head-read-failed
 HAM_PRODUCED_HEAD=$(git rev-parse HEAD) || return 1
 export HAM_PRODUCED_HEAD
-while [ "$(jq -r '.mergeStateStatus // ""' "<<RUN_DIR>>/pr-after.json")" = "BEHIND" ]; do
+# A positively conflicting head cannot rely on pull_request CI to start.
+# Enter the same bounded, fenced rebase path before any required-check wait.
+while jq -e '.mergeStateStatus == "BEHIND" or .mergeable == "CONFLICTING" or
+  .mergeStateStatus == "DIRTY"' "<<RUN_DIR>>/pr-after.json" >/dev/null; do
   if [ "$POST_REMEDIATION_SHA" != "$HAM_PRODUCED_HEAD" ]; then
     HAM_PHASE_OUTCOME=head-changed
     HAM_NO_MERGE_NOTE="HAM closing status — no merge. The live head differs from the hammer-produced head; released for the next hammer pass."
@@ -889,8 +893,12 @@ while [ "$(jq -r '.mergeStateStatus // ""' "<<RUN_DIR>>/pr-after.json")" = "BEHI
   # Retain the produced head when the base policy permits it, including the
   # first pass. This also handles a strict already-up-to-date head with
   # a lagging BEHIND snapshot; the final live gate must still settle green.
-  if [ "$(jq -r '.mergeable // ""' "<<RUN_DIR>>/pr-after.json")" = "MERGEABLE" ] \
-     && ! ham_base_touches_pr_files validated-head MERGEABLE BEHIND; then
+  current_mergeable=$(jq -r '.mergeable // ""' "<<RUN_DIR>>/pr-after.json")
+  current_state=$(jq -r '.mergeStateStatus // ""' "<<RUN_DIR>>/pr-after.json")
+  if [ "$current_state" != "DIRTY" ] \
+     && [ "$current_mergeable" = "MERGEABLE" ] \
+     && ! ham_base_touches_pr_files validated-head \
+       "$current_mergeable" "$current_state"; then
     echo "HAM: produced head covers the base policy; avoiding a redundant rebase." >&2
     break
   fi

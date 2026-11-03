@@ -4490,6 +4490,8 @@ refusal, cancellation and unknown exits; process success alone proves no merge.
 
 ## Change notes
 
+- LAC-2151 integration with LAC-2075: the durable write-boundary hook follows the sending-token budget preflight; tests retain both protections.
+
 - LAC-2075: GitHub budget preflights and header observations now name the credential that sends the request. A low anonymous `default` bucket can no longer defer watcher intake or other authenticated reads and writes, and one token cannot borrow another's budget or poison it. A low or zero budget for the sending token still defers. This also covers the `reviewer.mjs` review-post preflight. The floor, urgent reserve and fail-closed gates are unchanged. See the [SEV3 report](docs/postmortems/SEV3-LAC-2075-authenticated-github-reads-deferred-by-the-anonymous-budget-2026-11-03.md).
 
 - LAC-2151 storage hardening: a saved review must durably enter `write-started` before publication. A failed checkpoint preserves exact-head recovery and refuses the public write; later bookkeeping failures cannot make a posted body reusable.

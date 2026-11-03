@@ -383,7 +383,7 @@ test('REVPOSTSTALL-01: reviewer.mjs preserves before side calls, tracks them und
   assert.ok(at('onBeforeReviewWrite: deliveryGuard.markWriteStarted', post) < at('Review posted to', post));
   assert.ok(at('deliveryGuard.delivered()', post) < at('GITHUB POST FAILED', post));
   const postFn = at('async function postGitHubReview(');
-  const throttle = at('await awaitThrottleIfNeeded();', postFn);
+  const throttle = at("await awaitThrottleIfNeeded('core', githubCredential({ token }))", postFn);
   const boundary = at('opts.onBeforeReviewWrite?.()', postFn);
   assert.ok(throttle < boundary && boundary < at('postExactHeadReview(', postFn));
 });

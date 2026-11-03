@@ -36,6 +36,8 @@ function buildLoaderSource(scenario) {
     [fileUrl('src', 'adversarial-gate-context.mjs')]: 'fixture:adversarial-gate-context',
     [fileUrl('src', 'duplicate-family-state.mjs')]: 'fixture:duplicate-family-state',
     [fileUrl('src', 'follow-up-jobs.mjs')]: 'fixture:follow-up-jobs',
+    [fileUrl('src', 'remediation-publication-recovery.mjs')]: 'fixture:publication-recovery',
+    [fileUrl('src', 'adapters', 'comms', 'github-pr-comments', 'comment-delivery.mjs')]: 'fixture:comment-delivery',
     [fileUrl('src', 'remediation-published-head.mjs')]: 'fixture:remediation-published-head',
     [fileUrl('src', 'remediation-ci-infrastructure.mjs')]: 'fixture:remediation-ci-infrastructure',
     [fileUrl('src', 'remediation-prompt.mjs')]: 'fixture:remediation-prompt',
@@ -124,6 +126,9 @@ export async function load(url, context, nextLoad) {
   }
 
   const simpleStubs = {
+    // Publication proof and delivery debt have their own offline integration suites.
+    'fixture:publication-recovery': "export async function proveStoppedPublication() { return null; }",
+    'fixture:comment-delivery': "export function addToDeliveryRetryIndex() {}",
     'fixture:remediation-ci-infrastructure': "export async function recoverInfrastructureCiStops() { return []; } export function holdRemediationForCiInfrastructure() { return null; } export async function resumeCiInfrastructureRound() { return null; } export function deferCiInfrastructureProbe() {} export function clearCiInfrastructureWait() { return null; }",
     'fixture:remediation-published-head': "export function completeWorkerPublishedHead() { return null; } export function completeLiveWorkerPublishedHead() { return null; } export function completeKnownWorkerPublish() { return null; } export function findWorkerPublishedHead() { return null; } export function hasWorkerPublishArtifacts() { return false; } export function buildRereviewResult() { return {}; }",
     'fixture:routing': "export const REVIEWER_ROUTE_BY_MODEL = {}; export const ROUTE_BY_BUILDER_CLASS = {}; export function routeSubject(subject) { return String(subject.title || '').startsWith('[codex]') || String(subject.title || '').startsWith('[claude-code]') ? { reviewerModel: 'claude', botTokenEnv: 'CLAUDE_TOKEN', tag: 'codex' } : null; } export function defaultReviewerRouteFromEnv() { return null; } export function validateDefaultReviewerRouteConfig() {} export function describeCrossModelReviewWaiver() { return null; } export function isCrossModelReviewWaived() { return false; } export function reviewerRefusesBuilder() { return false; } export const CODEX_BUILDER_REVIEW_REFUSAL = 'synthetic routing refusal'; export function applyGeminiReviewerRoute(opts) { return opts && opts.baseRoute; } export function applyEffectiveReviewerRoute(opts) { return opts && opts.baseRoute; } export const GEMINI_REVIEWABLE_BUILDER_CLASSES = []; export function geminiMayReviewBuilder() { return false; } export function normalizeBuilderClass() { return null; } export function normalizeReviewerModel(value) { const v = String(value || '').trim().toLowerCase(); return v === 'claude-code' ? 'claude' : (['claude', 'codex', 'gemini'].includes(v) ? v : null); }",

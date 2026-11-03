@@ -55,8 +55,10 @@ export function hasWorkerJobTrailer(message, jobId) {
  * returned null, silently, for most final rounds that pushed (agent-os#7293 and
  * #7311 were `diverged`), which is why their pushed heads were reviewed again.
  *
- * The proof is local and structural instead. With the workspace HEAD equal to
- * the live PR head and carrying this job's `Worker-Job-Id` trailer:
+ * The proof is local and structural instead. The live PR head must carry this
+ * job's `Worker-Job-Id` trailer. When
+ * it differs from the workspace HEAD, every local worker patch must also be
+ * present on the live head (stable patch equivalence via `git cherry`):
  *   1. every reviewed commit has a patch-equivalent in HEAD
  *      (`git cherry HEAD <reviewed>` lists only `-`), so nothing reviewed was
  *      dropped or rewritten;
@@ -80,20 +82,21 @@ export function hasWorkerJobTrailer(message, jobId) {
  */
 export async function proveFinalRoundWorkerPush({
   repo, prNumber, jobId, reviewedHead, baseBranch, workspaceDir, execFileImpl,
-  withheldBecause = null, log = console, sleep,
+  liveHeadSha = null, withheldBecause = null, log = console, sleep,
 }) {
-  let remoteSha;
-  try {
-    const remote = await execGhWithRetry({
-      execFileImpl, args: ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'headRefOid', '--jq', '.headRefOid'],
-      log, ...(sleep ? { sleep } : {}),
-    });
-    remoteSha = String(remote.stdout || '').trim();
-  } catch (err) {
-    log.warn?.(`[follow-up-remediation] Worker-push proof failed for ${repo}#${prNumber}: ${err?.message || err}`);
-    throw err;
+  if (liveHeadSha === null) {
+    try {
+      const remote = await execGhWithRetry({
+        execFileImpl, args: ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'headRefOid', '--jq', '.headRefOid'],
+        log, ...(sleep ? { sleep } : {}),
+      });
+      const remoteSha = String(remote.stdout || '').trim();
+      liveHeadSha = SHA.test(remoteSha) ? remoteSha : null;
+    } catch (err) {
+      log.warn?.(`[follow-up-remediation] Worker-push proof failed for ${repo}#${prNumber}: ${err?.message || err}`);
+      throw err;
+    }
   }
-  const liveHeadSha = SHA.test(remoteSha) ? remoteSha : null;
   const withheld = (reason) => {
     log.warn?.(
       `[follow-up-remediation] Withholding final-round push proof for ${repo}#${prNumber}: ${reason} ` +
@@ -118,24 +121,46 @@ export async function proveFinalRoundWorkerPush({
   };
   try {
     const localSha = (await git(['rev-parse', 'HEAD'])).trim();
-    if (!SHA.test(localSha) || localSha !== liveHeadSha) return withheld(`live-head-mismatch local=${localSha.slice(0, 12) || 'none'}`);
+    if (!SHA.test(localSha) || !SHA.test(liveHeadSha)) return withheld(`live-head-mismatch local=${localSha || 'none'} live=${liveHeadSha || 'none'}`);
     if (localSha === reviewedHead) return { workerPushedHeadSha: null, liveHeadSha, reason: 'no-push' };
     const workerOwns = async (sha) => hasWorkerJobTrailer(await git(['show', '-s', '--format=%B', sha]), jobId);
     if (!await workerOwns(localSha)) return withheld('head-not-worker-commit');
+    if (localSha !== liveHeadSha) await git(['fetch', '--no-tags', 'origin', baseBranch]);
     const baseRef = `origin/${baseBranch}`;
     const base = (await git(['rev-parse', '--verify', `${baseRef}^{commit}`])).trim();
+    // Inspect immutable live objects without changing the worker's checkout.
+    // A publisher may have rebased in a separate checkout after this HEAD was
+    // captured. Do not accept a trailer alone: all local work must survive.
+    const head = liveHeadSha;
+    if (head !== localSha) {
+      try {
+        await git(['cat-file', '-e', `${head}^{commit}`]);
+      } catch {
+        await git(['fetch', '--no-tags', 'origin', head]);
+      }
+      const localWork = cherryEntries(await git(['cherry', reviewedHead, localSha, base]))
+        .filter(({ sign }) => sign !== '-');
+      if (!localWork.length) return withheld(`no-local-worker-patches local=${localSha} live=${head}`);
+      for (const { sha } of localWork) {
+        if (!await workerOwns(sha)) return withheld(`foreign-local-commit ${sha}`);
+      }
+      const missing = cherryEntries(await git(['cherry', head, localSha, base]))
+        .filter(({ sign }) => sign !== '-');
+      if (missing.length) return withheld(`worker-patch-not-published local=${localSha} live=${head} missing=${missing[0].sha}`);
+      if (!await workerOwns(head)) return withheld('live-head-not-worker-commit');
+    }
     let governedProof = null;
-    const dropped = cherryEntries(await git(['cherry', localSha, reviewedHead])).filter(({ sign }) => sign !== '-');
+    const dropped = cherryEntries(await git(['cherry', head, reviewedHead])).filter(({ sign }) => sign !== '-');
     if (dropped.length > 0) {
-      governedProof = await proveGeneratedIndexReplay({ repo, baseBranch, base, head: localSha, reviewedHead, git, workerOwns });
+      governedProof = await proveGeneratedIndexReplay({ repo, baseBranch, base, head, reviewedHead, git, workerOwns });
       if (!governedProof) return withheld(`reviewed-commit-not-replayed ${dropped[0].sha.slice(0, 12)}`);
       const authoritative = await lookup(['api', `repos/${repo}/git/ref/heads/${encodeURIComponent(baseBranch)}`, '--jq', '.object.sha']);
       if (String(authoritative.stdout || '').trim() !== base) return withheld('generated-index-base-not-current');
     }
-    if ((await git(['rev-list', '--merges', localSha, `^${reviewedHead}`, `^${base}`])).trim()) {
+    if ((await git(['rev-list', '--merges', head, `^${reviewedHead}`, `^${base}`])).trim()) {
       return withheld('merge-commit-in-push');
     }
-    const pushed = cherryEntries(await git(['cherry', reviewedHead, localSha, base]));
+    const pushed = cherryEntries(await git(['cherry', reviewedHead, head, base]));
     const added = pushed.filter(({ sign }) => sign !== '-');
     for (const { sha } of governedProof ? [] : added) {
       if (!await workerOwns(sha)) {
@@ -148,14 +173,14 @@ export async function proveFinalRoundWorkerPush({
       const currentBase = await lookup(['api', `repos/${repo}/git/ref/heads/${encodeURIComponent(baseBranch)}`, '--jq', '.object.sha']);
       if (String(currentBase.stdout || '').trim() !== base) return withheld('base-changed-during-proof');
     }
-    if (String(refreshed.stdout || '').trim() !== localSha ||
+    if (String(refreshed.stdout || '').trim() !== head ||
         (await git(['rev-parse', 'HEAD'])).trim() !== localSha ||
         (await git(['rev-parse', baseRef])).trim() !== base) return withheld('head-or-base-changed-during-proof');
     return {
-      workerPushedHeadSha: localSha,
+      workerPushedHeadSha: head,
       liveHeadSha,
       reason: reviewedCommitsReplayed > 0 ? 'replayed-onto-base' : 'descendant',
-      proof: { method: FINAL_ROUND_REPLAY_PROOF, reviewedCommitsReplayed, workerCommits: added.length, ...governedProof },
+      proof: { method: FINAL_ROUND_REPLAY_PROOF, reviewedCommitsReplayed, workerCommits: added.length, ...(head !== localSha ? { localHeadSha: localSha, publication: 'patch-equivalent-live-head' } : {}), ...governedProof },
     };
   } catch (err) {
     if (err.finalRoundLiveLookupFailure) throw err;

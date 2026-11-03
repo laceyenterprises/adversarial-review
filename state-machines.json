@@ -172,7 +172,7 @@
       "returned-to-closer",
       "closed-observed"
     ],
-    "transitions": "Disjoint-file isolated Git replay persists exact old/candidate/base, strict ordered binary proof and immutable source reference before owner-fenced expected-old-head publication. Empty/nonlinear/unprovable changes return to closer. Explicit rights/holds are read again under issuance lock; denied rights park with named notice intent. Ambiguous operations retain intent until proven stop/drain and reconciliation. Restart reuses proven candidate; live candidate resumes checks without repush, proven not-applied old head permits retry, prior successful result with old head parks, foreign head returns. Base advances retain derivation chain and original patience; no-op retains SHA explicitly. Authoritative terminal state outranks unreadable receipts/workspaces and never returns a closed PR to a closer. Original signatures remain at source heads. The existing execution brake intercepts preparation and last-moment push. Network Git requires an injected entitled runner with no ambient fallback. Admission recomputes the complete contiguous proof chain plus immutable receipt digest before treating either candidate or expected old head as derived. Transient proof execution failures park; computed mismatches return; expired patience parks before verification. Already-published progress rechecks holds and permissions. Deterministic pre-invocation refusals settle not-applied. Readmitted retained candidates resume ready \u2192 rebasing \u2192 publishing without recreation. Explicit drained Git success settles with Git provenance despite a lagging API; explicit single-ref porcelain refusals settle not-applied. Failed prepares remove unreturned workspaces; successful workspace retention and repeated full proof/snapshot payloads remain follow-up before production routing. HOLDERPROOF-01: successful leased queue, remediation and auth-recovery Git rewrites record compatible branch receipts after publication. Receipt storage errors preserve the published outcome and expose exact tips for operator recovery; no lifecycle state or merge authority change.",
+    "transitions": "Disjoint-file isolated Git replay persists exact old/candidate/base, strict ordered binary proof and immutable source reference before owner-fenced expected-old-head publication. Empty/nonlinear/unprovable changes return to closer. Explicit rights/holds are read again under issuance lock; denied rights park with named notice intent. Ambiguous operations retain intent until proven stop/drain and reconciliation. Restart reuses proven candidate; live candidate resumes checks without repush, proven not-applied old head permits retry, prior successful result with old head parks, foreign head returns. Base advances retain derivation chain and original patience; no-op retains SHA explicitly. Authoritative terminal state outranks unreadable receipts/workspaces and never returns a closed PR to a closer. Original signatures remain at source heads. The existing execution brake intercepts preparation and last-moment push. Network Git requires an injected entitled runner with no ambient fallback. Admission recomputes the complete contiguous proof chain plus immutable receipt digest before treating either candidate or expected old head as derived. Transient proof execution failures park; computed mismatches return; expired patience parks before verification. Already-published progress rechecks holds and permissions. Deterministic pre-invocation refusals settle not-applied. Readmitted retained candidates resume ready → rebasing → publishing without recreation. Explicit drained Git success settles with Git provenance despite a lagging API; explicit single-ref porcelain refusals settle not-applied. Failed prepares remove unreturned workspaces; successful workspace retention and repeated full proof/snapshot payloads remain follow-up before production routing. HOLDERPROOF-01: successful leased queue, remediation and auth-recovery Git rewrites record compatible branch receipts after publication. Receipt storage errors preserve the published outcome and expose exact tips for operator recovery; no lifecycle state or merge authority change.",
     "codeSources": [
       "src/finalization/queue-rebase.mjs",
       "src/finalization/queue-rebase-proof.mjs",
@@ -802,7 +802,9 @@
         "src/follow-up-branch.mjs",
         "src/follow-up-operator-label.mjs",
         "src/remediation-ci-infrastructure.mjs",
-        "src/follow-up-remediation.mjs"
+        "src/follow-up-remediation.mjs",
+        "src/reviewer-ci-admission.mjs",
+        "src/remediation-publication-recovery.mjs"
       ],
       "states": [
         {
@@ -929,7 +931,7 @@
           "id": "follow-up-job.13",
           "from": "stopped",
           "to": "pending",
-          "trigger": "allowlisted explicit retrigger or live satisfied required-label event with unchanged round cap; branch-unresolved resets lookup attempts; all-infrastructure CI stops except max-rounds recover on successful current-head replacements",
+          "trigger": "allowlisted explicit retrigger or live satisfied required-label event with unchanged round cap; branch-unresolved resets lookup attempts; all-infrastructure CI stops except max-rounds recover on successful current-head replacements; structurally proven committed-unpublished recovery uses only remaining rounds",
           "codeSource": "src/follow-up-jobs.mjs"
         },
         {
@@ -973,6 +975,20 @@
           "to": "in_progress",
           "trigger": "infrastructure-only CI without retained publication work: bounded wait; moved/terminal head clears wait under lock",
           "codeSource": "src/remediation-ci-infrastructure.mjs"
+        },
+        {
+          "id": "follow-up-job.20",
+          "from": "stopped",
+          "to": "completed",
+          "trigger": "committed-unpublished live publication proven and strict final-round reply validated; preserve spent rounds and restore hammer ownership",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.21",
+          "from": "stopped",
+          "to": "stopped",
+          "trigger": "committed-unpublished live publication proven but ordinary round budget exhausted; clear publication debt and escalate max-rounds without another round",
+          "codeSource": "src/follow-up-jobs.mjs"
         }
       ]
     },
@@ -1784,19 +1800,20 @@
     "src/ama/closure-owner.mjs": "2448cded95d11c7a03d85758d16bf1719a433daef79e8d7454c1696c6bfc079e",
     "src/ama/dispatch-closer.mjs": "4b7ac51eec53eb2f73861a53f921dea8862ee6e8b149ce103106058384d93b3f",
     "src/fast-merge-processing.mjs": "2bb4cfe6ab2b4479285e1c48aaf1b0a7a4019a9e95437ba0a1a73a1af73a461b",
-    "src/follow-up-jobs.mjs": "2b9daa25ce7f61a615c8d35e1e92954ddffff68bebdb6e2a5a090c3e2e15392d",
+    "src/follow-up-jobs.mjs": "183be18a14a3c45506db5d6521cb80b1c0a738bdcc8878cf9c3cafe0db9d02cb",
     "src/follow-up-remediation.mjs": "a6bfbec3da209969aa4b50235fca4936f3b384e5f4ae5f9843fbbea7fd22275f",
     "src/orphan-post-reconcile.mjs": "a4f21f7764d361da91bfa699ad5261e41a2f8348f13c6330ea113b3ae4dad826",
     "src/posted-review-row.mjs": "ae3be33e5c3812b6d421eae1fa19311767e966681da0f8a997ae93127a1f3a07",
     "src/review-state-db.mjs": "97959038d5e497b70eee07af65d2589f1c706f2ffb16648064317c7d5bf3d743",
     "src/review-state-statements.mjs": "b7cce8ac8bba20cc6c4673471e681aae46931d7338f63f751c7aeb419af1edf8",
     "src/review-state.mjs": "14a346d9eb6af8101d68c164f0e2e4e07ea23aa6a0dafa3dbabd14feda933c1b",
-    "src/reviewer-ci-admission.mjs": "258c3a6d1089cb5d4a525f0b6a0836f979a79b27f6305895357180e18141fdbf",
+    "src/reviewer-ci-admission.mjs": "b24995f796ae6af2e665d93a30c954b1c78fc59ce62e88074cfb69b965837bdf",
     "src/reviewer-reattach.mjs": "c52dcf0ea186716725d5916c0be5de3619cd44e011c5c06bf4999877369ebd39",
     "src/reviewer.mjs": "10b8e5b50611cebbcffabc5e5709ffcbf33ed856f469c2a946ed14d72c775e88",
     "src/watcher.mjs": "c47d27893200f979089c74357f797f23bcdb81bb1391f9bc1ebe612acdb6abe0",
     "src/adapters/reviewer-runtime/fixture-stub/index.mjs": "551075e64dc0fba15d5411f1d79297bedec2d3e17accecc5c496c04dab3e26ad",
-    "src/ama/gsr-closer-lease.mjs": "fea38cdec29edd83201cacbd0fb4134ac4f79156d98a385e647615b45406bff2"
+    "src/ama/gsr-closer-lease.mjs": "fea38cdec29edd83201cacbd0fb4134ac4f79156d98a385e647615b45406bff2",
+    "src/remediation-publication-recovery.mjs": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
   },
   "workerObservationReads": "DOG-10 / LAC-2118: worker/process/session/provenance observations use the immutable SDK 0.9.0 public HTTP boundary, separately gated by default-off ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED=1 (env only; no template activation). Already enabled ADVERSARIAL_DISPATCH_READS_ENABLED own-launch HCP reads remain independent. Disabled, unsupported, failed and successful-empty provenance permits existing title-based cross-model review intake with persisted builder_class_inconclusive; empty scope_complete:false evidence never certifies absence, merge identity, lease release or teardown. Positive head attestations remain valid independently; otherwise authoritative identity stays unknown without authorized evidence, with no private fallback. Default PR provenance means the single live pr_opened row; builder_identity permits later completions and is reserved for review routing. Ambiguous identity fails closed; branch provenance is diagnostic-only and cannot replace an opener hidden by grants. Cache identity excludes request_timeout_ms; public token-based HTTP reads receive per-call remaining physical deadlines and failed sessions are evicted. Reroute uses async provenance; cold backfill prepares one SDK registration before sync loops and fails readiness before writes. Partial accounting and zero/null meanings persist. No new lifecycle states or smoke authority.",
   "mergeLeaseGateAccounting": "GATECAPBASE-01: head/base-scoped refusal budgets refund base advances, server rebase conflicts, lane-busy, contention and planned yields under the release-identity fence. New heads and observed bases reset caps; stable-base predicate loops still stop. Capped admissible conflicts return to the existing hammer conflict procedure without a lease; other admissible heads page through durable closure-wait deduplication. Terminal, moved, held and draft heads retain admission fences. No operator reset is required. Synthetic merge-lease, recovery and rendered hammer fixtures cover these routes; existing lifecycle states, merge fences and smoke promises remain unchanged. Runtime owner may observe organic reasons and owner/page receipts read-only after normal deployment; no live worker action or new probe.",

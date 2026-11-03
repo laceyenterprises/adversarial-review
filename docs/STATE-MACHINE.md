@@ -1041,8 +1041,21 @@ An exited worker reporting a retained commit that could not publish transitions
 to `stopped` with `committed-unpublished`, retaining `unpublishedWork` and the
 workspace beyond terminal TTL. The PR comment names job/commit and the gate
 reports publication failure, without asking for an operator verdict on findings.
-A live head matching the retained commit changes that gate to pending review;
-it does not settle the review or remove retained work.
+REMPUBPROOF-01: structural replay proof accepts a live rebased head containing
+every worker patch. Failed current-head CI can recover that stopped job under
+the queue lock, bound to its source digest and live head. Validated final-round
+completion moves to `completed` with hammer ownership; other replies requeue
+only within the remaining round budget. Recovery clears publication debt and
+retains the previous stop as audit evidence; it never refunds a spent round.
+Unknown, missing or partial publication stays stopped. Exhausted ordinary
+recovery escalates explicitly without another round.
+Concurrent admission observes the same job's in-place `max-rounds-reached`
+reclassification at the proven head and reports budget exhaustion, preserving
+operator escalation. This diagnostic adds no state or transition; the reviewed
+admission source projection is refreshed and existing smoke promises are unchanged.
+Recovered final completion retains the ordinary reply comment as durable delivery
+debt and registers its retry index; admission repairs a missing index while that
+comment remains unposted. Existing completion and delivery states are unchanged.
 
 ### Main states
 

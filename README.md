@@ -1770,9 +1770,12 @@ the handoff smoke verifies settlement without a worker or round charge and
 that unchanged workspace HEADs cannot acquire publication debt from reply hashes.
 Reviewer pass/run metadata preserves branch and builder tag across
 runtime paths. A `committed-unpublished` stop retains the local commit/workspace,
-names job and commit in the PR comment, and reports failed publication without an
-operator-decision notice. Confirmed publication changes the gate to pending
-review, preserving the retained evidence. See the [queue contract](docs/data-model/follow-up-jobs.md#branch-and-publication-contract-remedbranch-01).
+names the local commit and observed live head, and reports failed publication
+without an operator-decision notice. Stable patch equivalence can prove a rebased
+live head from a stale worker checkout. On failed current-head CI, proven stopped
+debt recovers under the queue lock: validated final completion restores hammer
+ownership, or the remaining normal round budget owns the regression. Recovery
+preserves spent rounds and the original cap; unknown evidence stays unproven. See the [queue contract](docs/data-model/follow-up-jobs.md#branch-and-publication-contract-remedbranch-01).
 
 PRM-06 activation requires a read-only `hq fleet quota status --json` check on
 the deployed producer before a submodule bump or reader deployment: both
@@ -2816,13 +2819,15 @@ stateDiagram-v2
     s1 --> s0: follow-up-job.10 transient retry, unpublished infrastructure-only CI recovery or orchestration-mode refusal hold without round charge
     s2 --> s0: follow-up-job.11 next round unless comment-only final hammer handoff
     s3 --> s0: follow-up-job.12 explicit retrigger or all-infrastructure CI stop with successful current-head replacement checks
-    s4 --> s0: follow-up-job.13 allowlisted explicit retrigger or live satisfied required-label event with unchanged round cap; branch-unresolved resets lookup attempts; all-infrastructure CI stops except max-rounds recover on successful current-head replacements
+    s4 --> s0: follow-up-job.13 allowlisted explicit retrigger or live satisfied required-label event with unchanged round cap; branch-unresolved resets lookup attempts; all-infrastructure CI stops except max-rounds recover on successful current-head replacements; structurally proven committed-unpublished recovery uses only remaining rounds
     s1 --> s4: follow-up-job.14 stacked-base-merged: hold before worker spawn and request rebase/retarget
     s1 --> s0: follow-up-job.15 base evidence unreadable: budget-neutral delayed recheck
     s1 --> s4: follow-up-job.16 operator-only findings after lifecycle admission: hold without spawning
     s1 --> s3: follow-up-job.17 exited worker has a matching preservation-refusal sidecar
     s0 --> s0: follow-up-job.18 branch-unresolved remediation: up to three delayed head lookups without worker or round charge
     s1 --> s1: follow-up-job.19 infrastructure-only CI without retained publication work: bounded wait; moved/terminal head clears wait under lock
+    s4 --> s2: follow-up-job.20 committed-unpublished live publication proven and strict final-round reply validated; preserve spent rounds and restore hammer ownership
+    s4 --> s4: follow-up-job.21 committed-unpublished live publication proven but ordinary round budget exhausted; clear publication debt and escalate max-rounds without another round
     s2 --> [*]
     s3 --> [*]
     s4 --> [*]
@@ -4467,11 +4472,23 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 - WSOBSPAGE-01: CAPREHEAD and pipeline health request workspace evidence for the target repository and branch; the closer reaper excludes directories proven absent. Unknown identities and presence remain evidence requiring custody checks. The companion Agent OS producer filters before pagination within its existing 10,001-slot bound. Workspace reads budget one page for an exact worker, the producer bound for scoped requests, and 1,000 rows for compatibility listings. Exhausting that budget returns inspectable rows with `ok: false`, `complete: false`, `truncated: true` and `reason: worker-observation-truncated`; custody and health consumers reject partial evidence. Real outages retain their unavailable result. Synthetic coverage includes 4,300 slots and twelve live workspaces.
 
+- PR #1696 rescue: keep publication-recovery and delivery-index dependencies inside the existing offline watcher fixture boundaries in the fast-merge and reviewer-timeout handoff suites. Both suites continue to exercise the real watcher and CI admission paths; disposable-Git publication proof and durable delivery behavior remain covered by their dedicated integration tests.
+
+- PR #1696 final comment remediation: validate supplied publication-proof head SHAs, reuse CI admission's known head while retaining the final live-head check, and classify concurrent in-place round exhaustion from the current job. Focused offline fixtures cover malformed heads, head movement and concurrent exhaustion. Repair watcher/API fixture isolation and completion diagnostic expectations, and retain indexed reply-comment delivery debt on recovered final completion; lifecycle states, round budgets and smoke promises are unchanged.
+
+- REMPUBPROOF-01: prove rebased remediation publication from equivalent worker patches on the live head; recover proven publication stops once through validated final completion or the remaining CI-regression round budget. Retained unpublished debt names both heads. Synthetic Git fixtures cover rebase, missing/partial work, unrelated heads, stale evidence, final blockers and budget exhaustion.
+
+- PR #1692 final review: cover exact single-column drift for both the passes and reviews selectors, including the reviews enrichment tables. Table-less stores retain the unavailable-store contract.
+
+- SENTINELREVIEWROOT-01: table-less review evidence returns `review_store` unavailable, preserving column diagnostics for existing tables. Synthetic fixtures cover both selectors and single-column drift.
+
 - PR #1693 HAM remediation: cache the produced-head snapshot fields once in the retention guard and remove the unreachable conflict alternative from the downstream green-CI branch. Offline regression tests retain conflict-first repair and base-policy behavior.
 
 - LAC-2148 final comment remediation: pass snapshot mergeability and merge state into the verify-head base-policy helper so its conflict guards remain authoritative at the produced-head retention call. Focused offline tests cover the snapshot arguments.
 
 - 2026-11-02 — LAC-2148 / CONFLICTBEFORECI-01: route positively conflicting published heads through bounded conflict repair before absent-CI waits; retain unknown observation, LAC-2097 head retention and existing custody/merge gates. See [RCA](docs/postmortems/LAC-2148-conflict-before-ci.md).
+
+- ARCH-01 final remediation: defer the architecture review schema mirror until this reader consumes its settings, per CFGREADERSCOPE-01. Offline tests verify that checked-in configuration and local overlays ignore this sibling-owned namespace, including future keys and thresholds validated by Python.
 
 - LAC-2146 final remediation: the qualification in [PR #1691](https://github.com/laceyenterprises/adversarial-review/pull/1691) covers unresolved unpooled fallback attribution in `skipped[]`, including an absent resolver and exhausted or successful subsequent routes.
 

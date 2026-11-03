@@ -1,3 +1,4 @@
+import { proveFinalRoundWorkerPush } from './comment-only-final-round.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // Publication debt is distinct from unresolved findings or an operator decision.
 import { extractCommitShaFromOperationalBlocker } from './github-auth-recovery.mjs';
@@ -17,5 +18,14 @@ export async function findCommittedUnpublishedWork({ reply, job, workspaceDir, e
     if (/^[a-f0-9]{40}$/iu.test(head)) commitSha = head === job.revisionRef ? null : head;
   } catch { /* HQ workspaces may be unavailable; retain explicit worker evidence. */ }
   if (!commitSha || String(job.revisionRef || '').startsWith(commitSha)) return null;
-  return { jobId: job.jobId, commitSha, workspaceDir, reported: true };
+  let publication = null;
+  try {
+    publication = job.repo && job.prNumber && job.baseBranch && workspaceDir
+      ? await proveFinalRoundWorkerPush({ repo: job.repo, prNumber: job.prNumber,
+      jobId: job.jobId, reviewedHead: job.revisionRef, baseBranch: job.baseBranch,
+      workspaceDir, execFileImpl }) : null;
+    if (publication?.workerPushedHeadSha) return null;
+  } catch { /* Unknown live evidence must retain publication debt. */ }
+  return { jobId: job.jobId, commitSha, workspaceDir, reported: true,
+    liveHeadSha: publication?.liveHeadSha || null, publicationReason: publication?.reason || 'live-publication-unknown' };
 }

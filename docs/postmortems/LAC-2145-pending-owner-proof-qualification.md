@@ -135,7 +135,7 @@ passed **481/481 tests**, zero failed/cancelled/skipped, across
 `ama-closer-dispatch-priority.test.mjs`, `noowner-01.test.mjs`,
 `ama-closer-lease.test.mjs`, and `leaseciproof-01.test.mjs`.
 
-Local Node 26 validation:
+Local Node 26 validation before merging the updated trunk:
 
 - `npm run lint`: zero errors (153 existing warnings); explicit ESLint on
   the changed JavaScript: zero errors (one existing unused-import warning).
@@ -152,6 +152,15 @@ Local Node 26 validation:
   is retained as a host qualification limitation, not full-suite evidence.
   [Machine-readable incomplete-run counts](evidence/LAC-2145/full-node26-incomplete.json)
   preserve this result.
+
+Before the final push, `main` at c2e81d181af7113da085c71c91650d3ff98fac32
+was merged into this branch. The only conflict was the shared README
+change-note insertion; both entries are retained with LAC-2145 newest.
+The qualification fixtures and ownership implementation did not change.
+After that merge, Node 26 lint, contracts, byte-equivalence demo and all five
+new regressions passed again, and a further
+[ten controlled trials passed 30/30 cases](evidence/LAC-2145/node26-after-trunk-merge-trials.json).
+The incomplete full-suite attempt was not repeated or relabeled green.
 
 Full Node 22/26 Linux CI and a settled cross-model review of the
 published head remain merge gates. Source qualification authorizes no runtime

@@ -50,6 +50,7 @@ import { MAX_WORKER_EXEC_TIMEOUT_SECONDS } from './worker-execution-limits.mjs';
 import { TOKEN_POOL_DECLARATION_PATHS, validateTokenPoolDeclarations } from './config-token-pools.mjs';
 import { googleTokensSchema } from './config-google-tokens.mjs';
 import { cloudAccessConfigSchema } from './cloud-access-config-schema.mjs';
+import { grokEnvAliases, grokRolePinViolations, grokSchema } from './config-grok.mjs';
 
 export const __testYamlHooks = {
   load: (...args) => yaml.load(...args),
@@ -151,8 +152,12 @@ export function resetRuntimeUnknownWarningCacheForTests() {
 
 // -------- Schema declaration -----------------------------------------------
 
-const ENUM_ROLES_REVIEWER = ['claude-code', 'codex', 'claude', 'gemini', 'adversarial'];
-const ENUM_ROLES_REMEDIATOR = ['claude-code', 'codex', 'gemini', 'remediator-codex-corp', 'codex-corp', 'adversarial'];
+// GRK-09: the public role enums recognize the Grok lanes (`grok` reviewer
+// family, `remediator-grok`, `hammer-grok`), mirroring the Python schema_v1.
+// Recognition is not dispatchability: a pin naming a Grok lane loads only while
+// `grok.enabled` and that lane's flag are true (config-grok.mjs), both default false.
+const ENUM_ROLES_REVIEWER = ['claude-code', 'codex', 'claude', 'gemini', 'grok', 'adversarial'];
+const ENUM_ROLES_REMEDIATOR = ['claude-code', 'codex', 'gemini', 'remediator-codex-corp', 'codex-corp', 'remediator-grok', 'adversarial'];
 export const ENUM_CODEX_WORKER_ACCOUNT_ORDER = Object.freeze(['personal-first', 'corporate-first']);
 // REMFALLBACK-01: the concrete remediator worker classes a capped remediator can
 // fall back to. `adversarial` is a routing mode, not a class, so it is excluded.
@@ -162,7 +167,7 @@ const ENUM_ROLES_REMEDIATOR_FALLBACK = ['claude-code', 'codex', 'gemini', 'remed
 // `hammer` is the universal end-of-budget rescue worker (codex-backed, runs under
 // the merge-agent app identity); allowed here so the budget-exhausted final pass
 // can dispatch it. See worker-pool hq_resolve_worker_identity (merge-agent-lacey).
-const ENUM_ROLES_MERGE_AGENT_WORKER_CLASS = ['merge-agent', 'codex', 'claude-code', 'hammer', 'hammer-claude'];
+const ENUM_ROLES_MERGE_AGENT_WORKER_CLASS = ['merge-agent', 'codex', 'claude-code', 'hammer', 'hammer-claude', 'hammer-grok'];
 const ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS = ['plan', 'codex', 'codex-corp', 'claude-code'];
 export const ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE = ['native', 'agentos'];
 export const ENUM_ROLES_ADVERSARIAL_OPERATOR_LABEL_ACTOR_ENFORCEMENT = ['observe', 'enforce'];
@@ -1981,6 +1986,8 @@ function schemaV1() {
       },
       osg: OSG_SCHEMA,
       mes: MES_SCHEMA,
+      // GRK-09: Grok harness knobs; every enable flag defaults false.
+      grok: grokSchema(),
       roles: {
         __type: TYPE_DICT,
         __strict: true,
@@ -3872,6 +3879,8 @@ function postgresRuntimeAlias(value) {
 const identity = (v) => v;
 
 export const ENV_ALIASES = {
+  // GRK-09: canonical AGENT_OS_GROK_* names, mirrored from the Python table.
+  ...grokEnvAliases(),
   'worker_pool.post_merge_actions.rca_worker_class': {
     canonical: 'AGENT_OS_WORKER_POOL_POST_MERGE_ACTIONS_RCA_WORKER_CLASS',
     aliases: [],
@@ -5974,6 +5983,22 @@ function validateGoalLineageConfig(merged, trace) {
   );
 }
 
+// GRK-09: a role pin may name a Grok lane only while that lane is enabled.
+// Mirrors _validate_grok_role_pins in the Python loader; the message names the
+// pinned key and the flag to set, never any other config value.
+function validateGrokRolePins(merged, trace) {
+  const [violation] = grokRolePinViolations(merged);
+  if (!violation) return;
+  const { key, value, required } = violation;
+  const entries = trace[key] || [];
+  const source = entries.length ? entries[entries.length - 1].source : 'merged-config';
+  throw new AgentOSConfigError(
+    `${key}: ${JSON.stringify(value)} selects a disabled Grok lane; set ${required}: true `
+      + 'to make it dispatchable, or choose another value',
+    { key, expected: `${required}: true`, got: value, source },
+  );
+}
+
 function enforceCiHostingSecurityInvariants(merged, trace) {
   const excluded = getLeaf(merged, 'ci.hosting.excluded_workflows');
   if (!Array.isArray(excluded)) return;
@@ -6470,6 +6495,7 @@ function loadConfigImpl({
 
   enforceCiHostingSecurityInvariants(merged, trace);
   validateGoalLineageConfig(merged, trace);
+  validateGrokRolePins(merged, trace);
   const pools = merged.oauth?.identity_token_pools;
   if (tokenPoolIdentity !== undefined && pools !== null && typeof pools === 'object'
     && !Array.isArray(pools) && !Object.hasOwn(pools, tokenPoolIdentity)) return null;

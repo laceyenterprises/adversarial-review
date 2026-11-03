@@ -776,7 +776,10 @@ round removed, `remediationPlan.retryAfter` set to the hold end and a
 - `skipped[]`: `{ workerClass, reason }` for each declared fallback class passed
   over (`provider-untracked`, `reviews-next-round:<reviewer>`,
   `capped:<capSource>`, `resets-within-hold-window`, `unavailable:<state>`,
-  `unrunnable-in-mode:<mode>`, `model-unresolvable`). A `model-unresolvable`
+  `unrunnable-in-mode:<mode>`, `model-unresolvable`,
+  `unpooled-fallback-unresolved`). Pooled routing uses
+  `unpooled-fallback-unresolved` when an unpooled candidate has no resolver
+  result, including when the resolver is absent. A `model-unresolvable`
   entry (REMGEMINI-01) also carries `detail` in pooled and standalone routing,
   the typed registry fault rendered as a string: the
   class's governed model or registry entry could not be resolved, so it was

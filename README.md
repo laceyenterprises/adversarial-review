@@ -4463,6 +4463,8 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- LAC-2146 final remediation: pooled routing records unresolved unpooled fallback candidates in `skipped[]` as `unpooled-fallback-unresolved`, including when no resolver is configured. Offline regressions cover exhausted and successful subsequent fallback routes.
+
 - GEMREMEDIATORCLASS-01 / LAC-2146: Gemini remediation keeps its logical route locally and dispatches HQ work as `remediator-gemini`, preserving registered model/entitlement policy across dedicated builder isolation. Concrete fallback aliases, pooled refusal ordering, quota/recovery identity and native/SDK receipts are covered offline. See [release prerequisites and SEV/RCA](docs/INCIDENT-2026-11-02-gemini-remediation-builder-class.md); agent-os #10117 retains its hold until paired qualification.
 
 - LAC-2145 / LEASECIPROOF-01: pair synthetic pending-owner PIDs with raw process-start fixtures and qualify all three intermittent assertions with counted trials. See the [SEV/RCA evidence and limitations](docs/postmortems/LAC-2145-pending-owner-proof-qualification.md). Production ownership fences are unchanged.

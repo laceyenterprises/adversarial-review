@@ -647,6 +647,9 @@ order through Gemini's ordinary quota/model checks, without enrolling agy in
 the OAuth account pool. Unknown pooled evidence does not ground a primary.
 Readable unknown/busy/capped Gemini evidence or an unresolved model skips that
 candidate; reviewer-family exclusions and quota holds remain authoritative.
+An unpooled candidate without a resolver result (including an absent resolver)
+is recorded in `skipped[]` as `unpooled-fallback-unresolved` before the next
+candidate is tried.
 An empty dedicated Gemini **builder** pool must refuse builders and must not
 block this registered remediation route. The paired #10117 release and validation
 requirements are recorded in the [SEV/RCA](INCIDENT-2026-11-02-gemini-remediation-builder-class.md).

@@ -123,6 +123,7 @@ export async function resolvePooledWorkerRouting({ primary, fallbackWorkerClasse
         reason: preferCrossFamily ? 'infrastructure-fallback' : 'primary-grounded-fallback', skipped };
       if (fallback) skipped.push({ workerClass: candidate, reason: fallback.reason,
         ...(fallback.detail ? { detail: fallback.detail } : {}) });
+      else skipped.push({ workerClass: candidate, reason: 'unpooled-fallback-unresolved' });
       continue;
     }
     if (FAMILIES[candidate] === FAMILIES[identity]

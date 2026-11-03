@@ -170,6 +170,25 @@ It records `simplicityNoteApplied: true|false`
 and a reason in its existing closing audit text, outside all finding counts.
 No new store, config key, label or merge authority is introduced.
 
+## Strict settled-clean and missing-job recovery (STRICTSETTLED-01)
+
+"Settled clean" has one predicate: a non-critical `comment-only` or `approved`
+review that merge authority's `isDaemonMergeReviewAllowed` accepts under the
+effective `roles.adversarial.merge_authority.strict_mode`. The watcher's
+pre-defer release reads strict mode through `loadEffectiveMergeAuthorityConfig`
+and fails closed to strict. Under strict mode, a known non-blocking finding or
+an unknown non-blocking section keeps the pending job queued. With strict mode
+off, such a review is released as `settled-clean`, as before.
+
+`settled-clean` and `settled-clean-head-moved` stops are retriggerable, like
+`review-settled` and `no-remediation-required`. When the AMA closer selects
+`remediate` with no live job, it requeues the latest job only if that job is
+stopped with one of these four settled codes, its review still owes remediation,
+and rounds remain. The requeued job carries optional
+`remediationJobMissingRecovery: { headSha, recreatedAt, previousStopCode }`.
+A job whose marker names the current head is never requeued again by this
+path. Older records omit the field. No new store or config key is introduced.
+
 ## Branch and publication contract (REMEDBRANCH-01)
 
 Every reviewer runtime carries the subject's PR head `branch` and title-prefix

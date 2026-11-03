@@ -9,6 +9,7 @@ import { reviewCeilingOwner } from './review-ceiling-owner.mjs';
 import { infrastructureOnlyFailures } from './ci-infrastructure.mjs';
 import { recoverInfrastructureChecks } from './ci-recovery.mjs';
 import { recoverInfrastructureCiStops } from './remediation-ci-infrastructure.mjs';
+import { recreateMissingRemediationJob } from './remediation-job-missing-recovery.mjs';
 import { evaluateHammerStopHold } from './ama/hammer-stop-hold.mjs';
 import { deriveNextActionSnapshot, hasLiveRemediationJob, isClosureRecoveryDecision, nextAction } from './pr-next-action.mjs';
 import { withDaemonMergeReservation } from './ama/merge-lease.mjs';
@@ -953,6 +954,26 @@ function closureWaitProgress(result, startedAt) {
   return { startedAt: Math.max(launchAt, Number.isFinite(startedAt) ? startedAt : launchAt) };
 }
 
+// STRICTSETTLED-01: a `remediate` decision with no live job requeues the PR's
+// released remediation job, once per head, instead of waiting on a lane that no
+// actor owns. Recovery failure never changes the tick's own outcome.
+function recoverMissingRemediationJob({ recoverImpl, rootDir, repoPath, prNumber, decision, strictMode, nowMs, logger }) {
+  if (typeof recoverImpl !== 'function') return null;
+  let recovery;
+  try {
+    recovery = recoverImpl({ rootDir, repo: repoPath, prNumber, headSha: decision?.head, strictMode,
+      now: new Date(Number.isFinite(nowMs) ? nowMs : Date.now()).toISOString() });
+  } catch (error) {
+    logger?.warn?.(`[watcher] remediation-job-missing recovery failed for ${repoPath}#${prNumber}: ${error.message}`);
+    return null;
+  }
+  if (recovery?.recreated) {
+    logger?.info?.(`[watcher] remediation-job-missing recovery recreated ${recovery.jobId || 'remediation job'} `
+      + `for ${repoPath}#${prNumber} head=${decision?.head} previousStop=${recovery.previousStopCode}`);
+  }
+  return recovery || null;
+}
+
 async function dispatchAmaClosureFor({
   hammerWakeSink = null,
   resolvedNextAction = null,
@@ -1014,6 +1035,7 @@ async function dispatchAmaClosureFor({
   evaluateHammerStopHoldImpl = evaluateHammerStopHold,
   deliverAlertImpl = deliverAlert,
   recoverInfrastructureChecksImpl = recoverInfrastructureChecks,
+  recreateMissingRemediationJobImpl = recreateMissingRemediationJob,
   fetchPullRequestMergeabilityImpl = fetchPullRequestMergeability,
   mergeabilitySampleDelayMs = MERGEABILITY_SAMPLE_DELAY_MS,
   now = () => Date.now(),
@@ -2359,9 +2381,14 @@ async function dispatchAmaClosureFor({
         headSha: decision.head, env, now: now(), startedAt: Date.parse(decision.deadline?.anchoredAt),
         reason: `action=${decision.action} actor=${decision.actor} reason=${decision.reason} head=${decision.head}` });
     } catch (error) { logger?.warn?.(`[watcher] next-action observation failed: ${error.message}`); }
+    const remediationJobRecovery = decision.action === 'remediate' && !hasLiveRemediationJob(shared.snapshot)
+      ? recoverMissingRemediationJob({ recoverImpl: recreateMissingRemediationJobImpl, rootDir, repoPath,
+        prNumber, decision, strictMode: cfg?.strictMode !== false, nowMs: now(), logger }) : null;
     return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
       reason: decision.action === 'review' ? 'handed-to-review'
-        : hasLiveRemediationJob(shared.snapshot) ? 'active-remediation-job' : 'remediation-job-missing',
+        : hasLiveRemediationJob(shared.snapshot) || remediationJobRecovery?.recreated
+          ? 'active-remediation-job' : 'remediation-job-missing',
+      ...(remediationJobRecovery ? { remediationJobRecovery } : {}),
       nextAction: decision, boundedWait, retryAfterMs: boundedWait?.retryAfterMs || 30_000 }, { amaEnabled: true });
   }
 
@@ -2613,10 +2640,15 @@ async function dispatchAmaClosureFor({
         env, now: now(), startedAt: Date.parse(decision.deadline?.anchoredAt),
         reason: `action=${decision.action} actor=${decision.actor} reason=${decision.reason} head=${decision.head}` });
     } catch (error) { logger?.warn?.(`[watcher] next-action observation failed: ${error.message}`); }
+    const remediationJobRecovery = decision.action === 'remediate' && !hasLiveRemediationJob(shared.snapshot)
+      ? recoverMissingRemediationJob({ recoverImpl: recreateMissingRemediationJobImpl, rootDir, repoPath,
+        prNumber, decision, strictMode: cfg?.strictMode !== false, nowMs: now(), logger }) : null;
     return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
       reason: decision.action === 'review' ? 'handed-to-review' : decision.action === 'remediate'
-        ? hasLiveRemediationJob(shared.snapshot) ? 'active-remediation-job' : 'remediation-job-missing'
+        ? hasLiveRemediationJob(shared.snapshot) || remediationJobRecovery?.recreated
+          ? 'active-remediation-job' : 'remediation-job-missing'
         : 'pending-required-checks', nextAction: decision,
+      ...(remediationJobRecovery ? { remediationJobRecovery } : {}),
       boundedWait, retryAfterMs: boundedWait?.retryAfterMs || 30_000 }, { amaEnabled: true });
   }
   // Final-push provenance was collected into the shared snapshot above. Its

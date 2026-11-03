@@ -151,9 +151,15 @@ function requestEligibleHammerWake({
     .map(row => row?.launch_request_id || row?.launchRequestId || row?.id).filter(id => typeof id === 'string' && id))].sort();
   const retryIdentity = retryIds.length ? `${retryLaunch || 'retry'}:${createHash('sha256')
     .update(JSON.stringify(retryIds)).digest('hex')}` : retryLaunch;
-  const wakeAttemptKey = recoveryDispatch
+  const attemptGeneration = shared?.snapshot?.observations?.leases?.value?.closer?.acquiredAt || 'no-lease';
+  const selectedAttempt = decision?.attempt ?? 'initial';
+  const wakeIdentity = recoveryDispatch
     ? `recovery:${decision.row}:${decision.reason}:${decision.deadline?.anchoredAt || decision.deadline?.at || 'unanchored'}:${retryIdentity || 'initial'}`
     : retryIdentity || (decision?.attempt != null ? `retry-${decision.attempt}` : 'initial');
+  // A reclaimed terminal lease can retain its dead launch receipt until the
+  // replacement dispatch returns. The newly acquired lease is the attempt.
+  const wakeAttemptKey = attemptGeneration !== 'no-lease' || decision?.attempt != null
+    ? `${wakeIdentity}:lease:${attemptGeneration}:next:${selectedAttempt}` : wakeIdentity;
   let eligibility = { eligible: false, reasons: [] };
   if (shared) {
     const ownsWake = (decision?.action === 'hammer' && decision.actor === 'hammer'

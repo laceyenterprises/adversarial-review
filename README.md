@@ -4468,6 +4468,12 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- PR #1697 rescue integration: reviewed the existing terminal-retry and dispatch-outcome edges, documented fresh replacement identity and bootstrap-drain custody, and refreshed the combined dispatcher source projection without changing lifecycle enum values or graph edges. The independent SMV graph and mutation tests remain authoritative.
+
+- CLOSERCRASHRECLAIM-01 final comment remediation: deduplicate successful bootstrap-drain signals, fall back to direct-child termination after group signaling errors, and place the crash-recovery guidance in its own [closure runbook subsection](docs/RUNBOOK-ama-closure.md#closer-crash-recovery-closercrashreclaim-01). Offline regressions cover delayed exit, escalation and unconfirmed drain.
+
+- CLOSERCRASHRECLAIM-01: drain readiness controller groups after bootstrap failure; allocate a fresh worker identity after terminal lease reclamation; key hammer wakes by lease generation and next attempt. Live-owner and dirty-tree fences remain enforced. See [closure recovery](docs/RUNBOOK-ama-closure.md).
+
 - PR #1696 rescue: keep publication-recovery and delivery-index dependencies inside the existing offline watcher fixture boundaries in the fast-merge and reviewer-timeout handoff suites. Both suites continue to exercise the real watcher and CI admission paths; disposable-Git publication proof and durable delivery behavior remain covered by their dedicated integration tests.
 
 - PR #1696 final comment remediation: validate supplied publication-proof head SHAs, reuse CI admission's known head while retaining the final live-head check, and classify concurrent in-place round exhaustion from the current job. Focused offline fixtures cover malformed heads, head movement and concurrent exhaustion. Repair watcher/API fixture isolation and completion diagnostic expectations, and retain indexed reply-comment delivery debt on recovered final completion; lifecycle states, round budgets and smoke promises are unchanged.

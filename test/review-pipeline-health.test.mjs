@@ -3,6 +3,7 @@ installDispatchFileProducerFixture();
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
+import { dispatchReadTransport } from '../src/dispatch-read-client.mjs';
 
 import { recordDaemonMergePark, parkRecordPath } from '../src/daemon-merge-park-log.mjs';
 import { writePrTerminalReconcileState } from '../src/pr-terminal-reconcile.mjs';
@@ -416,6 +417,105 @@ test('first-pass CI orphan is distinct and suppressed by a live branch worker', 
     },
   });
   assert.equal(withLiveWorker.count, 0);
+});
+
+test('CI orphan workspace pages are memoized by repo and branch only within one snapshot', (t) => {
+  const hqRoot = tempRoot();
+  const scopes = [
+    [REPO, 'shared'], [REPO, 'shared'], [REPO, 'other'], ['other/repo', 'shared'],
+  ];
+  const queue = {firstPassPrs: scopes.map(([repo], index) => ({
+    repo, prNumber: index, reviewAttempts: 0, reviewerFailed: false,
+  }))};
+  const reads = [];
+  const originalObservation = dispatchReadTransport.observationSync;
+  t.mock.method(dispatchReadTransport, 'observationSync', (selector, options) => {
+    if (selector.observation !== 'workspaces') return originalObservation(selector, options);
+    reads.push([selector.repo, selector.branch, selector.offset]);
+    return {schema_version: 1, observation: 'workspaces', status: 'found',
+      items: [{workspace_id: `unrelated-${selector.offset}`, worker_id: 'unrelated', branch: 'unrelated'}],
+      complete: selector.offset === 1, next_offset: selector.offset === 0 ? 1 : null,
+      scope_complete: false, mutation_authority: false};
+  });
+  const options = {hqRoot, execFileSyncImpl: (command, args) => {
+    assert.equal(command, 'gh');
+    return JSON.stringify(args.includes('checks') ? [{name: 'unit', bucket: 'fail'}]
+      : {state: 'OPEN', headRefName: scopes[Number(args[2])][1]});
+  }};
+  for (let pass = 0; pass < 2; pass += 1) {
+    const result = summarizeFirstPassCiOrphans(queue, options);
+    assert.equal(result.count, 4);
+    assert.equal(result.collected, true);
+    assert.equal(reads.length, (pass + 1) * 6);
+  }
+  const expected = [scopes[0], scopes[2], scopes[3]]
+    .flatMap(([repo, branch]) => [[repo, branch, 0], [repo, branch, 1]]);
+  assert.deepEqual(reads, [...expected, ...expected]);
+});
+
+test('CI orphan caches unavailable workspace evidence without asserting absence', (t) => {
+  let reads = 0;
+  const originalObservation = dispatchReadTransport.observationSync;
+  t.mock.method(dispatchReadTransport, 'observationSync', (selector, options) => {
+    if (selector.observation !== 'workspaces') return originalObservation(selector, options);
+    reads += 1;
+    throw Object.assign(new Error('timeout'), {code: 'ETIMEDOUT'});
+  });
+  const result = summarizeFirstPassCiOrphans({firstPassPrs: [1, 2].map(prNumber => ({
+    repo: REPO, prNumber, reviewAttempts: 0,
+  }))}, {hqRoot: tempRoot(), execFileSyncImpl: (command, args) => {
+    assert.equal(command, 'gh');
+    return JSON.stringify(args.includes('checks') ? [{name: 'unit', bucket: 'fail'}]
+      : {state: 'OPEN', headRefName: 'shared'});
+  }});
+  assert.equal(result.count, 0);
+  assert.equal(result.collected, false);
+  assert.equal(result.errors.length, 2);
+  assert.equal(reads, 1);
+});
+
+test('CI orphan skips workspace and worker status reads for missing branch refs', (t) => {
+  t.mock.method(dispatchReadTransport, 'observationSync', () => assert.fail('invalid branch observation'));
+  const branches = ['', null, undefined];
+  const result = summarizeFirstPassCiOrphans({firstPassPrs: branches.map((_, prNumber) => ({
+    repo: REPO, prNumber, reviewAttempts: 0,
+  }))}, {hqRoot: tempRoot(), execFileSyncImpl: (command, args) => {
+    assert.equal(command, 'gh');
+    return JSON.stringify(args.includes('checks') ? [{name: 'unit', bucket: 'fail'}]
+      : {state: 'OPEN', headRefName: branches[Number(args[2])]});
+  }});
+  assert.equal(result.count, 3);
+  assert.equal(result.collected, true);
+  assert.equal(dispatchReadTransport.observationSync.mock.callCount(), 0);
+});
+
+test('CI orphan workspace pagination cannot outlive the remaining snapshot deadline', (t) => {
+  let now = 0;
+  t.mock.method(Date, 'now', () => now);
+  const timeouts = [];
+  const originalObservation = dispatchReadTransport.observationSync;
+  t.mock.method(dispatchReadTransport, 'observationSync', (selector, options) => {
+    if (selector.observation !== 'workspaces') return originalObservation(selector, options);
+    timeouts.push(options.timeoutMs);
+    now += 1_000_000;
+    return {schema_version: 1, observation: 'workspaces', status: 'found',
+      items: [{workspace_id: 'partial', worker_id: 'partial'}], complete: false, next_offset: 1,
+      scope_complete: false, mutation_authority: false};
+  });
+  const result = summarizeFirstPassCiOrphans({firstPassPrs: [1, 2].map(prNumber => ({
+    repo: REPO, prNumber, reviewAttempts: 0,
+  }))}, {hqRoot: tempRoot(), config: {firstPassCiOrphanDeadlineMs: 100},
+    execFileSyncImpl: (command, args) => {
+      assert.equal(command, 'gh');
+      return JSON.stringify(args.includes('checks') ? [{name: 'unit', bucket: 'fail'}]
+        : {state: 'OPEN', headRefName: 'shared'});
+    }});
+  assert.equal(timeouts.length, 1);
+  assert.ok(timeouts[0] > 0 && timeouts[0] <= 600);
+  assert.equal(result.count, 0);
+  assert.equal(result.collected, false);
+  assert.equal(result.errors.length, 1);
+  assert.equal(result.unprobedPrs, 1);
 });
 
 test('first-pass CI orphan is additive to reviewer queue-starvation attribution', () => {

@@ -30,7 +30,7 @@ function fixtureEnv(env = {}) {
   // Fake gh fixtures must never inherit live credentials or a worker launch identity.
   const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     !key.startsWith('HAM_')
-    && !['HQ_LAUNCH_REQUEST_ID', 'AGENT_OS_WORKER_LRQ_ID', 'LAUNCH_REQUEST_ID'].includes(key)
+    && !['HQ_LAUNCH_REQUEST_ID', 'HQ_WORKER_RUN_ID', 'AGENT_OS_WORKER_LRQ_ID', 'LAUNCH_REQUEST_ID'].includes(key)
     && !/^(?:HAMMER_LACEY_GH_TOKEN|MERGE_AGENT_GH_TOKEN|HQ_ENTITLEMENT_GH_TOKEN|GH_TOKEN|GITHUB_TOKEN)(?:_|$)/.test(key)));
   return { ...cleanEnv, ...env };
 }
@@ -639,6 +639,7 @@ esac
       HAM_PR_NUMBER: '424244', HAM_REVIEWED_SHA: successfulMerge ? reviewedHead : head, HAM_TARGET_REMEDIATION_SHA: head,
       HAM_RISK_CLASS: 'medium', HAM_MERGE_METHOD: 'squash', HAM_HQ_ROOT: dir, HAM_HQ_OWNER: userInfo().username,
       HAM_AUDIT_PATH: join(dir, 'audit.json'), HAM_REVIEWER: 'reviewer',
+      HQ_LAUNCH_REQUEST_ID: 'lrq_receipt-fixture', HQ_WORKER_RUN_ID: 'wrun_receipt-fixture',
       HAM_AMA_TRAILERS: trailers,
       PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir, RECEIPT_SCENARIO: scenario, REAL_NODE: process.execPath,
     };

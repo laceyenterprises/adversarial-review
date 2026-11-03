@@ -4490,6 +4490,8 @@ refusal, cancellation and unknown exits; process success alone proves no merge.
 
 ## Change notes
 
+- PR #1701 rescue: give rendered merge fixtures isolated launch/run identities, keep ambient worker identity out of fixtures, and assert retry events retain their raw infrastructure reason in `lastPhase` alongside the classified outcome. Existing exact-head merge-proof and retry/refund rules remain enforced.
+
 - LAC-2133 final comment remediation: accept camelCase launch request time and identity in the live closer inspection handoff, including its diagnostic timestamp, while retaining snake_case precedence and custody fences. Offline regressions cover alias timing, identity mismatches and incomplete snapshots; the existing subject/head guard already rejects a missing snapshot.
 
 - PR #1699 rescue: shorten redundant scope/restore guidance to meet the existing rendered 60 KiB prompt limit. CI edits and additions remain operator-only, permitted non-CI base restoration retains finding authority and validation, gitlink edits remain forbidden, and dispositions stay in the correct reply/audit artifact. The byte-budget limit is unchanged.

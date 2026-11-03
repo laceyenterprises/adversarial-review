@@ -172,7 +172,8 @@ These observations reuse the existing uncharged lease-wait refund, including
 series, target and lifetime accounting. A second abort on the unchanged head
 remains eligible for the existing closer retry wake and its load-aware
 admission deadline. The existing `ama_closer.hammer_ended_without_merge` event
-includes `retryable: true` and `phaseOutcome`. They must never become
+includes `retryable: true`, the classified `phaseOutcome`, and the original
+infrastructure reason in `lastPhase`. They must never become
 `hammer-final-no-merge`, including when a no-merge comment is present.
 
 Red required checks, findings, conflicts, another writer's head change,

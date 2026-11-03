@@ -1,0 +1,254 @@
+{
+  "schemaVersion": 1,
+  "description": "GRK-09 Grok knob parity. Synthetic values only. The agent-os copy lives at platform/agent-os-config/src/agent_os_config/tests/fixtures/grok-config-parity.v1.json; the adversarial-review copy at test/fixtures/grok-config-parity.v1.json must stay identical.",
+  "schema": {
+    "grok.enabled": {
+      "type": "bool",
+      "default": false
+    },
+    "grok.model": {
+      "type": "string",
+      "default": "grok-build",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "grok.cli_path": {
+      "type": "string",
+      "default": null,
+      "nullable": true,
+      "pattern": "^/[^\\x00]*$"
+    },
+    "grok.first_output_timeout_seconds": {
+      "type": "int",
+      "default": 60,
+      "min": 10,
+      "max": 900
+    },
+    "grok.stall_timeout_seconds": {
+      "type": "int",
+      "default": 300,
+      "min": 30,
+      "max": 3300
+    },
+    "grok.reviewer.enabled": {
+      "type": "bool",
+      "default": false
+    },
+    "grok.remediator.enabled": {
+      "type": "bool",
+      "default": false
+    },
+    "grok.hammer.enabled": {
+      "type": "bool",
+      "default": false
+    },
+    "grok.native_resume.enabled": {
+      "type": "bool",
+      "default": false
+    }
+  },
+  "envAliases": {
+    "grok.enabled": "AGENT_OS_GROK_ENABLED",
+    "grok.model": "AGENT_OS_GROK_MODEL",
+    "grok.cli_path": "AGENT_OS_GROK_CLI_PATH",
+    "grok.first_output_timeout_seconds": "AGENT_OS_GROK_FIRST_OUTPUT_TIMEOUT_SECONDS",
+    "grok.stall_timeout_seconds": "AGENT_OS_GROK_STALL_TIMEOUT_SECONDS",
+    "grok.reviewer.enabled": "AGENT_OS_GROK_REVIEWER_ENABLED",
+    "grok.remediator.enabled": "AGENT_OS_GROK_REMEDIATOR_ENABLED",
+    "grok.hammer.enabled": "AGENT_OS_GROK_HAMMER_ENABLED",
+    "grok.native_resume.enabled": "AGENT_OS_GROK_NATIVE_RESUME_ENABLED"
+  },
+  "rolePinLanes": {
+    "roles.reviewer": {
+      "grok": "reviewer"
+    },
+    "roles.remediator": {
+      "remediator-grok": "remediator"
+    },
+    "roles.merge_agent_worker_class": {
+      "hammer-grok": "hammer"
+    }
+  },
+  "cases": [
+    {
+      "name": "defaults-all-lanes-off",
+      "top": "version: 1\n",
+      "expect": {
+        "grok.enabled": false,
+        "grok.model": "grok-build",
+        "grok.cli_path": null,
+        "grok.first_output_timeout_seconds": 60,
+        "grok.stall_timeout_seconds": 300,
+        "grok.reviewer.enabled": false,
+        "grok.remediator.enabled": false,
+        "grok.hammer.enabled": false,
+        "grok.native_resume.enabled": false
+      }
+    },
+    {
+      "name": "checked-in-override",
+      "top": "version: 1\ngrok:\n  enabled: true\n  model: grok-synthetic-model\n  cli_path: /synthetic/managed/grok\n  first_output_timeout_seconds: 120\n  stall_timeout_seconds: 600\n  native_resume:\n    enabled: true\n",
+      "expect": {
+        "grok.enabled": true,
+        "grok.model": "grok-synthetic-model",
+        "grok.cli_path": "/synthetic/managed/grok",
+        "grok.first_output_timeout_seconds": 120,
+        "grok.stall_timeout_seconds": 600,
+        "grok.reviewer.enabled": false,
+        "grok.remediator.enabled": false,
+        "grok.hammer.enabled": false,
+        "grok.native_resume.enabled": true
+      }
+    },
+    {
+      "name": "local-override-tolerates-unknown-local-keys",
+      "top": "version: 1\n",
+      "local": "grok:\n  enabled: true\n  future_knob: 1\n  reviewer:\n    enabled: true\n    future_leaf: synthetic\n",
+      "expect": {
+        "grok.enabled": true,
+        "grok.model": "grok-build",
+        "grok.cli_path": null,
+        "grok.first_output_timeout_seconds": 60,
+        "grok.stall_timeout_seconds": 300,
+        "grok.reviewer.enabled": true,
+        "grok.remediator.enabled": false,
+        "grok.hammer.enabled": false,
+        "grok.native_resume.enabled": false
+      }
+    },
+    {
+      "name": "env-override-beats-file",
+      "top": "version: 1\ngrok:\n  first_output_timeout_seconds: 120\n",
+      "env": {
+        "AGENT_OS_GROK_ENABLED": "true",
+        "AGENT_OS_GROK_FIRST_OUTPUT_TIMEOUT_SECONDS": "30",
+        "AGENT_OS_GROK_HAMMER_ENABLED": "true"
+      },
+      "expect": {
+        "grok.enabled": true,
+        "grok.model": "grok-build",
+        "grok.cli_path": null,
+        "grok.first_output_timeout_seconds": 30,
+        "grok.stall_timeout_seconds": 300,
+        "grok.reviewer.enabled": false,
+        "grok.remediator.enabled": false,
+        "grok.hammer.enabled": true,
+        "grok.native_resume.enabled": false
+      }
+    },
+    {
+      "name": "role-pins-load-when-their-lanes-are-on",
+      "top": "version: 1\ngrok:\n  enabled: true\n  reviewer:\n    enabled: true\n  remediator:\n    enabled: true\n  hammer:\n    enabled: true\nroles:\n  reviewer: grok\n  remediator: remediator-grok\n  merge_agent_worker_class: hammer-grok\n",
+      "expect": {
+        "grok.enabled": true,
+        "grok.model": "grok-build",
+        "grok.cli_path": null,
+        "grok.first_output_timeout_seconds": 60,
+        "grok.stall_timeout_seconds": 300,
+        "grok.reviewer.enabled": true,
+        "grok.remediator.enabled": true,
+        "grok.hammer.enabled": true,
+        "grok.native_resume.enabled": false,
+        "roles.reviewer": "grok",
+        "roles.remediator": "remediator-grok",
+        "roles.merge_agent_worker_class": "hammer-grok"
+      }
+    },
+    {
+      "name": "old-config-with-grok-fallback-slot-loads",
+      "top": "version: 1\nroles:\n  remediator: codex\n  remediator_fallback: [gemini, remediator-grok, claude-code]\n",
+      "expect": {
+        "grok.enabled": false,
+        "grok.model": "grok-build",
+        "grok.cli_path": null,
+        "grok.first_output_timeout_seconds": 60,
+        "grok.stall_timeout_seconds": 300,
+        "grok.reviewer.enabled": false,
+        "grok.remediator.enabled": false,
+        "grok.hammer.enabled": false,
+        "grok.native_resume.enabled": false,
+        "roles.remediator": "codex",
+        "roles.remediator_fallback": [
+          "gemini",
+          "remediator-grok",
+          "claude-code"
+        ]
+      }
+    },
+    {
+      "name": "bool-flag-rejects-string",
+      "top": "version: 1\ngrok:\n  enabled: \"yes\"\n",
+      "errorKey": "grok.enabled"
+    },
+    {
+      "name": "bool-flag-rejects-env-word",
+      "top": "version: 1\n",
+      "env": {
+        "AGENT_OS_GROK_REVIEWER_ENABLED": "yes"
+      },
+      "errorKey": "grok.reviewer.enabled"
+    },
+    {
+      "name": "lane-flag-rejects-int",
+      "top": "version: 1\ngrok:\n  hammer:\n    enabled: 1\n",
+      "errorKey": "grok.hammer.enabled"
+    },
+    {
+      "name": "first-output-below-floor",
+      "top": "version: 1\ngrok:\n  first_output_timeout_seconds: 5\n",
+      "errorKey": "grok.first_output_timeout_seconds"
+    },
+    {
+      "name": "first-output-above-ceiling",
+      "top": "version: 1\ngrok:\n  first_output_timeout_seconds: 901\n",
+      "errorKey": "grok.first_output_timeout_seconds"
+    },
+    {
+      "name": "stall-above-ceiling",
+      "top": "version: 1\ngrok:\n  stall_timeout_seconds: 3301\n",
+      "errorKey": "grok.stall_timeout_seconds"
+    },
+    {
+      "name": "stall-rejects-float",
+      "top": "version: 1\ngrok:\n  stall_timeout_seconds: 300.5\n",
+      "errorKey": "grok.stall_timeout_seconds"
+    },
+    {
+      "name": "cli-path-must-be-absolute",
+      "top": "version: 1\ngrok:\n  cli_path: grok\n",
+      "errorKey": "grok.cli_path"
+    },
+    {
+      "name": "model-rejects-whitespace",
+      "top": "version: 1\ngrok:\n  model: grok build\n",
+      "errorKey": "grok.model"
+    },
+    {
+      "name": "reviewer-pin-needs-master-switch",
+      "top": "version: 1\nroles:\n  reviewer: grok\n",
+      "errorKey": "roles.reviewer"
+    },
+    {
+      "name": "remediator-pin-needs-lane-flag",
+      "top": "version: 1\ngrok:\n  enabled: true\nroles:\n  remediator: remediator-grok\n",
+      "errorKey": "roles.remediator"
+    },
+    {
+      "name": "hammer-pin-needs-master-switch",
+      "top": "version: 1\ngrok:\n  hammer:\n    enabled: true\nroles:\n  merge_agent_worker_class: hammer-grok\n",
+      "errorKey": "roles.merge_agent_worker_class"
+    },
+    {
+      "name": "reviewer-pin-from-env-needs-lane",
+      "top": "version: 1\ngrok:\n  enabled: true\n",
+      "env": {
+        "AGENT_OS_ROLES_REVIEWER": "grok"
+      },
+      "errorKey": "roles.reviewer"
+    },
+    {
+      "name": "reviewer-enum-rejects-class-spelling",
+      "top": "version: 1\ngrok:\n  enabled: true\n  reviewer:\n    enabled: true\nroles:\n  reviewer: grok-reviewer\n",
+      "errorKey": "roles.reviewer"
+    }
+  ]
+}

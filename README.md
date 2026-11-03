@@ -4463,6 +4463,8 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- LAC-2148 final comment remediation: pass snapshot mergeability and merge state into the verify-head base-policy helper so its conflict guards remain authoritative at the produced-head retention call. Focused offline tests cover the snapshot arguments.
+
 - 2026-11-02 — LAC-2148 / CONFLICTBEFORECI-01: route positively conflicting published heads through bounded conflict repair before absent-CI waits; retain unknown observation, LAC-2097 head retention and existing custody/merge gates. See [RCA](docs/postmortems/LAC-2148-conflict-before-ci.md).
 
 - LAC-2146 final remediation: the qualification in [PR #1691](https://github.com/laceyenterprises/adversarial-review/pull/1691) covers unresolved unpooled fallback attribution in `skipped[]`, including an absent resolver and exhausted or successful subsequent routes.

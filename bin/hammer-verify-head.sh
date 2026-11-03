@@ -895,7 +895,9 @@ while jq -e '.mergeStateStatus == "BEHIND" or .mergeable == "CONFLICTING" or
   # a lagging BEHIND snapshot; the final live gate must still settle green.
   if [ "$(jq -r '.mergeStateStatus // ""' "<<RUN_DIR>>/pr-after.json")" != "DIRTY" ] \
      && [ "$(jq -r '.mergeable // ""' "<<RUN_DIR>>/pr-after.json")" = "MERGEABLE" ] \
-     && ! ham_base_touches_pr_files validated-head MERGEABLE BEHIND; then
+     && ! ham_base_touches_pr_files validated-head \
+       "$(jq -r '.mergeable // ""' "<<RUN_DIR>>/pr-after.json")" \
+       "$(jq -r '.mergeStateStatus // ""' "<<RUN_DIR>>/pr-after.json")"; then
     echo "HAM: produced head covers the base policy; avoiding a redundant rebase." >&2
     break
   fi

@@ -7,10 +7,9 @@ import { observeSynchronousChild } from './watcher-latency.mjs';
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { readFileSync } from 'node:fs';
 import {
   awaitThrottleIfNeeded, extractRateLimitObservation, recordResponseRateLimit,
-  resolveRateLimitSharedStatePath, resolveThrottleFloor, markGitHubRateLimited,
+  readGitHubBudgetBucketsSync, resolveThrottleFloor, markGitHubRateLimited,
   recordRateLimitedCall, currentGitHubBudgetScope, GitHubBudgetDeferredError,
   githubCredential, githubBudgetKey, scopedGitHubRateLimit, githubBudgetBelowFloor, githubBudgetFloor,
 } from './rate-limit-throttle.mjs';
@@ -207,8 +206,9 @@ function executeFileSync(execFileImpl, command, args, options = {}) {
 function executeGhSync(execFileImpl, command, args, activeOptions, session) {
   let { env } = activeOptions;
   const resource = args[0] === 'api' ? ghResources(args)[0] : 'graphql';
-  let buckets = {};
-  try { buckets = JSON.parse(readFileSync(resolveRateLimitSharedStatePath(env), 'utf8')).buckets || {}; } catch { /* No observation yet. */ }
+  // Owner-aware (GHSTATEOWNER-01): the caller's own store plus a readable
+  // shared store; an unreadable store contributes unknown, never a fake empty.
+  const buckets = readGitHubBudgetBucketsSync({ env });
   const scope = currentGitHubBudgetScope();
   let credential = githubCredential({ env });
   let waited = false;

@@ -1,6 +1,6 @@
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
@@ -246,12 +246,130 @@ function mergeObservationMaps(current, incoming, nowMs = Date.now()) {
   return merged;
 }
 
-async function readStateFile(sharedStatePath, { nowMs = Date.now(), readFileImpl = readFile } = {}) {
+// GHSTATEOWNER-01. The store is written 0600, so it is private to the uid
+// that wrote it, while the deployed directory may be group-writable to several
+// owners. Each read is classified: `missing` (ENOENT) is the only state that
+// means "no observations"; `unreadable` (EACCES, EPERM or any other read
+// error) means the observations are unknown; `malformed` means the document
+// holds no usable observation. Contents never enter the classification.
+function classifyStateText(path, text, nowMs) {
   try {
-    return normalizeObservationMap(JSON.parse(await readFileImpl(sharedStatePath, 'utf8')), nowMs);
+    return { path, status: 'ok', buckets: normalizeObservationMap(JSON.parse(text), nowMs) };
   } catch {
-    return {};
+    return { path, status: 'malformed', buckets: {} };
   }
+}
+
+function classifyStateReadError(path, err) {
+  if (err?.code === 'ENOENT') return { path, status: 'missing', buckets: {} };
+  return { path, status: 'unreadable', code: err?.code || 'EUNKNOWN', buckets: {} };
+}
+
+async function readStateEvidence(path, { nowMs = Date.now(), readFileImpl = readFile } = {}) {
+  let text;
+  try { text = await readFileImpl(path, 'utf8'); } catch (err) { return classifyStateReadError(path, err); }
+  return classifyStateText(path, text, nowMs);
+}
+
+function readStateEvidenceSync(path, { nowMs = Date.now(), readFileSyncImpl = readFileSync } = {}) {
+  let text;
+  try { text = readFileSyncImpl(path, 'utf8'); } catch (err) { return classifyStateReadError(path, err); }
+  return classifyStateText(path, text, nowMs);
+}
+
+function summarizeStateEvidence(evidence) {
+  if (!evidence) return undefined;
+  return { path: evidence.path, status: evidence.status, ...(evidence.code ? { code: evidence.code } : {}) };
+}
+
+function defaultGetuid() {
+  return typeof process.getuid === 'function' ? process.getuid() : null;
+}
+
+// An owner-scoped sibling of the shared store, keyed by the caller's numeric
+// uid. The uid comes from process metadata, never from a credential.
+function ownerScopedStatePath(sharedStatePath, uid) {
+  return `${String(sharedStatePath).replace(/\.json$/, '')}.uid-${uid}.json`;
+}
+
+// The shared store belongs to the uid that owns the file or, before the file
+// exists, the uid that owns its directory. Every other caller keeps its
+// observations in its own owner-scoped store and never writes the shared one:
+// a rename would replace evidence it could not read with a snapshot its owner
+// cannot read. Ownership that cannot be proven is treated as foreign. A
+// platform without uids (or a stat without one) keeps the shared store.
+function planStoreFromOwner(sharedStatePath, uid, owner) {
+  const shared = { path: sharedStatePath, scope: 'shared', sharedStatePath, uid, sharedOwnerUid: owner.uid ?? null };
+  if (!Number.isInteger(uid) || owner.missing) return shared;
+  if (owner.error) return { ...shared, path: ownerScopedStatePath(sharedStatePath, uid), scope: 'owner' };
+  if (!Number.isInteger(owner.uid) || owner.uid === uid) return shared;
+  return { ...shared, path: ownerScopedStatePath(sharedStatePath, uid), scope: 'owner' };
+}
+
+async function planStateStore(sharedStatePath, { getuidImpl = defaultGetuid, storeStatImpl = stat } = {}) {
+  const uid = getuidImpl();
+  if (!Number.isInteger(uid)) return planStoreFromOwner(sharedStatePath, uid, { missing: true });
+  for (const candidate of [sharedStatePath, dirname(sharedStatePath)]) {
+    try {
+      return planStoreFromOwner(sharedStatePath, uid, { uid: (await storeStatImpl(candidate))?.uid });
+    } catch (err) {
+      if (err?.code !== 'ENOENT') return planStoreFromOwner(sharedStatePath, uid, { error: err?.code || 'EUNKNOWN' });
+    }
+  }
+  return planStoreFromOwner(sharedStatePath, uid, { missing: true });
+}
+
+function planStateStoreSync(sharedStatePath, { getuidImpl = defaultGetuid, storeStatSyncImpl = statSync } = {}) {
+  const uid = getuidImpl();
+  if (!Number.isInteger(uid)) return planStoreFromOwner(sharedStatePath, uid, { missing: true });
+  for (const candidate of [sharedStatePath, dirname(sharedStatePath)]) {
+    try {
+      return planStoreFromOwner(sharedStatePath, uid, { uid: storeStatSyncImpl(candidate)?.uid });
+    } catch (err) {
+      if (err?.code !== 'ENOENT') return planStoreFromOwner(sharedStatePath, uid, { error: err?.code || 'EUNKNOWN' });
+    }
+  }
+  return planStoreFromOwner(sharedStatePath, uid, { missing: true });
+}
+
+// Merge the caller's own store with the shared store it does not own. A
+// readable foreign shared store still contributes; observation merge is
+// conservative, and buckets stay keyed by credential digest.
+function combineStoreEvidence(plan, own, shared, nowMs) {
+  return {
+    scope: plan.scope,
+    uid: plan.uid ?? null,
+    sharedOwnerUid: plan.sharedOwnerUid,
+    path: plan.path,
+    store: summarizeStateEvidence(own),
+    ...(shared ? { shared: summarizeStateEvidence(shared) } : {}),
+    buckets: shared ? mergeObservationMaps(shared.buckets, own.buckets, nowMs) : own.buckets,
+  };
+}
+
+async function readStoreEvidence(sharedStatePath, { nowMs = Date.now(), readFileImpl = readFile, ...planOptions } = {}) {
+  const plan = await planStateStore(sharedStatePath, planOptions);
+  const own = await readStateEvidence(plan.path, { nowMs, readFileImpl });
+  const shared = plan.scope === 'owner' ? await readStateEvidence(sharedStatePath, { nowMs, readFileImpl }) : null;
+  return combineStoreEvidence(plan, own, shared, nowMs);
+}
+
+function readStoreEvidenceSync(sharedStatePath, { nowMs = Date.now(), readFileSyncImpl = readFileSync, ...planOptions } = {}) {
+  const plan = planStateStoreSync(sharedStatePath, planOptions);
+  const own = readStateEvidenceSync(plan.path, { nowMs, readFileSyncImpl });
+  const shared = plan.scope === 'owner' ? readStateEvidenceSync(sharedStatePath, { nowMs, readFileSyncImpl }) : null;
+  return combineStoreEvidence(plan, own, shared, nowMs);
+}
+
+function storeEvidenceSummary(evidence) {
+  return Object.fromEntries(Object.entries(evidence).filter(([key]) => key !== 'buckets'));
+}
+
+function storeUnreadableError(evidence) {
+  return Object.assign(new Error(`GitHub budget store unreadable (${evidence.code}) at ${evidence.path}; `
+    + 'refusing to replace observations that could not be read (GHSTATEOWNER-01)'), {
+    code: 'GITHUB_BUDGET_STORE_UNREADABLE', storeCode: evidence.code, storePath: evidence.path,
+  });
 }
 
 async function writeStateFile(sharedStatePath, state, {
@@ -412,23 +530,46 @@ function createRateLimitThrottle({
   renameImpl = rename,
   rmImpl = rm,
   statImpl = stat,
+  getuidImpl = defaultGetuid,
+  storeStatImpl = statImpl,
 } = {}) {
   let inMemoryObservations = {};
   const activeThrottlePromises = new Map();
+  const reportedStoreFaults = new Set();
 
   function resolveSharedStatePathNow() {
     return sharedStatePath || resolveRateLimitSharedStatePath(env);
   }
 
-  async function readSharedState() {
-    const resolvedSharedStatePath = resolveSharedStatePathNow();
+  function resolveStorePlan() {
+    return planStateStore(resolveSharedStatePathNow(), { getuidImpl, storeStatImpl });
+  }
+
+  // The caller's own store failing is a fault worth one warning per process.
+  // A foreign shared store the caller cannot read is the designed owner
+  // boundary; it is reported through readBudgetStoreEvidence, not logged.
+  function reportOwnStoreFault(store) {
+    if (!store || !['unreadable', 'malformed'].includes(store.status)) return;
+    const fault = `${store.path}\0${store.status}\0${store.code || ''}`;
+    if (reportedStoreFaults.has(fault)) return;
+    reportedStoreFaults.add(fault);
+    logger.warn?.(`[rate-limit-throttle] GitHub budget store ${store.status}${store.code ? ` (${store.code})` : ''} `
+      + `at ${store.path}; its observations are unknown, not absent (GHSTATEOWNER-01)`);
+  }
+
+  async function readBudgetStoreEvidence() {
     // Writers publish complete snapshots by atomic rename. A budget read must
     // not create state directories merely to discover that no record exists.
-    const shared = await readStateFile(resolvedSharedStatePath, {
-      nowMs: nowMs(),
-      readFileImpl,
+    const evidence = await readStoreEvidence(resolveSharedStatePathNow(), {
+      nowMs: nowMs(), readFileImpl, getuidImpl, storeStatImpl,
     });
-    inMemoryObservations = mergeObservationMaps(inMemoryObservations, shared, nowMs());
+    reportOwnStoreFault(evidence.store);
+    return evidence;
+  }
+
+  async function readSharedState() {
+    const { buckets } = await readBudgetStoreEvidence();
+    inMemoryObservations = mergeObservationMaps(inMemoryObservations, buckets, nowMs());
     return inMemoryObservations;
   }
 
@@ -437,9 +578,17 @@ function createRateLimitThrottle({
     if (rateLimitedOnly) observation = { ...observation, remaining: 0 };
     let normalized = sanitizeObservation(observation, nowMs());
     if (!rateLimitedOnly && !normalized) return null;
-    const resolvedSharedStatePath = resolveSharedStatePathNow();
-    return withSharedStateLock(resolvedSharedStatePath, async () => {
-      const current = await readStateFile(resolvedSharedStatePath, { nowMs: nowMs(), readFileImpl });
+    // Only the caller's own store is locked and written (GHSTATEOWNER-01).
+    const { path: storePath } = await resolveStorePlan();
+    return withSharedStateLock(storePath, async () => {
+      const read = await readStateEvidence(storePath, { nowMs: nowMs(), readFileImpl });
+      // Never rename over observations that could not be read: the merged
+      // snapshot would silently drop them, including active zero-balance holds.
+      if (read.status === 'unreadable') {
+        reportOwnStoreFault(read);
+        throw storeUnreadableError(read);
+      }
+      const current = read.buckets;
       if (rateLimitedOnly) {
         // Resolve missing-header failures under the lock so simultaneous first
         // failures share one window and increment the same durable counter.
@@ -463,7 +612,7 @@ function createRateLimitThrottle({
         Object.keys(merged).length > 0
         && JSON.stringify(merged) !== JSON.stringify(current)
       ) {
-        await writeStateFile(resolvedSharedStatePath, merged, {
+        await writeStateFile(storePath, merged, {
           mkdirImpl,
           openImpl,
           renameImpl,
@@ -523,7 +672,8 @@ function createRateLimitThrottle({
         if (!githubBudgetBelowFloor(current, configuredFloor)) return false;
         const floor = githubBudgetFloor(current, configuredFloor);
         const waitMs = Math.max(0, observationResetAtMs(current) - nowMs());
-        const resolvedSharedStatePath = resolveSharedStatePathNow();
+        // The status file sits beside the caller's own store.
+        const { path: resolvedSharedStatePath } = await resolveStorePlan();
         recordApiCallImpl?.({
           category: 'rate_limit_throttle_seconds',
           durationMs: waitMs,
@@ -574,6 +724,7 @@ function createRateLimitThrottle({
     recordResponseRateLimit,
     recordRateLimitedCall,
     readSharedState,
+    readBudgetStoreEvidence,
     resolveSharedStatePath: () => resolveSharedStatePathNow(),
     resolveThrottleFloor: () => resolveThrottleFloor(env, logger),
     __test__: {
@@ -581,7 +732,7 @@ function createRateLimitThrottle({
       mergeObservations: mergeResourceObservations,
       normalizeObservation,
       normalizeObservationMap,
-      readStateFile: () => readStateFile(resolveSharedStatePathNow(), { nowMs: nowMs(), readFileImpl }),
+      readStateFile: async () => (await readBudgetStoreEvidence()).buckets,
       sanitizeObservation,
     },
   };
@@ -601,11 +752,26 @@ function readGitHubBudgetState() { return defaultThrottle.readSharedState(); }
 
 function recordRateLimitedCall(resource, credential, observation) { return defaultThrottle.recordRateLimitedCall(resource, credential, observation); }
 
-function readGitHubBudgetStatus({ rootDir = TOOL_ROOT, env = process.env, nowMs = Date.now() } = {}) {
-  const sharedStatePath = env.GHO_RATE_LIMIT_SHARED_STATE_PATH || resolve(rootDir, 'data', 'api-cache', 'rate-limit-state.json');
-  let buckets = {};
-  try { buckets = normalizeObservationMap(JSON.parse(readFileSync(sharedStatePath, 'utf8')), nowMs); }
-  catch { /* Status is read-only and unknown evidence is displayed as unknown. */ }
+function statusSharedStatePath({ rootDir = TOOL_ROOT, env = process.env } = {}) {
+  return env.GHO_RATE_LIMIT_SHARED_STATE_PATH || resolve(rootDir, 'data', 'api-cache', 'rate-limit-state.json');
+}
+
+// Synchronous owner-aware bucket read for `meteredExecFileSync` and status.
+function readGitHubBudgetBucketsSync({ env = process.env, nowMs = Date.now(), sharedStatePath, ...seams } = {}) {
+  return readStoreEvidenceSync(sharedStatePath || resolveRateLimitSharedStatePath(env), { nowMs, ...seams }).buckets;
+}
+
+// Which store this runtime reads and writes, and whether each was readable.
+// Status is read-only: an unreadable store is reported here instead of being
+// displayed as an empty budget (GHSTATEOWNER-01).
+function readGitHubBudgetStoreStatus({ rootDir = TOOL_ROOT, env = process.env, nowMs = Date.now(), ...seams } = {}) {
+  return storeEvidenceSummary(readStoreEvidenceSync(statusSharedStatePath({ rootDir, env }), { nowMs, ...seams }));
+}
+
+function readGitHubBudgetStatus({ rootDir = TOOL_ROOT, env = process.env, nowMs = Date.now(), ...seams } = {}) {
+  // Unknown or unreadable evidence is displayed as unknown; the store status
+  // (readGitHubBudgetStoreStatus) says which.
+  let { buckets } = readStoreEvidenceSync(statusSharedStatePath({ rootDir, env }), { nowMs, ...seams });
   const credential = githubCredential({ env });
   // Keep every observed credential visible, and resolve the conventional
   // resource fields against the credential used by this runtime.
@@ -634,7 +800,10 @@ export {
   scopedGitHubRateLimit,
   withGitHubBudgetScope,
   readGitHubBudgetState,
+  readGitHubBudgetBucketsSync,
   readGitHubBudgetStatus,
+  readGitHubBudgetStoreStatus,
+  ownerScopedStatePath,
   recordRateLimitedCall,
   createRateLimitThrottle,
   DEFAULT_RESOURCE,

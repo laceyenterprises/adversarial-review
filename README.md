@@ -4490,6 +4490,10 @@ refusal, cancellation and unknown exits; process success alone proves no merge.
 
 ## Change notes
 
+- LAC-2157 final comment remediation: `createRateLimitThrottle` now uses an injected `statImpl` for store ownership discovery by default, while preserving explicit `storeStatImpl` overrides. Offline regressions cover directory ownership fallback and owner-scoped writes.
+
+- GHSTATEOWNER-01 / LAC-2157: the `0600` GitHub budget store is now private to its owner in practice as well as in mode. A caller whose uid does not own the shared store (or, before it exists, its directory) uses `rate-limit-state.uid-<uid>.json` with its own lock and throttle status file, and never writes the shared store. Reads classify `missing`, `malformed` and `unreadable` (errno) instead of returning an empty snapshot for every failure. A writer refuses (`GITHUB_BUDGET_STORE_UNREADABLE`) to rename over observations it could not read. `runtime-status` reports the store scope and classification. Credential isolation, the observed-limit floor, merge rules, atomic writes and locks are unchanged. See the [SEV4 report](docs/postmortems/SEV4-GHSTATEOWNER-01-a-private-github-budget-store-was-read-as-empty-across-owners-2026-11-03.md).
+
 - STRICTSETTLED-01: unify the watcher's settled-clean release predicate across follow-up claims and active defer with merge authority's strict-mode predicate, so Comment-only reviews that still owe remediation retain their worker path. The AMA closer requeues a settled release with no live remediation job at most once per PR head, within the remaining round budget, recording `remediationJobMissingRecovery`. The spec and runbook distinguish automatic recovery from explicit operator retriggers and document the shared requeue metadata.
 
 - WATCHERANONBUCKET-01: cap the throttle floor at 10% of the observed quota (minimum 1), so anonymous 60/h buckets can admit requests. Deferred diagnostics name the credential, balance and effective floor; transitions to zero remaining retain a known limit when failure headers omit it.

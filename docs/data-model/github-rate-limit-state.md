@@ -107,3 +107,51 @@ receives SIGTERM or SIGINT, it kills the active child with SIGKILL but reports
 the original interruption as 143 or 130, respectively. Child-originated
 signals retain their own status (for example, SIGALRM is 142). Errors without
 a numeric exit status or recognized signal fall back to 1.
+
+## Store ownership (GHSTATEOWNER-01)
+
+The store and its temporary file are written `0600`, so the store is private to
+the uid that wrote it. The deployed `data/api-cache` directory may still be
+group-writable to several operating-system owners. The shared store therefore
+belongs to the uid that owns the file or, before it exists, the uid that owns
+its directory. Any other caller keeps its observations in an owner-scoped
+sibling, `<store without .json>.uid-<uid>.json` (for example
+`rate-limit-state.uid-502.json`), with its own `.lock` and `.throttled.json`.
+It never locks, writes or renames over the shared store. A caller whose
+ownership check fails with anything other than `ENOENT` also uses its
+owner-scoped store, because it cannot prove it owns the shared one. A platform
+without uids keeps the single shared store. The uid comes from process and
+file metadata, never from a credential, and does not attribute any bucket to
+a credential.
+
+Reads classify each store. Only `missing` (`ENOENT`) means no observations.
+`unreadable` (`EACCES`, `EPERM` or any other read error) means the observations
+are unknown. `malformed` means the document held nothing usable. A
+non-owning caller reads its own store and also tries the shared store. A
+readable shared store merges conservatively under the rules above, and buckets
+stay keyed by credential digest. An unreadable one contributes nothing and is
+reported, not treated as empty. Admission then uses the caller's own
+evidence: an unknown bucket still admits, and GitHub's own responses record
+into the caller's store. A writer never renames over a store it could not read.
+`recordResponseRateLimit` and `recordRateLimitedCall` reject with
+`GITHUB_BUDGET_STORE_UNREADABLE` (`storeCode` carries the errno) rather than
+replace observations they never saw, including active zero-balance holds. A
+malformed own store is still replaced by the owner's next write. The caller's
+own unreadable or malformed store is warned once per process; the warning
+names the path and errno only. A foreign unreadable shared store is the
+designed boundary and is reported through status, not logged.
+
+`readGitHubBudgetStoreStatus` (exposed as `githubBudgetStore` in
+`runtime-status`) reports `scope` (`shared` or `owner`), `uid`,
+`sharedOwnerUid`, the caller's store `{ path, status, code? }` and, for an
+owner-scoped caller, the shared store's classification. The rendered status
+adds a `GitHub budget store:` line only when the scope is `owner` or a store is
+unreadable or malformed. `readGitHubBudgetStatus`, the synchronous
+`meteredExecFileSync` preflight (`readGitHubBudgetBucketsSync`) and the async
+throttle all use the same resolution.
+
+Owners therefore do not share observations through a store they cannot read.
+Cross-owner coordination is limited to a shared store its readers can actually
+read. A foreign file already sitting at the shared path is left in place:
+each caller keeps using its own owner-scoped store, and status names the
+shared store's owner uid. Removing it is an operator decision.

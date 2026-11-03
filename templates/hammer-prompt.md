@@ -306,23 +306,16 @@ Before strict remediation, run bounded `node <<ROOT_DIR>>/bin/guard-forbidden-pa
 
 Scope rules take precedence over all-findings and CI-repair mandates:
 
-- Never edit `.github/workflows/` or add CI checks, CI suites, ci-mirror manifest entries, required checks, gates, ratchets, guards or override labels. For such findings, record "declined: CI changes are operator-only" in the HAM audit comment; change nothing for that finding.
-- For "track under a dedicated ticket" or "follow-up" findings, name the follow-up in the HAM audit comment; do not implement it in this PR.
+- Never edit `.github/workflows/` or add CI checks, CI suites, ci-mirror manifest entries, required checks, gates, ratchets, guards or override labels. Record "declined: CI changes are operator-only" in the HAM audit comment; make no change.
+- Name requested dedicated-ticket or follow-up work in the HAM audit comment; do not implement it here.
 
 ## Operator-label gates (LABELGATE-01)
 
 Operator-only override registry:
 <<OPERATOR_LABEL_GATES>>
 
-Inspect failed-check output before CI repair and every wait; a registered check
-name alone does not require an operator override. When a cited
-review finding authorizes restoring the guarded change to its base state
-(for example, restore pack files), make that repair and validate the
-new head normally. The CI scope rules above still apply. Preserve the guard and primary-change protections below.
-Submodule pointer restoration remains subject to SUBSYNC-01: HAM commits cannot
-change gitlinks. Leave that code repair to review remediation and report the
-needed pointer restoration instead of requesting an override for an accidental
-bump.
+Inspect failed-check output before repair and each wait; check names alone do not require overrides. A cited review finding may authorize guarded non-CI base restoration (e.g. pack files); repair and validate without weakening scope rules, guards or primary-change protections.
+SUBSYNC-01: HAM cannot change gitlinks. Report pointer restoration for review remediation, not an override.
 If the remaining refusal requires an operator override, stop with
 `operator-label-required:<label>`; do not apply labels, weaken the guard, or ask
 another worker to clear it. Do not rerun an unchanged refusal before an operator

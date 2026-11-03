@@ -881,13 +881,13 @@ for (const [pendingOnly, auditFails] of [[false, false], [false, true], [true, f
 test('LABELGATE-01: hammer can restore review-flagged guarded changes before deferring', () => {
   const section = HAMMER_TEMPLATE.split('## Operator-label gates (LABELGATE-01)')[1]
     .split('## Preserve the PR primary change')[0];
-  assert.match(section, /cited\nreview finding authorizes restoring the guarded change to its base state/);
-  assert.match(section, /restore pack files/);
+  assert.match(section, /cited review finding may authorize guarded non-CI base restoration/);
+  assert.match(section, /pack files/);
   assert.doesNotMatch(section, /remove an unintended workflow cost delta/);
-  assert.match(section, /The CI scope rules above still apply/);
-  assert.match(section, /HAM commits cannot\nchange gitlinks/);
-  assert.match(section, /Leave that code repair to review remediation/);
-  assert.match(section, /make that repair and validate the\nnew head normally/);
+  assert.match(section, /without weakening scope rules, guards or primary-change protections/);
+  assert.match(section, /HAM cannot change gitlinks/);
+  assert.match(section, /Report pointer restoration for review remediation, not an override/);
+  assert.match(section, /repair and validate/);
   assert.match(section, /If the remaining refusal requires an operator override, stop/);
 });
 
@@ -945,7 +945,7 @@ test('HAMMERNOCI-01: rendered hammer policy declines CI work and records follow-
       strictNonBlockingRemediation });
     assert.match(prompt, /scope rules take precedence over all-findings and CI-repair mandates/i);
     assert.match(prompt, /Never edit `\.github\/workflows\/` or add CI checks, CI suites, ci-mirror manifest entries, required checks, gates, ratchets, guards or override labels/);
-    assert.match(prompt, /record "declined: CI changes are operator-only" in the HAM audit comment; change nothing for that finding/);
-    assert.match(prompt, /For "track under a dedicated ticket" or "follow-up" findings, name the follow-up in the HAM audit comment; do not implement it in this PR/);
+    assert.match(prompt, /Record "declined: CI changes are operator-only" in the HAM audit comment; make no change/);
+    assert.match(prompt, /Name requested dedicated-ticket or follow-up work in the HAM audit comment; do not implement it here/);
   }
 });

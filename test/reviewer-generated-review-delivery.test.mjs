@@ -19,6 +19,7 @@ import {
   resolveDeliveryDeadlineMs,
 } from '../src/reviewer-generated-review-delivery.mjs';
 import { createRateLimitThrottle } from '../src/rate-limit-throttle.mjs';
+import { writeFileAtomic } from '../src/atomic-write.mjs';
 import { reviewerSignalAwareFailureClass } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
 import { createGeminiReviewerProcessDeadline } from '../src/reviewer-process-deadline.mjs';
 import { __test__ as reviewerTest } from '../src/reviewer.mjs';
@@ -385,4 +386,63 @@ test('REVPOSTSTALL-01: reviewer.mjs preserves before side calls, tracks them und
   const throttle = at('await awaitThrottleIfNeeded();', postFn);
   const boundary = at('opts.onBeforeReviewWrite?.()', postFn);
   assert.ok(throttle < boundary && boundary < at('postExactHeadReview(', postFn));
+});
+
+
+test('REVPOSTSTALL-01: a failed durable write checkpoint refuses publication and preserves exact-head retry', (t) => {
+  const rootDir = tempRoot(t);
+  const timers = manualTimers();
+  let diskFails = false;
+  const original = delivery(rootDir, {
+    writeFileAtomicImpl(...args) {
+      if (diskFails) throw new Error('fixture store unavailable');
+      return writeFileAtomic(...args);
+    },
+  }, { timers });
+  assert.equal(original.preserve({ rawReviewText: RAW_REVIEW, dispatch: { reviewText: RAW_REVIEW } }), true);
+  const guard = original.armDeliveryDeadline();
+  diskFails = true;
+  let publicWrites = 0;
+  let failure;
+  assert.throws(() => {
+    try { guard.markWriteStarted(); } catch (error) { failure = error; throw error; }
+    publicWrites += 1;
+  }, { code: 'generated-review-write-checkpoint-failed' });
+  assert.equal(publicWrites, 0);
+  assert.equal(guard.writeStarted, false);
+  assert.equal(timers.timers[0].cleared, false, 'deadline still owns a pre-write failure');
+  assert.equal(reviewerSignalAwareFailureClass(failure, failure.message, 1), 'reviewer-stalled', 'the saved review is retried without charging a model rerun');
+  assert.equal(delivery(rootDir, { sessionUuid: RETRY_SESSION }).readReusable()?.rawReviewText, RAW_REVIEW);
+});
+
+test('REVPOSTSTALL-01: a failed delivered update cannot undo the durable write boundary', (t) => {
+  const rootDir = tempRoot(t);
+  let diskFails = false;
+  const original = delivery(rootDir, {
+    writeFileAtomicImpl(...args) {
+      if (diskFails) throw new Error('fixture delivered update unavailable');
+      return writeFileAtomic(...args);
+    },
+  });
+  assert.equal(original.preserve({ rawReviewText: RAW_REVIEW, dispatch: { reviewText: RAW_REVIEW } }), true);
+  const guard = original.armDeliveryDeadline();
+  guard.markWriteStarted();
+  diskFails = true;
+  guard.delivered();
+  assert.equal(records(rootDir)[0].record.deliveryState, 'write-started');
+  assert.equal(delivery(rootDir, { sessionUuid: RETRY_SESSION }).readReusable(), null);
+});
+
+test('REVPOSTSTALL-01: an initially unavailable store without a reusable record keeps ordinary delivery', () => {
+  const original = createGeneratedReviewDelivery({
+    rootDir: '/nonexistent', repo: 'fixture/repo', prNumber: 1, headSha: HEAD,
+    passKind: 'first-pass', reviewerModel: 'gemini', botTokenEnv: 'FIXTURE_TOKEN',
+    reviewAttemptNumber: 1, promptStage: 'first', diff: DIFF,
+    writeFileAtomicImpl() { throw new Error('fixture initial store unavailable'); },
+    log: { warn() {}, log() {}, error() {} },
+  });
+  assert.equal(original.preserve({ rawReviewText: RAW_REVIEW }), false);
+  const guard = original.armDeliveryDeadline();
+  assert.doesNotThrow(() => guard.markWriteStarted());
+  assert.equal(guard.writeStarted, true);
 });

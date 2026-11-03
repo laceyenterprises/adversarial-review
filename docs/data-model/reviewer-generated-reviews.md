@@ -74,8 +74,12 @@ again.
 
 ## Persistence and retention
 
-Writes are best-effort. A store failure logs a warning and never fails a
-completed review. The store is not part of the repository-rename continuity
+Initial preservation and delivery bookkeeping are best-effort. Once a reusable
+record exists, changing it to `write-started` must succeed before the GitHub
+write is allowed. A failed checkpoint refuses publication and emits the existing
+uncharged `[reviewer-stalled]` marker so the exact-head reply stays recoverable.
+A failed `delivered` update leaves the durable `write-started` record non-reusable.
+An initially unavailable store with no saved record keeps ordinary delivery. The store is not part of the repository-rename continuity
 journal. After a rename the old-slug record no longer matches, and the next
 claim reruns the model (fail-closed). There is no automatic retention sweeper.
 The reviewer operator archives records after PR closure, keeping records for

@@ -249,7 +249,8 @@ function createGeneratedReviewDelivery({
     };
   }
 
-  // Best-effort: a store failure must never fail a completed review.
+  // Initial preservation is best-effort. Once reusable bytes exist, the
+  // write-started checkpoint below must be durable before public effects.
   // The record binds the model and identity that actually produced the review:
   // an oversized-route fallback can change both after dispatch began.
   function preserve({
@@ -356,16 +357,25 @@ function createGeneratedReviewDelivery({
       // here the post path's own timeouts and reconciliation own the outcome.
       markWriteStarted() {
         if (writeStarted || settled) return;
-        writeStarted = true;
-        clear();
         const at = now();
-        phases.push({ phase: 'github-write', startedAt: at, durationMs: null });
-        current = phases.at(-1);
-        updateRecord(() => ({
+        // Once a reusable record exists, its write boundary must be durable
+        // before any public effect. Otherwise a later claim could replay a
+        // review that posted before body capture. Initial preservation stays
+        // best-effort when there is no reusable record to invalidate.
+        if (activeRecord && !updateRecord(() => ({
           deliveryState: 'write-started',
           writeStartedAt: new Date(at).toISOString(),
           writeStartedSessionUuid: sessionUuid,
-        }));
+        }))) {
+          const error = new Error('[reviewer-stalled] Preserved review write checkpoint unavailable before GitHub write; retry exact-head delivery');
+          error.code = 'generated-review-write-checkpoint-failed';
+          error.reviewerStalled = true;
+          throw error;
+        }
+        writeStarted = true;
+        clear();
+        phases.push({ phase: 'github-write', startedAt: at, durationMs: null });
+        current = phases.at(-1);
       },
       delivered() {
         if (settled && !writeStarted) return;

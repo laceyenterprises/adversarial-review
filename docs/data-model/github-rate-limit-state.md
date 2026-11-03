@@ -15,6 +15,21 @@ stored. The `default` anonymous credential keeps bare resource keys. CLI token
 selection prefers `GH_TOKEN` over `GITHUB_TOKEN`; Octokit uses the token actually
 selected for its request, including dynamic provider tokens.
 
+Every admission preflight and every header observation names the credential
+that sends the request (LAC-2075). This includes the outer telemetry wrappers
+around a transport that also meters itself. A `gh` subprocess uses the token in
+the child environment it receives: `buildGhEnv` passes `GH_TOKEN` before
+`GITHUB_TOKEN`, while `buildAllowlistedGhEnv` injects `GITHUB_TOKEN` first.
+Watcher Octokit calls use `GITHUB_TOKEN`, which is the dynamic provider's
+source. Adapter reads use the token that the watcher broker signal binds through
+`--pat-env`; without one they use `adapter:<selector>`. Bot-authored comment
+and review writes use the posting bot token. Only a request that sends no token uses the
+anonymous `default` bucket; an authenticated request never waits on that bucket
+or charges it. A low or zero balance for the sending credential still defers
+that request. Ambient `gh` login without an environment token also resolves to
+`default`, because the parent process cannot distinguish it from an anonymous
+request.
+
 Each bucket contains normalized `resource`, non-negative `remaining`, ISO
 `resetAt` and `observedAt`, optional positive `rateLimitedCalls`, optional
 `credential` (omitted for `default`) and optional `credentialSelector` (the

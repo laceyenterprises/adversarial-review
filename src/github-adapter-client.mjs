@@ -535,14 +535,26 @@ function adapterUnsupportedError(err) {
   return isUnsupportedOperationPayload(err);
 }
 
-// The label adapter queries GraphQL before mutation. Its subprocess does not
-// share AsyncLocalStorage with the watcher, so account failures at this seam.
-async function executeLabelAdapter(execFileImpl, adapterBin, args, options) {
+// The parent can name an adapter call's budget only for a token it binds via
+// --pat-env; otherwise the adapter's own auth selector owns the bucket. Never
+// the anonymous `default` bucket, which an authenticated call does not spend.
+function githubAdapterCredential(args, env = {}) {
   const index = args.indexOf('--auth');
   const selector = index >= 0 ? args[index + 1] : 'default';
   const tokenNames = args.flatMap((arg, i) => arg === '--pat-env' ? [args[i + 1]] : []);
-  const token = tokenNames.map(name => options.env[name]).find(Boolean);
-  const credential = token ? githubCredential({ token }) : `adapter:${selector}`;
+  const token = tokenNames.map(name => env?.[name]).find(Boolean);
+  return { selector, credential: token ? githubCredential({ token }) : `adapter:${selector}` };
+}
+
+// Reads bind no reviewer identity: only the watcher's broker service token.
+function githubAdapterReadCredential(env = process.env) {
+  return githubAdapterCredential(appendMergeAgentServiceAuthAdapterArgs([], 'read', {}, env), buildAdapterEnv(env)).credential;
+}
+
+// The label adapter queries GraphQL before mutation. Its subprocess does not
+// share AsyncLocalStorage with the watcher, so account failures at this seam.
+async function executeLabelAdapter(execFileImpl, adapterBin, args, options) {
+  const { selector, credential } = githubAdapterCredential(args, options.env);
   // Outside a watcher scope the adapter owns its own transport admission.
   // Parent accounting is needed to carry its failure into the enclosing poll.
   const scope = currentGitHubBudgetScope();
@@ -840,6 +852,7 @@ const __test__ = {
 export {
   buildAdapterEnv,
   adapterUnsupportedError,
+  githubAdapterReadCredential,
   __test__,
   readAdapterHeadAndState,
   readAdapterIssueComments,

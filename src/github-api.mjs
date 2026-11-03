@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
 import {
+  githubAdapterReadCredential,
   readAdapterHeadAndState,
   readAdapterPrRollup,
   readAdapterReviewBodiesForHead,
@@ -12,7 +13,7 @@ import {
   resolveGitHubAdapterBin,
 } from './github-adapter-client.mjs';
 import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
-import { awaitThrottleIfNeeded, extractRateLimitObservation, recordResponseRateLimit } from './rate-limit-throttle.mjs';
+import { awaitThrottleIfNeeded, extractRateLimitObservation, githubCredential, recordResponseRateLimit } from './rate-limit-throttle.mjs';
 
 const execFileAsync = promisify(execFile);
 const PAGE_SIZE = 100;
@@ -781,26 +782,32 @@ async function execGhJson(execFileImpl, args) {
   }
   const throttleResource = args[0] === 'api' && args[1] === 'graphql' ? 'graphql' : 'core';
   for (let attempt = 0; attempt <= GH_EXEC_RETRIES; attempt += 1) {
+    // Admission and header observations belong to the token gh actually sends
+    // (LAC-2075), never the anonymous bucket. An unscoped wait can outlive a
+    // token refresh, so the observed credential is re-read from the sent env.
+    let credential = githubCredential({ env: buildGhEnv() });
     try {
-      await awaitThrottleIfNeeded(throttleResource);
+      await awaitThrottleIfNeeded(throttleResource, credential);
+      const ghEnv = buildGhEnv();
+      credential = githubCredential({ env: ghEnv });
       const effectiveArgs = headerAware ? ['api', '-i', ...args.slice(1)] : args;
       const { stdout } = await meteredExecFile(execFileImpl, 'gh', effectiveArgs, {
         maxBuffer: GH_MAX_BUFFER,
         timeout: loadAwareTimeoutMs(GH_EXEC_TIMEOUT_MS),
         killSignal: 'SIGKILL',
-        env: buildGhEnv(),
+        env: ghEnv,
         credentialEnv: process.env,
       });
       if (headerAware) {
         const response = parseGhApiHttpEnvelope(stdout);
-        await recordResponseRateLimit(extractRateLimitObservation(response.headers));
+        await recordResponseRateLimit({ ...extractRateLimitObservation(response.headers), credential });
         return JSON.parse(String(response.bodyText || 'null'));
       }
       return JSON.parse(String(stdout || 'null'));
     } catch (err) {
       if (headerAware) {
         const response = parseGhApiHttpEnvelope(err?.stdout || '');
-        await recordResponseRateLimit(extractRateLimitObservation(response.headers));
+        await recordResponseRateLimit({ ...extractRateLimitObservation(response.headers), credential });
       }
       const payload = tryParseGraphqlErrorPayload(err);
       if (payload?.errors) {
@@ -865,7 +872,7 @@ async function runAdapterReadWithTelemetry(category, {
   if (!adapterAvailable) return null;
   const startedAt = Date.now();
   try {
-    await awaitThrottleIfNeeded('core');
+    await awaitThrottleIfNeeded('core', githubAdapterReadCredential(env));
     const result = await action();
     if (result !== null && result !== undefined) {
       recordApiCallImpl?.({

@@ -46,7 +46,7 @@ import { captureLocalReviewerUsage } from './reviewer-pass-tokens.mjs';
 import { createReviewerProgressRecorder, persistHostedReviewerExecution, persistSingleReviewDecision } from './reviewer-execution-pass.mjs';
 import { normalizeReviewerFamily } from './reviewer-family.mjs';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
-import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
+import { awaitThrottleIfNeeded, githubCredential } from './rate-limit-throttle.mjs';
 import { resolveGitHubAppBotLogin } from './github-app-identity.mjs';
 import {
   classifyFollowUpCriticality,
@@ -1468,7 +1468,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
         });
         let adapterEnv = null;
         try {
-          await awaitThrottleIfNeeded();
+          await awaitThrottleIfNeeded('core', githubCredential({ token })); // the posting bot token's budget, never anonymous (LAC-2075)
           adapterEnv = {
             PATH: sourceEnv.PATH ?? '/usr/bin:/bin',
             HOME: sourceEnv.HOME ?? '',

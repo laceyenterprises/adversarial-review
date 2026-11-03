@@ -9,7 +9,7 @@ import { execFile } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { openReviewStateDb, ensureReviewStateSchema } from './review-state.mjs';
-import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
+import { awaitThrottleIfNeeded, githubCredential } from './rate-limit-throttle.mjs';
 import { isSqliteBusyError, withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -190,7 +190,8 @@ async function lookupRecentReviewArtifact({
   timestampField = 'created_at',
 } = {}) {
   if (!repo || !prNumber || !endpoint || !login || !postedAt) return null;
-  await awaitThrottleIfNeeded();
+  // Admit against the token this lookup's gh subprocess sends (LAC-2075).
+  await awaitThrottleIfNeeded('core', githubCredential({ env }));
   // `-f per_page=100` makes `gh api` send the field as a JSON body which
   // forces method=POST and the comments endpoint returns HTTP 422
   // ("body wasn't supplied"). `-X GET` keeps the method explicit so the

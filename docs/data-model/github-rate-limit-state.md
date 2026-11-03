@@ -39,6 +39,9 @@ bucket keeps the newer known `limit`. The counter belongs to that credential/res
 window; a new window starts a new counter. Expired observations are discarded on
 reads. Version 1 resource-keyed and legacy single-observation documents remain
 readable as anonymous observations; they do not throttle authenticated budgets.
+When a healthy bucket transitions to zero remaining, a failure without a quota
+limit retains the active observation's known `limit`, including when the failure
+uses a different or guessed reset. A limit supplied by the failure takes precedence.
 
 Writes hold the adjacent `.lock` directory, sync a temporary file and rename it
 over the store. Concurrent responses for the same window retain the lowest

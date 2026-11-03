@@ -538,6 +538,39 @@ test('headerless rate limits initialize and renew an expired resource window ato
   assert.equal((await b.readSharedState()).core.rateLimitedCalls, 1);
 });
 
+for (const [description, observation, expectedLimit] of [
+  ['headerless failure', null, 60],
+  ['failure with a reset but no limit', { remaining: 0, resetAt: '2026-01-01T00:02:00Z' }, 60],
+  ['failure with a new limit', { remaining: 0, resetAt: '2026-01-01T00:02:00Z', limit: 120 }, 120],
+]) {
+  test(`zero-balance merge retains the known limit: ${description}`, async t => {
+    const rootDir = makeRootDir();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const now = Date.parse('2026-01-01T00:00:00Z');
+    const writer = makeThrottle({ rootDir, nowMs: () => now });
+    await writer.recordResponseRateLimit({ remaining: 58, limit: 60, resetAt: now + 1800_000 });
+    const recorded = await writer.recordRateLimitedCall('core', 'default', observation);
+    assert.equal(recorded.remaining, 0);
+    assert.equal(recorded.limit, expectedLimit);
+    assert.equal(recorded.rateLimitedCalls, 1);
+    assert.equal(recorded.resetAt, new Date(now + (observation ? 120_000 : 60_000)).toISOString());
+    assert.equal(recorded.resetUnknown === true, observation === null);
+    const persisted = JSON.parse(readFileSync(writer.resolveSharedStatePath(), 'utf8'));
+    assert.equal(persisted.buckets.core.limit, expectedLimit);
+
+    const reader = makeThrottle({ rootDir, nowMs: () => now });
+    assert.deepEqual((await reader.readSharedState()).core, persisted.buckets.core);
+    await withGitHubBudgetScope({}, async () => {
+      await assert.rejects(reader.awaitThrottleIfNeeded(), err => {
+        assert.equal(err.name, 'GitHubBudgetDeferredError');
+        assert.equal(err.observation.limit, expectedLimit);
+        assert.ok(err.message.includes(`remaining=0/${expectedLimit}; floor=${expectedLimit / 10}`));
+        return true;
+      });
+    });
+  });
+}
+
 test('GHBUDGET-01: a newly settled review gets closing priority before its published gate refresh', async () => {
   const { isClosingRowReady } = await import('../src/watcher-github-budget.mjs');
   const row = { repo: 'fixture/repo', pr_number: 42, reviewer_head_sha: 'a'.repeat(40), review_status: 'posted' };

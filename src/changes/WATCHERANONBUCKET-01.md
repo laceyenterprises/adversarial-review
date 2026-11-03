@@ -8,6 +8,9 @@ instead of deferring until every reset. Async preflights, the synchronous gh
 read and the watcher's low-budget closing shortcut share the effective floor.
 A bucket with no recorded limit keeps the configured floor. An unknown bucket
 admits.
+Transitions from a healthy balance to zero retain the known limit when failure
+headers omit it, so stored budgets and deferred diagnostics keep the scaled
+floor and quota balance. An incoming known limit takes precedence.
 
 `GitHubBudgetDeferredError` now carries `credential` and names the bucket key
 in its message, with the remaining balance, limit and effective floor. Operators

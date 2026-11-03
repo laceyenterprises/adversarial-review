@@ -4490,6 +4490,8 @@ refusal, cancellation and unknown exits; process success alone proves no merge.
 
 ## Change notes
 
+- WATCHERANONBUCKET-01: cap the throttle floor at 10% of the observed quota (minimum 1), so anonymous 60/h buckets can admit requests. Deferred diagnostics name the credential, balance and effective floor; transitions to zero remaining retain a known limit when failure headers omit it.
+
 - LAC-2151 final comment remediation: verify the cached processed review digest as well as the raw model reply before redelivery; missing or mismatched cached text is retained as evidence and not reused.
 
 - LAC-2151 integration with LAC-2075: the durable write-boundary hook follows the sending-token budget preflight; tests retain both protections.

@@ -197,7 +197,9 @@ function mergeResourceObservations(current, incoming, nowMs = Date.now()) {
   // so a recovered budget is not held for the guessed duration. Callers pass
   // (older, newer).
   if (left.remaining === 0 && right.remaining > 0) return left.resetUnknown === true ? right : left;
-  if (right.remaining === 0 && left.remaining > 0) return right;
+  if (right.remaining === 0 && left.remaining > 0) {
+    return { ...right, ...(left.limit && !right.limit ? { limit: left.limit } : {}) };
+  }
   const leftResetAtMs = observationResetAtMs(left);
   const rightResetAtMs = observationResetAtMs(right);
   if (rightResetAtMs > leftResetAtMs) return right;

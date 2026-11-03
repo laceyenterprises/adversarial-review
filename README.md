@@ -4459,6 +4459,10 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- Clarify that the closure hammer creates or updates affected module change-note
+  fragments when authors omit them, matching the hammer prompt’s documentation
+  currency mandate.
+
 - REVIEWSTALL-01 HAM validation repair: align the Codex invocation regression
   with ceiling-capped stall deadlines and reviewer metadata, and refresh the
   reviewer runtime state-source fingerprint for the existing cancellation path.

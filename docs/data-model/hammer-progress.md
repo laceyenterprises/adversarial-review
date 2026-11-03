@@ -69,3 +69,7 @@ grace after it. `recordHammerProgress` refuses it unless the caller passes
 or retryable no-merge outcomes from the merge phase, and helper early failures
 the closer may still retry, keep their AMA terminal audits and merge-action
 receipts but write no `terminal-stop`.
+Controller startup follows the same distinction: exhausted launch-environment
+reads and missing legacy dispatch metadata write deferred audits without a
+`terminal-stop`; malformed activation and foreign launch identity emit a final
+receipt before refusing startup.

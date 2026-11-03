@@ -778,6 +778,11 @@ test('watcher releases a settled-clean pending follow-up job on the current head
       '## Blocking issues',
       '- None.',
       '',
+      // STRICTSETTLED-01: merge authority treats a missing non-blocking section
+      // as unknown, which still owes remediation under strict mode.
+      '## Non-blocking issues',
+      '- None.',
+      '',
       '## Verdict',
       'Approved',
     ].join('\n'),

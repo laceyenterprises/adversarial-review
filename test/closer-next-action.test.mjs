@@ -24,7 +24,7 @@ import { maybeDispatchAmaClosureFor, resolveMergeAgentCoexistenceForWatcher } fr
 import { reviewCeilingOwner } from '../src/review-ceiling-owner.mjs';
 import { observeClosureWait, CLOSURE_WAIT_BOUND_MS, CLOSURE_WAIT_RETRY_MS } from '../src/ama/closure-wait.mjs';
 import { followUpJobFilePrefix } from '../src/follow-up-job-names.mjs';
-import { getFollowUpJobDir } from '../src/follow-up-jobs.mjs';
+import { createFollowUpJob, getFollowUpJobDir, markFollowUpJobStopped } from '../src/follow-up-jobs.mjs';
 import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import { evaluateHammerStopHold } from '../src/ama/hammer-stop-hold.mjs';
 import { maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
@@ -971,6 +971,36 @@ for (const jobStatus of ['failed', 'stopped']) {
     assert.ok(!f.effects.some(([kind]) => kind === 'closer'));
   });
 }
+
+test('STRICTSETTLED-01: remediation-job-missing recreates a released job once per head', async t => {
+  const body = '## Blocking issues\n- None.\n## Non-blocking issues\n- **Synthetic nit**\n  - **File:** `x.mjs`\n'
+    + '  - **Problem:** a non-blocking finding.\n## Verdict\nComment only';
+  const f = redCiFixture(t, { findings: false });
+  f.args.candidate.statusCheckRollup[0].conclusion = 'SUCCESS';
+  f.args.reviewStateRow.review_body = body;
+  f.args.fetchLatestHeadReviewBodiesImpl = async () => [body];
+  const created = createFollowUpJob({ branch: 'fixture/remediation', rootDir: f.args.rootDir, repo: identity.repo,
+    prNumber: identity.prNumber, reviewerModel: 'claude', linearTicketId: null, revisionRef: HEAD,
+    reviewBody: body, reviewPostedAt: '2025-12-31T23:59:00.000Z', critical: false, maxRemediationRounds: 2 });
+  markFollowUpJobStopped({ rootDir: f.args.rootDir, jobPath: created.jobPath, stoppedAt: '2025-12-31T23:59:30.000Z',
+    stopCode: 'settled-clean', sourceStatus: 'pending', commentDeliveryExemption: 'interrupted-without-reconciled-reply',
+    stopReason: 'Released pending follow-up job before reviewer defer: settled-clean.' });
+
+  const first = await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(first.nextAction.action, 'remediate', JSON.stringify(first.nextAction));
+  assert.equal(first.remediationJobRecovery?.recreated, true, JSON.stringify(first.remediationJobRecovery));
+  assert.equal(first.reason, 'active-remediation-job');
+  assert.equal(first.dispatched, false);
+  const pending = getFollowUpJobDir(f.args.rootDir, 'pending');
+  assert.equal(fs.readdirSync(pending).filter(name => name.endsWith('.json')).length, 1);
+
+  // The fixture clock is pinned while queue liveness reads the wall clock, so
+  // the next pass may not count the queued job as live. Either way it is never
+  // recreated a second time.
+  const second = await maybeDispatchAmaClosureFor(f.args);
+  assert.notEqual(second.remediationJobRecovery?.recreated, true, JSON.stringify(second.remediationJobRecovery));
+  assert.equal(fs.readdirSync(pending).filter(name => name.endsWith('.json')).length, 1);
+});
 
 test('real executed CI stop keeps its review baseline through closure preflight and closer evaluation', async t => {
   const f = closureFixture(t);

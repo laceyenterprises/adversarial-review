@@ -19,6 +19,7 @@ import { randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { findLiveAmaCloserLease, isHeldAmaCloserLease } from './ama/closer-lease.mjs';
+import { isDaemonMergeReviewAllowed } from './ama/daemon-merge.mjs';
 import { isActiveAmaCloserDispatchRecord, readAmaCloserDispatchRecord, reconcileAmaCloserLease } from './ama/dispatch-closer.mjs';
 import { ensureWorkspaceTrashDir, launchWorkspaceTrashDeleter, workspaceTrashDir } from './follow-up-workspace-trash.mjs';
 import { getConfig } from './config-loader.mjs';
@@ -123,6 +124,11 @@ const RETRIGGERABLE_STOP_CODES = Object.freeze([
   // retrigger label/CLI call means "address the remaining non-blocking flags."
   'review-settled',
   'no-remediation-required',
+  // The watcher's pre-defer release of a settled pending job (STRICTSETTLED-01):
+  // the same "settled" shape, so the same operator retrigger and the closer's
+  // once-per-head remediation-job-missing recovery may requeue it.
+  'settled-clean',
+  'settled-clean-head-moved',
   // The silent-no-progress guard auto-stops when a remediation round
   // completes without setting `reReview.requested = true`. The guard
   // prevents an automatic loop where remediation keeps "completing"
@@ -471,24 +477,26 @@ function classifyFollowUpCriticality(reviewBody) {
  * and "Exhaustion always closes by landing, never by abandoning… never an
  * indefinite `wait`".
  *
- * @param {{critical: boolean, verdict: string|null, nonBlockingFindingCount: number,
+ * STRICTSETTLED-01: the finding test is merge authority's own predicate,
+ * `isDaemonMergeReviewAllowed` — the one `pr-next-action` uses to decide
+ * `clean` versus `remediate`. Under strict mode a known non-blocking finding,
+ * or an unknown non-blocking section, owes a round. Callers that release jobs
+ * outside the follow-up daemon pass the effective `strictMode` from
+ * `loadEffectiveMergeAuthorityConfig`; absence means strict.
+ *
+ * @param {{critical: boolean, verdict: string|null, blockingFindingCount: number,
+ *          blockingFindingState: string, nonBlockingFindingCount: number,
  *          nonBlockingFindingState: string}} classification
- * @param {{strictNonBlockingRemediation?: boolean}} [options]
+ * @param {{strictMode?: boolean, strictNonBlockingRemediation?: boolean}} [options]
+ *   `strictNonBlockingRemediation` is the legacy spelling of `strictMode`.
  */
 function isSettledCleanClassification(classification, options = {}) {
-  // `!== false` mirrors the config idiom used by eligibility.mjs and
-  // ama-closure-orchestration.mjs: strict is the default, absence means on.
-  const strictNonBlockingRemediation = options?.strictNonBlockingRemediation !== false;
   if (classification?.critical !== false) return false;
   if (classification?.verdict !== 'comment-only' && classification?.verdict !== 'approved') {
     return false;
   }
-  if (!strictNonBlockingRemediation) return true;
-  // Unknown is not clean: an unparseable non-blocking section must owe a round
-  // rather than silently short-circuit closure, matching eligibility's
-  // `non-blocking-findings-unknown` refusal.
-  return classification?.nonBlockingFindingState === 'known'
-    && classification?.nonBlockingFindingCount === 0;
+  const strictMode = (options?.strictMode ?? options?.strictNonBlockingRemediation) !== false;
+  return isDaemonMergeReviewAllowed(classification, { strictMode });
 }
 
 function resolveDurableFollowUpClassification(reviewBody, _fallbackCritical, options = {}) {

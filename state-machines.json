@@ -862,7 +862,7 @@
           "id": "follow-up-job.03",
           "from": "pending",
           "to": "stopped",
-          "trigger": "settled clean bypasses branch hold, exhausted branch lookups or rounds",
+          "trigger": "settled clean bypasses branch hold, exhausted branch lookups or rounds; settled clean is merge authority's strict-mode predicate in the watcher release too (STRICTSETTLED-01)",
           "codeSource": "src/follow-up-jobs.mjs"
         },
         {
@@ -932,7 +932,7 @@
           "id": "follow-up-job.13",
           "from": "stopped",
           "to": "pending",
-          "trigger": "allowlisted explicit retrigger or live satisfied required-label event with unchanged round cap; branch-unresolved resets lookup attempts; all-infrastructure CI stops except max-rounds recover on successful current-head replacements; structurally proven committed-unpublished recovery uses only remaining rounds",
+          "trigger": "allowlisted explicit retrigger or live satisfied required-label event with unchanged round cap; branch-unresolved resets lookup attempts; all-infrastructure CI stops except max-rounds recover on successful current-head replacements; structurally proven committed-unpublished recovery uses only remaining rounds; STRICTSETTLED-01: an AMA remediate decision with no live job requeues a settled-clean release once per PR head while merge authority's strict predicate still owes remediation",
           "codeSource": "src/follow-up-jobs.mjs"
         },
         {

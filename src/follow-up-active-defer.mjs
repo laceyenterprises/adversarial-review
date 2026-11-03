@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { basename, dirname, join } from 'node:path';
 
 import * as followUpJobs from './follow-up-jobs.mjs';
+import { loadEffectiveMergeAuthorityConfig } from './ama/effective-policy.mjs';
 import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import { currentProcessGroupId, isPgidAlive } from './process-group-identity.mjs';
 import { readWorkerCpuPercent, resolveWorkerArtifactProgressMs, resolveWorkerSessionProgressMs } from './follow-up-worker-progress.mjs';
@@ -58,22 +59,33 @@ function normalizeRevisionRef(value) {
   return normalized || null;
 }
 
-function isSettledCleanFollowUpJob(job) {
+// STRICTSETTLED-01: the strict-mode read is merge authority's own resolver, so
+// the watcher and the closer cannot disagree about whether findings remain owed.
+// An unreadable policy keeps the strict default: holding a job costs at most
+// one remediation round, releasing it wrongly leaves the PR without an owner.
+function resolveMergeAuthorityStrictMode({ rootDir, loadPolicyImpl = loadEffectiveMergeAuthorityConfig } = {}) {
+  try {
+    return loadPolicyImpl({ rootDir })?.strictMode !== false;
+  } catch {
+    return true;
+  }
+}
+
+function isSettledCleanFollowUpJob(job, { strictMode = true } = {}) {
   const nextAction = job?.remediationPlan?.nextAction;
   if (nextAction?.operatorOverride === true) return false;
 
-  const action = job?.recommendedFollowUpAction || {};
-  const actionType = String(action?.type ?? '').trim().toLowerCase();
-  if (['settled-clean', 'no-remediation-required', 'none'].includes(actionType)) {
-    return true;
+  // A stored review is classified with the same predicate merge authority
+  // uses. Under strict mode a comment-only review with a non-blocking finding
+  // still owes its remediation round, so its job is not released.
+  if (String(job?.reviewBody ?? '').trim()) {
+    return followUpJobs.isSettledCleanClassification(
+      followUpJobs.classifyFollowUpCriticality(job.reviewBody), { strictMode });
   }
 
-  if (!String(job?.reviewBody ?? '').trim()) {
-    return false;
-  }
-  const classification = followUpJobs.classifyFollowUpCriticality(job.reviewBody);
-  return classification.critical === false
-    && (classification.verdict === 'comment-only' || classification.verdict === 'approved');
+  const action = job?.recommendedFollowUpAction || {};
+  const actionType = String(action?.type ?? '').trim().toLowerCase();
+  return ['settled-clean', 'no-remediation-required', 'none'].includes(actionType);
 }
 
 function stopTerminalPendingFollowUpJob({
@@ -82,13 +94,18 @@ function stopTerminalPendingFollowUpJob({
   currentRevisionRef = null,
   stoppedAt = new Date().toISOString(),
   markStoppedImpl = followUpJobs.markFollowUpJobStopped,
+  strictMode = null,
+  loadPolicyImpl = loadEffectiveMergeAuthorityConfig,
 }) {
   const job = latest?.job;
   if (job?.status !== 'pending') {
     return null;
   }
 
-  const settledClean = isSettledCleanFollowUpJob(job);
+  const effectiveStrictMode = typeof strictMode === 'boolean'
+    ? strictMode
+    : resolveMergeAuthorityStrictMode({ rootDir, loadPolicyImpl });
+  const settledClean = isSettledCleanFollowUpJob(job, { strictMode: effectiveStrictMode });
   const jobRevisionRef = normalizeRevisionRef(job?.revisionRef);
   const headRevisionRef = normalizeRevisionRef(currentRevisionRef);
   const revisionSuperseded = Boolean(jobRevisionRef && headRevisionRef && jobRevisionRef !== headRevisionRef);
@@ -333,6 +350,7 @@ function shouldDeferReviewForActiveFollowUp({
   nowMs = Date.now(),
   log = console,
   staleSignalImpl = signalStaleFollowUpWorker,
+  strictMode = null,
 }) {
   let latest = latestJobFinder(rootDir, { repo, prNumber });
   if (latest?.job?.status === 'pending' && currentRevisionRef) {
@@ -365,6 +383,7 @@ function shouldDeferReviewForActiveFollowUp({
     currentRevisionRef,
     stoppedAt: new Date(nowMs).toISOString(),
     markStoppedImpl,
+    strictMode,
   }) : null;
   if (terminalStopped?.deferred) return { defer: true, latestJobStatus: terminalStopped.job.status,
     jobPath: terminalStopped.jobPath, jobId: terminalStopped.job.jobId, reason: terminalStopped.reason };
@@ -419,6 +438,8 @@ function shouldDeferReviewForActiveFollowUp({
 }
 
 export {
+  isSettledCleanFollowUpJob,
+  resolveMergeAuthorityStrictMode,
   shouldDeferReviewForActiveFollowUp,
   stopBudgetExhaustedPendingFollowUpJob,
   stopTerminalPendingFollowUpJob,

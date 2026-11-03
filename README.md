@@ -2826,7 +2826,7 @@ stateDiagram-v2
     state "cancelled" as s5
     [*] --> s0: follow-up-job.01 create from delivered review
     s0 --> s1: follow-up-job.02 resolve head branch, claim and start round
-    s0 --> s4: follow-up-job.03 settled clean bypasses branch hold, exhausted branch lookups or rounds
+    s0 --> s4: follow-up-job.03 settled clean bypasses branch hold, exhausted branch lookups or rounds; settled clean is merge authority's strict-mode predicate in the watcher release too (STRICTSETTLED-01)
     s0 --> s3: follow-up-job.04 claim failure
     s0 --> s5: follow-up-job.05 operator cancellation
     s1 --> s2: follow-up-job.06 validated worker reply; proven publication precedes infrastructure hold and legacy published wait completes on green
@@ -2836,7 +2836,7 @@ stateDiagram-v2
     s1 --> s0: follow-up-job.10 transient retry, unpublished infrastructure-only CI recovery or orchestration-mode refusal hold without round charge
     s2 --> s0: follow-up-job.11 next round unless comment-only final hammer handoff
     s3 --> s0: follow-up-job.12 explicit retrigger or all-infrastructure CI stop with successful current-head replacement checks
-    s4 --> s0: follow-up-job.13 allowlisted explicit retrigger or live satisfied required-label event with unchanged round cap; branch-unresolved resets lookup attempts; all-infrastructure CI stops except max-rounds recover on successful current-head replacements; structurally proven committed-unpublished recovery uses only remaining rounds
+    s4 --> s0: follow-up-job.13 allowlisted explicit retrigger or live satisfied required-label event with unchanged round cap; branch-unresolved resets lookup attempts; all-infrastructure CI stops except max-rounds recover on successful current-head replacements; structurally proven committed-unpublished recovery uses only remaining rounds; STRICTSETTLED-01: an AMA remediate decision with no live job requeues a settled-clean release once per PR head while merge authority's strict predicate still owes remediation
     s1 --> s4: follow-up-job.14 stacked-base-merged: hold before worker spawn and request rebase/retarget
     s1 --> s0: follow-up-job.15 base evidence unreadable: budget-neutral delayed recheck
     s1 --> s4: follow-up-job.16 operator-only findings after lifecycle admission: hold without spawning

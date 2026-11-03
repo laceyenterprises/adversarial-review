@@ -642,6 +642,11 @@ async function readPinnedCopyWarnings({ env = process.env, runImpl = runBoundedP
     return warnings;
   })();
   byEnvironment.set(env, { root, at, promise });
+  // Only successful observations retain the TTL; an older failure must not
+  // evict a replacement read after the deploy root changes or the TTL expires.
+  promise.catch(() => {
+    if (byEnvironment.get(env)?.promise === promise) byEnvironment.delete(env);
+  });
   return promise;
 }
 

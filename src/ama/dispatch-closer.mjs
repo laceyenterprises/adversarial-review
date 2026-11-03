@@ -4644,7 +4644,7 @@ async function maybeDispatchAmaCloserWithinRepositoryCycle(args) {
     if (args.cfg?.enabled && isDrainDeferredAmaCloserRecord(deferred)) {
       try {
         const status = await (args.readDispatchDrainStatusImpl || readDispatchDrainStatus)({
-          hqPath: resolveCloserHqPath(dispatchContext),
+          hqPath: resolveCloserHqPath(dispatchContext, args.env || process.env),
           hqRoot: dispatchContext.hqRoot || DEFAULT_HQ_ROOT,
           ledgerDbPath: dispatchContext.ledgerDbPath,
           execFileImpl: args.execFileImpl || execFileAsync, signal: args.signal, env: args.env || process.env,
@@ -5340,7 +5340,7 @@ async function maybeDispatchAmaCloserAttempt({
   const targetDispatchIdentity = { repo, prNumber, headSha: targetRemediationSha };
   const auditIdentity = { repo, prNumber, headSha: reviewedSha };
   const targetAuditIdentity = { repo, prNumber, headSha: targetRemediationSha };
-  const hqPath = resolveCloserHqPath(dispatchContext);
+  const hqPath = resolveCloserHqPath(dispatchContext, env);
   const hqProject = dispatchContext.hqProject || DEFAULT_PROJECT;
   const reviewedHeadRecord = readAmaCloserDispatchRecord(rootDir, reviewedHeadDispatchIdentity);
   // HAMBG-02: reconcile this review series' newest hammer launch, not only the

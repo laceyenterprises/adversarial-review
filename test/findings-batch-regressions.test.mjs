@@ -1,56 +1,29 @@
-// Kept inside the launch's src-only scope; run with node --test explicitly.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, openSync, closeSync, readFileSync, readdirSync, symlinkSync, realpathSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, openSync, closeSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import Database from 'better-sqlite3';
 import fsExt from 'fs-ext';
-// The standard runner discovers test/ only. Enter the same symlink-preserving
-// isolation before importing production modules, which can open module-local state.
-if (!process.env.ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT) {
-  const repo = fileURLToPath(new URL('../', import.meta.url));
-  const sandbox = realpathSync(mkdtempSync(join(tmpdir(), 'batch-tests-')));
-  const worker = join(sandbox, 'file-0');
-  mkdirSync(worker);
-  try {
-    for (const entry of readdirSync(repo, { withFileTypes: true })) {
-      if (entry.name === 'data' || entry.name === '.git') continue;
-      symlinkSync(join(repo, entry.name), join(worker, entry.name), entry.isDirectory() ? 'dir' : 'file');
-    }
-    const bin = join(sandbox, 'bin');
-    mkdirSync(bin);
-    for (const command of ['gh', 'hq', 'codex']) writeFileSync(join(bin, command), '#!/bin/sh\nexit 78\n', { mode: 0o755 });
-    const env = { PATH: `${bin}:${process.env.PATH}`, TMPDIR: sandbox,
-      NODE_OPTIONS: '--preserve-symlinks --preserve-symlinks-main',
-      ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT: sandbox, ADVERSARIAL_REVIEW_TEST_REEXEC: '1',
-      GIT_CEILING_DIRECTORIES: sandbox, AGENT_OS_DEPLOY_CHECKOUT: join(sandbox, 'deploy') };
-    const result = spawnSync(process.execPath, ['--preserve-symlinks', '--preserve-symlinks-main', '--test',
-      join(worker, 'src/findings-batch-regressions.test.mjs')], { cwd: worker, env, stdio: 'inherit' });
-    process.exitCode = result.status ?? 1;
-  } finally { rmSync(sandbox, { recursive: true, force: true }); }
-  process.exit(process.exitCode);
-}
-await import('../test/helpers/load-aware-timeout-fixture.mjs');
-const { __testables__: closer } = await import('./ama/dispatch-closer.mjs');
-const { acquireAmaCloserLease, updateAmaCloserLease, releaseRetryableAmaCloserLease } = await import('./ama/closer-lease.mjs');
-const { launchRequestMeaning } = await import('./ama/launch-request-status.mjs');
-const { recoverOrphan } = await import('./ama/orphan-watchdog.mjs');
-const { inspectLegacyPoolOverrides } = await import('./config-token-pool-migration.mjs');
-const { conflictOwnerReviewRoute } = await import('./conflict-owner-review-route.mjs');
-const { ensureReviewStateSchema } = await import('./review-state.mjs');
-const { readReviewObservations } = await import('./review-observations.mjs');
-const { recoverOverdueOwnership } = await import('./ownerproof-review-recovery.mjs');
-const { dispatchReadTransport } = await import('./dispatch-read-client.mjs');
-const { listHardeningRecordsFromSdk } = await import('./hardening-ledger-context.mjs');
-const { readDispatchStdout, readDispatchStdoutSync, MAX_DISPATCH_STDOUT_BYTES } = await import('./dispatch-files-client.mjs');
-const { readPinnedCopyWarnings } = await import('./agy-reviewer-identities.mjs');
-const { resolveRemediationModel } = await import('./adapters/agent-runtime/local/remediation.mjs');
-const { closureOwnerShadowEvidence } = await import('./pr-next-action-consumer.mjs');
-const { deriveNextActionSnapshot, nextAction } = await import('./pr-next-action.mjs');
-const { registerSharedNextAction, resolveSharedNextAction, shadowNextAction } = await import('./pr-next-action-shadow.mjs');
+import './helpers/load-aware-timeout-fixture.mjs';
+const { __testables__: closer } = await import('../src/ama/dispatch-closer.mjs');
+const { acquireAmaCloserLease, updateAmaCloserLease, releaseRetryableAmaCloserLease } = await import('../src/ama/closer-lease.mjs');
+const { launchRequestMeaning } = await import('../src/ama/launch-request-status.mjs');
+const { recoverOrphan } = await import('../src/ama/orphan-watchdog.mjs');
+const { inspectLegacyPoolOverrides } = await import('../src/config-token-pool-migration.mjs');
+const { conflictOwnerReviewRoute } = await import('../src/conflict-owner-review-route.mjs');
+const { ensureReviewStateSchema } = await import('../src/review-state.mjs');
+const { readReviewObservations } = await import('../src/review-observations.mjs');
+const { recoverOverdueOwnership } = await import('../src/ownerproof-review-recovery.mjs');
+const { dispatchReadTransport } = await import('../src/dispatch-read-client.mjs');
+const { listHardeningRecordsFromSdk } = await import('../src/hardening-ledger-context.mjs');
+const { readDispatchStdout, readDispatchStdoutSync, MAX_DISPATCH_STDOUT_BYTES } = await import('../src/dispatch-files-client.mjs');
+const { readPinnedCopyWarnings } = await import('../src/agy-reviewer-identities.mjs');
+const { resolveRemediationModel } = await import('../src/adapters/agent-runtime/local/remediation.mjs');
+const { closureOwnerShadowEvidence } = await import('../src/pr-next-action-consumer.mjs');
+const { deriveNextActionSnapshot, nextAction } = await import('../src/pr-next-action.mjs');
+const { registerSharedNextAction, resolveSharedNextAction, shadowNextAction } = await import('../src/pr-next-action-shadow.mjs');
 
 const HEAD = 'a'.repeat(40), OLD = 'b'.repeat(40);
 const quiet = { log() {}, info() {}, warn() {}, error() {} };
@@ -238,6 +211,44 @@ test('native pinned-copy observations coalesce and expire without changing expli
   env.AGENT_OS_DEPLOY_CHECKOUT = '/synthetic/other';
   await readPinnedCopyWarnings({ env, runImpl });
   assert.equal(calls, 3);
+});
+
+for (const [failure, result] of [
+  ['spawn error', { code: null, error: new Error('synthetic spawn failure') }],
+  ['timeout', { code: null, timedOut: true }],
+  ['nonzero exit', { code: 1, stderr: 'synthetic failure' }],
+  ['invalid response', { code: 0, stdout: '{}' }],
+]) {
+  test(`pinned-copy ${failure} is shared in flight and retried immediately after rejection`, async () => {
+    const env = { AGENT_OS_DEPLOY_CHECKOUT: '/synthetic/deploy' };
+    let calls = 0;
+    const runImpl = async () => ++calls === 1 ? result : { code: 0, stdout: '[]' };
+    const reads = await Promise.allSettled([
+      readPinnedCopyWarnings({ env, runImpl }), readPinnedCopyWarnings({ env, runImpl }),
+    ]);
+    assert.equal(calls, 1);
+    assert.deepEqual(reads.map(read => read.status), ['rejected', 'rejected']);
+    assert.equal(reads[0].reason, reads[1].reason);
+    assert.deepEqual(await readPinnedCopyWarnings({ env, runImpl }), []);
+    assert.deepEqual(await readPinnedCopyWarnings({ env, runImpl }), []);
+    assert.equal(calls, 2, 'successful retry retains the cache');
+  });
+}
+
+test('a rejected pinned-copy read cannot evict a newer deploy-root observation', async () => {
+  const env = { AGENT_OS_DEPLOY_CHECKOUT: '/synthetic/old' };
+  let rejectOld, calls = 0;
+  const runImpl = async () => {
+    if (++calls === 1) return new Promise((_resolve, reject) => { rejectOld = reject; });
+    return { code: 0, stdout: '[]' };
+  };
+  const oldRead = assert.rejects(readPinnedCopyWarnings({ env, runImpl }), /old read failed/);
+  env.AGENT_OS_DEPLOY_CHECKOUT = '/synthetic/new';
+  assert.deepEqual(await readPinnedCopyWarnings({ env, runImpl }), []);
+  rejectOld(new Error('old read failed'));
+  await oldRead;
+  assert.deepEqual(await readPinnedCopyWarnings({ env, runImpl }), []);
+  assert.equal(calls, 2);
 });
 
 test('closeout lookup is deterministic across repo casing and uses case-insensitive indexes', t => {

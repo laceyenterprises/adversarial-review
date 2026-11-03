@@ -1,3 +1,4 @@
+import { hqRemediationWorkerClass } from './remediation-worker-class.mjs';
 import { loadRoleConfig } from './role-config.mjs';
 import { writeFollowUpJob } from './follow-up-jobs.mjs';
 
@@ -68,7 +69,7 @@ function buildLegacyHqRemediationDispatchArgs({
   const args = [
     'dispatch',
     '--ticket', ticketRef,
-    '--worker-class', workerClass,
+    '--worker-class', hqRemediationWorkerClass(workerClass),
     '--prompt', promptPath,
     '--completion-shape', 'branch-push',
     '--required-outcome', 'push',

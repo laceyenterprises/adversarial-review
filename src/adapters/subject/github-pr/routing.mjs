@@ -142,6 +142,7 @@ function getReviewerRouteTable({
 function normalizeBuilderClass(builderClassInput, routeTable = ROUTE_BY_BUILDER_CLASS) {
   const raw = String(builderClassInput || '').trim().toLowerCase();
   const builderClass = ({
+    'remediator-gemini': 'gemini',
     'codex-corp': 'codex',
     'remediator-codex': 'codex',
     'remediator-codex-corp': 'codex',
@@ -174,6 +175,7 @@ function normalizeReviewerModel(reviewerInput) {
     case 'remediator-codex':
     case 'remediator-codex-corp':
       return 'codex';
+    case 'remediator-gemini':
     case 'gemini':
     case 'gemini-reviewer':
       return 'gemini';

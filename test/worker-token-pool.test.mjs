@@ -296,6 +296,37 @@ test('ITP-14 pooled routing preserves the declared infrastructure fallback', asy
   assert.equal(result.reason, 'infrastructure-fallback');
 });
 
+for (const resolver of ['missing', 'null', 'undefined']) {
+  for (const laterFallback of [false, true]) {
+    test(`unresolved unpooled fallback is attributed with resolver=${resolver}, laterFallback=${laterFallback}`, async () => {
+      const seen = [];
+      const result = await pool.resolvePooledWorkerRouting({
+        primary: 'remediator-codex', kind: 'remediator', env: {},
+        fallbackWorkerClasses: ['remediator-grok', ...(laterFallback ? ['remediator-claude'] : [])],
+        ...(resolver === 'missing' ? {} : { resolveUnpooledFallback: async candidate => {
+          assert.equal(candidate, 'remediator-grok');
+          return resolver === 'null' ? null : undefined;
+        } }),
+        selectAccountImpl: async ({ identity }) => {
+          seen.push(identity);
+          return { identity, workerClass: identity, pooled: true,
+            hold: identity === 'remediator-codex',
+            status: identity === 'remediator-codex' ? 'unavailable' : 'selected',
+            reason: identity === 'remediator-codex' ? 'accounts-unavailable' : 'preferred-ready' };
+        },
+      });
+      assert.deepEqual(result.skipped, [
+        { workerClass: 'remediator-grok', reason: 'unpooled-fallback-unresolved' },
+      ]);
+      assert.deepEqual(seen, ['remediator-codex', ...(laterFallback ? ['remediator-claude'] : [])]);
+      assert.equal(result.workerClass, laterFallback ? 'remediator-claude' : 'remediator-codex');
+      assert.equal(result.fellBack, laterFallback);
+      assert.equal(result.hold, !laterFallback);
+      assert.equal(result.reason, laterFallback ? 'primary-grounded-fallback' : 'no-available-fallback');
+    });
+  }
+}
+
 test('ITP-14 invalid owner requests/results and unreadable configuration hold without fallback', async () => {
   for (const mutate of [
     w => { w.request.identity = 'codex'; },

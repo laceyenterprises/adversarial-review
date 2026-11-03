@@ -1344,6 +1344,7 @@ function spawnLocalRemediationWorker(workerClass, opts) {
     case 'codex': return spawnCodexRemediationWorker(opts);
     case 'remediator-claude':
     case 'claude-code': return spawnClaudeCodeRemediationWorker(opts);
+    case 'remediator-gemini':
     case 'gemini': return spawnGeminiRemediationWorker(opts);
     default: throw new Error(`unknown remediation worker class: ${workerClass}`);
   }

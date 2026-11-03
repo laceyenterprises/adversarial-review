@@ -1,3 +1,4 @@
+import { hqRemediationWorkerClass } from './remediation-worker-class.mjs';
 import { cleanupServiceCodexAuth } from './codex-service-home.mjs';
 
 import { withRepositoryStateCycle } from './repository-state-lock.mjs';
@@ -401,7 +402,7 @@ function createRemediationRuntime({
 } = {}) {
   async function run(request = {}) {
     const mode = request.mode;
-    const workerClass = request.role?.workerClass;
+    const workerClass = normalizeRemediationWorkerClass(request.role?.workerClass) || request.role?.workerClass;
     if (mode === 'os') {
       const worker = await dispatchRemediationViaHq({
         hqRoot: resolveHqRoot(env, { requireExists: true }),
@@ -603,7 +604,7 @@ async function dispatchRemediationViaHq({
           request_id: requestId,
           ticket_ref: ticketRef,
           prompt: promptPath,
-          worker_class: workerClass,
+          worker_class: hqRemediationWorkerClass(workerClass),
           task_kind: 'coding',
           completion_shape: 'branch-push',
           required_outcome: 'push',
@@ -671,9 +672,9 @@ async function dispatchRemediationViaHq({
         env,
       });
   return {
-    model: workerClass,
+    model: normalizeRemediationWorkerClass(workerClass) || workerClass,
     ...(modelResolution || {}),
-    workerClass,
+    workerClass: hqRemediationWorkerClass(workerClass),
     state: 'spawned',
     spawnedAt: now(),
     promptPath,

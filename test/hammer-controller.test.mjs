@@ -1376,3 +1376,60 @@ test('bootstrap failure drains the controller group while readiness read is bloc
   assert.equal(f.receipt().drained, true);
   assert.ok(snapshots >= 3, 'cancellation is followed by an empty census');
 });
+
+for (const mode of ['owned-group', 'refused-group', 'unreadable-census']) {
+  test(`bootstrap drain deduplicates signals and escalates with ${mode}`, async t => {
+    const f = fixture(t, 'exit 0');
+    let now = 0, snapshots = 0, killedAt;
+    const signals = [], directSignals = [], releases = [];
+    const child = Object.assign(new EventEmitter(), {
+      pid: 4242, stdin: new PassThrough(), stdio: [null, null, null, null, new PassThrough()],
+      kill(signal) {
+        assert.notEqual(mode, 'owned-group', 'owned group requires no direct fallback');
+        directSignals.push([signal, now]);
+        if (signal === 'SIGKILL') killedAt = now;
+        return true;
+      },
+      unref() {},
+    });
+    const status = await runHammerController('/fixture', [], {
+      env: f.env, pollMs: 5, graceMs: 30, drainMs: 30,
+      nowImpl: () => now,
+      delayImpl: async ms => {
+        now += ms;
+        // Keep several polls between signal delivery and the reaped exit.
+        if (killedAt !== undefined && now - killedAt === 15) child.emit('exit', null, 'SIGKILL');
+      },
+      readLaunchImpl: async () => launch('running'), spawnImpl: () => child,
+      snapshotImpl() {
+        assert.equal(child.stdin.readableLength, 0, 'ready was never released');
+        if (++snapshots === 1 || mode === 'unreadable-census') throw new Error('synthetic census failure');
+        return killedAt !== undefined && now - killedAt >= 15 ? [] : [{ pid: 4242, birth: 'fixture-birth' }];
+      },
+      signalGroupImpl(pgid, signal) {
+        assert.equal(pgid, -4242);
+        signals.push([signal, now]);
+        if (mode === 'refused-group') throw Object.assign(new Error('fixture group refusal'), { code: 'EPERM' });
+        if (signal === 'SIGKILL') killedAt = now;
+      },
+      releaseImpl({ drained }) {
+        releases.push(drained);
+        return { released: true };
+      },
+    });
+    assert.equal(status, 125);
+    const expected = [['SIGTERM', 0], ['SIGKILL', 30]];
+    if (mode === 'owned-group') assert.deepEqual(signals, expected);
+    else assert.deepEqual(directSignals, expected);
+    if (mode === 'unreadable-census') assert.deepEqual(signals, []);
+    if (mode === 'refused-group') assert.equal(f.receipt().signalError, 'EPERM');
+    assert.equal(f.receipt().drained, mode !== 'unreadable-census');
+    assert.equal(f.receipt().state, mode === 'unreadable-census' ? 'cleanup-unconfirmed' : 'quiescent');
+    assert.deepEqual(releases, mode === 'unreadable-census' ? [] : [true]);
+    if (mode === 'unreadable-census') assert.equal(f.receipt().leaseCleanup, undefined);
+    if (mode !== 'owned-group') {
+      assert.equal(f.receipt().directTermSent, true);
+      assert.equal(f.receipt().directKillSent, true);
+    }
+  });
+}

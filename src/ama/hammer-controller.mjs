@@ -456,12 +456,18 @@ export async function runHammerController(script, args = [], {
       try { members = await snapshotImpl(child.pid); } catch { /* Unknown retains custody. */ }
       if (members?.length === 0 && exited) { drained = true; break; }
       const signal = nowImpl() - stopAt < graceMs ? 'SIGTERM' : 'SIGKILL';
-      if (members && groupStillOwned(members, witnessed, !exited, child.pid)) {
-        try { signalGroupImpl(-child.pid, signal); }
-        catch (failure) { if (failure.code !== 'ESRCH') record.signalError = failure.code; }
-      } else if (!exited) {
-        // Only the direct child is safe when the census cannot prove ownership.
-        child.kill(signal);
+      const owned = members && groupStillOwned(members, witnessed, !exited, child.pid);
+      if (owned && ((signal === 'SIGTERM' && !termSent) || (signal === 'SIGKILL' && !killSent))) {
+        try {
+          signalGroupImpl(-child.pid, signal);
+          if (signal === 'SIGTERM') termSent = true; else killSent = true;
+        } catch (failure) { if (failure.code !== 'ESRCH') record.signalError = failure.code; }
+      }
+      if ((!owned || record.signalError) && !exited) {
+        // Only the direct child is safe without group authority or after a
+        // refused group signal. Successful delivery is once per transition.
+        const key = signal === 'SIGTERM' ? 'directTermSent' : 'directKillSent';
+        if (!record[key]) record[key] = child.kill(signal);
       }
       await delayImpl(Math.min(pollMs, 100));
     } while (nowImpl() < cleanupUntil);

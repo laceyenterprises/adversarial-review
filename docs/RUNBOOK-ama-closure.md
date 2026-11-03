@@ -1,17 +1,5 @@
 ## Outcome progress receipts (HAMPROGRESS-01)
 
-CLOSERCRASHRECLAIM-01: bootstrap failure retains controller cancellation ownership
-until its detached readiness wrapper and group are verified drained. Unknown drain
-retains custody. Agent OS terminal-slot reconciliation owns cleanup of an orphaned
-controller group and then delegates copied credentials to the normal auth owner.
-After terminal lease reclaim under the existing per-PR intent lock, a replacement
-closer gets a unique worker ID even on the same head; abandoned directories are
-never adopted. Live-owner and dirty branch-holder checks remain in force. Hammer
-wake dedupe includes the active lease acquisition generation and selected next
-attempt, so the dead launch receipt cannot suppress a replacement wake. Existing
-lifecycle states, receipt schemas and smoke commands are unchanged.
-
-
 The phase scripts and metered merge invocation emit fixed, version-1 receipts
 through `bin/hammer-progress.mjs` into
 `dispatch/<lrq>/hammer-progress/<run-id>/<milestone>.json` under the resolved HQ
@@ -351,6 +339,23 @@ consumed disagreements durably per PR/head. A second disagreement at that head,
 including during the successor attempt or on a later background tick, pages
 immediately through the existing closure-wait path and returns
 `closure-decision-mismatch-escalated`. It does not start another successor attempt.
+
+### Closer crash recovery (CLOSERCRASHRECLAIM-01)
+
+Bootstrap failure retains controller cancellation ownership until its detached
+readiness wrapper and group are verified drained. Successful TERM and KILL
+delivery is deduplicated across drain polls, with escalation after the grace
+window. A refused group signal falls back to the still-live direct child;
+an unreadable census permits only direct-child signaling. Direct-child exit
+alone cannot establish group drain. Unknown drain retains custody.
+Agent OS terminal-slot reconciliation owns cleanup of an orphaned controller
+group and then delegates copied credentials to the normal auth owner.
+After terminal lease reclaim under the existing per-PR intent lock, a replacement
+closer gets a unique worker ID even on the same head; abandoned directories are
+never adopted. Live-owner and dirty branch-holder checks remain in force. Hammer
+wake dedupe includes the active lease acquisition generation and selected next
+attempt, so the dead launch receipt cannot suppress a replacement wake. Existing
+lifecycle states, receipt schemas and smoke commands are unchanged.
 
 ### Closure-recovery executor (CLOSURERECOVERYEXEC-01)
 

@@ -4463,6 +4463,8 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- CLOSERCRASHRECLAIM-01 final comment remediation: deduplicate successful bootstrap-drain signals, fall back to direct-child termination after group signaling errors, and place the crash-recovery guidance in its own [closure runbook subsection](docs/RUNBOOK-ama-closure.md#closer-crash-recovery-closercrashreclaim-01). Offline regressions cover delayed exit, escalation and unconfirmed drain.
+
 - CLOSERCRASHRECLAIM-01: drain readiness controller groups after bootstrap failure; allocate a fresh worker identity after terminal lease reclamation; key hammer wakes by lease generation and next attempt. Live-owner and dirty-tree fences remain enforced. See [closure recovery](docs/RUNBOOK-ama-closure.md).
 
 - PR #1693 HAM remediation: cache the produced-head snapshot fields once in the retention guard and remove the unreachable conflict alternative from the downstream green-CI branch. Offline regression tests retain conflict-first repair and base-policy behavior.

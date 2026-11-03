@@ -2543,16 +2543,16 @@ function parseJsonArray(raw) {
   }
 }
 
-function branchWorkerIndex(_hqRoot) {
-  const observed = readWorkerObservationSync({observation: 'workspaces'}, {hqRoot: _hqRoot});
-  if (!observed.ok) return null;
+function branchWorkerIndex(_hqRoot, repo, branch) {
+  const observed = readWorkerObservationSync({observation: 'workspaces', repo, branch}, {hqRoot: _hqRoot});
+  if (!observed.ok || observed.truncated || observed.complete === false) return null;
   const seen = new Set();
   return observed.rows.filter(row => row.worker_id && !seen.has(row.worker_id) && seen.add(row.worker_id));
 }
 
 function liveWorkerForBranch(hqRoot, repo, branch, {
   execFileSyncImpl,
-  workerIndex = branchWorkerIndex(hqRoot),
+  workerIndex = branchWorkerIndex(hqRoot, repo, branch),
   workerStatusTimeoutMs = DEFAULT_FIRST_PASS_CI_ORPHAN_WORKER_STATUS_TIMEOUT_MS,
 }) {
   if (!branch) return null;
@@ -2633,7 +2633,6 @@ function summarizeFirstPassCiOrphans(firstPassQueue, {
   const maxProbedPrs = config.firstPassCiOrphanMaxProbedPrs || DEFAULT_FIRST_PASS_CI_ORPHAN_MAX_PROBED_PRS;
   const deadlineMs = loadAwareTimeoutMs(config.firstPassCiOrphanDeadlineMs || DEFAULT_FIRST_PASS_CI_ORPHAN_DEADLINE_MS);
   const deadlineAt = Date.now() + deadlineMs;
-  const workerIndex = branchWorkerIndex(hqRoot);
   let probedPrs = 0;
   let unprobedPrs = 0;
   for (const queued of candidates) {
@@ -2658,7 +2657,6 @@ function summarizeFirstPassCiOrphans(firstPassQueue, {
       if (String(pr.state).toUpperCase() !== 'OPEN' || failedChecks.length === 0) continue;
       const liveWorker = liveWorkerForBranch(hqRoot, queued.repo, pr.headRefName, {
         execFileSyncImpl,
-        workerIndex,
         workerStatusTimeoutMs: config.firstPassCiOrphanWorkerStatusTimeoutMs,
       });
       if (liveWorker?.error) {

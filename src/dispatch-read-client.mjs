@@ -349,42 +349,66 @@ function unprovenAbsence() {
 }
 
 
+// Workspace selectors are bounded by the producer's 10,001-slot inventory.
+// An exact worker needs one page; branch/repo/presence scopes may exhaust that
+// bounded inventory. Unscoped compatibility scans keep a 1,000-row budget.
+function observationPaging(selector) {
+  const limit = selector.limit ?? 100;
+  const scoped = selector.observation === 'workspaces'
+    && (selector.repo || selector.branch || selector.exclude_absent === true);
+  const maxPages = selector.observation === 'workspaces' && selector.worker_id ? 1
+    : scoped ? Math.ceil(10001 / limit) : selector.observation === 'workspaces' ? Math.ceil(1000 / limit) : 10;
+  return {limit, maxPages};
+}
+function truncatedObservation(rows, observation, nextOffset) {
+  const result = observationRows(rows, observation);
+  if (!result.ok) return result;
+  // Partial rows remain inspectable, but existing custody/accounting callers
+  // must explicitly opt in instead of treating ok as a complete inventory.
+  return {...result, ok:false, complete:false, truncated:true,
+    reason:'worker-observation-truncated', detail:'observation page limit reached', nextOffset};
+}
+
 export async function readWorkerObservation(selector, args = {}) {
   try {
     const rows = [];
+    const {limit, maxPages} = observationPaging(selector);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) return {ok:false,reason:'worker-observation-unavailable'};
     let offset = 0;
     const deadline = Date.now() + (args.timeoutMs ?? loadAwareTimeoutMs(8_000));
-    for (let page = 0; page < 10; page++) {
+    for (let page = 0; page < maxPages; page++) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) return {ok:false,reason:'worker-observation-unavailable'};
-      const reply = await boundedLookup({...selector, offset}, {...args,timeoutMs:remaining});
+      const reply = await boundedLookup({...selector, limit, offset}, {...args,timeoutMs:remaining});
       const evidence = checkedObservation(reply, selector, offset);
       if (!evidence.ok) return evidence;
       if (evidence.notLive) return {...observationRows([], selector.observation),outcome:'not-live'};
       rows.push(...evidence.rows);
-      if (reply.complete) return observationRows(rows, selector.observation);
+      if (reply.complete) return {...observationRows(rows, selector.observation),complete:true,truncated:false};
       offset = reply.next_offset;
     }
-    return {ok:false,reason:'worker-observation-unavailable'};
+    return truncatedObservation(rows, selector.observation, offset);
   } catch (error) { cachedSession = null; return observationFailure(error); }
 }
 export function readWorkerObservationSync(selector, args = {}) {
   try {
     const rows = [];
+    const {limit, maxPages} = observationPaging(selector);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) return {ok:false,reason:'worker-observation-unavailable'};
     let offset = 0;
     const deadline = Date.now() + (args.timeoutMs ?? loadAwareTimeoutMs(8_000));
-    for (let page = 0; page < 10; page++) {
+    for (let page = 0; page < maxPages; page++) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) return {ok:false,reason:'worker-observation-unavailable'};
-      const reply = dispatchReadTransport.observationSync({...selector,offset}, {...args,timeoutMs:remaining});
+      const reply = dispatchReadTransport.observationSync({...selector,limit,offset}, {...args,timeoutMs:remaining});
       const evidence = checkedObservation(reply, selector, offset);
       if (!evidence.ok) return evidence;
       if (evidence.notLive) return {...observationRows([], selector.observation),outcome:'not-live'};
       rows.push(...evidence.rows);
-      if (reply.complete) return observationRows(rows, selector.observation);
+      if (reply.complete) return {...observationRows(rows, selector.observation),complete:true,truncated:false};
       offset = reply.next_offset;
     }
-    return {ok:false,reason:'worker-observation-unavailable'};
+    return truncatedObservation(rows, selector.observation, offset);
   } catch (error) { cachedSession = null; return observationFailure(error); }
 }
 function observationFailure(error) {

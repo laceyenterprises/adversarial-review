@@ -47,8 +47,8 @@ export async function probeCapReheadOwnership(args, {
     return { owned: true, uncertain: owner?.owned !== true || owner?.uncertain === true };
   }
   if (!args.branch) return { uncertain: true };
-  const observed = await readWorkspacesImpl({ observation: 'workspaces' }, args);
-  if (!observed?.ok || !Array.isArray(observed.rows)) return { uncertain: true };
+  const observed = await readWorkspacesImpl({ observation: 'workspaces', repo: args.repo, branch: args.branch }, args);
+  if (!observed?.ok || observed.truncated || observed.complete === false || !Array.isArray(observed.rows)) return { uncertain: true };
   const basename = args.repo.split('/').at(-1);
   for (const row of observed.rows) {
     if (row.present === false && !row.launch_request_id) continue;

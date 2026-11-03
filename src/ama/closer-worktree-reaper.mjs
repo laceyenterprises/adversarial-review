@@ -185,8 +185,8 @@ function pruneProbeFailures(probeFailures, {
 }
 
 async function listCurrentHammerWorkerIds(hqRoot, {registeredByWorker = new Map(), readWorkerObservationImpl = readWorkerObservation} = {}) {
-  const observed = await readWorkerObservationImpl({observation: 'workspaces'}, {hqRoot});
-  if (!observed.ok) return null;
+  const observed = await readWorkerObservationImpl({observation: 'workspaces', exclude_absent: true}, {hqRoot});
+  if (!observed.ok || observed.truncated || observed.complete === false) return null;
   return new Set([...registeredByWorker.keys(), ...observed.rows.map(row => row.worker_id).filter(id => HAMMER_WORKER_RE.test(id || ''))]);
 }
 
@@ -209,8 +209,8 @@ async function listHqRepoPaths(hqRoot, {hqPath = DEFAULT_HQ_PATH, execFileImpl =
 
 async function listHammerWorkerDirs(hqRoot, {scanLimit, lastName,
   readWorkerObservationImpl = readWorkerObservation} = {}) {
-  const observed = await readWorkerObservationImpl({observation: 'workspaces'}, {hqRoot});
-  if (!observed.ok) return {entries: [], nextCursor: null, complete: false};
+  const observed = await readWorkerObservationImpl({observation: 'workspaces', exclude_absent: true}, {hqRoot});
+  if (!observed.ok || observed.truncated || observed.complete === false) return {entries: [], nextCursor: null, complete: false};
   const seen = new Set();
   const workers = observed.rows.filter(row => HAMMER_WORKER_RE.test(row.worker_id || '')
     && !seen.has(row.worker_id) && seen.add(row.worker_id)).map(row => ({name: row.worker_id, row}));

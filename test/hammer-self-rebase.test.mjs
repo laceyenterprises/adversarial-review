@@ -47,7 +47,7 @@ function fixture(t, scenario) {
   const base = commit(initialDisjoint ? 'base-old\nbody\nhammer-old\n' : 'base-new\nbody\nhammer-old\n', ancestor, initialDisjoint);
   const rebased = initialDisjoint ? original : commit('base-new\nbody\nhammer-new\n', base);
   const foreign = commit('foreign\n', rebased);
-  const startsRebased = ['no-op', 'initial-lease-drift', 'ci-disjoint', 'ci-disjoint-conflict', 'ci-disjoint-lease-delay'].includes(scenario);
+  const startsRebased = ['initial-unknown', 'no-op', 'initial-lease-drift', 'ci-disjoint', 'ci-disjoint-conflict', 'ci-disjoint-lease-delay'].includes(scenario);
   const disjoint = scenario.startsWith('ci-disjoint') || ['ci-old-reply', 'local-validation-disjoint-base'].includes(scenario);
   const nextBase = commit(disjoint ? 'base-new\nbody\nhammer-old\n' : 'base-new\nadvanced\nhammer-old\n', base, disjoint);
   const nextRebased = commit(disjoint ? 'base-new\nbody\nhammer-new\n' : 'base-new\nadvanced\nhammer-new\n', nextBase, disjoint);
@@ -191,7 +191,7 @@ source "$FIXTURE_DIR/hammer-publish.sh"
 status=$?
 echo "publish=$status outcome=$HAM_PHASE_OUTCOME held=$HAM_MERGE_LEASE_HELD"
 [ "$status" -eq 0 ] || exit "$status"
-if [[ "$SCENARIO" = prepredicate-* ]]; then
+if [[ "$SCENARIO" = prepredicate-* || "\${FIXTURE_WAIT_ONLY:-0}" = 1 ]]; then
   if [ "$SCENARIO" = prepredicate-contention ]; then
     ham_release_merge_lease --yield || exit $?
     source "$FIXTURE_DIR/hammer-verify-head.sh"
@@ -655,3 +655,59 @@ for (const scenario of ['lease-probe-exhausted', 'prepredicate-probe-exhausted']
     assert.equal(existsSync(join(f.dir, 'lease-held')), false);
   });
 }
+
+for (const scenario of ['initial-absent-conflict', 'initial-dirty-conflict', 'ci-absent-conflict']) {
+  test(`CONFLICTBEFORECI-01: ${scenario} reaches conflict repair before absent checks wait`, t => {
+    const f = fixture(t, scenario);
+    const result = f.run();
+    assert.equal(result.status, 21, result.stdout + result.stderr);
+    assert.match(result.stdout, /outcome=rebase-conflict/);
+    assert.equal(existsSync(join(f.dir, 'lease-held')), false);
+    const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    const checks = events.filter(e => e.kind === 'checks');
+    assert.equal(checks.length, scenario === 'ci-absent-conflict' ? 1 : 0);
+    if (checks.length) assert.equal(checks[0].value.conclusion, null);
+    assert.equal(events.some(e => e.kind === 'gh' && e.value[1] === 'merge'), false);
+    assert.equal(existsSync(join(f.dir, 'sleeps')), false, 'no impossible CI poll');
+  });
+}
+
+for (const scenario of ['ci-absent-conflict-moved', 'ci-absent-conflict-canceled', 'ci-absent-conflict-publish-failed']) {
+  test(`CONFLICTBEFORECI-01: conflict repair preserves refusal fence: ${scenario}`, t => {
+    const f = fixture(t, scenario);
+    const result = f.run(), output = result.stdout + result.stderr;
+    assert.notEqual(result.status, 0, output);
+    assert.notEqual(result.status, 21, 'refusal must precede semantic conflict repair');
+    assert.equal(existsSync(join(f.dir, 'lease-held')), false);
+    const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(events.some(e => e.kind === 'gh' && e.value[1] === 'merge'), false);
+    assert.equal(events.filter(e => e.kind === 'gh' && e.value.some(arg => arg.includes('updatePullRequestBranch'))).length, 1,
+      'only the initial verified update is allowed; no conflict repair after refusal');
+    if (scenario.endsWith('moved')) assert.match(output, /live-head-moved-before-merge/);
+    if (scenario.endsWith('canceled')) assert.match(output, /merge-lease-admission-refused/);
+    if (scenario.endsWith('publish-failed')) assert.equal(events.some(e => e.kind === 'checks'), false);
+  });
+}
+
+test('CONFLICTBEFORECI-01: pre-predicate wait consumes positive conflict before missing checks', t => {
+  const f = fixture(t, 'ci-absent-conflict');
+  const result = f.run({ FIXTURE_WAIT_ONLY: '1' });
+  assert.equal(result.status, 21, result.stdout + result.stderr);
+  assert.match(result.stdout, /wait=21 outcome=rebase-conflict/);
+  assert.equal(existsSync(join(f.dir, 'lease-held')), false);
+  assert.equal(existsSync(join(f.dir, 'sleeps')), false);
+  const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(events.filter(e => e.kind === 'checks').length, 1);
+  assert.equal(events.some(e => e.kind === 'initial-predicate'), false);
+});
+
+test('CONFLICTBEFORECI-01: UNKNOWN with absent checks observes without rewriting', t => {
+  const f = fixture(t, 'initial-unknown');
+  const result = f.run(), output = result.stdout + result.stderr;
+  assert.equal(result.status, 20, output);
+  const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(events.some(e => e.kind === 'gh' && e.value.some(arg => arg.includes('updatePullRequestBranch'))), false);
+  assert.equal(events.some(e => e.kind === 'gh' && e.value[1] === 'merge'), false);
+  assert.ok(events.filter(e => e.kind === 'checks').length > 1);
+  assert.equal(existsSync(join(f.dir, 'lease-held')), false);
+});

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -55,6 +55,33 @@ echo "$HAM_REQUIRES_UP_TO_DATE"
 }
 
 const needsRebase = source.match(/^ham_base_touches_pr_files\(\) \{\n[\s\S]*?^\}/m)?.[0];
+const producedHeadPolicyCall = source.match(/&& ! (ham_base_touches_pr_files validated-head[\s\S]*?); then/)?.[1];
+for (const [mergeable, state, strict, expected] of [
+  ['MERGEABLE', 'BEHIND', 0, 1],
+  ['MERGEABLE', 'BEHIND', 1, 0],
+  ['MERGEABLE', 'DIRTY', 0, 0],
+  ['CONFLICTING', 'UNKNOWN', 0, 0],
+  ['UNKNOWN', 'UNKNOWN', 1, 1],
+]) {
+  test(`produced-head policy call uses snapshot: ${mergeable}/${state}, strict=${strict}`, t => {
+    const dir = mkdtempSync(join(tmpdir(), 'produced-head-policy-'));
+    t.after(() => rmSync(dir, { force: true, recursive: true }));
+    assert.ok(producedHeadPolicyCall);
+    writeFileSync(join(dir, 'pr-after.json'), JSON.stringify({ mergeable, mergeStateStatus: state }));
+    const result = spawnSync('/bin/bash', ['-uc', `
+${needsRebase}
+HAM_REQUIRES_UP_TO_DATE=${strict}
+POST_REMEDIATION_SHA=${'a'.repeat(40)}
+ham_capture_current_base_sha() { HAM_CAPTURED_BASE_SHA=${'b'.repeat(40)}; }
+ham_is_full_sha() { return 0; }
+git() { [ "$1" = merge-base ] || return 90; echo ${'c'.repeat(40)}; }
+${source.match(/^  current_mergeable=\$\(jq[^\n]+\n  current_state=\$\(jq[^\n]+/m)?.[0].replaceAll('<<RUN_DIR>>', dir)}
+${producedHeadPolicyCall.replaceAll('<<RUN_DIR>>', dir)}
+`], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(result.status, expected, result.stdout + result.stderr);
+  });
+}
+
 for (const [state, mergeable, strict, expected] of [
   ['CLEAN', 'MERGEABLE', 0, 1],
   ['CLEAN', 'MERGEABLE', 1, 1],

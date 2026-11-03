@@ -475,6 +475,12 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
   // merge under the existing leases; this receipt never certifies remediation.
   const resume = plain(progress?.hammerResume);
   if (resume && sameHead(resume.headSha, head)) {
+    // CONFLICTBEFORECI-01: pull_request checks may never start on a conflict.
+    // Ownership, stops and safety rows above still fence this repair.
+    if (pr.mergeable === 'CONFLICTING' || pr.mergeState === 'DIRTY') {
+      return { row: 'R10-conflict', action: 'hammer', actor: 'hammer', reason: 'conflict-rebase',
+        deadlineKind: 'admission', queue: 'dispatch' };
+    }
     if (checks.state !== 'FAILURE' && (checks.state !== 'SUCCESS' || pr.mergeable === 'UNKNOWN')) {
       return { row: 'R11-pending', action: 'wait-for-CI', actor: 'ci',
         reason: checks.state === 'PENDING' ? 'checks-pending'

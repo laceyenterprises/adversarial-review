@@ -3164,3 +3164,32 @@ lifetime pages stay deduplicated across heads. Before deployment, the runtime
 owner should inspect the existing exhausted-PR backlog read-only, account for
 its expected channel volume, and verify successful-page deduplication after
 restart. This rollout does not seed reservations or suppress existing stops.
+
+
+## CONFLICTBEFORECI-01 — positive conflict precedes absent CI
+
+After successful source publication, verify-head treats GitHub `CONFLICTING`
+or `DIRTY` as repair work even when `BEHIND` is absent and the check rollup
+is empty. It enters the existing capped server update; conflict exit 21 releases
+the lane and directs Appendix D local semantic resolution. A conflict observed
+during `--wait-ci` also enters the single bounded repair path before another
+check poll, repeating admission/head/cancellation fences on reacquisition.
+A server conflict releases the lane and returns 21; a successful update must
+collect fresh evidence on the new head.
+Repair preserves the original reviewed patch and current-main behavior; publish
+with the existing immutable-head CAS, stop on publication failure, validate the
+changed surface outside the lease, then re-enter verify-head and require fresh
+exact-head CI, range/audit and predicate authority. The foreground controller
+and native launch/lease owner remain authoritative throughout.
+
+The closure resume selector gives this same positive conflict priority over a
+pending/unknown-check debt, after existing owner, safety, hold and cap decisions.
+Unknown mergeability alone still observes. CLEAN/non-strict MERGEABLE BEHIND
+heads retain their source SHA and checks across unrelated main movement.
+No new actor, budget, check, review pass or merge permission is introduced.
+
+Synthetic scenario: `CONFLICTBEFORECI-01/positive-conflict-absent-checks`.
+Source validation and normal PR publication do not establish organic activation.
+Observe a naturally conflicting published head reach repair before absent-CI
+waiting, followed by new-head hosted checks and normal merge authority; retain
+owner and publication receipts. Do not seize an existing owner to demonstrate it.

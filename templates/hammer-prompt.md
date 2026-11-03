@@ -51,6 +51,8 @@ explicit conflict or deferred paths in this table.
    `hammer-publish.sh`, then unset the flag on success. This does not publish a
    validated audit. Use Appendix C's ordinary publication block.
 4. **Verify head:** source `hammer-verify-head.sh`; act on the table below.
+   CONFLICTBEFORECI-01: resolve positive CONFLICTING/DIRTY before waiting for checks;
+   pull_request CI may be absent until repair. UNKNOWN remains an observation wait.
 5. **Publish audit:** with revalidation complete and the lease held, source
    `hammer-publish.sh` without publication-only mode. Prepare audit inputs in
    Appendix A. Run Appendix E's bounded exact-head CI wait, then build and run its predicate.
@@ -983,7 +985,7 @@ Post the PR audit comment. Use `ham_gh` with refreshed entitled credentials. Inc
 
 In the persistent merge-lease shell, `source "<<RUN_DIR>>/hammer-publish.sh"` with the exported dispatch values. Publish the validation audit under lease. If the captured starting base cannot be proven, the procedure sets `HAM_BASE_HEAD=<<REVIEWED_SHA>>` and audits the full reviewed-to-built range. Nonzero status blocks continuation and releases for a later hammer pass; it never requests review.
 
-Before building claim/predicate inputs, run `source "<<RUN_DIR>>/hammer-merge.sh" --wait-ci` in the same shell. It waits only when this run published a changed head (including a server rebase), yields the first CI wait, and reacquires under the existing lease rules. Pending checks exhaust the existing CI deadline with `required-checks-pending` / `remote-ci-timeout`, never `predicate-failed`. A run with no publication returns `ci-wait-not-needed`. This mode cannot merge and needs no predicate verdict. The normal merge invocation retains the same deadline and all merge fences.
+Before building claim/predicate inputs, run `source "<<RUN_DIR>>/hammer-merge.sh" --wait-ci` in the same shell. It waits only when this run published a changed head (including a server rebase), yields the first CI wait, and reacquires under the existing lease rules. Exit 21 takes Appendix D before any further check wait. Pending checks exhaust the existing CI deadline with `required-checks-pending` / `remote-ci-timeout`, never `predicate-failed`. A run with no publication returns `ci-wait-not-needed`. This mode cannot merge and needs no predicate verdict. The normal merge invocation retains the same deadline and all merge fences.
 
 On success, refresh all exact-head inputs below. If the wait's bounded base retry changed `POST_REMEDIATION_SHA`, re-source `hammer-publish.sh` under the reacquired lease to publish the new head's audit before constructing the predicate. Phase head variables are exported for child processes.
 

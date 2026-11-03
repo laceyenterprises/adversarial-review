@@ -992,3 +992,16 @@ test('EXHAUSTEDHEADOWNER-01: a new exhausted builder head still owes review whil
     observations: { policy: complete({ ...snapshot.observations.policy.value, hammerCap: { headSha: OLD, lifetimeExhausted: true } }) } });
   assert.equal(nextAction(lifetime).reason, 'lifetime-exhausted');
 });
+
+for (const conclusion of [null, 'PENDING']) {
+  test(`CONFLICTBEFORECI-01: resume with ${conclusion} checks routes positive conflict through normal ownership`, () => {
+    const options = { checks: { conclusion }, progress: { hammerResume: { headSha: HEAD, attemptNumber: 1 } } };
+    for (const pr of [{ mergeable: 'CONFLICTING' }, { mergeStateStatus: 'DIRTY' }]) {
+      assert.equal(nextAction(snap({ ...options, pr })).reason, 'conflict-rebase');
+      assert.equal(nextAction(snap({ ...options, pr, launches: { closer: { headSha: HEAD, status: 'running' } } })).reason, 'live-owner');
+      assert.equal(nextAction(snap({ ...options, pr, controls: { safetyRefusal: { deterministic: true, reason: 'cancelled' } } })).reason, 'safety-refusal');
+    }
+    assert.equal(nextAction(snap({ ...options, pr: { mergeable: 'UNKNOWN' } })).action, 'wait-for-CI');
+    assert.equal(nextAction(snap({ ...options, pr: { mergeStateStatus: 'BEHIND' } })).action, 'wait-for-CI');
+  });
+}

@@ -7928,3 +7928,16 @@ returning delivered heads retain recorded same-head/lifetime caps.
 HAMGITTOKEN-01 final timeout ownership: bounded submodule sync exports `HAM_GIT_SYNC_BOUNDED=1` only for its child, so the metered Git wrapper yields its default 30-second timeout to the existing outer 120-second bound. Snapshot and pushed-attestation proof calls resolve `${HAM_NODE_BIN:-node}` consistently; the main procedure still validates its runtime before general authority operations. No merge, credential or cancellation predicate changes.
 
 Both bounded Git paths use the same TERM/wait/KILL deadline owner. Submodule expiry waits for child cleanup before returning 124, rather than replacing the deadline owner with Node and losing child cleanup to SIGALRM. An offline shortened-deadline fixture verifies lock removal before return; the production submodule bound remains 120 seconds.
+
+
+## Positive conflict before CI (CONFLICTBEFORECI-01)
+
+A published `CONFLICTING`/`DIRTY` head enters bounded native repair before
+waiting for absent PR checks. Initial verify-head and the pre-predicate CI wait
+share the existing fenced rebase path; exit 21 releases the lane and directs
+Appendix D. Reacquisition repeats cancellation, hold and immutable-head checks.
+UNKNOWN alone observes; nonconflicting main movement retains LAC-2097 behavior.
+Repair preserves reviewed source and current-main semantics, stops on publication
+failure, and requires new-head checks and normal merge authority. Existing native
+owners retain custody. See [the governing state contract](STATE-MACHINE.md#conflictbeforeci-01--positive-conflict-precedes-absent-ci)
+and [RCA/activation boundary](postmortems/LAC-2148-conflict-before-ci.md).

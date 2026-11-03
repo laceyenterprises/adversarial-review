@@ -1,3 +1,22 @@
+## Live closer operator inspection (HAMWORKPROGRESS-02)
+
+HAMWORKPROGRESS-02: live R03 hammer custody also receives an operator inspection
+handoff after thirty wall-clock minutes from the current dispatched lease's
+acquisition or the current launch's durable request time, whichever is later,
+independent of load-scaled execution budgets and renewed heartbeat
+or decision timestamps. This is a progress-unverified notice, not a stalled or
+terminal verdict: AR's ownership snapshot cannot certify active validation or
+source writing. Execution remains owned; long validators, writers, WIP and
+uncertain effects retain their lease and process custody. No cancel, signal,
+lease release, successor dispatch or merge is authorized by this notice.
+Complete current-head launch/retry evidence and matching acquisition/launch/holder
+identity are required. Parked, suspended, unknown, non-merge and claimed retry
+owners keep their existing path. The existing closure-wait store deduplicates one
+notice per head/launch/acquisition across watcher restarts, retries failed delivery,
+and reports await-operator without changing the shared execution decision.
+Operators inspect outcome receipts and active work before using supported HQ
+lifecycle controls. Source publication alone does not prove autonomous closure.
+
 ## Outcome progress receipts (HAMPROGRESS-01)
 
 The phase scripts and metered merge invocation emit fixed, version-1 receipts

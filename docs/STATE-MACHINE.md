@@ -1307,6 +1307,23 @@ CLOSURESPLIT-01: closure and background hammer dispatch carry the selected immut
 
 CLOSURERECOVERYEXEC-01 / RECOVERYSTALL-01: an R04 closure-recovery reconciliation is admitted to the closer by both closure and background hammer dispatch (shared predicate `hasClosureRecoveryIntent`), never reported as closure-decision-mismatch. At its deadline the closer explicitly refreshes the exact-head lease and launch/retry custody, including terminal leases without dispatch receipts. Readable absence returns to ordinary admission; terminal lease retirement and exclusive reacquisition share the existing per-PR intent lock. Live, parked, suspended, replaced or unreadable custody cannot authorize a replacement. Successful refresh advances observedAt to the current pass while preserving the original recovery deadline anchor. Diagnostic persistence failures warn and retain that refreshed decision for ordinary admission without a durable attempt record. Durable attempts, deadline and last evidence appear in closureRecovery and the unresolved blocker detail when persistence succeeds. Closure-wait class closure-recovery-deadline pages at expiry and every six hours while unresolved, with durable reservation timestamps and delivery refunds. The orphan watchdog does not duplicate these pages. Lifecycle states, sticky success, caps, strict mode, required checks and merge gates retain their existing contracts.
 
+HAMWORKPROGRESS-02: live R03 hammer custody also receives an operator inspection
+handoff after thirty wall-clock minutes from the current dispatched lease's
+acquisition or the current launch's durable request time, whichever is later,
+independent of load-scaled execution budgets and renewed heartbeat
+or decision timestamps. This is a progress-unverified notice, not a stalled or
+terminal verdict: AR's ownership snapshot cannot certify active validation or
+source writing. Execution remains owned; long validators, writers, WIP and
+uncertain effects retain their lease and process custody. No cancel, signal,
+lease release, successor dispatch or merge is authorized by this notice.
+Complete current-head launch/retry evidence and matching acquisition/launch/holder
+identity are required. Parked, suspended, unknown, non-merge and claimed retry
+owners keep their existing path. The existing closure-wait store deduplicates one
+notice per head/launch/acquisition across watcher restarts, retries failed delivery,
+and reports await-operator without changing the shared execution decision.
+Operators inspect outcome receipts and active work before using supported HQ
+lifecycle controls. Source publication alone does not prove autonomous closure.
+
 OWNERDEADLINE-01: every open PR needs one live owner with a next action and
 an anchored deadline. Once that deadline is at least the existing ownerless
 bound overdue, retained-route reasons and renewed review requests cannot prove

@@ -909,6 +909,12 @@ async function handlePostedReviewRowWithinReadCache({
     }
     if (coexistenceDecision.outcome === 'await-operator') {
       const { amaClosureResult } = coexistenceDecision;
+      if (amaClosureResult?.liveCloserHandoff) {
+        logger.log(`[watcher] live closer requires operator inspection for ${repoPath}#${prNumber}: `
+          + `${amaClosureResult.liveCloserHandoff.reason}; execution custody retained`);
+        return { handled: true, outcome: 'await-operator',
+          gateDecision: gateProjection?.decision || null, amaClosureResult };
+      }
       const reasonsHint = Array.isArray(amaClosureResult?.reasons)
         ? amaClosureResult.reasons.slice(0, 8).join(',')
         : amaClosureResult?.reason || 'unknown';

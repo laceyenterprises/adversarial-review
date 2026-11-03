@@ -27,7 +27,7 @@ import { createHistoryReader } from './ama/history-reader.mjs';
 import { hammerDispatchMismatch, bindClosureNextAction, readClosureNextAction, observeClosureOwnership, closureOwnerFromDecision, hasClosureRecoveryIntent, hasHammerDispatchIntent, observeClosureResult, observeDaemonGate as reviseDaemonGate, observeDaemonResult, revalidateClosurePr, resolveClosureNextAction, reviseClosureNextAction } from './ama/closure-next-action.mjs';
 import { probeOrphanOwnership } from './ama/orphan-watchdog.mjs';
 import { observeClosureWait } from './ama/closure-wait.mjs';
-import { enforceClosureRecoveryDeadline } from './ama/closure-recovery.mjs';
+import { enforceClosureRecoveryDeadline, enforceLiveCloserHandoff } from './ama/closure-recovery.mjs';
 import { observeClosureDecisionMismatch, observeClosureRefreshLoop } from './ama/closure-refresh-loop.mjs';
 import { closureOwnerShadowEvidence, shadowNextActionLater } from './pr-next-action-consumer.mjs';
 import { hostname } from 'node:os';
@@ -3159,6 +3159,17 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
       : { outcome: 'ama-pending', amaClosureResult };
   }
   if (amaClosureResult?.capRehead?.dispatched || amaClosureResult?.capRehead?.custody === true) return { outcome: 'ama-pending', amaClosureResult };
+  // Live-owner recovery returns early by design. Enforce its independent
+  // operator handoff first, including when a heartbeat renews the final-round wait.
+  if (!isSafetyRecoveryHold(amaClosureResult) && !labelNames?.some(label =>
+    [...OPERATOR_HOLD_LABELS, 'adversarial-merge-blocked', 'merge-agent-stuck', 'duplicate-family-hold'].includes(label))) {
+    const handoff = await enforceLiveCloserHandoff({ rootDir, repo: repoPath, prNumber,
+      headSha: candidate?.headSha || currentRevisionRef, shared: readClosureNextAction(amaClosureResult),
+      result: amaClosureResult, now: typeof orphanOptions.now === 'number' ? orphanOptions.now
+        : orphanOptions.now ? Date.parse(orphanOptions.now) : Date.now(), env: orphanOptions.env || process.env,
+      observeWaitImpl: orphanOptions.observeClosureWaitImpl || observeClosureWait, logger });
+    if (handoff) return { outcome: 'await-operator', amaClosureResult: bindClosureNextAction(handoff, readClosureNextAction(amaClosureResult)) };
+  }
   const admissionDisagreement = await observeReviewAdmissionContract({ rootDir, repo: repoPath, prNumber,
     headSha: candidate?.headSha || currentRevisionRef, reviewStateRow, result: amaClosureResult, logger,
     now: typeof orphanOptions.now === 'number' ? orphanOptions.now

@@ -9,11 +9,12 @@
 // the recorded launch/lease (and dispatches when ownership resolves) before its
 // shared-intent gate. This module owns what happens when it does not resolve:
 // the closer's named refusal until the decision's deadline, then periodic
-// escalation through closure-wait. It owns no merge or dispatch authority.
-import { hasClosureRecoveryIntent, reviseClosureNextAction } from './closure-next-action.mjs';
+// escalation through closure-wait. Live R03 custody additionally has a bounded
+// operator inspection below. Neither path owns merge or dispatch authority.
+import { closureDecisionMatches, hasClosureRecoveryIntent, reviseClosureNextAction } from './closure-next-action.mjs';
 import { observeClosureWait } from './closure-wait.mjs';
 import { readAmaCloserLease, isCurrentAmaCloserLease } from './closer-lease.mjs';
-import { launchRequestOwned } from './launch-request-status.mjs';
+import { launchRequestOwned, launchRequestMeaning, withLiveLaunchRetry } from './launch-request-status.mjs';
 import { deriveNextActionSnapshot, nextAction } from '../pr-next-action.mjs';
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
@@ -23,6 +24,8 @@ import { join } from 'node:path';
 export const CLOSURE_RECOVERY_WAIT_CLASS = 'closure-recovery-deadline';
 export const CLOSURE_RECOVERY_ESCALATED_REASON = 'closure-recovery-ownership-unresolved';
 export const CLOSURE_RECOVERY_REPAGE_MS = 6 * 60 * 60 * 1000;
+// Operator inspection policy, independent of the load-scaled execution wait.
+export const LIVE_CLOSER_HANDOFF_BOUND_MS = 30 * 60 * 1000;
 const RETRY_MS = 30_000;
 // Closer outcomes that leave custody unresolved, besides its intent gate
 // echoing the R04 reason itself. Any other refusal names its own owner.
@@ -161,4 +164,73 @@ export async function enforceClosureRecoveryDeadline({ rootDir, repo, prNumber, 
     ...(boundedWait ? { boundedWait } : {}), retryAfterMs: RETRY_MS,
     closureRecovery: { ...closureRecovery, outcome: 'escalated', paged: boundedWait?.notify === true,
       ...(pageError ? { pageError } : {}) } };
+}
+
+// HAMWORKPROGRESS-02: live custody is a dispatch fence, not evidence that the
+// closer is advancing its task. Bound the *operator review* independently of
+// heartbeat/refreshed decision deadlines. We cannot certify validator/writer
+// activity from these observations, so this grants no cancellation, reclaim,
+// successor, or merge authority, even when progress cannot be verified.
+export async function enforceLiveCloserHandoff({ rootDir, repo, prNumber, headSha, shared, result,
+  now = Date.now(), env = process.env, observeWaitImpl = observeClosureWait, logger = console }) {
+  const decision = shared?.decision;
+  if (!result || result.dispatched || result.needsOperator
+    || !closureDecisionMatches(shared, { repo, prNumber, headSha })
+    || decision.row !== 'R03-live-owner' || decision.actor !== 'hammer'
+    || decision.action !== 'hammer' || decision.queue?.intent !== 'owned') return null;
+  const observations = shared.snapshot.observations;
+  if (observations?.leases?.state !== 'complete' || observations?.launches?.state !== 'complete') return null;
+  const lease = observations.leases.value?.closer;
+  const launch = observations.launches.value?.closer;
+  const probe = launch?.probe || (launch?.row ? { ok: true, row: launch.row,
+    retryChain: launch.retryChain, retryChainUnreadable: launch.retryChainUnreadable } : null);
+  if (!lease || lease.status !== 'dispatched' || !lease.lrqId || !probe?.ok
+    || probe.retryChainUnreadable || !Array.isArray(probe.retryChain)) return null;
+  const effective = withLiveLaunchRetry(probe);
+  const meaning = launchRequestMeaning(effective.row);
+  // An explicit parked/operator state, an unknown read, or a claimed retry
+  // belongs to its own owner. Never charge a successor its predecessor's age.
+  if (!['running', 'starting'].includes(meaning.status) || meaning.parked
+    || (effective.liveRetryLaunchRequestId && effective.liveRetryLaunchRequestId !== lease.lrqId)
+    || launch.launchRequestId !== lease.lrqId || (launch.headSha && launch.headSha !== headSha)) return null;
+  const taskKind = effective.row?.task_kind ?? effective.row?.taskKind;
+  if (taskKind && taskKind !== 'merge') return null;
+  const acquired = Date.parse(lease.acquiredAt);
+  const requestedAt = effective.row?.requested_at ?? effective.row?.requestedAt;
+  const launchRequestId = effective.row?.launch_request_id ?? effective.row?.launchRequestId;
+  const requested = Date.parse(requestedAt);
+  // A retried launch can adopt an older lease. Its own durable request time
+  // grants a fresh window; missing/future identity evidence stays unknown.
+  if (!Number.isFinite(acquired) || !Number.isFinite(requested) || acquired > now || requested > now
+    || (launchRequestId && launchRequestId !== lease.lrqId)) return null;
+  const started = Math.max(acquired, requested);
+  if (now - started < LIVE_CLOSER_HANDOFF_BOUND_MS) return null;
+  // Read the actual generation before any notification. Heartbeats may advance
+  // updatedAt; acquisition, launch, and holder identity must still match.
+  let current;
+  try { current = readAmaCloserLease(rootDir, { repo, prNumber, headSha }); }
+  catch { return null; } // An unreadable generation is not permission to hand off.
+  if (current?.status !== 'dispatched' || current.lrqId !== lease.lrqId
+    || current.acquiredAt !== lease.acquiredAt || current.watcherPid !== lease.watcherPid
+    || current.holderHost !== lease.holderHost) return null;
+  const handoff = { reason: 'live-closer-progress-unverified', launchRequestId: lease.lrqId,
+    acquiredAt: lease.acquiredAt, requestedAt,
+    deadlineAt: new Date(started + LIVE_CLOSER_HANDOFF_BOUND_MS).toISOString(),
+    custody: 'retained', progress: 'unverified' };
+  let boundedWait = null;
+  try {
+    boundedWait = await observeWaitImpl({ rootDir, repo, prNumber, headSha, now, env,
+      immediate: true, startedAt: started,
+      waitClass: `live-closer-handoff:${lease.lrqId}:${lease.acquiredAt}`,
+      reason: `${handoff.reason}: launch=${lease.lrqId} acquired=${lease.acquiredAt} `
+        + 'operator inspection required; validator/source-writer activity unverified; '
+        + 'retain WIP, uncertain effects and execution custody; use supported HQ lifecycle controls only' });
+    boundedWait = { ...boundedWait, boundedMs: LIVE_CLOSER_HANDOFF_BOUND_MS };
+  } catch (error) {
+    logger?.warn?.(`[watcher] live closer handoff notification failed for ${repo}#${prNumber}: ${error.message}`);
+  }
+  // The execution decision stays owned. Operator attention is an additional
+  // responsibility, never a fabricated stalled verdict or terminal transition.
+  return { ...result, needsOperator: true, skipMergeAgent: true, recoveryWait: true,
+    liveCloserHandoff: handoff, ...(boundedWait ? { boundedWait } : {}), retryAfterMs: RETRY_MS };
 }

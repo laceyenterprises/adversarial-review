@@ -4490,6 +4490,8 @@ refusal, cancellation and unknown exits; process success alone proves no merge.
 
 ## Change notes
 
+- STRICTSETTLED-01: unify the watcher's settled-clean release predicate across follow-up claims and active defer with merge authority's strict-mode predicate, so Comment-only reviews that still owe remediation retain their worker path. The AMA closer requeues a settled release with no live remediation job at most once per PR head, within the remaining round budget, recording `remediationJobMissingRecovery`. The spec and runbook distinguish automatic recovery from explicit operator retriggers and document the shared requeue metadata.
+
 - WATCHERANONBUCKET-01: cap the throttle floor at 10% of the observed quota (minimum 1), so anonymous 60/h buckets can admit requests. Deferred diagnostics name the credential, balance and effective floor; transitions to zero remaining retain a known limit when failure headers omit it.
 
 - LAC-2151 final comment remediation: verify the cached processed review digest as well as the raw model reply before redelivery; missing or mismatched cached text is retained as evidence and not reused.

@@ -460,6 +460,18 @@ its cursor preserved between runs. Its Git worktree removal and worker
 teardown are single operations that cannot safely be interrupted halfway
 through; the cadence keeps those operations off most consume intervals.
 
+CI-orphan health collection memoizes workspace observations by repository and
+branch for one snapshot, including unavailable or incomplete evidence. Scoped
+paging uses at most the remaining snapshot deadline (and the ordinary
+observation timeout); exhausted or incomplete reads retain probe-blind
+diagnostics rather than asserting worker absence. Missing branch refs skip
+workspace and dispatch-status reads. A later health snapshot reads afresh.
+
+Each closer reaper pass shares one present-workspace inventory between cursor
+discovery and probe-history pruning. An incomplete inventory cannot prove a
+worker absent or authorize discovery from partial rows. Each later pass
+refreshes the inventory before advancing its saved cursor.
+
 ## Argus security lane
 
 The watcher drains `data/argus-security-jobs/` (ARGUSDRAIN-01). Each tick it

@@ -1,7 +1,7 @@
 import './helpers/dispatch-files-preload.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -10,6 +10,66 @@ import {
   parseGitWorktreePorcelain,
   reapCloserHammerWorktrees,
 } from '../src/ama/closer-worktree-reaper.mjs';
+
+test('closer reaper shares one workspace inventory per pass and refreshes across cursor steps', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-closer-inventory-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let inventoryReads = 0;
+  const probed = [];
+  for (let pass = 0; pass < 3; pass += 1) {
+    const result = await reapCloserHammerWorktrees({
+      hqRoot: root,
+      repoPaths: [],
+      cursorPath: join(root, 'cursor.json'),
+      scanLimit: 1,
+      readWorkerObservationImpl: async (selector) => {
+        assert.deepEqual(selector, {observation: 'workspaces', exclude_absent: true});
+        inventoryReads += 1;
+        return {ok: true, complete: true, rows: [101, 102, ...(pass > 0 ? [103] : [])].map(id => ({
+          worker_id: `hammer-ama-pr-${id}`,
+          directory_name: 'agent-os',
+          launch_request_id: `lrq-${id}`,
+          present: true,
+        }))};
+      },
+      probeWorkerActivityImpl: async ({launchRequestId}) => {
+        probed.push(launchRequestId);
+        return {state: 'active', status: 'running'};
+      },
+      execFileImpl: async () => assert.fail('active worker must not be removed'),
+      logger: {info() {}, warn() {}},
+    });
+    assert.equal(result.scanned, 1);
+    assert.equal(result.reaped, 0);
+    assert.equal(inventoryReads, pass + 1);
+  }
+  assert.deepEqual(probed, ['lrq-101', 'lrq-102', 'lrq-103']);
+});
+
+for (const refusal of [{ok: false}, {ok: true, truncated: true}, {ok: true, complete: false}]) {
+  test(`closer reaper retains probe history on incomplete shared inventory ${JSON.stringify(refusal)}`, async (t) => {
+    const root = mkdtempSync(join(tmpdir(), 'ama-closer-incomplete-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const cursorPath = join(root, 'cursor.json');
+    const workerId = 'hammer-ama-pr-101';
+    const failure = {failureCount: 1, lastFailureAt: new Date().toISOString()};
+    writeFileSync(cursorPath, JSON.stringify({probeFailures: {[workerId]: failure}}));
+    let inventoryReads = 0;
+    const result = await reapCloserHammerWorktrees({
+      hqRoot: root, repoPaths: [], cursorPath,
+      readWorkerObservationImpl: async () => {
+        inventoryReads += 1;
+        return {...refusal, rows: [{worker_id: workerId, present: true}]};
+      },
+      execFileImpl: async () => assert.fail('incomplete inventory cannot authorize removal'),
+      logger: {info() {}, warn() {}},
+    });
+    assert.equal(inventoryReads, 1);
+    assert.equal(result.scanned, 0);
+    assert.equal(result.reaped, 0);
+    assert.deepEqual(JSON.parse(readFileSync(cursorPath, 'utf8')).probeFailures, {[workerId]: failure});
+  });
+}
 
 test('closer worktree reaper removes merged hammer worktrees and skips open registered worktrees', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-'));

@@ -67,7 +67,7 @@ test('reaper requests present or unknown workspaces and completes twelve matches
   });
   assert.equal(result.scanned,12);
   assert.equal(result.reaped,0);
-  assert.equal(calls.length,2);
+  assert.equal(calls.length,1);
   assert.ok(calls.every(selector => selector.exclude_absent === true));
 });
 

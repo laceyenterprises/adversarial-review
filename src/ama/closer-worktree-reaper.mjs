@@ -184,8 +184,7 @@ function pruneProbeFailures(probeFailures, {
   return probeFailures;
 }
 
-async function listCurrentHammerWorkerIds(hqRoot, {registeredByWorker = new Map(), readWorkerObservationImpl = readWorkerObservation} = {}) {
-  const observed = await readWorkerObservationImpl({observation: 'workspaces', exclude_absent: true}, {hqRoot});
+function listCurrentHammerWorkerIds(observed, {registeredByWorker = new Map()} = {}) {
   if (!observed.ok || observed.truncated || observed.complete === false) return null;
   return new Set([...registeredByWorker.keys(), ...observed.rows.map(row => row.worker_id).filter(id => HAMMER_WORKER_RE.test(id || ''))]);
 }
@@ -207,9 +206,7 @@ async function listHqRepoPaths(hqRoot, {hqPath = DEFAULT_HQ_PATH, execFileImpl =
   } catch { logger?.warn?.("[closer-worktree-reap] repository-inventory-unavailable"); return {paths: [], complete: false, failedRoots: 1}; }
 }
 
-async function listHammerWorkerDirs(hqRoot, {scanLimit, lastName,
-  readWorkerObservationImpl = readWorkerObservation} = {}) {
-  const observed = await readWorkerObservationImpl({observation: 'workspaces', exclude_absent: true}, {hqRoot});
+function listHammerWorkerDirs(hqRoot, {scanLimit, lastName, observed} = {}) {
   if (!observed.ok || observed.truncated || observed.complete === false) return {entries: [], nextCursor: null, complete: false};
   const seen = new Set();
   const workers = observed.rows.filter(row => HAMMER_WORKER_RE.test(row.worker_id || '')
@@ -687,8 +684,11 @@ async function reapCloserHammerWorktrees({
   const registrationIncomplete = !registrationScan.complete || repoDiscovery.complete === false;
   const reapStartedAt = Date.now();
   const registered = registrationScan.byPath;
-  const workerDiscovery = await listHammerWorkerDirs(hqRoot, {
-    readWorkerObservationImpl,
+  // Share one inventory across discovery and probe-failure pruning in this
+  // pass. The next pass reads afresh before advancing its persisted cursor.
+  const observed = await readWorkerObservationImpl({observation: 'workspaces', exclude_absent: true}, {hqRoot});
+  const workerDiscovery = listHammerWorkerDirs(hqRoot, {
+    observed,
     scanLimit,
     lastName: cursor.worker,
     readdirImpl,
@@ -794,8 +794,7 @@ async function reapCloserHammerWorktrees({
   summary.budgetExceeded = false;
   let evaluationCursor = cursor.evaluation;
   const probeFailures = { ...cursor.probeFailures };
-  const currentWorkerIds = await listCurrentHammerWorkerIds(hqRoot, {
-    readWorkerObservationImpl,
+  const currentWorkerIds = listCurrentHammerWorkerIds(observed, {
     registeredByWorker,
     readdirImpl,
     logger,

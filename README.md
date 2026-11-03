@@ -4463,6 +4463,8 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- WSOBSPAGE-01 final comment remediation: share one workspace inventory between closer reaper discovery and probe-history pruning per pass. Memoize CI-orphan workspace evidence by repository and branch within each health snapshot, including refusals; skip reads for missing branches and cap observation paging at the remaining snapshot deadline. Targeted offline regressions cover cursor refresh, incomplete inventory, scoped cache isolation and deadline exhaustion. Existing lifecycle states, persistent shapes and smoke promises are unchanged.
+
 - WSOBSPAGE-01: CAPREHEAD and pipeline health request workspace evidence for the target repository and branch; the closer reaper excludes directories proven absent. Unknown identities and presence remain evidence requiring custody checks. The companion Agent OS producer filters before pagination within its existing 10,001-slot bound. Workspace reads budget one page for an exact worker, the producer bound for scoped requests, and 1,000 rows for compatibility listings. Exhausting that budget returns inspectable rows with `ok: false`, `complete: false`, `truncated: true` and `reason: worker-observation-truncated`; custody and health consumers reject partial evidence. Real outages retain their unavailable result. Synthetic coverage includes 4,300 slots and twelve live workspaces.
 
 - PR #1693 HAM remediation: cache the produced-head snapshot fields once in the retention guard and remove the unreachable conflict alternative from the downstream green-CI branch. Offline regression tests retain conflict-first repair and base-policy behavior.

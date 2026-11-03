@@ -2543,8 +2543,10 @@ function parseJsonArray(raw) {
   }
 }
 
-function branchWorkerIndex(_hqRoot, repo, branch) {
-  const observed = readWorkerObservationSync({observation: 'workspaces', repo, branch}, {hqRoot: _hqRoot});
+function branchWorkerIndex(hqRoot, repo, branch, deadlineAt) {
+  const timeoutMs = Math.min(loadAwareTimeoutMs(8_000), deadlineAt - Date.now());
+  if (timeoutMs <= 0) return null;
+  const observed = readWorkerObservationSync({observation: 'workspaces', repo, branch}, {hqRoot, timeoutMs});
   if (!observed.ok || observed.truncated || observed.complete === false) return null;
   const seen = new Set();
   return observed.rows.filter(row => row.worker_id && !seen.has(row.worker_id) && seen.add(row.worker_id));
@@ -2552,10 +2554,18 @@ function branchWorkerIndex(_hqRoot, repo, branch) {
 
 function liveWorkerForBranch(hqRoot, repo, branch, {
   execFileSyncImpl,
-  workerIndex = branchWorkerIndex(hqRoot, repo, branch),
+  workerIndexCache,
+  deadlineAt,
   workerStatusTimeoutMs = DEFAULT_FIRST_PASS_CI_ORPHAN_WORKER_STATUS_TIMEOUT_MS,
 }) {
   if (!branch) return null;
+  const key = JSON.stringify([repo, branch]);
+  if (!workerIndexCache.has(key)) {
+    // Cache refusals too: retrying an unavailable inventory in the same
+    // snapshot cannot prove absence and only consumes the scan budget.
+    workerIndexCache.set(key, branchWorkerIndex(hqRoot, repo, branch, deadlineAt));
+  }
+  const workerIndex = workerIndexCache.get(key);
   const timeout = loadAwareTimeoutMs(workerStatusTimeoutMs);
   const hqBin = process.env.AGENT_OS_HQ_BIN || process.env.HQ_BIN || 'hq';
   const ownerUser = readHostIdentitySync({hqRoot}).ownerUser;
@@ -2633,6 +2643,7 @@ function summarizeFirstPassCiOrphans(firstPassQueue, {
   const maxProbedPrs = config.firstPassCiOrphanMaxProbedPrs || DEFAULT_FIRST_PASS_CI_ORPHAN_MAX_PROBED_PRS;
   const deadlineMs = loadAwareTimeoutMs(config.firstPassCiOrphanDeadlineMs || DEFAULT_FIRST_PASS_CI_ORPHAN_DEADLINE_MS);
   const deadlineAt = Date.now() + deadlineMs;
+  const workerIndexCache = new Map();
   let probedPrs = 0;
   let unprobedPrs = 0;
   for (const queued of candidates) {
@@ -2657,6 +2668,8 @@ function summarizeFirstPassCiOrphans(firstPassQueue, {
       if (String(pr.state).toUpperCase() !== 'OPEN' || failedChecks.length === 0) continue;
       const liveWorker = liveWorkerForBranch(hqRoot, queued.repo, pr.headRefName, {
         execFileSyncImpl,
+        workerIndexCache,
+        deadlineAt,
         workerStatusTimeoutMs: config.firstPassCiOrphanWorkerStatusTimeoutMs,
       });
       if (liveWorker?.error) {

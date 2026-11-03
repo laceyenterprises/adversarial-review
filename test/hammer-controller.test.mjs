@@ -1346,3 +1346,33 @@ test('closing scripts take the lease and click merge only after assert-launch', 
   // The gate follows the last pre-click recheck, so each retried click repeats it.
   assert.ok(click > 0 && merge.lastIndexOf('assert-launch', click) > merge.lastIndexOf('stacked-base-check.mjs', click));
 });
+
+test('bootstrap failure drains the controller group while readiness read is blocked', async t => {
+  const f = fixture(t, 'exit 0');
+  let alive = true, snapshots = 0;
+  const signals = [];
+  const child = Object.assign(new EventEmitter(), {
+    pid: 4242, stdin: new PassThrough(), stdio: [null, null, null, null, new PassThrough()],
+    kill() { assert.fail('a witnessed group uses the group cancel path'); }, unref() {},
+  });
+  const status = await runHammerController('/fixture', [], {
+    env: f.env, pollMs: 5, graceMs: 30, drainMs: 100,
+    readLaunchImpl: async () => launch('running'), spawnImpl: () => child,
+    snapshotImpl() {
+      if (++snapshots === 1) throw new Error('synthetic bootstrap census failure');
+      return alive ? [{ pid: 4242, birth: 'fixture-birth' }] : [];
+    },
+    signalGroupImpl(pgid, signal) {
+      signals.push([pgid, signal]);
+      assert.equal(child.stdin.readableLength, 0, 'ready was never released');
+      alive = false;
+      child.emit('exit', null, signal);
+    },
+    releaseImpl({ drained }) { assert.equal(drained, true); return { released: true }; },
+  });
+  assert.equal(status, 125);
+  assert.deepEqual(signals, [[-4242, 'SIGTERM']]);
+  assert.equal(f.receipt().state, 'quiescent');
+  assert.equal(f.receipt().drained, true);
+  assert.ok(snapshots >= 3, 'cancellation is followed by an empty census');
+});

@@ -311,6 +311,8 @@ for (const scenario of ['exhausted-findings', 'clean-red-ci']) test(`CLOSERCUSTO
   });
   assert.equal(second.dispatched, true, JSON.stringify(second));
   assert.equal(second.launchRequestId, 'synthetic-next-launch');
+  const replacement = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
+  assert.notEqual(replacement.workerId, receipt.workerId, 'same-head replacement owns a fresh directory');
   assert.equal(readAmaCloserLease(rootDir, identity).lrqId, second.launchRequestId);
   assert.deepEqual(nextDeps.calls.filter(call => ['worker', 'dispatch'].includes(call.args[0]))
     .map(call => call.args[0]), ['worker', 'dispatch']);
@@ -2962,6 +2964,9 @@ for (const outcome of ['superseded', 'failed-without-merge', 'deferred', 'succee
     } else {
       assert.equal(result.dispatched, true, JSON.stringify(result));
       assert.equal(dispatches.length, 1, 'launches on the same watcher pass');
+      const workerArg = dispatches[0].args.find(arg => typeof arg === 'string' && /^hammer-ama-pr-404-/.test(arg));
+      assert.match(workerArg, /^hammer-ama-pr-404-[a-z0-9]+-[a-f0-9]{12}$/);
+      assert.notEqual(workerArg, `hammer-ama-pr-404-${HEAD.slice(0, 12)}`);
       assert.equal(readAmaCloserLease(rootDir, identity).lrqId, 'lrq_hammer_1');
       assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
       assert.ok(logs.some(line => JSON.parse(line).event === 'ama_closer.terminal_lease_reclaimed'));

@@ -447,14 +447,34 @@ export async function runHammerController(script, args = [], {
     return drained && reason === 'shell-exited' ? status : drained ? 143 : 125;
   } catch (error) {
     // Bootstrap has not released stdin if initial registration/probing failed.
-    // A live direct-child handle is safe even when process inspection is denied.
-    if (!exited) child.kill('SIGTERM');
+    // Keep the cancellation owner alive until its readiness wrapper is drained.
+    // A one-shot child.kill followed by unref can leave that shell orphaned.
+    stop('controller-error');
+    const cleanupUntil = nowImpl() + graceMs + drainMs;
+    do {
+      let members;
+      try { members = await snapshotImpl(child.pid); } catch { /* Unknown retains custody. */ }
+      if (members?.length === 0 && exited) { drained = true; break; }
+      const signal = nowImpl() - stopAt < graceMs ? 'SIGTERM' : 'SIGKILL';
+      if (members && groupStillOwned(members, witnessed, !exited, child.pid)) {
+        try { signalGroupImpl(-child.pid, signal); }
+        catch (failure) { if (failure.code !== 'ESRCH') record.signalError = failure.code; }
+      } else if (!exited) {
+        // Only the direct child is safe when the census cannot prove ownership.
+        child.kill(signal);
+      }
+      await delayImpl(Math.min(pollMs, 100));
+    } while (nowImpl() < cleanupUntil);
     child.stdin.destroy();
     console.error(`hammer-controller: refused before readiness: ${error.message}`);
-    record.state = 'cleanup-unconfirmed';
+    record.state = drained ? 'quiescent' : 'cleanup-unconfirmed';
     record.reason = 'controller-error';
     record.errorCode = error.code || 'unknown';
-    record.drained = false;
+    record.drained = drained;
+    if (drained) {
+      try { record.leaseCleanup = releaseImpl({ env, shellPid: child.pid, startedAt, drained, terminationReason: record.reason }); }
+      catch { record.leaseCleanup = { released: false, reason: 'lease-cleanup-failed' }; }
+    }
     try { persist(); } catch { /* Keep the original registration if disk failed. */ }
     return 125;
   } finally {

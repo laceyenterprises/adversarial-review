@@ -241,3 +241,16 @@ test('audit path binds retry identity independently of decision reason and deadl
   assert.notEqual(hammerWakeAuditPath('synthetic-root', { ...subject, wakeAttemptKey: 'attempt-1' }),
     hammerWakeAuditPath('synthetic-root', { ...subject, wakeAttemptKey: 'attempt-2' }));
 });
+
+test('terminal reclaim wakes the next lease generation even with the dead launch retained', t => {
+  const f = fixture(t);
+  const shared = acquiredAt => pair({ launches: { closer: terminal },
+    leases: { closer: { headSha: HEAD, status: 'terminal', acquiredAt } } });
+  const first = shared(AT);
+  assert.equal(f.wake(first).outcome, 'requested');
+  assert.equal(f.wake(first).outcome, 'duplicate');
+  const replacement = shared('2026-01-01T00:01:00.000Z');
+  assert.equal(f.wake(replacement).outcome, 'requested');
+  assert.equal(f.wake(replacement).outcome, 'duplicate');
+  assert.equal(f.calls.length, 2);
+});

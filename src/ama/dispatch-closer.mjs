@@ -5400,7 +5400,7 @@ async function maybeDispatchAmaCloserAttempt({
   const targetRecord = existingDispatchHeadAdvanced
     ? readAmaCloserDispatchRecord(rootDir, targetDispatchIdentity)
     : existingRecord;
-  const workerId = isHammerWorkerClass(workerClass)
+  let workerId = isHammerWorkerClass(workerClass)
     ? hammerCloserWorkerIdFromRecord(
       prNumber,
       targetRecord,
@@ -7457,6 +7457,7 @@ async function maybeDispatchAmaCloserAttempt({
   // Capture predecessor ownership before terminal-lease reclamation and before
   // publishing a replacement intent can clear its launch receipt.
   const predecessorLease = readAmaCloserLease(rootDir, leaseIdentity);
+  const custodyWorkerId = workerId;
   const custodyLaunchRequestId = (existingRecord?.workerId === workerId && !existingRecord.launchRequestIdIsDispatchFallback
     ? existingRecord.launchRequestId : null)
     || (predecessorLease?.workerId === workerId ? predecessorLease.lrqId : null);
@@ -7469,6 +7470,7 @@ async function maybeDispatchAmaCloserAttempt({
     now: dispatchContext.dispatchedAt,
   });
   let terminalCustodyUnknown = false;
+  let terminalLeaseReclaimed = false;
   if (!leaseResult.acquired) {
     const existingLease = leaseResult.existingLease || readAmaCloserLease(rootDir, leaseIdentity);
     if (existingLease?.status === AMA_CLOSER_LEASE_STATUS.TERMINAL
@@ -7498,6 +7500,7 @@ async function maybeDispatchAmaCloserAttempt({
         });
         leaseResult = acquireAmaCloserLease({ rootDir, ...leaseIdentity, dispatchTimeoutMs,
           watcherPid: process.pid, now: dispatchContext.dispatchedAt });
+        terminalLeaseReclaimed = leaseResult.acquired;
       }
       if (!leaseResult.acquired) leaseResult = { ...leaseResult, existingLease: readAmaCloserLease(rootDir, leaseIdentity) };
     } else if (existingLease?.status === AMA_CLOSER_LEASE_STATUS.PENDING
@@ -7554,7 +7557,7 @@ async function maybeDispatchAmaCloserAttempt({
   // Retained custody must not erase a lease-held receipt: the next tick
   // re-probes the same launch rather than falling back to worker evidence.
   const restorePredecessorCloserLease = () => Boolean(predecessorLease?.lrqId
-    && predecessorLease.workerId === workerId
+    && predecessorLease.workerId === custodyWorkerId
     && restoreAmaCloserLeaseIfCurrent(rootDir, predecessorLease, { expectedLease: leaseResult.lease }));
 
   // Allocate only for a lease-owning launch attempt.
@@ -7565,7 +7568,7 @@ async function maybeDispatchAmaCloserAttempt({
   // Re-read under the PR lock before a new intent overwrites the settled proof.
   // A refusal leaves that proof available for the next ordinary admission.
   const noLaunchRecord = readAmaCloserDispatchRecord(rootDir, targetDispatchIdentity);
-  if (custodyLaunchRequestId || provenNoLaunchCloserRecord(noLaunchRecord, { repo, prNumber,
+  if (terminalLeaseReclaimed || custodyLaunchRequestId || provenNoLaunchCloserRecord(noLaunchRecord, { repo, prNumber,
     headSha: targetRemediationSha, workerId })) {
     try {
       closerReclaim = await reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
@@ -7599,6 +7602,11 @@ async function maybeDispatchAmaCloserAttempt({
       return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
         reason: 'hammer-closer-in-flight', workerStatus: closerReclaim.workerStatus || null });
     }
+  }
+  if (terminalLeaseReclaimed && workerId) {
+    // Keep predecessor custody checks intact before allocating a new directory.
+    // A reclaimed attempt never adopts the old (possibly dirty) worktree.
+    workerId = `${hammerCloserWorkerId(prNumber, targetRemediationSha)}-${dispatchIdempotencyKey.slice('ama-closer-'.length).replaceAll('-', '').slice(0, 12)}`;
   }
   try {
   scratchDir = createHammerScratchDir(promptDir);

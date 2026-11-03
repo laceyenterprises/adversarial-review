@@ -44,6 +44,14 @@ back to the observation's `attempt` and then null; zero is preserved. Terminal
 no-merge recovery (R07) records that attempt, while retry admission (R08)
 records the next attempt (current plus one), or null when unavailable.
 
+HAMWORKPROGRESS-02: the consumer's shared lease evidence also retains
+`watcherPid` and `holderHost`, alongside `lrqId` and `acquiredAt`. Live closer
+inspection compares these with the current lease before notification. These
+facts fence generation changes; they do not grant dispatch or cancellation
+permission and are not outcome progress. Ledger launch evidence keeps its
+existing `requested_at` anchor so an adopted lease cannot charge a successor
+its predecessor's review age. The v1 diagnostic record shape is unchanged.
+
 Disagreement records additionally contain:
 
 - `fields`: the differing members of `action`, `actor`, `reason`.

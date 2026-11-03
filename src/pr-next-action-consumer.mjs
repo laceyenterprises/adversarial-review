@@ -90,7 +90,7 @@ const pick = (value, keys) => (value && typeof value === 'object'
 const REVIEW_KEYS = ['verdict', 'headSha', 'riskClass', 'blockingFindingState', 'blockingFindingCount', 'nonBlockingFindingState',
   'nonBlockingFindingCount', 'remediationPending', 'postedAt', 'commentOnlyFinalRoundPush', 'attestation', 'operatorApprovedEvidence',
   'operatorLabelFindings'];
-const LEASE_KEYS = ['status', 'lrqId', 'headSha', 'acquiredAt', 'updatedAt', 'terminalOutcome', 'deadlineAt'];
+const LEASE_KEYS = ['status', 'lrqId', 'headSha', 'acquiredAt', 'updatedAt', 'terminalOutcome', 'deadlineAt', 'watcherPid', 'holderHost'];
 
 // NXA-01's ledger observation as the `launches` source. Any confirmed terminal
 // launch on an open PR is a no-merge; the PR observation owns merge truth and

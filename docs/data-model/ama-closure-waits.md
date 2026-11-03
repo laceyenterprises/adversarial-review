@@ -16,7 +16,7 @@ daemon owns these databases. `CREATE TABLE IF NOT EXISTS` initializes
 | Column | SQLite definition | Meaning |
 | --- | --- | --- |
 | `head` | `TEXT` | Exact PR head SHA. |
-| `class` | `TEXT` | `primary-change` for immediate primary-change pages, `final-round` for final-round stalls and cap exhaustion, `lane-busy` for the third repeated legacy lane-busy launch on a head, `ci-regression-ownerless` for immediate failed-CI remediation refusals, `closure-recovery-deadline` for deadline escalation and six-hour reminders of unresolved R04 custody (RECOVERYSTALL-01), and `bounded-wait` for other waits. Lane-busy pages are immediate, retain contention refunds/backoff, retry failed delivery, and dedupe per PR/head across restarts. Primary-change receipts remain independent of final-round receipts. |
+| `class` | `TEXT` | `primary-change` for immediate primary-change pages, `final-round` for final-round stalls and cap exhaustion, `lane-busy` for the third repeated legacy lane-busy launch on a head, `ci-regression-ownerless` for immediate failed-CI remediation refusals, `closure-recovery-deadline` for deadline escalation and six-hour reminders of unresolved R04 custody (RECOVERYSTALL-01), `live-closer-handoff:<lrq>:<acquiredAt>` for one operator inspection notice per exact-head live closer acquisition, and `bounded-wait` for other waits. Lane-busy pages are immediate, retain contention refunds/backoff, retry failed delivery, and dedupe per PR/head across restarts. Primary-change receipts remain independent of final-round receipts. |
 | `started` | `INTEGER NOT NULL` | First observation or latest launch/head progress in epoch milliseconds. |
 | `reason` | `TEXT` | Latest wait reason, refreshed on every observation. |
 | `paged` | `INTEGER DEFAULT 0` | Exhaustion page reservation: 0 available, 1 reserved/sent. |
@@ -219,3 +219,23 @@ These read-side rules add no store fields or merge/dispatch authority.
 existing final-round class does, because the lifetime cap belongs to the PR.
 Both page immediately after shared selection proves no automatic budget owner.
 Failed delivery refunds the reserved page. No table or lifecycle enum changes.
+
+## Live closer inspection receipt (HAMWORKPROGRESS-02)
+
+HAMWORKPROGRESS-02: live R03 hammer custody also receives an operator inspection
+handoff after thirty wall-clock minutes from the current dispatched lease's
+acquisition or the current launch's durable request time, whichever is later,
+independent of load-scaled execution budgets and renewed heartbeat
+or decision timestamps. This is a progress-unverified notice, not a stalled or
+terminal verdict: AR's ownership snapshot cannot certify active validation or
+source writing. Execution remains owned; long validators, writers, WIP and
+uncertain effects retain their lease and process custody. No cancel, signal,
+lease release, successor dispatch or merge is authorized by this notice.
+The shared lease projection retains watcherPid and holderHost for generation
+comparison. Complete current-head launch/retry evidence and matching acquisition/launch/holder
+identity are required. Parked, suspended, unknown, non-merge and claimed retry
+owners keep their existing path. The existing closure-wait store deduplicates one
+notice per head/launch/acquisition across watcher restarts, retries failed delivery,
+and reports await-operator without changing the shared execution decision.
+Operators inspect outcome receipts and active work before using supported HQ
+lifecycle controls. Source publication alone does not prove autonomous closure.

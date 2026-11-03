@@ -124,6 +124,23 @@ definitive refusals and merge gates remain enforced. See the
 Offline fixtures prove source behavior; existing smoke promises are unchanged,
 and natural runtime recovery awaits normal deployment. No restart is required.
 
+HAMWORKPROGRESS-02: live R03 hammer custody also receives an operator inspection
+handoff after thirty wall-clock minutes from the current dispatched lease's
+acquisition or the current launch's durable request time, whichever is later,
+independent of load-scaled execution budgets and renewed heartbeat
+or decision timestamps. This is a progress-unverified notice, not a stalled or
+terminal verdict: AR's ownership snapshot cannot certify active validation or
+source writing. Execution remains owned; long validators, writers, WIP and
+uncertain effects retain their lease and process custody. No cancel, signal,
+lease release, successor dispatch or merge is authorized by this notice.
+Complete current-head launch/retry evidence and matching acquisition/launch/holder
+identity are required. Parked, suspended, unknown, non-merge and claimed retry
+owners keep their existing path. The existing closure-wait store deduplicates one
+notice per head/launch/acquisition across watcher restarts, retries failed delivery,
+and reports await-operator without changing the shared execution decision.
+Operators inspect outcome receipts and active work before using supported HQ
+lifecycle controls. Source publication alone does not prove autonomous closure.
+
 OWNERDEADLINE-01: every open PR needs one live owner with a next action and
 an anchored deadline. Once that deadline is at least the existing ownerless
 bound overdue, retained-route reasons and renewed review requests cannot prove
@@ -4483,6 +4500,7 @@ Deploy this reader before activating these keys in core's checked-in config.
 - AMA-PR-1699: clarify that CI scope restrictions also govern guarded restorations, put remediator scope dispositions in `pushback[].reasoning`, and record Hammer dispositions in its audit comment.
 
 - HAMMERNOCI-01: hammer and remediator instructions decline CI changes as operator-only and identify follow-up-only findings in replies without implementing them. Existing prompt tests cover both rules in rendered instructions.
+- LAC-2133 / HAMWORKPROGRESS-02: bound live closer operator inspection independently of heartbeats; preserve execution custody, validators, writers and claimed successor generations. The original regression returned ama-pending at expiry; injected-clock coverage verifies handoff, deduplication and failed-delivery retry. Loaded-runtime and natural closure acceptance remain pending.
 
 - PR #1696 rescue: keep publication-recovery and delivery-index dependencies inside the existing offline watcher fixture boundaries in the fast-merge and reviewer-timeout handoff suites. Both suites continue to exercise the real watcher and CI admission paths; disposable-Git publication proof and durable delivery behavior remain covered by their dedicated integration tests.
 

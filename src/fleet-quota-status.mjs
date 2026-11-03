@@ -41,6 +41,7 @@ export const QUOTA_HARNESS_PROVIDER = Object.freeze({
   claude: 'anthropic',
   'claude-code': 'anthropic',
   gemini: 'google',
+  'remediator-gemini': 'google',
 });
 
 export function providerForQuotaHarness(harness) {

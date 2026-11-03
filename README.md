@@ -4463,6 +4463,8 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- GEMREMEDIATORCLASS-01 / LAC-2146: Gemini remediation keeps its logical route locally and dispatches HQ work as `remediator-gemini`, preserving registered model/entitlement policy across dedicated builder isolation. Concrete fallback aliases, pooled refusal ordering, quota/recovery identity and native/SDK receipts are covered offline. See [release prerequisites and SEV/RCA](docs/INCIDENT-2026-11-02-gemini-remediation-builder-class.md); agent-os #10117 retains its hold until paired qualification.
+
 - LAC-2145 / LEASECIPROOF-01: pair synthetic pending-owner PIDs with raw process-start fixtures and qualify all three intermittent assertions with counted trials. See the [SEV/RCA evidence and limitations](docs/postmortems/LAC-2145-pending-owner-proof-qualification.md). Production ownership fences are unchanged.
 
 - FINDINGSBATCHCUSTODY-01 (LAC-2143): accept native workspace display paths
@@ -4484,6 +4486,7 @@ Deploy this reader before activating these keys in core's checked-in config.
   no-progress deadlines within the existing wall ceiling. Stalls emit a
   timing receipt, release the seat, and return to the existing queue without
   spending review or recovery attempts.
+
 
 - HAMGITTOKEN-01 final rescue: the outer 120-second submodule-sync bound owns its child timeout and waits for lock cleanup; bounded snapshot and publication proofs accept unset or empty `HAM_NODE_BIN` consistently. Credential refresh classification and exact-head merge predicates remain intact.
 

@@ -1,0 +1,37 @@
+{
+  "agy_builder.py": {
+    "commit": "db0c448858e06157ec3486f38c3338183e7687ec",
+    "path": "modules/worker-pool/lib/python/cwp_dispatch/agy_builder.py",
+    "sha256": "563a473333c269248333582451fe286fc20dbe82e9387d1a6c74d1079a19ca52",
+    "functions": [
+      "builder_identities",
+      "admission_identity",
+      "identity_ready",
+      "launch_environment"
+    ]
+  },
+  "adapters.py": {
+    "commit": "db0c448858e06157ec3486f38c3338183e7687ec",
+    "path": "modules/worker-pool/lib/python/cwp_dispatch/adapters.py",
+    "sha256": "a20b67c3faa98a739d9b9e94727c810fedb7f9fef0116c33da721c667e0b7e8e",
+    "functions": [
+      "adapter_subprocess_env_for_payload"
+    ]
+  },
+  "classes.json": {
+    "commit": "3237516e7b01ab188c3a5e7118e9926b8ca19115",
+    "path": "modules/worker-pool/worker-classes.json",
+    "classes": [
+      "gemini",
+      "remediator-gemini"
+    ]
+  },
+  "gemini_runtime.py": {
+    "commit": "3237516e7b01ab188c3a5e7118e9926b8ca19115",
+    "path": "modules/worker-pool/lib/python/cwp_dispatch/gemini_runtime.py",
+    "sha256": "0c9555da5eb94e487ffe5ca7d8f0ff3cd50f0872d3f793fdd160118e1c45b0e0",
+    "functions": [
+      "resolve_antigravity_launch_model"
+    ]
+  }
+}

@@ -65,7 +65,7 @@ export async function selectWorkerTokenAccount({ identity, model, env = process.
 
 export async function resolvePooledWorkerRouting({ primary, fallbackWorkerClasses = [],
   kind, env, modelForClass, reviewerModels = [], selectAccountImpl = selectWorkerTokenAccount,
-  preferCrossFamily = false, infrastructureReason = null,
+  preferCrossFamily = false, infrastructureReason = null, resolveUnpooledFallback = null,
   ...options }) {
   const aliases = kind === 'hammer' ? HAMMERS : REMEDIATORS;
   const canonical = name => Object.hasOwn(aliases, name) ? aliases[name] : name;
@@ -111,7 +111,21 @@ export async function resolvePooledWorkerRouting({ primary, fallbackWorkerClasse
   if (account.status !== 'unavailable' && (!preferCrossFamily || account.hold)) return base;
   const skipped = [];
   for (const candidate of [...new Set(fallbackWorkerClasses.map(canonical))]) {
-    if (!Object.hasOwn(FAMILIES, candidate) || FAMILIES[candidate] === FAMILIES[identity]
+    // Gemini remediation is governed by agy availability, not the OAuth token
+    // pool. Preserve its position in the declared order after a positive pooled
+    // refusal; the caller applies the same model/quota/mode checks as legacy.
+    if (!Object.hasOwn(FAMILIES, candidate)) {
+      const fallback = await resolveUnpooledFallback?.(candidate);
+      if (fallback && !fallback.hold) return { ...fallback, fellBack: true,
+        from: identity, to: fallback.workerClass,
+        capSource: preferCrossFamily ? infrastructureReason : account.reason,
+        primaryState: account.status,
+        reason: preferCrossFamily ? 'infrastructure-fallback' : 'primary-grounded-fallback', skipped };
+      if (fallback) skipped.push({ workerClass: candidate, reason: fallback.reason,
+        ...(fallback.detail ? { detail: fallback.detail } : {}) });
+      continue;
+    }
+    if (FAMILIES[candidate] === FAMILIES[identity]
       || (kind === 'hammer' ? !candidate.startsWith('hammer') : !candidate.startsWith('remediator-'))) continue;
     if (kind === 'remediator' && reviewerModels.some(model => isCrossModelReviewWaived(candidate, model))) {
       skipped.push({ workerClass: candidate, reason: 'reviews-next-round' });

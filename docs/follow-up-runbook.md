@@ -632,8 +632,24 @@ to replace it keeps its typed registry deferral.
 `gemini` runs on the Antigravity harness. Locally the daemon spawns the managed
 `agy` binary with the `remediator-gemini` registry model as `--model` and the
 prompt as the `--print` argument; the pre-flight probes agy's keychain
-credential. Through HQ dispatch the job runs on the agy-backed `gemini` worker
-class. Either way the worker commits under the `gemini-remediation` trailer.
+credential. Through HQ dispatch the job runs on the registered
+`remediator-gemini` class (GEMREMEDIATORCLASS-01). Both the native argv and SDK
+request use that concrete class with `task_kind=coding`, `branch-push` and
+required outcome `push`. HQ owns its model, entitlement, auth and identity
+admission; local model pins retain local semantics. Logical `gemini`,
+`gemini-remediation` and concrete fallback `remediator-gemini` normalize to
+`gemini` for availability, cross-model exclusion and recovery. No config
+schema or operator pin is added. Either way the worker commits under the
+`gemini-remediation` trailer.
+
+A positive pooled Codex/Claude all-account refusal walks the declared fallback
+order through Gemini's ordinary quota/model checks, without enrolling agy in
+the OAuth account pool. Unknown pooled evidence does not ground a primary.
+Readable unknown/busy/capped Gemini evidence or an unresolved model skips that
+candidate; reviewer-family exclusions and quota holds remain authoritative.
+An empty dedicated Gemini **builder** pool must refuse builders and must not
+block this registered remediation route. The paired #10117 release and validation
+requirements are recorded in the [SEV/RCA](INCIDENT-2026-11-02-gemini-remediation-builder-class.md).
 
 To add a Grok remediator once its class can run, list `remediator-grok` in the
 order (for example `[gemini, remediator-grok, claude-code]`). Both config

@@ -8752,9 +8752,11 @@ test('consumeNextFollowUpJob dispatches gemini through broker-backed hq without 
       assert.equal(commands.some((entry) => entry[0] === process.env.HQ_BIN && entry[1] === 'dispatch' && entry[2] !== 'status'), false);
       const dispatchRequest = requests.find((entry) => entry.url === '/v1/dispatch');
       assert.ok(dispatchRequest);
-      // hq-dispatch accepts gemini as the worker class (already allowlisted in
-      // HQ_WORKER_CLASSES).
-      assert.equal(dispatchRequest.body.worker_class, 'gemini');
+      // HQ admission uses the registered remediator class, independently of
+      // the logical harness used for attribution and next-round recovery.
+      assert.equal(dispatchRequest.body.worker_class, 'remediator-gemini');
+      assert.equal(result.job.remediationWorker.model, 'gemini');
+      assert.equal(result.job.remediationWorker.workerClass, 'remediator-gemini');
       assert.equal(dispatchRequest.body.request_id, result.job.jobId);
       assert.equal(dispatchRequest.body.completion_shape, 'branch-push');
       assert.equal(dispatchRequest.body.required_outcome, 'push');
@@ -8774,7 +8776,8 @@ test('consumeNextFollowUpJob dispatches gemini through broker-backed hq without 
   }
 });
 
-test('reconcileFollowUpJob keeps HQ-dispatched remediation active across daemon bounce and then completes from the worker-pool reply', async () => {
+for (const recoveredModel of ['codex', 'gemini', 'remediator-gemini']) {
+test(`reconcileFollowUpJob recovers ${recoveredModel} HQ remediation across daemon bounce and completes from its reply`, async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { claimed } = makeQueuedJob(rootDir, { prNumber: 72, linearTicketId: 'LAC-272' });
   const hqRoot = path.join(rootDir, 'hq');
@@ -8787,7 +8790,8 @@ test('reconcileFollowUpJob keeps HQ-dispatched remediation active across daemon 
     jobPath: claimed.jobPath,
     spawnedAt: '2026-04-21T10:01:00.000Z',
     worker: {
-      model: 'codex',
+      model: recoveredModel,
+      ...(recoveredModel !== 'codex' ? { workerClass: 'remediator-gemini' } : {}),
       state: 'spawned',
       dispatchMode: 'hq',
       completionShape: 'branch-push',
@@ -8865,8 +8869,14 @@ test('reconcileFollowUpJob keeps HQ-dispatched remediation active across daemon 
     assert.equal(completed.action, 'completed');
     assert.equal(completed.job.remediationWorker.dispatchMode, 'hq');
     assert.equal(completed.job.reReview.requested, true);
+    assert.equal(completed.job.jobId, spawned.job.jobId);
+    assert.equal(spawned.job.remediationPlan.currentRound, 1);
+    assert.equal(completed.job.remediationPlan.currentRound, spawned.job.remediationPlan.currentRound);
+    assert.equal(completed.job.remediationWorker.launchRequestId, 'lrq_arp04_recovery');
+    assert.equal(completed.job.remediationWorker.replyPath, replyPath);
   });
 });
+}
 
 test('health.worker.terminal topic event completes an HQ remediation worker without dispatch-status polling', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
@@ -9771,6 +9781,39 @@ test('consumeNextFollowUpJob routes agentos remediation through HQ branch-push d
       assert.equal(dispatchRequest.body.completion_shape, 'branch-push');
       assert.equal(dispatchRequest.body.required_outcome, 'push');
     }));
+  });
+});
+
+test('Gemini SDK dispatch preserves concrete admission and stable round receipts across retries', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'gemrem-sdk-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const promptPath = path.join(root, 'round-2.md');
+  writeFileSync(promptPath, 'remediate round 2\n');
+  await withAppContractDispatchServer(async ({ requests, dispatches }) => {
+    const args = {
+      hqRoot: root, workerClass: 'remediator-gemini', repo: 'example/repo', prNumber: 17,
+      branch: 'codex/round-2', promptPath, replyPath: path.join(root, 'round-2-reply.json'),
+      jobId: 'gemrem-round-2', launchRequestId: 'gemrem-round-2',
+      env: { ...process.env, HQ_ROOT: root, HQ_PARENT_SESSION: 'session:fixture',
+        HQ_PROJECT: 'fixture', AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agentos' },
+      execFileImpl: async () => { throw new Error('SDK launch must not execute the native CLI'); },
+    };
+    const first = await dispatchRemediationViaHq(args);
+    const second = await dispatchRemediationViaHq(args);
+    const wire = requests.find(entry => entry.url === '/v1/dispatch').body;
+    assert.equal(wire.worker_class, 'remediator-gemini');
+    assert.equal(wire.task_kind, 'coding');
+    assert.equal(wire.completion_shape, 'branch-push');
+    assert.equal(wire.required_outcome, 'push');
+    assert.equal(wire.request_id, args.jobId);
+    assert.equal(wire.ticket_ref, args.jobId);
+    assert.equal(wire.branch, args.branch);
+    assert.equal(dispatches.size, 1);
+    assert.equal(second.dispatchId, first.dispatchId);
+    assert.equal(second.launchRequestId, first.launchRequestId);
+    assert.equal(first.model, 'gemini');
+    assert.equal(first.workerClass, wire.worker_class);
+    assert.equal(first.replyPath, args.replyPath);
   });
 });
 

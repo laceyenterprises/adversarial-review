@@ -1,5 +1,17 @@
 # Data Model - Follow-Up Remediation Jobs
 
+## Gemini route and dispatch identity (GEMREMEDIATORCLASS-01)
+
+New HQ Gemini remediation workers record `model: "gemini"` for logical
+quota/reconcile attribution and `workerClass: "remediator-gemini"` for concrete
+HQ admission. Historical `model: "gemini"` and concrete `model:
+"remediator-gemini"` normalize to the same route. Local workers retain their
+physical `gemini` identity and `gemini-remediation` commit trailer.
+The request/ticket ID remains the stable job ID; dispatch ID, launch-request
+ID, reply artifact path, sticky HQ dispatch path and remediation round are
+unchanged. Recovery uses those durable receipts, never a new builder launch.
+No store shape, terminal state, retry budget or claim transition changes.
+
 
 ## Model provenance (REMODELFALLBACK-01)
 

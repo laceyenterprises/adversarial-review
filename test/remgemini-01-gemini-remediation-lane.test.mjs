@@ -15,7 +15,7 @@ import { claudeAccountFixture } from './helpers/claude-account-fixture.mjs';
 import {
   RegistryUnavailableError,
   readCommittedWorkerModelSeed,
-  spawnGeminiRemediationWorker,
+  spawnLocalRemediationWorker,
 } from '../src/adapters/agent-runtime/local/remediation.mjs';
 import { resolveRemediationWorkerClassWithFallback } from '../src/remediation-worker-class-fallback.mjs';
 import { resolvePooledWorkerRouting } from '../src/worker-token-pool.mjs';
@@ -195,7 +195,7 @@ test('remediator-gemini resolves from the registry and spawns the Antigravity ha
   chmodSync(agyStub, 0o700);
   const promptPath = join(root, 'prompt.md');
   writeFileSync(promptPath, 'synthetic remediation prompt');
-  const worker = spawnGeminiRemediationWorker({
+  const worker = spawnLocalRemediationWorker('remediator-gemini', {
     workspaceDir: root,
     promptPath,
     outputPath: join(root, 'out.txt'),
@@ -203,7 +203,7 @@ test('remediator-gemini resolves from the registry and spawns the Antigravity ha
     hqRoot: root,
     replyPath: join(root, 'reply.json'),
     launchRequestId: 'lrq_synthetic_remgemini',
-    enforceHarnessIdentity: false,
+    enforceHarnessIdentity: true,
     sourceEnv: { HQ_ROOT: root, HOME: root, PATH: '/usr/bin:/bin', AGY_CLI_PATH: agyStub },
   });
   // The launcher unrefs its detached child; re-ref it so the test runner's

@@ -1,0 +1,66 @@
+{
+  "gemini": {
+    "allowedModels": [
+      "gemini-2.5-pro",
+      "gemini-2.5-flash"
+    ],
+    "antigravityAllowedModels": [
+      "Gemini 3.8 Flash (High)",
+      "Gemini 3.8 Flash (Medium)",
+      "Gemini 3.8 Flash (Low)",
+      "Gemini 4 Argon (Low)",
+      "Gemini 4 Argon (Medium)",
+      "Gemini 4 Argon (High)"
+    ],
+    "antigravityModel": "Gemini 3.8 Flash (High)",
+    "costEstimateUsd": 0.1,
+    "defaultModel": "gemini-2.5-pro",
+    "defaultTools": [
+      "read",
+      "write",
+      "bash:safe"
+    ],
+    "entitlement": "gemini-worker",
+    "fallbackWorkerClasses": [
+      "claude-code"
+    ],
+    "networkProfile": "restricted",
+    "vdb": {
+      "allowCanonicalFallback": true,
+      "enabled": true
+    }
+  },
+  "remediator-gemini": {
+    "allowedModels": [
+      "Gemini 3.8 Flash (High)",
+      "Gemini 3.8 Flash (Medium)",
+      "Gemini 3.8 Flash (Low)",
+      "Gemini 4 Argon (Low)",
+      "Gemini 4 Argon (Medium)",
+      "Gemini 4 Argon (High)"
+    ],
+    "costEstimateUsd": 0.1,
+    "defaultModel": "Gemini 3.8 Flash (High)",
+    "defaultTools": [
+      "read",
+      "write",
+      "bash:git-safe",
+      "github:write"
+    ],
+    "entitlement": "foundry-remediator-worker",
+    "networkProfile": "restricted",
+    "supportsTaskKinds": [
+      "coding",
+      "remediation"
+    ],
+    "tags": [
+      "runtime:antigravity"
+    ],
+    "toolsAllowlist": [
+      "read",
+      "write",
+      "bash:git-safe",
+      "github:write"
+    ]
+  }
+}

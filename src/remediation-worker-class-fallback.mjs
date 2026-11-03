@@ -67,31 +67,8 @@ import {
   routeSubject,
 } from './adapters/subject/github-pr/routing.mjs';
 
-export function normalizeRemediationWorkerClass(workerClassInput) {
-  const workerClass = String(workerClassInput || '').trim().toLowerCase();
-  if (!workerClass) return null;
-  switch (workerClass) {
-    case 'remediator-codex':
-    case 'remediator-codex-corp':
-    case 'remediator-claude':
-    case 'remediator-claude-corp':
-      return workerClass;
-    case 'codex-corp':
-      return 'remediator-codex-corp';
-    case 'codex':
-    case 'codex-remediation':
-      return 'codex';
-    case 'claude':
-    case 'claude-code':
-    case 'claude-code-remediation':
-      return 'claude-code';
-    case 'gemini':
-    case 'gemini-remediation':
-      return 'gemini';
-    default:
-      return null;
-  }
-}
+import { normalizeRemediationWorkerClass } from './remediation-worker-class.mjs';
+export { normalizeRemediationWorkerClass } from './remediation-worker-class.mjs';
 
 // REMEDIATORLANE-01: the one capability check between lane selection and the
 // orchestration mode that must run it. The corporate Claude lane is
@@ -236,9 +213,9 @@ async function resolveModeRunnableWorkerClass({
 } = {}) {
   await ensureWorkerRegistryReadyImpl({env});
   modelForClass ??= (workerClass) => remediatorModelForClass(workerClass, { job, env });
-  let primaryClass = String(primary || '').trim().toLowerCase();
+  let primaryClass = normalizeRemediationWorkerClass(primary) || String(primary || '').trim().toLowerCase();
   const fallbacks = [...new Set((Array.isArray(fallbackWorkerClasses) ? fallbackWorkerClasses : [])
-    .map((value) => String(value || '').trim().toLowerCase())
+    .map((value) => normalizeRemediationWorkerClass(value) || String(value || '').trim().toLowerCase())
     .filter(Boolean))];
   const base = { workerClass: primaryClass, fellBack: false, hold: false };
   const lastInfrastructureRetry = job?.remediationPlan?.retryHistory?.findLast(entry =>
@@ -249,7 +226,26 @@ async function resolveModeRunnableWorkerClass({
         && ['codex', 'remediator-codex'].includes(primaryClass))));
   const pooled = await resolvePooledWorkerRouting({ primary: primaryClass, fallbackWorkerClasses: fallbacks,
     kind: 'remediator', env, modelForClass, reviewerModels, selectAccountImpl, preferCrossFamily,
-    infrastructureReason: lastInfrastructureRetry?.retryMetadata?.reason });
+    infrastructureReason: lastInfrastructureRetry?.retryMetadata?.reason,
+    resolveUnpooledFallback: async candidate => {
+      if (candidate !== 'gemini') return null;
+      const ownReviewer = reviewerModels.find(model => isCrossModelReviewWaived(candidate, model));
+      if (ownReviewer) return { hold: true, reason: `reviews-next-round:${ownReviewer}` };
+      try {
+        const routing = await resolveModeRunnableWorkerClass({
+          primary: candidate, fallbackWorkerClasses: [], job, nowMs, modelForClass,
+          ensureWorkerRegistryReadyImpl, reviewerModels, env, hqPath, execFileImpl,
+          remediationMode, modeRefusals, codexAccountPolicy: 'pinned',
+          selectAccountImpl: async () => null,
+        });
+        // A fallback needs positive availability when fleet evidence is readable.
+        return !routing.hold && ['primary-available', 'fleet-quota-status-unavailable'].includes(routing.reason)
+          ? routing : { ...routing, hold: true };
+      } catch (error) {
+        if (error.code !== 'registry-unavailable') throw error;
+        return { hold: true, ...modelUnresolvedSkip(candidate, error) };
+      }
+    } });
   if (pooled) return { ...pooled, ...(pooled.hold ? { holdUntil: holdUntilFor(null, nowMs) } : {}) };
 
   if (!primaryClass) {

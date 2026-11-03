@@ -33,6 +33,7 @@ function buildLoaderSource() {
     [fileUrl('src', 'adversarial-gate-status.mjs')]: 'fixture:adversarial-gate-status',
     [fileUrl('src', 'adversarial-gate-context.mjs')]: 'fixture:adversarial-gate-context',
     [fileUrl('src', 'follow-up-jobs.mjs')]: 'fixture:follow-up-jobs',
+    [fileUrl('src', 'remediation-publication-recovery.mjs')]: 'fixture:publication-recovery',
     [fileUrl('src', 'remediation-prompt.mjs')]: 'fixture:remediation-prompt',
     [fileUrl('src', 'follow-up-merge-agent.mjs')]: 'fixture:follow-up-merge-agent',
     [fileUrl('src', 'follow-up-retrigger-label.mjs')]: 'fixture:follow-up-retrigger-label',
@@ -316,6 +317,8 @@ export async function load(url, context, nextLoad) {
   }
 
   const simpleStubs = {
+    // Publication proof and delivery debt have their own offline integration suites.
+    'fixture:publication-recovery': "export async function proveStoppedPublication() { return null; }",
     'fixture:hcp-health': "export async function checkHcpHealthz() { return { ready: true, reason: 'fixture' }; }",
     'fixture:ci-hammer-alert': "export * from '${fileUrl('src', 'alert-delivery.mjs')}?actual'; export async function deliverAlert(text, options) { (globalThis.__ciHammerPages ||= []).push(options); return { status: 'queued' }; }",
     'fixture:operator-surface': "globalThis.__timeoutHandoffOperatorWrites = []; export function createCompositeOperatorSurface() { return { extractLinearTicketId() { return null; }, syncTriageStatus: async (...args) => globalThis.__timeoutHandoffOperatorWrites.push(args), observeOperatorApproved: async () => null, observeMergeAgentOverride: async () => process.env.FIXTURE_MERGE_AGENT_REQUESTED === '1' ? { applied: true, observedRevisionRef: 'timeout-head-164', actor: process.env.FIXTURE_MERGE_AGENT_ACTOR || 'operator-bot', eventId: 'evt-merge-agent-requested', observedAt: process.env.FIXTURE_MERGE_AGENT_CREATED_AT || '2026-05-27T04:00:01.000Z' } : null, observeLabelControl: async () => process.env.FIXTURE_CI_RETRIGGER ? { applied: true, actor: 'VirtualPaul', eventId: 'evt-retrigger', observedAt: new Date().toISOString() } : null }; }",

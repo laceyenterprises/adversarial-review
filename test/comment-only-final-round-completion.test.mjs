@@ -218,9 +218,9 @@ test('a completed final round whose moved head cannot be proven records the head
   assert.equal(result.workerPushedHeadSha, null);
   assert.equal(result.completed, true, 'the worker outcome stands; the head requires automatic review');
   assert.equal(result.completionFields.withheldPushHeadSha, foreignHead);
-  assert.match(result.completionFields.finalRoundOutcome.push, /^live-head-mismatch/);
+  assert.match(result.completionFields.finalRoundOutcome.push, /^worker-patch-not-published/);
   assert.equal(alerts.length, 0);
-  assert.match(warnings.join('\n'), /Withholding final-round push proof for example\/repo#42: live-head-mismatch/);
+  assert.match(warnings.join('\n'), /Withholding final-round push proof for example\/repo#42: worker-patch-not-published/);
 });
 
 test('a contamination-audit failure withholds the proof, names the reason for automatic review', async () => {

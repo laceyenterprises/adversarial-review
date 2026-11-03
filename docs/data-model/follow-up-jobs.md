@@ -206,19 +206,43 @@ local `commitSha` in `operationalBlockers[]`.
 
 An exited worker reporting committed-but-unpublished work stops with
 `remediationPlan.stop.code: "committed-unpublished"`, even at the round cap.
-`unpublishedWork` records `jobId`, `commitSha`, `workspaceDir`, and `reported`.
-When the workspace HEAD can be inspected, it overrides reply hashes: an unchanged
-HEAD at `revisionRef` produces no publication debt. Explicit worker-reported
-commit evidence remains a fallback when the workspace is unavailable.
-The stop reason and PR comment name the job and commit; the gate remains failed
-with reason `remediation-committed-unpublished`, without an operator-decision
-notice. If the live head exactly matches the retained commit, the gate reports
-pending review (`remediation-published-awaiting-review`, or the existing
-`stale-review-head` when the prior reviewed head is known). Publication alone
-never settles the review or deletes the retained evidence. Workspace retention
-skips this publication debt, including past the normal terminal TTL. Recover by inspecting that workspace and running the same
-guarded publisher with the original previous head and remote lease; the record
-is diagnostic evidence and does not authorize a merge or an unguarded push.
+`unpublishedWork` records `jobId`, `commitSha`, `workspaceDir`, `reported`,
+`liveHeadSha`, and `publicationReason`. When the workspace HEAD can be inspected,
+it overrides reply hashes: an unchanged HEAD at `revisionRef` produces no debt.
+Explicit worker-reported commit evidence remains a fallback when the workspace
+is unavailable. The stop reason names both the local commit and observed live
+head; unavailable or partial evidence remains unproven.
+
+REMPUBPROOF-01: publication uses the existing structural replay proof. An equal
+live/workspace head is accepted under the existing ownership and replay checks.
+A different live head must also contain every local worker patch, established by
+stable patch equivalence through `git cherry`. The proof fetches the current base
+and immutable live commit without changing the worker checkout, checks reviewed
+patch preservation and worker ownership, and rechecks head/base before accepting.
+A trailer alone cannot establish publication.
+
+On failed current-head CI, a stopped publication debt with this proof can recover
+under the queue write lock. Recovery is bound to the full source-job digest and
+the observed live head. A valid completed comment-only final-round reply is
+reclassified through the existing completion checks and moved to `completed`,
+restoring hammer ownership even at the cap. Otherwise only the remaining normal
+round budget may requeue it; exhaustion still escalates explicitly. Recovery
+never refunds a spent round or increments the cap. Pending recovery records
+`publicationRecovery: {recoveredAt, headSha, proof, previousStop}`; final completion
+retains its proof in `completion` with `completion.publicationRecovery` recording
+the recovery timestamp and previous stop. Both clear `unpublishedWork` only after
+proof. Repeated admission observes the active/completed successor rather than
+requeueing it again.
+Recovered final completion also rebuilds the existing `commentDelivery` debt
+from the validated reply and indexes its completed job for ordinary delivery
+retry. Repeated admission restores that index while the recovered comment is
+unposted. This uses the existing delivery shape and does not spend a round.
+
+The gate remains failed with `remediation-committed-unpublished` when proof is
+missing. Workspace retention skips this debt, including past terminal TTL.
+Recover genuinely unpublished work by inspecting the retained workspace and using
+the guarded publisher with the original previous head and remote lease; the
+record never authorizes a merge or an unguarded push.
 
 ## Job filenames and per-PR reads (LEDGERSCAN-01)
 

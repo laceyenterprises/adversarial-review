@@ -1,3 +1,4 @@
+import { proveStoppedPublication } from './remediation-publication-recovery.mjs';
 import { createFollowUpJob, requeueFollowUpJobForNextRound, resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
 import { addCiRegressionFinding } from './ci-regression-finding.mjs';
 import { observeClosureWait } from './ama/closure-wait.mjs';
@@ -8,6 +9,7 @@ import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
 import { isCompletedFinalRemediationJob, scanArchivedStoppedFollowUpJobs } from './comment-only-final-round.mjs';
 import { RECOVERY_SOURCE_PATH } from './comment-only-recovery-record.mjs';
 import { recoverCancelledChecks, recoverInfrastructureChecks } from './ci-recovery.mjs';
+import { addToDeliveryRetryIndex } from './adapters/comms/github-pr-comments/comment-delivery.mjs';
 
 const DEFAULT_CI_BLOCKED_REREVIEW_RECHECK_MS = 5 * 60 * 1000;
 const CI_BLOCKED_REREVIEW_RECHECK_ENV = 'ADVERSARIAL_REREVIEW_CI_BLOCKED_RECHECK_MS';
@@ -245,6 +247,9 @@ async function guardRereviewCiBeforeReviewer({
 
     // Preserve the completed round's start/result edge for the hammer's proof.
     if (isCompletedFinalRemediationJob(latest.job)) {
+      if (latest.job.completion?.publicationRecovery && latest.job.commentDelivery?.posted === false) {
+        addToDeliveryRetryIndex(rootDir, latest.jobPath);
+      }
       return ciBlockedHammerOwnerResult({
         repo, prNumber, ciGate, reason: 'ci-regression-hammer-owned',
         jobPath: latest.jobPath, job: latest.job,
@@ -267,6 +272,8 @@ async function guardRereviewCiBeforeReviewer({
     }
 
     try {
+      const publicationRecovery = await proveStoppedPublication({ job: latest.job, jobPath: latest.jobPath,
+        headSha: reviewerHeadSha || ciGate.headSha, ciGate, execFileImpl, log });
       const requeued = requeueImpl({
         rootDir,
         jobPath: latest.jobPath,
@@ -276,8 +283,14 @@ async function guardRereviewCiBeforeReviewer({
         revisionRef: reviewerHeadSha || ciGate.headSha || null,
         stopMetadata: { ciRegression: true },
         ciRegressionFinding: reason,
+        publicationRecovery,
         readOperatorLabelImpl,
       });
+      if (isCompletedFinalRemediationJob(requeued?.job)) {
+        addToDeliveryRetryIndex(rootDir, requeued.jobPath);
+        return ciBlockedHammerOwnerResult({ repo, prNumber, ciGate, reason: 'ci-regression-hammer-owned',
+          jobPath: requeued.jobPath, job: requeued.job });
+      }
       const nextStatus = requeued?.job?.status || null;
       if (nextStatus === 'pending') {
         log.warn?.(
@@ -305,6 +318,32 @@ async function guardRereviewCiBeforeReviewer({
       }
       return blockOwnerless({ proceed: false, reason: 'ci-regression-not-requeued', ciGate, ...jobFields }, 'requeue produced no active remediation job');
     } catch (err) {
+      if (err?.code === 'ENOENT' || /from stopped:max-rounds-reached\b/u.test(err?.message || '')) {
+        // Another admission may have consumed the same stopped snapshot while
+        // this caller inspected immutable Git objects. Observe that successor;
+        // disappearance alone must not erase a proven recovery's owner.
+        if (latest.job?.remediationPlan?.stop?.code === 'committed-unpublished') {
+          const successor = latestJobFinder(rootDir, { repo, prNumber });
+          if (successor?.job?.jobId === latest.job.jobId) {
+            const head = reviewerHeadSha || ciGate.headSha;
+            if (isCompletedFinalRemediationJob(successor.job)
+              && successor.job.completion?.workerPushedHeadSha === head) {
+              return ciBlockedHammerOwnerResult({ repo, prNumber, ciGate,
+                reason: 'ci-regression-hammer-owned', ...successor });
+            }
+            if (['pending', 'in_progress', 'inProgress'].includes(successor.job.status)
+              && successor.job.revisionRef === head && successor.job.publicationRecovery?.headSha === head) {
+              return { proceed: false, reason: 'ci-regression-remediation-active', ciGate, ...successor };
+            }
+            if (successor.job.status === 'stopped'
+              && successor.job.remediationPlan?.stop?.code === 'max-rounds-reached'
+              && successor.job.publicationRecovery?.headSha === head) {
+              return blockOwnerless(ciBlockedHammerOwnerResult({ repo, prNumber, ciGate,
+                reason: 'ci-regression-stopped', ...successor }), 'concurrent admission exhausted the remediation round budget');
+            }
+          }
+        }
+      }
       if (err?.code === 'ENOENT') {
         log.warn?.(
           `[watcher] Refusing re-review for ${repo}#${prNumber}: failed external CI ` +

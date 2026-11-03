@@ -19,6 +19,18 @@ lifecycle controls. Source publication alone does not prove autonomous closure.
 
 ## Outcome progress receipts (HAMPROGRESS-01)
 
+## Hammer terminal outcome evidence
+
+Every hammer run has a terminal merge outcome in Agent OS worker-run metadata.
+A merged outcome requires the hammer's own merge execution and a recent GitHub
+read proving the exact head, merge commit SHA and mergedAt. Other exits carry a
+closed reason and raw last phase; remediation pushes include the new head.
+`ama_closer.hammer_ended_without_merge.phaseOutcome` always classifies the exit.
+Unclassified exits are visible and alert through the existing ticket path.
+Read the ledger with `hq merge-lane hammers --json --since 24h`; reporting performs
+no GitHub reads. Outcomes are telemetry and grant no merge or retry authority.
+
+
 The phase scripts and metered merge invocation emit fixed, version-1 receipts
 through `bin/hammer-progress.mjs` into
 `dispatch/<lrq>/hammer-progress/<run-id>/<milestone>.json` under the resolved HQ
@@ -160,7 +172,8 @@ These observations reuse the existing uncharged lease-wait refund, including
 series, target and lifetime accounting. A second abort on the unchanged head
 remains eligible for the existing closer retry wake and its load-aware
 admission deadline. The existing `ama_closer.hammer_ended_without_merge` event
-includes `retryable: true` and `phaseOutcome`. They must never become
+includes `retryable: true`, the classified `phaseOutcome`, and the original
+infrastructure reason in `lastPhase`. They must never become
 `hammer-final-no-merge`, including when a no-merge comment is present.
 
 Red required checks, findings, conflicts, another writer's head change,

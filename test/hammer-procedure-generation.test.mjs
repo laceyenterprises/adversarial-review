@@ -34,7 +34,8 @@ test('rendered phase receipts are emitted by phase outcomes without changing mer
     }
     if (phase === 'hammer-publish') assert.match(rendered, /remediation-pushed/);
     if (phase === 'hammer-merge') {
-      assert.doesNotMatch(rendered, /\/bin\/hammer-progress\.mjs/);
+      assert.match(rendered, /hammer-progress\.mjs --phase/);
+      assert.doesNotMatch(rendered, /hammer-progress\.mjs.*terminal-stop/);
       assert.match(rendered, /--match-head-commit "\$POST_REMEDIATION_SHA"/);
     }
   }
@@ -50,14 +51,15 @@ test('phase receipt failures warn once and preserve execution under errexit', ()
     assert.ok(phase === 'hammer-merge' || calls.length > 0);
     for (const call of calls) {
       const result = spawnSync('/bin/bash', ['--noprofile', '--norc', '-euc', `${call}\nprintf 'continued'`], {
-        env: { ...process.env, HAM_NODE_BIN: process.execPath, ham_audit_reason: 'checks-red',
+        env: { ...process.env, HAM_NODE_BIN: process.execPath, ham_audit_reason: 'checks-red', ham_phase_reason: 'checks-red',
+          HAM_API_KNOWN_PUSHED_HEAD: 'a'.repeat(40), HAM_PUSHED_HEAD: 'b'.repeat(40),
           HQ_WORKER_RUN_ID: 'invalid-run' },
         encoding: 'utf8', timeout: 5000,
       });
       assert.equal(result.error, undefined);
       assert.equal(result.status, 0, result.stderr);
       assert.equal(result.stdout, 'continued');
-      assert.equal(result.stderr, 'HAM progress receipt unavailable\n');
+      assert.equal(result.stderr, call.includes('--phase') ? '' : 'HAM progress receipt unavailable\n');
     }
   }
 });

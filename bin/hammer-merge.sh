@@ -49,6 +49,11 @@ ham_append_terminal_audit() {
   HAM_NO_MERGE_NOTE="Waited ${HAM_HEAD_WAITED_SECONDS:-0}s for the published head and ${HAM_REQUIRED_CHECKS_WAITED_SECONDS:-0}s for required checks on that exact head."
   ham_audit_outcome="$1"
   ham_audit_reason="$2"
+  ham_phase_reason="$ham_audit_reason"
+  if [ "$1" = "succeeded" ] && [ "${HAM_OWN_MERGE_EXECUTED:-0}" != "1" ]; then
+    ham_phase_reason="already-merged-by-other"
+  fi
+  "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-progress.mjs --phase "$ham_phase_reason" || true
   # No terminal progress receipt here: a no-merge outcome may be deferred,
   # requeued or remediated in this run. The closer's final exit records it.
   # Record confirmed execution or a refusal before other bookkeeping can fail.
@@ -62,7 +67,7 @@ ham_append_terminal_audit() {
   fi
   if [ -n "$ham_receipt_outcome" ]; then
     /usr/bin/perl -e 'alarm shift; exec @ARGV' 60 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-action-receipt.mjs \
-      <<HQ_ROOT>> <<REPO>> <<PR_NUMBER>> "$POST_REMEDIATION_SHA" "$ham_receipt_outcome" "$ham_audit_reason" "${HAM_MERGE_EXECUTED_AT:-}" "$HAM_GATE_JSON" \
+      <<HQ_ROOT>> <<REPO>> <<PR_NUMBER>> "$POST_REMEDIATION_SHA" "$ham_receipt_outcome" "$ham_audit_reason" "${HAM_MERGE_EXECUTED_AT:-}" "$HAM_GATE_JSON" "$HAM_POST_MERGE_JSON" \
       || echo "HAM warning: merge-action receipt unavailable; coverage remains pending" >&2
   fi
   if [ "$ham_audit_outcome" != succeeded ]; then

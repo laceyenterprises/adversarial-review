@@ -526,7 +526,7 @@ for (const reason of HAMMER_RETRYABLE_READ_OUTCOMES) {
     assert.ok(events.some(message => {
       const event = JSON.parse(message);
       return event.event === 'ama_closer.hammer_ended_without_merge'
-        && event.retryable === true && event.phaseOutcome === reason;
+        && event.retryable === true && event.lastPhase === reason;
     }));
   });
 }

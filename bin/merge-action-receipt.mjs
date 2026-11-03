@@ -4,17 +4,18 @@ import { chmodSync, chownSync, lstatSync, mkdirSync, readFileSync, renameSync, u
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { isExecutedMergeRefusal, writeMergeActionReceipt } from '../src/ama/merge-action-receipt.mjs';
+import { recordVerifiedHammerMerge } from '../src/ama/hammer-outcome.mjs';
 import { execGhWithRetry } from '../src/gh-cli.mjs';
 
-const [hqRoot, repo, number, headSha, outcome, reason = '', executedAt = new Date().toISOString(), gatePath] = process.argv.slice(2);
+const [hqRoot, repo, number, headSha, outcome, reason = '', executedAt = new Date().toISOString(), gatePath, livePath] = process.argv.slice(2);
 if (!['merged', 'refused'].includes(outcome)) throw new Error('Invalid receipt outcome');
 if (outcome === 'refused' && !isExecutedMergeRefusal(reason)) process.exit(0);
 const record = { repo, prNumber: Number(number), headSha, merged: outcome === 'merged',
   reason: reason || null, executedAt: executedAt || new Date().toISOString(), producerClass: 'closer-hammer',
   actor: 'hammer', action: 'gh pr merge', receiptProtocol: 'OPSEV1-03' };
 if (record.merged) {
-  const { stdout } = await execGhWithRetry({
-    args: ['pr', 'view', number, '--repo', repo, '--json', 'state,headRefOid,mergedAt'],
+  const { stdout } = livePath ? { stdout: readFileSync(livePath, 'utf8') } : await execGhWithRetry({
+    args: ['pr', 'view', number, '--repo', repo, '--json', 'state,headRefOid,mergedAt,mergeCommit'],
     timeoutMs: 15_000,
   });
   const live = JSON.parse(stdout);
@@ -22,6 +23,7 @@ if (record.merged) {
     || Math.abs(Date.parse(live.mergedAt) - Date.parse(record.executedAt)) > 120_000) {
     throw new Error('Merge-action requires a verified recent exact-head merge');
   }
+  recordVerifiedHammerMerge({ live, headSha, executedAt: record.executedAt, env: { ...process.env, HAM_HQ_ROOT: hqRoot } });
 }
 if (record.merged && gatePath) {
   const gate = JSON.parse(readFileSync(gatePath, 'utf8'));

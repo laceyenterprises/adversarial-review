@@ -30,7 +30,7 @@ function fixtureEnv(env = {}) {
   // Fake gh fixtures must never inherit live credentials or a worker launch identity.
   const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     !key.startsWith('HAM_')
-    && !['HQ_LAUNCH_REQUEST_ID', 'AGENT_OS_WORKER_LRQ_ID', 'LAUNCH_REQUEST_ID'].includes(key)
+    && !['HQ_LAUNCH_REQUEST_ID', 'HQ_WORKER_RUN_ID', 'AGENT_OS_WORKER_LRQ_ID', 'LAUNCH_REQUEST_ID'].includes(key)
     && !/^(?:HAMMER_LACEY_GH_TOKEN|MERGE_AGENT_GH_TOKEN|HQ_ENTITLEMENT_GH_TOKEN|GH_TOKEN|GITHUB_TOKEN)(?:_|$)/.test(key)));
   return { ...cleanEnv, ...env };
 }
@@ -242,6 +242,7 @@ test('API fallback push rejection releases the lease under set -e for both push 
   writeFileSync(join(dir, 'publisher'), `#!/bin/sh
 case "$1" in
   */metered-gh.mjs) exec "$REAL_NODE" "$@" ;;
+  */hammer-progress.mjs) printf '%s\\n' "$2 $3" >> "$PROGRESS_ARGS_FILE" ;;
   */hammer-pushed-attestation.mjs) printf '%s\\n' "$*" > "$ATTESTATION_ARGS_FILE"; echo '{}' ;;
   *) printf '%s\\n' "$PUBLISH_RESULT" ;;
 esac
@@ -259,8 +260,10 @@ esac
       previousHead: 'a'.repeat(40), pushedHead: 'b'.repeat(40) },
   ]) {
     rmSync(join(dir, 'push-args'), { force: true });
+    rmSync(join(dir, 'progress-args'), { force: true });
     const env = { REAL_NODE: process.execPath, HAMMER_LACEY_GH_TOKEN: 'synthetic-hammer', HAM_COMMIT_PUBLICATION_ONLY: '1', HAM_NODE_BIN: join(dir, 'publisher'),
       PUBLISH_RESULT: JSON.stringify(result), PUSH_ARGS_FILE: join(dir, 'push-args'),
+      PROGRESS_ARGS_FILE: join(dir, 'progress-args'),
       ATTESTATION_ARGS_FILE: join(dir, 'attestation-args'), PATH: `${dir}:${process.env.PATH}` };
     const failure = run('/bin/bash', ['-c', `set -e
 HAM_MERGE_LEASE_HELD=1
@@ -276,7 +279,10 @@ echo SHOULD_NOT_CONTINUE
       assert.equal(readFileSync(env.ATTESTATION_ARGS_FILE, 'utf8').trim(),
         `${root}/bin/hammer-pushed-attestation.mjs fixture/repo 1 ${result.previousHead} ${result.pushedHead}`);
       assert.equal(existsSync(env.PUSH_ARGS_FILE), false, 'unsynchronized local HEAD must never be pushed');
+      assert.equal(readFileSync(env.PROGRESS_ARGS_FILE, 'utf8'),
+        `remediation-pushed ${result.pushedHead}\n`, 'known pushed head returns before the ordinary progress call');
     } else {
+      assert.equal(existsSync(env.PROGRESS_ARGS_FILE), false, 'a rejected push earns no publication receipt');
       assert.equal(readFileSync(env.PUSH_ARGS_FILE, 'utf8').trim(), result.branch
         ? `push origin HEAD:refs/heads/worker --force-with-lease=refs/heads/worker:${result.fallbackHead}`
         : 'push --force-with-lease');
@@ -639,6 +645,7 @@ esac
       HAM_PR_NUMBER: '424244', HAM_REVIEWED_SHA: successfulMerge ? reviewedHead : head, HAM_TARGET_REMEDIATION_SHA: head,
       HAM_RISK_CLASS: 'medium', HAM_MERGE_METHOD: 'squash', HAM_HQ_ROOT: dir, HAM_HQ_OWNER: userInfo().username,
       HAM_AUDIT_PATH: join(dir, 'audit.json'), HAM_REVIEWER: 'reviewer',
+      HQ_LAUNCH_REQUEST_ID: 'lrq_receipt-fixture', HQ_WORKER_RUN_ID: 'wrun_receipt-fixture',
       HAM_AMA_TRAILERS: trailers,
       PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir, RECEIPT_SCENARIO: scenario, REAL_NODE: process.execPath,
     };
@@ -684,6 +691,13 @@ echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OWN=$HAM_OWN_MERGE_EXECUTED EXIT=$HAM
     if (successfulMerge) {
       assert.match(result.stdout, /STATUS=0 HELD=0 OWN=1 EXIT=0/);
       assert.equal(readFileSync(join(dir, 'merge-head'), 'utf8'), head);
+      assert.doesNotMatch(result.stderr, /merge-action receipt unavailable/);
+      const outcome = JSON.parse(readFileSync(join(dir,
+        'dispatch/lrq_receipt-fixture/hammer-progress/wrun_receipt-fixture/outcome.json'), 'utf8'));
+      assert.equal(outcome.outcome, 'merged', 'post-merge JSON reaches the real receipt CLI');
+      assert.equal(outcome.headSha, head);
+      assert.equal(outcome.mergeCommitSha, 'b'.repeat(40));
+      assert.equal(outcome.proof, 'github-exact-head-own-merge');
     } else if (scenario.startsWith('accepted')) {
       assert.equal(readFileSync(join(dir, 'merge-attempted'), 'utf8').trim(), 'attempted');
       assert.match(result.stdout, /OWN=1 EXIT=0/);

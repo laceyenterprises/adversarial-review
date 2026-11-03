@@ -1,3 +1,4 @@
+import { classifyHammerExit, hammerNoMergeDetails } from './hammer-outcome.mjs';
 import { ownershipReadBudgets as closerScanBudgets, boundedOwnershipRead as boundedCloserScanRead } from '../ownership-read.mjs';
 import { HAMMER_RETRYABLE_READ_OUTCOMES } from './hammer-phase-outcome.mjs';
 import { repositoryObservationCache } from '../repository-state-cache.mjs';
@@ -5463,7 +5464,7 @@ async function maybeDispatchAmaCloserAttempt({
     });
     if (infrastructureReadPark) logAmaCloserDispatchEvent(logger, 'ama_closer.hammer_ended_without_merge', {
       repo, prNumber, headSha: queuedHead, launchRequestId: existingRecord.launchRequestId,
-      outcome: 'no-merge', retryable: true, phaseOutcome: parkReason,
+      outcome: 'no-merge', retryable: true, phaseOutcome: classifyHammerExit(parkReason), lastPhase: parkReason,
     });
   }
   if (certifiedPark && !parkLedger) {
@@ -6205,6 +6206,8 @@ async function maybeDispatchAmaCloserAttempt({
             dispatchId: existingRecord.dispatchId || null,
             observedWorkerStatus: reportedNoWork ? 'failed' : 'succeeded',
             classification: exitedWithoutClose ? HAMMER_EXITED_WITHOUT_CLOSE : 'hammer-ended-without-merge',
+            ...hammerNoMergeDetails({ hqRoot, launchRequestId: existingRecord.launchRequestId,
+              runId: existingRecord.workerRunId, raw: hammerOutcome.reason || noMergeOutcome }),
             ...(retryRefund ? { retryRefund } : {}),
           }, { level: 'warn' });
         }

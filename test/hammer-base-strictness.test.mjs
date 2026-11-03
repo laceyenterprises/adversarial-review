@@ -75,6 +75,7 @@ POST_REMEDIATION_SHA=${'a'.repeat(40)}
 ham_capture_current_base_sha() { HAM_CAPTURED_BASE_SHA=${'b'.repeat(40)}; }
 ham_is_full_sha() { return 0; }
 git() { [ "$1" = merge-base ] || return 90; echo ${'c'.repeat(40)}; }
+${source.match(/^  current_mergeable=\$\(jq[^\n]+\n  current_state=\$\(jq[^\n]+/m)?.[0].replaceAll('<<RUN_DIR>>', dir)}
 ${producedHeadPolicyCall.replaceAll('<<RUN_DIR>>', dir)}
 `], { encoding: 'utf8', timeout: 5000 });
     assert.equal(result.status, expected, result.stdout + result.stderr);

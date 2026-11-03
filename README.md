@@ -4463,6 +4463,8 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- PR #1693 HAM remediation: cache the produced-head snapshot fields once in the retention guard and remove the unreachable conflict alternative from the downstream green-CI branch. Offline regression tests retain conflict-first repair and base-policy behavior.
+
 - LAC-2148 final comment remediation: pass snapshot mergeability and merge state into the verify-head base-policy helper so its conflict guards remain authoritative at the produced-head retention call. Focused offline tests cover the snapshot arguments.
 
 - 2026-11-02 — LAC-2148 / CONFLICTBEFORECI-01: route positively conflicting published heads through bounded conflict repair before absent-CI waits; retain unknown observation, LAC-2097 head retention and existing custody/merge gates. See [RCA](docs/postmortems/LAC-2148-conflict-before-ci.md).

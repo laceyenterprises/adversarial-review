@@ -893,11 +893,12 @@ while jq -e '.mergeStateStatus == "BEHIND" or .mergeable == "CONFLICTING" or
   # Retain the produced head when the base policy permits it, including the
   # first pass. This also handles a strict already-up-to-date head with
   # a lagging BEHIND snapshot; the final live gate must still settle green.
-  if [ "$(jq -r '.mergeStateStatus // ""' "<<RUN_DIR>>/pr-after.json")" != "DIRTY" ] \
-     && [ "$(jq -r '.mergeable // ""' "<<RUN_DIR>>/pr-after.json")" = "MERGEABLE" ] \
+  current_mergeable=$(jq -r '.mergeable // ""' "<<RUN_DIR>>/pr-after.json")
+  current_state=$(jq -r '.mergeStateStatus // ""' "<<RUN_DIR>>/pr-after.json")
+  if [ "$current_state" != "DIRTY" ] \
+     && [ "$current_mergeable" = "MERGEABLE" ] \
      && ! ham_base_touches_pr_files validated-head \
-       "$(jq -r '.mergeable // ""' "<<RUN_DIR>>/pr-after.json")" \
-       "$(jq -r '.mergeStateStatus // ""' "<<RUN_DIR>>/pr-after.json")"; then
+       "$current_mergeable" "$current_state"; then
     echo "HAM: produced head covers the base policy; avoiding a redundant rebase." >&2
     break
   fi

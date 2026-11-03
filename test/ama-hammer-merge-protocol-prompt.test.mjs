@@ -934,3 +934,16 @@ test('hammer documentation currency accepts ticket fragments without shared appe
     assert.match(prompt, /observed results/);
   }
 });
+
+
+test('HAMMERNOCI-01: rendered hammer policy declines CI work and records follow-up-only findings', () => {
+  for (const strictNonBlockingRemediation of [true, false]) {
+    const prompt = composeCloserPrompt({ templateBody: HAMMER_TEMPLATE,
+      repo: 'fixture/repo', prNumber: 42, reviewedSha: 'a'.repeat(40),
+      strictNonBlockingRemediation });
+    assert.match(prompt, /scope rules take precedence over all-findings and CI-repair mandates/i);
+    assert.match(prompt, /Never edit `\.github\/workflows\/` or add CI checks, CI suites, ci-mirror manifest entries, required checks, gates, ratchets, guards or override labels/);
+    assert.match(prompt, /reply "declined: CI changes are operator-only"; change nothing for that finding/);
+    assert.match(prompt, /For "track under a dedicated ticket" or "follow-up" findings, name the follow-up in the reply; do not implement it in this PR/);
+  }
+});

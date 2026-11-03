@@ -4478,6 +4478,8 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 - CLOSERCRASHRECLAIM-01: drain readiness controller groups after bootstrap failure; allocate a fresh worker identity after terminal lease reclamation; key hammer wakes by lease generation and next attempt. Live-owner and dirty-tree fences remain enforced. See [closure recovery](docs/RUNBOOK-ama-closure.md).
 
+- HAMMERNOCI-01: hammer and remediator instructions decline CI changes as operator-only and identify follow-up-only findings in replies without implementing them. Existing prompt tests cover both rules in rendered instructions.
+
 - PR #1696 rescue: keep publication-recovery and delivery-index dependencies inside the existing offline watcher fixture boundaries in the fast-merge and reviewer-timeout handoff suites. Both suites continue to exercise the real watcher and CI admission paths; disposable-Git publication proof and durable delivery behavior remain covered by their dedicated integration tests.
 
 - PR #1696 final comment remediation: validate supplied publication-proof head SHAs, reuse CI admission's known head while retaining the final live-head check, and classify concurrent in-place round exhaustion from the current job. Focused offline fixtures cover malformed heads, head movement and concurrent exhaustion. Repair watcher/API fixture isolation and completion diagnostic expectations, and retain indexed reply-comment delivery debt on recovered final completion; lifecycle states, round budgets and smoke promises are unchanged.

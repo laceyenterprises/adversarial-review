@@ -174,3 +174,18 @@ test('REMLABEL-01: closer classification uses the current review body after an o
   const unknown = resolveSettledReviewVerdict(rootDir, { ...args, liveHeadReview: { resolved: false } });
   assert.equal(unknown.operatorLabelFindings, null);
 });
+
+
+test('HAMMERNOCI-01: every remediator stage declines CI work and records follow-up-only findings', () => {
+  for (const options of [{ currentRound: 0 }, { currentRound: 1 }, { currentRound: 2 }, { currentRound: 2, finalRound: 'comment-only' }]) {
+    const prompt = buildRemediationPrompt({ jobId: 'sample-job', repo: 'sample/repo', prNumber: 1,
+      baseBranch: 'main', branch: 'topic', revisionRef: head, reviewBody: clean,
+      finalRound: options.finalRound,
+      remediationPlan: { currentRound: options.currentRound, maxRounds: 3 } },
+    { remediationReplyPath: '/fixture/reply.json' });
+    assert.match(prompt, /scope rules take precedence over all-findings and CI-repair mandates/i);
+    assert.match(prompt, /Never edit `\.github\/workflows\/` or add CI checks, CI suites, ci-mirror manifest entries, required checks, gates, ratchets, guards or override labels/);
+    assert.match(prompt, /remediation reply as "declined: CI changes are operator-only"; change nothing for that finding/);
+    assert.match(prompt, /recommends "track under a dedicated ticket" or "follow-up", name it as a follow-up in the remediation reply; do not implement it in this PR/);
+  }
+});

@@ -12,7 +12,7 @@ import {
   awaitThrottleIfNeeded, extractRateLimitObservation, recordResponseRateLimit,
   resolveRateLimitSharedStatePath, resolveThrottleFloor, markGitHubRateLimited,
   recordRateLimitedCall, currentGitHubBudgetScope, GitHubBudgetDeferredError,
-  githubCredential, githubBudgetKey, scopedGitHubRateLimit,
+  githubCredential, githubBudgetKey, scopedGitHubRateLimit, githubBudgetBelowFloor, githubBudgetFloor,
 } from './rate-limit-throttle.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -215,10 +215,14 @@ function executeGhSync(execFileImpl, command, args, activeOptions, session) {
   for (const res of ghResources(args)) {
     const bucket = buckets[githubBudgetKey(res, credential)];
     const limited = scopedGitHubRateLimit(res, credential);
-    if (limited) throw new GitHubBudgetDeferredError(limited);
-    if (bucket?.remaining < resolveThrottleFloor(env) && Date.parse(bucket.resetAt) > Date.now()) {
+    if (limited) throw new GitHubBudgetDeferredError(limited, { credential });
+    // The floor is capped by the bucket's observed limit (WATCHERANONBUCKET-01).
+    if (githubBudgetBelowFloor(bucket, resolveThrottleFloor(env)) && Date.parse(bucket.resetAt) > Date.now()) {
       if (scope?.urgent && bucket.remaining > 0) continue;
-      if (scope) { scope.deferred = true; throw new GitHubBudgetDeferredError(bucket); }
+      if (scope) {
+        scope.deferred = true;
+        throw new GitHubBudgetDeferredError(bucket, { credential, floor: githubBudgetFloor(bucket, resolveThrottleFloor(env)) });
+      }
       bridgeCall('wait', [{ resource: res, credential }], env);
       waited = true;
     }

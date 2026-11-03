@@ -31,12 +31,17 @@ that request. Ambient `gh` login without an environment token also resolves to
 request.
 
 Each bucket contains normalized `resource`, non-negative `remaining`, ISO
-`resetAt` and `observedAt`, optional positive `rateLimitedCalls`, optional
+`resetAt` and `observedAt`, optional positive `limit` (the bucket's
+`x-ratelimit-limit`), optional positive `rateLimitedCalls`, optional
 `credential` (omitted for `default`) and optional `credentialSelector` (the
-adapter's broker role). The counter belongs to that credential/resource reset
+adapter's broker role). When two observations share a reset window, the merged
+bucket keeps the newer known `limit`. The counter belongs to that credential/resource reset
 window; a new window starts a new counter. Expired observations are discarded on
 reads. Version 1 resource-keyed and legacy single-observation documents remain
 readable as anonymous observations; they do not throttle authenticated budgets.
+When a healthy bucket transitions to zero remaining, a failure without a quota
+limit retains the active observation's known `limit`, including when the failure
+uses a different or guessed reset. A limit supplied by the failure takes precedence.
 
 Writes hold the adjacent `.lock` directory, sync a temporary file and rename it
 over the store. Concurrent responses for the same window retain the lowest
@@ -66,6 +71,21 @@ returned to the caller's scope so local admission and persisted readers agree.
 `core` and `graphql` fields select the active credential from the supplied runtime
 environment; missing or expired evidence is displayed as unknown rather than
 falling back to another credential's budget.
+
+A throttle floor never exceeds what the bucket can hold
+(WATCHERANONBUCKET-01). `githubBudgetFloor` uses the configured
+`GHO_RATE_LIMIT_THROTTLE_FLOOR` (default 200), capped at 10% of the bucket's
+recorded `limit` and never below 1. The anonymous quota is 60 per hour, so its
+effective floor is 6. Without the cap, every anonymous admission sat below 200
+until reset and again after the next observation. A bucket without a recorded
+`limit` keeps the configured floor. An unknown bucket (no observation) admits.
+Async preflights, the synchronous `meteredExecFileSync` read and the watcher's
+low-budget closing shortcut all apply the same effective floor. A
+`GitHubBudgetDeferredError` carries `credential` and names the bucket key in its
+message (`credential=default`, `token-<digest>` or `adapter:<selector>`), with
+`remaining`, the limit when known, and the effective floor. The un-scoped
+throttle status file (`<store>.throttled.json`) records the same `credential`.
+Tokens never appear; only their digest key does.
 
 GitHub budget deferral applies to GitHub I/O. Local operator-alert enqueueing
 and non-GitHub alert delivery continue during deferred or rate-limited ticks.

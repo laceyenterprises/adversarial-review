@@ -329,7 +329,7 @@ function renderRuntimeStatus(model) {
   lines.push(renderSettleSmokeLine(model.settleSmoke));
   lines.push(renderReviewerCutoverLine(model.reviewerCutover));
   for (const [resource, budget] of Object.entries(model.githubBudget || {})) {
-    lines.push(`GitHub ${resource}: remaining=${budget.remaining ?? 'unknown'} reset=${budget.resetAt || 'unknown'} rate-limited=${budget.rateLimitedCalls}`);
+    lines.push(`GitHub ${resource}: remaining=${budget.remaining ?? 'unknown'}${budget.limit ? `/${budget.limit}` : ''} reset=${budget.resetAt || 'unknown'} rate-limited=${budget.rateLimitedCalls}`);
   }
   return lines.join('\n');
 }

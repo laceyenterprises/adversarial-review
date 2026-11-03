@@ -1,4 +1,4 @@
-import { readGitHubBudgetStatus } from './rate-limit-throttle.mjs';
+import { readGitHubBudgetStatus, readGitHubBudgetStoreStatus } from './rate-limit-throttle.mjs';
 // `runtime status` model + renderer (ARC-09, SPEC §1 Win 1). Builds the hybrid
 // runtime status surface from DURABLE artifacts so the CLI works as a separate
 // process from the watcher daemon that owns the live router:
@@ -208,6 +208,7 @@ function buildRuntimeStatus(rootDir, {
   return {
     generatedAt: now().toISOString(),
     githubBudget: readGitHubBudgetStatus({ rootDir, env, nowMs: now().getTime() }),
+    githubBudgetStore: readGitHubBudgetStoreStatus({ rootDir, env, nowMs: now().getTime() }),
     mode,
     since,
     snapshotPresent: Boolean(snapStatus),
@@ -317,6 +318,18 @@ function renderReviewerCutoverLine(cutover) {
   return `reviewer cutover: ${state} ${cutover.selectedRuntime} (${cutover.domainId}; ${reason})`;
 }
 
+// GHSTATEOWNER-01: shown only when this runtime uses an owner-scoped store or
+// a store could not be read, so unknown evidence is never mistaken for none.
+function renderGitHubBudgetStoreLine(store) {
+  if (!store) return null;
+  const healthy = status => !status || status.status === 'ok' || status.status === 'missing';
+  if (store.scope === 'shared' && healthy(store.store)) return null;
+  const describe = status => `${status.status}${status.code ? `(${status.code})` : ''}`;
+  return `GitHub budget store: scope=${store.scope} store=${describe(store.store)}`
+    + `${store.shared ? ` shared=${describe(store.shared)}` : ''}`
+    + `${Number.isInteger(store.sharedOwnerUid) && store.sharedOwnerUid !== store.uid ? ` shared-owner-uid=${store.sharedOwnerUid}` : ''}`;
+}
+
 // Render the model to the SPEC §1 Win 1 text block.
 function renderRuntimeStatus(model) {
   const lines = [];
@@ -331,6 +344,8 @@ function renderRuntimeStatus(model) {
   for (const [resource, budget] of Object.entries(model.githubBudget || {})) {
     lines.push(`GitHub ${resource}: remaining=${budget.remaining ?? 'unknown'}${budget.limit ? `/${budget.limit}` : ''} reset=${budget.resetAt || 'unknown'} rate-limited=${budget.rateLimitedCalls}`);
   }
+  const storeLine = renderGitHubBudgetStoreLine(model.githubBudgetStore);
+  if (storeLine) lines.push(storeLine);
   return lines.join('\n');
 }
 

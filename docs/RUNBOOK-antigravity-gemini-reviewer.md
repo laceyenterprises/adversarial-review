@@ -515,6 +515,12 @@ cat data/api-cache/rate-limit-state.json.throttled.json
 grep '"rate_limit_throttle_seconds"' data/api-call-log/$(date -u +%F).jsonl | tail
 ```
 
+Run the `cat` as the daemon's owner. A process whose uid does not own the
+shared store writes `data/api-cache/rate-limit-state.uid-<uid>.json.throttled.json`
+instead (GHSTATEOWNER-01). `runtime-status` prints a `GitHub budget store:` line
+naming the scope and any unreadable store. See
+[`docs/data-model/github-rate-limit-state.md`](data-model/github-rate-limit-state.md#store-ownership-ghstateowner-01).
+
 A `write-started` record that never reaches `delivered` means a write may
 have landed. Check the PR's reviews for the reviewer bot at that head before
 any manual step.

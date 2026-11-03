@@ -1,0 +1,59 @@
+Supplementary 14-case controlled run: 11 passed, 3 failed. Node 26.10.0/Darwin.
+✖ failing tests:
+
+test at file-0/test/ama-closer-dispatch-priority.test.mjs:2068:3
+✖ CLOSERLEASE-01: reconcile pending-live lease before red-CI remediation refusal (6305.613459ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'dispatch-status-unknown'
+  - 'closer-lease-held-by-other-process'
+  
+      at TestContext.<anonymous> (file:///<isolated-sandbox>/file-0/test/ama-closer-dispatch-priority.test.mjs:2115:29)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'dispatch-status-unknown',
+    expected: 'closer-lease-held-by-other-process',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at file-1/test/noowner-01.test.mjs:1392:1
+✖ REVIEWALERT-01 ownerless recovery honours a live pending lease and earlier terminal receipt (1327.34ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + undefined
+  - true
+  
+      at TestContext.<anonymous> (file:///<isolated-sandbox>/file-1/test/noowner-01.test.mjs:1404:10)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    expected: true,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at file-1/test/noowner-01.test.mjs:1411:1
+✖ REVIEWALERT-01 a competing launch wins the late lease CAS without losing its receipt (199.432916ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + undefined
+  - 'lease-held'
+  
+      at TestContext.<anonymous> (file:///<isolated-sandbox>/file-1/test/noowner-01.test.mjs:1426:10)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    expected: 'lease-held',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

@@ -1,0 +1,106 @@
+{
+  "node": "v26.10.0",
+  "platform": "darwin",
+  "records": [
+    {
+      "mode": "absent",
+      "trial": 1,
+      "exit": 0,
+      "signal": null,
+      "error": null,
+      "tests": 3,
+      "pass": 3,
+      "fail": 0
+    },
+    {
+      "mode": "absent",
+      "trial": 2,
+      "exit": 0,
+      "signal": null,
+      "error": null,
+      "tests": 3,
+      "pass": 3,
+      "fail": 0
+    },
+    {
+      "mode": "absent",
+      "trial": 3,
+      "exit": 0,
+      "signal": null,
+      "error": null,
+      "tests": 3,
+      "pass": 3,
+      "fail": 0
+    },
+    {
+      "mode": "absent",
+      "trial": 4,
+      "exit": 0,
+      "signal": null,
+      "error": null,
+      "tests": 3,
+      "pass": 3,
+      "fail": 0
+    },
+    {
+      "mode": "absent",
+      "trial": 5,
+      "exit": 0,
+      "signal": null,
+      "error": null,
+      "tests": 3,
+      "pass": 3,
+      "fail": 0
+    },
+    {
+      "mode": "present",
+      "trial": 1,
+      "exit": 0,
+      "signal": null,
+      "error": null,
+      "tests": 3,
+      "pass": 3,
+      "fail": 0
+    },
+    {
+      "mode": "present",
+      "trial": 2,
+      "exit": 0,
+      "signal": null,
+      "error": null,
+      "tests": 3,
+      "pass": 3,
+      "fail": 0
+    },
+    {
+      "mode": "present",
+      "trial": 3,
+      "exit": 0,
+      "signal": null,
+      "error": null,
+      "tests": 3,
+      "pass": 3,
+      "fail": 0
+    },
+    {
+      "mode": "present",
+      "trial": 4,
+      "exit": 0,
+      "signal": null,
+      "error": null,
+      "tests": 3,
+      "pass": 3,
+      "fail": 0
+    },
+    {
+      "mode": "present",
+      "trial": 5,
+      "exit": 0,
+      "signal": null,
+      "error": null,
+      "tests": 3,
+      "pass": 3,
+      "fail": 0
+    }
+  ]
+}

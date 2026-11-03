@@ -1,0 +1,13 @@
+{
+  "node": "v22.22.3",
+  "platform": "darwin",
+  "command": "node test/run-tests.mjs ama-closer-dispatch-priority.test.mjs noowner-01.test.mjs ama-closer-lease.test.mjs leaseciproof-01.test.mjs",
+  "exit": 0,
+  "counts": {
+    "tests": 481,
+    "pass": 481,
+    "fail": 0,
+    "cancelled": 0,
+    "skipped": 0
+  }
+}

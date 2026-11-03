@@ -1557,7 +1557,11 @@ the merged fix PR and out-of-scope drops cite a ticket. Empty outcomes fail.
 
 Decision-only preparation pushes tested fixes; one PR-shaped follow-up publishes
 on that same branch. Nullable repository metadata and absent push milestones are
-handled using keyed launch evidence and the actual remote branch/head. Explicit
+handled using keyed launch evidence and the actual remote branch/head. Native
+absolute workspace repository projections are display metadata; repository
+authority comes from the exact public keyed launch identity and independent
+remote tested-head or marked-PR evidence. No workspace field is required. Historical invalid outcomes require
+owner adjudication under the [bounded recovery procedure](docs/follow-up-runbook.md#findings-batch-publication-custody-findingsbatchcustody-01). Explicit
 failed pushes or failed preparation still refuse publication. Durable batch IDs,
 launch receipts, a per-batch lock and submission intent fence duplicate workers
 and publishers. Existing failed batches stay visible for same-launch repair.
@@ -4460,6 +4464,13 @@ Deploy this reader before activating these keys in core's checked-in config.
 ## Change notes
 
 - ARCH-03: ARR-only PRs select the architecture rubric across reviewer stages and runtimes; mixed PRs retain the code rubric. Verdicts, attestation, remediation and merge behavior are unchanged. See [change details](src/changes/ARCH-03.md).
+
+- LAC-2145 / LEASECIPROOF-01: pair synthetic pending-owner PIDs with raw process-start fixtures and qualify all three intermittent assertions with counted trials. See the [SEV/RCA evidence and limitations](docs/postmortems/LAC-2145-pending-owner-proof-qualification.md). Production ownership fences are unchanged.
+
+- FINDINGSBATCHCUSTODY-01 (LAC-2143): accept native workspace display paths
+  without deriving repository authority from them; replay the actual public
+  launch projection and retain keyed identity and publication fences. Historical
+  invalid outcomes remain under separate owner adjudication.
 
 - REVIEWSTALL-01 HAM validation repair: align the Codex invocation regression
   with ceiling-capped stall deadlines and reviewer metadata, and refresh the

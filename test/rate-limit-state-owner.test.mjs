@@ -62,6 +62,40 @@ async function freshAdmission(throttle) {
   }
 }
 
+for (const overrideStoreStat of [false, true]) {
+  test(`store ownership uses ${overrideStoreStat ? 'an explicit storeStatImpl override' : 'the injected statImpl by default'}`, async t => {
+    const { statePath, stateDir, fs } = makeFixture(t);
+    const { storeStatImpl, ...seams } = fs.forUid(PEER_UID);
+    const inspected = [];
+    const inspectStore = async target => {
+      inspected.push(target);
+      return storeStatImpl(target);
+    };
+    const peer = createRateLimitThrottle({
+      env: { GHO_RATE_LIMIT_SHARED_STATE_PATH: statePath },
+      nowMs: () => NOW, logger: quiet, recordApiCallImpl: () => {},
+      ...seams,
+      statImpl: overrideStoreStat
+        ? async () => assert.fail('an uncontended lock should not require stat')
+        : inspectStore,
+      ...(overrideStoreStat ? { storeStatImpl: inspectStore } : {}),
+    });
+
+    const before = await peer.readBudgetStoreEvidence();
+    assert.equal(before.scope, 'owner');
+    assert.equal(before.sharedOwnerUid, OWNER_UID);
+    assert.ok(inspected.includes(stateDir), 'an absent shared store must use injected directory ownership');
+
+    await peer.recordResponseRateLimit(healthy());
+    const peerStore = throttleModule.ownerScopedStatePath(statePath, PEER_UID);
+    assert.equal(existsSync(statePath), false, 'a peer must not write the shared store');
+    assert.equal(fs.ownerOf(peerStore), PEER_UID);
+    const after = await peer.readBudgetStoreEvidence();
+    assert.equal(after.store.path, peerStore);
+    assert.equal(after.buckets[KEY]?.remaining, 4500);
+  });
+}
+
 test('a peer owner that cannot read the shared store never replaces it or loses its own observations', async t => {
   const { statePath, fs, throttleFor } = makeFixture(t);
   await throttleFor(OWNER_UID).recordResponseRateLimit(hold());

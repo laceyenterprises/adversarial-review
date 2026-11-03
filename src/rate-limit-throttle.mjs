@@ -531,7 +531,7 @@ function createRateLimitThrottle({
   rmImpl = rm,
   statImpl = stat,
   getuidImpl = defaultGetuid,
-  storeStatImpl = stat,
+  storeStatImpl = statImpl,
 } = {}) {
   let inMemoryObservations = {};
   const activeThrottlePromises = new Map();

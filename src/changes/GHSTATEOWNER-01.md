@@ -22,6 +22,10 @@ the merge rules, atomic rename and the lock protocol are unchanged.
 field report the scope and classification. `meteredExecFileSync` uses the same
 resolution through `readGitHubBudgetBucketsSync`.
 
+`createRateLimitThrottle` defaults `storeStatImpl` to its injected `statImpl`,
+so one stat adapter covers lock inspection and store ownership discovery.
+Callers can still override `storeStatImpl` independently.
+
 `test/rate-limit-state-owner.test.mjs` reproduces the defect with a hermetic
 two-owner permission adapter (`test/helpers/two-owner-fs.mjs`) and a real
 `EACCES` from a `chmod 000` temporary store. See

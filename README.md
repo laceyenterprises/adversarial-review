@@ -4471,6 +4471,8 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 - 2026-11-02 — LAC-2148 / CONFLICTBEFORECI-01: route positively conflicting published heads through bounded conflict repair before absent-CI waits; retain unknown observation, LAC-2097 head retention and existing custody/merge gates. See [RCA](docs/postmortems/LAC-2148-conflict-before-ci.md).
 
+- ARCH-01 final remediation: defer the architecture review schema mirror until this reader consumes its settings, per CFGREADERSCOPE-01. Offline tests verify that checked-in configuration and local overlays ignore this sibling-owned namespace, including future keys and thresholds validated by Python.
+
 - LAC-2146 final remediation: the qualification in [PR #1691](https://github.com/laceyenterprises/adversarial-review/pull/1691) covers unresolved unpooled fallback attribution in `skipped[]`, including an absent resolver and exhausted or successful subsequent routes.
 
 - GEMREMEDIATORCLASS-01 / LAC-2146: [PR #1691](https://github.com/laceyenterprises/adversarial-review/pull/1691) implements concrete HQ `remediator-gemini` routing while preserving the logical remediation route, registered model policy, entitlements and dedicated builder isolation. The paired [Agent OS #10117](https://github.com/laceyenterprises/agent-os/pull/10117) release and live adoption remain separately gated by [LAC-2146](https://linear.app/laceyenterprises/issue/LAC-2146).

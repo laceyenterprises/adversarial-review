@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { proveFinalRoundWorkerPush } from '../src/comment-only-final-round.mjs';
@@ -11,6 +11,7 @@ import { buildFollowUpJob, buildRemediationReply, writeFollowUpJob, readFollowUp
 import { guardRereviewCiBeforeReviewer } from '../src/reviewer-ci-admission.mjs';
 import { findLatestFollowUpJob } from '../src/operator-retrigger-helpers.mjs';
 import { proveStoppedPublication } from '../src/remediation-publication-recovery.mjs';
+import { deliveryRetryIndexPointerPath } from '../src/adapters/comms/github-pr-comments/comment-delivery.mjs';
 
 const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
   GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
@@ -129,8 +130,14 @@ test('a valid completed final round reconciles directly to hammer ownership even
   assert.equal(first.job.remediationPlan.rounds[0].state, 'completed');
   assert.equal(first.job.remediationPlan.currentRound, 1);
   assert.equal(first.job.remediationPlan.maxRounds, 1);
+  assert.equal(first.job.commentDelivery.posted, false);
+  assert.equal(first.job.commentDelivery.deliveryKind, 'remediation-reply');
+  assert.match(first.job.commentDelivery.body, /Repair published/);
+  assert.equal(JSON.parse(readFileSync(deliveryRetryIndexPointerPath(f.root, first.jobPath), 'utf8')).jobPath, first.jobPath);
+  rmSync(deliveryRetryIndexPointerPath(f.root, first.jobPath));
   const second = await admission(f, { requeueImpl: () => assert.fail('completed final round must retain owner') });
   assert.equal(second.reason, 'ci-regression-hammer-owned');
+  assert.equal(JSON.parse(readFileSync(deliveryRetryIndexPointerPath(f.root, second.jobPath), 'utf8')).jobPath, second.jobPath);
 });
 
 test('changed job evidence invalidates publication recovery under the queue lock', async t => {
@@ -140,6 +147,24 @@ test('changed job evidence invalidates publication recovery under the queue lock
   writeFollowUpJob(stopped.jobPath, job);
   assert.throws(() => requeueFollowUpJobForNextRound({ rootDir: f.root, jobPath: stopped.jobPath,
     revisionRef: f.live, publicationRecovery: proof }), /stopped:committed-unpublished/);
+});
+
+test('admission reuses the known live head and keeps the final GitHub head fence', async t => {
+  const f = fixture(t); const stopped = stop(f);
+  for (const moved of [false, true]) {
+    let lookups = 0;
+    const proof = await proveStoppedPublication({ ...stopped, headSha: f.live, ciGate: f.ciGate, log,
+      execFileImpl: async (command, args, options) => {
+        if (command === 'gh') {
+          lookups += 1;
+          return { stdout: moved ? `${f.local}\n` : `${f.live}\n` };
+        }
+        return f.execFileImpl(command, args, options);
+      } });
+    assert.equal(lookups, 1, 'only the final live-head recheck needs GitHub');
+    if (moved) assert.equal(proof, null, 'a changed live head invalidates the supplied snapshot');
+    else assert.equal(proof.headSha, f.live);
+  }
 });
 
 test('unpublished work cannot requeue and a proven incomplete round cannot exceed its cap', async t => {
@@ -196,4 +221,26 @@ for (const final of [false, true]) test(`two admissions sharing a stopped snapsh
   assert.equal(job.remediationPlan.currentRound, 1);
   assert.equal(job.remediationPlan.maxRounds, 2);
   if (!final) assert.equal(job.remediationPlan.nextAction.round, 2);
+});
+
+test('concurrent admissions report in-place budget exhaustion using the reclassified job', async t => {
+  const f = fixture(t); const stopped = stop(f, { cap: 1 });
+  const snapshot = { ...stopped, job: readFollowUpJob(stopped.jobPath) };
+  const warnings = [];
+  let reads = 0;
+  const latestJobFinder = (...args) => ++reads <= 2 ? snapshot : findLatestFollowUpJob(...args);
+  const results = await Promise.all([admission(f, { latestJobFinder, log: { warn: line => warnings.push(line) } }),
+    admission(f, { latestJobFinder, log: { warn: line => warnings.push(line) } })]);
+  for (const result of results) {
+    assert.equal(result.reason, 'ci-regression-stopped');
+    assert.equal(result.needsOperator, true);
+    assert.equal(result.jobPath, stopped.jobPath);
+    assert.equal(result.job.remediationPlan.stop.code, 'max-rounds-reached');
+    assert.equal(result.job.remediationPlan.currentRound, 1);
+    assert.equal(result.job.remediationPlan.maxRounds, 1);
+    assert.equal(result.job.publicationRecovery.headSha, f.live);
+    assert.match(result.closureBlocker, /round-budget-exhausted \(1\/1\)/);
+  }
+  assert.doesNotMatch(warnings.join('\n'), /no longer exists|requeue failed/);
+  assert.equal(readFollowUpJob(stopped.jobPath).remediationPlan.currentRound, 1);
 });

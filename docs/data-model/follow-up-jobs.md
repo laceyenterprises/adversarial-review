@@ -233,6 +233,10 @@ retains its proof in `completion` with `completion.publicationRecovery` recordin
 the recovery timestamp and previous stop. Both clear `unpublishedWork` only after
 proof. Repeated admission observes the active/completed successor rather than
 requeueing it again.
+Recovered final completion also rebuilds the existing `commentDelivery` debt
+from the validated reply and indexes its completed job for ordinary delivery
+retry. Repeated admission restores that index while the recovered comment is
+unposted. This uses the existing delivery shape and does not spend a round.
 
 The gate remains failed with `remediation-committed-unpublished` when proof is
 missing. Workspace retention skips this debt, including past terminal TTL.

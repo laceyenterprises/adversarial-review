@@ -1807,7 +1807,7 @@
     "src/review-state-db.mjs": "97959038d5e497b70eee07af65d2589f1c706f2ffb16648064317c7d5bf3d743",
     "src/review-state-statements.mjs": "b7cce8ac8bba20cc6c4673471e681aae46931d7338f63f751c7aeb419af1edf8",
     "src/review-state.mjs": "14a346d9eb6af8101d68c164f0e2e4e07ea23aa6a0dafa3dbabd14feda933c1b",
-    "src/reviewer-ci-admission.mjs": "7741057693663e177aa78d49aa2526b09e20aeb339a9a22d339926589db47be8",
+    "src/reviewer-ci-admission.mjs": "b24995f796ae6af2e665d93a30c954b1c78fc59ce62e88074cfb69b965837bdf",
     "src/reviewer-reattach.mjs": "c52dcf0ea186716725d5916c0be5de3619cd44e011c5c06bf4999877369ebd39",
     "src/reviewer.mjs": "10b8e5b50611cebbcffabc5e5709ffcbf33ed856f469c2a946ed14d72c775e88",
     "src/watcher.mjs": "c47d27893200f979089c74357f797f23bcdb81bb1391f9bc1ebe612acdb6abe0",

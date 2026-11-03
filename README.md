@@ -4468,6 +4468,8 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- PR #1696 final comment remediation: validate supplied publication-proof head SHAs, reuse CI admission's known head while retaining the final live-head check, and classify concurrent in-place round exhaustion from the current job. Focused offline fixtures cover malformed heads, head movement and concurrent exhaustion. Repair watcher/API fixture isolation and completion diagnostic expectations, and retain indexed reply-comment delivery debt on recovered final completion; lifecycle states, round budgets and smoke promises are unchanged.
+
 - REMPUBPROOF-01: prove rebased remediation publication from equivalent worker patches on the live head; recover proven publication stops once through validated final completion or the remaining CI-regression round budget. Retained unpublished debt names both heads. Synthetic Git fixtures cover rebase, missing/partial work, unrelated heads, stale evidence, final blockers and budget exhaustion.
 
 - PR #1693 HAM remediation: cache the produced-head snapshot fields once in the retention guard and remove the unreachable conflict alternative from the downstream green-CI branch. Offline regression tests retain conflict-first repair and base-policy behavior.

@@ -82,20 +82,21 @@ export function hasWorkerJobTrailer(message, jobId) {
  */
 export async function proveFinalRoundWorkerPush({
   repo, prNumber, jobId, reviewedHead, baseBranch, workspaceDir, execFileImpl,
-  withheldBecause = null, log = console, sleep,
+  liveHeadSha = null, withheldBecause = null, log = console, sleep,
 }) {
-  let remoteSha;
-  try {
-    const remote = await execGhWithRetry({
-      execFileImpl, args: ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'headRefOid', '--jq', '.headRefOid'],
-      log, ...(sleep ? { sleep } : {}),
-    });
-    remoteSha = String(remote.stdout || '').trim();
-  } catch (err) {
-    log.warn?.(`[follow-up-remediation] Worker-push proof failed for ${repo}#${prNumber}: ${err?.message || err}`);
-    throw err;
+  if (liveHeadSha === null) {
+    try {
+      const remote = await execGhWithRetry({
+        execFileImpl, args: ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'headRefOid', '--jq', '.headRefOid'],
+        log, ...(sleep ? { sleep } : {}),
+      });
+      const remoteSha = String(remote.stdout || '').trim();
+      liveHeadSha = SHA.test(remoteSha) ? remoteSha : null;
+    } catch (err) {
+      log.warn?.(`[follow-up-remediation] Worker-push proof failed for ${repo}#${prNumber}: ${err?.message || err}`);
+      throw err;
+    }
   }
-  const liveHeadSha = SHA.test(remoteSha) ? remoteSha : null;
   const withheld = (reason) => {
     log.warn?.(
       `[follow-up-remediation] Withholding final-round push proof for ${repo}#${prNumber}: ${reason} ` +
@@ -120,7 +121,7 @@ export async function proveFinalRoundWorkerPush({
   };
   try {
     const localSha = (await git(['rev-parse', 'HEAD'])).trim();
-    if (!SHA.test(localSha) || !liveHeadSha) return withheld(`live-head-mismatch local=${localSha || 'none'} live=${liveHeadSha || 'none'}`);
+    if (!SHA.test(localSha) || !SHA.test(liveHeadSha)) return withheld(`live-head-mismatch local=${localSha || 'none'} live=${liveHeadSha || 'none'}`);
     if (localSha === reviewedHead) return { workerPushedHeadSha: null, liveHeadSha, reason: 'no-push' };
     const workerOwns = async (sha) => hasWorkerJobTrailer(await git(['show', '-s', '--format=%B', sha]), jobId);
     if (!await workerOwns(localSha)) return withheld('head-not-worker-commit');

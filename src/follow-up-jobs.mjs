@@ -3462,6 +3462,7 @@ function requeueFollowUpJobForNextRoundLocked({
     && currentJob.finalRound === 'comment-only' && currentJob.reReview?.suppressed === 'comment-only-final-round') {
     return markFollowUpJobCompleted({ rootDir, jobPath, completedAt: requestedAt,
       resultingHeadSha: revisionRef,
+      commentDelivery: publicationRecovery.commentDelivery,
       completion: { ...currentJob.completion, ...publicationRecovery.completionFields,
         withheldPushHeadSha: null, publicationRecovery: { recoveredAt: requestedAt,
           previousStop: currentJob.remediationPlan.stop } },

@@ -6,6 +6,7 @@ import { resolveCommentOnlyFinalRoundCompletion } from './comment-only-final-rou
 import { readRemediationReplyArtifact } from './follow-up-jobs.mjs';
 import { auditWorkspaceForContamination } from './remediation-git-pr-io.mjs';
 import { parseHqWorkerWorkspaceFromPayload, resolveHqWorkerWorkspace } from './remediation-hq-dispatch.mjs';
+import { buildReconcileCommentDelivery } from './adapters/comms/github-pr-comments/comment-delivery.mjs';
 
 export async function proveStoppedPublication({ job, jobPath, headSha, ciGate, execFileImpl, log = console }) {
   if (job?.status !== 'stopped' || job.remediationPlan?.stop?.code !== 'committed-unpublished'
@@ -17,9 +18,10 @@ export async function proveStoppedPublication({ job, jobPath, headSha, ciGate, e
   if (!workspaceDir) return null;
   const push = await proveFinalRoundWorkerPush({ repo: job.repo, prNumber: job.prNumber,
     jobId: job.jobId, reviewedHead: job.revisionRef, baseBranch: job.baseBranch,
-    workspaceDir, execFileImpl, log });
+    workspaceDir, liveHeadSha: headSha, execFileImpl, log });
   if (push.workerPushedHeadSha !== headSha) return null;
   let completion = null;
+  let commentDelivery = null;
   if (job.finalRound === 'comment-only' && job.reReview?.suppressed === 'comment-only-final-round') {
     // Preserve the reply's actual findings and human-owned blockers. Publication
     // alone cannot turn a partial or invalid reply into a completed final round.
@@ -31,8 +33,12 @@ export async function proveStoppedPublication({ job, jobPath, headSha, ciGate, e
       execFileImpl, log, retryDelaysMs: [], auditWorkspaceForContaminationImpl: auditWorkspaceForContamination,
       inspectRemediationCiRegressionImpl: async () => ciGate,
       writeJobImpl: () => { throw new Error('publication-recovery-cannot-rewrite-source'); } });
+    if (completion?.completed === true && completion.workerPushedHeadSha === headSha) {
+      commentDelivery = buildReconcileCommentDelivery({ job, worker, action: 'completed', reply,
+        reReview: { ...job.reReview, requested: false } }).commentDelivery;
+    }
   }
   return { sourceDigest, headSha, proof: push.proof,
     completedFinalRound: completion?.completed === true && completion.workerPushedHeadSha === headSha,
-    completionFields: completion?.completionFields || {} };
+    completionFields: completion?.completionFields || {}, commentDelivery };
 }

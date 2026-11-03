@@ -167,6 +167,26 @@ test('worker proof retries a transient live lookup and remains re-entrant after 
   }), /TLS handshake timeout/);
 });
 
+test('worker proof rejects malformed live heads before inspecting Git objects or fetching', async () => {
+  for (const supplied of [false, true]) {
+    const calls = [];
+    const result = await proveFinalRoundWorkerPush({
+      repo: 'example/repo', prNumber: 42, jobId: JOB_ID, reviewedHead: oldHead,
+      baseBranch: 'main', workspaceDir: '/unused', log: { warn() {} },
+      ...(supplied ? { liveHeadSha: 'not-a-sha' } : {}),
+      execFileImpl: async (command, args) => {
+        calls.push(command);
+        if (command === 'gh') return { stdout: 'not-a-sha\n' };
+        assert.deepEqual(args.slice(-2), ['rev-parse', 'HEAD']);
+        return { stdout: newHead };
+      },
+    });
+    assert.equal(result.workerPushedHeadSha, null);
+    assert.match(result.reason, /^live-head-mismatch /);
+    assert.deepEqual(calls, supplied ? ['git'] : ['gh', 'git']);
+  }
+});
+
 test('worker proof retains every non-empty git error line in its reason and warning', async (t) => {
   const { dir, reviewed } = prFixture(t);
   const warnings = [];

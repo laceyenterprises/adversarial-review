@@ -488,6 +488,37 @@ The review command's `--print-timeout` is sized from
 derived print timeout still leaves enough time for AGY to finish a real review;
 if it is raised, the AGY print timeout rises with it.
 
+### Stalled delivery after `Review generated` (REVPOSTSTALL-01)
+
+This applies to every hosted reviewer family. A reply that passes the posting
+contract is preserved in
+[`data/reviewer-generated-reviews/`](data-model/reviewer-generated-reviews.md)
+before the pre-post side calls. The delivery phase is then bounded: by default
+10 minutes nominal, load-scaled, capped at 20 minutes, and kept inside the
+Gemini process deadline. `ADVERSARIAL_REVIEW_DELIVERY_DEADLINE_MS` overrides it.
+If the GitHub write has not started by then, the reviewer prints a
+`[reviewer-delivery-stall]` receipt naming the stuck phase and exits as
+`[reviewer-stalled]`. That releases the claim without charging review or
+recovery budgets. The next same-head claim posts the preserved review through
+the normal path without rerunning the model. Once the write has started, the
+post path's own controls own the outcome.
+
+Recovery is automatic. Do not hand-post a preserved review: that bypasses the
+reviewer identity, verdict-mode, grounding and capture path. Read-only
+evidence (run from the deployed checkout):
+
+```bash
+grep -h '\[reviewer-delivery-stall\]' data/reviewer-runs/<session>.stderr
+jq '{deliveryState, headSha, originSessionUuid, deferrals, redeliveries}' \
+  data/reviewer-generated-reviews/<repo-slug>-<pr>-<head>-*.json
+cat data/api-cache/rate-limit-state.json.throttled.json
+grep '"rate_limit_throttle_seconds"' data/api-call-log/$(date -u +%F).jsonl | tail
+```
+
+A `write-started` record that never reaches `delivered` means a write may
+have landed. Check the PR's reviews for the reviewer bot at that head before
+any manual step.
+
 ## Review Provenance Stamp
 
 A posted Antigravity review carries a labelled stamp under its header:

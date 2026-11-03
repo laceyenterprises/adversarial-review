@@ -97,6 +97,7 @@ function createGeminiReviewerProcessDeadline({ env = process.env, initialMs = nu
       return deadline;
     },
     get signal() { return deadline?.signal; },
+    get deadlineAt() { return deadline?.deadlineAt ?? null; },
     extendForPlan: (plan) => {
       if (plan && Number.isFinite(plan.timeoutMs)) {
         reportPlan(plan);

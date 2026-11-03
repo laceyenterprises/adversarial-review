@@ -96,6 +96,15 @@ test('table-less stores are unavailable; a real table retains exact column drift
       started_at TEXT, ended_at TEXT, status TEXT, metadata_json TEXT)`);
     db.exec('ALTER TABLE reviewer_passes DROP COLUMN metadata_json');
     assert.deepEqual(read('passes').missing_fields, ['metadata_json']);
+    db.exec(`CREATE TABLE reviewed_prs(repo TEXT, pr_number INTEGER, pr_state TEXT,
+      review_status TEXT, failure_message TEXT, reviewer_head_sha TEXT,
+      revision_ref TEXT, reviewed_at TEXT, posted_at TEXT);
+      ALTER TABLE reviewed_prs DROP COLUMN posted_at;
+      ALTER TABLE reviewer_passes ADD COLUMN body_md TEXT;
+      ALTER TABLE reviewer_passes ADD COLUMN verdict TEXT;
+      CREATE TABLE pr_merge_closeouts(repo TEXT, pr_number INTEGER,
+        closeout_body_md TEXT, closeout_posted_at TEXT)`);
+    assert.deepEqual(read('reviews').missing_fields, ['posted_at']);
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

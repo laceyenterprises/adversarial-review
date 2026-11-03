@@ -4463,6 +4463,8 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- PR #1692 final review: cover exact single-column drift for both the passes and reviews selectors, including the reviews enrichment tables. Table-less stores retain the unavailable-store contract.
+
 - SENTINELREVIEWROOT-01: table-less review evidence returns `review_store` unavailable, preserving column diagnostics for existing tables. Synthetic fixtures cover both selectors and single-column drift.
 
 - PR #1693 HAM remediation: cache the produced-head snapshot fields once in the retention guard and remove the unreachable conflict alternative from the downstream green-CI branch. Offline regression tests retain conflict-first repair and base-policy behavior.

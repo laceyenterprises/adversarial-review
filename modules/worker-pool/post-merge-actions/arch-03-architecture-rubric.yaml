@@ -1,0 +1,15 @@
+# Operator handoff only; no automated deployment, restart or live review.
+operator_steps:
+  - description: >-
+      Let the merged reviewer revision reach the managed Agent OS checkout
+      through the normal submodule float and review-service deployment.
+      Any privileged refresh or restart remains operator/SRE-owned.
+      After deployment, retain read-only evidence from natural reviews:
+      an ARR-only PR selects the architecture rubric and a mixed PR retains
+      the code rubric, with ordinary structured verdicts and HCP attestation.
+      Record the loaded revision and observations before acknowledging this
+      handoff. Publication and offline fixtures do not establish live adoption.
+    run_as: designated runtime operator
+    command: hq submodule float tools/adversarial-review
+actions: []
+contact_on_failure: operator

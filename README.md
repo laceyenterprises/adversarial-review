@@ -4463,6 +4463,12 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- LAC-2146 final remediation: the qualification in [PR #1691](https://github.com/laceyenterprises/adversarial-review/pull/1691) covers unresolved unpooled fallback attribution in `skipped[]`, including an absent resolver and exhausted or successful subsequent routes.
+
+- GEMREMEDIATORCLASS-01 / LAC-2146: [PR #1691](https://github.com/laceyenterprises/adversarial-review/pull/1691) implements concrete HQ `remediator-gemini` routing while preserving the logical remediation route, registered model policy, entitlements and dedicated builder isolation. The paired [Agent OS #10117](https://github.com/laceyenterprises/agent-os/pull/10117) release and live adoption remain separately gated by [LAC-2146](https://linear.app/laceyenterprises/issue/LAC-2146).
+
+- ARCH-03: [PR #1688](https://github.com/laceyenterprises/adversarial-review/pull/1688) implements ARR-only architecture-rubric selection across reviewer stages and runtimes; mixed PRs retain the code rubric. Source merge, normal deployment and natural ARR-only/mixed review acceptance remain distinct. Verdicts, attestation, remediation and merge behavior are unchanged.
+
 - Isolate controller test audit heads from inherited Hammer dispatch SHAs so startup-failure fixtures record audits under their own test identity.
 
 - CLOSERLAUNCHENV-01 final remediation: retryable controller startup failures

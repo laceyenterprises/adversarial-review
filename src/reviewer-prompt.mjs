@@ -16,6 +16,7 @@ import { buildObviousDocsGuidance, fetchLinkedSpecContents, formatAdvisoryFindin
 import { buildHardeningReviewContext } from './hardening-ledger-context.mjs';
 import { buildSlimReviewerExtraContext } from './review-mode-selection.mjs';
 import { formatGuardForbiddenPaths } from './guard-forbidden-paths.mjs';
+import { parseDiffEntries } from './reviewer-util.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -24,9 +25,8 @@ const ROOT = join(__dirname, '..');
 // The reviewer's prompt set is sourced from the domain config
 // (`domains/<id>.json` → `promptSet`), never a hardcoded literal. Resolution
 // fails loud with a classified `PromptSetResolutionError` — there is no silent
-// fallback to code-pr. The active domain id remains fixed to `code-pr` here
-// (the sole registered reviewer domain); threading the domain id itself is a
-// separate work item.
+// fallback to code-pr. ARR-only diffs select a different reviewer rubric within
+// this same domain; identity, routing, remediation and verdict contracts stay put.
 const REVIEWER_DOMAIN_ID = 'code-pr';
 const REVIEWER_PROMPT_SET = resolvePromptSet({
   rootDir: ROOT,
@@ -51,6 +51,17 @@ const ADVERSARIAL_PROMPT_FINAL_ROUND_ADDENDUM = readFileSync(
   'utf8',
 ).trim();
 
+// Inspect both sides so renaming code into an ARR cannot select the docs rubric.
+// Unreadable headers and empty diffs conservatively retain the code rubric.
+export function selectReviewerRubric(diff) {
+  const entries = parseDiffEntries(diff);
+  const isArrPath = (path) => typeof path === 'string'
+    && /^docs\/architecture\/reviews\/ARR-[A-Za-z0-9][A-Za-z0-9._-]*\.(?:md|json)$/.test(path);
+  return entries.length > 0 && entries.every(({ parsed, oldPath, newPath }) => (
+    parsed && isArrPath(oldPath) && isArrPath(newPath)
+  )) ? 'architecture-review' : 'code-pr';
+}
+
 // Compatibility for older watchers lives with prompt-stage selection.
 export function selectReviewerPromptStage({ verdictOnly = false, reviewAttemptNumber,
   completedRemediationRounds, maxRemediationRounds } = {}) {
@@ -65,6 +76,7 @@ export function selectReviewerPromptStage({ verdictOnly = false, reviewAttemptNu
 function buildReviewerPromptPrefix({
   isFinalRound = false,
   stage,
+  reviewKind = 'code-pr',
   reviewAttemptNumber,
   completedRemediationRounds,
   maxRemediationRounds,
@@ -86,7 +98,7 @@ function buildReviewerPromptPrefix({
 
   return loadStagePrompt({
     rootDir: ROOT,
-    promptSet: REVIEWER_PROMPT_SET,
+    promptSet: reviewKind === 'architecture-review' ? 'architecture-review' : REVIEWER_PROMPT_SET,
     actor: 'reviewer',
     stage: selectedStage,
   });
@@ -160,11 +172,13 @@ function buildReviewerPrompt({ promptPrefix, extraContext = '', diff = '' } = {}
   return `${promptPrefix || ''}${extraContext}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
 }
 
-function buildPromptForReviewerModel(reviewerModel, diff, extraContext = '', { promptStage = 'first', runtime = null } = {}) {
+function buildPromptForReviewerModel(reviewerModel, diff, extraContext = '', {
+  promptStage = 'first', runtime = null, reviewKind = selectReviewerRubric(diff),
+} = {}) {
   const model = String(reviewerModel || '').trim().toLowerCase();
   const promptPrefix = model === 'gemini' && runtime === 'antigravity'
-    ? buildAgyReviewerPromptPrefix({ stage: promptStage })
-    : buildReviewerPromptPrefix({ stage: promptStage });
+    ? buildAgyReviewerPromptPrefix({ stage: promptStage, reviewKind })
+    : buildReviewerPromptPrefix({ stage: promptStage, reviewKind });
   return buildReviewerPrompt({ promptPrefix, extraContext, diff });
 }
 
@@ -184,8 +198,8 @@ function isFinalReviewRound({ reviewAttemptNumber, maxRemediationRounds }) {
   return attempt > cap;
 }
 
-function buildAgyReviewerPromptPrefix({ stage }) {
-  return `${buildReviewerPromptPrefix({ stage })}
+function buildAgyReviewerPromptPrefix({ stage, reviewKind = 'code-pr' }) {
+  return `${buildReviewerPromptPrefix({ stage, reviewKind })}
 
 Antigravity runtime instructions:
 - This is a single-shot GitHub review. The PR diff and all needed context are already provided below.

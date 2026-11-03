@@ -1,4 +1,5 @@
 import './helpers/registry-session-fixture.mjs';
+import { closerProcessFixture } from './helpers/closer-process-fixture.mjs';
 import { assertHoldRecord } from '../src/ama/hold-record.mjs';
 import { seedCloserIntent, intentExpired, intentEarly } from './helpers/closer-intent-fixture.mjs';
 import { selectWorkerTokenAccount } from '../src/worker-token-pool.mjs';
@@ -2066,6 +2067,7 @@ test('OWNERPROOF-01: terminal closer lease and spent dispatch counter do not ref
 for (const status of ['succeeded-open', 'succeeded', 'failed', 'running', 'starting', 'unreadable', 'throws', 'timeout',
   'pending', 'pending-dead', 'pending-live', 'pending-expired']) {
   test(`CLOSERLEASE-01: reconcile ${status} lease before red-CI remediation refusal`, async t => {
+    const processReads = closerProcessFixture(t);
     const rootDir = mkdtempSync(join(tmpdir(), 'closerlease-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     const deps = testDeps();
@@ -2116,6 +2118,7 @@ for (const status of ['succeeded-open', 'succeeded', 'failed', 'running', 'start
     else assert.equal(result.dispatched, false);
     assert.ok(reads <= 2, 'reconciliation reuses its observed ledger evidence');
     assert.equal(pidProbes, localWatcher ? 1 : 0);
+    assert.equal(processReads.length, status === 'pending-live' ? 1 : 0);
     const lease = readAmaCloserLease(rootDir, identity);
     const terminal = ['failed', 'succeeded', 'succeeded-open'].includes(status);
     if (terminal) assert.equal(result.reason, 'live-owner', 'lease reconciliation precedes shared live-remediator refusal');

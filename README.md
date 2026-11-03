@@ -4463,6 +4463,8 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- Isolate controller test audit heads from inherited Hammer dispatch SHAs so startup-failure fixtures record audits under their own test identity.
+
 - CLOSERLAUNCHENV-01 final remediation: retryable controller startup failures
   keep deferred audits without emitting final `terminal-stop` progress receipts;
   malformed activation and foreign identity retain final receipts. Documented

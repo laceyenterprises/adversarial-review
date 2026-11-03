@@ -49,7 +49,8 @@ function fixture(t, script, { realCensus = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ham-controller-'));
   recordEnvironment(dir);
   const env = { ...process.env, HQ_ROOT: dir, HAM_HQ_ROOT: dir, HAM_RUN_DIR: dir, HAM_ROOT_DIR: dir, HAM_REPO: 'fixture/repo',
-    HAM_PR_NUMBER: '42', HQ_LAUNCH_REQUEST_ID: 'lrq_controller-test', AGENT_OS_WORKER_LRQ_ID: 'lrq_controller-test' };
+    HAM_PR_NUMBER: '42', HAM_TARGET_REMEDIATION_SHA: head, HAM_REVIEWED_SHA: head,
+    HQ_LAUNCH_REQUEST_ID: 'lrq_controller-test', AGENT_OS_WORKER_LRQ_ID: 'lrq_controller-test' };
   delete env.LAUNCH_REQUEST_ID;
   for (const key of ['HAM_CONTROLLER_RECORD', 'HAM_CONTROLLER_TOKEN', 'HAM_CONTROLLER_PID', 'HAM_CONTROLLER_FD']) delete env[key];
   const bin = join(dir, 'bin'); mkdirSync(bin);

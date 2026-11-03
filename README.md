@@ -1770,9 +1770,12 @@ the handoff smoke verifies settlement without a worker or round charge and
 that unchanged workspace HEADs cannot acquire publication debt from reply hashes.
 Reviewer pass/run metadata preserves branch and builder tag across
 runtime paths. A `committed-unpublished` stop retains the local commit/workspace,
-names job and commit in the PR comment, and reports failed publication without an
-operator-decision notice. Confirmed publication changes the gate to pending
-review, preserving the retained evidence. See the [queue contract](docs/data-model/follow-up-jobs.md#branch-and-publication-contract-remedbranch-01).
+names the local commit and observed live head, and reports failed publication
+without an operator-decision notice. Stable patch equivalence can prove a rebased
+live head from a stale worker checkout. On failed current-head CI, proven stopped
+debt recovers under the queue lock: validated final completion restores hammer
+ownership, or the remaining normal round budget owns the regression. Recovery
+preserves spent rounds and the original cap; unknown evidence stays unproven. See the [queue contract](docs/data-model/follow-up-jobs.md#branch-and-publication-contract-remedbranch-01).
 
 PRM-06 activation requires a read-only `hq fleet quota status --json` check on
 the deployed producer before a submodule bump or reader deployment: both
@@ -2816,13 +2819,15 @@ stateDiagram-v2
     s1 --> s0: follow-up-job.10 transient retry, unpublished infrastructure-only CI recovery or orchestration-mode refusal hold without round charge
     s2 --> s0: follow-up-job.11 next round unless comment-only final hammer handoff
     s3 --> s0: follow-up-job.12 explicit retrigger or all-infrastructure CI stop with successful current-head replacement checks
-    s4 --> s0: follow-up-job.13 allowlisted explicit retrigger or live satisfied required-label event with unchanged round cap; branch-unresolved resets lookup attempts; all-infrastructure CI stops except max-rounds recover on successful current-head replacements
+    s4 --> s0: follow-up-job.13 allowlisted explicit retrigger or live satisfied required-label event with unchanged round cap; branch-unresolved resets lookup attempts; all-infrastructure CI stops except max-rounds recover on successful current-head replacements; structurally proven committed-unpublished recovery uses only remaining rounds
     s1 --> s4: follow-up-job.14 stacked-base-merged: hold before worker spawn and request rebase/retarget
     s1 --> s0: follow-up-job.15 base evidence unreadable: budget-neutral delayed recheck
     s1 --> s4: follow-up-job.16 operator-only findings after lifecycle admission: hold without spawning
     s1 --> s3: follow-up-job.17 exited worker has a matching preservation-refusal sidecar
     s0 --> s0: follow-up-job.18 branch-unresolved remediation: up to three delayed head lookups without worker or round charge
     s1 --> s1: follow-up-job.19 infrastructure-only CI without retained publication work: bounded wait; moved/terminal head clears wait under lock
+    s4 --> s2: follow-up-job.20 committed-unpublished live publication proven and strict final-round reply validated; preserve spent rounds and restore hammer ownership
+    s4 --> s4: follow-up-job.21 committed-unpublished live publication proven but ordinary round budget exhausted; clear publication debt and escalate max-rounds without another round
     s2 --> [*]
     s3 --> [*]
     s4 --> [*]
@@ -4462,6 +4467,8 @@ compression. Shared local overlays remain tolerant of unknown sibling keys.
 Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
+
+- REMPUBPROOF-01: prove rebased remediation publication from equivalent worker patches on the live head; recover proven publication stops once through validated final completion or the remaining CI-regression round budget. Retained unpublished debt names both heads. Synthetic Git fixtures cover rebase, missing/partial work, unrelated heads, stale evidence, final blockers and budget exhaustion.
 
 - PR #1693 HAM remediation: cache the produced-head snapshot fields once in the retention guard and remove the unreachable conflict alternative from the downstream green-CI branch. Offline regression tests retain conflict-first repair and base-policy behavior.
 

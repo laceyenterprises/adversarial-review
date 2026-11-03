@@ -132,7 +132,7 @@ test('the proof needs the live PR head, the worker trailer on HEAD, and an actua
   const moved = await proveFinalRoundWorkerPush(proofArgs(dir, reviewed, { live: other }));
   assert.equal(moved.workerPushedHeadSha, null);
   assert.equal(moved.liveHeadSha, other);
-  assert.match(moved.reason, /^live-head-mismatch/);
+  assert.match(moved.reason, /^git-proof-failed/);
 
   commitFile(dir, 'untrailed.txt', 'x\n', 'no trailer on HEAD');
   assert.equal((await proveFinalRoundWorkerPush(proofArgs(dir, reviewed))).reason, 'head-not-worker-commit');

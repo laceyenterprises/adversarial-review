@@ -1,3 +1,4 @@
+import { proveStoppedPublication } from './remediation-publication-recovery.mjs';
 import { createFollowUpJob, requeueFollowUpJobForNextRound, resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
 import { addCiRegressionFinding } from './ci-regression-finding.mjs';
 import { observeClosureWait } from './ama/closure-wait.mjs';
@@ -267,6 +268,8 @@ async function guardRereviewCiBeforeReviewer({
     }
 
     try {
+      const publicationRecovery = await proveStoppedPublication({ job: latest.job, jobPath: latest.jobPath,
+        headSha: reviewerHeadSha || ciGate.headSha, ciGate, execFileImpl, log });
       const requeued = requeueImpl({
         rootDir,
         jobPath: latest.jobPath,
@@ -276,8 +279,13 @@ async function guardRereviewCiBeforeReviewer({
         revisionRef: reviewerHeadSha || ciGate.headSha || null,
         stopMetadata: { ciRegression: true },
         ciRegressionFinding: reason,
+        publicationRecovery,
         readOperatorLabelImpl,
       });
+      if (isCompletedFinalRemediationJob(requeued?.job)) {
+        return ciBlockedHammerOwnerResult({ repo, prNumber, ciGate, reason: 'ci-regression-hammer-owned',
+          jobPath: requeued.jobPath, job: requeued.job });
+      }
       const nextStatus = requeued?.job?.status || null;
       if (nextStatus === 'pending') {
         log.warn?.(
@@ -306,6 +314,24 @@ async function guardRereviewCiBeforeReviewer({
       return blockOwnerless({ proceed: false, reason: 'ci-regression-not-requeued', ciGate, ...jobFields }, 'requeue produced no active remediation job');
     } catch (err) {
       if (err?.code === 'ENOENT') {
+        // Another admission may have consumed the same stopped snapshot while
+        // this caller inspected immutable Git objects. Observe that successor;
+        // disappearance alone must not erase a proven recovery's owner.
+        if (latest.job?.remediationPlan?.stop?.code === 'committed-unpublished') {
+          const successor = latestJobFinder(rootDir, { repo, prNumber });
+          if (successor?.job?.jobId === latest.job.jobId) {
+            const head = reviewerHeadSha || ciGate.headSha;
+            if (isCompletedFinalRemediationJob(successor.job)
+              && successor.job.completion?.workerPushedHeadSha === head) {
+              return ciBlockedHammerOwnerResult({ repo, prNumber, ciGate,
+                reason: 'ci-regression-hammer-owned', ...successor });
+            }
+            if (['pending', 'in_progress', 'inProgress'].includes(successor.job.status)
+              && successor.job.revisionRef === head && successor.job.publicationRecovery?.headSha === head) {
+              return { proceed: false, reason: 'ci-regression-remediation-active', ciGate, ...successor };
+            }
+          }
+        }
         log.warn?.(
           `[watcher] Refusing re-review for ${repo}#${prNumber}: failed external CI ` +
             `(${formatCiCheckList(ciGate.failedChecks)}) but the stopped follow-up job no longer exists. ` +

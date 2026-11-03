@@ -2572,7 +2572,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
         ? 'max-rounds-reached'
         : 'no-progress';
       const stopReason = unpublishedWork
-        ? `Remediation job ${job.jobId} committed work locally (${unpublishedWork.commitSha}) but publication failed; retained work awaits publication.`
+        ? `Remediation job ${job.jobId} committed work locally (${unpublishedWork.commitSha}) but publication is unproven on live head ${unpublishedWork.liveHeadSha || 'unknown'} (${unpublishedWork.publicationReason}); retained work awaits publication.`
         : stopCode === 'max-rounds-reached'
         ? `Remediation round ${currentRound || 1} finished without a durable re-review request and reached the max remediation rounds cap (${currentRound}/${maxRounds}); stopping the bounded loop.`
         : `No durable re-review request was recorded after remediation round ${currentRound || 1}; stopping to avoid a silent no-progress loop.`;

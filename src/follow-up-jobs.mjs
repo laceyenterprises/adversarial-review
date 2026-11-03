@@ -25,8 +25,8 @@ import { getConfig } from './config-loader.mjs';
 import { loadRoleConfig } from './role-config.mjs';
 import { MAX_QUOTA_HOLD_WINDOW_MS, quotaHoldTarget } from './remediation-quota-evidence.mjs';
 import { claimFollowUpForReview } from './follow-up-review-claim.mjs';
-import { withCommentOnlyRecovery } from './comment-only-recovery-record.mjs';
-import { isCompletedFinalRemediationJob, scanArchivedStoppedFollowUpJobs } from './comment-only-final-round.mjs';
+import { recoveryDigest, withCommentOnlyRecovery } from './comment-only-recovery-record.mjs';
+import { FINAL_ROUND_REPLAY_PROOF, isCompletedFinalRemediationJob, scanArchivedStoppedFollowUpJobs } from './comment-only-final-round.mjs';
 import {
   DEFAULT_RISK_CLASS,
   DEFAULT_ROUND_BUDGET_BY_RISK,
@@ -3212,6 +3212,8 @@ function markFollowUpJobCompleted({
         remediationPlan: {
           ...(currentJob.remediationPlan || buildRemediationRoundPlan()),
           nextAction: null,
+          stop: null,
+          stopReason: null,
         },
       };
 
@@ -3219,6 +3221,7 @@ function markFollowUpJobCompleted({
         nextJob = updateCurrentRound(nextJob, (round) => ({
           ...round,
           state: 'completed',
+          stop: null,
           resultingHeadSha,
           finishedAt: normalizedCompletedAt,
           worker: remediationWorker || round.worker || currentJob.remediationWorker || null,
@@ -3392,7 +3395,12 @@ function markFollowUpJobStopped({
   });
 }
 
-function requeueFollowUpJobForNextRound({
+function requeueFollowUpJobForNextRound(options) {
+  return withFollowUpJobLock(join(options.rootDir, 'data', 'follow-up-jobs'),
+    () => requeueFollowUpJobForNextRoundLocked(options));
+}
+
+function requeueFollowUpJobForNextRoundLocked({
   rootDir,
   jobPath,
   requestedAt = new Date().toISOString(),
@@ -3411,6 +3419,7 @@ function requeueFollowUpJobForNextRound({
   stopMetadata = null,
   readOperatorLabelImpl = readFollowUpOperatorLabel,
   ciRegressionFinding = null,
+  publicationRecovery = null,
 }) {
   const currentJob = readFollowUpJob(jobPath);
   // This terminal handoff is progress. Keep its completed provenance even at
@@ -3444,12 +3453,43 @@ function requeueFollowUpJobForNextRound({
   if (operatorLabelSatisfaction && revisionRef && operatorLabelSatisfaction.headSha !== revisionRef) {
     throw new Error(`Cannot requeue follow-up job ${currentJob.jobId}: operator-label observation head moved`);
   }
-  if (currentJob.status === 'stopped' && !isRetriggerableStoppedFollowUpJob(currentJob, { operatorLabelSatisfaction })) {
+  const recoveredPublication = currentJob.status === 'stopped'
+    && currentJob.remediationPlan?.stop?.code === 'committed-unpublished'
+    && publicationRecovery?.sourceDigest === recoveryDigest(currentJob)
+    && publicationRecovery?.headSha === revisionRef
+    && publicationRecovery?.proof?.method === FINAL_ROUND_REPLAY_PROOF;
+  if (recoveredPublication && publicationRecovery.completedFinalRound
+    && currentJob.finalRound === 'comment-only' && currentJob.reReview?.suppressed === 'comment-only-final-round') {
+    return markFollowUpJobCompleted({ rootDir, jobPath, completedAt: requestedAt,
+      resultingHeadSha: revisionRef,
+      completion: { ...currentJob.completion, ...publicationRecovery.completionFields,
+        withheldPushHeadSha: null, publicationRecovery: { recoveredAt: requestedAt,
+          previousStop: currentJob.remediationPlan.stop } },
+      reReview: { ...currentJob.reReview, requested: false, suppressed: 'comment-only-final-round' },
+      jobUpdates: { unpublishedWork: null, stoppedAt: null },
+    });
+  }
+  if (currentJob.status === 'stopped' && !recoveredPublication && !isRetriggerableStoppedFollowUpJob(currentJob, { operatorLabelSatisfaction })) {
     const code = currentJob?.remediationPlan?.stop?.code || 'unknown';
     throw new Error(`Cannot requeue follow-up job ${currentJob.jobId} from stopped:${code}`);
   }
 
   if (currentRound >= maxRounds) {
+    if (recoveredPublication) {
+      // The terminal mover deliberately leaves same-directory records alone.
+      // Reclassify this proven debt in place while holding the queue lock.
+      const nextJob = computeFollowUpJobStoppedState({ currentJob,
+        stoppedAt: requestedAt, stopCode, sourceStatus: currentJob.status,
+        stoppedBy: { type: 'system', requestedBy }, stopMetadata,
+        stopReason: `Reached max remediation rounds (${currentRound}/${maxRounds}). ${reason}`,
+        jobUpdates: { unpublishedWork: null, publicationRecovery: {
+          recoveredAt: requestedAt, headSha: revisionRef, proof: publicationRecovery.proof,
+          previousStop: currentJob.remediationPlan.stop,
+        } },
+      });
+      writeFollowUpJob(jobPath, nextJob);
+      return { job: nextJob, jobPath };
+    }
     return markFollowUpJobStopped({
       commentDeliveryExemption: 'round-requeue-refused',
       rootDir,
@@ -3516,6 +3556,10 @@ function requeueFollowUpJobForNextRound({
       finalRound: null,
     } : {}),
     revisionRef: nextRevisionRef,
+    ...(recoveredPublication ? { unpublishedWork: null, publicationRecovery: {
+      recoveredAt: requestedAt, headSha: revisionRef, proof: publicationRecovery.proof,
+      previousStop: currentJob.remediationPlan.stop,
+    } } : {}),
     ...(previousStopCode === 'branch-unresolved' ? {
       branchResolution: { ...currentJob.branchResolution, attempts: 0, retryAfter: requestedAt },
     } : {}),

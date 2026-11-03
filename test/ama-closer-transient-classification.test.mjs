@@ -376,7 +376,7 @@ function eligibleInputs(rootDir) {
   return { reviewState, prMetadata, cfg, dispatchContext, headSha };
 }
 
-async function dispatchWithError(rootDir, errFactory) {
+async function dispatchWithError(rootDir, errFactory, overrides = {}) {
   const { reviewState, prMetadata, cfg, dispatchContext } = eligibleInputs(rootDir);
   const calls = [];
   const execFileImpl = async (cmd, args) => {
@@ -392,6 +392,7 @@ async function dispatchWithError(rootDir, errFactory) {
     resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
     writeFileImpl: () => {},
     readTemplateImpl: () => readFileSync(HAMMER_TEMPLATE_PATH, 'utf8'),
+    ...overrides,
   });
   return { result, calls };
 }
@@ -448,6 +449,8 @@ test('DRAINDEFER-01: exit 6 drain refusal persists epoch, releases lease and pre
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-drain-budget-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const inputs = eligibleInputs(rootDir);
+  delete inputs.dispatchContext.hqPath;
+  inputs.env = { HQ_BIN: '/fixture/environment/hq' };
   const identity = { repo: inputs.dispatchContext.repo, prNumber: inputs.prMetadata.prNumber, headSha: inputs.headSha };
   const logger = { warn() {}, log() {}, error() {} };
   const handler = { repoPath: identity.repo, ...identity };
@@ -457,11 +460,13 @@ test('DRAINDEFER-01: exit 6 drain refusal persists epoch, releases lease and pre
   const before = readNoProgressLane(rootDir, identity);
   const { result, calls } = await dispatchWithError(rootDir, () =>
     Object.assign(new Error('dispatch refused'), { code: 6,
-      stderr: '[hq] dispatch refused: drain in effect (epoch=42, reason=synthetic-repo_unregistered-branch_holder_blocked-uq_worker_runs_live_logical_job)' }));
+      stderr: '[hq] dispatch refused: drain in effect (epoch=42, reason=synthetic-repo_unregistered-branch_holder_blocked-uq_worker_runs_live_logical_job)' }),
+  { env: inputs.env, dispatchContext: inputs.dispatchContext });
   assert.equal(result.reason, 'deferred-by-drain');
   assert.equal(result.drainEpoch, '42');
   assert.equal(result.skipMergeAgent, true);
   assert.equal(calls.filter(call => call.args[0] === 'dispatch').length, 1, 'a drain waits for the next pass, without inline transient retries');
+  assert.equal(calls.find(call => call.args[0] === 'dispatch').cmd, inputs.env.HQ_BIN);
   const record = readAmaCloserDispatchRecord(rootDir, identity);
   assert.equal(record.retryCount, 0);
   assert.equal(record.state, 'deferred-by-drain');
@@ -476,6 +481,8 @@ test('DRAINDEFER-01: exit 6 drain refusal persists epoch, releases lease and pre
   const statusCalls = [];
   const waiting = await maybeDispatchAmaCloser({ ...inputs, logger,
     execFileImpl: async (_cmd, args, options) => {
+      assert.equal(_cmd, inputs.env.HQ_BIN);
+      assert.equal(options.env.HQ_BIN, inputs.env.HQ_BIN);
       assert.equal(options.cwd, resolve(REPO_ROOT, '../..'));
       statusCalls.push(args);
       return { stdout: JSON.stringify({ isDraining: true, epoch: 43 }) };

@@ -6531,6 +6531,11 @@ After deploy, SRE owns these checks:
 
 ## Deploy drain deferrals (DRAINDEFER-01)
 
+Closer dispatch, drain-status reads and post-merge signal emission resolve HQ
+from `dispatchContext.hqPath`, then `HQ_BIN` in the caller's execution environment,
+then the daemon default `/Users/airlock/.local/bin/hq`. A supplied environment
+does not require changing the watcher's process environment.
+
 Drain refusal classification requires exit 6 and an anchored diagnostic; incidental
 drain text and other exit codes keep their ordinary handling. Epoch metadata
 preserves numeric, formatted and alphanumeric tokens. When autonomous execution

@@ -19,6 +19,7 @@ function withSuspendedStatus(row, meaning) {
     || row.status.trim().toLowerCase() !== SUSPENDED) return meaning;
   return { ...meaning, status: SUSPENDED,
     terminal: typeof row.terminal === 'boolean' ? row.terminal : false,
+    succeeded: typeof row.succeeded === 'boolean' ? row.succeeded : false,
     diagnostics: meaning.diagnostics.filter(note => !note.includes('$.status')) };
 }
 

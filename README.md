@@ -4037,7 +4037,7 @@ no new smoke action or blocking check is added. Worker source tests are separate
 from deployed observations. Only the operator activates or approves after merge;
 retain legacy support for one release cycle.
 
-HAMLANEWAIT-02: retryable merge deferrals release closer ownership as terminal with retryable-<reason> (lane-busy, merge-lease-timeout, required-checks-pending, pr-mergeability-unknown). The audit CLI writes the receipt under the existing owner snapshot fence. In-run lease retries retain ownership. Closure/rescue and bounded startup/periodic sweeps reconcile terminal launches before admission; live launches, retries, parked owners and unreadable evidence retain their existing semantics. Ordinary same-head daemon eligibility or hammer admission schedules the retry through existing backoff, attempt and lifetime caps; terminal lease reclamation and exclusive acquisition prevent duplicate retries. Orphan ownership probes a dispatched lease LRQ even without its dispatch projection. Startup/periodic sweeps defer ledger probes until 15 seconds after the latest lease timestamp (updatedAt, falling back to acquiredAt); missing timestamps remain probeable. No new lifecycle states, config keys, checks or smoke actions; deployment acceptance requires natural recovery observation. VERIFYHEADTRANSIENT-01: explicit infrastructure read outcomes in hammer-phase-outcome.mjs record deferred audits and retryable closer/merge release, including generation-fenced controller cleanup after confirmed drain. Completed matching launches refund the existing lease-wait accounting before ordinary same-head closer retry; each abort leaves series, target and lifetime charges unchanged. The existing retry wake retains a load-aware owner deadline and emits hammer_ended_without_merge with retryable true and phaseOutcome. Red checks, findings, conflicts, moved heads, cancellation and proven owner loss keep final accounting. Synthetic verifyheadtransient-01 and ama-hammer-retry-cap fixtures cover repeated aborts. No new state or smoke command. After deployment the build manager confirms express float and watcher restart; retain the first organic verify-head abort, owned retry wake/deadline and merge without operator action.
+HAMLANEWAIT-02: retryable merge deferrals release closer ownership as terminal with retryable-<reason> (lane-busy, merge-lease-timeout, required-checks-pending, pr-mergeability-unknown). The audit CLI writes the receipt under the existing owner snapshot fence. In-run lease retries retain ownership. Closure/rescue and bounded startup/periodic sweeps reconcile terminal launches before admission; live launches, retries, parked owners and unreadable evidence retain their existing semantics. Ordinary same-head daemon eligibility or hammer admission schedules the retry through existing backoff, attempt and lifetime caps; terminal lease reclamation and exclusive acquisition prevent duplicate retries. Orphan ownership probes a dispatched lease LRQ even without its dispatch projection. Startup/periodic sweeps defer ledger probes until 15 seconds after the latest lease timestamp (updatedAt, falling back to acquiredAt); missing timestamps remain probeable. No new lifecycle states, config keys, checks or smoke actions; deployment acceptance requires natural recovery observation. VERIFYHEADTRANSIENT-01: explicit infrastructure read outcomes in hammer-phase-outcome.mjs record deferred audits and retryable closer/merge release, including generation-fenced controller cleanup after confirmed drain. Completed matching launches refund the existing lease-wait accounting before ordinary same-head closer retry; each abort leaves series, target and lifetime charges unchanged. The existing retry wake retains a load-aware owner deadline and emits hammer_ended_without_merge with retryable true and phaseOutcome. Red checks, findings, conflicts, moved heads, cancellation and proven owner loss keep final accounting. Synthetic verifyheadtransient-01 and ama-hammer-retry-cap fixtures cover repeated aborts. No new state or smoke command. After deployment the build manager confirms express float and watcher restart; retain the first organic verify-head abort, owned retry wake/deadline and merge without operator action. CLOSERLAUNCHENV-01: launch-environment-read-unavailable and launch-environment-missing-legacy-dispatch reuse that explicit retry/refund path before controller spawn. After float, deploy and service bounce, the deployment owner retains natural-traffic evidence of zero identity-unconfirmed stops from transient reads, or a read-unavailable retry with owner, deadline and unchanged cap spend. Retryable startup failures emit no terminal-stop progress receipt; malformed activation and foreign identity retain final receipts. Synchronous dispatch-file retries run back-to-back without backoff, so fast failures defer to the ordinary closer retry.
 
 HAMLANEWAIT-01: legacy closer lane writes wait for release notifications until
 a fresh 60-second merge-attempt deadline after CI/lease waits. A bounded
@@ -4463,7 +4463,18 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
-- ARCH-03: ARR-only PRs select the architecture rubric across reviewer stages and runtimes; mixed PRs retain the code rubric. Verdicts, attestation, remediation and merge behavior are unchanged. See [change details](src/changes/ARCH-03.md).
+- LAC-2146 final remediation: the qualification in [PR #1691](https://github.com/laceyenterprises/adversarial-review/pull/1691) covers unresolved unpooled fallback attribution in `skipped[]`, including an absent resolver and exhausted or successful subsequent routes.
+
+- GEMREMEDIATORCLASS-01 / LAC-2146: [PR #1691](https://github.com/laceyenterprises/adversarial-review/pull/1691) implements concrete HQ `remediator-gemini` routing while preserving the logical remediation route, registered model policy, entitlements and dedicated builder isolation. The paired [Agent OS #10117](https://github.com/laceyenterprises/agent-os/pull/10117) release and live adoption remain separately gated by [LAC-2146](https://linear.app/laceyenterprises/issue/LAC-2146).
+
+- ARCH-03: [PR #1688](https://github.com/laceyenterprises/adversarial-review/pull/1688) implements ARR-only architecture-rubric selection across reviewer stages and runtimes; mixed PRs retain the code rubric. Source merge, normal deployment and natural ARR-only/mixed review acceptance remain distinct. Verdicts, attestation, remediation and merge behavior are unchanged.
+
+- Isolate controller test audit heads from inherited Hammer dispatch SHAs so startup-failure fixtures record audits under their own test identity.
+
+- CLOSERLAUNCHENV-01 final remediation: retryable controller startup failures
+  keep deferred audits without emitting final `terminal-stop` progress receipts;
+  malformed activation and foreign identity retain final receipts. Documented
+  that synchronous dispatch-file retries run back-to-back without backoff.
 
 - LAC-2145 / LEASECIPROOF-01: pair synthetic pending-owner PIDs with raw process-start fixtures and qualify all three intermittent assertions with counted trials. See the [SEV/RCA evidence and limitations](docs/postmortems/LAC-2145-pending-owner-proof-qualification.md). Production ownership fences are unchanged.
 
@@ -4514,6 +4525,12 @@ Deploy this reader before activating these keys in core's checked-in config.
   documentation. The hammer prompt explicitly creates or updates module fragments.
 
 REMGEMINI-01 parity: both Node config readers accept `remediator-gemini` as well as `gemini` in the fallback list. This expands validation only; defaults, fallback order, and selected provider do not change. Paired with Agent OS #10087.
+
+- CLOSERLAUNCHENV-01: retry controller launch-environment reads with the shared
+  load-aware budget. Exhausted reads and absent legacy metadata use explicit
+  retryable no-merge outcomes and existing cap refunds; malformed values and
+  foreign identities still hard-stop. See the closer runbook for deployment
+  and natural-traffic acceptance.
 
 - HAM: retain explicit bug-fix-only freeze contracts in the MLR-03 documentation,
   including the merge-agent scope and promotion boundary, while preserving the

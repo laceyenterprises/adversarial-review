@@ -19,6 +19,12 @@ const head = 'a'.repeat(40);
 const at = '2026-01-01T00:00:00.000Z';
 const identity = { repo: 'fixture/repo', prNumber: 42, headSha: head };
 const launchRequestId = 'lrq_fixture';
+test('CLOSERLAUNCHENV-01: malformed and foreign launch environment remain hard stops', () => {
+  for (const reason of ['controller-launch-environment-malformed', 'controller-launch-environment-identity-unconfirmed']) {
+    assert.equal(HAMMER_RETRYABLE_READ_OUTCOMES.has(reason), false);
+    assert.equal(hammerPhaseAttempt({ outcome: 'failed-without-merge', reason }).outcome, 'failed-without-merge');
+  }
+});
 function fixture(t) {
   const dir = mkdtempSync(join(tmpdir(), 'verifyheadtransient-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

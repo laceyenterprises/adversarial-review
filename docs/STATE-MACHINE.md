@@ -19,6 +19,13 @@ See [the closure runbook](RUNBOOK-ama-closure.md).
 
 # Adversarial Review State Machine Notes
 
+CLOSERLAUNCHENV-01 final remediation preserves the existing retry/refund edge:
+retryable launch-environment startup failures write deferred audits without a
+`terminal-stop` progress receipt. Malformed activation and foreign launch identity
+retain final receipts. Synchronous dispatch-file retries run back-to-back with
+load-aware timeouts and no backoff; fast failures defer to ordinary closer retry.
+Controller states, receipt fields and existing smoke commands are unchanged.
+
 CLOSERSCANREAD-01 final remediation keeps the existing closer states and
 transitions. Missing-row retirement now requires a complete census without
 deferred records as well as the existing absence quorum. Capacity checks preserve

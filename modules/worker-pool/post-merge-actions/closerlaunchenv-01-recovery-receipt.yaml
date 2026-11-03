@@ -1,0 +1,19 @@
+# Operator-owned handoff only; this plan executes no live action or probe.
+operator_steps:
+  - description: >-
+      After review and merge, the deployment owner floats the adversarial-review
+      submodule, deploys and bounces the service through the existing deployment
+      process. Retain natural-traffic evidence of zero identity-unconfirmed
+      stops caused by transient launch-environment reads, or an explicit
+      launch-environment-read-unavailable outcome recorded as retryable with
+      its owner, load-aware deadline and unchanged closer cap spend. Attach the
+      loaded revision and receipt to the companion incident report. Workers
+      must not restart services, dispatch synthetic failures or mutate labels.
+      The command only prints this handoff and does not satisfy the receipt.
+    run_as: designated deployment owner
+    command: >-
+      /usr/bin/printf '%s\n' 'CLOSERLAUNCHENV-01: float, deploy and bounce through the normal deployment process, then retain the organic launch-environment retry/refund receipt described in docs/RUNBOOK-ama-closure.md.'
+actions: []
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

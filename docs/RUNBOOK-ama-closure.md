@@ -2983,9 +2983,10 @@ prompt-driven worker behavior, not predicate gates — the audit comment and the
    `docs/data-model/catalog.json`, then runs
    `node scripts/validate-data-model-catalog.mjs`; a red validator is a red
    check. When the diff changes a module surface or operational contract and
-   `modules/<name>/<name>-walkthrough.md` exists, accept a
-   `<module dir>/changes/<TICKET-ID>.md` fragment plus any needed in-place
-   walkthrough/README section edits as satisfying walkthrough currency. The
+   `modules/<name>/<name>-walkthrough.md` exists, the hammer creates or updates
+   the `<module dir>/changes/<TICKET-ID>.md` fragment, including when the author
+   omitted it. Accept that fragment plus any needed in-place walkthrough/README
+   section edits as satisfying walkthrough currency. The
    walkthrough need not change when its existing text needs no correction. Follow
    `docs/walkthroughs/README.md` when available. Do not append ticket sections or
    shared README change-note entries. An end-of-file ticket section is at most a

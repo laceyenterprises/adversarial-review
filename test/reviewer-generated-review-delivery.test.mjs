@@ -6,7 +6,7 @@ import './helpers/registry-session-fixture.mjs';
 import './helpers/dispatch-files-preload.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -120,7 +120,7 @@ function writeThrottledCoreState(path) {
   })}\n`);
 }
 
-test('REVPOSTSTALL-01 regression: a completed review stuck in a non-settling pre-post throttle defers within the bound, preserved, with no GitHub write', async (t) => {
+test('REVPOSTSTALL-01 regression: a completed review stuck in a non-settling pre-post throttle defers within the bound, preserved, with no GitHub write', { timeout: 10000 }, async (t) => {
   const rootDir = tempRoot(t);
   const timers = manualTimers();
   const { lines, log } = captureLog();
@@ -134,21 +134,24 @@ test('REVPOSTSTALL-01 regression: a completed review stuck in a non-settling pre
   const statePath = join(rootDir, 'data', 'api-cache', 'rate-limit-state.json');
   writeThrottledCoreState(statePath);
   const throttleTelemetry = [];
+  let enterSleep;
+  const sleepEntered = new Promise((resolve) => { enterSleep = resolve; });
   const throttle = createRateLimitThrottle({
     env: {}, logger: log, sharedStatePath: statePath,
-    sleepImpl: () => new Promise(() => {}),
+    sleepImpl: () => { enterSleep(); return new Promise(() => {}); },
     recordApiCallImpl: (call) => throttleTelemetry.push(call),
   });
   let wrote = false;
   const delivery$ = guard.track('verdict-mode', throttle.awaitThrottleIfNeeded('core'))
     .then(() => { guard.markWriteStarted(); wrote = true; });
   void delivery$;
-  for (let i = 0; i < 20 && throttleTelemetry.length === 0; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  // Wait for the real sleep seam after its asynchronous state read and status
+  // write. Event-loop turns are not an I/O completion guarantee (Node 22 CI).
+  await sleepEntered;
   assert.equal(throttleTelemetry[0]?.category, 'rate_limit_throttle_seconds', 'the real governor entered its sleep');
   assert.equal(throttleTelemetry[0].extra.remaining_at_activation, 59);
   // The governor publishes its sleep as `<state>.throttled.json`, the same
   // operator-visible evidence the deployed witness left.
-  for (let i = 0; i < 200 && !existsSync(`${statePath}.throttled.json`); i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(JSON.parse(readFileSync(`${statePath}.throttled.json`, 'utf8')).remaining, 59);
   assert.equal(exits.length, 0, 'nothing exits before the bound');
 

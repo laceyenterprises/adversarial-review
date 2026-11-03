@@ -132,7 +132,7 @@ test('the proof needs the live PR head, the worker trailer on HEAD, and an actua
   const moved = await proveFinalRoundWorkerPush(proofArgs(dir, reviewed, { live: other }));
   assert.equal(moved.workerPushedHeadSha, null);
   assert.equal(moved.liveHeadSha, other);
-  assert.match(moved.reason, /^live-head-mismatch/);
+  assert.match(moved.reason, /^git-proof-failed/);
 
   commitFile(dir, 'untrailed.txt', 'x\n', 'no trailer on HEAD');
   assert.equal((await proveFinalRoundWorkerPush(proofArgs(dir, reviewed))).reason, 'head-not-worker-commit');
@@ -165,6 +165,26 @@ test('worker proof retries a transient live lookup and remains re-entrant after 
       return base.execFileImpl(command, argv);
     },
   }), /TLS handshake timeout/);
+});
+
+test('worker proof rejects malformed live heads before inspecting Git objects or fetching', async () => {
+  for (const supplied of [false, true]) {
+    const calls = [];
+    const result = await proveFinalRoundWorkerPush({
+      repo: 'example/repo', prNumber: 42, jobId: JOB_ID, reviewedHead: oldHead,
+      baseBranch: 'main', workspaceDir: '/unused', log: { warn() {} },
+      ...(supplied ? { liveHeadSha: 'not-a-sha' } : {}),
+      execFileImpl: async (command, args) => {
+        calls.push(command);
+        if (command === 'gh') return { stdout: 'not-a-sha\n' };
+        assert.deepEqual(args.slice(-2), ['rev-parse', 'HEAD']);
+        return { stdout: newHead };
+      },
+    });
+    assert.equal(result.workerPushedHeadSha, null);
+    assert.match(result.reason, /^live-head-mismatch /);
+    assert.deepEqual(calls, supplied ? ['git'] : ['gh', 'git']);
+  }
 });
 
 test('worker proof retains every non-empty git error line in its reason and warning', async (t) => {

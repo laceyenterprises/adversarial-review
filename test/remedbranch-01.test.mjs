@@ -217,7 +217,8 @@ test('REMEDBRANCH-01: unavailable workspace retains explicit unpublished evidenc
   const work = await findCommittedUnpublishedWork({ job, workspaceDir,
     reply: { summary: 'Committed locally but not pushed.', operationalBlockers: [null, 42, { commitSha }] },
     execFileImpl: async () => { throw new Error('HQ workspace unavailable'); } });
-  assert.deepEqual(work, { jobId: job.jobId, workspaceDir, commitSha, reported: true });
+  assert.deepEqual(work, { jobId: job.jobId, workspaceDir, commitSha, reported: true,
+    liveHeadSha: null, publicationReason: 'live-publication-unknown' });
 });
 
 test('REMEDBRANCH-01: agent-runtime posted review retains subject branch and builder tag through pass recovery', async t => {

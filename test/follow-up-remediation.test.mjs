@@ -11105,7 +11105,7 @@ test('a completed final round whose moved head has no push proof wakes recovery 
   assert.equal(result.action, 'completed');
   assert.equal(result.job.completion.workerPushedHeadSha, undefined);
   assert.equal(result.job.completion.withheldPushHeadSha, liveHead);
-  assert.match(result.job.completion.finalRoundOutcome.push, /^live-head-mismatch/);
+  assert.match(result.job.completion.finalRoundOutcome.push, /^no-local-worker-patches/);
   assert.equal(alerts.length, 0, 'watcher recovery must get a chance before an operator page');
   assert.equal(result.job.completion.withheldHeadReReview, undefined, 'watcher admission owns the recovery intent');
   assert.equal(JSON.parse(readFileSync(result.jobPath, 'utf8')).completion.withheldPushHeadSha, liveHead);

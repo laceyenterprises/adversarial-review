@@ -9,6 +9,7 @@ import { closureOwnerShadowEvidence, launchSource } from '../src/pr-next-action-
 import { bindClosureNextAction } from '../src/ama/closure-next-action.mjs';
 import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { observeClosureWait } from '../src/ama/closure-wait.mjs';
+import { enforceLiveCloserHandoff } from '../src/ama/closure-recovery.mjs';
 
 const START = Date.parse('2026-03-01T00:00:00Z');
 const BOUND = 30 * 60 * 1000;
@@ -165,5 +166,51 @@ test('the normal ledger consumer projection reaches the bounded handoff', async 
     },
   } }, f.lease, {});
   assert.equal((await f.run(START + BOUND)).outcome, 'await-operator');
+  assert.equal(f.pages(), 1);
+});
+
+for (const snapshot of [undefined, null, { subjectKey: `${REPO}#41`, head: HEAD }]) {
+  test(`incomplete snapshot safely declines a live handoff: ${JSON.stringify(snapshot)}`, async t => {
+    const f = fixture(t);
+    const result = await enforceLiveCloserHandoff({ ...f.identity, now: START + BOUND,
+      shared: { decision: f.shared.decision, snapshot }, result: { dispatched: false },
+      observeWaitImpl: () => assert.fail('incomplete evidence cannot notify') });
+    assert.equal(result, null);
+    assert.deepEqual(readAmaCloserLease(f.rootDir, f.identity), f.lease);
+  });
+}
+
+test('camelCase launch evidence retains its own request window and diagnostic timestamp', async t => {
+  const f = fixture(t);
+  const requestedAt = new Date(START + BOUND).toISOString();
+  f.shared.snapshot.observations.launches.value.closer.probe.row = {
+    status: 'running', taskKind: 'merge', launchRequestId: f.lease.lrqId, requestedAt,
+  };
+  assert.equal((await f.run(START + BOUND)).outcome, 'ama-pending');
+  assert.equal(f.pages(), 0);
+  const result = await f.run(START + 2 * BOUND);
+  assert.equal(result.outcome, 'await-operator');
+  assert.equal(result.amaClosureResult.liveCloserHandoff.requestedAt, requestedAt);
+  assert.equal(f.pages(), 1);
+  assert.deepEqual(readAmaCloserLease(f.rootDir, f.identity), f.lease);
+});
+
+test('camelCase launch identity mismatch cannot notify', async t => {
+  const f = fixture(t);
+  f.shared.snapshot.observations.launches.value.closer.probe.row = {
+    status: 'running', launchRequestId: 'lrq-foreign', requestedAt: new Date(START).toISOString(),
+  };
+  assert.equal((await f.run(START + BOUND)).outcome, 'ama-pending');
+  assert.equal(f.pages(), 0);
+});
+
+test('snake_case launch identity and request time take precedence over aliases', async t => {
+  const f = fixture(t);
+  Object.assign(f.shared.snapshot.observations.launches.value.closer.probe.row, {
+    launchRequestId: 'lrq-foreign', requestedAt: new Date(START + 2 * BOUND).toISOString(),
+  });
+  const result = await f.run(START + BOUND);
+  assert.equal(result.outcome, 'await-operator');
+  assert.equal(result.amaClosureResult.liveCloserHandoff.requestedAt, new Date(START).toISOString());
   assert.equal(f.pages(), 1);
 });

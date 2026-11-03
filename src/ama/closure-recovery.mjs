@@ -196,11 +196,13 @@ export async function enforceLiveCloserHandoff({ rootDir, repo, prNumber, headSh
   const taskKind = effective.row?.task_kind ?? effective.row?.taskKind;
   if (taskKind && taskKind !== 'merge') return null;
   const acquired = Date.parse(lease.acquiredAt);
-  const requested = Date.parse(effective.row?.requested_at);
+  const requestedAt = effective.row?.requested_at ?? effective.row?.requestedAt;
+  const launchRequestId = effective.row?.launch_request_id ?? effective.row?.launchRequestId;
+  const requested = Date.parse(requestedAt);
   // A retried launch can adopt an older lease. Its own durable request time
   // grants a fresh window; missing/future identity evidence stays unknown.
   if (!Number.isFinite(acquired) || !Number.isFinite(requested) || acquired > now || requested > now
-    || (effective.row.launch_request_id && effective.row.launch_request_id !== lease.lrqId)) return null;
+    || (launchRequestId && launchRequestId !== lease.lrqId)) return null;
   const started = Math.max(acquired, requested);
   if (now - started < LIVE_CLOSER_HANDOFF_BOUND_MS) return null;
   // Read the actual generation before any notification. Heartbeats may advance
@@ -212,7 +214,7 @@ export async function enforceLiveCloserHandoff({ rootDir, repo, prNumber, headSh
     || current.acquiredAt !== lease.acquiredAt || current.watcherPid !== lease.watcherPid
     || current.holderHost !== lease.holderHost) return null;
   const handoff = { reason: 'live-closer-progress-unverified', launchRequestId: lease.lrqId,
-    acquiredAt: lease.acquiredAt, requestedAt: effective.row.requested_at,
+    acquiredAt: lease.acquiredAt, requestedAt,
     deadlineAt: new Date(started + LIVE_CLOSER_HANDOFF_BOUND_MS).toISOString(),
     custody: 'retained', progress: 'unverified' };
   let boundedWait = null;

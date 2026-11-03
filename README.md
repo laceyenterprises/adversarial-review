@@ -4485,6 +4485,8 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- LAC-2133 final comment remediation: accept camelCase launch request time and identity in the live closer inspection handoff, including its diagnostic timestamp, while retaining snake_case precedence and custody fences. Offline regressions cover alias timing, identity mismatches and incomplete snapshots; the existing subject/head guard already rejects a missing snapshot.
+
 - PR #1699 rescue: shorten redundant scope/restore guidance to meet the existing rendered 60 KiB prompt limit. CI edits and additions remain operator-only, permitted non-CI base restoration retains finding authority and validation, gitlink edits remain forbidden, and dispositions stay in the correct reply/audit artifact. The byte-budget limit is unchanged.
 
 - WSOBSPAGE-01 final comment remediation: share one workspace inventory between closer reaper discovery and probe-history pruning per pass. Memoize CI-orphan workspace evidence by repository and branch within each health snapshot, including refusals; skip reads for missing branches and cap observation paging at the remaining snapshot deadline. Targeted offline regressions cover cursor refresh, incomplete inventory, scoped cache isolation and deadline exhaustion. Existing lifecycle states, persistent shapes and smoke promises are unchanged.

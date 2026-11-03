@@ -4469,7 +4469,7 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 - 2026-11-02 — LAC-2148 / CONFLICTBEFORECI-01: route positively conflicting published heads through bounded conflict repair before absent-CI waits; retain unknown observation, LAC-2097 head retention and existing custody/merge gates. See [RCA](docs/postmortems/LAC-2148-conflict-before-ci.md).
 
-- ARCH-01: mirror the architecture pressure threshold and registry schema for reader parity. Architecture settings remain parse-only in this reader; synthetic tests preserve tolerance of unread fields in shared local overlays.
+- ARCH-01 final remediation: defer the architecture review schema mirror until this reader consumes its settings, per CFGREADERSCOPE-01. Offline tests verify that checked-in configuration and local overlays ignore this sibling-owned namespace, including future keys and thresholds validated by Python.
 
 - LAC-2146 final remediation: the qualification in [PR #1691](https://github.com/laceyenterprises/adversarial-review/pull/1691) covers unresolved unpooled fallback attribution in `skipped[]`, including an absent resolver and exhausted or successful subsequent routes.
 

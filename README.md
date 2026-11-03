@@ -4490,6 +4490,14 @@ refusal, cancellation and unknown exits; process success alone proves no merge.
 
 ## Change notes
 
+- LAC-2151 final comment remediation: verify the cached processed review digest as well as the raw model reply before redelivery; missing or mismatched cached text is retained as evidence and not reused.
+
+- LAC-2151 integration with LAC-2075: the durable write-boundary hook follows the sending-token budget preflight; tests retain both protections.
+
+- LAC-2151 storage hardening: a saved review must durably enter `write-started` before publication. A failed checkpoint preserves exact-head recovery and refuses the public write; later bookkeeping failures cannot make a posted body reusable.
+
+- REVPOSTSTALL-01 / LAC-2151: a reviewer reply that passes the posting contract is now preserved with its exact head and identity binding before the pre-post side calls. A delivery stall that has not reached the GitHub write is bounded and released as uncharged `[reviewer-stalled]`. The next same-head claim posts the preserved reply without rerunning the model. Witness: PR 1700's completed Gemini review waited about 57 minutes behind the shared default-credential core throttle. Why that shared bucket stays below its floor is unproven. See the [SEV3 report](docs/postmortems/SEV3-a-generated-review-waited-57-minutes-behind-the-shared-github-throttle-2026-11-03.md).
+
 - LAC-2075: GitHub budget preflights and header observations now name the credential that sends the request. A low anonymous `default` bucket can no longer defer watcher intake or other authenticated reads and writes, and one token cannot borrow another's budget or poison it. A low or zero budget for the sending token still defers. This also covers the `reviewer.mjs` review-post preflight. The floor, urgent reserve and fail-closed gates are unchanged. See the [SEV3 report](docs/postmortems/SEV3-LAC-2075-authenticated-github-reads-deferred-by-the-anonymous-budget-2026-11-03.md).
 
 - PR #1701 final comment remediation: strengthen offline fixtures to assert that the known-published-head stop emits one progress call and that successful merges persist run-scoped exact-head proof from the post-merge JSON read. The outcome classifier always returns an object, including for missing live state; production behavior, persistent shapes, lifecycle states and smoke promises remain unchanged.

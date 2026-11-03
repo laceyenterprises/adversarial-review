@@ -1376,6 +1376,23 @@
       ],
       "owner": "reviewer prompt-budget evidence",
       "elisionKindValues": ["+", "-", " "]
+    },
+    {
+      "id": "reviewer-generated-reviews",
+      "title": "Reviewer Generated Reviews",
+      "path": "docs/data-model/reviewer-generated-reviews.md",
+      "store": "data/reviewer-generated-reviews/<repo-slug>-<prNumber>-<headSha>-<passKind>-<reviewerModel>-<originSessionUuid>.json",
+      "schemaSurface": "src/reviewer-generated-review-delivery.mjs",
+      "relatedSchemaSurfaces": [
+        "src/reviewer.mjs",
+        "src/reviewer-process-deadline.mjs"
+      ],
+      "owner": "hosted reviewer delivery (REVPOSTSTALL-01)",
+      "bodyDigestFields": [
+        "rawReviewSha256",
+        "reviewTextSha256"
+      ],
+      "deliveryStateValues": ["pending-delivery", "deferred", "write-started", "delivered"]
     }
   ]
 }

@@ -90,6 +90,7 @@ import {
 } from './reviewer-fence.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { createGeminiReviewerProcessDeadline } from './reviewer-process-deadline.mjs';
+import { createGeneratedReviewDelivery } from './reviewer-generated-review-delivery.mjs';
 import {
   configureReviewerWorkspaceAudit,
   ReviewerSnapshotBaseError,
@@ -1469,6 +1470,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
         let adapterEnv = null;
         try {
           await awaitThrottleIfNeeded('core', githubCredential({ token })); // the posting bot token's budget, never anonymous (LAC-2075)
+          opts.onBeforeReviewWrite?.(); // REVPOSTSTALL-01: from here the post path owns the outcome.
           adapterEnv = {
             PATH: sourceEnv.PATH ?? '/usr/bin:/bin',
             HOME: sourceEnv.HOME ?? '',
@@ -1646,6 +1648,7 @@ async function postGitHubReviewWithCapture({
   prepareReviewWrite = clearPendingReviewsForSelf,
   reviewerSpawnToken = null,
   reviewerIdentity = null,
+  onBeforeReviewWrite = null,
   reviewerTokenFetchTimeoutMs = undefined,
   lookupRetryBackoffMs = undefined,
   sleepImpl = undefined,
@@ -1711,7 +1714,7 @@ async function postGitHubReviewWithCapture({
     if (!recoveringPendingCapture) {
       const postResult = await postGitHubReview(repo, prNumber, effectiveReviewBody, botTokenEnv, execFileImpl, {
         rootDir, fetchImpl, readFileImpl, log, prepareReviewWrite,
-        reviewerSpawnToken, reviewerIdentity,
+        reviewerSpawnToken, reviewerIdentity, onBeforeReviewWrite,
         reviewerTokenFetchTimeoutMs,
         reviewerHeadSha: normalizedHeadSha || null,
       });
@@ -2073,13 +2076,17 @@ async function main() {
   // CHUNKTIME-01: the Gemini reviewer bounds its own run; see reviewer-process-deadline.mjs.
   const geminiDeadline = createGeminiReviewerProcessDeadline();
   if (effectiveModel === 'gemini' || useAgyChunkFallback) geminiDeadline.arm();
+  // REVPOSTSTALL-01: a same-binding review preserved by a stalled delivery is redelivered, not re-run.
+  const generatedReview = createGeneratedReviewDelivery({ rootDir: ROOT, repo, prNumber, headSha: reviewerHeadSha, passKind, reviewerModel: effectiveModel, botTokenEnv: effectiveBotTokenEnv,
+    reviewAttemptNumber, promptStage: reviewModeDecision.promptStage, verdictOnly, diff, sessionUuid: reviewerSessionUuid, reviewDbAttemptNumber });
+  const preservedDispatch = generatedReview.readReusable();
   try {
     console.error(`[reviewer] DEBUG: starting ${effectiveModel} review...`);
     // Single selection site (GMW-01): claude / gemini / codex. gemini routes
     // to reviewWithGemini and never falls through to codex.
     let dispatch;
     try {
-      dispatch = useAgyChunkFallback
+      dispatch = preservedDispatch || (useAgyChunkFallback
         ? await reviewAgyOversizedInChunks(diff, extraContext, {
             reviewerModel: effectiveModel,
             promptStage: reviewModeDecision.promptStage,
@@ -2095,7 +2102,7 @@ async function main() {
             reviewerSubprocessCwd,
             signal: effectiveModel === 'gemini' ? geminiDeadline.signal : undefined,
             onProgress: createReviewerProgressRecorder({ rootDir: ROOT, repo, prNumber, attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0, passKind, reviewerSessionUuid }),
-          });
+          }));
     } catch (firstErr) {
       if (!oversizedAgyRoute?.oversized || useAgyChunkFallback) throw firstErr;
       console.warn(
@@ -2162,6 +2169,7 @@ async function main() {
     if (!dispatch.chunked) assertReviewerReply(rawReviewText, { onRejected: (rejected) => persistRejectedCodexOutput({ repo, prNumber, ...rejected }) });
     assertReviewerReply(reviewText, { onRejected: (rejected) => persistRejectedCodexOutput({ repo, prNumber, ...rejected }) });
     console.error(`[reviewer] DEBUG: review completed (${reviewText.length} bytes)`);
+    generatedReview.preserve({ rawReviewText, dispatch, execution: reviewerExecution, reviewerAttribution, reviewerModel: effectiveModel, botTokenEnv: effectiveBotTokenEnv });
   } catch (err) {
     if (effectiveModel === 'claude') captureLocalReviewerUsage({ model: effectiveModel, workspacePath: reviewerSubprocessCwd, startedAt: reviewerStartedAt, rootDir: ROOT, failed: true });
     if (err.code === 'registry-unavailable') {
@@ -2232,16 +2240,17 @@ async function main() {
     }));
   }
   console.log(`[reviewer] Review generated (${reviewText.length} chars)`);
+  const deliveryGuard = generatedReview.armDeliveryDeadline({ processDeadlineAt: geminiDeadline.deadlineAt });
 
   // 3. Post to GitHub
   const reviewerMetadata = resolveReviewerMetadata(effectiveModel);
   // REVTOKENFLOOR-01: a load-scaled run can outlive the token inherited at spawn.
-  await refreshReviewerTokensForSideCalls([botTokenEnv, effectiveBotTokenEnv], { pinBotTokenEnv: effectiveBotTokenEnv || botTokenEnv });
-  const verdictModeResolution = await fetchCurrentHeadVerdictMode({
+  await deliveryGuard.track('token-refresh', refreshReviewerTokensForSideCalls([botTokenEnv, effectiveBotTokenEnv], { pinBotTokenEnv: effectiveBotTokenEnv || botTokenEnv }));
+  const verdictModeResolution = await deliveryGuard.track('verdict-mode', fetchCurrentHeadVerdictMode({
     repo,
     prNumber,
     reviewerHeadSha,
-  });
+  }));
   const verdictMode = verdictModeResolution.verdictMode;
   console.log(
     `[reviewer] Verdict mode for ${repo}#${prNumber}@${reviewerHeadSha || '<unknown-head>'}: ${verdictMode}` +
@@ -2252,11 +2261,11 @@ async function main() {
     : '';
   let scopeViolationFinding = null;
   try {
-    const scopeReview = await resolveAdditiveOnlyScopeReview({
+    const scopeReview = await deliveryGuard.track('scope-review', resolveAdditiveOnlyScopeReview({
       repo,
       prNumber,
       logger: console,
-    });
+    }));
     scopeViolationFinding = scopeReview.finding || null;
     if (scopeViolationFinding) {
       console.error(
@@ -2270,15 +2279,15 @@ async function main() {
     );
   }
   // REVIEWCHUNK-01: demote blocking cards whose quoted code is absent at head (never adds a gate).
-  const headGrounding = await groundBlockingFindingsAtHead(reviewText, { repo, headSha: reviewerHeadSha, diff,
-    checkoutDir: reviewerCheckoutDir, requireEvidence: true, log: console });
+  const headGrounding = await deliveryGuard.track('head-grounding', groundBlockingFindingsAtHead(reviewText, { repo, headSha: reviewerHeadSha, diff,
+    checkoutDir: reviewerCheckoutDir, requireEvidence: true, log: console }));
   reviewText = headGrounding.reviewText;
   persistReviewGroundingMetadata({ rootDir: ROOT, repo, prNumber, reviewDbAttemptNumber, reviewAttemptNumber, reviewerClass: effectiveModel,
     passKind, headSha: reviewerHeadSha, execution: reviewerExecution, headGrounding: headGrounding.grounding, reviewDiffScope });
-  const reviewTextForPost = filterGuardForbiddenFindings(await applyReviewScopeGates(reviewText, {
+  const reviewTextForPost = filterGuardForbiddenFindings(await deliveryGuard.track('scope-gates', applyReviewScopeGates(reviewText, {
     scopeViolationFinding, repo, prNumber, diff, prContext,
     labels: verdictModeResolution.labels, reviewerHeadSha, log: console,
-  }), guardForbiddenPaths, { log: console });
+  })), guardForbiddenPaths, { log: console });
   const fullComment = filterGitHubBody(buildReviewCommentBody({
     reviewerMetadata,
     verdictMode,
@@ -2339,9 +2348,9 @@ async function main() {
       reviewerHeadSha: reviewerHeadSha || null,
       reviewBody: fullComment,
       execution: reviewerExecution, singleReview: reviewModeDecision.singleReview,
-      reviewerAttribution: reviewerAttributionForModel(reviewerAttribution, effectiveModel),
+      reviewerAttribution: reviewerAttributionForModel(preservedDispatch ? preservedDispatch.reviewerAttribution : reviewerAttribution, effectiveModel),
       botTokenEnv: effectiveBotTokenEnv,
-      passKind,
+      passKind, onBeforeReviewWrite: deliveryGuard.markWriteStarted,
       reviewerSpawnToken,
       reviewerIdentity: resolveReviewerIdentityForBotTokenEnv(
         effectiveBotTokenEnv,
@@ -2354,6 +2363,7 @@ async function main() {
     });
     console.log(`[reviewer] Review posted to ${repo}#${prNumber}`);
     geminiDeadline.dispose();
+    deliveryGuard.delivered();
   } catch (err) {
     console.error(`[reviewer] GITHUB POST FAILED for ${repo}#${prNumber}:`, err.message);
     process.exit(reviewerPostFailureExitCode(err));

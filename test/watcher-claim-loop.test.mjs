@@ -128,6 +128,8 @@ function buildLoaderSource({
     ...(process.env.FIXTURE_THROW_HELDHEAD_REQUEST === '1' ? { [fileUrl('src', 'comment-only-final-round.mjs')]: 'fixture:heldhead' } : {}),
     [fileUrl('src', 'follow-up-jobs.mjs')]: 'fixture:follow-up-jobs',
     [fileUrl('src', 'remediation-published-head.mjs')]: 'fixture:remediation-published-head',
+    [fileUrl('src', 'remediation-publication-recovery.mjs')]: 'fixture:publication-recovery',
+    [fileUrl('src', 'adapters', 'comms', 'github-pr-comments', 'comment-delivery.mjs')]: 'fixture:comment-delivery',
     [fileUrl('src', 'remediation-ci-infrastructure.mjs')]: 'fixture:remediation-ci-infrastructure',
     [fileUrl('src', 'remediation-prompt.mjs')]: 'fixture:remediation-prompt',
     [fileUrl('src', 'follow-up-merge-agent.mjs')]: 'fixture:follow-up-merge-agent',
@@ -358,6 +360,9 @@ export async function load(url, context, nextLoad) {
     'fixture:reviewer-token-ledger-lookup': 'export async function readReviewerEvidenceInWorker() { return null; }',
     'fixture:remediation-ci-infrastructure': "export async function recoverInfrastructureCiStops() { return []; } export function holdRemediationForCiInfrastructure() { return null; } export async function resumeCiInfrastructureRound() { return null; } export function deferCiInfrastructureProbe() {} export function clearCiInfrastructureWait() { return null; }",
     'fixture:remediation-published-head': "export function completeWorkerPublishedHead() { return null; } export function completeLiveWorkerPublishedHead() { return null; } export function completeKnownWorkerPublish() { return null; } export function findWorkerPublishedHead() { return null; } export function hasWorkerPublishArtifacts() { return false; } export function buildRereviewResult() { return {}; }",
+    // Disposable-Git publication recovery is covered in its own integration suite.
+    'fixture:publication-recovery': "export async function proveStoppedPublication() { return null; }",
+    'fixture:comment-delivery': "export function addToDeliveryRetryIndex() {}",
     'fixture:session-ledger-read-adapter': ${JSON.stringify(provenanceReaderSource ?? `export * from '${fileUrl('src', 'session-ledger-read-adapter.mjs')}?actual'; export function readPrBuilderProvenanceAsync({ prNumber }) { return globalThis.__watcherClaimLoopProvenance?.(prNumber) || { ok: false, reason: 'missing-builder-provenance' }; }`)},
     'fixture:branch-protection': "export function createBranchProtectionChecker() { return {}; } export async function fetchAdversarialGateBranchProtection() {} export async function warnForMissingAdversarialGateBranchProtection() {}",
     'fixture:adversarial-gate-status': "export function readGateRecord() { return globalThis.__budgetGateRecord || null; } export function resolveSettledReviewVerdict() { return globalThis.__holdReleaseSettled || { verdict: '', remediationPending: false }; } export function buildAdversarialGateSnapshot() { return { settledReview: { verdict: '', remediationPending: false }, reviewedHeadSha: null, mergeableState: '', labels: [] }; } export function deleteGateRecordsForPR() {} export function pickAdversarialGateStatus() { return { state: 'pending', reason: 'fixture', context: 'agent-os/adversarial-gate' }; } export async function projectAdversarialGateStatus() { globalThis.__holdReleaseGateProjections = (globalThis.__holdReleaseGateProjections || 0) + 1; return { decision: { state: 'pending', reason: 'fixture' } }; } export async function publishAdversarialGateStatus() { return { posted: true }; }",

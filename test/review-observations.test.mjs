@@ -79,3 +79,34 @@ test('old partial schema is explicit, empty is observable and missing DB is unav
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+
+test('table-less stores are unavailable; a real table retains exact column drift', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'review-store-'));
+  mkdirSync(join(rootDir, 'data'));
+  const db = new Database(join(rootDir, 'data/reviews.db'));
+  const read = kind => readReviewObservations({ rootDir, selector: { kind }, repositories: ['example/repo'] });
+  try {
+    for (const kind of ['passes', 'reviews']) {
+      assert.deepEqual(read(kind).missing_fields, ['review_store']);
+      assert.equal(read(kind).scope_complete, false);
+    }
+    db.exec(`CREATE TABLE reviewer_passes(pass_id INTEGER, repo TEXT, pr_number INTEGER,
+      attempt_number INTEGER, reviewer_class TEXT, reviewer_model TEXT, pass_kind TEXT,
+      started_at TEXT, ended_at TEXT, status TEXT, metadata_json TEXT)`);
+    db.exec('ALTER TABLE reviewer_passes DROP COLUMN metadata_json');
+    assert.deepEqual(read('passes').missing_fields, ['metadata_json']);
+    db.exec(`CREATE TABLE reviewed_prs(repo TEXT, pr_number INTEGER, pr_state TEXT,
+      review_status TEXT, failure_message TEXT, reviewer_head_sha TEXT,
+      revision_ref TEXT, reviewed_at TEXT, posted_at TEXT);
+      ALTER TABLE reviewed_prs DROP COLUMN posted_at;
+      ALTER TABLE reviewer_passes ADD COLUMN body_md TEXT;
+      ALTER TABLE reviewer_passes ADD COLUMN verdict TEXT;
+      CREATE TABLE pr_merge_closeouts(repo TEXT, pr_number INTEGER,
+        closeout_body_md TEXT, closeout_posted_at TEXT)`);
+    assert.deepEqual(read('reviews').missing_fields, ['posted_at']);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});

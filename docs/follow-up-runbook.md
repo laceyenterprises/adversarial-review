@@ -1992,6 +1992,11 @@ job's `revisionRef`, external SHAs in worker commentary cannot create publicatio
 debt. Reported commit evidence remains a fallback for unavailable HQ workspaces.
 Publisher branch hydration uses the caller's environment, including scoped
 GitHub credentials, for the PR metadata read as well as Git commands.
+CI-admission publication recovery supplies its already observed live head to
+the structural replay proof. The proof validates the SHA and still performs
+a fresh GitHub head check after inspecting immutable Git objects. Concurrent
+admission that finds the same job reclassified in place as `max-rounds-reached`
+reports budget exhaustion at that proven head and retains operator escalation.
 
 ## Exact operator absence evidence (LAC-2120)
 

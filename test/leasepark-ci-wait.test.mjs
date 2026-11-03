@@ -59,7 +59,7 @@ ham_renew_ci_retry_lease
   assert.equal(missing.status, 1, missing.stderr);
 });
 
-function runWait(t, { gate, greenAfterSleep = false, greenAfterPolls = 1, launches = 1, overlap = false, failAfterGreen = false, fixture = null, staleAbortBeforeAcquire = false, daemonDuringWait = false, transientRead = false }) {
+function runWait(t, { gate, greenAfterSleep = false, greenAfterPolls = 1, launches = 1, overlap = false, rebaseConflict = false, failAfterGreen = false, fixture = null, staleAbortBeforeAcquire = false, daemonDuringWait = false, transientRead = false }) {
   const dir = mkdtempSync(join(tmpdir(), 'ci-wait-refund-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(join(dir, 'clock'), '0');
@@ -121,6 +121,7 @@ HAM_VALIDATION_BASE_SHA=${quote(fixture.validationBase)}
 ham_bounded_git_sync() { git fetch origin main >/dev/null 2>&1; }` : `ham_base_touches_pr_files() { return ${overlap ? 0 : 1}; }`}
 ham_rebase_head() {
   echo rebase >> "$TEST_ROOT/retries"
+  ${rebaseConflict ? 'HAM_PHASE_OUTCOME=rebase-conflict; return 21' : ':'}
   if [ -d .git ]; then git rebase origin/main >/dev/null 2>&1 || return 21; fi
   ham_base_touches_pr_files() { return 1; }
 }
@@ -329,7 +330,6 @@ for (const transientRead of [false, true]) {
 }
 
 for (const [name, gate] of [
-  ['conflict with green CI', { checksConclusion: 'SUCCESS', mergeable: 'CONFLICTING', reasons: ['pr-not-mergeable'] }],
   ['strict BEHIND with green CI', { checksConclusion: 'SUCCESS', mergeStateStatus: 'BEHIND', reasons: ['pr-not-mergeable'] }],
   ['closed PR', { checksConclusion: 'SUCCESS', state: 'CLOSED', reasons: ['pr-not-mergeable'] }],
   ['pending CI plus a label hold', { checksConclusion: 'PENDING', reasons: ['ci-not-green', 'label-do-not-merge'] }],
@@ -338,6 +338,20 @@ for (const [name, gate] of [
     const result = runWait(t, { gate: { ok: false, ...gate } });
     assert.match(result.audit, /failed-without-merge github-gate-timeout/);
     assert.doesNotMatch(result.audit, /deferred/);
+  });
+}
+
+for (const checksConclusion of ['SUCCESS', null]) {
+  test(`CONFLICTBEFORECI known conflict hands off bounded repair with CI ${checksConclusion}`, t => {
+    const result = runWait(t, {
+      gate: { ok: false, checksConclusion, mergeable: 'CONFLICTING', reasons: ['pr-not-mergeable'] },
+      overlap: true, rebaseConflict: true,
+    });
+    assert.match(result.audit, /failed-without-merge rebase-conflict/);
+    assert.match(result.audit, /exit:21/);
+    assert.doesNotMatch(result.audit, /github-gate-timeout/);
+    assert.equal(readFileSync(join(result.dir, 'retries'), 'utf8'), 'rebase\n');
+    assert.equal(inspectMergeLease({ rootDir: result.dir, repo: 'fixture/repo', base: 'main' }).holder, null);
   });
 }
 

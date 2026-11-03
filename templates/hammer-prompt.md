@@ -51,8 +51,7 @@ explicit conflict or deferred paths in this table.
    `hammer-publish.sh`, then unset the flag on success. This does not publish a
    validated audit. Use Appendix C's ordinary publication block.
 4. **Verify head:** source `hammer-verify-head.sh`; act on the table below.
-   CONFLICTBEFORECI-01: resolve positive CONFLICTING/DIRTY before waiting for checks;
-   pull_request CI may be absent until repair. UNKNOWN remains an observation wait.
+   CONFLICTING/DIRTY enters bounded repair before absent-CI waits; UNKNOWN observes.
 5. **Publish audit:** with revalidation complete and the lease held, source
    `hammer-publish.sh` without publication-only mode. Prepare audit inputs in
    Appendix A. Run Appendix E's bounded exact-head CI wait, then build and run its predicate.

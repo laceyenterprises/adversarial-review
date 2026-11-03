@@ -53,6 +53,8 @@ acknowledgements, head races, publication/snapshot failures, cancellation and
 lease cleanup. `test/pr-next-action.test.mjs` covers conflict resume, existing
 owner and safety refusal precedence, and UNKNOWN/BEHIND observation. Normal
 controller and publication suites remain part of validation.
+`test/leasepark-ci-wait.test.mjs` pins the shared wait consumer's exit-21
+handoff and lease release for known conflicts with green or absent CI.
 
 Stable v2 requirement/scenario: CONFLICTBEFORECI-01/positive-conflict-absent-checks.
 Invariant: a known conflict has a bounded native repair successor before a CI

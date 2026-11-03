@@ -242,6 +242,7 @@ test('API fallback push rejection releases the lease under set -e for both push 
   writeFileSync(join(dir, 'publisher'), `#!/bin/sh
 case "$1" in
   */metered-gh.mjs) exec "$REAL_NODE" "$@" ;;
+  */hammer-progress.mjs) printf '%s\\n' "$2 $3" >> "$PROGRESS_ARGS_FILE" ;;
   */hammer-pushed-attestation.mjs) printf '%s\\n' "$*" > "$ATTESTATION_ARGS_FILE"; echo '{}' ;;
   *) printf '%s\\n' "$PUBLISH_RESULT" ;;
 esac
@@ -259,8 +260,10 @@ esac
       previousHead: 'a'.repeat(40), pushedHead: 'b'.repeat(40) },
   ]) {
     rmSync(join(dir, 'push-args'), { force: true });
+    rmSync(join(dir, 'progress-args'), { force: true });
     const env = { REAL_NODE: process.execPath, HAMMER_LACEY_GH_TOKEN: 'synthetic-hammer', HAM_COMMIT_PUBLICATION_ONLY: '1', HAM_NODE_BIN: join(dir, 'publisher'),
       PUBLISH_RESULT: JSON.stringify(result), PUSH_ARGS_FILE: join(dir, 'push-args'),
+      PROGRESS_ARGS_FILE: join(dir, 'progress-args'),
       ATTESTATION_ARGS_FILE: join(dir, 'attestation-args'), PATH: `${dir}:${process.env.PATH}` };
     const failure = run('/bin/bash', ['-c', `set -e
 HAM_MERGE_LEASE_HELD=1
@@ -276,7 +279,10 @@ echo SHOULD_NOT_CONTINUE
       assert.equal(readFileSync(env.ATTESTATION_ARGS_FILE, 'utf8').trim(),
         `${root}/bin/hammer-pushed-attestation.mjs fixture/repo 1 ${result.previousHead} ${result.pushedHead}`);
       assert.equal(existsSync(env.PUSH_ARGS_FILE), false, 'unsynchronized local HEAD must never be pushed');
+      assert.equal(readFileSync(env.PROGRESS_ARGS_FILE, 'utf8'),
+        `remediation-pushed ${result.pushedHead}\n`, 'known pushed head returns before the ordinary progress call');
     } else {
+      assert.equal(existsSync(env.PROGRESS_ARGS_FILE), false, 'a rejected push earns no publication receipt');
       assert.equal(readFileSync(env.PUSH_ARGS_FILE, 'utf8').trim(), result.branch
         ? `push origin HEAD:refs/heads/worker --force-with-lease=refs/heads/worker:${result.fallbackHead}`
         : 'push --force-with-lease');
@@ -685,6 +691,13 @@ echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OWN=$HAM_OWN_MERGE_EXECUTED EXIT=$HAM
     if (successfulMerge) {
       assert.match(result.stdout, /STATUS=0 HELD=0 OWN=1 EXIT=0/);
       assert.equal(readFileSync(join(dir, 'merge-head'), 'utf8'), head);
+      assert.doesNotMatch(result.stderr, /merge-action receipt unavailable/);
+      const outcome = JSON.parse(readFileSync(join(dir,
+        'dispatch/lrq_receipt-fixture/hammer-progress/wrun_receipt-fixture/outcome.json'), 'utf8'));
+      assert.equal(outcome.outcome, 'merged', 'post-merge JSON reaches the real receipt CLI');
+      assert.equal(outcome.headSha, head);
+      assert.equal(outcome.mergeCommitSha, 'b'.repeat(40));
+      assert.equal(outcome.proof, 'github-exact-head-own-merge');
     } else if (scenario.startsWith('accepted')) {
       assert.equal(readFileSync(join(dir, 'merge-attempted'), 'utf8').trim(), 'attempted');
       assert.match(result.stdout, /OWN=1 EXIT=0/);

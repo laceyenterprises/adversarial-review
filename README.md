@@ -4490,6 +4490,8 @@ refusal, cancellation and unknown exits; process success alone proves no merge.
 
 ## Change notes
 
+- PR #1701 final comment remediation: strengthen offline fixtures to assert that the known-published-head stop emits one progress call and that successful merges persist run-scoped exact-head proof from the post-merge JSON read. The outcome classifier always returns an object, including for missing live state; production behavior, persistent shapes, lifecycle states and smoke promises remain unchanged.
+
 - PR #1701 rescue: give rendered merge fixtures isolated launch/run identities, keep ambient worker identity out of fixtures, and assert retry events retain their raw infrastructure reason in `lastPhase` alongside the classified outcome. Existing exact-head merge-proof and retry/refund rules remain enforced.
 
 - LAC-2133 final comment remediation: accept camelCase launch request time and identity in the live closer inspection handoff, including its diagnostic timestamp, while retaining snake_case precedence and custody fences. Offline regressions cover alias timing, identity mismatches and incomplete snapshots; the existing subject/head guard already rejects a missing snapshot.

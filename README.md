@@ -4463,6 +4463,8 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- SENTINELREVIEWROOT-01: table-less review evidence returns `review_store` unavailable, preserving column diagnostics for existing tables. Synthetic fixtures cover both selectors and single-column drift.
+
 - LAC-2146 final remediation: the qualification in [PR #1691](https://github.com/laceyenterprises/adversarial-review/pull/1691) covers unresolved unpooled fallback attribution in `skipped[]`, including an absent resolver and exhausted or successful subsequent routes.
 
 - GEMREMEDIATORCLASS-01 / LAC-2146: [PR #1691](https://github.com/laceyenterprises/adversarial-review/pull/1691) implements concrete HQ `remediator-gemini` routing while preserving the logical remediation route, registered model policy, entitlements and dedicated builder isolation. The paired [Agent OS #10117](https://github.com/laceyenterprises/agent-os/pull/10117) release and live adoption remain separately gated by [LAC-2146](https://linear.app/laceyenterprises/issue/LAC-2146).

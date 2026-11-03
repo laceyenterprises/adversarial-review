@@ -32,7 +32,7 @@ export function readReviewObservations({ rootDir, selector, repositories }) {
     const cols = columns(db, table);
     if (!cols.has('repo') || !cols.has('pr_number')) {
       if (cols.size === 0) return { schema_version: 1, kind, items: [], complete: true, next_offset: null,
-        missing_fields: FIELDS[kind], observed_at: new Date().toISOString(), scope_complete: false, mutation_authority: false };
+        missing_fields: ['review_store'], observed_at: new Date().toISOString(), scope_complete: false, mutation_authority: false };
       throw new Error('review identity schema unavailable');
     }
     const missing = FIELDS[kind].filter(field => !cols.has(field));

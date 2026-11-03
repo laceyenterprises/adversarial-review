@@ -4474,6 +4474,10 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 - REMPUBPROOF-01: prove rebased remediation publication from equivalent worker patches on the live head; recover proven publication stops once through validated final completion or the remaining CI-regression round budget. Retained unpublished debt names both heads. Synthetic Git fixtures cover rebase, missing/partial work, unrelated heads, stale evidence, final blockers and budget exhaustion.
 
+- PR #1692 final review: cover exact single-column drift for both the passes and reviews selectors, including the reviews enrichment tables. Table-less stores retain the unavailable-store contract.
+
+- SENTINELREVIEWROOT-01: table-less review evidence returns `review_store` unavailable, preserving column diagnostics for existing tables. Synthetic fixtures cover both selectors and single-column drift.
+
 - PR #1693 HAM remediation: cache the produced-head snapshot fields once in the retention guard and remove the unreachable conflict alternative from the downstream green-CI branch. Offline regression tests retain conflict-first repair and base-policy behavior.
 
 - LAC-2148 final comment remediation: pass snapshot mergeability and merge state into the verify-head base-policy helper so its conflict guards remain authoritative at the produced-head retention call. Focused offline tests cover the snapshot arguments.

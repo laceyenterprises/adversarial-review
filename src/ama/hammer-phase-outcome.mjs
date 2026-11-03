@@ -2,6 +2,8 @@
 // explicit: a red check, moved head or lost owner must never match by message.
 export const HAMMER_RETRYABLE_READ_OUTCOMES = new Set([
   'git-credential-refresh-failed',
+  'launch-environment-read-unavailable',
+  'launch-environment-missing-legacy-dispatch',
   'merge-lease-base-read-failed',
   'verify-head-pr-read-failed',
   'missing-pr-state',

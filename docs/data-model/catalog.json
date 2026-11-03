@@ -55,7 +55,7 @@
       "path": "docs/data-model/hammer-progress.md",
       "store": "<HQ root>/dispatch/<launchRequestId>/hammer-progress/<runId>/<milestone>.json",
       "schemaSurface": "src/ama/hammer-progress.mjs",
-      "relatedSchemaSurfaces": ["bin/hammer-progress.mjs", "bin/hammer-validate.mjs", "templates/hammer-prompt.md", "bin/metered-gh.mjs", "src/ama/hammer-terminal-audit.mjs", "bin/hammer-verify-head.sh", "bin/hammer-publish.sh"],
+      "relatedSchemaSurfaces": ["bin/hammer-progress.mjs", "bin/hammer-validate.mjs", "templates/hammer-prompt.md", "bin/metered-gh.mjs", "src/ama/hammer-terminal-audit.mjs", "src/ama/hammer-controller.mjs", "bin/hammer-verify-head.sh", "bin/hammer-publish.sh"],
       "owner": "active HAM worker run",
       "primaryKey": ["launchRequestId", "runId", "milestone"],
       "fields": ["schemaVersion", "launchRequestId", "runId", "milestone", "at", "reason"],

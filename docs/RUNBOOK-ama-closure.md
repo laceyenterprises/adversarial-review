@@ -65,7 +65,24 @@ uses `HAM_HQ_ROOT` when set, otherwise the standard `HQ_ROOT` /
 `AGENT_OS_HQ_ROOT` / home-directory fallback. The exported
 `controllerLaunchEnvironment()` defaults to `process.env`. A later worker
 export cannot enable a missing/disabled record or disable an enabled one.
-Missing, malformed or foreign records refuse startup. The strict string check,
+Startup takes up to `LAUNCH_READ_ATTEMPTS` dispatch-file reads, sizing each
+with `launchReadTimeoutMs()` through the shared load-aware helper. Exhaustion
+records `launch-environment-read-unavailable` and exits 75 before child spawn
+or merge-lease acquisition. An identity-matching older dispatch record with
+no `launchEnvironment` records `launch-environment-missing-legacy-dispatch`;
+it also refuses execution with retryable exit 75 and requires the adapter
+producer revision on the next launch. Neither case adopts a shell export.
+These synchronous lookups run back-to-back without delay or backoff. Each
+lookup receives its own timeout; fast failures can exhaust immediately and
+defer to the existing uncharged closer retry rather than wait for a writer.
+Both retryable outcomes write no `terminal-stop` progress receipt, so the
+supervisor's final-stop grace cannot convert their deferred audit into a
+charged terminal stop.
+A present value without boolean `dispatchReadsEnabled` records
+`controller-launch-environment-malformed` and hard-stops with exit 125.
+A foreign launch identity retains
+`controller-launch-environment-identity-unconfirmed` and exit 125.
+The strict string check,
 SDK/HCP reader and grants are unchanged.
 
 The tracked watcher/follow-up service environment activates those services;
@@ -85,6 +102,25 @@ forced launch, ledger mutation or new smoke step is authorized by this change.
 - **HAMGITTOKEN-01:** Refresh-on-request Git authentication replaces the
   startup-token helper. A failed mint produces the existing retryable
   infrastructure abort with reason `git-credential-refresh-failed`.
+
+### CLOSERLAUNCHENV-01 — retry launch-environment observations
+
+The two explicit launch-environment read/legacy outcomes join
+`HAMMER_RETRYABLE_READ_OUTCOMES`. Before controller startup they write a
+launch-bound deferred audit; the existing VERIFYHEADTRANSIENT-01 reconciliation
+retains the hammer retry owner and load-aware deadline and refunds series,
+target and lifetime closer accounting. Malformed values and foreign identities
+remain final. No state, cap, gate, lease or persisted field is added.
+Malformed and foreign startup failures still emit a final `terminal-stop`
+receipt; retryable startup failures emit only their deferred audit.
+
+After merge, the deployment owner floats the submodule, deploys and bounces
+the service. Retain natural-traffic evidence of zero identity-unconfirmed
+stops caused by transient reads, or an explicit read-unavailable outcome
+recorded as retryable with its owner/deadline and unchanged cap spend.
+This change authorizes no live restart or synthetic dispatch.
+The [operator handoff plan](../modules/worker-pool/post-merge-actions/closerlaunchenv-01-recovery-receipt.yaml)
+records that requirement and executes no live action or probe.
 
 ### VERIFYHEADTRANSIENT-01 — retry infrastructure observations
 

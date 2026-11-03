@@ -17,6 +17,7 @@ import { resolveHqRoot } from '../hq-root.mjs';
 import { readAmaAuditEntry } from './audit.mjs';
 import { HAMMER_RETRYABLE_READ_OUTCOMES } from './hammer-phase-outcome.mjs';
 import { hammerGitOptions } from '../hammer-token.mjs';
+import { reportHammerEarlyFailure } from './hammer-terminal-audit.mjs';
 
 // A slow or failed ledger read is not a cancellation. Only a readable terminal,
 // parked or foreign row stops a round at once; reads that fail stop it only
@@ -31,7 +32,7 @@ export const LAUNCH_GATE_WAIT_MS = 60_000;
 // The public launch reader's nominal timeout, scaled once per read.
 const LAUNCH_READ_NOMINAL_MS = 30_000;
 
-export function launchReadTimeoutMs() { return loadAwareTimeoutMs(LAUNCH_READ_NOMINAL_MS); }
+export function launchReadTimeoutMs(options = {}) { return loadAwareTimeoutMs(LAUNCH_READ_NOMINAL_MS, options); }
 
 // Compatibility shim: launch transport no longer interprets database settings.
 export function controllerLedgerTarget() { return undefined; }
@@ -48,13 +49,26 @@ export function controllerLaunchId(env) {
 
 // Activation belongs to the adapter's launch record, not a later shell export.
 // This is environment provenance only; launch status still uses the SDK reader.
-export function controllerLaunchEnvironment(env = process.env, {readDispatchFilesImpl = readDispatchFilesSync} = {}) {
+export function controllerLaunchEnvironment(env = process.env, {
+  readDispatchFilesImpl = readDispatchFilesSync, readTimeoutImpl = launchReadTimeoutMs,
+} = {}) {
   const launchRequestId = controllerLaunchId(env);
-  const result = readDispatchFilesImpl({launch_request_id: launchRequestId}, {env});
-  const enabled = result?.metadata?.launchEnvironment?.dispatchReadsEnabled;
-  if (!result?.ok || result.metadata.launchRequestId !== launchRequestId || typeof enabled !== 'boolean') {
-    throw new Error('hammer controller launch environment identity unconfirmed');
+  let result;
+  // This synchronous compatibility path retries back-to-back, without backoff.
+  // Each lookup has a load-aware timeout; fast failures may exhaust immediately
+  // and defer startup to the existing uncharged closer retry path.
+  for (let attempt = 1; attempt <= LAUNCH_READ_ATTEMPTS; attempt += 1) {
+    try {
+      result = readDispatchFilesImpl({launch_request_id: launchRequestId}, {env, timeoutMs: readTimeoutImpl()});
+    } catch { result = null; }
+    if (result?.ok === true) break;
   }
+  const refuse = reason => { throw Object.assign(new Error(reason), { phaseOutcome: reason }); };
+  if (result?.ok !== true) refuse('launch-environment-read-unavailable');
+  if (result.metadata?.launchRequestId !== launchRequestId) refuse('controller-launch-environment-identity-unconfirmed');
+  if (!Object.hasOwn(result.metadata, 'launchEnvironment')) refuse('launch-environment-missing-legacy-dispatch');
+  const enabled = result.metadata.launchEnvironment?.dispatchReadsEnabled;
+  if (typeof enabled !== 'boolean') refuse('controller-launch-environment-malformed');
   return {...env, ADVERSARIAL_DISPATCH_READS_ENABLED: enabled ? '1' : '0'};
 }
 
@@ -209,6 +223,7 @@ export async function runHammerController(script, args = [], {
   unreadableGraceMs = LAUNCH_UNREADABLE_GRACE_MS, gateWaitMs = LAUNCH_GATE_WAIT_MS,
   readLaunchImpl = readLaunchRequestStatusFromLedgerAsync,
   readTimeoutImpl = launchReadTimeoutMs,
+  readDispatchFilesImpl = readDispatchFilesSync,
   nowImpl = () => performance.now(), delayImpl = delay,
   snapshotImpl, groupCensusImpl = createControllerGroupCensus,
   releaseImpl = releaseControllerLease,
@@ -220,7 +235,14 @@ export async function runHammerController(script, args = [], {
   if (!env.HAM_RUN_DIR || !env.HAM_ROOT_DIR || !env.HAM_REPO || !/^[1-9]\d*$/.test(env.HAM_PR_NUMBER || '')) {
     throw new Error('source inputs.sh before starting the hammer controller');
   }
-  env = controllerLaunchEnvironment(env);
+  try {
+    env = controllerLaunchEnvironment(env, { readDispatchFilesImpl, readTimeoutImpl });
+  } catch (error) {
+    if (error.phaseOutcome) reportHammerEarlyFailure(error.phaseOutcome, {
+      env, final: !HAMMER_RETRYABLE_READ_OUTCOMES.has(error.phaseOutcome),
+    });
+    throw error;
+  }
   const census = snapshotImpl ? null : groupCensusImpl({ env });
   snapshotImpl ??= census.snapshot;
   // Reads abandoned at exit must not hold the process open until they time out.

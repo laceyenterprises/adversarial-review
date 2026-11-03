@@ -4468,6 +4468,8 @@ Deploy this reader before activating these keys in core's checked-in config.
 
 ## Change notes
 
+- PR #1697 rescue integration: reviewed the existing terminal-retry and dispatch-outcome edges, documented fresh replacement identity and bootstrap-drain custody, and refreshed the combined dispatcher source projection without changing lifecycle enum values or graph edges. The independent SMV graph and mutation tests remain authoritative.
+
 - CLOSERCRASHRECLAIM-01 final comment remediation: deduplicate successful bootstrap-drain signals, fall back to direct-child termination after group signaling errors, and place the crash-recovery guidance in its own [closure runbook subsection](docs/RUNBOOK-ama-closure.md#closer-crash-recovery-closercrashreclaim-01). Offline regressions cover delayed exit, escalation and unconfirmed drain.
 
 - CLOSERCRASHRECLAIM-01: drain readiness controller groups after bootstrap failure; allocate a fresh worker identity after terminal lease reclamation; key hammer wakes by lease generation and next attempt. Live-owner and dirty-tree fences remain enforced. See [closure recovery](docs/RUNBOOK-ama-closure.md).

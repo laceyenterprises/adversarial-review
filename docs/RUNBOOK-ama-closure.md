@@ -7725,6 +7725,40 @@ operator action. Confirm the merged head matches the green head and no extra
 rebase occurred merely because main advanced. This live receipt is post-merge
 verification; offline synthetic fixtures do not establish it.
 
+## Repeated no-delivery closer attempts (CLOSERRETRY-01)
+
+A closer attempt that ends with the PR open and its head unmoved delivered
+neither a merge nor a push, and each attempt reloads the whole repository
+context. The per-head dispatch record and the per-PR hammer cap allow one retry
+after a first failure, but their refunds (exited without closing, no-work,
+label-gate) could still admit a third attempt with the same failure.
+
+`src/ama/closer-no-delivery.mjs` keeps one file per PR,
+`data/follow-up-jobs/closer-no-delivery/<repo>-pr-<n>.json`, holding terminal
+no-delivery attempts keyed on `(head, failure class)`. The failure class is the
+hammer's classified phase outcome (for example `crashed`, `ci-red`, `conflict`),
+else its no-merge outcome code, else `launch:<LRQ failure class>` or
+`launch-failed`. Each launch counts once.
+
+- **Gate.** After the hammer cap and before the prompt write, harness
+  resolution and quota probe, the closer stops when the latest failure class has
+  already ended two attempts on the current head. It returns
+  `closer-repeat-no-delivery-skipped` with `needsOperator: true`, the existing
+  stuck signal. It adds no label.
+- **Record.** Each skipped repeat increments `skippedCount` on the key
+  (`firstSkippedAt`, `lastSkippedAt`) and logs
+  `ama_closer.repeat_no_delivery_skipped` with the head, class, prior attempts
+  and last launch.
+- **Re-enabled by.** A new head (a new key); a different failure class that has
+  not yet repeated (allowed once); the existing APPROVALREARM-01 allowance, which
+  clears the head's attempts once per grant (`ama_closer.no_delivery_redrive`);
+  or `npm run reset-pr -- <owner/repo> <pr>`, which moves the ledger into the
+  operator reset archive and names it as `closerNoDeliveryLedger` in the receipt.
+- **Spends no key.** Infrastructure-read and lane-busy deferrals, and an
+  infrastructure death whose dispatch was refunded under CLOSERREUSE-01.
+- **Unreadable file.** An unreadable or corrupt ledger blocks and is never
+  overwritten. A re-drive replaces it.
+
 ## Awaited operator approval after exhausted retries (APPROVALREARM-01)
 
 A closer refusal must name its required approval as an audit

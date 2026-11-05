@@ -1,14 +1,16 @@
 import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import {
   CLOSER_NO_DELIVERY_ATTEMPTS_PER_KEY,
   CLOSER_REPEAT_SKIPPED_REASON,
+  CLOSER_REPEAT_SKIP_PERSIST_INTERVAL_MS,
   applyCloserOperatorRedrive,
+  closerNoDeliveryAttemptKey,
   closerNoDeliveryFilePath,
   evaluateCloserNoDeliveryGate,
   readCloserNoDeliveryLedger,
@@ -64,14 +66,58 @@ test('a second no-delivery attempt on the same head and failure class is skipped
   assert.equal(decision.failureClass, 'ci-red');
   assert.equal(decision.priorAttempts, 2);
   assert.equal(decision.lastLaunchRequestId, 'lrq_synth_ci-red_2');
-  // Each skipped repeat is counted on its key.
-  assert.equal(recordCloserRepeatSkipped(rootDir, IDENTITY, { headSha: HEAD, failureClass: 'ci-red',
-    now: '2026-11-01T11:00:00Z' }).skippedCount, 1);
-  assert.equal(recordCloserRepeatSkipped(rootDir, IDENTITY, { headSha: HEAD, failureClass: 'ci-red',
-    now: '2026-11-01T11:05:00Z' }).skippedCount, 2);
+  // Entering the skipped state is persisted; later skips are persisted at most
+  // once per interval, so a stuck PR does not rewrite the ledger every poll.
+  assert.equal(CLOSER_REPEAT_SKIP_PERSIST_INTERVAL_MS, 15 * 60 * 1000);
+  const skip = (now) => recordCloserRepeatSkipped(rootDir, IDENTITY, { headSha: HEAD, failureClass: 'ci-red', now });
+  const filePath = closerNoDeliveryFilePath(rootDir, IDENTITY);
+  assert.deepEqual(skip('2026-11-01T11:00:00Z'), { skippedCount: 1, persisted: true });
+  const afterFirst = readFileSync(filePath, 'utf8');
+  assert.deepEqual(skip('2026-11-01T11:05:00Z'), { skippedCount: 1, persisted: false });
+  assert.deepEqual(skip('2026-11-01T11:14:59Z'), { skippedCount: 1, persisted: false });
+  assert.equal(readFileSync(filePath, 'utf8'), afterFirst, 'a throttled skip does not rewrite the ledger');
+  assert.deepEqual(skip('2026-11-01T11:15:00Z'), { skippedCount: 2, persisted: true });
   const key = readCloserNoDeliveryLedger(rootDir, IDENTITY).heads[HEAD].classes['ci-red'];
+  assert.equal(key.skippedCount, 2);
   assert.equal(key.firstSkippedAt, '2026-11-01T11:00:00Z');
-  assert.equal(key.lastSkippedAt, '2026-11-01T11:05:00Z');
+  assert.equal(key.lastSkippedAt, '2026-11-01T11:15:00Z');
+  // A clock that moved backwards persists rather than suppressing the record.
+  assert.deepEqual(skip('2026-11-01T10:00:00Z'), { skippedCount: 3, persisted: true });
+});
+
+test('a failed attempt without a launch id counts once across repeated polls', (t) => {
+  const rootDir = tempRoot(t);
+  const record = { dispatchId: 'dispatch_synth_nolrq', lastAttemptedAt: '2026-11-01T09:00:00Z' };
+  const observe = (n, attemptKey) => recordCloserNoDeliveryAttempt(rootDir, IDENTITY, {
+    headSha: HEAD, failureClass: 'crashed', launchRequestId: null, attemptKey,
+    now: `2026-11-01T10:0${n}:00Z` });
+  assert.equal(observe(1, closerNoDeliveryAttemptKey(record)).recorded, true);
+  for (let n = 2; n <= 5; n += 1) {
+    assert.equal(observe(n, closerNoDeliveryAttemptKey(record)).reason, 'already-recorded');
+  }
+  assert.equal(gate(rootDir).skip, false, 'one failure keeps its bounded retry');
+  assert.equal(gate(rootDir).priorAttempts, 1);
+  // A second, distinct dispatch of the same class is the repeat.
+  assert.equal(observe(6, closerNoDeliveryAttemptKey({ dispatchId: 'dispatch_synth_nolrq_2' })).recorded, true);
+  assert.equal(gate(rootDir).skip, true);
+});
+
+test('an attempt with no identity at all cannot spend the retry by being re-observed', (t) => {
+  const rootDir = tempRoot(t);
+  const observe = (n) => recordCloserNoDeliveryAttempt(rootDir, IDENTITY, {
+    headSha: HEAD, failureClass: 'crashed', now: `2026-11-01T10:0${n}:00Z` });
+  assert.equal(observe(1).recorded, true);
+  assert.equal(observe(2).reason, 'already-recorded');
+  assert.equal(gate(rootDir).skip, false);
+});
+
+test('attempt identity falls back from dispatch id to intent key to attempt time', () => {
+  assert.equal(closerNoDeliveryAttemptKey({ dispatchId: 'd1', dispatchIdempotencyKey: 'k1' }), 'dispatch:d1');
+  assert.equal(closerNoDeliveryAttemptKey({ dispatchIdempotencyKey: 'k1', lastAttemptedAt: 't' }), 'intent:k1');
+  assert.equal(closerNoDeliveryAttemptKey({ lastAttemptedAt: 't1', dispatchedAt: 't0' }), 'attempted:t1');
+  assert.equal(closerNoDeliveryAttemptKey({ dispatchedAt: 't0' }), 'attempted:t0');
+  assert.equal(closerNoDeliveryAttemptKey({}), null);
+  assert.equal(closerNoDeliveryAttemptKey(null), null);
 });
 
 test('re-observing one terminal launch does not count it twice', (t) => {
@@ -148,6 +194,26 @@ test('ledger keeps a bounded number of heads', (t) => {
       failureClass: 'crashed', launchRequestId: `lrq_synth_${i}`, now: `2026-11-01T10:${String(i).padStart(2, '0')}:00Z` });
   }
   assert.equal(Object.keys(readCloserNoDeliveryLedger(rootDir, IDENTITY).heads).length, 8);
+});
+
+test('head pruning keeps the newest heads when some timestamps are missing or malformed', (t) => {
+  const rootDir = tempRoot(t);
+  const heads = {};
+  for (let i = 0; i < 6; i += 1) {
+    heads[`bad${i}${'e'.repeat(36)}`] = { classes: {}, latestClass: null, redriveKeys: [],
+      updatedAt: i % 2 ? null : 'not-a-date' };
+  }
+  mkdirSync(dirname(closerNoDeliveryFilePath(rootDir, IDENTITY)), { recursive: true });
+  writeFileSync(closerNoDeliveryFilePath(rootDir, IDENTITY), JSON.stringify({ schemaVersion: 1, repo: REPO,
+    prNumber: PR, heads }));
+  const fresh = [];
+  for (let i = 0; i < 8; i += 1) {
+    const headSha = `${String(i).padStart(2, '0')}${'f'.repeat(38)}`;
+    fresh.push(headSha);
+    recordCloserNoDeliveryAttempt(rootDir, IDENTITY, { headSha, failureClass: 'crashed',
+      launchRequestId: `lrq_synth_fresh_${i}`, now: `2026-11-01T10:${String(i).padStart(2, '0')}:00Z` });
+  }
+  assert.deepEqual(Object.keys(readCloserNoDeliveryLedger(rootDir, IDENTITY).heads).sort(), fresh.sort());
 });
 
 // ── closer dispatch ───────────────────────────────────────────────────────
@@ -258,10 +324,18 @@ test('closer: a repeated no-delivery failure on the same head is skipped before 
   assert.ok(logged, 'the skipped repeat is written to the decision log');
   assert.equal(logged.headSha, HEAD);
   assert.equal(logged.failureClass, failureClass);
-  // Every later poll is skipped and counted again, not silent.
+  assert.equal(logged.skipPersisted, true);
+  // Every later poll is skipped and logged, not silent; within the persist
+  // interval it does not rewrite the ledger.
   const again = await pollCloser(rootDir);
   assert.equal(again.result.reason, CLOSER_REPEAT_SKIPPED_REASON);
-  assert.equal(readCloserNoDeliveryLedger(rootDir, IDENTITY).heads[HEAD].classes[failureClass].skippedCount, 2);
+  assert.deepEqual(again.dispatchCalls, []);
+  const loggedAgain = again.events.map((m) => { try { return JSON.parse(m); } catch { return null; } })
+    .find((e) => e?.event === 'ama_closer.repeat_no_delivery_skipped');
+  assert.ok(loggedAgain, 'a throttled skip is still written to the decision log');
+  assert.equal(loggedAgain.skipPersisted, false);
+  assert.equal(loggedAgain.skippedCount, 1);
+  assert.equal(readCloserNoDeliveryLedger(rootDir, IDENTITY).heads[HEAD].classes[failureClass].skippedCount, 1);
 });
 
 test('closer: a new head re-enables the closer', async (t) => {

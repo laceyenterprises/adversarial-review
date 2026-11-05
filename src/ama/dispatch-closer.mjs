@@ -212,6 +212,7 @@ import {
   CLOSER_REPEAT_SKIPPED_EVENT,
   CLOSER_REPEAT_SKIPPED_REASON,
   applyCloserOperatorRedrive,
+  closerNoDeliveryAttemptKey,
   evaluateCloserNoDeliveryGate,
   readCloserNoDeliveryLedger,
   recordCloserNoDeliveryAttempt,
@@ -6975,6 +6976,8 @@ async function maybeDispatchAmaCloserAttempt({
             failureClass: hammerNoDeliveryClass
               || (deadHammerRearmOutcome?.failureClass ? `launch:${deadHammerRearmOutcome.failureClass}` : 'launch-failed'),
             launchRequestId: existingRecord.launchRequestId,
+            // A launch without an LRQ id is still one attempt across polls.
+            attemptKey: closerNoDeliveryAttemptKey(existingRecord),
             workerClass: existingRecord.dispatchWorkerClass || existingRecord.workerClass || workerClass,
             now: dispatchContext.dispatchedAt,
           });
@@ -7295,7 +7298,7 @@ async function maybeDispatchAmaCloserAttempt({
         repo, prNumber, headSha: noDeliveryHead, reason: redriveApplied.reason }, { level: 'info' });
     }
     if (noDeliveryGate.skip) {
-      let skipped = { skippedCount: null };
+      let skipped = { skippedCount: null, persisted: false };
       try {
         skipped = recordCloserRepeatSkipped(rootDir, noDeliveryIdentity, {
           headSha: noDeliveryHead, failureClass: noDeliveryGate.failureClass, now: dispatchContext.dispatchedAt });
@@ -7306,6 +7309,7 @@ async function maybeDispatchAmaCloserAttempt({
         repo, prNumber, headSha: noDeliveryHead, failureClass: noDeliveryGate.failureClass,
         gate: noDeliveryGate.reason, priorAttempts: noDeliveryGate.priorAttempts,
         lastLaunchRequestId: noDeliveryGate.lastLaunchRequestId, skippedCount: skipped.skippedCount,
+        skipPersisted: skipped.persisted,
         message: 'closer not re-dispatched: repeated terminal no-delivery attempts exist for this head and failure class; '
           + 'a new head, a different failure class or an operator re-drive makes the PR eligible',
       }, { level: 'warn' });

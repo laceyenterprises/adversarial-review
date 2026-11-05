@@ -18,8 +18,9 @@
 //     approval allowance, or `npm run reset-pr`). A re-drive clears the head's
 //     attempts, so the re-driven attempt is bounded the same way.
 //
-// Each skipped repeat is counted on the key and returned to the caller, which
-// logs it and reports the existing needs-operator result. No new label.
+// Each skipped repeat is returned to the caller, which logs it and reports the
+// existing needs-operator result; the ledger counts entry into the skipped state
+// and then at most one skip per interval. No new label.
 //
 // The file is keyed on the PR, not the head, and prunes old heads, so it stays
 // small while a hammer moves the head.
@@ -37,6 +38,17 @@ export const CLOSER_REPEAT_SKIPPED_REASON = 'closer-repeat-no-delivery-skipped';
 export const CLOSER_REPEAT_SKIPPED_EVENT = 'ama_closer.repeat_no_delivery_skipped';
 const MAX_HEADS_RETAINED = 8;
 const MAX_ATTEMPTS_PER_CLASS = 16;
+// A PR held in the skipped state is re-gated on every poll. Its skip is
+// persisted when it enters that state, then at most once per interval per key,
+// so a stuck PR does not rewrite the ledger every tick. Every skip is logged.
+export const CLOSER_REPEAT_SKIP_PERSIST_INTERVAL_MS = 15 * 60 * 1000;
+// Shared identity of attempts that carry no launch, dispatch or intent id.
+const UNIDENTIFIED_ATTEMPT_KEY = 'unidentified';
+
+// A missing or malformed timestamp sorts as the oldest, never as NaN.
+function timestampMs(value) {
+  return Date.parse(value) || 0;
+}
 
 function ledgerDir(rootDir) {
   return join(rootDir, 'data', 'follow-up-jobs', 'closer-no-delivery');
@@ -86,7 +98,7 @@ export function readCloserNoDeliveryLedger(rootDir, identity) {
 function writeLedger(rootDir, identity, doc) {
   mkdirSync(ledgerDir(rootDir), { recursive: true });
   const heads = Object.entries(doc.heads)
-    .sort(([, a], [, b]) => Date.parse(b.updatedAt || 0) - Date.parse(a.updatedAt || 0))
+    .sort(([, a], [, b]) => timestampMs(b?.updatedAt) - timestampMs(a?.updatedAt))
     .slice(0, MAX_HEADS_RETAINED);
   writeFileAtomic(closerNoDeliveryFilePath(rootDir, identity),
     `${JSON.stringify({ ...doc, heads: Object.fromEntries(heads) }, null, 2)}\n`);
@@ -99,13 +111,30 @@ function headEntry(ledger, headSha) {
 }
 
 /**
- * Record one terminal no-delivery attempt. Idempotent per launch: the closer
- * re-observes a terminal launch every poll until it re-dispatches.
+ * Stable identity of a closer dispatch record's attempt when its launch request
+ * id is absent: the dispatch id, else the dispatch intent key, else the time the
+ * attempt was made. None of these change while the record is re-observed.
+ */
+export function closerNoDeliveryAttemptKey(record) {
+  if (!record || typeof record !== 'object') return null;
+  if (record.dispatchId) return `dispatch:${record.dispatchId}`;
+  if (record.dispatchIdempotencyKey) return `intent:${record.dispatchIdempotencyKey}`;
+  const at = record.lastAttemptedAt || record.dispatchedAt;
+  return at ? `attempted:${at}` : null;
+}
+
+/**
+ * Record one terminal no-delivery attempt. Idempotent per attempt: the closer
+ * re-observes a terminal launch every poll until it re-dispatches. The attempt
+ * is identified by its launch request id, else by `attemptKey` (the dispatch
+ * record's dispatch id, intent key or attempt time). An attempt with neither
+ * shares one fixed identity, so repeated polls of it can never spend the key's
+ * retry; at worst the older per-head bounds stay in charge.
  *
  * @returns {{ recorded: boolean, reason?: string, failureClass?: string }}
  */
 export function recordCloserNoDeliveryAttempt(rootDir, identity, {
-  headSha, failureClass, launchRequestId = null, workerClass = null, now,
+  headSha, failureClass, launchRequestId = null, attemptKey = null, workerClass = null, now,
 } = {}) {
   if (!headSha) return { recorded: false, reason: 'no-head' };
   const ledger = readCloserNoDeliveryLedger(rootDir, identity);
@@ -116,12 +145,12 @@ export function recordCloserNoDeliveryAttempt(rootDir, identity, {
   const entry = headEntry(ledger, headSha);
   const current = entry.classes[klass] || { attempts: [], skippedCount: 0 };
   const launch = launchRequestId ? String(launchRequestId) : null;
-  if (launch && current.attempts.some((attempt) => attempt.launchRequestId === launch)) {
+  const key = launch || (attemptKey ? String(attemptKey) : UNIDENTIFIED_ATTEMPT_KEY);
+  if (current.attempts.some((attempt) => (attempt.attemptKey || attempt.launchRequestId) === key
+    || (launch && attempt.launchRequestId === launch))) {
     return { recorded: false, reason: 'already-recorded', failureClass: klass };
   }
-  // Attempts with no launch id are distinct observations; cap them so an
-  // unidentified failure cannot grow the file.
-  const attempts = [...current.attempts, { launchRequestId: launch, workerClass, observedAt }]
+  const attempts = [...current.attempts, { launchRequestId: launch, attemptKey: key, workerClass, observedAt }]
     .slice(-MAX_ATTEMPTS_PER_CLASS);
   writeLedger(rootDir, identity, { ...ledger, heads: { ...ledger.heads, [headSha]: {
     ...entry, latestClass: klass, updatedAt: observedAt,
@@ -183,22 +212,34 @@ export function applyCloserOperatorRedrive(rootDir, identity, { headSha, redrive
 }
 
 /**
- * Count one skipped repeat on its key so a stuck PR is visible in the ledger as
- * well as the decision log.
+ * Count a skipped repeat on its key so a stuck PR is visible in the ledger as
+ * well as the decision log. The first skip is always persisted; later skips are
+ * persisted at most once per CLOSER_REPEAT_SKIP_PERSIST_INTERVAL_MS, so
+ * `skippedCount` counts persisted skips and `lastSkippedAt` the latest of them.
+ *
+ * @returns {{ skippedCount: number|null, persisted: boolean }}
  */
 export function recordCloserRepeatSkipped(rootDir, identity, { headSha, failureClass, now } = {}) {
   const ledger = readCloserNoDeliveryLedger(rootDir, identity);
-  if (ledger.__corrupt || !headSha) return { skippedCount: null };
+  if (ledger.__corrupt || !headSha) return { skippedCount: null, persisted: false };
   const klass = normalizeFailureClass(failureClass);
   const entry = headEntry(ledger, headSha);
   const current = entry.classes[klass];
-  if (!current) return { skippedCount: null };
+  if (!current) return { skippedCount: null, persisted: false };
   const skippedAt = now || new Date().toISOString();
-  const skippedCount = Number(current.skippedCount || 0) + 1;
+  const priorCount = Number(current.skippedCount || 0);
+  const lastMs = timestampMs(current.lastSkippedAt);
+  // A clock that moved backwards (or an unreadable timestamp) persists rather
+  // than suppressing the record indefinitely.
+  const elapsedMs = timestampMs(skippedAt) - lastMs;
+  if (priorCount > 0 && lastMs > 0 && elapsedMs >= 0 && elapsedMs < CLOSER_REPEAT_SKIP_PERSIST_INTERVAL_MS) {
+    return { skippedCount: priorCount, persisted: false };
+  }
+  const skippedCount = priorCount + 1;
   writeLedger(rootDir, identity, { ...ledger, heads: { ...ledger.heads, [headSha]: {
     ...entry, updatedAt: skippedAt,
     classes: { ...entry.classes, [klass]: { ...current, skippedCount,
       firstSkippedAt: current.firstSkippedAt || skippedAt, lastSkippedAt: skippedAt } },
   } } });
-  return { skippedCount };
+  return { skippedCount, persisted: true };
 }

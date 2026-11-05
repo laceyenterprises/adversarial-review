@@ -7738,17 +7738,22 @@ label-gate) could still admit a third attempt with the same failure.
 no-delivery attempts keyed on `(head, failure class)`. The failure class is the
 hammer's classified phase outcome (for example `crashed`, `ci-red`, `conflict`),
 else its no-merge outcome code, else `launch:<LRQ failure class>` or
-`launch-failed`. Each launch counts once.
+`launch-failed`. Each attempt counts once however often a poll re-observes it.
+It is identified by its launch request id, else its dispatch record's
+`dispatchId`, intent key or attempt time; an attempt with none of these shares
+one fixed identity, so re-observation cannot spend its retry.
 
 - **Gate.** After the hammer cap and before the prompt write, harness
   resolution and quota probe, the closer stops when the latest failure class has
   already ended two attempts on the current head. It returns
   `closer-repeat-no-delivery-skipped` with `needsOperator: true`, the existing
   stuck signal. It adds no label.
-- **Record.** Each skipped repeat increments `skippedCount` on the key
-  (`firstSkippedAt`, `lastSkippedAt`) and logs
-  `ama_closer.repeat_no_delivery_skipped` with the head, class, prior attempts
-  and last launch.
+- **Record.** Every skipped poll logs `ama_closer.repeat_no_delivery_skipped`
+  with the head, class, prior attempts, last launch, `skippedCount` and
+  `skipPersisted`. The ledger records entry into the skipped state, then at
+  most one skip per 15 minutes per key (`CLOSER_REPEAT_SKIP_PERSIST_INTERVAL_MS`),
+  so `skippedCount` counts persisted skips (`firstSkippedAt`, `lastSkippedAt`)
+  and a stuck PR does not rewrite the file every poll.
 - **Re-enabled by.** A new head (a new key); a different failure class that has
   not yet repeated (allowed once); the existing APPROVALREARM-01 allowance, which
   clears the head's attempts once per grant (`ama_closer.no_delivery_redrive`);

@@ -624,9 +624,10 @@ A candidate is skipped when it is:
   (`model-unresolvable`, with the registry fault in `detail`), or it has no
   tracked provider yet (`provider-untracked`);
 - the family that reviews the next round (`reviews-next-round:<reviewer>`). For
-  `gemini` (the always-on reviewer) this applies only when no other reviewer model
-  can take that round: it then reads
-  `reviews-next-round:gemini;no-alternate-reviewer:<model>=<why>,...`. Otherwise
+  `gemini` (the always-on reviewer) this applies only when the reviewer the route
+  picks with Gemini excluded cannot take that round: it then reads
+  `reviews-next-round:gemini;no-alternate-reviewer:<model>=<why>` (or
+  `no-alternate-reviewer:no-routed-reviewer`). Otherwise
   Gemini remediates and `remediationWorker.reviewerReassignment` records that the
   next review of its head goes to the named reviewer; the watcher logs
   `reviewer-reassignment` when it claims that review (GEMINIREMEDIATE-01).

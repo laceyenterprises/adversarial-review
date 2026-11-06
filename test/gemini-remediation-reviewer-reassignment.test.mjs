@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import {
   GEMINI_REMEDIATED_HEAD_REASON,
   alternateReviewerForGeminiRemediation,
+  createCachedFollowUpJobLister,
   geminiRemediatedReviewerExclusions,
   jobHasGeminiRemediation,
 } from '../src/gemini-remediated-head.mjs';
@@ -21,7 +22,7 @@ import {
   resolveRemediationWorkerClassWithFallback,
 } from '../src/remediation-worker-class-fallback.mjs';
 import { afhReviewerFallbackDecision, geminiFallbackEligibility } from '../src/afh-reviewer-fallback.mjs';
-import { applyGeminiReviewerRoute, routeSubject } from '../src/adapters/subject/github-pr/routing.mjs';
+import { applyGeminiReviewerRoute, routePR, routeSubject } from '../src/adapters/subject/github-pr/routing.mjs';
 
 const NOW = Date.parse('2026-11-06T12:00:00.000Z');
 const HERMETIC = { topPath: '/dev/null' };
@@ -35,7 +36,7 @@ const fleet = (rows) => async () => ({ stdout: JSON.stringify({ providerStatuses
 
 function resolveWith({ builderTag, rows, reviewerModels, primary = 'codex', fallbackWorkerClasses = ['gemini', 'claude-code'] }) {
   return resolveRemediationWorkerClassWithFallback({
-    codexAccountPolicy: 'pinned', primary, fallbackWorkerClasses, reviewerModels, nowMs: NOW,
+    codexAccountPolicy: 'pinned', primary, fallbackWorkerClasses, reviewerModels, nowMs: NOW, ...HERMETIC,
     job: { builderTag, reviewerModel: 'gemini' },
     execFileImpl: fleet(rows),
   });
@@ -79,7 +80,7 @@ test('the claim-time path selects gemini end to end with the always-on route in 
   assert.ok(warnings.some((line) => /reviewer-reassignment: gemini remediates .*gemini -> claude \(gemini-remediated-head\)/.test(line)));
 });
 
-test('a [claude-code] build whose only alternate reviewer (codex) is capped keeps the refusal and says why', async () => {
+test('a [claude-code] build whose routed reviewer (codex) is capped keeps the refusal and says why', async () => {
   const result = await resolveWith({
     builderTag: 'claude-code', rows: [OPENAI_CAPPED, ANTHROPIC_OK, GOOGLE_OK], reviewerModels: ['gemini', 'codex'],
     fallbackWorkerClasses: ['gemini'],
@@ -88,17 +89,17 @@ test('a [claude-code] build whose only alternate reviewer (codex) is capped keep
   assert.equal(result.reason, 'no-available-fallback');
   assert.equal(result.reviewerReassignment, undefined);
   assert.deepEqual(result.skipped, [{ workerClass: 'gemini', reason:
-    'reviews-next-round:gemini;no-alternate-reviewer:claude=builder-family,codex=capped:provider-grounded' }]);
+    'reviews-next-round:gemini;no-alternate-reviewer:codex=capped:provider-grounded' }]);
 });
 
-test('a [codex] build whose alternate reviewer (claude) is capped keeps the refusal and says why', async () => {
+test('a [codex] build whose routed reviewer (claude) is capped keeps the refusal and says why', async () => {
   const result = await resolveWith({
     builderTag: 'codex', rows: [OPENAI_CAPPED, ANTHROPIC_CAPPED, GOOGLE_OK], reviewerModels: ['gemini', 'claude'],
     fallbackWorkerClasses: ['gemini'],
   });
   assert.equal(result.hold, true);
   assert.deepEqual(result.skipped, [{ workerClass: 'gemini', reason:
-    'reviews-next-round:gemini;no-alternate-reviewer:claude=capped:provider-grounded,codex=builder-family' }]);
+    'reviews-next-round:gemini;no-alternate-reviewer:claude=capped:provider-grounded' }]);
 });
 
 test('claude-code stays refused behind gemini when claude would review the next round (no new waiver)', async () => {
@@ -133,7 +134,7 @@ test('non-capped behaviour is unchanged: the routed primary keeps the job and no
 test('an unreadable fleet status leaves the alternate unverified, so gemini stays selectable', async () => {
   const result = await resolveRemediationWorkerClassWithFallback({
     codexAccountPolicy: 'pinned', primary: 'codex', fallbackWorkerClasses: ['gemini'], reviewerModels: ['gemini', 'claude'],
-    nowMs: NOW, job: { builderTag: 'codex', reviewerModel: 'gemini', remediationPlan: { retryHistory: [{
+    nowMs: NOW, ...HERMETIC, job: { builderTag: 'codex', reviewerModel: 'gemini', remediationPlan: { retryHistory: [{
       round: 1, requeuedAt: '2026-11-06T10:00:00.000Z',
       retryMetadata: { code: 'quota-exhausted', harness: 'codex', resetAt: '2026-11-09T00:00:00.000Z',
         providerResetAt: '2026-11-09T00:00:00.000Z', source: 'provider-reported', maxUnvalidatedHoldMs: 3600000 },
@@ -153,8 +154,42 @@ test('alternate selection: corporate Claude counts, an unverified corporate acco
   assert.equal(alternateReviewerForGeminiRemediation({ builderClass: 'codex', capOf: cap({
     'claude-code': { capped: true, capSource: 'provider-grounded', available: false },
   }) }).available, false);
-  assert.equal(alternateReviewerForGeminiRemediation({ builderClass: 'gemini', capOf: cap({}) }).reviewerModel, 'claude');
+  assert.equal(alternateReviewerForGeminiRemediation({ builderClass: 'gemini', capOf: cap({}) }).reviewerModel, 'codex');
   assert.equal(alternateReviewerForGeminiRemediation({ builderClass: 'unknown-tool', capOf: cap({}) }).reason, 'unknown-builder-class');
+});
+
+test('the alternate is the reviewer the router picks, never another model it would not route to', () => {
+  const cap = () => ({ capped: false, available: true });
+  // A [codex] build routes to claude; codex is never a candidate, whatever its quota.
+  const routed = alternateReviewerForGeminiRemediation({ builderClass: 'codex', capOf: cap });
+  assert.equal(routed.reviewerModel, 'claude');
+  assert.deepEqual(routed.considered, [{ reviewerModel: 'claude', selected: true, reason: 'available' }]);
+  // The caller's domain-resolved route wins over the default route table.
+  const domainRoute = { 'claude-code': { reviewerModel: 'claude', botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN' } };
+  assert.equal(alternateReviewerForGeminiRemediation({
+    builderClass: 'claude-code', capOf: cap, routeTable: domainRoute,
+  }).reason, 'no-alternate-reviewer:claude=builder-family');
+  assert.equal(alternateReviewerForGeminiRemediation({ builderClass: 'codex', capOf: cap, reviewerModel: 'gemini' }).reason,
+    'no-alternate-reviewer:gemini=routed-to-gemini');
+  assert.equal(alternateReviewerForGeminiRemediation({ builderClass: 'codex', capOf: cap, reviewerModel: 'codex' }).reason,
+    'no-alternate-reviewer:codex=builder-family');
+  assert.equal(alternateReviewerForGeminiRemediation({ builderClass: 'codex', capOf: cap, reviewerModel: null }).reason,
+    'no-alternate-reviewer:no-routed-reviewer');
+});
+
+test('the remediator resolves the alternate through the reviewer route, as the watcher will', async () => {
+  const resolve = (loaderImpl) => resolveRemediationWorkerClassWithFallback({
+    codexAccountPolicy: 'pinned', primary: 'codex', fallbackWorkerClasses: ['gemini'],
+    reviewerModels: ['gemini', 'claude'], nowMs: NOW, ...HERMETIC, loaderImpl,
+    job: { builderTag: 'codex', reviewerModel: 'gemini' },
+    execFileImpl: fleet([OPENAI_CAPPED, ANTHROPIC_OK, GOOGLE_OK]),
+  });
+  assert.equal((await resolve(undefined)).reviewerReassignment.to, 'claude');
+  // A reviewer route the watcher cannot resolve leaves no alternate, so gemini stays refused.
+  const broken = await resolve(() => { throw Object.assign(new Error('bad config'), { name: 'AgentOSConfigError' }); });
+  assert.equal(broken.hold, true);
+  assert.deepEqual(broken.skipped, [{ workerClass: 'gemini',
+    reason: 'reviews-next-round:gemini;no-alternate-reviewer:no-routed-reviewer' }]);
 });
 
 // ── review side ──────────────────────────────────────────────────────────────
@@ -228,6 +263,20 @@ test('the AFH fallback never selects gemini for a head gemini remediated', () =>
   assert.notEqual(decision.to, 'gemini');
 });
 
+test('routePR carries the reassignment and the exclusion to the watcher', () => {
+  const options = { env: { AGENT_OS_REVIEWER_GEMINI_MODE: 'always-on' }, ...HERMETIC, loaderImpl: undefined };
+  const reassigned = routePR('[codex] LAC-1: change', null, { ...options, excludedReviewerModels: ['gemini'] });
+  assert.equal(reassigned.reviewerModel, 'claude');
+  assert.deepEqual(reassigned.excludedReviewerModels, ['gemini']);
+  assert.deepEqual(reassigned.reviewerReassignment, {
+    from: 'gemini', to: 'claude', reason: GEMINI_REMEDIATED_HEAD_REASON, mode: 'always-on',
+  });
+  const plain = routePR('[codex] LAC-1: change', null, options);
+  assert.equal(plain.reviewerModel, 'gemini');
+  assert.equal(plain.reviewerReassignment, undefined);
+  assert.equal(plain.excludedReviewerModels, undefined);
+});
+
 // ── the marker both sides share ──────────────────────────────────────────────
 
 test('only a gemini worker that actually ran marks the PR', () => {
@@ -253,4 +302,43 @@ test('exclusions come from any job state of the PR and fail closed on an unreada
     listJobsImpl: () => { throw new Error('corrupt job file'); },
   }), ['gemini']);
   assert.match(warnings[0], /gemini-remediated-head check failed for o\/r#1/);
+});
+
+test('the default job lister re-reads a state directory only when its listing changed', () => {
+  const dirs = new Map([['/root/data/follow-up-jobs/completed', {
+    mtimeNs: 1_000_000_000n, names: ['o__r-pr-1-a.json', 'o__r-pr-12-b.json', 'x__y-pr-1-c.json'],
+  }]]);
+  let nowNs = 100_000_000_000n;
+  const reads = { readdir: 0, jobs: [] };
+  const missing = () => Object.assign(new Error('missing'), { code: 'ENOENT' });
+  const list = createCachedFollowUpJobLister({
+    statImpl: (dir) => {
+      const entry = dirs.get(dir);
+      if (!entry) throw missing();
+      return { dev: 1n, ino: 2n, mtimeNs: entry.mtimeNs };
+    },
+    readdirImpl: (dir) => { reads.readdir += 1; return [...dirs.get(dir).names]; },
+    readJobImpl: (jobPath) => { reads.jobs.push(jobPath); return { jobPath }; },
+    nowNsImpl: () => nowNs,
+  });
+  const filter = { repo: 'o/r', prNumber: 1 };
+  const first = list('/root', 'completed', filter);
+  assert.deepEqual(first.map((entry) => entry.jobPath), ['/root/data/follow-up-jobs/completed/o__r-pr-1-a.json']);
+  list('/root', 'completed', filter);
+  assert.equal(reads.readdir, 1, 'an unchanged directory is not re-listed');
+  assert.equal(reads.jobs.length, 2, "only this PR's job files are read");
+  // A new job file moves the directory mtime, so the next tick sees it.
+  dirs.get('/root/data/follow-up-jobs/completed').names.push('o__r-pr-1-d.json');
+  dirs.get('/root/data/follow-up-jobs/completed').mtimeNs = 99_500_000_000n;
+  assert.equal(list('/root', 'completed', filter).length, 2);
+  assert.equal(reads.readdir, 2);
+  // A listing taken inside the racy window is not cached: a same-granule write could hide.
+  list('/root', 'completed', filter);
+  assert.equal(reads.readdir, 3);
+  nowNs = 200_000_000_000n;
+  list('/root', 'completed', filter);
+  list('/root', 'completed', filter);
+  assert.equal(reads.readdir, 4);
+  assert.deepEqual(list('/root', 'pending', filter), [], 'a missing state directory lists nothing');
+  assert.throws(() => list('/root', 'no-such-state', filter), /Unknown follow-up job directory key/);
 });

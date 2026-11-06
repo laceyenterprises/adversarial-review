@@ -622,6 +622,8 @@ function routePR(prTitle, subject = null, options = {}) {
     botTokenEnv: route.botTokenEnv,
     ...(route.geminiReviewerSelection ? { geminiReviewerSelection: route.geminiReviewerSelection } : {}),
     ...(route.geminiIntegrityGuard ? { geminiIntegrityGuard: route.geminiIntegrityGuard } : {}),
+    ...(route.reviewerReassignment ? { reviewerReassignment: route.reviewerReassignment } : {}),
+    ...(route.excludedReviewerModels ? { excludedReviewerModels: route.excludedReviewerModels } : {}),
     linearTicketId: extractLinearTicketId(prTitle, options),
   };
 }

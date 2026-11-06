@@ -819,16 +819,17 @@ round removed, `remediationPlan.retryAfter` set to the hold end and a
 - `reviewerReassignment` (GEMINIREMEDIATE-01, on the spawned worker audit, absent
   otherwise): `{ from: "gemini", to, reason: "gemini-remediated-head", builderClass,
   considered[] }`. It is written when Gemini was selected although Gemini would
-  have reviewed the next round: `to` is the non-Gemini reviewer model the next
-  review of the head Gemini produces goes to (`considered[]` lists the candidates
-  and why each was or was not usable). It is the decision log of the reviewer
+  have reviewed the next round: `to` is the reviewer the watcher's route picks
+  for the PR with Gemini excluded, so the next review of the head Gemini
+  produces goes to it (`considered[]` holds that routed reviewer and why it was
+  or was not usable; no other model is considered). It is the decision log of the reviewer
   change. The review side derives the same fact from the PR's jobs (a worker
   record with class `gemini` and a `spawnedAt`, in any job state), so a later
   round needs nothing beyond this file to know why the reviewer changed.
 - `skipped[]`: `{ workerClass, reason }` for each declared fallback class passed
   over (`provider-untracked`, `reviews-next-round:<reviewer>` — for `gemini` it is
-  `reviews-next-round:gemini;no-alternate-reviewer:<model>=<why>,...` when no other
-  reviewer model could take the next round —
+  `reviews-next-round:gemini;no-alternate-reviewer:<model>=<why>` when the routed
+  reviewer could not take the next round, or `...:no-routed-reviewer` —
   `capped:<capSource>`, `resets-within-hold-window`, `unavailable:<state>`,
   `unrunnable-in-mode:<mode>`, `model-unresolvable`,
   `unpooled-fallback-unresolved`). Pooled routing uses

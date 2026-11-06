@@ -200,10 +200,24 @@ function modelUnresolvedSkip(workerClass, error) {
 // when the next round can go to another reviewer model; the watcher then
 // excludes Gemini from that PR's reviews (gemini-remediated-head). With no
 // alternate (or no builder to judge it by) today's refusal stands, and says why.
-function geminiNextRoundDecision({ job, capOf }) {
+// The alternate is the reviewer the watcher will route that head to: the
+// builder's domain route with Gemini excluded (gemini-remediated-head). A route
+// that cannot be resolved leaves no alternate, so the refusal stands.
+function geminiExcludedReviewerModel(job, builderClass, { env, topPath, loaderImpl }) {
+  try {
+    const route = routeSubject({ builderClass, domainId: job?.domainId || 'code-pr' },
+      { env, topPath, loaderImpl, geminiReviewerMode: 'off', excludedReviewerModels: ['gemini'] });
+    return route?.configBroken ? null : (route?.reviewerModel ?? null);
+  } catch {
+    return null;
+  }
+}
+
+function geminiNextRoundDecision({ job, capOf, routeConfig }) {
   const builderClass = String(job?.builderTag || '').trim().toLowerCase();
   if (!builderClass) return { refusal: 'reviews-next-round:gemini' };
-  const alternate = alternateReviewerForGeminiRemediation({ builderClass, capOf });
+  const alternate = alternateReviewerForGeminiRemediation({ builderClass, capOf,
+    reviewerModel: geminiExcludedReviewerModel(job, builderClass, routeConfig) });
   if (!alternate.available) return { refusal: `reviews-next-round:gemini;${alternate.reason}` };
   return { reviewerReassignment: {
     from: 'gemini', to: alternate.reviewerModel, reason: GEMINI_REMEDIATED_HEAD_REASON,
@@ -241,6 +255,8 @@ async function readFleetQuotaStatuses({ env, hqPath, execFileImpl }) {
  * @param {Object=} args.env
  * @param {'personal-first'|'corporate-first'|'pinned'=} args.codexAccountPolicy — dispatch wrappers preserve operator pins.
  * @param {string=} args.hqPath
+ * @param {string=} args.topPath — config cascade for the reviewer route a Gemini remediation hands the next round to.
+ * @param {Function=} args.loaderImpl
  * @param {Function|null=} args.execFileImpl — DI for `hq fleet quota status --json`;
  *   null skips the fleet read so only job-local evidence applies.
  * @param {'os'|'local'|null=} args.remediationMode — the orchestration mode that will run
@@ -272,8 +288,11 @@ async function resolveModeRunnableWorkerClass({
   execFileImpl = execFileAsync,
   codexAccountPolicy = 'corporate-first',
   selectAccountImpl,
+  topPath,
+  loaderImpl,
 } = {}) {
   await ensureWorkerRegistryReadyImpl({env});
+  const routeConfig = { env, topPath, loaderImpl };
   modelForClass ??= (workerClass) => remediatorModelForClass(workerClass, { job, env });
   let primaryClass = normalizeRemediationWorkerClass(primary) || String(primary || '').trim().toLowerCase();
   const fallbacks = [...new Set((Array.isArray(fallbackWorkerClasses) ? fallbackWorkerClasses : [])
@@ -296,7 +315,7 @@ async function resolveModeRunnableWorkerClass({
       if (ownReviewer) {
         const { statuses } = await readFleetQuotaStatuses({ env, hqPath, execFileImpl });
         const evidence = remediatorQuotaEvidence(job, { nowMs });
-        const decision = geminiNextRoundDecision({ job,
+        const decision = geminiNextRoundDecision({ job, routeConfig,
           capOf: (harness) => classCapState(harness, { evidence, statuses, model: null }) });
         if (decision.refusal) return { hold: true, reason: decision.refusal };
         ({ reviewerReassignment } = decision);
@@ -493,7 +512,8 @@ async function resolveModeRunnableWorkerClass({
     let reviewerReassignment = null;
     if (ownReviewer && !corporateContinuation) {
       const decision = candidate === 'gemini' && ownReviewer === 'gemini'
-        ? geminiNextRoundDecision({ job, capOf: (harness) => classCapState(harness, { evidence, statuses, model: null }) })
+        ? geminiNextRoundDecision({ job, routeConfig,
+          capOf: (harness) => classCapState(harness, { evidence, statuses, model: null }) })
         : { refusal: `reviews-next-round:${ownReviewer}` };
       if (decision.refusal) {
         skipped.push({ workerClass: candidate, reason: decision.refusal });
@@ -637,6 +657,8 @@ export async function resolveClaimedRemediatorRouting({
     modelForClass: (workerClass) => remediatorModelForClass(workerClass, { job, env }),
     reviewerModels: nextRoundReviewerModels(job, { env, topPath, loaderImpl }),
     remediationMode,
+    topPath,
+    loaderImpl,
   });
   for (const refusal of routing?.modeRefusals || []) {
     log.warn?.(

@@ -69,9 +69,9 @@ export function normalizeFailureClass(value) {
   return token || 'unclassified';
 }
 
-function emptyLedger(identity) {
-  return { schemaVersion: CLOSER_NO_DELIVERY_SCHEMA_VERSION, repo: identity.repo,
-    prNumber: Number(identity.prNumber), heads: {} };
+function emptyLedger(identity = {}) {
+  return { schemaVersion: CLOSER_NO_DELIVERY_SCHEMA_VERSION, repo: identity?.repo,
+    prNumber: Number(identity?.prNumber), heads: {} };
 }
 
 // An unreadable ledger must not read as "no prior attempts": that would re-arm

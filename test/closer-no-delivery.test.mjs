@@ -187,6 +187,14 @@ test('an unreadable ledger blocks rather than reading as no prior attempts, and 
   assert.equal(gate(rootDir).skip, false);
 });
 
+test('a missing identity reads as an empty ledger instead of throwing', (t) => {
+  const rootDir = tempRoot(t);
+  const ledger = readCloserNoDeliveryLedger(rootDir, undefined);
+  assert.deepEqual(ledger.heads, {});
+  assert.equal(ledger.repo, undefined);
+  assert.equal(ledger.__corrupt, undefined);
+});
+
 test('ledger keeps a bounded number of heads', (t) => {
   const rootDir = tempRoot(t);
   for (let i = 0; i < 12; i += 1) {
@@ -248,7 +256,8 @@ function dispatchArgs(rootDir) {
 }
 
 // A closer launched against HEAD that ended `succeeded` with the PR still open.
-function seedEndedLaunch(rootDir, { headSha = HEAD, launchRequestId = 'lrq_synth_current' } = {}) {
+function seedEndedLaunch(rootDir, { headSha = HEAD, launchRequestId = 'lrq_synth_current',
+  workerClass = 'hammer', dispatchWorkerClass = 'hammer' } = {}) {
   const identity = { repo: REPO, prNumber: PR, headSha };
   acquireAmaCloserLease({ rootDir, ...identity, now: '2026-11-01T12:00:00Z' });
   updateAmaCloserLease({ rootDir, ...identity, status: AMA_CLOSER_LEASE_STATUS.DISPATCHED,
@@ -257,7 +266,7 @@ function seedEndedLaunch(rootDir, { headSha = HEAD, launchRequestId = 'lrq_synth
     terminalOutcome: 'failed-without-merge', now: '2026-11-01T12:31:00Z' });
   updateAmaCloserDispatchRecord(rootDir, identity, () => ({
     schemaVersion: 1, repo: REPO, prNumber: PR, headSha, reviewedSha: REVIEWED, targetRemediationSha: headSha,
-    workerClass: 'hammer', dispatchWorkerClass: 'hammer', promptPath: '/tmp/synthetic-prompt.md', promptDir: '/tmp',
+    workerClass, dispatchWorkerClass, promptPath: '/tmp/synthetic-prompt.md', promptDir: '/tmp',
     hqRoot: join(rootDir, 'hq-root'), launchRequestId, dispatchId: 'dispatch_synth_current', retryCount: 1,
     state: 'dispatched', lastObservedStatus: 'unknown',
   }));
@@ -336,6 +345,17 @@ test('closer: a repeated no-delivery failure on the same head is skipped before 
   assert.equal(loggedAgain.skipPersisted, false);
   assert.equal(loggedAgain.skippedCount, 1);
   assert.equal(readCloserNoDeliveryLedger(rootDir, IDENTITY).heads[HEAD].classes[failureClass].skippedCount, 1);
+});
+
+test('closer: the skipped-repeat stuck signal names the dispatched worker class', async (t) => {
+  const failureClass = await observedFailureClass(t);
+  const rootDir = tempRoot(t);
+  seedEndedLaunch(rootDir, { workerClass: null, dispatchWorkerClass: 'synthetic-dispatch-class' });
+  attempt(rootDir, 1, failureClass);
+  const { result, dispatchCalls } = await pollCloser(rootDir);
+  assert.equal(result.reason, CLOSER_REPEAT_SKIPPED_REASON);
+  assert.equal(result.workerClass, 'synthetic-dispatch-class');
+  assert.deepEqual(dispatchCalls, []);
 });
 
 test('closer: a new head re-enables the closer', async (t) => {

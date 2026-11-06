@@ -931,6 +931,15 @@
       "laneBusyDeferral": "optional {headSha, launches}: newest 64 distinct same-head lane-busy launches; reset on parked head/review series change or non-lane deferral; 2-minute exponential backoff capped at 30 minutes and durable closure-wait page on third launch; no failure-budget charge"
     },
     {
+      "id": "closer-no-delivery",
+      "title": "Closer No-Delivery Ledger",
+      "path": "docs/data-model/closer-no-delivery.md",
+      "store": "data/follow-up-jobs/closer-no-delivery/",
+      "schemaSurface": "src/ama/closer-no-delivery.mjs",
+      "relatedSchemaSurfaces": ["src/ama/dispatch-closer.mjs", "src/reset-pr.mjs"],
+      "owner": "AMA closer repeat no-delivery suppression (CLOSERRETRY-01)"
+    },
+    {
       "id": "closer-authored-stale",
       "title": "Closer-Authored Stale Verdict Audits",
       "path": "docs/data-model/closer-authored-stale.md",

@@ -11,6 +11,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { writeFileAtomic } from './atomic-write.mjs';
+import { closerNoDeliveryFilePath } from './ama/closer-no-delivery.mjs';
 import { buildCodePrSubjectIdentity } from './identity-shapes.mjs';
 import {
   FOLLOW_UP_JOB_DIRS,
@@ -191,6 +192,16 @@ function moveCandidates(candidates, resetRoot) {
   return { resetRoot, moved };
 }
 
+function moveCloserNoDeliveryLedger(rootDir, identity, resetRoot) {
+  const from = closerNoDeliveryFilePath(rootDir, identity);
+  if (!existsSync(from)) return null;
+  const targetDir = join(resetRoot, 'closer-no-delivery');
+  mkdirSync(targetDir, { recursive: true });
+  const to = join(targetDir, basename(from));
+  renameSync(from, to);
+  return { from, to };
+}
+
 function reserveReceipt(auditRootDir, receipt) {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const targetPath = receiptPath(auditRootDir, receipt.ts, attempt);
@@ -289,9 +300,15 @@ function main(argv, {
       throw err;
     }
 
-    const movedEntryCount = moved.reduce((sum, item) => sum + item.entries.length, 0);
+    // CLOSERRETRY-01: the operator re-drive of the closer. The ledger that
+    // blocks a repeat closer attempt on an unchanged head moves aside with the
+    // follow-up jobs, so the next poll may dispatch one closer again.
+    const closerLedger = moveCloserNoDeliveryLedger(rootDir, { repo: parsed.repo, prNumber: parsed.pr }, resetRoot);
+    const movedEntryCount = moved.reduce((sum, item) => sum + item.entries.length, 0)
+      + (closerLedger ? 1 : 0);
     const receipt = {
       ...baseReceipt,
+      ...(closerLedger ? { closerNoDeliveryLedger: closerLedger } : {}),
       outcome: movedEntryCount > 0 ? 'reset' : 'noop',
       resetRoot,
       movedJobCount: moved.length,

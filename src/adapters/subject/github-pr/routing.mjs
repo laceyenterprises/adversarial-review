@@ -283,6 +283,15 @@ function geminiMayReviewBuilder(builderClassInput, routeTable = ROUTE_BY_BUILDER
   return REVIEWER_FAMILY_BY_BUILDER_CLASS[builderClass] !== 'gemini';
 }
 
+// GEMINIREMEDIATE-01: a route can carry `excludedReviewerModels`, the models that
+// produced part of the head under review (today: gemini after it remediated the
+// PR). It is enumerable on purpose, so every `{ ...baseRoute }` downstream keeps it.
+const GEMINI_REMEDIATED_HEAD_REASON = 'gemini-remediated-head';
+function routeExcludesReviewer(route, model) {
+  return (Array.isArray(route?.excludedReviewerModels) ? route.excludedReviewerModels : [])
+    .some((excluded) => normalizeReviewerModel(excluded) === model);
+}
+
 // applyGeminiReviewerRoute — layers the gemini always-on/fallback selection on
 // top of an already-resolved cross-model `baseRoute`. Pure: the caller resolves
 // `mode` (config cascade) and, for `fallback`, supplies `primaryReviewerQuotaCapped`
@@ -313,17 +322,25 @@ function applyGeminiReviewerRoute({
 
   // Hard guard: gemini must NEVER review a gemini-built PR, no matter how the
   // gemini reviewer was selected. Fall back to the per-tag cross-model route.
-  if (baseIsGemini && normalizedBuilder && !geminiMayReviewBuilder(normalizedBuilder, routeTable)) {
+  const geminiExcluded = routeExcludesReviewer(baseRoute, 'gemini');
+  const geminiBuilt = Boolean(normalizedBuilder) && !geminiMayReviewBuilder(normalizedBuilder, routeTable);
+  if (baseIsGemini && normalizedBuilder && (geminiBuilt || geminiExcluded)) {
     const crossModel = routeTable[normalizedBuilder];
     return {
       ...baseRoute,
       reviewerModel: crossModel.reviewerModel,
       botTokenEnv: crossModel.botTokenEnv,
-      geminiIntegrityGuard: {
-        blockedReviewerModel: 'gemini',
-        builderClass: normalizedBuilder,
-        fellBackTo: crossModel.reviewerModel,
-      },
+      ...(geminiBuilt ? {
+        geminiIntegrityGuard: {
+          blockedReviewerModel: 'gemini',
+          builderClass: normalizedBuilder,
+          fellBackTo: crossModel.reviewerModel,
+        },
+      } : {
+        reviewerReassignment: {
+          from: 'gemini', to: crossModel.reviewerModel, reason: GEMINI_REMEDIATED_HEAD_REASON,
+        },
+      }),
     };
   }
 
@@ -338,6 +355,16 @@ function applyGeminiReviewerRoute({
   if (!normalizedBuilder || !geminiMayReviewBuilder(normalizedBuilder, routeTable)) return baseRoute;
   if (!GEMINI_REVIEWABLE_BUILDER_CLASSES.includes(normalizedBuilder)) return baseRoute;
   if (normalizedMode === 'fallback' && !primaryReviewerQuotaCapped) return baseRoute;
+  // Gemini produced part of this head (it remediated an earlier round), so the
+  // default Gemini layer is withheld: the cross-model reviewer keeps the route.
+  if (geminiExcluded) {
+    return {
+      ...baseRoute,
+      reviewerReassignment: {
+        from: 'gemini', to: baseRoute.reviewerModel, reason: GEMINI_REMEDIATED_HEAD_REASON, mode: normalizedMode,
+      },
+    };
+  }
 
   return {
     ...baseRoute,
@@ -456,6 +483,7 @@ function baseRouteForSubject(builderClass, {
   modulePaths,
   loaderImpl,
   routeTable = ROUTE_BY_BUILDER_CLASS,
+  excludedReviewerModels = [],
 } = {}) {
   let route;
   let operatorPinnedReviewer = false;
@@ -475,6 +503,7 @@ function baseRouteForSubject(builderClass, {
       tag: tagFromBuilderClass(builderClass),
       reviewerModel: route.reviewerModel,
       botTokenEnv: route.botTokenEnv,
+      ...(excludedReviewerModels.length ? { excludedReviewerModels: [...excludedReviewerModels] } : {}),
     }, routeTable),
     operatorPinnedReviewer,
   );
@@ -502,6 +531,7 @@ function routeSubject(subject, {
   geminiReviewerMode,
   primaryReviewerQuotaCapped = false,
   applyGeminiReviewerMode = true,
+  excludedReviewerModels = [],
   domainId = subject?.ref?.domainId || subject?.domainId || 'code-pr',
   rootDir = ROOT,
   domainConfig = null,
@@ -517,7 +547,7 @@ function routeSubject(subject, {
   });
   const builderClass = normalizeBuilderClass(subject?.builderClass, routeTable);
   if (!builderClass) return null;
-  const baseRoute = baseRouteForSubject(builderClass, { env, topPath, modulePaths, loaderImpl, routeTable });
+  const baseRoute = baseRouteForSubject(builderClass, { env, topPath, modulePaths, loaderImpl, routeTable, excludedReviewerModels });
   if (baseRoute?.configBroken || !applyGeminiReviewerMode) return baseRoute;
   try {
     const mode = resolveGeminiReviewerModeForRoute({
@@ -592,6 +622,8 @@ function routePR(prTitle, subject = null, options = {}) {
     botTokenEnv: route.botTokenEnv,
     ...(route.geminiReviewerSelection ? { geminiReviewerSelection: route.geminiReviewerSelection } : {}),
     ...(route.geminiIntegrityGuard ? { geminiIntegrityGuard: route.geminiIntegrityGuard } : {}),
+    ...(route.reviewerReassignment ? { reviewerReassignment: route.reviewerReassignment } : {}),
+    ...(route.excludedReviewerModels ? { excludedReviewerModels: route.excludedReviewerModels } : {}),
     linearTicketId: extractLinearTicketId(prTitle, options),
   };
 }
@@ -606,6 +638,7 @@ const resolveDefaultReviewer = defaultReviewerRouteFromEnv;
 export {
   DEFAULT_REVIEWER_ENV,
   DEFAULT_GEMINI_REVIEWER_MODE,
+  GEMINI_REMEDIATED_HEAD_REASON,
   GEMINI_REVIEWER_MODES,
   GEMINI_REVIEWABLE_BUILDER_CLASSES,
   extractLinearTicketId,

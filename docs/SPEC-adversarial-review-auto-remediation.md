@@ -803,6 +803,26 @@ its primary reviewer capped (the gemini fallback layer). The check is the same
 work. The routed primary (builder-tag route or operator pin) is not
 second-guessed. If no candidate survives for a capped primary, the claim holds
 as described below.
+GEMINIREMEDIATE-01: `gemini` is the exception to that skip. Gemini is the
+always-on reviewer, so skipping it whenever it reviews the next round meant it
+could never remediate. The rule it protects (no model reviews a head it
+produced) is kept per round instead: Gemini is selected when the reviewer the
+watcher's own route picks for the PR with Gemini excluded (domain route table
+included) is not Gemini, not the builder's own family, and is not capped (fleet status plus the job's own quota evidence; a corporate
+account needs positive evidence). The selection records
+`remediationWorker.reviewerReassignment` (`gemini-remediated-head`). From then on
+the watcher excludes Gemini from every review of that PR, in all layers that
+could pick it (the always-on / fallback layer, an operator Gemini pin, the AFH
+fallback, the exec-failure and timeout fallbacks, the review-worker-class
+fallback), and the reviewer the row is claimed with is the cross-model one.
+Gemini never reviews a Gemini-built PR, as before. With no usable alternate the
+refusal stands and the skip reads
+`reviews-next-round:gemini;no-alternate-reviewer:<model>=<why>` (or
+`no-alternate-reviewer:no-routed-reviewer` when the route resolves no reviewer).
+`routePR` carries `reviewerReassignment` and `excludedReviewerModels` to its
+callers. The PR's job lister caches each state directory's entry names by
+directory identity and mtime, so an unchanged directory is not re-listed on
+every poll; job files are still read fresh.
 This availability fallback may select the PR builder's family as a remediator;
 the normal builder-tag route resumes automatically when its provider recovers.
 Unknown and degraded states alone do not authorize fallback, and an unreadable

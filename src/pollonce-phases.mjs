@@ -109,6 +109,7 @@ import {
   resolveReviewerWorkerClassWithFallback,
   reviewWorkerClassFallback,
 } from './review-worker-class-fallback.mjs';
+import { geminiRemediatedReviewerExclusions } from './gemini-remediated-head.mjs';
 import { packTokensForSubject } from './reviewer-burst-lease.mjs';
 import {
   fetchReviewsForHeadForDedup,
@@ -1932,9 +1933,11 @@ export async function processReviewSubject(entry, ctx) {
         subject = reconciled.subject;
       }
       let crossModelWaiverReason = null;
+      // GEMINIREMEDIATE-01: a PR gemini has remediated is never reviewed by gemini.
       let baseRoute = routeSubject(subject, {
         domainId,
         geminiReviewerMode: 'off',
+        excludedReviewerModels: geminiRemediatedReviewerExclusions({ rootDir: ROOT, repo: repoPath, prNumber }),
       });
       // CFG-02 round-1 review B3 fix (2026-05-30): routeSubject can now
       // return a tagged `configBroken: true` sentinel when a runtime
@@ -2072,6 +2075,12 @@ export async function processReviewSubject(entry, ctx) {
             `(${geminiBaseRoute.geminiReviewerSelection.reason}; mode=${geminiReviewerMode}; ` +
             `mode-source=${geminiModeResolution.source || 'unknown'}; ` +
             `replaced reviewer=${geminiBaseRoute.geminiReviewerSelection.replacedReviewerModel})`
+        );
+      } else if (geminiBaseRoute.reviewerReassignment) {
+        console.log(
+          `[watcher] reviewer-reassignment ${repoPath}#${prNumber}: ` +
+            `${geminiBaseRoute.reviewerReassignment.from} -> ${geminiBaseRoute.reviewerReassignment.to} ` +
+            `(${geminiBaseRoute.reviewerReassignment.reason}; mode=${geminiReviewerMode})`
         );
       } else if (geminiBaseRoute.geminiIntegrityGuard) {
         console.warn(
@@ -2230,7 +2239,7 @@ export async function processReviewSubject(entry, ctx) {
           fallbackWorkerClasses: depthPressure?.reason === 'review-max-wait'
             ? [route.geminiReviewerSelection?.replacedReviewerModel === 'claude' ? 'claude-code'
               : route.geminiReviewerSelection?.replacedReviewerModel || (reviewerAuthorClass === 'codex' ? 'claude-code' : 'codex')]
-            : reviewWorkerClassFallback(process.env),
+            : reviewWorkerClassFallback(process.env).filter((workerClass) => !(route.excludedReviewerModels || []).includes(workerClass)),
           depthPressure,
           blockedClaudeWorkerClasses: blockedClaudeWorkerClasses(),
           blockedCodexCorporate: blockedCodexCorporate(),

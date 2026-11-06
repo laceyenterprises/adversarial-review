@@ -151,7 +151,7 @@ import { applyPreSpawnLifecycleGate } from './follow-up-stuck-claim-sweep.mjs';
 import { detectRemediationQuotaEvidence } from './remediation-quota-evidence.mjs';
 import { settleMissingRemediationArtifact } from './remediation-missing-artifact.mjs';
 import { settleQuotaExhaustedRemediation } from './remediation-quota-hold.mjs';
-import { normalizeRemediationWorkerClass, remediationLaneModeRefusal, remediatorFallbackAudit, resolveClaimedRemediatorRouting, nextRoundReviewerModels, resolveRemediationWorkerClassWithFallback } from './remediation-worker-class-fallback.mjs';
+import { applyHqDispatchHandoffEnv, normalizeRemediationWorkerClass, remediationLaneModeRefusal, remediationLaneRuntimeMode, remediatorFallbackAudit, resolveClaimedRemediatorRouting, nextRoundReviewerModels, resolveRemediationWorkerClassWithFallback } from './remediation-worker-class-fallback.mjs';
 import {
   DEFAULT_REPLIES_ROOT,
   HQ_REMEDIATION_DISPATCH_TRIGGER,
@@ -3333,7 +3333,12 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
     // Pooled accounts require dispatcher-owned selection, binding and leases.
     // A successful proposal selects that path even when local mode was chosen
     // by config or health routing; it must never become a repeating quota hold.
-    const remediationMode = remediatorRouting.pooled ? 'os' : runtimeMode;
+    // REMLANEACCOUNT-01: native mode hands an account-bound lane to HQ dispatch,
+    // which binds the account, instead of refusing it; bookkeeping is the 'hq' path.
+    const laneRuntimeMode = remediationLaneRuntimeMode(workerClass, runtimeMode, { env: jobEnv });
+    const accountBoundHandoff = !remediatorRouting.pooled && laneRuntimeMode !== runtimeMode;
+    const remediationMode = remediatorRouting.pooled ? 'os' : laneRuntimeMode;
+    if (accountBoundHandoff) applyHqDispatchHandoffEnv(jobEnv, { workerClass, runtimeMode, log });
     const remediationDispatchPath = remediationMode === 'os' ? 'hq' : 'bare';
     if (remediationMode === 'os') {
       remediatorRouting = await resolveOsgRemediatorRouteImpl({ current: remediatorRouting,
@@ -3443,7 +3448,7 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
     // OAuth at dispatch time, so the local ~/.gemini gate applies only to
     // the direct CLI path.
     // Backstop only: the selection above already skips a lane the mode refuses.
-    const laneModeRefusal = remediationLaneModeRefusal(workerClass, remediationMode);
+    const laneModeRefusal = remediationLaneModeRefusal(workerClass, remediationMode, { env: jobEnv });
     if (laneModeRefusal) {
       throw new Error(`corporate Claude remediation requires account-bound HQ dispatch `
         + `(selected lane ${workerClass}, mode ${remediationMode}: ${laneModeRefusal})`);
@@ -3675,6 +3680,7 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
       worker: {
         ...worker,
         ...remediatorFallbackAudit(remediatorRouting),
+        ...(accountBoundHandoff ? { hqDispatchHandoff: { workerClass, from: runtimeMode, to: remediationMode } } : {}),
         ...(remediatorRouting.osg ? { osgRemediator: remediatorRouting.osg } : {}),
         dirtyMergeResolution: claimed.job?.remediationWorker?.dirtyMergeResolution || null,
         pushTokenCapability: workflowPushPreflight?.capability

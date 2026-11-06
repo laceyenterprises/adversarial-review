@@ -10,6 +10,7 @@ import { infrastructureOnlyFailures } from './ci-infrastructure.mjs';
 import { recoverInfrastructureChecks } from './ci-recovery.mjs';
 import { recoverInfrastructureCiStops } from './remediation-ci-infrastructure.mjs';
 import { recreateMissingRemediationJob } from './remediation-job-missing-recovery.mjs';
+import { remediationJobMissingDetail } from './remediation-hold-cause.mjs';
 import { evaluateHammerStopHold } from './ama/hammer-stop-hold.mjs';
 import { deriveNextActionSnapshot, hasLiveRemediationJob, isClosureRecoveryDecision, nextAction } from './pr-next-action.mjs';
 import { withDaemonMergeReservation } from './ama/merge-lease.mjs';
@@ -3174,9 +3175,13 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
       closureOwner: closureOwnerFromDecision(shared.decision) }, shared);
   }
   throwIfAborted(signal);
+  const closureBlockerReason = amaClosureResult?.dispatched ? 'hammer-running'
+    : amaClosureResult?.closureBlocker || amaClosureResult?.daemonCleanMerge?.reason || amaClosureResult?.reason || 'closure-pending';
   logger?.info?.(JSON.stringify({ event: 'ama.closure_blocker', repo: repoPath, pr: prNumber,
-    reason: amaClosureResult?.dispatched ? 'hammer-running'
-      : amaClosureResult?.closureBlocker || amaClosureResult?.daemonCleanMerge?.reason || amaClosureResult?.reason || 'closure-pending' }));
+    reason: closureBlockerReason,
+    // REMLANEACCOUNT-01: a held job is not a missing one; name the hold (lane, reason).
+    ...(closureBlockerReason === 'remediation-job-missing'
+      ? remediationJobMissingDetail({ rootDir, repo: repoPath, prNumber }) : {}) }));
   if (amaClosureResult?.dispatched) {
     return { outcome: 'ama-dispatched', amaClosureResult };
   }

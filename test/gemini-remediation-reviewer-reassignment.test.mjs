@@ -7,6 +7,9 @@ import './helpers/load-aware-timeout-fixture.mjs';
 // are synthetic and offline.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   GEMINI_REMEDIATED_HEAD_REASON,
@@ -304,8 +307,13 @@ test('exclusions come from any job state of the PR and fail closed on an unreada
   assert.match(warnings[0], /gemini-remediated-head check failed for o\/r#1/);
 });
 
-test('the default job lister re-reads a state directory only when its listing changed', () => {
-  const dirs = new Map([['/root/data/follow-up-jobs/completed', {
+test('the default job lister re-reads a state directory only when its listing changed', (t) => {
+  // An empty real root: the PR-name filter reads <root>/data/repository-names.json,
+  // and a fixed path such as /root is unreadable (EACCES) on the Linux runner.
+  const root = mkdtempSync(join(tmpdir(), 'gemini-job-lister-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const completedDir = join(root, 'data', 'follow-up-jobs', 'completed');
+  const dirs = new Map([[completedDir, {
     mtimeNs: 1_000_000_000n, names: ['o__r-pr-1-a.json', 'o__r-pr-12-b.json', 'x__y-pr-1-c.json'],
   }]]);
   let nowNs = 100_000_000_000n;
@@ -322,23 +330,23 @@ test('the default job lister re-reads a state directory only when its listing ch
     nowNsImpl: () => nowNs,
   });
   const filter = { repo: 'o/r', prNumber: 1 };
-  const first = list('/root', 'completed', filter);
-  assert.deepEqual(first.map((entry) => entry.jobPath), ['/root/data/follow-up-jobs/completed/o__r-pr-1-a.json']);
-  list('/root', 'completed', filter);
+  const first = list(root, 'completed', filter);
+  assert.deepEqual(first.map((entry) => entry.jobPath), [join(completedDir, 'o__r-pr-1-a.json')]);
+  list(root, 'completed', filter);
   assert.equal(reads.readdir, 1, 'an unchanged directory is not re-listed');
   assert.equal(reads.jobs.length, 2, "only this PR's job files are read");
   // A new job file moves the directory mtime, so the next tick sees it.
-  dirs.get('/root/data/follow-up-jobs/completed').names.push('o__r-pr-1-d.json');
-  dirs.get('/root/data/follow-up-jobs/completed').mtimeNs = 99_500_000_000n;
-  assert.equal(list('/root', 'completed', filter).length, 2);
+  dirs.get(completedDir).names.push('o__r-pr-1-d.json');
+  dirs.get(completedDir).mtimeNs = 99_500_000_000n;
+  assert.equal(list(root, 'completed', filter).length, 2);
   assert.equal(reads.readdir, 2);
   // A listing taken inside the racy window is not cached: a same-granule write could hide.
-  list('/root', 'completed', filter);
+  list(root, 'completed', filter);
   assert.equal(reads.readdir, 3);
   nowNs = 200_000_000_000n;
-  list('/root', 'completed', filter);
-  list('/root', 'completed', filter);
+  list(root, 'completed', filter);
+  list(root, 'completed', filter);
   assert.equal(reads.readdir, 4);
-  assert.deepEqual(list('/root', 'pending', filter), [], 'a missing state directory lists nothing');
-  assert.throws(() => list('/root', 'no-such-state', filter), /Unknown follow-up job directory key/);
+  assert.deepEqual(list(root, 'pending', filter), [], 'a missing state directory lists nothing');
+  assert.throws(() => list(root, 'no-such-state', filter), /Unknown follow-up job directory key/);
 });

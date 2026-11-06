@@ -7297,7 +7297,7 @@ async function maybeDispatchAmaCloserAttempt({
         logger?.warn?.(`[ama-closer] no-delivery re-drive reset failed for ${repo}#${prNumber}: ${error?.message || error}`);
       }
     }
-    const noDeliveryGate = redrive && redriveApplied?.reset !== false
+    const noDeliveryGate = redrive && redriveApplied?.reset === true
       ? { skip: false, reason: 'operator-redrive' }
       : evaluateCloserNoDeliveryGate(readCloserNoDeliveryLedger(rootDir, noDeliveryIdentity),
         { headSha: noDeliveryHead });
@@ -7329,7 +7329,7 @@ async function maybeDispatchAmaCloserAttempt({
         reason: CLOSER_REPEAT_SKIPPED_REASON,
         failureClass: noDeliveryGate.failureClass,
         priorAttempts: noDeliveryGate.priorAttempts,
-        workerClass: existingRecord?.workerClass || workerClass,
+        workerClass: existingRecord?.dispatchWorkerClass || existingRecord?.workerClass || workerClass,
         dispatchId: existingRecord?.dispatchId || existingRecord?.launchRequestId || null,
         launchRequestId: existingRecord?.launchRequestId || null,
         promptPath: existingRecord?.promptPath || null,

@@ -3144,6 +3144,11 @@ dispatch returns from in_progress to pending before launch, with reason
 audit. This is a budget-neutral hold, not worker failure. Personal/declared
 runnable fallthrough proceeds normally; OS mode is unchanged. Existing states,
 smoke steps, merge gates and proposed pending-state deadline remain unchanged.
+REMLANEACCOUNT-01 narrows that hold to native hosts whose HQ dispatch is
+unreachable: when HQ is reachable the account-bound lane is launched through HQ
+dispatch (spawned worker `dispatchMode: hq`, `hqDispatchHandoff` audit) and the
+claim proceeds through the ordinary in_progress path. No state or transition is
+added.
 
 ## Exhausted cycles and new builder heads (EXHAUSTEDHEADOWNER-01)
 

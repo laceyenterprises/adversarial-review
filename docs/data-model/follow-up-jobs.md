@@ -832,7 +832,12 @@ round removed, `remediationPlan.retryAfter` set to the hold end and a
 - `modeRefusals[]` (optional, REMEDIATORLANE-01): `{ workerClass, mode, reason }`
   for each lane the claim's orchestration mode cannot run. Native mode
   (`"local"`) refuses `remediator-claude-corp` with
-  `"requires-account-bound-hq-dispatch"`; OS mode refuses nothing. A refused
+  `"requires-account-bound-hq-dispatch"` only when HQ dispatch is unreachable
+  (no `HQ_ROOT`, or one that does not exist). With HQ reachable the lane is not
+  refused: REMLANEACCOUNT-01 hands it to HQ dispatch, and the spawned
+  `remediationWorker` carries `hqDispatchHandoff: { workerClass, from: "local",
+  to: "os" }` with `dispatchMode: "hq"` and the job's `remediationPlan.dispatchPath`
+  set to `"hq"`. OS mode refuses nothing. A refused
   pinned or routed primary carries `capSource: "remediation-lane-unrunnable-in-mode"`.
 - `noRespawn: true`: the claim gate releases the hold early only on a fleet
   probe whose `lastGoodAt` is newer than the entry's `requeuedAt`.
@@ -935,3 +940,14 @@ account selection retain their existing contracts.
 REMEDIATORLANE-01 final diagnostic guard: an account already excluded by quota
 cannot acquire a mode-refusal attribution from unknown account evidence. Its
 existing quota/account hold diagnostics remain authoritative.
+
+REMLANEACCOUNT-01: native mode no longer refuses the account-bound
+`remediator-claude-corp` lane when HQ dispatch is reachable; the consume path
+launches it through the same `hq dispatch --worker-class remediator-claude-corp`
+path OS mode uses, so claim, heartbeat, completion and reaping follow the
+ordinary `hq` bookkeeping. The handoff falls back to the closer's HQ session and
+project when `HQ_PARENT_SESSION` / `HQ_PROJECT` are unset in the daemon
+environment. The watcher's `ama.closure_blocker` line for
+`remediation-job-missing` carries `remediationHold: { lane, reason, capSource,
+holdUntil, modeRefusals? }` read from the latest held job's last
+`remediator-fallback-resolution` retry entry; it adds no new stored field.

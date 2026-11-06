@@ -42,6 +42,8 @@ import { codexWorkerLaneFromSnapshot, isAutomaticCodexAccountPolicy } from './co
 // round is skipped, by the same `isCrossModelReviewWaived` rule reviewer
 // selection uses to keep a builder from reviewing its own work. The routed
 // primary itself (builder-tag route or operator pin) is not second-guessed.
+import { statSync } from 'node:fs';
+import { resolve as resolvePath } from 'node:path';
 import { promisify } from 'node:util';
 import { execFile as execFileCb } from 'node:child_process';
 
@@ -70,17 +72,57 @@ import {
 import { normalizeRemediationWorkerClass } from './remediation-worker-class.mjs';
 export { normalizeRemediationWorkerClass } from './remediation-worker-class.mjs';
 
-// REMEDIATORLANE-01: the one capability check between lane selection and the
-// orchestration mode that must run it. The corporate Claude lane is
-// account-bound, and only HQ dispatch ('os') can bind a run to that account. In
-// native mode ('local') the selector skips it, and the consume path keeps the
-// same check as a backstop. An unknown mode refuses nothing, which keeps
-// direct callers' behaviour unchanged.
+// REMEDIATORLANE-01 / REMLANEACCOUNT-01: the one capability check between lane
+// selection and the orchestration mode that must run it. The corporate Claude
+// lane is account-bound, and only HQ dispatch ('os') binds a run to that
+// account. Native mode ('local') does not refuse it: the consume path hands the
+// lane to HQ dispatch (remediationLaneRuntimeMode) whenever HQ dispatch can be
+// reached from this host, because a refusal strands every comment-only PR while
+// the other lanes are capped. The lane is refused only when it genuinely cannot
+// be bound: no HQ_ROOT, or one that does not exist. An unknown mode refuses
+// nothing, which keeps direct callers' behaviour unchanged.
 const ACCOUNT_BOUND_REMEDIATION_WORKER_CLASSES = new Set(['remediator-claude-corp']);
 
-export function remediationLaneModeRefusal(workerClass, mode) {
+// The same fallbacks the AMA closer applies to its HQ dispatch (follow-up-merge-agent).
+const NATIVE_HANDOFF_PARENT_SESSION = 'session:adversarial-review:watcher';
+const NATIVE_HANDOFF_PROJECT = 'pr-merge-orchestration';
+
+export function isAccountBoundRemediationWorkerClass(workerClass) {
+  return ACCOUNT_BOUND_REMEDIATION_WORKER_CLASSES.has(workerClass);
+}
+
+function hqDispatchReachable(env) {
+  const root = String(env?.HQ_ROOT || '').trim();
+  if (!root) return false;
+  try {
+    return statSync(resolvePath(root)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+// The handoff dispatches with the same HQ session/project fallbacks the closer uses.
+export function applyHqDispatchHandoffEnv(env, { workerClass, runtimeMode, log = console } = {}) {
+  env.HQ_PARENT_SESSION ||= NATIVE_HANDOFF_PARENT_SESSION;
+  env.HQ_PROJECT ||= NATIVE_HANDOFF_PROJECT;
+  log.info?.(`[follow-up-remediation] remediation lane ${workerClass} handed to HQ dispatch in ${runtimeMode} mode `
+    + '(account-bound lane; HQ dispatch binds the account)');
+}
+
+export function remediationLaneModeRefusal(workerClass, mode, { env = process.env } = {}) {
   return mode && mode !== 'os' && ACCOUNT_BOUND_REMEDIATION_WORKER_CLASSES.has(workerClass)
+    && !hqDispatchReachable(env)
     ? 'requires-account-bound-hq-dispatch' : null;
+}
+
+// The mode that actually runs `workerClass`: native mode ('local') hands an
+// account-bound lane to HQ dispatch ('os'), the path that binds the account.
+// Claim, liveness, completion and reaping all follow the persisted 'hq'
+// dispatch path from there, exactly as for any HQ-dispatched remediator.
+export function remediationLaneRuntimeMode(workerClass, mode, { env = process.env } = {}) {
+  return mode === 'local' && ACCOUNT_BOUND_REMEDIATION_WORKER_CLASSES.has(workerClass)
+    && !remediationLaneModeRefusal(workerClass, mode, { env })
+    ? 'os' : mode;
 }
 
 const execFileAsync = promisify(execFileCb);
@@ -298,7 +340,7 @@ async function resolveModeRunnableWorkerClass({
 
   // REMEDIATORLANE-01: each lane the mode refuses is recorded once, with why.
   const refuseInMode = (workerClass) => {
-    const reason = remediationLaneModeRefusal(workerClass, remediationMode);
+    const reason = remediationLaneModeRefusal(workerClass, remediationMode, { env });
     if (reason && !modeRefusals.some((entry) => entry.workerClass === workerClass)) {
       modeRefusals.push({ workerClass, mode: remediationMode, reason });
     }

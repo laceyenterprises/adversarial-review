@@ -1,9 +1,11 @@
 import './helpers/registry-session-fixture.mjs';
 // REMEDIATORLANE-01: remediation lane selection never returns a lane the
-// active orchestration mode cannot run. Native mode ('local') cannot bind the
-// corporate Claude account, so that lane falls through to the next runnable
-// lane, and with none left the job holds with a named reason instead of being
-// claimed and failed as a worker failure. OS mode is unchanged.
+// active orchestration mode cannot run. Native mode ('local') binds the
+// corporate Claude account only through HQ dispatch (REMLANEACCOUNT-01 hands
+// the lane over when HQ is reachable); when it is not reachable the lane falls
+// through to the next runnable lane, and with none left the job holds with a
+// named reason instead of being claimed and failed as a worker failure. OS mode
+// is unchanged. Every refusal below runs with no reachable HQ root.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
@@ -26,12 +28,15 @@ const CORPORATE_REFUSAL = Object.freeze({ workerClass: 'remediator-claude-corp',
 const resolve = (snapshot, options = {}) => resolveRemediationWorkerClassWithFallback({
   codexAccountPolicy: 'pinned', env: {}, execFileImpl: snapshot ? execFor(snapshot) : null, ...options });
 
-test('the capability check refuses only the account-bound lane, and only outside OS mode', () => {
-  assert.equal(remediationLaneModeRefusal('remediator-claude-corp', 'local'), 'requires-account-bound-hq-dispatch');
-  assert.equal(remediationLaneModeRefusal('remediator-claude-corp', 'os'), null);
-  assert.equal(remediationLaneModeRefusal('remediator-claude-corp', null), null);
+test('the capability check refuses only the account-bound lane, only outside OS mode, and only without a reachable HQ root', () => {
+  const unreachable = { env: {} };
+  assert.equal(remediationLaneModeRefusal('remediator-claude-corp', 'local', unreachable), 'requires-account-bound-hq-dispatch');
+  assert.equal(remediationLaneModeRefusal('remediator-claude-corp', 'local',
+    { env: { HQ_ROOT: '/nonexistent/synthetic-hq-root' } }), 'requires-account-bound-hq-dispatch');
+  assert.equal(remediationLaneModeRefusal('remediator-claude-corp', 'os', unreachable), null);
+  assert.equal(remediationLaneModeRefusal('remediator-claude-corp', null, unreachable), null);
   for (const workerClass of ['codex', 'remediator-codex', 'remediator-codex-corp', 'claude-code', 'remediator-claude', 'gemini']) {
-    assert.equal(remediationLaneModeRefusal(workerClass, 'local'), null, workerClass);
+    assert.equal(remediationLaneModeRefusal(workerClass, 'local', unreachable), null, workerClass);
   }
 });
 
@@ -121,10 +126,10 @@ test('claim-time routing passes the mode through and logs the refused lane', asy
 
 function nativeConsumeFixture(t) {
   const rootDir = mkdtempSync(join(tmpdir(), 'remediatorlane-01-'));
-  mkdirSync(join(rootDir, 'hq'));
+  // HQ_ROOT names a directory that does not exist: HQ dispatch is unreachable.
   const overrides = { AGENT_OS_CONFIG_PATH: '/dev/null', AGENT_OS_ROLES_REMEDIATOR: 'adversarial',
     ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: undefined, ADV_WITH_HQ_INTEGRATION: undefined,
-    AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'native', HQ_ROOT: join(rootDir, 'hq') };
+    AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'native', HQ_ROOT: join(rootDir, 'hq-unreachable') };
   const previous = Object.fromEntries(Object.keys(overrides).map(key => [key, process.env[key]]));
   const apply = values => {
     for (const [key, value] of Object.entries(values)) {

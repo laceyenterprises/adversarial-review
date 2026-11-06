@@ -608,5 +608,9 @@ test('claim-time routing applies the rule: a declared gemini fallback is passed 
     log: { warn() {} },
   });
   assert.equal(routing.workerClass, 'claude-code');
-  assert.deepEqual(routing.skipped, [{ workerClass: 'gemini', reason: 'reviews-next-round:gemini' }]);
+  // GEMINIREMEDIATE-01: the refusal stands because no other reviewer can take
+  // the next round (this builder's own family is refused and codex is capped),
+  // and the skip says so.
+  assert.deepEqual(routing.skipped, [{ workerClass: 'gemini', reason:
+    'reviews-next-round:gemini;no-alternate-reviewer:claude=builder-family,codex=capped:provider-reset-past-hold-window' }]);
 });

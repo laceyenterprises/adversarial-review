@@ -252,11 +252,14 @@ function modelMayReviewBuilder(model, builderClass) {
 }
 
 function candidateReviewerModelsForExecFallback({ baseRoute, builderClass }) {
+  const excludedReviewerModels = baseRoute?.excludedReviewerModels || [];
   const seen = new Set();
   const candidates = [];
   const push = (model, { sameModelLastResort = false } = {}) => {
     const normalized = normalizeReviewerAttribution(model);
     if (!normalized || seen.has(normalized)) return;
+    // GEMINIREMEDIATE-01: a model that wrote part of this head cannot review it.
+    if (excludedReviewerModels.some((model) => normalizeReviewerAttribution(model) === normalized)) return;
     if (reviewerRefusesBuilder(builderClass, normalized)) return;
     if (!sameModelLastResort && !modelMayReviewBuilder(normalized, builderClass)) return;
     seen.add(normalized);
@@ -528,6 +531,7 @@ export function selectReviewerRouteForAttempt({
   const fallbackModel = resolveReviewerTimeoutFallbackModel(env);
   if (!fallbackModel || fallbackModel === baseRoute?.reviewerModel) return { ...baseRoute };
   if (reviewerRefusesBuilder(builderClass, fallbackModel)) return { ...baseRoute };
+  if ((baseRoute?.excludedReviewerModels || []).some((model) => normalizeReviewerAttribution(model) === normalizeReviewerAttribution(fallbackModel))) return { ...baseRoute };
   const fallbackRoute = reviewerRouteForModel(fallbackModel);
   if (!fallbackRoute) return { ...baseRoute };
   // AFH-04: never switch the timeout fallback onto a reviewer whose provider is

@@ -69,6 +69,10 @@ import {
   routeSubject,
 } from './adapters/subject/github-pr/routing.mjs';
 
+import {
+  GEMINI_REMEDIATED_HEAD_REASON,
+  alternateReviewerForGeminiRemediation,
+} from './gemini-remediated-head.mjs';
 import { normalizeRemediationWorkerClass } from './remediation-worker-class.mjs';
 export { normalizeRemediationWorkerClass } from './remediation-worker-class.mjs';
 
@@ -191,6 +195,22 @@ function modelUnresolvedSkip(workerClass, error) {
   return { workerClass, reason: 'model-unresolvable', detail: String(error?.message || error) };
 }
 
+// GEMINIREMEDIATE-01: Gemini is the always-on reviewer, so refusing it whenever
+// Gemini reviews the next round meant it could never remediate. It may remediate
+// when the next round can go to another reviewer model; the watcher then
+// excludes Gemini from that PR's reviews (gemini-remediated-head). With no
+// alternate (or no builder to judge it by) today's refusal stands, and says why.
+function geminiNextRoundDecision({ job, capOf }) {
+  const builderClass = String(job?.builderTag || '').trim().toLowerCase();
+  if (!builderClass) return { refusal: 'reviews-next-round:gemini' };
+  const alternate = alternateReviewerForGeminiRemediation({ builderClass, capOf });
+  if (!alternate.available) return { refusal: `reviews-next-round:gemini;${alternate.reason}` };
+  return { reviewerReassignment: {
+    from: 'gemini', to: alternate.reviewerModel, reason: GEMINI_REMEDIATED_HEAD_REASON,
+    builderClass, considered: alternate.considered,
+  } };
+}
+
 async function readFleetQuotaStatuses({ env, hqPath, execFileImpl }) {
   if (typeof execFileImpl !== 'function') return { statuses: null, error: 'fleet-quota-status-not-wired' };
   try {
@@ -272,7 +292,15 @@ async function resolveModeRunnableWorkerClass({
     resolveUnpooledFallback: async candidate => {
       if (candidate !== 'gemini') return null;
       const ownReviewer = reviewerModels.find(model => isCrossModelReviewWaived(candidate, model));
-      if (ownReviewer) return { hold: true, reason: `reviews-next-round:${ownReviewer}` };
+      let reviewerReassignment = null;
+      if (ownReviewer) {
+        const { statuses } = await readFleetQuotaStatuses({ env, hqPath, execFileImpl });
+        const evidence = remediatorQuotaEvidence(job, { nowMs });
+        const decision = geminiNextRoundDecision({ job,
+          capOf: (harness) => classCapState(harness, { evidence, statuses, model: null }) });
+        if (decision.refusal) return { hold: true, reason: decision.refusal };
+        ({ reviewerReassignment } = decision);
+      }
       try {
         const routing = await resolveModeRunnableWorkerClass({
           primary: candidate, fallbackWorkerClasses: [], job, nowMs, modelForClass,
@@ -282,7 +310,7 @@ async function resolveModeRunnableWorkerClass({
         });
         // A fallback needs positive availability when fleet evidence is readable.
         return !routing.hold && ['primary-available', 'fleet-quota-status-unavailable'].includes(routing.reason)
-          ? routing : { ...routing, hold: true };
+          ? { ...routing, ...(reviewerReassignment ? { reviewerReassignment } : {}) } : { ...routing, hold: true };
       } catch (error) {
         if (error.code !== 'registry-unavailable') throw error;
         return { hold: true, ...modelUnresolvedSkip(candidate, error) };
@@ -462,9 +490,16 @@ async function resolveModeRunnableWorkerClass({
     // primary's diversity decision rather than introducing a new writer family.
     const corporateContinuation = candidate === 'remediator-codex-corp'
       && ['codex', 'remediator-codex'].includes(primaryClass);
+    let reviewerReassignment = null;
     if (ownReviewer && !corporateContinuation) {
-      skipped.push({ workerClass: candidate, reason: `reviews-next-round:${ownReviewer}` });
-      continue;
+      const decision = candidate === 'gemini' && ownReviewer === 'gemini'
+        ? geminiNextRoundDecision({ job, capOf: (harness) => classCapState(harness, { evidence, statuses, model: null }) })
+        : { refusal: `reviews-next-round:${ownReviewer}` };
+      if (decision.refusal) {
+        skipped.push({ workerClass: candidate, reason: decision.refusal });
+        continue;
+      }
+      ({ reviewerReassignment } = decision);
     }
     const cap = capOf(candidate);
     if (candidate === 'remediator-codex-corp' && cap.available !== true) {
@@ -494,6 +529,7 @@ async function resolveModeRunnableWorkerClass({
       resetAt: primaryCap.resetAt,
       candidateState: statuses ? cap.state : 'unverified',
       skipped,
+      ...(reviewerReassignment ? { reviewerReassignment } : {}),
     };
   }
 
@@ -617,6 +653,13 @@ export async function resolveClaimedRemediatorRouting({
         `auto-reverts when the routed harness recovers`
     );
   }
+  if (routing?.reviewerReassignment) {
+    log.warn?.(
+      `[follow-up-remediation] reviewer-reassignment: ${routing.workerClass} remediates ${job?.repo}#${job?.prNumber}; ` +
+        `the next review of its head moves ${routing.reviewerReassignment.from} -> ${routing.reviewerReassignment.to} ` +
+        `(${routing.reviewerReassignment.reason})`
+    );
+  }
   return routing;
 }
 
@@ -633,6 +676,8 @@ export function remediatorFallbackAudit(routing) {
       evidenceGeneration: routing.evidenceGeneration || null,
     } } : {}),
     ...(routing?.modeRefusals?.length ? { modeRefusals: routing.modeRefusals } : {}),
+    // The decision log of the reviewer change: which reviewer takes this head, and why.
+    ...(routing?.reviewerReassignment ? { reviewerReassignment: routing.reviewerReassignment } : {}),
   };
   if (!routing?.fellBack) return proposal;
   return {

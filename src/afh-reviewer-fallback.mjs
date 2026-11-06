@@ -810,10 +810,15 @@ export function geminiFallbackEligibility({
   builderClass,
   geminiReviewerMode = null,
   routeTable = ROUTE_BY_BUILDER_CLASS,
+  excludedReviewerModels = [],
 } = {}) {
   const mode = String(geminiReviewerMode ?? '').trim().toLowerCase();
   if (mode === 'off' || mode === '') {
     return { eligible: false, reason: 'gemini-reviewer-mode-off' };
+  }
+  // GEMINIREMEDIATE-01: gemini wrote part of this head, so it cannot review it.
+  if (excludedReviewerModels.some((model) => normalizeReviewerModel(model) === 'gemini')) {
+    return { eligible: false, reason: 'gemini-remediated-head' };
   }
   const normalizedBuilder = normalizeBuilderClass(builderClass, routeTable);
   if (!normalizedBuilder) return { eligible: false, reason: 'unknown-builder-class' };
@@ -925,6 +930,7 @@ export function afhReviewerFallbackDecision({
         builderClass: normalizedBuilder,
         geminiReviewerMode,
         routeTable,
+        excludedReviewerModels: baseRoute.excludedReviewerModels || [],
       });
       if (!eligibility.eligible) {
         considered.push({ reviewerModel: candidate, selected: false, reason: eligibility.reason });

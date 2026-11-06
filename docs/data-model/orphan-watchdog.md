@@ -85,6 +85,15 @@ head, elapsed idle minutes, last reason and action. Store failures retain the ex
 store-error page behavior. All tests use fixture state and injected dispatch,
 ledger and pager functions.
 
+## Page-only outcomes do not end discovery (CLOSERPARKOWNER-01)
+
+`recoverOverdueOwnership` returns `null` when `recoverOrphan` answered `ama-pending`
+or `recovery-exhausted` without a review request for an expired action that discovery
+cannot execute (anything but a head-bound reviewer or hammer dispatch intent). The
+page and `transition_pages` row are unchanged and still once per head and transition;
+only the early return from the watcher pass is removed, so the closer can select and
+record a real next action. No schema change.
+
 ## Deadline-bound ownership (OWNERDEADLINE-01)
 
 For a matching-head closure-recovery action, RECOVERYDEADLINE-01 handles expiry

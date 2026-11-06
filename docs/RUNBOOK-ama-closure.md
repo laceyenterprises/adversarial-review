@@ -7456,6 +7456,21 @@ it does not repeat the receipt query. Recovery scope accepts both `projectRef`
 and canonical `project_ref` (camelCase takes precedence), defaulting to
 `adversarial-merge-authority` only when neither is supplied.
 
+### Parked final-round pushes reach the closer (CLOSERPARKOWNER-01)
+
+A completed comment-only final-round push head is owned by the closer lane, not by
+exhausted-head verdict admission (EXHAUSTEDHEADOWNER-01 skips it on purpose).
+Discovery's deadline check (`recoverOverdueOwnership`) ends a watcher pass only when
+it can execute the selected owner (reviewer or hammer dispatch) or when recovery
+changed something. When the expired action has no discovery executor (a CI observer,
+an R04 `closure-recovery` reconcile, or the default selected for a lane record with
+no action) the check still pages once per head and transition, logs
+`CLOSERPARKOWNER-01: ... continuing the walk`, and returns so the posted-review
+handler and the closer run on the same pass. Read-only symptom of the old behavior: a
+watchdog `transition_pages` row for `R04-ownership`/`closure-recovery`/`ownership-unreadable`,
+a lane record whose `lastRunAt` never advances, and no watcher log line for the PR.
+Exhausted executable routes still stop at `recovery-exhausted` with their single page.
+
 ### Deadline-bound ownership (OWNERDEADLINE-01)
 
 OWNERDEADLINE-01: every open PR needs one live owner with a next action and

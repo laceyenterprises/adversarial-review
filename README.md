@@ -334,6 +334,53 @@ and label control access.
 
 ---
 
+## Standalone install and run
+
+You can run a review on any machine with Node and a provider API key. The
+standalone path has no Agent OS host, no private submodule, no GitHub token and
+no `config.yaml`. It reads a unified diff, sends it with the same staged
+reviewer prompt the GitHub-PR pipeline uses, and checks the reply against the
+same kernel verdict contract.
+
+```bash
+git clone https://github.com/laceyenterprises/adversarial-review.git
+cd adversarial-review
+npm ci            # Node >=22 <27
+
+export ANTHROPIC_API_KEY=...   # or OPENAI_API_KEY=...
+git diff main...HEAD | npm run --silent review:standalone -- \
+  --provider anthropic --model <model-id> --diff -
+```
+
+| Option | Meaning |
+|---|---|
+| `--provider anthropic\|openai` | Reads `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`. |
+| `--model <id>` | Required. No default model is assumed. |
+| `--diff <file\|->` or `--base <git-ref>` | A diff file or stdin, or `git diff <ref>...HEAD` in the current directory. |
+| `--base-url <url>` | Point at a gateway or compatible endpoint. |
+| `--stage`, `--prompt-set` | Reviewer prompt stage (`first`, `middle`, `last`) and the set under `prompts/`. |
+| `--max-diff-bytes`, `--timeout-ms` | Refuse oversized diffs (no silent truncation); bound the request. |
+| `--json` | Print `{ verdict, review, provider, model }`. |
+
+The same command is available as `node src/cli.mjs standalone ...`. Exit
+code `0` means approved or comment-only, `1` means request-changes, and `2`
+means a usage, provider or reply-contract failure. An unreadable or
+incomplete reply never reads as a pass.
+
+Notes:
+
+- This is a single review of a single diff. It does not poll GitHub, post
+  comments, run remediation rounds or merge. Those are the production
+  daemons described below, and they need their own configuration.
+- The production reviewers authenticate through subscription CLIs and strip
+  API keys from their environment on purpose. The standalone path is
+  separate and does the opposite: it uses the key you export.
+- `src/standalone-review.mjs` imports only `src/kernel/` and Node built-ins;
+  `test/standalone-review.test.mjs` pins that, and runs the whole path
+  offline against a stub provider.
+
+---
+
 ## Why this works — the design notes worth reading
 
 The review loop is intentionally boring in its boundaries. The
@@ -4489,6 +4536,8 @@ The ledger receipt distinguishes a proven merge by this run from remediation,
 refusal, cancellation and unknown exits; process success alone proves no merge.
 
 ## Change notes
+
+- ANY-12: adversarial-review stands alone. Added a `NOTICE` (Lacey Enterprises LLC; the Apache-2.0 `LICENSE` is unchanged and now pinned by a test), a standalone `src/standalone-review.mjs` entrypoint (`npm run review:standalone`, or `adversarial-review standalone`) that reviews one diff through an Anthropic or OpenAI API key using only the kernel prompt, reply and verdict contracts, and a README install-and-run section. The path is additive: no existing entrypoint, config key or default changed, and it imports no daemon, config or host module. Offline tests drive it with a stub provider.
 
 - GEMINIREMEDIATE-01 final review remediation: the alternate reviewer for a Gemini-remediated head is now the reviewer the watcher's own route picks with Gemini excluded (domain route tables and config included), not any uncapped quota harness; `routePR` now passes `reviewerReassignment` and `excludedReviewerModels` through; the per-poll job lister caches each state directory's listing by directory identity and mtime instead of re-listing `completed/` every tick; and `docs/data-model/catalog.json` registers `src/gemini-remediated-head.mjs` and `remediationWorker.reviewerReassignment`. Watcher test stubs export `GEMINI_REMEDIATED_HEAD_REASON`.
 

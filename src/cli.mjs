@@ -20,6 +20,7 @@ import {
 
 const USAGE = `\
 Usage:
+  adversarial-review standalone --provider <anthropic|openai> --model <id> (--diff <file|-> | --base <git-ref>) [--json]
   adversarial-review pipeline-health [--root <dir>] [--json | --prometheus | --sentinel]
   adversarial-review latency report [--root <dir>] [--since <24h>] [--json]
   adversarial-review reconcile-terminal [--root <dir>] [--cap <n>] [--json]
@@ -151,6 +152,12 @@ function handoffMain(argv, io = {}) {
 
 async function main(argv, io = {}) {
   const [command, ...rest] = argv;
+  if (command === 'standalone') {
+    // Lazy import: the standalone path is kernel-only and must not pull in, or
+    // be affected by, the production daemon graph.
+    const { standaloneMain } = await import('./standalone-review.mjs');
+    return standaloneMain(rest, io);
+  }
   if (command === 'reset-pr') {
     return resetPrMain(rest, io);
   }

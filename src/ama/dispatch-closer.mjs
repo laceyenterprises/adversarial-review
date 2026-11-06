@@ -209,6 +209,16 @@ import { resolveNodeBin } from '../node-interpreter.mjs';
 import { resolveCloserPassAttempt } from './closer-pass-attempt.mjs';
 import { maybeRearmInfraDeadHammer } from './dead-hammer-rearm.mjs';
 import {
+  CLOSER_REPEAT_SKIPPED_EVENT,
+  CLOSER_REPEAT_SKIPPED_REASON,
+  applyCloserOperatorRedrive,
+  closerNoDeliveryAttemptKey,
+  evaluateCloserNoDeliveryGate,
+  readCloserNoDeliveryLedger,
+  recordCloserNoDeliveryAttempt,
+  recordCloserRepeatSkipped,
+} from './closer-no-delivery.mjs';
+import {
   evaluateHammerStopHold,
   isInfrastructureStop,
   HAMMER_TRANSIENT_STOP_HOLD_REASON,
@@ -5888,6 +5898,8 @@ async function maybeDispatchAmaCloserAttempt({
     let releaseUnprovenTerminalHoldMerged = false;
     let advancedTerminalDispatchSuperseded = false;
     let hammerEndedWithoutMerge = false;
+    // CLOSERRETRY-01: failure class of a hammer that ended with the PR still open.
+    let hammerNoDeliveryClass = null;
     throwIfAborted(signal);
     const statusProbe = await probeAmaCloserDispatchStatus({
       hqPath,
@@ -6195,6 +6207,10 @@ async function maybeDispatchAmaCloserAttempt({
               logger,
             })
             : null;
+          const noMergeDetails = hammerNoMergeDetails({ hqRoot, launchRequestId: existingRecord.launchRequestId,
+            runId: existingRecord.workerRunId, raw: hammerOutcome.reason || noMergeOutcome });
+          hammerNoDeliveryClass = noMergeDetails.phaseOutcome !== 'unclassified'
+            ? noMergeDetails.phaseOutcome : noMergeOutcome;
           logAmaCloserDispatchEvent(logger, exitedWithoutClose
             ? 'ama_closer.hammer_exited_without_close'
             : 'ama_closer.hammer_ended_without_merge', {
@@ -6206,8 +6222,7 @@ async function maybeDispatchAmaCloserAttempt({
             dispatchId: existingRecord.dispatchId || null,
             observedWorkerStatus: reportedNoWork ? 'failed' : 'succeeded',
             classification: exitedWithoutClose ? HAMMER_EXITED_WITHOUT_CLOSE : 'hammer-ended-without-merge',
-            ...hammerNoMergeDetails({ hqRoot, launchRequestId: existingRecord.launchRequestId,
-              runId: existingRecord.workerRunId, raw: hammerOutcome.reason || noMergeOutcome }),
+            ...noMergeDetails,
             ...(retryRefund ? { retryRefund } : {}),
           }, { level: 'warn' });
         }
@@ -6887,6 +6902,7 @@ async function maybeDispatchAmaCloserAttempt({
       // CLOSERREUSE-01: a hammer that died of an infrastructure cause and
       // pushed nothing gets its dispatch refunded, so the retry cap below
       // re-arms it within the series' budget (see dead-hammer-rearm.mjs).
+      let deadHammerRearmOutcome = null;
       if (status === 'failed' && !hammerEndedWithoutMerge && !existingDispatchHeadAdvanced) {
         const deadHammerRearm = await maybeRearmInfraDeadHammer({
           rootDir,
@@ -6920,6 +6936,7 @@ async function maybeDispatchAmaCloserAttempt({
             return Boolean(next?.workerClass) && next.workerClass !== died;
           },
         });
+        deadHammerRearmOutcome = deadHammerRearm;
         // Log an infrastructure death once per launch, refunded or not. The
         // launch is re-observed on every tick until a re-dispatch replaces the
         // record, so the logged launch is stored on the record
@@ -6941,6 +6958,32 @@ async function maybeDispatchAmaCloserAttempt({
               ? { ...current, infraRearmLoggedLaunchRequestId: existingRecord.launchRequestId }
               : null
           ));
+        }
+      }
+      // CLOSERRETRY-01: a launch that ended with the PR open and the head
+      // unmoved delivered neither a merge nor a push. Key it on (PR, head,
+      // failure class) so the gate before the prompt load can refuse a repeat.
+      // An infrastructure death that was just refunded never ran its close and
+      // keeps its own one-per-series re-arm instead of spending the key.
+      // A deferral for infrastructure reads or a busy lane is an observation, not
+      // an attempt to close: it spends no key.
+      if (status === 'failed' && !existingDispatchHeadAdvanced && existingRecord.headSha
+        && !laneBusyPark && !infrastructureReadPark
+        && deadHammerRearmOutcome?.rearmed !== true) {
+        try {
+          recordCloserNoDeliveryAttempt(rootDir, { repo, prNumber }, {
+            headSha: existingRecord.headSha,
+            failureClass: hammerNoDeliveryClass
+              || (deadHammerRearmOutcome?.failureClass ? `launch:${deadHammerRearmOutcome.failureClass}` : 'launch-failed'),
+            launchRequestId: existingRecord.launchRequestId,
+            // A launch without an LRQ id is still one attempt across polls.
+            attemptKey: closerNoDeliveryAttemptKey(existingRecord),
+            workerClass: existingRecord.dispatchWorkerClass || existingRecord.workerClass || workerClass,
+            now: dispatchContext.dispatchedAt,
+          });
+        } catch (error) {
+          // A missed record only leaves the older per-head bounds in charge.
+          logger?.warn?.(`[ama-closer] no-delivery attempt record failed for ${repo}#${prNumber}: ${error?.message || error}`);
         }
       }
     }
@@ -7222,6 +7265,68 @@ async function maybeDispatchAmaCloserAttempt({
   if (!hasHammerDispatchIntent(sharedNextAction, decisionIdentity) && !resumeCertifiedPark) {
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
       ...(hammerDispatchMismatch(selectedNextAction, sharedNextAction, decisionIdentity, { logger }) || { reason: sharedNextAction.decision.reason }), nextActionShared: sharedNextAction });
+  }
+
+  // CLOSERRETRY-01: a closer that already ended twice on this exact head without
+  // a merge or a push, in the same failure class, is not dispatched a third time.
+  // Each attempt reloads the whole repository context. A new head, a different
+  // failure class, or an operator re-drive (the APPROVALREARM-01 allowance, or
+  // `npm run reset-pr`, which removes the ledger) makes the PR eligible. Placed
+  // before the prompt write,
+  // harness resolution and quota probe, so a skipped repeat costs none of them.
+  {
+    const noDeliveryIdentity = { repo, prNumber };
+    const noDeliveryHead = prMetadata?.headSha || targetRemediationSha;
+    const redrive = approvalCap.operatorApprovalApplied
+      ? { key: `approval:${readHammerRetryCapLedger(rootDir, noDeliveryIdentity)?.operatorApprovalRearms?.[noDeliveryHead]?.grantedAt || 'applied'}` }
+      : null;
+    let redriveApplied = null;
+    if (redrive && noDeliveryHead) {
+      try {
+        redriveApplied = applyCloserOperatorRedrive(rootDir, noDeliveryIdentity, {
+          headSha: noDeliveryHead, redriveKey: redrive.key, now: dispatchContext.dispatchedAt });
+      } catch (error) {
+        logger?.warn?.(`[ama-closer] no-delivery re-drive reset failed for ${repo}#${prNumber}: ${error?.message || error}`);
+      }
+    }
+    const noDeliveryGate = redrive && redriveApplied?.reset === true
+      ? { skip: false, reason: 'operator-redrive' }
+      : evaluateCloserNoDeliveryGate(readCloserNoDeliveryLedger(rootDir, noDeliveryIdentity),
+        { headSha: noDeliveryHead });
+    if (redriveApplied?.reset) {
+      logAmaCloserDispatchEvent(logger, 'ama_closer.no_delivery_redrive', {
+        repo, prNumber, headSha: noDeliveryHead, reason: redriveApplied.reason }, { level: 'info' });
+    }
+    if (noDeliveryGate.skip) {
+      let skipped = { skippedCount: null, persisted: false };
+      try {
+        skipped = recordCloserRepeatSkipped(rootDir, noDeliveryIdentity, {
+          headSha: noDeliveryHead, failureClass: noDeliveryGate.failureClass, now: dispatchContext.dispatchedAt });
+      } catch (error) {
+        logger?.warn?.(`[ama-closer] skipped-repeat record failed for ${repo}#${prNumber}: ${error?.message || error}`);
+      }
+      logAmaCloserDispatchEvent(logger, CLOSER_REPEAT_SKIPPED_EVENT, {
+        repo, prNumber, headSha: noDeliveryHead, failureClass: noDeliveryGate.failureClass,
+        gate: noDeliveryGate.reason, priorAttempts: noDeliveryGate.priorAttempts,
+        lastLaunchRequestId: noDeliveryGate.lastLaunchRequestId, skippedCount: skipped.skippedCount,
+        skipPersisted: skipped.persisted,
+        message: 'closer not re-dispatched: repeated terminal no-delivery attempts exist for this head and failure class; '
+          + 'a new head, a different failure class or an operator re-drive makes the PR eligible',
+      }, { level: 'warn' });
+      // The existing stuck signal: needsOperator without a new label.
+      return noAmaDispatch({
+        dispatched: false,
+        skipMergeAgent: true,
+        needsOperator: true,
+        reason: CLOSER_REPEAT_SKIPPED_REASON,
+        failureClass: noDeliveryGate.failureClass,
+        priorAttempts: noDeliveryGate.priorAttempts,
+        workerClass: existingRecord?.dispatchWorkerClass || existingRecord?.workerClass || workerClass,
+        dispatchId: existingRecord?.dispatchId || existingRecord?.launchRequestId || null,
+        launchRequestId: existingRecord?.launchRequestId || null,
+        promptPath: existingRecord?.promptPath || null,
+      });
+    }
   }
 
   // Persist the prompt under watcher-owned repo state and pass that path

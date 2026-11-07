@@ -96,17 +96,29 @@ uses `HAM_HQ_ROOT` when set, otherwise the standard `HQ_ROOT` /
 `AGENT_OS_HQ_ROOT` / home-directory fallback. The exported
 `controllerLaunchEnvironment()` defaults to `process.env`. A later worker
 export cannot enable a missing/disabled record or disable an enabled one.
-Startup takes up to `LAUNCH_READ_ATTEMPTS` dispatch-file reads, sizing each
-with `launchReadTimeoutMs()` through the shared load-aware helper. Exhaustion
-records `launch-environment-read-unavailable` and exits 75 before child spawn
-or merge-lease acquisition. An identity-matching older dispatch record with
+HAMMERLAUNCHREAD-01: the hammer resolves this once, before remediation, with
+`hammer-controller.mjs resolve-environment` (run by the prompt's one-time
+`inputs.sh` initialization). It keeps the confirmed activation in the private,
+launch-bound receipt `<HAM_RUN_DIR>/launch-environment-<lrq>.json` (mode 0600,
+written once). The closing `run` reuses that receipt and makes no new read, so
+a transient lookup failure can no longer discard a finished remediation and
+validation. A failed lookup is retried with spaced backoff
+(`LAUNCH_READ_BACKOFF_MS`: 2, 5, 10, 20, then 30 seconds), each wait capped so
+no read starts after `LAUNCH_UNREADABLE_GRACE_MS` (unchanged, 120 seconds);
+each lookup keeps its own `launchReadTimeoutMs()` load-aware timeout.
+Exhaustion at that early step records `launch-environment-read-unavailable` and
+exits 75 before any remediation, child spawn or merge-lease acquisition. A
+closing `run` with no kept receipt (an older prompt, or the merge-agent path)
+re-reads over the same window and records the distinct retryable
+`launch-environment-read-unavailable-at-closure`, so a refusal after work can
+be told apart from one before work. A kept receipt that is malformed or names
+another launch refuses with the malformed or identity reason below; it is never
+replaced by a fresh read. An identity-matching older dispatch record with
 no `launchEnvironment` records `launch-environment-missing-legacy-dispatch`;
 it also refuses execution with retryable exit 75 and requires the adapter
 producer revision on the next launch. Neither case adopts a shell export.
-These synchronous lookups run back-to-back without delay or backoff. Each
-lookup receives its own timeout; fast failures can exhaust immediately and
-defer to the existing uncharged closer retry rather than wait for a writer.
-Both retryable outcomes write no `terminal-stop` progress receipt, so the
+Readable identity, legacy and malformed answers refuse at once and are never
+retried. The retryable outcomes write no `terminal-stop` progress receipt, so the
 supervisor's final-stop grace cannot convert their deferred audit into a
 charged terminal stop.
 A present value without boolean `dispatchReadsEnabled` records

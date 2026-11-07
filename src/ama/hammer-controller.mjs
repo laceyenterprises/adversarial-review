@@ -27,6 +27,13 @@ export const LAUNCH_POLL_MS = 10_000;
 export const LAUNCH_UNREADABLE_GRACE_MS = 120_000;
 // Reads a start, lease or merge step takes before it refuses on unreadable.
 export const LAUNCH_READ_ATTEMPTS = 3;
+// HAMMERLAUNCHREAD-01: a failed read waits before the next one. The lookup
+// fails in bursts, so back-to-back retries land inside the same burst. Each
+// wait is capped by the caller's own budget; this never widens it.
+export const LAUNCH_READ_BACKOFF_MS = Object.freeze([2_000, 5_000, 10_000, 20_000, 30_000]);
+export function launchReadBackoffMs(failures) {
+  return LAUNCH_READ_BACKOFF_MS[Math.min(Math.max(failures, 1), LAUNCH_READ_BACKOFF_MS.length) - 1];
+}
 // Minimum budget for the controller's fresh-read answer; widened under load.
 export const LAUNCH_GATE_WAIT_MS = 60_000;
 // The public launch reader's nominal timeout, scaled once per read.
@@ -47,29 +54,112 @@ export function controllerLaunchId(env) {
   return ids[0];
 }
 
+// The environment read is synchronous; offline fixtures replace this clock.
+const sleepCell = new Int32Array(new SharedArrayBuffer(4));
+export const launchEnvironmentClock = {
+  now: () => performance.now(),
+  sleep: ms => { if (ms > 0) Atomics.wait(sleepCell, 0, 0, ms); },
+};
+
+const refuseEnvironment = reason => { throw Object.assign(new Error(reason), { phaseOutcome: reason }); };
+const withActivation = (env, enabled) => ({...env, ADVERSARIAL_DISPATCH_READS_ENABLED: enabled ? '1' : '0'});
+
 // Activation belongs to the adapter's launch record, not a later shell export.
 // This is environment provenance only; launch status still uses the SDK reader.
+// A failed lookup is retried with spaced backoff until the unreadable grace
+// window is spent; each lookup keeps its own load-aware timeout. Readable
+// identity, legacy and malformed answers refuse at once and are never retried.
 export function controllerLaunchEnvironment(env = process.env, {
   readDispatchFilesImpl = readDispatchFilesSync, readTimeoutImpl = launchReadTimeoutMs,
+  graceMs = LAUNCH_UNREADABLE_GRACE_MS, nowImpl = () => launchEnvironmentClock.now(),
+  sleepImpl = ms => launchEnvironmentClock.sleep(ms),
+  unavailableReason = 'launch-environment-read-unavailable',
 } = {}) {
   const launchRequestId = controllerLaunchId(env);
+  const begun = nowImpl();
   let result;
-  // This synchronous compatibility path retries back-to-back, without backoff.
-  // Each lookup has a load-aware timeout; fast failures may exhaust immediately
-  // and defer startup to the existing uncharged closer retry path.
-  for (let attempt = 1; attempt <= LAUNCH_READ_ATTEMPTS; attempt += 1) {
+  for (let failures = 1; ; failures += 1) {
     try {
       result = readDispatchFilesImpl({launch_request_id: launchRequestId}, {env, timeoutMs: readTimeoutImpl()});
     } catch { result = null; }
     if (result?.ok === true) break;
+    const remaining = begun + graceMs - nowImpl();
+    if (!(remaining > 0)) break;
+    sleepImpl(Math.min(launchReadBackoffMs(failures), remaining));
   }
-  const refuse = reason => { throw Object.assign(new Error(reason), { phaseOutcome: reason }); };
-  if (result?.ok !== true) refuse('launch-environment-read-unavailable');
-  if (result.metadata?.launchRequestId !== launchRequestId) refuse('controller-launch-environment-identity-unconfirmed');
-  if (!Object.hasOwn(result.metadata, 'launchEnvironment')) refuse('launch-environment-missing-legacy-dispatch');
+  if (result?.ok !== true) refuseEnvironment(unavailableReason);
+  if (result.metadata?.launchRequestId !== launchRequestId) refuseEnvironment('controller-launch-environment-identity-unconfirmed');
+  if (!Object.hasOwn(result.metadata, 'launchEnvironment')) refuseEnvironment('launch-environment-missing-legacy-dispatch');
   const enabled = result.metadata.launchEnvironment?.dispatchReadsEnabled;
-  if (typeof enabled !== 'boolean') refuse('controller-launch-environment-malformed');
-  return {...env, ADVERSARIAL_DISPATCH_READS_ENABLED: enabled ? '1' : '0'};
+  if (typeof enabled !== 'boolean') refuseEnvironment('controller-launch-environment-malformed');
+  return withActivation(env, enabled);
+}
+
+// HAMMERLAUNCHREAD-01: the launch environment is launch provenance and never
+// changes during a launch. It is resolved once, before remediation, and kept in
+// a launch-bound receipt in the private run directory beside the deployed
+// phase scripts. The closing controller uses that receipt instead of a fresh
+// read, so a transient lookup failure cannot discard finished work.
+export function launchEnvironmentReceiptPath(env, launchRequestId = controllerLaunchId(env)) {
+  if (!env.HAM_RUN_DIR) throw new Error('source inputs.sh before resolving the launch environment');
+  return join(env.HAM_RUN_DIR, `launch-environment-${launchRequestId}.json`);
+}
+
+// Absent is null. A receipt that exists must be exact: it is never repaired
+// from, or silently replaced by, a fresh read.
+export function readLaunchEnvironmentReceipt(env, launchRequestId = controllerLaunchId(env)) {
+  const path = launchEnvironmentReceiptPath(env, launchRequestId);
+  let receipt;
+  try { receipt = JSON.parse(readFileSync(path, 'utf8')); }
+  catch (error) {
+    if (error.code === 'ENOENT') return null;
+    refuseEnvironment('controller-launch-environment-malformed');
+  }
+  if (receipt?.schemaVersion !== 1 || typeof receipt.dispatchReadsEnabled !== 'boolean'
+      || typeof receipt.launchRequestId !== 'string') refuseEnvironment('controller-launch-environment-malformed');
+  if (receipt.launchRequestId !== launchRequestId) refuseEnvironment('controller-launch-environment-identity-unconfirmed');
+  return receipt;
+}
+
+// The early step. A failure here costs nothing: no remediation has run, and the
+// caller records the existing uncharged deferral. Rerunning reuses the receipt.
+export function resolveLaunchEnvironment(env = process.env, options = {}) {
+  const launchRequestId = controllerLaunchId(env);
+  const kept = readLaunchEnvironmentReceipt(env, launchRequestId);
+  if (kept) return { env: withActivation(env, kept.dispatchReadsEnabled), source: 'receipt' };
+  const resolved = controllerLaunchEnvironment(env, options);
+  const dispatchReadsEnabled = resolved.ADVERSARIAL_DISPATCH_READS_ENABLED === '1';
+  try {
+    writeFileAtomic(launchEnvironmentReceiptPath(env, launchRequestId), `${JSON.stringify({ schemaVersion: 1,
+      launchRequestId, dispatchReadsEnabled, resolvedAt: new Date().toISOString() }, null, 2)}\n`,
+    { mode: 0o600, overwrite: false });
+  } catch (error) {
+    // The receipt only spares the closure a read: if it cannot be written, the
+    // closing run reads again under the same rules.
+    if (error.code !== 'EEXIST') return { env: resolved, source: 'read-unkept' };
+    // A concurrent resolver kept it first; it must agree exactly.
+    if (readLaunchEnvironmentReceipt(env, launchRequestId)?.dispatchReadsEnabled !== dispatchReadsEnabled) {
+      refuseEnvironment('controller-launch-environment-malformed');
+    }
+  }
+  return { env: resolved, source: 'read' };
+}
+
+// The closure step: the kept receipt, with no new read. Only a launch that
+// never resolved early reads here; that read spends the same grace window and
+// refuses with a reason distinct from a refusal before any work.
+export function closureLaunchEnvironment(env = process.env, options = {}) {
+  const kept = readLaunchEnvironmentReceipt(env);
+  if (kept) return { env: withActivation(env, kept.dispatchReadsEnabled), source: 'receipt' };
+  return { env: controllerLaunchEnvironment(env, {
+    ...options, unavailableReason: 'launch-environment-read-unavailable-at-closure' }), source: 'read' };
+}
+
+// Both entry points record the same launch-bound audit on a named refusal.
+export function reportLaunchEnvironmentFailure(error, env) {
+  if (error.phaseOutcome) reportHammerEarlyFailure(error.phaseOutcome, {
+    env, final: !HAMMER_RETRYABLE_READ_OUTCOMES.has(error.phaseOutcome),
+  });
 }
 
 export function assertHammerController(env = process.env, { readGroupImpl = currentProcessGroupId } = {}) {
@@ -236,11 +326,9 @@ export async function runHammerController(script, args = [], {
     throw new Error('source inputs.sh before starting the hammer controller');
   }
   try {
-    env = controllerLaunchEnvironment(env, { readDispatchFilesImpl, readTimeoutImpl });
+    ({ env } = closureLaunchEnvironment(env, { readDispatchFilesImpl, readTimeoutImpl, graceMs: unreadableGraceMs }));
   } catch (error) {
-    if (error.phaseOutcome) reportHammerEarlyFailure(error.phaseOutcome, {
-      env, final: !HAMMER_RETRYABLE_READ_OUTCOMES.has(error.phaseOutcome),
-    });
+    reportLaunchEnvironmentFailure(error, env);
     throw error;
   }
   const census = snapshotImpl ? null : groupCensusImpl({ env });
@@ -278,9 +366,9 @@ export async function runHammerController(script, args = [], {
   let startRead;
   for (let attempt = 1; attempt <= LAUNCH_READ_ATTEMPTS; attempt += 1) {
     startRead = await readLaunch();
-    if (startRead !== 'unreadable' || attempt === LAUNCH_READ_ATTEMPTS
-        || nowImpl() - startBegun >= unreadableGraceMs) break;
-    await delayImpl(1000 * attempt);
+    const remaining = startBegun + unreadableGraceMs - nowImpl();
+    if (startRead !== 'unreadable' || attempt === LAUNCH_READ_ATTEMPTS || remaining <= 0) break;
+    await delayImpl(Math.min(launchReadBackoffMs(attempt), remaining));
   }
   if (startRead !== 'permitted') {
     closing.abort();
@@ -338,9 +426,13 @@ export async function runHammerController(script, args = [], {
         // its server deadline outrun the caller's socket timeout. Count any
         // existing read as the first attempt; reads never overlap.
         const readTimeoutMs = Math.max(latestReadTimeoutMs, readTimeoutImpl());
-        const waitMs = Math.max(gateWaitMs, LAUNCH_READ_ATTEMPTS * (readTimeoutMs + pollMs));
+        // Failed gate reads are spaced (HAMMERLAUNCHREAD-01); the step's
+        // budget carries those waits so all three reads still fit.
+        let spacingMs = 0;
+        for (let failures = 1; failures < LAUNCH_READ_ATTEMPTS; failures += 1) spacingMs += launchReadBackoffMs(failures);
+        const waitMs = Math.max(gateWaitMs, LAUNCH_READ_ATTEMPTS * (readTimeoutMs + pollMs) + spacingMs);
         pendingGate = { token: request[3], deadline: nowImpl() + waitMs,
-          readTimeoutMs, reads: reading ? 1 : 0 };
+          readTimeoutMs, reads: reading ? 1 : 0, nextReadAt: 0 };
         // A read admitted just before the deadline may finish after it.
         child.stdio[4].write(`wait:${pendingGate.token}:${waitMs + readTimeoutMs + 10_000}\n`);
       }
@@ -358,6 +450,7 @@ export async function runHammerController(script, args = [], {
     reading = readLaunch(pendingGate?.readTimeoutMs).then(outcome => {
       reading = undefined;
       if (outcome === 'ended') stop('launch-ended');
+      if (outcome === 'unreadable' && pendingGate) pendingGate.nextReadAt = nowImpl() + launchReadBackoffMs(pendingGate.reads);
     });
   };
   // Two full reads always fit, even when load stretches each read's timeout.
@@ -410,7 +503,7 @@ export async function runHammerController(script, args = [], {
             || pendingGate.reads >= LAUNCH_READ_ATTEMPTS))) {
           // An unreadable launch blocks this step; only the grace window ends the round.
           child.stdio[4].write(`blocked:${pendingGate.token}\n`); pendingGate = undefined;
-        } else if (!reading) beginRead();
+        } else if (!reading && nowImpl() >= pendingGate.nextReadAt) beginRead();
       }
       if (reason) {
         if (record.state !== 'stopping') { record.state = 'stopping'; persist(); }

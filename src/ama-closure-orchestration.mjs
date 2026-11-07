@@ -124,6 +124,7 @@ import {
 } from './ama-hammer-background-dispatch.mjs';
 import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
 import { fetchPullRequestMergeability, fetchReviewBodiesForHead } from './github-api.mjs';
+import { readReviewCarryForwardRecord, reviewCarryForwardHeadProof } from './review-carry-forward.mjs';
 import {
   closureGateMergeability,
   normalizeGithubMergeability,
@@ -1370,6 +1371,12 @@ async function dispatchAmaClosureFor({
       closerHeadProof = { proven: false, reviewedHead: originalReviewedHead, currentHead: settledReviewHeadSha,
         closerCommits: [], reason: 'closer-proof-failed' };
     }
+  }
+  // REVIEWCARRY-01: a recorded generated-only carry-forward for this exact pair
+  // stands in for the head proof; the shared predicate still gates the verdict.
+  if (closerHeadProof?.proven !== true && originalReviewedHead && settledReviewHeadSha) {
+    closerHeadProof = reviewCarryForwardHeadProof(readReviewCarryForwardRecord(rootDir, { repo: repoPath,
+      prNumber, reviewedHead: originalReviewedHead, currentHead: settledReviewHeadSha })) || closerHeadProof;
   }
   let closerOnlyHeadDelta = closerHeadProof?.proven === true;
   let closerHeadHasLiveReview = false;

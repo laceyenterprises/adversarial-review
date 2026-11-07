@@ -29,6 +29,7 @@ import { maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
 import { recoverStrandedCloserHead } from '../src/ama/closer-head-recovery.mjs';
 import { hammerWakeAuditPath, readHammerWakeAudit, requestEligibleHammerWake } from '../src/hammer-wake.mjs';
 import { closerAuthoredStaleAuditPath } from '../src/closer-authored-stale.mjs';
+import { writeReviewCarryForwardRecord } from '../src/review-carry-forward.mjs';
 import { observeClosureRefreshLoop, CLOSURE_REFRESH_CYCLE_LIMIT } from '../src/ama/closure-refresh-loop.mjs';
 import { observeClosureWait } from '../src/ama/closure-wait.mjs';
 
@@ -1308,6 +1309,37 @@ for (const [scenario, decision] of [['green', 'eligible'], ['worker', 'rereview-
     assert.equal(result.dispatched, false);
     assert.equal(result.closerAuthoredStale.decision, decision);
     assert.equal(result.closerAuthoredStale.eligible, decision === 'eligible');
+    assert.deepEqual(payloads, []);
+    assert.deepEqual(wakes, []);
+  });
+}
+
+// REVIEWCARRY-01: a builder head with no hammer chain carries the settled clean
+// review only through a recorded generated-only carry-forward for this pair.
+for (const [scenario, recorded, decision] of [['worker', false, 'rereview-exact-head'],
+  ['worker', true, 'eligible'], ['blocking', true, 'not-eligible'], ['red', true, 'not-eligible']]) {
+  test(`REVIEWCARRY-01 probe answers ${decision} for ${scenario} with${recorded ? '' : 'out'} a carry-forward record`, async t => {
+    const reviewed = 'a'.repeat(40), current = 'b'.repeat(40);
+    const { args, payloads, wakes } = closerResumeFixture(scenario);
+    t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+    const body = args.reviewStateRow.review_body;
+    args.reviewStateRow.reviewer_head_sha = reviewed;
+    args.candidate.headSha = current;
+    args.currentRevisionRef = current;
+    args.proveCloserAuthoredStaleHeadImpl = options => proveCloserAuthoredStaleHead({ ...options, comments: [] });
+    args.resolveHeadCloserCommitSuppressionImpl = async () => ({ suppressed: false, reason: 'not-closer' });
+    args.fetchLatestHeadReviewBodiesImpl = async (_repo, _pr, head) => head === reviewed ? [body] : [];
+    args.fetchCurrentPrStateImpl = async () => ({ state: 'OPEN', headSha: current, isDraft: false, mergeable: 'MERGEABLE' });
+    if (recorded) {
+      assert.equal(writeReviewCarryForwardRecord(args.rootDir, { repo: args.repoPath, prNumber: args.prNumber,
+        settledReview: { verdict: 'comment-only', blockingFindingCount: 0 },
+        proof: { proven: true, reviewedHead: reviewed, currentHead: current, excludedPatterns: ['gen/**'],
+          excludedPathsChanged: ['gen/catalog.json'] } }).written, true);
+    }
+    const result = await maybeDispatchAmaClosureFor({ ...args, probeCloserAuthoredStale: true });
+    assert.equal(result.probe, true);
+    assert.equal(result.closerAuthoredStale.decision, decision);
+    assert.equal(result.closerAuthoredStale.reviewedHead, recorded ? reviewed : result.closerAuthoredStale.reviewedHead);
     assert.deepEqual(payloads, []);
     assert.deepEqual(wakes, []);
   });

@@ -4750,6 +4750,20 @@ failures warn without changing authority. See the
 [hammer retry ledger](data-model/hammer-retry-cap.md) and
 [carried-verdict audit](data-model/closer-authored-stale.md) for durable fields.
 
+REVIEWCARRY-01 adds a second carry-forward source for builder heads. When a
+posted review's head moves and the PR's own patch is unchanged, the watcher
+records a [review carry-forward](data-model/review-carry-forward.md) instead of
+requesting the automatic re-review. "Unchanged" here means equal as a
+normalized diff against the merge base, after excluding the paths the host
+repository declares in `.adversarial-review/generated-paths` at the base. The
+carried review must be settled `Comment only` or `Approved` with zero blocking
+findings and no pending remediation. The closer then uses the record as the head
+proof for `closerAuthoredStaleEligible`, and the daemon clean path accepts the
+recorded pair and validates the live head. Exact-head CI, mergeability, strict
+clean-review and live reconcile gates are unchanged. Any non-generated
+difference, a blocking finding, a capped or unreadable diff, or a reset onto an
+older base leaves today's exact-head re-review in place.
+
 Across-head launch records prove ownership only through a nonterminal session
 ledger status. A `dispatching` intent without a launch ID is uncertain; queued
 reviewer/remediator records alone are not live ownership. Launch terminality

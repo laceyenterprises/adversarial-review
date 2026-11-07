@@ -943,6 +943,15 @@
       "owner": "AMA closer-authored stale-head verdict carry-forward"
     },
     {
+      "id": "review-carry-forward",
+      "title": "Review Carry-Forward Records",
+      "path": "docs/data-model/review-carry-forward.md",
+      "store": "data/review-carry-forward/",
+      "schemaSurface": "src/review-carry-forward.mjs",
+      "relatedSchemaSurfaces": ["src/pollonce-phases.mjs", "src/ama-closure-orchestration.mjs", "src/daemon-clean-merge.mjs", "src/adversarial-gate-status.mjs"],
+      "owner": "REVIEWCARRY-01 generated-only settled-review carry-forward"
+    },
+    {
       "id": "ama-closer-dispatches",
       "recordedLaunchCustody": "CLOSERCUSTODYLRQ-01: durable dispatch receipts and optional lease workerId/dispatchedAt retain launch custody across restart. Before replacement intent publication, probe the recorded launch including retries; terminal evidence permits host teardown with `--force` to bypass the open-PR guard while host custody checks remain mandatory, live/parked owners retain custody, and unavailable evidence retains the receipt and bounded wait/page. Legacy public slot fallback and existing attempt/ceiling/merge gates remain. Activate by watcher restart after deploy; SRE observes a natural failed/succeeded launch release within one tick with launch ID/status/reason and the next budgeted dispatch. Synthetic tests only; no new smoke command.",
       "ciCapacityRecovery": "CIBLOCKRESUME-01: exact-head infrastructure recovery retires matching legacy decision-blocked local custody under the intent lock and lease CAS; recoveredLaunchRequestId retains provenance. Live/unknown retries and merge gates remain enforced.",

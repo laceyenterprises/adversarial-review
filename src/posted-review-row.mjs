@@ -1,4 +1,5 @@
 import { acquireRepositoryStateOwner } from './repository-state-lock.mjs';
+import { describeAmaPendingOwner } from './ama/pending-owner.mjs';
 import { resolveRepositoryName } from './repository-names.mjs';
 import { readHammerResumes, reconcileHammerResumes } from './ama/hammer-resume.mjs';
 import { withPostedReviewReadCache, closePostedReviewReadCache } from './posted-review-read-cache.mjs';
@@ -883,12 +884,15 @@ async function handlePostedReviewRowWithinReadCache({
         const suppressedNote = retainDecision.suppressedSincePrevious > 0
           ? ` (after ${retainDecision.suppressedSincePrevious} suppressed identical polls)`
           : '';
+        // CLOSERREVIVE-01: name the owner; with none, ownership is released.
+        const pendingOwner = describeAmaPendingOwner(amaClosureResult,
+          { launching: isAmaCloserLaunching(amaClosureResult), leaseWait: Boolean(leaseWaitMessage) });
         logger.log(
-          `[watcher] AMA hammer route ${remediationMissing ? 'waiting without a live actor' : 'retained ownership'} for ${repoPath}#${prNumber}: ` +
+          `[watcher] AMA hammer route ${remediationMissing ? 'waiting without a live actor'
+            : pendingOwner.owned ? 'retained ownership' : 'released ownership'} for ${repoPath}#${prNumber}: ` +
           `${leaseWaitMessage || amaClosureResult.reason || 'ama-dispatch-pending'} ` +
           (isAmaCloserLaunching(amaClosureResult) ? 'closer is launching; ' : '') +
-          `lrq=${amaClosureResult.launchRequestId || amaClosureResult.dispatchId || 'unknown'} ` +
-          `workerClass=${amaClosureResult.workerClass || 'unknown'}${suppressedNote}`
+          `${pendingOwner.label} workerClass=${pendingOwner.workerClass}${suppressedNote}`
         );
       }
       return { handled: true, outcome: 'ama-pending', urgent: coexistenceDecision.urgent === true,

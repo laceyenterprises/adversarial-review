@@ -1,4 +1,5 @@
 import { isWorkerProcessRunning } from './remediation-worker-liveness.mjs';
+import { staleClaimMayBeReclaimed } from './remediation-job-ownership.mjs';
 import { completeWorkerPublishedHead, hasWorkerPublishArtifacts } from './remediation-published-head.mjs';
 // Stuck-claim sweep + heartbeat emitter + pre-spawn lifecycle recheck.
 //
@@ -926,6 +927,11 @@ async function sweepStuckInProgressClaims({
   for (const { job, jobPath } of listInProgressFollowUpJobs(rootDir)) {
     scanned += 1;
     if (job?.remediationWorker?.dispatchMode === 'hq') {
+      skipped += 1;
+      continue;
+    }
+    // CLOSERREVIVE-01: never reclaim a job the closer reads as a live owner.
+    if (!staleClaimMayBeReclaimed(job, { now: nowMs }).reclaim) {
       skipped += 1;
       continue;
     }

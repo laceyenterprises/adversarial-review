@@ -6,7 +6,7 @@ installDispatchFileProducerFixture();
 import './helpers/dispatch-read-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { EventEmitter, once } from 'node:events';
 import { Duplex, PassThrough } from 'node:stream';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, renameSync, rmSync, existsSync, statSync } from 'node:fs';
@@ -147,6 +147,20 @@ function fixture(t, script, { realCensus = false } = {}) {
       return name && JSON.parse(readFileSync(join(dir, name), 'utf8'));
     },
   };
+}
+
+for (const verb of ['assert-owner', 'assert-launch', 'resolve-environment']) {
+  test(`CLI ${verb} rejects trailing arguments before controller work`, () => {
+    for (const args of [['unexpected-arg'], ['']]) {
+      const result = spawnSync(process.execPath, [join(root, 'bin/hammer-controller.mjs'), verb, ...args], {
+        env: {}, encoding: 'utf8', timeout: 10000,
+      });
+      assert.ifError(result.error);
+      assert.equal(result.status, 64);
+      assert.equal(result.stdout, '');
+      assert.match(result.stderr, /^usage: hammer-controller\.mjs .+\n$/);
+    }
+  });
 }
 
 test('launch identity refuses missing, conflicting and non-LRQ owners', () => {

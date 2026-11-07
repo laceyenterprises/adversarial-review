@@ -6,15 +6,16 @@ installDispatchFileProducerFixture();
 import './helpers/dispatch-read-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { EventEmitter, once } from 'node:events';
 import { Duplex, PassThrough } from 'node:stream';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, renameSync, rmSync, existsSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, renameSync, rmSync, existsSync, statSync } from 'node:fs';
 import { tmpdir, hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { assertHammerController, controllerGroupSnapshot, createControllerGroupCensus, controllerLaunchId, controllerLaunchEnvironment, controllerLedgerTarget, groupStillOwned, releaseControllerLease, runHammerController,
-  LAUNCH_POLL_MS, LAUNCH_READ_ATTEMPTS, LAUNCH_UNREADABLE_GRACE_MS, launchReadTimeoutMs } from '../src/ama/hammer-controller.mjs';
+  LAUNCH_POLL_MS, LAUNCH_READ_ATTEMPTS, LAUNCH_UNREADABLE_GRACE_MS, launchReadTimeoutMs,
+  launchEnvironmentClock, launchEnvironmentReceiptPath, resolveLaunchEnvironment } from '../src/ama/hammer-controller.mjs';
 import { readAmaAuditEntry } from '../src/ama/audit.mjs';
 import { acquireMergeLease, inspectMergeLease, releaseMergeLease, mergeLeaseFilePath } from '../src/ama/merge-lease.mjs';
 import { readLaunchRequestStatusFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
@@ -22,6 +23,18 @@ import { createControllerCensus, nativeControllerIdentity } from '../src/control
 import Database from 'better-sqlite3';
 
 const root = resolve(import.meta.dirname, '..');
+// HAMMERLAUNCHREAD-01: environment retries wait synchronously. Offline tests
+// advance a fake clock instead of sleeping through the real grace window.
+const environmentClock = { at: 0, sleeps: [] };
+launchEnvironmentClock.now = () => environmentClock.at;
+launchEnvironmentClock.sleep = ms => { environmentClock.sleeps.push(ms); environmentClock.at += ms; };
+const fakeEnvironmentClockPreload = `
+  import { launchEnvironmentClock } from ${JSON.stringify(new URL('../src/ama/hammer-controller.mjs', import.meta.url).href)};
+  let at = 0; launchEnvironmentClock.now = () => at; launchEnvironmentClock.sleep = ms => { at += ms; };
+`;
+// Fast-failing reads start at 0, then after each capped backoff, until the
+// grace window is spent: 0, 2, 7, 17, 37, 67, 97 and 120 seconds.
+const graceReads = 8;
 const head = 'a'.repeat(40);
 async function until(check) {
   const deadline = performance.now() + 8000;
@@ -134,6 +147,20 @@ function fixture(t, script, { realCensus = false } = {}) {
       return name && JSON.parse(readFileSync(join(dir, name), 'utf8'));
     },
   };
+}
+
+for (const verb of ['assert-owner', 'assert-launch', 'resolve-environment']) {
+  test(`CLI ${verb} rejects trailing arguments before controller work`, () => {
+    for (const args of [['unexpected-arg'], ['']]) {
+      const result = spawnSync(process.execPath, [join(root, 'bin/hammer-controller.mjs'), verb, ...args], {
+        env: {}, encoding: 'utf8', timeout: 10000,
+      });
+      assert.ifError(result.error);
+      assert.equal(result.status, 64);
+      assert.equal(result.stdout, '');
+      assert.match(result.stderr, /^usage: hammer-controller\.mjs .+\n$/);
+    }
+  });
 }
 
 test('launch identity refuses missing, conflicting and non-LRQ owners', () => {
@@ -349,7 +376,7 @@ test('CLOSERLAUNCHENV-01: a transient environment read retries before controller
   assert.equal(launchReads, 1);
 });
 
-test('CLOSERLAUNCHENV-01: three unavailable reads record a deferred startup without spawning', async t => {
+test('CLOSERLAUNCHENV-01: unavailable reads over the grace window record a deferred startup without spawning', async t => {
   const f = fixture(t, 'exit 0');
   const env = { ...f.env, HAM_REVIEWED_SHA: head, HQ_WORKER_RUN_ID: 'wrun_environment-test' };
   let reads = 0;
@@ -362,11 +389,11 @@ test('CLOSERLAUNCHENV-01: three unavailable reads record a deferred startup with
     },
     readLaunchImpl: () => assert.fail('no launch-status read before environment confirmation'),
     spawnImpl: () => assert.fail('no child or merge lease before environment confirmation'),
-  }), { phaseOutcome: 'launch-environment-read-unavailable' });
-  assert.equal(reads, LAUNCH_READ_ATTEMPTS);
+  }), { phaseOutcome: 'launch-environment-read-unavailable-at-closure' });
+  assert.equal(reads, graceReads);
   const audit = readAmaAuditEntry(f.dir, 'fixture/repo', 42, head);
   assert.equal(audit.status, 'deferred');
-  assert.equal(audit.attempts.at(-1).reason, 'launch-environment-read-unavailable');
+  assert.equal(audit.attempts.at(-1).reason, 'launch-environment-read-unavailable-at-closure');
   assert.equal(audit.attempts.at(-1).launchRequestId, 'lrq_controller-test');
   assert.equal(existsSync(join(f.dir, 'dispatch', 'lrq_controller-test',
     'hammer-progress', env.HQ_WORKER_RUN_ID, 'terminal-stop.json')), false);
@@ -406,21 +433,21 @@ test('CLOSERLAUNCHENV-01: environment retry timeouts scale once with simulated l
         reads++; budgets.push(timeoutMs); return { ok: false };
       },
     }), { phaseOutcome: 'launch-environment-read-unavailable' });
-    assert.equal(reads, LAUNCH_READ_ATTEMPTS);
+    assert.equal(reads, graceReads);
   }
-  assert.deepEqual(budgets, [30000, 30000, 30000, 180000, 180000, 180000]);
+  assert.deepEqual(budgets, [...Array(graceReads).fill(30000), ...Array(graceReads).fill(180000)]);
 });
 
 test('CLOSERLAUNCHENV-01: CLI preserves named deferred and hard-stop startup audits', t => {
   for (const [kind, reason, status] of [
-    ['unavailable', 'launch-environment-read-unavailable', 75],
+    ['unavailable', 'launch-environment-read-unavailable-at-closure', 75],
     ['legacy', 'launch-environment-missing-legacy-dispatch', 75],
     ['malformed', 'controller-launch-environment-malformed', 125],
     ['foreign', 'controller-launch-environment-identity-unconfirmed', 125],
   ]) {
     const f = fixture(t, 'exit 0');
     const preload = join(f.dir, 'environment-preload.mjs');
-    writeFileSync(preload, `
+    writeFileSync(preload, `${fakeEnvironmentClockPreload}
       import { dispatchReadTransport } from ${JSON.stringify(new URL('../src/dispatch-read-client.mjs', import.meta.url).href)};
       dispatchReadTransport.observationSync = () => ({});
       dispatchReadTransport.sdk = () => ({readDispatchFiles: () => ({
@@ -448,6 +475,188 @@ test('CLOSERLAUNCHENV-01: CLI preserves named deferred and hard-stop startup aud
       assert.equal(receipt.runId, 'wrun_environment-test');
     }
   }
+});
+
+const environmentReply = (dispatchReadsEnabled = true, launchRequestId = 'lrq_controller-test') => ({ ok: true,
+  metadata: { launchRequestId, launchEnvironment: { dispatchReadsEnabled } } });
+
+test('HAMMERLAUNCHREAD-01: a reader that fails twice then succeeds yields the environment after spaced attempts', () => {
+  let clock = 0;
+  const readsAt = [], sleeps = [];
+  const env = controllerLaunchEnvironment({ HQ_LAUNCH_REQUEST_ID: 'lrq_controller-test' }, {
+    nowImpl: () => clock, sleepImpl: ms => { sleeps.push(ms); clock += ms; },
+    readTimeoutImpl: () => 77,
+    readDispatchFilesImpl: (_selector, { timeoutMs }) => {
+      assert.equal(timeoutMs, 77);
+      readsAt.push(clock);
+      return readsAt.length < 3 ? { ok: false, reason: 'dispatch-files-unavailable' } : environmentReply(true);
+    },
+  });
+  assert.equal(env.ADVERSARIAL_DISPATCH_READS_ENABLED, '1');
+  assert.deepEqual(readsAt, [0, 2000, 7000]);
+  assert.deepEqual(sleeps, [2000, 5000]);
+});
+
+test('HAMMERLAUNCHREAD-01: an always-failing reader refuses only after the grace budget, never widening it', () => {
+  for (const readMs of [0, 30_000]) {
+    let clock = 0;
+    const readsAt = [];
+    assert.throws(() => controllerLaunchEnvironment({ HQ_LAUNCH_REQUEST_ID: 'lrq_controller-test' }, {
+      nowImpl: () => clock, sleepImpl: ms => { clock += ms; },
+      readDispatchFilesImpl: () => { readsAt.push(clock); clock += readMs; return { ok: false }; },
+    }), { phaseOutcome: 'launch-environment-read-unavailable' });
+    // No read starts after the window; each wait is spaced, and the last is capped by it.
+    assert.ok(clock >= LAUNCH_UNREADABLE_GRACE_MS, `refused at ${clock}`);
+    assert.ok(readsAt.at(-1) <= LAUNCH_UNREADABLE_GRACE_MS);
+    for (let i = 1; i < readsAt.length; i += 1) assert.ok(readsAt[i] - readsAt[i - 1] - readMs >= 2000 || readsAt[i] === LAUNCH_UNREADABLE_GRACE_MS);
+    if (readMs === 0) assert.deepEqual(readsAt, [0, 2000, 7000, 17000, 37000, 67000, 97000, 120000]);
+  }
+});
+
+test('HAMMERLAUNCHREAD-01: an early unavailable read refuses before any remediation step runs, uncharged', t => {
+  const f = fixture(t, 'exit 0');
+  const preload = join(f.dir, 'environment-preload.mjs');
+  writeFileSync(preload, `${fakeEnvironmentClockPreload}
+    import { dispatchReadTransport } from ${JSON.stringify(new URL('../src/dispatch-read-client.mjs', import.meta.url).href)};
+    dispatchReadTransport.observationSync = () => { throw Object.assign(new Error('synthetic 503'), { status: 503 }); };
+  `);
+  const remediated = join(f.dir, 'remediation-step-ran');
+  const env = { ...f.env, HQ_WORKER_RUN_ID: 'wrun_environment-test', FIXTURE_PRELOAD: preload,
+    FIXTURE_HELPER: join(root, 'bin/hammer-controller.mjs'), FIXTURE_REMEDIATED: remediated };
+  // The prompt's shape: resolve, stop on nonzero, and only then remediate.
+  let status = 0, stderr = '';
+  try {
+    execFileSync('/bin/bash', ['-c', `"${process.execPath}" --import "$FIXTURE_PRELOAD" "$FIXTURE_HELPER" resolve-environment || exit $?
+      : > "$FIXTURE_REMEDIATED"`], { env, timeout: 20000, stdio: 'pipe' });
+  } catch (error) { status = error.status; stderr = error.stderr.toString(); }
+  assert.equal(status, 75, stderr);
+  assert.match(stderr, /launch-environment-read-unavailable/);
+  assert.doesNotMatch(stderr, /at-closure/);
+  assert.match(stderr, /uncharged deferral, already audited; stop now, with no remediation/);
+  assert.equal(existsSync(remediated), false);
+  assert.equal(existsSync(launchEnvironmentReceiptPath(f.env)), false);
+  const audit = readAmaAuditEntry(f.dir, 'fixture/repo', 42, head);
+  assert.equal(audit.status, 'deferred');
+  assert.equal(audit.attempts.at(-1).reason, 'launch-environment-read-unavailable');
+  assert.equal(existsSync(join(f.dir, 'dispatch', 'lrq_controller-test', 'hammer-progress',
+    'wrun_environment-test', 'terminal-stop.json')), false);
+});
+
+test('HAMMERLAUNCHREAD-01: the CLI keeps one private receipt and reuses it on rerun', t => {
+  const f = fixture(t, 'exit 0');
+  const resolveOnce = () => JSON.parse(execFileSync(process.execPath, [join(root, 'bin/hammer-controller.mjs'),
+    'resolve-environment'], { env: f.env, encoding: 'utf8', timeout: 10000 }));
+  assert.deepEqual(resolveOnce(), { launchEnvironment: 'resolved', source: 'read', dispatchReadsEnabled: true });
+  // The adapter record changing later does not change this launch's kept value.
+  recordEnvironment(f.dir, '0');
+  assert.deepEqual(resolveOnce(), { launchEnvironment: 'resolved', source: 'receipt', dispatchReadsEnabled: true });
+  assert.equal(statSync(launchEnvironmentReceiptPath(f.env)).mode & 0o777, 0o600);
+});
+
+test('HAMMERLAUNCHREAD-01: the prompt resolves the environment before remediation and the closing controller', () => {
+  const prompt = readFileSync(join(root, 'templates/hammer-prompt.md'), 'utf8');
+  const resolveAt = prompt.indexOf('bin/hammer-controller.mjs" resolve-environment || exit $?');
+  // It is the step right after the one-time inputs initialization.
+  assert.ok(resolveAt > prompt.indexOf(`cat > '<<RUN_DIR>>/inputs.sh'`));
+  for (const later of ['bin/hammer-controller.mjs" run', '## Appendix B', '## Mandate', '## Appendix C']) {
+    assert.ok(resolveAt < prompt.indexOf(later), later);
+  }
+});
+
+for (const enabled of [true, false]) {
+  test(`HAMMERLAUNCHREAD-01: the closure step uses the environment resolved at start and makes no new read (${enabled})`, async t => {
+    const f = fixture(t, 'exit 0');
+    let reads = 0;
+    const early = resolveLaunchEnvironment(f.env, { readDispatchFilesImpl: () => { reads++; return environmentReply(enabled); } });
+    assert.equal(early.source, 'read');
+    assert.equal(reads, 1);
+    const receipt = JSON.parse(readFileSync(launchEnvironmentReceiptPath(f.env), 'utf8'));
+    assert.deepEqual({ ...receipt, resolvedAt: undefined },
+      { schemaVersion: 1, launchRequestId: 'lrq_controller-test', dispatchReadsEnabled: enabled, resolvedAt: undefined });
+    // Rerunning the early step reuses the receipt too.
+    assert.equal(resolveLaunchEnvironment(f.env, { readDispatchFilesImpl: () => assert.fail('no second read') }).source, 'receipt');
+    let observed;
+    await assert.rejects(runHammerController('/does-not-run', [], {
+      env: { ...f.env, ADVERSARIAL_DISPATCH_READS_ENABLED: enabled ? '0' : '1' },
+      readDispatchFilesImpl: () => assert.fail('the closure step must not read the launch environment again'),
+      readLaunchImpl: args => {
+        observed = args.env.ADVERSARIAL_DISPATCH_READS_ENABLED;
+        return enabled ? launch('running') : { ok: false, reason: 'dispatch reads disabled' };
+      },
+      delayImpl: async () => {}, spawnImpl: () => { throw Error('spawn-reached'); },
+    }), enabled ? /spawn-reached/ : /refusing controller start/);
+    assert.equal(observed, enabled ? '1' : '0');
+  });
+}
+
+test('HAMMERLAUNCHREAD-01: identity, legacy and malformed refusals stay exact for early, kept and closure reads', async t => {
+  const f = fixture(t, 'exit 0');
+  const path = launchEnvironmentReceiptPath(f.env);
+  // A readable refusal is never retried, never kept, and keeps its reason.
+  for (const [metadata, phaseOutcome] of [
+    [{ launchRequestId: 'lrq_controller-test' }, 'launch-environment-missing-legacy-dispatch'],
+    [{ launchRequestId: 'lrq_controller-test', launchEnvironment: { dispatchReadsEnabled: 'true' } }, 'controller-launch-environment-malformed'],
+    [{ launchRequestId: 'lrq_foreign', launchEnvironment: { dispatchReadsEnabled: true } }, 'controller-launch-environment-identity-unconfirmed'],
+  ]) {
+    let reads = 0;
+    assert.throws(() => resolveLaunchEnvironment(f.env, { readDispatchFilesImpl: () => { reads++; return { ok: true, metadata }; } }),
+      { phaseOutcome });
+    assert.equal(reads, 1);
+    assert.equal(existsSync(path), false);
+  }
+  // A kept receipt that is not exact refuses; it is never replaced by a fresh read.
+  for (const [content, phaseOutcome] of [
+    ['{broken', 'controller-launch-environment-malformed'],
+    [JSON.stringify({ schemaVersion: 1, launchRequestId: 'lrq_controller-test', dispatchReadsEnabled: 'true' }), 'controller-launch-environment-malformed'],
+    [JSON.stringify({ schemaVersion: 2, launchRequestId: 'lrq_controller-test', dispatchReadsEnabled: true }), 'controller-launch-environment-malformed'],
+    [JSON.stringify({ schemaVersion: 1, launchRequestId: 'lrq_foreign', dispatchReadsEnabled: true }), 'controller-launch-environment-identity-unconfirmed'],
+  ]) {
+    writeFileSync(path, content);
+    const noRead = { readDispatchFilesImpl: () => assert.fail('a kept receipt is never re-read') };
+    assert.throws(() => resolveLaunchEnvironment(f.env, noRead), { phaseOutcome });
+    await assert.rejects(runHammerController('/does-not-run', [], { env: f.env, ...noRead,
+      readLaunchImpl: () => assert.fail('no launch-status read after a refused receipt'),
+      spawnImpl: () => assert.fail('no child after a refused receipt') }), { phaseOutcome });
+  }
+  // An unwritable run directory keeps nothing; the closure then reads under the same rules.
+  const unwritable = { ...f.env, HAM_RUN_DIR: join(f.dir, 'read-only') };
+  mkdirSync(unwritable.HAM_RUN_DIR, { mode: 0o500 });
+  assert.equal(resolveLaunchEnvironment(unwritable, { readDispatchFilesImpl: () => environmentReply(true) }).source, 'read-unkept');
+  assert.equal(existsSync(launchEnvironmentReceiptPath(unwritable)), false);
+  // Without a run directory nothing is read, and it is not a malformed receipt.
+  assert.throws(() => resolveLaunchEnvironment({ ...f.env, HAM_RUN_DIR: '' }, {
+    readDispatchFilesImpl: () => assert.fail('no read without a run directory') }),
+  error => !error.phaseOutcome && /source inputs.sh/.test(error.message));
+  // Another launch's receipt in a shared run directory is not this launch's.
+  rmSync(path);
+  writeFileSync(launchEnvironmentReceiptPath({ ...f.env, HQ_LAUNCH_REQUEST_ID: 'lrq_other', AGENT_OS_WORKER_LRQ_ID: 'lrq_other' }),
+    JSON.stringify({ schemaVersion: 1, launchRequestId: 'lrq_other', dispatchReadsEnabled: true }));
+  let reads = 0;
+  assert.equal(resolveLaunchEnvironment(f.env, { readDispatchFilesImpl: () => { reads++; return environmentReply(false); } })
+    .env.ADVERSARIAL_DISPATCH_READS_ENABLED, '0');
+  assert.equal(reads, 1);
+});
+
+test('HAMMERLAUNCHREAD-01: a closure read without a kept receipt re-reads in the grace window and records a distinct reason', async t => {
+  const f = fixture(t, 'exit 0');
+  let reads = 0;
+  const startedAt = environmentClock.at;
+  await assert.rejects(runHammerController('/does-not-run', [], {
+    env: f.env, readDispatchFilesImpl: () => { reads++; return { ok: false }; },
+    readLaunchImpl: () => assert.fail('no launch-status read'), spawnImpl: () => assert.fail('no child'),
+  }), { phaseOutcome: 'launch-environment-read-unavailable-at-closure' });
+  assert.equal(reads, graceReads);
+  assert.ok(environmentClock.at - startedAt >= LAUNCH_UNREADABLE_GRACE_MS);
+  const attempt = readAmaAuditEntry(f.dir, 'fixture/repo', 42, head).attempts.at(-1);
+  assert.equal(attempt.reason, 'launch-environment-read-unavailable-at-closure');
+  assert.equal(attempt.outcome, 'deferred');
+  // A transient failure that recovers inside the window proceeds.
+  reads = 0;
+  await assert.rejects(runHammerController('/does-not-run', [], {
+    env: f.env, readDispatchFilesImpl: () => (++reads < 4 ? { ok: false } : environmentReply(true)),
+    readLaunchImpl: () => launch('running'), spawnImpl: () => { throw Error('spawn-reached'); },
+  }), /spawn-reached/);
+  assert.equal(reads, 4);
 });
 
 test('missing, malformed and foreign launch environment refuses before any dispatch read', async t => {
@@ -1109,7 +1318,7 @@ test('start retries one failed launch read, then runs on a good one', async t =>
     onTick: s => { if (s.clock() >= 5_000) s.exit(0); } });
   const { status, receipt } = await sim.done;
   assert.equal(status, 0);
-  assert.deepEqual(sim.readCalls.slice(0, 2).map(read => read.at), [0, 1000]);
+  assert.deepEqual(sim.readCalls.slice(0, 2).map(read => read.at), [0, 2000]);
   assert.equal(receipt.launchReadFailures, 1);
 });
 
@@ -1138,7 +1347,8 @@ for (const [kind, gateRead, answer, reason] of [
           gateAt = s.clock(); readsAtGate = s.readCalls.length;
           s.control.push(gateRequest);
         }
-        if (gateAt !== undefined && s.clock() >= gateAt + 10_000) s.exit(0);
+        // Failed gate reads are spaced 2 s then 5 s apart (HAMMERLAUNCHREAD-01).
+        if (gateAt !== undefined && s.clock() >= gateAt + 20_000) s.exit(0);
       },
     });
     const { receipt } = await sim.done;
@@ -1244,6 +1454,30 @@ test('an unreadable gate exhausts three load-scaled reads and then the round gra
   assert.equal(attempts, 3);
   assert.deepEqual(gateReplies(sim), [`blocked:${gateToken}\n`]);
   assert.ok(sim.signals[0].at >= gateAt + 270_000);
+});
+
+test('HAMMERLAUNCHREAD-01: failed lease or merge gate reads are spaced, and still all three fit', async t => {
+  let gateAt;
+  const gateReadsAt = [];
+  const sim = simulate(t, {
+    reads: (n, s) => {
+      if (n === 1) return launch('running');
+      if (gateAt === undefined || gateReplies(s).length) return unreadable();
+      gateReadsAt.push(s.clock());
+      return unreadable();
+    },
+    onTick: s => {
+      if (gateAt === undefined && s.clock() >= 50_000) { gateAt = s.clock(); s.control.push(gateRequest); }
+      if (gateReplies(s).length) s.exit(0);
+    },
+  });
+  await sim.done;
+  assert.equal(gateReadsAt.length, LAUNCH_READ_ATTEMPTS);
+  assert.ok(gateReadsAt[1] - gateReadsAt[0] >= 2000, JSON.stringify(gateReadsAt));
+  assert.ok(gateReadsAt[2] - gateReadsAt[1] >= 5000, JSON.stringify(gateReadsAt));
+  assert.deepEqual(gateReplies(sim), [`blocked:${gateToken}\n`]);
+  const advertised = Number(sim.answers[0].trim().split(':')[2]);
+  assert.ok(advertised >= LAUNCH_READ_ATTEMPTS * 30_000 + 7000 + 10_000);
 });
 
 for (const verb of ['complete', 'launch']) {

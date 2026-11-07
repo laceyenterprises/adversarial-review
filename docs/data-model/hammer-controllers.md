@@ -9,11 +9,13 @@ Before any dispatch read, the controller loads
 before the standard `HQ_ROOT` / `AGENT_OS_HQ_ROOT` / home-directory fallback.
 It requires `launchProvenance.launchRequestId` to match its unambiguous launch identity.
 It replaces any caller-exported `ADVERSARIAL_DISPATCH_READS_ENABLED` with the
-value in that adapter-owned record. Dispatch-file lookup retries up to
-`LAUNCH_READ_ATTEMPTS` with a fresh `launchReadTimeoutMs()` budget per read.
-This synchronous path retries back-to-back without delay or backoff; fast
-failures can exhaust immediately and defer startup to the next closer retry.
-Exhausted lookup (`launch-environment-read-unavailable`) and absent legacy
+value in that adapter-owned record. A failed dispatch-file lookup is retried
+with spaced backoff (`LAUNCH_READ_BACKOFF_MS`: 2, 5, 10, 20, then 30 seconds),
+each wait capped so no lookup starts after `LAUNCH_UNREADABLE_GRACE_MS`; every
+lookup gets a fresh `launchReadTimeoutMs()` budget (HAMMERLAUNCHREAD-01).
+Exhausted lookup (`launch-environment-read-unavailable` before work,
+`launch-environment-read-unavailable-at-closure` from a closing `run` with no
+kept receipt) and absent legacy
 `launchEnvironment` (`launch-environment-missing-legacy-dispatch`) refuse
 startup with exit 75 and a deferred launch-bound audit under the existing
 VERIFYHEADTRANSIENT-01 retry/refund contract. A present malformed activation
@@ -26,6 +28,29 @@ the unchanged reader. This file supplies environment provenance only: launch
 status still comes exclusively from the SDK/HCP own-launch read. The Agent OS
 adapter records and explicitly delivers `"1"` for reviewed hammer classes
 before spawn. No controller registration fields or lifecycle states change.
+## Launch environment receipt (HAMMERLAUNCHREAD-01)
+
+**Store:** `<HAM_RUN_DIR>/launch-environment-<own-lrq>.json`, mode 0600, written
+once (atomic link, never overwritten).
+**Writer:** `bin/hammer-controller.mjs resolve-environment`, which the hammer
+prompt runs right after its one-time `inputs.sh` initialization, before any
+remediation or validation. **Reader:** the same verb on rerun, and the closing
+`run`, which uses it instead of a fresh dispatch-file lookup.
+
+Version 1 fields: `schemaVersion` (1), exact `launchRequestId`, boolean
+`dispatchReadsEnabled` (the confirmed adapter activation) and ISO `resolvedAt`.
+It holds no credential, transport output or path. It is written only after the
+identity, legacy and malformed checks above pass. A receipt that cannot be
+parsed, has another schema version or a non-boolean value refuses
+`controller-launch-environment-malformed`; one whose `launchRequestId` differs
+from the file's launch refuses `controller-launch-environment-identity-unconfirmed`.
+Neither is repaired from a fresh read. An absent receipt is not an error: the
+closing `run` falls back to the spaced lookup. If the receipt cannot be written,
+the early step still succeeds (`source: read-unkept`) and keeps nothing. The run directory is the same
+private directory that holds the deployed phase scripts, so the receipt adds no
+new trust boundary. The activation is launch provenance and cannot change
+during a launch, so a kept value is never stale for its own launch.
+
 **Entrypoint:** `bin/hammer-controller.mjs run <script> [args...]`
 
 Each invocation creates an independent registration before releasing its Bash
@@ -59,17 +84,19 @@ all launch reads succeed, cannot trigger that reason (HAMVALTIMEOUTFLAKE-01).
 A validator timeout still cancels the registered group as `validation-stopped`
 and permits no validation audit. It does not adopt a successor LRQ or follow
 retries to authorize the old process. Start retries an
-unreadable launch read up to three times within that window; a terminal or
+unreadable launch read up to three times within that window, waiting 2 then 5
+seconds between attempts (capped by the window); a terminal or
 parked start read, or an unreadable process census, refuses execution at once.
 
 Lease acquisition and the merge click call `assert-launch`: the ownership
 checks of `assert-owner`, then a `launch:<pid>:<nonce>` request on FD 4. The controller
 answers `clear` only when its newest permitted read started no longer ago than
 one poll interval plus that read's timeout. Otherwise it first takes fresh reads
-(up to three, counting an already in-flight read as the first attempt). The gate
+(up to three, counting an already in-flight read as the first attempt, and
+waiting 2 then 5 seconds after a failed one). The gate
 freezes its per-read timeout at the greater of the current load-aware timeout and
 the latest read timeout. Its deadline allows three such reads plus census polling
-slack, with `LAUNCH_GATE_WAIT_MS` (60 seconds) as a floor. A read admitted before
+slack and those two waits, with `LAUNCH_GATE_WAIT_MS` (60 seconds) as a floor. A read admitted before
 that deadline may finish; no new read starts after it. The unreadable grace waits
 for this bounded gate budget before stopping the round, while terminal evidence,
 signals and the absolute controller ceiling still stop it immediately. Exhausted

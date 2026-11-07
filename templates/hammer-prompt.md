@@ -97,7 +97,7 @@ reconstruct its functions or release another invocation's lease.
 If you have announced the same next step twice without executing it, execute it
 now. If you cannot, stop with a named terminal reason via
 `hammer-terminal-audit.mjs` (for example `procedure-stalled`). Repeating a plan
-is not progress. Never spend more than a few commands reading procedure files.
+is not progress.
 
 Before every non-phase procedure step, export `HAM_PROCEDURE_STEP` to that step's name (for example `claim-build`) and set `HAM_PHASE_OUTCOME=claim-build-failed` before executing it. A controller `stop()` must take the failing step's explicit reason; never default to the previous phase's success (`published`, `verified`, or `ci-settled`). The terminal helper normalizes stale success reasons to `<HAM_PROCEDURE_STEP>-failed`, or `procedure-step-failed` when no step was named.
 
@@ -229,6 +229,7 @@ ham_git() {
 ham_pr() { "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-pr-read.mjs" "$HAM_REPO" "$HAM_PR_NUMBER" "$@"; }
 HAM_INPUTS
 source "<<RUN_DIR>>/inputs.sh"
+"${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-controller.mjs" resolve-environment || exit $?
 ```
 
 `HAM_ROOT_DIR`: deployed checkout/round ledger; keep exported.

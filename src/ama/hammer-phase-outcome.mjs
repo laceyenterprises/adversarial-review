@@ -3,6 +3,8 @@
 export const HAMMER_RETRYABLE_READ_OUTCOMES = new Set([
   'git-credential-refresh-failed',
   'launch-environment-read-unavailable',
+  // HAMMERLAUNCHREAD-01: the same deferral at the closure step, after work.
+  'launch-environment-read-unavailable-at-closure',
   'launch-environment-missing-legacy-dispatch',
   'merge-lease-base-read-failed',
   'verify-head-pr-read-failed',

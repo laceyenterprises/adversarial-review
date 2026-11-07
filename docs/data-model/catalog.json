@@ -150,6 +150,7 @@
       "store": "<HAM_RUN_DIR>/controller-<uuid>.json",
       "schemaSurface": "src/ama/hammer-controller.mjs",
       "launchReadSource": "SDK app-sdk source or null when unavailable; older v1 receipts omit it. Launch observations do not select canonical or standby DSNs. No DSN, credentials or path is stored.",
+      "launchEnvironmentReceipt": "HAMMERLAUNCHREAD-01: <HAM_RUN_DIR>/launch-environment-<lrq>.json, mode 0600, written once before remediation by resolve-environment; v1 fields schemaVersion, launchRequestId, boolean dispatchReadsEnabled, resolvedAt. The closing run reuses it with no new read; malformed or foreign receipts refuse and are never repaired from a fresh read.",
       "relatedSchemaSurfaces": ["src/controller-process-census.mjs", "src/controller_process_census.py", "bin/hammer-controller.mjs", "bin/hammer-verify-head.sh", "bin/hammer-merge.sh", "src/ama/bounded-command.mjs", "src/merge-agent-prompt.mjs"],
       "owner": "versioned closer controller"
     },

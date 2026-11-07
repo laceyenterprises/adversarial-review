@@ -410,6 +410,10 @@ function schemaV1() {
     __strict: true,
     __keys: {
       version: { __type: TYPE_INT, __required: true, __enum: [1] },
+      // PROFILENODE-01: explicit profile selector (resolution step 1). No
+      // __default on purpose: the resolved profile is exposed as
+      // AgentOSConfig.profile, so an absent key leaves `values` untouched.
+      profile: { __type: TYPE_STRING },
       cloud_access: cloudAccessConfigSchema(),
       // APPLEBUILD-01: shared CFG-01 toolchain selection, owned by Apple tools.
       apple: {
@@ -6080,11 +6084,60 @@ function localSibling(path) {
   return null;
 }
 
+// PROFILENODE-01: profile overlay. Mirrors the platform loaders' ANY-02
+// contract. Resolution order: explicit `profile:` key, env AGENT_OS_PROFILE,
+// `reference-host` when the overlay file exists next to the top file, else
+// `core`. Only the `reference-host` profile has an overlay file.
+export const PROFILE_ENV = 'AGENT_OS_PROFILE';
+export const DEFAULT_PROFILE = 'core';
+export const OVERLAY_PROFILE = 'reference-host';
+
+// `<stem>.profile.<profile>.yaml` beside the top file (`config.yaml` ->
+// `config.profile.reference-host.yaml`); null for non-YAML top paths, like
+// localSibling.
+function profileOverlaySibling(path, profile = OVERLAY_PROFILE) {
+  const dir = dirname(path);
+  const name = basename(path);
+  if (name.endsWith('.yaml')) {
+    return join(dir, `${name.slice(0, -'.yaml'.length)}.profile.${profile}.yaml`);
+  }
+  if (name.endsWith('.yml')) {
+    return join(dir, `${name.slice(0, -'.yml'.length)}.profile.${profile}.yml`);
+  }
+  return null;
+}
+
+function nonBlankString(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed === '' ? null : trimmed;
+}
+
+function resolveProfile({ explicit, env, overlayExists }) {
+  const fromKey = nonBlankString(explicit);
+  if (fromKey) return { profile: fromKey, source: 'explicit' };
+  const fromEnv = nonBlankString(env?.[PROFILE_ENV]);
+  if (fromEnv) return { profile: fromEnv, source: 'env' };
+  if (overlayExists) return { profile: OVERLAY_PROFILE, source: 'overlay-present' };
+  return { profile: DEFAULT_PROFILE, source: 'default' };
+}
+
 // -------- AgentOSConfig (public class) -------------------------------------
 
 export class AgentOSConfig {
-  constructor({ values, trace, sources, schema, runtimeDroppedUnknownKeys = [] }) {
+  constructor({
+    values,
+    trace,
+    sources,
+    schema,
+    runtimeDroppedUnknownKeys = [],
+    profile = DEFAULT_PROFILE,
+    profileSource = 'default',
+  }) {
     this.values = values;
+    // PROFILENODE-01: resolved profile (see resolveProfile) and why.
+    this.profile = profile;
+    this.profileSource = profileSource;
     this._trace = trace;
     this.sources = sources;
     this.schema = schema;
@@ -6379,20 +6432,46 @@ function loadConfigImpl({
     }
   }
 
-  // --- Layer 4: *.local.yaml siblings ---
+  // --- Layer 3.5 / 4: profile overlay, then *.local.yaml siblings ---
   // localSibling returns null for non-yaml/yml top paths; we skip Layer 4
   // entirely for those rather than synthesize a `${name}.local` sibling.
-  const localSources = [];
   const topLocal = localSibling(topPathResolved);
-  if (topLocal && existsSync(topLocal)) localSources.push({ path: topLocal, kind: 'top' });
+  const layerDocs = new Map();
+  const readLayer = (path) => {
+    if (!layerDocs.has(path)) layerDocs.set(path, loadLayerFile(path));
+    return layerDocs.get(path);
+  };
+  const topLocalPresent = Boolean(topLocal && existsSync(topLocal));
+
+  // PROFILENODE-01: profile resolution. The explicit `profile:` key follows
+  // normal layering (top, then the top-level local sibling wins). The overlay
+  // itself cannot select its own profile.
+  const explicitProfileOf = (doc) =>
+    doc && typeof doc === 'object' && !Array.isArray(doc) ? doc.profile : undefined;
+  const explicitProfile = nonBlankString(
+    topLocalPresent ? explicitProfileOf(readLayer(topLocal).doc) : undefined,
+  ) ?? nonBlankString(explicitProfileOf(topDoc));
+  const overlayPath = profileOverlaySibling(topPathResolved);
+  const overlayExists = Boolean(overlayPath && existsSync(overlayPath));
+  const { profile, source: profileSource } = resolveProfile({
+    explicit: explicitProfile,
+    env: envView,
+    overlayExists,
+  });
+
+  const layerSources = [];
+  if (profile === OVERLAY_PROFILE && overlayExists) {
+    layerSources.push({ path: overlayPath, kind: 'profile', label: `profile:${overlayPath}` });
+  }
+  if (topLocalPresent) layerSources.push({ path: topLocal, kind: 'top', label: `local:${topLocal}` });
   for (const rawPath of modulePaths) {
     const moduleLocal = localSibling(rawPath);
     if (moduleLocal && existsSync(moduleLocal)) {
-      localSources.push({ path: moduleLocal, kind: 'module' });
+      layerSources.push({ path: moduleLocal, kind: 'module', label: `local:${moduleLocal}` });
     }
   }
-  for (const { path: local } of localSources) {
-    const { doc: localDoc, rawText: localRaw } = loadLayerFile(local);
+  for (const { path: local, label } of layerSources) {
+    const { doc: localDoc, rawText: localRaw } = readLayer(local);
     if (localDoc === null || localDoc === undefined || isEmptyDoc(localDoc)) continue;
     let validatedLocal;
     if (
@@ -6420,7 +6499,7 @@ function loadConfigImpl({
       if (dotted === 'version') continue;
       setLeafPath(merged, path, value);
       (trace[dotted] = trace[dotted] || []).push({
-        source: `local:${local}`,
+        source: label,
         value,
         path: local,
       });
@@ -6519,6 +6598,8 @@ function loadConfigImpl({
     sources,
     schema,
     runtimeDroppedUnknownKeys,
+    profile,
+    profileSource,
   });
 }
 
@@ -6618,6 +6699,10 @@ function _watchedPathsForCall({ topPath, modulePaths, env }) {
   const envView = env || process.env;
   const resolvedTop = topPath || envView.AGENT_OS_CONFIG_PATH || DEFAULT_TOP_LEVEL_PATH;
   const watched = [resolvedTop];
+  // PROFILENODE-01: the overlay is read between the top file and its local
+  // sibling, so edits to it must invalidate cached loads.
+  const topOverlay = profileOverlaySibling(resolvedTop);
+  if (topOverlay) watched.push(topOverlay);
   const topLocal = localSibling(resolvedTop);
   if (topLocal) watched.push(topLocal);
   for (const modulePath of modulePaths || []) {
@@ -6689,6 +6774,14 @@ function _cacheKeyFor({ topPath, modulePaths, env, legacyGeminiReviewer = false 
         envAliases.push([name, envView[name]]);
       }
     }
+  }
+  // PROFILENODE-01: AGENT_OS_PROFILE selects the profile, so it is part of the
+  // slot identity like the declared env aliases. Key on the value
+  // resolveProfile actually reads (trimmed, blank = unset) so a blank or
+  // padded value shares the slot of the profile it resolves to.
+  const envProfile = nonBlankString(envView[PROFILE_ENV]);
+  if (envProfile) {
+    envAliases.push([PROFILE_ENV, envProfile]);
   }
   envAliases.sort(([a], [b]) => a.localeCompare(b));
   return JSON.stringify({

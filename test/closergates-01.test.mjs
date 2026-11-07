@@ -12,7 +12,7 @@ import { join, resolve } from 'node:path';
 import { classifyClosureGateFailure, readClosureGateSync } from '../src/ama/closure-gate-read.mjs';
 import { collectPredicateInputs, PREDICATE_PR_FIELDS } from '../src/ama/predicate-inputs.mjs';
 import {
-  CLOSURE_RESUME_FILE, CLOSURE_RESUME_REASON, composeClosureResumePrompt, readClosureResume, recordClosureResume,
+  CLOSURE_RESUME_FILE, CLOSURE_RESUME_REASON, closureResumeEvidence, composeClosureResumePrompt, readClosureResume, recordClosureResume,
 } from '../src/ama/closure-resume.mjs';
 import { appendAmaAuditAttempt, readAmaAuditEntry } from '../src/ama/audit.mjs';
 import { HAMMER_RETRYABLE_READ_OUTCOMES } from '../src/ama/hammer-phase-outcome.mjs';
@@ -159,8 +159,54 @@ function hammerEnv(hqRoot, runDir, overrides = {}) {
   return { HAM_HQ_ROOT: hqRoot, HAM_RUN_DIR: runDir, HAM_REPO: REPO, HAM_PR_NUMBER: String(PR),
     HAM_REVIEWED_SHA: REVIEWED, HAM_TARGET_REMEDIATION_SHA: REVIEWED, HAM_BASE_HEAD: REVIEWED,
     POST_REMEDIATION_SHA: HEAD, HAM_PUBLISHED_AUDIT_HEAD: HEAD, HAM_AUDIT_COMMENT_BODY: body,
-    HQ_LAUNCH_REQUEST_ID: LRQ, ...overrides };
+    HQ_LAUNCH_REQUEST_ID: LRQ, HQ_WORKER_RUN_ID: 'wrun_closergates-fixture', ...overrides };
 }
+
+function terminalReceipt(hqRoot) {
+  return join(hqRoot, 'dispatch', LRQ, 'hammer-progress', 'wrun_closergates-fixture', 'terminal-stop.json');
+}
+
+test('CLOSERGATES-01: definitive predicate CLI refusals emit a final progress receipt and audit', t => {
+  const hqRoot = scratch(t);
+  const runDir = scratch(t);
+  const node = join(runDir, 'node-fixture');
+  // Replace only the child reader; run the actual CLI and refusal reporting.
+  writeFileSync(node, '#!/bin/sh\nprintf \'%s\\n\' \'{"number":42,"headRefOid":"' + HEAD
+    + '","baseRefName":"main\\\\n"}\'\n', { mode: 0o755 });
+  const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+    !/^(HQ_|HAM_|AGENT_OS_|LAUNCH_REQUEST_ID$)/.test(key)));
+  const result = spawnSync(process.execPath, [join(ROOT, 'bin', 'hammer-predicate-inputs.mjs')], {
+    env: { ...inherited, ...hammerEnv(hqRoot, runDir), HAM_NODE_BIN: node },
+    encoding: 'utf8', timeout: 30_000,
+  });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /predicate-input-malformed/);
+  assert.equal(readAmaAuditEntry(hqRoot, REPO, PR, HEAD).attempts.at(-1).reason, 'predicate-input-malformed');
+  assert.equal(JSON.parse(readFileSync(terminalReceipt(hqRoot), 'utf8')).reason, 'predicate-input-malformed');
+});
+
+test('CLOSERGATES-01: closure resume compares SHA values without case sensitivity', t => {
+  const env = hammerEnv(scratch(t), scratch(t));
+  const expected = closureResumeEvidence(env);
+  for (const post of [HEAD, HEAD.toUpperCase()]) {
+    for (const published of [HEAD, HEAD.toUpperCase()]) {
+      for (const comment of [HEAD, HEAD.toUpperCase()]) {
+        const evidence = closureResumeEvidence({ ...env, POST_REMEDIATION_SHA: post,
+          HAM_PUBLISHED_AUDIT_HEAD: published, HAM_AUDIT_COMMENT_BODY: `HAM-Validated-Head: ${comment}` });
+        assert.equal(evidence?.validatedHead, HEAD);
+        assert.equal(evidence?.validation.auditPublishedHead, HEAD);
+      }
+    }
+  }
+  assert.ok(expected);
+  for (const overrides of [
+    { HAM_PUBLISHED_AUDIT_HEAD: MOVED.toUpperCase() },
+    { POST_REMEDIATION_SHA: 'invalid' },
+    { HAM_AUDIT_COMMENT_BODY: `HAM-Validated-Head: ${MOVED.toUpperCase()}` },
+    { HAM_AUDIT_COMMENT_BODY: `HAM-Validated-Head: ${HEAD}\nHAM-Validated-Head: ${HEAD.toUpperCase()}` },
+    { HAM_AUDIT_COMMENT_BODY: `HAM-Validated-Head: ${HEAD} extra` },
+  ]) assert.equal(closureResumeEvidence({ ...env, ...overrides }), null);
+});
 
 test('CLOSERGATES-01: an exhausted transient gate writes a closure-resume receipt for the validated head', t => {
   const hqRoot = scratch(t);
@@ -250,7 +296,12 @@ test('CLOSERGATES-01: a conflict at verification is rebased and revalidated, nev
   writeFileSync(join(runDir, CLOSURE_RESUME_FILE), JSON.stringify({ schemaVersion: 1, validatedHead: repo.head,
     reviewedHead: REVIEWED, gate: 'protection', launchRequestId: LRQ }));
   // verify-head exits 21; the phase wrapper records the conflict (non-final).
-  recordHammerEarlyFailure('rebase-conflict', { env, headSha: repo.head });
+  assert.equal(recordHammerEarlyFailure('rebase-conflict', { env, headSha: repo.head }), null);
+  assert.equal(readAmaAuditEntry(hqRoot, REPO, PR, repo.head), null, 'repairable work writes no terminal audit');
+  const nonFinalCli = spawnSync(process.execPath, [join(ROOT, 'bin', 'hammer-terminal-audit.mjs'), 'rebase-conflict', repo.head],
+    { env: { ...process.env, ...env }, encoding: 'utf8', timeout: 30_000 });
+  assert.equal(nonFinalCli.status, 0, nonFinalCli.stderr);
+  assert.equal(readAmaAuditEntry(hqRoot, REPO, PR, repo.head), null);
   // Ending the run on it is refused while the repair budget lasts.
   assert.throws(() => recordHammerEarlyFailure('rebase-conflict', { env, headSha: repo.head, final: true }),
     RepairableConflictError);
@@ -258,7 +309,7 @@ test('CLOSERGATES-01: a conflict at verification is rebased and revalidated, nev
     { env: { ...process.env, ...env }, encoding: 'utf8', timeout: 60_000 });
   assert.equal(cli.status, 65, cli.stderr);
   assert.match(cli.stderr, /repairable, not terminal[\s\S]*Run Appendix D/);
-  assert.equal(existsSync(join(runDir, 'hammer-progress')) && readdirSync(join(runDir, 'hammer-progress')).length > 0, false);
+  assert.equal(existsSync(terminalReceipt(hqRoot)), false);
 
   // Appendix D rebases: the head moves, so the resumed run validates it normally.
   writeFileSync(join(repo.dir, 'file.txt'), 'rebased\n');
@@ -273,6 +324,30 @@ test('CLOSERGATES-01: a conflict at verification is rebased and revalidated, nev
     recordHammerEarlyFailure('rebase-conflict', { env, headSha: String(i).repeat(40) });
   }
   assert.ok(recordHammerEarlyFailure('rebase-conflict', { env, headSha: repo.head, final: true }));
+  assert.equal(readAmaAuditEntry(hqRoot, REPO, PR, repo.head).attempts.at(-1).reason, 'conflict-repair-exhausted');
+  assert.equal(JSON.parse(readFileSync(terminalReceipt(hqRoot), 'utf8')).reason, 'conflict-repair-exhausted');
+});
+
+test('CLOSERGATES-01: final conflict reports alone count distinct heads and exhaust the repair budget', t => {
+  const hqRoot = scratch(t);
+  const runDir = scratch(t);
+  const env = hammerEnv(hqRoot, runDir);
+  const heads = [HEAD, REVIEWED, MOVED];
+  for (let i = 0; i < CONFLICT_REPAIR_BUDGET; i += 1) {
+    const result = spawnSync(process.execPath,
+      [join(ROOT, 'bin', 'hammer-terminal-audit.mjs'), '--final', 'rebase-conflict', heads[i]],
+      { env: { ...process.env, ...env }, encoding: 'utf8', timeout: 30_000 });
+    assert.equal(result.status, i < CONFLICT_REPAIR_BUDGET - 1 ? 65 : 0, result.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(join(runDir, 'conflict-repairs.json'), 'utf8')).heads, heads.slice(0, i + 1));
+    if (i < CONFLICT_REPAIR_BUDGET - 1) {
+      assert.equal(readAmaAuditEntry(hqRoot, REPO, PR, heads[i]), null);
+      assert.equal(existsSync(terminalReceipt(hqRoot)), false);
+      assert.throws(() => recordHammerEarlyFailure('rebase-conflict', { env, headSha: heads[i], final: true }),
+        RepairableConflictError, 'the same head does not consume another repair');
+    }
+  }
+  assert.equal(readAmaAuditEntry(hqRoot, REPO, PR, MOVED).attempts.at(-1).reason, 'conflict-repair-exhausted');
+  assert.equal(JSON.parse(readFileSync(terminalReceipt(hqRoot), 'utf8')).reason, 'conflict-repair-exhausted');
 });
 
 test('CLOSERGATES-01: a credential mint that timed out or failed to run is a retryable deferral', t => {

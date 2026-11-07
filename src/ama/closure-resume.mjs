@@ -22,12 +22,13 @@ const SETTLED = new Set(['succeeded', 'failed-without-merge', 'superseded', 'def
 // hammer-publish exports HAM_PUBLISHED_AUDIT_HEAD after the entitled audit with
 // `HAM-Validated-Head` lands, and clears it whenever the head moves.
 export function closureResumeEvidence(env = process.env) {
-  const validatedHead = env.POST_REMEDIATION_SHA;
-  if (!SHA.test(validatedHead || '') || env.HAM_PUBLISHED_AUDIT_HEAD !== validatedHead) return null;
+  const validatedHead = String(env.POST_REMEDIATION_SHA || '').toLowerCase();
+  if (!SHA.test(validatedHead) || String(env.HAM_PUBLISHED_AUDIT_HEAD || '').toLowerCase() !== validatedHead) return null;
   if (!SHA.test(env.HAM_REVIEWED_SHA || '')) return null;
   const body = String(env.HAM_AUDIT_COMMENT_BODY || '');
   const validatedLines = body.split(/\r?\n/).filter(line => /^HAM-Validated-Head:/.test(line));
-  if (validatedLines.length !== 1 || validatedLines[0].trim() !== `HAM-Validated-Head: ${validatedHead}`) return null;
+  const commentHead = validatedLines[0]?.trim().match(/^HAM-Validated-Head: ([a-fA-F0-9]{40})$/)?.[1];
+  if (validatedLines.length !== 1 || commentHead?.toLowerCase() !== validatedHead) return null;
   return {
     validatedHead: validatedHead.toLowerCase(),
     reviewedHead: env.HAM_REVIEWED_SHA.toLowerCase(),

@@ -52,13 +52,13 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
   const headFor = /^[a-f0-9]{40}$/i.test(headSha || '') ? headSha
     : env.HAM_TARGET_REMEDIATION_SHA || env.HAM_REVIEWED_SHA;
   if (reason === REPAIRABLE_CONFLICT) {
-    if (final !== true) noteConflictedHead(env, headFor);
-    else {
-      // A run without its private directory cannot count; keep the old rule.
-      const heads = conflictedHeads(env);
-      if (heads && heads.length < CONFLICT_REPAIR_BUDGET) throw new RepairableConflictError(heads.length);
-      if (heads) reason = CONFLICT_REPAIR_EXHAUSTED;
-    }
+    noteConflictedHead(env, headFor);
+    // A phase observation grants repair work, never a terminal audit.
+    if (final !== true) return null;
+    // A run without its private directory cannot count; keep the old rule.
+    const heads = conflictedHeads(env);
+    if (heads && heads.length < CONFLICT_REPAIR_BUDGET) throw new RepairableConflictError(heads.length);
+    if (heads) reason = CONFLICT_REPAIR_EXHAUSTED;
   }
   try { recordHammerPhase(reason, { env }); } catch { /* Diagnostic capture cannot block the original failure. */ }
   if (final === true) reportHammerProgress('terminal-stop', { env, reason, final });

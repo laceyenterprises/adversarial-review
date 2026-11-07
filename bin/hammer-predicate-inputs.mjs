@@ -44,7 +44,7 @@ if (result.ok) {
     + `HAM next: release the lease and stop with retryable ${result.reason}; not final for this head.\n`);
   process.exitCode = 75;
 } else {
-  reportHammerEarlyFailure(result.reason, { env, headSha: env.POST_REMEDIATION_SHA });
+  reportHammerEarlyFailure(result.reason, { env, headSha: env.POST_REMEDIATION_SHA, final: true });
   process.stderr.write(`HAM closure gate ${result.gate} refused: ${result.reason}\n${String(result.detail || '').slice(-500)}\n`
     + `HAM next: release the lease and stop with ${result.reason}.\n`);
   process.exitCode = 1;

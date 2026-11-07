@@ -129,7 +129,8 @@ mint) shares `src/ama/closure-gate-read.mjs`: transient failures (timeout,
 5xx, connection errors, rate limits, a credential mint that timed out or failed
 to run) retry in place with the same `LAUNCH_READ_BACKOFF_MS` spacing inside a
 120-second closure budget. Definitive answers (401/403, a moved head, malformed
-output) refuse at once as before. A protection 404 "Branch not found" is
+output) refuse at once and write a final `terminal-stop` progress receipt.
+A protection 404 "Branch not found" is
 retried only while a branch read contradicts it; confirmed or persistent, it
 refuses as `protection-branch-not-found`, never as "no protection". When a
 gate exhausts after the run published its validation audit, the helper exits
@@ -138,12 +139,19 @@ closure-gate-read-unavailable`, `attemptPhase: hammer-closure-resume`) to the
 head's AMA audit. The closer's next launch on that same head carries a
 closure-only prompt block and `<run dir>/closure-resume.json`;
 `hammer-validate.mjs` reuses the recorded evidence while the checkout is still
-that head. A moved head (including an Appendix D rebase) validates normally.
+that head. Validation evidence compares SHA values without case sensitivity,
+retains lowercase receipt heads and hashes the original audit body unchanged.
+A moved head (including an Appendix D rebase) validates normally.
 An API credential mint that times out or fails to run records the retryable
 `credential-refresh-unavailable`. `hammer-terminal-audit.mjs --final
-rebase-conflict` exits 65 and records nothing until the run has met conflicts
-on three heads (`conflict-repair-exhausted`); the run repairs the conflict
-through Appendix D instead.
+rebase-conflict` counts the reported head in `<run dir>/conflict-repairs.json`
+before checking the budget. Until three distinct heads have conflicted, it
+exits 65 without a terminal AMA audit or `terminal-stop` receipt; the run
+repairs the conflict through Appendix D instead. Non-final conflict reports
+only count the head and return successfully, without a terminal audit or
+progress receipt. Repeated reports of the same head spend no additional
+budget. A final report at three distinct heads records
+`conflict-repair-exhausted` and its final progress receipt.
 A present value without boolean `dispatchReadsEnabled` records
 `controller-launch-environment-malformed` and hard-stops with exit 125.
 A foreign launch identity retains

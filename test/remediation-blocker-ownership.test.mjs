@@ -19,6 +19,8 @@ for (const [name, entry, owner] of [
   ['other kind', { ...pendingCi, kind: 'unknown' }, 'human'],
   ['untagged operator approval', { finding: 'Required CI is pending; operator approval is required.' }, 'human'],
   ['untagged legacy sentence', { finding: 'Required CI is pending.', needsHumanInput: legacyFollowup }, 'CI'],
+  ['negation starts the finding field', { title: 'CI pending', finding: 'No human decision or operator approval is needed.' }, 'CI'],
+  ['two-item comma list after a bullet', { title: 'CI pending', finding: '- No human decision, or operator approval is needed.' }, 'CI'],
   ['untagged negated decision', { ...pendingCi, kind: undefined }, 'CI'],
   ['untagged negated approval', { finding: 'Required CI is pending. No human decision or operator approval is needed.' }, 'CI'],
   ['untagged negated permissions', { finding: 'Required CI is pending. No credentials or permissions are required.' }, 'CI'],

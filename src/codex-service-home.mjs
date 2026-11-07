@@ -14,7 +14,7 @@ function runServiceCodexCommandAsync(command, args, { stdio, ...options }) {
     // collection. Authentication errors and catalog warnings redact output.
     const child = execFile(command, args, options, (error, stdout, stderr) => {
       if (error) { reject(error); return; }
-      resolve({ stdout, stderr: stdio[2] === 'ignore' ? '' : stderr });
+      resolve({ stdout, stderr: stdio?.[2] === 'ignore' ? '' : stderr });
     });
     // execFile cannot honour stdio: ignore. Deliver EOF explicitly so neither
     // finite probe can wait for interactive input.

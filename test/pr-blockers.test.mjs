@@ -5,9 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import Database from 'better-sqlite3';
-import { buildPrBlocker, reviewCoverage, formatPrBlockers, makePrBlockersReport } from '../src/pr-blockers.mjs';
+import { buildPrBlocker, reviewCoverage, formatPrBlockers, makePrBlockersReport, reportAction } from '../src/pr-blockers.mjs';
 import { collectPrBlockers, readPages, readReviewStore, readCloserLeases,
-  readConflictFiles, readRemediation } from '../src/pr-blockers-read.mjs';
+  readConflictFiles, readRemediation, readCloserReceipts } from '../src/pr-blockers-read.mjs';
 import { parsePrBlockersArgs } from '../bin/pr-blockers.mjs';
 import { nextAction, deriveNextActionSnapshot } from '../src/pr-next-action.mjs';
 
@@ -55,8 +55,19 @@ test('post-review authors distinguish authenticated closer edges from other comm
   const result = reviewCoverage({ headSha: previous }, head, { status: 'ahead',
     commits: [{ sha: another, author: { login: 'synthetic-builder' } },
       { sha: head, author: { login: 'synthetic-closer' } }] },
-  [{ syntheticTrustedEdge: { head } }], comment => comment.syntheticTrustedEdge);
+  [{ syntheticTrustedEdge: { base: another, head } }], comment => comment.syntheticTrustedEdge);
   assert.deepEqual(result.commits.map(commit => commit.closerAttested), [false, true]);
+});
+
+test('a closer edge attests intermediate commits, but never preceding or unknown-base commits', () => {
+  const first = 'c'.repeat(40), middle = 'd'.repeat(40);
+  const comparison = { status: 'ahead', commits: [first, middle, head].map(sha => ({ sha })) };
+  const edge = base => [{ syntheticTrustedEdge: { base, head } }];
+  const attest = base => reviewCoverage({ headSha: previous }, head, comparison, edge(base),
+    comment => comment.syntheticTrustedEdge).commits.map(commit => commit.closerAttested);
+  assert.deepEqual(attest(previous), [true, true, true]);
+  assert.deepEqual(attest(first), [false, true, true]);
+  assert.deepEqual(attest('e'.repeat(40)), [false, false, false]);
 });
 
 test('unreadable attestation evidence is not evidence that post-review commits are unattested', () => {
@@ -162,6 +173,27 @@ test('expired owner deadline is distinct from a freshly anchored recovery deadli
   assert.equal(result.decision.deadline.at, '2026-01-02T12:04:00.000Z');
 });
 
+test('live reviewer and remediator retain their shared actions even past the decision deadline', () => {
+  for (const [actor, action] of [['reviewer', 'review'], ['remediator', 'remediate']]) {
+    assert.equal(reportAction({ actor, action, reason: 'live-owner',
+      deadline: { at: '2026-01-01T12:00:00Z' } }, { now }), action);
+  }
+});
+
+test('CI observer deadlines and terminal lease deadlines never become owner deadlines', () => {
+  for (const lease of [null, { status: 'terminal', headSha: head,
+    acquiredAt: '2026-01-01T12:00:00Z', deadlineAt: '2026-01-01T12:30:00Z' }]) {
+    const result = row({ pr: { ...pr, statusCheckRollup: [{ ...green, status: 'QUEUED', conclusion: null }] },
+      observations: { ...observations, leases: { closer: lease } } });
+    assert.equal(result.closer.deadline, null);
+    assert.equal(result.closer.deadlineStatus, 'unknown');
+    assert.ok(result.decision.deadline.at);
+    const text = formatPrBlockers(makePrBlockersReport([result], new Date(now).toISOString()));
+    assert.ok(text.includes('NEXT ACTOR DEADLINE'));
+    assert.ok(text.includes(result.decision.deadline.at));
+  }
+});
+
 test('stale duplicate hold is only a superseded question and preserves safety refusal', () => {
   const result = row({ pr: { ...pr, labels: ['duplicate-family-hold'] },
     review: { ...review, headSha: previous }, comparison: { status: 'diverged' } });
@@ -220,7 +252,7 @@ test('review store reads genuine posted passes without bootstrapping or changing
   db.exec(`CREATE TABLE reviewed_prs(repo TEXT, pr_number INTEGER, reviewer TEXT);
     CREATE TABLE reviewer_passes(repo TEXT, pr_number INTEGER, pass_id INTEGER,
       pass_kind TEXT, head_sha TEXT, body_md TEXT, gh_comment_id TEXT, body_captured_at TEXT, ended_at TEXT);
-    INSERT INTO reviewed_prs VALUES('example/project', 7, 'synthetic-reviewer');`);
+    INSERT INTO reviewed_prs VALUES('example/project', 7, 'lacey-claude-reviewer');`);
   const insert = db.prepare('INSERT INTO reviewer_passes VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)');
   insert.run(repo, 7, 1, 'first-pass', head, body, '11', review.postedAt, review.postedAt);
   insert.run(repo, 7, 2, 'rereview', previous, body, null, review.postedAt, review.postedAt);
@@ -245,6 +277,20 @@ test('lease reads isolate repository and PR identities and create no lock files'
   assert.deepEqual(await readdir(join(root, 'data')), ['ama-closer-leases']);
   await writeFile(join(dir, `example__project-pr-7-${head}.json`), JSON.stringify({ repo, prNumber: 7, headSha: head, status: 'unknown-status' }));
   await assert.rejects(readCloserLeases(root, repo, 7), /unknown closer lease status/);
+});
+
+test('a historical no-sha or malformed receipt explicitly fails the whole ownership read', async t => {
+  const root = await fixture(t);
+  const dir = join(root, 'data', 'follow-up-jobs', 'ama-closer-dispatches');
+  await mkdir(dir, { recursive: true });
+  const path = join(dir, 'example__project-pr-7-no-sha.json');
+  await writeFile(path, JSON.stringify({ repo, prNumber: 7, headSha: null }));
+  await assert.rejects(readCloserReceipts(root, repo, 7), /malformed ownership record.*no-sha/);
+  await writeFile(path, '{invalid');
+  await assert.rejects(readCloserReceipts(root, repo, 7), SyntaxError);
+  const report = await collectPrBlockers(collectorOptions({ root }));
+  assert.equal(report.rows[0].decision.reason, 'ownership-unreadable');
+  assert.ok(report.rows[0].errors.includes('closer receipts unavailable'));
 });
 
 test('remediation reader treats an active job without a ledger observation as unknown', async t => {
@@ -290,12 +336,115 @@ const collectorOptions = changes => ({
   fetchPr: async () => pr, readStore: () => ({ row: null, pass: null }),
   leasesRead: async () => [], remediationRead: async () => ({ job: null, roundsLeft: false }),
   enrichChecks: async ({ rollup }) => rollup,
-  authoritativeLogins: ['synthetic-reviewer'],
+  authoritativeLogins: ['lacey-claude-reviewer'],
   get: async path => {
+    if (path === 'rate_limit') return { resources: { core: { remaining: 5000 } } };
     if (path.includes('/reviews?')) return [];
     if (path.includes('/pulls?')) return [{ number: 7, created_at: pr.createdAt }];
     return { state: 'open', head: { sha: head } };
   }, ...changes,
+});
+
+test('collector refuses low or unreadable core rate budgets before any PR reads', async () => {
+  for (const rate of [{ resources: { core: { remaining: 999 } } }, {}]) {
+    const calls = [];
+    const report = await collectPrBlockers(collectorOptions({ get: async path => {
+      calls.push(path);
+      return rate;
+    } }));
+    assert.deepEqual(calls, ['rate_limit']);
+    assert.deepEqual(report.rows, []);
+    assert.match(report.errors[0], /rate budget/);
+  }
+});
+
+test('a pathological paginated list cannot exceed the report REST budget', async () => {
+  let calls = 0;
+  const report = await collectPrBlockers(collectorOptions({ get: async path => {
+    calls++;
+    if (path === 'rate_limit') return { resources: { core: { remaining: 5000 } } };
+    if (path.includes('/reviews?')) return Array.from({ length: 100 }, () => ({ state: 'PENDING' }));
+    if (path.includes('/pulls?')) return [{ number: 7 }];
+    return { state: 'open', head: { sha: head } };
+  } }));
+  assert.equal(calls, 200);
+  assert.equal(report.rows[0].eligible, false);
+  assert.ok(report.errors.some(error => error.includes('REST read budget')));
+});
+
+test('collector caps PR reads across repositories and reports omitted rows', async () => {
+  const options = collectorOptions({ limit: 1, repos: [repo, 'example/other'] });
+  const calls = [];
+  const report = await collectPrBlockers({ ...options, get: async path => {
+    calls.push(path);
+    if (path.includes('/pulls?')) return [{ number: 7 }, { number: 8 }];
+    return options.get(path);
+  } });
+  assert.equal(report.rows.length, 1);
+  assert.ok(report.errors.some(error => error.includes('additional PRs omitted')));
+  assert.ok(!calls.some(path => path.includes('/pulls/8') || path.includes('example/other')));
+  assert.equal(parsePrBlockersArgs(['--repo', repo]).limit, 25);
+  assert.equal(parsePrBlockersArgs(['--repo', repo, '--limit', '2']).limit, 2);
+  for (const limit of ['0', '-1', '101', '1.5', 'NaN']) {
+    assert.throws(() => parsePrBlockersArgs(['--repo', repo, '--limit', limit]));
+  }
+});
+
+test('real remediationWorker job shapes resolve live HQ ownership without treating dispatchId as LRQ', async t => {
+  const root = await fixture(t);
+  const dir = join(root, 'data', 'follow-up-jobs', 'in-progress');
+  await mkdir(dir, { recursive: true });
+  const path = join(dir, 'example__project-pr-7-job.json');
+  for (const key of ['launchRequestId', 'launchRequestID', 'lrq']) {
+    await writeFile(path, JSON.stringify({ repo, prNumber: 7, status: 'in_progress',
+      headSha: head, createdAt: review.postedAt,
+      remediationWorker: { dispatchMode: 'hq', [key]: 'synthetic-remediator' } }));
+    const report = await collectPrBlockers(collectorOptions({ root, remediationRead: readRemediation,
+      launchRead: async ({ launchRequestId }) => {
+        assert.equal(launchRequestId, 'synthetic-remediator');
+        return { state: 'complete', value: { launch: { status: 'running' }, retryChain: [] } };
+      } }));
+    assert.equal(report.rows[0].decision.reason, 'live-owner');
+    assert.equal(report.rows[0].decision.actor, 'remediator');
+    assert.equal(report.rows[0].nextAction, 'remediate');
+    assert.deepEqual(report.rows[0].errors, []);
+  }
+  for (const status of ['pending', 'in_progress']) {
+    await writeFile(path, JSON.stringify({ repo, prNumber: 7, status,
+      createdAt: review.postedAt, remediationWorker: { dispatchMode: 'hq', dispatchId: 'not-an-lrq' } }));
+    assert.equal((await readRemediation(root, repo, 7)).launchRequestId, null);
+    const report = await collectPrBlockers(collectorOptions({ root, remediationRead: readRemediation }));
+    assert.equal(report.rows[0].decision.reason, 'ownership-unreadable');
+    assert.ok(report.rows[0].errors.includes('active remediation has no launch-request ID; ownership unknown'));
+  }
+});
+
+test('review families sharing a head are unknown rather than optimistic eligibility', async () => {
+  const options = collectorOptions({ authoritativeLogins: ['lacey-claude-reviewer', 'lacey-codex-reviewer'] });
+  const report = await collectPrBlockers({ ...options, get: async path => path.includes('/reviews?')
+    ? [{ user: { login: 'lacey-claude-reviewer' }, state: 'CHANGES_REQUESTED', commit_id: head,
+      body: '## Verdict\nRequest changes', submitted_at: review.postedAt },
+    { user: { login: 'lacey-codex-reviewer' }, state: 'COMMENTED', commit_id: head,
+      body, submitted_at: '2026-01-02T11:59:00Z' }] : options.get(path) });
+  assert.equal(report.rows[0].eligible, false);
+  assert.equal(report.rows[0].coverage.kind, 'unknown');
+  assert.equal(report.rows[0].decision.reason, 'reviews-unknown');
+  assert.equal(report.rows[0].review.blockingEmpty, null);
+});
+
+test('review selection walks ancestry past a newer review from a discarded branch', async () => {
+  const options = collectorOptions();
+  const report = await collectPrBlockers({ ...options, get: async path => {
+    if (path.includes('/reviews?')) return [
+      { user: { login: 'lacey-claude-reviewer' }, state: 'COMMENTED', commit_id: head,
+        body, submitted_at: review.postedAt },
+      { user: { login: 'lacey-claude-reviewer' }, state: 'COMMENTED', commit_id: previous,
+        body, submitted_at: '2026-01-02T11:59:00Z' }];
+    if (path.includes('/compare/')) return { status: 'diverged', commits: [] };
+    return options.get(path);
+  } });
+  assert.equal(report.rows[0].coverage.kind, 'exact-head');
+  assert.equal(report.rows[0].nextAction, 'merge-ready');
 });
 
 test('collector reports unreadable reviews as unknown and preserves partial repository errors', async () => {
@@ -314,7 +463,7 @@ test('collector reports unreadable reviews as unknown and preserves partial repo
 test('collector selects the latest authenticated submitted review and ignores a copied approval', async () => {
   const options = collectorOptions();
   const result = await collectPrBlockers({ ...options, get: async path => path.includes('/reviews?')
-    ? [{ user: { login: 'synthetic-reviewer' }, state: 'COMMENTED', commit_id: head,
+    ? [{ user: { login: 'lacey-claude-reviewer' }, state: 'COMMENTED', commit_id: head,
       body, submitted_at: review.postedAt },
     { user: { login: 'synthetic-builder' }, state: 'APPROVED', commit_id: previous,
       body, submitted_at: '2026-01-02T11:59:00Z' }] : options.get(path) });
@@ -348,7 +497,7 @@ test('an earlier-head closer lease requests reconciliation instead of inventing 
 test('collector retains unknown currency when closer comments cannot be read', async () => {
   const options = collectorOptions();
   const report = await collectPrBlockers({ ...options, get: async path => {
-    if (path.includes('/reviews?')) return [{ user: { login: 'synthetic-reviewer' }, state: 'COMMENTED',
+    if (path.includes('/reviews?')) return [{ user: { login: 'lacey-claude-reviewer' }, state: 'COMMENTED',
       commit_id: previous, body, submitted_at: review.postedAt }];
     if (path.includes('/compare/')) return { status: 'ahead', total_commits: 1, commits: [{ sha: head }] };
     if (path.includes('/comments?')) throw new Error('synthetic comment read failure');

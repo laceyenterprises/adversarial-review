@@ -15,7 +15,16 @@ export function reviewCoverage(review, head, comparison, comments = [], provenan
   if (!['ahead', 'identical'].includes(comparison.status) || !Array.isArray(comparison.commits)) {
     return { kind: 'unknown', commits: [] };
   }
-  const attested = comments && new Set(comments.map(provenanceEdge).filter(Boolean).map(edge => edge.head));
+  const attested = comments && new Set();
+  if (attested) {
+    const order = [review.headSha, ...comparison.commits.map(commit => commit.sha)];
+    for (const edge of comments.map(provenanceEdge).filter(Boolean)) {
+      const base = order.indexOf(edge.base), end = order.indexOf(edge.head);
+      if (base >= 0 && end > base) {
+        for (const commit of order.slice(base + 1, end + 1)) attested.add(commit);
+      }
+    }
+  }
   return { kind: 'post-review', commits: comparison.commits.map(commit => ({
     sha: commit.sha,
     author: commit.author?.login || commit.commit?.author?.name || 'unknown',
@@ -43,10 +52,11 @@ const age = (at, now) => Number.isFinite(Date.parse(at)) ? Math.max(0, now - Dat
 // findings, mixed conflicts, and incomplete reads).
 export function reportAction(decision, { conflicts, duplicate, eligible, now }) {
   if (decision.reason === 'lease-expired') return 'closer-overdue';
-  if (decision.reason === 'live-owner') {
+  if (decision.reason === 'live-owner' && decision.actor === 'hammer') {
     const due = Date.parse(decision.deadline?.at);
     return Number.isFinite(due) && due <= now ? 'closer-overdue' : 'wait-closer';
   }
+  if (decision.reason === 'live-owner') return decision.action;
   if (decision.row === 'R04-ownership') return 'wait-closer';
   if (decision.action === 'operator-hold' || decision.action === 'done') return decision.action;
   if (duplicate && decision.reason === 'safety-refusal') return 'superseded?';
@@ -86,7 +96,12 @@ export function buildPrBlocker({ repo, pr, review = null, comparison = null, com
     && coverage.kind === 'exact-head' && facts.blockingFindingState === 'known'
     && facts.blockingFindingCount === 0 && ['approved', 'comment-only'].includes(facts.verdict)
     && checks.conclusion === 'SUCCESS';
-  const ownerDeadline = closerLeaseDeadline(lease) || decision.deadline?.at || null;
+  const launch = observations.launches?.value?.closer || observations.launches?.closer;
+  const job = observations.remediation?.value?.job || observations.remediation?.job;
+  const ownerDeadline = decision.actor === 'remediator' ? job?.deadlineAt || job?.heartbeatDeadlineAt || null
+    : (decision.actor === 'hammer' && decision.reason === 'live-owner'
+      ? launch?.deadlineAt || launch?.heartbeatDeadlineAt : null)
+      || (['pending', 'dispatched'].includes(lease?.status) ? closerLeaseDeadline(lease) : null);
   const due = Date.parse(ownerDeadline);
   return {
     repo, number: pr.number, title: String(pr.title || ''), headSha: pr.headRefOid || null,
@@ -112,7 +127,7 @@ export const makePrBlockersReport = (rows, observedAt, errors = []) => ({
 const cell = value => String(value ?? '-').replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
 export function formatPrBlockers(report) {
   const lines = [['PR', 'MERGE', 'AGE', 'VERDICT / BLOCKING EMPTY', 'COVERAGE', 'CI FAIL / PENDING',
-    'OWNER / AGE / DEADLINE', 'ELIGIBLE', 'NEXT ACTION / REASON', 'CONFLICTS', 'TITLE']];
+    'OWNER / AGE / DEADLINE', 'ELIGIBLE', 'NEXT ACTION / REASON', 'NEXT ACTOR DEADLINE', 'CONFLICTS', 'TITLE']];
   for (const row of report.rows) {
     const authors = [...new Set(row.coverage.commits.map(commit =>
       `${commit.author}(${commit.closerAttested === null ? 'attestation-unknown' : commit.closerAttested ? 'closer-attested' : 'unattested'})`))];
@@ -124,6 +139,7 @@ export function formatPrBlockers(report) {
       `${row.closer.kind} / ${row.closer.ageMs === null ? '?' : `${(row.closer.ageMs / 60000).toFixed(0)}m`} / ${row.closer.deadlineStatus}`,
       row.eligible ? 'eligible' : '-',
       `${row.nextAction} / ${row.decision.reason}`,
+      row.decision.deadline?.at || '-',
       row.conflicts.state === 'complete' ? row.conflicts.files.map(file => `${file.path}${file.generated ? '(generated)' : ''}`).join(',') || '-'
         : row.conflicts.state, row.title]);
   }

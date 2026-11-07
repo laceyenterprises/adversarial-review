@@ -6,7 +6,8 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execGhWithRetry } from './gh-cli.mjs';
 import { fetchMergeAgentCandidateSnapshot } from './merge-agent-candidate-snapshot.mjs';
-import { amaAllAuthoritativeReviewerLogins } from './ama/reviewer-authority.mjs';
+import { amaAllAuthoritativeReviewerLogins, amaReviewerFamilyForLogin,
+  latestAuthoritativeReviewInAncestry } from './ama/reviewer-authority.mjs';
 import { REVIEWER_PASS_GENUINE_POSTED_REVIEW_WHERE_SQL,
   REVIEWER_PASS_NORMALIZED_POSTED_AT_SQL } from './reviewer-pass-posted-review-sql.mjs';
 import { readLaunchRequestObservationFromLedgerAsync } from './session-ledger-read-adapter.mjs';
@@ -26,6 +27,11 @@ const unknown = () => ({ state: 'unknown', value: null });
 const complete = value => ({ state: 'complete', value });
 const sha = value => /^[a-f0-9]{40}$/i.test(value || '');
 const repositoryPattern = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+export const DEFAULT_PR_LIMIT = 25;
+export function validatePrLimit(limit) {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('PR limit must be an integer from 1 to 100');
+  return limit;
+}
 export function validateRepo(repo) {
   if (!repositoryPattern.test(repo || '') || repo.split('/').some(part => ['.', '..'].includes(part))) {
     throw new Error('repository must have owner/name form');
@@ -39,13 +45,13 @@ export async function githubGet(path) {
     totalTimeoutMs: 60000 })).stdout);
 }
 
-export async function readPages(get, path) {
+export async function readPages(get, path, limit = Infinity) {
   const rows = [];
   for (let page = 1; ; page++) {
     const batch = await get(`${path}${path.includes('?') ? '&' : '?'}per_page=100&page=${page}`);
     if (!Array.isArray(batch)) throw new Error('expected a paginated list');
-    rows.push(...batch);
-    if (batch.length < 100) return rows;
+    rows.push(...batch.slice(0, limit - rows.length));
+    if (batch.length < 100 || rows.length >= limit) return rows;
   }
 }
 
@@ -80,7 +86,7 @@ async function readPrRecords(root, repo, number, dir) {
   const rows = [];
   for (const name of (await directoryEntries(dir)).filter(matches)) {
     const row = JSON.parse(await readFile(join(dir, name), 'utf8'));
-    if (!sha(row?.headSha)) throw new Error('malformed ownership record');
+    if (!sha(row?.headSha)) throw new Error(`malformed ownership record: ${name}`);
     if (names.includes(row.repo) && Number(row.prNumber) === number) rows.push(row);
   }
   return rows;
@@ -114,10 +120,12 @@ export async function readRemediation(root, repo, number) {
   // Do not infer liveness from a process listing. Durable dispatch evidence is
   // resolved by the caller through the same ownership observation as closers.
   return { job: latest ? { status: latest.status, headSha: latest.headSha || latest.revisionRef,
-    createdAt: latest.createdAt, live: false } : null,
+    createdAt: latest.createdAt, deadlineAt: latest.deadlineAt,
+    heartbeatDeadlineAt: latest.heartbeatDeadlineAt, live: false } : null,
   roundsLeft: Number.isFinite(plan?.currentRound) && Number.isFinite(plan?.maxRounds)
     ? plan.currentRound < plan.maxRounds : null,
-  launchRequestId: active?.worker?.launchRequestId || active?.worker?.dispatchId || null,
+  launchRequestId: active?.remediationWorker?.launchRequestId || active?.remediationWorker?.launchRequestID
+    || active?.remediationWorker?.lrq || null,
   ownershipUnknown: Boolean(active) };
 }
 
@@ -154,21 +162,42 @@ export async function readConflictFiles({ checkout, base, head, generatedPaths =
   finally { if (scratch) await rm(scratch, { recursive: true, force: true }); }
 }
 
-export async function collectPrBlockers({ repos, root, checkouts = {}, cfg, now = Date.now(),
+export async function collectPrBlockers({ repos, root, checkouts = {}, cfg, now = Date.now(), limit = DEFAULT_PR_LIMIT,
   get = githubGet, fetchPr = fetchMergeAgentCandidateSnapshot, readStore = readReviewStore,
   leasesRead = readCloserLeases, receiptsRead = readCloserReceipts, remediationRead = readRemediation,
   launchRead = readLaunchRequestObservationFromLedgerAsync, conflictRead = readConflictFiles,
   guardsRead = loadGuardForbiddenPaths, authoritativeLogins = amaAllAuthoritativeReviewerLogins(),
   enrichChecks = args => enrichCiInfrastructureEvidence({ ...args, execFileImpl: exec }) } = {}) {
   repos.forEach(validateRepo);
+  validatePrLimit(limit);
+  const transportGet = get;
+  let reads = 0;
+  get = async path => {
+    if (reads >= 200) throw new Error('report REST read budget exhausted');
+    reads++;
+    return transportGet(path);
+  };
   const policy = cfg.getMergeAuthorityConfig();
   const checksCfg = { requiredCheckContexts: policy.requiredCheckContexts || [] };
   const rows = [], errors = [];
+  try {
+    const rate = (await get('rate_limit'))?.resources?.core;
+    if (!Number.isFinite(rate?.remaining) || rate.remaining < 1000) {
+      throw new Error('insufficient core rate budget');
+    }
+  } catch {
+    return makePrBlockersReport([], new Date(now).toISOString(),
+      ['GitHub core rate budget unavailable or below 1000 remaining; report refused']);
+  }
+  let inspected = 0;
   for (const repo of [...new Set(repos)]) {
+    if (inspected >= limit) { errors.push(`PR limit ${limit} reached; remaining repositories omitted`); break; }
     let pulls;
-    try { pulls = await readPages(get, `repos/${repo}/pulls?state=open`); }
+    try { pulls = await readPages(get, `repos/${repo}/pulls?state=open`, limit - inspected + 1); }
     catch { errors.push(`${repo}: open PR list unavailable`); continue; }
-    for (const listed of pulls) {
+    if (pulls.length > limit - inspected) errors.push(`${repo}: PR limit ${limit} reached; additional PRs omitted`);
+    for (const listed of pulls.slice(0, limit - inspected)) {
+      inspected++;
       const number = listed.number;
       const rowErrors = [];
       const attempt = async (name, read, fallback) => {
@@ -185,6 +214,9 @@ export async function collectPrBlockers({ repos, root, checkouts = {}, cfg, now 
         attempt('closer receipts', () => receiptsRead(root, repo, number), null),
         attempt('remediation', () => remediationRead(root, repo, number), null),
       ]);
+      if (remediation?.ownershipUnknown && !remediation.launchRequestId) {
+        rowErrors.push('active remediation has no launch-request ID; ownership unknown');
+      }
       const pr = { ...listed, ...prRaw, number, createdAt: listed.created_at,
         state: prRaw?.mergedAt ? 'MERGED' : prRaw?.state || 'UNKNOWN' };
       if (prRaw && pr.state === 'OPEN') {
@@ -193,8 +225,21 @@ export async function collectPrBlockers({ repos, root, checkouts = {}, cfg, now 
         }), pr.statusCheckRollup);
       }
       const trusted = new Set(authoritativeLogins);
-      const authoritative = reviews?.filter(review => trusted.has(String(review.user?.login || '').replace(/\[bot\]$/, ''))
-        && ['APPROVED', 'COMMENTED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(review.state)).at(-1);
+      const compareCache = new Map();
+      const compare = (base, head) => {
+        const path = `repos/${repo}/compare/${base}...${head}`;
+        if (!compareCache.has(path)) compareCache.set(path, get(`${path}?per_page=100&page=1`));
+        return compareCache.get(path);
+      };
+      const trustedReviews = reviews?.filter(review =>
+        trusted.has(String(review.user?.login || '').replace(/\[bot\]$/, ''))) || [];
+      const authoritative = reviews && await attempt('review authority',
+        () => latestAuthoritativeReviewInAncestry(trustedReviews, pr.headRefOid, compare), null);
+      const families = new Set(trustedReviews.filter(entry => entry.commit_id === authoritative?.commit_id
+        && ['APPROVED', 'COMMENTED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(entry.state))
+        .map(entry => amaReviewerFamilyForLogin(entry.user?.login)).filter(Boolean));
+      const ambiguousReview = families.size > 1;
+      if (ambiguousReview) rowErrors.push('multiple authoritative review families on selected head; review authority unknown');
       const review = authoritative ? { body: authoritative.body, headSha: authoritative.commit_id,
         postedAt: authoritative.submitted_at } : null;
       // A delivered store artifact absent from the live review list can be a
@@ -207,7 +252,7 @@ export async function collectPrBlockers({ repos, root, checkouts = {}, cfg, now 
         attempt('review ancestry', async () => {
           if (!sha(review.headSha) || !sha(pr.headRefOid)) throw new Error('missing SHA');
           const path = `repos/${repo}/compare/${review.headSha}...${pr.headRefOid}`;
-          const first = await get(`${path}?per_page=100&page=1`);
+          const first = await compare(review.headSha, pr.headRefOid);
           const commits = [...(first.commits || [])];
           for (let page = 2; commits.length < first.total_commits; page++) {
             const batch = await get(`${path}?per_page=100&page=${page}`);
@@ -283,11 +328,13 @@ export async function collectPrBlockers({ repos, root, checkouts = {}, cfg, now 
         pr.statusCheckRollup = null;
         pr.mergeable = 'UNKNOWN';
       }
-      const row = buildPrBlocker({ repo, pr, review: review || storedReview, comparison, comments,
+      const row = buildPrBlocker({ repo, pr, review: ambiguousReview ? null : review || storedReview, comparison, comments,
         conflicts, observations, policy, cfg: checksCfg, now, errors: rowErrors,
-        reviewKnown: reviews !== null && !storedReview, currencyKnown });
+        reviewKnown: reviews !== null && !storedReview && !ambiguousReview
+          && !rowErrors.includes('review authority unavailable'), currencyKnown });
       rows.push(row);
     }
   }
+  if (reads >= 200) errors.push('report REST read budget reached (200); some evidence may be unavailable');
   return makePrBlockersReport(rows, new Date(now).toISOString(), errors);
 }

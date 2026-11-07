@@ -2,7 +2,7 @@
 import { parseArgs } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { loadConfigCached } from '../src/config-loader.mjs';
-import { collectPrBlockers, validateRepo } from '../src/pr-blockers-read.mjs';
+import { collectPrBlockers, validateRepo, validatePrLimit, DEFAULT_PR_LIMIT } from '../src/pr-blockers-read.mjs';
 import { formatPrBlockers } from '../src/pr-blockers.mjs';
 
 export function parsePrBlockersArgs(argv) {
@@ -11,6 +11,7 @@ export function parsePrBlockersArgs(argv) {
     root: { type: 'string', default: fileURLToPath(new URL('..', import.meta.url)) },
     checkout: { type: 'string', multiple: true },
     json: { type: 'boolean', default: false },
+    limit: { type: 'string', default: String(DEFAULT_PR_LIMIT) },
     help: { type: 'boolean', default: false },
   } });
   if (!values.help && !values.repo?.length) throw new Error('at least one --repo owner/name is required');
@@ -20,13 +21,14 @@ export function parsePrBlockersArgs(argv) {
     if (split < 1 || !entry.slice(split + 1)) throw new Error('--checkout requires owner/name=directory');
     checkouts[validateRepo(entry.slice(0, split))] = entry.slice(split + 1);
   }
-  return { ...values, repos: (values.repo || []).map(validateRepo), checkouts };
+  return { ...values, limit: validatePrLimit(Number(values.limit)),
+    repos: (values.repo || []).map(validateRepo), checkouts };
 }
 
 export async function main(argv = process.argv.slice(2)) {
   const options = parsePrBlockersArgs(argv);
   if (options.help) {
-    process.stdout.write('Usage: node bin/pr-blockers.mjs --repo owner/name [--repo owner/other] [--json] [--root directory] [--checkout owner/name=directory]\n');
+    process.stdout.write('Usage: node bin/pr-blockers.mjs --repo owner/name [--repo owner/other] [--limit 1..100] [--json] [--root directory] [--checkout owner/name=directory]\n');
     return;
   }
   const report = await collectPrBlockers({ ...options, cfg: loadConfigCached() });

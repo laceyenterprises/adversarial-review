@@ -52,6 +52,7 @@ export function findingBatchOptions(env = process.env) {
     batchSize: positive('ADVERSARIAL_FINDINGS_BATCH_SIZE', 100),
     intervalMs: positive('ADVERSARIAL_FINDINGS_BATCH_INTERVAL_MS', 3600000),
     maxAgeMs: positive('ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS', 48 * 3600000),
+    timeoutMs: positive('ADVERSARIAL_FINDINGS_BATCH_TIMEOUT_MS', 24 * 3600000),
   };
 }
 
@@ -61,7 +62,7 @@ export function findingBatchOptions(env = process.env) {
 export function claimFindingBatches(db, day, { batchSize = 100 } = {}) {
   if (!Number.isSafeInteger(batchSize) || batchSize < 1) throw Error('invalid batchSize');
   return db.transaction(() => {
-    const pending = db.prepare(`SELECT b.finding_id,b.repo,b.area,b.captured_at,
+    const pending = db.prepare(`SELECT b.finding_id,b.repo,b.area,b.captured_at,b.batch_attempts AS attempts,
       ${FINDING_PRIORITY_SQL} AS priority
       FROM finding_backlog b JOIN review_findings f USING(finding_id)
       JOIN reviewed_prs r ON r.repo=b.repo AND r.pr_number=b.pr_number
@@ -87,8 +88,11 @@ export function claimFindingBatches(db, day, { batchSize = 100 } = {}) {
     }).sort((a, b) => a[0].priority - b[0].priority || a[0].captured_at.localeCompare(b[0].captured_at));
     for (const rows of chunks) {
       const { repo, area } = rows[0];
+      // A released finding is re-batched under its attempt number, so a retry
+      // never collides with the released batch's identity, key or artifacts.
       const batchId = createHash('sha256').update(JSON.stringify([repo, area,
-        rows.map(row => row.finding_id || row.note_id)])).digest('hex');
+        rows.map(row => (row.finding_id && row.attempts ? `${row.finding_id}#${row.attempts}` : row.finding_id || row.note_id))]))
+        .digest('hex');
       db.prepare('INSERT INTO finding_batches(batch_id,repo,area,day) VALUES (?,?,?,?)').run(batchId, repo, area, day);
       for (const row of rows) {
         if (row.finding_id) db.prepare('UPDATE finding_backlog SET batch_id=? WHERE finding_id=? AND batch_id IS NULL')
@@ -143,21 +147,57 @@ function hasAppliedOutcome(result) {
     || result?.simplicityNotes?.some(n => n.simplicityNoteApplied === true);
 }
 
+const DROP_REASON = /^(?:stale-code-changed|already-fixed-in-[1-9]\d*|not-reproducible|out-of-scope-with-ticket|false-positive):[ \t]*\S[^\r\n]*(?:\r?\n.*)?$/s;
+// Lifecycle codes written before FINDINGSBATCH-02, rewritten by its migration.
+const LEGACY_DROP_REASONS = new Map([
+  ['superseded-final-review', 'stale-code-changed: Final posted review superseded this finding'],
+  ['pr-closed-without-merge', 'false-positive: Source PR closed without merge; reviewed changes did not land'],
+]);
+const LEGACY_DROP_CODES = new Map([['stale', 'stale-code-changed'], ['stale-code-changed', 'stale-code-changed'],
+  ['not-reproducible', 'not-reproducible'], ['out-of-scope', 'out-of-scope-with-ticket'],
+  ['out-of-scope-with-ticket', 'out-of-scope-with-ticket'], ['false-positive', 'false-positive']]);
+
+// Results written before the strict vocabulary can still carry a known code in
+// another spelling ("False positive - ...", "already fixed in #12: ...").
+// Only an exact code plus a justification maps; anything else is ambiguous and
+// returns null, so that finding is re-verified instead of guessed.
+export function normalizeDroppedReason(reason) {
+  const text = typeof reason === 'string' ? reason.trim() : '';
+  if (DROP_REASON.test(text)) return text;
+  if (LEGACY_DROP_REASONS.has(text)) return LEGACY_DROP_REASONS.get(text);
+  const legacy = /^([A-Za-z][A-Za-z0-9 _#-]{0,39}?)[ \t]*(?::|\u2014|\u2013|[ \t]-[ \t])[ \t]*(\S[\s\S]*)$/.exec(text);
+  if (!legacy) return null;
+  const code = legacy[1].trim().toLowerCase().replace(/[\s_]+/g, '-');
+  const fixed = /^already-fixed-in-#?([1-9]\d*)$/.exec(code);
+  const mapped = fixed ? `already-fixed-in-${fixed[1]}` : LEGACY_DROP_CODES.get(code);
+  const normalized = mapped && `${mapped}: ${legacy[2].trim()}`;
+  return normalized && DROP_REASON.test(normalized) ? normalized : null;
+}
+
+// Manifest identity is all-or-nothing. A single malformed or legacy outcome is
+// not: that finding returns to the queue for re-verification and the rest of
+// the batch settles normally.
 function validateBatchOutcomes(db, batch, result) {
   const rows = db.prepare('SELECT finding_id FROM finding_backlog WHERE batch_id=?').all(batch.batch_id);
   const ids = new Set(rows.map(r => r.finding_id));
   if (result?.batchId !== batch.batch_id || !Array.isArray(result.findings) || result.findings.length !== ids.size) {
     throw Error('invalid-batch-manifest');
   }
-  const findings = result.findings.map(f => {
-    if (!ids.delete(f.findingId) || !['applied', 'dropped'].includes(f.outcome)
-      || typeof f.reason !== 'string' || !f.reason.trim()) throw Error('invalid-finding-outcome');
-    if (f.outcome === 'dropped'
-      && !/^(?:stale-code-changed|already-fixed-in-[1-9]\d*|not-reproducible|out-of-scope-with-ticket|false-positive):[ \t]*\S[^\r\n]*(?:\r?\n.*)?$/s.test(f.reason.trim())) {
-      throw Error('invalid-dropped-reason');
+  const findings = [], requeue = [];
+  for (const f of result.findings) {
+    if (!ids.delete(f?.findingId)) throw Error('invalid-batch-manifest');
+    const reason = typeof f.reason === 'string' ? f.reason.trim() : '';
+    if (!['applied', 'dropped'].includes(f.outcome) || !reason) {
+      requeue.push({ findingId: f.findingId, reason: 'invalid-finding-outcome' });
+      continue;
     }
-    return { findingId: f.findingId, outcome: f.outcome, reason: f.reason.trim() };
-  });
+    const dropped = f.outcome === 'dropped' && normalizeDroppedReason(reason);
+    if (f.outcome === 'dropped' && !dropped) requeue.push({ findingId: f.findingId, reason: 'invalid-dropped-reason' });
+    else if (dropped && dropped.startsWith('out-of-scope-with-ticket:')
+      && !/\b[A-Z][A-Z0-9]+-\d+\b|https:\/\/\S+/.test(dropped)) {
+      requeue.push({ findingId: f.findingId, reason: 'batch-drop-ticket-missing' });
+    } else findings.push({ findingId: f.findingId, outcome: f.outcome, reason: dropped || reason });
+  }
   const notes = batchNotes(db, batch.batch_id);
   const noteIds = new Set(notes.map(n => n.noteId));
   const outcomes = result.simplicityNotes ?? [];
@@ -170,8 +210,61 @@ function validateBatchOutcomes(db, batch, result) {
     return { noteId: n.noteId, simplicityNoteApplied: n.simplicityNoteApplied, reason: n.reason.replace(/\s+/g, ' ').trim() };
   });
   const applied = hasAppliedOutcome({ findings, simplicityNotes });
-  if (!findings.length && !simplicityNotes.length) throw Error('batch-zero-outcomes');
-  return { findings, simplicityNotes, applied };
+  if (!result.findings.length && !simplicityNotes.length) throw Error('batch-zero-outcomes');
+  return { findings, requeue, simplicityNotes, applied };
+}
+
+export const FINDING_BATCH_MAX_ATTEMPTS = 3;
+
+function releaseReason(reason) {
+  return String(reason || 'batch-released').replace(/\s+/g, ' ').trim().slice(0, 300) || 'batch-released';
+}
+
+// Return still-open findings of a batch to the unbatched queue, counting the
+// attempt and auditing the old batch and reason. The final allowed attempt
+// drops the finding with an explicit exhausted reason. Callers hold the
+// transaction. Settled findings are never touched.
+function releaseBatchFindings(db, batchId, entries, maxAttempts = FINDING_BATCH_MAX_ATTEMPTS) {
+  const counts = { requeued: 0, exhausted: 0 };
+  const read = db.prepare('SELECT batch_attempts FROM finding_backlog WHERE finding_id=? AND batch_id=? AND outcome IS NULL');
+  const audit = db.prepare(`INSERT INTO finding_batch_releases(finding_id,batch_id,attempt,reason,disposition)
+    VALUES (?,?,?,?,?)`);
+  for (const { findingId, reason: raw } of entries) {
+    const row = read.get(findingId, batchId);
+    if (!row) continue;
+    const attempt = row.batch_attempts + 1, reason = releaseReason(raw);
+    if (attempt >= maxAttempts) {
+      db.prepare(`UPDATE finding_backlog SET batch_attempts=?,outcome='dropped',reason=?,result_pr=NULL
+        WHERE finding_id=?`).run(attempt, `batch-retry-exhausted: ${reason}`, findingId);
+      audit.run(findingId, batchId, attempt, reason, 'exhausted');
+      counts.exhausted++;
+    } else {
+      db.prepare('UPDATE finding_backlog SET batch_attempts=?,batch_id=NULL WHERE finding_id=?').run(attempt, findingId);
+      audit.run(findingId, batchId, attempt, reason, 'requeued');
+      counts.requeued++;
+    }
+  }
+  return counts;
+}
+
+// Release a whole batch whose launch has ended without settling. Its open
+// findings return to the queue (or exhaust); its advisories, which never gate
+// anything, are retired with the reason. The batch keeps its error, launch and
+// artifacts for audit and leaves the collection queue.
+export function releaseFindingBatch(db, batch, reason, { maxAttempts = FINDING_BATCH_MAX_ATTEMPTS } = {}) {
+  return db.transaction(() => {
+    const row = db.prepare('SELECT completed_at,released_at FROM finding_batches WHERE batch_id=?').get(batch.batch_id);
+    if (!row || row.completed_at || row.released_at) return null;
+    const why = releaseReason(reason);
+    const open = db.prepare('SELECT finding_id AS findingId FROM finding_backlog WHERE batch_id=? AND outcome IS NULL ORDER BY finding_id')
+      .all(batch.batch_id).map(({ findingId }) => ({ findingId, reason: why }));
+    const counts = releaseBatchFindings(db, batch.batch_id, open, maxAttempts);
+    const notes = db.prepare('UPDATE finding_batch_notes SET dropped_reason=? WHERE batch_id=? AND dropped_reason IS NULL')
+      .run(`batch-released: ${why}`, batch.batch_id).changes;
+    db.prepare("UPDATE finding_batches SET released_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),release_reason=? WHERE batch_id=?")
+      .run(why, batch.batch_id);
+    return { ...counts, notes, reason: why };
+  }).immediate();
 }
 
 // Validate the entire manifest before writing any outcome. A worker report alone
@@ -179,14 +272,15 @@ function validateBatchOutcomes(db, batch, result) {
 // Normal review can rebase its commits; this record grants no merge authority.
 export function settleFindingBatch(db, batch, result, pr = null, dropPrs = {}) {
   return db.transaction(() => {
-    if (db.prepare('SELECT completed_at FROM finding_batches WHERE batch_id=?').get(batch.batch_id)?.completed_at) return true;
-    const { findings, simplicityNotes, applied } = validateBatchOutcomes(db, batch, result);
+    const stored = db.prepare('SELECT completed_at,released_at FROM finding_batches WHERE batch_id=?').get(batch.batch_id);
+    if (stored?.completed_at) return true;
+    // A concurrent collector released it; its findings belong to the queue now.
+    if (stored?.released_at) throw Error('batch-released');
+    const { findings, requeue, simplicityNotes, applied } = validateBatchOutcomes(db, batch, result);
     for (const f of findings) {
       const fixedBy = f.outcome === 'dropped' && /^already-fixed-in-([1-9]\d*):/.exec(f.reason);
       if (fixedBy && String(dropPrs[fixedBy[1]]?.state).toUpperCase() !== 'MERGED'
         && !dropPrs[fixedBy[1]]?.mergedAt) throw Error('batch-drop-pr-unverified');
-      if (f.outcome === 'dropped' && f.reason.startsWith('out-of-scope-with-ticket:')
-        && !/\b[A-Z][A-Z0-9]+-\d+\b|https:\/\/\S+/.test(f.reason)) throw Error('batch-drop-ticket-missing');
     }
     if (applied) {
       if (!Number.isSafeInteger(result.prNumber) || result.prNumber < 1 || !/^[a-f0-9]{40}$/i.test(result.headSha || '')
@@ -204,9 +298,11 @@ export function settleFindingBatch(db, batch, result, pr = null, dropPrs = {}) {
     }
     for (const f of findings) db.prepare(`UPDATE finding_backlog SET outcome=?,reason=?,result_pr=?
       WHERE batch_id=? AND finding_id=?`).run(f.outcome, f.reason.trim(), f.outcome === 'applied' ? result.prNumber : null, batch.batch_id, f.findingId);
+    releaseBatchFindings(db, batch.batch_id, requeue);
     db.prepare("UPDATE finding_batches SET completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),error=NULL,result_json=? WHERE batch_id=?")
       .run(JSON.stringify({ batchId: batch.batch_id, prNumber: applied ? result.prNumber : null,
-        headSha: applied ? (pr.headRefOid || result.headSha) : null, findings, simplicityNotes }), batch.batch_id);
+        headSha: applied ? (pr.headRefOid || result.headSha) : null, findings, simplicityNotes,
+        ...(requeue.length ? { requeued: requeue } : {}) }), batch.batch_id);
     return true;
   }).immediate();
 }
@@ -281,11 +377,11 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
     // authority. The public launch projection intentionally omits worktree paths.
     // The exact LRQ plus keyed repository/ticket checks above and the independent
     // remote tested-head / marked-PR checks below establish publication custody.
-    // git-safe records a branch push projection, not necessarily an HQ
-    // branch_pushed milestone. Bind the launch through the ledger above and
-    // verify the actual remote branch/head below instead of guessing a format.
-    const push = status.milestones?.branch_pushed;
-    if (push && push.status !== 'done') throw Error('batch-push-evidence-missing');
+    // git-safe records a branch push projection, not an HQ branch_pushed
+    // milestone. Dispatch status fills every unobserved milestone as
+    // not_started, and a decision-only launch is not re-probed when it exits,
+    // so the milestone cannot refute a push. Bind the launch through the
+    // ledger above and verify the actual remote branch/head below instead.
     const publication = await fetchPublication(batch.repo, branch, { execFileImpl, env, logger });
     if (!Array.isArray(publication.prs)) throw Error('batch-publication-evidence-invalid');
     if (publication.prs.length) {
@@ -334,37 +430,65 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
 async function verifyDropPrs(batch, result, options, fetchPr = fetchFindingBatchPr) {
   const prs = {};
   for (const f of result.findings || []) {
-    const match = f.outcome === 'dropped' && /^already-fixed-in-([1-9]\d*):/.exec(typeof f.reason === 'string' ? f.reason.trim() : '');
+    const match = f?.outcome === 'dropped' && /^already-fixed-in-([1-9]\d*):/.exec(normalizeDroppedReason(f.reason) || '');
     if (match && !prs[match[1]]) prs[match[1]] = await fetchPr(batch.repo, Number(match[1]), options);
   }
   return prs;
 }
 
+// Settlement errors that cannot clear once the launch has ended: no pushed
+// head, no publication, failed preparation, or identity/receipt mismatch. A
+// read/transport failure is not listed; it retries, bounded by the timeout.
+const ENDED_LAUNCH_RELEASE_ERRORS = /^(?:batch-push-evidence-missing|batch-push-evidence-mismatch|batch-preparation-failed|batch-branch-missing|batch-publish-ended-without-pr(?::.*)?|batch-publish-receipt-mismatch|batch-launch-evidence-mismatch|batch-publish-reused-decision-launch|invalid-batch-manifest|invalid-advisory-manifest|invalid-advisory-outcome|batch-outcome-too-large)$/s;
+
+// A batch is released only when every keyed launch (preparation and any
+// publisher) is terminal in the ledger, or the ledger proves none exists after
+// the batch timeout. Unreadable ledger evidence or any live launch holds it.
+// Waiting on an open batch PR clears the error, so it is never released here.
+async function releaseEndedFindingBatch({ db, batchId, hasOutcomes, env, rootDir, readLaunches, now, timeoutMs }) {
+  const batch = db.prepare('SELECT * FROM finding_batches WHERE batch_id=?').get(batchId);
+  if (!batch || batch.completed_at || batch.released_at || !batch.launch_id) return null;
+  const startedMs = Date.parse(batch.launched_at || `${batch.day}T00:00:00Z`);
+  const stale = Number.isFinite(startedMs) && now - startedMs > timeoutMs && Boolean(batch.error || !hasOutcomes);
+  if (!stale && !(batch.error && ENDED_LAUNCH_RELEASE_ERRORS.test(batch.error))) return null;
+  const key = `findings-batch-${batch.batch_id}`;
+  const probe = await readLaunches({ env, rootDir, hqRoot: resolveHqRoot(env), idempotencyKey: key, timeoutMs: 15_000 });
+  if (!probe?.ok || !Array.isArray(probe.rows) || (!probe.rows.length && !stale)) return null;
+  if (probe.rows.some(row => row?.idempotency_key !== key || !readLaunchRequestStatus(row.status).terminal)) return null;
+  return releaseFindingBatch(db, batch, batch.error || 'batch-launch-ended-without-outcomes');
+}
+
 export async function runFindingBatches({ db, rootDir, env = process.env, day = new Date().toISOString().slice(0, 10),
   execFileImpl = execFileAsync, fetchPr = fetchFindingBatchPr, fetchPublication = fetchFindingBatchPublication,
   readLaunches = readLaunchRequestByIdempotencyKeyAsync, logger = console, resolutionOnly = false,
-  batchSize = findingBatchOptions(env).batchSize, concurrency = 1 }) {
+  batchSize = findingBatchOptions(env).batchSize, concurrency = 1, now = Date.now(),
+  timeoutMs = findingBatchOptions(env).timeoutMs }) {
   if (!Number.isSafeInteger(concurrency) || concurrency < 1) throw Error('invalid concurrency');
   if (!resolutionOnly) claimFindingBatches(db, day, { batchSize });
-  const queue = db.prepare('SELECT * FROM finding_batches WHERE completed_at IS NULL ORDER BY rowid').all();
+  const queue = db.prepare('SELECT * FROM finding_batches WHERE completed_at IS NULL AND released_at IS NULL ORDER BY rowid').all();
   let stopped = false;
   const processBatch = async batch => {
+    let hasOutcomes = false;
     try {
       if (fleetStopReason({ env, logger })) { stopped = true; return; }
       const dir = join(rootDir, 'data', 'finding-batches', batch.batch_id);
       const outputPath = join(dir, 'outcomes.json');
       let result;
       try {
-        if (statSync(outputPath).size > 1024 * 1024) throw Error('batch-outcome-too-large');
+        const size = statSync(outputPath).size;
+        hasOutcomes = true;
+        if (size > 1024 * 1024) throw Error('batch-outcome-too-large');
         result = JSON.parse(readFileSync(outputPath, 'utf8'));
       } catch (error) { if (error.code !== 'ENOENT') throw error; }
       if (result) {
-        if (hasAppliedOutcome(result) && result.prNumber == null) {
+        // Applied claims that fail validation are re-verified, never published.
+        const applied = hasAppliedOutcome(result) && validateBatchOutcomes(db, batch, result).applied;
+        if (applied && result.prNumber == null) {
           await publishFindingBatch({ db, batch, result, dir, outputPath, env, rootDir,
             execFileImpl, fetchPublication, fetchPr, readLaunches, logger });
           return;
         }
-        const pr = hasAppliedOutcome(result) && Number.isSafeInteger(result.prNumber)
+        const pr = applied && Number.isSafeInteger(result.prNumber)
           ? await fetchPr(batch.repo, result.prNumber, { execFileImpl, env, logger }) : null;
         const dropPrs = await verifyDropPrs(batch, result, { execFileImpl, env, logger }, fetchPr);
         settleFindingBatch(db, batch, result, pr, dropPrs);
@@ -382,12 +506,20 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
         const { stdout } = await execFileImpl(env.HQ_BIN || 'hq', args, { env, timeout: dispatchTimeoutMs(), maxBuffer: 1024 * 1024 });
         const receipt = readDispatchReceipt(parseDispatchJsonOutput(stdout));
         if (!receipt.launchRequestId) throw Error(receipt.identityDiagnostic);
-        db.prepare('UPDATE finding_batches SET launch_id=?,error=NULL WHERE batch_id=?')
-          .run(receipt.launchRequestId, batch.batch_id);
+        db.prepare('UPDATE finding_batches SET launch_id=?,launched_at=?,error=NULL WHERE batch_id=?')
+          .run(receipt.launchRequestId, new Date(now).toISOString(), batch.batch_id);
       }
     } catch (error) {
       db.prepare('UPDATE finding_batches SET error=? WHERE batch_id=?').run(String(error.message), batch.batch_id);
       logger.warn?.(`[findings-batch] ${batch.repo}/${batch.area}: ${error.message}`);
+    }
+    try {
+      const released = await releaseEndedFindingBatch({ db, batchId: batch.batch_id, hasOutcomes,
+        env, rootDir, readLaunches, now, timeoutMs });
+      if (released) logger.warn?.(`[findings-batch] ${batch.repo}/${batch.area}: released ${batch.batch_id} `
+        + `(${released.reason}): ${released.requeued} requeued, ${released.exhausted} exhausted`);
+    } catch (error) {
+      logger.warn?.(`[findings-batch] ${batch.repo}/${batch.area}: release check failed: ${error.message}`);
     }
   };
   // Bound submission parallelism; HQ's existing normal-priority admission
@@ -409,7 +541,7 @@ export function createFindingBatchTicker(options) {
     running = true;
     try {
       const resolutionOnly = now < next;
-      const { completed } = await runFindingBatches({ ...options, resolutionOnly,
+      const { completed } = await runFindingBatches({ ...options, resolutionOnly, now,
         day: new Date(now).toISOString().slice(0, 10) });
       if (completed) {
         if (!resolutionOnly) next = now + (options.intervalMs ?? findingBatchOptions(options.env).intervalMs);

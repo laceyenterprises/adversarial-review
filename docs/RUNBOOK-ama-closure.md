@@ -1,3 +1,83 @@
+## Reading the PR blockers report
+
+Run `npm run pr-blockers -- --repo example/project --repo example/other`
+from the deployed review service. Add `--json` for the
+[version 1 JSON contract](pr-blockers.schema.json), or `--root directory`
+to read another deployment's review store and durable ownership records.
+The report paginates open PRs, reviews and post-review commits. `--limit N`
+caps inspected PRs across all repositories (default 25, range 1–100); omitted
+PRs are reported as an incomplete result with exit status 1. Narrow repository
+selection for follow-up reads. Before inspecting PRs, the report requires a
+readable GitHub core rate budget with at least 1,000 requests remaining.
+List, review, ancestry, comment and final-head reads share a 200-request cap
+per invocation; exhausted evidence becomes unavailable, never eligible.
+The normal per-PR cost is three logical calls (PR snapshot, one reviews page,
+final head), plus list pages and the one rate preflight per invocation.
+Stale reviews add ancestry comparisons and comment pages; large comparisons add
+pages. DIRTY heads add two guard-file reads; failed checks can add one CI-job
+read. Snapshot, guard and CI enrichment calls are outside the 200-request cap
+but bounded by the PR limit. Transport retries may multiply physical requests.
+These bounds reserve capacity for daemons; the report never waits for rate reset.
+It makes no comments, label changes, merges or dispatches.
+
+Each row shows merge state, age, review verdict and empty-blocking-section
+classification, review coverage, failed external checks and pending count,
+the shared next actor, lease age/deadline, diagnostic eligibility and next action.
+The owner deadline comes only from an active lease or explicit launch/job
+deadline; absent or terminal owners have an unknown owner deadline. The separate
+`NEXT ACTOR DEADLINE` column shows the shared decision's observer, admission or
+recovery deadline, which is also retained in JSON as `decision.deadline`.
+`post-review` names authors and marks commits with authenticated closer
+attestations separately from unattested commits. `rebased-since-review` means
+the reviewed SHA is no longer an ancestor. Missing evidence is `unknown`.
+An unconfirmed stored review never establishes exact-head eligibility.
+Review selection uses the shared authoritative ancestry reader, skipping reviews
+on discarded branches. Multiple authoritative families on the selected review
+head yield unknown review authority and a row error: one family's later empty
+verdict cannot erase another family's findings. A closer edge attests all commits
+after its base through its head in the comparison order; an unknown base cannot
+attest that interval.
+
+Actions project the shared rescue/closure `nextAction(snapshot)` decision:
+`merge-ready`, `rereview-exact-head`, `ci-fix`, `wait-closer`,
+`closer-overdue`, and `rebase-generated-only`. Other policy results retain
+their shared action and reason (for example `wait-for-CI`, `hammer`,
+`remediate` or `operator-hold`). `superseded?` is a stale-review PR with the
+existing duplicate-family hold; it requests inspection, not automatic closure.
+The JSON includes the complete shared decision. Unknown ownership stays with
+recovery. A terminal worker receipt alone does not establish a remote merge.
+Live remediators and reviewers retain `remediate` and `review`; the closer wait
+projections apply only to hammer custody. Remediation launch identity is read
+from the job's `remediationWorker.launchRequestId` (also `launchRequestID` or
+`lrq`) and resolved through the ledger. A dispatch ID alone is not launch
+identity. Active jobs without one produce an explicit ownership-unknown error.
+
+`eligible` is the report's diagnostic formula: OPEN, CLEAN, exact-head settled
+review with a known empty blocking section and green external checks. It is
+not merge authorization. Strict non-blocking remediation, holds, attestations,
+protection, leases and other execution gates can still require action; read
+the next-action reason as well. Empty checks fail closed. Required context and
+latest-run rules come from the same CI summarizer as the closer.
+
+For optional conflict detail, add
+`--checkout example/project=directory` pointing to a checkout that already
+contains the exact base and head objects. The report runs bounded `merge-tree`
+with a disposable object store; it never fetches or changes the checkout.
+Missing objects or unsupported Git yield `unavailable`. Generated flags use
+the existing guard's declared generated paths, read at the PR's base SHA.
+Mixed or unknown conflicts retain the shared hammer action.
+
+Read failures produce per-row or per-repository errors and exit status 1 while
+preserving available rows. PRs observed as terminal on the final live read are
+omitted; moving or unverifiable heads lose CI eligibility and request a refresh.
+Ownership reads deliberately fail closed for the entire PR if any matching
+lease or dispatch receipt is malformed, unparseable or lacks a valid head SHA,
+including historical `no-sha` receipts. Unlike the shared dispatch listing,
+this diagnostic does not skip damaged records and imply absent custody.
+It reports `closer leases unavailable` or `closer receipts unavailable`, keeps
+ownership unknown and exits 1. Inspect the matching deployment files before
+trusting ownership; the report never repairs them.
+
 ## Live closer operator inspection (HAMWORKPROGRESS-02)
 
 HAMWORKPROGRESS-02: live R03 hammer custody also receives an operator inspection

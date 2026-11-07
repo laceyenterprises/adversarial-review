@@ -1789,7 +1789,7 @@
     "src/remediation-ci-infrastructure.mjs": "0473feae0f4eefa22a4bcd6474788963c9fa95f11a601fdd6340da1599841568",
     "src/ama/dispatch-submitter.mjs": "c186abb1b2071524a8afd722bf10c637d1e54586f2f186b47f57be3baad9dd60",
     "src/ama/closure-next-action.mjs": "5bb0293c10c0b45c7086401cd9f7d4d137363a39308cf7178891c1c8b5375dcc",
-    "src/pr-next-action.mjs": "e95595ca93271d8d9ac37db05b251b7315002a7e438bda008c2e0c1e5e42981f",
+    "src/pr-next-action.mjs": "24b348b711003879178403f742b6aa7d2f04bd9515e77098934daf575213189b",
     "src/ama/pre-receipt-intent.mjs": "4954d9ad52d99a9eff753b0b0a399c15aa3b6872e2d3462b8dde2ba5f7673e0d",
     "src/follow-up-branch.mjs": "637f2a18c5fb2a89d2d02c98d80587a713a188c10d70891941d77df847579a8d",
     "src/posted-review-head-repair.mjs": "ce761260224b7a82d152e5b289e8967bbf54026c427a17bdb5cff0a6556ff7d6",

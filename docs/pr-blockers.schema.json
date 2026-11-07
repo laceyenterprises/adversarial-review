@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PR blockers report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "observedAt", "rows", "errors"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "observedAt": { "type": "string", "format": "date-time" },
+    "errors": { "type": "array", "items": { "type": "string" } },
+    "rows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["repo", "number", "title", "headSha", "mergeState", "mergeable", "ageMs", "review", "coverage", "ci", "closer", "conflicts", "eligible", "nextAction", "decision", "errors"],
+        "properties": {
+          "repo": { "type": "string" },
+          "number": { "type": "integer", "minimum": 1 },
+          "title": { "type": "string" },
+          "headSha": { "type": ["string", "null"] },
+          "mergeState": { "type": "string" },
+          "mergeable": { "type": "string" },
+          "ageMs": { "type": ["number", "null"], "minimum": 0 },
+          "eligible": { "type": "boolean" },
+          "nextAction": { "type": "string" },
+          "errors": { "type": "array", "items": { "type": "string" } },
+          "review": {
+            "type": "object",
+            "required": ["verdict", "headSha", "postedAt", "blockingFindingState", "blockingFindingCount", "nonBlockingFindingState", "nonBlockingFindingCount", "blockingEmpty"],
+            "additionalProperties": false,
+            "properties": {
+              "verdict": { "type": ["string", "null"] },
+              "headSha": { "type": ["string", "null"] },
+              "postedAt": { "type": ["string", "null"] },
+              "blockingFindingState": { "enum": ["known", "unknown"] },
+              "blockingFindingCount": { "type": "integer", "minimum": 0 },
+              "nonBlockingFindingState": { "enum": ["known", "unknown"] },
+              "nonBlockingFindingCount": { "type": "integer", "minimum": 0 },
+              "blockingEmpty": { "type": ["boolean", "null"] }
+            }
+          },
+          "coverage": {
+            "type": "object",
+            "required": ["kind", "commits"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": { "enum": ["exact-head", "post-review", "rebased-since-review", "no-review", "unknown"] },
+              "commits": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["sha", "author", "closerAttested"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "sha": { "type": "string" },
+                    "author": { "type": "string" },
+                    "closerAttested": { "type": ["boolean", "null"] }
+                  }
+                }
+              }
+            }
+          },
+          "ci": {
+            "type": "object",
+            "required": ["conclusion", "failing", "pending"],
+            "additionalProperties": false,
+            "properties": {
+              "conclusion": { "type": ["string", "null"] },
+              "failing": { "type": "array", "items": { "type": "string" } },
+              "pending": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "closer": {
+            "type": "object",
+            "required": ["kind", "status", "headSha", "ageMs", "deadline", "deadlineStatus"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": { "type": "string" },
+              "status": { "type": ["string", "null"] },
+              "headSha": { "type": ["string", "null"] },
+              "ageMs": { "type": ["number", "null"], "minimum": 0 },
+              "deadline": { "type": ["string", "null"] },
+              "deadlineStatus": { "enum": ["unknown", "within-deadline", "overdue"] }
+            }
+          },
+          "conflicts": {
+            "type": "object",
+            "required": ["state", "files", "generatedOnly"],
+            "additionalProperties": false,
+            "properties": {
+              "state": { "enum": ["unavailable", "complete"] },
+              "generatedOnly": { "type": "boolean" },
+              "files": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["path", "generated"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "path": { "type": "string" },
+                    "generated": { "type": "boolean" }
+                  }
+                }
+              }
+            }
+          },
+          "decision": {
+            "type": "object",
+            "description": "The unmodified shared nextAction(snapshot) result.",
+            "required": ["action", "actor", "reason", "head", "deadline", "row", "queue", "decisionKey", "evidenceRefs"]
+          }
+        }
+      }
+    }
+  }
+}

@@ -287,7 +287,7 @@ test('ITP-14 pooled routing preserves the declared infrastructure fallback', asy
   const result = await resolveRemediationWorkerClassWithFallback({ primary: 'codex', env: {},
     execFileImpl: () => assert.fail('no legacy quota read'),
     fallbackWorkerClasses: ['remediator-codex-corp', 'remediator-claude'],
-    job: { remediationPlan: { currentRound: 1, retryHistory: [{ round: 1,
+    job: { builderTag: 'grok', remediationPlan: { currentRound: 1, retryHistory: [{ round: 1,
       retryMetadata: { code: 'infrastructure-refund', workerClass: 'remediator-codex',
         harnessSpecific: true, reason: 'codex-tool-host-unavailable' } }] } },
     selectAccountImpl: async ({ identity }) => ({ identity, workerClass: identity,
@@ -409,7 +409,7 @@ test('direct pooled Codex resolver preserves the job non-blocking model', async 
   const expected = resolveConfiguredNonBlockingCodexModel(env).resolvedModel;
   let selected = false;
   const result = await resolveRemediationWorkerClassWithFallback({ primary: 'codex', env,
-    job: { nonBlockingOnly: true },
+    job: { builderTag: 'grok', nonBlockingOnly: true },
     selectAccountImpl: async ({ identity, model }) => {
       selected = true;
       assert.equal(model, expected);

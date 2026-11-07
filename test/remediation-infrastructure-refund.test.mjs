@@ -192,7 +192,7 @@ for (const reason of ['codex-tool-host-unavailable', 'publish-blocked', 'boot-fa
 }
 
 test('harness-specific refund selects the configured fallback and preserves reviewer diversity', async () => {
-  const job = { remediationPlan: { currentRound: 1, retryHistory: [{ round: 1, retryMetadata: {
+  const job = { builderTag: 'grok', remediationPlan: { currentRound: 1, retryHistory: [{ round: 1, retryMetadata: {
     code: 'infrastructure-refund', harnessSpecific: true, workerClass: 'codex',
   } }] } };
   const args = { primary: 'codex', fallbackWorkerClasses: ['claude-code'], job, execFileImpl: null, env: {},

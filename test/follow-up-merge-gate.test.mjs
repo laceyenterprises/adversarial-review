@@ -31,6 +31,7 @@ function setupPendingJob(rootDir, overrides = {}) {
     repo: overrides.repo || 'laceyenterprises/clio',
     prNumber: overrides.prNumber || 42,
     reviewerModel: 'codex',
+    builderTag: 'grok',
     linearTicketId: null,
     reviewBody: '## Summary\nNothing useful.\n## Verdict\nRequest changes',
     reviewPostedAt: '2026-05-02T10:00:00.000Z',

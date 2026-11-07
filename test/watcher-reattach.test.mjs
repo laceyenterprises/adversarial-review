@@ -32,10 +32,10 @@ function seedReviewing(db, overrides = {}) {
   db.prepare(
     `INSERT INTO reviewed_prs
        (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
-        review_attempts, last_attempted_at, reviewer_session_uuid,
+        builder_class, review_attempts, last_attempted_at, reviewer_session_uuid,
         reviewer_pgid, reviewer_started_at, reviewer_head_sha, reviewer_timeout_ms,
         reviewer_lease_expires_at, infra_auto_recover_attempts)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     overrides.repo || REPO,
     overrides.prNumber || PR,
@@ -43,6 +43,7 @@ function seedReviewing(db, overrides = {}) {
     overrides.reviewer || 'codex',
     overrides.prState || 'open',
     'reviewing',
+    overrides.builderClass || 'grok',
     overrides.reviewAttempts ?? 2,
     Object.prototype.hasOwnProperty.call(overrides, 'lastAttemptedAt')
       ? overrides.lastAttemptedAt

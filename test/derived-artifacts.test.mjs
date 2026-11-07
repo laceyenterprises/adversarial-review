@@ -72,14 +72,29 @@ test('LAC-2107: fixture subprocess budgets scale once and stay bounded', () => {
   assert.equal(fixtureTimeoutMs(5000, { ...busy, loadAvg1m: 8 }), 17500);
 });
 
-test('LAC-2107: controlled slow fixture survives the loaded policy beyond five seconds', async t => {
+test('LAC-2107: fixture runner passes the loaded timeout to the subprocess', async t => {
   loadedFixtureHost(t);
   const root = mkdtempSync(join(tmpdir(), 'slow-artifact-fixture-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const started = performance.now();
-  await runFixtureBuild({ cwd: root, env: { PATH: '/usr/bin:/bin' },
-    args: ['-c', 'exec sleep 6'] });
-  assert.ok(performance.now() - started >= 6000);
+  const calls = [];
+  const original = childProcess.execFileSync;
+  const output = Buffer.from('fixture output');
+  t.mock.method(childProcess, 'execFileSync', (file, ...args) => {
+    if (file !== '/bin/sh') return original(file, ...args);
+    calls.push({ file, args });
+    return output;
+  });
+  syncBuiltinESMExports();
+  const env = { PATH: '/usr/bin:/bin' };
+  assert.equal(await runFixtureBuild({ cwd: root, env,
+    args: ['sandbox-wrapper', '-c', 'printf fixture'] }), output);
+  assert.deepEqual(calls, [{
+    file: '/bin/sh',
+    args: [['-c', 'printf fixture'], {
+      cwd: root, env, timeout: 30_000,
+      maxBuffer: 64 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
+    }],
+  }]);
 });
 
 for (const receipt of [false, true]) test(`LAC-2107: ${receipt ? 'receipt' : 'declared'} fixture failure retains bounded redacted diagnostics`, async t => {

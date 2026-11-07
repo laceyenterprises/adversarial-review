@@ -111,7 +111,7 @@ import {
   writeCloserAuthoredStaleAudit,
 } from './closer-authored-stale.mjs';
 import { listFollowUpJobsInDir, resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
-import { findFinalRemediationPushJob } from './comment-only-final-round.mjs';
+import { findFinalRemediationPushJob, hasInProgressCommentOnlyFinalRound } from './comment-only-final-round.mjs';
 import { classifyCheckRollup, summarizeChecksConclusion } from './checks-summary.mjs';
 import { CI_BLOCKED_HAMMER_RESCUE_PREFIXES } from './reviewer-ci-admission.mjs';
 import { summarizeExternalChecks } from './remediation-ci-regression.mjs';
@@ -1806,6 +1806,9 @@ async function dispatchAmaClosureFor({
   }
   const releasedStop = recordedStop && readHammerStopHoldForHead({ rootDir, repo: repoPath,
     prNumber, headSha: currentPrHeadSha, stopKey: recordedStop.stopKey })?.releasedAt;
+  const suppressedFinalRoundInProgress = Boolean(currentPrHeadSha && reviewState.headSha
+    && currentPrHeadSha !== reviewState.headSha
+    && hasInProgressCommentOnlyFinalRound(rootDir, { repo: repoPath, prNumber, reviewedHead: reviewState.headSha }));
   const closureOwnerInput = { hammerStop: recordedStop && (!recordedStop.refusal || !releasedStop) && !isInfrastructureStop(recordedStop) ? recordedStop : null,
     ...(recordedTerminalReview ? { terminalReview: { validated: true,
       headSha: currentPrHeadSha, reviewedHeadSha: reviewState.headSha } } : {}),
@@ -1838,7 +1841,11 @@ async function dispatchAmaClosureFor({
     // no longer a deterministic refusal. Route it through release, not remediation.
     roundsLeft: !isLegacyReviewHandoffStop(recordedStop) && !reviewCycleExhausted && !finalPush
       && gateSnapshot.settledReview?.commentOnlyFinalRoundPush !== true, ciBlockedHammerOwner,
-    finalPush: remediationHandoff ? { headSha: currentPrHeadSha, suppressed: true } : null,
+    // CLOSERREVIVE-01: the watcher withholds re-review while a comment-only final
+    // round is in progress for the reviewed head, so no exact-head review will
+    // come. A closer must not wait for one: the hammer takes the head.
+    finalPush: remediationHandoff || suppressedFinalRoundInProgress
+      ? { headSha: currentPrHeadSha, suppressed: true } : null,
     reviewCeilingReached: reviewCycleCapReached
       || (dispatchJob?.reviewFailureExhausted === true && dispatchJob?.reviewFailureClass === 'reviewer-timeout') };
   const resolveOwner = () => resolveClosureNextAction({ input: closureOwnerInput, passSnapshot,

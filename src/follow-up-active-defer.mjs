@@ -279,6 +279,8 @@ function stopStaleInProgressFollowUpJob({
     return null;
   }
   const worker = job?.worker || job?.remediationWorker || {};
+  // An HQ launch is stopped by the reconcile pass and the stuck-claim sweep,
+  // which read its launch state; this local-progress stop never applies to it.
   if (worker?.dispatchMode === 'hq') {
     return null;
   }

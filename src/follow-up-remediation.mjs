@@ -95,6 +95,7 @@ import { allBlockingDisputed } from './kernel/remediation-reply.mjs';
 import { requestWatcherWake } from './watcher-wake.mjs';
 import { REREVIEW_WAKE_REASONS, requestRereviewWake } from './rereview-wake.mjs';
 import { requestHammerWakeForSettledReviewStop } from './hammer-wake.mjs';
+import { recordHqLaunchObservation } from './remediation-hq-launch-observation.mjs';
 import { drainPendingNoRemediationJobs } from './no-remediation-follow-up.mjs';
 import { activeRemediationStopDecision, lifecycleStopDecision, resolveJobPRLifecycleSafe } from './follow-up-lifecycle.mjs';
 import { cancellationSettlesStop, sendWorkerSignal, workerCancelHandle } from './follow-up-worker-cancel.mjs';
@@ -1475,6 +1476,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
     workerTerminalEvent,
     workerTerminalReplyPath: paths?.replyPath || null,
   });
+  if (isHqWorker) job = recordHqLaunchObservation({ job, jobPath, liveness, observedAt: now() }); // CLOSERREVIVE-01
   if (!isHqWorker && liveness.state === 'exited') cleanupServiceCodexAuth(worker);
   // A publication refusal wins over reply text, no-progress handling and
   // published-head recovery. It cannot authorize a re-review or empty close.

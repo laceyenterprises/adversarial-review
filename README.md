@@ -1358,6 +1358,9 @@ sweep. Cleanup runs when a reviewer prepares a snapshot for that repo.
 
 ### Oversized reviewer prompts
 
+Declared generated paths and verified pure moves/splits are first replaced by a
+content-hashed manifest; see [large review diffs](docs/review-large-diffs.md) for
+the base-pinned declaration and detection rules. Posted reviews retain this manifest.
 Claude print-mode prompts travel on stdin, with explicit `--model`/`--effort`
 flags. Before routing a full prompt, the reviewer checks both delivery and
 context budgets. An oversized prompt stays with the selected cross-model
@@ -1366,10 +1369,12 @@ Every chunk must fit. File units that fit are reviewed intact; oversized files
 are split by line, with elision only for lines that cannot fit alongside their
 file and hunk headers. Elided additions produce synthetic blocking findings;
 elided context and deletions produce non-blocking evidence notes. A hard ceiling or
-chunk-cap failure records terminal `reviewer-prompt-too-large` evidence and
-queues the existing `reviewer.oversized_agy_prompt` operator alert.
-The size preflight throws `ReviewerPromptTooLargeError`; `reviewer.mjs` exits
-with reserved code 76, which the CLI runtime classifies as terminal. Quoting
+chunk-cap failure after recovery records terminal `reviewer-chunk-budget-exceeded`
+evidence and queues the existing `reviewer.oversized_agy_prompt` operator alert.
+The size preflight throws `ReviewerPromptTooLargeError`. Initial size failures
+(code 76) are retryable through the existing bounded infrastructure path.
+After summarisation and chunking are exhausted, `reviewer.mjs` exits with
+code 77 and preserves the refusal reason for the operator. Quoting
 `[reviewer-prompt-too-large]` in model output or stderr does not select this
 class. Transient chunk failures retain their normal retry classification and
 do not send the terminal size alert. Chunked reviews sum available provider
@@ -1422,7 +1427,7 @@ mechanism (no shared configuration-schema keys):
   original byte length, and SHA-256. Review bodies block only on elided additions;
   head-keyed metadata, including diff-line kind, is saved under `data/review-elisions/`.
 - `ADVERSARIAL_REVIEW_CHUNK_HARD_MAX_BYTES`: diff plus extra-context ceiling,
-  default 8 MiB, measured on the raw diff plus extra context before elision.
+  default 8 MiB, measured after generated/move summarisation and before line elision.
   This bounds preprocessing work even for a single generated line; content
   above it remains a terminal size refusal with a `shrink-diff` PR-update owner.
   `ADVERSARIAL_REVIEW_AGY_CHUNK_MAX_CHUNKS` bounds all chunked reviews (default 20).
@@ -4560,6 +4565,8 @@ evidence ignores case and stores lowercase heads. Offline
 merge predicates and smoke commands remain unchanged.
 
 ## Change notes
+
+- REVIEWLARGE-01: reviewers summarise base-declared generated paths and byte-identical moves/splits in a hashed manifest before prompt sizing. Typed prompt-size failures retry summarisation and bounded chunking; chunk findings retain provenance and any blocking finding blocks the combined verdict. Posted reviews disclose their scope; exhausted chunk plans retain the operator path. See [large review diffs](docs/review-large-diffs.md) and the MERGEHOTSPOT-01 SEV report in agent-os.
 
 - GRK-10 final remediation: refused or missing custom reviewer models return no route without throwing; Claude remediation aliases normalize to their reviewer family. Removed the unreachable same-family last-resort worker fallback and added exhaustion regressions. Author-tagging reference tables and roster expectations now include Grok; the fallback route fixture supplies explicit builder provenance.
 - GRK-10: `[grok]` builder titles route to Codex review and `remediator-codex`. Closer wrappers retain the original builder tag; family checks refuse Grok acting aliases and unknown provenance before dispatch and fallback. Existing availability policy can select an eligible non-Grok fallback or defer. Activation is the companion merge and watcher reload in GRK-16, which also owns the live review/remediation route receipt; no live activation is performed here.

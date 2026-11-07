@@ -29,6 +29,7 @@ import { filterGitHubBody } from './github-outbound-body.mjs';
  * ────────────────────────────────────────────────────────────────────────────
  */
 import { assertReviewHeadCurrent, reviewerExecutionFailureExitCode, reviewerPostFailureExitCode,
+  ReviewerPromptTooLargeError, ReviewerSizeRecoveryExhaustedError,
   REVIEWER_PROMPT_TOO_LARGE_EXIT_CODE, REVIEWER_CHUNK_BUDGET_EXCEEDED_EXIT_CODE, REPOSITORY_STATE_BUSY_EXIT_CODE } from './reviewer-outcomes.mjs';
 import { execFile } from 'node:child_process';
 import {
@@ -142,6 +143,7 @@ import {
   parseDiffFiles,
   buildGhErrorDetail,
 } from './reviewer-util.mjs';
+import { resolveReviewBaseSha, loadReviewGeneratedPaths, summariseReviewDiff, reviewManifestText, discloseReviewManifest, retryLargeReview } from './reviewer-large-diff.mjs';
 import { fetchPRDiff, fetchPRDiffFromFilesApi } from './reviewer-diff-fetch.mjs';
 import { resolvePrOwnReviewDiff } from './reviewer-own-diff.mjs';
 import { groundBlockingFindingsAtHead, persistReviewGroundingMetadata } from './review-head-grounding.mjs';
@@ -176,6 +178,7 @@ import {
   buildAgyReviewerPromptPrefix,
   isFinalReviewRound,
   selectReviewerPromptStage,
+  selectReviewerRubric,
 } from './reviewer-prompt.mjs';
 const CRITICAL_WORDS = ['critical', 'vulnerability', 'security', 'injection'];
 
@@ -1973,6 +1976,16 @@ async function main() {
     log: console,
   });
 
+  const reviewBaseSha = await resolveReviewBaseSha({ repo, prNumber, headSha: reviewerHeadSha });
+  const generatedPaths = await loadReviewGeneratedPaths({ repo, baseSha: reviewBaseSha });
+  const reviewKind = selectReviewerRubric(diff);
+  const preparedDiff = await summariseReviewDiff({ diff, repo, generatedPaths,
+    baseSha: reviewBaseSha, headSha: reviewerHeadSha,
+    cwd: resolveReviewerSubprocessCwd({ repo, rootDir: ROOT }) });
+  const reviewDiff = preparedDiff.diff;
+  const reviewDisclosure = reviewManifestText(preparedDiff.manifest);
+  const reviewExtraContext = extraContext + reviewDisclosure;
+
   // 2. Run adversarial review (OAuth only — no API key fallback)
   let effectiveModel = reviewerModel;
   let effectiveBotTokenEnv = botTokenEnv;
@@ -1985,9 +1998,9 @@ async function main() {
     reviewerModel: effectiveModel,
     botTokenEnv: effectiveBotTokenEnv,
     builderTag,
-    diff,
-    extraContext,
-    promptStage: reviewModeDecision.promptStage,
+    diff: reviewDiff,
+    extraContext: reviewExtraContext,
+    promptStage: reviewModeDecision.promptStage, reviewKind,
     geminiRuntime: geminiRuntimeForBudget,
   });
   if (oversizedAgyRoute.oversized) {
@@ -2087,21 +2100,31 @@ async function main() {
     let dispatch;
     try {
       dispatch = preservedDispatch || (useAgyChunkFallback
-        ? await reviewAgyOversizedInChunks(diff, extraContext, {
+        ? await reviewAgyOversizedInChunks(reviewDiff, reviewExtraContext, {
             reviewerModel: effectiveModel,
-            promptStage: reviewModeDecision.promptStage,
+            promptStage: reviewModeDecision.promptStage, reviewKind,
             reviewerSubprocessCwd,
             promptBytes: oversizedAgyRoute?.promptBytes,
             maxBytes: oversizedAgyRoute?.maxBytes,
             onRejectedCodexOutput: (rejected) => persistRejectedCodexOutput({ repo, prNumber, ...rejected }),
             signal: geminiDeadline.signal, onChunkPlan: geminiDeadline.extendForPlan, mes,
           })
-        : await dispatchReviewerModel(effectiveModel, diff, extraContext, {
-            reviewerArm, mes,
-            promptStage: reviewModeDecision.promptStage,
-            reviewerSubprocessCwd,
-            signal: effectiveModel === 'gemini' ? geminiDeadline.signal : undefined,
-            onProgress: createReviewerProgressRecorder({ rootDir: ROOT, repo, prNumber, attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0, passKind, reviewerSessionUuid }),
+        : await retryLargeReview({
+            run: (prepared = preparedDiff) => dispatchReviewerModel(effectiveModel, prepared.diff, extraContext + reviewManifestText(prepared.manifest), {
+              reviewerArm, mes, promptStage: reviewModeDecision.promptStage, reviewKind,
+              reviewerSubprocessCwd,
+              signal: effectiveModel === 'gemini' ? geminiDeadline.signal : undefined,
+              onProgress: createReviewerProgressRecorder({ rootDir: ROOT, repo, prNumber, attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0, passKind, reviewerSessionUuid }),
+            }),
+            summarise: async () => preparedDiff,
+            chunk: (prepared) => reviewAgyOversizedInChunks(prepared.diff, extraContext + reviewManifestText(prepared.manifest), {
+              reviewerModel: effectiveModel, promptStage: reviewModeDecision.promptStage, reviewKind,
+              reviewerSubprocessCwd, mes,
+              maxBytes: oversizedAgyRoute?.maxBytes,
+              signal: effectiveModel === 'gemini' ? geminiDeadline.signal : undefined,
+              onChunkPlan: effectiveModel === 'gemini' ? geminiDeadline.extendForPlan : undefined,
+              onRejectedCodexOutput: (rejected) => persistRejectedCodexOutput({ repo, prNumber, ...rejected }),
+            }),
           }));
     } catch (firstErr) {
       if (!oversizedAgyRoute?.oversized || useAgyChunkFallback) throw firstErr;
@@ -2120,8 +2143,8 @@ async function main() {
         stateDir: reviewerWorkspaceStateDir,
       });
       geminiDeadline.arm();
-      dispatch = await reviewAgyOversizedInChunks(diff, extraContext, {
-        promptStage: reviewModeDecision.promptStage,
+      dispatch = await reviewAgyOversizedInChunks(reviewDiff, reviewExtraContext, {
+        promptStage: reviewModeDecision.promptStage, reviewKind,
         reviewerSubprocessCwd,
         promptBytes: oversizedAgyRoute.promptBytes,
         maxBytes: oversizedAgyRoute.maxBytes,
@@ -2168,9 +2191,12 @@ async function main() {
     // REVIEWVALID-01: a template echo is never posted; chunk replies were checked one by one.
     if (!dispatch.chunked) assertReviewerReply(rawReviewText, { onRejected: (rejected) => persistRejectedCodexOutput({ repo, prNumber, ...rejected }) });
     assertReviewerReply(reviewText, { onRejected: (rejected) => persistRejectedCodexOutput({ repo, prNumber, ...rejected }) });
+    reviewText = discloseReviewManifest(reviewText, preparedDiff.manifest);
+    dispatch.reviewText = reviewText;
     console.error(`[reviewer] DEBUG: review completed (${reviewText.length} bytes)`);
     generatedReview.preserve({ rawReviewText, dispatch, execution: reviewerExecution, reviewerAttribution, reviewerModel: effectiveModel, botTokenEnv: effectiveBotTokenEnv });
   } catch (err) {
+    if (err instanceof ReviewerPromptTooLargeError) err = new ReviewerSizeRecoveryExhaustedError(err);
     if (effectiveModel === 'claude') captureLocalReviewerUsage({ model: effectiveModel, workspacePath: reviewerSubprocessCwd, startedAt: reviewerStartedAt, rootDir: ROOT, failed: true });
     if (err.code === 'registry-unavailable') {
       console.error(err.message);
@@ -2195,7 +2221,7 @@ async function main() {
         managedByWatcher: Boolean(reviewerSpawnToken),
         failureClass: reviewerExecutionFailureExitCode(err) === REVIEWER_PROMPT_TOO_LARGE_EXIT_CODE
           ? 'reviewer-prompt-too-large' : 'reviewer-chunk-budget-exceeded',
-        facts: reviewerSizeFacts({ diff, headSha: reviewerHeadSha || reviewerWorkspaceHeadSha,
+        facts: reviewerSizeFacts({ diff: reviewDiff, headSha: reviewerHeadSha || reviewerWorkspaceHeadSha,
           promptBytes: oversizedAgyRoute?.promptBytes, maxBytes: oversizedAgyRoute?.maxBytes,
           maxChunks: resolveAgyChunkMaxChunks(), chunkPlan: err.plan || null }),
       });

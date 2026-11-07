@@ -9,7 +9,7 @@ import { settleReviewerAttempt } from '../src/reviewer-spawn-settle.mjs';
 import { reviewerSizeFacts, reviewerSizeFactsLine, dispatchReviewerSizeUpdate, reportReviewerSizeFailure, readSizeFacts } from '../src/reviewer-size-owner.mjs';
 import { alertClioOversizedAgyFailure } from '../src/reviewer-alerts.mjs';
 import { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
-import { prepareMarkSizeFailed, prepareMarkAttemptStarted } from '../src/review-state-statements.mjs';
+import { prepareMarkSizeFailed, prepareMarkSizeRetry, prepareMarkAttemptStarted } from '../src/review-state-statements.mjs';
 
 const repo = 'example-org/example-repo';
 const headSha = 'a'.repeat(40);
@@ -32,7 +32,7 @@ function fixture(t) {
   const alerts = [];
   const options = { rootDir, repoPath: repo, prNumber: 42, reviewerHeadSha: headSha,
     reviewerSessionUuid: session, builderTag: 'codex', leaseRecoveryEnabled: true,
-    result: { ok: false, failureClass: 'reviewer-prompt-too-large', error: 'synthetic size ceiling',
+    result: { ok: false, failureClass: 'reviewer-chunk-budget-exceeded', error: 'synthetic size ceiling',
       stderr: reviewerSizeFactsLine(facts) },
     statements: { getReviewRow: db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'), markSizeFailed: prepareMarkSizeFailed(db),
       markFailed: { run() { assert.fail('must use the head/session fence'); } },
@@ -49,7 +49,7 @@ function fixture(t) {
     row: () => db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = 42').get(repo) };
 }
 
-for (const failureClass of ['reviewer-prompt-too-large', 'reviewer-chunk-budget-exceeded']) {
+for (const failureClass of ['reviewer-chunk-budget-exceeded']) {
   test(`terminal ${failureClass} records one shrink-diff owner, dispatch and enriched alert`, async (t) => {
     const f = fixture(t);
     f.options.result.failureClass = failureClass;
@@ -283,4 +283,36 @@ test('recovered transient dispatch receipt is persisted and included in the aler
   const [name] = readdirSync(join(f.rootDir, 'data', 'review-size-actions')).filter(name => name.endsWith('.json'));
   const record = JSON.parse(readFileSync(join(f.rootDir, 'data', 'review-size-actions', name), 'utf8'));
   assert.equal(record.dispatch.launchRequestId, 'lrq_retry_receipt');
+});
+
+
+test('initial prompt size failure uses bounded retry without a shrink-diff handoff', async t => {
+  const f = fixture(t);
+  f.options.result.failureClass = 'reviewer-prompt-too-large';
+  f.options.statements.markSizeRetry = prepareMarkSizeRetry(f.db);
+  f.options.statements.markCascadeFailed = { run() { assert.fail('recovery cap is not exhausted'); } };
+  await settleReviewerAttempt(f.options);
+  assert.equal(f.row().review_status, 'pending-upstream');
+  assert.equal(f.row().infra_auto_recover_attempts, 1);
+  assert.equal(f.row().review_attempts, 0);
+  assert.equal(f.dispatches.length, 0);
+  assert.equal(f.alerts.length, 0);
+});
+
+
+test('initial size retry cannot release a replacement head or same-head session', async t => {
+  for (const replacement of [nextHead, headSha]) {
+    const f = fixture(t);
+    f.options.result.failureClass = 'reviewer-prompt-too-large';
+    f.options.statements.markSizeRetry = prepareMarkSizeRetry(f.db);
+    f.db.prepare('UPDATE reviewed_prs SET reviewer_head_sha = ?, reviewer_session_uuid = ?').run(replacement, 'replacement');
+    const result = await settleReviewerAttempt(f.options);
+    assert.equal(result.reason, 'size-retry-claim-mismatch');
+    assert.equal(f.row().review_status, 'reviewing');
+    assert.equal(f.row().reviewer_session_uuid, 'replacement');
+    assert.equal(f.row().infra_auto_recover_attempts, 0);
+    assert.equal(f.options.statements.markSizeRetry.run('2026-01-01', 'late size result',
+      repo, 42, headSha, session).changes, 0);
+    assert.equal(f.dispatches.length, 0);
+  }
 });

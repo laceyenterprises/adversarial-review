@@ -4,7 +4,7 @@
 // are self-contained: their only dependency is the shared alert bus.
 
 import { deliverAlert } from './alert-delivery.mjs';
-import { ReviewerPromptTooLargeError, ReviewerChunkBudgetExceededError } from './reviewer-outcomes.mjs';
+import { ReviewerPromptTooLargeError, ReviewerChunkBudgetExceededError, ReviewerSizeRecoveryExhaustedError } from './reviewer-outcomes.mjs';
 
 /**
  * Alert the operator when OAuth credentials are unavailable.
@@ -51,7 +51,7 @@ async function alertClioOversizedAgyFailure({
 }, {
   deliverAlertImpl = deliverAlert,
 } = {}) {
-  if (!(error instanceof ReviewerPromptTooLargeError) && !(error instanceof ReviewerChunkBudgetExceededError)
+  if (!(error instanceof ReviewerPromptTooLargeError) && !(error instanceof ReviewerChunkBudgetExceededError) && !(error instanceof ReviewerSizeRecoveryExhaustedError)
     && !['reviewer-prompt-too-large', 'reviewer-chunk-budget-exceeded'].includes(failureClass)) return null;
   const ownership = nextAction
     ? `Next action: ${nextAction.action}; owner: ${nextAction.actor || 'unresolved'}; head: ${nextAction.head}\nSize facts: ${JSON.stringify(nextAction.facts)}\nPR update: ${JSON.stringify(dispatch)}`

@@ -17,7 +17,6 @@ import {
 } from './fleet-quota-status.mjs';
 import {
   REVIEWER_ROUTE_BY_MODEL as REVIEWER_ROUTE_TABLE_BY_MODEL,
-  isCrossModelReviewWaived,
   reviewerRefusesBuilder,
 } from './adapters/subject/github-pr/routing.mjs';
 
@@ -80,15 +79,16 @@ function reviewerModelForWorkerClass(workerClass) {
 // share. `clio-agent` dispatches codex workers, so a clio-agent-authored PR
 // handed to a `codex` reviewer is codex reviewing codex — string-unequal,
 // diversity-dead. `routing.mjs` already owns that mapping
-// (REVIEWER_FAMILY_BY_BUILDER_CLASS, read through `isCrossModelReviewWaived`),
+// (REVIEWER_FAMILY_BY_BUILDER_CLASS, read through `reviewerRefusesBuilder`),
 // and the prior art here is real: a gemini-authored PR was once left with no
 // diverse reviewer when codex was out. So route THROUGH the existing check
 // rather than re-deriving one beside it, and keep the raw compare as a belt-and-
 // braces guard for tags routing.mjs does not know.
 //
-// Depth pressure never relaxes this. Satisfying a deep queue by handing a
-// class-X PR to a class-X reviewer would buy throughput by deleting the thing
-// review exists to provide.
+// Neither quota exhaustion nor depth pressure relaxes this. There is no
+// same-family last resort: if all candidates are refused, dispatch holds.
+// Satisfying a deep queue by handing a class-X PR to a class-X reviewer would
+// buy throughput by deleting the thing review exists to provide.
 export function violatesWriterDiversity(authorClass, candidateWorkerClass) {
   const author = String(authorClass || '').trim().toLowerCase();
   const candidate = String(candidateWorkerClass || '').trim().toLowerCase();
@@ -96,7 +96,7 @@ export function violatesWriterDiversity(authorClass, candidateWorkerClass) {
   if (author && candidate === author) return true;
   const reviewerModel = reviewerModelForWorkerClass(candidate);
   if (!reviewerModel) return true;
-  return isCrossModelReviewWaived(author, reviewerModel);
+  return reviewerRefusesBuilder(author, reviewerModel);
 }
 
 // ENTITLEMENT — "spilling onto a class that cannot boot converts a slow queue
@@ -468,10 +468,6 @@ export async function resolveReviewerWorkerClassWithFallback({
   const viableFallbacks = quotaTrackedFallbacks.filter(
     (candidate) => !violatesWriterDiversity(author, candidate)
   );
-  const sameWriterLastResorts = quotaTrackedFallbacks.filter(
-    (candidate) => violatesWriterDiversity(author, candidate)
-      && !reviewerRefusesBuilder(author, reviewerModelForWorkerClass(candidate))
-  );
   if (quotaTrackedFallbacks.length === 0 && !primaryIsClaude) {
     return { ...base, ...depthFields, reason: 'no-available-fallback' };
   }
@@ -590,21 +586,6 @@ export async function resolveReviewerWorkerClassWithFallback({
           to: candidate,
           reason: 'primary-grounded-fallback',
           primaryState: primaryAvail.state,
-        };
-      }
-    }
-    for (const candidate of sameWriterLastResorts) {
-      const candidateAvail = availability(candidate);
-      if (candidateAvail.available) {
-        return {
-          workerClass: candidate,
-          ...accountFields(candidate),
-          fellBack: true,
-          from: primaryClass,
-          to: candidate,
-          reason: 'primary-grounded-last-resort',
-          primaryState: primaryAvail.state,
-          lastResort: true,
         };
       }
     }

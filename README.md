@@ -421,7 +421,9 @@ catches a flapping provider the hard gate misses) — the assigned reviewer cann
 spawn at all, so `src/afh-reviewer-fallback.mjs` walks an ordered fallback:
 current reviewer → the per-tag cross-model primary → Gemini → Claude, skipping
 candidates that would violate the builder-family refusal. Both Claude accounts
-are refused for Claude-family builds, including last-resort fallback. A
+are refused for Claude-family builds, including last-resort fallback.
+Quota-triggered worker-class fallback also enforces family refusal without a
+same-family last resort; it holds when no eligible reviewer is available. A
 `[claude-code]` PR uses Gemini during a Codex outage when Gemini is eligible and
 available; if Gemini is also grounded or disabled, review dispatch holds until
 an eligible cross-model reviewer recovers. Fallback is stateless and
@@ -4547,6 +4549,9 @@ The ledger receipt distinguishes a proven merge by this run from remediation,
 refusal, cancellation and unknown exits; process success alone proves no merge.
 
 ## Change notes
+
+- GRK-10 final remediation: refused or missing custom reviewer models return no route without throwing; Claude remediation aliases normalize to their reviewer family. Removed the unreachable same-family last-resort worker fallback and added exhaustion regressions. Author-tagging reference tables and roster expectations now include Grok; the fallback route fixture supplies explicit builder provenance.
+- GRK-10: `[grok]` builder titles route to Codex review and `remediator-codex`. Closer wrappers retain the original builder tag; family checks refuse Grok acting aliases and unknown provenance before dispatch and fallback. Existing availability policy can select an eligible non-Grok fallback or defer. Activation is the companion merge and watcher reload in GRK-16, which also owns the live review/remediation route receipt; no live activation is performed here.
 
 - CLOSERREVIVE-01: the fixer and the closer now agree on whether a remediation job is alive. A job dispatched through HQ has no local process or heartbeat, so `remediationJobOwnership` expired it five minutes after spawn while the launch was still running; the closer then reclaimed it every poll and skipped the PR. The reconcile pass now records the launch status it reads from `hq dispatch status` as `remediationWorker.hqLaunch`, terminal included (a launch it reads as exited is recorded as terminal at once, so it stops owning the job), and the shared predicate reads liveness from it (requested, leased and running are live; terminal is not; a just-requested launch is live until first observed; local heartbeats and PIDs never make an HQ launch live). The stale-claim sweep uses the same predicate through `staleClaimMayBeReclaimed`, and the active-defer stop never stops an HQ launch, so a running HQ launch is never both a live owner and a reclaim candidate. A comment-only final round whose re-review the watcher suppresses, while it runs and after it completes with a push of the current head, now feeds the shared next-action snapshot as a suppressed final push, so the closer launches instead of waiting for an exact-head review that never comes (a live remediation launch still owns the head first). The watcher's AMA-pending log names the owner (`lrq=`, `owner=<actor>(...)`, `owner=closer(launching)`) or says `released ownership` with `owner=none` instead of `lrq=unknown workerClass=unknown`. Tests: `test/closerrevive-01.test.mjs`.
 

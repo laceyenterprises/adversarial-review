@@ -9,8 +9,7 @@
 > you want to understand how the running pipeline is wired; ignore it if
 > you're just sending a PR.
 
-Inside the maintainer's deployment, every PR is opened by one of three
-known worker classes, and the watcher routes reviewer selection off the
+Inside the maintainer's deployment, agent-built PRs use known worker classes, and the watcher routes reviewer selection off the
 title prefix at PR-creation time. Because that routing decision is made
 once and is not re-evaluated on retitle, the prefix has to be right the
 first time — hence the strict validation.
@@ -28,6 +27,13 @@ first time — hence the strict validation.
 | Claude Code | `[claude-code]` | email contains `claude` or `clio@laceyenterprises.com` |
 | Codex (Clio-delegated) | `[codex]` | email contains `codex` |
 | Clio sub-agent | `[clio-agent]` | `clio@laceyenterprises.com` |
+| Grok | `[grok]` | Title tag identifies the builder; no author-email heuristic |
+
+Grok builders use `[grok]`. Their default reviewer is Codex and their remediator is
+`remediator-codex`; availability fallback may select an eligible non-Grok lane or
+defer. Grok acting lanes are not enabled by this routing contract. A closer
+wrapper such as `[hammer] [grok]` retains Grok as the original builder family; a
+closer prefix alone supplies no builder provenance.
 
 ## Placement
 
@@ -50,7 +56,7 @@ redundancy.)
 
 - **Canonical helper path** (build-time / CLI-time): the canonical way
   to open an internal worker-class PR is
-  `npm run pr:create:tagged -- --tag <codex|claude-code|clio-agent> --title "<unprefixed title>" -- <gh args...>`.
+  `npm run pr:create:tagged -- --tag <codex|claude-code|clio-agent|grok> --title "<unprefixed title>" -- <gh args...>`.
   The helper lives in [`src/pr-create-tagged.mjs`](src/pr-create-tagged.mjs)
   and enforces the prefix locally before the PR exists, so human
   operators and dispatched workers never need to remember the tag by
@@ -78,6 +84,7 @@ the builder is never also the reviewer.
 |---|---|---|
 | `[claude-code]` or `[clio-agent]` | `codex-reviewer-lacey` | Codex |
 | `[codex]` | `claude-reviewer-lacey` | Claude Code (claude-sonnet-4-6) |
+| `[grok]` | `codex-reviewer-lacey` | Codex |
 | No tag / unknown | **Fail-loud guardrail** | No reviewer spawned |
 
 The `*-lacey` bot accounts are GitHub identities the maintainer's

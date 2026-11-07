@@ -844,7 +844,9 @@ async function spawnReviewerOnceWithAccount({
   if (reviewerRefusesBuilder(builderTag, reviewerModel)) {
     return {
       ok: false, effectiveReviewerModel: reviewerModel, failureClass: 'bug',
-      routingRefusal: true, error: normalizeReviewerModel(reviewerModel) === 'claude'
+      routingRefusal: true, error: normalizeReviewerModel(reviewerModel) === 'grok'
+        ? 'Grok acting lanes are unavailable'
+        : normalizeReviewerModel(reviewerModel) === 'claude'
         ? 'Claude-family reviewer cannot review a Claude-family builder'
         : normalizeReviewerModel(reviewerModel) === 'gemini'
           ? 'Gemini-family reviewer cannot review a Gemini-family builder' : CODEX_BUILDER_REVIEW_REFUSAL,

@@ -340,6 +340,20 @@ test('daemon clean merge: a recorded carry-forward lets the clean-merge path pro
   const result = await runDaemonCleanMergeAttempt(daemonArgs(root, { onAttempt: args => { attempted = args; } }));
   assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED, JSON.stringify(result));
   assert.equal(attempted.validatedHead, CURRENT, 'the carried review validates exactly the live head');
+  assert.equal(attempted.auditMetadata.closureAuthority, 'daemon-review-carry-forward');
+}));
+
+test('daemon clean merge: an exact-head review keeps ordinary audit authority', withRoot(async (root) => {
+  // A historical carry record must not relabel an exact-head clean merge.
+  recordCarry(root);
+  let attempted = null;
+  const args = daemonArgs(root, { onAttempt: value => { attempted = value; } });
+  args.gateSnapshot.reviewedHeadSha = CURRENT;
+  args.reviewState.headSha = CURRENT;
+  const result = await runDaemonCleanMergeAttempt(args);
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED, JSON.stringify(result));
+  assert.equal(attempted.validatedHead, CURRENT);
+  assert.equal(attempted.auditMetadata.closureAuthority, undefined);
 }));
 
 test('daemon clean merge: a carry-forward record never merges over a blocking finding', withRoot(async (root) => {

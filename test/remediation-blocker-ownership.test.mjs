@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  classifyRemediationBlockers, operationalBlockerOwner,
+  classifyRemediationBlockers, operationalBlockerOwner, reportsCompletedPipelineWait,
 } from '../src/remediation-blocker-ownership.mjs';
 import { resolvePendingCiCompletion } from '../src/comment-only-final-round-completion.mjs';
 import pendingCi from './fixtures/pending-ci-ownership/blocker.json' with { type: 'json' };
@@ -49,3 +49,27 @@ test('PENDINGCIOWNER-01 the CI normalizer receives structured ownership and pres
     assert.deepEqual(result.reply.reReview.originalOperationalBlockers || result.reply.operationalBlockers, [entry]);
   }
 });
+
+for (const [finding, expected] of [
+  ['Required CI is pending. No human decision, operator approval, or intervention is needed.', 'CI'],
+  ['Required CI is pending. No human decision or operator approval is needed.', 'CI'],
+  ['Required CI is pending. No credentials or permissions are required.', 'CI'],
+  ['Required CI is pending. No credentials and permissions are required.', 'CI'],
+  ['Required CI is pending. There are no credentials, and operator approval is required.', 'human'],
+  ['Required CI is pending. Pushed with no credentials, operator approval required.', 'human'],
+  ['Required CI is pending. Lacking access: no credentials, approval required.', 'human'],
+  ['Required CI is pending. No credentials, and operator approval is required.', 'human'],
+  ['Required CI is pending. No credentials, approval required.', 'human'],
+  ['Required CI is pending. We have no credentials and operator approval is required.', 'human'],
+  ['Required CI is pending. We have no credentials, and operator approval is required.', 'human'],
+  ['Required CI is pending. We have no additional permissions and operator approval is required.', 'human'],
+  ['Required CI is pending. No human decision is needed; operator approval is required.', 'human'],
+]) {
+  test(`legacy blocker ownership: ${finding}`, () => {
+    const reply = { outcome: 'completed', blockers: [],
+      operationalBlockers: [{ title: 'CI pending', finding }] };
+    assert.equal(operationalBlockerOwner(reply.operationalBlockers[0]), expected);
+    assert.equal(classifyRemediationBlockers(reply).humanRequired, expected === 'human');
+    assert.equal(reportsCompletedPipelineWait(reply), expected === 'CI');
+  });
+}

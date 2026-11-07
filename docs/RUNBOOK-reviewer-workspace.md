@@ -106,6 +106,14 @@ raises the existing `OAuthError` before those side effects; diagnostics omit raw
 auth/parser output. This proves local credential consumption, not remote token
 validity. Broker refresh/recovery retains its existing owner.
 
+Cli-direct discovery awaits `prepareServiceCodexHomeAsync` for credential
+validation and catalog seeding; execution keeps the synchronous helper. Both
+drive the same staging and cleanup protocol. The default async transport closes
+probe stdin immediately and buffers stdout/stderr within the existing timeout
+and output limits. Login recognition checks both streams; catalog stderr is
+discarded after collection. Authentication failures and catalog warnings never
+include raw subprocess output.
+
 The reviewer retains `--ignore-user-config` and passes the same reviewed tooling
 pins (including the file-store setting) as CLI overrides. Reviewer/probe homes are removed after use; remediation
 homes retain sessions under `<codexHome>/sessions` without `--ephemeral`,

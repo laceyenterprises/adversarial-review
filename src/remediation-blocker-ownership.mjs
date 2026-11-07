@@ -15,11 +15,14 @@ export function operationalBlockerOwner(entry) {
   const text = [entry?.title, entry?.finding, entry?.reasoning].filter(Boolean).join(' ');
   // Legacy prose alone needs a conservative heuristic. Remove only explicit
   // negated need phrases, never a whole sentence that could also request access.
-  // "Have no credentials" describes a missing prerequisite, not a negated
-  // requirement. Do not let a later "and approval is required" erase it.
-  const legacyNeeds = text.replace(/\bno (?:(?:additional|human|operator|finding|input|decision|approval|intervention|action|credentials?|permissions?|authentication|authorization|access|or|and|adversarial|review)[,\s]+)+(?:(?:is|are)\s+)?(?:needed|required|necessary)\b/gi,
-    (phrase, offset) => /\b(?:have|has)\s+$/i.test(text.slice(0, offset))
-      ? phrase : '');
+  // Only strip a standalone negated-need clause. Embedded "no credentials"
+  // can describe a missing prerequisite. Commas are accepted only in an
+  // enumerated list ending in ", or", never across a new approval clause.
+  const needItem = '(?:additional|human|operator|finding|input|decision|approval|intervention|action|credentials?|permissions?|authentication|authorization|access|adversarial|review)';
+  const listItem = `${needItem}(?:\\s+${needItem})*`;
+  const negatedNeed = new RegExp(`\\bno (?:${listItem}(?:,\\s*${listItem})+,\\s*or\\s+${listItem}|${needItem}(?:\\s+(?:${needItem}|or|and))*)\\s+(?:(?:is|are)\\s+)?(?:needed|required|necessary)\\b`, 'gi');
+  const legacyNeeds = text.replace(negatedNeed, (phrase, offset) =>
+    /(?:^|[.!?;:])\s*$/.test(text.slice(0, offset)) ? '' : phrase);
   if (/\b(?:credentials?|auth(?:entication|orization)?|permissions?|operator|human|decision|conflicting requirements?|approval|(?:auth|access|api|session|bearer|github)[ -]tokens?)\b/i.test(legacyNeeds)
     || /\b(?:fetch|rebase|push)\b[^.]{0,30}\b(?:failed|rejected|conflict)\b/i.test(text)) return 'human';
   if (legacyCiFollowup) return 'CI';

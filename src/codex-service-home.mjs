@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
-import { promisify } from 'node:util';
 import { mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -8,7 +7,20 @@ import { PER_WORKER_PLACEHOLDER_REFRESH_TOKEN } from './codex-per-worker-auth.mj
 import { scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 
 const template = readFileSync(new URL('./codex-service-config.toml', import.meta.url), 'utf8');
-const execFileAsync = promisify(execFile);
+
+function runServiceCodexCommandAsync(command, args, { stdio, ...options }) {
+  return new Promise((resolve, reject) => {
+    // execFile buffers both output streams; discard catalog stderr after
+    // collection. Authentication errors and catalog warnings redact output.
+    const child = execFile(command, args, options, (error, stdout, stderr) => {
+      if (error) { reject(error); return; }
+      resolve({ stdout, stderr: stdio[2] === 'ignore' ? '' : stderr });
+    });
+    // execFile cannot honour stdio: ignore. Deliver EOF explicitly so neither
+    // finite probe can wait for interactive input.
+    child.stdin.end();
+  });
+}
 
 function runServiceCodexCommand(command, args, options) {
   if (args[0] !== 'login') return execFileSync(command, args, options);
@@ -56,7 +68,7 @@ export function prepareServiceCodexHome({ env, workspaceDir, model, effort = nul
 
 // Readiness probes share the same credential staging, validation, catalog pins
 // and cleanup as execution, while yielding the event loop during CLI commands.
-export async function prepareServiceCodexHomeAsync({ execFileImpl = execFileAsync, ...options }) {
+export async function prepareServiceCodexHomeAsync({ execFileImpl = runServiceCodexCommandAsync, ...options }) {
   const steps = serviceCodexHomeSteps(options);
   let step = steps.next();
   while (!step.done) {

@@ -157,7 +157,7 @@ async function probeCodexCli({
   env = process.env,
   cwd = process.cwd(),
   timeout = loadAwareTimeoutMs(30_000),
-  execFileImpl = execFileAsync,
+  execFileImpl,
   requireMcpOAuth = false,
   execFileSyncImpl,
   ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,

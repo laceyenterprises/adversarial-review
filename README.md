@@ -1649,7 +1649,10 @@ This is explicit and idempotent; concurrency bounds submissions while existing
 HQ admission bounds running workers. The backfill waits up to five seconds for a
 SQLite writer lock. No automatic deployment backfill runs.
 `pipeline-health` JSON `nonBlockingBacklog` exposes open and unbatched finding
-counts, oldest open age, applied/dropped by UTC day and batch error counts.
+counts, oldest open age, applied/dropped by UTC day and batch error counts. Its
+`progress` object (also printed by `node bin/review-findings.mjs backlog --db <db>`)
+tracks the drain: `open` = `unbatched` + `batched` + `stranded`, plus `retrying`,
+`exhausted` and `releasedBatches`. Drained means `open` is 0.
 The existing alert path reports findings older than 48 hours by default.
 Within 24 hours, SRE retains a receipt showing the open backlog trends down,
 visible applied/dropped daily counts and no evidence-format losses. See the
@@ -4547,6 +4550,8 @@ The ledger receipt distinguishes a proven merge by this run from remediation,
 refusal, cancellation and unknown exits; process success alone proves no merge.
 
 ## Change notes
+
+- FINDINGSREQUEUE-01: findings no longer get stranded on a findings batch that failed after its worker ended. Before this change, a batch whose settlement errored kept its findings bound (`batch_id`) forever: each poll re-checked the same ended launch, and nothing re-batched the findings or launched a new worker. Now, when every launch under the batch's idempotency key is terminal in the launch ledger, a batch is released in two cases. The first is an error that cannot clear (no pushed head, no publication, failed preparation, identity or receipt mismatch, or a malformed manifest). The second is a batch that has stayed unsettled, with an error or without outcomes, for longer than `ADVERSARIAL_FINDINGS_BATCH_TIMEOUT_MS` (default 24h; the ledger may then also prove the launch absent). Release clears `batch_id` on the batch's open findings, adds 1 to the new `finding_backlog.batch_attempts`, and writes a `finding_batch_releases` audit row naming the old batch and the reason. The third attempt drops the finding with `batch-retry-exhausted: <last error>` instead. A live keyed launch, ledger evidence that cannot be read, or a batch waiting on its open marked PR is left untouched. A retry hashes the attempt number into its manifest, so it gets a fresh batch ID and idempotency key. Legacy drop reasons no longer error the whole batch: an exact code in another spelling maps to the current vocabulary, and any other invalid outcome returns only that finding for re-verification while the rest settle. Root cause of `batch-push-evidence-missing`: `hq dispatch status` reports every unobserved milestone as `not_started`, and HQ re-probes `branch_pushed` at exit only for `pr`/`branch-push` launches, never `decision-only` ones. The collector's "milestone present but not done" check therefore rejected batches that had really pushed. The milestone is no longer consulted; the remote tested head, already verified, is the push evidence. A batch that drops everything settles without any push. `nonBlockingBacklog.progress` reports open/unbatched/batched/stranded/retrying/exhausted counts. Migration `20261107_findings_batch_requeue.sql` is additive and idempotent. Tests: `test/findingsrequeue-01.test.mjs`; `test/findings-batch.test.mjs` updated where it pinned the old stranding behaviour.
 
 - HAMMERLAUNCHREAD-01 final comment remediation: verified that `assert-owner` and `assert-launch` already enforce zero arguments in the reviewed head. Added offline CLI regressions for both verbs and `resolve-environment`, checking that trailing arguments (including an empty string) return usage and exit 64 before controller work.
 

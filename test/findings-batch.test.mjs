@@ -359,11 +359,16 @@ test('FINDINGSBATCH-01 daily claims fence concurrent dispatch and outcomes requi
   const [next] = claimFindingBatches(db, '2026-01-02');
   assert.deepEqual(claimFindingBatches(db, '2026-01-03'), []);
   const findingId = db.prepare('SELECT finding_id FROM finding_backlog WHERE batch_id=?').get(next.batch_id).finding_id;
-  assert.throws(() => settleFindingBatch(db, next, { batchId: next.batch_id,
-    findings: [{ findingId, outcome: 'dropped', reason: '' }] }));
-  settleFindingBatch(db, next, { batchId: next.batch_id,
+  // FINDINGSREQUEUE-01: a blank reason returns that finding for re-verification.
+  assert.equal(settleFindingBatch(db, next, { batchId: next.batch_id,
+    findings: [{ findingId, outcome: 'dropped', reason: '' }] }), true);
+  assert.deepEqual(db.prepare('SELECT batch_id,batch_attempts,outcome FROM finding_backlog WHERE finding_id=?').get(findingId),
+    { batch_id: null, batch_attempts: 1, outcome: null });
+  const [retry] = claimFindingBatches(db, '2026-01-03');
+  assert.notEqual(retry.batch_id, next.batch_id);
+  settleFindingBatch(db, retry, { batchId: retry.batch_id,
     findings: [{ findingId, outcome: 'dropped', reason: 'not-reproducible: Already described on current main' }] });
-  assert.equal(db.prepare('SELECT reason FROM finding_backlog WHERE batch_id=?').get(next.batch_id).reason,
+  assert.equal(db.prepare('SELECT reason FROM finding_backlog WHERE batch_id=?').get(retry.batch_id).reason,
     'not-reproducible: Already described on current main');
 });
 
@@ -640,7 +645,7 @@ test('FINDINGSBATCHCUSTODY-01 native publication requires independent exact repo
     ['foreign ticket', f => { f.launches[0].ticket_ref = 'FINDINGS-other'; }],
     ['foreign key', f => { f.launches[0].idempotency_key = 'findings-batch-other'; }],
     ['failed preparation', f => { f.status.status = 'failed'; f.status.succeeded = false; }],
-    ['explicit unsuccessful push', f => { f.status.milestones.branch_pushed.status = 'not_started'; }],
+    ['tested head absent from remote', f => { f.publication.headSha = undefined; }],
     ['wrong remote head', f => { f.publication.headSha = 'c'.repeat(40); }],
     ['unmarked result PR', f => { f.publication.prs = [{ ...f.pr, body: 'foreign' }]; }],
   ];
@@ -670,7 +675,7 @@ test('FINDINGSBATCHCUSTODY-01 workspace display paths do not grant repository au
   }
 });
 
-test('FINDINGSBATCHCUSTODY-01 invalid historical outcomes retain every finding and artifact', async t => {
+test('FINDINGSREQUEUE-01 invalid historical outcomes return the finding for re-verification and retain the artifact', async t => {
   for (const [outcome, reason, error] of [
     ['dropped', 'This looks stale', 'invalid-dropped-reason'],
     ['resolved', 'Fixed in the prepared branch', 'invalid-finding-outcome'],
@@ -681,10 +686,15 @@ test('FINDINGSBATCHCUSTODY-01 invalid historical outcomes retain every finding a
     writeFileSync(f.outputPath, JSON.stringify(f.result));
     const original = readFileSync(f.outputPath, 'utf8');
     await f.run();
-    assert.equal(f.dispatches.length, 1);
-    assert.deepEqual(f.db.prepare('SELECT completed_at,error FROM finding_batches').get(),
-      { completed_at: null, error });
-    assert.equal(f.db.prepare('SELECT outcome FROM finding_backlog').get().outcome, null);
+    assert.equal(f.dispatches.length, 1, 'an invalid applied claim is never published');
+    const stored = f.db.prepare('SELECT completed_at,error,result_json FROM finding_batches').get();
+    assert.ok(stored.completed_at);
+    assert.equal(stored.error, null);
+    assert.deepEqual(JSON.parse(stored.result_json).requeued, [{ findingId: f.result.findings[0].findingId, reason: error }]);
+    assert.deepEqual(f.db.prepare('SELECT outcome,batch_id,batch_attempts FROM finding_backlog').get(),
+      { outcome: null, batch_id: null, batch_attempts: 1 });
+    assert.deepEqual(f.db.prepare('SELECT batch_id,reason,disposition FROM finding_batch_releases').all(),
+      [{ batch_id: f.batch.batch_id, reason: error, disposition: 'requeued' }]);
     assert.equal(readFileSync(f.outputPath, 'utf8'), original);
   });
 });
@@ -741,16 +751,24 @@ test('FINDINGSSHAPE-01 decline-only outcomes finish without PR, push, status pro
   assert.equal(f.dispatches.length, 1);
 });
 
-test('FINDINGSSHAPE-01 explicit unsuccessful push milestone fails before publication reads', async t => {
-  for (const status of ['pending', 'failed']) await t.test(`push=${status}`, async t => {
+test('FINDINGSREQUEUE-01 the push milestone is not push authority; the remote tested head is', async t => {
+  // Dispatch status reports every unobserved milestone as not_started and does
+  // not re-probe a decision-only launch at exit, so a real push can read as
+  // anything but done. Only the remote branch head decides.
+  for (const status of ['not_started', 'pending', 'failed']) await t.test(`push=${status}`, async t => {
     const f = await publicationFixture(t);
-    f.status.milestones = status ? { branch_pushed: { status } } : {};
-    let reads = 0;
-    await f.run({ fetchPublication: async () => { reads++; throw Error('unexpected publication read'); } });
-    assert.equal(reads, 0);
-    assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error, 'batch-push-evidence-missing');
-    assert.equal(f.db.prepare('SELECT completed_at FROM finding_batches').get().completed_at, null);
-    assert.equal(f.db.prepare('SELECT outcome FROM finding_backlog').get().outcome, null);
+    f.status.milestones = { branch_pushed: { status } };
+    await f.run();
+    assert.equal(f.dispatches.length, 2, 'the pushed tested head publishes');
+    assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error, null);
+  });
+  await t.test('tested head never pushed', async t => {
+    const f = await publicationFixture(t);
+    f.status.milestones = { branch_pushed: { status: 'not_started' } };
+    f.publication.headSha = 'c'.repeat(40);
+    await f.run();
+    assert.deepEqual(f.db.prepare('SELECT error,release_reason FROM finding_batches').get(),
+      { error: 'batch-push-evidence-mismatch', release_reason: 'batch-push-evidence-mismatch' });
     assert.equal(f.dispatches.length, 1);
   });
 });
@@ -788,6 +806,14 @@ test('FINDINGSSHAPE-01 lost publisher receipts and terminal launches never dispa
     assert.equal(f.db.prepare('SELECT completed_at FROM finding_batches').get().completed_at, null);
     assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error,
       enqueued ? 'batch-publish-ended-without-pr: failed' : 'batch-publish-receipt-pending');
+    if (enqueued) {
+      // FINDINGSREQUEUE-01: both keyed launches ended with no PR. The batch is
+      // released and its finding re-batched, never given a second publisher.
+      assert.deepEqual(f.db.prepare('SELECT released_at IS NOT NULL AS released,release_reason FROM finding_batches').get(),
+        { released: 1, release_reason: 'batch-publish-ended-without-pr: failed' });
+      assert.deepEqual(f.db.prepare('SELECT batch_id,batch_attempts FROM finding_backlog').get(), { batch_id: null, batch_attempts: 1 });
+      return;
+    }
     f.publication.prs = [{ ...f.pr, state: 'MERGED' }];
     await f.run();
     assert.ok(f.db.prepare('SELECT completed_at FROM finding_batches').get().completed_at);
@@ -798,7 +824,6 @@ test('FINDINGSSHAPE-01 publication holds on invalid manifests, live preparation 
   const cases = [
     ['foreign manifest', f => { f.result.batchId = 'foreign'; }],
     ['missing finding', f => { f.result.findings = []; }],
-    ['blank reason', f => { f.result.findings[0].reason = ''; }],
     ['missing pushed head', f => { f.result.headSha = null; }],
     ['live preparation', f => { f.status.status = 'running'; f.status.terminal = false; }],
     ['explicit nonterminal', f => { f.status.terminal = false; }],
@@ -988,16 +1013,15 @@ test('FINDINGSBATCH-02 null status repo and absent milestone use ledger plus rem
 test('FINDINGSBATCH-02 strict dropped vocabulary, verified fix PR, ticket and zero-outcome failure', async t => {
   const f = await publicationFixture(t);
   const { settleFindingBatch } = await import('../src/findings-batch.mjs');
+  const { normalizeDroppedReason } = await import('../src/findings-batch.mjs');
   const result = { ...f.result, findings: f.result.findings.map(r => ({ ...r, outcome: 'dropped' })) };
+  // FINDINGSREQUEUE-01: these no longer error the batch; they re-verify (see its tests).
   for (const reason of ['No time', 'stale-code-changed', 'false-positive:', 'already-fixed-in-0: bad PR', 'unknown: text']) {
-    result.findings[0].reason = reason;
-    assert.throws(() => settleFindingBatch(f.db, f.batch, result), /invalid-dropped-reason/);
+    assert.equal(normalizeDroppedReason(reason), null, reason);
   }
   result.findings[0].reason = 'already-fixed-in-23: Removed the obsolete branch';
   assert.throws(() => settleFindingBatch(f.db, f.batch, result), /batch-drop-pr-unverified/);
   assert.throws(() => settleFindingBatch(f.db, f.batch, result, null, { 23: { state: 'OPEN' } }), /batch-drop-pr-unverified/);
-  result.findings[0].reason = 'out-of-scope-with-ticket: deferred';
-  assert.throws(() => settleFindingBatch(f.db, f.batch, result), /batch-drop-ticket-missing/);
   result.findings[0].reason = 'out-of-scope-with-ticket: SYNTH-23 owns the broader refactor';
   assert.equal(settleFindingBatch(f.db, f.batch, result), true);
   f.db.prepare("INSERT INTO finding_batches(batch_id,repo,area,day) VALUES ('empty',?,'empty','2026-01-02')").run(repo);

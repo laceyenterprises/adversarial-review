@@ -12,9 +12,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { recoverOverdueOwnership } from '../src/ownerproof-review-recovery.mjs';
-import { recoverOrphan } from '../src/ama/orphan-watchdog.mjs';
+import { probeOrphanOwnership, recoverOrphan } from '../src/ama/orphan-watchdog.mjs';
 import { noProgressLaneFilePath } from '../src/watcher-no-progress-lane.mjs';
 import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
+import { acquireAmaCloserLease, readAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { dispatchReadTransport } from '../src/dispatch-read-client.mjs';
+import { observeClosureWait } from '../src/ama/closure-wait.mjs';
 
 const REPO = 'fixture/project';
 const PR = 4242;
@@ -148,11 +151,61 @@ test('an owned park is not double-owned: a proven owner clears discovery recover
 
   // The closer's own custody keeps a second pass from launching a second hammer.
   const execCalls = [];
-  const first = await maybeDispatchAmaClosureFor(closureArgs(rootDir, {
-    maybeDispatchAmaCloserImpl: async () => { execCalls.push('dispatch'); return { dispatched: true, launchRequestId: 'lrq_fixture' }; },
-  }));
+  const leaseIdentity = { rootDir, ...IDENTITY, headSha: PUSHED };
+  const launchRequestId = 'lrq_fixture';
+  let ledgerReads = 0;
+  t.mock.method(dispatchReadTransport, 'lookup', async selector => {
+    if (selector.observation === 'workers') {
+      assert.equal(selector.launch_request_id, launchRequestId);
+      return { schema_version: 1, observation: 'workers', status: 'not_found',
+        items: [], complete: true, next_offset: null, scope_complete: false, mutation_authority: false };
+    }
+    ledgerReads++;
+    assert.deepEqual(selector.launch_request_ids, [launchRequestId]);
+    assert.equal(selector.include_retry_chain, true);
+    return { schema_version: 1, status: 'found', complete: true, roots: [launchRequestId],
+      items: [{ launch_request_id: launchRequestId, ticket_id: `AMA-PR-${PR}`,
+        repo: REPO, status: 'running', requested_at: NOW }], retry_edges: [] };
+  });
+  let custodyProbes = 0;
+  const args = () => closureArgs(rootDir, {
+    now: () => Date.parse(NOW),
+    observeClosureWaitImpl: options => observeClosureWait({ ...options, now: Date.parse(NOW),
+      pageImpl: async message => { pages.push(message); } }),
+    maybeDispatchAmaCloserImpl: async () => {
+      execCalls.push('dispatch');
+      assert.equal(acquireAmaCloserLease({ ...leaseIdentity, watcherPid: process.pid, now: NOW }).acquired, true);
+      updateAmaCloserLease({ ...leaseIdentity, status: 'dispatched', lrqId: launchRequestId, now: NOW });
+      return { dispatched: true, launchRequestId };
+    },
+    probeClosureOwnershipImpl: async options => {
+      custodyProbes++;
+      assert.equal(readAmaCloserLease(rootDir, leaseIdentity).lrqId, launchRequestId);
+      const ownership = await probeOrphanOwnership({ ...options, now: NOW });
+      assert.equal(ownership.owned, true);
+      assert.equal(ownership.uncertain, false);
+      assert.deepEqual(ownership.launchIds, [launchRequestId]);
+      return ownership;
+    },
+  });
+  const first = await maybeDispatchAmaClosureFor(args());
   assert.equal(first.dispatched, true);
   assert.equal(execCalls.length, 1);
+  const persistedLease = readAmaCloserLease(rootDir, leaseIdentity);
+  assert.equal(persistedLease.status, 'dispatched');
+  assert.equal(persistedLease.headSha, PUSHED);
+  assert.equal(persistedLease.lrqId, launchRequestId);
+
+  const second = await maybeDispatchAmaClosureFor(args());
+  assert.equal(second.dispatched, false);
+  assert.equal(second.reason, `in-flight:${launchRequestId}`);
+  assert.equal(second.nextAction.row, 'R03-live-owner');
+  assert.equal(second.nextAction.queue.intent, 'owned');
+  assert.ok(ledgerReads > 0, 'the second pass resolves the persisted launch through the ledger adapter');
+  assert.equal(custodyProbes, 1, 'the second pass checks closer custody');
+  assert.equal(execCalls.length, 1, 'the second closure pass must not invoke the executor');
+  assert.deepEqual(readAmaCloserLease(rootDir, leaseIdentity), persistedLease, 'the first owner keeps its lease');
+  assert.deepEqual(pages, [], 'live custody does not page during its progress window');
 });
 
 test('an exhausted, non-remediable park surfaces as stuck: an executable route spends two attempts, pages once, and keeps the pass', async t => {

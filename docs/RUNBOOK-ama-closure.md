@@ -1,3 +1,48 @@
+## Reading the PR blockers report
+
+Run `npm run pr-blockers -- --repo example/project --repo example/other`
+from the deployed review service. Add `--json` for the
+[version 1 JSON contract](pr-blockers.schema.json), or `--root directory`
+to read another deployment's review store and durable ownership records.
+The report paginates open PRs, reviews and post-review commits.
+It makes no comments, label changes, merges or dispatches.
+
+Each row shows merge state, age, review verdict and empty-blocking-section
+classification, review coverage, failed external checks and pending count,
+the shared next actor, lease age/deadline, diagnostic eligibility and next action.
+`post-review` names authors and marks commits with authenticated closer
+attestations separately from unattested commits. `rebased-since-review` means
+the reviewed SHA is no longer an ancestor. Missing evidence is `unknown`.
+An unconfirmed stored review never establishes exact-head eligibility.
+
+Actions project the shared rescue/closure `nextAction(snapshot)` decision:
+`merge-ready`, `rereview-exact-head`, `ci-fix`, `wait-closer`,
+`closer-overdue`, and `rebase-generated-only`. Other policy results retain
+their shared action and reason (for example `wait-for-CI`, `hammer`,
+`remediate` or `operator-hold`). `superseded?` is a stale-review PR with the
+existing duplicate-family hold; it requests inspection, not automatic closure.
+The JSON includes the complete shared decision. Unknown ownership stays with
+recovery. A terminal worker receipt alone does not establish a remote merge.
+
+`eligible` is the report's diagnostic formula: OPEN, CLEAN, exact-head settled
+review with a known empty blocking section and green external checks. It is
+not merge authorization. Strict non-blocking remediation, holds, attestations,
+protection, leases and other execution gates can still require action; read
+the next-action reason as well. Empty checks fail closed. Required context and
+latest-run rules come from the same CI summarizer as the closer.
+
+For optional conflict detail, add
+`--checkout example/project=directory` pointing to a checkout that already
+contains the exact base and head objects. The report runs bounded `merge-tree`
+with a disposable object store; it never fetches or changes the checkout.
+Missing objects or unsupported Git yield `unavailable`. Generated flags use
+the existing guard's declared generated paths, read at the PR's base SHA.
+Mixed or unknown conflicts retain the shared hammer action.
+
+Read failures produce per-row or per-repository errors and exit status 1 while
+preserving available rows. PRs observed as terminal on the final live read are
+omitted; moving or unverifiable heads lose CI eligibility and request a refresh.
+
 ## Live closer operator inspection (HAMWORKPROGRESS-02)
 
 HAMWORKPROGRESS-02: live R03 hammer custody also receives an operator inspection

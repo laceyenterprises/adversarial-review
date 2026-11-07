@@ -226,6 +226,13 @@ function leaseFacts(leases, head) {
   };
 }
 
+// Diagnostics need the owner's deadline, which can differ from the successor
+// recovery deadline. Keep explicit deadlines and lease-window defaults in the
+// same projection used by nextAction rather than reimplementing their rules.
+export function closerLeaseDeadline(lease) {
+  return iso(leaseFacts({ state: 'complete', value: { closer: lease } }, lease?.headSha).deadlineMs);
+}
+
 function snapshotFacts(snapshot) {
   const sources = Object.fromEntries(['pr', 'candidate', 'checks', 'reviews', 'remediation', 'launches',
     'leases', 'controls', 'policy', 'progress', 'history'].map(name => [name, observation(snapshot, name)]));

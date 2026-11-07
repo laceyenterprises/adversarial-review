@@ -209,3 +209,47 @@ export async function retryLargeReview({ run, summarise, chunk }) {
     throw error;
   }
 }
+
+
+// Keep prompt sizing, deferred diff inspection and chunk fallback in one
+// place. Route options are evaluated for each try because the caller may
+// fall back to a different reviewer after an unavailable oversize route.
+export function createReviewSizeRecovery({
+  diff, extraContext, repo, prNumber, headSha, initialSizing, resolveCwd,
+  resolveRoute, options, run, chunk,
+}) {
+  const original = { diff, manifest: [] };
+  let prepared = original;
+  let sizing = initialSizing;
+  let summarised;
+  const contextFor = candidate => extraContext + reviewManifestText(candidate.manifest);
+  return {
+    get prepared() { return prepared; },
+    get sizing() { return sizing; },
+    run: () => retryLargeReview({
+      run: (candidate = original) => {
+        prepared = candidate;
+        const context = contextFor(candidate);
+        sizing = resolveRoute(candidate.diff, context);
+        if (sizing.oversized) {
+          throw new ReviewerPromptTooLargeError(`prompt size=${sizing.promptBytes} maxBytes=${sizing.maxBytes}`);
+        }
+        const { reviewerModel, ...reviewOptions } = options();
+        return run(reviewerModel, candidate.diff, context, reviewOptions);
+      },
+      summarise: async () => {
+        if (Buffer.byteLength(diff, 'utf8') < REVIEW_SUMMARISATION_MIN_BYTES) return prepared;
+        if (!summarised) {
+          const baseSha = await resolveReviewBaseSha({ repo, prNumber, headSha });
+          const generatedPaths = await loadReviewGeneratedPaths({ repo, baseSha });
+          summarised = await summariseReviewDiff({ diff, repo, generatedPaths, baseSha, headSha, cwd: resolveCwd() });
+        }
+        prepared = summarised;
+        return prepared;
+      },
+      chunk: candidate => chunk(candidate.diff, contextFor(candidate), {
+        ...options(), promptBytes: sizing.promptBytes, maxBytes: sizing.maxBytes,
+      }),
+    }),
+  };
+}

@@ -17,21 +17,21 @@ const identity = { repo: 'fixture/repo', prNumber: 21, headSha: 'a'.repeat(40) }
 const now = '2026-10-27T00:00:00Z';
 const owner = 'synthetic-closer';
 const cases = [
-  ['canonical wins', { HQ_LAUNCH_REQUEST_ID: owner, AGENT_OS_WORKER_LRQ_ID: 'other', LAUNCH_REQUEST_ID: 'third' }, owner],
-  ['worker fallback wins', { AGENT_OS_WORKER_LRQ_ID: owner, LAUNCH_REQUEST_ID: 'other' }, owner],
-  ['legacy fallback', { LAUNCH_REQUEST_ID: owner }, owner],
-  ['missing identity', {}, null],
-  ['different owner', { AGENT_OS_WORKER_LRQ_ID: 'successor' }, 'successor'],
-  ['worker fallback overrides JSON', { AGENT_OS_WORKER_LRQ_ID: owner }, owner, { launchRequestId: 'input-launch' }],
-  ['legacy fallback overrides JSON', { LAUNCH_REQUEST_ID: owner }, owner, { launchRequestId: 'input-launch' }],
-  ['JSON identity retained without environment identity', {}, 'input-launch', { launchRequestId: 'input-launch' }],
-  ['JSON matching owner cannot authorize release', {}, owner, { launchRequestId: owner }],
-  ['worker fallback with mapped terminal remediation', { AGENT_OS_WORKER_LRQ_ID: owner }, owner, { reason: 'github-gate-read-failed' }, true],
-  ['legacy fallback with mapped terminal remediation', { LAUNCH_REQUEST_ID: owner }, owner, { reason: 'github-gate-read-failed' }, true],
+  ['canonical wins', { HQ_LAUNCH_REQUEST_ID: owner, AGENT_OS_WORKER_LRQ_ID: 'other', LAUNCH_REQUEST_ID: 'third' }, owner, true],
+  ['worker fallback wins', { AGENT_OS_WORKER_LRQ_ID: owner, LAUNCH_REQUEST_ID: 'other' }, owner, true],
+  ['legacy fallback', { LAUNCH_REQUEST_ID: owner }, owner, true],
+  ['missing identity', {}, null, false],
+  ['different owner', { AGENT_OS_WORKER_LRQ_ID: 'successor' }, 'successor', false],
+  ['worker fallback overrides JSON', { AGENT_OS_WORKER_LRQ_ID: owner }, owner, true, { launchRequestId: 'input-launch' }],
+  ['legacy fallback overrides JSON', { LAUNCH_REQUEST_ID: owner }, owner, true, { launchRequestId: 'input-launch' }],
+  ['JSON identity retained without environment identity', {}, 'input-launch', false, { launchRequestId: 'input-launch' }],
+  ['JSON matching owner cannot authorize release', {}, owner, false, { launchRequestId: owner }],
+  ['worker fallback with mapped terminal remediation', { AGENT_OS_WORKER_LRQ_ID: owner }, owner, true, { reason: 'github-gate-read-failed' }, true],
+  ['legacy fallback with mapped terminal remediation', { LAUNCH_REQUEST_ID: owner }, owner, true, { reason: 'github-gate-read-failed' }, true],
 ];
 
 for (const command of ['init', 'append']) {
-  for (const [name, environment, expectedId, context = {}, terminalRemediation = false] of cases) {
+  for (const [name, environment, expectedId, expectRelease, context = {}, terminalRemediation = false] of cases) {
     test(`ama-audit ${command}: ${name} binds metadata and retryable release`, t => {
       const rootDir = mkdtempSync(join(tmpdir(), 'ama-audit-launch-'));
       t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -57,9 +57,7 @@ for (const command of ['init', 'append']) {
       assert.equal(audit.attempts.at(-1).outcome, 'deferred');
       assert.equal(audit.status, 'deferred');
       const receipt = readAmaCloserLease(rootDir, identity);
-      const environmentId = environment.HQ_LAUNCH_REQUEST_ID
-        || environment.AGENT_OS_WORKER_LRQ_ID || environment.LAUNCH_REQUEST_ID;
-      if (environmentId === owner) {
+      if (expectRelease) {
         assert.equal(receipt.status, 'terminal');
         assert.equal(receipt.terminalOutcome, `retryable-${reason}`);
         assert.equal(receipt.lrqId, owner);

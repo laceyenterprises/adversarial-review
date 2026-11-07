@@ -360,12 +360,15 @@ git diff main...HEAD | npm run --silent review:standalone -- \
 | `--base-url <url>` | Point at a gateway or compatible endpoint. |
 | `--stage`, `--prompt-set` | Reviewer prompt stage (`first`, `middle`, `last`) and the set under `prompts/`. |
 | `--max-diff-bytes`, `--timeout-ms` | Refuse oversized diffs (no silent truncation); bound the request. |
+| `--max-output-tokens <n>` | Reply budget, including any hidden reasoning (default 8192). A reply cut off at this limit exits `2`; raise it for reasoning models. |
 | `--json` | Print `{ verdict, review, provider, model }`. |
 
-The same command is available as `node src/cli.mjs standalone ...`. Exit
-code `0` means approved or comment-only, `1` means request-changes, and `2`
-means a usage, provider or reply-contract failure. An unreadable or
-incomplete reply never reads as a pass.
+The same command is available as `node src/cli.mjs standalone ...` or, from
+an installed package, `adversarial-review standalone ...` (bin links and other
+symlinks to `src/cli.mjs` work). Exit code `0` means approved or comment-only,
+`1` means request-changes, and `2` means a usage, provider, reply-contract or
+any other failure. An unreadable, truncated or incomplete reply never reads as
+a pass, and an unexpected error never reads as request-changes.
 
 Notes:
 
@@ -375,6 +378,14 @@ Notes:
 - The production reviewers authenticate through subscription CLIs and strip
   API keys from their environment on purpose. The standalone path is
   separate and does the opposite: it uses the key you export.
+- The model sees only the diff. It has no repository access, so the request
+  tells it that context outside the diff is unseen and that issues depending
+  on unseen code are questions, not blocking findings.
+- The diff is wrapped in a tag with a random per-request nonce
+  (`<diff-…>`), so diff text cannot close the subject and pose as
+  instructions.
+- A diff on stdin is refused as soon as it passes `--max-diff-bytes`; the rest
+  of the stream is not read into memory.
 - `src/standalone-review.mjs` imports only `src/kernel/` and Node built-ins;
   `test/standalone-review.test.mjs` pins that, and runs the whole path
   offline against a stub provider.
@@ -4536,6 +4547,8 @@ The ledger receipt distinguishes a proven merge by this run from remediation,
 refusal, cancellation and unknown exits; process success alone proves no merge.
 
 ## Change notes
+
+- ANY-12 final-review remediation: the standalone review hardens its failure modes. A provider body that cannot be read, and any unexpected error in `adversarial-review standalone`, now exit `2` instead of `1` (request-changes). `--max-output-tokens` sets the reply budget (default 8192), and a reply cut off at the limit (`stop_reason: max_tokens`, `finish_reason: length`) is reported as truncation instead of an empty or partial review. The request states that the model sees only the diff, and the diff sits between per-request nonce tags it cannot close. A stdin diff is refused as soon as it passes `--max-diff-bytes`. The CLI's main-module check resolves symlinks, so the npm bin link no longer exits `0` without doing anything. Offline tests cover each case.
 
 - ANY-12: adversarial-review stands alone. Added a `NOTICE` (Lacey Enterprises LLC; the Apache-2.0 `LICENSE` is unchanged and now pinned by a test), a standalone `src/standalone-review.mjs` entrypoint (`npm run review:standalone`, or `adversarial-review standalone`) that reviews one diff through an Anthropic or OpenAI API key using only the kernel prompt, reply and verdict contracts, and a README install-and-run section. The path is additive: no existing entrypoint, config key or default changed, and it imports no daemon, config or host module. Offline tests drive it with a stub provider.
 

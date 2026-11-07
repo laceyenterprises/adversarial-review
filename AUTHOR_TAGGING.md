@@ -9,8 +9,7 @@
 > you want to understand how the running pipeline is wired; ignore it if
 > you're just sending a PR.
 
-Inside the maintainer's deployment, every PR is opened by one of three
-known worker classes, and the watcher routes reviewer selection off the
+Inside the maintainer's deployment, agent-built PRs use known worker classes, and the watcher routes reviewer selection off the
 title prefix at PR-creation time. Because that routing decision is made
 once and is not re-evaluated on retitle, the prefix has to be right the
 first time — hence the strict validation.
@@ -28,6 +27,12 @@ first time — hence the strict validation.
 | Claude Code | `[claude-code]` | email contains `claude` or `clio@laceyenterprises.com` |
 | Codex (Clio-delegated) | `[codex]` | email contains `codex` |
 | Clio sub-agent | `[clio-agent]` | `clio@laceyenterprises.com` |
+
+Grok builders use `[grok]`. Their default reviewer is Codex and their remediator is
+`remediator-codex`; availability fallback may select an eligible non-Grok lane or
+defer. Grok acting lanes are not enabled by this routing contract. A closer
+wrapper such as `[hammer] [grok]` retains Grok as the original builder family; a
+closer prefix alone supplies no builder provenance.
 
 ## Placement
 

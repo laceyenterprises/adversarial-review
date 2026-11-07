@@ -17,7 +17,6 @@ import {
 } from './fleet-quota-status.mjs';
 import {
   REVIEWER_ROUTE_BY_MODEL as REVIEWER_ROUTE_TABLE_BY_MODEL,
-  isCrossModelReviewWaived,
   reviewerRefusesBuilder,
 } from './adapters/subject/github-pr/routing.mjs';
 
@@ -96,7 +95,7 @@ export function violatesWriterDiversity(authorClass, candidateWorkerClass) {
   if (author && candidate === author) return true;
   const reviewerModel = reviewerModelForWorkerClass(candidate);
   if (!reviewerModel) return true;
-  return isCrossModelReviewWaived(author, reviewerModel);
+  return reviewerRefusesBuilder(author, reviewerModel);
 }
 
 // ENTITLEMENT — "spilling onto a class that cannot boot converts a slow queue

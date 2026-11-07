@@ -52,11 +52,26 @@ export function summarizeFindingBacklog(db, now = Date.now()) {
       sum(outcome='applied') AS applied,sum(outcome='dropped') AS dropped
       FROM finding_backlog WHERE outcome IS NOT NULL AND resolved_at IS NOT NULL
       GROUP BY day ORDER BY day DESC`).all();
+    // A store not yet migrated by the watcher reports progress as null rather
+    // than losing the whole summary.
+    const requeue = Boolean(db.prepare("SELECT 1 FROM pragma_table_info('finding_batches') WHERE name='released_at'").get());
     const batchErrors = db.prepare(`SELECT error,count(*) AS count FROM finding_batches
-      WHERE completed_at IS NULL AND error IS NOT NULL GROUP BY error ORDER BY error`).all();
+      WHERE completed_at IS NULL ${requeue ? 'AND released_at IS NULL' : ''} AND error IS NOT NULL GROUP BY error ORDER BY error`).all();
+    // Drain progress: open = unbatched + batched + stranded. Stranded findings
+    // sit in an unsettled batch with an error; release returns them to the
+    // queue (retrying) or drops them as exhausted. Drained means open is 0.
+    const counts = requeue && db.prepare(`SELECT sum(b.outcome IS NULL) AS open,
+      sum(b.outcome IS NULL AND b.batch_id IS NULL) AS unbatched,
+      sum(b.outcome IS NULL AND b.batch_id IS NOT NULL AND a.error IS NULL) AS batched,
+      sum(b.outcome IS NULL AND b.batch_id IS NOT NULL AND a.error IS NOT NULL) AS stranded,
+      sum(b.outcome IS NULL AND b.batch_attempts > 0) AS retrying,
+      sum(b.outcome='dropped' AND b.reason LIKE 'batch-retry-exhausted:%') AS exhausted
+      FROM finding_backlog b LEFT JOIN finding_batches a ON a.batch_id=b.batch_id`).get();
+    const progress = counts ? { ...Object.fromEntries(Object.entries(counts).map(([key, value]) => [key, value || 0])),
+      releasedBatches: db.prepare('SELECT count(*) AS n FROM finding_batches WHERE released_at IS NOT NULL').get().n } : null;
     return { available: true, areas, ...open, unbatchedCount: open.unbatchedCount || 0,
       oldestOpenAgeMs: open.oldestOpenAt ? Math.max(0, now - Date.parse(open.oldestOpenAt)) : 0,
-      perDay, batchErrors };
+      perDay, batchErrors, progress };
   } catch (error) { return { available: false, error: error.message, areas: null }; }
 }
 
@@ -68,7 +83,7 @@ export function findingBacklogAlert(backlog, maxAgeMs = 48 * 3600000) {
     subject: 'Non-blocking findings backlog is overdue',
     message: `${backlog.openCount} open findings; oldest is ${Math.floor(backlog.oldestOpenAgeMs / 3600000)} hours old`,
     evidence: [`oldestOpenAt=${backlog.oldestOpenAt}`, `maxAgeMs=${maxAgeMs}`],
-    recommendedAction: 'Inspect batch errors, repair failed launches, and run the operator findings batch backfill.',
+    recommendedAction: 'Inspect progress and batch errors; ended batches release automatically. Run the operator findings batch backfill to re-batch released findings.',
     details: { ...backlog, maxAgeMs },
   };
 }

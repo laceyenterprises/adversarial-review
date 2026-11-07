@@ -47,7 +47,8 @@ Gate readers never parse reply artifacts or execute reproduction commands.
 **Source of truth:** `src/review-finding-records.mjs`,
 `src/finding-commit-attribution.mjs`, `src/finding-remediation-capture.mjs`,
 `src/findings-backlog.mjs`, `src/findings-batch.mjs`,
-`migrations/20261024_simplicity_batch_lifecycle.sql`
+`migrations/20261024_simplicity_batch_lifecycle.sql`,
+`migrations/20261107_findings_batch_requeue.sql`
 
 `review_findings` stores each blocking and non-blocking finding from first-pass
 and rereview bodies using the existing kernel parser. Remediation comments and
@@ -231,6 +232,44 @@ completion time where available, while historical lifecycle drops with no dated
 receipt remain undated. Outcome transitions maintain this timestamp. Historical
 empty completed manifests become unresolved `batch-zero-outcomes` errors.
 
+FINDINGSREQUEUE-01 migration `20261107_findings_batch_requeue.sql` adds
+`finding_backlog.batch_attempts` (failed batch attempts, default 0),
+`finding_batches.launched_at`, `released_at` and `release_reason`, and the audit
+table `finding_batch_releases(finding_id, batch_id, attempt, reason,
+disposition, released_at)`, where `disposition` is `requeued` or `exhausted`.
+Re-applying it is safe. Existing rows keep their values; a pre-migration batch
+has no `launched_at` and ages from its claim `day`.
+
+### Releasing batches whose launch ended (FINDINGSREQUEUE-01)
+
+A batch is released when every launch under its `findings-batch-<batch-id>`
+key (preparation and any publisher) is terminal in the launch ledger and either:
+
+- settlement failed with an error that cannot clear after the launch ended:
+  `batch-push-evidence-missing`, `batch-push-evidence-mismatch`,
+  `batch-preparation-failed`, `batch-branch-missing`,
+  `batch-publish-ended-without-pr: <status>`, `batch-publish-receipt-mismatch`,
+  `batch-launch-evidence-mismatch`, `batch-publish-reused-decision-launch`,
+  `invalid-batch-manifest`, `invalid-advisory-manifest`,
+  `invalid-advisory-outcome` or `batch-outcome-too-large`; or
+- the batch is still unsettled, with any error or with no outcomes artifact, more
+  than `ADVERSARIAL_FINDINGS_BATCH_TIMEOUT_MS` (default 86400000, 24 hours) after
+  `launched_at`. In this case a ledger that proves no keyed launch exists also
+  counts as ended.
+
+A live keyed launch, or ledger evidence that cannot be read, leaves the batch
+untouched. A batch waiting on its open, marked PR has no error and is never
+released. Release runs in one transaction. Each still-open finding gets
+`batch_attempts + 1` and an audit row naming the old batch and reason, then
+returns to the queue with `batch_id` cleared. On its third attempt it is instead
+dropped with `batch-retry-exhausted: <last error>`. The batch keeps its
+`error`, launch ID and artifacts. It gets `released_at` and `release_reason` and
+leaves the collection queue. Its advisory notes, which never gate anything, are
+retired with `dropped_reason = 'batch-released: <reason>'`. The next claim pass
+re-batches the findings. A re-batched finding hashes its attempt number into the
+manifest, so the retry gets a fresh batch ID, artifact directory and dispatch
+idempotency key, and never collides with the released batch.
+
 An immediate SQLite transaction assigns **all** unassigned findings from confirmed
 merged source PRs to capped batches. Severity (`critical`/P0, `high`/P1,
 `medium`/P2, `low`/P3) sorts first where supplied, then capture age and ID;
@@ -277,9 +316,11 @@ ledger must independently bind that launch to the repository and ticket. Status
 projection (`status: pushed`, `reason: branch_pushed`), which does not guarantee a
 `branch_pushed` milestone in dispatch status. The collector therefore checks the
 remote branch SHA against the reported tested head, or recovers the marked PR.
-An explicit unsuccessful milestone still refuses publication, as does failed or
-unknown terminal preparation. Missing milestones alone no longer discard a
-successful push. It looks for PRs on that branch across all states before inspecting the
+Dispatch status fills every unobserved milestone as `not_started` and does not
+re-probe a decision-only launch when it exits, so a real push can show any
+non-`done` value. Since FINDINGSREQUEUE-01 the milestone value is not consulted
+at all; the remote tested head is the push evidence. Failed or unknown terminal
+preparation still refuses publication. It looks for PRs on that branch across all states before inspecting the
 remote ref, preserving branch slashes and percent-encoding each path segment. One
 same-repository PR with the exact marker is bound through ordinary settlement;
 an unmerged close stays unresolved and never starts another publisher. Foreign,
@@ -302,7 +343,8 @@ intent, `publish.lock` inode, and `publish-prompt.md` beside the outcomes artifa
 These are collector recovery artifacts; the outcome schema and SQLite schema do
 not change. Failed or uncertain publication requires repairing the existing
 launch/intent after proving its state, rather than resetting the batch ID/key or
-starting a fresh branch. No automatic timeout releases that fence.
+starting a fresh branch. Once every keyed launch has ended, the
+FINDINGSREQUEUE-01 release path above returns the findings to the queue instead.
 
 The publisher reuses the pushed branch and checks for an existing PR again,
 opens the single PR through `hq pr open --spec-ref none` with the exact batch
@@ -327,8 +369,8 @@ completion records the live PR head and outcome, without granting merge authorit
 `result_pr` (null for dropped findings). Batch failures retain `error` until valid manifest and batch PR
 evidence is confirmed, at which point even an unmerged PR clears the stale error
 when it is not yet eligible to settle. Failures never discard findings or blindly repeat a
-preparation/publication phase. Diagnose a missing artifact or failed worker before
-repairing its existing batch; no automatic timeout releases its fence.
+preparation/publication phase within a batch. After the batch's launches end, the
+release path re-batches the findings under a bounded attempt count.
 
 `pipeline-health` JSON includes `nonBlockingBacklog`; the read-only local CLI is
 `node bin/review-findings.mjs backlog --db <existing-review-db>`. Each unresolved
@@ -358,13 +400,28 @@ Worker drops use `reason: "<code>: <justification line>"`, with code restricted 
 `out-of-scope-with-ticket`, or `false-positive`. The worker must describe the
 current-main evidence; lack of time is not a drop. Already-fixed drops additionally
 require an independently fetched merged fix PR; out-of-scope drops must cite a
-ticket or ticket URL. Incomplete, duplicate, foreign, blank or invalid outcomes
-leave the entire batch unresolved. Empty finding/advisory manifests fail instead
-of completing. Advisory-only applied/declined manifests remain supported.
+ticket or ticket URL. Incomplete, duplicate or foreign manifest IDs leave the
+entire batch unresolved (`invalid-batch-manifest`). Since FINDINGSREQUEUE-01 a
+single bad outcome no longer errors the batch. A legacy drop reason written
+before this vocabulary maps to the current code only when the code is exact and
+justified. That covers spelling variants such as `False positive - <why>`,
+`Stale: <why>` or `already fixed in #23: <why>`, plus the lifecycle codes
+`superseded-final-review` and `pr-closed-without-merge`. Any other drop reason,
+any outcome other than `applied`/`dropped`, a blank reason, or an out-of-scope
+drop with no ticket returns that finding to the queue for re-verification. This
+counts as an attempt and is recorded in `result_json.requeued`. The rest of the
+batch settles normally, and such a claim is never published as applied. An
+unverified already-fixed PR still holds the batch. Empty finding/advisory
+manifests fail instead of completing. Advisory-only applied/declined manifests remain supported.
 
 Health also exposes finding-only `openCount`, `unbatchedCount`, `oldestOpenAt`,
 `oldestOpenAgeMs`, `perDay` (applied/dropped by UTC resolution date), and aggregated
-unresolved `batchErrors`. `review:findings_backlog_overdue` enters the existing
+unresolved `batchErrors` (released batches excluded), plus the drain view
+`progress`: `open` (= `unbatched` + `batched` + `stranded`), `unbatched`, `batched`
+(in an unsettled batch with no error), `stranded` (in an unsettled batch with an
+error), `retrying` (open after at least one release), `exhausted` (dropped with
+`batch-retry-exhausted:`) and `releasedBatches`. The drain is complete when `open`
+is 0. `review:findings_backlog_overdue` enters the existing
 pipeline-health/Sentinel findings path when oldest open age exceeds
 `ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS` (default 172800000, 48 hours).
 This is an operational alert, with no additional merge or CI gate.

@@ -986,49 +986,13 @@ Before building claim/predicate inputs, run `source "<<RUN_DIR>>/hammer-merge.sh
 
 On success, refresh all exact-head inputs below. If the wait's bounded base retry changed `POST_REMEDIATION_SHA`, re-source `hammer-publish.sh` under the reacquired lease to publish the new head's audit before constructing the predicate. Phase head variables are exported for child processes.
 
+Run this block verbatim; never re-type its reads. The helper writes `pr-after.json`, `reviews.json`, `protection.json`, `timeline.json` and `commit.json` for `$POST_REMEDIATION_SHA`, retrying transient failures in place. Exit 75 is a retryable closure deferral (not final for this head); exit 1 prints its named refusal.
+
 ```bash
 export HAM_PROCEDURE_STEP=predicate-input-refresh
 HAM_PHASE_OUTCOME=predicate-input-refresh-failed
-ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > "$HAM_RUN_DIR/pr-after.json"
-ham_pr --json reviews > "$HAM_RUN_DIR/reviews.json"
-
-base_enc=$(printf '%s' "$(jq -r '.baseRefName' "$HAM_RUN_DIR/pr-after.json")" | jq -sRr @uri)
-protection_err="$HAM_RUN_DIR/protection.stderr"
-trap 'rm -f "$protection_err"; ham_release_merge_lease' EXIT
-# HAMBG-02: GitHub's live wording. A private repo on the free plan answers
-# "Upgrade to GitHub Pro or make this repository public to enable this
-# feature. (HTTP 403)"; a repo with no protection answers "Branch not
-# protected (HTTP 404)". ama-check classifies both inputs written below.
-protection_plan_unavailable_re='branch protection.*(not available|upgrade|plan)|upgrade.*branch protection|protected branches.*(not available|upgrade|plan)|upgrade to github pro|make this repository public'
-protection_not_protected_re='branch not protected'
-protection_transient_re='Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timed? out|timeout|TLS handshake timeout|connection (reset|refused|aborted)|temporary failure|network is unreachable|rate limit|secondary rate limit|HTTP[ /]5[0-9][0-9]|(^|[^0-9])(500|502|503|504)([^0-9]|$)|bad gateway|service unavailable|gateway timeout|server error'
-protection_attempt=1
-protection_max_attempts=3
-while true; do
-  : > "$protection_err"
-  if ham_gh api "repos/<<REPO>>/branches/$base_enc/protection" > "$HAM_RUN_DIR/protection.json" 2> "$protection_err"; then
-    break
-  fi
-  if grep -Eiq "$protection_plan_unavailable_re" "$protection_err"; then
-    jq -n '{ branchProtectionUnavailable: true, reason: "github_plan" }' > "$HAM_RUN_DIR/protection.json"
-    break
-  fi
-  if grep -Eiq "$protection_not_protected_re" "$protection_err"; then
-    jq -n '{ status: "404", message: "Branch not protected" }' > "$HAM_RUN_DIR/protection.json"
-    break
-  fi
-  if [ "$protection_attempt" -lt "$protection_max_attempts" ] && grep -Eiq "$protection_transient_re" "$protection_err"; then
-    echo "branch protection fetch transient failure (attempt $protection_attempt/$protection_max_attempts); retrying" >&2
-    cat "$protection_err" >&2
-    sleep "$protection_attempt"
-    protection_attempt=$((protection_attempt + 1))
-    continue
-  fi
-  cat "$protection_err" >&2
-  exit 1
-done
-ham_gh api "repos/<<REPO>>/issues/<<PR_NUMBER>>/timeline" --paginate > "$HAM_RUN_DIR/timeline.json"
-ham_gh api "repos/<<REPO>>/commits/$POST_REMEDIATION_SHA" > "$HAM_RUN_DIR/commit.json"
+trap 'ham_release_merge_lease' EXIT
+"${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-predicate-inputs.mjs" || exit $?
 ```
 
 Remediate, rebase and validate; reuse an already-fixed head. Keep the range

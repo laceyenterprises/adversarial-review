@@ -2,6 +2,10 @@
 // explicit: a red check, moved head or lost owner must never match by message.
 export const HAMMER_RETRYABLE_READ_OUTCOMES = new Set([
   'git-credential-refresh-failed',
+  // CLOSERGATES-01: an API credential mint that timed out or failed to run,
+  // and a closure gate whose transient read failures outlasted the budget.
+  'credential-refresh-unavailable',
+  'closure-gate-read-unavailable',
   'launch-environment-read-unavailable',
   // HAMMERLAUNCHREAD-01: the same deferral at the closure step, after work.
   'launch-environment-read-unavailable-at-closure',

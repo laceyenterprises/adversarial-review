@@ -208,6 +208,7 @@ import { isHammerWorkerClass } from './hammer-worker-class.mjs';
 import { resolveNodeBin } from '../node-interpreter.mjs';
 import { resolveCloserPassAttempt } from './closer-pass-attempt.mjs';
 import { maybeRearmInfraDeadHammer } from './dead-hammer-rearm.mjs';
+import { CLOSURE_RESUME_FILE, composeClosureResumePrompt, readClosureResume } from './closure-resume.mjs';
 import {
   evaluateHammerStopHold,
   isInfrastructureStop,
@@ -5337,6 +5338,13 @@ async function maybeDispatchAmaCloserAttempt({
   }
   if (!queueCloser && orphanAdmit && useHammerTerminalRemediationPrompt) prompt += '\nREMORPHAN-01 owner-of-last-resort pass: rebase, remediate all current findings, validate CI, and merge only under your own lease with every ordinary merge predicate satisfied. Primary-line edits require per-finding Reversal-Authorized-By trailers in the HAMINTENT-03 format described above, verified required-guard reversal authority as described above, or restoration of the reverted lines. If the closer-authored head cannot be re-certified, use the exact-head re-review path; never waive primary-change or CI gates.\n';
 
+  // CLOSERGATES-01: a previous hammer pushed and validated this exact head,
+  // then exhausted a transient closure gate. This launch runs only the closure
+  // gates and the merge. A moved head has no receipt (the audit is per head).
+  const closureResume = !queueCloser && isHammerWorkerClass(workerClass)
+    ? readClosureResume({ hqRoot, repo, prNumber, headSha: targetRemediationSha }) : null;
+  if (closureResume) prompt += composeClosureResumePrompt(closureResume);
+
   const reviewedHeadDispatchIdentity = { repo, prNumber, headSha: dispatchRecordHeadSha };
   const targetDispatchIdentity = { repo, prNumber, headSha: targetRemediationSha };
   const auditIdentity = { repo, prNumber, headSha: reviewedSha };
@@ -7624,6 +7632,8 @@ async function maybeDispatchAmaCloserAttempt({
     writeFileSync(join(scratchDir, `${phase}.sh`), renderHammerProcedure(phase, procedureValues),
       { encoding: 'utf8', mode: 0o600, flag: 'wx' });
   }
+  if (closureResume) writeFileSync(join(scratchDir, CLOSURE_RESUME_FILE), `${JSON.stringify(closureResume, null, 2)}\n`,
+    { encoding: 'utf8', mode: 0o600, flag: 'wx' });
   if (queueCloser) {
     try { prompt = renderQueueCloserPrompt(procedureValues, queueCloser) + prompt; }
     catch (error) {
@@ -7654,6 +7664,8 @@ async function maybeDispatchAmaCloserAttempt({
       workerClass,
       dispatchWorkerClass,
       ...(osgRemediatorRoute.osg ? { osgRemediator: osgRemediatorRoute.osg } : {}),
+      ...(closureResume ? { closureResume: { validatedHead: closureResume.validatedHead,
+        gate: closureResume.gate, launchRequestId: closureResume.launchRequestId } } : {}),
       workerId,
       promptPath,
       promptDir,

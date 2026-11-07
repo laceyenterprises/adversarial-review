@@ -1,15 +1,12 @@
-// Runs the hammer prompt's branch-protection fetch loop, verbatim from
-// templates/hammer-prompt.md, against a stub `gh` that answers with the given
-// stdout, stderr and exit code. HAMBG-02: the loop has to turn GitHub's real
-// answers into a protection file that ama-check can decide on.
+// Runs the hammer's branch-protection fetch (bin/hammer-predicate-inputs.mjs)
+// against a stub that answers with the given stdout, stderr and exit code.
+// HAMBG-02: the fetch has to turn GitHub's real answers into a protection file
+// that ama-check can decide on.
 
-import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+import { join } from 'node:path';
+import { collectPredicateInputs } from '../../src/ama/predicate-inputs.mjs';
 
 export const GITHUB_PLAN_UNAVAILABLE_STDERR =
   'gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)';
@@ -17,56 +14,33 @@ export const BRANCH_NOT_PROTECTED_STDERR = 'gh: Branch not protected (HTTP 404)'
 export const BRANCH_NOT_PROTECTED_STDOUT =
   '{"message":"Branch not protected","documentation_url":"https://docs.github.com/rest/branches/branch-protection#get-branch-protection","status":"404"}';
 
-export function hammerProtectionFetchScript() {
-  const template = readFileSync(join(REPO_ROOT, 'templates', 'hammer-prompt.md'), 'utf8');
-  const start = template.indexOf('protection_err="$HAM_RUN_DIR/protection.stderr"');
-  if (start < 0) throw new Error('hammer prompt has no protection fetch loop');
-  const end = template.indexOf('\ndone\n', start);
-  if (end < 0) throw new Error('hammer prompt protection fetch loop has no closing done');
-  return template.slice(start, end + '\ndone\n'.length);
-}
+export const FIXTURE_HEAD = 'a'.repeat(40);
 
+// CLOSERGATES-01: the fetch moved from transcribed prompt shell into
+// bin/hammer-predicate-inputs.mjs. Drive its real collector against a stub
+// protection answer, a branch read that finds the base, and a fake clock.
 export function runHammerProtectionFetch({ stdout = '', stderr = '', exitCode = 1 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ham-protection-fetch-'));
   try {
-    const bin = join(dir, 'bin');
-    mkdirSync(bin);
-    const ghStub = join(bin, 'gh');
-    writeFileSync(ghStub, [
-      '#!/bin/sh',
-      'printf \'%s\' "$STUB_GH_STDOUT"',
-      '[ -z "$STUB_GH_STDERR" ] || printf \'%s\\n\' "$STUB_GH_STDERR" >&2',
-      'exit "$STUB_GH_EXIT"',
-      '',
-    ].join('\n'));
-    chmodSync(ghStub, 0o755);
-    const protectionPath = join(dir, 'protection.json');
-    const script = [
-      // Exercise the protection loop against the stub directly. Inheriting the
-      // worker's credential-refresh wrapper would make this offline fixture
-      // refresh real credentials on its deliberate HTTP 401 response.
-      'ham_gh() { gh "$@"; }',
-      `HAM_RUN_DIR='${dir}'`,
-      'base_enc=main',
-      'ham_release_merge_lease() { :; }',
-      hammerProtectionFetchScript()
-        .replaceAll('<<RUN_DIR>>', dir)
-        .replaceAll('<<REPO>>', 'laceyenterprises/example'),
-    ].join('\n');
-    const result = spawnSync('bash', ['-c', script], {
-      cwd: dir,
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        PATH: `${bin}:${process.env.PATH}`,
-        STUB_GH_STDOUT: stdout,
-        STUB_GH_STDERR: stderr,
-        STUB_GH_EXIT: String(exitCode),
+    let at = 0;
+    const clock = { now: () => at, sleep: ms => { at += ms; } };
+    const result = collectPredicateInputs({
+      repo: 'laceyenterprises/example', prNumber: 42, headSha: FIXTURE_HEAD, runDir: dir, clock,
+      readPr: args => args.includes('reviews') ? '{"reviews":[]}'
+        : JSON.stringify({ number: 42, headRefOid: FIXTURE_HEAD, baseRefName: 'main' }),
+      readApi: ([path]) => {
+        if (path.endsWith('/protection')) {
+          if (exitCode === 0) return stdout;
+          throw new Error(stderr);
+        }
+        if (path.endsWith('/branches/main')) return '{"name":"main","protected":true}';
+        return path.includes('/timeline') ? '[]' : '{}';
       },
     });
-    if (result.error) throw result.error;
+    const protectionPath = join(dir, 'protection.json');
     const protectionBody = existsSync(protectionPath) ? readFileSync(protectionPath, 'utf8') : null;
-    return { status: result.status, stderr: result.stderr, protectionBody };
+    return { status: result.ok ? 0 : 1, stderr: result.ok ? '' : `${result.reason}\n${result.detail || ''}`,
+      reason: result.reason, protectionBody };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

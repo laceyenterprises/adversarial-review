@@ -18,6 +18,7 @@ import { readAmaAuditEntry } from './audit.mjs';
 import { HAMMER_RETRYABLE_READ_OUTCOMES } from './hammer-phase-outcome.mjs';
 import { hammerGitOptions } from '../hammer-token.mjs';
 import { reportHammerEarlyFailure } from './hammer-terminal-audit.mjs';
+import { launchReadBackoffMs } from './closure-gate-read.mjs';
 
 // A slow or failed ledger read is not a cancellation. Only a readable terminal,
 // parked or foreign row stops a round at once; reads that fail stop it only
@@ -27,13 +28,8 @@ export const LAUNCH_POLL_MS = 10_000;
 export const LAUNCH_UNREADABLE_GRACE_MS = 120_000;
 // Reads a start, lease or merge step takes before it refuses on unreadable.
 export const LAUNCH_READ_ATTEMPTS = 3;
-// HAMMERLAUNCHREAD-01: a failed read waits before the next one. The lookup
-// fails in bursts, so back-to-back retries land inside the same burst. Each
-// wait is capped by the caller's own budget; this never widens it.
-export const LAUNCH_READ_BACKOFF_MS = Object.freeze([2_000, 5_000, 10_000, 20_000, 30_000]);
-export function launchReadBackoffMs(failures) {
-  return LAUNCH_READ_BACKOFF_MS[Math.min(Math.max(failures, 1), LAUNCH_READ_BACKOFF_MS.length) - 1];
-}
+// HAMMERLAUNCHREAD-01 spacing; CLOSERGATES-01 shares it with every closure gate.
+export { LAUNCH_READ_BACKOFF_MS, launchReadBackoffMs } from './closure-gate-read.mjs';
 // Minimum budget for the controller's fresh-read answer; widened under load.
 export const LAUNCH_GATE_WAIT_MS = 60_000;
 // The public launch reader's nominal timeout, scaled once per read.

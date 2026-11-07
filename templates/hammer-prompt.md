@@ -947,6 +947,12 @@ resolver line. Do not execute past unresolved hand-written conflicts.
 HEAD_BRANCH=$(ham_pr --json headRefName --jq '.headRefName')
 ham_bounded_git_sync "$BASE_BRANCH" "$HEAD_BRANCH"
 git checkout "$HEAD_BRANCH"
+# HAMEMPTYPRIMARY-01: capture the fetched source before replay. For a
+# conflict-only repair of the reviewed head, retain author messages/identity;
+# never squash or amend the author change into a HAM-classified commit.
+HAM_CONFLICT_SOURCE=$(git rev-parse HEAD) || exit 1
+HAM_CONFLICT_BASE=$(git rev-parse "origin/$BASE_BRANCH") || exit 1
+[ "$HAM_CONFLICT_SOURCE" = "$(git rev-parse "origin/$HEAD_BRANCH")" ] || exit 1
 if ! git rebase "origin/$BASE_BRANCH"; then
   # Merge and stage hand-written sources first, preserving both sides' intent.
   # Leave registered generated outputs to the shared GENCONFLICT-01 resolver;
@@ -955,6 +961,13 @@ if ! git rebase "origin/$BASE_BRANCH"; then
   # per commit. If any source conflict remains, or generation fails, it aborts
   # and removes this worktree. Stop and report the emitted reason on failure.
   hq generated-conflicts resolve --worktree "$PWD" || exit 1
+fi
+# Only the conflict-only reviewed-head replay uses this proof. Remediation
+# heads retain their existing full-range findings/preservation validation.
+if [ "$HAM_CONFLICT_SOURCE" = "<<REVIEWED_SHA>>" ]; then
+  /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-conflict-primary.mjs" \
+    "<<REVIEWED_SHA>>" "$HAM_CONFLICT_SOURCE" "$HAM_CONFLICT_BASE" \
+    > "<<RUN_DIR>>/conflict-primary.json" || exit 1
 fi
 # SUBSYNC-01: the rebase moved gitlinks but not submodule checkouts.
 # This block can run in a fresh shell, so default the cap here: an unset cap makes

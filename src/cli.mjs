@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { main as pipelineHealthMain } from './review-pipeline-health-cli.mjs';
@@ -20,6 +21,7 @@ import {
 
 const USAGE = `\
 Usage:
+  adversarial-review standalone --provider <anthropic|openai> --model <id> (--diff <file|-> | --base <git-ref>) [--json]
   adversarial-review pipeline-health [--root <dir>] [--json | --prometheus | --sentinel]
   adversarial-review latency report [--root <dir>] [--since <24h>] [--json]
   adversarial-review reconcile-terminal [--root <dir>] [--cap <n>] [--json]
@@ -151,6 +153,22 @@ function handoffMain(argv, io = {}) {
 
 async function main(argv, io = {}) {
   const [command, ...rest] = argv;
+  if (command === 'standalone') {
+    // Lazy import: the standalone path is kernel-only and must not pull in, or
+    // be affected by, the production daemon graph.
+    //
+    // Its exit code is its verdict (1 = request-changes), so an unexpected
+    // failure must exit 2 here rather than fall through to the generic
+    // top-level handler's 1.
+    try {
+      const { standaloneMain } = await import('./standalone-review.mjs');
+      return await standaloneMain(rest, io);
+    } catch (error) {
+      const stderr = io.stderr || process.stderr;
+      stderr.write(`error: standalone review failed: ${error?.message || error}\n`);
+      return 2;
+    }
+  }
   if (command === 'reset-pr') {
     return resetPrMain(rest, io);
   }
@@ -219,7 +237,20 @@ async function main(argv, io = {}) {
   return 2;
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// Compare real paths: the package bin link (npm i -g, npx,
+// node_modules/.bin) or a symlinked checkout makes process.argv[1] a symlink
+// while import.meta.url is already resolved. A plain string compare would
+// skip main() and exit 0 with no output.
+function isMainModule() {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) {
   main(process.argv.slice(2)).then((code) => {
     process.exitCode = code;
   }).catch((err) => {

@@ -2,6 +2,7 @@ import { reportHammerEarlyFailure } from './ama/hammer-terminal-audit.mjs';
 import { execFileSync } from 'node:child_process';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { fileURLToPath } from 'node:url';
+import { readClosureGateSync } from './ama/closure-gate-read.mjs';
 
 const ENTITLED_VARS = ['HAMMER_LACEY_GH_TOKEN', 'MERGE_AGENT_GH_TOKEN'];
 
@@ -44,6 +45,16 @@ const EXPIRY_MARGIN_MS = 10 * 60 * 1000;
 function expiresLater(expiresAt, now = Date.now()) {
   const at = /^\d{4}-\d{2}-\d{2}T/.test(expiresAt || '') ? Date.parse(expiresAt) : NaN;
   return Number.isFinite(at) && at - now > EXPIRY_MARGIN_MS;
+}
+
+// CLOSERGATES-01: the Git credential helper's in-place mint retry window.
+export const CREDENTIAL_MINT_BUDGET_MS = 7_000;
+// A mint that timed out or whose command failed is an infrastructure deferral
+// the caller may retry; invalid output stays a definitive refusal.
+export const CREDENTIAL_REFRESH_UNAVAILABLE = 'credential-refresh-unavailable';
+function mintFailureReason(error) {
+  return /\((timeout or signal|command error)\)$/.test(error?.refreshOutcome || '')
+    ? CREDENTIAL_REFRESH_UNAVAILABLE : 'credential-refresh-failed';
 }
 
 let warnedProactiveFailure = false;
@@ -168,6 +179,17 @@ export function hammerTokenSession(options = {}) {
     warnedProactiveFailure = false;
     return parsed;
   }
+  // CLOSERGATES-01: a mint that timed out or whose command failed is retried in
+  // place with spaced backoff inside a short budget. Invalid output and a
+  // missing command are definitive and never retried.
+  function refreshWithRetry(timeout = 10_000) {
+    let last;
+    const result = readClosureGateSync(() => {
+      try { return refresh(timeout); } catch (error) { last = error; throw error; }
+    }, { budgetMs: CREDENTIAL_MINT_BUDGET_MS });
+    if (result.ok) return result.value;
+    throw last;
+  }
   // Redaction returns the same object, minus secrets: callers route retries and
   // failures from its code, signal and status. A spawn-level child error (a
   // timeout or missing binary) is its own `.error`, so visited objects are
@@ -222,7 +244,7 @@ export function hammerTokenSession(options = {}) {
     gitCredential() {
       try {
         if (!command) throw failure('unavailable (no launch refresh command)');
-        return refresh()?.token;
+        return refreshWithRetry()?.token;
       } catch {
         reportHammerEarlyFailure(GIT_CREDENTIAL_REFRESH_FAILED, { env: credentialEnv });
         throw new Error(GIT_CREDENTIAL_REFRESH_FAILED);
@@ -252,13 +274,13 @@ export function hammerTokenSession(options = {}) {
       if (forced) {
         forced = false;
         try { refresh(refreshTimeout); } catch (error) {
-          reportHammerEarlyFailure('credential-refresh-failed', { env: credentialEnv });
+          reportHammerEarlyFailure(mintFailureReason(error), { env: credentialEnv });
           throw error;
         }
       } else if (!held || !expiresLater(expiresAt)) {
         try { refresh(refreshTimeout); } catch (error) {
           if (!held) {
-            reportHammerEarlyFailure('credential-refresh-failed', { env: credentialEnv });
+            reportHammerEarlyFailure(mintFailureReason(error), { env: credentialEnv });
             throw error;
           }
           warnProactiveFailure(error.refreshOutcome);

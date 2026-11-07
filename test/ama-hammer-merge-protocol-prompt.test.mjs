@@ -261,7 +261,10 @@ test('hammer terminal evidence producers and predicate inputs use the private ru
     assert.ok(HAMMER_TEMPLATE.includes(`--ham-${suffix} "$HAM_RUN_DIR/${suffix}.json"`));
     assert.ok(!HAMMER_TEMPLATE.includes(`/tmp/ham-<<PR_NUMBER>>-${suffix}.json`));
   }
-  assert.ok(HAMMER_TEMPLATE.includes('> "$HAM_RUN_DIR/commit.json"'));
+  // CLOSERGATES-01: the deployed helper writes commit.json (and the other
+  // predicate inputs) into the run directory.
+  assert.match(HAMMER_TEMPLATE, /bin\/hammer-predicate-inputs\.mjs" \|\| exit \$\?/);
+  assert.ok(HAMMER_TEMPLATE.includes('`commit.json` for `$POST_REMEDIATION_SHA`'));
   assert.ok(HAMMER_TEMPLATE.includes('Write `$HAM_RUN_DIR/terminal-remediation.json`'));
 });
 
@@ -463,12 +466,11 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
     /jq -er 'if \(\.needsRevalidation \| type\) == "boolean" then \.needsRevalidation else true end'/,
   );
   assert.doesNotMatch(HAMMER_PROMPT, /jq[^\n]*\.needsRevalidation\s*\/\/\s*true/);
-  assert.match(HAMMER_PROMPT, /protection_plan_unavailable_re=/);
-  assert.match(HAMMER_PROMPT, /branchProtectionUnavailable: true, reason: "github_plan"/);
-  assert.match(HAMMER_PROMPT, /protection_not_protected_re='branch not protected'/);
-  assert.match(HAMMER_PROMPT, /jq -n '\{ status: "404", message: "Branch not protected" \}'/);
-  assert.match(HAMMER_PROMPT, /2> "\$protection_err"/);
-  assert.match(HAMMER_PROMPT, /trap 'rm -f "\$protection_err"; ham_release_merge_lease' EXIT/);
+  // CLOSERGATES-01: protection classification lives in the deployed helper;
+  // the prompt runs it verbatim and never re-types its reads.
+  assert.doesNotMatch(HAMMER_PROMPT, /protection_plan_unavailable_re=|repos\/[^"]*\/branches\/\$base_enc\/protection/);
+  assert.match(HAMMER_PROMPT, /Run this block verbatim; never re-type its reads\./);
+  assert.match(HAMMER_PROMPT, /trap 'ham_release_merge_lease' EXIT\n"\$\{HAM_NODE_BIN:-node\}" "[^"]*\/bin\/hammer-predicate-inputs\.mjs"/);
   assert.doesNotMatch(HAMMER_PROMPT, /\|\s*IN\(/);
   assert.match(HAMMER_PROMPT, /summarizeChecksConclusion\(pr\.statusCheckRollup\) === 'SUCCESS'/);
   assert.doesNotMatch(HAMMER_PROMPT, /HAM_PPH_REMOTE_SHA=\$\(printf '%040d' 0\)/);

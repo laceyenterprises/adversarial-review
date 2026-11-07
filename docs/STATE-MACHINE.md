@@ -1203,6 +1203,15 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+CLOSERGATES-01 final remediation keeps repairable conflicts out of terminal
+AMA state: both final and non-final observations count the current head once;
+only a final report after three distinct heads records
+`conflict-repair-exhausted`. Earlier final reports exit 65 for Appendix D;
+non-final reports return without a terminal audit or progress receipt.
+Definitive predicate-input refusals emit `terminal-stop`. Closure-resume
+evidence compares SHA values without case sensitivity. Existing lifecycle
+states, merge predicates and smoke commands are unchanged.
+
 HAMGITTOKEN-01 final remediation routes bounded rebased-head submodule sync
 through the shared Git classifier. Mint failures retain
 `git-credential-refresh-failed` before lease release and follow the existing

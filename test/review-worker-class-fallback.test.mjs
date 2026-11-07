@@ -155,19 +155,25 @@ test('fail-open: malformed fleet-quota status stdout keeps the primary', async (
   assert.match(errors[0], /failing open/);
 });
 
-test('defers rather than selecting a Codex-family reviewer the child refuses', async () => {
-  const result = await resolveReviewerWorkerClassWithFallback({
-    authorClass: 'codex',
-    primary: 'gemini',
-    fallbackWorkerClasses: ['codex'],
-    execFileImpl: fleetStatusStub(GEMINI_EXHAUSTED_CODEX_OK),
+for (const [authorClass, primary, fallbackWorkerClasses, rows] of [
+  ['codex', 'gemini', ['codex'], GEMINI_EXHAUSTED_CODEX_OK],
+  ['clio-agent', 'gemini', ['codex'], GEMINI_EXHAUSTED_CODEX_OK],
+  ['claude-code', 'codex', ['claude', 'claude-code'], CODEX_EXHAUSTED_CLAUDE_OK],
+]) {
+  test(`defers rather than selecting a refused same-family last resort for ${authorClass}`, async () => {
+    const result = await resolveReviewerWorkerClassWithFallback({
+      authorClass,
+      primary,
+      fallbackWorkerClasses,
+      execFileImpl: fleetStatusStub(rows),
+    });
+    assert.equal(result.workerClass, primary);
+    assert.equal(result.fellBack, false);
+    assert.equal(result.reason, 'no-available-fallback');
+    assert.equal(result.quotaBlocked, true);
+    assert.equal(result.primaryState, 'exhausted');
   });
-  assert.equal(result.workerClass, 'gemini');
-  assert.equal(result.fellBack, false);
-  assert.equal(result.reason, 'no-available-fallback');
-  assert.equal(result.quotaBlocked, true);
-  assert.equal(result.primaryState, 'exhausted');
-});
+}
 
 test('retries transient fleet quota status failures with bounded backoff before falling back', async () => {
   const warnings = [];
@@ -518,6 +524,7 @@ test('reviewWorkerClassFallback defaults to a cross-model pair and honors the en
 test('applies fallback route with explicit worker-class precedence and model-key lookup', () => {
   const result = applyReviewerWorkerClassFallbackToRoute({
     route: {
+      builderClass: 'grok',
       reviewerModel: 'codex',
       botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
       reviewerWorkerClass: 'codex',

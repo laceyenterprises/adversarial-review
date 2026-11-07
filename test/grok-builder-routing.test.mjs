@@ -3,7 +3,7 @@ import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildTaggedTitle, builderClassFromTitle, hasCanonicalTaggedTitle } from '../src/adapters/subject/github-pr/title-tagging.mjs';
-import { routeSubject, reviewerRefusesBuilder, normalizeBuilderClass, normalizeReviewerModel, applyGeminiReviewerRoute } from '../src/adapters/subject/github-pr/routing.mjs';
+import { routePR, routeSubject, reviewerRefusesBuilder, normalizeBuilderClass, normalizeReviewerModel, applyGeminiReviewerRoute } from '../src/adapters/subject/github-pr/routing.mjs';
 import { pickRemediationWorkerClass } from '../src/remediation-worker-routing.mjs';
 import { remediationSubjectRefusal, resolveClaimedRemediatorRouting, resolveRemediationWorkerClassWithFallback } from '../src/remediation-worker-class-fallback.mjs';
 import { violatesWriterDiversity } from '../src/review-worker-class-fallback.mjs';
@@ -60,6 +60,25 @@ test('Grok acting aliases are refused before reviewer runtime or account selecti
   assert.equal(result.routingRefusal, true);
   const repaired = applyGeminiReviewerRoute({ builderClass: 'grok', mode: 'off', baseRoute: { reviewerModel: 'grok-api' } });
   assert.equal(repaired.reviewerModel, 'codex');
+});
+
+test('refused or missing configured reviewer models return null through public route entry points', () => {
+  for (const reviewerModel of ['grok-api', 'unknown', undefined]) {
+    for (const applyGeminiReviewerMode of [true, false]) {
+      const options = { env, loaderImpl, geminiReviewerMode: 'off', applyGeminiReviewerMode,
+        routeTable: { grok: { reviewerModel } } };
+      assert.equal(routeSubject({ builderClass: 'grok' }, options), null);
+      assert.equal(routePR('[grok] Synthetic change', null, options), null);
+    }
+  }
+});
+
+test('Claude remediation aliases normalize consistently and retain family refusal', () => {
+  for (const workerClass of ['remediator-claude', 'remediator-claude-corp']) {
+    assert.equal(normalizeReviewerModel(workerClass), 'claude');
+    assert.equal(reviewerRefusesBuilder('claude-code', workerClass), true);
+    assert.equal(reviewerRefusesBuilder('grok', workerClass), false);
+  }
 });
 
 test('Codex outage uses an eligible Claude reviewer or defers under existing AFH policy', () => {

@@ -421,7 +421,9 @@ catches a flapping provider the hard gate misses) — the assigned reviewer cann
 spawn at all, so `src/afh-reviewer-fallback.mjs` walks an ordered fallback:
 current reviewer → the per-tag cross-model primary → Gemini → Claude, skipping
 candidates that would violate the builder-family refusal. Both Claude accounts
-are refused for Claude-family builds, including last-resort fallback. A
+are refused for Claude-family builds, including last-resort fallback.
+Quota-triggered worker-class fallback also enforces family refusal without a
+same-family last resort; it holds when no eligible reviewer is available. A
 `[claude-code]` PR uses Gemini during a Codex outage when Gemini is eligible and
 available; if Gemini is also grounded or disabled, review dispatch holds until
 an eligible cross-model reviewer recovers. Fallback is stateless and
@@ -4559,6 +4561,7 @@ merge predicates and smoke commands remain unchanged.
 
 ## Change notes
 
+- GRK-10 final remediation: refused or missing custom reviewer models return no route without throwing; Claude remediation aliases normalize to their reviewer family. Removed the unreachable same-family last-resort worker fallback and added exhaustion regressions. Author-tagging reference tables and roster expectations now include Grok; the fallback route fixture supplies explicit builder provenance.
 - GRK-10: `[grok]` builder titles route to Codex review and `remediator-codex`. Closer wrappers retain the original builder tag; family checks refuse Grok acting aliases and unknown provenance before dispatch and fallback. Existing availability policy can select an eligible non-Grok fallback or defer. Activation is the companion merge and watcher reload in GRK-16, which also owns the live review/remediation route receipt; no live activation is performed here.
 
 - REVIEWCARRY-01 final remediation: the watcher prefers the named base branch over a possibly stale PR base SHA when proving carry-forward, retaining the SHA fallback when the name is absent. Daemon merges authorized by that proof record `closureAuthority: daemon-review-carry-forward`; existing operator and closer authority precedence is preserved. Offline watcher and daemon regressions cover these cases. Lifecycle states and existing smoke promises are unchanged.

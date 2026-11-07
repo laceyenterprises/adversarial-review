@@ -27,6 +27,7 @@ first time — hence the strict validation.
 | Claude Code | `[claude-code]` | email contains `claude` or `clio@laceyenterprises.com` |
 | Codex (Clio-delegated) | `[codex]` | email contains `codex` |
 | Clio sub-agent | `[clio-agent]` | `clio@laceyenterprises.com` |
+| Grok | `[grok]` | Title tag identifies the builder; no author-email heuristic |
 
 Grok builders use `[grok]`. Their default reviewer is Codex and their remediator is
 `remediator-codex`; availability fallback may select an eligible non-Grok lane or
@@ -55,7 +56,7 @@ redundancy.)
 
 - **Canonical helper path** (build-time / CLI-time): the canonical way
   to open an internal worker-class PR is
-  `npm run pr:create:tagged -- --tag <codex|claude-code|clio-agent> --title "<unprefixed title>" -- <gh args...>`.
+  `npm run pr:create:tagged -- --tag <codex|claude-code|clio-agent|grok> --title "<unprefixed title>" -- <gh args...>`.
   The helper lives in [`src/pr-create-tagged.mjs`](src/pr-create-tagged.mjs)
   and enforces the prefix locally before the PR exists, so human
   operators and dispatched workers never need to remember the tag by
@@ -83,6 +84,7 @@ the builder is never also the reviewer.
 |---|---|---|
 | `[claude-code]` or `[clio-agent]` | `codex-reviewer-lacey` | Codex |
 | `[codex]` | `claude-reviewer-lacey` | Claude Code (claude-sonnet-4-6) |
+| `[grok]` | `codex-reviewer-lacey` | Codex |
 | No tag / unknown | **Fail-loud guardrail** | No reviewer spawned |
 
 The `*-lacey` bot accounts are GitHub identities the maintainer's

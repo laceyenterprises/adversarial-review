@@ -222,6 +222,7 @@ import {
 import {
   evaluateHammerStopHold,
   isInfrastructureStop,
+  canEnrichCiInfrastructureStop,
   HAMMER_TRANSIENT_STOP_HOLD_REASON,
   HAMMER_STOP_HOLD_REASON,
   readHammerStopForHead,
@@ -1482,14 +1483,21 @@ function retireForeignCloserLaunch({ rootDir, repo, prNumber, identity, leaseIde
 export async function releaseRecoveredCiInfrastructureOwner({ rootDir, hqRoot, repo, prNumber,
   prMetadata, reviewedSha, requiredCheckContexts = [], excludeContexts = [], now = new Date().toISOString(),
   readLaunchImpl = readLaunchRequestStatusFromLedgerAsync,
+  evaluation = null, execFileImpl = execFileAsync,
   evaluateStopImpl = evaluateHammerStopHold, logger = console, env = process.env, signal } = {}) {
   const headSha = prMetadata?.headSha;
   if (!rootDir || !hqRoot || !headSha) return false;
-  const stop = readHammerStopForHead({ hqRoot, repo, prNumber, headSha, reviewedSha, logger });
-  if (!isInfrastructureStop(stop) || !infrastructureOnlyFailures(recordedCiFailures(stop))) return false;
-  const recovered = await evaluateStopImpl({ rootDir, hqRoot, repo, prNumber, headSha, reviewedSha,
-    prMetadata, requiredCheckContexts, excludeContexts, now, logger });
+  if (!evaluation) {
+    const stop = readHammerStopForHead({ hqRoot, repo, prNumber, headSha, reviewedSha, logger });
+    if (!(isInfrastructureStop(stop) && infrastructureOnlyFailures(recordedCiFailures(stop)))
+      && !canEnrichCiInfrastructureStop(stop, repo)) return false;
+  }
+  const recovered = evaluation || await evaluateStopImpl({ rootDir, hqRoot, repo, prNumber, headSha, reviewedSha,
+    prMetadata, requiredCheckContexts, excludeContexts, now, logger, execFileImpl });
   if (recovered.action !== 'release' || !recovered.changed?.includes('ci-infrastructure-recovered')) return false;
+  const stop = recovered.infrastructureStop;
+  if (stop?.headSha !== headSha || !isInfrastructureStop(stop)
+    || !infrastructureOnlyFailures(recordedCiFailures(stop))) return false;
   const stops = recovered.infrastructureStop?.refundStops || [];
   let released = false;
   for (const record of readAmaCloserDispatchRecordsForPR(rootDir, { repo, prNumber })) {
@@ -4814,7 +4822,7 @@ async function maybeDispatchAmaCloserAttempt({
       hqRoot: dispatchContext?.hqRoot, repo: reconciliationRepo, prNumber, prMetadata,
       reviewedSha: reviewState?.headSha, excludeContexts: [dispatchContext?.requiredGateContext].filter(Boolean),
       requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
-      readLaunchImpl: readLaunchRequestStatusImpl, env, signal, logger });
+      readLaunchImpl: readLaunchRequestStatusImpl, execFileImpl, env, signal, logger });
   }
   if (reconciliationRoot && reconciliationRepo) {
     let held = null;

@@ -1588,6 +1588,12 @@ the PR intent lock and lease CAS, then normal closure selection runs again.
 Unknown descendants, active retries, unrelated launches, moved heads, missing
 checks and real failures retain their existing safety behavior. This changes
 ownership only; every merge predicate and lease remains mandatory.
+Historical stops with missing steps use the evaluator's enriched exact-head
+result for that same custody release without rewriting the audit. Failed job
+evidence reads remain unknown and retry after a 60-second process-local cache
+TTL keyed by repository, head and job URL. Offline regressions cover a real
+parked dispatch record and lease; existing lifecycle edges and smoke promises
+remain unchanged.
 
 The failed-job rerun requires fresh exact-head zero-step capacity annotation
 proof for every unsuccessful job in each affected workflow, including optional
@@ -4560,6 +4566,7 @@ merge predicates and smoke commands remain unchanged.
 ## Change notes
 
 - CLOSERRETRY-01: the merge-authority closer is no longer dispatched a third time for the same failure on an unchanged head. Terminal no-delivery attempts (the PR still open, the head unmoved) are kept per `(PR, head, failure class)` in `data/follow-up-jobs/closer-no-delivery/` (`src/ama/closer-no-delivery.mjs`). The first attempt and the series' one bounded retry still run; once a class has ended two attempts on one head, the closer stops before the prompt, harness and quota work and returns the existing needs-operator result with reason `closer-repeat-no-delivery-skipped`. Every skip is logged as `ama_closer.repeat_no_delivery_skipped`; the ledger records entry into the skipped state and then at most one skip per 15 minutes per key (`skippedCount`, `skipPersisted` in the log), so a stuck PR does not rewrite it every poll. Each attempt counts once across polls, identified by its launch request id, else its dispatch id, intent key or attempt time. A new head, a different failure class, the existing operator approval allowance, or `npm run reset-pr` (which now moves the PR's ledger aside and notes it in its receipt) re-enables the closer. If applying the operator approval re-drive fails, the closer falls back to the stored ledger gate instead of dispatching, and the skipped-repeat result reports the dispatched worker class. Infrastructure-read and lane-busy deferrals and refunded infrastructure deaths spend no key. No new label, gate or CI check. Offline coverage is in `test/closer-no-delivery.test.mjs`.
+- PR #1724 final Comment-only remediation: release parked closer custody using the evaluated historical CI evidence, share all classifier reason sources before enrichment, and cache failed job evidence for 60 seconds. Added offline recovery and cache regressions; merge gates, lifecycle edges and existing smoke promises remain unchanged.
 
 - PRBLOCKERS-01 HAM validation repair: refresh the reviewed `pr-next-action.mjs` source projection hash after adding the closer deadline diagnostic helper. State transitions and the independent graph remain unchanged; targeted SMV validation covers the refreshed manifest.
 

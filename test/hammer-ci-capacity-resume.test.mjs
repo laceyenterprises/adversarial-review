@@ -12,7 +12,7 @@ import { acquireAmaCloserLease, updateAmaCloserLease, readAmaCloserLease } from 
 import { closureOwnerShadowEvidence } from '../src/pr-next-action-consumer.mjs';
 import { deriveNextActionSnapshot, nextAction } from '../src/pr-next-action.mjs';
 import { resolveSharedNextAction } from '../src/pr-next-action-shadow.mjs';
-import { readHammerStopForHead, isInfrastructureStop } from '../src/ama/hammer-stop-hold.mjs';
+import { evaluateHammerStopHold, readHammerStopForHead, isInfrastructureStop } from '../src/ama/hammer-stop-hold.mjs';
 
 const repo = 'example/fixture', prNumber = 42, headSha = 'a'.repeat(40);
 const now = '2026-01-01T00:00:00Z', launchRequestId = 'lrq_fixture-capacity';
@@ -87,6 +87,40 @@ test('CIBLOCKRESUME-01 legacy decision ownership releases and selects closer in 
   assert.equal(selection(rootDir, null, []).action, 'wait-for-CI');
   assert.equal(selection(rootDir, null, [{ ...green, conclusion: 'FAILURE' }]).action, 'hammer');
 });
+
+for (const reuseEvaluation of [false, true]) {
+  test(`historical enriched stop releases real parked custody, reuseEvaluation=${reuseEvaluation}`, async t => {
+    const rootDir = fixture(t);
+    writeAmaAuditEntry({ hqRoot: rootDir, ...identity, now,
+      attempt: { path: 'hammer', head: headSha, outcome: 'failed-without-merge',
+        reason: 'github-gate-not-green', launchRequestId,
+        githubGate: { reasons: ['ci-not-green'], badChecks: [{ name: 'unit', conclusion: 'FAILURE',
+          detailsUrl: `https://github.com/${repo}/actions/runs/10/job/1` }] } } });
+    owner(rootDir);
+    assert.equal(selection(rootDir).row, 'R03-live-owner');
+    let reads = 0;
+    const args = { rootDir, hqRoot: rootDir, ...identity, now, logger,
+      prMetadata: { isOpen: true, headSha, statusCheckRollup: [green] },
+      execFileImpl: async () => {
+        reads++;
+        return { stdout: JSON.stringify({ jobs: [{ id: 1, head_sha: headSha, conclusion: 'failure', steps: [] }] }) };
+      } };
+    const evaluation = reuseEvaluation ? await evaluateHammerStopHold(args) : null;
+    assert.equal(isInfrastructureStop(readHammerStopForHead({ hqRoot: rootDir, ...identity })), false);
+    assert.equal(await releaseRecoveredCiInfrastructureOwner({ ...args, evaluation,
+      ...(reuseEvaluation ? { evaluateStopImpl: async () => assert.fail('reuse the enriched evaluation') } : {}),
+      readLaunchImpl: async () => probe() }), true);
+    assert.equal(reads, 1);
+    assert.equal(readAmaCloserLease(rootDir, identity), null);
+    const record = readAmaCloserDispatchRecord(rootDir, identity);
+    assert.equal(record.state, 'no-dispatch');
+    assert.equal(record.reason, 'ci-infrastructure-recovered');
+    assert.equal(record.recoveredLaunchRequestId, launchRequestId);
+    assert.equal(selection(rootDir).row, 'R15-daemon');
+    assert.equal(isInfrastructureStop(readHammerStopForHead({ hqRoot: rootDir, ...identity })), false,
+      'owner release must not require modifying historical audit evidence');
+  });
+}
 
 for (const [name, changed] of [
   ['running owner', probe('running')], ['unknown descendants', probe('blocked_needs_decision', { retryChainUnreadable: true })],

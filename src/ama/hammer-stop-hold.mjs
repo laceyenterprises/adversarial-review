@@ -102,9 +102,13 @@ const INFRASTRUCTURE_STOP_REASONS = new Set([
   'unrendered-dispatch-phase-script-placeholders',
 ]);
 
-export function isInfrastructureStop(stop) {
-  const reasons = [...stopReasons(stop), ...(stop?.refusal?.reasons || []),
+function infrastructureStopReasons(stop) {
+  return [...stopReasons(stop), ...(stop?.refusal?.reasons || []),
     ...[stop?.predicate, stop?.reason].filter(Boolean)];
+}
+
+export function isInfrastructureStop(stop) {
+  const reasons = infrastructureStopReasons(stop);
   if (!reasons.length) return false;
   if (reasons.every(reason => INFRASTRUCTURE_STOP_REASONS.has(reason))) return true;
   return reasons.every(reason => CI_INFRASTRUCTURE_STOP_REASONS.has(reason))
@@ -112,7 +116,7 @@ export function isInfrastructureStop(stop) {
 }
 
 export function canEnrichCiInfrastructureStop(stop, repo) {
-  const reasons = [...(stop?.reasons || []), stop?.predicate].filter(Boolean);
+  const reasons = infrastructureStopReasons(stop);
   return Boolean(stop?.failedChecks?.length) && hasMissingActionsEvidence(stop.failedChecks, repo) && !isInfrastructureStop(stop)
     && reasons.length > 0 && reasons.every(reason => CI_INFRASTRUCTURE_STOP_REASONS.has(reason));
 }

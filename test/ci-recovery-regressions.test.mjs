@@ -72,6 +72,54 @@ test('REST details_url caches remain bound to the exact job, run and head', asyn
   assert.deepEqual(reads, [10, 20, 10], 'a new head requires fresh exact-head evidence');
 });
 
+for (const failure of ['404', 'timeout', 'head mismatch', 'missing steps', 'missing job', 'invalid JSON']) {
+  test(`negative job evidence expires without authorizing recovery: ${failure}`, async t => {
+    let clock = Date.parse(now), reads = 0, recovered = false;
+    t.mock.method(Date, 'now', () => clock);
+    const check = { name: 'unit', conclusion: 'FAILURE',
+      detailsUrl: `https://github.com/${repo}/actions/runs/10/job/1` };
+    const execFileImpl = async () => {
+      reads++;
+      if (!recovered && ['404', 'timeout'].includes(failure)) throw new Error(failure);
+      if (!recovered && failure === 'invalid JSON') return { stdout: 'unreadable' };
+      return { stdout: JSON.stringify({ jobs: [{ id: !recovered && failure === 'missing job' ? 2 : 1,
+        head_sha: !recovered && failure === 'head mismatch' ? 'b'.repeat(40) : head,
+        conclusion: 'failure', steps: !recovered && failure === 'missing steps' ? undefined : [] }] }) };
+    };
+    const args = { rollup: [check], repo, headSha: head, execFileImpl };
+    assert.equal(checkInfrastructureReason((await enrichCiInfrastructureEvidence(args))[0]), null);
+    const initialReads = reads;
+    assert.ok(initialReads > 0);
+    recovered = true;
+    clock += 59_999;
+    assert.equal(checkInfrastructureReason((await enrichCiInfrastructureEvidence(args))[0]), null);
+    assert.equal(reads, initialReads, 'repeat passes must respect the negative TTL');
+    clock++;
+    assert.equal(checkInfrastructureReason((await enrichCiInfrastructureEvidence(args))[0]), 'actions-zero-step');
+    assert.equal(reads, initialReads + 1);
+    await enrichCiInfrastructureEvidence(args);
+    assert.equal(reads, initialReads + 1, 'successful evidence remains cached');
+  });
+}
+
+test('negative job evidence is isolated by repo, head and URL and does not starve another run', async () => {
+  let reads = 0;
+  const execFileImpl = async () => { reads++; throw new Error('404'); };
+  const check = { name: 'unit', conclusion: 'FAILURE',
+    detailsUrl: `https://github.com/${repo}/actions/runs/10/job/1` };
+  const args = { rollup: [check], repo, headSha: head, execFileImpl };
+  await enrichCiInfrastructureEvidence(args);
+  await enrichCiInfrastructureEvidence(args);
+  assert.equal(reads, 1);
+  await enrichCiInfrastructureEvidence({ ...args, headSha: 'b'.repeat(40) });
+  assert.equal(reads, 2);
+  await enrichCiInfrastructureEvidence({ ...args, repo: 'Example/Fixture' });
+  assert.equal(reads, 3);
+  const sibling = { ...check, detailsUrl: `https://github.com/${repo}/actions/runs/20/job/2` };
+  await enrichCiInfrastructureEvidence({ ...args, rollup: [check, sibling] });
+  assert.equal(reads, 4);
+});
+
 for (const concurrent of [false, true]) test(`historical recovery keeps one live PR owner, concurrent=${concurrent}`, async t => {
   const rootDir = root(t);
   for (const [index, status] of ['stopped', 'failed'].entries()) {
@@ -205,6 +253,14 @@ test('CI enrichment accepts absent predicates but requires actual infrastructure
   assert.equal(canEnrichCiInfrastructureStop({ ...stop, reasons: [] }, repo), false);
   assert.equal(canEnrichCiInfrastructureStop({ ...stop, reasons: ['primary-change-unknown'] }, repo), false);
   assert.equal(canEnrichCiInfrastructureStop({ ...stop, predicate: 'primary-change-unknown' }, repo), false);
+  for (const extra of [
+    { refusal: { reasons: ['primary-change-unknown'] } },
+    { reason: 'primary-change-unknown' },
+    { githubGate: { reasons: ['primary-change-unknown'] } },
+    { eligibilityTrace: { reasons: ['primary-change-unknown'] } },
+  ]) assert.equal(canEnrichCiInfrastructureStop({ ...stop, ...extra }, repo), false);
+  assert.equal(canEnrichCiInfrastructureStop({ ...stop, reasons: [], reason: 'ci-not-green' }, repo), true);
+  assert.equal(canEnrichCiInfrastructureStop({ ...stop, refusal: { reasons: ['ci-not-green'] } }, repo), true);
   assert.equal(canEnrichCiInfrastructureStop(null, repo), false);
 });
 

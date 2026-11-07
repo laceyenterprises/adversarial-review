@@ -1768,6 +1768,7 @@ async function dispatchAmaClosureFor({
     recordedStop = evaluatedStop.infrastructureStop || recordedStop;
     if (evaluatedStop.action === 'release' && autonomousMergeExecutionEnabled && prMetadata.isOpen) {
       infrastructureOwnerReleased = await amaDispatchCloser.releaseRecoveredCiInfrastructureOwner({
+        evaluation: evaluatedStop,
         rootDir, hqRoot: resolveHqRoot(env), repo: repoPath, prNumber, prMetadata, reviewedSha: reviewState.headSha,
         excludeContexts: [requiredGateContext], requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
         now: new Date(now()).toISOString(), logger, env, signal });

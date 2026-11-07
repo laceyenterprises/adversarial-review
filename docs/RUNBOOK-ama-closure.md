@@ -749,7 +749,16 @@ Closure uses the shared hammer-stop evaluator by default, including historical
 CI stops that need Actions evidence. Missing optional predicates do not prevent
 enrichment when all recorded reasons are CI infrastructure reasons; empty or
 mixed reasons do not qualify. Actions evidence matches repository and host
-casing without relaxing the exact run, job or head binding. Offline regression
+casing without relaxing the exact run, job or head binding. The enrichment gate
+uses the classifier's full reason list, including nested refusal reasons and
+the singular reason field. Failed, mismatched or incomplete job reads remain
+unknown and are cached for 60 seconds by repository, head and job URL in the
+process-local, bounded evidence cache; another job can still be inspected.
+Closure passes the evaluated, enriched stop directly to parked-owner release.
+Direct closer admission evaluates enrichable historical stops before deciding
+whether to release custody. Neither path requires rewriting historical audits;
+both retain the exact-head recovery proof, PR intent lock, lease CAS and
+launch/retry status checks. Offline regression
 coverage lives in `test/ci-recovery-regressions.test.mjs` and runs through the
 standard test runner. Existing lifecycle states and smoke promises are unchanged.
 

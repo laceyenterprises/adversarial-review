@@ -29,6 +29,7 @@ import {
   updateAmaCloserDispatchRecord,
 } from '../src/ama/dispatch-closer.mjs';
 import { readAmaAuditEntry, writeAmaAuditEntry } from '../src/ama/audit.mjs';
+import { CLOSURE_RESUME_FILE, recordClosureResume } from '../src/ama/closure-resume.mjs';
 import { readClosureNextAction } from '../src/ama/closure-next-action.mjs';
 import { readHammerStopForHead } from '../src/ama/hammer-stop-hold.mjs';
 import { closerAuthoredStaleEligible } from '../src/closer-authored-stale.mjs';
@@ -4668,4 +4669,45 @@ test('APPROVALREARM-01: watcher approval consumes a truncated-clock launch once 
   }
   assert.equal(alerts.length, alertsBeforeSecondRefusal + 1, 'the re-armed refusal pages once even after the prior cap page');
   assert.equal(launches, 1, 'a second refusal and label toggles cannot replenish the grant');
+});
+
+// CLOSERGATES-01: a hammer that pushed and validated this head, then exhausted
+// a transient closure gate, left a receipt. The next launch is closure-only.
+function recordClosureResumeFixture(rootDir, headSha) {
+  return recordClosureResume({ gate: 'protection', env: {
+    HAM_HQ_ROOT: join(rootDir, 'hq-root'), HAM_REPO: REPO, HAM_PR_NUMBER: String(PR_NUMBER),
+    HAM_REVIEWED_SHA: MERGE_COMMIT, POST_REMEDIATION_SHA: headSha, HAM_PUBLISHED_AUDIT_HEAD: headSha,
+    HAM_AUDIT_COMMENT_BODY: `HAM-Validated-Head: ${headSha}`, HQ_LAUNCH_REQUEST_ID: 'lrq_prior_closer' } });
+}
+
+test('CLOSERGATES-01: a closure-resume receipt on the live head dispatches a closure-only hammer', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closergates-dispatch-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  assert.ok(recordClosureResumeFixture(rootDir, REVIEWED_HEAD));
+  const prompts = [];
+  const result = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir),
+    ...hammerDispatchDeps({ writeFileImpl: (_dir, _path, prompt) => prompts.push(prompt) }) });
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.match(prompts.at(-1), /## Closure resume \(CLOSERGATES-01\)/);
+  assert.match(prompts.at(-1), /runs ONLY the closure gates and the merge/);
+  const record = readAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
+  assert.deepEqual(record.closureResume, { validatedHead: REVIEWED_HEAD, gate: 'protection',
+    launchRequestId: 'lrq_prior_closer' });
+  const handed = JSON.parse(fs.readFileSync(join(record.scratchDir, CLOSURE_RESUME_FILE), 'utf8'));
+  assert.equal(handed.validatedHead, REVIEWED_HEAD);
+  assert.equal(handed.gate, 'protection');
+});
+
+test('CLOSERGATES-01: a receipt for a head that moved is void; the launch runs the normal procedure', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closergates-dispatch-moved-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  assert.ok(recordClosureResumeFixture(rootDir, ADVANCED_HEAD));
+  const prompts = [];
+  const result = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir),
+    ...hammerDispatchDeps({ writeFileImpl: (_dir, _path, prompt) => prompts.push(prompt) }) });
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.doesNotMatch(prompts.at(-1), /Closure resume/);
+  const record = readAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
+  assert.equal(record.closureResume, undefined);
+  assert.equal(fs.existsSync(join(record.scratchDir, CLOSURE_RESUME_FILE)), false);
 });

@@ -8,6 +8,19 @@ import { LEASE_VALIDATION_IDLE_MS, pytestValidationEnvironment } from '../src/am
 import { loadAwareTimeoutSeconds } from '../src/load-aware-timeout.mjs';
 
 import { reportHammerProgress, reportRemediationCommit } from '../src/ama/hammer-progress.mjs';
+import { execFileSync } from 'node:child_process';
+import { readRunClosureResume } from '../src/ama/closure-resume.mjs';
+
+// CLOSERGATES-01: a closure-resume launch validated nothing new. While the
+// checkout is still the receipt's validated head, that launch's evidence
+// stands and the suite is not re-run. Any other head validates normally.
+function closureResumeReceipt() {
+  if (!process.env.HAM_RUN_DIR) return null;
+  let head;
+  try { head = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
+  catch { return null; }
+  return readRunClosureResume(process.env.HAM_RUN_DIR, head);
+}
 
 const args = process.argv.slice(2);
 let pytest = false;
@@ -22,9 +35,13 @@ while (args.length && args[0] !== '--') {
     if (!/^[1-9][0-9]*$/.test(raw || '') || !Number.isSafeInteger(nominalSeconds) || nominalSeconds > 3600) valid = false;
   } else { valid = false; break; }
 }
+let resumed;
 if (!valid || args.shift() !== '--' || !args.length) {
   console.error('usage: hammer-validate.mjs [--pytest] [--nominal-timeout 1..3600] -- <test paths/pytest args OR command args>');
   process.exitCode = 64;
+} else if ((resumed = closureResumeReceipt())) {
+  const receipt = resumed;
+  console.error(`hammer-validate: closure resume: head ${receipt.validatedHead} was validated by launch ${receipt.launchRequestId || 'unknown'}; reusing that evidence, not re-running validation.`);
 } else {
   const scratch = await mkdtemp(join(tmpdir(), 'ham-validation-'));
   try {

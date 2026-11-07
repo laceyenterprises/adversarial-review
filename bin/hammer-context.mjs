@@ -15,6 +15,7 @@ import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { extractSimplicityNote } from '../src/kernel/verdict.mjs';
+import { CLOSURE_GATE_BUDGET_MS, closureGateClock, readClosureGateSync } from '../src/ama/closure-gate-read.mjs';
 
 const [repo, number, flag, statePath] = process.argv.slice(2);
 if (!/^[^/\s]+\/[^/\s]+$/.test(repo || '') || !/^[1-9]\d*$/.test(number || '') || (flag && (flag !== '--state-file' || !statePath))) {
@@ -22,11 +23,22 @@ if (!/^[^/\s]+\/[^/\s]+$/.test(repo || '') || !/^[1-9]\d*$/.test(number || '') |
   process.stderr.write('usage: hammer-context.mjs owner/repo pr [--state-file local-state.json]\n');
   process.exit(64);
 }
-function get(args) {
+function getOnce(args) {
   const result = meteredExecFileSync(spawnSync, 'gh', args, { hammerToken: true, encoding: 'utf8', timeout: 15000, maxBuffer: GH_LOOKUP_MAX_BUFFER });
   if (result.error || result.status !== 0) throw new Error(`${args[0]} ${args[1]} failed: ${(result.stderr || result.error?.message || '').slice(-500)}`);
   return JSON.parse(result.stdout);
 }
+// CLOSERGATES-01: each read retries transient failures in place with spaced
+// backoff; the whole snapshot shares one closure budget. A definitive failure
+// (or a 404 nobody contradicts) still fails the snapshot at once.
+const contextDeadline = closureGateClock.now() + CLOSURE_GATE_BUDGET_MS;
+function readGate(read, options = {}) {
+  const result = readClosureGateSync(read, { ...options,
+    budgetMs: Math.max(0, contextDeadline - closureGateClock.now()) });
+  if (result.ok) return result.value;
+  throw Object.assign(new Error(result.detail || 'closure gate read failed'), { gate: result });
+}
+const get = args => readGate(() => getOnce(args));
 function compact(value, max = 1200) {
   let result = '';
   let bytes = 0;
@@ -57,9 +69,27 @@ try {
     process.stdout.write(`${JSON.stringify({ head: checks.headRefOid, noMerge: true, ...infrastructureStop })}\n`);
     process.exit(20);
   }
+  // "Branch not protected" and a plan without protection are real answers with
+  // no required checks. Any other failure is unknown, never "no protection": a
+  // 404 is retried while a branch read contradicts it.
   let protection;
-  try { protection = get(['api', `repos/${repo}/branches/${encodeURIComponent(pr.base?.ref || 'main')}/protection`]); }
-  catch { protection = { required_status_checks: null, unavailable: true }; }
+  const base = typeof pr.base?.ref === 'string' && pr.base.ref ? pr.base.ref : null;
+  try {
+    if (!base) throw new Error('PR base ref unavailable');
+    const branch = encodeURIComponent(base);
+    protection = readGate(() => {
+      try { return getOnce(['api', `repos/${repo}/branches/${branch}/protection`]); }
+      catch (error) {
+        if (/branch not protected|upgrade to github pro|make this repository public/i.test(error.message)) {
+          return { required_status_checks: null };
+        }
+        throw error;
+      }
+    }, { confirmNotFound: () => {
+      try { getOnce(['api', `repos/${repo}/branches/${branch}`]); return false; }
+      catch (error) { if (/\b404\b/.test(error.message)) return true; throw error; }
+    } });
+  } catch { protection = { required_status_checks: null, unavailable: true }; }
   const head = pr.head?.sha || null;
   const currentReviews = Array.isArray(reviews) ? reviews.filter((r) => r.commit_id === head) : [];
   const verdict = currentReviews.filter((r) => /^## Adversarial Review\b/m.test(r.body || '')).at(-1);
@@ -121,7 +151,9 @@ try {
     pr: { repo, number: Number(number), state: pr.state, merged: Boolean(pr.merged_at), draft: Boolean(pr.draft), mergeable: pr.mergeable, mergeableState: pr.mergeable_state, base: pr.base?.ref },
     head,
     review: verdict ? { state: verdict.state, author: verdict.user?.login, submittedAt: verdict.submitted_at, simplicityNote: simplicityNote ? compact(simplicityNote, 1200) : null, simplicityNoteTruncated: Boolean(simplicityNote && Buffer.byteLength(simplicityNote) > Buffer.byteLength(compact(simplicityNote, 1200))), findings: compact(verdict.body, 1800), findingsBytes, findingsTruncated: findingsBytes > Buffer.byteLength(compact(verdict.body, 1800)) } : null,
-    requiredChecks: protection.required_status_checks?.contexts || protection.required_status_checks?.checks?.map((c) => c.context) || [],
+    requiredChecks: protection.unavailable ? null
+      : protection.required_status_checks?.contexts || protection.required_status_checks?.checks?.map((c) => c.context) || [],
+    ...(protection.unavailable ? { requiredChecksUnavailable: true } : {}),
     checks: (checks.statusCheckRollup || []).slice(0, 40).map((c) => ({ name: c.name || c.context, conclusion: c.conclusion || c.state || c.status })),
     diffStat: { files: pr.changed_files ?? null, additions: pr.additions ?? null, deletions: pr.deletions ?? null },
     conflictsVersusBase: pr.mergeable == null ? null : pr.mergeable === false || pr.mergeable_state === 'dirty',
@@ -135,7 +167,7 @@ try {
     output.statedIntent = '';
     output.primaryChange = { status: primaryChange.status, reason: primaryChange.reason, fullEvidenceCommand: primaryChange.fullEvidenceCommand, truncated: true };
     output.checks = output.checks.slice(0, 10).map((c) => ({ name: compact(c.name, 100), conclusion: compact(c.conclusion, 30) }));
-    output.requiredChecks = output.requiredChecks.slice(0, 10).map((c) => compact(c, 100));
+    output.requiredChecks = output.requiredChecks?.slice(0, 10).map((c) => compact(c, 100)) ?? null;
     serialized = JSON.stringify(output);
   }
   if (Buffer.byteLength(serialized) >= 8192) throw new Error('snapshot exceeds 8192 bytes');

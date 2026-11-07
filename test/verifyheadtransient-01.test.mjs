@@ -71,8 +71,11 @@ for (const reason of ['github-gate-red', 'predicate-not-eligible', 'rebase-confl
   'protective-predecessor-open', 'protective-predecessor-state-unreadable']) {
   test(`VERIFYHEADTRANSIENT-01: adjudicated ${reason} remains final`, t => {
     const rootDir = fixture(t);
+    // These are final exits. Non-final conflict observations now retain repair
+    // custody; without a run directory, an explicit final keeps legacy refusal.
     recordHammerEarlyFailure(reason, { env: { HAM_HQ_ROOT: rootDir, HAM_REPO: identity.repo,
-      HAM_PR_NUMBER: '42', HAM_TARGET_REMEDIATION_SHA: head } });
+      HAM_PR_NUMBER: '42', HAM_TARGET_REMEDIATION_SHA: head, HQ_LAUNCH_REQUEST_ID: launchRequestId,
+      HQ_WORKER_RUN_ID: 'wrun_fixture' }, final: true });
     assert.equal(readAmaAuditEntry(rootDir, identity.repo, 42, head).status, 'failed-without-merge');
     assert.equal(decision(false).reason, 'hammer-final-no-merge');
     assert.equal(hammerPhaseAttempt({ outcome: 'succeeded', reason }).outcome, 'succeeded');

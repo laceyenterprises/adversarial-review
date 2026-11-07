@@ -44,7 +44,7 @@ if (['fetch', 'push', 'ls-remote', 'submodule'].includes(args[0])) {
   fs.appendFileSync(dir + '/remote.log', JSON.stringify({ args, env: process.env,
     url: 'https://github.com/fixture/repo.git' }) + '\\n');
   const result = cp.spawnSync('/usr/bin/git', ['credential', 'fill'], {
-    env: process.env, encoding: 'utf8', input: 'protocol=https\\nhost=github.com\\n\\n', timeout: 10000 });
+    env: process.env, encoding: 'utf8', input: 'protocol=https\\nhost=github.com\\n\\n', timeout: 60000 });
   if (result.status !== 0) { process.stderr.write(result.stderr); process.exit(128); }
   const password = result.stdout.match(/^password=(.*)$/m)?.[1];
   const match = /^synthetic-mint-(\\d+)-(\\d+)$/.exec(password || '');
@@ -68,7 +68,7 @@ if (['fetch', 'push', 'ls-remote', 'submodule'].includes(args[0])) {
     GIT_TRACE: '1', GIT_TRACE_CURL: '1', GIT_CURL_VERBOSE: '1' };
   const run = (script, overrides = {}, baseEnv = env) => spawnSync('/bin/bash', ['-c', script.replaceAll('<<ROOT_DIR>>', root)
     .replaceAll('<<RUN_DIR>>', dir).replaceAll('<<PR_NUMBER>>', '42')], {
-    cwd: dir, env: { ...baseEnv, ...overrides }, encoding: 'utf8', timeout: 20000,
+    cwd: dir, env: { ...baseEnv, ...overrides }, encoding: 'utf8', timeout: 90000,
   });
   const count = () => Number(readFileSync(join(dir, 'count'), 'utf8'));
   const noLeaks = result => {
@@ -109,7 +109,10 @@ for (const fail of ['1', 'invalid']) test(`HAMGITTOKEN-01: ${fail} refresh is ex
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, 'git-credential-refresh-failed');
   assert.match(readFileSync(join(f.dir, 'fetch-base.stderr'), 'utf8'), /git-credential-refresh-failed/);
-  assert.equal(f.count(), 1, 'no held-token fallback or retry of a broken mint');
+  // CLOSERGATES-01: a failed mint command is retried in place with spaced
+  // backoff; invalid output is definitive and minted once. Never a held token.
+  if (fail === 'invalid') assert.equal(f.count(), 1, 'no held-token fallback or retry of an invalid mint');
+  else assert.ok(f.count() >= 2 && f.count() <= 3, `spaced mint retries: ${f.count()}`);
   const attempt = readAmaAuditEntry(f.dir, 'fixture/repo', 42, head).attempts.at(-1);
   assert.equal(attempt.reason, 'git-credential-refresh-failed');
   assert.equal(attempt.outcome, 'deferred');
@@ -200,7 +203,10 @@ printf '%s:%s' "$status" "$HAM_PHASE_OUTCOME"`, { FAIL_REFRESH: fail });
     assert.equal(result.stdout, fail
       ? 'release:git-credential-refresh-failed\n1:git-credential-refresh-failed'
       : 'remote accepted\n0:verify-head');
-    assert.equal(f.count(), 1);
+    // CLOSERGATES-01: a failed mint command is retried in place before the
+    // retryable stop; invalid output and success mint once.
+    if (fail === '1') assert.ok(f.count() >= 2 && f.count() <= 3, `spaced mint retries: ${f.count()}`);
+    else assert.equal(f.count(), 1);
     assert.ok(HAMMER_RETRYABLE_READ_OUTCOMES.has('git-credential-refresh-failed'));
     assert.deepEqual(JSON.parse(readFileSync(join(f.dir, 'remote.log'), 'utf8')).args,
       ['submodule', 'update', '--recursive']);

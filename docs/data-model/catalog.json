@@ -423,8 +423,11 @@
         "src/ama/no-ci-configured.mjs",
         "src/daemon-clean-merge.mjs",
         "src/ama/hammer-stop-hold.mjs",
-        "src/ama/hammer-resume.mjs"
+        "src/ama/hammer-resume.mjs",
+        "src/ama/closure-resume.mjs",
+        "bin/hammer-predicate-inputs.mjs"
       ],
+      "closureResumeFields": ["attempts[].closureResume.schemaVersion", "attempts[].closureResume.validatedHead", "attempts[].closureResume.reviewedHead", "attempts[].closureResume.baseHead", "attempts[].closureResume.validation", "attempts[].closureResume.gate", "attempts[].closureResume.launchRequestId", "attempts[].closureResume.detail"],
       "pendingAttestationFields": ["attempts[].pendingAttestation.baseHead", "attempts[].pendingAttestation.validatedHead", "attempts[].pendingAttestation.identity", "attempts[].pendingAttestation.validationSummary"],
       "owner": "AMA merge authority",
       "guardReversalEvidenceFields": ["attempts[].guardReversals"],

@@ -4551,6 +4551,8 @@ refusal, cancellation and unknown exits; process success alone proves no merge.
 
 ## Change notes
 
+- PRBLOCKERS-01 HAM validation repair: refresh the reviewed `pr-next-action.mjs` source projection hash after adding the closer deadline diagnostic helper. State transitions and the independent graph remain unchanged; targeted SMV validation covers the refreshed manifest.
+
 - PRBLOCKERS-01 final comment remediation: resolve real `remediationWorker` launch IDs, retain actor-specific live actions, separate owner and successor deadlines, attest intermediate closer commits, and fail closed on ambiguous review families. Bound report reads with `--limit`, a rate-budget preflight and a REST read cap; document and test strict malformed ownership handling. No persistent store, lifecycle, merge gate or smoke promise changes.
 
 - PRBLOCKERS-01: Add `npm run pr-blockers -- --repo example/project` for a read-only per-PR blocker table and version 1 JSON, with shared closure decisions, exact-head coverage, CI, durable ownership and optional generated-conflict detail.

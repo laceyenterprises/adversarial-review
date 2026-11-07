@@ -123,6 +123,8 @@ change. Reviewed and refreshed affected source projection hashes using
 `digest(stateProjection(source))` from `test/helpers/smv-contracts.mjs`;
 the existing review-row states and transitions remain the same.
 
+PRBLOCKERS-01: `closerLeaseDeadline` projects the existing closer lease deadline for blocker diagnostics through `leaseFacts`. Its synthetic complete-state input adds a source projection record without changing lifecycle states, transitions, or merge authority. Reviewed the helper against the independent graph and refreshed its manifest hash using `digest(stateProjection(source))` from `test/helpers/smv-contracts.mjs`.
+
 PENDINGCLAIM-01: retry classification and the unknown, review-population,
 infrastructure and daemon-bounce claims share one SQL failure-shape expression.
 A lease-released `pending` failure with `failed_at`, accrued attempts (or an

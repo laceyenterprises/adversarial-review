@@ -60,6 +60,10 @@ const DEFAULT_ROUTE_BY_BUILDER_CLASS = {
     reviewerModel: 'codex',
     botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
   },
+  grok: {
+    reviewerModel: 'codex',
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+  },
   hermes: {
     reviewerModel: 'codex',
     botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
@@ -123,6 +127,7 @@ const REVIEWER_FAMILY_BY_BUILDER_CLASS = {
   pi: 'pi',
   opencode: 'opencode',
   hermes: 'hermes',
+  grok: 'grok',
 };
 
 function getReviewerRouteTable({
@@ -142,6 +147,10 @@ function getReviewerRouteTable({
 function normalizeBuilderClass(builderClassInput, routeTable = ROUTE_BY_BUILDER_CLASS) {
   const raw = String(builderClassInput || '').trim().toLowerCase();
   const builderClass = ({
+    'grok-api': 'grok',
+    'grok-reviewer': 'grok',
+    'remediator-grok': 'grok',
+    'hammer-grok': 'grok',
     'remediator-gemini': 'gemini',
     'codex-corp': 'codex',
     'remediator-codex': 'codex',
@@ -163,6 +172,13 @@ function normalizeReviewerModel(reviewerInput) {
   const reviewer = String(reviewerInput || '').trim().toLowerCase();
   if (!reviewer) return null;
   switch (reviewer) {
+    // Integrity vocabulary only: no Grok execution route is registered here.
+    case 'grok':
+    case 'grok-api':
+    case 'grok-reviewer':
+    case 'remediator-grok':
+    case 'hammer-grok':
+      return 'grok';
     case 'claude':
     case 'claude-code':
     case 'claude-code-corp':
@@ -215,8 +231,10 @@ function isCrossModelReviewWaived(builderClassInput, reviewerInput) {
 // Every account/holder keeps its reviewer family refusal, including explicit last resorts.
 export const CODEX_BUILDER_REVIEW_REFUSAL = 'Codex-family reviewer cannot review a Codex-family builder';
 export function reviewerRefusesBuilder(builderClass, reviewerModel) {
-  return ['codex', 'claude', 'gemini'].includes(normalizeReviewerModel(reviewerModel))
-    && isCrossModelReviewWaived(builderClass, reviewerModel);
+  const builder = normalizeBuilderClass(builderClass);
+  const actor = normalizeReviewerModel(reviewerModel);
+  return !builder || !actor || actor === 'grok'
+    || isCrossModelReviewWaived(builder, actor);
 }
 
 function describeCrossModelReviewWaiver(builderClassInput, reviewerInput, env = process.env) {
@@ -317,6 +335,7 @@ function applyGeminiReviewerRoute({
   const baseIsGemini = normalizeReviewerModel(baseRoute.reviewerModel) === 'gemini';
   if (!baseIsGemini && reviewerRefusesBuilder(normalizedBuilder, baseRoute.reviewerModel)) {
     const crossModel = routeTable[normalizedBuilder];
+    if (!crossModel || reviewerRefusesBuilder(normalizedBuilder, crossModel.reviewerModel)) return null;
     return { ...baseRoute, reviewerModel: crossModel.reviewerModel, botTokenEnv: crossModel.botTokenEnv };
   }
 

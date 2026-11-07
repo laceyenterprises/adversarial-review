@@ -1759,7 +1759,7 @@ export async function processReviewSubject(entry, ctx) {
         console.log(`[watcher] auto-refresh SUPPRESSED for ${repoPath}#${prNumber}: comment-only final round is in progress`);
       } else if (postedReviewHeadMoved && existing?.review_status === 'posted'
         && await carryStalePostedReviewForward({ rootDir: ROOT, repo: repoPath, prNumber, reviewRow: existing,
-          currentHead: subject.headSha, baseRef: subject.baseSha || subject.baseRefName,
+          currentHead: subject.headSha, baseRef: subject.baseRefName || subject.baseSha,
           resolveSettledReview: () => resolveSettledReviewVerdict(ROOT, { repo: repoPath, prNumber,
             reviewRow: existing, currentHeadSha: existing.reviewer_head_sha }) })) {
         // REVIEWCARRY-01: own patch unchanged except declared generated paths; the

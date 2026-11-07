@@ -1048,7 +1048,9 @@ async function runDaemonCleanMergeAttemptInner({
           ? { closureAuthority: 'daemon-autonomous-closer-commit-clean' }
           : headCloserCertifiedNonBlocking
             ? { closureAuthority: 'daemon-head-closer-certified-non-blocking' }
-            : {}),
+            : reviewCarryForward
+              ? { closureAuthority: 'daemon-review-carry-forward' }
+              : {}),
       // Record which accountability authorized the merge: hq-dispatched worker
       // identity (the normal path) or an explicit head-scoped operator label
       // (Deliverable 1 substitution). The audit doc thus always names WHO the

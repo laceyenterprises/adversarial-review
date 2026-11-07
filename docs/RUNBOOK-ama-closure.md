@@ -4875,6 +4875,13 @@ clean-review and live reconcile gates are unchanged. Any non-generated
 difference, a blocking finding, a capped or unreadable diff, or a reset onto an
 older base leaves today's exact-head re-review in place.
 
+The watcher resolves both compares against the named PR base branch when
+available, falling back to the PR base SHA only when its name is absent.
+This avoids including unrelated trunk commits from a stale base SHA in the
+PR's own patch. Daemon clean merges using the carried review record
+`closureAuthority: daemon-review-carry-forward` in the merge audit unless an
+existing docs, operator or closer authority takes precedence.
+
 Across-head launch records prove ownership only through a nonterminal session
 ledger status. A `dispatching` intent without a launch ID is uncertain; queued
 reviewer/remediator records alone are not live ownership. Launch terminality

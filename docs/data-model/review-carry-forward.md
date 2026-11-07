@@ -65,7 +65,7 @@ written once (`overwrite: false`).
 | `prNumber` | integer | Pull request number. |
 | `reviewedHead` | string | Head the carried review was posted on. |
 | `currentHead` | string | New head the review carries to. |
-| `baseRef` | string | Base ref used for both compares. |
+| `baseRef` | string | Base ref used for both compares. The watcher prefers the PR base branch name, falling back to its SHA when the name is absent. |
 | `reviewedMergeBase`, `currentMergeBase` | string | Merge bases of the two heads; the second descends from the first. |
 | `proof` | string | `own-patch-equal-excluding-generated-paths`. |
 | `ownPatchDigest` | hex string | SHA-256 of the normalized non-generated patch. |
@@ -86,7 +86,9 @@ written once (`overwrite: false`).
   The record carries no closer commits.
 - `src/daemon-clean-merge.mjs` accepts the recorded pair in its moved-head check
   and validates the live head. Strict clean-review, CI, mergeability and
-  in-lease re-reads still apply.
+  in-lease re-reads still apply. The merge audit records
+  `closureAuthority: daemon-review-carry-forward` unless an existing docs,
+  operator or closer authority takes precedence.
 
 A malformed record, a record for another pair, or a record with a blocking or
 unclean verdict reads as no carry-forward.

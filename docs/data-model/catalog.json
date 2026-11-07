@@ -389,6 +389,7 @@
     },
     {
       "id": "ama-audit",
+      "reviewCarryForwardAuthority": "closureAuthority=daemon-review-carry-forward identifies daemon clean merges authorized by a generated-only carried review; existing docs, operator and closer authorities take precedence",
       "gateRevisionProvenance": "HOLDGATEVERSION-01: new attempts record reviewServiceRevision from loaded service code; optional producer gatePredicateVersion survives immutable append and hold projection.",
       "operatorApprovalAwaitedInputs": "attempts[].awaitedInputs: optional normalized operator-label inputs; explicit marker and legacy activation requirement compatibility; consumed by exact-head hold release and retry re-arm",
       "hammerCapturedBase": "rebasedOntoBase is empty after verification unless the captured base is proved an ancestor of the produced head; FIFO capture alone is not rebase provenance. Existing successful retry rebases retain their proved target.",
@@ -956,6 +957,7 @@
     },
     {
       "id": "review-carry-forward",
+      "baseRefResolution": "Watcher prefers the PR base branch name for both compares, falling back to its base SHA when the name is absent",
       "title": "Review Carry-Forward Records",
       "path": "docs/data-model/review-carry-forward.md",
       "store": "data/review-carry-forward/",

@@ -103,6 +103,7 @@ test('HAMTOKEN-05 whitespace-rejecting parser fails on exactly the same export f
   const source = readFileSync(new URL('../src/hammer-token.mjs', import.meta.url), 'utf8')
     .replace("'./ama/hammer-terminal-audit.mjs'", JSON.stringify(new URL('../src/ama/hammer-terminal-audit.mjs', import.meta.url).href))
     .replace("'./load-aware-timeout.mjs'", JSON.stringify(new URL('../src/load-aware-timeout.mjs', import.meta.url).href))
+    .replace("'./ama/closure-gate-read.mjs'", JSON.stringify(new URL('../src/ama/closure-gate-read.mjs', import.meta.url).href))
     .replace('const text = output.trim();', 'const text = output.trim(); if (/\\s/.test(text)) return null;');
   const legacy = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
   const result = legacy.hammerTokenSession({ credentialEnv: env, hammerToken: true }).checkRefresh();

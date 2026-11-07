@@ -284,8 +284,14 @@ existing append semantics.
 
 ## Launch outcome evidence (LVR-02)
 
-`attempts[].launchRequestId` is the producing `HQ_LAUNCH_REQUEST_ID` when
-available. The CLI overwrites any stale identity from an attempt input file.
+`attempts[].launchRequestId` records the producing launch. For
+`bin/ama-audit.mjs`, the first non-empty `HQ_LAUNCH_REQUEST_ID`,
+`AGENT_OS_WORKER_LRQ_ID`, then `LAUNCH_REQUEST_ID` wins, including when they
+disagree, and overwrites any identity from an attempt input file. Without an
+environment identity the CLI retains an input-file identity for audit only;
+it cannot authorize closer-lease release. Clear inherited launch variables
+when auditing on behalf of another launch. Other producers retain their own
+identity policies.
 LVR-01 checks this attempt-local identity and outcome, rather than inheriting a
 sticky document status from another launch. Manual callers without a launch
 identity retain the existing audit format.

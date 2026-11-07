@@ -17,7 +17,9 @@
  * `--attempt-json <path>` is optional context the writer merges into
  * the attempt entry (e.g. `mergeCliExitCode`, `postCliGithubState`,
  * `preMergeReasons`). When absent, only `outcome` (+ caller-provided
- * `--now`) is recorded.
+ * `--now`) is recorded, plus launch identity from the environment when set.
+ * The first non-empty HQ_LAUNCH_REQUEST_ID, AGENT_OS_WORKER_LRQ_ID, or
+ * LAUNCH_REQUEST_ID overrides `--attempt-json` launchRequestId.
  *
  * Exit codes:
  *   0   write succeeded; absolute file path on stdout
@@ -62,6 +64,13 @@ Common args:
   --attempt-json optional JSON file merged into the attempt entry
   --now          ISO 8601 UTC timestamp (caller-provided for
                  deterministic tests)
+
+Launch identity:
+  The first non-empty HQ_LAUNCH_REQUEST_ID, AGENT_OS_WORKER_LRQ_ID,
+  LAUNCH_REQUEST_ID wins, even when the values disagree, and overrides
+  --attempt-json launchRequestId. Without these environment values, the JSON
+  identity is retained for audit only; it cannot authorize lease release.
+  Clear inherited launch variables when auditing on behalf of another launch.
 
 Trailers args:
   --worker-class    e.g. codex or claude-code

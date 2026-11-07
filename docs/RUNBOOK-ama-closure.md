@@ -745,6 +745,14 @@ job pages refuse recovery. The durable one-rerun workflow/head bound remains;
 a consumed retry is never replenished by capacity returning.
 
 
+Closure uses the shared hammer-stop evaluator by default, including historical
+CI stops that need Actions evidence. Missing optional predicates do not prevent
+enrichment when all recorded reasons are CI infrastructure reasons; empty or
+mixed reasons do not qualify. Actions evidence matches repository and host
+casing without relaxing the exact run, job or head binding. Offline regression
+coverage lives in `test/ci-recovery-regressions.test.mjs` and runs through the
+standard test runner. Existing lifecycle states and smoke promises are unchanged.
+
 A failed Actions job with proven zero executed steps is infrastructure;
 billing/quota annotations require that same zero-step proof. The shared classifier reuses job
 steps or performs at most one job-page read per inspection with a load-aware

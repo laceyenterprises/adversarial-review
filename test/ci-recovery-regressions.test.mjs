@@ -1,46 +1,15 @@
-// Run: node src/ci-recovery-regressions.test.mjs
-// Keep regression coverage within this batch's src scope while reusing the
-// ordinary offline runner and its per-file filesystem isolation.
+import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
-
-if (!process.env.ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT) {
-  const checkout = dirname(dirname(fileURLToPath(import.meta.url)));
-  const isolated = mkdtempSync('/tmp/ci-regression-runner-');
-  let status = 1;
-  try {
-    for (const name of readdirSync(checkout)) {
-      if (!['.git', 'data', 'test'].includes(name)) symlinkSync(join(checkout, name), join(isolated, name));
-    }
-    mkdirSync(join(isolated, 'test'));
-    for (const name of readdirSync(join(checkout, 'test'))) {
-      symlinkSync(join(checkout, 'test', name), join(isolated, 'test', name));
-    }
-    const name = 'ci-recovery-regressions.test.mjs';
-    symlinkSync(fileURLToPath(import.meta.url), join(isolated, 'test', name));
-    const env = { ...process.env };
-    delete env.NODE_TEST_CONTEXT;
-    const run = spawnSync(process.execPath, ['--preserve-symlinks', '--preserve-symlinks-main',
-      join(isolated, 'test/run-tests.mjs'), name], { cwd: isolated, env, stdio: 'inherit' });
-    if (run.error) throw run.error;
-    status = run.status ?? 1;
-  } finally {
-    rmSync(isolated, { recursive: true, force: true });
-  }
-  process.exit(status);
-}
-await import('../test/helpers/rate-limit-state-isolation.mjs');
+import { join } from 'node:path';
 const [
   { checkInfrastructureReason, enrichCiInfrastructureEvidence, hasMissingActionsEvidence, infrastructureEvidencePending },
   { buildFollowUpJob, listFollowUpJobsInDir, writeFollowUpJob },
   { recoverInfrastructureCiStops }, { writeAmaAuditEntry },
-  { evaluateHammerStopHold, isInfrastructureStop, readHammerStopForHead },
+  { evaluateHammerStopHold, isInfrastructureStop, canEnrichCiInfrastructureStop, readHammerStopForHead },
   { recordHammerRetryDispatch, readHammerRetryCapLedger },
   { deriveNextActionSnapshot, nextAction }, { bindClosureNextAction },
   { recoverAmaAutomation }, { maybeDispatchAmaClosureFor },
@@ -174,15 +143,15 @@ for (const field of ['rollup', 'statusCheckRollup']) {
   }
 }
 
-for (const executed of [false, true]) {
-  test(`closure enriches historical CI stops before selecting the owner, executed=${executed}`, async t => {
+for (const [executed, productionDefault] of [[false, false], [true, false], [false, true]]) {
+  test(`closure evaluates historical CI stops before selecting the owner, executed=${executed}, productionDefault=${productionDefault}`, async t => {
     const rootDir = root(t);
     const check = { name: 'unit', conclusion: 'FAILURE',
       detailsUrl: `https://github.com/${repo}/actions/runs/10/job/1` };
     recordHammerRetryDispatch(rootDir, { repo, prNumber },
       { jobKey: head, headSha: head, launchRequestId: 'fixture-infra', now });
-    audit(rootDir, check);
-    assert.equal(isInfrastructureStop(readHammerStopForHead({ hqRoot: rootDir, repo, prNumber, headSha: head })), false);
+    audit(rootDir, productionDefault ? failed : check);
+    assert.equal(isInfrastructureStop(readHammerStopForHead({ hqRoot: rootDir, repo, prNumber, headSha: head })), productionDefault);
     const body = '## Blocking issues\n- None.\n\n## Non-blocking issues\n- Synthetic finding\n\n## Verdict\nComment only';
     let evaluations = 0, reads = 0, evaluation;
     const result = await maybeDispatchAmaClosureFor({
@@ -200,7 +169,7 @@ for (const executed of [false, true]) {
       runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'not-taken' }),
       maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, reason: 'fixture-stop' }),
       deliverAlertImpl: async () => {},
-      evaluateHammerStopHoldImpl: async options => {
+      ...(productionDefault ? {} : { evaluateHammerStopHoldImpl: async options => {
         evaluations++;
         evaluation = await evaluateHammerStopHold({ ...options,
           deliverAlertImpl: async () => {},
@@ -211,18 +180,45 @@ for (const executed of [false, true]) {
               steps: executed ? [{ conclusion: 'failure', status: 'completed' }] : [] }] }) };
           } });
         return evaluation;
-      },
+      } }),
     });
-    assert.equal(evaluations, 1, JSON.stringify(result));
-    assert.equal(reads, 1);
+    assert.equal(evaluations, productionDefault ? 0 : 1, JSON.stringify(result));
+    assert.equal(reads, productionDefault ? 0 : 1);
     assert.equal(readHammerRetryCapLedger(rootDir, { repo, prNumber }).attemptCount, executed ? 1 : 0);
     if (executed) {
       assert.ok(!evaluation.changed?.includes('ci-infrastructure-recovered'),
         'ordinary gate recovery must not refund an executed failure as infrastructure');
     } else {
-      assert.equal(evaluation.action, 'release');
-      assert.deepEqual(evaluation.changed, ['ci-infrastructure-recovered']);
+      if (!productionDefault) {
+        assert.equal(evaluation.action, 'release');
+        assert.deepEqual(evaluation.changed, ['ci-infrastructure-recovered']);
+      }
       assert.notEqual(result.nextAction?.reason, 'automated-stop');
     }
   });
 }
+
+test('CI enrichment accepts absent predicates but requires actual infrastructure reasons', () => {
+  const stop = { reasons: ['ci-not-green'], failedChecks: [{ name: 'unit', conclusion: 'FAILURE',
+    detailsUrl: `https://github.com/${repo}/actions/runs/10/job/1` }] };
+  assert.equal(canEnrichCiInfrastructureStop(stop, repo), true);
+  assert.equal(canEnrichCiInfrastructureStop({ ...stop, reasons: [] }, repo), false);
+  assert.equal(canEnrichCiInfrastructureStop({ ...stop, reasons: ['primary-change-unknown'] }, repo), false);
+  assert.equal(canEnrichCiInfrastructureStop({ ...stop, predicate: 'primary-change-unknown' }, repo), false);
+  assert.equal(canEnrichCiInfrastructureStop(null, repo), false);
+});
+
+test('Actions evidence matches repository and host casing throughout enrichment', async () => {
+  const check = { name: 'unit', conclusion: 'FAILURE',
+    detailsUrl: 'https://GitHub.com/Example/Fixture/actions/runs/10/job/1' };
+  assert.equal(hasMissingActionsEvidence([check], repo), true);
+  assert.equal(hasMissingActionsEvidence([check], 'foreign/repo'), false);
+  let reads = 0;
+  const enriched = await enrichCiInfrastructureEvidence({ rollup: [check], repo, headSha: head,
+    execFileImpl: async () => {
+      reads++;
+      return { stdout: JSON.stringify({ jobs: [{ id: 1, head_sha: head, conclusion: 'failure', steps: [] }] }) };
+    } });
+  assert.equal(reads, 1);
+  assert.equal(checkInfrastructureReason(enriched[0]), 'actions-zero-step');
+});

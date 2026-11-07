@@ -112,8 +112,9 @@ export function isInfrastructureStop(stop) {
 }
 
 export function canEnrichCiInfrastructureStop(stop, repo) {
+  const reasons = [...(stop?.reasons || []), stop?.predicate].filter(Boolean);
   return Boolean(stop?.failedChecks?.length) && hasMissingActionsEvidence(stop.failedChecks, repo) && !isInfrastructureStop(stop)
-    && [...(stop.reasons || []), stop.predicate].every(reason => CI_INFRASTRUCTURE_STOP_REASONS.has(reason));
+    && reasons.length > 0 && reasons.every(reason => CI_INFRASTRUCTURE_STOP_REASONS.has(reason));
 }
 
 const DETERMINISTIC_STOP_REASONS = new Set([

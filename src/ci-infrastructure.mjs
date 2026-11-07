@@ -56,13 +56,13 @@ export function rollupInfrastructureEvidencePending(rollup, options) {
 
 export function hasMissingActionsEvidence(checks, repo) {
   return checks.some(item => !checkInfrastructureReason(item) && !Array.isArray(checkSteps(item))
-    && String(item?.detailsUrl || item?.details_url || '').startsWith('https://github.com/' + repo + '/actions/runs/'));
+    && String(item?.detailsUrl || item?.details_url || '').toLowerCase().startsWith(('https://github.com/' + repo + '/actions/runs/').toLowerCase()));
 }
 
 export function infrastructureEvidencePending(checks) {
   return Array.isArray(checks) && checks.some(checkInfrastructureReason) && checks.every(item =>
     checkInfrastructureReason(item) || (!Array.isArray(checkSteps(item))
-      && /^https:\/\/github\.com\/[^/]+\/[^/]+\/actions\/runs\/\d+\/job\/\d+/.test(String(item?.detailsUrl || item?.details_url || ''))));
+      && /^https:\/\/github\.com\/[^/]+\/[^/]+\/actions\/runs\/\d+\/job\/\d+/i.test(String(item?.detailsUrl || item?.details_url || ''))));
 }
 
 // Reuse job evidence already attached by another reader. Otherwise ONE read,
@@ -81,8 +81,8 @@ export async function enrichCiInfrastructureEvidence({ rollup, repo, headSha, ex
   const missing = items.filter(item => FAILED.has(checkItemState(item))
     && !checkInfrastructureReason(item) && !Array.isArray(checkSteps(item)));
   const candidate = missing.map(item => ({ item, match: String(item.detailsUrl || item.details_url || '').match(
-    /^https:\/\/github\.com\/([^/]+\/[^/]+)\/actions\/runs\/(\d+)\/job\/(\d+)(?:\?.*)?$/) }))
-    .find(({ match }) => match && match[1] === repo);
+    /^https:\/\/github\.com\/([^/]+\/[^/]+)\/actions\/runs\/(\d+)\/job\/(\d+)(?:\?.*)?$/i) }))
+    .find(({ match }) => match && match[1].toLowerCase() === String(repo).toLowerCase());
   if (!candidate || !headSha || !execFileImpl || signal?.aborted) return rollup;
   try {
     const timeoutMs = loadAwareTimeoutMs(3000);

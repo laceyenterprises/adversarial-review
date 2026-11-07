@@ -617,7 +617,8 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
      changes a module's public interface, dispatch flow, or operational contract
      and a `modules/<name>/<name>-walkthrough.md` exists for that module, a
      `<module dir>/changes/<TICKET-ID>.md` fragment plus any needed in-place
-     walkthrough/README section edits satisfies walkthrough currency. Reviewers
+     walkthrough/README section edits satisfies walkthrough currency. Create the
+     fragment when the author omitted it, or update the existing fragment. Reviewers
      accept the fragment; the walkthrough need not change when its existing text
      needs no correction. Follow `docs/walkthroughs/README.md` when available.
      If that guide is absent, include Summary, Interface changes (or none), and

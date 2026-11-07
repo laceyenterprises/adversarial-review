@@ -933,6 +933,7 @@ test('hammer documentation currency accepts ticket fragments without shared appe
   assert.match(normalized, /This adds no blocking condition/);
   const dispatched = buildMergeAgentPrompt({ repo: 'fixture/repo', prNumber: 42, baseBranch: 'main' });
   for (const prompt of [normalized, dispatched]) {
+    assert.match(prompt, /Create the fragment when the author omitted it, or update the existing fragment/);
     assert.match(prompt, /If that guide is absent, include Summary, Interface changes \(or none\), and/);
     assert.match(prompt, /Verification with (?:the )?commands/);
     assert.match(prompt, /observed results/);

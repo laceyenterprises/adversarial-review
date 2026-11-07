@@ -180,6 +180,28 @@ test('the cached loader tracks overlay edits and AGENT_OS_PROFILE', () => {
   }
 });
 
+test('a blank or padded AGENT_OS_PROFILE shares the cache slot of the profile it resolves to', () => {
+  const f = fixture({ 'config.yaml': TOP, 'config.profile.reference-host.yaml': OVERLAY });
+  try {
+    resetConfigCache();
+    const key = 'entitlements.fixture-agent.gh_bot_login';
+    const args = { topPath: f.topPath, modulePaths: [] };
+    const unset = loadConfigCached({ ...args, env: {} });
+    assert.equal(unset.get(key), 'overlay-bot[bot]');
+    // Blank values resolve as unset, so they must hit the unset slot.
+    assert.equal(loadConfigCached({ ...args, env: { AGENT_OS_PROFILE: '' } }), unset);
+    assert.equal(loadConfigCached({ ...args, env: { AGENT_OS_PROFILE: '   ' } }), unset);
+    // A padded name resolves to the trimmed profile and shares its slot.
+    const core = loadConfigCached({ ...args, env: { AGENT_OS_PROFILE: 'core' } });
+    assert.notEqual(core, unset);
+    assert.equal(core.get(key), 'base-bot[bot]');
+    assert.equal(loadConfigCached({ ...args, env: { AGENT_OS_PROFILE: '  core ' } }), core);
+  } finally {
+    resetConfigCache();
+    f.cleanup();
+  }
+});
+
 test('the entitlement bot-login reader resolves through the overlay', () => {
   const f = fixture({ 'config.yaml': TOP, 'config.profile.reference-host.yaml': OVERLAY });
   try {

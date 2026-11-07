@@ -6776,9 +6776,12 @@ function _cacheKeyFor({ topPath, modulePaths, env, legacyGeminiReviewer = false 
     }
   }
   // PROFILENODE-01: AGENT_OS_PROFILE selects the profile, so it is part of the
-  // slot identity like the declared env aliases.
-  if (Object.prototype.hasOwnProperty.call(envView, PROFILE_ENV)) {
-    envAliases.push([PROFILE_ENV, envView[PROFILE_ENV]]);
+  // slot identity like the declared env aliases. Key on the value
+  // resolveProfile actually reads (trimmed, blank = unset) so a blank or
+  // padded value shares the slot of the profile it resolves to.
+  const envProfile = nonBlankString(envView[PROFILE_ENV]);
+  if (envProfile) {
+    envAliases.push([PROFILE_ENV, envProfile]);
   }
   envAliases.sort(([a], [b]) => a.localeCompare(b));
   return JSON.stringify({

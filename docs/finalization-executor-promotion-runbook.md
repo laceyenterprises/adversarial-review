@@ -285,7 +285,10 @@ the resolved adapter/schema, counts by clean/remediated/unvalidated source and
 active/parked/terminal disposition, observed admissions and bounded receipt sample.
 SQLite read patience remains 1 second nominal, scaled once and clipped to a
 5-second ceiling. Schema comparison and receipt reads use the real deployed DB;
-the probe validates at most 100 recent receipts. Counts describe stored records,
+the probe validates at most 100 recent receipts. Expected receipt validation
+failures and JSON syntax errors increment `invalidSampledReceipts` without
+disabling admission availability; unexpected runtime or storage errors report
+`admission-schema-or-adapter-unavailable`. Counts describe stored records,
 not a whole-store provenance audit. The digest identifies probe code bytes,
 not a running watcher's build or effective lane route. Missing organic observations
 remain pending. Do not submit synthetic work, claim a lane or mutate state to

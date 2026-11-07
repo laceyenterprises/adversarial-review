@@ -103,9 +103,14 @@ Operator holds short-circuit before opening a repository state fence.
 
 REVIEWLARGE-01: initial `reviewer-prompt-too-large` failures use the existing
 bounded `pending-upstream` recovery path; stored same-head failures are eligible
-for bounded infrastructure recovery. Reviewers summarise base-declared generated
-paths and verified pure moves before sizing, then use deterministic chunks.
-Exhausted recovery is `reviewer-chunk-budget-exceeded` (exit 77).
+for bounded infrastructure recovery. Reviewers size and try raw diffs first,
+summarise base-declared generated paths and verified pure moves after a typed
+size refusal, then use deterministic chunks. Diffs below 64 KiB skip
+summarisation I/O. Only a typed size refusal at the final chunk stage becomes
+`reviewer-chunk-budget-exceeded` (exit 77); earlier unhandled preflights retain
+exit 76. Manifest disclosure sits inside Summary and passes final reply
+validation. The review-row graph, source projection hashes and existing smoke
+promises are unchanged.
 SIZEOWNER-02: terminal `reviewer-chunk-budget-exceeded` settles to `failed`.
 The size-failure writer now fences the dispatched head and session. Settlement
 records one durable `shrink-diff` next action and reserves a builder-class
@@ -749,8 +754,9 @@ new PR
   Codex and Claude reservations retain their streamed process ceiling rather
   than the legacy claim timeout, including after watcher restart.
 - An initial reviewer size refusal uses reserved CLI code 76 and bounded
-  `reviewer-prompt-too-large` recovery. The reviewer first summarises declared
-  generated files and verified pure moves, then chunks remaining code as needed.
+  `reviewer-prompt-too-large` recovery. In-attempt recovery sizes and tries the
+  raw diff, summarises declared generated files and verified pure moves on a
+  typed size refusal, then chunks remaining code as needed.
   Exhausted recovery exits 77, retains the refusal reason and uses the existing
   operator handoff and alert. Only typed errors select these size outcomes;
   model-output previews cannot select them. Transient chunk errors retain their

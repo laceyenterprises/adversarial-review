@@ -4,9 +4,10 @@ import { promisify } from 'node:util';
 import { parseDiffEntries } from './reviewer-util.mjs';
 import { fetchRepoFileAtRef } from './pack-lockhash.mjs';
 import { execGhWithRetry } from './gh-cli.mjs';
-import { ReviewerPromptTooLargeError } from './reviewer-outcomes.mjs';
+import { ReviewerPromptTooLargeError, ReviewerSizeRecoveryExhaustedError } from './reviewer-outcomes.mjs';
 
 const execFileAsync = promisify(execFile);
+export const REVIEW_SUMMARISATION_MIN_BYTES = 64 * 1024;
 export const GENERATED_PATHS_DECLARATION = '.github/review-generated-paths.json';
 const hash = text => createHash('sha256').update(text).digest('hex');
 const hashable = content => Buffer.isBuffer(content)
@@ -92,7 +93,9 @@ export function detectPureSplits(entries) {
 }
 
 export async function summariseReviewDiff({ diff, repo, baseSha, headSha, cwd,
-  generatedPaths = [], fetchFileImpl = fetchRepoFileAtRef, execFileImpl = execFileAsync }) {
+  minDiffBytes = REVIEW_SUMMARISATION_MIN_BYTES, generatedPaths = [], fetchFileImpl = fetchRepoFileAtRef, execFileImpl = execFileAsync }) {
+  // Small diffs do not justify repository-wide copy search or blob reads.
+  if (Buffer.byteLength(diff, 'utf8') < minDiffBytes) return { diff, manifest: [] };
   const entries = parseDiffEntries(diff);
   // Never lose preambles or unparseable entries through summarisation.
   if (!entries.length || /[\r\ufffd]/.test(diff) || !diff.startsWith('diff --git ') || entries.some(entry => !entry.parsed)) {
@@ -182,7 +185,13 @@ export function reviewManifestText(manifest) {
 
 export function discloseReviewManifest(reviewText, manifest) {
   const disclosure = reviewManifestText(manifest);
-  return disclosure && !reviewText.includes(disclosure) ? reviewText + disclosure : reviewText;
+  if (!disclosure || reviewText.includes(disclosure)) return reviewText;
+  // Keep the canonical Verdict final, including when an advisory follows it.
+  // The caller validates the final review including this audit data.
+  const summary = /^##[ \t]+Summary[ \t]*\r?$/im.exec(reviewText);
+  if (!summary) return reviewText;
+  const end = summary.index + summary[0].length;
+  return reviewText.slice(0, end) + disclosure + reviewText.slice(end);
 }
 
 // Size errors are retryable inside the attempt. Only exhausted recovery reaches
@@ -195,5 +204,8 @@ export async function retryLargeReview({ run, summarise, chunk }) {
   try { return await run(prepared); } catch (error) {
     if (!(error instanceof ReviewerPromptTooLargeError)) throw error;
   }
-  return chunk(prepared);
+  try { return await chunk(prepared); } catch (error) {
+    if (error instanceof ReviewerPromptTooLargeError) throw new ReviewerSizeRecoveryExhaustedError(error);
+    throw error;
+  }
 }

@@ -9,7 +9,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { resolveReviewBaseSha, loadReviewGeneratedPaths, summariseReviewDiff, reviewManifestText,
   discloseReviewManifest, retryLargeReview } from '../src/reviewer-large-diff.mjs';
-import { ReviewerPromptTooLargeError } from '../src/reviewer-outcomes.mjs';
+import { ReviewerPromptTooLargeError, ReviewerSizeRecoveryExhaustedError, reviewerExecutionFailureExitCode } from '../src/reviewer-outcomes.mjs';
+import { validateReviewerReply } from '../src/kernel/review-reply.mjs';
+import { extractReviewVerdict } from '../src/kernel/verdict.mjs';
 import { reviewAgyOversizedInChunks, resolveAgyOversizedReviewRoute } from '../src/reviewer-harness.mjs';
 
 const baseSha = 'a'.repeat(40), headSha = 'b'.repeat(40);
@@ -64,7 +66,7 @@ test('one-to-many split requires exact, complete, non-overlapping content covera
   const left = 'alpha\nbeta\n', right = 'gamma\ndelta\n';
   const diff = wholeFile('fixtures/all.txt', left + right, '-')
     + wholeFile('fixtures/left.txt', left) + wholeFile('fixtures/right.txt', right);
-  const prepared = await summariseReviewDiff({ diff });
+  const prepared = await summariseReviewDiff({ diff, minDiffBytes: 0 });
   assert.equal(prepared.diff, '');
   assert.equal(prepared.manifest.length, 3);
   assert.ok(prepared.manifest.every(entry => entry.movedFrom === 'fixtures/all.txt'));
@@ -76,7 +78,7 @@ test('one-to-many split requires exact, complete, non-overlapping content covera
     diff.replaceAll('\n', '\r\n'),
     diff.replace('+delta', '+\ufffd'),
   ]) {
-    const retained = await summariseReviewDiff({ diff: changed });
+    const retained = await summariseReviewDiff({ diff: changed, minDiffBytes: 0 });
     assert.equal(retained.diff, changed);
     assert.deepEqual(retained.manifest, []);
   }
@@ -97,7 +99,7 @@ test('git rename and copy detection independently verifies identical blob hashes
   git('add', '-A'); git('commit', '-qm', 'move and copy');
   const head = git('rev-parse', 'HEAD');
   const diff = execFileSync('git', ['diff', '--no-renames', base, head], { cwd, encoding: 'utf8' });
-  const prepared = await summariseReviewDiff({ diff, cwd, baseSha: base, headSha: head });
+  const prepared = await summariseReviewDiff({ diff, minDiffBytes: 0, cwd, baseSha: base, headSha: head });
   assert.equal(prepared.diff, '');
   assert.equal(prepared.manifest.length, 3);
   assert.ok(prepared.manifest.every(entry => entry.movedFrom === 'old.txt'));
@@ -105,7 +107,7 @@ test('git rename and copy detection independently verifies identical blob hashes
 
 test('rename metadata with different content hashes never exempts code', async () => {
   const diff = wholeFile('old.mjs', 'old code\n', '-') + wholeFile('new.mjs', 'new code\n');
-  const prepared = await summariseReviewDiff({ diff, cwd: '.', baseSha, headSha,
+  const prepared = await summariseReviewDiff({ diff, minDiffBytes: 0, cwd: '.', baseSha, headSha,
     execFileImpl: async (_cmd, args) => ({ stdout: args[0] === 'diff'
       ? 'diff --git a/old.mjs b/new.mjs\nsimilarity index 100%\nrename from old.mjs\nrename to new.mjs\n'
       : args[1].startsWith(baseSha) ? 'old code\n' : 'new code\n' }) });
@@ -116,12 +118,12 @@ test('rename metadata with different content hashes never exempts code', async (
 test('API rename metadata is verified at both pinned revisions without a local checkout', async () => {
   const diff = 'diff --git a/old.txt b/new.txt\nsimilarity index 100%\nrename from old.txt\nrename to new.txt\n';
   const reads = [];
-  const prepared = await summariseReviewDiff({ diff, baseSha, headSha, repo: 'example/project',
+  const prepared = await summariseReviewDiff({ diff, minDiffBytes: 0, baseSha, headSha, repo: 'example/project',
     fetchFileImpl: async (_repo, path, ref) => { reads.push([path, ref]); return 'identical\n'; } });
   assert.equal(prepared.diff, '');
   assert.equal(prepared.manifest[0].movedFrom, 'old.txt');
   assert.deepEqual(reads, [['old.txt', baseSha], ['new.txt', headSha]]);
-  const retained = await summariseReviewDiff({ diff, baseSha, headSha,
+  const retained = await summariseReviewDiff({ diff, minDiffBytes: 0, baseSha, headSha,
     fetchFileImpl: async () => '\ufffd' });
   assert.equal(retained.diff, diff, 'lossy binary decoding cannot prove identical bytes');
 });
@@ -129,13 +131,46 @@ test('API rename metadata is verified at both pinned revisions without a local c
 test('a reused move source retains its new code diff', async () => {
   const modifiedSource = 'diff --git a/old.mjs b/old.mjs\n--- a/old.mjs\n+++ b/old.mjs\n@@ -1 +1 @@\n-old code\n+new code\n';
   const diff = modifiedSource + wholeFile('new.mjs', 'old code\n');
-  const prepared = await summariseReviewDiff({ diff, cwd: '.', baseSha, headSha,
+  const prepared = await summariseReviewDiff({ diff, minDiffBytes: 0, cwd: '.', baseSha, headSha,
     execFileImpl: async (_cmd, args) => ({ stdout: args[0] === 'diff'
       ? 'diff --git a/old.mjs b/new.mjs\nsimilarity index 100%\nrename from old.mjs\nrename to new.mjs\n'
       : 'old code\n' }) });
   assert.equal(prepared.diff, modifiedSource);
   assert.equal(prepared.manifest.length, 1);
   assert.equal(prepared.manifest[0].path, 'new.mjs');
+});
+
+test('small diffs retain inline review without copy search or blob reads', async () => {
+  const diff = wholeFile('fixtures/generated.json', 'small generated content\n');
+  const prepared = await summariseReviewDiff({ diff, cwd: '.', baseSha, headSha,
+    generatedPaths: ['fixtures/generated.json'],
+    execFileImpl: () => assert.fail('small review must not search copies'),
+    fetchFileImpl: () => assert.fail('small review must not inspect blobs'),
+  });
+  assert.deepEqual(prepared, { diff, manifest: [] });
+});
+
+test('fitting raw reviews never summarise or chunk', async () => {
+  assert.equal(await retryLargeReview({ run: async () => clean,
+    summarise: () => assert.fail('raw prompt fits'), chunk: () => assert.fail('raw prompt fits'),
+  }), clean);
+});
+
+test('only a typed size failure after chunk recovery becomes terminal', async () => {
+  const initial = new ReviewerPromptTooLargeError('initial preflight');
+  const prepared = { diff: '+small', manifest: [] };
+  assert.equal(reviewerExecutionFailureExitCode(initial), 76);
+  await assert.rejects(retryLargeReview({ run: () => { throw initial; },
+    summarise: () => { throw initial; }, chunk: () => assert.fail('no summary available'),
+  }), error => error === initial && reviewerExecutionFailureExitCode(error) === 76);
+  await assert.rejects(retryLargeReview({ run: () => { throw initial; },
+    summarise: () => prepared, chunk: () => { throw new ReviewerPromptTooLargeError('chunk cap exhausted'); },
+  }), error => error instanceof ReviewerSizeRecoveryExhaustedError
+    && reviewerExecutionFailureExitCode(error) === 77 && /chunk cap exhausted/.test(error.message));
+  const transient = new Error('transient chunk failure');
+  await assert.rejects(retryLargeReview({ run: () => { throw initial; },
+    summarise: () => prepared, chunk: () => { throw transient; },
+  }), error => error === transient && reviewerExecutionFailureExitCode(error) === 1);
 });
 
 test('size failure retries summarisation, then chunking; ordinary failures never do', async () => {
@@ -179,9 +214,23 @@ test('deterministic code chunks preserve a blocking finding and posted scope dis
   assert.match(posted, /bounded reviewer chunks/);
   assert.match(posted, /summarisation of declared generated paths/);
   assert.equal(discloseReviewManifest(posted, manifest), posted);
+  assert.equal(validateReviewerReply(posted).ok, true);
+  assert.equal(extractReviewVerdict(posted), 'Request changes');
   const first = [...seen]; seen.length = 0;
   await reviewAgyOversizedInChunks(diff, '', options);
   assert.deepEqual(seen, first);
   await assert.rejects(reviewAgyOversizedInChunks(diff, '', { ...options, maxChunks: 1 }),
     error => error instanceof ReviewerPromptTooLargeError && /chunking unavailable/.test(error.message));
+});
+
+test('manifest remains inside Summary and preserves canonical verdicts and advisory', () => {
+  const manifest = [{ path: 'fixtures/generated.json', sha256: '0'.repeat(64) }];
+  for (const advisory of ['', '\n\n## Simplicity and cost (advisory)\nKeep the existing approach.']) {
+    const posted = discloseReviewManifest(clean + advisory, manifest);
+    assert.equal(validateReviewerReply(posted).ok, true);
+    assert.equal(extractReviewVerdict(posted), 'Comment only');
+    assert.ok(posted.indexOf('```json') > posted.indexOf('## Summary'));
+    assert.ok(posted.indexOf('```json') < posted.indexOf('## Blocking issues'));
+    assert.equal(discloseReviewManifest(posted, manifest), posted);
+  }
 });

@@ -410,7 +410,7 @@ test('REVPOSTSTALL-01: reviewer.mjs preserves before side calls, tracks them und
   };
   const main = at('async function main()');
   const readReusable = at('generatedReview.readReusable()', main);
-  assert.ok(readReusable < at('dispatch = preservedDispatch || (useAgyChunkFallback', main));
+  assert.ok(readReusable < at('dispatch = preservedDispatch || await reviewWithSizeRecovery()', main));
   const preserved = at('generatedReview.preserve({', main);
   assert.ok(at('DEBUG: review completed', main) < preserved);
   const generated = at('Review generated (', main);

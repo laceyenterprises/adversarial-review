@@ -3,11 +3,18 @@
 REVIEWLARGE-01 addresses the oversized-review failure described by the
 MERGEHOTSPOT-01 SEV report in agent-os.
 
-Before prompt sizing, reviewers replace declared generated files and verified
-pure moves with a manifest containing paths, added/removed line counts and
-SHA-256 content hashes. Moves also name their source. The posted review carries
-the manifest, so readers can see which content was summarised. Original diffs
-remain available to head grounding, scope classification and delivery binding.
+Reviewers route and size the raw diff first, then try the full prompt when it
+fits. A typed size refusal activates in-attempt summarisation: declared generated
+files and verified pure moves are replaced with a manifest containing paths,
+added/removed line counts and SHA-256 content hashes. Moves also name their
+source. Fitting raw reviews perform no declaration reads or copy search. Diffs
+below 64 KiB remain inline even during recovery, avoiding copy search and blob
+inspection when context overhead causes the refusal.
+
+The posted review carries the manifest inside `## Summary`, preserving the final
+`## Verdict` and any simplicity advisory. The complete payload is validated
+before preservation and posting. Original diffs remain available to head
+grounding, scope classification and delivery binding.
 
 A host repository can declare exact generated paths in
 `.github/review-generated-paths.json`:
@@ -40,8 +47,12 @@ chunk must complete and validate before aggregation. Any blocking finding
 blocks the combined verdict; file and line fields remain intact. The posted
 summary discloses chunking. A typed prompt-size failure is retried inside the
 review attempt with summarisation and then bounded chunking; quoted model text
-does not trigger recovery. Only exhausted recovery reaches the existing
-operator path, with the chunking or budget refusal reason preserved.
+does not trigger recovery. The same stages apply when an oversized cross-model
+route is unavailable and Gemini takes over. Only a typed size refusal from the
+final chunk stage becomes terminal exit 77, with its refusal reason preserved.
+An initial size error outside completed recovery retains exit 76 and the existing
+bounded same-head infrastructure retry; transient chunk failures retain their
+ordinary classification.
 
 No size recovery changes merge eligibility or authorises merging without a
 settled review of the current head.

@@ -1358,9 +1358,12 @@ sweep. Cleanup runs when a reviewer prepares a snapshot for that repo.
 
 ### Oversized reviewer prompts
 
-Declared generated paths and verified pure moves/splits are first replaced by a
-content-hashed manifest; see [large review diffs](docs/review-large-diffs.md) for
-the base-pinned declaration and detection rules. Posted reviews retain this manifest.
+Reviewers size and try the raw diff first. On a typed size refusal, declared
+generated paths and verified pure moves/splits can be replaced by a content-hashed
+manifest before retrying; diffs below 64 KiB skip summarisation I/O. See
+[large review diffs](docs/review-large-diffs.md) for the base-pinned declaration
+and detection rules. Posted reviews retain this manifest inside Summary, before
+the canonical Verdict, and validate the complete payload before preservation.
 Claude print-mode prompts travel on stdin, with explicit `--model`/`--effort`
 flags. Before routing a full prompt, the reviewer checks both delivery and
 context budgets. An oversized prompt stays with the selected cross-model
@@ -4565,6 +4568,8 @@ evidence ignores case and stores lowercase heads. Offline
 merge predicates and smoke commands remain unchanged.
 
 ## Change notes
+
+- REVIEWLARGE-01 final remediation: restore raw-first size recovery, defer copy/blob inspection until summarisation is needed (64 KiB diff floor), and disclose the manifest inside Summary before final reply validation. Only an exhausted chunk size refusal becomes exit 77; state projection hashes remain valid.
 
 - REVIEWLARGE-01: reviewers summarise base-declared generated paths and byte-identical moves/splits in a hashed manifest before prompt sizing. Typed prompt-size failures retry summarisation and bounded chunking; chunk findings retain provenance and any blocking finding blocks the combined verdict. Posted reviews disclose their scope; exhausted chunk plans retain the operator path. See [large review diffs](docs/review-large-diffs.md) and the MERGEHOTSPOT-01 SEV report in agent-os.
 

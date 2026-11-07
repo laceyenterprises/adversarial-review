@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { RepairableConflictError, recordHammerEarlyFailure } from '../src/ama/hammer-terminal-audit.mjs';
+import { REPAIRABLE_CONFLICT, RepairableConflictError, recordHammerEarlyFailure } from '../src/ama/hammer-terminal-audit.mjs';
 
 // --final marks the run's last command: no retry, remediation or phase follows.
 const args = process.argv.slice(2);
@@ -10,10 +10,11 @@ if (!/^[a-z][a-z0-9:-]*$/.test(reason || '')) {
   process.exitCode = 64;
 } else {
   try {
-    if (!recordHammerEarlyFailure(reason, { headSha, final })) throw new Error('missing audit identity');
+    const audit = recordHammerEarlyFailure(reason, { headSha, final });
+    if (!audit && !(reason === REPAIRABLE_CONFLICT && !final)) throw new Error('missing audit identity');
   } catch (error) {
     if (error instanceof RepairableConflictError) {
-      // CLOSERGATES-01: nothing was recorded; the run is not over.
+      // CLOSERGATES-01: only the conflict head was recorded; the run is not over.
       process.stderr.write(`HAM: ${error.message}. Do not end the run. Run Appendix D: release the lease, rebase and resolve, publish the commit, revalidate, then re-enter verify-head. If a resolution is unsafe, stop with conflict-semantic-unsafe.\n`);
       process.exitCode = 65;
     } else {

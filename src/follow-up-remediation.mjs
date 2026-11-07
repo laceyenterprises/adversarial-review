@@ -95,7 +95,7 @@ import { allBlockingDisputed } from './kernel/remediation-reply.mjs';
 import { requestWatcherWake } from './watcher-wake.mjs';
 import { REREVIEW_WAKE_REASONS, requestRereviewWake } from './rereview-wake.mjs';
 import { requestHammerWakeForSettledReviewStop } from './hammer-wake.mjs';
-import { hqLaunchObservation } from './remediation-job-ownership.mjs';
+import { recordHqLaunchObservation } from './remediation-hq-launch-observation.mjs';
 import { drainPendingNoRemediationJobs } from './no-remediation-follow-up.mjs';
 import { activeRemediationStopDecision, lifecycleStopDecision, resolveJobPRLifecycleSafe } from './follow-up-lifecycle.mjs';
 import { cancellationSettlesStop, sendWorkerSignal, workerCancelHandle } from './follow-up-worker-cancel.mjs';
@@ -1373,27 +1373,6 @@ async function failFollowUpJobForHqCancel({
   };
 }
 
-const HQ_LAUNCH_OBSERVATION_REFRESH_MS = 60 * 1000;
-
-// CLOSERREVIVE-01: persist the HQ launch status the reconcile pass just read.
-// Rewrites at most once a minute while the status is unchanged.
-function recordHqLaunchObservation({ job, jobPath, liveness, observedAt }) {
-  const observation = hqLaunchObservation(liveness?.dispatchStatus, observedAt);
-  if (!observation.status || observation.terminal) return job;
-  const previous = job.remediationWorker?.hqLaunch;
-  const previousAt = Date.parse(previous?.observedAt || '');
-  const nowMs = Date.parse(observedAt);
-  if (previous?.status === observation.status && Number.isFinite(previousAt)
-    && Number.isFinite(nowMs) && nowMs - previousAt < HQ_LAUNCH_OBSERVATION_REFRESH_MS) return job;
-  const updated = { ...job, remediationWorker: { ...job.remediationWorker, hqLaunch: observation } };
-  try {
-    writeFollowUpJob(jobPath, updated);
-    return updated;
-  } catch {
-    return job; // The next reconcile pass observes again.
-  }
-}
-
 async function reconcileFollowUpJob(args = {}) {
   return withRepositoryStateCycle(args.rootDir || ROOT, () => reconcileFollowUpJobWithinRepositoryCycle(args));
 }
@@ -1497,6 +1476,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
     workerTerminalEvent,
     workerTerminalReplyPath: paths?.replyPath || null,
   });
+  if (isHqWorker) job = recordHqLaunchObservation({ job, jobPath, liveness, observedAt: now() }); // CLOSERREVIVE-01
   if (!isHqWorker && liveness.state === 'exited') cleanupServiceCodexAuth(worker);
   // A publication refusal wins over reply text, no-progress handling and
   // published-head recovery. It cannot authorize a re-review or empty close.
@@ -1536,13 +1516,10 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
     if (completed) return { action: 'completed', ...completed };
   }
   if (liveness.state === 'active' && !lifecycleStop) {
-    // CLOSERREVIVE-01: an HQ launch has no local heartbeat; record what HQ said
-    // so closure reads the launch state, not an expired local timestamp.
-    const activeJob = isHqWorker ? recordHqLaunchObservation({ job, jobPath, liveness, observedAt: now() }) : job;
     return {
       action: 'active',
       reason: liveness.reason,
-      job: activeJob,
+      job,
       jobPath,
     };
   }

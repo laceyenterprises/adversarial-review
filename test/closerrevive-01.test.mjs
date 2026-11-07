@@ -14,6 +14,7 @@ import { sweepStuckInProgressClaims } from '../src/follow-up-stuck-claim-sweep.m
 import { remediationJobOwnership, staleClaimMayBeReclaimed, hqLaunchObservation,
   REMEDIATION_HQ_LAUNCH_OBSERVATION_GRACE_MS } from '../src/remediation-job-ownership.mjs';
 import { reconcileFollowUpJob } from '../src/follow-up-remediation.mjs';
+import { recordHqLaunchObservation } from '../src/remediation-hq-launch-observation.mjs';
 
 const REPO = 'fixture/project';
 const PR = 77;
@@ -102,12 +103,16 @@ test('an HQ-dispatched job stays owned while its launch runs and stops owning on
       { now: iso(later), logger })?.jobId, 'job-hq-1');
   }
 
-  // A terminal launch is not owned, whatever the last observation said.
-  const terminal = JSON.parse(readFileSync(jobPath, 'utf8'));
-  terminal.remediationWorker.hqLaunch = hqLaunchObservation('succeeded', iso(runningAt + 90_000));
-  writeFileSync(jobPath, JSON.stringify(terminal));
+  // The reconcile pass that reads the launch as exited records it as terminal,
+  // so the closer stops reading it as the owner well inside the running window.
+  const exitedAt = runningAt + 90_000;
+  await reconcileFollowUpJob({ rootDir: root, job: JSON.parse(readFileSync(jobPath, 'utf8')),
+    jobPath, now: () => iso(exitedAt), execFileImpl: execFileImpl('succeeded'),
+    resolvePRLifecycleImpl: async () => null, log: logger });
+  assert.deepEqual(JSON.parse(readFileSync(jobPath, 'utf8')).remediationWorker.hqLaunch,
+    { status: 'succeeded', terminal: true, observedAt: iso(exitedAt) });
   assert.equal(findActiveRemediationJob(root, { repo: REPO, prNumber: PR },
-    { now: iso(runningAt + 120_000), logger }), null);
+    { now: iso(exitedAt + 1000), logger }), null);
 });
 
 test('the stale sweep and the closer never disagree: a live owner is never reclaimed', async t => {
@@ -232,4 +237,35 @@ test('a moved head with no final round in progress still waits for an exact-head
   const result = await maybeDispatchAmaClosureFor(closureArgs(root, {
     maybeDispatchAmaCloserImpl: async () => assert.fail('no closer launches without a review') }));
   assert.equal(result.nextAction?.action, 'review');
+});
+
+test('a completed comment-only final round that pushed the current head launches the closer', async t => {
+  const { root } = seedQueue(t, finalRoundJob({ status: 'completed', completedAt: iso(Date.now() - 60_000),
+    reReview: { suppressed: 'comment-only-final-round' }, completion: { workerPushedHeadSha: MOVED } }), 'completed');
+  let launched = null;
+  await maybeDispatchAmaClosureFor(closureArgs(root, {
+    maybeDispatchAmaCloserImpl: async args => {
+      launched = args;
+      return { dispatched: true, launchRequestId: 'lrq_closer' };
+    } }));
+  assert.ok(launched, 'the watcher withholds re-review of the pushed head, so the closer must own it');
+  assert.equal(launched.sharedNextAction.decision.reason, 'suppressed-final-push');
+});
+
+test('a launch read as exited is recorded terminal at once; a running read refreshes once a minute', t => {
+  const { jobPath } = seedQueue(t, hqJob());
+  const job = JSON.parse(readFileSync(jobPath, 'utf8'));
+  const gone = recordHqLaunchObservation({ job, jobPath, observedAt: iso(T0),
+    liveness: { state: 'exited', dispatchStatus: { status: 'not-found' } } });
+  assert.deepEqual(gone.remediationWorker.hqLaunch, { status: 'not-found', terminal: true, observedAt: iso(T0) });
+  assert.equal(JSON.parse(readFileSync(jobPath, 'utf8')).remediationWorker.hqLaunch.terminal, true);
+
+  const running = recordHqLaunchObservation({ job, jobPath, observedAt: iso(T0),
+    liveness: { state: 'active', dispatchStatus: { status: 'running' } } });
+  assert.equal(running.remediationWorker.hqLaunch.status, 'running');
+  assert.equal(recordHqLaunchObservation({ job: running, jobPath, observedAt: iso(T0 + 30_000),
+    liveness: { state: 'active', dispatchStatus: { status: 'running' } } }), running);
+  assert.equal(recordHqLaunchObservation({ job: running, jobPath, observedAt: iso(T0 + 61_000),
+    liveness: { state: 'active', dispatchStatus: { status: 'running' } } }).remediationWorker.hqLaunch.observedAt,
+  iso(T0 + 61_000));
 });

@@ -6,7 +6,6 @@ import { basename, dirname, join } from 'node:path';
 import * as followUpJobs from './follow-up-jobs.mjs';
 import { loadEffectiveMergeAuthorityConfig } from './ama/effective-policy.mjs';
 import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
-import { staleClaimMayBeReclaimed } from './remediation-job-ownership.mjs';
 import { currentProcessGroupId, isPgidAlive } from './process-group-identity.mjs';
 import { readWorkerCpuPercent, resolveWorkerArtifactProgressMs, resolveWorkerSessionProgressMs } from './follow-up-worker-progress.mjs';
 
@@ -280,11 +279,11 @@ function stopStaleInProgressFollowUpJob({
     return null;
   }
   const worker = job?.worker || job?.remediationWorker || {};
+  // An HQ launch is stopped by the reconcile pass and the stuck-claim sweep,
+  // which read its launch state; this local-progress stop never applies to it.
   if (worker?.dispatchMode === 'hq') {
     return null;
   }
-  // CLOSERREVIVE-01: the closer's owner predicate also gates the stale stop.
-  if (!staleClaimMayBeReclaimed(job, { now: nowMs }).reclaim) return null;
   const recorded = resolveLatestFollowUpObservedAtMs(latest);
   const artifact = resolveWorkerArtifactProgressMs(rootDir, job);
   const { sourceMs, source } = artifact.sourceMs !== null && artifact.sourceMs > (recorded.sourceMs ?? 0)

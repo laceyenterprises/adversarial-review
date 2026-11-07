@@ -184,6 +184,8 @@ function normalizeReviewerModel(reviewerInput) {
     case 'claude-code-corp':
     case 'claude-reviewer':
     case 'claude-reviewer-corp':
+    case 'remediator-claude':
+    case 'remediator-claude-corp':
       return 'claude';
     case 'codex':
     case 'codex-corp':
@@ -526,6 +528,7 @@ function baseRouteForSubject(builderClass, {
     }, routeTable),
     operatorPinnedReviewer,
   );
+  if (!resolvedRoute) return null;
   Object.defineProperty(resolvedRoute, 'routeTable', {
     value: routeTable,
     enumerable: false,

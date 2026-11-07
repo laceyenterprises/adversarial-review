@@ -17,6 +17,7 @@ function censusUnavailable(verb, interpreter, cause, code = cause?.code) {
 export function nativeControllerIdentity(verb, pid, { execFileSyncImpl = execFileSync, env = process.env, timeoutImpl = loadAwareTimeoutMs } = {}) {
   if (!Number.isInteger(pid) || pid <= 1) throw new Error('invalid controller census identity');
   const interpreter = env.HQ_PYTHON3 || env.AGENT_OS_PY || 'python3';
+  if (verb !== 'pgid' && verb !== 'group') throw censusUnavailable(verb, interpreter, null, 'EINVAL');
   let result;
   try {
     const output = execFileSyncImpl(interpreter, ['-I', '-B', helperPath, verb, String(pid)], {

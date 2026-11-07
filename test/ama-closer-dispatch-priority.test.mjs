@@ -1236,10 +1236,14 @@ test('AMASCALE: observed backlog holds at the floor, then scales below the ceili
   assert.deepEqual(events.find(({ event }) => event === 'ama.closer_queue_depth'), {
     event: 'ama.closer_queue_depth', eligibleBacklog: 1, liveLaunches: 3, effectiveCap: 3,
   });
+  const backlogPath = join(rootDir, 'data', 'ama-closure-lag', 'state.json');
+  const deferred = JSON.parse(readFileSync(backlogPath, 'utf8')).prs['acme/repo#404'];
+  assert.equal(typeof deferred.deferredAt, 'number');
+  assert.equal(typeof deferred.closerSeenAt, 'number');
 
   // Current eligible observations, rather than the active count plus one,
   // increase the dispatch limit. Reobserving this candidate does not double-count it.
-  for (const prNumber of [997, 998, 999]) {
+  for (const prNumber of [991, 992, 993]) {
     await observeCloserBacklog({ rootDir, repo: 'acme/repo', prNumber });
   }
   assert.equal((await maybeDispatchAmaCloser(args)).dispatched, true);
@@ -1247,6 +1251,9 @@ test('AMASCALE: observed backlog holds at the floor, then scales below the ceili
   assert.deepEqual(events.filter(({ event }) => event === 'ama.closer_queue_depth').at(-1), {
     event: 'ama.closer_queue_depth', eligibleBacklog: 4, liveLaunches: 3, effectiveCap: 4,
   });
+  const dispatched = JSON.parse(readFileSync(backlogPath, 'utf8')).prs['acme/repo#404'];
+  assert.equal(dispatched.closerSeenAt, undefined);
+  assert.equal(dispatched.deferredAt, undefined);
 });
 
 test('LCR: dead no-LRQ AMA launch lease does not globally hold hammer dispatch', async (t) => {
@@ -1738,9 +1745,15 @@ test('AMASCALE: five blocked decision launches leave all other-PR capacity avail
 });
 
 
-test('AMASCALE: ten eligible closer dispatches are admitted with floor three and ceiling 32', async (t) => {
+test('AMASCALE: pending demand admits ten closer dispatches with floor three and ceiling 32', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'amascale-ten-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  // Demand from deferred PRs, separately from launched work, raises the cap.
+  const now = Date.now();
+  for (let prNumber = 200; prNumber < 210; prNumber++) {
+    await observeCloserBacklog({ rootDir, repo: 'acme/repo', prNumber,
+      deferred: true, now: now - (prNumber - 200) * 5 * 60 * 1000 });
+  }
   const deps = testDeps();
   const results = await Promise.all(Array.from({ length: 10 }, (_, index) => maybeDispatchAmaCloser({
     ...findingsRemediationArgs(rootDir, { prMetadata: { prNumber: 100 + index },

@@ -7519,7 +7519,8 @@ async function maybeDispatchAmaCloserAttempt({
   const otherPrLaunches = activeLaunches.filter((record) => record.holdsCapacity === true
     && (record.repo !== repo || Number(record.prNumber) !== Number(prNumber)));
   let eligibleCloserBacklog = 0;
-  try { eligibleCloserBacklog = await observeCloserBacklogImpl({ rootDir, repo, prNumber, logger }); }
+  try { eligibleCloserBacklog = await observeCloserBacklogImpl({ rootDir, repo, prNumber, pending: !samePrLaunch,
+    activePrKeys: activeLaunches.map(record => `${record.repo}#${record.prNumber}`), logger }); }
   catch (error) { logger?.warn?.(`AMA backlog observation failed: ${error.message}`); }
   // A successful census can lower the cap below existing launches. Adding a
   // candidate to the live count here would defeat that backpressure.
@@ -7535,6 +7536,8 @@ async function maybeDispatchAmaCloserAttempt({
   });
   if (samePrLaunch || otherPrLaunches.length >= maxConcurrentLaunches) {
     const activeLaunch = samePrLaunch || otherPrLaunches[0];
+    try { await observeCloserBacklogImpl({ rootDir, repo, prNumber, pending: !samePrLaunch, deferred: !samePrLaunch, logger }); }
+    catch (error) { logger?.warn?.(`AMA backlog deferral observation failed: ${error.message}`); }
     logAmaCloserDispatchEvent(logger, 'ama_closer.dispatch_deferred_active_launch', {
       repo,
       prNumber,
@@ -8375,6 +8378,8 @@ async function maybeDispatchAmaCloserAttempt({
           }));
           deleteAmaCloserLease(rootDir, leaseIdentity);
         }
+        try { await observeCloserBacklogImpl({ rootDir, repo, prNumber, pending: false, logger }); }
+        catch (error) { logger?.warn?.(`AMA backlog dispatch observation failed: ${error.message}`); }
         return noAmaDispatch({ dispatched: false, skipMergeAgent: true, inFlight: true,
           reason: 'dispatch-retry-live', launchRequestId: previous.launchRequestId || null,
           liveRetryLaunchRequestId: retryProbe.liveRetryLaunchRequestId,
@@ -8510,6 +8515,8 @@ async function maybeDispatchAmaCloserAttempt({
       // then dies early cannot re-fire forever. Branch-holder / transient / plain
       // dispatch-failed never spawned a worker and are intentionally NOT counted.
       if (ambiguousLaunch) {
+        try { await observeCloserBacklogImpl({ rootDir, repo, prNumber, pending: false, logger }); }
+        catch (error) { logger?.warn?.(`AMA backlog dispatch observation failed: ${error.message}`); }
         promoteLaunchedLease(parsedFailure);
         recordHammerLaunchAgainstCap('ambiguous-launch-spawned', parsedFailure.launchRequestId);
       }
@@ -8580,6 +8587,8 @@ async function maybeDispatchAmaCloserAttempt({
   }
 
   const parsed = normalizeDispatchIdentifiers(parseAmaCloserDispatchOutput(execResult?.stdout || ''));
+  try { await observeCloserBacklogImpl({ rootDir, repo, prNumber, pending: false, logger }); }
+  catch (error) { logger?.warn?.(`AMA backlog dispatch observation failed: ${error.message}`); }
   recordHammerLaunchAgainstCap('confirmed-launch', parsed.launchRequestId);
   updateDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
     const liveRecord = { ...(current || {}) };

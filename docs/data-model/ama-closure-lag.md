@@ -9,13 +9,22 @@ deduplicated SEV1 pages. It grants no merge authority and never releases leases.
 
 | Field | Shape | Contract |
 |---|---|---|
-| `prs` | object keyed by `repo#PR` | Each entry may contain `closerSeenAt`, `eligibleAt`, `headSha`, `reason`, `terminal`, and `terminalAt`. Timestamps are epoch milliseconds. |
+| `prs` | object keyed by `repo#PR` | Each entry may contain `closerSeenAt`, `deferredAt`, `eligibleAt`, `headSha`, `reason`, `terminal`, and `terminalAt`. Timestamps are epoch milliseconds. |
 | `samples` | array | Completion observations `{ at, lagMs, pr, reason }` used in rolling p95 lag. |
 | `breaches` | object keyed by `p95` or `pr:repo#PR` | Each value contains an immutable breach `event` and a `paged` boolean. Successful delivery sets `paged`; failures leave it false for retry. |
 | `sloMs` | optional number | Last supplied p95 SLO, defaulting to 1800000 milliseconds when absent. |
 
-`observeCloserBacklog` returns a Promise of the count of nonterminal PRs seen
-within ten minutes. `observeClosureLag` returns a Promise of the observation's
+`observeCloserBacklog` returns a Promise of the count of pending nonterminal PRs
+attempted within `CLOSER_BACKLOG_STALE_MS` (six hours). `closerSeenAt` records the
+latest pending attempt; `deferred: true` also sets `deferredAt` on first deferral
+and preserves it on retries. `pending: false` clears both fields after dispatch
+or when an active launch already owns the PR. Terminal PR observations also clear
+both fields. Active launches are counted separately by the dispatch caller.
+The caller supplies `activePrKeys` (`repo#PR`) to retire legacy pending markers
+for every known active owner before counting, including observations written
+before dispatch-time clearing existed. Lag samples are retained.
+Older ledgers with only `closerSeenAt` remain readable without migration.
+`observeClosureLag` returns a Promise of the observation's
 events and pending breach pages; it logs events and delivers pages after saving
 the state. The watcher records eligibility and backlog, and lifecycle sync or
 the common daemon merge boundary marks terminal PRs before post-merge receipt
@@ -35,13 +44,15 @@ pool behind another writer. Contention expiry or IO failures reject the observat
 a unique temporary file, file fsync and rename, with best-effort directory fsync.
 Page delivery and its acknowledgement use separate lock acquisitions.
 
-Explicit ineligibility or a changed head clears a nonterminal wait. Terminal
+Explicit ineligibility or a changed head clears a nonterminal lag wait.
+Lag resets preserve pending closer demand and its first deferral because a
+closer can repair an ineligible or changed head. Terminal
 entries retain their head and terminal time through eligibility and backlog
 observations. Re-arming requires positive OPEN evidence at a different known
 head with `observedAt` strictly after `terminalAt`; stale observations and
 same-head eligibility cannot re-arm. `observedAt` defaults to `now`; snapshot
 callers supply the snapshot's observation time rather than its delivery time.
-No persistent fields or migration are added.
+The optional scheduling field `deferredAt` requires no migration.
 
 Before creating or retrying an undelivered per-PR breach, the observer reads
 that PR's live state once through an injectable reader. Merged or closed PRs

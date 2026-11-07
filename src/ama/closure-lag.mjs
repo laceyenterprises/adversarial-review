@@ -1,5 +1,5 @@
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
-// Diagnostics only. This state never authorizes a merge or releases a lease.
+// Scheduling and diagnostics only. Never authorizes a merge or releases a lease.
 import fsExt from 'fs-ext';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
@@ -67,15 +67,34 @@ async function locked(rootDir, action, logger = console) {
   }
 }
 
-export async function observeCloserBacklog({ rootDir, repo, prNumber, now = Date.now(), logger = console }) {
+// Scheduling observations survive slow watcher passes, but abandoned waits expire.
+export const CLOSER_BACKLOG_STALE_MS = 6 * 60 * 60 * 1000;
+
+export async function observeCloserBacklog({ rootDir, repo, prNumber, pending = true,
+  deferred = false, activePrKeys = [], now = Date.now(), logger = console }) {
   return locked(rootDir, (state) => {
     const key = `${repo}#${prNumber}`;
-    state.prs[key] ??= {};
+    const pr = state.prs[key] ??= {};
     // A census is not evidence that a terminal PR reopened.
-    if (!state.prs[key].terminal) state.prs[key].closerSeenAt = now;
-    // A stale observation is not a current eligible backlog. Active launches
-    // are counted independently by the caller and retain their exclusivity.
-    return Object.values(state.prs).filter((pr) => pr.closerSeenAt >= now - 600000 && !pr.terminal).length;
+    if (!pending || pr.terminal) {
+      delete pr.closerSeenAt;
+      delete pr.deferredAt;
+    } else {
+      pr.closerSeenAt = now;
+      if (deferred) pr.deferredAt ??= now;
+    }
+    // Active launches are counted independently by the caller. Expiration uses
+    // the latest attempt, preserving the first deferral for scheduling order.
+    // Also retire observations left by writers predating dispatch-time clearing.
+    for (const activeKey of activePrKeys) {
+      const active = state.prs[activeKey];
+      if (active) {
+        delete active.closerSeenAt;
+        delete active.deferredAt;
+      }
+    }
+    return Object.values(state.prs).filter((pr) =>
+      pr.closerSeenAt >= now - CLOSER_BACKLOG_STALE_MS && !pr.terminal).length;
   }, logger);
 }
 
@@ -105,6 +124,7 @@ function markTerminal(state, key, { repo, prNumber, headSha, merged, mergedAt, n
   pr.terminal = true;
   pr.terminalAt = Math.max(pr.terminalAt || 0, now);
   delete pr.closerSeenAt;
+  delete pr.deferredAt;
   delete state.breaches[`pr:${key}`];
 }
 
@@ -159,7 +179,10 @@ export async function observeClosureLag({ rootDir, repo, prNumber, headSha, elig
       && observedAt > pr.terminalAt;
     if (!merged && !closed && (!pr.terminal || reopened)) {
       if (reopened || eligible === false || (headSha && pr.headSha && headSha !== pr.headSha)) {
-        pr = state.prs[key] = { headSha };
+        // Merge eligibility and head churn reset the lag sample, not a PR's
+        // pending closer demand (a closer may be needed to repair that head).
+        pr = state.prs[key] = { headSha, ...(!reopened && pr.closerSeenAt != null
+          ? { closerSeenAt: pr.closerSeenAt, ...(pr.deferredAt != null ? { deferredAt: pr.deferredAt } : {}) } : {}) };
         delete state.breaches[`pr:${key}`];
       }
       if (eligible && pr.eligibleAt == null) {

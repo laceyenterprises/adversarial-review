@@ -1,5 +1,6 @@
 import { isCurrentAuthoritativeFamilyReview, amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
 import { carryHammerWithdrawals, createReviewCurrencyReader, rebaseCurrencyCovers } from './ama/review-currency.mjs';
+import { readReviewCarryForwardRecord } from './review-carry-forward.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { classifyOperatorGatedFindings } from './ama/operator-label-gates.mjs';
 import { readReviewFailureDecision } from './review-retry-exhaustion.mjs';
@@ -705,6 +706,7 @@ function pickAdversarialGateStatus({
   hasActiveSamePrRemediation = false,
   hammerWithdrawals = [],
   reviewCurrency = null,
+  reviewCarryForward = null,
 } = {}) {
   const context = resolveGateStatusContext(env);
   let operatorLabelGates = [];
@@ -966,7 +968,9 @@ function pickAdversarialGateStatus({
     return decide('pending', 'Adversarial review (primary quota-capped) is awaiting fallback verdict.', 'awaiting-fallback');
   }
 
-  if (primaryRowIsStale && !rebaseCurrencyCovers(reviewCurrency, reviewedHead, headSha)) {
+  const carriedForward = Boolean(reviewCarryForward && reviewCarryForward.reviewedHead === reviewedHead
+    && reviewCarryForward.currentHead === headSha);
+  if (primaryRowIsStale && !rebaseCurrencyCovers(reviewCurrency, reviewedHead, headSha) && !carriedForward) {
     return decide(
       'pending',
       'Live head has advanced past the reviewed head; re-review of the current head is pending.',
@@ -1229,9 +1233,15 @@ async function buildAdversarialGateSnapshot(rootDir, {
   const operatorDecisionId = decisionUpdatedMs !== null && latestFailureMs !== null
     && decisionUpdatedMs >= latestFailureMs ? failureDecision?.id : undefined;
 
+  // REVIEWCARRY-01: the recorded generated-only carry-forward for this exact pair.
+  const rowReviewedHead = resolvedRow?.reviewer_head_sha || null;
+  const reviewCarryForward = headSha && rowReviewedHead && rowReviewedHead !== headSha
+    ? readReviewCarryForwardRecord(rootDir, { repo, prNumber, reviewedHead: rowReviewedHead, currentHead: headSha })
+    : null;
   return {
     reviewRow: resolvedRow ? { ...resolvedRow, operator_decision_id: operatorDecisionId } : resolvedRow,
     latestJob,
+    reviewCarryForward,
     hasActiveSamePrRemediation,
     activeFollowUpJob,
     operatorApproval,

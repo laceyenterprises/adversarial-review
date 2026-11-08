@@ -311,6 +311,19 @@ test('static-only exclusions apply after resolving retained rename identities', 
   }
 });
 
+test('static-only scope deduplicates retained aliases and current names in first-seen order', async t => {
+  const f = fixture(t, { org: null });
+  ensureReviewStateSchema(f.db);
+  f.seed([repository(1, 'example-org/old')]);
+  f.seed([repository(1, 'example-org/new')]);
+  const refresh = f.create();
+  const repos = await refresh(null,
+    ['example-org/old', 'example-org/kept', 'example-org/new', 'example-org/kept']);
+  assert.deepEqual(repos, ['example-org/new', 'example-org/kept']);
+  assert.deepEqual(await refresh(null, repos), repos);
+  assert.equal(f.calls, 0);
+});
+
 test('chain rename fallback explicitly warns about the current name fenced by history', async t => {
   const f = fixture(t);
   ensureReviewStateSchema(f.db);
@@ -321,7 +334,7 @@ test('chain rename fallback explicitly warns about the current name fenced by hi
   f.seed([repository(2, 'example-org/a'), repository(1, 'example-org/b')]);
   f.fail();
   assert.deepEqual(await f.create()(f.octokit, []), ['example-org/b']);
-  assert.ok(f.warnings.some(text => text.includes('omitted current repository example-org/a')
+  assert.ok(f.warnings.some(text => text.includes('omitted candidate repository example-org/a')
     && text.includes('ambiguous ownership history')));
 });
 
@@ -336,9 +349,9 @@ test('fallback warns for fenced static names absent from current identities but 
   }
   f.fail();
   assert.deepEqual(await refresh(f.octokit, []), []);
-  const omissions = f.warnings.filter(text => text.includes('omitted current repository'));
+  const omissions = f.warnings.filter(text => text.includes('Startup fallback omitted'));
   assert.equal(omissions.length, 1);
-  assert.match(omissions[0], /example-org\/static/);
+  assert.match(omissions[0], /omitted candidate repository example-org\/static/);
 });
 
 test('busy complete startup listing explains why new repositories await reconciliation', async t => {

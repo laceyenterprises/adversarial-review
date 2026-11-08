@@ -35,14 +35,17 @@ On startup listing failure, discovery reads current `repository_identities`
 names for the configured organization, unions configured static names, and
 filters case-insensitive short/full-name exclusions and persisted quarantine.
 The same exclusion predicate applies to static and discovered names on both
-successful and fallback listings. Static names resolve retained rename identities
-before exclusion, including when no organization is configured. Fallback also
-omits names held by more than one `repository_id` in `repository_name_history`, including on first deploy
-before quarantine has been populated. It logs
+successful and fallback listings. Static names resolve retained rename
+identities before exclusion, including when no organization is configured.
+Static-only scope deduplicates resolved names in first-seen order. Fallback
+also omits names held by more than one `repository_id` in
+`repository_name_history`, including on first deploy before quarantine has
+been populated. It logs
 `watching N repos (fallback: last known set)` and warns for each non-excluded
 static or known candidate omitted by quarantine or ambiguous history. These are
-historical observations, not proof of current visibility or archive status; the next complete successful
-listing replaces the fallback, excluding archived repositories as usual.
+historical observations, not proof of current visibility or archive status;
+the next complete successful listing replaces the fallback, excluding archived
+repositories as usual.
 Partial paginated listings never replace scope.
 
 `repository_discovery_quarantine` in `data/reviews.db` contains `full_name`

@@ -20,7 +20,7 @@ export function createRepositoryRefresher({ config, db, rootDir, additionalState
 
   async function refresh(octokit, currentRepos) {
     let activeRepos = currentRepos;
-    if (!config.org) return activeRepos.map(name => canonicalRepositoryName(db, name))
+    if (!config.org) return [...new Set(activeRepos.map(name => canonicalRepositoryName(db, name)))]
       .filter(name => !isExcluded(name));
 
     const startedAt = now();
@@ -123,7 +123,7 @@ export function createRepositoryRefresher({ config, db, rootDir, additionalState
           .filter(name => name.split('/')[0].toLowerCase() === config.org.toLowerCase());
         const candidates = [...new Set([...(config.repos || []).map(name => canonicalRepositoryName(db, name)), ...known])];
         for (const name of candidates.filter(name => !isExcluded(name) && quarantined.has(name.toLowerCase()))) {
-          logger.warn(`[watcher] Startup fallback omitted current repository ${name}: persisted quarantine or ambiguous ownership history; an authoritative safe listing is required.`);
+          logger.warn(`[watcher] Startup fallback omitted candidate repository ${name}: persisted quarantine or ambiguous ownership history; an authoritative safe listing is required.`);
         }
         activeRepos = candidates.filter(name => !isExcluded(name) && !quarantined.has(name.toLowerCase()));
         logger.log(`[watcher] watching ${activeRepos.length} repos (fallback: last known set): ${activeRepos.join(', ')}`);

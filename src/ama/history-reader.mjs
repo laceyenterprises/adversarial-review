@@ -105,7 +105,7 @@ export function createHistoryReader(options = {}) {
       }));
       const failed = settled.find(result => result.status === 'rejected');
       if (failed) throw failed.reason;
-      pending.push(...settled.flatMap(result => result.value));
+      for (const result of settled) for (const child of result.value) pending.push(child);
     }
     // Completion order of concurrent requests must not affect the evidence.
     changed.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
@@ -194,10 +194,17 @@ export function createHistoryReader(options = {}) {
     const batches = [result];
     const pageCount = Math.max(1, Math.ceil(result.total_commits / 100));
     let nextPage = 2;
+    let stopped = false;
     const workers = await Promise.allSettled(Array.from({ length: Math.min(4, pageCount - 1) }, async () => {
-      while (nextPage <= pageCount) {
+      while (!stopped && nextPage <= pageCount) {
         const number = nextPage++;
-        batches[number - 1] = await page(`${path}?per_page=100&page=${number}`, fields);
+        try {
+          batches[number - 1] = await page(`${path}?per_page=100&page=${number}`, fields);
+        } catch (error) {
+          // Let active reads settle, but stop claiming pages after a failure.
+          stopped = true;
+          throw error;
+        }
       }
     }));
     const failed = workers.find(entry => entry.status === 'rejected');

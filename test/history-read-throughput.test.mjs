@@ -122,6 +122,65 @@ test('an incomplete tree still refuses complete evidence', async () => {
   await assert.rejects(get(path), /incomplete tree/);
 });
 
+test('a wide directory wave reaches child validation without exceeding argument limits', async () => {
+  const wide = sha('wide-directory'), child = sha('truncated-wide-child');
+  const requested = [];
+  const get = createHistoryReader({ execGhWithRetryImpl: async ({ args: argv }) => {
+    const key = argv[1];
+    requested.push(key);
+    if (key.startsWith(`${path}?`)) return { stdout: JSON.stringify({
+      status: 'ahead', total_commits: 1, merge_base_commit: { sha: base }, commits: [commit(head, base)],
+    }) };
+    const ref = key.split('/').at(-1);
+    let tree;
+    if (ref === base) tree = [];
+    else if (ref === head) tree = Array.from({ length: 8 }, (_, i) => ({
+      path: `dir-${i}`, type: 'tree', mode: '040000', sha: wide,
+    }));
+    else if (ref === wide) tree = Array.from({ length: 20000 }, (_, i) => ({
+      path: `child-${i}`, type: 'tree', mode: '040000', sha: child,
+    }));
+    else {
+      assert.equal(ref, child);
+      // Stop after enqueuing 160,000 children: the refusal must come from
+      // incomplete evidence, rather than a runtime argument-count limit.
+      return { stdout: JSON.stringify({ tree: [], truncated: true }) };
+    }
+    return { stdout: JSON.stringify({ tree, truncated: false }) };
+  } });
+  await assert.rejects(get(path), /incomplete tree/);
+  assert.ok(requested.includes(`repos/${repo}/git/trees/${child}`));
+});
+
+test('a failed commit page stops new requests, settles active workers and permits retry', async () => {
+  const requested = [];
+  let failPage = true, active = 0;
+  const get = createHistoryReader({ execGhWithRetryImpl: async ({ args: argv }) => {
+    const number = Number(new URL(argv[1], 'https://fixture.invalid/').searchParams.get('page'));
+    requested.push(number);
+    active++;
+    try {
+      if (number > 1) {
+        await turn();
+        if (failPage && number === 2) throw new Error('fixture page failure');
+        await turn();
+      }
+      return { stdout: JSON.stringify({
+        status: 'ahead', total_commits: 1000, merge_base_commit: { sha: base },
+        commits: Array.from({ length: 100 }, (_, i) => commit(sha(`page-commit-${(number - 1) * 100 + i}`), base)),
+      }) };
+    } finally { active--; }
+  } });
+  await assert.rejects(get.commitHistory(path), /fixture page failure/);
+  assert.deepEqual(requested, [1, 2, 3, 4, 5], 'no additional pages dispatched after the failure');
+  assert.equal(active, 0, 'already active reads settle before returning failure');
+  failPage = false;
+  const result = await get.commitHistory(path);
+  assert.deepEqual(result.commits.map(commit => commit.sha),
+    Array.from({ length: 1000 }, (_, i) => sha(`page-commit-${i}`)));
+  assert.equal(active, 0);
+});
+
 test('deadline still fails closed during parallel tree collection', async () => {
   const { get, counts } = fixture({ stallTree: true, contextTimeoutMs: 50 });
   const pending = assert.rejects(get(path), { code: 'HISTORY_READ_TIMEOUT' });

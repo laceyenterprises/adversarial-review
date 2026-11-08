@@ -19,6 +19,13 @@ fallback. Child output and free-text errors remain private.
 
 ## Verification
 
+HAM CI repair: the activation refresh check now expects the 150-second owner
+allowance scaled once by the maximum multiplier (six), replacing its stale
+60-second expectation. The timer-ceiling and single-invocation assertions remain.
+Bounded targeted validation passes all 138 tests across activation-check,
+hamcredrefresh-01, hammer-token and smv. Lint passes with zero errors (152
+existing warnings), contract typechecking and the offline walkthrough pass.
+
 `node --test test/hamcredrefresh-01.test.mjs`: the initial ten cases produced
 nine failures against the original code, then ten passes with the fix.
 The final file passes 12 cases, including held-token refusal and the Git helper's

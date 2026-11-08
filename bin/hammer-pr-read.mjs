@@ -10,6 +10,7 @@ try {
   const json = JSON.stringify(snapshot);
   process.stdout.write(jqIndex < 0 ? `${json}\n` : execFileSync('jq', ['-r', args[jqIndex + 1]], { input: json, encoding: 'utf8' }));
 } catch (err) {
-  process.stderr.write(`${err.stderr || err.message}\n`);
+  const message = err.budgetDeferred === true ? 'GitHub rate limit budget deferred' : err.stderr || err.message;
+  process.stderr.write(`${message}\n`);
   process.exitCode = err.signal === 'SIGALRM' ? 142 : Number.isInteger(err.status) ? err.status : Number.isInteger(err.code) ? err.code : 1;
 }

@@ -170,6 +170,22 @@ test('one sustained installation deficit alert across polls and monitor restarts
   assert.equal(alerts.length, 2, 'a new exhausted window is not a recovered installation');
 });
 
+test('an unobserved deficit interval does not page when the installation reappears low', async t => {
+  const dir = root(t);
+  const start = Date.now();
+  const alerts = [];
+  const low = { core: { credential: 'installation-12-34', resource: 'core', remaining: 1,
+    limit: 5400, resetAt: new Date(start + 7200000).toISOString() } };
+  const run = (now, budgets) => monitorGitHubBudgets({ rootDir: dir, budgets, now,
+    deliverAlert: async (...args) => alerts.push(args), logger: { log() {} } });
+  await run(start, low);
+  await run(start + 1000, {});
+  await run(start + 20 * 60000, low);
+  assert.equal(alerts.length, 0);
+  await run(start + 36 * 60000, low);
+  assert.equal(alerts.length, 1);
+});
+
 test('broker-verified installation identity survives token rotation without conflating foreign credentials', () => {
   registerGitHubInstallationToken('synthetic-token-one', '12', '34');
   registerGitHubInstallationToken('synthetic-token-two', '12', '34');

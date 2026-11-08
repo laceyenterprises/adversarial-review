@@ -185,3 +185,9 @@ Cross-owner coordination is limited to a shared store its readers can actually
 read. A foreign file already sitting at the shared path is left in place:
 each caller keeps using its own owner-scoped store, and status names the
 shared store's owner uid. Removing it is an operator decision.
+
+Installation binding is process-local. Child processes and standalone status
+readers using only a token digest do not see installation-keyed holds. Budget
+deferrals retain the last validated ETag and enter the bounded transient-read
+path. A missing observation breaks the deficit interval, and an alert receipt
+is deduplicated by credential and episode start.

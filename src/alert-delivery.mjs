@@ -1532,12 +1532,14 @@ async function deliverAlert(text, {
   const doc = buildQueuedAlertDoc(text, { event, payload, config, now });
   // Deduplication must inspect the same real sink that queueAlertDoc writes.
   // fsImpl supplies token/config reads; virtual token presence is not a receipt.
-  if (event === 'reviewer.model_unavailable' || event === 'adversarial_review.pr_progress_stalled') {
-    const progressStalled = event === 'adversarial_review.pr_progress_stalled';
-    doc.id = fixedAlertId(progressStalled ? 'pr-progress' : 'reviewer-model', crypto.createHash('sha256').update(JSON.stringify(
-      progressStalled ? [payload?.repo, payload?.prNumber, payload?.headSha]
-        : [payload?.refusedModel, new Date(now).toISOString().slice(0, 10)],
-    )).digest('hex'));
+  const progressStalled = event === 'adversarial_review.pr_progress_stalled';
+  const budgetDeficit = event === 'adversarial-github-budget' && payload?.budget && payload?.since;
+  if (event === 'reviewer.model_unavailable' || progressStalled || budgetDeficit) {
+    const family = progressStalled ? 'pr-progress' : budgetDeficit ? 'github-budget' : 'reviewer-model';
+    const identity = progressStalled ? [payload?.repo, payload?.prNumber, payload?.headSha]
+      : budgetDeficit ? [payload.budget, payload.since]
+        : [payload?.refusedModel, new Date(now).toISOString().slice(0, 10)];
+    doc.id = fixedAlertId(family, crypto.createHash('sha256').update(JSON.stringify(identity)).digest('hex'));
     for (const state of ['pending', 'inflight', 'delivered', 'dead-letter']) {
       const existingPath = alertDocPath(rootDir, state, doc.id);
       if ((receiptFsImpl?.existsSync || existsSync)(existingPath)) {

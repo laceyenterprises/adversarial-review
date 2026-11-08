@@ -60,7 +60,7 @@ function conditionalReader(cache, execImpl) {
     } catch (error) {
       // gh reports a 304 as a non-2xx exit; its headers are still on stdout.
       if (reusable && httpEnvelope(error?.stdout).status === 304) return cached.body;
-      drop();
+      if (error?.budgetDeferred !== true) drop();
       throw error;
     }
     const response = httpEnvelope(stdout);

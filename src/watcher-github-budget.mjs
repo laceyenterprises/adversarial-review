@@ -37,11 +37,11 @@ async function runLowBudgetWatcherPoll({ db, activeRepos, rootDir, domainId, exe
   handlePostedReviewRow, createWatcherOperatorSurface, projectAdversarialGateStatus, markMerged, markClosed, deliverAlert,
 }) {
   const allBudgets = await readGitHubBudgetState();
+  const credential = githubCredential({ token: process.env.GITHUB_TOKEN || null });
   if (rootDir && deliverAlert) {
-    try { await monitorGitHubBudgets({ rootDir, budgets: allBudgets, deliverAlert }); }
+    try { await monitorGitHubBudgets({ rootDir, budgets: allBudgets, deliverAlert, activeCredential: credential }); }
     catch (error) { console.warn(`[watcher] GitHub budget visibility failed: ${error.message}`); }
   }
-  const credential = githubCredential({ token: process.env.GITHUB_TOKEN || null });
   const budgets = Object.fromEntries(['core', 'graphql'].map(resource => [resource,
     allBudgets[githubBudgetKey(resource, credential)]]));
   // This shortcut skips the entire discovery phase. A single depleted pool (or

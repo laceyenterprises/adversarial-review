@@ -834,7 +834,7 @@ phase
   }
 });
 for (const scenario of ['first retry visible', 'already visible', 'two lag polls', 'visibility timeout', 'third head', 'initial third head',
-  'transient TLS', 'transient HTTP 503', 'probe alarm', 'transient exhaustion',
+  'transient TLS', 'transient HTTP 503', 'budget deferral', 'probe alarm', 'transient exhaustion',
   'permanent error', 'permanent numbered URL', 'malformed JSON', 'missing head', 'invalid head']) {
   test(`HAMCLOSE-07 verify-head: ${scenario}`, t => {
     const dir = mkdtempSync(join(tmpdir(), 'hammer-head-wait-'));
@@ -881,13 +881,26 @@ head=${before}
 case "$HAM_TEST_SCENARIO" in
   'first retry visible') [ "$n" -lt 2 ] || head=${pushed} ;;
   'already visible') head=${pushed} ;;
-  'two lag polls'|'transient TLS'|'transient HTTP 503'|'probe alarm') [ "$n" -lt 3 ] || head=${pushed} ;;
+  'two lag polls'|'transient TLS'|'transient HTTP 503'|'budget deferral'|'probe alarm') [ "$n" -lt 3 ] || head=${pushed} ;;
   'third head') [ "$n" -lt 2 ] || head=${third} ;;
   'initial third head') head=${third} ;;
 esac
 printf '{"head":{"sha":"%s"},"base":{"ref":"main"}}\\n' "$head"
 `, { mode: 0o755 });
+    const readNode = join(dir, 'read-node');
+    writeFileSync(readNode, `#!/bin/sh
+case "$1" in
+  */bin/hammer-pr-read.mjs)
+    if [ "$HAM_TEST_SCENARIO" = 'budget deferral' ] && [ "$(cat "$TMPDIR/polls")" = 1 ]; then
+      echo 2 > "$TMPDIR/polls"
+      echo 'GitHub rate limit budget deferred' >&2
+      exit 1
+    fi ;;
+esac
+exec "$REAL_NODE" "$@"
+`, { mode: 0o755 });
     const env = { HAM_PR_URL: 'https://github.com/fixture/repo/pull/1', HAM_PR_NUMBER: prNumber,
+      HAM_NODE_BIN: readNode, REAL_NODE: process.execPath,
       HAM_REVIEWED_SHA: before, HAM_REPO: 'fixture/repo', HAM_RUN_DIR: dir, HAM_ROOT_DIR: root, HAM_HQ_ROOT: dir,
       HAM_REVIEWER: 'synthetic-reviewer', HAM_RISK_CLASS: 'low', HAM_MERGE_METHOD: 'squash', HAM_TARGET_REMEDIATION_SHA: before, HAM_PUSHED_HEAD: pushed,
       HAM_PUSHED_FROM_HEAD: before, HAM_TEST_SCENARIO: scenario, PATH: `${dir}:${process.env.PATH}`, TMPDIR: dir };
@@ -967,7 +980,7 @@ exit "$rc"`], env);
       assert.equal(JSON.parse(readFileSync(join(dir, 'pr-after.json'), 'utf8')).headRefOid, before);
     } else {
       assert.equal(result.status, 0, result.stderr);
-      const recovered = ['transient TLS', 'transient HTTP 503', 'probe alarm'].includes(scenario);
+      const recovered = ['transient TLS', 'transient HTTP 503', 'budget deferral', 'probe alarm'].includes(scenario);
       const expected = ['first retry visible', 'already visible', 'two lag polls'].includes(scenario) || recovered ? pushed : third;
       assert.match(result.stdout, new RegExp(`CONTINUE_TO_CHECKS head=${expected}`));
       if (recovered) {

@@ -8,7 +8,9 @@ Node-gyp verifies the downloaded archive against `SHASUMS256.txt`. Both matrix
 versions remain; the Node 26.10.0 compatibility pin remains.
 
 `npm ci --foreground-scripts --loglevel verbose` runs with `V=1` and uses the
-prepared headers. Each attempt prints its complete compiler output. Only a
+prepared headers. Each attempt streams its complete compiler output while the
+install runs. Terminal styling is stripped only for failure classification;
+printed diagnostics retain their original formatting. Only a
 failure with node-gyp's working directory identifying `node_modules/fs-ext`
 clears the current version's header cache, prepares verified headers again, and
 retries once. Unrelated failures and a failed second attempt remain failures.
@@ -54,6 +56,17 @@ comparison supporting a compiler flag, NAN override, or removal of the Node 26
 pin. The retained verbose output makes a future failure directly comparable.
 
 ## Verification
+
+Final comment-only remediation:
+
+- Ten offline installer tests passed from both the repository root and `test/`,
+  using module-relative executable resolution and isolated temporary working
+  directories. Cases include styled fs-ext recovery, styled unrelated-addon
+  refusal, and a subprocess handshake proving progress arrives before exit.
+- Targeted ESLint and `git diff --check`: passed.
+- Full-suite validation remains owned by PR-head CI for this remediation.
+
+Initial implementation:
 
 - Synthetic installer tests: seven passed, covering initial success, one clean
   retry, persistent failure, unrelated npm failure, another addon's failure, and

@@ -5452,21 +5452,22 @@ assume the interactive operator or HQ owner is also the dispatch-file owner:
 atomic replacement creates a file owned by the calling user and can lock out
 the daemon when run as another account.
 
+Use these SDK-only commands only after release, producer and full-grant
+readiness; see the
+[reader deployment contract](producer-contract-readers.md#dispatch-lookup-activation-and-limits).
+Pass the default-off read activation flag explicitly through `env` under
+`sudo -H`, and pin `<hq-root>` to the value used by the watcher.
+
 ```bash
-sudo -A -H -u <daemon-user> node bin/reconcile-ama-closer-dispatches.mjs --root-dir <runtime-root> --hq-root <hq-root> --ledger-target <ledger-target> --dry-run
-sudo -A -H -u <daemon-user> node bin/reconcile-ama-closer-dispatches.mjs --root-dir <runtime-root> --hq-root <hq-root> --ledger-target <ledger-target>
+sudo -A -H -u <daemon-user> env ADVERSARIAL_DISPATCH_READS_ENABLED=1 node bin/reconcile-ama-closer-dispatches.mjs --root-dir <runtime-root> --hq-root <hq-root> --dry-run
+sudo -A -H -u <daemon-user> env ADVERSARIAL_DISPATCH_READS_ENABLED=1 node bin/reconcile-ama-closer-dispatches.mjs --root-dir <runtime-root> --hq-root <hq-root>
 ```
 
-Pin `<hq-root>` and `<ledger-target>` to the values used by the watcher;
-`--ledger-target` accepts a SQLite path/`sqlite://` URI or Postgres DSN.
-This avoids environment loss under `sudo -H`. This legacy CLI still validates the target and prints its resolved label
-(without DSN credentials) for compatibility. SDK launch reads ignore that target;
-the printed `ledger` label does not certify a canonical launch read. Enable
-`ADVERSARIAL_DISPATCH_READS_ENABLED=1` only after release, producer and full-grant
-readiness, and inspect recorded `app-contract` / `app-sdk` evidence.
-Both commands also print scanned, terminal,
-missing, unreadable, changed, and active counts. Target resolution failure aborts
-before rewriting records. Verify the preview's ledger metadata before apply.
+The CLI rejects retired database-source flags, including `--ledger-target`,
+before reconciliation. Both commands print `source: app-sdk`, `dryRun`, and
+scanned, terminal, missing, unreadable, changed, and active counts.
+Verify the preview counts and recorded `app-contract` / `app-sdk` evidence
+before apply; unreadable reads do not authorize rewriting records.
 Apply preserves original fields, writes `state: launch-terminal`, the
 ledger terminal status, and `reconciledAt`; repeated apply makes no further
 changes. The normal dispatch capacity scan reconciles only launches still within

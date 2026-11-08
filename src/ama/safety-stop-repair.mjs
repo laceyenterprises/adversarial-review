@@ -62,13 +62,14 @@ export async function dispatchSafetyStopRepair({ rootDir, repo, prNumber, headSh
   for (const prior of Object.values(ledger?.stopRepairReservations || {})) {
     if (prior.headSha === headSha) continue;
     const comparison = await get.metadata(`repos/${repo}/compare/${prior.headSha}...${headSha}`);
-    if (comparison.status === 'ahead' || comparison.status === 'identical') {
+    const status = comparison?.status;
+    if (status === 'ahead' || status === 'identical') {
       return { ...refuse('repair-descendant-still-refused'), previousRepair: prior };
     }
-    if (!['behind', 'diverged'].includes(comparison.status)) return refuse('repair-ancestry-unreadable');
+    if (!['behind', 'diverged'].includes(status)) return refuse('repair-ancestry-unreadable');
   }
   let repairEvidence = null;
-  if (refusal.reasons?.includes('primary-change-reverted')) {
+  if (refusal.reasons?.includes('primary-change-reverted') || refusal.reason === 'primary-change-reverted') {
     const evidence = await fetchPrimaryChangeImpl({ repo, prNumber, headSha, rootDir, get, signal });
     repairEvidence = primaryChangeRepairEvidence(evidence, headSha, {
       strictNonBlockingRemediation: cfg.strictNonBlockingRemediation !== false,

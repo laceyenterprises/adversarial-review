@@ -134,6 +134,55 @@ test('gate diagnostics collect multiple files without changing the merge refusal
   assert.deepEqual(checkPrimaryChange(evidence, HEAD), before);
 });
 
+test('scalar primary-change refusal fetches fresh reviewed coordinates before dispatch', async t => {
+  const f = setup(t);
+  delete f.refusal.reasons;
+  f.refusal.reason = 'primary-change-reverted';
+  let reads = 0;
+  f.options.repairOptions.fetchPrimaryChangeImpl = async ({ headSha }) => {
+    reads++;
+    assert.equal(headSha, HEAD);
+    return revertedEvidence(headSha);
+  };
+  const result = await recoverAmaAutomation(f.options);
+  assert.equal(result.recovery.action, 'scoped-repair');
+  assert.equal(reads, 1);
+  const brief = readFileSync(result.recovery.repairs[f.refusal.key].promptPath, 'utf8');
+  assert.match(brief, /src\/feature.mjs: reviewed lines \[12, 14\); gate merge-base ranges \[10, 11\)/);
+  assert.match(brief, /docs\/guide.md: reviewed lines \[12, 14\); gate merge-base ranges \[10, 11\)/);
+  assert.equal(f.commands.filter(call => call.command === 'hq').length, 1);
+});
+
+for (const comparison of [null, {}, { status: 'unknown' }]) {
+  test(`unreadable repair ancestry refuses without another submission: ${JSON.stringify(comparison)}`, async t => {
+    const f = setup(t);
+    await recoverAmaAutomation(f.options);
+    const ledger = readHammerRetryCapLedger(f.options.rootDir, f.options);
+    const repairedHead = 'd'.repeat(40);
+    const transport = f.options.repairOptions.execFileImpl;
+    let comparisons = 0;
+    const result = await dispatchSafetyStopRepair({
+      ...f.options, ...f.options.repairOptions, headSha: repairedHead,
+      refusal: { ...f.refusal, key: 'e'.repeat(64) }, dispatchKey: 'fixture-unreadable-ancestry',
+      execFileImpl: async (command, args) => {
+        if (command === 'gh' && args[0] === 'api') {
+          comparisons++;
+          assert.equal(args[1], `repos/${f.options.repo}/compare/${HEAD}...${repairedHead}`);
+          return { stdout: JSON.stringify(comparison) };
+        }
+        if (command === 'gh') return { stdout: JSON.stringify({ state: 'OPEN', headRefOid: repairedHead,
+          headRefName: 'fixture/repair', isDraft: false, labels: [] }) };
+        return transport(command, args);
+      },
+      fetchPrimaryChangeImpl: () => assert.fail('unreadable ancestry must refuse before evidence collection'),
+    });
+    assert.equal(comparisons, 1);
+    assert.deepEqual(result, { dispatched: false, reason: 'repair-ancestry-unreadable' });
+    assert.deepEqual(readHammerRetryCapLedger(f.options.rootDir, f.options), ledger);
+    assert.equal(f.commands.filter(call => call.command === 'hq').length, 1);
+  });
+}
+
 test('a repaired descendant which still fails the gate is surfaced without another launch', async t => {
   const f = setup(t);
   await recoverAmaAutomation(f.options);

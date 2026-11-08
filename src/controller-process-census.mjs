@@ -6,12 +6,14 @@ const helperPath = fileURLToPath(new URL('./controller_process_census.py', impor
 const NO_OPERATOR_CHANGE = 'it executes no setuid binary and needs no operator process-introspection change';
 
 // Name the failed mechanism so a refusal is not mistaken for a host permission
-// gap. Keep the code bounded; never echo helper output beyond its errno token.
-function censusUnavailable(verb, interpreter, cause, code = cause?.code) {
+// gap. Only bounded errno and exhaustion metadata may leave the helper.
+function censusUnavailable(verb, interpreter, cause, code = cause?.code, interrupted = false) {
   const mechanism = verb === 'pgid' ? 'getpgid' : 'kern.proc.pgrp sysctl';
   const detail = code || (Number.isInteger(cause?.status) ? `exit ${cause.status}` : 'unreadable');
   return Object.assign(new Error(`controller process census unavailable: ${mechanism} census helper `
-    + `controller_process_census.py via ${interpreter} failed (${detail}); ${NO_OPERATOR_CHANGE}`), { code });
+    + `controller_process_census.py via ${interpreter} failed (${detail}); ${NO_OPERATOR_CHANGE}`
+    + (interrupted ? '; retryable syscall interruption exhausted (3 failures)' : '')),
+    { code, retryable: interrupted, ...(interrupted ? { censusAttempts: 3 } : {}) });
 }
 
 export function nativeControllerIdentity(verb, pid, { execFileSyncImpl = execFileSync, env = process.env, timeoutImpl = loadAwareTimeoutMs } = {}) {
@@ -25,10 +27,11 @@ export function nativeControllerIdentity(verb, pid, { execFileSyncImpl = execFil
     });
     result = JSON.parse(output);
   } catch (error) {
-    // The helper reports an OS refusal as its errno name only.
-    const reported = String(error?.stderr || '').match(/^controller census: ([A-Z][A-Z0-9]{1,15})$/m)?.[1];
+    // Only explicit syscall exhaustion carries retry metadata.
+    const reported = String(error?.stderr || '').match(/^controller census: ([A-Z][A-Z0-9]{1,15})( retry-exhausted=3)?$/m);
     throw censusUnavailable(verb, interpreter, error,
-      error?.code || reported || (error instanceof SyntaxError ? 'EMALFORMED' : undefined));
+      error?.code || reported?.[1] || (error instanceof SyntaxError ? 'EMALFORMED' : undefined),
+      !error?.code && ['EIO', 'EINTR'].includes(reported?.[1]) && Boolean(reported?.[2]));
   }
   return validatedIdentity(verb, interpreter, result);
 }
@@ -67,7 +70,7 @@ export function createControllerCensus({ spawnImpl = spawn, env = process.env, t
     clearTimeout(timer);
     if (error) { retire(); reject(error); } else resolve(value);
   };
-  const fail = (code, cause) => settle(undefined, censusUnavailable(pending?.verb, interpreter, cause, code));
+  const fail = (code, cause, interrupted = false) => settle(undefined, censusUnavailable(pending?.verb, interpreter, cause, code, interrupted));
   const start = () => {
     const child = spawnImpl(interpreter, ['-I', '-B', helperPath, 'serve'], { env, stdio: ['pipe', 'pipe', 'ignore'] });
     // Only a pending request's timer keeps the event loop alive.
@@ -85,8 +88,11 @@ export function createControllerCensus({ spawnImpl = spawn, env = process.env, t
       const line = received.slice(0, end); received = received.slice(end + 1);
       let reply;
       try { reply = JSON.parse(line); } catch { reply = null; }
-      // The helper reports an OS refusal as its errno name only.
-      if (/^[A-Z][A-Z0-9]{1,15}$/.test(reply?.error)) { fail(reply.error); return; }
+      // Legacy errno-only replies remain definitive unavailable evidence.
+      if (/^[A-Z][A-Z0-9]{1,15}$/.test(reply?.error)) {
+        fail(reply.error, undefined, ['EIO', 'EINTR'].includes(reply.error) && reply.retryable === true && reply.attempts === 3);
+        return;
+      }
       if (!reply || !('ok' in reply) || received !== '') { fail('EMALFORMED'); return; }
       let result;
       try { result = validatedIdentity(pending.verb, interpreter, reply.ok); }

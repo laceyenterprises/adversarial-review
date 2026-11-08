@@ -274,7 +274,20 @@ that head. Validation evidence compares SHA values without case sensitivity,
 retains lowercase receipt heads and hashes the original audit body unchanged.
 A moved head (including an Appendix D rebase) validates normally.
 An API credential mint that times out or fails to run records the retryable
-`credential-refresh-unavailable`. `hammer-terminal-audit.mjs --final
+`credential-refresh-unavailable`. API preparation, forced renewal after a 401,
+the Git credential helper and the refresh-only activation check allow the
+launch refresh command 150 seconds before load scaling (up to 900 seconds
+with the default sixfold ceiling). This preserves the owner's 120-second
+broker retry window and 135-second HCP wait, including startup headroom.
+An explicit caller deadline clips this wait without further scaling. The
+owner retries the same entitled identity; no ambient identity is substituted.
+Named authorization or identity refusals stop immediately, including when
+an old entitled token is held. Free-text child diagnostics stay discarded.
+After normal deployment, SRE observes the next two deploy-driven broker rolls
+and retains watcher `terminalOutcome` evidence that no hammer ends with
+`retryable-credential-refresh-unavailable`; source tests alone do not prove
+this live receipt.
+`hammer-terminal-audit.mjs --final
 rebase-conflict` counts the reported head in `<run dir>/conflict-repairs.json`
 before checking the budget. Until three distinct heads have conflicted, it
 exits 65 without a terminal AMA audit or `terminal-stop` receipt; the run

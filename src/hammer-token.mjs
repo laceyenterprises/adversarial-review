@@ -42,6 +42,24 @@ function parseRefreshOutput(output, names) {
 // A proactive refresh may be skipped while the held token's known expiry is
 // comfortably ahead; a rejected call still forces one refresh.
 const EXPIRY_MARGIN_MS = 10 * 60 * 1000;
+// hq github-token refresh owns broker/HCP retries (120s/135s nominal).
+// Leave startup/IPC headroom and scale the outer wait once, like the owner.
+// A caller supplying a remaining deadline still owns that shorter allowance.
+const REFRESH_COMMAND_TIMEOUT_MS = 150_000;
+const AUTH_REFUSALS = new Set([
+  'launch_scope_required', 'launch_not_active', 'binding_unavailable', 'binding_changed',
+  'broker_identity_mismatch', 'broker_lifetime_short',
+  'hcp_response_invalid', 'mint_response_invalid',
+  'broker_http_401', 'broker_http_403', 'hcp_http_401', 'hcp_http_403',
+]);
+function authRefusal(error) {
+  // Parse only the producer's bounded diagnostic code, never its free text.
+  const match = /^entitled GitHub re-mint unavailable: ([a-z0-9_]+); refusing credential fallback$/m.exec(String(error?.stderr || ''));
+  return AUTH_REFUSALS.has(match?.[1]) ? match[1] : null;
+}
+function definitiveRefreshFailure(error) {
+  return AUTH_REFUSALS.has(error.refreshOutcome?.match(/^failed \(([^)]+)\)$/)?.[1]);
+}
 function expiresLater(expiresAt, now = Date.now()) {
   const at = /^\d{4}-\d{2}-\d{2}T/.test(expiresAt || '') ? Date.parse(expiresAt) : NaN;
   return Number.isFinite(at) && at - now > EXPIRY_MARGIN_MS;
@@ -157,7 +175,7 @@ export function hammerTokenSession(options = {}) {
     error.stderr = error.message;
     return error;
   }
-  function refresh(timeout = 10_000) {
+  function refresh(timeout = loadAwareTimeoutMs(REFRESH_COMMAND_TIMEOUT_MS)) {
     if (!command) return;
     let output;
     try {
@@ -167,6 +185,8 @@ export function hammerTokenSession(options = {}) {
       });
     } catch (error) {
       // Command text, stdout, stderr and child error messages can hold secrets.
+      const refusal = !error.signal && error.code !== 'ETIMEDOUT' && authRefusal(error);
+      if (refusal) throw failure(`failed (${refusal})`);
       throw failure(error.signal || error.code === 'ETIMEDOUT' ? 'failed (timeout or signal)' : 'failed (command error)');
     }
     const parsed = parseRefreshOutput(output, [variable, 'GH_TOKEN'].filter(Boolean));
@@ -182,7 +202,7 @@ export function hammerTokenSession(options = {}) {
   // CLOSERGATES-01: a mint that timed out or whose command failed is retried in
   // place with spaced backoff inside a short budget. Invalid output and a
   // missing command are definitive and never retried.
-  function refreshWithRetry(timeout = 10_000) {
+  function refreshWithRetry(timeout = loadAwareTimeoutMs(REFRESH_COMMAND_TIMEOUT_MS)) {
     let last;
     const result = readClosureGateSync(() => {
       try { return refresh(timeout); } catch (error) { last = error; throw error; }
@@ -245,9 +265,13 @@ export function hammerTokenSession(options = {}) {
       try {
         if (!command) throw failure('unavailable (no launch refresh command)');
         return refreshWithRetry()?.token;
-      } catch {
+      } catch (error) {
         reportHammerEarlyFailure(GIT_CREDENTIAL_REFRESH_FAILED, { env: credentialEnv });
-        throw new Error(GIT_CREDENTIAL_REFRESH_FAILED);
+        const refused = new Error(GIT_CREDENTIAL_REFRESH_FAILED);
+        if (definitiveRefreshFailure(error)) {
+          refused.refreshRefusal = error.refreshOutcome.match(/^failed \(([^)]+)\)$/)[1];
+        }
+        throw refused;
       }
     },
     // Exercise the same refresh/parser without held-token fallback or a GitHub
@@ -255,7 +279,7 @@ export function hammerTokenSession(options = {}) {
     checkRefresh(now = Date.now) {
       if (!command) throw failure('unavailable (no launch refresh command)');
       try {
-        const parsed = refresh(loadAwareTimeoutMs(10_000));
+        const parsed = refresh();
         const expiry = Date.parse(parsed.expiresAt || '');
         const currentMs = typeof now === 'function' ? now() : Number(now);
         return { parsed: true, source: parsed.source,
@@ -267,19 +291,20 @@ export function hammerTokenSession(options = {}) {
         throw error;
       }
     },
-    prepare({ timeoutMs = 10_000 } = {}) {
-      if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw failure('failed (deadline expired)');
-      const refreshTimeout = Math.min(10_000, Math.max(1, Math.floor(timeoutMs)));
+    prepare({ timeoutMs } = {}) {
+      if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) throw failure('failed (deadline expired)');
       if (!managed) return childOptions;
+      const refreshTimeout = () => Math.min(loadAwareTimeoutMs(REFRESH_COMMAND_TIMEOUT_MS),
+        timeoutMs === undefined ? Infinity : Math.max(1, Math.floor(timeoutMs)));
       if (forced) {
         forced = false;
-        try { refresh(refreshTimeout); } catch (error) {
+        try { refresh(refreshTimeout()); } catch (error) {
           reportHammerEarlyFailure(mintFailureReason(error), { env: credentialEnv });
           throw error;
         }
       } else if (!held || !expiresLater(expiresAt)) {
-        try { refresh(refreshTimeout); } catch (error) {
-          if (!held) {
+        try { refresh(refreshTimeout()); } catch (error) {
+          if (!held || definitiveRefreshFailure(error)) {
             reportHammerEarlyFailure(mintFailureReason(error), { env: credentialEnv });
             throw error;
           }

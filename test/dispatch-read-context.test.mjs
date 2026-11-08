@@ -15,7 +15,9 @@ async function freshProcess(env, script) {
   for (const key of Object.keys(childEnv)) {
     if (/^(APP_CONTRACT_|HCP_|HQ_LAUNCH_REQUEST_ID$|ADVERSARIAL_(DISPATCH_READS|WORKER_OBSERVATIONS)_ENABLED$)/.test(key)) delete childEnv[key];
   }
-  const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+  // Context fixtures must not depend on host load or CPU-sampling permissions.
+  const deterministicScript = `import os from 'node:os'; os.loadavg = () => [0, 0, 0];\n${script}`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', deterministicScript], {
     env: { ...childEnv, ...env }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000,
   });
   let stdout = '', stderr = '';

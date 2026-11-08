@@ -12,6 +12,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, readdirSyn
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { codexAccountFixture } from './helpers/codex-account-fixture.mjs';
+import { claudeAccountFixture } from './helpers/claude-account-fixture.mjs';
 
 import {
   closerQuotaSnapshotPath,
@@ -68,6 +69,65 @@ function buildFleetExec(stdout) {
   };
   return { impl, calls };
 }
+
+test('exhausted plan with credits cannot resolve a healthy Codex probe as primary-available', async () => {
+  const payload = JSON.parse(fleetQuotaStdout({ openai: 'ok', anthropic: 'ok' }));
+  payload.providerStatuses[0].providerRateLimits = [{
+    limitId: 'codex', windowMinutes: 10080, usedPercent: 100,
+    resetsAt: new Date(Date.now() + 86_400_000).toISOString(),
+    credits: { has_credits: true },
+  }];
+  const result = await resolveCloserDispatchHarness({
+    workerClass: 'hammer', codexAccountPolicy: 'pinned',
+    fallbackWorkerClasses: ['hammer-claude'],
+    execFileImpl: buildFleetExec(JSON.stringify(payload)).impl,
+  });
+  assert.equal(result.workerClass, 'hammer-claude');
+  assert.equal(result.fellBack, true);
+  assert.equal(result.primaryState, 'exhausted');
+});
+
+test('exhausted plan without an eligible closer fallback is held', async () => {
+  const payload = JSON.parse(fleetQuotaStdout({ openai: 'ok' }));
+  payload.providerStatuses[0].providerRateLimits = [{
+    limitId: 'codex', windowMinutes: 10080, usedPercent: 100,
+    resetsAt: new Date(Date.now() + 86_400_000).toISOString(),
+    credits: { has_credits: true },
+  }];
+  const result = await resolveCloserDispatchHarness({
+    workerClass: 'hammer', codexAccountPolicy: 'pinned', fallbackWorkerClasses: [],
+    execFileImpl: buildFleetExec(JSON.stringify(payload)).impl,
+  });
+  assert.equal(result.hold, true);
+  assert.notEqual(result.reason, 'primary-available');
+});
+
+test('corporate closer uses its declared Claude fallback for an exhausted account', async () => {
+  const payload = claudeAccountFixture({ primary: 'exhausted', corp: 'ok' });
+  payload.providerStatuses.push({ provider: 'openai', authPath: 'oauth-corp', state: 'ok',
+    estRemaining: { confidence: 'measured', inferred: false, rateLimits: [{
+    limitId: 'codex', windowMinutes: 10080, usedPercent: 101,
+    resetsAt: new Date(Date.now() + 86_400_000).toISOString(),
+  }] } });
+  const result = await resolveCloserDispatchHarness({
+    modelForWorkerClass: () => null,
+    workerClass: 'hammer-corp', codexAccountPolicy: 'pinned',
+    fallbackWorkerClasses: ['hammer-claude-corp'],
+    execFileImpl: buildFleetExec(JSON.stringify(payload)).impl,
+  });
+  assert.equal(result.workerClass, 'hammer-claude-corp');
+  assert.equal(result.fellBack, true);
+});
+
+test('an exhausted window with an unknown reset cannot certify recovery', () => {
+  const statuses = parseHqFleetQuotaStatus(JSON.stringify({ providerStatuses: [{
+    provider: 'openai', authPath: 'oauth', state: 'ok', providerRateLimits: [],
+    estRemaining: { confidence: 'measured', inferred: false, rateLimits: [{
+      limitId: 'codex', windowMinutes: 10080, usedPercent: 100, resetsAt: 'unknown',
+    }] },
+  }] }));
+  assert.equal(statuses[0].state, 'exhausted');
+});
 
 test('providerForCloserWorkerClass maps hammer/codex to openai and claude classes to anthropic', () => {
   assert.equal(providerForCloserWorkerClass('hammer'), 'openai');

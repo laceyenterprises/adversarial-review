@@ -1,4 +1,5 @@
 import './helpers/dispatch-files-preload.mjs';
+import { exhaustedCodexPlanRow } from './helpers/codex-plan-meter-fixture.mjs';
 import {spawnReviewer} from './helpers/reviewer-quota-fixture.mjs';
 import { readCorporateCodexQuotaCooldown, recordCorporateCodexQuotaCooldown } from '../src/codex-account-routing.mjs';
 import { reviewerCredentialKey } from '../src/claude-account-routing.mjs';
@@ -68,6 +69,30 @@ function spawnArgs({ env, capture }) {
 
 function newCapture() {
   return { spawnCalls: 0, begun: [], completed: [] };
+}
+
+for (const authPath of ['oauth', 'oauth-corp']) {
+  for (const stale of [false, true]) {
+    test(`Codex ${authPath} reviewer meter admission, stale=${stale}`, async () => {
+      const statusDir = await mkdtemp(join(tmpdir(), 'reviewer-plan-meter-'));
+      try {
+        const row = exhaustedCodexPlanRow(authPath);
+        row.cachedEvidenceStale = stale;
+        await writeFile(join(statusDir, `openai-${authPath}.status.json`), JSON.stringify(row));
+        const capture = newCapture();
+        const env = { AGENT_OS_REVIEWER_QUOTA_STATUS_DIR: statusDir, ADVERSARIAL_REVIEW_STATE_DIR: statusDir };
+        const args = { ...spawnArgs({ env, capture }), rootDir: statusDir,
+          reviewerModel: 'codex', botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+          codexBrokerProvider: authPath === 'oauth-corp' ? 'codex-corp' : 'codex' };
+        const result = await spawnReviewer(args);
+        assert.equal(capture.spawnCalls, stale ? 1 : 0);
+        if (!stale) assert.equal(result.failureClass, 'quota-exhausted');
+        const cooldown = readCorporateCodexQuotaCooldown(statusDir, { env });
+        assert.equal(cooldown?.resetAt ?? null,
+          authPath === 'oauth-corp' && !stale ? row.providerRateLimits[0].resetsAt : null);
+      } finally { await rm(statusDir, { recursive: true, force: true }); }
+    });
+  }
 }
 
 test('known-exhausted reviewer skips spawn and records a terminal quota pass', async () => {

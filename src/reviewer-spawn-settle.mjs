@@ -241,7 +241,7 @@ export async function readReviewerQuotaDecision({
       return { available: true, state: 'missing-provider-status', provider };
     }
     if (reviewerModel === 'codex') await ensureWorkerRegistryReadyImpl({env});
-    const cap = harnessCapFromStatuses(parseHqFleetQuotaStatus(JSON.stringify({ providerStatuses: accountStatuses })), {
+    const cap = harnessCapFromStatuses(accountStatuses, {
       harness: corporateAccount ? (reviewerModel === 'codex' ? 'codex-corp' : 'claude-reviewer-corp') : reviewerModel,
       model: reviewerModel === 'codex'
         ? resolveRemediationModel('codex-reviewer', { env, pin: env.CODEX_MODEL_ID || null, fallbackModel: null }).resolvedModel

@@ -14,6 +14,10 @@ with independent fresh quota and broker evidence. Missing, unreadable, malformed
 or expired records preserve fleet-based selection. The provider reset is preferred;
 absent or past resets use 15 minutes. Repeated writes retain the later of the
 active cooldown and the new reset, so a fallback cannot shorten a provider hold.
+HAMMERCREDITS-01 preflight also carries the latest future reset among current
+exhausting Codex plan meters through the shared fleet classifier. Stale provider
+evidence, stale meter rows, elapsed resets and inferred projections do not create
+this synthesized cap. The stored shape remains `{ "resetAt": "<ISO timestamp>" }`.
 Holds are bounded to seven days. Expired
 records need no cleanup to stop applying.
 

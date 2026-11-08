@@ -13,12 +13,9 @@ export const FLEET_QUOTA_STATUS_TIMEOUT_MS = 45_000;
 // cwp_quota_probe: `ok` | `exhausted` | `degraded` | `unknown`) and
 // `hq fleet quota status --json` surfaces it as `providerStatuses`.
 //
-// Two in-module consumers share this classifier so cap detection stays
-// consistent (extend, don't fork):
-//   - follow-up-remediation.mjs — quota-hold revalidation for the
-//     reviewer/remediator worker classes.
-//   - ama/harness-fallback.mjs — closer/hammer harness fallback: a codex-capped
-//     hammer must fall back to an available harness instead of a doomed spawn.
+// Reviewer admission, Codex account routing, remediation quota holds/fallback,
+// closer/hammer fallback, AFH reviewer fallback, Argus and burst share this
+// classifier so cap detection stays consistent (extend, don't fork).
 
 // Provider whose OAuth quota gates a given quota harness family. Mirrors the
 // SUPPORTED_PROVIDER_AUTH_TUPLES the quota probe daemon tracks (anthropic /
@@ -193,18 +190,45 @@ export function reserveFloorWeeklyMeasurement(floor) {
 
 export function quotaStatusesFromSnapshot(payload) {
   const providerStatuses = Array.isArray(payload?.providerStatuses) ? payload.providerStatuses : [];
-  return providerStatuses.map((entry) => ({
-    provider: String(entry?.provider || '').trim().toLowerCase(),
-    authPath: String(entry?.authPath || entry?.auth_path || '').trim().toLowerCase(),
-    state: String(entry?.state || '').trim().toLowerCase(),
-    source: entry?.source || 'hq-fleet-quota-status',
-    lastGoodAt: entry?.lastGoodAt || entry?.last_good_at || null,
-    lastProbeAt: entry?.lastProbeAt || entry?.last_probe_at || null,
-    lastErrorSignature: entry?.lastErrorSignature || entry?.last_error_signature || null,
-    resetAtUtc: entry?.resetAtUtc || entry?.reset_at_utc || null,
-    models: normalizeModelRows(entry?.models),
-    afhGrounding: normalizeAfhGroundingVerdict(entry?.afhGrounding ?? entry?.afh_grounding),
-  }));
+  const nowMs = Date.now();
+  return providerStatuses.map((entry) => {
+    const planLimits = exhaustedCodexPlanLimits(entry, nowMs);
+    const resetTimes = planLimits.map(row => Date.parse(row.resetsAt)).filter(time => time > nowMs);
+    return {
+      provider: String(entry?.provider || '').trim().toLowerCase(),
+      authPath: String(entry?.authPath || entry?.auth_path || '').trim().toLowerCase(),
+      // A successful credit-backed turn cannot certify subscription capacity.
+      // Only current measured evidence can override the producer's probe state.
+      state: planLimits.length ? 'exhausted' : String(entry?.state || '').trim().toLowerCase(),
+      ...(planLimits.length ? { stateSource: 'codex-plan-meter' } : {}),
+      source: entry?.source || 'hq-fleet-quota-status',
+      lastGoodAt: entry?.lastGoodAt || entry?.last_good_at || null,
+      lastProbeAt: entry?.lastProbeAt || entry?.last_probe_at || null,
+      lastErrorSignature: entry?.lastErrorSignature || entry?.last_error_signature || null,
+      resetAtUtc: resetTimes.length ? new Date(Math.max(...resetTimes)).toISOString()
+        : entry?.resetAtUtc || entry?.reset_at_utc || null,
+      models: normalizeModelRows(entry?.models),
+      afhGrounding: normalizeAfhGroundingVerdict(entry?.afhGrounding ?? entry?.afh_grounding),
+    };
+  });
+}
+
+function exhaustedCodexPlanLimits(entry, nowMs) {
+  if (String(entry?.provider || '').trim().toLowerCase() !== 'openai'
+    || !['oauth', 'oauth-corp'].includes(String(entry?.authPath || entry?.auth_path || '').trim().toLowerCase())
+    || entry.cachedEvidenceStale === true) return [];
+  const limits = [
+    ...(Array.isArray(entry?.providerRateLimits) ? entry.providerRateLimits : []),
+    ...(entry?.estRemaining?.confidence === 'measured' && entry.estRemaining.inferred !== true
+      && Array.isArray(entry.estRemaining.rateLimits) ? entry.estRemaining.rateLimits : []),
+  ];
+  return limits.filter(row => row?.limitId === 'codex' && row.fresh !== false
+    && (!Number.isFinite(Date.parse(row.resetsAt)) || Date.parse(row.resetsAt) > nowMs)
+    && Number.isFinite(row.usedPercent) && row.usedPercent >= 100);
+}
+
+function meterStateDiagnostic(status) {
+  return status.stateSource === 'codex-plan-meter' ? ' (stateSource=codex-plan-meter)' : '';
 }
 
 // Rows for one provider, OAuth-first (the auth path a native-harness spawn
@@ -241,7 +265,7 @@ export function providerAvailabilityFromStatuses(statuses, { provider, authPath 
     // AFH-02 soft verdict rides alongside; `available`/`state` keep their exact
     // pre-AFH hard semantics so existing HHR consumers are unchanged.
     afhGrounding: status.afhGrounding || null,
-    ...(status.state !== 'ok' ? { diagnostic: `cwp_dispatch.cli_fleet: providerStatuses[provider=${normalizedProvider},authPath=${status.authPath}].state=${diagnosticValue(status.state)}` } : {}),
+    ...(status.state !== 'ok' ? { diagnostic: `cwp_dispatch.cli_fleet: providerStatuses[provider=${normalizedProvider},authPath=${status.authPath}].state=${diagnosticValue(status.state)}${meterStateDiagnostic(status)}` } : {}),
   };
 }
 
@@ -343,10 +367,11 @@ export function harnessCapFromStatuses(statuses, { harness, model = null, authPa
     capSource,
     available: capSource === null && row.state === 'ok' && (!modelRow || modelRow.state === 'ok'),
     state: row.state || 'unknown',
+    ...(row.stateSource ? { stateSource: row.stateSource } : {}),
     model: modelName,
     modelState: modelRow?.state || null,
-    ...(row.state !== 'ok' || (modelRow && modelRow.state !== 'ok') ? { diagnostic: `cwp_dispatch.cli_fleet: providerStatuses[provider=${provider},authPath=${row.authPath}]${modelRow && modelRow.state !== 'ok' ? `.models[model=${modelName}].state=${diagnosticValue(modelRow.state)}` : `.state=${diagnosticValue(row.state)}`}` } : {}),
-    resetAt: modelRow?.resetAtUtc || row.resetAtUtc || null,
+    ...(row.state !== 'ok' || (modelRow && modelRow.state !== 'ok') ? { diagnostic: `cwp_dispatch.cli_fleet: providerStatuses[provider=${provider},authPath=${row.authPath}]${modelRow && modelRow.state !== 'ok' ? `.models[model=${modelName}].state=${diagnosticValue(modelRow.state)}` : `.state=${diagnosticValue(row.state)}`}${meterStateDiagnostic(row)}` } : {}),
+    resetAt: (row.stateSource === 'codex-plan-meter' ? row.resetAtUtc : modelRow?.resetAtUtc || row.resetAtUtc) || null,
     lastGoodAt: modelRow?.lastGoodAt || row.lastGoodAt || null,
     afhGrounding: soft.verdict,
     source,
@@ -368,6 +393,7 @@ export function quotaAccountDiagnostics(payload, { provider, authPath, cap, rese
   if (!row) diagnostics.push(`cwp_dispatch.cli_fleet: ${path} missing`);
   else {
     if (row.cachedEvidenceStale === true) diagnostics.push(`cwp_dispatch.cli_fleet: ${path}.cachedEvidenceStale=true (stale)`);
+    if (cap.stateSource === 'codex-plan-meter') diagnostics.push(`cwp_dispatch.cli_fleet: ${path}.state=exhausted (stateSource=codex-plan-meter)`);
     if (row.state !== 'ok') diagnostics.push(`cwp_dispatch.cli_fleet: ${path}.state=${diagnosticValue(row.state)}`);
     if (!cap.available && cap.modelState && cap.modelState !== 'ok') diagnostics.push(`cwp_dispatch.cli_fleet: ${path}.models[model=${cap.model}].state=${diagnosticValue(cap.modelState)}`);
     if (cap.capped) diagnostics.push(`cwp_dispatch.cli_fleet: ${path}.${cap.capSource === 'model-exhausted' ? 'models' : cap.capSource === 'afh-soft-grounded' ? 'afhGrounding.grounded' : 'state'} ${cap.capSource}`);

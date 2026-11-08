@@ -320,7 +320,8 @@
       "path": "docs/data-model/codex-corporate-quota-cooldown.md",
       "store": "data/codex-corporate-quota-cooldown.json",
       "schemaSurface": "src/codex-account-routing.mjs",
-      "relatedSchemaSurfaces": ["src/pollonce-phases.mjs", "src/reviewer-spawn-settle.mjs"],
+      "relatedSchemaSurfaces": ["src/pollonce-phases.mjs", "src/reviewer-spawn-settle.mjs", "src/fleet-quota-status.mjs"],
+      "timestampSource": "typed provider reset or latest future exhausting plan-meter reset; default 15 minutes, bounded to seven days",
       "owner": "Codex reviewer account routing"
     },
     {

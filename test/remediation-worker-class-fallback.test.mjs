@@ -1,5 +1,6 @@
 import './helpers/registry-session-fixture.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
+import { exhaustedCodexPlanRow } from './helpers/codex-plan-meter-fixture.mjs';
 // Historical cross-harness scenarios retain explicit personal-class pin behavior.
 // Automatic account routing is covered in codex-worker-account-routing.test.mjs.
 import { test } from 'node:test';
@@ -20,6 +21,21 @@ function fleetStatusStub(rows) {
   // Shape parsed by parseHqFleetQuotaStatus: { providerStatuses: [{provider, authPath, state}] }
   const stdout = JSON.stringify({ providerStatuses: rows });
   return async () => ({ stdout });
+}
+
+for (const stale of [false, true]) {
+  test(`Codex remediator meter fallback respects freshness, stale=${stale}`, async () => {
+    const row = exhaustedCodexPlanRow();
+    row.providerRateLimits[0].fresh = !stale;
+    const result = await resolveRemediationWorkerClassWithFallback({
+      primary: 'codex', codexAccountPolicy: 'pinned',
+      fallbackWorkerClasses: ['claude-code'],
+      execFileImpl: fleetStatusStub([row, { provider: 'anthropic', authPath: 'oauth', state: 'ok' }]),
+    });
+    assert.equal(result.workerClass, stale ? 'codex' : 'claude-code');
+    assert.equal(result.fellBack, !stale);
+    assert.equal(result.primaryState, stale ? 'ok' : 'exhausted');
+  });
 }
 
 for (const pin of ['remediator-codex-corp', 'codex-corp']) {

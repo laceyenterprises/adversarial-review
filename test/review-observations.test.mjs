@@ -65,6 +65,18 @@ test('CLI validates stdin and emits bounded public errors with failing exit stat
   }
   const encoded = JSON.stringify(request);
   assert.equal(run(encoded.padEnd(32768, ' ')).status, 0, 'exact size limit remains accepted');
+  // The transport limit counts UTF-16 code units, rather than UTF-8 bytes.
+  for (const character of ['é', '😀']) {
+    const unicode = JSON.stringify({ ...request, padding: character }).padEnd(32768, ' ');
+    assert.equal(unicode.length, 32768);
+    assert.ok(Buffer.byteLength(unicode, 'utf8') > 32768);
+    const atLimit = run(unicode);
+    assert.equal(atLimit.status, 0, atLimit.stderr);
+    const overLimit = run(`${unicode} `);
+    assert.equal(overLimit.status, 1);
+    assert.equal(overLimit.stdout, '');
+    assert.equal(overLimit.stderr, 'request too large\n');
+  }
 });
 
 test('real producer schema: scoped pages, latest completed pass, nullable closeout and end cutoff', () => {

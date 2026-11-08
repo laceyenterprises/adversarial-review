@@ -144,9 +144,9 @@ test('src spawnReviewer refuses public exhausted quota without the fixture wrapp
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   let reads = 0;
   const result = await productionSpawnReviewer({
-    rootDir, repo: 'fixture-owner/demo', prNumber: 1, reviewerModel: 'claude-code',
+    rootDir, repo: 'fixture-owner/demo', prNumber: 1, reviewerModel: 'claude-code', builderTag: 'codex',
     reviewerHeadSha: 'fixture-head', reviewerSessionUuid: 'direct-quota', reviewAttemptNumber: 1,
-    quotaCheckEnv: { AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'true' },
+    quotaCheckEnv: { AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'true', AGENT_OS_CONFIG_PATH: process.env.AGENT_OS_CONFIG_PATH },
     readReviewerQuotaDecisionImpl: options => readReviewerQuotaDecision({ ...options,
       execFileImpl: async (_command, args) => {
         reads++;

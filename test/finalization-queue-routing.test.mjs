@@ -250,7 +250,8 @@ test('HAMLANEWAIT-01: legacy merge wakes on another operation release within its
   const pending = runLegacyLaneWrite({ rootDir: f.rootDir, ...lane, command: 'synthetic-merge', argv: [],
     deadline: new Date(Date.now() + 3000).toISOString(), readConfig: () => ({}),
     exec: async (_c, _a, { timeout }) => { called = true; assert.ok(timeout > 0 && timeout < 3000); return { stdout: 'merged' }; } });
-  // The pending call installs its watch synchronously before returning.
+  // Watch registration is synchronous; yield a native event-loop turn before release.
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(called, false);
   release();
   release = null;
@@ -281,7 +282,8 @@ test('HAMLANEWAIT-01: waking rechecks lane transfer and never invokes the old le
   const release = adapter.tryLock(lane);
   const pending = runLegacyLaneWrite({ rootDir: f.rootDir, ...lane, readConfig: () => ({}),
     deadline: new Date(Date.now() + 3000).toISOString(), exec: () => assert.fail('stale route must refuse') });
-  // The pending call installs its watch synchronously before returning.
+  // Watch registration is synchronous; yield a native event-loop turn before release.
+  await new Promise(resolve => setImmediate(resolve));
   const started = performance.now();
   release();
   const result = await pending;

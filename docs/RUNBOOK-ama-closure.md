@@ -464,6 +464,18 @@ mandatory rules and named consultation conditions within its existing 60 KiB
 budget. Reference content retains every original rule with dispatch values
 substituted; ordinary scratch cleanup owns its lifetime.
 
+Every phase resolves and exports `HAM_NODE_BIN` before invoking helpers through
+`bin/hammer-node-runtime.sh`. Persisted `inputs.sh` runs the same resolver every
+time it is sourced, including after session continuation. A nonempty
+`HAM_NODE_BIN` must name an absolute executable file; an invalid explicit value
+stops with `node-runtime-unavailable`. When unset or empty, resolution uses the
+launch pin `AGENT_OS_NODE_BIN`, then `command -v node`. An invalid launch pin or
+missing executable produces the same named stop. Resolution failure unsets
+`HAM_NODE_BIN` so the failure-audit wrapper reports its unavailable runtime
+without attempting the rejected executable. Persisted `ham_gh`, `ham_git` and
+`ham_pr` helpers use the resolved export directly. Keep sourcing the original
+inputs in every shell; do not reconstruct lease ownership on resume.
+
 For current PR/head lease observation, run
 `node bin/hammer-lease-state.mjs --repo OWNER/REPO --base BASE --pr N --head SHA`
 from the deployed checkout (or pass its `--root-dir`). It reports `held` for
@@ -8339,7 +8351,7 @@ classification. A missing closer carry-forward proof alone is not builder
 provenance. Final-round handoffs and existing closer attempts keep their owner;
 returning delivered heads retain recorded same-head/lifetime caps.
 
-HAMGITTOKEN-01 final timeout ownership: bounded submodule sync exports `HAM_GIT_SYNC_BOUNDED=1` only for its child, so the metered Git wrapper yields its default 30-second timeout to the existing outer 120-second bound. Snapshot and pushed-attestation proof calls resolve `${HAM_NODE_BIN:-node}` consistently; the main procedure still validates its runtime before general authority operations. No merge, credential or cancellation predicate changes.
+HAMGITTOKEN-01 final timeout ownership: bounded submodule sync exports `HAM_GIT_SYNC_BOUNDED=1` only for its child, so the metered Git wrapper yields its default 30-second timeout to the existing outer 120-second bound. Snapshot and pushed-attestation proof calls use the exported `HAM_NODE_BIN` resolved at phase entry; extracted-function tests must run that same runtime setup. No merge, credential or cancellation predicate changes.
 
 Both bounded Git paths use the same TERM/wait/KILL deadline owner. Submodule expiry waits for child cleanup before returning 124, rather than replacing the deadline owner with Node and losing child cleanup to SIGALRM. An offline shortened-deadline fixture verifies lock removal before return; the production submodule bound remains 120 seconds.
 

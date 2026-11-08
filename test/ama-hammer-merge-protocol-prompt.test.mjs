@@ -119,7 +119,7 @@ test('HAMPROMPT-01: phase existence block checks files without executing their s
   const block = [...HAMMER_TEMPLATE.matchAll(/```bash\n([\s\S]*?)\n```/g)]
     .find(([, body]) => body.includes('dispatch-phase-scripts-missing'))?.[1];
   assert.ok(block);
-  const script = block.replaceAll('<<RUN_DIR>>', dir);
+  const script = block.replaceAll('<<RUN_DIR>>', dir).replaceAll('<<ROOT_DIR>>', REPO_ROOT);
   const run = () => spawnSync('/bin/bash', ['-c', script], { encoding: 'utf8', timeout: 5000,
     env: { ...process.env, HAM_NODE_BIN: node } });
   assert.equal(run().status, 0);
@@ -396,7 +396,7 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.match(HAMMER_PROMPT, /complete the merge\/closing-comment sequence idempotently/);
   assert.match(HAMMER_PROMPT, /final rebase→remote-CI→merge window/);
   assert.match(HAMMER_PROMPT, /HAM_MERGE_LEASE_WAIT_SECONDS="\$\{HAM_MERGE_LEASE_WAIT_SECONDS:-900\}"/);
-  assert.match(HAMMER_PROMPT, /HAM_NODE_BIN="\$\{HAM_NODE_BIN:-\$\(command -v node 2>\/dev\/null \|\| true\)\}"/);
+  assert.match(HAMMER_PROMPT, /source "<<ROOT_DIR>>\/bin\/hammer-node-runtime\.sh"/);
   assert.match(HAMMER_PROMPT, /hammer-validate\.mjs --pytest/);
   assert.match(HAMMER_PROMPT, /120-second no-output deadline never scales/);
   assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort\(\)/);

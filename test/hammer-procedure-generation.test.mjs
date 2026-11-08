@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -25,6 +25,7 @@ test('rendered phase receipts are emitted by phase outcomes without changing mer
     const source = readFileSync(new URL(`../bin/${phase}.sh`, import.meta.url), 'utf8');
     const values = Object.fromEntries([...source.matchAll(/<<([A-Z_]+)>>/g)].map(([, key]) => [key, 'fixture']));
     const rendered = renderHammerProcedure(phase, values);
+    assert.doesNotMatch(rendered, /HAM_NODE_BIN:-node/);
     // A no-merge merge outcome can be retried in-run, so phases never record terminal-stop.
     assert.doesNotMatch(rendered, /terminal-stop/);
     if (phase !== 'hammer-merge') assert.ok(rendered.includes('/bin/hammer-progress.mjs'));
@@ -183,4 +184,128 @@ test('claim binder refreshes the published audit body and refuses stale or ambig
     assert.deepEqual(JSON.parse(readFileSync(path)), valid
       ? { commit: { sha: head }, auditComment: { ...original.auditComment, body } } : original);
   }
+});
+
+// Full phase entrypoints run against an executable fake; it rejects every
+// operation except the read-only lease-status query. No credentials are passed.
+test('HAMNODEBIN-01: every resumed phase resolves and exports Node before querying lease status', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-node-runtime-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const bin = join(dir, 'bin');
+  mkdirSync(bin);
+  const fake = join(bin, 'node');
+  writeFileSync(fake, `#!/bin/bash
+case "$1:$2" in
+  */merge-lease.mjs:status) printf 'synthetic-lease-status\\n'; exit 0 ;;
+esac
+exit 1
+`, { mode: 0o755 });
+  const root = fileURLToPath(new URL('../', import.meta.url));
+  for (const phase of HAMMER_PHASES) {
+    const source = readFileSync(new URL(`../bin/${phase}.sh`, import.meta.url), 'utf8');
+    const values = Object.fromEntries([...source.matchAll(/<<([A-Z_]+)>>/g)].map(([, key]) => [key, 'fixture']));
+    Object.assign(values, { ROOT_DIR: root, RUN_DIR: dir, PR_NUMBER: '17', REPO: 'example/project' });
+    const script = join(dir, `${phase}.sh`);
+    writeFileSync(script, renderHammerProcedure(phase, values));
+    for (const pin of [undefined, '', fake]) {
+      const result = spawnSync('/bin/bash', ['--noprofile', '--norc', '-uc', `
+source "$1" >/dev/null 2>/dev/null
+[ "$HAM_NODE_BIN" = "$2" ] || exit 91
+# Cross a child-shell boundary to verify the resolved runtime is exported.
+/bin/bash -uc '"$HAM_NODE_BIN" "$1/bin/merge-lease.mjs" status --repo example/project --base main' bash "$3"
+`, 'bash', script, fake, root], {
+        encoding: 'utf8', timeout: 5000,
+        env: { PATH: `${bin}:${process.env.PATH}`, ...(pin === undefined ? {} : { HAM_NODE_BIN: pin }),
+          ...(pin === fake ? { AGENT_OS_NODE_BIN: '/synthetic/missing-node' } : {}) },
+      });
+      assert.ifError(result.error);
+      assert.equal(result.status, 0, `${phase}: ${result.stderr}`);
+      assert.equal(result.stdout, 'synthetic-lease-status\n');
+    }
+    // Invalid explicit pins must not fall back to the executable PATH fake.
+    const nonExecutable = join(dir, 'non-executable');
+    writeFileSync(nonExecutable, '#!/bin/bash\nexit 0\n');
+    chmodSync(nonExecutable, 0o644);
+    for (const invalid of [join(dir, 'missing'), 'node', dir, nonExecutable]) {
+      for (const argv of [['-c', 'source "$1"', 'bash', script], [script]]) {
+        const result = spawnSync('/bin/bash', argv, {
+          encoding: 'utf8', timeout: 5000,
+          env: { PATH: `${bin}:${process.env.PATH}`, HAM_NODE_BIN: invalid },
+        });
+        assert.ifError(result.error);
+        assert.notEqual(result.status, 0, phase);
+        assert.match(result.stderr, /node-runtime-unavailable/);
+        assert.match(result.stderr, /HAM terminal failure audit unavailable/);
+        assert.doesNotMatch(result.stderr, /No such file or directory|command not found|Permission denied|is a directory/);
+        assert.doesNotMatch(result.stdout, /synthetic-lease-status/);
+      }
+    }
+  }
+});
+
+test('HAMNODEBIN-01: failed runtime resolution clears invalid pins in the caller and child shells', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-invalid-runtime-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const resolver = fileURLToPath(new URL('../bin/hammer-node-runtime.sh', import.meta.url));
+  const nonExecutable = join(dir, 'non-executable');
+  writeFileSync(nonExecutable, '#!/bin/bash\nexit 0\n', { mode: 0o644 });
+  for (const pinName of ['HAM_NODE_BIN', 'AGENT_OS_NODE_BIN']) {
+    for (const invalid of [join(dir, 'missing'), 'node', dir, nonExecutable]) {
+      const result = spawnSync('/bin/bash', ['-uc', `
+if source "$1"; then exit 91; fi
+[ "\${HAM_NODE_BIN+x}" != x ] || exit 92
+[ "$HAM_PHASE_OUTCOME" = node-runtime-unavailable ] || exit 93
+/bin/bash -uc '[ "\${HAM_NODE_BIN+x}" != x ]'
+`, 'bash', resolver], {
+        env: { PATH: process.env.PATH, [pinName]: invalid },
+        encoding: 'utf8', timeout: 5000,
+      });
+      assert.ifError(result.error);
+      assert.equal(result.status, 0, `${pinName}: ${result.stderr}`);
+      assert.match(result.stderr, /node-runtime-unavailable/);
+    }
+  }
+});
+
+test('HAMNODEBIN-01: persisted resume inputs restore the runtime and honor the launch pin', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-resume-inputs-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const root = fileURLToPath(new URL('../', import.meta.url));
+  const template = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
+  const inputs = template.match(/<<'HAM_INPUTS'\n([\s\S]*?)\nHAM_INPUTS/)[1];
+  writeFileSync(join(dir, 'base-head'), 'a'.repeat(40));
+  const script = join(dir, 'inputs.sh');
+  writeFileSync(script, inputs.replaceAll('<<ROOT_DIR>>', root).replaceAll('<<RUN_DIR>>', dir)
+    .replaceAll(/<<[A-Z_]+>>/g, 'fixture'));
+  const result = spawnSync('/bin/bash', ['-euc', `source "$1"
+unset HAM_NODE_BIN
+source "$1"
+/bin/bash -uc 'printf "%s" "$HAM_NODE_BIN"'
+`, 'bash', script], {
+    env: { PATH: process.env.PATH, AGENT_OS_NODE_BIN: process.execPath },
+    encoding: 'utf8', timeout: 5000,
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, process.execPath);
+  // After sourcing, helpers must require the resolved export rather than
+  // silently launching a PATH runtime if the caller loses it.
+  const fallback = join(dir, 'node');
+  writeFileSync(fallback, '#!/bin/bash\nprintf unexpected-PATH-runtime\n', { mode: 0o755 });
+  for (const helper of ['ham_gh', 'ham_git', 'ham_pr']) {
+    const lost = spawnSync('/bin/bash', ['-c', 'source "$1" || exit; unset HAM_NODE_BIN; "$2" fixture', 'bash', script, helper], {
+      env: { PATH: `${dir}:${process.env.PATH}`, AGENT_OS_NODE_BIN: process.execPath },
+      encoding: 'utf8', timeout: 5000,
+    });
+    assert.ifError(lost.error);
+    assert.notEqual(lost.status, 0, helper);
+    assert.equal(lost.stdout, '', helper);
+  }
+  const emptyPath = join(dir, 'empty-path');
+  mkdirSync(emptyPath);
+  const missing = spawnSync('/bin/bash', ['-c', 'source "$1"', 'bash', join(root, 'bin/hammer-node-runtime.sh')], {
+    env: { PATH: emptyPath }, encoding: 'utf8', timeout: 5000,
+  });
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /node-runtime-unavailable/);
 });

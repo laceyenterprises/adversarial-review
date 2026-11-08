@@ -16,6 +16,7 @@ Before PR reads/edits, perform this existence check only. Missing deployed
 scripts require one fresh AMA dispatch/lease; do not reconstruct them:
 
 ```bash
+source "<<ROOT_DIR>>/bin/hammer-node-runtime.sh" || exit 1
 export HAM_REPO='<<REPO>>' HAM_PR_NUMBER='<<PR_NUMBER>>' HAM_HQ_ROOT='<<HQ_ROOT>>' HAM_TARGET_REMEDIATION_SHA='<<TARGET_REMEDIATION_SHA>>'
 if ! test -f "<<RUN_DIR>>/hammer-verify-head.sh" -a -f "<<RUN_DIR>>/hammer-publish.sh" -a -f "<<RUN_DIR>>/hammer-merge.sh"; then
   "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-terminal-audit.mjs" dispatch-phase-scripts-missing
@@ -23,9 +24,9 @@ if ! test -f "<<RUN_DIR>>/hammer-verify-head.sh" -a -f "<<RUN_DIR>>/hammer-publi
 fi
 ```
 
-Initialize `inputs.sh` once using Appendix A (capture the starting head before
-edits); then run this guard and source it each shell. Do not replace missing
-inputs after edits.
+Initialize `inputs.sh` once per Appendix A before edits; guard and source it in
+every shell, including resumes, to resolve and export `HAM_NODE_BIN`.
+Never replace missing inputs after edits.
 
 ```bash
 test -f "<<RUN_DIR>>/inputs.sh" || {
@@ -140,8 +141,8 @@ which appendix applies; these are prompt sections, never phase source files.
 
 ## Shell safety
 
-Fresh shells reset state and cwd. Persist only in `<<RUN_DIR>>` (TMPDIR); never `/tmp`.
-Use absolute helpers; distrust cwd.
+Fresh shells reset state/cwd. Persist only in `<<RUN_DIR>>` (TMPDIR), never `/tmp`.
+Use absolute helpers.
 
 Bound every shell command. On macOS:
 
@@ -210,6 +211,7 @@ Source `<<RUN_DIR>>/inputs.sh` each shell; persist audits there.
 umask 077
 /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-base-head.mjs" '<<PR_URL>>' > '<<RUN_DIR>>/base-head' || exit 1
 cat > '<<RUN_DIR>>/inputs.sh' <<'HAM_INPUTS'
+source "<<ROOT_DIR>>/bin/hammer-node-runtime.sh" || { return 1 2>/dev/null || exit 1; }
 export HAM_BASE_HEAD="$(cat '<<RUN_DIR>>/base-head')"
 export TMPDIR='<<RUN_DIR>>'
 export HAM_PR_URL='<<PR_URL>>' HAM_REPO='<<REPO>>' HAM_PR_NUMBER='<<PR_NUMBER>>'
@@ -219,14 +221,14 @@ export HAM_RUN_DIR='<<RUN_DIR>>'
 export HAM_ROOT_DIR='<<ROOT_DIR>>' HAM_HQ_ROOT='<<HQ_ROOT>>' HAM_HQ_OWNER='<<HQ_OWNER>>'
 export HAM_AUDIT_PATH='<<AUDIT_PATH>>' HAM_REVIEWER='<<REVIEWER>>'
 export HAM_AMA_TRAILERS=<<AMA_TRAILERS_SHELL>>
-ham_gh() { "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/metered-gh.mjs" exec-hammer "$@"; }
+ham_gh() { "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/metered-gh.mjs" exec-hammer "$@"; }
 ham_git() {
   local ham_git_exit=0
-  "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/metered-gh.mjs" exec-git "$@" || ham_git_exit=$?
+  "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/metered-gh.mjs" exec-git "$@" || ham_git_exit=$?
   if [ "$ham_git_exit" -eq 76 ]; then HAM_PHASE_OUTCOME=git-credential-refresh-failed; fi
   return "$ham_git_exit"
 }
-ham_pr() { "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-pr-read.mjs" "$HAM_REPO" "$HAM_PR_NUMBER" "$@"; }
+ham_pr() { "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-pr-read.mjs" "$HAM_REPO" "$HAM_PR_NUMBER" "$@"; }
 HAM_INPUTS
 source "<<RUN_DIR>>/inputs.sh"
 "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-controller.mjs" resolve-environment || exit $?

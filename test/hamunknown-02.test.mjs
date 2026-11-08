@@ -22,6 +22,8 @@ function runMerge(t, gates, { laneRefusal = null, laneExit = 75, leaseWaitSecond
   const dir = mkdtempSync(join(tmpdir(), 'hamunknown-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   for (const path of ['modules/worker-pool/lib/python', 'platform/session-ledger/src']) mkdirSync(join(dir, path), { recursive: true });
+  mkdirSync(join(dir, 'bin'));
+  writeFileSync(join(dir, 'bin/hammer-node-runtime.sh'), readFileSync(new URL('../bin/hammer-node-runtime.sh', import.meta.url)));
   const identity = { rootDir: dir, repo: 'fixture/repo', prNumber: 1, headSha: head };
   acquireAmaCloserLease(identity);
   updateAmaCloserLease({ ...identity, status: 'dispatched', lrqId: 'synthetic-closer' });

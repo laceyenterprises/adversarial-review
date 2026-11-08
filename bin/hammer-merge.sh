@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+# Resolve again in every phase: resumed shells may not inherit launch exports.
+source "<<ROOT_DIR>>/bin/hammer-node-runtime.sh" || { return 1 2>/dev/null || exit 1; }
 # GitHub credentials refresh inside metered-gh immediately before each call.
 export HAM_ROOT_DIR='<<ROOT_DIR>>'
 # HAMMERTRIM-01: rendered by bin/hammer-procedure.mjs with trusted dispatch values.
-ham_gh() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec-hammer "$@"; }
-ham_pr() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-pr-read.mjs <<REPO>> <<PR_NUMBER>> "$@"; }
+ham_gh() { "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/metered-gh.mjs exec-hammer "$@"; }
+ham_pr() { "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-pr-read.mjs <<REPO>> <<PR_NUMBER>> "$@"; }
 
 ham_merge_phase() {
 local ham_wait_only=0
@@ -209,7 +211,7 @@ ham_emit_git_merge_signal() {
   HAM_SIGNAL_ATTEMPTS=0
   while [ "$HAM_SIGNAL_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
     HAM_SIGNAL_ATTEMPTS=$((HAM_SIGNAL_ATTEMPTS + 1))
-    if /usr/bin/perl -e 'alarm shift; exec @ARGV' 20 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/record-merge-signal.mjs \
+    if /usr/bin/perl -e 'alarm shift; exec @ARGV' 20 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/record-merge-signal.mjs \
       "<<HQ_ROOT>>" "<<PR_NUMBER>>" "$HAM_MERGE_COMMIT" "<<MERGE_METHOD>>" >/dev/null 2>&1
     then
       return 0

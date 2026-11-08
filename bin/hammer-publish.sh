@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
+# Resolve again in every phase: resumed shells may not inherit launch exports.
+source "<<ROOT_DIR>>/bin/hammer-node-runtime.sh" || { return 1 2>/dev/null || exit 1; }
 # GitHub credentials refresh inside metered-gh immediately before each call.
 export POST_REMEDIATION_SHA HAM_PRODUCED_HEAD HAM_PUSHED_HEAD HAM_PUSHED_FROM_HEAD
 export HAM_AUDIT_COMMENT_BODY HAM_PUBLISHED_AUDIT_HEAD
 export HAM_ROOT_DIR='<<ROOT_DIR>>'
 # HAMMERTRIM-01: rendered by bin/hammer-procedure.mjs with trusted dispatch values.
-ham_gh() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec-hammer "$@"; }
+ham_gh() { "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/metered-gh.mjs exec-hammer "$@"; }
 ham_git() {
   local ham_git_exit=0
-  "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec-git "$@" || ham_git_exit=$?
+  "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/metered-gh.mjs exec-git "$@" || ham_git_exit=$?
   if [ "$ham_git_exit" -eq 76 ]; then HAM_PHASE_OUTCOME=git-credential-refresh-failed; fi
   return "$ham_git_exit"
 }
-ham_pr() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-pr-read.mjs <<REPO>> <<PR_NUMBER>> "$@"; }
+ham_pr() { "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-pr-read.mjs <<REPO>> <<PR_NUMBER>> "$@"; }
 
 ham_entitled_gh() { ham_gh "$@"; }
 
@@ -180,7 +182,7 @@ fi
 # record widens responsibility to the review's own proven head, never review.
 ham_prove_audit_range() {
   local ham_range_exit=0
-  /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-head-context.mjs \
+  /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-head-context.mjs \
     <<REPO>> <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" --pr <<PR_URL>> \
     > "<<RUN_DIR>>/range.json" || ham_range_exit=$?
   if [ "$ham_range_exit" -eq 76 ]; then HAM_PHASE_OUTCOME=git-credential-refresh-failed; fi
@@ -329,7 +331,7 @@ return 0
 # separate, under the merge lease, after remote CI validates the published SHA.
 if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" = "1" ]; then
   HAM_PUBLICATION_PREVIOUS_HEAD="${POST_REMEDIATION_SHA:-${HAM_BASE_HEAD:-}}"
-  HAM_API_PUBLISH_RESULT=$(/usr/bin/perl -e 'alarm shift; exec @ARGV' 120 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-api-publish.mjs <<REPO>> <<PR_URL>>) || HAM_API_PUBLISH_RESULT='{"route":"re-review","reason":"API publication timed out"}'
+  HAM_API_PUBLISH_RESULT=$(/usr/bin/perl -e 'alarm shift; exec @ARGV' 120 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-api-publish.mjs <<REPO>> <<PR_URL>>) || HAM_API_PUBLISH_RESULT='{"route":"re-review","reason":"API publication timed out"}'
   printf '%s\n' "$HAM_API_PUBLISH_RESULT"
   HAM_PUSHED_FROM_HEAD=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.previousHead // empty')
   if [ -z "$HAM_PUSHED_FROM_HEAD" ]; then HAM_PUSHED_FROM_HEAD="$HAM_PUBLICATION_PREVIOUS_HEAD"; fi

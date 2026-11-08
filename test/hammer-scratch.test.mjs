@@ -450,7 +450,7 @@ test('HAMTMP-02: dispatch snapshots deployed phases and the prompt sources only 
   assert.match(reference, /At most one re-author per run/);
   assert.doesNotMatch(prompt, /hammer-procedure\.mjs|--render|\/tmp\/ham-/);
   assert.doesNotMatch(prompt, /(?:^|[\s`'"])bin\/(?:hammer-|run-bounded)/m);
-  assert.match(prompt, /Fresh shells reset state and cwd/);
+  assert.match(prompt, /Fresh shells reset state(?:\/| and )cwd\./);
   for (const phase of ['hammer-verify-head', 'hammer-publish', 'hammer-merge']) {
     const path = join(record.scratchDir, `${phase}.sh`);
     assert.ok(prompt.includes(`source "${path}"`), phase);

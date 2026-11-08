@@ -161,7 +161,7 @@ test('refresh check scales its timeout once at maximum load and stays below the 
   const env = { HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: 'synthetic-refresh' };
   assert.equal(hammerTokenSession({ credentialEnv: env, hammerToken: true }).checkRefresh().parsed, true);
   assert.equal(calls, 1);
-  assert.equal(refreshOptions.timeout, 60_000);
+  assert.equal(refreshOptions.timeout, 150_000 * 6);
   assert.ok(refreshOptions.timeout <= 2 ** 31 - 1);
   assert.equal(refreshOptions.maxBuffer, 16 * 1024);
   assert.equal(refreshOptions.stdio, 'pipe');

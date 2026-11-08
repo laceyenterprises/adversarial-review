@@ -274,7 +274,20 @@ that head. Validation evidence compares SHA values without case sensitivity,
 retains lowercase receipt heads and hashes the original audit body unchanged.
 A moved head (including an Appendix D rebase) validates normally.
 An API credential mint that times out or fails to run records the retryable
-`credential-refresh-unavailable`. `hammer-terminal-audit.mjs --final
+`credential-refresh-unavailable`. API preparation, forced renewal after a 401,
+the Git credential helper and the refresh-only activation check allow the
+launch refresh command 150 seconds before load scaling (up to 900 seconds
+with the default sixfold ceiling). This preserves the owner's 120-second
+broker retry window and 135-second HCP wait, including startup headroom.
+An explicit caller deadline clips this wait without further scaling. The
+owner retries the same entitled identity; no ambient identity is substituted.
+Named authorization or identity refusals stop immediately, including when
+an old entitled token is held. Free-text child diagnostics stay discarded.
+After normal deployment, SRE observes the next two deploy-driven broker rolls
+and retains watcher `terminalOutcome` evidence that no hammer ends with
+`retryable-credential-refresh-unavailable`; source tests alone do not prove
+this live receipt.
+`hammer-terminal-audit.mjs --final
 rebase-conflict` counts the reported head in `<run dir>/conflict-repairs.json`
 before checking the budget. Until three distinct heads have conflicted, it
 exits 65 without a terminal AMA audit or `terminal-stop` receipt; the run
@@ -7004,7 +7017,10 @@ admission-cache lookup and rate-limit accounting, including when dispatch only
 supplies a refresh command. Each invocation, including after a CI wait, runs
 that variable's `<TOKEN_VAR>_REFRESH_COMMAND`, falling back to the launch
 environment's `HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND`. The trusted command has a fixed
-10-second timeout. Its diagnostics are discarded. After an actual throttle wait
+150-second timeout before load scaling (up to 900 seconds with the default
+sixfold ceiling), clipped by any explicit caller deadline. Only allowlisted
+authorization/identity refusal codes cross the diagnostic boundary; free-text
+child diagnostics are discarded. After an actual throttle wait
 it refreshes again immediately before execution and attributes the response to
 that credential. Without a refresh command, the current token is used unchanged.
 
@@ -7030,7 +7046,8 @@ clears the cached expiry rather than inheriting the previous token's timestamp.
 The refresh before a call is an optimisation. When it fails and the session
 already holds an entitled token (from `HAMMER_LACEY_GH_TOKEN`,
 `MERGE_AGENT_GH_TOKEN` or an earlier refresh; an ambient `GH_TOKEN` does not
-count), the call proceeds with that token and the process
+count), the call proceeds with that token unless the refresh returned an
+allowlisted authorization/identity refusal, which stops immediately. The process
 writes one warning to stderr per failure streak, naming only the outcome:
 `hammer-token: warning: proactive entitled token refresh failed (...); continuing with the held token`.
 That warning means the refresh command is broken while the held token still

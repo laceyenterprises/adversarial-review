@@ -237,6 +237,12 @@ pluggability is real but only one non-PR domain ships today.
 Known sharp edges — the rough texture that we'd rather name out loud
 than hide — are catalogued in [`KNOWN-SHARP-EDGES.md`](KNOWN-SHARP-EDGES.md).
 
+Hammer credential renewal preserves the launch command's bounded owner retry
+window across transient service restarts; explicit authorization refusals stop
+with a bounded reason. The [closure runbook](docs/RUNBOOK-ama-closure.md)
+defines the timeout contract and the SRE receipt across two natural broker rolls.
+Offline deadline/refusal coverage lives in `test/hamcredrefresh-01.test.mjs`.
+
 ---
 
 ## Five-minute path

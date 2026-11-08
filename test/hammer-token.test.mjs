@@ -579,7 +579,9 @@ process.stderr.write(process.env.GITHUB_TOKEN);
   });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, '[redacted]');
-  assert.equal(result.stderr, 'hammer-token: warning: proactive entitled token refresh failed (empty or invalid output); continuing with the held token\n[redacted]');
+  const stderr = result.stderr.replace(/^\[load-aware-timeout\] CPU sample unavailable; (?:using full load-based corroboration|reusing last good sample \(under 60s old\))\n/, '');
+  assert.equal(stderr, 'hammer-token: warning: proactive entitled token refresh failed (empty or invalid output); continuing with the held token\n[redacted]');
+  assert.doesNotMatch(result.stdout + result.stderr, new RegExp(`${expired}|${fresh}`));
 });
 
 test('a held token with a comfortably later known expiry skips the proactive refresh but not the forced one', async t => {
@@ -619,11 +621,11 @@ test('an ambient GH_TOKEN is neither kept on a failed refresh nor trusted to exp
   assert.throws(() => hammerTokenSession({ env, hammerToken: true }).prepare(), /refresh failed \(command error\)/);
 });
 
-test('refresh command has a fixed timeout and discards its diagnostics', t => {
+test('refresh command respects an explicit deadline and discards its diagnostics', t => {
   const f = fixture(t);
   delete f.env.HAMMER_LACEY_GH_TOKEN;
   const command = `exec ${quote(process.execPath)} -e 'process.stderr.write("synthetic-secret"); setInterval(() => {}, 1000)'`;
-  assert.throws(() => hammerTokenSession({ env: { ...f.env, HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: command } }).prepare(),
+  assert.throws(() => hammerTokenSession({ env: { ...f.env, HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: command } }).prepare({ timeoutMs: 25 }),
     error => /refresh failed \(timeout or signal\)/.test(error.message) && !error.message.includes('synthetic-secret'));
 });
 

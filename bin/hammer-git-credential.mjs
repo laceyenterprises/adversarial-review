@@ -13,8 +13,9 @@ if (process.argv[2] === 'get') {
     try {
       const token = hammerTokenSession({ hammerToken: true }).gitCredential();
       process.stdout.write(`username=x-access-token\npassword=${token}\n\n`);
-    } catch {
+    } catch (error) {
       process.stderr.write(`${GIT_CREDENTIAL_REFRESH_FAILED}\n`);
+      if (error.refreshRefusal) process.stderr.write(`entitled-refresh-refused:${error.refreshRefusal}\n`);
       process.exitCode = 1;
     }
   }

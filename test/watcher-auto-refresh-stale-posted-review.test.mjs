@@ -1420,8 +1420,8 @@ test('watcher retries transient closer identity probe failures before suppressin
         throw err;
       }
       if (calls === 2) {
-        const err = new Error('secondary rate limit');
-        err.stderr = 'secondary rate limit';
+        const err = new Error('HTTP 503 Service Unavailable');
+        err.stderr = 'HTTP 503 Service Unavailable';
         throw err;
       }
       return {
@@ -1788,4 +1788,19 @@ test('HAMVALIDORPHAN-01 queued suppression restores the delivered verdict and re
     assert.equal(hammerHeadOwnership({ suppressed: true, reason: 'closer-author-login' }, 'new'), null);
     db.close();
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+// Rate-limit retries differ from transport retries: a closer cannot spend at zero.
+test('closer identity rate limit defers retries instead of spending an exhausted budget', async () => {
+  let calls = 0;
+  await assert.rejects(getHeadCloserCommitSuppression({
+    repoPath: 'fixture/repo', prNumber: 1, headSha: 'a'.repeat(40),
+    fetchVerifiedCommitFromLocalGitImpl: async () => null,
+    execFileImpl: async () => {
+      calls++;
+      throw Object.assign(new Error('secondary rate limit'), { stderr: 'secondary rate limit' });
+    },
+    retryBackoffMs: [1], sleepImpl: async () => {}, logger: { warn() {} },
+  }), { budgetDeferred: true });
+  assert.equal(calls, 1);
 });

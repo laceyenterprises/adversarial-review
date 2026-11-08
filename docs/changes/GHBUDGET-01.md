@@ -43,6 +43,17 @@ The existing `post-merge-verify.json` declaration retains this SRE obligation.
 
 ## Verification
 
+CI remediation updates the lifecycle and startup-admission fixtures to serve
+the REST pull response used by production polling. An integration fixture
+drives `syncPRLifecycle` through an open 200, a matched 304 and a fresh merged
+200, checking that only the fresh terminal response finalizes the row.
+Polling authors retain the normalized `{ login }` interface.
+Closer identity tests now distinguish retryable transport/server failures from
+an explicit rate limit: the latter defers further reads at zero balance.
+
+- CI remediation: `bash bin/run-bounded.sh --timeout 600 --tail-bytes 8192 -- node test/run-tests.mjs test/github-api.test.mjs test/watcher-auto-refresh-stale-posted-review.test.mjs test/ghbudget-01.test.mjs test/watcher-claim-loop.test.mjs`: 291 passed on Node 26 after the fresh-main rebase. The initial 180-second claim-loop run timed out; the completed run took 248 seconds.
+- Rechecked lint (zero errors, 152 existing warnings), contract typechecking,
+  the 91-entry data-model catalog, the offline demo and `git diff --check`.
 - `node test/run-tests.mjs test/ghbudget-01.test.mjs test/reviewer-broker-refresh.test.mjs test/api-stats.test.mjs test/rate-limit-throttle.test.mjs test/github-budget-credentials.test.mjs test/github-budget-credential-scope.test.mjs`: 112 passed, offline.
 - `node scripts/validate-data-model-catalog.mjs`: 91 entries validated.
 - `npm run lint`: zero errors (152 existing warnings).

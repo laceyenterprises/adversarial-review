@@ -2323,10 +2323,33 @@ const octokit = {
   paginate: async () => [],
   rest: {
     repos: { listForOrg: async () => ({ data: [] }) },
-    pulls: { list: async () => ({ data: [] }) },
+    pulls: {
+      list: async () => ({ data: [] }),
+      get: async (params) => {
+        globalThis.__githubApiWatcherHeadStateCalls = (globalThis.__githubApiWatcherHeadStateCalls || 0) + 1;
+        const { rollup: pr, conditionalReplay } = globalThis.__githubApiWatcherScenario;
+        const call = globalThis.__githubApiWatcherHeadStateCalls;
+        if (conditionalReplay && call === 2) {
+          if (params.headers?.['if-none-match'] !== '"lifecycle-1"') throw new Error('missing matching lifecycle ETag');
+          return { status: 304, headers: {} };
+        }
+        return { status: 200, headers: { etag: '"lifecycle-' + call + '"' }, data: {
+          state: conditionalReplay && call === 1 ? 'open' : pr.mergedAt ? 'closed' : pr.state.toLowerCase(),
+          merged_at: conditionalReplay && call === 1 ? null : pr.mergedAt, closed_at: pr.closedAt,
+          head: { sha: pr.headRefOid }, user: pr.author, labels: pr.labels,
+        } };
+      },
+    },
     issues: {},
   },
 };
+if (globalThis.__githubApiWatcherScenario.conditionalReplay) {
+  const { syncPRLifecycle } = await import(${JSON.stringify(fileUrl('src', 'pr-lifecycle-sync.mjs'))});
+  for (let i = 0; i < 2; i++) {
+    const result = await syncPRLifecycle(octokit, { syncTriageStatus: async () => {} }, 'code-pr');
+    if (result.stillOpen !== 1 || result.merged !== 0) throw new Error('cached open lifecycle changed prematurely');
+  }
+}
 await pollOnce(octokit, {
   healthProbe: {
     beginTick() { return {}; },
@@ -2345,13 +2368,13 @@ console.log(${JSON.stringify(WATCHER_SUMMARY_MARKER)} + JSON.stringify({
 `;
 }
 
-function runWatcherScenario(rollup, { seedRow = {} } = {}) {
+function runWatcherScenario(rollup, { seedRow = {}, conditionalReplay = false } = {}) {
   const tmp = mkdtempSync(path.join(tmpdir(), 'github-api-watcher-'));
   try {
     const loaderPath = path.join(tmp, 'loader.mjs');
     const registerPath = path.join(tmp, 'register.mjs');
     const runnerPath = path.join(tmp, 'runner.mjs');
-    writeFileSync(loaderPath, buildWatcherLoaderSource({ rollup }), 'utf8');
+    writeFileSync(loaderPath, buildWatcherLoaderSource({ rollup, conditionalReplay }), 'utf8');
     writeFileSync(registerPath, buildWatcherRegisterSource(loaderPath), 'utf8');
     writeFileSync(runnerPath, buildWatcherRunnerSource(seedRow), 'utf8');
     const result = spawnSync(process.execPath, ['--import', registerPath, runnerPath], {
@@ -2360,7 +2383,7 @@ function runWatcherScenario(rollup, { seedRow = {} } = {}) {
       maxBuffer: 20 * 1024 * 1024,
       env: {
         ...process.env,
-        GITHUB_API_WATCHER_SCENARIO: JSON.stringify({ rollup }),
+        GITHUB_API_WATCHER_SCENARIO: JSON.stringify({ rollup, conditionalReplay }),
       },
     });
     assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -3352,7 +3375,7 @@ test('head/state helper paginates labels beyond the first page', async () => {
   );
 });
 
-test('watcher tick downstream output is unchanged when PR fetches come from the roll-up helper', () => {
+test('watcher lifecycle REST fetch preserves downstream merged-state output', () => {
   const rollup = {
     ...makeExpectedRollup(),
     state: 'open',
@@ -3571,4 +3594,15 @@ test('mergeability sampling retries transient gh subprocess timeouts', async () 
     assert.equal(calls.length, 2);
     assert.equal(calls[0].options.killSignal, 'SIGKILL');
   });
+});
+
+test('lifecycle sync replays a matched 304 before a fresh merged response settles the row', () => {
+  const rollup = { ...makeExpectedRollup(), state: 'closed',
+    mergedAt: '2026-06-06T08:45:00.000Z', labels: [{ name: 'automerge' }] };
+  const summary = runWatcherScenario(rollup, { conditionalReplay: true });
+  assert.equal(summary.headStateCalls, 3);
+  assert.equal(summary.rows[0].pr_state, 'merged');
+  assert.equal(summary.rows[0].merged_at, rollup.mergedAt);
+  assert.equal(summary.triage.length, 1);
+  assert.equal(summary.triage[0].state, 'finalized');
 });

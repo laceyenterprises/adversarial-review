@@ -89,12 +89,14 @@ test('60 unchanged polls cost one initial read; fresh 304 preserves exact head a
     charged++;
     return { status: 200, headers: { etag: merged ? '"fixture-v2"' : '"fixture-v1"' },
       data: { state: merged ? 'closed' : 'open', head: { sha: merged ? 'b'.repeat(40) : 'a'.repeat(40) },
+        user: { login: 'fixture-author', id: 123 },
         merged_at: merged ? '2026-01-01T01:00:00Z' : null, labels: [{ name: 'hold' }] } };
   } } } };
   for (let i = 0; i < 60; i++) {
     const state = await fetchPollingPrState(octokit, dir, 'fixture/repo', 1);
     assert.equal(state.state, 'OPEN');
     assert.equal(state.headRefOid, 'a'.repeat(40));
+    assert.deepEqual(state.author, { login: 'fixture-author' });
     assert.deepEqual(state.labels, [{ name: 'hold' }]);
   }
   assert.equal(requests, 60);

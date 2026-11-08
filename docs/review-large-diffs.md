@@ -11,8 +11,9 @@ source. Fitting raw reviews perform no declaration reads or copy search. Diffs
 below 64 KiB remain inline even during recovery, avoiding copy search and blob
 inspection when context overhead causes the refusal.
 
-The posted review carries the manifest inside `## Summary`, preserving the final
-`## Verdict` and any simplicity advisory. The complete payload is validated
+The posted review carries a bounded manifest inside `## Summary`. When entries
+are omitted, it records the full manifest digest and total file count while
+preserving the final `## Verdict` and any simplicity advisory. The complete payload is validated
 before preservation and posting. Original diffs remain available to head
 grounding, scope classification and delivery binding.
 

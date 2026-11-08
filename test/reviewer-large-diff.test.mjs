@@ -84,6 +84,17 @@ test('one-to-many split requires exact, complete, non-overlapping content covera
   }
 });
 
+test('identical split siblings consume distinct whole-line offsets', async () => {
+  const shared = 'repeated lines\n';
+  const diff = wholeFile('old.txt', shared + 'different\n' + shared, '-')
+    + wholeFile('left.txt', shared) + wholeFile('middle.txt', 'different\n')
+    + wholeFile('right.txt', shared);
+  const prepared = await summariseReviewDiff({ diff, minDiffBytes: 0 });
+  assert.equal(prepared.diff, '');
+  assert.equal(prepared.manifest.length, 4);
+  assert.ok(prepared.manifest.every(entry => entry.movedFrom === 'old.txt'));
+});
+
 test('git rename and copy detection independently verifies identical blob hashes', async t => {
   const cwd = mkdtempSync(join(tmpdir(), 'review-moves-'));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
@@ -233,4 +244,23 @@ test('manifest remains inside Summary and preserves canonical verdicts and advis
     assert.ok(posted.indexOf('```json') < posted.indexOf('## Blocking issues'));
     assert.equal(discloseReviewManifest(posted, manifest), posted);
   }
+});
+
+test('large manifest disclosure has a bounded payload and the full digest', () => {
+  const manifest = Array.from({ length: 1_000 }, (_, i) => ({
+    path: `fixtures/long-path-${i}.json`, sha256: 'a'.repeat(64),
+  }));
+  const digest = createHash('sha256').update(JSON.stringify(manifest)).digest('hex');
+  const disclosure = reviewManifestText(manifest);
+  assert.ok(disclosure.length <= 8_000);
+  assert.ok(disclosure.includes(`Full manifest SHA-256: ${digest}.`));
+  assert.match(disclosure, /Additional manifest entries are omitted/);
+  assert.ok(disclosure.includes('fixtures/long-path-0.json'));
+  assert.ok(!disclosure.includes('fixtures/long-path-999.json'));
+  const review = '## Summary\n' + 'x'.repeat(59_600) + '\n\n## Verdict\n\nComment only';
+  const posted = discloseReviewManifest(review, manifest);
+  assert.ok(posted.length <= 60_000);
+  assert.ok(posted.includes(digest));
+  assert.match(posted, /## Verdict\n\nComment only$/);
+  assert.equal(discloseReviewManifest(posted, manifest), posted);
 });

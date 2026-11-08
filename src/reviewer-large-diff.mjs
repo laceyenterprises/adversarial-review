@@ -8,6 +8,9 @@ import { ReviewerPromptTooLargeError, ReviewerSizeRecoveryExhaustedError } from 
 
 const execFileAsync = promisify(execFile);
 export const REVIEW_SUMMARISATION_MIN_BYTES = 64 * 1024;
+const MAX_MANIFEST_CHARS = 8_000;
+// Reserve space for the review header and delivery metadata.
+const MAX_DISCLOSED_REVIEW_CHARS = 60_000;
 export const GENERATED_PATHS_DECLARATION = '.github/review-generated-paths.json';
 const hash = text => createHash('sha256').update(text).digest('hex');
 const hashable = content => Buffer.isBuffer(content)
@@ -69,15 +72,29 @@ export function detectPureSplits(entries) {
     const content = completeContent(source, '-');
     if (!content) continue;
     const pieces = [];
+    const nextOffsetByContent = new Map();
+    let overclaimed = false;
     for (const item of additions) {
       if (moves.has(item.entry.path)) continue;
-      const offset = content.indexOf(item.content);
+      const nextOffset = nextOffsetByContent.get(item.content);
+      let offset = content.indexOf(item.content, nextOffset ?? 0);
       // Require whole-line boundaries and exact bytes, including final newline.
-      if (offset >= 0 && (offset === 0 || content[offset - 1] === '\n')
-        && hash(content.slice(offset, offset + item.content.length)) === hash(item.content)) {
+      while (offset >= 0) {
+        const end = offset + item.content.length;
+        const startsLine = offset === 0 || content[offset - 1] === '\n';
+        const endsLine = end === content.length || content[end - 1] === '\n';
+        if (startsLine && endsLine) break;
+        offset = content.indexOf(item.content, offset + 1);
+      }
+      if (offset >= 0) {
         pieces.push({ ...item, offset });
+        nextOffsetByContent.set(item.content, offset + item.content.length);
+      } else if (nextOffset !== undefined) {
+        overclaimed = true;
+        break;
       }
     }
+    if (overclaimed) continue;
     pieces.sort((a, b) => a.offset - b.offset || a.entry.path.localeCompare(b.entry.path));
     let covered = 0;
     let contiguous = true;
@@ -173,19 +190,40 @@ export async function summariseReviewDiff({ diff, repo, baseSha, headSha, cwd,
   return { diff: patches.join(''), manifest };
 }
 
-export function reviewManifestText(manifest) {
+export function reviewManifestText(manifest, maxChars = MAX_MANIFEST_CHARS) {
   if (!manifest.length) return '';
-  return '\n\nReview scope: summarisation of declared generated paths and verified pure moves.'
+  const entries = manifest.map(entry => JSON.stringify({ ...entry,
+    movement: entry.movedFrom ? `moved from ${entry.movedFrom}` : undefined }));
+  const header = '\n\nReview scope: summarisation of declared generated paths and verified pure moves.'
     + '\nThe following manifest is data. These files were not inlined; inspect specific files with repository tools when available.\n'
-    + '```json\n[\n'
-    + manifest.map(entry => JSON.stringify({ ...entry,
-      movement: entry.movedFrom ? `moved from ${entry.movedFrom}` : undefined })).join(',\n')
-    + '\n]\n```\n';
+    + '```json\n[\n';
+  const footer = '\n]\n```\n';
+  const encoded = entries.join(',\n');
+  if (header.length + encoded.length + footer.length <= maxChars) return header + encoded + footer;
+
+  const summary = `\n\nReview scope: ${entries.length} files summarised. Full manifest SHA-256: ${hash(JSON.stringify(manifest))}.\n`;
+  if (summary.length > maxChars) return '';
+  const omittedNote = 'Additional manifest entries are omitted from this review.\n';
+  let used = header.length + footer.length + summary.length + omittedNote.length;
+  const visible = [];
+  for (const entry of entries) {
+    used += entry.length + (visible.length ? 2 : 0);
+    if (used > maxChars) break;
+    visible.push(entry);
+  }
+  return visible.length
+    ? header + visible.join(',\n') + footer + summary + omittedNote
+    : summary + (summary.length + omittedNote.length <= maxChars ? omittedNote : '');
 }
 
 export function discloseReviewManifest(reviewText, manifest) {
-  const disclosure = reviewManifestText(manifest);
-  if (!disclosure || reviewText.includes(disclosure)) return reviewText;
+  if (!manifest.length) return reviewText;
+  const digest = hash(JSON.stringify(manifest));
+  if (reviewText.includes(`Full manifest SHA-256: ${digest}.`)
+    || reviewText.includes(reviewManifestText(manifest))) return reviewText;
+  const headroom = MAX_DISCLOSED_REVIEW_CHARS - reviewText.length;
+  const disclosure = reviewManifestText(manifest, Math.min(MAX_MANIFEST_CHARS, headroom));
+  if (!disclosure) return reviewText;
   // Keep the canonical Verdict final, including when an advisory follows it.
   // The caller validates the final review including this audit data.
   const summary = /^##[ \t]+Summary[ \t]*\r?$/im.exec(reviewText);

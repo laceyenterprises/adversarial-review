@@ -2084,7 +2084,8 @@ async function main() {
     reviewAttemptNumber, promptStage: reviewModeDecision.promptStage, verdictOnly, diff, sessionUuid: reviewerSessionUuid, reviewDbAttemptNumber });
   const preservedDispatch = generatedReview.readReusable();
   const sizeRecovery = createReviewSizeRecovery({
-    diff, extraContext, repo, prNumber, headSha: reviewerHeadSha, initialSizing: oversizedAgyRoute,
+    diff, extraContext, repo, prNumber,
+    headSha: reviewerHeadSha || reviewerWorkspaceHeadSha, initialSizing: oversizedAgyRoute,
     resolveCwd: () => resolveReviewerSubprocessCwd({ repo, rootDir: ROOT }),
     resolveRoute: (diff, extraContext) => resolveAgyOversizedReviewRoute({
       reviewerModel: effectiveModel, botTokenEnv: effectiveBotTokenEnv, builderTag, diff, extraContext,

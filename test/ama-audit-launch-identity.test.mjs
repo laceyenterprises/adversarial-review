@@ -15,16 +15,20 @@ import {
 const cli = fileURLToPath(new URL('../bin/ama-audit.mjs', import.meta.url));
 const identity = { repo: 'fixture/repo', prNumber: 21, headSha: 'a'.repeat(40) };
 const now = '2026-10-27T00:00:00Z';
-const owner = 'synthetic-closer';
+const owner = 'lrq_synthetic_closer';
 const cases = [
-  ['canonical wins', { HQ_LAUNCH_REQUEST_ID: owner, AGENT_OS_WORKER_LRQ_ID: 'other', LAUNCH_REQUEST_ID: 'third' }, owner, true],
-  ['worker fallback wins', { AGENT_OS_WORKER_LRQ_ID: owner, LAUNCH_REQUEST_ID: 'other' }, owner, true],
+  ['canonical identity', { HQ_LAUNCH_REQUEST_ID: owner }, owner, true],
+  ['identical aliases', { HQ_LAUNCH_REQUEST_ID: owner, AGENT_OS_WORKER_LRQ_ID: owner, LAUNCH_REQUEST_ID: owner }, owner, true],
+  ['conflicting canonical and legacy IDs', { HQ_LAUNCH_REQUEST_ID: owner, LAUNCH_REQUEST_ID: 'lrq_other' }, owner, false],
+  ['conflicting IDs with terminal remediation', { HQ_LAUNCH_REQUEST_ID: owner, AGENT_OS_WORKER_LRQ_ID: 'lrq_other' }, owner, false, { reason: 'github-gate-read-failed' }, true],
+  ['conflicting canonical and fallback IDs', { HQ_LAUNCH_REQUEST_ID: owner, AGENT_OS_WORKER_LRQ_ID: 'lrq_other', LAUNCH_REQUEST_ID: 'lrq_third' }, owner, false],
+  ['conflicting worker and legacy IDs', { AGENT_OS_WORKER_LRQ_ID: owner, LAUNCH_REQUEST_ID: 'lrq_other' }, owner, false],
   ['legacy fallback', { LAUNCH_REQUEST_ID: owner }, owner, true],
   ['missing identity', {}, null, false],
-  ['different owner', { AGENT_OS_WORKER_LRQ_ID: 'successor' }, 'successor', false],
-  ['worker fallback overrides JSON', { AGENT_OS_WORKER_LRQ_ID: owner }, owner, true, { launchRequestId: 'input-launch' }],
-  ['legacy fallback overrides JSON', { LAUNCH_REQUEST_ID: owner }, owner, true, { launchRequestId: 'input-launch' }],
-  ['JSON identity retained without environment identity', {}, 'input-launch', false, { launchRequestId: 'input-launch' }],
+  ['different owner', { AGENT_OS_WORKER_LRQ_ID: 'lrq_successor' }, 'lrq_successor', false],
+  ['worker fallback overrides JSON', { AGENT_OS_WORKER_LRQ_ID: owner }, owner, true, { launchRequestId: 'lrq_input_launch' }],
+  ['legacy fallback overrides JSON', { LAUNCH_REQUEST_ID: owner }, owner, true, { launchRequestId: 'lrq_input_launch' }],
+  ['JSON identity retained without environment identity', {}, 'lrq_input_launch', false, { launchRequestId: 'lrq_input_launch' }],
   ['JSON matching owner cannot authorize release', {}, owner, false, { launchRequestId: owner }],
   ['worker fallback with mapped terminal remediation', { AGENT_OS_WORKER_LRQ_ID: owner }, owner, true, { reason: 'github-gate-read-failed' }, true],
   ['legacy fallback with mapped terminal remediation', { LAUNCH_REQUEST_ID: owner }, owner, true, { reason: 'github-gate-read-failed' }, true],
@@ -62,7 +66,7 @@ for (const command of ['init', 'append']) {
         assert.equal(receipt.terminalOutcome, `retryable-${reason}`);
         assert.equal(receipt.lrqId, owner);
       } else {
-        assert.deepEqual(receipt, before, 'unidentified or different launches preserve ownership');
+        assert.deepEqual(receipt, before, 'unidentified, ambiguous, or different launches preserve ownership');
       }
     });
   }

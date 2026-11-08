@@ -140,8 +140,13 @@ function runInitOrAppend(subcommand, argv) {
     }
   }
   const attemptBase = loadAttemptJson(values['attempt-json']);
-  const launchRequestId = process.env.HQ_LAUNCH_REQUEST_ID
-    || process.env.AGENT_OS_WORKER_LRQ_ID || process.env.LAUNCH_REQUEST_ID || null;
+  const launchRequestIds = [
+    process.env.HQ_LAUNCH_REQUEST_ID,
+    process.env.AGENT_OS_WORKER_LRQ_ID,
+    process.env.LAUNCH_REQUEST_ID,
+  ].filter(Boolean);
+  const launchRequestId = launchRequestIds[0] || null;
+  const leaseLaunchRequestId = new Set(launchRequestIds).size === 1 ? launchRequestId : null;
   const rawAttempt = { ...attemptBase, outcome: values.outcome,
     ...(launchRequestId ? { launchRequestId } : {}) };
   const attempt = values['closure-authority'] === 'ham-terminal-remediation'
@@ -168,7 +173,7 @@ function runInitOrAppend(subcommand, argv) {
         : appendAmaAuditAttempt(args);
     if (values['root-dir']) releaseRetryableAmaCloserLease({
       rootDir: values['root-dir'], repo: args.repo, prNumber: args.prNumber,
-      headSha: args.headSha, launchRequestId,
+      headSha: args.headSha, launchRequestId: leaseLaunchRequestId,
       sourceHeadSha: values['lease-head'], attempt, now: args.now,
     });
     process.stdout.write(`${filePath}\n`);

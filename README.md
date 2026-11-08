@@ -4580,6 +4580,8 @@ New repository notes live in [`docs/changes/`](docs/changes/README.md), one
 entries below are preserved historical notes. No per-ticket README or index
 update is needed.
 
+- **HAM-1722:** Preserve closer leases when environment launch IDs conflict while retaining audit identity precedence; use launch-request-format fixtures and cover identical aliases and ambiguous terminal outcomes.
+
 - FINDINGS-6d0e0584: AMA audit uses the first nonempty launch identity from `HQ_LAUNCH_REQUEST_ID`, `AGENT_OS_WORKER_LRQ_ID`, and `LAUNCH_REQUEST_ID`. JSON identity remains audit metadata and cannot release a closer lease.
 - REVIEWLARGE-01 final remediation: restore raw-first size recovery, defer copy/blob inspection until summarisation is needed (64 KiB diff floor), and disclose the manifest inside Summary before final reply validation. Only an exhausted chunk size refusal becomes exit 77; state projection hashes remain valid.
 

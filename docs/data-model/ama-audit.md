@@ -289,7 +289,9 @@ existing append semantics.
 `AGENT_OS_WORKER_LRQ_ID`, then `LAUNCH_REQUEST_ID` wins, including when they
 disagree, and overwrites any identity from an attempt input file. Without an
 environment identity the CLI retains an input-file identity for audit only;
-it cannot authorize closer-lease release. Clear inherited launch variables
+it cannot authorize closer-lease release. Release also requires exactly one
+distinct non-empty environment launch ID; conflicting aliases preserve the
+lease even though audit metadata retains the precedence above. Clear inherited launch variables
 when auditing on behalf of another launch. Other producers retain their own
 identity policies.
 LVR-01 checks this attempt-local identity and outcome, rather than inheriting a

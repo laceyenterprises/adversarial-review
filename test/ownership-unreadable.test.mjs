@@ -202,13 +202,23 @@ test('OWNERUNREADABLE-01: the anchored deadline survives same-pass refresh and t
 test('OWNERUNREADABLE-01: a stalled read shares one deadline and cannot retry after abort', async t => {
   const f = fixture(t, { observedAt: LATER });
   let sourceReads = 0, resolverReads = 0, signal;
-  // Synthetic expiry exercises the shared bound without sleeping through a
-  // host-load-scaled production deadline or raising this test's wall clock.
-  const observation = await readOwnershipObservation(options => {
-    sourceReads++;
-    signal = options.signal;
-    return new Promise(resolve => signal.addEventListener('abort', () => resolve({ state: 'unknown', value: null }), { once: true }));
-  }, { scanBudgetMs: 1, launchReadTimeoutMs: 1 });
+  // Keep scheduler delays from expiring the pass before its first read.
+  // The real timeout aborts that read, then advances the shared deadline.
+  let now = Date.now();
+  const clock = t.mock.method(Date, 'now', () => now);
+  let observation;
+  try {
+    observation = await readOwnershipObservation(options => {
+      sourceReads++;
+      signal = options.signal;
+      return new Promise(resolve => signal.addEventListener('abort', () => {
+        now++;
+        resolve({ state: 'unknown', value: null });
+      }, { once: true }));
+    }, { scanBudgetMs: 1, launchReadTimeoutMs: 1 });
+  } finally {
+    clock.mock.restore();
+  }
   const shared = await f.resolve({ readLaunches: () => {
     resolverReads++;
     return observation;

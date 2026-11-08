@@ -1168,6 +1168,8 @@ test('CLOSERGATE-01: an unresolved prior-head intent does not hold the current h
 test('LCR: a dispatched worker on a prior head holds its PR', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'lcr-same-pr-worker-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  await observeCloserBacklog({ rootDir, repo: 'acme/repo', prNumber: 404, deferred: true });
+  const observations = [];
   const oldHead = 'b'.repeat(40);
   updateAmaCloserDispatchRecord(rootDir, { repo: 'acme/repo', prNumber: 404, headSha: oldHead }, () => ({
     repo: 'acme/repo', prNumber: 404, headSha: oldHead,
@@ -1182,10 +1184,19 @@ test('LCR: a dispatched worker on a prior head holds its PR', async (t) => {
   const result = await maybeDispatchAmaCloser({
     ...findingsRemediationArgs(rootDir, { dispatchContext: { dispatchedAt: '2026-07-20T12:01:00Z' } }),
     ...deps,
+    observeCloserBacklogImpl: async options => {
+      observations.push(options);
+      return observeCloserBacklog(options);
+    },
   });
   assert.equal(result.reason, 'ama-closer-launch-in-progress');
   assert.equal(result.activeLaunch.headSha, oldHead);
   assert.equal(deps.calls.length, 0);
+  assert.equal(observations.length, 1, 'an active owner needs only one backlog observation');
+  assert.equal(observations[0].pending, false);
+  const backlog = JSON.parse(readFileSync(join(rootDir, 'data', 'ama-closure-lag', 'state.json'), 'utf8'));
+  assert.equal(backlog.prs['acme/repo#404'].closerSeenAt, undefined);
+  assert.equal(backlog.prs['acme/repo#404'].deferredAt, undefined);
 });
 
 test('LCR: blocked record cannot consume another PR launch slot', async (t) => {
@@ -1236,10 +1247,14 @@ test('AMASCALE: observed backlog holds at the floor, then scales below the ceili
   assert.deepEqual(events.find(({ event }) => event === 'ama.closer_queue_depth'), {
     event: 'ama.closer_queue_depth', eligibleBacklog: 1, liveLaunches: 3, effectiveCap: 3,
   });
+  const backlogPath = join(rootDir, 'data', 'ama-closure-lag', 'state.json');
+  const deferred = JSON.parse(readFileSync(backlogPath, 'utf8')).prs['acme/repo#404'];
+  assert.equal(typeof deferred.deferredAt, 'number');
+  assert.equal(typeof deferred.closerSeenAt, 'number');
 
   // Current eligible observations, rather than the active count plus one,
   // increase the dispatch limit. Reobserving this candidate does not double-count it.
-  for (const prNumber of [997, 998, 999]) {
+  for (const prNumber of [991, 992, 993]) {
     await observeCloserBacklog({ rootDir, repo: 'acme/repo', prNumber });
   }
   assert.equal((await maybeDispatchAmaCloser(args)).dispatched, true);
@@ -1247,6 +1262,9 @@ test('AMASCALE: observed backlog holds at the floor, then scales below the ceili
   assert.deepEqual(events.filter(({ event }) => event === 'ama.closer_queue_depth').at(-1), {
     event: 'ama.closer_queue_depth', eligibleBacklog: 4, liveLaunches: 3, effectiveCap: 4,
   });
+  const dispatched = JSON.parse(readFileSync(backlogPath, 'utf8')).prs['acme/repo#404'];
+  assert.equal(dispatched.closerSeenAt, undefined);
+  assert.equal(dispatched.deferredAt, undefined);
 });
 
 test('LCR: dead no-LRQ AMA launch lease does not globally hold hammer dispatch', async (t) => {
@@ -1738,9 +1756,15 @@ test('AMASCALE: five blocked decision launches leave all other-PR capacity avail
 });
 
 
-test('AMASCALE: ten eligible closer dispatches are admitted with floor three and ceiling 32', async (t) => {
+test('AMASCALE: pending demand admits ten closer dispatches with floor three and ceiling 32', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'amascale-ten-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  // Demand from deferred PRs, separately from launched work, raises the cap.
+  const now = Date.now();
+  for (let prNumber = 200; prNumber < 210; prNumber++) {
+    await observeCloserBacklog({ rootDir, repo: 'acme/repo', prNumber,
+      deferred: true, now: now - (prNumber - 200) * 5 * 60 * 1000 });
+  }
   const deps = testDeps();
   const results = await Promise.all(Array.from({ length: 10 }, (_, index) => maybeDispatchAmaCloser({
     ...findingsRemediationArgs(rootDir, { prMetadata: { prNumber: 100 + index },

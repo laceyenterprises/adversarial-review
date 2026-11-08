@@ -249,8 +249,8 @@ for (const omitTimestamp of [false, true]) test(`TRANSIENTSTOP-01: next pass rel
     readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
     fetchPullRequestRollupImpl: async () => ({ state: 'OPEN', comments: [] }),
     resolveCloserDispatchHarnessImpl: async () => ({ workerClass: 'hammer', fellBack: false }),
-    observeCloserBacklogImpl: async () => {
-      observedRecord = readAmaCloserDispatchRecord(args.rootDir, identity);
+    observeCloserBacklogImpl: async ({ pending = true }) => {
+      if (pending) observedRecord = readAmaCloserDispatchRecord(args.rootDir, identity);
       return 0;
     },
     readTemplateImpl: () => 'synthetic hammer prompt', writeFileImpl: () => {},

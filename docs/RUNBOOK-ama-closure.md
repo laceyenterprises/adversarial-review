@@ -5310,8 +5310,11 @@ Only requested, leased, starting and running ledger launches consume capacity,
 with terminal ledger evidence required before PID absence releases a slot. Parked/blocked decision launches
 retain same-PR exclusivity but consume no fleet slots. Terminal launches release
 capacity without releasing safety leases or authorizing retries. The backlog
-census counts nonterminal closer candidates observed within ten minutes,
-including the current candidate. Live launches are compared against this
+census counts nonterminal closer candidates observed within six hours of their
+latest attempt, including the current candidate. The first capacity deferral
+records `deferredAt`; dispatch, terminal PR observations and known active owners
+clear both pending markers. See the [census store contract](data-model/ama-closure-lag.md).
+Live launches are compared against this
 backlog-derived cap; their count does not raise a successfully observed cap.
 The process-wide background dispatch queue scales with its eligible entries to
 a fixed ceiling of 32 (while preserving a higher configured host floor).

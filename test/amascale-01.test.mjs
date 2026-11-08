@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import { alertPresentationForDoc } from '../src/alert-delivery.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -8,7 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { effectiveCloserCap, launchHoldsCloserCapacity } from '../src/ama/closure-capacity.mjs';
-import { observeCloserBacklog, observeClosureLag } from '../src/ama/closure-lag.mjs';
+import { CLOSER_BACKLOG_STALE_MS, observeCloserBacklog, observeClosureLag } from '../src/ama/closure-lag.mjs';
 import { createAmaHammerBackgroundQueue } from '../src/ama-hammer-background-dispatch.mjs';
 
 function root(t) {
@@ -16,6 +17,76 @@ function root(t) {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
+
+test('deferred census retains fifteen PRs attempted across an hour', async (t) => {
+  const rootDir = root(t);
+  const start = 1000;
+  for (let prNumber = 1; prNumber <= 15; prNumber++) {
+    await observeCloserBacklog({ rootDir, repo: 'fixture/repo', prNumber,
+      deferred: true, now: start + (prNumber - 1) * 60 * 60 * 1000 / 14 });
+  }
+  const count = await observeCloserBacklog({ rootDir, repo: 'fixture/repo',
+    prNumber: 1, deferred: true, now: start + 60 * 60 * 1000 });
+  assert.equal(count, 15);
+  assert.equal(effectiveCloserCap(count, 10, 32), 15);
+  const pr = lagState(rootDir).prs['fixture/repo#1'];
+  assert.equal(pr.deferredAt, start);
+  assert.equal(pr.closerSeenAt, start + 60 * 60 * 1000);
+});
+
+test('dispatch and terminal observations remove pending closer entries', async (t) => {
+  const rootDir = root(t);
+  const args = { rootDir, repo: 'fixture/repo', logger: {} };
+  for (const prNumber of [1, 2, 3]) {
+    await observeCloserBacklog({ ...args, prNumber, deferred: true, now: 1000 });
+  }
+  assert.equal(await observeCloserBacklog({ ...args, prNumber: 1, pending: false, now: 2000 }), 2);
+  for (const [prNumber, terminal] of [[2, { merged: true }], [3, { closed: true }]]) {
+    await observeClosureLag({ ...args, prNumber, ...terminal, now: 2000, pageImpl: async () => {} });
+  }
+  assert.equal(await observeCloserBacklog({ ...args, prNumber: 1, pending: false, now: 3000 }), 0);
+  for (const pr of Object.values(lagState(rootDir).prs)) {
+    assert.equal(pr.closerSeenAt, undefined);
+    assert.equal(pr.deferredAt, undefined);
+  }
+});
+
+test('pending census expires by latest attempt at the six-hour boundary', async (t) => {
+  const args = { rootDir: root(t), repo: 'fixture/repo', prNumber: 1, deferred: true };
+  await observeCloserBacklog({ ...args, now: 1000 });
+  const census = { ...args, prNumber: 2, pending: false };
+  assert.equal(await observeCloserBacklog({ ...census, now: 1000 + CLOSER_BACKLOG_STALE_MS }), 1);
+  assert.equal(await observeCloserBacklog({ ...census, now: 1001 + CLOSER_BACKLOG_STALE_MS }), 0);
+  await observeCloserBacklog({ ...args, now: 2000 + CLOSER_BACKLOG_STALE_MS });
+  assert.equal(await observeCloserBacklog({ ...census, now: 2001 + CLOSER_BACKLOG_STALE_MS }), 1);
+});
+
+test('lag eligibility reset preserves pending repair demand and its first deferral', async (t) => {
+  const args = { rootDir: root(t), repo: 'fixture/repo', prNumber: 1, logger: {} };
+  await observeCloserBacklog({ ...args, deferred: true, now: 1000 });
+  await observeClosureLag({ ...args, headSha: 'old-head', eligible: true, now: 2000 });
+  await observeClosureLag({ ...args, headSha: 'new-head', eligible: false, now: 3000 });
+  const pr = lagState(args.rootDir).prs['fixture/repo#1'];
+  assert.equal(pr.eligibleAt, undefined);
+  assert.equal(pr.deferredAt, 1000);
+  assert.equal(pr.closerSeenAt, 1000);
+  assert.equal(await observeCloserBacklog({ ...args, prNumber: 2, pending: false, now: 4000 }), 1);
+});
+
+test('known active owners retire legacy census entries without clearing lag samples', async (t) => {
+  const args = { rootDir: root(t), repo: 'fixture/repo', logger: {} };
+  await observeClosureLag({ ...args, prNumber: 1, headSha: 'head', eligible: true,
+    now: 1000, pageImpl: async () => {} });
+  for (const prNumber of [1, 2, 3]) {
+    await observeCloserBacklog({ ...args, prNumber, deferred: true, now: 1000 });
+  }
+  assert.equal(await observeCloserBacklog({ ...args, prNumber: 3, now: 2000,
+    activePrKeys: ['fixture/repo#1', 'fixture/other#99'] }), 2);
+  const active = lagState(args.rootDir).prs['fixture/repo#1'];
+  assert.equal(active.closerSeenAt, undefined);
+  assert.equal(active.deferredAt, undefined);
+  assert.equal(active.eligibleAt, 1000);
+});
 
 test('five parked hammers consume no capacity; only live launch states count', () => {
   assert.equal(Array.from({ length: 5 }, () => ({ status: 'blocked_needs_decision' })).filter(launchHoldsCloserCapacity).length, 0);

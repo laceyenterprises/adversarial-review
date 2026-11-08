@@ -4,7 +4,7 @@ import { readCompletedRemediationRounds, exactHammerValidation } from './hammer-
 import { createHash } from 'node:crypto';
 import { storedPrimaryChange, primaryChangeStoreOwned, verifiedReversalRecord } from './primary-change-store.mjs';
 import { createHistoryReader } from './history-reader.mjs';
-import { historyReadFailureReason } from './history-read-policy.mjs';
+import { historyReadFailureReason, historyReadTimeoutEvidence, withHistoryReadBudget } from './history-read-policy.mjs';
 import { fetchCiCost, checkCiCost } from './ci-cost.mjs';
 import { fetchGuardReversals, verifiedGuardReversals } from './guard-reversal.mjs';
 import { amaAllAuthoritativeReviewerLogins, amaReviewerFamilyForLogin, isCurrentAuthoritativeFamilyReview } from './reviewer-authority.mjs';
@@ -1457,7 +1457,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
       primaryFiles: primary.files, finalFiles: final.files };
   } catch (error) {
     return unknown(historyReadFailureReason(error),
-      { readFailed: true, historyReadFailed: true });
+      { readFailed: true, historyReadFailed: true, ...historyReadTimeoutEvidence(error) });
   }
 }
 
@@ -1565,7 +1565,25 @@ export async function fetchPrimaryChangeHistoryClassification(args) {
 
 // Every production primary-change read also proves the independent cost gate.
 // Keep history failures distinct and retain the existing terminal-state handling.
-export async function fetchPrimaryChange(args, {
+export async function fetchPrimaryChange(args, options = {}) {
+  try {
+    return await withHistoryReadBudget(async signal => {
+      const source = args.get.withSignal ? args.get.withSignal(signal) : args.get;
+      const read = method => (...values) => withHistoryReadBudget(() => method(...values), { signal });
+      const get = Object.assign(read(source), { persistPrimaryChange: source.persistPrimaryChange });
+      for (const method of ['metadata', 'commitVerification']) {
+        if (source[method]) get[method] = read(source[method].bind(source));
+      }
+      return collectPrimaryChange({ ...args, get, signal }, options);
+    }, { signal: args.signal, timeoutMs: options.contextTimeoutMs });
+  } catch (error) {
+    return { headSha: args.headSha, hasHammerCommits: null, readFailed: true, historyReadFailed: true,
+      ...historyReadTimeoutEvidence(error),
+      reason: historyReadFailureReason(error) };
+  }
+}
+
+async function collectPrimaryChange(args, {
   fetchCiCostImpl = fetchCiCost, proveDerivedArtifactsImpl = proveDerivedArtifacts,
   proveGeneratedBlocksImpl = proveGeneratedBlocks,
   proveMigrationRenumbersImpl = proveMigrationRenumbers,
@@ -1592,19 +1610,26 @@ export async function fetchPrimaryChange(args, {
         path => path === `repos/${args.repo}/pulls/${args.prNumber}` ? Promise.resolve(pr) : path === reviewsPath ? Promise.resolve(reviews) : args.get(path),
         { metadata: args.get.metadata, commitVerification: args.get.commitVerification }) }));
     } catch (error) {
-      return { headSha: args.headSha, hasHammerCommits: null, readFailed: true, historyReadFailed: true, reason: historyReadFailureReason(error) };
+      return { headSha: args.headSha, hasHammerCommits: null, readFailed: true, historyReadFailed: true,
+        ...historyReadTimeoutEvidence(error), reason: historyReadFailureReason(error) };
     }
   } else history = await fetchPrimaryChangeHistory(args);
+  args.signal.throwIfAborted();
   if (![true, false].includes(history.hasHammerCommits) || history.headMismatch) return history;
   const ciCost = await fetchCiCostImpl({ ...args, get: path =>
     args.get.metadata && path.includes('/compare/') ? args.get.metadata(path) : args.get(path) });
+  args.signal.throwIfAborted();
   const guardEvidence = await fetchGuardReversals(args, history);
+  args.signal.throwIfAborted();
   const derivedArtifacts = await proveDerivedArtifactsImpl({ ...args, rootDir: primaryChangeRoot(args) }, history);
+  args.signal.throwIfAborted();
   const evidence = { ...history, ciCost, ...guardEvidence, ...(derivedArtifacts.length ? { derivedArtifacts } : {}) };
   const result = { ...evidence, ...await fetchGuardReviewSnapshots(args, evidence) };
+  args.signal.throwIfAborted();
   // Failed optional attempts record structured diagnostics on this transient
   // result as well; retain them through the predicate and refusal audits.
   const migrationRenumberProofs = await proveMigrationRenumbersImpl(args, result);
+  args.signal.throwIfAborted();
   if (migrationRenumberProofs.length) result.migrationRenumberProofs = migrationRenumberProofs;
   // Outside the history cache: a missing sandbox/checkout is retryable optional
   // evidence, and an old cached refusal must benefit without manual invalidation.
@@ -1612,6 +1637,7 @@ export async function fetchPrimaryChange(args, {
     const refusal = checkPrimaryChange(result, args.headSha, { strictNonBlockingRemediation: true });
     if (refusal.reason !== 'primary-change-reverted') break;
     const proofs = await proveGeneratedBlocksImpl({ ...args, rootDir: primaryChangeRoot(args) }, result, refusal);
+    args.signal.throwIfAborted();
     if (!proofs.length) break;
     const previous = result.generatedBlockProofs || [];
     const added = proofs.filter(proof => !previous.some(entry => JSON.stringify(entry) === JSON.stringify(proof)));
@@ -1624,6 +1650,7 @@ export async function fetchPrimaryChange(args, {
     const refusal = checkPrimaryChange(result, args.headSha, { strictNonBlockingRemediation: true });
     if (refusal.reason !== 'primary-change-reverted' || refusal.missingEvidence?.evidence !== 'reversal-authorization') break;
     const sources = await fetchDeadCodeSourcesImpl(args, result, refusal.path, refusal.missingEvidence.regions || []);
+    args.signal.throwIfAborted();
     if (!sources.length) break;
     result.deadCodeSources = [...(result.deadCodeSources || []), ...sources];
   }

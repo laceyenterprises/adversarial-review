@@ -833,12 +833,13 @@ test('identity probes stay local and merge evidence is lazy and cancellable', as
   const { fetchHeadCloserVerifiedCommit } = await import('../src/head-closer-commit-suppression.mjs');
   const controller = new AbortController();
   const commit = { sha: head, commit: { message: 'HAM remediation\n\nWorker-Class: hammer\nClosed-By: hammer (adversarial-pipe-mode)' }, parents: [{ sha: 'a'.repeat(40) }], files: [] };
-  let calls = 0;
+  let calls = 0, historySignal;
   const input = { repoPath: 'fixture/repo', prNumber: 1, headSha: head, signal: controller.signal,
     fetchVerifiedCommitFromLocalGitImpl: async () => commit,
     execGhWithRetryImpl: async (options) => {
       calls++;
-      assert.equal(options.signal, controller.signal);
+      historySignal = options.signal;
+      assert.equal(historySignal.aborted, false);
       return { stdout: JSON.stringify({ head: { sha: 'a'.repeat(40) } }) };
     } };
   await fetchHeadCloserVerifiedCommit(input);
@@ -846,6 +847,8 @@ test('identity probes stay local and merge evidence is lazy and cancellable', as
   const result = await fetchHeadCloserVerifiedCommit({ ...input, includePrimaryChange: true });
   assert.equal(calls, 1);
   assert.equal(result.primaryChange.headMismatch, true);
+  controller.abort();
+  assert.equal(historySignal.aborted, true);
 });
 
 test('HAMINTENT #1208: mandated test repairs are informational, including test-only PRs', () => {

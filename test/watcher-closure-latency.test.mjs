@@ -229,7 +229,7 @@ test('concurrent posted handlers still refuse a held per-PR lease', async t => {
   assert.deepEqual(outcomes, [false, false, false, false]);
 });
 
-test('same-tick primary-change readers share immutable evidence while mutable PR/review/base reads stay live', async () => {
+test('same-tick primary-change readers isolate in-flight deadlines and share completed immutable evidence', async () => {
   const reads = new Map();
   const exec = async ({ args }) => {
     const path = args[1];
@@ -244,16 +244,43 @@ test('same-tick primary-change readers share immutable evidence while mutable PR
   await withClosureEvaluationReadCache(async () => {
     const first = createHistoryReader(options), second = createHistoryReader(options);
     await Promise.all([first(commit), second(commit)]);
+    await first(commit);
+    await second(commit);
     await second(moved);
     await first(pr); await second(pr);
     await first(reviews); await second(reviews);
-    assert.equal(reads.get(`${commit}?per_page=100&page=1`), 1);
+    assert.equal(reads.get(`${commit}?per_page=100&page=1`), 2);
     assert.equal(reads.get(pr), 2);
     assert.equal(reads.get(reviews), 2);
   });
   await withClosureEvaluationReadCache(() => createHistoryReader(options)(commit));
-  assert.equal(reads.get(`${commit}?per_page=100&page=1`), 2);
+  assert.equal(reads.get(`${commit}?per_page=100&page=1`), 3);
   assert.equal(reads.get(`${moved}?per_page=100&page=1`), 1);
+});
+
+test('a shorter history deadline cannot cancel a different reader of the same immutable commit', { timeout: 2000 }, async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const bothStarted = deferred(), reply = deferred();
+  let reads = 0;
+  const exec = async () => {
+    if (++reads === 2) bothStarted.resolve();
+    await reply.promise;
+    return { stdout: JSON.stringify({ sha: head, files: [], parents: [] }) };
+  };
+  await withClosureEvaluationReadCache(async () => {
+    const options = { execGhWithRetryImpl: exec, nowMs: () => 0 };
+    const short = createHistoryReader({ ...options, contextTimeoutMs: 10 });
+    const long = createHistoryReader({ ...options, contextTimeoutMs: 1000 });
+    const path = `repos/${repo}/commits/${head}`;
+    const expired = assert.rejects(short(path), { code: 'HISTORY_READ_TIMEOUT' });
+    const completed = long(path);
+    await bothStarted.promise;
+    t.mock.timers.tick(10);
+    await expired;
+    reply.resolve();
+    assert.equal((await completed).sha, head);
+    assert.equal(reads, 2);
+  });
 });
 
 test('unsupported subcommand falls back once per tick, retries next tick and leaves transient failures retryable', async () => {

@@ -3,6 +3,49 @@ import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 export const HISTORY_READ_ERROR_LIMIT = 2000;
 export const HISTORY_CONTEXT_TIMEOUT_MS = 90_000;
 
+export function historyReadTimeoutError() {
+  return Object.assign(new Error('history read context budget exhausted'), {
+    name: 'TimeoutError', code: 'HISTORY_READ_TIMEOUT', primaryChangeReadFailed: true,
+  });
+}
+
+export function historyReadTimeoutEvidence(error) {
+  for (let depth = 0; error && depth < 8; depth++, error = error.cause) {
+    if (error.code === 'HISTORY_READ_TIMEOUT') return { historyReadTimedOut: true };
+  }
+  return {};
+}
+
+// Own the whole asynchronous operation, including time spent before a child is
+// spawned (quota admission/auth/cache) and injected transports ignoring abort.
+// Keep the timer referenced: a stalled promise alone does not keep Node alive.
+export async function withHistoryReadBudget(operation, {
+  signal: parentSignal, timeoutMs = HISTORY_CONTEXT_TIMEOUT_MS,
+} = {}) {
+  const controller = new AbortController();
+  const signal = parentSignal ? AbortSignal.any([parentSignal, controller.signal]) : controller.signal;
+  let timer, abort;
+  try {
+    signal.throwIfAborted();
+    const interrupted = new Promise((_, reject) => {
+      abort = () => reject(signal.reason);
+      signal.addEventListener('abort', abort, { once: true });
+      timer = setTimeout(() => controller.abort(historyReadTimeoutError()),
+        Math.max(0, Math.min(HISTORY_CONTEXT_TIMEOUT_MS, timeoutMs)));
+    });
+    return await Promise.race([interrupted, Promise.resolve().then(() => {
+      signal.throwIfAborted();
+      return operation(signal);
+    }).then(result => {
+      signal.throwIfAborted();
+      return result;
+    })]);
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener('abort', abort);
+  }
+}
+
 // gh normally includes stderr in message; injected executors and wrappers may
 // keep it separately. Preserve it once, including the cause after a long URL.
 export function historyReadErrorDetail(error) {

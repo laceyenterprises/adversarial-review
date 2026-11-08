@@ -49,7 +49,7 @@ for (const field of ['primarySqlBlob', 'sqlBlob', 'moduleBlob', 'registryBlob', 
   });
 }
 
-test('slow reader records a deadline through collector and predicate diagnostics', async () => {
+test('whole-collector cancellation of a slow migration reader is a retryable history read failure', async () => {
   const f = migrationRenumberFixture(), get = f.args.get;
   const evidence = await fetchPrimaryChange({ ...f.args,
     get: path => path.includes('/git/blobs/') ? new Promise(() => {}) : get(path),
@@ -57,10 +57,10 @@ test('slow reader records a deadline through collector and predicate diagnostics
   }, { fetchCiCostImpl: async () => f.evidence.ciCost,
     proveDerivedArtifactsImpl: async () => [], proveGeneratedBlocksImpl: async () => [] });
   const result = checkPrimaryChange(evidence, f.args.headSha);
-  assert.equal(result.reason, 'primary-change-reverted');
-  assert.equal(result.migrationRenumberDiagnostics.at(-1).reason, 'deadline-exceeded');
-  assert.doesNotMatch(result.missingEvidence.summary, /deadline-exceeded/);
-  assert.equal(result.missingEvidence.migrationRenumberDiagnostics, undefined);
+  assert.equal(result.reason, 'history-read-failed');
+  assert.equal(evidence.readFailed, true);
+  assert.equal(evidence.historyReadFailed, true);
+  assert.equal(evidence.headSha, f.args.headSha);
 });
 
 for (const [name, mutate] of [

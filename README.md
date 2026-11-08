@@ -2778,6 +2778,15 @@ followed by fresh sandbox reproduction. See the
 and [RCA with residual renderer scope](docs/INCIDENT-2026-10-24-legacy-artifact-and-finding-preservation.md).
 Offline regressions are `primary-change-lines`, `primary-change-store`,
 `derived-artifacts` and `primary-change-generated-blocks` under `test/`.
+
+Primary-change collection has a fixed 90-second wall-clock deadline across
+history reads and optional proofs (HAMHISTORYBUDGET-01). Timeout returns
+retryable `history-read-failed` evidence and an in-lease merge attempt releases
+custody before returning. Native immutable reads may finish after a shorter
+tick expires, within that verification limit. Standalone rescue readers defer
+exhausted quota; cancellation kills history command groups and prevents late
+read results from continuing verification. The existing exact-head,
+preservation and finding-authorized reversal gates still apply.
 Lifecycle states, transitions and existing smoke promises are unchanged; native
 receipt registration and live recovery are separate operator work.
 

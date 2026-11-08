@@ -2717,6 +2717,15 @@ locking the head or requiring manual close; later ticks evaluate real CI again.
 A merged daemon result remains terminal for dispatch and never sends this clean
 head to the hammer's non-empty-remediation contract.
 
+HAMHISTORYBUDGET-01: primary-change verification has a fixed 90-second
+wall-clock deadline covering history, rate admission and optional proofs.
+Timeout returns retryable head-scoped `history-read-failed` evidence, cancels
+history children and yields an acquired merge lease through the existing release
+path. A later attempt revalidates the exact head. Native immutable reads may
+survive a shorter tick deadline only within this bound; standalone rescue
+readers use the same bound and defer exhausted quota. Preservation and
+reviewer-authorized reversal predicates are unchanged.
+
 PRIMARYCHG-01: unknown primary-change evidence defers merge and is recomputed
 on each pipeline tick. CAPROUTE-01 treats a live-head hammer stop for
 `primary-change-unknown` (including legacy audits) or

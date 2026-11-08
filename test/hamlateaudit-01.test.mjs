@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import { resolveHamTerminalRemediationEvidence } from '../src/ama/dispatch-closer.mjs';
+import { __test__ as githubApi } from '../src/github-api.mjs';
 
 // Incident facts from the dispatch; bodies are synthetic, not a live PR read.
 const OLD = 'a757cb4904c5' + '0'.repeat(28);
@@ -69,28 +70,58 @@ test('a fresh audit can consider the new review; unknown evidence never grants a
   assert.equal((await terminalReviewProofMatches({ reviews: [old], headSha: HEAD, compare })).ok, false);
   assert.equal((await proof([old, { ...late, submitted_at: AUDIT_AT }])).ok, false);
   assert.equal((await proof([old, { ...late, submitted_at: null }])).reason, 'terminal-review-evidence-unavailable');
-  await assert.rejects(() => terminalReviewProofMatches({ reviews: [old], headSha: HEAD,
-    validatedAt: AUDIT_AT, compare: async () => { throw new Error('offline unknown'); } }), /offline unknown/);
-  await assert.rejects(() => terminalReviewProofMatches({ reviews: [old], headSha: HEAD,
-    validatedAt: AUDIT_AT, currency: async () => ({ current: false }),
-    compare: async () => { throw new Error('ancestry unavailable'); } }), /ancestry unavailable/);
+  for (const options of [
+    { compare: async () => { throw new Error('compare 404'); } },
+    { currency: async () => ({ current: false }), compare },
+    { currency: async () => { throw new Error('currency unavailable'); }, compare },
+    { compare, reviews: [{ ...old, commit_id: undefined }] },
+  ]) {
+    assert.deepEqual(await terminalReviewProofMatches({ reviews: [old], headSha: HEAD,
+      validatedAt: AUDIT_AT, ...options }),
+    { ok: false, reason: 'terminal-review-evidence-unavailable' });
+  }
 });
 
-test('shared terminal evidence resolver carries the late-review refusal into canonical eligibility', async () => {
-  const result = await resolveHamTerminalRemediationEvidence({
-    reviewState: { headSha: OLD }, prMetadata: { headSha: HEAD },
-    repoPath: 'example/repo', prNumber: 54,
-    fetchHeadCloserVerifiedCommitImpl: async () => ({ sha: HEAD, parentSha: OLD,
-      trailers: {}, changedFiles: [], primaryChange: primaryChangeFixture(HEAD) }),
-    fetchPullRequestRollupImpl: async () => ({
-      reviews: [{ ...old, commit_id: HEAD }, late],
-      comments: [{ author: 'the-hammer-lacey[bot]', createdAt: AUDIT_AT,
-        body: `<!-- hq:ham-terminal-remediation:audit -->\nHAM-Base-Head: ${OLD}\nHAM-Validated-Head: ${HEAD}` }],
-    }),
-    execFileImpl: async () => { throw new Error('unexpected network read'); },
-  });
-  assert.equal(result.hamTerminalRemediationGroundTruth.terminalReviewProof.ok, false);
-  assert.equal(result.hamTerminalRemediationGroundTruth.terminalReviewProof.reason, 'review-changed-since-validation');
+test('proof reads each ancestry/currency pair once per invocation and refreshes on the next gate', async () => {
+  let comparisons = 0, currencies = 0;
+  const options = { reviews: [old, { ...late, commit_id: OTHER }], headSha: HEAD,
+    validatedAt: AUDIT_AT,
+    compare: async (...args) => { comparisons++; return compare(...args); },
+    currency: async (from) => { currencies++; return { current: from === OLD }; },
+  };
+  assert.equal((await terminalReviewProofMatches(options)).ok, true);
+  assert.equal(comparisons, 1);
+  assert.equal(currencies, 2);
+  assert.equal((await terminalReviewProofMatches(options)).ok, true);
+  assert.equal(comparisons, 2);
+  assert.equal(currencies, 4);
+});
+
+test('shared terminal evidence resolver consumes production-normalized review heads and classifies missing proof', async () => {
+  for (const [reviews, expected] of [
+    [[{ ...old, commit_id: HEAD }], null],
+    [[{ ...old, commit_id: HEAD }, late], 'review-changed-since-validation'],
+    [[{ ...old, commit_id: null }], 'terminal-review-evidence-unavailable'],
+  ]) {
+    const result = await resolveHamTerminalRemediationEvidence({
+      reviewState: { headSha: OLD }, prMetadata: { headSha: HEAD },
+      repoPath: 'example/repo', prNumber: 54,
+      fetchHeadCloserVerifiedCommitImpl: async () => ({ sha: HEAD, parentSha: OLD,
+        trailers: {}, changedFiles: [], primaryChange: primaryChangeFixture(HEAD) }),
+      fetchPullRequestRollupImpl: async () => ({
+        reviews: reviews.map(review => githubApi.normalizeReview({
+          id: review.node_id, author: review.user, commit: { oid: review.commit_id },
+          state: review.state, body: review.body, submittedAt: review.submitted_at,
+        })),
+        comments: [{ author: 'the-hammer-lacey[bot]', createdAt: AUDIT_AT,
+          body: `<!-- hq:ham-terminal-remediation:audit -->\nHAM-Base-Head: ${OLD}\nHAM-Validated-Head: ${HEAD}` }],
+      }),
+      execFileImpl: async () => { throw new Error('unexpected network read'); },
+    });
+    const proof = result.hamTerminalRemediationGroundTruth.terminalReviewProof;
+    assert.equal(proof.ok, expected === null);
+    assert.equal(proof.reason || null, expected);
+  }
 });
 
 test('rendered final GitHub gate fetches reviews and rejects the race after an earlier eligible predicate', () => {
@@ -104,7 +135,9 @@ test('rendered final GitHub gate fetches reviews and rejects the race after an e
       headMatch: { current: HEAD },
       hamTerminalRemediation: { ok: true, auditComment: { createdAt: AUDIT_AT } },
     } }));
-    for (const [reviews, expected] of [[[old], true], [[old, late], false]]) {
+    for (const [reviews, expected, unavailable] of [
+      [[old], true, false], [[old, late], false, false], [[old], false, true],
+    ]) {
       // Execute the actual gate's JS with only I/O replaced. The currency and
       // merge predicates remain production code; no GitHub credentials/network.
       const code = `
@@ -121,7 +154,10 @@ const fetchHammerPr = async (_repo, _pr, options) => {
     checks: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] };
 };
 const createHistoryReader = () => async path => {
-  if (path.includes('/compare/')) return { status: 'ahead' };
+  if (path.includes('/compare/')) {
+    if (${unavailable}) throw new Error('compare 404');
+    return { status: 'ahead' };
+  }
   throw new Error('unexpected offline read: ' + path);
 };
 const loadEffectiveMergeAuthorityConfig = () => ({});
@@ -136,7 +172,8 @@ ${gateCode.replace(/^import .*;\n/gm, '').replaceAll('<<REPO>>', 'example/repo')
       assert.equal(result.status, 0, result.stderr);
       const gateResult = JSON.parse(result.stdout);
       assert.equal(gateResult.ok, expected, result.stdout);
-      if (!expected) assert.ok(gateResult.reasons.includes('review-changed-since-validation'));
+      if (!expected) assert.ok(gateResult.reasons.includes(unavailable
+        ? 'terminal-review-evidence-unavailable' : 'review-changed-since-validation'));
     }
   } finally {
     rmSync(fixtureDir, { recursive: true, force: true });

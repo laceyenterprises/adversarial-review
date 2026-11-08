@@ -1266,6 +1266,11 @@ reviews retain canonical selection rules. Existing leases, lifecycle states,
 finding coverage and required-check gates remain authoritative; no review
 request or merge authority is added.
 
+Final remediation classifies unavailable proof consistently at all terminal
+consumers and retains review commit SHAs in production rollups. The daemon's
+closer own-commit certification remains independent of HAM terminal audit
+currency. Lifecycle states, transitions and existing smoke promises are unchanged.
+
 CLOSERGATES-01 final remediation keeps repairable conflicts out of terminal
 AMA state: both final and non-final observations count the current head once;
 only a final report after three distinct heads records

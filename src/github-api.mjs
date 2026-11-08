@@ -115,6 +115,9 @@ query PullRequestRollup(
           body
           state
           submittedAt
+          commit {
+            oid
+          }
         }
         pageInfo {
           hasNextPage
@@ -290,6 +293,9 @@ query PullRequestRollupReviews(
           body
           state
           submittedAt
+          commit {
+            oid
+          }
         }
         pageInfo {
           hasNextPage
@@ -522,6 +528,7 @@ function normalizeComment(comment) {
 function normalizeReview(review) {
   return {
     id: review?.id == null ? null : String(review.id),
+    commitId: review?.commitId || review?.commit?.oid || review?.commit_id || null,
     author: normalizeAuthor(review?.author),
     body: String(review?.body || ''),
     state: review?.state || null,
@@ -966,6 +973,7 @@ async function fetchLegacyReviews(execFileImpl, repo, prNumber) {
     `repos/${repo}/pulls/${normalizedPrNumber}/reviews`,
     (data) => (Array.isArray(data) ? data : []).map((review) => ({
       id: review?.id == null ? null : String(review.id),
+      commitId: review?.commit_id || null,
       author: normalizeAuthor(review?.user),
       body: String(review?.body || ''),
       state: review?.state || null,

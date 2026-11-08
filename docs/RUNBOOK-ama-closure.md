@@ -9,6 +9,16 @@ returns `review-changed-since-validation`; unavailable evidence refuses merge.
 An identical same-head repeat preserves proof. Pending, untrusted and
 inapplicable-branch reviews retain existing selection rules.
 
+GraphQL (including paginated reviews), adapter and legacy REST rollups retain
+each review's commit SHA as `commitId`. Missing SHAs, unreadable comparisons
+and failed applicability proofs return `terminal-review-evidence-unavailable`
+at every terminal proof consumer, rather than a generic gate-read failure.
+Each proof evaluation caches ancestry and currency reads by commit pair;
+the next live gate evaluation reads fresh evidence. The daemon requires this
+HAM audit proof only for HAM-terminal-validated heads. The existing closer
+own-commit certification lane keeps its independent authority and needs no
+HAM audit timestamp.
+
 The closer's finding classification uses the latest applicable routed-family
 review, including a review on the exact validated head after dispatch. A fresh
 audit must still pass existing finding coverage, provenance, lease and merge

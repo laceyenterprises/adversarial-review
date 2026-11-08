@@ -82,6 +82,31 @@ export async function isCurrentAuthoritativeFamilyReview(review, reviews, headSh
 export async function terminalReviewProofMatches({
   reviews, headSha, validatedAt, compare, currency = null,
 }) {
+  // Share reads across the undated/latest/prior selections, but never across
+  // live gate snapshots: a retry must observe fresh GitHub evidence.
+  const memoize = reader => {
+    const reads = new Map();
+    return (from, to) => {
+      const key = JSON.stringify([from, to]);
+      if (!reads.has(key)) reads.set(key, Promise.resolve().then(() => reader(from, to)));
+      return reads.get(key);
+    };
+  };
+  try {
+    return await terminalReviewProofMatchesImpl({
+      reviews, headSha, validatedAt, compare: memoize(compare),
+      currency: currency ? memoize(currency) : null,
+    });
+  } catch {
+    // A missing review head or unavailable compare is missing proof, not a
+    // transient failure to read the entire gate (hammer, daemon and closer).
+    return { ok: false, reason: 'terminal-review-evidence-unavailable' };
+  }
+}
+
+async function terminalReviewProofMatchesImpl({
+  reviews, headSha, validatedAt, compare, currency = null,
+}) {
   const cutoff = Date.parse(validatedAt);
   if (!Array.isArray(reviews) || !Number.isFinite(cutoff)) {
     return { ok: false, reason: 'terminal-review-evidence-unavailable' };

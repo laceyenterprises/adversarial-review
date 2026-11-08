@@ -982,7 +982,7 @@ async function runDaemonCleanMergeAttemptInner({
         merged: false, skipMergeAgent: true, recoveryWait: true, retryAfterMs: 30_000 };
     }
   }
-  const terminalReviewHead = (certifiedNonCleanHead || hamTerminalRemediationValidated) ? hamAuditHead : null;
+  const terminalReviewHead = (hamTerminalRemediationHead || hamTerminalRemediationValidated) ? hamAuditHead : null;
   const initialGate = {
     requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
     docsFastPath,

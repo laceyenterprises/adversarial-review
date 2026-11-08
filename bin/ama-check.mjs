@@ -629,7 +629,7 @@ async function main(argv = process.argv.slice(2)) {
       );
       reviewState = buildReviewState({ reviewsJson, prJson, timelineJson,
         reviewedSha: args['reviewed-sha'], reviewer: args.reviewer, riskClass: args['risk-class'],
-        reviewCycleExhausted, applicableReview });
+        reviewCycleExhausted, applicableReview: applicableReview ?? null });
       terminalReviewProof = await terminalReviewProofMatches({
         reviews: reviewsJson?.reviews, headSha: prMetadata.headSha,
         validatedAt: hamTerminalRemediationGroundTruth.auditComment.createdAt, compare, currency,

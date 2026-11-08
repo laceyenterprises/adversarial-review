@@ -132,10 +132,10 @@ test('HAMEMPTYPRIMARY-01: an untrusted anchor and unavailable patch fail closed'
   const f = fixture(t);
   assert.equal(await proveConflictPrimary({ ...f, sourceHead: f.base }), null);
   assert.equal(await proveConflictPrimary({ ...f, git: args => args[0] === 'diff' ? '' : f.git(args) }), null);
-  assert.equal(await proveConflictPrimary({ ...f, git: args => {
+  await assert.rejects(proveConflictPrimary({ ...f, git: args => {
     if (args[0] === 'diff') throw new Error('unavailable patch');
     return f.git(args);
-  } }), null);
+  } }), /unavailable patch/);
 });
 
 test('HAMEMPTYPRIMARY-01: the publication helper is read-only and exits nonzero on lost primary', t => {
@@ -170,6 +170,20 @@ test('HAMEMPTYPRIMARY-01: the publication helper preserves Git failure diagnosti
     assert.equal(error.stdout, '');
     assert.match(error.stderr, /conflict-primary-unproven: retain the reviewed author commits and patches before publication/);
     assert.match(error.stderr, /fatal: not a git repository/);
+    return true;
+  });
+});
+
+test('HAMEMPTYPRIMARY-01: Git errors inside the proof reach the publication diagnostic', t => {
+  const f = fixture(t);
+  const cli = fileURLToPath(new URL('../bin/hammer-conflict-primary.mjs', import.meta.url));
+  const missing = '1'.repeat(40);
+  assert.throws(() => execFileSync(process.execPath, [cli, missing, missing, f.base], {
+    cwd: f.dir, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'],
+  }), error => {
+    assert.equal(error.status, 1);
+    assert.equal(error.stdout, '');
+    assert.match(error.stderr, /fatal: Not a valid commit name/);
     return true;
   });
 });

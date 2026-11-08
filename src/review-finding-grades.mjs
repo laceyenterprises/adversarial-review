@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { normalizeDroppedReason } from './findings-batch.mjs';
+import { normalizeDroppedReason } from './finding-drop-reason.mjs';
 import { syncFindingDisputes } from './review-finding-records.mjs';
 
 export const GRADE_KINDS = Object.freeze(['batch-remediator', 'grader', 'judge', 'hammer', 'remediator', 'lifecycle', 'scar', 'operator']);

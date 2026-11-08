@@ -69,3 +69,24 @@ grade per JSONL line. Continue with the last grade ID until a page is empty.
 Missing/legacy schema fails visibly. Reads include source reviewer provenance
 and the reviewed head separately from the graded head. Keep production exports
 in private storage; public test fixtures are synthetic.
+
+Batch settlement also calls `recordFindingGrade` in the outcome transaction,
+using `batch:<batch-id>:<finding-id>` as its immutable source key. A settled retry
+is idempotent. Invalid outcomes, released batches and retry exhaustion do not
+fabricate grades. The grade kind is `batch-remediator`; `life.*` carries
+`lifecycle=1`, and `life.*` and `ind.stale` remain indeterminate, never reviewer
+errors. Mapping shares `backlogGradeCode` with the historical backfill.
+
+Evidence includes the batch ID, optional selection hash, outcome/reason, result
+PR/head and `evaluatedRef: origin/main`. The result PR head is distinct from the
+main head checked by the worker: without a verified main SHA, `graded_head_sha`
+stays NULL. `attempt` is the finding's batch attempt counter plus one.
+
+Explicit manifest remediation consumes grades through the synchronous
+`readConsensus(db, { findingId, reviewedHeadSha }) -> { label }` seam on
+`claimFindingBatches` / `runFindingBatches`. Until a persisted consensus reader
+is supplied, `readRemediationConsensus` prefers the latest non-interested
+independent grader observation at the pinned reviewed head, then the latest
+non-interested batch observation. `life.*`, `ind.stale` and severity calibration
+are excluded. Only label `real` admits remediation. This fallback does not
+persist consensus or change review, routing or merge decisions.

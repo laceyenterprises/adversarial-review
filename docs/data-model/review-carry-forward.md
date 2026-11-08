@@ -29,7 +29,10 @@ re-review):
    blocking findings are known and zero, and no remediation is pending.
 2. The PR's own patch at each head (GitHub compare `<base>...<head>`, which is
    the diff from the merge base) is equal after excluding the declared generated
-   paths. Comparison drops hunk headers (line numbers) and keeps every content
+   paths. Complete Git trees must also show the same old and new blob identities,
+   modes and types for every changed non-generated path. Missing or truncated
+   tree evidence refuses carry-forward. The patch check drops hunk headers
+   (line numbers) and keeps every content
    line exactly, so whitespace and context changes count as changes.
 3. The remaining patch is non-empty. A file list at GitHub's 300-file cap, or a
    non-generated file whose patch GitHub omitted, is missing proof.

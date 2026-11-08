@@ -47,7 +47,7 @@ function file(filename, patch, extra = {}) {
 }
 
 function fakeGitHub({ reviewedFiles, currentFiles, reviewedFork = OLD_FORK, currentFork = NEW_FORK,
-  forkStatus = 'ahead', declaration = DECLARATION } = {}) {
+  forkStatus = 'ahead', declaration = DECLARATION, treeOverrides = {} } = {}) {
   const calls = [];
   const get = async (path) => {
     calls.push(path);
@@ -61,6 +61,14 @@ function fakeGitHub({ reviewedFiles, currentFiles, reviewedFork = OLD_FORK, curr
     if (path.startsWith(`repos/${REPO}/contents/${GENERATED_PATHS_DECLARATION}?ref=`)) {
       if (declaration === null) throw new Error('gh: Not Found (HTTP 404)');
       return { type: 'file', encoding: 'base64', content: Buffer.from(declaration).toString('base64') };
+    }
+    const treePrefix = `repos/${REPO}/git/trees/`;
+    if (path.startsWith(treePrefix)) {
+      const revision = path.slice(treePrefix.length).split('?')[0];
+      const isHead = [REVIEWED, CURRENT].includes(revision);
+      return { sha: revision, truncated: false, tree: [
+        { path: 'src/feature.mjs', sha: (isHead ? 'd' : 'c').repeat(40), mode: '100644', type: 'blob' },
+      ], ...treeOverrides[revision] };
     }
     throw new Error(`unexpected read ${path}`);
   };
@@ -104,6 +112,32 @@ test('a generated-only conflict resolution carries forward', async () => {
   // The declaration is read at the new merge base (a base-branch commit), never at the PR head.
   assert.ok(github.calls.includes(`repos/${REPO}/contents/${GENERATED_PATHS_DECLARATION}?ref=${NEW_FORK}`));
   assert.ok(!github.calls.some(path => path.includes(`ref=${CURRENT}`) || path.includes(`ref=${REVIEWED}`)));
+});
+
+test('identical patch text cannot carry a relocated edit or changed file mode', async () => {
+  for (const fileChange of [
+    { sha: 'e'.repeat(40) },
+    { mode: '100755' },
+    { mode: '120000' },
+  ]) {
+    const github = fakeGitHub({
+      reviewedFiles: [file('src/feature.mjs', featurePatch(10))],
+      currentFiles: [file('src/feature.mjs', featurePatch(57))],
+      treeOverrides: { [CURRENT]: { tree: [
+        { path: 'src/feature.mjs', sha: 'd'.repeat(40), mode: '100644', type: 'blob', ...fileChange },
+      ] } },
+    });
+    assert.equal((await prove(github)).reason, 'own-tree-delta-changed');
+  }
+});
+
+test('a truncated tree cannot prove carry-forward', async () => {
+  const files = [file('src/feature.mjs', featurePatch(10))];
+  const github = fakeGitHub({
+    reviewedFiles: files, currentFiles: files,
+    treeOverrides: { [CURRENT]: { truncated: true } },
+  });
+  assert.equal((await prove(github)).reason, 'proof-read-failed');
 });
 
 test('a one-line change in a non-generated file does NOT carry forward', async () => {

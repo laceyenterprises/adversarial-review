@@ -14,7 +14,7 @@
 //   2. the PR's own patch (diff vs. its merge base) at the new head equals the
 //      patch at the reviewed head after excluding the declared generated paths,
 //      compared as a normalized diff (hunk line numbers dropped, content and
-//      whitespace kept exactly);
+//      whitespace kept exactly), with an independent Git tree delta proof;
 //   3. that remaining patch is non-empty and fully readable (no truncated or
 //      binary non-generated file, no capped file list);
 //   4. the new merge base descends from the reviewed merge base (a branch reset
@@ -171,6 +171,33 @@ export function normalizeOwnPatch(files, { isGenerated } = {}) {
   return { complete: true, entries, excludedPaths: excludedPaths.sort(), digest };
 }
 
+// Compare both base-to-head transitions from complete immutable trees. Exact
+// blob identities anchor changes even when the patch has repeated context.
+// The tree also supplies modes and types missing from GitHub's compare JSON.
+async function readLeafTree(repo, revision, get) {
+  const tree = await get(`repos/${repo}/git/trees/${revision}?recursive=1`);
+  if (tree?.sha !== revision || tree.truncated !== false || !Array.isArray(tree.tree)) {
+    throw new Error('incomplete tree proof');
+  }
+  const leaves = new Map();
+  for (const entry of tree.tree) {
+    if (entry.type === 'tree') continue;
+    if (typeof entry.path !== 'string' || !entry.path || leaves.has(entry.path)
+      || !SHA.test(entry.sha || '') || !['blob', 'commit'].includes(entry.type)
+      || !/^(?:100644|100755|120000|160000)$/.test(entry.mode || '')) {
+      throw new Error('invalid tree entry');
+    }
+    leaves.set(entry.path, [entry.type, entry.mode, entry.sha].join(':'));
+  }
+  return leaves;
+}
+
+function treeDelta(base, head, isGenerated) {
+  return [...new Set([...base.keys(), ...head.keys()])].sort()
+    .filter(path => !isGenerated(path) && base.get(path) !== head.get(path))
+    .map(path => [path, base.get(path) ?? null, head.get(path) ?? null]);
+}
+
 async function readDeclaration({ repo, ref, get }) {
   try {
     const body = await get(`repos/${repo}/contents/${GENERATED_PATHS_DECLARATION}?ref=${ref}`);
@@ -241,6 +268,15 @@ export async function proveReviewCarryForward({
       }
       for (const name of byName.keys()) changed.add(name);
       return { ...facts, reason: 'own-patch-changed', changedPaths: [...changed].sort() };
+    }
+    const trees = new Map();
+    for (const revision of new Set([reviewedFork, currentFork, reviewed, current])) {
+      trees.set(revision, await readLeafTree(repo, revision, get));
+    }
+    const reviewedDelta = treeDelta(trees.get(reviewedFork), trees.get(reviewed), isGenerated);
+    const currentDelta = treeDelta(trees.get(currentFork), trees.get(current), isGenerated);
+    if (!reviewedDelta.length || JSON.stringify(reviewedDelta) !== JSON.stringify(currentDelta)) {
+      return { ...facts, reason: 'own-tree-delta-changed' };
     }
     return { ...facts, proven: true, reason: 'own-patch-equal' };
   } catch (error) {

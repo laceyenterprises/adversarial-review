@@ -745,6 +745,23 @@ job pages refuse recovery. The durable one-rerun workflow/head bound remains;
 a consumed retry is never replenished by capacity returning.
 
 
+Closure uses the shared hammer-stop evaluator by default, including historical
+CI stops that need Actions evidence. Missing optional predicates do not prevent
+enrichment when all recorded reasons are CI infrastructure reasons; empty or
+mixed reasons do not qualify. Actions evidence matches repository and host
+casing without relaxing the exact run, job or head binding. The enrichment gate
+uses the classifier's full reason list, including nested refusal reasons and
+the singular reason field. Failed, mismatched or incomplete job reads remain
+unknown and are cached for 60 seconds by repository, head and job URL in the
+process-local, bounded evidence cache; another job can still be inspected.
+Closure passes the evaluated, enriched stop directly to parked-owner release.
+Direct closer admission evaluates enrichable historical stops before deciding
+whether to release custody. Neither path requires rewriting historical audits;
+both retain the exact-head recovery proof, PR intent lock, lease CAS and
+launch/retry status checks. Offline regression
+coverage lives in `test/ci-recovery-regressions.test.mjs` and runs through the
+standard test runner. Existing lifecycle states and smoke promises are unchanged.
+
 A failed Actions job with proven zero executed steps is infrastructure;
 billing/quota annotations require that same zero-step proof. The shared classifier reuses job
 steps or performs at most one job-page read per inspection with a load-aware

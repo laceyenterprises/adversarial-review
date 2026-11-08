@@ -109,7 +109,10 @@ export async function recoverInfrastructureCiStops({ rootDir, repo, prNumber, he
     if (!infrastructureOnlyFailures(failedChecks) || !checksExecutedAgain(ciGate.rollup, failedChecks)) continue;
     const result = releaseInfrastructureCiStop({ rootDir, jobPath, repo, prNumber, headSha, now,
       recordedFailures, failedChecks });
-    if (result) recovered.push(result);
+    if (result) {
+      recovered.push(result);
+      break;
+    }
   }
   return recovered;
 }

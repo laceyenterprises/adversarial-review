@@ -4,6 +4,7 @@ import { checkItemState, latestCheckRollupItems, isAdversarialOwnStatusContext }
 
 const attachedSteps = new WeakMap();
 const jobEvidenceCaches = new WeakMap();
+const NEGATIVE_JOB_EVIDENCE_TTL_MS = 60_000;
 export function rememberCheckSteps(check, steps) {
   if (check && typeof check === 'object' && Array.isArray(steps)) attachedSteps.set(check, steps);
 }
@@ -28,7 +29,7 @@ export function checkInfrastructureReason(check) {
       || (!step.started_at && !step.startedAt && !step.completed_at && !step.completedAt
         && !['completed', 'in_progress'].includes(String(step.status || '').toLowerCase())
         && !step.conclusion)));
-  if (zeroSteps && messages.some(message => /(?:job|workflow).*(?:not started|not run).*(?:budget|billing|quota|spending limit)|(?:budget|billing|quota).*(?:preventing further use|not started)/i.test(String(message || '')))) {
+  if (zeroSteps && messages.some(message => /(?:job|workflow).*(?:not started|not run).*(?:budget|billing|quota|spending limit)|(?:budget|billing|quota).*(?:preventing further use|not started)/is.test(String(message || '')))) {
     return 'actions-billing-quota';
   }
   if (zeroSteps) return 'actions-zero-step';
@@ -56,13 +57,13 @@ export function rollupInfrastructureEvidencePending(rollup, options) {
 
 export function hasMissingActionsEvidence(checks, repo) {
   return checks.some(item => !checkInfrastructureReason(item) && !Array.isArray(checkSteps(item))
-    && String(item.detailsUrl || '').startsWith('https://github.com/' + repo + '/actions/runs/'));
+    && String(item?.detailsUrl || item?.details_url || '').toLowerCase().startsWith(('https://github.com/' + repo + '/actions/runs/').toLowerCase()));
 }
 
 export function infrastructureEvidencePending(checks) {
   return Array.isArray(checks) && checks.some(checkInfrastructureReason) && checks.every(item =>
     checkInfrastructureReason(item) || (!Array.isArray(checkSteps(item))
-      && /^https:\/\/github\.com\/[^/]+\/[^/]+\/actions\/runs\/\d+\/job\/\d+/.test(String(item?.detailsUrl || ''))));
+      && /^https:\/\/github\.com\/[^/]+\/[^/]+\/actions\/runs\/\d+\/job\/\d+/i.test(String(item?.detailsUrl || item?.details_url || ''))));
 }
 
 // Reuse job evidence already attached by another reader. Otherwise ONE read,
@@ -73,17 +74,26 @@ export async function enrichCiInfrastructureEvidence({ rollup, repo, headSha, ex
   rollup = rollup.map(item => Array.isArray(checkSteps(item)) ? { ...item, steps: checkSteps(item) } : item);
   let cache = execFileImpl && jobEvidenceCaches.get(execFileImpl);
   if (execFileImpl && !cache) { cache = new Map(); jobEvidenceCaches.set(execFileImpl, cache); }
+  const cacheKey = item => JSON.stringify([repo, headSha, item?.detailsUrl || item?.details_url]);
+  const cacheResult = (item, steps) => {
+    if (cache.size >= 512) cache.delete(cache.keys().next().value);
+    cache.set(cacheKey(item), { steps, retryAfter: steps ? null : Date.now() + NEGATIVE_JOB_EVIDENCE_TTL_MS });
+  };
   rollup = rollup.map(item => {
-    const steps = cache?.get(JSON.stringify([repo, headSha, item?.detailsUrl]));
+    const steps = cache?.get(cacheKey(item))?.steps;
     return Array.isArray(steps) ? { ...item, steps } : item;
   });
   const items = latestCheckRollupItems(rollup);
   const missing = items.filter(item => FAILED.has(checkItemState(item))
     && !checkInfrastructureReason(item) && !Array.isArray(checkSteps(item)));
   const candidate = missing.map(item => ({ item, match: String(item.detailsUrl || item.details_url || '').match(
-    /^https:\/\/github\.com\/([^/]+\/[^/]+)\/actions\/runs\/(\d+)\/job\/(\d+)(?:\?.*)?$/) }))
-    .find(({ match }) => match && match[1] === repo);
+    /^https:\/\/github\.com\/([^/]+\/[^/]+)\/actions\/runs\/(\d+)\/job\/(\d+)(?:\?.*)?$/i) }))
+    .find(({ item, match }) => match && match[1].toLowerCase() === String(repo).toLowerCase()
+      && !(cache?.get(cacheKey(item))?.retryAfter > Date.now()));
   if (!candidate || !headSha || !execFileImpl || signal?.aborted) return rollup;
+  // Unknown evidence stays unknown, but repeated readers share a short retry
+  // bound for failures, mismatches and missing steps (including in-flight reads).
+  cacheResult(candidate.item, null);
   try {
     const timeoutMs = loadAwareTimeoutMs(3000);
     const { stdout } = await execGhWithRetry({ execFileImpl,
@@ -98,8 +108,7 @@ export async function enrichCiInfrastructureEvidence({ rollup, repo, headSha, ex
       const job = jobs.find(job => String(job.id) === match[2] && job.head_sha === headSha
         && String(job.conclusion || '').toUpperCase() === checkItemState(item));
       if (job && Array.isArray(job.steps)) {
-        if (cache.size >= 512) cache.delete(cache.keys().next().value);
-        cache.set(JSON.stringify([repo, headSha, item.detailsUrl]), job.steps);
+        cacheResult(item, job.steps);
         return { ...item, steps: job.steps };
       }
       return item;

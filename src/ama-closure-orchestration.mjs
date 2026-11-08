@@ -20,7 +20,7 @@ import { resolveHqRoot } from './hq-root.mjs';
 import { fleetStopReason } from './fleet-stop.mjs';
 import { recordOperatorNoticeCloserOutcome } from './operator-decision-notice.mjs';
 import { checkPrimaryChange, fetchPrimaryChange } from './ama/primary-change.mjs';
-import { readHammerStopForHead, readHammerStopHoldForHead, isInfrastructureStop, isLegacyReviewHandoffStop } from './ama/hammer-stop-hold.mjs';
+import { readHammerStopForHead, readHammerStopHoldForHead, isInfrastructureStop, canEnrichCiInfrastructureStop, isLegacyReviewHandoffStop } from './ama/hammer-stop-hold.mjs';
 import {
   evaluateHammerRetryCap, readHammerRetryCapLedger, rearmOperatorApprovedCloser, resetHammerSeriesForNonCloserHead,
 } from './ama/hammer-retry-cap.mjs';
@@ -1767,14 +1767,15 @@ async function dispatchAmaClosureFor({
     if (wait.action === 'release') recordedStop = null;
   }
   let infrastructureOwnerReleased = false;
-  if (isInfrastructureStop(recordedStop)) {
-    const evaluatedStop = await evaluateHammerStopHold({ rootDir, hqRoot: resolveHqRoot(env), repo: repoPath, prNumber,
-      headSha: currentPrHeadSha, reviewedSha: reviewState.headSha, prMetadata,
+  if (isInfrastructureStop(recordedStop) || canEnrichCiInfrastructureStop(recordedStop, repoPath)) {
+    const evaluatedStop = await evaluateHammerStopHoldImpl({ rootDir, hqRoot: resolveHqRoot(env), repo: repoPath, prNumber,
+      headSha: currentPrHeadSha, reviewedSha: reviewState.headSha, prMetadata, reviewState,
       excludeContexts: [requiredGateContext], requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
       logger, now: new Date(now()).toISOString() });
     recordedStop = evaluatedStop.infrastructureStop || recordedStop;
     if (evaluatedStop.action === 'release' && autonomousMergeExecutionEnabled && prMetadata.isOpen) {
       infrastructureOwnerReleased = await amaDispatchCloser.releaseRecoveredCiInfrastructureOwner({
+        evaluation: evaluatedStop,
         rootDir, hqRoot: resolveHqRoot(env), repo: repoPath, prNumber, prMetadata, reviewedSha: reviewState.headSha,
         excludeContexts: [requiredGateContext], requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
         now: new Date(now()).toISOString(), logger, env, signal });

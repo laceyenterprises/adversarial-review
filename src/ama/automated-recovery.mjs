@@ -170,7 +170,9 @@ async function recoverAmaAutomationLocked({
     }
   }
   const checks = readClosureNextAction(result)?.snapshot?.observations?.checks?.value;
-  const failures = checks?.failedChecks || summarizeExternalChecks(checks?.rollup, {
+  const rollup = Array.isArray(checks?.rollup) ? checks.rollup
+    : Array.isArray(checks?.statusCheckRollup) ? checks.statusCheckRollup : [];
+  const failures = checks?.failedChecks || summarizeExternalChecks(rollup, {
     cfg: { requiredCheckContexts: [] },
   }).failedChecks;
   if (selected.action === 'wait-for-CI' && isInfrastructureStop({ reason: 'ci-not-green', failedChecks: failures })) {
@@ -188,7 +190,7 @@ async function recoverAmaAutomationLocked({
           ? { ...item, ciInfrastructureOnly: true } : item) };
     }
     const stops = stop?.refundStops || [];
-    if (isInfrastructureStop(stop) && checksExecutedAgain(checks.rollup, stop.failedChecks)
+    if (isInfrastructureStop(stop) && checksExecutedAgain(rollup, stop.failedChecks)
       && stops.length > 0 && stops.every(item => item.ciInfrastructureOnly)
       && state.attempts === new Set(stops.map(item => item.launchRequestId).filter(Boolean)).size
       && state.ciInfrastructureRecovery?.stopKey !== stop.stopKey) {

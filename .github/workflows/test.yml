@@ -67,7 +67,9 @@ jobs:
         # `npm ci` is preferred over `npm install` so the lockfile is honored
         # exactly and an out-of-date lockfile fails CI loudly rather than
         # silently drifting.
-        run: npm ci
+        # Prepare checksum-verified headers before lifecycle scripts; preserve
+        # full compiler diagnostics and retry only fs-ext build failures once.
+        run: node bin/ci-install.mjs
 
       - name: Run CDM review-gate re-derivation guard
         # CDM-07AR: verdict/head/mergeability gate facts must come from

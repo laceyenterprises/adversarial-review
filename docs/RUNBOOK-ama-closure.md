@@ -80,6 +80,9 @@ trusting ownership; the report never repairs them.
 
 ## Expired wakes and missing review provenance
 
+Each initial hammer wake starts its own finite positive admission budget at
+reservation time; an already-overdue ownership decision cannot expire a new
+delivery immediately. The audit preserves the original decision deadline.
 An expired hammer wake with complete evidence of no acting closer gets a fresh
 attempt and admission window. Its audit links the expired predecessor through
 `supersedes`; repeated calls dedupe the replacement until its deadline. Live,

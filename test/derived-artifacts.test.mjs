@@ -366,8 +366,9 @@ test('build cancellation kills background descendants before returning', async t
     // Probe our own descendant without requiring the host's ps executable.
     // Linux zombies are terminated but only their new parent can reap them.
     let terminated = false;
-    // Linux exposes terminated zombies immediately; other hosts may delay reaping visibility.
-    const attempts = process.platform === 'linux' ? 1 : 50;
+    // Group SIGKILL delivery and descendant scheduling can lag the shell's
+    // close event on every host, including loaded Linux CI runners.
+    const attempts = 50;
     for (let attempt = 0; attempt < attempts; attempt++) {
       try {
         process.kill(pid, 0);

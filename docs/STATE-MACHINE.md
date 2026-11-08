@@ -1247,6 +1247,8 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 ## MSM two-path merge authority (current)
 
 Wake transport preserves the existing reserved/requested/failed outcomes.
+Initial delivery starts a fresh admission budget at reservation, even when the
+original decision deadline (retained in the audit) is already overdue.
 An expired wake with complete absent/terminal closer evidence reserves a
 deterministic successor attempt with a fresh admission window and a predecessor
 audit link. Unexpired wakes and live/unreadable ownership remain deduplicated.

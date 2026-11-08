@@ -136,6 +136,20 @@ test('expired unacted wake gets an audited replacement and a fresh admission win
   assert.equal(f.calls.length, 3);
 });
 
+test('first wake from an overdue decision dedupes for a fresh admission budget', t => {
+  const f = fixture(t), shared = pair();
+  const nowMs = Date.parse(shared.decision.deadline.at) + 60_000;
+  const first = f.wake(shared, { nowMs });
+  const audit = JSON.parse(readFileSync(first.auditPath, 'utf8'));
+  assert.equal(audit.wakeDeadline.anchoredAt, new Date(nowMs).toISOString());
+  assert.equal(Date.parse(audit.wakeDeadline.at), nowMs + shared.decision.deadline.budgetMs);
+  assert.deepEqual(audit.nextAction.deadline, shared.decision.deadline);
+  assert.equal(audit.supersedes, undefined);
+  assert.equal(f.wake(shared, { nowMs: nowMs + 1 }).outcome, 'duplicate');
+  assert.equal(f.wake(shared, { nowMs: Date.parse(audit.wakeDeadline.at) }).outcome, 'requested');
+  assert.equal(f.calls.length, 2);
+});
+
 test('unexpired wake still dedupes up to its admission deadline', t => {
   const f = fixture(t), shared = pair();
   const first = f.wake(shared);

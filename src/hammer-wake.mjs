@@ -222,6 +222,17 @@ function requestEligibleHammerWake({
       auditPath = hammerWakeAuditPath(rootDir, identity);
       let supersedes = null;
       let wakeDeadline = null;
+      // The decision may already be overdue when attention is first requested.
+      // Give this delivery its own admission budget rather than immediately
+      // expiring it against the older ownership deadline.
+      const admission = decision?.deadline;
+      const admissionBudgetMs = Number(admission?.budgetMs) > 0
+        ? Number(admission.budgetMs)
+        : Date.parse(admission?.at || '') - Date.parse(admission?.anchoredAt || '');
+      if (shared && Number.isFinite(admissionBudgetMs) && admissionBudgetMs > 0) {
+        wakeDeadline = { at: new Date(nowMs + admissionBudgetMs).toISOString(),
+          anchoredAt: new Date(nowMs).toISOString(), budgetMs: admissionBudgetMs, class: admission.class };
+      }
       // Follow deterministic successor keys. Exclusive create elects a single
       // replacement even when concurrent callers observe the expired record.
       // Keep predecessors intact, including their original admission evidence.
@@ -251,7 +262,8 @@ function requestEligibleHammerWake({
         ...identity,
         observedAt,
         outcome: 'reserved',
-        ...(supersedes ? { supersedes, wakeDeadline } : {}),
+        ...(supersedes ? { supersedes } : {}),
+        ...(wakeDeadline ? { wakeDeadline } : {}),
         ...(retryOfLaunchRequestId ? { retryOfLaunchRequestId } : {}),
         route: 'watcher-ama-merge-authority',
         ...(shared ? { nextAction: { action: decision.action, actor: decision.actor, reason: decision.reason,

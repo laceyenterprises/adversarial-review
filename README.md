@@ -2140,8 +2140,10 @@ Repair intent may wake on failed required CI, conflict or proven final push;
 execution still enforces existing launch and merge safety. Attempt keys rearm
 one wake per reconciled retryable no-merge launch on the same head, including
 after lease removal. Live owners and unreadable retry chains keep ownership.
-Expired unacted wakes reserve deterministic successor attempts only with
-complete absent/terminal closer evidence. Each successor links its predecessor
+Initial wake deliveries start a fresh admission budget at reservation, retaining
+the original decision deadline for diagnostics. Expired unacted wakes reserve
+deterministic successor attempts only with complete absent/terminal closer
+evidence. Each successor links its predecessor
 and gets a fresh admission window; unexpired successors dedupe concurrent calls.
 With no reviewed SHA, AMA refuses new dispatch with `ama-reviewed-head-unavailable`
 (or `ama-head-unavailable` if neither head is known), after reconciling existing

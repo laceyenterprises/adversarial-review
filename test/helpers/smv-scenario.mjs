@@ -813,16 +813,25 @@ if (scenario === 'clean') {
     readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }), log: quiet,
   });
   assert.equal(active.some(row => row.launchRequestId === 'synthetic-ended'), false);
-  assert.equal(wake().outcome, 'requested'); assert.equal(wake().outcome, 'duplicate');
+  const retryWake = wake();
+  assert.equal(retryWake.outcome, 'requested'); assert.equal(wake().outcome, 'duplicate');
   assert.equal(wakes, 2);
+  const retryWakeAudit = JSON.parse(readFileSync(retryWake.auditPath));
   const expiredWakeOptions = { ...retrySubject, shared: wakeShared,
-    nowMs: Date.parse(wakeShared.decision.deadline.at) + 1,
+    nowMs: Date.parse(retryWakeAudit.wakeDeadline.at) + 1,
     requestWatcherWakeImpl: () => { wakes++; return { requested: true }; }, log: quiet };
   const renewedWake = requestEligibleHammerWake(expiredWakeOptions);
   assert.equal(renewedWake.outcome, 'requested');
   assert.equal(requestEligibleHammerWake(expiredWakeOptions).outcome, 'duplicate');
   assert.equal(wakes, 3);
   assert.equal(JSON.parse(readFileSync(renewedWake.auditPath)).supersedes.reason, 'expired-without-acting-closer');
+  const overdueNow = Date.parse(wakeShared.decision.deadline.at) + 60_000;
+  const overdueOptions = { ...expiredWakeOptions, prNumber: prNumber + 11, nowMs: overdueNow };
+  const overdueWake = requestEligibleHammerWake(overdueOptions);
+  assert.equal(overdueWake.outcome, 'requested');
+  assert.equal(requestEligibleHammerWake(overdueOptions).outcome, 'duplicate');
+  assert.equal(Date.parse(JSON.parse(readFileSync(overdueWake.auditPath)).wakeDeadline.at),
+    overdueNow + wakeShared.decision.deadline.budgetMs);
   let missingHeadAlerts = 0;
   for (let pass = 0; pass < 2; pass++) {
     const refused = await maybeDispatchAmaCloser({ cfg: { enabled: true },

@@ -37,3 +37,21 @@ validation uses the explicit file runner with a 600-second bound instead.
 
 Wake successor-chain caps/backoff remain a non-blocking follow-up. No live
 recovery operation or production acceptance observation was performed.
+
+## CI remediation
+
+Initial wake deliveries now persist their own `wakeDeadline` from reservation
+time and the decision's finite positive budget. This prevents an overdue
+ownership deadline from renewing a freshly delivered wake on the next call;
+the original deadline remains in `nextAction`. The domain doc, canonical
+catalog, runbook, state declarations and disposable smoke describe this timing.
+Stacked-base dispatch fixtures supply reviewed provenance so they still exercise
+the base guard. The cancellation fixture allows bounded observation of process
+group termination on Linux as well as macOS.
+
+Validation: the seven targeted wake, recovery, stacked-base and artifact suites
+passed all 218 tests; closer dispatch and watcher claim-loop suites passed all
+487 tests. SMV passed all 11 tests including disposable smoke. Lint
+passed with zero errors (152 existing warnings), contract typechecking passed,
+the catalog validator passed 91 entries and the research-finding demo passed.
+The full local suite was not run, per the remediation worker contract.

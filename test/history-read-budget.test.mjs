@@ -121,17 +121,26 @@ test('the budget includes optional proof stages after history has succeeded', { 
 });
 
 for (const stage of ['metadata', 'tree', 'blob']) {
-  test(`standalone rescue-shaped reader bounds a stalled ${stage} transport`, { timeout: 2000 }, async () => {
-    let transportSignal;
-    const get = createHistoryReader({ contextTimeoutMs: 25,
+  test(`standalone rescue-shaped reader bounds a stalled ${stage} transport`, { timeout: 2000 }, async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    let transportSignal, markTransportStarted;
+    const transportStarted = new Promise(resolve => { markTransportStarted = resolve; });
+    const get = createHistoryReader({ contextTimeoutMs: 25, nowMs: () => 0,
       execGhWithRetryImpl: async ({ args, signal }) => {
-        transportSignal = signal;
         assert.ok(currentGitHubBudgetScope(), 'standalone CLI must defer exhausted quota');
         const path = args[1];
-        if (stage === 'metadata' || path.includes(`/git/${stage === 'tree' ? 'trees' : 'blobs'}/`)) return never();
+        if (stage === 'metadata' || path.includes(`/git/${stage === 'tree' ? 'trees' : 'blobs'}/`)) {
+          transportSignal = signal;
+          markTransportStarted();
+          return never();
+        }
         return { stdout: JSON.stringify(value(path)) };
       } });
-    await assert.rejects(get(`repos/fixture/repo/compare/${base}...${head}`), { code: 'HISTORY_READ_TIMEOUT' });
+    const expired = assert.rejects(get(`repos/fixture/repo/compare/${base}...${head}`),
+      { code: 'HISTORY_READ_TIMEOUT' });
+    await transportStarted;
+    t.mock.timers.tick(25);
+    await expired;
     assert.equal(transportSignal.aborted, true);
   });
 }

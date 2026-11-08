@@ -258,22 +258,27 @@ test('same-tick primary-change readers isolate in-flight deadlines and share com
   assert.equal(reads.get(`${moved}?per_page=100&page=1`), 1);
 });
 
-test('a shorter history deadline cannot cancel a different reader of the same immutable commit', { timeout: 2000 }, async () => {
+test('a shorter history deadline cannot cancel a different reader of the same immutable commit', { timeout: 2000 }, async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const bothStarted = deferred(), reply = deferred();
   let reads = 0;
   const exec = async () => {
-    reads++;
-    await new Promise(resolve => setTimeout(resolve, 50));
+    if (++reads === 2) bothStarted.resolve();
+    await reply.promise;
     return { stdout: JSON.stringify({ sha: head, files: [], parents: [] }) };
   };
   await withClosureEvaluationReadCache(async () => {
-    const short = createHistoryReader({ execGhWithRetryImpl: exec, contextTimeoutMs: 10 });
-    const long = createHistoryReader({ execGhWithRetryImpl: exec, contextTimeoutMs: 1000 });
+    const options = { execGhWithRetryImpl: exec, nowMs: () => 0 };
+    const short = createHistoryReader({ ...options, contextTimeoutMs: 10 });
+    const long = createHistoryReader({ ...options, contextTimeoutMs: 1000 });
     const path = `repos/${repo}/commits/${head}`;
-    const [expired, completed] = await Promise.allSettled([short(path), long(path)]);
-    assert.equal(expired.status, 'rejected');
-    assert.equal(expired.reason.code, 'HISTORY_READ_TIMEOUT');
-    assert.equal(completed.status, 'fulfilled');
-    assert.equal(completed.value.sha, head);
+    const expired = assert.rejects(short(path), { code: 'HISTORY_READ_TIMEOUT' });
+    const completed = long(path);
+    await bothStarted.promise;
+    t.mock.timers.tick(10);
+    await expired;
+    reply.resolve();
+    assert.equal((await completed).sha, head);
     assert.equal(reads, 2);
   });
 });

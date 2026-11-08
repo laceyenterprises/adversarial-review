@@ -6,6 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { recordApiCall } from './api-telemetry.mjs';
+import { readBudgetBinding, writeBudgetBinding } from './github-budget-bindings.mjs';
 
 const DEFAULT_THROTTLE_FLOOR = 200;
 // A floor may never exceed what a bucket can hold. The anonymous quota (limit
@@ -51,10 +52,12 @@ function withCloserGitHubBudget(fn) {
   });
 }
 
-function registerGitHubInstallationToken(token, appId, installationId) {
+function registerGitHubInstallationToken(token, appId, installationId, { env = process.env, expiresAtMs } = {}) {
   if (!token || !/^\d+$/.test(String(appId)) || !/^\d+$/.test(String(installationId))) return;
   const digest = createHash('sha256').update(String(token)).digest('hex').slice(0, 24);
   installationCredentials.set(digest, `installation-${appId}-${installationId}`);
+  writeBudgetBinding(`${resolveRateLimitSharedStatePath(env)}.bindings`, digest,
+    `installation-${appId}-${installationId}`, expiresAtMs);
   recordApiCall({ category: 'other', status: 'bound', extra: {
     unit: 'credential_binding', credential: `token-${digest}`,
     app: String(appId), installation: String(installationId),
@@ -67,7 +70,9 @@ function registerGitHubInstallationToken(token, appId, installationId) {
 function githubCredential({ env = process.env, token = env.GH_TOKEN || env.GITHUB_TOKEN } = {}) {
   if (!token) return 'default';
   const digest = createHash('sha256').update(String(token)).digest('hex').slice(0, 24);
-  return installationCredentials.get(digest) || `token-${digest}`;
+  return installationCredentials.get(digest)
+    || readBudgetBinding(`${resolveRateLimitSharedStatePath(env)}.bindings`, digest)
+    || `token-${digest}`;
 }
 
 function githubBudgetKey(resource, credential = 'default') {
@@ -803,7 +808,8 @@ function readGitHubBudgetStatus({ rootDir = TOOL_ROOT, env = process.env, nowMs 
   // Unknown or unreadable evidence is displayed as unknown; the store status
   // (readGitHubBudgetStoreStatus) says which.
   let { buckets } = readStoreEvidenceSync(statusSharedStatePath({ rootDir, env }), { nowMs, ...seams });
-  const credential = githubCredential({ env });
+  const credential = githubCredential({ env: { ...env,
+    GHO_RATE_LIMIT_SHARED_STATE_PATH: statusSharedStatePath({ rootDir, env }) } });
   // Keep every observed credential visible, and resolve the conventional
   // resource fields against the credential used by this runtime.
   buckets = { ...buckets, ...Object.fromEntries(['core', 'graphql'].map(resource =>

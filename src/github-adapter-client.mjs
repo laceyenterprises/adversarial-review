@@ -546,7 +546,7 @@ function githubAdapterCredential(args, env = {}) {
   const selector = index >= 0 ? args[index + 1] : 'default';
   const tokenNames = args.flatMap((arg, i) => arg === '--pat-env' ? [args[i + 1]] : []);
   const token = tokenNames.map(name => env?.[name]).find(Boolean);
-  return { selector, credential: token ? githubCredential({ token }) : `adapter:${selector}` };
+  return { selector, credential: token ? githubCredential({ token, env }) : `adapter:${selector}` };
 }
 
 // Reads bind no reviewer identity: only the watcher's broker service token.

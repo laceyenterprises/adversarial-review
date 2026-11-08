@@ -24,6 +24,39 @@ function currentHead(headRefOid) {
   return async () => ({ state: 'open', mergedAt: null, closedAt: null, headRefOid });
 }
 
+test('caller-post inconsistency gets one same-head reconciliation and stays blocking on repetition', async t => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'spawn-verdict-reconcile-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const head = 'a'.repeat(40), requests = [], posted = [];
+  const body = '## Summary\nSynthetic review.\n\n## Blocking issues\n- None.\n\n## Non-blocking issues\n- None.\n\n## Suggested fixes\n- None.\n\n## Verdict\nTwo blocking issues remain: lost writes and a broken command.\n\nComment only';
+  const options = {
+    rootDir, repo: 'example/project', prNumber: 7, reviewerModel: 'gemini',
+    reviewerHeadSha: head, reviewAttemptNumber: 1, reviewDbAttemptNumber: 1,
+    passKind: 'first-pass', reviewerSessionUuid: 'synthetic-verdict-review',
+    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
+    reviewerRuntimeAdapterOverride: {
+      async spawnReviewer(request) {
+        requests.push(request);
+        return { ok: true, verdict: 'comment-only', reviewBody: body, reviewBodyDelivery: 'caller-post' };
+      },
+    },
+    postGitHubReviewWithCaptureImpl: async payload => posted.push(payload),
+    fetchPullRequestHeadAndStateImpl: currentHead(head),
+  };
+  const result = await spawnReviewer(options);
+  assert.equal(result.ok, true);
+  assert.equal(result.verdict, 'request-changes');
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].subjectContext.reviewerHeadSha, requests[1].subjectContext.reviewerHeadSha);
+  assert.match(requests[1].prompt, /Reconcile them/);
+  assert.match(requests[1].sessionUuid, /:verdict-reconcile$/);
+  assert.equal(posted.length, 1);
+  assert.match(posted[0].reviewBody, /operator attention is required/i);
+  await spawnReviewer({ ...options, reviewerSessionUuid: 'synthetic-verdict-review-next',
+    reviewAttemptNumber: 2, reviewDbAttemptNumber: 2, passKind: 'rereview' });
+  assert.equal(requests.length, 3, 'a later claim cannot replenish the reconciliation budget');
+});
+
 test('REVIEWSTALL-01: stalled pass is cancelled and claim requeued without spending budgets', async t => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'stall-settle-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

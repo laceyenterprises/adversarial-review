@@ -19,6 +19,23 @@ See [the closure runbook](RUNBOOK-ama-closure.md).
 
 # Adversarial Review State Machine Notes
 
+Review parsing fails closed when Blocking issues and Verdict disagree.
+Explicit verdict keywords and counted/remaining blocking-issue phrases in the
+unfenced Verdict section produce `verdict_inconsistent: true`, an effective
+request-changes verdict and an unknown blocking classification. No blocking
+finding is invented. Negative counts such as “no blocking issues” remain
+permissive when the structured list is empty. Chunk aggregation and pipeline
+stage classification preserve the blocking outcome.
+
+Before posting a newly generated inconsistent review, the hosted reviewer
+reserves one same-head reconciliation and re-runs the reviewer with the original
+diff and a reconciliation instruction. A repeated contradiction, failed retry,
+previous reservation or unavailable reservation store retains the blocking
+review with an operator notice. Delivery retries reuse the preserved result.
+See [reviewer verdict recovery](data-model/reviewer-verdict-recovery.md) for the
+reservation lifecycle and [reviewer passes](data-model/reviewer-passes.md) for
+captured evidence. Existing watcher job lifecycle values are unchanged.
+
 CLOSERLAUNCHENV-01 final remediation preserves the existing retry/refund edge:
 retryable launch-environment startup failures write deferred audits without a
 `terminal-stop` progress receipt. Malformed activation and foreign launch identity

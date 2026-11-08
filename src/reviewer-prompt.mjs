@@ -209,7 +209,8 @@ Antigravity runtime instructions:
 - Start with "## Adversarial Review — Gemini (gemini-reviewer-lacey)" unless an outer caller already supplied that header.
 - The last line of "## Verdict" must be exactly one of: "Comment only", "Request changes", or "Approve". Only the optional final simplicity advisory from the shared guidance may follow it.
 - Never copy the output template itself: every placeholder such as <Title>, <path>, <range> or <one paragraph> must be replaced by real content, and a reply that echoes the template is rejected and never posted.
-- Verdict is a pure function of the structured Blocking issues list: if "## Blocking issues" is empty / "- None.", the Verdict MUST be "Comment only"; emit "Request changes" only when at least one blocking issue is listed. Non-blocking issues never escalate the verdict.`;
+- Verdict is a pure function of the structured Blocking issues list: if "## Blocking issues" is empty / "- None.", the Verdict MUST be "Comment only"; emit "Request changes" only when at least one blocking issue is listed. Non-blocking issues never escalate the verdict.
+- Every blocking defect named in Verdict prose MUST appear as a complete finding under Blocking issues. Reconcile both sections before returning the review; never pair a blocking defect or blocking count in Verdict with "- None." or "Comment only".`;
 }
 
 export {

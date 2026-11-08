@@ -1126,6 +1126,47 @@ test('REVIEWMODEL-02: watcher never reclaims a terminal model refusal on the sam
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
+test('inconsistent adapter-owned review output does not duplicate watcher claims on the next poll', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-verdict-claim-'));
+  const body = '## Summary\nSynthetic review.\n\n## Blocking issues\n- None.\n\n## Verdict\nTwo blocking issues remain: lost writes and a broken command.\n\nComment only';
+  try {
+    const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    writeFileSync(loaderPath, buildLoaderSource({
+      subjectHeads: { '102': 'sha-happy-102' },
+      reviewerRuntimeSource: `
+        globalThis.__watcherClaimLoopReviewerSpawns = [];
+        export function createReviewerRuntimeAdapterForDomain() { return {
+          async spawnReviewer(payload) {
+            globalThis.__watcherClaimLoopReviewerSpawns.push(payload);
+            return { ok: true, reviewBody: ${JSON.stringify(body)}, reviewBodyDelivery: 'adapter' };
+          }, async cancel() {}, async reattach() {}
+        }; }
+        export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); }
+        export function loadDomainConfig() { return {}; }
+        export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }
+      `,
+    }));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({
+      afterFirstPoll: `
+        const firstClaims = claims.length;
+        const firstSpawns = globalThis.__watcherClaimLoopReviewerSpawns.length;
+        await pollOnce(octokit, pollOptions);
+        assert.equal(claims.length, firstClaims);
+        assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.length, firstSpawns);
+        assert.ok(firstSpawns > 0);
+      `,
+    }));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(installGhFixture(tmp)) });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('watcher pollOnce claim loop records subject-state head SHAs and drives the happy path', () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-claim-loop-'));
   const loaderPath = path.join(tmp, 'fixture-loader.mjs');

@@ -1,5 +1,6 @@
 import { findingLineRanges } from './finding-lines.mjs';
 import { maskReviewFences } from './review-markdown.mjs';
+import { verdictConsistency } from './verdict-consistency.mjs';
 
 // Parse the `## Blocking Issues` section into structured findings. The
 // review contract (`prompts/code-pr/reviewer.*.md`) requires:
@@ -307,7 +308,13 @@ function parseReviewFindings(body) {
     });
   const blocking = classify(parseBlockingFindingsSection(normalized));
   const nonBlocking = classify(parseNonBlockingFindingsSection(normalized));
+  const consistency = verdictConsistency(normalized, blocking);
+  if (consistency.verdict_inconsistent) {
+    blocking.state = 'unknown';
+    blocking.malformed ||= 'verdict-inconsistent';
+  }
   return {
+    ...(consistency.verdict_inconsistent ? consistency : {}),
     blocking,
     nonBlocking,
     findingsCount: blocking.state === 'known' && nonBlocking.state === 'known'

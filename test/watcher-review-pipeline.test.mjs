@@ -54,6 +54,19 @@ function fakeComms() {
   };
 }
 
+test('inconsistent stage verdict blocks the pipeline before subsequent stages', async () => {
+  const { spawnReviewer, calls } = fakeSpawnReviewer({
+    'code-pr': cleanBody('synthetic').replace('## Verdict\n', '## Verdict\nTwo blocking issues remain: lost writes and a broken command.\n\n'),
+    'code-pr-security': cleanBody('unused'),
+  });
+  const result = await runGatedReviewPipeline({
+    resolvedPipeline: resolved(), currentRevisionRef: 'synthetic-head', riskClass: 'medium',
+    spawnReviewer, spawnReviewerArgs: BASE_ARGS,
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(result.pipeline.disposition, 'blocking');
+});
+
 const BASE_ARGS = {
   repo: 'laceyenterprises/demo', prNumber: 7, reviewerModel: 'codex', botTokenEnv: 'GH_BOT', reviewerSessionUuid: 'sess-1',
 };

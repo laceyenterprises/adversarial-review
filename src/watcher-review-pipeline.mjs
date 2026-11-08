@@ -23,8 +23,7 @@
 
 import {
   classifyStructuredBlockingIssues,
-  extractReviewVerdict,
-  normalizeReviewVerdict,
+  normalizeEffectiveReviewVerdict,
   sanitizeReviewPayloadBestEffort,
 } from './kernel/verdict.mjs';
 import { runReviewPipeline } from './review-pipeline-driver.mjs';
@@ -34,7 +33,7 @@ import { runReviewPipeline } from './review-pipeline-driver.mjs';
 // which the kernel treats as indeterminate (the stage gate stays closed).
 function defaultParseVerdict(reviewBody) {
   const sanitized = sanitizeReviewPayloadBestEffort(reviewBody);
-  const kind = normalizeReviewVerdict(extractReviewVerdict(sanitized));
+  const kind = normalizeEffectiveReviewVerdict(sanitized);
   const blocking = classifyStructuredBlockingIssues(sanitized);
   return { kind, blocking };
 }

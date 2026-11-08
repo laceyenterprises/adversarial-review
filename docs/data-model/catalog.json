@@ -670,6 +670,7 @@
         "src/exhausted-head-verdict.mjs"
       ],
       "deliveryHeadWaitFields": ["head_wait_started_at"],
+      "verdictConsistencyFields": ["verdict_inconsistent"],
       "reviewerExecutionModelSources": ["env-pin", "registry", "committed-seed", "runtime-display-token"],
       "reviewerExecutionHarnesses": ["claude-code", "codex", "antigravity", "gemini-cli"],
       "reviewerExecutionEffortSources": ["env", "registry", "committed-seed", "host-config", "transport-default", "model-display-name", "none"],
@@ -1423,6 +1424,18 @@
         "reviewTextSha256"
       ],
       "deliveryStateValues": ["pending-delivery", "deferred", "write-started", "delivered"]
+    },
+    {
+      "id": "reviewer-verdict-recovery",
+      "title": "Reviewer Verdict Recovery",
+      "path": "docs/data-model/reviewer-verdict-recovery.md",
+      "store": "data/reviewer-verdict-recovery/<sha256>.json",
+      "schemaSurface": "src/reviewer-verdict-recovery.mjs",
+      "relatedSchemaSurfaces": ["src/reviewer.mjs", "src/reviewer-spawn-settle.mjs", "src/kernel/verdict-consistency.mjs"],
+      "owner": "reviewer output reconciliation",
+      "primaryKey": ["repo", "prNumber", "headSha"],
+      "fields": ["repo", "prNumber", "headSha", "verdict_inconsistent", "status", "reviewBody", "reconciledReviewBody", "error"],
+      "statusValues": ["reserved", "reconciled", "operator-required"]
     }
   ]
 }

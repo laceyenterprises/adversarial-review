@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -82,6 +82,21 @@ function readPass(rootDir, { repo, prNumber, attemptNumber, passKind }) {
     db.close();
   }
 }
+
+test('contradictory review capture records the machine-readable inconsistency fact', async t => {
+  const rootDir = makeRootDir();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const key = seedPass(rootDir, { repo: 'example/project', prNumber: 7 });
+  const body = '## Summary\nSynthetic review.\n\n## Blocking issues\n- None.\n\n## Non-blocking issues\n- None.\n\n## Verdict\nTwo blocking issues remain: lost writes and a broken command.\n\nComment only';
+  await captureReviewerBodyAfterPost(rootDir, {
+    ...key, reviewerModel: 'codex', reviewBody: body, verdict: 'request-changes',
+    knownGitHubArtifact: { id: '700', commitId: 'a'.repeat(40) },
+    log: { warn() {}, error() {} },
+  });
+  const row = readPass(rootDir, key);
+  assert.equal(row.verdict, 'request-changes');
+  assert.equal(JSON.parse(row.metadata_json).verdict_inconsistent, true);
+});
 
 function writeLegacyUnverifiedCapture(rootDir, {
   repo,

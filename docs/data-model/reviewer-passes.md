@@ -7,6 +7,13 @@ AGYTELEMETRY-01 counter decoding and reconciliation additionally use
 
 ## Ownership
 
+`metadata_json.verdict_inconsistent: true` records a captured review whose
+Blocking issues and Verdict disagree. The effective verdict is request-changes;
+the parsed blocking state is unknown, so an empty structured list cannot admit
+automated closure. The original body remains available as evidence. The
+reviewer's one same-head reconciliation reservation is documented in
+[reviewer verdict recovery](reviewer-verdict-recovery.md).
+
 - Store: `data/reviews.db`
 - Tables: `reviewer_passes`, `reviewer_rate_limit_snapshots`
 - Schema: `migrations/20260518_reviewer_passes.sql` plus later additive migrations

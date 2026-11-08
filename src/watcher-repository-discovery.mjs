@@ -20,7 +20,7 @@ export function createRepositoryRefresher({ config, db, rootDir, additionalState
 
   async function refresh(octokit, currentRepos) {
     let activeRepos = currentRepos;
-    if (!config.org) return activeRepos;
+    if (!config.org) return activeRepos.filter(name => !isExcluded(name));
 
     const startedAt = now();
     const refreshInterval = config.repoRefreshIntervalMs ?? 3_600_000;
@@ -102,6 +102,12 @@ export function createRepositoryRefresher({ config, db, rootDir, additionalState
       }
       logger.error(`[watcher] Failed to ${listingComplete ? 'reconcile' : 'list'} org repos for ${config.org}:`, err.message);
       if (!hasSuccessfulListing) {
+        // A complete listing is not yet an identity-safe scope: a busy rename
+        // may leave observation/recovery unfinished. New repositories wait for
+        // the first contention-free reconciliation rather than bypassing it.
+        if (listingComplete && err.code === 'REPOSITORY_STATE_BUSY') {
+          logger.warn('[watcher] Startup repository reconciliation blocked by repository-state lock contention; new repositories wait for a contention-free listing.');
+        }
         const backoff = Math.min(refreshInterval, [120_000, 300_000, 600_000][Math.min(startupFailures++, 2)]);
         const deferredUntil = err.budgetDeferred ? Date.parse(err.observation?.resetAt) : NaN;
         nextRefreshAt = Math.min(startedAt + backoff, deferredUntil > startedAt ? deferredUntil : Infinity);
@@ -114,6 +120,9 @@ export function createRepositoryRefresher({ config, db, rootDir, additionalState
         const known = db.prepare('SELECT full_name FROM repository_identities ORDER BY full_name').all()
           .map(row => row.full_name)
           .filter(name => name.split('/')[0].toLowerCase() === config.org.toLowerCase());
+        for (const name of known.filter(name => !isExcluded(name) && quarantined.has(name.toLowerCase()))) {
+          logger.warn(`[watcher] Startup fallback omitted current repository ${name}: persisted quarantine or ambiguous ownership history; an authoritative safe listing is required.`);
+        }
         activeRepos = [...new Set([...(config.repos || []).map(name => canonicalRepositoryName(db, name)), ...known])]
           .filter(name => !isExcluded(name) && !quarantined.has(name.toLowerCase()));
         logger.log(`[watcher] watching ${activeRepos.length} repos (fallback: last known set): ${activeRepos.join(', ')}`);

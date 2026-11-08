@@ -86,17 +86,35 @@ export function createHistoryReader(options = {}) {
       if (!ref) return new Map();
       const root = await tree(repo, ref);
       if (![...root.values()].some(entry => entry.type === 'tree')) return root;
-      const data = await cached(`repos/${repo}/git/trees/${ref}?recursive=1`,
-        '{tree: [.tree[] | {path, mode, type, sha}], truncated}');
+      let data;
+      try {
+        data = await cached(`repos/${repo}/git/trees/${ref}?recursive=1`,
+          '{tree: [.tree[] | {path, mode, type, sha}], truncated}');
+      } catch (error) {
+        // The recursive endpoint is an optimization. A smaller subtree read
+        // may still succeed after transport retries or output overflow, but
+        // cancellation, the shared deadline and malformed JSON stay terminal.
+        remainingMs();
+        const cause = error.cause || error;
+        if (cause instanceof SyntaxError || cause.code === 'HISTORY_READ_TIMEOUT'
+          || cause.name === 'AbortError' || cause.code === 'ABORT_ERR'
+          || !(cause.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || cause.code === 'ENOBUFS'
+            || historyReadRetryDelayMs(cause, 0) !== null)) throw error;
+        console.warn(`history recursive tree ${ref}: falling back to walker: ${historyReadErrorDetail(cause)}`);
+        return null;
+      }
       if (data.truncated === true) return null;
       if (data.truncated !== false || !Array.isArray(data.tree)) throw new Error(`incomplete recursive tree ${ref}`);
       const entries = new Map();
       const children = new Map();
+      let unsupportedMode = false;
       for (const entry of data.tree) {
         remainingMs();
         if (typeof entry.path !== 'string' || !entry.path || entry.path.split('/').some(part => !part || part === '.' || part === '..')
           || entries.has(entry.path) || !/^[0-9a-f]{40}$/i.test(entry.sha || '')
-          || !({ tree: ['040000'], blob: ['100644', '100755', '120000'], commit: ['160000'] })[entry.type]?.includes(entry.mode)) throw new Error(`invalid recursive tree ${ref}`);
+          || !['tree', 'blob', 'commit'].includes(entry.type)
+          || typeof entry.mode !== 'string' || !/^[0-7]{6}$/.test(entry.mode)) throw new Error(`invalid recursive tree ${ref}`);
+        if (!({ tree: ['040000'], blob: ['100644', '100755', '120000'], commit: ['160000'] })[entry.type].includes(entry.mode)) unsupportedMode = true;
         entries.set(entry.path, entry);
       }
       for (const [path, entry] of entries) {
@@ -115,6 +133,12 @@ export function createHistoryReader(options = {}) {
         }
       }
       for (const name of root.keys()) if (!entries.has(name)) throw new Error(`incomplete recursive tree ${ref}`);
+      // Legacy modes cannot be rebuilt canonically. The existing walker can
+      // still skip equal directories without interpreting their stored bytes.
+      if (unsupportedMode) {
+        console.warn(`history recursive tree ${ref}: falling back to walker: unsupported object mode`);
+        return null;
+      }
       // Rebuild every descendant tree object. The server's completeness marker
       // alone cannot detect an omitted child; its immutable parent SHA can.
       for (const [path, entry] of entries) if (entry.type === 'tree') {

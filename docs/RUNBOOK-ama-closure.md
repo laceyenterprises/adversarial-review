@@ -4619,13 +4619,34 @@ A complete snapshot must explicitly report `truncated: false`, match the separat
 read root entries, have unique valid paths and ancestors, and reproduce every
 descendant Git tree SHA from its complete direct children (including modes).
 Missing or inconsistent evidence fails closed. An explicitly truncated recursive
-response falls back to the uncapped directory walker; a truncated nonrecursive
-tree still fails closed. Flat roots need no recursive request.
+response falls back to the uncapped directory walker. Recursive transport failures
+(including exhausted request timeouts, HTTP 5xx and child-output overflow) also
+fall back, with a bounded warning naming the tree and failure. The fallback shares
+the remaining global budget; deadline exhaustion, abort, malformed JSON and
+permanent API refusals still propagate. A truncated nonrecursive tree still fails
+closed. Flat roots need no recursive request.
+Syntactically valid legacy object modes such as `100664` select the walker after
+root/path/ancestor validation, allowing it to skip unchanged legacy directories.
+Tree-SHA mismatches remain refusals: missing children cannot be distinguished from
+noncanonical stored tree encodings or lossily decoded non-UTF-8 names. Repositories
+containing those encodings can therefore lose history evidence even when the old
+walker would skip the affected directory; this compatibility limitation is retained
+to avoid accepting an incomplete recursive snapshot.
 The fallback settles at most eight before/after subtree pairs per wave (16 GitHub
 requests), skipping equal subtrees. Both paths then diff at most eight changed
 blob pairs at once. Immutable requests coalesce within the existing credential
 and cancellation boundaries; sorted paths make evidence independent of request
 completion order. Recursive output stays under the existing child-output limit.
+Recursive collection reads and validates the entire repository, including unchanged
+directories: normally two snapshots, or three for a hammer's primary/final proof.
+Copying, freezing, cache byte accounting and SHA reconstruction scale with total
+tree entries, whereas the walker scales with changed subtrees. The shared closure
+cache retains at most 16 MiB across reads; several multi-megabyte snapshots can
+evict other PRs' immutable evidence during the same tick. Output overflow selects
+the walker but does not prevent the cost of the initial attempt. No new size cap
+is introduced under the v1 freeze. The validation fixture covers 53 changed paths;
+large-repository latency and cache reuse are unmeasured, so request-count savings
+are not a repository-size-independent performance guarantee.
 This reduces request volume without changing the 90-second budget, quota policy,
 live provenance reads, reversal authorization or cancellation ownership.
 

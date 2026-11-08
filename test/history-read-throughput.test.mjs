@@ -19,7 +19,7 @@ const repo = 'fixture/repo', path = `repos/${repo}/compare/${base}...${head}`;
 // A nonexistent private fixture root prevents durable history writes/reuse.
 const args = { repo, prNumber: 42, headSha: head, rootDir: join(tmpdir(), randomUUID()) };
 const commit = (id, parent) => ({ sha: id, parents: [{ sha: parent }], commit: { message: 'author change' } });
-function fixture({ failTree = false, stallTree = false, contextTimeoutMs, hammer = false, schedule, recursive = false } = {}) {
+function fixture({ failTree = false, stallTree = false, contextTimeoutMs, hammer = false, schedule, recursive = false, recursiveFailure } = {}) {
   const objects = new Map();
   const roots = [[], []];
   for (let i = 0; i < 53; i++) for (let side = 0; side < 2; side++) {
@@ -61,6 +61,7 @@ function fixture({ failTree = false, stallTree = false, contextTimeoutMs, hammer
       try {
         await schedule?.read('tree');
         await turn();
+        if (key.endsWith('?recursive=1') && recursiveFailure) throw recursiveFailure;
         if (stallTree) return new Promise(() => {});
         if (failTree && ![base, head].some(ref => key.endsWith(ref))) return { stdout: '{"tree":[],"truncated":true}' };
       } finally { activeTrees--; }
@@ -414,4 +415,62 @@ test('recursive evidence coalesces completed requests only within its credential
     assert.equal(counts.blob, 212);
     assert.equal(counts.compare, 2);
   });
+});
+
+for (const error of [
+  Object.assign(new Error('request timed out after retries'), { code: 'ETIMEDOUT' }),
+  Object.assign(new Error('HTTP 503 Service Unavailable'), { status: 503 }),
+  Object.assign(new Error('recursive output overflow'), { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' }),
+  Object.assign(new Error('recursive output overflow'), { code: 'ENOBUFS' }),
+]) {
+  test(`recursive transport failure falls back with identical complete evidence: ${error.code || error.status}`, async t => {
+    const warnings = [];
+    t.mock.method(console, 'warn', message => warnings.push(message));
+    const fallback = fixture({ recursive: true, recursiveFailure: error });
+    assert.deepEqual(await fallback.get(path), await fixture().get(path));
+    assert.equal(fallback.counts.tree, 110, 'walker reuses both cached roots');
+    assert.equal(warnings.length, 2);
+    assert.ok(warnings.every(message => message.includes('falling back to walker')));
+  });
+}
+
+for (const error of [
+  Object.assign(new Error('budget exhausted'), { code: 'HISTORY_READ_TIMEOUT' }),
+  Object.assign(new Error('cancelled'), { name: 'AbortError', code: 'ABORT_ERR' }),
+  Object.assign(new Error('HTTP 401 Unauthorized'), { status: 401 }),
+  new SyntaxError('invalid JSON: timeout'),
+]) {
+  test(`recursive failure remains terminal: ${error.code || error.name}`, async t => {
+    const warnings = [];
+    t.mock.method(console, 'warn', message => warnings.push(message));
+    const { get, counts } = fixture({ recursive: true, recursiveFailure: error });
+    await assert.rejects(get(path), /history read failed/);
+    await turn();
+    assert.equal(counts.tree, 4, 'no subtree fallback');
+    assert.equal(counts.blob, 0);
+    assert.deepEqual(warnings, []);
+  });
+}
+
+test('a legacy 100664 mode in an unchanged directory falls back and skips that directory', async t => {
+  const warnings = [];
+  t.mock.method(console, 'warn', message => warnings.push(message));
+  const unchanged = { path: 'legacy', type: 'tree', mode: '040000', sha: sha('legacy-dir') };
+  const requested = [];
+  const get = createHistoryReader({ execGhWithRetryImpl: async ({ args: argv }) => {
+    const key = argv[1];
+    requested.push(key);
+    if (key.includes('/compare/')) return { stdout: JSON.stringify({ status: 'ahead', total_commits: 1,
+      merge_base_commit: { sha: base }, commits: [commit(head, base)] }) };
+    const recursive = key.endsWith('?recursive=1');
+    const tree = recursive ? [unchanged, { path: 'legacy/file', type: 'blob', mode: '100664', sha: sha('legacy-blob') }] : [unchanged];
+    assert.ok(key.includes(`/git/trees/${base}`) || key.includes(`/git/trees/${head}`), 'unchanged directory must not be walked');
+    return { stdout: JSON.stringify({ tree, truncated: false }) };
+  } });
+  const evidence = await get(path);
+  assert.equal(evidence.filesComplete, true);
+  assert.deepEqual(evidence.files, []);
+  assert.equal(requested.length, 5, 'one compare, two roots and two recursive attempts');
+  assert.equal(warnings.length, 2);
+  assert.ok(warnings.every(message => message.includes('unsupported object mode')));
 });

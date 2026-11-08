@@ -87,6 +87,8 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
+import { terminalReviewProofMatches } from './reviewer-authority.mjs';
+import { createReviewCurrencyReader } from './review-currency.mjs';
 import { findActiveRemediationJob } from './active-remediation-job.mjs';
 import { listSettledJsonNames } from './dispatch-dir-names.mjs';
 import { amaCloserDispatchDir, amaCloserDispatchFilePath, readAmaCloserDispatchRecord, readAmaCloserDispatchRecordsForPR } from './dispatch-record-read.mjs';
@@ -4547,6 +4549,12 @@ export async function resolveHamTerminalRemediationEvidence({
     reviewedHead, currentHead, baseRef: prMetadata.baseRefName || 'main', env, comments: rollup?.comments,
     get: async path => JSON.parse((await execGhWithRetry({ execFileImpl, args: ['api', path],
       timeoutMs: loadAwareTimeoutMs(15000), env, signal })).stdout) }) : null;
+  const get = createHistoryReader({ execFileImpl, env, signal });
+  const terminalReviewProof = await terminalReviewProofMatches({
+    reviews: rollup?.reviews, headSha: currentHead, validatedAt: verifiedAuditComment.createdAt,
+    compare: (from, to) => get(`repos/${repoPath}/compare/${from}...${to}`),
+    currency: createReviewCurrencyReader({ repo: repoPath, prNumber, get, comments: rollup?.comments }),
+  });
 
   return {
     hamTerminalRemediation: buildHamTerminalRemediationEvidenceFromGroundTruth({
@@ -4558,6 +4566,7 @@ export async function resolveHamTerminalRemediationEvidence({
       commit: verifiedCommit,
       auditComment: verifiedAuditComment,
       range,
+      terminalReviewProof,
     },
   };
 }
@@ -6417,7 +6426,15 @@ async function maybeDispatchAmaCloserAttempt({
             fetchLiveGateImpl: async () => {
               const rollup = await fetchPullRequestRollupImpl(repo, prNumber, { execFileImpl });
               const state = String(rollup?.state || '');
+              const get = createHistoryReader({ execFileImpl, env, signal });
+              const terminalReviewProof = await terminalReviewProofMatches({
+                reviews: rollup?.reviews, headSha: mergeHead,
+                validatedAt: eligibilityOptions.hamTerminalRemediationGroundTruth?.auditComment?.createdAt,
+                compare: (from, to) => get(`repos/${repo}/compare/${from}...${to}`),
+                currency: createReviewCurrencyReader({ repo, prNumber, get, comments: rollup?.comments }),
+              });
               return {
+                terminalReviewProof,
                 primaryChange: await fetchPrimaryChangeImpl({ repo, prNumber, rootDir, headSha: rollup?.headSha || rollup?.headRefOid || '',
                   get: createHistoryReader({ execGhWithRetryImpl: execGhWithRetry, execFileImpl, env, signal }),
                 }),

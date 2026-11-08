@@ -186,6 +186,18 @@ function baseArgs(harness, overrides = {}) {
   };
 }
 
+test('HAMLATEAUDIT-01: changed terminal review proof refuses merge under the held daemon lease', async () => {
+  const h = makeHarness();
+  h.deps.fetchLiveGateImpl = async () => greenGate({
+    terminalReviewProof: { ok: false, reason: 'review-changed-since-validation' },
+  });
+  const result = await attemptDaemonCleanMerge(baseArgs(h));
+  assert.equal(result.merged, false);
+  assert.equal(h.calls.merge, 0);
+  assert.equal(h.calls.release, 1);
+  assert.ok(result.reasons.includes('review-changed-since-validation'), JSON.stringify(result));
+});
+
 test('pre-merge recording follows live validation on every transport retry', async () => {
   for (const revoked of [false, true]) {
     const events = [];

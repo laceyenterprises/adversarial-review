@@ -1,3 +1,21 @@
+## Terminal audit review currency (HAMLATEAUDIT-01)
+
+A validated head alone does not prove that a later review was considered.
+The hammer's initial predicate and final live gate compare each authoritative
+family's latest applicable review head/body with the evidence at the authenticated
+audit's publication time, using canonical ancestry/currency rules. The daemon
+performs the same comparison before reusing terminal validation. A changed review
+returns `review-changed-since-validation`; unavailable evidence refuses merge.
+An identical same-head repeat preserves proof. Pending, untrusted and
+inapplicable-branch reviews retain existing selection rules.
+
+The closer's finding classification uses the latest applicable routed-family
+review, including a review on the exact validated head after dispatch. A fresh
+audit must still pass existing finding coverage, provenance, lease and merge
+predicates. No review requests or new merge authority are introduced. Source
+publication does not establish deployment or repair already merged artwork.
+See the [offline source RCA](postmortems/SEV2-LAC-2162-late-review-terminal-audit.md).
+
 ## Reading the PR blockers report
 
 Run `npm run pr-blockers -- --repo example/project --repo example/other`

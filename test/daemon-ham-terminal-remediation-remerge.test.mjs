@@ -19,8 +19,8 @@ import { DAEMON_MERGE_DISPOSITION } from '../src/ama/daemon-merge.mjs';
 // per-head hammer retry cap consumption — while STILL re-verifying green CI +
 // mergeable + head-match live.
 
-const REVIEWED_HEAD = 'reviewed-head-x0000000000000000000000000';
-const HAM_HEAD = 'ham-remediation-head-y0000000000000000000';
+const REVIEWED_HEAD = 'a'.repeat(40);
+const HAM_HEAD = 'b'.repeat(40);
 
 function tempRoot() {
   return mkdtempSync(join(tmpdir(), 'daemon-ham-remerge-'));
@@ -46,7 +46,8 @@ function hamValidatedAuditEntry(head) {
         eligibilityTrace: {
           eligible: false,
           reasons: ['ci-not-green'],
-          trace: { hamTerminalRemediation: { ok: true } },
+          trace: { hamTerminalRemediation: { ok: true,
+            auditComment: { createdAt: '2026-08-06T00:00:00Z' } } },
         },
       },
     ],
@@ -96,7 +97,9 @@ function findingsReviewArgs(rootDir, overrides = {}) {
       state: 'OPEN',
       headSha: HAM_HEAD,
       comments: [{ author: 'the-hammer-lacey[bot]',
+        createdAt: '2026-08-06T00:00:00Z',
         body: `HAM-Base-Head: ${REVIEWED_HEAD}\nHAM-Validated-Head: ${HAM_HEAD}` }],
+      reviews: [],
       headRefName: 'ham/branch',
       statusCheckRollup: [GREEN_CHECK],
       mergeable: 'MERGEABLE',
@@ -123,6 +126,34 @@ function findingsReviewArgs(rootDir, overrides = {}) {
     ...overrides,
   };
 }
+
+test('HAMLATEAUDIT-01: daemon terminal-audit reuse checks fresh exact-head review bodies', async () => {
+  const rootDir = tempRoot();
+  try {
+    const args = findingsReviewArgs(rootDir);
+    const rollup = await args.fetchRollupImpl();
+    const body = '## Blocking Issues\n- None.\n\n## Non-blocking Issues\n- None.\n\n## Verdict\nComment only';
+    const review = { commit: { oid: HAM_HEAD }, author: { login: 'lacey-codex-reviewer' },
+      state: 'COMMENTED', submittedAt: '2026-08-05T23:59:00Z', body };
+    rollup.reviews = [review, { ...review, submittedAt: '2026-08-06T00:05:00Z',
+      body: body.replace('## Non-blocking Issues\n- None.', '## Non-blocking Issues\n- **Artwork color changed.** Restore it.') }];
+    // A newer marker cannot silently refresh an older eligible audit's proof.
+    rollup.comments.push({ ...rollup.comments[0], createdAt: '2026-08-06T00:10:00Z' });
+    let observed = null;
+    await runDaemonCleanMergeAttempt({ ...args,
+      fetchRollupImpl: async () => rollup,
+      readAmaAuditEntryImpl: () => hamValidatedAuditEntry(HAM_HEAD),
+      attemptDaemonCleanMergeImpl: async options => {
+        observed = await options.fetchLiveGateImpl();
+        return { disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, merged: false };
+      },
+    });
+    assert.equal(observed.terminalReviewProof.ok, false);
+    assert.equal(observed.terminalReviewProof.reason, 'review-changed-since-validation');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
 
 test('headHasValidatedHamTerminalRemediation: true when a validated attempt matches the head', () => {
   const ok = headHasValidatedHamTerminalRemediation({

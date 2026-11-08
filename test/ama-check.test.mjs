@@ -555,6 +555,34 @@ test('ama-check does not let mergeStateStatus=CLEAN override mergeable=CONFLICTI
   }
 });
 
+test('HAMLATEAUDIT-01: ama-check refuses an old-head terminal audit after a new exact-head finding', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-late-review-'));
+  try {
+    const reviews = [{ state: 'COMMENTED', body: SETTLED_COMMENT_BODY,
+      author: AUTHORITATIVE_REVIEWER, submittedAt: '2026-06-13T12:00:00Z',
+      commit: { oid: HEAD_SHA } }];
+    const input = { branchProtectionRequired: false,
+      protectionBody: '{}', prPatch: { headRefOid: HAM_SHA, labels: [] },
+      hamTerminalRemediation: hamTerminalEvidence(), reviews };
+    const before = runAmaCheck(tmp, input);
+    assert.equal(before.status, 0, before.stderr);
+    assert.equal(JSON.parse(before.stdout).eligible, true, before.stdout);
+    reviews.push({ ...reviews[0], commit: { oid: HAM_SHA }, submittedAt: '2026-06-13T12:32:13Z',
+      body: SETTLED_COMMENT_BODY.replace('## Non-blocking Issues\n- None.',
+        '## Non-blocking Issues\n- **Eyebrow color changed.** Restore original color.') });
+    const after = runAmaCheck(tmp, input);
+    assert.equal(after.status, 0, after.stderr);
+    const verdict = JSON.parse(after.stdout);
+    assert.equal(verdict.eligible, false);
+    assert.ok(verdict.reasons.includes('review-changed-since-validation'), after.stdout);
+    assert.equal(verdict.trace.hamTerminalRemediation.ok, false);
+    assert.equal(verdict.trace.verdict.nonBlockingFindings.count, 1,
+      'latest applicable exact-head review must also supply the standing findings');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('ama-check validates HAM terminal remediation only with HAM head provenance and audit evidence', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'ama-check-ham-terminal-'));
   try {

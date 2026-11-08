@@ -38,7 +38,8 @@ import {
 } from '../src/follow-up-merge-agent.mjs';
 import { normalizeGithubMergeability } from '../src/github-mergeability.mjs';
 import { extractNonBlockingFindingIdentities } from '../src/kernel/remediation-reply.mjs';
-import { amaAuthoritativeReviewerLoginsForModel, isCurrentAuthoritativeFamilyReview } from '../src/ama/reviewer-authority.mjs';
+import { amaAuthoritativeReviewerLoginsForModel, isCurrentAuthoritativeFamilyReview, latestAuthoritativeReviewInAncestry, terminalReviewProofMatches } from '../src/ama/reviewer-authority.mjs';
+import { hammerRangeMatches } from '../src/ama/hammer-head-validation.mjs';
 import { resolveGateStatusContext } from '../src/adversarial-gate-context.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from '../src/kernel/verdict.mjs';
 
@@ -277,8 +278,9 @@ function recomputeReviewCycleExhausted({ rootDir, repo, prNumber }) {
 /**
  * Normalize a `gh pr view --json reviews` payload + the
  * `--reviewed-sha` flag into the `reviewState` shape the eligibility
- * predicate consumes. Picks the latest review submitted at or after
- * the reviewed SHA was set.
+ * predicate consumes. Ordinary checks use the reviewed head; terminal
+ * validation supplies the canonical latest applicable review independently
+ * of the dispatch SHA, which remains the range/provenance binding.
  *
  * Reviewer-family resolution is fail-closed: live review authority is scoped
  * to the reviewer model/family from the dispatch context. If that route cannot
@@ -292,6 +294,7 @@ function buildReviewState({
   reviewer,
   riskClass,
   reviewCycleExhausted = false,
+  applicableReview,
 }) {
   const reviews = Array.isArray(reviewsJson?.reviews) ? reviewsJson.reviews : [];
   const authoritativeReviewerLogins = new Set(
@@ -310,13 +313,14 @@ function buildReviewState({
       }))
       .sort((a, b) => String(reviewSubmittedAt(b.review) || '').localeCompare(String(reviewSubmittedAt(a.review) || '')))
     : [];
-  const authoritativeReview = authoritativeReviewsForHead[0] || null;
+  const authoritativeReview = applicableReview === undefined ? authoritativeReviewsForHead[0] || null
+    : applicableReview ? { review: applicableReview, verdict: normalizedStructuredVerdict(applicableReview.body) } : null;
   const verdict = authoritativeReview?.verdict === 'unknown'
     ? ''
     : authoritativeReview?.verdict || '';
 
-  // Standing blocking findings must come from an authoritative review body
-  // ON the reviewed head — never the off-head fallback, and never synthesized.
+  // Findings come from the selected authoritative review body. A terminal
+  // caller may supply a newer applicable review on the validated head.
   // Without this, `reviewState.blockingFindingState` is `undefined`, so the
   // eligibility predicate's `classifyBlockingFindings` returns
   // `{ known: false }` for EVERY PR, pushing `blocking-findings-unknown` +
@@ -524,7 +528,7 @@ async function main(argv = process.argv.slice(2)) {
       reviewCycleExhausted = false;
     }
   }
-  const reviewState = buildReviewState({
+  let reviewState = buildReviewState({
     reviewsJson,
     prJson,
     timelineJson,
@@ -582,6 +586,58 @@ async function main(argv = process.argv.slice(2)) {
       commit: { ...hamTerminalRemediationGroundTruth.commit, primaryChange },
     };
   }
+  let terminalReviewProof = null;
+  if (hamTerminalRemediationGroundTruth?.auditComment) {
+    const compare = async (from, to) => {
+      if (from === to) return { status: 'identical' };
+      if (from === args['reviewed-sha'] && to === prMetadata.headSha
+        && hammerRangeMatches(hamTerminalRemediationGroundTruth.range, from, to)) return { status: 'ahead' };
+      try {
+        await currencyGit(['merge-base', '--is-ancestor', from, to]);
+        return { status: 'ahead' };
+      } catch {
+        try {
+          await currencyGit(['merge-base', '--is-ancestor', to, from]);
+          return { status: 'behind' };
+        } catch {
+          // Missing objects cannot establish inapplicability.
+          await currencyGit(['cat-file', '-e', `${from}^{commit}`]);
+          await currencyGit(['cat-file', '-e', `${to}^{commit}`]);
+          return { status: 'diverged' };
+        }
+      }
+    };
+    try {
+      const get = async path => {
+        if (path.includes('/compare/')) return compare(...path.split('/compare/')[1].split('...'));
+        if (path.endsWith(`/pulls/${prJson.number}`)) {
+          const base = prJson.baseRefOid || (await currencyGit(['rev-parse', `origin/${prJson.baseRefName || 'main'}`])).trim();
+          return { head: { sha: prMetadata.headSha }, base: { sha: base } };
+        }
+        if (hamCommitJson && path.endsWith(`/commits/${hamCommitJson.sha}`)) return hamCommitJson;
+        throw new Error('authenticated HAM remediation commit absent from supplied snapshot');
+      };
+      const currency = createReviewCurrencyReader({ repo: args.repo, prNumber: prJson.number, comments: timelineJson, get });
+      const logins = amaAuthoritativeReviewerLoginsForModel(args.reviewer);
+      const applicableReview = await latestAuthoritativeReviewInAncestry(
+        (reviewsJson?.reviews || []).filter(review => reviewSubmittedAt(review)
+          && logins.includes(normalizeLogin(reviewAuthorLogin(review)))).map(review => ({
+          ...review, user: { login: normalizeLogin(reviewAuthorLogin(review)) },
+          commit_id: reviewCommitOid(review),
+        })).sort((a, b) => String(reviewSubmittedAt(a)).localeCompare(String(reviewSubmittedAt(b)))),
+        prMetadata.headSha, compare, currency,
+      );
+      reviewState = buildReviewState({ reviewsJson, prJson, timelineJson,
+        reviewedSha: args['reviewed-sha'], reviewer: args.reviewer, riskClass: args['risk-class'],
+        reviewCycleExhausted, applicableReview });
+      terminalReviewProof = await terminalReviewProofMatches({
+        reviews: reviewsJson?.reviews, headSha: prMetadata.headSha,
+        validatedAt: hamTerminalRemediationGroundTruth.auditComment.createdAt, compare, currency,
+      });
+    } catch {
+      terminalReviewProof = { ok: false, reason: 'terminal-review-evidence-unavailable' };
+    }
+  }
   const recordedWithdrawals = hammerWithdrawalsFromComments(timelineJson, readHammerWithdrawals({
     rootDir: args['root-dir'] ? resolve(args['root-dir']) : DEFAULT_ROOT_DIR,
     repo: args.repo, prNumber: prJson?.number,
@@ -622,6 +678,7 @@ async function main(argv = process.argv.slice(2)) {
     primaryChange,
     hamTerminalRemediation,
     hamTerminalRemediationGroundTruth,
+    terminalReviewProof,
     rebaseReviewCoverage,
     // HAMFINAL-01 ("Hammers judgement is final"): HAM-authored
     // `withdrawn-by-hammer` comments must match successful durable admission.

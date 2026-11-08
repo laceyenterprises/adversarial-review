@@ -263,6 +263,7 @@ export function daemonMergeBackoffMs(
 
 function normalizeGateState(live = {}) {
   return {
+    terminalReviewProof: live.terminalReviewProof,
     docsFastPath: live.docsFastPath,
     primaryChange: live.primaryChange,
     requirePrimaryChange: live.requirePrimaryChange,
@@ -567,6 +568,7 @@ async function attemptDaemonCleanMergeInner({
   const preLease = normalizeGateState(liveGate);
   let noCiEvidence = null;
   const evaluateGate = (gate, evidence = null) => evaluateEligibilityImpl({
+    terminalReviewProof: gate.terminalReviewProof,
     docsFastPath: gate.docsFastPath,
     primaryChange: gate.primaryChange,
     requirePrimaryChange: gate.requirePrimaryChange,

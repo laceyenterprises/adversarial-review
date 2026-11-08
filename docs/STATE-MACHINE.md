@@ -1258,6 +1258,14 @@ closer custody. `ama-reviewed-head-unavailable` (known current head) and
 existing deduplicated closure-wait alert. Wake targets do not replace live-head
 metadata or review evidence. These refusals do not add lifecycle states.
 
+HAMLATEAUDIT-01: terminal validation also requires unchanged applicable review
+evidence since its authenticated audit. A newer changed review on the same
+validated head invalidates the proof at the initial closer predicate and final
+hammer/daemon merge boundaries. Identical same-head repeats and inapplicable
+reviews retain canonical selection rules. Existing leases, lifecycle states,
+finding coverage and required-check gates remain authoritative; no review
+request or merge authority is added.
+
 CLOSERGATES-01 final remediation keeps repairable conflicts out of terminal
 AMA state: both final and non-final observations count the current head once;
 only a final report after three distinct heads records

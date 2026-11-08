@@ -73,3 +73,53 @@ export async function isCurrentAuthoritativeFamilyReview(review, reviews, headSh
   }
   return true;
 }
+
+// HAMLATEAUDIT-01: an exact SHA proves content validation, not that a later
+// review's findings were considered. Compare each authoritative family's
+// applicable body at validation with its current body. IDs/timestamps alone
+// must not invalidate an identical repeat; different families cannot erase
+// one another. Reuse the same ancestry/currency rules as finding admission.
+export async function terminalReviewProofMatches({
+  reviews, headSha, validatedAt, compare, currency = null,
+}) {
+  const cutoff = Date.parse(validatedAt);
+  if (!Array.isArray(reviews) || !Number.isFinite(cutoff)) {
+    return { ok: false, reason: 'terminal-review-evidence-unavailable' };
+  }
+  // Currency can independently prove a rewritten head, but a failed proof
+  // alone cannot establish that a review belongs to a discarded branch.
+  const checkedCurrency = currency && (async (from, to) => {
+    const result = await currency(from, to);
+    if (result.current === true) return result;
+    const ancestry = await compare(from, to);
+    if (!['behind', 'diverged'].includes(ancestry?.status)) throw new Error('cannot verify terminal review applicability');
+    return result;
+  });
+  const normalized = reviews.map(review => ({
+    ...review,
+    user: review.user || review.author,
+    commit_id: review.commit_id || review.commit?.oid || review.commitId,
+    submitted_at: review.submitted_at || review.submittedAt,
+    state: String(review.state || '').toUpperCase(),
+  })).sort((a, b) => String(a.submitted_at || '').localeCompare(String(b.submitted_at || '')));
+  const families = new Set(normalized.map(review => amaReviewerFamilyForLogin(review.user?.login)).filter(Boolean));
+  for (const family of families) {
+    const entries = normalized.filter(review => amaReviewerFamilyForLogin(review.user?.login) === family);
+    const undated = entries.filter(review => !Number.isFinite(Date.parse(review.submitted_at)));
+    if (await latestAuthoritativeReviewInAncestry(undated, headSha, compare, checkedCurrency)) {
+      return { ok: false, reason: 'terminal-review-evidence-unavailable' };
+    }
+    const latest = await latestAuthoritativeReviewInAncestry(entries, headSha, compare, checkedCurrency);
+    if (!latest) continue;
+    const prior = await latestAuthoritativeReviewInAncestry(
+      // GitHub timestamps have second precision. An equal-second review
+      // cannot prove it preceded the audit; retain the earlier body instead.
+      entries.filter(review => Date.parse(review.submitted_at) < cutoff), headSha, compare, checkedCurrency,
+    );
+    if (latest.commit_id !== prior?.commit_id || latest.body !== prior?.body) {
+      return { ok: false, reason: 'review-changed-since-validation',
+        reviewId: latest.node_id || latest.id || null, family };
+    }
+  }
+  return { ok: true };
+}

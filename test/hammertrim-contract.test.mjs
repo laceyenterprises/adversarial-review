@@ -1156,7 +1156,7 @@ test('GHBUDGET-01: count a rendered common hammer close with fake gh', async t =
   writeFileSync(join(dir, 'details'), 'Synthetic no-diff close.');
   // The real lane wrapper shares this absolute deadline with the fake shell clock.
   writeFileSync(join(dir, 'clock'), String(Math.floor(Date.now() / 1000)));
-  writeFileSync(join(dir, 'verdict'), JSON.stringify({ eligible: true, trace: { headMatch: { current: head }, branchProtection: { required: false } } }));
+  writeFileSync(join(dir, 'verdict'), JSON.stringify({ eligible: true, trace: { headMatch: { current: head }, branchProtection: { required: false }, hamTerminalRemediation: { auditComment: { createdAt: '2026-01-02T00:00:00Z' } } } }));
   writeFileSync(join(dir, 'date'), '#!/bin/sh\nif [ "$1" = +%s ]; then cat "$TMPDIR/clock"; else exec /bin/date "$@"; fi\n', { mode: 0o755 });
   writeFileSync(join(dir, 'sleep'), `#!${process.execPath}
 const fs = require('node:fs'); const file = process.env.TMPDIR + '/clock';
@@ -1213,7 +1213,7 @@ HAM_VERDICT_FILE="$TMPDIR/verdict" HAM_VERDICT_READY_FILE="$TMPDIR/verdict"
 source "$3" || exit $?
 echo COMMON_CLOSE_SUCCEEDED
 `;
-  const result = spawnSync('/bin/bash', ['-c', script, '_', ...phasePaths], { env: fixtureEnv(env), encoding: 'utf8', timeout: 30_000 });
+  const result = spawnSync('/bin/bash', ['-c', script, '_', ...phasePaths], { env: fixtureEnv(env), encoding: 'utf8', timeout: subprocessTimeout });
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stdout, /COMMON_CLOSE_SUCCEEDED/);
   const calls = readFileSync(join(dir, 'calls.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
@@ -1223,7 +1223,7 @@ echo COMMON_CLOSE_SUCCEEDED
   assert.equal(readFileSync(join(scratchDir, 'pr-after.json'), 'utf8').includes(head), true);
   t.diagnostic(`GHBUDGET common close: GraphQL=${graphql.length} REST=${rest.length} total=${calls.length}`);
   assert.equal(graphql.length, 3, 'audit identity, comment and merge use GraphQL');
-  assert.equal(rest.length, 46, 'includes fresh PR/check admission after the CI-wait lease release and the live stacked-base recheck');
+  assert.equal(rest.length, 48, 'includes fresh review proof at both green gates, PR/check admission after lease release and the live stacked-base recheck');
 });
 
 test('GHBUDGET-01: REST prompt snapshots preserve review authors and exact commit heads', async () => {
@@ -1243,5 +1243,23 @@ test('GHBUDGET-01: REST prompt snapshots preserve review authors and exact commi
   for (const block of prompt.matchAll(/```bash\n([\s\S]*?)\n```/g)) {
     const commands = block[1].split('\n').filter(line => !line.trim().startsWith('#')).join('\n');
     assert.doesNotMatch(commands, /(?<![\w-])gh (?:api|pr)/, 'prompt commands must use a metered helper');
+  }
+});
+
+test('HAMLATEAUDIT-01: review pagination waits until the existing check snapshot permits merge', async () => {
+  const { fetchHammerPr } = await import('../src/hammer-pr-read.mjs');
+  for (const status of ['in_progress', 'completed']) {
+    const calls = [];
+    const snapshot = await fetchHammerPr('fixture/repo', 42, {
+      withReviews: pr => pr.checks[0].status === 'COMPLETED',
+      read: async path => {
+        calls.push(path);
+        if (path.includes('/check-runs?')) return { check_runs: [{ name: 'test', status, conclusion: 'success' }] };
+        if (path.includes('/statuses?') || path.includes('/reviews?')) return [];
+        return { state: 'open', head: { sha: 'a'.repeat(40) }, labels: [] };
+      },
+    });
+    assert.equal(calls.some(path => path.includes('/reviews?')), status === 'completed');
+    assert.equal(Array.isArray(snapshot.reviews), status === 'completed');
   }
 });

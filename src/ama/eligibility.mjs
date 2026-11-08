@@ -787,6 +787,7 @@ function validateHamTerminalRemediationEvidence(
     verifiedRange = null,
     blockingFindings = { known: false, count: 0 },
     strictNonBlockingRemediation = false,
+    terminalReviewProof = null,
     logger = null,
   } = {},
 ) {
@@ -855,6 +856,7 @@ function validateHamTerminalRemediationEvidence(
   const exactValidation = exactHammerValidation(verifiedAuditComment, currentHead)
     && hammerRangeMatches(verifiedRange, reviewedHead, currentHead);
   const checks = {
+    reviewCurrent: terminalReviewProof?.ok !== false,
     exactValidation,
     workerClass: verifiedTrailers['worker-class'] === 'hammer',
     ticket: isHamWorkerTicket(ticket),
@@ -884,7 +886,8 @@ function validateHamTerminalRemediationEvidence(
   const safetyCoreOk = activeClaimed === true
     && checks.head
     && exactValidation
-    && checks.primaryChange;
+    && checks.primaryChange
+    && checks.reviewCurrent;
   // HAMIDENT-02: identity is diagnostic; the App SHA binding supplies authority.
   // Missing identity fields are not proof that GitHub explicitly returned null.
   const loginIsNull = (identity) => identity === null
@@ -1036,6 +1039,9 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   if (currencyRefused) reasons.push('review-currency-unproven');
   const nonBlockingFindings = classifyNonBlockingFindings(reviewState);
   const strictNonBlockingRemediation = cfg?.strictNonBlockingRemediation !== false;
+  const terminalReviewProof = options?.terminalReviewProof
+    || options?.hamTerminalRemediationGroundTruth?.terminalReviewProof || null;
+  if (terminalReviewProof?.ok === false) reasons.push(terminalReviewProof.reason);
   const hamTerminalRemediation = validateHamTerminalRemediationEvidence(
     options?.hamTerminalRemediation || null,
     {
@@ -1046,6 +1052,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       verifiedRange: options?.hamTerminalRemediationGroundTruth?.range || null,
       blockingFindings,
       strictNonBlockingRemediation,
+      terminalReviewProof,
       logger: options?.logger || null,
     },
   );
@@ -1452,6 +1459,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     },
     hamTerminalRemediation: {
       ...hamTerminalRemediation,
+      terminalReviewProof,
       waived: waivedByHamTerminalRemediation,
       nonBlockingCoverage: {
         ok: nonBlockingCoverageOk,

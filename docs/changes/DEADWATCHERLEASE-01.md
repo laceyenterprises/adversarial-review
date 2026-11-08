@@ -61,3 +61,21 @@ description, with its independent graph snapshot refreshed.
 - `test/smv.test.mjs`: 11 passed, including the disposable-Git smoke.
 - `npm run lint`: zero errors, 153 existing warnings.
 - `bash demo/research-finding-walkthrough.sh`: passed offline byte equivalence.
+
+## Final HAM adjudication
+
+All four final non-blocking findings were checked against the remediated head.
+The reaper verifies start identity before retaining a reused PID, conditional
+lease deletion/restoration equates omitted and null identities, and acquisition
+rejects invalid PIDs and tolerates capture failures. The pending-reclaim finding
+is withdrawn: the shared identity-aware abandonment check runs before the raw
+PID fallback; its regression covers matching and reused identities both with
+and without a dispatch timeout. Full-snapshot update CAS intentionally remains
+exact, preserving stale-observation protection.
+
+HAM validation passed the targeted closer lease, recovery reaper, watcher claim
+loop, closure ownership, and dispatch priority suites through
+`hammer-validate.mjs`, plus `npm run lint`, `npm run typecheck:contracts`,
+`bash demo/research-finding-walkthrough.sh`, and
+`node scripts/validate-data-model-catalog.mjs`. The full suite remains the
+exact-head remote CI authority. No runtime behavior changes in this final note.

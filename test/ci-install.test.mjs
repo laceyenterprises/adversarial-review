@@ -8,6 +8,8 @@ import { join, resolve } from 'node:path';
 async function fixture(t, scenario) {
   const root = mkdtempSync(join(tmpdir(), 'ci-install-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
+  // TMPDIR may sit inside an ES-module package; the executable stubs use require.
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ type: 'commonjs' }));
   const bin = join(root, 'bin');
   mkdirSync(bin);
   const stub = `#!${process.execPath}

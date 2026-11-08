@@ -65,6 +65,9 @@ Final comment-only remediation:
   refusal, and a subprocess handshake proving progress arrives before exit.
 - Targeted ESLint and `git diff --check`: passed.
 - Full-suite validation remains owned by PR-head CI for this remediation.
+- HAM validation also covers a scratch directory nested inside an ES-module
+  checkout. The fixture explicitly declares its CommonJS stub package so
+  extensionless `npm`/`npx` executables do not inherit the enclosing package type.
 
 Initial implementation:
 

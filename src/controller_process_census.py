@@ -5,9 +5,22 @@ import errno
 import json
 import os
 import sys
+import time
 
 CTL_KERN, KERN_PROC, KERN_PROC_PGRP = 1, 14, 2
 SZOMB = 5
+INTERRUPTION_ATTEMPTS = 3
+
+
+class CensusInterrupted(OSError):
+    """An explicit syscall interruption exhausted this request's retry budget."""
+
+
+def error_reply(error):
+    reply = {"error": errno.errorcode.get(error.errno, "EIO")}
+    if isinstance(error, CensusInterrupted):
+        reply.update(retryable=True, attempts=INTERRUPTION_ATTEMPTS)
+    return reply
 
 
 class KinfoProc(ctypes.Structure):
@@ -30,24 +43,38 @@ class KinfoProc(ctypes.Structure):
     ]
 
 
-def group_snapshot(pgid, sysctl):
+def group_snapshot(pgid, sysctl, sleep=time.sleep):
     # KERN_PROC_PGRP filters in the kernel and returns one snapshot: the same
     # records ps reads, without a setuid helper. Unlike per-PID libproc reads it
     # needs no same-user check, so a member running a setuid tool stays visible.
     mib = (ctypes.c_int * 4)(CTL_KERN, KERN_PROC, KERN_PROC_PGRP, pgid)
     record = ctypes.sizeof(KinfoProc)
     # ENOMEM reports truncation. Bound growth even under process churn.
-    for capacity in (64, 1024, 16384, 65536):
+    interruptions = 0
+    capacities = iter((64, 1024, 16384, 65536))
+    capacity = next(capacities)
+    while True:
         records = (KinfoProc * capacity)()
         size = ctypes.c_size_t(ctypes.sizeof(records))
         ctypes.set_errno(0)
         if sysctl(mib, 4, records, ctypes.byref(size), None, 0) == 0:
             break
         error = ctypes.get_errno()
-        if error != errno.ENOMEM:
-            raise OSError(error or errno.EIO, "group census unavailable")
-    else:
-        raise OSError(errno.EOVERFLOW, "group census truncated")
+        # Only an explicit failed syscall can be transient. Never retry a
+        # successful but incomplete/inconsistent snapshot, or synthesize a
+        # retryable EIO from a failure that supplied no errno.
+        if error in (errno.EIO, errno.EINTR):
+            interruptions += 1
+            if interruptions >= INTERRUPTION_ATTEMPTS:
+                raise CensusInterrupted(error, "group census interrupted")
+            sleep(0.01 * interruptions)
+            continue
+        if error == errno.ENOMEM:
+            capacity = next(capacities, None)
+            if capacity is None:
+                raise OSError(errno.EOVERFLOW, "group census truncated")
+            continue
+        raise OSError(error or errno.EIO, "group census unavailable")
     if size.value % record or size.value > ctypes.sizeof(records):
         raise OSError(errno.EIO, "group census misaligned")
     members = []
@@ -110,7 +137,7 @@ def serve(requests, replies, sysctl=None):
         except ValueError:
             reply = {"error": "EINVAL"}
         except OSError as error:
-            reply = {"error": errno.errorcode.get(error.errno, "EIO")}
+            reply = error_reply(error)
         replies.write(json.dumps(reply) + "\n")
         replies.flush()
 
@@ -130,7 +157,8 @@ if __name__ == "__main__":
         print("controller census: EINVAL", file=sys.stderr)
         sys.exit(2)
     except OSError as error:
-        # Only the errno name leaves the helper; the caller names the mechanism.
-        name = errno.errorcode.get(error.errno, "EIO")
-        print(f"controller census: {name}", file=sys.stderr)
+        # Only bounded errno/exhaustion tokens leave the helper.
+        reply = error_reply(error)
+        suffix = " retry-exhausted=3" if reply.get("retryable") else ""
+        print(f"controller census: {reply['error']}{suffix}", file=sys.stderr)
         sys.exit(2)

@@ -48,6 +48,96 @@ class Sysctl:
 
 
 class CensusTests(unittest.TestCase):
+    def test_hamcensuseio_interruption_retries_a_fresh_complete_snapshot(self):
+        for code in (errno.EIO, errno.EINTR):
+            with self.subTest(code=code):
+                reads, waits = [], []
+                good = Sysctl()
+
+                def interrupted(*args):
+                    reads.append(args[2])
+                    if len(reads) < 3:
+                        # Failed syscalls may have written partial output.
+                        args[2][0].pid = 999
+                        ctypes.set_errno(code)
+                        return -1
+                    return good(*args)
+
+                result = census.group_snapshot(100, interrupted, sleep=waits.append)
+                self.assertEqual([row["pid"] for row in result], [100, 101])
+                self.assertEqual(len(reads), 3)
+                self.assertIsNot(reads[0], reads[1])
+                self.assertEqual(waits, [0.01, 0.02])
+
+    def test_hamcensuseio_exhaustion_is_distinct_from_invalid_evidence(self):
+        for code in (errno.EIO, errno.EINTR):
+            sysctl, waits = Sysctl(error=code, result=-1), []
+            with self.assertRaises(census.CensusInterrupted) as raised:
+                census.group_snapshot(100, sysctl, sleep=waits.append)
+            self.assertEqual(sysctl.calls, 3)
+            self.assertEqual(waits, [0.01, 0.02])
+            self.assertEqual(
+                census.error_reply(raised.exception),
+                {"error": errno.errorcode[code], "retryable": True, "attempts": 3},
+            )
+        for sysctl in (
+            Sysctl(error=errno.EPERM, result=-1),
+            Sysctl(result=-1),
+            Sysctl(size=649),
+            Sysctl(pgid=99),
+        ):
+            with self.assertRaises(OSError) as raised:
+                census.group_snapshot(100, sysctl, sleep=lambda _: self.fail("retry"))
+            self.assertEqual(sysctl.calls, 1)
+            self.assertNotIn("retryable", census.error_reply(raised.exception))
+
+    def test_hamcensuseio_churn_does_not_reset_interruption_budget(self):
+        errors = iter([errno.EIO, errno.ENOMEM, errno.EINTR, errno.ENOMEM, errno.EIO])
+        calls = []
+
+        def churn(*args):
+            calls.append(len(args[2]))
+            ctypes.set_errno(next(errors))
+            return -1
+
+        with self.assertRaises(census.CensusInterrupted):
+            census.group_snapshot(100, churn, sleep=lambda _: None)
+        self.assertEqual(calls, [64, 64, 1024, 1024, 16384])
+
+    def test_hamcensuseio_retry_does_not_relax_snapshot_validation(self):
+        for bad in (
+            Sysctl(size=649),
+            Sysctl(pgid=99),
+            Sysctl(enomem=99),
+            Sysctl(error=errno.EPERM, result=-1),
+            Sysctl(result=-1),
+        ):
+            calls = []
+
+            def interrupted(*args):
+                calls.append(1)
+                if len(calls) == 1:
+                    ctypes.set_errno(errno.EIO)
+                    return -1
+                return bad(*args)
+
+            with self.assertRaises(OSError) as raised:
+                census.group_snapshot(100, interrupted, sleep=lambda _: None)
+            self.assertNotIsInstance(raised.exception, census.CensusInterrupted)
+            self.assertNotIn("retryable", census.error_reply(raised.exception))
+            self.assertEqual(len(calls), 5 if bad.enomem else 2)
+
+    def test_hamcensuseio_serve_preserves_exhaustion_without_replaying_data(self):
+        replies = io.StringIO()
+        sysctl = Sysctl(error=errno.EIO, result=-1)
+        with mock.patch.object(census.sys, "platform", "darwin"):
+            census.serve(["group 100\n"] * 2, replies, sysctl=sysctl)
+        self.assertEqual(
+            [json.loads(line) for line in replies.getvalue().splitlines()],
+            [{"error": "EIO", "retryable": True, "attempts": 3}] * 2,
+        )
+        self.assertEqual(sysctl.calls, 6)
+
     def test_kinfo_proc_abi(self):
         self.assertEqual(ctypes.sizeof(census.KinfoProc), 648)
         offsets = {

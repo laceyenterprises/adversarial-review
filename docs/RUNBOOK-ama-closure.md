@@ -7444,6 +7444,22 @@ one that began before it. Owner assertion (`getpgid`) keeps the one-shot helper
 because it runs in a separate short-lived process. Other platforms keep the
 per-tick `ps` provider.
 
+HAMCENSUSEIO-01: an explicit failed `kern.proc.pgrp` syscall with `EIO` or
+`EINTR` retries with fresh buffers after 10ms, then 20ms. The request permits
+at most three such failures in total, including across `ENOMEM` buffer growth;
+the existing four buffer capacities and outer load-aware probe deadline still
+bound the request. The adapters add no second retry loop. Exhaustion retains
+the errno and exposes `retryable: true` and `censusAttempts: 3` on the adapter
+error and identifies exhausted syscall interruption in stderr. Serve-mode errors
+carry `retryable: true, attempts: 3`; one-shot stderr
+adds the bounded token `retry-exhausted=3`. Other errors expose
+`retryable: false`. This distinction is diagnostic, never proof of an empty
+group or permission to proceed. A failed syscall with no errno, permission
+denial, successful but partial/misaligned data, invalid identity, or exhausted
+buffer growth refuses immediately without interruption retries. Every
+successful retry must pass the same complete snapshot and identity validation.
+Exhaustion follows the existing controller refusal and helper-retirement path.
+
 `controllerGroupSnapshot` forwards an injected `execFileSyncImpl` to the native
 helper on Darwin as well as to `ps` on other platforms. Invalid helper argument
 counts, non-integer identities or identities at or below 1, and unsupported operations emit only

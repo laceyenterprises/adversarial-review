@@ -76,6 +76,44 @@ test('native kern.proc.pgrp allowed, zombie, denied, truncated and inconsistent 
     { timeout: 5000, stdio: 'pipe' });
 });
 
+test('HAMCENSUSEIO-01: one-shot adapter distinguishes exhausted interruptions without retrying the helper', () => {
+  for (const [token, retryable] of [
+    ['EIO retry-exhausted=3', true], ['EINTR retry-exhausted=3', true],
+    ['EIO', false], ['EPERM', false], ['EPERM retry-exhausted=3', false],
+  ]) {
+    let calls = 0;
+    assert.throws(() => nativeControllerIdentity('group', 42, { execFileSyncImpl() {
+      calls += 1;
+      throw Object.assign(new Error('fixture'), { status: 2, stderr: `controller census: ${token}\n` });
+    } }), error => error.retryable === retryable && error.censusAttempts === (retryable ? 3 : undefined)
+      && error.message.includes('retryable syscall interruption exhausted (3 failures)') === retryable);
+    assert.equal(calls, 1);
+  }
+});
+
+test('HAMCENSUSEIO-01: round adapter preserves exhaustion and refuses proof until a fresh request succeeds', async () => {
+  for (const reply of [
+    { error: 'EIO', retryable: true, attempts: 3 },
+    { error: 'EINTR', retryable: true, attempts: 3 },
+    { error: 'EIO' }, { error: 'EPERM', retryable: true, attempts: 3 },
+    { error: 'EIO', retryable: true, attempts: 99 },
+  ]) {
+    const f = fakeHelpers((line, helper, count) =>
+      helper.stdout.write(`${JSON.stringify(count === 1 ? reply : { ok: [{ pid: 42, birth: '123.000001' }] })}\n`));
+    const census = createControllerCensus({ spawnImpl: f.spawnImpl });
+    try {
+      const retryable = ['EIO', 'EINTR'].includes(reply.error) && reply.retryable === true && reply.attempts === 3;
+      await assert.rejects(census.group(42), error => error.code === reply.error && error.retryable === retryable
+        && error.censusAttempts === (retryable ? 3 : undefined)
+        && error.message.includes('retryable syscall interruption exhausted (3 failures)') === retryable);
+      assert.deepEqual(f.spawned[0].requests, ['group 42']);
+      assert.deepEqual(f.spawned[0].kills, ['SIGKILL']);
+      assert.deepEqual(await census.group(42), [{ pid: 42, birth: '123.000001' }]);
+      assert.equal(f.spawned.length, 2);
+    } finally { census.close(); }
+  }
+});
+
 test('Darwin current PGID uses the available native path in the declared boundary', { skip: process.platform !== 'darwin' }, () => {
   const expected = nativeControllerIdentity('pgid', process.pid);
   assert.equal(currentProcessGroupId({ useCache: false }), expected);

@@ -10,9 +10,10 @@ change to maximum rigor and keep the offline test property intact.
 
 Repository change notes go in `docs/changes/<TICKET-ID>.md`; see
 [the change-note convention](docs/changes/README.md). This replaces the root README append requirement;
-existing module-local fragments remain valid. Do not add new entries to the
-root README's historical `## Change notes` section or update a shared index
-for each ticket. Keep existing history. Correct affected canonical docs in
+existing module-local fragments remain valid. Do not add ticket notes anywhere
+in the root README (including above the title or in its historical
+`## Change notes` section), or update a shared index for each ticket.
+Keep existing history. Correct affected canonical docs in
 place when their contract changes; a note does not replace those corrections.
 
 ## Where code belongs

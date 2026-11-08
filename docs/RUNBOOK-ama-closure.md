@@ -5456,7 +5456,7 @@ Use these SDK-only commands only after release, producer and full-grant
 readiness; see the
 [reader deployment contract](producer-contract-readers.md#dispatch-lookup-activation-and-limits).
 Pass the default-off read activation flag explicitly through `env` under
-`sudo -H`, and pin `<hq-root>` to the value used by the watcher.
+`sudo -H`, and pin `<hq-root>` to the value used by the watcher. Pass every SDK session or bootstrap environment variable used by the watcher (for example, `APP_CONTRACT_ENDPOINT_URL`) through the same `env` prefix.
 
 ```bash
 sudo -A -H -u <daemon-user> env ADVERSARIAL_DISPATCH_READS_ENABLED=1 node bin/reconcile-ama-closer-dispatches.mjs --root-dir <runtime-root> --hq-root <hq-root> --dry-run

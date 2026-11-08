@@ -4575,7 +4575,7 @@ merge predicates and smoke commands remain unchanged.
 
 ## Change notes
 
-- Correct the closer backlog-repair runbook to use the SDK-only CLI, pass its read activation flag through `sudo`, and describe current output and rejected database-source flags.
+- FINDINGS-94c784e1: Correct the closer backlog-repair runbook to use the SDK-only CLI, pass its read activation flag and SDK session/bootstrap environment through `sudo`, describe current output and rejected database-source flags, and make dispatch-read subprocess fixtures independent of host load diagnostics.
 
 - LIVEPACKNEW-01 final remediation: stop ledger retries when the budget expires during backoff, count only dispatched retries, and emit zero retry counts for unread packs in remediation facts. Offline regressions cover deadline boundaries and malformed plans.
 

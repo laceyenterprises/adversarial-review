@@ -1200,6 +1200,63 @@ test('REVERSALPARENT-01: immutable original proof maps to the repaired parent be
   }
 });
 
+test('REVERSALPARENT-01: collector pins an original repaired parent across a context-only rebase', async () => {
+  const originalParent = sha('4');
+  const repairedParent = { filename: 'src/a.mjs', status: 'modified', additions: 2, deletions: 1,
+    patch: '@@ -10 +10,2 @@\n-start()\n+generated_terminal_policy()\n+log_startup()' };
+  const { evidence, result } = await snapshotReversal({
+    shift: 20, earlierHammerAdded: '+generated_terminal_policy()', reviewedAdded: '+start_unsafe()',
+    originalParent,
+    read: (path, transport) => {
+      // The original HAM parent descends from the cited review head through
+      // an intermediate repair. The superseding snapshot pins that HAM.
+      if (path.endsWith(`${reviewedHead}...${originalParent}`)) return { status: 'ahead' };
+      if (path.endsWith(`${oldBase}...${originalParent}`)) return {
+        status: 'ahead', merge_base_commit: { sha: oldBase }, files: [repairedParent],
+      };
+      return transport(path);
+    },
+    transform: (path, response) => path.endsWith(`/commits/${head}`)
+      ? withReversalContext(response, 'new_base')
+      : path.endsWith(`/commits/${sha('d')}`) ? withReversalContext(response, 'old_base') : response,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const authorization = evidence.reversalAuthorizations[0];
+  const original = authorization.originalAuthorization;
+  assert.equal(authorization.rebased, true);
+  assert.notEqual(original.rebased, true);
+  assert.equal(original.commit.sha, sha('d'));
+  assert.equal(original.commit.parents[0].sha, originalParent);
+  assert.equal(original.review, authorization.review);
+  assert.equal(original.commit.commit.message, authorization.commit.commit.message);
+  assert.deepEqual(original.reviewedFiles, authorization.reviewedFiles);
+  assert.deepEqual(original.parentFiles, [repairedParent]);
+  assert.match(original.reviewedFiles[0].patch, /start_unsafe/);
+  assert.match(authorization.parentFiles[0].patch, /@@ -30/);
+  assert.match(authorization.parentFiles[0].patch, /generated_terminal_policy/);
+
+  // Coverage comes from the immutable original review, even if only the
+  // outer body has different coordinates. Review identity must still match.
+  const changedBody = structuredClone(evidence);
+  const outer = changedBody.reversalAuthorizations[0];
+  outer.review = { ...outer.review, body: outer.review.body.replace('`10-11`', '`90-91`') };
+  assert.equal(checkPrimaryChange(changedBody, head).ok, true);
+  for (const mutate of [
+    entry => { entry.originalAuthorization.review = { ...entry.review, node_id: 'PRR_other' }; },
+    entry => { entry.originalAuthorization.commit.commit = {
+      ...entry.originalAuthorization.commit.commit,
+      message: entry.commit.commit.message + '\nReversal-Authorized-By: PRR_cited finding=2 kind=blocking',
+    }; },
+  ]) {
+    const changed = structuredClone(evidence);
+    mutate(changed.reversalAuthorizations[0]);
+    const refused = checkPrimaryChange(changed, head);
+    assert.equal(refused.ok, false);
+    assert.ok(refused.missingEvidence.rejected.some(
+      entry => entry.reason === 'original-authorization-identity-differs'));
+  }
+});
+
 test('REVERSALPARENT-01: captured refusals retain their independent proof fences', () => {
   for (const [name, start, reason] of [
     ['agent-os-10329', 376, 'reviewed-parent-patch-differs'],

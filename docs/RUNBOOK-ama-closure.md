@@ -4712,7 +4712,11 @@ match that original reversal's **parent** diff, including intervening
 remediation, rather than the older cited review's diff (REVERSALPARENT-01).
 Unique region mapping then enters the original authorization evaluator, which
 checks the original finding against its reviewed snapshot and the original
-HAM patch against its parent. Whole-parent changed-content equivalence,
+HAM patch against its parent. Before skipping the outer finding projection,
+the evaluator requires matching review node IDs and complete commit trailer
+sets; disagreement refuses with `original-authorization-identity-differs`.
+The immutable original review supplies coverage, including when only the outer
+review body's coordinates differ. Whole-parent changed-content equivalence,
 review authority, provenance, citation coverage and multiplicity still apply.
 A missing document citation or a region absent from a durable verified
 observation remains refused; repairing parent mapping grants neither.

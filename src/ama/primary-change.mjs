@@ -476,6 +476,10 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
         // parent, including repairs between the review and that parent. Map
         // to that state first; recursion below checks the original finding.
         const originalParentProof = rebased && authorization.originalAuthorization;
+        if (originalParentProof && (originalParentProof.review?.node_id !== review.node_id
+          || reversalTrailerIdentity(originalParentProof.commit) !== reversalTrailerIdentity(commit))) {
+          return reject('original-authorization-identity-differs');
+        }
         const reviewed = authorization.verifiedRegions || originalParentProof ? null : rebased === true
           ? projectRebasedRegion(parentFiles, reviewedFiles, path, region, cache)
           : projectRegion(reviewedFiles, path, region, cache);

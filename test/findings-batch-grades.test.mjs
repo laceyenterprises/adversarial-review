@@ -9,8 +9,9 @@ import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.
 import { beginReviewerPass } from '../src/reviewer-pass-tokens.mjs';
 import { updateReviewerPassBodyCapture } from '../src/review-body-capture.mjs';
 import { claimFindingBatches, settleFindingBatch, releaseFindingBatch, runFindingBatches } from '../src/findings-batch.mjs';
-import { recordFindingGrade } from '../src/review-finding-grades.mjs';
+import { recordFindingGrade, backfillFindingGrades } from '../src/review-finding-grades.mjs';
 import { readRemediationConsensus, validateFindingManifest } from '../src/finding-remediation-selection.mjs';
+import { summarizeFindingBacklog } from '../src/findings-backlog.mjs';
 import { main } from '../bin/findings-batch-backfill.mjs';
 
 const repo = 'sample/service', head = 'a'.repeat(40), day = '2026-01-02';
@@ -188,12 +189,14 @@ test('settlement records taxonomy grades atomically after PR verification, with 
   const grades = db.prepare('SELECT * FROM review_finding_grades ORDER BY grade_id').all();
   assert.deepEqual(grades.map(g => g.taxonomy_code), ['ind.stale', 'tp.already-fixed-elsewhere',
     'ind.cannot-reproduce', 'tp.out-of-scope', 'fp.misread-code', 'life.pr-closed', 'tp.valid']);
-  assert.ok(grades.every(g => g.grader_kind === 'batch-remediator' && g.graded_head_sha === null && g.attempt === 1));
+  assert.ok(grades.every(g => g.grader_kind === (g.lifecycle ? 'lifecycle' : 'batch-remediator') && g.graded_head_sha === null && g.attempt === 1));
   assert.equal(grades[0].label, 'indeterminate');
   assert.equal(grades[5].lifecycle, 1);
   assert.equal(grades[5].label, 'indeterminate');
   assert.equal(JSON.parse(grades[6].evidence_json).resultPr, 24);
   assert.equal(settleFindingBatch(db, batch, result, pr, fixPrs), true);
+  assert.equal(db.prepare('SELECT count(*) n FROM review_finding_grades').get().n, 7);
+  assert.equal(backfillFindingGrades(db).inserted, 0);
   assert.equal(db.prepare('SELECT count(*) n FROM review_finding_grades').get().n, 7);
   const [retry] = claimFindingBatches(db, day);
   releaseFindingBatch(db, retry, 'synthetic failure');
@@ -227,4 +230,66 @@ test('selected retries keep manifest provenance, advance attempt identity and ne
   assert.equal(gradeRow.attempt, 2);
   assert.equal(JSON.parse(gradeRow.evidence_json).manifestSha256, value.sha256);
   assert.deepEqual(claimFindingBatches(db, day, { manifest: value }), []);
+});
+
+
+test('released selections stay out of automatic claims and reclaims re-read consensus once', t => {
+  const { db, rows } = fixture(t);
+  const value = manifest([rows[0], rows[1]]);
+  let calls = 0, label = 'real';
+  const readConsensus = () => { calls++; assert.equal(db.inTransaction, false); return { label }; };
+  const [batch] = claimFindingBatches(db, day, { manifest: value, readConsensus });
+  assert.equal(calls, 2);
+  releaseFindingBatch(db, batch, 'synthetic release');
+  // Recover provenance from the durable release audit, including repeat migration.
+  db.prepare('UPDATE finding_backlog SET manifest_sha256=NULL WHERE manifest_sha256=?').run(value.sha256);
+  db.prepare("DELETE FROM schema_migrations WHERE id='20261108_findings_selection_scope.sql'").run();
+  ensureReviewStateSchema(db);
+  db.prepare("DELETE FROM schema_migrations WHERE id='20261108_findings_selection_scope.sql'").run();
+  ensureReviewStateSchema(db);
+  claimFindingBatches(db, day);
+  assert.equal(db.prepare('SELECT count(*) n FROM finding_backlog WHERE manifest_sha256=? AND batch_id IS NULL').get(value.sha256).n, 2);
+  assert.equal(summarizeFindingBacklog(db).openCount, 7);
+  label = 'false';
+  assert.deepEqual(claimFindingBatches(db, day, { manifest: value, readConsensus }), []);
+  label = 'real';
+  assert.equal(claimFindingBatches(db, day, { manifest: value, readConsensus }).length, 1);
+});
+
+test('default runner never dispatches a selected batch after explicit dispatch failure', async t => {
+  const { db, rows, rootDir, grade } = fixture(t);
+  grade(rows[0]);
+  const value = manifest([rows[0]]);
+  let calls = 0;
+  const deps = { db, rootDir, env: { HQ_ROOT: rootDir }, logger: { warn() {} },
+    execFileImpl: async () => { calls++; throw Error('synthetic dispatch failure'); } };
+  await runFindingBatches({ ...deps, manifest: value });
+  assert.equal(calls, 1);
+  const selected = db.prepare('SELECT * FROM finding_batches WHERE manifest_sha256=?').get(value.sha256);
+  await runFindingBatches({ ...deps, execFileImpl: async () => ({ stdout: '{"launchRequestId":"default-launch"}' }) });
+  assert.equal(db.prepare('SELECT launch_id FROM finding_batches WHERE batch_id=?').get(selected.batch_id).launch_id, null);
+  await runFindingBatches({ ...deps, manifest: value });
+  assert.equal(calls, 2);
+});
+
+test('selection enrollment excludes superseded bodies and earlier posted passes', t => {
+  const { db, rows } = fixture(t);
+  db.prepare('UPDATE review_findings SET current_body=0 WHERE finding_id=?').run(rows[0].finding_id);
+  const readConsensus = () => ({ label: 'real' });
+  assert.deepEqual(claimFindingBatches(db, day, { manifest: manifest([rows[0]]), readConsensus }), []);
+  db.prepare('UPDATE review_findings SET current_body=1 WHERE finding_id=?').run(rows[0].finding_id);
+  db.exec(`INSERT INTO reviewer_passes (pass_id,repo,pr_number,attempt_number,pass_kind,reviewer_class,head_sha,started_at,body_md,body_captured_at,gh_comment_id,status)
+    SELECT 9999,repo,pr_number,2,'rereview',reviewer_class,head_sha,'2026-01-03','new body','2026-01-03','2',status FROM reviewer_passes LIMIT 1`);
+  assert.deepEqual(claimFindingBatches(db, day, { manifest: manifest([rows[0]]), readConsensus }), []);
+});
+
+
+test('manifest canonical JSON escapes DEL exactly like Python ensure_ascii', () => {
+  const row = { finding_id: 'synthetic-\u007f', repo, pr_number: 7, head_sha: head };
+  const db = { prepare: () => ({ get: () => row }) };
+  assert.equal(validateFindingManifest(db, { version: 1, findings: [row],
+    heads: [{ repo, pr_number: 7, head_sha: head }],
+    sha256: '587c6ed903f857dc6a6271e8b23a652d10eaec8058bf1954c5b817a6644e06f3' }).size, 1);
+  assert.throws(() => validateFindingManifest(db, { version: 1,
+    findings: Array(10001).fill(row), sha256: 'a'.repeat(64) }), /invalid finding manifest/);
 });

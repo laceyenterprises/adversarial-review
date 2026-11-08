@@ -67,16 +67,19 @@ export function findingBatchOptions(env = process.env) {
 export function claimFindingBatches(db, day, { batchSize = 100, manifest = null, readConsensus = readRemediationConsensus } = {}) {
   if (!Number.isSafeInteger(batchSize) || batchSize < 1) throw Error('invalid batchSize');
   const selection = manifest === null ? null : validateFindingManifest(db, manifest);
+  // Validate and read consensus once, before taking the SQLite writer lock.
+  const admitted = selection === null ? null : new Map([...selection].filter(([, row]) =>
+    readConsensus(db, { findingId: row.finding_id, reviewedHeadSha: row.head_sha }).label === 'real'));
   return db.transaction(() => {
-    if (selection) enrollManifestFindings(db, selection, readConsensus);
+    if (admitted) enrollManifestFindings(db, admitted, manifest.sha256);
     const pending = db.prepare(`SELECT b.finding_id,b.repo,b.area,b.captured_at,b.batch_attempts AS attempts,
       ${FINDING_PRIORITY_SQL} AS priority
       FROM finding_backlog b JOIN review_findings f USING(finding_id)
       JOIN reviewed_prs r ON r.repo=b.repo AND r.pr_number=b.pr_number
       WHERE b.outcome IS NULL AND b.batch_id IS NULL AND r.pr_state='merged'
+        ${selection === null ? 'AND b.manifest_sha256 IS NULL' : ''}
       ORDER BY priority,b.captured_at,b.finding_id`).all()
-      .filter(row => !selection || (selection.has(row.finding_id)
-        && readConsensus(db, { findingId: row.finding_id, reviewedHeadSha: selection.get(row.finding_id).head_sha }).label === 'real'));
+      .filter(row => admitted === null || admitted.has(row.finding_id));
     // Snapshot advisory placement before assignment changes the candidate view.
     const notes = selection ? [] : db.prepare(`SELECT c.note_id,c.repo,c.area,p.body_captured_at AS captured_at,4 AS priority
       FROM finding_batch_note_candidates c JOIN reviewer_passes p USING(pass_id)
@@ -106,8 +109,8 @@ export function claimFindingBatches(db, day, { batchSize = 100, manifest = null,
       db.prepare('INSERT INTO finding_batches(batch_id,repo,area,day,manifest_sha256) VALUES (?,?,?,?,?)')
         .run(batchId, repo, area, day, manifest?.sha256 ?? null);
       for (const row of rows) {
-        if (row.finding_id) db.prepare('UPDATE finding_backlog SET batch_id=? WHERE finding_id=? AND batch_id IS NULL')
-          .run(batchId, row.finding_id);
+        if (row.finding_id) db.prepare('UPDATE finding_backlog SET batch_id=?,manifest_sha256=? WHERE finding_id=? AND batch_id IS NULL')
+          .run(batchId, manifest?.sha256 ?? null, row.finding_id);
         else db.prepare('UPDATE finding_batch_notes SET batch_id=? WHERE note_id=? AND batch_id IS NULL')
           .run(batchId, row.note_id);
       }
@@ -287,7 +290,7 @@ export function settleFindingBatch(db, batch, result, pr = null, dropPrs = {}) {
       const taxonomyCode = backlogGradeCode(f.outcome, f.reason);
       const attempt = db.prepare('SELECT batch_attempts FROM finding_backlog WHERE finding_id=?').get(f.findingId).batch_attempts + 1;
       recordFindingGrade(db, { sourceKey: `batch:${batch.batch_id}:${f.findingId}`, findingId: f.findingId,
-        graderKind: 'batch-remediator', taxonomyCode, attempt, gradedAt: new Date().toISOString(),
+        graderKind: taxonomyCode.startsWith('life.') ? 'lifecycle' : 'batch-remediator', taxonomyCode, attempt, gradedAt: new Date().toISOString(),
         evidence: { batchId: batch.batch_id, manifestSha256: batch.manifest_sha256 ?? null,
           outcome: f.outcome, reason: f.reason, resultPr: f.outcome === 'applied' ? result.prNumber : null,
           resultHeadSha: applied ? (pr.headRefOid || result.headSha) : null, evaluatedRef: 'origin/main' } });
@@ -458,7 +461,7 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
   batchSize = findingBatchOptions(env).batchSize, concurrency = 1, now = Date.now(),
   timeoutMs = findingBatchOptions(env).timeoutMs, manifest = null, readConsensus = readRemediationConsensus }) {
   if (!Number.isSafeInteger(concurrency) || concurrency < 1) throw Error('invalid concurrency');
-  if (manifest !== null) validateFindingManifest(db, manifest);
+  if (resolutionOnly && manifest !== null) validateFindingManifest(db, manifest);
   if (!resolutionOnly) claimFindingBatches(db, day, { batchSize, manifest, readConsensus });
   const queue = db.prepare('SELECT * FROM finding_batches WHERE completed_at IS NULL AND released_at IS NULL ORDER BY rowid').all()
     .filter(batch => manifest === null || batch.manifest_sha256 === manifest.sha256);
@@ -488,7 +491,7 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
           ? await fetchPr(batch.repo, result.prNumber, { execFileImpl, env, logger }) : null;
         const dropPrs = await verifyDropPrs(batch, result, { execFileImpl, env, logger }, fetchPr);
         settleFindingBatch(db, batch, result, pr, dropPrs);
-      } else if (!resolutionOnly && !batch.launch_id) {
+      } else if (!resolutionOnly && !batch.launch_id && (manifest !== null || batch.manifest_sha256 === null)) {
         const findings = db.prepare(`SELECT b.finding_id AS findingId,b.pr_number AS prNumber,
           b.head_sha AS headSha,b.reviewer_family AS reviewerFamily,f.finding_json FROM finding_backlog b
           JOIN review_findings f USING(finding_id) WHERE b.batch_id=?

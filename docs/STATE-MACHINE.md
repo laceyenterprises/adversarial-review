@@ -86,6 +86,14 @@ identity, predecessor restoration and bounded unknown-evidence accounting retain
 the existing hammer-dispatch states and transitions. Closing-decision and CI
 ownership precedence remain unchanged.
 
+RGY-04 selections retain durable backlog provenance after release. Automatic
+claims exclude selected rows and automatic dispatch skips selected prepared
+batches; already-started collection/publication continues. Only an explicit
+selection can re-read consensus and claim released real findings. Non-blocking
+backlog health excludes selected work. Settlement and backfill share lifecycle
+grade kinds, and backfill skips settlement observations. Existing states and
+smoke promises are unchanged.
+
 ## Explicit same-head re-review intent (RETRIGGERDEDUP-01)
 
 Accepted label, CLI, rescue and remediation requests atomically pair their row

@@ -73,7 +73,9 @@ in private storage; public test fixtures are synthetic.
 Batch settlement also calls `recordFindingGrade` in the outcome transaction,
 using `batch:<batch-id>:<finding-id>` as its immutable source key. A settled retry
 is idempotent. Invalid outcomes, released batches and retry exhaustion do not
-fabricate grades. The grade kind is `batch-remediator`; `life.*` carries
+fabricate grades. The grade kind is `batch-remediator`, or `lifecycle` for `life.*`, matching
+backfill. Backfill skips backlog decisions already recorded under their exact
+batch/finding settlement source key, so a worker decision is observed once. `life.*` carries
 `lifecycle=1`, and `life.*` and `ind.stale` remain indeterminate, never reviewer
 errors. Mapping shares `backlogGradeCode` with the historical backfill.
 
@@ -90,3 +92,9 @@ independent grader observation at the pinned reviewed head, then the latest
 non-interested batch observation. `life.*`, `ind.stale` and severity calibration
 are excluded. Only label `real` admits remediation. This fallback does not
 persist consensus or change review, routing or merge decisions.
+
+The batch fallback has limited admission reach: settlement grades normally belong
+to terminal backlog rows, which cannot be claimed. It can matter after lifecycle
+reopening. It is an unscoped batch observation, not independent reviewed-head
+proof, and does not make a worker's false-positive drop an independent verdict.
+Use the synchronous consensus seam for a stronger persisted consensus policy.

@@ -492,14 +492,14 @@ from offline synthetic tests.
 `heads` lists distinct sorted repository/PR/head tuples; `sha256` hashes compact,
 recursively key-sorted, ASCII-escaped JSON of
 `{"version":1,"findings":<entries sorted by finding_id>}`. Metadata such as
-name, counts and estimates is not hashed. Files are capped at 128 MiB.
+name, counts and estimates is not hashed. Files are capped at 128 MiB and 10,000 findings. Validation and one consensus read per finding run before the claim write transaction.
 Every entry must match its stored finding identity and reviewed head before any
 claim or dispatch. Tampering, duplicate/missing identities and pin mismatches
 refuse the selection.
 
 An explicit selection admits only consensus-real findings from merged source
 PRs, using the [grade consensus seam](review-finding-grades.md). It may enroll
-selected blocking findings absent from the automatic non-blocking backlog.
+selected blocking findings absent from the automatic non-blocking backlog. Enrollment requires a current body in the final posted first-pass/rereview.
 Existing owners and terminal outcomes are preserved; an already-owned finding
 is not stolen or rebatched. No simplicity advisories enroll in selected batches.
 Workers must re-check applicability on current main and drop findings that no
@@ -507,12 +507,16 @@ longer apply. Grades describe reviewed-head correctness; they do not prove main
 applicability.
 
 `migrations/20261108_findings_batch_manifest.sql` adds nullable
-`finding_batches.manifest_sha256`. Selected batch IDs incorporate that hash,
+`finding_batches.manifest_sha256`. The additive
+`20261108_findings_selection_scope.sql` also stores `finding_backlog.manifest_sha256`,
+including recovery from existing selected batches and release receipts. Selected batch IDs incorporate that hash,
 and selected runner invocations dispatch/collect only matching batches.
 Releases still increment attempts and retain old batch evidence; repeating the
-selection can claim released real findings under fresh IDs. Default claims and
-the automatic collector retain their existing backlog behavior, including
-collection of selected batches. No selection is automatically activated.
-Settlement writes append-only `batch-remediator` grades atomically with valid
+selection re-reads consensus and can claim released real findings under fresh IDs.
+Default claims exclude selected backlog rows; the default ticker never starts an
+undispatched selected batch. Collection/publication of already-started selected
+batches continues. Selected rows and batches are excluded from the automatic
+non-blocking backlog health counts. No selection is automatically activated.
+Settlement writes append-only `batch-remediator` grades (`lifecycle` for `life.*`) atomically with valid
 outcomes after existing publication/PR checks. Requeue and exhaustion produce
 no correctness grade. No new lifecycle state or merge authority is introduced.

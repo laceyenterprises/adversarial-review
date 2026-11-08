@@ -1714,7 +1714,10 @@ the selection hash and reviewed-head pins, claims only selected real findings
 from merged sources, and dispatches/collects only that selection's batches.
 Workers still check applicability on current main. Settlement appends structured
 grades; lifecycle and stale outcomes remain indeterminate. Omitting the flag
-preserves the default drain. See the [selection contract](docs/data-model/review-findings.md#graded-selection-remediation).
+preserves the default drain. Selected rows remain excluded after release; only
+an explicit selection rechecks consensus and retries them. The ticker collects
+already-started selected work but never starts an undispatched selected batch.
+Backlog health counts cover the automatic drain. See the [selection contract](docs/data-model/review-findings.md#graded-selection-remediation).
 `pipeline-health` JSON `nonBlockingBacklog` exposes open and unbatched finding
 counts, oldest open age, applied/dropped by UTC day and batch error counts. Its
 `progress` object (also printed by `node bin/review-findings.mjs backlog --db <db>`)

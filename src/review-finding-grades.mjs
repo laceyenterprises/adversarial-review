@@ -72,7 +72,10 @@ export function backfillFindingGrades(db) {
         findingId: row.finding_id, taxonomyCode: code, graderKind: kind, gradedHeadSha: head,
         interestedParty: interested, evidence, gradedAt: at || new Date().toISOString() });
     };
-    for (const row of db.prepare('SELECT * FROM finding_backlog WHERE outcome IS NOT NULL ORDER BY finding_id').all()) {
+    for (const row of db.prepare(`SELECT b.* FROM finding_backlog b WHERE outcome IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM review_finding_grades g
+        WHERE g.source_key='batch:' || b.batch_id || ':' || b.finding_id)
+      ORDER BY finding_id`).all()) {
       const code = backlogGradeCode(row.outcome, row.reason);
       add('backlog', row, code, code?.startsWith('life.') ? 'lifecycle' : 'batch-remediator', null, false, row.resolved_at);
     }

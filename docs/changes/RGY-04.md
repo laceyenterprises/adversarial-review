@@ -13,14 +13,14 @@ outcomes; lifecycle/stale outcomes do not become reviewer errors.
   version 1 hashes and finding/repository/PR/head identities. Explicit runs claim,
   dispatch and collect only that selection, excluding simplicity advisories.
 - `claimFindingBatches` and `runFindingBatches` accept `manifest` and a synchronous
-  `readConsensus` seam. The temporary fallback prefers independent reviewed-head
+  `readConsensus` seam. Manifest validation and one consensus read per finding precede the writer transaction; the consensus statement is reused. Selections are limited to 10,000 findings and DEL escaping matches Python. The temporary fallback prefers independent reviewed-head
   grades, then non-interested batch observations; only real admits remediation.
-- Selected real findings from merged sources can enroll even when blocking.
+- Selected real findings from the final posted current body on merged sources can enroll even when blocking.
   Existing owners, terminal outcomes and retry caps remain authoritative.
 - Additive migration `20261108_findings_batch_manifest.sql` stores nullable batch
-  selection hashes. Selection hashes and retry attempts fence batch identity.
-- Settlement writes idempotent `batch-remediator` observations through the grade
-  API. Requeue, release and retry exhaustion create no correctness grade.
+  selection hashes. The follow-up selection-scope migration retains backlog provenance across release and recovers it from existing batch/release receipts. Default claims, dispatch and health exclude selected work; already-started collection continues. Selection hashes and retry attempts fence batch identity.
+- Settlement writes idempotent `batch-remediator` observations (`lifecycle` for `life.*`) through the grade
+  API; historical backfill skips the same settled decision. Requeue, release and retry exhaustion create no correctness grade.
 - Drop normalization moves to a shared module, preserving the existing export.
   No review routing, strictness, merge predicate, CI or deployment action changes.
 
@@ -40,3 +40,10 @@ Tests run individually with netguard and a 600-second process-group bound:
 
 The full suite was not run under the ticket's targeted-test constraint.
 No live database, services, model providers or production findings were used.
+
+Remediation validation: the grade-driven batch tests pass all 12 cases, including
+settle-then-backfill deduplication, released selection recovery/retry, failed
+selected dispatch isolation, superseded enrollment, and Python DEL hashing.
+The adjacent batch, regression, requeue and grade suites pass (125 tests).
+Catalog validation passes (91 entries), lint has zero errors, contract typecheck
+and the offline byte-equivalence demo pass. No full local suite was run.

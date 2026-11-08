@@ -21,7 +21,7 @@
       "primaryKey": [
         "grade_id"
       ],
-      "compatibility": "Additive multi-source grades with immutable source keys; explicit historical backfill and atomic batch settlement writes. Explicit manifest remediation consumes grades; no live review or merge predicate consumes them."
+      "compatibility": "Additive multi-source grades with immutable source keys; explicit historical backfill and atomic batch settlement writes. Explicit manifest remediation consumes grades; no live review or merge predicate consumes them. Backfill excludes decisions already graded at settlement; lifecycle grade kind agrees across paths."
     },
     {
       "id": "review-findings",
@@ -47,7 +47,8 @@
         "src/kernel/review-findings.mjs",
         "src/kernel/remediation-reply.mjs",
         "migrations/20261108_findings_batch_manifest.sql",
-        "src/finding-remediation-selection.mjs"
+        "src/finding-remediation-selection.mjs",
+        "migrations/20261108_findings_selection_scope.sql"
       ],
       "owner": "review-body capture and remediation completion observations"
     }

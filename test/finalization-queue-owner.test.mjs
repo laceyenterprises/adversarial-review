@@ -93,10 +93,11 @@ test('HAMLANEWAIT-01: release in another process wakes the bounded native lane w
   const adapter = resolveQueueOwnerAdapter({ rootDir: f.root, db: f.store.db });
   assert.equal(adapter.tryLock(lane), null);
   const pending = adapter.waitForLock(lane, { deadline: new Date(Date.now() + 3000).toISOString() });
-  // Let the native watch subscription enter the event loop before release.
-  const timer = setTimeout(() => child.send('release'), 50);
-  t.after(() => clearTimeout(timer));
+  // The waiter installs its watch synchronously before returning.
+  const started = performance.now();
+  child.send('release');
   const release = await pending;
+  assert.ok(performance.now() - started < 1500, 'release notification must beat the deadline fallback');
   assert.equal(typeof release, 'function', 'must acquire from release wake before the deadline');
   try { assert.equal(adapter.tryLock(lane), null); } finally { release(); }
   await exited;

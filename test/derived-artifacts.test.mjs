@@ -362,7 +362,9 @@ test('build cancellation kills background descendants before returning', async t
     // Probe our own descendant without requiring the host's ps executable.
     // Linux zombies are terminated but only their new parent can reap them.
     let terminated = false;
-    for (let attempt = 0; attempt < 50; attempt++) {
+    // Linux exposes terminated zombies immediately; other hosts may delay reaping visibility.
+    const attempts = process.platform === 'linux' ? 1 : 50;
+    for (let attempt = 0; attempt < attempts; attempt++) {
       try {
         process.kill(pid, 0);
         if (process.platform === 'linux') {
@@ -373,7 +375,7 @@ test('build cancellation kills background descendants before returning', async t
         terminated = true;
       }
       if (terminated) break;
-      await new Promise(resolve => setTimeout(resolve, 20));
+      if (attempt + 1 < attempts) await new Promise(resolve => setTimeout(resolve, 20));
     }
     assert.equal(terminated, true, 'descendant must be absent or a terminated zombie');
   } finally { clearTimeout(timer); }

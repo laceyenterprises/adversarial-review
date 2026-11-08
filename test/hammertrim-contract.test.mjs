@@ -403,7 +403,7 @@ test('bounded runner preserves exit status and caps combined output', () => {
   const childPidFile = join(tmpdir(), `bounded-child-${process.pid}.pid`);
   try {
     const children = run(path, ['--timeout', '1', '--', '/bin/sh', '-c', `sleep 30 & echo $! > ${childPidFile}; wait`]);
-    if (children.status === 125) {
+    if (children.status === 125 && process.env.ADVERSARIAL_TEST_RESTRICTED_PROCESS_PROBE === '1') {
       // Some restricted hosts deny a post-exit group probe. The supervisor
       // must report that uncertainty as failure even if this known child died.
       assert.match(children.stderr, /run-bounded: cleanup EPERM/);

@@ -250,12 +250,13 @@ test('HAMLANEWAIT-01: legacy merge wakes on another operation release within its
   const pending = runLegacyLaneWrite({ rootDir: f.rootDir, ...lane, command: 'synthetic-merge', argv: [],
     deadline: new Date(Date.now() + 3000).toISOString(), readConfig: () => ({}),
     exec: async (_c, _a, { timeout }) => { called = true; assert.ok(timeout > 0 && timeout < 3000); return { stdout: 'merged' }; } });
-  const timer = setTimeout(() => { release(); release = null; }, 50);
-  t.after(() => clearTimeout(timer));
+  // The pending call installs its watch synchronously before returning.
   assert.equal(called, false);
+  release();
+  release = null;
   assert.equal((await pending).stdout, 'merged');
   assert.equal(called, true);
-  assert.ok(performance.now() - started < 2500, 'release wake must precede deadline');
+  assert.ok(performance.now() - started < 1500, 'release wake must precede the polling fallback');
 });
 
 test('HAMLANEWAIT-01: deadline exhaustion is lane-busy with no merge or durable writer intent', { timeout: 5000 }, async t => {
@@ -280,11 +281,12 @@ test('HAMLANEWAIT-01: waking rechecks lane transfer and never invokes the old le
   const release = adapter.tryLock(lane);
   const pending = runLegacyLaneWrite({ rootDir: f.rootDir, ...lane, readConfig: () => ({}),
     deadline: new Date(Date.now() + 3000).toISOString(), exec: () => assert.fail('stale route must refuse') });
-  // Exercise the wake after native subscription, as in the preceding wake test.
-  const timer = setTimeout(release, 50);
-  t.after(() => clearTimeout(timer));
+  // The pending call installs its watch synchronously before returning.
+  const started = performance.now();
+  release();
   const result = await pending;
   assert.equal(result.reason, 'lane-transfer-required');
+  assert.ok(performance.now() - started < 1500, 'release wake must precede the polling fallback');
   assert.equal(result.outcome, undefined);
 });
 

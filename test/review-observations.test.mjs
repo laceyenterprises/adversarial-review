@@ -17,6 +17,23 @@ test('CLI validates stdin and emits bounded public errors with failing exit stat
   const run = input => spawnSync(process.execPath,
     [fileURLToPath(new URL('../src/review-observations-cli.mjs', import.meta.url))],
     { input, encoding: 'utf8', timeout: 10_000 });
+  mkdirSync(join(rootDir, 'data'));
+  const db = new Database(join(rootDir, 'data/reviews.db'));
+  try {
+    ensureReviewStateSchema(db);
+    db.prepare(`INSERT INTO reviewed_prs(repo, pr_number, review_status, pr_state, reviewed_at, reviewer)
+      VALUES (?, ?, 'posted', 'open', '2026-10-01T00:00:00Z', 'fixture')`).run('Example/Repo', 1);
+    beginReviewerPass(rootDir, { repo: 'example/repo', prNumber: 1, attemptNumber: 1,
+      passKind: 'first-pass', reviewerClass: 'codex', startedAt: '2026-10-01T00:00:00Z' });
+    completeReviewerPass(rootDir, { repo: 'example/repo', prNumber: 1, attemptNumber: 1,
+      passKind: 'first-pass', status: 'completed', endedAt: '2026-10-02T00:00:00Z' });
+    db.prepare('UPDATE reviewer_passes SET body_md=?, verdict=? WHERE repo=? AND attempt_number=?')
+      .run('completed body', 'approved', 'example/repo', 1);
+    db.prepare('INSERT INTO pr_merge_closeouts(repo, pr_number, closeout_body_md, closeout_posted_at) VALUES (?, ?, ?, ?)')
+      .run('example/repo', 1, 'merged body', '2026-10-04T00:00:00Z');
+  } finally {
+    db.close();
+  }
   const valid = run(JSON.stringify(request));
   assert.equal(valid.error, undefined);
   assert.equal(valid.status, 0, valid.stderr);
@@ -25,6 +42,13 @@ test('CLI validates stdin and emits bounded public errors with failing exit stat
   assert.equal(new Date(observedAt).toISOString(), observedAt);
   const { observed_at: _expectedObservedAt, ...expected } = readReviewObservations(request);
   assert.deepEqual(projection, expected);
+  assert.equal(projection.items.length, 1);
+  assert.equal(projection.items[0].review_body, 'completed body');
+  assert.equal(projection.items[0].verdict, 'approved');
+  assert.equal(projection.items[0].attempt_number, 1);
+  assert.equal(projection.items[0].closeout_body, 'merged body');
+  assert.equal(projection.items[0].closeout_posted_at, '2026-10-04T00:00:00Z');
+  assert.equal(projection.items[0].pr_state, 'open');
   for (const [input, reason] of [
     ['{private-invalid-json', 'invalid review request JSON'],
     [' '.repeat(32769), 'request too large'],

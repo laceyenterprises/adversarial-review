@@ -105,7 +105,7 @@ test('exhausted plan without an eligible closer fallback is held', async () => {
 test('corporate closer uses its declared Claude fallback for an exhausted account', async () => {
   const payload = claudeAccountFixture({ primary: 'exhausted', corp: 'ok' });
   payload.providerStatuses.push({ provider: 'openai', authPath: 'oauth-corp', state: 'ok',
-    estRemaining: { rateLimits: [{
+    estRemaining: { confidence: 'measured', inferred: false, rateLimits: [{
     limitId: 'codex', windowMinutes: 10080, usedPercent: 101,
     resetsAt: new Date(Date.now() + 86_400_000).toISOString(),
   }] } });
@@ -119,21 +119,10 @@ test('corporate closer uses its declared Claude fallback for an exhausted accoun
   assert.equal(result.fellBack, true);
 });
 
-test('an elapsed reset estimate cannot certify plan recovery', () => {
-  const statuses = parseHqFleetQuotaStatus(JSON.stringify({ providerStatuses: [{
-    provider: 'openai', authPath: 'oauth', state: 'ok',
-    providerRateLimits: [{
-      limitId: 'codex', windowMinutes: 10080, usedPercent: 100,
-      resetsAt: new Date(Date.now() - 1000).toISOString(),
-    }],
-  }] }));
-  assert.equal(statuses[0].state, 'exhausted');
-});
-
 test('an exhausted window with an unknown reset cannot certify recovery', () => {
   const statuses = parseHqFleetQuotaStatus(JSON.stringify({ providerStatuses: [{
     provider: 'openai', authPath: 'oauth', state: 'ok', providerRateLimits: [],
-    estRemaining: { rateLimits: [{
+    estRemaining: { confidence: 'measured', inferred: false, rateLimits: [{
       limitId: 'codex', windowMinutes: 10080, usedPercent: 100, resetsAt: 'unknown',
     }] },
   }] }));

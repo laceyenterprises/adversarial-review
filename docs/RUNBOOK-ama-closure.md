@@ -1209,12 +1209,27 @@ budgets, polling/backoff, cache freshness,
 leases, rate-limit windows and reviewer/worker run limits keep their existing
 meaning and duration.
 
-Closer harness resolution treats a reported exhausted Codex account meter at 100% or more
-as exhausted even when its probe reports `ok` and usage credits remain.
-The shared quota classifier reads `providerRateLimits` (or the measured
-`estRemaining.rateLimits` projection). It chooses an eligible configured
-fallback, or holds when none is eligible; account recovery is re-evaluated on
-the next observation.
+The shared fleet quota classifier treats a Codex account meter at 100% or more
+as exhausted even when its probe reports `ok` and usage credits remain. This
+applies to personal and corporate OAuth accounts in closer harness selection,
+reviewer quota admission, Codex account routing, remediation fallback, AFH
+reviewer fallback, Argus and burst. Each consumer retains its existing fallback
+or hold policy.
+
+Evidence comes from `providerRateLimits`, or `estRemaining.rateLimits` only
+when `confidence === 'measured'` and `inferred !== true`. A row marked
+`fresh: false`, an elapsed parseable `resetsAt`, or provider-level
+`cachedEvidenceStale: true` cannot synthesize exhaustion. The producer owns the
+freshness TTL; missing or unparseable reset times do not establish recovery
+for otherwise current meter evidence. An explicit exhausted producer state
+remains authoritative independently of the meter override.
+
+Normalized rows and cap diagnostics identify the override as
+`stateSource: 'codex-plan-meter'`; the raw snapshot is preserved. The latest
+future reset among the exhausting meters becomes `resetAtUtc` and the account
+cap's `resetAt`, ahead of model-level reset estimates. Corporate reviewer
+preflight carries it into the existing cooldown instead of using the 15-minute
+unknown-reset fallback. Recovery is re-evaluated on subsequent quota reads.
 
 For quota reads, let `T` be the scaled 45-second child timeout: at the default
 6x cap, `T = 270s`; at the maximum 20x cap, `T = 900s`. Worst-case timeout

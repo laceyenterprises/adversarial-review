@@ -88,6 +88,7 @@ const DEFAULT_FOLLOW_UP_JOBS_SOURCE = "export const FOLLOW_UP_JOB_DIRS = { pendi
   + " export function readFollowUpJob() { throw new Error('unexpected fixture job read'); } export function releaseInfrastructureCiStop() { throw new Error('unexpected fixture CI stop release'); }";
 
 function buildLoaderSource({
+  reviewCarryForwardSource = null,
   deadlineRecoverySource = null,
   capRouteSource = null,
   provenanceReaderSource = null,
@@ -114,6 +115,7 @@ function buildLoaderSource({
   const packageParentUrl = fileUrl('package.json');
 
   const stubs = {
+    ...(reviewCarryForwardSource ? { [fileUrl('src', 'review-carry-forward.mjs')]: 'fixture:review-carry-forward' } : {}),
     [fileUrl('src', 'adapters', 'agent-runtime', 'local', 'remediation.mjs')]: 'fixture:worker-registry',
     ...(deadlineRecoverySource ? { [fileUrl('src', 'ownerproof-review-recovery.mjs')]: 'fixture:deadline-recovery' } : {}),
     ...(capRouteSource ? { [fileUrl('src', 'review-cycle-cap-hammer.mjs')]: 'fixture:cap-route' } : {}),
@@ -353,6 +355,7 @@ export async function load(url, context, nextLoad) {
   }
 
   const simpleStubs = {
+    'fixture:review-carry-forward': ${JSON.stringify(reviewCarryForwardSource)},
     'fixture:worker-registry': ${JSON.stringify(`export * from '${fileUrl('src', 'adapters', 'agent-runtime', 'local', 'remediation.mjs')}?actual'; export async function ensureWorkerRegistryReady() { globalThis.__registryPrefetches = (globalThis.__registryPrefetches || 0) + 1; } export const prefetchWorkerRegistry = ensureWorkerRegistryReady; export function resolveRemediationModel(_className, {pin, fallbackModel} = {}) { return {resolvedModel: pin || fallbackModel || null, modelSource: 'producer', resolvedReasoningLevel: null}; }`)},
     // Claim-loop cases own adapter usage fixtures, not ledger subprocesses.
     // Keep the newer worker transport inside the same offline accounting seam.
@@ -402,6 +405,49 @@ import { register } from 'node:module';
 
 register(${JSON.stringify(pathToFileURL(loaderPath).href)}, import.meta.url);
 `;
+}
+
+for (const baseRefName of ['main', null]) {
+  test(`REVIEWCARRY-01 watcher prefers the base branch and retains SHA fallback (${baseRefName})`, () => {
+    const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-carry-base-'));
+    try {
+      const loaderPath = path.join(tmp, 'loader.mjs');
+      const registerPath = path.join(tmp, 'register.mjs');
+      const runnerPath = path.join(tmp, 'runner.mjs');
+      writeFileSync(loaderPath, buildLoaderSource({
+        subject101Overrides: { baseRefName, baseSha: 'stale-base-sha' },
+        reviewCarryForwardSource: `
+          export * from ${JSON.stringify(`${fileUrl('src', 'review-carry-forward.mjs')}?actual`)};
+          export async function carryStalePostedReviewForward(args) {
+            (globalThis.__carryForwardCalls ||= []).push(args);
+            return true;
+          }
+        `,
+      }));
+      writeFileSync(registerPath, buildRegisterSource(loaderPath));
+      writeFileSync(runnerPath, buildRunnerSource({
+        prePollSetup: `
+          db.prepare(\`INSERT INTO reviewed_prs
+            (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+             review_attempts, reviewer_head_sha, revision_ref)
+            VALUES (?, 101, '2026-11-07', 'gemini', 'open', 'posted', 1, 'reviewed-head', 'reviewed-head')\`)
+            .run('laceyenterprises/adversarial-review');
+        `,
+        afterFirstPoll: `
+          const calls = globalThis.__carryForwardCalls || [];
+          assert.equal(calls.length, 1, 'the moved posted review reaches carry-forward proof');
+          assert.equal(calls[0].baseRef, ${JSON.stringify(baseRefName || 'stale-base-sha')});
+          assert.equal(calls[0].currentHead, 'sha-happy-101');
+          assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number=101').get().review_status, 'posted');
+          assert.ok(!claims.some(claim => claim.prNumber === 101));
+        `,
+      }));
+      const result = spawnSync(process.execPath,
+        ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+        { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(installGhFixture(tmp)), timeout: 30000 });
+      assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+    } finally { rmSync(tmp, { recursive: true, force: true }); }
+  });
 }
 
 function buildRunnerSource({

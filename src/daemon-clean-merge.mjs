@@ -48,6 +48,7 @@ import {
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 import { resolveRequiredCheckContextsFromCfg } from './ama/required-check-contexts.mjs';
 import { fleetStopReason } from './fleet-stop.mjs';
+import { readReviewCarryForwardRecord } from './review-carry-forward.mjs';
 
 const execFileAsync = promisify(execFile);
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -636,8 +637,13 @@ async function runDaemonCleanMergeAttemptInner({
   }
   // Commit authors/trailers are hints, never authority for a moved head.
   // An App-bound HAM validation or a complete App chain must carry the review.
+  // REVIEWCARRY-01: a recorded generated-only carry-forward binds exactly this
+  // reviewed/live pair; strict clean review, CI and mergeability still apply.
+  const reviewCarryForward = !docsFastPath && validatedHead !== liveHead
+    ? readReviewCarryForwardRecord(rootDir, { repo: repoPath, prNumber, reviewedHead: validatedHead, currentHead: liveHead })
+    : null;
   if (validatedHead !== liveHead && !liveOperatorOverride
-    && hamTerminalRemediationValidated !== true
+    && hamTerminalRemediationValidated !== true && !reviewCarryForward
     && !hammerAttestationChain(liveRollup?.comments, validatedHead, liveHead)) {
     return NOT_TAKEN('stale-head', { reasons: ['stale-head'], exactHeadReview: true });
   }
@@ -959,7 +965,9 @@ async function runDaemonCleanMergeAttemptInner({
     ? liveHead
     : certifiedNonCleanHead
       ? hamAuditHead
-      : validatedHead;
+      : reviewCarryForward
+        ? liveHead
+        : validatedHead;
   if (!strictMode && reviewState?.nonBlockingFindingCount > 0) {
     try {
       captureReadyFindings({ rootDir, repo: repoPath, prNumber, headSha: validatedHead,
@@ -1040,7 +1048,9 @@ async function runDaemonCleanMergeAttemptInner({
           ? { closureAuthority: 'daemon-autonomous-closer-commit-clean' }
           : headCloserCertifiedNonBlocking
             ? { closureAuthority: 'daemon-head-closer-certified-non-blocking' }
-            : {}),
+            : reviewCarryForward
+              ? { closureAuthority: 'daemon-review-carry-forward' }
+              : {}),
       // Record which accountability authorized the merge: hq-dispatched worker
       // identity (the normal path) or an explicit head-scoped operator label
       // (Deliverable 1 substitution). The audit doc thus always names WHO the

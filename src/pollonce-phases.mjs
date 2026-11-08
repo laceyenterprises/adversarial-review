@@ -284,6 +284,7 @@ import { resolveReviewerCeilingSeconds, usesStreamedReviewerCeiling } from './re
 import { resolveReviewPopulationRetryConfig } from './role-config.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { getStalePostedReviewAutoRereviewSuppression } from './stale-posted-review-rereview.mjs';
+import { carryStalePostedReviewForward } from './review-carry-forward.mjs';
 import { requeuePostedReviewWithoutHead } from './posted-review-head-repair.mjs';
 import { computeVocabularyFatigueFindingForPR } from './vocabulary-fatigue.mjs';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
@@ -1756,6 +1757,13 @@ export async function processReviewSubject(entry, ctx) {
         );
       } else if (postedReviewHeadMoved && finalRoundInProgress) {
         console.log(`[watcher] auto-refresh SUPPRESSED for ${repoPath}#${prNumber}: comment-only final round is in progress`);
+      } else if (postedReviewHeadMoved && existing?.review_status === 'posted'
+        && await carryStalePostedReviewForward({ rootDir: ROOT, repo: repoPath, prNumber, reviewRow: existing,
+          currentHead: subject.headSha, baseRef: subject.baseRefName || subject.baseSha,
+          resolveSettledReview: () => resolveSettledReviewVerdict(ROOT, { repo: repoPath, prNumber,
+            reviewRow: existing, currentHeadSha: existing.reviewer_head_sha }) })) {
+        // REVIEWCARRY-01: own patch unchanged except declared generated paths; the
+        // recorded carry-forward leaves the posted review to the closers.
       } else if (postedReviewHeadMoved && existing?.review_status === 'posted') {
         try {
           const refreshResult = requestReviewRereview({

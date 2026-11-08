@@ -1,0 +1,30 @@
+{
+  "domains": [
+    {
+      "title": "Hammer stop repair lineage",
+      "path": "docs/data-model/hammer-retry-cap.md",
+      "store": "data/follow-up-jobs/hammer-retry-cap/",
+      "schemaSurface": "src/ama/hammer-retry-cap.mjs",
+      "relatedSchemaSurfaces": [
+        "src/ama/safety-stop-repair.mjs",
+        "src/ama/automated-recovery.mjs"
+      ],
+      "owner": "AMA bounded stop repair",
+      "optionalFields": [
+        "stopRepairReservations: dispatch-key map of { headSha, refusal }; retained across head and series resets"
+      ]
+    },
+    {
+      "title": "AMA stop repair exhaustion evidence",
+      "path": "docs/data-model/ama-automated-recovery.md",
+      "store": "data/follow-up-jobs/ama-automated-recovery/",
+      "schemaSurface": "src/ama/automated-recovery.mjs",
+      "owner": "AMA watcher recovery router",
+      "optionalFields": [
+        "repairs[key].previousRepair: prior { headSha, refusal } blocking a failing descendant",
+        "event.refusal: complete current refusal or null",
+        "event.repair: repair receipt including prior refusal evidence, or null"
+      ]
+    }
+  ]
+}

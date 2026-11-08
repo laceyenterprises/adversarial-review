@@ -723,7 +723,7 @@ No live repair, restart or forced page is needed for source acceptance.
 ## Deterministic refusal repair (SAFETYSTOPOWNER-01)
 
 R05 closure recovery dispatches one scoped coding PR update for an audited
-deterministic refusal with a concrete recorded repair. The worker receives the
+deterministic refusal explicitly marked `repairable: true` with a concrete recorded repair. The worker receives the
 exact missing-evidence summary, protected regions and complete recorded evidence.
 It must prove the expected open head before editing/pushing and preserve the
 primary-change contract. It cannot merge or change gates, labels, leases or
@@ -748,6 +748,24 @@ repair evidence still fails closed.
 
 GitHub inspection uses the shared metered reader within a 15-second budget.
 The repair executor loads only when recovery selects that path.
+
+STOPHOLDREPAIR-01 sends this exact-head repair decision to its executor before
+the generic ownerless watchdog, including scoped operator recovery wakes.
+Non-repairable refusals retain their refusal route. The primary-change repair
+brief freshly traverses the existing gate attribution across every refused path.
+It lists merge-base regions and their reviewed-file line ranges with explicit
+half-open coordinates, plus the reviewed and hammer heads. Unreadable or
+unmappable regions stop and surface evidence rather than guessing at an edit.
+The update restores those regions as a builder-authored commit without closer
+trailers, on top of the expected hammer head, with a fast-forward push only.
+
+The PR's existing retry ledger retains each submitted repair's source head and
+refusal across head/series resets. If a descendant head still selects a safety
+refusal, recovery surfaces the original and current evidence without launching
+another repair. This conservative lineage bound also applies to later failing
+descendants; an operator must inspect them. A passing repaired head follows
+ordinary review and closure admission; only authoritative live state establishes
+merged/closed terminality. No receipt, repair or deadline waives a merge predicate.
 
 The reversal collector checks subsequent immutable review snapshots when the
 first superseding snapshot predates the original remediation commit. It still

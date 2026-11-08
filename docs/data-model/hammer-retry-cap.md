@@ -1,5 +1,24 @@
 # Data Model - Hammer Retry Cap Ledger
 
+## Stop repair lineage (STOPHOLDREPAIR-01)
+
+The optional `stopRepairReservations` object is keyed by repair dispatch key.
+Each entry is `{ headSha, refusal }`, where `refusal` is the complete original
+gate refusal, including its identity, reasons, evidence, repairability and next
+action. The existing PR ledger lock writes this reservation after charging the
+ordinary series/target/lifetime budgets and before HQ submission. The map
+survives every ordinary head/series reset with the permanent charge fields.
+Legacy ledgers without it remain readable. It shares this ledger's retention;
+no independent reset, TTL or refund is introduced.
+
+Before another scoped repair submission, the dispatcher checks ancestry against
+recorded source heads using immutable comparison metadata. A failing descendant
+is surfaced as `repair-descendant-still-refused` with both original and current
+refusals and no new launch. Unreadable ancestry refuses submission. This
+conservative bound covers later failing descendants as well; passing heads use
+normal closure. Same-head/key dedupe remains the recovery receipt's authority,
+and existing budgets still bound other keys.
+
 ## Non-closer head series reset (CLOSERPROOF-01)
 
 A series belongs to the heads the closer authored. When the PR head moves to a

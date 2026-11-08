@@ -169,7 +169,7 @@ function writeHammerRetryCapLedger(rootDir, identity, doc) {
 
 // Permanent charge/refund identities survive every head/series reset.
 function durableChargeFields(ledger) {
-  return Object.fromEntries(['dispatchCharges', 'noWorkRefunds', 'pendingTransientCharge', 'targetChargeEpoch', 'operatorApprovalRearms', 'phaseInputsReplacement', 'nonCloserHeadResets']
+  return Object.fromEntries(['dispatchCharges', 'noWorkRefunds', 'pendingTransientCharge', 'targetChargeEpoch', 'operatorApprovalRearms', 'phaseInputsReplacement', 'nonCloserHeadResets', 'stopRepairReservations']
     .filter(key => ledger?.[key] !== undefined).map(key => [key, ledger[key]]));
 }
 
@@ -920,7 +920,13 @@ export function reserveHammerRepairDispatch(rootDir, identity, options) {
     if (ledger?.__corrupt) throw new Error('corrupt hammer retry ledger');
     if (ledger?.chargedDispatchKeys?.includes(options.dispatchKey)) return false;
     if (evaluateHammerRetryCap(ledger, options).capExhausted) return false;
-    recordHammerRetryDispatchUnlocked(rootDir, identity, options);
+    const charged = recordHammerRetryDispatchUnlocked(rootDir, identity, options);
+    if (options.refusal) {
+      writeHammerRetryCapLedger(rootDir, identity, { ...charged,
+        stopRepairReservations: { ...charged.stopRepairReservations, [options.dispatchKey]: {
+          headSha: options.headSha, refusal: options.refusal,
+        } } });
+    }
     return true;
   });
 }

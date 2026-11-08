@@ -148,7 +148,12 @@ both closure snapshot projections. The unchanged hold still fences the hammer;
 R05 closure recovery can spend one scoped PR-update attempt per head/refusal
 key through the [existing recovery owner](ama-automated-recovery.md#budget-and-exhaustion).
 Missing or exhausted repair ownership pages with that key instead of silently
-skipping every wake. Legacy concrete `next` records remain eligible for repair.
+skipping every wake. STOPHOLDREPAIR-01 requires an explicit `repairable: true`
+marker at execution; the audit reader computes that marker for legacy concrete
+`next` records. Repair execution precedes generic ownerless recovery and does
+not release this hold or authorize merge. Its brief carries fresh gate
+attribution across all refused paths, mapped reviewed-file ranges and a
+builder-authored, trailer-free, fast-forward restoration instruction.
 
 After a hammer stops without merging, explicitly deterministic refusals wait
 for an input change. Other stops become eligible for retry after a five-minute backoff,

@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import { seedCloserIntent, intentExpired, intentEarly } from './helpers/closer-intent-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -952,7 +953,10 @@ test('selectReleasableCloserLeases: a LIVE same-host holder is never released at
     deadHolderThresholdMs: DEFAULT_DEAD_HOLDER_CLOSER_LEASE_MS,
     isProcessAlive: pidIsAlive,
   });
-  assert.deepEqual(releasable, [], 'live holder -> the 6h floor is the only gate');
+  assert.deepEqual(releasable, [], 'live holder retains ownership');
+  assert.deepEqual(selectReleasableCloserLeases([{ ...lease, updatedAt: hoursAgo(7) }], {
+    now: NOW, thresholdMs: DEFAULT_STALE_CLOSER_LEASE_MS, isProcessAlive: pidIsAlive,
+  }), [], 'a live legacy holder is retained beyond the generic age floor');
 
   // A liveness probe that throws must read as "alive", never as "dead".
   const throwing = selectReleasableCloserLeases([lease], {
@@ -1178,6 +1182,7 @@ test('createStaleStateReaperTicker reclaims a lease orphaned AFTER startup, on a
   });
   assert.equal(ticker.intervalMs, DEFAULT_STALE_STATE_REAPER_INTERVAL_MS);
 
+
   // 2. A closer is dispatched after startup and its holder dies.
   const orphanedMs = startupMs + 60_000;
   const orphaned = writeLease(rootDir, {
@@ -1352,6 +1357,15 @@ test('startWatcherStaleStateReaper runs the startup sweep AND returns a poll-loo
   assert.equal(JSON.parse(readFileSync(startupOrphan, 'utf8')).terminalOutcome, 'abandoned-holder-dead');
   assert.equal(typeof ticker.tick, 'function', 'and hands back the poll-loop trigger');
   assert.equal(ticker.intervalMs, DEFAULT_STALE_STATE_REAPER_INTERVAL_MS);
+  const afterStartup = writeLease(rootDir, {
+    repo: 'fixture/after-startup', prNumber: 92, headSha: 'fff',
+    status: 'pending', terminalOutcome: null,
+    acquiredAt: minutesAgo(45), updatedAt: minutesAgo(45),
+    watcherPid: DEAD_PID, holderHost: THIS_HOST,
+  });
+  assert.equal((await ticker.tick()).ran, false, 'startup sweep does not repeat on the first poll');
+  assert.equal((await ticker.tick()).ran, false);
+  assert.equal(JSON.parse(readFileSync(afterStartup, 'utf8')).status, 'pending');
 });
 
 
@@ -1468,7 +1482,7 @@ for (const runSweep of [runStartupStaleStateReaper, runStaleStateReaper]) {
   });
 }
 
-for (const scenario of ['dead', 'timeout', 'live', 'current', 'launch', 'handoff', 'intent']) {
+for (const scenario of ['dead', 'timeout', 'live', 'expired-live', 'reused', 'current', 'launch', 'handoff', 'intent']) {
   test(`CLOSERLEASEDEAD-01 startup sweep ${scenario}`, async t => {
     const rootDir = tempRoot();
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -1476,7 +1490,9 @@ for (const scenario of ['dead', 'timeout', 'live', 'current', 'launch', 'handoff
     const lease = { repo: 'fixture/project', prNumber: 7, headSha: 'a'.repeat(40),
       status: scenario === 'handoff' ? 'handed-to-review' : 'pending',
       lrqId: scenario === 'launch' ? 'lrq_fixture' : null,
-      acquiredAt: minutesAgo(1), updatedAt: NOW, dispatchTimeoutMs: scenario === 'timeout' ? 30_000 : 120_000,
+      acquiredAt: minutesAgo(1), updatedAt: NOW,
+      watcherStartedAt: minutesAgo(3),
+      dispatchTimeoutMs: ['timeout', 'expired-live', 'reused'].includes(scenario) ? 30_000 : 120_000,
       holderHost: THIS_HOST, watcherPid: scenario === 'current' ? process.pid : DEAD_PID, terminalOutcome: null };
     const path = writeLease(rootDir, lease);
     if (scenario === 'intent') {
@@ -1485,17 +1501,27 @@ for (const scenario of ['dead', 'timeout', 'live', 'current', 'launch', 'handoff
       writeFileSync(recordPath, JSON.stringify({ ...lease, state: 'dispatching' }));
     }
     const result = await runStartupStaleStateReaper({ rootDir, now: NOW, env: {},
-      isProcessAlive: () => scenario === 'live' || scenario === 'launch' ? true : scenario === 'timeout' ? null : false,
+      isProcessAlive: () => ['live', 'expired-live', 'reused', 'launch', 'current'].includes(scenario) ? true : scenario === 'timeout' ? null : false,
+      captureProcessImpl: () => ({ startedAt: minutesAgo(scenario === 'reused' ? 2 : 3) }),
       preReceiptIntentOptions: { readPullRequestStateImpl: async () => ({}),
         readLegacyIntentLaunchesImpl: async () => ({ ok: false }),
         processExecFileSyncImpl: () => { throw Error('synthetic unavailable scan'); } },
       logger: { warn: text => logs.push(text), log: text => logs.push(text), error: text => logs.push(text) } });
-    const released = ['dead', 'timeout'].includes(scenario);
+    const released = ['dead', 'timeout', 'reused'].includes(scenario);
     assert.equal(result.closerLeases.released, released ? 1 : 0);
+    if (!['current', 'handoff'].includes(scenario)) {
+      const observed = logs.map(text => { try { return JSON.parse(text); } catch { return null; } })
+        .find(row => row?.event === 'ama_closer.startup_claim_observed');
+      assert.equal(observed?.watcherPid, DEAD_PID, 'startup records the prior owner even when it retains the claim');
+    }
     const after = JSON.parse(readFileSync(path, 'utf8'));
     if (released) {
       assert.equal(after.status, 'terminal');
-      assert.equal(after.terminalOutcome, scenario === 'dead' ? 'abandoned-holder-dead' : 'abandoned-timeout');
+      assert.equal(after.terminalOutcome, scenario === 'timeout' ? 'abandoned-timeout' : 'abandoned-holder-dead');
+      const audit = logs.map(text => { try { return JSON.parse(text); } catch { return null; } })
+        .find(row => row?.event === 'ama_closer.abandoned_lease_reclaimed');
+      assert.equal(audit?.watcherPid, DEAD_PID);
+      assert.equal(audit?.watcherStartedAt, lease.watcherStartedAt);
       assert.ok(logs.some(text => text.includes('startup stale-state sweep:') && text.includes('released 1 closer lease')));
     } else assert.deepEqual(after, lease);
   });

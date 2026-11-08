@@ -1,6 +1,7 @@
 import { seedCloserIntent, intentExpired } from './helpers/closer-intent-fixture.mjs';
 import test from 'node:test';
 import { abandonAmaCloserLease, reconcileAndAbandonAmaCloserLease } from '../src/ama/abandoned-closer-lease.mjs';
+import { probeOrphanOwnership } from '../src/ama/orphan-watchdog.mjs';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
@@ -495,6 +496,46 @@ test('CLAIMPIDSTALE-01 hostless lease abandonment agrees with local ownership', 
   }
   assert.equal(abandonedAmaCloserLeaseOutcome({ ...lease, holderHost: 'foreign-fixture' }, {
     ...opts, isProcessAlive: () => assert.fail('foreign PIDs must not be probed') }), null);
+});
+
+test('DEADWATCHERLEASE-01 exact process identity survives acquisition and prevents PID reuse custody', t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const startedAt = '2025-12-31T23:58:00Z';
+  const lease = acquireAmaCloserLease({ rootDir, repo: 'fixture/project', prNumber: 77,
+    headSha: 'a'.repeat(40), watcherPid: 4242, now: '2026-01-01T00:00:00Z',
+    dispatchTimeoutMs: 60_000, captureProcessImpl: () => ({ pid: 4242, startedAt }) }).lease;
+  assert.equal(lease.watcherStartedAt, startedAt);
+  const options = { now: Date.parse(lease.acquiredAt) + 60_001, livePid: 4343,
+    isProcessAlive: () => true, captureProcessImpl: () => ({ startedAt }) };
+  assert.equal(abandonedAmaCloserLeaseOutcome(lease, options), null, 'expired live owner retains custody');
+  assert.equal(abandonedAmaCloserLeaseOutcome(lease, { ...options,
+    isProcessAlive: () => false }), 'abandoned-holder-dead');
+  // Both processes predate acquisition: comparing only acquiredAt misses reuse.
+  assert.equal(abandonedAmaCloserLeaseOutcome(lease, { ...options,
+    captureProcessImpl: () => ({ startedAt: '2025-12-31T23:59:00Z' }) }), 'abandoned-holder-dead');
+  assert.equal(abandonedAmaCloserLeaseOutcome(lease, { ...options,
+    captureProcessImpl: () => { throw Error('unreadable'); } }), null);
+  assert.equal(abandonedAmaCloserLeaseOutcome(lease, { ...options, livePid: lease.watcherPid,
+    captureProcessImpl: () => ({ startedAt: '2025-12-31T23:59:00Z' }) }), 'abandoned-holder-dead',
+  'a restarted watcher reusing the PID cannot adopt its predecessor by PID alone');
+});
+
+test('DEADWATCHERLEASE-01 orphan ownership rejects a pending lease with reused process identity', async t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { rootDir, repo: 'fixture/project', prNumber: 78, headSha: 'b'.repeat(40) };
+  const acquiredAt = '2026-01-01T00:00:00Z';
+  acquireAmaCloserLease({ ...identity, watcherPid: 4242, now: acquiredAt,
+    dispatchTimeoutMs: 60_000, captureProcessImpl: () => ({ startedAt: '2025-12-31T23:58:00Z' }) });
+  for (const reused of [false, true]) {
+    const result = await probeOrphanOwnership({ ...identity, now: '2026-01-01T00:00:01Z',
+      processKillImpl: () => {},
+      captureProcessImpl: () => ({ startedAt: reused ? '2025-12-31T23:59:00Z' : '2025-12-31T23:58:00Z' }),
+      readStatusImpl: async () => assert.fail('no receipt exists'), env: {}, logger: { warn() {} } });
+    assert.equal(result.owned, !reused);
+    if (!reused) assert.equal(result.proof, 'pending-closer-lease');
+  }
 });
 
 test('CLOSERLEASEDEAD-01 a replacement launch installed during the identity probe is preserved', async t => {

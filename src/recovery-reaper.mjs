@@ -75,6 +75,7 @@ import {
   isReclaimableDispatchedAmaCloserLease,
   isCurrentAmaCloserLease,
   abandonedAmaCloserLeaseOutcome,
+  isAmaCloserPidAlive,
   readAmaCloserLease,
 } from './ama/closer-lease.mjs';
 import { readLaunchRequestStatusFromLedgerAsync } from './session-ledger-read-adapter.mjs';
@@ -311,6 +312,11 @@ export function selectReleasableCloserLeases(leases, {
     if (lease.status === 'dispatched') return isReclaimableDispatchedAmaCloserLease(lease, {
       now: nowMs, launchStatusProbe: launchStatusProbes.get(lease.lrqId) ?? null, fallbackAgeMs: thresholdMs,
     });
+    if (lease.status === 'pending' && (!lease.holderHost || lease.holderHost === localHost)) {
+      try {
+        if ((isProcessAlive || isAmaCloserPidAlive)(lease.watcherPid) === true) return false;
+      } catch { /* Unknown liveness keeps the existing age fallback. */ }
+    }
     // Modern launch-less leases are handled by the shared abandonment rule in
     // the driver, including terminal evidence and mutation fencing.
     if (lease.status === 'pending' && !lease.lrqId && Number(lease.dispatchTimeoutMs) > 0
@@ -754,6 +760,7 @@ export async function reapStaleCloserLeases({
   closerLeaseReconciliationOptions = {},
   captureProcessImpl,
   preReceiptIntentOptions = {},
+  phase = 'periodic',
   env = process.env,
 } = {}) {
   if (!rootDir) {
@@ -783,6 +790,18 @@ export async function reapStaleCloserLeases({
     })); } catch { launchStatusProbes.set(lease.lrqId, null); }
   }
   const unresolvedIntentLeasePaths = new Set();
+  if (phase === 'startup') {
+    for (const lease of discovery.records) {
+      if (!['pending', 'dispatched'].includes(lease.status)
+        || Number(lease.watcherPid) === Number(livePid)) continue;
+      // Observation is not liveness proof: retain the owner unless the normal
+      // fenced recovery below establishes that its claim can be released.
+      logger?.log?.(JSON.stringify({ event: 'ama_closer.startup_claim_observed',
+        repo: lease.repo, prNumber: lease.prNumber, headSha: lease.headSha,
+        watcherPid: lease.watcherPid, watcherStartedAt: lease.watcherStartedAt || null,
+        status: lease.status }));
+    }
+  }
   const reconciledLeases = [];
   const reconciledIntents = new Set();
   for (const lease of discovery.records) {
@@ -955,7 +974,7 @@ export async function reapStaleCloserLeases({
  * Orchestrator — run both reapers once. Never throws: a reaper failure must not
  * prevent the watcher from starting to poll, nor stall a poll once it has.
  *
- * `phase` only labels the summary line; startup and periodic sweeps are the
+ * `phase` labels observations and summary; startup and periodic sweeps are the
  * same work against the same thresholds. Sharing one implementation is the
  * point — a periodic tick that drifted from the startup path would recreate the
  * exact class of bug CLR-02 fixes.
@@ -1002,6 +1021,7 @@ export async function runStaleStateReaper({
       isProcessAlive,
       captureProcessImpl,
       preReceiptIntentOptions,
+      phase,
       env,
       entryScanLimit: resolveCloserLeaseEntryScanLimit(env),
       readLimit: resolveCloserLeaseReadLimit(env),
@@ -1069,7 +1089,8 @@ export function createStaleStateReaperTicker({
   const tickIntervalMs = Number.isFinite(Number(intervalMs)) && Number(intervalMs) > 0
     ? Math.floor(Number(intervalMs))
     : resolveStaleStateReaperIntervalMs(env);
-  let lastRunMs = Number.isFinite(Number(lastRunAtMs)) ? Number(lastRunAtMs) : nowMsImpl();
+  let lastRunMs = lastRunAtMs != null && Number.isFinite(Number(lastRunAtMs))
+    ? Number(lastRunAtMs) : nowMsImpl();
   let inFlight = false;
   return {
     intervalMs: tickIntervalMs,

@@ -7,6 +7,7 @@ import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
+import { withCloserGitHubBudget } from './rate-limit-throttle.mjs';
 import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers } from './ama/ham-provenance.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -468,7 +469,10 @@ export async function fetchHeadCloserVerifiedCommit({
   if (!repoPath || !sha) return null;
   const withPrimaryChange = async (commit) => includePrimaryChange ? ({ ...normalizeVerifiedCloserCommit(commit),
     primaryChange: await fetchPrimaryChange({ repo: repoPath, prNumber, headSha: sha, rootDir, env,
-      get: createHistoryReader({ execGhWithRetryImpl: execGhWithRetryImpl, execFileImpl, env, signal }),
+      get: createHistoryReader({
+        execGhWithRetryImpl: options => withCloserGitHubBudget(() => execGhWithRetryImpl(options)),
+        execFileImpl, env, signal,
+      }),
     }),
   }) : normalizeVerifiedCloserCommit(commit);
   // Daemon-robust: read the closer commit from the local checkout first. The remote
@@ -494,7 +498,7 @@ export async function fetchHeadCloserVerifiedCommit({
   }
   const retryDelays = Array.isArray(retryBackoffMs) ? retryBackoffMs : [];
   try {
-    const { stdout } = await execGhWithRetryImpl({
+    const { stdout } = await withCloserGitHubBudget(() => execGhWithRetryImpl({
       execFileImpl,
       env,
       signal,
@@ -505,7 +509,7 @@ export async function fetchHeadCloserVerifiedCommit({
       retries: retryDelays.length,
       backoffMs: Number(retryDelays[0]) || 500,
       sleep: sleepImpl,
-    });
+    }));
     const parsed = JSON.parse(String(stdout || '{}'));
     return withPrimaryChange(parsed);
   } catch (err) {
@@ -555,7 +559,7 @@ export async function getHeadCloserCommitSuppression({
   }
   const retryDelays = Array.isArray(retryBackoffMs) ? retryBackoffMs : [];
   try {
-    const { stdout } = await execGhWithRetryImpl({
+    const { stdout } = await withCloserGitHubBudget(() => execGhWithRetryImpl({
       execFileImpl,
       args: [
         'api',
@@ -566,7 +570,7 @@ export async function getHeadCloserCommitSuppression({
       retries: retryDelays.length,
       backoffMs: Number(retryDelays[0]) || 500,
       sleep: sleepImpl,
-    });
+    }));
     const raw = JSON.parse(String(stdout || '{}'));
     const commit = {
       sha: raw.sha || sha,
@@ -579,9 +583,9 @@ export async function getHeadCloserCommitSuppression({
     if (identity.suppressed || !prNumber) return identity;
     // HAMFINAL-02: no-diff validation has no HAM tip to suppress. An entitled
     // exact-head audit reserves this head for merge, never for another review.
-    const comments = await execGhWithRetryImpl({ execFileImpl,
+    const comments = await withCloserGitHubBudget(() => execGhWithRetryImpl({ execFileImpl,
       args: ['api', `repos/${repoPath}/issues/${prNumber}/comments`, '--paginate', '--slurp'],
-      retries: retryDelays.length, backoffMs: Number(retryDelays[0]) || 500, sleep: sleepImpl });
+      retries: retryDelays.length, backoffMs: Number(retryDelays[0]) || 500, sleep: sleepImpl }));
     const pages = JSON.parse(String(comments.stdout || '[]'));
     const records = Array.isArray(pages) ? pages.flat() : [];
     if (records.some(comment => exactHammerValidation({ body: comment.body, author: comment.user?.login }, sha))) {

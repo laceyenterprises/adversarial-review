@@ -1199,6 +1199,7 @@ async function pollOnceWithinBudget(
   try {
     watcherHeartbeat?.markPollProgress?.();
     if (await runLowBudgetWatcherPoll({ db, activeRepos, rootDir: ROOT,
+      deliverAlert: defaultDeliverAlert,
       domainId: WATCHER_PRIMARY_DOMAIN_ID, execFileImpl: execFileAsync,
       handlePostedReviewRow, createWatcherOperatorSurface, projectAdversarialGateStatus,
       markMerged: (...args) => stmtMarkMerged.run(...args), markClosed: (...args) => stmtMarkClosed.run(...args),

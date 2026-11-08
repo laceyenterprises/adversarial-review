@@ -1,0 +1,15 @@
+operator_steps:
+  - description: >-
+      After this change and its companion attribution change deploy, SRE floats
+      this repository and restarts the watcher through its documented owner
+      path. Over two hours verify no zero-balance installation deferrals,
+      head-state calls/hour fall by more than half, and a natural green-CI head
+      pushed by a closer reaches its closer within one poll window. Retain the
+      attributed HTTP/304 counts as well as loaded-code evidence.
+    run_as: designated SRE operator
+    command: >-
+      /usr/bin/printf '%s\n' 'GHBUDGET-01 activation requires the companion deployment, normal repository float and watcher restart, then two hours of natural budget, head-call, consumer-attribution and closer-latency evidence.'
+actions: []
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

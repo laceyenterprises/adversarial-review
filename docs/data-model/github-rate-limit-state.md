@@ -5,15 +5,41 @@
 `GHO_RATE_LIMIT_SHARED_STATE_PATH`
 **Source of truth:** `src/rate-limit-throttle.mjs`
 **Runtime surfaces:** `src/metered-gh.mjs`, `bin/metered-gh.mjs`,
-`src/runtime-status.mjs`
+`src/runtime-status.mjs`, `src/github-budget-monitor.mjs`, `src/api-telemetry.mjs`
 
 The shared JSON document has `version: 2` and a `buckets` object keyed by
 `githubBudgetKey(resource, credential)`. Authenticated keys are
+`installation-<app-id>-<installation-id>/<resource>` for tokens whose metadata
+positively identifies `github_app_installation` and matches both configured App and
+installation pins in the broker client in this process. PAT fallbacks, missing
+source metadata and unpinned identities remain token-keyed. Rotated tokens for that
+installation share observations. Other authenticated keys remain
 `token-<digest>/<resource>` (normally `core` and `graphql`); the digest is the
 first 24 hex characters of SHA-256 of the effective token. Raw tokens are never
 stored. The `default` anonymous credential keeps bare resource keys. CLI token
 selection prefers `GH_TOKEN` over `GITHUB_TOKEN`; Octokit uses the token actually
 selected for its request, including dynamic provider tokens.
+
+`data/api-cache/budget-deficits.json` is the watcher's diagnostic episode map,
+keyed by installation/credential. Entries contain `since` (epoch milliseconds),
+`resetAt` and `alerted`. A low observed balance starts an episode; after more
+than 15 minutes it emits one deduplicated alert and persists the receipt.
+An observed healthy balance clears it. Expired/unknown buckets do not trigger
+alerts or prove recovery; another observed low window retains the same episode
+and alert receipt. One watcher owns the atomically replaced
+0600 file; it grants no merge authority. Each poll logs one line per known
+installation with its resource balances.
+
+`data/api-call-log/<UTC-date>.jsonl` additionally records `consumer` on logical
+attempts and separate `github_request` rows with `unit: http_response`,
+`requestCategory`, credential, resource, status and `budgetExempt` for 304.
+These additive rows count actual metered CLI/Octokit responses; logical
+attempts and GraphQL points are distinct units. Older missing consumer fields
+mean unattributed. Child adapters inherit `GHO_API_CONSUMER` for correlation.
+Broker verification also emits `unit: credential_binding` rows associating a
+token digest with its validated `app`/`installation`, so a combined report can
+group child env-token requests with the parent's installation. Bindings are
+metadata, not HTTP requests or logical attempts.
 
 Every admission preflight and every header observation names the credential
 that sends the request (LAC-2075). This includes the outer telemetry wrappers
@@ -91,7 +117,11 @@ GitHub budget deferral applies to GitHub I/O. Local operator-alert enqueueing
 and non-GitHub alert delivery continue during deferred or rate-limited ticks.
 Each async budget scope evaluates the current resource observation independently:
 below the throttle floor, ordinary scopes defer immediately, while urgent closing
-scopes may use positive remaining capacity. Zero remaining defers both. Only
+scopes may use positive remaining capacity. Zero remaining defers both, including
+hammer binary reads: they return a budget deferral immediately rather than
+sleeping until reset. Nested closer scopes
+propagate deferred/rate-limited accounting to their parent even when a caller
+swallows the error; urgency remains local to the nested operation. Only
 un-scoped callers share in-process sleep promises; scoped callers never join
 another caller's wait or inherit its deferral decision.
 
@@ -155,3 +185,9 @@ Cross-owner coordination is limited to a shared store its readers can actually
 read. A foreign file already sitting at the shared path is left in place:
 each caller keeps using its own owner-scoped store, and status names the
 shared store's owner uid. Removing it is an operator decision.
+
+Installation binding is process-local. Child processes and standalone status
+readers using only a token digest do not see installation-keyed holds. Budget
+deferrals retain the last validated ETag and enter the bounded transient-read
+path. A missing observation breaks the deficit interval, and an alert receipt
+is deduplicated by credential and episode start.

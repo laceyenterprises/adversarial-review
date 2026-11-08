@@ -17,6 +17,11 @@ start identity; older leases remain readable. Structured abandonment event
 `ama_closer.abandoned_lease_reclaimed` includes the owner PID and start identity. Startup also emits
 `ama_closer.startup_claim_observed` for inspected prior claims.
 No new runtime option or lifecycle state.
+Final remediation makes process capture optional on acquisition, normalizes
+missing/null identities for conditional deletion/restoration, and checks identity
+in the reaper's legacy age selector. Full-snapshot update CAS remains exact.
+Pending reclaim accepts the existing process-capture seam; regression coverage
+confirms it already rejects verified reused PIDs before raw liveness fallback.
 
 ## Verification
 
@@ -34,3 +39,25 @@ Each test command ran individually under the required network guard through
 Only touched test files were run, as required by the ticket. The reaper suite
 now imports the existing synthetic load fixture so direct execution does not
 scale its expected deadlines with host load. No live recovery was performed.
+
+Final-round validation uses `bash bin/run-bounded.sh --timeout 120 -- node --test
+test/ama-closer-lease.test.mjs test/recovery-reaper.test.mjs` (42 lease tests and
+109 reaper tests passed), scoped ESLint (zero errors), contract typecheck,
+data-model catalog validation (91 entries), and `git diff --check`.
+The closer-lease state projection remains identical; lifecycle states,
+transitions and existing smoke/post-deploy promises are unchanged.
+Additional CI repair aligns older live-owner/age fixtures and process-read
+counts with acquisition-time identity capture. The raw-evidence fixture now
+records the predecessor identity before simulating PID reuse. The disposable
+smoke supplies complete synthetic process absence instead of observing its own
+live runner. The closer-lease declaration now matches the existing README
+description, with its independent graph snapshot refreshed.
+
+- Targeted runner selection (`test/hamclose-ownership.test.mjs`,
+  `test/leaseciproof-01.test.mjs`, `test/load-aware-operational-waits.test.mjs`,
+  `test/noowner-01.test.mjs`, `test/ama-closer-dispatch-priority.test.mjs`):
+  484 passed under `bash bin/run-bounded.sh --timeout 180 -- node test/run-tests.mjs`.
+- `test/finalclose-01.test.mjs`: 75 passed.
+- `test/smv.test.mjs`: 11 passed, including the disposable-Git smoke.
+- `npm run lint`: zero errors, 153 existing warnings.
+- `bash demo/research-finding-walkthrough.sh`: passed offline byte equivalence.

@@ -276,7 +276,8 @@ function holderIsProvablyDeadHere(lease, { isProcessAlive, host }) {
  *
  * @param {Array<object>} leases  each `{ ...lease, _path }`
  * @param {{ now:any, thresholdMs:number, livePid?:number,
- *          deadHolderThresholdMs?:number, isProcessAlive?:function, host?:string }} opts
+ *          deadHolderThresholdMs?:number, isProcessAlive?:function,
+ *          captureProcessImpl?:function, host?:string }} opts
  * @returns {Array<object>}
  */
 export function selectReleasableCloserLeases(leases, {
@@ -285,6 +286,7 @@ export function selectReleasableCloserLeases(leases, {
   livePid = null,
   deadHolderThresholdMs = null,
   isProcessAlive = null,
+  captureProcessImpl,
   host = null,
   isInterruptedInFlightDispatch = null,
   launchStatusProbes = new Map(),
@@ -314,7 +316,11 @@ export function selectReleasableCloserLeases(leases, {
     });
     if (lease.status === 'pending' && (!lease.holderHost || lease.holderHost === localHost)) {
       try {
-        if ((isProcessAlive || isAmaCloserPidAlive)(lease.watcherPid) === true) return false;
+        if ((isProcessAlive || isAmaCloserPidAlive)(lease.watcherPid) === true
+          && abandonedAmaCloserLeaseOutcome(lease, {
+            now: nowMs, host: localHost, livePid,
+            isProcessAlive: () => true, captureProcessImpl,
+          }) !== 'abandoned-holder-dead') return false;
       } catch { /* Unknown liveness keeps the existing age fallback. */ }
     }
     // Modern launch-less leases are handled by the shared abandonment rule in
@@ -878,6 +884,7 @@ export async function reapStaleCloserLeases({
     livePid,
     deadHolderThresholdMs,
     isProcessAlive,
+    captureProcessImpl,
     host,
     launchStatusProbes,
   });

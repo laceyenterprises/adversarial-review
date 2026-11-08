@@ -6359,6 +6359,10 @@ is absent or its recorded process start identity differs (legacy leases use
 started-after-acquisition proof), or `abandoned-timeout` strictly after
 its persisted `acquiredAt + dispatchTimeoutMs` when liveness is unconfirmed.
 DEADWATCHERLEASE-01 records optional `watcherStartedAt` on local acquisition.
+Only positive integer local PIDs are inspected; missing/invalid PIDs and capture
+failures leave the optional identity null without failing acquisition.
+Conditional deletion/restoration equates an omitted legacy start identity with
+null; full-snapshot `expectedLease` updates still require the exact observation.
 Confirmed live local owners retain custody after expiry. Reclamation emits
 `ama_closer.abandoned_lease_reclaimed` naming the owner PID and recorded start
 identity under the existing reclaim fence. Startup sweeps once before polling;
@@ -6374,6 +6378,9 @@ This includes legacy leases with missing or null `dispatchTimeoutMs`: dead-PID
 proof does not require a timeout. Shared abandonment runs before the reaper's
 age-based selector; the 30-minute dead-holder tier and 6-hour floor apply only
 to leases left for that fallback, outside unresolved-intent fences.
+The legacy age selector also checks start identity before retaining a live PID:
+verified reuse permits age-based cleanup, while matching or unreadable identity
+retains live custody.
 The same hostless dead/reused-watcher proof also enters pre-receipt intent
 reconciliation before the intent deadline. Entry does not prove no submission:
 a legacy keyless intent still requires a successful empty closer-ticket/time

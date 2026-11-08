@@ -1209,6 +1209,7 @@ if (scenario === 'clean') {
     readPullRequestStateImpl: async () => ({ state: 'OPEN' }),
     now: recoveryNow, readIntentReceiptImpl: () => ({ ok: true, rows: [] }),
     processKillImpl: () => { throw Object.assign(new Error('synthetic dead owner'), { code: 'ESRCH' }); },
+    processExecFileSyncImpl: () => '99 Wed Dec 31 23:59:00 2025 synthetic-unrelated-process\n',
   });
   assert.equal(noLaunch.status, 'no-launch');
   assert.equal(noLaunch.record.reason, 'keyed-no-launch-proven');
@@ -1224,7 +1225,8 @@ if (scenario === 'clean') {
     targetRemediationSha: headSha, state: 'dispatching', workerClass: 'hammer',
     dispatchPhase: 'submitting', dispatchIdempotencyKey: deadKey,
     lastAttemptedAt: liveNow, dispatchTimeoutMs: 2_700_000, retryCount: 1 }));
-  acquireAmaCloserLease({ rootDir, ...deadIdentity, now: liveNow, watcherPid: 12345 });
+  acquireAmaCloserLease({ rootDir, ...deadIdentity, now: liveNow, watcherPid: 12345,
+    captureProcessImpl: () => null });
   const deadOptions = { now: liveNow, readPullRequestStateImpl: async () => ({ state: 'OPEN' }),
     processKillImpl: () => { throw Object.assign(Error('synthetic dead'), { code: 'ESRCH' }); },
     readIntentReceiptImpl: () => ({ ok: true, rows: [] }) };
@@ -1250,7 +1252,8 @@ if (scenario === 'clean') {
   updateAmaCloserDispatchRecord(rootDir, legacyIdentity, () => ({ ...legacyIdentity,
     targetRemediationSha: legacyIdentity.headSha, workerClass: 'hammer', state: 'dispatching',
     lastAttemptedAt: recoveryNow, retryCount: 1 }));
-  acquireAmaCloserLease({ rootDir, ...legacyIdentity, now: recoveryNow, watcherPid: 12345 });
+  acquireAmaCloserLease({ rootDir, ...legacyIdentity, now: recoveryNow, watcherPid: 12345,
+    captureProcessImpl: () => null });
   const legacyOptions = { now: recoveryNow,
     readPullRequestStateImpl: async () => ({ state: 'OPEN' }),
     processKillImpl: () => { throw Object.assign(new Error('synthetic dead owner'), { code: 'ESRCH' }); } };

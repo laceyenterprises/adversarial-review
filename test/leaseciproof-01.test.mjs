@@ -26,7 +26,8 @@ for (const scenario of [
     const calls = closerProcessFixture(t, scenario);
     const identity = { repo: 'fixture/project', prNumber: 7, headSha: 'a'.repeat(40) };
     const acquired = acquireAmaCloserLease({ rootDir, ...identity, watcherPid: 123,
-      now: '2026-01-01T00:00:00Z', dispatchTimeoutMs: 60_000 });
+      now: '2026-01-01T00:00:00Z', dispatchTimeoutMs: 60_000,
+      captureProcessImpl: () => ({ pid: 123, startedAt: '2025-12-31T23:59:00.000Z' }) });
     assert.equal(acquired.acquired, true);
     assert.deepEqual(captureCloserProcessSync(123), { pid: 123, startedAt: scenario.startedAt });
     let pidProbes = 0;

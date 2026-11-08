@@ -34,7 +34,8 @@
       ],
       "optionalFields": [
         "watcherStartedAt: UTC process start identity; null/unset when unavailable or legacy"
-      ]
+      ],
+      "processIdentityCompatibility": "DEADWATCHERLEASE-01 final remediation: acquisition captures only positive integer local PIDs and tolerates capture failures with null watcherStartedAt; invalid or missing watcherPid persists as null. Conditional deletion/restoration equates missing/null start identity but rejects different identities; full-snapshot expectedLease updates stay exact. The legacy reaper age selector checks shared start identity before retaining a live PID; verified reuse permits age fallback, matching/unreadable identity retains live custody."
     }
   ]
 }

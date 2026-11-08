@@ -3,7 +3,7 @@ import test from 'node:test';
 import { abandonAmaCloserLease, reconcileAndAbandonAmaCloserLease } from '../src/ama/abandoned-closer-lease.mjs';
 import { probeOrphanOwnership } from '../src/ama/orphan-watchdog.mjs';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -14,6 +14,9 @@ import {
   abandonedAmaCloserLeaseOutcome,
   acquireAmaCloserLease,
   amaCloserLeaseFilePath,
+  deleteAmaCloserLeaseIfCurrent,
+  isCurrentAmaCloserLease,
+  isReclaimablePendingAmaCloserLease,
   readAmaCloserLease,
   restoreAmaCloserLeaseIfCurrent,
   updateAmaCloserLease,
@@ -519,6 +522,66 @@ test('DEADWATCHERLEASE-01 exact process identity survives acquisition and preven
   assert.equal(abandonedAmaCloserLeaseOutcome(lease, { ...options, livePid: lease.watcherPid,
     captureProcessImpl: () => ({ startedAt: '2025-12-31T23:59:00Z' }) }), 'abandoned-holder-dead',
   'a restarted watcher reusing the PID cannot adopt its predecessor by PID alone');
+});
+
+test('DEADWATCHERLEASE-01 acquisition tolerates missing PIDs and failed identity capture', t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  for (const watcherPid of [undefined, null, 0, -1, 1.5, NaN, 'invalid', 4242]) {
+    const captured = [];
+    const result = acquireAmaCloserLease({ rootDir, ...IDENTITY,
+      headSha: `pid-${String(watcherPid)}`, watcherPid, captureProcessImpl: pid => {
+        captured.push(pid);
+        throw Error('transient capture failure');
+      } });
+    assert.deepEqual(captured, watcherPid === 4242 ? [4242] : [],
+      'only positive integer PIDs reach process capture');
+    assert.equal(result.acquired, true);
+    assert.equal(result.lease.watcherStartedAt, null);
+    assert.equal(result.lease.watcherPid, watcherPid === 4242 ? 4242 : null);
+    assert.equal(readAmaCloserLease(rootDir, result.lease).watcherStartedAt, null);
+  }
+  const captured = [];
+  const foreign = acquireAmaCloserLease({ rootDir, ...IDENTITY, watcherPid: 4242,
+    host: 'foreign-fixture-host', captureProcessImpl: pid => captured.push(pid) });
+  assert.equal(foreign.acquired, true);
+  assert.equal(foreign.lease.watcherStartedAt, null);
+  assert.deepEqual(captured, [], 'foreign PIDs must not be inspected locally');
+});
+
+test('DEADWATCHERLEASE-01 legacy CAS treats missing and null identity equally but rejects replacement identities', t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  for (const omittedOnDisk of [true, false]) {
+    const { lease, leasePath } = acquireAmaCloserLease({ rootDir, ...IDENTITY });
+    const expected = { ...lease };
+    if (omittedOnDisk) {
+      delete lease.watcherStartedAt;
+      writeFileSync(leasePath, JSON.stringify(lease));
+    } else {
+      delete expected.watcherStartedAt;
+    }
+    assert.equal(isCurrentAmaCloserLease(rootDir, expected), true);
+    assert.equal(deleteAmaCloserLeaseIfCurrent(rootDir, {
+      ...expected, watcherStartedAt: '2026-01-01T00:00:00Z',
+    }), false, 'a different process identity must still defeat deletion');
+    assert.equal(deleteAmaCloserLeaseIfCurrent(rootDir, expected), true);
+  }
+});
+
+test('DEADWATCHERLEASE-01 pending reclaim checks identity before raw PID liveness', () => {
+  const lease = { status: 'pending', lrqId: null, watcherPid: 4242,
+    holderHost: hostname(), acquiredAt: '2026-01-01T00:00:00Z',
+    watcherStartedAt: '2025-12-31T23:58:00Z' };
+  for (const dispatchTimeoutMs of [null, 60_000]) {
+    for (const reused of [false, true]) {
+      assert.equal(isReclaimablePendingAmaCloserLease({ ...lease, dispatchTimeoutMs }, {
+        now: '2026-01-02T00:00:00Z', processKillImpl: () => {},
+        captureProcessImpl: () => ({ startedAt: reused
+          ? '2025-12-31T23:59:00Z' : lease.watcherStartedAt }),
+      }), reused, 'matching owners retain custody; verified reused PIDs are reclaimed');
+    }
+  }
 });
 
 test('DEADWATCHERLEASE-01 orphan ownership rejects a pending lease with reused process identity', async t => {

@@ -968,6 +968,27 @@ test('selectReleasableCloserLeases: a LIVE same-host holder is never released at
   assert.deepEqual(throwing, [], 'an unanswerable liveness probe fails closed');
 });
 
+test('selectReleasableCloserLeases: legacy age fallback rejects verified reused PIDs', () => {
+  const lease = { status: 'pending', lrqId: null, watcherPid: DEAD_PID,
+    holderHost: THIS_HOST, acquiredAt: hoursAgo(7), updatedAt: hoursAgo(7),
+    watcherStartedAt: hoursAgo(8) };
+  for (const holderHost of [THIS_HOST, undefined]) {
+    for (const watcherStartedAt of [lease.watcherStartedAt, undefined]) {
+      for (const scenario of ['matching', 'reused', 'unreadable']) {
+        const selected = selectReleasableCloserLeases([{ ...lease, holderHost, watcherStartedAt }], {
+          now: NOW, thresholdMs: DEFAULT_STALE_CLOSER_LEASE_MS,
+          isProcessAlive: pidIsAlive, host: THIS_HOST,
+          captureProcessImpl: () => {
+            if (scenario === 'unreadable') throw Error('unreadable');
+            return { startedAt: scenario === 'reused' ? hoursAgo(6) : hoursAgo(8) };
+          },
+        });
+        assert.equal(selected.length, scenario === 'reused' ? 1 : 0);
+      }
+    }
+  }
+});
+
 test('selectReleasableCloserLeases: a lease younger than the dead-holder tier is never released', () => {
   const lease = {
     repo: 'a/x', prNumber: 1, headSha: 'h1', status: 'pending', terminalOutcome: null,

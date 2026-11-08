@@ -155,12 +155,21 @@ status-only evidence remains unknown. No new durable states or fields are added.
 
 DEADWATCHERLEASE-01 adds optional `watcherStartedAt`, the UTC process start
 identity captured on the acquiring host. New local leases persist it (null if
-unreadable); older leases remain readable. A different observed start time
+unreadable); older leases remain readable. Acquisition inspects only positive
+integer local PIDs; missing or invalid PIDs persist as null, and capture errors
+leave `watcherStartedAt` null without preventing acquisition. The ownership
+snapshot comparison used for conditional deletion/restoration treats missing
+and null start identities equally, while distinct recorded identities still
+refuse a stale mutation. Full-snapshot `expectedLease` updates remain exact.
+A different observed start time
 proves PID reuse even when both processes started before acquisition. Without
 this field, the legacy started-after-acquisition proof remains available.
 Confirmed live local owners retain custody past the deadline, including when
 start-time capture is unavailable. Unknown liveness retains the existing
 persisted timeout fallback; deadlines are never shortened or refreshed.
+The reaper's legacy age selector uses the same start-identity check before
+retaining a live PID past its generic age floor; verified reuse reaches the
+age fallback. Matching identities and unreadable capture retain live custody.
 
 The existing startup sweep runs once before polling; the returned ticker waits
 its normal interval before periodic sweeps. Each inspected pending/dispatched

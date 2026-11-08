@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { main } from '../bin/hammer-edit-plan.mjs';
 import { checkHammerEditPlan } from '../src/ama/hammer-edit-plan.mjs';
+import { assertFindingDisputeOwner } from '../src/ama/finding-dispute-owner.mjs';
 import { checkPrimaryChange } from '../src/ama/primary-change.mjs';
 import { amaAllAuthoritativeReviewerLogins } from '../src/ama/reviewer-authority.mjs';
 import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
@@ -128,6 +129,34 @@ test('failed or stale backlog capture cannot return a successful deferral receip
   assert.equal(db.prepare('SELECT count(*) n FROM finding_backlog').get().n, 0);
 });
 
+test('owner mismatch refuses deferral before any database write', async t => {
+  const { rootDir, db, planFile } = fixture(t);
+  let captured = false;
+  await assert.rejects(main([repo, '7', '1', planFile], {
+    rootDir, readReviewImpl: async () => review,
+    loadPolicy: () => ({ strictNonBlockingRemediation: false }),
+    assertOwner: (root) => assertFindingDisputeOwner(root, {
+      geteuidImpl: () => process.geteuid() + 1,
+    }),
+    captureImpl: () => { captured = true; },
+  }), error => error.exitCode === 78 && /refusing cross-user write/.test(error.message));
+  assert.equal(captured, false);
+  assert.equal(db.prepare('SELECT count(*) n FROM finding_backlog').get().n, 0);
+});
+
+test('unknown canonical findings refuse deferral before capture', async t => {
+  const { rootDir, planFile } = fixture(t);
+  let captured = false;
+  const malformed = { ...review, body: body.replace('**Keep routing simple**', '**<title>**')
+    .replace('`src/router.mjs`', '`<path>`') };
+  await assert.rejects(main([repo, '7', '1', planFile], {
+    rootDir, readReviewImpl: async () => malformed,
+    loadPolicy: () => ({ strictNonBlockingRemediation: false }),
+    captureImpl: () => { captured = true; },
+  }), /non-blocking-findings-unknown/);
+  assert.equal(captured, false);
+});
+
 test('duplicate captured passes reuse the existing pending content identity', async t => {
   const { rootDir, db, planFile } = fixture(t);
   const dependencies = { rootDir, readReviewImpl: async () => review,
@@ -160,7 +189,10 @@ test('ordinary ready capture stays compatible and invalid deferral rolls back', 
 
 test('hammer contract invokes the pre-edit helper and distinguishes deferred audit counts', () => {
   const prompt = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
-  assert.match(prompt, /Before editing any author-introduced line,[^\n]*bin\/hammer-edit-plan\.mjs/);
+  assert.match(prompt, /Before editing any author-introduced line,[^\n]*bounded helper/);
+  assert.match(prompt, /HAM_EDIT_OWNER=\$\(stat -f '%Su' <<ROOT_DIR>>\/data\/reviews\.db\)/);
+  assert.match(prompt, /HAM_EDIT_RUN=\(sudo -A -H -u "\$HAM_EDIT_OWNER"/);
+  assert.match(prompt, /alarm shift; exec @ARGV' 90 "\$\{HAM_EDIT_RUN\[@\]\}" "\$HAM_NODE_BIN" \\\n  <<ROOT_DIR>>\/bin\/hammer-edit-plan\.mjs/);
   assert.match(prompt, /exit 20 records the non-blocking finding[^\n]*means make no edit/);
   assert.match(prompt, /separate counts\n   for remediated and deferred findings/);
 });

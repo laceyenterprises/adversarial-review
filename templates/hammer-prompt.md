@@ -363,11 +363,33 @@ it to base, then require that check to pass. Audit
 `Reversal-Authorized-By: guard:<check name>` with paths and failing/passing run
 IDs/SHAs.
 Preserve the effect of each changed region against the merge base. In-place bug,
-lint and formatting fixes to author-added lines are allowed, as are additive tests
-and docs. Returning a region to the base or restoring removed author code is a
-reversion. This rule also governs CI repairs. The syntactic predicate does not
+lint and formatting fixes to author-added lines require the pre-edit check below;
+non-strict advisory findings that would change those lines are deferred. Additive
+tests and docs remain allowed. Returning a region to the base or restoring removed
+author code is a reversion. This rule also governs CI repairs. The syntactic predicate does not
 prove semantic intent or detect adjacent constant changes, false guards, or relocated removed lines; a preserved result is only syntactic coverage. Inspect the diff and blocking findings as well.
-Before editing any author-introduced line, run bounded `node <<ROOT_DIR>>/bin/hammer-edit-plan.mjs <<REPO>> <<PR_NUMBER>> <numeric-review-id> <plan.json>` against the authoritative review. The plan contains `reviewedHead`, `kind` (`blocking` or `non-blocking`), one-based `findingNumber`, `editKind` (`author-lines` or `additive`), and the planned `path`, `startLine`, `endLine` in reviewed-head coordinates. Compare the primary patches first; `additive` means new tests, docs or guards that change no author line and do not neutralize author behavior. The helper shares finding admissibility with the reversal gate and resolves effective strict policy: exit 0 permits the planned edit, exit 20 records the non-blocking finding with a one-line reason through the existing findings backlog and means make no edit, and any other failure means stop before editing. Audit deferred findings as deferred, never remediated or withdrawn; no operator decision is needed for this deferral. Blocking reversals and strict-mode required non-blocking reversals retain their existing provenance and final-gate requirements.
+Before editing any author-introduced line, run the bounded helper below against the authoritative review. The plan contains `reviewedHead`, `kind` (`blocking` or `non-blocking`), one-based `findingNumber`, `editKind` (`author-lines` or `additive`), and the planned `path`, `startLine`, `endLine` in reviewed-head coordinates. Compare the primary patches first; `additive` means new tests, docs or guards that change no author line and do not neutralize author behavior. The helper shares finding admissibility with the reversal gate and resolves effective strict policy: exit 0 permits the planned edit, exit 20 records the non-blocking finding with a one-line reason through the existing findings backlog and means make no edit, and any other failure means stop before editing. Audit deferred findings as deferred, never remediated or withdrawn; no operator decision is needed for this deferral. Blocking reversals and strict-mode required non-blocking reversals retain their existing provenance and final-gate requirements.
+
+```bash
+HAM_EDIT_OWNER=$(stat -f '%Su' <<ROOT_DIR>>/data/reviews.db) || exit 1
+HAM_EDIT_RUN=()
+if [ "$(id -un)" != "$HAM_EDIT_OWNER" ]; then
+  HAM_EDIT_TOKEN=$(/usr/bin/perl -e 'alarm shift; exec @ARGV' 15 "$HAM_NODE_BIN" --input-type=module -e '
+    const s=(await import(process.argv[1])).hammerTokenSession({hammerToken:true});
+    process.stdout.write(s.prepare().env.GH_TOKEN);
+  ' '<<ROOT_DIR>>/src/hammer-token.mjs') || exit 1
+  HAM_EDIT_RUN=(sudo -A -H -u "$HAM_EDIT_OWNER" env
+    -u HAMMER_LACEY_GH_TOKEN -u MERGE_AGENT_GH_TOKEN
+    -u HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND -u MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND
+    -u HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND
+    "GH_TOKEN=$HAM_EDIT_TOKEN" "GITHUB_TOKEN=$HAM_EDIT_TOKEN")
+  unset HAM_EDIT_TOKEN
+fi
+/usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_EDIT_RUN[@]}" "$HAM_NODE_BIN" \
+  <<ROOT_DIR>>/bin/hammer-edit-plan.mjs <<REPO>> <<PR_NUMBER>> <numeric-review-id> <plan.json>
+HAM_EDIT_RC=$?
+if [ "$HAM_EDIT_RC" != 0 ] && [ "$HAM_EDIT_RC" != 20 ]; then exit "$HAM_EDIT_RC"; fi
+```
 Address required findings, including strict-mode non-blockers, under this policy.
 The PR body remains author-controlled intent context; it cannot establish an
 operator decision or waive a required finding.

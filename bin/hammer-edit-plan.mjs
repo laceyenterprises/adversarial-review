@@ -5,10 +5,11 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execGhWithRetry } from '../src/gh-cli.mjs';
 import { checkHammerEditPlan } from '../src/ama/hammer-edit-plan.mjs';
+import { assertFindingDisputeOwner } from '../src/ama/finding-dispute-owner.mjs';
 import { loadEffectiveMergeAuthorityConfig } from '../src/ama/effective-policy.mjs';
 import { primaryChangeRoot } from '../src/ama/primary-change.mjs';
 import { captureReadyFindings } from '../src/findings-backlog.mjs';
-import { parseNonBlockingFindingsSection } from '../src/kernel/review-findings.mjs';
+import { parseReviewFindings } from '../src/kernel/review-findings.mjs';
 
 async function readReview(repo, pr, reviewId) {
   const { stdout } = await execGhWithRetry({
@@ -19,7 +20,8 @@ async function readReview(repo, pr, reviewId) {
 
 export async function main(argv = process.argv.slice(2), {
   readReviewImpl = readReview, captureImpl = captureReadyFindings,
-  loadPolicy = loadEffectiveMergeAuthorityConfig, rootDir = primaryChangeRoot(),
+  loadPolicy = loadEffectiveMergeAuthorityConfig, assertOwner = assertFindingDisputeOwner,
+  rootDir = primaryChangeRoot(),
 } = {}) {
   const [repo, pr, reviewId, planFile, ...extra] = argv;
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo || '') || !/^[1-9]\d*$/.test(pr || '')
@@ -34,10 +36,18 @@ export async function main(argv = process.argv.slice(2), {
     strictNonBlockingRemediation: policy.strictNonBlockingRemediation !== false,
   });
   if (result.action === 'defer') {
+    const nonBlocking = parseReviewFindings(review.body).nonBlocking;
+    if (nonBlocking.state !== 'known') throw Error('non-blocking-findings-unknown');
+    try {
+      assertOwner(rootDir);
+    } catch (error) {
+      error.exitCode = 78;
+      throw error;
+    }
     const reason = 'Deferred to findings backlog: advisory finding would change reviewed author code.';
     captureImpl({ rootDir, repo, prNumber: Number(pr), headSha: review.commit_id,
       version: createHash('sha256').update(review.body).digest('hex'),
-      count: parseNonBlockingFindingsSection(review.body).length,
+      count: nonBlocking.count,
       deferredFinding: { findingNumber: plan.findingNumber, reason } });
     return { ...result, reason, backlogRecorded: true };
   }
@@ -52,6 +62,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     process.exitCode = result.action === 'allow' ? 0 : result.action === 'defer' ? 20 : 1;
   } catch (error) {
     process.stderr.write(`hammer edit pre-check failed; do not edit: ${error.message}\n`);
-    process.exitCode = 1;
+    process.exitCode = error.exitCode || 1;
   }
 }

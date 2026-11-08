@@ -17,6 +17,10 @@ deferral and forbids editing; other failures stop editing. The plan format and
 audit contract are documented in the closure runbook and hammer prompt.
 `captureReadyFindings` accepts optional `deferredFinding` selection and reason;
 existing backlog columns and lifecycle are reused without migration.
+The hammer invokes the helper as the review-state database owner; the defer
+branch checks ownership before opening SQLite and uses the canonical findings
+count. Non-strict advisory author-line fixes are deferred, including in-place
+edits that the final syntactic preservation check might otherwise permit.
 
 ## Verification
 

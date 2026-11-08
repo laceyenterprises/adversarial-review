@@ -1522,6 +1522,14 @@ or `operator-required`; interrupted reservations stay consumed. Watcher lifecycl
 values and deployed smoke commands are unchanged. See
 [reviewer verdict recovery](docs/data-model/reviewer-verdict-recovery.md).
 
+HAMEMPTYPRIMARY-01 preserves author commits before conflict-only publication;
+its local proof does not alter lifecycle states or merge authority. Offline Git
+fixtures establish source behavior. The runtime owner separately observes the
+next natural replay after normal deployment, retaining the primary, exact head,
+checks, authenticated audit and custody outcome as declared in
+`post-merge-verify.json`. [LAC-2159's SEV3 report](docs/postmortems/SEV3-HAMEMPTYPRIMARY-01-LAC-2159.md)
+tracks pending organic acceptance; no production probe is added.
+
 BASEFETCH-01 preserves closer states and merge gates while isolating base
 capture and distinguishing invalid validation evidence from fetch failure.
 Existing smoke commands are unchanged. After the build manager confirms float

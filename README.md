@@ -4601,6 +4601,13 @@ merge predicates and smoke commands remain unchanged.
 
 ## Change notes
 
+New repository notes live in [`docs/changes/`](docs/changes/README.md), one
+`<TICKET-ID>.md` file per ticket. Follow that convention for new work; the
+entries below are preserved historical notes. No per-ticket README or index
+update is needed.
+
+- LIVEPACKNEW-01: a head-only pack plan is conclusively not live when a complete base-plan scan finds no matching planId, without a ledger read. Collisions retain ledger checks and base-authoritative tickets; unavailable scans fail closed. Unavailable ledger reads retry up to three attempts within ten seconds, with retry counts in structured review facts. Final remediation: stop ledger retries when the budget expires during backoff, count only dispatched retries, and emit zero retry counts for unread packs in remediation facts. Offline regressions cover deadline boundaries and malformed plans.
+
 - HAM PR #1735: tighten descendant termination and bounded-runner assertions, make lane-release wake tests deterministic, and exercise the review-observation CLI with persisted review and closeout evidence, including multibyte inputs at the UTF-16 code-unit size boundary. Isolate direct reviewer quota admission from builder routing and host configuration.
 
 - FINDINGS-dd4e87b5: strengthen offline test coverage for review-observation CLI input and errors, canonical Claude batch-steer environment aliases and conflict rejection, DAG input guards and producer refusals, findings dispatch timeouts under synthetic load, direct reviewer quota admission, successful Codex catalog seeding, and closer settlement after a remote merge with unavailable capture evidence. Keep cold-start and descendant-cancellation fixtures independent of the host ps executable and CPU sampling. Pin the bounded runner's unconfirmed-cleanup failure on restricted hosts while still requiring descendant termination. Release native lane locks after the fixture watch subscription enters the event loop, preserving the original deadline and stale-route assertions. Re-check historical findings against current main; production behaviour is unchanged.
@@ -4617,13 +4624,6 @@ merge predicates and smoke commands remain unchanged.
   phrases and enumerated lists ending in ", or", while retaining human ownership
   for missing credentials and separate approval clauses. Regression cases now
   live in the existing ownership and service-home suites discovered by `npm test`.
-- LIVEPACKNEW-01 final remediation: stop ledger retries when the budget expires during backoff, count only dispatched retries, and emit zero retry counts for unread packs in remediation facts. Offline regressions cover deadline boundaries and malformed plans.
-
-New repository notes live in [`docs/changes/`](docs/changes/README.md), one
-`<TICKET-ID>.md` file per ticket. Follow that convention for new work; the
-entries below are preserved historical notes. No per-ticket README or index
-update is needed.
-- LIVEPACKNEW-01: a head-only pack plan is conclusively not live when a complete base-plan scan finds no matching planId, without a ledger read. Collisions retain ledger checks and base-authoritative tickets; unavailable scans fail closed. Unavailable ledger reads retry up to three attempts within ten seconds, with retry counts in structured review facts.
 
 - **HAM-1722:** Preserve closer leases when environment launch IDs conflict while retaining audit identity precedence; use launch-request-format fixtures and cover identical aliases and ambiguous terminal outcomes.
 

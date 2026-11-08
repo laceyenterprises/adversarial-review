@@ -1611,6 +1611,7 @@ function schemaV1() {
             __strict: true,
             __keys: {
               enabled: { __type: TYPE_BOOL, __default: true },
+              clone_repos: { __type: TYPE_LIST, __item: { __type: TYPE_STRING }, __default: ['agent-os'] },
               direct_dsn: {
                 __type: TYPE_STRING,
                 __default: null,

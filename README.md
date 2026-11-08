@@ -528,11 +528,6 @@ rows, including category/resource/status and 304 exemption. Logical attempts
 must not be counted as charged requests. Known installation balances are
 logged once per poll. A persisted below-floor episode alerts once after more
 than 15 minutes and rearms on an observed healthy balance.
-After deployment, SRE floats this repository, restarts the watcher through the
-documented owner path, and retains two natural hours with no zero-balance
-deferrals, head-state calls/hour reduced by more than half, and a green-CI
-closer-pushed head reaching its closer within one poll window. Retain actual
-HTTP/304 counts to distinguish savings from a category change.
 
 REGISTRYSESSION-02: each process that resolves governed reviewer, closer or
 remediation models owns its registry readiness. The shared

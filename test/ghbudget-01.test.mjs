@@ -8,6 +8,8 @@ import { fetchPollingPrState } from '../src/polling-pr-state.mjs';
 import { monitorGitHubBudgets } from '../src/github-budget-monitor.mjs';
 import { createRateLimitThrottle, withGitHubBudgetScope, withCloserGitHubBudget,
   githubCredential, registerGitHubInstallationToken } from '../src/rate-limit-throttle.mjs';
+import { markGitHubRateLimited, currentGitHubBudgetScope } from '../src/rate-limit-throttle.mjs';
+import { runPostedReviewHandlersFairly } from '../src/watcher-poll-fairness.mjs';
 import { fetchHammerPr } from '../src/hammer-pr-read.mjs';
 import { parseGhDebug } from '../src/metered-gh.mjs';
 import { getHeadCloserCommitSuppression } from '../src/head-closer-commit-suppression.mjs';
@@ -17,6 +19,41 @@ function root(t) {
   const dir = mkdtempSync(join(tmpdir(), 'ghbudget-fixture-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
+}
+
+for (const failure of ['deferred', 'rate-limited']) {
+  test(`swallowed closer ${failure} excludes the posted-review handler from no-progress accounting`, async t => {
+    const throttle = createRateLimitThrottle({ sharedStatePath: join(root(t), 'budget.json'),
+      env: {}, recordApiCallImpl: () => {} });
+    await throttle.recordResponseRateLimit({ resource: 'core', credential: 'fixture',
+      remaining: 0, resetAt: Date.now() + 3600000 });
+    let records = 0, observations = 0;
+    const summary = await runPostedReviewHandlersFairly({
+      handlers: [{ repoPath: 'fixture/repo', prNumber: 1, run: async () => {
+        try {
+          await withCloserGitHubBudget(async () => {
+            assert.equal(currentGitHubBudgetScope().urgent, true);
+            if (failure === 'deferred') await throttle.awaitThrottleIfNeeded('core', 'fixture');
+            else {
+              markGitHubRateLimited('core', 'fixture');
+              throw new Error('synthetic rate limit swallowed by closer');
+            }
+          });
+        } catch { /* Closure leaves the handler alive for its next poll. */ }
+        assert.equal(currentGitHubBudgetScope().urgent, false);
+      } }],
+      laneGate: {
+        evaluate: () => ({ run: true }),
+        record: () => { records++; },
+        observeDecision: () => { observations++; },
+      },
+      budgetMs: 1000, handlerTimeoutMs: 500, minimumHandlerStartBudgetMs: 1,
+      logger: { warn() {}, error() {} },
+    });
+    assert.equal(summary.ran, 1);
+    assert.equal(records, 0);
+    assert.equal(observations, 1);
+  });
 }
 
 test('60 unchanged polls cost one initial read; fresh 304 preserves exact head and a changed response becomes terminal', async t => {

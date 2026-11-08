@@ -5,12 +5,14 @@
 `GHO_RATE_LIMIT_SHARED_STATE_PATH`
 **Source of truth:** `src/rate-limit-throttle.mjs`
 **Runtime surfaces:** `src/metered-gh.mjs`, `bin/metered-gh.mjs`,
-`src/runtime-status.mjs`
+`src/runtime-status.mjs`, `src/github-budget-monitor.mjs`, `src/api-telemetry.mjs`
 
 The shared JSON document has `version: 2` and a `buckets` object keyed by
 `githubBudgetKey(resource, credential)`. Authenticated keys are
 `installation-<app-id>-<installation-id>/<resource>` for tokens whose metadata
-was verified by the broker client in this process. Rotated tokens for that
+positively identifies `github_app_installation` and matches both configured App and
+installation pins in the broker client in this process. PAT fallbacks, missing
+source metadata and unpinned identities remain token-keyed. Rotated tokens for that
 installation share observations. Other authenticated keys remain
 `token-<digest>/<resource>` (normally `core` and `graphql`); the digest is the
 first 24 hex characters of SHA-256 of the effective token. Raw tokens are never
@@ -115,7 +117,11 @@ GitHub budget deferral applies to GitHub I/O. Local operator-alert enqueueing
 and non-GitHub alert delivery continue during deferred or rate-limited ticks.
 Each async budget scope evaluates the current resource observation independently:
 below the throttle floor, ordinary scopes defer immediately, while urgent closing
-scopes may use positive remaining capacity. Zero remaining defers both. Only
+scopes may use positive remaining capacity. Zero remaining defers both, including
+hammer binary reads: they return a budget deferral immediately rather than
+sleeping until reset. Nested closer scopes
+propagate deferred/rate-limited accounting to their parent even when a caller
+swallows the error; urgency remains local to the nested operation. Only
 un-scoped callers share in-process sleep promises; scoped callers never join
 another caller's wait or inherit its deferral decision.
 

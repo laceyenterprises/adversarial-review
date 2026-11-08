@@ -37,8 +37,18 @@ function currentGitHubBudgetScope() { return budgetScopes.getStore(); }
 // or a secondary limit safe. Only the positive balance below the polling floor
 // is reserved for fresh identity and merge-precondition reads.
 function withCloserGitHubBudget(fn) {
-  return budgetScopes.run({ rateLimited: false, deferred: false,
-    limitedBudgets: new Map(), ...currentGitHubBudgetScope(), urgent: true }, fn);
+  const parent = currentGitHubBudgetScope();
+  const scope = { rateLimited: false, deferred: false,
+    limitedBudgets: new Map(), ...parent, urgent: true };
+  return budgetScopes.run(scope, async () => {
+    try { return await fn(); }
+    finally {
+      if (parent) {
+        parent.rateLimited ||= scope.rateLimited;
+        parent.deferred ||= scope.deferred;
+      }
+    }
+  });
 }
 
 function registerGitHubInstallationToken(token, appId, installationId) {

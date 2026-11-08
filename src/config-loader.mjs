@@ -414,6 +414,20 @@ function schemaV1() {
       // __default on purpose: the resolved profile is exposed as
       // AgentOSConfig.profile, so an absent key leaves `values` untouched.
       profile: { __type: TYPE_STRING },
+      credentials: {
+        __type: TYPE_DICT, __strict: false,
+        __keys: {
+          enforcement: { __type: TYPE_STRING, __default: 'observe', __enum: ['observe', 'enforce'] },
+          model_broker: {
+            __type: TYPE_DICT, __strict: false,
+            __keys: { enforcement: { __type: TYPE_STRING, __default: 'observe', __enum: ['observe', 'enforce'] } },
+          },
+          cloud: {
+            __type: TYPE_DICT, __strict: false,
+            __keys: { enabled: { __type: TYPE_BOOL, __default: false } },
+          },
+        },
+      },
       cloud_access: cloudAccessConfigSchema(),
       // APPLEBUILD-01: shared CFG-01 toolchain selection, owned by Apple tools.
       apple: {

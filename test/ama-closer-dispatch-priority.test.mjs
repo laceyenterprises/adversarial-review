@@ -1168,6 +1168,8 @@ test('CLOSERGATE-01: an unresolved prior-head intent does not hold the current h
 test('LCR: a dispatched worker on a prior head holds its PR', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'lcr-same-pr-worker-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  await observeCloserBacklog({ rootDir, repo: 'acme/repo', prNumber: 404, deferred: true });
+  const observations = [];
   const oldHead = 'b'.repeat(40);
   updateAmaCloserDispatchRecord(rootDir, { repo: 'acme/repo', prNumber: 404, headSha: oldHead }, () => ({
     repo: 'acme/repo', prNumber: 404, headSha: oldHead,
@@ -1182,10 +1184,19 @@ test('LCR: a dispatched worker on a prior head holds its PR', async (t) => {
   const result = await maybeDispatchAmaCloser({
     ...findingsRemediationArgs(rootDir, { dispatchContext: { dispatchedAt: '2026-07-20T12:01:00Z' } }),
     ...deps,
+    observeCloserBacklogImpl: async options => {
+      observations.push(options);
+      return observeCloserBacklog(options);
+    },
   });
   assert.equal(result.reason, 'ama-closer-launch-in-progress');
   assert.equal(result.activeLaunch.headSha, oldHead);
   assert.equal(deps.calls.length, 0);
+  assert.equal(observations.length, 1, 'an active owner needs only one backlog observation');
+  assert.equal(observations[0].pending, false);
+  const backlog = JSON.parse(readFileSync(join(rootDir, 'data', 'ama-closure-lag', 'state.json'), 'utf8'));
+  assert.equal(backlog.prs['acme/repo#404'].closerSeenAt, undefined);
+  assert.equal(backlog.prs['acme/repo#404'].deferredAt, undefined);
 });
 
 test('LCR: blocked record cannot consume another PR launch slot', async (t) => {

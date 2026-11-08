@@ -7536,8 +7536,10 @@ async function maybeDispatchAmaCloserAttempt({
   });
   if (samePrLaunch || otherPrLaunches.length >= maxConcurrentLaunches) {
     const activeLaunch = samePrLaunch || otherPrLaunches[0];
-    try { await observeCloserBacklogImpl({ rootDir, repo, prNumber, pending: !samePrLaunch, deferred: !samePrLaunch, logger }); }
-    catch (error) { logger?.warn?.(`AMA backlog deferral observation failed: ${error.message}`); }
+    if (!samePrLaunch) {
+      try { await observeCloserBacklogImpl({ rootDir, repo, prNumber, deferred: true, logger }); }
+      catch (error) { logger?.warn?.(`AMA backlog deferral observation failed: ${error.message}`); }
+    }
     logAmaCloserDispatchEvent(logger, 'ama_closer.dispatch_deferred_active_launch', {
       repo,
       prNumber,

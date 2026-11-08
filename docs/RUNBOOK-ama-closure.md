@@ -1209,6 +1209,13 @@ budgets, polling/backoff, cache freshness,
 leases, rate-limit windows and reviewer/worker run limits keep their existing
 meaning and duration.
 
+Closer harness resolution treats a reported exhausted Codex account meter at 100% or more
+as exhausted even when its probe reports `ok` and usage credits remain.
+The shared quota classifier reads `providerRateLimits` (or the measured
+`estRemaining.rateLimits` projection). It chooses an eligible configured
+fallback, or holds when none is eligible; account recovery is re-evaluated on
+the next observation.
+
 For quota reads, let `T` be the scaled 45-second child timeout: at the default
 6x cap, `T = 270s`; at the maximum 20x cap, `T = 900s`. Worst-case timeout
 budgets below exclude process teardown, parsing and any separate runtime probes;

@@ -196,7 +196,9 @@ export function quotaStatusesFromSnapshot(payload) {
   return providerStatuses.map((entry) => ({
     provider: String(entry?.provider || '').trim().toLowerCase(),
     authPath: String(entry?.authPath || entry?.auth_path || '').trim().toLowerCase(),
-    state: String(entry?.state || '').trim().toLowerCase(),
+    // A successful credit-backed turn cannot certify subscription capacity.
+    // Reset estimates alone do not supersede a reported exhausted meter.
+    state: codexPlanExhausted(entry) ? 'exhausted' : String(entry?.state || '').trim().toLowerCase(),
     source: entry?.source || 'hq-fleet-quota-status',
     lastGoodAt: entry?.lastGoodAt || entry?.last_good_at || null,
     lastProbeAt: entry?.lastProbeAt || entry?.last_probe_at || null,
@@ -205,6 +207,17 @@ export function quotaStatusesFromSnapshot(payload) {
     models: normalizeModelRows(entry?.models),
     afhGrounding: normalizeAfhGroundingVerdict(entry?.afhGrounding ?? entry?.afh_grounding),
   }));
+}
+
+function codexPlanExhausted(entry) {
+  if (String(entry?.provider || '').trim().toLowerCase() !== 'openai'
+    || !['oauth', 'oauth-corp'].includes(String(entry?.authPath || entry?.auth_path || '').trim().toLowerCase())) return false;
+  const limits = [
+    ...(Array.isArray(entry?.providerRateLimits) ? entry.providerRateLimits : []),
+    ...(Array.isArray(entry?.estRemaining?.rateLimits) ? entry.estRemaining.rateLimits : []),
+  ];
+  return limits.some(row => row?.limitId === 'codex'
+    && typeof row.usedPercent === 'number' && row.usedPercent >= 100);
 }
 
 // Rows for one provider, OAuth-first (the auth path a native-harness spawn

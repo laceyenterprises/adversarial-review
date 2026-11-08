@@ -4577,13 +4577,12 @@ merge predicates and smoke commands remain unchanged.
 
 - FINDINGS-94c784e1: Correct the closer backlog-repair runbook to use the SDK-only CLI, pass its read activation flag and SDK session/bootstrap environment through `sudo`, describe current output and rejected database-source flags, and make dispatch-read subprocess fixtures independent of host load diagnostics.
 
-- LIVEPACKNEW-01 final remediation: stop ledger retries when the budget expires during backoff, count only dispatched retries, and emit zero retry counts for unread packs in remediation facts. Offline regressions cover deadline boundaries and malformed plans.
-
 New repository notes live in [`docs/changes/`](docs/changes/README.md), one
 `<TICKET-ID>.md` file per ticket. Follow that convention for new work; the
 entries below are preserved historical notes. No per-ticket README or index
 update is needed.
-- LIVEPACKNEW-01: a head-only pack plan is conclusively not live when a complete base-plan scan finds no matching planId, without a ledger read. Collisions retain ledger checks and base-authoritative tickets; unavailable scans fail closed. Unavailable ledger reads retry up to three attempts within ten seconds, with retry counts in structured review facts.
+
+- LIVEPACKNEW-01: a head-only pack plan is conclusively not live when a complete base-plan scan finds no matching planId, without a ledger read. Collisions retain ledger checks and base-authoritative tickets; unavailable scans fail closed. Unavailable ledger reads retry up to three attempts within ten seconds, with retry counts in structured review facts. Final remediation stops ledger retries when the budget expires during backoff, counts only dispatched retries, and emits zero retry counts for unread packs in remediation facts. Offline regressions cover deadline boundaries and malformed plans.
 
 - **HAM-1722:** Preserve closer leases when environment launch IDs conflict while retaining audit identity precedence; use launch-request-format fixtures and cover identical aliases and ambiguous terminal outcomes.
 

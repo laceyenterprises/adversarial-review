@@ -461,7 +461,7 @@ test('comment-only with NO Blocking Issues section fails closed as unknown (live
   assert.equal(res.blockingFindingCount, 0);
 });
 
-test('comment-only with a REAL blocking finding reconciles to request-changes and count >= 1', () => {
+test('comment-only with a REAL blocking finding stays request-changes with unknown blocking state', () => {
   const res = resolveSettledReviewVerdict('/root', {
     repo: 'acme/agent-os',
     prNumber: 1858,
@@ -474,8 +474,8 @@ test('comment-only with a REAL blocking finding reconciles to request-changes an
     },
   });
   assert.equal(res.verdict, 'request-changes');
-  assert.equal(res.blockingFindingState, 'known');
-  assert.ok(res.blockingFindingCount >= 1, `expected >= 1, got ${res.blockingFindingCount}`);
+  assert.equal(res.blockingFindingState, 'unknown');
+  assert.equal(res.blockingFindingCount, 0, 'unknown blockers do not expose an authoritative count');
 });
 
 test('live-review lookup failure fails CLOSED on blocking-findings (unknown)', () => {
@@ -706,7 +706,7 @@ test('E2E: settled-success + eligible + clean mergeability uses daemon route, no
   assert.equal(execCalls.length, 0, 'clean eligible PR must not spawn a click-only agent');
 });
 
-test('E2E: comment-only + real blocking finding stays ineligible (blocking-findings-present)', () => {
+test('E2E: comment-only + real blocking finding stays ineligible (blocking-findings-unknown)', () => {
   const HEAD2 = 'a'.repeat(40);
   const settled = resolveSettledReviewVerdict('/root', {
     repo: 'acme/agent-os',
@@ -721,7 +721,8 @@ test('E2E: comment-only + real blocking finding stays ineligible (blocking-findi
   });
   const result = eligibilityFor(settled);
   assert.equal(result.eligible, false);
-  assert.ok(result.reasons.includes('blocking-findings-present'), JSON.stringify(result.reasons));
+  assert.ok(result.reasons.includes('blocking-findings-unknown'), JSON.stringify(result.reasons));
+  assert.ok(result.reasons.includes('verdict-not-settled-success'), JSON.stringify(result.reasons));
 });
 
 test('E2E: request-changes stays ineligible (verdict-not-settled-success)', () => {

@@ -103,7 +103,7 @@ Request changes
 });
 
 
-test('parsed review body exposes the reconciled effective verdict', () => {
+test('parsed review body keeps contradictory verdicts blocking', () => {
   const reviewBody = `
 ## Blocking issues
 - None.
@@ -116,7 +116,10 @@ Approved
 Request changes
 `;
 
-  assert.equal(parseReviewBody(reviewBody).verdict, 'Comment only');
+  const parsed = parseReviewBody(reviewBody);
+  assert.equal(parsed.verdict, 'Request changes');
+  assert.equal(parsed.blocking.missing, true, 'contradictory metadata remains unavailable to rescue');
+  assert.equal(parsed.blocking.count, 0);
 });
 
 test('parsed findings expose normalized category and structured fields', () => {

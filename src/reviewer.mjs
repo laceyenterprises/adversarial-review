@@ -2117,12 +2117,8 @@ async function main() {
       effectiveModel = 'gemini';
       effectiveBotTokenEnv = 'GH_GEMINI_REVIEWER_TOKEN';
       configureReviewerWorkspaceAudit({
-        repo,
-        prNumber,
-        reviewerModel: effectiveModel,
-        headSha: reviewerWorkspaceHeadSha,
-        checkoutDir: reviewerCheckoutDir,
-        stateDir: reviewerWorkspaceStateDir,
+        repo, prNumber, reviewerModel: effectiveModel, headSha: reviewerWorkspaceHeadSha,
+        checkoutDir: reviewerCheckoutDir, stateDir: reviewerWorkspaceStateDir,
       });
       geminiDeadline.arm();
       dispatch = await reviewWithSizeRecovery();

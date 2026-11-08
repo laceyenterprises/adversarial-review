@@ -30,6 +30,13 @@ No CI workflow or merge override changes.
 The recovery receipt stores a numeric `prNumber`; head normalization is unchanged.
 Lifecycle states, transitions and deployed smoke promises are unchanged.
 
+HAM closure preserves both final-review fixes already present in the remediation
+head. Follow-up criticality, rescue and settled-verdict regression assertions now
+expect contradictory reviews to stay request-changes with unavailable blocking
+metadata. The end-to-end eligibility assertion verifies both unknown blockers
+and an unsettled verdict refuse merge. Workspace-audit argument formatting keeps
+the reviewer at the existing 2,550-line ceiling without changing execution.
+
 ## Verification
 
 Scoped offline tests run individually with `node --test <file>` through the
@@ -64,3 +71,15 @@ Final remediation validation on the freshly rebased branch:
 
 Tests, lint, typechecking and the demo use `bin/run-bounded.sh`. No full local
 suite was run; PR-head CI retains that merge gate.
+
+HAM closure validation through `hammer-validate.mjs`:
+
+- Targeted `node --import ./test/helpers/load-aware-timeout-fixture.mjs --test`
+  runs pass for follow-up jobs, merge-agent rescue classification, settled
+  verdict resolution, ARC-10 decomposition, verdict recovery and watcher review
+  pipeline. The watcher claim-loop suite also passes all 160 cases.
+- `npm run lint`: zero errors (153 existing warnings).
+- `npm run typecheck:contracts`: passes.
+- `node scripts/validate-data-model-catalog.mjs`: all 91 entries validate.
+- `bash demo/research-finding-walkthrough.sh`: byte-stable offline demo passes.
+- `git diff --check`: passes.

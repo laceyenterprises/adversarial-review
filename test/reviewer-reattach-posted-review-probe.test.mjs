@@ -32,6 +32,7 @@ function row(overrides = {}) {
   return {
     repo: 'laceyenterprises/agent-os',
     pr_number: 5711,
+    builderTag: 'grok',
     reviewer: 'gemini',
     reviewer_started_at: STARTED_AT,
     ...overrides,

@@ -128,6 +128,7 @@ function spawnArgs(statusDir, capture) {
   return {
     repo: 'example/demo',
     prNumber: 99,
+    builderTag: 'codex',
     reviewerModel: 'claude-code',
     botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
     reviewerHeadSha: 'deadbeef',

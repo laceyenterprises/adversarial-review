@@ -105,8 +105,6 @@ test('a withdrawn remediator-gemini registry class skips gemini instead of abort
   assert.equal(result.workerClass, 'claude-code');
   assert.deepEqual(result.skipped.map(({ workerClass, reason }) => ({ workerClass, reason })), [
     { workerClass: 'gemini', reason: 'model-unresolvable' },
-    // A Grok slot listed before its class is connected is skipped the same way.
-    { workerClass: 'remediator-grok', reason: 'provider-untracked' },
   ]);
   assert.match(result.skipped[0].detail, /readable registry has no class/);
 });

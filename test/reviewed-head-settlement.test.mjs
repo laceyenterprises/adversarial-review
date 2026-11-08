@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { writeReviewerRunRecord } from '../src/adapters/reviewer-runtime/run-state.mjs';
 import { join } from 'node:path';
 import { ensureReviewStateSchema, forceResetReviewToPending, requestReviewRereview } from '../src/review-state.mjs';
 import {
@@ -36,6 +37,7 @@ function fixture(t) {
     .run(repo, startedAt, head);
   assert.equal(prepareMarkAttemptStarted(db).run(startedAt, session, head, head,
     600_000, '2026-01-01T00:10:00.000Z', head, repo, 1).changes, 1);
+  writeReviewerRunRecord(rootDir, { sessionUuid: session, subjectContext: { builderTag: 'codex' } });
   const statements = {
     markPosted: prepareMarkPosted(db),
     releaseUnsettledPostedReview: prepareReleaseUnsettledPostedReview(db),

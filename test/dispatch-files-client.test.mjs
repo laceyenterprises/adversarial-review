@@ -156,7 +156,7 @@ test('production spawnReviewer honors the public quota gate directly', async t =
   const rootDir = mkdtempSync(join(tmpdir(), 'reviewer-quota-fence-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const result = await spawnReviewer({rootDir, repo: 'acme/fixture', prNumber: 1,
-    reviewerModel: 'claude-code', reviewerHeadSha: 'a'.repeat(40), reviewerSessionUuid: 'direct-quota',
+    builderTag: 'codex', reviewerModel: 'claude-code', reviewerHeadSha: 'a'.repeat(40), reviewerSessionUuid: 'direct-quota',
     quotaCheckEnv: {}, beginReviewerPassImpl() {}, completeReviewerPassImpl() {},
     readReviewerQuotaDecisionImpl: args => readReviewerQuotaDecision({...args, execFileImpl: async () => {
       calls++; return {stdout: JSON.stringify({providerStatuses: [{provider: 'anthropic', authPath: 'oauth', state: 'exhausted'}]})};

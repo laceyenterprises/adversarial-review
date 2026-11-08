@@ -332,7 +332,7 @@ test('ITP-12 reattach renews the original receipt and releases only after confir
       reviewer_head_sha, reviewer_timeout_ms) VALUES (?, 7, ?, 'codex', 'open', 'reviewing',
       'session', 9001, ?, 'head-1', 3600000)`).run('sample/project', '2026-10-20T00:00:00Z', '2026-10-20T00:00:00Z');
     writeReviewerRunRecord(root, { sessionUuid: 'session', state: 'spawned', pgid: 9001,
-      subjectContext: { reviewerAccountReceipt: receipt, reviewerModel: 'codex' } });
+      subjectContext: { builderTag: 'claude-code', reviewerAccountReceipt: receipt, reviewerModel: 'codex' } });
     let alive = true;
     const calls = [];
     const options = { db, rootDir: root, now: new Date('2026-10-20T00:10:00Z'),

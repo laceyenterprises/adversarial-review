@@ -272,11 +272,18 @@ function killPgid(pgid, signal = 'SIGKILL') {
   }
 }
 
+function reattachReviewerFamily(reviewer) {
+  const family = normalizeReviewerModel(reviewer);
+  if (family) return family;
+  // Older rows used these harness labels for Codex-posted verdicts.
+  return reviewerBotLogin(reviewer) === resolveReviewerBotLogin('codex') ? 'codex' : null;
+}
+
 function makeReviewPostedProbe(octokit) {
   const cache = new Map();
 
   return async function reviewPostedAfter(row, { refresh = false, headSha = null } = {}) {
-    if (reviewerRefusesBuilder(row.builderTag, row.reviewer)) return null;
+    if (reviewerRefusesBuilder(row.builderTag, reattachReviewerFamily(row.reviewer))) return null;
     const startedAtMs = parseTime(row.reviewer_started_at);
 
     const { owner, repo } = splitRepoPath(row.repo);
@@ -561,7 +568,7 @@ async function reconcileReviewerSessions({
   for (const row of allRows) {
     const context = readReviewerRunRecordBestEffort(rootDir, row)?.subjectContext;
     row.builderTag = context?.builderTag || null;
-    if (context && !reviewerRefusesBuilder(row.builderTag, row.reviewer)) {
+    if (context && !reviewerRefusesBuilder(row.builderTag, reattachReviewerFamily(row.reviewer))) {
       try { persistReviewerAttributionForSession(db, row, { ...context, reviewerModel: row.reviewer }); }
       catch { log.warn('[watcher] reviewer attribution recovery unavailable; original receipt retained'); }
     }
@@ -650,12 +657,6 @@ async function reconcileReviewerSessions({
 
   for (const listedRow of rows) {
     let row = listedRow;
-    if (reviewerRefusesBuilder(row.builderTag, row.reviewer)) {
-      markStickyOrphan({ statements, row, failureAt,
-        message: 'Reviewer family matches the recorded builder family; operator must verify before retrying.',
-        log, event: 'reviewer_reattach_family_refused' });
-      continue;
-    }
     let terminalState = String(row.pr_state || '').trim().toLowerCase();
     let terminalConfirmed = terminalState === 'merged';
     let closedPrStateUnverified = false;
@@ -788,6 +789,13 @@ async function reconcileReviewerSessions({
         log,
         event: 'reviewer_reattach_unknown_reviewer',
       });
+      continue;
+    }
+
+    if (reviewerRefusesBuilder(row.builderTag, reattachReviewerFamily(row.reviewer))) {
+      markStickyOrphan({ statements, row, failureAt,
+        message: 'Builder or reviewer family could not be verified as eligible; operator must verify before retrying.',
+        log, event: 'reviewer_reattach_family_refused' });
       continue;
     }
 

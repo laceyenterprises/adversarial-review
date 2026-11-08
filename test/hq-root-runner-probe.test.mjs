@@ -52,6 +52,7 @@ test('runner quota probe cannot see an inherited exhausted Gemini status', async
   const result = await spawnReviewer({
     repo: 'fixture-owner/demo',
     prNumber: 1,
+    builderTag: 'codex',
     reviewerModel: 'gemini',
     reviewerHeadSha: 'fixture-head',
     reviewerSessionUuid: 'fixture-session',

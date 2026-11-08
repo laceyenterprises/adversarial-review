@@ -86,7 +86,7 @@ test('local-mode consume, prompt build, and reconcile agree on the same reply pa
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-local-'));
 
   await withLocalReplyEnv(rootDir, async (repliesRoot) => {
-    createFollowUpJob({ branch: 'fixture/remediation',
+    createFollowUpJob({ builderTag: 'claude-code', branch: 'fixture/remediation',
       rootDir,
       repo: 'laceyenterprises/agent-os',
       prNumber: 428,

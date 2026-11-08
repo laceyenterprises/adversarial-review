@@ -457,7 +457,10 @@ time it is sourced, including after session continuation. A nonempty
 `HAM_NODE_BIN` must name an absolute executable file; an invalid explicit value
 stops with `node-runtime-unavailable`. When unset or empty, resolution uses the
 launch pin `AGENT_OS_NODE_BIN`, then `command -v node`. An invalid launch pin or
-missing executable produces the same named stop. Keep sourcing the original
+missing executable produces the same named stop. Resolution failure unsets
+`HAM_NODE_BIN` so the failure-audit wrapper reports its unavailable runtime
+without attempting the rejected executable. Persisted `ham_gh`, `ham_git` and
+`ham_pr` helpers use the resolved export directly. Keep sourcing the original
 inputs in every shell; do not reconstruct lease ownership on resume.
 
 For current PR/head lease observation, run

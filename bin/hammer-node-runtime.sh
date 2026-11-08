@@ -16,6 +16,7 @@ ham_resolve_node_runtime() {
         return 0
       fi ;;
   esac
+  unset HAM_NODE_BIN
   # Consumed by the sourcing phase and its failure-audit wrapper.
   # shellcheck disable=SC2034
   HAM_PHASE_OUTCOME=node-runtime-unavailable

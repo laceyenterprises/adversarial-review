@@ -14,6 +14,10 @@ executable `HAM_NODE_BIN`. Unset or empty values resolve through the launch pin
 `AGENT_OS_NODE_BIN`, then `command -v node`. Invalid explicit pins or unavailable
 executables fail with `node-runtime-unavailable`. The initial prompt entry and
 persisted `inputs.sh` source the resolver, restoring the export in resumed shells.
+Final comment-only remediation clears `HAM_NODE_BIN` when resolution fails,
+avoiding an attempted invocation of the rejected pin during failure auditing.
+Persisted `ham_gh`, `ham_git` and `ham_pr` helpers now use the resolved export
+directly, matching the phase entrypoints.
 
 Lease ownership, cleanup, mandatory stops, merge predicates and CI configuration
 are unchanged. The closure runbook describes the runtime contract in place.
@@ -42,3 +46,21 @@ The ticket restricts execution to touched test files; the full suite and demo
 were not run. The repository has no `scripts/test-shellcheck-gate.sh`, so the
 scoped ShellCheck commands above validate the changed shell surfaces directly.
 HCP memory search timed out; the local hardening brief returned no projections.
+
+Final comment-only remediation, after rebasing onto freshly fetched `origin/main`:
+
+- `bin/run-bounded.sh --timeout 120 -- node --test test/hammer-procedure-generation.test.mjs`: 11 passed.
+- `bin/run-bounded.sh --timeout 120 -- node --test --test-name-pattern=HAMNODEBIN-01 test/hammertrim-contract.test.mjs`: one passed.
+- `npm run lint`: passed, zero errors and 152 existing warnings.
+- `npm run typecheck:contracts`: passed.
+- `shellcheck bin/hammer-node-runtime.sh` and `bash -n bin/hammer-node-runtime.sh`: passed.
+- Rendered phases and persisted inputs: `bash -n` and
+  `shellcheck --shell=bash --severity=error` passed.
+- `git diff --check`: passed.
+
+New regression coverage verifies invalid runtime pins are absent in caller and
+child shells, rendered failure audits emit no invocation errors, and persisted
+helpers refuse a lost runtime export instead of launching a PATH fallback.
+The full suite and demo remain delegated to PR-head CI under this round's
+targeted-validation instruction. No persistent store, lifecycle declaration or
+smoke promise changes are introduced.

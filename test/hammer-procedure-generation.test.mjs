@@ -235,8 +235,34 @@ source "$1" >/dev/null 2>/dev/null
         assert.ifError(result.error);
         assert.notEqual(result.status, 0, phase);
         assert.match(result.stderr, /node-runtime-unavailable/);
+        assert.match(result.stderr, /HAM terminal failure audit unavailable/);
+        assert.doesNotMatch(result.stderr, /No such file or directory|command not found|Permission denied|is a directory/);
         assert.doesNotMatch(result.stdout, /synthetic-lease-status/);
       }
+    }
+  }
+});
+
+test('HAMNODEBIN-01: failed runtime resolution clears invalid pins in the caller and child shells', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-invalid-runtime-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const resolver = fileURLToPath(new URL('../bin/hammer-node-runtime.sh', import.meta.url));
+  const nonExecutable = join(dir, 'non-executable');
+  writeFileSync(nonExecutable, '#!/bin/bash\nexit 0\n', { mode: 0o644 });
+  for (const pinName of ['HAM_NODE_BIN', 'AGENT_OS_NODE_BIN']) {
+    for (const invalid of [join(dir, 'missing'), 'node', dir, nonExecutable]) {
+      const result = spawnSync('/bin/bash', ['-uc', `
+if source "$1"; then exit 91; fi
+[ "\${HAM_NODE_BIN+x}" != x ] || exit 92
+[ "$HAM_PHASE_OUTCOME" = node-runtime-unavailable ] || exit 93
+/bin/bash -uc '[ "\${HAM_NODE_BIN+x}" != x ]'
+`, 'bash', resolver], {
+        env: { PATH: process.env.PATH, [pinName]: invalid },
+        encoding: 'utf8', timeout: 5000,
+      });
+      assert.ifError(result.error);
+      assert.equal(result.status, 0, `${pinName}: ${result.stderr}`);
+      assert.match(result.stderr, /node-runtime-unavailable/);
     }
   }
 });
@@ -262,8 +288,23 @@ source "$1"
   assert.ifError(result.error);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, process.execPath);
+  // After sourcing, helpers must require the resolved export rather than
+  // silently launching a PATH runtime if the caller loses it.
+  const fallback = join(dir, 'node');
+  writeFileSync(fallback, '#!/bin/bash\nprintf unexpected-PATH-runtime\n', { mode: 0o755 });
+  for (const helper of ['ham_gh', 'ham_git', 'ham_pr']) {
+    const lost = spawnSync('/bin/bash', ['-c', 'source "$1" || exit; unset HAM_NODE_BIN; "$2" fixture', 'bash', script, helper], {
+      env: { PATH: `${dir}:${process.env.PATH}`, AGENT_OS_NODE_BIN: process.execPath },
+      encoding: 'utf8', timeout: 5000,
+    });
+    assert.ifError(lost.error);
+    assert.notEqual(lost.status, 0, helper);
+    assert.equal(lost.stdout, '', helper);
+  }
+  const emptyPath = join(dir, 'empty-path');
+  mkdirSync(emptyPath);
   const missing = spawnSync('/bin/bash', ['-c', 'source "$1"', 'bash', join(root, 'bin/hammer-node-runtime.sh')], {
-    env: { PATH: dir }, encoding: 'utf8', timeout: 5000,
+    env: { PATH: emptyPath }, encoding: 'utf8', timeout: 5000,
   });
   assert.equal(missing.status, 1);
   assert.match(missing.stderr, /node-runtime-unavailable/);

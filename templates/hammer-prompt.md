@@ -222,14 +222,14 @@ export HAM_RUN_DIR='<<RUN_DIR>>'
 export HAM_ROOT_DIR='<<ROOT_DIR>>' HAM_HQ_ROOT='<<HQ_ROOT>>' HAM_HQ_OWNER='<<HQ_OWNER>>'
 export HAM_AUDIT_PATH='<<AUDIT_PATH>>' HAM_REVIEWER='<<REVIEWER>>'
 export HAM_AMA_TRAILERS=<<AMA_TRAILERS_SHELL>>
-ham_gh() { "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/metered-gh.mjs" exec-hammer "$@"; }
+ham_gh() { "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/metered-gh.mjs" exec-hammer "$@"; }
 ham_git() {
   local ham_git_exit=0
-  "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/metered-gh.mjs" exec-git "$@" || ham_git_exit=$?
+  "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/metered-gh.mjs" exec-git "$@" || ham_git_exit=$?
   if [ "$ham_git_exit" -eq 76 ]; then HAM_PHASE_OUTCOME=git-credential-refresh-failed; fi
   return "$ham_git_exit"
 }
-ham_pr() { "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-pr-read.mjs" "$HAM_REPO" "$HAM_PR_NUMBER" "$@"; }
+ham_pr() { "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-pr-read.mjs" "$HAM_REPO" "$HAM_PR_NUMBER" "$@"; }
 HAM_INPUTS
 source "<<RUN_DIR>>/inputs.sh"
 "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-controller.mjs" resolve-environment || exit $?

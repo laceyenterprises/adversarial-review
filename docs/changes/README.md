@@ -6,6 +6,10 @@ remediation updates that ticket's file. If a change has no ticket, use
 `PR-<number>.md` once the PR number is known. Existing module-local fragments
 remain valid for their module; do not duplicate the same note here.
 
+The repository-level notes in `src/changes/*.md` are historical. Preserve them,
+but write new repository-level notes only in `docs/changes/`; `src/changes/`
+is not an alternative destination or a module-local fragment directory.
+
 Include Summary, Interface changes (or none), and Verification with commands
 and observed results. Link a longer report when useful. Browse this directory
 or search filenames for the ticket; no hand-maintained ticket index or generated

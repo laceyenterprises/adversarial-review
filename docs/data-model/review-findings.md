@@ -140,11 +140,23 @@ authority and do not carry a withdrawal forward to an arbitrary evaluated head.
 ## Read API and offline repair
 
 `readReviewFindings(db, options)` accepts a caller-owned, optionally read-only
-SQLite connection. Filters are `repo`, `prNumber`, `afterPassId`, `afterOrdinal`
-and `limit` (1–5000, default 500). The cursor is the last row's pass and ordinal,
+SQLite connection. Filters are `repo`, `prNumber`, `prNumbers` (a nonempty
+positive-integer list), `findingId`, `reviewerModel`, `reviewerHarness`,
+`promptDigest`, `since` (inclusive), `until` (exclusive), `area`, `blocking`
+(`any`, boolean or 0/1), and `labelState` (`ungraded`, `graded`, `disputed`).
+All filters intersect before pagination. Timestamps compare instants. Area
+matches a literal complete path or directory prefix after removing Markdown
+backticks, or an exact backlog area; SQL wildcard characters stay literal.
+Graded means at least one non-lifecycle, non-severity grade. Disputed means
+conflicting real/false grades or evidenced withdrawals; it can overlap graded.
+Lifecycle-only and severity-only grades leave findings ungraded. This selection
+state does not resolve weighted consensus.
+
+Pagination accepts `afterPassId`, `afterOrdinal` and `limit` (1–5000, default 500). The cursor is the last row's pass and ordinal,
 so pagination can stop within a pass. Results include linked reply references,
-commit evidence and disputes. A populated page uses three queries: the finding
-selection and two batched linked-record reads using a bound JSON array. An
+commit evidence, disputes, ordered `grades`, and `graded`/`disputed` indicators.
+A populated page uses four queries: the finding selection and three batched
+linked-record reads using a bound JSON array. An
 empty page uses only the selection query; read-only connections remain supported. The computed historical status is `withdrawn`
 when recorded hammer withdrawal evidence exists, `dismissed` when the pass was
 dismissed, `addressed` when a matched reply has an overlapping commit, otherwise

@@ -6,6 +6,7 @@
 // is unchanged. This module carries no model-spawn or credential knowledge —
 // only how the adversarial prompt, stage selection, and diff framing are built.
 
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -225,3 +226,9 @@ export {
   isFinalReviewRound,
   buildAgyReviewerPromptPrefix,
 };
+
+// Hash the final assembled text, including stage, runtime instructions and context.
+export function reviewerPromptProvenance(prompt, { reviewKind = 'code-pr', promptStage = 'first', promptOverride = false } = {}) {
+  return { promptSet: promptOverride ? null : reviewKind === 'architecture-review' ? 'architecture-review' : REVIEWER_PROMPT_SET,
+    promptStage: promptOverride ? null : promptStage, promptDigest: createHash('sha256').update(prompt).digest('hex') };
+}

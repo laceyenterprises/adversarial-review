@@ -1,6 +1,7 @@
 import './helpers/review-cli-resolver-fixture.mjs';
 import './helpers/registry-session-fixture.mjs';
 import test from 'node:test';
+import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import * as timeouts from '../src/reviewer-timeout.mjs';
 import { resolveAgyOversizedReviewRoute, reviewAgyOversizedInChunks, reviewWithGemini, __test__ as harness } from '../src/reviewer-harness.mjs';
@@ -95,6 +96,7 @@ test('LAC-2100: observed prompt size and delivery budget run all six bounded Gem
   assert.equal(route.maxBytes, 233440);
   let plan;
   let calls = 0;
+  const promptDigests = [];
   const result = await reviewAgyOversizedInChunks(diff, context, {
     env, maxBytes: route.maxBytes, promptBytes: route.promptBytes,
     onChunkPlan: value => { plan = value; },
@@ -102,12 +104,16 @@ test('LAC-2100: observed prompt size and delivery budget run all six bounded Gem
       assert.equal(options.timeoutMs, 3530000);
       assert.equal(options.signal.aborted, false);
       calls += 1;
-      return { reviewText: '## Verdict\nComment only' };
+      const promptDigest = createHash('sha256').update(`${_diff}${_context}`).digest('hex');
+      promptDigests.push(promptDigest);
+      return { reviewText: '## Verdict\nComment only', execution: { harness: 'synthetic', promptSet: 'code-pr', promptStage: 'first', promptDigest } };
     },
   });
   assert.equal(plan.chunkCount, 6);
   assert.equal(calls, 6);
   assert.equal(result.chunks.length, 6);
+  assert.equal(result.execution.promptDigest, null);
+  assert.deepEqual(result.execution.promptDigests, promptDigests);
   for (const chunk of result.chunks) assert.ok(chunk.promptBytes <= route.maxBytes);
 });
 

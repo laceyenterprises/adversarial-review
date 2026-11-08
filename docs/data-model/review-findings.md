@@ -1,5 +1,15 @@
 # Review finding records
 
+Review findings additionally carry nullable `reviewer_harness`, `prompt_set`,
+`prompt_stage`, `prompt_digest` and `prompt_digests_json` from their pass's
+`metadata_json.reviewerExecution`. The digest hashes the exact assembled prompt
+text sent to the harness, including runtime guidance, context and diff. Chunked
+passes have a NULL scalar digest and an ordered JSON array of actual chunk
+prompt digests; no synthetic combined digest is invented. Custom prompt overrides
+retain their actual digest with unknown set/stage. Legacy missing provenance
+stays NULL. Projection and metadata updates retain this attribution. See
+[reviewer passes](reviewer-passes.md) and [finding grades](review-finding-grades.md).
+
 ## Blocking evidence and factual disputes (REVIEWEVIDENCE-01)
 
 New PR review output passes through the existing head-grounding pass before

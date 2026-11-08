@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { serviceFixtureExec, writeDummyCodexAuth } from './helpers/codex-service-fixture.mjs';
 import { dispatchReadTransport } from '../src/dispatch-read-client.mjs';
@@ -107,10 +108,12 @@ for (const recovery of [false, true]) {
       CODEX_REVIEWER_AUTH_PROVIDER: '', CODEX_HOME: '', CODEX_AUTH_PATH: writeDummyCodexAuth(join(authRoot, 'auth.json')) });
     assert.equal(await ensureWorkerRegistryReady(), false);
     let sentEffort = null;
+    let sentPrompt = null;
     const result = await harness.reviewWithCodex('+synthetic diff', '', {
       log: quiet, codexCli: process.execPath, assertCodexOAuthImpl: async () => {},
       execFileSyncImpl: serviceFixtureExec,
-      spawnCodexReviewImpl: async ({ configOverrides }) => {
+      spawnCodexReviewImpl: async ({ configOverrides, prompt }) => {
+        sentPrompt = prompt;
         sentEffort = configOverrides.find(item => item.key === 'model_reasoning_effort')?.value;
         if (recovery) throw Object.assign(new Error('synthetic no progress'), { progressTimedOut: true });
         return { stdout: review, stderr: '' };
@@ -121,6 +124,10 @@ for (const recovery of [false, true]) {
       },
     });
     assert.equal(sentEffort, 'medium');
+    assert.equal(result.execution.promptDigest, createHash('sha256').update(sentPrompt).digest('hex'));
+    assert.equal(result.execution.promptSet, 'code-pr');
+    assert.equal(result.execution.promptStage, 'first');
+    assert.ok(result.execution.harness);
     assert.equal(result.execution.effort, 'medium');
     assert.equal(result.execution.effortSource, 'committed-seed');
   });
@@ -160,15 +167,19 @@ test('Claude review execution records its unchanged effort and its source', asyn
   withProcessEnv(t, f.env);
   assert.equal(await ensureWorkerRegistryReady(), false);
   let sentEffort = null;
+  let sentPrompt = null;
   const result = await harness.reviewWithClaude('+synthetic diff', '', {
     logger: quiet, platform: 'linux',
     assertClaudeOAuthImpl: async () => ({ env: {}, transport: 'keychain' }),
-    spawnClaudeImpl: async args => {
+    spawnClaudeImpl: async (args, options) => {
+      sentPrompt = options.input;
       sentEffort = args[args.indexOf('--effort') + 1];
       return { stdout: JSON.stringify({ result: review, usage: {} }), stderr: '' };
     },
   });
   assert.equal(sentEffort, 'high');
+  assert.equal(result.execution.promptDigest, createHash('sha256').update(sentPrompt).digest('hex'));
+  assert.equal(result.execution.promptSet, 'code-pr');
   assert.equal(result.execution.effort, 'high');
   assert.equal(result.execution.effortSource, 'committed-seed');
 });

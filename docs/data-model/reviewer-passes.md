@@ -29,6 +29,18 @@ cancelled or superseded work records `cancelled`. This keeps time-to-merge
 rollups from counting an unproven merge. `metadata_json.workerClass` holds the
 logical AMA dispatch class, even when `reviewer_class` names a fallback harness.
 
+## Prompt provenance
+
+Successful harness execution records `harness`, `promptSet`, `promptStage` and
+`promptDigest` in `metadata_json.reviewerExecution` alongside model and effort.
+SHA-256 covers the resolved text actually submitted, after snapshot boundaries,
+runtime guidance, stage selection, context and diff assembly. Native Codex and
+its OAuth recovery use the same text digest. External prompt overrides retain a
+digest but leave set and stage unknown. For chunked reviews, `promptDigest` is
+NULL and `promptDigests` contains the ordered per-chunk text digests. These fields
+are copied onto review findings both at capture and on pass metadata updates.
+Legacy records are not assigned a digest from today's prompt files.
+
 ## Delivery head wait marker
 
 The delivery row's `reviewer_head_sha` is written together with `posted` by

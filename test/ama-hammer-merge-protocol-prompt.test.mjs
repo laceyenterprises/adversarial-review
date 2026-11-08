@@ -937,6 +937,9 @@ test('hammer documentation currency accepts ticket fragments without shared appe
     assert.match(prompt, /If that guide is absent, include Summary, Interface changes \(or none\), and/);
     assert.match(prompt, /Verification with (?:the )?commands/);
     assert.match(prompt, /observed results/);
+    assert.match(prompt, /Resolve `<TICKET-ID>` from the PR body’s `## Ticket` section, falling back to an unambiguous ticket identifier in the PR title or head branch/);
+    assert.match(prompt, /Never use the closer’s own `Worker-Ticket: HAM` as the fragment ticket/);
+    assert.match(prompt, /record the missing identifier in the audit rather than inventing one/);
   }
 });
 

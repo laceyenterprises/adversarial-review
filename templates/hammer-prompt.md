@@ -618,7 +618,12 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
      and a `modules/<name>/<name>-walkthrough.md` exists for that module, a
      `<module dir>/changes/<TICKET-ID>.md` fragment plus any needed in-place
      walkthrough/README section edits satisfies walkthrough currency. Create the
-     fragment when the author omitted it, or update the existing fragment. Reviewers
+     fragment when the author omitted it, or update the existing fragment. Resolve
+     `<TICKET-ID>` from the PR body’s `## Ticket` section, falling back to an
+     unambiguous ticket identifier in the PR title or head branch. Never use the
+     closer’s own `Worker-Ticket: HAM` as the fragment ticket. If no ticket can be
+     identified, record the missing identifier in the audit rather than inventing one.
+     Reviewers
      accept the fragment; the walkthrough need not change when its existing text
      needs no correction. Follow `docs/walkthroughs/README.md` when available.
      If that guide is absent, include Summary, Interface changes (or none), and

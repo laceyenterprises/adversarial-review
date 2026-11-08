@@ -2988,7 +2988,10 @@ prompt-driven worker behavior, not predicate gates — the audit comment and the
    omitted it. Accept that fragment plus any needed in-place walkthrough/README
    section edits as satisfying walkthrough currency. The
    walkthrough need not change when its existing text needs no correction. Follow
-   `docs/walkthroughs/README.md` when available. Do not append ticket sections or
+   `docs/walkthroughs/README.md` when available. Resolve `<TICKET-ID>` from the PR body’s `## Ticket` section,
+   falling back to an unambiguous ticket identifier in the PR title or head branch.
+   Never use the closer’s own `Worker-Ticket: HAM`; if no ticket can be identified,
+   record the missing identifier in the audit rather than inventing one. Do not append ticket sections or
    shared README change-note entries. An end-of-file ticket section is at most a
    non-blocking style note, never a blocking finding. This adds no blocking condition. Follow the target repository's AGENTS.md change-note convention for repository-level notes; accept its per-ticket records without requesting a shared root README entry. This does not replace required in-place canonical contract corrections.
    If the PR repository lacks those docs because they belong to a

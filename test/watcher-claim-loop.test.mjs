@@ -3734,6 +3734,50 @@ test('REVIEWDELAY-01: pollOnce records process starts before detached reviewers 
 });
 
 
+test('startup discovery failure enumerates PRs for the durable fallback on the first poll', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-discovery-fallback-'));
+  try {
+    const loaderPath = path.join(tmp, 'loader.mjs');
+    const registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    const loader = buildLoaderSource({
+      discoveryHookSource: 'globalThis.__fallbackLists.push(...repos); return [];',
+    }).replace('export async function load(url, context, nextLoad) {', `
+      export async function load(url, context, nextLoad) {
+        if (url === ${JSON.stringify(fileUrl('src', 'watcher.mjs'))}) {
+          const result = await nextLoad(url, context);
+          result.source = String(result.source).replace(
+            "JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'))",
+            '({ org: "example", repos: [] })');
+          return result;
+        }
+    `);
+    writeFileSync(loaderPath, loader);
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    const runner = buildRunnerSource({
+      prePollSetup: `
+        globalThis.__fallbackLists = [];
+        db.prepare('INSERT INTO repository_identities VALUES (?, ?, ?, ?)')
+          .run('456', 'R_fallback', 'example/durable', '2026-11-01T00:00:00Z');
+      `,
+      afterFirstPoll: `
+        assert.equal(githubCalls.filter(call => call.kind === 'paginate').length, 1);
+        assert.deepEqual(globalThis.__fallbackLists, ['example/durable']);
+        assert.equal(claims.length, 0);
+        assert.equal(githubWrites.length, 0);
+        assert.equal(fetchCalls.length, 0);
+      `,
+    }).replace("return [{ id: 123, node_id: 'R_fixture123', name: 'adversarial-review', archived: false }];",
+      "throw new Error('Synthetic startup repository listing failure');");
+    writeFileSync(runnerPath, runner);
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv({ ...installGhFixture(tmp),
+        AGENT_OS_CONFIG_PATH: path.join(tmp, 'config.yaml') }), timeout: 20_000 });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
 test('GHSCOPE-01: a rate-limited first discovery still fetches other repository lists in pollOnce', () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-scoped-budget-'));
   const loaderPath = path.join(tmp, 'loader.mjs');

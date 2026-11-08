@@ -65,33 +65,33 @@ test('LAC-2107: fixture subprocess budgets scale once and stay bounded', () => {
   assert.equal(fixtureTimeoutMs(5000, { ...busy, loadAvg1m: 8 }), 17500);
 });
 
-test('LAC-2107: fixture build passes the loaded policy budget to the subprocess', async t => {
-  t.mock.method(os, 'loadavg', () => [os.cpus().length * 3, 0, 0]);
-  const original = childProcess.execFileSync;
-  const builds = [];
-  const output = Buffer.from('synthetic fixture output');
-  // Keep one mock per property: stacked mocks can restore an earlier proxy.
-  t.mock.method(childProcess, 'execFileSync', (file, ...args) => {
-    if (file === '/bin/ps') return `${os.cpus().length * 100}\n`;
-    if (file !== '/bin/sh') return original(file, ...args);
-    builds.push({ file, args });
-    return output;
+test('fixture build teardown restores CommonJS and ESM subprocess exports', async t => {
+  await t.test('LAC-2107: fixture build passes the loaded policy budget to the subprocess', async t => {
+    t.mock.method(os, 'loadavg', () => [os.cpus().length * 3, 0, 0]);
+    const original = childProcess.execFileSync;
+    const builds = [];
+    const output = Buffer.from('synthetic fixture output');
+    // Keep one mock per property: stacked mocks can restore an earlier proxy.
+    t.mock.method(childProcess, 'execFileSync', (file, ...args) => {
+      if (file === '/bin/ps') return `${os.cpus().length * 100}\n`;
+      if (file !== '/bin/sh') return original(file, ...args);
+      builds.push({ file, args });
+      return output;
+    });
+    syncBuiltinESMExports();
+    t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+    const spec = { cwd: '/synthetic/artifact-fixture', env: { PATH: '/usr/bin:/bin' },
+      args: ['ignored wrapper argument', '-c', 'synthetic build'] };
+    assert.equal(await runFixtureBuild(spec), output);
+    assert.deepEqual(builds, [{
+      file: '/bin/sh',
+      args: [['-c', 'synthetic build'], {
+        cwd: spec.cwd, env: spec.env, timeout: 30_000,
+        maxBuffer: 64 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
+      }],
+    }]);
   });
-  syncBuiltinESMExports();
-  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
-  const spec = { cwd: '/synthetic/artifact-fixture', env: { PATH: '/usr/bin:/bin' },
-    args: ['ignored wrapper argument', '-c', 'synthetic build'] };
-  assert.equal(await runFixtureBuild(spec), output);
-  assert.deepEqual(builds, [{
-    file: '/bin/sh',
-    args: [['-c', 'synthetic build'], {
-      cwd: spec.cwd, env: spec.env, timeout: 30_000,
-      maxBuffer: 64 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
-    }],
-  }]);
-});
-
-test('fixture build teardown restores CommonJS and ESM subprocess exports', () => {
+  // Await the mock-owning subtest, including its teardown, before probing both exports.
   assert.equal(childProcess.execFileSync, originalExecFileSync);
   assert.equal(execFileSync, originalExecFileSync);
   assert.equal(execFileSync('/bin/sh', ['-c', 'printf teardown-restored'], {

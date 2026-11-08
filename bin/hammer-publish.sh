@@ -182,7 +182,7 @@ fi
 # record widens responsibility to the review's own proven head, never review.
 ham_prove_audit_range() {
   local ham_range_exit=0
-  /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-head-context.mjs \
+  "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" read head-context 90 540 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-head-context.mjs \
     <<REPO>> <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" --pr <<PR_URL>> \
     > "<<RUN_DIR>>/range.json" || ham_range_exit=$?
   if [ "$ham_range_exit" -eq 76 ]; then HAM_PHASE_OUTCOME=git-credential-refresh-failed; fi
@@ -331,7 +331,7 @@ return 0
 # separate, under the merge lease, after remote CI validates the published SHA.
 if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" = "1" ]; then
   HAM_PUBLICATION_PREVIOUS_HEAD="${POST_REMEDIATION_SHA:-${HAM_BASE_HEAD:-}}"
-  HAM_API_PUBLISH_RESULT=$(/usr/bin/perl -e 'alarm shift; exec @ARGV' 120 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-api-publish.mjs <<REPO>> <<PR_URL>>) || HAM_API_PUBLISH_RESULT='{"route":"re-review","reason":"API publication timed out"}'
+  HAM_API_PUBLISH_RESULT=$("$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" mutation api-publish 120 720 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-api-publish.mjs <<REPO>> <<PR_URL>>) || HAM_API_PUBLISH_RESULT='{"route":"re-review","reason":"API publication timed out"}'
   printf '%s\n' "$HAM_API_PUBLISH_RESULT"
   HAM_PUSHED_FROM_HEAD=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.previousHead // empty')
   if [ -z "$HAM_PUSHED_FROM_HEAD" ]; then HAM_PUSHED_FROM_HEAD="$HAM_PUBLICATION_PREVIOUS_HEAD"; fi
@@ -347,7 +347,7 @@ if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" = "1" ]; then
   if [ -n "$HAM_API_KNOWN_PUSHED_HEAD" ]; then
     HAM_PUSHED_HEAD="$HAM_API_KNOWN_PUSHED_HEAD"
     export HAM_PUSHED_FROM_HEAD HAM_PUSHED_HEAD
-    if ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-pushed-attestation.mjs \
+    if ! "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" mutation pushed-attestation 90 540 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-pushed-attestation.mjs \
       <<REPO>> <<PR_NUMBER>> "$HAM_PUSHED_FROM_HEAD" "$HAM_API_KNOWN_PUSHED_HEAD"; then
       HAM_PHASE_OUTCOME=pushed-attestation-unavailable
       printf -v HAM_NO_MERGE_NOTE '%s\nHAM-Base-Head: %s\nHAM-Pushed-Head: %s\nHAM-CI-Validated: false' \
@@ -406,7 +406,7 @@ if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" = "1" ]; then
   # This grants no CI validation or merge authority.
   if [ -n "$HAM_PUSHED_HEAD" ] && [ "$HAM_PUSHED_HEAD" != "$HAM_PUSHED_FROM_HEAD" ]; then
     "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-progress.mjs" remediation-pushed "$HAM_PUSHED_HEAD" || true
-    if ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-pushed-attestation.mjs \
+    if ! "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" mutation pushed-attestation 90 540 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-pushed-attestation.mjs \
       <<REPO>> <<PR_NUMBER>> "$HAM_PUSHED_FROM_HEAD" "$HAM_PUSHED_HEAD"; then
       HAM_PHASE_OUTCOME=pushed-attestation-unavailable
       printf -v HAM_NO_MERGE_NOTE '%s\nHAM-Base-Head: %s\nHAM-Pushed-Head: %s\nHAM-CI-Validated: false' \

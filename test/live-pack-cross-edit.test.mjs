@@ -10,11 +10,13 @@ import {
   evaluateLivePackCrossEdits,
   extractPrTicketIds,
   inconclusiveFindingsForDiff,
+  listBasePlanPaths,
   resolveLivePackContextForJob,
   resolveLivePackRemediationContext,
   resolvePostMergeActionsBotLogins,
   reviewBodyHasLivePackCrossEditFinding,
   touchedPacksFromPaths,
+  resolvePackLiveness,
 } from '../src/live-pack-cross-edit.mjs';
 import { classifyFollowUpCriticality } from '../src/follow-up-jobs.mjs';
 import { normalizeEffectiveReviewVerdict } from '../src/kernel/verdict.mjs';
@@ -100,6 +102,306 @@ const REVIEW_TEXT = [
   'Comment only',
   '',
 ].join('\n');
+
+// Synthetic base/head fixtures for new-pack collision and retry decisions.
+function newPackFixture({ collision = false, scanFails = false } = {}) {
+  const reads = [];
+  let listings = 0;
+  const options = {
+    repo: 'example/review-fixture',
+    baseRef: 'base',
+    headRef: 'head',
+    branch: 'feature/CHANGE-01',
+    changedPaths: ['projects/new-pack/plan.json'],
+    sleepImpl: async () => {},
+    listBasePlanPathsImpl: async (repo, ref) => {
+      assert.equal(repo, options.repo);
+      assert.equal(ref, 'base');
+      listings++;
+      if (scanFails) throw new Error('synthetic listing unavailable');
+      return { ref: 'base-tree', paths: ['projects/old-pack/plan.json'] };
+    },
+    fetchFileAtRefImpl: async (_repo, path, ref) => {
+      reads.push([path, ref]);
+      if (path.startsWith('projects/new-') && ref === 'base') throw new Error('HTTP 404');
+      if (ref === 'head') return JSON.stringify({ planId: 'new-plan', tickets: [{ id: 'CHANGE-01' }] });
+      assert.equal(ref, 'base-tree');
+      return JSON.stringify({ planId: collision ? 'new-plan' : 'old-plan', tickets: [{ id: 'OLD-01' }] });
+    },
+  };
+  return { options, reads, listingCount: () => listings };
+}
+
+test('new pack with a throwing ledger is conclusively not live without reading it', async () => {
+  const { options, reads, listingCount } = newPackFixture();
+  let ledgerReads = 0;
+  const result = await evaluateLivePackCrossEdits({
+    ...options,
+    readActiveDagRunsImpl: () => { ledgerReads++; throw new Error('synthetic unavailable'); },
+  });
+  assert.deepEqual(result.findings, []);
+  assert.equal(result.packs[0].live, false);
+  assert.equal(result.packs[0].inconclusive, false);
+  assert.equal(result.packs[0].reason, 'new-pack-absent-at-base');
+  assert.equal(ledgerReads, 0);
+  assert.equal(listingCount(), 1);
+  assert.deepEqual(reads, [
+    ['projects/new-pack/plan.json', 'base'],
+    ['projects/new-pack/plan.json', 'head'],
+    ['projects/old-pack/plan.json', 'base-tree'],
+  ]);
+});
+
+test('new planId collision reads ledger, retries, and cannot exempt itself with head tickets', async () => {
+  const { options } = newPackFixture({ collision: true });
+  let calls = 0;
+  const result = await evaluateLivePackCrossEdits({
+    ...options,
+    readActiveDagRunsImpl: ({ planId }) => {
+      assert.equal(planId, 'new-plan');
+      calls++;
+      throw new Error('synthetic unavailable');
+    },
+  });
+  assert.equal(calls, 3);
+  assert.equal(result.packs[0].ownPack, false);
+  assert.equal(result.findings[0].blocking, true);
+  assert.equal(result.findings[0].inconclusive, true);
+  assert.equal(result.findings[0].retry_count, 2);
+  assert.doesNotMatch(result.findings[0].reason, /retr/i);
+});
+
+test('unavailable or malformed base-plan scan fails closed without trusting head tickets', async () => {
+  for (const malformed of [false, true]) {
+    const { options } = newPackFixture({ scanFails: !malformed });
+    const fetch = options.fetchFileAtRefImpl;
+    const result = await evaluateLivePackCrossEdits({
+      ...options,
+      fetchFileAtRefImpl: (repo, path, ref) => ref === 'base-tree' ? '{}' : fetch(repo, path, ref),
+      readActiveDagRunsImpl: () => { throw new Error('must not read ledger'); },
+    });
+    assert.equal(result.findings[0].inconclusive, true);
+    assert.match(result.findings[0].reason, /base-plan-scan-unavailable/);
+  }
+});
+
+test('multiple new packs share one listing and each base plan read', async () => {
+  const { options, reads, listingCount } = newPackFixture();
+  const result = await evaluateLivePackCrossEdits({
+    ...options, changedPaths: ['projects/new-pack/plan.json', 'projects/new-other/SPEC.md'],
+    readActiveDagRunsImpl: () => { throw new Error('must not read ledger'); },
+  });
+  assert.equal(result.packs.length, 2);
+  assert.deepEqual(result.findings, []);
+  assert.equal(listingCount(), 1);
+  assert.equal(reads.filter(([, ref]) => ref === 'base-tree').length, 1);
+});
+
+test('existing pack retries two unavailable reads then accepts conclusive live and not-live answers', async () => {
+  for (const runs of [[], [{ run_id: 'run-synthetic', state: 'running' }]]) {
+    let attempts = 0;
+    const waits = [];
+    const pack = await resolvePackLiveness({
+      repo: 'example/review-fixture', slug: 'existing', baseRef: 'base', headRef: 'head',
+      fetchFileAtRefImpl: (_repo, _path, ref) => {
+        assert.equal(ref, 'base');
+        return '{"planId":"existing-plan","tickets":[{"id":"OLD-01"}]}';
+      },
+      listBasePlanPathsImpl: () => { throw new Error('existing packs must not scan'); },
+      sleepImpl: async (ms) => { waits.push(ms); },
+      readActiveDagRunsImpl: ({ timeoutMs, signal }) => {
+        assert.ok(timeoutMs <= 3000);
+        assert.equal(signal.aborted, false);
+        attempts++;
+        if (attempts === 1) throw new Error('synthetic transport failure');
+        return attempts === 2 ? { ok: false, reason: 'dispatch-read-unavailable' } : { ok: true, runs };
+      },
+    });
+    assert.equal(attempts, 3);
+    assert.deepEqual(waits, [100, 200]);
+    assert.equal(pack.retryCount, 2);
+    assert.equal(pack.inconclusive, false);
+    assert.equal(pack.live, runs.length > 0);
+  }
+});
+
+test('ledger retry checks its deadline after backoff and counts only dispatched retries', async (t) => {
+  let now;
+  t.mock.method(Date, 'now', () => now);
+  for (const elapsed of [9_999, 10_000, 10_001]) {
+    now = 0;
+    let attempts = 0;
+    const pack = await resolvePackLiveness({
+      repo: 'example/review-fixture', slug: 'existing', baseRef: 'base',
+      fetchFileAtRefImpl: () => '{"planId":"existing-plan"}',
+      sleepImpl: async (ms) => {
+        assert.equal(ms, 100);
+        now = elapsed;
+      },
+      readActiveDagRunsImpl: ({ timeoutMs }) => {
+        attempts++;
+        if (attempts === 1) return { ok: false, reason: 'dispatch-read-unavailable' };
+        assert.equal(timeoutMs, 1);
+        return { ok: true, runs: [] };
+      },
+    });
+    const withinBudget = elapsed < 10_000;
+    assert.equal(attempts, withinBudget ? 2 : 1, `elapsed=${elapsed}`);
+    assert.equal(pack.retryCount, withinBudget ? 1 : 0);
+    assert.equal(pack.inconclusive, !withinBudget);
+    if (!withinBudget) assert.match(pack.reason, /dispatch-read-unavailable/);
+  }
+});
+
+test('existing pack permanent failure remains blocking and head cannot add an own-pack exemption', async () => {
+  let attempts = 0;
+  const result = await evaluateLivePackCrossEdits({
+    repo: 'example/review-fixture', baseRef: 'base', headRef: 'head', branch: 'feature/CHANGE-01',
+    changedPaths: ['projects/existing/plan.json'],
+    fetchFileAtRefImpl: (_repo, _path, ref) => {
+      assert.equal(ref, 'base', 'head must never grant an existing pack exemption');
+      return '{"planId":"existing-plan","tickets":[{"id":"OLD-01"}]}';
+    },
+    sleepImpl: async () => {},
+    readActiveDagRunsImpl: () => { attempts++; return { ok: false, reason: 'dispatch-read-unavailable' }; },
+  });
+  assert.equal(attempts, 3);
+  assert.equal(result.findings[0].blocking, true);
+  assert.equal(result.findings[0].inconclusive, true);
+  const body = await applyLivePackCrossEditReview(REVIEW_TEXT, { evaluateImpl: async () => result, log: null });
+  assert.equal(normalizeEffectiveReviewVerdict(body, { log: null }), 'request-changes');
+  assert.match(body, /"retryCount": 2/);
+});
+
+test('base-tree listing rejects truncation and filters to direct project plans', async () => {
+  for (const truncated of [false, true]) {
+    const listing = listBasePlanPaths('example/review-fixture', 'base/ref', {
+      execFileImpl: async (_cmd, args) => {
+        if (args.includes('repos/example/review-fixture/commits/base%2Fref')) {
+          return { stdout: '{"sha":"base-commit"}' };
+        }
+        assert.ok(args.includes('repos/example/review-fixture/git/trees/base-commit?recursive=1'));
+        return { stdout: JSON.stringify({ sha: 'base-tree', truncated, tree: [
+          { path: 'projects/old/plan.json', type: 'blob' },
+          { path: 'projects/old/nested/plan.json', type: 'blob' },
+          { path: 'modules/plan.json', type: 'blob' },
+        ] }) };
+      },
+    });
+    if (truncated) await assert.rejects(listing, /incomplete/);
+    else assert.deepEqual(await listing, { ref: 'base-commit', paths: ['projects/old/plan.json'] });
+  }
+});
+
+test('new pack remediation uses the same offline decision', async () => {
+  const { options } = newPackFixture();
+  const context = await resolveLivePackRemediationContext({
+    ...options, baseBranch: 'base', listPrFilesImpl: async () => options.changedPaths,
+    readActiveDagRunsImpl: () => { throw new Error('must not read ledger'); },
+  });
+  assert.match(context, /"live": false/);
+  assert.match(context, /"liveCheckInconclusive": false/);
+});
+
+test('remediation facts report zero retries for unreadable and missing plan identities', async () => {
+  const context = await resolveLivePackRemediationContext({
+    repo: 'example/review-fixture', prNumber: 1, baseBranch: 'base',
+    listPrFilesImpl: async () => ['projects/unreadable/SPEC.md', 'projects/no-plan/SPEC.md'],
+    fetchFileAtRefImpl: (_repo, path) => path.includes('/unreadable/') ? '{invalid' : '{}',
+    readActiveDagRunsImpl: () => { throw new Error('must not read ledger'); },
+  });
+  const facts = JSON.parse(context.match(/```json\n([\s\S]*?)\n```/)[1]);
+  assert.equal(facts.length, 2);
+  for (const pack of facts) {
+    assert.equal(pack.retryCount, 0, pack.slug);
+    assert.deepEqual(pack.runs, []);
+    assert.equal(pack.liveCheckInconclusive, true);
+  }
+});
+
+test('ledger scope denial fails closed immediately without retry', async () => {
+  let calls = 0;
+  const pack = await resolvePackLiveness({
+    repo: 'example/review-fixture', slug: 'existing', baseRef: 'base',
+    fetchFileAtRefImpl: () => '{"planId":"existing-plan"}',
+    readActiveDagRunsImpl: () => {
+      calls++;
+      return { ok: false, outcome: 'scope-denied', reason: 'worker-observation-scope-denied' };
+    },
+    sleepImpl: () => { throw new Error('scope denial must not retry'); },
+  });
+  assert.equal(calls, 1);
+  assert.equal(pack.inconclusive, true);
+  assert.equal(pack.retryCount, 0);
+});
+
+test('stalled ledger reads are bounded and each attempt is cancelled', async () => {
+  const signals = [];
+  const pack = await resolvePackLiveness({
+    repo: 'example/review-fixture', slug: 'existing', baseRef: 'base',
+    fetchFileAtRefImpl: () => '{"planId":"existing-plan"}',
+    readActiveDagRunsImpl: ({ signal }) => {
+      signals.push(signal);
+      return new Promise(() => {});
+    },
+    sleepImpl: async () => {},
+  });
+  assert.equal(signals.length, 3);
+  assert.ok(signals.every((signal) => signal.aborted));
+  assert.equal(pack.inconclusive, true);
+  assert.equal(pack.retryCount, 2);
+});
+
+test('conclusive checks retain machine-readable review facts without adding findings', async () => {
+  const { options } = newPackFixture();
+  const result = await evaluateLivePackCrossEdits({
+    ...options,
+    readActiveDagRunsImpl: () => { throw new Error('must not read ledger'); },
+  });
+  const body = await applyLivePackCrossEditReview(REVIEW_TEXT, { evaluateImpl: async () => result });
+  assert.match(body, /"reason": "new-pack-absent-at-base"/);
+  assert.match(body, /"retryCount": 0/);
+  assert.equal(reviewBodyHasLivePackCrossEditFinding(body), false);
+  assert.equal(normalizeEffectiveReviewVerdict(body, { log: null }), 'comment-only');
+});
+
+test('job adapter routes the new base-tree scan and pinned plan fetch through injected executor', async () => {
+  const repo = 'example/review-fixture';
+  const reads = [];
+  const context = await resolveLivePackContextForJob({
+    job: {
+      repo, prNumber: 1, baseBranch: 'base', revisionRef: 'head',
+      branch: 'feature/change', title: 'CHANGE-01: add pack',
+    },
+    readActiveDagRunsImpl: () => { throw new Error('must not read ledger'); },
+    execFileImpl: async (command, args) => {
+      assert.equal(command, 'gh');
+      const target = args.find((arg) => String(arg).startsWith('repos/'));
+      reads.push(target);
+      if (target === `repos/${repo}/pulls/1/files`) {
+        return { stdout: '[{"filename":"projects/new-pack/plan.json"}]' };
+      }
+      if (target === `repos/${repo}/contents/projects/new-pack/plan.json?ref=base`) {
+        throw new Error('HTTP 404');
+      }
+      if (target === `repos/${repo}/contents/projects/new-pack/plan.json?ref=head`) {
+        return { stdout: '{"planId":"new-plan"}' };
+      }
+      if (target === `repos/${repo}/commits/base`) {
+        return { stdout: '{"sha":"base-commit"}' };
+      }
+      if (target === `repos/${repo}/git/trees/base-commit?recursive=1`) {
+        return { stdout: JSON.stringify({ sha: 'base-tree', truncated: false, tree: [
+          { path: 'projects/old-pack/plan.json', type: 'blob' },
+        ] }) };
+      }
+      assert.equal(target, `repos/${repo}/contents/projects/old-pack/plan.json?ref=base-commit`);
+      return { stdout: '{"planId":"old-plan"}' };
+    },
+  });
+  assert.match(context, /"live": false/);
+  assert.equal(reads.length, 6);
+});
 
 test('touchedPacksFromPaths guards only spec, spec meta, plan and prompts', () => {
   const touched = touchedPacksFromPaths([

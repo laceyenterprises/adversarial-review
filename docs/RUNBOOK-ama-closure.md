@@ -4707,6 +4707,15 @@ before a cited reversal; equality of the whole segment is not required.
 Finding coverage and the authorizing HAM patch's parent-state content proof
 remain required. Immutable original reversal
 proofs use the same parent-state mapping, including earlier HAM edits.
+When an immutable original reversal is available, a rewritten parent must
+match that original reversal's **parent** diff, including intervening
+remediation, rather than the older cited review's diff (REVERSALPARENT-01).
+Unique region mapping then enters the original authorization evaluator, which
+checks the original finding against its reviewed snapshot and the original
+HAM patch against its parent. Whole-parent changed-content equivalence,
+review authority, provenance, citation coverage and multiplicity still apply.
+A missing document citation or a region absent from a durable verified
+observation remains refused; repairing parent mapping grants neither.
 Reviewed-parent content comparisons retain path, status and changed-content
 multisets while ignoring context and hunk partitioning. A citation with no later
 superseding authoritative review remains current by GitHub review order.

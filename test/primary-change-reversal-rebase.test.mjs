@@ -7,7 +7,7 @@ import { checkPrimaryChange, fetchPrimaryChange, fetchPrimaryChangeContext,
 import { recoverStrandedCloserHead } from '../src/ama/closer-head-recovery.mjs';
 import { evaluateMergeEligibility } from '../src/ama/merge-eligibility.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -1154,6 +1154,79 @@ test('direct ancestry permits a cited reversal after an earlier HAM changes the 
     authorization.commit.files[0].patch = authorization.commit.files[0].patch
       .replace('-generated_terminal_policy()', '-different_content()');
     assert.equal(checkPrimaryChange(evidence, head, { strictNonBlockingRemediation: true }).ok, false);
+  }
+});
+
+test('REVERSALPARENT-01: immutable original proof maps to the repaired parent before checking the finding', async () => {
+  for (const nonBlocking of [false, true]) {
+    const citedReview = nonBlocking ? terminalPolicyReview() : review();
+    const { evidence } = await collect({ earlierHammerAdded: '+generated_terminal_policy()', shift: 0,
+      reviewHead: author, reviewToParent: 'ahead', reviews: [{ ...citedReview, commit_id: author }],
+      cites: [`PRR_cited finding=1 kind=${nonBlocking ? 'non-blocking' : 'blocking'}`] });
+    const original = structuredClone(evidence.reversalAuthorizations[0]);
+    original.commit.sha = sha('d');
+    const authorization = evidence.reversalAuthorizations[0];
+    authorization.rebased = true;
+    authorization.originalAuthorization = original;
+    // The original review predates an intermediate repair. Rewritten parents
+    // match that repair, not the older review; base offsets may have shifted.
+    const shift = files => files.map(file => ({ ...file, patch: file.patch.replace(
+      /@@ -(\d+)([^+]*?)\+(\d+)/g,
+      (_match, old, middle, next) => `@@ -${Number(old) + 20}${middle}+${Number(next) + 20}`) }));
+    evidence.primaryFiles = shift(evidence.primaryFiles);
+    authorization.parentFiles = shift(authorization.parentFiles);
+    authorization.commit.files = shift(authorization.commit.files);
+    authorization.commit.parents = [{ sha: sha('7') }];
+    assert.notEqual(original.parentFiles[0].patch, original.reviewedFiles[0].patch);
+    const result = checkPrimaryChange(evidence, head, { strictNonBlockingRemediation: true });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    if (nonBlocking) assert.equal(checkPrimaryChange(evidence, head).ok, false);
+
+    for (const mutate of [
+      entry => { delete entry.originalAuthorization; },
+      entry => { entry.originalAuthorization.review.body = entry.originalAuthorization.review.body.replace('`10-11`', '`30-31`'); },
+      entry => { entry.originalAuthorization.commit.author.login = 'fixture-builder'; },
+      entry => { entry.parentFiles[0].patch = entry.parentFiles[0].patch.replace('generated_terminal_policy()', 'unreviewed_policy()'); },
+      entry => { entry.parentFiles.push({ filename: 'src/unrelated.mjs', status: 'added',
+        additions: 1, deletions: 0, patch: '@@ -0,0 +1 @@\n+unreviewed()' }); },
+      entry => { entry.parentFiles[0].patch += '\n@@ -90 +90,2 @@\n-start()\n+generated_terminal_policy()';
+        entry.parentFiles[0].additions += 1; entry.parentFiles[0].deletions += 1; },
+      entry => { entry.commit.files[0].patch = entry.commit.files[0].patch.replace('-generated_terminal_policy()', '-other()'); },
+    ]) {
+      const changed = structuredClone(evidence);
+      mutate(changed.reversalAuthorizations[0]);
+      assert.equal(checkPrimaryChange(changed, head, { strictNonBlockingRemediation: true }).ok, false);
+    }
+  }
+});
+
+test('REVERSALPARENT-01: captured refusals retain their independent proof fences', () => {
+  for (const [name, start, reason] of [
+    ['agent-os-10329', 376, 'reviewed-parent-patch-differs'],
+    ['agent-os-10301', 254, 'region-not-previously-verified'],
+    ['finch-35', 18, 'region-not-previously-verified'],
+  ]) {
+    // These are path projections for refusal replay, never full merge proofs.
+    const { evidence, path } = JSON.parse(readFileSync(
+      new URL(`./fixtures/reversalparent/${name}.json`, import.meta.url), 'utf8'));
+    const result = checkPrimaryChange(evidence, evidence.headSha, { strictNonBlockingRemediation: true });
+    assert.equal(result.reason, 'primary-change-reverted', name);
+    assert.equal(result.path, path);
+    assert.deepEqual(result.missingEvidence.regions, [{ start, end: start }]);
+    assert.ok(result.missingEvidence.rejected.some(entry => entry.reason === reason), JSON.stringify(result));
+    if (name === 'agent-os-10329') {
+      // Even isolating the parent-mapping defect cannot invent a document
+      // citation. The immutable original still has to authorize the region.
+      for (const authorization of evidence.reversalAuthorizations) {
+        authorization.parentFiles = authorization.parentFiles.filter(file => file.filename === path);
+        authorization.originalAuthorization.parentFiles = authorization.originalAuthorization.parentFiles
+          .filter(file => file.filename === path);
+      }
+      const isolated = checkPrimaryChange(evidence, evidence.headSha, { strictNonBlockingRemediation: true });
+      assert.equal(isolated.ok, false);
+      assert.ok(isolated.missingEvidence.rejected.some(entry =>
+        entry.reason === 'original-authorization-does-not-cover-region'));
+    }
   }
 });
 

@@ -472,11 +472,16 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
         }
         if (locations.some(location => location.ranges.some(({ start, end }) => !Number.isSafeInteger(start)
           || !Number.isSafeInteger(end) || start < 1 || end < start))) return reject('finding-lines-invalid');
-        const reviewed = authorization.verifiedRegions ? null : rebased === true
+        // REVERSALPARENT-01: an immutable original reversal pins its actual
+        // parent, including repairs between the review and that parent. Map
+        // to that state first; recursion below checks the original finding.
+        const originalParentProof = rebased && authorization.originalAuthorization;
+        const reviewed = authorization.verifiedRegions || originalParentProof ? null : rebased === true
           ? projectRebasedRegion(parentFiles, reviewedFiles, path, region, cache)
           : projectRegion(reviewedFiles, path, region, cache);
         if (rebased && !authorization.verifiedRegions) {
-          if (reversalPatchIdentity(reviewedFiles, cache) !== reversalPatchIdentity(parentFiles, cache)) return reject('reviewed-parent-patch-differs');
+          const expectedParent = originalParentProof ? originalParentProof.parentFiles : reviewedFiles;
+          if (reversalPatchIdentity(expectedParent, cache) !== reversalPatchIdentity(parentFiles, cache)) return reject('reviewed-parent-patch-differs');
         }
         // Direct ancestry already establishes shared base coordinates. Earlier
         // HAM repairs may change the segment; whole-segment equality cannot
@@ -489,9 +494,7 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
         if (authorization.originalAuthorization) {
           // Evaluate the same unit against the immutable original HAM patch,
           // in the reviewed merge-base coordinates, with the ordinary guards.
-          const originalFiles = authorization.verifiedRegions ? authorization.originalAuthorization.parentFiles
-            : authorization.originalAuthorization.rebased
-            ? authorization.originalAuthorization.parentFiles : reviewedFiles;
+          const originalFiles = authorization.originalAuthorization.parentFiles;
           // An unchanged immutable parent/base keeps exact coordinates, even
           // with duplicate segments elsewhere. Rewritten parents need the
           // ordinary unique content mapping.

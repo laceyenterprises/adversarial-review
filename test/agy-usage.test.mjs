@@ -1,6 +1,7 @@
 import './helpers/review-cli-resolver-fixture.mjs';
 import './helpers/worker-observation-fixture.mjs';
 import test from 'node:test';
+import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -94,6 +95,7 @@ test('mismatch, unsafe join and dedicated-account counter transport', (t) => {
 
 test('Gemini reviewer stream response delivers measured usage to its caller', async (t) => {
   const options = fixture(t);
+  let sentPrompt = null;
   const result = await reviewWithGemini('+synthetic diff\n', '', {
     env: { ...process.env, HOME: options.root, AGENT_OS_CONFIG_PATH: '/dev/null' },
     resolveGeminiRuntimeImpl: () => 'antigravity',
@@ -112,8 +114,10 @@ test('Gemini reviewer stream response delivers measured usage to its caller', as
     purgeStaleGeminiReviewerSessionDirsImpl: () => {},
     releaseGeminiCredentialCheckoutImpl: async () => {},
     assertAgyAuthImpl: async () => {},
-    spawnAgyReviewImpl: async () => ({ stdout: options.stdout, stderr: '' }),
+    spawnAgyReviewImpl: async ({ prompt }) => { sentPrompt = prompt; return { stdout: options.stdout, stderr: '' }; },
   });
+  assert.equal(result.execution.promptDigest, createHash('sha256').update(sentPrompt).digest('hex'));
+  assert.equal(result.execution.promptSet, 'code-pr');
   assert.equal(result.tokenUsage.total, 120);
   assert.equal(result.tokenUsage.source, 'agy-measured');
   assert.equal(result.tokenUsage.agyRequestTotal, 120);

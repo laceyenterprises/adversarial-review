@@ -8,6 +8,7 @@ import { appendScopeViolationFinding, evaluateAdditiveOnlyScope } from '../src/a
 import { ReviewerPromptTooLargeError } from '../src/reviewer-outcomes.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
@@ -4873,7 +4874,9 @@ test('reviewWithGemini happy path returns the captured review text', async () =>
   assert.deepEqual(result, {
     reviewText: 'BLOCKING: real finding\n\nVERDICT: blocked',
     tokenUsage: null,
-    execution: { harness: 'gemini-cli', model: 'gemini-2.5-pro', modelSource: 'registry', effort: null, effortSource: 'none' },
+    execution: { promptSet: 'code-pr', promptStage: 'first',
+      promptDigest: createHash('sha256').update(captured[0].prompt).digest('hex'),
+      harness: 'gemini-cli', model: 'gemini-2.5-pro', modelSource: 'registry', effort: null, effortSource: 'none' },
   });
   // The prompt fed to gemini carries the extra context and the diff fence.
   assert.equal(captured.length, 1);
@@ -5808,6 +5811,7 @@ test('reviewWithGemini keeps successful antigravity review when spend report loo
   resetGeminiReviewerSessionPreflightForTest();
   const root = mkdtempSync(join(tmpdir(), 'gemini-cqp-spend-success-'));
   let cleaned = false;
+  let sentPrompt;
   const released = [];
   const warnings = [];
   const reviewText = '## Adversarial Review — Gemini (gemini-reviewer-lacey)\n\n## Summary\nClean.\n\n## Verdict\nComment only';
@@ -5831,17 +5835,18 @@ test('reviewWithGemini keeps successful antigravity review when spend report loo
         released.push({ checkoutId: releasedCheckout.checkoutId, quotaSignal });
       },
       assertAgyAuthImpl: async () => {},
-      spawnAgyReviewImpl: async () => ({
-        stdout: reviewText,
-        stderr: '',
-        tokenUsage: { total: 42 },
-      }),
+      spawnAgyReviewImpl: async ({ prompt }) => {
+        sentPrompt = prompt;
+        return { stdout: reviewText, stderr: '', tokenUsage: { total: 42 } };
+      },
       retryDelaysMs: [],
       log: { warn: (message) => warnings.push(message) },
     }));
 
     assert.deepEqual(result, { reviewText, tokenUsage: null,
-      execution: { harness: 'antigravity', model: 'Gemini 3.8 Flash (High)', modelSource: 'runtime-display-token',
+      execution: { promptSet: 'code-pr', promptStage: 'first',
+        promptDigest: createHash('sha256').update(sentPrompt).digest('hex'),
+        harness: 'antigravity', model: 'Gemini 3.8 Flash (High)', modelSource: 'runtime-display-token',
         effort: 'high', effortSource: 'model-display-name' } });
     assert.equal(cleaned, true);
     assert.deepEqual(released, [{ checkoutId: 'co_spend_success_throw', quotaSignal: false }]);
@@ -6179,13 +6184,15 @@ test('reviewWithGemini wraps non-auth spawn failures as a Gemini exec error', as
 
 test('reviewWithGemini retries transient Gemini subprocess failures before succeeding', async () => {
   const attempts = [];
+  let sentPrompt;
   const sleeps = [];
   const result = await reviewWithGemini('+diff\n', '', {
     resolveGeminiRuntimeImpl: () => 'cli',
     assertOAuthImpl: async () => {},
     retryDelaysMs: [0, 0],
     sleepImpl: async (ms) => { sleeps.push(ms); },
-    spawnGeminiReviewImpl: async () => {
+    spawnGeminiReviewImpl: async ({ prompt }) => {
+      sentPrompt = prompt;
       attempts.push('spawn');
       if (attempts.length < 3) {
         const err = new Error('Command failed');
@@ -6200,7 +6207,9 @@ test('reviewWithGemini retries transient Gemini subprocess failures before succe
   });
 
   assert.deepEqual(result, { reviewText: '## Verdict\n\nComment only', tokenUsage: null,
-    execution: { harness: 'gemini-cli', model: 'gemini-2.5-pro', modelSource: 'registry', effort: null, effortSource: 'none' } });
+    execution: { promptSet: 'code-pr', promptStage: 'first',
+      promptDigest: createHash('sha256').update(sentPrompt).digest('hex'),
+      harness: 'gemini-cli', model: 'gemini-2.5-pro', modelSource: 'registry', effort: null, effortSource: 'none' } });
   assert.equal(attempts.length, 3);
   assert.deepEqual(sleeps, [0, 0]);
 });

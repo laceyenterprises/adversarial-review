@@ -52,6 +52,11 @@ export function persistReviewFindings(db, passId) {
         model: pass.reviewer_model, effort: pass.reasoning_effort, head: pass.head_sha,
         hammer: blockingFindingIdentity(f) });
     }
+    db.prepare(`UPDATE review_findings SET reviewer_harness=?,prompt_set=?,prompt_digest=?,prompt_stage=?,prompt_digests_json=?
+      WHERE pass_id=?`).run(metadata?.reviewerExecution?.harness ?? null,
+      metadata?.reviewerExecution?.promptSet ?? null, metadata?.reviewerExecution?.promptDigest ?? null,
+      metadata?.reviewerExecution?.promptStage ?? null,
+      metadata?.reviewerExecution?.promptDigests ? JSON.stringify(metadata.reviewerExecution.promptDigests) : null, passId);
     syncFindingDisputes(db, { passId });
     return inserted;
   })();

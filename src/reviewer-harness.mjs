@@ -106,6 +106,7 @@ import {
   parseDiffFiles,
 } from './reviewer-util.mjs';
 import {
+  reviewerPromptProvenance,
   selectReviewerRubric,
   buildReviewerPromptPrefix,
   buildReviewerPrompt,
@@ -968,7 +969,7 @@ async function reviewWithClaude(diff, extraContext = '', {
   const raw = stdout.trim();
   const parsed = parseClaudeJsonOutput(raw, replySelection ?? undefined);
   return { reviewText: parsed.reviewText, tokenUsage: parsed.tokenUsage,
-    execution: { harness: reviewerExecutionHarness('claude'), model: reviewerExecution.model, modelSource: reviewerExecution.modelSource, effort: reviewerExecution.effort,
+    execution: { ...reviewerPromptProvenance(prompt, { reviewKind, promptStage, promptOverride: promptOverride !== null }), harness: reviewerExecutionHarness('claude'), model: reviewerExecution.model, modelSource: reviewerExecution.modelSource, effort: reviewerExecution.effort,
       effortSource: reviewerExecution.effortSource, replySelection: parsed.replySelection } };
 }
 
@@ -1383,7 +1384,7 @@ async function reviewWithCodex(diff, extraContext = '', {
             timeoutMs: resolveReviewerTimeoutMs(env),
             idleTimeoutMs: Math.max(resolveProgressTimeoutMs(env), 3 * 60 * 1000),
           });
-          return { ...recovered, execution: { harness: reviewerExecutionHarness('codex'), model: codexExecOverrides.model, modelSource: codexExecOverrides.modelSource, effort: reasoningEffort, effortSource } };
+          return { ...recovered, execution: { ...reviewerPromptProvenance(prompt, { reviewKind, promptStage, promptOverride: promptOverride !== null }), harness: reviewerExecutionHarness('codex'), model: codexExecOverrides.model, modelSource: codexExecOverrides.modelSource, effort: reasoningEffort, effortSource } };
         } catch (fallbackErr) {
           throw new Error(
             `Native Codex made no progress and OAuth Responses recovery failed: `
@@ -1448,7 +1449,7 @@ async function reviewWithCodex(diff, extraContext = '', {
     return {
       reviewText: combined,
       tokenUsage,
-      execution: { harness: reviewerExecutionHarness('codex'), model: codexExecOverrides.model, modelSource: codexExecOverrides.modelSource,
+      execution: { ...reviewerPromptProvenance(prompt, { reviewKind, promptStage, promptOverride: promptOverride !== null }), harness: reviewerExecutionHarness('codex'), model: codexExecOverrides.model, modelSource: codexExecOverrides.modelSource,
         effort: codexExecOverrides.reasoningEffort, effortSource: codexExecOverrides.effortSource },
     };
   } finally {
@@ -2890,6 +2891,7 @@ async function reviewWithGemini(diff, extraContext = '', {
   const addedIdentity = runtime === 'antigravity'
     ? (agyIdentity === undefined ? resolveAgyReviewIdentityFromEnv(process.env) : agyIdentity)
     : null;
+  let promptProvenance = {};
   let identityRun = null;
 
   // Strip API keys (incl. GEMINI_API_KEY / GOOGLE_API_KEY) before any Gemini
@@ -2991,6 +2993,7 @@ async function reviewWithGemini(diff, extraContext = '', {
       extraContext,
       diff,
     });
+    promptProvenance = reviewerPromptProvenance(prompt, { reviewKind, promptStage, promptOverride: promptOverride !== null });
     // Runtime-aware model token. The token FORMATS differ and are NOT
     // interchangeable: the gemini-CLI path expects a slug (gemini-2.5-pro);
     // the agy/antigravity path expects agy's verbatim display name
@@ -3178,7 +3181,7 @@ async function reviewWithGemini(diff, extraContext = '', {
 
   const effort = geminiRequestedThinkingLevel(selectedModel, runtime);
   return { reviewText, tokenUsage: geminiUsage,
-    execution: { harness: reviewerExecutionHarness('gemini', runtime), model: selectedModel, modelSource: selectedModelSource,
+    execution: { ...promptProvenance, harness: reviewerExecutionHarness('gemini', runtime), model: selectedModel, modelSource: selectedModelSource,
       effort, effortSource: effort ? 'model-display-name' : 'none' } };
 }
 
@@ -3779,6 +3782,7 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
   const timer = timeoutPlan ? setTimeout(() => controller.abort(deadlineError), timeoutPlan.timeoutMs) : null;
   const chunkReviews = [];
   const chunkUsages = [];
+  const promptDigests = [];
   let execution = null;
   try {
     for (let index = 0; index < split.chunks.length; index += 1) {
@@ -3820,6 +3824,7 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
         onRejected: (rejected) => onRejectedCodexOutput?.({ ...rejected, chunkIndex: index + 1 }) });
       chunkUsages.push(normalizeTokenUsage(result.tokenUsage));
       execution ||= result.execution || null;
+      if (result.execution?.promptDigest) promptDigests.push(result.execution.promptDigest);
       chunkReviews.push({
         index: index + 1,
         promptBytes: chunk.promptBytes,
@@ -3843,7 +3848,7 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
     rawReviewText: mergedReviewText,
     reviewText: mergedReviewText,
     tokenUsage: sumChunkTokenUsage(chunkUsages),
-    execution,
+    execution: execution ? { ...execution, promptDigest: null, promptDigests } : null,
     needsSanitize: false,
     chunked: true,
     chunks: split.chunks,

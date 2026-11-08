@@ -34,6 +34,7 @@ const HAMMER_WAKE_RETENTION_MAX_FILES = 5000;
 const HAMMER_WAKE_SWEEP_INTERVAL_MS = 60 * 1000;
 const hammerWakeSweeps = repositoryObservationCache(new Map());
 const HAMMER_WAKE_RETRY_ATTEMPTS = 3;
+const HAMMER_WAKE_EXPIRY_RENEWALS = 3;
 const HAMMER_WAKE_STALE_RESERVATION_MS = 10 * 60 * 1000;
 
 function hammerWakeAuditDir(rootDir) {
@@ -205,6 +206,30 @@ function requestEligibleHammerWake({
   let retryable = Boolean(isClosureRecoveryDecision(decision)
     && decision.head === headSha && shared.snapshot?.head === headSha);
 
+  function finish() {
+    const event = {
+      schemaVersion: HAMMER_WAKE_AUDIT_SCHEMA_VERSION,
+      event: 'hammer_wake',
+      ...identity,
+      observedAt,
+      outcome,
+      reason,
+      eligibilityReasons,
+      ...(shared ? { nextAction: decision } : {}),
+      route: 'watcher-ama-merge-authority',
+      // Diagnostic only: the caller relies on a later watcher tick, not this flag.
+      retryable,
+      latencyEvent,
+      ...(auditPath ? { auditPath } : {}),
+    };
+    try {
+      log?.log?.(JSON.stringify(event));
+    } catch {
+      // Diagnostic logging cannot make the wake helper throw into AMA closure.
+    }
+    return event;
+  }
+
   if (!identity.repo || !Number.isInteger(identity.prNumber) || identity.prNumber <= 0 || !identity.headSha || !identity.eligibilityReason) {
     reason = 'invalid-wake-identity';
     retryable = false;
@@ -238,6 +263,7 @@ function requestEligibleHammerWake({
       // Keep predecessors intact, including their original admission evidence.
       if (shared && hasNoActingCloser(shared)) {
         let prior = readHammerWakeAudit(auditPath);
+        let renewals = 0;
         while (prior && ['reserved', 'requested'].includes(prior.outcome)) {
           const deadline = prior.wakeDeadline || prior.nextAction?.deadline;
           const atMs = Date.parse(deadline?.at || '');
@@ -245,6 +271,13 @@ function requestEligibleHammerWake({
           const anchoredMs = Date.parse(deadline?.anchoredAt || prior.observedAt || '');
           const budgetMs = Number(deadline?.budgetMs) > 0 ? Number(deadline.budgetMs) : atMs - anchoredMs;
           if (!Number.isFinite(budgetMs) || budgetMs <= 0) break;
+          if (renewals === HAMMER_WAKE_EXPIRY_RENEWALS) {
+            outcome = 'duplicate';
+            reason = 'wake-expiry-cap-reached';
+            retryable = false;
+            return finish();
+          }
+          renewals += 1;
           supersedes = { wakeAttemptKey: identity.wakeAttemptKey, reason: 'expired-without-acting-closer',
             deadlineAt: deadline.at };
           identity.wakeAttemptKey = `${wakeAttemptKey}:expiry:${createHash('sha256')
@@ -415,27 +448,7 @@ function requestEligibleHammerWake({
     }
   }
 
-  const event = {
-    schemaVersion: HAMMER_WAKE_AUDIT_SCHEMA_VERSION,
-    event: 'hammer_wake',
-    ...identity,
-    observedAt,
-    outcome,
-    reason,
-    eligibilityReasons,
-    ...(shared ? { nextAction: decision } : {}),
-    route: 'watcher-ama-merge-authority',
-    // Diagnostic only: the caller relies on a later watcher tick, not this flag.
-    retryable,
-    latencyEvent,
-    ...(auditPath ? { auditPath } : {}),
-  };
-  try {
-    log?.log?.(JSON.stringify(event));
-  } catch {
-    // Diagnostic logging cannot make the wake helper throw into AMA closure.
-  }
-  return event;
+  return finish();
 }
 
 function readHammerWakeAudit(path) {

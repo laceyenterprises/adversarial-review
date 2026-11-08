@@ -83,6 +83,9 @@ Directory: `data/hammer-wakes/`
   chain and reserve successors with exclusive create; repeated observations
   dedupe the current unexpired successor. Each successor carries `supersedes`
   and a fresh `wakeDeadline`. Missing/invalid deadlines cannot rearm by expiry.
+  A head and wake attempt allow three successors. Further expiry returns
+  `wake-expiry-cap-reached` and pages once through closure-wait custody. A
+  distinct attempt still has its own admission window.
   A reconciled retryable no-merge decision gets a new attempt key from the
   completed LRQ and completed retry descendant IDs, even on the same head
   and after terminal lease removal. Descendant IDs accept `launch_request_id`,

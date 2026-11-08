@@ -86,7 +86,10 @@ delivery immediately. The audit preserves the original decision deadline.
 An expired hammer wake with complete evidence of no acting closer gets a fresh
 attempt and admission window. Its audit links the expired predecessor through
 `supersedes`; repeated calls dedupe the replacement until its deadline. Live,
-parked and unreadable launch/retry evidence retains custody. Wakes only request
+parked and unreadable launch/retry evidence retains custody. At most three
+successors are allowed for the same head and wake attempt. When the last
+window expires, `wake-expiry-cap-reached` pages through the existing
+deduplicated closure-wait path. Wakes only request
 watcher attention; the closer's normal caps, leases and merge gates still apply.
 
 Without a reviewed SHA, new AMA dispatch returns `ama-reviewed-head-unavailable`

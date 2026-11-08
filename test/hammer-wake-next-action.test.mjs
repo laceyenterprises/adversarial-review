@@ -136,6 +136,24 @@ test('expired unacted wake gets an audited replacement and a fresh admission win
   assert.equal(f.calls.length, 3);
 });
 
+test('expiry renewal stops after three successors for the same head and attempt', t => {
+  const f = fixture(t), shared = pair();
+  let record = f.wake(shared);
+  for (let renewal = 0; renewal < 3; renewal += 1) {
+    const prior = JSON.parse(readFileSync(record.auditPath, 'utf8'));
+    record = f.wake(shared, { nowMs: Date.parse(prior.wakeDeadline.at) });
+    assert.equal(record.outcome, 'requested');
+  }
+  const prior = JSON.parse(readFileSync(record.auditPath, 'utf8'));
+  const nowMs = Date.parse(prior.wakeDeadline.at);
+  for (const delay of [0, 1000]) {
+    const exhausted = f.wake(shared, { nowMs: nowMs + delay });
+    assert.equal(exhausted.reason, 'wake-expiry-cap-reached');
+    assert.equal(exhausted.auditPath, record.auditPath);
+  }
+  assert.equal(f.calls.length, 4);
+});
+
 test('first wake from an overdue decision dedupes for a fresh admission budget', t => {
   const f = fixture(t), shared = pair();
   const nowMs = Date.parse(shared.decision.deadline.at) + 60_000;

@@ -870,7 +870,7 @@
     },
     {
       "id": "hammer-wakes",
-      "expiryWindow": "Initial deliveries and successors start a finite positive admission budget at reservation time; nextAction.deadline retains the original decision deadline.",
+      "expiryWindow": "Initial deliveries and successors start a finite positive admission budget at reservation time; nextAction.deadline retains the original decision deadline. A head and wake attempt allow three successors, then wake-expiry-cap-reached requests the deduplicated closure-wait alert.",
       "expiryFields": ["supersedes.wakeAttemptKey", "supersedes.reason", "supersedes.deadlineAt", "wakeDeadline.at", "wakeDeadline.anchoredAt", "wakeDeadline.budgetMs", "wakeDeadline.class"],
       "retryIdentity": "Shared wakeAttemptKey binds initial or completed LRQ identity and a stable descendant-ID set digest; descendant IDs accept launch_request_id, launchRequestId, then id. retryOfLaunchRequestId records one re-wake per reconciled retryable no-merge attempt. Recovery wake keys use deadline.anchoredAt, then deadline.at, then the explicit unanchored sentinel for their anchor component.",
       "title": "Hammer Wakes",

@@ -2100,6 +2100,11 @@ async function dispatchAmaClosureFor({
       shared,
       log: logger,
     });
+    if (wake?.reason === 'wake-expiry-cap-reached') {
+      await observeWait({ rootDir, repo: repoPath, prNumber, headSha: wake.headSha, env,
+        immediate: true, waitClass: wake.reason,
+        reason: 'Three renewed closer wake windows expired without a confirmed owner.' });
+    }
     const capRehead = await runCoexistenceOperation('cap-rehead',
       ({ signal: operationSignal }) => maybeDispatchCapReheadImpl({
       rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,

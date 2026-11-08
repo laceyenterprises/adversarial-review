@@ -35,8 +35,9 @@ in the final dispatch run. An attempted name-filtered run was redirected by the
 repository sandbox runner to the whole file and exceeded its 120-second bound;
 validation uses the explicit file runner with a 600-second bound instead.
 
-Wake successor-chain caps/backoff remain a non-blocking follow-up. No live
-recovery operation or production acceptance observation was performed.
+A head and wake attempt may renew at most three times. Further expiry uses
+the existing deduplicated closure-wait page and does not request another wake.
+No live recovery operation or production acceptance observation was performed.
 
 ## CI remediation
 

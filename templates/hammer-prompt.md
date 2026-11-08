@@ -171,7 +171,7 @@ export HAM_REPO='<<REPO>>' HAM_PR_NUMBER='<<PR_NUMBER>>' HAM_HQ_ROOT='<<HQ_ROOT>
 
 ## Cost and context discipline
 
-Before reads at start and after **each push**, run `node <<ROOT_DIR>>/bin/hammer-context.mjs <<REPO>> <<PR_NUMBER>>` once; fetch the full review if `review.findingsTruncated` or `review.simplicityNoteTruncated`.
+Run `ham_read context "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-context.mjs" <<REPO>> <<PR_NUMBER>>` before reads and after **each push**; nonzero stops. Fetch full review for `review.findingsTruncated` or `review.simplicityNoteTruncated` using `ham_read review-read <read-only command...>`.
 
 Context/verify-head exit 20 with `ci-infrastructure`: stop without merge or HQ
 decision. Recovery resumes after exact-head checks pass.
@@ -209,7 +209,7 @@ Source `<<RUN_DIR>>/inputs.sh` each shell; persist audits there.
 
 ```bash
 umask 077
-/usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-base-head.mjs" '<<PR_URL>>' > '<<RUN_DIR>>/base-head' || exit 1
+"$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" read base-head 90 540 "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-base-head.mjs" '<<PR_URL>>' > '<<RUN_DIR>>/base-head' || exit 1
 cat > '<<RUN_DIR>>/inputs.sh' <<'HAM_INPUTS'
 source "<<ROOT_DIR>>/bin/hammer-node-runtime.sh" || { return 1 2>/dev/null || exit 1; }
 export HAM_BASE_HEAD="$(cat '<<RUN_DIR>>/base-head')"
@@ -221,6 +221,8 @@ export HAM_RUN_DIR='<<RUN_DIR>>'
 export HAM_ROOT_DIR='<<ROOT_DIR>>' HAM_HQ_ROOT='<<HQ_ROOT>>' HAM_HQ_OWNER='<<HQ_OWNER>>'
 export HAM_AUDIT_PATH='<<AUDIT_PATH>>' HAM_REVIEWER='<<REVIEWER>>'
 export HAM_AMA_TRAILERS=<<AMA_TRAILERS_SHELL>>
+ham_step() { "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" "$@"; }
+ham_read() { ham_step read "$1" 90 540 "${@:2}"; }
 ham_gh() { "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/metered-gh.mjs" exec-hammer "$@"; }
 ham_git() {
   local ham_git_exit=0
@@ -428,7 +430,7 @@ if [ "$(id -un)" != "$HAM_DISPUTE_OWNER" ]; then
   unset HAM_DISPUTE_TOKEN
 fi
 DISPUTED_HEAD=$(/usr/bin/perl -e 'alarm shift; exec @ARGV' 15 git rev-parse HEAD) || exit 1
-if /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_DISPUTE_RUN[@]}" "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/dispute-finding.mjs \
+if "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" mutation dispute-finding 90 540 "${HAM_DISPUTE_RUN[@]}" "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/dispute-finding.mjs \
   --root-dir <<ROOT_DIR>> --repo <<REPO>> --pr <<PR_NUMBER>> \
   --head-sha "$DISPUTED_HEAD" --review '<review node id or URL>' \
   --finding '<n>' --evidence-file "$HAM_DISPUTE_EVIDENCE_FILE"; then
@@ -786,7 +788,7 @@ Fetch the live PR and final review:
 ```bash
 # UNREGREPO-01: hold a stacked PR whose parent branch was already merged.
 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/stacked-base-check.mjs <<ROOT_DIR>> <<REPO>> <<PR_NUMBER>> || exit 20
-ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName,reviews > "$HAM_RUN_DIR/pr-before.json"
+ham_read review-read "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-pr-read.mjs" <<REPO>> <<PR_NUMBER>> --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName,reviews > "$HAM_RUN_DIR/pr-before.json" || exit $?
 ```
 
 Identify the newest authoritative adversarial review whose commit is
@@ -803,7 +805,7 @@ Commit the remediation:
 # git rebase/pull) moves gitlinks but leaves submodule checkouts stale.
 # `ignore = all` hides this from status/diff; staging can rewind the submodule.
 # Re-sync initialized submodules to recorded commits; leave uninitialized ones.
-/usr/bin/perl -e 'alarm shift; exec @ARGV' 120 git submodule update --recursive
+ham_step mutation submodule-sync 120 720 git submodule update --recursive
 git status --short --ignore-submodules=none
 git add <changed files>   # never a submodule path, never `git add -f`/`--force`
 # The hammer never moves a submodule pointer: submodule fixes land as a PR in the
@@ -975,12 +977,12 @@ fi
 # Only the conflict-only reviewed-head replay uses this proof. Remediation
 # heads retain their existing full-range findings/preservation validation.
 if [ "$HAM_CONFLICT_SOURCE" = "<<REVIEWED_SHA>>" ]; then
-  /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-conflict-primary.mjs" \
+  ham_read conflict-primary "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-conflict-primary.mjs" \
     "<<REVIEWED_SHA>>" "$HAM_CONFLICT_SOURCE" "$HAM_CONFLICT_BASE" \
     > "<<RUN_DIR>>/conflict-primary.json" || {
       HAM_CONFLICT_PROOF_STATUS=$?
       HAM_CONFLICT_PROOF_REASON=conflict-primary-unproven
-      if [ "$HAM_CONFLICT_PROOF_STATUS" -eq 142 ]; then
+      if [ "$HAM_CONFLICT_PROOF_STATUS" -eq 124 ] || [ "$HAM_CONFLICT_PROOF_STATUS" -eq 142 ]; then
         HAM_CONFLICT_PROOF_REASON=conflict-primary-timeout
       fi
       "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-terminal-audit.mjs" "$HAM_CONFLICT_PROOF_REASON"
@@ -993,7 +995,7 @@ fi
 HAM_CONFLICT_SUBMODULE_SYNC_CAP="${HAM_UPDATE_BRANCH_RETRY_CAP:-3}"
 HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT=1
 while true; do
-  if /usr/bin/perl -e 'alarm shift; exec @ARGV' 120 git submodule update --recursive; then
+  if ham_step mutation submodule-sync 120 720 git submodule update --recursive; then
     break
   fi
   if [ "$HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT" -ge "$HAM_CONFLICT_SUBMODULE_SYNC_CAP" ]; then
@@ -1108,7 +1110,7 @@ HAM_PHASE_OUTCOME=predicate-build-failed
 HAM_PRIMARY_CHANGE_FILE=$(mktemp "${TMPDIR:-/tmp}/ham-primary-change.XXXXXX") || exit 1
 trap 'rm -f "$HAM_PRIMARY_CHANGE_FILE" "${HAM_VERDICT_FILE:-}" "${HAM_VERDICT_READY_FILE:-}"' EXIT
 chmod 600 "$HAM_PRIMARY_CHANGE_FILE"
-/usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/primary-change-context.mjs <<REPO>> <<PR_NUMBER>> "$POST_REMEDIATION_SHA" \
+ham_read primary-change-context "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/primary-change-context.mjs <<REPO>> <<PR_NUMBER>> "$POST_REMEDIATION_SHA" \
   > "$HAM_PRIMARY_CHANGE_FILE" || exit 1
 HAM_VERDICT_FILE=$(mktemp "${TMPDIR:-/tmp}/ham-verdict.XXXXXX") || exit 1
 chmod 600 "$HAM_VERDICT_FILE"

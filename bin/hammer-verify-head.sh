@@ -553,7 +553,7 @@ ham_bounded_git_sync() {
 
 ham_bounded_submodule_sync() {
   local ham_submodule_sync_exit=0
-  ham_bounded_git_operation 120 env HAM_GIT_SYNC_BOUNDED=1 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/metered-gh.mjs exec-git submodule update --recursive || ham_submodule_sync_exit=$?
+  "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" mutation submodule-sync 120 720 env HAM_GIT_SYNC_BOUNDED=1 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/metered-gh.mjs exec-git submodule update --recursive || ham_submodule_sync_exit=$?
   if [ "$ham_submodule_sync_exit" -eq 76 ]; then HAM_PHASE_OUTCOME=git-credential-refresh-failed; fi
   return "$ham_submodule_sync_exit"
 }
@@ -641,7 +641,7 @@ ham_settle_rebase_snapshot() {
       if ham_is_full_sha "$snapshot_head" && [ "$snapshot_head" != "$from" ]; then
         if [ "$async_result" -eq 1 ]; then
           if ! ham_bounded_git_sync "$snapshot_head" \
-            || ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-rebase-result.mjs" \
+            || ! "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" read rebase-result 90 540 "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-rebase-result.mjs" \
               "$from" "$snapshot_head" "$base" > "<<RUN_DIR>>/rebase-result-proof.json"; then
             if [ "${HAM_PHASE_OUTCOME:-}" != git-credential-refresh-failed ]; then HAM_PHASE_OUTCOME=rebase-result-unproven; fi
             ham_release_merge_lease || return 1
@@ -795,7 +795,7 @@ ham_rebase_head() {
     HAM_PUSHED_HEAD="$POST_REMEDIATION_SHA"
     export HAM_PUSHED_FROM_HEAD HAM_PUSHED_HEAD
     "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-progress.mjs" remediation-pushed || true
-    if ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-pushed-attestation.mjs \
+    if ! "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" mutation pushed-attestation 90 540 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-pushed-attestation.mjs \
       <<REPO>> <<PR_NUMBER>> "$HAM_PUSHED_FROM_HEAD" "$HAM_PUSHED_HEAD"; then
       HAM_PHASE_OUTCOME=pushed-attestation-unavailable
       printf -v HAM_NO_MERGE_NOTE '%s\nHAM-Base-Head: %s\nHAM-Pushed-Head: %s\nHAM-CI-Validated: false' \

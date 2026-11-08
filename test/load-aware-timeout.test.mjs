@@ -335,6 +335,17 @@ test('CLI prints usage context for missing and help arguments while staying boun
   }
 });
 
+test('CLI accepts an explicit ceiling and fails safely for invalid ceilings', () => {
+  for (const [ceiling, warning] of [['90', false], ['0', true], ['invalid', true]]) {
+    const result = spawnSync(process.execPath, ['bin/load-aware-timeout.mjs', '90', ceiling], {
+      encoding: 'utf8', timeout: 5000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, '90');
+    if (warning) assert.match(result.stderr, /ceiling must be finite/);
+  }
+});
+
 test('is pure given inputs — same args, same output, no clock/randomness', () => {
   const a = loadAwareTimeoutSeconds(300, { loadAvg1m: 12, cpuCount: 6, cpuBusyPercent: 95 });
   const b = loadAwareTimeoutSeconds(300, { loadAvg1m: 12, cpuCount: 6, cpuBusyPercent: 95 });

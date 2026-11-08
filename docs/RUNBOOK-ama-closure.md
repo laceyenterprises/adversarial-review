@@ -476,6 +476,33 @@ without attempting the rejected executable. Persisted `ham_gh`, `ham_git` and
 `ham_pr` helpers use the resolved export directly. Keep sourcing the original
 inputs in every shell; do not reconstruct lease ownership on resume.
 
+Mandatory helper calls use `bin/hammer-helper-step.mjs MODE STEP NOMINAL CEILING
+COMMAND [ARG...]`. It sizes each attempt through `bin/load-aware-timeout.mjs`
+with an explicit ceiling, retaining the nominal budget if sizing is unavailable.
+Base-head, context, full-review, primary-change, range and rebase/conflict proof
+reads use 90 seconds nominal and a 540-second ceiling. A timed-out read gets
+one retry; permanent failures and semantic stop codes return immediately.
+The runner waits for child exit, allowing five seconds for TERM cleanup before
+KILL, and keeps children in the controller's process group. Failed read output
+cannot mix with a successful retry. Child early-failure audits are provisional
+until the runner either recovers or publishes the exhausted failure.
+
+Publication and provenance writes use `mutation` mode, which never retries:
+API publication and submodule synchronization use 120/720 seconds, pushed attestation and finding disputes
+90/540, and merge-action receipt capture 60/360. Existing lease, live-head,
+idempotency, publication recovery and receipt rules still govern these writes.
+Timeout reason codes include step, effective seconds, applied load multiplier
+in thousandths and attempt count, for example
+`base-head-timeout:budget-540s:load-6000-milli:attempts-2`.
+The multiplier is the applied budget divided by nominal, after rounding and
+the ceiling. This records granted patience rather than an uncapped load curve.
+The 15-second token/head guards and 20-second local merge-signal capture
+remain fixed. Submodule updates can fetch missing objects; their existing
+cleanup and retry owners remain in place, with no new mutation replay.
+Existing published-head
+polls and CI gate reads retain their enclosing deadlines and retry rules;
+git fetch retains its load-aware bounded synchronization and lock cleanup.
+
 For current PR/head lease observation, run
 `node bin/hammer-lease-state.mjs --repo OWNER/REPO --base BASE --pr N --head SHA`
 from the deployed checkout (or pass its `--root-dir`). It reports `held` for

@@ -98,7 +98,7 @@ for (const nodeBin of ['', null]) {
     t.after(() => rmSync(root, { recursive: true, force: true }));
     mkdirSync(join(root, 'bin'));
     const node = join(root, 'bin/node');
-    writeFileSync(node, '#!/bin/sh\nprintf "%s\\n" "${HAM_GIT_SYNC_BOUNDED:-missing}" "$@"\n', {mode: 0o755});
+    writeFileSync(node, `#!/bin/sh\ncase \"$1\" in */hammer-helper-step.mjs) exec \"${process.execPath}\" \"$@\" ;; esac\nprintf "%s\\n" "\${HAM_GIT_SYNC_BOUNDED:-missing}" "$@"\n`, {mode: 0o755});
     const env = {...process.env, AGENT_OS_NODE_BIN: '', PATH: `${join(root, 'bin')}:${process.env.PATH}`};
     if (nodeBin === null) delete env.HAM_NODE_BIN; else env.HAM_NODE_BIN = nodeBin;
     const result = spawnSync('/bin/bash', ['-c', `${SYNC_FUNCTIONS}
@@ -117,10 +117,13 @@ ham_bounded_submodule_sync`], {env, cwd: root, encoding: 'utf8', timeout: 5000})
 assert.deepEqual(process.argv.slice(2), ['a'.repeat(40), 'b'.repeat(40), 'c'.repeat(40)]);
 console.log(JSON.stringify({proof:'fixture-exact-head'}));
 `);
-    const start = PROMPT.indexOf("/usr/bin/perl -e 'alarm shift; exec @ARGV' 90", PROMPT.indexOf('ham_settle_rebase_snapshot() {'));
+    const start = PROMPT.indexOf('"$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" read rebase-result',
+      PROMPT.indexOf('ham_settle_rebase_snapshot() {'));
     assert.ok(start >= 0);
     const end = PROMPT.indexOf('; then', start);
-    const command = PROMPT.slice(start, end).replaceAll('<<ROOT_DIR>>', root).replaceAll('<<RUN_DIR>>', root);
+    const command = PROMPT.slice(start, end)
+      .replace('<<ROOT_DIR>>/bin/hammer-helper-step.mjs', resolve('bin/hammer-helper-step.mjs'))
+      .replaceAll('<<ROOT_DIR>>', root).replaceAll('<<RUN_DIR>>', root);
     const env = {...process.env, AGENT_OS_NODE_BIN: '', PATH: `${join(root, 'bin')}:${process.env.PATH}`};
     if (nodeBin === null) delete env.HAM_NODE_BIN; else env.HAM_NODE_BIN = nodeBin;
     const setup = `from=${'a'.repeat(40)}; snapshot_head=${'b'.repeat(40)}; base=${'c'.repeat(40)};
@@ -137,8 +140,8 @@ test('bounded submodule expiry sends TERM and waits for lock cleanup', t => {
   t.after(() => rmSync(root, {recursive: true, force: true}));
   mkdirSync(join(root, 'bin'));
   const lock = join(root, 'submodule.lock');
-  writeFileSync(join(root, 'bin/node'), '#!/bin/sh\ntouch "$HAM_TEST_LOCK"\ntrap \'rm -f "$HAM_TEST_LOCK"; exit 143\' TERM\nwhile :; do /bin/sleep 0.1; done\n', {mode: 0o755});
-  const functions = SYNC_FUNCTIONS.replace('120 env HAM_GIT_SYNC_BOUNDED=1', '1 env HAM_GIT_SYNC_BOUNDED=1');
+  writeFileSync(join(root, 'bin/node'), `#!/bin/sh\ncase \"$1\" in */hammer-helper-step.mjs) exec \"${process.execPath}\" \"$@\" ;; esac\ntouch "$HAM_TEST_LOCK"\ntrap \'rm -f "$HAM_TEST_LOCK"; exit 143\' TERM\nwhile :; do /bin/sleep 0.1; done\n`, {mode: 0o755});
+  const functions = SYNC_FUNCTIONS.replace('mutation submodule-sync 120 720', 'mutation submodule-sync 1 1');
   assert.notEqual(functions, SYNC_FUNCTIONS, 'fixture shortens only the production submodule bound');
   const result = spawnSync('/bin/bash', ['-c', `${functions}
 ham_bounded_submodule_sync`], {

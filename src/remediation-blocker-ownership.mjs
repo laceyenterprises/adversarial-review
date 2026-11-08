@@ -18,11 +18,13 @@ export function operationalBlockerOwner(entry) {
   // negated need phrases, never a whole sentence that could also request access.
   // Only strip a standalone negated-need clause. Embedded "no credentials"
   // can describe a missing prerequisite. Commas are accepted only in an
-  // enumerated list ending in ", or", never across a new approval clause.
+  // enumerated list ending in "or", never across a new approval clause.
   const needItem = '(?:additional|human|operator|finding|input|decision|approval|intervention|action|credentials?|permissions?|authentication|authorization|access|adversarial|review)';
   const listItem = `${needItem}(?:\\s+${needItem})*`;
-  const negatedNeed = new RegExp(`\\bno (?:${listItem}(?:,\\s*${listItem})*,\\s*or\\s+${listItem}|${needItem}(?:\\s+(?:${needItem}|or|and))*)\\s+(?:(?:is|are)\\s+)?(?:needed|required|necessary)\\b`, 'gi');
-  const ambiguousCredentialAndApproval = /\b(?:credentials?|permissions?|authentication|authorization|access)\s+and\s+(?:(?:human|operator)\s+)?(?:approval|decision|action)\b/i;
+  const negatedNeed = new RegExp(`\\bno (?:${listItem}(?:,\\s*${listItem})*,?\\s+or\\s+${listItem}|${needItem}(?:\\s+(?:${needItem}|or|and))*)\\s+(?:(?:is|are)\\s+)?(?:needed|required|necessary)\\b`, 'gi');
+  const credentialItem = '(?:credentials?|permissions?|authentication|authorization|access)';
+  const approvalItem = '(?:(?:human|operator)\\s+)?(?:approval|decision|action)';
+  const ambiguousCredentialAndApproval = new RegExp(`\\b(?:${credentialItem}\\s+and\\s+${approvalItem}|${approvalItem}\\s+and\\s+${credentialItem})\\b`, 'i');
   const legacyNeeds = fields.map(field => String(field).replace(negatedNeed, (phrase, offset, value) => {
     // Conjunction-led prose and mixed credentials/approval remain human-owned.
     const standalone = /(?:^|[.!?;:]|\n)\s*(?:[-*>]\s+)?$/.test(value.slice(0, offset));

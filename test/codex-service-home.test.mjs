@@ -1,7 +1,8 @@
 import './helpers/review-cli-resolver-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import childProcess, { spawnSync } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import { setImmediate as nextTurn } from 'node:timers/promises';
 import { EventEmitter } from 'node:events';
 import { materializePerWorkerCodexAuth, prepareCorporateCodexReviewerAuth } from '../src/codex-per-worker-auth.mjs';
@@ -363,7 +364,8 @@ for (const provider of ['codex', 'codex-corp']) {
         ...(failure === 'reply-context' ? {} : { replyPath: join(f.root, 'reply.json'), hqRoot: f.root }),
         workerClass: provider === 'codex-corp' ? 'remediator-codex-corp' : 'codex',
         enforceHarnessIdentity: false, log: quiet,
-        sourceEnv: { HOME: f.root, CODEX_HOME: dirname(f.authPath), HQ_REPO_ROOT: f.root,
+        // The startup contract resolves /Users/<owner> auth paths to that owner home.
+        sourceEnv: { HOME: f.root.match(/^\/Users\/[^/]+/)?.[0] || f.root, CODEX_HOME: dirname(f.authPath), HQ_REPO_ROOT: f.root,
           // Corporate staging cannot be disabled by a primary auth path/kill switch.
           ...(provider === 'codex-corp' ? { CODEX_AUTH_PATH: f.authPath, AGENT_OS_CODEX_PER_WORKER_AUTH: '0' } : {}) },
         materializePerWorkerCodexAuthImpl: materializer(f, auth => { staged = auth; }),
@@ -552,3 +554,30 @@ test('async catalog rejection retains authenticated server-catalog fallback with
   assert.equal(existsSync(home.codexHome), false);
   assert.equal(existsSync(f.authPath), true);
 });
+
+for (const code of ['EPIPE', 'ERR_STREAM_DESTROYED']) {
+  test(`async service probe handles early stdin ${code}`, async (t) => {
+    const f = fixture();
+    const commandError = new Error('probe exited early');
+    const mock = t.mock.method(childProcess, 'execFile', (_command, _args, _options, callback) => {
+      const stdin = new EventEmitter();
+      stdin.end = () => queueMicrotask(() => {
+        stdin.emit('error', Object.assign(new Error('stdin closed'), { code }));
+        callback(commandError, '', '');
+      });
+      return { stdin };
+    });
+    syncBuiltinESMExports();
+    try {
+      await assert.rejects(prepareServiceCodexHomeAsync({
+        env: f.env, workspaceDir: f.root, model: 'fixture-model',
+        codexCli: '/fixture/codex', log: quiet,
+      }), /Codex service OAuth unavailable at effective CLI credential store/);
+      assert.equal(mock.mock.callCount(), 1);
+    } finally {
+      mock.mock.restore();
+      syncBuiltinESMExports();
+      f.cleanup();
+    }
+  });
+}

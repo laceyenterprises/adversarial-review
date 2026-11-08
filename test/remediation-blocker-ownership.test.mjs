@@ -58,6 +58,9 @@ test('PENDINGCIOWNER-01 the CI normalizer receives structured ownership and pres
 for (const [finding, expected] of [
   ['Required CI is pending. No human decision, operator approval, or intervention is needed.', 'CI'],
   ['Required CI is pending. No human decision or operator approval is needed.', 'CI'],
+  ['Required CI is pending. No human decision, operator approval or intervention is needed.', 'CI'],
+  ['Required CI is pending. No operator approval and credentials are required.', 'human'],
+  ['Required CI is pending. No credentials and operator approval are required.', 'human'],
   ['Required CI is pending. No credentials or permissions are required.', 'CI'],
   ['Required CI is pending. No credentials and permissions are required.', 'CI'],
   ['Required CI is pending. There are no credentials, and operator approval is required.', 'human'],

@@ -4576,6 +4576,9 @@ merge predicates and smoke commands remain unchanged.
 ## Change notes
 
 - FINDINGS-94c784e1: Correct the closer backlog-repair runbook to use the SDK-only CLI, pass its read activation flag and SDK session/bootstrap environment through `sudo`, describe current output and rejected database-source flags, and make dispatch-read subprocess fixtures independent of host load diagnostics.
+- HAM PR #1726: recognize negated lists with or without a serial comma, retain
+  human ownership for mixed credential and approval clauses in either order,
+  and handle stdin stream errors when async Codex probes exit early.
 
 - PR #1726 final comment remediation: cli-direct Codex discovery awaits credential
   and catalog preparation with shared staging and cleanup. Async probes close

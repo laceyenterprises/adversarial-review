@@ -18,6 +18,9 @@ function runServiceCodexCommandAsync(command, args, { stdio, ...options }) {
     });
     // execFile cannot honour stdio: ignore. Deliver EOF explicitly so neither
     // finite probe can wait for interactive input.
+    // Early process exit can close stdin before EOF is delivered. execFile's
+    // callback owns the command result, including its exit error.
+    child.stdin.on('error', () => {});
     child.stdin.end();
   });
 }

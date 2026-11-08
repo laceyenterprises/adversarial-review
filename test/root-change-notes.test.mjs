@@ -77,6 +77,7 @@ test('repository convention is discoverable to builders and every affected promp
   assert.match(read('AGENTS.md'), /docs\/changes\/<TICKET-ID>\.md/);
   assert.match(read('README.md'), /\[.*docs\/changes\/.*\]\(docs\/changes\/README\.md\)/);
   assert.match(read('docs/changes/README.md'), /Summary, Interface changes \(or none\), and Verification/);
+  assert.match(read('docs/changes/README.md'), /src\/changes\/\*\.md` are historical/);
   const readers = ['templates/hammer-prompt.md', 'docs/RUNBOOK-ama-closure.md',
     'docs/SPEC-adversarial-review-auto-remediation.md', 'docs/follow-up-runbook.md'];
   for (const role of ['reviewer', 'remediator']) {

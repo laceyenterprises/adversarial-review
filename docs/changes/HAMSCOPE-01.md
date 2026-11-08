@@ -36,3 +36,7 @@ edits that the final syntactic preservation check might otherwise permit.
   transcript deliveries.
 - Full-suite execution remains delegated to PR-head CI under the remediation
   worker's targeted-test-only constraint.
+- The next hosted run exposed a rendered prompt of 63,441 bytes. The pre-edit
+  helper now reuses Appendix B1's owner setup, retaining the timeout, owner and
+  token checks. The fixed-path regression renders 61,298 bytes under the same
+  60 KiB limit. The focused prompt-size, author-line, and deferral tests passed.

@@ -190,9 +190,9 @@ test('ordinary ready capture stays compatible and invalid deferral rolls back', 
 test('hammer contract invokes the pre-edit helper and distinguishes deferred audit counts', () => {
   const prompt = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
   assert.match(prompt, /Before editing any author-introduced line,[^\n]*bounded helper/);
-  assert.match(prompt, /HAM_EDIT_OWNER=\$\(stat -f '%Su' <<ROOT_DIR>>\/data\/reviews\.db\)/);
-  assert.match(prompt, /HAM_EDIT_RUN=\(sudo -A -H -u "\$HAM_EDIT_OWNER"/);
-  assert.match(prompt, /alarm shift; exec @ARGV' 90 "\$\{HAM_EDIT_RUN\[@\]\}" "\$HAM_NODE_BIN" \\\n  <<ROOT_DIR>>\/bin\/hammer-edit-plan\.mjs/);
-  assert.match(prompt, /exit 20 records the non-blocking finding[^\n]*means make no edit/);
+  assert.match(prompt, /HAM_DISPUTE_OWNER=\$\(stat -f '%Su' <<ROOT_DIR>>\/data\/reviews\.db\)/);
+  assert.match(prompt, /HAM_DISPUTE_RUN=\(sudo -A -H -u "\$HAM_DISPUTE_OWNER"/);
+  assert.match(prompt, /alarm shift; exec @ARGV' 90 "\$\{HAM_DISPUTE_RUN\[@\]\}" "\$HAM_NODE_BIN" \\\n  <<ROOT_DIR>>\/bin\/hammer-edit-plan\.mjs/);
+  assert.match(prompt, /Exit 20 records the non-blocking finding[^\n]*\nand means make no edit/);
   assert.match(prompt, /separate counts\n   for remediated and deferred findings/);
 });

@@ -109,9 +109,30 @@ test('HAMEMPTYPRIMARY-01: the publication helper is read-only and exits nonzero 
   assert.equal(f.git(['rev-parse', 'HEAD']).trim(), f.head);
   f.git(['commit', '--amend', '-qm', `HAM rewrite\n\nWorker-Class: hammer\nReviewed-Head: ${f.reviewedHead}`]);
   const collapsed = f.git(['rev-parse', 'HEAD']).trim();
-  assert.throws(run, error => error.status === 1 && /conflict-primary-unproven/.test(error.stderr));
+  assert.throws(run, error => {
+    assert.equal(error.status, 1);
+    assert.equal(error.stdout, '');
+    assert.match(error.stderr, /\nconflict-primary-unproven\n$/);
+    return true;
+  });
   assert.equal(f.git(['rev-parse', 'HEAD']).trim(), collapsed);
   assert.equal(f.git(['status', '--porcelain']), '');
+});
+
+test('HAMEMPTYPRIMARY-01: the publication helper preserves Git failure diagnostics', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hamemptyprimary-cli-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const cli = fileURLToPath(new URL('../bin/hammer-conflict-primary.mjs', import.meta.url));
+  assert.throws(() => execFileSync(process.execPath, [cli], {
+    cwd: dir, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, GIT_DIR: join(dir, 'missing.git') },
+  }), error => {
+    assert.equal(error.status, 1);
+    assert.equal(error.stdout, '');
+    assert.match(error.stderr, /conflict-primary-unproven: retain the reviewed author commits and patches before publication/);
+    assert.match(error.stderr, /fatal: not a git repository/);
+    return true;
+  });
 });
 
 test('HAMEMPTYPRIMARY-01: conflict procedure proves preservation before publication', () => {

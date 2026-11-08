@@ -10,7 +10,8 @@ try {
   const proof = await proveConflictPrimary({ reviewedHead, sourceHead, head, base, git });
   if (!proof) throw new Error('conflict-primary-unproven');
   process.stdout.write(`${JSON.stringify(proof)}\n`);
-} catch {
+} catch (error) {
   process.stderr.write('conflict-primary-unproven: retain the reviewed author commits and patches before publication\n');
+  process.stderr.write(`${error?.stderr || error?.message || String(error)}\n`);
   process.exitCode = 1;
 }

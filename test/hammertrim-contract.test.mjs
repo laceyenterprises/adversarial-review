@@ -1223,7 +1223,9 @@ echo COMMON_CLOSE_SUCCEEDED
   assert.equal(readFileSync(join(scratchDir, 'pr-after.json'), 'utf8').includes(head), true);
   t.diagnostic(`GHBUDGET common close: GraphQL=${graphql.length} REST=${rest.length} total=${calls.length}`);
   assert.equal(graphql.length, 3, 'audit identity, comment and merge use GraphQL');
-  assert.equal(rest.length, 48, 'includes fresh review proof at both green gates, PR/check admission after lease release and the live stacked-base recheck');
+  // LAC-2174: author-only classification omits the two empty-tree reads.
+  assert.equal(calls.filter(args => args.some(value => value.includes('/git/trees/'))).length, 0);
+  assert.equal(rest.length, 46, 'includes fresh review proof at both green gates, PR/check admission after lease release and the live stacked-base recheck');
 });
 
 test('GHBUDGET-01: REST prompt snapshots preserve review authors and exact commit heads', async () => {

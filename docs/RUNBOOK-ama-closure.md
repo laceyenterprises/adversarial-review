@@ -4592,6 +4592,16 @@ Completed immutable evidence remains shared within a closure evaluation.
 In-flight reads belong to each reader's deadline so timing out one reader
 cannot cancel another reader's work or extend its wait.
 
+History classification reads every paginated commit before deciding whether a
+hammer exists. Author-only and history-only classification skips file reconstruction;
+a hammer preservation decision still reconstructs both complete author and final
+snapshots. Immutable commit pages are reused within that reader. Directory traversal
+settles at most eight before/after subtree pairs per wave (16 GitHub requests),
+then diffs at most eight changed blob pairs at once. Equal subtrees remain skipped,
+truncated trees still fail closed, and sorted paths make evidence independent of
+request completion order. This reduces serial collection without changing the
+90-second budget, quota policy, live reads or cancellation ownership.
+
 Cancellation reaches metadata, subtree, blob, retry and local proof work.
 Production history CLI/diff children run in an isolated process group, killed
 with SIGKILL on timeout/cancellation so wrapper descendants cannot retain pipes.

@@ -78,24 +78,37 @@ export function createHistoryReader(options = {}) {
   };
   const filesBetween = async (repo, base, head) => {
     const changed = [];
-    const walk = async (beforeRef, afterRef, prefix = '') => {
-      if (beforeRef && beforeRef === afterRef) return;
-      const [before, after] = await Promise.all([
-        beforeRef ? tree(repo, beforeRef) : new Map(),
-        afterRef ? tree(repo, afterRef) : new Map(),
-      ]);
-      for (const name of new Set([...before.keys(), ...after.keys()])) {
-        const a = before.get(name), b = after.get(name);
-        if (a?.sha === b?.sha && a?.mode === b?.mode) continue;
-        const path = `${prefix}${name}`;
-        if (a?.type === 'tree' || b?.type === 'tree') {
-          if (a && a.type !== 'tree') changed.push({ path, a });
-          if (b && b.type !== 'tree') changed.push({ path, b });
-          await walk(a?.type === 'tree' ? a.sha : null, b?.type === 'tree' ? b.sha : null, `${path}/`);
-        } else changed.push({ path, a, b });
-      }
-    };
-    await walk(base, head);
+    // Process independent directories in bounded waves. A depth-first await
+    // serialized every sibling subtree before any blobs could be read.
+    const pending = [{ beforeRef: base, afterRef: head, prefix: '' }];
+    while (pending.length) {
+      const wave = pending.splice(0, 8);
+      const settled = await Promise.allSettled(wave.map(async ({ beforeRef, afterRef, prefix }) => {
+        if (beforeRef && beforeRef === afterRef) return [];
+        const [before, after] = await Promise.all([
+          beforeRef ? tree(repo, beforeRef) : new Map(),
+          afterRef ? tree(repo, afterRef) : new Map(),
+        ]);
+        const children = [];
+        for (const name of new Set([...before.keys(), ...after.keys()])) {
+          const a = before.get(name), b = after.get(name);
+          if (a?.sha === b?.sha && a?.mode === b?.mode) continue;
+          const path = `${prefix}${name}`;
+          if (a?.type === 'tree' || b?.type === 'tree') {
+            if (a && a.type !== 'tree') changed.push({ path, a });
+            if (b && b.type !== 'tree') changed.push({ path, b });
+            children.push({ beforeRef: a?.type === 'tree' ? a.sha : null,
+              afterRef: b?.type === 'tree' ? b.sha : null, prefix: `${path}/` });
+          } else changed.push({ path, a, b });
+        }
+        return children;
+      }));
+      const failed = settled.find(result => result.status === 'rejected');
+      if (failed) throw failed.reason;
+      pending.push(...settled.flatMap(result => result.value));
+    }
+    // Completion order of concurrent requests must not affect the evidence.
+    changed.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
     const files = new Array(changed.length);
     const dir = await mkdtemp(join(tmpdir(), 'ham-history-'));
     const blob = async entry => {
@@ -168,37 +181,45 @@ export function createHistoryReader(options = {}) {
     try { return await operation(); }
     finally { signal.removeEventListener('abort', abort); }
   }, { signal: ghOptions.signal, timeoutMs: remainingMs() });
+  const commitHistory = async path => {
+    const compare = /^repos\/(.+\/[^/]+)\/compare\/([^?]+)$/.exec(path);
+    if (!compare) throw new Error('commit history requires a compare path');
+    // Symbolic refs are live even inside one reader; memoize only SHA pairs.
+    const page = /^[0-9a-f]{40}\.\.\.[0-9a-f]{40}$/i.test(compare[2]) ? cached : json;
+    const commits = [];
+    let result;
+    const fields = `{status, total_commits, merge_base_commit: {sha: .merge_base_commit.sha}, commits: [.commits[] | ${commitFields}]}`;
+    result = await page(`${path}?per_page=100&page=1`, fields);
+    if (!Number.isSafeInteger(result.total_commits) || result.total_commits < 0) throw new Error('missing compare commit count');
+    const batches = [result];
+    const pageCount = Math.max(1, Math.ceil(result.total_commits / 100));
+    let nextPage = 2;
+    const workers = await Promise.allSettled(Array.from({ length: Math.min(4, pageCount - 1) }, async () => {
+      while (nextPage <= pageCount) {
+        const number = nextPage++;
+        batches[number - 1] = await page(`${path}?per_page=100&page=${number}`, fields);
+      }
+    }));
+    const failed = workers.find(entry => entry.status === 'rejected');
+    if (failed) throw failed.reason;
+    for (const batch of batches) {
+      if (batch.total_commits !== result.total_commits || !Array.isArray(batch.commits)
+        || batch.status !== result.status || batch.merge_base_commit?.sha !== result.merge_base_commit?.sha) throw new Error('inconsistent compare pagination');
+      commits.push(...batch.commits);
+    }
+    if (commits.length !== result.total_commits) throw new Error('incomplete compare pagination');
+    if (new Set(commits.map(commit => commit.sha)).size !== commits.length) throw new Error('duplicate compare commit page');
+    if (!/^[0-9a-f]{40}$/i.test(result.merge_base_commit?.sha || '')) throw new Error('missing compare merge base');
+    return { ...result, commits };
+  };
   const reader = path => bounded(async () => {
     try {
       const compare = /^repos\/(.+\/[^/]+)\/compare\/([^?]+)$/.exec(path);
       if (compare) {
         const [, repo, range] = compare;
         const head = range.split('...')[1];
-        const commits = [];
-        let result;
-        const fields = `{status, total_commits, merge_base_commit: {sha: .merge_base_commit.sha}, commits: [.commits[] | ${commitFields}]}`;
-        result = await json(`${path}?per_page=100&page=1`, fields);
-        if (!Number.isSafeInteger(result.total_commits) || result.total_commits < 0) throw new Error('missing compare commit count');
-        const batches = [result];
-        const pageCount = Math.max(1, Math.ceil(result.total_commits / 100));
-        let nextPage = 2;
-        const workers = await Promise.allSettled(Array.from({ length: Math.min(4, pageCount - 1) }, async () => {
-          while (nextPage <= pageCount) {
-            const page = nextPage++;
-            batches[page - 1] = await json(`${path}?per_page=100&page=${page}`, fields);
-          }
-        }));
-        const failed = workers.find(entry => entry.status === 'rejected');
-        if (failed) throw failed.reason;
-        for (const batch of batches) {
-          if (batch.total_commits !== result.total_commits || !Array.isArray(batch.commits)
-            || batch.status !== result.status || batch.merge_base_commit?.sha !== result.merge_base_commit?.sha) throw new Error('inconsistent compare pagination');
-          commits.push(...batch.commits);
-        }
-        if (commits.length !== result.total_commits) throw new Error('incomplete compare pagination');
-        if (new Set(commits.map(commit => commit.sha)).size !== commits.length) throw new Error('duplicate compare commit page');
-        if (!/^[0-9a-f]{40}$/i.test(result.merge_base_commit?.sha || '')) throw new Error('missing compare merge base');
-        return { ...result, commits, filesComplete: true, files: await filesBetween(repo, result.merge_base_commit.sha, head) };
+        const result = await commitHistory(path);
+        return { ...result, filesComplete: true, files: await filesBetween(repo, result.merge_base_commit.sha, head) };
       }
       if (/\/commits\/[0-9a-f]{40}$/i.test(path)) {
         let result;
@@ -223,6 +244,7 @@ export function createHistoryReader(options = {}) {
     }
   });
   // Cost/ancestry consumers need metadata, not reconstructed per-file patches.
+  reader.commitHistory = path => bounded(() => commitHistory(path));
   reader.metadata = path => bounded(() => json(path, '{status, total_commits, merge_base_commit: {sha: .merge_base_commit.sha}}'));
   // Provenance proofs request compact web-flow verification separately; avoid
   // buffering signature payloads in every history and commit-file page.

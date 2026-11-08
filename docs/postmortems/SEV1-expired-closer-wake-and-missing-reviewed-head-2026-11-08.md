@@ -49,11 +49,12 @@ Exclusive creation deduplicates simultaneous replacement requests. Live,
 parked, quota-resuming, unresolved and unreadable launch evidence cannot prove
 absence. The existing watcher remains the dispatch and merge authority.
 
-AMA uses the known current head for operational identity when review provenance
-is absent, recording `reviewedHead: null` and `reviewSha: null` in the audit.
-Missing both heads returns `ama-head-unavailable`. The existing closure-wait
-store deduplicates an immediate alert identifying the PR and refusal reason.
+AMA reconciles existing closer custody before refusing a new launch without
+review provenance. A known current head returns `ama-reviewed-head-unavailable`;
+missing both heads returns `ama-head-unavailable`. The closure-wait store
+deduplicates an immediate alert identifying the PR/head and refusal reason.
 Delivery errors stay structured and refund the alert reservation for retry.
+The current head never substitutes for reviewed provenance or live-read metadata.
 
 These changes do not restore review rounds or authorize a merge. Exact-head
 review, findings remediation, strict mode, required checks, authoritative
@@ -65,8 +66,9 @@ In particular, a terminal launch does not itself prove the PR merged.
 `test/hammer-wake-next-action.test.mjs` exercises expired absent/terminal owners,
 fresh replacement deadlines, repeated expiry, concurrent callers, unexpired
 deduplication, and live/unreadable descendant fences.
-`test/ama-closer-dispatch-priority.test.mjs` exercises dispatch with null review
-provenance using snapshot/wake heads and a named, deduplicated missing-head alert.
+`test/ama-closer-dispatch-priority.test.mjs` exercises refusal with null review
+provenance using snapshot/wake heads, preservation of pending/live/unreadable
+custody, and named, deduplicated missing-head alerts.
 Validation results are recorded in the
 [change note](../changes/CLOSERWAKEEXPIRY-01.md).
 

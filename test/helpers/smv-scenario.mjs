@@ -834,6 +834,14 @@ if (scenario === 'clean') {
     assert.equal(refused.dispatched, false);
   }
   assert.equal(missingHeadAlerts, 1);
+  const missingReview = await maybeDispatchAmaCloser({ cfg: { enabled: true },
+    reviewState: { headSha: null, reviewCycleExhausted: true },
+    prMetadata: { prNumber: prNumber + 101, headSha, isOpen: true },
+    dispatchContext: { rootDir, repo, reviewedSha: null },
+    readTemplateImpl: () => { throw new Error('unreviewed head cannot render a hammer prompt'); },
+    deliverAlertImpl: async () => {}, logger: quiet });
+  assert.equal(missingReview.namedReason, 'ama-reviewed-head-unavailable');
+  assert.equal(missingReview.dispatched, false);
   const shadow = await shadowNextAction({ shared: wakeShared, env: {}, sink() {} });
   assert.equal(shadow.decision, wakeShared.decision);
   const { observeClosureResult, reviseClosureNextAction } = await import('../../src/ama/closure-next-action.mjs');

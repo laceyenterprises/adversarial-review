@@ -2143,9 +2143,10 @@ after lease removal. Live owners and unreadable retry chains keep ownership.
 Expired unacted wakes reserve deterministic successor attempts only with
 complete absent/terminal closer evidence. Each successor links its predecessor
 and gets a fresh admission window; unexpired successors dedupe concurrent calls.
-With no reviewed SHA, AMA anchors its audit on the current head while recording
-null review provenance. Missing both heads returns `ama-head-unavailable` and a
-durably deduplicated alert through the existing closure-wait path.
+With no reviewed SHA, AMA refuses new dispatch with `ama-reviewed-head-unavailable`
+(or `ama-head-unavailable` if neither head is known), after reconciling existing
+closer custody. A durably deduplicated closure-wait alert identifies the missing
+evidence. Wake targets never replace live-head metadata or reviewed provenance.
 The handoff smoke verifies shared routing and attempt rearming. Offline coverage:
 `node test/run-tests.mjs test/hammer-wake-next-action.test.mjs
  test/event-driven-hammer-wake.test.mjs test/wake-closeout.test.mjs`.

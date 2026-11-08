@@ -86,12 +86,14 @@ attempt and admission window. Its audit links the expired predecessor through
 parked and unreadable launch/retry evidence retains custody. Wakes only request
 watcher attention; the closer's normal caps, leases and merge gates still apply.
 
-For exhausted cycles without a reviewed SHA, the AMA fallback anchors its audit
-on the current head and records `reviewedHead: null`. If both heads are unknown,
-`ama-head-unavailable` returns a structured refusal and uses the existing durable
-closure-wait alert path once per PR. Alert delivery failures remain visible and
-retryable. Inspect the live PR and ownership evidence through the ordinary
-recovery tooling; an audit anchor alone grants no review or merge authority.
+Without a reviewed SHA, new AMA dispatch returns `ama-reviewed-head-unavailable`
+when a current head is known, or `ama-head-unavailable` when neither is known.
+Existing live, pending, parked and unreadable closer custody is reconciled first.
+The refusal uses the existing durable closure-wait alert path, deduplicated per
+PR/head and reason; delivery failures remain visible and retryable. Inspect the
+live PR and review evidence through ordinary recovery tooling. A wake target is
+only diagnostic identity: it never fills the live `prMetadata.headSha` field or
+becomes a reviewed SHA in prompts, trailers, ama-check or daemon merge inputs.
 
 ## Live closer operator inspection (HAMWORKPROGRESS-02)
 

@@ -4812,34 +4812,11 @@ async function maybeDispatchAmaCloserAttempt({
     });
   }
 
-  // Audit identity is required even when no review exists for an exhausted
-  // cycle. Keep review provenance separate from the operational head binding.
+  // Wake targets can identify a missing-evidence alert, but cannot supply
+  // live metadata or certify a reviewed head.
   const knownReviewedHead = dispatchContext?.reviewedSha || reviewState?.headSha || null;
   const currentHead = prMetadata?.headSha || dispatchContext?.targetRemediationSha
     || dispatchContext?.headSha || sharedNextAction?.snapshot?.head || null;
-  if (!knownReviewedHead && !currentHead) {
-    const reason = 'ama-head-unavailable';
-    let evidenceWait = null;
-    let alertError = null;
-    try {
-      evidenceWait = await observeClosureWait({
-        rootDir: dispatchContext?.rootDir || SUBMODULE_ROOT,
-        repo: dispatchContext?.repo, prNumber, headSha: 'unknown-head',
-        reason, waitClass: reason, immediate: true, env,
-        now: Date.parse(dispatchContext?.dispatchedAt) || Date.now(),
-        pageImpl: (message, alertOptions) => deliverAlertImpl(message, {
-          ...alertOptions, event: 'ama_closer.ownerless',
-          payload: { repo: dispatchContext?.repo, prNumber, reason },
-        }),
-      });
-    } catch (error) {
-      alertError = error?.message || String(error);
-      logger?.warn?.(`[ama-closer] ${reason} alert failed: ${alertError}`);
-    }
-    return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-      needsOperator: true, reason, evidenceWait, ...(alertError ? { alertError } : {}) });
-  }
-  if (!prMetadata.headSha && currentHead) prMetadata = { ...prMetadata, headSha: currentHead };
 
   let finalHammerRetryReason = null;
   let reconciledDispatchedLease = null;
@@ -4857,6 +4834,11 @@ async function maybeDispatchAmaCloserAttempt({
     let held = null;
     try { held = findLiveAmaCloserLease(reconciliationRoot, { repo: reconciliationRepo, prNumber }); }
     catch { /* Preserve admission behavior on unreadable ownership. */ }
+    if (!knownReviewedHead && held?.lease.status === AMA_CLOSER_LEASE_STATUS.PENDING
+      && !isReclaimablePendingAmaCloserLease(held.lease, {
+        now: dispatchContext.dispatchedAt, processKillImpl,
+      })) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+        inFlight: true, reason: 'closer-lease-held-by-other-process', existingLease: held.lease });
     if (held?.lease.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED && held.lease.lrqId) {
       const statusProbe = await Promise.resolve().then(() => readLaunchRequestStatusImpl({
         launchRequestId: held.lease.lrqId, rootDir: reconciliationRoot,
@@ -4903,6 +4885,13 @@ async function maybeDispatchAmaCloserAttempt({
       if (statusProbe?.liveRetryLaunchRequestId) return noAmaDispatch({ dispatched: false,
         skipMergeAgent: true, inFlight: true, reason: 'dispatch-retry-live',
         launchRequestId: held.lease.lrqId, liveRetryLaunchRequestId: statusProbe.liveRetryLaunchRequestId });
+      if (!knownReviewedHead && launchRequestOwned(statusProbe) !== false) {
+        return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+          reason: launchRequestOwned(statusProbe) === true
+            ? dispatchStatusReason(withLiveLaunchRetry(statusProbe).row.status)
+            : 'dispatch-retry-chain-unreadable',
+          launchRequestId: held.lease.lrqId, preservePredecessorArtifacts: true });
+      }
       const settled = await reconcileAmaCloserLeaseAsync({ ...dispatchContext, rootDir: reconciliationRoot,
         repo: reconciliationRepo, prNumber,
         cleanupScratchImpl, now: dispatchContext.dispatchedAt, statusProbe, probedLaunchRequestId: held.lease.lrqId, logger, env, signal,
@@ -4962,6 +4951,30 @@ async function maybeDispatchAmaCloserAttempt({
     })) {
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
       inFlight: true, reason: 'closer-lease-held-by-other-process', existingLease: pendingLaunchLease });
+  }
+
+  // Reconcile existing custody before refusing a new launch without review provenance.
+  if (!knownReviewedHead) {
+    const reason = currentHead ? 'ama-reviewed-head-unavailable' : 'ama-head-unavailable';
+    let evidenceWait = null;
+    let alertError = null;
+    try {
+      evidenceWait = await observeClosureWait({
+        rootDir: dispatchContext?.rootDir || SUBMODULE_ROOT,
+        repo: dispatchContext?.repo, prNumber, headSha: currentHead || 'unknown-head',
+        reason, waitClass: reason, immediate: true, env,
+        now: Date.parse(dispatchContext?.dispatchedAt) || Date.now(),
+        pageImpl: (message, alertOptions) => deliverAlertImpl(message, {
+          ...alertOptions, event: 'ama_closer.ownerless',
+          payload: { repo: dispatchContext?.repo, prNumber, reason },
+        }),
+      });
+    } catch (error) {
+      alertError = error?.message || String(error);
+      logger?.warn?.(`[ama-closer] ${reason} alert failed: ${alertError}`);
+    }
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+      needsOperator: true, reason, evidenceWait, ...(alertError ? { alertError } : {}) });
   }
 
   if (dispatchContext?.baseBranch) {
@@ -5288,7 +5301,7 @@ async function maybeDispatchAmaCloserAttempt({
 
   const repo = dispatchContext.repo;
   const reviewedHead = dispatchContext.reviewedSha || reviewState.headSha || null;
-  const reviewedSha = reviewedHead || currentHead;
+  const reviewedSha = reviewedHead;
   const targetRemediationSha = dispatchContext.targetRemediationSha || reviewedSha;
   const headAdvancedDuringDispatch =
     Boolean(reviewedSha && targetRemediationSha && reviewedSha !== targetRemediationSha);
@@ -5371,9 +5384,6 @@ async function maybeDispatchAmaCloserAttempt({
   };
   const queueCloser = dispatchContext.queueCloserPrepared;
   let prompt = queueCloser ? '' : composeCloserPrompt(promptInputs);
-  if (!queueCloser && !reviewedHead) {
-    prompt += '\nNo reviewed head is available. The audit anchor is the current PR head only; it is not review or merge authorization. Obtain the required current-head review evidence before merging.\n';
-  }
   if (reviewState?.operatorLabelFindings?.gated?.length) {
     prompt += operatorGatedRemediationInstructions('', reviewState.operatorLabelFindings);
   }

@@ -2,7 +2,8 @@
 
 Captured 2026-11-08. These fixtures retain the affected path's primary/final
 patches, authorization and original authorization, cited review, identity
-fields and durable verified-region set. Agent OS #10329 also retains the
+fields and durable verified-region set. Repeated patch and review strings are
+stored once in each capture and expanded verbatim by the replay test. Agent OS #10329 also retains the
 README path that fails whole-parent equivalence.
 
 They are **path projections**, not complete production merge evidence. File

@@ -1207,8 +1207,10 @@ test('REVERSALPARENT-01: captured refusals retain their independent proof fences
     ['finch-35', 18, 'region-not-previously-verified'],
   ]) {
     // These are path projections for refusal replay, never full merge proofs.
-    const { evidence, path } = JSON.parse(readFileSync(
+    const { evidence: capture, path, captureTexts } = JSON.parse(readFileSync(
       new URL(`./fixtures/reversalparent/${name}.json`, import.meta.url), 'utf8'));
+    const evidence = JSON.parse(JSON.stringify(capture), (_key, value) =>
+      Number.isSafeInteger(value?.$captureText) ? captureTexts[value.$captureText] : value);
     const result = checkPrimaryChange(evidence, evidence.headSha, { strictNonBlockingRemediation: true });
     assert.equal(result.reason, 'primary-change-reverted', name);
     assert.equal(result.path, path);

@@ -2245,7 +2245,13 @@ Key control points:
   blocking finding, or a non-blocking finding required by the effective
   `strict_non_blocking_remediation` policy, on its reviewed head. Non-strict
   advisory findings cannot authorize reversals. File/Lines must cover each reverted
-  base line. HAMLINES-01 reads all cited ranges, including legacy approximate,
+  base line. Before author-line edits, `bin/hammer-edit-plan.mjs` uses the gate's
+  shared finding-admissibility predicate and live effective policy. Inadmissible
+  advisory edits are deferred without editing and enrolled through the existing
+  findings backlog with a one-line reason; additive fixes changing no author line
+  remain allowed. A failed backlog capture stops the edit. Blocking and strict-mode
+  reversals retain final gate verification and the existing lifecycle.
+  HAMLINES-01 reads all cited ranges, including legacy approximate,
   multi-range and symbol-qualified forms; approximate endpoints stay exact.
   Leading range lists stop before explanatory notes; numbers in prose or symbol
   suffixes supply no coverage. Legacy symbol-qualified entries require a complete

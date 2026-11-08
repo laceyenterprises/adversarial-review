@@ -4,7 +4,7 @@ import { persistReviewFindings } from './review-finding-records.mjs';
 
 // Called at the merge command boundary. Missing/stale capture defers the merge,
 // rather than spending a hammer or silently losing the findings.
-export function captureReadyFindings({ rootDir, repo, prNumber, headSha, version, count }) {
+export function captureReadyFindings({ rootDir, repo, prNumber, headSha, version, count, deferredFinding }) {
   const db = openReviewStateDb(rootDir);
   try {
     return db.transaction(() => {
@@ -20,6 +20,25 @@ export function captureReadyFindings({ rootDir, repo, prNumber, headSha, version
       const actual = db.prepare('SELECT count(*) n FROM review_findings WHERE pass_id=? AND current_body=1 AND blocking=0')
         .get(pass.pass_id).n;
       if (actual !== count) throw Error('findings-capture-count-mismatch');
+      if (deferredFinding) {
+        const { findingNumber, reason } = deferredFinding;
+        if (!Number.isSafeInteger(findingNumber) || findingNumber < 1
+          || typeof reason !== 'string' || !reason.trim() || /[\r\n]/.test(reason)) {
+          throw Error('findings-deferral-invalid');
+        }
+        const finding = db.prepare(`SELECT finding_id,content_sha256 FROM review_findings
+          WHERE pass_id=? AND current_body=1 AND blocking=0 ORDER BY ordinal LIMIT 1 OFFSET ?`)
+          .get(pass.pass_id, findingNumber - 1);
+        if (!finding) throw Error('findings-deferral-not-found');
+        const inserted = db.prepare(`INSERT OR IGNORE INTO finding_backlog
+          (finding_id,repo,pr_number,head_sha,content_sha256,reviewer_family,area)
+          SELECT * FROM finding_backlog_candidates WHERE finding_id=?`).run(finding.finding_id).changes;
+        const recorded = db.prepare(`UPDATE finding_backlog SET reason=?
+          WHERE repo=? AND pr_number=? AND head_sha=? AND content_sha256=? AND outcome IS NULL`)
+          .run(reason, repo, prNumber, headSha, finding.content_sha256).changes;
+        if (!recorded) throw Error('findings-deferral-not-pending');
+        return inserted;
+      }
       return db.prepare(`INSERT OR IGNORE INTO finding_backlog
         (finding_id,repo,pr_number,head_sha,content_sha256,reviewer_family,area)
         SELECT * FROM finding_backlog_candidates WHERE repo=? AND pr_number=? AND head_sha=?`).run(repo, prNumber, headSha).changes;

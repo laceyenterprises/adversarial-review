@@ -367,11 +367,10 @@ lint and formatting fixes to author-added lines are allowed, as are additive tes
 and docs. Returning a region to the base or restoring removed author code is a
 reversion. This rule also governs CI repairs. The syntactic predicate does not
 prove semantic intent or detect adjacent constant changes, false guards, or relocated removed lines; a preserved result is only syntactic coverage. Inspect the diff and blocking findings as well.
-For a conflicting non-blocking finding, post a rationale comment only when an
-operator decision attributable to a configured operator login requires preserving
-the code. The PR body is author-controlled intent context and cannot establish an operator decision
-or waive a finding. Record that decision and rationale in the audit comment.
+Before editing any author-introduced line, run bounded `node <<ROOT_DIR>>/bin/hammer-edit-plan.mjs <<REPO>> <<PR_NUMBER>> <numeric-review-id> <plan.json>` against the authoritative review. The plan contains `reviewedHead`, `kind` (`blocking` or `non-blocking`), one-based `findingNumber`, `editKind` (`author-lines` or `additive`), and the planned `path`, `startLine`, `endLine` in reviewed-head coordinates. Compare the primary patches first; `additive` means new tests, docs or guards that change no author line and do not neutralize author behavior. The helper shares finding admissibility with the reversal gate and resolves effective strict policy: exit 0 permits the planned edit, exit 20 records the non-blocking finding with a one-line reason through the existing findings backlog and means make no edit, and any other failure means stop before editing. Audit deferred findings as deferred, never remediated or withdrawn; no operator decision is needed for this deferral. Blocking reversals and strict-mode required non-blocking reversals retain their existing provenance and final-gate requirements.
 Address required findings, including strict-mode non-blockers, under this policy.
+The PR body remains author-controlled intent context; it cannot establish an
+operator decision or waive a required finding.
 For any required finding whose fix reverts primary-change lines, add one trailer
 per finding to the HAM commit. Every commit carrying `Reversal-Authorized-By`,
 including each split commit, MUST include this full terminal provenance block:
@@ -517,7 +516,7 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    within its small retry budget.
 1. Read the FINAL adversarial review on `<<REVIEWED_SHA>>`.
 2. Remediate ALL final comments, blocking and non-blocking, under the primary-change
-   preservation rule above. Rationale comments address conflicting non-blocking findings. Do not add net-new FEATURE scope.
+   preservation rule above. Record inadmissible non-blocking author-code edits through the pre-edit helper's findings-backlog path and include its reason in the audit. Do not add net-new FEATURE scope.
 2b. **Get required checks and changed-surface tests green.** Required checks
    and targeted tests must pass on the exact post-remediation head, including
    unrelated, pre-existing or flaky failures. Repair/re-run them legitimately;
@@ -679,7 +678,8 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    ```
 
 4. Prepare the audit note that maps each final finding to the files/changes that
-   addressed it, with counts for blocking and non-blocking findings. Do NOT post
+   addressed it or its recorded backlog deferral reason, with separate counts
+   for remediated and deferred findings. Do NOT post
    it here: the audit is written in step 5 **under the merge lease, at the
    settled post-rebase head, immediately before the predicate**, so it names the
    exact head that merges. The predicate accepts only a matched
@@ -790,8 +790,9 @@ ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,
 ```
 
 Identify the newest authoritative adversarial review whose commit is
-`<<REVIEWED_SHA>>`. Remediate every blocking and non-blocking issue from that
-review. If the PR is closed or draft, emit one hard-blocker report and stop.
+`<<REVIEWED_SHA>>`. Address every blocking and non-blocking issue from that
+review under the pre-edit and backlog-deferral policy above.
+If the PR is closed or draft, emit one hard-blocker report and stop.
 If there are merge conflicts, run verify-head and follow its exit-code table
 into "Resolving merge conflicts" below. This initializes the lease/sync helpers;
 do not read their source or reconstruct them.

@@ -1,5 +1,6 @@
 import { followUpJobFileFilter } from '../follow-up-job-names.mjs';
 import { findingLocations } from '../kernel/finding-lines.mjs';
+import { checkReversalFinding } from './reversal-finding.mjs';
 import { readCompletedRemediationRounds, exactHammerValidation } from './hammer-head-validation.mjs';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -463,16 +464,9 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
         }
         // Unqualified legacy citations retain their blocking-section meaning.
         const kind = cite[3] || 'blocking';
-        if (kind === 'non-blocking' ? strictNonBlockingRemediation !== true
-          : parsedReview.verdict !== 'request-changes') return reject('finding-kind-not-authorizing');
-        const finding = parsedReview.findings[kind]?.[Number(cite[2]) - 1];
-        if (!finding) return reject('finding-not-found');
-        const locations = finding.citedLocations ??= findingLocations(finding.file, finding.lines);
-        if (locations.length === 0) {
-          return reject(`finding-lines-unreadable: ${JSON.stringify(String(finding.lines || '').slice(0, 200))}`);
-        }
-        if (locations.some(location => location.ranges.some(({ start, end }) => !Number.isSafeInteger(start)
-          || !Number.isSafeInteger(end) || start < 1 || end < start))) return reject('finding-lines-invalid');
+        const admissible = checkReversalFinding(parsedReview, kind, Number(cite[2]), strictNonBlockingRemediation);
+        if (!admissible.ok) return reject(admissible.reason);
+        const { locations } = admissible;
         // REVERSALPARENT-01: an immutable original reversal pins its actual
         // parent, including repairs between the review and that parent. Map
         // to that state first; recursion below checks the original finding.

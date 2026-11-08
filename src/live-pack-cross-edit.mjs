@@ -25,12 +25,15 @@
 // body. Anything else is gated exactly as before.
 //
 // New packs share one complete base-tree listing and cached base-plan reads.
-// Ledger observations retry at most three times within a ten-second budget.
+// Base scans fetch at most 64 plans with four concurrent reads; unavailable
+// scans fall back to the ledger without granting head-ticket exemptions.
+// Ledger observations retry at most three times with load-aware 8s attempts.
 
 import { execFile } from 'node:child_process';
 import { isDeepStrictEqual, promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execGhWithRetry } from './gh-cli.mjs';
 import { fetchRepoFileAtRef } from './pack-lockhash.mjs';
 import { parseGhApiArrayPages } from './reviewer-diff-fetch.mjs';
@@ -322,10 +325,19 @@ function basePlanReader({ repo, baseRef, listBasePlanPathsImpl, fetchFileAtRefIm
   return () => {
     plans ??= (async () => {
       const listing = await listBasePlanPathsImpl(repo, baseRef);
-      const result = [];
-      for (const path of listing.paths) {
-        result.push(parsePlanJson(await fetchFileAtRefImpl(repo, path, listing.ref)));
-      }
+      if (listing.paths.length > 64) throw new Error('base plan scan exceeds 64 plans');
+      const result = new Array(listing.paths.length);
+      let next = 0;
+      // Await every worker even on failure: no fetches escape the scan lifetime.
+      const workers = await Promise.allSettled(Array.from({ length: 4 }, async () => {
+        while (next < listing.paths.length) {
+          const index = next++;
+          const path = listing.paths[index];
+          result[index] = { path, ...parsePlanJson(await fetchFileAtRefImpl(repo, path, listing.ref)) };
+        }
+      }));
+      const failure = workers.find((worker) => worker.status === 'rejected');
+      if (failure) throw failure.reason;
       return result;
     })();
     return plans;
@@ -337,7 +349,8 @@ function defaultReadActiveDagRuns(args) {
 }
 
 async function readPackRunsWithRetry(planId, read, sleep) {
-  const deadline = Date.now() + 10_000;
+  const attemptBudgetMs = loadAwareTimeoutMs(8_000);
+  const deadline = Date.now() + 3 * attemptBudgetMs + 300;
   let result;
   let retryCount = 0;
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -346,7 +359,7 @@ async function readPackRunsWithRetry(planId, read, sleep) {
     }
     if (Date.now() >= deadline) break;
     if (attempt > 0) retryCount++;
-    const timeoutMs = Math.max(1, Math.min(3_000, deadline - Date.now()));
+    const timeoutMs = Math.max(1, Math.min(attemptBudgetMs, deadline - Date.now()));
     const controller = new AbortController();
     let timer;
     try {
@@ -384,7 +397,7 @@ async function resolvePackLiveness({
   readActiveDagRunsImpl = defaultReadActiveDagRuns,
   sleepImpl = delay,
 }) {
-  const plan = await loadPackPlan({ repo, slug, baseRef, headRef, fetchFileAtRefImpl });
+  let plan = await loadPackPlan({ repo, slug, baseRef, headRef, fetchFileAtRefImpl });
   if (!plan.ok) {
     console.warn('[live-pack-cross-edit] plan read failed:', plan.detail);
     return {
@@ -402,16 +415,22 @@ async function resolvePackLiveness({
   }
   if (plan.absentAtBase) {
     try {
-      const collisions = (await readBasePlansImpl()).filter((base) => base.planId === plan.planId);
-      if (collisions.length === 0) {
+      const basePlans = await readBasePlansImpl();
+      // Reconcile the initial branch read with the scan's immutable snapshot.
+      // A pack added while the branch moved is an existing pack at that snapshot.
+      const snapshotPlan = basePlans.find((base) => base.path === `projects/${slug}/plan.json`);
+      if (snapshotPlan) plan = { ...snapshotPlan, absentAtBase: false };
+      const collisions = basePlans.filter((base) => base.planId === plan.planId);
+      if (plan.absentAtBase && collisions.length === 0) {
         return { slug, planId: plan.planId, ticketIds: plan.ticketIds, runs: [],
           live: false, inconclusive: false, reason: 'new-pack-absent-at-base', retryCount: 0 };
       }
       // Head-only tickets cannot exempt a collision with a base plan.
       plan.ticketIds = [...new Set(collisions.flatMap((base) => base.ticketIds))].sort();
     } catch {
-      return { slug, planId: plan.planId, ticketIds: [], runs: [],
-        live: false, inconclusive: true, reason: 'base-plan-scan-unavailable', retryCount: 0 };
+      // The ledger can still prove not-live. Unverified head tickets must not
+      // exempt an active pack when collision evidence is unavailable.
+      plan.ticketIds = [];
     }
   }
   const { result, retryCount } = await readPackRunsWithRetry(plan.planId, readActiveDagRunsImpl, sleepImpl);
@@ -784,7 +803,7 @@ async function applyLivePackCrossEditReview(reviewText, {
       labels: currentLabels,
     });
     findings = review.findings;
-    packFacts = (review.packs || []).map((pack) => ({
+    packFacts = (review.packs || []).filter((pack) => pack.retryCount !== undefined).map((pack) => ({
       slug: pack.slug, planId: pack.planId, live: pack.live,
       inconclusive: pack.inconclusive, reason: pack.reason, retryCount: pack.retryCount ?? 0,
     }));
@@ -824,8 +843,13 @@ async function applyLivePackCrossEditReview(reviewText, {
     );
   }
   const facts = packFacts.length > 0
-    ? `\n\n## Live Pack Check Facts\n\n\`\`\`json\n${JSON.stringify(packFacts, null, 2)}\n\`\`\`\n` : '';
-  return appendLivePackStampExemptions(applyLivePackCrossEditFindings(reviewText, findings), exemptions) + waiverAudit + facts;
+    ? `\n\nLive Pack Check Facts\n\n\`\`\`json\n${JSON.stringify(packFacts, null, 2)}\n\`\`\`\n` : '';
+  const sections = splitSections(reviewText);
+  const summary = sections.find((section) => /^##\s+Summary\s*$/i.test(section.heading || ''));
+  if (summary && facts) summary.lines.push(facts);
+  const withFacts = summary && facts ? sections.map((section) =>
+    [section.heading, ...section.lines].filter((line) => line !== null).join('\n')).join('\n') : reviewText;
+  return appendLivePackStampExemptions(applyLivePackCrossEditFindings(withFacts, findings), exemptions) + waiverAudit;
 }
 
 // Remediation entry point for a follow-up job. `execFileImpl` is threaded to

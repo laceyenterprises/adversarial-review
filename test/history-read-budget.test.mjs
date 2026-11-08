@@ -7,8 +7,10 @@ import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
+import { getEventListeners } from 'node:events';
 import { createHistoryReader } from '../src/ama/history-reader.mjs';
 import { execHistoryFile, historyChildExecutor } from '../src/ama/history-child.mjs';
+import { withHistoryReadBudget } from '../src/ama/history-read-policy.mjs';
 import { fetchPrimaryChange, checkPrimaryChange } from '../src/ama/primary-change.mjs';
 import { currentGitHubBudgetScope, withGitHubBudgetScope } from '../src/rate-limit-throttle.mjs';
 
@@ -59,6 +61,20 @@ test('a shorter reader deadline retains timeout classification in collected evid
   const evidence = await fetchPrimaryChange({ ...args, get });
   assert.equal(evidence.historyReadTimedOut, true);
   assert.equal(checkPrimaryChange(evidence, head).reason, 'history-read-failed');
+});
+
+test('synchronous deadline exhaustion retains its code through the history error wrapper', async () => {
+  let samples = 0, reads = 0;
+  const get = createHistoryReader({ contextTimeoutMs: 25,
+    nowMs: () => ++samples <= 2 ? 0 : 50,
+    execGhWithRetryImpl: async () => { reads++; return { stdout: '{}' }; } });
+  await assert.rejects(get(prPath), error => {
+    assert.match(error.message, /history read failed: repos\/fixture\/repo\/pulls\/42/);
+    assert.equal(error.code, 'HISTORY_READ_TIMEOUT');
+    assert.equal(error.cause.code, 'HISTORY_READ_TIMEOUT');
+    return true;
+  });
+  assert.equal(reads, 0, 'an expired budget must not start a transport');
 });
 
 test('binding collection cancellation cannot reset an already consumed reader budget', async () => {
@@ -142,6 +158,81 @@ test('caller cancellation interrupts an injected reader without waiting for the 
   assert.equal(checkPrimaryChange(evidence, head).reason, 'history-read-failed');
   assert.match(evidence.reason, /caller cancelled/);
   assert.equal(evidence.historyReadTimedOut, undefined);
+});
+
+test('native budget composites do not accumulate parent listeners across repeated reads', async () => {
+  const controller = new AbortController();
+  const failure = new Error('read failed');
+  for (let i = 0; i < 25; i++) {
+    assert.equal(await withHistoryReadBudget(signal => {
+      assert.equal(signal.aborted, false);
+      assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+      return 'ok';
+    }, { signal: controller.signal }), 'ok');
+    assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+    await assert.rejects(withHistoryReadBudget(() => { throw failure; },
+      { signal: controller.signal }), error => error === failure);
+    assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+  }
+});
+
+test('budget composites clean up after timeout and propagate parent cancellation', { timeout: 2000 }, async () => {
+  const controller = new AbortController();
+  await assert.rejects(withHistoryReadBudget(never, { signal: controller.signal, timeoutMs: 10 }),
+    { code: 'HISTORY_READ_TIMEOUT' });
+  assert.equal(controller.signal.aborted, false);
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+  const reason = new Error('caller cancelled');
+  await assert.rejects(withHistoryReadBudget(signal => {
+    controller.abort(reason);
+    assert.equal(signal.reason, reason);
+    return never();
+  }, { signal: controller.signal }), error => error === reason);
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+  let calls = 0;
+  await assert.rejects(withHistoryReadBudget(() => { calls++; },
+    { signal: controller.signal }), error => error === reason);
+  assert.equal(calls, 0);
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+});
+
+test('concurrent budget composites avoid parent listener warnings and clean up local listeners', async () => {
+  const controller = new AbortController();
+  const signals = [];
+  const pending = Array.from({ length: 25 }, () => withHistoryReadBudget(signal => {
+    signals.push(signal);
+    return never();
+  }, { signal: controller.signal }));
+  await Promise.resolve();
+  assert.equal(signals.length, 25);
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+  const reason = new Error('cancel concurrent reads');
+  controller.abort(reason);
+  for (const result of await Promise.allSettled(pending)) {
+    assert.equal(result.status, 'rejected');
+    assert.equal(result.reason, reason);
+  }
+  for (const signal of signals) assert.equal(getEventListeners(signal, 'abort').length, 0);
+});
+
+test('production child executor accepts omitted args and honors the options overload', async () => {
+  assert.deepEqual(await execHistoryFile(process.execPath), { stdout: '', stderr: '' });
+  const output = await execHistoryFile(process.execPath, { encoding: 'buffer' });
+  assert.ok(Buffer.isBuffer(output.stdout));
+  assert.ok(Buffer.isBuffer(output.stderr));
+  assert.equal(output.stdout.length, 0);
+  assert.equal(output.stderr.length, 0);
+});
+
+test('cancelling a failed spawn never signals a missing PID', async t => {
+  const kill = t.mock.method(process, 'kill', () => {});
+  const controller = new AbortController();
+  const pending = execHistoryFile(join(rootDir, 'missing-command'), [], { signal: controller.signal });
+  assert.equal(pending.child.pid, undefined);
+  const reason = new Error('caller cancelled');
+  controller.abort(reason);
+  await assert.rejects(pending, error => error === reason);
+  assert.equal(kill.mock.callCount(), 0);
 });
 
 test('production child executor preserves stdout, diff exit 1 and bounded output failures', async () => {

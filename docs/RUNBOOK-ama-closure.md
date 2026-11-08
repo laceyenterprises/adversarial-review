@@ -4550,6 +4550,8 @@ exit, which the predicate treats as `history-read-failed` rather than a proven r
 history waits, CI-cost and optional preservation proofs, to 90 seconds without
 load scaling. It returns exact-head `readFailed` / `historyReadFailed` evidence
 (`historyReadTimedOut: true` on its deadline), classified as `history-read-failed`.
+Reader error wrappers retain `HISTORY_READ_TIMEOUT` even when the elapsed-time
+check detects exhaustion before a deadline timer fires.
 This retryable failure never authorizes a reversal or merge. The in-lease merge
 executor releases custody through its existing release path; a later attempt
 must revalidate the live head and all merge gates.

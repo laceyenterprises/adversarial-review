@@ -12,7 +12,11 @@ export function historyChildExecutor(impl = execute) {
   return executors.get(impl);
 }
 
-export function execHistoryFile(command, args, options) {
+export function execHistoryFile(command, args = [], options) {
+  if (args && typeof args === 'object' && !Array.isArray(args)) {
+    options = args;
+    args = [];
+  }
   // execFile silently drops `detached`; spawn is required to own the group.
   const { signal, timeout, maxBuffer = 1024 * 1024, encoding = 'utf8',
     cwd, env, windowsHide, windowsVerbatimArguments } = options || {};
@@ -23,6 +27,7 @@ export function execHistoryFile(command, args, options) {
   let failure, timer;
   const chunks = { stdout: [], stderr: [] }, sizes = { stdout: 0, stderr: 0 };
   const kill = () => {
+    if (!child?.pid) return;
     try {
       if (grouped) process.kill(-child.pid, 'SIGKILL');
       else child.kill('SIGKILL');

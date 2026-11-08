@@ -57,6 +57,7 @@ export function createHistoryReader(options = {}) {
       const limit = cause.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || cause.code === 'ENOBUFS'
         ? ` (output limit ${GH_LOOKUP_MAX_BUFFER} bytes exceeded)` : '';
       const error = new Error(historyReadErrorDetail(`history read failed: ${path}${limit}: ${historyReadErrorDetail(cause)}`), { cause });
+      if (cause.code === 'HISTORY_READ_TIMEOUT') error.code = cause.code;
       error.primaryChangeReadFailed = true;
       throw error;
     }

@@ -95,7 +95,7 @@ async function withHqRemediationEnv(rootDir, { orchestrationMode = 'native' } = 
 }
 
 function seedJob(rootDir, prNumber) {
-  return createFollowUpJob({ branch: `codex/fix-pr-${prNumber}`,
+  return createFollowUpJob({ builderTag: 'claude-code', branch: `codex/fix-pr-${prNumber}`,
     rootDir,
     repo: REPO,
     prNumber,

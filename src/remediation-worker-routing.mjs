@@ -1,3 +1,4 @@
+import { normalizeBuilderClass } from './adapters/subject/github-pr/routing.mjs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadRoleConfig, resolveDefaultRemediator } from './role-config.mjs';
@@ -32,6 +33,7 @@ const DEFAULT_REMEDIATION_WORKER_CLASS = 'codex';
 // or `=claude-code` — the env override wins over per-tag routing for
 // budget-squeeze or model-availability scenarios.
 const REMEDIATION_WORKER_BY_BUILDER_TAG = Object.freeze({
+  grok: 'remediator-codex',
   codex: 'claude-code',
   'claude-code': 'codex',
   'clio-agent': 'claude-code',
@@ -130,7 +132,7 @@ function resolveRoleRegistryRemediator({ env = process.env, topPath, loaderImpl,
 function pickRemediationWorkerClass(job, { env = process.env, topPath, loaderImpl } = {}) {
   const envOverride = defaultRemediatorWorkerClassFromEnv(env, { topPath, loaderImpl });
   if (envOverride) return normalizeRemediationWorkerClass(envOverride) || envOverride;
-  const builderTag = String(job?.builderTag || '').trim().toLowerCase();
+  const builderTag = normalizeBuilderClass(job?.builderTag);
   if (builderTag && Object.prototype.hasOwnProperty.call(REMEDIATION_WORKER_BY_BUILDER_TAG, builderTag)) {
     return REMEDIATION_WORKER_BY_BUILDER_TAG[builderTag];
   }

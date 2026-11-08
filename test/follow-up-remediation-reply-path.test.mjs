@@ -144,7 +144,7 @@ async function withOAuthTestEnv(workDir, run) {
 }
 
 function makeQueuedJob(rootDir, overrides = {}) {
-  const created = createFollowUpJob({ branch: 'fixture/remediation',
+  const created = createFollowUpJob({ builderTag: 'claude-code', branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 428,
@@ -195,7 +195,7 @@ test('consumeNextFollowUpJob exports the canonical reply env, pre-creates the HQ
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 
   await withOAuthTestEnv(rootDir, async (hqRoot) => {
-    createFollowUpJob({ branch: 'fixture/remediation',
+    createFollowUpJob({ builderTag: 'claude-code', branch: 'fixture/remediation',
       rootDir,
       repo: 'laceyenterprises/agent-os',
       prNumber: 428,

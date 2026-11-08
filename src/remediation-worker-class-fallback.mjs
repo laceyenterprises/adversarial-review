@@ -66,6 +66,7 @@ import { resolveConfiguredNonBlockingCodexModel } from './adapters/agent-runtime
 import {
   isCrossModelReviewWaived,
   normalizeReviewerModel,
+  normalizeBuilderClass,
   routeSubject,
 } from './adapters/subject/github-pr/routing.mjs';
 
@@ -243,6 +244,17 @@ async function readFleetQuotaStatuses({ env, hqPath, execFileImpl }) {
   }
 }
 
+// Grok acting lanes remain unavailable in this delivery, independently of CFG
+// recognition. Check before pool selection and again at the claim/spawn boundary.
+export function remediationSubjectRefusal(job, workerClass) {
+  if (normalizeReviewerModel(workerClass) === 'grok') {
+    return 'grok-acting-lane-unavailable';
+  }
+  if (job && (!job.domainId || job.domainId === 'code-pr')
+    && !normalizeBuilderClass(job.builderTag)) return 'unknown-builder-family';
+  return null;
+}
+
 /**
  * @param {Object} args
  * @param {string} args.primary — the routed remediation worker_class (from pickRemediationWorkerClass).
@@ -291,6 +303,10 @@ async function resolveModeRunnableWorkerClass({
   topPath,
   loaderImpl,
 } = {}) {
+  const refusal = remediationSubjectRefusal(job, primary);
+  if (refusal) return { workerClass: primary, hold: true, fellBack: false, reason: refusal };
+  fallbackWorkerClasses = (Array.isArray(fallbackWorkerClasses) ? fallbackWorkerClasses : [])
+    .filter(candidate => !remediationSubjectRefusal(job, candidate));
   await ensureWorkerRegistryReadyImpl({env});
   const routeConfig = { env, topPath, loaderImpl };
   modelForClass ??= (workerClass) => remediatorModelForClass(workerClass, { job, env });
@@ -660,6 +676,8 @@ export async function resolveClaimedRemediatorRouting({
     topPath,
     loaderImpl,
   });
+  const subjectRefusal = remediationSubjectRefusal(job, routing?.workerClass);
+  if (subjectRefusal) return { ...routing, hold: true, reason: subjectRefusal };
   for (const refusal of routing?.modeRefusals || []) {
     log.warn?.(
       `[follow-up-remediation] remediation lane ${refusal.workerClass} refused in ${refusal.mode} mode ` +

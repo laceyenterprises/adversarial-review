@@ -235,7 +235,7 @@ test('REMEDBRANCH-01: agent-runtime posted review retains subject branch and bui
     logger: { warn() {}, error() {} } });
   let posted = 0;
   const result = await spawnReviewer({ rootDir, repo: 'fixture/repo', prNumber: 42,
-    reviewerModel: 'Gemini 3.8 Flash (High)', builderTag: 'codex', branch: 'feature/retry',
+    reviewerModel: 'gemini', builderTag: 'codex', branch: 'feature/retry',
     reviewerHeadSha: head, reviewerSessionUuid: sessionUuid, reviewAttemptNumber: 1, reviewDbAttemptNumber: 1,
     reviewerRuntimeAdapterOverride: adapter, domainId: 'code-pr',
     readReviewerQuotaDecisionImpl: async () => ({ available: true }),

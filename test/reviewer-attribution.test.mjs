@@ -43,7 +43,7 @@ function readPass(root) {
 }
 const builders = { codex: ['codex', 'codex-corp', 'clio-agent', 'hammer', 'hammer-corp', 'remediator-codex', 'remediator-codex-corp'],
   claude: ['claude-code', 'claude-code-corp', 'hammer-claude', 'hammer-claude-corp', 'remediator-claude', 'remediator-claude-corp'],
-  gemini: ['gemini'], pi: ['pi'], opencode: ['opencode'], hermes: ['hermes'] };
+  gemini: ['gemini'], pi: ['pi'], opencode: ['opencode'], hermes: ['hermes'], grok: ['grok', 'grok-api'] };
 const reviewers = { codex: ['codex', 'codex-corp', 'codex-reviewer'],
   claude: ['claude', 'claude-reviewer', 'claude-reviewer-corp'], gemini: ['gemini', 'gemini-reviewer'] };
 test('ITP-13 attribution accepts initial zero generations and rejects invalid counters', () => {
@@ -93,7 +93,7 @@ test('ITP-13 every builder family × reviewer family × token keeps family exclu
       }
     }
   }
-  assert.deepEqual(Object.values(TAG_PREFIXES), ['[codex]', '[claude-code]', '[clio-agent]', '[gemini]', '[pi]', '[opencode]', '[hermes]']);
+  assert.deepEqual(Object.values(TAG_PREFIXES), ['[codex]', '[claude-code]', '[clio-agent]', '[gemini]', '[pi]', '[opencode]', '[hermes]', '[grok]']);
 });
 for (const family of ['claude', 'codex', 'gemini']) test(`ITP-13 ${family} account changes keep subject, capture and queued exact-head attribution`, async t => {
   const root = fixture(t);
@@ -128,7 +128,7 @@ for (const projected of [false, true]) test(`ITP-13 ${projected ? 'projected' : 
   const metadata = { reviewerSessionUuid: 'session-1', signedHistory: { payload: { reviewer_identity: 'old-holder' }, signature: 'historic-bytes' } };
   beginReviewerPass(root, { repo, prNumber: 1, attemptNumber: 1, reviewerClass: 'gemini', passKind: 'first-pass', startedAt, headSha: 'head-1', metadata });
   writeReviewerRunRecord(root, { sessionUuid: 'session-1', state: 'spawned', pgid: 99999, spawnedAt: startedAt,
-    subjectContext: { repo, prNumber: 1, reviewerModel: 'gemini', ...(projected
+    subjectContext: { repo, prNumber: 1, builderTag: 'codex', reviewerModel: 'gemini', ...(projected
       ? { reviewerAttribution: project({ reviewerModel: 'gemini', agyHolderLease: { user: 'old-holder', reviewId: 'old-review' } }) }
       : { agyIdentityLease: { user: 'old-holder', reviewId: 'old-review' } }) } });
   const path = join(root, 'data/reviewer-runs/session-1.json');
@@ -223,7 +223,7 @@ for (const passSession of ['other-session', 'session-1']) test(`ITP-13 same-fami
       findPostedReview: async () => { throw new Error('family check must precede review probe'); } });
     const row = db.prepare('SELECT review_status, failure_message FROM reviewed_prs WHERE pr_number = 1').get();
     assert.equal(row.review_status, 'failed-orphan');
-    assert.match(row.failure_message, /family matches/);
+    assert.match(row.failure_message, /family could not be verified as eligible/);
     assert.equal(JSON.parse(readPass(root).metadata_json).reviewerAttribution, undefined);
   } finally { db.close(); }
 });

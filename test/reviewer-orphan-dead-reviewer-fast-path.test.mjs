@@ -2,6 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
 import { spawn } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { writeReviewerRunRecord } from '../src/adapters/reviewer-runtime/run-state.mjs';
 import { killFixtureChild } from './helpers/fixture-child.mjs';
 
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
@@ -200,7 +204,7 @@ test('shouldReconcileReviewerSession leaves fresh null-pgid claims inside launch
   );
 });
 
-test('reconcile releases a dead reviewer whose head advanced -> pending + armable (releaseSuperseded)', async () => {
+test('reconcile releases a dead reviewer whose head advanced -> pending + armable (releaseSuperseded)', async t => {
   const now = new Date('2026-08-08T21:19:26.000Z');
   const startedAt = new Date(now.getTime() - (GRACE_MS + 1000)).toISOString();
   const db = setupDb();
@@ -208,7 +212,16 @@ test('reconcile releases a dead reviewer whose head advanced -> pending + armabl
   const log = makeLog();
   const settled = [];
 
+  const rootDir = mkdtempSync(join(tmpdir(), 'dead-reviewer-reconcile-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  writeReviewerRunRecord(rootDir, {
+    sessionUuid: readRow(db).reviewer_session_uuid,
+    state: 'failed',
+    subjectContext: { builderTag: 'claude-code' },
+  });
+
   const result = await reconcileReviewerSessions({
+    rootDir,
     db,
     octokit: makeOctokit([]),
     now,
@@ -243,7 +256,7 @@ test('reconcile releases a dead reviewer whose head advanced -> pending + armabl
   assert.equal(armed.changes, 1, 'released row is re-armable by the reviewer claim CAS');
 });
 
-test('reconcile releases a dead reviewer on the SAME head -> pending (releasePending; the #5059 case)', async () => {
+test('reconcile releases a dead reviewer on the SAME head -> pending (releasePending; the #5059 case)', async t => {
   const now = new Date('2026-08-08T21:19:26.000Z');
   const startedAt = new Date(now.getTime() - (GRACE_MS + 1000)).toISOString();
   const db = setupDb();
@@ -251,7 +264,16 @@ test('reconcile releases a dead reviewer on the SAME head -> pending (releasePen
   const log = makeLog();
   const settled = [];
 
+  const rootDir = mkdtempSync(join(tmpdir(), 'dead-reviewer-reconcile-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  writeReviewerRunRecord(rootDir, {
+    sessionUuid: readRow(db).reviewer_session_uuid,
+    state: 'failed',
+    subjectContext: { builderTag: 'claude-code' },
+  });
+
   const result = await reconcileReviewerSessions({
+    rootDir,
     db,
     octokit: makeOctokit([]), // no posted review from the dead worker
     now,

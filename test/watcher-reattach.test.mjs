@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -13,7 +13,7 @@ import {
   POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS,
   findReviewerProcessBySessionUuid,
   makeReviewPostedProbe,
-  reconcileReviewerSessions,
+  reconcileReviewerSessions as reconcile,
 } from '../src/reviewer-reattach.mjs';
 
 const REPO = 'laceyenterprises/adversarial-review';
@@ -22,13 +22,24 @@ const STARTED_AT = '2026-05-11T05:10:00.000Z';
 const FAILURE_AT = '2026-05-11T05:20:00.000Z';
 const HEAD_SHA = 'abc123';
 
+const roots = new Map();
+test.after(() => {
+  for (const root of roots.values()) rmSync(root, { recursive: true, force: true });
+});
+
+function reconcileReviewerSessions(options) {
+  return reconcile({ rootDir: roots.get(options.db), ...options });
+}
+
 function setupDb() {
   const db = new Database(':memory:');
   ensureReviewStateSchema(db);
+  roots.set(db, mkdtempSync(join(tmpdir(), 'reviewer-reattach-fixture-')));
   return db;
 }
 
 function seedReviewing(db, overrides = {}) {
+  const sessionUuid = Object.hasOwn(overrides, 'sessionUuid') ? overrides.sessionUuid : 'session-70';
   db.prepare(
     `INSERT INTO reviewed_prs
        (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
@@ -47,9 +58,7 @@ function seedReviewing(db, overrides = {}) {
     Object.prototype.hasOwnProperty.call(overrides, 'lastAttemptedAt')
       ? overrides.lastAttemptedAt
       : STARTED_AT,
-    Object.prototype.hasOwnProperty.call(overrides, 'sessionUuid')
-      ? overrides.sessionUuid
-      : 'session-70',
+    sessionUuid,
     Object.prototype.hasOwnProperty.call(overrides, 'pgid') ? overrides.pgid : 9001,
     Object.prototype.hasOwnProperty.call(overrides, 'startedAt')
       ? overrides.startedAt
@@ -63,6 +72,15 @@ function seedReviewing(db, overrides = {}) {
       : null,
     overrides.infraAutoRecoverAttempts ?? 0
   );
+
+  if (sessionUuid) {
+    writeReviewerRunRecord(roots.get(db), {
+      sessionUuid,
+      state: overrides.runState || 'completed',
+      spawnedAt: overrides.startedAt || overrides.lastAttemptedAt || STARTED_AT,
+      subjectContext: { builderTag: overrides.builderClass || 'grok' },
+    });
+  }
 
   if (
     Object.prototype.hasOwnProperty.call(overrides, 'mergedAt') ||
@@ -974,6 +992,7 @@ test('review probe with no start time selects the newest bot review', async () =
   const findPostedReview = makeReviewPostedProbe(octokit);
 
   const review = await findPostedReview({
+    builderTag: 'grok',
     repo: REPO,
     pr_number: PR,
     reviewer: 'codex',
@@ -1363,6 +1382,7 @@ test('claimed rows with null pgid adopt a live run-state pgid after watcher boun
   const rootDir = mkdtempSync(join(tmpdir(), 'reviewer-reattach-adopt-'));
   writeReviewerRunRecord(rootDir, {
     sessionUuid: 'session-70',
+    subjectContext: { builderTag: 'grok' },
     runtime: 'cli-direct',
     state: 'heartbeating',
     pgid: 9001,
@@ -1460,6 +1480,7 @@ test('claimed rows with null pgid use quarantine-only failure text when the reco
 test('claimed rows with null pgid stay reviewing while launch guard window is active', async () => {
   const db = setupDb();
   seedReviewing(db, {
+    runState: 'launching',
     pgid: null,
     lastAttemptedAt: '2026-05-11T05:19:00.000Z',
     startedAt: null,
@@ -1570,6 +1591,7 @@ test('old spawned/null-pgid rows wait the full reviewer timeout before rearm', a
   const rootDir = mkdtempSync(join(tmpdir(), 'reviewer-reattach-old-nullpgid-'));
   writeReviewerRunRecord(rootDir, {
     sessionUuid: 'session-70',
+    subjectContext: { builderTag: 'grok' },
     runtime: 'cli-direct',
     state: 'spawned',
     pgid: null,
@@ -1619,6 +1641,7 @@ test('terminal/null-pgid rows rearm without waiting for full reviewer timeout', 
   const rootDir = mkdtempSync(join(tmpdir(), 'reviewer-reattach-terminal-nullpgid-'));
   writeReviewerRunRecord(rootDir, {
     sessionUuid: 'session-70',
+    subjectContext: { builderTag: 'grok' },
     runtime: 'cli-direct',
     state: 'cancelled',
     pgid: null,
@@ -1672,6 +1695,7 @@ test('launching/null-pgid rows wait full reviewer timeout before rearm', async (
   const rootDir = mkdtempSync(join(tmpdir(), 'reviewer-reattach-launching-nullpgid-'));
   writeReviewerRunRecord(rootDir, {
     sessionUuid: 'session-70',
+    subjectContext: { builderTag: 'grok' },
     runtime: 'cli-direct',
     state: 'launching',
     pgid: null,

@@ -12,6 +12,7 @@ const TAG_PREFIXES = {
   pi: '[pi]',
   opencode: '[opencode]',
   hermes: '[hermes]',
+  grok: '[grok]',
 };
 
 const TAG_ALIASES = {
@@ -24,6 +25,7 @@ const TAG_ALIASES = {
   pi: 'pi',
   opencode: 'opencode',
   hermes: 'hermes',
+  grok: 'grok',
 };
 
 const BUILDER_CLASS_BY_TAG = {
@@ -34,6 +36,7 @@ const BUILDER_CLASS_BY_TAG = {
   pi: 'pi',
   opencode: 'opencode',
   hermes: 'hermes',
+  grok: 'grok',
 };
 
 const KNOWN_TAGS = Object.keys(TAG_PREFIXES);
@@ -53,8 +56,10 @@ function getPrefixForTag(tagInput) {
 
 function parseKnownPrefix(rawTitle) {
   if (typeof rawTitle !== 'string') return null;
-  const title = rawTitle.trim();
+  let title = rawTitle.trim();
   if (!title) return null;
+  // A closer wrapper never supplies builder provenance on its own.
+  title = title.replace(/^\[(?:closer|hammer|hammer-corp|hammer-claude|hammer-claude-corp|hammer-grok)\]\s*/i, '');
 
   const lower = title.toLowerCase();
   for (let i = 0; i < KNOWN_TAGS.length; i += 1) {

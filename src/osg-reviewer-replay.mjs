@@ -21,13 +21,14 @@ export function replayRouteAllowed(builderInput, arm, options = {}) {
   if (arm?.worker_class && arm.worker_class !== workerClass
     && (!['codex', 'claude'].includes(arm.harness) || arm.worker_class !== `${workerClass}-corp`)) return false;
   const family = modelFamily(arm?.model);
-  if (!builder || !family || reviewerRefusesBuilder(builder, family)) return false;
+  if (!builder || !family) return false;
   // A non-native harness must not conceal the model's family. Known builder
   // model evidence takes precedence over a generic third-party harness tag.
   if (builderModel && (!modelFamily(builderModel) || modelFamily(builderModel) === family)) return false;
   if (diagnostic && arm.harness === 'pi' && family === 'deepseek') {
     return !['pi', 'opencode', 'hermes'].includes(builder) || Boolean(builderModel);
   }
+  if (reviewerRefusesBuilder(builder, family)) return false;
   return arm.harness === family && (family === 'gemini'
     ? GEMINI_REVIEWABLE_BUILDER_CLASSES.includes(builder)
     : ROUTE_BY_BUILDER_CLASS[builder].reviewerModel === family);

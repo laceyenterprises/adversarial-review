@@ -303,7 +303,7 @@ beforeEach((context) => {
 import { collectWorkspaceDocContext } from '../src/prompt-context.mjs';
 import {
   claimNextFollowUpJob,
-  createFollowUpJob,
+  createFollowUpJob as createJob,
   getFollowUpJobDir,
   markFollowUpJobSpawned,
   readFollowUpJob,
@@ -349,6 +349,10 @@ function withAgentOsShimRoot(root, run) {
   return result;
 }
 
+function createFollowUpJob(options) {
+  return createJob({ builderTag: 'claude-code', ...options });
+}
+
 function makeJob(overrides = {}) {
   return {
     jobId: 'laceyenterprises__clio-pr-7-2026-04-21T08-00-00-000Z',
@@ -358,6 +362,7 @@ function makeJob(overrides = {}) {
     branch: 'fixture/remediation',
     linearTicketId: 'LAC-207',
     reviewerModel: 'claude',
+    builderTag: 'claude-code',
     critical: true,
     createdAt: '2026-04-21T08:00:00.000Z',
     reviewSummary: 'Handle token refresh before retrying.',

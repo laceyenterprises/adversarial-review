@@ -295,12 +295,12 @@ test('GMW-02 roster matches the SPEC §1 capability matrix', () => {
   const roster = reviewerRoster({ mode: 'always-on' });
   const defaultsByModel = Object.fromEntries(roster.map((r) => [r.reviewerModel, r.defaultBuilderClasses]));
   assert.deepEqual(defaultsByModel.claude, []);
-  assert.deepEqual(defaultsByModel.codex, ['gemini', 'pi', 'opencode', 'hermes']);
+  assert.deepEqual(defaultsByModel.codex, ['gemini', 'pi', 'opencode', 'grok', 'hermes']);
   assert.deepEqual(defaultsByModel.gemini, ['codex', 'claude-code', 'clio-agent']);
 
   const eligibleByModel = Object.fromEntries(roster.map((r) => [r.reviewerModel, r.eligibleBuilderClasses]));
-  assert.deepEqual(eligibleByModel.claude, ['codex', 'clio-agent', 'gemini', 'pi', 'opencode', 'hermes']);
-  assert.deepEqual(eligibleByModel.codex, ['claude-code', 'gemini', 'pi', 'opencode', 'hermes']);
+  assert.deepEqual(eligibleByModel.claude, ['codex', 'clio-agent', 'gemini', 'pi', 'opencode', 'grok', 'hermes']);
+  assert.deepEqual(eligibleByModel.codex, ['claude-code', 'gemini', 'pi', 'opencode', 'grok', 'hermes']);
   assert.deepEqual(eligibleByModel.gemini, ['codex', 'claude-code', 'clio-agent']);
   // gemini never reviews gemini.
   assert.ok(!defaultsByModel.gemini.includes('gemini'));
@@ -309,8 +309,8 @@ test('GMW-02 roster matches the SPEC §1 capability matrix', () => {
 
 test('GMW-02 roster formatting + gemini note reflects the mode', () => {
   const out = formatReviewerRoster(reviewerRoster({ mode: 'always-on' }));
-  assert.match(out, /claude\s+-> default: \[\]; eligible: \[codex, clio-agent, gemini, pi, opencode, hermes\]/);
-  assert.match(out, /codex\s+-> default: \[gemini, pi, opencode, hermes\]; eligible: \[claude-code, gemini, pi, opencode, hermes\]/);
+  assert.match(out, /claude\s+-> default: \[\]; eligible: \[codex, clio-agent, gemini, pi, opencode, grok, hermes\]/);
+  assert.match(out, /codex\s+-> default: \[gemini, pi, opencode, grok, hermes\]; eligible: \[claude-code, gemini, pi, opencode, grok, hermes\]/);
   assert.match(out, /gemini\s+-> default: \[codex, claude-code, clio-agent\]; eligible: \[codex, claude-code, clio-agent\]\s+\(always-on, GMW\)/);
 
   assert.match(

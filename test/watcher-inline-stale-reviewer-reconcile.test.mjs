@@ -1,3 +1,4 @@
+import { writeReviewerRunRecord } from '../src/adapters/reviewer-runtime/run-state.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
@@ -79,6 +80,11 @@ test('inline reconcile requeues an expired null-pgid claim before same-head spaw
     seedReviewingNullPgid(db, {
       now,
       lastAttemptedAgeMs: DEFAULT_NULL_PGID_LAUNCH_GRACE_MS + 1_000,
+    });
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: readRow(db).reviewer_session_uuid,
+      state: 'failed',
+      subjectContext: { builderTag: 'codex' },
     });
     const settled = [];
     const log = makeLog();

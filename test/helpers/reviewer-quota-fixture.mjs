@@ -3,7 +3,7 @@ import {readFileSync, readdirSync} from 'node:fs';
 import {join} from 'node:path';
 import {spawnReviewer as spawn, readReviewerQuotaDecision} from '../../src/reviewer-spawn-settle.mjs';
 export function spawnReviewer(args) {
-  return spawn({...args, readReviewerQuotaDecisionImpl: args.readReviewerQuotaDecisionImpl ?? (options =>
+  return spawn({builderTag: 'grok', ...args, readReviewerQuotaDecisionImpl: args.readReviewerQuotaDecisionImpl ?? (options =>
     readReviewerQuotaDecision({...options, execFileImpl: async (_command, argv) => {
       if (argv.join(' ') !== 'fleet quota status --json') throw new Error('unexpected fixture transport');
       const env = options.env || {};

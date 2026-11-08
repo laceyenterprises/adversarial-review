@@ -197,7 +197,7 @@ test('hold persistence failures return the hold without posting or throwing', as
 
 test('remediation stops before spawning on a merged parent branch', async t => {
   const f = fixture(t);
-  createFollowUpJob({ rootDir: f.rootDir, jobId: 'synthetic-job', repo, prNumber: 41,
+  createFollowUpJob({ builderTag: 'claude-code', rootDir: f.rootDir, jobId: 'synthetic-job', repo, prNumber: 41,
     baseBranch: 'feature/parent', branch: 'feature/child', reviewerModel: 'claude',
     createdAt: '2026-10-16T10:00:00Z', reviewBody: '## Verdict\nRequest changes',
     changedFiles: ['src/widget.mjs'], remediationPlan: { maxRounds: 2, currentRound: 0, rounds: [] } });
@@ -261,7 +261,7 @@ test('merged-parent search follows pagination and bounds unreadable history', as
 
 test('unreadable base evidence requeues remediation without spending its round', async t => {
   const f = fixture(t);
-  createFollowUpJob({ rootDir: f.rootDir, repo, prNumber: 41,
+  createFollowUpJob({ builderTag: 'claude-code', rootDir: f.rootDir, repo, prNumber: 41,
     baseBranch: 'feature/parent', branch: 'feature/child', reviewerModel: 'claude',
     createdAt: '2026-10-16T10:00:00Z', reviewBody: '## Verdict\nRequest changes',
     changedFiles: ['src/widget.mjs'], remediationPlan: { maxRounds: 2, currentRound: 0, rounds: [] } });
@@ -344,7 +344,7 @@ for (const { mode, branch } of [
       ? { stdout: JSON.stringify({ base: { ref: 'main', repo: { default_branch: 'main' } } }) }
       : f.execFileImpl(cmd, args);
     assert.equal((await inspectStackedBase({ repo, prNumber: 42, execFileImpl })).ok, true);
-    const created = createFollowUpJob({ rootDir: f.rootDir, jobId: `recovered-${mode}`, repo, prNumber: 41,
+    const created = createFollowUpJob({ builderTag: 'claude-code', rootDir: f.rootDir, jobId: `recovered-${mode}`, repo, prNumber: 41,
       baseBranch: 'main', branch: branch || 'feature/child', reviewerModel: 'claude',
       createdAt: '2026-10-16T10:00:00Z', reviewBody: '## Verdict\nRequest changes',
       changedFiles: ['src/widget.mjs'], remediationPlan: { maxRounds: 2, currentRound: 0, rounds: [] } });

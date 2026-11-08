@@ -14,6 +14,9 @@ export function createRepositoryRefresher({ config, db, rootDir, additionalState
   db.exec(`CREATE TABLE IF NOT EXISTS repository_discovery_quarantine (
     full_name TEXT PRIMARY KEY COLLATE NOCASE
   )`);
+  const excluded = new Set((config.excludeRepos ?? []).map(name => name.toLowerCase()));
+  const isExcluded = name => excluded.has(name.toLowerCase())
+    || excluded.has(name.split('/').at(-1).toLowerCase());
 
   async function refresh(octokit, currentRepos) {
     let activeRepos = currentRepos;
@@ -31,6 +34,7 @@ export function createRepositoryRefresher({ config, db, rootDir, additionalState
     };
 
     nextRefreshAt = startedAt + refreshInterval;
+    let listingComplete = false;
     try {
       const all = [];
       if (typeof octokit.paginate?.iterator === 'function') {
@@ -55,21 +59,25 @@ export function createRepositoryRefresher({ config, db, rootDir, additionalState
         for (const repo of repos) all.push(repo);
       }
 
-      const excluded = new Set(config.excludeRepos ?? []);
-      const watched = all.filter(r => !r.archived && !excluded.has(r.name) && !excluded.has(r.full_name || `${config.org}/${r.name}`))
-        .map(r => ({ ...r, full_name: r.full_name || `${config.org}/${r.name}` }));
+      listingComplete = true;
+      const watched = all.map(r => ({ ...r, full_name: r.full_name || `${config.org}/${r.name}` }))
+        .filter(r => !r.archived && !isExcluded(r.full_name));
       const observations = observeRepositoryListing({ db, rootDir,
         additionalStateDir, repositories: watched, logger });
       const conflicts = observations.filter(row => row.conflict);
       const quarantined = new Set(conflicts.map(row => row.fullName.toLowerCase()));
-      db.transaction(() => {
-        const remove = db.prepare('DELETE FROM repository_discovery_quarantine WHERE full_name=?');
-        const insert = db.prepare('INSERT INTO repository_discovery_quarantine VALUES (?)');
-        for (const observation of observations) {
-          remove.run(observation.fullName);
-          if (observation.conflict) insert.run(observation.fullName);
-        }
-      }).immediate();
+      try {
+        db.transaction(() => {
+          const remove = db.prepare('DELETE FROM repository_discovery_quarantine WHERE full_name=?');
+          const insert = db.prepare('INSERT INTO repository_discovery_quarantine VALUES (?)');
+          for (const observation of observations) {
+            remove.run(observation.fullName);
+            if (observation.conflict) insert.run(observation.fullName);
+          }
+        }).immediate();
+      } catch (error) {
+        logger.warn(`[watcher] Repository quarantine persistence failed; using in-memory conflicts for this listing: ${error.message}`);
+      }
       for (const conflict of conflicts) {
         await deliverAlert(`Repository identity conflict: ${conflict.fullName}; intake quarantined for this repository. ${conflict.reason}`, {
           source: 'adversarial-repository-identity', severity: 'SEV2',
@@ -78,32 +86,36 @@ export function createRepositoryRefresher({ config, db, rootDir, additionalState
       }
       const discoveredRepos = watched.map(r => r.full_name);
       activeRepos = [...new Set([...(config.repos || []).map(name => canonicalRepositoryName(db, name)), ...discoveredRepos])]
-        .filter(name => !quarantined.has(name.toLowerCase()));
+        .filter(name => !isExcluded(name) && !quarantined.has(name.toLowerCase()));
 
       hasSuccessfulListing = true;
       logger.log(`[watcher] Org repos refreshed — watching ${activeRepos.length} repos: ${activeRepos.join(', ')}`);
     } catch (err) {
-      if (err.code === 'REPOSITORY_STATE_BUSY') throw err;
-      recordApiCall({
-        category: 'other',
-        repo: repoLabel,
-        status: apiStatusFromError(err),
-        durationMs: null,
-      });
-      logger.error(`[watcher] Failed to list org repos for ${config.org}:`, err.message);
+      if (err.code === 'REPOSITORY_STATE_BUSY' && hasSuccessfulListing) throw err;
+      if (!listingComplete) {
+        recordApiCall({
+          category: 'other',
+          repo: repoLabel,
+          status: apiStatusFromError(err),
+          durationMs: null,
+        });
+      }
+      logger.error(`[watcher] Failed to ${listingComplete ? 'reconcile' : 'list'} org repos for ${config.org}:`, err.message);
       if (!hasSuccessfulListing) {
         const backoff = Math.min(refreshInterval, [120_000, 300_000, 600_000][Math.min(startupFailures++, 2)]);
         const deferredUntil = err.budgetDeferred ? Date.parse(err.observation?.resetAt) : NaN;
         nextRefreshAt = Math.min(startedAt + backoff, deferredUntil > startedAt ? deferredUntil : Infinity);
-        const excluded = new Set((config.excludeRepos || []).map(name => name.toLowerCase()));
-        const quarantined = new Set(db.prepare('SELECT full_name FROM repository_discovery_quarantine').all()
+        // Historical ambiguity also fences names on the first deployment,
+        // before discovery has had a chance to persist a quarantine.
+        const quarantined = new Set(db.prepare(`SELECT full_name FROM repository_discovery_quarantine
+          UNION SELECT full_name FROM repository_name_history
+          GROUP BY full_name HAVING count(DISTINCT repository_id) > 1`).all()
           .map(row => row.full_name.toLowerCase()));
         const known = db.prepare('SELECT full_name FROM repository_identities ORDER BY full_name').all()
           .map(row => row.full_name)
           .filter(name => name.split('/')[0].toLowerCase() === config.org.toLowerCase());
         activeRepos = [...new Set([...(config.repos || []).map(name => canonicalRepositoryName(db, name)), ...known])]
-          .filter(name => !excluded.has(name.toLowerCase()) && !excluded.has(name.split('/')[1].toLowerCase())
-            && !quarantined.has(name.toLowerCase()));
+          .filter(name => !isExcluded(name) && !quarantined.has(name.toLowerCase()));
         logger.log(`[watcher] watching ${activeRepos.length} repos (fallback: last known set): ${activeRepos.join(', ')}`);
         logger.warn(`[watcher] Startup repository discovery degraded; retry at ${new Date(nextRefreshAt).toISOString()}`);
       }

@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRepositoryRefresher } from '../src/watcher-repository-discovery.mjs';
 import { observeRepositoryListing } from '../src/repository-identity.mjs';
+import { acquireRepositoryStateOwner } from '../src/repository-state-lock.mjs';
+import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { alertPresentationForDoc } from '../src/alert-delivery.mjs';
 
 const minute = 60_000;
@@ -19,17 +21,17 @@ function fixture(t, config = {}) {
   let calls = 0;
   let listing = [];
   let failure = null;
-  const logs = [], warnings = [], alerts = [];
+  const logs = [], warnings = [], alerts = [], apiCalls = [];
   const logger = { log: (...args) => logs.push(args.join(' ')), warn: (...args) => warnings.push(args.join(' ')), error() {} };
   const options = { config: { org: 'example-org', ...config }, db, rootDir, now: () => time, logger,
-    recordApiCall() {}, apiStatusFromResult: () => 200, apiStatusFromError: () => 503,
+    recordApiCall: call => apiCalls.push(call), apiStatusFromResult: () => 200, apiStatusFromError: () => 503,
     deliverAlert: async (text, options) => { alerts.push({ text, ...options }); } };
   const octokit = { rest: { repos: { listForOrg() {} } }, paginate: async () => {
     calls++;
     if (failure) throw failure;
     return listing;
   } };
-  return { db, rootDir, logs, warnings, alerts, options, octokit,
+  return { db, rootDir, logs, warnings, alerts, apiCalls, options, octokit,
     create: () => createRepositoryRefresher(options),
     seed: repositories => observeRepositoryListing({ db, rootDir, repositories, logger }),
     advance: ms => { time += ms; },
@@ -63,6 +65,8 @@ test('empty startup warns each poll, alerts once after grace, and retries at def
   assert.equal(f.alerts.length, 1);
   assert.equal(f.alerts[0].event, 'adversarial-repository-discovery');
   assert.equal(alertPresentationForDoc(f.alerts[0]).severity, 'SEV2');
+  assert.match(alertPresentationForDoc(f.alerts[0]).headline, /Zero watched repositories/);
+  assert.match(alertPresentationForDoc(f.alerts[0]).action, /repository-state lock contention/);
   f.advance(minute - 1);
   await refresh(f.octokit, []);
   assert.equal(f.calls, 2);
@@ -193,4 +197,97 @@ test('failed alert enqueue is retried while discovery remains throttled', async 
   await refresh(f.octokit, []);
   assert.equal(attempts, 2);
   assert.equal(f.calls, 1);
+});
+
+test('startup rename lock contention restores fallback and retries at startup backoff', async t => {
+  const f = fixture(t);
+  ensureReviewStateSchema(f.db);
+  f.seed([repository(1, 'example-org/old')]);
+  f.succeed([repository(1, 'example-org/new')]);
+  const refresh = f.create();
+  const release = acquireRepositoryStateOwner(f.rootDir);
+  let fallback;
+  try {
+    fallback = await refresh(f.octokit, []);
+    assert.deepEqual(fallback, ['example-org/old']);
+    assert.deepEqual(f.apiCalls.map(call => call.status), [200]);
+    assert.ok(f.warnings.some(line => line.includes('Startup repository discovery degraded')));
+  } finally { release(); }
+  f.advance(2 * minute - 1);
+  await refresh(f.octokit, fallback);
+  assert.equal(f.calls, 1);
+  f.advance(1);
+  assert.deepEqual(await refresh(f.octokit, fallback), ['example-org/new']);
+  assert.equal(f.calls, 2);
+});
+
+test('steady-state rename lock contention still rethrows and consumes the full interval', async t => {
+  const f = fixture(t);
+  f.succeed([repository(1, 'example-org/old')]);
+  const refresh = f.create();
+  const repos = await refresh(f.octokit, []);
+  f.advance(60 * minute);
+  f.succeed([repository(1, 'example-org/new')]);
+  const release = acquireRepositoryStateOwner(f.rootDir);
+  try {
+    await assert.rejects(refresh(f.octokit, repos), { code: 'REPOSITORY_STATE_BUSY' });
+  } finally { release(); }
+  f.advance(2 * minute);
+  assert.deepEqual(await refresh(f.octokit, repos), repos);
+  assert.equal(f.calls, 2);
+});
+
+test('failed quarantine persistence preserves the successful listing and in-memory conflict fence', async t => {
+  const f = fixture(t);
+  f.seed([repository(1, 'example-org/reused'), repository(2, 'example-org/stale')]);
+  const refresh = f.create();
+  f.db.exec(`CREATE TRIGGER fail_quarantine BEFORE INSERT ON repository_discovery_quarantine
+    BEGIN SELECT RAISE(ABORT, 'Synthetic SQLite write failure'); END`);
+  f.succeed([repository(3, 'example-org/reused'), repository(4, 'example-org/fresh')]);
+  assert.deepEqual(await refresh(f.octokit, []), ['example-org/fresh']);
+  assert.deepEqual(f.apiCalls.map(call => call.status), [200]);
+  assert.ok(f.warnings.some(line => line.includes('Repository quarantine persistence failed')));
+  f.advance(2 * minute);
+  await refresh(f.octokit, ['example-org/fresh']);
+  assert.equal(f.calls, 1, 'a local write failure must not enter startup retry mode');
+});
+
+test('successful and fallback listings share case-insensitive short/full-name and static exclusions', async t => {
+  for (const fails of [false, true]) {
+    const f = fixture(t, {
+      repos: ['example-org/static', 'example-org/hidden', 'example-org/kept'],
+      excludeRepos: ['STATIC', 'EXAMPLE-ORG/HIDDEN', 'SKIP', 'EXAMPLE-ORG/FULL'],
+    });
+    const listing = [repository(1, 'example-org/skip'), repository(2, 'example-org/full'),
+      repository(3, 'example-org/visible')];
+    f.seed(listing);
+    if (fails) f.fail();
+    else f.succeed(listing);
+    assert.deepEqual(await f.create()(f.octokit, []), ['example-org/kept', 'example-org/visible']);
+  }
+});
+
+test('first-deploy fallback excludes historically ambiguous names without a persisted quarantine', async t => {
+  const f = fixture(t, { repos: ['example-org/reused'] });
+  f.seed([repository(1, 'example-org/reused'), repository(2, 'example-org/safe')]);
+  // An older owner observed this spelling before the quarantine table existed.
+  f.db.prepare('INSERT INTO repository_name_history VALUES (?, ?, ?)').run('3', 'EXAMPLE-ORG/REUSED', new Date().toISOString());
+  f.fail();
+  const refresh = f.create();
+  assert.deepEqual(await refresh(f.octokit, []), ['example-org/safe']);
+  assert.equal(f.db.prepare('SELECT count(*) AS n FROM repository_discovery_quarantine').get().n, 0);
+  f.advance(2 * minute);
+  f.succeed([repository(1, 'example-org/reused'), repository(2, 'example-org/safe')]);
+  assert.deepEqual(await refresh(f.octokit, ['example-org/safe']), ['example-org/reused', 'example-org/safe']);
+});
+
+test('retry and zero-scope grace deadlines are evaluated on the next poll', async t => {
+  const f = fixture(t);
+  f.fail();
+  const refresh = f.create();
+  await refresh(f.octokit, []);
+  f.advance(5 * minute);
+  await refresh(f.octokit, []);
+  assert.equal(f.calls, 2);
+  assert.equal(f.alerts.length, 1);
 });

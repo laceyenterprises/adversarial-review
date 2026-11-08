@@ -53,13 +53,20 @@ Incomplete pagination cannot publish a partial listing. A later complete
 successful listing replaces fallback scope.
 
 Startup failures schedule the earlier of the budget error's future reset time
-or bounded 2/5/10-minute backoff, capped by the configured refresh interval.
+or bounded 2/5/10-minute backoff, capped by the configured refresh interval,
+including for startup repository-state lock contention. Deadlines are checked
+on the next poll on or after they fall due.
 After one successful listing, the existing full-interval failure semantics
-remain in force. Every zero-scope poll warns. After two minutes of continuous
+remain in force. Every zero-scope poll warns. At the first poll on or after two minutes of continuous
 zero scope, one SEV2 `adversarial-repository-discovery` event per process episode
-enters the existing alert outbox; failed enqueue retries. A restart begins a new
+enters the existing alert outbox as a digest notice with a coverage-loss headline
+and an explicit recovery action; failed enqueue retries. A restart begins a new
 grace period. Persisted quarantine is cleared only by a safe observation of the
 same name, so a missing name cannot silently undo a known identity conflict.
+Fallback also excludes names with multiple historical repository IDs, protecting
+first deployment before quarantine has been populated. A local quarantine write
+failure is logged separately and preserves the complete listing's in-memory
+conflict fence.
 
 ## Regression evidence and limits
 

@@ -80,18 +80,19 @@
       "id": "repository-identities",
       "title": "Repository Identity and Rename Continuity",
       "path": "docs/data-model/repository-identities.md",
-      "store": "data/reviews.db; data/repository-names.json; data/repository-renames/; service-owned repo state",
+      "store": "data/reviews.db: repository_identities, repository_name_history, repository_rename_audit, repository_discovery_quarantine; data/repository-names.json; data/repository-renames/; service-owned repo state",
       "schemaSurface": "src/repository-identity.mjs",
       "relatedSchemaSurfaces": [
         "src/repository-state-files.mjs",
         "src/repository-state-lock.mjs",
         "src/repository-names.mjs",
+        "src/watcher-repository-discovery.mjs",
         "src/watcher.mjs",
         "src/ama/closer-lease.mjs",
         "src/ama/merge-lease.mjs"
       ],
       "owner": "watcher discovery with reviewer, follow-up and AMA state owners",
-      "compatibility": "Stable GitHub numeric ID and node ID backfill from existing discovery; same-ID name changes use an audited immediate transaction per database and a fenced replay journal for files. Opaque owner IDs and signed evidence remain stable; reused names never inherit another repository identity. Control-state files use an audited directory allowlist and exact owner/filename recipes; telemetry/workspaces remain historical. Unchanged observations are read-only, and projection caches invalidate on atomic file identity. Name conflicts quarantine only their repository at ordinary discovery cadence; retiring a row cannot reassign prior PR state. Reviewer BUSY exit 78 releases an unclaimed attempt. HQ authority continuity belongs to REPORENAME-02."
+      "compatibility": "Stable GitHub numeric ID and node ID backfill from existing discovery; same-ID name changes use an audited immediate transaction per database and a fenced replay journal for files. Opaque owner IDs and signed evidence remain stable; reused names never inherit another repository identity. Control-state files use an audited directory allowlist and exact owner/filename recipes; telemetry/workspaces remain historical. Unchanged observations are read-only, and projection caches invalidate on atomic file identity. Additive repository_discovery_quarantine(full_name TEXT PRIMARY KEY COLLATE NOCASE) persists per-name conflicts; only a safe observation of the same name clears quarantine, not listing absence. A failed quarantine write preserves the listing's in-memory fence and logs a local error. Startup fallback reads current organization names, applying shared exclusions, persisted quarantine and ambiguous historical ownership; startup failures including lock contention use bounded retries evaluated on polls. First successful listing restores ordinary cadence. Retiring a row cannot reassign prior PR state. Reviewer BUSY exit 78 releases an unclaimed attempt. HQ authority continuity belongs to REPORENAME-02."
     },
     {
       "id": "review-size-actions",

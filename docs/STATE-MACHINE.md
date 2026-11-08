@@ -120,12 +120,15 @@ Operator holds short-circuit before opening a repository state fence.
 
 REPODISCOVERY-01 separates initial discovery recovery from steady-state refresh.
 Before the first successful organization listing, failures restore durable
-current names for the configured organization with exclusions and persisted
-identity-conflict quarantine. Retry uses the earlier of a future budget reset
+current names for the configured organization with case-insensitive exclusions,
+persisted identity-conflict quarantine and a historical-ambiguity fence.
+Startup lock contention takes this same recovery path.
+Retry uses the earlier of a future budget reset
 or 2/5/10-minute backoff capped by the refresh interval. After success, failures
-retain scope and consume the full interval. Zero scope warns each poll and
-emits one SEV2 discovery notice after two minutes per continuous empty episode;
-failed enqueue remains retryable. Existing lifecycle states, claim CAS,
+retain scope and consume the full interval. Retry deadlines and the two-minute
+zero-scope grace are evaluated at the next poll on or after they fall due.
+Zero scope warns each poll and emits one SEV2 discovery digest notice per
+continuous empty episode; failed enqueue remains retryable. Existing lifecycle states, claim CAS,
 terminal-PR guards, merge authority and smoke commands are unchanged.
 
 REVIEWLARGE-01: initial `reviewer-prompt-too-large` failures use the existing

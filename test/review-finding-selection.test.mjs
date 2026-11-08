@@ -62,6 +62,43 @@ test('filters intersect before pagination and preserve reviewed heads and grades
   assert.equal(readReviewFindings(db, { since: '2026-01-02T01:00:00+01:00' }).length, 3);
 });
 
+test('non-ISO date filters compare parsed instants with inclusive since and exclusive until', t => {
+  const { db, rows } = fixture(t);
+  const ids = rows.map(row => row.finding_id);
+  for (const filters of [
+    { since: 'Fri, 02 Jan 2026 00:00:00 GMT' },
+    { until: 'Sat, 03 Jan 2026 00:00:00 GMT' },
+    { since: '01/01/2026', until: '01/03/2026' },
+    { since: 'Fri, 02 Jan 2026 01:00:00 +0100', until: '01/03/2026' },
+  ]) {
+    assert.deepEqual(readReviewFindings(db, filters).map(row => row.finding_id), ids);
+  }
+  for (const filters of [
+    { since: 'Sat, 03 Jan 2026 00:00:00 GMT' },
+    { until: 'Fri, 02 Jan 2026 00:00:00 GMT' },
+  ]) {
+    assert.deepEqual(readReviewFindings(db, filters), []);
+  }
+  assert.throws(() => readReviewFindings(db, {
+    since: 'Fri, 02 Jan 2026 01:00:00 +0100', until: '2026-01-02T00:00:00Z',
+  }), /invalid finding filters/);
+});
+
+test('area filters trim padding inside Markdown code quotes and preserve path boundaries', t => {
+  const { db, rows } = fixture(t);
+  const update = db.prepare('UPDATE review_findings SET file=? WHERE finding_id=?');
+  update.run('  ` modules/input.mjs `  ', rows[0].finding_id);
+  update.run('` modules `', rows[1].finding_id);
+  update.run('` modules_extra/input.mjs `', rows[2].finding_id);
+  for (const area of ['modules', 'modules/']) {
+    assert.deepEqual(readReviewFindings(db, { area }).map(row => row.finding_id),
+      rows.slice(0, 2).map(row => row.finding_id));
+  }
+  assert.deepEqual(readReviewFindings(db, { area: 'modules/input.mjs' }).map(row => row.finding_id),
+    [rows[0].finding_id]);
+  assert.deepEqual(readReviewFindings(db, { area: 'mod%' }), []);
+});
+
 test('label states exclude lifecycle-only grades and expose conflicting labels as disputed', t => {
   const { db, rows } = fixture(t);
   assert.deepEqual(readReviewFindings(db, { labelState: 'graded' }).map(r => r.finding_id), [rows[0].finding_id]);

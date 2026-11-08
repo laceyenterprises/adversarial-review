@@ -144,9 +144,12 @@ SQLite connection. Filters are `repo`, `prNumber`, `prNumbers` (a nonempty
 positive-integer list), `findingId`, `reviewerModel`, `reviewerHarness`,
 `promptDigest`, `since` (inclusive), `until` (exclusive), `area`, `blocking`
 (`any`, boolean or 0/1), and `labelState` (`ungraded`, `graded`, `disputed`).
-All filters intersect before pagination. Timestamps compare instants. Area
+All filters intersect before pagination. Timestamp strings accepted by
+JavaScript's `Date.parse` are normalized to UTC ISO-8601 before comparison,
+including RFC 2822 and non-ISO date strings. Timestamps compare instants. Area
 matches a literal complete path or directory prefix after removing Markdown
-backticks, or an exact backlog area; SQL wildcard characters stay literal.
+backticks and padding spaces outside and inside them, or an exact backlog area;
+SQL wildcard characters stay literal. Stored timestamps and file fields are unchanged.
 Graded means at least one non-lifecycle, non-severity grade. Disputed means
 conflicting real/false grades or evidenced withdrawals; it can overlap graded.
 Lifecycle-only and severity-only grades leave findings ungraded. This selection

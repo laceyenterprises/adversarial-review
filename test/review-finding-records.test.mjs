@@ -335,7 +335,7 @@ test('rescue: findings CLI retains the actionable argument error', () => {
   assert.match(result.stderr, /expected show, backlog, backfill or link-job/);
 });
 
-test('rescue: finding read executes three queries for a populated page', async t => {
+test('rescue: finding read executes four queries for a populated page', async t => {
   const { db } = fixture(t);
   const { readReviewFindings } = await api();
   let queries = 0;
@@ -345,8 +345,8 @@ test('rescue: finding read executes three queries for a populated page', async t
   } };
   const rows = readReviewFindings(counted);
   assert.equal(rows.length, 2);
-  assert.equal(queries, 3);
-  assert.ok(rows.every(row => row.remediations.length === 0 && row.disputes.length === 0));
+  assert.equal(queries, 4);
+  assert.ok(rows.every(row => row.remediations.length === 0 && row.disputes.length === 0 && row.grades.length === 0));
 });
 
 test('rescue: posted dispute waits for its evidence head in triggers and backfill', async t => {

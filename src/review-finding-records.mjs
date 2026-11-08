@@ -198,13 +198,13 @@ export function readReviewFindings(db, { repo = null, prNumber = null, prNumbers
   }
   if (prNumbers !== null) { where.push('p.pr_number IN (SELECT value FROM json_each(?))'); params.push(JSON.stringify(prNumbers)); }
   if (blocking !== 'any') { where.push('f.blocking=?'); params.push(Number(blocking)); }
-  if (since !== null) { where.push('julianday(p.started_at)>=julianday(?)'); params.push(since); }
-  if (until !== null) { where.push('julianday(p.started_at)<julianday(?)'); params.push(until); }
+  if (since !== null) { where.push('julianday(p.started_at)>=julianday(?)'); params.push(new Date(Date.parse(since)).toISOString()); }
+  if (until !== null) { where.push('julianday(p.started_at)<julianday(?)'); params.push(new Date(Date.parse(until)).toISOString()); }
   if (area !== null) {
     area = area.replace(/\/+$/, '');
-    // Captured File fields retain Markdown code quoting; match the same
-    // trimmed/backtick-stripped path used by findingPath.
-    const file = "trim(trim(f.file),'`')";
+    // Captured File fields retain Markdown code quoting and may contain
+    // padding spaces both outside and inside the backticks.
+    const file = "trim(trim(trim(f.file),'`'))";
     where.push(`(${file}=? OR substr(${file},1,length(?)+1)=? OR b.area=?)`);
     params.push(area, area, `${area}/`, area);
   }

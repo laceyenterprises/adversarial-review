@@ -2,6 +2,7 @@ import { followUpJobFileFilter } from '../follow-up-job-names.mjs';
 import { findingLocations } from '../kernel/finding-lines.mjs';
 import { readCompletedRemediationRounds, exactHammerValidation } from './hammer-head-validation.mjs';
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { storedPrimaryChange, primaryChangeStoreOwned, verifiedReversalRecord } from './primary-change-store.mjs';
 import { createHistoryReader } from './history-reader.mjs';
 import { historyReadFailureReason, historyReadTimeoutEvidence, withHistoryReadBudget } from './history-read-policy.mjs';
@@ -1210,7 +1211,8 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
     const pr = await read(`repos/${repo}/pulls/${prNumber}`);
     if (pr.head?.sha !== headSha) return unknown('live head changed during history read', { headMismatch: true });
     if (!SHA.test(pr.base?.sha || '')) return unknown('missing base SHA');
-    const history = await read(`repos/${repo}/compare/${pr.base.sha}...${headSha}`);
+    const historyPath = `repos/${repo}/compare/${pr.base.sha}...${headSha}`;
+    let history = await (get.commitHistory ? get.commitHistory(historyPath) : read(historyPath));
     if (!Array.isArray(history.commits) || history.commits.length !== history.total_commits
       || history.commits.some((commit) => !SHA.test(commit?.sha || '')
         || typeof commit?.commit?.message !== 'string')) return unknown('missing, malformed or capped commit history');
@@ -1241,10 +1243,22 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
         builderBoundary = boundary;
       }
     }
-    const first = history.commits.find((commit, index) => isHammerCommit(commit,
+    let first = history.commits.find((commit, index) => isHammerCommit(commit,
       launchIndex >= 0 && index > launchIndex));
     if (!first) return { headSha, hasHammerCommits: false };
     if (historyOnly) return { headSha, hasHammerCommits: true };
+    // Only classification can omit patches. Every hammer proof still consumes
+    // the complete author and final tree differences before granting authority.
+    if (get.commitHistory) {
+      const full = await read(historyPath);
+      if (full.total_commits !== history.total_commits
+        || full.merge_base_commit?.sha !== history.merge_base_commit?.sha
+        || !isDeepStrictEqual(full.commits, history.commits)) {
+        return unknown('commit history changed during file collection');
+      }
+      history = full;
+      first = history.commits.find(commit => commit.sha === first.sha);
+    }
     if (first && (!first.parents?.length || first.parents.length > 2
       || !SHA.test(first.parents[0].sha))) return unknown('missing or unsupported first hammer parents');
     if (first && first.parents.length === 2) {
@@ -1578,7 +1592,7 @@ export async function fetchPrimaryChange(args, options = {}) {
       const source = args.get.withSignal ? args.get.withSignal(signal) : args.get;
       const read = method => (...values) => withHistoryReadBudget(() => method(...values), { signal });
       const get = Object.assign(read(source), { persistPrimaryChange: source.persistPrimaryChange });
-      for (const method of ['metadata', 'commitVerification']) {
+      for (const method of ['metadata', 'commitVerification', 'commitHistory']) {
         if (source[method]) get[method] = read(source[method].bind(source));
       }
       return collectPrimaryChange({ ...args, get, signal }, options);
@@ -1615,7 +1629,7 @@ async function collectPrimaryChange(args, {
         baseSha: pr.base.sha, mergeBase: comparison.merge_base_commit.sha, reviewKey, launchHead },
       () => fetchPrimaryChangeHistory({ ...args, rootDir: primaryChangeRoot(args), persistAuthorizations: true, get: Object.assign(
         path => path === `repos/${args.repo}/pulls/${args.prNumber}` ? Promise.resolve(pr) : path === reviewsPath ? Promise.resolve(reviews) : args.get(path),
-        { metadata: args.get.metadata, commitVerification: args.get.commitVerification }) }));
+        { metadata: args.get.metadata, commitVerification: args.get.commitVerification, commitHistory: args.get.commitHistory }) }));
     } catch (error) {
       return { headSha: args.headSha, hasHammerCommits: null, readFailed: true, historyReadFailed: true,
         ...historyReadTimeoutEvidence(error), reason: historyReadFailureReason(error) };

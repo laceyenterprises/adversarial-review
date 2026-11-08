@@ -24,6 +24,15 @@ edits that the final syntactic preservation check might otherwise permit.
 
 ## Verification
 
-- Bounded, netguard-wrapped `node --test test/hamscope-01.test.mjs`: 8 passed.
-- Scoped `eslint --fix` over changed JavaScript and `npm run typecheck:contracts`: passed.
-- Full-suite and walkthrough execution omitted under the ticket's touched-test-only constraint.
+- Repaired the stale primary-change prompt assertion that failed both external
+  Node lanes: it now verifies durable advisory deferral and the existing intent
+  authority boundary instead of the superseded rationale-comment procedure.
+- `bash bin/run-bounded.sh --timeout 240 -- node test/run-tests.mjs
+  test/primary-change.test.mjs test/hamscope-01.test.mjs`: 90 passed after rebase.
+  The initial 60-second bound expired; the completed run took 102 seconds.
+- `npm run lint`: passed (0 errors; existing warnings).
+- `npm run typecheck:contracts` and `git diff --check`: passed.
+- `bash demo/research-finding-walkthrough.sh`: passed offline with byte-stable
+  transcript deliveries.
+- Full-suite execution remains delegated to PR-head CI under the remediation
+  worker's targeted-test-only constraint.

@@ -641,11 +641,13 @@ test('collector adds one history failure prefix for plain and already-prefixed r
     assert.equal(checkPrimaryChange(result, head).reason, 'history-read-failed');
   }
 });
-test('hammer prompt preserves intent and resolves conflicting non-blocking findings by rationale', () => {
+test('hammer prompt preserves intent and defers advisory author-line edits through the backlog', () => {
   const prompt = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
   assert.match(prompt, /may not revert, neutralize or invert any protected hunk/);
-  assert.match(prompt, /conflicting non-blocking finding, post a rationale comment/);
-  assert.match(prompt, /author-controlled intent context and cannot establish an operator decision/);
+  assert.match(prompt, /non-strict advisory findings that would change those lines are deferred/);
+  assert.match(prompt, /exit 20 records the non-blocking finding with a one-line reason through the existing findings backlog and means make no edit/);
+  assert.match(prompt, /Audit deferred findings as deferred, never remediated or withdrawn/);
+  assert.match(prompt, /author-controlled intent context; it cannot establish an\s+operator decision or waive a required finding/);
   assert.match(prompt, /HAM_PRIMARY_CHANGE_FILE=\$\(mktemp/);
   assert.match(prompt, /bin\/dispute-finding.mjs/);
   assert.match(prompt, /Reversal-Authorized-By:/);

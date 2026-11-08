@@ -14,14 +14,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
 import { redactAndCap } from '../src/adapters/comms/github-pr-comments/redaction.mjs';
 
-function loadedFixtureHost(t) {
-  t.mock.method(os, 'loadavg', () => [os.cpus().length * 3, 0, 0]);
-  const original = childProcess.execFileSync;
-  t.mock.method(childProcess, 'execFileSync', (file, ...args) => file === '/bin/ps'
-    ? `${os.cpus().length * 100}\n` : original(file, ...args));
-  syncBuiltinESMExports();
-  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
-}
+const originalExecFileSync = execFileSync;
 
 // Keep the receipt policy reader offline even when this file is run directly.
 beforeEach(t => {
@@ -73,16 +66,19 @@ test('LAC-2107: fixture subprocess budgets scale once and stay bounded', () => {
 });
 
 test('LAC-2107: fixture build passes the loaded policy budget to the subprocess', async t => {
-  loadedFixtureHost(t);
+  t.mock.method(os, 'loadavg', () => [os.cpus().length * 3, 0, 0]);
   const original = childProcess.execFileSync;
   const builds = [];
   const output = Buffer.from('synthetic fixture output');
+  // Keep one mock per property: stacked mocks can restore an earlier proxy.
   t.mock.method(childProcess, 'execFileSync', (file, ...args) => {
+    if (file === '/bin/ps') return `${os.cpus().length * 100}\n`;
     if (file !== '/bin/sh') return original(file, ...args);
     builds.push({ file, args });
     return output;
   });
   syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
   const spec = { cwd: '/synthetic/artifact-fixture', env: { PATH: '/usr/bin:/bin' },
     args: ['ignored wrapper argument', '-c', 'synthetic build'] };
   assert.equal(await runFixtureBuild(spec), output);
@@ -93,6 +89,14 @@ test('LAC-2107: fixture build passes the loaded policy budget to the subprocess'
       maxBuffer: 64 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
     }],
   }]);
+});
+
+test('fixture build teardown restores CommonJS and ESM subprocess exports', () => {
+  assert.equal(childProcess.execFileSync, originalExecFileSync);
+  assert.equal(execFileSync, originalExecFileSync);
+  assert.equal(execFileSync('/bin/sh', ['-c', 'printf teardown-restored'], {
+    encoding: 'utf8', timeout: fixtureTimeoutMs(5000),
+  }), 'teardown-restored');
 });
 
 for (const receipt of [false, true]) test(`LAC-2107: ${receipt ? 'receipt' : 'declared'} fixture failure retains bounded redacted diagnostics`, async t => {

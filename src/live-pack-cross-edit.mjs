@@ -343,8 +343,9 @@ async function readPackRunsWithRetry(planId, read, sleep) {
   for (let attempt = 0; attempt < 3; attempt++) {
     if (attempt > 0) {
       await sleep(100 * 2 ** (attempt - 1));
-      retryCount++;
     }
+    if (Date.now() >= deadline) break;
+    if (attempt > 0) retryCount++;
     const timeoutMs = Math.max(1, Math.min(3_000, deadline - Date.now()));
     const controller = new AbortController();
     let timer;
@@ -682,7 +683,7 @@ The orchestrator could not determine which build packs this PR touches are runni
     ownPack: pack.ownPack,
     live: pack.live || pack.inconclusive,
     liveCheckInconclusive: pack.inconclusive,
-    retryCount: pack.retryCount,
+    retryCount: pack.retryCount ?? 0,
     runs: pack.runs.map((run) => ({ runId: run.run_id, state: run.state })),
     touchedFiles: pack.touchedFiles,
   }));

@@ -4575,6 +4575,8 @@ merge predicates and smoke commands remain unchanged.
 
 ## Change notes
 
+- LIVEPACKNEW-01 final remediation: stop ledger retries when the budget expires during backoff, count only dispatched retries, and emit zero retry counts for unread packs in remediation facts. Offline regressions cover deadline boundaries and malformed plans.
+
 New repository notes live in [`docs/changes/`](docs/changes/README.md), one
 `<TICKET-ID>.md` file per ticket. Follow that convention for new work; the
 entries below are preserved historical notes. No per-ticket README or index

@@ -225,6 +225,34 @@ test('existing pack retries two unavailable reads then accepts conclusive live a
   }
 });
 
+test('ledger retry checks its deadline after backoff and counts only dispatched retries', async (t) => {
+  let now;
+  t.mock.method(Date, 'now', () => now);
+  for (const elapsed of [9_999, 10_000, 10_001]) {
+    now = 0;
+    let attempts = 0;
+    const pack = await resolvePackLiveness({
+      repo: 'example/review-fixture', slug: 'existing', baseRef: 'base',
+      fetchFileAtRefImpl: () => '{"planId":"existing-plan"}',
+      sleepImpl: async (ms) => {
+        assert.equal(ms, 100);
+        now = elapsed;
+      },
+      readActiveDagRunsImpl: ({ timeoutMs }) => {
+        attempts++;
+        if (attempts === 1) return { ok: false, reason: 'dispatch-read-unavailable' };
+        assert.equal(timeoutMs, 1);
+        return { ok: true, runs: [] };
+      },
+    });
+    const withinBudget = elapsed < 10_000;
+    assert.equal(attempts, withinBudget ? 2 : 1, `elapsed=${elapsed}`);
+    assert.equal(pack.retryCount, withinBudget ? 1 : 0);
+    assert.equal(pack.inconclusive, !withinBudget);
+    if (!withinBudget) assert.match(pack.reason, /dispatch-read-unavailable/);
+  }
+});
+
 test('existing pack permanent failure remains blocking and head cannot add an own-pack exemption', async () => {
   let attempts = 0;
   const result = await evaluateLivePackCrossEdits({
@@ -273,6 +301,22 @@ test('new pack remediation uses the same offline decision', async () => {
   });
   assert.match(context, /"live": false/);
   assert.match(context, /"liveCheckInconclusive": false/);
+});
+
+test('remediation facts report zero retries for unreadable and missing plan identities', async () => {
+  const context = await resolveLivePackRemediationContext({
+    repo: 'example/review-fixture', prNumber: 1, baseBranch: 'base',
+    listPrFilesImpl: async () => ['projects/unreadable/SPEC.md', 'projects/no-plan/SPEC.md'],
+    fetchFileAtRefImpl: (_repo, path) => path.includes('/unreadable/') ? '{invalid' : '{}',
+    readActiveDagRunsImpl: () => { throw new Error('must not read ledger'); },
+  });
+  const facts = JSON.parse(context.match(/```json\n([\s\S]*?)\n```/)[1]);
+  assert.equal(facts.length, 2);
+  for (const pack of facts) {
+    assert.equal(pack.retryCount, 0, pack.slug);
+    assert.deepEqual(pack.runs, []);
+    assert.equal(pack.liveCheckInconclusive, true);
+  }
 });
 
 test('ledger scope denial fails closed immediately without retry', async () => {

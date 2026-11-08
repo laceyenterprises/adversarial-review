@@ -18,3 +18,15 @@ Scope denials remain immediately inconclusive. Persistent failures still
 produce the existing blocking finding. Retry counts appear in structured
 review facts, finding JSON and remediation facts, without changing finding
 prose. No configuration, waiver, lifecycle or merge-authority changes.
+
+Final remediation checks the deadline after backoff before dispatching another
+ledger read and counts only retries actually dispatched. Remediation facts
+normalize omitted retry counts to zero for packs whose plan could not be read.
+Offline regressions cover just before, exactly at and after the deadline and
+malformed or identity-less plans.
+
+Verification: `node --test test/live-pack-cross-edit.test.mjs
+test/remlabel-live-pack-merge.test.mjs` passed all 50 offline tests.
+`npm run lint` passed with zero errors; `npm run typecheck:contracts`,
+`bash demo/research-finding-walkthrough.sh` and `git diff --check` passed.
+The full suite remains delegated to PR-head CI.

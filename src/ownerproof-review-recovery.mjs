@@ -8,6 +8,23 @@ import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority
 const fetchReviews = async (...args) => (await import('./github-api.mjs')).fetchReviewBodiesForHead(...args);
 const maybeDispatchAmaClosureFor = async (...args) => (await import('./ama-closure-orchestration.mjs')).maybeDispatchAmaClosureFor(...args);
 
+// CLOSERPARKOWNER-01: the executors recovery can run from discovery are the
+// selected reviewer dispatch and the selected hammer dispatch (no remediation
+// executor is passed below). Every other expired action (a CI observer, an R04
+// `closure-recovery` reconcile, a lane record that selected nothing) belongs to
+// the closer in the posted-review handler, which re-reads the live PR and
+// reconciles custody itself. Keep this in step with `canDispatch` in
+// src/ama/orphan-watchdog.mjs.
+function recoveryRunsSelected(selected, headSha) {
+  return selected?.head === headSha && selected.queue?.intent === 'dispatch' && !selected.queue.deferredBy
+    && ((selected.action === 'review' && selected.actor === 'reviewer')
+      || (selected.action === 'hammer' && selected.actor === 'hammer'));
+}
+
+// Outcomes recoverOrphan returns when it changed nothing but its own page and
+// bookkeeping. A review request or a dispatch always names itself elsewhere.
+const NO_EFFECT_OUTCOMES = new Set(['ama-pending', 'recovery-exhausted']);
+
 // Every discovered open PR visits this local check before admission/backoff.
 // Only actual recovery enters the normal executor and its fresh candidate read.
 export async function recoverOverdueOwnership({ rootDir, repo, prNumber, subject, reviewStateRow,
@@ -26,7 +43,7 @@ export async function recoverOverdueOwnership({ rootDir, repo, prNumber, subject
   })) : null;
   if (!overdueNextAction(selected, subject.headSha, now, env)) return null;
   const labels = (subject.labels || []).map(label => typeof label === 'string' ? label : label.name);
-  return recoverImpl({ rootDir, repo, prNumber, headSha: subject.headSha, reviewStateRow, labels, now, env, logger,
+  const recovered = await recoverImpl({ rootDir, repo, prNumber, headSha: subject.headSha, reviewStateRow, labels, now, env, logger,
     candidate: { prState: 'open', headSha: subject.headSha },
     result: { amaEnabled: true, nextAction: selected, reason: 'next-action-deadline-expired' },
     dispatchHammer: async orphanRecovery => {
@@ -39,6 +56,18 @@ export async function recoverOverdueOwnership({ rootDir, repo, prNumber, subject
         currentRevisionRef: candidate.headSha, reviewStateRow, domainId, orphanRecovery, logger });
     },
   });
+  // A page with no effect must not end the walk. The page above still names the
+  // lapsed transition once; ending the pass here would also hide the PR from the
+  // posted-review handler, the only code that can select and refresh a real
+  // owner, so the lapsed deadline could never clear (the PR stayed parked).
+  if (NO_EFFECT_OUTCOMES.has(recovered?.outcome) && !recovered.amaClosureResult?.reviewRequest
+    && !recoveryRunsSelected(selected, subject.headSha)) {
+    logger?.log?.(`[watcher] CLOSERPARKOWNER-01: ${repo}#${prNumber}@${subject.headSha} expired ` +
+      `${selected.row || 'unknown-row'} (${selected.action}/${selected.actor}) has no discovery executor; ` +
+      'continuing the walk so the closer owns it');
+    return null;
+  }
+  return recovered;
 }
 
 // Posted rows already visit the closure watchdog. Visit the other routable

@@ -3746,9 +3746,13 @@ test('startup discovery failure enumerates PRs for the durable fallback on the f
       export async function load(url, context, nextLoad) {
         if (url === ${JSON.stringify(fileUrl('src', 'watcher.mjs'))}) {
           const result = await nextLoad(url, context);
-          result.source = String(result.source).replace(
+          const originalSource = String(result.source);
+          result.source = originalSource.replace(
             "JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'))",
             '({ org: "example", repos: [] })');
+          if (result.source === originalSource) {
+            throw new Error('Watcher fallback fixture setup failed: config source replacement did not match');
+          }
           return result;
         }
     `);

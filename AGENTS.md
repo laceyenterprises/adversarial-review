@@ -8,10 +8,12 @@ test suite that runs fully offline with no GitHub token, network, or Agent OS
 host. A bug here can wave bad code into every downstream repo, so hold every
 change to maximum rigor and keep the offline test property intact.
 
-Change notes go under `## Change notes` in README.md, newest first; never above the title.
-This repository's root README change notes remain required. The per-ticket
-fragment convention and guidance against shared README change-note entries
-apply to module-level documentation; they do not replace this repository-level log.
+Repository change notes go in `docs/changes/<TICKET-ID>.md`; see
+[the change-note convention](docs/changes/README.md). This replaces the root README append requirement;
+existing module-local fragments remain valid. Do not add new entries to the
+root README's historical `## Change notes` section or update a shared index
+for each ticket. Keep existing history. Correct affected canonical docs in
+place when their contract changes; a note does not replace those corrections.
 
 ## Where code belongs
 

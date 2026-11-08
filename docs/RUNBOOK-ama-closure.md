@@ -2972,7 +2972,7 @@ prompt-driven worker behavior, not predicate gates — the audit comment and the
    walkthrough need not change when its existing text needs no correction. Follow
    `docs/walkthroughs/README.md` when available. Do not append ticket sections or
    shared README change-note entries. An end-of-file ticket section is at most a
-   non-blocking style note, never a blocking finding. This adds no blocking condition.
+   non-blocking style note, never a blocking finding. This adds no blocking condition. Follow the target repository's AGENTS.md change-note convention for repository-level notes; accept its per-ticket records without requesting a shared root README entry. This does not replace required in-place canonical contract corrections.
    If the PR repository lacks those docs because they belong to a
    superproject or submodule boundary, the hammer leaves the repo-local surface
    alone and notes the skipped superproject-doc obligation in its audit comment.

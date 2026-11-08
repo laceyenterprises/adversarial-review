@@ -187,6 +187,79 @@
           "__default": "off"
         }
       }
+    },
+    "rgy": {
+      "__type": "dict",
+      "__strict": true,
+      "__keys": {
+        "grader": {
+          "__type": "dict",
+          "__strict": true,
+          "__keys": {
+            "run_cost_cap_usd": {
+              "__type": "float",
+              "__min": 0,
+              "__default": 10.0
+            },
+            "day_cost_cap_usd": {
+              "__type": "float",
+              "__min": 0,
+              "__default": 25.0
+            },
+            "max_call_cost_usd": {
+              "__type": "float",
+              "__min": 1e-06,
+              "__default": 0.1
+            },
+            "timeout_seconds": {
+              "__type": "int",
+              "__min": 1,
+              "__max": 600,
+              "__default": 120
+            },
+            "arms": {
+              "__type": "list",
+              "__default": [],
+              "__item": {
+                "__type": "dict",
+                "__strict": true,
+                "__keys": {
+                  "name": {
+                    "__type": "string",
+                    "__required": true,
+                    "__pattern": "^.{1,16384}$"
+                  },
+                  "worker_class": {
+                    "__type": "string",
+                    "__required": true,
+                    "__pattern": "^.{1,16384}$"
+                  },
+                  "harness": {
+                    "__type": "string",
+                    "__required": true,
+                    "__pattern": "^.{1,16384}$"
+                  },
+                  "model": {
+                    "__type": "string",
+                    "__required": true,
+                    "__pattern": "^.{1,16384}$"
+                  },
+                  "effort": {
+                    "__type": "string",
+                    "__required": true,
+                    "__pattern": "^.{1,16384}$"
+                  },
+                  "prompt": {
+                    "__type": "string",
+                    "__required": true,
+                    "__pattern": "^[\\s\\S]{1,16384}$"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

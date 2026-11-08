@@ -51,3 +51,16 @@ and the offline byte-equivalence demo pass. No full local suite was run.
 Related hardening keeps historical backlog source hashes independent of the new
 selection-provenance column; a seeded pre-migration source key remains unchanged
 before and after selection tagging, preventing duplicate historical grades.
+
+CI remediation accounts separately for the manifest and selection-scope migration
+sentinel reads in the existing closure-latency test. Both Node CI lanes failed
+because these twelve expected reads were charged to the unchanged non-migration
+budget of 114. The test now pins six reads for each new migration while retaining
+that budget and all existing GitHub read assertions.
+
+CI remediation verification: bounded targeted runs of
+`test/watcher-closure-latency.test.mjs` (33 passed) and
+`test/findings-batch-grades.test.mjs` (13 passed) succeed on Node 26.
+`npm run lint` reports zero errors (existing warnings),
+`npm run typecheck:contracts`, `bash demo/research-finding-walkthrough.sh`
+and `git diff --check` pass. No full local suite was run.

@@ -1,126 +1,90 @@
 name: Test
 
-# Runs the kernel + adapter test suite on every pull request and every push
-# to main. The test suite is fixture-driven and does not require network
-# access, a real GitHub bot token, or a Linear API key — see
-# `demo/research-finding-walkthrough.sh` for the offline-runnable end-to-end
-# path that mirrors the same byte-stable contracts the CI here exercises.
+# LAC-2164 native-build reproduction lane (diagnostic branch only; never merged).
+# Dispatch: gh workflow run test.yml --repo laceyenterprises/adversarial-review --ref lac-2164-native-repro
+# Repeats `npm ci` under Node 22.23.4 on ubuntu-24.04 (the CI image where fs-ext 2.1.1 intermittently
+# fails to see V8 declarations) and keeps the evidence the normal workflow discards: toolchain versions,
+# node-gyp verbose output, and fingerprints of the installed headers. Two modes: `as-ci` mirrors the
+# Test workflow exactly (setup-node npm cache, default node-gyp devdir); `isolated` gives node-gyp a
+# fresh per-job devdir.
 
 on:
   workflow_dispatch:
-  pull_request:
-    branches:
-      - main
-  push:
-    branches:
-      - main
 
-# Cancel superseded runs on the same branch so a fast-follow push doesn't
-# burn CI minutes on an already-stale commit. Manual reruns from the UI
-# are unaffected.
 concurrency:
-  group: test-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: lac-2164-repro-${{ github.run_id }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  test:
-    name: npm test (Node ${{ matrix.node }})
-    # Move back to the newer image after ARSANDBOXLINUX-01 fixes Linux bwrap isolation.
+  repro:
+    name: npm ci repro (Node 22.23.4, ${{ matrix.mode }} ${{ matrix.i }})
     runs-on: ubuntu-24.04
     strategy:
-      # Run the suite against every Node major the package.json `engines`
-      # range advertises support for. If a version starts failing here, the
-      # right fix is either a code change or a deliberate `engines` bump in
-      # package.json — not silent removal from this matrix.
       fail-fast: false
       matrix:
-        node:
-          - '22'
-          - '26'
-        include:
-          # 2026-10-12: fs-ext 2.1.1 fails with Node 26.11.1 headers:
-          # field 'work_req' has incomplete type 'uv__work'. Pin production's
-          # version until a Node 26 or fs-ext release builds; then float again.
-          - node: '26'
-            version: '26.10.0'
+        mode: [as-ci, isolated]
+        i: [1, 2, 3, 4, 5, 6]
     steps:
-      # Third-party actions are pinned to commit SHAs, not version tags.
-      # This protects us from a tag-repoint supply-chain attack: if the
-      # `v4` tag on actions/checkout is ever moved (intentionally or by
-      # compromise), CI here continues to use the exact commit that was
-      # vetted. Dependabot's github-actions ecosystem (see
-      # .github/dependabot.yml) tracks SHA bumps and proposes weekly
-      # updates as PRs so the pin stays current.
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - name: Set up Node.js ${{ matrix.node }}
+      - name: Set up Node.js 22.23.4
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
-          node-version: ${{ matrix.version || matrix.node }}
+          node-version: '22.23.4'
           cache: npm
 
-      - name: Install dependencies
-        # `npm ci` is preferred over `npm install` so the lockfile is honored
-        # exactly and an out-of-date lockfile fails CI loudly rather than
-        # silently drifting.
-        run: npm ci
-
-      - name: Run CDM review-gate re-derivation guard
-        # CDM-07AR: verdict/head/mergeability gate facts must come from
-        # `src/adversarial-gate-status.mjs`, not be re-derived by consumers.
-        # Allowlisted exceptions stay visible in the uploaded JSON artifact.
+      - name: Toolchain
         run: |
-          node scripts/audit-cdm-rederivation.mjs \
-            --strict \
-            --format json \
-            --out /tmp/cdm-rederivation-audit.json
+          set -x
+          node -v; npm -v; uname -a; cat /etc/os-release | head -4
+          gcc --version | head -1; g++ --version | head -1; python3 --version
+          node -p 'JSON.stringify(process.release)'
+          node -p 'process.versions.v8'
+          ls -la "$HOME/.cache/node-gyp" 2>/dev/null || echo "no default node-gyp devdir before install"
 
-      - name: Upload CDM re-derivation audit artifact
+      - name: npm ci (verbose, foreground scripts)
+        id: ci
+        continue-on-error: true
+        env:
+          npm_config_loglevel: verbose
+          npm_config_foreground_scripts: 'true'
+        run: |
+          if [ "${{ matrix.mode }}" = isolated ]; then export npm_config_devdir="$RUNNER_TEMP/node-gyp-devdir"; fi
+          npm ci 2>&1 | tee "$RUNNER_TEMP/npm-ci.log"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Header fingerprint
+        if: always()
+        run: |
+          OUT="$RUNNER_TEMP/evidence"; mkdir -p "$OUT"
+          cp "$RUNNER_TEMP/npm-ci.log" "$OUT/" 2>/dev/null || true
+          echo "ci outcome: ${{ steps.ci.outcome }}" > "$OUT/outcome.txt"
+          for D in "$HOME/.cache/node-gyp" "$RUNNER_TEMP/node-gyp-devdir"; do
+            [ -d "$D" ] || continue
+            tag=$(basename "$D")
+            find "$D" -type f | sort > "$OUT/$tag.files.txt"
+            find "$D" -type f -name '*.h' -print0 | sort -z | xargs -0 sha256sum > "$OUT/$tag.headers.sha256" || true
+            for h in v8-isolate.h v8-function.h v8-statistics.h; do
+              f=$(find "$D" -name "$h" | head -1); [ -n "$f" ] || continue
+              { echo "== $f"; wc -c "$f"; grep -n -E 'class V8_EXPORT HeapStatistics|enum class ConstructorBehavior|#include' "$f" | head -40; } >> "$OUT/$tag.key-headers.txt"
+            done
+            ls -la --time-style=full-iso -R "$D" | head -400 > "$OUT/$tag.ls.txt"
+          done
+          ls -la "$OUT"
+
+      - name: Upload evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: cdm-rederivation-audit-${{ matrix.node }}-${{ github.sha }}
-          path: /tmp/cdm-rederivation-audit.json
+          name: lac-2164-repro-${{ matrix.mode }}-${{ matrix.i }}
+          path: ${{ runner.temp }}/evidence
+          retention-days: 14
           if-no-files-found: warn
 
-      - name: Run kernel + adapter test suite
-        # `npm test` invokes `node --test test/*.test.mjs test/adapters/*.test.mjs`.
-        # The suite includes byte-equivalence assertions on JSONL transcripts,
-        # which catch accidental delivery-key drift, timestamp instability,
-        # and unordered JSON.
-        run: npm test
-
-      - name: Typecheck contracts
-        # The `src/kernel/contracts.d.ts` declarations are the public adapter
-        # contract. They're typechecked separately so a contract drift fails
-        # CI even when the runtime `.mjs` modules still parse.
-        run: npm run typecheck:contracts
-
-      - name: Run offline end-to-end demo
-        # The demo proves the documented five-minute new-contributor path
-        # actually works against the same kernel/adapter contracts the unit
-        # tests exercise. It builds a temporary fixture, drives the markdown
-        # subject through reviewer → verdict parser → remediation reply
-        # parser → JSONL transcript → re-review → convergence, and exits
-        # non-zero on any invariant violation.
-        run: bash demo/research-finding-walkthrough.sh
-
-      - name: Run fallback canary (fixture)
-        # ARC-09: drive a synthetic review through the `local` outage-lifeline
-        # runtime against a fixture reviewer. Proves the runtime port +
-        # admission + verdict-parse + status-file + alerting path all still
-        # work — a green canary here means the lifeline harness has not rotted.
-        # Hermetic: no CLI spawn, no network. The daily production canary
-        # (launchd) is the `--live` counterpart on the watcher host.
-        run: node scripts/adversarial-runtime-canary.mjs --root "$RUNNER_TEMP/canary" --fixture
-
-      - name: Run failover drill (sandboxed)
-        # ARC-09: exercise the ARC-07 health router through a full kill →
-        # failover → restore → resume → reconcile cycle in an in-memory fixture
-        # harness, asserting automatic failover, automatic resume, and ZERO
-        # duplicate dispatches on resume. NEVER contacts a live OS endpoint.
-        run: node scripts/adversarial-runtime-failover-drill.mjs --root "$RUNNER_TEMP/drill"
+      - name: Fail the job when npm ci failed
+        if: steps.ci.outcome == 'failure'
+        run: exit 1

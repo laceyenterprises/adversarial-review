@@ -4575,6 +4575,11 @@ merge predicates and smoke commands remain unchanged.
 
 ## Change notes
 
+New repository notes live in [`docs/changes/`](docs/changes/README.md), one
+`<TICKET-ID>.md` file per ticket. Follow that convention for new work; the
+entries below are preserved historical notes. No per-ticket README or index
+update is needed.
+
 - REVIEWLARGE-01 final remediation: restore raw-first size recovery, defer copy/blob inspection until summarisation is needed (64 KiB diff floor), and disclose the manifest inside Summary before final reply validation. Only an exhausted chunk size refusal becomes exit 77; state projection hashes remain valid.
 
 - REVIEWLARGE-01: reviewers summarise base-declared generated paths and byte-identical moves/splits in a hashed manifest before prompt sizing. Typed prompt-size failures retry summarisation and bounded chunking; chunk findings retain provenance and any blocking finding blocks the combined verdict. Posted reviews disclose their scope; exhausted chunk plans retain the operator path. See [large review diffs](docs/review-large-diffs.md) and the MERGEHOTSPOT-01 SEV report in agent-os.

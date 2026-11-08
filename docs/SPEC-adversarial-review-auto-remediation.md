@@ -2766,7 +2766,7 @@ walkthrough/README section edits as satisfying walkthrough currency. The
 walkthrough need not change when its existing text needs no correction. Follow
 `docs/walkthroughs/README.md` when available. Do not append ticket sections or
 shared README change-note entries. An end-of-file ticket section is at most a
-non-blocking style note, never a blocking finding. This adds no blocking condition.
+non-blocking style note, never a blocking finding. This adds no blocking condition. Follow the target repository's AGENTS.md change-note convention for repository-level notes; accept its per-ticket records without requesting a shared root README entry. This does not replace required in-place canonical contract corrections.
 Repositories without those documentation surfaces are exempt; if a
 submodule change owes documentation in a superproject, the merge-agent records
 the skipped superproject-doc obligation in its audit or closing comment instead

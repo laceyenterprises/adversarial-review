@@ -203,6 +203,10 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
       + ' Do not append ticket sections to walkthroughs or READMEs or shared README change-note entries.'
       + ' An end-of-file ticket section is at most a non-blocking style note, never a blocking finding.'
       + ' This adds no blocking condition.'
+      + " Follow the target repository's AGENTS.md change-note convention for"
+      + ' repository-level notes; accept its per-ticket records without requesting a'
+      + ' shared root README entry. This does not replace required in-place canonical'
+      + ' contract corrections.'
       + " If the diff changes an owner's lifecycle states, transitions, durable status values,"
       + ' smoke-verified promises or post-deploy verification steps, and that owner'
       + ' declares `state-machines.json` and/or `post-merge-verify.json` beside its README,'

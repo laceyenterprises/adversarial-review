@@ -78,6 +78,21 @@ It reports `closer leases unavailable` or `closer receipts unavailable`, keeps
 ownership unknown and exits 1. Inspect the matching deployment files before
 trusting ownership; the report never repairs them.
 
+## Expired wakes and missing review provenance
+
+An expired hammer wake with complete evidence of no acting closer gets a fresh
+attempt and admission window. Its audit links the expired predecessor through
+`supersedes`; repeated calls dedupe the replacement until its deadline. Live,
+parked and unreadable launch/retry evidence retains custody. Wakes only request
+watcher attention; the closer's normal caps, leases and merge gates still apply.
+
+For exhausted cycles without a reviewed SHA, the AMA fallback anchors its audit
+on the current head and records `reviewedHead: null`. If both heads are unknown,
+`ama-head-unavailable` returns a structured refusal and uses the existing durable
+closure-wait alert path once per PR. Alert delivery failures remain visible and
+retryable. Inspect the live PR and ownership evidence through the ordinary
+recovery tooling; an audit anchor alone grants no review or merge authority.
+
 ## Live closer operator inspection (HAMWORKPROGRESS-02)
 
 HAMWORKPROGRESS-02: live R03 hammer custody also receives an operator inspection

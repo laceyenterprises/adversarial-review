@@ -6,7 +6,7 @@ import { repositoryObservationCache } from './repository-state-cache.mjs';
 // follow-up-remediation.mjs back under the ARC-19 R3 line ratchet, which is
 // decrease-only by contract.
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, statSync } from 'node:fs';
 import { readdir, stat, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +19,8 @@ import { requestWatcherWake } from './watcher-wake.mjs';
 import { writeFollowUpJob } from './follow-up-jobs.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { isClosureRecoveryDecision } from './pr-next-action.mjs';
+import { launchRequestOwned } from './ama/launch-request-status.mjs';
+import { isUnresolvedLaunchReference } from './launch-reference.mjs';
 
 // Mirrors the definition in follow-up-remediation.mjs: the repo root is two
 // levels up from this module, not something either file imports.
@@ -59,6 +61,21 @@ function staleHammerWakeReservation(record, auditPath, nowMs = Date.now(), maxAg
     }
   }
   return Number.isFinite(observedMs) && nowMs - observedMs > maxAgeMs;
+}
+
+function hasNoActingCloser(shared) {
+  const launches = shared?.snapshot?.observations?.launches;
+  const leases = shared?.snapshot?.observations?.leases;
+  if (launches?.state !== 'complete' || leases?.state !== 'complete') return false;
+  if (isUnresolvedLaunchReference(launches)) return false;
+  const closer = launches.value?.closer;
+  const lease = leases.value?.closer;
+  if (!closer) return !lease?.lrqId;
+  if (closer.retryChainUnreadable === true) return false;
+  const probe = closer.probe || { ok: true, row: closer.row || { status: closer.status },
+    retryChain: closer.retryChain, retryChainUnreadable: closer.retryChainUnreadable };
+  return (!lease?.lrqId || lease.lrqId === closer.launchRequestId)
+    && launchRequestOwned(probe) === false;
 }
 
 async function sweepHammerWakeAudits(
@@ -203,6 +220,30 @@ function requestEligibleHammerWake({
     }
     if (outcome !== 'failed') {
       auditPath = hammerWakeAuditPath(rootDir, identity);
+      let supersedes = null;
+      let wakeDeadline = null;
+      // Follow deterministic successor keys. Exclusive create elects a single
+      // replacement even when concurrent callers observe the expired record.
+      // Keep predecessors intact, including their original admission evidence.
+      if (shared && hasNoActingCloser(shared)) {
+        let prior = readHammerWakeAudit(auditPath);
+        while (prior && ['reserved', 'requested'].includes(prior.outcome)) {
+          const deadline = prior.wakeDeadline || prior.nextAction?.deadline;
+          const atMs = Date.parse(deadline?.at || '');
+          if (!Number.isFinite(atMs) || nowMs < atMs) break;
+          const anchoredMs = Date.parse(deadline?.anchoredAt || prior.observedAt || '');
+          const budgetMs = Number(deadline?.budgetMs) > 0 ? Number(deadline.budgetMs) : atMs - anchoredMs;
+          if (!Number.isFinite(budgetMs) || budgetMs <= 0) break;
+          supersedes = { wakeAttemptKey: identity.wakeAttemptKey, reason: 'expired-without-acting-closer',
+            deadlineAt: deadline.at };
+          identity.wakeAttemptKey = `${wakeAttemptKey}:expiry:${createHash('sha256')
+            .update(`${identity.wakeAttemptKey}:${deadline.at}`).digest('hex')}`;
+          wakeDeadline = { at: new Date(nowMs + budgetMs).toISOString(),
+            anchoredAt: new Date(nowMs).toISOString(), budgetMs, class: deadline.class };
+          auditPath = hammerWakeAuditPath(rootDir, identity);
+          prior = readHammerWakeAudit(auditPath);
+        }
+      }
       let retryOfLaunchRequestId = retryLaunch || null;
       const reserved = {
         schemaVersion: HAMMER_WAKE_AUDIT_SCHEMA_VERSION,
@@ -210,6 +251,7 @@ function requestEligibleHammerWake({
         ...identity,
         observedAt,
         outcome: 'reserved',
+        ...(supersedes ? { supersedes, wakeDeadline } : {}),
         ...(retryOfLaunchRequestId ? { retryOfLaunchRequestId } : {}),
         route: 'watcher-ama-merge-authority',
         ...(shared ? { nextAction: { action: decision.action, actor: decision.actor, reason: decision.reason,

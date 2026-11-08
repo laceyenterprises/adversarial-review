@@ -1,0 +1,137 @@
+{
+  "id": "ama-audit",
+  "reviewCarryForwardAuthority": "closureAuthority=daemon-review-carry-forward identifies daemon clean merges authorized by a generated-only carried review; existing docs, operator and closer authorities take precedence",
+  "gateRevisionProvenance": "HOLDGATEVERSION-01: new attempts record reviewServiceRevision from loaded service code; optional producer gatePredicateVersion survives immutable append and hold projection.",
+  "operatorApprovalAwaitedInputs": "attempts[].awaitedInputs: optional normalized operator-label inputs; explicit marker and legacy activation requirement compatibility; consumed by exact-head hold release and retry re-arm",
+  "hammerCapturedBase": "rebasedOntoBase is empty after verification unless the captured base is proved an ancestor of the produced head; FIFO capture alone is not rebase provenance. Existing successful retry rebases retain their proved target.",
+  "docsFastPathRange": "Terminal metadata records the latest eligible immutable base/head comparison on the same leased base branch; live gates precede attestation recording on every transport attempt. Record failures are deferred with exitCode, signal, stderrTail (redacted, at most 2000 characters), error, retryAfter, needsOperator and parkReason. Exact-head history permits three failures with 60s then 120s backoff and parks subsequent ticks without writes; legacy failure entries also count.",
+  "docsFastPathFields": [
+    "closureAuthority=docs-fast-path",
+    "mergeAccountability=docs-fast-path",
+    "docsFastPath.headSha",
+    "docsFastPath.baseSha",
+    "docsFastPath.baseBranch",
+    "attempts[].reason=attestation-record-failed"
+  ],
+  "launchOutcomeFields": [
+    "attempts[].launchRequestId",
+    "attempts[].reason",
+    "attempts[].attemptPhase"
+  ],
+  "auditCliLaunchIdentity": "First non-empty HQ_LAUNCH_REQUEST_ID, AGENT_OS_WORKER_LRQ_ID, LAUNCH_REQUEST_ID overrides attempt-json identity even on conflict. Without an environment ID, JSON identity is audit-only and cannot authorize closer-lease release. Release requires exactly one distinct non-empty environment launch ID; conflicting aliases preserve the lease.",
+  "earlyFailureDeduplication": "Keyed reports preserve each launch's terminal reason; unkeyed hammer-early-exit reports preserve the first unkeyed terminal reason per repo/PR/head without suppressing keyed launches.",
+  "osgResolutionFields": [
+    "harnessResolution.modelResolution",
+    "harnessResolution.osgRemediator",
+    "attempts[].harnessResolution.modelResolution",
+    "attempts[].harnessResolution.osgRemediator"
+  ],
+  "harnessResolutionDiagnostics": "optional array of producer/field evidence strings; no admission or retry authority",
+  "title": "AMA Closure Audit",
+  "path": "docs/data-model/ama-audit.md",
+  "store": "$HQ_ROOT/dispatch/audit/adversarial-merge-authority/",
+  "accountProposalField": "harnessResolution.accountProposal and attempts[].harnessResolution.accountProposal; diagnostic only, dispatcher binding is authoritative",
+  "schemaSurface": "src/ama/audit.mjs",
+  "relatedSchemaSurfaces": [
+    "src/ama/dispatch-closer.mjs",
+    "src/follow-up-branch.mjs",
+    "src/remediation-unpublished.mjs",
+    "src/worker-token-pool.mjs",
+    "bin/ama-audit.mjs",
+    "src/finalization/queue-delivery.mjs",
+    "bin/hammer-terminal-audit.mjs",
+    "src/ama/hammer-terminal-audit.mjs",
+    "bin/hammer-publish.sh",
+    "bin/hammer-pending-attestation.mjs",
+    "src/ama/hammer-pending-attestation.mjs",
+    "templates/hammer-prompt.md",
+    "src/ama/daemon-merge.mjs",
+    "bin/hammer-merge.sh",
+    "bin/hammer-verify-head.sh",
+    "src/ama/closing-keywords.mjs",
+    "src/ama/no-ci-configured.mjs",
+    "src/daemon-clean-merge.mjs",
+    "src/ama/hammer-stop-hold.mjs",
+    "src/ama/hammer-resume.mjs",
+    "src/ama/closure-resume.mjs",
+    "bin/hammer-predicate-inputs.mjs"
+  ],
+  "closureResumeFields": [
+    "attempts[].closureResume.schemaVersion",
+    "attempts[].closureResume.validatedHead",
+    "attempts[].closureResume.reviewedHead",
+    "attempts[].closureResume.baseHead",
+    "attempts[].closureResume.validation",
+    "attempts[].closureResume.gate",
+    "attempts[].closureResume.launchRequestId",
+    "attempts[].closureResume.detail"
+  ],
+  "pendingAttestationFields": [
+    "attempts[].pendingAttestation.baseHead",
+    "attempts[].pendingAttestation.validatedHead",
+    "attempts[].pendingAttestation.identity",
+    "attempts[].pendingAttestation.validationSummary"
+  ],
+  "owner": "AMA merge authority",
+  "guardReversalEvidenceFields": [
+    "attempts[].guardReversals"
+  ],
+  "guardReversalEntryFields": [
+    "authorization",
+    "paths",
+    "failedCheckRun",
+    "passingCheckRun",
+    "failedHead",
+    "passingHead"
+  ],
+  "messageRewriteFields": [
+    "closingKeywordRewrites",
+    "attempts[].closingKeywordRewrites"
+  ],
+  "waitEvidenceFields": {
+    "attempts[].waitNote": "string",
+    "attempts[].headWaitedSeconds": "non-negative integer seconds; 0 means not started",
+    "attempts[].requiredChecksWaitedSeconds": "non-negative integer seconds; 0 means not started"
+  },
+  "pendingCiResumeFields": [
+    "attempts[].resumeOwed",
+    "attempts[].resumeHead",
+    "attempts[].resumeAttempt"
+  ],
+  "unknownMergeabilityEvidence": {
+    "reason": "pr-mergeability-unknown",
+    "remoteCiStatus": [
+      "mergeability-unknown",
+      "mergeability-unknown-ci-timeout"
+    ],
+    "checksConclusion": "attempts[].githubGate.checksConclusion"
+  },
+  "pendingCiResumeConsumer": "src/ama/hammer-resume.mjs; posted-review scheduler prioritizes pending debt every poll; closure resumes exact-head green through normal leased hammer gates",
+  "leaseTimeoutEvidence": {
+    "waited_s": "number or null when duration evidence is absent",
+    "configured_s": "number"
+  },
+  "leaseAdmissionOutcomes": {
+    "operator-hold": "deferred",
+    "pr-is-draft": "deferred",
+    "head-changed": "superseded",
+    "pr-not-open": "failed-without-merge"
+  },
+  "stackedBaseHoldOutcomes": {
+    "stacked-base-merged": "deferred",
+    "stacked-base-read-failed": "deferred"
+  },
+  "daemonAttemptPhases": [
+    "daemon-pre-merge",
+    "daemon-merged",
+    "daemon-deferred",
+    "daemon-failed"
+  ],
+  "compatibilityFields": [
+    "appendedRecords"
+  ],
+  "reviewProvenanceFields": {
+    "reviewedHead": "reviewed SHA or null when the current head anchors the audit",
+    "reviewSha": "reviewed SHA or null; the audit anchor alone is not review evidence"
+  }
+}

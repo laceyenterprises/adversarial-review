@@ -906,6 +906,73 @@ test('LCR: findings-remediation hammer dispatches with --priority normal', async
   );
 });
 
+for (const headSource of ['snapshot', 'wake', 'wake-head-sha']) {
+  test(`CLOSERWAKEEXPIRY-01: no reviewed head anchors dispatch audit on the ${headSource} head`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closer-wake-anchor-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const deps = testDeps();
+    const args = findingsRemediationArgs(rootDir, {
+      reviewState: { headSha: null, reviewCycleExhausted: true, verdict: 'comment-only',
+        blockingFindingCount: 0, nonBlockingFindingCount: 1 },
+      prMetadata: { ...(headSource !== 'snapshot' ? { headSha: null } : {}),
+        mergeableState: 'CONFLICTING' },
+      dispatchContext: { reviewedSha: null,
+        ...(headSource === 'wake' ? { targetRemediationSha: HEAD } : {}),
+        ...(headSource === 'wake-head-sha' ? { headSha: HEAD } : {}) },
+    });
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps });
+    assert.equal(result.dispatched, true);
+    assert.equal(deps.calls.length, 1);
+    const audit = readAmaAuditEntry(args.dispatchContext.hqRoot, 'acme/repo', 404, HEAD);
+    assert.equal(audit.headSha, HEAD);
+    assert.equal(audit.reviewedHead, null);
+    assert.equal(audit.reviewSha, null);
+  });
+}
+
+test('CLOSERWAKEEXPIRY-01: unknown heads return a named refusal and alert once across repeated calls', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-wake-no-head-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deps = testDeps(), alerts = [];
+  const args = findingsRemediationArgs(rootDir, {
+    reviewState: { headSha: null, reviewCycleExhausted: true },
+    prMetadata: { headSha: null, mergeableState: 'CONFLICTING' },
+    dispatchContext: { reviewedSha: null, targetRemediationSha: null },
+  });
+  for (let pass = 0; pass < 2; pass++) {
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      deliverAlertImpl: async (message, options) => { alerts.push({ message, options }); } });
+    assert.equal(result.dispatched, false);
+    assert.equal(result.namedReason, 'ama-head-unavailable');
+    assert.equal(result.needsOperator, true);
+  }
+  assert.equal(deps.calls.length, 0);
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0].message, /acme\/repo PR 404.*ama-head-unavailable/);
+  assert.equal(alerts[0].options.event, 'ama_closer.ownerless');
+});
+
+test('CLOSERWAKEEXPIRY-01: missing-head alert delivery failure stays structured and retries', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-wake-alert-retry-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = { ...findingsRemediationArgs(rootDir, {
+    reviewState: { headSha: null, reviewCycleExhausted: true },
+    prMetadata: { headSha: null },
+    dispatchContext: { reviewedSha: null },
+  }), ...testDeps() };
+  const failed = await maybeDispatchAmaCloser({ ...args,
+    deliverAlertImpl: async () => { throw new Error('synthetic delivery failure'); } });
+  assert.equal(failed.namedReason, 'ama-head-unavailable');
+  assert.equal(failed.alertError, 'synthetic delivery failure');
+  let deliveries = 0;
+  for (let pass = 0; pass < 2; pass++) {
+    const result = await maybeDispatchAmaCloser({ ...args,
+      deliverAlertImpl: async () => { deliveries++; } });
+    assert.equal(result.namedReason, 'ama-head-unavailable');
+  }
+  assert.equal(deliveries, 1);
+});
+
 test('LCR: hq dispatch caps worker provision watchdog at the AMA dispatch timeout', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'lcr-provision-timeout-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

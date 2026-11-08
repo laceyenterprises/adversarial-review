@@ -4812,6 +4812,35 @@ async function maybeDispatchAmaCloserAttempt({
     });
   }
 
+  // Audit identity is required even when no review exists for an exhausted
+  // cycle. Keep review provenance separate from the operational head binding.
+  const knownReviewedHead = dispatchContext?.reviewedSha || reviewState?.headSha || null;
+  const currentHead = prMetadata?.headSha || dispatchContext?.targetRemediationSha
+    || dispatchContext?.headSha || sharedNextAction?.snapshot?.head || null;
+  if (!knownReviewedHead && !currentHead) {
+    const reason = 'ama-head-unavailable';
+    let evidenceWait = null;
+    let alertError = null;
+    try {
+      evidenceWait = await observeClosureWait({
+        rootDir: dispatchContext?.rootDir || SUBMODULE_ROOT,
+        repo: dispatchContext?.repo, prNumber, headSha: 'unknown-head',
+        reason, waitClass: reason, immediate: true, env,
+        now: Date.parse(dispatchContext?.dispatchedAt) || Date.now(),
+        pageImpl: (message, alertOptions) => deliverAlertImpl(message, {
+          ...alertOptions, event: 'ama_closer.ownerless',
+          payload: { repo: dispatchContext?.repo, prNumber, reason },
+        }),
+      });
+    } catch (error) {
+      alertError = error?.message || String(error);
+      logger?.warn?.(`[ama-closer] ${reason} alert failed: ${alertError}`);
+    }
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+      needsOperator: true, reason, evidenceWait, ...(alertError ? { alertError } : {}) });
+  }
+  if (!prMetadata.headSha && currentHead) prMetadata = { ...prMetadata, headSha: currentHead };
+
   let finalHammerRetryReason = null;
   let reconciledDispatchedLease = null;
   let earlyLaunchRequestProbe = null;
@@ -5258,7 +5287,8 @@ async function maybeDispatchAmaCloserAttempt({
     : readFileSync(templatePath, 'utf8');
 
   const repo = dispatchContext.repo;
-  const reviewedSha = dispatchContext.reviewedSha || reviewState.headSha;
+  const reviewedHead = dispatchContext.reviewedSha || reviewState.headSha || null;
+  const reviewedSha = reviewedHead || currentHead;
   const targetRemediationSha = dispatchContext.targetRemediationSha || reviewedSha;
   const headAdvancedDuringDispatch =
     Boolean(reviewedSha && targetRemediationSha && reviewedSha !== targetRemediationSha);
@@ -5341,6 +5371,9 @@ async function maybeDispatchAmaCloserAttempt({
   };
   const queueCloser = dispatchContext.queueCloserPrepared;
   let prompt = queueCloser ? '' : composeCloserPrompt(promptInputs);
+  if (!queueCloser && !reviewedHead) {
+    prompt += '\nNo reviewed head is available. The audit anchor is the current PR head only; it is not review or merge authorization. Obtain the required current-head review evidence before merging.\n';
+  }
   if (reviewState?.operatorLabelFindings?.gated?.length) {
     prompt += operatorGatedRemediationInstructions('', reviewState.operatorLabelFindings);
   }
@@ -7434,8 +7467,9 @@ async function maybeDispatchAmaCloserAttempt({
     },
     metadata: {
       harnessResolution,
+      reviewedHead,
       reviewedBy: dispatchContext.reviewedBy || null,
-      reviewSha: reviewedSha,
+      reviewSha: reviewedHead,
       riskClass: dispatchContext.riskClass || null,
       requiredGateContexts: dispatchContext.requiredGateContext
         ? [dispatchContext.requiredGateContext]

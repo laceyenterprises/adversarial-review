@@ -17,6 +17,16 @@ retain their actual reason and ordinary accounting. See the
 
 ## Purpose
 
+Closer dispatch normally anchors its audit on the reviewed SHA. When no reviewed
+head exists, the current PR snapshot head (or supplied wake target) anchors the
+audit and operational lease/dispatch identities. `reviewedHead` and `reviewSha`
+remain explicitly null in the bootstrap audit; an audit anchor is not review
+evidence. The closer still needs the ordinary current-head merge predicates.
+If neither head is available, dispatch returns the named `ama-head-unavailable`
+refusal before constructing an audit path. The existing closure-wait store
+reserves one immediate `ama_closer.ownerless` alert per PR under `unknown-head`;
+failed alert delivery is refunded for retry and retained in the structured result.
+
 One JSON document records closure attempts for a `(repo, prNumber, headSha)`
 tuple. Its filename is `<repo-with-slashes-replaced>-pr-<number>-<head>.json`.
 The writer serializes appends with a sibling lock file and writes JSON atomically

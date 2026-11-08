@@ -1246,6 +1246,15 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+Wake transport preserves the existing reserved/requested/failed outcomes.
+An expired wake with complete absent/terminal closer evidence reserves a
+deterministic successor attempt with a fresh admission window and a predecessor
+audit link. Unexpired wakes and live/unreadable ownership remain deduplicated.
+AMA dispatch can bind audit and lease identity to the current head when reviewed
+provenance is null. With neither head, `ama-head-unavailable` retains operator
+ownership through the existing deduplicated closure-wait alert. These transport
+and audit changes do not add lifecycle states or authorize merge.
+
 CLOSERGATES-01 final remediation keeps repairable conflicts out of terminal
 AMA state: both final and non-final observations count the current head once;
 only a final report after three distinct heads records

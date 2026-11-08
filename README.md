@@ -738,6 +738,17 @@ and [storage audit](docs/data-model/repository-identities.md). SRE records the
 post-deploy continuity receipt after the separately approved rename;
 HQ attestation identity continuity belongs to REPORENAME-02.
 
+Repository discovery restores durable current names for the configured organization
+when startup listing fails, respecting exclusions and persisted identity-conflict
+quarantine. Until the first successful listing, it retries after 2, 5, then 10
+minutes (capped by the configured refresh interval), or sooner at the budget
+deferral's end. A successful listing replaces fallback scope and restores the
+ordinary refresh interval, including after subsequent failures. Every poll with
+zero watched repositories warns; after two minutes, one SEV2 notice per continuous
+empty episode enters the existing alert outbox under
+`adversarial-repository-discovery`. See the
+[discovery contract](docs/data-model/repository-identities.md#startup-discovery-recovery).
+
 For the GitHub-PR domain, the loop is wired through two long-running
 daemons on the maintainer's host:
 

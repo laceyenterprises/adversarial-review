@@ -29,6 +29,38 @@ reused historical name never redirects the new repository to its former owner.
 Ambiguous historical ownership refuses resolution. Opaque job, launch, pass,
 family, entry, session and lease IDs remain stable.
 
+## Startup discovery recovery
+
+On startup listing failure, discovery reads current `repository_identities`
+names for the configured organization, unions configured static names, and
+filters current short/full-name exclusions and persisted quarantine. It logs
+`watching N repos (fallback: last known set)`. These are historical observations,
+not proof of current visibility or archive status; the next complete successful
+listing replaces the fallback, excluding archived repositories as usual.
+Partial paginated listings never replace scope.
+
+`repository_discovery_quarantine` in `data/reviews.db` contains `full_name`
+(case-insensitive text primary key). Discovery creates it additively and stores
+identity conflicts from completed observations in one immediate transaction.
+A successful nonconflicting observation of that same name clears its quarantine;
+absence from a listing does not. This name fence prevents restart fallback from
+restoring a known conflicting repository. Existing pre-upgrade identity records
+remain usable; no historical conflict information can be reconstructed where
+it was never persisted.
+
+The discovery clock is process-local: before one successful listing, failure
+backoff is 2, 5, then 10 minutes, capped by `repoRefreshIntervalMs`, or the
+budget error's future `observation.resetAt`, whichever is earlier. Expired or
+invalid deadlines use backoff. Once successful, every refresh attempt consumes
+the ordinary interval and failures keep the previous scope.
+
+Every zero-scope poll warns, including when discovery is throttled or the scope
+is static. After two continuous minutes of zero scope, one
+`adversarial-repository-discovery` event enters the existing alert path as SEV2.
+Enqueue failures retry on later polls. Grace and notice deduplication are
+process-local and reset when scope becomes nonempty; restarting starts a new
+grace. The durable alert outbox owns delivery retries after enqueue.
+
 ## Transaction and recovery
 
 Each asynchronous state owner holds its own shared `data/.repository-state.lock`

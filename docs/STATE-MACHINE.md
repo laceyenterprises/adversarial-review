@@ -118,6 +118,16 @@ transitions remain unchanged. Organization discovery now lives in
 `src/watcher-repository-discovery.mjs` to retain the watcher size ratchet.
 Operator holds short-circuit before opening a repository state fence.
 
+REPODISCOVERY-01 separates initial discovery recovery from steady-state refresh.
+Before the first successful organization listing, failures restore durable
+current names for the configured organization with exclusions and persisted
+identity-conflict quarantine. Retry uses the earlier of a future budget reset
+or 2/5/10-minute backoff capped by the refresh interval. After success, failures
+retain scope and consume the full interval. Zero scope warns each poll and
+emits one SEV2 discovery notice after two minutes per continuous empty episode;
+failed enqueue remains retryable. Existing lifecycle states, claim CAS,
+terminal-PR guards, merge authority and smoke commands are unchanged.
+
 REVIEWLARGE-01: initial `reviewer-prompt-too-large` failures use the existing
 bounded `pending-upstream` recovery path; stored same-head failures are eligible
 for bounded infrastructure recovery. Reviewers size and try raw diffs first,

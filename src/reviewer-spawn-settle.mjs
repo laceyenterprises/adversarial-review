@@ -97,6 +97,7 @@ import {
   stmtReleaseUnsettledPostedReview,
   stmtMarkFailed,
   stmtMarkSizeFailed,
+  stmtMarkSizeRetry,
   stmtReleaseReviewLease,
   stmtMarkFailedQuota,
   stmtReleaseReviewLeaseQuota,
@@ -1540,6 +1541,7 @@ function settleReviewerAttempt({
     releaseUnsettledPostedReview: stmtReleaseUnsettledPostedReview,
     markFailed: stmtMarkFailed,
     markSizeFailed: stmtMarkSizeFailed,
+    markSizeRetry: stmtMarkSizeRetry,
     releaseReviewerClaim: stmtReleaseReviewerClaim,
     releaseLegacyStaleReviewerClaim: stmtReleaseLegacyStaleReviewerClaim,
     releaseReviewLease: stmtReleaseReviewLease,
@@ -1708,6 +1710,7 @@ function settleReviewerAttempt({
   }
 
   const transientFailureClasses = new Set([
+    'reviewer-prompt-too-large',
     'reviewer-model-unresolved',
     'cascade',
     'oauth-broken',
@@ -1762,9 +1765,9 @@ function settleReviewerAttempt({
     return;
   }
 
-  // A size ceiling is deterministic for this head; never release it to pending,
-  // even during a coincident provider outage or with lease recovery enabled.
-  if (failureClass === 'reviewer-prompt-too-large' || failureClass === 'reviewer-chunk-budget-exceeded') {
+  // Only exhausted chunk recovery is terminal. Initial size failures use the
+  // bounded retry path, whose reviewer first summarises and then chunks.
+  if (failureClass === 'reviewer-chunk-budget-exceeded') {
     const marked = withSqliteBusyRetrySync(
       () => statements.markSizeFailed
         ? statements.markSizeFailed.run(failureAt, classifiedMessage, repoPath, prNumber, reviewerHeadSha, reviewerSessionUuid)
@@ -1854,6 +1857,12 @@ function settleReviewerAttempt({
       throw new Error('settleReviewerAttempt requires statements.getReviewRow.get for transient infra cap enforcement');
     }
     const currentRow = statements.getReviewRow.get(repoPath, prNumber);
+    if (failureClass === 'reviewer-prompt-too-large'
+      && (!currentRow || currentRow.review_status !== 'reviewing'
+        || currentRow.reviewer_head_sha !== reviewerHeadSha
+        || (currentRow.reviewer_session_uuid ?? null) !== reviewerSessionUuid)) {
+      return { posted: false, reason: 'size-retry-claim-mismatch' };
+    }
     const infraRecoverAttempts = Number(currentRow?.infra_auto_recover_attempts || 0);
     const cascadeState = recordCascadeFailure(rootDir, {
       repo: repoPath,
@@ -1872,12 +1881,11 @@ function settleReviewerAttempt({
         ? `REPEAT infra auto-recovery cap exhaustion after reset (${infraRecoverAttempts}/${INFRA_AUTO_RECOVER_CAP})`
         : `infra auto-recovery cap exhausted (${infraRecoverAttempts}/${INFRA_AUTO_RECOVER_CAP})`;
       withSqliteBusyRetrySync(
-        () => statements.markCascadeFailed.run(
-          failureAt,
-          `${classifiedMessage}\nSystem: ${exhaustionLabel}.`,
-          repoPath,
-          prNumber
-        ),
+        () => failureClass === 'reviewer-prompt-too-large'
+          ? statements.markSizeFailed.run(failureAt, `${classifiedMessage}\nSystem: ${exhaustionLabel}.`,
+            repoPath, prNumber, reviewerHeadSha, reviewerSessionUuid)
+          : statements.markCascadeFailed.run(failureAt, `${classifiedMessage}\nSystem: ${exhaustionLabel}.`,
+            repoPath, prNumber),
         { label: `reviewer-settle-cascade-failed:${repoPath}#${prNumber}`, log }
       );
       log.warn(
@@ -1886,10 +1894,15 @@ function settleReviewerAttempt({
       );
       return;
     }
-    withSqliteBusyRetrySync(
-      () => statements.markPendingUpstream.run(failureAt, classifiedMessage, repoPath, prNumber),
+    const retryWrite = withSqliteBusyRetrySync(
+      () => failureClass === 'reviewer-prompt-too-large'
+        ? statements.markSizeRetry.run(failureAt, classifiedMessage, repoPath, prNumber, reviewerHeadSha, reviewerSessionUuid)
+        : statements.markPendingUpstream.run(failureAt, classifiedMessage, repoPath, prNumber),
       { label: `reviewer-settle-pending-upstream:${repoPath}#${prNumber}`, log }
     );
+    if (failureClass === 'reviewer-prompt-too-large' && retryWrite.changes === 0) {
+      return { posted: false, reason: 'size-retry-claim-mismatch' };
+    }
     const breakdown = formatTransientFailureBreakdown(cascadeState.transientFailureBreakdown);
     log.warn(
       `[watcher] PR #${prNumber} marked pending-upstream after ${cascadeState.consecutiveTransientFailures} transient reviewer failures (${breakdown}); ` +

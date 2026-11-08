@@ -22,8 +22,17 @@ export class ReviewerPromptTooLargeError extends Error {
   }
 }
 
+// The reviewer tried summarisation and bounded chunking. This distinct outcome
+// preserves the operator handoff without making initial size failures terminal.
+export class ReviewerSizeRecoveryExhaustedError extends Error {
+  constructor(cause) {
+    super(`[reviewer-chunk-budget-exceeded] size recovery exhausted: ${cause.message}`, { cause });
+    this.name = 'ReviewerSizeRecoveryExhaustedError';
+  }
+}
+
 export function reviewerExecutionFailureExitCode(error) {
-  if (error instanceof ReviewerChunkBudgetExceededError) return REVIEWER_CHUNK_BUDGET_EXCEEDED_EXIT_CODE;
+  if (error instanceof ReviewerChunkBudgetExceededError || error instanceof ReviewerSizeRecoveryExhaustedError) return REVIEWER_CHUNK_BUDGET_EXCEEDED_EXIT_CODE;
   return error instanceof ReviewerPromptTooLargeError ? REVIEWER_PROMPT_TOO_LARGE_EXIT_CODE : 1;
 }
 

@@ -47,6 +47,16 @@ export function prepareMarkSizeFailed(db) {
       AND reviewer_head_sha = ? AND reviewer_session_uuid IS ?`);
 }
 
+export function prepareMarkSizeRetry(db) {
+  return db.prepare(`UPDATE reviewed_prs
+    SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?,
+        reviewer_lease_expires_at = NULL, reviewer_session_uuid = NULL,
+        reviewer_pgid = NULL,
+        infra_auto_recover_attempts = COALESCE(infra_auto_recover_attempts, 0) + 1
+    WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'
+      AND reviewer_head_sha = ? AND reviewer_session_uuid IS ?`);
+}
+
 export function prepareReleaseUnsettledPostedReview(db) {
   return db.prepare(`UPDATE reviewed_prs
       SET review_status = 'pending', posted_at = NULL,

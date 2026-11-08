@@ -3129,6 +3129,7 @@ test('HOLDRELEASE-01: cancelled history does not fence an ordinary held first re
 
 for (const [name, status, message, chargedCounter] of [
   ['infra failure', 'failed', '[hcp-unavailable] offline fixture', 'infra_auto_recover_attempts'],
+  ['initial prompt size failure', 'failed', '[reviewer-prompt-too-large] synthetic size ceiling', 'infra_auto_recover_attempts'],
   ['lease-released infra failure', 'pending', '[hcp-unavailable] offline fixture', 'infra_auto_recover_attempts'],
   ['upstream hold', 'pending-upstream', '[cascade] upstream failure', null],
   ['population failure', 'failed', 'generated-but-not-posted: no GitHub review found', 'review_population_retry_attempts'],

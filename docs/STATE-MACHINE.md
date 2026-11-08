@@ -101,8 +101,17 @@ transitions remain unchanged. Organization discovery now lives in
 `src/watcher-repository-discovery.mjs` to retain the watcher size ratchet.
 Operator holds short-circuit before opening a repository state fence.
 
-SIZEOWNER-02: terminal `reviewer-prompt-too-large` and
-`reviewer-chunk-budget-exceeded` still settle to `failed`, never `pending`.
+REVIEWLARGE-01: initial `reviewer-prompt-too-large` failures use the existing
+bounded `pending-upstream` recovery path; stored same-head failures are eligible
+for bounded infrastructure recovery. Reviewers size and try raw diffs first,
+summarise base-declared generated paths and verified pure moves after a typed
+size refusal, then use deterministic chunks. Diffs below 64 KiB skip
+summarisation I/O. Only a typed size refusal at the final chunk stage becomes
+`reviewer-chunk-budget-exceeded` (exit 77); earlier unhandled preflights retain
+exit 76. Manifest disclosure sits inside Summary and passes final reply
+validation. The review-row graph, source projection hashes and existing smoke
+promises are unchanged.
+SIZEOWNER-02: terminal `reviewer-chunk-budget-exceeded` settles to `failed`.
 The size-failure writer now fences the dispatched head and session. Settlement
 records one durable `shrink-diff` next action and reserves a builder-class
 PR-update dispatch per head, using the existing branch-push/push path. Its
@@ -744,12 +753,14 @@ new PR
   Detached reservation expiry uses this database budget only for Gemini;
   Codex and Claude reservations retain their streamed process ceiling rather
   than the legacy claim timeout, including after watcher restart.
-- A reviewer size preflight refusal exits with reserved CLI code 76 and settles
-  as terminal `reviewer-prompt-too-large` on that head, without lease recovery.
-  Only the typed preflight error selects this exit code and queues the
-  `reviewer.oversized_agy_prompt` operator alert. Marker text in model-output
-  previews cannot select it; transient chunk errors retain their usual recovery
-  path. A new head or operator retrigger re-arms a real size refusal. See the
+- An initial reviewer size refusal uses reserved CLI code 76 and bounded
+  `reviewer-prompt-too-large` recovery. In-attempt recovery sizes and tries the
+  raw diff, summarises declared generated files and verified pure moves on a
+  typed size refusal, then chunks remaining code as needed.
+  Exhausted recovery exits 77, retains the refusal reason and uses the existing
+  operator handoff and alert. Only typed errors select these size outcomes;
+  model-output previews cannot select them. Transient chunk errors retain their
+  usual recovery path. A new head or operator retrigger re-arms exhausted recovery. See the
   [prompt budgets](../README.md#oversized-reviewer-prompts) for override knobs.
 - An Antigravity model refusal (`reviewer-model-unavailable`) queues the
   `reviewer.model_unavailable` operator alert with the refused model and full

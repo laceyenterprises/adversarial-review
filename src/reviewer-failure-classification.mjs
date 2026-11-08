@@ -12,6 +12,7 @@ import { INFRA_RUNTIME_MISSING_LIBRARY_FAILURE_CLASS } from './runtime-missing-l
 // The classifier's complete bounded-retry vocabulary. Consumers and invariant
 // tests enumerate this list; SQL claims only fence the classified snapshot.
 export const INFRA_RECOVERABLE_FAILURE_CLASSES = Object.freeze([
+  'reviewer-prompt-too-large',
   'reviewer-model-unresolved',
   'reviewer-timeout',
   'launchctl-bootstrap',
@@ -65,7 +66,7 @@ function reviewerFailureClassFromStoredRow(reviewRow) {
   const message = rawMessage.toLowerCase();
   if (message.includes('[reviewer-configuration-error]')) return 'reviewer-configuration-error';
   const tagMatch = message.match(
-    /^\[(reviewer-chunk-budget-exceeded|reviewer-configuration-error|reviewer-model-unresolved|reviewer-model-unavailable|reviewer-timeout|launchctl-bootstrap|cascade|quota-exhausted|provider-overloaded|reviewer-empty-output|reviewer-output|oauth-broken|token-refresh-pending|attestation-sign-failed|hcp-unavailable|infra-runtime-missing-library|agy-identity-unavailable|dispatch-failed|adapter_spawn_timeout|daemon-bounce)\]/
+    /^\[(reviewer-prompt-too-large|reviewer-chunk-budget-exceeded|reviewer-configuration-error|reviewer-model-unresolved|reviewer-model-unavailable|reviewer-timeout|launchctl-bootstrap|cascade|quota-exhausted|provider-overloaded|reviewer-empty-output|reviewer-output|oauth-broken|token-refresh-pending|attestation-sign-failed|hcp-unavailable|infra-runtime-missing-library|agy-identity-unavailable|dispatch-failed|adapter_spawn_timeout|daemon-bounce)\]/
   );
   if (tagMatch) return tagMatch[1];
   const legacyClass = classifyReviewerFailure(rawMessage, null);

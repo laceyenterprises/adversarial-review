@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { __test__, resolveAgyOversizedReviewRoute, reviewAgyOversizedInChunks } from '../src/reviewer-harness.mjs';
 import { buildPromptForReviewerModel } from '../src/reviewer-prompt.mjs';
 import { alertClioOversizedAgyFailure } from '../src/reviewer-alerts.mjs';
-import { ReviewerPromptTooLargeError, reviewerExecutionFailureExitCode, REVIEWER_PROMPT_TOO_LARGE_EXIT_CODE } from '../src/reviewer-outcomes.mjs';
+import { ReviewerPromptTooLargeError, ReviewerSizeRecoveryExhaustedError, reviewerExecutionFailureExitCode, REVIEWER_PROMPT_TOO_LARGE_EXIT_CODE } from '../src/reviewer-outcomes.mjs';
 import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { settleReviewerAttempt } from '../src/reviewer-spawn-settle.mjs';
 
@@ -194,13 +194,14 @@ test('direct Claude oversize is chunked using Claude, with bounded full prompts'
   assert.ok(calls > 1);
 });
 
-async function assertTerminalAlert(error) {
+async function assertTerminalAlert(cause) {
+  const error = new ReviewerSizeRecoveryExhaustedError(cause);
   const rootDir = mkdtempSync(join(tmpdir(), 'reviewer-size-'));
   try {
     const failureClass = classifyReviewerFailure(error.message, reviewerExecutionFailureExitCode(error));
-    assert.equal(failureClass, 'reviewer-prompt-too-large');
+    assert.equal(failureClass, 'reviewer-chunk-budget-exceeded');
     const writes = [];
-    settleReviewerAttempt({ rootDir, repoPath: 'example/repo', prNumber: 3,
+    await settleReviewerAttempt({ rootDir, repoPath: 'example/repo', prNumber: 3,
       result: { ok: false, failureClass, error: error.message }, leaseRecoveryEnabled: true,
       statements: {
         markFailed: { run: (...args) => writes.push(args) },
@@ -208,7 +209,7 @@ async function assertTerminalAlert(error) {
       }, log: { warn() {}, error() {}, info() {} },
     });
     assert.equal(writes.length, 1);
-    assert.match(writes[0][1], /reviewer-prompt-too-large/);
+    assert.match(writes[0][1], /reviewer-chunk-budget-exceeded.*size recovery exhausted/);
     const alerts = [];
     await alertClioOversizedAgyFailure({ repo: 'example/repo', prNumber: 3,
       promptBytes: 9000000, maxBytes: 262144, reason: error.message, error }, {
@@ -249,11 +250,12 @@ test('target delivery budget can refuse a route independently of context', () =>
   assert.equal(routeFor({ env: { ADVERSARIAL_REVIEW_CLAUDE_DELIVERY_MAX_BYTES: '100000' } }).route, null);
 });
 
-test('new size failure is excluded from automatic command and population retries', async () => {
-  const { unknownReviewerCommandFailureClass } = await import('../src/reviewer-failure-classification.mjs');
+test('initial size failure uses bounded infra recovery rather than population retry', async () => {
+  const { unknownReviewerCommandFailureClass, infraRecoverableFailureClass } = await import('../src/reviewer-failure-classification.mjs');
   const { reviewPopulationRetryDecision } = await import('../src/reviewer-route-selection.mjs');
   const row = { review_status: 'failed', failure_message: '[reviewer-prompt-too-large] Command failed with code 1',
     failed_at: new Date().toISOString(), review_attempts: 1, reviewer_head_sha: 'head' };
+  assert.equal(infraRecoverableFailureClass(row), 'reviewer-prompt-too-large');
   assert.equal(unknownReviewerCommandFailureClass(row), null);
   assert.equal(reviewPopulationRetryDecision(row, { headSha: 'head' }).retryable, false);
 });

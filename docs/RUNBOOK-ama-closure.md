@@ -4534,7 +4534,7 @@ and HTTP 5xx receive at most three attempts. The nominal 500/1000ms backoff and
 15-second per-attempt timeout scale through `src/load-aware-timeout.mjs`.
 Secondary rate limits require a valid `Retry-After` header; the reader includes
 response headers and waits at least that long. Reads, retry waits and local
-diffs share the existing 90-second context budget; attempts use only the
+diffs share a fixed 90-second wall-clock context budget; attempts use only the
 remaining time, and a retry whose delay cannot fit fails with the original error.
 An exhausted shared GitHub quota defers instead of entering an unbounded throttle
 sleep. Permanent 404, non-rate-limit 403 and 422 errors, malformed data and
@@ -4545,7 +4545,31 @@ Rejected credentials use
 the helper's single forced token-refresh attempt. Exhausted reads and malformed
 JSON emit head-scoped `historyReadFailed: true` evidence and a non-zero helper
 exit, which the predicate treats as `history-read-failed` rather than a proven reversal. The hammer prompt's
-90-second process limit still bounds the complete collection. History errors
+90-second process limit remains an outer supervisor bound. HAMHISTORYBUDGET-01:
+`fetchPrimaryChange` independently bounds the whole collection, including cached
+history waits, CI-cost and optional preservation proofs, to 90 seconds without
+load scaling. It returns exact-head `readFailed` / `historyReadFailed` evidence
+(`historyReadTimedOut: true` on its deadline), classified as `history-read-failed`.
+This retryable failure never authorizes a reversal or merge. The in-lease merge
+executor releases custody through its existing release path; a later attempt
+must revalidate the live head and all merge gates.
+
+Native closer reads inherit the existing shared rate-budget scope. Standalone
+helpers (including rescue transports using this reader) create a defer-on-quota
+scope instead of sleeping until reset. A native daemon's immutable read may
+outlive a shorter poll/tick deadline for cache reuse, but cannot outlive its own
+90-second verification deadline. An external rescue's 180-second operator bound
+does not replace this shared deadline. No claim is made that the reported
+Agent OS #10268 transport stall was reproduced live.
+Completed immutable evidence remains shared within a closure evaluation.
+In-flight reads belong to each reader's deadline so timing out one reader
+cannot cancel another reader's work or extend its wait.
+
+Cancellation reaches metadata, subtree, blob, retry and local proof work.
+Production history CLI/diff children run in an isolated process group, killed
+with SIGKILL on timeout/cancellation so wrapper descendants cannot retain pipes.
+Diff workers settle before their scratch directory is removed; late injected
+reader results cannot continue collection. History errors
 retain underlying command stderr up to 2,000 characters in full evidence, the
 bounded snapshot reason, audit `historyReadError` and closing-status summaries.
 These internal read retries do not change the per-PR hammer retry cap.

@@ -10,6 +10,7 @@ import { acquireDaemonMergeLease, acquireMergeLease, releaseMergeLease, withDaem
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import { migrationRenumberFixture } from './helpers/migration-renumber.mjs';
 import { proveMigrationRenumbers } from '../src/ama/migration-renumber.mjs';
+import { fetchPrimaryChange } from '../src/ama/primary-change.mjs';
 
 import {
   attemptDaemonCleanMerge,
@@ -1431,6 +1432,29 @@ test('ordinary green CI keeps pre-lease no-CI evidence explicitly labeled as adm
 });
 
 // HAMENOBUFS-01: the durable park carries the read error and stays retryable.
+test('HAMHISTORYBUDGET-01: stalled in-lease history returns custody and a later exact-head attempt can merge', { timeout: 2000 }, async () => {
+  const h = makeHarness();
+  const pending = () => new Promise(() => {});
+  h.deps.fetchLiveGateImpl = async () => greenGate({ requirePrimaryChange: true,
+    primaryChange: await fetchPrimaryChange({ repo: 'o/r', prNumber: 7, headSha: HEAD, get: pending },
+      { contextTimeoutMs: 25 }) });
+  const result = await attemptDaemonCleanMerge(baseArgs(h, { retryCap: 1 }));
+  assert.equal(result.reason, 'history-read-failed');
+  assert.equal(result.permanent, false);
+  assert.equal(h.calls.acquire, 1);
+  assert.equal(h.calls.release, 1);
+  assert.equal(h.calls.merge, 0);
+  assert.equal(h.releasedLease.holderHead, HEAD);
+  assert.equal(h.releaseOutcome.merged, false);
+  assert.equal(h.releaseOutcome.yielded, true);
+  h.deps.fetchLiveGateImpl = async () => greenGate({ requirePrimaryChange: true,
+    primaryChange: primaryChangeFixture(HEAD) });
+  const resumed = await attemptDaemonCleanMerge(baseArgs(h));
+  assert.equal(resumed.merged, true);
+  assert.equal(h.calls.release, 2);
+  assert.equal(h.lastMergeCtx.head, HEAD);
+});
+
 test('history read failure parks with its error without a permanent marker or merge', async () => {
   const detail = 'history read failed: spawnSync gh ENOBUFS';
   const failed = greenGate({ requirePrimaryChange: true, primaryChange: {

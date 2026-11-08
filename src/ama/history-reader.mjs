@@ -1,15 +1,13 @@
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { immutableSnapshotValue, readClosureImmutable } from '../closure-evaluation-cache.mjs';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { execHistoryFile, historyChildExecutor } from './history-child.mjs';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execGhWithRetry, GH_LOOKUP_MAX_BUFFER } from '../gh-cli.mjs';
-import { HISTORY_CONTEXT_TIMEOUT_MS, historyReadErrorDetail, historyReadRetryDelayMs } from './history-read-policy.mjs';
+import { HISTORY_CONTEXT_TIMEOUT_MS, historyReadErrorDetail, historyReadRetryDelayMs, historyReadTimeoutError, withHistoryReadBudget } from './history-read-policy.mjs';
 import { currentGitHubBudgetScope, withGitHubBudgetScope } from '../rate-limit-throttle.mjs';
 
-const execFileAsync = promisify(execFile);
 const commitFields = '{sha, commit: {message: .commit.message, author: .commit.author, committer: .commit.committer}, author, committer, parents: [.parents[] | {sha}]}';
 
 // REST compare files are capped at 300 and cannot be paginated. Read only
@@ -17,14 +15,18 @@ const commitFields = '{sha, commit: {message: .commit.message, author: .commit.a
 // subtrees) and diff one changed blob pair at a time. Never buffer a compare's
 // patches, and never treat a server cap as a complete protected file list.
 export function createHistoryReader(options = {}) {
-  const { execGhWithRetryImpl = execGhWithRetry, diffImpl = execFileAsync,
-    contextTimeoutMs = loadAwareTimeoutMs(HISTORY_CONTEXT_TIMEOUT_MS), nowMs = () => performance.now(), ...ghOptions } = options;
+  const { execGhWithRetryImpl = execGhWithRetry, diffImpl = execHistoryFile,
+    contextTimeoutMs = HISTORY_CONTEXT_TIMEOUT_MS, nowMs = () => performance.now(), ...ghOptions } = options;
+  const executorIdentity = ghOptions.execFileImpl || execHistoryFile;
+  ghOptions.execFileImpl = historyChildExecutor(executorIdentity);
+  const controller = new AbortController();
+  ghOptions.signal = ghOptions.signal ? AbortSignal.any([ghOptions.signal, controller.signal]) : controller.signal;
   let deadline;
   const remainingMs = () => {
     ghOptions.signal?.throwIfAborted();
     deadline ??= nowMs() + contextTimeoutMs;
     const remaining = Math.floor(deadline - nowMs());
-    if (remaining <= 0) throw new Error('history read context budget exhausted');
+    if (remaining <= 0) throw historyReadTimeoutError();
     return remaining;
   };
   const cache = new Map();
@@ -42,13 +44,14 @@ export function createHistoryReader(options = {}) {
           retries: 2, retryDelayMs: historyReadRetryDelayMs, totalTimeoutMs: remainingMs(), nowMs });
         // CLI reads must defer an exhausted shared quota instead of entering an
         // unbounded throttle sleep. Daemon callers retain their existing scope.
-        const { stdout } = await (currentGitHubBudgetScope() ? run() : withGitHubBudgetScope({}, run));
+        const { stdout } = await bounded(() => currentGitHubBudgetScope() ? run() : withGitHubBudgetScope({}, run));
+        ghOptions.signal.throwIfAborted();
         return immutableSnapshotValue(JSON.parse(stdout.replace(/^HTTP\/[\s\S]*?\r?\n\r?\n/, '')));
       };
       const env = ghOptions.env || process.env;
       return await (immutable
         ? readClosureImmutable(execGhWithRetryImpl, [path, jq, env.GH_TOKEN, env.GITHUB_TOKEN,
-          env.GH_HOST, env.GH_CONFIG_DIR], execute, ghOptions.execFileImpl || execFileAsync, ghOptions.signal)
+          env.GH_HOST, env.GH_CONFIG_DIR], execute, executorIdentity, ghOptions.signal)
         : execute());
     } catch (cause) {
       const limit = cause.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || cause.code === 'ENOBUFS'
@@ -117,13 +120,13 @@ export function createHistoryReader(options = {}) {
             file.additions = 0; file.deletions = 0; files[index] = file; continue;
           }
           await Promise.all([
-            blob(a).then(bytes => writeFile(join(dir, beforePath), bytes)),
-            blob(b).then(bytes => writeFile(join(dir, afterPath), bytes)),
+            blob(a).then(bytes => { ghOptions.signal.throwIfAborted(); return writeFile(join(dir, beforePath), bytes, { signal: ghOptions.signal }); }),
+            blob(b).then(bytes => { ghOptions.signal.throwIfAborted(); return writeFile(join(dir, afterPath), bytes, { signal: ghOptions.signal }); }),
           ]);
           let patch;
           try {
-            ({ stdout: patch } = await diffImpl('git', ['-c', 'core.autocrlf=false', '-c', 'core.attributesFile=/dev/null', 'diff', '--diff-algorithm=myers', '--no-indent-heuristic', '--no-index', '--no-ext-diff', '--no-textconv', '--no-color', '--unified=3', '--', beforePath, afterPath],
-              { cwd: dir, encoding: 'utf8', timeout: Math.min(loadAwareTimeoutMs(15000), remainingMs()), maxBuffer: GH_LOOKUP_MAX_BUFFER, ...(ghOptions.signal ? { signal: ghOptions.signal } : {}) }));
+            ({ stdout: patch } = await bounded(() => diffImpl('git', ['-c', 'core.autocrlf=false', '-c', 'core.attributesFile=/dev/null', 'diff', '--diff-algorithm=myers', '--no-indent-heuristic', '--no-index', '--no-ext-diff', '--no-textconv', '--no-color', '--unified=3', '--', beforePath, afterPath],
+              { cwd: dir, encoding: 'utf8', timeout: Math.min(loadAwareTimeoutMs(15000), remainingMs()), maxBuffer: GH_LOOKUP_MAX_BUFFER, signal: ghOptions.signal, killSignal: 'SIGKILL' })));
           } catch (error) {
             if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || error.code === 'ENOBUFS') {
               throw new Error(`history diff output limit ${GH_LOOKUP_MAX_BUFFER} bytes exceeded for ${path}`, { cause: error });
@@ -158,7 +161,13 @@ export function createHistoryReader(options = {}) {
       return files;
     } finally { await rm(dir, { recursive: true, force: true }); }
   };
-  const reader = async path => {
+  const bounded = async operation => withHistoryReadBudget(async signal => {
+    const abort = () => controller.abort(signal.reason);
+    signal.addEventListener('abort', abort, { once: true });
+    try { return await operation(); }
+    finally { signal.removeEventListener('abort', abort); }
+  }, { signal: ghOptions.signal, timeoutMs: remainingMs() });
+  const reader = path => bounded(async () => {
     try {
       const compare = /^repos\/(.+\/[^/]+)\/compare\/([^?]+)$/.exec(path);
       if (compare) {
@@ -211,12 +220,17 @@ export function createHistoryReader(options = {}) {
       error.primaryChangeReadFailed = true;
       throw error;
     }
-  };
+  });
   // Cost/ancestry consumers need metadata, not reconstructed per-file patches.
-  reader.metadata = path => json(path, '{status, total_commits, merge_base_commit: {sha: .merge_base_commit.sha}}');
+  reader.metadata = path => bounded(() => json(path, '{status, total_commits, merge_base_commit: {sha: .merge_base_commit.sha}}'));
   // Provenance proofs request compact web-flow verification separately; avoid
   // buffering signature payloads in every history and commit-file page.
-  reader.commitVerification = path => json(path, '{sha, verification: .commit.verification}');
+  reader.commitVerification = path => bounded(() => json(path, '{sha, verification: .commit.verification}'));
+  // The collector owns a deadline covering proofs as well as API history.
+  // Bind that cancellation to every real child, without mutating a shared reader.
+  reader.withSignal = signal => createHistoryReader({ ...options,
+    contextTimeoutMs: remainingMs(),
+    signal: AbortSignal.any([ghOptions.signal, signal]) });
   reader.persistPrimaryChange = true;
   return reader;
 }

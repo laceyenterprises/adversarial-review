@@ -291,8 +291,8 @@ test('HAMHELPERTIMEOUT-01 helpers declare bounded read retries separately from m
   const merge = readFileSync(new URL('../bin/hammer-merge.sh', import.meta.url), 'utf8');
   const publish = readFileSync(new URL('../bin/hammer-publish.sh', import.meta.url), 'utf8');
   const verify = readFileSync(new URL('../bin/hammer-verify-head.sh', import.meta.url), 'utf8');
-  assert.match(HAMMER_TEMPLATE, /hammer-helper-step.mjs" read base-head 90 540/);
-  assert.match(HAMMER_TEMPLATE, /ham_read\(\) \{ ham_step read "\$1" 90 540/);
+  assert.match(HAMMER_TEMPLATE, /hammer-helper-step.mjs" read:report base-head 90 540/);
+  assert.match(HAMMER_TEMPLATE, /ham_read\(\) \{ ham_step read:report "\$1" 90 540/);
   for (const step of ['context', 'review-read', 'primary-change-context', 'conflict-primary']) {
     assert.match(HAMMER_TEMPLATE, new RegExp(`ham_read ${step}`));
   }

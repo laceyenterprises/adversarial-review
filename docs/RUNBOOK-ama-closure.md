@@ -485,7 +485,15 @@ one retry; permanent failures and semantic stop codes return immediately.
 The runner waits for child exit, allowing five seconds for TERM cleanup before
 KILL, and keeps children in the controller's process group. Failed read output
 cannot mix with a successful retry. Child early-failure audits are provisional
-until the runner either recovers or publishes the exhausted failure.
+until the caller selects the outcome. Plain `read` and `mutation` modes return
+the child's status and diagnostics without writing an early-exit audit or phase
+receipt. Use `read:report` or `mutation:report` only when failure ends the run
+and the caller delegates terminal reporting (base-head capture, prompt
+`ham_read`, finding disputes). Even these modes leave semantic exits 20 and 21
+to their caller: context's infrastructure stop already records its own
+exact-head attempt, and a repairable conflict is not a terminal failure.
+The base-head initialization sources `hammer-node-runtime.sh` before invoking
+the runner, including in a fresh shell before `inputs.sh` exists.
 
 Publication and provenance writes use `mutation` mode, which never retries:
 API publication and submodule synchronization use 120/720 seconds, pushed attestation and finding disputes
@@ -499,9 +507,32 @@ the ceiling. This records granted patience rather than an uncapped load curve.
 The 15-second token/head guards and 20-second local merge-signal capture
 remain fixed. Submodule updates can fetch missing objects; their existing
 cleanup and retry owners remain in place, with no new mutation replay.
+In particular, merge-action receipt failure remains warning-only with coverage
+pending; submodule retries or tolerated sync failures cannot write stale
+terminal attempts. Phase-owned reads, API publication fallback and pushed
+attestation keep their caller's final reason rather than a runner early exit.
 Existing published-head
 polls and CI gate reads retain their enclosing deadlines and retry rules;
 git fetch retains its load-aware bounded synchronization and lock cleanup.
+
+These are per-attempt allowances, not extensions of the enclosing run.
+At the ceiling, a two-attempt read allows about 1,100 seconds (18m20s),
+including two five-second sizing calls and two five-second TERM graces.
+The default three-attempt conflict submodule loop allows about 2,196 seconds
+(36m36s), including sizing, cleanup and its 2s/4s backoffs. Conflict repair
+and commit preparation run outside the merge lease. All controller-owned
+commands remain subject to `runHammerController`'s absolute 7,200-second
+ceiling; stacked helpers may exhaust that ceiling and be canceled before
+using their full allowance. Load scaling never renews that outer deadline.
+
+The per-base merge lease independently records a load-scaled 900-second
+nominal deadline (5,400 seconds at the default sixfold maximum). It may have
+been acquired under lighter load than a later helper: there is no promise
+that all helper allowances fit its remaining age. A live same-host holder
+is retained past that deadline by `reclaimIfStale`; foreign-host expiry and
+holder identity checks remain authoritative. Helpers neither renew a lease
+nor confer merge authority. The existing controller cleanup and exact live
+lease/head/predicate checks still govern cancellation and the merge click.
 
 For current PR/head lease observation, run
 `node bin/hammer-lease-state.mjs --repo OWNER/REPO --base BASE --pr N --head SHA`

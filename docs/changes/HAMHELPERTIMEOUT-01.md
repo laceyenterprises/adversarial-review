@@ -9,10 +9,16 @@ retries. All mandatory stops and merge fences remain in force. Includes the
 
 ## Interface changes
 
-`bin/hammer-helper-step.mjs read|mutation STEP NOMINAL CEILING COMMAND [ARG...]`
-owns helper bounds and terminal timeout diagnostics. Its read mode permits two
-attempts for timeouts; mutation mode permits one. Inner failure audits remain
-provisional until the runner decides the outcome. Applied multipliers are
+`bin/hammer-helper-step.mjs MODE STEP NOMINAL CEILING COMMAND [ARG...]`
+owns helper bounds and timeout diagnostics. `read` permits two attempts for
+timeouts; `mutation` permits one. Both leave durable reporting to their caller.
+The explicit `read:report` / `mutation:report` modes delegate terminal reporting
+to the runner except for caller-owned semantic exits 20 and 21. Inner failure
+audits remain provisional, including for best-effort receipt writes and
+caller-retried submodule updates. Base-head initialization resolves its runtime
+before `inputs.sh` exists. The closure runbook compares stacked allowances
+with the independent two-hour controller limit and merge-lease deadline.
+Applied multipliers are
 effective budget divided by nominal, represented as thousandths in reason codes.
 `bin/load-aware-timeout.mjs NOMINAL [CEILING]` accepts an optional explicit ceiling
 without changing existing one-argument callers. Phase scripts keep resolving
@@ -51,3 +57,15 @@ files was clean. The three rendered phases passed `bash -n` and
 `scripts/test-shellcheck-gate.sh`, so the installed ShellCheck was used directly.
 The prompt remains within its existing 60 KiB bound. Memory searches were
 available and returned no matching records for this timeout/retry pattern.
+
+### Final comment-only remediation
+
+The five targeted suites above pass with 115 tests: helper-step now has 16,
+including caller-owned timeout reporting, semantic exits, failed post-merge
+receipt capture, a recovered conflict submodule loop, fresh-shell base capture,
+and a pinned high-load CLI ceiling regression. Protocol, bounded Git sync,
+load-aware timeout and procedure generation retain 45/9/34/11 passing tests.
+Commands ran through `bin/run-bounded.sh --timeout 120` with bounded output.
+`npm run lint` passed (zero errors, 152 existing warnings);
+`npm run typecheck:contracts`, `bash demo/research-finding-walkthrough.sh`
+and `git diff --check` passed. No full local test suite was run.

@@ -209,7 +209,8 @@ Source `<<RUN_DIR>>/inputs.sh` each shell; persist audits there.
 
 ```bash
 umask 077
-"$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" read base-head 90 540 "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-base-head.mjs" '<<PR_URL>>' > '<<RUN_DIR>>/base-head' || exit 1
+source "<<ROOT_DIR>>/bin/hammer-node-runtime.sh" || exit 1
+"$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" read:report base-head 90 540 "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-base-head.mjs" '<<PR_URL>>' > '<<RUN_DIR>>/base-head' || exit 1
 cat > '<<RUN_DIR>>/inputs.sh' <<'HAM_INPUTS'
 source "<<ROOT_DIR>>/bin/hammer-node-runtime.sh" || { return 1 2>/dev/null || exit 1; }
 export HAM_BASE_HEAD="$(cat '<<RUN_DIR>>/base-head')"
@@ -222,7 +223,7 @@ export HAM_ROOT_DIR='<<ROOT_DIR>>' HAM_HQ_ROOT='<<HQ_ROOT>>' HAM_HQ_OWNER='<<HQ_
 export HAM_AUDIT_PATH='<<AUDIT_PATH>>' HAM_REVIEWER='<<REVIEWER>>'
 export HAM_AMA_TRAILERS=<<AMA_TRAILERS_SHELL>>
 ham_step() { "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" "$@"; }
-ham_read() { ham_step read "$1" 90 540 "${@:2}"; }
+ham_read() { ham_step read:report "$1" 90 540 "${@:2}"; }
 ham_gh() { "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/metered-gh.mjs" exec-hammer "$@"; }
 ham_git() {
   local ham_git_exit=0
@@ -437,7 +438,7 @@ if [ "$(id -un)" != "$HAM_DISPUTE_OWNER" ]; then
   unset HAM_DISPUTE_TOKEN
 fi
 DISPUTED_HEAD=$(/usr/bin/perl -e 'alarm shift; exec @ARGV' 15 git rev-parse HEAD) || exit 1
-if "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" mutation dispute-finding 90 540 "${HAM_DISPUTE_RUN[@]}" "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/dispute-finding.mjs \
+if "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" mutation:report dispute-finding 90 540 "${HAM_DISPUTE_RUN[@]}" "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/dispute-finding.mjs \
   --root-dir <<ROOT_DIR>> --repo <<REPO>> --pr <<PR_NUMBER>> \
   --head-sha "$DISPUTED_HEAD" --review '<review node id or URL>' \
   --finding '<n>' --evidence-file "$HAM_DISPUTE_EVIDENCE_FILE"; then

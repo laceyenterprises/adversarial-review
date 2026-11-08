@@ -7742,3 +7742,16 @@ test('aliases cannot introduce unknown fields into consumed atomic search policy
       { name: 'AgentOSConfigError', key: 'services.hcp.search.future_example' });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('VDBREPOSCOPE-01 clone repositories default and strict validation', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vdb-repo-scope-'));
+  const topPath = join(dir, 'config.yaml');
+  try {
+    writeFileSync(topPath, 'version: 1\n');
+    assert.deepEqual(loadConfig({ topPath, env: {} }).get('session_ledger.vdb.clone_repos'), ['agent-os']);
+    writeFileSync(topPath, 'version: 1\nsession_ledger:\n  vdb:\n    clone_repos: [agent-os, adversarial-review]\n');
+    assert.deepEqual(loadConfig({ topPath, env: {} }).get('session_ledger.vdb.clone_repos'), ['agent-os', 'adversarial-review']);
+    writeFileSync(topPath, 'version: 1\nsession_ledger:\n  vdb:\n    clone_repos: [123]\n');
+    assert.throws(() => loadConfig({ topPath, env: {} }), AgentOSConfigError);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

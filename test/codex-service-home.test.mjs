@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cleanupServiceCodexAuth, prepareServiceCodexHome, prepareServiceCodexHomeAsync, serviceCodexConfigArgs } from '../src/codex-service-home.mjs';
-import { probeCodexCli } from '../src/adapters/reviewer-runtime/cli-direct/discovery.mjs';
+import { probeCodexCli, probeReviewerCliOAuth } from '../src/adapters/reviewer-runtime/cli-direct/discovery.mjs';
 import { dummyCodexAuth, serviceFixtureExec, writeDummyCodexAuth } from './helpers/codex-service-fixture.mjs';
 
 const quiet = { info() {}, warn() {} };
@@ -205,7 +205,7 @@ test('offline subprocess consumes auth.json while ignoring an external CODEX_AUT
   } finally { home.cleanup(); f.cleanup(); }
 });
 
-for (const discovery of [false, true]) {
+for (const discovery of [false, true, 'reviewer-oauth']) {
   test(`default async transport closes probe stdin (discovery=${discovery})`, async t => {
     const f = fixture();
     t.after(f.cleanup);
@@ -227,7 +227,9 @@ if (['login', 'debug'].includes(args[0])) {
 }
 `, { mode: 0o700 });
     const env = { ...f.env, CODEX_CLI: binary, FIXTURE_COMMANDS: receipt };
-    if (discovery) {
+    if (discovery === 'reviewer-oauth') {
+      await probeReviewerCliOAuth({ model: 'codex', env, cwd: f.root, ensureWorkerRegistryReadyImpl: async () => {} });
+    } else if (discovery) {
       await probeCodexCli({ env, cwd: f.root, ensureWorkerRegistryReadyImpl: async () => {} });
     } else {
       const home = await prepareServiceCodexHomeAsync({ env, workspaceDir: f.root,

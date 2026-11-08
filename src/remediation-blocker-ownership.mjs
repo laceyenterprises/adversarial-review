@@ -22,8 +22,12 @@ export function operationalBlockerOwner(entry) {
   const needItem = '(?:additional|human|operator|finding|input|decision|approval|intervention|action|credentials?|permissions?|authentication|authorization|access|adversarial|review)';
   const listItem = `${needItem}(?:\\s+${needItem})*`;
   const negatedNeed = new RegExp(`\\bno (?:${listItem}(?:,\\s*${listItem})*,\\s*or\\s+${listItem}|${needItem}(?:\\s+(?:${needItem}|or|and))*)\\s+(?:(?:is|are)\\s+)?(?:needed|required|necessary)\\b`, 'gi');
-  const legacyNeeds = fields.map(field => String(field).replace(negatedNeed, (phrase, offset, value) =>
-    /(?:^|[.!?;:]|\n)\s*(?:[-*>]\s+)?$/.test(value.slice(0, offset)) ? '' : phrase)).join(' ');
+  const ambiguousCredentialAndApproval = /\b(?:credentials?|permissions?|authentication|authorization|access)\s+and\s+(?:(?:human|operator)\s+)?(?:approval|decision|action)\b/i;
+  const legacyNeeds = fields.map(field => String(field).replace(negatedNeed, (phrase, offset, value) => {
+    // Conjunction-led prose and mixed credentials/approval remain human-owned.
+    const standalone = /(?:^|[.!?;:]|\n)\s*(?:[-*>]\s+)?$/.test(value.slice(0, offset));
+    return standalone && !ambiguousCredentialAndApproval.test(phrase) ? '' : phrase;
+  })).join(' ');
   if (/\b(?:credentials?|auth(?:entication|orization)?|permissions?|operator|human|decision|conflicting requirements?|approval|(?:auth|access|api|session|bearer|github)[ -]tokens?)\b/i.test(legacyNeeds)
     || /\b(?:fetch|rebase|push)\b[^.]{0,30}\b(?:failed|rejected|conflict)\b/i.test(text)) return 'human';
   if (legacyCiFollowup) return 'CI';

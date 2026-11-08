@@ -248,12 +248,13 @@ async function probeReviewerCliOAuth({
   env = process.env,
   cwd = process.cwd(),
   timeout = loadAwareTimeoutMs(30_000),
-  execFileImpl = execFileAsync,
+  execFileImpl,
   requireMcpOAuth = false,
+  ensureWorkerRegistryReadyImpl,
 } = {}) {
   const normalized = String(model || '').toLowerCase();
   if (normalized.includes('codex')) {
-    return probeCodexCli({ env, cwd, timeout, execFileImpl, requireMcpOAuth });
+    return probeCodexCli({ env, cwd, timeout, execFileImpl, requireMcpOAuth, ensureWorkerRegistryReadyImpl });
   }
   if (normalized.includes('gemini')) {
     return probeGeminiCli({ env, cwd, timeout, execFileImpl });

@@ -328,12 +328,18 @@ function basePlanReader({ repo, baseRef, listBasePlanPathsImpl, fetchFileAtRefIm
       if (listing.paths.length > 64) throw new Error('base plan scan exceeds 64 plans');
       const result = new Array(listing.paths.length);
       let next = 0;
+      let failed = false;
       // Await every worker even on failure: no fetches escape the scan lifetime.
       const workers = await Promise.allSettled(Array.from({ length: 4 }, async () => {
-        while (next < listing.paths.length) {
+        while (!failed && next < listing.paths.length) {
           const index = next++;
           const path = listing.paths[index];
-          result[index] = { path, ...parsePlanJson(await fetchFileAtRefImpl(repo, path, listing.ref)) };
+          try {
+            result[index] = { path, ...parsePlanJson(await fetchFileAtRefImpl(repo, path, listing.ref)) };
+          } catch (err) {
+            failed = true;
+            throw err;
+          }
         }
       }));
       const failure = workers.find((worker) => worker.status === 'rejected');

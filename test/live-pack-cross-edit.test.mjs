@@ -1121,13 +1121,13 @@ test('facts keep advisory last and omit no-plan packs', async () => {
   }
 });
 
-test('moving base uses snapshot plan identity and tickets rather than the initial head plan', async () => {
+test('moving base uses snapshot identity and tickets despite a conflicting JSON path', async () => {
   const { options } = newPackFixture();
   const result = await evaluateLivePackCrossEdits({
     ...options,
     listBasePlanPathsImpl: async () => ({ ref: 'snapshot', paths: ['projects/new-pack/plan.json'] }),
     fetchFileAtRefImpl: (repo, path, ref) => ref === 'snapshot'
-      ? '{"planId":"snapshot-plan","tickets":[{"id":"BASE-01"}]}'
+      ? '{"path":"projects/wrong-pack/plan.json","planId":"snapshot-plan","tickets":[{"id":"BASE-01"}]}'
       : options.fetchFileAtRefImpl(repo, path, ref),
     readActiveDagRunsImpl: ({ planId }) => {
       assert.equal(planId, 'snapshot-plan');
@@ -1164,6 +1164,46 @@ test('base scan caps plan count and fetch concurrency, then falls back to ledger
     assert.ok(maxActive <= 4);
     assert.equal(active, 0);
     assert.equal(result.packs[0].reason, count > 64 ? 'no-non-terminal-dag-runs' : 'new-pack-absent-at-base');
+  }
+});
+
+test('base scan stops scheduling after fetch or parse failure and drains in-flight reads', async () => {
+  for (const failure of ['fetch', 'parse']) {
+    const { options } = newPackFixture();
+    const paths = Array.from({ length: 64 }, (_, i) => `projects/base-${i}/plan.json`);
+    const reads = [];
+    let active = 0;
+    let ledgerReads = 0;
+    const result = await evaluateLivePackCrossEdits({
+      ...options,
+      listBasePlanPathsImpl: async () => ({ ref: 'snapshot', paths }),
+      fetchFileAtRefImpl: async (repo, path, ref) => {
+        if (ref !== 'snapshot') return options.fetchFileAtRefImpl(repo, path, ref);
+        reads.push(path);
+        active++;
+        try {
+          await new Promise((resolve) => setImmediate(resolve));
+          if (path === paths[0]) {
+            if (failure === 'fetch') throw new Error('synthetic fetch failure');
+            return '{}';
+          }
+          return '{"planId":"base-plan"}';
+        } finally {
+          active--;
+        }
+      },
+      readActiveDagRunsImpl: () => {
+        ledgerReads++;
+        assert.equal(active, 0, 'scan must drain before ledger fallback');
+        return { ok: true, runs: [{ run_id: 'live', state: 'running' }] };
+      },
+    });
+    assert.deepEqual(reads, paths.slice(0, 4), failure);
+    assert.equal(active, 0);
+    assert.equal(ledgerReads, 1);
+    assert.equal(result.packs[0].ownPack, false);
+    assert.equal(result.packs[0].inconclusive, false);
+    assert.equal(result.findings.length, 1);
   }
 });
 

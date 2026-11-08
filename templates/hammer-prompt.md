@@ -16,6 +16,7 @@ Before PR reads/edits, perform this existence check only. Missing deployed
 scripts require one fresh AMA dispatch/lease; do not reconstruct them:
 
 ```bash
+source "<<ROOT_DIR>>/bin/hammer-node-runtime.sh" || exit 1
 export HAM_REPO='<<REPO>>' HAM_PR_NUMBER='<<PR_NUMBER>>' HAM_HQ_ROOT='<<HQ_ROOT>>' HAM_TARGET_REMEDIATION_SHA='<<TARGET_REMEDIATION_SHA>>'
 if ! test -f "<<RUN_DIR>>/hammer-verify-head.sh" -a -f "<<RUN_DIR>>/hammer-publish.sh" -a -f "<<RUN_DIR>>/hammer-merge.sh"; then
   "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-terminal-audit.mjs" dispatch-phase-scripts-missing
@@ -24,8 +25,9 @@ fi
 ```
 
 Initialize `inputs.sh` once using Appendix A (capture the starting head before
-edits); then run this guard and source it each shell. Do not replace missing
-inputs after edits.
+edits); then run this guard and source it each shell, including every resumed
+continuation. The inputs resolve and re-export `HAM_NODE_BIN` each time.
+Do not replace missing inputs after edits.
 
 ```bash
 test -f "<<RUN_DIR>>/inputs.sh" || {
@@ -210,6 +212,7 @@ Source `<<RUN_DIR>>/inputs.sh` each shell; persist audits there.
 umask 077
 /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-base-head.mjs" '<<PR_URL>>' > '<<RUN_DIR>>/base-head' || exit 1
 cat > '<<RUN_DIR>>/inputs.sh' <<'HAM_INPUTS'
+source "<<ROOT_DIR>>/bin/hammer-node-runtime.sh" || { return 1 2>/dev/null || exit 1; }
 export HAM_BASE_HEAD="$(cat '<<RUN_DIR>>/base-head')"
 export TMPDIR='<<RUN_DIR>>'
 export HAM_PR_URL='<<PR_URL>>' HAM_REPO='<<REPO>>' HAM_PR_NUMBER='<<PR_NUMBER>>'

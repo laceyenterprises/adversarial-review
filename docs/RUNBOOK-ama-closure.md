@@ -451,6 +451,15 @@ mandatory rules and named consultation conditions within its existing 60 KiB
 budget. Reference content retains every original rule with dispatch values
 substituted; ordinary scratch cleanup owns its lifetime.
 
+Every phase resolves and exports `HAM_NODE_BIN` before invoking helpers through
+`bin/hammer-node-runtime.sh`. Persisted `inputs.sh` runs the same resolver every
+time it is sourced, including after session continuation. A nonempty
+`HAM_NODE_BIN` must name an absolute executable file; an invalid explicit value
+stops with `node-runtime-unavailable`. When unset or empty, resolution uses the
+launch pin `AGENT_OS_NODE_BIN`, then `command -v node`. An invalid launch pin or
+missing executable produces the same named stop. Keep sourcing the original
+inputs in every shell; do not reconstruct lease ownership on resume.
+
 For current PR/head lease observation, run
 `node bin/hammer-lease-state.mjs --repo OWNER/REPO --base BASE --pr N --head SHA`
 from the deployed checkout (or pass its `--root-dir`). It reports `held` for

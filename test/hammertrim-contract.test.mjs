@@ -1263,3 +1263,42 @@ test('HAMLATEAUDIT-01: review pagination waits until the existing check snapshot
     assert.equal(Array.isArray(snapshot.reviews), status === 'completed');
   }
 });
+
+test('HAMNODEBIN-01: audit publication executes its real lease-status checks after losing the launch export', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-publish-node-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const fake = join(dir, 'node');
+  writeFileSync(fake, `#!/bin/bash
+case "$1:$2" in
+  */merge-lease.mjs:status)
+    echo status >> "$TMPDIR/lease-calls"
+    echo '{"holder":{"leaseId":"synthetic","holderPr":17,"pastDeadline":false,"holderPidLive":true,"ageSeconds":1}}'
+    exit 0 ;;
+esac
+# Stop at the first simulated PR read; this test cannot publish anything.
+echo synthetic-read-refused >&2
+exit 1
+`, { mode: 0o755 });
+  const source = readFileSync(new URL('../bin/hammer-publish.sh', import.meta.url), 'utf8');
+  const values = Object.fromEntries([...source.matchAll(/<<([A-Z_]+)>>/g)].map(([, key]) => [key, 'fixture']));
+  Object.assign(values, { ROOT_DIR: fileURLToPath(new URL('../', import.meta.url)), RUN_DIR: dir,
+    PR_NUMBER: '17', REPO: 'example/project' });
+  const script = join(dir, 'publish.sh');
+  writeFileSync(script, renderHammerProcedure('hammer-publish', values));
+  const result = spawnSync('/bin/bash', ['-uc', `
+ham_release_merge_lease() { :; }
+source "$1"
+status=$?
+printf '%s:%s' "$status" "$HAM_PHASE_OUTCOME"
+`, 'bash', script], {
+    env: { PATH: `${dir}:${process.env.PATH}`, TMPDIR: dir,
+      HAM_MERGE_LEASE_HELD: '1', HAM_MERGE_LEASE_ID: 'synthetic', BASE_BRANCH: 'main',
+      HAMMER_LACEY_GH_TOKEN: 'synthetic' },
+    encoding: 'utf8', timeout: 5000,
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, '1:publish-head-read-failed');
+  assert.equal(readFileSync(join(dir, 'lease-calls'), 'utf8'), 'status\nstatus\n');
+  assert.doesNotMatch(result.stderr, /merge lease lost|command not found|node-runtime-unavailable/);
+});

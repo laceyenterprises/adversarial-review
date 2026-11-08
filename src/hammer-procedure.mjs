@@ -46,7 +46,7 @@ ham_record_phase_failure() {
     HAM_MERGE_LEASE_RETRYABLE_ABORT=1
     HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON="$HAM_PHASE_OUTCOME"
   fi
-  "\${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-terminal-audit.mjs "\${HAM_PHASE_OUTCOME:-${phase}-failed}" "\${POST_REMEDIATION_SHA:-<<TARGET_REMEDIATION_SHA>>}" || echo 'HAM terminal failure audit unavailable' >&2
+  [ -n "\${HAM_NODE_BIN:-}" ] && "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-terminal-audit.mjs "\${HAM_PHASE_OUTCOME:-${phase}-failed}" "\${POST_REMEDIATION_SHA:-<<TARGET_REMEDIATION_SHA>>}" || echo 'HAM terminal failure audit unavailable' >&2
 }
 ham_run_rendered_phase() {
 `) + `

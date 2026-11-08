@@ -7605,6 +7605,14 @@ using the existing `terminal` status and outcome `retryable-lane-busy`,
 merge-write lease. Intermediate in-run lease waits do not release closer ownership.
 The audit CLI accepts `--root-dir` and `--lease-head` to bind settlement to the
 review-service store and original dispatch head; its launch ID must match.
+For `bin/ama-audit.mjs`, the first non-empty `HQ_LAUNCH_REQUEST_ID`,
+`AGENT_OS_WORKER_LRQ_ID`, then `LAUNCH_REQUEST_ID` supplies that ID, even when
+the values disagree. It also overrides `launchRequestId` in `--attempt-json`.
+Without an environment ID the JSON identity is retained for audit only and
+cannot authorize lease release. Release requires exactly one distinct non-empty
+environment launch ID; conflicting aliases preserve the lease. Clear inherited launch variables when auditing
+on behalf of another launch. This CLI precedence does not relax the hammer
+controller's requirement for one unambiguous launch identity.
 Rekeyed heads follow that same launch. A changed owner, review handoff or sticky
 success is preserved under the existing reclaim flock and expected-owner fence.
 

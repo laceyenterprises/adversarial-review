@@ -17,7 +17,9 @@
  * `--attempt-json <path>` is optional context the writer merges into
  * the attempt entry (e.g. `mergeCliExitCode`, `postCliGithubState`,
  * `preMergeReasons`). When absent, only `outcome` (+ caller-provided
- * `--now`) is recorded.
+ * `--now`) is recorded, plus launch identity from the environment when set.
+ * The first non-empty HQ_LAUNCH_REQUEST_ID, AGENT_OS_WORKER_LRQ_ID, or
+ * LAUNCH_REQUEST_ID overrides `--attempt-json` launchRequestId.
  *
  * Exit codes:
  *   0   write succeeded; absolute file path on stdout
@@ -62,6 +64,13 @@ Common args:
   --attempt-json optional JSON file merged into the attempt entry
   --now          ISO 8601 UTC timestamp (caller-provided for
                  deterministic tests)
+
+Launch identity:
+  The first non-empty HQ_LAUNCH_REQUEST_ID, AGENT_OS_WORKER_LRQ_ID,
+  LAUNCH_REQUEST_ID wins, even when the values disagree, and overrides
+  --attempt-json launchRequestId. Without these environment values, the JSON
+  identity is retained for audit only; it cannot authorize lease release.
+  Clear inherited launch variables when auditing on behalf of another launch.
 
 Trailers args:
   --worker-class    e.g. codex or claude-code
@@ -131,8 +140,15 @@ function runInitOrAppend(subcommand, argv) {
     }
   }
   const attemptBase = loadAttemptJson(values['attempt-json']);
+  const launchRequestIds = [
+    process.env.HQ_LAUNCH_REQUEST_ID,
+    process.env.AGENT_OS_WORKER_LRQ_ID,
+    process.env.LAUNCH_REQUEST_ID,
+  ].filter(Boolean);
+  const launchRequestId = launchRequestIds[0] || null;
+  const leaseLaunchRequestId = new Set(launchRequestIds).size === 1 ? launchRequestId : null;
   const rawAttempt = { ...attemptBase, outcome: values.outcome,
-    ...(process.env.HQ_LAUNCH_REQUEST_ID ? { launchRequestId: process.env.HQ_LAUNCH_REQUEST_ID } : {}) };
+    ...(launchRequestId ? { launchRequestId } : {}) };
   const attempt = values['closure-authority'] === 'ham-terminal-remediation'
     ? hammerPhaseAttempt(rawAttempt) : rawAttempt;
   const metadata = Object.fromEntries([
@@ -157,7 +173,7 @@ function runInitOrAppend(subcommand, argv) {
         : appendAmaAuditAttempt(args);
     if (values['root-dir']) releaseRetryableAmaCloserLease({
       rootDir: values['root-dir'], repo: args.repo, prNumber: args.prNumber,
-      headSha: args.headSha, launchRequestId: process.env.HQ_LAUNCH_REQUEST_ID,
+      headSha: args.headSha, launchRequestId: leaseLaunchRequestId,
       sourceHeadSha: values['lease-head'], attempt, now: args.now,
     });
     process.stdout.write(`${filePath}\n`);

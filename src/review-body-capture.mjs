@@ -1,4 +1,5 @@
 import { persistReviewFindingsSafe } from './review-finding-records.mjs';
+import { parseReviewFindings } from './kernel/review-findings.mjs';
 import { normalizeReviewerModel } from './adapters/subject/github-pr/routing.mjs';
 import { validateReviewerAttribution } from './reviewer-attribution.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
@@ -520,6 +521,7 @@ async function captureReviewerBodyAfterPost(rootDir, {
 } = {}) {
   reviewBody = filterGitHubBody(reviewBody, { repo, reviewerHeadSha, rootDir, env });
   const singleReviewPatch = {
+    ...(parseReviewFindings(reviewBody).verdict_inconsistent ? { verdict_inconsistent: true } : {}),
     ...(reviewerAttribution ? { reviewerAttribution: validateReviewerAttribution(reviewerAttribution) } : {}),
     ...(singleReview?.applied === true
       ? { singleReview: { applied: true, basis: singleReview.basis || null, stats: singleReview.stats || null } } : {}),

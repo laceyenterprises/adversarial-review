@@ -1496,6 +1496,16 @@ records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
 
+Review verdict consistency is enforced before closure: disagreement between
+Blocking issues and Verdict yields `verdict_inconsistent: true`, request-changes
+and an unknown blocking state. The reviewer consumes one durable reservation per
+PR head before reconciliation. Repeated inconsistency or unavailable recovery
+retains a blocking review and operator notice. Chunked and caller-post reviews
+share this budget. The recovery receipt moves from `reserved` to `reconciled`
+or `operator-required`; interrupted reservations stay consumed. Watcher lifecycle
+values and deployed smoke commands are unchanged. See
+[reviewer verdict recovery](docs/data-model/reviewer-verdict-recovery.md).
+
 BASEFETCH-01 preserves closer states and merge gates while isolating base
 capture and distinguishing invalid validation evidence from fetch failure.
 Existing smoke commands are unchanged. After the build manager confirms float

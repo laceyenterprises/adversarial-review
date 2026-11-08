@@ -39,3 +39,12 @@ test('blocking finding stays REQUEST_CHANGES', () => {
 test('missing finding sections fail closed as COMMENT', () => {
   assert.equal(exactHeadReviewEventForBody('## Verdict\nComment only'), 'COMMENT');
 });
+
+test('contradictory verdict prose cannot submit an approval', () => {
+  assert.equal(exactHeadReviewEventForBody(reviewBody({
+    verdict: 'Two blocking issues remain: lost writes and a broken recovery path.\n\nComment only',
+  })), 'REQUEST_CHANGES');
+  assert.equal(exactHeadReviewEventForBody(reviewBody({
+    verdict: 'No blocking issues remain.\n\nComment only',
+  })), 'APPROVE');
+});

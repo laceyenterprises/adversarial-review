@@ -252,7 +252,7 @@ function validateReviewArtifact(markdown) {
     throw new Error('review artifact missing recognized Verdict value');
   }
   // REVIEWVALID-01: a template echo fails as reviewer-output, never a verdict.
-  assertReviewerReply(payload);
+  assertReviewerReply(payload, { allowVerdictInconsistency: true });
   return sanitized;
 }
 

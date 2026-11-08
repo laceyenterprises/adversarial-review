@@ -22,11 +22,10 @@
 // the watcher never calls this module and the v1 path is byte-identical.
 
 import {
-  classifyStructuredBlockingIssues,
-  extractReviewVerdict,
-  normalizeReviewVerdict,
+  normalizeEffectiveReviewVerdict,
   sanitizeReviewPayloadBestEffort,
 } from './kernel/verdict.mjs';
+import { parseReviewFindings } from './kernel/review-findings.mjs';
 import { runReviewPipeline } from './review-pipeline-driver.mjs';
 
 // Best-effort so a stage whose review body is missing a canonical section does
@@ -34,8 +33,8 @@ import { runReviewPipeline } from './review-pipeline-driver.mjs';
 // which the kernel treats as indeterminate (the stage gate stays closed).
 function defaultParseVerdict(reviewBody) {
   const sanitized = sanitizeReviewPayloadBestEffort(reviewBody);
-  const kind = normalizeReviewVerdict(extractReviewVerdict(sanitized));
-  const blocking = classifyStructuredBlockingIssues(sanitized);
+  const kind = normalizeEffectiveReviewVerdict(sanitized);
+  const blocking = parseReviewFindings(sanitized).blocking;
   return { kind, blocking };
 }
 

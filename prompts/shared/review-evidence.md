@@ -10,6 +10,12 @@ the claim. A possible concern, preference, or unsupported assertion is insuffici
 If either location or behaviour evidence is missing, record it as non-blocking
 and explain what evidence is missing. Non-blocking findings cannot escalate the verdict.
 
+Every blocking issue named in Verdict prose must appear as a complete finding
+under Blocking issues. Reconcile the sections before returning the review:
+with an empty blocking list, do not describe remaining blocking defects in the
+verdict; with blocking findings, do not claim there are no blocking issues or
+end with Comment only or Approve.
+
 ## Runtime-cost findings
 
 A change that adds recurring runtime cost on a hot or per-worker path is a

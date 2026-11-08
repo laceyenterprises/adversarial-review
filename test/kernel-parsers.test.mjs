@@ -308,7 +308,7 @@ test('kernel verdict parser preserves verdict line when trailing clarifier is no
   assert.equal(normalizeReviewVerdict(extractReviewVerdict(review)), 'request-changes');
 });
 
-test('effective verdict reconciles empty blocking list request-changes to comment-only', () => {
+test('effective verdict blocks an empty blocking list with request-changes', () => {
   const messages = [];
   const review = [
     '## Summary',
@@ -333,9 +333,9 @@ test('effective verdict reconciles empty blocking list request-changes to commen
   assert.equal(normalizeEffectiveReviewVerdict(review, {
     log: { warn: (message) => messages.push(message) },
     context: 'test-context',
-  }), 'comment-only');
+  }), 'request-changes');
   assert.equal(messages.length, 1);
-  assert.match(messages[0], /Reconciled Request changes to Comment only/);
+  assert.match(messages[0], /verdict_inconsistent=true/);
   assert.match(messages[0], /test-context/);
 });
 

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { resolveDomainPipeline } from '../src/domain-pipeline.mjs';
-import { runGatedReviewPipeline, defaultStageDomainId } from '../src/watcher-review-pipeline.mjs';
+import { runGatedReviewPipeline, defaultStageDomainId, defaultParseVerdict } from '../src/watcher-review-pipeline.mjs';
 
 const REGISTRY = {
   roles: {
@@ -53,6 +53,35 @@ function fakeComms() {
     postPipelineRollup: async (rollup, key) => { rollups.push({ rollup, key }); return { deliveryExternalId: `rollup-${rollups.length}` }; },
   };
 }
+
+test('stage parser marks contradictory verdicts as unknown blocking metadata', () => {
+  for (const body of [
+    cleanBody('synthetic').replace('## Verdict\n', '## Verdict\nTwo blocking issues remain.\n\n'),
+    cleanBody('synthetic').replace('Comment only', 'Request changes'),
+  ]) {
+    assert.deepEqual(defaultParseVerdict(body), {
+      kind: 'request-changes',
+      blocking: { count: 0, state: 'unknown', malformed: 'verdict-inconsistent', findings: [] },
+    });
+  }
+  assert.deepEqual(defaultParseVerdict(cleanBody('consistent')), {
+    kind: 'comment-only',
+    blocking: { count: 0, state: 'known', findings: [] },
+  });
+});
+
+test('inconsistent stage verdict blocks the pipeline before subsequent stages', async () => {
+  const { spawnReviewer, calls } = fakeSpawnReviewer({
+    'code-pr': cleanBody('synthetic').replace('## Verdict\n', '## Verdict\nTwo blocking issues remain: lost writes and a broken command.\n\n'),
+    'code-pr-security': cleanBody('unused'),
+  });
+  const result = await runGatedReviewPipeline({
+    resolvedPipeline: resolved(), currentRevisionRef: 'synthetic-head', riskClass: 'medium',
+    spawnReviewer, spawnReviewerArgs: BASE_ARGS,
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(result.pipeline.disposition, 'blocking');
+});
 
 const BASE_ARGS = {
   repo: 'laceyenterprises/demo', prNumber: 7, reviewerModel: 'codex', botTokenEnv: 'GH_BOT', reviewerSessionUuid: 'sess-1',

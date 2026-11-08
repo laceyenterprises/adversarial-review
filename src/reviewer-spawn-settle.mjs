@@ -6,7 +6,8 @@ import { execFile as execQuotaFile } from 'node:child_process';
 import { promisify as promisifyQuota } from 'node:util';
 const executeQuota = promisifyQuota(execQuotaFile);
 import { groundBlockingFindingsAtHead, persistReviewGroundingMetadata } from './review-head-grounding.mjs';
-import { extractReviewVerdict, normalizeReviewVerdict } from './kernel/verdict.mjs';
+import { normalizeEffectiveReviewVerdict } from './kernel/verdict.mjs';
+import { reconcileReviewVerdict } from './reviewer-verdict-recovery.mjs';
 import { buildReviewerAttribution } from './reviewer-attribution.mjs';
 import { readCorporateCodexQuotaCooldown, recordCorporateCodexQuotaCooldown } from './codex-account-routing.mjs';
 import { readReviewerEvidenceInWorker } from './reviewer-token-ledger-lookup.mjs';
@@ -1030,7 +1031,7 @@ async function spawnReviewerOnceWithAccount({
       reviewerAttribution = buildReviewerAttribution({ reviewerModel, reviewerAccountReceipt,
         agyHolderLease: agyIdentityLease });
       onReviewerRuntimeStarted();
-      const runtimeResult = await activeReviewerRuntimeAdapter.spawnReviewer({
+      const runtimeRequest = {
         model: reviewerModel,
         prompt: '',
         subjectContext: {
@@ -1071,7 +1072,27 @@ async function spawnReviewerOnceWithAccount({
         forbiddenFallbacks: ['api-key', 'anthropic-api-key'],
         onReviewerPgid,
         onReviewerTimeoutPlan,
-      });
+      };
+      let runtimeResult = await activeReviewerRuntimeAdapter.spawnReviewer(runtimeRequest);
+      if (runtimeResult.ok && shouldPostAdapterReviewBody(runtimeResult) && runtimeResult.reviewBody) {
+        const recoveryDispatch = value => ({ ...value, rawReviewText: value.reviewBody, reviewText: value.reviewBody });
+        const reconciled = await reconcileReviewVerdict({
+          dispatch: recoveryDispatch(runtimeResult), rootDir, repo, prNumber, headSha: reviewerHeadSha,
+          run: async instruction => {
+            const sessionUuid = `${reviewerSessionUuid || reviewerSpawnToken}:verdict-reconcile`;
+            const retry = await activeReviewerRuntimeAdapter.spawnReviewer({
+              ...runtimeRequest, sessionUuid, prompt: `${runtimeRequest.prompt}${instruction}`,
+              subjectContext: { ...runtimeRequest.subjectContext, reviewerSessionUuid: sessionUuid },
+            });
+            if (!retry.ok || !shouldPostAdapterReviewBody(retry) || !retry.reviewBody) {
+              throw new Error(retry.error || retry.failureClass || 'reconciliation returned no review artifact');
+            }
+            return recoveryDispatch(retry);
+          },
+        });
+        runtimeResult = { ...reconciled, reviewBody: reconciled.reviewText,
+          verdict: normalizeEffectiveReviewVerdict(reconciled.reviewText) };
+      }
       if (reviewerAccountReceipt && !runtimeResult.ok && runtimeResult.failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS) {
         try { recordReviewerAccountQuotaFailure(rootDir, reviewerAccountReceipt, { env: quotaCheckEnv,
           resetAt: resolveQuotaResetIso([runtimeResult.error, runtimeResult.stderr, runtimeResult.stderrTail].filter(Boolean).join('\n')) }); }
@@ -1148,7 +1169,7 @@ async function spawnReviewerOnceWithAccount({
             repo, headSha: reviewerHeadSha, requireEvidence: true, log: console,
           });
           result = { ...result, reviewBody: grounded.reviewText,
-            verdict: normalizeReviewVerdict(extractReviewVerdict(grounded.reviewText)) };
+            verdict: normalizeEffectiveReviewVerdict(grounded.reviewText) };
           persistReviewGroundingMetadata({ rootDir, repo, prNumber, reviewDbAttemptNumber: captureAttemptNumber,
             reviewerClass: reviewerModel, passKind, headSha: reviewerHeadSha, headGrounding: grounded.grounding });
           await postGitHubReviewWithCaptureImpl({

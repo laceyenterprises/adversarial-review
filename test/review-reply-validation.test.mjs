@@ -87,6 +87,12 @@ const EMPTY_FINDINGS_REPLY = VALID_REPLY.replace(
   '## Blocking issues\n- None.\n\n',
 );
 
+test('contradictory chunk verdict can reach bounded reconciliation while other reply rules remain enforced', () => {
+  assert.equal(validateReviewerReply(EMPTY_FINDINGS_REPLY, { allowVerdictInconsistency: true }).ok, true);
+  assert.equal(validateReviewerReply(TEMPLATE_ECHO_REPLY, { allowVerdictInconsistency: true }).ok, false);
+  assert.equal(validateReviewerReply(EMPTY_FINDINGS_REPLY).ok, false);
+});
+
 test('REVIEWVERDICTEMPTY-01: request changes requires a blocking finding for every accepted spelling', () => {
   for (const verdict of ['Request changes', 'REQUEST CHANGES', '**Request changes**',
     '- Request changes', 'request_changes', 'Request   changes',
@@ -311,7 +317,6 @@ test('REVIEWVALID-01: a rejection carries the reviewer-output tag and evidence f
 
 for (const [name, invalidReply, reason] of [
   ['REVIEWVALID-01: template-echo', TEMPLATE_ECHO_REPLY, 'template placeholders'],
-  ['REVIEWVERDICTEMPTY-01: empty request-changes', EMPTY_FINDINGS_REPLY, 'request-changes-without-findings'],
 ]) {
   test(`${name} chunk is rejected, retried as reviewer-output, and never posted`, async () => {
     const diff = 'diff --git a/sample.mjs b/sample.mjs\n--- a/sample.mjs\n+++ b/sample.mjs\n@@ -0,0 +1,9000 @@\n'

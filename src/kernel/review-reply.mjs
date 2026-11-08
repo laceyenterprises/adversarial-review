@@ -1,4 +1,5 @@
 import { maskReviewFences } from './review-markdown.mjs';
+import { INCONSISTENT_VERDICT_MARKER } from './verdict-consistency.mjs';
 // REVIEWVALID-01: the posting contract for a reviewer reply.
 //
 // A posted review is a claim about the code. A reply that is the
@@ -112,10 +113,10 @@ function isTemplatePlaceholderValue(value, placeholders) {
  * Check a raw reviewer reply against the posting contract.
  *
  * @param {string} reviewText
- * @param {{ placeholders?: readonly string[] }} [options]
+ * @param {{ placeholders?: readonly string[], allowVerdictInconsistency?: boolean }} [options]
  * @returns {{ ok: boolean, reasons: string[] }}
  */
-function validateReviewerReply(reviewText, { placeholders = reviewTemplatePlaceholders() } = {}) {
+function validateReviewerReply(reviewText, { placeholders = reviewTemplatePlaceholders(), allowVerdictInconsistency = false } = {}) {
   const text = promoteCanonicalReviewSectionHeadings(normalizeWhitespace(reviewText));
   if (!text) return { ok: false, reasons: ['empty reply'] };
   const lines = text.split('\n');
@@ -181,7 +182,9 @@ function validateReviewerReply(reviewText, { placeholders = reviewTemplatePlaceh
   // Use the same effective verdict as downstream consumers, including the
   // stricter tiebreak when blocking and permissive verdict lines coexist.
   if (normalizeVerdictSectionLine(extractReviewVerdict(text)) === 'request-changes'
-    && blockingFindings.length === 0) {
+    && blockingFindings.length === 0
+    && !allowVerdictInconsistency
+    && !unfenced.includes(INCONSISTENT_VERDICT_MARKER)) {
     reasons.push('request-changes-without-findings');
   }
   return { ok: reasons.length === 0, reasons };
@@ -191,8 +194,8 @@ function validateReviewerReply(reviewText, { placeholders = reviewTemplatePlaceh
  * Throw `ReviewerReplyRejectedError` when the raw reply breaks the posting
  * contract. `onRejected` receives the evidence first, for forensic capture.
  */
-function assertReviewerReply(reviewText, { onRejected = null, placeholders } = {}) {
-  const { ok, reasons } = validateReviewerReply(reviewText, placeholders ? { placeholders } : undefined);
+function assertReviewerReply(reviewText, { onRejected = null, placeholders, allowVerdictInconsistency = false } = {}) {
+  const { ok, reasons } = validateReviewerReply(reviewText, { placeholders, allowVerdictInconsistency });
   if (ok) return;
   const error = new ReviewerReplyRejectedError(reasons);
   const warn = (persistError) => console.error(

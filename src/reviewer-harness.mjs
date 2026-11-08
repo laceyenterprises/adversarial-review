@@ -66,6 +66,8 @@ import {
   sanitizeCodexReviewPayload,
 } from './kernel/verdict.mjs';
 import { assertReviewerReply, validateReviewerReply } from './kernel/review-reply.mjs';
+import { parseReviewFindings } from './kernel/review-findings.mjs';
+import { INCONSISTENT_VERDICT_MARKER, verdictSection } from './kernel/verdict-consistency.mjs';
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 import {
   mintClaudeCodeRemediationBrokerToken,
@@ -3551,6 +3553,10 @@ function mergeChunkedAgyReviews(chunkReviews, { truncated = false, promptBytes =
     '## Summary',
     `Reviewed an oversized diff through ${chunkReviews.length} bounded reviewer chunks because the full prompt exceeded its delivery or context budget${promptBytes ? ` (${promptBytes} bytes > ${maxBytes} bytes)` : ''}.`,
   ];
+  const inconsistent = texts.filter(text => parseReviewFindings(text).verdict_inconsistent);
+  if (inconsistent.length) parts.push(INCONSISTENT_VERDICT_MARKER,
+    'Chunk verdicts disagree with their blocking findings; reconciliation is required.',
+    ...inconsistent.map(text => `Original chunk verdict:\n${verdictSection(text).trim()}`));
   parts.push('', '## Blocking issues');
   const blocking = texts.flatMap((text) => extractMarkdownIssueList(text, 'Blocking issues'));
   blocking.push(...elisions.filter((entry) => entry.kind === '+').map((entry) =>
@@ -3561,7 +3567,7 @@ function mergeChunkedAgyReviews(chunkReviews, { truncated = false, promptBytes =
     + '  - **Why it matters:** Added content has not been fully reviewed.\n'
     + '  - **Recommended fix:** Provide a reviewable diff or obtain an explicit operator risk decision before merging.'));
   parts.push(blocking.length > 0 ? blocking.join('\n') : '- None.');
-  const verdict = blocking.length > 0 ? 'Request changes' : 'Comment only';
+  const verdict = blocking.length > 0 || inconsistent.length > 0 ? 'Request changes' : 'Comment only';
   parts.push('', '## Non-blocking issues');
   const nonBlocking = texts.flatMap((text) => extractMarkdownIssueList(text, 'Non-blocking issues'));
   nonBlocking.push(...elisions.filter((entry) => entry.kind !== '+').map((entry) =>
@@ -3807,8 +3813,10 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
       }
       // REVIEWVALID-01: one template-echo chunk must not reach the merged review.
       assertReviewerReply(result.rawReviewText ?? result.reviewText, {
+        allowVerdictInconsistency: true,
         onRejected: (rejected) => onRejectedCodexOutput?.({ ...rejected, chunkIndex: index + 1 }) });
       assertReviewerReply(result.reviewText, {
+        allowVerdictInconsistency: true,
         onRejected: (rejected) => onRejectedCodexOutput?.({ ...rejected, chunkIndex: index + 1 }) });
       chunkUsages.push(normalizeTokenUsage(result.tokenUsage));
       execution ||= result.execution || null;

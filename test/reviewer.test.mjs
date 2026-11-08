@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import './helpers/review-cli-resolver-fixture.mjs';
 import { serviceFixtureExec, writeDummyCodexAuth } from './helpers/codex-service-fixture.mjs';
 import { serviceCodexConfigArgs } from '../src/codex-service-home.mjs';
@@ -4618,7 +4619,7 @@ test('mergeChunkedAgyReviews sanitizes each child before extracting sections', (
   assert.match(merged, /## Verdict\nRequest changes/);
 });
 
-test('mergeChunkedAgyReviews derives verdict from merged blocking issues', () => {
+test('mergeChunkedAgyReviews preserves a contradictory blocking verdict for reconciliation', () => {
   const merged = mergeChunkedAgyReviews([
     {
       reviewText: [
@@ -4643,7 +4644,8 @@ test('mergeChunkedAgyReviews derives verdict from merged blocking issues', () =>
   assert.match(merged, /## Blocking issues\n- None\./);
   assert.match(merged, /## Non-blocking issues\n- Worth noting\./);
   assert.match(merged, /## Suggested fixes\n- Optional cleanup\./);
-  assert.match(merged, /## Verdict\nComment only/);
+  assert.match(merged, /## Verdict\nRequest changes/);
+  assert.match(merged, /verdict_inconsistent: true/);
 });
 
 test('mergeChunkedAgyReviews preserves non-bulleted issue section text as a synthetic bullet', () => {

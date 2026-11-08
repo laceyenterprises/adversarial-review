@@ -260,14 +260,14 @@ export function createReviewSizeRecovery({
   let prepared = original;
   let sizing = initialSizing;
   let summarised;
-  const contextFor = candidate => extraContext + reviewManifestText(candidate.manifest);
+  const contextFor = (candidate, addendum) => extraContext + addendum + reviewManifestText(candidate.manifest);
   return {
     get prepared() { return prepared; },
     get sizing() { return sizing; },
-    run: () => retryLargeReview({
+    run: (addendum = '') => retryLargeReview({
       run: (candidate = original) => {
         prepared = candidate;
-        const context = contextFor(candidate);
+        const context = contextFor(candidate, addendum);
         sizing = resolveRoute(candidate.diff, context);
         if (sizing.oversized) {
           throw new ReviewerPromptTooLargeError(`prompt size=${sizing.promptBytes} maxBytes=${sizing.maxBytes}`);
@@ -285,7 +285,7 @@ export function createReviewSizeRecovery({
         prepared = summarised;
         return prepared;
       },
-      chunk: candidate => chunk(candidate.diff, contextFor(candidate), {
+      chunk: candidate => chunk(candidate.diff, contextFor(candidate, addendum), {
         ...options(), promptBytes: sizing.promptBytes, maxBytes: sizing.maxBytes,
       }),
     }),

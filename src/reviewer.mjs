@@ -98,6 +98,7 @@ import {
   resolveReviewerWorkspaceStateDir,
 } from './reviewer-workspace.mjs';
 import { normalizeEffectiveReviewVerdict, sanitizeCodexReviewPayload } from './kernel/verdict.mjs';
+import { reconcileReviewVerdict } from './reviewer-verdict-recovery.mjs';
 import { assertReviewerReply } from './kernel/review-reply.mjs';
 import { suppressFinalRoundFollowUp } from './comment-only-final-round.mjs';
 import { createLinearTriageAdapter } from './adapters/operator/linear-triage/index.mjs';
@@ -2116,16 +2117,17 @@ async function main() {
       effectiveModel = 'gemini';
       effectiveBotTokenEnv = 'GH_GEMINI_REVIEWER_TOKEN';
       configureReviewerWorkspaceAudit({
-        repo,
-        prNumber,
-        reviewerModel: effectiveModel,
-        headSha: reviewerWorkspaceHeadSha,
-        checkoutDir: reviewerCheckoutDir,
-        stateDir: reviewerWorkspaceStateDir,
+        repo, prNumber, reviewerModel: effectiveModel, headSha: reviewerWorkspaceHeadSha,
+        checkoutDir: reviewerCheckoutDir, stateDir: reviewerWorkspaceStateDir,
       });
       geminiDeadline.arm();
       dispatch = await reviewWithSizeRecovery();
     }
+    dispatch = await reconcileReviewVerdict({
+      dispatch, run: reviewWithSizeRecovery, rootDir: ROOT, repo, prNumber,
+      headSha: reviewerHeadSha,
+      onRejected: rejected => persistRejectedCodexOutput({ repo, prNumber, ...rejected }),
+    });
     persistReviewElisions({ rootDir: ROOT, repo, prNumber,
       headSha: reviewerHeadSha || reviewerWorkspaceHeadSha, elisions: dispatch.elisions });
     rawReviewText = dispatch.rawReviewText;

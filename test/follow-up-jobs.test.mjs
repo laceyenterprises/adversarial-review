@@ -340,10 +340,10 @@ test('classifyFollowUpCriticality treats a contradictory request-changes verdict
   ].join('\n'));
 
   assert.equal(result.critical, true);
-  assert.equal(result.blockingFindingState, 'known');
+  assert.equal(result.blockingFindingState, 'unknown');
   assert.equal(result.blockingFindingCount, 0);
   assert.equal(result.statedVerdict, 'request-changes');
-  assert.equal(result.verdict, 'comment-only');
+  assert.equal(result.verdict, 'request-changes');
   assert.equal(result.criticalityReason, 'request-changes-verdict');
 });
 

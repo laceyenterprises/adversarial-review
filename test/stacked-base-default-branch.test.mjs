@@ -193,6 +193,7 @@ test('watcher candidates reuse the learned default on subsequent evaluations', a
 test('closer dispatch passes known base metadata and logger to the guard', async t => {
   const logger = { warn() {} };
   const result = await maybeDispatchAmaCloser({ cfg: { enabled: true }, prMetadata: { prNumber },
+    reviewState: { headSha: 'a'.repeat(40) },
     dispatchContext: { rootDir: workspace(t), repo, baseBranch: defaultBranch, defaultBranch }, logger,
     guardStackedBaseImpl: async options => {
       assert.equal(options.baseBranch, defaultBranch);

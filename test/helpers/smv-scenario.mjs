@@ -813,8 +813,44 @@ if (scenario === 'clean') {
     readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }), log: quiet,
   });
   assert.equal(active.some(row => row.launchRequestId === 'synthetic-ended'), false);
-  assert.equal(wake().outcome, 'requested'); assert.equal(wake().outcome, 'duplicate');
+  const retryWake = wake();
+  assert.equal(retryWake.outcome, 'requested'); assert.equal(wake().outcome, 'duplicate');
   assert.equal(wakes, 2);
+  const retryWakeAudit = JSON.parse(readFileSync(retryWake.auditPath));
+  const expiredWakeOptions = { ...retrySubject, shared: wakeShared,
+    nowMs: Date.parse(retryWakeAudit.wakeDeadline.at) + 1,
+    requestWatcherWakeImpl: () => { wakes++; return { requested: true }; }, log: quiet };
+  const renewedWake = requestEligibleHammerWake(expiredWakeOptions);
+  assert.equal(renewedWake.outcome, 'requested');
+  assert.equal(requestEligibleHammerWake(expiredWakeOptions).outcome, 'duplicate');
+  assert.equal(wakes, 3);
+  assert.equal(JSON.parse(readFileSync(renewedWake.auditPath)).supersedes.reason, 'expired-without-acting-closer');
+  const overdueNow = Date.parse(wakeShared.decision.deadline.at) + 60_000;
+  const overdueOptions = { ...expiredWakeOptions, prNumber: prNumber + 11, nowMs: overdueNow };
+  const overdueWake = requestEligibleHammerWake(overdueOptions);
+  assert.equal(overdueWake.outcome, 'requested');
+  assert.equal(requestEligibleHammerWake(overdueOptions).outcome, 'duplicate');
+  assert.equal(Date.parse(JSON.parse(readFileSync(overdueWake.auditPath)).wakeDeadline.at),
+    overdueNow + wakeShared.decision.deadline.budgetMs);
+  let missingHeadAlerts = 0;
+  for (let pass = 0; pass < 2; pass++) {
+    const refused = await maybeDispatchAmaCloser({ cfg: { enabled: true },
+      reviewState: { headSha: null, reviewCycleExhausted: true },
+      prMetadata: { prNumber: prNumber + 100, headSha: null, isOpen: true },
+      dispatchContext: { rootDir, repo, reviewedSha: null },
+      deliverAlertImpl: async () => { missingHeadAlerts++; }, logger: quiet });
+    assert.equal(refused.namedReason, 'ama-head-unavailable');
+    assert.equal(refused.dispatched, false);
+  }
+  assert.equal(missingHeadAlerts, 1);
+  const missingReview = await maybeDispatchAmaCloser({ cfg: { enabled: true },
+    reviewState: { headSha: null, reviewCycleExhausted: true },
+    prMetadata: { prNumber: prNumber + 101, headSha, isOpen: true },
+    dispatchContext: { rootDir, repo, reviewedSha: null },
+    readTemplateImpl: () => { throw new Error('unreviewed head cannot render a hammer prompt'); },
+    deliverAlertImpl: async () => {}, logger: quiet });
+  assert.equal(missingReview.namedReason, 'ama-reviewed-head-unavailable');
+  assert.equal(missingReview.dispatched, false);
   const shadow = await shadowNextAction({ shared: wakeShared, env: {}, sink() {} });
   assert.equal(shadow.decision, wakeShared.decision);
   const { observeClosureResult, reviseClosureNextAction } = await import('../../src/ama/closure-next-action.mjs');
@@ -1029,7 +1065,8 @@ if (scenario === 'clean') {
   evidence = { hammers, cleanBranchHoldSettled: true, unchangedHeadHasNoPublicationDebt: true, nullHeadConfirmed: true, unknownBranchRetryRecovered: true, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, scratchCursorResumed: true, scratchLedgerClockIndependent: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, hammerRangeValidated: true, noHammerReviewRequest: true, claimPreserved: true, reviewedHeadRecorded: true,
     headlessPostRequeuedOnce: true, terminalRetryable: true, terminalCapacityFreed: true, terminalNoMergeReclaimedSamePass: true,
     autoMergeHeld: true, autoMergeBoundReleased: true, unreadableCapacityReserved: true,
-    wakeRearmed: true, remediationCloseoutOwned: true, terminalRecoveryHandedToHammer: true,
+    wakeRearmed: true, expiredWakeRearmed: true, missingHeadAlertDeduplicated: true,
+    remediationCloseoutOwned: true, terminalRecoveryHandedToHammer: true,
     unreadableRecoveryFenced: true, merged: true, remoteHeadMatches: true };
 } else if (scenario === 'ci-blocked') {
   const ceilingDb = openReviewStateDb(rootDir); ensureReviewStateSchema(ceilingDb);

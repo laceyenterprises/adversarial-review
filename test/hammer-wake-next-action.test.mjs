@@ -116,6 +116,107 @@ test('concurrent duplicate sees the exclusive reservation before transport compl
   assert.equal(f.calls.length, 0);
 });
 
+test('expired unacted wake gets an audited replacement and a fresh admission window', t => {
+  const f = fixture(t), shared = pair();
+  const first = f.wake(shared);
+  const deadlineMs = Date.parse(first.nextAction.deadline.at);
+  const second = f.wake(shared, { nowMs: deadlineMs,
+    observedAt: new Date(deadlineMs).toISOString() });
+  assert.equal(second.outcome, 'requested');
+  assert.notEqual(second.wakeAttemptKey, first.wakeAttemptKey);
+  const audit = JSON.parse(readFileSync(second.auditPath, 'utf8'));
+  assert.equal(audit.supersedes.wakeAttemptKey, first.wakeAttemptKey);
+  assert.equal(audit.supersedes.reason, 'expired-without-acting-closer');
+  assert.ok(Date.parse(audit.wakeDeadline.at) > deadlineMs);
+  assert.equal(JSON.parse(readFileSync(first.auditPath, 'utf8')).outcome, 'requested');
+  assert.equal(f.wake(shared, { nowMs: deadlineMs + 1 }).outcome, 'duplicate');
+  const third = f.wake(shared, { nowMs: Date.parse(audit.wakeDeadline.at) });
+  assert.equal(third.outcome, 'requested');
+  assert.notEqual(third.wakeAttemptKey, second.wakeAttemptKey);
+  assert.equal(f.calls.length, 3);
+});
+
+test('expiry renewal stops after three successors for the same head and attempt', t => {
+  const f = fixture(t), shared = pair();
+  let record = f.wake(shared);
+  for (let renewal = 0; renewal < 3; renewal += 1) {
+    const prior = JSON.parse(readFileSync(record.auditPath, 'utf8'));
+    record = f.wake(shared, { nowMs: Date.parse(prior.wakeDeadline.at) });
+    assert.equal(record.outcome, 'requested');
+  }
+  const prior = JSON.parse(readFileSync(record.auditPath, 'utf8'));
+  const nowMs = Date.parse(prior.wakeDeadline.at);
+  for (const delay of [0, 1000]) {
+    const exhausted = f.wake(shared, { nowMs: nowMs + delay });
+    assert.equal(exhausted.reason, 'wake-expiry-cap-reached');
+    assert.equal(exhausted.auditPath, record.auditPath);
+  }
+  assert.equal(f.calls.length, 4);
+});
+
+test('first wake from an overdue decision dedupes for a fresh admission budget', t => {
+  const f = fixture(t), shared = pair();
+  const nowMs = Date.parse(shared.decision.deadline.at) + 60_000;
+  const first = f.wake(shared, { nowMs });
+  const audit = JSON.parse(readFileSync(first.auditPath, 'utf8'));
+  assert.equal(audit.wakeDeadline.anchoredAt, new Date(nowMs).toISOString());
+  assert.equal(Date.parse(audit.wakeDeadline.at), nowMs + shared.decision.deadline.budgetMs);
+  assert.deepEqual(audit.nextAction.deadline, shared.decision.deadline);
+  assert.equal(audit.supersedes, undefined);
+  assert.equal(f.wake(shared, { nowMs: nowMs + 1 }).outcome, 'duplicate');
+  assert.equal(f.wake(shared, { nowMs: Date.parse(audit.wakeDeadline.at) }).outcome, 'requested');
+  assert.equal(f.calls.length, 2);
+});
+
+test('unexpired wake still dedupes up to its admission deadline', t => {
+  const f = fixture(t), shared = pair();
+  const first = f.wake(shared);
+  assert.equal(f.wake(shared, { nowMs: Date.parse(first.nextAction.deadline.at) - 1 }).outcome, 'duplicate');
+  assert.equal(f.calls.length, 1);
+});
+
+test('concurrent expired wake callers elect one replacement reservation', t => {
+  const f = fixture(t), shared = pair();
+  const first = f.wake(shared), nowMs = Date.parse(first.nextAction.deadline.at);
+  let nested;
+  const replacement = f.wake(shared, { nowMs, requestWatcherWakeImpl: () => {
+    nested = f.wake(shared, { nowMs });
+    return { requested: true };
+  } });
+  assert.equal(replacement.outcome, 'requested');
+  assert.equal(nested.outcome, 'duplicate');
+  assert.equal(nested.wakeAttemptKey, replacement.wakeAttemptKey);
+});
+
+for (const [name, launches] of [
+  ['terminal closer', { closer: terminal }],
+  ['live closer', { closer: { ...terminal, row: { status: 'running' } } }],
+  ['parked closer', { closer: { ...terminal, row: { status: 'pending' } } }],
+  ['live descendant', { closer: { ...terminal, retryChain: [{ id: 'child', status: 'running' }] } }],
+  ['unreadable descendants', { closer: { ...terminal, retryChainUnreadable: true } }],
+  ['unreadable descendants with a root probe', { closer: { ...terminal, retryChainUnreadable: true,
+    probe: { ok: true, row: { status: 'succeeded' } } } }],
+  ['quota resume pending', { closer: { ...terminal, row: { status: 'failed',
+    failure_class: 'worker_killed', worker_killed_cause: 'provider_quota_exhausted' } } }],
+]) test(`expired wake respects ${name} evidence`, t => {
+  const f = fixture(t), initial = pair({ launches });
+  // Preserve dispatch intent to exercise the transport's independent ownership
+  // check against an old decision and newly enriched ledger evidence.
+  const shared = { ...initial, decision: pair().decision };
+  const first = f.wake(shared);
+  const result = f.wake(shared, { nowMs: Date.parse(first.nextAction.deadline.at) });
+  assert.equal(result.outcome, name === 'terminal closer' ? 'requested' : 'duplicate');
+});
+
+for (const source of ['launches', 'leases']) test(`expired wake retains dedupe with unreadable ${source}`, t => {
+  const f = fixture(t), initial = pair();
+  const shared = { ...initial, snapshot: { ...initial.snapshot, observations: {
+    ...initial.snapshot.observations, [source]: { state: 'unknown', value: null },
+  } } };
+  const first = f.wake(shared);
+  assert.equal(f.wake(shared, { nowMs: Date.parse(first.nextAction.deadline.at) }).outcome, 'duplicate');
+});
+
 test('completed fleet retry descendants advance identity without depending on row order or timestamps', t => {
   const f = fixture(t);
   const run = retryChain => f.wake(pair({ launches: { closer: { ...terminal, retryChain } } }));

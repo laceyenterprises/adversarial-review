@@ -1246,6 +1246,18 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+Wake transport preserves the existing reserved/requested/failed outcomes.
+Initial delivery starts a fresh admission budget at reservation, even when the
+original decision deadline (retained in the audit) is already overdue.
+An expired wake with complete absent/terminal closer evidence reserves a
+deterministic successor attempt with a fresh admission window and a predecessor
+audit link. Unexpired wakes and live/unreadable ownership remain deduplicated.
+AMA refuses new dispatch without reviewed provenance, after reconciling existing
+closer custody. `ama-reviewed-head-unavailable` (known current head) and
+`ama-head-unavailable` (neither head known) retain operator ownership through the
+existing deduplicated closure-wait alert. Wake targets do not replace live-head
+metadata or review evidence. These refusals do not add lifecycle states.
+
 CLOSERGATES-01 final remediation keeps repairable conflicts out of terminal
 AMA state: both final and non-final observations count the current head once;
 only a final report after three distinct heads records

@@ -42,6 +42,8 @@ Directory: `data/hammer-wakes/`
 | `headSha` | string | Live PR head SHA admitted for the wake. |
 | `eligibilityReason` | string | `shared-next-action` for the adopted caller; retained legacy reasons continue to identify older records. |
 | `wakeAttemptKey` | optional string | Shared routing uses `initial`, or the completed launch receipt ID for a retryable no-merge decision (numeric decision attempt when no receipt ID is available); completed retry descendant IDs add a stable set digest because fleet retries reuse ancestor receipts. Independent of reason/deadline changes for ordinary retries. RECOVERYDEADLINE-01 recovery dispatch uses `recovery:<row>:<reason>:<anchor>:<retry-identity-or-initial>` (anchor is `deadline.anchoredAt`, falling back to `deadline.at`, then the explicit `unanchored` sentinel) so an earlier initial wake cannot swallow expiry; repeated clocks preserve this key. |
+| `supersedes` | optional object | Expiry replacement provenance: predecessor `wakeAttemptKey`, original `deadlineAt`, and `reason: expired-without-acting-closer`. The predecessor remains intact. |
+| `wakeDeadline` | optional object | Delivery admission window (`at`, `anchoredAt`, `budgetMs`, `class`). Initial delivery uses the decision's finite positive budget (or its `at - anchoredAt` duration), starting when reserved, even if the decision is overdue. Successors reuse the predecessor's budget. The original decision remains in `nextAction`. |
 | `nextAction` | optional object | Shared action, actor, original reason, deadline, head, decision key, evidence references, queue intent/deferral, pass ID and generation. No raw evidence. |
 | `observedAt` | string | ISO-8601 time when the eligible snapshot was observed. |
 | `outcome` | string | `reserved`, `requested`, or `failed`. Returned events may also report `skipped` or `duplicate` without replacing a requested audit file. |
@@ -72,6 +74,18 @@ Directory: `data/hammer-wakes/`
 - Reservation creation uses atomic exclusive create. Readers should not observe
   partially written JSON at the final reservation path.
 - A current `requested` record suppresses duplicates for the same attempt.
+  At or after its recorded deadline, complete lease and launch evidence proving
+  no acting closer permits a new attempt. Absent launches must have no unresolved
+  lease receipt; terminal launches must have no live, parked, quota-resuming or
+  unreadable retry descendants. Missing or unreadable ownership never proves
+  absence. The successor key appends `:expiry:<sha256>` to the original attempt
+  key, hashing the predecessor key and deadline. Callers follow this deterministic
+  chain and reserve successors with exclusive create; repeated observations
+  dedupe the current unexpired successor. Each successor carries `supersedes`
+  and a fresh `wakeDeadline`. Missing/invalid deadlines cannot rearm by expiry.
+  A head and wake attempt allow three successors. Further expiry returns
+  `wake-expiry-cap-reached` and pages once through closure-wait custody. A
+  distinct attempt still has its own admission window.
   A reconciled retryable no-merge decision gets a new attempt key from the
   completed LRQ and completed retry descendant IDs, even on the same head
   and after terminal lease removal. Descendant IDs accept `launch_request_id`,

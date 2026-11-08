@@ -43,6 +43,7 @@ function fixture(t, { base = 'feature/parent', merged = true, fork = false, defa
 test('merged parent branch holds closer dispatch, persists reason and comments once across concurrent walks', async t => {
   const f = fixture(t);
   const call = () => maybeDispatchAmaCloser({ cfg: { enabled: true },
+    reviewState: { headSha: 'a'.repeat(40) },
     prMetadata: { prNumber: 41 }, dispatchContext: { ...f, baseBranch: 'feature/parent' },
     execFileImpl: f.execFileImpl });
   const held = await Promise.all([call(), call()]);

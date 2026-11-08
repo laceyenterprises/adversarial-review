@@ -293,3 +293,18 @@ test('manifest canonical JSON escapes DEL exactly like Python ensure_ascii', () 
   assert.throws(() => validateFindingManifest(db, { version: 1,
     findings: Array(10001).fill(row), sha256: 'a'.repeat(64) }), /invalid finding manifest/);
 });
+
+
+test('backfill preserves historical source keys when selection provenance is added', t => {
+  const { db, rows } = fixture(t);
+  db.prepare("UPDATE finding_backlog SET outcome='dropped',reason='false-positive: misread-code: Validation exists' WHERE finding_id=?").run(rows[1].finding_id);
+  const historical = db.prepare('SELECT * FROM finding_backlog WHERE finding_id=?').get(rows[1].finding_id);
+  delete historical.manifest_sha256;
+  const sourceKey = `backlog:${historical.finding_id}:${createHash('sha256').update(JSON.stringify(historical)).digest('hex')}`;
+  recordFindingGrade(db, { sourceKey, findingId: historical.finding_id, taxonomyCode: 'fp.misread-code',
+    graderKind: 'batch-remediator', gradedAt: '2026-01-02T00:00:00Z', evidence: { source: 'backlog', record: historical } });
+  assert.equal(backfillFindingGrades(db).inserted, 0);
+  db.prepare('UPDATE finding_backlog SET manifest_sha256=? WHERE finding_id=?').run('b'.repeat(64), historical.finding_id);
+  assert.equal(backfillFindingGrades(db).inserted, 0);
+  assert.equal(db.prepare('SELECT count(*) n FROM review_finding_grades').get().n, 1);
+});

@@ -10,7 +10,9 @@ withdrawal admission and merge predicates do not read them.
 Each finding can have multiple grades. `grade_id` is the export cursor;
 `source_key` uniquely identifies an immutable observation. Replaying a source
 key does not replace its grade. Backfill keys include the source record hash,
-so changed evidence adds a grade and preserves earlier observations.
+so changed evidence adds a grade and preserves earlier observations. Backlog
+source hashes exclude additive selection provenance (`manifest_sha256`), which
+does not represent another worker decision and must not re-key historical rows.
 
 Fields include `finding_id`, nullable `graded_head_sha`, `grader_kind`, nullable
 `grader_harness`, `grader_model`, `grader_effort`, `prompt_digest`, `label`,

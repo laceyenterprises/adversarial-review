@@ -76,6 +76,9 @@ export function backfillFindingGrades(db) {
       AND NOT EXISTS (SELECT 1 FROM review_finding_grades g
         WHERE g.source_key='batch:' || b.batch_id || ':' || b.finding_id)
       ORDER BY finding_id`).all()) {
+      // Selection provenance is not a new worker observation. Keep historical
+      // backlog source hashes stable across the additive scope migration.
+      delete row.manifest_sha256;
       const code = backlogGradeCode(row.outcome, row.reason);
       add('backlog', row, code, code?.startsWith('life.') ? 'lifecycle' : 'batch-remediator', null, false, row.resolved_at);
     }

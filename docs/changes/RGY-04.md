@@ -41,9 +41,13 @@ Tests run individually with netguard and a 600-second process-group bound:
 The full suite was not run under the ticket's targeted-test constraint.
 No live database, services, model providers or production findings were used.
 
-Remediation validation: the grade-driven batch tests pass all 12 cases, including
+Remediation validation: the grade-driven batch tests pass all 13 cases, including
 settle-then-backfill deduplication, released selection recovery/retry, failed
 selected dispatch isolation, superseded enrollment, and Python DEL hashing.
 The adjacent batch, regression, requeue and grade suites pass (125 tests).
 Catalog validation passes (91 entries), lint has zero errors, contract typecheck
 and the offline byte-equivalence demo pass. No full local suite was run.
+
+Related hardening keeps historical backlog source hashes independent of the new
+selection-provenance column; a seeded pre-migration source key remains unchanged
+before and after selection tagging, preventing duplicate historical grades.

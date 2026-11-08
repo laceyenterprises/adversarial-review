@@ -23,6 +23,20 @@ export function isSafetyRecoveryHold(result) {
     || (result?.needsOperator === true && !result?.primaryChangeRepair);
 }
 
+// A recovery decision alone cannot authorize code edits. Require the gate's
+// explicit repair contract, bound to this exact head.
+export function repairableHammerStop(result, headSha) {
+  const selected = result?.nextAction;
+  if (selected?.head !== headSha || selected.row !== 'R05-structural'
+    || selected.actor !== 'closure-recovery' || selected.reason !== 'safety-refusal'
+    || selected.queue?.deferredBy) return null;
+  const controls = readClosureNextAction(result)?.snapshot?.observations?.controls?.value;
+  const stop = result?.hammerStop?.headSha === headSha ? result.hammerStop : controls?.safetyRefusal;
+  const refusal = stop?.headSha === headSha ? stop.refusal : null;
+  return stop?.deterministic === true && refusal?.repairable === true
+    && /^[a-f0-9]{64}$/.test(refusal.key || '') && String(refusal.next || '').trim() ? refusal : null;
+}
+
 async function requestRereview(options) {
   const { requestReviewRereview } = await import('../review-state.mjs');
   return requestReviewRereview(options);
@@ -90,6 +104,9 @@ async function recoverAmaAutomationLocked({
   async function exhausted(refusalKey = null, detail = null) {
     const event = refusalKey ? { event: 'ama.automated_recovery.exhausted', severity: 'SEV1',
       reason: `safety-refusal:${refusalKey}`, refusalKey, detail, repo, pr: prNumber, head: headSha,
+      refusal: result?.hammerStop?.refusal
+        || readClosureNextAction(result)?.snapshot?.observations?.controls?.value?.safetyRefusal?.refusal || null,
+      repair: state.repairs?.[refusalKey] || null,
       attempts: state.attempts, nextAction: selected } : state.event || { event: 'ama.automated_recovery.exhausted', severity: 'SEV1',
       reason, reasons, repo, pr: prNumber, head: headSha, attempts: state.attempts, nextAction: selected };
     if (state.event?.reason !== event.reason) {
@@ -128,7 +145,8 @@ async function recoverAmaAutomationLocked({
     const refusal = stop?.headSha === headSha ? stop.refusal
       : controls?.safetyRefusal?.headSha === headSha ? controls.safetyRefusal.refusal : null;
     const refusalKey = refusal?.key || selected.decisionKey || 'unrecorded';
-    if (!/^[a-f0-9]{64}$/.test(refusal?.key || '') || refusal.repairable === false || !String(refusal.next || '').trim()) {
+    if (!repairableHammerStop({ ...result, nextAction: selected,
+      hammerStop: stop || controls?.safetyRefusal }, headSha)) {
       return exhausted(refusalKey, 'no-recorded-repair');
     }
     state.repairs ||= {};

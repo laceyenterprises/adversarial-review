@@ -9,6 +9,21 @@ import { recordHammerRetryDispatch, readHammerRetryCapLedger } from '../src/ama/
 import { bindClosureNextAction, observeClosureResult } from '../src/ama/closure-next-action.mjs';
 import { closureOwnerShadowEvidence } from '../src/pr-next-action-consumer.mjs';
 import { matrixPair, HEAD, quiet } from './helpers/next-action-matrix.mjs';
+import { primaryChangeFixture } from './helpers/primary-change.mjs';
+import { checkPrimaryChange } from '../src/ama/primary-change.mjs';
+import { primaryChangeRepairEvidence } from '../src/ama/primary-change-repair.mjs';
+import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
+
+function revertedEvidence(headSha = HEAD) {
+  const evidence = primaryChangeFixture(headSha);
+  evidence.primaryHead = 'c'.repeat(40);
+  evidence.primaryFiles = ['src/feature.mjs', 'docs/guide.md'].map(filename => ({
+    filename, status: 'modified', additions: 2, deletions: 1,
+    patch: '@@ -10,1 +12,2 @@\n-old\n+builder change\n+builder detail',
+  }));
+  evidence.finalFiles = [];
+  return evidence;
+}
 
 function setup(t) {
   const rootDir = mkdtempSync(join(tmpdir(), 'safety-stop-repair-'));
@@ -26,6 +41,7 @@ function setup(t) {
     now: () => now, pageImpl: async (...args) => pages.push(args),
     readRepairStatusImpl: async () => ({ ok: true, row: { status: 'running' } }),
     repairOptions: { cfg: { enabled: true, autonomousMergeExecutionEnabled: true, hammerLifetimeDispatchCeiling: 6 },
+      fetchPrimaryChangeImpl: async ({ headSha }) => revertedEvidence(headSha),
       env: { HQ_ROOT: rootDir }, fleetStopImpl: () => null, workerClassImpl: () => 'codex',
       probeOwnershipImpl: async () => ({ owned: false, uncertain: false }),
       execFileImpl: async (command, args) => {
@@ -55,6 +71,12 @@ test('R05 recorded repair dispatches one scoped PR update, then pages exhaustion
   assert.ok(brief.includes(JSON.stringify(f.refusal.missingEvidence, null, 2)));
   assert.ok(brief.includes(f.refusal.next));
   assert.match(brief, /Do not merge/);
+  assert.match(brief, /Hold reasons: primary-change-reverted/);
+  assert.match(brief, /src\/feature.mjs: reviewed lines \[12, 14\)/);
+  assert.match(brief, /docs\/guide.md: reviewed lines \[12, 14\)/);
+  assert.match(brief, /builder-authored commit/);
+  assert.match(brief, /Do not add closer trailers/);
+  assert.match(brief, /Fast-forward only/);
   const ledger = readHammerRetryCapLedger(f.options.rootDir, f.options);
   assert.equal(ledger.attemptCount, 1);
   assert.equal(ledger.lifetimeAttemptCount, 1);
@@ -67,6 +89,175 @@ test('R05 recorded repair dispatches one scoped PR update, then pages exhaustion
   assert.equal(f.commands.filter(call => call.command === 'hq').length, 1);
   assert.equal(f.pages.length, 1);
   assert.ok(f.pages[0][0].includes(f.refusal.key));
+});
+
+test('watcher routes repairable holds before the ownerless watchdog, including scoped recovery requests', async t => {
+  for (const scoped of [false, true]) {
+    const f = setup(t);
+    const resolved = await resolveMergeAgentCoexistenceForWatcher({
+      rootDir: f.options.rootDir, repoPath: f.options.repo, prNumber: 7, currentRevisionRef: HEAD,
+      candidate: { headSha: HEAD, prState: 'open', isDraft: false },
+      labelNames: scoped ? ['merge-agent-requested'] : [], reviewStateRow: {}, dispatchJob: {},
+      logger: quiet,
+      maybeDispatchAmaClosureForImpl: async () => Object.assign(f.options.result, { amaEnabled: true }),
+      recoverAmaAutomationImpl: options => recoverAmaAutomation({ ...f.options, ...options }),
+      recoverOrphanImpl: () => assert.fail('repair owner must run before generic orphan recovery'),
+    });
+    assert.equal(resolved.recovery.action, 'scoped-repair');
+    assert.equal(f.commands.filter(call => call.command === 'hq').length, 1);
+  }
+});
+
+test('safety result projection retains the gate repair evidence', t => {
+  const f = setup(t);
+  const shared = observeClosureResult(matrixPair(), { safetyRefusal: true, hammerStop: f.options.result.hammerStop });
+  assert.deepEqual(shared.snapshot.observations.controls.value.safetyRefusal.refusal, f.refusal);
+});
+
+for (const repairable of [false, undefined]) {
+  test(`non-repairable safety refusal never dispatches: ${repairable}`, async t => {
+    const f = setup(t);
+    f.refusal.repairable = repairable;
+    assert.equal((await recoverAmaAutomation(f.options)).outcome, 'recovery-exhausted');
+    assert.equal(f.commands.length, 0);
+    assert.equal(f.pages.length, 1);
+  });
+}
+
+test('gate diagnostics collect multiple files without changing the merge refusal', () => {
+  const evidence = revertedEvidence();
+  const before = checkPrimaryChange(evidence, HEAD);
+  const repair = primaryChangeRepairEvidence(evidence, HEAD);
+  assert.deepEqual(repair.paths.map(path => path.path), ['src/feature.mjs', 'docs/guide.md']);
+  assert.deepEqual(repair.paths[0].regions, [{ start: 10, end: 11 }]);
+  assert.deepEqual(repair.paths[0].reviewedRanges, [{ start: 12, end: 14 }]);
+  assert.deepEqual(checkPrimaryChange(evidence, HEAD), before);
+});
+
+test('scalar primary-change refusal fetches fresh reviewed coordinates before dispatch', async t => {
+  const f = setup(t);
+  delete f.refusal.reasons;
+  f.refusal.reason = 'primary-change-reverted';
+  let reads = 0;
+  f.options.repairOptions.fetchPrimaryChangeImpl = async ({ headSha }) => {
+    reads++;
+    assert.equal(headSha, HEAD);
+    return revertedEvidence(headSha);
+  };
+  const result = await recoverAmaAutomation(f.options);
+  assert.equal(result.recovery.action, 'scoped-repair');
+  assert.equal(reads, 1);
+  const brief = readFileSync(result.recovery.repairs[f.refusal.key].promptPath, 'utf8');
+  assert.match(brief, /src\/feature.mjs: reviewed lines \[12, 14\); gate merge-base ranges \[10, 11\)/);
+  assert.match(brief, /docs\/guide.md: reviewed lines \[12, 14\); gate merge-base ranges \[10, 11\)/);
+  assert.equal(f.commands.filter(call => call.command === 'hq').length, 1);
+});
+
+for (const comparison of [null, {}, { status: 'unknown' }]) {
+  test(`unreadable repair ancestry refuses without another submission: ${JSON.stringify(comparison)}`, async t => {
+    const f = setup(t);
+    await recoverAmaAutomation(f.options);
+    const ledger = readHammerRetryCapLedger(f.options.rootDir, f.options);
+    const repairedHead = 'd'.repeat(40);
+    const transport = f.options.repairOptions.execFileImpl;
+    let comparisons = 0;
+    const result = await dispatchSafetyStopRepair({
+      ...f.options, ...f.options.repairOptions, headSha: repairedHead,
+      refusal: { ...f.refusal, key: 'e'.repeat(64) }, dispatchKey: 'fixture-unreadable-ancestry',
+      execFileImpl: async (command, args) => {
+        if (command === 'gh' && args[0] === 'api') {
+          comparisons++;
+          assert.equal(args[1], `repos/${f.options.repo}/compare/${HEAD}...${repairedHead}`);
+          return { stdout: JSON.stringify(comparison) };
+        }
+        if (command === 'gh') return { stdout: JSON.stringify({ state: 'OPEN', headRefOid: repairedHead,
+          headRefName: 'fixture/repair', isDraft: false, labels: [] }) };
+        return transport(command, args);
+      },
+      fetchPrimaryChangeImpl: () => assert.fail('unreadable ancestry must refuse before evidence collection'),
+    });
+    assert.equal(comparisons, 1);
+    assert.deepEqual(result, { dispatched: false, reason: 'repair-ancestry-unreadable' });
+    assert.deepEqual(readHammerRetryCapLedger(f.options.rootDir, f.options), ledger);
+    assert.equal(f.commands.filter(call => call.command === 'hq').length, 1);
+  });
+}
+
+test('a repaired descendant which still fails the gate is surfaced without another launch', async t => {
+  const f = setup(t);
+  await recoverAmaAutomation(f.options);
+  const repairedHead = 'd'.repeat(40);
+  // Ordinary head/review churn must retain the repair lineage reservation.
+  recordHammerRetryDispatch(f.options.rootDir, f.options, {
+    headSha: repairedHead, jobKey: 'synthetic-new-review',
+  });
+  assert.equal(Object.keys(readHammerRetryCapLedger(f.options.rootDir, f.options).stopRepairReservations).length, 1);
+  const transport = f.options.repairOptions.execFileImpl;
+  f.options.repairOptions.execFileImpl = async (command, args) => {
+    if (command === 'gh' && args[0] === 'api') return { stdout: JSON.stringify({ status: 'ahead' }) };
+    if (command === 'gh') return { stdout: JSON.stringify({ state: 'OPEN', headRefOid: repairedHead,
+      headRefName: 'fixture/repair', isDraft: false, labels: [] }) };
+    return transport(command, args);
+  };
+  const stop = { ...f.options.result.hammerStop, headSha: repairedHead,
+    refusal: { ...f.refusal, key: 'e'.repeat(64) } };
+  const shared = observeClosureResult(matrixPair({ pr: { state: 'OPEN', headSha: repairedHead } }), { hammerStop: stop });
+  // The snapshot subject must move with the candidate, not only its observation.
+  const result = { hammerStop: stop, nextAction: { ...shared.decision, head: repairedHead } };
+  const failed = await recoverAmaAutomation({ ...f.options, headSha: repairedHead, result });
+  assert.equal(failed.outcome, 'recovery-exhausted');
+  assert.equal(failed.recovery.repairs[stop.refusal.key].reason, 'repair-descendant-still-refused');
+  assert.deepEqual(failed.recovery.repairs[stop.refusal.key].previousRepair.refusal, f.refusal);
+  assert.deepEqual(failed.recovery.event.refusal, stop.refusal);
+  assert.deepEqual(failed.recovery.event.repair.previousRepair.refusal, f.refusal);
+  assert.equal(f.commands.filter(call => call.command === 'hq').length, 1);
+});
+
+test('a repaired passing head returns through normal closure and authoritative terminal handling', async t => {
+  const f = setup(t);
+  await recoverAmaAutomation(f.options);
+  const repairedHead = 'd'.repeat(40);
+  const evidence = revertedEvidence(repairedHead);
+  evidence.finalFiles = evidence.primaryFiles;
+  assert.equal(checkPrimaryChange(evidence, repairedHead).ok, true);
+  let closures = 0;
+  const result = await resolveMergeAgentCoexistenceForWatcher({
+    rootDir: f.options.rootDir, repoPath: f.options.repo, prNumber: 7, currentRevisionRef: repairedHead,
+    candidate: { headSha: repairedHead, prState: 'open' }, labelNames: [], reviewStateRow: {}, dispatchJob: {},
+    logger: quiet,
+    maybeDispatchAmaClosureForImpl: async () => {
+      closures++;
+      return { amaEnabled: true, reason: 'daemon-merged', daemonCleanMerge: { remoteMergedConfirmed: true } };
+    },
+    recoverAmaAutomationImpl: () => assert.fail('passing head must not launch repair'),
+    recoverOrphanImpl: () => assert.fail('confirmed merge is terminal'),
+  });
+  assert.equal(closures, 1);
+  assert.equal(result.outcome, 'pr-terminal');
+  assert.equal(result.terminalReason, 'merged');
+  assert.equal(f.commands.filter(call => call.command === 'hq').length, 1);
+});
+
+test('reviewed coordinates preserve shifted hunks and deletion anchors, and omit surviving regions', () => {
+  const evidence = revertedEvidence();
+  evidence.primaryFiles = [{
+    filename: 'src/feature.mjs', status: 'modified', additions: 2, deletions: 2,
+    patch: '@@ -1,1 +1,2 @@\n-first\n+new first\n+extra\n@@ -10,1 +11,0 @@\n-remove me',
+  }];
+  evidence.finalFiles = [{
+    filename: 'src/feature.mjs', status: 'modified', additions: 2, deletions: 1,
+    patch: '@@ -1,1 +1,2 @@\n-first\n+new first\n+extra',
+  }];
+  const repair = primaryChangeRepairEvidence(evidence, HEAD);
+  assert.deepEqual(repair.paths[0].regions, [{ start: 10, end: 11 }]);
+  assert.deepEqual(repair.paths[0].reviewedRanges, [{ start: 12, end: 12 }]);
+});
+
+test('incomplete fresh gate evidence never submits a repair', async t => {
+  const f = setup(t);
+  f.options.repairOptions.fetchPrimaryChangeImpl = async () => ({ headSha: HEAD, readFailed: true });
+  assert.equal((await recoverAmaAutomation(f.options)).outcome, 'recovery-exhausted');
+  assert.equal(f.commands.filter(call => call.command === 'hq').length, 0);
 });
 
 test('both snapshot projections carry exact refusal evidence to the R05 executor', async t => {

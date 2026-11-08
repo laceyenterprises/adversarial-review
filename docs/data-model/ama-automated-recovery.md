@@ -75,11 +75,22 @@ repair as one scoped coding PR update, using the existing remediator routing,
 carry the full refusal. The brief includes its unmodified `next`, exact
 missing-evidence summary and complete evidence with protected regions. The worker
 must recheck the expected open head before editing and pushing; it has no merge,
-label, lease, review-state or additional-dispatch authority.
+label, lease, review-state or additional-dispatch authority. STOPHOLDREPAIR-01
+requires an explicit `repairable: true`; a missing marker is not authorization.
+The watcher invokes this owner before generic ownerless recovery for the
+exact-head R05 repair decision, including scoped operator recovery requests.
+For primary-change reversals, the brief additionally includes fresh attribution
+for every refused path, gate merge-base ranges and mapped reviewed-file ranges
+(half-open, with equal endpoints denoting an anchor), and both snapshot heads.
+Restoration must use a builder-authored commit without closer trailers and a
+fast-forward push on the expected hammer head.
 
 `repairs` is an optional object keyed by refusal key. Each entry records
 `reservedAt` (epoch milliseconds), deterministic `dispatchKey`, and optional
-`dispatched`, `launchRequestId`, `promptPath` and `reason`. The existing head
+`dispatched`, `launchRequestId`, `promptPath`, `reason` and `previousRepair`.
+`previousRepair`, when present, is the prior PR-ledger reservation
+`{ headSha, refusal }` that prevents another repair on a failing descendant.
+The existing head
 flock persists the reservation and charges `attempts` before submission. The
 dispatcher separately reserves the existing hammer series/target/lifetime budget
 under its PR ledger lock. Charges and reservations survive crashes and ambiguous
@@ -99,8 +110,14 @@ unreadable, interrupted or expired attempt, exhausted budget, missing repair or
 non-deferred dispatch refusal immediately uses the existing exhaustion page path.
 Its reason is `safety-refusal:<refusal key>` and its payload retains `refusalKey`
 and `detail`.
+STOPHOLDREPAIR-01 adds `refusal` (complete current refusal or null) and `repair`
+(the current repair receipt or null) to refusal exhaustion events, so a
+descendant refusal surfaces its original repair evidence as well.
 Pages deduplicate per head/key and retry failed delivery. A new key may use only
-remaining shared budgets. A changed head receives its own receipt; the hammer
+remaining shared budgets. A changed head receives its own receipt, but a failing
+descendant of any recorded repair source head cannot launch another repair.
+Unknown ancestry fails closed. This conservative bound survives review/series
+resets in the PR ledger; passing heads retain normal closure. The hammer
 lifetime ceiling still follows the PR. Legacy records without `repairs` remain
 readable. No merge gate or lease rule changes.
 

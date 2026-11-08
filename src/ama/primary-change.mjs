@@ -810,6 +810,27 @@ export function primaryChangeExactReviewEvidence(trace) {
 
 // Non-blocking waivers require an explicit effective strict-mode policy.
 export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemediation = false } = {}) {
+  return evaluatePrimaryChange(evidence, headSha, { strictNonBlockingRemediation });
+}
+
+// Diagnostic traversal only: keep the complete attribution/authorization
+// context, then inspect the next path after each refusal. Merge callers cannot
+// supply a skip list and always receive the first failing predicate.
+export function describePrimaryChangeRepair(evidence, headSha, options = {}) {
+  const skipped = new Set();
+  const paths = [];
+  for (;;) {
+    const answer = evaluatePrimaryChange(evidence, headSha, options, skipped);
+    if (answer.ok) return { headSha, reviewedHead: evidence.primaryHead, mergeBase: evidence.mergeBase, paths };
+    if (answer.reason !== 'primary-change-reverted' || !answer.path || skipped.has(answer.path)) {
+      throw new Error(`primary-change repair evidence unavailable: ${answer.reason}`);
+    }
+    paths.push(answer.missingEvidence);
+    skipped.add(answer.path);
+  }
+}
+
+function evaluatePrimaryChange(evidence, headSha, { strictNonBlockingRemediation = false } = {}, diagnosticSkipPaths = new Set()) {
   if (evidence && [true, false].includes(evidence.hasHammerCommits)) {
     const cost = checkCiCost(evidence.ciCost, headSha);
     if (!cost.ok) return cost;
@@ -868,6 +889,7 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
             authorized(path, unit, diagnosticCache, restoringDeletion))) };
     };
     for (const [path, change] of primary) {
+      if (diagnosticSkipPaths.has(path)) continue;
       if (guardReversals.some(proof => proof.path === path)) continue;
       if (derivedChanges.some(proof => proof.path === change.filename || proof.registryPath === change.filename
         || proof.modulePath === change.filename || proof.sqlPath === change.filename)) continue;

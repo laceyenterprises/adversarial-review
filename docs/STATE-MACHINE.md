@@ -1456,7 +1456,7 @@ records it as the park reason and pages once per head through closure-wait.
 Owner states and edges are unchanged (the existing `[*] -> hammer` edge).
 
 SAFETYSTOPOWNER-01 supplies an executor for existing R05 closure recovery:
-an audited deterministic refusal with a concrete `next` gets one scoped coding
+an audited deterministic refusal explicitly marked `repairable: true` with a concrete `next` gets one scoped coding
 PR update per head/refusal key. The recovery receipt and existing hammer ledger
 reserve budget before submission, including ambiguous attempts. Missing repair,
 non-deferred submission refusal or exhaustion pages with the key; a live receipt
@@ -1467,6 +1467,15 @@ rechecks admission. Ambiguous submission errors stay charged. This adds no merge
 authority, lease transition or lifecycle status. Primary-change authorization may search later immutable
 review snapshots for the original reversal, while retaining current-at-parent
 review proof, exact commit identity/content and cited-region coverage.
+
+STOPHOLDREPAIR-01 gives a repairable exact-head R05 decision precedence over
+generic ownerless recovery, which cannot execute that repair. The repair brief
+lists all gate-attributed uncited regions in merge-base and reviewed-head
+coordinates and requires a builder-authored, trailer-free, fast-forward update.
+Durable PR-ledger reservations prevent a failing descendant from starting another
+repair chain; exhaustion surfaces both refusals. Passing repaired heads re-enter
+ordinary closure, and authoritative merged/closed observations stay terminal.
+Non-repairable refusals, strict mode, merge predicates and lifecycle states are unchanged.
 
 CLOSERLEASEDEAD-01: a launch-less pending closer lease transitions to terminal
 `abandoned-holder-dead` on a confirmed absent/reused same-host watcher PID

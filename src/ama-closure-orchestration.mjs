@@ -77,7 +77,7 @@ import {
   protectivePredecessorMergeWindowFinding,
   resolveProtectivePredecessorDeclaration,
 } from './ama/protective-predecessor.mjs';
-import { isSafetyRecoveryHold, recoverAmaAutomation } from './ama/automated-recovery.mjs';
+import { isSafetyRecoveryHold, recoverAmaAutomation, repairableHammerStop } from './ama/automated-recovery.mjs';
 import { amaRetainLoopCapFor } from './kernel/convergence-budget.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
 import { resolveRequiredCheckContextsFromCfg } from './ama/required-check-contexts.mjs';
@@ -3234,6 +3234,19 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
       : orphanOptions.now ? Date.parse(orphanOptions.now) : Date.now(), env: orphanOptions.env || process.env,
     observeWaitImpl: orphanOptions.observeClosureWaitImpl || observeClosureWait });
   if (admissionDisagreement) return admissionDisagreement;
+  // The generic ownerless watchdog cannot execute R05 repairs and otherwise
+  // returns a pending/exhausted result before the repair owner is reached.
+  // The repair dispatcher still proves live head, holds and absent ownership.
+  if (amaClosureResult?.amaEnabled && repairableHammerStop(amaClosureResult,
+    currentRevisionRef || candidate?.headSha || dispatchJob?.headSha)) {
+    return recoverAmaAutomationImpl({
+      rootDir, repo: repoPath, prNumber,
+      headSha: currentRevisionRef || candidate?.headSha || dispatchJob?.headSha,
+      result: amaClosureResult, reviewStateRow, logger, signal,
+      maxAttempts: amaRetainLoopCapFor(dispatchJob?.remediationPlan?.maxRounds),
+      ...recoveryOptions,
+    });
+  }
   const mergeAgentRequestedScoped = !labelNames?.some((label) =>
     [...OPERATOR_HOLD_LABELS, 'adversarial-merge-blocked',
       'merge-agent-stuck', 'duplicate-family-hold'].includes(label))

@@ -269,7 +269,7 @@ export function observeClosureResult(shared, result, passSnapshot = null) {
   if (result.capacity) return reviseClosureNextAction(shared, {
     policy: { ...policy, capacity: { ...policy.capacity, hammer: result.capacity } },
   }, passSnapshot);
-  if (result.safetyRefusal) return reviseClosureNextAction(shared, {
+  if (result.safetyRefusal && !result.hammerStop?.refusal) return reviseClosureNextAction(shared, {
     controls: { ...shared.snapshot.observations.controls?.value,
       safetyRefusal: { deterministic: true, reason: result.operatorReason || result.reason } },
   }, passSnapshot);

@@ -1,5 +1,6 @@
 import * as adversarialGateRecords from './adversarial-gate-status.mjs';
 import { fetchHammerPr } from './hammer-pr-read.mjs';
+import { monitorGitHubBudgets } from './github-budget-monitor.mjs';
 import { resolveThrottleFloor, withGitHubBudgetScope, isGitHubRateLimitError, readGitHubBudgetState, currentGitHubBudgetScope, githubCredential, githubBudgetKey, githubBudgetBelowFloor } from './rate-limit-throttle.mjs';
 
 // Scheduling only. A durable success is a priority hint; serve must refresh the
@@ -33,9 +34,13 @@ function isClosingRowReady(rootDir, row, {
 }
 
 async function runLowBudgetWatcherPoll({ db, activeRepos, rootDir, domainId, execFileImpl,
-  handlePostedReviewRow, createWatcherOperatorSurface, projectAdversarialGateStatus, markMerged, markClosed,
+  handlePostedReviewRow, createWatcherOperatorSurface, projectAdversarialGateStatus, markMerged, markClosed, deliverAlert,
 }) {
   const allBudgets = await readGitHubBudgetState();
+  if (rootDir && deliverAlert) {
+    try { await monitorGitHubBudgets({ rootDir, budgets: allBudgets, deliverAlert }); }
+    catch (error) { console.warn(`[watcher] GitHub budget visibility failed: ${error.message}`); }
+  }
   const credential = githubCredential({ token: process.env.GITHUB_TOKEN || null });
   const budgets = Object.fromEntries(['core', 'graphql'].map(resource => [resource,
     allBudgets[githubBudgetKey(resource, credential)]]));

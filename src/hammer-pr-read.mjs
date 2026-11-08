@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { meteredExecFile } from './metered-gh.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { withCloserGitHubBudget } from './rate-limit-throttle.mjs';
 
 // Conditional reads (ETag, 304). A 304 returns the body stored with the exact
 // ETag that was sent; GitHub does not charge it to the primary rate limit. A
@@ -88,7 +89,7 @@ async function fetchHammerPr(repo, prNumber, { withChecks = true, withReviews = 
   const cache = read ? null : conditionalState(repo, prNumber, env);
   const get = read || conditionalReader(cache, execImpl || (args => meteredExecFile(promisify(execFile), 'gh', args,
     { hammerToken: true, timeout: loadAwareTimeoutMs(30_000), killSignal: 'SIGKILL', maxBuffer: 10 * 1024 * 1024, env })));
-  try { return await readHammerPr(repo, prNumber, { withChecks, withReviews, get, cache }); }
+  try { return await withCloserGitHubBudget(() => readHammerPr(repo, prNumber, { withChecks, withReviews, get, cache })); }
   finally { if (cache?.dirty) cache.save(); }
 }
 

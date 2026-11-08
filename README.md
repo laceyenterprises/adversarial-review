@@ -514,6 +514,26 @@ no explicit pin. These are consumer receipts after deployment; offline tests
 and PR publication do not establish live adoption. No service restart, grant
 change or synthetic live run is part of this change.
 
+GitHub lifecycle polling revalidates tracked PRs with REST ETags on every
+poll. Only a live 304 permits cached head/state reuse; changed merged/closed
+responses still produce authoritative terminal transitions. Routine polling
+defers below the configured floor while closer identity and hammer
+precondition reads may use its positive reserve. Zero balance and explicit
+rate limits still fail closed. Broker-verified tokens share a stable
+App/installation budget key across rotation; unverified credentials remain
+separate.
+
+API telemetry adds a consumer name and separate `github_request` HTTP-response
+rows, including category/resource/status and 304 exemption. Logical attempts
+must not be counted as charged requests. Known installation balances are
+logged once per poll. A persisted below-floor episode alerts once after more
+than 15 minutes and rearms on an observed healthy balance.
+After deployment, SRE floats this repository, restarts the watcher through the
+documented owner path, and retains two natural hours with no zero-balance
+deferrals, head-state calls/hour reduced by more than half, and a green-CI
+closer-pushed head reaching its closer within one poll window. Retain actual
+HTTP/304 counts to distinguish savings from a category change.
+
 REGISTRYSESSION-02: each process that resolves governed reviewer, closer or
 remediation models owns its registry readiness. The shared
 `ensureWorkerRegistryReady()` helper asynchronously registers an app session and

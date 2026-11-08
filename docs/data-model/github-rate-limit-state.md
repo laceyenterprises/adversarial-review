@@ -9,11 +9,31 @@
 
 The shared JSON document has `version: 2` and a `buckets` object keyed by
 `githubBudgetKey(resource, credential)`. Authenticated keys are
+`installation-<app-id>-<installation-id>/<resource>` for tokens whose metadata
+was verified by the broker client in this process. Rotated tokens for that
+installation share observations. Other authenticated keys remain
 `token-<digest>/<resource>` (normally `core` and `graphql`); the digest is the
 first 24 hex characters of SHA-256 of the effective token. Raw tokens are never
 stored. The `default` anonymous credential keeps bare resource keys. CLI token
 selection prefers `GH_TOKEN` over `GITHUB_TOKEN`; Octokit uses the token actually
 selected for its request, including dynamic provider tokens.
+
+`data/api-cache/budget-deficits.json` is the watcher's diagnostic episode map,
+keyed by installation/credential. Entries contain `since` (epoch milliseconds),
+`resetAt` and `alerted`. A low observed balance starts an episode; after more
+than 15 minutes it emits one deduplicated alert and persists the receipt.
+An observed healthy balance clears it. Expired/unknown buckets do not trigger
+alerts or prove recovery; another observed low window retains the same episode
+and alert receipt. One watcher owns the atomically replaced
+0600 file; it grants no merge authority. Each poll logs one line per known
+installation with its resource balances.
+
+`data/api-call-log/<UTC-date>.jsonl` additionally records `consumer` on logical
+attempts and separate `github_request` rows with `unit: http_response`,
+`requestCategory`, credential, resource, status and `budgetExempt` for 304.
+These additive rows count actual metered CLI/Octokit responses; logical
+attempts and GraphQL points are distinct units. Older missing consumer fields
+mean unattributed. Child adapters inherit `GHO_API_CONSUMER` for correlation.
 
 Every admission preflight and every header observation names the credential
 that sends the request (LAC-2075). This includes the outer telemetry wrappers

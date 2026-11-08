@@ -9,7 +9,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const DEFAULT_RETENTION_DAYS = 14;
@@ -19,6 +19,7 @@ const LOG_DIR_PARTS = ['data', 'api-call-log'];
 const LOG_FILE_MODE = 0o640;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const CATEGORY_ORDER = Object.freeze([
+  'github_request',
   'cache_hit_diff_fetch',
   'conditional_304',
   'diff_fetch',
@@ -41,6 +42,17 @@ const CATEGORY_ORDER = Object.freeze([
   'agr_account_rate_limited',
   'agr_all_capped',
 ]);
+
+function githubRequestCategory(path = '') {
+  if (path.includes('/graphql')) return 'graphql';
+  if (/\/commits\//.test(path)) return 'commit';
+  if (/\/pulls\/(?:\d+|\{pull_number\})\/reviews/.test(path)) return 'reviews';
+  if (/\/(?:issues|pulls)\/\d+\/comments/.test(path)) return 'comments';
+  if (/\/pulls\/(?:\d+|\{pull_number\})/.test(path)) return 'pr_state';
+  if (/\/pulls(?:\?|$)/.test(path)) return 'pr_list';
+  if (/\/labels/.test(path)) return 'labels';
+  return 'other';
+}
 
 function resolveApiCallLogDir(rootDir) {
   return join(rootDir, ...LOG_DIR_PARTS);
@@ -374,7 +386,10 @@ function recordApiCall(args) {
         defaultRecorderBeforeExitRegistered = true;
       }
     }
-    return defaultRecorder.recordApiCall(args);
+    return defaultRecorder.recordApiCall({ ...args, extra: {
+      ...args.extra, consumer: args.extra?.consumer || process.env.GHO_API_CONSUMER
+        || basename(process.argv[1] || 'unknown', '.mjs'),
+    } });
   } catch (err) {
     process.stderr.write(`[api-telemetry] failed to record API call: ${err?.message || err}\n`);
     return null;
@@ -382,6 +397,7 @@ function recordApiCall(args) {
 }
 
 export {
+  githubRequestCategory,
   CATEGORY_ORDER,
   apiStatusFromError,
   buildApiCallRow,

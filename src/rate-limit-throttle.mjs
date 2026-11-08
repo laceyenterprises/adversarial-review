@@ -24,6 +24,7 @@ const TOOL_ROOT = dirname(MODULE_DIR);
 const DEFAULT_SHARED_STATE_PATH = resolve(TOOL_ROOT, 'data', 'api-cache', 'rate-limit-state.json');
 
 const budgetScopes = new AsyncLocalStorage();
+const installationCredentials = new Map();
 
 function withGitHubBudgetScope(options, fn) {
   const scope = { urgent: false, rateLimited: false, deferred: false, ...options, limitedBudgets: new Map() };
@@ -32,11 +33,27 @@ function withGitHubBudgetScope(options, fn) {
 
 function currentGitHubBudgetScope() { return budgetScopes.getStore(); }
 
+// Preserve the parent's observed rate limits: priority never makes exhaustion
+// or a secondary limit safe. Only the positive balance below the polling floor
+// is reserved for fresh identity and merge-precondition reads.
+function withCloserGitHubBudget(fn) {
+  return budgetScopes.run({ rateLimited: false, deferred: false,
+    limitedBudgets: new Map(), ...currentGitHubBudgetScope(), urgent: true }, fn);
+}
+
+function registerGitHubInstallationToken(token, appId, installationId) {
+  if (!token || !/^\d+$/.test(String(appId)) || !/^\d+$/.test(String(installationId))) return;
+  const digest = createHash('sha256').update(String(token)).digest('hex').slice(0, 24);
+  installationCredentials.set(digest, `installation-${appId}-${installationId}`);
+  while (installationCredentials.size > 256) installationCredentials.delete(installationCredentials.keys().next().value);
+}
+
 // Tokens never enter state or logs. A digest isolates credentials without
 // depending on which environment-variable alias supplied the token.
 function githubCredential({ env = process.env, token = env.GH_TOKEN || env.GITHUB_TOKEN } = {}) {
   if (!token) return 'default';
-  return `token-${createHash('sha256').update(String(token)).digest('hex').slice(0, 24)}`;
+  const digest = createHash('sha256').update(String(token)).digest('hex').slice(0, 24);
+  return installationCredentials.get(digest) || `token-${digest}`;
 }
 
 function githubBudgetKey(resource, credential = 'default') {
@@ -788,6 +805,8 @@ function readGitHubBudgetStatus({ rootDir = TOOL_ROOT, env = process.env, nowMs 
 }
 
 export {
+  registerGitHubInstallationToken,
+  withCloserGitHubBudget,
   awaitThrottleIfNeeded,
   currentGitHubBudgetScope,
   GitHubBudgetDeferredError,

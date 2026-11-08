@@ -26,7 +26,7 @@ import { pollFastMergeQueue, resolveFastMergePerPollCap } from './follow-up-merg
 import { scrapeMergeCloseout } from './closeout-scraper.mjs';
 import { fetchConditionalRestPage } from './conditional-request.mjs';
 import { loadConfigCached } from './config-loader.mjs';
-import { fetchPullRequestHeadAndState } from './github-api.mjs';
+import { fetchPollingPrState } from './polling-pr-state.mjs';
 import { normalizeLabelNames, subjectRefWithLinearTicket } from './review-cycle-cap-actions.mjs';
 import {
   attemptMergeAgentLifecycleCleanup,
@@ -325,9 +325,7 @@ export async function syncPRLifecycle(octokit, operatorSurface, primaryDomainId 
     rows: openRows,
     source: 'lifecycle-sync',
     fetchLiveState: async (repo, prNumber) => {
-      const freshState = await fetchPullRequestHeadAndState(repo, prNumber, {
-        execFileImpl: execFileAsync,
-      });
+      const freshState = await fetchPollingPrState(octokit, ROOT, repo, prNumber);
       try { await observeClosureLag({ rootDir: ROOT, repo, prNumber,
         headSha: freshState.headRefOid,
         merged: freshState.merged === true || String(freshState.state).toUpperCase() === 'MERGED',

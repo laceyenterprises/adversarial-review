@@ -1,4 +1,5 @@
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { registerGitHubInstallationToken } from './rate-limit-throttle.mjs';
 // reviewer-broker-refresh.mjs — keep the long-lived watcher's reviewer-bot
 // GitHub App installation tokens fresh.
 //
@@ -320,6 +321,7 @@ async function fetchReviewerTokenFromBrokerUrl({
         { transient: false },
       );
     }
+    registerGitHubInstallationToken(accessToken, actualAppId, actualInstallationId);
     const expiresAtMs = body?.expires_at ? Date.parse(body.expires_at) : NaN;
     return {
       token: accessToken,

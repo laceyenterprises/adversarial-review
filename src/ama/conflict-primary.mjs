@@ -28,6 +28,18 @@ export async function proveConflictPrimary({ reviewedHead, sourceHead, head, bas
     };
     const reviewedCommits = await series(fork, reviewedHead), replayedCommits = await series(base, head);
     if (reviewedCommits.length !== replayedCommits.length) return null;
+    const metadata = async (bottom, tip) => {
+      const fields = (await git(['log', '--no-decorate', '--no-notes', '--no-show-signature',
+        '--format=%H%x00%an%x00%ae%x00%B', '-z', `${bottom}..${tip}`])).split('\0');
+      if (fields.pop() !== '' || fields.length % 4 !== 0) throw new Error('malformed conflict metadata');
+      const commits = new Map();
+      for (let i = 0; i < fields.length; i += 4) {
+        commits.set(fields[i], fields.slice(i + 1, i + 4).join('\0'));
+      }
+      return commits;
+    };
+    const reviewedMetadata = await metadata(fork, reviewedHead);
+    const replayedMetadata = await metadata(base, head);
     const patch = async ref => {
       const text = await git(['diff', '--no-ext-diff', '--no-textconv', '--no-renames', '--full-index',
         '--unified=0', `${ref}^`, ref, '--']);
@@ -42,9 +54,8 @@ export async function proveConflictPrimary({ reviewedHead, sourceHead, head, bas
       const original = reviewedCommits[i], replay = replayedCommits[i];
       // Rebase preserves author identity and message. In particular, do not
       // turn a reviewed author commit into the first HAM commit on main.
-      const metadata = ref => git(['show', '-s', '--format=%an%x00%ae%x00%B', ref]);
-      const before = await metadata(original), after = await metadata(replay);
-      if (before !== after) return null;
+      const before = reviewedMetadata.get(original);
+      if (!before || before !== replayedMetadata.get(replay)) return null;
       if (i === 0 && hammer(before.split('\0').slice(2).join('\0'))) return null;
       if (await patch(original) !== await patch(replay)) return null;
     }

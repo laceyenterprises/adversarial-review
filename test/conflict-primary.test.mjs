@@ -8,11 +8,11 @@ import { fileURLToPath } from 'node:url';
 import { proveConflictPrimary } from '../src/ama/conflict-primary.mjs';
 import { checkPrimaryChange } from '../src/ama/primary-change.mjs';
 
-function fixture(t) {
+function fixture(t, { message = 'Author correction', sameLine = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'hamemptyprimary-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const git = args => execFileSync('git', args, { cwd: dir, encoding: 'utf8', timeout: 5000,
-    stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env,
+  const git = (args, config = {}) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', timeout: 5000,
+    stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...config,
       GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
       GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
       GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' } });
@@ -26,15 +26,18 @@ function fixture(t) {
   const fork = commit('Base');
   git(['checkout', '-qb', 'author']);
   write('heading\nSEVDOCS-335 fixed\nfooter\n');
-  const reviewedHead = commit('Author correction');
+  const reviewedHead = commit(message);
   git(['checkout', '-q', 'main']);
-  write('new heading\nSEVDOCS-335 old\nfooter\n');
+  write(sameLine ? 'new heading\nSEVDOCS-335 upstream\nfooter\n' : 'new heading\nSEVDOCS-335 old\nfooter\n');
   const base = commit('Upstream context');
   git(['checkout', '-q', 'author']);
-  assert.throws(() => git(['rebase', 'main']), 'adjacent context causes a real conflict');
+  const rebaseConfig = {
+    GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.commentChar', GIT_CONFIG_VALUE_0: ';',
+  };
+  assert.throws(() => git(['rebase', 'main'], rebaseConfig), 'expected a real conflict');
   write('new heading\nSEVDOCS-335 fixed\nfooter\n');
   git(['add', 'notes.md']);
-  git(['-c', 'core.editor=true', 'rebase', '--continue']);
+  git(['-c', 'core.editor=true', 'rebase', '--continue'], rebaseConfig);
   const head = git(['rev-parse', 'HEAD']).trim();
   return { dir, git, write, commit, fork, reviewedHead, sourceHead: reviewedHead, head, base };
 }
@@ -46,6 +49,42 @@ test('HAMEMPTYPRIMARY-01: a real resolved conflict retains the author primary an
   assert.equal(f.git(['show', `${f.head}:notes.md`]), 'new heading\nSEVDOCS-335 fixed\nfooter\n');
   assert.equal(f.git(['rev-parse', `${f.head}^`]).trim(), f.base);
   assert.notEqual(f.head, f.reviewedHead);
+});
+
+test('HAMEMPTYPRIMARY-01: conflicted replay preserves Markdown and issue references in the message', async t => {
+  const f = fixture(t, { message: 'Author correction\n\n## Summary\n#123 reference' });
+  assert.match(f.git(['show', '-s', '--format=%B', f.head]), /## Summary\n#123 reference/);
+  assert.equal((await proveConflictPrimary(f))?.proof, 'conflict-primary-preserved');
+});
+
+test('HAMEMPTYPRIMARY-01: same-line resolution requires reviewed remediation', async t => {
+  const f = fixture(t, { sameLine: true });
+  assert.equal(f.git(['show', `${f.head}:notes.md`]), 'new heading\nSEVDOCS-335 fixed\nfooter\n');
+  assert.equal(await proveConflictPrimary(f), null);
+});
+
+test('HAMEMPTYPRIMARY-01: a commit already upstream cannot be certified as replayed', async t => {
+  const f = fixture(t);
+  f.git(['checkout', '-qb', 'equivalent-upstream', f.fork]);
+  f.git(['cherry-pick', '-x', f.reviewedHead]);
+  const base = f.git(['rev-parse', 'HEAD']).trim();
+  f.git(['checkout', '--detach', f.reviewedHead]);
+  f.git(['rebase', 'equivalent-upstream']);
+  const head = f.git(['rev-parse', 'HEAD']).trim();
+  assert.equal(head, base);
+  assert.equal(await proveConflictPrimary({ ...f, base, head }), null);
+});
+
+test('HAMEMPTYPRIMARY-01: a reviewed merge commit cannot be certified as linear replay', async t => {
+  const f = fixture(t);
+  f.git(['checkout', '-qb', 'side', f.fork]);
+  writeFileSync(join(f.dir, 'side.txt'), 'side content\n');
+  f.git(['add', 'side.txt']);
+  f.git(['commit', '-qm', 'Side change']);
+  f.git(['checkout', '--detach', f.reviewedHead]);
+  f.git(['merge', '--no-edit', 'side']);
+  const reviewedHead = f.git(['rev-parse', 'HEAD']).trim();
+  assert.equal(await proveConflictPrimary({ ...f, reviewedHead, sourceHead: reviewedHead }), null);
 });
 
 test('HAMEMPTYPRIMARY-01: identical text reclassified as HAM loses the primary and is refused', async t => {
@@ -141,5 +180,10 @@ test('HAMEMPTYPRIMARY-01: conflict procedure proves preservation before publicat
   const proof = text.indexOf('/bin/hammer-conflict-primary.mjs', start);
   const publish = text.indexOf('HAM_COMMIT_PUBLICATION_ONLY=1', start);
   assert.ok(start > 0 && proof > start && publish > proof);
+  const gate = text.slice(proof, publish);
+  assert.match(gate, /conflict-primary-unproven/);
+  assert.match(gate, /conflict-primary-timeout/);
+  assert.match(gate, /hammer-terminal-audit\.mjs" "\$HAM_CONFLICT_PROOF_REASON"/);
+  assert.match(text.slice(start, proof), /core\.commentChar/);
   assert.match(text.slice(start, proof), /if \[ "\$HAM_CONFLICT_SOURCE" = "<<REVIEWED_SHA>>" \]/);
 });

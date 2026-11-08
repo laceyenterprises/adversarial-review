@@ -953,6 +953,13 @@ git checkout "$HEAD_BRANCH"
 HAM_CONFLICT_SOURCE=$(git rev-parse HEAD) || exit 1
 HAM_CONFLICT_BASE=$(git rev-parse "origin/$BASE_BRANCH") || exit 1
 [ "$HAM_CONFLICT_SOURCE" = "$(git rev-parse "origin/$HEAD_BRANCH")" ] || exit 1
+(
+# Git's default '#' comment marker would strip headings and issue references
+# on rebase --continue. Use the same marker for the rebase and its resolver.
+HAM_GIT_CONFIG_COUNT=${GIT_CONFIG_COUNT:-0}
+export "GIT_CONFIG_KEY_${HAM_GIT_CONFIG_COUNT}=core.commentChar"
+export "GIT_CONFIG_VALUE_${HAM_GIT_CONFIG_COUNT}=;"
+export GIT_CONFIG_COUNT=$((HAM_GIT_CONFIG_COUNT + 1))
 if ! git rebase "origin/$BASE_BRANCH"; then
   # Merge and stage hand-written sources first, preserving both sides' intent.
   # Leave registered generated outputs to the shared GENCONFLICT-01 resolver;
@@ -962,12 +969,21 @@ if ! git rebase "origin/$BASE_BRANCH"; then
   # and removes this worktree. Stop and report the emitted reason on failure.
   hq generated-conflicts resolve --worktree "$PWD" || exit 1
 fi
+) || exit 1
 # Only the conflict-only reviewed-head replay uses this proof. Remediation
 # heads retain their existing full-range findings/preservation validation.
 if [ "$HAM_CONFLICT_SOURCE" = "<<REVIEWED_SHA>>" ]; then
   /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-conflict-primary.mjs" \
     "<<REVIEWED_SHA>>" "$HAM_CONFLICT_SOURCE" "$HAM_CONFLICT_BASE" \
-    > "<<RUN_DIR>>/conflict-primary.json" || exit 1
+    > "<<RUN_DIR>>/conflict-primary.json" || {
+      HAM_CONFLICT_PROOF_STATUS=$?
+      HAM_CONFLICT_PROOF_REASON=conflict-primary-unproven
+      if [ "$HAM_CONFLICT_PROOF_STATUS" -eq 142 ]; then
+        HAM_CONFLICT_PROOF_REASON=conflict-primary-timeout
+      fi
+      "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-terminal-audit.mjs" "$HAM_CONFLICT_PROOF_REASON"
+      exit 1
+    }
 fi
 # SUBSYNC-01: the rebase moved gitlinks but not submodule checkouts.
 # This block can run in a fresh shell, so default the cap here: an unset cap makes
@@ -992,6 +1008,12 @@ export HAM_COMMIT_PUBLICATION_ONLY
 source "<<RUN_DIR>>/hammer-publish.sh" || exit 1
 unset HAM_COMMIT_PUBLICATION_ONLY
 ```
+
+A `conflict-primary-unproven` outcome requires the PR owner to take the
+conflict through reviewed remediation with full-range validation. Report the
+reviewed head and captured base. Do not republish or retry the same replay
+as patch-equivalent. A `conflict-primary-timeout` indicates the proof budget
+expired and does not establish a patch mismatch.
 
 After conflict repair and commit publication, refresh context and re-run
 changed-surface tests (2b) outside the lease. Re-enter **verify-head** (Appendix C)

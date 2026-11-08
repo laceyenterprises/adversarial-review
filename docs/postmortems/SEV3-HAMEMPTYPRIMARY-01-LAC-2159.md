@@ -71,10 +71,13 @@ Use ordinary Git rebase, retaining the author commits, and put actual subsequent
 HAM work in separate commits. Never amend/squash the primary into HAM. Unknown,
 opaque/binary, empty or unavailable patch evidence, changed content, nonlinear
 history, lost commits or reclassification stops this conflict-only procedure
-before publication. This proof deliberately does not accept general semantic
-conflict resolution, generated-output changes or remediation as patch-equivalent;
-those need the existing remediation/full-range validation path. A source head
-already changed by remediation retains that existing path.
+before publication. This includes same-line resolutions that remove different
+upstream text, merge commits, commits dropped as already upstream, and standalone
+mode-only, empty-file or binary patches. A proof refusal emits
+`conflict-primary-unproven`. The PR owner must route the change through reviewed
+remediation and full-range validation. Appendix D does not dispatch that
+successor automatically. An expired proof budget emits `conflict-primary-timeout`.
+A source head already changed by remediation retains its full-range validation.
 
 The proof is local publication evidence, not a review carry-forward receipt or
 merge authorization. No trusted anchor is accepted from a commit trailer.

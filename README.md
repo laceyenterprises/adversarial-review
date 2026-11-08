@@ -4579,6 +4579,7 @@ New repository notes live in [`docs/changes/`](docs/changes/README.md), one
 `<TICKET-ID>.md` file per ticket. Follow that convention for new work; the
 entries below are preserved historical notes. No per-ticket README or index
 update is needed.
+- LIVEPACKNEW-01: a head-only pack plan is conclusively not live when a complete base-plan scan finds no matching planId, without a ledger read. Collisions retain ledger checks and base-authoritative tickets; unavailable scans fail closed. Unavailable ledger reads retry up to three attempts within ten seconds, with retry counts in structured review facts.
 
 - REVIEWLARGE-01 final remediation: restore raw-first size recovery, defer copy/blob inspection until summarisation is needed (64 KiB diff floor), and disclose the manifest inside Summary before final reply validation. Only an exhausted chunk size refusal becomes exit 77; state projection hashes remain valid.
 

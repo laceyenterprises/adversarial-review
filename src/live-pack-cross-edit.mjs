@@ -24,11 +24,12 @@
 // (parsed JSON at base and head). Every exemption is recorded in the review
 // body. Anything else is gated exactly as before.
 //
-// Cost is bounded: per touched pack, one plan.json fetch (a second only when
-// the pack is absent at the base ref) and a bounded public SDK observation.
+// New packs share one complete base-tree listing and cached base-plan reads.
+// Ledger observations retry at most three times within a ten-second budget.
 
 import { execFile } from 'node:child_process';
 import { isDeepStrictEqual, promisify } from 'node:util';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import { execGhWithRetry } from './gh-cli.mjs';
 import { fetchRepoFileAtRef } from './pack-lockhash.mjs';
@@ -173,7 +174,8 @@ async function loadPackPlan({
       return { ok: false, reason: 'plan-read-failed', detail: `${planPath}@${ref}: ${err?.message || err}` };
     }
     try {
-      return { ok: true, ...parsePlanJson(text), planRef: ref };
+      return { ok: true, ...parsePlanJson(text), planRef: ref,
+        absentAtBase: Boolean(normalizeText(baseRef) && ref !== normalizeText(baseRef)) };
     } catch (err) {
       return { ok: false, reason: 'plan-malformed', detail: `${planPath}@${ref}: ${err?.message || err}` };
     }
@@ -288,8 +290,83 @@ async function evaluateGateStampExemption({
   };
 }
 
-function defaultReadActiveDagRuns({ planId, states }) {
-  return readActiveDagRunsForPlanAsync({ planId, states });
+async function listBasePlanPaths(repo, baseRef, { execFileImpl = execFileAsync } = {}) {
+  // Contents reads require a commit ref, rather than a Git tree object ID.
+  const commitReply = await execGhWithRetry({
+    execFileImpl,
+    args: ['api', `repos/${repo}/commits/${encodeURIComponent(baseRef)}`],
+  });
+  const commitRef = normalizeText(JSON.parse(String(commitReply.stdout))?.sha);
+  if (!commitRef) throw new Error('base commit unavailable');
+  const { stdout } = await execGhWithRetry({
+    execFileImpl,
+    args: ['api', `repos/${repo}/git/trees/${encodeURIComponent(commitRef)}?recursive=1`],
+  });
+  const tree = JSON.parse(String(stdout));
+  // A truncated listing cannot prove absence. Pin subsequent fetches to the
+  // listed commit, even when baseRef names a moving branch.
+  if (tree.truncated !== false || !Array.isArray(tree.tree)) {
+    throw new Error('base plan listing incomplete');
+  }
+  return {
+    ref: commitRef,
+    paths: tree.tree.filter((entry) => entry.type === 'blob'
+      && /^projects\/[^/]+\/plan\.json$/.test(entry.path)).map((entry) => entry.path),
+  };
+}
+
+// Lazy, per-evaluation cache: existing packs need no listing, and multiple
+// new packs share both the listing and each base plan fetch.
+function basePlanReader({ repo, baseRef, listBasePlanPathsImpl, fetchFileAtRefImpl }) {
+  let plans;
+  return () => {
+    plans ??= (async () => {
+      const listing = await listBasePlanPathsImpl(repo, baseRef);
+      const result = [];
+      for (const path of listing.paths) {
+        result.push(parsePlanJson(await fetchFileAtRefImpl(repo, path, listing.ref)));
+      }
+      return result;
+    })();
+    return plans;
+  };
+}
+
+function defaultReadActiveDagRuns(args) {
+  return readActiveDagRunsForPlanAsync(args);
+}
+
+async function readPackRunsWithRetry(planId, read, sleep) {
+  const deadline = Date.now() + 10_000;
+  let result;
+  let retryCount = 0;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) {
+      await sleep(100 * 2 ** (attempt - 1));
+      retryCount++;
+    }
+    const timeoutMs = Math.max(1, Math.min(3_000, deadline - Date.now()));
+    const controller = new AbortController();
+    let timer;
+    try {
+      result = await Promise.race([
+        Promise.resolve().then(() => read({
+          planId, states: LIVE_DAG_RUN_STATES, timeoutMs, signal: controller.signal,
+        })),
+        new Promise((resolve) => {
+          timer = setTimeout(() => resolve({ ok: false, reason: 'ledger-read-failed' }), timeoutMs);
+        }),
+      ]);
+    } catch (err) {
+      result = { ok: false, reason: 'ledger-read-threw', detail: err?.message || String(err) };
+    } finally {
+      clearTimeout(timer);
+      controller.abort();
+    }
+    if (result?.ok || result?.outcome === 'scope-denied'
+      || result?.reason === 'worker-observation-scope-denied' || Date.now() >= deadline) break;
+  }
+  return { result, retryCount };
 }
 
 // Liveness of one pack. `live` is true for a conclusive non-terminal run;
@@ -300,8 +377,11 @@ async function resolvePackLiveness({
   slug,
   baseRef,
   headRef,
-  fetchFileAtRefImpl,
+  fetchFileAtRefImpl = fetchRepoFileAtRef,
+  listBasePlanPathsImpl = listBasePlanPaths,
+  readBasePlansImpl = basePlanReader({ repo, baseRef, listBasePlanPathsImpl, fetchFileAtRefImpl }),
   readActiveDagRunsImpl = defaultReadActiveDagRuns,
+  sleepImpl = delay,
 }) {
   const plan = await loadPackPlan({ repo, slug, baseRef, headRef, fetchFileAtRefImpl });
   if (!plan.ok) {
@@ -319,12 +399,21 @@ async function resolvePackLiveness({
   if (!plan.planId) {
     return { slug, planId: null, ticketIds: [], runs: [], live: false, inconclusive: false, reason: 'no-plan' };
   }
-  let result;
-  try {
-    result = await readActiveDagRunsImpl({ planId: plan.planId, states: LIVE_DAG_RUN_STATES });
-  } catch (err) {
-    result = { ok: false, reason: 'ledger-read-threw', detail: err?.message || String(err) };
+  if (plan.absentAtBase) {
+    try {
+      const collisions = (await readBasePlansImpl()).filter((base) => base.planId === plan.planId);
+      if (collisions.length === 0) {
+        return { slug, planId: plan.planId, ticketIds: plan.ticketIds, runs: [],
+          live: false, inconclusive: false, reason: 'new-pack-absent-at-base', retryCount: 0 };
+      }
+      // Head-only tickets cannot exempt a collision with a base plan.
+      plan.ticketIds = [...new Set(collisions.flatMap((base) => base.ticketIds))].sort();
+    } catch {
+      return { slug, planId: plan.planId, ticketIds: [], runs: [],
+        live: false, inconclusive: true, reason: 'base-plan-scan-unavailable', retryCount: 0 };
+    }
   }
+  const { result, retryCount } = await readPackRunsWithRetry(plan.planId, readActiveDagRunsImpl, sleepImpl);
   if (!result?.ok) {
     // Private operator diagnostics never enter findings or review JSON.
     console.warn('[live-pack-cross-edit] ledger read failed:', result?.reason, result?.detail);
@@ -338,6 +427,7 @@ async function resolvePackLiveness({
       live: false,
       inconclusive: true,
       readOutcome,
+      retryCount,
       reason: `plan ${plan.planId}: live-pack-read-${readOutcome} (${PUBLIC_LEDGER_REASONS.has(result?.reason) ? result.reason : 'ledger-read-failed'})`,
     };
   }
@@ -351,6 +441,7 @@ async function resolvePackLiveness({
     runs,
     live: runs.length > 0,
     inconclusive: false,
+    retryCount,
     reason: result.outcome === 'not-live' ? 'not-live' : runs.length > 0 ? 'non-terminal-dag-runs' : 'no-non-terminal-dag-runs',
   };
 }
@@ -370,6 +461,7 @@ function buildLivePackCrossEditFinding({ pack, touchedFiles }) {
     runs: pack.runs,
     touched_files: touchedFiles,
     inconclusive: pack.inconclusive,
+    ...(pack.retryCount !== undefined ? { retry_count: pack.retryCount } : {}),
     ...(pack.readOutcome ? {read_outcome:pack.readOutcome} : {}),
     reason,
     detail:
@@ -393,6 +485,8 @@ async function evaluateLivePackCrossEdits({
   labels = [],
   fetchFileAtRefImpl = fetchRepoFileAtRef,
   readActiveDagRunsImpl = defaultReadActiveDagRuns,
+  listBasePlanPathsImpl = listBasePlanPaths,
+  sleepImpl = delay,
   resolvePrAuthorImpl = fetchPullRequestAuthorLogin,
   trustedStampLoginsImpl = resolvePostMergeActionsBotLogins,
 } = {}) {
@@ -402,9 +496,11 @@ async function evaluateLivePackCrossEdits({
   const packs = [];
   const candidateFindings = [];
   const exemptions = [];
+  const readBasePlansImpl = basePlanReader({ repo, baseRef, listBasePlanPathsImpl, fetchFileAtRefImpl });
   for (const [slug, touchedFiles] of touched) {
     const pack = await resolvePackLiveness({
       repo, slug, baseRef, headRef, fetchFileAtRefImpl, readActiveDagRunsImpl,
+      readBasePlansImpl, sleepImpl,
     });
     const ownPack = prTicketIds.some((id) => pack.ticketIds.includes(id));
     if (ownPack || !(pack.live || pack.inconclusive)) {
@@ -586,6 +682,7 @@ The orchestrator could not determine which build packs this PR touches are runni
     ownPack: pack.ownPack,
     live: pack.live || pack.inconclusive,
     liveCheckInconclusive: pack.inconclusive,
+    retryCount: pack.retryCount,
     runs: pack.runs.map((run) => ({ runId: run.run_id, state: run.state })),
     touchedFiles: pack.touchedFiles,
   }));
@@ -593,7 +690,7 @@ The orchestrator could not determine which build packs this PR touches are runni
   return `
 
 ## Trusted Live Build Pack Facts
-This PR touches the build pack directories below. The session ledger was read by the orchestrator, not the reviewer; a pack whose live check was inconclusive is treated as live (fail closed).
+This PR touches the build pack directories below. The orchestrator checks base plans and, when needed, the session ledger; a pack whose live check was inconclusive is treated as live (fail closed).
 ${fence}json
 ${JSON.stringify(facts, null, 2)}
 ${fence}
@@ -619,6 +716,8 @@ async function resolveLivePackRemediationContext({
   loadPrTitleImpl = null,
   fetchFileAtRefImpl = fetchRepoFileAtRef,
   readActiveDagRunsImpl = defaultReadActiveDagRuns,
+  listBasePlanPathsImpl = listBasePlanPaths,
+  sleepImpl = delay,
 } = {}) {
   try {
     const paths = await listPrFilesImpl(repo, prNumber);
@@ -629,6 +728,7 @@ async function resolveLivePackRemediationContext({
     if (!title && loadPrTitleImpl) title = await loadPrTitleImpl(repo, prNumber);
     const prTicketIds = extractPrTicketIds({ branch, title });
     const packs = [];
+    const readBasePlansImpl = basePlanReader({ repo, baseRef: baseBranch, listBasePlanPathsImpl, fetchFileAtRefImpl });
     for (const [slug, touchedFiles] of touched) {
       const pack = await resolvePackLiveness({
         repo,
@@ -637,6 +737,8 @@ async function resolveLivePackRemediationContext({
         headRef: headRef || branch,
         fetchFileAtRefImpl,
         readActiveDagRunsImpl,
+        readBasePlansImpl,
+        sleepImpl,
       });
       if (!pack.planId && !pack.inconclusive) continue;
       packs.push({ ...pack, ownPack: prTicketIds.some((id) => pack.ticketIds.includes(id)), touchedFiles });
@@ -668,6 +770,7 @@ async function applyLivePackCrossEditReview(reviewText, {
   let findings;
   let exemptions = [];
   let waiverAudit = '';
+  let packFacts = [];
   try {
     const review = await evaluateImpl({
       repo,
@@ -680,6 +783,10 @@ async function applyLivePackCrossEditReview(reviewText, {
       labels: currentLabels,
     });
     findings = review.findings;
+    packFacts = (review.packs || []).map((pack) => ({
+      slug: pack.slug, planId: pack.planId, live: pack.live,
+      inconclusive: pack.inconclusive, reason: pack.reason, retryCount: pack.retryCount ?? 0,
+    }));
     exemptions = review.exemptions || [];
     for (const entry of exemptions) {
       log?.error?.(
@@ -715,7 +822,9 @@ async function applyLivePackCrossEditReview(reviewText, {
         `runs=${finding.run_ids.join(',') || '<inconclusive>'} files=${finding.touched_files.join(', ')}`,
     );
   }
-  return appendLivePackStampExemptions(applyLivePackCrossEditFindings(reviewText, findings), exemptions) + waiverAudit;
+  const facts = packFacts.length > 0
+    ? `\n\n## Live Pack Check Facts\n\n\`\`\`json\n${JSON.stringify(packFacts, null, 2)}\n\`\`\`\n` : '';
+  return appendLivePackStampExemptions(applyLivePackCrossEditFindings(reviewText, findings), exemptions) + waiverAudit + facts;
 }
 
 // Remediation entry point for a follow-up job. `execFileImpl` is threaded to
@@ -740,6 +849,7 @@ function resolveLivePackContextForJob({ job, execFileImpl = execFileAsync, readA
       return title;
     },
     fetchFileAtRefImpl: (repo, path, ref) => fetchRepoFileAtRef(repo, path, ref, { execFileImpl }),
+    listBasePlanPathsImpl: (repo, ref) => listBasePlanPaths(repo, ref, { execFileImpl }),
   });
 }
 
@@ -759,6 +869,7 @@ export {
   formatLivePackRemediationContext,
   inconclusiveFindingsForDiff,
   listPullRequestFiles,
+  listBasePlanPaths,
   loadPackPlan,
   resolveLivePackContextForJob,
   resolveLivePackRemediationContext,

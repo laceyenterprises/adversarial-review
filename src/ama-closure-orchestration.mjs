@@ -2482,6 +2482,7 @@ async function dispatchAmaClosureFor({
       authoritativeReviewerLogins,
       dismissStaleRequestChangesOnResolved,
       hamTerminalRemediationValidated,
+      hamTerminalRemediationAudit: hamTerminalRemediationEvidenceOptions?.hamTerminalRemediationGroundTruth?.auditComment,
       sharedNextAction: shared,
       passSnapshot,
       onGateSnapshot: observeDaemonGate,

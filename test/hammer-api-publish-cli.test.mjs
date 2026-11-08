@@ -266,7 +266,7 @@ const commit = sha => {
 };
 if (args[0] === 'pr' && args[1] === 'comment') {
   const comments = JSON.parse(fs.readFileSync(commentsPath));
-  comments.push({ id: comments.length + 1, user: { login: 'hammer-worker' }, body: args[args.indexOf('--body') + 1] });
+  comments.push({ id: comments.length + 1, user: { login: 'hammer-worker' }, created_at: '2026-01-02T00:00:00Z', body: args[args.indexOf('--body') + 1] });
   fs.writeFileSync(commentsPath, JSON.stringify(comments)); output({ id: 1 });
 } else if (args[0] !== 'api') fail('unexpected fake service command');
 else if (args[1] === 'graphql') {
@@ -309,7 +309,7 @@ else if (args[1] === 'graphql') {
     const comments = JSON.parse(fs.readFileSync(commentsPath));
     const bodyField = args.find(arg => arg.startsWith('body='));
     if (bodyField) {
-      const comment = { id: comments.length + 1, user: { login: 'hammer-worker' }, body: bodyField.slice(5) };
+      const comment = { id: comments.length + 1, user: { login: 'hammer-worker' }, created_at: '2026-01-02T00:00:00Z', body: bodyField.slice(5) };
       comments.push(comment); fs.writeFileSync(commentsPath, JSON.stringify(comments)); output(comment);
     } else output(args.includes('--slurp') ? [comments] : comments);
   } else if (path.includes('/compare/')) {

@@ -316,6 +316,8 @@ ham_refresh_github_gate_once() {
   POST_REMEDIATION_SHA="$POST_REMEDIATION_SHA" \
   HAM_REQUIRES_UP_TO_DATE="${HAM_REQUIRES_UP_TO_DATE:-1}" \
   HAM_BRANCH_PROTECTION_REQUIRED="$HAM_BRANCH_PROTECTION_REQUIRED" \
+  HAM_REVIEW_PROOF_REQUIRED="$((1 - ham_wait_only))" \
+  HAM_REVIEW_VERDICT_FILE="${HAM_VERDICT_FILE:-}" \
   /usr/bin/perl -e 'alarm shift; exec @ARGV' "$gate_timeout" "$HAM_NODE_BIN" --input-type=module <<'NODE' > "$HAM_GATE_JSON"
 import { fetchHammerPr } from '<<ROOT_DIR>>/src/hammer-pr-read.mjs';
 import { createHistoryReader } from '<<ROOT_DIR>>/src/ama/history-reader.mjs';
@@ -324,11 +326,18 @@ import { loadEffectiveMergeAuthorityConfig } from '<<ROOT_DIR>>/src/ama/effectiv
 import { execGhWithRetry } from '<<ROOT_DIR>>/src/gh-cli.mjs';
 import { evaluateMergeEligibility } from '<<ROOT_DIR>>/src/ama/merge-eligibility.mjs';
 import { classifyCheckRollup, latestCheckRollupItems } from '<<ROOT_DIR>>/src/checks-summary.mjs';
+import { readFileSync } from 'node:fs';
+import { terminalReviewProofMatches } from '<<ROOT_DIR>>/src/ama/reviewer-authority.mjs';
+import { createReviewCurrencyReader } from '<<ROOT_DIR>>/src/ama/review-currency.mjs';
 
 const repo = '<<REPO>>';
 const prNumber = Number('<<PR_NUMBER>>');
 const expectedHead = process.env.POST_REMEDIATION_SHA;
-const rollup = await fetchHammerPr(repo, prNumber);
+const reviewProofRequired = process.env.HAM_REVIEW_PROOF_REQUIRED === '1';
+const rollup = await fetchHammerPr(repo, prNumber, { withReviews: snapshot =>
+  reviewProofRequired && classifyCheckRollup(snapshot.checks || []) === 'SUCCESS'
+    && snapshot.state === 'OPEN' && snapshot.headSha === expectedHead,
+});
 const checks = Array.isArray(rollup.checks)
   ? rollup.checks
   : Array.isArray(rollup.statusCheckRollup)
@@ -344,11 +353,10 @@ const mergeable = String(rollup.mergeable || '').toUpperCase() === 'MERGEABLE';
 const notBehind = String(rollup.mergeStateStatus || '').toUpperCase() !== 'BEHIND';
 const state = String(rollup.state || '').toUpperCase();
 const open = state === 'OPEN';
-// MSM-02: the GitHub-side gate (required checks green + mergeable + head-match)
-// is the shared merge-eligibility predicate. Verdict and lease are gated upstream
-// for this call site — ama-check emits the verdict into /tmp verdict.json and the
-// shell hard-checks HAM_MERGE_LEASE_HELD before reaching here — so they are passed
-// as already-satisfied; `ok` stays exactly the pre-MSM-02 GitHub gate.
+// MSM-02: checks, mergeability and head matching use the shared predicate.
+// The shell holds the lease and ama-check established the verdict upstream.
+// HAMLATEAUDIT-01 also rechecks that verdict's review evidence here: unchanged
+// source and green CI cannot keep an older audit valid after changed findings.
 // A BEHIND head only blocks when the base branch requires the PR to be up to
 // date (required_status_checks.strict). When the shell resolved no strict rule
 // (HAM_REQUIRES_UP_TO_DATE=0), pass requiresUpToDateBranch:false so a
@@ -360,9 +368,21 @@ const cfg = loadEffectiveMergeAuthorityConfig({ rootDir: '<<ROOT_DIR>>' });
 const primaryChange = checksConclusion === 'SUCCESS' ? await fetchPrimaryChange({ repo, prNumber, headSha: expectedHead, rootDir: '<<ROOT_DIR>>',
   get: createHistoryReader(),
 }) : null;
+let terminalReviewProof = null;
+if (reviewProofRequired && checksConclusion === 'SUCCESS' && open && headMatches) {
+  const verdict = JSON.parse(readFileSync(process.env.HAM_REVIEW_VERDICT_FILE, 'utf8'));
+  const get = createHistoryReader();
+  const currency = createReviewCurrencyReader({ repo, prNumber, get });
+  terminalReviewProof = await terminalReviewProofMatches({
+    reviews: rollup.reviews, headSha: expectedHead,
+    validatedAt: verdict.trace?.hamTerminalRemediation?.auditComment?.createdAt,
+    compare: (from, to) => get(`repos/${repo}/compare/${from}...${to}`), currency,
+  });
+}
 // Pending/red checks cannot merge. Defer preservation and cost evaluation until
 // green, when real exact-head evidence is fetched; never synthesize approval.
 const eligibility = evaluateMergeEligibility({
+  terminalReviewProof,
   primaryChange,
   requirePrimaryChange: checksConclusion === 'SUCCESS',
   strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
@@ -384,6 +404,7 @@ const primaryIntent = primaryChange ? checkPrimaryChange(primaryChange, expected
 console.log(JSON.stringify({
   ok: eligibility.eligible,
   reasons: eligibility.reasons,
+  terminalReviewProof,
   primaryChangeReason: primaryChange?.reason || primaryIntent?.detail || null,
   // REVERSALREBASE-01: the closing status names the one missing piece.
   primaryChangeMissingEvidence: primaryIntent?.missingEvidence || null,
@@ -626,6 +647,12 @@ while :; do
     echo "HAM race: live PR head moved off validated head; releasing lease without merge or re-dispatch" >&2
     HAM_REMOTE_CI_STATUS=live-head-moved
     ham_append_terminal_audit superseded live-head-moved-before-merge || true
+    ham_release_merge_lease
+    return 20
+  fi
+  if jq -e '.terminalReviewProof.ok == false' "$HAM_GATE_JSON" >/dev/null; then
+    HAM_PHASE_OUTCOME=$(jq -r '.terminalReviewProof.reason' "$HAM_GATE_JSON")
+    ham_append_terminal_audit deferred "$HAM_PHASE_OUTCOME" || true
     ham_release_merge_lease
     return 20
   fi

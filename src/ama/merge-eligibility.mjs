@@ -49,6 +49,8 @@ export const ELIGIBLE_MERGE_VERDICTS = Object.freeze([
  * do a stable `reasons[0]` "primary blocker" read.
  */
 export const MERGE_ELIGIBILITY_REASONS = Object.freeze([
+  'review-changed-since-validation',
+  'terminal-review-evidence-unavailable',
   'ci-cost-read-failed',
   'ci-cost-check-failed',
   'ci-cost-unauthorized',
@@ -72,6 +74,7 @@ export const MERGE_ELIGIBILITY_REASONS = Object.freeze([
  *
  * Plain snapshot of already-fetched values. No field triggers I/O.
  *
+ * @property {{ok: boolean, reason?: string}=} terminalReviewProof Live applicability of the terminal audit's review evidence.
  * @property {boolean=} strictNonBlockingRemediation Effective policy for non-blocking reversal waivers.
  * @property {string=}  verdict         Normalized verdict token. Eligible when it is
  *                                      one of {@link ELIGIBLE_MERGE_VERDICTS}; else
@@ -250,6 +253,7 @@ function headMatches(state) {
  */
 export function evaluateMergeEligibility(state = {}) {
   const reasons = [];
+  if (state.terminalReviewProof?.ok === false) reasons.push(state.terminalReviewProof.reason);
   let guardReversals = [];
   let derivedChanges = [];
   if (state.primaryChange || state.requirePrimaryChange === true) {

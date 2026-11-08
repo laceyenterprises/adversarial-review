@@ -469,6 +469,7 @@ function makeExpectedRollup() {
     reviews: [
       {
         id: 'PRR_kw1',
+        commitId: 'a'.repeat(40),
         author: { login: 'codex-reviewer-lacey' },
         body: 'Looks good with one note.',
         state: 'COMMENTED',
@@ -476,6 +477,7 @@ function makeExpectedRollup() {
       },
       {
         id: 'PRR_kw2',
+        commitId: 'b'.repeat(40),
         author: { login: 'claude-reviewer-lacey' },
         body: 'Please keep the fallback path for one release.',
         state: 'CHANGES_REQUESTED',
@@ -545,7 +547,7 @@ function buildGraphqlResponse(expected, {
             },
           },
           reviews: {
-            nodes: reviews,
+            nodes: reviews.map(({ commitId, ...review }) => ({ ...review, commit: { oid: commitId } })),
             pageInfo: {
               hasNextPage: reviewsHasNextPage,
               endCursor: reviewsEndCursor,
@@ -640,6 +642,7 @@ function makeGraphqlExecStub(expected, { pagination = false } = {}) {
     assert.equal(args.includes('graphql'), true);
     const vars = parseGhArgs(args);
     const query = String(vars.query || '');
+    if (query.includes('reviews(first:')) assert.match(query, /commit\s*\{\s*oid\s*\}/);
     if (!pagination || (!vars.commentsAfter && !vars.reviewsAfter && !vars.checksAfter)) {
       return {
         stdout: JSON.stringify(buildGraphqlResponse(expected, {
@@ -988,6 +991,7 @@ function makeLegacyExecStub(expected) {
           body: review.body,
           state: review.state,
           submitted_at: review.submittedAt,
+          commit_id: review.commitId,
         })))}`
       };
     }
@@ -999,6 +1003,7 @@ function makeLegacyExecStub(expected) {
           body: review.body,
           state: review.state,
           submitted_at: review.submittedAt,
+          commit_id: review.commitId,
         }))),
       };
     }
@@ -1953,6 +1958,7 @@ function makeLargeExpectedRollup() {
     })),
     reviews: Array.from({ length: 145 }, (_, index) => ({
       id: `PRR_${index + 1}`,
+      commitId: 'a'.repeat(40),
       author: { login: `reviewer-${index + 1}` },
       body: `Review ${index + 1}`,
       state: index % 2 === 0 ? 'COMMENTED' : 'APPROVED',
@@ -1978,6 +1984,7 @@ function makeAsymmetricExpectedRollup() {
     })),
     reviews: Array.from({ length: 250 }, (_, index) => ({
       id: `PRR_${index + 1}`,
+      commitId: 'a'.repeat(40),
       author: { login: `reviewer-${index + 1}` },
       body: `Review ${index + 1}`,
       state: index % 2 === 0 ? 'COMMENTED' : 'APPROVED',

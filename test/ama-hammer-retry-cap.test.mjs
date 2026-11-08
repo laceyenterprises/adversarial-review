@@ -1473,6 +1473,13 @@ test('same-head terminal HAM remediation auto-merges when structural gates pass'
       fetchPullRequestRollupImpl: async () => ({
         state: 'OPEN',
         headSha: REVIEWED_HEAD,
+        reviews: [{
+          user: { login: 'lacey-claude-reviewer' },
+          commit_id: REVIEWED_HEAD,
+          submitted_at: '2026-07-06T12:00:00Z',
+          state: 'CHANGES_REQUESTED',
+          body: 'Auth path not threaded in src/auth.js.',
+        }],
         mergeable: 'MERGEABLE',
         mergeStateStatus: 'CLEAN',
         labels: [],
@@ -1553,6 +1560,13 @@ test('same-head terminal HAM remediation leaves terminal breadcrumb when merge s
       fetchPullRequestRollupImpl: async () => ({
         state: 'OPEN',
         headSha: REVIEWED_HEAD,
+        reviews: [{
+          user: { login: 'lacey-claude-reviewer' },
+          commit_id: REVIEWED_HEAD,
+          submitted_at: '2026-07-06T12:00:00Z',
+          state: 'CHANGES_REQUESTED',
+          body: 'Auth path not threaded in src/auth.js.',
+        }],
         mergeable: 'MERGEABLE',
         mergeStateStatus: 'CLEAN',
         labels: [],
@@ -1717,6 +1731,13 @@ test('same-head terminal HAM remediation records merged audit before nonfatal cl
       fetchPullRequestRollupImpl: async () => ({
         state: 'OPEN',
         headSha: REVIEWED_HEAD,
+        reviews: [{
+          user: { login: 'lacey-claude-reviewer' },
+          commit_id: REVIEWED_HEAD,
+          submitted_at: '2026-07-06T12:00:00Z',
+          state: 'CHANGES_REQUESTED',
+          body: 'Auth path not threaded in src/auth.js.',
+        }],
         mergeable: 'MERGEABLE',
         mergeStateStatus: 'CLEAN',
         labels: [],

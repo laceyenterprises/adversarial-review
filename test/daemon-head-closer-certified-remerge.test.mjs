@@ -107,6 +107,11 @@ test('daemon lands the closer own-commit head over a non-blocking-only settled-s
         resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: true }),
         attemptDaemonCleanMergeImpl: async (args) => {
           captured = args;
+          const liveGate = await args.fetchLiveGateImpl();
+          assert.equal(liveGate.terminalReviewProof, null,
+            'closer self-certification requires no HAM audit cutoff');
+          assert.equal(liveGate.terminalReviewValidated, false);
+          assert.equal(liveGate.candidateHead, CLOSER_HEAD);
           return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true, attempts: 1 };
         },
       }),

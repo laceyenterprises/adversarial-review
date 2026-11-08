@@ -128,7 +128,8 @@ async function readHammerPr(repo, prNumber, { withChecks, withReviews, get, cach
     snapshot.statusCheckRollup = checks;
     snapshot.checks = checks;
   }
-  if (withReviews) {
+  // Callers may defer review pagination until the already-read checks permit merge.
+  if (typeof withReviews === 'function' ? withReviews(snapshot) : withReviews) {
     snapshot.reviews = [];
     for (let page = 1; ; page++) {
       const reviews = await get(`repos/${repo}/pulls/${prNumber}/reviews?per_page=100&page=${page}`);

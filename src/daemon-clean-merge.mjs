@@ -9,6 +9,8 @@ import { guardStackedBase } from './ama/stacked-base.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { hammerAttestationChain } from './ama/hammer-head-validation.mjs';
+import { terminalReviewProofMatches } from './ama/reviewer-authority.mjs';
+import { createReviewCurrencyReader } from './ama/review-currency.mjs';
 import { createHistoryReader } from './ama/history-reader.mjs';
 import { verifyNoCiConfigured } from './ama/no-ci-configured.mjs';
 import { observeClosureLag } from './ama/closure-lag.mjs';
@@ -438,6 +440,7 @@ async function runDaemonCleanMergeAttemptInner({
   authoritativeReviewerLogins = [],
   dismissStaleRequestChangesOnResolved = true,
   hamTerminalRemediationValidated = false,
+  hamTerminalRemediationAudit = null,
   evaluateMovedHeadClobberGuardImpl = evaluateMovedHeadClobberGuard,
   appendAmaAuditAttemptImpl = appendAmaAuditAttempt,
   clobberGuardNowImpl = () => new Date().toISOString(),
@@ -979,7 +982,7 @@ async function runDaemonCleanMergeAttemptInner({
         merged: false, skipMergeAgent: true, recoveryWait: true, retryAfterMs: 30_000 };
     }
   }
-  const terminalReviewHead = (certifiedNonCleanHead || hamTerminalRemediationValidated) ? hamAuditHead : null;
+  const terminalReviewHead = (hamTerminalRemediationHead || hamTerminalRemediationValidated) ? hamAuditHead : null;
   const initialGate = {
     requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
     docsFastPath,
@@ -1164,11 +1167,31 @@ async function runDaemonCleanMergeAttemptInner({
         throw error;
       });
       const state = String(rollup?.state || '');
+      let terminalReviewProof = null;
+      if (terminalReviewHead && state.toUpperCase() === 'OPEN') {
+        let validation = hamTerminalRemediationAudit;
+        if (!validation) {
+          try {
+            const entry = readAmaAuditEntryImpl(hqRoot, repoPath, prNumber, terminalReviewHead);
+            validation = entry?.attempts?.filter(attempt =>
+              isHamTerminalRemediationValidatedAttempt(attempt, terminalReviewHead)).at(-1)
+              ?.eligibilityTrace?.trace?.hamTerminalRemediation?.auditComment;
+          } catch { /* No matching audit is unavailable proof. */ }
+        }
+        const get = createHistoryReader({ execFileImpl, env, signal });
+        terminalReviewProof = await terminalReviewProofMatches({
+          reviews: rollup.reviews, headSha: terminalReviewHead,
+          validatedAt: validation?.createdAt,
+          compare: (from, to) => get(`repos/${repoPath}/compare/${from}...${to}`),
+          currency: createReviewCurrencyReader({ repo: repoPath, prNumber, get, comments: rollup.comments }),
+        });
+      }
       const freshDocs = docsFastPath ? await readDocsFastPathImpl({ repoPath, prNumber,
         subject: { headSha: validatedHead }, live: true, execFileImpl, env, execGhWithRetryImpl }) : null;
       const freshBootstrap = await bootstrapFor(rollup);
       ciMergePathPending = mergePathPendingFor(rollup);
       return reportGateSnapshot({
+        terminalReviewProof,
         requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
         ciRecoveryPending: ciMergePathPending,
         terminalReviewValidated: Boolean(terminalReviewHead

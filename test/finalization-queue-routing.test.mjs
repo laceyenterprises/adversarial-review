@@ -279,17 +279,34 @@ test('HAMLANEWAIT-01: deadline exhaustion is lane-busy with no merge or durable 
 test('HAMLANEWAIT-01: waking rechecks lane transfer and never invokes the old legacy route', { timeout: 5000 }, async t => {
   const f = fixture(t), adapter = resolveQueueOwnerAdapter(f.store);
   assert.equal((await transfer(f, queue)).ok, true);
-  const release = adapter.tryLock(lane);
-  const pending = runLegacyLaneWrite({ rootDir: f.rootDir, ...lane, readConfig: () => ({}),
-    deadline: new Date(Date.now() + 3000).toISOString(), exec: () => assert.fail('stale route must refuse') });
-  // Watch registration is synchronous; yield a native event-loop turn before release.
-  await new Promise(resolve => setImmediate(resolve));
-  const started = performance.now();
-  release();
-  const result = await pending;
+  let release = adapter.tryLock(lane);
+  assert.equal(typeof release, 'function');
+  t.after(() => release?.());
+  let clockReads = 0;
+  const result = await runLegacyLaneWrite({ rootDir: f.rootDir, ...lane, readConfig: () => ({}),
+    deadline: '2026-10-25T00:00:03.000Z', now: () => {
+      clockReads++;
+      if (clockReads === 1) {
+        // The initial tryLock has refused; waitForLock is reading its budget.
+        assert.equal(adapter.tryLock(lane), null);
+        return at;
+      }
+      if (clockReads === 2) {
+        // Hand off during the waiter's post-subscription acquisition recheck.
+        // This pins the transfer fence without depending on fs.watch delivery
+        // or host scheduling speed. Native wake delivery has a sibling test in
+        // finalization-queue-owner.test.mjs.
+        release();
+        release = null;
+      }
+      return '2026-10-25T00:00:01.000Z';
+    }, exec: () => assert.fail('stale route must refuse') });
+  assert.ok(clockReads >= 2, 'must pass through the contended wait handoff');
+  assert.equal(release, null, 'the waiter must reach the acquisition recheck');
   assert.equal(result.reason, 'lane-transfer-required');
-  assert.ok(performance.now() - started < 1500, 'release wake must precede the polling fallback');
   assert.equal(result.outcome, undefined);
+  assert.deepEqual(f.routing.read(lane).legacyWriters, []);
+  assert.equal(f.routing.read(lane).route.executor, 'queue-v2');
 });
 
 test('HAMLANEWAIT-01: configured queue-v2 route retains immediate contention refusal', async t => {

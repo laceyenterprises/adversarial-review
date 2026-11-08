@@ -67,7 +67,26 @@ jobs:
         # `npm ci` is preferred over `npm install` so the lockfile is honored
         # exactly and an out-of-date lockfile fails CI loudly rather than
         # silently drifting.
-        run: npm ci
+        # Temporary diagnosis on the working branch; removed before PR publication.
+        env:
+          V: '1'
+        run: |
+          node --version
+          npm --version
+          g++ --version
+          version=$(node -p 'process.versions.node')
+          for attempt in 1 2 3 4 5 6; do
+            echo "Fresh-cache default install attempt $attempt"
+            rm -rf "$HOME/.cache/node-gyp/$version"
+            if npm ci --loglevel verbose; then
+              echo "Default install passed"
+            else
+              echo "Default install failed; compare serialized foreground build"
+              break
+            fi
+          done
+          rm -rf "$HOME/.cache/node-gyp/$version"
+          npm ci --foreground-scripts --loglevel verbose
 
       - name: Run CDM review-gate re-derivation guard
         # CDM-07AR: verdict/head/mergeability gate facts must come from

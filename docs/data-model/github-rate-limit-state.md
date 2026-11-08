@@ -34,6 +34,10 @@ attempts and separate `github_request` rows with `unit: http_response`,
 These additive rows count actual metered CLI/Octokit responses; logical
 attempts and GraphQL points are distinct units. Older missing consumer fields
 mean unattributed. Child adapters inherit `GHO_API_CONSUMER` for correlation.
+Broker verification also emits `unit: credential_binding` rows associating a
+token digest with its validated `app`/`installation`, so a combined report can
+group child env-token requests with the parent's installation. Bindings are
+metadata, not HTTP requests or logical attempts.
 
 Every admission preflight and every header observation names the credential
 that sends the request (LAC-2075). This includes the outer telemetry wrappers

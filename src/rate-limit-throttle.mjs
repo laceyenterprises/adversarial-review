@@ -45,6 +45,10 @@ function registerGitHubInstallationToken(token, appId, installationId) {
   if (!token || !/^\d+$/.test(String(appId)) || !/^\d+$/.test(String(installationId))) return;
   const digest = createHash('sha256').update(String(token)).digest('hex').slice(0, 24);
   installationCredentials.set(digest, `installation-${appId}-${installationId}`);
+  recordApiCall({ category: 'other', status: 'bound', extra: {
+    unit: 'credential_binding', credential: `token-${digest}`,
+    app: String(appId), installation: String(installationId),
+  } });
   while (installationCredentials.size > 256) installationCredentials.delete(installationCredentials.keys().next().value);
 }
 

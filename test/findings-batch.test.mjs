@@ -1,6 +1,10 @@
 import './helpers/dispatch-read-fixture.mjs';
 import test from 'node:test';
 import { spawn } from 'node:child_process';
+import childProcess from 'node:child_process';
+import os from 'node:os';
+import { syncBuiltinESMExports } from 'node:module';
+import { resetLoadAwareTimeoutCachesForTesting } from '../src/load-aware-timeout.mjs';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -555,7 +559,7 @@ test('FINDINGSBATCH-01 hourly settlement clears mixed outcomes without claiming 
   assert.equal(launches, 2);
 });
 
-async function publicationFixture(t, { advice = false } = {}) {
+async function publicationFixture(t, { advice = false, expectedTimeout = null } = {}) {
   const f = fixture(t);
   f.pass(1, advice ? adviceOnly : body);
   f.db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
@@ -564,6 +568,7 @@ async function publicationFixture(t, { advice = false } = {}) {
   const dispatches = [];
   await runFindingBatches({ ...f, env, day: '2026-01-02', execFileImpl: async (_bin, args, options) => {
     assert.ok(options.timeout >= 900_000);
+    if (expectedTimeout !== null) assert.equal(options.timeout, expectedTimeout);
     dispatches.push(args);
     return { stdout: '{"launchRequestId":"fixture-initial"}' };
   } });
@@ -603,6 +608,7 @@ async function publicationFixture(t, { advice = false } = {}) {
       // Model provisioning that takes 496 seconds without a real wall-clock
       // wait. Both submissions must survive the former fixed 60-second kill.
       assert.ok(options.timeout >= 900_000);
+      if (expectedTimeout !== null) assert.equal(options.timeout, expectedTimeout);
       dispatches.push(args);
       launches.push({ ...launch, launch_request_id: 'fixture-publish', status: 'running' });
       return { stdout: '{"launchRequestId":"fixture-publish"}' };
@@ -612,6 +618,27 @@ async function publicationFixture(t, { advice = false } = {}) {
   return { ...f, batch, outputPath, result, status, dispatches, launches, publication, options, pr,
     run: overrides => runFindingBatches({ ...options, ...overrides }) };
 }
+
+test('initial and publication dispatch timeouts scale beyond the one-hour default cap under load', async t => {
+  const cores = os.cpus().length;
+  t.mock.method(os, 'loadavg', () => [cores * 3, cores * 3, cores * 3]);
+  t.mock.method(childProcess, 'execFileSync', (command, args) => {
+    assert.equal(command, '/bin/ps');
+    assert.deepEqual(args, ['-A', '-o', '%cpu=']);
+    return `${cores * 100}\n`;
+  });
+  syncBuiltinESMExports();
+  resetLoadAwareTimeoutCachesForTesting();
+  t.after(() => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    resetLoadAwareTimeoutCachesForTesting();
+  });
+  const f = await publicationFixture(t, { expectedTimeout: 5_400_000 });
+  assert.equal(f.dispatches.length, 1);
+  await f.run();
+  assert.equal(f.dispatches.length, 2, 'publication uses the same uncapped load scaling');
+});
 
 async function nativePublicationFixture(t) {
   const f = await publicationFixture(t);

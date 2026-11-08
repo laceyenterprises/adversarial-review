@@ -7664,6 +7664,16 @@ test('CLAUDESTEERON-01 mirrors batch steering activation, rollback and launch ov
       for (const loader of [loadConfig, loadConfigRuntime]) {
         assert.equal(loader({ topPath, env: {} }).get(key), value);
         assert.equal(loader({ topPath, env: { HQ_CLAUDE_BATCH_STEER: value ? '0' : '1' } }).get(key), !value);
+        const canonical = 'AGENT_OS_WORKER_POOL_DISPATCH_CLAUDE_BATCH_STEER_ENABLED';
+        assert.equal(loader({ topPath, env: { [canonical]: value ? '0' : '1' } }).get(key), !value);
+        assert.equal(loader({ topPath, env: {
+          [canonical]: value ? '1' : '0',
+          HQ_CLAUDE_BATCH_STEER: value ? '1' : '0',
+        } }).get(key), value, 'matching canonical and alias values are accepted');
+        assert.throws(() => loader({ topPath, env: {
+          [canonical]: value ? '1' : '0',
+          HQ_CLAUDE_BATCH_STEER: value ? '0' : '1',
+        } }), { name: 'AgentOSConfigError', key }, 'conflicting environment values fail closed');
       }
     }
     for (const value of ['true', 1, null, [], {}]) {

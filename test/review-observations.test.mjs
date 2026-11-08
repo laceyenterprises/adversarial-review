@@ -4,9 +4,80 @@ import Database from 'better-sqlite3';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { readReviewObservations } from '../src/review-observations.mjs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { beginReviewerPass, completeReviewerPass } from '../src/reviewer-pass-tokens.mjs';
+
+test('CLI validates stdin and emits bounded public errors with failing exit status', t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'review-cli-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const request = { rootDir, selector: { kind: 'reviews' }, repositories: ['example/repo'] };
+  const run = input => spawnSync(process.execPath,
+    [fileURLToPath(new URL('../src/review-observations-cli.mjs', import.meta.url))],
+    { input, encoding: 'utf8', timeout: 10_000 });
+  mkdirSync(join(rootDir, 'data'));
+  const db = new Database(join(rootDir, 'data/reviews.db'));
+  try {
+    ensureReviewStateSchema(db);
+    db.prepare(`INSERT INTO reviewed_prs(repo, pr_number, review_status, pr_state, reviewed_at, reviewer)
+      VALUES (?, ?, 'posted', 'open', '2026-10-01T00:00:00Z', 'fixture')`).run('Example/Repo', 1);
+    beginReviewerPass(rootDir, { repo: 'example/repo', prNumber: 1, attemptNumber: 1,
+      passKind: 'first-pass', reviewerClass: 'codex', startedAt: '2026-10-01T00:00:00Z' });
+    completeReviewerPass(rootDir, { repo: 'example/repo', prNumber: 1, attemptNumber: 1,
+      passKind: 'first-pass', status: 'completed', endedAt: '2026-10-02T00:00:00Z' });
+    db.prepare('UPDATE reviewer_passes SET body_md=?, verdict=? WHERE repo=? AND attempt_number=?')
+      .run('completed body', 'approved', 'example/repo', 1);
+    db.prepare('INSERT INTO pr_merge_closeouts(repo, pr_number, closeout_body_md, closeout_posted_at) VALUES (?, ?, ?, ?)')
+      .run('example/repo', 1, 'merged body', '2026-10-04T00:00:00Z');
+  } finally {
+    db.close();
+  }
+  const valid = run(JSON.stringify(request));
+  assert.equal(valid.error, undefined);
+  assert.equal(valid.status, 0, valid.stderr);
+  assert.equal(valid.stderr, '');
+  const { observed_at: observedAt, ...projection } = JSON.parse(valid.stdout);
+  assert.equal(new Date(observedAt).toISOString(), observedAt);
+  const { observed_at: _expectedObservedAt, ...expected } = readReviewObservations(request);
+  assert.deepEqual(projection, expected);
+  assert.equal(projection.items.length, 1);
+  assert.equal(projection.items[0].review_body, 'completed body');
+  assert.equal(projection.items[0].verdict, 'approved');
+  assert.equal(projection.items[0].attempt_number, 1);
+  assert.equal(projection.items[0].closeout_body, 'merged body');
+  assert.equal(projection.items[0].closeout_posted_at, '2026-10-04T00:00:00Z');
+  assert.equal(projection.items[0].pr_state, 'open');
+  for (const [input, reason] of [
+    ['{private-invalid-json', 'invalid review request JSON'],
+    [' '.repeat(32769), 'request too large'],
+    [JSON.stringify({ ...request, selector: { kind: 'unknown' } }), 'invalid review selector'],
+    [JSON.stringify({ ...request, repositories: ['*'] }), 'review repository grant required'],
+    ['null', 'review evidence unavailable'],
+  ]) {
+    const result = run(input);
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr, `${reason}\n`);
+    assert.doesNotMatch(result.stderr, /private-invalid-json|review-cli-/);
+  }
+  const encoded = JSON.stringify(request);
+  assert.equal(run(encoded.padEnd(32768, ' ')).status, 0, 'exact size limit remains accepted');
+  // The transport limit counts UTF-16 code units, rather than UTF-8 bytes.
+  for (const character of ['é', '😀']) {
+    const unicode = JSON.stringify({ ...request, padding: character }).padEnd(32768, ' ');
+    assert.equal(unicode.length, 32768);
+    assert.ok(Buffer.byteLength(unicode, 'utf8') > 32768);
+    const atLimit = run(unicode);
+    assert.equal(atLimit.status, 0, atLimit.stderr);
+    const overLimit = run(`${unicode} `);
+    assert.equal(overLimit.status, 1);
+    assert.equal(overLimit.stdout, '');
+    assert.equal(overLimit.stderr, 'request too large\n');
+  }
+});
 
 test('real producer schema: scoped pages, latest completed pass, nullable closeout and end cutoff', () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'review-projection-'));

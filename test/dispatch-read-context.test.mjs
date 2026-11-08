@@ -15,9 +15,10 @@ async function freshProcess(env, script) {
   for (const key of Object.keys(childEnv)) {
     if (/^(APP_CONTRACT_|HCP_|HQ_LAUNCH_REQUEST_ID$|ADVERSARIAL_(DISPATCH_READS|WORKER_OBSERVATIONS)_ENABLED$)/.test(key)) delete childEnv[key];
   }
-  // Context fixtures must not depend on host load or CPU-sampling permissions.
-  const deterministicScript = `import os from 'node:os'; os.loadavg = () => [0, 0, 0];\n${script}`;
-  const child = spawn(process.execPath, ['--input-type=module', '-e', deterministicScript], {
+  // Cold registration is independent of the host CPU sampler. Keep the child
+  // deterministic even where process-table access is restricted.
+  const isolatedScript = `import os from 'node:os'; os.loadavg = () => [0, 0, 0];\n${script}`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', isolatedScript], {
     env: { ...childEnv, ...env }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000,
   });
   let stdout = '', stderr = '';
@@ -54,8 +55,8 @@ test('cold composition registers the existing review app before authenticated sy
   t.after(() => new Promise(resolve => server.close(resolve)));
   const { code, result } = await freshProcess({ HQ_ROOT: root,
     APP_CONTRACT_ENDPOINT_URL: `http://127.0.0.1:${server.address().port}` }, `
-    import { prepareDispatchReadContext, readDispatchLaunchesSync } from ${JSON.stringify(client)};
-    import { readHostIdentitySync } from ${JSON.stringify(files)};
+    const { prepareDispatchReadContext, readDispatchLaunchesSync } = await import(${JSON.stringify(client)});
+    const { readHostIdentitySync } = await import(${JSON.stringify(files)});
     const ready = await prepareDispatchReadContext();
     const identity = readHostIdentitySync();
     const launch = readDispatchLaunchesSync({launch_request_ids: ['fixture-launch']});
@@ -76,7 +77,7 @@ test('a missing existing bootstrap credential yields a fixed named failure in a 
   const root = mkdtempSync(join(tmpdir(), 'dispatch-context-missing-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const { code, result } = await freshProcess({ HQ_ROOT: root }, `
-    import { prepareDispatchReadContext } from ${JSON.stringify(client)};
+    const { prepareDispatchReadContext } = await import(${JSON.stringify(client)});
     const result = await prepareDispatchReadContext();
     console.log(JSON.stringify(result));
     if (!result.ok) process.exitCode = 1;

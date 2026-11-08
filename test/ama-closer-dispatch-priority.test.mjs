@@ -2227,6 +2227,49 @@ for (const evidence of ['merged signal', 'terminal audit', 'terminal audit witho
   });
 }
 
+for (const failure of ['worker-observation-scope-denied', 'worker-observation-unavailable', 'throw']) {
+  test(`remote merge with capture ${failure} reconciles terminal ownership without a retry`, t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closer-merged-capture-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const identity = { repo: 'example/repo', prNumber: 42, headSha: HEAD };
+    const now = '2026-07-20T12:00:00Z';
+    acquireAmaCloserLease({ rootDir, ...identity, now });
+    updateAmaCloserLease({ rootDir, ...identity, status: 'dispatched', lrqId: 'lrq_merged', now });
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({
+      ...identity, state: 'dispatched', launchRequestId: 'lrq_merged', retryCount: 1,
+    }));
+    const diagnostics = [];
+    let captureReads = 0;
+    let liveReads = 0;
+    const args = { rootDir, ...identity, hqRoot: rootDir, now,
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded', terminal_at: now } }),
+      readBuildCompletionSignalForPrImpl: () => {
+        captureReads++;
+        if (failure === 'throw') throw new Error('synthetic capture outage');
+        return { ok: false, reason: failure };
+      },
+      readBuildCompletionProducerEvidenceImpl: () => assert.fail('refused capture must not broaden scope'),
+      readPullRequestStateImpl: () => { liveReads++; return { state: 'MERGED', headRefOid: HEAD }; },
+      logger: { warn: line => diagnostics.push(JSON.parse(line)), info() {} },
+    };
+    assert.equal(reconcileAmaCloserLease(args), true, 'live merged state settles the real closer');
+    assert.equal(captureReads, 1);
+    assert.equal(liveReads, 1);
+    assert.equal(diagnostics[0].reason, failure.endsWith('scope-denied')
+      ? 'merge-capture-read-scope-denied' : 'merge-capture-read-unavailable');
+    const lease = readAmaCloserLease(rootDir, identity);
+    assert.equal(lease.status, 'terminal');
+    assert.equal(lease.terminalOutcome, 'succeeded', 'capture outage cannot refund a delivered merge');
+    const record = readAmaCloserDispatchRecord(rootDir, identity);
+    assert.equal(record.terminalOutcome, 'succeeded');
+    assert.equal(record.retryCount, 1);
+    assert.equal(reconcileAmaCloserLease(args), false, 'settled merge is not retried');
+    assert.equal(captureReads, 1);
+    assert.equal(liveReads, 1);
+    assert.deepEqual(readAmaCloserDispatchRecord(rootDir, identity), record);
+  });
+}
+
 for (const routing of [
   { ledgerTarget: { backend: 'postgres', databaseName: 'fixture-ledger' }, ledgerDbPath: null },
   { ledgerTarget: null, ledgerDbPath: '/fixture/custom-ledger.sqlite' },

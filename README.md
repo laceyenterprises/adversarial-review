@@ -4601,6 +4601,10 @@ merge predicates and smoke commands remain unchanged.
 
 ## Change notes
 
+- HAM PR #1735: tighten descendant termination and bounded-runner assertions, make lane-release wake tests deterministic, and exercise the review-observation CLI with persisted review and closeout evidence, including multibyte inputs at the UTF-16 code-unit size boundary. Isolate direct reviewer quota admission from builder routing and host configuration.
+
+- FINDINGS-dd4e87b5: strengthen offline test coverage for review-observation CLI input and errors, canonical Claude batch-steer environment aliases and conflict rejection, DAG input guards and producer refusals, findings dispatch timeouts under synthetic load, direct reviewer quota admission, successful Codex catalog seeding, and closer settlement after a remote merge with unavailable capture evidence. Keep cold-start and descendant-cancellation fixtures independent of the host ps executable and CPU sampling. Pin the bounded runner's unconfirmed-cleanup failure on restricted hosts while still requiring descendant termination. Release native lane locks after the fixture watch subscription enters the event loop, preserving the original deadline and stale-route assertions. Re-check historical findings against current main; production behaviour is unchanged.
+
 - FINDINGS-94c784e1: Correct the closer backlog-repair runbook to use the SDK-only CLI, pass its read activation flag and SDK session/bootstrap environment through `sudo`, describe current output and rejected database-source flags, and make dispatch-read subprocess fixtures independent of host load diagnostics.
 - HAM PR #1726: recognize negated lists with or without a serial comma, retain
   human ownership for mixed credential and approval clauses in either order,

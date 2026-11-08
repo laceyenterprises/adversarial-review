@@ -67,6 +67,9 @@ export function summarizeFindingBacklog(db, now = Date.now()) {
       .map(row => ({ ...row, oldestAgeMs: Math.max(0, now - Date.parse(row.oldestAt)) }));
     const open = db.prepare(`SELECT count(*) AS openCount,min(captured_at) AS oldestOpenAt,
       sum(batch_id IS NULL) AS unbatchedCount FROM finding_backlog WHERE outcome IS NULL`).get();
+    const batchable = db.prepare(`SELECT count(*) AS batchableCount,min(b.captured_at) AS oldestBatchableAt
+      FROM finding_backlog b JOIN reviewed_prs r USING(repo,pr_number)
+      WHERE b.outcome IS NULL AND r.pr_state='merged'`).get();
     const perDay = db.prepare(`SELECT substr(resolved_at,1,10) AS day,
       sum(outcome='applied') AS applied,sum(outcome='dropped') AS dropped
       FROM finding_backlog WHERE outcome IS NOT NULL AND resolved_at IS NOT NULL
@@ -88,20 +91,21 @@ export function summarizeFindingBacklog(db, now = Date.now()) {
       FROM finding_backlog b LEFT JOIN finding_batches a ON a.batch_id=b.batch_id`).get();
     const progress = counts ? { ...Object.fromEntries(Object.entries(counts).map(([key, value]) => [key, value || 0])),
       releasedBatches: db.prepare('SELECT count(*) AS n FROM finding_batches WHERE released_at IS NOT NULL').get().n } : null;
-    return { available: true, areas, ...open, unbatchedCount: open.unbatchedCount || 0,
+    return { available: true, areas, ...open, ...batchable, unbatchedCount: open.unbatchedCount || 0,
       oldestOpenAgeMs: open.oldestOpenAt ? Math.max(0, now - Date.parse(open.oldestOpenAt)) : 0,
+      oldestBatchableAgeMs: batchable.oldestBatchableAt ? Math.max(0, now - Date.parse(batchable.oldestBatchableAt)) : 0,
       perDay, batchErrors, progress };
   } catch (error) { return { available: false, error: error.message, areas: null }; }
 }
 
 export function findingBacklogAlert(backlog, maxAgeMs = 48 * 3600000) {
-  if (!backlog?.available || backlog.oldestOpenAgeMs <= maxAgeMs) return null;
+  if (!backlog?.available || !(backlog.oldestBatchableAgeMs > maxAgeMs)) return null;
   return {
     code: 'review:findings_backlog_overdue',
     tier: 'ticket',
     subject: 'Non-blocking findings backlog is overdue',
-    message: `${backlog.openCount} open findings; oldest is ${Math.floor(backlog.oldestOpenAgeMs / 3600000)} hours old`,
-    evidence: [`oldestOpenAt=${backlog.oldestOpenAt}`, `maxAgeMs=${maxAgeMs}`],
+    message: `${backlog.batchableCount} open findings on merged PRs; oldest is ${Math.floor(backlog.oldestBatchableAgeMs / 3600000)} hours old`,
+    evidence: [`oldestBatchableAt=${backlog.oldestBatchableAt}`, `maxAgeMs=${maxAgeMs}`],
     recommendedAction: 'Inspect progress and batch errors; ended batches release automatically. Run the operator findings batch backfill to re-batch released findings.',
     details: { ...backlog, maxAgeMs },
   };

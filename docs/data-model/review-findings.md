@@ -253,6 +253,10 @@ position to the final captured body's exact head, digest and parsed count. Its
 one-line explanation is stored in the existing backlog `reason` field while
 `outcome` remains null: deferral neither resolves nor withdraws the finding.
 Retries and duplicate passes use the existing repository/PR/head/content identity.
+The Hammer closeout comment is the durable deferral audit. Backlog reason is
+current state and can be replaced by a later outcome. Overdue alerts count only
+unresolved findings whose source PR is merged.
+
 Unavailable or stale capture fails before returning a deferral receipt. Existing
 merge enrollment and batch dispatch rules still apply; an open source PR cannot
 dispatch a backlog batch. No schema or lifecycle state is added.

@@ -13,7 +13,7 @@ import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.
 import { beginReviewerPass } from '../src/reviewer-pass-tokens.mjs';
 import { updateReviewerPassBodyCapture } from '../src/review-body-capture.mjs';
 import { collect, review as historyReview } from './helpers/hamclose-history.mjs';
-import { captureReadyFindings } from '../src/findings-backlog.mjs';
+import { captureReadyFindings, findingBacklogAlert, summarizeFindingBacklog } from '../src/findings-backlog.mjs';
 import { createHash } from 'node:crypto';
 
 const head = 'a'.repeat(40), repo = 'sample/service';
@@ -73,6 +73,31 @@ test('advisory author-line edit is deferred durably through the backlog with no 
     assert.match(rows[0].reason, /advisory finding would change reviewed author code/);
   } finally { reopened.close(); }
   assert.equal(db.prepare('SELECT count(*) n FROM finding_batches').get().n, 0);
+});
+
+test('open-PR deferrals become overdue only after the source merges', t => {
+  const { rootDir, db } = fixture(t);
+  captureReadyFindings({ rootDir, repo, prNumber: 7, headSha: head, count: 1,
+    version: createHash('sha256').update(body).digest('hex'),
+    deferredFinding: { findingNumber: 1, reason: 'Deferred.' } });
+  const now = Date.now() + 72 * 3600_000;
+  const open = summarizeFindingBacklog(db, now);
+  assert.equal(open.openCount, 1);
+  assert.equal(open.areas[0].waitingForMerge, 1);
+  assert.equal(findingBacklogAlert(open), null);
+  db.prepare("UPDATE reviewed_prs SET pr_state='merged' WHERE repo=? AND pr_number=7").run(repo);
+  assert.equal(findingBacklogAlert(summarizeFindingBacklog(db, now)).code, 'review:findings_backlog_overdue');
+});
+
+test('in-place CI and blocking repairs do not require reversal coverage', () => {
+  const target = { ...plan, kind: undefined, findingNumber: undefined };
+  const emptyReview = { ...review, body: '## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nComment only' };
+  assert.equal(checkHammerEditPlan(emptyReview,
+    { ...target, editKind: 'in-place', requiredCiRepair: true }).action, 'allow');
+  const blocking = historyReview();
+  assert.equal(checkHammerEditPlan(blocking, { ...plan, reviewedHead: blocking.commit_id,
+    editKind: 'in-place', kind: 'blocking', startLine: 45, endLine: 45 }).action, 'allow');
+  assert.equal(checkHammerEditPlan(review, { ...plan, editKind: 'in-place' }).action, 'defer');
 });
 
 test('advisory additive test is allowed and does not defer the finding', async t => {

@@ -362,16 +362,15 @@ or a required guard on the exact author head forbids the path in PRs. Restore
 it to base, then require that check to pass. Audit
 `Reversal-Authorized-By: guard:<check name>` with paths and failing/passing run
 IDs/SHAs.
-Preserve the effect of every changed region, including during CI fixes.
-Returning to base or restoring removed author code is a reversion. Syntactic
-coverage does not prove intent. Inspect the diff for bypasses and blocking issues.
+Preserve each region during CI fixes. Returning to base or restoring removals
+is a reversion. Check intent and bypasses separately.
 
 Before editing any author-introduced line, use this bounded helper on the
-authoritative review. The plan takes `reviewedHead`, `kind` (`blocking` or
-`non-blocking`), one-based `findingNumber`, `editKind` (`author-lines` or
-`additive`), and reviewed `path`, `startLine`, `endLine`. Compare primary patches:
-additive edits neither touch author lines nor neutralize their behavior. Run
-Appendix B1's owner setup through `fi` in this shell before invoking:
+review. Supply `reviewedHead`, `kind`, one-based `findingNumber`, reviewed
+`path`, `startLine`, `endLine`, and `editKind` (`author-lines`, `additive`,
+`in-place`). In-place blocking or uncited `requiredCiRepair: true` fixes
+preserve behavior; additive leaves author code intact. Run B1's owner setup
+through `fi` in this shell:
 
 ```bash
 HAM_EDIT_RC=0
@@ -382,8 +381,8 @@ if [ "$HAM_EDIT_RC" != 0 ] && [ "$HAM_EDIT_RC" != 20 ]; then exit "$HAM_EDIT_RC"
 
 Exit 0 permits the edit. Exit 20 records the non-blocking finding in the backlog
 and means make no edit. Audit the reason as deferred, never remediated or
-withdrawn. Other failures stop. Blocking and strict non-blocking reversals
-retain provenance requirements. The author-controlled PR body cannot supply
+withdrawn. On 78 hand the evidence to the DB owner. Required reversals retain
+provenance requirements. The author-controlled PR body cannot supply
 an operator decision or waive a required finding.
 For any required finding whose fix reverts primary-change lines, add one trailer
 per finding to the HAM commit. Every commit carrying `Reversal-Authorized-By`,

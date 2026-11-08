@@ -19,8 +19,10 @@ audit contract are documented in the closure runbook and hammer prompt.
 existing backlog columns and lifecycle are reused without migration.
 The hammer invokes the helper as the review-state database owner; the defer
 branch checks ownership before opening SQLite and uses the canonical findings
-count. Non-strict advisory author-line fixes are deferred, including in-place
-edits that the final syntactic preservation check might otherwise permit.
+count. Non-strict advisory author-line changes are deferred. An in-place repair
+may address a blocking finding or required CI without authorizing a reversal.
+Additive classification still relies on the plan, with the final gate retained.
+Overdue alerts exclude unresolved findings whose source PR is open.
 
 ## Verification
 

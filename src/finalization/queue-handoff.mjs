@@ -9,7 +9,9 @@ import { hasConcreteExactHeadEvidence } from '../ama/hammer-adjudication.mjs';
 
 const sha = /^[a-f0-9]{40}$/i;
 const text = value => typeof value === 'string' && value.trim().length > 0;
-const requireFact = (condition, reason) => { if (!condition) throw new Error(`handoff: ${reason}`); };
+// Distinguish rejected receipt evidence from adapter/runtime failures.
+export class QueueReceiptValidationError extends Error {}
+const requireFact = (condition, reason) => { if (!condition) throw new QueueReceiptValidationError(`handoff: ${reason}`); };
 
 // Canonical JSON makes transport object-key order irrelevant, retaining array
 // order and every signed field. Reject non-JSON input rather than hash a lossy copy.

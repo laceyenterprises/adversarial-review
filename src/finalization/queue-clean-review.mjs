@@ -1,4 +1,4 @@
-import { handoffDigest, handoffJson, normalizeQueueHandoff, validateQueueHandoff } from './queue-handoff.mjs';
+import { handoffDigest, handoffJson, normalizeQueueHandoff, validateQueueHandoff, QueueReceiptValidationError } from './queue-handoff.mjs';
 import { queueTime } from './queue-store.mjs';
 import { queueWaitMs } from './queue-wait.mjs';
 import { readQueueEvidence } from './queue-read.mjs';
@@ -6,16 +6,16 @@ import { readQueueEvidence } from './queue-read.mjs';
 // Reuse the complete signed provenance validator. On direct admission the
 // builder is the producer; there is no closer or finding disposition to invent.
 export function normalizeCleanReview(input) {
-  if (input?.closer !== undefined || input?.dispositions !== undefined) throw new Error('clean review cannot carry closer adjudication');
+  if (input?.closer !== undefined || input?.dispositions !== undefined) throw new QueueReceiptValidationError('clean review cannot carry closer adjudication');
   const h = normalizeQueueHandoff({ ...input, closer: input?.worker, dispositions: [] });
-  if (h.sourceReview.commitId !== h.head) throw new Error('clean review requires exact head');
+  if (h.sourceReview.commitId !== h.head) throw new QueueReceiptValidationError('clean review requires exact head');
   delete h.closer; delete h.dispositions;
   return h;
 }
 export function validateCleanReview(input, evidence) {
   const h = normalizeCleanReview(input);
   if (evidence?.review?.verdict !== 'settled-success' || evidence?.review?.findings?.length !== 0
-    || evidence?.currency?.proof !== 'exact-head') throw new Error('clean review is not current and zero-finding');
+    || evidence?.currency?.proof !== 'exact-head') throw new QueueReceiptValidationError('clean review is not current and zero-finding');
   return validateQueueHandoff({ ...h, closer: h.worker, dispositions: [] }, {
     ...evidence, identities: { ...evidence.identities, closer: evidence.identities?.worker },
   });
@@ -33,7 +33,7 @@ export function resolveCleanReviewStore(store) {
     const input = JSON.parse(row.input_json), evidence = JSON.parse(row.evidence_json), entry = JSON.parse(row.payload_json);
     if (entry.handoffDigest !== handoffDigest(input) || entry.head !== input.head || entry.prNumber !== input.prNumber
       || entry.admissionGeneration !== input.admissionGeneration || handoffJson(entry.lane) !== handoffJson(input.lane)) {
-      throw new Error('inconsistent clean review receipt');
+      throw new QueueReceiptValidationError('inconsistent clean review receipt');
     }
     validateCleanReview(input, evidence);
     return { input, evidence, entry };

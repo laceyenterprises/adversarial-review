@@ -4,7 +4,7 @@ import { evaluateMergeEligibility } from '../ama/merge-eligibility.mjs';
 import { isOperatorHeld } from '../operator-hold-labels.mjs';
 import { QUEUE_ACTIONABLE_PHASES, resolveLaneKey } from './ledger-events.mjs';
 import { resolveQueueHandoffStore } from './queue-handoff-store.mjs';
-import { validateQueueHandoff } from './queue-handoff.mjs';
+import { validateQueueHandoff, QueueReceiptValidationError } from './queue-handoff.mjs';
 import { resolveCleanReviewStore } from './queue-clean-review.mjs';
 import { queueTime } from './queue-store.mjs';
 import { queueWaitMs } from './queue-wait.mjs';
@@ -79,7 +79,7 @@ export function resolveQueueAdmissionAdapters(store) {
       if (direct) return { kind: 'clean', ...direct };
       const receipt = handoffs.read(entry);
       if (!receipt) return null;
-      if (receipt.ack.entryId !== entry.entryId) throw new Error('foreign admission receipt');
+      if (receipt.ack.entryId !== entry.entryId) throw new QueueReceiptValidationError('foreign admission receipt');
       validateQueueHandoff(receipt.handoff, receipt.evidence);
       return { kind: 'remediated', ...receipt };
     },

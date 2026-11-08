@@ -1,4 +1,4 @@
-import { handoffDigest, handoffJson, normalizeQueueHandoff, validateQueueHandoff } from './queue-handoff.mjs';
+import { handoffDigest, handoffJson, normalizeQueueHandoff, validateQueueHandoff, QueueReceiptValidationError } from './queue-handoff.mjs';
 import { resolveLaneKey } from './ledger-events.mjs';
 import { queueTime } from './queue-store.mjs';
 import { queueWaitMs } from './queue-wait.mjs';
@@ -14,7 +14,7 @@ function parse(row, entryStmt) {
     || handoffDigest(handoff) !== row.payload_digest || handoff.head !== row.admission_head
     || handoff.prNumber !== row.pr_number || handoff.admissionGeneration !== row.admission_generation
     || handoff.lane.repository !== row.repository || handoff.lane.base !== row.base) {
-    throw new Error('inconsistent durable handoff acknowledgement');
+    throw new QueueReceiptValidationError('inconsistent durable handoff acknowledgement');
   }
   return result;
 }

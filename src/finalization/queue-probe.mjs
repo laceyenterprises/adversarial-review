@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { resolveQueueOwnerAdapter } from './queue-owner.mjs';
 import { queueWaitMs } from './queue-wait.mjs';
 import { resolveQueueAdmissionAdapters } from './queue-admission.mjs';
+import { QueueReceiptValidationError } from './queue-handoff.mjs';
 import { resolveQueueHandoffStore } from './queue-handoff-store.mjs';
 import { resolveQueueChecksAdapter } from './queue-checks.mjs';
 import { resolveQueueGitAdapter } from './queue-git.mjs';
@@ -85,9 +86,19 @@ export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = n
         LEFT JOIN finalization_queue_handoff h USING(entry_id)`).get();
       // Verify a bounded recent sample through the actual receipt adapters;
       // totals remain store counts, not a claim that every receipt was audited.
+      // Known bad evidence is observable; unexpected adapter/storage errors
+      // must reach the capability failure handler.
       const sample = db.prepare('SELECT payload_json FROM finalization_queue_entry ORDER BY rowid DESC LIMIT 100').all();
-      for (const row of sample) adapters.receipt(JSON.parse(row.payload_json));
+      let invalidSampledReceipts = 0;
+      for (const row of sample) {
+        try { adapters.receipt(JSON.parse(row.payload_json)); }
+        catch (error) {
+          if (!(error instanceof SyntaxError || error instanceof QueueReceiptValidationError)) throw error;
+          invalidSampledReceipts += 1;
+        }
+      }
       result.observations.admission = { ...counts, sampledReceipts: sample.length, sampleLimit: 100,
+        ...(invalidSampledReceipts ? { invalidSampledReceipts } : {}),
         organicAdmissionObserved: counts.observed > 0 };
       result.capabilities.admission = { available: true, adapter: adapters.name, schema: '20261025_finalization_queue_admission',
         liveAdapter: 'composition-required', routing: 'not-installed-by-this-capability' };

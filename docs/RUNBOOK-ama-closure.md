@@ -4632,6 +4632,25 @@ These internal read retries do not change the per-PR hammer retry cap.
 A blocking finding may authorize a specific reversal. A non-blocking finding may
 also authorize one only when the effective `strict_non_blocking_remediation` policy
 is enabled; advisory findings in non-strict mode cannot waive preservation.
+Before changing author-introduced lines, the hammer runs
+`bin/hammer-edit-plan.mjs OWNER/REPO PR REVIEW_ID PLAN_JSON`. The JSON plan names
+`reviewedHead`, `kind`, one-based `findingNumber`, `editKind` (`author-lines` or
+`additive`), and the affected `path`, `startLine`, `endLine` in reviewed coordinates.
+The helper reads the review and effective policy and shares `checkReversalFinding`
+with the primary-change gate. Exit 0 allows the planned edit; exit 20 means no edit:
+the advisory finding was captured in the existing findings backlog with a one-line
+deferral reason. Capture failure stops remediation rather than losing the finding.
+The helper runs as the existing review-state database owner when the hammer has
+a different uid. Before capture it checks ownership of the database, directory,
+sidecars and alert sink, and refuses with exit 78 on a mismatch. Its deferral
+count comes from the canonical normalized findings classifier; unknown findings
+stop before capture.
+Additive tests, docs and guards may proceed only when they change no author line
+and do not neutralize author behavior. `allow/additive-fix` trusts the hammer's
+plan classification; the final patch and merge gates still verify the actual
+change. Deferred findings are audited separately
+from remediated or withdrawn findings. This pre-check does not replace final
+ancestry, commit provenance, patch coverage or merge eligibility checks.
 All three evaluators pass the effective policy to the primary-change predicate:
 closure eligibility (`bin/ama-check.mjs`), the daemon's pre-lease and in-lease
 merge checks, and the hammer's in-lease GitHub gate (`bin/hammer-merge.sh`).

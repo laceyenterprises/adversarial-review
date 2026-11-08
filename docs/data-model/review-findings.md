@@ -246,6 +246,21 @@ idempotent across retries and duplicate passes on a head by repository, PR,
 head and content hash. Late finding inserts on an already merged PR also enroll.
 No historical full-corpus scan runs at deployment. Records are never pruned.
 
+The hammer pre-edit helper can use the same ready-to-merge capture path to enroll
+one deferred advisory finding before making any author-line edit. The optional
+`deferredFinding: { findingNumber, reason }` binds a one-based non-blocking section
+position to the final captured body's exact head, digest and parsed count. Its
+one-line explanation is stored in the existing backlog `reason` field while
+`outcome` remains null: deferral neither resolves nor withdraws the finding.
+Retries and duplicate passes use the existing repository/PR/head/content identity.
+The Hammer closeout comment is the durable deferral audit. Backlog reason is
+current state and can be replaced by a later outcome. Overdue alerts count only
+unresolved findings whose source PR is merged.
+
+Unavailable or stale capture fails before returning a deferral receipt. Existing
+merge enrollment and batch dispatch rules still apply; an open source PR cannot
+dispatch a backlog batch. No schema or lifecycle state is added.
+
 The migration is `migrations/20261024_findings_backlog.sql`, installed by the
 existing review-state migration runner. All storage remains in `data/reviews.db`.
 

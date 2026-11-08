@@ -1434,6 +1434,7 @@
       "relatedSchemaSurfaces": ["src/reviewer.mjs", "src/reviewer-spawn-settle.mjs", "src/kernel/verdict-consistency.mjs"],
       "owner": "reviewer output reconciliation",
       "primaryKey": ["repo", "prNumber", "headSha"],
+      "primaryKeyNormalization": "SHA-256 of JSON [repo, Number(prNumber), trimmed lowercase headSha]; normalized values are stored in the receipt.",
       "fields": ["repo", "prNumber", "headSha", "verdict_inconsistent", "status", "reviewBody", "reconciledReviewBody", "error"],
       "statusValues": ["reserved", "reconciled", "operator-required"]
     }

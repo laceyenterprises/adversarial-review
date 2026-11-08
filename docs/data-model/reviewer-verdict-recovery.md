@@ -6,8 +6,10 @@
 
 **Source:** `src/reviewer-verdict-recovery.mjs`
 
-The key is SHA-256 of the JSON array `[repo, prNumber, headSha]`. The reviewer
-reserves one reconciliation attempt for an immutable PR head with an exclusive,
+The key is SHA-256 of the JSON array `[repo, prNumber, headSha]`, with `prNumber`
+coerced through `Number(prNumber)` and `headSha` trimmed and lowercased before
+hashing and storage. Numeric and string PR numbers share the same reservation.
+The reviewer reserves one reconciliation attempt for an immutable PR head with an exclusive,
 atomic write before invoking the model again. Reviewer family, stage, process
 restart and claim concurrency cannot replenish the budget. A different head
 gets a different key. Missing heads or unavailable storage refuse the retry

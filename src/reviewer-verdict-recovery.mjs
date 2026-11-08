@@ -32,6 +32,7 @@ async function reconcileReviewVerdict({
   // duplicate sections, template echoes or other malformed raw output.
   assertReviewerReply(dispatch.rawReviewText ?? dispatch.reviewText, { allowVerdictInconsistency: true, onRejected });
   assertReviewerReply(firstBody, { allowVerdictInconsistency: true, onRejected });
+  prNumber = Number(prNumber);
   headSha = String(headSha || '').trim().toLowerCase();
   const key = createHash('sha256').update(JSON.stringify([repo, prNumber, headSha])).digest('hex');
   const path = join(rootDir, 'data', 'reviewer-verdict-recovery', `${key}.json`);

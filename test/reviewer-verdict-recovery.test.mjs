@@ -141,6 +141,25 @@ test('persistent inconsistency retries exactly once across restarts and simultan
   assert.equal(calls, 2, 'a new immutable head has its own budget');
 });
 
+for (const firstPrNumber of [7, '7']) {
+  test(`numeric and string PR numbers share one reservation (${typeof firstPrNumber} first)`, async t => {
+    const options = fixture(t);
+    let calls = 0;
+    const run = async () => { calls++; return dispatch(contradictory); };
+    const otherPrNumber = typeof firstPrNumber === 'number' ? '7' : 7;
+    await Promise.all([firstPrNumber, otherPrNumber].map(prNumber =>
+      reconcileReviewVerdict({ ...options, prNumber, dispatch: dispatch(contradictory), run })));
+    await reconcileReviewVerdict({ ...options, prNumber: otherPrNumber,
+      dispatch: dispatch(contradictory), run });
+    assert.equal(calls, 1, 'caller types and restarts cannot replenish the head budget');
+    const dir = join(options.rootDir, 'data', 'reviewer-verdict-recovery');
+    const files = readdirSync(dir);
+    assert.equal(files.length, 1);
+    const record = JSON.parse(readFileSync(join(dir, files[0]), 'utf8'));
+    assert.equal(record.prNumber, 7);
+  });
+}
+
 test('a consistent clean reconciliation can clear the review without replenishing the head budget', async t => {
   const options = fixture(t);
   const result = await reconcileReviewVerdict({ ...options, dispatch: dispatch(contradictory),

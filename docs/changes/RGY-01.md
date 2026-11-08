@@ -36,3 +36,8 @@ limit, using synthetic data and stubbed providers:
 
 The full suite and unrelated walkthrough demo were not run under the ticket's
 scoped-test constraint. No live database, service or model provider was used.
+
+HAM validation repair: Gemini response tests now verify the prompt set, stage,
+and SHA-256 digest against the prompt sent to the runtime. The closure latency
+profile accounts separately for the new grade migration sentinel reads while
+retaining its existing non-migration read budget.

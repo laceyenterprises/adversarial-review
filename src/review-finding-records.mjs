@@ -173,14 +173,59 @@ export function linkFindingRemediation(db, { job, workspaceDir, roundNumber = jo
 
 // A caller-owned SQLite connection can be read-only. Missing/legacy schema is
 // reported to the corpus caller; it must not turn missing data into zero findings.
-export function readReviewFindings(db, { repo = null, prNumber = null, afterPassId = 0, afterOrdinal = 0, limit = 500 } = {}) {
+export function readReviewFindings(db, { repo = null, prNumber = null, prNumbers = null,
+  findingId = null, reviewerModel = null, reviewerHarness = null, promptDigest = null,
+  since = null, until = null, area = null, blocking = 'any', labelState = null,
+  afterPassId = 0, afterOrdinal = 0, limit = 500 } = {}) {
   if (!Number.isInteger(limit) || limit < 1 || limit > 5000) throw new Error('limit must be 1..5000');
+  if (!['any', true, false, 0, 1].includes(blocking)
+    || ![null, 'ungraded', 'graded', 'disputed'].includes(labelState)
+    || (prNumbers !== null && (!Array.isArray(prNumbers) || !prNumbers.length
+      || prNumbers.some(n => !Number.isSafeInteger(n) || n < 1)))
+    || [since, until].some(t => t !== null && !Number.isFinite(Date.parse(t)))
+    || (since && until && Date.parse(since) >= Date.parse(until))
+    || (area !== null && (!area || area.startsWith('/') || area.split('/').includes('..')))) {
+    throw new Error('invalid finding filters');
+  }
+  // Apply filters before keyset pagination. Area is a literal path prefix, not
+  // a LIKE expression; timestamps compare instants, with an exclusive end.
+  const where = ['f.current_body=1', '(f.pass_id>? OR (f.pass_id=? AND f.ordinal>?))'];
+  const params = [afterPassId, afterPassId, afterOrdinal];
+  for (const [column, value] of [['p.repo', repo], ['p.pr_number', prNumber],
+    ['f.finding_id', findingId], ['f.reviewer_model', reviewerModel],
+    ['f.reviewer_harness', reviewerHarness], ['f.prompt_digest', promptDigest]]) {
+    if (value !== null) { where.push(`${column}=?`); params.push(value); }
+  }
+  if (prNumbers !== null) { where.push('p.pr_number IN (SELECT value FROM json_each(?))'); params.push(JSON.stringify(prNumbers)); }
+  if (blocking !== 'any') { where.push('f.blocking=?'); params.push(Number(blocking)); }
+  if (since !== null) { where.push('julianday(p.started_at)>=julianday(?)'); params.push(new Date(Date.parse(since)).toISOString()); }
+  if (until !== null) { where.push('julianday(p.started_at)<julianday(?)'); params.push(new Date(Date.parse(until)).toISOString()); }
+  if (area !== null) {
+    area = area.replace(/\/+$/, '');
+    // Captured File fields retain Markdown code quoting and may contain
+    // padding spaces both outside and inside the backticks.
+    const file = "trim(trim(trim(f.file),'`'))";
+    where.push(`(${file}=? OR substr(${file},1,length(?)+1)=? OR b.area=?)`);
+    params.push(area, area, `${area}/`, area);
+  }
+  const graded = `EXISTS (SELECT 1 FROM review_finding_grades g WHERE g.finding_id=f.finding_id
+    AND g.lifecycle=0 AND g.taxonomy_code NOT LIKE 'sev.%')`;
+  const disputed = `(EXISTS (SELECT 1 FROM review_finding_grades g JOIN review_finding_grades h
+    ON h.finding_id=g.finding_id WHERE g.finding_id=f.finding_id
+    AND g.lifecycle=0 AND h.lifecycle=0 AND g.label='real' AND h.label='false'
+    AND g.taxonomy_code NOT LIKE 'sev.%' AND h.taxonomy_code NOT LIKE 'sev.%')
+    OR EXISTS (SELECT 1 FROM review_finding_remediations m WHERE m.finding_id=f.finding_id AND m.reason='disputed-with-evidence')
+    OR EXISTS (SELECT 1 FROM review_finding_disputes d WHERE d.finding_id=f.finding_id
+      AND d.resolution='withdrawn-by-hammer' AND d.comment_id<>''))`;
+  if (labelState === 'graded') where.push(graded);
+  if (labelState === 'ungraded') where.push(`NOT ${graded}`);
+  if (labelState === 'disputed') where.push(disputed);
   const rows = db.prepare(`SELECT f.*, p.repo, p.pr_number, p.verdict, p.started_at,
-    b.outcome AS backlog_outcome,b.reason AS backlog_reason,b.batch_id AS backlog_batch_id,b.result_pr AS backlog_result_pr
+    b.outcome AS backlog_outcome,b.reason AS backlog_reason,b.batch_id AS backlog_batch_id,b.result_pr AS backlog_result_pr,
+    ${graded} AS graded, ${disputed} AS disputed
     FROM review_findings f JOIN reviewer_passes p ON p.pass_id=f.pass_id
-    LEFT JOIN finding_backlog b ON b.finding_id=f.finding_id WHERE f.current_body=1 AND (f.pass_id>? OR (f.pass_id=? AND f.ordinal>?))
-      AND (? IS NULL OR p.repo=?) AND (? IS NULL OR p.pr_number=?)
-    ORDER BY f.pass_id, f.ordinal LIMIT ?`).all(afterPassId, afterPassId, afterOrdinal, repo, repo, prNumber, prNumber, limit);
+    LEFT JOIN finding_backlog b ON b.finding_id=f.finding_id WHERE ${where.join(' AND ')}
+    ORDER BY f.pass_id, f.ordinal LIMIT ?`).all(...params, limit);
   if (!rows.length) return [];
   // JSON1 is already required by the schema. One bound array avoids both N+1
   // reads and SQLite's parameter-count limit for a 5,000-finding page.
@@ -204,6 +249,8 @@ export function readReviewFindings(db, { repo = null, prNumber = null, afterPass
   const disputeRows = db.prepare(`SELECT * FROM review_finding_disputes
     WHERE finding_id IN (SELECT value FROM json_each(?))
     ORDER BY finding_id, head_sha, comment_id`).all(ids);
+  const gradesByFinding = groupByFinding(db.prepare(`SELECT * FROM review_finding_grades
+    WHERE finding_id IN (SELECT value FROM json_each(?)) ORDER BY finding_id,grade_id`).all(ids));
   const remediationsByFinding = groupByFinding(remediationRows);
   const disputesByFinding = groupByFinding(disputeRows);
   return rows.map(row => {
@@ -213,6 +260,6 @@ export function readReviewFindings(db, { repo = null, prNumber = null, afterPass
       || disputes.some(d => d.resolution === 'withdrawn-by-hammer' && d.comment_id)
       ? 'withdrawn' : row.verdict === 'dismissed' ? 'dismissed'
         : remediations.some(m => m.commit_sha) ? 'addressed' : 'unaddressed';
-    return { ...row, status, remediations, disputes };
+    return { ...row, status, remediations, disputes, grades: gradesByFinding.get(row.finding_id) || [] };
   });
 }

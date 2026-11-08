@@ -7,7 +7,8 @@ import { join, resolve } from 'node:path';
 import test from 'node:test';
 
 const PROMPT = readFileSync(new URL('../bin/hammer-verify-head.sh', import.meta.url), 'utf8');
-const SYNC_FUNCTIONS = PROMPT.slice(
+const RUNTIME_SETUP = `source "${resolve('bin/hammer-node-runtime.sh')}" || exit 1;\n`;
+const SYNC_FUNCTIONS = RUNTIME_SETUP + PROMPT.slice(
   PROMPT.indexOf('ham_update_branch_transient() {'),
   PROMPT.indexOf('ham_fetch_base_with_retries() {'),
 ).replaceAll('<<ROOT_DIR>>', resolve('.')).replaceAll('<<PR_NUMBER>>', '1234');
@@ -46,7 +47,7 @@ ${SYNC_FUNCTIONS}\nham_bounded_git_sync main`], {
       encoding: 'utf8',
       timeout: 30_000,
       env: {
-        ...process.env,
+        ...process.env, AGENT_OS_NODE_BIN: '',
         PATH: `${binDir}:${process.env.PATH}`,
         HAM_NODE_BIN: nodeBin ?? '',
         HAM_GIT_SYNC_NOMINAL_SECONDS: '1',
@@ -98,7 +99,7 @@ for (const nodeBin of ['', null]) {
     mkdirSync(join(root, 'bin'));
     const node = join(root, 'bin/node');
     writeFileSync(node, '#!/bin/sh\nprintf "%s\\n" "${HAM_GIT_SYNC_BOUNDED:-missing}" "$@"\n', {mode: 0o755});
-    const env = {...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}`};
+    const env = {...process.env, AGENT_OS_NODE_BIN: '', PATH: `${join(root, 'bin')}:${process.env.PATH}`};
     if (nodeBin === null) delete env.HAM_NODE_BIN; else env.HAM_NODE_BIN = nodeBin;
     const result = spawnSync('/bin/bash', ['-c', `${SYNC_FUNCTIONS}
 ham_bounded_submodule_sync`], {env, cwd: root, encoding: 'utf8', timeout: 5000});
@@ -120,11 +121,11 @@ console.log(JSON.stringify({proof:'fixture-exact-head'}));
     assert.ok(start >= 0);
     const end = PROMPT.indexOf('; then', start);
     const command = PROMPT.slice(start, end).replaceAll('<<ROOT_DIR>>', root).replaceAll('<<RUN_DIR>>', root);
-    const env = {...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}`};
+    const env = {...process.env, AGENT_OS_NODE_BIN: '', PATH: `${join(root, 'bin')}:${process.env.PATH}`};
     if (nodeBin === null) delete env.HAM_NODE_BIN; else env.HAM_NODE_BIN = nodeBin;
     const setup = `from=${'a'.repeat(40)}; snapshot_head=${'b'.repeat(40)}; base=${'c'.repeat(40)};
 `;
-    const result = spawnSync('/bin/bash', ['-c', setup + command], {env, cwd: root, encoding: 'utf8', timeout: 5000});
+    const result = spawnSync('/bin/bash', ['-c', RUNTIME_SETUP + setup + command], {env, cwd: root, encoding: 'utf8', timeout: 5000});
     assert.equal(result.status, 0, result.stderr);
     assert.equal(JSON.parse(readFileSync(join(root, 'rebase-result-proof.json'), 'utf8')).proof, 'fixture-exact-head');
   });
@@ -142,7 +143,7 @@ test('bounded submodule expiry sends TERM and waits for lock cleanup', t => {
   const result = spawnSync('/bin/bash', ['-c', `${functions}
 ham_bounded_submodule_sync`], {
     cwd: root, encoding: 'utf8', timeout: 10000,
-    env: {...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}`, HAM_NODE_BIN: '', HAM_TEST_LOCK: lock},
+    env: {...process.env, AGENT_OS_NODE_BIN: '', PATH: `${join(root, 'bin')}:${process.env.PATH}`, HAM_NODE_BIN: '', HAM_TEST_LOCK: lock},
   });
   assert.equal(result.status, 124, result.stderr);
   assert.equal(existsSync(lock), false, 'deadline waits for the child cleanup before returning');

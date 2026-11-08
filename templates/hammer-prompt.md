@@ -24,10 +24,9 @@ if ! test -f "<<RUN_DIR>>/hammer-verify-head.sh" -a -f "<<RUN_DIR>>/hammer-publi
 fi
 ```
 
-Initialize `inputs.sh` once using Appendix A (capture the starting head before
-edits); then run this guard and source it each shell, including every resumed
-continuation. The inputs resolve and re-export `HAM_NODE_BIN` each time.
-Do not replace missing inputs after edits.
+Initialize `inputs.sh` once per Appendix A before edits; guard and source it in
+every shell, including resumes, to resolve and export `HAM_NODE_BIN`.
+Never replace missing inputs after edits.
 
 ```bash
 test -f "<<RUN_DIR>>/inputs.sh" || {
@@ -142,8 +141,8 @@ which appendix applies; these are prompt sections, never phase source files.
 
 ## Shell safety
 
-Fresh shells reset state and cwd. Persist only in `<<RUN_DIR>>` (TMPDIR); never `/tmp`.
-Use absolute helpers; distrust cwd.
+Fresh shells reset state/cwd. Persist only in `<<RUN_DIR>>` (TMPDIR), never `/tmp`.
+Use absolute helpers.
 
 Bound every shell command. On macOS:
 

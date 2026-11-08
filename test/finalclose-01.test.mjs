@@ -683,6 +683,7 @@ test('FINALCLOSE-01 starting-head chain transport failure is distinguishable fro
 test('FINALCLOSE-01 provenance read abort writes its terminal audit and releases the lease without attempting merge', t => {
   const rootDir = finalRound(t), bin = join(rootDir, 'bin'), runDir = join(rootDir, 'run');
   mkdirSync(bin); mkdirSync(runDir);
+  writeFileSync(join(bin, 'hammer-node-runtime.sh'), readFileSync(new URL('../bin/hammer-node-runtime.sh', import.meta.url)));
   const captured = join(rootDir, 'captured.json');
   writeFileSync(join(bin, 'ama-audit.mjs'), `import {readFileSync,writeFileSync} from 'node:fs';
     const args=process.argv.slice(2); writeFileSync(${JSON.stringify(captured)},readFileSync(args[args.indexOf('--attempt-json')+1]));`);

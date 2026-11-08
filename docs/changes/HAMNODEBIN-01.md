@@ -64,3 +64,20 @@ helpers refuse a lost runtime export instead of launching a PATH fallback.
 The full suite and demo remain delegated to PR-head CI under this round's
 targeted-validation instruction. No persistent store, lifecycle declaration or
 smoke promise changes are introduced.
+
+Hammer closeout validation after rebasing onto current main:
+
+- Preserved both the HAMLATEAUDIT-01 pagination test and HAMNODEBIN-01 publication
+  test when resolving their append-at-end conflict.
+- Isolated merge/provenance fixtures now install the shared resolver; extracted
+  sync/proof fixtures run it before exercising functions. Empty/unset runtime,
+  timeout cleanup, merge refusal and provenance-abort assertions remain intact.
+- Updated the prompt fixture to render the resolver path and assert the shared
+  runtime contract. Shortened redundant setup wording to retain the 60 KiB budget.
+- `node --test` over `hammer-procedure-generation`, `hammertrim-contract`,
+  `ham-bounded-git-sync`, `hamunknown-02`, `finalclose-01`, and
+  `ama-hammer-merge-protocol-prompt` test files: 151 passed, zero failed.
+- `npm run lint`: zero errors (152 existing warnings).
+- `npm run typecheck:contracts`: passed.
+- `bash demo/research-finding-walkthrough.sh`: passed with byte-stable deliveries.
+- `git diff --check`: passed. Full-suite validation remains on exact-head PR CI.

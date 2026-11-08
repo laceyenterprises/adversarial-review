@@ -49,13 +49,14 @@ test('LEASEDEADPID-01 a dead pending watcher releases final comment findings wit
   assert.deepEqual(readAmaCloserLease(rootDir, identity), lease);
 });
 
-test('LEASEDEADPID-01 a live pending watcher waits until the existing reclaim boundary', () => {
+test('LEASEDEADPID-01 a verified live pending watcher retains custody past the reclaim boundary', () => {
   for (const age of [1_000, AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS - 1,
     AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS + 1]) {
     const lease = { status: 'pending', watcherPid: 4242, lrqId: null, acquiredAt: leaseAtAge(age) };
-    const options = { now: leaseNow, processKillImpl(pid, signal) { assert.equal(pid, 4242); assert.equal(signal, 0); } };
-    const reclaimable = age >= AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS;
-    assert.equal(isReclaimablePendingAmaCloserLease(lease, options), reclaimable);
+    const options = { now: leaseNow,
+      captureProcessImpl: () => ({ startedAt: '2025-12-31T00:00:00Z' }),
+      processKillImpl(pid, signal) { assert.equal(pid, 4242); assert.equal(signal, 0); } };
+    assert.equal(isReclaimablePendingAmaCloserLease(lease, options), false);
 
   }
 });

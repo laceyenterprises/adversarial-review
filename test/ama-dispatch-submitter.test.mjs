@@ -89,3 +89,15 @@ test('CLOSERLEASEDEAD-01 synchronous process identity uses normalized bounded ps
     assert.deepEqual(captureCloserProcessSync(4242, { processExecFileSyncImpl }), { pid: 4242, startedAt: null });
   }
 });
+
+test('DEADWATCHERLEASE-01 intent probes use lease identity when the intent lacks watcher identity', () => {
+  for (const watcherStartedAt of [startedAt, '2026-10-22T10:17:18.000Z']) {
+    const result = probeCloserSubmitter({ ...record, dispatchWatcher: undefined },
+      { watcherPid: 12345, watcherStartedAt }, {
+        processKillImpl: () => {},
+        processExecFileSyncImpl: () => `12345 ${stamp} unrelated\n`,
+      });
+    assert.equal(result.watcher.status, watcherStartedAt === startedAt ? 'live' : 'gone');
+    assert.equal(result.watcher.reason, watcherStartedAt === startedAt ? 'pid-present' : 'pid-reused');
+  }
+});

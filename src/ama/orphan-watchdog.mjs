@@ -10,10 +10,11 @@ import Database from 'better-sqlite3';
 import fsExt from 'fs-ext';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { hostname } from 'node:os';
 import { createHash } from 'node:crypto';
 import { readLaunchRequestStatusFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
 import { launchRequestOwned, launchRequestMeaning } from './launch-request-status.mjs';
-import { readAmaCloserLease, amaCloserPendingLeaseExpiryMs } from './closer-lease.mjs';
+import { readAmaCloserLease, amaCloserPendingLeaseExpiryMs, abandonedAmaCloserLeaseOutcome } from './closer-lease.mjs';
 import { listSettledJsonNames } from './dispatch-dir-names.mjs';
 import { requestBoundedOrphanReview } from './orphan-review-request.mjs';
 import { remediationJobOwnership } from '../remediation-job-ownership.mjs';
@@ -52,7 +53,8 @@ export async function probeOrphanOwnership(args = {}) {
 async function probeOrphanOwnershipWithinRepositoryCycle({ rootDir, repo, prNumber, headSha, reviewStateRow, labels = [],
   readStatusImpl = readLaunchRequestStatusFromLedgerAsync, timeoutMs = loadAwareTimeoutMs(5000), signal = null, reservationStartedAt = null,
   now = new Date().toISOString(), processKillImpl = process.kill, logger = console, reservationRecordHead = null,
-  excludeWatcherPid = null, env = process.env, includeOwnerEvidence = false, nextAction = null }) {
+  excludeWatcherPid = null, env = process.env, includeOwnerEvidence = false, nextAction = null,
+  captureProcessImpl }) {
   const overdue = overdueNextAction(nextAction, headSha, now, env);
   const alive = (pid, group = false) => {
     if (!Number.isInteger(Number(pid)) || Number(pid) <= 0) return false;
@@ -69,7 +71,10 @@ async function probeOrphanOwnershipWithinRepositoryCycle({ rootDir, repo, prNumb
     return { owned: true, proof: 'fresh-closer-heartbeat',
       ...(includeOwnerEvidence ? { actor: 'hammer', lease: pendingLease } : {}) };
   }
-  if (pendingLease?.status === 'pending' && alive(pendingLease.watcherPid)
+  if (pendingLease?.status === 'pending'
+    && (!pendingLease.holderHost || pendingLease.holderHost === hostname())
+    && alive(pendingLease.watcherPid)
+    && !abandonedAmaCloserLeaseOutcome(pendingLease, { now, isProcessAlive: alive, captureProcessImpl })
     && Number(pendingLease.watcherPid) !== Number(excludeWatcherPid)
     && Number.isFinite(pendingAge) && pendingAge >= 0
     && pendingAge < amaCloserPendingLeaseExpiryMs(pendingLease.dispatchTimeoutMs)) {

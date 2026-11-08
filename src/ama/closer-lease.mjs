@@ -130,30 +130,39 @@ export function abandonedAmaCloserLeaseOutcome(lease, {
   // Legacy hostless leases use the local PID namespace, as pending ownership
   // and dispatch reclaim already do. Otherwise a dead watcher can retain them.
   const local = !lease.holderHost || lease.holderHost === host;
-  if (local && Number(lease.watcherPid) === Number(livePid)) return null;
+  if (local && Number(lease.watcherPid) === Number(livePid) && !lease.watcherStartedAt) return null;
   const acquiredAt = Date.parse(lease.acquiredAt);
   const nowMs = typeof now === 'number' ? now : Date.parse(now);
-  const timeout = Number(lease.dispatchTimeoutMs);
-  if (Number.isFinite(acquiredAt) && Number.isFinite(nowMs) && timeout > 0
-    && Number.isFinite(timeout) && nowMs > acquiredAt + timeout) return 'abandoned-timeout';
   const pid = Number(lease.watcherPid);
   if (local && Number.isInteger(pid) && pid > 0) {
     try {
       const alive = isProcessAlive(pid);
       if (alive === false) return 'abandoned-holder-dead';
-      if (alive === true && Number.isFinite(acquiredAt)) {
-        const startedAt = Date.parse(captureProcessImpl(pid)?.startedAt);
-        if (Number.isFinite(startedAt) && startedAt > acquiredAt) return 'abandoned-holder-dead';
+      if (alive === true) {
+        let identity;
+        try { identity = captureProcessImpl(pid); } catch { return null; }
+        const startedAt = Date.parse(identity?.startedAt);
+        const expectedStartedAt = Date.parse(lease.watcherStartedAt);
+        if (Number.isFinite(startedAt)
+          && (Number.isFinite(expectedStartedAt) ? startedAt !== expectedStartedAt
+            : Number.isFinite(acquiredAt) && startedAt > acquiredAt)) return 'abandoned-holder-dead';
+        // Expiry cannot revoke a live local owner's dispatch authority.
+        return null;
       }
     } catch { /* Uncertain evidence retains ownership until the deadline. */ }
   }
+  const timeout = Number(lease.dispatchTimeoutMs);
+  if (Number.isFinite(acquiredAt) && Number.isFinite(nowMs) && timeout > 0
+    && Number.isFinite(timeout) && nowMs > acquiredAt + timeout) return 'abandoned-timeout';
   return null;
 }
 
-export function isReclaimablePendingAmaCloserLease(lease, { now = null, processKillImpl = process.kill } = {}) {
+export function isReclaimablePendingAmaCloserLease(lease, {
+  now = null, processKillImpl = process.kill, captureProcessImpl = captureCloserProcessSync,
+} = {}) {
   if (lease?.status !== PENDING || lease.lrqId) return false;
   let observedPidAlive;
-  if (abandonedAmaCloserLeaseOutcome(lease, { now: now ?? Date.now(),
+  if (abandonedAmaCloserLeaseOutcome(lease, { now: now ?? Date.now(), captureProcessImpl,
     isProcessAlive: pid => (observedPidAlive = isAmaCloserPidAlive(pid, processKillImpl)) })) return true;
   if ((!lease.holderHost || lease.holderHost === hostname()) && lease.watcherPid === process.pid) return false;
   if (Number.isFinite(Number(lease.dispatchTimeoutMs)) && Number(lease.dispatchTimeoutMs) > 0) return false;
@@ -162,6 +171,7 @@ export function isReclaimablePendingAmaCloserLease(lease, { now = null, processK
   const isLocalHost = !lease.holderHost || lease.holderHost === hostname();
   const pidAlive = isLocalHost ? observedPidAlive ?? isAmaCloserPidAlive(lease.watcherPid, processKillImpl) : null;
   if (pidAlive === false) return true;
+  if (pidAlive === true) return false;
 
   const acquiredAtMs = Date.parse(String(lease.acquiredAt || ''));
   const nowMs = typeof now === 'number' ? now : Date.parse(String(now || new Date().toISOString()));
@@ -229,6 +239,7 @@ function isCurrentAmaCloserLeaseWithinRepositoryState(rootDir, lease) {
     return current?.status === lease.status && current?.lrqId === lease.lrqId
       && current?.updatedAt === lease.updatedAt && current?.acquiredAt === lease.acquiredAt
       && current?.watcherPid === lease.watcherPid && current?.holderHost === lease.holderHost
+      && (current?.watcherStartedAt ?? null) === (lease.watcherStartedAt ?? null)
       && current?.dispatchTimeoutMs === lease.dispatchTimeoutMs
       && current?.terminalOutcome === lease.terminalOutcome;
   } catch { return false; }
@@ -707,6 +718,7 @@ function acquireAmaCloserLeaseWithinRepositoryState({
   prNumber,
   headSha,
   watcherPid,
+  captureProcessImpl = captureCloserProcessSync,
   dispatchTimeoutMs,
   host,
   now,
@@ -725,7 +737,7 @@ function acquireAmaCloserLeaseWithinRepositoryState({
       }
       const handed = readLeaseFile(leasePath);
       if (handed?.status === HANDED_TO_REVIEW) rmSync(leasePath, { force: true });
-      return acquireAmaCloserLease({ rootDir, repo, prNumber, headSha, watcherPid, dispatchTimeoutMs, host, now });
+      return acquireAmaCloserLease({ rootDir, repo, prNumber, headSha, watcherPid, captureProcessImpl, dispatchTimeoutMs, host, now });
     } finally { closeSync(fd); }
   }
   // Pre-check — cheap path when an existing lease is on disk. The
@@ -736,13 +748,20 @@ function acquireAmaCloserLeaseWithinRepositoryState({
   if (existingLease) {
     return { acquired: false, leasePath, lease: existingLease, existingLease };
   }
+  const numericPid = Number(watcherPid);
+  let watcherStartedAt = null;
+  if ((!host || host === hostname()) && Number.isInteger(numericPid) && numericPid > 0) {
+    try { watcherStartedAt = captureProcessImpl(numericPid)?.startedAt || null; }
+    catch { /* Optional identity capture must not prevent lease acquisition. */ }
+  }
   const lease = {
     schemaVersion: LEASE_SCHEMA_VERSION,
     repo,
     prNumber: Number(prNumber),
     headSha,
     acquiredAt: now || new Date().toISOString(),
-    watcherPid: Number.isFinite(Number(watcherPid)) ? Number(watcherPid) : null,
+    watcherPid: Number.isInteger(numericPid) && numericPid > 0 ? numericPid : null,
+    watcherStartedAt,
     dispatchTimeoutMs: Number.isFinite(Number(dispatchTimeoutMs)) && Number(dispatchTimeoutMs) > 0
       ? Number(dispatchTimeoutMs) : null,
     // CLR-02 — `watcherPid` alone is not a usable liveness signal: a pid read on

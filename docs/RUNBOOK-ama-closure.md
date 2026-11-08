@@ -6406,8 +6406,18 @@ and still uses atomic single-claim acquisition.
 
 CLOSERLEASEDEAD-01: startup/periodic sweeps and closure routing terminalize a
 pending lease with no launch ID as `abandoned-holder-dead` when a same-host PID
-is absent or started after acquisition, or `abandoned-timeout` strictly after
-its persisted `acquiredAt + dispatchTimeoutMs`. Uncertain process/ownership
+is absent or its recorded process start identity differs (legacy leases use
+started-after-acquisition proof), or `abandoned-timeout` strictly after
+its persisted `acquiredAt + dispatchTimeoutMs` when liveness is unconfirmed.
+DEADWATCHERLEASE-01 records optional `watcherStartedAt` on local acquisition.
+Only positive integer local PIDs are inspected; missing/invalid PIDs and capture
+failures leave the optional identity null without failing acquisition.
+Conditional deletion/restoration equates an omitted legacy start identity with
+null; full-snapshot `expectedLease` updates still require the exact observation.
+Confirmed live local owners retain custody after expiry. Reclamation emits
+`ama_closer.abandoned_lease_reclaimed` naming the owner PID and recorded start
+identity under the existing reclaim fence. Startup sweeps once before polling;
+the returned periodic ticker does not repeat that sweep immediately. Uncertain process/ownership
 reads cannot extend that deadline; closure rechecks after a yielded ownership
 probe and proceeds through ordinary next-action admission in the same pass.
 The terminal receipt remains until normal exclusive reacquisition. Startup logs
@@ -6419,6 +6429,9 @@ This includes legacy leases with missing or null `dispatchTimeoutMs`: dead-PID
 proof does not require a timeout. Shared abandonment runs before the reaper's
 age-based selector; the 30-minute dead-holder tier and 6-hour floor apply only
 to leases left for that fallback, outside unresolved-intent fences.
+The legacy age selector also checks start identity before retaining a live PID:
+verified reuse permits age-based cleanup, while matching or unreadable identity
+retains live custody.
 The same hostless dead/reused-watcher proof also enters pre-receipt intent
 reconciliation before the intent deadline. Entry does not prove no submission:
 a legacy keyless intent still requires a successful empty closer-ticket/time
@@ -6431,8 +6444,8 @@ operator holds retain their handling. Unresolved keyed dispatch intents stay
 fenced for native reconciliation; abandonment alone cannot prove no submission.
 `runStaleStateReaper` and its startup wrapper accept `captureProcessImpl` and
 forward it to the closer-lease sweep for process start-time verification.
-Omitting it uses `captureCloserProcessSync`; injected capture failures retain
-ownership until the persisted deadline, just like default capture failures.
+Omitting it uses `captureCloserProcessSync`; capture failure retains a confirmed
+live owner even past the deadline. Unknown liveness keeps the persisted timeout.
 The [lease data model](data-model/ama-closer-leases.md#abandoned-pending-holders-closerleasedead-01)
 describes the recorded outcomes and mutation fence. After normal deployment,
 observe a naturally abandoned lease recording its outcome and normal next

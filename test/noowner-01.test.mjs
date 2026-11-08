@@ -1404,7 +1404,7 @@ test('REVIEWALERT-01 ownerless recovery honours a live pending lease and earlier
     reviewedSha: identity.headSha, dispatchContext: { dispatchedAt: minutesAfter(at, 1),
       orphanRecovery: { ownerProof: true, headSha: identity.headSha } } }), ...deps, processKillImpl: () => {} });
   assert.equal(result.inFlight, true);
-  assert.equal(processReads.length, 1);
+  assert.equal(processReads.length, 2, 'acquisition and owner probe each capture start identity');
   assert.equal(hqLaunches(deps).length, 0);
   assert.deepEqual(readAmaCloserLease(rootDir, identity), lease);
   assert.deepEqual(readAmaCloserDispatchRecord(rootDir, identity), receipt);
@@ -1428,7 +1428,7 @@ test('REVIEWALERT-01 a competing launch wins the late lease CAS without losing i
       return 0;
     } });
   assert.equal(result.reason, 'lease-held');
-  assert.equal(processReads.length, 1);
+  assert.equal(processReads.length, 2, 'acquisition and owner probe each capture start identity');
   assert.equal(hqLaunches(deps).length, 0);
   assert.deepEqual(readAmaCloserLease(rootDir, identity), lease);
   assert.deepEqual(readAmaCloserDispatchRecord(rootDir, identity), receipt);

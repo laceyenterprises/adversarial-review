@@ -40,7 +40,10 @@ export async function abandonAmaCloserLease(rootDir, lease, { logger = console, 
     const result = updateAmaCloserLease({ rootDir, ...lease, expectedLease,
       status: 'terminal', terminalOutcome: outcome,
       now: new Date(options.now ?? Date.now()).toISOString() });
-    logger?.warn?.(`[reaper] released abandoned closer lease repo=${lease.repo} pr=${lease.prNumber} outcome=${outcome}`);
+    logger?.warn?.(JSON.stringify({ event: 'ama_closer.abandoned_lease_reclaimed',
+      repo: lease.repo, prNumber: lease.prNumber, headSha: lease.headSha,
+      watcherPid: lease.watcherPid, watcherStartedAt: lease.watcherStartedAt || null,
+      outcome, message: `released abandoned closer lease outcome=${outcome}` }));
     return result.lease;
   } catch (error) {
     if (['EBUSY', 'ESTALE'].includes(error.code)) return null;

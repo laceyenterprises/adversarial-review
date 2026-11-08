@@ -3006,7 +3006,11 @@ stateDiagram-v2
 
 CLOSERLEASEDEAD-01 records `abandoned-holder-dead` or `abandoned-timeout` for
 launch-less pending leases with a confirmed absent/reused same-host watcher PID
-or an elapsed dispatch timeout. CLAIMPIDSTALE-01 includes legacy leases without
+or an elapsed dispatch timeout when liveness is unconfirmed. Local leases record
+optional `watcherStartedAt`; exact start mismatch proves PID reuse even before
+acquisition (DEADWATCHERLEASE-01). Confirmed live owners survive expiry; reclaim
+audit names the old PID and start identity. The existing startup sweep runs once
+before the normal periodic ticker. CLAIMPIDSTALE-01 includes legacy leases without
 holderHost in local PID checks; dead owners leave the terminal receipt and
 abandonment log at startup or the next closure evaluation, even without a
 dispatch timeout. Dead hostless owners also enter pre-receipt reconciliation

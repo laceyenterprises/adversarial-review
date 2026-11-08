@@ -2242,7 +2242,8 @@ for (const status of ['succeeded-open', 'succeeded', 'failed', 'running', 'start
     else assert.equal(result.dispatched, false);
     assert.ok(reads <= 2, 'reconciliation reuses its observed ledger evidence');
     assert.equal(pidProbes, localWatcher ? 1 : 0);
-    assert.equal(processReads.length, status === 'pending-live' ? 1 : 0);
+    assert.equal(processReads.length, localWatcher ? (status === 'pending-live' ? 2 : 1) : 0,
+      'local acquisition captures identity before the live-owner reclaim probe');
     const lease = readAmaCloserLease(rootDir, identity);
     const terminal = ['failed', 'succeeded', 'succeeded-open'].includes(status);
     if (terminal) assert.equal(result.reason, 'live-owner', 'lease reconciliation precedes shared live-remediator refusal');

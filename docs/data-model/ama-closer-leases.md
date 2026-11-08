@@ -11,8 +11,9 @@ A `dispatching` intent now prevents the stale-lease reaper from releasing its
 lease or refunding a presumed phantom attempt. The keyed native reconciler may
 promote a matching dead-owner pending lease after receipt proof, or terminalize
 it as `deferred` after proof that submission never began, or after complete
-dead-submitter and empty-key proof (CLOSERPENDINGDEAD-01). The lease shape
-is unchanged; process identities and diagnostic evidence live on the intent. Lease updates serialize on the existing reclaim flock; native repair
+dead-submitter and empty-key proof (CLOSERPENDINGDEAD-01). The lease also retains optional `watcherStartedAt` (DEADWATCHERLEASE-01);
+submitter identities and diagnostic evidence live on the intent. Lease updates
+serialize on the existing reclaim flock; native repair
 compares the complete expected owner under that fence before transition. Busy
 or changed mutation ownership defers the repair. Live, foreign-host,
 replaced and unrelated receipted leases remain unchanged. Missing lease evidence
@@ -33,15 +34,14 @@ deferral or supersession cannot demote it to a terminal failure. Findings from
 that review may acquire a fresh hammer lease through `fromReviewHandoff` under
 the sibling `.handoff.lock` exclusive flock and atomic single-claim acquisition.
 Clean reviews use daemon merge. Existing hammer retry and lifetime caps remain.
-`acquiredAt`, `updatedAt`, `watcherPid`, `holderHost`, and `dispatchTimeoutMs`
+`acquiredAt`, `updatedAt`, `watcherPid`, `watcherStartedAt`, `holderHost`, and `dispatchTimeoutMs`
 identify the launch window. LOADAR-01 records the load-aware effective
 subprocess budget in `dispatchTimeoutMs`. CLOSERLEASEDEAD-01 expires a pending,
 launch-less lease strictly after `acquiredAt + dispatchTimeoutMs`, without
 scaling or adding retry overhead. Dispatch-record expiry retains its existing
 retry and token-poll window. Nominal
 pending fallback and dispatched/unknown reclaim ages use the shared load-aware
-helper. Confirmed live launches still retain ownership at any age; no store
-fields or lifecycle states change. A dispatched lease carries `lrqId`.
+helper. Confirmed live launches still retain ownership at any age; lifecycle states remain unchanged. A dispatched lease carries `lrqId`.
 CLOSERCUSTODYLRQ-01 also records `workerId` and `dispatchedAt` when the
 dispatcher returns a real `launchRequestId` receipt; a legacy `dispatchId`
 fallback does not populate `workerId` and cannot become launch-bound custody; `headSha` already binds the lease to its head.
@@ -153,10 +153,38 @@ status-only evidence remains unknown. No new durable states or fields are added.
 
 ## Abandoned pending holders (CLOSERLEASEDEAD-01)
 
+DEADWATCHERLEASE-01 adds optional `watcherStartedAt`, the UTC process start
+identity captured on the acquiring host. New local leases persist it (null if
+unreadable); older leases remain readable. Acquisition inspects only positive
+integer local PIDs; missing or invalid PIDs persist as null, and capture errors
+leave `watcherStartedAt` null without preventing acquisition. The ownership
+snapshot comparison used for conditional deletion/restoration treats missing
+and null start identities equally, while distinct recorded identities still
+refuse a stale mutation. Full-snapshot `expectedLease` updates remain exact.
+A different observed start time
+proves PID reuse even when both processes started before acquisition. Without
+this field, the legacy started-after-acquisition proof remains available.
+Confirmed live local owners retain custody past the deadline, including when
+start-time capture is unavailable. Unknown liveness retains the existing
+persisted timeout fallback; deadlines are never shortened or refreshed.
+The reaper's legacy age selector uses the same start-identity check before
+retaining a live PID past its generic age floor; verified reuse reaches the
+age fallback. Matching identities and unreadable capture retain live custody.
+
+The existing startup sweep runs once before polling; the returned ticker waits
+its normal interval before periodic sweeps. Each inspected pending/dispatched
+claim with a prior PID records `ama_closer.startup_claim_observed`, including
+claims retained for live or uncertain ownership. Reclamation keeps the intent fence
+and `.reclaim.lock` snapshot comparison and emits
+`ama_closer.abandoned_lease_reclaimed` with repository, PR, head, dead owner PID,
+recorded start identity and outcome. Normal terminal-lease reclamation and atomic
+acquisition can then admit a closer in the same evaluation. No launch-receipt or
+finding-remediation proof is replaced by watcher death.
+
 Startup/periodic sweeps and closure routing share the abandonment rule for
 `pending` leases without `lrqId`. A matching `holderHost` or a legacy lease
 without `holderHost` permits a local PID probe: a confirmed absent PID or a process started after `acquiredAt` records
-`abandoned-holder-dead`. Unreadable identity evidence retains the lease until
+`abandoned-holder-dead`. Unknown process liveness retains the lease until
 its own persisted dispatch timeout; even foreign-host leases record
 `abandoned-timeout` strictly after that deadline. Observation never refreshes
 `acquiredAt`. Current-process leases and review handoffs retain ownership.

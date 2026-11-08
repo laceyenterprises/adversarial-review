@@ -69,7 +69,7 @@ export function probeCloserSubmitter(record, lease, options = {}) {
     return result;
   }
   const watcherRow = rows.find(row => row.pid === lease.watcherPid);
-  const expectedWatcher = record.dispatchWatcher;
+  const expectedWatcher = record.dispatchWatcher || { pid: lease.watcherPid, startedAt: lease.watcherStartedAt };
   if (watcherRow) {
     const expectedStartedAt = timestamp(expectedWatcher?.startedAt);
     if (expectedWatcher?.pid !== lease.watcherPid || !expectedStartedAt) {

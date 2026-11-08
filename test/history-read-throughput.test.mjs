@@ -8,6 +8,7 @@ import { setImmediate as turn } from 'node:timers/promises';
 import { createHistoryReader } from '../src/ama/history-reader.mjs';
 import { execHistoryFile } from '../src/ama/history-child.mjs';
 import { fetchPrimaryChange, fetchPrimaryChangeHistoryClassification, checkPrimaryChange } from '../src/ama/primary-change.mjs';
+import { withClosureEvaluationReadCache } from '../src/closure-evaluation-cache.mjs';
 import { currentGitHubBudgetScope } from '../src/rate-limit-throttle.mjs';
 
 // Synthetic immutable history: only the reported shape (2 commits / 53 paths)
@@ -18,11 +19,13 @@ const repo = 'fixture/repo', path = `repos/${repo}/compare/${base}...${head}`;
 // A nonexistent private fixture root prevents durable history writes/reuse.
 const args = { repo, prNumber: 42, headSha: head, rootDir: join(tmpdir(), randomUUID()) };
 const commit = (id, parent) => ({ sha: id, parents: [{ sha: parent }], commit: { message: 'author change' } });
-function fixture({ failTree = false, stallTree = false, contextTimeoutMs, hammer = false, schedule } = {}) {
+function fixture({ failTree = false, stallTree = false, contextTimeoutMs, hammer = false, schedule, recursive = false } = {}) {
   const objects = new Map();
   const roots = [[], []];
   for (let i = 0; i < 53; i++) for (let side = 0; side < 2; side++) {
-    const dir = sha(`dir-${i}-${side}`), blob = sha(`blob-${i}-${side}`);
+    const blob = sha(`blob-${i}-${side}`);
+    const body = Buffer.concat([Buffer.from('100644 source.mjs\0'), Buffer.from(blob, 'hex')]);
+    const dir = createHash('sha1').update(`tree ${body.length}\0`).update(body).digest('hex');
     const bytes = Buffer.from(`${side ? 'new' : 'old'}-${i}\n`);
     roots[side].push({ path: `dir-${String(i).padStart(2, '0')}`, type: 'tree', mode: '040000', sha: dir });
     objects.set(`git/trees/${dir}`, { tree: [{ path: 'source.mjs', type: 'blob', mode: '100644', sha: blob }], truncated: false });
@@ -31,6 +34,11 @@ function fixture({ failTree = false, stallTree = false, contextTimeoutMs, hammer
   objects.set(`git/trees/${base}`, { tree: roots[0], truncated: false });
   objects.set(`git/trees/${head}`, { tree: roots[1], truncated: false });
   objects.set(`git/trees/${middle}`, { tree: roots[1], truncated: false });
+  for (const [ref, side] of [[base, 0], [head, 1], [middle, 1]]) {
+    objects.set(`git/trees/${ref}?recursive=1`, recursive ? { truncated: false,
+      tree: roots[side].flatMap(entry => [entry, ...objects.get(`git/trees/${entry.sha}`).tree.map(child => ({ ...child, path: `${entry.path}/${child.path}` }))]),
+    } : { tree: [], truncated: true });
+  }
   const counts = { compare: 0, tree: 0, blob: 0, live: 0, diff: 0 };
   let activeTrees = 0, peakTrees = 0;
   const transport = async ({ args, signal }) => {
@@ -73,10 +81,10 @@ function fixture({ failTree = false, stallTree = false, contextTimeoutMs, hammer
       counts.diff++;
       return execHistoryFile(...argv);
     } });
-  return { get, counts, peakTrees: () => peakTrees };
+  return { get, transport, counts, peakTrees: () => peakTrees };
 }
 
-test('LAC-2174: 53 independent directories retain all patches with bounded tree requests', async t => {
+test('LAC-2174 fallback: 53 independent directories retain all patches with bounded tree requests', async t => {
   const { get, counts, peakTrees } = fixture();
   const start = performance.now();
   const result = await get(path);
@@ -88,14 +96,14 @@ test('LAC-2174: 53 independent directories retain all patches with bounded tree 
     assert.equal(file.additions, 1);
     assert.equal(file.deletions, 1);
   }
-  assert.deepEqual(counts, { compare: 1, tree: 108, blob: 106, live: 0, diff: 53 });
+  assert.deepEqual(counts, { compare: 1, tree: 110, blob: 106, live: 0, diff: 53 });
   assert.equal(peakTrees(), 16, 'at most eight before/after directory pairs');
   // Deterministic latency model, excluding local filesystem/git: 2s/request.
-  // Legacy DFS: metadata + root + 53 sibling pairs + seven blob waves.
-  const legacyMs = (1 + 1 + 53 + 7) * 2000;
-  const optimizedMs = (1 + 1 + Math.ceil(53 / 8) + 7) * 2000;
-  assert.equal(legacyMs, 124000);
-  assert.equal(optimizedMs, 32000);
+  // Fallback model: metadata + root/recursive attempt + 53 sibling pairs + seven blob waves.
+  const legacyMs = (1 + 2 + 53 + 7) * 2000;
+  const optimizedMs = (1 + 2 + Math.ceil(53 / 8) + 7) * 2000;
+  assert.equal(legacyMs, 126000);
+  assert.equal(optimizedMs, 34000);
   t.diagnostic(JSON.stringify({ counts, peakTreeRequests: peakTrees(), localWallMs: performance.now() - start,
     modeledRequestMs: 2000, legacyMs, optimizedMs }));
 });
@@ -131,6 +139,7 @@ test('a wide directory wave reaches child validation without exceeding argument 
     if (key.startsWith(`${path}?`)) return { stdout: JSON.stringify({
       status: 'ahead', total_commits: 1, merge_base_commit: { sha: base }, commits: [commit(head, base)],
     }) };
+    if (key.endsWith('?recursive=1')) return { stdout: '{"tree":[],"truncated":true}' };
     const ref = key.split('/').at(-1);
     let tree;
     if (ref === base) tree = [];
@@ -253,7 +262,7 @@ test('symbolic compare history remains live within the same reader', async () =>
   assert.equal(counts.tree, 0);
 });
 
-test('eager versus staged author-only collection yields the same decision with 216 versus 2 API reads', async t => {
+test('eager versus staged author-only collection yields the same decision with 218 versus 2 API reads', async t => {
   const eager = fixture(), staged = fixture();
   const options = { fetchCiCostImpl: async () => ({ headSha: head, ok: true }) };
   // Legacy capability-free transport forces the formerly eager full comparison.
@@ -262,7 +271,7 @@ test('eager versus staged author-only collection yields the same decision with 2
   assert.deepEqual(checkPrimaryChange(after, head), checkPrimaryChange(before, head));
   assert.equal(checkPrimaryChange(after, head).ok, true);
   const apiReads = counts => counts.compare + counts.tree + counts.blob + counts.live;
-  assert.equal(apiReads(eager.counts), 216);
+  assert.equal(apiReads(eager.counts), 218);
   assert.equal(apiReads(staged.counts), 2);
   assert.equal(eager.counts.diff, 53);
   assert.equal(staged.counts.diff, 0);
@@ -273,16 +282,16 @@ test('eager versus staged author-only collection yields the same decision with 2
 // wave is admitted. Filesystem/git remain real but do not consume modeled time.
 // Two-tree admission reproduces the legacy sibling-serial request schedule;
 // sixteen-tree admission exercises the production bounded waves.
-function latencySchedule(treeLimit) {
-  const remaining = { compare: 1, tree: 108, blob: 106 };
+function latencySchedule(treeLimit, { recursive = false, requestMs = 2000 } = {}) {
+  const remaining = { compare: 1, tree: recursive ? 4 : 110, blob: 106 };
   const queues = { compare: [], tree: [], blob: [] };
   const schedule = { elapsedMs: 0, waves: { compare: 0, tree: 0, blob: 0 }, read(stage) {
     return new Promise(resolve => {
-      const limit = stage === 'compare' ? 1 : stage === 'tree' ? remaining.tree === 108 ? 2 : treeLimit : 16;
+      const limit = stage === 'compare' ? 1 : stage === 'tree' ? recursive || remaining.tree >= 108 ? 2 : treeLimit : 16;
       const size = Math.min(limit, remaining[stage]);
       queues[stage].push(resolve);
       if (queues[stage].length === size) {
-        schedule.elapsedMs += 2000;
+        schedule.elapsedMs += requestMs;
         schedule.waves[stage]++;
         remaining[stage] -= size;
         for (const done of queues[stage].splice(0)) done();
@@ -292,7 +301,7 @@ function latencySchedule(treeLimit) {
   return schedule;
 }
 
-test('virtual legacy request schedule exhausts the canonical budget; bounded waves complete in 32 seconds', async t => {
+test('virtual legacy request schedule exhausts the canonical budget; bounded waves complete in 34 seconds', async t => {
   const legacy = latencySchedule(2);
   const before = fixture({ schedule: legacy });
   await assert.rejects(before.get(path), { code: 'HISTORY_READ_TIMEOUT' });
@@ -301,8 +310,108 @@ test('virtual legacy request schedule exhausts the canonical budget; bounded wav
   const optimized = latencySchedule(16);
   const after = fixture({ schedule: optimized });
   assert.equal((await after.get(path)).files.length, 53);
-  assert.equal(optimized.elapsedMs, 32000);
-  assert.deepEqual(optimized.waves, { compare: 1, tree: 8, blob: 7 });
+  assert.equal(optimized.elapsedMs, 34000);
+  assert.deepEqual(optimized.waves, { compare: 1, tree: 9, blob: 7 });
   t.diagnostic(JSON.stringify({ legacy: { elapsedMs: legacy.elapsedMs, waves: legacy.waves, counts: before.counts },
     optimized: { elapsedMs: optimized.elapsedMs, waves: optimized.waves, counts: after.counts } }));
+});
+
+test('HAMHISTORYTHROUGHPUT-02: complete recursive snapshots retain identical patches with 104 fewer tree reads than the deployed path', async t => {
+  const previous = fixture(), optimized = fixture({ recursive: true });
+  const start = performance.now();
+  const after = await optimized.get(path);
+  assert.deepEqual(after, await previous.get(path));
+  assert.deepEqual(optimized.counts, { compare: 1, tree: 4, blob: 106, live: 0, diff: 53 });
+  assert.equal(previous.counts.tree, 110, 'explicit truncation safely falls back to the subtree walker');
+  t.diagnostic(JSON.stringify({ fallback: previous.counts, optimized: optimized.counts, localWallMs: performance.now() - start,
+    deployedApiReads: 215, optimizedApiReads: 111 }));
+});
+
+test('HAMHISTORYTHROUGHPUT-02: request reduction completes the same proof within the unchanged global budget', async t => {
+  // Six seconds is an explicit synthetic transport model, not live latency.
+  const fallbackSchedule = latencySchedule(16, { requestMs: 6000 });
+  const fallback = fixture({ schedule: fallbackSchedule });
+  await assert.rejects(fallback.get(path), { code: 'HISTORY_READ_TIMEOUT' });
+  const schedule = latencySchedule(16, { recursive: true, requestMs: 6000 });
+  const optimized = fixture({ recursive: true, schedule });
+  const result = await optimized.get(path);
+  assert.equal(result.filesComplete, true);
+  assert.equal(result.files.length, 53);
+  assert.equal(schedule.elapsedMs, 60000);
+  assert.deepEqual(schedule.waves, { compare: 1, tree: 2, blob: 7 });
+  t.diagnostic(JSON.stringify({ fallbackMs: fallbackSchedule.elapsedMs, optimizedMs: schedule.elapsedMs, counts: optimized.counts }));
+});
+
+for (const corruption of ['missing-marker', 'missing-root-entry', 'duplicate', 'orphan', 'wrong-sha', 'unknown-type', 'missing-child', 'wrong-mode']) {
+  test(`recursive evidence fails closed on ${corruption}`, async () => {
+    const blob = sha('recursive-blob');
+    const body = Buffer.concat([Buffer.from('100644 file\0'), Buffer.from(blob, 'hex')]);
+    const dir = createHash('sha1').update(`tree ${body.length}\0`).update(body).digest('hex');
+    const root = { path: 'dir', mode: '040000', type: 'tree', sha: dir };
+    const leaf = { path: 'dir/file', mode: '100644', type: 'blob', sha: blob };
+    let blobs = 0;
+    const get = createHistoryReader({ execGhWithRetryImpl: async ({ args: argv }) => {
+      const key = argv[1];
+      if (key.includes('/compare/')) return { stdout: JSON.stringify({ status: 'ahead', total_commits: 1,
+        merge_base_commit: { sha: base }, commits: [commit(head, base)] }) };
+      if (key.endsWith('?recursive=1')) {
+        const data = { tree: [root, leaf], truncated: false };
+        if (corruption === 'missing-marker') delete data.truncated;
+        if (corruption === 'missing-root-entry') data.tree = [];
+        if (corruption === 'missing-child') data.tree = [root];
+        if (corruption === 'wrong-mode') data.tree[1] = { ...leaf, mode: '100755' };
+        if (corruption === 'duplicate') data.tree.push(leaf);
+        if (corruption === 'orphan') data.tree.push({ ...leaf, path: 'absent/file' });
+        if (corruption === 'wrong-sha') data.tree[0] = { ...root, sha: blob };
+        if (corruption === 'unknown-type') data.tree[1] = { ...leaf, type: 'unknown' };
+        return { stdout: JSON.stringify(data) };
+      }
+      if (key.includes('/git/trees/')) return { stdout: JSON.stringify({ tree: key.endsWith(base) ? [] : [root], truncated: false }) };
+      blobs++;
+      throw new Error('must not read blobs from malformed evidence');
+    } });
+    await assert.rejects(get(path), /recursive tree/);
+    assert.equal(blobs, 0);
+  });
+}
+
+test('recursive hammer proof still hydrates both exact snapshots before allowing preservation', async () => {
+  const { get, counts } = fixture({ recursive: true, hammer: true });
+  const evidence = await fetchPrimaryChange({ ...args, get }, { fetchCiCostImpl: async () => ({ headSha: head, ok: true }) });
+  assert.equal(evidence.headSha, head);
+  assert.equal(evidence.primaryFiles.length, 53);
+  assert.equal(evidence.finalFiles.length, 53);
+  assert.equal(checkPrimaryChange(evidence, head).ok, true);
+  const reversed = { ...evidence, finalFiles: [] };
+  assert.equal(checkPrimaryChange(reversed, head).ok, false);
+  assert.equal(counts.tree, 6, 'base snapshot requests coalesce across primary and final comparisons');
+  assert.equal(counts.blob, 106, 'identical SHA-addressed blobs coalesce');
+});
+
+test('recursive snapshot verification cannot continue past the global history deadline', async () => {
+  let treeReads = 0;
+  const schedule = { elapsedMs: 0, async read(stage) {
+    if (stage === 'tree' && ++treeReads === 3) this.elapsedMs = 90000;
+  } };
+  const { get, counts } = fixture({ recursive: true, schedule });
+  await assert.rejects(get(path), { code: 'HISTORY_READ_TIMEOUT' });
+  assert.ok(treeReads >= 3 && treeReads <= 4, 'deadline expires on the first recursive request');
+  assert.equal(counts.blob, 0);
+  assert.equal(counts.diff, 0);
+});
+
+test('recursive evidence coalesces completed requests only within its credential identity', async () => {
+  const { transport, counts } = fixture({ recursive: true });
+  const reader = token => createHistoryReader({ execGhWithRetryImpl: transport, env: { GH_TOKEN: token } });
+  await withClosureEvaluationReadCache(async () => {
+    const first = await reader('offline-fixture-one')(path);
+    const second = await reader('offline-fixture-two')(path);
+    assert.deepEqual(first, second);
+    assert.equal(counts.tree, 8);
+    assert.equal(counts.blob, 212);
+    assert.deepEqual(await reader('offline-fixture-one')(path), first);
+    assert.equal(counts.tree, 8, 'same-credential completed recursive evidence reuses its immutable cache');
+    assert.equal(counts.blob, 212);
+    assert.equal(counts.compare, 2);
+  });
 });

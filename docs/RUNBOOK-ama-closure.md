@@ -4613,12 +4613,21 @@ cannot cancel another reader's work or extend its wait.
 History classification reads every paginated commit before deciding whether a
 hammer exists. Author-only and history-only classification skips file reconstruction;
 a hammer preservation decision still reconstructs both complete author and final
-snapshots. Immutable commit pages are reused within that reader. Directory traversal
-settles at most eight before/after subtree pairs per wave (16 GitHub requests),
-then diffs at most eight changed blob pairs at once. Equal subtrees remain skipped,
-truncated trees still fail closed, and sorted paths make evidence independent of
-request completion order. This reduces serial collection without changing the
-90-second budget, quota policy, live reads or cancellation ownership.
+snapshots. Immutable commit pages are reused within that reader. For roots with
+directories, HAMHISTORYTHROUGHPUT-02 first requests SHA-addressed recursive trees.
+A complete snapshot must explicitly report `truncated: false`, match the separately
+read root entries, have unique valid paths and ancestors, and reproduce every
+descendant Git tree SHA from its complete direct children (including modes).
+Missing or inconsistent evidence fails closed. An explicitly truncated recursive
+response falls back to the uncapped directory walker; a truncated nonrecursive
+tree still fails closed. Flat roots need no recursive request.
+The fallback settles at most eight before/after subtree pairs per wave (16 GitHub
+requests), skipping equal subtrees. Both paths then diff at most eight changed
+blob pairs at once. Immutable requests coalesce within the existing credential
+and cancellation boundaries; sorted paths make evidence independent of request
+completion order. Recursive output stays under the existing child-output limit.
+This reduces request volume without changing the 90-second budget, quota policy,
+live provenance reads, reversal authorization or cancellation ownership.
 
 Cancellation reaches metadata, subtree, blob, retry and local proof work.
 Production history CLI/diff children run in an isolated process group, killed

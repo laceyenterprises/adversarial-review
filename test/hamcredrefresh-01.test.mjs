@@ -84,6 +84,21 @@ test('Git credential mint does not retry an explicit authorization refusal', t =
   assert.equal(f.calls.length, 1);
 });
 
+test('Git credential mint preserves its failure sentinel for unexpected thrown values', t => {
+  const f = fixture(t, () => assert.fail('unexpected mint attempt'));
+  for (const value of [null, undefined, 'unexpected', 42, {}, { refreshOutcome: 42 },
+    { refreshOutcome: 'failed (unknown_refusal)' }]) {
+    // A failure before the retry reader runs bypasses refresh()'s Error wrapper.
+    t.mock.method(closureGateClock, 'now', () => { throw value; });
+    assert.throws(() => f.session().gitCredential(), error => {
+      assert.equal(error.message, 'git-credential-refresh-failed');
+      assert.equal(error.refreshRefusal, undefined);
+      return true;
+    });
+  }
+  assert.equal(f.calls.length, 0);
+});
+
 test('Git helper emits the bounded refusal reason alongside the existing failure sentinel', () => {
   const result = childProcess.spawnSync(process.execPath,
     [fileURLToPath(new URL('../bin/hammer-git-credential.mjs', import.meta.url)), 'get'], {

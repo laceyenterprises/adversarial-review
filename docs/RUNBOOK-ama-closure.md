@@ -7017,7 +7017,10 @@ admission-cache lookup and rate-limit accounting, including when dispatch only
 supplies a refresh command. Each invocation, including after a CI wait, runs
 that variable's `<TOKEN_VAR>_REFRESH_COMMAND`, falling back to the launch
 environment's `HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND`. The trusted command has a fixed
-10-second timeout. Its diagnostics are discarded. After an actual throttle wait
+150-second timeout before load scaling (up to 900 seconds with the default
+sixfold ceiling), clipped by any explicit caller deadline. Only allowlisted
+authorization/identity refusal codes cross the diagnostic boundary; free-text
+child diagnostics are discarded. After an actual throttle wait
 it refreshes again immediately before execution and attributes the response to
 that credential. Without a refresh command, the current token is used unchanged.
 
@@ -7043,7 +7046,8 @@ clears the cached expiry rather than inheriting the previous token's timestamp.
 The refresh before a call is an optimisation. When it fails and the session
 already holds an entitled token (from `HAMMER_LACEY_GH_TOKEN`,
 `MERGE_AGENT_GH_TOKEN` or an earlier refresh; an ambient `GH_TOKEN` does not
-count), the call proceeds with that token and the process
+count), the call proceeds with that token unless the refresh returned an
+allowlisted authorization/identity refusal, which stops immediately. The process
 writes one warning to stderr per failure streak, naming only the outcome:
 `hammer-token: warning: proactive entitled token refresh failed (...); continuing with the held token`.
 That warning means the refresh command is broken while the held token still

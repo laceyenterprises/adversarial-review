@@ -4,6 +4,10 @@
 
 Hammer refresh callers now preserve the launch command's bounded retry window
 instead of killing renewal after ten seconds during a transient restart.
+Final comment-only remediation parses each allowlisted refusal once and safely
+classifies nullish or malformed thrown values without masking the Git credential
+failure sentinel. The detailed credential runbook now matches the timeout and
+held-token refusal contract.
 
 ## Interface changes
 
@@ -24,6 +28,15 @@ ESLint reports no errors (152 existing warnings across the repository, none
 in the changed files); contract typechecking passes.
 Commands run individually under a 600-second
 process-group deadline and the offline network guard.
+
+Final remediation: `node test/run-tests.mjs test/hamcredrefresh-01.test.mjs
+test/hammer-token.test.mjs test/smv.test.mjs` passes all 129 targeted tests after
+rebasing onto current trunk. The new unexpected-error regression failed on
+the prior implementation with a null property access, then passed with the fix.
+`npm run lint` passes with 152 existing warnings and no errors;
+`npm run typecheck:contracts`, `node scripts/validate-data-model-catalog.mjs`
+(91 entries), `bash demo/research-finding-walkthrough.sh`, and `git diff --check`
+pass. Long commands ran under the checked-in bounded runner.
 
 SRE acceptance remains pending: after deployment, observe two natural
 deploy-driven broker rolls without a hammer watcher outcome of

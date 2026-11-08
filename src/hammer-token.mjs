@@ -57,8 +57,10 @@ function authRefusal(error) {
   const match = /^entitled GitHub re-mint unavailable: ([a-z0-9_]+); refusing credential fallback$/m.exec(String(error?.stderr || ''));
   return AUTH_REFUSALS.has(match?.[1]) ? match[1] : null;
 }
-function definitiveRefreshFailure(error) {
-  return AUTH_REFUSALS.has(error.refreshOutcome?.match(/^failed \(([^)]+)\)$/)?.[1]);
+function definitiveRefreshRefusal(error) {
+  const outcome = error?.refreshOutcome;
+  const refusal = typeof outcome === 'string' ? outcome.match(/^failed \(([^)]+)\)$/)?.[1] : null;
+  return AUTH_REFUSALS.has(refusal) ? refusal : null;
 }
 function expiresLater(expiresAt, now = Date.now()) {
   const at = /^\d{4}-\d{2}-\d{2}T/.test(expiresAt || '') ? Date.parse(expiresAt) : NaN;
@@ -268,9 +270,8 @@ export function hammerTokenSession(options = {}) {
       } catch (error) {
         reportHammerEarlyFailure(GIT_CREDENTIAL_REFRESH_FAILED, { env: credentialEnv });
         const refused = new Error(GIT_CREDENTIAL_REFRESH_FAILED);
-        if (definitiveRefreshFailure(error)) {
-          refused.refreshRefusal = error.refreshOutcome.match(/^failed \(([^)]+)\)$/)[1];
-        }
+        const refusal = definitiveRefreshRefusal(error);
+        if (refusal) refused.refreshRefusal = refusal;
         throw refused;
       }
     },
@@ -304,7 +305,7 @@ export function hammerTokenSession(options = {}) {
         }
       } else if (!held || !expiresLater(expiresAt)) {
         try { refresh(refreshTimeout()); } catch (error) {
-          if (!held || definitiveRefreshFailure(error)) {
+          if (!held || definitiveRefreshRefusal(error)) {
             reportHammerEarlyFailure(mintFailureReason(error), { env: credentialEnv });
             throw error;
           }

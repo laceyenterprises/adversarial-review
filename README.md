@@ -4576,7 +4576,17 @@ merge predicates and smoke commands remain unchanged.
 ## Change notes
 
 - FINDINGS-94c784e1: Correct the closer backlog-repair runbook to use the SDK-only CLI, pass its read activation flag and SDK session/bootstrap environment through `sudo`, describe current output and rejected database-source flags, and make dispatch-read subprocess fixtures independent of host load diagnostics.
+- HAM PR #1726: recognize negated lists with or without a serial comma, retain
+  human ownership for mixed credential and approval clauses in either order,
+  and handle stdin stream errors when async Codex probes exit early.
 
+- PR #1726 final comment remediation: cli-direct Codex discovery awaits credential
+  and catalog preparation with shared staging and cleanup. Async probes close
+  stdin; their bounded stderr buffers are discarded or used only for redacted
+  login recognition. Legacy blocker ownership accepts standalone negated-need
+  phrases and enumerated lists ending in ", or", while retaining human ownership
+  for missing credentials and separate approval clauses. Regression cases now
+  live in the existing ownership and service-home suites discovered by `npm test`.
 - LIVEPACKNEW-01 final remediation: stop ledger retries when the budget expires during backoff, count only dispatched retries, and emit zero retry counts for unread packs in remediation facts. Offline regressions cover deadline boundaries and malformed plans.
 
 New repository notes live in [`docs/changes/`](docs/changes/README.md), one

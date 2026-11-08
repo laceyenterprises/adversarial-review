@@ -1,7 +1,9 @@
 import './helpers/review-cli-resolver-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import childProcess, { spawnSync } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { setImmediate as nextTurn } from 'node:timers/promises';
 import { EventEmitter } from 'node:events';
 import { materializePerWorkerCodexAuth, prepareCorporateCodexReviewerAuth } from '../src/codex-per-worker-auth.mjs';
 import { spawnCodexRemediationWorker, waitForLocalRemediationExit } from '../src/adapters/agent-runtime/local/remediation.mjs';
@@ -10,8 +12,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, sym
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cleanupServiceCodexAuth, prepareServiceCodexHome, serviceCodexConfigArgs } from '../src/codex-service-home.mjs';
-import { probeCodexCli } from '../src/adapters/reviewer-runtime/cli-direct/discovery.mjs';
+import { cleanupServiceCodexAuth, prepareServiceCodexHome, prepareServiceCodexHomeAsync, serviceCodexConfigArgs } from '../src/codex-service-home.mjs';
+import { probeCodexCli, probeReviewerCliOAuth } from '../src/adapters/reviewer-runtime/cli-direct/discovery.mjs';
 import { dummyCodexAuth, serviceFixtureExec, writeDummyCodexAuth } from './helpers/codex-service-fixture.mjs';
 
 const quiet = { info() {}, warn() {} };
@@ -204,6 +206,45 @@ test('offline subprocess consumes auth.json while ignoring an external CODEX_AUT
   } finally { home.cleanup(); f.cleanup(); }
 });
 
+for (const discovery of [false, true, 'reviewer-oauth']) {
+  test(`default async transport closes probe stdin (discovery=${discovery})`, async t => {
+    const f = fixture();
+    t.after(f.cleanup);
+    const binary = join(f.root, 'codex');
+    const receipt = join(f.root, 'commands.jsonl');
+    const boundary = new URL('./fixtures/codex-service-cli.mjs', import.meta.url).href;
+    writeFileSync(binary, `#!${process.execPath}
+import { appendFileSync } from 'node:fs';
+const args = process.argv.slice(2);
+if (['login', 'debug'].includes(args[0])) {
+  // Bound a broken transport without allowing it to wait for the 30s timeout.
+  const timeout = setTimeout(() => process.exit(2), 1500);
+  for await (const chunk of process.stdin) { void chunk; }
+  clearTimeout(timeout);
+  appendFileSync(process.env.FIXTURE_COMMANDS, JSON.stringify({ args, home: process.env.CODEX_HOME }) + '\\n');
+  await import(${JSON.stringify(boundary)});
+} else {
+  console.log('[]');
+}
+`, { mode: 0o700 });
+    const env = { ...f.env, CODEX_CLI: binary, FIXTURE_COMMANDS: receipt };
+    if (discovery === 'reviewer-oauth') {
+      await probeReviewerCliOAuth({ model: 'codex', env, cwd: f.root, ensureWorkerRegistryReadyImpl: async () => {} });
+    } else if (discovery) {
+      await probeCodexCli({ env, cwd: f.root, ensureWorkerRegistryReadyImpl: async () => {} });
+    } else {
+      const home = await prepareServiceCodexHomeAsync({ env, workspaceDir: f.root,
+        model: 'fixture-model', codexCli: binary, log: quiet });
+      try { assert.ok(home.catalogPath); } finally { home.cleanup(); }
+    }
+    const commands = readFileSync(receipt, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(commands.map(command => command.args), [['login', 'status'], ['debug', 'models']]);
+    assert.equal(commands[0].home, commands[1].home);
+    assert.equal(existsSync(commands[0].home), false);
+    assert.equal(existsSync(f.authPath), true);
+  });
+}
+
 const deployedCli = '/opt/homebrew/bin/codex';
 for (const legacy of [false, true]) {
   test(`deployed CLI offline login status consumes the dummy service store (legacy=${legacy})`, { skip: !existsSync(deployedCli) }, () => {
@@ -323,7 +364,8 @@ for (const provider of ['codex', 'codex-corp']) {
         ...(failure === 'reply-context' ? {} : { replyPath: join(f.root, 'reply.json'), hqRoot: f.root }),
         workerClass: provider === 'codex-corp' ? 'remediator-codex-corp' : 'codex',
         enforceHarnessIdentity: false, log: quiet,
-        sourceEnv: { HOME: f.root, CODEX_HOME: dirname(f.authPath), HQ_REPO_ROOT: f.root,
+        // The startup contract resolves /Users/<owner> auth paths to that owner home.
+        sourceEnv: { HOME: f.root.match(/^\/Users\/[^/]+/)?.[0] || f.root, CODEX_HOME: dirname(f.authPath), HQ_REPO_ROOT: f.root,
           // Corporate staging cannot be disabled by a primary auth path/kill switch.
           ...(provider === 'codex-corp' ? { CODEX_AUTH_PATH: f.authPath, AGENT_OS_CODEX_PER_WORKER_AUTH: '0' } : {}) },
         materializePerWorkerCodexAuthImpl: materializer(f, auth => { staged = auth; }),
@@ -447,3 +489,95 @@ test('reviewer CLI overrides pin the file credential store under --ignore-user-c
   assert.ok(args.every((arg, index) => index % 2 === 1 || arg === '--config'));
   assert.ok(values.includes('cli_auth_credentials_store="file"'));
 });
+
+test('discovery yields during credential and catalog commands without a synchronous executor', async t => {
+  const f = fixture();
+  t.after(f.cleanup);
+  const calls = [];
+  let home;
+  await probeCodexCli({ env: { ...f.env, CODEX_CLI: '/fixture/codex' }, cwd: f.root, ensureWorkerRegistryReadyImpl: async () => {},
+    execFileImpl: async (command, args, options) => {
+      calls.push(args.join(' '));
+      home = options.env.CODEX_HOME;
+      assert.notEqual(home, join(f.root, '.codex'));
+      assert.equal(options.env.CODEX_AUTH_PATH, join(home, 'auth.json'));
+      // This timer must run while discovery is waiting for the subprocess.
+      await nextTurn();
+      if (['login', 'debug'].includes(args[0])) {
+        const stdout = serviceFixtureExec(command, args, options);
+        return args[0] === 'login' ? { stdout: '', stderr: stdout } : { stdout };
+      }
+      assert.match(readFileSync(join(home, 'config.toml'), 'utf8'), /model_catalog_json/);
+      return { stdout: args[0] === '--version' ? 'fixture' : '[]' };
+    } });
+  assert.deepEqual(calls, ['login status', 'debug models', '--version', 'sessions list']);
+  assert.equal(existsSync(home), false);
+  assert.equal(existsSync(f.authPath), true);
+});
+
+test('async service authentication errors clean the private store and redact subprocess output', async t => {
+  const f = fixture();
+  t.after(f.cleanup);
+  let home;
+  await assert.rejects(prepareServiceCodexHomeAsync({ env: f.env, workspaceDir: f.root,
+    model: 'fixture-model', codexCli: '/fixture/codex', log: { info() {}, warn() {} },
+    execFileImpl: async (_command, args, options) => {
+      home = options.env.CODEX_HOME;
+      assert.deepEqual(args, ['login', 'status']);
+      await nextTurn();
+      throw new Error('synthetic-secret-from-subprocess');
+    } }), error => error.isOAuthError && !error.message.includes('synthetic-secret'));
+  assert.equal(existsSync(home), false);
+  assert.equal(existsSync(f.authPath), true);
+});
+
+test('async catalog rejection retains authenticated server-catalog fallback without leaking CLI output', async t => {
+  const f = fixture();
+  t.after(f.cleanup);
+  const warnings = [];
+  const home = await prepareServiceCodexHomeAsync({ env: f.env, workspaceDir: f.root,
+    model: 'fixture-model', codexCli: '/fixture/codex',
+    log: { info() {}, warn(message) { warnings.push(message); } },
+    execFileImpl: async (command, args, options) => {
+      await nextTurn();
+      if (args[0] === 'login') return { stdout: serviceFixtureExec(command, args, options) };
+      assert.deepEqual(args, ['debug', 'models']);
+      throw new Error('synthetic-catalog-secret');
+    } });
+  try {
+    assert.equal(home.catalogPath, null);
+    assert.doesNotMatch(readFileSync(join(home.codexHome, 'config.toml'), 'utf8'), /model_catalog_json/);
+    assert.equal(existsSync(home.authPath), true);
+    assert.equal(warnings.length, 1);
+    assert.doesNotMatch(warnings[0], /synthetic-catalog-secret/);
+  } finally { home.cleanup(); }
+  assert.equal(existsSync(home.codexHome), false);
+  assert.equal(existsSync(f.authPath), true);
+});
+
+for (const code of ['EPIPE', 'ERR_STREAM_DESTROYED']) {
+  test(`async service probe handles early stdin ${code}`, async (t) => {
+    const f = fixture();
+    const commandError = new Error('probe exited early');
+    const mock = t.mock.method(childProcess, 'execFile', (_command, _args, _options, callback) => {
+      const stdin = new EventEmitter();
+      stdin.end = () => queueMicrotask(() => {
+        stdin.emit('error', Object.assign(new Error('stdin closed'), { code }));
+        callback(commandError, '', '');
+      });
+      return { stdin };
+    });
+    syncBuiltinESMExports();
+    try {
+      await assert.rejects(prepareServiceCodexHomeAsync({
+        env: f.env, workspaceDir: f.root, model: 'fixture-model',
+        codexCli: '/fixture/codex', log: quiet,
+      }), /Codex service OAuth unavailable at effective CLI credential store/);
+      assert.equal(mock.mock.callCount(), 1);
+    } finally {
+      mock.mock.restore();
+      syncBuiltinESMExports();
+      f.cleanup();
+    }
+  });
+}

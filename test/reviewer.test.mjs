@@ -3301,8 +3301,10 @@ test('Claude review invocation passes prompt off argv in cli-direct shape', asyn
   ]);
 });
 
-test('Codex review invocation uses the reviewer snapshot cwd and passes prompt as argv', async () => {
+for (const catalogAvailable of [false, true]) {
+test(`Codex review invocation uses snapshot cwd and argv with catalog available=${catalogAvailable}`, async () => {
   const calls = [];
+  let catalogPath = null;
   const source = mkdtempSync(join(tmpdir(), 'review-invocation-'));
   const authPath = writeDummyCodexAuth(join(source, 'auth.json'));
   const prompt = 'review this codex diff';
@@ -3311,7 +3313,7 @@ test('Codex review invocation uses the reviewer snapshot cwd and passes prompt a
   await spawnCodexReview({
     codexCli: '/fixture/codex',
     execFileSyncImpl: (command, args, options) => {
-      if (args[0] !== 'login') throw new Error('catalog unavailable');
+      if (!catalogAvailable && args[0] !== 'login') throw new Error('catalog unavailable');
       return serviceFixtureExec(command, args, options);
     },
     outputPath,
@@ -3326,6 +3328,13 @@ test('Codex review invocation uses the reviewer snapshot cwd and passes prompt a
     timeout: 12_345,
     maxBuffer: 999,
     spawnCapturedImpl: async (command, args, options) => {
+      if (catalogAvailable) {
+        const catalogArg = args.find(arg => arg.startsWith('model_catalog_json='));
+        assert.ok(catalogArg, 'successful seeding attaches the catalog override');
+        catalogPath = JSON.parse(catalogArg.slice('model_catalog_json='.length));
+        assert.equal(catalogPath.startsWith(`${options.env.CODEX_HOME}/`), true);
+        assert.equal(JSON.parse(readFileSync(catalogPath, 'utf8')).models[0].slug, 'gpt-5.4');
+      } else assert.equal(args.some(arg => arg.startsWith('model_catalog_json=')), false);
       calls.push({ command, args, options });
       return { stdout: '', stderr: '' };
     },
@@ -3344,6 +3353,7 @@ test('Codex review invocation uses the reviewer snapshot cwd and passes prompt a
         outputPath,
         prompt,
         model: 'gpt-5.4',
+        modelCatalogPath: catalogPath,
         configOverrides: [
           { key: 'model_provider', value: 'openai' },
           { key: 'model_reasoning_effort', value: 'high' },
@@ -3373,12 +3383,14 @@ test('Codex review invocation uses the reviewer snapshot cwd and passes prompt a
     'model_provider="openai"',
     '--config',
     'model_reasoning_effort="high"',
+    ...(catalogPath ? ['--config', `model_catalog_json=${JSON.stringify(catalogPath)}`] : []),
     '--output-last-message',
     outputPath,
     '--',
     prompt,
   ]);
 });
+}
 
 test('resolveCodexExecOverrides uses service registry without interactive provider settings', () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'codex-config-'));

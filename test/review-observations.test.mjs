@@ -4,9 +4,44 @@ import Database from 'better-sqlite3';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { readReviewObservations } from '../src/review-observations.mjs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { beginReviewerPass, completeReviewerPass } from '../src/reviewer-pass-tokens.mjs';
+
+test('CLI validates stdin and emits bounded public errors with failing exit status', t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'review-cli-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const request = { rootDir, selector: { kind: 'reviews' }, repositories: ['example/repo'] };
+  const run = input => spawnSync(process.execPath,
+    [fileURLToPath(new URL('../src/review-observations-cli.mjs', import.meta.url))],
+    { input, encoding: 'utf8', timeout: 10_000 });
+  const valid = run(JSON.stringify(request));
+  assert.equal(valid.error, undefined);
+  assert.equal(valid.status, 0, valid.stderr);
+  assert.equal(valid.stderr, '');
+  const { observed_at: observedAt, ...projection } = JSON.parse(valid.stdout);
+  assert.equal(new Date(observedAt).toISOString(), observedAt);
+  const { observed_at: _expectedObservedAt, ...expected } = readReviewObservations(request);
+  assert.deepEqual(projection, expected);
+  for (const [input, reason] of [
+    ['{private-invalid-json', 'invalid review request JSON'],
+    [' '.repeat(32769), 'request too large'],
+    [JSON.stringify({ ...request, selector: { kind: 'unknown' } }), 'invalid review selector'],
+    [JSON.stringify({ ...request, repositories: ['*'] }), 'review repository grant required'],
+    ['null', 'review evidence unavailable'],
+  ]) {
+    const result = run(input);
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr, `${reason}\n`);
+    assert.doesNotMatch(result.stderr, /private-invalid-json|review-cli-/);
+  }
+  const encoded = JSON.stringify(request);
+  assert.equal(run(encoded.padEnd(32768, ' ')).status, 0, 'exact size limit remains accepted');
+});
 
 test('real producer schema: scoped pages, latest completed pass, nullable closeout and end cutoff', () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'review-projection-'));

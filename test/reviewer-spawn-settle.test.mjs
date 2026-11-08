@@ -4,7 +4,8 @@ import {spawnReviewer} from './helpers/reviewer-quota-fixture.mjs';
 import './helpers/worker-observation-fixture.mjs';
 import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
 import { prepareReleaseReviewerClaim } from '../src/review-state-statements.mjs';
-import { settleReviewerAttempt } from '../src/reviewer-spawn-settle.mjs';
+import { settleReviewerAttempt, spawnReviewer as productionSpawnReviewer,
+  readReviewerQuotaDecision } from '../src/reviewer-spawn-settle.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -136,6 +137,32 @@ test('spawnReviewer consumes public quota evidence with either transport root al
       }
     }
   }
+});
+
+test('src spawnReviewer refuses public exhausted quota without the fixture wrapper', async t => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'direct-quota-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  let reads = 0;
+  const result = await productionSpawnReviewer({
+    rootDir, repo: 'fixture-owner/demo', prNumber: 1, reviewerModel: 'claude-code',
+    reviewerHeadSha: 'fixture-head', reviewerSessionUuid: 'direct-quota', reviewAttemptNumber: 1,
+    quotaCheckEnv: { AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'true' },
+    readReviewerQuotaDecisionImpl: options => readReviewerQuotaDecision({ ...options,
+      execFileImpl: async (_command, args) => {
+        reads++;
+        assert.deepEqual(args, ['fleet', 'quota', 'status', '--json']);
+        return { stdout: JSON.stringify({ providerStatuses: [
+          { provider: 'anthropic', authPath: 'oauth', state: 'exhausted' },
+        ] }) };
+      } }),
+    reviewerRuntimeAdapterOverride: { spawnReviewer: () => assert.fail('capped reviewer spawned') },
+    beginReviewerPassImpl() {}, completeReviewerPassImpl() {},
+  });
+  assert.equal(reads, 1);
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'primary-reviewer-quota-capped');
+  assert.equal(result.quotaProvider, 'anthropic');
+  assert.equal(result.quotaState, 'exhausted');
 });
 
 test('spawnReviewer posts successful adapter-produced review bodies through GitHub capture', async () => {

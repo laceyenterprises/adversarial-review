@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readWorkerObservation, dispatchReadTransport} from '../src/dispatch-read-client.mjs';
 import {readBuildCompletionSignalForPr,readBuildCompletionSignalForPrAsync,
   readBuildCompletionProducerEvidence,readBuildCompletionProducerEvidenceAsync,readActiveDagRunsForPlan,readActiveDagRunsForPlanAsync,
+  LIVE_DAG_RUN_STATES, readExecutionVerdictsFromLedger,
   readExecutionVerdictsFromLedgerAsync} from '../src/session-ledger-read-adapter.mjs';
 
 const page = (observation,items,more={}) => ({schema_version:1,observation,
@@ -65,16 +66,58 @@ test('completion repo/PR/head/signal selectors use SDK, retaining all companion 
   assert.equal(sync.row.completion_id,'completion');
 });
 
-test('completion capture failure after remote acceptance remains missing; an opened PR is no merge',async()=>{
-  let remoteMerges=0;
-  const remoteAccept=()=>{remoteMerges++;return {state:'MERGED'};};
-  const remote=remoteAccept();
+test('an absent completion page cannot prove a merge',async()=>{
   const result=await readBuildCompletionSignalForPrAsync({repo:'example/repo',prNumber:1,
     dispatchSession:{dispatchLookup:async()=>page('completions',[])}});
   assert.equal(result.ok,false);
   assert.equal(result.reason,'missing-build-completion-signal');
-  assert.equal(remote.state,'MERGED');
-  assert.equal(remoteMerges,1);
+});
+
+test('missing DAG identity never reaches either producer transport', async () => {
+  for (const planId of [undefined, null, '', '   ']) {
+    const args = { planId,
+      workerObservationSyncImpl: () => assert.fail('unscoped sync read'),
+      dispatchSession: { dispatchLookup: async () => assert.fail('unscoped async read') } };
+    assert.deepEqual(readActiveDagRunsForPlan(args), { ok: false, reason: 'missing-plan-id' });
+    assert.deepEqual(await readActiveDagRunsForPlanAsync(args), { ok: false, reason: 'missing-plan-id' });
+  }
+});
+
+test('DAG default states and sync execution verdicts retain their SDK selectors', async () => {
+  assert.deepEqual([...LIVE_DAG_RUN_STATES], ['pending', 'running', 'parked', 'awaiting-merge']);
+  const selectors = [];
+  const respond = selector => {
+    selectors.push(selector);
+    return page(selector.observation, selector.observation === 'dag_runs'
+      ? [{ run_id: 'run', state: 'awaiting-merge' }]
+      : [{ verdictId: 'verdict', launchRequestId: 'launch', verdict: 'no_work', schemaVersion: 1 }]);
+  };
+  const args = { planId: 'example-plan', launchRequestId: 'launch', workerObservationSyncImpl: respond,
+    dispatchSession: { dispatchLookup: async selector => respond(selector) } };
+  assert.deepEqual(await readActiveDagRunsForPlanAsync(args), readActiveDagRunsForPlan(args));
+  for (const selector of selectors) {
+    assert.equal(selector.plan_id, 'example-plan');
+    assert.deepEqual(selector.states, LIVE_DAG_RUN_STATES);
+  }
+  assert.deepEqual(await readExecutionVerdictsFromLedgerAsync(args), readExecutionVerdictsFromLedger(args));
+  assert.equal(selectors.at(-1).launch_request_id, 'launch');
+  assert.equal(selectors.at(-1).observation, 'execution_verdicts');
+});
+
+test('a producer refusal of an invalid DAG states override cannot become an empty live-pack result', async () => {
+  const states = ["running'); DROP TABLE dag_runs; --"];
+  const refuse = selector => {
+    assert.equal(selector.plan_id, 'example-plan');
+    assert.deepEqual(selector.states, states);
+    throw Object.assign(new Error('invalid DAG states'), { status: 400 });
+  };
+  const args = { planId: 'example-plan', states, workerObservationSyncImpl: refuse,
+    dispatchSession: { dispatchLookup: async selector => refuse(selector) } };
+  for (const result of [readActiveDagRunsForPlan(args), await readActiveDagRunsForPlanAsync(args)]) {
+    assert.equal(result.ok, false);
+    assert.equal(result.outcome, 'unavailable');
+    assert.equal(result.runs, undefined);
+  }
 });
 
 test('partial multi-repository pages are collected and later failure discards early evidence',async()=>{

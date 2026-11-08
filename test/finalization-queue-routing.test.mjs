@@ -280,7 +280,9 @@ test('HAMLANEWAIT-01: waking rechecks lane transfer and never invokes the old le
   const release = adapter.tryLock(lane);
   const pending = runLegacyLaneWrite({ rootDir: f.rootDir, ...lane, readConfig: () => ({}),
     deadline: new Date(Date.now() + 3000).toISOString(), exec: () => assert.fail('stale route must refuse') });
-  release();
+  // Exercise the wake after native subscription, as in the preceding wake test.
+  const timer = setTimeout(release, 50);
+  t.after(() => clearTimeout(timer));
   const result = await pending;
   assert.equal(result.reason, 'lane-transfer-required');
   assert.equal(result.outcome, undefined);

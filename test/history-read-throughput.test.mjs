@@ -182,11 +182,19 @@ test('a failed commit page stops new requests, settles active workers and permit
 });
 
 test('deadline still fails closed during parallel tree collection', async () => {
-  const { get, counts } = fixture({ stallTree: true, contextTimeoutMs: 50 });
-  const pending = assert.rejects(get(path), { code: 'HISTORY_READ_TIMEOUT' });
-  for (let i = 0; i < 100 && !counts.tree; i++) await turn();
+  // Admit both root reads before exhausting the canonical budget. Wall-clock
+  // scheduling under full-suite load must not expire the reader before trees.
+  const schedule = { elapsedMs: 0, async read(stage) {
+    if (stage === 'tree') {
+      await turn();
+      this.elapsedMs = 90000;
+    }
+  } };
+  const { get, counts } = fixture({ schedule });
+  await assert.rejects(get(path), { code: 'HISTORY_READ_TIMEOUT' });
   assert.equal(counts.tree, 2);
-  await pending;
+  assert.equal(counts.blob, 0);
+  assert.equal(counts.diff, 0);
 });
 
 test('an incomplete commit page cannot become an author-only success', async () => {

@@ -29,6 +29,52 @@ reused historical name never redirects the new repository to its former owner.
 Ambiguous historical ownership refuses resolution. Opaque job, launch, pass,
 family, entry, session and lease IDs remain stable.
 
+## Startup discovery recovery
+
+On startup listing failure, discovery reads current `repository_identities`
+names for the configured organization, unions configured static names, and
+filters case-insensitive short/full-name exclusions and persisted quarantine.
+The same exclusion predicate applies to static and discovered names on both
+successful and fallback listings. Fallback also omits names held by more than
+one `repository_id` in `repository_name_history`, including on first deploy
+before quarantine has been populated. It logs
+`watching N repos (fallback: last known set)`. These are historical observations,
+not proof of current visibility or archive status; the next complete successful
+listing replaces the fallback, excluding archived repositories as usual.
+Partial paginated listings never replace scope.
+
+`repository_discovery_quarantine` in `data/reviews.db` contains `full_name`
+(case-insensitive text primary key). Discovery creates it additively and stores
+identity conflicts from completed observations in one immediate transaction.
+A successful nonconflicting observation of that same name clears its quarantine;
+absence from a listing does not. This name fence prevents restart fallback from
+restoring a known conflicting repository. Existing pre-upgrade identity records
+remain usable; conflicts absent from both quarantine and name history cannot
+be reconstructed. If a quarantine write fails, discovery logs the local error
+and retains the complete listing with its in-memory conflict fence. This is
+not a GitHub failure; restart protection then depends on previously persisted
+quarantine and historical ambiguity until a later successful write.
+
+The discovery clock is process-local: before one successful listing, failure
+backoff is 2, 5, then 10 minutes, capped by `repoRefreshIntervalMs`, or the
+budget error's future `observation.resetAt`, whichever is earlier. Expired or
+invalid deadlines use backoff. Startup repository-state lock contention uses
+the same fallback and short backoff. Once successful, every refresh attempt
+consumes the ordinary interval and failures keep the previous scope; lock
+contention still propagates to the caller. Retry deadlines are checked at the
+next poll on or after the deadline, so a five-minute poll interval can delay
+a nominal two-minute retry until five minutes.
+
+Every zero-scope poll warns, including when discovery is throttled or the scope
+is static. At the first poll on or after two continuous minutes of zero scope, one
+`adversarial-repository-discovery` event enters the existing alert path as SEV2.
+It deliberately remains a digest notice during startup recovery, with an
+explicit coverage-loss headline and an action to inspect listing errors,
+GitHub budget and repository-state lock contention. It does not page.
+Enqueue failures retry on later polls. Grace and notice deduplication are
+process-local and reset when scope becomes nonempty; restarting starts a new
+grace. The durable alert outbox owns delivery retries after enqueue.
+
 ## Transaction and recovery
 
 Each asynchronous state owner holds its own shared `data/.repository-state.lock`

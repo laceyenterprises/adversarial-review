@@ -643,6 +643,15 @@ function alertPresentationForDoc(doc) {
       detail: `Reason: ${event}; path class: ${payload.pathClass}; error code: ${payload.errorCode}`,
     };
   }
+  if (event === 'adversarial-repository-discovery') {
+    return {
+      severity: 'SEV2',
+      headline: 'Zero watched repositories — discovery coverage degraded',
+      body: String(doc.text || event),
+      action: 'Inspect watcher discovery errors, GitHub budget and repository-state lock contention; confirm scope recovers on the next eligible poll.',
+      detail: `Organization: ${payload.org || 'static scope'}; empty since: ${payload.emptySince || 'unknown'}`,
+    };
+  }
   if (event === 'adversarial_review.pr_progress_stalled') {
     return { severity: 'SEV1', headline: 'Open PR progress stalled',
       body: String(doc.text || event),

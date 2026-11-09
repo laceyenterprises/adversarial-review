@@ -323,6 +323,54 @@ test('GEMINIQUOTA-01: no-reset checkout failure falls back in the same pass and 
   }
 });
 
+test('GRK-10: ineligible quota fallbacks never receive the durable reviewer claim', async () => {
+  const cases = [
+    ...['grok', 'grok-api', 'grok-reviewer', 'remediator-grok', 'hammer-grok', 'unknown']
+      .map(reviewerModel => ({ builderTag: 'grok', reviewerModel })),
+    ...['codex', 'codex-corp', 'codex-reviewer', 'remediator-codex', 'remediator-codex-corp']
+      .map(reviewerModel => ({ builderTag: 'codex', reviewerModel })),
+    ...['claude', 'claude-code', 'claude-code-corp', 'claude-reviewer', 'claude-reviewer-corp',
+      'remediator-claude', 'remediator-claude-corp']
+      .map(reviewerModel => ({ builderTag: 'claude-code', reviewerModel })),
+  ];
+  for (const { builderTag, reviewerModel } of cases) {
+    const rootDir = await mkdtemp(join(tmpdir(), 'reviewer-family-fallback-'));
+    try {
+      const models = [];
+      const transfers = [];
+      const settled = [];
+      const args = {
+        ...spawnArgs({ env: { AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'false',
+          ADVERSARIAL_REVIEW_STATE_DIR: rootDir }, capture: newCapture() }),
+        rootDir,
+        builderTag,
+        reviewerModel: 'gemini',
+        geminiQuotaFallbackRoute: { reviewerModel: ` ${reviewerModel.toUpperCase()} ` },
+        onGeminiQuotaFallback: route => transfers.push(route),
+        onPostOperationSettled: result => settled.push(result),
+        reviewerRuntimeAdapterOverride: {
+          async spawnReviewer({ model }) {
+            models.push(model);
+            return { ok: false, failureClass: 'quota-exhausted',
+              error: 'Synthetic quota exhaustion' };
+          },
+        },
+      };
+      // The first call discovers exhaustion; the second starts with a persisted cooldown.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const result = await spawnReviewer({ ...args, reviewerSessionUuid: randomUUID() });
+        assert.equal(result.failureClass, 'quota-exhausted', reviewerModel);
+        assert.equal(result.effectiveReviewerModel, 'gemini', reviewerModel);
+        assert.deepEqual(transfers, [], reviewerModel);
+      }
+      assert.ok(models.every(model => model === 'gemini'), reviewerModel);
+      assert.equal(settled.length, 2, reviewerModel);
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  }
+});
+
 test('GEMINIQUOTA-01: quota_exhausted without reset preserves both settlement budgets', async () => {
   const { classifyReviewerFailure } = await import('../src/adapters/reviewer-runtime/cli-direct/classification.mjs');
   const { settleReviewerAttempt } = await import('../src/reviewer-spawn-settle.mjs');

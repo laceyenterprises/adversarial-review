@@ -565,7 +565,11 @@ async function spawnReviewerWithinRepositoryCycle(args) {
   const rootDir = args.rootDir || ROOT;
   const env = args.quotaCheckEnv || args.env || process.env;
   const fallback = args.geminiQuotaFallbackRoute;
-  const canFallback = fallback && !fallback.quotaBlocked && normalizeReviewerModel(fallback.reviewerModel) !== 'gemini';
+  // Recheck after the primary settles as well as on cooldown entry. Refused
+  // families must never receive the durable claim, even if spawn would refuse.
+  const canFallback = () => fallback && !fallback.quotaBlocked
+    && normalizeReviewerModel(fallback.reviewerModel) !== 'gemini'
+    && !reviewerRefusesBuilder(args.builderTag, fallback.reviewerModel);
   const runFallback = async (quotaResult = null) => {
     const credentialKey = reviewerCredentialKey(fallback.reviewerModel, args.claudeAccountSelection?.provider);
     const gate = shouldPauseReviewerModel(rootDir, credentialKey);
@@ -613,7 +617,7 @@ async function spawnReviewerWithinRepositoryCycle(args) {
       }
     }
   };
-  if (canFallback && readReviewerGeminiQuotaCooldown({
+  if (canFallback() && readReviewerGeminiQuotaCooldown({
     rootDir, env, pool: args.agyReviewerIdentityPool || getAgyReviewerIdentityPool(),
     adapter: args.reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter,
   })) {
@@ -623,7 +627,7 @@ async function spawnReviewerWithinRepositoryCycle(args) {
     ...args,
     onPostOperationSettled: (result) => {
       if (!result.ok && (result.failureClass === 'reviewer-model-unavailable'
-        || (canFallback && result.failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS))) return;
+        || (canFallback() && result.failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS))) return;
       args.onPostOperationSettled?.(result);
     },
   });
@@ -639,7 +643,7 @@ async function spawnReviewerWithinRepositoryCycle(args) {
     } catch (error) {
       console.warn(`[watcher] Failed to queue model-unavailable alert: ${error.message}`);
     }
-    if (canFallback) return runFallback(result);
+    if (canFallback()) return runFallback(result);
     args.onPostOperationSettled?.(result);
     return result;
   }
@@ -650,7 +654,7 @@ async function spawnReviewerWithinRepositoryCycle(args) {
       rootDir, env, result, identityUser: result.agyIdentityUser,
       pool: args.agyReviewerIdentityPool || getAgyReviewerIdentityPool(),
     });
-    if (canFallback) {
+    if (canFallback()) {
       console.info(`[watcher] reviewer-selection ${args.repo}#${args.prNumber} → ${fallback.reviewerModel} (Gemini quota exhausted; immediate fallback)`);
       return runFallback(result);
     }

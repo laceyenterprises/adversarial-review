@@ -8,6 +8,10 @@ Selection reuses the existing daemon-only supersession rule. All live merge
 predicates, strict-mode finding policy, attestation and lease checks remain.
 Fixtures use synthetic repositories, heads and audit records.
 
+Final comment-only remediation clarifies that unsuccessful supersession retains
+the original stop or retry owner and action: R07 keeps closure-recovery ownership,
+while R08 keeps hammer dispatch ownership.
+
 ## Interface changes
 
 No new configuration, labels, checks or durable lifecycle states. The next-action
@@ -26,6 +30,11 @@ Each file ran separately through `cwp_dispatch.worker_validation`, with a
 - `bash demo/research-finding-walkthrough.sh`: passed, three byte-stable deliveries.
 
 The full suite was not run on the host, as required by the dispatch.
+
+Final comment-only documentation remediation re-ran the focused next-action
+suite (283 passed), lint (zero errors, 152 existing warnings), contract typecheck
+and offline walkthrough (three byte-stable deliveries); all passed using the
+bounded runner with a 120-second limit per command. `git diff --check` also passed.
 
 After ordinary deployment and the separately authorized service restart, SRE
 must retain a natural terminal-stop → fresh clean exact-head review → daemon

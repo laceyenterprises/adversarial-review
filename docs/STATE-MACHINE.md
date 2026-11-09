@@ -1558,10 +1558,10 @@ Freshness uses the stop record time, an active cap's existing alert time, or
 the terminal launch/retry times; missing or invalid time retains the stop or retry owner. The
 decision records `stop-superseded-by-exact-head-review` and
 `stop-reason:<superseded reason>`. Red, pending, conflicting or unproven heads
-retain recovery ownership. Hammer caps and cap-ledger contents are unchanged;
-only the daemon may be selected. The daemon re-fetches primary-change evidence
-and requires its predicate before every merge attempt. Durable lifecycle states
-are unchanged.
+retain the original stop or retry owner and action. Hammer caps and cap-ledger
+contents are unchanged; only the daemon may be selected. The daemon re-fetches
+primary-change evidence and requires its predicate before every merge attempt.
+Durable lifecycle states are unchanged.
 
 STOPSTALE-03 keeps the original alert time during a continuous cap suppression,
 including lifetime suppression across review heads. New series/target episodes

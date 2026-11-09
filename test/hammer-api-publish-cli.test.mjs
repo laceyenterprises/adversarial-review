@@ -420,6 +420,8 @@ exit "$rc"
       return error;
     });
     const scratch = readFileSync(scratchCalls, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+    assert.match(publication.stderr, /HAM helper step=api-publish attempt=1\/1 /,
+      'the rendered publication phase must retain the real helper output/status boundary');
     if (stops) {
       const remoteHead = await git('--git-dir', remote, 'rev-parse', 'refs/heads/worker');
       assert.notEqual(remoteHead, local);

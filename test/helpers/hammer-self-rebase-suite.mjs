@@ -1,3 +1,4 @@
+import './rate-limit-state-isolation.mjs';
 import nodeTest from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -13,8 +14,12 @@ const root = resolve(import.meta.dirname, '../..');
 const helper = join(root, 'test/fixtures/hammer-self-rebase.mjs');
 const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
 const subprocessTimeout = loadAwareTimeoutMs(45_000);
+// The isolation preload routes direct launches through the runner too, so
+// tmpdir() is inside the sandbox removed by the parent even if this file dies.
 const nodeCompileCache = mkdtempSync(join(tmpdir(), 'hammer-node-cache-'));
-nodeTest.after(() => rmSync(nodeCompileCache, { force: true, recursive: true }));
+const cleanCompileCache = () => rmSync(nodeCompileCache, { force: true, recursive: true });
+nodeTest.after(cleanCompileCache);
+process.once('exit', cleanCompileCache);
 const fixtureClockStart = 1700000000;
 const ciWaitSeconds = 900;
 
@@ -106,8 +111,9 @@ sleep() {
   executable('node-fixture', `#!/bin/bash
 case "$1" in
   */hammer-helper-step.mjs)
-    # Helper budgets and process cleanup have their own integration suite.
-    # This fixture exercises phase ordering against the synthetic executors.
+    # Representative scenarios retain the real wrapper and its output/status
+    # mapping; the remaining cases focus on phase ordering at lower cost.
+    if [ "\${FIXTURE_REAL_HELPER:-0}" = 1 ]; then exec "$REAL_NODE" "$@"; fi
     shift 5; exec "$@" ;;
   */metered-gh.mjs) if [ "$2" = exec-git ]; then shift 2; exec git "$@"; fi; shift 2; exec gh "$@" ;;
   */hammer-pr-read.mjs) shift 3; exec gh pr view "$@" ;;
@@ -252,8 +258,13 @@ status=$?
 echo "merge=$status outcome=$HAM_PHASE_OUTCOME held=$HAM_MERGE_LEASE_HELD"
 exit "$status"
 `], { cwd: scratch, env: { ...env, ...extraEnv }, encoding: 'utf8', timeout: subprocessTimeout });
-    assert.doesNotMatch(result.stderr, /HAM helper step=/,
-      'every phase scenario must route explicit and shebang helper launches through the fixture runtime');
+    if (extraEnv.FIXTURE_REAL_HELPER === '1') {
+      assert.match(result.stderr, /HAM helper step=rebase-result /,
+        'the shebang-launched rebase proof must run through the real helper');
+    } else {
+      assert.doesNotMatch(result.stderr, /HAM helper step=/,
+        'other scenarios route explicit and shebang helper launches through the fixture runtime');
+    }
     return result;
   };
   return { dir, scratch, original, rebased, nextBase, nextRebased, run, git };
@@ -452,7 +463,9 @@ export function registerHammerSelfRebaseTests(shard) {
   for (const scenario of ['old-reply', 'ci-old-reply', 'snapshot-lag', 'old-reply-foreign', 'old-reply-never']) {
     test(`LAC-2097: update-branch visibility converges without repeating the CAS: ${scenario}`, t => {
       const f = fixture(t, scenario);
-      const result = f.run(), diagnostics = result.stdout + result.stderr;
+      const realHelper = ['old-reply', 'old-reply-foreign'].includes(scenario);
+    const result = f.run(realHelper ? { FIXTURE_REAL_HELPER: '1' } : {});
+    const diagnostics = result.stdout + result.stderr;
       const refusal = ['old-reply-foreign', 'old-reply-never'].includes(scenario);
       assert.equal(result.signal, null, diagnostics);
       assert.equal(result.status, scenario === 'old-reply-foreign' ? 20 : scenario === 'old-reply-never' ? 1 : 0, diagnostics);

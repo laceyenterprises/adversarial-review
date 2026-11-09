@@ -6,6 +6,8 @@ import { meteredExecFileSync } from '../metered-gh.mjs';
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 // CLI subprocess fixtures can replace sleep before the entrypoint loads.
 // Explicit per-call sleep injection continues to take precedence.
+// Production code must not assign to this test seam: doing so removes the
+// transport backoff for every caller in the process.
 export const hammerNetworkClock = { sleep: pause };
 
 // Retry transport failures only, preserving the entitled token and expected-head

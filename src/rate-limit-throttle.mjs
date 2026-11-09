@@ -589,8 +589,8 @@ function extractRateLimitObservation(headers, { observedAt = new Date().toISOStr
 function createRateLimitThrottle({
   env = process.env,
   logger = console,
-  nowMs = () => rateLimitClock.now(),
-  sleepImpl = ms => rateLimitClock.sleep(ms),
+  nowMs: injectedNowMs,
+  sleepImpl: injectedSleepImpl,
   sharedStatePath,
   recordApiCallImpl = recordApiCall,
   readFileImpl = readFile,
@@ -603,6 +603,13 @@ function createRateLimitThrottle({
   getuidImpl = defaultGetuid,
   storeStatImpl = statImpl,
 } = {}) {
+  const nowMs = injectedNowMs === undefined ? () => rateLimitClock.now() : injectedNowMs;
+  const sleepImpl = injectedSleepImpl === undefined ? ms => rateLimitClock.sleep(ms) : injectedSleepImpl;
+  // Locks protect real file I/O and compare against filesystem mtime. The
+  // default throttle's virtual budget clock must not age or exhaust them.
+  // Explicit factory injections still control both clocks for lock tests.
+  const lockNowMs = injectedNowMs === undefined ? () => Date.now() : injectedNowMs;
+  const lockSleepImpl = injectedSleepImpl === undefined ? defaultSleep : injectedSleepImpl;
   let inMemoryObservations = {};
   const activeThrottlePromises = new Map();
   const reportedStoreFaults = new Set();
@@ -696,8 +703,8 @@ function createRateLimitThrottle({
       writeFileImpl,
       rmImpl,
       statImpl,
-      sleepImpl,
-      nowMs,
+      sleepImpl: lockSleepImpl,
+      nowMs: lockNowMs,
     });
   }
 

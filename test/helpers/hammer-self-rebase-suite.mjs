@@ -13,6 +13,8 @@ const root = resolve(import.meta.dirname, '../..');
 const helper = join(root, 'test/fixtures/hammer-self-rebase.mjs');
 const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
 const subprocessTimeout = loadAwareTimeoutMs(45_000);
+const fixtureClockStart = 1700000000;
+const ciWaitSeconds = 900;
 
 // The synchronous shell fixtures can otherwise starve the test reporter until
 // the whole file finishes, tripping a bounded runner's no-output deadline.
@@ -67,7 +69,7 @@ function fixture(t, scenario) {
       { title: 'Keep advisory repair', blocking: false, file: 'surface.txt', addressed: true },
     ] } }));
   writeFileSync(join(dir, 'protection.json'), '{}');
-  writeFileSync(join(dir, 'clock'), '1700000000');
+  writeFileSync(join(dir, 'clock'), String(fixtureClockStart));
   const executable = (name, source) => writeFileSync(join(bin, name), source, { mode: 0o755 });
   executable('gh', '#!/bin/sh\nexec "$REAL_NODE" "$FIXTURE_HELPER" gh "$@"\n');
   executable('date', '#!/bin/sh\nif [ "$1" = +%s ]; then cat "$FIXTURE_DIR/clock"; else exec /bin/date "$@"; fi\n');
@@ -77,8 +79,10 @@ value=$(cat "$FIXTURE_DIR/clock")
 increment="$1"
 if [ "$SCENARIO" = ci-shared-deadline ] && [ "$value" -eq 1700000000 ]; then increment=600; fi
 # Model a delayed wakeup before the last second of the fixed 900s window.
-# Repeating the same pending snapshot at every intermediate 30s adds no state.
-if [ "$SCENARIO" = prepredicate-timeout ] && [ "$value" -eq 1700000030 ]; then increment=869; fi
+# Jump on the first sleep, after the initial pending check, regardless of cadence.
+if [ "$SCENARIO" = prepredicate-timeout ] && [ "$(wc -l < "$FIXTURE_DIR/sleeps")" -eq 1 ]; then
+  increment=$((${fixtureClockStart} + ${ciWaitSeconds} - 1 - value))
+fi
 echo $((value + increment)) > "$FIXTURE_DIR/clock"
 `);
   executable('node-fixture', `#!/bin/bash
@@ -232,8 +236,12 @@ exit "$status"
 export function registerHammerSelfRebaseTests(shard) {
   if (!Number.isInteger(shard) || shard < 0 || shard >= 3) throw new RangeError('invalid hammer shard');
   let caseIndex = 0;
+  let registeredCount = 0;
   const test = (name, body) => {
-    if (caseIndex++ % 3 === shard) nodeTest(name, body);
+    if (caseIndex++ % 3 === shard) {
+      registeredCount++;
+      nodeTest(`[hammer shard ${shard + 1}/3] ${name}`, body);
+    }
   };
   test('LAC-2093: an unregistered dispatched controller cannot acquire or validate a head', t => {
     const f = fixture(t, 'no-op');
@@ -601,7 +609,8 @@ export function registerHammerSelfRebaseTests(shard) {
   for (const scenario of ['prepredicate-green', 'prepredicate-timeout', 'prepredicate-unchanged', 'prepredicate-contention', 'prepredicate-base-retry']) {
     test(`CLOSERCIWAIT-01: ${scenario}`, t => {
       const f = fixture(t, scenario);
-      const result = f.run();
+      // Exercise the deadline independently of the production default cadence.
+      const result = f.run(scenario === 'prepredicate-timeout' ? { HAM_REMOTE_CI_POLL_SECONDS: '47' } : {});
       const output = result.stdout + result.stderr;
       assert.equal(result.signal, null, output);
       assert.doesNotMatch(output, /predicate-failed|verify-head-error/);
@@ -618,12 +627,16 @@ export function registerHammerSelfRebaseTests(shard) {
         assert.match(output, /outcome=required-checks-pending remote=remote-ci-timeout/);
         assert.equal(predicates.length, 0);
         assert.equal(events.some(e => e.kind === 'gh' && e.value[1] === 'merge'), false);
-      assert.deepEqual(events.filter(e => e.kind === 'checks').map(e => e.value.at),
-        [1700000000, 1700000030, 1700000899], 'observe pending before and just short of the absolute deadline');
-      assert.equal(Number(readFileSync(join(f.dir, 'clock'), 'utf8')), 1700000900);
-      assert.equal(readFileSync(join(f.dir, 'sleeps'), 'utf8').trim().split('\n').at(-1), '1',
-        'the final requested sleep is clamped to the remaining second');
-      assert.equal(existsSync(join(f.dir, 'lease-held')), false);
+        const checkTimes = events.filter(e => e.kind === 'checks').map(e => e.value.at);
+        const deadline = checkTimes[0] + ciWaitSeconds;
+        const sleeps = readFileSync(join(f.dir, 'sleeps'), 'utf8').trim().split('\n').map(Number);
+        assert.deepEqual(checkTimes, [fixtureClockStart, deadline - 1],
+          'observe pending initially and just short of the absolute deadline');
+        assert.equal(Number(readFileSync(join(f.dir, 'clock'), 'utf8')), deadline);
+        assert.equal(sleeps.length, 2, 'one delayed wakeup and one final clamped sleep');
+        assert.equal(sleeps[0], 47, 'the fixture accepts a non-default polling cadence');
+        assert.equal(sleeps.at(-1), 1, 'the final requested sleep is clamped to the remaining second');
+        assert.equal(existsSync(join(f.dir, 'lease-held')), false);
         return;
       }
       assert.equal(result.status, 0, output);
@@ -728,4 +741,5 @@ export function registerHammerSelfRebaseTests(shard) {
     assert.ok(events.filter(e => e.kind === 'checks').length > 1);
     assert.equal(existsSync(join(f.dir, 'lease-held')), false);
   });
+  console.info(`Hammer self-rebase shard ${shard + 1}/3: ${registeredCount} of ${caseIndex} cases; select all three entrypoints for the complete suite.`);
 }

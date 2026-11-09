@@ -56,13 +56,6 @@ function testFiles() {
     .filter((name) => name.endsWith('.test.mjs'))
     .map((name) => path.join(adaptersDir, name));
   const files = [...topLevel, ...adapters].sort();
-  // These shell integration shards dominate the measured Node 22 tail. Start
-  // them with the first pool of workers instead of the alphabetical queue.
-  // Keep the same eight-worker limit and every selected test file.
-  const longFiles = new Set([
-    'hammer-self-rebase.test.mjs', 'hammer-self-rebase-2.test.mjs', 'hammer-self-rebase-3.test.mjs',
-  ]);
-  files.sort((a, b) => Number(longFiles.has(path.basename(b))) - Number(longFiles.has(path.basename(a))));
   const requested = process.argv.slice(2).filter((arg) => !arg.startsWith('-'));
   if (requested.length === 0) return files;
   const selected = files.filter((file) => requested.some((name) => (

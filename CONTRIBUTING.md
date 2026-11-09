@@ -289,7 +289,10 @@ network, no external services — and runs in CI on every PR against Node 22
 and Node 26.
 
 For the complete hammer self-rebase subset, select all three entrypoints;
-they partition one shared suite and are scheduled first by the full runner:
+they partition one shared suite. Each test name identifies its shard, and
+each entrypoint reports its shard index and registered case count. Selecting
+one entrypoint runs only that shard. The full runner uses the existing
+eight-worker pool with no priority scheduling guarantee:
 
 ```bash
 node test/run-tests.mjs hammer-self-rebase.test.mjs hammer-self-rebase-2.test.mjs hammer-self-rebase-3.test.mjs

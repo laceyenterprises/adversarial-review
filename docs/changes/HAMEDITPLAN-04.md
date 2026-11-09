@@ -45,3 +45,27 @@ The required full `npm test` run passed through the repository's isolated runner
 19,098 passed, 11 skipped, zero failures (664 seconds). This includes the final
 edit-plan regressions and the registration tests that fail in the direct
 search-selected invocation.
+
+## Final comment-only review
+
+The reported unused third argument is consumed: at reviewed head
+`e3571b5204cbcf26735478b15f08a2bd1d694a9b`,
+`src/ama/hammer-edit-plan.mjs:8-9` declares `prefix` as the third parameter
+and interpolates it into the correction message. The outside-range call at
+lines 67-69 intentionally supplies `correctable: `, matching the closure
+runbook's documented message and the exact-message CLI regression in
+`test/hameditplan-04.test.mjs`. Removing that argument would change the
+documented output, so the implementation is retained.
+
+After the fresh-main rebase, a direct offline reproduction first verified
+byte-identical edit-plan source against that reviewed head, then exercised an
+outside-range plan. It returned `action: correct`,
+`reason: not-covered-by-cited-finding` and a message starting
+`correctable: plan region src/example.mjs:5-7`. No interface, persistent state,
+lifecycle or smoke promise changes are needed.
+
+Final-round validation: the four targeted suites listed above passed all 82
+tests under `bash bin/run-bounded.sh --timeout 120`. Repository lint passed
+with zero errors and 152 existing warnings; contract typechecking, the offline
+research walkthrough and `git diff --check` passed. The full suite was left
+to PR-head CI for this round.

@@ -31,14 +31,7 @@ import { filterGitHubBody } from './github-outbound-body.mjs';
 import { assertReviewHeadCurrent, reviewerExecutionFailureExitCode, reviewerPostFailureExitCode,
   REVIEWER_PROMPT_TOO_LARGE_EXIT_CODE, REVIEWER_CHUNK_BUDGET_EXCEEDED_EXIT_CODE, REPOSITORY_STATE_BUSY_EXIT_CODE } from './reviewer-outcomes.mjs';
 import { execFile } from 'node:child_process';
-import {
-  accessSync,
-  constants,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  writeFileSync,
-} from 'node:fs';
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';

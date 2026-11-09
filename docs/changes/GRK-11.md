@@ -70,3 +70,16 @@ reviewer lane after master-switch qualification, and the registered watcher
 reload if required. It must collect a real other-family toy review,
 MODEL-TURN, common token/cost evidence and signed reviewed receipt. No live
 activation follows from merging this PR.
+
+HAM CI repair verification:
+
+- Updated the pipeline-health default reviewer-class expectation to include Grok.
+- Compacted the existing filesystem import in `src/reviewer.mjs`, saving seven
+  lines without changing behavior or increasing the ARC-10 ceiling.
+- Serial targeted Grok/routing/fence/runtime/ARC-10 tests passed, as did the
+  pipeline-health configurable silence-class regression.
+- Lint (zero errors), contract typecheck, offline research-finding walkthrough,
+  and data-model catalog validation (91 entries) passed.
+- The first concurrent targeted invocation failed at file level; the serial
+  invocation passed all selected files. Exact-head remote CI remains required.
+- Agent OS PR 10478 remains open; merge remains blocked on that prerequisite.

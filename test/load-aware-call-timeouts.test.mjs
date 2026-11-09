@@ -28,7 +28,16 @@ const quiet = { log() {}, warn() {}, error() {} };
 
 // Registry preparation sizes reads before each test; start policy/cache-clock
 // assertions without that preparation's cached timeout policy.
-beforeEach(() => resetLoadAwareTimeoutCachesForTesting());
+beforeEach(t => {
+  resetLoadAwareTimeoutCachesForTesting();
+  t.mock.method(os, 'platform', () => 'linux');
+  const previousDebug = process.env.LOAD_AWARE_TIMEOUT_DEBUG;
+  process.env.LOAD_AWARE_TIMEOUT_DEBUG = '1';
+  t.after(() => {
+    if (previousDebug === undefined) delete process.env.LOAD_AWARE_TIMEOUT_DEBUG;
+    else process.env.LOAD_AWARE_TIMEOUT_DEBUG = previousDebug;
+  });
+});
 
 function syntheticBusyHost(t) {
   t.mock.method(os, 'loadavg', () => [os.cpus().length * 3, 0, 0]);
@@ -56,7 +65,7 @@ test('millisecond and second forms share the curve, corroboration and bounds', (
 test('CPU sample, including failure, is reused for five seconds', () => {
   let now = 0;
   let calls = 0;
-  const sample = createCpuBusySampler({ cpuCount: 2, nowMs: () => now,
+  const sample = createCpuBusySampler({ platform: () => 'linux', cpuCount: 2, nowMs: () => now,
     execFileSyncImpl: () => { calls++; return calls === 1 ? '85\n85\n' : '40\n'; } });
   assert.equal(sample(), 85);
   now = 4999;
@@ -66,7 +75,7 @@ test('CPU sample, including failure, is reused for five seconds', () => {
   assert.equal(sample(), 20);
   assert.equal(calls, 2);
   let failures = 0;
-  const failedSample = createCpuBusySampler({ nowMs: () => now, warn() {},
+  const failedSample = createCpuBusySampler({ platform: () => 'linux', nowMs: () => now, warn() {},
     execFileSyncImpl: () => { failures++; throw new Error('synthetic ps failure'); } });
   assert.equal(failedSample(), null);
   now += 4999;

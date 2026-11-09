@@ -211,7 +211,7 @@ test('unavailable or non-finite CPU uses the load curve and preserves policy con
 for (const unavailable of [null, '', 'NaN\n', 'Infinity\n', '40\ninvalid\n', '1e308\n1e308\n']) {
   test(`CPU sampler substitutes for unavailable output ${JSON.stringify(unavailable)}`, () => {
     const warnings = [];
-    const sample = createCpuBusySampler({ cpuCount: 2, nowMs: () => 0,
+    const sample = createCpuBusySampler({ platform: () => 'linux', cpuCount: 2, nowMs: () => 0,
       warn: message => warnings.push(message),
       execFileSyncImpl: () => {
         if (unavailable === null) throw new Error('synthetic ps failure');
@@ -229,7 +229,7 @@ for (const busy of [0, 42.5, 85]) {
     let now = 0;
     let calls = 0;
     const warnings = [];
-    const sample = createCpuBusySampler({ cpuCount: 2, nowMs: () => now,
+    const sample = createCpuBusySampler({ platform: () => 'linux', cpuCount: 2, nowMs: () => now,
       warn: message => warnings.push(message),
       execFileSyncImpl: () => {
         calls++;
@@ -261,7 +261,7 @@ for (const busy of [0, 42.5, 85]) {
 test('slow ps failures have a one-second budget to limit daemon event-loop stalls and cache from completion', () => {
   let now = 0;
   let calls = 0;
-  const sample = createCpuBusySampler({ nowMs: () => now, warn() {},
+  const sample = createCpuBusySampler({ platform: () => 'linux', nowMs: () => now, warn() {},
     execFileSyncImpl: (command, args, options) => {
       assert.equal(command, '/bin/ps');
       assert.deepEqual(args, ['-A', '-o', '%cpu=']);
@@ -280,6 +280,142 @@ test('slow ps failures have a one-second budget to limit daemon event-loop stall
   now = 6000;
   assert.equal(sample(), null);
   assert.equal(calls, 2);
+});
+
+test('macOS cold sampling corroborates one-shot budgets, then uses cached native deltas', () => {
+  let now = 0;
+  let reads = 0;
+  let spawns = 0;
+  const sample = createCpuBusySampler({
+    platform: () => 'darwin', cpuCount: 1, nowMs: () => now,
+    cpus: () => {
+      reads++;
+      return [{ times: { user: reads * 20, idle: reads * 80, sys: 0, nice: 0, irq: 0 } }];
+    },
+    execFileSyncImpl: (command, args, options) => {
+      spawns++;
+      assert.equal(command, '/bin/ps');
+      assert.deepEqual(args, ['-A', '-o', '%cpu=']);
+      assert.equal(options.timeout, 1000);
+      assert.deepEqual(options.stdio, ['ignore', 'pipe', 'ignore']);
+      return '20\n';
+    },
+    warn: message => assert.fail(message),
+  });
+  assert.equal(sample(), 20, 'a fresh sampler supplies finite CPU evidence');
+  assert.equal(loadAwareTimeoutSeconds(360, {
+    enabled: true, maxMultiplier: 6, loadAvg1m: 3, cpuCount: 1, cpuBusyPercent: sample(),
+  }), 784, 'low CPU must not grant the full 2160-second load budget');
+  now = 4999;
+  assert.equal(sample(), 20);
+  assert.equal(reads, 1);
+  now = 5000;
+  assert.ok(Math.abs(sample() - 20) < 1e-10);
+  assert.equal(reads, 2);
+  assert.equal(spawns, 1, 'a warm sampler uses native counters without ps');
+  now = 70_000;
+  assert.equal(sample(), 20, 'a stale baseline obtains bounded cold evidence again');
+  assert.equal(spawns, 2);
+});
+
+test('macOS denied cold ps falls back quietly, then recovers with native interval deltas', () => {
+  let now = 0;
+  let reads = 0;
+  let spawns = 0;
+  const times = (user, idle) => ({ times: { user, idle, sys: 0, nice: 0, irq: 0 } });
+  const sample = createCpuBusySampler({
+    platform: () => 'darwin', nowMs: () => now,
+    cpus: () => { reads++; return reads === 1 ? [times(100, 100), times(300, 500)]
+      : [times(150, 150), times(400, 700)]; },
+    execFileSyncImpl: () => { spawns++; throw new Error('synthetic macOS ps denial'); },
+  });
+  assert.equal(sample(), null, 'cold baseline uses the full load curve');
+  now = 4999;
+  assert.equal(sample(), null);
+  assert.equal(reads, 1);
+  now = 5000;
+  assert.equal(sample(), 37.5);
+  assert.equal(reads, 2);
+  assert.equal(spawns, 1, 'denied ps is tried only while establishing the baseline');
+});
+
+test('macOS unavailable, invalid and unchanged counters use the existing fallback and recover', () => {
+  let now = 0;
+  let counters = [];
+  const sample = createCpuBusySampler({ platform: () => 'darwin', nowMs: () => now,
+    execFileSyncImpl: () => { throw new Error('synthetic macOS ps denial'); },
+    cpus: () => counters, warn() {} });
+  for (const invalid of [[], [{}], [{ times: { user: NaN } }]]) {
+    counters = invalid;
+    assert.equal(sample(), null);
+    now += 5000;
+  }
+  counters = [{ times: { user: 100, idle: 100, sys: 0, nice: 0, irq: 0 } }];
+  assert.equal(sample(), null);
+  now += 5000;
+  counters = [{ times: { user: 150, idle: 150, sys: 0, nice: 0, irq: 0 } }];
+  assert.equal(sample(), 50);
+  now += 60_000;
+  assert.equal(sample(), null, 'unchanged counters cannot renew good evidence');
+  counters = [{ times: { user: 200, idle: 150, sys: 0, nice: 0, irq: 0 } }];
+  now += 5000;
+  assert.equal(sample(), 100);
+});
+
+test('macOS resets, CPU-count changes and stale baselines never create fresh CPU evidence', () => {
+  let now = 0;
+  let times = { user: 100, idle: 100, sys: 0, nice: 0, irq: 0 };
+  let count = 1;
+  const sample = createCpuBusySampler({
+    platform: () => 'darwin', nowMs: () => now, warn() {},
+    execFileSyncImpl: () => { throw new Error('synthetic macOS ps denial'); },
+    cpus: () => Array.from({ length: count }, () => ({ times })),
+  });
+  assert.equal(sample(), null);
+  now = 5000;
+  times = { ...times, user: 200 };
+  assert.equal(sample(), 100);
+  now = 70_000;
+  times = { ...times, idle: 200 };
+  assert.equal(sample(), null, 'an old interval cannot measure current load');
+  now += 5000;
+  times = { ...times, user: 100, idle: 400 };
+  assert.equal(sample(), null, 'reject a backwards field even when total ticks increase');
+  now += 5000;
+  count = 2;
+  times = { ...times, user: 200 };
+  assert.equal(sample(), null, 'CPU-count changes require a new baseline');
+  now += 5000;
+  times = { ...times, user: 300 };
+  assert.equal(sample(), 100);
+});
+
+test('macOS one-shot CLI uses cold CPU corroboration with debug on or off', () => {
+  const preload = `import os from 'node:os';
+    import childProcess from 'node:child_process';
+    import assert from 'node:assert/strict';
+    import { syncBuiltinESMExports } from 'node:module';
+    os.platform = () => 'darwin';
+    os.loadavg = () => [3, 0, 0];
+    os.cpus = () => [{ times: { user: 100, idle: 100, sys: 0, nice: 0, irq: 0 } }];
+    childProcess.execFileSync = (command, args, options) => {
+      assert.equal(command, '/bin/ps');
+      assert.equal(options.timeout, 1000);
+      return '20\\n';
+    };
+    syncBuiltinESMExports();`;
+  for (const debug of ['', '1']) {
+    const result = spawnSync(process.execPath, [
+      '--import', `data:text/javascript,${encodeURIComponent(preload)}`,
+      'bin/load-aware-timeout.mjs', '360',
+    ], {
+      encoding: 'utf8', timeout: 5000,
+      env: { ...process.env, LOAD_AWARE_TIMEOUT_DEBUG: debug },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, '784');
+    assert.equal(result.stderr, '');
+  }
 });
 
 test('effective timeout is clamped to maxSeconds', () => {

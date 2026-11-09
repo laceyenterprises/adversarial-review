@@ -623,6 +623,7 @@ async function publicationFixture(t, { advice = false, expectedTimeout = null } 
 }
 
 test('initial and publication dispatch timeouts scale beyond the one-hour default cap under load', async t => {
+  t.mock.method(os, 'platform', () => 'linux');
   const cores = os.cpus().length;
   t.mock.method(os, 'loadavg', () => [cores * 3, cores * 3, cores * 3]);
   t.mock.method(childProcess, 'execFileSync', (command, args) => {

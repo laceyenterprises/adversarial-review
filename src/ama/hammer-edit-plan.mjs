@@ -62,7 +62,11 @@ export function checkHammerEditPlan(review, plan, { strictNonBlockingRemediation
     'supply a nonempty path and integer reviewed coordinates 1 <= startLine <= endLine.');
   if (!admissible.locations.some(location => location.path === plan.path
       && location.ranges.some(range => range.start <= plan.startLine && range.end >= plan.endLine))) {
-    return refuse('not-covered-by-cited-finding');
+    const ranges = admissible.locations.flatMap(location => location.ranges.map(range =>
+      `${location.path}:${range.start}-${range.end}`)).join(', ');
+    return correct('not-covered-by-cited-finding',
+      `plan region ${plan.path}:${plan.startLine}-${plan.endLine} is outside the cited finding's ranges ${ranges}; re-plan within a cited range, or as editKind=additive if no existing author line is removed or replaced`,
+      'correctable: ');
   }
   return { action: 'allow', reason: 'finding-authorizes-planned-region' };
 }

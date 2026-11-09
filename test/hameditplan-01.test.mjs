@@ -6,11 +6,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { checkHammerEditPlan } from '../src/ama/hammer-edit-plan.mjs';
-import { main, editPlanExitCode } from '../bin/hammer-edit-plan.mjs';
+import { main, editPlanExitCode, EDIT_PLAN_USAGE } from '../bin/hammer-edit-plan.mjs';
 import { amaAllAuthoritativeReviewerLogins } from '../src/ama/reviewer-authority.mjs';
 
 const template = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
-const examples = [...template.matchAll(/```json\n([^`]+)\n```/g)]
+const examples = [...EDIT_PLAN_USAGE.matchAll(/```json\n([^`]+)\n```/g)]
   .map(match => JSON.parse(match[1])).filter(plan => plan.reviewedHead);
 const ci = examples.find(plan => plan.requiredCiRepair);
 const review = { commit_id: 'a'.repeat(40), state: 'CHANGES_REQUESTED',
@@ -29,7 +29,7 @@ const review = { commit_id: 'a'.repeat(40), state: 'CHANGES_REQUESTED',
 Request changes
 ` };
 
-test('all four literal template shapes pass with applicable review evidence', () => {
+test('all four helper usage shapes pass with applicable review evidence', () => {
   assert.equal(examples.length, 4);
   assert.equal(Object.hasOwn(ci, 'kind'), false);
   assert.equal(Object.hasOwn(ci, 'findingNumber'), false);
@@ -38,6 +38,15 @@ test('all four literal template shapes pass with applicable review evidence', ()
   }
   const empty = { ...review, body: '## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nComment only' };
   assert.equal(checkHammerEditPlan(empty, ci).action, 'allow');
+});
+
+test('CLI help exposes complete plan shapes offline and the prompt routes to it', () => {
+  const result = spawnSync(process.execPath, [new URL('../bin/hammer-edit-plan.mjs', import.meta.url).pathname, '--help'], {
+    encoding: 'utf8', timeout: 5000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, EDIT_PLAN_USAGE);
+  assert.match(template, /ham_read edit-plan-usage .*hammer-edit-plan\.mjs" --help/);
 });
 
 test('CI citation fields and malformed locations refuse correctably without granting an edit', async t => {

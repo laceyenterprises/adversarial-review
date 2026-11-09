@@ -491,8 +491,25 @@ deployments; that compatibility path cannot bypass the full-dispatch preflight.
 Base-head, context, full-review, primary-change, range and rebase/conflict proof
 reads use 90 seconds nominal and a 540-second ceiling. A timed-out read gets
 one retry; permanent failures and semantic stop codes return immediately.
+The canonical full-review command is
+`ham_read review-read "$HAM_NODE_BIN" "$HAM_ROOT_DIR/bin/hammer-pr-read.mjs" "$HAM_REPO" "$HAM_PR_NUMBER" --full-review`.
+It displays and atomically writes all paginated review bodies and commit
+associations to `$HAM_RUN_DIR/reviews-full.json`, including complete findings.
+Use it before acting on the final review and to expand truncated context;
+review-head matching and merge eligibility remain unchanged.
+Read-only shell syntax failures (including Bash eval status 1 or 2 with a
+syntax diagnostic), missing executables and command-not-found status 127 use
+`hammer-command-error`: retry once, then return 75 and record an existing
+retryable deferral. Correct the local command before another attempt.
+The controller also syntax-checks a closure script before executing it, so a
+parser error before `ham_read` is reached has the same retryable reason.
+Helper attempts retain child stderr and spawn errors (including the missing
+executable name). Controller preflight logs Bash's parser diagnostic alongside
+the retryable reason, preserving its line number and unexpected token.
+Real read refusals retain their named terminal semantics.
 Child exit statuses, including 142 and signal-derived statuses, are preserved;
-only a timeout imposed by the runner returns 124.
+only a timeout imposed by the runner returns 124; local read command errors
+use the retryable status 75 described above.
 The runner waits for child exit, allowing five seconds for TERM cleanup before
 KILL, and keeps children in the controller's process group. Failed read output
 cannot mix with a successful retry. Child early-failure audits are provisional
@@ -4794,7 +4811,8 @@ affected `path`, `startLine`, `endLine` in reviewed coordinates. Cited plans als
 name `kind` and one-based `findingNumber`. An uncited in-place CI test repair
 instead supplies `requiredCiRepair: true` and omits both citation fields. Other edit kinds receive in-place-only correction feedback. Cited plans reject `requiredCiRepair: true` for every edit kind, preserving applicable policy refusals.
 In-place repairs preserve behavior; they do not grant reversal authority.
-The literal shapes are in `templates/hammer-prompt.md`.
+`node bin/hammer-edit-plan.mjs --help` prints complete JSON shapes offline;
+the prompt retains the field rules and directs the hammer to that usage output.
 The helper reads the review and effective policy and shares `checkReversalFinding`
 with the primary-change gate. Exit 21 is a shape-only refusal with an expected-shape message: make no edit,
 correct the plan once and rerun the helper. The prompt permits one correction

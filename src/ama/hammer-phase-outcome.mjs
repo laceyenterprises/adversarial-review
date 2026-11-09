@@ -1,6 +1,7 @@
 // Infrastructure observations spend no adjudication authority. Keep this list
 // explicit: a red check, moved head or lost owner must never match by message.
 export const HAMMER_RETRYABLE_READ_OUTCOMES = new Set([
+  'hammer-command-error',
   'git-credential-refresh-failed',
   // CLOSERGATES-01: an API credential mint that timed out or failed to run,
   // and a closure gate whose transient read failures outlasted the budget.

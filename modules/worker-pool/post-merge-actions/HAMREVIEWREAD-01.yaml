@@ -1,0 +1,15 @@
+# Operator handoff only; no daemon or live-state command executes on merge.
+operator_steps:
+  - description: >-
+      After normal submodule float and separately authorized follow-up/watcher
+      and dispatcher reloads, verify no new hammer_stop_hold_released events
+      with review-read-failed for clean PRs, and failed-without-merge closer
+      stops show status=failed and a failure class in launch_requests.
+      Retain deployed revisions and natural event/launch receipts as described
+      in docs/changes/HAMREVIEWREAD-01.md. Displaying this note does not satisfy
+      the activation check.
+    run_as: designated SRE operator
+    command: /bin/cat docs/changes/HAMREVIEWREAD-01.md
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

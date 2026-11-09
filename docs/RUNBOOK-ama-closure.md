@@ -1,5 +1,11 @@
 ## Terminal audit review currency (HAMLATEAUDIT-01)
 
+Terminal launch and lease observations are retained in the
+[append-only closer outcome journal](data-model/ama-closer-outcomes.md).
+Consumers must join these observations by launch identity: successful process
+exit alone never proves merge. Journal failures emit a local diagnostic and
+leave existing closure and paging decisions unchanged.
+
 A validated head alone does not prove that a later review was considered.
 The hammer's initial predicate and final live gate compare each authoritative
 family's latest applicable review head/body with the evidence at the authenticated

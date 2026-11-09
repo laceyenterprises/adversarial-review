@@ -806,9 +806,17 @@ On Agent OS hosts with the Adversarial Merge Authority enabled
 two-path merge model** (operational reference:
 [`docs/RUNBOOK-ama-closure.md`](docs/RUNBOOK-ama-closure.md)):
 
-- **Hammer — the common path.** When the final review carries findings
-  (blocking, or non-blocking under the default strict posture), the PR
-  needs a rebase, or CI needs repair, the watcher dispatches exactly one
+At the round cap, an eligible exact-head Comment-only review with zero
+blocking findings and remaining non-blocking or demoted findings first gets
+one builder fix-all round and a full re-review. Its zero-finding re-review
+uses the daemon path below; remaining findings use the configured fallback.
+The existing durable handoff receipt prevents duplicate builder work and
+concurrent closer admission.
+
+- **Hammer — repair and fallback.** Blocking final findings, conflicts,
+  CI-only repair, and findings remaining after the builder fix-all round
+  retain the configured hammer/operator behavior. When hammer admission
+  applies, the watcher dispatches exactly one
   hammer terminal-remediation worker (`templates/hammer-prompt.md`). The
   default `watcher.ama_hammer_dispatch_mode: inline` contract waits for
   that `hq dispatch` inside the posted-review phase. Operators may set
@@ -824,7 +832,7 @@ two-path merge model** (operational reference:
   GitHub required checks on the exact post-remediation head within a
   bounded remote-CI window, and merges under its own lease with
   `--match-head-commit`.
-- **Daemon inline merge — the rare path.** When the final review is
+- **Daemon inline merge — clean completion.** When the final review is
   fully clean (zero blocking AND zero non-blocking findings, both
   classifications known), GitHub reports required checks green and the
   PR mergeable, and the live head still matches the reviewed head, the
@@ -1088,7 +1096,7 @@ closure ownership across a soft caller deadline. No lifecycle states
 or merge gates change. Runtime recovery requires separate read-only observations
 after normal deployment; see the [lease runbook](docs/RUNBOOK-ama-closure.md#leasefair-01-fair-merge-lease-service).
 
-When the hammer closes a PR (the common MSM path),
+When the hammer closes a PR,
 `templates/hammer-prompt.md` directs one linear flow. The verify-head,
 publish, and merge procedures live in `bin/hammer-*.sh` and are rendered by
 `bin/hammer-procedure.mjs` into the same persistent shell so the verified

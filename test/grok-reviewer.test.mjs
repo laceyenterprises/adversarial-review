@@ -1,6 +1,7 @@
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { reviewWithGrok } from '../src/grok-reviewer.mjs';
 import { dispatchReviewerModel } from '../src/reviewer-harness.mjs';
 import { reviewerRefusesBuilder, REVIEWER_ROUTE_BY_MODEL } from '../src/adapters/subject/github-pr/routing.mjs';
@@ -144,8 +145,10 @@ test('model dispatcher sanitizes Grok output and never invokes Codex', async () 
 });
 
 test('Grok preflight delegates auth to the managed adapter', async () => {
-  assert.deepEqual(await probeReviewerCliOAuth({ model: 'grok',
-    execFileImpl: () => assert.fail('Grok used a sibling credential probe') }), { managed: true });
+  for (const model of ['grok', 'grok-build', 'grok-reviewer', 'GROK-4', 'remediator-grok']) {
+    assert.deepEqual(await probeReviewerCliOAuth({ model,
+      execFileImpl: () => assert.fail('Grok used a sibling credential probe') }), { managed: true });
+  }
   assert.equal(REVIEWER_ROUTE_BY_MODEL.grok.botTokenEnv, 'GH_GROK_REVIEWER_TOKEN');
   assert.equal(normalizeReviewerClass('grok-reviewer'), 'grok');
   const attribution = buildReviewerAttribution({ reviewerModel: 'grok' });
@@ -156,6 +159,53 @@ test('Grok preflight delegates auth to the managed adapter', async () => {
     reviewerModel: 'grok', codexSessionRoots: forbidden, claudeSessionRoots: forbidden,
     env: {},
   }), null);
+});
+
+test('Grok SIGTERM cancels only its dispatch and leaves outer async cleanup alive', () => {
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import assert from 'node:assert/strict';
+    import { reviewWithGrok } from ${JSON.stringify(new URL('../src/grok-reviewer.mjs', import.meta.url).href)};
+    for (const cancelFails of [false, true]) {
+      const originalListeners = process.listenerCount('SIGTERM');
+      let outerCleaned = false;
+      let request;
+      let finish;
+      const cancellations = [];
+      const outer = () => { setImmediate(() => { outerCleaned = true; }); };
+      process.once('SIGTERM', outer);
+      const reviewing = reviewWithGrok('', '', {
+        builderClass: 'codex',
+        env: { GH_GROK_REVIEWER_TOKEN: 'synthetic-token' },
+        loaderImpl: () => ({ get: (key, fallback) =>
+          ['grok.enabled', 'grok.reviewer.enabled'].includes(key) ? true : fallback }),
+        registryImpl: async () => ({ ok: true, data: { registrySource: 'db', classes: {
+          'grok-reviewer': { enabled: true, harness: 'grok', fallbackWorkerClasses: [] },
+        } } }),
+        runtimeFactory: () => ({
+          spawnReviewer: args => {
+            request = args;
+            return new Promise(resolve => { finish = resolve; });
+          },
+          cancel: async session => {
+            cancellations.push(session);
+            if (cancelFails) throw new Error('synthetic cancel failure');
+          },
+        }),
+        readUsageImpl: () => null,
+      });
+      await new Promise(resolve => setImmediate(resolve));
+      process.emit('SIGTERM');
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(outerCleaned, true);
+      assert.deepEqual(cancellations, [request.sessionUuid]);
+      finish({ ok: true, reviewBody: 'synthetic review' });
+      await reviewing;
+      assert.equal(process.listenerCount('SIGTERM'), originalListeners);
+    }
+    console.log('outer cleanup completed');
+  `], { encoding: 'utf8', timeout: 30_000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /outer cleanup completed/);
 });
 
 test('AFH cannot retain a Grok reviewer for Grok provenance even on missing health or pins', () => {

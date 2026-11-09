@@ -48,8 +48,9 @@ export async function reviewWithGrok(diff, extraContext = '', {
   const innerTimeoutMs = Math.max(1,
     outerTimeoutMs - Math.min(30_000, Math.max(1, Math.floor(outerTimeoutMs / 10))));
   const cancelOnTerm = () => {
+    // The outer reviewer owns shutdown and fence cleanup.
     void Promise.resolve().then(() => runtime.cancel(sessionUuid))
-      .catch(() => {}).finally(() => process.exit(143));
+      .catch(() => {});
   };
   process.once('SIGTERM', cancelOnTerm);
   let response;

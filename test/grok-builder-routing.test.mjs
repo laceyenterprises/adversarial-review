@@ -55,6 +55,25 @@ test('Grok opt-in does not override security domain routing', () => {
   assert.equal(selected.reviewerModel, 'claude');
 });
 
+test('Grok opt-in respects retry exclusions through subject and PR routes', () => {
+  const enabledLoader = () => ({ get: (key, fallback) =>
+    ['grok.enabled', 'grok.reviewer.enabled'].includes(key) ? true : fallback });
+  for (const excluded of ['grok', 'grok-reviewer', 'grok-api']) {
+    for (const [builderClass, reviewerModel] of [['codex', 'claude'], ['claude-code', 'codex']]) {
+      for (const applyGeminiReviewerMode of [true, false]) {
+        const options = { env, loaderImpl: enabledLoader, geminiReviewerMode: 'off',
+          excludedReviewerModels: [excluded], applyGeminiReviewerMode };
+        const subjectRoute = routeSubject({ builderClass }, options);
+        const prRoute = routePR(`[${builderClass}] Synthetic change`, null, options);
+        for (const result of [subjectRoute, prRoute]) {
+          assert.equal(result.reviewerModel, reviewerModel);
+          assert.deepEqual(result.excludedReviewerModels, [excluded]);
+        }
+      }
+    }
+  }
+});
+
 test('Grok title tagging and closer wrappers retain original builder provenance', () => {
   assert.equal(buildTaggedTitle(' GROK ', 'Synthetic change'), '[grok] Synthetic change');
   for (const prefix of ['', '[closer] ', '[hammer] ', '[hammer-corp] ', '[hammer-claude] ', '[hammer-claude-corp] ', '[hammer-grok] ']) {

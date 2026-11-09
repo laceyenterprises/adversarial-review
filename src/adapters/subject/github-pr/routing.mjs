@@ -541,7 +541,9 @@ function baseRouteForSubject(builderClass, {
     const pinnedRoute = defaultReviewerRouteFromEnv(env, { topPath, modulePaths, loaderImpl });
     operatorPinnedReviewer = Boolean(pinnedRoute);
     route = pinnedRoute || routeTable[builderClass];
-    if (domainId === 'code-pr' && !pinnedRoute && !reviewerRefusesBuilder(builderClass, 'grok', {
+    if (domainId === 'code-pr' && !pinnedRoute
+      && !routeExcludesReviewer({ excludedReviewerModels }, 'grok')
+      && !reviewerRefusesBuilder(builderClass, 'grok', {
       env, ...(loaderImpl ? { loaderImpl } : {}), topPath, modulePaths,
     })) route = REVIEWER_ROUTE_BY_MODEL.grok;
   } catch (err) {

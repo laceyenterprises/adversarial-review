@@ -1742,6 +1742,13 @@ async function dispatchAmaClosureFor({
   }
   let recordedStop = readHammerStopForHeadImpl({ hqRoot: resolveHqRoot(env), repo: repoPath,
     prNumber, headSha: currentPrHeadSha, reviewedSha: reviewState.headSha, logger });
+  // Hand off before caps/final no-merge policy can select another closer or
+  // park this head. Queue admission retains the existing closer-custody fence.
+  const conflictPrimaryHandoff = autonomousMergeExecutionEnabled && prMetadata.isOpen
+    && recordedStop?.predicate === 'conflict-primary-unproven'
+    ? await evaluateHammerStopHoldImpl({ rootDir, hqRoot: resolveHqRoot(env), repo: repoPath, prNumber,
+      headSha: currentPrHeadSha, reviewedSha: reviewState.headSha, prMetadata, reviewState,
+      logger, deliverAlertImpl, now: new Date(now()).toISOString() }) : null;
   if (autonomousMergeExecutionEnabled && prMetadata.isOpen
     && operatorLabelInputs(recordedStop?.refusal || recordedStop).length) {
     try {
@@ -1838,7 +1845,7 @@ async function dispatchAmaClosureFor({
     // terminal job, while the next posted finding may still await job creation.
     // Reuse the gate's PR-scoped, case-insensitive live owner. Do not scan
     // growing terminal directories again while a live job already owns the PR.
-    followUpJob: gateSnapshot.activeFollowUpJob || ['completed', 'failed', 'stopped']
+    followUpJob: gateSnapshot.activeFollowUpJob || conflictPrimaryHandoff?.remediation || ['completed', 'failed', 'stopped']
       .flatMap(key => listFollowUpJobsInDir(rootDir, key, { repo: repoPath, prNumber, caseInsensitiveRepo: true }))
       .map(entry => entry.job)
       .filter(job => String(job.repo || '').toLowerCase() === repoPath.toLowerCase()
@@ -1862,7 +1869,8 @@ async function dispatchAmaClosureFor({
     anchors: { postedAt: reviewState.postedAt || reviewStateRow?.posted_at || null, finalRoundCompletedAt },
     checksRollup: candidate?.statusCheckRollup,
     candidate: { ...candidate, ...mergeabilityForGate }, labels: prMetadata.labels });
-  let shared = (ownerCap.operatorApprovalApplied || infrastructureOwnerReleased ? null : resolvedNextAction) || await resolveOwner();
+  let shared = (ownerCap.operatorApprovalApplied || infrastructureOwnerReleased || conflictPrimaryHandoff
+    ? null : resolvedNextAction) || await resolveOwner();
   if (resolvedNextAction) shared = reviseClosureNextAction(shared, { progress: {
     ...shared.snapshot.observations.progress?.value, hammerResume,
   } }, passSnapshot);
@@ -1887,6 +1895,13 @@ async function dispatchAmaClosureFor({
   if (closureOwnerSink) closureOwnerSink.shared = shared;
   if (closureOwnerSink) closureOwnerSink.value = closureOwner;
   if (closureOwnerSink) closureOwnerSink.shadowInput = { input: closureOwnerInput, autonomousMergeExecutionEnabled };
+  if (conflictPrimaryHandoff) {
+    return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
+      reason: conflictPrimaryHandoff.remediation ? 'conflict-primary-builder-remediation'
+        : conflictPrimaryHandoff.hammerStop?.handoffPending
+          ? 'conflict-primary-handoff-pending' : 'conflict-primary-handoff-head-changed',
+      ...conflictPrimaryHandoff, nextAction: shared.decision }, { amaEnabled: true });
+  }
   if (shared.decision.action === 'done') {
     return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true, prTerminal: true,
       reason: shared.decision.reason }, { amaEnabled: true });

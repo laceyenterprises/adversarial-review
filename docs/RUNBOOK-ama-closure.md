@@ -318,6 +318,16 @@ forced launch, ledger mutation or new smoke step is authorized by this change.
 
 ## Change notes
 
+- **HAMCONFLICTOWNER-01:** A current-head `conflict-primary-unproven` closer
+  audit hands the PR to the existing builder-tag-routed remediation queue,
+  before closer cap or retry selection. The job durably names its PR, head,
+  `closureHandoff.reason` and `jobId`; pending work owns the next action.
+  Its work order resolves the conflict preserving both sides, addresses open
+  findings and pushes a head for normal full review. Repeated stops reuse the
+  job across terminal settlement and archival. Unavailable provenance keeps
+  the handoff pending for another watcher pass. `conflict-primary-timeout`
+  retains its existing retry behavior; an unproven replay cannot publish.
+
 - **HAMGITTOKEN-01:** Refresh-on-request Git authentication replaces the
   startup-token helper. A failed mint produces the existing retryable
   infrastructure abort with reason `git-credential-refresh-failed`.

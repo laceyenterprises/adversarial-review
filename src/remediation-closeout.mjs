@@ -19,6 +19,9 @@ export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha
   const roundsLeft = job.finalRound === 'comment-only' ? false : Number.isFinite(max) ? round < max : null;
   const final = roundsLeft === false;
   const head = headSha || lifecycle?.headSha || job.revisionRef;
+  const fullReviewRequired = job.closureHandoff?.reason === 'conflict-primary-unproven'
+    && job.closureHandoff.review === 'full' && workerPushedHeadSha === head
+    && String(head).toLowerCase() !== String(job.revisionRef).toLowerCase();
   let leases = snapshot?.observations?.leases;
   if (!leases) {
     try { leases = { closer: readAmaCloserLease(rootDir, { repo: job.repo, prNumber: job.prNumber, headSha: head }) }; }
@@ -87,11 +90,12 @@ export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha
       pr,
       reviews,
       remediation: { completedRounds: round, maxRounds: max, roundsLeft,
+        ...(fullReviewRequired ? { fullReviewRequired: true } : {}),
         job: { status: retryActiveJob ? 'in_progress' : 'completed', headSha: head,
           // This is the selected retry successor, not the finished worker's
           // liveness. Reconciliation requeues it through the bounded retry path.
           live: retryActiveJob },
-        ...(final && workerPushedHeadSha === head ? { finalPush: { headSha: head, suppressed: true } } : {}) },
+        ...(final && !fullReviewRequired && workerPushedHeadSha === head ? { finalPush: { headSha: head, suppressed: true } } : {}) },
       checks, leases, launches, policy,
       ...((lease?.terminalOutcome === 'succeeded' || receipt?.terminalOutcome === 'succeeded' || receipt?.outcome === 'succeeded')
         ? { progress: { ...snapshot?.observations?.progress?.value,
@@ -111,7 +115,8 @@ export function closeoutRereview(shared, reason = null) {
   // This queues intent only; reviewer-ci-admission still requires green CI.
   const awaitingCiAdmission = ((decision.action === 'wait-for-CI' && decision.actor === 'ci')
     || (decision.action === 'remediate' && decision.actor === 'remediator'))
-    && shared.snapshot.observations.remediation.value.roundsLeft === true;
+    && (shared.snapshot.observations.remediation.value.roundsLeft === true
+      || shared.snapshot.observations.remediation.value.fullReviewRequired === true);
   const requested = (decision.action === 'review' && decision.queue.intent === 'dispatch') || awaitingCiAdmission;
   return { requested, requestedAt: shared.snapshot.observedAt,
     status: requested ? 'pending' : 'suppressed', reason,

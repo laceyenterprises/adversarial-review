@@ -165,6 +165,10 @@ function remediationFacts(remediation) {
     roundsLeft: remediation.state === 'complete' ? roundsLeft : null,
     nextRound: completed !== null ? completed + 1 : null,
     jobStatus: lower(job?.status) || null,
+    conflictPrimaryHandoff: remediation.state === 'complete'
+      && job?.closureHandoff?.reason === 'conflict-primary-unproven'
+      && sameHead(lower(job.closureHandoff.headSha), lower(job?.headSha)),
+    jobId: text(job?.jobId) || null,
     // Remediation observations belong to this PR; a head move or retrigger
     // with no revision does not release its live worker's ownership.
     jobLive: remediation.state === 'complete'
@@ -372,6 +376,17 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
   // Keep established owners and ownership reconciliation above. New work
   // requires a readable execution switch; absence is not implicit enablement.
   if (policy?.autonomousMergeExecutionEnabled !== true) return refresh('policy-unknown');
+
+  // Queue ownership survives admission delay and spent review rounds. A fresh
+  // builder head, rather than another closer replay, resolves this work order.
+  // Live closer/reviewer custody and unreadable ownership still fence admission.
+  if (remediation.conflictPrimaryHandoff && sameHead(lower(remediation.jobHead), lower(head))
+    && remediation.jobStatus === 'pending') {
+    return { row: 'R14-findings', action: 'remediate', actor: 'remediator',
+      reason: 'conflict-primary-unproven', deadlineKind: 'admission',
+      queue: 'dispatch', round: remediation.nextRound,
+      refs: [`remediation:${remediation.jobId}`] };
+  }
 
   // R05: existing structural restriction recovery (empty-diff closure and the
   // primary-change preservation gate) and deterministic safety refusals.

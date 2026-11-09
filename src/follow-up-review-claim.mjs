@@ -49,9 +49,20 @@ export function reviewBodyDigest(reviewBody, context = {}) {
   return normalized ? createHash('sha256').update(normalized).digest('hex') : null;
 }
 
+function followUpDigest(job, context = {}) {
+  // Conflict work is identified by its terminal reason, not prompt wording or
+  // the review context captured at enqueue. PR and head are already part of
+  // the claim key. Ordinary posted-review deduplication remains body-based.
+  if (job?.closureHandoff?.reason === 'conflict-primary-unproven'
+    && String(job.closureHandoff.headSha || '').toLowerCase() === String(job.revisionRef || '').toLowerCase()) {
+    return createHash('sha256').update('closer-terminal-audit:conflict-primary-unproven').digest('hex');
+  }
+  return reviewBodyDigest(job?.reviewBody, context);
+}
+
 function findFollowUpForReview(rootDir, { repo, prNumber, revisionRef, digest }, log) {
   const sameReview = (job) => (
-    String(job.revisionRef || '').trim() === revisionRef && reviewBodyDigest(job.reviewBody, { repo, reviewerHeadSha: revisionRef, rootDir }) === digest
+    String(job.revisionRef || '').trim() === revisionRef && followUpDigest(job, { repo, reviewerHeadSha: revisionRef, rootDir }) === digest
   );
   for (const status of FOLLOW_UP_STATUS_DIRS) {
     const match = scanPrFollowUpJobs(rootDir, status, repo, prNumber, log).find(sameReview);
@@ -59,6 +70,17 @@ function findFollowUpForReview(rootDir, { repo, prNumber, revisionRef, digest },
   }
   const archived = scanArchivedStoppedFollowUpJobs(rootDir, repo, prNumber, log).find(sameReview);
   return archived ? { jobId: archived.jobId || null, status: 'stopped-archived' } : null;
+}
+
+// Read-only ownership lookup. An existing handoff remains visible even while
+// GitHub is unavailable; only creating new work requires a fresh live read.
+export function findFollowUpForJob(rootDir, job, log = console) {
+  const revisionRef = String(job?.revisionRef || '').trim();
+  const digest = followUpDigest(job);
+  if (!SHA.test(revisionRef) || !digest || !job?.repo) return null;
+  return findFollowUpForReview(rootDir, {
+    repo: job.repo, prNumber: job.prNumber, revisionRef, digest,
+  }, log);
 }
 
 function claimLocation(rootDir, { repo, prNumber, revisionRef, digest }) {
@@ -148,7 +170,7 @@ export function claimFollowUpForReview(rootDir, job, {
 } = {}) {
   const revisionRef = String(job?.revisionRef || '').trim();
   if (job) job.reviewBody = filterGitHubBody(job.reviewBody, { repo: job.repo, reviewerHeadSha: job.revisionRef, rootDir });
-  const digest = reviewBodyDigest(job?.reviewBody);
+  const digest = followUpDigest(job);
   if (!SHA.test(revisionRef) || !digest || !job?.repo) return { release() {} };
   const review = { repo: job.repo, prNumber: job.prNumber, revisionRef, digest };
   const label = `${job.repo}#${job.prNumber}@${revisionRef.slice(0, 12)}`;

@@ -99,3 +99,20 @@ The required full `npm test` run exited 1 at its 900-second timeout, reporting
 failures in untouched suites (including hammer self-rebase and review pipeline
 health) and unfinished tests. Outcome fixtures passed in that run. Full-suite
 greenness is not claimed; the scoped offline result is 16 passed, 0 failed.
+
+HAM CI repair: reviewed the state projection delta introduced by terminal
+telemetry deduplication. Its sole addition is the `doc.state !==
+'launch-terminal'` comparison that controls a journal append; it changes no
+lifecycle write, state, transition, custody rule, or smoke promise. Refresh
+the existing `dispatch-closer.mjs` source fingerprint in `state-machines.json`
+to cover that reviewed comparison. The independent graph snapshot and drift
+mutation tests remain unchanged. Both final Gemini findings are already
+addressed by the live head's trimmed identity validation and lazy ENOENT-only
+directory creation. No interface change is introduced by this CI repair.
+
+HAM validation: the isolated offline runner passed all 188 targeted tests
+(outcome journal, SMV including mutation checks and disposable Git smoke,
+and watcher claim-loop). Repository lint passed with 0 errors and 152
+existing warnings; contract typecheck, offline byte-equivalence walkthrough,
+92-entry data-model catalog validation and git diff --check passed.
+The full suite remains assigned to exact-head remote CI.

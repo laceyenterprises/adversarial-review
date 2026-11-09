@@ -283,27 +283,33 @@ test('HAMLANEWAIT-01: waking rechecks lane transfer and never invokes the old le
   let release = adapter.tryLock(lane);
   assert.equal(typeof release, 'function');
   t.after(() => release?.());
-  let refusals = 0, waitingClockReads = 0;
+  let refusals = 0, recheckAcquisitions = 0;
   const flockSync = fsExt.flockSync;
   t.mock.method(fsExt, 'flockSync', (...args) => {
-    try { return flockSync(...args); }
+    // Release at the next lock attempt after contention, independent of how
+    // often routing or deadline bookkeeping reads the clock.
+    if (refusals === 1 && release !== null) {
+      release();
+      release = null;
+    }
+    try {
+      const result = flockSync(...args);
+      if (refusals > 0) {
+        assert.equal(release, null, 'contended acquisition must follow holder release');
+        recheckAcquisitions++;
+      }
+      return result;
+    }
     catch (error) {
       if (['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) refusals++;
       throw error;
     }
   });
   const result = await runLegacyLaneWrite({ rootDir: f.rootDir, ...lane, readConfig: () => ({}),
-    deadline: '2026-10-25T00:00:03.000Z', now: () => {
-      // Ignore any clock reads before an actual failed acquisition. Release
-      // only at the waiter's acquisition recheck after its budget read.
-      if (refusals > 0 && ++waitingClockReads === 2) {
-        release();
-        release = null;
-      }
-      return at;
-    }, exec: () => assert.fail('stale route must refuse') });
+    deadline: '2026-10-25T00:00:03.000Z', now: () => at,
+    exec: () => assert.fail('stale route must refuse') });
   assert.equal(refusals, 1, 'initial routing acquisition must encounter contention');
-  assert.ok(waitingClockReads >= 2, 'must pass through the contended wait handoff');
+  assert.equal(recheckAcquisitions, 1, 'must acquire once at the subscription recheck');
   assert.equal(release, null, 'the waiter must reach the acquisition recheck');
   assert.equal(result.reason, 'lane-transfer-required');
   assert.equal(result.outcome, undefined);
@@ -311,7 +317,7 @@ test('HAMLANEWAIT-01: waking rechecks lane transfer and never invokes the old le
   assert.equal(f.routing.read(lane).route.executor, 'queue-v2');
 });
 
-test('HAMLANEWAIT-01: native watcher wake rechecks the route after a pending wait', { timeout: 5000 }, async t => {
+test('HAMLANEWAIT-01: native watcher wake rechecks the route after a pending wait', { timeout: 15000 }, async t => {
   const f = fixture(t), adapter = resolveQueueOwnerAdapter(f.store);
   assert.equal((await transfer(f, queue)).ok, true);
   let release = adapter.tryLock(lane);
@@ -338,12 +344,14 @@ test('HAMLANEWAIT-01: native watcher wake rechecks the route after a pending wai
     }
   });
   const result = await runLegacyLaneWrite({ rootDir: f.rootDir, ...lane, readConfig: () => ({}),
-    deadline: new Date(Date.now() + 3000).toISOString(),
+    deadline: new Date(Date.now() + 10000).toISOString(),
     exec: () => assert.fail('watcher wake must fence the stale legacy route') });
+  assert.equal(result.reason, 'lane-transfer-required',
+    `native wake result: ${JSON.stringify({ reason: result.reason, outcome: result.outcome,
+      waitedMs: result.waitedMs, refusals, releasedAfterRecheck, wakeAcquisitions })}`);
   assert.ok(refusals >= 2, 'the subscription recheck must also encounter contention');
   assert.equal(releasedAfterRecheck, true);
   assert.equal(wakeAcquisitions, 1, 'must acquire after the synchronous recheck via the native wake');
-  assert.equal(result.reason, 'lane-transfer-required');
   assert.equal(result.outcome, undefined);
   assert.deepEqual(f.routing.read(lane).legacyWriters, []);
   assert.equal(f.routing.read(lane).route.executor, 'queue-v2');

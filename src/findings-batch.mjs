@@ -449,6 +449,14 @@ function batchAgeMs(batch, now) {
   return Number.isFinite(startedMs) ? Math.max(0, now - startedMs) : 0;
 }
 
+// A failed subprocess does not prove a failed remediation attempt. Keep its
+// key available for retry/receipt recovery even after the ordinary age limit.
+// Legacy dispatch errors did not distinguish transport from receipt failures,
+// so conservatively retry those too, without inheriting their old cap charge.
+function retryableDispatchError(batch) {
+  return !batch.launch_id && /^batch-dispatch-(?:failed|retryable):/.test(batch.error || '');
+}
+
 // Release only on terminal/absent ledger custody. The dispatch-failure cap may
 // release before timeout; missing keyed receipts for a recorded launch require
 // the timeout plus its direct ledger snapshot. Unreadable evidence holds and
@@ -457,6 +465,7 @@ async function releaseEndedFindingBatch({ db, batchId, hasOutcomes, env, rootDir
   readLaunches, readLaunchSnapshot, now, timeoutMs }) {
   const batch = db.prepare('SELECT * FROM finding_batches WHERE batch_id=?').get(batchId);
   if (!batch || batch.completed_at || batch.released_at) return null;
+  if (retryableDispatchError(batch)) return null;
   if (!batch.launch_id && !batch.error) return null;
   const stale = batchAgeMs(batch, now) > timeoutMs && Boolean(batch.error || !hasOutcomes);
   const dispatchExhausted = !batch.launch_id && batch.batch_attempts >= FINDING_BATCH_MAX_DISPATCH_ATTEMPTS;
@@ -516,8 +525,13 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
   const processBatch = async batch => {
     let hasOutcomes = false;
     let dispatching = false;
+    let dispatchReturned = false;
     try {
       if (fleetStopReason({ env, logger })) { stopped = true; return; }
+      if (retryableDispatchError(batch)) {
+        db.prepare('UPDATE finding_batches SET batch_attempts=0 WHERE batch_id=?').run(batch.batch_id);
+        batch.batch_attempts = 0;
+      }
       // Release overdue pre-launch failures before another submission can mask
       // their age/error. An exhausted batch never submits again while held.
       if (!batch.launch_id && batch.error) {
@@ -558,6 +572,7 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
         const args = findingBatchDispatchArgs({ batch, promptPath, workerClass: pickRemediationWorkerClass({ repo: batch.repo }, { env }), env });
         dispatching = true;
         const { stdout } = await execFileImpl(env.HQ_BIN || 'hq', args, { env, timeout: dispatchTimeoutMs(), maxBuffer: 1024 * 1024 });
+        dispatchReturned = true;
         const receipt = readDispatchReceipt(parseDispatchJsonOutput(stdout));
         if (!receipt.launchRequestId) throw Error(receipt.identityDiagnostic);
         db.prepare('UPDATE finding_batches SET launch_id=?,launched_at=?,error=NULL WHERE batch_id=?')
@@ -568,9 +583,14 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
       // Redact before truncation so a long credential is never cut into a leak.
       const detail = redactPublicSafeText(String(dispatching ? error.stderr || error.message : error.message), 300)
         .replace(/\s+/g, ' ').trim();
-      const reason = dispatching ? `batch-dispatch-failed: ${detail}` : detail;
-      db.prepare('UPDATE finding_batches SET error=?,batch_attempts=batch_attempts+? WHERE batch_id=?')
-        .run(reason, dispatching ? 1 : 0, batch.batch_id);
+      const reason = dispatching
+        ? `batch-dispatch-${dispatchReturned ? 'receipt-invalid' : 'retryable'}: ${detail}` : detail;
+      // Only a returned, invalid receipt spends the bounded dispatch budget.
+      // Timeouts, transport failures and admission refusals retain the same
+      // batch/key and cannot age into a charged release without a launch.
+      db.prepare(`UPDATE finding_batches SET error=?,
+        batch_attempts=CASE WHEN ? THEN 0 ELSE batch_attempts+? END WHERE batch_id=?`)
+        .run(reason, dispatching && !dispatchReturned ? 1 : 0, dispatchReturned ? 1 : 0, batch.batch_id);
       logger.warn?.(`[findings-batch] ${batch.repo}/${batch.area}: ${reason}`);
     }
     try {

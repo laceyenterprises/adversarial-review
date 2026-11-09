@@ -431,7 +431,7 @@ test('an unreadable keyed probe stays held and reports needs-operator after time
   });
 });
 
-test('failed dispatches are durably bounded and expose redacted stderr before requeue/exhaustion', async t => {
+test('temporary dispatch failures retain the batch and never exhaust findings, even past timeout', async t => {
   const f = fixture(t, ['Only result']);
   const now = Date.parse('2026-01-02T00:00:00Z');
   const logs = [];
@@ -444,33 +444,57 @@ test('failed dispatches are durably bounded and expose redacted stderr before re
         stderr: `synthetic admission refused: Bearer synthetic-token password=synthetic-secret ${'x'.repeat(1000)}`,
       });
     } };
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    // Recompose the runner each pass, as on a watcher restart.
-    await f.run(overrides);
-    assert.equal(f.batches()[0].batch_attempts, attempt);
-    assert.equal(Boolean(f.batches()[0].released_at), attempt === 3);
-    assert.equal(f.backlog()[0].batch_attempts, attempt === 3 ? 1 : 0, 'release charges the finding only once');
+  const [batch] = claimFindingBatches(f.db, '2026-01-02');
+  // Include an old capped row from before dispatch failures were classified.
+  f.db.prepare("UPDATE finding_batches SET batch_attempts=3,error='batch-dispatch-failed: timeout'").run();
+  f.db.prepare('UPDATE finding_backlog SET batch_attempts=2').run();
+  const failures = [
+    Object.assign(Error('dispatch timeout'), { killed: true, code: 'ETIMEDOUT' }),
+    Object.assign(Error('TLS connection reset'), { code: 'ECONNRESET' }),
+    Object.assign(Error('I/O unavailable'), { code: 'EIO' }),
+  ];
+  for (let pass = 0; pass < 12; pass++) {
+    await f.run({ ...overrides, now: now + pass * DAY,
+      ...(pass % 4 ? { execFileImpl: async () => { calls++; throw failures[pass % failures.length]; } } : {}) });
+    assert.equal(f.batches().length, 1, 'retry retains the original batch/key');
+    assert.equal(f.batches()[0].batch_attempts, 0);
+    assert.equal(f.batches()[0].released_at, null);
+    assert.equal(f.backlog()[0].batch_attempts, 2, 'no worker attempt was consumed');
+    assert.equal(f.backlog()[0].outcome, null);
   }
-  assert.equal(calls, 3);
-  assert.match(f.batches()[0].release_reason, /^batch-dispatch-attempts-exhausted: batch-dispatch-failed: synthetic admission refused/);
-  assert.ok(f.batches()[0].error.length < 330);
+  assert.equal(calls, 12);
+  assert.equal(f.db.prepare('SELECT count(*) n FROM finding_batch_releases').get().n, 0);
+  assert.ok(f.batches()[0].error.length < 335);
   assert.ok(!logs.join('\n').includes('synthetic-token'));
   assert.ok(!logs.join('\n').includes('synthetic-secret'));
   assert.ok(!logs.join('\n').includes('sensitive command'));
-  await f.run({ ...overrides, resolutionOnly: true });
+  await f.run({ ...overrides, resolutionOnly: true, now: now + 13 * DAY });
+  assert.equal(calls, 12);
+  // Recovery uses the original key and records a normal launch receipt.
+  await f.run({ day: '2026-01-15', now: now + 13 * DAY });
+  assert.equal(f.batches()[0].launch_id, 'synthetic-launch-1');
+  assert.equal(f.batches()[0].error, null);
+  assert.equal(f.dispatches[0][f.dispatches[0].indexOf('--idempotency-key') + 1], `findings-batch-${batch.batch_id}`);
+});
+
+test('returned invalid receipts still spend the durable dispatch cap', async t => {
+  const f = fixture(t, ['Only result']);
+  let calls = 0;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await f.run({ day: '2026-01-02', now: Date.parse('2026-01-02T01:00:00Z'),
+      execFileImpl: async () => { calls++; return { stdout: '{}' }; } });
+    assert.equal(f.batches()[0].batch_attempts, attempt);
+    assert.equal(Boolean(f.batches()[0].released_at), attempt === 3);
+    assert.equal(f.backlog()[0].batch_attempts, attempt === 3 ? 1 : 0);
+  }
   assert.equal(calls, 3);
-  // Existing exhaustion still applies across fresh batches.
-  f.db.prepare('UPDATE finding_backlog SET batch_attempts=2').run();
-  for (let attempt = 1; attempt <= 3; attempt++) await f.run(overrides);
-  assert.equal(f.backlog()[0].batch_attempts, 3);
-  assert.equal(f.backlog()[0].outcome, 'dropped');
-  assert.match(f.backlog()[0].reason, /^batch-retry-exhausted: batch-dispatch-attempts-exhausted:/);
+  assert.match(f.batches()[0].release_reason, /^batch-dispatch-attempts-exhausted: batch-dispatch-receipt-invalid:/);
 });
 
 test('dispatch cap holds any live launch without making a fourth submission', async t => {
   const f = fixture(t);
   const [batch] = claimFindingBatches(f.db, '2026-01-02');
-  f.db.prepare("UPDATE finding_batches SET batch_attempts=3,error='batch-dispatch-failed: lost receipt'").run();
+  f.db.prepare("UPDATE finding_batches SET batch_attempts=3,error='batch-dispatch-receipt-invalid: lost receipt'").run();
   f.launches.set(`findings-batch-${batch.batch_id}`, [{
     launch_request_id: 'synthetic-live', idempotency_key: `findings-batch-${batch.batch_id}`, status: 'running',
   }]);

@@ -298,7 +298,8 @@ key (preparation and any publisher) is terminal in the launch ledger and either:
   counts as ended.
 
 FINDINGSSTUCK-01 also releases an errored batch with no recorded launch after
-the timeout, aging from its claim day. A readable keyed probe must prove every
+the timeout, aging from its claim day, except for retryable dispatch failures
+(described below). A readable keyed probe must prove every
 launch terminal or absent; missing local receipts alone never prove absence.
 Applied artifacts without a launch receipt report `batch-launch-receipt-missing`,
 distinct from a missing pushed head.
@@ -312,13 +313,19 @@ emits `needs-operator` with the batch ID and a named probe reason; it never beco
 an absence certificate.
 
 Migration `20261109_findings_batch_dispatch_attempts.sql` adds
-`finding_batches.batch_attempts` (default 0), a durable counter of failed initial
-dispatch submissions, including invalid/missing receipts. This differs from
+`finding_batches.batch_attempts` (default 0), a durable counter of successful
+initial dispatch responses with invalid/missing receipts. This differs from
 `finding_backlog.batch_attempts`, which counts released finding attempts.
-After three failed submissions, no more initial dispatches are made for that
+After three invalid receipts, no more initial dispatches are made for that
 batch. Readable terminal/absent keyed evidence permits release with
-`batch-dispatch-attempts-exhausted: batch-dispatch-failed: <detail>`; unreadable
-evidence reports `needs-operator`, and live launches retain custody.
+`batch-dispatch-attempts-exhausted: batch-dispatch-receipt-invalid: <detail>`;
+unreadable evidence reports `needs-operator`, and live launches retain custody.
+A failed subprocess (including timeout, transport or admission failure) records
+`batch-dispatch-retryable: <detail>`, resets the dispatch counter and retries
+with the same batch/key on the next dispatch pass. These never-launched batches
+cannot release on age alone or consume per-finding attempts. Legacy
+`batch-dispatch-failed` errors are ambiguous and receive the same conservative
+retry/reset treatment. Resolution-only passes retain them without dispatch.
 Dispatch stderr is preferred to the command echo, redacted and capped at 300
 characters before the named error prefix. Each release still charges a finding
 only once. Reapplying the migration preserves the counter.

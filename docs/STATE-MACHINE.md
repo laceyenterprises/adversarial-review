@@ -1,3 +1,10 @@
+FINDINGSSTUCK-01 remediation retains never-launched batches across subprocess
+transport, timeout and admission failures, irrespective of claim age. Each retry
+uses the same batch/key without charging a finding attempt. Legacy ambiguous
+errors reset the dispatch counter too. Only returned invalid dispatch receipts
+spend the three-response cap; ordinary ledger custody still fences release.
+Existing lifecycle values and deployed smoke commands remain unchanged.
+
 PRERECEIPTADOPT-01 remediation preserves existing closer states and transitions.
 Terminal recovery reads the HQ audit root before finalizing shared lease outcomes;
 exact-ticket receipts retain pinned and legacy missing-class compatibility.

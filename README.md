@@ -1702,7 +1702,12 @@ failed pushes or failed preparation still refuse publication. Durable batch IDs,
 launch receipts, a per-batch lock and submission intent fence duplicate workers
 and publishers. Existing failed batches stay visible for same-launch repair.
 Simplicity advisories keep their final-review enrollment and validated outcome
-rules, sharing the cap and marked result PR with findings.
+rules, sharing the cap and marked result PR with findings. Failed initial dispatch
+subprocesses retain the same batch/key for retry, even after the batch timeout,
+without consuming finding attempts. Legacy ambiguous dispatch errors also reset
+the dispatch counter. Only successful dispatch responses with invalid receipts
+consume the three-response dispatch cap; terminal/absent ledger evidence still
+fences charged release. See the [release contract](docs/data-model/review-findings.md#releasing-batches-whose-launch-ended-findingsrequeue-01).
 
 After deployment, restart the watcher, then SRE runs
 `node bin/findings-batch-backfill.mjs --root <review-root> --db <review-root>/data/reviews.db --concurrency 2 --batch-size 100`.

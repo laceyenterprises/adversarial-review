@@ -3,7 +3,10 @@
 ## Summary
 
 Release errored batches without launch receipts after the existing timeout, and
-bound failed initial dispatch submissions to three per batch. A missing keyed
+bound returned invalid initial dispatch receipts to three per batch. Subprocess
+transport, timeout and admission failures retain the same batch/key without
+consuming dispatch or finding attempts, even past timeout. Legacy ambiguous
+dispatch errors receive the same retry/reset treatment. A missing keyed
 receipt after timeout requires direct recorded-launch/retry ledger evidence;
 unreadable evidence retains custody and reports `needs-operator`.
 Every release keeps the existing per-finding requeue/exhaustion accounting.
@@ -13,7 +16,7 @@ See the [SEV2 report](../postmortems/SEV2-findings-batches-retained-open-finding
 ## Interface changes
 
 Add replay-safe migration `20261109_findings_batch_dispatch_attempts.sql`:
-`finding_batches.batch_attempts` counts failed initial submissions, independently
+`finding_batches.batch_attempts` counts returned invalid initial receipts, independently
 of `finding_backlog.batch_attempts` release charges. Missing launch receipts
 report `batch-launch-receipt-missing`; capped submissions release with
 `batch-dispatch-attempts-exhausted` only on terminal/absent ledger custody.
@@ -43,3 +46,19 @@ The ticket limits test execution to touched test files; no full suite or
 walkthrough demo was run. Fixtures use disposable SQLite and injected synthetic
 dispatch/ledger responses. No live review DB changes or recovery actions were
 performed. Source validation does not establish deployed backlog recovery.
+
+## Remediation validation (PR #1777, round 2)
+
+Regression coverage exercises twelve daily transient dispatch failures on a
+legacy capped batch already at two finding attempts, then successful recovery
+on the original idempotency key. A separate fixture retains the invalid-receipt
+cap. Canonical state, data-model and README contracts describe the distinction;
+no schema shape, lifecycle values or deployed smoke commands change.
+
+- Bounded `node --test test/findingsrequeue-01.test.mjs test/findings-batch.test.mjs test/smv.test.mjs`: 153 passed, zero failures.
+- Targeted ESLint on the source and both findings test files: zero errors.
+- `node scripts/validate-data-model-catalog.mjs`: validated 91 entries.
+- `npm run typecheck:contracts` and `git diff --check`: passed.
+
+The neighboring PR-reader fixture now fixes its clock inside the timeout so
+its marker/read-error checks cannot accidentally exercise overdue release.

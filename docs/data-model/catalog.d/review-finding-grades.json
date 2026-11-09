@@ -52,7 +52,7 @@
         "migrations/20261109_findings_batch_dispatch_attempts.sql"
       ],
       "owner": "review-body capture and remediation completion observations",
-      "compatibility": "FINDINGSSTUCK-01: additive replay-safe finding_batches.batch_attempts counts failed initial submissions separately from per-finding release attempts. Existing releases, requeue/exhaustion audit and settlement authority are preserved."
+      "compatibility": "FINDINGSSTUCK-01: additive replay-safe finding_batches.batch_attempts counts returned invalid initial receipts separately from per-finding release attempts. Failed dispatch subprocesses and legacy ambiguous errors reset that counter and retain the same batch/key beyond timeout without a finding charge; actual releases retain their existing requeue/exhaustion audit."
     }
   ]
 }

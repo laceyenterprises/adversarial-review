@@ -33,11 +33,21 @@ test('a fresh process resolves broker bindings for status and zero-balance admis
   await throttle.recordResponseRateLimit({ resource: 'core', credential: 'installation-12-34',
     remaining: 0, resetAt: Date.now() + 60_000 });
   const moduleUrl = new URL('../src/rate-limit-throttle.mjs', import.meta.url).href;
+  const apiUrl = new URL('../src/github-api.mjs', import.meta.url).href;
+  const ghCliUrl = new URL('../src/gh-cli.mjs', import.meta.url).href;
   const script = `
     import assert from 'node:assert/strict';
     import { githubCredential, readGitHubBudgetStatus, createRateLimitThrottle,
       withCloserGitHubBudget } from ${JSON.stringify(moduleUrl)};
+    import { __test__ as api } from ${JSON.stringify(apiUrl)};
+    import { buildAllowlistedGhEnv } from ${JSON.stringify(ghCliUrl)};
     assert.equal(githubCredential(), 'installation-12-34');
+    assert.equal(githubCredential({ env: { GH_TOKEN: process.env.GH_TOKEN } }), 'installation-12-34');
+    for (const env of [api.buildGhEnv(), buildAllowlistedGhEnv()]) {
+      assert.equal(env.GHO_RATE_LIMIT_SHARED_STATE_PATH, undefined);
+      assert.equal(githubCredential({ env }), 'installation-12-34');
+    }
+    assert.equal(githubCredential({ env: {} }), 'default');
     assert.equal(githubCredential({ token: 'synthetic-rotated-token' }), 'installation-12-34');
     assert.match(githubCredential({ token: 'synthetic-foreign-token' }), /^token-/);
     assert.equal(readGitHubBudgetStatus().core.remaining, 0);
@@ -120,19 +130,25 @@ test('bindings create private directories and reject foreign files and symlinks'
 });
 
 
-test('adapter credential lookup inherits the configured process store with a partial env', t => {
+test('adapter credential lookup inherits only the process store with a partial env', t => {
   const root = fixture(t);
   const env = { ...process.env, GHO_RATE_LIMIT_SHARED_STATE_PATH: join(root, 'budget.json'),
-    GH_TOKEN: 'synthetic-adapter-binding', GHO_API_CALL_LOG_DISABLE: '1' };
+    GH_TOKEN: 'synthetic-adapter-binding', GITHUB_TOKEN: 'synthetic-ambient-adapter-token',
+    GHO_API_CALL_LOG_DISABLE: '1' };
   registerGitHubInstallationToken(env.GH_TOKEN, '56', '78', { env });
+  registerGitHubInstallationToken(env.GITHUB_TOKEN, '56', '79', { env });
   const moduleUrl = new URL('../src/github-adapter-client.mjs', import.meta.url).href;
   const script = `
     import assert from 'node:assert/strict';
-    import { __test__ } from ${JSON.stringify(moduleUrl)};
-    const args = ['--pat-env', 'GH_TOKEN'];
-    assert.equal(__test__.githubAdapterCredential(args).credential, 'installation-56-78');
+    import { __test__, githubAdapterReadCredential } from ${JSON.stringify(moduleUrl)};
+    const args = ['--pat-env', 'GITHUB_TOKEN', '--pat-env', 'GH_TOKEN'];
+    assert.equal(__test__.githubAdapterCredential(args).credential, 'adapter:default');
     assert.equal(__test__.githubAdapterCredential(args, { GH_TOKEN: process.env.GH_TOKEN }).credential,
       'installation-56-78');
+    assert.equal(githubAdapterReadCredential({
+      GH_TOKEN: process.env.GH_TOKEN, WATCHER_GH_AUTH_VIA_BROKER: 'true',
+    }), 'installation-56-78');
+    assert.equal(__test__.githubAdapterCredential(args, process.env).credential, 'installation-56-79');
     console.log('ok');
   `;
   assert.equal(execFileSync(process.execPath, ['--input-type=module', '-e', script],
@@ -157,4 +173,23 @@ test('negative binding lookups are bounded, expire after one second and isolate 
   assert.equal(githubCredential({ token, env }), 'installation-90-12');
   now += 60_000;
   assert.equal(githubCredential({ token, env }), `token-${digest}`);
+});
+
+test('binding misses use the inherited store path as their cache key', t => {
+  const root = fixture(t);
+  const token = 'synthetic-inherited-cache';
+  const digest = createHash('sha256').update(token).digest('hex').slice(0, 24);
+  const firstPath = join(root, 'first.json');
+  const secondPath = join(root, 'second.json');
+  const previousPath = process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH;
+  t.after(() => {
+    if (previousPath === undefined) delete process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH;
+    else process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = previousPath;
+  });
+  process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = firstPath;
+  assert.equal(githubCredential({ token, env: {} }), `token-${digest}`);
+  writeBudgetBinding(`${secondPath}.bindings`, digest, 'installation-90-34', Date.now() + 60_000);
+  process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = secondPath;
+  assert.equal(resolveBudgetBindingDirectory({}), `${secondPath}.bindings`);
+  assert.equal(githubCredential({ token, env: {} }), 'installation-90-34');
 });

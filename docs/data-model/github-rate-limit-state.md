@@ -190,7 +190,13 @@ shared store's owner uid. Removing it is an operator decision.
 
 Installation bindings persist in `<selected-store>.bindings/<digest>.json`, where
 `selected-store` uses the same GHSTATEOWNER-01 plan as observations: the shared
-path for its owner, otherwise the caller's `.uid-<uid>.json` sibling. Only
+path for its owner, otherwise the caller's `.uid-<uid>.json` sibling. Binding
+lookups and registrations resolve `GHO_RATE_LIMIT_SHARED_STATE_PATH` from the
+caller's environment first, then `process.env` when absent or null. This also
+applies to negative-cache keys, so allowlisted child environments use the
+broker's configured store. An explicit empty path selects the default store.
+Token selection uses only the caller's environment or explicit token; adapter
+accounting never inherits ambient tokens missing from the child environment. Only
 broker-verified identities are written. Each file contains `{ digest, credential,
 expiresAt }`: the 24-character token digest, `installation-<app>-<installation>`,
 and epoch-millisecond expiry capped at one hour from registration (or the
@@ -198,17 +204,26 @@ broker's earlier token expiry). Files are atomically written `0600`; new binding
 directories are created `0700`. Writes prune readable expired digest files.
 Raw tokens are never persisted.
 
-Readers reject symlink directories, group/other-writable directories, symlink
-files, foreign directory/file owners, malformed identities and expired bindings.
-File ownership is checked on the opened descriptor. With no platform uid,
+Readers reject directories observed as symlinks or group/other-writable at the
+directory check, and reject symlink files, foreign directory/file owners,
+malformed identities and expired bindings. The directory check and file open
+are separate path operations: a writer with access to the parent can replace
+the directory between them. These checks assume a trusted parent directory;
+they do not guarantee resistance to concurrent parent-directory replacement.
+File opens use `O_NOFOLLOW` for the final component, and file ownership is
+checked on the opened descriptor. With no platform uid,
 owner comparison is unavailable. Unavailable bindings fall back to token-digest
 isolation; registration remains usable in the registering process. Private
 bindings are shared across processes of the same uid, not across deployment
 uids. Operators can inspect the selected store's adjacent directory and remove
-expired files; write-time pruning normally handles rotation cleanup. Missing
+expired files; write-time pruning normally handles rotation cleanup. Temporary
+files left by crashed atomic writers are outside digest-file pruning and may
+need operator cleanup. Missing
 bindings are cached for one second per store path and digest (at most 256
 entries), so fresh cross-process registrations may take one second to become
-visible after a miss. Successful disk resolutions are revalidated on each lookup.
+visible after a miss. Successful disk resolutions are revalidated on each lookup
+so removal, ownership changes and expiry take effect immediately; this deliberately
+retains bounded filesystem work rather than caching positive results.
 Budget
 deferrals retain the last validated ETag and enter the bounded transient-read
 path. A missing observation breaks the deficit interval, and an alert receipt

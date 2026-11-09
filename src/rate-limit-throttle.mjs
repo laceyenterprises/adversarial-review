@@ -54,9 +54,18 @@ function withCloserGitHubBudget(fn) {
   });
 }
 
+// Allowlisted child environments omit store settings, but must still resolve
+// the broker's bindings. Inherit only the path, never ambient credentials.
+function resolveBudgetBindingStatePath(env) {
+  return resolveRateLimitSharedStatePath({
+    GHO_RATE_LIMIT_SHARED_STATE_PATH: env.GHO_RATE_LIMIT_SHARED_STATE_PATH
+      ?? process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH,
+  });
+}
+
 // Bindings follow the same proven owner selection as quota observations.
 function resolveBudgetBindingDirectory(env = process.env, planOptions = {}) {
-  return `${planStateStoreSync(resolveRateLimitSharedStatePath(env), planOptions).path}.bindings`;
+  return `${planStateStoreSync(resolveBudgetBindingStatePath(env), planOptions).path}.bindings`;
 }
 
 function registerGitHubInstallationToken(token, appId, installationId, { env = process.env, expiresAtMs } = {}) {
@@ -79,7 +88,7 @@ function githubCredential({ env = process.env, token = env.GH_TOKEN || env.GITHU
   const digest = createHash('sha256').update(String(token)).digest('hex').slice(0, 24);
   const registered = installationCredentials.get(digest);
   if (registered) return registered;
-  const cacheKey = `${resolveRateLimitSharedStatePath(env)}:${digest}`;
+  const cacheKey = `${resolveBudgetBindingStatePath(env)}:${digest}`;
   const now = Date.now();
   if (missingInstallationBindings.get(cacheKey) > now) return `token-${digest}`;
   const binding = readBudgetBinding(resolveBudgetBindingDirectory(env), digest, now);

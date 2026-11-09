@@ -52,6 +52,7 @@ export function checkHammerEditPlan(review, plan, { strictNonBlockingRemediation
   // Additive means no existing author line is removed, replaced or neutralized.
   if (plan.editKind === 'additive') return { action: 'allow', reason: 'additive-fix' };
   if (plan.editKind === 'in-place') {
+    // Redundant today: retain this safety check against future dispatch changes.
     if (plan.kind !== 'blocking') return refuse('edit-kind-invalid');
     if (!locationValid()) return correct('edit-location-invalid',
       'supply a nonempty path and integer reviewed coordinates 1 <= startLine <= endLine.');

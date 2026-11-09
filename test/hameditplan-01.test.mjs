@@ -217,6 +217,28 @@ test('CLI rejects conflicting or missing pins and retains review authority check
   }
 });
 
+test('CLI refuses missing or invalid pins before reading or parsing a plan', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hameditplan-pin-first-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const malformedPlan = join(rootDir, 'malformed.json');
+  writeFileSync(malformedPlan, '{');
+  const forbidden = () => assert.fail('invalid pins must stop before review or policy reads');
+  for (const planFile of [join(rootDir, 'missing.json'), malformedPlan, rootDir]) {
+    for (const pin of [undefined, '', 'invalid', 'd'.repeat(39), 'g'.repeat(40)]) {
+      for (const explicit of [false, true]) {
+        if (explicit && pin === undefined) continue;
+        const result = await main(['sample/service', '7', '1', planFile,
+          ...(explicit ? ['--reviewed-head', pin] : [])], {
+          env: { HAM_REVIEWED_SHA: explicit ? review.commit_id : pin },
+          readReviewImpl: forbidden, loadPolicy: forbidden, captureImpl: forbidden,
+        });
+        assert.deepEqual(result, { action: 'stop', reason: 'review-evidence-invalid' });
+        assert.equal(editPlanExitCode(result), 1);
+      }
+    }
+  }
+});
+
 test('CLI accepts equivalent hash casing from either pin source without rewriting the plan', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hameditplan-case-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

@@ -4813,7 +4813,8 @@ Before changing author-introduced lines, the hammer runs
 The prompt substitutes the controller-pinned `<<REVIEWED_SHA>>` in the option
 and every literal plan example, including when running as the database owner.
 Without that option the CLI reads `HAM_REVIEWED_SHA`; a missing or invalid pin
-refuses with `review-evidence-invalid`. Omitted, non-string or empty (including
+refuses with `review-evidence-invalid` before reading or parsing the plan file.
+Omitted, non-string or empty (including
 whitespace-only) plan `reviewedHead` values are filled from the pin in memory.
 A nonempty string must equal the pin ignoring hex letter case; the CLI normalizes
 the head to lowercase before passing it to the checker. The authoritative reviewer

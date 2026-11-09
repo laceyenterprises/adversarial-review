@@ -63,9 +63,11 @@ export async function main(argv = process.argv.slice(2), {
   }
   const pin = extra.length ? extra[1] : env.HAM_REVIEWED_SHA;
   const reviewedHead = typeof pin === 'string' ? pin.toLowerCase() : pin;
+  if (typeof reviewedHead !== 'string' || !/^[a-f0-9]{40}$/.test(reviewedHead)) {
+    return { action: 'stop', reason: 'review-evidence-invalid' };
+  }
   const plan = JSON.parse(readFileSync(planFile, 'utf8'));
-  if (typeof reviewedHead !== 'string' || !/^[a-f0-9]{40}$/.test(reviewedHead)
-    || !plan || typeof plan !== 'object' || Array.isArray(plan)
+  if (!plan || typeof plan !== 'object' || Array.isArray(plan)
     || (typeof plan.reviewedHead === 'string' && plan.reviewedHead.trim()
       && plan.reviewedHead.toLowerCase() !== reviewedHead)) {
     return { action: 'stop', reason: 'review-evidence-invalid' };

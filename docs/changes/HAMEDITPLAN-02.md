@@ -61,6 +61,26 @@ The full suite was left to PR-head CI.
 
 Fresh re-land preserves review-read instructions and fixes case-insensitive 40-hex head comparison plus additive help/template coordinate parity.
 
+## Review remediation
+
+Missing or invalid run pins now return `review-evidence-invalid` before the CLI
+reads or parses the plan file. Regression coverage exercises both pin sources
+with missing files, malformed JSON and directory paths, and verifies that review,
+policy and backlog operations remain untouched. The closure runbook documents
+this refusal ordering.
+
+The reported undefined `usage`, help JSON parsing and template-placeholder
+failures are absent at reviewed head `46579743ca818a3fa1420716cc1aa44d41d6250c`:
+the prompt contract declares `usage`, excludes help from plan assertions and
+loads head-free examples from help. No harness rewrite was needed.
+
+After rebasing onto freshly fetched `origin/main`, bounded targeted tests
+(`npm test -- test/hameditplan-01.test.mjs test/hammer-prompt-contract.test.mjs`)
+passed all 17 tests, including execution of 38 documented prompt commands.
+Repository lint passed with zero errors and 152 existing warnings; contract
+typechecking and the offline research byte-equivalence walkthrough passed.
+The full suite is reserved for PR-head CI.
+
 ## Fresh re-land verification
 
 Preserved the CLI usage export and fenced help examples used by current main.

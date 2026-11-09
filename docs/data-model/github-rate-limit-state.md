@@ -221,9 +221,10 @@ files left by crashed atomic writers are outside digest-file pruning and may
 need operator cleanup. Missing
 bindings are cached for one second per store path and digest (at most 256
 entries), so fresh cross-process registrations may take one second to become
-visible after a miss. Successful disk resolutions are revalidated on each lookup
-so removal, ownership changes and expiry take effect immediately; this deliberately
-retains bounded filesystem work rather than caching positive results.
+visible after a miss. Successful disk resolutions recheck the opened file's identity and ownership on
+each lookup. An unchanged file can reuse a parsed binding for up to one second,
+capped by expiry, with at most 256 cached records. Replacement, removal and
+ownership changes still take effect on the next lookup.
 Budget
 deferrals retain the last validated ETag and enter the bounded transient-read
 path. A missing observation breaks the deficit interval, and an alert receipt

@@ -76,8 +76,12 @@ test('bindings expire, reject malformed identity and digest substitution, and pr
   const digest = createHash('sha256').update('fixture').digest('hex').slice(0, 24);
   const other = 'b'.repeat(24);
   const now = Date.now();
+  const failOnRead = () => assert.fail('an unchanged binding should reuse its parsed record');
   writeBudgetBinding(directory, digest, 'installation-12-34', now + 1000, now);
   assert.equal(readBudgetBinding(directory, digest, now), 'installation-12-34');
+  assert.equal(readBudgetBinding(directory, digest, now + 1, { readFileSyncImpl: failOnRead }), 'installation-12-34');
+  writeBudgetBinding(directory, digest, 'installation-56-78', now + 1000, now + 1);
+  assert.equal(readBudgetBinding(directory, digest, now + 2), 'installation-56-78');
   assert.equal(readBudgetBinding(directory, digest, now + 1000), null);
   writeBudgetBinding(directory, other, 'installation-12-34', now + 10_000, now + 1001);
   assert.equal(readdirSync(directory).includes(`${digest}.json`), false);

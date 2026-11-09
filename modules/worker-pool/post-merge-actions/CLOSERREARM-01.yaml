@@ -1,0 +1,15 @@
+operator_steps:
+  - description: >-
+      After both CLOSERREARM-01 companions merge, use the normal submodule float
+      and separately authorized review-service restart procedure. On the next
+      natural terminal closer stop followed by a fresh clean exact-head review,
+      retain the daemon merge receipt without a human merge. Retain a natural
+      rescue merge result showing its action or a named owner and exact reason.
+      Acknowledge only after those receipts exist. This command displays the
+      handoff and performs no live action.
+    run_as: SRE with registered review-service ownership
+    command: >-
+      /usr/bin/printf '%s\n' 'CLOSERREARM-01: after normal float and separately authorized restart, retain natural fresh-review daemon merge and rescue action-or-owner receipts.'
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

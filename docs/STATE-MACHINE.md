@@ -1549,12 +1549,13 @@ projection adds `operator-hold` and `done` evaluation outputs; durable launch,
 lease and review lifecycle states are unchanged. See the
 [adoption runbook](RUNBOOK-ama-closure.md#closer-and-recovery-adoption-nxa-05).
 
-STOPSTALE-01 / STOPSTALE-02 share one daemon-only supersession path for
+STOPSTALE-01 / STOPSTALE-02 / CLOSERREARM-01 share one daemon-only supersession path for
 R07 deterministic stops, retry exhaustion, lifetime exhaustion and terminal
-hammer no-merge. A strictly newer exact-head settled review must pass the
+hammer no-merge, and R08 terminal no-merge with retries remaining.
+A strictly newer exact-head settled review must pass the
 current findings policy (including strict mode) and ordinary daemon gates.
 Freshness uses the stop record time, an active cap's existing alert time, or
-the terminal launch/retry times; missing or invalid time retains R07. The
+the terminal launch/retry times; missing or invalid time retains the stop or retry owner. The
 decision records `stop-superseded-by-exact-head-review` and
 `stop-reason:<superseded reason>`. Red, pending, conflicting or unproven heads
 retain recovery ownership. Hammer caps and cap-ledger contents are unchanged;

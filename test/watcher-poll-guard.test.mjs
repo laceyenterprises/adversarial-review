@@ -17,6 +17,7 @@ import {
 } from '../src/watcher-poll-guard.mjs';
 
 test('WATCHERTIMER-01: discovered 20-repo poll at 5x load finishes without a 1ms deadline or warning', async t => {
+  t.mock.method(os, 'platform', () => 'linux');
   t.mock.method(os, 'loadavg', () => [os.cpus().length * 2.6, 0, 0]);
   t.mock.method(childProcess, 'execFileSync', command => {
     assert.equal(command, '/bin/ps');

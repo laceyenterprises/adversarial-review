@@ -1371,10 +1371,13 @@ posted-review step deadlines through `src/load-aware-timeout.mjs`. All quota
 readers share a 45-second nominal budget. The existing graded CPU
 corroboration curve supplies up to 6x patience by default under contention;
 CPU samples (including failures) and timeout policy are cached for five seconds.
-On macOS, native `os.cpus()` counters avoid spawning `ps`; readings use interval
-deltas, with silent fallback while the first baseline warms or a baseline older
-than 60 seconds refreshes. Other platforms retain the synchronous `ps` sample
-with its one-second budget. Failed attempts already have a safe fallback.
+On macOS, native `os.cpus()` counters supply interval deltas. A cold baseline,
+changed CPU count or baseline older than 60 seconds triggers one synchronous
+`ps` attempt with a one-second budget, so one-shot timeout CLIs can corroborate
+load immediately. The baseline is saved before that attempt; even if `ps` is
+denied, the next sample interval can use native deltas without another spawn.
+Other platforms retain the synchronous `ps` sample with its one-second budget.
+Failed attempts already have a safe fallback.
 If sampling fails or returns non-finite data, the last successful CPU reading
 is reused while it is under 60 seconds
 old; otherwise the full load-based multiplier applies. Failed attempts do not
@@ -1382,7 +1385,23 @@ refresh the successful reading's age. CPU substitution diagnostics are silent
 by default. Set
 `LOAD_AWARE_TIMEOUT_DEBUG=1` to emit them to stderr, limited to one per minute
 per process; the same flag enables timeout-policy config-fallback diagnostics.
-Leave it unset for CLIs with exact stderr contracts. A measured zero still
+Leave it unset for CLIs with exact stderr contracts. This default also applies
+to daemons on all platforms: no automatic health field or metric reports
+degradation. For operator diagnosis, enable the flag on an owned daemon run and
+inspect CPU-substitution and config-fallback messages separately. To verify
+native sampling directly on macOS, run this read-only probe from the deployed
+checkout, with debug enabled:
+
+```bash
+LOAD_AWARE_TIMEOUT_DEBUG=1 node --input-type=module -e 'import { hostCpuBusyPercent } from "./src/load-aware-timeout.mjs"; console.log("cold", hostCpuBusyPercent()); setTimeout(() => console.log("warm", hostCpuBusyPercent()), 5100)'
+```
+
+Retain a finite warm reading; quiet stderr alone cannot prove sampler health.
+The cold reading should also be finite where `ps` is permitted. Separately run
+`LOAD_AWARE_TIMEOUT_DEBUG=1 node bin/load-aware-timeout.mjs 360` and retain the
+numeric budget plus any substitution/config diagnostics (an idle host may skip
+CPU sampling entirely). Repeat exact-stderr validation with the flag unset.
+A measured zero still
 supplies zero corroboration,
 including when reused during failures for up to 60 seconds; this can retain
 nominal timeouts while contention rises. Hosts whose CPU sampling is permanently
@@ -1397,8 +1416,9 @@ extension point accepted by the Python loader and its shell wrapper; do not add
 a top-level `timeouts` root. The Node watcher owns validation and consumption of
 these leaves; Python and shell tolerate them but do not expose the timeout policy
 in their resolved config or shell exports. An invalid or unreadable config uses
-the default policy for five seconds and emits one warning per refresh interval, so timeout
-computations do not interrupt GitHub reads or lock/quota bookkeeping.
+the default policy for five seconds and, only with the debug flag enabled,
+emits one warning per refresh interval, so timeout computations do not interrupt
+GitHub reads or lock/quota bookkeeping.
 
 Posted-review admission uses the nominal step deadline regardless of host load.
 Scaled handler waits are capped at the remaining phase budget (including time

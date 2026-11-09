@@ -33,6 +33,7 @@ export function underMaxLoad(t, { maxMultiplier = MAX_MULTIPLIER } = {}) {
   const previous = readFileSync(configPath);
   writeFileSync(configPath, `version: 1\nadversarial:\n  reviewer:\n    load_aware:\n      enabled: true\n      max_multiplier: ${maxMultiplier}\n`);
   const cores = os.cpus().length || 1;
+  const platformMock = t.mock.method(os, 'platform', () => 'linux');
   const loadMock = t.mock.method(os, 'loadavg', () => [cores * (1 + 2 * maxMultiplier), 0, 0]);
   const cpuMock = t.mock.method(childProcess, 'execFileSync', (command, args, options) => {
     if (command === process.env.HQ_BIN && command.includes('/review-resolver-fixture-')) {
@@ -44,6 +45,7 @@ export function underMaxLoad(t, { maxMultiplier = MAX_MULTIPLIER } = {}) {
   syncBuiltinESMExports();
   resetLoadAwareTimeoutCachesForTesting();
   t.after(() => {
+    platformMock.mock.restore();
     loadMock.mock.restore();
     cpuMock.mock.restore();
     syncBuiltinESMExports();

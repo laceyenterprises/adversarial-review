@@ -72,15 +72,32 @@ export function createCpuBusySampler({
   let warnedAt = -Infinity;
   let previousCpu = null;
   let previousCpuAt = -Infinity;
+  function readPsBusyPercent() {
+    const out = execFileSyncImpl('/bin/ps', ['-A', '-o', '%cpu='], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: CPU_SAMPLE_TIMEOUT_MS,
+    });
+    let total = 0;
+    let seen = false;
+    for (const line of out.split(/\r?\n/)) {
+      const raw = line.trim().replace(',', '.');
+      if (!raw) continue;
+      const value = Number(raw);
+      if (!Number.isFinite(value)) throw new Error('Invalid CPU sample');
+      total += value;
+      seen = true;
+    }
+    const busy = total / cpuCount;
+    return seen && Number.isFinite(busy) ? Math.max(0, Math.min(100, busy)) : null;
+  }
   return function sample() {
     let now = nowMs();
     if (now - sampledAt >= SAMPLE_INTERVAL_MS) {
       cached = null;
       try {
         if (platform() === 'darwin') {
-          // Native counters avoid spawning ps, which can be denied on a
-          // contained macOS host. A cold or stale baseline falls back until
-          // the next interval, without sleeping on the caller's event loop.
+          // Native counters avoid steady-state ps calls. A cold/stale
+          // baseline tries bounded ps once so one-shot CLIs still get CPU
+          // corroboration; denied ps keeps the ordinary quiet fallback.
           const counters = cpus();
           if (!counters?.length) throw new Error('CPU counters unavailable');
           const current = counters.map(({ times }) => {
@@ -94,32 +111,21 @@ export function createCpuBusySampler({
             && now - previousCpuAt <= LAST_GOOD_CPU_MAX_AGE_MS ? previousCpu : null;
           previousCpu = current;
           previousCpuAt = now;
-          if (!previous) throw new Error('CPU baseline unavailable');
-          let total = 0;
-          let idle = 0;
-          for (const [index, counter] of current.entries()) {
-            const deltas = counter.map((value, field) => value - previous[index][field]);
-            if (deltas.some(value => value < 0)) throw new Error('CPU counters reset');
-            total += deltas.reduce((sum, value) => sum + value, 0);
-            idle += deltas[3];
+          if (!previous) {
+            cached = readPsBusyPercent();
+          } else {
+            let total = 0;
+            let idle = 0;
+            for (const [index, counter] of current.entries()) {
+              const deltas = counter.map((value, field) => value - previous[index][field]);
+              if (deltas.some(value => value < 0)) throw new Error('CPU counters reset');
+              total += deltas.reduce((sum, value) => sum + value, 0);
+              idle += deltas[3];
+            }
+            if (total > 0 && Number.isFinite(total)) cached = 100 * (1 - idle / total);
           }
-          if (total > 0 && Number.isFinite(total)) cached = 100 * (1 - idle / total);
         } else {
-          const out = execFileSyncImpl('/bin/ps', ['-A', '-o', '%cpu='], {
-            encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: CPU_SAMPLE_TIMEOUT_MS,
-          });
-          let total = 0;
-          let seen = false;
-          for (const line of out.split(/\r?\n/)) {
-            const raw = line.trim().replace(',', '.');
-            if (!raw) continue;
-            const value = Number(raw);
-            if (!Number.isFinite(value)) throw new Error('Invalid CPU sample');
-            total += value;
-            seen = true;
-          }
-          const busy = total / cpuCount;
-          if (seen && Number.isFinite(busy)) cached = Math.max(0, Math.min(100, busy));
+          cached = readPsBusyPercent();
         }
       } catch { /* Reuse fresh evidence, otherwise grant full load-based patience. */ }
       // Cache attempts from completion so a slow failure cannot cause a hot retry loop.

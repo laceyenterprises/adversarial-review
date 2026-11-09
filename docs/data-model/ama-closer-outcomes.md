@@ -44,6 +44,12 @@ window. The journal emits no reopen event, so a current-terminal denominator
 must also check the dispatch record and live retry chain, excluding rearmed
 launches while their retries remain active or unreadable.
 A missing lease outcome is unknown, never inferred from an exit code.
+In particular, `handed-to-review` ends closer custody without terminalizing the
+lease: the common hammer path that pushes fixes back to review emits no
+`lease-terminal` row for that handoff. Its launch can still emit a
+`launch-terminal` row. Report this known no-lease-row case separately when
+dispatch/lease evidence is available; the journal alone cannot distinguish it
+from missing lease evidence and must retain the unknown outcome.
 `succeeded` is affirmative merge evidence; a later observation on another head
 cannot erase it. Gate reasons can be correlated with the existing AMA audit's
 per-launch attempts. Deferred outcomes retain their separate classification.
@@ -58,4 +64,10 @@ Filesystem failures produce only the fixed local diagnostic
 `ama_closer.outcome_record_unavailable`. Closure, cleanup, dispatch and paging
 decisions retain their existing behavior. There is no automatic backfill,
 migration, retention deletion, daemon restart or policy change.
-History begins after deployment; missing older history is unavailable.
+Reporting history begins at the deployment cutover. Predecessor capture can
+incidentally append pre-deployment terminal records when their heads are retried;
+this is a biased partial sample, not a historical backfill. Readers must ignore
+rows whose `terminalAt` predates the deployment cutover, including rows in
+old-dated files, and clip reporting windows to that cutover. The journal does
+not record the cutover: consumers must obtain it from deployment evidence.
+Missing older history is unavailable.

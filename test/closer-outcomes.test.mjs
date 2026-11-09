@@ -4,7 +4,9 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { appendCloserOutcome, closerOutcomeObservation } from '../src/ama/closer-outcomes.mjs';
-import { updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
+import {
+  amaCloserDispatchDir, reconcileAmaCloserDispatches, updateAmaCloserDispatchRecord,
+} from '../src/ama/dispatch-closer.mjs';
 import { acquireAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 
 const identity = { repo: 'example/project', prNumber: 42, headSha: 'a'.repeat(40) };
@@ -89,7 +91,7 @@ test('lease writer records deferred outcomes without declaring launch exit', t =
   assert.deepEqual(rows(rootDir).map(row => [row.kind, row.outcome]), [['lease-terminal', 'deferred']]);
 });
 
-test('paging and dispatch equivalence when the telemetry store is unavailable', t => {
+test('dispatch and cleanup equivalence when the telemetry store is unavailable', t => {
   const root = scratch(t);
   const healthy = scratch(t);
   mkdirSync(join(root, 'data'), { recursive: true });
@@ -104,6 +106,53 @@ test('paging and dispatch equivalence when the telemetry store is unavailable', 
   assert.deepEqual(cleanups, ['launch-one', 'launch-one']);
   assert.deepEqual(warnings, ['ama_closer.outcome_record_unavailable']);
   // This existing seam has no paging effect. Failure adds only a local warning.
+});
+
+test('reconcile updates the scanned file in place and retains behavior when telemetry is unavailable', async t => {
+  const warnings = [];
+  t.mock.method(console, 'warn', message => warnings.push(message));
+  const results = [];
+  for (const unavailable of [false, true]) {
+    const root = scratch(t);
+    const dir = amaCloserDispatchDir(root);
+    mkdirSync(dir, { recursive: true });
+    // Legacy filename deliberately disagrees with the record's stored identity.
+    const dispatchPath = join(dir, 'legacy-dispatch.json');
+    const dispatched = { ...identity, launchRequestId: 'launch-one', state: 'dispatched',
+      lastObservedStatus: 'running', lastObservedAt: '2026-01-02T03:00:00.000Z' };
+    writeFileSync(dispatchPath, JSON.stringify(dispatched));
+    if (unavailable) writeFileSync(join(root, 'data/ama-closer-outcomes'), 'unavailable');
+    const cleanups = [];
+    const logs = [];
+    const options = {
+      now, nowMs: () => Date.parse(now),
+      readLaunchRequestStatusImpl: async ({ launchRequestId }) => {
+        assert.equal(launchRequestId, dispatched.launchRequestId);
+        return { ok: true, row: { status: 'failed' } };
+      },
+      cleanupScratchImpl(record) { cleanups.push(record); },
+      log: { info(message) { logs.push(JSON.parse(message)); } },
+    };
+    const result = await reconcileAmaCloserDispatches(root, options);
+    assert.equal(result.changed, 1);
+    assert.equal(result.terminal, 1);
+    assert.deepEqual(result.active, []);
+    const terminal = JSON.parse(readFileSync(dispatchPath, 'utf8'));
+    assert.deepEqual(terminal, { ...dispatched, state: 'launch-terminal',
+      lastObservedStatus: 'failed', terminalLaunchStatus: 'failed',
+      lastObservedAt: now, reconciledAt: now });
+    assert.deepEqual(readdirSync(dir).filter(name => name.endsWith('.json')), ['legacy-dispatch.json']);
+    assert.deepEqual(cleanups, [dispatched]);
+    assert.equal(logs.filter(row => row.event === 'ama_closer.launch_capacity_reconciled').length, 1);
+    if (!unavailable) assert.deepEqual(rows(root), [closerOutcomeObservation(terminal, 'launch-terminal')]);
+    results.push({ result, terminal, cleanups, logs });
+    const repeated = await reconcileAmaCloserDispatches(root, options);
+    assert.equal(repeated.changed, 0, 'terminal projection must not be reconciled again');
+    assert.equal(cleanups.length, 1);
+    if (!unavailable) assert.equal(rows(root).length, 1);
+  }
+  assert.deepEqual(results[1], results[0]);
+  assert.deepEqual(warnings, ['ama_closer.outcome_record_unavailable']);
 });
 
 test('append failure is non-fatal and diagnostic text excludes transport errors', t => {

@@ -8,7 +8,8 @@
       "store": "data/ama-closer-outcomes/YYYY-MM-DD.jsonl",
       "schemaSurface": "src/ama/closer-outcomes.mjs",
       "relatedSchemaSurfaces": ["src/ama/dispatch-closer.mjs", "src/ama/closer-lease.mjs"],
-      "owner": "AMA closer telemetry"
+      "owner": "AMA closer telemetry",
+      "description": "Append-only terminal launch and terminal lease observations, joined by globally unique launch request identity; process success never implies merge."
     },
     {
       "id": "mes-review-enforcement",

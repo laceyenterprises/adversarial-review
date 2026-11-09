@@ -2037,11 +2037,14 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
     counts.changed += 1;
     if (options.dryRun) return true;
     const preserve = AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES.has(normalizeWorkerRunStatus(current.lastObservedStatus));
-    writeAmaCloserDispatchRecord(rootDir, current, {
+    const terminal = {
       ...current, state: 'launch-terminal',
       lastObservedStatus: preserve ? current.lastObservedStatus : amaCloserStatusFromTerminalLaunchRequestStatus(terminalStatus),
       terminalLaunchStatus: terminalStatus, lastObservedAt: now, reconciledAt: now,
-    });
+    };
+    // The scanned path is authoritative even for legacy filename/identity drift.
+    writeFileAtomic(dispatchPath, `${JSON.stringify(terminal, null, 2)}\n`);
+    appendCloserOutcome(rootDir, terminal, 'launch-terminal');
     (options.cleanupScratchImpl || cleanupHammerScratchDir)(current, options.log || options.logger,
       { ...options, rootDir });
     logAmaCloserDispatchEvent(options.log || options.logger, 'ama_closer.launch_capacity_reconciled', {

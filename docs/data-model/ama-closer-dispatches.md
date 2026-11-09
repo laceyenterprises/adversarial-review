@@ -46,8 +46,20 @@ response stays fenced and unreceipted for exact-key recovery. The attempt key
 binds that recovery to its dispatch head; an explicit different ledger head
 cannot be adopted.
 Ledger repository metadata may be absent or null in older schemas; when present,
-it must match the full repository name or its basename. The exact closer ticket
-is always required, and an explicit head mismatch still refuses adoption.
+it must match the full repository name or its basename. PRERECEIPTADOPT-01 permits
+an absent, null or empty ticket only for the single row carrying the intent's
+own `dispatchIdempotencyKey`, with a recognized hammer worker class and matching
+repository/head when present. A non-empty different ticket stays foreign;
+`identity_ambiguous: true`, multiple rows, missing/other worker classes and
+explicit repository/head mismatches refuse adoption. Direct dispatch output and
+live-retry adoption still require the exact closer ticket. Receipt recovery
+persists the launch and promotes the matching lease under the existing snapshot
+CAS. For a terminal receipt it then invokes ordinary terminal reconciliation,
+after releasing the intent lock, including retry-chain and merge evidence reads.
+A successful process exit alone never proves a merge; normal success grace,
+auto-merge holds, live retries and unreadable evidence retain their authority.
+The watcher reaches this path for a dead pending owner before its in-flight
+wait and can admit the next eligible closer on the same pass.
 SDK launch replies now supply ticket, repository and head identity. The producer
 owns backend schema projection and compatibility; this consumer no longer joins
 launch columns, lineage, logical-job claims or worker rows. Returned
@@ -133,9 +145,16 @@ check. The consumer uses an inclusive UTC attempt boundary and adds no
 repository, head or terminal-status filter. Full grant coverage is an activation
 prerequisite; filtered emptiness is not independent proof of global absence.
 An operator key read returning zero cannot bypass an unreadable
-supplemental ticket query. A returned unidentified, conflicting or same-ticket
-wrong-head receipt remains ambiguous even when terminal; an empty ticket query
-cannot settle it. Dry-run remains the default;
+supplemental ticket query. A unique own-key terminal closer receipt can instead
+be recovered with the same identity rules as native reconciliation, including a
+missing ticket. Apply records `settlement-authorized` before recovery and
+`settled-terminal-receipt` only after ordinary terminal reconciliation settles
+the matching lease. A live receipt is refused as `closer-receipt-exists`; an
+unsettled terminal receipt reports `receipt-settlement-pending`. Dry-run previews
+receipt recovery without writes; it does not prove subsequent terminal settlement.
+Conflicting, multiply identified or same-ticket wrong-head receipts remain
+ambiguous even when terminal; an empty ticket query cannot settle them.
+Dry-run remains the default;
 apply requires the directory owner's UID, an operator reason, and a durable
 `settlement-authorized` audit before lease/intent mutation, followed by the
 completion audit. Audit evidence includes the recorded ID and both queries.

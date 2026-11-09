@@ -13,6 +13,8 @@ import { recordHammerRetryDispatch } from './hammer-retry-cap.mjs';
 import { deliverAlert } from '../alert-delivery.mjs';
 import { execGhWithRetry } from '../gh-cli.mjs';
 import { probeCloserSubmitter } from './dispatch-submitter.mjs';
+import { isHammerWorkerClass } from './hammer-worker-class.mjs';
+import { isTerminalLaunchRequestStatus } from './launch-request-status.mjs';
 
 const heldLocks = new WeakMap();
 function lockPath(rootDir, identity) {
@@ -70,9 +72,15 @@ function intentSnapshotMatches(path, bytes, rootDir, identity, lease) {
   catch { return false; }
 }
 
-// Match the exact closer ticket; a generic HAM or conflict worker is not this PR's closer.
-export function closerLaunchMatches(record, row) {
-  return row?.identity_ambiguous !== true && row?.ticket_ref === `AMA-PR-${record.prNumber}`
+// A missing ticket is acceptable only under this intent's unique key. The
+// caller also requires exactly one returned row before adopting any receipt.
+export function closerLaunchMatches(record, row, { uniqueKeyReceipt = false } = {}) {
+  const ownKey = uniqueKeyReceipt && Boolean(record.dispatchIdempotencyKey)
+    && row?.idempotency_key === record.dispatchIdempotencyKey;
+  return row?.identity_ambiguous !== true
+    && (row?.ticket_ref === `AMA-PR-${record.prNumber}`
+      || (ownKey && isHammerWorkerClass(row?.worker_class)
+        && (row?.ticket_ref == null || row.ticket_ref === '')))
     && (row.target_repo == null || (typeof row.target_repo === 'string' && [record.repo, record.repo.split('/').at(-1)].map(value => value.toLowerCase()).includes(row.target_repo.toLowerCase())))
     && (!row.head_sha || row.head_sha === (record.targetRemediationSha || record.headSha));
 }
@@ -224,7 +232,8 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
     options.signal?.throwIfAborted();
     const matchingReceipt = !legacy && receipt && receipt.idempotency_key === record.dispatchIdempotencyKey
       && typeof receipt.launch_request_id === 'string' && receipt.launch_request_id.startsWith('lrq_')
-      && closerLaunchMatches(record, receipt);
+      && isHammerWorkerClass(receipt.worker_class)
+      && closerLaunchMatches(record, receipt, { uniqueKeyReceipt: true });
     if (!legacy && receipt && !matchingReceipt) {
       evidence = { ...evidence, receiptIdentityMismatch: {
         ticketRef: receipt.ticket_ref || null, targetRepo: receipt.target_repo || null,
@@ -246,7 +255,12 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
     let budgetUnreadable = false;
     const recoverableReceipt = !foreignLease && matchingReceipt
       && (!lease?.lrqId || lease.lrqId === receipt.launch_request_id) && !settledNoLaunch;
-    if (options.operatorSettlement && recoverableReceipt) return { status: 'held', reason: 'closer-receipt-exists', evidence };
+    if (options.operatorSettlement && recoverableReceipt && !isTerminalLaunchRequestStatus(receipt)) {
+      return { status: 'held', reason: 'closer-receipt-exists', evidence };
+    }
+    if (options.operatorSettlement && recoverableReceipt && !options.dryRun) {
+      options.beforeSettlement?.({ ...record, preReceiptReconciliation: { query: evidence } });
+    }
     if (recoverableReceipt && !options.dryRun && String(record.workerClass).startsWith('hammer')) {
       // Charge before receipt persistence, keyed across a crash on either side.
       try {
@@ -365,6 +379,17 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
           ...next.preReceiptReconciliation }));
       }
     }
-    return { status, changed: next !== record, record: next, ...(evidence ? { evidence } : {}) };
+    let reconciledRecord = next;
+    if (status === 'receipt-recovered' && isTerminalLaunchRequestStatus(receipt) && !options.dryRun) {
+      // The ordinary observer owns retry traversal, merge proof, success grace
+      // and lease outcomes. It takes the intent lock itself, after persistence.
+      release();
+      const { reconcileAmaCloserLeaseAsync } = await import('./dispatch-closer.mjs');
+      await reconcileAmaCloserLeaseAsync({ ...options, rootDir, repo: record.repo,
+        prNumber: record.prNumber, probedLaunchRequestId: receipt.launch_request_id, now });
+      reconciledRecord = readAmaCloserDispatchRecord(rootDir, identity) || next;
+    }
+    return { status, changed: next !== record, record: reconciledRecord,
+      ...(evidence ? { evidence } : {}) };
   } finally { release(); }
 }

@@ -8,6 +8,7 @@ import { parseArgs } from 'node:util';
 import { amaCloserDispatchDir } from '../src/ama/dispatch-record-read.mjs';
 import { reconcilePreReceiptIntent } from '../src/ama/pre-receipt-intent.mjs';
 import { appendOperatorMutationAuditRow } from '../src/operator-mutation-audit.mjs';
+import { readAmaCloserLease } from '../src/ama/closer-lease.mjs';
 
 const usage = `Usage: node bin/settle-legacy-closer-intent.mjs
   --root-dir <review-root> --hq-root <hq-root>
@@ -58,12 +59,20 @@ export async function main(args = process.argv.slice(2), options = {}) {
     beforeSettlement: next => audit({ outcome: 'settlement-authorized',
       evidence: next.preReceiptReconciliation.query }),
   });
-  const conclusive = result.status === 'no-launch';
+  const recovered = result.status === 'receipt-recovered';
+  const lease = recovered && readAmaCloserLease(rootDir, { ...identity,
+    headSha: result.record.targetRemediationSha || identity.headSha });
+  const conclusive = result.status === 'no-launch' || (recovered
+    && (dryRun || (lease?.status === 'terminal' && lease.lrqId === result.record.launchRequestId)));
+  const recoveryReason = recovered
+    ? (conclusive ? 'terminal-receipt-recovered' : 'receipt-settlement-pending') : null;
   const output = { dryRun, ...identity, conclusive, status: result.status,
-    reason: result.reason || result.record?.preReceiptReconciliation?.reason || 'not-a-pre-receipt-intent',
+    reason: result.reason || recoveryReason
+      || result.record?.preReceiptReconciliation?.reason || 'not-a-pre-receipt-intent',
     evidence: result.evidence || null };
-  if (!dryRun) output.auditPath = audit({ outcome: conclusive ? 'settled-no-dispatch'
-    : `refused:${output.reason}`, evidence: output.evidence });
+  const settledOutcome = recovered ? 'settled-terminal-receipt' : 'settled-no-dispatch';
+  if (!dryRun) output.auditPath = audit({ outcome: conclusive ? settledOutcome : `refused:${output.reason}`,
+    evidence: output.evidence });
   print(JSON.stringify(output));
   if (!conclusive) throw new Error(`Closer intent settlement refused: ${output.reason}`);
   return output;

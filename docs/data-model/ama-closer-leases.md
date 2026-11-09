@@ -151,6 +151,16 @@ Worker-run and app-owned lifecycle spellings are separate contracts. Unknown
 status-only evidence remains unknown. No new durable states or fields are added.
 
 
+PRERECEIPTADOPT-01: native receipt recovery accepts one own-key closer launch
+with a null/empty ticket and matching optional repository/head metadata. After
+promoting the unchanged pending lease, terminal receipts enter the shared
+terminal observer on the same pass. It traverses retries and reads merge/PR
+evidence before choosing the existing terminal outcome. Worker success alone
+is not `succeeded` lease evidence. A dead watcher no longer preserves an
+in-flight wait after conclusive terminal settlement. The operator tool uses the
+same path with a pre-mutation authorization audit. No lease fields, statuses,
+retry refunds or ownership CAS rules change.
+
 ## Abandoned pending holders (CLOSERLEASEDEAD-01)
 
 DEADWATCHERLEASE-01 adds optional `watcherStartedAt`, the UTC process start

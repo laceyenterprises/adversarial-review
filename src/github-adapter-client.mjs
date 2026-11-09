@@ -542,6 +542,7 @@ function adapterUnsupportedError(err) {
 // --pat-env; otherwise the adapter's own auth selector owns the bucket. Never
 // the anonymous `default` bucket, which an authenticated call does not spend.
 function githubAdapterCredential(args, env = {}) {
+  env = { ...process.env, ...env };
   const index = args.indexOf('--auth');
   const selector = index >= 0 ? args[index + 1] : 'default';
   const tokenNames = args.flatMap((arg, i) => arg === '--pat-env' ? [args[i + 1]] : []);
@@ -838,6 +839,7 @@ async function writeAdapterPullRequestMerge(repo, prNumber, {
 }
 
 const __test__ = {
+  githubAdapterCredential,
   adapterUnsupportedError,
   buildAdapterEnv,
   candidateSuperprojectAdapterPaths,

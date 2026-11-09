@@ -1,5 +1,4 @@
-// Kept inside the batch's src scope. Run with:
-// node --test src/github-budget-bindings.test.mjs
+import './helpers/rate-limit-state-isolation.mjs';
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -7,8 +6,8 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readBudgetBinding, writeBudgetBinding } from './github-budget-bindings.mjs';
-import { createRateLimitThrottle, githubCredential, registerGitHubInstallationToken } from './rate-limit-throttle.mjs';
+import { readBudgetBinding, writeBudgetBinding } from '../src/github-budget-bindings.mjs';
+import { createRateLimitThrottle, githubCredential, registerGitHubInstallationToken, resolveBudgetBindingDirectory } from '../src/rate-limit-throttle.mjs';
 
 const previousLogDisable = process.env.GHO_API_CALL_LOG_DISABLE;
 process.env.GHO_API_CALL_LOG_DISABLE = '1';
@@ -33,7 +32,7 @@ test('a fresh process resolves broker bindings for status and zero-balance admis
   const throttle = createRateLimitThrottle({ env, recordApiCallImpl() {} });
   await throttle.recordResponseRateLimit({ resource: 'core', credential: 'installation-12-34',
     remaining: 0, resetAt: Date.now() + 60_000 });
-  const moduleUrl = new URL('./rate-limit-throttle.mjs', import.meta.url).href;
+  const moduleUrl = new URL('../src/rate-limit-throttle.mjs', import.meta.url).href;
   const script = `
     import assert from 'node:assert/strict';
     import { githubCredential, readGitHubBudgetStatus, createRateLimitThrottle,
@@ -88,4 +87,74 @@ test('an unavailable binding store leaves a successful registration usable in it
   const env = { GHO_RATE_LIMIT_SHARED_STATE_PATH: join(file, 'budget.json') };
   assert.doesNotThrow(() => registerGitHubInstallationToken('synthetic-unwritable', '12', '34', { env }));
   assert.equal(githubCredential({ env, token: 'synthetic-unwritable' }), 'installation-12-34');
+});
+
+test('bindings select separate stores for the canonical owner 7001 and peer 7002', () => {
+  const env = { GHO_RATE_LIMIT_SHARED_STATE_PATH: '/fixture/rate-limit-state.json' };
+  const storeStatSyncImpl = () => ({ uid: 7001 });
+  assert.equal(resolveBudgetBindingDirectory(env, { getuidImpl: () => 7001, storeStatSyncImpl }),
+    '/fixture/rate-limit-state.json.bindings');
+  assert.equal(resolveBudgetBindingDirectory(env, { getuidImpl: () => 7002, storeStatSyncImpl }),
+    '/fixture/rate-limit-state.uid-7002.json.bindings');
+});
+
+test('bindings create private directories and reject foreign files and symlinks', async t => {
+  const root = fixture(t);
+  const directory = join(root, 'bindings');
+  const digest = 'c'.repeat(24);
+  const now = Date.now();
+  writeBudgetBinding(directory, digest, 'installation-12-34', now + 1000, now);
+  assert.equal(statSync(directory).mode & 0o777, 0o700);
+  assert.equal(readBudgetBinding(directory, digest, now), 'installation-12-34');
+  assert.equal(readBudgetBinding(directory, digest, now, {
+    fstatSyncImpl: () => ({ isFile: () => true, uid: process.getuid() + 1 }),
+  }), null);
+  const { symlinkSync } = await import('node:fs');
+  const target = join(root, 'target.json');
+  writeFileSync(target, readFileSync(join(directory, `${digest}.json`)));
+  rmSync(join(directory, `${digest}.json`));
+  symlinkSync(target, join(directory, `${digest}.json`));
+  assert.equal(readBudgetBinding(directory, digest, now), null);
+  symlinkSync(directory, join(root, 'alias'));
+  assert.equal(readBudgetBinding(join(root, 'alias'), digest, now), null);
+});
+
+
+test('adapter credential lookup inherits the configured process store with a partial env', t => {
+  const root = fixture(t);
+  const env = { ...process.env, GHO_RATE_LIMIT_SHARED_STATE_PATH: join(root, 'budget.json'),
+    GH_TOKEN: 'synthetic-adapter-binding', GHO_API_CALL_LOG_DISABLE: '1' };
+  registerGitHubInstallationToken(env.GH_TOKEN, '56', '78', { env });
+  const moduleUrl = new URL('../src/github-adapter-client.mjs', import.meta.url).href;
+  const script = `
+    import assert from 'node:assert/strict';
+    import { __test__ } from ${JSON.stringify(moduleUrl)};
+    const args = ['--pat-env', 'GH_TOKEN'];
+    assert.equal(__test__.githubAdapterCredential(args).credential, 'installation-56-78');
+    assert.equal(__test__.githubAdapterCredential(args, { GH_TOKEN: process.env.GH_TOKEN }).credential,
+      'installation-56-78');
+    console.log('ok');
+  `;
+  assert.equal(execFileSync(process.execPath, ['--input-type=module', '-e', script],
+    { env, encoding: 'utf8' }).trim(), 'ok');
+});
+
+
+test('negative binding lookups are bounded, expire after one second and isolate store paths', t => {
+  const root = fixture(t);
+  const token = 'synthetic-negative-cache';
+  const digest = createHash('sha256').update(token).digest('hex').slice(0, 24);
+  const env = { GHO_RATE_LIMIT_SHARED_STATE_PATH: join(root, 'budget.json') };
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  assert.equal(githubCredential({ token, env }), `token-${digest}`);
+  writeBudgetBinding(resolveBudgetBindingDirectory(env), digest, 'installation-90-12', now + 60_000, now);
+  assert.equal(githubCredential({ token, env }), `token-${digest}`);
+  const otherEnv = { GHO_RATE_LIMIT_SHARED_STATE_PATH: join(root, 'other.json') };
+  writeBudgetBinding(resolveBudgetBindingDirectory(otherEnv), digest, 'installation-34-56', now + 60_000, now);
+  assert.equal(githubCredential({ token, env: otherEnv }), 'installation-34-56');
+  now += 1000;
+  assert.equal(githubCredential({ token, env }), 'installation-90-12');
+  now += 60_000;
+  assert.equal(githubCredential({ token, env }), `token-${digest}`);
 });

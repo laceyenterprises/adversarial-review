@@ -26,6 +26,8 @@ const DEFAULT_SHARED_STATE_PATH = resolve(TOOL_ROOT, 'data', 'api-cache', 'rate-
 
 const budgetScopes = new AsyncLocalStorage();
 const installationCredentials = new Map();
+const missingInstallationBindings = new Map();
+const BINDING_MISS_TTL_MS = 1000;
 
 function withGitHubBudgetScope(options, fn) {
   const scope = { urgent: false, rateLimited: false, deferred: false, ...options, limitedBudgets: new Map() };
@@ -52,11 +54,16 @@ function withCloserGitHubBudget(fn) {
   });
 }
 
+// Bindings follow the same proven owner selection as quota observations.
+function resolveBudgetBindingDirectory(env = process.env, planOptions = {}) {
+  return `${planStateStoreSync(resolveRateLimitSharedStatePath(env), planOptions).path}.bindings`;
+}
+
 function registerGitHubInstallationToken(token, appId, installationId, { env = process.env, expiresAtMs } = {}) {
   if (!token || !/^\d+$/.test(String(appId)) || !/^\d+$/.test(String(installationId))) return;
   const digest = createHash('sha256').update(String(token)).digest('hex').slice(0, 24);
   installationCredentials.set(digest, `installation-${appId}-${installationId}`);
-  writeBudgetBinding(`${resolveRateLimitSharedStatePath(env)}.bindings`, digest,
+  writeBudgetBinding(resolveBudgetBindingDirectory(env), digest,
     `installation-${appId}-${installationId}`, expiresAtMs);
   recordApiCall({ category: 'other', status: 'bound', extra: {
     unit: 'credential_binding', credential: `token-${digest}`,
@@ -70,9 +77,21 @@ function registerGitHubInstallationToken(token, appId, installationId, { env = p
 function githubCredential({ env = process.env, token = env.GH_TOKEN || env.GITHUB_TOKEN } = {}) {
   if (!token) return 'default';
   const digest = createHash('sha256').update(String(token)).digest('hex').slice(0, 24);
-  return installationCredentials.get(digest)
-    || readBudgetBinding(`${resolveRateLimitSharedStatePath(env)}.bindings`, digest)
-    || `token-${digest}`;
+  const registered = installationCredentials.get(digest);
+  if (registered) return registered;
+  const cacheKey = `${resolveRateLimitSharedStatePath(env)}:${digest}`;
+  const now = Date.now();
+  if (missingInstallationBindings.get(cacheKey) > now) return `token-${digest}`;
+  const binding = readBudgetBinding(resolveBudgetBindingDirectory(env), digest, now);
+  if (binding) {
+    missingInstallationBindings.delete(cacheKey);
+    return binding;
+  }
+  missingInstallationBindings.set(cacheKey, now + BINDING_MISS_TTL_MS);
+  while (missingInstallationBindings.size > 256) {
+    missingInstallationBindings.delete(missingInstallationBindings.keys().next().value);
+  }
+  return `token-${digest}`;
 }
 
 function githubBudgetKey(resource, credential = 'default') {
@@ -825,6 +844,7 @@ function readGitHubBudgetStatus({ rootDir = TOOL_ROOT, env = process.env, nowMs 
 }
 
 export {
+  resolveBudgetBindingDirectory,
   registerGitHubInstallationToken,
   withCloserGitHubBudget,
   awaitThrottleIfNeeded,

@@ -13,6 +13,12 @@ terminal launch evidence from authoritative lease outcomes. Consumers join by
 launch identity; process success never proves a merge. Closure, strict review,
 dispatch, cleanup, and paging policies remain unchanged.
 
+Remediation retains underscore-bearing operator-hold launch statuses verbatim
+and registers the store in the validated data-model catalog. The reader contract
+joins on globally unique launch IDs regardless of repository spelling, selects
+the latest terminal status, and requires separate live-retry evidence for
+current-terminal counts; historical observations alone cannot prove liveness.
+
 This is the upstream prerequisite for pipeline observers. Downstream work
 remains incomplete until this change merges, the normal submodule float
 advances the consumer, and fixtures validate that merged version.
@@ -27,3 +33,10 @@ filtering, and dispatch/cleanup equivalence when journal writes fail.
 validator with network guards: 7 passed. ESLint on the changed source and test
 files: clean. The changed-file CI mirror: CDM re-derivation guard and contract
 typecheck passed; the full suite was deferred by the fast tier.
+
+Remediation validation: bounded `node --test test/closer-outcomes.test.mjs`
+passed all 8 tests, including both operator-hold status round trips.
+`node scripts/validate-data-model-catalog.mjs` validated 92 entries.
+`npm run lint` passed with 0 errors (152 existing warnings);
+`npm run typecheck:contracts`, `bash demo/research-finding-walkthrough.sh`
+and `git diff --check` passed. The full suite remains delegated to PR-head CI.

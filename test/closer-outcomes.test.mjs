@@ -50,6 +50,18 @@ test('parked, provisional, unlaunched, malformed and missing-time records are ex
     terminalOutcome: 'abandoned-timeout', updatedAt: now }, 'lease-terminal'), null);
 });
 
+test('operator-hold terminal statuses survive journal serialization', t => {
+  const root = scratch(t);
+  const statuses = ['operator_triage_required', 'reaped_stuck_requested'];
+  for (const terminalLaunchStatus of statuses) {
+    assert.equal(appendCloserOutcome(root, {
+      ...receipt, launchRequestId: terminalLaunchStatus, terminalLaunchStatus,
+    }, 'launch-terminal'), true);
+  }
+  assert.deepEqual(rows(root).map(row => row.launchStatus), statuses);
+  assert.ok(rows(root).every(row => row.kind === 'launch-terminal' && row.outcome === null));
+});
+
 test('only fixed fields are serialized, without arbitrary output or credentials', t => {
   const root = scratch(t);
   appendCloserOutcome(root, { ...receipt, prompt: 'synthetic-private-text',

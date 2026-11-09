@@ -1,12 +1,15 @@
 {
-  "domains": [
+  "version": 1,
+  "entries": [
     {
+      "id": "ama-closer-outcomes",
       "title": "AMA closer outcome observations",
       "path": "docs/data-model/ama-closer-outcomes.md",
       "store": "data/ama-closer-outcomes/YYYY-MM-DD.jsonl",
       "schemaSurface": "src/ama/closer-outcomes.mjs",
+      "relatedSchemaSurfaces": ["src/ama/dispatch-closer.mjs", "src/ama/closer-lease.mjs"],
       "owner": "AMA closer telemetry",
-      "description": "Append-only terminal launch and terminal lease observations, joined by repository and launch request identity; process success never implies merge."
+      "description": "Append-only terminal launch and terminal lease observations, joined by globally unique launch request identity; process success never implies merge."
     }
   ]
 }

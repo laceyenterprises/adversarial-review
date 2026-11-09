@@ -1,5 +1,7 @@
 # AMA closer outcome observations
 
+**Source of truth:** `src/ama/closer-outcomes.mjs`
+
 Owner: `src/ama/closer-outcomes.mjs`. Store:
 `data/ama-closer-outcomes/YYYY-MM-DD.jsonl`, append-only, mode 0640.
 The date is the observation's terminal timestamp in UTC.
@@ -13,6 +15,8 @@ text, environment, labels, user identity or provider response is copied.
 They establish terminal launch evidence, including a failed or canceled launch
 that wrote no AMA audit. Process success does not prove a merge:
 `outcome` remains null on these rows.
+Operator-hold terminal statuses `operator_triage_required` and
+`reaped_stuck_requested` are retained verbatim in `launchStatus`.
 
 `lease-terminal` rows come from successful terminal lease writes with an LRQ.
 They retain the authoritative `terminalOutcome`, including `succeeded`,
@@ -23,10 +27,22 @@ failures produce no rows.
 The existing launch-status classifier owns terminality. Parked or unknown
 statuses (including a missing launch's `not-found`) are excluded.
 
-Readers join the kinds by `(repo, launchRequestId)` across dates and heads,
+Readers join the kinds by globally unique `launchRequestId` across dates and heads,
 deduplicate repeated observations, and count only launches with terminal launch
 evidence in the requested window. Use the earliest terminal launch observation
 time; later reconciliation must not move an old launch into a new window.
+Repository spelling is descriptive metadata, not part of the join key: lease
+and dispatch writers may use different case or names after a repository rename.
+
+A live retry can rearm the dispatch record under its original launch ID.
+These rows describe historical terminal observations, not current liveness:
+rearming reopens the dispatch lifecycle without removing earlier journal rows.
+For status breakdowns, use the latest `terminalAt` observation's `launchStatus`
+for that ID (as of the reporting cutoff); conflicting statuses at the same
+timestamp are unknown. The earliest timestamp still anchors its historical
+window. The journal emits no reopen event, so a current-terminal denominator
+must also check the dispatch record and live retry chain, excluding rearmed
+launches while their retries remain active or unreadable.
 A missing lease outcome is unknown, never inferred from an exit code.
 `succeeded` is affirmative merge evidence; a later observation on another head
 cannot erase it. Gate reasons can be correlated with the existing AMA audit's

@@ -19,7 +19,7 @@ export function closerOutcomeObservation(record, kind) {
   } else return null;
   const terminalAt = kind === 'lease-terminal' ? record.updatedAt : record.reconciledAt;
   if (typeof terminalAt !== 'string' || !Number.isFinite(Date.parse(terminalAt))) return null;
-  const code = value => typeof value === 'string' && /^[a-z][a-z0-9:-]{0,159}$/.test(value)
+  const code = value => typeof value === 'string' && /^[a-z][a-z0-9_:-]{0,159}$/.test(value)
     ? value : null;
   return {
     schemaVersion: 1, kind, repo: record.repo, prNumber: record.prNumber,

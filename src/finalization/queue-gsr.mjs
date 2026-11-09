@@ -64,5 +64,5 @@ export function queueGsrMain([command, rootDir, token]) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try { process.stdout.write(JSON.stringify(queueGsrMain(process.argv.slice(2))) + '\n'); }
-  catch (error) { process.stderr.write(`queue GSR unavailable: ${error.name}\n`); process.exitCode = 1; }
+  catch (error) { process.stderr.write(`queue GSR unavailable: ${error.message || error.name}\n`); process.exitCode = 1; }
 }

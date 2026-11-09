@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -21,6 +23,22 @@ function fixture(t) {
   t.after(() => { store.close(); rmSync(rootDir, { recursive: true, force: true }); });
   return { store, owner, gsr, routing };
 }
+
+test('queue GSR CLI reports argument and maintenance token errors on stderr', t => {
+  const root = mkdtempSync(join(tmpdir(), 'queue-gsr-cli-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const cli = fileURLToPath(new URL('../src/finalization/queue-gsr.mjs', import.meta.url));
+  for (const [args, message] of [
+    [[], 'queue GSR command and root required'],
+    [['drain', root, 'invalid'], 'maintenance token required'],
+  ]) {
+    const result = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', timeout: 10000 });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr, `queue GSR unavailable: ${message}\n`);
+  }
+});
 
 test('drain fences new claims; steer retains queue work; only original token resumes', async t => {
   const f = fixture(t);

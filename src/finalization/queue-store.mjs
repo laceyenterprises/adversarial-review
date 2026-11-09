@@ -49,6 +49,7 @@ export function openFinalizationQueueStore({ rootDir, db, busyTimeoutMs = 5_000 
     database.pragma(`busy_timeout = ${queueWaitMs(busyTimeoutMs, { ceilingMs: 30_000 })}`);
   }
   ensureFinalizationQueueSchema(database);
+  const gsrHoldStmt = database.prepare('SELECT * FROM finalization_queue_gsr WHERE singleton=1');
   const tx = fn => database.transaction(fn).immediate();
   const laneArgs = lane => Object.values(resolveLaneKey(lane));
   const readOwner = lane => database.prepare('SELECT * FROM finalization_queue_lane WHERE repository=? AND base=?').get(...laneArgs(lane)) ?? null;
@@ -77,7 +78,7 @@ export function openFinalizationQueueStore({ rootDir, db, busyTimeoutMs = 5_000 
 
   const store = {
     db: database, rootDir, tx, readOwner, assertFence,
-    executionHold: () => database.prepare('SELECT * FROM finalization_queue_gsr WHERE singleton=1').get() ?? null,
+    executionHold: () => gsrHoldStmt.get() ?? null,
     // Internal transaction primitives used by queue-owner under the issuance lock.
     ensureLane, append, operations,
     readEntry, entries,

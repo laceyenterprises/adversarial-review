@@ -1,6 +1,6 @@
 # MLR-13 — External custody observations and queue GSR
 
-## Change notes
+## Summary
 
 Agent OS source transactions retain lifecycle facts until the existing
 finalization append API returns a committed, source-keyed receipt. The thin
@@ -32,3 +32,29 @@ trials on the original owner and 0/30 on the changed owner. Unknown operation
 intent survives drain/resume and a cold queue is held before lane creation.
 These deterministic schedules exercise the exclusion boundary; they are
 not a live drain rehearsal.
+
+## Interface changes
+
+The custody and queue GSR CLIs include the underlying error message on stderr.
+`custodyFreshness` returns an unknown, non-fresh projection for inputs without
+custody data. Queue hold reads reuse a prepared statement while observing
+current hold state on every call. Persistent shapes and lifecycle states are
+unchanged.
+
+Final remediation removes the ticket narrative from the root README and
+clarifies that the state manifest includes operational verification records.
+The ledger documentation describes the missing-custody projection.
+
+## Verification
+
+Final remediation passed 52 targeted offline tests across
+`finalization-custody`, `finalization-queue-gsr`, `finalization-queue-owner`,
+`finalization-ledger-events` and `finalization-ledger-store` using
+`node --test test/<name>.test.mjs` for those five files. This includes CLI
+stderr diagnostics, absent-custody projections and 30 forced post-drain
+continuations with zero remote invocations.
+
+`npm run lint` passed with zero errors (152 existing warnings);
+`npm run typecheck:contracts`, `bash demo/research-finding-walkthrough.sh`,
+`node scripts/validate-data-model-catalog.mjs` (91 entries) and
+`git diff --check` passed. The full suite is left to PR-head CI.

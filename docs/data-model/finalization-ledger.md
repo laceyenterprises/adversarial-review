@@ -24,6 +24,9 @@ dirty (boolean or unknown), launch liveness and a freshness bound of at most
 ingestion makes no closure or salvage decision. The off-pass Agent OS bridge
 uses this store's existing `append` API and acknowledges only a committed row.
 Replays retain the original sequence and event time.
+The `custodyFreshness(event, now)` projection returns non-fresh, unknown
+liveness and no terminal dirty worktree evidence when custody data is absent,
+so consumers can safely project heterogeneous event streams.
 
 Eligibility is not stored as mutable state. Consumers replay rows for one
 subject in `seq` order through `src/finalization/ledger-fold.mjs`, then pass the

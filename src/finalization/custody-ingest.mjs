@@ -14,8 +14,9 @@ export function ingestCustody(store, input) {
 
 /** A freshness projection only. It grants no ownership or merge authority. */
 export function custodyFreshness(event, now) {
+  const c = event?.custody;
+  if (!c) return { fresh: false, liveness: 'unknown', terminalDirtyWorktree: false };
   const age = Date.parse(now) - Date.parse(event.at);
-  const c = event.custody;
   const fresh = Number.isFinite(age) && age >= 0 && age <= c.freshnessSeconds * 1000;
   return {
     fresh,
@@ -37,7 +38,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   try {
     process.stdout.write(JSON.stringify(custodyIngestMain(process.argv.slice(2), readFileSync(0, 'utf8'))) + '\n');
   } catch (error) {
-    process.stderr.write(`custody append unavailable: ${error.name}\n`);
+    process.stderr.write(`custody append unavailable: ${error.message || error.name}\n`);
     process.exitCode = 1;
   }
 }

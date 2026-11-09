@@ -2041,7 +2041,9 @@ follows the absent-signal path and cannot suppress target hammer dispatch.
 The offline `ama-closer-dispatch-priority` fixtures verify target dispatch,
 lease outcome and one mismatch diagnostic; existing smoke promises are unchanged.
 
-[state-machines.json](state-machines.json) maps the six owned lifecycle objects.
+[state-machines.json](state-machines.json) declares owned lifecycle objects
+and related operational verification records, including launch custody
+freshness and queue maintenance holds.
 Final-round exact-head Comment-only reviews with non-blocking or demoted
 findings receive one durable builder fix-all round before findings closure.
 Its published head requires fresh full review: zero findings select normal

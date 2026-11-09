@@ -2050,6 +2050,15 @@ fallback. Pending fix-all work retains ownership through admission delays;
 conflict and CI-only repair keep their hammer routes. See the
 [closure runbook](docs/RUNBOOK-ama-closure.md#final-findings-remediation-through-the-builder-laneauto-01)
 for the state contract and SRE's natural-traffic acceptance procedure.
+MLR-13 adds launch custody observations with an explicit freshness bound and
+original source identity. These events grant no closure authority. The queue
+executor joins GSR through an original-token maintenance hold that fences
+claims and remote operation intents while preserving ambiguous work. Deploy
+the additive GSR schema and reload affected writers through the registered SRE
+procedure before activation; MLR-08 owns organic read-only custody receipts
+and the separately authorized drain rehearsal before canary. Existing smoke
+promises remain unchanged; bounded synthetic coverage is recorded in
+[the MLR-13 fragment](docs/changes/MLR-13.md).
 LAC-2092 keeps Linear incident acceptance with its external owner: live
 incident/severity labels and legacy leading SEV issue titles suppress terminal
 pipeline sync and stale reopening. Already-matched state sync skips label reads

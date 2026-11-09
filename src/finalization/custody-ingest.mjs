@@ -1,0 +1,43 @@
+// Agent OS off-pass producer bridge to the existing finalization append API.
+// One observation per invocation, acknowledged only after the app store commits.
+import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+import { makeFinalizationEvent } from './ledger-events.mjs';
+import { openFinalizationLedgerStore } from './ledger-store.mjs';
+
+export function ingestCustody(store, input) {
+  if (input?.type !== 'launch_custody_observed') throw new TypeError('custody event required');
+  const event = makeFinalizationEvent(input.type, input.subjectKey, input);
+  const appended = store.append(event);
+  return { idempotencyKey: appended.idempotencyKey, seq: appended.seq };
+}
+
+/** A freshness projection only. It grants no ownership or merge authority. */
+export function custodyFreshness(event, now) {
+  const age = Date.parse(now) - Date.parse(event.at);
+  const c = event.custody;
+  const fresh = Number.isFinite(age) && age >= 0 && age <= c.freshnessSeconds * 1000;
+  return {
+    fresh,
+    liveness: fresh ? c.launchLiveness ?? 'unknown' : 'unknown',
+    terminalDirtyWorktree: fresh && c.state === 'workspace'
+      && c.launchLiveness === 'terminal' && c.dirty === true,
+  };
+}
+
+export function custodyIngestMain(argv, input) {
+  if (argv.length !== 2 || argv[0] !== '--root') throw new Error('--root DIR required');
+  if (input.length > 65536) throw new Error('custody event too large');
+  const store = openFinalizationLedgerStore({ rootDir: argv[1] });
+  try { return ingestCustody(store, JSON.parse(input)); }
+  finally { store.close(); }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  try {
+    process.stdout.write(JSON.stringify(custodyIngestMain(process.argv.slice(2), readFileSync(0, 'utf8'))) + '\n');
+  } catch (error) {
+    process.stderr.write(`custody append unavailable: ${error.name}\n`);
+    process.exitCode = 1;
+  }
+}

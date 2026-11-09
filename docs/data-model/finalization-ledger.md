@@ -14,6 +14,17 @@ review verdicts, check-settlement observations, attestations, remediation
 dispatch/conclusion events, budget exhaustion, operator overrides, and terminal
 finalized/closed/escalated/halted marks.
 
+MLR-13 adds `launch_custody_observed`, pinned to repository/PR/head with a
+launch id, stable source/idempotency key and original event time. Its `custody`
+payload preserves requested, admitted, deferred/refused with reason, running,
+terminal and workspace observations. Worker-run terminal scope remains distinct
+from launch terminal scope. Workspace evidence carries worktree, branch, head,
+dirty (boolean or unknown), launch liveness and a freshness bound of at most
+180 seconds. A terminal dirty holder is evidence for the MLR-06 consumer;
+ingestion makes no closure or salvage decision. The off-pass Agent OS bridge
+uses this store's existing `append` API and acknowledges only a committed row.
+Replays retain the original sequence and event time.
+
 Eligibility is not stored as mutable state. Consumers replay rows for one
 subject in `seq` order through `src/finalization/ledger-fold.mjs`, then pass the
 projected state to `src/finalization/eligibility.mjs`.
@@ -81,6 +92,15 @@ No caller or lane is activated by this migration or by opening the store.
 | `finalization_queue_entry` | `entry_id`; unique `(repository, base, pr_number, admission_head, admission_generation)`; unique handoff, ack and readiness sequence within the lane; phase and JSON projection. |
 | `finalization_queue_event` | Global append `seq`, lane, event type, event time, JSON payload. Lane index orders replay. Events are append-only; projection writes and events commit in one immediate transaction. |
 | `finalization_queue_operation` | Globally unique operation id; lane, entry, owner/route generation, push/merge kind, immutable intent JSON and nullable result JSON. Null result means ambiguous, including a crash before invocation. |
+
+`migrations/20261109_finalization_queue_gsr.sql` adds
+`finalization_queue_gsr`: `singleton INTEGER PRIMARY KEY CHECK(singleton=1)`,
+`token TEXT NOT NULL`, and `at TEXT NOT NULL`. An absent row permits issuance.
+A maintenance row fences both claims and operation-intent creation in the same
+immediate transaction used by the queue writer. Only a matching original token
+can delete the row. Drain and resume retain entries and ambiguous operations;
+MGQ reconciliation still owns their outcomes. Status and steer return receipts
+without changing routing. A cold queue is held before a future lane can issue.
 
 Repository names normalize to lowercase. Base refs are case sensitive short
 branch refs; full `refs/*` aliases and malformed branch refs are rejected.

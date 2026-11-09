@@ -841,7 +841,8 @@ export type FinalizationEventType =
   | 'finalized'
   | 'closed'
   | 'escalated'
-  | 'halted';
+  | 'halted'
+  | 'launch_custody_observed';
 
 /**
  * One appended ledger observation. `at` is the event time (the ONLY way time
@@ -852,6 +853,16 @@ export type FinalizationEventType =
  */
 export interface FinalizationEvent {
   type: FinalizationEventType;
+  /** Agent OS source observation; interpreted by the custody consumer, not eligibility. */
+  custody?: {
+    repository: string;
+    prNumber: number;
+    launchRequestId: string;
+    state: string;
+    at: string;
+    freshnessSeconds: number;
+    [key: string]: unknown;
+  };
   subjectKey: SubjectKey;
   at: IsoTimestamp;
   seq?: number;

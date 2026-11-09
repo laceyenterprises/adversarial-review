@@ -4613,12 +4613,42 @@ cannot cancel another reader's work or extend its wait.
 History classification reads every paginated commit before deciding whether a
 hammer exists. Author-only and history-only classification skips file reconstruction;
 a hammer preservation decision still reconstructs both complete author and final
-snapshots. Immutable commit pages are reused within that reader. Directory traversal
-settles at most eight before/after subtree pairs per wave (16 GitHub requests),
-then diffs at most eight changed blob pairs at once. Equal subtrees remain skipped,
-truncated trees still fail closed, and sorted paths make evidence independent of
-request completion order. This reduces serial collection without changing the
-90-second budget, quota policy, live reads or cancellation ownership.
+snapshots. Immutable commit pages are reused within that reader. For roots with
+directories, HAMHISTORYTHROUGHPUT-02 first requests SHA-addressed recursive trees.
+A complete snapshot must explicitly report `truncated: false`, match the separately
+read root entries, have unique valid paths and ancestors, and reproduce every
+descendant Git tree SHA from its complete direct children (including modes).
+Missing or inconsistent evidence fails closed. An explicitly truncated recursive
+response falls back to the uncapped directory walker. Recursive transport failures
+(including exhausted request timeouts, HTTP 5xx and child-output overflow) also
+fall back, with a bounded warning naming the tree and failure. The fallback shares
+the remaining global budget; deadline exhaustion, abort, malformed JSON and
+permanent API refusals still propagate. A truncated nonrecursive tree still fails
+closed. Flat roots need no recursive request.
+Syntactically valid legacy object modes such as `100664` select the walker after
+root/path/ancestor validation, allowing it to skip unchanged legacy directories.
+Tree-SHA mismatches remain refusals: missing children cannot be distinguished from
+noncanonical stored tree encodings or lossily decoded non-UTF-8 names. Repositories
+containing those encodings can therefore lose history evidence even when the old
+walker would skip the affected directory; this compatibility limitation is retained
+to avoid accepting an incomplete recursive snapshot.
+The fallback settles at most eight before/after subtree pairs per wave (16 GitHub
+requests), skipping equal subtrees. Both paths then diff at most eight changed
+blob pairs at once. Immutable requests coalesce within the existing credential
+and cancellation boundaries; sorted paths make evidence independent of request
+completion order. Recursive output stays under the existing child-output limit.
+Recursive collection reads and validates the entire repository, including unchanged
+directories: normally two snapshots, or three for a hammer's primary/final proof.
+Copying, freezing, cache byte accounting and SHA reconstruction scale with total
+tree entries, whereas the walker scales with changed subtrees. The shared closure
+cache retains at most 16 MiB across reads; several multi-megabyte snapshots can
+evict other PRs' immutable evidence during the same tick. Output overflow selects
+the walker but does not prevent the cost of the initial attempt. No new size cap
+is introduced under the v1 freeze. The validation fixture covers 53 changed paths;
+large-repository latency and cache reuse are unmeasured, so request-count savings
+are not a repository-size-independent performance guarantee.
+This reduces request volume without changing the 90-second budget, quota policy,
+live provenance reads, reversal authorization or cancellation ownership.
 
 Cancellation reaches metadata, subtree, blob, retry and local proof work.
 Production history CLI/diff children run in an isolated process group, killed

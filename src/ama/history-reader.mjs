@@ -4,6 +4,7 @@ import { execHistoryFile, historyChildExecutor } from './history-child.mjs';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { execGhWithRetry, GH_LOOKUP_MAX_BUFFER } from '../gh-cli.mjs';
 import { HISTORY_CONTEXT_TIMEOUT_MS, historyReadErrorDetail, historyReadRetryDelayMs, historyReadTimeoutError, withHistoryReadBudget } from './history-read-policy.mjs';
 import { currentGitHubBudgetScope, withGitHubBudgetScope } from '../rate-limit-throttle.mjs';
@@ -78,9 +79,92 @@ export function createHistoryReader(options = {}) {
   };
   const filesBetween = async (repo, base, head) => {
     const changed = [];
+    // A complete recursive snapshot coalesces directory reads. Inspect roots
+    // first: flat histories need no extra request, and truncated recursive
+    // responses must fall back to the uncapped subtree walker below.
+    const snapshot = async ref => {
+      if (!ref) return new Map();
+      const root = await tree(repo, ref);
+      if (![...root.values()].some(entry => entry.type === 'tree')) return root;
+      let data;
+      try {
+        data = await cached(`repos/${repo}/git/trees/${ref}?recursive=1`,
+          '{tree: [.tree[] | {path, mode, type, sha}], truncated}');
+      } catch (error) {
+        // The recursive endpoint is an optimization. A smaller subtree read
+        // may still succeed after transport retries or output overflow, but
+        // cancellation, the shared deadline and malformed JSON stay terminal.
+        remainingMs();
+        const cause = error.cause || error;
+        if (cause instanceof SyntaxError || cause.code === 'HISTORY_READ_TIMEOUT'
+          || cause.name === 'AbortError' || cause.code === 'ABORT_ERR'
+          || !(cause.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || cause.code === 'ENOBUFS'
+            || historyReadRetryDelayMs(cause, 0) !== null)) throw error;
+        console.warn(`history recursive tree ${ref}: falling back to walker: ${historyReadErrorDetail(cause)}`);
+        return null;
+      }
+      if (data.truncated === true) return null;
+      if (data.truncated !== false || !Array.isArray(data.tree)) throw new Error(`incomplete recursive tree ${ref}`);
+      const entries = new Map();
+      const children = new Map();
+      let unsupportedMode = false;
+      for (const entry of data.tree) {
+        remainingMs();
+        if (typeof entry.path !== 'string' || !entry.path || entry.path.split('/').some(part => !part || part === '.' || part === '..')
+          || entries.has(entry.path) || !/^[0-9a-f]{40}$/i.test(entry.sha || '')
+          || !['tree', 'blob', 'commit'].includes(entry.type)
+          || typeof entry.mode !== 'string' || !/^[0-7]{6}$/.test(entry.mode)) throw new Error(`invalid recursive tree ${ref}`);
+        if (!({ tree: ['040000'], blob: ['100644', '100755', '120000'], commit: ['160000'] })[entry.type].includes(entry.mode)) unsupportedMode = true;
+        entries.set(entry.path, entry);
+      }
+      for (const [path, entry] of entries) {
+        remainingMs();
+        const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : null;
+        if (parent && entries.get(parent)?.type !== 'tree') throw new Error(`incomplete recursive tree ${ref}`);
+        if (parent) {
+          if (!children.has(parent)) children.set(parent, []);
+          children.get(parent).push(entry);
+        }
+        if (!parent) {
+          const original = root.get(path);
+          if (!original || original.sha !== entry.sha || original.mode !== entry.mode || original.type !== entry.type) {
+            throw new Error(`inconsistent recursive tree ${ref}`);
+          }
+        }
+      }
+      for (const name of root.keys()) if (!entries.has(name)) throw new Error(`incomplete recursive tree ${ref}`);
+      // Legacy modes cannot be rebuilt canonically. The existing walker can
+      // still skip equal directories without interpreting their stored bytes.
+      if (unsupportedMode) {
+        console.warn(`history recursive tree ${ref}: falling back to walker: unsupported object mode`);
+        return null;
+      }
+      // Rebuild every descendant tree object. The server's completeness marker
+      // alone cannot detect an omitted child; its immutable parent SHA can.
+      for (const [path, entry] of entries) if (entry.type === 'tree') {
+        remainingMs();
+        const rows = (children.get(path) || []).map(child => {
+          const name = child.path.slice(path.length + 1);
+          return { key: Buffer.from(`${name}${child.type === 'tree' ? '/' : ''}`),
+            bytes: Buffer.concat([Buffer.from(`${child.mode.replace(/^0+/, '')} ${name}\0`), Buffer.from(child.sha, 'hex')]) };
+        }).sort((a, b) => Buffer.compare(a.key, b.key));
+        const body = Buffer.concat(rows.map(row => row.bytes));
+        const digest = createHash('sha1').update(`tree ${body.length}\0`).update(body).digest('hex');
+        if (digest !== entry.sha) throw new Error(`incomplete recursive tree ${ref}: ${path}`);
+      }
+      remainingMs();
+      return new Map([...entries].filter(([, entry]) => entry.type !== 'tree'));
+    };
+    const [beforeSnapshot, afterSnapshot] = await Promise.all([snapshot(base), snapshot(head)]);
+    if (beforeSnapshot && afterSnapshot) {
+      for (const path of new Set([...beforeSnapshot.keys(), ...afterSnapshot.keys()])) {
+        const a = beforeSnapshot.get(path), b = afterSnapshot.get(path);
+        if (a?.sha !== b?.sha || a?.mode !== b?.mode) changed.push({ path, a, b });
+      }
+    }
     // Process independent directories in bounded waves. A depth-first await
     // serialized every sibling subtree before any blobs could be read.
-    const pending = [{ beforeRef: base, afterRef: head, prefix: '' }];
+    const pending = beforeSnapshot && afterSnapshot ? [] : [{ beforeRef: base, afterRef: head, prefix: '' }];
     while (pending.length) {
       const wave = pending.splice(0, 8);
       const settled = await Promise.allSettled(wave.map(async ({ beforeRef, afterRef, prefix }) => {

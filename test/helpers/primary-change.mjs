@@ -81,7 +81,7 @@ export function primaryRenameRepository(t, { changed = false, deleted = false,
       data = { status: from === to ? 'identical' : 'ahead', total_commits: commits.length, commits,
         merge_base_commit: { sha: git('merge-base', from, to) } };
     } else if (path.includes('/git/trees/')) data = { truncated: false,
-      tree: git('ls-tree', path.split('/git/trees/')[1]).split('\n').filter(Boolean).map(line => {
+      tree: git('ls-tree', ...(path.endsWith('?recursive=1') ? ['-r', '-t'] : []), path.split('/git/trees/')[1].split('?')[0]).split('\n').filter(Boolean).map(line => {
         const [, mode, type, sha, path] = /^(\d+) (\S+) (\S+)\t(.+)$/.exec(line);
         return { mode, type, sha, path };
       }) };

@@ -87,8 +87,6 @@ test('policy and evidence refusals keep their terminal and deferral exits', () =
     [{ ...review, commit_id: 'b'.repeat(40) }, ci, 'review-evidence-invalid'],
     [{ ...review, user: { login: 'synthetic-author' } }, ci, 'review-evidence-invalid'],
     [review, { ...blocking, findingNumber: 99 }, 'finding-evidence-invalid'],
-    [review, { ...blocking, endLine: 3 }, 'not-covered-by-cited-finding'],
-    [review, { ...blocking, path: 'src/other.mjs' }, 'not-covered-by-cited-finding'],
     [{ ...review, body: review.body.replace('**Lines:** 2', '**Lines:** unknown') }, blocking, 'finding-lines-unreadable: \"unknown\"'],
   ]) {
     const result = checkHammerEditPlan(candidate, plan, { strictNonBlockingRemediation: true });

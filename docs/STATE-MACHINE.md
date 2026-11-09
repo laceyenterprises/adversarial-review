@@ -2297,6 +2297,11 @@ Key control points:
   A valid cited non-blocking `in-place` plan instead receives correctable
   shape feedback (exit 21) to re-plan as `additive`, in either strict mode.
   This never permits a non-blocking in-place edit.
+  An otherwise authorized `author-lines` plan outside its finding's cited ranges
+  receives exit 21 with those ranges. Within the existing one-correction budget,
+  re-plan within a cited range or as `additive` without removing or replacing
+  author lines. The uncovered author-line plan never allows an edit; terminal
+  evidence and policy outcomes remain unchanged.
   HAMLINES-01 reads all cited ranges, including legacy approximate,
   multi-range and symbol-qualified forms; approximate endpoints stay exact.
   Leading range lists stop before explanatory notes; numbers in prose or symbol

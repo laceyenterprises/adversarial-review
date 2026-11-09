@@ -135,11 +135,12 @@ test('untrusted, stale, malformed and uncovered evidence never permits an author
     [{ ...review, user: { login: 'synthetic-author' } }, plan],
     [review, { ...plan, kind: 'unknown' }],
     [review, { ...plan, findingNumber: 2 }],
-    [review, { ...plan, endLine: 3 }],
-    [review, { ...plan, path: 'src/other.mjs' }],
     [{ ...review, body: body.replace('**Lines:** 2', '**Lines:** unknown') }, plan],
   ]) {
     assert.equal(checkHammerEditPlan(candidate, edit, { strictNonBlockingRemediation: true }).action, 'stop');
+  }
+  for (const edit of [{ ...plan, endLine: 3 }, { ...plan, path: 'src/other.mjs' }]) {
+    assert.equal(checkHammerEditPlan(review, edit, { strictNonBlockingRemediation: true }).action, 'correct');
   }
 });
 

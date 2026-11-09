@@ -324,6 +324,9 @@ forced launch, ledger mutation or new smoke step is authorized by this change.
 
 ## Change notes
 
+- **HAMEDITPLAN-04:** An otherwise admissible `author-lines` plan outside the
+  cited finding's ranges receives exit 21 with those ranges and re-planning
+  guidance. It never permits the uncovered edit; exit 1 remains terminal.
 - **HAMEDITPLAN-03:** A cited non-blocking `in-place` plan is a correctable
   shape error (exit 21). Re-plan as `additive`; in-place permission is unchanged.
 
@@ -4865,6 +4868,13 @@ Re-plan as `additive`; this grants no in-place permission, even in strict mode
 or with `requiredCiRepair`. Missing or invalid finding citations remain terminal.
 Blocking cited in-place CI plans retain their citations and are evaluated for
 policy and readable finding evidence before shape correction.
+An otherwise well-formed, authorized `author-lines` plan outside the cited
+finding's ranges receives exit 21 with
+`correctable: plan region <path>:<start>-<end> is outside the cited finding's ranges <list>; re-plan within a cited range, or as editKind=additive if no existing author line is removed or replaced`.
+The list includes each cited path and range for that finding. Re-plan within
+one cited range or use a genuinely additive fix within the same correction
+budget. The uncovered author-line edit is never allowed. Missing authority,
+unreadable finding ranges and other policy refusals retain their outcomes.
 Review evidence and policy refusals retain their terminal or deferring outcomes.
 Exit 0 allows the planned edit; exit 20 means no edit:
 the shell prints NO EDIT and exits 20; the advisory finding was captured in the existing findings backlog with a one-line

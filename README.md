@@ -2841,6 +2841,10 @@ never a conflict) before any edit; a second shape refusal exits 1. Cited plans
 retain their citations during correction; policy refusals retain their existing
 outcomes. A valid cited non-blocking `in-place` plan is a shape error: on exit 21,
 re-plan as `additive`. Non-blocking findings never permit in-place edits.
+An otherwise authorized `author-lines` plan outside its cited ranges also receives
+exit 21, naming those ranges. Re-plan within a cited range or as `additive` if no
+existing author line is removed or replaced; uncovered author-line edits remain
+disallowed.
 The CLI takes the controller-pinned head via `--reviewed-head SHA`
 (or `HAM_REVIEWED_SHA`), fills omitted, non-string or empty plan heads, and rejects
 malformed heads or heads that differ from the cited review's `commit_id`.

@@ -44,8 +44,8 @@ test('CI citation fields and malformed locations refuse correctably without gran
   const rootDir = mkdtempSync(join(tmpdir(), 'hameditplan-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const planFile = join(rootDir, 'plan.json');
-  for (const fields of [{ kind: 'blocking' }, { findingNumber: 1 },
-    { kind: 'non-blocking', findingNumber: 1 }, { path: '' }, { startLine: 0 }, { endLine: undefined }]) {
+  for (const fields of [{ kind: 'blocking', findingNumber: 1 },
+    { editKind: 'in_place' }, { editKind: undefined }, { path: '' }, { startLine: 0 }, { endLine: undefined }]) {
     writeFileSync(planFile, JSON.stringify({ ...ci, ...fields }));
     const result = await main(['sample/service', '7', '1', planFile], {
       rootDir, readReviewImpl: async () => review,
@@ -78,20 +78,52 @@ test('policy and evidence refusals keep their terminal and deferral exits', () =
   assert.equal(editPlanExitCode(checkHammerEditPlan(review, ci)), 0);
 });
 
-test('template procedure permits one shape correction and never continues past a terminal refusal', t => {
+test('cited CI plans retain policy refusals and backlog capture through main', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hameditplan-policy-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const planFile = join(rootDir, 'plan.json');
+  for (const [candidate, fields, action] of [
+    [review, { kind: 'non-blocking', findingNumber: 1 }, 'defer'],
+    [{ ...review, body: review.body.replace('**Lines:** 2', '**Lines:** unknown') },
+      { kind: 'blocking', findingNumber: 1 }, 'stop'],
+    [review, { kind: 'blocking' }, 'stop'],
+    [review, { findingNumber: 1 }, 'stop'],
+  ]) {
+    writeFileSync(planFile, JSON.stringify({ ...ci, ...fields }));
+    const captures = [];
+    const result = await main(['sample/service', '7', '1', planFile], {
+      rootDir, readReviewImpl: async () => candidate,
+      loadPolicy: () => ({ strictNonBlockingRemediation: false }),
+      assertOwner: () => {}, captureImpl: capture => captures.push(capture),
+    });
+    assert.equal(result.action, action);
+    assert.equal(editPlanExitCode(result), action === 'defer' ? 20 : 1);
+    assert.equal(captures.length, action === 'defer' ? 1 : 0);
+    if (action === 'defer') assert.equal(captures[0].deferredFinding.findingNumber, 1);
+    else if (fields.findingNumber && fields.kind) assert.match(result.reason, /finding-lines-unreadable/);
+  }
+  const corrected = checkHammerEditPlan(review, { ...ci, kind: 'blocking', findingNumber: 1 });
+  assert.equal(corrected.action, 'correct');
+  assert.match(corrected.message, /retain kind and findingNumber/);
+  assert.equal(checkHammerEditPlan(review, { ...ci, kind: 'blocking', findingNumber: 1,
+    requiredCiRepair: undefined }).action, 'allow');
+});
+
+test('template itself exits without editing on first and repeated shape refusals', t => {
   const block = template.match(/```bash\n(HAM_EDIT_CORRECTION_FILE=[\s\S]+?)\n```/)[1];
   const executable = block.replace(/\/usr\/bin\/perl[^\n]+\n[^\n]+/, 'mock_check || HAM_EDIT_RC=$?');
-  for (const [codes, expectedExit, expectedCalls] of [
-    [[21, 0], 0, 2], [[21, 21], 21, 2], [[1, 0], 1, 1], [[20], 0, 1], [[78], 78, 1],
+  for (const [codes, expectedExits] of [
+    [[21, 0], [21, 0]], [[21, 21], [21, 1]], [[1], [1]], [[20], [0]], [[78], [78]],
   ]) {
     const runDir = mkdtempSync(join(tmpdir(), 'hameditplan-shell-'));
     t.after(() => rmSync(runDir, { recursive: true, force: true }));
     const runnable = executable.replaceAll('<<RUN_DIR>>', runDir);
-    const script = `calls=0\nmock_check() { calls=$((calls + 1)); echo called; case "$calls" in\n`
-      + codes.map((code, i) => `${i + 1}) return ${code};;`).join('\n')
-      + `\nesac; }\n${runnable}\nif [ "$HAM_EDIT_RC" = 21 ]; then\n${runnable}\nfi\n`;
-    const result = spawnSync('bash', ['-c', script], { encoding: 'utf8', timeout: 5000 });
-    assert.equal(result.status, expectedExit, result.stderr);
-    assert.equal(result.stdout.trim().split('\n').length, expectedCalls);
+    for (const [i, code] of codes.entries()) {
+      const script = `mock_check() { return ${code}; }\n${runnable}\nif [ "$HAM_EDIT_RC" = 0 ]; then echo EDIT; fi\n`;
+      const result = spawnSync('bash', ['-c', script], { encoding: 'utf8', timeout: 5000 });
+      assert.equal(result.status, expectedExits[i], result.stderr);
+      assert.equal(result.stdout.includes('\nEDIT') || result.stdout.startsWith('EDIT'), code === 0);
+      if (code === 21) assert.match(result.stdout, /NO EDIT:/);
+    }
   }
 });

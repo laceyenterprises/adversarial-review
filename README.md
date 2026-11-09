@@ -2829,9 +2829,10 @@ approved disposable offline safe canary of deployed code; it does not inspect
 live queues, credentials or running daemon freshness. This worker does not run
 host mode. Node dependencies and local Git must already be installed.
 
-The hammer edit-plan helper permits one shape correction (exit 21) before any
-edit; policy refusals retain their existing outcomes. After the submodule float
-and follow-up/watcher restart, SRE verifies the CI-repair closer activation
+The hammer edit-plan helper permits one shape correction per run (exit 21,
+never a conflict) before any edit; a second shape refusal exits 1. Cited plans
+retain their citations during correction; policy refusals retain their existing
+outcomes. After the submodule float and follow-up/watcher restart, SRE verifies the CI-repair closer activation
 receipt declared in `post-merge-verify.json` and the
 [closure runbook](docs/RUNBOOK-ama-closure.md). Existing smoke commands are unchanged.
 

@@ -4770,7 +4770,11 @@ In-place repairs preserve behavior; they do not grant reversal authority.
 The literal shapes are in `templates/hammer-prompt.md`.
 The helper reads the review and effective policy and shares `checkReversalFinding`
 with the primary-change gate. Exit 21 is a shape-only refusal with an expected-shape message: make no edit,
-correct the plan once and rerun the helper. A second shape refusal stops.
+correct the plan once and rerun the helper. The prompt permits one correction
+per run across all plans; a second shape refusal exits 1. Exit 21 here is never
+a verify-head or wait-CI conflict. The first shape refusal exits the shell block
+without editing. Cited in-place CI plans retain their citations and are evaluated for
+policy and readable finding evidence before shape correction.
 Review evidence and policy refusals retain their terminal or deferring outcomes.
 Exit 0 allows the planned edit; exit 20 means no edit:
 the advisory finding was captured in the existing findings backlog with a one-line

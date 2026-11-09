@@ -20,20 +20,16 @@ export function checkHammerEditPlan(review, plan, { strictNonBlockingRemediation
     findings: { blocking: parseBlockingFindingsSection(review.body),
       'non-blocking': parseNonBlockingFindingsSection(review.body) } };
   if (!['request-changes', 'approved', 'comment-only'].includes(parsed.verdict)) return refuse('finding-evidence-invalid');
-  if (plan.editKind === 'in-place' && plan.requiredCiRepair === true
-    && (plan.kind !== undefined || plan.findingNumber !== undefined)) {
-    return correct('edit-kind-invalid',
-      'uncited CI repair requires editKind: in-place, requiredCiRepair: true, reviewedHead, path, startLine and endLine; omit kind and findingNumber.');
-  }
-  if (plan.editKind === 'in-place') {
-    if (!locationValid()) return correct('edit-location-invalid',
-      'supply a nonempty path and integer reviewed coordinates 1 <= startLine <= endLine.');
-    // This class never grants reversal authority. Advisory edits must still
-    // take the normal deferral path, even when they would preserve the hunk.
-    const requiredRepair = plan.kind === 'blocking'
-      && checkReversalFinding(parsed, 'blocking', plan.findingNumber, strictNonBlockingRemediation).ok;
-    const uncitedCiRepair = plan.kind === undefined && plan.findingNumber === undefined && plan.requiredCiRepair === true;
-    if (requiredRepair || uncitedCiRepair) return { action: 'allow', reason: 'in-place-repair' };
+  const uncitedCiRepair = plan.kind === undefined && plan.findingNumber === undefined && plan.requiredCiRepair === true;
+  if (uncitedCiRepair) {
+    if (!['author-lines', 'additive', 'in-place'].includes(plan.editKind)) {
+      return correct('edit-kind-invalid', 'editKind must be author-lines, additive or in-place.');
+    }
+    if (plan.editKind === 'in-place') {
+      if (!locationValid()) return correct('edit-location-invalid',
+        'supply a nonempty path and integer reviewed coordinates 1 <= startLine <= endLine.');
+      return { action: 'allow', reason: 'in-place-repair' };
+    }
   }
   if (!['blocking', 'non-blocking'].includes(plan.kind)
     || !Number.isSafeInteger(plan.findingNumber) || plan.findingNumber < 1
@@ -48,7 +44,14 @@ export function checkHammerEditPlan(review, plan, { strictNonBlockingRemediation
     return { action: plan.kind === 'non-blocking' && admissible.reason === 'finding-kind-not-authorizing'
       ? 'defer' : 'stop', reason: admissible.reason };
   }
-  if (plan.editKind === 'in-place') return refuse('edit-kind-invalid');
+  if (plan.editKind === 'in-place') {
+    if (plan.requiredCiRepair === true) return correct('edit-kind-invalid',
+      'use the cited repair shape without requiredCiRepair; retain kind and findingNumber.');
+    if (plan.kind !== 'blocking') return refuse('edit-kind-invalid');
+    if (!locationValid()) return correct('edit-location-invalid',
+      'supply a nonempty path and integer reviewed coordinates 1 <= startLine <= endLine.');
+    return { action: 'allow', reason: 'in-place-repair' };
+  }
   if (!locationValid()) return correct('edit-location-invalid',
     'supply a nonempty path and integer reviewed coordinates 1 <= startLine <= endLine.');
   if (!admissible.locations.some(location => location.path === plan.path

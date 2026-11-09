@@ -56,6 +56,12 @@
           "body",
           "url"
         ],
+        "reviewContextLimits": {
+          "maxEntries": 50,
+          "maxBodyChars": 2000,
+          "maxUrlChars": 2048,
+          "selection": "most recent update/submission/creation time; undated entries first in source order"
+        },
         "identity": [
           "repo",
           "prNumber",

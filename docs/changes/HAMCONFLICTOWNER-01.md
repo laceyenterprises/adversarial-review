@@ -44,7 +44,34 @@ the matching job's `closureHandoff` into `remediation.job` in the shared
 next-action snapshot. It must retain that pending owner instead of dispatching
 another closer. No private repository is changed here.
 
+## Rescue remediation (PR 1790)
+
+Closeout compares published commit SHAs case-insensitively, including its
+retry and final-push decisions. Conflict handoffs still require full review
+on the last allowed round when Git and GitHub use different hex casing.
+Saved review context keeps the 50 most recent nonblank entries across sources,
+with bodies limited to 2,000 characters and URLs to 2,048 characters. Truncated
+bodies end in an ellipsis; discussion links retain access to omitted context.
+The job shape and round budgets are unchanged.
+
 ## Verification
+
+Rescue remediation:
+
+- Bounded `npm test -- test/hamconflictowner-01.test.mjs
+  test/remediation-closeout-next-action.test.mjs test/closer-next-action.test.mjs
+  test/watcher-claim-loop.test.mjs`: 321 passed, zero failures. Coverage includes
+  mixed-case published heads on green and pending CI at the final round, and
+  bounded recent context across sources/pages in both the stored job and prompt.
+- `npm run lint`: zero errors (152 existing warnings); changed-file ESLint
+  `--fix`, `npm run typecheck:contracts`, catalog validation, the offline
+  research walkthrough and `git diff --check`: passed.
+
+- Full bounded `npm test`: exited nonzero; output includes failures in the
+  untouched `test/follow-up-remediation.test.mjs` local OAuth startup fixtures
+  (`inherited HOME does not satisfy the requested local OAuth owner contract`).
+  This run does not establish a green full-suite result; scoped tests above
+  remain green. No unrelated runtime/authentication code was changed.
 
 Final comment-only round:
 

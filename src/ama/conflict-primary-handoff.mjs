@@ -11,6 +11,28 @@ import { meteredExecFile } from '../metered-gh.mjs';
 
 export const CONFLICT_PRIMARY_HANDOFF_REASON = 'conflict-primary-unproven';
 const execFileAsync = promisify(execFile);
+const MAX_CONTEXT_ENTRIES = 50;
+const MAX_CONTEXT_BODY_CHARS = 2000;
+const MAX_CONTEXT_URL_CHARS = 2048;
+
+function boundedReviewContext(entries) {
+  // Sort across all three sources. Undated entries retain their source order
+  // before dated entries; stable sorting also preserves equal-time ordering.
+  const timestamp = entry => Date.parse(entry.updated_at || entry.updatedAt
+    || entry.submittedAt || entry.created_at || entry.createdAt || '') || 0;
+  return entries
+    .filter(entry => typeof entry.body === 'string' && entry.body.trim())
+    .sort((a, b) => timestamp(a) - timestamp(b))
+    .slice(-MAX_CONTEXT_ENTRIES)
+    .map(entry => {
+      const url = entry.html_url || entry.url;
+      return {
+        body: entry.body.length > MAX_CONTEXT_BODY_CHARS
+          ? `${entry.body.slice(0, MAX_CONTEXT_BODY_CHARS - 1)}…` : entry.body,
+        url: typeof url === 'string' ? url.slice(0, MAX_CONTEXT_URL_CHARS) : null,
+      };
+    });
+}
 
 function existingJob(rootDir, duplicate) {
   if (!duplicate?.jobId) return null;
@@ -107,9 +129,7 @@ export async function handoffConflictPrimary({
     branch: pr.headRefName, baseBranch: pr.baseRefName, builderTag,
     reviewBody: conflictPrimaryWorkOrder(headSha), reviewPostedAt: now,
     closureHandoff: { reason: CONFLICT_PRIMARY_HANDOFF_REASON, headSha, review: 'full',
-      reviewContext: [...(pr.reviews || []), ...(pr.comments || []), ...reviewComments]
-        .filter(entry => typeof entry.body === 'string' && entry.body.trim())
-        .map(entry => ({ body: entry.body, url: entry.html_url || entry.url || null })) },
+      reviewContext: boundedReviewContext([...(pr.reviews || []), ...(pr.comments || []), ...reviewComments]) },
   });
   const job = result.job || existingJob(rootDir, result.duplicateOf);
   return handoffReceipt(job, headSha, now);

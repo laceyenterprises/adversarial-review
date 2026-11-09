@@ -19,8 +19,10 @@ export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha
   const roundsLeft = job.finalRound === 'comment-only' ? false : Number.isFinite(max) ? round < max : null;
   const final = roundsLeft === false;
   const head = headSha || lifecycle?.headSha || job.revisionRef;
+  const workerPublishedHead = Boolean(workerPushedHeadSha && head)
+    && String(workerPushedHeadSha).toLowerCase() === String(head).toLowerCase();
   const fullReviewRequired = job.closureHandoff?.reason === 'conflict-primary-unproven'
-    && job.closureHandoff.review === 'full' && workerPushedHeadSha === head
+    && job.closureHandoff.review === 'full' && workerPublishedHead
     && String(head).toLowerCase() !== String(job.revisionRef).toLowerCase();
   let leases = snapshot?.observations?.leases;
   if (!leases) {
@@ -70,7 +72,7 @@ export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha
   // existing retry path. Completing that owner here would strand legacy jobs
   // whose review head is missing before reconciliation can requeue them.
   const retryActiveJob = roundsLeft === true && job.status === 'in_progress'
-    && workerPushedHeadSha !== head && checkReadState === 'complete' && ciGate.state === 'failed';
+    && !workerPublishedHead && checkReadState === 'complete' && ciGate.state === 'failed';
   // The normalized observer conclusion is pending, while the original read
   // state stays explicit in both the snapshot and the decision's evidence refs.
   const checks = { state: 'complete', value: checksValue,
@@ -95,7 +97,7 @@ export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha
           // This is the selected retry successor, not the finished worker's
           // liveness. Reconciliation requeues it through the bounded retry path.
           live: retryActiveJob },
-        ...(final && !fullReviewRequired && workerPushedHeadSha === head ? { finalPush: { headSha: head, suppressed: true } } : {}) },
+        ...(final && !fullReviewRequired && workerPublishedHead ? { finalPush: { headSha: head, suppressed: true } } : {}) },
       checks, leases, launches, policy,
       ...((lease?.terminalOutcome === 'succeeded' || receipt?.terminalOutcome === 'succeeded' || receipt?.outcome === 'succeeded')
         ? { progress: { ...snapshot?.observations?.progress?.value,

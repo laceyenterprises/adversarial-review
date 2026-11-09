@@ -118,16 +118,52 @@ test('unproven stop queues one runnable builder-tag remediation and transfers th
   // Even the final allowed push must return to normal full review, rather
   // than becoming the suppressed-final-push hammer shortcut.
   for (const state of ['green', 'pending']) {
-    const closeout = remediationCloseout({ rootDir: f.rootDir,
-      job: { ...claimed.job, remediationPlan: { ...claimed.job.remediationPlan,
-        currentRound: claimed.job.remediationPlan.maxRounds } },
-      snapshot: shared().snapshot, completedAt: AT, headSha: NEXT, workerPushedHeadSha: NEXT,
-      lifecycle: { prState: 'OPEN', headSha: NEXT, mergeable: 'MERGEABLE' },
-      ciGate: { state, headSha: NEXT } });
-    assert.equal(closeout.snapshot.observations.remediation.value.finalPush, undefined);
-    assert.equal(closeoutRereview(closeout).requested, true);
-    assert.equal(closeout.decision.action, state === 'green' ? 'review' : 'wait-for-CI');
+    for (const pushedHead of [NEXT, NEXT.toUpperCase()]) {
+      const closeout = remediationCloseout({ rootDir: f.rootDir,
+        job: { ...claimed.job, remediationPlan: { ...claimed.job.remediationPlan,
+          currentRound: claimed.job.remediationPlan.maxRounds } },
+        snapshot: shared().snapshot, completedAt: AT, headSha: NEXT, workerPushedHeadSha: pushedHead,
+        lifecycle: { prState: 'OPEN', headSha: NEXT, mergeable: 'MERGEABLE' },
+        ciGate: { state, headSha: NEXT } });
+      assert.equal(closeout.snapshot.observations.remediation.value.finalPush, undefined);
+      assert.equal(closeout.snapshot.observations.remediation.value.fullReviewRequired, true);
+      assert.equal(closeoutRereview(closeout).requested, true);
+      assert.equal(closeout.decision.action, state === 'green' ? 'review' : 'wait-for-CI');
+    }
   }
+});
+
+test('handoff bounds recent context across sources and pages before saving the job and prompt', async t => {
+  const f = fixture(t);
+  const comment = index => ({ body: `${index}:` + 'x'.repeat(3000),
+    updated_at: new Date(Date.parse(AT) + index * 1000).toISOString(),
+    html_url: `https://example.test/discussion/${index}`, url: 'https://api.example.test/comment' });
+  const result = await handoffConflictPrimary({ ...f.args,
+    execFileImpl: async (bin, args) => {
+      if (args[0] === 'api') return { stdout: JSON.stringify([
+        Array.from({ length: 40 }, (_, i) => comment(i)),
+        Array.from({ length: 40 }, (_, i) => comment(i + 40)),
+      ]) };
+      const pr = JSON.parse((await f.args.execFileImpl(bin, args)).stdout);
+      return { stdout: JSON.stringify({ ...pr, reviews: [comment(81)],
+        comments: [{ ...comment(80), html_url: 'u'.repeat(3000) }, { body: '  ' }] }) };
+    } });
+  const job = readFollowUpJob(join(getFollowUpJobDir(f.rootDir, 'pending'), `${result.remediation.jobId}.json`));
+  const context = job.closureHandoff.reviewContext;
+  assert.equal(context.length, 50);
+  assert.match(context[0].body, /^32:/);
+  assert.match(context.at(-1).body, /^81:/, 'recent review summary survives older inline comments');
+  for (const entry of context) {
+    assert.equal(entry.body.length, 2000);
+    assert.ok(entry.body.endsWith('…'));
+    assert.ok(entry.url.length <= 2048);
+  }
+  assert.equal(context[0].url, 'https://example.test/discussion/32');
+  assert.equal(context.at(-2).url.length, 2048);
+  const prompt = buildRemediationPrompt(job, { template: 'Synthetic remediation template.',
+    remediationReplyPath: join(f.rootDir, 'reply.json') });
+  assert.ok(prompt.includes(JSON.stringify(context)));
+  assert.ok(!prompt.includes('x'.repeat(2000)), 'full bodies cannot reach the prompt');
 });
 
 test('repeated and concurrent stops on the same head deduplicate even after terminal settlement', async t => {

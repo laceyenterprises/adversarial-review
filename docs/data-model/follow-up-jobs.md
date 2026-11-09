@@ -17,6 +17,11 @@ summaries, PR issue comments and inline diff comments, passed as untrusted data
 to the remediation prompt. Inline comments are read through the paginated
 GitHub REST pull-request comments endpoint because `gh pr view --json` does
 not expose them. Their `html_url` preserves the discussion anchor in `url`.
+Before saving the job, context is sorted by update/submission/creation time
+(undated entries retain source order before dated entries) and limited to the
+50 most recent nonblank entries across all sources. Bodies are capped at 2,000
+characters including a trailing ellipsis when truncated; URLs at 2,048
+characters. Discussion links allow the worker to retrieve omitted context.
 An unavailable or malformed inline-comment read retains the stop for retry
 without enqueueing partial context. Existing
 builder-tag routing, account selection, leases and consumer admission apply.
@@ -24,7 +29,8 @@ This is a new bounded conflict work order, without the prior comment-only
 final-round marker or inherited spent finding-round count. Its required
 resolution is a new pushed head followed by normal full review and full-range
 validation. A published conflict-remediation head retains this requirement
-even at the last allowed round: closeout omits the suppressed final-push
+even at the last allowed round, comparing the published SHA without regard to
+hex casing: closeout omits the suppressed final-push
 shortcut, and `fullReviewRequired` in its remediation observation retains
 review intent while CI is pending. The round budget itself is unchanged.
 

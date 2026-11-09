@@ -240,10 +240,10 @@ test('every concrete hammer prompt helper call executes against the real helper 
   const usage = await f.execute('"$HAM_NODE_BIN" "$HAM_ROOT_DIR/bin/hammer-edit-plan.mjs" --help');
   assert.equal(usage.error, undefined, usage.stderr);
   assert.equal(usage.status, 0, usage.stderr);
-  const plans = documentedExamples(usage.stdout).json.filter(({ value }) => value.reviewedHead);
+  const plans = documentedExamples(usage.stdout).json.filter(({ value }) => value.editKind);
   assert.ok(plans.length >= 4);
   for (const { value } of json) {
-    if (value.reviewedHead) continue;
+    if (value.editKind || value.reviewedHead) continue;
     if (value.active === true && value.commit && value.auditComment) {
       // The claim is a schema example; resolve its literal explanatory values
       // without manufacturing or removing any fields.

@@ -12,8 +12,13 @@ enqueue stale work and unavailable provenance retains the stop for retry.
 The ordinary queue record is the durable ownership receipt: `repo`,
 `prNumber`, `revisionRef`, `jobId`, `status`, `builderTag` and optional
 `closureHandoff: { reason: "conflict-primary-unproven", headSha, review: "full",
-reviewContext: [{ body, url }] }`. The context contains host-read reviews and
-comments, passed as untrusted data to the remediation prompt. Existing
+reviewContext: [{ body, url }] }`. The context contains host-read review
+summaries, PR issue comments and inline diff comments, passed as untrusted data
+to the remediation prompt. Inline comments are read through the paginated
+GitHub REST pull-request comments endpoint because `gh pr view --json` does
+not expose them. Their `html_url` preserves the discussion anchor in `url`.
+An unavailable or malformed inline-comment read retains the stop for retry
+without enqueueing partial context. Existing
 builder-tag routing, account selection, leases and consumer admission apply.
 This is a new bounded conflict work order, without the prior comment-only
 final-round marker or inherited spent finding-round count. Its required
@@ -31,6 +36,10 @@ work-order edit, review edit or base advance creates no second remediation at
 that head. Ordinary posted-review deduplication retains its existing body
 digest. A new head is new work. Read-only lookup recovers an existing receipt
 before any GitHub read, so a later transport outage cannot hide its owner.
+Archived receipts read the historical job from `stopped-archived/<YYYY-MM>/`,
+preserving `createdAt`, `claimedAt`, `lastHeartbeatAt` and `remediationWorker`
+when present. The returned observation retains `status: "stopped-archived"`
+and `live: false`; archival grants no worker custody.
 
 The shared next-action reader consumes `remediation.job.closureHandoff`,
 `headSha`, `jobId` and `status`. A matching pending job selects `remediate` /

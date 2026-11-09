@@ -439,7 +439,7 @@ test('HAMCONFLICTOWNER-01: an unproven stop hands off before closer caps and ret
   for (let i = 1; i <= 2; i++) recordHammerRetryDispatch(f.args.rootDir, identity, {
     jobKey: HEAD, headSha: HEAD, launchRequestId: `fixture-prior-${i}`, now: AT });
   f.args.evaluateHammerStopHoldImpl = args => evaluateHammerStopHold({ ...args,
-    execFileImpl: async () => ({ stdout: JSON.stringify({ state: 'OPEN', headRefOid: HEAD,
+    execFileImpl: async (_bin, argv) => ({ stdout: JSON.stringify(argv[0] === 'api' ? [[]] : { state: 'OPEN', headRefOid: HEAD,
       headRefName: 'fixture-branch', baseRefName: 'main', title: '[codex] Fixture change' }) }) });
   const first = await maybeDispatchAmaClosureFor(f.args);
   assert.equal(first.dispatched, false);

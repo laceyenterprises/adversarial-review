@@ -1,7 +1,7 @@
 import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, renameSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, renameSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { evaluateHammerStopHold } from '../src/ama/hammer-stop-hold.mjs';
@@ -25,13 +25,23 @@ function fixture(t) {
   let reads = 0;
   const execFileImpl = async (bin, args) => {
     assert.equal(bin, 'gh');
+    reads++;
+    if (args[0] === 'api') {
+      assert.deepEqual(args, ['api', `repos/${identity.repo}/pulls/1/comments?per_page=100`,
+        '--paginate', '--slurp']);
+      return { stdout: JSON.stringify([
+        [{ body: 'Synthetic inline finding on the conflict.', html_url: 'https://example.test/pull/1#discussion_r1',
+          url: 'https://api.example.test/pulls/comments/1' }],
+        [{ body: 'Synthetic inline reply on a later page.', html_url: 'https://example.test/pull/1#discussion_r2' },
+          { body: '   ' }, { body: null }],
+      ]) };
+    }
     assert.deepEqual(args, ['pr', 'view', '1', '--repo', identity.repo,
       '--json', 'state,headRefOid,headRefName,baseRefName,title,reviews,comments']);
-    reads++;
     return { stdout: JSON.stringify({ state: 'OPEN', headRefOid: HEAD, headRefName: 'fixture-branch',
       baseRefName: 'main', title: '[codex] Fixture correction',
       reviews: [{ body: 'Synthetic open finding: preserve the new upstream default.' }],
-      comments: [{ body: 'Synthetic inline context.' }] }) };
+      comments: [{ body: 'Synthetic PR issue comment.' }] }) };
   };
   const args = { ...identity, execFileImpl, logger: quiet,
     prMetadata: { headSha: HEAD, isOpen: true, mergeableState: 'CONFLICTING' } };
@@ -74,7 +84,9 @@ test('unproven stop queues one runnable builder-tag remediation and transfers th
   assert.equal(job.trigger.type, 'closer-terminal-audit');
   assert.deepEqual(job.closureHandoff, { reason: 'conflict-primary-unproven', headSha: HEAD, review: 'full',
     reviewContext: [{ body: 'Synthetic open finding: preserve the new upstream default.', url: null },
-      { body: 'Synthetic inline context.', url: null }] });
+      { body: 'Synthetic PR issue comment.', url: null },
+      { body: 'Synthetic inline finding on the conflict.', url: 'https://example.test/pull/1#discussion_r1' },
+      { body: 'Synthetic inline reply on a later page.', url: 'https://example.test/pull/1#discussion_r2' }] });
   assert.match(job.reviewBody, /Rebase or merge onto the current base/);
   assert.match(job.reviewBody, /preserving both\s+sides/);
   assert.match(job.reviewBody, /address all open findings/);
@@ -86,7 +98,10 @@ test('unproven stop queues one runnable builder-tag remediation and transfers th
     remediationReplyPath: join(f.rootDir, 'reply.json') });
   assert.match(prompt, /Untrusted PR Review Context/);
   assert.match(prompt, /Synthetic open finding: preserve the new upstream default/);
-  assert.match(prompt, /Synthetic inline context/);
+  assert.match(prompt, /Synthetic PR issue comment/);
+  assert.match(prompt, /Synthetic inline finding on the conflict/);
+  assert.match(prompt, /Synthetic inline reply on a later page/);
+  assert.match(prompt, /https:\/\/example.test\/pull\/1#discussion_r1/);
   const decision = result.nextActionShared.decision;
   assert.equal(decision.action, 'remediate');
   assert.equal(decision.actor, 'remediator');
@@ -139,11 +154,41 @@ test('repeated and concurrent stops on the same head deduplicate even after term
   const again = await evaluateHammerStopHold(args);
   assert.equal(again.remediation.jobId, results[0].remediation.jobId);
   assert.equal(readdirSync(pending).length, 0);
-  const archived = join(getFollowUpJobDir(f.rootDir, 'stoppedArchived'), '2026-01');
+  const archivedRoot = getFollowUpJobDir(f.rootDir, 'stoppedArchived');
+  const archived = join(archivedRoot, '2026-01');
+  mkdirSync(join(archivedRoot, '2025-12'), { recursive: true });
   mkdirSync(archived, { recursive: true });
+  const historical = { ...readFollowUpJob(join(stopped, `${again.remediation.jobId}.json`)),
+    claimedAt: AT, lastHeartbeatAt: '2026-01-01T00:01:00.000Z',
+    remediationWorker: { model: 'codex', state: 'stopped', spawnedAt: AT } };
+  writeFollowUpJob(join(stopped, `${again.remediation.jobId}.json`), historical);
   renameSync(join(stopped, `${again.remediation.jobId}.json`), join(archived, `${again.remediation.jobId}.json`));
-  assert.equal((await evaluateHammerStopHold(args)).remediation.jobId, again.remediation.jobId);
+  const receipt = await evaluateHammerStopHold({ ...args,
+    execFileImpl: async () => assert.fail('archived receipts must not require GitHub') });
+  assert.equal(receipt.remediation.jobId, again.remediation.jobId);
+  assert.equal(receipt.remediation.status, 'stopped-archived');
+  assert.equal(receipt.remediation.live, false);
+  for (const field of ['createdAt', 'claimedAt', 'lastHeartbeatAt', 'remediationWorker']) {
+    assert.deepEqual(receipt.remediation[field], historical[field], field);
+  }
   assert.equal(readdirSync(pending).length, 0);
+});
+
+test('unavailable or malformed inline comments retain the stop without enqueueing partial context', async t => {
+  const f = fixture(t);
+  for (const response of [null, 'not-json']) {
+    const result = await evaluateHammerStopHold({ ...f.args,
+      readAuditImpl: () => f.stop('conflict-primary-unproven'),
+      execFileImpl: async (bin, args) => {
+        if (args[0] !== 'api') return f.args.execFileImpl(bin, args);
+        if (response === null) throw new Error('synthetic inline comments read failure');
+        return { stdout: response };
+      } });
+    assert.equal(result.action, 'hold');
+    assert.equal(result.hammerStop.handoffPending, true);
+    assert.equal(result.remediation, undefined);
+    assert.equal(existsSync(getFollowUpJobDir(f.rootDir, 'pending')), false);
+  }
 });
 
 test('the terminal audit writer feeds the production stop reader and durable queue handoff', async t => {

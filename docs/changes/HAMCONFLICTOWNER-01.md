@@ -20,6 +20,13 @@ builder-tag and account routing, live custody, queue claim and merge gates
 remain authoritative. Handoff read/enqueue failures retain the stop for a
 later watcher pass.
 
+Final comment-only remediation captures inline diff comments from the
+paginated REST endpoint alongside review summaries and PR issue comments,
+preserving discussion links in the existing `body`/`url` projection. Unreadable
+inline context retains the stop for retry. Archived duplicate receipts read
+the stored historical job so timestamps and worker metadata survive archival;
+their stopped-archived status and non-live ownership remain unchanged.
+
 The existing cross-process claim keys this work by PR/head/reason, including
 archived jobs and changes to work-order wording. A read-only receipt lookup
 preserves an enqueued owner through later GitHub outages. Published conflict
@@ -38,6 +45,19 @@ next-action snapshot. It must retain that pending owner instead of dispatching
 another closer. No private repository is changed here.
 
 ## Verification
+
+Final comment-only round:
+
+- `node test/run-tests.mjs test/hamconflictowner-01.test.mjs
+  test/closer-next-action.test.mjs test/follow-up-review-claim.test.mjs
+  test/watcher-claim-loop.test.mjs`: 275 passed under the 180-second bounded
+  runner, including paginated inline context, failed context reads and archived
+  execution metadata. The initial 60-second multi-process invocation timed out
+  and failed a claim assertion; the isolated runner passed all four suites.
+- `npm run lint`: zero errors (152 existing warnings).
+- `npm run typecheck:contracts`, `node scripts/validate-data-model-catalog.mjs`,
+  `bash demo/research-finding-walkthrough.sh` and `git diff --check`: passed.
+- The full local suite was not run in this round; PR-head CI owns that gate.
 
 Synthetic fixtures exercise terminal audit consumption, actual queue admission,
 same-head deduplication including terminal/archived jobs, normal full-review

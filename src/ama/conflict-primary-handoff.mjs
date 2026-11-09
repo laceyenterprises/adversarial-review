@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
+import { readdirSync } from 'node:fs';
 import { createFollowUpJob, getFollowUpJobDir, readFollowUpJob } from '../follow-up-jobs.mjs';
 import { parseKnownPrefix } from '../adapters/subject/github-pr/title-tagging.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
@@ -20,9 +21,19 @@ function existingJob(rootDir, duplicate) {
       if (error.code !== 'ENOENT') throw error;
     }
   }
-  // The review claim also recognizes archived stops. They prove enqueue but
-  // cannot establish live worker custody.
-  if (duplicate.status === 'stopped-archived') return duplicate;
+  // Preserve the archived record's execution metadata without granting custody.
+  if (duplicate.status === 'stopped-archived') {
+    const archiveDir = getFollowUpJobDir(rootDir, 'stoppedArchived');
+    for (const entry of readdirSync(archiveDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      try {
+        const job = readFollowUpJob(join(archiveDir, entry.name, `${duplicate.jobId}.json`));
+        return { ...job, status: 'stopped-archived' };
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+    }
+  }
   throw new Error('conflict-primary-handoff-job-unavailable');
 }
 
@@ -85,14 +96,20 @@ export async function handoffConflictPrimary({
   if (!builderTag || !pr.headRefName || !pr.baseRefName) {
     throw new Error('conflict-primary-handoff-provenance-unavailable');
   }
+  // gh pr view does not expose inline review comments as a JSON field.
+  const { stdout: inlineComments } = await meteredExecFile(execFileImpl, 'gh',
+    ['api', `repos/${repo}/pulls/${prNumber}/comments?per_page=100`, '--paginate', '--slurp'], {
+      encoding: 'utf8', timeout: loadAwareTimeoutMs(15_000),
+    });
+  const reviewComments = JSON.parse(inlineComments).flat();
   const result = createJobImpl({
     rootDir, repo, prNumber, revisionRef: headSha,
     branch: pr.headRefName, baseBranch: pr.baseRefName, builderTag,
     reviewBody: conflictPrimaryWorkOrder(headSha), reviewPostedAt: now,
     closureHandoff: { reason: CONFLICT_PRIMARY_HANDOFF_REASON, headSha, review: 'full',
-      reviewContext: [...(pr.reviews || []), ...(pr.comments || [])]
+      reviewContext: [...(pr.reviews || []), ...(pr.comments || []), ...reviewComments]
         .filter(entry => typeof entry.body === 'string' && entry.body.trim())
-        .map(entry => ({ body: entry.body, url: entry.url || null })) },
+        .map(entry => ({ body: entry.body, url: entry.html_url || entry.url || null })) },
   });
   const job = result.job || existingJob(rootDir, result.duplicateOf);
   return handoffReceipt(job, headSha, now);

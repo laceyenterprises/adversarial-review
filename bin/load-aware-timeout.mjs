@@ -3,7 +3,7 @@
  * CLI: print a load-aware effective timeout (whole seconds) for a nominal cap.
  *
  * Usage:
- *   node bin/load-aware-timeout.mjs <nominalSeconds>
+ *   node bin/load-aware-timeout.mjs <nominalSeconds> [ceilingSeconds]
  *
  * Intended for the hammer's bounded test wrapper, e.g.:
  *   /usr/bin/perl -e 'alarm shift; exec @ARGV' \
@@ -18,7 +18,7 @@
 import { loadAwareTimeoutSeconds } from '../src/load-aware-timeout.mjs';
 
 const raw = process.argv[2];
-const usage = 'Usage: node bin/load-aware-timeout.mjs <nominalSeconds>';
+const usage = 'Usage: node bin/load-aware-timeout.mjs <nominalSeconds> [ceilingSeconds]';
 if (!raw || raw === '--help' || raw === '-h') {
   const fallback = 600;
   process.stdout.write(String(fallback));
@@ -27,7 +27,11 @@ if (!raw || raw === '--help' || raw === '-h') {
 }
 
 try {
-  process.stdout.write(String(loadAwareTimeoutSeconds(raw)));
+  const ceiling = process.argv[3] === undefined ? undefined : Number(process.argv[3]);
+  if (ceiling !== undefined && (!Number.isFinite(ceiling) || ceiling < Number(raw))) {
+    throw new Error('ceiling must be finite and at least the nominal timeout');
+  }
+  process.stdout.write(String(loadAwareTimeoutSeconds(raw, { maxSeconds: ceiling })));
 } catch (err) {
   const n = Number(raw);
   const fallback = Number.isFinite(n) && n > 0 ? Math.ceil(n) : 600;

@@ -859,13 +859,15 @@ for (const file of ['bin/hammer-publish.sh', 'bin/hammer-merge.sh', 'bin/hammer-
   test(`${file}: shell gh calls explicitly enable refresh-only hammer credentials`, t => {
     const f = fixture(t);
     const source = readFileSync(resolve(file), 'utf8');
-    const definition = source.match(/^ham_gh\(\) \{.*$/m)?.[0];
+    const definition = source.match(/^ham_gh\(\) \{.*$/m)?.[0]
+      ?? source.match(/^source "<<ROOT_DIR>>\/bin\/hammer-shell-helpers\.sh".*$/m)?.[0];
     assert.ok(definition, file);
     const command = f.env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND;
     delete f.env.HAMMER_LACEY_GH_TOKEN;
     delete f.env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND;
     f.env.HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND = command;
     f.env.HAM_NODE_BIN = process.execPath;
+    f.env.HAM_ROOT_DIR = resolve('.');
     writeFileSync(join(f.dir, 'gh'), `#!${process.execPath}
 if (process.env.GH_TOKEN !== ${JSON.stringify(fresh)}) process.exit(99);
 process.stdout.write('ok');

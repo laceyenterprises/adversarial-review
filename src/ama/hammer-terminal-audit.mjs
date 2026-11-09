@@ -2,7 +2,7 @@ import { recordHammerPhase } from './hammer-outcome.mjs';
 import { appendAmaAuditAttempt, readAmaAuditEntry } from './audit.mjs';
 import { reportHammerProgress } from './hammer-progress.mjs';
 import { HAMMER_RETRYABLE_READ_OUTCOMES, hammerPhaseAttempt } from './hammer-phase-outcome.mjs';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from '../atomic-write.mjs';
 
@@ -90,6 +90,13 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
 }
 
 export function reportHammerEarlyFailure(reason, options) {
+  // A managed helper attempt is provisional. Its parent publishes this reason
+  // only after its bounded retry, so a recovered read cannot poison the audit.
+  const failureFile = (options?.env || process.env).HAM_HELPER_FAILURE_FILE;
+  if (failureFile && /^[a-z][a-z0-9:-]*$/.test(reason || '')) {
+    try { writeFileSync(failureFile, reason, { mode: 0o600 }); } catch { /* Parent still stops. */ }
+    return null;
+  }
   try { return recordHammerEarlyFailure(reason, options); }
   catch (error) {
     if (error instanceof RepairableConflictError) {

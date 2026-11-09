@@ -7,26 +7,25 @@ merge with HAM provenance; the machine gate is mandatory.
 
 ## Operating core — execute the next action
 
-The phase scripts ARE the procedure. Run them as instructed and act on their
-exit code and stderr. Do not read, grep or analyze their source; if a phase's
-outcome is unclear, stop with the named reason it printed. Never spend more
-than a few commands reading procedure files.
+The phase scripts ARE the procedure. Run them as instructed; act on exit code and stderr.
+Do not read, grep or analyze their source. If an outcome is unclear,
+stop with its printed reason.
 
-Before PR reads/edits, perform this existence check only. Missing deployed
-scripts require one fresh AMA dispatch/lease; do not reconstruct them:
+Before PR reads/edits, check only existence. Missing scripts require a fresh
+AMA dispatch/lease; never reconstruct them:
 
 ```bash
 source "<<ROOT_DIR>>/bin/hammer-node-runtime.sh" || exit 1
 export HAM_REPO='<<REPO>>' HAM_PR_NUMBER='<<PR_NUMBER>>' HAM_HQ_ROOT='<<HQ_ROOT>>' HAM_TARGET_REMEDIATION_SHA='<<TARGET_REMEDIATION_SHA>>'
-if ! test -f "<<RUN_DIR>>/hammer-verify-head.sh" -a -f "<<RUN_DIR>>/hammer-publish.sh" -a -f "<<RUN_DIR>>/hammer-merge.sh"; then
+if ! test -f "<<RUN_DIR>>/hammer-verify-head.sh" -a -f "<<RUN_DIR>>/hammer-publish.sh" -a -f "<<RUN_DIR>>/hammer-merge.sh" -a -x "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" -a -f "<<ROOT_DIR>>/bin/hammer-shell-helpers.sh"; then
   "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-terminal-audit.mjs" dispatch-phase-scripts-missing
   exit 1
 fi
 ```
 
-Initialize `inputs.sh` once per Appendix A before edits; guard and source it in
-every shell, including resumes, to resolve and export `HAM_NODE_BIN`.
-Never replace missing inputs after edits.
+Initialize `inputs.sh` once per Appendix A before edits. Guard and source it
+in every shell/resume to resolve/export `HAM_NODE_BIN`. Never replace missing
+inputs after edits.
 
 ```bash
 test -f "<<RUN_DIR>>/inputs.sh" || {
@@ -36,10 +35,9 @@ test -f "<<RUN_DIR>>/inputs.sh" || {
 source "<<RUN_DIR>>/inputs.sh"
 ```
 
-Run phases with Appendix A's status-capturing wrapper in the same
-persistent Bash shell under the foreground controller. Preserve FD 4 and all
-HQ/controller environment. Never continue after a failed phase except on the
-explicit conflict or deferred paths in this table.
+Use Appendix A's status-capturing wrapper in one persistent Bash shell under
+the foreground controller. Preserve FD 4 and all HQ/controller environment.
+After failure, follow only the explicit conflict/deferred paths below.
 
 ### State machine
 
@@ -171,7 +169,7 @@ export HAM_REPO='<<REPO>>' HAM_PR_NUMBER='<<PR_NUMBER>>' HAM_HQ_ROOT='<<HQ_ROOT>
 
 ## Cost and context discipline
 
-Before reads at start and after **each push**, run `node <<ROOT_DIR>>/bin/hammer-context.mjs <<REPO>> <<PR_NUMBER>>` once; fetch the full review if `review.findingsTruncated` or `review.simplicityNoteTruncated`.
+Run `ham_read context "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-context.mjs" "<<REPO>>" "<<PR_NUMBER>>"` before reads and after **each push**; nonzero stops; fetch the full review if `review.findingsTruncated` or `review.simplicityNoteTruncated` using `ham_read review-read <read-only command...>`.
 
 Context/verify-head exit 20 with `ci-infrastructure`: stop without merge or HQ
 decision. Recovery resumes after exact-head checks pass.
@@ -209,7 +207,8 @@ Source `<<RUN_DIR>>/inputs.sh` each shell; persist audits there.
 
 ```bash
 umask 077
-/usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-base-head.mjs" '<<PR_URL>>' > '<<RUN_DIR>>/base-head' || exit 1
+source "<<ROOT_DIR>>/bin/hammer-node-runtime.sh" || exit 1
+/usr/bin/perl -e 'shift or exit 1; my $h=shift; if (-f $h) { exec $h, @ARGV; die $! } shift; shift; my $s=shift; shift; alarm $s; exec @ARGV' "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" read:report base-head 90 540 "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-base-head.mjs" '<<PR_URL>>' > '<<RUN_DIR>>/base-head' || exit 1
 cat > '<<RUN_DIR>>/inputs.sh' <<'HAM_INPUTS'
 source "<<ROOT_DIR>>/bin/hammer-node-runtime.sh" || { return 1 2>/dev/null || exit 1; }
 export HAM_BASE_HEAD="$(cat '<<RUN_DIR>>/base-head')"
@@ -221,21 +220,13 @@ export HAM_RUN_DIR='<<RUN_DIR>>'
 export HAM_ROOT_DIR='<<ROOT_DIR>>' HAM_HQ_ROOT='<<HQ_ROOT>>' HAM_HQ_OWNER='<<HQ_OWNER>>'
 export HAM_AUDIT_PATH='<<AUDIT_PATH>>' HAM_REVIEWER='<<REVIEWER>>'
 export HAM_AMA_TRAILERS=<<AMA_TRAILERS_SHELL>>
-ham_gh() { "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/metered-gh.mjs" exec-hammer "$@"; }
-ham_git() {
-  local ham_git_exit=0
-  "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/metered-gh.mjs" exec-git "$@" || ham_git_exit=$?
-  if [ "$ham_git_exit" -eq 76 ]; then HAM_PHASE_OUTCOME=git-credential-refresh-failed; fi
-  return "$ham_git_exit"
-}
-ham_pr() { "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-pr-read.mjs" "$HAM_REPO" "$HAM_PR_NUMBER" "$@"; }
+source "<<ROOT_DIR>>/bin/hammer-shell-helpers.sh" || { return 1 2>/dev/null || exit 1; }
+ham_step() { /usr/bin/perl -e 'shift or exit 1; exec @ARGV; die $!' "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" "$@"; }
+ham_read() { ham_step read:report "$1" 90 540 "${@:2}"; }
 HAM_INPUTS
 source "<<RUN_DIR>>/inputs.sh"
 "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-controller.mjs" resolve-environment || exit $?
 ```
-
-`HAM_ROOT_DIR`: deployed checkout/round ledger; keep exported.
-`HAM_HQ_ROOT` is the HQ root.
 
 Write `<<RUN_DIR>>/close-controller.sh`; run in foreground:
 
@@ -262,9 +253,9 @@ values in the same shell for the merge audit.
 Use `source "<<RUN_DIR>>/hammer-merge.sh" --wait-ci` after publication and before the predicate for bounded exact-head required-check waits.
 GitHub calls: `ham_gh` or `ham_pr`. No `--watch` or polling loops.
 API helpers refresh per call, then refresh and retry once on a credential rejection.
-Git inherits the controller's refresh-on-request credential helper; use `ham_git`
-for remote operations and `ham_bounded_git_sync` for bounded fetches. A failed
-Git credential mint stops with retryable `git-credential-refresh-failed`.
+Use the controller's refresh-on-request `ham_git` for remote operations and
+`ham_bounded_git_sync` for fetches. Failed Git credential minting stops with
+retryable `git-credential-refresh-failed`.
 Never read or print raw token variables.
 
 For each phase, in that shell, set `PHASE` to `hammer-verify-head`, `hammer-publish`, or `hammer-merge` and run:
@@ -435,8 +426,8 @@ if [ "$(id -un)" != "$HAM_DISPUTE_OWNER" ]; then
   unset HAM_DISPUTE_TOKEN
 fi
 DISPUTED_HEAD=$(/usr/bin/perl -e 'alarm shift; exec @ARGV' 15 git rev-parse HEAD) || exit 1
-if /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_DISPUTE_RUN[@]}" "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/dispute-finding.mjs \
-  --root-dir <<ROOT_DIR>> --repo <<REPO>> --pr <<PR_NUMBER>> \
+if /usr/bin/perl -e 'shift or exit 1; exec @ARGV; die $!' "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" mutation:report dispute-finding 90 540 "${HAM_DISPUTE_RUN[@]}" "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/dispute-finding.mjs" \
+  --root-dir "<<ROOT_DIR>>" --repo "<<REPO>>" --pr "<<PR_NUMBER>>" \
   --head-sha "$DISPUTED_HEAD" --review '<review node id or URL>' \
   --finding '<n>' --evidence-file "$HAM_DISPUTE_EVIDENCE_FILE"; then
   :
@@ -786,7 +777,7 @@ Fetch the live PR and final review:
 ```bash
 # UNREGREPO-01: hold a stacked PR whose parent branch was already merged.
 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/stacked-base-check.mjs <<ROOT_DIR>> <<REPO>> <<PR_NUMBER>> || exit 20
-ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName,reviews > "$HAM_RUN_DIR/pr-before.json"
+ham_read review-read "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-pr-read.mjs" "<<REPO>>" "<<PR_NUMBER>>" --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName,reviews > "$HAM_RUN_DIR/pr-before.json" || exit $?
 ```
 
 Identify the newest authoritative adversarial review whose commit is
@@ -804,7 +795,7 @@ Commit the remediation:
 # git rebase/pull) moves gitlinks but leaves submodule checkouts stale.
 # `ignore = all` hides this from status/diff; staging can rewind the submodule.
 # Re-sync initialized submodules to recorded commits; leave uninitialized ones.
-/usr/bin/perl -e 'alarm shift; exec @ARGV' 120 git submodule update --recursive
+ham_step mutation submodule-sync 120 720 git submodule update --recursive
 git status --short --ignore-submodules=none
 git add <changed files>   # never a submodule path, never `git add -f`/`--force`
 # The hammer never moves a submodule pointer: submodule fixes land as a PR in the
@@ -976,12 +967,12 @@ fi
 # Only the conflict-only reviewed-head replay uses this proof. Remediation
 # heads retain their existing full-range findings/preservation validation.
 if [ "$HAM_CONFLICT_SOURCE" = "<<REVIEWED_SHA>>" ]; then
-  /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-conflict-primary.mjs" \
+  ham_read conflict-primary "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-conflict-primary.mjs" \
     "<<REVIEWED_SHA>>" "$HAM_CONFLICT_SOURCE" "$HAM_CONFLICT_BASE" \
     > "<<RUN_DIR>>/conflict-primary.json" || {
       HAM_CONFLICT_PROOF_STATUS=$?
       HAM_CONFLICT_PROOF_REASON=conflict-primary-unproven
-      if [ "$HAM_CONFLICT_PROOF_STATUS" -eq 142 ]; then
+      if [ "$HAM_CONFLICT_PROOF_STATUS" -eq 124 ] || [ "$HAM_CONFLICT_PROOF_STATUS" -eq 142 ]; then
         HAM_CONFLICT_PROOF_REASON=conflict-primary-timeout
       fi
       "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-terminal-audit.mjs" "$HAM_CONFLICT_PROOF_REASON"
@@ -994,7 +985,7 @@ fi
 HAM_CONFLICT_SUBMODULE_SYNC_CAP="${HAM_UPDATE_BRANCH_RETRY_CAP:-3}"
 HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT=1
 while true; do
-  if /usr/bin/perl -e 'alarm shift; exec @ARGV' 120 git submodule update --recursive; then
+  if ham_step mutation submodule-sync 120 720 git submodule update --recursive; then
     break
   fi
   if [ "$HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT" -ge "$HAM_CONFLICT_SUBMODULE_SYNC_CAP" ]; then
@@ -1109,7 +1100,7 @@ HAM_PHASE_OUTCOME=predicate-build-failed
 HAM_PRIMARY_CHANGE_FILE=$(mktemp "${TMPDIR:-/tmp}/ham-primary-change.XXXXXX") || exit 1
 trap 'rm -f "$HAM_PRIMARY_CHANGE_FILE" "${HAM_VERDICT_FILE:-}" "${HAM_VERDICT_READY_FILE:-}"' EXIT
 chmod 600 "$HAM_PRIMARY_CHANGE_FILE"
-/usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/primary-change-context.mjs <<REPO>> <<PR_NUMBER>> "$POST_REMEDIATION_SHA" \
+ham_read primary-change-context "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/primary-change-context.mjs" "<<REPO>>" "<<PR_NUMBER>>" "$POST_REMEDIATION_SHA" \
   > "$HAM_PRIMARY_CHANGE_FILE" || exit 1
 HAM_VERDICT_FILE=$(mktemp "${TMPDIR:-/tmp}/ham-verdict.XXXXXX") || exit 1
 chmod 600 "$HAM_VERDICT_FILE"

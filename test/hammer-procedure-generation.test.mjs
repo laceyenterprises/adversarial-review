@@ -292,7 +292,7 @@ source "$1"
   // silently launching a PATH runtime if the caller loses it.
   const fallback = join(dir, 'node');
   writeFileSync(fallback, '#!/bin/bash\nprintf unexpected-PATH-runtime\n', { mode: 0o755 });
-  for (const helper of ['ham_gh', 'ham_git', 'ham_pr']) {
+  for (const helper of ['ham_step', 'ham_read', 'ham_gh', 'ham_git', 'ham_pr']) {
     const lost = spawnSync('/bin/bash', ['-c', 'source "$1" || exit; unset HAM_NODE_BIN; "$2" fixture', 'bash', script, helper], {
       env: { PATH: `${dir}:${process.env.PATH}`, AGENT_OS_NODE_BIN: process.execPath },
       encoding: 'utf8', timeout: 5000,

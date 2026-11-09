@@ -287,6 +287,29 @@ test('starting head capture aborts before edits when its retry helper fails', ()
   assert.doesNotMatch(result.stdout, /EDITS_STARTED/);
 });
 
+test('HAMHELPERTIMEOUT-01 helpers declare bounded read retries separately from mutations', () => {
+  const merge = readFileSync(new URL('../bin/hammer-merge.sh', import.meta.url), 'utf8');
+  const publish = readFileSync(new URL('../bin/hammer-publish.sh', import.meta.url), 'utf8');
+  const verify = readFileSync(new URL('../bin/hammer-verify-head.sh', import.meta.url), 'utf8');
+  assert.match(HAMMER_TEMPLATE, /hammer-helper-step.mjs" read:report base-head 90 540/);
+  assert.match(HAMMER_TEMPLATE, /ham_read\(\) \{ ham_step read:report "\$1" 90 540/);
+  for (const step of ['context', 'review-read', 'primary-change-context', 'conflict-primary']) {
+    assert.match(HAMMER_TEMPLATE, new RegExp(`ham_read ${step}`));
+  }
+  assert.match(merge, /hammer-helper-step.mjs" read primary-change-context 90 540/);
+  assert.match(publish, /hammer-helper-step.mjs" read head-context 90 540/);
+  assert.match(verify, /hammer-helper-step.mjs" read rebase-result 90 540/);
+  assert.match(verify, /hammer-helper-step.mjs" mutation submodule-sync 120 720/);
+  assert.match(publish, /hammer-helper-step.mjs" mutation api-publish 120 720/);
+  assert.match(merge, /hammer-helper-step.mjs" mutation merge-action-receipt 60 360/);
+  for (const source of [publish, verify]) {
+    assert.match(source, /hammer-helper-step.mjs" mutation pushed-attestation 90 540/);
+    assert.doesNotMatch(source, /hammer-helper-step.mjs" read (api-publish|pushed-attestation)/);
+  }
+  assert.match(HAMMER_TEMPLATE, /alarm shift; exec @ARGV' 15 git rev-parse HEAD/);
+  assert.match(merge, /alarm shift; exec @ARGV' 20.*record-merge-signal/);
+});
+
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: options.cwd,
@@ -743,7 +766,7 @@ test('hammer never moves a submodule pointer: re-syncs checkouts and unstages gi
     HAMMER_PROMPT.indexOf('Commit the remediation:'),
     HAMMER_PROMPT.indexOf('git commit -m "HAM remediate final adversarial findings"'),
   );
-  assert.match(commitBlock, /alarm shift; exec @ARGV' 120 git submodule update --recursive/);
+  assert.match(commitBlock, /ham_step mutation submodule-sync 120 720 git submodule update --recursive/);
   assert.match(commitBlock, /git status --short --ignore-submodules=none/);
   assert.match(commitBlock, /git diff --cached --raw -z --ignore-submodules=none/);
   assert.match(commitBlock, /\$old_mode eq "160000" \|\| \$new_mode eq "160000"/);

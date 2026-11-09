@@ -66,6 +66,26 @@ contract typechecking and the offline research-finding demo also pass.
 The reported Node 22 CI timeout after 900 seconds is tracked separately as
 ARSUITETIMEOUT-01; the suite cap and CI jobs are unchanged.
 
+## Hammer CI repair
+
+Both Node 22 and Node 26 CI failed the existing rendered-prompt budget
+assertions: 61,457 bytes exceeded the 60 KiB limit by 17 bytes. Shortened
+the context-read introduction without changing its required helper, timing,
+full-review requirement or stop semantics. The byte-budget assertions remain
+unchanged.
+
+Targeted validation also hardened two offline fixtures for a real closer
+environment: the fake `gh` uses an import that works inside an ES-module
+package, and the durable helper fixture explicitly pins its synthetic target
+SHA so an inherited dispatch target cannot redirect its audit.
+
+Hammer validation passed the PR-read and helper-step files after those
+fixture repairs. The controller, prompt protocol, simplicity-note,
+documentation and prompt-budget tests passed in the initial targeted run.
+Repository lint passed with zero errors and 152 existing warnings, contract
+typechecking passed, and the offline demo produced three byte-stable
+deliveries. The full local suite was not run; hosted checks remain required.
+
 ## Activation check
 
 After normal submodule float and the follow-up/watcher and dispatcher reloads,

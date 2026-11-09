@@ -233,7 +233,8 @@ function durableFixture(t) {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const env = { ...process.env, HAM_NODE_BIN: process.execPath, HAM_HQ_ROOT: dir,
     HAM_RUN_DIR: dir, HAM_REPO: 'fixture/repo', HAM_PR_NUMBER: '42',
-    HAM_REVIEWED_SHA: 'a'.repeat(40), HQ_LAUNCH_REQUEST_ID: 'lrq_synthetic',
+    HAM_REVIEWED_SHA: 'a'.repeat(40), HAM_TARGET_REMEDIATION_SHA: 'a'.repeat(40),
+    HQ_LAUNCH_REQUEST_ID: 'lrq_synthetic',
     HQ_WORKER_RUN_ID: 'wrun_synthetic', TMPDIR: dir };
   const phasePath = join(dir, 'dispatch/lrq_synthetic/hammer-progress/wrun_synthetic/last-phase.json');
   const audit = () => readAmaAuditEntry(dir, env.HAM_REPO, 42, env.HAM_REVIEWED_SHA);

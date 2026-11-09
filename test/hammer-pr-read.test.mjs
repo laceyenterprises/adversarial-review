@@ -352,7 +352,7 @@ test('QCP-08: the hammer PR CLI revalidates through gh, records the 304 budget a
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const runDir = join(dir, 'run'); mkdirSync(runDir);
   writeFileSync(join(dir, 'gh'), `#!${process.execPath}
-const fs = require('node:fs');
+const fs = await import('node:fs');
 const [, , verb, path, ...flags] = process.argv;
 const resources = ${JSON.stringify(headResources(head))};
 const resource = resources[path];

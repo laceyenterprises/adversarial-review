@@ -169,7 +169,7 @@ export HAM_REPO='<<REPO>>' HAM_PR_NUMBER='<<PR_NUMBER>>' HAM_HQ_ROOT='<<HQ_ROOT>
 
 ## Cost and context discipline
 
-Run `ham_read context "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-context.mjs" "<<REPO>>" "<<PR_NUMBER>>"` before reads and after **each push**; nonzero stops. Before findings and for truncated context, read the full final review:
+Run `ham_read context "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-context.mjs" "<<REPO>>" "<<PR_NUMBER>>"` before reads and after **each push**; nonzero stops. Read the full final review before findings or on truncation:
 
 <!-- hammer-reference:G1 -->
 Use this exact helper for the full final review, also whenever `review.findingsTruncated` or `review.simplicityNoteTruncated` is true:

@@ -767,8 +767,17 @@ Antigravity reviewer runtime.
 
 Follow-up remediation defaults to cross-model routing by PR builder tag:
 `[codex]` PRs route to `claude-code`, `[claude-code]` PRs route to `codex`,
-and `[clio-agent]` PRs route to `claude-code`. When the durable builder tag is
-missing or unknown, the degraded fallback is `codex`. Operators may pin
+and `[clio-agent]` PRs route to `claude-code`. When a code-PR job's durable
+builder tag is missing or unknown, the claim consumer reads the PR title harness
+prefix, stable `pr_opened` worker identity (independent of current head), and
+explicit `Worker-Class:` body metadata. Recognized sources must agree on family;
+Clio and Codex share a family. It persists the derived `builderTag` and
+`builderTagRecovery` evidence before selecting a remediator, and logs the repair.
+Missing or conflicting authorship stops the job with named evidence, the
+adversarial-review operator as owner, and an escalation/retrigger action.
+These stops permit explicit retrigger after evidence correction. Recovery never
+derives authorship from the reviewer and refuses a remediator from the recovered
+builder's family, including an operator pin. Operators may pin
 remediation with `roles.remediator`,
 `AGENT_OS_ROLES_REMEDIATOR`, or
 `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR=codex|claude-code|gemini`; aliases

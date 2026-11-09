@@ -1,4 +1,5 @@
 import { hqRemediationWorkerClass } from './remediation-worker-class.mjs';
+import { recoverRemediationBuilder, readRemediationBuilderEvidence, stopRecoveredBuilderRemediator } from './remediation-builder-authorship.mjs';
 import { cleanupServiceCodexAuth } from './codex-service-home.mjs';
 
 import { withRepositoryStateCycle } from './repository-state-lock.mjs';
@@ -3129,6 +3130,7 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
   guardStackedBaseImpl = guardStackedBase,
   deliverAlertImpl = deliverAlert,
   healthRouter = null,
+  readBuilderEvidenceImpl = readRemediationBuilderEvidence,
   log = console,
 } = {}) {
   // CFG-09: per-job boundary for the role-config cascade cache. Match
@@ -3300,6 +3302,23 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
   const preparationStartedMs = Date.now(); let envPreparationMs = 0; let workspacePreparationMs = 0;
 
   try {
+    const authorship = await recoverRemediationBuilder({
+      rootDir, job: claimed.job, jobPath: claimed.jobPath, execFileImpl, now, log,
+      readEvidenceImpl: readBuilderEvidenceImpl,
+    });
+    if (!authorship.ok) {
+      const stopped = markFollowUpJobStopped({
+        rootDir, jobPath: claimed.jobPath, stoppedAt: now(), sourceStatus: 'in_progress',
+        stopCode: authorship.stopCode, stopReason: authorship.reason,
+        stopMetadata: { builderAuthorshipEscalation: authorship.escalation },
+        commentDeliveryExemption: 'no-remediation-started',
+        remediationWorker: { state: 'never-spawned', reconciledAt: now() },
+      });
+      log.error?.(`[follow-up-remediation] ${authorship.reason}`);
+      return { consumed: false, reason: authorship.reason, escalation: authorship.escalation,
+        job: stopped.job, jobPath: stopped.jobPath };
+    }
+    claimed.job = authorship.job;
     // REMFALLBACK-01: re-resolved on every claim, so a capped routed remediator
     // moves to a declared fallback class. The fleet read is wired only from the
     // daemon (`resolveRemediationWorkerClassImpl`), keeping the heavily-spied
@@ -3319,6 +3338,9 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
       remediationMode: runtimeMode,
     });
     workerClass = remediatorRouting.workerClass;
+    const ownBuilderStop = stopRecoveredBuilderRemediator({
+      rootDir, job: claimed.job, jobPath: claimed.jobPath, workerClass, now, log });
+    if (ownBuilderStop) return ownBuilderStop;
     if (!remediatorRouting.pooled) {
       jobEnv.CODEX_BROKER_PROVIDER = workerClass === 'remediator-codex-corp' ? 'codex-corp' : 'codex';
     }
@@ -3347,6 +3369,9 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
         kind: 'remediator', rootDir, repo: claimed.job.repo, prNumber: claimed.job.prNumber,
         reviewerModels: nextRoundReviewerModels(claimed.job, { env: jobEnv }), env: jobEnv, log });
       workerClass = remediatorRouting.workerClass;
+      const ownBuilderStop = stopRecoveredBuilderRemediator({
+        rootDir, job: claimed.job, jobPath: claimed.jobPath, workerClass, now, log });
+      if (ownBuilderStop) return ownBuilderStop;
     }
     if (remediatorRouting.pooled || !['codex', 'remediator-codex', 'remediator-codex-corp'].includes(workerClass)) {
       delete jobEnv.CODEX_BROKER_PROVIDER;

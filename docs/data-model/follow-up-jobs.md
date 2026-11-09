@@ -1,5 +1,29 @@
 # Data Model - Follow-Up Remediation Jobs
 
+## Builder authorship recovery
+
+For code-PR jobs with missing or unrecognized `builderTag`, the claim consumer
+compares the PR title harness prefix, head-independent `pr_opened` worker
+identity, and explicit `Worker-Class:` metadata lines in the PR body.
+Recognized sources must agree on family (Clio and Codex share one family).
+The job retains its existing ID, head and round plan. Before selection it
+persists canonical `builderTag` plus optional `builderTagRecovery` containing
+`previousTag`, `observedAt`, and `evidence` (`sources`, normalized tags,
+`missingEvidence`, source `availability`, decision and selected tag).
+A log line names the job and derivation. Legacy corporate class spellings and
+bracketed tags normalize through the shared builder classifier.
+
+Absent/conflicting evidence uses the existing `stopped` state with
+`missing-builder-authorship` or `conflicting-builder-authorship`. The stop
+contains `builderAuthorshipEscalation` (`owner`, `nextAction`, `observedAt`,
+`evidence`), and its reason and consume output name the job/PR, sources and
+operator action. No worker is spawned or publication charged; claim-time round
+allocation remains unchanged. These codes permit explicit operator retrigger
+after evidence correction. Recovered jobs also refuse an own-family remediator,
+including pins and fallback/pool proposals; `builder-cannot-remediate-own-pr`
+stops name the operator and action to select a different family.
+Ordinary recognized-tag jobs and non-code domains retain their existing routing.
+
 ## Gemini route and dispatch identity (GEMREMEDIATORCLASS-01)
 
 New HQ Gemini remediation workers record `model: "gemini"` for logical

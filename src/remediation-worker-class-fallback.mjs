@@ -252,6 +252,9 @@ export function remediationSubjectRefusal(job, workerClass) {
   }
   if (job && (!job.domainId || job.domainId === 'code-pr')
     && !normalizeBuilderClass(job.builderTag)) return 'unknown-builder-family';
+  if (job?.builderTagRecovery && isCrossModelReviewWaived(job.builderTag, workerClass)) {
+    return 'builder-cannot-remediate-own-pr';
+  }
   return null;
 }
 

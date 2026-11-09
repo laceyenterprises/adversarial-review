@@ -1,4 +1,5 @@
 {
+  "remediationBuilderAuthorship": "Missing or unrecognized code-PR builder tags recover from agreeing recorded title-prefix, stable pr_opened identity and explicit body metadata before dispatch. Missing/conflicting authorship or own-family recovered routing stops with an operator owner and next action; explicit retrigger may resume after evidence/route correction. Existing states, claim allocation and publication budgets remain unchanged.",
   "primaryChangeHistoryBudget": "HAMHISTORYBUDGET-01: primary-change collection has a fixed 90-second wall-clock deadline across history/cache/quota reads and optional proofs. Timeout returns head-scoped retryable history-read-failed evidence, cancels history process groups and yields an acquired merge lease through the existing release path. Native immutable reads may outlive a shorter tick only within this bound; standalone rescue readers defer exhausted quota. Exact-head, strict preservation and reviewer-authorized reversal predicates and lifecycle states are unchanged.",
   "hammerCredentialRefresh": "HAMCREDREFRESH-01: API preparation, forced refresh, Git credential mint and refresh-only checks allow a nominal 150s load-scaled command wait so owner broker/HCP retries (120s/135s) can finish. Explicit caller deadlines clip without rescaling. Named authorization/identity refusals stop without held-token fallback; transient exhaustion retains existing deferred outcomes and ownership. No lifecycle state, merge predicate, cap or lease changes.",
   "githubApiBudget": "GHBUDGET-01: lifecycle polling revalidates via REST ETags; only a live 304 permits cached head/state reuse. Fresh merged/closed responses retain authoritative terminal transitions. Polling defers below the unchanged floor; closer identity and hammer preconditions may use positive reserved capacity. Zero balance and explicit limits still fail closed. Broker-verified rotating tokens share installation identity. A persisted low-budget episode transitions observing -> alerted after more than 15 minutes. Observed health clears it, a missing observation resets the interval, and the outbox receipt is keyed by the episode start. Offline ghbudget-01 fixtures cover these contracts.",
@@ -810,6 +811,7 @@
       "codeSources": [
         "src/follow-up-jobs.mjs",
         "src/follow-up-branch.mjs",
+      "src/remediation-builder-authorship.mjs",
         "src/follow-up-operator-label.mjs",
         "src/remediation-ci-infrastructure.mjs",
         "src/follow-up-remediation.mjs",
@@ -906,7 +908,7 @@
           "id": "follow-up-job.08",
           "from": "in_progress",
           "to": "stopped",
-          "trigger": "lifecycle, budget or committed-unpublished stop",
+      "trigger": "lifecycle, budget, committed-unpublished or unresolved builder-authorship stop with named operator ownership",
           "codeSource": "src/follow-up-jobs.mjs"
         },
         {

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "follow-up-builder-authorship",
+      "title": "Follow-up builder authorship recovery",
+      "path": "docs/data-model/follow-up-jobs.md",
+      "store": "data/follow-up-jobs/{pending,in-progress,stopped}/",
+      "schemaSurface": "src/remediation-builder-authorship.mjs",
+      "relatedSchemaSurfaces": ["src/follow-up-jobs.mjs", "src/follow-up-remediation.mjs"],
+      "owner": "follow-up daemon",
+      "optionalFields": [
+        "builderTagRecovery: { previousTag, observedAt, evidence }",
+        "remediationPlan.stop.builderAuthorshipEscalation: { owner, nextAction, observedAt, evidence }"
+      ],
+      "compatibility": "Additive recovery evidence; existing job IDs, claim allocation and publication budgets remain unchanged."
+    }
+  ]
+}

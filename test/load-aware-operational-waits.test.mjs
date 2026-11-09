@@ -24,6 +24,7 @@ import { acquireMergeLease, acquireDaemonMergeLease, releaseMergeLease, upsertMe
 
 
 function busyHost(t) {
+  t.mock.method(os, 'platform', () => 'linux');
   t.mock.method(os, 'loadavg', () => [os.cpus().length * 3, 0, 0]);
   t.mock.method(childProcess, 'execFileSync', command => {
     assert.equal(command, '/bin/ps');

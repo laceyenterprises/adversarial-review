@@ -2161,6 +2161,7 @@ function buildFollowUpJob({
   // pr-merge-orchestration spec's risk-tiered budget. Null for jobs
   // built without a spec linkage; falls back to DEFAULT_RISK_CLASS.
   riskClass = null,
+  closureHandoff = null,
 }) {
   if (String(verdictMode || 'enforce') !== 'enforce') {
     throw new Error('advisory-only reviews must not create follow-up remediation jobs');
@@ -2195,7 +2196,7 @@ function buildFollowUpJob({
     jobId,
     createdAt,
     trigger: {
-      type: 'github-review-posted',
+      type: closureHandoff ? 'closer-terminal-audit' : 'github-review-posted',
       postedAt: createdAt,
     },
     repo,
@@ -2214,6 +2215,7 @@ function buildFollowUpJob({
     // reviewerModel='codex'. Persisting the tag at creation time keeps the
     // builder→remediator routing deterministic.
     builderTag: builderTag || null,
+    ...(closureHandoff ? { closureHandoff } : {}),
     critical: classification.critical,
     nonBlockingOnly,
     ...(nonBlockingOnly && normalizeEffectiveReviewVerdict(reviewBody) === 'comment-only'

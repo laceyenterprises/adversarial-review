@@ -1,5 +1,11 @@
 ## Terminal audit review currency (HAMLATEAUDIT-01)
 
+Terminal launch and lease observations are retained in the
+[append-only closer outcome journal](data-model/ama-closer-outcomes.md).
+Consumers must join these observations by launch identity: successful process
+exit alone never proves merge. Journal failures emit a local diagnostic and
+leave existing closure and paging decisions unchanged.
+
 A validated head alone does not prove that a later review was considered.
 The hammer's initial predicate and final live gate compare each authoritative
 family's latest applicable review head/body with the evidence at the authenticated
@@ -318,6 +324,27 @@ forced launch, ledger mutation or new smoke step is authorized by this change.
 
 ## Change notes
 
+- **HAMEDITPLAN-04:** An otherwise admissible `author-lines` plan outside the
+  cited finding's ranges receives exit 21 with those ranges and re-planning
+  guidance. It never permits the uncovered edit; exit 1 remains terminal.
+- **HAMEDITPLAN-03:** A cited non-blocking `in-place` plan is a correctable
+  shape error (exit 21). Re-plan as `additive`; in-place permission is unchanged.
+
+- **HAMEDITPLAN-02:** The edit-plan CLI fills omitted, non-string or empty
+  `reviewedHead` from the run's pinned SHA. Explicit heads must match the cited
+  review's `commit_id`, including citations from another reviewed head.
+  `--help` and `-h` print accepted shapes and exit 0 without checking a plan.
+
+- **HAMCONFLICTOWNER-01:** A current-head `conflict-primary-unproven` closer
+  audit hands the PR to the existing builder-tag-routed remediation queue,
+  before closer cap or retry selection. The job durably names its PR, head,
+  `closureHandoff.reason` and `jobId`; pending work owns the next action.
+  Its work order resolves the conflict preserving both sides, addresses open
+  findings and pushes a head for normal full review. Repeated stops reuse the
+  job across terminal settlement and archival. Unavailable provenance keeps
+  the handoff pending for another watcher pass. `conflict-primary-timeout`
+  retains its existing retry behavior; an unproven replay cannot publish.
+
 - **HAMGITTOKEN-01:** Refresh-on-request Git authentication replaces the
   startup-token helper. A failed mint produces the existing retryable
   infrastructure abort with reason `git-credential-refresh-failed`.
@@ -491,8 +518,25 @@ deployments; that compatibility path cannot bypass the full-dispatch preflight.
 Base-head, context, full-review, primary-change, range and rebase/conflict proof
 reads use 90 seconds nominal and a 540-second ceiling. A timed-out read gets
 one retry; permanent failures and semantic stop codes return immediately.
+The canonical full-review command is
+`ham_read review-read "$HAM_NODE_BIN" "$HAM_ROOT_DIR/bin/hammer-pr-read.mjs" "$HAM_REPO" "$HAM_PR_NUMBER" --full-review`.
+It displays and atomically writes all paginated review bodies and commit
+associations to `$HAM_RUN_DIR/reviews-full.json`, including complete findings.
+Use it before acting on the final review and to expand truncated context;
+review-head matching and merge eligibility remain unchanged.
+Read-only shell syntax failures (including Bash eval status 1 or 2 with a
+syntax diagnostic), missing executables and command-not-found status 127 use
+`hammer-command-error`: retry once, then return 75 and record an existing
+retryable deferral. Correct the local command before another attempt.
+The controller also syntax-checks a closure script before executing it, so a
+parser error before `ham_read` is reached has the same retryable reason.
+Helper attempts retain child stderr and spawn errors (including the missing
+executable name). Controller preflight logs Bash's parser diagnostic alongside
+the retryable reason, preserving its line number and unexpected token.
+Real read refusals retain their named terminal semantics.
 Child exit statuses, including 142 and signal-derived statuses, are preserved;
-only a timeout imposed by the runner returns 124.
+only a timeout imposed by the runner returns 124; local read command errors
+use the retryable status 75 described above.
 The runner waits for child exit, allowing five seconds for TERM cleanup before
 KILL, and keeps children in the controller's process group. Failed read output
 cannot mix with a successful retry. Child early-failure audits are provisional
@@ -1371,15 +1415,41 @@ posted-review step deadlines through `src/load-aware-timeout.mjs`. All quota
 readers share a 45-second nominal budget. The existing graded CPU
 corroboration curve supplies up to 6x patience by default under contention;
 CPU samples (including failures) and timeout policy are cached for five seconds.
-The synchronous `ps` sample has a one-second budget to limit daemon event-loop
-stalls; failed attempts already have a safe fallback. If it fails or returns non-finite
-data, the last successful CPU reading is reused while it is under 60 seconds
+On macOS, native `os.cpus()` counters supply interval deltas. A cold baseline,
+changed CPU count or baseline older than 60 seconds triggers one synchronous
+`ps` attempt with a one-second budget, so one-shot timeout CLIs can corroborate
+load immediately. The baseline is saved before that attempt; even if `ps` is
+denied, the next sample interval can use native deltas without another spawn.
+Other platforms retain the synchronous `ps` sample with its one-second budget.
+Failed attempts already have a safe fallback.
+If sampling fails or returns non-finite data, the last successful CPU reading
+is reused while it is under 60 seconds
 old; otherwise the full load-based multiplier applies. Failed attempts do not
-refresh the successful reading's age. Substitution warnings are limited to one
-per minute per process. A measured zero still supplies zero corroboration,
+refresh the successful reading's age. CPU substitution diagnostics are silent
+by default. Set
+`LOAD_AWARE_TIMEOUT_DEBUG=1` to emit them to stderr, limited to one per minute
+per process; the same flag enables timeout-policy config-fallback diagnostics.
+Leave it unset for CLIs with exact stderr contracts. This default also applies
+to daemons on all platforms: no automatic health field or metric reports
+degradation. For operator diagnosis, enable the flag on an owned daemon run and
+inspect CPU-substitution and config-fallback messages separately. To verify
+native sampling directly on macOS, run this read-only probe from the deployed
+checkout, with debug enabled:
+
+```bash
+LOAD_AWARE_TIMEOUT_DEBUG=1 node --input-type=module -e 'import { hostCpuBusyPercent } from "./src/load-aware-timeout.mjs"; console.log("cold", hostCpuBusyPercent()); setTimeout(() => console.log("warm", hostCpuBusyPercent()), 5100)'
+```
+
+Retain a finite warm reading; quiet stderr alone cannot prove sampler health.
+The cold reading should also be finite where `ps` is permitted. Separately run
+`LOAD_AWARE_TIMEOUT_DEBUG=1 node bin/load-aware-timeout.mjs 360` and retain the
+numeric budget plus any substitution/config diagnostics (an idle host may skip
+CPU sampling entirely). Repeat exact-stderr validation with the flag unset.
+A measured zero still
+supplies zero corroboration,
 including when reused during failures for up to 60 seconds; this can retain
-nominal timeouts while contention rises. Hosts where `/bin/ps` is permanently
-missing or inaccessible use the full load curve under load once any last-good
+nominal timeouts while contention rises. Hosts whose CPU sampling is permanently
+unavailable use the full load curve under load once any last-good
 reading expires (immediately if none exists), subject to the configured cap.
 
 Set `adversarial.reviewer.load_aware.enabled: false` in `config.local.yaml` to restore
@@ -1390,8 +1460,9 @@ extension point accepted by the Python loader and its shell wrapper; do not add
 a top-level `timeouts` root. The Node watcher owns validation and consumption of
 these leaves; Python and shell tolerate them but do not expose the timeout policy
 in their resolved config or shell exports. An invalid or unreadable config uses
-the default policy for five seconds and emits one warning per refresh interval, so timeout
-computations do not interrupt GitHub reads or lock/quota bookkeeping.
+the default policy for five seconds and, only with the debug flag enabled,
+emits one warning per refresh interval, so timeout computations do not interrupt
+GitHub reads or lock/quota bookkeeping.
 
 Posted-review admission uses the nominal step deadline regardless of host load.
 Scaled handler waits are capped at the remaining phase budget (including time
@@ -4761,12 +4832,52 @@ A blocking finding may authorize a specific reversal. A non-blocking finding may
 also authorize one only when the effective `strict_non_blocking_remediation` policy
 is enabled; advisory findings in non-strict mode cannot waive preservation.
 Before changing author-introduced lines, the hammer runs
-`bin/hammer-edit-plan.mjs OWNER/REPO PR REVIEW_ID PLAN_JSON`. The JSON plan names
-`reviewedHead`, `kind`, one-based `findingNumber`, `editKind` (`author-lines` or
-`additive`), and the affected `path`, `startLine`, `endLine` in reviewed coordinates.
+`bin/hammer-edit-plan.mjs OWNER/REPO PR REVIEW_ID PLAN_JSON --reviewed-head SHA`.
+The prompt substitutes the controller-pinned `<<REVIEWED_SHA>>` in the option,
+including when running as the database owner. Literal plan examples omit the
+optional head; for a cited review on another head, supply that review's
+`commit_id` as `reviewedHead`.
+Without that option the CLI reads `HAM_REVIEWED_SHA`; a missing or invalid pin
+refuses with `review-evidence-invalid` before reading or parsing the plan file.
+Omitted, non-string or empty (including
+whitespace-only) plan `reviewedHead` values are filled from the pin in memory.
+A nonempty string must be a valid 40-hex SHA; the CLI normalizes it to lowercase
+before passing it to the checker, even when it differs from the pin. Malformed
+nonempty strings refuse rather than falling back. The authoritative reviewer
+login, review state and review `commit_id` matching the resolved plan head remain
+mandatory. An omitted head therefore works only for a review on the pinned head.
+`--help` and `-h` print usage and accepted shapes with exit 0 and perform no plan
+check, review read, policy read or backlog capture. Real helper failures retain
+their existing outcomes. Help is handled at the CLI entry point, separately
+from the plan-check exit-code mapping.
+The JSON plan names `editKind` (`author-lines`, `additive` or `in-place`), and the
+affected `path`, `startLine`, `endLine` in reviewed coordinates. Cited plans also
+name `kind` and one-based `findingNumber`. An uncited in-place CI test repair
+instead supplies `requiredCiRepair: true` and omits both citation fields. Other edit kinds receive in-place-only correction feedback. Cited plans reject `requiredCiRepair: true` for every edit kind, preserving applicable policy refusals.
+In-place repairs preserve behavior; they do not grant reversal authority.
+`node bin/hammer-edit-plan.mjs --help` prints complete JSON shapes offline;
+the prompt retains the field rules and directs the hammer to that usage output.
 The helper reads the review and effective policy and shares `checkReversalFinding`
-with the primary-change gate. Exit 0 allows the planned edit; exit 20 means no edit:
-the advisory finding was captured in the existing findings backlog with a one-line
+with the primary-change gate. Exit 21 is a shape-only refusal with an expected-shape message: make no edit,
+correct the plan once and rerun the helper. The prompt permits one correction
+per run across all plans; a second shape refusal exits 1. Exit 21 here is never
+a verify-head or wait-CI conflict. The first shape refusal exits the shell block
+without editing. A valid cited non-blocking `in-place` plan receives exit 21 with
+`correctable: allowed editKinds for kind=non-blocking are additive|author-lines (author-lines only where checkReversalFinding authorizes)`.
+Re-plan as `additive`; this grants no in-place permission, even in strict mode
+or with `requiredCiRepair`. Missing or invalid finding citations remain terminal.
+Blocking cited in-place CI plans retain their citations and are evaluated for
+policy and readable finding evidence before shape correction.
+An otherwise well-formed, authorized `author-lines` plan outside the cited
+finding's ranges receives exit 21 with
+`correctable: plan region <path>:<start>-<end> is outside the cited finding's ranges <list>; re-plan within a cited range, or as editKind=additive if no existing author line is removed or replaced`.
+The list includes each cited path and range for that finding. Re-plan within
+one cited range or use a genuinely additive fix within the same correction
+budget. The uncovered author-line edit is never allowed. Missing authority,
+unreadable finding ranges and other policy refusals retain their outcomes.
+Review evidence and policy refusals retain their terminal or deferring outcomes.
+Exit 0 allows the planned edit; exit 20 means no edit:
+the shell prints NO EDIT and exits 20; the advisory finding was captured in the existing findings backlog with a one-line
 deferral reason. Capture failure stops remediation rather than losing the finding.
 The helper runs as the existing review-state database owner when the hammer has
 a different uid. Before capture it checks ownership of the database, directory,
@@ -8360,11 +8471,12 @@ receipt. No worker label change, service action or forced dispatch is needed.
 ## R07 stop supersession (STOPSTALE-02)
 
 `src/pr-next-action.mjs` routes deterministic automated stops, retry-exhausted,
-lifetime-exhausted and hammer-final-no-merge through one supersession helper.
+lifetime-exhausted, hammer-final-no-merge and R08 terminal no-merge with
+retries remaining through one supersession helper.
 A strictly newer exact-head review must be merge-eligible under the current
 strict-mode policy. Normal row selection then runs with hammer history set
 aside, accepting only `daemon-merge` / `daemon`; any other result retains the
-original R07 reason, attempt and recovery ownership. Decision refs include
+original stop or retry reason, attempt and ownership. Decision refs include
 `stop-superseded-by-exact-head-review` and `stop-reason:<original reason>`.
 
 Freshness is anchored to durable evidence: `controls.stop.recordedAt`, an
@@ -8375,6 +8487,10 @@ not change ledger storage. Missing, invalid or non-earlier times fail closed.
 An observation clock or a repeatedly updated ledger timestamp grants no escape.
 Caps remain binding for hammer dispatch; selection neither resets nor refunds
 any budget. Automated hold labels and earlier safety/ownership rows still win.
+An exact-head clean review after a terminal tooling stop can therefore return
+to the daemon without another hammer run. The daemon still reads the live
+head, required checks, primary-change evidence and attestation, and acquires
+the shared merge lease. A strict-mode non-blocking finding cannot use this path.
 
 STOPSTALE-03 preserves `alertedAt` when an alert repeats during the same
 lifetime suppression, including across reviewed-head changes. Series and target

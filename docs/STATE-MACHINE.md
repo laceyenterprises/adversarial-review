@@ -1549,18 +1549,19 @@ projection adds `operator-hold` and `done` evaluation outputs; durable launch,
 lease and review lifecycle states are unchanged. See the
 [adoption runbook](RUNBOOK-ama-closure.md#closer-and-recovery-adoption-nxa-05).
 
-STOPSTALE-01 / STOPSTALE-02 share one daemon-only supersession path for
+STOPSTALE-01 / STOPSTALE-02 / CLOSERREARM-01 share one daemon-only supersession path for
 R07 deterministic stops, retry exhaustion, lifetime exhaustion and terminal
-hammer no-merge. A strictly newer exact-head settled review must pass the
+hammer no-merge, and R08 terminal no-merge with retries remaining.
+A strictly newer exact-head settled review must pass the
 current findings policy (including strict mode) and ordinary daemon gates.
 Freshness uses the stop record time, an active cap's existing alert time, or
-the terminal launch/retry times; missing or invalid time retains R07. The
+the terminal launch/retry times; missing or invalid time retains the stop or retry owner. The
 decision records `stop-superseded-by-exact-head-review` and
 `stop-reason:<superseded reason>`. Red, pending, conflicting or unproven heads
-retain recovery ownership. Hammer caps and cap-ledger contents are unchanged;
-only the daemon may be selected. The daemon re-fetches primary-change evidence
-and requires its predicate before every merge attempt. Durable lifecycle states
-are unchanged.
+retain the original stop or retry owner and action. Hammer caps and cap-ledger
+contents are unchanged; only the daemon may be selected. The daemon re-fetches
+primary-change evidence and requires its predicate before every merge attempt.
+Durable lifecycle states are unchanged.
 
 STOPSTALE-03 keeps the original alert time during a continuous cap suppression,
 including lifetime suppression across review heads. New series/target episodes
@@ -1906,6 +1907,21 @@ guards still apply, and an already captured prompt path must remain unchanged.
 |---|---|---|
 | **Hammer (common)** | Final review carries findings (blocking, or non-blocking under the default strict posture); its remediation may also require a rebase or CI repair | The watcher dispatches exactly one hammer terminal-remediation worker (`templates/hammer-prompt.md`, via `src/ama/dispatch-closer.mjs`). In the default `watcher.ama_hammer_dispatch_mode: inline` mode, the posted-review phase awaits that `hq dispatch` attempt. In `background` mode, the phase submits the same closer call to a bounded in-process queue keyed by PR@head with durable pending intent under `data/ama-hammer-background/` (recovered through normal guards on the first adoption phase after restart), returns retained ownership (`ama-pending`) with reason `ama-closer-dispatch-backgrounded`, and lets the closer's lease/dispatch-record guards prevent duplicate launches on later ticks. The hammer remediates, rebases only when GitHub reports a conflict or strict/unknown BEHIND, holds the required-checks-plus-changed-surface-tests merge bar, waits out GitHub required checks on the exact post-remediation head inside a bounded remote-CI window, and merges under its own lease with `--match-head-commit`. LEASEFAIR-01 releases the lease during the first CI wait. HAMRESUMEOWED-01 retains CLEAN and known non-strict MERGEABLE BEHIND heads, including overlapping-file base advances; only GitHub conflict or strict/unknown BEHIND requires rebase. LEASEFAIR-02 handles a required rebase with one in-run rebase and at most `HAM_CI_RETRY_WAIT_SECONDS` (default/minimum 120) wall-clock seconds of exact-head CI while retaining that lease, then rebuilds audit and predicate authority. |
 | **Daemon inline merge (rare)** | Final review is fully clean — zero blocking AND zero non-blocking findings, both classifications known — or a current-head `operator-approved` overrides the verdict and finding gates; green required checks (or explicit no-CI bootstrap evidence), a MERGEABLE PR, and a live validated head remain mandatory | The watcher daemon clicks merge inline through a bounded `gh pr merge --match-head-commit` subprocess under the shared merge lease (`src/ama/daemon-merge.mjs`). An approval override records operator evidence and distinct closure authority in the audit. No agent is spawned. Dispositions: `merged`, `failed-closed` (conflicts, real CI failures and stale heads fall through to capped HAM; a current MERGEABLE clean head waiting on empty/no-CI evidence or cancelled recovery returns to the merge-agent path), `deferred` (lease contention; retry next tick), `not-taken` (a current MERGEABLE zero-finding settled head waiting on empty/no-CI evidence or cancelled recovery returns to the merge path; remediable failures and reviews with findings fall through to HAM). Protective predecessor and revoked-approval holds remain authoritative. |
+
+HAMCONFLICTOWNER-01: a closer terminal audit with
+`reason: conflict-primary-unproven` at the live head transfers conflict work
+to the existing follow-up remediation queue before closer retry/cap selection.
+The stable work order deduplicates across closer attempts and terminal/archive
+queue moves. Its durable `closureHandoff` receipt names the reason and required
+full review; `repo`, `prNumber`, `revisionRef` and `jobId` name the owner.
+A pending matching job selects `remediate` / `remediator` through admission
+delays, while existing live custody and unknown-ownership fences retain
+precedence. `src/pr-next-action.mjs` selects this row, as recorded by
+`closure-owner.06` in `state-machines.json`. A new builder head returns to normal
+full review. Missing provenance or enqueue failure retains the handoff for a
+later watcher pass.
+`conflict-primary-timeout` remains retryable; the proof and publish fence are
+unchanged. See [the queue contract](data-model/follow-up-jobs.md#conflict-primary-handoff-hamconflictowner-01).
 
 Merge lease scheduling uses FIFO arrival across daemon and closer roles.
 A closer's non-terminal no-merge release retains the PR's original arrival
@@ -2274,10 +2290,18 @@ Key control points:
   advisory findings cannot authorize reversals. File/Lines must cover each reverted
   base line. Before author-line edits, `bin/hammer-edit-plan.mjs` uses the gate's
   shared finding-admissibility predicate and live effective policy. Inadmissible
-  advisory edits are deferred without editing and enrolled through the existing
-  findings backlog with a one-line reason; additive fixes changing no author line
+  advisory `author-lines` edits are deferred without editing and enrolled through
+  the existing findings backlog with a one-line reason; additive fixes changing no author line
   remain allowed. A failed backlog capture stops the edit. Blocking and strict-mode
   reversals retain final gate verification and the existing lifecycle.
+  A valid cited non-blocking `in-place` plan instead receives correctable
+  shape feedback (exit 21) to re-plan as `additive`, in either strict mode.
+  This never permits a non-blocking in-place edit.
+  An otherwise authorized `author-lines` plan outside its finding's cited ranges
+  receives exit 21 with those ranges. Within the existing one-correction budget,
+  re-plan within a cited range or as `additive` without removing or replacing
+  author lines. The uncovered author-line plan never allows an edit; terminal
+  evidence and policy outcomes remain unchanged.
   HAMLINES-01 reads all cited ranges, including legacy approximate,
   multi-range and symbol-qualified forms; approximate endpoints stay exact.
   Leading range lists stop before explanatory notes; numbers in prose or symbol

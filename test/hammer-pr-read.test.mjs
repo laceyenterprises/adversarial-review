@@ -5,14 +5,108 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fetchHammerPr } from '../src/hammer-pr-read.mjs';
+import { fetchHammerPr, writeHammerFullReviews } from '../src/hammer-pr-read.mjs';
 import { classifyCheckRollup } from '../src/checks-summary.mjs';
 import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
+import { parseReviewFindings } from '../src/kernel/review-findings.mjs';
 
 const head = 'a'.repeat(40);
 const label = { id: 123, node_id: 'LA_fixture', name: 'operator-hold', color: 'ff0000' };
 const pr = { state: 'open', head: { sha: head }, labels: [label], mergeable: true };
+// CLI tests own a fake gh executable and must never mint a host credential.
+const cliEnv = { ...process.env, HAMMER_LACEY_GH_TOKEN: 'synthetic-offline-token',
+  HAMMER_LACEY_GH_TOKEN_EXPIRES_AT: '2099-01-01T00:00:00Z',
+  HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: '', HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND: '' };
 
+test('canonical full-review read preserves paginated bodies, findings and commit associations in the run file', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-full-review-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const body = `Final review\n${'full finding\n'.repeat(300)}
+## Blocking issues
+- **Preserve complete review**
+  - **File:** \`src/example.mjs\`
+  - **Lines:** 2
+  - **Problem:** A truncated review loses the required correction.
+## Non-blocking issues
+- None.
+## Verdict
+Request changes
+`;
+  const earlierHead = 'b'.repeat(40);
+  const calls = [];
+  const text = await writeHammerFullReviews('fixture/repo', 42, {
+    env: { HAM_RUN_DIR: dir }, read: async path => {
+      calls.push(path);
+      if (!path.includes('/reviews?')) return pr;
+      const review = { id: 101, body, commit_id: head, state: 'COMMENTED' };
+      return path.endsWith('page=1')
+        ? Array.from({ length: 100 }, (_, id) => ({ ...review, id: id + 1, commit_id: earlierHead }))
+        : [review];
+    },
+  });
+  const rows = JSON.parse(text);
+  assert.equal(rows.length, 101);
+  assert.equal(rows[100].body, body);
+  assert.deepEqual(rows[0].commit, { oid: earlierHead });
+  assert.deepEqual(rows[100].commit, { oid: head });
+  const findings = parseReviewFindings(rows[100].body);
+  assert.equal(findings.findingsCount, 1);
+  assert.equal(findings.blocking.findings[0].file, '`src/example.mjs`');
+  assert.equal(findings.blocking.findings[0].lines, '2');
+  assert.equal(readFileSync(join(dir, 'reviews-full.json'), 'utf8'), text);
+  assert.deepEqual(calls, [
+    'repos/fixture/repo/pulls/42',
+    'repos/fixture/repo/pulls/42/reviews?per_page=100&page=1',
+    'repos/fixture/repo/pulls/42/reviews?per_page=100&page=2',
+  ]);
+});
+
+test('full-review prompt routes to the canonical helper and its reference appendix', async () => {
+  const prompt = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
+  assert.match(prompt, /ham_read review-read .*bin\/hammer-pr-read\.mjs.*--full-review/);
+  assert.doesNotMatch(prompt, /ham_read review-read <read-only command/);
+  const { composeCloserPrompt } = await import('../src/ama/dispatch-closer.mjs');
+  const rendered = composeCloserPrompt({
+    prUrl: 'https://github.com/acme/repo/pull/42', repo: 'acme/repo', prNumber: 42,
+    reviewedSha: head, riskClass: 'medium', mergeMethod: 'squash',
+    requiredGateContext: 'adversarial-review', auditPath: '/tmp/hammer-audit.json',
+    hqRoot: '/tmp/hq', rootDir: '/tmp/adversarial-review', hqOwnerUser: 'tester', reviewedBy: 'reviewer',
+    reviewer: 'reviewer', dispatchedAt: '2026-09-27T00:00:00Z', amaTrailers: '',
+    templateBody: prompt, scratchDir: '/fixture/scratch',
+  });
+  assert.match(rendered, /Appendix G1/);
+});
+
+test('full-review CLI displays the canonical file without an ad-hoc formatting command', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-full-review-cli-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const review = { id: 1, body: 'Final review: synthetic complete finding', commit_id: head };
+  writeFileSync(join(dir, 'gh'), `#!${process.execPath}
+const path = process.argv[3];
+if (path === 'repos/fixture/repo/pulls/42') console.log(${JSON.stringify(JSON.stringify(pr))});
+else if (path.includes('/reviews?')) console.log(${JSON.stringify(JSON.stringify([review]))});
+else process.exit(1);
+`, { mode: 0o755 });
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL('../bin/hammer-pr-read.mjs', import.meta.url)),
+    'fixture/repo', '42', '--full-review'], {
+    encoding: 'utf8', timeout: 5000,
+    env: { ...cliEnv, PATH: `${dir}:${process.env.PATH}`, HAM_RUN_DIR: dir,
+      GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json') },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(join(dir, 'reviews-full.json'), 'utf8'), result.stdout);
+  assert.equal(JSON.parse(result.stdout)[0].body, review.body);
+  assert.deepEqual(JSON.parse(result.stdout)[0].commit, { oid: head });
+});
+
+test('a failed full-review read publishes no partial review file', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-full-review-failure-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await assert.rejects(writeHammerFullReviews('fixture/repo', 42, {
+    env: { HAM_RUN_DIR: dir }, read: async () => { throw new Error('synthetic read refusal'); },
+  }), /synthetic read refusal/);
+  assert.deepEqual(readdirSync(dir), []);
+});
 test('a budget deferral preserves the ETag for the next authenticated read', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-pr-etag-deferral-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -71,7 +165,7 @@ test('REST snapshot preserves the lease green assertion for runs and contexts', 
     writeFileSync(join(dir, 'pre-acquire-checks.json'), JSON.stringify(value));
     return spawnSync('/bin/bash', ['-c', `${helper}\nham_lease_snapshot_green`], {
       encoding: 'utf8', timeout: 10000,
-      env: { ...process.env, HAM_NODE_BIN: process.execPath, POST_REMEDIATION_SHA: head },
+      env: { ...cliEnv, HAM_NODE_BIN: process.execPath, POST_REMEDIATION_SHA: head },
     });
   };
   assert.equal(green(snapshot).status, 0);
@@ -112,7 +206,7 @@ else process.exit(1);
 `, { mode: 0o755 });
     const result = spawnSync(process.execPath, [fileURLToPath(new URL('../bin/hammer-pr-read.mjs', import.meta.url)), 'fixture/repo', '42', ...args], {
       encoding: 'utf8', timeout: 5000,
-      env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json') },
+      env: { ...cliEnv, PATH: `${dir}:${process.env.PATH}`, GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json') },
     });
     assert.ifError(result.error);
     assert.equal(result.status, 0, result.stderr);
@@ -130,7 +224,7 @@ test('hammer PR CLI preserves synchronous jq exit status', t => {
   const result = spawnSync(process.execPath, [fileURLToPath(new URL('../bin/hammer-pr-read.mjs', import.meta.url)),
     'fixture/repo', '42', '--json', 'headRefOid', '--jq', 'halt_error(7)'], {
     encoding: 'utf8', timeout: 5000,
-    env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json') },
+    env: { ...cliEnv, PATH: `${dir}:${process.env.PATH}`, GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json') },
   });
   assert.ifError(result.error);
   assert.equal(result.status, 7, result.stderr);
@@ -143,7 +237,7 @@ test('hammer PR CLI preserves alarm status for bounded visibility retries', t =>
   const result = spawnSync(process.execPath, [fileURLToPath(new URL('../bin/hammer-pr-read.mjs', import.meta.url)),
     'fixture/repo', '42', '--json', 'headRefOid'], {
     encoding: 'utf8', timeout: 5000,
-    env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json') },
+    env: { ...cliEnv, PATH: `${dir}:${process.env.PATH}`, GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json') },
   });
   assert.ifError(result.error);
   assert.equal(result.status, 142, result.stderr);
@@ -283,7 +377,7 @@ test('QCP-08: the hammer PR CLI revalidates through gh, records the 304 budget a
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const runDir = join(dir, 'run'); mkdirSync(runDir);
   writeFileSync(join(dir, 'gh'), `#!${process.execPath}
-const fs = require('node:fs');
+const fs = await import('node:fs');
 const [, , verb, path, ...flags] = process.argv;
 const resources = ${JSON.stringify(headResources(head))};
 const resource = resources[path];
@@ -304,7 +398,7 @@ if (notModified) { process.stderr.write('gh: HTTP 304\\n'); process.exit(1); }
   const budget = join(dir, 'budget.json');
   const run = () => spawnSync(process.execPath, [fileURLToPath(new URL('../bin/hammer-pr-read.mjs', import.meta.url)),
     'fixture/repo', '42'], { encoding: 'utf8', timeout: 10000,
-    env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, HAM_RUN_DIR: runDir, GHO_RATE_LIMIT_SHARED_STATE_PATH: budget } });
+    env: { ...cliEnv, PATH: `${dir}:${process.env.PATH}`, HAM_RUN_DIR: runDir, GHO_RATE_LIMIT_SHARED_STATE_PATH: budget } });
   const first = run();
   assert.equal(first.status, 0, first.stderr);
   const second = run();

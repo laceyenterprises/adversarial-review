@@ -232,3 +232,22 @@ test('compiled schema is reused and frozen, with independent mutable defaults pe
     assert.equal(third.get('roles.adversarial.merge_authority.worker_class_fallback').includes('test-only'), false);
   });
 });
+
+test('CNS bounded dispatch policy parses with shadow defaults and rejects authority widening', () => {
+  withTop((topPath) => {
+    const config = loadConfig({ topPath, env: {} });
+    assert.equal(config.get('sentinel.cns.auto_dispatch.mode'), 'shadow');
+    assert.deepEqual(config.get('sentinel.cns.auto_dispatch.allow_families'), ['closers.*', 'host.leak.*', 'capacity.*']);
+    assert.deepEqual(config.get('sentinel.cns.auto_dispatch.deny_families'), []);
+    assert.equal(config.get('sentinel.cns.auto_dispatch.minimum_severity'), 'sev2');
+    assert.equal(config.get('sentinel.cns.auto_dispatch.worker_class'), 'claude-code');
+    assert.equal(config.get('sentinel.cns.auto_dispatch.priority'), 'normal');
+    assert.equal(config.get('sentinel.cns.auto_dispatch.hourly_cap'), 6);
+    assert.equal(config.get('sentinel.cns.auto_dispatch.daily_token_budget'), 400000);
+    assert.equal(config.get('sentinel.cns.auto_dispatch.worker_token_budget'), 150000);
+    assert.equal(config.get('sentinel.cns.auto_dispatch.cooldown_seconds'), 3600);
+    for (const [key, value] of [['mode', 'invalid'], ['priority', 'critical'], ['worker_class', 'worker']]) {
+      assert.throws(() => validateSchema(nested(['sentinel', 'cns', 'auto_dispatch', key], value)));
+    }
+  });
+});

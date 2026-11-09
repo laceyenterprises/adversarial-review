@@ -1,0 +1,29 @@
+# Operator-owned activation receipt; no automated live change.
+operator_steps:
+  - description: >-
+      After the owned submodule floats and watcher/follow-up processes restart
+      through the normal deployment procedure, SRE retains loaded revisions
+      and runs the read-only cold/warm hostCpuBusyPercent probe in the closure
+      runbook with LOAD_AWARE_TIMEOUT_DEBUG=1 on the macOS host. Require a finite
+      warm reading after at least five seconds, and a finite cold reading where
+      ps is permitted. Retain any substitution and config-fallback diagnostics;
+      a null warm reading fails sampler acceptance even when stderr is quiet.
+      Also retain one owned daemon run with debug enabled and no continuing
+      substitution or config-fallback diagnostics after warmup, plus the output
+      and diagnostics of LOAD_AWARE_TIMEOUT_DEBUG=1 node bin/load-aware-timeout.mjs
+      360 (an idle host may skip sampling in this CLI).
+      Separately retain a natural hammer run with LOAD_AWARE_TIMEOUT_DEBUG unset
+      and no repeated CPU sample unavailable messages on helper steps. Confirm
+      PR 1776's closer passes local validation for
+      test/finalization-queue-gsr.test.mjs on the macOS host. If that PR has
+      already settled or the test is absent on its current head, record that
+      fact and retain an equivalent current-head exact-stderr validation
+      receipt. Record loaded revisions and evidence before acknowledging.
+      This worker performs no float, restart, closer dispatch or live change.
+    run_as: designated SRE operator
+    command: >-
+      /usr/bin/printf '%s\n' 'LOADAWARESTDERR-01: after normal deployment, retain finite cold/warm CPU probe readings, debug-enabled daemon and sizing CLI diagnostics, and separate debug-unset hammer/closer exact-stderr validation evidence per the closure runbook.'
+actions: []
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

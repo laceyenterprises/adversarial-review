@@ -2275,10 +2275,13 @@ Key control points:
   advisory findings cannot authorize reversals. File/Lines must cover each reverted
   base line. Before author-line edits, `bin/hammer-edit-plan.mjs` uses the gate's
   shared finding-admissibility predicate and live effective policy. Inadmissible
-  advisory edits are deferred without editing and enrolled through the existing
-  findings backlog with a one-line reason; additive fixes changing no author line
+  advisory `author-lines` edits are deferred without editing and enrolled through
+  the existing findings backlog with a one-line reason; additive fixes changing no author line
   remain allowed. A failed backlog capture stops the edit. Blocking and strict-mode
   reversals retain final gate verification and the existing lifecycle.
+  A valid cited non-blocking `in-place` plan instead receives correctable
+  shape feedback (exit 21) to re-plan as `additive`, in either strict mode.
+  This never permits a non-blocking in-place edit.
   HAMLINES-01 reads all cited ranges, including legacy approximate,
   multi-range and symbol-qualified forms; approximate endpoints stay exact.
   Leading range lists stop before explanatory notes; numbers in prose or symbol

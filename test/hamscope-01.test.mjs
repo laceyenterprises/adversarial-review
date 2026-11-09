@@ -97,7 +97,7 @@ test('in-place CI and blocking repairs do not require reversal coverage', () => 
   const blocking = historyReview();
   assert.equal(checkHammerEditPlan(blocking, { ...plan, reviewedHead: blocking.commit_id,
     editKind: 'in-place', kind: 'blocking', startLine: 45, endLine: 45 }).action, 'allow');
-  assert.equal(checkHammerEditPlan(review, { ...plan, editKind: 'in-place' }).action, 'defer');
+  assert.equal(checkHammerEditPlan(review, { ...plan, editKind: 'in-place' }).action, 'correct');
 });
 
 test('advisory additive test is allowed and does not defer the finding', async t => {

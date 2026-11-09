@@ -5,8 +5,8 @@ import { checkReversalFinding } from './reversal-finding.mjs';
 
 export function checkHammerEditPlan(review, plan, { strictNonBlockingRemediation = false } = {}) {
   const refuse = reason => ({ action: 'stop', reason });
-  const correct = (reason, expectedShape) => ({ action: 'correct', reason,
-    message: `Do not edit. Correct the plan once: ${expectedShape}` });
+  const correct = (reason, expectedShape, prefix = 'Do not edit. Correct the plan once: ') => ({
+    action: 'correct', reason, message: `${prefix}${expectedShape}` });
   const locationValid = () => typeof plan.path === 'string' && plan.path.trim()
     && Number.isSafeInteger(plan.startLine) && Number.isSafeInteger(plan.endLine)
     && plan.startLine >= 1 && plan.endLine >= plan.startLine;
@@ -36,6 +36,11 @@ export function checkHammerEditPlan(review, plan, { strictNonBlockingRemediation
     || !parsed.findings[plan.kind]?.[plan.findingNumber - 1]) return refuse('finding-evidence-invalid');
   if (!['author-lines', 'additive', 'in-place'].includes(plan.editKind)) {
     return correct('edit-kind-invalid', 'editKind must be author-lines, additive or in-place.');
+  }
+  if (plan.kind === 'non-blocking' && plan.editKind === 'in-place') {
+    return correct('edit-kind-invalid',
+      'allowed editKinds for kind=non-blocking are additive|author-lines (author-lines only where checkReversalFinding authorizes)',
+      'correctable: ');
   }
   const admissible = checkReversalFinding(parsed, plan.kind, plan.findingNumber, strictNonBlockingRemediation);
   if (plan.editKind !== 'additive' && !admissible.ok) {

@@ -52,38 +52,75 @@ const LAST_GOOD_CPU_MAX_AGE_MS = 60_000;
 const SUBSTITUTION_LOG_INTERVAL_MS = 60_000;
 const HOST_CPU_COUNT = os.cpus()?.length || 1;
 
+function debugDiagnostic(message) {
+  if (process.env.LOAD_AWARE_TIMEOUT_DEBUG === '1') console.warn(message);
+}
+
 // Cache failures too: an unreadable ps must not spawn again on every call.
 export function createCpuBusySampler({
   execFileSyncImpl = (...args) => execFileSync(...args),
+  platform = () => os.platform(),
+  cpus = () => os.cpus(),
   nowMs = () => performance.now(),
   cpuCount = HOST_CPU_COUNT,
-  warn = message => console.warn(message),
+  warn = debugDiagnostic,
 } = {}) {
   let sampledAt = -Infinity;
   let cached = null;
   let lastGood = null;
   let lastGoodAt = -Infinity;
   let warnedAt = -Infinity;
+  let previousCpu = null;
+  let previousCpuAt = -Infinity;
   return function sample() {
     let now = nowMs();
     if (now - sampledAt >= SAMPLE_INTERVAL_MS) {
       cached = null;
       try {
-        const out = execFileSyncImpl('/bin/ps', ['-A', '-o', '%cpu='], {
-          encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: CPU_SAMPLE_TIMEOUT_MS,
-        });
-        let total = 0;
-        let seen = false;
-        for (const line of out.split(/\r?\n/)) {
-          const raw = line.trim().replace(',', '.');
-          if (!raw) continue;
-          const value = Number(raw);
-          if (!Number.isFinite(value)) throw new Error('Invalid CPU sample');
-          total += value;
-          seen = true;
+        if (platform() === 'darwin') {
+          // Native counters avoid spawning ps, which can be denied on a
+          // contained macOS host. A cold or stale baseline falls back until
+          // the next interval, without sleeping on the caller's event loop.
+          const counters = cpus();
+          if (!counters?.length) throw new Error('CPU counters unavailable');
+          const current = counters.map(({ times }) => {
+            const values = ['user', 'nice', 'sys', 'idle', 'irq'].map(key => times?.[key]);
+            if (values.some(value => !Number.isFinite(value) || value < 0)) {
+              throw new Error('Invalid CPU counters');
+            }
+            return values;
+          });
+          const previous = previousCpu?.length === current.length
+            && now - previousCpuAt <= LAST_GOOD_CPU_MAX_AGE_MS ? previousCpu : null;
+          previousCpu = current;
+          previousCpuAt = now;
+          if (!previous) throw new Error('CPU baseline unavailable');
+          let total = 0;
+          let idle = 0;
+          for (const [index, counter] of current.entries()) {
+            const deltas = counter.map((value, field) => value - previous[index][field]);
+            if (deltas.some(value => value < 0)) throw new Error('CPU counters reset');
+            total += deltas.reduce((sum, value) => sum + value, 0);
+            idle += deltas[3];
+          }
+          if (total > 0 && Number.isFinite(total)) cached = 100 * (1 - idle / total);
+        } else {
+          const out = execFileSyncImpl('/bin/ps', ['-A', '-o', '%cpu='], {
+            encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: CPU_SAMPLE_TIMEOUT_MS,
+          });
+          let total = 0;
+          let seen = false;
+          for (const line of out.split(/\r?\n/)) {
+            const raw = line.trim().replace(',', '.');
+            if (!raw) continue;
+            const value = Number(raw);
+            if (!Number.isFinite(value)) throw new Error('Invalid CPU sample');
+            total += value;
+            seen = true;
+          }
+          const busy = total / cpuCount;
+          if (seen && Number.isFinite(busy)) cached = Math.max(0, Math.min(100, busy));
         }
-        const busy = total / cpuCount;
-        if (seen && Number.isFinite(busy)) cached = Math.max(0, Math.min(100, busy));
       } catch { /* Reuse fresh evidence, otherwise grant full load-based patience. */ }
       // Cache attempts from completion so a slow failure cannot cause a hot retry loop.
       now = nowMs();
@@ -134,7 +171,7 @@ function timeoutPolicy() {
   } catch {
     // Timeout sizing must remain available when any part of the shared config
     // is invalid. Cache failures too, bounding config reads and diagnostics.
-    console.warn('[load-aware-timeout] config unavailable; using default timeout policy for 5s');
+    debugDiagnostic('[load-aware-timeout] config unavailable; using default timeout policy for 5s');
   }
   policyCache = { path, at: now, value };
   return value;
@@ -175,7 +212,7 @@ export function corroboratedLoadAwareMultiplier(
  * @param {Object} [opts]
  * @param {number} [opts.loadAvg1m]   Override 1m loadavg (else os.loadavg()[0]).
  * @param {number} [opts.cpuCount]    Override CPU count (else os.cpus().length).
- * @param {number} [opts.cpuBusyPercent] Override CPU busy percent (else sampled from ps).
+ * @param {number} [opts.cpuBusyPercent] Override CPU busy percent (else sampled from host counters or ps).
  * @param {number} [opts.maxSeconds]  Absolute clamp (default 3600).
  * @returns {number} Effective timeout (policy caps never shrink the nominal).
  * @throws {Error} when baseSeconds is not a positive finite number.

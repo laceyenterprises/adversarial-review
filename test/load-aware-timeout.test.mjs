@@ -211,7 +211,7 @@ test('unavailable or non-finite CPU uses the load curve and preserves policy con
 for (const unavailable of [null, '', 'NaN\n', 'Infinity\n', '40\ninvalid\n', '1e308\n1e308\n']) {
   test(`CPU sampler substitutes for unavailable output ${JSON.stringify(unavailable)}`, () => {
     const warnings = [];
-    const sample = createCpuBusySampler({ cpuCount: 2, nowMs: () => 0,
+    const sample = createCpuBusySampler({ platform: () => 'linux', cpuCount: 2, nowMs: () => 0,
       warn: message => warnings.push(message),
       execFileSyncImpl: () => {
         if (unavailable === null) throw new Error('synthetic ps failure');
@@ -229,7 +229,7 @@ for (const busy of [0, 42.5, 85]) {
     let now = 0;
     let calls = 0;
     const warnings = [];
-    const sample = createCpuBusySampler({ cpuCount: 2, nowMs: () => now,
+    const sample = createCpuBusySampler({ platform: () => 'linux', cpuCount: 2, nowMs: () => now,
       warn: message => warnings.push(message),
       execFileSyncImpl: () => {
         calls++;
@@ -261,7 +261,7 @@ for (const busy of [0, 42.5, 85]) {
 test('slow ps failures have a one-second budget to limit daemon event-loop stalls and cache from completion', () => {
   let now = 0;
   let calls = 0;
-  const sample = createCpuBusySampler({ nowMs: () => now, warn() {},
+  const sample = createCpuBusySampler({ platform: () => 'linux', nowMs: () => now, warn() {},
     execFileSyncImpl: (command, args, options) => {
       assert.equal(command, '/bin/ps');
       assert.deepEqual(args, ['-A', '-o', '%cpu=']);
@@ -280,6 +280,76 @@ test('slow ps failures have a one-second budget to limit daemon event-loop stall
   now = 6000;
   assert.equal(sample(), null);
   assert.equal(calls, 2);
+});
+
+test('macOS CPU counters return cached interval deltas without spawning ps', () => {
+  let now = 0;
+  let reads = 0;
+  let spawns = 0;
+  const times = (user, idle) => ({ times: { user, idle, sys: 0, nice: 0, irq: 0 } });
+  const sample = createCpuBusySampler({
+    platform: () => 'darwin', nowMs: () => now,
+    cpus: () => { reads++; return reads === 1 ? [times(100, 100), times(300, 500)]
+      : [times(150, 150), times(400, 700)]; },
+    execFileSyncImpl: () => { spawns++; throw new Error('macOS must not spawn ps'); },
+  });
+  assert.equal(sample(), null, 'cold baseline uses the full load curve');
+  now = 4999;
+  assert.equal(sample(), null);
+  assert.equal(reads, 1);
+  now = 5000;
+  assert.equal(sample(), 37.5);
+  assert.equal(reads, 2);
+  assert.equal(spawns, 0);
+});
+
+test('macOS unavailable, invalid and unchanged counters use the existing fallback and recover', () => {
+  let now = 0;
+  let counters = [];
+  const sample = createCpuBusySampler({ platform: () => 'darwin', nowMs: () => now,
+    cpus: () => counters, warn() {} });
+  for (const invalid of [[], [{}], [{ times: { user: NaN } }]]) {
+    counters = invalid;
+    assert.equal(sample(), null);
+    now += 5000;
+  }
+  counters = [{ times: { user: 100, idle: 100, sys: 0, nice: 0, irq: 0 } }];
+  assert.equal(sample(), null);
+  now += 5000;
+  counters = [{ times: { user: 150, idle: 150, sys: 0, nice: 0, irq: 0 } }];
+  assert.equal(sample(), 50);
+  now += 60_000;
+  assert.equal(sample(), null, 'unchanged counters cannot renew good evidence');
+  counters = [{ times: { user: 200, idle: 150, sys: 0, nice: 0, irq: 0 } }];
+  now += 5000;
+  assert.equal(sample(), 100);
+});
+
+test('macOS resets, CPU-count changes and stale baselines never create fresh CPU evidence', () => {
+  let now = 0;
+  let times = { user: 100, idle: 100, sys: 0, nice: 0, irq: 0 };
+  let count = 1;
+  const sample = createCpuBusySampler({
+    platform: () => 'darwin', nowMs: () => now, warn() {},
+    cpus: () => Array.from({ length: count }, () => ({ times })),
+  });
+  assert.equal(sample(), null);
+  now = 5000;
+  times = { ...times, user: 200 };
+  assert.equal(sample(), 100);
+  now = 70_000;
+  times = { ...times, idle: 200 };
+  assert.equal(sample(), null, 'an old interval cannot measure current load');
+  now += 5000;
+  times = { ...times, user: 100, idle: 400 };
+  assert.equal(sample(), null, 'reject a backwards field even when total ticks increase');
+  now += 5000;
+  count = 2;
+  times = { ...times, user: 200 };
+  assert.equal(sample(), null, 'CPU-count changes require a new baseline');
+  now += 5000;
+  times = { ...times, user: 300 };
+  assert.equal(sample(), 100);
 });
 
 test('effective timeout is clamped to maxSeconds', () => {

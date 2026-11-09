@@ -31,6 +31,7 @@ const REVIEWER_LOGIN_BY_MODEL = new Map([
   ['claude', 'claude-reviewer-lacey'],
   ['codex', 'codex-reviewer-lacey'],
   ['gemini', 'gemini-reviewer-lacey'],
+  ['grok', 'grok-reviewer-lacey'],
 ]);
 const BODY_CAPTURE_GRACE_MS = 5 * 60 * 1000;
 const REMEDIATION_MARKER_REQUIRED_FROM = '2026-05-04T00:00:00.000Z';

@@ -13,12 +13,32 @@ operator pins and missing provider health. The managed class must be enabled
 in the effective DB registry with its Grok harness and no opaque nested
 fallback. Review retries remain with the provenance-aware review routing owner.
 With no explicit reviewer pin, enabling the reviewer flag selects Grok for
-eligible other-family builders; a Grok-built subject keeps its non-Grok route.
+eligible other-family builders in the `code-pr` domain; a Grok-built subject
+keeps its non-Grok route. Other domains retain their configured reviewer routing.
 AFH consumes the existing `xai` provider evidence and can return to the usual
 per-builder primary without changing role configuration.
 GitHub posting uses only `GH_GROK_REVIEWER_TOKEN` and the independent
 `grok-reviewer` signing subject; missing posting authority refuses execution.
 The existing reviewed signing/recording path is preserved.
+AMA, review capture, reattach, closeout and backfill recognize both
+`lacey-grok-reviewer[bot]` and `grok-reviewer-lacey` GitHub identities.
+Nested HQ records carry `subjectContext.nestedReviewerRuntime` so watcher
+recovery leaves them to the outer reviewer; a termination cancels the nested
+dispatch. Its timeout remains below the outer reviewer budget. Execution
+provenance records the model from an available dispatch receipt and otherwise
+records an unknown model rather than the registry default. Pre-execution
+refusals use `reviewer-configuration-error`; worker-class fallback accepts
+`grok-reviewer` explicitly.
+
+## Interface changes
+
+Grok routing is limited to `code-pr`; nested HQ run records carry the
+`nestedReviewerRuntime` ownership marker.
+
+## Verification
+
+Targeted Grok routing, reviewer, and runtime recovery tests; data-model catalog
+validation and lint.
 
 Merge prerequisites: GRK-05, GRK-09 and GRK-10, plus Agent OS
 [PR 10478](https://github.com/laceyenterprises/agent-os/pull/10478) for the

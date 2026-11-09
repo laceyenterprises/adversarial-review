@@ -349,14 +349,22 @@ function applyGeminiReviewerRoute({
   mode,
   primaryReviewerQuotaCapped = false,
   routeTable = ROUTE_BY_BUILDER_CLASS,
+  env = process.env,
+  loaderImpl = loadConfigCached,
+  topPath,
+  modulePaths,
 } = {}) {
   if (!baseRoute || baseRoute.configBroken) return baseRoute;
   const normalizedBuilder =
     normalizeBuilderClass(builderClass, routeTable) || normalizeBuilderClass(baseRoute.builderClass, routeTable);
   const baseIsGemini = normalizeReviewerModel(baseRoute.reviewerModel) === 'gemini';
-  if (!baseIsGemini && reviewerRefusesBuilder(normalizedBuilder, baseRoute.reviewerModel)) {
+  if (!baseIsGemini && reviewerRefusesBuilder(normalizedBuilder, baseRoute.reviewerModel, {
+    env, loaderImpl, topPath, modulePaths,
+  })) {
     const crossModel = routeTable[normalizedBuilder];
-    if (!crossModel || reviewerRefusesBuilder(normalizedBuilder, crossModel.reviewerModel)) return null;
+    if (!crossModel || reviewerRefusesBuilder(normalizedBuilder, crossModel.reviewerModel, {
+      env, loaderImpl, topPath, modulePaths,
+    })) return null;
     return { ...baseRoute, reviewerModel: crossModel.reviewerModel, botTokenEnv: crossModel.botTokenEnv };
   }
 
@@ -425,12 +433,13 @@ function applyEffectiveReviewerRoute(options = {}) {
   return applyGeminiReviewerRoute(options);
 }
 
-function applyGeminiIntegrityGuard(route, routeTable = ROUTE_BY_BUILDER_CLASS) {
+function applyGeminiIntegrityGuard(route, routeTable = ROUTE_BY_BUILDER_CLASS, configOptions = {}) {
   return applyGeminiReviewerRoute({
     builderClass: route?.builderClass,
     baseRoute: route,
     mode: 'off',
     routeTable,
+    ...configOptions,
   });
 }
 
@@ -523,6 +532,7 @@ function baseRouteForSubject(builderClass, {
   modulePaths,
   loaderImpl,
   routeTable = ROUTE_BY_BUILDER_CLASS,
+  domainId = 'code-pr',
   excludedReviewerModels = [],
 } = {}) {
   let route;
@@ -531,7 +541,7 @@ function baseRouteForSubject(builderClass, {
     const pinnedRoute = defaultReviewerRouteFromEnv(env, { topPath, modulePaths, loaderImpl });
     operatorPinnedReviewer = Boolean(pinnedRoute);
     route = pinnedRoute || routeTable[builderClass];
-    if (!pinnedRoute && !reviewerRefusesBuilder(builderClass, 'grok', {
+    if (domainId === 'code-pr' && !pinnedRoute && !reviewerRefusesBuilder(builderClass, 'grok', {
       env, ...(loaderImpl ? { loaderImpl } : {}), topPath, modulePaths,
     })) route = REVIEWER_ROUTE_BY_MODEL.grok;
   } catch (err) {
@@ -547,7 +557,7 @@ function baseRouteForSubject(builderClass, {
       reviewerModel: route.reviewerModel,
       botTokenEnv: route.botTokenEnv,
       ...(excludedReviewerModels.length ? { excludedReviewerModels: [...excludedReviewerModels] } : {}),
-    }, routeTable),
+    }, routeTable, { env, loaderImpl, topPath, modulePaths }),
     operatorPinnedReviewer,
   );
   if (!resolvedRoute) return null;
@@ -591,7 +601,7 @@ function routeSubject(subject, {
   });
   const builderClass = normalizeBuilderClass(subject?.builderClass, routeTable);
   if (!builderClass) return null;
-  const baseRoute = baseRouteForSubject(builderClass, { env, topPath, modulePaths, loaderImpl, routeTable, excludedReviewerModels });
+  const baseRoute = baseRouteForSubject(builderClass, { env, topPath, modulePaths, loaderImpl, routeTable, domainId, excludedReviewerModels });
   if (baseRoute?.configBroken || !applyGeminiReviewerMode) return baseRoute;
   try {
     const mode = resolveGeminiReviewerModeForRoute({
@@ -607,6 +617,7 @@ function routeSubject(subject, {
       mode,
       primaryReviewerQuotaCapped,
       routeTable,
+      env, loaderImpl, topPath, modulePaths,
     });
   } catch (err) {
     if (err && err.name === 'AgentOSConfigError') {

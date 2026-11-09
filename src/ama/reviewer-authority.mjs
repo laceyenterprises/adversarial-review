@@ -7,6 +7,7 @@ const AMA_AUTHORITATIVE_REVIEWER_LOGINS_BY_MODEL = Object.freeze({
   claude: ['lacey-claude-reviewer', 'claude-reviewer-lacey'],
   codex: ['lacey-codex-reviewer', 'codex-reviewer-lacey'],
   gemini: ['lacey-gemini-reviewer', 'gemini-reviewer-lacey'],
+  grok: ['lacey-grok-reviewer', 'grok-reviewer-lacey'],
 });
 
 // The reviewer bot's GitHub account; accept BOTH observed naming forms so the

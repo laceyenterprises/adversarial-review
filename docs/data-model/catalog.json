@@ -1284,6 +1284,7 @@
       "path": "docs/data-model/reviewer-run-records.md",
       "store": "data/reviewer-runs/<sessionUuid>.json",
       "schemaSurface": "src/adapters/reviewer-runtime/run-state.mjs",
+      "nestedReviewerRuntime": "subjectContext.nestedReviewerRuntime=true identifies Grok HQ child dispatches excluded from watcher startup reattachment; ordinary TTL pruning still applies",
       "reviewerReserveFloorReason": "personal-anthropic-reserve-floor; historical percentage-bearing reasons remain readable",
       "relatedSchemaSurfaces": [
         "src/afh-reviewer-fallback.mjs",

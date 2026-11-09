@@ -10,6 +10,12 @@ import { buildPromptForReviewerModel } from './reviewer-prompt.mjs';
 import { readWorkerRunTokenUsage } from './reviewer-pass-tokens.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 
+function configurationRefusal(message) {
+  return Object.assign(new Error(`[reviewer-configuration-error] ${message}`), {
+    failureClass: 'reviewer-configuration-error',
+  });
+}
+
 export async function reviewWithGrok(diff, extraContext = '', {
   builderClass,
   subjectContext = {},
@@ -23,7 +29,7 @@ export async function reviewWithGrok(diff, extraContext = '', {
   readUsageImpl = readWorkerRunTokenUsage,
 } = {}) {
   if (reviewerRefusesBuilder(builderClass, 'grok', { env, loaderImpl })) {
-    throw new Error('Grok reviewer disabled or builder family refused');
+    throw configurationRefusal('Grok reviewer disabled or builder family refused');
   }
   // A seed is inspectable while disabled, but cannot authorize execution.
   const observed = await registryImpl('worker_registry', { env });
@@ -33,18 +39,32 @@ export async function reviewWithGrok(diff, extraContext = '', {
     || (entry.fallbackWorkerClasses || []).length) {
     // Review fallback is selected by the review service, with original builder
     // provenance checked again. An opaque nested dispatch fallback cannot.
-    throw new Error('Effective grok-reviewer registry import unavailable or unsafe');
+    throw configurationRefusal('Effective grok-reviewer registry import unavailable or unsafe');
   }
-  if (!env.GH_GROK_REVIEWER_TOKEN) throw new Error('Missing Grok reviewer posting authority');
+  if (!env.GH_GROK_REVIEWER_TOKEN) throw configurationRefusal('Missing Grok reviewer posting authority');
   const runtime = runtimeFactory({ rootDir, env, workerClass: 'grok-reviewer', taskKind: 'review' });
-  const response = await runtime.spawnReviewer({
-    sessionUuid: randomUUID(),
-    model: 'grok',
-    workerClass: 'grok-reviewer',
-    timeoutMs: resolveReviewerTimeoutMs(env),
-    prompt: buildPromptForReviewerModel('grok', diff, extraContext, { promptStage, reviewKind }),
-    subjectContext: { ...subjectContext, builderClass },
-  });
+  const sessionUuid = randomUUID();
+  const outerTimeoutMs = resolveReviewerTimeoutMs(env);
+  const innerTimeoutMs = Math.max(1,
+    outerTimeoutMs - Math.min(30_000, Math.max(1, Math.floor(outerTimeoutMs / 10))));
+  const cancelOnTerm = () => {
+    void Promise.resolve().then(() => runtime.cancel(sessionUuid))
+      .catch(() => {}).finally(() => process.exit(143));
+  };
+  process.once('SIGTERM', cancelOnTerm);
+  let response;
+  try {
+    response = await runtime.spawnReviewer({
+      sessionUuid,
+      model: 'grok',
+      workerClass: 'grok-reviewer',
+      timeoutMs: innerTimeoutMs,
+      prompt: buildPromptForReviewerModel('grok', diff, extraContext, { promptStage, reviewKind }),
+      subjectContext: { ...subjectContext, builderClass, nestedReviewerRuntime: true },
+    });
+  } finally {
+    process.removeListener('SIGTERM', cancelOnTerm);
+  }
   if (!response.ok) {
     // Preserve typed refusal/unknown outcomes; never echo CLI output or secrets.
     throw Object.assign(new Error('Managed Grok review unavailable'), {
@@ -54,7 +74,8 @@ export async function reviewWithGrok(diff, extraContext = '', {
   return {
     reviewText: response.reviewBody,
     tokenUsage: readUsageImpl({ launchRequestId: response.reattachToken, env, rootDir }),
-    execution: { harness: 'grok', model: entry.defaultModel, modelSource: 'registry',
+    execution: { harness: 'grok', model: response.execution?.model || null,
+      modelSource: response.execution?.model ? 'dispatch-receipt' : 'unknown',
       launchRequestId: response.reattachToken },
   };
 }

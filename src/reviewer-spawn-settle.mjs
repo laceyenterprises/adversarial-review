@@ -164,6 +164,7 @@ const REVIEW_POST_FRESHNESS_RETRY_DELAYS_MS = Object.freeze([100, 250]);
 // ARC-18: resolveReviewerIdentity + its identity map stay in watcher (still used
 // there and exported); re-derived here as a byte-identical copy for spawnReviewer.
 const REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV = Object.freeze({
+  GH_GROK_REVIEWER_TOKEN: 'grok-reviewer',
   GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer-lacey',
   GH_CODEX_REVIEWER_TOKEN: 'codex-reviewer-lacey',
   GH_GEMINI_REVIEWER_TOKEN: 'gemini-reviewer-lacey',

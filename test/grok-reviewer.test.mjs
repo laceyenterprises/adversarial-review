@@ -10,6 +10,10 @@ import { buildReviewerAttribution, validateReviewerAttribution } from '../src/re
 import { emitReviewedAttestation } from '../src/reviewed-attestation.mjs';
 import { probeReviewerCliOAuth } from '../src/adapters/reviewer-runtime/cli-direct/discovery.mjs';
 import { applyAfhReviewerFallback, providerForReviewerModel } from '../src/afh-reviewer-fallback.mjs';
+import { amaAuthoritativeReviewerLoginsForModel, amaReviewerFamilyForLogin,
+  isCurrentAuthoritativeFamilyReview } from '../src/ama/reviewer-authority.mjs';
+import { resolveReviewerBotLoginAliases } from '../src/review-body-capture.mjs';
+import { reviewerBotLogin } from '../src/reviewer-reattach.mjs';
 
 const body = '## Summary\nThe change preserves the documented behavior.\n\n## Blocking issues\n- None.\n\n## Non-blocking issues\n- None.\n\n## Verdict\nComment only';
 const env = { GH_GROK_REVIEWER_TOKEN: 'synthetic-posting-authority' };
@@ -59,9 +63,22 @@ test('managed invocation preserves original provenance and common nullable telem
   }));
   assert.equal(request.subjectContext.builderClass, 'codex');
   assert.equal(request.workerClass, 'grok-reviewer');
+  assert.equal(request.subjectContext.nestedReviewerRuntime, true);
+  assert.ok(request.timeoutMs < 20 * 60 * 1000);
   assert.match(request.prompt, /synthetic diff/);
   assert.strictEqual(result.tokenUsage, usage);
   assert.equal(result.execution.harness, 'grok');
+  assert.equal(result.execution.model, null);
+  assert.equal(result.execution.modelSource, 'unknown');
+});
+
+test('Grok execution uses a model reported by dispatch when present', async () => {
+  const result = await reviewWithGrok('', '', options({
+    runtimeFactory: () => ({ spawnReviewer: async () => ({ ok: true, reviewBody: body,
+      reattachToken: 'synthetic-dispatch', execution: { model: 'grok-pinned' } }) }),
+  }));
+  assert.equal(result.execution.model, 'grok-pinned');
+  assert.equal(result.execution.modelSource, 'dispatch-receipt');
 });
 
 test('unimported, disabled, missing, or fallback-bearing registry cannot execute', async () => {
@@ -79,6 +96,29 @@ test('unimported, disabled, missing, or fallback-bearing registry cannot execute
 test('missing posting authority fails closed before execution', async () => {
   await assert.rejects(reviewWithGrok('', '', options({ env: {},
     runtimeFactory: () => assert.fail('missing authority reached runtime') })), /posting authority/);
+});
+
+test('pre-execution refusals are typed configuration errors', async () => {
+  for (const overrides of [
+    { loaderImpl: config(false) },
+    { registryImpl: async () => ({ ok: false }) },
+    { env: {} },
+  ]) {
+    await assert.rejects(reviewWithGrok('', '', options(overrides)),
+      error => error.failureClass === 'reviewer-configuration-error');
+  }
+});
+
+test('Grok GitHub reviews are authoritative and resolvable for capture and reattach', async () => {
+  const logins = amaAuthoritativeReviewerLoginsForModel('grok');
+  assert.deepEqual(logins, ['lacey-grok-reviewer', 'grok-reviewer-lacey']);
+  assert.equal(reviewerBotLogin('grok'), 'lacey-grok-reviewer[bot]');
+  assert.ok(resolveReviewerBotLoginAliases('GH_GROK_REVIEWER_TOKEN').length > 0);
+  const review = { user: { login: 'lacey-grok-reviewer[bot]' }, state: 'COMMENTED',
+    commit_id: 'a'.repeat(40), body: '## Verdict\nComment only' };
+  assert.equal(amaReviewerFamilyForLogin(review.user.login), 'grok');
+  assert.equal(await isCurrentAuthoritativeFamilyReview(review, [review], review.commit_id,
+    async () => ({ status: 'identical' })), true);
 });
 
 test('typed quota, auth and timeout failures cannot become a review', async () => {
@@ -133,27 +173,18 @@ test('AFH cannot retain a Grok reviewer for Grok provenance even on missing heal
 
 test('AFH uses xai health and selects a different builder family when Grok is grounded', () => {
   assert.equal(providerForReviewerModel('grok-api'), 'xai');
-  const flags = { AGENT_OS_CONFIG_PATH: '/dev/null',
-    AGENT_OS_GROK_ENABLED: 'true', AGENT_OS_GROK_REVIEWER_ENABLED: 'true' };
-  const saved = Object.fromEntries(Object.keys(flags).map(key => [key, process.env[key]]));
-  try {
-    Object.assign(process.env, flags);
     const status = grounded => ({ state: grounded ? 'exhausted' : 'ok',
       hardGrounded: grounded, softGrounded: false, grounded });
     const grounding = { available: true, providers: { xai: status(true),
       openai: status(false), anthropic: status(false), google: status(true) } };
     for (const [builderClass, expected] of [['claude-code', 'codex'], ['codex', 'claude']]) {
       const result = applyAfhReviewerFallback({ builderClass,
-        baseRoute: REVIEWER_ROUTE_BY_MODEL.grok, grounding, geminiReviewerMode: 'off' });
+        baseRoute: REVIEWER_ROUTE_BY_MODEL.grok, grounding, geminiReviewerMode: 'off',
+        env, loaderImpl: config(true) });
       assert.equal(result.reviewerModel, expected);
-      assert.equal(reviewerRefusesBuilder(builderClass, result.reviewerModel), false);
+      assert.equal(reviewerRefusesBuilder(builderClass, result.reviewerModel,
+        { env, loaderImpl: config(true) }), false);
     }
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
 });
 
 test('Grok reviewed signing failure never records an unsigned receipt', async () => {

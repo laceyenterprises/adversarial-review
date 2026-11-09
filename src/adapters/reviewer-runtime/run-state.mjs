@@ -167,7 +167,8 @@ function readRecoverableReviewerRunRecords(rootDir) {
     if (!name.endsWith('.json')) continue;
     try {
       const parsed = normalizeReviewerRunRecord(JSON.parse(readFileSync(join(dir, name), 'utf8')));
-      if (RECOVERABLE_RUN_STATES.has(parsed.state)) {
+      if (RECOVERABLE_RUN_STATES.has(parsed.state)
+        && parsed.subjectContext?.nestedReviewerRuntime !== true) {
         records.push(parsed);
       }
     } catch {

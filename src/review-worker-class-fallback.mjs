@@ -18,7 +18,6 @@ import {
 import {
   REVIEWER_ROUTE_BY_MODEL as REVIEWER_ROUTE_TABLE_BY_MODEL,
   reviewerRefusesBuilder,
-  normalizeReviewerModel,
 } from './adapters/subject/github-pr/routing.mjs';
 
 const execFileAsync = promisify(execFileCb);
@@ -49,6 +48,7 @@ const REVIEWER_MODEL_BY_WORKER_CLASS = Object.freeze({
   'claude-code': 'claude',
   codex: 'codex',
   gemini: 'gemini',
+  'grok-reviewer': 'grok',
 });
 
 export function reviewWorkerClassFallback(env = process.env) {
@@ -69,8 +69,7 @@ function resolveHqCwd(env = process.env) {
 }
 
 function reviewerModelForWorkerClass(workerClass) {
-  return REVIEWER_MODEL_BY_WORKER_CLASS[String(workerClass || '').trim().toLowerCase()]
-    || normalizeReviewerModel(workerClass);
+  return REVIEWER_MODEL_BY_WORKER_CLASS[String(workerClass || '').trim().toLowerCase()] || null;
 }
 
 // WRITER DIVERSITY — a correctness constraint, not a preference.

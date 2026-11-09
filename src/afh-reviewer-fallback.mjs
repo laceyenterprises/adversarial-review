@@ -874,7 +874,12 @@ export function afhReviewerFallbackDecision({
   grounding = null,
   geminiReviewerMode = null,
   routeTable = ROUTE_BY_BUILDER_CLASS,
+  env = process.env,
+  loaderImpl,
+  topPath,
+  modulePaths,
 } = {}) {
+  const refusalOptions = { env, loaderImpl, topPath, modulePaths };
   const notApplied = (reason, extra = {}) => ({
     applied: false,
     reason,
@@ -890,7 +895,7 @@ export function afhReviewerFallbackDecision({
   const currentModel = normalizeReviewerModel(baseRoute.reviewerModel);
   if (!currentModel) return notApplied('unknown-reviewer-model');
   if (currentModel === 'grok' && reviewerRefusesBuilder(
-    builderClass || baseRoute.builderClass, currentModel,
+    builderClass || baseRoute.builderClass, currentModel, refusalOptions,
   )) return notApplied('grok-family-refused', { integrityRefused: true });
   const primary = reviewerModelGrounding(grounding, currentModel);
   if (grounding?.reason === 'afh-reviewer-fallback-disabled' && !primary.reserveFloor) {
@@ -941,7 +946,7 @@ export function afhReviewerFallbackDecision({
         continue;
       }
     }
-    if (reviewerRefusesBuilder(normalizedBuilder, candidate)) {
+    if (reviewerRefusesBuilder(normalizedBuilder, candidate, refusalOptions)) {
       considered.push({ reviewerModel: candidate, selected: false, reason: `${normalizeReviewerModel(candidate)}-builder-integrity-guard` });
       continue;
     }

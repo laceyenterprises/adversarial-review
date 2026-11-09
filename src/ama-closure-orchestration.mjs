@@ -1,3 +1,5 @@
+import { handoffFinalFixAll } from './ama/final-fix-all.mjs';
+import { parseKnownPrefix } from './adapters/subject/github-pr/title-tagging.mjs';
 import { maybeDispatchCapRehead, capReheadCounters } from './ama/cap-rehead.mjs';
 import { escalateClosureBudget } from './ama/closure-budget-escalation.mjs';
 import { repositoryObservationCache } from './repository-state-cache.mjs';
@@ -1002,6 +1004,7 @@ async function dispatchAmaClosureFor({
   logger,
   loadConfigImpl = loadConfigCached,
   maybeDispatchAmaCloserImpl = maybeDispatchAmaCloser,
+  handoffFinalFixAllImpl = handoffFinalFixAll,
   resolveAmaHammerDispatchModeImpl = resolveAmaHammerDispatchMode,
   amaHammerBackgroundQueueImpl = amaHammerBackgroundQueue,
   fetchCurrentPrStateImpl = fetchCurrentPrStateForBackgroundDispatch,
@@ -1890,6 +1893,35 @@ async function dispatchAmaClosureFor({
       ...(shared.snapshot.observations.progress?.value ?? shared.snapshot.observations.progress),
       primaryChange: { ...primary, headSha: currentPrHeadSha },
     } }, passSnapshot);
+  }
+  // LANEAUTO-01: spend one builder round before findings closure. Ownership,
+  // operator holds and structural repair still take precedence in shared policy.
+  if (autonomousMergeExecutionEnabled && prMetadata.isOpen && !prMetadata.isDraft
+    && parseKnownPrefix(prMetadata.title) && reviewCycleExhausted
+    && reviewState.headSha === currentPrHeadSha && reviewState.verdict === 'comment-only'
+    && reviewState.blockingFindingState === 'known' && reviewState.blockingFindingCount === 0
+    && reviewState.nonBlockingFindingState === 'known' && reviewState.nonBlockingFindingCount > 0
+    && shared.decision.action === 'hammer' && shared.decision.reason !== 'automated-stop'
+    && !['R05-structural', 'R10-conflict'].includes(shared.decision.row)
+    && prMetadata.mergeableState !== 'CONFLICTING') {
+    let fixAll;
+    try {
+      fixAll = await handoffFinalFixAllImpl({ rootDir, repo: repoPath, prNumber,
+        headSha: currentPrHeadSha, reviewBody: gateSnapshot.settledReview.reviewBody, riskClass: reviewState.riskClass,
+        now: new Date(now()).toISOString() });
+    } catch (error) {
+      logger?.warn?.(`[watcher] final fix-all handoff deferred: ${error?.message || error}`);
+      fixAll = { action: 'hold', reason: 'final-fix-all-handoff-pending' };
+    }
+    if (fixAll.action !== 'fallback') {
+      if (fixAll.remediation) shared = reviseClosureNextAction(shared, {
+        remediation: { ...shared.snapshot.observations.remediation?.value, job: fixAll.remediation },
+      }, passSnapshot);
+      if (closureOwnerSink) { closureOwnerSink.shared = shared; closureOwnerSink.value = 'remediator'; }
+      return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
+        reason: fixAll.reason || 'final-fix-all-builder-remediation', ...fixAll,
+        nextAction: shared.decision }, { amaEnabled: true });
+    }
   }
   let closureOwner = closureOwnerFromDecision(shared.decision);
   if (closureOwnerSink) closureOwnerSink.shared = shared;

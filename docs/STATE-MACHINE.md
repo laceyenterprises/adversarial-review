@@ -1271,6 +1271,27 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+At the final review-round cap, a latest exact-head Comment-only review with
+known zero blocking findings and remaining non-blocking or demoted findings
+gets one builder **final fix-all** work order before findings closure. The
+existing follow-up queue and builder-tag worker sync with main, address every
+finding and the PR's own red checks, validate and push. The work order uses
+`closureHandoff.reason: final-fix-all`, `review: full` and the existing statuses.
+It is claimable for exactly one round, independently of the spent ordinary
+finding-round budget. Pending admission remains remediator-owned beyond the
+ordinary pending-liveness grace; the PR closer-intent lock serializes enqueue
+with closer admission, including rescue. Live closer or remediation custody
+prevents a second owner.
+
+A receipt deduplicates the source head even after terminal settlement or
+archival. Its published head must receive a fresh full review; this round
+never uses the suppressed final-push shortcut. If that review still has
+findings, the configured hammer/operator fallback owns closure. A zero-finding
+exact-head re-review takes the ordinary daemon path, with every existing merge
+predicate, attestation and lease check. Conflicts and CI-only repair retain
+their hammer routes. Blocking reviews retain their existing behavior. Strict
+mode, finding content, head matching, merge authority and leases are unchanged.
+
 Wake transport preserves the existing reserved/requested/failed outcomes.
 Initial delivery starts a fresh admission budget at reservation, even when the
 original decision deadline (retained in the audit) is already overdue.
@@ -1354,7 +1375,9 @@ existing admission. Every pass logs `owning lane=closer` and makes the normal
 closure observer due, even when the review fingerprint is unchanged. CI waits
 and their deadlines are re-evaluated there; green CI reaches normal daemon or
 hammer selection. This scheduling handoff grants no merge authority and changes
-no blocking-finding, exact-head, lease, round-budget or dispatch-cap gate.
+no blocking-finding, exact-head, lease or dispatch-cap gate. The final fix-all
+work order described above is the one additional builder round for eligible
+exact-head final reviews.
 
 HAMRESUMEOWED-01: a pending-only hammer exit owes closure for its exact
 `resumeHead`. The posted-review scheduler consumes this debt every poll,

@@ -165,9 +165,10 @@ function remediationFacts(remediation) {
     roundsLeft: remediation.state === 'complete' ? roundsLeft : null,
     nextRound: completed !== null ? completed + 1 : null,
     jobStatus: lower(job?.status) || null,
-    conflictPrimaryHandoff: remediation.state === 'complete'
-      && job?.closureHandoff?.reason === 'conflict-primary-unproven'
+    builderHandoff: remediation.state === 'complete'
+      && ['conflict-primary-unproven', 'final-fix-all'].includes(job?.closureHandoff?.reason)
       && sameHead(lower(job.closureHandoff.headSha), lower(job?.headSha)),
+    handoffReason: job?.closureHandoff?.reason,
     jobId: text(job?.jobId) || null,
     // Remediation observations belong to this PR; a head move or retrigger
     // with no revision does not release its live worker's ownership.
@@ -380,10 +381,10 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
   // Queue ownership survives admission delay and spent review rounds. A fresh
   // builder head, rather than another closer replay, resolves this work order.
   // Live closer/reviewer custody and unreadable ownership still fence admission.
-  if (remediation.conflictPrimaryHandoff && sameHead(lower(remediation.jobHead), lower(head))
+  if (remediation.builderHandoff && sameHead(lower(remediation.jobHead), lower(head))
     && remediation.jobStatus === 'pending') {
     return { row: 'R14-findings', action: 'remediate', actor: 'remediator',
-      reason: 'conflict-primary-unproven', deadlineKind: 'admission',
+      reason: remediation.handoffReason, deadlineKind: 'admission',
       queue: 'dispatch', round: remediation.nextRound,
       refs: [`remediation:${remediation.jobId}`] };
   }

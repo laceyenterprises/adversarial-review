@@ -1,3 +1,38 @@
+## Final findings remediation through the builder (LANEAUTO-01)
+
+At the final review-round cap, a latest exact-head Comment-only review with
+known zero blocking findings and remaining non-blocking or demoted findings
+gets one builder **final fix-all** work order before findings closure. The
+existing follow-up queue and builder-tag worker sync with main, address every
+finding and the PR's own red checks, validate and push. The work order uses
+`closureHandoff.reason: final-fix-all`, `review: full` and the existing statuses.
+It is claimable for exactly one round, independently of the spent ordinary
+finding-round budget. Pending admission remains remediator-owned beyond the
+ordinary pending-liveness grace; the PR closer-intent lock serializes enqueue
+with closer admission, including rescue. Live closer or remediation custody
+prevents a second owner.
+
+A receipt deduplicates the source head even after terminal settlement or
+archival. Its published head must receive a fresh full review; this round
+never uses the suppressed final-push shortcut. If that review still has
+findings, the configured hammer/operator fallback owns closure. A zero-finding
+exact-head re-review takes the ordinary daemon path, with every existing merge
+predicate, attestation and lease check. Conflicts and CI-only repair retain
+their hammer routes. Blocking reviews retain their existing behavior. Strict
+mode, finding content, head matching, merge authority and leases are unchanged.
+
+After both PRs land, SRE lets the submodule float through main-catchup and
+restarts the registered watcher and follow-up services through the deployment
+procedure. On natural traffic, retain receipts showing (1) a newly final-round
+eligible head queued as `final-fix-all`, (2) no concurrent closer, (3) a pushed
+head with a fresh full review, (4) daemon merge after a zero-finding exact-head
+review, or the configured fallback if findings remain. Compare merges per hour
+and the closer `failed-without-merge` share with the pre-deployment window:
+acceptance requires merges rising and the closer failure share falling.
+No source fixture proves these production outcomes. No migration, new check,
+label or live action is part of the worker change. Operator steps are declared
+in `docs/changes/LANEAUTO-01-post-merge.yaml`.
+
 ## Terminal audit review currency (HAMLATEAUDIT-01)
 
 Terminal launch and lease observations are retained in the

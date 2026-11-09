@@ -1,3 +1,4 @@
+import { finalFixAllQueueOwner } from './final-fix-all.mjs';
 import { classifyHammerExit, hammerNoMergeDetails } from './hammer-outcome.mjs';
 import { appendCloserOutcome } from './closer-outcomes.mjs';
 import { ownershipReadBudgets as closerScanBudgets, boundedOwnershipRead as boundedCloserScanRead } from '../ownership-read.mjs';
@@ -7658,6 +7659,10 @@ async function maybeDispatchAmaCloserAttempt({
   releaseIntentLock = tryAcquireCloserIntentLock(rootDir, { repo, prNumber });
   if (!releaseIntentLock) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
     inFlight: true, reason: 'ama-closer-launch-in-progress' });
+  // Share the PR intent lock with final fix-all enqueue, including rescue.
+  if (finalFixAllQueueOwner(rootDir, { repo, prNumber })) return noAmaDispatch({
+    dispatched: false, skipMergeAgent: true, reason: 'final-fix-all-builder-owner',
+  });
   const dispatchIdempotencyKey = `ama-closer-${randomUUID()}`;
   if (queueCloser) {
     // Re-read after asynchronous eligibility/status work and under the existing

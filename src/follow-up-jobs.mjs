@@ -365,6 +365,10 @@ function resolveRiskClassForLinearTicket(linearTicketId, { rootDir }) {
 }
 
 function resolveRoundBudgetForJob(job, { rootDir, preferPersisted = true } = {}) {
+  if (job?.closureHandoff?.reason === 'final-fix-all') {
+    return buildRoundBudgetResolution({ riskClass: normalizeRiskClass(job.riskClass) || DEFAULT_RISK_CLASS,
+      roundBudget: 1, source: 'final-fix-all' });
+  }
   const persistedRiskClass = normalizeRiskClass(job?.riskClass);
   const persistedRoundBudget = Number(
     job?.remediationPlan?.maxRounds
@@ -2199,7 +2203,8 @@ function buildFollowUpJob({
     jobId,
     createdAt,
     trigger: {
-      type: closureHandoff ? 'closer-terminal-audit' : 'github-review-posted',
+      type: closureHandoff?.reason === 'final-fix-all' ? 'final-round-review'
+        : closureHandoff ? 'closer-terminal-audit' : 'github-review-posted',
       postedAt: createdAt,
     },
     repo,
@@ -2221,7 +2226,7 @@ function buildFollowUpJob({
     ...(closureHandoff ? { closureHandoff } : {}),
     critical: classification.critical,
     nonBlockingOnly,
-    ...(nonBlockingOnly && normalizeEffectiveReviewVerdict(reviewBody) === 'comment-only'
+    ...(nonBlockingOnly && closureHandoff?.reason !== 'final-fix-all' && normalizeEffectiveReviewVerdict(reviewBody) === 'comment-only'
       ? { finalRound: 'comment-only' } : {}),
     reviewSummary: extractReviewSummary(reviewBody),
     simplicityNote: extractSimplicityNote(reviewBody),
@@ -2292,7 +2297,7 @@ function createFollowUpJob({ rootDir, readPRHeadImpl, ...jobInput }) {
 }
 
 function writeNewFollowUpJob(rootDir, baseJob, jobInput) {
-  const priorNonBlockingRounds = baseJob.nonBlockingOnly
+  const priorNonBlockingRounds = baseJob.nonBlockingOnly && baseJob.closureHandoff?.reason !== 'final-fix-all'
     ? summarizePRRemediationLedger(rootDir, baseJob).consecutiveNonBlockingRounds
     : 0;
   const configuredNonBlockingMax = baseJob.nonBlockingOnly

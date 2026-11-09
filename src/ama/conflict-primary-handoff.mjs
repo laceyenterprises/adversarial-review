@@ -34,7 +34,7 @@ function boundedReviewContext(entries) {
     });
 }
 
-function existingJob(rootDir, duplicate) {
+export function existingJob(rootDir, duplicate) {
   if (!duplicate?.jobId) return null;
   for (const bucket of ['pending', 'inProgress', 'completed', 'failed', 'stopped']) {
     try {
@@ -65,18 +65,18 @@ function existingJob(rootDir, duplicate) {
   throw new Error('conflict-primary-handoff-job-unavailable');
 }
 
-function handoffReceipt(job, headSha, now) {
+function handoffReceipt(job, headSha, now, reason = CONFLICT_PRIMARY_HANDOFF_REASON) {
   if (!job?.jobId) throw new Error('conflict-primary-handoff-enqueue-unconfirmed');
   return {
     action: 'hold',
-    hammerStop: { headSha, predicate: CONFLICT_PRIMARY_HANDOFF_REASON,
+    hammerStop: { headSha, predicate: reason,
       owner: 'remediator', remediationJobId: job.jobId,
       remediationStatus: job.status, deterministic: true },
     remediation: { jobId: job.jobId, status: job.status,
       live: remediationJobOwnership(job, { now }).live,
       createdAt: job.createdAt, claimedAt: job.claimedAt, lastHeartbeatAt: job.lastHeartbeatAt,
       remediationWorker: job.remediationWorker,
-      headSha, closureHandoff: { reason: CONFLICT_PRIMARY_HANDOFF_REASON, headSha, review: 'full' } },
+      headSha, closureHandoff: { reason, headSha, review: 'full' } },
   };
 }
 
@@ -102,14 +102,14 @@ Work-order reason: ${CONFLICT_PRIMARY_HANDOFF_REASON}
 }
 
 export async function handoffConflictPrimary({
-  rootDir, repo, prNumber, headSha, now,
+  rootDir, repo, prNumber, headSha, now, reason = CONFLICT_PRIMARY_HANDOFF_REASON, reviewBody = null, riskClass = null,
   execFileImpl = execFileAsync, createJobImpl = createFollowUpJob,
 }) {
   headSha = headSha.toLowerCase();
   const identity = { repo, prNumber, revisionRef: headSha,
-    closureHandoff: { reason: CONFLICT_PRIMARY_HANDOFF_REASON, headSha } };
+    closureHandoff: { reason, headSha } };
   const existing = findFollowUpForJob(rootDir, identity);
-  if (existing) return handoffReceipt(existingJob(rootDir, existing), headSha, now);
+  if (existing) return handoffReceipt(existingJob(rootDir, existing), headSha, now, reason);
   // Re-read branch and builder provenance, and fence a moved/closed PR before
   // enqueue. This read runs in the watcher, never inside a restricted worker.
   const { stdout } = await meteredExecFile(execFileImpl, 'gh', ['pr', 'view', String(prNumber),
@@ -133,11 +133,11 @@ export async function handoffConflictPrimary({
   const reviewComments = Array.isArray(parsed) ? parsed.flat() : [];
   const result = createJobImpl({
     rootDir, repo, prNumber, revisionRef: headSha,
-    branch: pr.headRefName, baseBranch: pr.baseRefName, builderTag,
-    reviewBody: conflictPrimaryWorkOrder(headSha), reviewPostedAt: now,
-    closureHandoff: { reason: CONFLICT_PRIMARY_HANDOFF_REASON, headSha, review: 'full',
+    branch: pr.headRefName, baseBranch: pr.baseRefName, builderTag, riskClass,
+    reviewBody: reviewBody ?? conflictPrimaryWorkOrder(headSha), reviewPostedAt: now,
+    closureHandoff: { reason, headSha, review: 'full',
       reviewContext: boundedReviewContext([...(pr.reviews || []), ...(pr.comments || []), ...reviewComments]) },
   });
   const job = result.job || existingJob(rootDir, result.duplicateOf);
-  return handoffReceipt(job, headSha, now);
+  return handoffReceipt(job, headSha, now, reason);
 }

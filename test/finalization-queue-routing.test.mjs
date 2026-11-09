@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fsExt from 'fs-ext';
-import { mkdtempSync, rmSync } from 'node:fs';
+import fs, { mkdtempSync, rmSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openFinalizationQueueStore } from '../src/finalization/queue-store.mjs';
@@ -284,11 +285,24 @@ test('HAMLANEWAIT-01: waking rechecks lane transfer and never invokes the old le
   assert.equal(typeof release, 'function');
   t.after(() => release?.());
   let refusals = 0, recheckAcquisitions = 0;
+  let watcherRegistered = false;
+  const watch = fs.watch;
+  const watchMock = t.mock.method(fs, 'watch', (...args) => {
+    const watcher = watch(...args);
+    watcherRegistered = true;
+    return watcher;
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    watchMock.mock.restore();
+    syncBuiltinESMExports();
+  });
   const flockSync = fsExt.flockSync;
   t.mock.method(fsExt, 'flockSync', (...args) => {
     // Release at the next lock attempt after contention, independent of how
     // often routing or deadline bookkeeping reads the clock.
     if (refusals === 1 && release !== null) {
+      assert.equal(watcherRegistered, true, 'watcher must be registered before the acquisition recheck');
       release();
       release = null;
     }
@@ -343,15 +357,18 @@ test('HAMLANEWAIT-01: native watcher wake rechecks the route after a pending wai
       throw error;
     }
   });
+  const started = performance.now();
   const result = await runLegacyLaneWrite({ rootDir: f.rootDir, ...lane, readConfig: () => ({}),
     deadline: new Date(Date.now() + 10000).toISOString(),
     exec: () => assert.fail('watcher wake must fence the stale legacy route') });
+  const elapsedMs = performance.now() - started;
   assert.equal(result.reason, 'lane-transfer-required',
     `native wake result: ${JSON.stringify({ reason: result.reason, outcome: result.outcome,
       waitedMs: result.waitedMs, refusals, releasedAfterRecheck, wakeAcquisitions })}`);
   assert.ok(refusals >= 2, 'the subscription recheck must also encounter contention');
   assert.equal(releasedAfterRecheck, true);
   assert.equal(wakeAcquisitions, 1, 'must acquire after the synchronous recheck via the native wake');
+  assert.ok(elapsedMs < 8000, `native wake must finish well before the 10s deadline; elapsedMs=${elapsedMs}`);
   assert.equal(result.outcome, undefined);
   assert.deepEqual(f.routing.read(lane).legacyWriters, []);
   assert.equal(f.routing.read(lane).route.executor, 'queue-v2');

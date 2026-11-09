@@ -12,13 +12,16 @@
         "bin/review-grades.mjs",
         "src/reviewer-prompt.mjs",
         "src/reviewer-harness.mjs",
-        "src/review-finding-records.mjs"
+        "src/review-finding-records.mjs",
+        "src/findings-batch.mjs",
+        "src/finding-remediation-selection.mjs",
+        "src/finding-drop-reason.mjs"
       ],
       "owner": "advisory finding-grade observations",
       "primaryKey": [
         "grade_id"
       ],
-      "compatibility": "Additive multi-source grades with unique immutable source keys; explicit backfill only. No live review or merge consumer."
+      "compatibility": "Additive multi-source grades with immutable source keys; explicit historical backfill and atomic batch settlement writes. Explicit manifest remediation consumes grades; no live review or merge predicate consumes them. Backfill excludes decisions already graded at settlement; lifecycle grade kind agrees across paths."
     },
     {
       "id": "review-findings",
@@ -42,7 +45,10 @@
         "src/finding-remediation-capture.mjs",
         "src/kernel/finding-lines.mjs",
         "src/kernel/review-findings.mjs",
-        "src/kernel/remediation-reply.mjs"
+        "src/kernel/remediation-reply.mjs",
+        "migrations/20261108_findings_batch_manifest.sql",
+        "src/finding-remediation-selection.mjs",
+        "migrations/20261108_findings_selection_scope.sql"
       ],
       "owner": "review-body capture and remediation completion observations"
     }

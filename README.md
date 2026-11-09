@@ -1709,6 +1709,18 @@ After deployment, restart the watcher, then SRE runs
 This is explicit and idempotent; concurrency bounds submissions while existing
 HQ admission bounds running workers. The backfill waits up to five seconds for a
 SQLite writer lock. No automatic deployment backfill runs.
+For a frozen graded selection, add `--manifest <selection.json>`. This validates
+the selection hash and reviewed-head pins, claims only selected real findings
+from merged sources, and dispatches/collects only that selection's batches.
+Workers still check applicability on current main. Settlement appends structured
+grades; lifecycle and stale outcomes remain indeterminate. Omitting the flag
+preserves the default drain. Selected rows remain excluded after release; only
+an explicit selection rechecks consensus and retries them. The ticker collects
+already-started selected work but never starts an undispatched selected batch.
+Backlog health counts cover the automatic drain; `selectedBacklog` separately
+reports per-manifest open, unbatched, errored and undispatched finding counts.
+Rerun the manifest explicitly to recover failed dispatches or released findings.
+See the [selection contract](docs/data-model/review-findings.md#graded-selection-remediation).
 `pipeline-health` JSON `nonBlockingBacklog` exposes open and unbatched finding
 counts, oldest open age, applied/dropped by UTC day and batch error counts. Its
 `progress` object (also printed by `node bin/review-findings.mjs backlog --db <db>`)

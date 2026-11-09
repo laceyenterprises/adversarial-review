@@ -100,9 +100,12 @@ test('batch jobs own advisory-only and mixed feedback, and durably record applie
       assert.equal(reads, applied ? 1 : 0);
       const stored = db.prepare('SELECT completed_at,result_json FROM finding_batches').get();
       assert.ok(stored.completed_at);
+      const grades = db.prepare('SELECT grader_kind,taxonomy_code FROM review_finding_grades').all();
+      assert.deepEqual(grades, mixed ? [{ grader_kind: 'batch-remediator', taxonomy_code: 'ind.cannot-reproduce' }] : []);
       assert.deepEqual(JSON.parse(stored.result_json).simplicityNotes, result.simplicityNotes);
       assert.deepEqual(claimFindingBatches(db, '2026-01-03'), []);
       assert.equal(settleFindingBatch(db, batch, result), true);
+      assert.equal(db.prepare('SELECT count(*) n FROM review_finding_grades').get().n, mixed ? 1 : 0);
     });
   }
 });

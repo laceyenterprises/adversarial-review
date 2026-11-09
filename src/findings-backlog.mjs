@@ -50,9 +50,13 @@ export function captureReadyFindings({ rootDir, repo, prNumber, headSha, version
 export function summarizeFindingBacklog(db, now = Date.now()) {
   if (!db) return { available: false, error: 'review-store-unavailable', areas: null };
   try {
+    const selectionScope = Boolean(db.prepare("SELECT 1 FROM pragma_table_info('finding_backlog') WHERE name='manifest_sha256'").get());
+    const batchSelection = Boolean(db.prepare("SELECT 1 FROM pragma_table_info('finding_batches') WHERE name='manifest_sha256'").get());
+    const backlogScope = selectionScope ? 'manifest_sha256 IS NULL AND ' : '';
+    const batchScope = batchSelection ? 'manifest_sha256 IS NULL AND ' : '';
     const areas = db.prepare(`WITH unresolved AS (
       SELECT b.repo,b.area,b.captured_at,b.batch_id,r.pr_state FROM finding_backlog b
-      JOIN reviewed_prs r ON r.repo=b.repo AND r.pr_number=b.pr_number WHERE b.outcome IS NULL
+      JOIN reviewed_prs r ON r.repo=b.repo AND r.pr_number=b.pr_number WHERE ${selectionScope ? 'b.manifest_sha256 IS NULL AND ' : ''}b.outcome IS NULL
       UNION ALL
       SELECT n.repo,coalesce(a.area,c.area,'_simplicity'),p.body_captured_at,n.batch_id,r.pr_state
       FROM finding_batch_notes n JOIN reviewer_passes p USING(pass_id)
@@ -66,19 +70,19 @@ export function summarizeFindingBacklog(db, now = Date.now()) {
       GROUP BY b.repo,b.area ORDER BY b.repo,b.area`).all()
       .map(row => ({ ...row, oldestAgeMs: Math.max(0, now - Date.parse(row.oldestAt)) }));
     const open = db.prepare(`SELECT count(*) AS openCount,min(captured_at) AS oldestOpenAt,
-      sum(batch_id IS NULL) AS unbatchedCount FROM finding_backlog WHERE outcome IS NULL`).get();
+      sum(batch_id IS NULL) AS unbatchedCount FROM finding_backlog WHERE ${backlogScope}outcome IS NULL`).get();
     const batchable = db.prepare(`SELECT count(*) AS batchableCount,min(b.captured_at) AS oldestBatchableAt
       FROM finding_backlog b JOIN reviewed_prs r USING(repo,pr_number)
-      WHERE b.outcome IS NULL AND r.pr_state='merged'`).get();
+      WHERE ${selectionScope ? 'b.manifest_sha256 IS NULL AND ' : ''}b.outcome IS NULL AND r.pr_state='merged'`).get();
     const perDay = db.prepare(`SELECT substr(resolved_at,1,10) AS day,
       sum(outcome='applied') AS applied,sum(outcome='dropped') AS dropped
-      FROM finding_backlog WHERE outcome IS NOT NULL AND resolved_at IS NOT NULL
+      FROM finding_backlog WHERE ${backlogScope}outcome IS NOT NULL AND resolved_at IS NOT NULL
       GROUP BY day ORDER BY day DESC`).all();
     // A store not yet migrated by the watcher reports progress as null rather
     // than losing the whole summary.
     const requeue = Boolean(db.prepare("SELECT 1 FROM pragma_table_info('finding_batches') WHERE name='released_at'").get());
     const batchErrors = db.prepare(`SELECT error,count(*) AS count FROM finding_batches
-      WHERE completed_at IS NULL ${requeue ? 'AND released_at IS NULL' : ''} AND error IS NOT NULL GROUP BY error ORDER BY error`).all();
+      WHERE ${batchScope}completed_at IS NULL ${requeue ? 'AND released_at IS NULL' : ''} AND error IS NOT NULL GROUP BY error ORDER BY error`).all();
     // Drain progress: open = unbatched + batched + stranded. Stranded findings
     // sit in an unsettled batch with an error; release returns them to the
     // queue (retrying) or drops them as exhausted. Drained means open is 0.
@@ -88,13 +92,24 @@ export function summarizeFindingBacklog(db, now = Date.now()) {
       sum(b.outcome IS NULL AND b.batch_id IS NOT NULL AND a.error IS NOT NULL) AS stranded,
       sum(b.outcome IS NULL AND b.batch_attempts > 0) AS retrying,
       sum(b.outcome='dropped' AND b.reason LIKE 'batch-retry-exhausted:%') AS exhausted
-      FROM finding_backlog b LEFT JOIN finding_batches a ON a.batch_id=b.batch_id`).get();
+      FROM finding_backlog b LEFT JOIN finding_batches a ON a.batch_id=b.batch_id ${selectionScope ? 'WHERE b.manifest_sha256 IS NULL' : ''}`).get();
     const progress = counts ? { ...Object.fromEntries(Object.entries(counts).map(([key, value]) => [key, value || 0])),
-      releasedBatches: db.prepare('SELECT count(*) AS n FROM finding_batches WHERE released_at IS NOT NULL').get().n } : null;
+      releasedBatches: db.prepare(`SELECT count(*) AS n FROM finding_batches WHERE ${batchScope}released_at IS NOT NULL`).get().n } : null;
+    // Selected work requires an explicit manifest rerun after dispatch failure
+    // or release. Keep it visible separately from automatic-drain health.
+    const selectedBacklog = selectionScope && batchSelection ? db.prepare(`
+      SELECT b.manifest_sha256 AS manifestSha256,
+        sum(b.outcome IS NULL) AS openCount,
+        sum(b.outcome IS NULL AND b.batch_id IS NULL) AS unbatchedCount,
+        sum(b.outcome IS NULL AND a.error IS NOT NULL) AS erroredCount,
+        sum(b.outcome IS NULL AND b.batch_id IS NOT NULL AND a.launch_id IS NULL) AS undispatchedCount
+      FROM finding_backlog b LEFT JOIN finding_batches a USING(batch_id)
+      WHERE b.manifest_sha256 IS NOT NULL GROUP BY b.manifest_sha256
+      ORDER BY b.manifest_sha256`).all() : null;
     return { available: true, areas, ...open, ...batchable, unbatchedCount: open.unbatchedCount || 0,
       oldestOpenAgeMs: open.oldestOpenAt ? Math.max(0, now - Date.parse(open.oldestOpenAt)) : 0,
       oldestBatchableAgeMs: batchable.oldestBatchableAt ? Math.max(0, now - Date.parse(batchable.oldestBatchableAt)) : 0,
-      perDay, batchErrors, progress };
+      perDay, batchErrors, progress, selectedBacklog };
   } catch (error) { return { available: false, error: error.message, areas: null }; }
 }
 

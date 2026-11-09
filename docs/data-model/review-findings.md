@@ -483,3 +483,49 @@ never clear ownership or open a duplicate PR to retry. No backfill runs at deplo
 or startup. Within 24 hours SRE records declining open count, dated applied/dropped
 outcomes and absence of evidence-format failures. This organic receipt is separate
 from offline synthetic tests.
+
+### Graded selection remediation
+
+`node bin/findings-batch-backfill.mjs` additionally accepts
+`--manifest <selection.json>` with the RGY-02 version 1 frozen manifest:
+`findings` entries contain `finding_id`, `repo`, `pr_number`, `head_sha`;
+`heads` lists distinct objects `{repo, pr_number, head_sha}`, sorted by repository,
+PR number and head SHA; `sha256` hashes compact,
+recursively key-sorted, ASCII-escaped JSON of
+`{"version":1,"findings":<entries sorted by finding_id>}`. Metadata such as
+name, counts and estimates is not hashed. Files are capped at 128 MiB and 10,000 findings. Validation and one consensus read per finding run before the claim write transaction.
+Every entry must match its stored finding identity and reviewed head before any
+claim or dispatch. Tampering, duplicate/missing identities and pin mismatches
+refuse the selection.
+
+An explicit selection admits only consensus-real findings from merged source
+PRs, using the [grade consensus seam](review-finding-grades.md). It may enroll
+selected blocking findings absent from the automatic non-blocking backlog. Enrollment requires a current body in the final posted first-pass/rereview.
+Existing owners and terminal outcomes are preserved; an already-owned finding
+is not stolen or rebatched. No simplicity advisories enroll in selected batches.
+Workers must re-check applicability on current main and drop findings that no
+longer apply. Grades describe reviewed-head correctness; they do not prove main
+applicability.
+
+`migrations/20261108_findings_batch_manifest.sql` adds nullable
+`finding_batches.manifest_sha256`. The additive
+`20261108_findings_selection_scope.sql` also stores `finding_backlog.manifest_sha256`,
+including recovery from existing selected batches and, only for unowned rows,
+release receipts. A current default batch never inherits an old selection. Selected batch IDs incorporate that hash,
+and selected runner invocations dispatch/collect only matching batches.
+Releases still increment attempts and retain old batch evidence; repeating the
+selection re-reads consensus and can claim released real findings under fresh IDs.
+Default claims exclude selected backlog rows; the default ticker never starts an
+undispatched selected batch. Collection/publication of already-started selected
+batches continues. Selected rows and batches are excluded from the automatic
+non-blocking backlog health counts. The summary additionally exposes
+`selectedBacklog`, an array grouped by `manifestSha256`, with `openCount`,
+`unbatchedCount`, `erroredCount` (open findings in batches with errors), and
+`undispatchedCount` (open findings owned by batches without a launch ID).
+Dispatch failures and released selections remain visible here and require an
+explicit rerun with that manifest. Before the selection columns are migrated,
+`selectedBacklog` is null and automatic-drain health remains available.
+No selection is automatically activated.
+Settlement writes append-only `batch-remediator` grades (`lifecycle` for `life.*`) atomically with valid
+outcomes after existing publication/PR checks. Requeue and exhaustion produce
+no correctness grade. No new lifecycle state or merge authority is introduced.

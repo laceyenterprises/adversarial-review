@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import Database from 'better-sqlite3';
+import { readFileSync, statSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
@@ -11,7 +12,7 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
   const options = {};
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i];
-    if (!['--root', '--db', '--concurrency', '--batch-size'].includes(key)
+    if (!['--root', '--db', '--concurrency', '--batch-size', '--manifest'].includes(key)
       || !argv[i + 1] || argv[i + 1].startsWith('--') || options[key]) throw Error(`invalid option: ${key}`);
     options[key] = argv[i + 1];
   }
@@ -23,11 +24,16 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
       || !Number.isSafeInteger(Number(options[key])))) throw Error(`invalid ${key}`);
   }
   const rootDir = resolve(options['--root']);
+  let manifest = null;
+  if (options['--manifest']) {
+    if (statSync(options['--manifest']).size > 128 * 1024 * 1024) throw Error('manifest byte cap exceeded');
+    manifest = JSON.parse(readFileSync(options['--manifest'], 'utf8'));
+  }
   if (resolve(options['--db']) !== join(rootDir, 'data', 'reviews.db')) throw Error('--db must match --root/data/reviews.db');
   const db = new Database(resolve(options['--db']), { fileMustExist: true, timeout: 5000 });
   try {
     ensureReviewStateSchema(db);
-    const result = await runFindingBatches({ ...dependencies, db, rootDir,
+    const result = await runFindingBatches({ ...dependencies, db, rootDir, manifest,
       concurrency: Number(options['--concurrency']),
       ...(options['--batch-size'] ? { batchSize: Number(options['--batch-size']) } : {}) });
     return { ...result, backlog: summarizeFindingBacklog(db) };

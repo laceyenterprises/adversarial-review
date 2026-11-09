@@ -12,6 +12,7 @@ import { reviewerPromptProvenance, buildPromptForReviewerModel } from '../src/re
 import { persistHostedReviewerExecution } from '../src/reviewer-execution-pass.mjs';
 import { GRADE_TAXONOMY, backlogGradeCode, backfillFindingGrades, recordFindingGrade, readFindingGrades } from '../src/review-finding-grades.mjs';
 import { main } from '../bin/review-grades.mjs';
+import { normalizeDroppedReason } from '../src/finding-drop-reason.mjs';
 
 const at = '2026-01-01T00:00:00Z';
 const body = `## Blocking Issues
@@ -95,6 +96,10 @@ test('backlog mapping preserves lifecycle and ambiguous false-positive distincti
   assert.equal(backlogGradeCode('dropped', 'already fixed in #8: Merged fix'), 'tp.already-fixed-elsewhere');
   assert.equal(backlogGradeCode('dropped', 'pr-closed-without-merge'), 'life.pr-closed');
   assert.equal(backlogGradeCode('dropped', 'superseded-final-review'), 'life.superseded');
+  for (const reason of ['pr-closed-without-merge', 'superseded-final-review', 'stale: Module removed']) {
+    assert.equal(backlogGradeCode('dropped', normalizeDroppedReason(reason)), backlogGradeCode('dropped', reason),
+      'live settlement and historical backfill share drop normalization');
+  }
   assert.equal(backlogGradeCode('dropped', 'batch-retry-exhausted: No result'), null);
   assert.equal(readFindingGrades(db).length, cases.length);
 });

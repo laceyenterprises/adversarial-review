@@ -491,8 +491,22 @@ deployments; that compatibility path cannot bypass the full-dispatch preflight.
 Base-head, context, full-review, primary-change, range and rebase/conflict proof
 reads use 90 seconds nominal and a 540-second ceiling. A timed-out read gets
 one retry; permanent failures and semantic stop codes return immediately.
+The canonical full-review command is
+`ham_read review-read "$HAM_NODE_BIN" "$HAM_ROOT_DIR/bin/hammer-pr-read.mjs" "$HAM_REPO" "$HAM_PR_NUMBER" --full-review`.
+It displays and atomically writes all paginated review bodies and commit
+associations to `$HAM_RUN_DIR/reviews-full.json`, including complete findings.
+Use it before acting on the final review and to expand truncated context;
+review-head matching and merge eligibility remain unchanged.
+Read-only shell syntax failures (including Bash eval status 1 or 2 with a
+syntax diagnostic), missing executables and command-not-found status 127 use
+`hammer-command-error`: retry once, then return 75 and record an existing
+retryable deferral. Correct the local command before another attempt.
+The controller also syntax-checks a closure script before executing it, so a
+parser error before `ham_read` is reached has the same retryable reason.
+Real read refusals retain their named terminal semantics.
 Child exit statuses, including 142 and signal-derived statuses, are preserved;
-only a timeout imposed by the runner returns 124.
+only a timeout imposed by the runner returns 124; local read command errors
+use the retryable status 75 described above.
 The runner waits for child exit, allowing five seconds for TERM cleanup before
 KILL, and keeps children in the controller's process group. Failed read output
 cannot mix with a successful retry. Child early-failure audits are provisional

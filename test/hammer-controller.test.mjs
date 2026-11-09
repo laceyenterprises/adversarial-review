@@ -36,6 +36,21 @@ const fakeEnvironmentClockPreload = `
 // grace window is spent: 0, 2, 7, 17, 37, 67, 97 and 120 seconds.
 const graceReads = 8;
 const head = 'a'.repeat(40);
+test('controller rejects a malformed ham_read script as a retryable local command error before any command runs', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-command-construction-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const script = join(dir, 'close.sh');
+  writeFileSync(script, 'ham_read review-display python3 -c import json; print(json.dumps({}))\n');
+  const env = { HAM_RUN_DIR: dir, HAM_ROOT_DIR: root, HAM_HQ_ROOT: dir, HAM_REPO: 'fixture/repo',
+    HAM_PR_NUMBER: '42', HAM_REVIEWED_SHA: head, HQ_LAUNCH_REQUEST_ID: 'lrq_synthetic-command' };
+  const status = await runHammerController(script, [], { env,
+    spawnImpl: () => { assert.fail('malformed script must never execute'); } });
+  assert.equal(status, 75);
+  const attempt = readAmaAuditEntry(dir, env.HAM_REPO, 42, head).attempts.at(-1);
+  assert.equal(attempt.reason, 'hammer-command-error');
+  assert.equal(attempt.outcome, 'deferred');
+});
+
 async function until(check) {
   const deadline = performance.now() + 8000;
   while (performance.now() < deadline) {

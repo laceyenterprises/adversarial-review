@@ -156,7 +156,7 @@ Validation: load-scaled 360s ceiling (`--nominal-timeout` tunes it); the 120-sec
 
 Never scan `/tmp`, `/private/tmp`, `$HOME`, `$HQ_ROOT` or whole checkouts for review state.
 Use live PR/review and inputs; without GraphQL quota use
-`ham_gh api repos/<<REPO>>/pulls/<<PR_NUMBER>>/reviews` or run files.
+the canonical full-review helper below or run files.
 
 Use `ham_bounded_git_sync` (load-aware, one transient retry).
 Do not wrap `git fetch` or other Git sync in your own fixed alarm: interrupted ref updates orphan locks.
@@ -169,7 +169,18 @@ export HAM_REPO='<<REPO>>' HAM_PR_NUMBER='<<PR_NUMBER>>' HAM_HQ_ROOT='<<HQ_ROOT>
 
 ## Cost and context discipline
 
-Run `ham_read context "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-context.mjs" "<<REPO>>" "<<PR_NUMBER>>"` before reads and after **each push**; nonzero stops; fetch the full review if `review.findingsTruncated` or `review.simplicityNoteTruncated` using `ham_read review-read <read-only command...>`.
+Run `ham_read context "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-context.mjs" "<<REPO>>" "<<PR_NUMBER>>"` before reads and after **each push**; nonzero stops. Before findings and for truncated context, read the full final review:
+
+<!-- hammer-reference:G1 -->
+Use this exact helper for the full final review, also whenever `review.findingsTruncated` or `review.simplicityNoteTruncated` is true:
+
+```bash
+ham_read review-read "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-pr-read.mjs" "<<REPO>>" "<<PR_NUMBER>>" --full-review
+```
+
+It writes `$HAM_RUN_DIR/reviews-full.json` and displays complete paginated review bodies, findings and commit associations. Use this helper for both reads; do not compose a shell, Python or `eval` command to fetch or display reviews. Existing review-head and merge predicates still decide authority.
+`hammer-command-error` means a local command could not run (shell syntax or missing executable), not a GitHub read failure. The read wrapper retries once, then returns 75 as a retryable deferral. Correct the command before another attempt; never record `review-read-failed` for this reason. Real read failures retain their existing stop semantics.
+<!-- /hammer-reference:G1 -->
 
 Context/verify-head exit 20 with `ci-infrastructure`: stop without merge or HQ
 decision. Recovery resumes after exact-head checks pass.

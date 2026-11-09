@@ -11,7 +11,7 @@ import { reportHammerEarlyFailure } from '../src/ama/hammer-terminal-audit.mjs';
 import { readAmaAuditEntry } from '../src/ama/audit.mjs';
 import { recordHammerPhase } from '../src/ama/hammer-outcome.mjs';
 
-async function fixture(t, script, { mode = 'read:report', scaled = false } = {}) {
+async function fixture(t, script, { mode = 'read:report', scaled = false, step = 'base-head' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-helper-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const count = join(dir, 'calls');
@@ -25,7 +25,7 @@ ${script}
   const reports = [];
   let output = '', errors = '';
   const code = await runHelperStep({
-    mode, step: 'base-head', nominal: 1, ceiling: 6, command: process.execPath, args: [fake],
+    mode, step, nominal: 1, ceiling: 6, command: process.execPath, args: [fake],
     env: { ...process.env, TMPDIR: dir, HAM_TEST_COUNT: count },
   }, {
     budget: (nominal, ceiling) => loadAwareTimeoutSeconds(nominal, {
@@ -87,6 +87,62 @@ console.error('permission denied'); process.exitCode = 76;`);
   assert.deepEqual(result.reports, ['git-credential-refresh-failed']);
 });
 
+test('unquoted python eval is a retried command error and never a terminal review-read failure', async t => {
+  const result = await fixture(t, `
+const {spawnSync} = await import('node:child_process');
+const child = spawnSync('/bin/bash', ['-c', ${JSON.stringify("eval 'python3 -c import json; print(json.dumps({}))'")}], {encoding:'utf8'});
+console.error(child.stderr); process.exitCode = child.status;
+`, { step: 'review-read' });
+  assert.equal(result.code, 75, result.errors);
+  assert.equal(result.calls, 2);
+  assert.match(result.errors, /hammer-command-error/);
+  assert.doesNotMatch(result.errors, /failure reason=review-read-failed/);
+  assert.deepEqual(result.reports, ['hammer-command-error']);
+  const { hammerPhaseAttempt } = await import('../src/ama/hammer-phase-outcome.mjs');
+  assert.equal(hammerPhaseAttempt({ outcome: 'failed-without-merge', reason: result.reports[0] }).outcome, 'deferred');
+});
+
+test('a corrected command can succeed on its one read retry without any terminal audit', async t => {
+  const result = await fixture(t, `
+if (attempt === 1) { console.error("bash: syntax error near unexpected token '('"); process.exitCode = 2; }
+else console.log('complete review');
+`);
+  assert.equal(result.code, 0);
+  assert.equal(result.calls, 2);
+  assert.equal(result.output, 'complete review\n');
+  assert.deepEqual(result.reports, []);
+});
+
+test('Bash unexpected-end-of-file syntax diagnostics also use command-error retries', async t => {
+  const result = await fixture(t, `
+console.error('synthetic-script.sh: line 1: syntax error: unexpected end of file'); process.exitCode = 2;
+`, { step: 'review-read' });
+  assert.equal(result.code, 75);
+  assert.equal(result.calls, 2);
+  assert.deepEqual(result.reports, ['hammer-command-error']);
+});
+
+test('missing executable and shell command-not-found yield a bounded command-error deferral', async () => {
+  for (const [command, args] of [['/nonexistent/synthetic-hammer-read', []], ['/bin/bash', ['-c', 'synthetic_missing_hammer_read']]]) {
+    const reports = [];
+    let errors = '';
+    const code = await runHelperStep({ mode: 'read:report', step: 'review-read', nominal: 1, ceiling: 1,
+      command, args }, { budget: () => 1, report: reason => reports.push(reason),
+      stdout: () => {}, stderr: text => { errors += text; } });
+    assert.equal(code, 75);
+    assert.match(errors, /attempt=2\/2/);
+    assert.deepEqual(reports, ['hammer-command-error']);
+  }
+});
+
+test('a real review read refusal is terminal and exit 2 without a Bash diagnostic is not construction', async t => {
+  for (const status of [1, 2]) {
+    const result = await fixture(t, `console.error('synthetic API read refusal'); process.exitCode = ${status};`, { step: 'review-read' });
+    assert.equal(result.code, status);
+    assert.equal(result.calls, 1);
+    assert.deepEqual(result.reports, ['review-read-failed']);
+  }
+});
 for (const code of [20, 21]) {
   test(`semantic exit ${code} is neither retried nor reported even when stderr mentions a timeout`, async t => {
     const result = await fixture(t, `console.error('CI infrastructure timeout evidence'); process.exitCode = ${code};`);

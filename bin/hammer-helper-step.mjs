@@ -54,7 +54,7 @@ async function execute(command, args, { seconds, env, directory }) {
   }, seconds * 1000);
   try {
     return await new Promise(resolve => {
-      child.once('error', () => resolve({ code: 1, timedOut }));
+      child.once('error', error => resolve({ code: error.code === 'ENOENT' ? 127 : 1, timedOut }));
       child.once('close', (code, signal) => resolve({
         code: timedOut ? 124 : (code ?? (signal ? 128 + constants.signals[signal] : 1)), timedOut,
       }));
@@ -100,6 +100,17 @@ export async function runHelperStep({ mode, step, nominal, ceiling, command, arg
       if (result.code === 0) {
         stdout(output);
         return 0;
+      }
+      // Local shell construction is not an observation of GitHub. Retry only
+      // read-only commands, then yield to the existing closer retry owner.
+      const commandError = mode.startsWith('read') && (result.code === 127
+        || ([1, 2].includes(result.code)
+          && /(?:\bbash:|\beval:|:\s*line \d+:)[^\n]*(?:syntax error|unexpected EOF while looking for matching)/i.test(errors)));
+      if (commandError) {
+        stderr('HAM helper failure reason=hammer-command-error; correct the command and retry this read\n');
+        if (attempt < attempts) continue;
+        if (reportsFailure) await report('hammer-command-error', { env });
+        return 75;
       }
       if (timeout && attempt < attempts) continue;
       // Keep API publication receipts even on failure. Never replay a mutation.

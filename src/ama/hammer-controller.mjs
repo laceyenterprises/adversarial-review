@@ -309,6 +309,7 @@ export async function runHammerController(script, args = [], {
   unreadableGraceMs = LAUNCH_UNREADABLE_GRACE_MS, gateWaitMs = LAUNCH_GATE_WAIT_MS,
   readLaunchImpl = readLaunchRequestStatusFromLedgerAsync,
   readTimeoutImpl = launchReadTimeoutMs,
+  censusRetryWindowMs = loadAwareTimeoutMs(10_000),
   readDispatchFilesImpl = readDispatchFilesSync,
   nowImpl = () => performance.now(), delayImpl = delay,
   snapshotImpl, groupCensusImpl = createControllerGroupCensus,
@@ -399,6 +400,7 @@ export async function runHammerController(script, args = [], {
     launchReadSource: launchReads.source });
   const persist = () => writeFileAtomic(recordPath, `${JSON.stringify(withReads(), null, 2)}\n`, { mode: 0o600 });
   const witnessed = new Map();
+  let censusFailures = 0, censusFailureStarted, censusAttempts = 0;
   let reason, stopAt, termSent = false, killSent = false, drained = false;
   const stop = why => { if (!reason) { reason = why; stopAt = nowImpl(); } };
   const handlers = ['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGALRM'].map(signal => {
@@ -473,10 +475,27 @@ export async function runHammerController(script, args = [], {
       // Judge only a validator request that arrived before this census began.
       const validator = pendingValidator;
       let members;
-      try { members = await snapshotImpl(child.pid); }
-      catch (error) {
+      const censusStarted = nowImpl();
+      try {
+        members = await snapshotImpl(child.pid);
+        censusFailures = 0;
+        censusAttempts = 0;
+        censusFailureStarted = undefined;
+      } catch (error) {
         if (!record.probeError) console.error(`hammer-controller: ${error.message}`);
-        record.probeError = error.code || 'unknown'; stop('process-probe-unreadable');
+        record.probeError = error.code || 'unknown';
+        censusFailureStarted ??= censusStarted;
+        censusFailures += 1;
+        censusAttempts += error.censusAttempts || 1;
+        record.censusFailure = { requests: censusFailures, attempts: censusAttempts,
+          elapsedMs: Math.max(0, Math.round(nowImpl() - censusFailureStarted)), lastErrno: record.probeError };
+        // No result means no signal or validation authority. Poll again with a
+        // fresh helper, retaining pending validation/merge gates until bounded
+        // exhaustion or a separate cancellation requires direct-child cleanup.
+        if (!reason && (censusFailures >= 3 || nowImpl() - censusFailureStarted >= censusRetryWindowMs)) {
+          record.reasonDetail = { reason: 'process-probe-unreadable', ...record.censusFailure };
+          stop('process-probe-unreadable');
+        }
       }
       if (members?.length === 0 && exited) { stop('shell-exited'); drained = true; break; }
       const owned = members && groupStillOwned(members, witnessed, !exited, child.pid);
@@ -484,17 +503,17 @@ export async function runHammerController(script, args = [], {
       // event. An empty group grants no signal authority; wait for that event
       // before deciding whether the completed script succeeded.
       if (members?.length && !owned) stop('process-identity-unconfirmed');
-      if (validator && validator === pendingValidator) {
+      if (validator && validator === pendingValidator && (members || reason)) {
         const clear = !reason && owned && members.some(member => member.pid === validator.pid)
           && members.every(member => member.pid === child.pid || member.pid === validator.pid);
         if (!clear) stop('validation-descendants-or-probe-unconfirmed');
         child.stdio[4].write(`${clear ? 'clear' : 'blocked'}:${validator.token}\n`);
         pendingValidator = undefined;
       }
-      if (pendingGate) {
+      if (pendingGate && (members || reason)) {
         // Fresh: started no longer ago than one poll interval plus its timeout.
         const fresh = nowImpl() - lastPermitted.at <= launchPollMs + lastPermitted.readTimeoutMs;
-        if (!reason && fresh) { child.stdio[4].write(`clear:${pendingGate.token}\n`); pendingGate = undefined; }
+        if (!reason && members && fresh) { child.stdio[4].write(`clear:${pendingGate.token}\n`); pendingGate = undefined; }
         else if (reason || (!reading && (nowImpl() >= pendingGate.deadline
             || pendingGate.reads >= LAUNCH_READ_ATTEMPTS))) {
           // An unreadable launch blocks this step; only the grace window ends the round.

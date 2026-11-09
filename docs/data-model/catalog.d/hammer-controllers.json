@@ -1,0 +1,15 @@
+{
+  "domains": [
+    {
+      "title": "Hammer controller registrations",
+      "path": "docs/data-model/hammer-controllers.md",
+      "store": "<HAM_RUN_DIR>/controller-<uuid>.json",
+      "schemaSurface": "src/ama/hammer-controller.mjs",
+      "owner": "Versioned closer controller",
+      "optionalFields": [
+        "censusFailure: latest failed series { requests, attempts, elapsedMs, lastErrno }, retained after recovery",
+        "reasonDetail: census exhaustion { reason, requests, attempts, elapsedMs, lastErrno }, frozen when the stop begins"
+      ]
+    }
+  ]
+}

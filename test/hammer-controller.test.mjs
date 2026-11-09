@@ -227,7 +227,7 @@ test('Darwin census forwards the subprocess runner through the default native pr
     assert.deepEqual(args.slice(0, 2), ['-I', '-B']);
     assert.match(args[2], /controller_process_census\.py$/);
     assert.deepEqual(args.slice(3), ['group', '100']);
-    assert.ok(options.timeout >= 2000 && options.timeout <= 12000);
+    assert.ok(options.timeout >= 3000 && options.timeout <= 41000);
     return JSON.stringify(members);
   } });
   assert.deepEqual(result, members);
@@ -1136,6 +1136,57 @@ test('QCP-08: a census refused mid-round never authorizes a group signal', async
   assert.equal(receipt.state, 'cleanup-unconfirmed');
   assert.equal(census.closed, true);
 });
+
+test('CENSUSEIO-01: merge gate and validation survive transient unreadable census', async t => {
+  const token = '22222222-2222-4222-8222-222222222222';
+  const shell = { pid: 4242, birth: '100.000001' };
+  const validator = { pid: 999, birth: '100.000002' };
+  let calls = 0, sim;
+  sim = simulate(t, { reads: () => launch('running'), snapshotImpl: async () => {
+    calls++;
+    if (calls === 1) return [shell];
+    if (calls === 2) {
+      sim.control.push(`complete:999:${token}\n`);
+      await new Promise(resolve => setImmediate(resolve));
+      return [shell, validator];
+    }
+    if (calls === 3 || calls === 5) throw Object.assign(new Error('synthetic EIO'),
+      { code: 'EIO', censusAttempts: 15, censusElapsedMs: 2000 });
+    if (calls === 4) return [shell, validator];
+    if (calls === 6) return [shell];
+    return [];
+  }, onTick(state) {
+    if (calls === 4) state.control.push(`launch:4242:${token}\n`);
+    if (calls === 6) state.exit(0);
+  } });
+  const { status, receipt } = await sim.done;
+  assert.equal(status, 0);
+  assert.deepEqual(sim.signals, []);
+  assert.equal(sim.answers.filter(answer => answer === `clear:${token}\n`).length, 2);
+  assert.equal(receipt.reason, 'shell-exited');
+  assert.equal(receipt.censusFailure.lastErrno, 'EIO');
+});
+
+for (const windowMs of [500, 10_000]) {
+  test(`CENSUSEIO-01: census exhaustion bounds retry by ${windowMs}ms and three requests`, async t => {
+    let calls = 0;
+    const sim = simulate(t, { reads: () => launch('running'), censusRetryWindowMs: windowMs,
+      snapshotImpl: () => {
+        if (++calls === 1) return [{ pid: 4242, birth: '100.000001' }];
+        throw Object.assign(new Error('synthetic EIO'), { code: 'EIO', censusAttempts: 15 });
+      } });
+    const { receipt, status } = await sim.done;
+    assert.equal(status, 125);
+    assert.deepEqual(sim.signals, []);
+    assert.equal(receipt.reasonDetail.lastErrno, 'EIO');
+    assert.equal(receipt.reasonDetail.requests, windowMs === 500 ? 2 : 3);
+    assert.equal(receipt.reasonDetail.attempts, receipt.reasonDetail.requests * 15);
+    assert.equal(receipt.reasonDetail.elapsedMs, windowMs === 500 ? 1000 : 2000);
+    assert.equal(receipt.directTermSent, true);
+    assert.equal(receipt.directKillSent, true);
+    assert.equal(receipt.state, 'cleanup-unconfirmed');
+  });
+}
 
 test('QCP-08: a validator request that lands during a census is judged by the next census', async t => {
   const token = '22222222-2222-4222-8222-222222222222';

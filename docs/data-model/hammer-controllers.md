@@ -140,7 +140,14 @@ PID and provider birth must still match before another group signal. Darwin
 uses exact kernel seconds/microseconds from the `kern.proc.pgrp` sysctl (the
 start time `ps lstart` prints to the second); other hosts retain `ps lstart`.
 One census helper serves the whole round on Darwin and answers each tick with a
-new kernel read (QCP-08); the receipt fields and refusal codes are unchanged.
+new kernel read (QCP-08). CENSUSEIO-01 adds `censusFailure` containing the latest
+failed series' request count, kernel attempts (one per unreported request), elapsed
+milliseconds and last errno. After readiness, up to three consecutive failed
+requests retry within a load-aware nominal ten-second window; pending validation
+and merge gates await a readable snapshot. An admitted read may finish beyond
+that window. Exhaustion retains `reason: process-probe-unreadable` and adds
+`reasonDetail: { reason, requests, attempts, elapsedMs, lastErrno }` captured at
+exhaustion. Failure metadata grants no signal or lease-release authority.
 The provider remains fixed for an invocation; no denied probe becomes an empty
 census or a weaker identity match. A fresh
 group census must confirm no live members (zombies excluded) before `quiescent`.

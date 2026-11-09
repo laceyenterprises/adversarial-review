@@ -8438,11 +8438,12 @@ receipt. No worker label change, service action or forced dispatch is needed.
 ## R07 stop supersession (STOPSTALE-02)
 
 `src/pr-next-action.mjs` routes deterministic automated stops, retry-exhausted,
-lifetime-exhausted and hammer-final-no-merge through one supersession helper.
+lifetime-exhausted, hammer-final-no-merge and R08 terminal no-merge with
+retries remaining through one supersession helper.
 A strictly newer exact-head review must be merge-eligible under the current
 strict-mode policy. Normal row selection then runs with hammer history set
 aside, accepting only `daemon-merge` / `daemon`; any other result retains the
-original R07 reason, attempt and recovery ownership. Decision refs include
+original stop or retry reason, attempt and ownership. Decision refs include
 `stop-superseded-by-exact-head-review` and `stop-reason:<original reason>`.
 
 Freshness is anchored to durable evidence: `controls.stop.recordedAt`, an
@@ -8453,6 +8454,10 @@ not change ledger storage. Missing, invalid or non-earlier times fail closed.
 An observation clock or a repeatedly updated ledger timestamp grants no escape.
 Caps remain binding for hammer dispatch; selection neither resets nor refunds
 any budget. Automated hold labels and earlier safety/ownership rows still win.
+An exact-head clean review after a terminal tooling stop can therefore return
+to the daemon without another hammer run. The daemon still reads the live
+head, required checks, primary-change evidence and attestation, and acquires
+the shared merge lease. A strict-mode non-blocking finding cannot use this path.
 
 STOPSTALE-03 preserves `alertedAt` when an alert repeats during the same
 lifetime suppression, including across reviewed-head changes. Series and target

@@ -21,6 +21,7 @@ import {
 } from '../src/ama/daemon-merge.mjs';
 import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { readDaemonMergeParks } from '../src/daemon-merge-park-log.mjs';
+import { appendAmaAuditAttempt } from '../src/ama/audit.mjs';
 import { __testables__ as daemonCleanMergeTestables } from '../src/daemon-clean-merge.mjs';
 
 // Integration test for the MSM-03 wiring seam in `maybeDispatchAmaClosureFor`:
@@ -138,6 +139,53 @@ function findingsArgs(rootDir) {
   return { ...args, reviewStateRow: { ...args.reviewStateRow, review_body: body },
     dispatchJob: { ...args.dispatchJob, remediationStopCode: 'max-rounds-reached', nonBlockingFindingCount: 1, nonBlockingFindingState: 'known' },
     fetchLatestHeadReviewBodiesImpl: async () => [body] };
+}
+
+for (const scenario of ['fresh-clean', 'fresh-finding', 'older-clean', 'new-head', 'live-closer']) {
+test(`CLOSERREARM-01 ${scenario} after a terminal closer stop`, async t => {
+  const { acquireAmaCloserLease, updateAmaCloserLease } = await import('../src/ama/closer-lease.mjs');
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = scenario === 'fresh-finding' ? findingsArgs(rootDir) : baseArgs(rootDir);
+  const head = 'a'.repeat(40), oldHead = scenario === 'new-head' ? 'b'.repeat(40) : head;
+  const stoppedAt = '2026-01-01T00:00:00.000Z';
+  const postedAt = scenario === 'older-clean' ? '2025-12-31T23:59:00.000Z' : '2026-01-01T00:10:00.000Z';
+  const identity = { rootDir, repo: args.repoPath, prNumber: args.prNumber, headSha: oldHead };
+  appendAmaAuditAttempt({ hqRoot: rootDir, ...identity, attempt: {
+    outcome: 'failed-without-merge', attemptPhase: 'hammer-terminal',
+    reason: 'review-read-failed', head: oldHead, startedAt: stoppedAt,
+    closingStatus: 'Final adjudication ended without merge; operator follow-through required.',
+  } });
+  acquireAmaCloserLease({ ...identity, now: stoppedAt });
+  updateAmaCloserLease({ ...identity, status: 'dispatched', lrqId: 'synthetic-ended', now: stoppedAt });
+  if (scenario !== 'live-closer') updateAmaCloserLease({ ...identity, status: 'terminal',
+    terminalOutcome: 'failed-without-merge', now: stoppedAt });
+  t.mock.method(dispatchReadTransport, 'lookup', async () => ({
+    schema_version: 1, status: 'found', complete: true, roots: ['synthetic-ended'],
+    items: [{ launch_request_id: 'synthetic-ended',
+      status: scenario === 'live-closer' ? 'running' : 'succeeded',
+      terminal_at: scenario === 'live-closer' ? null : stoppedAt }], retry_edges: [],
+  }));
+  let merges = 0;
+  await maybeDispatchAmaClosureFor({ ...args,
+    candidate: { ...args.candidate, headSha: head }, currentRevisionRef: head,
+    reviewStateRow: { ...args.reviewStateRow, reviewer_head_sha: head, posted_at: postedAt },
+    now: () => Date.parse(postedAt),
+    env: { ...process.env, HQ_ROOT: rootDir },
+    runDaemonCleanMergeAttemptImpl: async input => {
+      assert.equal(input.currentPrHeadSha, head);
+      assert.equal(input.sharedNextAction.decision.actor, 'daemon');
+      if (scenario === 'fresh-clean') {
+        assert.ok(input.sharedNextAction.decision.evidenceRefs.includes('stop-superseded-by-exact-head-review'));
+      }
+      merges++;
+      return { disposition: 'merged', merged: true };
+    },
+    maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, reason: 'synthetic-stop' }),
+    deliverAlertImpl: async () => {},
+  });
+  assert.equal(merges, ['fresh-clean', 'new-head'].includes(scenario) ? 1 : 0);
+});
 }
 
 test('CIUNKNOWN-01 settled zero-finding review stays on merge path when CI is unknown', async () => {

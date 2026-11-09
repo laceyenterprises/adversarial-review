@@ -426,7 +426,7 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
       refs: [`receipt:${lower(receipt.path) || 'unknown-path'}`] };
   }
 
-  // R07 variants share one daemon-only supersession path. The recursive
+  // R07 stops and R08 terminal retries share one daemon-only supersession path. The recursive
   // selection sets aside hammer history, never refunds it or admits dispatch.
   const stopped = (row, recordedMs, forHead = true) => {
     const notFired = reason => ({ ...row,
@@ -518,8 +518,8 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
   const terminalRecoveryExpired = facts.recoveryExpired && leaseForHead && lease.status === 'terminal';
   if (!daemonAfterSupersededStop && launchForHead && launch.owned === false && launch.outcome === 'no-merge' && launch.retryable === true
     && (!terminalHead || terminalRecoveryExpired)) {
-    return { row: 'R08-retry', action: 'hammer', actor: 'hammer', reason: 'retry-no-merge', deadlineKind: 'admission',
-      queue: 'dispatch', attempt: launch.attempt !== null ? launch.attempt + 1 : null };
+    return stopped({ row: 'R08-retry', action: 'hammer', actor: 'hammer', reason: 'retry-no-merge', deadlineKind: 'admission',
+      queue: 'dispatch', attempt: launch.attempt !== null ? launch.attempt + 1 : null }, launch.terminalMs);
   }
 
   // A label-only review has no remediation actor to admit. Preserve established

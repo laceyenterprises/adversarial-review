@@ -62,3 +62,21 @@ no schema shape, lifecycle values or deployed smoke commands change.
 
 The neighboring PR-reader fixture now fixes its clock inside the timeout so
 its marker/read-error checks cannot accidentally exercise overdue release.
+
+## CI remediation (PR #1777, round 3)
+
+Both Node CI lanes failed the posted-review database-read assertion because
+the new dispatch-attempt migration's six sentinel reads were included in the
+non-migration budget. Account for that migration separately using the existing
+test convention, asserting exactly six reads and retaining the 114-read runtime
+budget. No production interface, schema, lifecycle or smoke contract changes.
+
+Verification: reproduced the CI failure locally (`120 !== 114`) before the fix.
+`npm run lint` passed with zero errors (152 existing warnings); targeted ESLint
+on the changed test, `npm run typecheck:contracts`, the offline research-finding
+walkthrough and `git diff --check` passed. Full-suite execution remains with CI.
+The changed watcher-closure-latency file passed all 33 tests independently.
+A broader bounded run also passed both findings files (110 tests) and those
+33 tests, but its additional, unchanged watcher-claim-loop file exceeded the
+120-second deadline; that optional expansion does not establish a full
+claim-loop result.

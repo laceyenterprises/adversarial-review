@@ -38,6 +38,8 @@ export const QUOTA_HARNESS_PROVIDER = Object.freeze({
   claude: 'anthropic',
   'claude-code': 'anthropic',
   gemini: 'google',
+  grok: 'xai',
+  'grok-reviewer': 'xai',
   'remediator-gemini': 'google',
 });
 

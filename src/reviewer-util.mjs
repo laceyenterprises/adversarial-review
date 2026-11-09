@@ -17,6 +17,7 @@ const REVIEW_FAMILY_BY_BUILDER_CLASS = Object.freeze({
   pi: 'pi',
   opencode: 'opencode',
   hermes: 'hermes',
+  grok: 'grok',
 });
 
 function normalizeBuilderTag(builderTag) {

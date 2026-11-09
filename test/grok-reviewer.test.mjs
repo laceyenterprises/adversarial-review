@@ -1,0 +1,171 @@
+import './helpers/load-aware-timeout-fixture.mjs';
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { reviewWithGrok } from '../src/grok-reviewer.mjs';
+import { dispatchReviewerModel } from '../src/reviewer-harness.mjs';
+import { reviewerRefusesBuilder, REVIEWER_ROUTE_BY_MODEL } from '../src/adapters/subject/github-pr/routing.mjs';
+import { builderClassFromTitle } from '../src/adapters/subject/github-pr/title-tagging.mjs';
+import { normalizeReviewerClass, readBestReviewerEvidenceTokenUsage } from '../src/reviewer-pass-tokens.mjs';
+import { buildReviewerAttribution, validateReviewerAttribution } from '../src/reviewer-attribution.mjs';
+import { emitReviewedAttestation } from '../src/reviewed-attestation.mjs';
+import { probeReviewerCliOAuth } from '../src/adapters/reviewer-runtime/cli-direct/discovery.mjs';
+import { applyAfhReviewerFallback, providerForReviewerModel } from '../src/afh-reviewer-fallback.mjs';
+
+const body = '## Summary\nThe change preserves the documented behavior.\n\n## Blocking issues\n- None.\n\n## Non-blocking issues\n- None.\n\n## Verdict\nComment only';
+const env = { GH_GROK_REVIEWER_TOKEN: 'synthetic-posting-authority' };
+const config = enabled => () => ({ get: (key, fallback) =>
+  ['grok.enabled', 'grok.reviewer.enabled'].includes(key) ? enabled : fallback });
+const registry = { ok: true, data: { registrySource: 'db', classes: {
+  'grok-reviewer': { enabled: true, harness: 'grok', defaultModel: 'grok-build', fallbackWorkerClasses: [] },
+} } };
+const options = overrides => ({
+  builderClass: 'codex', subjectContext: { subjectExternalId: 'example/review#1' },
+  env, loaderImpl: config(true), registryImpl: async () => registry,
+  runtimeFactory: () => ({ spawnReviewer: async () => ({ ok: true, reviewBody: body, reattachToken: 'synthetic-dispatch' }) }),
+  readUsageImpl: () => null, ...overrides,
+});
+
+test('Grok reviewer is opt-in and refuses every same-family alias before registry or auth', async () => {
+  assert.equal(reviewerRefusesBuilder('codex', 'grok', { loaderImpl: config(false) }), true);
+  const aliases = ['grok', 'grok-api', 'grok-reviewer', 'remediator-grok', 'hammer-grok'];
+  for (const actor of aliases) {
+    assert.equal(reviewerRefusesBuilder('codex', actor, { loaderImpl: config(true) }), false);
+    for (const builder of [...aliases, 'unknown']) {
+      assert.equal(reviewerRefusesBuilder(builder, actor, { loaderImpl: config(true) }), true);
+      await assert.rejects(reviewWithGrok('', '', options({ builderClass: builder,
+        registryImpl: () => assert.fail('refused builder reached registry') })), /family refused/);
+    }
+  }
+  for (const prefix of ['', '[closer] ', '[hammer-grok] ', '[hammer-claude] ']) {
+    const builder = builderClassFromTitle(`${prefix}[grok] Synthetic change`);
+    assert.equal(reviewerRefusesBuilder(builder, 'grok-api', { loaderImpl: config(true) }), true);
+  }
+});
+
+test('managed invocation preserves original provenance and common nullable telemetry', async () => {
+  const usage = { input: 20, output: 10, costUSD: null, source: 'grok-session-usage' };
+  let request;
+  const result = await reviewWithGrok('synthetic diff', 'synthetic context', options({
+    runtimeFactory: args => {
+      assert.equal(args.workerClass, 'grok-reviewer');
+      assert.equal(args.taskKind, 'review');
+      return { spawnReviewer: async value => { request = value;
+        return { ok: true, reviewBody: body, reattachToken: 'synthetic-dispatch' }; } };
+    },
+    readUsageImpl: args => {
+      assert.equal(args.launchRequestId, 'synthetic-dispatch');
+      return usage;
+    },
+  }));
+  assert.equal(request.subjectContext.builderClass, 'codex');
+  assert.equal(request.workerClass, 'grok-reviewer');
+  assert.match(request.prompt, /synthetic diff/);
+  assert.strictEqual(result.tokenUsage, usage);
+  assert.equal(result.execution.harness, 'grok');
+});
+
+test('unimported, disabled, missing, or fallback-bearing registry cannot execute', async () => {
+  for (const data of [
+    { ...registry.data, registrySource: 'json' },
+    { ...registry.data, classes: {} },
+    ...[{ enabled: false }, { harness: 'codex' }, { fallbackWorkerClasses: ['grok-api'] }]
+      .map(patch => ({ ...registry.data, classes: { 'grok-reviewer': { ...registry.data.classes['grok-reviewer'], ...patch } } })),
+  ]) {
+    await assert.rejects(reviewWithGrok('', '', options({ registryImpl: async () => ({ ok: true, data }),
+      runtimeFactory: () => assert.fail('unsafe import reached runtime') })), /registry import/);
+  }
+});
+
+test('missing posting authority fails closed before execution', async () => {
+  await assert.rejects(reviewWithGrok('', '', options({ env: {},
+    runtimeFactory: () => assert.fail('missing authority reached runtime') })), /posting authority/);
+});
+
+test('typed quota, auth and timeout failures cannot become a review', async () => {
+  for (const failureClass of ['quota-exhausted', 'oauth-broken', 'reviewer-timeout']) {
+    await assert.rejects(reviewWithGrok('', '', options({
+      runtimeFactory: () => ({ spawnReviewer: async () => ({ ok: false, failureClass,
+        stderrTail: 'synthetic-private-output' }) }),
+    })), error => error.failureClass === failureClass && !error.message.includes('private-output'));
+  }
+});
+
+test('model dispatcher sanitizes Grok output and never invokes Codex', async () => {
+  const result = await dispatchReviewerModel('grok', '', '', {
+    builderClass: 'codex',
+    reviewWithGrokImpl: async () => ({ reviewText: `runtime decoration\n${body}`, tokenUsage: { costUSD: 0.25 } }),
+    reviewWithCodexImpl: () => assert.fail('Grok fell through to Codex'),
+  });
+  assert.equal(result.reviewText, body);
+  assert.equal(result.tokenUsage.costUSD, 0.25);
+  await assert.rejects(dispatchReviewerModel('grok', '', '', {
+    reviewWithGrokImpl: async () => ({ reviewText: 'runtime failure' }),
+  }));
+});
+
+test('Grok preflight delegates auth to the managed adapter', async () => {
+  assert.deepEqual(await probeReviewerCliOAuth({ model: 'grok',
+    execFileImpl: () => assert.fail('Grok used a sibling credential probe') }), { managed: true });
+  assert.equal(REVIEWER_ROUTE_BY_MODEL.grok.botTokenEnv, 'GH_GROK_REVIEWER_TOKEN');
+  assert.equal(normalizeReviewerClass('grok-reviewer'), 'grok');
+  const attribution = buildReviewerAttribution({ reviewerModel: 'grok' });
+  assert.equal(validateReviewerAttribution(attribution).reviewerSubject, 'grok-reviewer');
+  assert.throws(() => validateReviewerAttribution(attribution, 'different-reviewer'), /subject mismatch/);
+  const forbidden = new Proxy([], { get() { assert.fail('Grok consulted sibling transcript roots'); } });
+  assert.equal(readBestReviewerEvidenceTokenUsage({
+    reviewerModel: 'grok', codexSessionRoots: forbidden, claudeSessionRoots: forbidden,
+    env: {},
+  }), null);
+});
+
+test('AFH cannot retain a Grok reviewer for Grok provenance even on missing health or pins', () => {
+  for (const builderClass of ['grok', 'grok-api', 'hammer-grok', 'unknown']) {
+    for (const reviewerModel of ['grok', 'grok-api', 'grok-reviewer']) {
+      const result = applyAfhReviewerFallback({
+        builderClass, baseRoute: { reviewerModel, operatorPinnedReviewer: true },
+        grounding: { available: false }, geminiReviewerMode: 'off',
+      });
+      assert.equal(result.integrityRefused, true);
+      assert.equal(result.quotaBlocked, true);
+    }
+  }
+});
+
+test('AFH uses xai health and selects a different builder family when Grok is grounded', () => {
+  assert.equal(providerForReviewerModel('grok-api'), 'xai');
+  const flags = { AGENT_OS_CONFIG_PATH: '/dev/null',
+    AGENT_OS_GROK_ENABLED: 'true', AGENT_OS_GROK_REVIEWER_ENABLED: 'true' };
+  const saved = Object.fromEntries(Object.keys(flags).map(key => [key, process.env[key]]));
+  try {
+    Object.assign(process.env, flags);
+    const status = grounded => ({ state: grounded ? 'exhausted' : 'ok',
+      hardGrounded: grounded, softGrounded: false, grounded });
+    const grounding = { available: true, providers: { xai: status(true),
+      openai: status(false), anthropic: status(false), google: status(true) } };
+    for (const [builderClass, expected] of [['claude-code', 'codex'], ['codex', 'claude']]) {
+      const result = applyAfhReviewerFallback({ builderClass,
+        baseRoute: REVIEWER_ROUTE_BY_MODEL.grok, grounding, geminiReviewerMode: 'off' });
+      assert.equal(result.reviewerModel, expected);
+      assert.equal(reviewerRefusesBuilder(builderClass, result.reviewerModel), false);
+    }
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test('Grok reviewed signing failure never records an unsigned receipt', async () => {
+  let records = 0;
+  await assert.rejects(emitReviewedAttestation({
+    repo: 'example/review', prNumber: 1, headSha: 'synthetic-head',
+    reviewerIdentity: 'grok-reviewer', verdict: 'comment-only', reviewBody: body,
+    env: {}, log: { log() {}, warn() {} },
+    execFileImpl: async (_command, argv) => {
+      if (argv[1] === 'record') records += 1;
+      throw new Error('synthetic signer unavailable');
+    },
+  }));
+  assert.equal(records, 0);
+});

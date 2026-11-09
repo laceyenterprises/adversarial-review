@@ -209,6 +209,7 @@ const execFileAsync = promisify(execFile);
 const ADVISORY_ONLY_REVIEW_LABEL = 'operator-approved: advisory-only-review';
 
 const REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV = Object.freeze({
+  GH_GROK_REVIEWER_TOKEN: 'grok-reviewer',
   GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer-lacey',
   GH_CODEX_REVIEWER_TOKEN: 'codex-reviewer-lacey',
   GH_GEMINI_REVIEWER_TOKEN: 'gemini-reviewer-lacey',
@@ -2093,6 +2094,7 @@ async function main() {
       promptStage: reviewModeDecision.promptStage, reviewKind, geminiRuntime: geminiRuntimeForBudget,
     }),
     options: () => ({ reviewerModel: effectiveModel, promptStage: reviewModeDecision.promptStage, reviewKind,
+      builderClass: builderTag, subjectContext: { subjectExternalId: `${repo}#${prNumber}` },
       reviewerSubprocessCwd, mes, signal: effectiveModel === 'gemini' ? geminiDeadline.signal : undefined }),
     run: (model, diff, context, options) => dispatchReviewerModel(model, diff, context, { ...options, reviewerArm,
       onProgress: createReviewerProgressRecorder({ rootDir: ROOT, repo, prNumber, attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0, passKind, reviewerSessionUuid }) }),

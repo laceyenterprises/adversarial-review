@@ -174,6 +174,7 @@ function resolveReviewerIdentity({ reviewerModel, botTokenEnv } = {}) {
     return REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV[botTokenEnv];
   }
   const normalizedModel = String(reviewerModel || '').trim().toLowerCase();
+  if (normalizedModel === 'grok') return 'grok-reviewer';
   if (normalizedModel === 'codex') return 'codex-reviewer-lacey';
   if (normalizedModel === 'gemini') return 'gemini-reviewer-lacey';
   return 'claude-reviewer-lacey';

@@ -108,6 +108,7 @@ const AFH_QUOTA_ONLY_CACHE_KEY = 'quota-only';
 // (fleet-quota-status.mjs) and CLOSER_WORKER_CLASS_PROVIDER
 // (ama/harness-fallback.mjs), which speak in harness/worker-class terms.
 export const AFH_REVIEWER_MODEL_PROVIDER = Object.freeze({
+  grok: 'xai',
   codex: 'openai',
   claude: 'anthropic',
   'claude-code': 'anthropic',
@@ -888,6 +889,9 @@ export function afhReviewerFallbackDecision({
   if (!baseRoute || baseRoute.configBroken) return notApplied('no-route');
   const currentModel = normalizeReviewerModel(baseRoute.reviewerModel);
   if (!currentModel) return notApplied('unknown-reviewer-model');
+  if (currentModel === 'grok' && reviewerRefusesBuilder(
+    builderClass || baseRoute.builderClass, currentModel,
+  )) return notApplied('grok-family-refused', { integrityRefused: true });
   const primary = reviewerModelGrounding(grounding, currentModel);
   if (grounding?.reason === 'afh-reviewer-fallback-disabled' && !primary.reserveFloor) {
     return notApplied('afh-grounding-unavailable:afh-reviewer-fallback-disabled', {
@@ -984,6 +988,9 @@ export function afhReviewerFallbackDecision({
  */
 export function applyAfhReviewerFallbackDecision(baseRoute, decision) {
   if (!baseRoute) return baseRoute;
+  if (decision?.integrityRefused) return {
+    ...baseRoute, quotaBlocked: true, integrityRefused: true,
+  };
   if (!decision?.applied) {
     if (decision?.primary?.model === 'claude' && decision.primary.accountSelection?.pooled) {
       return { ...baseRoute, claudeAccountSelection: decision.primary.accountSelection,

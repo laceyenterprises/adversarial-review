@@ -18,6 +18,7 @@ import {
 import {
   REVIEWER_ROUTE_BY_MODEL as REVIEWER_ROUTE_TABLE_BY_MODEL,
   reviewerRefusesBuilder,
+  normalizeReviewerModel,
 } from './adapters/subject/github-pr/routing.mjs';
 
 const execFileAsync = promisify(execFileCb);
@@ -68,7 +69,8 @@ function resolveHqCwd(env = process.env) {
 }
 
 function reviewerModelForWorkerClass(workerClass) {
-  return REVIEWER_MODEL_BY_WORKER_CLASS[String(workerClass || '').trim().toLowerCase()] || null;
+  return REVIEWER_MODEL_BY_WORKER_CLASS[String(workerClass || '').trim().toLowerCase()]
+    || normalizeReviewerModel(workerClass);
 }
 
 // WRITER DIVERSITY — a correctness constraint, not a preference.

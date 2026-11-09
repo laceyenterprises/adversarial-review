@@ -96,6 +96,10 @@ const GEMINI_REVIEWER_ROUTE = Object.freeze({
 const GEMINI_REVIEWABLE_BUILDER_CLASSES = Object.freeze(['claude-code', 'codex', 'clio-agent']);
 
 const REVIEWER_ROUTE_BY_MODEL = {
+  grok: {
+    reviewerModel: 'grok',
+    botTokenEnv: 'GH_GROK_REVIEWER_TOKEN',
+  },
   claude: {
     reviewerModel: 'claude',
     botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
@@ -186,12 +190,16 @@ function normalizeReviewerModel(reviewerInput) {
     case 'claude-reviewer-corp':
     case 'remediator-claude':
     case 'remediator-claude-corp':
+    case 'hammer-claude':
+    case 'hammer-claude-corp':
       return 'claude';
     case 'codex':
     case 'codex-corp':
     case 'codex-reviewer':
     case 'remediator-codex':
     case 'remediator-codex-corp':
+    case 'hammer':
+    case 'hammer-corp':
       return 'codex';
     case 'remediator-gemini':
     case 'gemini':
@@ -232,11 +240,22 @@ function isCrossModelReviewWaived(builderClassInput, reviewerInput) {
 
 // Every account/holder keeps its reviewer family refusal, including explicit last resorts.
 export const CODEX_BUILDER_REVIEW_REFUSAL = 'Codex-family reviewer cannot review a Codex-family builder';
-export function reviewerRefusesBuilder(builderClass, reviewerModel) {
+export function reviewerRefusesBuilder(builderClass, reviewerModel, {
+  env = process.env, loaderImpl = loadConfigCached, ...configOptions
+} = {}) {
   const builder = normalizeBuilderClass(builderClass);
   const actor = normalizeReviewerModel(reviewerModel);
-  return !builder || !actor || actor === 'grok'
-    || isCrossModelReviewWaived(builder, actor);
+  if (!builder || !actor || isCrossModelReviewWaived(builder, actor)) return true;
+  if (actor === 'grok') {
+    try {
+      const cfg = loaderImpl({ env, ...configOptions });
+      return cfg.get('grok.enabled', false) !== true
+        || cfg.get('grok.reviewer.enabled', false) !== true;
+    } catch {
+      return true;
+    }
+  }
+  return false;
 }
 
 function describeCrossModelReviewWaiver(builderClassInput, reviewerInput, env = process.env) {
@@ -512,6 +531,9 @@ function baseRouteForSubject(builderClass, {
     const pinnedRoute = defaultReviewerRouteFromEnv(env, { topPath, modulePaths, loaderImpl });
     operatorPinnedReviewer = Boolean(pinnedRoute);
     route = pinnedRoute || routeTable[builderClass];
+    if (!pinnedRoute && !reviewerRefusesBuilder(builderClass, 'grok', {
+      env, ...(loaderImpl ? { loaderImpl } : {}), topPath, modulePaths,
+    })) route = REVIEWER_ROUTE_BY_MODEL.grok;
   } catch (err) {
     if (err && err.name === 'AgentOSConfigError') {
       return configBrokenRoute(builderClass, err);

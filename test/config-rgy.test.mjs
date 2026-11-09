@@ -32,3 +32,26 @@ test('grader config is accepted and negative budget rejected by Node reader', ()
     assert.throws(() => loadConfig({ topPath, env: {} }));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('grader arms round-trip through the loader and reject invalid or unknown attributes', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rgy-arms-'));
+  const topPath = join(dir, 'config.yaml');
+  const arm = { name: 'independent', worker_class: 'codex', harness: 'codex',
+    model: 'fixture-model', effort: 'high', prompt: 'Grade this finding.\nReturn evidence.' };
+  const loadArm = value => {
+    writeFileSync(topPath, JSON.stringify({ version: 1, osg: { rgy: { grader: { arms: [value] } } } }));
+    return loadConfig({ topPath, env: {} }).get('osg.rgy.grader.arms');
+  };
+  try {
+    assert.deepEqual(loadArm(arm), [arm]);
+    for (const field of Object.keys(arm)) {
+      assert.throws(() => loadArm({ ...arm, [field]: '' }), error =>
+        error.message.includes(`osg.rgy.grader.arms[0].${field}`), `invalid ${field}`);
+    }
+    // The shared reader drops ordinary unknown keys for rolling-schema
+    // compatibility, but rejects reserved schema attributes.
+    assert.deepEqual(loadArm({ ...arm, unexpected: true }), [arm]);
+    assert.throws(() => loadArm({ ...arm, __unexpected: true }),
+      /osg\.rgy\.grader\.arms\[0\]\.__unexpected: unknown key \(strict schema\)/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

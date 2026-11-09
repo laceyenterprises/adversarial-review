@@ -1,5 +1,6 @@
 // Must stay the first import: it isolates this file's state before any production module loads.
 import './helpers/rate-limit-state-isolation.mjs';
+import './helpers/virtual-rate-limit-clock.mjs';
 import './helpers/worker-observation-fixture.mjs';
 import './helpers/dispatch-files-preload.mjs';
 import test from 'node:test';

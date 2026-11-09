@@ -20,6 +20,12 @@ const LOCK_RETRY_MS = 50;
 const LOCK_TIMEOUT_MS = 30_000;
 const DEFAULT_RESOURCE = 'core';
 const UNKNOWN_RATE_LIMIT_RESET_MS = 60_000;
+// Keep the default instance's clock injectable too, so stubbed transports can
+// exercise reset expiry and backoff without waiting on wall time.
+export const rateLimitClock = {
+  now: () => Date.now(),
+  sleep: ms => defaultSleep(ms),
+};
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const TOOL_ROOT = dirname(MODULE_DIR);
 const DEFAULT_SHARED_STATE_PATH = resolve(TOOL_ROOT, 'data', 'api-cache', 'rate-limit-state.json');
@@ -583,8 +589,8 @@ function extractRateLimitObservation(headers, { observedAt = new Date().toISOStr
 function createRateLimitThrottle({
   env = process.env,
   logger = console,
-  nowMs = () => Date.now(),
-  sleepImpl = defaultSleep,
+  nowMs: injectedNowMs,
+  sleepImpl: injectedSleepImpl,
   sharedStatePath,
   recordApiCallImpl = recordApiCall,
   readFileImpl = readFile,
@@ -597,6 +603,13 @@ function createRateLimitThrottle({
   getuidImpl = defaultGetuid,
   storeStatImpl = statImpl,
 } = {}) {
+  const nowMs = injectedNowMs === undefined ? () => rateLimitClock.now() : injectedNowMs;
+  const sleepImpl = injectedSleepImpl === undefined ? ms => rateLimitClock.sleep(ms) : injectedSleepImpl;
+  // Locks protect real file I/O and compare against filesystem mtime. The
+  // default throttle's virtual budget clock must not age or exhaust them.
+  // Explicit factory injections still control both clocks for lock tests.
+  const lockNowMs = injectedNowMs === undefined ? () => Date.now() : injectedNowMs;
+  const lockSleepImpl = injectedSleepImpl === undefined ? defaultSleep : injectedSleepImpl;
   let inMemoryObservations = {};
   const activeThrottlePromises = new Map();
   const reportedStoreFaults = new Set();
@@ -690,8 +703,8 @@ function createRateLimitThrottle({
       writeFileImpl,
       rmImpl,
       statImpl,
-      sleepImpl,
-      nowMs,
+      sleepImpl: lockSleepImpl,
+      nowMs: lockNowMs,
     });
   }
 

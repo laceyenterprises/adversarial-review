@@ -167,8 +167,10 @@ try {
     'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE',
     'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES',
   ]);
+  // Live Hammer head, lease and audit state belongs to the owning controller.
+  // Synthetic phase fixtures must supply their own state instead of inheriting it.
   const testEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
-    !inheritedStatePaths.has(key) && !key.startsWith('HCP_') && !/^(?:GH_.*TOKEN|GITHUB_.*TOKEN|.*_GH_TOKEN)(?:_REFRESH_COMMAND|_EXPIRES_AT)?$/.test(key)));
+    !inheritedStatePaths.has(key) && !key.startsWith('HCP_') && !key.startsWith('HAM_') && !/^(?:GH_.*TOKEN|GITHUB_.*TOKEN|.*_GH_TOKEN)(?:_REFRESH_COMMAND|_EXPIRES_AT)?$/.test(key)));
   child = spawn(process.execPath, [
     '--preserve-symlinks',
     '--preserve-symlinks-main',

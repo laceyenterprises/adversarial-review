@@ -4,11 +4,15 @@
 
 The existing Grok builder route selects Codex review and `remediator-codex`.
 Gemini's immediate fallback now checks normalized original builder and acting
-families before transferring the durable reviewer claim. It checks again after
-the primary finishes, including model-unavailable and quota-exhausted results.
+families before transferring the durable reviewer claim. Eligibility is computed
+once from the selected route snapshot and applies on cooldown entry and after
+model-unavailable and quota-exhausted results; live credential admission remains
+inside the fallback launch path.
 Unknown, same-family and Grok acting candidates cannot receive the claim.
 The primary failure and settlement budgets remain authoritative when no eligible
 fallback exists.
+Each Gemini invocation with a family-refused configured fallback warns once,
+naming the builder, fallback model and policy refusal.
 
 ## Interface changes
 
@@ -38,3 +42,22 @@ All commands ran through bounded `cwp_dispatch.worker_validation` under netguard
 
 The full suite and demo were not run, following this dispatch's scoped-test
 requirement. CI remains the full gate.
+
+Final comment-only remediation adds the model-unavailable variant across the
+same 18 ineligible candidates, verifies exactly one settlement and operator
+alert per invocation, and checks one fallback-refusal warning per invocation.
+The quota variant retains its two invocations across persisted cooldown.
+
+Final-round verification (all tests offline through `bin/run-bounded.sh`):
+
+- `node --test --test-concurrency=2 test/grok-builder-routing.test.mjs test/reviewer-spawn-settle-quota.test.mjs`:
+  62 passed.
+- `node --test test/hammer-prompt-contract.test.mjs`: 5 passed. The existing
+  Node 26 CI failure came from reading edit-plan examples removed from the
+  prompt. The test now reads the real helper's documented `--help` output and
+  executes all four plans, while handling the help command as usage output.
+- `node --test test/watcher-claim-loop.test.mjs`: all 161 inner cases passed
+  with a 600-second bound after the initial combined run exceeded 120 seconds.
+- Scoped ESLint: zero errors, three existing unused-import warnings.
+- `npm run lint`: zero errors, 152 existing warnings.
+- `npm run typecheck:contracts`: passed.

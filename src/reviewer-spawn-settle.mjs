@@ -565,11 +565,15 @@ async function spawnReviewerWithinRepositoryCycle(args) {
   const rootDir = args.rootDir || ROOT;
   const env = args.quotaCheckEnv || args.env || process.env;
   const fallback = args.geminiQuotaFallbackRoute;
-  // Recheck after the primary settles as well as on cooldown entry. Refused
-  // families must never receive the durable claim, even if spawn would refuse.
-  const canFallback = () => fallback && !fallback.quotaBlocked
+  const fallbackRefused = fallback && reviewerRefusesBuilder(args.builderTag, fallback.reviewerModel);
+  // Check the selected route snapshot before any durable claim transfer.
+  // Live credential admission is checked separately inside runFallback.
+  const canFallback = fallback && !fallback.quotaBlocked
     && normalizeReviewerModel(fallback.reviewerModel) !== 'gemini'
-    && !reviewerRefusesBuilder(args.builderTag, fallback.reviewerModel);
+    && !fallbackRefused;
+  if (fallbackRefused) {
+    console.warn(`[watcher] reviewer-selection ${args.repo}#${args.prNumber}: skipped fallback ${fallback.reviewerModel} for builder ${args.builderTag} (builder-family policy refusal)`);
+  }
   const runFallback = async (quotaResult = null) => {
     const credentialKey = reviewerCredentialKey(fallback.reviewerModel, args.claudeAccountSelection?.provider);
     const gate = shouldPauseReviewerModel(rootDir, credentialKey);
@@ -617,7 +621,7 @@ async function spawnReviewerWithinRepositoryCycle(args) {
       }
     }
   };
-  if (canFallback() && readReviewerGeminiQuotaCooldown({
+  if (canFallback && readReviewerGeminiQuotaCooldown({
     rootDir, env, pool: args.agyReviewerIdentityPool || getAgyReviewerIdentityPool(),
     adapter: args.reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter,
   })) {
@@ -627,7 +631,7 @@ async function spawnReviewerWithinRepositoryCycle(args) {
     ...args,
     onPostOperationSettled: (result) => {
       if (!result.ok && (result.failureClass === 'reviewer-model-unavailable'
-        || (canFallback() && result.failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS))) return;
+        || (canFallback && result.failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS))) return;
       args.onPostOperationSettled?.(result);
     },
   });
@@ -643,7 +647,7 @@ async function spawnReviewerWithinRepositoryCycle(args) {
     } catch (error) {
       console.warn(`[watcher] Failed to queue model-unavailable alert: ${error.message}`);
     }
-    if (canFallback()) return runFallback(result);
+    if (canFallback) return runFallback(result);
     args.onPostOperationSettled?.(result);
     return result;
   }
@@ -654,7 +658,7 @@ async function spawnReviewerWithinRepositoryCycle(args) {
       rootDir, env, result, identityUser: result.agyIdentityUser,
       pool: args.agyReviewerIdentityPool || getAgyReviewerIdentityPool(),
     });
-    if (canFallback()) {
+    if (canFallback) {
       console.info(`[watcher] reviewer-selection ${args.repo}#${args.prNumber} → ${fallback.reviewerModel} (Gemini quota exhausted; immediate fallback)`);
       return runFallback(result);
     }

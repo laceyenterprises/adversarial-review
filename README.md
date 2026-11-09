@@ -1534,7 +1534,14 @@ values and deployed smoke commands are unchanged. See
 [reviewer verdict recovery](docs/data-model/reviewer-verdict-recovery.md).
 
 HAMEMPTYPRIMARY-01 preserves author commits before conflict-only publication;
-its local proof does not alter lifecycle states or merge authority. Offline Git
+its local proof does not alter lifecycle states or merge authority.
+When that proof stops with `conflict-primary-unproven`, the watcher queues
+one builder-tag-routed remediation per PR head before further closer admission.
+The job's `closureHandoff` records the reason and full-review requirement.
+Pending remediation owns that head through admission delays; its new pushed
+head returns to normal review. Timeout retains the existing closer retry.
+See [the handoff contract](docs/data-model/follow-up-jobs.md#conflict-primary-handoff-hamconflictowner-01).
+Offline Git
 fixtures establish source behavior. The runtime owner separately observes the
 next natural replay after normal deployment, retaining the primary, exact head,
 checks, authenticated audit and custody outcome as declared in
@@ -3115,9 +3122,9 @@ stateDiagram-v2
     [*] --> s0: closure-owner.03 project shared next action: wait, including infrastructure-only CI without hammer or automated-stop charge
     [*] --> s1: closure-owner.04 project shared next action: hammer, including readable ownerless recovery at expiry under existing caps and lease
     [*] --> s2: closure-owner.05 project shared next action: review (including a head-bound shared rereview-exact-head decision before historical review ceiling or hammer ownership)
-    [*] --> s3: closure-owner.06 project shared next action: remediation
+    [*] --> s3: closure-owner.06 project shared next action: remediation, including a pending conflict-primary-unproven builder handoff
     [*] --> s3: closure-owner.07 proven live remediation owner retained
-    [*] --> s1: closure-owner.08 confirmed conflict selects capped repair with merge safety retained
+    [*] --> s1: closure-owner.08 confirmed conflict selects capped repair unless a conflict-primary-unproven builder handoff owns the head; merge safety retained
     [*] --> s4: closure-owner.09 project shared next action: daemon-merge, including any R07 deterministic stop, retry cap, lifetime cap or final no-merge superseded by a strictly newer eligible exact-head review with trustworthy recorded time; hammer caps stay binding; continuous cap alerts preserve time, complete confirmed lifetime charges can recover the budget boundary, and non-firing supersessions name why
     s0 --> [*]: closure-owner.10 next bounded observation; every recovery deadline dispatches or escalates once with row reason and evidence
     [*] --> s5: closure-owner.11 explicit hold, draft or disabled execution intent

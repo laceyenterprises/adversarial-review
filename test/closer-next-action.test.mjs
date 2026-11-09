@@ -427,6 +427,32 @@ function closureFixture(t, overrides = {}) {
   return { args, effects, waits };
 }
 
+test('HAMCONFLICTOWNER-01: an unproven stop hands off before closer caps and retains one queue owner', async t => {
+  const f = closureFixture(t);
+  f.args.env = { HQ_ROOT: f.args.rootDir };
+  f.args.candidate.mergeable = 'CONFLICTING';
+  f.args.candidate.mergeStateStatus = 'DIRTY';
+  f.args.deliverAlertImpl = async () => {};
+  writeAmaAuditEntry({ hqRoot: f.args.rootDir, ...identity, now: AT,
+    attempt: { outcome: 'failed-without-merge', attemptPhase: 'hammer-early-exit',
+      validatedHead: HEAD, reason: 'conflict-primary-unproven' } });
+  for (let i = 1; i <= 2; i++) recordHammerRetryDispatch(f.args.rootDir, identity, {
+    jobKey: HEAD, headSha: HEAD, launchRequestId: `fixture-prior-${i}`, now: AT });
+  f.args.evaluateHammerStopHoldImpl = args => evaluateHammerStopHold({ ...args,
+    execFileImpl: async (_bin, argv) => ({ stdout: JSON.stringify(argv[0] === 'api' ? [[]] : { state: 'OPEN', headRefOid: HEAD,
+      headRefName: 'fixture-branch', baseRefName: 'main', title: '[codex] Fixture change' }) }) });
+  const first = await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(first.dispatched, false);
+  assert.equal(first.reason, 'conflict-primary-builder-remediation');
+  assert.equal(first.nextAction.actor, 'remediator');
+  assert.equal(first.nextAction.reason, 'conflict-primary-unproven');
+  assert.equal(first.hammerStop.owner, 'remediator');
+  const second = await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(second.remediation.jobId, first.remediation.jobId);
+  assert.equal(second.nextAction.actor, 'remediator');
+  assert.deepEqual(f.effects, [], 'neither daemon nor closer may take the queued remediation');
+});
+
 for (const advisory of ['None.', '**Repair diagnostic** — name the failed input.']) {
   test(`LIVEPACKREMEDIATE-01: label-only closure parks before remediation with advisory: ${advisory}`, async t => {
     const body = `## Blocking issues\n- **[live_pack_cross_edit] Live pack** — operator waiver needed.\n## Non-blocking issues\n- ${advisory}\n## Verdict\nRequest changes`;

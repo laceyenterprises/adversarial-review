@@ -10,6 +10,7 @@ import { refundOperatorHeldHammerStop } from './operator-hold-refund.mjs';
 import { readLatestHoldRelease } from '../operator-hold-release.mjs';
 import { REVIEW_SERVICE_REVISION } from '../review-service-revision.mjs';
 import { companionOnlyStop, evaluateCompanionWait, COMPANION_FLOAT_WAIT_MS } from './companion-stop-wait.mjs';
+import { reviseClosureNextAction } from './closure-next-action.mjs';
 // CLOSERSTOPTRANSIENT-01: the historical input-change rule below applies only
 // to explicitly listed deterministic refusals. Other no-merge stops use a
 // durable five-minute backoff; ordinary retry and lifetime caps still apply.
@@ -535,6 +536,25 @@ export async function evaluateHammerStopHold({
   const readStop = () => readHammerStopForHead({ hqRoot, repo, prNumber, headSha, reviewedSha,
     readAuditImpl: readSnapshot, logger });
   let stop = readStop();
+  // A real resolution needs a new reviewed builder head. Base movement, a
+  // conflicting PR, or elapsed retry backoff cannot authorize another replay.
+  if (stop?.predicate === 'conflict-primary-unproven') {
+    try {
+      const { handoffConflictPrimary } = await import('./conflict-primary-handoff.mjs');
+      const result = await handoffConflictPrimary({ rootDir, repo, prNumber, headSha, now, execFileImpl });
+      if (result.remediation && sharedNextAction) {
+        result.nextActionShared = reviseClosureNextAction(sharedNextAction, {
+          remediation: { ...sharedNextAction.snapshot.observations.remediation?.value,
+            job: result.remediation },
+        });
+      }
+      return result;
+    } catch {
+      logger?.warn?.('[ama-closer] conflict-primary handoff unavailable; retaining stop for retry');
+      return { action: 'hold', hammerStop: { ...stop, deterministic: true,
+        owner: 'remediation-handoff', handoffPending: true } };
+    }
+  }
   if (canEnrichCiInfrastructureStop(stop, repo)) {
     const failedChecks = await enrichCiInfrastructureEvidence({ rollup: stop.failedChecks, repo, headSha, execFileImpl });
     stop.failedChecks.forEach((check, index) => {

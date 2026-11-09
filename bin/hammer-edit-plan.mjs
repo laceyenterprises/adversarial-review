@@ -21,7 +21,7 @@ Blocking reversal:
 Uncited CI repair:
 {"path":"test/example.test.mjs","startLine":2,"endLine":2,"editKind":"in-place","requiredCiRepair":true}
 Additive fix:
-{"kind":"non-blocking","findingNumber":1,"editKind":"additive"}
+{"kind":"non-blocking","findingNumber":1,"path":"test/example.test.mjs","startLine":2,"endLine":2,"editKind":"additive"}
 Strict non-blocking fix:
 {"kind":"non-blocking","findingNumber":1,"path":"src/example.mjs","startLine":2,"endLine":2,"editKind":"author-lines"}
 Blocking in-place repair uses the blocking shape with editKind "in-place".
@@ -53,12 +53,13 @@ export async function main(argv = process.argv.slice(2), {
     || (extra.length && (extra.length !== 2 || extra[0] !== '--reviewed-head'))) {
     throw Error(usage);
   }
-  const reviewedHead = extra.length ? extra[1] : env.HAM_REVIEWED_SHA;
+  const pin = extra.length ? extra[1] : env.HAM_REVIEWED_SHA;
+  const reviewedHead = typeof pin === 'string' ? pin.toLowerCase() : pin;
   const plan = JSON.parse(readFileSync(planFile, 'utf8'));
   if (typeof reviewedHead !== 'string' || !/^[a-f0-9]{40}$/i.test(reviewedHead)
     || !plan || typeof plan !== 'object' || Array.isArray(plan)
     || (typeof plan.reviewedHead === 'string' && plan.reviewedHead.trim()
-      && plan.reviewedHead !== reviewedHead)) {
+      && plan.reviewedHead.toLowerCase() !== reviewedHead)) {
     return { action: 'stop', reason: 'review-evidence-invalid' };
   }
   plan.reviewedHead = reviewedHead;

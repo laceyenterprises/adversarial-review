@@ -180,6 +180,7 @@ test('CLI rejects conflicting or missing pins and retains review authority check
   const planFile = join(rootDir, 'plan.json');
   for (const [pin, reviewedHead, candidate] of [
     [review.commit_id, 'b'.repeat(40), review],
+    [review.commit_id.toUpperCase(), 'B'.repeat(40), review],
     [review.commit_id, 'invalid', review],
     [review.commit_id, ` ${review.commit_id}`, review],
     [undefined, review.commit_id, review],
@@ -198,6 +199,28 @@ test('CLI rejects conflicting or missing pins and retains review authority check
     });
     assert.deepEqual(result, { action: 'stop', reason: 'review-evidence-invalid' });
     assert.equal(editPlanExitCode(result), 1);
+  }
+});
+
+test('CLI accepts equivalent hash casing from either pin source without rewriting the plan', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hameditplan-case-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const planFile = join(rootDir, 'plan.json');
+  for (const pin of [review.commit_id, review.commit_id.toUpperCase()]) {
+    for (const reviewedHead of [undefined, review.commit_id, review.commit_id.toUpperCase()]) {
+      const input = JSON.stringify({ ...ci, reviewedHead });
+      writeFileSync(planFile, input);
+      for (const explicit of [false, true]) {
+        const result = await main(['sample/service', '7', '1', planFile,
+          ...(explicit ? ['--reviewed-head', pin] : [])], {
+          rootDir, env: explicit ? {} : { HAM_REVIEWED_SHA: pin },
+          readReviewImpl: async () => review, loadPolicy: () => ({}),
+          captureImpl: () => assert.fail('an allowed CI repair must not capture findings'),
+        });
+        assert.equal(result.action, 'allow');
+        assert.equal(readFileSync(planFile, 'utf8'), input);
+      }
+    }
   }
 });
 
@@ -221,6 +244,9 @@ test('help exits successfully and prints plan shapes without reading review, pol
     }
     const shapes = [...child.stdout.matchAll(/^\{.+\}$/gm)].map(match => JSON.parse(match[0]));
     assert.equal(shapes.length, 4);
+    const additiveExample = { ...examples.find(plan => plan.editKind === 'additive') };
+    delete additiveExample.reviewedHead;
+    assert.deepEqual(shapes.find(plan => plan.editKind === 'additive'), additiveExample);
     for (const plan of shapes) {
       assert.equal(checkHammerEditPlan(review, { ...plan, reviewedHead: review.commit_id },
         { strictNonBlockingRemediation: true }).action, 'allow');

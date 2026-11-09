@@ -4798,8 +4798,9 @@ and every literal plan example, including when running as the database owner.
 Without that option the CLI reads `HAM_REVIEWED_SHA`; a missing or invalid pin
 refuses with `review-evidence-invalid`. Omitted, non-string or empty (including
 whitespace-only) plan `reviewedHead` values are filled from the pin in memory.
-A nonempty string must equal the pin. The authoritative reviewer login, review
-state and review `commit_id` matching that head remain mandatory.
+A nonempty string must equal the pin ignoring hex letter case; the CLI normalizes
+the head to lowercase before passing it to the checker. The authoritative reviewer
+login, review state and review `commit_id` matching that head remain mandatory.
 `--help` and `-h` print usage and accepted shapes with exit 0 and perform no plan
 check, review read, policy read or backlog capture. Real helper failures retain
 their existing outcomes.

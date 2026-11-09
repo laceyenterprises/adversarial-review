@@ -18,6 +18,11 @@ pin stops with `review-evidence-invalid`. The pure checker, authoritative
 reviewer, review state, review commit matching, policy and edit authorization
 checks remain unchanged.
 
+Final comment-only remediation normalizes the CLI pin to lowercase and compares
+nonempty plan heads without hex case sensitivity. Distinct hashes and whitespace
+around a hash remain invalid; plan files remain untouched. The additive CLI help
+example now includes the same file coordinates as the prompt example.
+
 `--help` and `-h` print usage and accepted plan shapes and exit 0 without reading
 a plan, fetching a review, loading policy or capturing findings. Actual helper
 failure exits are unchanged.
@@ -41,3 +46,15 @@ walkthrough's byte-equivalence check and `git diff --check` passed.
 The required full `npm test` attempt hit the repository runner's 900-second
 deadline and exited 1 with `ETIMEDOUT`; it is incomplete, not a green full-suite
 result. No broad rerun or live smoke was performed.
+
+Final comment-only round: offline `npm ci --offline --no-audit --no-fund`
+restored the initially absent dependencies. Bounded
+`npm test -- test/hameditplan-01.test.mjs test/hamscope-01.test.mjs test/smv.test.mjs`
+passed all 33 tests, including mixed-case pins from both input sources and exact
+additive help/prompt shape parity. Changed-file ESLint passed without warnings;
+`npm run lint` passed with zero errors and 152 existing warnings.
+`npm run typecheck:contracts`, `bash demo/research-finding-walkthrough.sh` and
+`git diff --check` passed. Two broader selections including
+`test/hammertrim-contract.test.mjs` reached their 60-second bounds without
+assertion failures; that broader suite remains unverified locally.
+The full suite was left to PR-head CI.

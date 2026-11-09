@@ -31,7 +31,7 @@ and the closer `failed-without-merge` share with the pre-deployment window:
 acceptance requires merges rising and the closer failure share falling.
 No source fixture proves these production outcomes. No migration, new check,
 label or live action is part of the worker change. Operator steps are declared
-in `docs/changes/LANEAUTO-01-post-merge.yaml`.
+in `modules/worker-pool/post-merge-actions/LANEAUTO-01.yaml`.
 
 ## Terminal audit review currency (HAMLATEAUDIT-01)
 

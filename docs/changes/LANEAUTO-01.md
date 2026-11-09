@@ -21,7 +21,7 @@ Canonical contracts: [closure runbook](../RUNBOOK-ama-closure.md),
 [state machine](../STATE-MACHINE.md), and
 [follow-up data model](../data-model/follow-up-jobs.md).
 SRE's float/restart and natural-traffic acceptance are declared in
-[the operator plan](LANEAUTO-01-post-merge.yaml); no live actions ran here.
+[the operator plan](../../modules/worker-pool/post-merge-actions/LANEAUTO-01.yaml); no live actions ran here.
 
 ## Verification
 

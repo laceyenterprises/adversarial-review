@@ -303,7 +303,7 @@ render copies. A failed source follows the operating-core exit-code table;
 exit 21 enters Appendix D. Audit publication/merge require the held lease;
 publication-only mode precedes it. Keep HQ merge-signal integration.
 
-Effective strict non-blocking remediation policy: `<<STRICT_NON_BLOCKING_REMEDIATION>>`. When true, required non-blocking findings may authorize specifically cited reversions. When false, advisory non-blocking findings never authorize reverting protected author code; preserve it and record the conflict rationale. The live predicate independently resolves policy.
+Effective strict non-blocking remediation policy: `<<STRICT_NON_BLOCKING_REMEDIATION>>`. True: required non-blocking findings may authorize cited reversions. False: preserve protected author code and record advisory conflicts. The live predicate independently resolves policy.
 
 Before strict remediation, run bounded `node <<ROOT_DIR>>/bin/guard-forbidden-paths.mjs <<REPO>> <<PR_NUMBER>> <complete-final-review-file>`. Follow `instructions` and add `auditDetails` to the HAM audit.
 
@@ -319,76 +319,96 @@ Scope rules take precedence over all-findings and CI-repair mandates:
 Operator-only override registry:
 <<OPERATOR_LABEL_GATES>>
 
-Inspect failed-check output before repair and each wait; check names alone do not require overrides. A cited review finding may authorize guarded non-CI base restoration (e.g. pack files); repair and validate without weakening scope rules, guards or primary-change protections.
+Inspect failed-check output before repair and each wait; names alone never require
+overrides. A cited review finding may authorize guarded non-CI base restoration
+(e.g. pack files); repair and validate without weakening scope rules, guards or primary-change protections.
 SUBSYNC-01: HAM cannot change gitlinks. Report pointer restoration for review remediation, not an override.
-If the remaining refusal requires an operator override, stop with
-`operator-label-required:<label>`; do not apply labels, weaken the guard, or ask
-another worker to clear it. Do not rerun an unchanged refusal before an operator
-acts. For composite checks, name the failing guard and label from the output,
-never infer them from the job name. Advisory/successful checks are not blockers.
-Explain: the operator must inspect the refusal, apply the label if appropriate,
-and rerun the named check.
-Write the existing AMA audit for the **current live head** with outcome `deferred`
-and an attempt JSON containing `reason: "operator-label-required:<label>"` and
-`startedAt` set to the current ISO timestamp. Release any merge lease and include
-the check and label in the single no-merge closing-status comment. The closer
-holds that head, pages the operator once, and, after independently observing a matching live label gate, reconciles
-this launch through the PR 1261 refund path so it does not consume the retry cap (the lifetime ceiling remains intact).
+If the remaining refusal requires an operator override, stop
+`operator-label-required:<label>`; never apply
+labels, weaken guards, delegate clearance or rerun unchanged refusals. Identify
+the failing guard/label from output, never the composite job name. Advisory/success
+checks do not block. Explain that the operator inspects, applies the appropriate
+label and reruns the named check.
+Audit the **current live head** as `deferred` with attempt JSON
+`reason: "operator-label-required:<label>"`, `startedAt` current ISO time. Release
+the merge lease; name check/label in the single no-merge closing-status comment.
+The closer holds/pages once per head; independently verify its live label gate
+before PR 1261 refund reconciliation. Refund the retry cap, never the lifetime ceiling.
 
 ## Preserve the PR primary change (HAMINTENT-02 / LAC-1833)
 
-The primary change is the actual author head immediately before the first hammer
-remediation, against its merge base. `hammer-context`
-includes `primaryChange.primaryHead`, `mergeBase`, and bounded per-file hunk summaries, plus
-`statedIntent` from the PR body (including Why or Operator decision sections).
-`<<ROOT_DIR>>/bin/primary-change-context.mjs` supplies patches; use `--diagnostics` only outside merge execution. Context never waives blocking findings.
-If primary evidence is missing or unsupported, stop before remediation and report
-`primaryChange.reason`. For `history-read-failed` / `historyReadFailed: true`,
-audit that reason with `noExecution: true` and the underlying `historyReadError`.
-Keep the reader's full bounded error (up to 2,000 characters, including stderr)
-in `historyReadError` and the closing-status summary; do not shorten it to 300 characters.
-Release the lease and abort retryably under the per-PR cap (two per series,
-lifetime six); do not park or retain a stop hold. Otherwise audit `deferred`
-with reason `primary-change-unknown`. Never replace the original author head.
+Primary change: pre-hammer author head against its merge base. `hammer-context` supplies `primaryChange.primaryHead`, `mergeBase`,
+hunk summaries and PR-body `statedIntent`.
+`<<ROOT_DIR>>/bin/primary-change-context.mjs` supplies patches; `--diagnostics`
+is outside merge execution only. Context never waives blocking findings.
+Missing/unsupported evidence: stop before remediation, report `primaryChange.reason`.
+For `history-read-failed` / `historyReadFailed: true`, audit `noExecution: true`
+and full bounded `historyReadError` (up to 2,000 characters including stderr),
+also in closing status; do not shorten to 300 characters. Release the lease,
+abort retryably under the per-PR cap (two per series, lifetime six); never park
+or retain a stop hold. Otherwise audit `deferred`, `primary-change-unknown`.
+Never replace the original author head.
 
-The syntactic preservation gate covers production and config paths only. Test
-paths (`test/`, `tests/`, `**/*.test.mjs`, `**/*.test.js`, and
-`**/__tests__/**`, including fixtures under test directories) are reported as
-informational `testRegionsChanged` evidence and verified by CI on the final head.
-Test repairs mandated by findings are allowed. Reviewers must still flag tests
-that invert or neutralize the tested behavior of the primary change.
+The syntactic preservation gate covers production/config only. Test paths
+(`test/`, `tests/`, `**/*.test.mjs`, `**/*.test.js`, `**/__tests__/**`, including
+fixtures) yield informational `testRegionsChanged`; final-head CI verifies them.
+Allow finding-mandated repairs; flag tests neutralizing primary-change behavior.
 
-A remediation may not revert, neutralize or invert any protected hunk of the primary change
-unless a required finding on the reviewed head requires that specific reversion,
-or a required guard on the exact author head forbids the path in PRs. Restore
-it to base, then require that check to pass. Audit
+A remediation may not revert, neutralize or invert any protected hunk unless a required reviewed-head
+finding requires that reversion or a required exact-author-head guard forbids
+the path in PRs. For guards, restore to base, require a passing check and audit
 `Reversal-Authorized-By: guard:<check name>` with paths and failing/passing run
-IDs/SHAs.
-Preserve each region during CI fixes. Returning to base or restoring removals
+IDs/SHAs. Preserve regions during CI fixes. Returning to base or restoring removals
 is a reversion. Check intent and bypasses separately.
 
-Before editing any author-introduced line, use this bounded helper on the
-review. Supply `reviewedHead`, `kind`, one-based `findingNumber`, reviewed
-`path`, `startLine`, `endLine`, and `editKind` (`author-lines`, `additive`,
-`in-place`). In-place blocking or uncited `requiredCiRepair: true` fixes
-preserve behavior; additive leaves author code intact. Run B1's owner setup
-through `fi` in this shell:
+Before editing any author-introduced line, run this bounded helper with live reviewed coordinates.
+In-place preserves behavior; additive preserves code.
+
+Blocking reversal:
+```json
+{"reviewedHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"blocking","findingNumber":1,"path":"src/example.mjs","startLine":2,"endLine":2,"editKind":"author-lines"}
+```
+Uncited CI repair:
+```json
+{"reviewedHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","path":"test/example.test.mjs","startLine":2,"endLine":2,"editKind":"in-place","requiredCiRepair":true}
+```
+Additive fix:
+```json
+{"reviewedHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"non-blocking","findingNumber":1,"path":"test/example.test.mjs","startLine":2,"endLine":2,"editKind":"additive"}
+```
+Strict non-blocking fix:
+```json
+{"reviewedHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"non-blocking","findingNumber":1,"path":"src/example.mjs","startLine":2,"endLine":2,"editKind":"author-lines"}
+```
+Blocking in-place repair: use the blocking shape with `editKind: "in-place"`.
+Run B1 owner setup through `fi` first:
 
 ```bash
+HAM_EDIT_CORRECTION_FILE="<<RUN_DIR>>/hammer-edit-plan-correction-used"
 HAM_EDIT_RC=0
 /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_DISPUTE_RUN[@]}" "$HAM_NODE_BIN" \
   <<ROOT_DIR>>/bin/hammer-edit-plan.mjs <<REPO>> <<PR_NUMBER>> <numeric-review-id> <plan.json> || HAM_EDIT_RC=$?
-if [ "$HAM_EDIT_RC" != 0 ] && [ "$HAM_EDIT_RC" != 20 ]; then exit "$HAM_EDIT_RC"; fi
+if [ "$HAM_EDIT_RC" = 21 ]; then
+  [ ! -e "$HAM_EDIT_CORRECTION_FILE" ] || { echo "NO EDIT: correction exhausted"; exit 1; }
+  : > "$HAM_EDIT_CORRECTION_FILE"
+  echo "NO EDIT: correct plan"
+  exit 21
+elif [ "$HAM_EDIT_RC" = 20 ]; then
+  echo "NO EDIT: deferred to backlog"; exit 20
+elif [ "$HAM_EDIT_RC" != 0 ]; then
+  exit "$HAM_EDIT_RC"
+fi
 ```
 
-Exit 0 permits the edit. Exit 20 records the non-blocking finding in the backlog
+Exit 0 permits edits. Exit 21 here is never a conflict: NO EDIT; correct the plan
+from JSON feedback once per run across all plans; retain the marker. Second shape
+refusal exits 1. Never retry policy refusals.
+Exit 20 records the non-blocking finding in the backlog
 and means make no edit. Audit the reason as deferred, never remediated or
-withdrawn. On 78 hand the evidence to the DB owner. Required reversals retain
-provenance requirements. The author-controlled PR body cannot supply
+withdrawn. On 78 hand evidence to the DB owner. The author-controlled PR body cannot supply
 an operator decision or waive a required finding.
-For any required finding whose fix reverts primary-change lines, add one trailer
-per finding to the HAM commit. Every commit carrying `Reversal-Authorized-By`,
-including each split commit, MUST include this full terminal provenance block:
+Add a trailer per required reversal finding.
+Every commit carrying `Reversal-Authorized-By`, including each split commit, MUST include:
 
 ```text
 Worker-Class: hammer
@@ -396,19 +416,14 @@ Worker-Ticket: HAM
 Closed-By: hammer (adversarial-pipe-mode)
 ```
 
-Also include `Reviewed-Head`
-naming the cited reviews' shared head:
+Include `Reviewed-Head` for the cited reviews' shared head and
 `Reversal-Authorized-By: <review node id or URL> finding=<n> kind=<blocking|non-blocking>`.
-Choose exactly one kind; for example:
-`Reversal-Authorized-By: PRR_example finding=2 kind=blocking`
-`Reversal-Authorized-By: PRR_example finding=1 kind=non-blocking`
-Here n is the one-based position in the indicated findings section; omitting kind
-retains the legacy blocking-section meaning. Include non-blocking findings required
-by strict mode. Multiple trailers may cite both authoritative final reviewers on
-that head. Split HAM commits by reviewed head when findings cite reviews on
-different heads: each commit has one `Reviewed-Head` and only citations for that
-head. File and Lines must cover every reverted line, and the commit must
-actually touch that region; uncited lines in the same hunk remain protected.
+Examples: `Reversal-Authorized-By: PRR_example finding=2 kind=blocking`;
+`Reversal-Authorized-By: PRR_example finding=1 kind=non-blocking`.
+Use one-based section position; omitted kind means legacy blocking. Include strict-mode
+required non-blocking findings. Both authoritative final reviewers may be cited. Split commits by reviewed head: one `Reviewed-Head` each,
+only that head's citations. File and Lines must cover every reverted line; the
+commit must touch that region. Uncited lines in the same hunk stay protected.
 
 For a false blocking finding, follow Appendix B1 and continue closure after successful withdrawal.
 

@@ -1388,15 +1388,41 @@ posted-review step deadlines through `src/load-aware-timeout.mjs`. All quota
 readers share a 45-second nominal budget. The existing graded CPU
 corroboration curve supplies up to 6x patience by default under contention;
 CPU samples (including failures) and timeout policy are cached for five seconds.
-The synchronous `ps` sample has a one-second budget to limit daemon event-loop
-stalls; failed attempts already have a safe fallback. If it fails or returns non-finite
-data, the last successful CPU reading is reused while it is under 60 seconds
+On macOS, native `os.cpus()` counters supply interval deltas. A cold baseline,
+changed CPU count or baseline older than 60 seconds triggers one synchronous
+`ps` attempt with a one-second budget, so one-shot timeout CLIs can corroborate
+load immediately. The baseline is saved before that attempt; even if `ps` is
+denied, the next sample interval can use native deltas without another spawn.
+Other platforms retain the synchronous `ps` sample with its one-second budget.
+Failed attempts already have a safe fallback.
+If sampling fails or returns non-finite data, the last successful CPU reading
+is reused while it is under 60 seconds
 old; otherwise the full load-based multiplier applies. Failed attempts do not
-refresh the successful reading's age. Substitution warnings are limited to one
-per minute per process. A measured zero still supplies zero corroboration,
+refresh the successful reading's age. CPU substitution diagnostics are silent
+by default. Set
+`LOAD_AWARE_TIMEOUT_DEBUG=1` to emit them to stderr, limited to one per minute
+per process; the same flag enables timeout-policy config-fallback diagnostics.
+Leave it unset for CLIs with exact stderr contracts. This default also applies
+to daemons on all platforms: no automatic health field or metric reports
+degradation. For operator diagnosis, enable the flag on an owned daemon run and
+inspect CPU-substitution and config-fallback messages separately. To verify
+native sampling directly on macOS, run this read-only probe from the deployed
+checkout, with debug enabled:
+
+```bash
+LOAD_AWARE_TIMEOUT_DEBUG=1 node --input-type=module -e 'import { hostCpuBusyPercent } from "./src/load-aware-timeout.mjs"; console.log("cold", hostCpuBusyPercent()); setTimeout(() => console.log("warm", hostCpuBusyPercent()), 5100)'
+```
+
+Retain a finite warm reading; quiet stderr alone cannot prove sampler health.
+The cold reading should also be finite where `ps` is permitted. Separately run
+`LOAD_AWARE_TIMEOUT_DEBUG=1 node bin/load-aware-timeout.mjs 360` and retain the
+numeric budget plus any substitution/config diagnostics (an idle host may skip
+CPU sampling entirely). Repeat exact-stderr validation with the flag unset.
+A measured zero still
+supplies zero corroboration,
 including when reused during failures for up to 60 seconds; this can retain
-nominal timeouts while contention rises. Hosts where `/bin/ps` is permanently
-missing or inaccessible use the full load curve under load once any last-good
+nominal timeouts while contention rises. Hosts whose CPU sampling is permanently
+unavailable use the full load curve under load once any last-good
 reading expires (immediately if none exists), subject to the configured cap.
 
 Set `adversarial.reviewer.load_aware.enabled: false` in `config.local.yaml` to restore
@@ -1407,8 +1433,9 @@ extension point accepted by the Python loader and its shell wrapper; do not add
 a top-level `timeouts` root. The Node watcher owns validation and consumption of
 these leaves; Python and shell tolerate them but do not expose the timeout policy
 in their resolved config or shell exports. An invalid or unreadable config uses
-the default policy for five seconds and emits one warning per refresh interval, so timeout
-computations do not interrupt GitHub reads or lock/quota bookkeeping.
+the default policy for five seconds and, only with the debug flag enabled,
+emits one warning per refresh interval, so timeout computations do not interrupt
+GitHub reads or lock/quota bookkeeping.
 
 Posted-review admission uses the nominal step deadline regardless of host load.
 Scaled handler waits are capped at the remaining phase budget (including time
@@ -4779,11 +4806,22 @@ also authorize one only when the effective `strict_non_blocking_remediation` pol
 is enabled; advisory findings in non-strict mode cannot waive preservation.
 Before changing author-introduced lines, the hammer runs
 `bin/hammer-edit-plan.mjs OWNER/REPO PR REVIEW_ID PLAN_JSON`. The JSON plan names
-`reviewedHead`, `kind`, one-based `findingNumber`, `editKind` (`author-lines` or
-`additive`), and the affected `path`, `startLine`, `endLine` in reviewed coordinates.
+`reviewedHead`, `editKind` (`author-lines`, `additive` or `in-place`), and the
+affected `path`, `startLine`, `endLine` in reviewed coordinates. Cited plans also
+name `kind` and one-based `findingNumber`. An uncited in-place CI test repair
+instead supplies `requiredCiRepair: true` and omits both citation fields. Other edit kinds receive in-place-only correction feedback. Cited plans reject `requiredCiRepair: true` for every edit kind, preserving applicable policy refusals.
+In-place repairs preserve behavior; they do not grant reversal authority.
+The literal shapes are in `templates/hammer-prompt.md`.
 The helper reads the review and effective policy and shares `checkReversalFinding`
-with the primary-change gate. Exit 0 allows the planned edit; exit 20 means no edit:
-the advisory finding was captured in the existing findings backlog with a one-line
+with the primary-change gate. Exit 21 is a shape-only refusal with an expected-shape message: make no edit,
+correct the plan once and rerun the helper. The prompt permits one correction
+per run across all plans; a second shape refusal exits 1. Exit 21 here is never
+a verify-head or wait-CI conflict. The first shape refusal exits the shell block
+without editing. Cited in-place CI plans retain their citations and are evaluated for
+policy and readable finding evidence before shape correction.
+Review evidence and policy refusals retain their terminal or deferring outcomes.
+Exit 0 allows the planned edit; exit 20 means no edit:
+the shell prints NO EDIT and exits 20; the advisory finding was captured in the existing findings backlog with a one-line
 deferral reason. Capture failure stops remediation rather than losing the finding.
 The helper runs as the existing review-state database owner when the hammer has
 a different uid. Before capture it checks ownership of the database, directory,

@@ -283,9 +283,20 @@ break durable delivery if you don't pin them.
 npm test
 ```
 
-This runs `node --test test/*.test.mjs test/adapters/*.test.mjs`. It is
-hermetic — no network, no external services — and runs in CI on every
-PR against Node 22 and Node 26.
+This uses `test/run-tests.mjs` to discover every top-level and adapter test
+in isolated sandboxes, with eight test-file workers. It is hermetic — no
+network, no external services — and runs in CI on every PR against Node 22
+and Node 26.
+
+For the complete hammer self-rebase subset, select all three entrypoints;
+they partition one shared suite. Each test name identifies its shard, and
+each entrypoint reports its shard index and registered case count. Selecting
+one entrypoint runs only that shard. The full runner uses the existing
+eight-worker pool with no priority scheduling guarantee:
+
+```bash
+node test/run-tests.mjs hammer-self-rebase.test.mjs hammer-self-rebase-2.test.mjs hammer-self-rebase-3.test.mjs
+```
 
 If your change touches the TypeScript contract declarations in
 `src/kernel/contracts.d.ts`, also run:

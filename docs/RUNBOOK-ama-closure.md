@@ -4789,11 +4789,22 @@ also authorize one only when the effective `strict_non_blocking_remediation` pol
 is enabled; advisory findings in non-strict mode cannot waive preservation.
 Before changing author-introduced lines, the hammer runs
 `bin/hammer-edit-plan.mjs OWNER/REPO PR REVIEW_ID PLAN_JSON`. The JSON plan names
-`reviewedHead`, `kind`, one-based `findingNumber`, `editKind` (`author-lines` or
-`additive`), and the affected `path`, `startLine`, `endLine` in reviewed coordinates.
+`reviewedHead`, `editKind` (`author-lines`, `additive` or `in-place`), and the
+affected `path`, `startLine`, `endLine` in reviewed coordinates. Cited plans also
+name `kind` and one-based `findingNumber`. An uncited in-place CI test repair
+instead supplies `requiredCiRepair: true` and omits both citation fields. Other edit kinds receive in-place-only correction feedback. Cited plans reject `requiredCiRepair: true` for every edit kind, preserving applicable policy refusals.
+In-place repairs preserve behavior; they do not grant reversal authority.
+The literal shapes are in `templates/hammer-prompt.md`.
 The helper reads the review and effective policy and shares `checkReversalFinding`
-with the primary-change gate. Exit 0 allows the planned edit; exit 20 means no edit:
-the advisory finding was captured in the existing findings backlog with a one-line
+with the primary-change gate. Exit 21 is a shape-only refusal with an expected-shape message: make no edit,
+correct the plan once and rerun the helper. The prompt permits one correction
+per run across all plans; a second shape refusal exits 1. Exit 21 here is never
+a verify-head or wait-CI conflict. The first shape refusal exits the shell block
+without editing. Cited in-place CI plans retain their citations and are evaluated for
+policy and readable finding evidence before shape correction.
+Review evidence and policy refusals retain their terminal or deferring outcomes.
+Exit 0 allows the planned edit; exit 20 means no edit:
+the shell prints NO EDIT and exits 20; the advisory finding was captured in the existing findings backlog with a one-line
 deferral reason. Capture failure stops remediation rather than losing the finding.
 The helper runs as the existing review-state database owner when the hammer has
 a different uid. Before capture it checks ownership of the database, directory,

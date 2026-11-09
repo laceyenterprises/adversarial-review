@@ -4811,7 +4811,8 @@ affected `path`, `startLine`, `endLine` in reviewed coordinates. Cited plans als
 name `kind` and one-based `findingNumber`. An uncited in-place CI test repair
 instead supplies `requiredCiRepair: true` and omits both citation fields. Other edit kinds receive in-place-only correction feedback. Cited plans reject `requiredCiRepair: true` for every edit kind, preserving applicable policy refusals.
 In-place repairs preserve behavior; they do not grant reversal authority.
-The literal shapes are in `templates/hammer-prompt.md`.
+`node bin/hammer-edit-plan.mjs --help` prints complete JSON shapes offline;
+the prompt retains the field rules and directs the hammer to that usage output.
 The helper reads the review and effective policy and shares `checkReversalFinding`
 with the primary-change gate. Exit 21 is a shape-only refusal with an expected-shape message: make no edit,
 correct the plan once and rerun the helper. The prompt permits one correction

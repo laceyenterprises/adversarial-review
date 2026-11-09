@@ -11,6 +11,29 @@ import { primaryChangeRoot } from '../src/ama/primary-change.mjs';
 import { captureReadyFindings } from '../src/findings-backlog.mjs';
 import { parseReviewFindings } from '../src/kernel/review-findings.mjs';
 
+export const EDIT_PLAN_USAGE = `usage: hammer-edit-plan.mjs OWNER/REPO PR REVIEW_ID PLAN_JSON
+
+Use live reviewed coordinates in these examples.
+
+Blocking reversal:
+\`\`\`json
+{"reviewedHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"blocking","findingNumber":1,"path":"src/example.mjs","startLine":2,"endLine":2,"editKind":"author-lines"}
+\`\`\`
+Uncited CI repair:
+\`\`\`json
+{"reviewedHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","path":"test/example.test.mjs","startLine":2,"endLine":2,"editKind":"in-place","requiredCiRepair":true}
+\`\`\`
+Additive fix:
+\`\`\`json
+{"reviewedHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"non-blocking","findingNumber":1,"path":"test/example.test.mjs","startLine":2,"endLine":2,"editKind":"additive"}
+\`\`\`
+Strict non-blocking fix:
+\`\`\`json
+{"reviewedHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"non-blocking","findingNumber":1,"path":"src/example.mjs","startLine":2,"endLine":2,"editKind":"author-lines"}
+\`\`\`
+Blocking in-place repair: use the blocking shape with \`editKind: "in-place"\`.
+`;
+
 async function readReview(repo, pr, reviewId) {
   const { stdout } = await execGhWithRetry({
     hammerToken: true, args: ['api', `repos/${repo}/pulls/${pr}/reviews/${reviewId}`], timeoutMs: 15_000,
@@ -60,10 +83,14 @@ export async function main(argv = process.argv.slice(2), {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
-    const result = await main();
-    process.stdout.write(`${JSON.stringify(result)}\n`);
-    // A recorded deferral is handled feedback, but must never authorize an edit.
-    process.exitCode = editPlanExitCode(result);
+    if (process.argv.length === 3 && process.argv[2] === '--help') {
+      process.stdout.write(EDIT_PLAN_USAGE);
+    } else {
+      const result = await main();
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+      // A recorded deferral is handled feedback, but must never authorize an edit.
+      process.exitCode = editPlanExitCode(result);
+    }
   } catch (error) {
     process.stderr.write(`hammer edit pre-check failed; do not edit: ${error.message}\n`);
     process.exitCode = error.exitCode || 1;

@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { fetchHammerPr, writeHammerFullReviews } from '../src/hammer-pr-read.mjs';
 import { classifyCheckRollup } from '../src/checks-summary.mjs';
 import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
+import { parseReviewFindings } from '../src/kernel/review-findings.mjs';
 
 const head = 'a'.repeat(40);
 const label = { id: 123, node_id: 'LA_fixture', name: 'operator-hold', color: 'ff0000' };
@@ -20,22 +21,47 @@ const cliEnv = { ...process.env, HAMMER_LACEY_GH_TOKEN: 'synthetic-offline-token
 test('canonical full-review read preserves paginated bodies, findings and commit associations in the run file', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-full-review-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const body = `Final review\n${'full finding\n'.repeat(300)}`;
+  const body = `Final review\n${'full finding\n'.repeat(300)}
+## Blocking issues
+- **Preserve complete review**
+  - **File:** \`src/example.mjs\`
+  - **Lines:** 2
+  - **Problem:** A truncated review loses the required correction.
+## Non-blocking issues
+- None.
+## Verdict
+Request changes
+`;
+  const earlierHead = 'b'.repeat(40);
   const calls = [];
   const text = await writeHammerFullReviews('fixture/repo', 42, {
     env: { HAM_RUN_DIR: dir }, read: async path => {
       calls.push(path);
       if (!path.includes('/reviews?')) return pr;
-      const review = { id: calls.length, body, commit_id: head, state: 'COMMENTED' };
-      return path.endsWith('page=1') ? Array.from({ length: 100 }, (_, id) => ({ ...review, id })) : [review];
+      const review = { id: 101, body, commit_id: head, state: 'COMMENTED' };
+      return path.endsWith('page=1')
+        ? Array.from({ length: 100 }, (_, id) => ({ ...review, id: id + 1, commit_id: earlierHead }))
+        : [review];
     },
   });
   const rows = JSON.parse(text);
   assert.equal(rows.length, 101);
   assert.equal(rows[100].body, body);
+  assert.deepEqual(rows[0].commit, { oid: earlierHead });
   assert.deepEqual(rows[100].commit, { oid: head });
+  const findings = parseReviewFindings(rows[100].body);
+  assert.equal(findings.findingsCount, 1);
+  assert.equal(findings.blocking.findings[0].file, '`src/example.mjs`');
+  assert.equal(findings.blocking.findings[0].lines, '2');
   assert.equal(readFileSync(join(dir, 'reviews-full.json'), 'utf8'), text);
-  assert.equal(calls.length, 3, 'no check reads and no missing review page');
+  assert.deepEqual(calls, [
+    'repos/fixture/repo/pulls/42',
+    'repos/fixture/repo/pulls/42/reviews?per_page=100&page=1',
+    'repos/fixture/repo/pulls/42/reviews?per_page=100&page=2',
+  ]);
+});
+
+test('full-review prompt routes to the canonical helper and its reference appendix', async () => {
   const prompt = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
   assert.match(prompt, /ham_read review-read .*bin\/hammer-pr-read\.mjs.*--full-review/);
   assert.doesNotMatch(prompt, /ham_read review-read <read-only command/);
@@ -48,7 +74,6 @@ test('canonical full-review read preserves paginated bodies, findings and commit
     reviewer: 'reviewer', dispatchedAt: '2026-09-27T00:00:00Z', amaTrailers: '',
     templateBody: prompt, scratchDir: '/fixture/scratch',
   });
-  assert.ok(Buffer.byteLength(rendered) <= 60 * 1024, `prompt is ${Buffer.byteLength(rendered)} bytes`);
   assert.match(rendered, /Appendix G1/);
 });
 

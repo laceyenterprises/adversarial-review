@@ -169,7 +169,7 @@ export HAM_REPO='<<REPO>>' HAM_PR_NUMBER='<<PR_NUMBER>>' HAM_HQ_ROOT='<<HQ_ROOT>
 
 ## Cost and context discipline
 
-Run `ham_read context "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-context.mjs" "<<REPO>>" "<<PR_NUMBER>>"` before reads and after **each push**; nonzero stops. Read the full final review before findings or on truncation:
+Run `ham_read context "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-context.mjs" "<<REPO>>" "<<PR_NUMBER>>"` before reads and after **each push**; nonzero stops. Read the full final review before findings:
 
 <!-- hammer-reference:G1 -->
 Use this exact helper for the full final review, also whenever `review.findingsTruncated` or `review.simplicityNoteTruncated` is true:
@@ -178,7 +178,7 @@ Use this exact helper for the full final review, also whenever `review.findingsT
 ham_read review-read "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-pr-read.mjs" "<<REPO>>" "<<PR_NUMBER>>" --full-review
 ```
 
-It writes `$HAM_RUN_DIR/reviews-full.json` and displays complete paginated review bodies, findings and commit associations. Use this helper for both reads; do not compose a shell, Python or `eval` command to fetch or display reviews. Existing review-head and merge predicates still decide authority.
+It writes `$HAM_RUN_DIR/reviews-full.json` and displays complete paginated bodies, findings and commit associations. Never compose shell, Python or `eval` commands for these reads. Existing review-head and merge predicates decide authority.
 `hammer-command-error` means a local command could not run (shell syntax or missing executable), not a GitHub read failure. The read wrapper retries once, then returns 75 as a retryable deferral. Correct the command before another attempt; never record `review-read-failed` for this reason. Real read failures retain their existing stop semantics.
 <!-- /hammer-reference:G1 -->
 
@@ -364,23 +364,16 @@ is a reversion. Check intent and bypasses separately.
 Before editing any author-introduced line, run this bounded helper with live reviewed coordinates.
 In-place preserves behavior; additive preserves code.
 
-Blocking reversal:
-```json
-{"reviewedHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"blocking","findingNumber":1,"path":"src/example.mjs","startLine":2,"endLine":2,"editKind":"author-lines"}
+Plans name `reviewedHead`, reviewed `path`, `startLine`, `endLine`, and
+`editKind` (`author-lines`, `in-place`, `additive`). Cited findings require
+`kind` and one-based `findingNumber`. Uncited CI repair requires `in-place`
+and `requiredCiRepair: true`, omitting both citation fields; cited plans omit
+that flag. For complete JSON examples, run:
+
+```bash
+ham_read edit-plan-usage "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-edit-plan.mjs" --help
 ```
-Uncited CI repair:
-```json
-{"reviewedHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","path":"test/example.test.mjs","startLine":2,"endLine":2,"editKind":"in-place","requiredCiRepair":true}
-```
-Additive fix:
-```json
-{"reviewedHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"non-blocking","findingNumber":1,"path":"test/example.test.mjs","startLine":2,"endLine":2,"editKind":"additive"}
-```
-Strict non-blocking fix:
-```json
-{"reviewedHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"non-blocking","findingNumber":1,"path":"src/example.mjs","startLine":2,"endLine":2,"editKind":"author-lines"}
-```
-Blocking in-place repair: use the blocking shape with `editKind: "in-place"`.
+
 Run B1 owner setup through `fi` first:
 
 ```bash

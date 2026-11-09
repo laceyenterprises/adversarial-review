@@ -86,6 +86,37 @@ Repository lint passed with zero errors and 152 existing warnings, contract
 typechecking passed, and the offline demo produced three byte-stable
 deliveries. The full local suite was not run; hosted checks remain required.
 
+## PR update 2
+
+After incorporating current main (including HAMEDITPLAN-01 and
+ARSUITETIMEOUT-01), both named failures reproduce at the same prompt-size
+assertion: 61,447 rendered bytes exceed the unchanged 61,440-byte limit.
+The full-review helper's pagination, bodies and commit associations pass;
+there is no reader defect to repair. Separate its data regression from prompt
+routing, retaining the dedicated byte-budget test in `hammertrim-contract`.
+Strengthen the data fixture with a parsed finding beyond the long body and
+distinct earlier/current review commits across the two pages.
+
+Move the four complete edit-plan JSON examples to
+`node bin/hammer-edit-plan.mjs --help`, which prints them without GitHub or
+database reads. Keep plan field rules, correction limits and policy outcomes
+in the prompt, and route to the helper for examples. Reuse those examples in
+the existing policy tests and correct the canonical runbook reference.
+Shorten duplicated full-review instructions. The same rendered fixture is now
+60,994 bytes, saving 453 bytes with 446 bytes of headroom.
+
+Individual offline runs through `cwp_dispatch.worker_validation`, each bounded
+to 600 seconds with netguard, pass: PR-read (20), prompt trim (53), edit-plan
+(7), prompt protocol (45), simplicity-note prompts (6), and documentation
+contracts (4). Final prompt wording also passes the dedicated byte-budget
+assertion. Changed-file ESLint with `--fix`, repository lint (zero errors,
+152 existing warnings), contract typechecking and the research-finding demo
+pass. No full local suite was run.
+
+The latest pre-update hosted run, 42644613448, completed Node 22 in about
+838 seconds with two failures; it did not time out. Test caps, CI jobs and
+thresholds are unchanged.
+
 ## Activation check
 
 After normal submodule float and the follow-up/watcher and dispatcher reloads,

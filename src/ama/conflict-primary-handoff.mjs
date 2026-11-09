@@ -21,7 +21,7 @@ function boundedReviewContext(entries) {
   const timestamp = entry => Date.parse(entry.updated_at || entry.updatedAt
     || entry.submittedAt || entry.created_at || entry.createdAt || '') || 0;
   return entries
-    .filter(entry => typeof entry.body === 'string' && entry.body.trim())
+    .filter(entry => entry && typeof entry.body === 'string' && entry.body.trim())
     .sort((a, b) => timestamp(a) - timestamp(b))
     .slice(-MAX_CONTEXT_ENTRIES)
     .map(entry => {

@@ -1402,7 +1402,7 @@
           "from": "[*]",
           "to": "remediation",
           "trigger": "project shared next action: remediation, including a pending conflict-primary-unproven builder handoff",
-          "codeSource": "src/ama/closure-next-action.mjs"
+          "codeSource": "src/pr-next-action.mjs"
         },
         {
           "id": "closure-owner.07",

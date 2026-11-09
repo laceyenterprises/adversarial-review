@@ -56,7 +56,37 @@ with bodies limited to 2,000 characters and URLs to 2,048 characters. Truncated
 bodies end in an ellipsis; discussion links retain access to omitted context.
 The job shape and round budgets are unchanged.
 
+## PR 1798 final comment-only remediation
+
+Ignore null review/comment entries before reading their bodies, and render
+captured review context as indented JSON in the remediation prompt. Regression
+fixtures cover null entries across all three sources and formatted bounded
+context. Correct `closure-owner.06`'s source to `src/pr-next-action.mjs`, which
+selects the pending handoff row; refresh the reviewed graph metadata digest.
+Lifecycle states, triggers, persisted fields and smoke promises are unchanged;
+the generated README diagrams remain byte-identical.
+
+The CLI pagination finding was not reproduced. Installed GitHub CLI 2.102.0
+documents `gh api --paginate --slurp`. A real CLI invocation against a disposable
+two-page local HTTP fixture exited zero and emitted
+`[[{"body":"page one"}],[{"body":"page two"}]]` (ignoring whitespace).
+Parsing and flattening yielded both comments. The existing pagination command
+therefore remains unchanged, consistent with the official
+[GitHub CLI manual](https://cli.github.com/manual/gh_api).
+
 ## Verification
+
+PR 1798 final comment-only remediation:
+
+- Bounded `node test/run-tests.mjs test/hamconflictowner-01.test.mjs
+  test/closer-next-action.test.mjs test/watcher-claim-loop.test.mjs
+  test/smv.test.mjs`: 288 passed, zero failures.
+- `npm run lint`: zero errors (152 existing warnings).
+- `npm run typecheck:contracts`, `node scripts/validate-data-model-catalog.mjs`,
+  `bash demo/research-finding-walkthrough.sh` and `git diff --check`: passed.
+- Real `gh api --paginate --slurp` against a disposable two-page local fixture:
+  exit 0; JSON parsing and flattening preserved both comments.
+- No full local suite was run; PR-head CI remains the full-suite merge gate.
 
 Rescue remediation:
 

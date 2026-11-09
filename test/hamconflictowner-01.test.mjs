@@ -162,8 +162,29 @@ test('handoff bounds recent context across sources and pages before saving the j
   assert.equal(context.at(-2).url.length, 2048);
   const prompt = buildRemediationPrompt(job, { template: 'Synthetic remediation template.',
     remediationReplyPath: join(f.rootDir, 'reply.json') });
-  assert.ok(prompt.includes(JSON.stringify(context)));
+  assert.ok(prompt.includes(JSON.stringify(context, null, 2)));
   assert.ok(!prompt.includes('x'.repeat(2000)), 'full bodies cannot reach the prompt');
+});
+
+test('handoff ignores null and undefined review context entries across sources', async t => {
+  const f = fixture(t);
+  const result = await handoffConflictPrimary({ ...f.args,
+    execFileImpl: async (bin, args) => {
+      if (args[0] === 'api') return { stdout: JSON.stringify([
+        [null, undefined, { body: 'Synthetic valid inline comment.' }],
+        [null],
+      ]) };
+      const pr = JSON.parse((await f.args.execFileImpl(bin, args)).stdout);
+      return { stdout: JSON.stringify({ ...pr, reviews: [null, undefined, ...pr.reviews],
+        comments: [null, undefined, ...pr.comments] }) };
+    } });
+  const job = readFollowUpJob(join(getFollowUpJobDir(f.rootDir, 'pending'),
+    `${result.remediation.jobId}.json`));
+  assert.deepEqual(job.closureHandoff.reviewContext, [
+    { body: 'Synthetic open finding: preserve the new upstream default.', url: null },
+    { body: 'Synthetic PR issue comment.', url: null },
+    { body: 'Synthetic valid inline comment.', url: null },
+  ]);
 });
 
 test('repeated and concurrent stops on the same head deduplicate even after terminal settlement', async t => {

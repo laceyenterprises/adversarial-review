@@ -1916,8 +1916,10 @@ queue moves. Its durable `closureHandoff` receipt names the reason and required
 full review; `repo`, `prNumber`, `revisionRef` and `jobId` name the owner.
 A pending matching job selects `remediate` / `remediator` through admission
 delays, while existing live custody and unknown-ownership fences retain
-precedence. A new builder head returns to normal full review. Missing
-provenance or enqueue failure retains the handoff for a later watcher pass.
+precedence. `src/pr-next-action.mjs` selects this row, as recorded by
+`closure-owner.06` in `state-machines.json`. A new builder head returns to normal
+full review. Missing provenance or enqueue failure retains the handoff for a
+later watcher pass.
 `conflict-primary-timeout` remains retryable; the proof and publish fence are
 unchanged. See [the queue contract](data-model/follow-up-jobs.md#conflict-primary-handoff-hamconflictowner-01).
 

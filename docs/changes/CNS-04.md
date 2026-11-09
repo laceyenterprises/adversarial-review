@@ -23,4 +23,7 @@ This PR does not ship downstream observers or config thresholds.
 Synthetic offline fixtures cover both terminal evidence kinds, same-head
 replacement, exclusion of provisional/parked/unlaunched observations, field
 filtering, and dispatch/cleanup equivalence when journal writes fail.
-Validation results are recorded in the PR.
+`node --test test/closer-outcomes.test.mjs`, run through the bounded worker
+validator with network guards: 7 passed. ESLint on the changed source and test
+files: clean. The changed-file CI mirror: CDM re-derivation guard and contract
+typecheck passed; the full suite was deferred by the fast tier.

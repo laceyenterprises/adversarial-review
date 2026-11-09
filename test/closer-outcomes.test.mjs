@@ -73,6 +73,63 @@ test('legacy string PR numbers are serialized as numbers for both observation ki
   assert.deepEqual(rows(root).map(row => row.prNumber), [42, 42]);
 });
 
+test('blank repository and head identities are rejected for both terminal kinds', t => {
+  const root = scratch(t);
+  const warnings = [];
+  for (const [kind, record] of [
+    ['launch-terminal', receipt],
+    ['lease-terminal', { ...identity, lrqId: 'launch-one',
+      status: 'terminal', terminalOutcome: 'succeeded', updatedAt: now }],
+  ]) {
+    for (const field of ['repo', 'headSha']) {
+      for (const value of ['', ' \t\n']) {
+        const invalid = { ...record, [field]: value };
+        assert.equal(closerOutcomeObservation(invalid, kind), null);
+        assert.equal(appendCloserOutcome(root, invalid, kind, {
+          warn(message) { warnings.push(message); },
+        }), false);
+      }
+    }
+  }
+  assert.deepEqual(warnings, Array(8).fill('ama_closer.outcome_record_unavailable'));
+  assert.deepEqual(readdirSync(root), [], 'invalid evidence creates no journal');
+});
+
+test('directory creation is lazy and recovers after directory removal', t => {
+  const root = scratch(t);
+  const directories = [];
+  const options = { mkdir(dir, flags) {
+    directories.push(dir);
+    return mkdirSync(dir, flags);
+  } };
+  assert.equal(appendCloserOutcome(root, receipt, 'launch-terminal', options), true);
+  assert.equal(appendCloserOutcome(root, receipt, 'launch-terminal', options), true);
+  const dir = join(root, 'data/ama-closer-outcomes');
+  assert.deepEqual(directories, [dir]);
+  assert.equal(rows(root).length, 2);
+  rmSync(dir, { recursive: true });
+  assert.equal(appendCloserOutcome(root, receipt, 'launch-terminal', options), true);
+  assert.deepEqual(directories, [dir, dir]);
+  assert.equal(rows(root).length, 1);
+});
+
+test('only missing-directory failures retry, and retry failures remain non-fatal', t => {
+  const root = scratch(t);
+  for (const code of ['ENOENT', 'EACCES']) {
+    let attempts = 0;
+    let mkdirs = 0;
+    const warnings = [];
+    assert.equal(appendCloserOutcome(root, receipt, 'launch-terminal', {
+      append() { attempts += 1; throw Object.assign(Error('private'), { code }); },
+      mkdir() { mkdirs += 1; },
+      warn(message) { warnings.push(message); },
+    }), false);
+    assert.equal(attempts, code === 'ENOENT' ? 2 : 1);
+    assert.equal(mkdirs, code === 'ENOENT' ? 1 : 0);
+    assert.deepEqual(warnings, ['ama_closer.outcome_record_unavailable']);
+  }
+});
+
 test('rejected terminal evidence emits only the fixed diagnostic', t => {
   const root = scratch(t);
   const warnings = [];

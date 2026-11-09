@@ -6,8 +6,9 @@ import { launchRequestMeaning } from './launch-request-status.mjs';
 // launch-terminal observation separate from the authoritative lease outcome.
 export function closerOutcomeObservation(record, kind) {
   const prNumber = Number(record?.prNumber);
-  if (!record || typeof record.repo !== 'string' || !Number.isSafeInteger(prNumber)
-    || prNumber <= 0 || typeof record.headSha !== 'string') return null;
+  if (!record || typeof record.repo !== 'string' || !record.repo.trim()
+    || !Number.isSafeInteger(prNumber) || prNumber <= 0
+    || typeof record.headSha !== 'string' || !record.headSha.trim()) return null;
   const launchRequestId = kind === 'lease-terminal' ? record.lrqId : record.launchRequestId;
   if (typeof launchRequestId !== 'string' || !launchRequestId) return null;
   if (kind === 'launch-terminal') {
@@ -33,7 +34,7 @@ export function closerOutcomeObservation(record, kind) {
 }
 
 export function appendCloserOutcome(rootDir, record, kind, {
-  append = appendFileSync, warn = message => console.warn(message),
+  append = appendFileSync, mkdir = mkdirSync, warn = message => console.warn(message),
 } = {}) {
   try {
     const observation = closerOutcomeObservation(record, kind);
@@ -47,11 +48,20 @@ export function appendCloserOutcome(rootDir, record, kind, {
       return false;
     }
     const dir = join(rootDir, 'data', 'ama-closer-outcomes');
-    mkdirSync(dir, { recursive: true });
     // One O_APPEND write per small row; concurrent writers never rewrite
     // history. Receipt replay is intentional: consumers deduplicate by launch.
-    append(join(dir, `${new Date(observation.terminalAt).toISOString().slice(0, 10)}.jsonl`),
-      `${JSON.stringify(observation)}\n`, { encoding: 'utf8', mode: 0o640, flush: true });
+    const filePath = join(dir, `${new Date(observation.terminalAt).toISOString().slice(0, 10)}.jsonl`);
+    const row = `${JSON.stringify(observation)}\n`;
+    const options = { encoding: 'utf8', mode: 0o640, flush: true };
+    try {
+      append(filePath, row, options);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+      // Lazily create the directory, also recovering if it was removed since
+      // a previous append. Retry once; all failures stay inside the guard.
+      mkdir(dir, { recursive: true });
+      append(filePath, row, options);
+    }
     return true;
   } catch {
     // Telemetry failure must not change closure, custody, or paging decisions.

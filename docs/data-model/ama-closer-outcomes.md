@@ -10,6 +10,7 @@ Version 1 rows contain `schemaVersion`, `kind`, `repo`, `prNumber`, `headSha`,
 `launchRequestId`, `terminalAt`, `launchStatus` and `outcome`. No prompt, error
 text, environment, labels, user identity or provider response is copied.
 Legacy numeric-string PR numbers are normalized to positive safe integers.
+Repository and head SHA strings must contain non-whitespace characters.
 
 `launch-terminal` rows come from durable dispatch receipt writes with
 `state=launch-terminal`, a `terminalLaunchStatus`, and a `reconciledAt`.
@@ -55,7 +56,8 @@ from missing lease evidence and must retain the unknown outcome.
 cannot erase it. Gate reasons can be correlated with the existing AMA audit's
 per-launch attempts. Deferred outcomes retain their separate classification.
 
-The writer appends a small row in one O_APPEND write and flushes it. Repeated
+The writer appends a small row in one O_APPEND write and flushes it. It creates
+the directory only after a missing-path error and retries once. Repeated
 receipt writes may append duplicates. The predecessor is also captured before a
 same-head dispatch projection is replaced, preserving history across retries.
 Predecessor capture is skipped when the new terminal document preserves the

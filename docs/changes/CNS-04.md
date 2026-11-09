@@ -37,6 +37,13 @@ An unchanged terminal rewrite skips predecessor capture, avoiding the duplicate
 predecessor/new-document pair while retaining changed launch, timestamp or status
 observations. Diagnostic-sink failures are also contained.
 
+Comment-only rescue remediation rejects empty or whitespace-only repository
+and head SHA identities for both terminal observation kinds. The journal now
+creates its directory only on an append's `ENOENT` and retries once, avoiding
+directory checks on steady-state appends while recovering after directory
+removal. Other filesystem errors and retry failures retain the fixed diagnostic
+and non-fatal behavior.
+
 This is the upstream prerequisite for pipeline observers. Downstream work
 remains incomplete until this change merges, the normal submodule float
 advances the consumer, and fixtures validate that merged version.
@@ -79,3 +86,12 @@ The full `npm test` run exited 1 after the runner's 900-second timeout;
 it also reported failures in untouched remediation-worker tests. All outcome
 fixtures passed within that run. The full suite is not claimed green; those
 unrelated failures were left outside this rescue's scope.
+
+Comment-only rescue validation: all 16 outcome tests passed with the isolated
+offline runner, including blank identities for both kinds, lazy directory
+creation, recovery after directory removal, and bounded retry failure.
+Changed-file ESLint with `--fix`, repository lint (0 errors, 152 existing
+warnings), contract typecheck, and the offline byte-equivalence walkthrough
+passed. A direct `node --test` invocation observed an unrelated host CPU-sample
+warning in a console assertion; the repository runner's deterministic timeout
+fixture avoids that host dependency.

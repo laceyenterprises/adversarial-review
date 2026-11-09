@@ -33,6 +33,10 @@ export function captureReadyFindings({ rootDir, repo, prNumber, headSha, version
         const inserted = db.prepare(`INSERT OR IGNORE INTO finding_backlog
           (finding_id,repo,pr_number,head_sha,content_sha256,reviewer_family,area)
           SELECT * FROM finding_backlog_candidates WHERE finding_id=?`).run(finding.finding_id).changes;
+        // `reason` is mutable queue state, not deferral history: settlement,
+        // supersession and batch retries replace it. The hammer's head-bound
+        // PR audit comment is the durable deferral record; it lists each
+        // deferred finding/reason separately from remediated findings.
         const recorded = db.prepare(`UPDATE finding_backlog SET reason=?
           WHERE repo=? AND pr_number=? AND head_sha=? AND content_sha256=? AND outcome IS NULL`)
           .run(reason, repo, prNumber, headSha, finding.content_sha256).changes;

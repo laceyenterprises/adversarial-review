@@ -2,7 +2,7 @@
 
 **Owner:** shared GitHub request throttle
 **Store:** `data/api-cache/rate-limit-state.json`, overridden by
-`GHO_RATE_LIMIT_SHARED_STATE_PATH`
+`GHO_RATE_LIMIT_SHARED_STATE_PATH`, and `<selected-store>.bindings/<digest>.json`
 **Source of truth:** `src/rate-limit-throttle.mjs`
 **Runtime surfaces:** `src/metered-gh.mjs`, `bin/metered-gh.mjs`,
 `src/runtime-status.mjs`, `src/github-budget-monitor.mjs`, `src/api-telemetry.mjs`
@@ -11,7 +11,9 @@ The shared JSON document has `version: 2` and a `buckets` object keyed by
 `githubBudgetKey(resource, credential)`. Authenticated keys are
 `installation-<app-id>-<installation-id>/<resource>` for tokens whose metadata
 positively identifies `github_app_installation` and matches both configured App and
-installation pins in the broker client in this process. PAT fallbacks, missing
+installation pins in the broker client. Broker-verified registrations resolve in the
+registering process and, through unexpired owner-checked binding files, in fresh
+processes using the same selected store. PAT fallbacks, missing
 source metadata and unpinned identities remain token-keyed. Rotated tokens for that
 installation share observations. Other authenticated keys remain
 `token-<digest>/<resource>` (normally `core` and `graphql`); the digest is the
@@ -186,8 +188,44 @@ read. A foreign file already sitting at the shared path is left in place:
 each caller keeps using its own owner-scoped store, and status names the
 shared store's owner uid. Removing it is an operator decision.
 
-Installation binding is process-local. Child processes and standalone status
-readers using only a token digest do not see installation-keyed holds. Budget
+Installation bindings persist in `<selected-store>.bindings/<digest>.json`, where
+`selected-store` uses the same GHSTATEOWNER-01 plan as observations: the shared
+path for its owner, otherwise the caller's `.uid-<uid>.json` sibling. Binding
+lookups and registrations resolve `GHO_RATE_LIMIT_SHARED_STATE_PATH` from the
+caller's environment first, then `process.env` when absent or null. This also
+applies to negative-cache keys, so allowlisted child environments use the
+broker's configured store. An explicit empty path selects the default store.
+Token selection uses only the caller's environment or explicit token; adapter
+accounting never inherits ambient tokens missing from the child environment. Only
+broker-verified identities are written. Each file contains `{ digest, credential,
+expiresAt }`: the 24-character token digest, `installation-<app>-<installation>`,
+and epoch-millisecond expiry capped at one hour from registration (or the
+broker's earlier token expiry). Files are atomically written `0600`; new binding
+directories are created `0700`. Writes prune readable expired digest files.
+Raw tokens are never persisted.
+
+Readers reject directories observed as symlinks or group/other-writable at the
+directory check, and reject symlink files, foreign directory/file owners,
+malformed identities and expired bindings. The directory check and file open
+are separate path operations: a writer with access to the parent can replace
+the directory between them. These checks assume a trusted parent directory;
+they do not guarantee resistance to concurrent parent-directory replacement.
+File opens use `O_NOFOLLOW` for the final component, and file ownership is
+checked on the opened descriptor. With no platform uid,
+owner comparison is unavailable. Unavailable bindings fall back to token-digest
+isolation; registration remains usable in the registering process. Private
+bindings are shared across processes of the same uid, not across deployment
+uids. Operators can inspect the selected store's adjacent directory and remove
+expired files; write-time pruning normally handles rotation cleanup. Temporary
+files left by crashed atomic writers are outside digest-file pruning and may
+need operator cleanup. Missing
+bindings are cached for one second per store path and digest (at most 256
+entries), so fresh cross-process registrations may take one second to become
+visible after a miss. Successful disk resolutions recheck the opened file's identity and ownership on
+each lookup. An unchanged file can reuse a parsed binding for up to one second,
+capped by expiry, with at most 256 cached records. Replacement, removal and
+ownership changes still take effect on the next lookup.
+Budget
 deferrals retain the last validated ETag and enter the bounded transient-read
 path. A missing observation breaks the deficit interval, and an alert receipt
 is deduplicated by credential and episode start.

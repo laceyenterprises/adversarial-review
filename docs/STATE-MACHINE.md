@@ -1,3 +1,9 @@
+REMBUILDERTAG-01 remediation normalizes legacy tags before routing and defers
+unavailable PR/transient opener evidence through the existing pre-spawn pending
+requeue with a 60-second retry and claim-round refund. Settled missing/conflicting
+evidence and recovered own-family routes retain owned stopped/retrigger outcomes.
+Lifecycle values and deployed smoke commands remain unchanged.
+
 HAMMERNOPROGRESS-01 retains existing lifecycle and charge edges. Seven bounded
 first-write receipt kinds earn finite load-aware outcome slices (nominal 3600
 active seconds); an unsuperseded final terminal stop receives a load-aware

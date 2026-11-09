@@ -38,9 +38,12 @@ The stable opener lookup ignores the current head because remediation moves
 heads after PR creation. Reviewer identity never supplies builder provenance.
 Clio and Codex agree as one model family.
 
-Conflicting or absent sources stop before dispatch, recording the job/PR,
+Settled conflicting or absent sources stop before dispatch, recording the job/PR,
 evidence, operator owner and escalation/retrigger action in the job and output.
 These stops permit explicit operator retrigger after evidence correction.
+Unavailable PR or transient opener reads instead requeue for 60 seconds with
+a pre-spawn round refund; PR reads retry transient failures twice within 15 seconds.
+Existing noncanonical tags are persisted with job-tag recovery evidence.
 Recovered jobs reject same-family remediators, including pinned or pooled
 proposals. The change retains normal review, CI and merge predicates, and adds
 no check, label, override, runner or live operation.

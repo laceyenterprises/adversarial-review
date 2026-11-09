@@ -13,7 +13,7 @@ export async function readRemediationBuilderEvidence({ rootDir, job, execFileImp
   try {
     const result = await execGhWithRetry({ execFileImpl, args: ['pr', 'view', String(job.prNumber),
       '--repo', job.repo, '--json', 'title,body'], env, timeoutMs: 8000,
-    retries: 0, totalTimeoutMs: 8000 });
+    retries: 2, totalTimeoutMs: 15000 });
     pr = JSON.parse(result.stdout);
   } catch {
     prRead = 'unavailable';
@@ -46,11 +46,12 @@ export function deriveRemediationBuilder(evidence) {
     return !fence;
   }).join('\n');
   const sources = [
+    ...(evidence.builderTag ? [{ source: 'job.builderTag', value: evidence.builderTag }] : []),
     { source: 'title-prefix', value: builderClassFromTitle(evidence.title) },
     ...(evidence.openerClasses || []).map(value => ({ source: 'pr_opened.worker_class', value })),
     // Read explicit metadata lines only, never free-form prose or reviewer identity.
-    ...[...metadata.matchAll(/^Worker-Class:[ \t]*([a-z0-9-]+)[ \t]*$/gim)]
-      .map(match => ({ source: 'body.Worker-Class', value: match[1] })),
+    ...[...metadata.matchAll(/^[ \t]*(?:Worker-Class:[ \t]*([a-z0-9-]+)|<!--[ \t]*(?:hq:worker-class=|Worker-Class:[ \t]*)([a-z0-9-]+)[ \t]*-->)[ \t]*$/gim)]
+      .map(match => ({ source: 'body.Worker-Class', value: match[1] || match[2] })),
   ].map(entry => ({ ...entry, builderTag: normalizeBuilderClass(entry.value) }));
   const recognized = sources.filter(entry => entry.builderTag);
   const families = new Set(recognized.map(entry => entry.builderTag === 'clio-agent' ? 'codex' : entry.builderTag));
@@ -68,16 +69,26 @@ export function deriveRemediationBuilder(evidence) {
 export async function recoverRemediationBuilder({ rootDir, job, jobPath, execFileImpl,
   now = () => new Date().toISOString(), log = console,
   readEvidenceImpl = readRemediationBuilderEvidence }) {
-  if ((job.domainId && job.domainId !== 'code-pr') || normalizeBuilderClass(job.builderTag)) {
+  if (job.domainId && job.domainId !== 'code-pr') {
     return { ok: true, job };
   }
+  const normalized = normalizeBuilderClass(job.builderTag);
+  if (normalized && normalized === job.builderTag) return { ok: true, job };
   let recorded;
-  try {
-    recorded = await readEvidenceImpl({ rootDir, job, execFileImpl });
-  } catch {
-    recorded = { availability: { pr: 'unavailable', pr_opened: 'unavailable' } };
+  if (normalized) {
+    recorded = { builderTag: job.builderTag };
+  } else {
+    try {
+      recorded = await readEvidenceImpl({ rootDir, job, execFileImpl });
+    } catch {
+      recorded = { availability: { pr: 'unavailable', pr_opened: 'unavailable' } };
+    }
   }
   const evidence = deriveRemediationBuilder(recorded || {});
+  if (Object.values(evidence.availability).some(value =>
+    value === 'unavailable' || value === 'identity-read-transient')) {
+    return { ok: false, retryable: true, reason: 'builder-authorship-read-unavailable' };
+  }
   const observedAt = now();
   if (!evidence.ok) {
     const owner = 'adversarial-review operator';

@@ -57,6 +57,8 @@ for (const [tag, evidence, expected] of [
   [null, { title: '[codex] Synthetic fix' }, 'codex'],
   ['obsolete-value', { openerClasses: ['claude-code-corp'] }, 'claude-code'],
   ['', { body: 'Worker-Class: codex-corp' }, 'codex'],
+  ['[codex]', {}, 'codex'],
+  ['claude-code-corp', {}, 'claude-code'],
 ]) test(`recovers ${JSON.stringify(tag)} and selects a different remediator family`, async t => {
   const f = fixture(t, tag);
   const lines = [];
@@ -118,15 +120,16 @@ for (const evidence of [{}, { title: 'untagged', openerClasses: ['unknown'] }]) 
   });
 }
 
-test('source failures become an explicit escalation rather than a generic retry', async t => {
+test('source failures defer without claiming absent authorship', async t => {
   const f = fixture(t);
   const result = await recoverRemediationBuilder({ ...f, readEvidenceImpl: async () => { throw Error('offline'); } });
-  assert.equal(result.stopCode, 'missing-builder-authorship');
-  assert.equal(result.escalation.evidence.availability.pr_opened, 'unavailable');
+  assert.equal(result.retryable, true);
+  assert.equal(result.reason, 'builder-authorship-read-unavailable');
+  assert.equal(JSON.parse(readFileSync(f.jobPath)).status, 'in_progress');
 });
 
 test('known tags and non-code subjects do not read or rewrite authorship', async t => {
-  const f = fixture(t, 'codex-corp');
+  const f = fixture(t, 'codex');
   for (const job of [f.job, { ...f.job, domainId: 'research', builderTag: null }]) {
     assert.equal((await recoverRemediationBuilder({ ...f, job,
       readEvidenceImpl: () => assert.fail('unexpected evidence read') })).job, job);
@@ -140,6 +143,51 @@ test('body and title conflicts refuse; compatible Clio/Codex families agree', ()
   assert.equal(deriveRemediationBuilder({ body: '```\nWorker-Class: codex\n```' }).ok, false);
   assert.equal(deriveRemediationBuilder({ body: '~~~example\nWorker-Class: codex' }).ok, false);
   assert.equal(deriveRemediationBuilder({ body: '```\nexample\n```\nWorker-Class: codex' }).ok, true);
+});
+
+for (const body of ['<!-- hq:worker-class=codex-corp -->', '<!-- Worker-Class: codex-corp -->']) {
+  test(`accepts explicit comment metadata: ${body}`, () => {
+    assert.equal(deriveRemediationBuilder({ body }).builderTag, 'codex');
+    assert.equal(deriveRemediationBuilder({ title: '[claude-code] Fix', body }).ok, false);
+    assert.equal(deriveRemediationBuilder({ body: `\`\`\`\n${body}\n\`\`\`` }).ok, false);
+    assert.equal(deriveRemediationBuilder({ body: `Example ${body}` }).ok, false);
+  });
+}
+
+test('PR transport retries transient errors within its bounded budget', async () => {
+  let attempts = 0;
+  const evidence = await readRemediationBuilderEvidence({ rootDir: '/synthetic',
+    job: { repo: 'example/service', prNumber: 7 }, env,
+    execFileImpl: async () => {
+      if (++attempts < 3) throw Object.assign(Error('HTTP 503'), { stderr: 'HTTP 503' });
+      return { stdout: '{"title":"[codex] Fix"}' };
+    }, readIdentityImpl: async () => ({ ok: true, rows: [] }) });
+  assert.equal(attempts, 3);
+  assert.equal(evidence.availability.pr, 'available');
+});
+
+for (const availability of [
+  { pr: 'unavailable', pr_opened: 'available' },
+  { pr: 'available', pr_opened: 'identity-read-transient' },
+]) test(`consumer requeues unavailable authorship: ${JSON.stringify(availability)}`, async t => {
+  const f = fixture(t);
+  rmSync(f.jobPath);
+  createFollowUpJob({ rootDir: f.rootDir, repo: f.job.repo, prNumber: 7,
+    branch: 'synthetic/fix', builderTag: null, reviewerModel: 'gemini',
+    reviewBody: '## Blocking issues\n- Synthetic finding\n\n## Verdict\nRequest changes', createdAt: AT });
+  const delayedPendingPaths = new Set();
+  const result = await consumeNextFollowUpJob({ rootDir: f.rootDir, promptTemplate: 'synthetic',
+    ensureWorkerRegistryReadyImpl: async () => {}, now: () => AT, delayedPendingPaths,
+    resolvePRLifecycleImpl: async () => ({ prState: 'open' }),
+    readBuilderEvidenceImpl: async () => ({ title: '[codex] Fix', availability }),
+    resolveRemediationWorkerClassImpl: () => assert.fail('must defer before routing'),
+    spawnImpl: () => assert.fail('must not spawn'), log: quiet });
+  assert.equal(result.job.status, 'pending');
+  assert.equal(result.reason, 'builder-authorship-read-unavailable');
+  assert.equal(result.job.remediationPlan.currentRound, 0);
+  assert.equal(result.job.remediationPlan.retryAfter, '2026-01-01T00:01:00.000Z');
+  assert.ok(delayedPendingPaths.has(result.jobPath));
+  assert.equal(result.job.remediationPlan.stop, null);
 });
 
 test('claim consumer persists recovered authorship before routing a legacy job', async t => {
@@ -169,7 +217,7 @@ test('claim consumer persists recovered authorship before routing a legacy job',
   assert.equal(result.job.builderTagRecovery.previousTag, 'obsolete-value');
 });
 
-for (const seam of ['pool', 'experiment']) test(`recovered builder cannot remediate itself after ${seam} routing`, async t => {
+for (const seam of ['fallback-refusal', 'pool', 'experiment']) test(`recovered builder cannot remediate itself after ${seam} routing`, async t => {
   const f = fixture(t);
   rmSync(f.jobPath);
   createFollowUpJob({ rootDir: f.rootDir, repo: f.job.repo, prNumber: 7,
@@ -180,7 +228,9 @@ for (const seam of ['pool', 'experiment']) test(`recovered builder cannot remedi
     resolvePRLifecycleImpl: async () => ({ prState: 'open' }),
     readBuilderEvidenceImpl: async () => ({ title: '[codex] Synthetic fix' }),
     healthRouter: { getMode: () => 'os' },
-    resolveRemediationWorkerClassImpl: async args => ({
+    resolveRemediationWorkerClassImpl: async args => seam === 'fallback-refusal'
+      ? resolveRemediationWorkerClassWithFallback({ ...args, primary: 'codex', execFileImpl: null })
+      : ({
       workerClass: seam === 'pool' ? 'remediator-codex-corp' : args.primary, hold: false,
     }),
     resolveOsgRemediatorRouteImpl: async () => {

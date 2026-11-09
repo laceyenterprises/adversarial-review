@@ -1,5 +1,5 @@
 {
-  "remediationBuilderAuthorship": "Missing or unrecognized code-PR builder tags recover from agreeing recorded title-prefix, stable pr_opened identity and explicit body metadata before dispatch. Missing/conflicting authorship or own-family recovered routing stops with an operator owner and next action; explicit retrigger may resume after evidence/route correction. Existing states, claim allocation and publication budgets remain unchanged.",
+  "remediationBuilderAuthorship": "Noncanonical tags persist normalized values and recovery evidence. Unavailable PR or transient opener reads use the existing pre-spawn pending requeue with a 60-second retry and round refund. Missing or unrecognized code-PR builder tags recover from agreeing recorded title-prefix, stable pr_opened identity and explicit body metadata before dispatch. Missing/conflicting authorship or own-family recovered routing stops with an operator owner and next action; explicit retrigger may resume after evidence/route correction. Existing states, claim allocation and publication budgets remain unchanged.",
   "primaryChangeHistoryBudget": "HAMHISTORYBUDGET-01: primary-change collection has a fixed 90-second wall-clock deadline across history/cache/quota reads and optional proofs. Timeout returns head-scoped retryable history-read-failed evidence, cancels history process groups and yields an acquired merge lease through the existing release path. Native immutable reads may outlive a shorter tick only within this bound; standalone rescue readers defer exhausted quota. Exact-head, strict preservation and reviewer-authorized reversal predicates and lifecycle states are unchanged.",
   "hammerCredentialRefresh": "HAMCREDREFRESH-01: API preparation, forced refresh, Git credential mint and refresh-only checks allow a nominal 150s load-scaled command wait so owner broker/HCP retries (120s/135s) can finish. Explicit caller deadlines clip without rescaling. Named authorization/identity refusals stop without held-token fallback; transient exhaustion retains existing deferred outcomes and ownership. No lifecycle state, merge predicate, cap or lease changes.",
   "githubApiBudget": "GHBUDGET-01: lifecycle polling revalidates via REST ETags; only a live 304 permits cached head/state reuse. Fresh merged/closed responses retain authoritative terminal transitions. Polling defers below the unchanged floor; closer identity and hammer preconditions may use positive reserved capacity. Zero balance and explicit limits still fail closed. Broker-verified rotating tokens share installation identity. A persisted low-budget episode transitions observing -> alerted after more than 15 minutes. Observed health clears it, a missing observation resets the interval, and the outbox receipt is keyed by the episode start. Offline ghbudget-01 fixtures cover these contracts.",
@@ -811,7 +811,6 @@
       "codeSources": [
         "src/follow-up-jobs.mjs",
         "src/follow-up-branch.mjs",
-      "src/remediation-builder-authorship.mjs",
         "src/follow-up-operator-label.mjs",
         "src/remediation-ci-infrastructure.mjs",
         "src/follow-up-remediation.mjs",
@@ -908,7 +907,7 @@
           "id": "follow-up-job.08",
           "from": "in_progress",
           "to": "stopped",
-      "trigger": "lifecycle, budget, committed-unpublished or unresolved builder-authorship stop with named operator ownership",
+          "trigger": "lifecycle, budget or committed-unpublished stop",
           "codeSource": "src/follow-up-jobs.mjs"
         },
         {
@@ -1813,7 +1812,7 @@
     "src/ama/dispatch-closer.mjs": "b862a841c5a85024f6673b360c3b4ea40f2f16b581cb9399c0c240b65d4613f7",
     "src/fast-merge-processing.mjs": "2bb4cfe6ab2b4479285e1c48aaf1b0a7a4019a9e95437ba0a1a73a1af73a461b",
     "src/follow-up-jobs.mjs": "183be18a14a3c45506db5d6521cb80b1c0a738bdcc8878cf9c3cafe0db9d02cb",
-    "src/follow-up-remediation.mjs": "a6bfbec3da209969aa4b50235fca4936f3b384e5f4ae5f9843fbbea7fd22275f",
+    "src/follow-up-remediation.mjs": "8689fed2f65fc5ee22128250b8c891a82b0c107283f435367a1516807504dd81",
     "src/orphan-post-reconcile.mjs": "a4f21f7764d361da91bfa699ad5261e41a2f8348f13c6330ea113b3ae4dad826",
     "src/posted-review-row.mjs": "ae3be33e5c3812b6d421eae1fa19311767e966681da0f8a997ae93127a1f3a07",
     "src/review-state-db.mjs": "97959038d5e497b70eee07af65d2589f1c706f2ffb16648064317c7d5bf3d743",

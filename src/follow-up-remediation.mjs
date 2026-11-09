@@ -3307,6 +3307,14 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
       readEvidenceImpl: readBuilderEvidenceImpl,
     });
     if (!authorship.ok) {
+      if (authorship.retryable) {
+        const requeued = requeueClaimedFollowUpJobBeforeSpawn({
+          rootDir, jobPath: claimed.jobPath, requeuedAt: now() });
+        requeued.job.remediationPlan.retryAfter = new Date(Date.parse(now()) + 60_000).toISOString();
+        writeFollowUpJob(requeued.jobPath, requeued.job);
+        delayedPendingPaths?.add?.(requeued.jobPath);
+        return { consumed: false, reason: authorship.reason, job: requeued.job, jobPath: requeued.jobPath };
+      }
       const stopped = markFollowUpJobStopped({
         rootDir, jobPath: claimed.jobPath, stoppedAt: now(), sourceStatus: 'in_progress',
         stopCode: authorship.stopCode, stopReason: authorship.reason,

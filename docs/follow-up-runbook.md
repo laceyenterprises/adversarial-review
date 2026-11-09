@@ -52,6 +52,16 @@ while its label gate is red. The final pre-spawn lifecycle gate gives
 those stopped jobs cannot launch a conflict hammer before their stale-state
 condition is resolved.
 
+## Builder authorship reads
+
+Before routing legacy code-PR jobs, recovery persists canonical tags and recorded
+evidence. PR reads retry transient failures twice within 15 seconds; unavailable
+PR evidence or transient opener identity reads requeue for 60 seconds without
+spending a round. Settled missing/conflicting authorship and own-family recovered
+routes stop with a named operator and retrigger action. Body evidence accepts
+explicit bare or HTML-comment Worker-Class metadata outside fenced examples.
+See the [job contract](data-model/follow-up-jobs.md#builder-authorship-recovery).
+
 ## Interrupted dispatch intents (LAC-2081)
 
 CLOSERINTENT-01: a new attempt clears predecessor receipt IDs. Dispatch output

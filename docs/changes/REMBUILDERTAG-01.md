@@ -36,3 +36,28 @@ merge predicate or live operation is added.
 Per the ticket's scoped-validation constraint, the full test suite and
 walkthrough demo were not run manually. Existing deployed smoke commands remain
 unchanged; organic recovery observation follows normal reviewed deployment.
+
+## Review remediation
+
+Canonicalize legacy bracketed and alias tags in persisted recovery evidence
+before routing. Accept explicit HTML comment metadata outside fences. Retry
+transient PR reads twice within 15 seconds and requeue unavailable PR/transient
+opener reads for 60 seconds with the existing pre-spawn round refund. Settled
+absence/conflict still requires operator correction. The real fallback-refusal
+consumer fixture confirms own-family proposals already stop before dispatch.
+Move the catalog fragment into the root catalog read by the validator.
+
+Corrected declaration drift by retaining the existing lifecycle graph/inventory
+and documenting recovery in the owner declaration; refreshed the changed
+consumer source projection. No test guard or smoke command changed.
+
+Verification after rebase and remediation:
+
+- Bounded `node --test test/remediation-builder-authorship.test.mjs test/smv.test.mjs`:
+  pass (52 authorship cases and all SMV checks, including disposable sandbox smoke).
+- `npm run lint`: pass, zero errors and 152 existing warnings.
+- `npm run typecheck:contracts`: pass.
+- `node scripts/validate-data-model-catalog.mjs`: pass, 92 entries.
+- `git diff --check`: pass.
+
+Full-suite validation remains with PR-head CI per worker scope.

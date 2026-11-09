@@ -284,13 +284,14 @@ export function settleFindingBatch(db, batch, result, pr = null, dropPrs = {}) {
         return false;
       }
     }
+    const selectAttempts = db.prepare('SELECT batch_attempts FROM finding_backlog WHERE finding_id=?');
     for (const f of findings) {
       db.prepare(`UPDATE finding_backlog SET outcome=?,reason=?,result_pr=?
       WHERE batch_id=? AND finding_id=?`).run(f.outcome, f.reason.trim(), f.outcome === 'applied' ? result.prNumber : null, batch.batch_id, f.findingId);
       const taxonomyCode = backlogGradeCode(f.outcome, f.reason);
-      const attempt = db.prepare('SELECT batch_attempts FROM finding_backlog WHERE finding_id=?').get(f.findingId).batch_attempts + 1;
+      const attempt = selectAttempts.get(f.findingId).batch_attempts + 1;
       recordFindingGrade(db, { sourceKey: `batch:${batch.batch_id}:${f.findingId}`, findingId: f.findingId,
-        graderKind: taxonomyCode.startsWith('life.') ? 'lifecycle' : 'batch-remediator', taxonomyCode, attempt, gradedAt: new Date().toISOString(),
+        graderKind: taxonomyCode?.startsWith('life.') ? 'lifecycle' : 'batch-remediator', taxonomyCode, attempt, gradedAt: new Date().toISOString(),
         evidence: { batchId: batch.batch_id, manifestSha256: batch.manifest_sha256 ?? null,
           outcome: f.outcome, reason: f.reason, resultPr: f.outcome === 'applied' ? result.prNumber : null,
           resultHeadSha: applied ? (pr.headRefOid || result.headSha) : null, evaluatedRef: 'origin/main' } });

@@ -212,6 +212,26 @@ test('consensus reader seam supports authoritative real-only admission', t => {
     [{ finding_id: rows[1].finding_id }]);
 });
 
+test('multi-finding settlement preserves each finding attempt and lifecycle grade kind', t => {
+  const { db, rows } = fixture(t);
+  db.prepare('UPDATE finding_backlog SET batch_attempts=1 WHERE finding_id=?').run(rows[1].finding_id);
+  const [batch] = claimFindingBatches(db, day);
+  const members = db.prepare('SELECT finding_id FROM finding_backlog WHERE batch_id=?').all(batch.batch_id);
+  assert.ok(members.length > 1);
+  assert.equal(settleFindingBatch(db, batch, { batchId: batch.batch_id,
+    findings: members.map(({ finding_id }) => ({ findingId: finding_id, outcome: 'dropped',
+      reason: finding_id === rows[1].finding_id
+        ? 'false-positive: Source PR closed without merge; reviewed changes did not land'
+        : 'not-reproducible: Input validation rejects the cited case' })) }), true);
+  const grades = db.prepare('SELECT finding_id,attempt,grader_kind FROM review_finding_grades').all();
+  assert.equal(grades.length, members.length);
+  for (const grade of grades) {
+    const retried = grade.finding_id === rows[1].finding_id;
+    assert.equal(grade.attempt, retried ? 2 : 1);
+    assert.equal(grade.grader_kind, retried ? 'lifecycle' : 'batch-remediator');
+  }
+});
+
 test('selected retries keep manifest provenance, advance attempt identity and never steal another owner', t => {
   const { db, rows, grade } = fixture(t);
   grade(rows[1]);

@@ -64,3 +64,27 @@ CI remediation verification: bounded targeted runs of
 `npm run lint` reports zero errors (existing warnings),
 `npm run typecheck:contracts`, `bash demo/research-finding-walkthrough.sh`
 and `git diff --check` pass. No full local suite was run.
+
+Rescue remediation (PR #1766): settlement prepares the attempt lookup once per
+transaction and uses null-safe lifecycle classification before the existing
+grade validator. A multi-finding regression verifies distinct retry attempts
+and lifecycle kinds remain correct.
+
+The catalog currency finding is confined to the generated artifact:
+`catalog.d/review-finding-grades.json` already declares the manifest migration,
+selection module, settlement sources and current compatibility contract.
+In-memory derivation of its two entries into the catalog verified every cited
+surface exists and all requested metadata is present (92 resulting entries).
+The rescue closeout explicitly prohibits committing `catalog.json` and assigns
+regeneration to main automation after merge; the compiled file remains unchanged
+in this remediation and requires that regeneration.
+
+Rescue verification (bounded by `cwp_dispatch.worker_validation`, 900 seconds):
+
+- `node test/run-tests.mjs test/findings-batch-grades.test.mjs test/findings-batch.test.mjs test/findingsrequeue-01.test.mjs test/review-finding-grades.test.mjs`: 138 passed.
+- `npm run lint`: zero errors, 152 existing warnings.
+- `npm run typecheck:contracts`: passed.
+- `bash demo/research-finding-walkthrough.sh`: three byte-stable deliveries.
+- In-memory catalog fragment derivation and surface assertions: passed.
+
+No full suite was run, following the rescue's scoped-validation instruction.

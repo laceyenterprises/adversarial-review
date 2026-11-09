@@ -96,6 +96,9 @@ console.error(child.stderr); process.exitCode = child.status;
   assert.equal(result.code, 75, result.errors);
   assert.equal(result.calls, 2);
   assert.match(result.errors, /hammer-command-error/);
+  assert.equal(result.errors.match(/line \d+: syntax error near unexpected token/g)?.length, 2,
+    'each failed attempt must retain the Bash parser diagnostic');
+  assert.match(result.errors, /print\(json\.dumps/);
   assert.doesNotMatch(result.errors, /failure reason=review-read-failed/);
   assert.deepEqual(result.reports, ['hammer-command-error']);
   const { hammerPhaseAttempt } = await import('../src/ama/hammer-phase-outcome.mjs');
@@ -119,6 +122,7 @@ console.error('synthetic-script.sh: line 1: syntax error: unexpected end of file
 `, { step: 'review-read' });
   assert.equal(result.code, 75);
   assert.equal(result.calls, 2);
+  assert.equal(result.errors.match(/synthetic-script\.sh: line 1: syntax error: unexpected end of file/g)?.length, 2);
   assert.deepEqual(result.reports, ['hammer-command-error']);
 });
 
@@ -131,6 +135,11 @@ test('missing executable and shell command-not-found yield a bounded command-err
       stdout: () => {}, stderr: text => { errors += text; } });
     assert.equal(code, 75);
     assert.match(errors, /attempt=2\/2/);
+    if (command === '/bin/bash') {
+      assert.equal(errors.match(/synthetic_missing_hammer_read: command not found/g)?.length, 2);
+    } else {
+      assert.equal(errors.match(/spawn \/nonexistent\/synthetic-hammer-read ENOENT/g)?.length, 2);
+    }
     assert.deepEqual(reports, ['hammer-command-error']);
   }
 });

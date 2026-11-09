@@ -20,6 +20,12 @@ closer outcome contract; real read failures and merge predicates are unchanged.
 The companion dispatcher change fails a `failed-without-merge` audit through the
 existing `no_work_done` failure class.
 
+Final comment-only remediation preserves actionable failure diagnostics:
+helper retries retain child stderr and now emit direct spawn errors with the
+missing executable name; controller syntax preflight emits Bash's captured
+parser output before returning 75. Retry budgets, lifecycle states, durable
+store shapes and smoke promises remain unchanged.
+
 ## Verification
 
 Scoped offline tests cover pagination and complete bodies, prompt helper usage,
@@ -33,6 +39,17 @@ The helper-step file passes 21 tests, PR-read passes 19, and controller passes
 passes with three byte-stable deliveries. The prompt remains within its
 unchanged 60 KiB rendered budget. The full suite was not run on the host,
 as required by the ticket.
+
+Final-round targeted validation adds assertions for diagnostics on both helper
+attempts (eval syntax errors, unexpected EOF, command-not-found and direct
+ENOENT), and for the controller's preflight line number and parser token.
+`node --test test/hammer-helper-step.test.mjs` passes all 21 tests.
+`node --test --test-name-pattern='controller rejects a malformed' test/hammer-controller.test.mjs`
+passes the preflight regression. Both ran offline through `bin/run-bounded.sh`
+with 60-second limits. `npm run lint` passes (zero errors, 152 existing
+warnings), `npm run typecheck:contracts` passes, the bounded offline
+`bash demo/research-finding-walkthrough.sh` passes with three byte-stable
+deliveries, and `git diff --check` passes. The full local suite was not run.
 
 ## Activation check
 

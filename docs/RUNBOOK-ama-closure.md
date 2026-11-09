@@ -503,6 +503,9 @@ syntax diagnostic), missing executables and command-not-found status 127 use
 retryable deferral. Correct the local command before another attempt.
 The controller also syntax-checks a closure script before executing it, so a
 parser error before `ham_read` is reached has the same retryable reason.
+Helper attempts retain child stderr and spawn errors (including the missing
+executable name). Controller preflight logs Bash's parser diagnostic alongside
+the retryable reason, preserving its line number and unexpected token.
 Real read refusals retain their named terminal semantics.
 Child exit statuses, including 142 and signal-derived statuses, are preserved;
 only a timeout imposed by the runner returns 124; local read command errors

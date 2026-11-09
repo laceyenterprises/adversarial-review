@@ -54,7 +54,9 @@ async function execute(command, args, { seconds, env, directory }) {
   }, seconds * 1000);
   try {
     return await new Promise(resolve => {
-      child.once('error', error => resolve({ code: error.code === 'ENOENT' ? 127 : 1, timedOut }));
+      child.once('error', error => resolve({
+        code: error.code === 'ENOENT' ? 127 : 1, timedOut, spawnError: error.message,
+      }));
       child.once('close', (code, signal) => resolve({
         code: timedOut ? 124 : (code ?? (signal ? 128 + constants.signals[signal] : 1)), timedOut,
       }));
@@ -92,7 +94,8 @@ export async function runHelperStep({ mode, step, nominal, ceiling, command, arg
       const result = await execute(command, args, { seconds, directory,
         env: { ...env, HAM_HELPER_FAILURE_FILE: reasonFile } });
       const output = readFileSync(join(directory, 'stdout'), 'utf8');
-      const errors = readFileSync(join(directory, 'stderr'), 'utf8');
+      const errors = readFileSync(join(directory, 'stderr'), 'utf8')
+        + (result.spawnError ? `${result.spawnError}\n` : '');
       stderr(errors);
       const timeout = result.timedOut || [124, 142].includes(result.code)
         || (result.code === 1 && /\b(?:ETIMEDOUT|timed out|timeout)\b/i.test(

@@ -37,6 +37,8 @@ const fakeEnvironmentClockPreload = `
 const graceReads = 8;
 const head = 'a'.repeat(40);
 test('controller rejects a malformed ham_read script as a retryable local command error before any command runs', async t => {
+  const diagnostics = [];
+  t.mock.method(console, 'error', (...args) => diagnostics.push(args.join(' ')));
   const dir = mkdtempSync(join(tmpdir(), 'hammer-command-construction-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const script = join(dir, 'close.sh');
@@ -46,6 +48,9 @@ test('controller rejects a malformed ham_read script as a retryable local comman
   const status = await runHammerController(script, [], { env,
     spawnImpl: () => { assert.fail('malformed script must never execute'); } });
   assert.equal(status, 75);
+  assert.match(diagnostics.join('\n'), /hammer-command-error/);
+  assert.match(diagnostics.join('\n'), /line 1: syntax error near unexpected token/);
+  assert.match(diagnostics.join('\n'), /print\(json\.dumps/);
   const attempt = readAmaAuditEntry(dir, env.HAM_REPO, 42, head).attempts.at(-1);
   assert.equal(attempt.reason, 'hammer-command-error');
   assert.equal(attempt.outcome, 'deferred');

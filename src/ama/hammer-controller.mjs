@@ -332,6 +332,8 @@ export async function runHammerController(script, args = [], {
     if (error.status === 2) {
       reportHammerEarlyFailure('hammer-command-error', { env });
       console.error('hammer-controller: hammer-command-error; correct the script before retrying');
+      const diagnostic = error.stderr?.toString().trim();
+      if (diagnostic) console.error(diagnostic);
       return 75;
     }
     // Missing scripts retain the existing execution/cleanup failure path.

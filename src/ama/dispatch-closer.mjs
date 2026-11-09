@@ -1,4 +1,5 @@
 import { classifyHammerExit, hammerNoMergeDetails } from './hammer-outcome.mjs';
+import { appendCloserOutcome } from './closer-outcomes.mjs';
 import { ownershipReadBudgets as closerScanBudgets, boundedOwnershipRead as boundedCloserScanRead } from '../ownership-read.mjs';
 import { HAMMER_RETRYABLE_READ_OUTCOMES } from './hammer-phase-outcome.mjs';
 import { repositoryObservationCache } from '../repository-state-cache.mjs';
@@ -2036,11 +2037,11 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
     counts.changed += 1;
     if (options.dryRun) return true;
     const preserve = AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES.has(normalizeWorkerRunStatus(current.lastObservedStatus));
-    writeFileAtomic(dispatchPath, `${JSON.stringify({
+    writeAmaCloserDispatchRecord(rootDir, current, {
       ...current, state: 'launch-terminal',
       lastObservedStatus: preserve ? current.lastObservedStatus : amaCloserStatusFromTerminalLaunchRequestStatus(terminalStatus),
       terminalLaunchStatus: terminalStatus, lastObservedAt: now, reconciledAt: now,
-    }, null, 2)}\n`);
+    });
     (options.cleanupScratchImpl || cleanupHammerScratchDir)(current, options.log || options.logger,
       { ...options, rootDir });
     logAmaCloserDispatchEvent(options.log || options.logger, 'ama_closer.launch_capacity_reconciled', {
@@ -2246,7 +2247,10 @@ export async function findActiveAmaCloserLaunches(rootDir, options = {}) {
 function writeAmaCloserDispatchRecord(rootDir, identity, doc) {
   mkdirSync(amaCloserDispatchDir(rootDir), { recursive: true });
   const filePath = amaCloserDispatchFilePath(rootDir, identity);
+  // Preserve the predecessor too: a retry can replace this head's projection.
+  appendCloserOutcome(rootDir, readAmaCloserDispatchRecord(rootDir, identity), 'launch-terminal');
   writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`);
+  appendCloserOutcome(rootDir, doc, 'launch-terminal');
   return filePath;
 }
 

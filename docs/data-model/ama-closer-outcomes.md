@@ -1,0 +1,45 @@
+# AMA closer outcome observations
+
+Owner: `src/ama/closer-outcomes.mjs`. Store:
+`data/ama-closer-outcomes/YYYY-MM-DD.jsonl`, append-only, mode 0640.
+The date is the observation's terminal timestamp in UTC.
+
+Version 1 rows contain `schemaVersion`, `kind`, `repo`, `prNumber`, `headSha`,
+`launchRequestId`, `terminalAt`, `launchStatus` and `outcome`. No prompt, error
+text, environment, labels, user identity or provider response is copied.
+
+`launch-terminal` rows come from durable dispatch receipt writes with
+`state=launch-terminal`, a `terminalLaunchStatus`, and a `reconciledAt`.
+They establish terminal launch evidence, including a failed or canceled launch
+that wrote no AMA audit. Process success does not prove a merge:
+`outcome` remains null on these rows.
+
+`lease-terminal` rows come from successful terminal lease writes with an LRQ.
+They retain the authoritative `terminalOutcome`, including `succeeded`,
+`failed-without-merge`, `deferred`, `superseded` and retryable reason codes.
+They do not establish process exit: a lease may release while a launch remains
+active. Pending leases without an LRQ, parked dispatches and provisional phase
+failures produce no rows.
+The existing launch-status classifier owns terminality. Parked or unknown
+statuses (including a missing launch's `not-found`) are excluded.
+
+Readers join the kinds by `(repo, launchRequestId)` across dates and heads,
+deduplicate repeated observations, and count only launches with terminal launch
+evidence in the requested window. Use the earliest terminal launch observation
+time; later reconciliation must not move an old launch into a new window.
+A missing lease outcome is unknown, never inferred from an exit code.
+`succeeded` is affirmative merge evidence; a later observation on another head
+cannot erase it. Gate reasons can be correlated with the existing AMA audit's
+per-launch attempts. Deferred outcomes retain their separate classification.
+
+The writer appends a small row in one O_APPEND write and flushes it. Repeated
+receipt writes may append duplicates. The predecessor is also captured before a
+same-head dispatch projection is replaced, preserving history across retries.
+Readers must tolerate a torn trailing row after an interrupted append and
+report incomplete evidence instead of assuming healthy counts.
+
+Filesystem failures produce only the fixed local diagnostic
+`ama_closer.outcome_record_unavailable`. Closure, cleanup, dispatch and paging
+decisions retain their existing behavior. There is no automatic backfill,
+migration, retention deletion, daemon restart or policy change.
+History begins after deployment; missing older history is unavailable.

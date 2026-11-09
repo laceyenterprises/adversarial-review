@@ -21,7 +21,8 @@ export function validateFindingManifest(db, manifest) {
       || typeof row.repo !== 'string' || !row.repo || !Number.isSafeInteger(row.pr_number) || row.pr_number < 1
       || !/^[a-f0-9]{40}$/i.test(row.head_sha || '')) throw Error('invalid finding manifest identity');
     const actual = lookup.get(row.finding_id);
-    if (!actual || actual.repo !== row.repo || actual.pr_number !== row.pr_number || actual.head_sha !== row.head_sha) {
+    if (!actual) throw Error('finding manifest entry missing');
+    if (actual.repo !== row.repo || actual.pr_number !== row.pr_number || actual.head_sha !== row.head_sha) {
       throw Error('finding manifest pin mismatch');
     }
     entries.set(row.finding_id, { finding_id: row.finding_id, repo: row.repo,

@@ -24,4 +24,3 @@ export function normalizeDroppedReason(reason) {
   const normalized = mapped && `${mapped}: ${legacy[2].trim()}`;
   return normalized && DROP_REASON.test(normalized) ? normalized : null;
 }
-

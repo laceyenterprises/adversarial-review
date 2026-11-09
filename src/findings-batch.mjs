@@ -284,12 +284,14 @@ export function settleFindingBatch(db, batch, result, pr = null, dropPrs = {}) {
         return false;
       }
     }
-    const selectAttempts = db.prepare('SELECT batch_attempts FROM finding_backlog WHERE finding_id=?');
+    const updateBacklog = db.prepare(`UPDATE finding_backlog SET outcome=?,reason=?,result_pr=?
+      WHERE batch_id=? AND finding_id=? RETURNING batch_attempts`);
     for (const f of findings) {
-      db.prepare(`UPDATE finding_backlog SET outcome=?,reason=?,result_pr=?
-      WHERE batch_id=? AND finding_id=?`).run(f.outcome, f.reason.trim(), f.outcome === 'applied' ? result.prNumber : null, batch.batch_id, f.findingId);
+      const updated = updateBacklog.get(f.outcome, f.reason.trim(),
+        f.outcome === 'applied' ? result.prNumber : null, batch.batch_id, f.findingId);
+      if (!updated) throw Error('batch-finding-backlog-missing');
       const taxonomyCode = backlogGradeCode(f.outcome, f.reason);
-      const attempt = selectAttempts.get(f.findingId).batch_attempts + 1;
+      const attempt = updated.batch_attempts + 1;
       recordFindingGrade(db, { sourceKey: `batch:${batch.batch_id}:${f.findingId}`, findingId: f.findingId,
         graderKind: taxonomyCode?.startsWith('life.') ? 'lifecycle' : 'batch-remediator', taxonomyCode, attempt, gradedAt: new Date().toISOString(),
         evidence: { batchId: batch.batch_id, manifestSha256: batch.manifest_sha256 ?? null,

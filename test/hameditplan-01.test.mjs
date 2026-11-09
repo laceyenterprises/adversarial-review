@@ -5,15 +5,16 @@ import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { checkHammerEditPlan } from '../src/ama/hammer-edit-plan.mjs';
 import { main, editPlanExitCode, EDIT_PLAN_USAGE } from '../bin/hammer-edit-plan.mjs';
 import { amaAllAuthoritativeReviewerLogins } from '../src/ama/reviewer-authority.mjs';
 
 const template = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
-const examples = [...EDIT_PLAN_USAGE.matchAll(/```json\n([^`]+)\n```/g)]
-  .map(match => JSON.parse(match[1])).filter(plan => plan.reviewedHead);
+const examples = [...template.matchAll(/```json\n([^`]+)\n```/g)]
+  .map(match => JSON.parse(match[1].replaceAll('<<REVIEWED_SHA>>', 'd'.repeat(40)))).filter(plan => plan.reviewedHead);
 const ci = examples.find(plan => plan.requiredCiRepair);
-const review = { commit_id: 'a'.repeat(40), state: 'CHANGES_REQUESTED',
+const review = { commit_id: 'd'.repeat(40), state: 'CHANGES_REQUESTED',
   user: { login: amaAllAuthoritativeReviewerLogins()[0] },
   body: `## Blocking issues
 - **Required correction**
@@ -29,11 +30,20 @@ const review = { commit_id: 'a'.repeat(40), state: 'CHANGES_REQUESTED',
 Request changes
 ` };
 
-test('all four helper usage shapes pass with applicable review evidence', () => {
+test('all four literal template shapes pass through the CLI with applicable review evidence', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hameditplan-examples-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const planFile = join(rootDir, 'plan.json');
   assert.equal(examples.length, 4);
   assert.equal(Object.hasOwn(ci, 'kind'), false);
   assert.equal(Object.hasOwn(ci, 'findingNumber'), false);
   for (const plan of examples) {
+    assert.equal(plan.reviewedHead, review.commit_id);
+    writeFileSync(planFile, JSON.stringify(plan));
+    assert.equal((await main(['sample/service', '7', '1', planFile, '--reviewed-head', review.commit_id], {
+      rootDir, env: {}, readReviewImpl: async () => review,
+      loadPolicy: () => ({ strictNonBlockingRemediation: true }),
+    })).action, 'allow');
     assert.equal(checkHammerEditPlan(review, plan, { strictNonBlockingRemediation: true }).action, 'allow');
   }
   const empty = { ...review, body: '## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nComment only' };
@@ -58,7 +68,7 @@ test('CI citation fields and malformed locations refuse correctably without gran
     { path: '' }, { startLine: 0 }, { endLine: undefined }]) {
     writeFileSync(planFile, JSON.stringify({ ...ci, ...fields }));
     const result = await main(['sample/service', '7', '1', planFile], {
-      rootDir, readReviewImpl: async () => review,
+      rootDir, env: { HAM_REVIEWED_SHA: review.commit_id }, readReviewImpl: async () => review,
       loadPolicy: () => ({ strictNonBlockingRemediation: true }),
       captureImpl: () => assert.fail('shape refusal must not capture a finding'),
     });
@@ -102,7 +112,7 @@ test('cited CI plans retain policy refusals and backlog capture through main', a
     writeFileSync(planFile, JSON.stringify({ ...ci, ...fields }));
     const captures = [];
     const result = await main(['sample/service', '7', '1', planFile], {
-      rootDir, readReviewImpl: async () => candidate,
+      rootDir, env: { HAM_REVIEWED_SHA: review.commit_id }, readReviewImpl: async () => candidate,
       loadPolicy: () => ({ strictNonBlockingRemediation: false }),
       assertOwner: () => {}, captureImpl: capture => captures.push(capture),
     });
@@ -150,4 +160,112 @@ test('cited plans reject the CI-only flag for every edit kind', () => {
     assert.equal(result.action, 'correct');
     assert.match(result.message, /must be in-place for uncited CI repairs/);
   }
+});
+
+test('CLI fills absent or unusable plan heads from the run pin without rewriting the plan file', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hameditplan-pin-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const planFile = join(rootDir, 'plan.json');
+  for (const reviewedHead of [undefined, null, false, 42, {}, [], '', '  ', review.commit_id]) {
+    const input = JSON.stringify({ ...ci, reviewedHead });
+    writeFileSync(planFile, input);
+    for (const explicit of [false, true]) {
+      const result = await main(['sample/service', '7', '1', planFile,
+        ...(explicit ? ['--reviewed-head', review.commit_id] : [])], {
+        rootDir, env: explicit ? {} : { HAM_REVIEWED_SHA: review.commit_id },
+        readReviewImpl: async () => review, loadPolicy: () => ({}),
+        captureImpl: () => assert.fail('an allowed CI repair must not capture findings'),
+      });
+      assert.equal(result.action, 'allow');
+      assert.equal(editPlanExitCode(result), 0);
+      assert.equal(readFileSync(planFile, 'utf8'), input);
+    }
+  }
+});
+
+test('CLI rejects conflicting or missing pins and retains review authority checks', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hameditplan-evidence-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const planFile = join(rootDir, 'plan.json');
+  for (const [pin, reviewedHead, candidate] of [
+    [review.commit_id, 'b'.repeat(40), review],
+    [review.commit_id.toUpperCase(), 'B'.repeat(40), review],
+    [review.commit_id, 'invalid', review],
+    [review.commit_id, 'd'.repeat(39), review],
+    [review.commit_id, 'd'.repeat(41), review],
+    [review.commit_id, 'G'.repeat(40), review],
+    ['D'.repeat(39), null, review],
+    ['D'.repeat(41), null, review],
+    ['G'.repeat(40), null, review],
+    [review.commit_id, ` ${review.commit_id}`, review],
+    [undefined, review.commit_id, review],
+    ['', review.commit_id, review],
+    ['invalid', review.commit_id, review],
+    [review.commit_id, null, { ...review, commit_id: 'b'.repeat(40) }],
+    [review.commit_id, null, { ...review, user: { login: 'synthetic-author' } }],
+    [review.commit_id, null, { ...review, state: 'PENDING' }],
+    // A plan matching the fetched review still cannot overrule the run pin.
+    ['b'.repeat(40), review.commit_id, review],
+  ]) {
+    writeFileSync(planFile, JSON.stringify({ ...ci, reviewedHead }));
+    const result = await main(['sample/service', '7', '1', planFile], {
+      rootDir, env: { HAM_REVIEWED_SHA: pin }, readReviewImpl: async () => candidate,
+      loadPolicy: () => ({}), captureImpl: () => assert.fail('invalid evidence must not capture'),
+    });
+    assert.deepEqual(result, { action: 'stop', reason: 'review-evidence-invalid' });
+    assert.equal(editPlanExitCode(result), 1);
+  }
+});
+
+test('CLI accepts equivalent hash casing from either pin source without rewriting the plan', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hameditplan-case-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const planFile = join(rootDir, 'plan.json');
+  for (const pin of [review.commit_id, review.commit_id.toUpperCase()]) {
+    for (const reviewedHead of [undefined, review.commit_id, review.commit_id.toUpperCase()]) {
+      const input = JSON.stringify({ ...ci, reviewedHead });
+      writeFileSync(planFile, input);
+      for (const explicit of [false, true]) {
+        const result = await main(['sample/service', '7', '1', planFile,
+          ...(explicit ? ['--reviewed-head', pin] : [])], {
+          rootDir, env: explicit ? {} : { HAM_REVIEWED_SHA: pin },
+          readReviewImpl: async () => review, loadPolicy: () => ({}),
+          captureImpl: () => assert.fail('an allowed CI repair must not capture findings'),
+        });
+        assert.equal(result.action, 'allow');
+        assert.equal(readFileSync(planFile, 'utf8'), input);
+      }
+    }
+  }
+});
+
+test('help exits successfully and prints plan shapes without reading review, policy or plan', async () => {
+  const forbidden = () => assert.fail('help must have no plan-check side effects');
+  for (const flag of ['--help', '-h']) {
+    const result = await main([flag], {
+      readReviewImpl: forbidden, loadPolicy: forbidden, captureImpl: forbidden, assertOwner: forbidden,
+      env: {},
+    });
+    assert.equal(result.action, 'help');
+    assert.equal(editPlanExitCode(result), 0);
+    const child = spawnSync(process.execPath, [fileURLToPath(new URL('../bin/hammer-edit-plan.mjs', import.meta.url)), flag], {
+      encoding: 'utf8', timeout: 10_000,
+    });
+    assert.equal(child.status, 0, child.stderr);
+    assert.equal(child.stderr, '');
+    assert.match(child.stdout, /usage: hammer-edit-plan\.mjs/);
+    for (const shape of ['Blocking reversal:', 'Uncited CI repair:', 'Additive fix:', 'Strict non-blocking fix:']) {
+      assert.ok(child.stdout.includes(shape));
+    }
+    const shapes = [...child.stdout.matchAll(/^\{.+\}$/gm)].map(match => JSON.parse(match[0]));
+    assert.equal(shapes.length, 4);
+    const additiveExample = { ...examples.find(plan => plan.editKind === 'additive') };
+    delete additiveExample.reviewedHead;
+    assert.deepEqual(shapes.find(plan => plan.editKind === 'additive'), additiveExample);
+    for (const plan of shapes) {
+      assert.equal(checkHammerEditPlan(review, { ...plan, reviewedHead: review.commit_id },
+        { strictNonBlockingRemediation: true }).action, 'allow');
+    }
+  }
+  await assert.rejects(main([]), /usage:/);
 });

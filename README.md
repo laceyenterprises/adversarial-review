@@ -2832,7 +2832,10 @@ host mode. Node dependencies and local Git must already be installed.
 The hammer edit-plan helper permits one shape correction per run (exit 21,
 never a conflict) before any edit; a second shape refusal exits 1. Cited plans
 retain their citations during correction; policy refusals retain their existing
-outcomes. After the submodule float and follow-up/watcher restart, SRE verifies the CI-repair closer activation
+outcomes. The CLI takes the controller-pinned head via `--reviewed-head SHA`
+(or `HAM_REVIEWED_SHA`), fills omitted, non-string or empty plan heads, and rejects
+conflicting heads. `--help` and `-h` print accepted shapes and exit 0 without
+checking a plan. After the submodule float and follow-up/watcher restart, SRE verifies the CI-repair closer activation
 receipt declared in `post-merge-verify.json` and the
 [closure runbook](docs/RUNBOOK-ama-closure.md). Existing smoke commands are unchanged.
 

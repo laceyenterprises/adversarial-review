@@ -95,3 +95,7 @@ warnings), contract typecheck, and the offline byte-equivalence walkthrough
 passed. A direct `node --test` invocation observed an unrelated host CPU-sample
 warning in a console assertion; the repository runner's deterministic timeout
 fixture avoids that host dependency.
+The required full `npm test` run exited 1 at its 900-second timeout, reporting
+failures in untouched suites (including hammer self-rebase and review pipeline
+health) and unfinished tests. Outcome fixtures passed in that run. Full-suite
+greenness is not claimed; the scoped offline result is 16 passed, 0 failed.

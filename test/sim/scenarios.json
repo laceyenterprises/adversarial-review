@@ -1,0 +1,616 @@
+{
+  "schemaVersion": 1,
+  "specRef": "merge-lane-rebuild@a0b63d32143a",
+  "sourceSha256": "c36dfada9ea3292b8016b31be3570c00e04042d3a261a959b7335610c853bc03",
+  "requirementIds": [
+    "R-01",
+    "R-02",
+    "R-03",
+    "R-04",
+    "R-05",
+    "R-06",
+    "R-07",
+    "R-08",
+    "R-09",
+    "R-10",
+    "R-11",
+    "R-12",
+    "R-13",
+    "R-14",
+    "R-15",
+    "R-16",
+    "R-17",
+    "R-18",
+    "R-19",
+    "R-20",
+    "R-21",
+    "R-22",
+    "R-23",
+    "R-24",
+    "R-25",
+    "R-26",
+    "R-27",
+    "R-28",
+    "R-29",
+    "R-30",
+    "R-31",
+    "R-32",
+    "R-33",
+    "R-34",
+    "R-35",
+    "R-36",
+    "R-37",
+    "R-38",
+    "R-39",
+    "R-40",
+    "R-41",
+    "R-42",
+    "R-43",
+    "R-44",
+    "R-45",
+    "R-46",
+    "R-47",
+    "R-48",
+    "R-49",
+    "R-50",
+    "R-51",
+    "R-52",
+    "R-53",
+    "R-54",
+    "R-55",
+    "R-56",
+    "R-57",
+    "R-58",
+    "R-59",
+    "R-60",
+    "R-61"
+  ],
+  "scenarios": [
+    {
+      "id": "S-01-findings",
+      "requirements": [
+        "R-01"
+      ],
+      "profile": "findings"
+    },
+    {
+      "id": "S-02-exhaustion",
+      "requirements": [
+        "R-02"
+      ],
+      "profile": "exhaustion"
+    },
+    {
+      "id": "S-03-snapshot-failure",
+      "requirements": [
+        "R-03"
+      ],
+      "profile": "snapshot-failure"
+    },
+    {
+      "id": "S-04-red-checks",
+      "requirements": [
+        "R-04"
+      ],
+      "profile": "red-checks"
+    },
+    {
+      "id": "S-05-racing-owners",
+      "requirements": [
+        "R-05"
+      ],
+      "profile": "racing-owners"
+    },
+    {
+      "id": "S-06-head-move",
+      "requirements": [
+        "R-06"
+      ],
+      "profile": "head-move"
+    },
+    {
+      "id": "S-07-exhausted-head-move",
+      "requirements": [
+        "R-07"
+      ],
+      "profile": "exhausted-head-move"
+    },
+    {
+      "id": "S-08-stale-review",
+      "requirements": [
+        "R-08"
+      ],
+      "profile": "stale-review"
+    },
+    {
+      "id": "S-08-decision-head-race",
+      "requirements": [
+        "R-08"
+      ],
+      "profile": "decision-head-race"
+    },
+    {
+      "id": "S-09-crash",
+      "requirements": [
+        "R-09"
+      ],
+      "profile": "crash"
+    },
+    {
+      "id": "S-10-auth-failure",
+      "requirements": [
+        "R-10"
+      ],
+      "profile": "auth-failure"
+    },
+    {
+      "id": "S-11-self-cancel",
+      "requirements": [
+        "R-11"
+      ],
+      "profile": "self-cancel"
+    },
+    {
+      "id": "S-12-exhaustion",
+      "requirements": [
+        "R-12"
+      ],
+      "profile": "exhaustion"
+    },
+    {
+      "id": "S-13-float-lag",
+      "requirements": [
+        "R-13"
+      ],
+      "profile": "float-lag"
+    },
+    {
+      "id": "S-14-red-checks",
+      "requirements": [
+        "R-14"
+      ],
+      "profile": "red-checks"
+    },
+    {
+      "id": "S-15-base-move",
+      "requirements": [
+        "R-15"
+      ],
+      "profile": "base-move"
+    },
+    {
+      "id": "S-16-stale-review",
+      "requirements": [
+        "R-16"
+      ],
+      "profile": "stale-review"
+    },
+    {
+      "id": "S-17-full-pool",
+      "requirements": [
+        "R-17"
+      ],
+      "profile": "full-pool"
+    },
+    {
+      "id": "S-18-snapshot-failure",
+      "requirements": [
+        "R-18"
+      ],
+      "profile": "snapshot-failure"
+    },
+    {
+      "id": "S-19-snapshot-failure",
+      "requirements": [
+        "R-19"
+      ],
+      "profile": "snapshot-failure"
+    },
+    {
+      "id": "S-20-findings",
+      "requirements": [
+        "R-20"
+      ],
+      "profile": "findings"
+    },
+    {
+      "id": "S-21-snapshot-failure",
+      "requirements": [
+        "R-21"
+      ],
+      "profile": "snapshot-failure"
+    },
+    {
+      "id": "S-22-already-merged",
+      "requirements": [
+        "R-22"
+      ],
+      "profile": "already-merged"
+    },
+    {
+      "id": "S-23-slow-start",
+      "requirements": [
+        "R-23"
+      ],
+      "profile": "slow-start"
+    },
+    {
+      "id": "S-24-primary-gap",
+      "requirements": [
+        "R-24"
+      ],
+      "profile": "primary-gap"
+    },
+    {
+      "id": "S-25-auth-failure",
+      "requirements": [
+        "R-25"
+      ],
+      "profile": "auth-failure"
+    },
+    {
+      "id": "S-26-activation-gap",
+      "requirements": [
+        "R-26"
+      ],
+      "profile": "activation-gap"
+    },
+    {
+      "id": "S-27-float-lag",
+      "requirements": [
+        "R-27"
+      ],
+      "profile": "float-lag"
+    },
+    {
+      "id": "S-28-kill-switch",
+      "requirements": [
+        "R-28"
+      ],
+      "profile": "kill-switch"
+    },
+    {
+      "id": "S-29-head-move",
+      "requirements": [
+        "R-29"
+      ],
+      "profile": "head-move"
+    },
+    {
+      "id": "S-30-dirty-terminal",
+      "requirements": [
+        "R-30"
+      ],
+      "profile": "dirty-terminal"
+    },
+    {
+      "id": "S-31-racing-owners",
+      "requirements": [
+        "R-31"
+      ],
+      "profile": "racing-owners"
+    },
+    {
+      "id": "S-32-budget-kill",
+      "requirements": [
+        "R-32"
+      ],
+      "profile": "budget-kill"
+    },
+    {
+      "id": "S-33-crash",
+      "requirements": [
+        "R-33"
+      ],
+      "profile": "crash"
+    },
+    {
+      "id": "S-34-dirty-terminal",
+      "requirements": [
+        "R-34"
+      ],
+      "profile": "dirty-terminal"
+    },
+    {
+      "id": "S-35-slow-start",
+      "requirements": [
+        "R-35"
+      ],
+      "profile": "slow-start"
+    },
+    {
+      "id": "S-36-snapshot-failure",
+      "requirements": [
+        "R-36"
+      ],
+      "profile": "snapshot-failure"
+    },
+    {
+      "id": "S-36-ledger-failure",
+      "requirements": [
+        "R-36"
+      ],
+      "profile": "ledger-failure"
+    },
+    {
+      "id": "S-36-unknown-mergeability",
+      "requirements": [
+        "R-36"
+      ],
+      "profile": "unknown-mergeability"
+    },
+    {
+      "id": "S-37-rearm",
+      "requirements": [
+        "R-37"
+      ],
+      "profile": "rearm"
+    },
+    {
+      "id": "S-38-exhausted-head-move",
+      "requirements": [
+        "R-38"
+      ],
+      "profile": "exhausted-head-move"
+    },
+    {
+      "id": "S-39-comment-final",
+      "requirements": [
+        "R-39"
+      ],
+      "profile": "comment-final"
+    },
+    {
+      "id": "S-40-dirty-conflict",
+      "requirements": [
+        "R-40"
+      ],
+      "profile": "dirty-conflict"
+    },
+    {
+      "id": "S-40-conflict",
+      "requirements": [
+        "R-40"
+      ],
+      "profile": "conflict"
+    },
+    {
+      "id": "S-41-budget-kill",
+      "requirements": [
+        "R-41"
+      ],
+      "profile": "budget-kill"
+    },
+    {
+      "id": "S-42-merge-failure",
+      "requirements": [
+        "R-42"
+      ],
+      "profile": "merge-failure"
+    },
+    {
+      "id": "S-43-primary-gap",
+      "requirements": [
+        "R-43"
+      ],
+      "profile": "primary-gap"
+    },
+    {
+      "id": "S-44-base-move",
+      "requirements": [
+        "R-44"
+      ],
+      "profile": "base-move"
+    },
+    {
+      "id": "S-45-exhausted-head-move",
+      "requirements": [
+        "R-45"
+      ],
+      "profile": "exhausted-head-move"
+    },
+    {
+      "id": "S-46-hcp-bounce",
+      "requirements": [
+        "R-46"
+      ],
+      "profile": "hcp-bounce"
+    },
+    {
+      "id": "S-47-activation-gap",
+      "requirements": [
+        "R-47"
+      ],
+      "profile": "activation-gap"
+    },
+    {
+      "id": "S-48-dirty-terminal",
+      "requirements": [
+        "R-48"
+      ],
+      "profile": "dirty-terminal"
+    },
+    {
+      "id": "S-49-clone-reserve",
+      "requirements": [
+        "R-49"
+      ],
+      "profile": "clone-reserve"
+    },
+    {
+      "id": "S-49-boot-stagger",
+      "requirements": [
+        "R-49"
+      ],
+      "profile": "boot-stagger"
+    },
+    {
+      "id": "S-49-self-cancel",
+      "requirements": [
+        "R-49"
+      ],
+      "profile": "self-cancel"
+    },
+    {
+      "id": "S-50-racing-owners",
+      "requirements": [
+        "R-50"
+      ],
+      "profile": "racing-owners"
+    },
+    {
+      "id": "S-51-unobserved-waiver",
+      "requirements": [
+        "R-51"
+      ],
+      "profile": "unobserved-waiver"
+    },
+    {
+      "id": "S-51-operator-hold",
+      "requirements": [
+        "R-51"
+      ],
+      "profile": "operator-hold"
+    },
+    {
+      "id": "S-52-full-pool",
+      "requirements": [
+        "R-52"
+      ],
+      "profile": "full-pool"
+    },
+    {
+      "id": "S-53-merge-crash",
+      "requirements": [
+        "R-53"
+      ],
+      "profile": "merge-crash"
+    },
+    {
+      "id": "S-54-ledger-failure",
+      "requirements": [
+        "R-54"
+      ],
+      "profile": "ledger-failure"
+    },
+    {
+      "id": "S-55-dirty-terminal",
+      "requirements": [
+        "R-55"
+      ],
+      "profile": "dirty-terminal"
+    },
+    {
+      "id": "S-56-float-lag",
+      "requirements": [
+        "R-56"
+      ],
+      "profile": "float-lag"
+    },
+    {
+      "id": "S-57-full-pool",
+      "requirements": [
+        "R-57"
+      ],
+      "profile": "full-pool"
+    },
+    {
+      "id": "S-58-slow-snapshot",
+      "requirements": [
+        "R-58"
+      ],
+      "profile": "slow-snapshot"
+    },
+    {
+      "id": "S-59-already-merged",
+      "requirements": [
+        "R-59"
+      ],
+      "profile": "already-merged"
+    },
+    {
+      "id": "S-60-unknown-mergeability",
+      "requirements": [
+        "R-60"
+      ],
+      "profile": "unknown-mergeability"
+    },
+    {
+      "id": "S-61-merge-crash",
+      "requirements": [
+        "R-61"
+      ],
+      "profile": "merge-crash"
+    },
+    {
+      "id": "S-61-rollback",
+      "requirements": [
+        "R-61"
+      ],
+      "profile": "rollback"
+    },
+    {
+      "id": "SEV0-2026-11-02-agent-os-PR-10034",
+      "requirements": [
+        "R-36"
+      ],
+      "profile": "snapshot-failure"
+    },
+    {
+      "id": "SEV0-2026-11-02-agent-os-PR-10042",
+      "requirements": [
+        "R-35"
+      ],
+      "profile": "slow-start"
+    },
+    {
+      "id": "SEV0-2026-11-02-agent-os-PR-10027",
+      "requirements": [
+        "R-36"
+      ],
+      "profile": "snapshot-failure"
+    },
+    {
+      "id": "SEV0-2026-11-02-agent-os-PR-10023",
+      "requirements": [
+        "R-41"
+      ],
+      "profile": "budget-kill"
+    },
+    {
+      "id": "SEV0-2026-11-02-agent-os-PR-10031",
+      "requirements": [
+        "R-42"
+      ],
+      "profile": "merge-failure"
+    },
+    {
+      "id": "SEV0-2026-11-02-agent-os-PR-10044",
+      "requirements": [
+        "R-53"
+      ],
+      "profile": "merge-crash"
+    },
+    {
+      "id": "SEV0-2026-11-02-adversarial-review-PR-1660",
+      "requirements": [
+        "R-35"
+      ],
+      "profile": "slow-start"
+    },
+    {
+      "id": "SEV0-2026-11-02-adversarial-review-PR-1662",
+      "requirements": [
+        "R-47"
+      ],
+      "profile": "activation-gap"
+    },
+    {
+      "id": "SEV0-2026-11-02-adversarial-review-PR-1667",
+      "requirements": [
+        "R-38"
+      ],
+      "profile": "exhausted-head-move"
+    }
+  ]
+}

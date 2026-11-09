@@ -2,6 +2,9 @@ import './helpers/registry-session-fixture.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { buildTaggedTitle, builderClassFromTitle, hasCanonicalTaggedTitle } from '../src/adapters/subject/github-pr/title-tagging.mjs';
 import { routePR, routeSubject, reviewerRefusesBuilder, normalizeBuilderClass, normalizeReviewerModel, applyGeminiReviewerRoute } from '../src/adapters/subject/github-pr/routing.mjs';
 import { pickRemediationWorkerClass } from '../src/remediation-worker-routing.mjs';
@@ -20,6 +23,12 @@ test('Grok title tagging and closer wrappers retain original builder provenance'
   for (const prefix of ['', '[closer] ', '[hammer] ', '[hammer-corp] ', '[hammer-claude] ', '[hammer-claude-corp] ', '[hammer-grok] ']) {
     assert.equal(builderClassFromTitle(`${prefix}[GrOk] Synthetic change`), 'grok');
     assert.equal(builderClassFromTitle(`${prefix}[codex] Synthetic change`), 'codex');
+    const routed = routePR(`${prefix}[GrOk] Synthetic change`, null,
+      { env, loaderImpl, geminiReviewerMode: 'off' });
+    assert.equal(routed.builderClass, 'grok');
+    assert.equal(routed.reviewerModel, 'codex');
+    assert.equal(pickRemediationWorkerClass({ builderTag: routed.builderClass },
+      { env, loaderImpl }), 'remediator-codex');
   }
   for (const title of ['[grok]', '[grok] [codex] change', '[hammer-grok] change', '[unknown] change', '[hammer] [hammer-grok] [grok] change']) {
     assert.equal(hasCanonicalTaggedTitle(title), false, title);
@@ -42,13 +51,15 @@ test('Grok aliases route to Codex while existing alternative builder routes rema
   assert.equal(violatesWriterDiversity('unknown', 'codex'), true);
 });
 
-test('Grok acting aliases are refused before reviewer runtime or account selection', async () => {
+test('Grok acting aliases are refused before reviewer runtime or account selection', async t => {
+  const rootDir = await mkdtemp(join(tmpdir(), 'grok-routing-'));
+  t.after(() => rm(rootDir, { recursive: true, force: true }));
   for (const actor of aliases) {
     assert.equal(normalizeReviewerModel(actor), 'grok');
     for (const builderTag of [...aliases, 'codex', 'unknown']) {
       assert.equal(reviewerRefusesBuilder(builderTag, actor), true);
       assert.equal(violatesWriterDiversity(builderTag, actor), true);
-      const result = await spawnReviewer({ builderTag, reviewerModel: actor,
+      const result = await spawnReviewer({ rootDir, builderTag, reviewerModel: actor,
         ensureWorkerRegistryReadyImpl: () => assert.fail('refused actor reached registry'),
         readReviewerQuotaDecisionImpl: () => assert.fail('refused actor reached quota'),
         reviewerRuntimeAdapterOverride: { spawn: () => assert.fail('refused actor reached runtime') } });
@@ -56,7 +67,7 @@ test('Grok acting aliases are refused before reviewer runtime or account selecti
       assert.equal(result.ok, false);
     }
   }
-  const result = await spawnReviewer({ builderTag: 'unknown', reviewerModel: 'codex' });
+  const result = await spawnReviewer({ rootDir, builderTag: 'unknown', reviewerModel: 'codex' });
   assert.equal(result.routingRefusal, true);
   const repaired = applyGeminiReviewerRoute({ builderClass: 'grok', mode: 'off', baseRoute: { reviewerModel: 'grok-api' } });
   assert.equal(repaired.reviewerModel, 'codex');

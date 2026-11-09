@@ -21,6 +21,7 @@ export function seedCloserIntent(rootDir, identity, { rekeyedHead, scenario = 'a
     fromHeadSha: identity.headSha, toHeadSha: rekeyedHead, now: intentEarly }).rekeyed, true);
   const currentIdentity = { ...identity, headSha: rekeyedHead || identity.headSha };
   const receipt = { launch_request_id: 'lrq_synthetic_closer', idempotency_key: key,
+    worker_class: 'hammer',
     ticket_ref: `AMA-PR-${identity.prNumber}`, target_repo: identity.repo,
     head_sha: identity.headSha, requested_at: intentStarted, status: 'running' };
   let reads = 0;

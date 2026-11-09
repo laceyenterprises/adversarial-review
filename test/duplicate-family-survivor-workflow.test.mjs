@@ -1,6 +1,9 @@
+import './helpers/rate-limit-state-isolation.mjs';
+import './helpers/virtual-rate-limit-clock.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
+import { rateLimitClock } from '../src/rate-limit-throttle.mjs';
 
 import { evaluateDuplicateFamilyCandidate } from '../src/duplicate-family-gate.mjs';
 import {
@@ -481,6 +484,7 @@ test('workflow retries transient survivor head and report verification failures'
   db.close = () => {};
   let viewAttempts = 0;
   let reportAttempts = 0;
+  const retryDelays = [];
   const code = await duplicateFamilyWorkflowMain([
     'select', FAMILY,
     '--survivor', '101',
@@ -493,7 +497,7 @@ test('workflow retries transient survivor head and report verification failures'
     openReviewStateDbImpl: () => db,
     stdout: { write() {} },
     stderr: { write() {} },
-    sleepImpl: async () => {},
+    sleepImpl: async ms => { retryDelays.push(ms); },
     execFileImpl: async (command, args) => {
       if (args[0] === 'pr' && args[1] === 'view') {
         viewAttempts += 1;
@@ -522,6 +526,9 @@ test('workflow retries transient survivor head and report verification failures'
   assert.equal(code, 0);
   assert.equal(viewAttempts, 3);
   assert.equal(reportAttempts, 2);
+  assert.deepEqual(retryDelays, [250, 500, 250]);
+  assert.deepEqual(rateLimitClock.sleep.mock.calls.map(call => call.arguments), [[60_000]],
+    'the nested rate-limit reset still expires before the report retry');
   assert.equal(familyFor(db, 101).status, 'survivor-selected');
   close();
 });

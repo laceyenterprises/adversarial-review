@@ -1,0 +1,12 @@
+operator_steps:
+  - description: >-
+      After the normal submodule float and follow-up/watcher restart, verify no
+      closer stops with edit-kind-invalid on a CI test-repair plan, and PR
+      #1778's next closer completes or stops for a policy reason. Retain the
+      closer outcome and activation receipt. Follow the existing closure runbook;
+      this plan authorizes no worker live action.
+    run_as: SRE operator
+    command: >-
+      Follow docs/RUNBOOK-ama-closure.md for deployment and inspect the next closer
+      outcomes against post-merge-verify.json hammerEditPlanCorrection.
+actions: []

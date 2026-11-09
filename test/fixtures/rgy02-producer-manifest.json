@@ -1,0 +1,53 @@
+{
+  "counts": {
+    "blocking": 2,
+    "findings": 2,
+    "graded": 0,
+    "graded_share": 0.0,
+    "heads": 2,
+    "non_blocking": 0,
+    "prs": 2,
+    "ungraded": 2
+  },
+  "created_at": "2026-11-09T03:01:39.143310+00:00",
+  "estimate": {
+    "basis": "planning assumption",
+    "grader": "codex-corp",
+    "sample_percent": 100,
+    "usd": 0.06,
+    "usd_per_finding": 0.03
+  },
+  "filters": {
+    "blocking": "any",
+    "reviewsDbPath": "/private/tmp/rgy02-fixture.Snmi1W/data/reviews.db"
+  },
+  "findings": [
+    {
+      "finding_id": "1:1:625cdc7c5df0a4a74ec26e8ff2a74b79edec412cb6dec4b24747d844042ed8f8",
+      "head_sha": "7777777777777777777777777777777777777777",
+      "pr_number": 7,
+      "repo": "sample/service"
+    },
+    {
+      "finding_id": "2:1:625cdc7c5df0a4a74ec26e8ff2a74b79edec412cb6dec4b24747d844042ed8f8",
+      "head_sha": "8888888888888888888888888888888888888888",
+      "pr_number": 8,
+      "repo": "sample/service"
+    }
+  ],
+  "heads": [
+    {
+      "head_sha": "7777777777777777777777777777777777777777",
+      "pr_number": 7,
+      "repo": "sample/service"
+    },
+    {
+      "head_sha": "8888888888888888888888888888888888888888",
+      "pr_number": 8,
+      "repo": "sample/service"
+    }
+  ],
+  "name": "rgy02-producer-contract",
+  "sha256": "68dfdb43a2807f3792b15acff4120b1bb993198b4e426683ffbdb246de05c3ec",
+  "version": 1
+}

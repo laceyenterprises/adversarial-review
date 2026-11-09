@@ -17,6 +17,8 @@ import { amaCloserDispatchFilePath, readAmaCloserDispatchRecord, updateAmaCloser
 import { readHammerRetryCapLedger, recordHammerRetryDispatch, hammerRetryCapFilePath } from '../src/ama/hammer-retry-cap.mjs';
 import { main as settleLegacyIntent } from '../bin/settle-legacy-closer-intent.mjs';
 import { readLaunchRequestByIdempotencyKeyAsync, readLaunchRequestsForTicketSinceAsync } from '../src/session-ledger-read-adapter.mjs';
+import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
+import { reconcileAndAbandonAmaCloserLease } from '../src/ama/abandoned-closer-lease.mjs';
 
 const identity = { repo: 'fixture/repo', prNumber: 8, headSha: 'a'.repeat(40) };
 const started = '2026-10-22T10:18:18Z';
@@ -24,13 +26,14 @@ const now = '2026-10-22T14:00:00Z';
 const key = 'ama-closer-fixture';
 const dead = () => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }); };
 const receipt = { launch_request_id: 'lrq_fixture', idempotency_key: key,
+  worker_class: 'hammer',
   ticket_ref: 'AMA-PR-8', target_repo: 'repo', status: 'running', requested_at: started };
 function fixture(t, patch = {}, lease = true) {
   const rootDir = mkdtempSync(join(tmpdir(), 'intent-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const ledgerDbPath = join(rootDir, 'ledger.sqlite');
   const db = new Database(ledgerDbPath);
-  db.exec('CREATE TABLE launch_requests (launch_request_id TEXT, idempotency_key TEXT, ticket_ref TEXT, target_repo TEXT, status TEXT, requested_at TEXT)');
+  db.exec("CREATE TABLE launch_requests (launch_request_id TEXT, idempotency_key TEXT, ticket_ref TEXT, target_repo TEXT, status TEXT, requested_at TEXT, worker_class TEXT DEFAULT 'hammer')");
   db.close();
   const record = { schemaVersion: 1, ...identity, reviewedSha: identity.headSha,
     targetRemediationSha: identity.headSha, state: 'dispatching', workerClass: 'hammer',
@@ -52,7 +55,7 @@ function fixture(t, patch = {}, lease = true) {
     read: () => readAmaCloserDispatchRecord(rootDir, identity),
     reconcile: extra => reconcilePreReceiptIntent(rootDir, identity, { ...options, ...extra }),
     insert: row => { const db = new Database(ledgerDbPath); try {
-      db.prepare('INSERT INTO launch_requests VALUES (@launch_request_id,@idempotency_key,@ticket_ref,@target_repo,@status,@requested_at)').run(row);
+      db.prepare('INSERT INTO launch_requests VALUES (@launch_request_id,@idempotency_key,@ticket_ref,@target_repo,@status,@requested_at,@worker_class)').run(row);
     } finally { db.close(); } },
   };
 }
@@ -74,7 +77,7 @@ for (const phase of ['prepared', 'submitting', 'accepted']) {
       acquireAmaCloserLease({rootDir: root, ...identity, now: ${JSON.stringify(started)}, watcherPid: process.pid});
       updateAmaCloserDispatchRecord(root, identity, current => ({...current, dispatchPhase: ${JSON.stringify(phase === 'prepared' ? 'prepared' : 'submitting')}}), { intentLock });
       ${phase === 'accepted' ? `const db = new Database(${JSON.stringify(f.options.ledgerDbPath)});
-      db.prepare('INSERT INTO launch_requests VALUES (?, ?, ?, ?, ?, ?)').run(...${JSON.stringify(Object.values(receipt))}); db.close();` : ''}
+      db.prepare('INSERT INTO launch_requests VALUES (?, ?, ?, ?, ?, ?, ?)').run(...${JSON.stringify(['launch_request_id', 'idempotency_key', 'ticket_ref', 'target_repo', 'status', 'requested_at', 'worker_class'].map(k => receipt[k]))}); db.close();` : ''}
       process.kill(process.pid, 'SIGKILL');
     `], { timeout: 10_000, encoding: 'utf8' });
     assert.equal(result.signal, 'SIGKILL', result.stderr);
@@ -403,6 +406,145 @@ function operatorArgs(f, extra = []) {
   return ['--root-dir', f.rootDir, '--hq-root', join(f.rootDir, 'hq'),
     '--repo', identity.repo,
     '--pr', String(identity.prNumber), '--head', identity.headSha, ...extra];
+}
+
+function terminalReceiptOptions(f, row, retryChain = []) {
+  return { ...f.options,
+    readIntentReceiptImpl: async () => ({ ok: true, rows: [row] }),
+    readLaunchRequestStatusImpl: async args => {
+      assert.equal(args.includeRetryChain, true);
+      return { ok: true, row, retryChain };
+    },
+    readMergedSignalImpl: async () => ({ ok: false }),
+    readCloserPullRequestStateImpl: async () => ({ state: 'OPEN', headRefOid: identity.headSha }),
+    cleanupScratchImpl: () => {},
+  };
+}
+
+for (const ticket_ref of [null, '']) for (const status of ['running', 'failed', 'succeeded']) {
+  test(`PRERECEIPTADOPT-01: unique own-key ${status} receipt with ticket ${JSON.stringify(ticket_ref)}`, async t => {
+    const f = fixture(t);
+    const row = { ...receipt, ticket_ref, status };
+    const result = await f.reconcile(terminalReceiptOptions(f, row));
+    assert.equal(result.status, 'receipt-recovered');
+    assert.equal(f.read().launchRequestId, row.launch_request_id);
+    const lease = readAmaCloserLease(f.rootDir, identity);
+    assert.equal(lease.lrqId, row.launch_request_id);
+    assert.equal(lease.status, status === 'running' ? 'dispatched' : 'terminal');
+    if (status !== 'running') assert.equal(lease.terminalOutcome, 'failed-without-merge',
+      'a successful process exit does not prove a merged PR');
+    assert.equal(readHammerRetryCapLedger(f.rootDir, identity).lifetimeAttemptCount, 1);
+  });
+}
+
+for (const patch of [
+  { ticket_ref: 'FOREIGN-8' }, { identity_ambiguous: true }, { worker_class: 'conflict-resolver' },
+  { worker_class: null }, { idempotency_key: 'other-intent' }, { target_repo: 'other/repo' },
+  { head_sha: 'b'.repeat(40) },
+]) test(`PRERECEIPTADOPT-01: empty-ticket adoption refuses ${JSON.stringify(patch)}`, async t => {
+  const f = fixture(t);
+  const before = readAmaCloserLease(f.rootDir, identity);
+  const result = await f.reconcile({ readIntentReceiptImpl: async () => ({
+    ok: true, rows: [{ ...receipt, ticket_ref: null, ...patch }],
+  }) });
+  assert.equal(result.status, 'unknown');
+  assert.equal(result.record.preReceiptReconciliation.reason, 'receipt-identity-ambiguous');
+  assert.deepEqual(readAmaCloserLease(f.rootDir, identity), before);
+});
+
+test('PRERECEIPTADOPT-01: two own-key empty-ticket receipts remain ambiguous', async t => {
+  const f = fixture(t);
+  const result = await f.reconcile({ readIntentReceiptImpl: async () => ({ ok: true,
+    rows: [receipt, { ...receipt, ticket_ref: null, launch_request_id: 'lrq_other' }] }) });
+  assert.equal(result.status, 'unknown');
+  assert.equal(result.evidence.rowCount, 2);
+  assert.equal(readAmaCloserLease(f.rootDir, identity).status, 'pending');
+});
+
+test('PRERECEIPTADOPT-01: watcher pass settles dead pending ownership and admits one successor', async t => {
+  const f = fixture(t);
+  const row = { ...receipt, ticket_ref: null, status: 'succeeded' };
+  const settled = await reconcileAndAbandonAmaCloserLease(f.rootDir,
+    readAmaCloserLease(f.rootDir, identity), {
+      ...terminalReceiptOptions(f, row), reconcileDispatched: () => assert.fail('already settled'),
+    });
+  assert.equal(settled.status, 'terminal');
+  assert.equal(settled.terminalOutcome, 'failed-without-merge');
+  assert.equal(deleteAmaCloserLeaseIfCurrent(f.rootDir, settled), true);
+  assert.equal(acquireAmaCloserLease({ rootDir: f.rootDir, ...identity,
+    watcherPid: 54321, now }).acquired, true);
+  assert.equal(acquireAmaCloserLease({ rootDir: f.rootDir, ...identity,
+    watcherPid: 54321, now }).acquired, false);
+});
+
+test('PRERECEIPTADOPT-01: terminal ancestor cannot release a live retry lease', async t => {
+  const f = fixture(t);
+  const row = { ...receipt, ticket_ref: null, status: 'succeeded' };
+  await f.reconcile(terminalReceiptOptions(f, row,
+    [{ ...row, launch_request_id: 'lrq_retry', status: 'running' }]));
+  assert.equal(readAmaCloserLease(f.rootDir, identity).status, 'dispatched');
+});
+
+test('PRERECEIPTADOPT-01: operator previews and audits terminal empty-ticket receipt recovery', async t => {
+  const f = fixture(t);
+  const row = { ...receipt, ticket_ref: null, status: 'succeeded' };
+  const options = { ...terminalReceiptOptions(f, row), print() {} };
+  const lease = readAmaCloserLease(f.rootDir, identity);
+  const preview = await settleLegacyIntent(operatorArgs(f), options);
+  assert.equal(preview.conclusive, true);
+  assert.deepEqual(readAmaCloserLease(f.rootDir, identity), lease);
+  assert.equal(f.read().state, 'dispatching');
+  const result = await settleLegacyIntent(operatorArgs(f, ['--apply', '--reason', 'synthetic recovery']), options);
+  assert.equal(result.conclusive, true);
+  assert.equal(result.reason, 'terminal-receipt-recovered');
+  assert.equal(readAmaCloserLease(f.rootDir, identity).terminalOutcome, 'failed-without-merge');
+  assert.deepEqual(readFileSync(result.auditPath, 'utf8').trim().split('\n').map(line =>
+    JSON.parse(line).outcome), ['settlement-authorized', 'settled-terminal-receipt']);
+});
+
+test('PRERECEIPTADOPT-01: SDK nullable ticket projection reaches exact-key recovery unchanged', async t => {
+  const f = fixture(t);
+  const row = { ...receipt, ticket_ref: null, head_sha: identity.headSha };
+  const result = await f.reconcile({
+    readIntentReceiptImpl: readLaunchRequestByIdempotencyKeyAsync,
+    dispatchSession: { dispatchLookup: async selector => {
+      assert.equal(selector.idempotency_key, key);
+      return { schema_version: 1, status: 'found', complete: true,
+        roots: [row.launch_request_id], items: [row], retry_edges: [] };
+    } },
+  });
+  assert.equal(result.status, 'receipt-recovered');
+  assert.equal(result.evidence.backend, 'app-contract');
+  assert.equal(closerLaunchMatches(f.record, row), false,
+    'generic dispatch and retry matching still require the closer ticket');
+});
+
+for (const mode of ['live-receipt', 'audit-failure', 'unreadable-retries']) {
+  test(`PRERECEIPTADOPT-01: operator recovery preserves authority on ${mode}`, async t => {
+    const f = fixture(t);
+    const row = { ...receipt, ticket_ref: null, status: mode === 'live-receipt' ? 'running' : 'succeeded' };
+    const lease = readAmaCloserLease(f.rootDir, identity);
+    if (mode === 'audit-failure') writeFileSync(join(f.rootDir, 'data', 'operator-mutations'), 'obstruction');
+    const options = { ...terminalReceiptOptions(f, row), print() {},
+      ...(mode === 'unreadable-retries'
+        ? { readLaunchRequestStatusImpl: async () => ({ ok: false }) } : {}),
+    };
+    const apply = () => settleLegacyIntent(
+      operatorArgs(f, ['--apply', '--reason', 'synthetic recovery']), options);
+    if (mode === 'unreadable-retries') {
+      const result = await apply();
+      assert.equal(result.conclusive, false);
+      const rows = readFileSync(result.auditPath, 'utf8').trim().split('\n').map(JSON.parse);
+      assert.equal(rows.at(-1).outcome, 'receipt-adopted-settlement-pending');
+      assert.equal(result.evidence.persistedLeaseStatus, 'dispatched');
+    } else await assert.rejects(apply(), mode === 'live-receipt' ? /closer-receipt-exists/ : undefined);
+    if (mode === 'unreadable-retries') assert.equal(readAmaCloserLease(f.rootDir, identity).status, 'dispatched');
+    else {
+      assert.deepEqual(readAmaCloserLease(f.rootDir, identity), lease);
+      assert.equal(f.read().state, 'dispatching');
+      assert.equal(readHammerRetryCapLedger(f.rootDir, identity), null);
+    }
+  });
 }
 
 test('operator legacy dry-run preserves intent, lease, budget and audit; apply audits settlement', async t => {
@@ -816,12 +958,12 @@ for (const missingColumn of ['target_repo', 'ticket_ref']) {
     assert.equal(probe.ok, true);
     assert.equal(probe.rows[0][missingColumn], null);
     const result = await f.reconcile();
-    assert.equal(result.status, missingColumn === 'target_repo' ? 'receipt-recovered' : 'unknown');
-    assert.equal(f.read().state, missingColumn === 'target_repo' ? 'dispatched' : 'dispatching');
+    assert.equal(result.status, 'receipt-recovered');
+    assert.equal(f.read().state, 'dispatched');
   });
 }
 
-for (const mismatch of [{ ticket_ref: 'CONFLICT-REBASE-8' }, { ticket_ref: null, target_repo: null },
+for (const mismatch of [{ ticket_ref: 'CONFLICT-REBASE-8' }, { ticket_ref: null, worker_class: 'conflict-resolver' },
   { target_repo: 'different/repo' }, { target_repo: '' }, { head_sha: 'b'.repeat(40) }]) {
   test(`CLOSERINTENT-01: exact-key receipt rejects ${JSON.stringify(mismatch)}`, async t => {
     const f = fixture(t);
@@ -855,7 +997,7 @@ for (const keyReadable of [true, false]) test(`CLOSERINTENT-01: keyed misattribu
   assert.deepEqual(audit[0].evidence, applied.evidence);
 });
 
-for (const patch of [{ ticket_ref: null }, { head_sha: 'b'.repeat(40) },
+for (const patch of [{ ticket_ref: null, worker_class: null }, { head_sha: 'b'.repeat(40) },
   { ticket_ref: 'FOREIGN', identity_ambiguous: true }]) {
   test(`LAC-2096: empty supplemental ticket evidence cannot settle terminal ambiguity ${JSON.stringify(patch)}`, async t => {
     const f = fixture(t);
@@ -867,6 +1009,24 @@ for (const patch of [{ ticket_ref: null }, { head_sha: 'b'.repeat(40) },
     assert.equal(f.read().state, 'dispatching');
     assert.deepEqual(readAmaCloserLease(f.rootDir, identity), lease);
     assert.equal(readHammerRetryCapLedger(f.rootDir, identity), null);
+  });
+}
+
+for (const worker_class of ['codex', null, undefined]) {
+  test(`PRERECEIPTADOPT-01: operator settles exact-ticket terminal receipt with class ${worker_class}`, async t => {
+    const f = fixture(t);
+    const row = { ...receipt, status: 'succeeded', worker_class };
+    const options = { ...terminalReceiptOptions(f, row), print() {},
+      readLegacyIntentLaunchesImpl: () => ({ ok: true, rows: [] }),
+    };
+    const result = await settleLegacyIntent(
+      operatorArgs(f, ['--apply', '--reason', 'synthetic exact-ticket recovery']), options);
+    assert.equal(result.conclusive, true);
+    assert.equal(result.reason, 'terminal-receipt-recovered');
+    assert.equal(f.read().launchRequestId, row.launch_request_id);
+    assert.equal(readAmaCloserLease(f.rootDir, identity).terminalOutcome, 'failed-without-merge');
+    assert.deepEqual(readFileSync(result.auditPath, 'utf8').trim().split('\n').map(line =>
+      JSON.parse(line).outcome), ['settlement-authorized', 'settled-terminal-receipt']);
   });
 }
 
@@ -1181,3 +1341,86 @@ for (const state of ['dispatching', 'dispatch-interrupted']) {
     });
   }
 }
+
+for (const worker_class of ['codex', 'claude-code', 'gemini', undefined]) {
+  test(`PRERECEIPTADOPT-01: exact-ticket receipt preserves class compatibility ${worker_class}`, async t => {
+    const f = fixture(t, { workerClass: worker_class || 'codex' });
+    const result = await f.reconcile({ readIntentReceiptImpl: async () => ({ ok: true,
+      rows: [{ ...receipt, worker_class }] }) });
+    assert.equal(result.status, 'receipt-recovered');
+    assert.equal(readAmaCloserLease(f.rootDir, identity).status, 'dispatched');
+  });
+}
+
+for (const outcome of ['deferred', 'succeeded']) for (const rootSource of ['record', 'option', 'env']) {
+  test(`PRERECEIPTADOPT-01: ${rootSource} HQ audit preserves ${outcome} ownership`, async t => {
+    const hqRoot = mkdtempSync(join(tmpdir(), 'intent-hq-'));
+    t.after(() => rmSync(hqRoot, { recursive: true, force: true }));
+    const f = fixture(t, rootSource === 'record' ? { hqRoot } : {});
+    const row = { ...receipt, ticket_ref: null, status: 'succeeded' };
+    writeAmaAuditEntry({ hqRoot, ...identity, now,
+      attempt: { outcome, launchRequestId: row.launch_request_id, reason: 'operator-hold' } });
+    const options = { ...terminalReceiptOptions(f, row),
+      ...(rootSource === 'option' ? { hqRoot } : {}),
+      ...(rootSource === 'env' ? { env: { HQ_ROOT: hqRoot } } : {}),
+      readPullRequestStateImpl: async () => ({ state: 'OPEN' }),
+      readCloserPullRequestStateImpl: undefined,
+    };
+    const settled = await reconcileAndAbandonAmaCloserLease(f.rootDir,
+      readAmaCloserLease(f.rootDir, identity), options);
+    assert.equal(settled.terminalOutcome, outcome);
+    assert.equal(acquireAmaCloserLease({ rootDir: f.rootDir, ...identity,
+      watcherPid: 54321, now }).acquired, false);
+    assert.equal(f.read().terminalOutcome, outcome);
+  });
+}
+
+test('PRERECEIPTADOPT-01: capacity scan excludes settled receipt recovery', async t => {
+  const f = fixture(t);
+  const row = { ...receipt, status: 'failed' };
+  const result = await reconcileAmaCloserDispatches(f.rootDir, {
+    ...terminalReceiptOptions(f, row),
+  });
+  assert.equal(f.read().terminalOutcome, 'failed-without-merge');
+  assert.equal(result.active[0].holdsCapacity, false);
+});
+
+test('PRERECEIPTADOPT-01: nested status read respects capacity scan budget', async t => {
+  const f = fixture(t);
+  const row = { ...receipt, status: 'failed' };
+  const result = await reconcileAmaCloserDispatches(f.rootDir, {
+    ...terminalReceiptOptions(f, row), scanBudgetMs: 50, launchReadTimeoutMs: 10,
+    readLaunchRequestStatusImpl: async ({ signal }) => {
+      assert.ok(signal);
+      return new Promise(() => {});
+    },
+  });
+  assert.equal(readAmaCloserLease(f.rootDir, identity).status, 'dispatched');
+  assert.equal(result.active[0].holdsCapacity, true);
+});
+
+test('PRERECEIPTADOPT-01: observer PR reader preserves auto-merge hold independently of intent reader', async t => {
+  const f = fixture(t, { lastAttemptedAt: '2026-10-22T13:59:00Z' }, false);
+  acquireAmaCloserLease({ rootDir: f.rootDir, ...identity,
+    now: f.record.lastAttemptedAt, watcherPid: 12345 });
+  const row = { ...receipt, status: 'succeeded' };
+  let intentReads = 0;
+  let observerReads = 0;
+  await f.reconcile({ ...terminalReceiptOptions(f, row),
+    readPullRequestStateImpl: async (record, options) => {
+      intentReads++;
+      assert.equal(record.prNumber, identity.prNumber);
+      assert.ok(options);
+      return { state: 'OPEN', merged: false };
+    },
+    readCloserPullRequestStateImpl: async ({ repo, prNumber }) => {
+      observerReads++;
+      assert.equal(repo, identity.repo);
+      assert.equal(prNumber, identity.prNumber);
+      return { state: 'OPEN', autoMergeRequest: { enabledAt: started }, headRefOid: identity.headSha };
+    },
+  });
+  assert.equal(intentReads, 1);
+  assert.equal(observerReads, 1);
+  assert.equal(readAmaCloserLease(f.rootDir, identity).status, 'dispatched');
+});

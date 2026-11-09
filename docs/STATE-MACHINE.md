@@ -1,3 +1,11 @@
+PRERECEIPTADOPT-01 remediation preserves existing closer states and transitions.
+Terminal recovery reads the HQ audit root before finalizing shared lease outcomes;
+exact-ticket receipts retain pinned and legacy missing-class compatibility.
+Settled recovered records consume no fleet capacity. Operator adoption with
+pending settlement records a completed adoption audit with persisted state,
+while ordinary lease reconciliation retains ownership. Reviewed and refreshed
+the affected source projections; existing smoke promises remain unchanged.
+
 HAMMERNOPROGRESS-01 retains existing lifecycle and charge edges. Seven bounded
 first-write receipt kinds earn finite load-aware outcome slices (nominal 3600
 active seconds); an unsuperseded final terminal stop receives a load-aware
@@ -85,6 +93,16 @@ Reviewed the dispatch producer guards and refreshed its state projection: receip
 identity, predecessor restoration and bounded unknown-evidence accounting retain
 the existing hammer-dispatch states and transitions. Closing-decision and CI
 ownership precedence remain unchanged.
+
+RGY-04 selections retain durable backlog provenance after release. Automatic
+claims exclude selected rows and automatic dispatch skips selected prepared
+batches; already-started collection/publication continues. Only an explicit
+selection can re-read consensus and claim released real findings. Non-blocking
+backlog health excludes selected work from automatic-drain counts and reports
+it separately in `selectedBacklog` per manifest, including dispatch failures and
+unbatched releases. Settlement and backfill share lifecycle
+grade kinds, and backfill skips settlement observations. Existing states and
+smoke promises are unchanged.
 
 ## Explicit same-head re-review intent (RETRIGGERDEDUP-01)
 
@@ -1531,18 +1549,19 @@ projection adds `operator-hold` and `done` evaluation outputs; durable launch,
 lease and review lifecycle states are unchanged. See the
 [adoption runbook](RUNBOOK-ama-closure.md#closer-and-recovery-adoption-nxa-05).
 
-STOPSTALE-01 / STOPSTALE-02 share one daemon-only supersession path for
+STOPSTALE-01 / STOPSTALE-02 / CLOSERREARM-01 share one daemon-only supersession path for
 R07 deterministic stops, retry exhaustion, lifetime exhaustion and terminal
-hammer no-merge. A strictly newer exact-head settled review must pass the
+hammer no-merge, and R08 terminal no-merge with retries remaining.
+A strictly newer exact-head settled review must pass the
 current findings policy (including strict mode) and ordinary daemon gates.
 Freshness uses the stop record time, an active cap's existing alert time, or
-the terminal launch/retry times; missing or invalid time retains R07. The
+the terminal launch/retry times; missing or invalid time retains the stop or retry owner. The
 decision records `stop-superseded-by-exact-head-review` and
 `stop-reason:<superseded reason>`. Red, pending, conflicting or unproven heads
-retain recovery ownership. Hammer caps and cap-ledger contents are unchanged;
-only the daemon may be selected. The daemon re-fetches primary-change evidence
-and requires its predicate before every merge attempt. Durable lifecycle states
-are unchanged.
+retain the original stop or retry owner and action. Hammer caps and cap-ledger
+contents are unchanged; only the daemon may be selected. The daemon re-fetches
+primary-change evidence and requires its predicate before every merge attempt.
+Durable lifecycle states are unchanged.
 
 STOPSTALE-03 keeps the original alert time during a continuous cap suppression,
 including lifetime suppression across review heads. New series/target episodes
@@ -1888,6 +1907,21 @@ guards still apply, and an already captured prompt path must remain unchanged.
 |---|---|---|
 | **Hammer (common)** | Final review carries findings (blocking, or non-blocking under the default strict posture); its remediation may also require a rebase or CI repair | The watcher dispatches exactly one hammer terminal-remediation worker (`templates/hammer-prompt.md`, via `src/ama/dispatch-closer.mjs`). In the default `watcher.ama_hammer_dispatch_mode: inline` mode, the posted-review phase awaits that `hq dispatch` attempt. In `background` mode, the phase submits the same closer call to a bounded in-process queue keyed by PR@head with durable pending intent under `data/ama-hammer-background/` (recovered through normal guards on the first adoption phase after restart), returns retained ownership (`ama-pending`) with reason `ama-closer-dispatch-backgrounded`, and lets the closer's lease/dispatch-record guards prevent duplicate launches on later ticks. The hammer remediates, rebases only when GitHub reports a conflict or strict/unknown BEHIND, holds the required-checks-plus-changed-surface-tests merge bar, waits out GitHub required checks on the exact post-remediation head inside a bounded remote-CI window, and merges under its own lease with `--match-head-commit`. LEASEFAIR-01 releases the lease during the first CI wait. HAMRESUMEOWED-01 retains CLEAN and known non-strict MERGEABLE BEHIND heads, including overlapping-file base advances; only GitHub conflict or strict/unknown BEHIND requires rebase. LEASEFAIR-02 handles a required rebase with one in-run rebase and at most `HAM_CI_RETRY_WAIT_SECONDS` (default/minimum 120) wall-clock seconds of exact-head CI while retaining that lease, then rebuilds audit and predicate authority. |
 | **Daemon inline merge (rare)** | Final review is fully clean — zero blocking AND zero non-blocking findings, both classifications known — or a current-head `operator-approved` overrides the verdict and finding gates; green required checks (or explicit no-CI bootstrap evidence), a MERGEABLE PR, and a live validated head remain mandatory | The watcher daemon clicks merge inline through a bounded `gh pr merge --match-head-commit` subprocess under the shared merge lease (`src/ama/daemon-merge.mjs`). An approval override records operator evidence and distinct closure authority in the audit. No agent is spawned. Dispositions: `merged`, `failed-closed` (conflicts, real CI failures and stale heads fall through to capped HAM; a current MERGEABLE clean head waiting on empty/no-CI evidence or cancelled recovery returns to the merge-agent path), `deferred` (lease contention; retry next tick), `not-taken` (a current MERGEABLE zero-finding settled head waiting on empty/no-CI evidence or cancelled recovery returns to the merge path; remediable failures and reviews with findings fall through to HAM). Protective predecessor and revoked-approval holds remain authoritative. |
+
+HAMCONFLICTOWNER-01: a closer terminal audit with
+`reason: conflict-primary-unproven` at the live head transfers conflict work
+to the existing follow-up remediation queue before closer retry/cap selection.
+The stable work order deduplicates across closer attempts and terminal/archive
+queue moves. Its durable `closureHandoff` receipt names the reason and required
+full review; `repo`, `prNumber`, `revisionRef` and `jobId` name the owner.
+A pending matching job selects `remediate` / `remediator` through admission
+delays, while existing live custody and unknown-ownership fences retain
+precedence. `src/pr-next-action.mjs` selects this row, as recorded by
+`closure-owner.06` in `state-machines.json`. A new builder head returns to normal
+full review. Missing provenance or enqueue failure retains the handoff for a
+later watcher pass.
+`conflict-primary-timeout` remains retryable; the proof and publish fence are
+unchanged. See [the queue contract](data-model/follow-up-jobs.md#conflict-primary-handoff-hamconflictowner-01).
 
 Merge lease scheduling uses FIFO arrival across daemon and closer roles.
 A closer's non-terminal no-merge release retains the PR's original arrival
@@ -2256,10 +2290,18 @@ Key control points:
   advisory findings cannot authorize reversals. File/Lines must cover each reverted
   base line. Before author-line edits, `bin/hammer-edit-plan.mjs` uses the gate's
   shared finding-admissibility predicate and live effective policy. Inadmissible
-  advisory edits are deferred without editing and enrolled through the existing
-  findings backlog with a one-line reason; additive fixes changing no author line
+  advisory `author-lines` edits are deferred without editing and enrolled through
+  the existing findings backlog with a one-line reason; additive fixes changing no author line
   remain allowed. A failed backlog capture stops the edit. Blocking and strict-mode
   reversals retain final gate verification and the existing lifecycle.
+  A valid cited non-blocking `in-place` plan instead receives correctable
+  shape feedback (exit 21) to re-plan as `additive`, in either strict mode.
+  This never permits a non-blocking in-place edit.
+  An otherwise authorized `author-lines` plan outside its finding's cited ranges
+  receives exit 21 with those ranges. Within the existing one-correction budget,
+  re-plan within a cited range or as `additive` without removing or replacing
+  author lines. The uncovered author-line plan never allows an edit; terminal
+  evidence and policy outcomes remain unchanged.
   HAMLINES-01 reads all cited ranges, including legacy approximate,
   multi-range and symbol-qualified forms; approximate endpoints stay exact.
   Leading range lists stop before explanatory notes; numbers in prose or symbol
@@ -2843,19 +2885,26 @@ response stays fenced and unreceipted for exact-key recovery. The attempt key
 binds that recovery to its dispatch head; an explicit different ledger head
 cannot be adopted.
 Ledger repository metadata may be absent or null in older schemas; when present,
-it must match the full repository name or its basename. The exact closer ticket
-is always required, and an explicit head mismatch still refuses adoption.
-Postgres reads resolve ticket identity from optional launch columns,
-`request_payload_json` / `lineage_json` (`ticketRef`, `taskKey`, and
-`launchProvenance.ticketId`), linked `launch_request_logical_job_claims.ticket_ref`
-and `worker_runs.task_key`, all correlated by the exact LRQ. Head identity comes
-from an optional launch `head_sha` and `launchProvenance.prHeadSha`; repository
-identity includes the existing target projection, linked logical jobs and
-provenance `repoFullName` / `repo`. Owner-qualified evidence takes precedence
-over a basename projection. Conflicting nonempty sources carry `identity_ambiguous: true` and refuse
-adoption; null projections never override positive canonical evidence. Status,
-retry-chain and bounded snapshot readers use the same identity projection.
-SQLite keyed/status reads retain their optional-column compatibility.
+it must match the full repository name or its basename. PRERECEIPTADOPT-01 permits
+an absent, null or empty ticket only for the single row carrying the intent's
+own `dispatchIdempotencyKey`, with a recognized hammer worker class and matching
+repository/head when present. A non-empty different ticket stays foreign;
+`identity_ambiguous: true`, multiple rows, missing/other worker classes and
+explicit repository/head mismatches refuse adoption. Direct dispatch output and
+live-retry adoption still require the exact closer ticket. Receipt recovery
+persists the launch and promotes the matching lease under the existing snapshot
+CAS. For a terminal receipt it then invokes ordinary terminal reconciliation,
+after releasing the intent lock, including retry-chain and merge evidence reads.
+A successful process exit alone never proves a merge; normal success grace,
+auto-merge holds, live retries and unreadable evidence retain their authority.
+The watcher reaches this path for a dead pending owner before its in-flight
+wait and can admit the next eligible closer on the same pass.
+SDK launch replies supply ticket, repository and head identity. The producer
+owns backend schema projection and compatibility; this consumer does not join
+launch columns, lineage, logical-job claims or worker rows. Returned
+`identity_ambiguous: true` refuses adoption. Status, retry-chain and snapshot
+readers share the same SDK evidence boundary; grant scope remains an activation
+prerequisite, not evidence of an unfiltered ledger query.
 
 An explicit foreign dispatch receipt ends only the new attempt as `no-dispatch`,
 reason `non-hammer-launch-not-adopted`: supersede its pending lease, restore the
@@ -2949,14 +2998,21 @@ keyed recovery it additionally queries the entire closer ticket at or after
 `lastAttemptedAt`, without repo/head filtering. A successful empty ticket query
 proves absence even if a recorded predecessor ID names another worker or the
 key read is unreadable (`closer-ticket-no-launch-proven`). Any closer row in
-that window refuses this ticket-based recovery. A Postgres launch with no
-readable ticket identity also blocks absence proof; the reader never substitutes
-`NULL = ticket` for a canonical lookup. The query includes the exact attempt
-boundary and null request timestamps and never filters repository, head or
-terminal status. An operator key read returning zero cannot bypass an unreadable
-supplemental ticket query. A returned unidentified, conflicting or same-ticket
-wrong-head receipt remains ambiguous even when terminal; an empty ticket query
-cannot settle it. Dry-run remains the default;
+that window refuses this ticket-based recovery. The SDK query is grant-scoped;
+it does not reproduce the deleted Postgres reader's global unidentified-row
+check. The consumer uses an inclusive UTC attempt boundary and adds no
+repository, head or terminal-status filter. Full grant coverage is an activation
+prerequisite; filtered emptiness is not independent proof of global absence. An operator key read returning zero cannot bypass an unreadable
+supplemental ticket query. A unique own-key terminal closer receipt can instead
+be recovered with the same identity rules as native reconciliation, including a
+missing ticket. Apply records `settlement-authorized` before recovery and
+`settled-terminal-receipt` only after ordinary terminal reconciliation settles
+the matching lease. A live receipt is refused as `closer-receipt-exists`; an
+unsettled terminal receipt reports `receipt-settlement-pending`. Dry-run previews
+receipt recovery without writes; it does not prove subsequent terminal settlement.
+Conflicting, multiply identified or same-ticket wrong-head receipts remain
+ambiguous even when terminal; an empty ticket query cannot settle them.
+Dry-run remains the default;
 apply requires the directory owner's UID, an operator reason, and a durable
 `settlement-authorized` audit before lease/intent mutation, followed by the
 completion audit. Audit evidence includes the recorded ID and both queries.

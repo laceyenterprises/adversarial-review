@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { normalizeDroppedReason } from './findings-batch.mjs';
+import { normalizeDroppedReason } from './finding-drop-reason.mjs';
 import { syncFindingDisputes } from './review-finding-records.mjs';
 
 export const GRADE_KINDS = Object.freeze(['batch-remediator', 'grader', 'judge', 'hammer', 'remediator', 'lifecycle', 'scar', 'operator']);
@@ -72,7 +72,13 @@ export function backfillFindingGrades(db) {
         findingId: row.finding_id, taxonomyCode: code, graderKind: kind, gradedHeadSha: head,
         interestedParty: interested, evidence, gradedAt: at || new Date().toISOString() });
     };
-    for (const row of db.prepare('SELECT * FROM finding_backlog WHERE outcome IS NOT NULL ORDER BY finding_id').all()) {
+    for (const row of db.prepare(`SELECT b.* FROM finding_backlog b WHERE outcome IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM review_finding_grades g
+        WHERE g.source_key='batch:' || b.batch_id || ':' || b.finding_id)
+      ORDER BY finding_id`).all()) {
+      // Selection provenance is not a new worker observation. Keep historical
+      // backlog source hashes stable across the additive scope migration.
+      delete row.manifest_sha256;
       const code = backlogGradeCode(row.outcome, row.reason);
       add('backlog', row, code, code?.startsWith('life.') ? 'lifecycle' : 'batch-remediator', null, false, row.resolved_at);
     }

@@ -144,4 +144,16 @@ async function readHammerPr(repo, prNumber, { withChecks, withReviews, get, cach
   return snapshot;
 }
 
-export { fetchHammerPr };
+// Both initial full-review reads and truncated context expansion use this
+// exact paginated reader. Preserve every body, finding and commit association;
+// review authority and current-head selection remain with existing predicates.
+async function writeHammerFullReviews(repo, prNumber, options = {}) {
+  const env = options.env || process.env;
+  if (!env.HAM_RUN_DIR) throw new TypeError('HAM_RUN_DIR is required for full reviews');
+  const snapshot = await fetchHammerPr(repo, prNumber, { ...options, withChecks: false, withReviews: true });
+  const text = `${JSON.stringify(snapshot.reviews, null, 2)}\n`;
+  writeFileAtomic(join(env.HAM_RUN_DIR, 'reviews-full.json'), text, { mode: 0o600 });
+  return text;
+}
+
+export { fetchHammerPr, writeHammerFullReviews };

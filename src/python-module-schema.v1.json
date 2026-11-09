@@ -1752,5 +1752,93 @@
         }
       }
     }
+  },
+  "sentinel": {
+    "__keys": {
+      "cns": {
+        "__type": "dict",
+        "__strict": false,
+        "__keys": {
+          "auto_dispatch": {
+            "__type": "dict",
+            "__strict": true,
+            "__keys": {
+              "mode": {
+                "__type": "string",
+                "__default": "shadow",
+                "__enum": [
+                  "off",
+                  "shadow",
+                  "enforce"
+                ]
+              },
+              "allow_families": {
+                "__type": "list",
+                "__default": [
+                  "closers.*",
+                  "host.leak.*",
+                  "capacity.*"
+                ],
+                "__item": {
+                  "__type": "string"
+                }
+              },
+              "deny_families": {
+                "__type": "list",
+                "__default": [],
+                "__item": {
+                  "__type": "string"
+                }
+              },
+              "minimum_severity": {
+                "__type": "string",
+                "__default": "sev2",
+                "__enum": [
+                  "sev0",
+                  "sev1",
+                  "sev2",
+                  "sev3",
+                  "sev4"
+                ]
+              },
+              "hourly_cap": {
+                "__type": "int",
+                "__default": 6,
+                "__min": 0
+              },
+              "daily_token_budget": {
+                "__type": "int",
+                "__default": 400000,
+                "__min": 0
+              },
+              "worker_token_budget": {
+                "__type": "int",
+                "__default": 150000,
+                "__min": 1
+              },
+              "cooldown_seconds": {
+                "__type": "int",
+                "__default": 3600,
+                "__min": 0
+              },
+              "worker_class": {
+                "__type": "string",
+                "__default": "claude-code",
+                "__enum": [
+                  "claude-code"
+                ]
+              },
+              "priority": {
+                "__type": "string",
+                "__default": "normal",
+                "__enum": [
+                  "normal"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
   }
 }

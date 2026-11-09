@@ -1,0 +1,18 @@
+# Repository-local declaration for the fix PR; the incident receipt lives in
+# the companion agent-os report. Managed PR plans use this directory.
+operator_steps:
+  - description: >-
+      SRE verifies that the next ordinary main run containing this fix has a
+      green npm test (Node 22) job with suite wall time well under 900 seconds.
+      Select that run from the listing, inspect its job and suite-step timings
+      with gh run view, and retain the run link and timing in the companion
+      ARSUITETIMEOUT-01 incident report before declaring recovery.
+      Do not trigger another workflow or make live changes.
+    run_as: designated SRE
+    command: >-
+      gh run list --branch main --workflow test.yml --limit 5
+      --json databaseId,headSha,conclusion,url
+actions: []
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

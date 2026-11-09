@@ -1,0 +1,14 @@
+operator_steps:
+  - description: >-
+      After normal merge, retain the ordinary main-suite run showing
+      test/hammer-prompt-contract.test.mjs is discovered and green. Confirm the
+      AR PR's red-then-green commit pair shows an unsupported documented
+      edit-plan invocation failing the conformance test and its removal
+      passing. Retain both results in the companion HAMCONTRACT-01 SEV2 report.
+      Do not trigger a new workflow or change live state.
+    run_as: designated SRE
+    command: >-
+      Inspect the ordinary main-suite run and HAMCONTRACT-01 PR acceptance
+      evidence, then retain the run URL, merge SHA and red/green commit SHAs
+      in the companion incident report.
+actions: []

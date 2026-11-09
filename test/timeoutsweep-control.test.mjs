@@ -18,6 +18,7 @@ const timeout = () => Object.assign(Error('synthetic timed out'), { code: 'ETIME
 const quiet = { info() {}, log() {}, warn() {}, error() {} };
 const sha = ch => ch.repeat(40);
 function loaded(t) {
+  t.mock.method(os, 'platform', () => 'linux');
   t.mock.method(os, 'loadavg', () => [os.cpus().length * 3, 0, 0]);
   t.mock.method(childProcess, 'execFileSync', command => {
     assert.equal(command, '/bin/ps');

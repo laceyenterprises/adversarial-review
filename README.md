@@ -2369,8 +2369,14 @@ pre-rebase head. Reconciliation validates the current rekeyed lease and compares
 its full snapshot across yielded reads before mutating it under the existing
 lease lock. Proven absence defers the current lease on that pass; a canonical
 receipt promotes it; unreadable or ambiguous evidence preserves the wait.
+A unique receipt carrying the intent's own key may have an empty ticket only
+when its worker class is a closer and repository/head metadata matches when
+present. Foreign tickets and ambiguous identity retain the fence. Terminal
+receipt recovery invokes ordinary terminal lease reconciliation before watcher
+admission; live retries and success/merge evidence retain their authority.
+The audited operator settlement tool also supports this terminal receipt case.
 Live submitters within the deadline retain ownership. Query budgets, absence
-rules, operator settlement and retry charging are unchanged.
+rules and retry charging are unchanged.
 
 Admission treats an unreadable current-head lease as held (`lease-unreadable`)
 and logs a warning; confirmed terminal PRs still stop dispatch. A failed intent

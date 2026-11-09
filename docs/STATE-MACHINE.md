@@ -1,3 +1,11 @@
+PRERECEIPTADOPT-01 remediation preserves existing closer states and transitions.
+Terminal recovery reads the HQ audit root before finalizing shared lease outcomes;
+exact-ticket receipts retain pinned and legacy missing-class compatibility.
+Settled recovered records consume no fleet capacity. Operator adoption with
+pending settlement records a completed adoption audit with persisted state,
+while ordinary lease reconciliation retains ownership. Reviewed and refreshed
+the affected source projections; existing smoke promises remain unchanged.
+
 HAMMERNOPROGRESS-01 retains existing lifecycle and charge edges. Seven bounded
 first-write receipt kinds earn finite load-aware outcome slices (nominal 3600
 active seconds); an unsuperseded final terminal stop receives a load-aware
@@ -2853,19 +2861,26 @@ response stays fenced and unreceipted for exact-key recovery. The attempt key
 binds that recovery to its dispatch head; an explicit different ledger head
 cannot be adopted.
 Ledger repository metadata may be absent or null in older schemas; when present,
-it must match the full repository name or its basename. The exact closer ticket
-is always required, and an explicit head mismatch still refuses adoption.
-Postgres reads resolve ticket identity from optional launch columns,
-`request_payload_json` / `lineage_json` (`ticketRef`, `taskKey`, and
-`launchProvenance.ticketId`), linked `launch_request_logical_job_claims.ticket_ref`
-and `worker_runs.task_key`, all correlated by the exact LRQ. Head identity comes
-from an optional launch `head_sha` and `launchProvenance.prHeadSha`; repository
-identity includes the existing target projection, linked logical jobs and
-provenance `repoFullName` / `repo`. Owner-qualified evidence takes precedence
-over a basename projection. Conflicting nonempty sources carry `identity_ambiguous: true` and refuse
-adoption; null projections never override positive canonical evidence. Status,
-retry-chain and bounded snapshot readers use the same identity projection.
-SQLite keyed/status reads retain their optional-column compatibility.
+it must match the full repository name or its basename. PRERECEIPTADOPT-01 permits
+an absent, null or empty ticket only for the single row carrying the intent's
+own `dispatchIdempotencyKey`, with a recognized hammer worker class and matching
+repository/head when present. A non-empty different ticket stays foreign;
+`identity_ambiguous: true`, multiple rows, missing/other worker classes and
+explicit repository/head mismatches refuse adoption. Direct dispatch output and
+live-retry adoption still require the exact closer ticket. Receipt recovery
+persists the launch and promotes the matching lease under the existing snapshot
+CAS. For a terminal receipt it then invokes ordinary terminal reconciliation,
+after releasing the intent lock, including retry-chain and merge evidence reads.
+A successful process exit alone never proves a merge; normal success grace,
+auto-merge holds, live retries and unreadable evidence retain their authority.
+The watcher reaches this path for a dead pending owner before its in-flight
+wait and can admit the next eligible closer on the same pass.
+SDK launch replies supply ticket, repository and head identity. The producer
+owns backend schema projection and compatibility; this consumer does not join
+launch columns, lineage, logical-job claims or worker rows. Returned
+`identity_ambiguous: true` refuses adoption. Status, retry-chain and snapshot
+readers share the same SDK evidence boundary; grant scope remains an activation
+prerequisite, not evidence of an unfiltered ledger query.
 
 An explicit foreign dispatch receipt ends only the new attempt as `no-dispatch`,
 reason `non-hammer-launch-not-adopted`: supersede its pending lease, restore the
@@ -2959,14 +2974,21 @@ keyed recovery it additionally queries the entire closer ticket at or after
 `lastAttemptedAt`, without repo/head filtering. A successful empty ticket query
 proves absence even if a recorded predecessor ID names another worker or the
 key read is unreadable (`closer-ticket-no-launch-proven`). Any closer row in
-that window refuses this ticket-based recovery. A Postgres launch with no
-readable ticket identity also blocks absence proof; the reader never substitutes
-`NULL = ticket` for a canonical lookup. The query includes the exact attempt
-boundary and null request timestamps and never filters repository, head or
-terminal status. An operator key read returning zero cannot bypass an unreadable
-supplemental ticket query. A returned unidentified, conflicting or same-ticket
-wrong-head receipt remains ambiguous even when terminal; an empty ticket query
-cannot settle it. Dry-run remains the default;
+that window refuses this ticket-based recovery. The SDK query is grant-scoped;
+it does not reproduce the deleted Postgres reader's global unidentified-row
+check. The consumer uses an inclusive UTC attempt boundary and adds no
+repository, head or terminal-status filter. Full grant coverage is an activation
+prerequisite; filtered emptiness is not independent proof of global absence. An operator key read returning zero cannot bypass an unreadable
+supplemental ticket query. A unique own-key terminal closer receipt can instead
+be recovered with the same identity rules as native reconciliation, including a
+missing ticket. Apply records `settlement-authorized` before recovery and
+`settled-terminal-receipt` only after ordinary terminal reconciliation settles
+the matching lease. A live receipt is refused as `closer-receipt-exists`; an
+unsettled terminal receipt reports `receipt-settlement-pending`. Dry-run previews
+receipt recovery without writes; it does not prove subsequent terminal settlement.
+Conflicting, multiply identified or same-ticket wrong-head receipts remain
+ambiguous even when terminal; an empty ticket query cannot settle them.
+Dry-run remains the default;
 apply requires the directory owner's UID, an operator reason, and a durable
 `settlement-authorized` audit before lease/intent mutation, followed by the
 completion audit. Audit evidence includes the recorded ID and both queries.

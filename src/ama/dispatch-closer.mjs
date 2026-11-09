@@ -2092,6 +2092,19 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
     if (isPreReceiptIntent(record)) {
       const recovery = await reconcilePreReceiptIntent(rootDir, record, { ...options, now,
         logger: options.logger || options.log,
+        ...Object.fromEntries([
+          ['readLaunchRequestStatusImpl', options.readLaunchRequestStatusImpl || readLaunchRequestStatusFromLedgerAsync],
+          ['readMergedSignalImpl', options.readMergedSignalImpl || readMergedBuildCompletionSignalAsync],
+          ['readCloserPullRequestStateImpl', options.readCloserPullRequestStateImpl || readAmaCloserPullRequestStateAsync],
+        ].map(([key, read]) => [key, async args => {
+          const timeoutMs = Math.min(budgets.launch, remaining());
+          if (timeoutMs <= 0) return { ok: false, reason: 'scan-read-timeout' };
+          const controller = new AbortController();
+          const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
+          try {
+            return await boundedCloserScanRead(() => read({ ...args, signal, timeoutMs }), timeoutMs, signal);
+          } finally { controller.abort(); }
+        }])),
         readIntentReceiptImpl: args => boundedCloserScanRead(() =>
           (options.readIntentReceiptImpl || readLaunchRequestByIdempotencyKeyAsync)(
             { ...args, timeoutMs: Math.min(budgets.launch, Math.max(1, remaining())) }),
@@ -2111,7 +2124,8 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
         active.push({ ...(recovery.record || record), prNumber, dispatchPath,
           holdsCapacity: false });
       } else if (recovery.status === 'receipt-recovered') {
-        active.push({ ...recovery.record, prNumber, dispatchPath, holdsCapacity: true });
+        active.push({ ...recovery.record, prNumber, dispatchPath,
+          holdsCapacity: !recovery.record.terminalOutcome });
       }
       continue;
     }

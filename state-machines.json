@@ -1467,7 +1467,7 @@
           "maxDurationSeconds": 1831.5,
           "overdueRecipient": "adversarial-review operator",
           "enforcement": "missing",
-          "deadEndEvidence": "CLOSERINTENTRECON-01 invokes the existing fenced proof from closure orchestration and the recovery reaper before waiting on a dead or expired pending owner, including the intent named by rekeyedFromHeadSha. LAC-2081 bounds diagnostics by the original dispatch timeout (30 minutes without it). LEGACYINTENT-01 supplies an audited operator exit on empty successful ticket/time ledger evidence. CLOSERGATE-01 scopes unresolved ownership to its PR/head with no fleet launch capacity and one durable inspection page; CLOSERINTENT-01 supplies an exit on successful empty-key proof after the dispatch deadline or audited empty closer-ticket proof; unreadable absence evidence remains held; authoritative closed/merged PR metadata retires the intent without claiming no submission."
+          "deadEndEvidence": "PRERECEIPTADOPT-01 recovers one own-key closer receipt with an absent/null/empty ticket and matching optional repository/head, preserving foreign and ambiguous identity fences. Terminal recovery uses ordinary retry/merge-aware lease settlement before watcher admission; audited operator recovery uses the same path. CLOSERINTENTRECON-01 invokes the existing fenced proof from closure orchestration and the recovery reaper before waiting on a dead or expired pending owner, including the intent named by rekeyedFromHeadSha. LAC-2081 bounds diagnostics by the original dispatch timeout (30 minutes without it). LEGACYINTENT-01 supplies an audited operator exit on empty successful ticket/time ledger evidence. CLOSERGATE-01 scopes unresolved ownership to its PR/head with no fleet launch capacity and one durable inspection page; CLOSERINTENT-01 supplies an exit on successful empty-key proof after the dispatch deadline or audited empty closer-ticket proof; unreadable absence evidence remains held; authoritative closed/merged PR metadata retires the intent without claiming no submission."
         },
         {
           "name": "dispatch-interrupted",
@@ -1801,7 +1801,7 @@
     "src/ama/dispatch-submitter.mjs": "c186abb1b2071524a8afd722bf10c637d1e54586f2f186b47f57be3baad9dd60",
     "src/ama/closure-next-action.mjs": "5bb0293c10c0b45c7086401cd9f7d4d137363a39308cf7178891c1c8b5375dcc",
     "src/pr-next-action.mjs": "24b348b711003879178403f742b6aa7d2f04bd9515e77098934daf575213189b",
-    "src/ama/pre-receipt-intent.mjs": "4954d9ad52d99a9eff753b0b0a399c15aa3b6872e2d3462b8dde2ba5f7673e0d",
+    "src/ama/pre-receipt-intent.mjs": "7a41d9bcd120a0f90bf1187edcd2882b8e7199d65437013be8ad9742e350455c",
     "src/follow-up-branch.mjs": "637f2a18c5fb2a89d2d02c98d80587a713a188c10d70891941d77df847579a8d",
     "src/posted-review-head-repair.mjs": "ce761260224b7a82d152e5b289e8967bbf54026c427a17bdb5cff0a6556ff7d6",
     "src/pollonce-phases.mjs": "63928dc55cc31ccf48009bdde1d6fed8e1b6b1c134a3a0ea9268eb1c9d22a8e3",

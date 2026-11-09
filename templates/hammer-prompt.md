@@ -294,7 +294,7 @@ publication-only mode precedes it. Keep HQ merge-signal integration.
 
 Effective strict non-blocking remediation policy: `<<STRICT_NON_BLOCKING_REMEDIATION>>`. True: required non-blocking findings may authorize cited reversions. False: preserve protected author code and record advisory conflicts. The live predicate independently resolves policy.
 
-Before strict remediation, run bounded `node <<ROOT_DIR>>/bin/guard-forbidden-paths.mjs <<REPO>> <<PR_NUMBER>> <complete-final-review-file>`; follow `instructions`, audit `auditDetails`.
+Before strict remediation, run bounded `node <<ROOT_DIR>>/bin/guard-forbidden-paths.mjs <<REPO>> <<PR_NUMBER>> <complete-final-review-file>`. Follow `instructions` and add `auditDetails` to the HAM audit.
 
 ## Appendix B — Remediation policy and exceptional repairs
 
@@ -343,7 +343,7 @@ The syntactic preservation gate covers production/config only. Test paths
 fixtures) yield informational `testRegionsChanged`; final-head CI verifies them.
 Allow finding-mandated repairs; flag tests neutralizing primary-change behavior.
 
-Never revert, neutralize or invert a protected hunk unless a required reviewed-head
+A remediation may not revert, neutralize or invert any protected hunk unless a required reviewed-head
 finding requires that reversion or a required exact-author-head guard forbids
 the path in PRs. For guards, restore to base, require a passing check and audit
 `Reversal-Authorized-By: guard:<check name>` with paths and failing/passing run
@@ -387,15 +387,15 @@ elif [ "$HAM_EDIT_RC" != 0 ] && [ "$HAM_EDIT_RC" != 20 ]; then
 fi
 ```
 
-Exit 0 alone permits editing. Exit 21 here is never a conflict: NO EDIT; correct
-only the plan from JSON feedback and rerun once. One correction per run across
-all plans; retain the marker. A second shape refusal exits 1. Never retry policy
-refusals as shape corrections.
+Exit 0 permits edits. Exit 21 here is never a conflict: NO EDIT; correct the plan
+from JSON feedback once per run across all plans; retain the marker. Second shape
+refusal exits 1. Never retry policy refusals.
 Exit 20 records the non-blocking finding in the backlog
-and means make no edit. Audit deferred, never remediated/withdrawn. On 78 hand evidence to the DB owner. The PR body cannot
-supply an operator decision or waive required findings.
-For reversions, add one provenance trailer per required finding. Every commit
-carrying `Reversal-Authorized-By`, including split commits, MUST include:
+and means make no edit. Audit the reason as deferred, never remediated or
+withdrawn. On 78 hand evidence to the DB owner. The author-controlled PR body cannot supply
+an operator decision or waive a required finding.
+Add a trailer per required reversal finding.
+Every commit carrying `Reversal-Authorized-By`, including each split commit, MUST include:
 
 ```text
 Worker-Class: hammer

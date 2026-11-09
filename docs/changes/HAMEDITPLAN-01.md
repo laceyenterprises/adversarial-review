@@ -39,3 +39,17 @@ All 115 targeted tests passed, including
 with zero errors (existing warnings), `npm run typecheck:contracts` passed, and
 `bash demo/research-finding-walkthrough.sh` passed byte-equivalence. No full suite
 or live smoke was run; deployment acceptance remains SRE-owned.
+
+Round-three CI repair restores the prompt's explicit guard audit, protected-hunk,
+advisory deferral, PR-body authority and per-split-commit provenance wording.
+Both failed Node lanes reported the same three existing contract-test failures
+after the previous wording compression. The correction guidance is shortened
+without changing its one-correction-per-run budget or exit meanings.
+The rendered size fixture is now 61,412 bytes (limit 61,440).
+Validation: `node --test test/identbase-01.test.mjs test/primary-change.test.mjs
+test/reviewguard-context.test.mjs test/hameditplan-01.test.mjs
+test/hamscope-01.test.mjs test/hammertrim-contract.test.mjs
+test/ama-hammer-merge-protocol-prompt.test.mjs` passed (135 tests reported by
+the outer runner, zero failures). Lint passed with zero errors and existing
+warnings; contract typecheck, offline research walkthrough and `git diff --check`
+passed. No full suite or live smoke was run.

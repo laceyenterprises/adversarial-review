@@ -53,3 +53,20 @@ test/ama-hammer-merge-protocol-prompt.test.mjs` passed (135 tests reported by
 the outer runner, zero failures). Lint passed with zero errors and existing
 warnings; contract typecheck, offline research walkthrough and `git diff --check`
 passed. No full suite or live smoke was run.
+
+Final HAM remediation addresses all three non-blocking findings: uncited CI
+repairs correct every non-in-place edit kind with in-place-only feedback;
+cited plans reject the CI-only flag across every edit kind while retaining
+applicable policy deferrals; the prompt prints NO EDIT and exits 20 on advisory
+deferral. The canonical closure runbook reflects these contracts. No findings
+are deferred and no workflow or check configuration changes are included.
+
+Validation: the changed-surface run passed 115 of 116 tests and exposed only a
+40-byte prompt budget overflow. Equivalent wording was shortened; rerunning
+`node --test test/hameditplan-01.test.mjs test/hammertrim-contract.test.mjs`
+passed all 59 tests, including the prompt budget and shell exit checks.
+The earlier changed-surface run also passed all hamscope and merge protocol
+cases. `npm run lint` passed with zero errors (existing warnings),
+`npm run typecheck:contracts` passed, and
+`bash demo/research-finding-walkthrough.sh` passed offline byte-equivalence.
+The full suite remains remote CI's exact-head gate.

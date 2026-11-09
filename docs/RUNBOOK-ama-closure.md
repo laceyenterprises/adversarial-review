@@ -4765,7 +4765,7 @@ Before changing author-introduced lines, the hammer runs
 `reviewedHead`, `editKind` (`author-lines`, `additive` or `in-place`), and the
 affected `path`, `startLine`, `endLine` in reviewed coordinates. Cited plans also
 name `kind` and one-based `findingNumber`. An uncited in-place CI test repair
-instead supplies `requiredCiRepair: true` and omits both citation fields.
+instead supplies `requiredCiRepair: true` and omits both citation fields. Other edit kinds receive in-place-only correction feedback. Cited plans reject `requiredCiRepair: true` for every edit kind, preserving applicable policy refusals.
 In-place repairs preserve behavior; they do not grant reversal authority.
 The literal shapes are in `templates/hammer-prompt.md`.
 The helper reads the review and effective policy and shares `checkReversalFinding`
@@ -4777,7 +4777,7 @@ without editing. Cited in-place CI plans retain their citations and are evaluate
 policy and readable finding evidence before shape correction.
 Review evidence and policy refusals retain their terminal or deferring outcomes.
 Exit 0 allows the planned edit; exit 20 means no edit:
-the advisory finding was captured in the existing findings backlog with a one-line
+the shell prints NO EDIT and exits 20; the advisory finding was captured in the existing findings backlog with a one-line
 deferral reason. Capture failure stops remediation rather than losing the finding.
 The helper runs as the existing review-state database owner when the hammer has
 a different uid. Before capture it checks ownership of the database, directory,

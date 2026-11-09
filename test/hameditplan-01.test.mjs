@@ -45,7 +45,8 @@ test('CI citation fields and malformed locations refuse correctably without gran
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const planFile = join(rootDir, 'plan.json');
   for (const fields of [{ kind: 'blocking', findingNumber: 1 },
-    { editKind: 'in_place' }, { editKind: undefined }, { path: '' }, { startLine: 0 }, { endLine: undefined }]) {
+    { editKind: 'author-lines' }, { editKind: 'additive' }, { editKind: 'in_place' }, { editKind: undefined },
+    { path: '' }, { startLine: 0 }, { endLine: undefined }]) {
     writeFileSync(planFile, JSON.stringify({ ...ci, ...fields }));
     const result = await main(['sample/service', '7', '1', planFile], {
       rootDir, readReviewImpl: async () => review,
@@ -113,7 +114,7 @@ test('template itself exits without editing on first and repeated shape refusals
   const block = template.match(/```bash\n(HAM_EDIT_CORRECTION_FILE=[\s\S]+?)\n```/)[1];
   const executable = block.replace(/\/usr\/bin\/perl[^\n]+\n[^\n]+/, 'mock_check || HAM_EDIT_RC=$?');
   for (const [codes, expectedExits] of [
-    [[21, 0], [21, 0]], [[21, 21], [21, 1]], [[1], [1]], [[20], [0]], [[78], [78]],
+    [[21, 0], [21, 0]], [[21, 21], [21, 1]], [[1], [1]], [[20], [20]], [[78], [78]],
   ]) {
     const runDir = mkdtempSync(join(tmpdir(), 'hameditplan-shell-'));
     t.after(() => rmSync(runDir, { recursive: true, force: true }));
@@ -125,5 +126,19 @@ test('template itself exits without editing on first and repeated shape refusals
       assert.equal(result.stdout.includes('\nEDIT') || result.stdout.startsWith('EDIT'), code === 0);
       if (code === 21) assert.match(result.stdout, /NO EDIT:/);
     }
+  }
+});
+
+test('cited plans reject the CI-only flag for every edit kind', () => {
+  for (const editKind of ['author-lines', 'additive', 'in-place']) {
+    const result = checkHammerEditPlan(review, { ...examples[0], editKind, requiredCiRepair: true });
+    assert.equal(result.action, 'correct');
+    assert.equal(editPlanExitCode(result), 21);
+    assert.match(result.message, /without requiredCiRepair; retain kind and findingNumber/);
+  }
+  for (const editKind of ['author-lines', 'additive', 'unknown', undefined]) {
+    const result = checkHammerEditPlan(review, { ...ci, editKind });
+    assert.equal(result.action, 'correct');
+    assert.match(result.message, /must be in-place for uncited CI repairs/);
   }
 });

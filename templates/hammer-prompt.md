@@ -370,7 +370,7 @@ Strict non-blocking fix:
 {"reviewedHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"non-blocking","findingNumber":1,"path":"src/example.mjs","startLine":2,"endLine":2,"editKind":"author-lines"}
 ```
 Blocking in-place repair: use the blocking shape with `editKind: "in-place"`.
-Run B1's owner setup through `fi` in this shell:
+Run B1 owner setup through `fi` first:
 
 ```bash
 HAM_EDIT_CORRECTION_FILE="<<RUN_DIR>>/hammer-edit-plan-correction-used"
@@ -378,11 +378,13 @@ HAM_EDIT_RC=0
 /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_DISPUTE_RUN[@]}" "$HAM_NODE_BIN" \
   <<ROOT_DIR>>/bin/hammer-edit-plan.mjs <<REPO>> <<PR_NUMBER>> <numeric-review-id> <plan.json> || HAM_EDIT_RC=$?
 if [ "$HAM_EDIT_RC" = 21 ]; then
-  if [ -e "$HAM_EDIT_CORRECTION_FILE" ]; then echo "NO EDIT: correction budget exhausted"; exit 1; fi
+  [ ! -e "$HAM_EDIT_CORRECTION_FILE" ] || { echo "NO EDIT: correction exhausted"; exit 1; }
   : > "$HAM_EDIT_CORRECTION_FILE"
-  echo "NO EDIT: correct plan and rerun"
+  echo "NO EDIT: correct plan"
   exit 21
-elif [ "$HAM_EDIT_RC" != 0 ] && [ "$HAM_EDIT_RC" != 20 ]; then
+elif [ "$HAM_EDIT_RC" = 20 ]; then
+  echo "NO EDIT: deferred to backlog"; exit 20
+elif [ "$HAM_EDIT_RC" != 0 ]; then
   exit "$HAM_EDIT_RC"
 fi
 ```

@@ -9,6 +9,11 @@ references. Record the current pass/fail table at ×1, ×3 and ×6 for MLR-06 wi
 changing production policy or the fold. See [the simulator guide](../../test/sim/README.md)
 for regeneration, evidence boundaries and baseline interpretation.
 
+Final comment-only remediation rejects empty, missing and non-array parked-PR
+requirement lists with an explicit validation error. Rename the nested oracle
+suite to `oracle-suite.mjs` so recursive discovery executes it only through the
+top-level bridge.
+
 The memory search was available and returned no matches for the simulator scope.
 `hq hardening for` resolved the current-head-verdict and hammer-liveness contracts
 but returned no local records. The canonical requirements ledger remains the
@@ -30,6 +35,12 @@ CI check, config, production store, runtime interface or merge policy changes.
 
 ## Verification
 
+- Final remediation: scoped recursive discovery with
+  `node --test 'test/**/*simulator*.test.mjs' 'test/sim/**/*.test.mjs'`
+  passed all 19 tests exactly once, including invalid parked-list regression
+  cases and unchanged baseline reproduction. Scoped ESLint and `git diff --check`
+  passed; lint (zero errors, 152 existing warnings), contract typecheck and the
+  offline research-finding demo also passed. Full-suite execution remains with CI.
 - `node --test test/finalization-simulator.test.mjs`: 18 tests passed, including
   determinism, a deliberately bad policy for each oracle predicate and the full
   234-run recorded baseline.

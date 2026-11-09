@@ -67,6 +67,23 @@ test('generated library covers every row, nine named parked subjects, and all fa
   assert.deepEqual(generate(source).scenarios, library.scenarios.filter(s => !s.id.startsWith('SEV0-')));
   assert.throws(() => generate(JSON.stringify({ requirements: [{ id: 'R-999', scenarioId: 'S-999' }] })), /unmapped/);
 });
+test('parked PR generation requires a non-empty array of known requirement IDs', () => {
+  const input = {
+    requirements: [{ id: 'R-01', scenarioId: 'S-01' }],
+    parkedPRs: [{ repo: 'adversarial-review', pr: 1774, requirementIds: ['R-01'] }],
+  };
+  assert.deepEqual(generate(JSON.stringify(input)).scenarios.at(-1), {
+    id: 'SEV0-2026-11-02-adversarial-review-PR-1774', requirements: ['R-01'], profile: rowRecipes['R-01'][0],
+  });
+  for (const requirementIds of [[], undefined, null, 'R-01', {}]) {
+    input.parkedPRs[0].requirementIds = requirementIds;
+    assert.throws(() => generate(JSON.stringify(input)), {
+      name: 'Error', message: 'parked PR 1774 requires a non-empty requirementIds array',
+    });
+  }
+  input.parkedPRs[0].requirementIds = ['R-999'];
+  assert.throws(() => generate(JSON.stringify(input)), /unknown parked requirement R-999/);
+});
 test('admission refusal is visible as a baseline cap-charge defect; read failures recover', async () => {
   const refusal = await simulate({ id: 'refusal', profile: 'clone-reserve' });
   assert.ok(refusal.transientCharges > 0);

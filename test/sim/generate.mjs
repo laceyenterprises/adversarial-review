@@ -21,6 +21,7 @@ export function generate(source) {
   }
   for (const parked of input.parkedPRs) {
     if (!Number.isSafeInteger(parked.pr) || !['agent-os', 'adversarial-review'].includes(parked.repo)) throw Error('invalid parked identity');
+    if (!Array.isArray(parked.requirementIds) || !parked.requirementIds.length) throw Error(`parked PR ${parked.pr} requires a non-empty requirementIds array`);
     for (const id of parked.requirementIds) if (!ids.has(id)) throw Error(`unknown parked requirement ${id}`);
     scenarios.push({ id: `SEV0-2026-11-02-${parked.repo}-PR-${parked.pr}`, requirements: parked.requirementIds,
       profile: rowRecipes[parked.requirementIds[0]][0] });

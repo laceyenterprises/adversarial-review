@@ -12,6 +12,9 @@ Run the ordinary test entry point (also discovered by `npm test`):
 node --test test/finalization-simulator.test.mjs
 ```
 
+The bridge imports `oracle-suite.mjs`, whose filename avoids duplicate discovery
+by recursive `*.test.mjs` runners.
+
 `clock.mjs` orders events by virtual time and insertion order. A seeded PRNG
 jitters read completion; supplied CPU/load evidence drives the shared
 `loadAwareTimeoutMs` primitive with finite ceilings. Reads and operation durations
@@ -67,6 +70,8 @@ records or prose. It includes all 61 requirements and nine named parked subjects
 A future requirements row needs a reviewed recipe before regeneration succeeds.
 The generator's coverage test uses a synthetic source, so tests need no companion
 checkout. Re-run generation against the canonical ledger when its rows change.
+Each parked PR must provide a non-empty `requirementIds` array containing only
+known requirement IDs; invalid lists are rejected before selecting a recipe.
 
 ## Baseline and limits
 

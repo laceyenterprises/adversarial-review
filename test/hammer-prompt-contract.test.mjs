@@ -127,7 +127,7 @@ exec ${shellQuote(realGit)} "$@"
     launchProvenance: { launchRequestId: 'lrq_contract', workerClass: 'hammer' },
     ADVERSARIAL_DISPATCH_READS_ENABLED: '1',
   }));
-  writeFileSync(join(run, 'close-controller.sh'), '#!/bin/bash\nexit 0\n');
+  writeFileSync(join(run, 'close-controller.sh'), '#!/bin/bash\nexit 0\n', { mode: 0o755 });
   Object.assign(env, {
     HAM_BASE_HEAD: reviewed, HAM_REVIEWED_SHA: reviewed, HAM_TARGET_REMEDIATION_SHA: head,
     POST_REMEDIATION_SHA: head, HAM_CONFLICT_SOURCE: reviewed, HAM_CONFLICT_BASE: base,
@@ -182,6 +182,55 @@ exec ${shellQuote(realGit)} "$@"
   });
   return { dir, run, head, reviewed, base, env, render, execute };
 }
+
+test('offline transport fixtures handle blob queries and reject unknown projections', async t => {
+  const f = fixture(t);
+  const blob = await f.execute('git rev-parse HEAD:example.txt');
+  assert.equal(blob.status, 0, blob.stderr);
+  for (const query of ['', '?encoding=base64']) {
+    const result = await f.execute(`gh api repos/fixture/repo/git/blobs/${blob.stdout.trim()}${query}`);
+    assert.equal(result.status, 0, result.stderr);
+    const value = JSON.parse(result.stdout);
+    assert.equal(value.encoding, 'base64');
+    assert.equal(Buffer.from(value.content, 'base64').toString(), 'author\n');
+    assert.equal(value.size, Buffer.byteLength('author\n'));
+  }
+  const endpoint = `repos/fixture/repo/commits/${f.head}`;
+  const supported = await f.execute(`gh api ${endpoint} --jq '{sha, verification: .commit.verification}'`);
+  assert.equal(supported.status, 0, supported.stderr);
+  assert.deepEqual(JSON.parse(supported.stdout), {
+    sha: f.head, verification: { verified: true, reason: 'valid' },
+  });
+  const unknown = await f.execute(`gh api ${endpoint} --jq '{unsupported: .sha}'`);
+  assert.notEqual(unknown.status, 0);
+  assert.match(unknown.stderr, /unhandled fixture jq: \{unsupported: \.sha\}/);
+  assert.equal(unknown.stdout, '');
+  const controller = await f.execute(shellQuote(join(f.run, 'close-controller.sh')));
+  assert.equal(controller.status, 0, controller.stderr);
+});
+
+test('fixture sleeps advance synchronously and support Promise chaining', t => {
+  const f = fixture(t);
+  for (const [entrypoint, module, symbol] of [
+    ['hammer-context', 'closure-gate-read', 'closureGateClock'],
+    ['hammer-conflict-primary', 'hammer-api-network', 'hammerNetworkClock'],
+    ['hammer-controller', 'hammer-controller', 'launchEnvironmentClock'],
+  ]) {
+    const source = `
+      import assert from 'node:assert/strict';
+      process.argv[1] = ${JSON.stringify(`/synthetic/${entrypoint}.mjs`)};
+      await import(${JSON.stringify(preload)});
+      const { ${symbol}: clock } = await import(${JSON.stringify(join(root, `src/ama/${module}.mjs`))});
+      assert.equal(clock.now(), 0);
+      const pending = clock.sleep(25);
+      assert.equal(clock.now(), 25);
+      await pending.then(() => assert.equal(clock.now(), 25));
+    `;
+    execFileSync(process.execPath, ['--input-type=module', '-e', source], {
+      cwd: f.dir, env: { ...f.env, NODE_OPTIONS: '' }, timeout: 5000, stdio: 'pipe',
+    });
+  }
+});
 
 test('every concrete hammer prompt helper call executes against the real helper offline', { timeout: 30_000 }, async t => {
   const f = fixture(t);

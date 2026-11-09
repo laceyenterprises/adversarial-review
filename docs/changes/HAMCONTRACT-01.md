@@ -16,6 +16,12 @@ disposable Git history and stores, PATH fakes, existing dispatch transport
 fixtures, injected clocks and denied network access. No known-defect skip is
 needed for the valid examples on this base.
 
+Final comment-only remediation makes supported jq projections explicit and
+rejects unknown object projections, strips blob-endpoint query parameters,
+returns promises from fake sleeps while advancing time synchronously, and
+makes the synthetic close controller directly executable. Focused regression
+checks cover these boundaries without changing production helpers or policy.
+
 ## Interface changes
 
 None. The existing test runner discovers `test/hammer-prompt-contract.test.mjs`.
@@ -46,3 +52,10 @@ accepted one operator step and zero automated actions.
 The full host suite is intentionally not run under this ticket's scoped-test
 constraint. Post-merge SRE must retain the normal main-suite result and the
 red/green commit evidence before declaring verification complete.
+
+Final-round targeted validation: all five tests passed, including the fixture
+edge cases and the existing 37 command occurrences / six JSON examples.
+Changed-file ESLint and `git diff --check` passed. Dependencies were installed
+from the local npm cache with `npm ci --offline --no-audit --no-fund`.
+Repository lint passed with zero errors and 152 existing warnings; contract
+typechecking and the byte-equivalence demo also passed.

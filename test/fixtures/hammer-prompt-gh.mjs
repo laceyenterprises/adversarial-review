@@ -52,7 +52,8 @@ else if (/\/compare\//.test(path)) {
     return { mode, type, sha, path };
   }) };
 } else if (/\/git\/blobs\//.test(path)) {
-  const bytes = execFileSync('git', ['cat-file', 'blob', path.split('/git/blobs/')[1]], { timeout: 5000 });
+  const blobSha = path.split('/git/blobs/')[1].split('?')[0];
+  const bytes = execFileSync('git', ['cat-file', 'blob', blobSha], { timeout: 5000 });
   value = { encoding: 'base64', content: bytes.toString('base64'), size: bytes.length };
 } else if (/\/commits\//.test(path)) {
   const sha = path.split('/commits/')[1].split('?')[0];
@@ -62,16 +63,39 @@ else if (/\/compare\//.test(path)) {
 } else throw Error(`unhandled fixture GitHub path: ${path}`);
 if (args.includes('--jq')) {
   const jq = args[args.indexOf('--jq') + 1];
+  const commitFields = '{sha, commit: {message: .commit.message, author: .commit.author, committer: .commit.committer}, author, committer, parents: [.parents[] | {sha}]}';
+  const pick = (object, keys) => Object.fromEntries(keys.map(key => [key, object[key] ?? null]));
+  const projectCommit = entry => ({
+    ...pick(entry, ['sha', 'author', 'committer']),
+    commit: pick(entry.commit, ['message', 'author', 'committer']),
+    parents: entry.parents.map(parent => pick(parent, ['sha'])),
+  });
+  const compareMetadata = () => ({
+    ...pick(value, ['status', 'total_commits']),
+    merge_base_commit: pick(value.merge_base_commit, ['sha']),
+  });
   if (jq === '.') { /* identity projection from the history reader */ }
   else if (jq === '.head.sha') value = value.head.sha;
   else if (jq === '.base.sha') value = value.base.sha;
   else if (jq === '.content') value = value.content;
   else if (jq === '.sha') value = value.sha;
-  else if (jq.startsWith('{')) {
-    // History-reader object projections consume a subset of these fixture
-    // objects. Keep verification's top-level projection faithful.
-    if (jq === '{sha, verification: .commit.verification}') value = { sha: value.sha, verification: value.commit.verification };
+  else if (jq === '{sha, verification: .commit.verification}') {
+    value = { sha: value.sha, verification: value.commit.verification };
   }
+  else if (jq === '{status, total_commits, merge_base_commit: {sha: .merge_base_commit.sha}}') {
+    value = compareMetadata();
+  }
+  else if (jq === `{status, total_commits, merge_base_commit: {sha: .merge_base_commit.sha}, commits: [.commits[] | ${commitFields}]}`) {
+    value = { ...compareMetadata(), commits: value.commits.map(projectCommit) };
+  }
+  else if (jq === `${commitFields.slice(0, -1)}, files: [.files[] | {filename, previous_filename, status, sha, patch, additions, deletions}]}`) {
+    value = { ...projectCommit(value), files: value.files.map(entry =>
+      pick(entry, ['filename', 'previous_filename', 'status', 'sha', 'patch', 'additions', 'deletions'])) };
+  }
+  else if (jq === '{tree: [.tree[] | {path, mode, type, sha}], truncated}') {
+    value = { tree: value.tree.map(entry => pick(entry, ['path', 'mode', 'type', 'sha'])), truncated: value.truncated };
+  }
+  else if (jq === '{encoding, content, size}') value = pick(value, ['encoding', 'content', 'size']);
   else throw Error(`unhandled fixture jq: ${jq}`);
 }
 if (args.includes('-i') || args.includes('--include')) process.stdout.write('HTTP/2.0 200 OK\r\n\r\n');

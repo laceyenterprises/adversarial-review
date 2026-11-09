@@ -35,7 +35,7 @@ if (process.argv[1]?.endsWith('/hammer-controller.mjs')) {
 }
 for (const clock of clocks) {
   clock.now = () => at;
-  clock.sleep = ms => { at += ms; };
+  clock.sleep = async ms => { at += ms; };
 }
 os.loadavg = () => [0, 0, 0];
 const offline = () => { throw Error('conformance fixture forbids network'); };

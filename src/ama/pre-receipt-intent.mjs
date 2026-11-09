@@ -1,6 +1,7 @@
 // LAC-2081: a dead caller is not proof that its dispatch child never enqueued.
 import fsExt from 'fs-ext';
 import { setTimeout as delay } from 'node:timers/promises';
+import { resolveHqRoot } from '../hq-root.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { closeSync, mkdirSync, openSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -232,7 +233,6 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
     options.signal?.throwIfAborted();
     const matchingReceipt = !legacy && receipt && receipt.idempotency_key === record.dispatchIdempotencyKey
       && typeof receipt.launch_request_id === 'string' && receipt.launch_request_id.startsWith('lrq_')
-      && isHammerWorkerClass(receipt.worker_class)
       && closerLaunchMatches(record, receipt, { uniqueKeyReceipt: true });
     if (!legacy && receipt && !matchingReceipt) {
       evidence = { ...evidence, receiptIdentityMismatch: {
@@ -385,7 +385,18 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
       // and lease outcomes. It takes the intent lock itself, after persistence.
       release();
       const { reconcileAmaCloserLeaseAsync } = await import('./dispatch-closer.mjs');
-      await reconcileAmaCloserLeaseAsync({ ...options, rootDir, repo: record.repo,
+      const observerOptions = Object.fromEntries(Object.entries({
+        env: options.env, signal: options.signal, logger: options.logger,
+        cleanupScratchImpl: options.cleanupScratchImpl,
+        readLaunchRequestStatusImpl: options.readLaunchRequestStatusImpl,
+        readMergedSignalImpl: options.readMergedSignalImpl,
+        readBuildCompletionSignalForPrImpl: options.readBuildCompletionSignalForPrImpl,
+        readBuildCompletionProducerEvidenceImpl: options.readBuildCompletionProducerEvidenceImpl,
+        // The intent PR reader has a different input and output contract.
+        readPullRequestStateImpl: options.readCloserPullRequestStateImpl,
+      }).filter(([, value]) => value !== undefined));
+      await reconcileAmaCloserLeaseAsync({ ...observerOptions, rootDir, repo: record.repo,
+        hqRoot: options.hqRoot || record.hqRoot || resolveHqRoot(options.env),
         prNumber: record.prNumber, probedLaunchRequestId: receipt.launch_request_id, now });
       reconciledRecord = readAmaCloserDispatchRecord(rootDir, identity) || next;
     }

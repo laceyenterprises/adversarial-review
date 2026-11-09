@@ -15,7 +15,12 @@ for incident evidence and the upstream projection follow-up.
 `settle-legacy-closer-intent.mjs` can recover a terminal keyed receipt rather
 than refusing every existing receipt. Apply retains the owner/reason/audit
 requirements and records `settled-terminal-receipt` on completed settlement;
-unresolved terminal evidence reports `receipt-settlement-pending`.
+unresolved terminal evidence reports `receipt-settlement-pending` and audits
+`receipt-adopted-settlement-pending` with persisted state. Re-running is safe.
+Terminal recovery resolves the HQ audit root explicitly, isolates observer
+reader contracts and bounds nested capacity-scan reads. Exact-ticket recovery
+preserves pinned non-hammer and legacy missing-class compatibility. Settled
+receipts no longer consume fleet capacity.
 Dry-run previews recovery without writes. Existing lease states, merge
 authority, retry accounting and absence-proof requirements remain unchanged.
 
@@ -35,3 +40,19 @@ Tests ran individually with `NETGUARD_LOG=<file>` and
 
 The full suite and demo were not run under the ticket's touched-tests-only
 constraint. No live state was modified.
+
+Remediation validation after rebasing onto fresh `origin/main`:
+
+- Bounded targeted `PRERECEIPTADOPT-01` tests in the pre-receipt and background
+  dispatch suites pass (34 top-level results; the background wrapper also runs
+  and passes all 148 watcher cases).
+- Focused capacity-settlement and independent PR-reader regressions pass (2/2).
+- `npm run lint`: zero errors (existing warnings).
+- `npm run typecheck:contracts`, `node scripts/validate-data-model-catalog.mjs`
+  and `git diff --check`: pass.
+- The SMV independent-graph test fails with graph hash `127a3252…` versus
+  `12aa71a8…`; the identical failure reproduces on clean rebased HEAD
+  `bd493eb042958ab5e75463ace2208daa112ac898`. No graph/guard is changed.
+  Reviewed affected source projections were refreshed and separately verified.
+
+The full suite and demo were not run under the remediation's targeted-only rule.

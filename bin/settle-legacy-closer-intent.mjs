@@ -69,12 +69,14 @@ export async function main(args = process.argv.slice(2), options = {}) {
   const output = { dryRun, ...identity, conclusive, status: result.status,
     reason: result.reason || recoveryReason
       || result.record?.preReceiptReconciliation?.reason || 'not-a-pre-receipt-intent',
-    evidence: result.evidence || null };
+    evidence: recovered && !dryRun ? { ...result.evidence, persistedRecordState: result.record.state,
+      persistedLeaseStatus: lease?.status || null, terminalOutcome: lease?.terminalOutcome || null }
+      : result.evidence || null };
   const settledOutcome = recovered ? 'settled-terminal-receipt' : 'settled-no-dispatch';
-  if (!dryRun) output.auditPath = audit({ outcome: conclusive ? settledOutcome : `refused:${output.reason}`,
+  if (!dryRun) output.auditPath = audit({ outcome: conclusive ? settledOutcome : recovered ? 'receipt-adopted-settlement-pending' : `refused:${output.reason}`,
     evidence: output.evidence });
   print(JSON.stringify(output));
-  if (!conclusive) throw new Error(`Closer intent settlement refused: ${output.reason}`);
+  if (!conclusive && !recovered) throw new Error(`Closer intent settlement refused: ${output.reason}`);
   return output;
 }
 

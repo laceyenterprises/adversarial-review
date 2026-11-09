@@ -1734,7 +1734,7 @@ for (const rekeyed of [false, true]) test(`PRERECEIPTADOPT-01 watcher resumes af
     readIntentReceiptImpl: async () => ({ ok: true, rows: [row] }),
     readLaunchRequestStatusImpl: async () => ({ ok: true, row, retryChain: [] }),
     readMergedSignalImpl: async () => ({ ok: false }),
-    readPullRequestStateImpl: async () => ({ state: 'OPEN', headRefOid: HEAD }),
+    readCloserPullRequestStateImpl: async () => ({ state: 'OPEN', headRefOid: HEAD }),
     cleanupScratchImpl: () => {},
   };
   args.closerLeaseLivenessOptions = { isProcessAlive: () => false };

@@ -1,3 +1,11 @@
+PRERECEIPTADOPT-01 remediation preserves existing closer states and transitions.
+Terminal recovery reads the HQ audit root before finalizing shared lease outcomes;
+exact-ticket receipts retain pinned and legacy missing-class compatibility.
+Settled recovered records consume no fleet capacity. Operator adoption with
+pending settlement records a completed adoption audit with persisted state,
+while ordinary lease reconciliation retains ownership. Reviewed and refreshed
+the affected source projections; existing smoke promises remain unchanged.
+
 HAMMERNOPROGRESS-01 retains existing lifecycle and charge edges. Seven bounded
 first-write receipt kinds earn finite load-aware outcome slices (nominal 3600
 active seconds); an unsuperseded final terminal stop receives a load-aware

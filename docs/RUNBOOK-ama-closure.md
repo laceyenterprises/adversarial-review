@@ -1077,6 +1077,13 @@ live-retry adoption still require the exact closer ticket. Receipt recovery
 persists the launch and promotes the matching lease under the existing snapshot
 CAS. For a terminal receipt it then invokes ordinary terminal reconciliation,
 after releasing the intent lock, including retry-chain and merge evidence reads.
+The observer resolves audits from the explicit HQ root, the stored intent HQ root,
+or the environment HQ root, in that order. Exact-ticket receipts retain support
+for pinned non-hammer classes and absent legacy class metadata; the hammer-class
+restriction applies only to empty-ticket recovery. Capacity scans bound nested
+status, merge and PR reads by the remaining pass budget and exclude settled
+receipts from capacity. The observer has a separate `readCloserPullRequestStateImpl`
+seam; it does not inherit the intent PR reader contract.
 A successful process exit alone never proves a merge; normal success grace,
 auto-merge holds, live retries and unreadable evidence retain their authority.
 The watcher reaches this path for a dead pending owner before its in-flight
@@ -1251,7 +1258,10 @@ be recovered with the same identity rules as native reconciliation, including a
 missing ticket. Apply records `settlement-authorized` before recovery and
 `settled-terminal-receipt` only after ordinary terminal reconciliation settles
 the matching lease. A live receipt is refused as `closer-receipt-exists`; an
-unsettled terminal receipt reports `receipt-settlement-pending`. Dry-run previews
+unsettled terminal receipt reports `receipt-settlement-pending` and records
+`receipt-adopted-settlement-pending`, with persisted record/lease states in audit
+evidence. Adoption is a completed mutation, even when settlement remains pending;
+re-running is safe because the ordinary observer owns the promoted lease. Dry-run previews
 receipt recovery without writes; it does not prove subsequent terminal settlement.
 Conflicting, multiply identified or same-ticket wrong-head receipts remain
 ambiguous even when terminal; an empty ticket query cannot settle them.

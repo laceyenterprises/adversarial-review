@@ -17,6 +17,7 @@ import { amaCloserDispatchFilePath, readAmaCloserDispatchRecord, updateAmaCloser
 import { readHammerRetryCapLedger, recordHammerRetryDispatch, hammerRetryCapFilePath } from '../src/ama/hammer-retry-cap.mjs';
 import { main as settleLegacyIntent } from '../bin/settle-legacy-closer-intent.mjs';
 import { readLaunchRequestByIdempotencyKeyAsync, readLaunchRequestsForTicketSinceAsync } from '../src/session-ledger-read-adapter.mjs';
+import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import { reconcileAndAbandonAmaCloserLease } from '../src/ama/abandoned-closer-lease.mjs';
 
 const identity = { repo: 'fixture/repo', prNumber: 8, headSha: 'a'.repeat(40) };
@@ -415,7 +416,7 @@ function terminalReceiptOptions(f, row, retryChain = []) {
       return { ok: true, row, retryChain };
     },
     readMergedSignalImpl: async () => ({ ok: false }),
-    readPullRequestStateImpl: async () => ({ state: 'OPEN', headRefOid: identity.headSha }),
+    readCloserPullRequestStateImpl: async () => ({ state: 'OPEN', headRefOid: identity.headSha }),
     cleanupScratchImpl: () => {},
   };
 }
@@ -528,10 +529,15 @@ for (const mode of ['live-receipt', 'audit-failure', 'unreadable-retries']) {
       ...(mode === 'unreadable-retries'
         ? { readLaunchRequestStatusImpl: async () => ({ ok: false }) } : {}),
     };
-    await assert.rejects(settleLegacyIntent(
-      operatorArgs(f, ['--apply', '--reason', 'synthetic recovery']), options),
-    mode === 'live-receipt' ? /closer-receipt-exists/
-      : mode === 'unreadable-retries' ? /receipt-settlement-pending/ : undefined);
+    const apply = () => settleLegacyIntent(
+      operatorArgs(f, ['--apply', '--reason', 'synthetic recovery']), options);
+    if (mode === 'unreadable-retries') {
+      const result = await apply();
+      assert.equal(result.conclusive, false);
+      const rows = readFileSync(result.auditPath, 'utf8').trim().split('\n').map(JSON.parse);
+      assert.equal(rows.at(-1).outcome, 'receipt-adopted-settlement-pending');
+      assert.equal(result.evidence.persistedLeaseStatus, 'dispatched');
+    } else await assert.rejects(apply(), mode === 'live-receipt' ? /closer-receipt-exists/ : undefined);
     if (mode === 'unreadable-retries') assert.equal(readAmaCloserLease(f.rootDir, identity).status, 'dispatched');
     else {
       assert.deepEqual(readAmaCloserLease(f.rootDir, identity), lease);
@@ -1317,3 +1323,86 @@ for (const state of ['dispatching', 'dispatch-interrupted']) {
     });
   }
 }
+
+for (const worker_class of ['codex', 'claude-code', 'gemini', undefined]) {
+  test(`PRERECEIPTADOPT-01: exact-ticket receipt preserves class compatibility ${worker_class}`, async t => {
+    const f = fixture(t, { workerClass: worker_class || 'codex' });
+    const result = await f.reconcile({ readIntentReceiptImpl: async () => ({ ok: true,
+      rows: [{ ...receipt, worker_class }] }) });
+    assert.equal(result.status, 'receipt-recovered');
+    assert.equal(readAmaCloserLease(f.rootDir, identity).status, 'dispatched');
+  });
+}
+
+for (const outcome of ['deferred', 'succeeded']) for (const rootSource of ['record', 'option', 'env']) {
+  test(`PRERECEIPTADOPT-01: ${rootSource} HQ audit preserves ${outcome} ownership`, async t => {
+    const hqRoot = mkdtempSync(join(tmpdir(), 'intent-hq-'));
+    t.after(() => rmSync(hqRoot, { recursive: true, force: true }));
+    const f = fixture(t, rootSource === 'record' ? { hqRoot } : {});
+    const row = { ...receipt, ticket_ref: null, status: 'succeeded' };
+    writeAmaAuditEntry({ hqRoot, ...identity, now,
+      attempt: { outcome, launchRequestId: row.launch_request_id, reason: 'operator-hold' } });
+    const options = { ...terminalReceiptOptions(f, row),
+      ...(rootSource === 'option' ? { hqRoot } : {}),
+      ...(rootSource === 'env' ? { env: { HQ_ROOT: hqRoot } } : {}),
+      readPullRequestStateImpl: async () => ({ state: 'OPEN' }),
+      readCloserPullRequestStateImpl: undefined,
+    };
+    const settled = await reconcileAndAbandonAmaCloserLease(f.rootDir,
+      readAmaCloserLease(f.rootDir, identity), options);
+    assert.equal(settled.terminalOutcome, outcome);
+    assert.equal(acquireAmaCloserLease({ rootDir: f.rootDir, ...identity,
+      watcherPid: 54321, now }).acquired, false);
+    assert.equal(f.read().terminalOutcome, outcome);
+  });
+}
+
+test('PRERECEIPTADOPT-01: capacity scan excludes settled receipt recovery', async t => {
+  const f = fixture(t);
+  const row = { ...receipt, status: 'failed' };
+  const result = await reconcileAmaCloserDispatches(f.rootDir, {
+    ...terminalReceiptOptions(f, row),
+  });
+  assert.equal(f.read().terminalOutcome, 'failed-without-merge');
+  assert.equal(result.active[0].holdsCapacity, false);
+});
+
+test('PRERECEIPTADOPT-01: nested status read respects capacity scan budget', async t => {
+  const f = fixture(t);
+  const row = { ...receipt, status: 'failed' };
+  const result = await reconcileAmaCloserDispatches(f.rootDir, {
+    ...terminalReceiptOptions(f, row), scanBudgetMs: 50, launchReadTimeoutMs: 10,
+    readLaunchRequestStatusImpl: async ({ signal }) => {
+      assert.ok(signal);
+      return new Promise(() => {});
+    },
+  });
+  assert.equal(readAmaCloserLease(f.rootDir, identity).status, 'dispatched');
+  assert.equal(result.active[0].holdsCapacity, true);
+});
+
+test('PRERECEIPTADOPT-01: observer PR reader preserves auto-merge hold independently of intent reader', async t => {
+  const f = fixture(t, { lastAttemptedAt: '2026-10-22T13:59:00Z' }, false);
+  acquireAmaCloserLease({ rootDir: f.rootDir, ...identity,
+    now: f.record.lastAttemptedAt, watcherPid: 12345 });
+  const row = { ...receipt, status: 'succeeded' };
+  let intentReads = 0;
+  let observerReads = 0;
+  await f.reconcile({ ...terminalReceiptOptions(f, row),
+    readPullRequestStateImpl: async (record, options) => {
+      intentReads++;
+      assert.equal(record.prNumber, identity.prNumber);
+      assert.ok(options);
+      return { state: 'OPEN', merged: false };
+    },
+    readCloserPullRequestStateImpl: async ({ repo, prNumber }) => {
+      observerReads++;
+      assert.equal(repo, identity.repo);
+      assert.equal(prNumber, identity.prNumber);
+      return { state: 'OPEN', autoMergeRequest: { enabledAt: started }, headRefOid: identity.headSha };
+    },
+  });
+  assert.equal(intentReads, 1);
+  assert.equal(observerReads, 1);
+  assert.equal(readAmaCloserLease(f.rootDir, identity).status, 'dispatched');
+});

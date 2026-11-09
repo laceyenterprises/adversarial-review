@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fsExt from 'fs-ext';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -282,27 +283,66 @@ test('HAMLANEWAIT-01: waking rechecks lane transfer and never invokes the old le
   let release = adapter.tryLock(lane);
   assert.equal(typeof release, 'function');
   t.after(() => release?.());
-  let clockReads = 0;
+  let refusals = 0, waitingClockReads = 0;
+  const flockSync = fsExt.flockSync;
+  t.mock.method(fsExt, 'flockSync', (...args) => {
+    try { return flockSync(...args); }
+    catch (error) {
+      if (['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) refusals++;
+      throw error;
+    }
+  });
   const result = await runLegacyLaneWrite({ rootDir: f.rootDir, ...lane, readConfig: () => ({}),
     deadline: '2026-10-25T00:00:03.000Z', now: () => {
-      clockReads++;
-      if (clockReads === 1) {
-        // The initial tryLock has refused; waitForLock is reading its budget.
-        assert.equal(adapter.tryLock(lane), null);
-        return at;
-      }
-      if (clockReads === 2) {
-        // Hand off during the waiter's post-subscription acquisition recheck.
-        // This pins the transfer fence without depending on fs.watch delivery
-        // or host scheduling speed. Native wake delivery has a sibling test in
-        // finalization-queue-owner.test.mjs.
+      // Ignore any clock reads before an actual failed acquisition. Release
+      // only at the waiter's acquisition recheck after its budget read.
+      if (refusals > 0 && ++waitingClockReads === 2) {
         release();
         release = null;
       }
-      return '2026-10-25T00:00:01.000Z';
+      return at;
     }, exec: () => assert.fail('stale route must refuse') });
-  assert.ok(clockReads >= 2, 'must pass through the contended wait handoff');
+  assert.equal(refusals, 1, 'initial routing acquisition must encounter contention');
+  assert.ok(waitingClockReads >= 2, 'must pass through the contended wait handoff');
   assert.equal(release, null, 'the waiter must reach the acquisition recheck');
+  assert.equal(result.reason, 'lane-transfer-required');
+  assert.equal(result.outcome, undefined);
+  assert.deepEqual(f.routing.read(lane).legacyWriters, []);
+  assert.equal(f.routing.read(lane).route.executor, 'queue-v2');
+});
+
+test('HAMLANEWAIT-01: native watcher wake rechecks the route after a pending wait', { timeout: 5000 }, async t => {
+  const f = fixture(t), adapter = resolveQueueOwnerAdapter(f.store);
+  assert.equal((await transfer(f, queue)).ok, true);
+  let release = adapter.tryLock(lane);
+  assert.equal(typeof release, 'function');
+  t.after(() => release?.());
+  let refusals = 0, releasedAfterRecheck = false, wakeAcquisitions = 0;
+  const flockSync = fsExt.flockSync;
+  t.mock.method(fsExt, 'flockSync', (...args) => {
+    try {
+      const result = flockSync(...args);
+      if (releasedAfterRecheck) wakeAcquisitions++;
+      return result;
+    } catch (error) {
+      if (['EAGAIN', 'EWOULDBLOCK'].includes(error.code) && ++refusals === 2) {
+        // Both the initial attempt and synchronous subscription recheck failed.
+        // Release on the next event-loop turn, after waitForLock is pending.
+        setImmediate(() => {
+          release();
+          release = null;
+          releasedAfterRecheck = true;
+        });
+      }
+      throw error;
+    }
+  });
+  const result = await runLegacyLaneWrite({ rootDir: f.rootDir, ...lane, readConfig: () => ({}),
+    deadline: new Date(Date.now() + 3000).toISOString(),
+    exec: () => assert.fail('watcher wake must fence the stale legacy route') });
+  assert.ok(refusals >= 2, 'the subscription recheck must also encounter contention');
+  assert.equal(releasedAfterRecheck, true);
+  assert.equal(wakeAcquisitions, 1, 'must acquire after the synchronous recheck via the native wake');
   assert.equal(result.reason, 'lane-transfer-required');
   assert.equal(result.outcome, undefined);
   assert.deepEqual(f.routing.read(lane).legacyWriters, []);

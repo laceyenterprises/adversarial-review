@@ -74,3 +74,10 @@ history-read abort cleanup. Removing that check preserves the existing abort
 audit and lease release; the dispatch preflight still requires the helper.
 The affected targeted files were rerun after that correction. The full suite
 is not claimed green.
+
+HAM closure repairs the credential regression test to execute the prompt’s shared
+shell helper after extraction, retaining fresh-token, exact-output and single-refresh
+assertions. The credential suite passes all 105 tests; the helper suite passes all
+16 tests with the live dispatch head and provisional-report path removed from the
+synthetic fixture environment. The helper launch suite also passes. Full-suite
+validation remains assigned to exact-head remote CI.

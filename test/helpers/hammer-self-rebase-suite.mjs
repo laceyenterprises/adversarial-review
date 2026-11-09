@@ -13,6 +13,8 @@ const root = resolve(import.meta.dirname, '../..');
 const helper = join(root, 'test/fixtures/hammer-self-rebase.mjs');
 const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
 const subprocessTimeout = loadAwareTimeoutMs(45_000);
+const nodeCompileCache = mkdtempSync(join(tmpdir(), 'hammer-node-cache-'));
+nodeTest.after(() => rmSync(nodeCompileCache, { force: true, recursive: true }));
 const fixtureClockStart = 1700000000;
 const ciWaitSeconds = 900;
 
@@ -29,6 +31,9 @@ function fixture(t, scenario) {
     GIT_ALLOW_PROTOCOL: 'file', GIT_AUTHOR_NAME: 'Fixture', GIT_COMMITTER_NAME: 'Fixture',
     GIT_AUTHOR_EMAIL: 'fixture@example.invalid', GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
     FIXTURE_DIR: dir, SCENARIO: scenario, REAL_NODE: process.execPath, REAL_GIT: realGit,
+    // Reuse compiled modules across short-lived helpers in this test file.
+    // The cache is disposable and never shares the caller's cache.
+    NODE_COMPILE_CACHE: nodeCompileCache,
     HAM_CONTROLLER_RECORD: '', HAM_CONTROLLER_CANCELLED: '0',
     HQ_LAUNCH_REQUEST_ID: '', AGENT_OS_WORKER_LRQ_ID: '', LAUNCH_REQUEST_ID: '',
     HAM_HQ_ROOT: dir, HAM_PROGRESS_FILE: '',
@@ -72,21 +77,38 @@ function fixture(t, scenario) {
   writeFileSync(join(dir, 'clock'), String(fixtureClockStart));
   const executable = (name, source) => writeFileSync(join(bin, name), source, { mode: 0o755 });
   executable('gh', '#!/bin/sh\nexec "$REAL_NODE" "$FIXTURE_HELPER" gh "$@"\n');
-  executable('date', '#!/bin/sh\nif [ "$1" = +%s ]; then cat "$FIXTURE_DIR/clock"; else exec /bin/date "$@"; fi\n');
-  executable('sleep', `#!/bin/sh
-echo "$1" >> "$FIXTURE_DIR/sleeps"
-value=$(cat "$FIXTURE_DIR/clock")
-increment="$1"
-if [ "$SCENARIO" = ci-shared-deadline ] && [ "$value" -eq 1700000000 ]; then increment=600; fi
-# Model a delayed wakeup before the last second of the fixed 900s window.
-# Jump on the first sleep, after the initial pending check, regardless of cadence.
-if [ "$SCENARIO" = prepredicate-timeout ] && [ "$(wc -l < "$FIXTURE_DIR/sleeps")" -eq 1 ]; then
-  increment=$((${fixtureClockStart} + ${ciWaitSeconds} - 1 - value))
-fi
-echo $((value + increment)) > "$FIXTURE_DIR/clock"
+  // Perl's direct exec uses the helper's /usr/bin/env node shebang. Route
+  // that entrypoint through the same fixture runtime as HAM_NODE_BIN.
+  executable('node', '#!/bin/sh\nexec "$FIXTURE_DIR/bin/node-fixture" "$@"\n');
+  // The rendered phases poll in this shell. Advance the same file-backed clock
+  // with builtins instead of spawning date/sleep/cat processes for every poll.
+  // Executable shims keep child processes on that clock too.
+  writeFileSync(join(dir, 'clock-functions.sh'), `
+date() {
+  if [ "\${1:-}" = +%s ]; then printf '%s\\n' "$(< "$FIXTURE_DIR/clock")"
+  else /bin/date "$@"; fi
+}
+sleep() {
+  printf '%s\\n' "$1" >> "$FIXTURE_DIR/sleeps"
+  local value increment
+  value=$(< "$FIXTURE_DIR/clock")
+  increment="$1"
+  if [ "$SCENARIO" = ci-shared-deadline ] && [ "$value" -eq 1700000000 ]; then increment=600; fi
+  if [ "$SCENARIO" = prepredicate-timeout ] && [ "$(wc -l < "$FIXTURE_DIR/sleeps")" -eq 1 ]; then
+    increment=$((${fixtureClockStart} + ${ciWaitSeconds} - 1 - value))
+  fi
+  printf '%s\\n' "$((value + increment))" > "$FIXTURE_DIR/clock"
+}
 `);
+  for (const name of ['date', 'sleep']) {
+    executable(name, `#!/bin/bash\nsource "$FIXTURE_DIR/clock-functions.sh"\n${name} "$@"\n`);
+  }
   executable('node-fixture', `#!/bin/bash
 case "$1" in
+  */hammer-helper-step.mjs)
+    # Helper budgets and process cleanup have their own integration suite.
+    # This fixture exercises phase ordering against the synthetic executors.
+    shift 5; exec "$@" ;;
   */metered-gh.mjs) if [ "$2" = exec-git ]; then shift 2; exec git "$@"; fi; shift 2; exec gh "$@" ;;
   */hammer-pr-read.mjs) shift 3; exec gh pr view "$@" ;;
   */legacy-lane-write.mjs) shift; exec "$REAL_NODE" "$FIXTURE_HELPER" legacy "$@" ;;
@@ -152,7 +174,9 @@ esac
     baseHead: original, validatedHead: rebased, identity: { login: 'hammer-worker', databaseId: 77 },
     range: { verified: true, reviewedHead: original, currentHead: rebased, baseSha: original, commits: [rebased] },
     counts: { total: 2, blocking: 1, nonBlocking: 1 } });
-  const run = (extraEnv = {}) => spawnSync('/bin/bash', ['-c', `
+  const run = (extraEnv = {}) => {
+    const result = spawnSync('/bin/bash', ['-c', `
+source "$FIXTURE_DIR/clock-functions.sh"
 ham_fixture_completion() { :; }
 if [ "$SCENARIO" = dirty ]; then echo dirty >> surface.txt; fi
 source "$FIXTURE_DIR/hammer-verify-head.sh"
@@ -228,6 +252,10 @@ status=$?
 echo "merge=$status outcome=$HAM_PHASE_OUTCOME held=$HAM_MERGE_LEASE_HELD"
 exit "$status"
 `], { cwd: scratch, env: { ...env, ...extraEnv }, encoding: 'utf8', timeout: subprocessTimeout });
+    assert.doesNotMatch(result.stderr, /HAM helper step=/,
+      'every phase scenario must route explicit and shebang helper launches through the fixture runtime');
+    return result;
+  };
   return { dir, scratch, original, rebased, nextBase, nextRebased, run, git };
 }
 

@@ -20,6 +20,12 @@ const LOCK_RETRY_MS = 50;
 const LOCK_TIMEOUT_MS = 30_000;
 const DEFAULT_RESOURCE = 'core';
 const UNKNOWN_RATE_LIMIT_RESET_MS = 60_000;
+// Keep the default instance's clock injectable too, so stubbed transports can
+// exercise reset expiry and backoff without waiting on wall time.
+export const rateLimitClock = {
+  now: () => Date.now(),
+  sleep: ms => defaultSleep(ms),
+};
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const TOOL_ROOT = dirname(MODULE_DIR);
 const DEFAULT_SHARED_STATE_PATH = resolve(TOOL_ROOT, 'data', 'api-cache', 'rate-limit-state.json');
@@ -583,8 +589,8 @@ function extractRateLimitObservation(headers, { observedAt = new Date().toISOStr
 function createRateLimitThrottle({
   env = process.env,
   logger = console,
-  nowMs = () => Date.now(),
-  sleepImpl = defaultSleep,
+  nowMs = () => rateLimitClock.now(),
+  sleepImpl = ms => rateLimitClock.sleep(ms),
   sharedStatePath,
   recordApiCallImpl = recordApiCall,
   readFileImpl = readFile,

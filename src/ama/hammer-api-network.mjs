@@ -4,11 +4,14 @@ import { isTransientGhError } from '../gh-cli.mjs';
 import { meteredExecFileSync } from '../metered-gh.mjs';
 
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+// CLI subprocess fixtures can replace sleep before the entrypoint loads.
+// Explicit per-call sleep injection continues to take precedence.
+export const hammerNetworkClock = { sleep: pause };
 
 // Retry transport failures only, preserving the entitled token and expected-head
 // CAS on every mutation attempt. An ambiguous server-side success still fails
 // closed through the lease-protected git fallback if the CAS rejects a retry.
-export async function hammerNetworkCall(command, args, input, { execFileImpl = execFileSync, env = process.env, sleep = pause } = {}) {
+export async function hammerNetworkCall(command, args, input, { execFileImpl = execFileSync, env = process.env, sleep = ms => hammerNetworkClock.sleep(ms) } = {}) {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       return meteredExecFileSync(execFileImpl, command, args, { input, hammerToken: true, timeout: loadAwareTimeoutMs(15000),

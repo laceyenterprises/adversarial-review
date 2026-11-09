@@ -16,12 +16,15 @@ import { amaAuthoritativeReviewerLoginsForModel } from '../src/ama/reviewer-auth
 const exec = promisify(execFile);
 const cli = fileURLToPath(new URL('../bin/hammer-api-publish.mjs', import.meta.url));
 const repoRoot = fileURLToPath(new URL('../', import.meta.url));
+const networkClockFixture = join(repoRoot, 'test/fixtures/virtual-hammer-network-clock.mjs');
 
 function fixture(t, scenario, target = 'pr') {
   const root = mkdtempSync(join(tmpdir(), 'hammer-api-publish-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const callsFile = join(root, 'calls.json');
   writeFileSync(callsFile, '[]');
+  const delaysFile = join(root, 'network-delays');
+  writeFileSync(delaysFile, '');
   for (const command of ['gh', 'git']) {
     writeFileSync(join(root, command), `#!${process.execPath}
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -74,10 +77,11 @@ if (command === 'gh') {
     'HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND',
   ]) delete fixtureEnv[name];
   return {
-    run: async (env = {}) => JSON.parse((await exec(process.execPath, [cli, 'fixture/repo', '1'], {
-      env: { ...fixtureEnv, ...env }, timeout: 20000,
+    run: async (env = {}) => JSON.parse((await exec(process.execPath, ['--import', networkClockFixture, cli, 'fixture/repo', '1'], {
+      env: { ...fixtureEnv, ...env, HAM_TEST_NETWORK_DELAYS: delaysFile }, timeout: 20000,
     })).stdout),
     calls: () => JSON.parse(readFileSync(callsFile, 'utf8')),
+    delays: () => readFileSync(delaysFile, 'utf8').trim().split('\n').filter(Boolean).map(Number),
   };
 }
 
@@ -105,6 +109,8 @@ test('API publisher retries every network subprocess and preserves mutation CAS 
   assert.equal(mutations[0].input.variables.input.expectedHeadOid, 'before');
   assert.deepEqual(mutations[0].input.variables.input.fileChanges.additions, [{ path: 'file', contents: 'YQ==' }]);
   assert.equal(f.calls().at(-1).key, 'reset');
+  assert.deepEqual(f.delays(), [500, 500, 500, 500, 500],
+    'each recovered transport retains its first backoff');
 });
 
 for (const target of ['pr', 'mutation', 'verification', 'fetch-before', 'fetch-published']) {
@@ -114,6 +120,8 @@ for (const target of ['pr', 'mutation', 'verification', 'fetch-before', 'fetch-p
       const result = await f.run();
       assert.equal(result.route, 're-review');
       assert.equal(f.calls().filter(call => call.key === target).length, attempts);
+      assert.deepEqual(f.delays(), scenario === 'exhaust' ? [500, 1000] : [],
+        'only transient errors back off, with no sleep after the final attempt');
       assert.ok(!f.calls().some(call => call.key === 'reset'));
       if (target !== 'pr') assert.equal(result.fallbackHead,
         ['verification', 'fetch-published'].includes(target) ? 'published' : 'before');
@@ -336,6 +344,7 @@ else process.exitCode = 7;
     const scratchCalls = join(root, 'scratch-calls.jsonl');
     writeFileSync(scratchCalls, '');
     writeFileSync(faultLoader, `
+import ${JSON.stringify(networkClockFixture)};
 import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { appendFileSync } from 'node:fs';

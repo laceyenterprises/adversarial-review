@@ -2834,8 +2834,11 @@ never a conflict) before any edit; a second shape refusal exits 1. Cited plans
 retain their citations during correction; policy refusals retain their existing
 outcomes. The CLI takes the controller-pinned head via `--reviewed-head SHA`
 (or `HAM_REVIEWED_SHA`), fills omitted, non-string or empty plan heads, and rejects
-conflicting heads. `--help` and `-h` print accepted shapes and exit 0 without
-checking a plan. After the submodule float and follow-up/watcher restart, SRE verifies the CI-repair closer activation
+malformed heads or heads that differ from the cited review's `commit_id`.
+For citations from another reviewed head, set the plan's `reviewedHead` to that
+review's `commit_id`; the controller pin remains required. `--help` and `-h`
+print accepted shapes and exit 0 separately from plan-check authorization.
+After the submodule float and follow-up/watcher restart, SRE verifies the CI-repair closer activation
 receipt declared in `post-merge-verify.json` and the
 [closure runbook](docs/RUNBOOK-ama-closure.md). Existing smoke commands are unchanged.
 

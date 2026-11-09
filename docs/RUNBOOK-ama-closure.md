@@ -319,7 +319,8 @@ forced launch, ledger mutation or new smoke step is authorized by this change.
 ## Change notes
 
 - **HAMEDITPLAN-02:** The edit-plan CLI fills omitted, non-string or empty
-  `reviewedHead` from the run's pinned SHA and rejects conflicting heads.
+  `reviewedHead` from the run's pinned SHA. Explicit heads must match the cited
+  review's `commit_id`, including citations from another reviewed head.
   `--help` and `-h` print accepted shapes and exit 0 without checking a plan.
 
 - **HAMGITTOKEN-01:** Refresh-on-request Git authentication replaces the
@@ -4810,18 +4811,23 @@ also authorize one only when the effective `strict_non_blocking_remediation` pol
 is enabled; advisory findings in non-strict mode cannot waive preservation.
 Before changing author-introduced lines, the hammer runs
 `bin/hammer-edit-plan.mjs OWNER/REPO PR REVIEW_ID PLAN_JSON --reviewed-head SHA`.
-The prompt substitutes the controller-pinned `<<REVIEWED_SHA>>` in the option
-and every literal plan example, including when running as the database owner.
+The prompt substitutes the controller-pinned `<<REVIEWED_SHA>>` in the option,
+including when running as the database owner. Literal plan examples omit the
+optional head; for a cited review on another head, supply that review's
+`commit_id` as `reviewedHead`.
 Without that option the CLI reads `HAM_REVIEWED_SHA`; a missing or invalid pin
 refuses with `review-evidence-invalid` before reading or parsing the plan file.
 Omitted, non-string or empty (including
 whitespace-only) plan `reviewedHead` values are filled from the pin in memory.
-A nonempty string must equal the pin ignoring hex letter case; the CLI normalizes
-the head to lowercase before passing it to the checker. The authoritative reviewer
-login, review state and review `commit_id` matching that head remain mandatory.
+A nonempty string must be a valid 40-hex SHA; the CLI normalizes it to lowercase
+before passing it to the checker, even when it differs from the pin. Malformed
+nonempty strings refuse rather than falling back. The authoritative reviewer
+login, review state and review `commit_id` matching the resolved plan head remain
+mandatory. An omitted head therefore works only for a review on the pinned head.
 `--help` and `-h` print usage and accepted shapes with exit 0 and perform no plan
 check, review read, policy read or backlog capture. Real helper failures retain
-their existing outcomes.
+their existing outcomes. Help is handled at the CLI entry point, separately
+from the plan-check exit-code mapping.
 The JSON plan names `editKind` (`author-lines`, `additive` or `in-place`), and the
 affected `path`, `startLine`, `endLine` in reviewed coordinates. Cited plans also
 name `kind` and one-based `findingNumber`. An uncited in-place CI test repair

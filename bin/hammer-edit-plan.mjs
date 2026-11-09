@@ -15,6 +15,7 @@ const usage = 'usage: hammer-edit-plan.mjs OWNER/REPO PR REVIEW_ID PLAN_JSON [--
 export const EDIT_PLAN_USAGE = `${usage}
 Use the controller-pinned reviewed SHA (--reviewed-head or HAM_REVIEWED_SHA).
 Omitted, non-string or empty reviewedHead values are filled from that pin.
+For a cited review on another head, set reviewedHead to that review's commit_id.
 Accepted plan shapes (coordinates refer to the reviewed head):
 Blocking reversal:
 \`\`\`json
@@ -44,7 +45,7 @@ async function readReview(repo, pr, reviewId) {
 }
 
 export function editPlanExitCode(result) {
-  return { allow: 0, defer: 20, correct: 21, help: 0 }[result.action] ?? 1;
+  return { allow: 0, defer: 20, correct: 21 }[result.action] ?? 1;
 }
 
 export async function main(argv = process.argv.slice(2), {
@@ -52,9 +53,6 @@ export async function main(argv = process.argv.slice(2), {
   loadPolicy = loadEffectiveMergeAuthorityConfig, assertOwner = assertFindingDisputeOwner,
   rootDir, env = process.env,
 } = {}) {
-  if (argv.length === 1 && ['--help', '-h'].includes(argv[0])) {
-    return { action: 'help', message: EDIT_PLAN_USAGE };
-  }
   const [repo, pr, reviewId, planFile, ...extra] = argv;
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo || '') || !/^[1-9]\d*$/.test(pr || '')
     || !/^[1-9]\d*$/.test(reviewId || '') || !planFile
@@ -67,12 +65,14 @@ export async function main(argv = process.argv.slice(2), {
     return { action: 'stop', reason: 'review-evidence-invalid' };
   }
   const plan = JSON.parse(readFileSync(planFile, 'utf8'));
-  if (!plan || typeof plan !== 'object' || Array.isArray(plan)
-    || (typeof plan.reviewedHead === 'string' && plan.reviewedHead.trim()
-      && plan.reviewedHead.toLowerCase() !== reviewedHead)) {
+  if (!plan || typeof plan !== 'object' || Array.isArray(plan)) {
     return { action: 'stop', reason: 'review-evidence-invalid' };
   }
-  plan.reviewedHead = reviewedHead;
+  plan.reviewedHead = typeof plan.reviewedHead === 'string' && plan.reviewedHead.trim()
+    ? plan.reviewedHead.toLowerCase() : reviewedHead;
+  if (!/^[a-f0-9]{40}$/.test(plan.reviewedHead)) {
+    return { action: 'stop', reason: 'review-evidence-invalid' };
+  }
   rootDir ??= primaryChangeRoot();
   const review = await readReviewImpl(repo, pr, reviewId);
   const policy = loadPolicy({ rootDir });
@@ -101,10 +101,15 @@ export async function main(argv = process.argv.slice(2), {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
-    const result = await main();
-    process.stdout.write(result.action === 'help' ? result.message : `${JSON.stringify(result)}\n`);
-    // A recorded deferral is handled feedback, but must never authorize an edit.
-    process.exitCode = editPlanExitCode(result);
+    const argv = process.argv.slice(2);
+    if (argv.length === 1 && ['--help', '-h'].includes(argv[0])) {
+      process.stdout.write(EDIT_PLAN_USAGE);
+    } else {
+      const result = await main(argv);
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+      // A recorded deferral is handled feedback, but must never authorize an edit.
+      process.exitCode = editPlanExitCode(result);
+    }
   } catch (error) {
     process.stderr.write(`hammer edit pre-check failed; do not edit: ${error.message}\n`);
     process.exitCode = error.exitCode || 1;

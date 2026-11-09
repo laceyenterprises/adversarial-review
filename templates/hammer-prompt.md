@@ -371,20 +371,21 @@ ham_read edit-plan-usage "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-edit-plan.mjs"
 
 Blocking:
 ```json
-{"reviewedHead":"<<REVIEWED_SHA>>","kind":"blocking","findingNumber":1,"path":"src/example.mjs","startLine":2,"endLine":2,"editKind":"author-lines"}
+{"kind":"blocking","findingNumber":1,"path":"src/example.mjs","startLine":2,"endLine":2,"editKind":"author-lines"}
 ```
 CI repair:
 ```json
-{"reviewedHead":"<<REVIEWED_SHA>>","path":"test/example.test.mjs","startLine":2,"endLine":2,"editKind":"in-place","requiredCiRepair":true}
+{"path":"test/example.test.mjs","startLine":2,"endLine":2,"editKind":"in-place","requiredCiRepair":true}
 ```
 Additive fix:
 ```json
-{"reviewedHead":"<<REVIEWED_SHA>>","kind":"non-blocking","findingNumber":1,"editKind":"additive"}
+{"kind":"non-blocking","findingNumber":1,"editKind":"additive"}
 ```
 Strict:
 ```json
-{"reviewedHead":"<<REVIEWED_SHA>>","kind":"non-blocking","findingNumber":1,"path":"src/example.mjs","startLine":2,"endLine":2,"editKind":"author-lines"}
+{"kind":"non-blocking","findingNumber":1,"path":"src/example.mjs","startLine":2,"endLine":2,"editKind":"author-lines"}
 ```
+Omitted `reviewedHead` uses the pin; for a review on another head, set it to that review's `commit_id`.
 Blocking in-place: `editKind: "in-place"`. Run B1 owner setup through `fi`:
 
 ```bash

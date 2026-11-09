@@ -11,21 +11,24 @@ without performing a plan check.
 `bin/hammer-edit-plan.mjs` accepts `--reviewed-head SHA` after the four positional
 arguments, falling back to `HAM_REVIEWED_SHA` when the option is absent. The
 prompt passes the substituted controller pin explicitly across the database-owner
-boundary and uses that same substitution in all four literal JSON examples.
+boundary. All four literal JSON examples omit the optional head, matching help.
 The CLI fills omitted, non-string and empty or whitespace-only plan
-`reviewedHead` values in memory. A conflicting nonempty string or missing/invalid
-pin stops with `review-evidence-invalid`. The pure checker, authoritative
-reviewer, review state, review commit matching, policy and edit authorization
-checks remain unchanged.
+`reviewedHead` values in memory. A valid explicit head may differ from the pin
+but must match the fetched authoritative review's `commit_id`. Malformed
+nonempty strings or a missing/invalid pin stop with `review-evidence-invalid`.
+The pure checker still enforces authoritative reviewer identity, review state,
+review commit matching, policy and edit authorization; the CLI no longer adds
+the unintended requirement that explicit heads match the pin.
 
 Final comment-only remediation normalizes the CLI pin to lowercase and compares
-nonempty plan heads without hex case sensitivity. Distinct hashes and whitespace
-around a hash remain invalid; plan files remain untouched. The additive CLI help
+nonempty plan heads without hex case sensitivity. Review-mismatched hashes and
+whitespace around a hash remain invalid; plan files remain untouched. The additive CLI help
 example and prompt example both omit optional file coordinates.
 
 `--help` and `-h` print usage and accepted plan shapes and exit 0 without reading
-a plan, fetching a review, loading policy or capturing findings. Actual helper
-failure exits are unchanged.
+a plan, fetching a review, loading policy or capturing findings. Help is handled
+by the CLI entry point and is not a plan-check result. Actual helper failure exits
+are unchanged.
 
 ## Verification
 
@@ -107,3 +110,29 @@ files selected by `git grep -l -e hammer-edit-plan -e hammer-prompt --
 `test/smv.test.mjs`: 564 passed, two skipped, and only the two reproduced
 registration baseline failures. Edit-plan, help/prompt parity, primary-change
 policy, review-read, rendered-budget and sandbox-smoke tests pass.
+
+## Final comment-only review remediation
+
+Restored cross-head citations: a valid explicit plan head is lowercased and
+checked against the fetched authoritative review, while the required controller
+pin fills only omitted or unusable heads. Missing/invalid pins still refuse
+before plan I/O; malformed nonempty strings and review-mismatched heads still
+refuse. Regression coverage exercises author-line authorization on another head
+with either pin source and both hex cases, plus a head matching neither source.
+
+Help now exits successfully only through the CLI entry path, outside
+`editPlanExitCode`. Prompt and help JSON shapes match without stamped heads,
+and both explain how to cite another review head. Updated the closure runbook,
+existing README contract and post-merge verification description in place.
+
+Bounded targeted validation passed all 30 tests in
+`npm test -- test/hameditplan-01.test.mjs test/hammer-prompt-contract.test.mjs
+test/hamscope-01.test.mjs` and all 11 tests in
+`npm test -- test/smv.test.mjs`. Repository lint passed with zero errors and
+152 existing warnings; changed-file ESLint, contract typechecking, the offline
+research byte-equivalence walkthrough and `git diff --check` passed.
+A standalone name-filtered prompt-budget test was redirected by the sandbox
+preload into an unfiltered file run and reached its 30-second bound. Direct
+execution of the same rendering assertions passed: 61,304 bytes within the
+61,440-byte limit, with no unresolved placeholders. No full suite was run;
+PR-head CI remains the full-suite merge gate.

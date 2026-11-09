@@ -243,7 +243,7 @@ test('every concrete hammer prompt helper call executes against the real helper 
   const plans = documentedExamples(usage.stdout).json.filter(({ value }) => value.editKind);
   assert.ok(plans.length >= 4);
   for (const { value } of json) {
-    if (value.reviewedHead) continue;
+    if (value.editKind || value.reviewedHead) continue;
     if (value.active === true && value.commit && value.auditComment) {
       // The claim is a schema example; resolve its literal explanatory values
       // without manufacturing or removing any fields.

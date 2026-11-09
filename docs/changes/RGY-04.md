@@ -76,8 +76,10 @@ selection module, settlement sources and current compatibility contract.
 In-memory derivation of its two entries into the catalog verified every cited
 surface exists and all requested metadata is present (92 resulting entries).
 The rescue closeout explicitly prohibits committing `catalog.json` and assigns
-regeneration to main automation after merge; the compiled file remains unchanged
-in this remediation and requires that regeneration.
+regeneration to main automation after merge. That rescue did not change the
+compiled file; the earlier partial scope-migration edit was still present. The
+subsequent advisory remediation below removes that partial edit, restoring the
+compiled file to the PR base while leaving regeneration to main automation.
 
 Rescue verification (bounded by `cwp_dispatch.worker_validation`, 900 seconds):
 
@@ -88,3 +90,30 @@ Rescue verification (bounded by `cwp_dispatch.worker_validation`, 900 seconds):
 - In-memory catalog fragment derivation and surface assertions: passed.
 
 No full suite was run, following the rescue's scoped-validation instruction.
+
+Advisory rescue remediation (PR #1766, round 2):
+
+- Probe backlog and batch selection columns independently so pre-migration and
+  partially migrated read-only stores retain summaries and overdue alerts.
+- Add per-manifest `selectedBacklog` health counts for open, unbatched, errored
+  and undispatched findings, exposing dispatch failures and released selections.
+- Recover selection provenance from release history only for unowned rows;
+  a current default owner takes precedence over old selection receipts.
+- Restore the base compiled catalog and unrelated queue-rebase arrow encoding.
+  Canonical catalog fragments remain the source for main's regeneration.
+- Pin byte-for-byte output from the installed RGY-02 producer using a temporary
+  synthetic store; confirm object-shaped heads and distinguish heads mismatch
+  from findings hash mismatch. No production store or provider was used.
+
+Round 2 verification (each command bounded by `cwp_dispatch.worker_validation`,
+900 seconds):
+
+- `node test/run-tests.mjs test/findings-batch-grades.test.mjs test/findings-batch.test.mjs test/findingsrequeue-01.test.mjs test/review-finding-grades.test.mjs test/watcher-claim-loop.test.mjs test/watcher-closure-latency.test.mjs`: 336 passed.
+- ESLint `--fix` on changed JavaScript and `npm run lint`: zero errors;
+  the repository lint reports 152 existing warnings.
+- `npm run typecheck:contracts`: passed.
+- `bash demo/research-finding-walkthrough.sh`: three byte-stable deliveries.
+- Catalog byte equality with the PR base, producer-fixture byte equality,
+  state-machine JSON parsing and `git diff --check`: passed.
+
+Validation follows this rescue's scoped-test instruction; no full suite was run.

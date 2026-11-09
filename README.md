@@ -1717,7 +1717,10 @@ grades; lifecycle and stale outcomes remain indeterminate. Omitting the flag
 preserves the default drain. Selected rows remain excluded after release; only
 an explicit selection rechecks consensus and retries them. The ticker collects
 already-started selected work but never starts an undispatched selected batch.
-Backlog health counts cover the automatic drain. See the [selection contract](docs/data-model/review-findings.md#graded-selection-remediation).
+Backlog health counts cover the automatic drain; `selectedBacklog` separately
+reports per-manifest open, unbatched, errored and undispatched finding counts.
+Rerun the manifest explicitly to recover failed dispatches or released findings.
+See the [selection contract](docs/data-model/review-findings.md#graded-selection-remediation).
 `pipeline-health` JSON `nonBlockingBacklog` exposes open and unbatched finding
 counts, oldest open age, applied/dropped by UTC day and batch error counts. Its
 `progress` object (also printed by `node bin/review-findings.mjs backlog --db <db>`)

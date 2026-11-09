@@ -11,7 +11,7 @@ import { updateReviewerPassBodyCapture } from '../src/review-body-capture.mjs';
 import { claimFindingBatches, settleFindingBatch, releaseFindingBatch, runFindingBatches } from '../src/findings-batch.mjs';
 import { recordFindingGrade, backfillFindingGrades } from '../src/review-finding-grades.mjs';
 import { readRemediationConsensus, validateFindingManifest } from '../src/finding-remediation-selection.mjs';
-import { summarizeFindingBacklog } from '../src/findings-backlog.mjs';
+import { summarizeFindingBacklog, findingBacklogAlert } from '../src/findings-backlog.mjs';
 import { main } from '../bin/findings-batch-backfill.mjs';
 
 const repo = 'sample/service', head = 'a'.repeat(40), day = '2026-01-02';
@@ -270,6 +270,9 @@ test('released selections stay out of automatic claims and reclaims re-read cons
   claimFindingBatches(db, day);
   assert.equal(db.prepare('SELECT count(*) n FROM finding_backlog WHERE manifest_sha256=? AND batch_id IS NULL').get(value.sha256).n, 2);
   assert.equal(summarizeFindingBacklog(db).openCount, 7);
+  assert.deepEqual(summarizeFindingBacklog(db).selectedBacklog, [{
+    manifestSha256: value.sha256, openCount: 2, unbatchedCount: 2, erroredCount: 0, undispatchedCount: 0,
+  }]);
   label = 'false';
   assert.deepEqual(claimFindingBatches(db, day, { manifest: value, readConsensus }), []);
   label = 'real';
@@ -285,6 +288,9 @@ test('default runner never dispatches a selected batch after explicit dispatch f
     execFileImpl: async () => { calls++; throw Error('synthetic dispatch failure'); } };
   await runFindingBatches({ ...deps, manifest: value });
   assert.equal(calls, 1);
+  assert.deepEqual(summarizeFindingBacklog(db).selectedBacklog, [{
+    manifestSha256: value.sha256, openCount: 1, unbatchedCount: 0, erroredCount: 1, undispatchedCount: 1,
+  }]);
   const selected = db.prepare('SELECT * FROM finding_batches WHERE manifest_sha256=?').get(value.sha256);
   await runFindingBatches({ ...deps, execFileImpl: async () => ({ stdout: '{"launchRequestId":"default-launch"}' }) });
   assert.equal(db.prepare('SELECT launch_id FROM finding_batches WHERE batch_id=?').get(selected.batch_id).launch_id, null);
@@ -327,4 +333,60 @@ test('backfill preserves historical source keys when selection provenance is add
   db.prepare('UPDATE finding_backlog SET manifest_sha256=? WHERE finding_id=?').run('b'.repeat(64), historical.finding_id);
   assert.equal(backfillFindingGrades(db).inserted, 0);
   assert.equal(db.prepare('SELECT count(*) n FROM review_finding_grades').get().n, 1);
+});
+
+
+test('real RGY-02 producer output pins heads objects and reports heads mismatches distinctly', () => {
+  const value = JSON.parse(readFileSync(new URL('./fixtures/rgy02-producer-manifest.json', import.meta.url), 'utf8'));
+  const rows = new Map(value.findings.map(row => [row.finding_id, row]));
+  const db = { prepare: () => ({ get: id => rows.get(id) }) };
+  assert.equal(validateFindingManifest(db, value).size, 2);
+  for (const heads of [[], undefined, [...value.heads].reverse(),
+    value.heads.map(h => [h.repo, h.pr_number, h.head_sha])]) {
+    assert.throws(() => validateFindingManifest(db, { ...value, heads }), /^Error: finding manifest heads mismatch$/);
+  }
+  assert.throws(() => validateFindingManifest(db, { ...value, sha256: 'a'.repeat(64) }),
+    /^Error: finding manifest hash mismatch$/);
+});
+
+for (const batchMigrated of [false, true]) {
+  test(`backlog health survives missing selection scope (batch migration=${batchMigrated})`, t => {
+    const { db } = fixture(t);
+    claimFindingBatches(db, day);
+    db.exec("UPDATE finding_batches SET error='synthetic failure'");
+    db.exec("UPDATE finding_backlog SET captured_at='2026-01-01T00:00:00Z'");
+    db.exec('ALTER TABLE finding_backlog DROP COLUMN manifest_sha256');
+    if (!batchMigrated) db.exec('ALTER TABLE finding_batches DROP COLUMN manifest_sha256');
+    const health = summarizeFindingBacklog(db, Date.parse('2026-02-01'));
+    assert.equal(health.available, true, health.error);
+    assert.equal(health.openCount, 8);
+    assert.equal(health.areas[0].size, 8);
+    assert.equal(health.progress.stranded, 8);
+    assert.deepEqual(health.batchErrors, [{ error: 'synthetic failure', count: 1 }]);
+    assert.equal(health.selectedBacklog, null);
+    assert.equal(findingBacklogAlert(health).code, 'review:findings_backlog_overdue');
+  });
+}
+
+test('scope recovery uses release history only for unowned findings', t => {
+  const { db, rows } = fixture(t);
+  const value = manifest(rows.slice(1, 4));
+  const [selected] = claimFindingBatches(db, day, { manifest: value, readConsensus: () => ({ label: 'real' }) });
+  releaseFindingBatch(db, selected, 'synthetic release');
+  // Model a legacy default owner and a current selected owner alongside an
+  // unowned released row. Both have the same older selection release history.
+  db.prepare('UPDATE finding_backlog SET manifest_sha256=NULL WHERE finding_id=?').run(rows[1].finding_id);
+  const [defaultBatch] = claimFindingBatches(db, day);
+  const [currentSelection] = claimFindingBatches(db, day, {
+    manifest: manifest([rows[3]]), readConsensus: () => ({ label: 'real' }),
+  });
+  db.exec('UPDATE finding_backlog SET manifest_sha256=NULL');
+  for (let i = 0; i < 2; i++) {
+    db.prepare("DELETE FROM schema_migrations WHERE id='20261108_findings_selection_scope.sql'").run();
+    ensureReviewStateSchema(db);
+    const read = id => db.prepare('SELECT batch_id,manifest_sha256 FROM finding_backlog WHERE finding_id=?').get(id);
+    assert.deepEqual(read(rows[1].finding_id), { batch_id: defaultBatch.batch_id, manifest_sha256: null });
+    assert.deepEqual(read(rows[2].finding_id), { batch_id: null, manifest_sha256: value.sha256 });
+    assert.deepEqual(read(rows[3].finding_id), { batch_id: currentSelection.batch_id, manifest_sha256: currentSelection.manifest_sha256 });
+  }
 });

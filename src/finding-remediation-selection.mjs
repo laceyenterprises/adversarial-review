@@ -32,8 +32,9 @@ export function validateFindingManifest(db, manifest) {
   const heads = [...new Set(sorted.map(({ repo, pr_number, head_sha }) => canonicalJson({ repo, pr_number, head_sha })))]
     .map(text => JSON.parse(text)).sort((a, b) => Buffer.compare(Buffer.from(a.repo), Buffer.from(b.repo))
       || a.pr_number - b.pr_number || Buffer.compare(Buffer.from(a.head_sha), Buffer.from(b.head_sha)));
-  if (digest !== manifest.sha256 || canonicalJson(heads) !== canonicalJson(manifest.heads ?? null)) {
-    throw Error('finding manifest hash mismatch');
+  if (digest !== manifest.sha256) throw Error('finding manifest hash mismatch');
+  if (canonicalJson(heads) !== canonicalJson(manifest.heads ?? null)) {
+    throw Error('finding manifest heads mismatch');
   }
   return entries;
 }

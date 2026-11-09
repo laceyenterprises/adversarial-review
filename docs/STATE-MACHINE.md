@@ -90,7 +90,9 @@ RGY-04 selections retain durable backlog provenance after release. Automatic
 claims exclude selected rows and automatic dispatch skips selected prepared
 batches; already-started collection/publication continues. Only an explicit
 selection can re-read consensus and claim released real findings. Non-blocking
-backlog health excludes selected work. Settlement and backfill share lifecycle
+backlog health excludes selected work from automatic-drain counts and reports
+it separately in `selectedBacklog` per manifest, including dispatch failures and
+unbatched releases. Settlement and backfill share lifecycle
 grade kinds, and backfill skips settlement observations. Existing states and
 smoke promises are unchanged.
 

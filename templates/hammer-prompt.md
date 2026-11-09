@@ -1033,11 +1033,11 @@ source "<<RUN_DIR>>/hammer-publish.sh" || exit 1
 unset HAM_COMMIT_PUBLICATION_ONLY
 ```
 
-A `conflict-primary-unproven` outcome requires the PR owner to take the
-conflict through reviewed remediation with full-range validation. Report the
-reviewed head and captured base. Do not republish or retry the same replay
-as patch-equivalent. A `conflict-primary-timeout` indicates the proof budget
-expired and does not establish a patch mismatch.
+`conflict-primary-unproven` routes this head to the watcher's builder-tag
+follow-up remediation queue: resolve onto current base, preserve both sides,
+fix findings and push for full review and full-range validation. No replay retry.
+Report reviewed head and captured base.
+`conflict-primary-timeout` means proof budget expired, not a patch mismatch.
 
 After conflict repair and commit publication, refresh context and re-run
 changed-surface tests (2b) outside the lease. Re-enter **verify-head** (Appendix C)

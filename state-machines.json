@@ -4,7 +4,7 @@
   "githubApiBudget": "GHBUDGET-01: lifecycle polling revalidates via REST ETags; only a live 304 permits cached head/state reuse. Fresh merged/closed responses retain authoritative terminal transitions. Polling defers below the unchanged floor; closer identity and hammer preconditions may use positive reserved capacity. Zero balance and explicit limits still fail closed. Broker-verified rotating tokens share installation identity. A persisted low-budget episode transitions observing -> alerted after more than 15 minutes. Observed health clears it, a missing observation resets the interval, and the outbox receipt is keyed by the episode start. Offline ghbudget-01 fixtures cover these contracts.",
   "reviewVerdictConsistency": "REVIEWVERDICT-01: Blocking issues / Verdict contradictions produce verdict_inconsistent=true, request-changes and unknown blocking classification. One exclusive PR/head reservation precedes reconciliation; reserved -> reconciled or operator-required, with interrupted/failed attempts permanently consumed. Chunked and caller-post outputs share the budget. Repeated contradictions or unavailable recovery retain a blocking review and operator notice. Existing watcher lifecycle states, merge authority and deployed smoke commands are unchanged.",
   "repositoryDiscovery": "REPODISCOVERY-01: startup listing failures including repository-state lock contention restore durable current organization names with shared case-insensitive exclusions, persisted identity-conflict quarantine and a historical-ambiguity fence. Quarantine write failures retain the complete listing with its in-memory conflicts and log a local error. Until first success, retries use the earlier future budget reset or 2/5/10-minute backoff capped by the refresh interval; successful listings replace fallback and restore full-interval semantics after all attempts. Retry deadlines and zero-scope two-minute grace are checked at the next poll on or after they fall due. Zero watched scope warns each poll and enqueues one SEV2 adversarial-repository-discovery digest notice per process-local continuous empty episode with an explicit recovery action; enqueue failures retry. No lifecycle states, claim CAS, terminal guards, merge authority or smoke commands change.",
-  "conflictPrimaryPreservation": "HAMEMPTYPRIMARY-01 / LAC-2159: conflict-only replay from the dispatch reviewed head preserves author identity/message, ordered text patches and a non-HAM primary before publication. Missing or mismatched local proof exits before push; existing lifecycle states, strict findings, custody, primary-change and merge predicates remain unchanged. This local proof grants no merge authority.",
+  "conflictPrimaryPreservation": "HAMEMPTYPRIMARY-01 / LAC-2159: conflict-only replay from the dispatch reviewed head preserves author identity/message, ordered text patches and a non-HAM primary before publication. Missing or mismatched local proof exits before push; existing lifecycle states, strict findings, custody, primary-change and merge predicates remain unchanged. This local proof grants no merge authority. HAMCONFLICTOWNER-01: a current-head conflict-primary-unproven terminal audit hands off to one durable builder-tag-routed follow-up remediation before closer cap/retry selection. The pending closureHandoff job owns remediate/remediator through admission delays; its new pushed head requires normal full review and full-range validation. Existing live custody and merge gates remain authoritative. Synthetic handoff, duplicate, timeout, proven replay and orchestration fixtures certify source behavior. No new lifecycle status, smoke command, host action or live dispatch is added.",
   "closureGateReceipts": "CLOSERGATES-01 final remediation: final and non-final conflict observations count the current head once. Non-final observations return without terminal AMA state or progress; final observations exit 65 until three distinct heads permit conflict-repair-exhausted with terminal-stop. Definitive predicate-input refusals emit terminal-stop. Closure-resume SHA comparisons ignore case and retain lowercase receipt heads. Existing lifecycle states, merge predicates and smoke commands remain unchanged.",
   "hammerTerminalOutcome": "HAMMEROUTCOME-01: immutable run-scoped merged proof (own execution plus exact-head GitHub merge SHA/time) or not_merged with mandatory classified reason/raw phase. Unknown exits alert. Diagnostic phase receipts can advance but grant no progress credit, merge authority or lifecycle transitions. Existing closer states, gates and retry policy remain unchanged; see docs/RUNBOOK-ama-closure.md.",
   "mesReviewEnforcement": "MES-09: a recorded schemaVersion 1 apply decision may replace only the implicit non-corporate Codex/Claude review or local remediation pair after env and OSG pins. Live registry model and per-model effort validation is required; CLI/policy errors or apply false retain static execution. Decisions precede model auth/spawn and are not cached. No lifecycle states, transitions, merge authority or smoke promises change.",
@@ -1401,7 +1401,7 @@
           "id": "closure-owner.06",
           "from": "[*]",
           "to": "remediation",
-          "trigger": "project shared next action: remediation",
+          "trigger": "project shared next action: remediation, including a pending conflict-primary-unproven builder handoff",
           "codeSource": "src/ama/closure-next-action.mjs"
         },
         {
@@ -1415,7 +1415,7 @@
           "id": "closure-owner.08",
           "from": "[*]",
           "to": "hammer",
-          "trigger": "confirmed conflict selects capped repair with merge safety retained",
+          "trigger": "confirmed conflict selects capped repair unless a conflict-primary-unproven builder handoff owns the head; merge safety retained",
           "codeSource": "src/pr-next-action.mjs"
         },
         {
@@ -1800,7 +1800,7 @@
     "src/remediation-ci-infrastructure.mjs": "0473feae0f4eefa22a4bcd6474788963c9fa95f11a601fdd6340da1599841568",
     "src/ama/dispatch-submitter.mjs": "c186abb1b2071524a8afd722bf10c637d1e54586f2f186b47f57be3baad9dd60",
     "src/ama/closure-next-action.mjs": "5bb0293c10c0b45c7086401cd9f7d4d137363a39308cf7178891c1c8b5375dcc",
-    "src/pr-next-action.mjs": "24b348b711003879178403f742b6aa7d2f04bd9515e77098934daf575213189b",
+    "src/pr-next-action.mjs": "292f80a1d6548cd450d850ec3ebf23582a099a1f3949d8879cd2a1d5cdc478c3",
     "src/ama/pre-receipt-intent.mjs": "7a41d9bcd120a0f90bf1187edcd2882b8e7199d65437013be8ad9742e350455c",
     "src/follow-up-branch.mjs": "637f2a18c5fb2a89d2d02c98d80587a713a188c10d70891941d77df847579a8d",
     "src/posted-review-head-repair.mjs": "ce761260224b7a82d152e5b289e8967bbf54026c427a17bdb5cff0a6556ff7d6",

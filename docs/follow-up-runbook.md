@@ -1326,6 +1326,11 @@ the HQ or GitHub label-write failure clears.
 
 ## Operator retrigger contracts
 
+`missing-builder-authorship`, `conflicting-builder-authorship`, and
+`builder-cannot-remediate-own-pr` are operator-retriggerable stopped codes.
+Before retriggering, reconcile the recorded opener evidence or select a remediator
+from a different builder family; recovery revalidates those conditions on claim.
+
 `retrigger-review` and `retrigger-remediation` are distinct surfaces and are intentionally idempotent:
 
 - `retrigger-review` resets the watcher row back to `review_status='pending'`. Its exit-code contract is stable: `0=triggered/already-pending`, `1=blocked`, `2=usage`, `3=reason input`, `4=runtime`.

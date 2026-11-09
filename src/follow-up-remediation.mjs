@@ -1,5 +1,5 @@
 import { hqRemediationWorkerClass } from './remediation-worker-class.mjs';
-import { recoverRemediationBuilder, readRemediationBuilderEvidence, stopRecoveredBuilderRemediator } from './remediation-builder-authorship.mjs';
+import { prepareRemediationBuilder, readRemediationBuilderEvidence, stopRecoveredBuilderRemediator } from './remediation-builder-authorship.mjs';
 import { cleanupServiceCodexAuth } from './codex-service-home.mjs';
 
 import { withRepositoryStateCycle } from './repository-state-lock.mjs';
@@ -17,7 +17,7 @@ import { remediationCloseout, closeoutRereview, refusedCloseout } from './remedi
 import { reportsCompletedPipelineWait } from './remediation-blocker-ownership.mjs';
 import { guardStackedBase } from './ama/stacked-base.mjs';
 import { logCodexWorkerDispatch } from './codex-account-routing.mjs';
-import { DEFAULT_REMEDIATION_WORKER_CLASS, defaultRemediatorWorkerClassFromEnv, resolveRoleRegistryRemediator, pickRemediationWorkerClass, resolveReconcileWorkerClass } from './remediation-worker-routing.mjs';
+import { resolveInitialRemediatorRouting, DEFAULT_REMEDIATION_WORKER_CLASS, defaultRemediatorWorkerClassFromEnv, resolveRoleRegistryRemediator, pickRemediationWorkerClass, resolveReconcileWorkerClass } from './remediation-worker-routing.mjs';
 import { completeLiveWorkerPublishedHead, completeKnownWorkerPublish, findWorkerPublishedHead, buildRereviewResult } from './remediation-published-head.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { logRoundBudgetDecision, settleInfrastructureRemediationRound, recordLocalRemediationOutcome } from './remediation-round-accounting.mjs';
@@ -153,7 +153,7 @@ import { applyPreSpawnLifecycleGate } from './follow-up-stuck-claim-sweep.mjs';
 import { detectRemediationQuotaEvidence } from './remediation-quota-evidence.mjs';
 import { settleMissingRemediationArtifact } from './remediation-missing-artifact.mjs';
 import { settleQuotaExhaustedRemediation } from './remediation-quota-hold.mjs';
-import { applyHqDispatchHandoffEnv, normalizeRemediationWorkerClass, remediationLaneModeRefusal, remediationLaneRuntimeMode, remediatorFallbackAudit, resolveClaimedRemediatorRouting, nextRoundReviewerModels, resolveRemediationWorkerClassWithFallback } from './remediation-worker-class-fallback.mjs';
+import { applyHqDispatchHandoffEnv, normalizeRemediationWorkerClass, remediationLaneModeRefusal, remediationLaneRuntimeMode, remediatorFallbackAudit, nextRoundReviewerModels, resolveRemediationWorkerClassWithFallback } from './remediation-worker-class-fallback.mjs';
 import {
   DEFAULT_REPLIES_ROOT,
   HQ_REMEDIATION_DISPATCH_TRIGGER,
@@ -3302,49 +3302,15 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
   const preparationStartedMs = Date.now(); let envPreparationMs = 0; let workspacePreparationMs = 0;
 
   try {
-    const authorship = await recoverRemediationBuilder({
-      rootDir, job: claimed.job, jobPath: claimed.jobPath, execFileImpl, now, log,
-      readEvidenceImpl: readBuilderEvidenceImpl,
-    });
-    if (!authorship.ok) {
-      if (authorship.retryable) {
-        const requeued = requeueClaimedFollowUpJobBeforeSpawn({
-          rootDir, jobPath: claimed.jobPath, requeuedAt: now() });
-        requeued.job.remediationPlan.retryAfter = new Date(Date.parse(now()) + 60_000).toISOString();
-        writeFollowUpJob(requeued.jobPath, requeued.job);
-        delayedPendingPaths?.add?.(requeued.jobPath);
-        return { consumed: false, reason: authorship.reason, job: requeued.job, jobPath: requeued.jobPath };
-      }
-      const stopped = markFollowUpJobStopped({
-        rootDir, jobPath: claimed.jobPath, stoppedAt: now(), sourceStatus: 'in_progress',
-        stopCode: authorship.stopCode, stopReason: authorship.reason,
-        stopMetadata: { builderAuthorshipEscalation: authorship.escalation },
-        commentDeliveryExemption: 'no-remediation-started',
-        remediationWorker: { state: 'never-spawned', reconciledAt: now() },
-      });
-      log.error?.(`[follow-up-remediation] ${authorship.reason}`);
-      return { consumed: false, reason: authorship.reason, escalation: authorship.escalation,
-        job: stopped.job, jobPath: stopped.jobPath };
-    }
+    const authorship = await prepareRemediationBuilder({ rootDir, job: claimed.job,
+      jobPath: claimed.jobPath, execFileImpl, now, log, delayedPendingPaths,
+      readEvidenceImpl: readBuilderEvidenceImpl });
+    if (!authorship.ok) return authorship.result;
     claimed.job = authorship.job;
-    // REMFALLBACK-01: re-resolved on every claim, so a capped routed remediator
-    // moves to a declared fallback class. The fleet read is wired only from the
-    // daemon (`resolveRemediationWorkerClassImpl`), keeping the heavily-spied
-    // consume path subprocess-free in unit tests (job-local evidence only).
-    // REMEDIATORLANE-01: the selection receives the mode that will run it, so
-    // it never returns a lane that mode refuses. A pooled proposal still forces
-    // OS mode below, and the pooled path selects before any refusal applies.
-    const runtimeMode = resolveRemediationRuntimeMode(claimed.job, { healthRouter, env: jobEnv });
-    let remediatorRouting = await resolveClaimedRemediatorRouting({
-      job: claimed.job,
-      ensureWorkerRegistryReadyImpl,
-      primary: pickRemediationWorkerClass(claimed.job),
-      env: jobEnv,
-      nowMs: Date.parse(claimed.job.claimedAt),
-      resolveImpl: resolveRemediationWorkerClassImpl,
-      log,
-      remediationMode: runtimeMode,
-    });
+    const { runtimeMode, routing } = await resolveInitialRemediatorRouting({ job: claimed.job,
+      healthRouter, env: jobEnv, ensureWorkerRegistryReadyImpl,
+      resolveImpl: resolveRemediationWorkerClassImpl, log });
+    let remediatorRouting = routing;
     workerClass = remediatorRouting.workerClass;
     const ownBuilderStop = stopRecoveredBuilderRemediator({
       rootDir, job: claimed.job, jobPath: claimed.jobPath, workerClass, now, log });

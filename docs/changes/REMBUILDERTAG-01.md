@@ -61,3 +61,24 @@ Verification after rebase and remediation:
 - `git diff --check`: pass.
 
 Full-suite validation remains with PR-head CI per worker scope.
+
+## Current-head CI repair
+
+The failed Node 22/26 lanes identified incomplete operator-retrigger documentation
+and a consume module above its existing size ceiling. Document all three
+operator-retriggerable authorship stop codes and the correction required before
+retriggering in the SPEC and follow-up runbook. Move pre-routing recovery
+settlement and initial routing assembly into their existing helper modules,
+keeping pending refunds, stopped ownership, route ordering and admission intact.
+The consumer now has 4296 lines against the existing 4297-line limit; no guard,
+workflow or CI configuration changed. Refresh its reviewed state projection;
+existing lifecycle values, durable store shape and smoke promises are unchanged.
+
+Validation: authorship, retrigger-label, boundary, fallback, runnable-lane and
+capped-hold suites pass. All 11 SMV checks, including disposable Git smoke, pass
+from a clean tracked archive with this patch applied and installed dependencies
+linked. In-workspace smoke attempts hit the existing clean-step time budget;
+the unchanged reviewed head also passes from a clean archive. Lint passes with
+zero errors and 152 existing warnings; contract typecheck, data-model catalog
+validation (92 entries), and diff check pass. The full suite remains delegated
+to PR-head CI.

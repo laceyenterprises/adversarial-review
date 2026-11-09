@@ -2,8 +2,8 @@ import { normalizeBuilderClass } from './adapters/subject/github-pr/routing.mjs'
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadRoleConfig, resolveDefaultRemediator } from './role-config.mjs';
-import { DEFAULT_REMEDIATOR_ENV, markRemediationConfigError } from './remediation-dispatch-mode.mjs';
-import { normalizeRemediationWorkerClass } from './remediation-worker-class-fallback.mjs';
+import { DEFAULT_REMEDIATOR_ENV, markRemediationConfigError, resolveRemediationRuntimeMode } from './remediation-dispatch-mode.mjs';
+import { normalizeRemediationWorkerClass, resolveClaimedRemediatorRouting } from './remediation-worker-class-fallback.mjs';
 import { loadDomainConfig } from './domain-config.mjs';
 import { resolveRemediatorWorkerClassFromDomain } from './domain-policy.mjs';
 
@@ -136,6 +136,17 @@ function pickRemediationWorkerClass(job, { env = process.env, topPath, loaderImp
     return REMEDIATION_WORKER_BY_BUILDER_TAG[builderTag];
   }
   return resolveRoleRegistryRemediator({ env, topPath, loaderImpl, domainId: job?.domainId || 'code-pr' });
+}
+
+// Re-resolve every claim so capped remediators can use a declared fallback.
+// Select for the mode that will execute; pooled proposals are admitted by HQ.
+export async function resolveInitialRemediatorRouting({ job, healthRouter, env = process.env,
+  ensureWorkerRegistryReadyImpl, resolveImpl, log }) {
+  const runtimeMode = resolveRemediationRuntimeMode(job, { healthRouter, env });
+  const routing = await resolveClaimedRemediatorRouting({ job, ensureWorkerRegistryReadyImpl,
+    primary: pickRemediationWorkerClass(job), env, nowMs: Date.parse(job.claimedAt),
+    resolveImpl, log, remediationMode: runtimeMode });
+  return { runtimeMode, routing };
 }
 
 // Reconcile-time GitHub operations must not return unmapped worker

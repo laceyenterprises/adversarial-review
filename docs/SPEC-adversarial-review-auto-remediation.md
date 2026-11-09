@@ -2476,6 +2476,11 @@ The watcher must project the gate on terminal early-exit paths, including alread
 
 ## Operator Retrigger Contracts
 
+`missing-builder-authorship`, `conflicting-builder-authorship`, and
+`builder-cannot-remediate-own-pr` are operator-retriggerable stopped codes.
+Before retriggering, reconcile the recorded opener evidence or select a remediator
+from a different builder family; recovery revalidates those conditions on claim.
+
 `retrigger-review` and `retrigger-remediation` are separate operator surfaces:
 
 - `retrigger-review` resets the watcher delivery row to `review_status='pending'` so the watcher can post another adversarial review.

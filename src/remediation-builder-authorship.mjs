@@ -2,6 +2,7 @@ import { normalizeBuilderClass, isCrossModelReviewWaived } from './adapters/subj
 import { builderClassFromTitle } from './adapters/subject/github-pr/title-tagging.mjs';
 import { readDaemonBuildIdentity } from './daemon-worker-identity.mjs';
 import { execGhWithRetry } from './gh-cli.mjs';
+import { requeueClaimedFollowUpJobBeforeSpawn } from './remediation-claimed-requeue.mjs';
 import { writeFollowUpJob, markFollowUpJobStopped } from './follow-up-jobs.mjs';
 
 // Read the stable opener, without head binding: remediation can move the head.
@@ -107,6 +108,30 @@ export async function recoverRemediationBuilder({ rootDir, job, jobPath, execFil
   log.warn?.(`[follow-up-remediation] job=${job.jobId} builder-tag-derived `
     + `${JSON.stringify(job.builderTag ?? null)} -> ${evidence.builderTag}; evidence=${JSON.stringify(evidence.sources)}`);
   return { ok: true, job: recovered };
+}
+
+// Settle recovery before routing; all exits precede worker admission.
+export async function prepareRemediationBuilder({ rootDir, job, jobPath, execFileImpl,
+  now = () => new Date().toISOString(), log = console, delayedPendingPaths, readEvidenceImpl }) {
+  const authorship = await recoverRemediationBuilder({
+    rootDir, job, jobPath, execFileImpl, now, log, readEvidenceImpl });
+  if (authorship.ok) return authorship;
+  if (authorship.retryable) {
+    const requeued = requeueClaimedFollowUpJobBeforeSpawn({ rootDir, jobPath, requeuedAt: now() });
+    requeued.job.remediationPlan.retryAfter = new Date(Date.parse(now()) + 60_000).toISOString();
+    writeFollowUpJob(requeued.jobPath, requeued.job);
+    delayedPendingPaths?.add?.(requeued.jobPath);
+    return { ok: false, result: { consumed: false, reason: authorship.reason,
+      job: requeued.job, jobPath: requeued.jobPath } };
+  }
+  const stopped = markFollowUpJobStopped({ rootDir, jobPath, stoppedAt: now(),
+    sourceStatus: 'in_progress', stopCode: authorship.stopCode, stopReason: authorship.reason,
+    stopMetadata: { builderAuthorshipEscalation: authorship.escalation },
+    commentDeliveryExemption: 'no-remediation-started',
+    remediationWorker: { state: 'never-spawned', reconciledAt: now() } });
+  log.error?.(`[follow-up-remediation] ${authorship.reason}`);
+  return { ok: false, result: { consumed: false, reason: authorship.reason,
+    escalation: authorship.escalation, job: stopped.job, jobPath: stopped.jobPath } };
 }
 
 // Recheck after every route-changing seam, including experiment/account proposals.

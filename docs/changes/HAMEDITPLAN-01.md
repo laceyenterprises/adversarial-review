@@ -21,4 +21,4 @@ Scoped offline `test/hameditplan-01.test.mjs` and `test/hamscope-01.test.mjs`,
 ESLint, contract typecheck and the research walkthrough run under netguard with
 per-command limits: all 16 tests passed, lint passed with 0 errors (existing
 warnings), typecheck passed and the walkthrough passed byte-equivalence. No full host suite or live
-changes. SRE activation is declared in `docs/post-merge-actions/HAMEDITPLAN-01.yaml`.
+changes. SRE activation is declared in `modules/worker-pool/post-merge-actions/HAMEDITPLAN-01.yaml`.

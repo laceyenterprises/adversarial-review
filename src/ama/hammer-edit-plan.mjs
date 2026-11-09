@@ -19,8 +19,8 @@ export function checkHammerEditPlan(review, plan, { strictNonBlockingRemediation
     if (typeof plan.path !== 'string' || !plan.path.trim()
       || !Number.isSafeInteger(plan.startLine) || !Number.isSafeInteger(plan.endLine)
       || plan.startLine < 1 || plan.endLine < plan.startLine) return refuse('edit-location-invalid');
-    // This class never grants reversal authority. Advisory edits must still
-    // take the normal deferral path, even when they would preserve the hunk.
+    // This class never grants reversal authority. Advisory edits continue to
+    // the policy-dependent stop/deferral below, even if they preserve the hunk.
     const requiredRepair = plan.kind === 'blocking'
       && checkReversalFinding(parsed, 'blocking', plan.findingNumber, strictNonBlockingRemediation).ok;
     const uncitedCiRepair = plan.kind === undefined && plan.findingNumber === undefined && plan.requiredCiRepair === true;
@@ -37,7 +37,10 @@ export function checkHammerEditPlan(review, plan, { strictNonBlockingRemediation
     return { action: plan.kind === 'non-blocking' && admissible.reason === 'finding-kind-not-authorizing'
       ? 'defer' : 'stop', reason: admissible.reason };
   }
-  if (plan.editKind === 'in-place') return refuse('edit-kind-invalid');
+  // A recognized advisory plan is disallowed in this category, not malformed.
+  // Strict remediation requires a covered author-lines plan (or an additive
+  // fix); it does not expand the blocking/CI-only in-place repair category.
+  if (plan.editKind === 'in-place') return refuse('advisory-in-place-disallowed');
   if (!Number.isSafeInteger(plan.startLine) || !Number.isSafeInteger(plan.endLine)
     || plan.startLine < 1 || plan.endLine < plan.startLine
     || !admissible.locations.some(location => location.path === plan.path

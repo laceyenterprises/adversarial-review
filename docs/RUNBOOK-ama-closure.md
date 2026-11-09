@@ -4733,10 +4733,33 @@ also authorize one only when the effective `strict_non_blocking_remediation` pol
 is enabled; advisory findings in non-strict mode cannot waive preservation.
 Before changing author-introduced lines, the hammer runs
 `bin/hammer-edit-plan.mjs OWNER/REPO PR REVIEW_ID PLAN_JSON`. The JSON plan names
-`reviewedHead`, `kind`, one-based `findingNumber`, `editKind` (`author-lines` or
-`additive`), and the affected `path`, `startLine`, `endLine` in reviewed coordinates.
+`reviewedHead`, `kind`, one-based `findingNumber`, `editKind` (`author-lines`,
+`additive`, or `in-place`), and the affected `path`, `startLine`, `endLine` in
+reviewed coordinates. `in-place` is restricted to behavior-preserving blocking
+repairs with a valid blocking citation, or uncited required CI repairs with
+`requiredCiRepair: true` and both `kind` and `findingNumber` omitted. It grants
+no reversal authority and does not require reversal-location coverage.
+`author-lines` requires coverage of the complete planned region by a cited
+required finding; non-blocking citations authorize it only under strict policy.
 The helper reads the review and effective policy and shares `checkReversalFinding`
-with the primary-change gate. Exit 0 allows the planned edit; exit 20 means no edit:
+with the primary-change gate.
+
+A valid advisory `in-place` plan under strict policy returns
+`stop/advisory-in-place-disallowed` (exit 1), rather than `edit-kind-invalid`.
+Do not edit under that plan. Re-plan as a genuinely additive fix or a covered
+`author-lines` repair and rerun the helper. Do not change the finding's category
+or omit its citation to claim CI authority. Strict required findings cannot be
+satisfied by backlog deferral. If no permitted repair exists, preserve the code
+and use the existing mandate 0b no-merge audit/closing status, quoting the exact
+refusal, finding, reviewed/live heads and missing coverage. This classification
+adds no waiver, operator decision or withdrawal route; B1's evidence-backed
+withdrawal remains limited to false blocking findings. Malformed input still
+stops with its specific evidence/location reason; `edit-kind-invalid` is reserved
+for an unknown edit category. Correct malformed input and rerun before editing.
+In non-strict mode advisory `in-place` and `author-lines` plans retain the
+existing durable backlog deferral.
+
+Exit 0 allows the planned edit; exit 20 means no edit:
 the advisory finding was captured in the existing findings backlog with a one-line
 deferral reason. Capture failure stops remediation rather than losing the finding.
 The helper runs as the existing review-state database owner when the hammer has

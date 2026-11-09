@@ -100,6 +100,76 @@ test('in-place CI and blocking repairs do not require reversal coverage', () => 
   assert.equal(checkHammerEditPlan(review, { ...plan, editKind: 'in-place' }).action, 'defer');
 });
 
+test('strict advisory in-place is a disallowed category, not malformed input, at helper and CLI seams', async t => {
+  const { rootDir, db, planFile, authorFile } = fixture(t);
+  const before = readFileSync(authorFile, 'utf8');
+  const inPlace = { ...plan, editKind: 'in-place' };
+  writeFileSync(planFile, JSON.stringify(inPlace));
+  const expected = { action: 'stop', reason: 'advisory-in-place-disallowed' };
+  assert.deepEqual(checkHammerEditPlan(review, inPlace, {
+    strictNonBlockingRemediation: true,
+  }), expected);
+  // Missing strict policy also defaults to strict at the CLI boundary.
+  for (const policy of [{}, { strictNonBlockingRemediation: true }]) {
+    assert.deepEqual(await main([repo, '7', '1', planFile], {
+      rootDir, readReviewImpl: async () => review, loadPolicy: () => policy,
+      captureImpl: () => assert.fail('strict stops must not capture a deferral'),
+    }), expected);
+  }
+  assert.deepEqual(checkHammerEditPlan(review, { ...inPlace, requiredCiRepair: true }, {
+    strictNonBlockingRemediation: true,
+  }), expected);
+  writeFileSync(planFile, JSON.stringify({ ...inPlace, editKind: 'typo' }));
+  assert.deepEqual(await main([repo, '7', '1', planFile], {
+    rootDir, readReviewImpl: async () => review,
+    loadPolicy: () => ({ strictNonBlockingRemediation: true }),
+    captureImpl: () => assert.fail('malformed stops must not capture a deferral'),
+  }), { action: 'stop', reason: 'edit-kind-invalid' });
+  assert.equal(db.prepare('SELECT count(*) n FROM finding_backlog').get().n, 0);
+  assert.equal(readFileSync(authorFile, 'utf8'), before);
+});
+
+test('non-strict advisory in-place defers durably and cannot masquerade as CI repair', async t => {
+  const { rootDir, db, planFile } = fixture(t);
+  writeFileSync(planFile, JSON.stringify({ ...plan, editKind: 'in-place', requiredCiRepair: true }));
+  const result = await main([repo, '7', '1', planFile], {
+    rootDir, readReviewImpl: async () => review,
+    loadPolicy: () => ({ strictNonBlockingRemediation: false }),
+  });
+  assert.equal(result.action, 'defer');
+  assert.equal(result.backlogRecorded, true);
+  assert.equal(db.prepare('SELECT head_sha FROM finding_backlog').get().head_sha, head);
+});
+
+test('strict advisory alternatives retain additive preservation and reviewed-coordinate coverage', () => {
+  const strict = { strictNonBlockingRemediation: true };
+  assert.deepEqual(checkHammerEditPlan(review, { ...plan, editKind: 'additive' }, strict),
+    { action: 'allow', reason: 'additive-fix' });
+  assert.deepEqual(checkHammerEditPlan(review, plan, strict),
+    { action: 'allow', reason: 'finding-authorizes-planned-region' });
+  assert.match(checkHammerEditPlan({
+    ...review, body: body.replace('**Lines:** 2', '**Lines:** unknown'),
+  }, { ...plan, editKind: 'in-place' }, strict).reason, /^finding-lines-unreadable:/);
+  for (const changed of [{ path: 'src/other.mjs' }, { endLine: 3 }]) {
+    assert.deepEqual(checkHammerEditPlan(review, { ...plan, ...changed }, strict),
+      { action: 'stop', reason: 'not-covered-by-cited-finding' });
+  }
+  for (const strictNonBlockingRemediation of [false, true]) {
+    const options = { strictNonBlockingRemediation };
+    const inPlace = { ...plan, editKind: 'in-place' };
+    assert.deepEqual(checkHammerEditPlan(review, { ...inPlace, startLine: 0 }, options),
+      { action: 'stop', reason: 'edit-location-invalid' });
+    assert.deepEqual(checkHammerEditPlan(review, { ...inPlace, findingNumber: 2 }, options),
+      { action: 'stop', reason: 'finding-evidence-invalid' });
+    assert.deepEqual(checkHammerEditPlan(review, { ...plan, editKind: 'typo' }, options),
+      { action: 'stop', reason: 'edit-kind-invalid' });
+    assert.deepEqual(checkHammerEditPlan({ ...review, commit_id: 'b'.repeat(40) }, inPlace, options),
+      { action: 'stop', reason: 'review-evidence-invalid' });
+    assert.deepEqual(checkHammerEditPlan({ ...review, user: { login: 'untrusted' } }, inPlace, options),
+      { action: 'stop', reason: 'review-evidence-invalid' });
+  }
+});
+
 test('advisory additive test is allowed and does not defer the finding', async t => {
   const { rootDir, db, planFile } = fixture(t);
   writeFileSync(planFile, JSON.stringify({ ...plan, editKind: 'additive', path: 'test/router.test.mjs' }));
@@ -220,4 +290,12 @@ test('hammer contract invokes the pre-edit helper and distinguishes deferred aud
   assert.match(prompt, /alarm shift; exec @ARGV' 90 "\$\{HAM_DISPUTE_RUN\[@\]\}" "\$HAM_NODE_BIN" \\\n  <<ROOT_DIR>>\/bin\/hammer-edit-plan\.mjs/);
   assert.match(prompt, /Exit 20 records the non-blocking finding[^\n]*\nand means make no edit/);
   assert.match(prompt, /separate counts\n   for remediated and deferred findings/);
+  const runbook = readFileSync(new URL('../docs/RUNBOOK-ama-closure.md', import.meta.url), 'utf8');
+  for (const text of [prompt, runbook]) {
+    assert.match(text, /stop\/advisory-in-place-disallowed/);
+    assert.match(text, /both `kind` and `findingNumber` omitted/);
+    assert.match(text, /mandate 0b/);
+    assert.match(text, /`edit-kind-invalid`[\s\S]*unknown[\s\S]*category/);
+  }
+  assert.match(runbook, /B1[\s\S]*withdrawal[\s\S]*false blocking finding/);
 });

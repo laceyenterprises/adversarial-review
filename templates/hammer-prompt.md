@@ -359,9 +359,14 @@ is a reversion. Check intent and bypasses separately.
 Before editing any author-introduced line, use this bounded helper on the
 review. Supply `reviewedHead`, `kind`, one-based `findingNumber`, reviewed
 `path`, `startLine`, `endLine`, and `editKind` (`author-lines`, `additive`,
-`in-place`). In-place blocking or uncited `requiredCiRepair: true` fixes
-preserve behavior; additive leaves author code intact. Run B1's owner setup
-through `fi` in this shell:
+`in-place`). In-place: behavior-preserving blocking/CI repairs only
+(CI: `requiredCiRepair: true`, both `kind` and `findingNumber` omitted).
+Additive preserves author lines/behavior. Strict advisory in-place stops:
+`stop/advisory-in-place-disallowed` (exit 1). Use additive or covered
+`author-lines`; never relabel as blocking/CI or defer required findings.
+Else mandate 0b: refusal, finding, reviewed/live heads, missing proof.
+Non-strict advisory in-place/author-lines defer. `edit-kind-invalid`: unknown
+category; fix input. Run B1's owner setup through `fi`:
 
 ```bash
 HAM_EDIT_RC=0

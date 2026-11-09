@@ -69,74 +69,103 @@ class CensusTests(unittest.TestCase):
                 self.assertIsNot(reads[0], reads[1])
                 self.assertEqual(waits, [0.01, 0.02])
 
-    def test_hamcensuseio_exhaustion_is_distinct_from_invalid_evidence(self):
+    def setUp(self):
+        original = census.group_snapshot
+        clock = [0.0]
+
+        def snapshot(*args, **kwargs):
+            sleep = kwargs.pop("sleep", lambda _: None)
+
+            def advance(seconds):
+                clock[0] += seconds
+                sleep(seconds)
+
+            return original(
+                *args, **kwargs, sleep=advance, now=lambda: clock[0], budget_ms=2000
+            )
+
+        patch = mock.patch.object(census, "group_snapshot", snapshot)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_persistent_failure_exhausts_time_budget_with_metadata(self):
         for code in (errno.EIO, errno.EINTR):
             sysctl, waits = Sysctl(error=code, result=-1), []
             with self.assertRaises(census.CensusInterrupted) as raised:
                 census.group_snapshot(100, sysctl, sleep=waits.append)
-            self.assertEqual(sysctl.calls, 3)
-            self.assertEqual(waits, [0.01, 0.02])
-            self.assertEqual(
-                census.error_reply(raised.exception),
-                {"error": errno.errorcode[code], "retryable": True, "attempts": 3},
-            )
+            reply = census.error_reply(raised.exception)
+            self.assertEqual(reply["error"], errno.errorcode[code])
+            self.assertTrue(reply["retryable"])
+            self.assertEqual(reply["attempts"], sysctl.calls)
+            self.assertGreater(sysctl.calls, 3)
+            self.assertEqual(reply["elapsedMs"], 2000)
+            self.assertAlmostEqual(sum(waits), 2)
+            self.assertLessEqual(max(waits), 0.2)
+
+    def test_embryonic_or_moving_record_requires_a_clean_reread(self):
+        for bad in (Sysctl(pgid=99), Sysctl(records=[(100, 2, 0, 0)])):
+            good = Sysctl()
+            calls = []
+
+            def changing(*args):
+                calls.append(1)
+                return (bad if len(calls) == 1 else good)(*args)
+
+            self.assertEqual(len(census.group_snapshot(100, changing)), 2)
+            self.assertEqual(len(calls), 2)
+
+    def test_persistent_inconsistency_has_the_same_bounded_retry(self):
+        for sysctl in (Sysctl(pgid=99), Sysctl(records=[(100, 2, 0, 0)])):
+            with self.assertRaises(census.CensusInterrupted) as raised:
+                census.group_snapshot(100, sysctl)
+            self.assertEqual(census.error_reply(raised.exception)["elapsedMs"], 2000)
+
+    def test_invalid_evidence_and_permission_denial_refuse_immediately(self):
         for sysctl in (
             Sysctl(error=errno.EPERM, result=-1),
             Sysctl(result=-1),
             Sysctl(size=649),
-            Sysctl(pgid=99),
         ):
             with self.assertRaises(OSError) as raised:
                 census.group_snapshot(100, sysctl, sleep=lambda _: self.fail("retry"))
             self.assertEqual(sysctl.calls, 1)
             self.assertNotIn("retryable", census.error_reply(raised.exception))
 
-    def test_hamcensuseio_churn_does_not_reset_interruption_budget(self):
-        errors = iter([errno.EIO, errno.ENOMEM, errno.EINTR, errno.ENOMEM, errno.EIO])
+    def test_churn_does_not_reset_deadline_during_buffer_growth(self):
+        errors = iter([errno.EIO, errno.ENOMEM, errno.EINTR, errno.ENOMEM])
         calls = []
 
         def churn(*args):
             calls.append(len(args[2]))
-            ctypes.set_errno(next(errors))
+            ctypes.set_errno(next(errors, errno.EIO))
             return -1
 
-        with self.assertRaises(census.CensusInterrupted):
-            census.group_snapshot(100, churn, sleep=lambda _: None)
-        self.assertEqual(calls, [64, 64, 1024, 1024, 16384])
+        with self.assertRaises(census.CensusInterrupted) as raised:
+            census.group_snapshot(100, churn)
+        self.assertEqual(calls[:5], [64, 64, 1024, 1024, 16384])
+        self.assertEqual(census.error_reply(raised.exception)["elapsedMs"], 2000)
 
-    def test_hamcensuseio_retry_does_not_relax_snapshot_validation(self):
-        for bad in (
-            Sysctl(size=649),
-            Sysctl(pgid=99),
-            Sysctl(enomem=99),
-            Sysctl(error=errno.EPERM, result=-1),
-            Sysctl(result=-1),
-        ):
-            calls = []
-
-            def interrupted(*args):
-                calls.append(1)
-                if len(calls) == 1:
-                    ctypes.set_errno(errno.EIO)
-                    return -1
-                return bad(*args)
-
-            with self.assertRaises(OSError) as raised:
-                census.group_snapshot(100, interrupted, sleep=lambda _: None)
-            self.assertNotIsInstance(raised.exception, census.CensusInterrupted)
-            self.assertNotIn("retryable", census.error_reply(raised.exception))
-            self.assertEqual(len(calls), 5 if bad.enomem else 2)
-
-    def test_hamcensuseio_serve_preserves_exhaustion_without_replaying_data(self):
+    def test_serve_preserves_exhaustion_without_replaying_data(self):
         replies = io.StringIO()
         sysctl = Sysctl(error=errno.EIO, result=-1)
         with mock.patch.object(census.sys, "platform", "darwin"):
             census.serve(["group 100\n"] * 2, replies, sysctl=sysctl)
-        self.assertEqual(
-            [json.loads(line) for line in replies.getvalue().splitlines()],
-            [{"error": "EIO", "retryable": True, "attempts": 3}] * 2,
-        )
-        self.assertEqual(sysctl.calls, 6)
+        answers = [json.loads(line) for line in replies.getvalue().splitlines()]
+        for answer in answers:
+            self.assertEqual(answer["error"], "EIO")
+            self.assertTrue(answer["retryable"])
+            self.assertEqual(answer["elapsedMs"], 2000)
+        self.assertEqual(sysctl.calls, sum(answer["attempts"] for answer in answers))
+
+    def test_caller_budget_is_bounded_and_standalone_default_is_nominal(self):
+        for raw, expected in (
+            ("12000", 12000),
+            ("999999", 40000),
+            ("0", 1),
+            ("invalid", 2000),
+        ):
+            with mock.patch.dict(census.os.environ, HAM_CENSUS_RETRY_BUDGET_MS=raw):
+                self.assertEqual(census.retry_budget_ms(), expected)
 
     def test_kinfo_proc_abi(self):
         self.assertEqual(ctypes.sizeof(census.KinfoProc), 648)

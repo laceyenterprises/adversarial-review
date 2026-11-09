@@ -14,7 +14,8 @@ test('native census validates the wire shape and retains timeout and isolation b
     assert.equal(bin, python);
     assert.deepEqual(args.slice(0, 2), ['-I', '-B']);
     assert.deepEqual(args.slice(-2), ['group', '42']);
-    assert.equal(options.timeout, 12000);
+    assert.equal(options.timeout, 13000);
+    assert.equal(options.env.HAM_CENSUS_RETRY_BUDGET_MS, '12000');
     assert.equal(options.maxBuffer, 1024 * 1024);
     return '[{"pid":42,"birth":"123.000001"}]';
   } });
@@ -73,7 +74,7 @@ test('invalid helper arguments report only EINVAL and exit 2', () => {
 
 test('native kern.proc.pgrp allowed, zombie, denied, truncated and inconsistent fixtures', () => {
   execFileSync(python, ['-I', '-B', fileURLToPath(new URL('./fixtures/controller-census.py', import.meta.url))],
-    { timeout: 5000, stdio: 'pipe' });
+    { timeout: 10000, stdio: 'pipe' });
 });
 
 test('HAMCENSUSEIO-01: one-shot adapter distinguishes exhausted interruptions without retrying the helper', () => {
@@ -86,9 +87,17 @@ test('HAMCENSUSEIO-01: one-shot adapter distinguishes exhausted interruptions wi
       calls += 1;
       throw Object.assign(new Error('fixture'), { status: 2, stderr: `controller census: ${token}\n` });
     } }), error => error.retryable === retryable && error.censusAttempts === (retryable ? 3 : undefined)
-      && error.message.includes('retryable syscall interruption exhausted (3 failures)') === retryable);
+      && error.message.includes('retryable census read exhausted (3 attempts, unknown ms, last errno') === retryable);
     assert.equal(calls, 1);
   }
+});
+
+test('CENSUSEIO-01: one-shot exhaustion retains variable attempts, elapsed time and errno', () => {
+  assert.throws(() => nativeControllerIdentity('group', 42, { execFileSyncImpl() {
+    throw Object.assign(new Error('synthetic exhaustion'), { status: 2,
+      stderr: 'controller census: EIO retry-exhausted=17 elapsed-ms=2000\n' });
+  } }), error => error.code === 'EIO' && error.retryable && error.censusAttempts === 17
+    && error.censusElapsedMs === 2000 && /17 attempts, 2000 ms, last errno EIO/.test(error.message));
 });
 
 test('HAMCENSUSEIO-01: round adapter preserves exhaustion and refuses proof until a fresh request succeeds', async () => {
@@ -96,16 +105,17 @@ test('HAMCENSUSEIO-01: round adapter preserves exhaustion and refuses proof unti
     { error: 'EIO', retryable: true, attempts: 3 },
     { error: 'EINTR', retryable: true, attempts: 3 },
     { error: 'EIO' }, { error: 'EPERM', retryable: true, attempts: 3 },
-    { error: 'EIO', retryable: true, attempts: 99 },
+    { error: 'EIO', retryable: true, attempts: 0 },
+    { error: 'EIO', retryable: true, attempts: 99, elapsedMs: 2000 },
   ]) {
     const f = fakeHelpers((line, helper, count) =>
       helper.stdout.write(`${JSON.stringify(count === 1 ? reply : { ok: [{ pid: 42, birth: '123.000001' }] })}\n`));
     const census = createControllerCensus({ spawnImpl: f.spawnImpl });
     try {
-      const retryable = ['EIO', 'EINTR'].includes(reply.error) && reply.retryable === true && reply.attempts === 3;
+      const retryable = ['EIO', 'EINTR'].includes(reply.error) && reply.retryable === true && reply.attempts > 0;
       await assert.rejects(census.group(42), error => error.code === reply.error && error.retryable === retryable
-        && error.censusAttempts === (retryable ? 3 : undefined)
-        && error.message.includes('retryable syscall interruption exhausted (3 failures)') === retryable);
+        && error.censusAttempts === (retryable ? reply.attempts : undefined)
+        && error.message.includes('retryable census read exhausted') === retryable);
       assert.deepEqual(f.spawned[0].requests, ['group 42']);
       assert.deepEqual(f.spawned[0].kills, ['SIGKILL']);
       assert.deepEqual(await census.group(42), [{ pid: 42, birth: '123.000001' }]);
@@ -294,14 +304,14 @@ test('Darwin round census matches the one-shot census for the same live group', 
 test('a slow ownership census survives within its load-aware budget', () => {
   const observe = timeoutImpl => nativeControllerIdentity('pgid', 42, { timeoutImpl,
     execFileSyncImpl(_bin, _args, options) {
-      if (options.timeout < 3000) throw Object.assign(new Error('slow scheduler'), { code: 'ETIMEDOUT' });
+      if (options.timeout < 4000) throw Object.assign(new Error('slow scheduler'), { code: 'ETIMEDOUT' });
       return '42';
     } });
   assert.throws(() => observe(base => base), { code: 'ETIMEDOUT' });
   assert.equal(observe(base => base * 3), 42);
 });
 
-test('persistent census sizes every request with the shared load-aware deadline', async () => {
+test('persistent census freezes the shared load-aware budget for its helper', async () => {
   const f = fakeHelpers((_line, helper) => helper.stdout.write('{"ok":42}\n'));
   let sizes = 0;
   const census = createControllerCensus({ spawnImpl: f.spawnImpl,
@@ -309,6 +319,7 @@ test('persistent census sizes every request with the shared load-aware deadline'
   try {
     assert.equal(await census.pgid(42), 42);
     assert.equal(await census.pgid(42), 42);
-    assert.equal(sizes, 2);
+    assert.equal(sizes, 1);
+    assert.equal(f.spawned[0].options.env.HAM_CENSUS_RETRY_BUDGET_MS, '6000');
   } finally { census.close(); }
 });

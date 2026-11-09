@@ -197,7 +197,8 @@ as `closer-terminal:<reason>`, preserving existing attempt and lifetime charges.
 A later progress receipt supersedes legacy premature stops (HAMTERMSTOP-01).
 
 HAMMERNOPROGRESS-01 also repairs fixed two-second process census deadlines:
-both one-shot and persistent census reads use `loadAwareTimeoutMs(2000)`.
+both one-shot and persistent census reads size a kernel retry budget with
+`loadAwareTimeoutMs(2000)`, plus one second of unscaled transport slack.
 On merge-lease release, exit 75 from an unavailable group observation is
 classified as `controller-observation-unavailable`, while an owner mismatch
 retains `controller-owner-lost`. This distinction applies only to release:
@@ -7462,33 +7463,40 @@ ledger adapter, launch ownership and lease-generation fences remain in force.
 QCP-08: a controller round starts the helper once in `serve` mode and sends one
 `group <pgid>` request per tick, instead of starting a new Python child every
 tick. Each request is a fresh kernel read; no answer is cached or replayed, so a
-group signal is still gated on that tick's census. A timeout (two seconds per
-request), helper exit, errno refusal, unsolicited output or malformed reply
-rejects the census with the same codes as before (`ETIMEDOUT`, `exit N`, the
-errno name, `EMALFORMED`). The controller then fails closed exactly as for a
-one-shot refusal, and the next tick starts a new helper. A helper that exits or
-errors while idle between ticks is retired at once, so the next tick starts a
-new helper rather than waiting out the request timeout. A validator request
-that arrives while a census is in flight is judged by the next census, never by
-one that began before it. Owner assertion (`getpgid`) keeps the one-shot helper
-because it runs in a separate short-lived process. Other platforms keep the
-per-tick `ps` provider.
+group signal is still gated on that tick's census. A timeout, helper exit, errno refusal, unsolicited output or malformed reply
+rejects the census (`ETIMEDOUT`, `exit N`, the errno name, `EMALFORMED`).
+The failed helper is retired, including if it exits or errors while idle.
+A validator request arriving during a census is judged by the next census.
+Owner assertion (`getpgid`) retains the one-shot helper; other platforms retain
+per-tick `ps` reads.
 
-HAMCENSUSEIO-01: an explicit failed `kern.proc.pgrp` syscall with `EIO` or
-`EINTR` retries with fresh buffers after 10ms, then 20ms. The request permits
-at most three such failures in total, including across `ENOMEM` buffer growth;
-the existing four buffer capacities and outer load-aware probe deadline still
-bound the request. The adapters add no second retry loop. Exhaustion retains
-the errno and exposes `retryable: true` and `censusAttempts: 3` on the adapter
-error and identifies exhausted syscall interruption in stderr. Serve-mode errors
-carry `retryable: true, attempts: 3`; one-shot stderr
-adds the bounded token `retry-exhausted=3`. Other errors expose
-`retryable: false`. This distinction is diagnostic, never proof of an empty
-group or permission to proceed. A failed syscall with no errno, permission
-denial, successful but partial/misaligned data, invalid identity, or exhausted
-buffer growth refuses immediately without interruption retries. Every
-successful retry must pass the same complete snapshot and identity validation.
-Exhaustion follows the existing controller refusal and helper-retirement path.
+CENSUSEIO-01: explicit `EIO`/`EINTR` and successful snapshots containing an
+embryonic start time or a mismatched group are re-read with fresh buffers.
+Backoff starts at 10ms, doubles and caps at 200ms. One monotonic deadline spans
+all retries and `ENOMEM` growth. The caller sizes the nominal two-second kernel
+budget once using `loadAwareTimeoutMs`, capped independently at 40 seconds.
+A persistent helper freezes this budget for its lifetime; one second of unscaled
+transport slack lets exhaustion metadata arrive before the caller times out.
+No argv, environment or partial snapshot data leaves the helper.
+
+Persistent transient failures return errno, `retryable: true`, actual `attempts`
+and `elapsedMs`; one-shot stderr uses `retry-exhausted=N elapsed-ms=N` tokens.
+Adapters retain `censusAttempts` and `censusElapsedMs` (legacy exhaustion tokens
+remain readable). Permission denial, missing errno, malformed buffers, invalid
+PID/microseconds and exhausted buffer capacities still refuse immediately.
+Every successful retry must pass full snapshot validation.
+
+After readiness, the controller tolerates failed census requests until three
+consecutive failures or a load-aware nominal ten-second window is exhausted,
+whichever occurs first (an admitted request may finish beyond the window).
+Pending validation and merge gates wait for a fresh readable census. Separate
+cancellation, launch termination and controller timeout still stop the round.
+An unreadable result never grants group-signal, validation or drain authority;
+a required stop signals only the direct child until group ownership is proved.
+The receipt retains `reason: process-probe-unreadable` for classification and
+adds structured `reasonDetail` with `requests`, kernel `attempts` (one when
+unreported), `elapsedMs` and `lastErrno`. `censusFailure` retains the latest failed
+series even after recovery. Lease-release and identity rules are unchanged.
 
 `controllerGroupSnapshot` forwards an injected `execFileSyncImpl` to the native
 helper on Darwin as well as to `ps` on other platforms. Invalid helper argument

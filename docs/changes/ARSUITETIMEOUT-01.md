@@ -74,3 +74,20 @@ SRE must observe the next ordinary main run containing the fix: `npm test
 (Node 22)` is green with suite wall time well under 900 seconds. Retain the run
 link and timing in the companion incident report. The repository-local PR
 declaration contains an operator observation only.
+
+## Hammer integration
+
+After `main` extracted the self-rebase scenarios, the clock shims, helper routing,
+representative real-helper assertions and sandbox-owned compile cache now live
+in `test/helpers/hammer-self-rebase-suite.mjs`. The three existing self-rebase
+entrypoints share those changes. The conflict replay retains `main`'s delayed
+wakeup model for the last second of the fixed CI wait deadline. No scenario or
+production behavior was removed. The test runner also strips inherited `HAM_`
+session state from child test environments, preventing live head/lease/audit
+values from contaminating synthetic phase fixtures; the controller retains
+its environment. Runner integration probes cover this boundary.
+
+Hammer validates the three split scenario files, virtual-clock isolation,
+throttle contention, API publication, duplicate-family workflow and merge-agent
+fixtures together outside the merge lease. Full-suite acceptance remains the
+required remote checks on the published head.

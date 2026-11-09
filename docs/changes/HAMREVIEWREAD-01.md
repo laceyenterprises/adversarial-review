@@ -51,6 +51,21 @@ warnings), `npm run typecheck:contracts` passes, the bounded offline
 `bash demo/research-finding-walkthrough.sh` passes with three byte-stable
 deliveries, and `git diff --check` passes. The full local suite was not run.
 
+The PR-update repairs the stale REVIEWSIMPLE-01 template expectation: either
+truncation flag must lead to the canonical full-review helper. Advice remains
+separate from findings and verdict authority, with its existing audit reporting.
+No runtime interface or CI configuration changes are part of this update.
+`test/simplicity-note-prompts.test.mjs` passes 6 tests,
+`test/ama-hammer-merge-protocol-prompt.test.mjs` passes 45,
+`test/hammer-pr-read.test.mjs` passes 19,
+`test/hammertrim-contract.test.mjs` passes 53, and
+`test/merge-agent-doc-contract.test.mjs` passes 4. Each file ran individually
+through `cwp_dispatch.worker_validation` with a 600-second limit and netguard.
+Changed-file ESLint, repository lint (zero errors, 152 existing warnings),
+contract typechecking and the offline research-finding demo also pass.
+The reported Node 22 CI timeout after 900 seconds is tracked separately as
+ARSUITETIMEOUT-01; the suite cap and CI jobs are unchanged.
+
 ## Activation check
 
 After normal submodule float and the follow-up/watcher and dispatcher reloads,

@@ -56,3 +56,29 @@ Remediation validation after rebasing onto fresh `origin/main`:
   Reviewed affected source projections were refreshed and separately verified.
 
 The full suite and demo were not run under the remediation's targeted-only rule.
+
+CI remediation: both Node lanes exposed a stale independent graph snapshot
+and an outdated exact-ticket refusal fixture. Reviewed the declaration diff:
+only the pending-intent evidence text changes in the object graph; states,
+transitions and generated diagrams are unchanged. Refreshed the existing
+independent snapshot without changing its drift checks. The refusal fixture
+now exercises an empty ticket with missing class metadata, while new operator
+apply cases verify exact-ticket recovery for `codex`, null and omitted classes.
+Production receipt matching and terminal reconciliation remain unchanged.
+
+- `bash bin/run-bounded.sh --timeout 180 -- node test/run-tests.mjs test/smv.test.mjs test/ama-pre-receipt-intent.test.mjs`:
+  204 pass, zero failures, including the independent graph, source projections,
+  mutation checks and disposable sandbox smoke. Direct `node --test` also
+  reproduced the two CI failure causes before the fix; running the entire
+  pre-receipt file directly inherits host process observations and produces
+  unrelated failures, so validation uses the checked-in isolation runner.
+- `npm run lint`: zero errors, 152 existing warnings.
+- `npm run typecheck:contracts`, `node scripts/validate-data-model-catalog.mjs`
+  (91 entries), and `git diff --check`: pass.
+- Focused recovery and watcher claim-loop checks through the isolation runner:
+  4 pass. A temporary external preload supplied the test-name filter to the
+  runner's Node child. The optional combined full-file watcher run hit its
+  180-second bound after 248 passes with no assertion failures; a direct
+  filtered retry hit 90 seconds because the isolation helper re-executes the
+  entire file without forwarding that filter. Neither timeout is a completed
+  watcher-suite result.

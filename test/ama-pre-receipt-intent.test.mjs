@@ -997,7 +997,7 @@ for (const keyReadable of [true, false]) test(`CLOSERINTENT-01: keyed misattribu
   assert.deepEqual(audit[0].evidence, applied.evidence);
 });
 
-for (const patch of [{ worker_class: null }, { head_sha: 'b'.repeat(40) },
+for (const patch of [{ ticket_ref: null, worker_class: null }, { head_sha: 'b'.repeat(40) },
   { ticket_ref: 'FOREIGN', identity_ambiguous: true }]) {
   test(`LAC-2096: empty supplemental ticket evidence cannot settle terminal ambiguity ${JSON.stringify(patch)}`, async t => {
     const f = fixture(t);
@@ -1009,6 +1009,24 @@ for (const patch of [{ worker_class: null }, { head_sha: 'b'.repeat(40) },
     assert.equal(f.read().state, 'dispatching');
     assert.deepEqual(readAmaCloserLease(f.rootDir, identity), lease);
     assert.equal(readHammerRetryCapLedger(f.rootDir, identity), null);
+  });
+}
+
+for (const worker_class of ['codex', null, undefined]) {
+  test(`PRERECEIPTADOPT-01: operator settles exact-ticket terminal receipt with class ${worker_class}`, async t => {
+    const f = fixture(t);
+    const row = { ...receipt, status: 'succeeded', worker_class };
+    const options = { ...terminalReceiptOptions(f, row), print() {},
+      readLegacyIntentLaunchesImpl: () => ({ ok: true, rows: [] }),
+    };
+    const result = await settleLegacyIntent(
+      operatorArgs(f, ['--apply', '--reason', 'synthetic exact-ticket recovery']), options);
+    assert.equal(result.conclusive, true);
+    assert.equal(result.reason, 'terminal-receipt-recovered');
+    assert.equal(f.read().launchRequestId, row.launch_request_id);
+    assert.equal(readAmaCloserLease(f.rootDir, identity).terminalOutcome, 'failed-without-merge');
+    assert.deepEqual(readFileSync(result.auditPath, 'utf8').trim().split('\n').map(line =>
+      JSON.parse(line).outcome), ['settlement-authorized', 'settled-terminal-receipt']);
   });
 }
 

@@ -4658,13 +4658,13 @@ merge predicates and smoke commands remain unchanged.
   phrases and enumerated lists ending in ", or", while retaining human ownership
   for missing credentials and separate approval clauses. Regression cases now
   live in the existing ownership and service-home suites discovered by `npm test`.
-- LIVEPACKNEW-01 final remediation: stop ledger retries when the budget expires during backoff, count only dispatched retries, and emit zero retry counts for unread packs in remediation facts. Offline regressions cover deadline boundaries and malformed plans.
 
 New repository notes live in [`docs/changes/`](docs/changes/README.md), one
 `<TICKET-ID>.md` file per ticket. Follow that convention for new work; the
 entries below are preserved historical notes. No per-ticket README or index
 update is needed.
-- LIVEPACKNEW-01: a head-only pack plan is conclusively not live when a complete base-plan scan finds no matching planId, without a ledger read. Collisions retain ledger checks and base-authoritative tickets; unavailable scans fail closed. Unavailable ledger reads retry up to three attempts within ten seconds, with retry counts in structured review facts.
+
+- LIVEPACKNEW-01: a head-only pack plan is conclusively not live when a complete base-plan scan finds no matching planId, without a ledger read. Collisions retain ledger checks and base-authoritative tickets; unavailable scans fail closed. Unavailable ledger reads retry up to three attempts within ten seconds, with retry counts in structured review facts. Retries stop when the budget expires during backoff; counts include only dispatched retries and are zero for unread packs in remediation facts. Offline regressions cover deadline boundaries and malformed plans.
 
 - **HAM-1722:** Preserve closer leases when environment launch IDs conflict while retaining audit identity precedence; use launch-request-format fixtures and cover identical aliases and ambiguous terminal outcomes.
 

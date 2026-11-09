@@ -376,7 +376,7 @@ Run B1 owner setup through `fi` first:
 HAM_EDIT_CORRECTION_FILE="<<RUN_DIR>>/hammer-edit-plan-correction-used"
 HAM_EDIT_RC=0
 /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_DISPUTE_RUN[@]}" "$HAM_NODE_BIN" \
-  <<ROOT_DIR>>/bin/hammer-edit-plan.mjs <<REPO>> <<PR_NUMBER>> <numeric-review-id> <plan.json> --help || HAM_EDIT_RC=$?
+  <<ROOT_DIR>>/bin/hammer-edit-plan.mjs <<REPO>> <<PR_NUMBER>> <numeric-review-id> <plan.json> || HAM_EDIT_RC=$?
 if [ "$HAM_EDIT_RC" = 21 ]; then
   [ ! -e "$HAM_EDIT_CORRECTION_FILE" ] || { echo "NO EDIT: correction exhausted"; exit 1; }
   : > "$HAM_EDIT_CORRECTION_FILE"

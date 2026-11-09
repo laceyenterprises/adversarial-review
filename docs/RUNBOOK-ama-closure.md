@@ -318,6 +318,9 @@ forced launch, ledger mutation or new smoke step is authorized by this change.
 
 ## Change notes
 
+- **HAMEDITPLAN-03:** A cited non-blocking `in-place` plan is a correctable
+  shape error (exit 21). Re-plan as `additive`; in-place permission is unchanged.
+
 - **HAMEDITPLAN-02:** The edit-plan CLI fills omitted, non-string or empty
   `reviewedHead` from the run's pinned SHA. Explicit heads must match the cited
   review's `commit_id`, including citations from another reviewed head.
@@ -4840,7 +4843,11 @@ with the primary-change gate. Exit 21 is a shape-only refusal with an expected-s
 correct the plan once and rerun the helper. The prompt permits one correction
 per run across all plans; a second shape refusal exits 1. Exit 21 here is never
 a verify-head or wait-CI conflict. The first shape refusal exits the shell block
-without editing. Cited in-place CI plans retain their citations and are evaluated for
+without editing. A valid cited non-blocking `in-place` plan receives exit 21 with
+`correctable: allowed editKinds for kind=non-blocking are additive|author-lines (author-lines only where checkReversalFinding authorizes)`.
+Re-plan as `additive`; this grants no in-place permission, even in strict mode
+or with `requiredCiRepair`. Missing or invalid finding citations remain terminal.
+Blocking cited in-place CI plans retain their citations and are evaluated for
 policy and readable finding evidence before shape correction.
 Review evidence and policy refusals retain their terminal or deferring outcomes.
 Exit 0 allows the planned edit; exit 20 means no edit:

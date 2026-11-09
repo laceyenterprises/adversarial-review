@@ -89,7 +89,6 @@ test('policy and evidence refusals keep their terminal and deferral exits', () =
     [review, { ...blocking, findingNumber: 99 }, 'finding-evidence-invalid'],
     [review, { ...blocking, endLine: 3 }, 'not-covered-by-cited-finding'],
     [review, { ...blocking, path: 'src/other.mjs' }, 'not-covered-by-cited-finding'],
-    [review, { ...advisory, editKind: 'in-place' }, 'edit-kind-invalid'],
     [{ ...review, body: review.body.replace('**Lines:** 2', '**Lines:** unknown') }, blocking, 'finding-lines-unreadable: \"unknown\"'],
   ]) {
     const result = checkHammerEditPlan(candidate, plan, { strictNonBlockingRemediation: true });
@@ -100,12 +99,57 @@ test('policy and evidence refusals keep their terminal and deferral exits', () =
   assert.equal(editPlanExitCode(checkHammerEditPlan(review, ci)), 0);
 });
 
+test('non-blocking in-place plans correct to additive without granting in-place permission', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hameditplan-non-blocking-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const planFile = join(rootDir, 'plan.json');
+  const message = 'correctable: allowed editKinds for kind=non-blocking are additive|author-lines (author-lines only where checkReversalFinding authorizes)';
+  const nonBlocking = { ...examples[3], reviewedHead: review.commit_id, editKind: 'in-place' };
+  for (const strictNonBlockingRemediation of [false, true]) {
+    const dependencies = {
+      rootDir, env: { HAM_REVIEWED_SHA: review.commit_id }, readReviewImpl: async () => review,
+      loadPolicy: () => ({ strictNonBlockingRemediation }),
+      captureImpl: () => assert.fail('a shape correction must not defer a finding'),
+    };
+    for (const requiredCiRepair of [undefined, false, true]) {
+      for (const findingNumber of [undefined, 1]) {
+        const plan = { ...nonBlocking, requiredCiRepair, findingNumber };
+        writeFileSync(planFile, JSON.stringify(plan));
+        const result = await main(['sample/service', '7', '1', planFile], dependencies);
+        assert.deepEqual(result, checkHammerEditPlan(review, plan, { strictNonBlockingRemediation }));
+        if (findingNumber === undefined) {
+          assert.deepEqual(result, { action: 'stop', reason: 'finding-evidence-invalid' });
+          assert.equal(editPlanExitCode(result), 1);
+        } else {
+          assert.deepEqual(result, { action: 'correct', reason: 'edit-kind-invalid', message });
+          assert.equal(editPlanExitCode(result), 21);
+        }
+      }
+    }
+    writeFileSync(planFile, JSON.stringify({ ...nonBlocking, editKind: 'additive' }));
+    const additive = await main(['sample/service', '7', '1', planFile], dependencies);
+    assert.deepEqual(additive, { action: 'allow', reason: 'additive-fix' });
+    assert.equal(editPlanExitCode(additive), 0);
+
+    for (const allowed of [ci, { ...nonBlocking, kind: 'blocking' }]) {
+      const result = checkHammerEditPlan(review, allowed, { strictNonBlockingRemediation });
+      assert.deepEqual(result, { action: 'allow', reason: 'in-place-repair' });
+      assert.equal(editPlanExitCode(result), 0);
+    }
+    const unauthorized = checkHammerEditPlan({
+      ...review, body: review.body.replace('**Lines:** 2', '**Lines:** unknown'),
+    }, { ...nonBlocking, kind: 'blocking' }, { strictNonBlockingRemediation });
+    assert.equal(unauthorized.action, 'stop');
+  }
+  assert.match(template, /Non-blocking in-place: on 21 re-plan as `additive`/);
+});
+
 test('cited CI plans retain policy refusals and backlog capture through main', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hameditplan-policy-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const planFile = join(rootDir, 'plan.json');
   for (const [candidate, fields, action] of [
-    [review, { kind: 'non-blocking', findingNumber: 1 }, 'defer'],
+    [review, { kind: 'non-blocking', findingNumber: 1, editKind: 'author-lines' }, 'defer'],
     [{ ...review, body: review.body.replace('**Lines:** 2', '**Lines:** unknown') },
       { kind: 'blocking', findingNumber: 1 }, 'stop'],
     [review, { kind: 'blocking' }, 'stop'],

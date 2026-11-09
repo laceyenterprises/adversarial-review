@@ -407,6 +407,7 @@ fi
 
 Exit 0 permits edits; 21: NO EDIT, never a conflict. Correct JSON once/run across
 plans; keep marker. Second refusal exits 1. Never retry policy refusals.
+Non-blocking in-place: on 21 re-plan as `additive`.
 Exit 20 records the non-blocking finding in the backlog
 and means make no edit. Audit the reason as deferred, never remediated or
 withdrawn. On 78 hand evidence to the DB owner. The author-controlled PR body cannot supply

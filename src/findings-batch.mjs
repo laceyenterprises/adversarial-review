@@ -10,7 +10,8 @@ import { resolveHqRoot } from './hq-root.mjs';
 import { fleetStopReason } from './fleet-stop.mjs';
 import fsExt from 'fs-ext';
 import { readDispatchStatus, readLaunchRequestStatus } from './producer-contracts/launch-status.mjs';
-import { readLaunchRequestByIdempotencyKeyAsync } from './session-ledger-read-adapter.mjs';
+import { readLaunchRequestByIdempotencyKeyAsync, readLaunchRequestSnapshotFromLedgerAsync } from './session-ledger-read-adapter.mjs';
+import { redactPublicSafeText } from './adapters/comms/github-pr-comments/redaction.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { normalizeDroppedReason } from './finding-drop-reason.mjs';
@@ -203,6 +204,7 @@ function validateBatchOutcomes(db, batch, result) {
 }
 
 export const FINDING_BATCH_MAX_ATTEMPTS = 3;
+export const FINDING_BATCH_MAX_DISPATCH_ATTEMPTS = 3;
 
 function releaseReason(reason) {
   return String(reason || 'batch-released').replace(/\s+/g, ' ').trim().slice(0, 300) || 'batch-released';
@@ -343,7 +345,8 @@ group-readable permissions (0664). Do not commit the artifact. If publication fa
 async function publishFindingBatch({ db, batch, result, dir, outputPath, env, rootDir,
   execFileImpl, fetchPublication, fetchPr, readLaunches, logger }) {
   validateBatchOutcomes(db, batch, result);
-  if (!batch.launch_id || !/^[a-f0-9]{40}$/i.test(result.headSha || '')) throw Error('batch-push-evidence-missing');
+  if (!batch.launch_id) throw Error('batch-launch-receipt-missing');
+  if (!/^[a-f0-9]{40}$/i.test(result.headSha || '')) throw Error('batch-push-evidence-missing');
   // Fence concurrent collectors across the receipt lookup and submission. The
   // launch ledger, including terminal rows, survives a lost dispatch receipt.
   const fd = openSync(join(dir, 'publish.lock'), 'a', 0o664);
@@ -441,26 +444,56 @@ async function verifyDropPrs(batch, result, options, fetchPr = fetchFindingBatch
 // read/transport failure is not listed; it retries, bounded by the timeout.
 const ENDED_LAUNCH_RELEASE_ERRORS = /^(?:batch-push-evidence-missing|batch-push-evidence-mismatch|batch-preparation-failed|batch-branch-missing|batch-publish-ended-without-pr(?::.*)?|batch-publish-receipt-mismatch|batch-launch-evidence-mismatch|batch-publish-reused-decision-launch|invalid-batch-manifest|invalid-advisory-manifest|invalid-advisory-outcome|batch-outcome-too-large)$/s;
 
-// A batch is released only when every keyed launch (preparation and any
-// publisher) is terminal in the ledger, or the ledger proves none exists after
-// the batch timeout. Unreadable ledger evidence or any live launch holds it.
-// Waiting on an open batch PR clears the error, so it is never released here.
-async function releaseEndedFindingBatch({ db, batchId, hasOutcomes, env, rootDir, readLaunches, now, timeoutMs }) {
-  const batch = db.prepare('SELECT * FROM finding_batches WHERE batch_id=?').get(batchId);
-  if (!batch || batch.completed_at || batch.released_at || !batch.launch_id) return null;
+function batchAgeMs(batch, now) {
   const startedMs = Date.parse(batch.launched_at || `${batch.day}T00:00:00Z`);
-  const stale = Number.isFinite(startedMs) && now - startedMs > timeoutMs && Boolean(batch.error || !hasOutcomes);
-  if (!stale && !(batch.error && ENDED_LAUNCH_RELEASE_ERRORS.test(batch.error))) return null;
+  return Number.isFinite(startedMs) ? Math.max(0, now - startedMs) : 0;
+}
+
+// Release only on terminal/absent ledger custody. The dispatch-failure cap may
+// release before timeout; missing keyed receipts for a recorded launch require
+// the timeout plus its direct ledger snapshot. Unreadable evidence holds and
+// reports needs-operator. Waiting on an open batch PR clears its error.
+async function releaseEndedFindingBatch({ db, batchId, hasOutcomes, env, rootDir,
+  readLaunches, readLaunchSnapshot, now, timeoutMs }) {
+  const batch = db.prepare('SELECT * FROM finding_batches WHERE batch_id=?').get(batchId);
+  if (!batch || batch.completed_at || batch.released_at) return null;
+  if (!batch.launch_id && !batch.error) return null;
+  const stale = batchAgeMs(batch, now) > timeoutMs && Boolean(batch.error || !hasOutcomes);
+  const dispatchExhausted = !batch.launch_id && batch.batch_attempts >= FINDING_BATCH_MAX_DISPATCH_ATTEMPTS;
+  if (!stale && !dispatchExhausted && !(batch.launch_id && batch.error && ENDED_LAUNCH_RELEASE_ERRORS.test(batch.error))) return null;
+  const hold = reason => stale || dispatchExhausted ? { needsOperator: reason } : null;
   const key = `findings-batch-${batch.batch_id}`;
-  const probe = await readLaunches({ env, rootDir, hqRoot: resolveHqRoot(env), idempotencyKey: key, timeoutMs: 15_000 });
-  if (!probe?.ok || !Array.isArray(probe.rows) || (!probe.rows.length && !stale)) return null;
-  if (probe.rows.some(row => row?.idempotency_key !== key || !readLaunchRequestStatus(row.status).terminal)) return null;
-  return releaseFindingBatch(db, batch, batch.error || 'batch-launch-ended-without-outcomes');
+  const options = { env, rootDir, hqRoot: resolveHqRoot(env), timeoutMs: 15_000 };
+  let probe;
+  try { probe = await readLaunches({ ...options, idempotencyKey: key }); }
+  catch { return hold('batch-keyed-launch-probe-unreadable'); }
+  if (!probe?.ok || !Array.isArray(probe.rows)) return hold('batch-keyed-launch-probe-unreadable');
+  if (probe.rows.some(row => row?.idempotency_key !== key)) return hold('batch-keyed-launch-probe-mismatch');
+  if (probe.rows.some(row => !readLaunchRequestStatus(row.status).status)) return hold('batch-launch-status-unreadable');
+  if (probe.rows.some(row => !readLaunchRequestStatus(row.status).terminal)) return null;
+  // Empty keyed receipts do not refute the launch we already own. Read that
+  // exact ledger identity (and retry descendants), never the status CLI cache.
+  if (batch.launch_id && !probe.rows.some(row => row.launch_request_id === batch.launch_id)) {
+    if (!stale) return null;
+    let snapshot;
+    try { snapshot = await readLaunchSnapshot({ ...options, launchRequestIds: [batch.launch_id] }); }
+    catch { return hold('batch-launch-probe-unreadable'); }
+    if (!snapshot?.ok || !Array.isArray(snapshot.rows)) return hold('batch-launch-probe-unreadable');
+    if (snapshot.rows.length && !snapshot.rows.some(row => row?.launch_request_id === batch.launch_id)) {
+      return hold('batch-launch-probe-mismatch');
+    }
+    if (snapshot.rows.some(row => !readLaunchRequestStatus(row?.status).status)) return hold('batch-launch-status-unreadable');
+    if (snapshot.rows.some(row => !readLaunchRequestStatus(row.status).terminal)) return null;
+  }
+  const reason = dispatchExhausted ? `batch-dispatch-attempts-exhausted: ${batch.error || 'batch-dispatch-failed'}`
+    : batch.error || 'batch-launch-ended-without-outcomes';
+  return releaseFindingBatch(db, batch, reason);
 }
 
 export async function runFindingBatches({ db, rootDir, env = process.env, day = new Date().toISOString().slice(0, 10),
   execFileImpl = execFileAsync, fetchPr = fetchFindingBatchPr, fetchPublication = fetchFindingBatchPublication,
   readLaunches = readLaunchRequestByIdempotencyKeyAsync, logger = console, resolutionOnly = false,
+  readLaunchSnapshot = readLaunchRequestSnapshotFromLedgerAsync,
   batchSize = findingBatchOptions(env).batchSize, concurrency = 1, now = Date.now(),
   timeoutMs = findingBatchOptions(env).timeoutMs, manifest = null, readConsensus = readRemediationConsensus }) {
   if (!Number.isSafeInteger(concurrency) || concurrency < 1) throw Error('invalid concurrency');
@@ -469,10 +502,28 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
   const queue = db.prepare('SELECT * FROM finding_batches WHERE completed_at IS NULL AND released_at IS NULL ORDER BY rowid').all()
     .filter(batch => manifest === null || batch.manifest_sha256 === manifest.sha256);
   let stopped = false;
+  const needsOperator = new Map();
+  const release = async (batch, hasOutcomes) => {
+    const released = await releaseEndedFindingBatch({ db, batchId: batch.batch_id, hasOutcomes,
+      env, rootDir, readLaunches, readLaunchSnapshot, now, timeoutMs });
+    if (released?.needsOperator) {
+      needsOperator.set(batch.batch_id, released.needsOperator);
+      logger.warn?.(`[findings-batch] needs-operator ${batch.batch_id}: ${released.needsOperator}`);
+    } else if (released) logger.warn?.(`[findings-batch] ${batch.repo}/${batch.area}: released ${batch.batch_id} `
+      + `(${released.reason}): ${released.requeued} requeued, ${released.exhausted} exhausted`);
+    return released;
+  };
   const processBatch = async batch => {
     let hasOutcomes = false;
+    let dispatching = false;
     try {
       if (fleetStopReason({ env, logger })) { stopped = true; return; }
+      // Release overdue pre-launch failures before another submission can mask
+      // their age/error. An exhausted batch never submits again while held.
+      if (!batch.launch_id && batch.error) {
+        const released = await release(batch, false);
+        if (released || batch.batch_attempts >= FINDING_BATCH_MAX_DISPATCH_ATTEMPTS) return;
+      }
       const dir = join(rootDir, 'data', 'finding-batches', batch.batch_id);
       const outputPath = join(dir, 'outcomes.json');
       let result;
@@ -505,6 +556,7 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
         const promptPath = join(dir, 'prompt.md');
         writeFileSync(promptPath, findingBatchPrompt(batch, findings, outputPath, batchNotes(db, batch.batch_id)));
         const args = findingBatchDispatchArgs({ batch, promptPath, workerClass: pickRemediationWorkerClass({ repo: batch.repo }, { env }), env });
+        dispatching = true;
         const { stdout } = await execFileImpl(env.HQ_BIN || 'hq', args, { env, timeout: dispatchTimeoutMs(), maxBuffer: 1024 * 1024 });
         const receipt = readDispatchReceipt(parseDispatchJsonOutput(stdout));
         if (!receipt.launchRequestId) throw Error(receipt.identityDiagnostic);
@@ -512,14 +564,17 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
           .run(receipt.launchRequestId, new Date(now).toISOString(), batch.batch_id);
       }
     } catch (error) {
-      db.prepare('UPDATE finding_batches SET error=? WHERE batch_id=?').run(String(error.message), batch.batch_id);
-      logger.warn?.(`[findings-batch] ${batch.repo}/${batch.area}: ${error.message}`);
+      // Prefer the actual dispatcher refusal over execFile's command echo.
+      // Redact before truncation so a long credential is never cut into a leak.
+      const detail = redactPublicSafeText(String(dispatching ? error.stderr || error.message : error.message), 300)
+        .replace(/\s+/g, ' ').trim();
+      const reason = dispatching ? `batch-dispatch-failed: ${detail}` : detail;
+      db.prepare('UPDATE finding_batches SET error=?,batch_attempts=batch_attempts+? WHERE batch_id=?')
+        .run(reason, dispatching ? 1 : 0, batch.batch_id);
+      logger.warn?.(`[findings-batch] ${batch.repo}/${batch.area}: ${reason}`);
     }
     try {
-      const released = await releaseEndedFindingBatch({ db, batchId: batch.batch_id, hasOutcomes,
-        env, rootDir, readLaunches, now, timeoutMs });
-      if (released) logger.warn?.(`[findings-batch] ${batch.repo}/${batch.area}: released ${batch.batch_id} `
-        + `(${released.reason}): ${released.requeued} requeued, ${released.exhausted} exhausted`);
+      await release(batch, hasOutcomes);
     } catch (error) {
       logger.warn?.(`[findings-batch] ${batch.repo}/${batch.area}: release check failed: ${error.message}`);
     }
@@ -529,6 +584,19 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
   await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
     while (queue.length && !stopped) await processBatch(queue.shift());
   }));
+  const stuck = new Map();
+  for (const batch of db.prepare('SELECT * FROM finding_batches WHERE completed_at IS NULL AND released_at IS NULL').all()) {
+    const ageMs = batchAgeMs(batch, now);
+    if (!batch.error && ageMs <= timeoutMs) continue;
+    const reason = needsOperator.has(batch.batch_id) ? `needs-operator:${needsOperator.get(batch.batch_id)}`
+      : (batch.error || 'batch-unsettled-past-timeout').split(':')[0];
+    const group = stuck.get(reason) || { reason, count: 0, oldestAgeMs: 0 };
+    group.count++;
+    group.oldestAgeMs = Math.max(group.oldestAgeMs, ageMs);
+    stuck.set(reason, group);
+  }
+  const open = db.prepare('SELECT count(*) AS n FROM finding_backlog WHERE outcome IS NULL').get().n;
+  logger.info?.(`[findings-batch] summary ${JSON.stringify({ openFindings: open, stuckBatches: [...stuck.values()] })}`);
   return { completed: !stopped };
 }
 

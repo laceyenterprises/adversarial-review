@@ -48,9 +48,11 @@
         "src/kernel/remediation-reply.mjs",
         "migrations/20261108_findings_batch_manifest.sql",
         "src/finding-remediation-selection.mjs",
-        "migrations/20261108_findings_selection_scope.sql"
+        "migrations/20261108_findings_selection_scope.sql",
+        "migrations/20261109_findings_batch_dispatch_attempts.sql"
       ],
-      "owner": "review-body capture and remediation completion observations"
+      "owner": "review-body capture and remediation completion observations",
+      "compatibility": "FINDINGSSTUCK-01: additive replay-safe finding_batches.batch_attempts counts failed initial submissions separately from per-finding release attempts. Existing releases, requeue/exhaustion audit and settlement authority are preserved."
     }
   ]
 }

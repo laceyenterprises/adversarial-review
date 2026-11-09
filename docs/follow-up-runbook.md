@@ -2130,8 +2130,9 @@ offline fixture is not evidence that historical findings are resolved.
    The public launch projection omits worktree paths; remote tested-head/marked-PR
    checks below independently bind publication to the intended repository.
 4. Require successful/publication-blocked terminal preparation and complete,
-   valid manifest coverage. An explicit push milestone other than `done` still
-   refuses publication. Read PRs on the original branch across all states before
+   valid manifest coverage. The dispatch `branch_pushed` milestone is not push
+   authority: decision-only launches may retain its default `not_started`.
+   Read PRs on the original branch across all states before
    the remote ref: recover only one same-repository PR with the exact batch
    marker. Without that PR, require the remote head equal to the tested pushed
    `headSha`. A closed unmerged PR remains unresolved. Preserve every finding
@@ -2144,10 +2145,20 @@ offline fixture is not evidence that historical findings are resolved.
    replacement here. For missing evidence, failed publisher or ambiguous intent,
    the exact next action is for the dispatch/review runtime owner to reconcile
    that existing LRQ/intent from authoritative acceptance and PR evidence and
-   propose a separately reviewed, batch-scoped repair. Retain custody meanwhile.
+   propose a separately reviewed, batch-scoped repair. Retain custody meanwhile
+   unless the collector independently establishes the bounded release conditions
+   in the [batch data model](data-model/review-findings.md#releasing-batches-whose-launch-ended-findingsrequeue-01).
+   Errored never-launched batches age from their claim day; failed dispatches
+   stop after three submissions. After timeout an empty keyed receipt additionally
+   requires terminal/absent evidence for the recorded launch and retries.
+   Unreadable or unproven absence holds and reports `needs-operator`; inspect
+   the public read authorization/availability without clearing receipt fences.
 6. Record the next organic collection receipt: unchanged unresolved/error state
    or the sole marked PR with current-head pipeline attachment/merge evidence.
    Report health counts and age as observed; never infer the backlog cleared.
+   Retain the per-pass `summary` line (open findings, stuck reasons/counts/oldest
+   ages) and any `needs-operator` probe reason. A release must have its audit
+   rows and corresponding requeued/exhausted counts.
 
 Qualify the two artifact failures separately:
 

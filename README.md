@@ -4464,8 +4464,17 @@ REBASECURRENCY-01: conflict-owner-review-route reads reviews.db in a read-only t
 Findings preparation and publication each use the shared load-aware timeout with
 900 seconds nominal and no shorter helper ceiling. Dispatch provisions before
 returning its receipt; measured provisioning up to 496 seconds must survive the
-caller's budget. The existing batch idempotency key, publication fence and
-settlement contract remain unchanged. Tests use synthetic dispatch receipts.
+caller's budget. Failed initial submissions increment the durable
+`finding_batches.batch_attempts`; after three failures, submission stops and
+terminal/absent keyed launch evidence releases the batch through the existing
+per-finding requeue/exhaustion audit. Errored batches without a launch receipt
+also become release candidates after the batch timeout (default 24 hours).
+An empty keyed receipt for a recorded launch additionally requires its exact
+ledger launch and retry descendants to be terminal or proven absent.
+Unreadable evidence holds custody and reports `needs-operator` after timeout.
+Each pass logs open findings and stuck batch reasons/counts/oldest ages.
+The batch idempotency key, publication fence and settlement evidence remain
+authoritative. Tests use synthetic dispatch receipts.
 
 GATECAPBASE-01: merge-lease refusal budgets are scoped to the current PR head
 and observed base. Base advances, server rebase conflicts, lane-busy and lease

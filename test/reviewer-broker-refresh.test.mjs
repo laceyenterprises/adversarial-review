@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
+import { githubCredential } from '../src/rate-limit-throttle.mjs';
 
 import {
   refreshFollowUpGithubToken,
@@ -52,6 +53,38 @@ function brokerOk(provider, accessToken, { expiresAt = null, metadata = {} } = {
 
 const readSecret = () => 'broker-shared-secret';
 const silentLog = { warn: () => {} };
+
+test('watcher broker binds only positively identified installation tokens with both matching pins', async () => {
+  for (const [source, pinned, bound] of [
+    ['github_pat_fallback', true, false],
+    [undefined, true, false],
+    ['github_app_installation', false, false],
+    ['github_app_installation', true, true],
+  ]) {
+    _resetReviewerTokenRefreshClockForTest();
+    const token = `fixture-watcher-${source}-${pinned}`;
+    const role = DEFAULT_WATCHER_GH_BROKER_ROLE;
+    const upper = role.toUpperCase().replace(/-/g, '_');
+    const env = {
+      WATCHER_GH_AUTH_VIA_BROKER: 'true',
+      OAUTH_BROKER_SHARED_SECRET_FILE: SECRET_FILE,
+      ...(pinned ? {
+        [`OAUTH_BROKER_${upper}_EXPECTED_APP_ID`]: '123',
+        [`OAUTH_BROKER_${upper}_EXPECTED_INSTALLATION_ID`]: '456',
+      } : {}),
+    };
+    const result = await refreshWatcherGithubToken({
+      env, now: 1_000_000, readFileImpl: readSecret, log: silentLog,
+      fetchImpl: async () => brokerOk(`github-app-${role}`, token, {
+        metadata: { app_id: '123', installation_id: '456', credential_source: source },
+      }),
+    });
+    assert.equal(result.refreshed, true);
+    assert.equal(env.GITHUB_TOKEN, token);
+    if (bound) assert.equal(githubCredential({ token }), 'installation-123-456');
+    else assert.match(githubCredential({ token }), /^token-[a-f0-9]{24}$/);
+  }
+});
 
 test('refreshes a broker-enabled reviewer token and writes it back to env', async () => {
   _resetReviewerTokenRefreshClockForTest();

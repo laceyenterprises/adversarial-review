@@ -29,6 +29,8 @@
       "relatedSchemaSurfaces": [
         "migrations/20261108_review_finding_grades.sql",
         "src/findings-backlog.mjs",
+        "bin/hammer-edit-plan.mjs",
+        "src/ama/hammer-edit-plan.mjs",
         "src/findings-batch.mjs",
         "migrations/20261024_findings_backlog.sql",
         "migrations/20261030_findings_batch_drain.sql",

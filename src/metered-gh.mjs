@@ -7,6 +7,7 @@ import { observeSynchronousChild } from './watcher-latency.mjs';
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { githubRequestCategory, recordApiCall } from './api-telemetry.mjs';
 import {
   awaitThrottleIfNeeded, extractRateLimitObservation, recordResponseRateLimit,
   readGitHubBudgetBucketsSync, resolveThrottleFloor, markGitHubRateLimited,
@@ -25,6 +26,8 @@ function ghResources(args) {
 
 function parseGhDebug(stderr, resource = 'core') {
   const observations = [];
+  const requests = [];
+  let httpStatus = null;
   const retained = [];
   let inRequest = false;
   let diagnosticTail = [];
@@ -34,6 +37,7 @@ function parseGhDebug(stderr, resource = 'core') {
   let limitMessage = false;
   let lastResponseRateLimit = null;
   let requestResource = resource;
+  let requestCategory = 'other';
   let lastResponseResource = resource;
   function flush() {
     // GraphQL can report RATE_LIMITED with HTTP 200. Preserve only the last
@@ -43,8 +47,10 @@ function parseGhDebug(stderr, resource = 'core') {
       lastResponseRateLimit = extractRateLimitObservation(headers, { resource: requestResource, rateLimited: true });
     }
     const observation = extractRateLimitObservation(headers, { resource: requestResource, rateLimited: rateLimited || (forbidden && limitMessage) });
+    if (httpStatus !== null) requests.push({ status: httpStatus, resource: headers['x-ratelimit-resource'] || requestResource, requestCategory });
     if (observation) observations.push({ ...observation, rateLimited: rateLimited || (forbidden && (observation.remaining === 0 || limitMessage)) });
     headers = {};
+    httpStatus = null;
     rateLimited = false;
     forbidden = false;
     limitMessage = false;
@@ -56,10 +62,16 @@ function parseGhDebug(stderr, resource = 'core') {
       flush();
       inRequest = true;
       requestResource = resource;
+      requestCategory = 'other';
     }
     const requestUrl = line.match(/^\* Request to https?:\/\/[^/]+(\/[^ ?#]*)/);
-    if (requestUrl) requestResource = requestUrl[1].includes('/graphql') ? 'graphql' : 'core';
+    if (requestUrl) {
+      requestResource = requestUrl[1].includes('/graphql') ? 'graphql' : 'core';
+      requestCategory = githubRequestCategory(requestUrl[1]);
+    }
     const header = line.match(/^< (x-ratelimit-[\w-]+|retry-after):\s*(.*)$/i);
+    const statusLine = line.match(/^< HTTP\/\S+ (\d{3})\b/);
+    if (statusLine) httpStatus = Number(statusLine[1]);
     if (header) headers[header[1].toLowerCase()] = header[2];
     if (/^< HTTP\/\S+ 429\b/.test(line)) rateLimited = true;
     if (/^< HTTP\/\S+ 403\b/.test(line)) forbidden = true;
@@ -82,7 +94,15 @@ function parseGhDebug(stderr, resource = 'core') {
   }
   retained.push(...diagnosticTail);
   flush();
-  return { observations, stderr: retained.join('\n'), lastResponseRateLimit, lastResponseResource };
+  return { observations, requests, stderr: retained.join('\n'), lastResponseRateLimit, lastResponseResource };
+}
+
+function recordRequests(parsed, credential) {
+  for (const request of parsed.requests) recordApiCall({
+    category: 'github_request', status: request.status,
+    extra: { credential, resource: request.resource, requestCategory: request.requestCategory, unit: 'http_response',
+      budgetExempt: request.status === 304 },
+  });
 }
 
 function isRateLimitedError(err) {
@@ -129,6 +149,7 @@ function responseRateLimited(result, parsed, failed) {
 
 async function finish(result, { failed = false, resource = 'core', credential = 'default' } = {}) {
   const parsed = parseGhDebug(result?.stderr, resource);
+  recordRequests(parsed, credential);
   const limited = responseRateLimited(result, parsed, failed);
   for (const observation of parsed.observations) await recordResponseRateLimit({ ...observation, credential });
   if (limited) {
@@ -179,6 +200,7 @@ function bridgeCall(action, payload, env) {
 
 function finishSync(result, { failed = false, resource = 'core', env, credential = githubCredential({ env }) } = {}) {
   const parsed = parseGhDebug(result?.stderr, resource);
+  recordRequests(parsed, credential);
   const limited = responseRateLimited(result, parsed, failed || Number(result?.status) > 0);
   if (parsed.observations.length) bridgeCall('record', parsed.observations.map(item => ({ ...item, credential })), env);
   if (limited) {

@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module';
 
-import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
+import { apiStatusFromError, githubRequestCategory, recordApiCall } from './api-telemetry.mjs';
 import {
   buildEtagCallKey,
   getCachedEtag,
@@ -229,10 +229,14 @@ function createWatcherOctokit({
     await awaitThrottleIfNeeded(resource, credential);
     try {
       const response = await request(options);
+      recordApiCall({ category: 'github_request', status: response.status,
+        extra: { credential, resource, requestCategory: githubRequestCategory(options.url), unit: 'http_response', budgetExempt: response.status === 304 } });
       const observation = extractRateLimitObservation(response.headers, { resource });
       if (observation) await recordResponseRateLimit({ ...observation, credential });
       return response;
     } catch (err) {
+      if (err?.status) recordApiCall({ category: 'github_request', status: err.status,
+        extra: { credential, resource, requestCategory: githubRequestCategory(options.url), unit: 'http_response', budgetExempt: err.status === 304 } });
       const limited = isGitHubRateLimitError(err);
       const observation = extractRateLimitObservation(err?.response?.headers, { resource, rateLimited: limited });
       if (limited && !err.budgetDeferred) err.observation = await recordRateLimitedCall(resource, credential, observation);

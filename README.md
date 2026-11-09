@@ -514,6 +514,11 @@ no explicit pin. These are consumer receipts after deployment; offline tests
 and PR publication do not establish live adoption. No service restart, grant
 change or synthetic live run is part of this change.
 
+GitHub lifecycle polling revalidates PRs with REST ETags. Closer reads may
+use positive reserve capacity while routine polling defers. See the
+[GitHub rate-limit state contract](docs/data-model/github-rate-limit-state.md)
+for cache validity, credential attribution, and deficit alerts.
+
 REGISTRYSESSION-02: each process that resolves governed reviewer, closer or
 remediation models owns its registry readiness. The shared
 `ensureWorkerRegistryReady()` helper asynchronously registers an app session and

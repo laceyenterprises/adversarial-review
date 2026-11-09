@@ -1,14 +1,26 @@
 #!/usr/bin/env node
 // Bound one helper, scale once, and retry only an explicitly read-only timeout.
 import { execFileSync, spawn } from 'node:child_process';
-import { closeSync, mkdtempSync, openSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { closeSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { constants, tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { reportHammerEarlyFailure } from '../src/ama/hammer-terminal-audit.mjs';
 import { MAX_TIMER_DELAY_MS } from '../src/load-aware-timeout.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+// Audit loading probes Git for service provenance. A successful wrapped command
+// must not acquire additional Git operations or publication side effects.
+async function reportFailure(reason, options) {
+  try {
+    const { reportHammerEarlyFailure } = await import('../src/ama/hammer-terminal-audit.mjs');
+    return reportHammerEarlyFailure(reason, options);
+  } catch {
+    // An unavailable diagnostic dependency cannot replace the wrapped status.
+    process.stderr.write('HAM helper failure audit unavailable\n');
+    return null;
+  }
+}
 
 export function helperBudget(nominal, ceiling) {
   try {
@@ -44,7 +56,7 @@ async function execute(command, args, { seconds, env, directory }) {
     return await new Promise(resolve => {
       child.once('error', () => resolve({ code: 1, timedOut }));
       child.once('close', (code, signal) => resolve({
-        code: timedOut ? 124 : (code ?? (signal === 'SIGALRM' ? 142 : 1)), timedOut,
+        code: timedOut ? 124 : (code ?? (signal ? 128 + constants.signals[signal] : 1)), timedOut,
       }));
     });
   } finally {
@@ -55,15 +67,18 @@ async function execute(command, args, { seconds, env, directory }) {
 
 export async function runHelperStep({ mode, step, nominal, ceiling, command, args = [], env = process.env }, {
   budget = helperBudget,
-  report = reportHammerEarlyFailure,
+  report = reportFailure,
   stdout = text => process.stdout.write(text),
   stderr = text => process.stderr.write(text),
 } = {}) {
-  if (!['read', 'mutation'].includes(mode) || !/^[a-z][a-z0-9-]*$/.test(step || '')
+  if (!['read', 'mutation', 'read:report', 'mutation:report'].includes(mode) || !/^[a-z][a-z0-9-]*$/.test(step || '')
     || !Number.isSafeInteger(nominal) || nominal <= 0 || !Number.isSafeInteger(ceiling)
     || ceiling < nominal || ceiling > Math.floor(MAX_TIMER_DELAY_MS / 1000)
     || !command) throw new TypeError('invalid hammer helper step');
-  const attempts = mode === 'read' ? 2 : 1;
+  // Callers own retries, tolerated writes and semantic stops unless they
+  // explicitly delegate terminal reporting. Child reports stay provisional.
+  const reportsFailure = mode.endsWith(':report');
+  const attempts = mode.startsWith('read') ? 2 : 1;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     const seconds = budget(nominal, ceiling);
     if (!Number.isFinite(seconds) || seconds < nominal || seconds > ceiling) {
@@ -92,22 +107,33 @@ export async function runHelperStep({ mode, step, nominal, ceiling, command, arg
       let reason = `${step}-failed`;
       try { reason = readFileSync(reasonFile, 'utf8').trim(); } catch { /* No child audit. */ }
       if (timeout) reason = `${step}-timeout:budget-${seconds}s:load-${multiplierMilli}-milli:attempts-${attempt}`;
-      stderr(`HAM helper terminal reason=${reason}\n`);
-      report(reason, { env });
-      return timeout ? 124 : result.code;
+      stderr(`HAM helper failure reason=${reason}\n`);
+      // 20 = semantic stop; 21 = repairable conflict. Their owners have already
+      // selected the outcome, possibly at a newer head than the dispatch head.
+      if (reportsFailure && ![20, 21].includes(result.code)) await report(reason, { env });
+      return result.code;
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
   }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+function isMainModule() {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) {
   const [mode, step, nominal, ceiling, command, ...args] = process.argv.slice(2);
   try {
     process.exitCode = await runHelperStep({ mode, step, nominal: Number(nominal),
       ceiling: Number(ceiling), command, args });
   } catch {
-    reportHammerEarlyFailure('helper-step-unavailable');
+    if (mode?.endsWith(':report')) await reportFailure('helper-step-unavailable');
     process.stderr.write('HAM helper-step-unavailable\n');
     process.exitCode = 1;
   }

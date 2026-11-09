@@ -13,6 +13,22 @@ const head = 'a'.repeat(40);
 const label = { id: 123, node_id: 'LA_fixture', name: 'operator-hold', color: 'ff0000' };
 const pr = { state: 'open', head: { sha: head }, labels: [label], mergeable: true };
 
+test('a budget deferral preserves the ETag for the next authenticated read', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-pr-etag-deferral-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const options = { withChecks: false, env: { HAM_RUN_DIR: dir } };
+  await fetchHammerPr('fixture/repo', 42, { ...options, execImpl: async () =>
+    ({ stdout: `HTTP/2 200 OK\netag: "preserved"\n\n${JSON.stringify(pr)}` }) });
+  await assert.rejects(fetchHammerPr('fixture/repo', 42, { ...options, execImpl: async () => {
+    throw Object.assign(new Error('budget deferred'), { budgetDeferred: true });
+  } }), { budgetDeferred: true });
+  const snapshot = await fetchHammerPr('fixture/repo', 42, { ...options, execImpl: async args => {
+    assert.ok(args.includes('If-None-Match: "preserved"'));
+    return { stdout: 'HTTP/2 304 Not Modified\n\n' };
+  } });
+  assert.equal(snapshot.headRefOid, head);
+});
+
 test('REST mergeCommit represents a completed merge, never an open PR test merge', async () => {
   const mergeSha = 'b'.repeat(40);
   for (const mergedAt of [null, '2026-10-13T12:00:00Z']) {

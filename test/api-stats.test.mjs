@@ -11,6 +11,23 @@ function makeRootDir(prefix = 'api-stats-') {
   return mkdtempSync(path.join(tmpdir(), prefix));
 }
 
+test('response and credential metadata do not inflate logical call totals', () => {
+  const summary = summarizeApiCallRows([
+    { category: 'conditional_304', repo: 'fixture/repo', status: 304 },
+    { category: 'github_request', repo: 'fixture/repo', status: 304, unit: 'http_response' },
+    { category: 'github_request', repo: 'fixture/repo', status: 200, unit: 'http_response' },
+    { category: 'other', unit: 'credential_binding' },
+  ], { budget: 5000 });
+  assert.equal(summary.totalCalls, 1);
+  assert.equal(summary.budgetRemaining, 4999);
+  assert.deepEqual(summary.repoRows, [{ repo: 'fixture/repo', count: 1 }]);
+  assert.equal(summary.httpResponses, 2);
+  assert.equal(summary.http304Responses, 1);
+  assert.equal(summary.credentialBindings, 1);
+  assert.match(formatApiStats(summary, { since: parseSinceWindow('1h') }),
+    /HTTP responses: 2 \(1 not modified\) \| Credential bindings: 1/);
+});
+
 function writeFixtureLog(rootDir, fileName, rows) {
   const logDir = resolveApiCallLogDir(rootDir);
   mkdirSync(logDir, { recursive: true });

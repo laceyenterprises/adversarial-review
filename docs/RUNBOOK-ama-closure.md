@@ -479,13 +479,31 @@ inputs in every shell; do not reconstruct lease ownership on resume.
 Mandatory helper calls use `bin/hammer-helper-step.mjs MODE STEP NOMINAL CEILING
 COMMAND [ARG...]`. It sizes each attempt through `bin/load-aware-timeout.mjs`
 with an explicit ceiling, retaining the nominal budget if sizing is unavailable.
+The executable runner starts through its own Node shebang; `HAM_NODE_BIN` remains
+the wrapped command's runtime. This keeps the runner separate from command
+adapters and preserves their argument and exit-status contracts. Its CLI
+recognizes symlinked deployments by comparing real paths. Persisted inputs
+source `bin/hammer-shell-helpers.sh` for the shared shell functions.
+Full dispatches require the runner to exist. The standalone
+base-head and rebase-proof fragments retain a nominal alarm for older partial
+deployments; that compatibility path cannot bypass the full-dispatch preflight.
 Base-head, context, full-review, primary-change, range and rebase/conflict proof
 reads use 90 seconds nominal and a 540-second ceiling. A timed-out read gets
 one retry; permanent failures and semantic stop codes return immediately.
+Child exit statuses, including 142 and signal-derived statuses, are preserved;
+only a timeout imposed by the runner returns 124.
 The runner waits for child exit, allowing five seconds for TERM cleanup before
 KILL, and keeps children in the controller's process group. Failed read output
 cannot mix with a successful retry. Child early-failure audits are provisional
-until the runner either recovers or publishes the exhausted failure.
+until the caller selects the outcome. Plain `read` and `mutation` modes return
+the child's status and diagnostics without writing an early-exit audit or phase
+receipt. Use `read:report` or `mutation:report` only when failure ends the run
+and the caller delegates terminal reporting (base-head capture, prompt
+`ham_read`, finding disputes). Even these modes leave semantic exits 20 and 21
+to their caller: context's infrastructure stop already records its own
+exact-head attempt, and a repairable conflict is not a terminal failure.
+The base-head initialization sources `hammer-node-runtime.sh` before invoking
+the runner, including in a fresh shell before `inputs.sh` exists.
 
 Publication and provenance writes use `mutation` mode, which never retries:
 API publication and submodule synchronization use 120/720 seconds, pushed attestation and finding disputes
@@ -499,9 +517,32 @@ the ceiling. This records granted patience rather than an uncapped load curve.
 The 15-second token/head guards and 20-second local merge-signal capture
 remain fixed. Submodule updates can fetch missing objects; their existing
 cleanup and retry owners remain in place, with no new mutation replay.
+In particular, merge-action receipt failure remains warning-only with coverage
+pending; submodule retries or tolerated sync failures cannot write stale
+terminal attempts. Phase-owned reads, API publication fallback and pushed
+attestation keep their caller's final reason rather than a runner early exit.
 Existing published-head
 polls and CI gate reads retain their enclosing deadlines and retry rules;
 git fetch retains its load-aware bounded synchronization and lock cleanup.
+
+These are per-attempt allowances, not extensions of the enclosing run.
+At the ceiling, a two-attempt read allows about 1,100 seconds (18m20s),
+including two five-second sizing calls and two five-second TERM graces.
+The default three-attempt conflict submodule loop allows about 2,196 seconds
+(36m36s), including sizing, cleanup and its 2s/4s backoffs. Conflict repair
+and commit preparation run outside the merge lease. All controller-owned
+commands remain subject to `runHammerController`'s absolute 7,200-second
+ceiling; stacked helpers may exhaust that ceiling and be canceled before
+using their full allowance. Load scaling never renews that outer deadline.
+
+The per-base merge lease independently records a load-scaled 900-second
+nominal deadline (5,400 seconds at the default sixfold maximum). It may have
+been acquired under lighter load than a later helper: there is no promise
+that all helper allowances fit its remaining age. A live same-host holder
+is retained past that deadline by `reclaimIfStale`; foreign-host expiry and
+holder identity checks remain authoritative. Helpers neither renew a lease
+nor confer merge authority. The existing controller cleanup and exact live
+lease/head/predicate checks still govern cancellation and the merge click.
 
 For current PR/head lease observation, run
 `node bin/hammer-lease-state.mjs --repo OWNER/REPO --base BASE --pr N --head SHA`
@@ -4659,6 +4700,25 @@ These internal read retries do not change the per-PR hammer retry cap.
 A blocking finding may authorize a specific reversal. A non-blocking finding may
 also authorize one only when the effective `strict_non_blocking_remediation` policy
 is enabled; advisory findings in non-strict mode cannot waive preservation.
+Before changing author-introduced lines, the hammer runs
+`bin/hammer-edit-plan.mjs OWNER/REPO PR REVIEW_ID PLAN_JSON`. The JSON plan names
+`reviewedHead`, `kind`, one-based `findingNumber`, `editKind` (`author-lines` or
+`additive`), and the affected `path`, `startLine`, `endLine` in reviewed coordinates.
+The helper reads the review and effective policy and shares `checkReversalFinding`
+with the primary-change gate. Exit 0 allows the planned edit; exit 20 means no edit:
+the advisory finding was captured in the existing findings backlog with a one-line
+deferral reason. Capture failure stops remediation rather than losing the finding.
+The helper runs as the existing review-state database owner when the hammer has
+a different uid. Before capture it checks ownership of the database, directory,
+sidecars and alert sink, and refuses with exit 78 on a mismatch. Its deferral
+count comes from the canonical normalized findings classifier; unknown findings
+stop before capture.
+Additive tests, docs and guards may proceed only when they change no author line
+and do not neutralize author behavior. `allow/additive-fix` trusts the hammer's
+plan classification; the final patch and merge gates still verify the actual
+change. Deferred findings are audited separately
+from remediated or withdrawn findings. This pre-check does not replace final
+ancestry, commit provenance, patch coverage or merge eligibility checks.
 All three evaluators pass the effective policy to the primary-change predicate:
 closure eligibility (`bin/ama-check.mjs`), the daemon's pre-lease and in-lease
 merge checks, and the hammer's in-lease GitHub gate (`bin/hammer-merge.sh`).

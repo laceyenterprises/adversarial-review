@@ -523,9 +523,9 @@ try {
           return {
             data: {
               number: params.pull_number,
-              state: 'open',
-              merged_at: null,
-              closed_at: null,
+              state: params.pull_number === 101 && ['closed', 'merged'].includes(process.env.FIXTURE_STARTUP_STATE) ? 'closed' : 'open',
+              merged_at: params.pull_number === 101 && process.env.FIXTURE_STARTUP_STATE === 'merged' ? '2026-05-15T12:01:00Z' : null,
+              closed_at: params.pull_number === 101 && process.env.FIXTURE_STARTUP_STATE === 'closed' ? '2026-05-15T12:01:00Z' : null,
               head: { sha: 'sha-detail-' + params.pull_number },
             },
           };

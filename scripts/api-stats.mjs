@@ -99,8 +99,20 @@ function summarizeApiCallRows(rows, { budget = DEFAULT_BUDGET } = {}) {
   let totalCalls = 0;
   let throttleActivations = 0;
   let throttleSeconds = 0;
+  let httpResponses = 0;
+  let http304Responses = 0;
+  let credentialBindings = 0;
 
   for (const row of rows) {
+    if (row?.unit === 'credential_binding') {
+      credentialBindings += 1;
+      continue;
+    }
+    if (row?.unit === 'http_response') {
+      httpResponses += 1;
+      if (Number(row.status) === 304) http304Responses += 1;
+      continue;
+    }
     if (row?.category === 'rate_limit_throttle_seconds') {
       throttleActivations += 1;
       throttleSeconds += Number.isFinite(Number(row?.durationMs)) ? Number(row.durationMs) / 1000 : 0;
@@ -120,6 +132,9 @@ function summarizeApiCallRows(rows, { budget = DEFAULT_BUDGET } = {}) {
     percentUsed: budget > 0 ? (totalCalls / budget) * 100 : 0,
     throttleActivations,
     throttleSeconds,
+    httpResponses,
+    http304Responses,
+    credentialBindings,
     categoryRows: CATEGORY_ORDER
       .filter((category) => category !== 'rate_limit_throttle_seconds')
       .map((category) => ({ category, count: callsByCategory.get(category) || 0 }))
@@ -138,6 +153,10 @@ function formatApiStats(summary, { since } = {}) {
     + ` | Remaining: ${summary.budgetRemaining}`
   );
   lines.push(`Throttle activations: ${summary.throttleActivations} (${summary.throttleSeconds.toFixed(0)}s total)`);
+  if (summary.httpResponses || summary.credentialBindings) {
+    lines.push(`HTTP responses: ${summary.httpResponses} (${summary.http304Responses} not modified)`
+      + ` | Credential bindings: ${summary.credentialBindings}`);
+  }
   if (summary.categoryRows.length > 0) {
     lines.push('By category:');
     for (const row of summary.categoryRows) {

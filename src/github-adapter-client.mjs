@@ -6,7 +6,7 @@ import { filterGitHubBody } from './github-outbound-body.mjs';
 import { recordMergeActionBestEffort } from './ama/merge-action-receipt.mjs';
 import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
 import { existsSync, lstatSync, realpathSync, statSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   isUnsupportedOperationPayload,
@@ -247,7 +247,8 @@ function parseAdapterJson(stdout, kind) {
 }
 
 function buildAdapterEnv(env = process.env) {
-  const adapterEnv = {};
+  const adapterEnv = { GHO_API_CONSUMER: env.GHO_API_CONSUMER
+    || basename(process.argv[1] || 'unknown', '.mjs') };
   for (const key of [
     'PATH',
     'HOME',
@@ -256,6 +257,8 @@ function buildAdapterEnv(env = process.env) {
     'TMPDIR',
     'GHO_RATE_LIMIT_SHARED_STATE_PATH',
     'GHO_RATE_LIMIT_THROTTLE_FLOOR',
+    'GHO_GITHUB_USAGE_LOG_DIR',
+    'GHO_API_CALL_LOG_DISABLE',
     'AGENT_OS_GITHUB_ADAPTER_AUTH',
     'AGENT_OS_GITHUB_ADAPTER_AUTH_MODE',
     'AGENT_OS_GITHUB_ADAPTER_TRANSPORT',

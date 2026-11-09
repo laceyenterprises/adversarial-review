@@ -1,4 +1,5 @@
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { registerGitHubInstallationToken } from './rate-limit-throttle.mjs';
 // reviewer-broker-refresh.mjs — keep the long-lived watcher's reviewer-bot
 // GitHub App installation tokens fresh.
 //
@@ -319,6 +320,12 @@ async function fetchReviewerTokenFromBrokerUrl({
         `broker ${brokerUrl} response.metadata.installation_id='${actualInstallationId}' != expected '${expectedInstallationId}'`,
         { transient: false },
       );
+    }
+    // App IDs can accompany a PAT fallback. Bind only a positively identified
+    // installation token whose identity was checked against both configured pins.
+    if (body?.metadata?.credential_source === 'github_app_installation'
+      && expectedAppId && expectedInstallationId) {
+      registerGitHubInstallationToken(accessToken, actualAppId, actualInstallationId);
     }
     const expiresAtMs = body?.expires_at ? Date.parse(body.expires_at) : NaN;
     return {

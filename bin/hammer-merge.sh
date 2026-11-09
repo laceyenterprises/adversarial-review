@@ -68,8 +68,8 @@ ham_append_terminal_audit() {
     ham_receipt_outcome=refused
   fi
   if [ -n "$ham_receipt_outcome" ]; then
-    "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" mutation merge-action-receipt 60 360 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-action-receipt.mjs \
-      <<HQ_ROOT>> <<REPO>> <<PR_NUMBER>> "$POST_REMEDIATION_SHA" "$ham_receipt_outcome" "$ham_audit_reason" "${HAM_MERGE_EXECUTED_AT:-}" "$HAM_GATE_JSON" "$HAM_POST_MERGE_JSON" \
+    /usr/bin/perl -e 'shift or exit 1; exec @ARGV; die $!' "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" mutation merge-action-receipt 60 360 "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/merge-action-receipt.mjs" \
+      "<<HQ_ROOT>>" "<<REPO>>" "<<PR_NUMBER>>" "$POST_REMEDIATION_SHA" "$ham_receipt_outcome" "$ham_audit_reason" "${HAM_MERGE_EXECUTED_AT:-}" "$HAM_GATE_JSON" "$HAM_POST_MERGE_JSON" \
       || echo "HAM warning: merge-action receipt unavailable; coverage remains pending" >&2
   fi
   if [ "$ham_audit_outcome" != succeeded ]; then
@@ -565,8 +565,8 @@ ham_validate_ci_retry() {
     --slurpfile commit "<<RUN_DIR>>/commit.json" \
     '.commit.sha = $head | .commit.parentSha = $commit[0].parents[0].sha | .auditComment.body = $body' \
     "<<RUN_DIR>>/terminal-remediation.json" > "<<RUN_DIR>>/retry-terminal-remediation.json" || return 1
-  "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" read primary-change-context 90 540 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/primary-change-context.mjs \
-    <<REPO>> <<PR_NUMBER>> "$POST_REMEDIATION_SHA" > "<<RUN_DIR>>/retry-primary-change.json" || return 1
+  /usr/bin/perl -e 'shift or exit 1; exec @ARGV; die $!' "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" read primary-change-context 90 540 "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/primary-change-context.mjs" \
+    "<<REPO>>" "<<PR_NUMBER>>" "$POST_REMEDIATION_SHA" > "<<RUN_DIR>>/retry-primary-change.json" || return 1
   "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/ama-check.mjs \
     --pr "<<RUN_DIR>>/pr-after.json" --reviews "<<RUN_DIR>>/reviews.json" \
     --protection "<<RUN_DIR>>/protection.json" --timeline "<<RUN_DIR>>/timeline.json" \

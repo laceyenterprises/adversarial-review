@@ -9,6 +9,7 @@ The date is the observation's terminal timestamp in UTC.
 Version 1 rows contain `schemaVersion`, `kind`, `repo`, `prNumber`, `headSha`,
 `launchRequestId`, `terminalAt`, `launchStatus` and `outcome`. No prompt, error
 text, environment, labels, user identity or provider response is copied.
+Legacy numeric-string PR numbers are normalized to positive safe integers.
 
 `launch-terminal` rows come from durable dispatch receipt writes with
 `state=launch-terminal`, a `terminalLaunchStatus`, and a `reconciledAt`.
@@ -57,10 +58,14 @@ per-launch attempts. Deferred outcomes retain their separate classification.
 The writer appends a small row in one O_APPEND write and flushes it. Repeated
 receipt writes may append duplicates. The predecessor is also captured before a
 same-head dispatch projection is replaced, preserving history across retries.
+Predecessor capture is skipped when the new terminal document preserves the
+same launch ID, reconciliation timestamp and terminal status; its append already
+preserves that observation.
 Readers must tolerate a torn trailing row after an interrupted append and
 report incomplete evidence instead of assuming healthy counts.
 
-Filesystem failures produce only the fixed local diagnostic
+Observation-building and filesystem failures, and rejected terminal candidates,
+produce only the fixed local diagnostic
 `ama_closer.outcome_record_unavailable`. Closure, cleanup, dispatch and paging
 decisions retain their existing behavior. There is no automatic backfill,
 migration, retention deletion, daemon restart or policy change.

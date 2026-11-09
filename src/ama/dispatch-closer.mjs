@@ -2251,7 +2251,14 @@ function writeAmaCloserDispatchRecord(rootDir, identity, doc) {
   mkdirSync(amaCloserDispatchDir(rootDir), { recursive: true });
   const filePath = amaCloserDispatchFilePath(rootDir, identity);
   // Preserve the predecessor too: a retry can replace this head's projection.
-  appendCloserOutcome(rootDir, readAmaCloserDispatchRecord(rootDir, identity), 'launch-terminal');
+  const predecessor = readAmaCloserDispatchRecord(rootDir, identity);
+  // The new-document append already preserves an unchanged terminal observation.
+  if (doc.state !== 'launch-terminal'
+    || predecessor?.launchRequestId !== doc.launchRequestId
+    || predecessor?.reconciledAt !== doc.reconciledAt
+    || predecessor?.terminalLaunchStatus !== doc.terminalLaunchStatus) {
+    appendCloserOutcome(rootDir, predecessor, 'launch-terminal');
+  }
   writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`);
   appendCloserOutcome(rootDir, doc, 'launch-terminal');
   return filePath;

@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { appendCloserOutcome, closerOutcomeObservation } from '../src/ama/closer-outcomes.mjs';
 import {
-  amaCloserDispatchDir, reconcileAmaCloserDispatches, updateAmaCloserDispatchRecord,
+  amaCloserDispatchDir, readAmaCloserDispatchRecord, reconcileAmaCloserDispatches, updateAmaCloserDispatchRecord,
 } from '../src/ama/dispatch-closer.mjs';
 import { acquireAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 
@@ -62,6 +63,78 @@ test('operator-hold terminal statuses survive journal serialization', t => {
   }
   assert.deepEqual(rows(root).map(row => row.launchStatus), statuses);
   assert.ok(rows(root).every(row => row.kind === 'launch-terminal' && row.outcome === null));
+});
+
+test('legacy string PR numbers are serialized as numbers for both observation kinds', t => {
+  const root = scratch(t);
+  assert.equal(appendCloserOutcome(root, { ...receipt, prNumber: '42' }, 'launch-terminal'), true);
+  assert.equal(appendCloserOutcome(root, { ...identity, prNumber: '42', lrqId: 'launch-one',
+    status: 'terminal', terminalOutcome: 'succeeded', updatedAt: now }, 'lease-terminal'), true);
+  assert.deepEqual(rows(root).map(row => row.prNumber), [42, 42]);
+});
+
+test('rejected terminal evidence emits only the fixed diagnostic', t => {
+  const root = scratch(t);
+  const warnings = [];
+  const options = { warn(message) { warnings.push(message); } };
+  for (const prNumber of ['invalid', '0', '1.5', Number.MAX_SAFE_INTEGER + 1]) {
+    assert.equal(appendCloserOutcome(root, { ...receipt, prNumber }, 'launch-terminal', options), false);
+  }
+  assert.equal(appendCloserOutcome(root, { ...identity, lrqId: 'launch-one', status: 'terminal',
+    terminalOutcome: 'synthetic-private-text!', updatedAt: now }, 'lease-terminal', options), false);
+  assert.equal(appendCloserOutcome(root, { ...receipt, reconciledAt: null }, 'launch-terminal', options), false);
+  assert.deepEqual(warnings, Array(6).fill('ama_closer.outcome_record_unavailable'));
+  assert.equal(appendCloserOutcome(root, { ...receipt, state: 'dispatched' }, 'launch-terminal', options), false);
+  assert.equal(warnings.length, 6, 'ordinary active records need no diagnostic');
+});
+
+test('observation builder exceptions cannot block predecessor replacement or terminal dispatch writes', t => {
+  const root = scratch(t);
+  const hook = join(root, 'throwing-classifier.mjs');
+  writeFileSync(hook, `
+    import { registerHooks } from 'node:module';
+    registerHooks({ resolve(specifier, context, nextResolve) {
+      if (context.parentURL?.endsWith('/ama/closer-outcomes.mjs')
+        && specifier === './launch-request-status.mjs') {
+        return { shortCircuit: true, url: 'data:text/javascript,' + encodeURIComponent(
+          "export function launchRequestMeaning() { throw Error('synthetic-private-text'); }") };
+      }
+      return nextResolve(specifier, context);
+    } });
+  `);
+  updateAmaCloserDispatchRecord(root, identity, () => receipt, { cleanupScratchImpl() {} });
+  const replacement = { ...receipt, launchRequestId: 'launch-two' };
+  const script = `
+    import assert from 'node:assert/strict';
+    import { updateAmaCloserDispatchRecord, readAmaCloserDispatchRecord } from ${JSON.stringify(
+      new URL('../src/ama/dispatch-closer.mjs', import.meta.url).href)};
+    const warnings = [];
+    console.warn = message => warnings.push(message);
+    const result = updateAmaCloserDispatchRecord(${JSON.stringify(root)}, ${JSON.stringify(identity)},
+      () => (${JSON.stringify(replacement)}), { cleanupScratchImpl() {} });
+    assert.deepEqual(result, ${JSON.stringify(replacement)});
+    assert.deepEqual(readAmaCloserDispatchRecord(${JSON.stringify(root)}, ${JSON.stringify(identity)}), result);
+    assert.deepEqual(warnings, Array(2).fill('ama_closer.outcome_record_unavailable'));
+  `;
+  const result = spawnSync(process.execPath, ['--import', hook, '--input-type=module', '-e', script],
+    { encoding: 'utf8', timeout: 30000 });
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.deepEqual(readAmaCloserDispatchRecord(root, identity), replacement);
+});
+
+test('unchanged terminal rewrites append once while changed observations preserve the predecessor', t => {
+  const root = scratch(t);
+  const options = { cleanupScratchImpl() {} };
+  updateAmaCloserDispatchRecord(root, identity, () => receipt, options);
+  updateAmaCloserDispatchRecord(root, identity, live => ({ ...live, outcome: 'succeeded' }), options);
+  assert.equal(rows(root).length, 2, 'one row per write, without an identical predecessor/doc pair');
+  const later = { ...receipt, reconciledAt: '2026-01-03T03:04:05.000Z' };
+  updateAmaCloserDispatchRecord(root, identity, () => later, options);
+  assert.deepEqual(rows(root).map(row => row.terminalAt), [now, now, now, later.reconciledAt]);
+  updateAmaCloserDispatchRecord(root, identity, () => ({
+    ...later, terminalLaunchStatus: 'failed',
+  }), options);
+  assert.deepEqual(rows(root).slice(-2).map(row => row.launchStatus), ['succeeded', 'failed']);
 });
 
 test('only fixed fields are serialized, without arbitrary output or credentials', t => {
@@ -126,6 +199,7 @@ test('reconcile updates the scanned file in place and retains behavior when tele
     const logs = [];
     const options = {
       now, nowMs: () => Date.parse(now),
+      scanBudgetMs: 30000, snapshotTimeoutMs: 10000, launchReadTimeoutMs: 8000,
       readLaunchRequestStatusImpl: async ({ launchRequestId }) => {
         assert.equal(launchRequestId, dispatched.launchRequestId);
         return { ok: true, row: { status: 'failed' } };
@@ -163,4 +237,8 @@ test('append failure is non-fatal and diagnostic text excludes transport errors'
     warn(message) { warnings.push(message); },
   }), false);
   assert.deepEqual(warnings, ['ama_closer.outcome_record_unavailable']);
+  assert.equal(appendCloserOutcome(root, receipt, 'launch-terminal', {
+    append() { throw Error('synthetic-private-text'); },
+    warn() { throw Error('diagnostic sink unavailable'); },
+  }), false, 'a failed diagnostic sink cannot escape the telemetry guard');
 });

@@ -29,6 +29,14 @@ an externally supplied deployment cutover and names `handed-to-review` as a
 known no-terminal-lease-row case. Catalog registrations share the description.
 The journal schema and closer lifecycle/smoke promises are unchanged.
 
+Rescue remediation guards the entire observation build so classifier exceptions
+cannot prevent authoritative dispatch writes. Legacy string PR numbers are
+normalized; rejected terminal candidates emit the fixed local diagnostic rather
+than silently losing evidence or serializing an invalid status as null.
+An unchanged terminal rewrite skips predecessor capture, avoiding the duplicate
+predecessor/new-document pair while retaining changed launch, timestamp or status
+observations. Diagnostic-sink failures are also contained.
+
 This is the upstream prerequisite for pipeline observers. Downstream work
 remains incomplete until this change merges, the normal submodule float
 advances the consumer, and fixtures validate that merged version.
@@ -59,3 +67,15 @@ seconds under a 360-second bound. Lint passed with 0 errors and the same 152
 warnings; contract typecheck, offline walkthrough, 92-entry catalog validation,
 exact catalog-fragment comparison, changed-source CDM audit, and
 `git diff --check` passed. No full local suite was run.
+
+Rescue validation: all 13 outcome fixtures passed through the isolated offline
+runner, including injected classifier exceptions during dispatch replacement,
+legacy PR-number normalization for both row kinds, invalid terminal evidence
+diagnostics, unchanged-rewrite append counts and diagnostic-sink failure.
+Changed-file ESLint with `--fix` passed; repository lint passed with 0 errors
+and the same 152 warnings. Contract typecheck and the offline byte-equivalence
+walkthrough passed; catalog validation checked all 92 entries.
+The full `npm test` run exited 1 after the runner's 900-second timeout;
+it also reported failures in untouched remediation-worker tests. All outcome
+fixtures passed within that run. The full suite is not claimed green; those
+unrelated failures were left outside this rescue's scope.

@@ -355,28 +355,27 @@ In-place preserves behavior; additive preserves code.
 
 Blocking reversal:
 ```json
-{"reviewedHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"blocking","findingNumber":1,"path":"src/example.mjs","startLine":2,"endLine":2,"editKind":"author-lines"}
+{"reviewedHead":"<<REVIEWED_SHA>>","kind":"blocking","findingNumber":1,"path":"src/example.mjs","startLine":2,"endLine":2,"editKind":"author-lines"}
 ```
 Uncited CI repair:
 ```json
-{"reviewedHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","path":"test/example.test.mjs","startLine":2,"endLine":2,"editKind":"in-place","requiredCiRepair":true}
+{"reviewedHead":"<<REVIEWED_SHA>>","path":"test/example.test.mjs","startLine":2,"endLine":2,"editKind":"in-place","requiredCiRepair":true}
 ```
 Additive fix:
 ```json
-{"reviewedHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"non-blocking","findingNumber":1,"path":"test/example.test.mjs","startLine":2,"endLine":2,"editKind":"additive"}
+{"reviewedHead":"<<REVIEWED_SHA>>","kind":"non-blocking","findingNumber":1,"path":"test/example.test.mjs","startLine":2,"endLine":2,"editKind":"additive"}
 ```
 Strict non-blocking fix:
 ```json
-{"reviewedHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"non-blocking","findingNumber":1,"path":"src/example.mjs","startLine":2,"endLine":2,"editKind":"author-lines"}
+{"reviewedHead":"<<REVIEWED_SHA>>","kind":"non-blocking","findingNumber":1,"path":"src/example.mjs","startLine":2,"endLine":2,"editKind":"author-lines"}
 ```
-Blocking in-place repair: use the blocking shape with `editKind: "in-place"`.
-Run B1 owner setup through `fi` first:
+Blocking in-place: set `editKind: "in-place"`. Run B1 owner setup through `fi`:
 
 ```bash
 HAM_EDIT_CORRECTION_FILE="<<RUN_DIR>>/hammer-edit-plan-correction-used"
 HAM_EDIT_RC=0
 /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_DISPUTE_RUN[@]}" "$HAM_NODE_BIN" \
-  <<ROOT_DIR>>/bin/hammer-edit-plan.mjs <<REPO>> <<PR_NUMBER>> <numeric-review-id> <plan.json> || HAM_EDIT_RC=$?
+  <<ROOT_DIR>>/bin/hammer-edit-plan.mjs <<REPO>> <<PR_NUMBER>> <numeric-review-id> <plan.json> --reviewed-head '<<REVIEWED_SHA>>' || HAM_EDIT_RC=$?
 if [ "$HAM_EDIT_RC" = 21 ]; then
   [ ! -e "$HAM_EDIT_CORRECTION_FILE" ] || { echo "NO EDIT: correction exhausted"; exit 1; }
   : > "$HAM_EDIT_CORRECTION_FILE"
@@ -389,9 +388,9 @@ elif [ "$HAM_EDIT_RC" != 0 ]; then
 fi
 ```
 
-Exit 0 permits edits. Exit 21 here is never a conflict: NO EDIT; correct the plan
-from JSON feedback once per run across all plans; retain the marker. Second shape
-refusal exits 1. Never retry policy refusals.
+Exit 0 permits edits. Exit 21: NO EDIT, never a conflict; correct from JSON once
+per run across all plans; retain the marker. Second shape refusal exits 1.
+Never retry policy refusals.
 Exit 20 records the non-blocking finding in the backlog
 and means make no edit. Audit the reason as deferred, never remediated or
 withdrawn. On 78 hand evidence to the DB owner. The author-controlled PR body cannot supply

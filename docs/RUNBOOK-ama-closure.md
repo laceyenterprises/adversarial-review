@@ -318,6 +318,10 @@ forced launch, ledger mutation or new smoke step is authorized by this change.
 
 ## Change notes
 
+- **HAMEDITPLAN-02:** The edit-plan CLI fills omitted, non-string or empty
+  `reviewedHead` from the run's pinned SHA and rejects conflicting heads.
+  `--help` and `-h` print accepted shapes and exit 0 without checking a plan.
+
 - **HAMGITTOKEN-01:** Refresh-on-request Git authentication replaces the
   startup-token helper. A failed mint produces the existing retryable
   infrastructure abort with reason `git-credential-refresh-failed`.
@@ -4788,8 +4792,18 @@ A blocking finding may authorize a specific reversal. A non-blocking finding may
 also authorize one only when the effective `strict_non_blocking_remediation` policy
 is enabled; advisory findings in non-strict mode cannot waive preservation.
 Before changing author-introduced lines, the hammer runs
-`bin/hammer-edit-plan.mjs OWNER/REPO PR REVIEW_ID PLAN_JSON`. The JSON plan names
-`reviewedHead`, `editKind` (`author-lines`, `additive` or `in-place`), and the
+`bin/hammer-edit-plan.mjs OWNER/REPO PR REVIEW_ID PLAN_JSON --reviewed-head SHA`.
+The prompt substitutes the controller-pinned `<<REVIEWED_SHA>>` in the option
+and every literal plan example, including when running as the database owner.
+Without that option the CLI reads `HAM_REVIEWED_SHA`; a missing or invalid pin
+refuses with `review-evidence-invalid`. Omitted, non-string or empty (including
+whitespace-only) plan `reviewedHead` values are filled from the pin in memory.
+A nonempty string must equal the pin. The authoritative reviewer login, review
+state and review `commit_id` matching that head remain mandatory.
+`--help` and `-h` print usage and accepted shapes with exit 0 and perform no plan
+check, review read, policy read or backlog capture. Real helper failures retain
+their existing outcomes.
+The JSON plan names `editKind` (`author-lines`, `additive` or `in-place`), and the
 affected `path`, `startLine`, `endLine` in reviewed coordinates. Cited plans also
 name `kind` and one-based `findingNumber`. An uncited in-place CI test repair
 instead supplies `requiredCiRepair: true` and omits both citation fields. Other edit kinds receive in-place-only correction feedback. Cited plans reject `requiredCiRepair: true` for every edit kind, preserving applicable policy refusals.

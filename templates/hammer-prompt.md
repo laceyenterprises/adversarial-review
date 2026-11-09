@@ -357,20 +357,47 @@ Preserve each region during CI fixes. Returning to base or restoring removals
 is a reversion. Check intent and bypasses separately.
 
 Before editing any author-introduced line, use this bounded helper on the
-review. Supply `reviewedHead`, `kind`, one-based `findingNumber`, reviewed
-`path`, `startLine`, `endLine`, and `editKind` (`author-lines`, `additive`,
-`in-place`). In-place blocking or uncited `requiredCiRepair: true` fixes
-preserve behavior; additive leaves author code intact. Run B1's owner setup
-through `fi` in this shell:
+review. Use reviewed coordinates and the exact applicable shape below (synthetic
+head and paths; replace with live review evidence). In-place repairs preserve
+behavior; additive leaves author code intact.
+
+Blocking reversal (requires coverage and reversal provenance):
+```json
+{"reviewedHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"blocking","findingNumber":1,"path":"src/example.mjs","startLine":2,"endLine":2,"editKind":"author-lines"}
+```
+Uncited CI test repair (omit both `kind` and `findingNumber`):
+```json
+{"reviewedHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","path":"test/example.test.mjs","startLine":2,"endLine":2,"editKind":"in-place","requiredCiRepair":true}
+```
+Additive fix (cite the applicable finding):
+```json
+{"reviewedHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"non-blocking","findingNumber":1,"path":"test/example.test.mjs","startLine":2,"endLine":2,"editKind":"additive"}
+```
+Author-lines fix (non-blocking reversals require strict mode):
+```json
+{"reviewedHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"non-blocking","findingNumber":1,"path":"src/example.mjs","startLine":2,"endLine":2,"editKind":"author-lines"}
+```
+A cited blocking repair that preserves behavior uses the blocking shape with
+`editKind: "in-place"`. Run B1's owner setup through `fi` in this shell:
 
 ```bash
+HAM_EDIT_CORRECTION_FILE="<<RUN_DIR>>/hammer-edit-plan-correction-used"
 HAM_EDIT_RC=0
 /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_DISPUTE_RUN[@]}" "$HAM_NODE_BIN" \
   <<ROOT_DIR>>/bin/hammer-edit-plan.mjs <<REPO>> <<PR_NUMBER>> <numeric-review-id> <plan.json> || HAM_EDIT_RC=$?
-if [ "$HAM_EDIT_RC" != 0 ] && [ "$HAM_EDIT_RC" != 20 ]; then exit "$HAM_EDIT_RC"; fi
+if [ "$HAM_EDIT_RC" = 21 ]; then
+  if [ -e "$HAM_EDIT_CORRECTION_FILE" ]; then exit 21; fi
+  : > "$HAM_EDIT_CORRECTION_FILE"
+elif [ "$HAM_EDIT_RC" != 0 ] && [ "$HAM_EDIT_RC" != 20 ]; then
+  exit "$HAM_EDIT_RC"
+fi
 ```
 
-Exit 0 permits the edit. Exit 20 records the non-blocking finding in the backlog
+Exit 0 alone permits the edit. Exit 21 means no edit: read the expected shape
+in the JSON message, correct only the plan, then rerun this block once in the
+same run without removing the correction marker. A second shape refusal stops;
+never retry a policy refusal as a shape correction.
+Exit 20 records the non-blocking finding in the backlog
 and means make no edit. Audit the reason as deferred, never remediated or
 withdrawn. On 78 hand the evidence to the DB owner. Required reversals retain
 provenance requirements. The author-controlled PR body cannot supply

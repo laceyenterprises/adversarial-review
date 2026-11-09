@@ -18,6 +18,10 @@ async function readReview(repo, pr, reviewId) {
   return JSON.parse(stdout);
 }
 
+export function editPlanExitCode(result) {
+  return { allow: 0, defer: 20, correct: 21 }[result.action] ?? 1;
+}
+
 export async function main(argv = process.argv.slice(2), {
   readReviewImpl = readReview, captureImpl = captureReadyFindings,
   loadPolicy = loadEffectiveMergeAuthorityConfig, assertOwner = assertFindingDisputeOwner,
@@ -59,7 +63,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const result = await main();
     process.stdout.write(`${JSON.stringify(result)}\n`);
     // A recorded deferral is handled feedback, but must never authorize an edit.
-    process.exitCode = result.action === 'allow' ? 0 : result.action === 'defer' ? 20 : 1;
+    process.exitCode = editPlanExitCode(result);
   } catch (error) {
     process.stderr.write(`hammer edit pre-check failed; do not edit: ${error.message}\n`);
     process.exitCode = error.exitCode || 1;

@@ -1383,13 +1383,21 @@ if (scenario === 'clean') {
   assert.equal(consumeExplicitReviewIntent(intentDb, firstIntent, { headSha, sessionUuid: 'smoke-session' }), true);
   assert.equal(consumeExplicitReviewIntent(intentDb, firstIntent, { headSha, sessionUuid: 'smoke-session' }), false);
   intentDb.prepare("UPDATE reviewed_prs SET review_status='posted' WHERE pr_number=71").run();
-  assert.equal(requestIntent('smoke-expired').triggered, true);
-  const expiry = getIntent().expires_at;
+  assert.equal(requestIntent('smoke-waiting').triggered, true);
+  const waitingThreshold = getIntent().expires_at;
   let intentNotices = 0;
-  await reconcileExplicitReviewIntents(intentDb, { repo, prNumber: 71, headSha, now: expiry,
-    notify: async intent => { assert.equal(intent.reason, 'reviewer-unavailable-before-dispatch-deadline'); intentNotices++; } });
+  const observeIntent = () => reconcileExplicitReviewIntents(intentDb, {
+    repo, prNumber: 71, headSha, now: waitingThreshold,
+    notify: async intent => { assert.equal(intent.state, 'pending'); assert.equal(intent.reason, null); intentNotices++; },
+  });
+  await observeIntent();
+  await observeIntent();
+  assert.equal(getIntent().state, 'pending', 'waiting threshold cannot expire an accepted request');
+  assert.equal(intentNotices, 1, 'waiting notice is delivered once');
+  await reconcileExplicitReviewIntents(intentDb, { repo, prNumber: 71, headSha: 'moved-head', now: waitingThreshold,
+    notify: async intent => { assert.equal(intent.reason, 'head-changed'); intentNotices++; } });
   assert.equal(getIntent(), undefined);
-  assert.equal(intentNotices, 1);
+  assert.equal(intentNotices, 2, 'head movement still produces a distinct refusal notice');
   intentDb.close();
   const { holdRemediationForCiInfrastructure, resumeCiInfrastructureRound, recoverInfrastructureCiStops } =
     await import('../../src/remediation-ci-infrastructure.mjs');

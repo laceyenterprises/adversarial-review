@@ -53,7 +53,12 @@ For an open queued or running exact-head intent, the watcher dismisses only conf
 reviewer bots' strictly superseded Request changes using the SVD-02 filter. Current-head,
 unknown-head and human reviews remain. Dismissal adds no review or merge authority;
 exact-head zero-finding attestation, strict mode, leases and hammer gates are unchanged.
-Failed dismissal retries on subsequent ticks; dismissed reviews no longer stand.
+The watcher keeps a bounded process-local cache (512 PRs per database handle).
+Live probes and failed dismissal retries run at most once per five minutes for
+an unchanged request and discovery head. Successful dismissal checks run once
+per request/head while cached; periodic live probes still settle moved/closed
+requests during holds. A new request, changed discovery head, eviction or restart
+permits a fresh check. This adds no persistent columns or lifecycle states.
 
 After the normal float and separately authorized watcher restart, SRE verifies no new
 deadline refusals, no superseded bot block on queued remediated heads, and about zero

@@ -136,6 +136,11 @@ to pending under its session CAS without spending a review attempt. While an int
 is queued or running, only configured bots' strictly superseded Request changes are
 dismissed through SVD-02 after a live head/state refresh; unreadable state defers
 dismissal, and moved/closed requests settle even during capacity holds.
+For an unchanged request and discovery head, live probes and failed dismissal
+retries run at most once per five minutes. Successful dismissal checks are
+memoized per request/head in a bounded process-local cache; periodic live probes
+continue settlement. New requests, changed discovery heads, eviction and restart
+permit a fresh check.
 Current/unknown-head and human reviews remain. This grants
 no merge authority: exact-head zero-finding review, attestation and leases still apply. A valid pending intent prevents dedup row repair
 from restoring `posted`. Implicit same-head dispatch remains deduplicated.

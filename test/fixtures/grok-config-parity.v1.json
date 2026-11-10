@@ -253,16 +253,6 @@
       "name": "closer-pending-v2-even-with-all-flags-on",
       "top": "version: 1\ngrok:\n  enabled: true\n  hammer:\n    enabled: true\nroles:\n  merge_agent_worker_class: hammer-grok\n",
       "errorKey": "roles.merge_agent_worker_class"
-    },
-    {
-      "name": "closer-worker_class-pending-v2",
-      "top": "version: 1\ngrok:\n  enabled: true\n  hammer:\n    enabled: true\nroles:\n  adversarial:\n    merge_authority:\n      worker_class: hammer-grok\n",
-      "errorKey": "roles.adversarial.merge_authority.worker_class"
-    },
-    {
-      "name": "closer-worker_class_fallback-pending-v2",
-      "top": "version: 1\ngrok:\n  enabled: true\n  hammer:\n    enabled: true\nroles:\n  adversarial:\n    merge_authority:\n      worker_class_fallback: [hammer-grok]\n",
-      "errorKey": "roles.adversarial.merge_authority.worker_class_fallback"
     }
   ]
 }

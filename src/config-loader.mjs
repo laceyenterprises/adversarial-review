@@ -2175,7 +2175,7 @@ function schemaV1() {
                   worker_class: {
                     __type: TYPE_STRING,
                     __default: 'hammer',
-                    __enum: ['codex', 'claude-code', 'hammer', 'hammer-corp', 'hammer-claude', 'hammer-grok', 'gemini'],
+                    __enum: ['codex', 'claude-code', 'hammer', 'hammer-corp', 'hammer-claude', 'gemini'],
                   },
                   // HHR harness-fallback (2026-07-05): ordered list of harnesses
                   // the closer/hammer falls back to when the configured
@@ -2193,7 +2193,7 @@ function schemaV1() {
                     // the primary `worker_class` enum are unchanged.
                     __item: {
                       __type: TYPE_STRING,
-                      __enum: ['codex', 'claude-code', 'hammer', 'hammer-corp', 'hammer-claude', 'hammer-grok', 'hammer-claude-corp', 'gemini'],
+                      __enum: ['codex', 'claude-code', 'hammer', 'hammer-corp', 'hammer-claude', 'hammer-claude-corp', 'gemini'],
                     },
                     __default: ['hammer-claude'],
                   },

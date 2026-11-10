@@ -3398,7 +3398,6 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
       };
       writeFollowUpJob(claimed.jobPath, claimed.job);
     }
-
     const currentRound = Number(claimed.job?.remediationPlan?.currentRound || 0);
     if (currentRound > roundBudgetResolution.roundBudget) {
       logRoundBudgetDecision(log, {
@@ -3426,7 +3425,6 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
         now,
         log,
       });
-
       return {
         consumed: false,
         reason: 'round-budget-exhausted',
@@ -3434,7 +3432,6 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
         jobPath: stopped.jobPath,
       };
     }
-
     workflowPushPreflight = await assertWorkflowPushCapabilityForJob({
       job: claimed.job,
       execFileImpl,

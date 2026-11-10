@@ -147,8 +147,6 @@ test('closer selection is explicitly refused even with both switches enabled', (
     const topPath = join(dir, 'config.yaml');
     for (const selection of [
       '  merge_agent_worker_class: hammer-grok\n',
-      '  adversarial:\n    merge_authority:\n      worker_class: hammer-grok\n',
-      '  adversarial:\n    merge_authority:\n      worker_class_fallback: [hammer-grok]\n',
     ]) {
       writeFileSync(topPath, 'version: 1\ngrok:\n  enabled: true\n  hammer:\n    enabled: true\nroles:\n' + selection);
       assert.throws(() => loadConfig({ topPath, env: {} }), /grok-closer-pending-merge-authority-v2/);

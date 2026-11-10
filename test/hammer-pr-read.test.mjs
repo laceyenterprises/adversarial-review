@@ -17,6 +17,9 @@ const pr = { state: 'open', head: { sha: head }, labels: [label], mergeable: tru
 const cliEnv = { ...process.env, HAMMER_LACEY_GH_TOKEN: 'synthetic-offline-token',
   HAMMER_LACEY_GH_TOKEN_EXPIRES_AT: '2099-01-01T00:00:00Z',
   HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: '', HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND: '' };
+// The CLI starts multiple Node processes; allow bounded startup headroom when
+// the offline suite runs concurrently on a shared CI runner.
+const cliTimeout = 30_000;
 
 test('canonical full-review read preserves paginated bodies, findings and commit associations in the run file', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-full-review-'));
@@ -89,7 +92,7 @@ else process.exit(1);
 `, { mode: 0o755 });
   const result = spawnSync(process.execPath, [fileURLToPath(new URL('../bin/hammer-pr-read.mjs', import.meta.url)),
     'fixture/repo', '42', '--full-review'], {
-    encoding: 'utf8', timeout: 5000,
+    encoding: 'utf8', timeout: cliTimeout,
     env: { ...cliEnv, PATH: `${dir}:${process.env.PATH}`, HAM_RUN_DIR: dir,
       GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json') },
   });
@@ -205,7 +208,7 @@ else if (path.includes('/statuses?')) console.log('[]');
 else process.exit(1);
 `, { mode: 0o755 });
     const result = spawnSync(process.execPath, [fileURLToPath(new URL('../bin/hammer-pr-read.mjs', import.meta.url)), 'fixture/repo', '42', ...args], {
-      encoding: 'utf8', timeout: 5000,
+      encoding: 'utf8', timeout: cliTimeout,
       env: { ...cliEnv, PATH: `${dir}:${process.env.PATH}`, GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json') },
     });
     assert.ifError(result.error);
@@ -223,7 +226,7 @@ test('hammer PR CLI preserves synchronous jq exit status', t => {
   writeFileSync(join(dir, 'gh'), `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify(pr)}'\n`, { mode: 0o755 });
   const result = spawnSync(process.execPath, [fileURLToPath(new URL('../bin/hammer-pr-read.mjs', import.meta.url)),
     'fixture/repo', '42', '--json', 'headRefOid', '--jq', 'halt_error(7)'], {
-    encoding: 'utf8', timeout: 5000,
+    encoding: 'utf8', timeout: cliTimeout,
     env: { ...cliEnv, PATH: `${dir}:${process.env.PATH}`, GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json') },
   });
   assert.ifError(result.error);
@@ -236,7 +239,7 @@ test('hammer PR CLI preserves alarm status for bounded visibility retries', t =>
   writeFileSync(join(dir, 'gh'), '#!/bin/sh\nkill -ALRM $$\n', { mode: 0o755 });
   const result = spawnSync(process.execPath, [fileURLToPath(new URL('../bin/hammer-pr-read.mjs', import.meta.url)),
     'fixture/repo', '42', '--json', 'headRefOid'], {
-    encoding: 'utf8', timeout: 5000,
+    encoding: 'utf8', timeout: cliTimeout,
     env: { ...cliEnv, PATH: `${dir}:${process.env.PATH}`, GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json') },
   });
   assert.ifError(result.error);

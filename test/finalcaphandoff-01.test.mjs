@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   createFollowUpJob, claimNextFollowUpJob, readFollowUpJob, writeFollowUpJob,
+  requeueFollowUpJobForNextRound, markFollowUpJobStopped, markFollowUpJobFailed, releaseInfrastructureCiStop,
 } from '../src/follow-up-jobs.mjs';
 import { consumeNextFollowUpJob } from '../src/follow-up-remediation.mjs';
 import { acquireAmaCloserLease, readAmaCloserLease } from '../src/ama/closer-lease.mjs';
@@ -33,7 +34,9 @@ function fixture(t, changes = {}) {
 
 test('FINALCAPHANDOFF-01: 1/1 before claim returns and persists actionable terminal custody, once', async t => {
   const { rootDir, job } = fixture(t);
-  const result = await consumeNextFollowUpJob({ rootDir, now: () => NOW, log: quiet,
+  const notices = [];
+  const result = await consumeNextFollowUpJob({ rootDir, now: () => NOW,
+    log: { ...quiet, warn: line => notices.push(JSON.parse(line)) },
     promptTemplate: 'Offline fixture; no worker is admitted.',
     ensureWorkerRegistryReadyImpl: async () => {},
     requestWatcherWakeImpl: () => { throw new Error('cap stop must not claim a clean verdict'); },
@@ -41,6 +44,7 @@ test('FINALCAPHANDOFF-01: 1/1 before claim returns and persists actionable termi
   assert.equal(result.consumed, false);
   assert.equal(result.reason, 'max-rounds-reached');
   const terminal = result.finalCapResult;
+  assert.deepEqual(notices, [{ event: 'remediation.final_cap_operator_action_required', ...terminal }]);
   assert.equal(terminal.status, 'operator-action-required');
   assert.equal(terminal.actor, 'operator');
   assert.equal(terminal.action, 'canonical-rescue');
@@ -103,7 +107,8 @@ test('ordinary risk-budget exhaustion does not acquire the nonblocking terminal 
     remediationPlan: { currentRound: 3, maxRounds: 3, rounds: [] } });
   const stopped = claimNextFollowUpJob({ rootDir, claimedAt: NOW, returnStopped: true });
   assert.equal(stopped.reason, 'max-rounds-reached');
-  assert.equal(stopped.job.finalCapResult, undefined);
+  assert.equal(stopped.job.finalCapResult, null);
+  assert.equal(stopped.finalCapResult, undefined);
 });
 
 test('remaining nonblocking budget claims normally without a terminal rescue result', t => {
@@ -164,4 +169,69 @@ test('canonical rescue distinguishes the conflict route, final-cap route, stale 
   assert.equal(final.actor, 'hammer');
   assert.equal(nextAction(snapshot({ stale: true })).action, 'review', 'a terminal result cannot carry findings to an unrelated head');
   assert.equal(nextAction(snapshot({ owned: true })).reason, 'live-owner');
+});
+
+test('cap evidence is cleared through operator retrigger, admission and later ordinary stop', t => {
+  const { rootDir } = fixture(t);
+  const capped = claimNextFollowUpJob({ rootDir, claimedAt: NOW, returnStopped: true });
+  assert.ok(capped.finalCapResult);
+  const pending = requeueFollowUpJobForNextRound({ rootDir, jobPath: capped.jobPath,
+    requestedAt: NOW, requestedBy: 'operator', revisionRef: OTHER });
+  assert.equal(readFollowUpJob(pending.jobPath).finalCapResult, undefined);
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: NOW, returnStopped: true });
+  assert.equal(claimed.job.status, 'in_progress');
+  assert.equal(claimed.job.remediationPlan.currentRound, 2);
+  assert.equal(claimed.job.finalCapResult, undefined);
+  // Legacy active records may still carry predecessor evidence.
+  writeFollowUpJob(claimed.jobPath, { ...claimed.job, finalCapResult: capped.finalCapResult });
+  const stopped = markFollowUpJobStopped({ rootDir, jobPath: claimed.jobPath,
+    stoppedAt: NOW, stopCode: 'stale-review-head', stopReason: 'Fixture stop.',
+    commentDeliveryExemption: 'operator-stop' });
+  assert.equal(readFollowUpJob(stopped.jobPath).finalCapResult, undefined);
+  requeueFollowUpJobForNextRound({ rootDir, jobPath: stopped.jobPath, requestedAt: NOW });
+  const lastClaim = claimNextFollowUpJob({ rootDir, claimedAt: NOW });
+  assert.equal(lastClaim.job.remediationPlan.currentRound, 3);
+  const failed = markFollowUpJobFailed({ rootDir, jobPath: lastClaim.jobPath,
+    failedAt: NOW, failure: { code: 'fixture-failure' } });
+  writeFollowUpJob(failed.jobPath, { ...failed.job, finalCapResult: capped.finalCapResult });
+  const exhausted = requeueFollowUpJobForNextRound({ rootDir, jobPath: failed.jobPath, requestedAt: NOW });
+  assert.equal(exhausted.job.remediationPlan.stop.code, 'max-rounds-reached');
+  assert.equal(readFollowUpJob(exhausted.jobPath).finalCapResult, undefined);
+});
+
+test('legacy cap evidence cannot leak through override admission', t => {
+  const { rootDir, jobPath, job } = fixture(t);
+  const stale = { status: 'operator-action-required', successorDispatched: false };
+  writeFollowUpJob(jobPath, { ...job, finalCapResult: stale,
+    remediationPlan: { ...job.remediationPlan, nextAction: { operatorOverride: true } } });
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: NOW, returnStopped: true });
+  assert.equal(readFollowUpJob(claimed.jobPath).finalCapResult, undefined);
+});
+
+for (const singleReview of [false, true]) {
+  test(`legacy cap evidence is cleared by ${singleReview ? 'single-review' : 'ordinary'} cap refusal`, t => {
+    const { rootDir } = fixture(t, { nonBlockingOnly: false,
+      finalCapResult: { status: 'operator-action-required', successorDispatched: false },
+      ...(singleReview ? { singleReview: { applied: true, basis: 'super-small' } } : {}),
+      remediationPlan: { currentRound: 3, maxRounds: 3, rounds: [] } });
+    const stopped = claimNextFollowUpJob({ rootDir, claimedAt: NOW, returnStopped: true });
+    assert.equal(stopped.finalCapResult, undefined);
+    assert.equal(readFollowUpJob(stopped.jobPath).finalCapResult, null);
+  });
+}
+
+test('infrastructure release clears legacy cap evidence before returning to pending', t => {
+  const { rootDir, jobPath, job } = fixture(t);
+  const failure = { name: 'unit', conclusion: 'FAILURE', steps: [] };
+  const stopped = markFollowUpJobStopped({ rootDir, jobPath, stoppedAt: NOW,
+    stopCode: 'ci-not-green', stopReason: 'Fixture infrastructure stop.',
+    commentDeliveryExemption: 'no-remediation-started',
+    failure: { code: 'ci-not-green', ciGate: { headSha: HEAD, failedChecks: [failure] } } });
+  writeFollowUpJob(stopped.jobPath, { ...stopped.job,
+    finalCapResult: { status: 'operator-action-required', successorDispatched: false } });
+  const released = releaseInfrastructureCiStop({ rootDir, jobPath: stopped.jobPath,
+    repo: job.repo, prNumber: job.prNumber, headSha: HEAD, now: NOW,
+    recordedFailures: [failure], failedChecks: [failure] });
+  assert.equal(released.job.status, 'pending');
+  assert.equal(readFollowUpJob(released.jobPath).finalCapResult, undefined);
 });

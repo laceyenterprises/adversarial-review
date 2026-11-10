@@ -2708,7 +2708,7 @@ function claimNextFollowUpJob({
             : nonBlockingCapReached
             ? `Reached non-blocking remediation rounds (${job.nonBlockingRoundsBefore}/${job.nonBlockingMaxRounds}) before claim. No successor dispatched. ${finalCapResult.nextAction}`
             : `Reached max remediation rounds (${currentRound}/${maxRounds}) before claim.`,
-          ...(finalCapResult ? { jobUpdates: { finalCapResult } } : {}),
+          jobUpdates: { finalCapResult },
         });
       } catch (err) {
         handleClaimedStopFailure({
@@ -2724,7 +2724,7 @@ function claimNextFollowUpJob({
           jobPath: stopped.jobPath,
           stopped: true,
           reason: 'max-rounds-reached',
-          ...(stopped.job.finalCapResult ? { finalCapResult: stopped.job.finalCapResult } : {}),
+          ...(finalCapResult ? { finalCapResult } : {}),
         };
       }
       continue;
@@ -2777,6 +2777,7 @@ function claimNextFollowUpJob({
       },
     };
 
+    delete claimedJob.finalCapResult;
     writeFollowUpJob(inProgressPath, claimedJob);
     return { job: claimedJob, jobPath: inProgressPath };
   }
@@ -3342,6 +3343,9 @@ function computeFollowUpJobStoppedState({
     },
   };
 
+  // Cap evidence belongs only to the stop that explicitly supplies it.
+  delete nextJob.finalCapResult;
+
   if (currentRound > 0 && getCurrentRound(nextJob)) {
     nextJob = updateCurrentRound(nextJob, (round) => ({
       ...round,
@@ -3630,6 +3634,7 @@ function requeueFollowUpJobForNextRoundLocked({
     },
   };
 
+  delete nextJob.finalCapResult;
   return moveFollowUpJob(rootDir, jobPath, 'pending', nextJob);
 }
 
@@ -3653,7 +3658,7 @@ export function releaseInfrastructureCiStop({ rootDir, jobPath, repo, prNumber, 
       || JSON.stringify(recordedFailures) !== JSON.stringify(recordedCiFailures(job))
       || !infrastructureOnlyFailures(failedChecks)) return null;
     const round = Number(job.remediationPlan?.currentRound || 0);
-    const result = moveFollowUpJob(rootDir, jobPath, 'pending', {
+    const pendingJob = {
       ...job, status: 'pending', revisionRef: headSha, pendingAt: now, claimedAt: null, claimedBy: null,
       failure: null, stoppedAt: null, failedAt: null, completedAt: null, completion: null,
       remediationWorker: null, reReview: null,
@@ -3667,8 +3672,9 @@ export function releaseInfrastructureCiStop({ rootDir, jobPath, repo, prNumber, 
         nextAction: { type: 'consume-pending-round', round: Math.max(1, round), requestedAt: now,
           requestedBy: 'ci-infrastructure-recovery', reason: 'Infrastructure-only CI stop released.' },
       },
-    });
-    return result;
+    };
+    delete pendingJob.finalCapResult;
+    return moveFollowUpJob(rootDir, jobPath, 'pending', pendingJob);
   });
 }
 

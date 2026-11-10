@@ -1533,8 +1533,10 @@ records the evidence/admission truth table and public export fixture refresh.
 
 Consecutive nonblocking-cap refusals remain `stopped/max-rounds-reached` and
 carry an actionable `finalCapResult` for operator canonical rescue. The result
-records the source review head and finding accounting and explicitly says no
-successor was dispatched. Offline coverage is in
+records the nullable job revision at stop time and finding accounting and
+explicitly says no successor was dispatched. Requeue, infrastructure release,
+admission and later stops clear old evidence. Consume emits the structured
+`remediation.final_cap_operator_action_required` warning for the refused claim. Offline coverage is in
 `test/finalcaphandoff-01.test.mjs`; after deployment, passively inspect the next
 natural cap refusal for that result. Live rescue and loaded revision proof
 remain operator work. See [the queue contract](docs/data-model/follow-up-jobs.md).

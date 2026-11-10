@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
+import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openFinalizationQueueStore } from '../src/finalization/queue-store.mjs';
 import { createQueueOwner } from '../src/finalization/queue-owner.mjs';
 import { createLaneRoutingController } from '../src/finalization/queue-routing.mjs';
-import { createQueueGsr, queueGsrMain } from '../src/finalization/queue-gsr.mjs';
+import { createQueueGsr, queueGsrMain, queueGsrSnapshot } from '../src/finalization/queue-gsr.mjs';
 
 const at = '2026-11-03T00:00:00.000Z';
 const lane = { repository: 'example/project', base: 'main' };
@@ -79,7 +80,7 @@ test('unknown remote operation stays blocking across drain/reopen/resume', async
 test('a cold queue is covered before any future lane is created', t => {
   const root = mkdtempSync(join(tmpdir(), 'cold-queue-gsr-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  assert.equal(queueGsrMain(['status', root]).present, true);
+  assert.equal(queueGsrMain(['status', root]).present, false);
   assert.equal(queueGsrMain(['drain', root, token]).held, true);
   assert.equal(queueGsrMain(['status', root]).token, token);
   assert.equal(queueGsrMain(['resume', root, token]).held, false);
@@ -118,4 +119,32 @@ export async function qualifyDrain(t, ownerFactory = createQueueOwner) {
 test('30 forced post-drain continuations cannot issue through a still-live owner fence', async t => {
   assert.equal(await qualifyDrain(t), 0);
   t.diagnostic('30 consecutive forced post-drain continuations: 0 remote invocations');
+});
+
+test('missing lane table is absent and token mismatches have explicit failed CLI receipts', t => {
+  const root = mkdtempSync(join(tmpdir(), 'gsr-receipts-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const db = new Database(':memory:');
+  t.after(() => db.close());
+  assert.equal(queueGsrSnapshot(db).present, false);
+  const cli = new URL('../src/finalization/queue-gsr.mjs', import.meta.url);
+  const run = (command, requested) => {
+    const result = spawnSync(process.execPath, [cli.pathname, command, root, requested], { encoding: 'utf8', timeout: 10000 });
+    assert.equal(result.error, undefined);
+    return { status: result.status, receipt: JSON.parse(result.stdout) };
+  };
+  assert.equal(run('drain', token).receipt.accepted, true);
+  assert.equal(run('drain', token).status, 0);
+  const other = run('drain', 'maintenance-window:other');
+  assert.equal(other.status, 1);
+  assert.equal(other.receipt.accepted, false);
+  assert.equal(other.receipt.token, token);
+  const wrong = run('resume', 'maintenance-window:other');
+  assert.equal(wrong.status, 1);
+  assert.equal(wrong.receipt.released, false);
+  assert.equal(wrong.receipt.held, true);
+  const released = run('resume', token);
+  assert.equal(released.status, 0);
+  assert.equal(released.receipt.released, true);
+  assert.equal(run('resume', token).status, 1);
 });

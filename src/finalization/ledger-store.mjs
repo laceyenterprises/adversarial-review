@@ -97,9 +97,16 @@ export function rowToEvent(row) {
   const subjectKey = { domainId: row.domain_id, subjectExternalId: row.subject_external_id };
   // Writes remain strict, but an older reader must preserve event types written
   // by a newer producer so the fold can safely ignore their unknown semantics.
-  const event = FINALIZATION_EVENT_TYPE_SET.has(row.event_type)
-    ? makeFinalizationEvent(row.event_type, subjectKey, fields)
-    : { type: row.event_type, subjectKey, ...fields };
+  let event;
+  try {
+    event = FINALIZATION_EVENT_TYPE_SET.has(row.event_type)
+      ? makeFinalizationEvent(row.event_type, subjectKey, fields)
+      : { type: row.event_type, subjectKey, ...fields };
+  } catch (error) {
+    if (row.event_type !== 'launch_custody_observed') throw error;
+    // Observation schema evolution cannot make the eligibility ledger unreadable.
+    event = { ...fields, type: 'unknown:launch_custody_observed', subjectKey };
+  }
   event.seq = row.seq;
   return event;
 }

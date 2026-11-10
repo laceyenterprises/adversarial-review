@@ -58,3 +58,25 @@ continuations with zero remote invocations.
 `npm run typecheck:contracts`, `bash demo/research-finding-walkthrough.sh`,
 `node scripts/validate-data-model-catalog.mjs` (91 entries) and
 `git diff --check` passed. The full suite is left to PR-head CI.
+
+
+## Further review remediation
+
+Custody ingestion resolves the app root, checks store ownership and requires an
+existing database. Reused keys with different custody content refuse the receipt.
+Unknown custody payloads remain readable without becoming eligibility or freshness
+evidence. Queue merge currency excludes custody observations; eligibility changes
+still invalidate an evaluated decision. GSR exposes accepted/released receipts,
+nonzero token-refusal exits and truthful missing-store status.
+
+Rebased onto current trunk, retaining its timeout stderr regression separately
+from the GSR tests and preserving both lifecycle declarations and README text.
+The Agent OS producer is in the superproject; no local producer docs were invented.
+
+Verification: 102 targeted tests passed across custody, GSR, queue merge,
+ledger fold/store/events, queue owner and CLI timeout stderr suites. Commands:
+`node --test test/finalization-{custody,queue-gsr,queue-merge,ledger-fold,ledger-store,ledger-events,queue-owner,cli-timeout-stderr}.test.mjs`
+(run in bounded groups); `npm run lint` (zero errors, existing warnings),
+`npm run typecheck:contracts`, `node scripts/validate-data-model-catalog.mjs`
+(93 entries), `bash demo/research-finding-walkthrough.sh` (byte-stable), and
+`git diff --check` passed. The full local suite was not run per worker rules.

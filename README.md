@@ -2043,7 +2043,10 @@ lease outcome and one mismatch diagnostic; existing smoke promises are unchanged
 
 [state-machines.json](state-machines.json) declares owned lifecycle objects
 and related operational verification records, including launch custody
-freshness and queue maintenance holds.
+freshness and queue maintenance holds. Custody ingestion requires an existing,
+owner-matched app store and does not advance queue merge eligibility currency.
+GSR receipts distinguish absent stores, accepted drains and released holds;
+token mismatches exit nonzero without changing the hold.
 Final-round exact-head Comment-only reviews with non-blocking or demoted
 findings receive one durable builder fix-all round before findings closure.
 Its published head requires fresh full review: zero findings select normal

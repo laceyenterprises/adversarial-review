@@ -23,7 +23,23 @@ dirty (boolean or unknown), launch liveness and a freshness bound of at most
 180 seconds. A terminal dirty holder is evidence for the MLR-06 consumer;
 ingestion makes no closure or salvage decision. The off-pass Agent OS bridge
 uses this store's existing `append` API and acknowledges only a committed row.
-Replays retain the original sequence and event time.
+Replays retain the original sequence and event time; reuse of a key with different
+custody content refuses acknowledgment. The CLI resolves the root and requires
+an existing `data/reviews.db` owned by the current OS user (including root and
+data directory ownership); it never creates a store. Invalid custody payloads
+from a newer producer rehydrate as `unknown:launch_custody_observed` passthroughs,
+while writes remain strict. They grant no freshness evidence.
+
+The fold's `eventCount` includes every row. Its `eligibilityEventCount` excludes
+custody observations, including unknown custody payloads; queue merge issuance
+compares that counter so off-pass custody cannot park an eligible candidate.
+Other events still invalidate the evaluated decision.
+
+Queue GSR receipts report `present: false` when the database or lane table is
+absent. Drain returns `accepted` only if the stored token matches the request
+(including an identical-token replay). Resume returns `released` only when it
+deletes the matching hold. The CLI prints the receipt and exits nonzero for a
+refused drain or unreleased resume, including a missing-store resume.
 The `custodyFreshness(event, now)` projection returns non-fresh, unknown
 liveness and no terminal dirty worktree evidence when custody data is absent,
 so consumers can safely project heterogeneous event streams.

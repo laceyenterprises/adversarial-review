@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { openFinalizationLedgerStore } from '../src/finalization/ledger-store.mjs';
@@ -76,4 +79,55 @@ test('foreign subjects, invalid dirty evidence and unbounded freshness are refus
     { custody: { ...event().custody, freshnessSeconds: 3600 } },
   ]) assert.throws(() => ingestCustody(store, { ...event(), ...patch }));
   assert.equal(store.read(event().subjectKey).length, 0);
+});
+
+test('conflicting custody under a replay key refuses without losing the original', t => {
+  const db = new Database(':memory:');
+  t.after(() => db.close());
+  const store = openFinalizationLedgerStore({ db });
+  ingestCustody(store, event());
+  assert.throws(() => ingestCustody(store, { ...event(), custody: { ...event().custody, dirty: false } }), /content mismatch/);
+  assert.equal(store.read(event().subjectKey)[0].custody.dirty, true);
+  assert.equal(store.read(event().subjectKey).length, 1);
+});
+
+test('future custody payloads remain readable but unknown; writes stay strict', t => {
+  const db = new Database(':memory:');
+  t.after(() => db.close());
+  const store = openFinalizationLedgerStore({ db });
+  ingestCustody(store, event());
+  db.prepare('UPDATE finalization_ledger SET payload_json=?').run(JSON.stringify({ custody: { ...event().custody, state: 'future-state', freshnessSeconds: 900 } }));
+  const rows = store.read(event().subjectKey);
+  assert.equal(rows[0].type, 'unknown:launch_custody_observed');
+  assert.equal(rows[0].seq, 1);
+  assert.equal(custodyFreshness(rows[0], at).fresh, false);
+  assert.throws(() => ingestCustody(store, { ...event(), custody: rows[0].custody }));
+});
+
+test('custody CLI requires an existing owner-matched store and commits to it', t => {
+  const root = mkdtempSync(join(tmpdir(), 'custody-cli-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const cli = new URL('../src/finalization/custody-ingest.mjs', import.meta.url);
+  const run = (dir, foreign = false) => spawnSync(process.execPath, ['--input-type=module', '-e', `
+    ${foreign ? 'process.getuid = () => -1;' : ''}
+    const { custodyIngestMain } = await import(${JSON.stringify(cli.href)});
+    try { console.log(JSON.stringify(custodyIngestMain(['--root', ${JSON.stringify(dir)}], ${JSON.stringify(JSON.stringify(event()))}))); }
+    catch (error) { console.error(error.message); process.exitCode = 1; }
+  `], { encoding: 'utf8', timeout: 10000 });
+  for (const dir of [join(root, 'missing'), root]) {
+    const result = run(dir);
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(result.stdout, '');
+    assert.equal(existsSync(join(root, 'data/reviews.db')), false);
+  }
+  openFinalizationLedgerStore({ rootDir: root }).close();
+  const foreign = run(root, true);
+  assert.equal(foreign.status, 1);
+  assert.match(foreign.stderr, /cross-user/);
+  assert.equal(foreign.stdout, '');
+  const committed = run(root);
+  assert.equal(committed.status, 0, committed.stderr);
+  const store = openFinalizationLedgerStore({ rootDir: root });
+  t.after(() => store.close());
+  assert.equal(store.read(event().subjectKey)[0].seq, JSON.parse(committed.stdout).seq);
 });

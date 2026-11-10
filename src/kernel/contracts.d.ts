@@ -928,6 +928,7 @@ export interface LedgerTerminalState {
 export interface LedgerState {
   subjectKey: SubjectKey | null;
   eventCount: number;
+  eligibilityEventCount: number;
   lastEventAt: IsoTimestamp | null;
   currentRevision: string | null;
   revisions: { [revisionRef: string]: LedgerRevisionState };

@@ -3,6 +3,14 @@ import { normalizeEffectiveReviewVerdict } from '../kernel/verdict.mjs';
 import { amaAllAuthoritativeReviewerLogins } from './reviewer-authority.mjs';
 import { checkReversalFinding } from './reversal-finding.mjs';
 
+/**
+ * @param {import('./hammer-edit-plan-contracts.js').HammerReviewEvidenceDiagnostic} diagnostic
+ * @returns {import('./hammer-edit-plan-contracts.js').HammerReviewEvidenceRefusal}
+ */
+export function refuseHammerReviewEvidence(diagnostic) {
+  return { action: 'stop', reason: 'review-evidence-invalid', diagnostic };
+}
+
 export function checkHammerEditPlan(review, plan, { strictNonBlockingRemediation = false } = {}) {
   const refuse = reason => ({ action: 'stop', reason });
   const correct = (reason, expectedShape, prefix = 'Do not edit. Correct the plan once: ') => ({
@@ -10,11 +18,17 @@ export function checkHammerEditPlan(review, plan, { strictNonBlockingRemediation
   const locationValid = () => typeof plan.path === 'string' && plan.path.trim()
     && Number.isSafeInteger(plan.startLine) && Number.isSafeInteger(plan.endLine)
     && plan.startLine >= 1 && plan.endLine >= plan.startLine;
-  if (!review || !plan || !/^[a-f0-9]{40}$/i.test(plan.reviewedHead || '')
-    || review.commit_id !== plan.reviewedHead
-    || !amaAllAuthoritativeReviewerLogins().includes(String(review.user?.login || '').replace(/\[bot\]$/, ''))
-    || !['CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'APPROVED'].includes(review.state)) {
-    return refuse('review-evidence-invalid');
+  if (!review) return refuseHammerReviewEvidence('review-missing');
+  if (!plan || typeof plan !== 'object' || Array.isArray(plan)) return refuseHammerReviewEvidence('plan-invalid');
+  if (typeof plan.reviewedHead !== 'string' || !/^[a-f0-9]{40}$/i.test(plan.reviewedHead)) {
+    return refuseHammerReviewEvidence('plan-head-invalid');
+  }
+  if (review.commit_id !== plan.reviewedHead) return refuseHammerReviewEvidence('review-head-mismatch');
+  if (!amaAllAuthoritativeReviewerLogins().includes(String(review.user?.login || '').replace(/\[bot\]$/, ''))) {
+    return refuseHammerReviewEvidence('reviewer-untrusted');
+  }
+  if (!['CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'APPROVED'].includes(review.state)) {
+    return refuseHammerReviewEvidence('review-state-invalid');
   }
   const parsed = { verdict: normalizeEffectiveReviewVerdict(review.body),
     findings: { blocking: parseBlockingFindingsSection(review.body),

@@ -83,14 +83,14 @@ test('CI citation fields and malformed locations refuse correctably without gran
 test('policy and evidence refusals keep their terminal and deferral exits', () => {
   const blocking = { ...examples[0], reviewedHead: review.commit_id };
   const advisory = { ...examples[3], reviewedHead: review.commit_id };
-  for (const [candidate, plan, reason] of [
-    [{ ...review, commit_id: 'b'.repeat(40) }, ci, 'review-evidence-invalid'],
-    [{ ...review, user: { login: 'synthetic-author' } }, ci, 'review-evidence-invalid'],
+  for (const [candidate, plan, reason, diagnostic] of [
+    [{ ...review, commit_id: 'b'.repeat(40) }, ci, 'review-evidence-invalid', 'review-head-mismatch'],
+    [{ ...review, user: { login: 'synthetic-author' } }, ci, 'review-evidence-invalid', 'reviewer-untrusted'],
     [review, { ...blocking, findingNumber: 99 }, 'finding-evidence-invalid'],
     [{ ...review, body: review.body.replace('**Lines:** 2', '**Lines:** unknown') }, blocking, 'finding-lines-unreadable: \"unknown\"'],
   ]) {
     const result = checkHammerEditPlan(candidate, plan, { strictNonBlockingRemediation: true });
-    assert.deepEqual(result, { action: 'stop', reason });
+    assert.deepEqual(result, { action: 'stop', reason, ...(diagnostic ? { diagnostic } : {}) });
     assert.equal(editPlanExitCode(result), 1);
   }
   assert.equal(editPlanExitCode(checkHammerEditPlan(review, advisory)), 20);
@@ -257,7 +257,9 @@ test('CLI rejects malformed or mismatched review heads and missing pins and reta
       rootDir, env: { HAM_REVIEWED_SHA: pin }, readReviewImpl: async () => candidate,
       loadPolicy: () => ({}), captureImpl: () => assert.fail('invalid evidence must not capture'),
     });
-    assert.deepEqual(result, { action: 'stop', reason: 'review-evidence-invalid' });
+    assert.equal(result.action, 'stop');
+    assert.equal(result.reason, 'review-evidence-invalid');
+    assert.equal(typeof result.diagnostic, 'string');
     assert.equal(editPlanExitCode(result), 1);
   }
 });
@@ -298,7 +300,7 @@ test('CLI refuses missing or invalid pins before reading or parsing a plan', asy
           env: { HAM_REVIEWED_SHA: explicit ? review.commit_id : pin },
           readReviewImpl: forbidden, loadPolicy: forbidden, captureImpl: forbidden,
         });
-        assert.deepEqual(result, { action: 'stop', reason: 'review-evidence-invalid' });
+        assert.deepEqual(result, { action: 'stop', reason: 'review-evidence-invalid', diagnostic: 'run-pin-invalid' });
         assert.equal(editPlanExitCode(result), 1);
       }
     }

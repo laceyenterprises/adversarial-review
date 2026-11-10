@@ -15,7 +15,9 @@ const HAMMERS = Object.freeze({ 'hammer-corp': 'hammer', 'hammer-claude-corp': '
 const FAMILIES = Object.freeze({ hammer: 'codex', 'hammer-claude': 'claude',
   'remediator-grok': 'grok', 'remediator-codex': 'codex', 'remediator-claude': 'claude' });
 const PROVIDERS_BY_FAMILY = Object.freeze({ codex: 'openai', claude: 'anthropic', grok: 'xai' });
-const providerForWorker = workerClass => PROVIDERS_BY_FAMILY[FAMILIES[workerClass]] ?? 'unknown';
+const providerForWorker = workerClass => PROVIDERS_BY_FAMILY[
+  FAMILIES[workerClass] ?? FAMILIES[REMEDIATORS[workerClass]]
+] ?? 'unknown';
 
 export async function selectWorkerTokenAccount({ identity, model, env = process.env,
   oauth = null, resolvePoolsImpl = resolveIdentityTokenPools, ownerImpl = reviewerPoolOwner,

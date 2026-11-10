@@ -375,6 +375,28 @@ test('pooled fallback audit providers stay defined for unpooled identities', asy
   }
 });
 
+test('pooled fallback audit providers normalize returned worker aliases', async () => {
+  for (const [workerClass, provider] of [
+    ['codex', 'openai'], ['remediator-codex-corp', 'openai'],
+    ['claude', 'anthropic'], ['claude-code', 'anthropic'],
+    ['remediator-claude-corp', 'anthropic'],
+  ]) {
+    const result = await pool.resolvePooledWorkerRouting({
+      primary: 'remediator-grok', kind: 'remediator', env: {},
+      fallbackWorkerClasses: ['gemini'],
+      selectAccountImpl: async ({ identity }) => ({
+        identity, workerClass: identity, pooled: true, hold: true,
+        status: 'unavailable', reason: 'accounts-unavailable',
+      }),
+      resolveUnpooledFallback: async () => ({ workerClass, hold: false }),
+    });
+    assert.equal(result.fellBack, true);
+    assert.equal(result.workerClass, workerClass);
+    assert.equal(result.provider, 'xai');
+    assert.equal(result.fallbackProvider, provider, workerClass);
+  }
+});
+
 for (const resolver of ['missing', 'null', 'undefined']) {
   for (const laterFallback of [false, true]) {
     test(`unresolved unpooled fallback is attributed with resolver=${resolver}, laterFallback=${laterFallback}`, async () => {

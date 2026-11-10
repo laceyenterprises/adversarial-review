@@ -5,11 +5,13 @@ import { DEFAULT_REMEDIATOR_ENV } from './remediation-dispatch-mode.mjs';
 import { MAX_QUOTA_HOLD_WINDOW_MS } from './remediation-quota-evidence.mjs';
 import { remediationSubjectRefusal } from './remediation-worker-class-fallback.mjs';
 
-// Refuse invalid subjects before spawn and revalidate after actor assignment.
+// Refuse invalid subjects before spawn and revalidate after actor assignment,
+// retaining the caller's optional config path and loader.
 export function stopClaimedJobForRefusedSubject({
-  rootDir, claimed, routing, env, now = () => new Date().toISOString(), log = console,
+  rootDir, claimed, routing, env, topPath, loaderImpl, now = () => new Date().toISOString(), log = console,
 }) {
-  const reason = remediationSubjectRefusal(claimed.job, routing.workerClass, { env });
+  if (!routing?.workerClass) return null;
+  const reason = remediationSubjectRefusal(claimed.job, routing.workerClass, { env, topPath, loaderImpl });
   if (!reason) return null;
   const stoppedAt = now();
   const stopReason = `Job ${claimed.job.jobId} (${claimed.job.repo}#${claimed.job.prNumber}): `

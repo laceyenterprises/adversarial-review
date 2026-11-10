@@ -15,11 +15,62 @@ import { join } from 'node:path';
 
 import { buildRemediationOutcomeCommentBody } from '../src/adapters/comms/github-pr-comments/pr-comments.mjs';
 import { recoverGithubAuthOperationalBlocker } from '../src/github-auth-recovery.mjs';
+import { stopClaimedJobForRefusedSubject } from '../src/remediation-claimed-requeue.mjs';
+import { createFollowUpJob, claimNextFollowUpJob, readFollowUpJob } from '../src/follow-up-jobs.mjs';
 
 const env = { AGENT_OS_CONFIG_PATH: '/dev/null', HQ_ROOT: tmpdir() };
 const loaderImpl = () => ({ get: (key, fallback) =>
   ['grok.enabled', 'grok.remediator.enabled'].includes(key) ? true : fallback });
 const options = { env, loaderImpl };
+
+test('subject stop ignores absent routing classes before touching job state', () => {
+  for (const routing of [undefined, null, {}, { workerClass: null }, { workerClass: '' }]) {
+    assert.equal(stopClaimedJobForRefusedSubject({ routing }), null);
+  }
+});
+
+for (const source of ['loader', 'path']) for (const enabled of [true, false]) {
+  test(`subject stop retains ${source} config with Grok enabled=${enabled}`, t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'grok-subject-config-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const topPath = join(rootDir, 'config.yaml');
+    writeFileSync(topPath, JSON.stringify({ version: 1, grok: {
+      enabled, remediator: { enabled },
+    } }));
+    createFollowUpJob({ rootDir, repo: 'sample/project', prNumber: 42, builderTag: 'codex',
+      branch: 'fixture/remediation', reviewerModel: 'gemini', critical: true,
+      reviewBody: '## Verdict\nRequest changes', reviewPostedAt: '2026-10-19T00:00:00Z' });
+    const claimed = claimNextFollowUpJob({ rootDir });
+    assert.ok(claimed && !claimed.stopped);
+    const configEnv = { AGENT_OS_CONFIG_PATH: '/dev/null',
+      ...(source === 'loader' ? {
+        AGENT_OS_GROK_ENABLED: String(!enabled),
+        AGENT_OS_GROK_REMEDIATOR_ENABLED: String(!enabled),
+      } : {}) };
+    let loads = 0;
+    const injectedLoader = args => {
+      loads++;
+      assert.equal(args.topPath, topPath);
+      assert.deepEqual(args.env, configEnv);
+      return { get: (key, fallback) =>
+        ['grok.enabled', 'grok.remediator.enabled'].includes(key) ? enabled : fallback };
+    };
+    const result = stopClaimedJobForRefusedSubject({
+      rootDir, claimed, routing: { workerClass: 'remediator-grok' }, env: configEnv,
+      topPath, ...(source === 'loader' ? { loaderImpl: injectedLoader } : {}),
+      log: { error() {} },
+    });
+    assert.equal(loads, source === 'loader' ? 1 : 0);
+    if (enabled) {
+      assert.equal(result, null);
+      assert.equal(readFollowUpJob(claimed.jobPath).status, 'in_progress');
+    } else {
+      assert.equal(result.reason, 'subject-refused');
+      assert.equal(result.job.status, 'stopped');
+      assert.match(result.job.remediationPlan.stop.reason, /grok-remediator-disabled/);
+    }
+  });
+}
 
 test('opt-in remediator identity and account-bound HQ dispatch', () => {
   assert.equal(normalizeRemediationWorkerClass('remediator-grok'), 'remediator-grok');

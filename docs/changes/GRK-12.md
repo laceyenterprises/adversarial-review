@@ -51,7 +51,11 @@ permission or smoke promise is introduced. Existing quota fallback and HQ
 admission apply. Domain closer selections are checked during domain loading,
 before poll phases; the policy resolver retains its defensive validation.
 Pooled fallback provider labels use a frozen map and `unknown` for unregistered
-families, including unpooled fallbacks. Grok commit identity uses the same
+families, including unpooled fallbacks. Returned legacy remediator aliases
+resolve through that same family map for provider attribution. The claimed
+subject-stop helper accepts optional `topPath` and `loaderImpl`, forwards both
+to subject evaluation, and returns without touching job state when no routing
+class is supplied. Grok commit identity uses the same
 `@laceyenterprises.com` domain as the other remediation workers.
 
 The Agent OS Python/shell loader and parity-fixture companion must merge
@@ -106,3 +110,21 @@ Grok routing, subject-stop, domain-loading, fallback and documentation tests.
 `npm run lint` passed with zero errors (152 existing warnings);
 `npm run typecheck:contracts`, the netguard-wrapped offline research-finding
 demo and `git diff --check` passed. The host full suite was not run.
+
+Latest advisory remediation adds regressions for remediator alias provider
+attribution, absent routing classes, and enabled/disabled subject evaluation
+through injected loaders and explicit config paths. The whitespace advisory
+requires no runtime change: both Node loader entry points already reject
+space/tab-padded `hammer-grok` values in all three closer selectors during
+schema validation, before `validateGrokRolePins`. A targeted regression
+exercises those twelve combinations. Strict identifier validation is preserved.
+No store shape, lifecycle state or smoke promise changed; existing Agent OS
+companion deployment obligations above remain in force.
+
+Validation: the six targeted files `test/worker-token-pool.test.mjs`,
+`test/config-loader-grok.test.mjs`, `test/grok-remediator.test.mjs`,
+`test/follow-up-remediation-quota-hold.test.mjs`,
+`test/arc19-boundary-gate.test.mjs` and `test/smv.test.mjs` passed (157 tests).
+Lint passed with zero errors and 152 existing warnings; contract typecheck
+and the offline research-finding demo passed. Full-suite validation remains
+with PR-head CI.

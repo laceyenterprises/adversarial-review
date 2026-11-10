@@ -47,6 +47,29 @@ function schemaLeaf(schema, dotted) {
   return node;
 }
 
+test('GRK-12: all closer selectors reject padded Grok pins during schema validation', () => {
+  for (const loader of [loadConfig, loadConfigRuntime]) {
+    for (const value of [' hammer-grok ', '\thammer-grok\t']) {
+      for (const [key, roles] of [
+        ['roles.merge_agent_worker_class', { merge_agent_worker_class: value }],
+        ['roles.adversarial.merge_authority.worker_class',
+          { adversarial: { merge_authority: { worker_class: value } } }],
+        ['roles.adversarial.merge_authority.worker_class_fallback[0]',
+          { adversarial: { merge_authority: { worker_class_fallback: [value] } } }],
+      ]) {
+        const top = JSON.stringify({ version: 1, grok: { enabled: true, hammer: { enabled: true } }, roles });
+        withCase({ top }, topPath => {
+          assert.throws(() => loader({ topPath, env: {} }), error => {
+            assert.equal(error.key, key);
+            assert.match(error.message, /not in allowlist/);
+            return true;
+          });
+        });
+      }
+    }
+  }
+});
+
 test('GRK-09: Node grok schema matches the parity snapshot', () => {
   const schema = grokSchema();
   assert.equal(schema.__strict, true);

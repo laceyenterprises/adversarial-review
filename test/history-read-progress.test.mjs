@@ -5,6 +5,7 @@ import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHistoryReader } from '../src/ama/history-reader.mjs';
+import { historyReadTimeoutError } from '../src/ama/history-read-policy.mjs';
 import { checkPrimaryChange, fetchPrimaryChange } from '../src/ama/primary-change.mjs';
 import { primaryRenameRepository } from './helpers/primary-change.mjs';
 
@@ -24,11 +25,20 @@ test('HISTREADLOAD-01: a fresh reader resumes persisted pages across bounded att
   let token = 0;
   const attempt = (headSha, maxReads, host = 'github.com') => {
     let reads = 0;
-    return createHistoryReader({ contextTimeoutMs: 100, progress: { rootDir, repo, prNumber, headSha },
+    const controller = new AbortController();
+    // Interrupt at a fixed read boundary: scheduler delays must not change
+    // how many pages this checkpoint-resumption fixture completes.
+    return createHistoryReader({ contextTimeoutMs: 10_000, signal: controller.signal,
+      progress: { rootDir, repo, prNumber, headSha },
       env: { GH_TOKEN: `synthetic-rotated-token-${++token}`, GH_HOST: host },
       execGhWithRetryImpl: async ({ args }) => {
         if (args[1].includes('/pulls/')) { liveReads++; return { stdout: '{}' }; }
-        if (++reads > maxReads) return never();
+        if (++reads > maxReads) {
+          // Let successful sibling reads finish publishing their checkpoints.
+          await new Promise(resolve => setImmediate(resolve));
+          controller.abort(historyReadTimeoutError());
+          return never();
+        }
         const page = Number(new URLSearchParams(args[1].split('?')[1]).get('page'));
         successes.set(page, (successes.get(page) || 0) + 1);
         return { stdout: JSON.stringify({ status: 'ahead', total_commits: commits.length,

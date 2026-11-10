@@ -44,6 +44,12 @@ passed with zero errors (152 existing warnings), contract typechecking passed,
 and the offline research-finding walkthrough retained byte-stable deliveries.
 The full suite was not run, as required by this dispatch.
 
+HAM closure replaces the persisted-page fixture's 100 ms interruption with an
+explicit read-boundary abort after successful sibling checkpoint publications.
+Both Node CI jobs failed when scheduling delays changed the expected completed
+page count. Checkpoint reuse, head/host isolation, token rotation and live reads
+remain asserted; production deadlines are unchanged.
+
 After ordinary deployment, SRE must verify watcher/follow-up PID start times,
 observe no new history-budget exhaustion at comparable load, and observe a
 long-history PR close through its closer. This work performs no live action.

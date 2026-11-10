@@ -225,6 +225,11 @@ export function makeFinalizationEvent(type, subject, fields = {}) {
 
   /** @type {FinalizationEvent} */
   const event = { type, subjectKey, at: fields.at };
+  // Every external observation can be replayed, not only dispatches.
+  if (fields.idempotencyKey !== undefined) {
+    if (!isNonEmptyString(fields.idempotencyKey)) throw new TypeError('invalid event idempotency key');
+    event.idempotencyKey = fields.idempotencyKey;
+  }
   for (const key of [...REQUIRED_FIELDS[type], ...OPTIONAL_FIELDS[type]]) {
     const value = fields[key];
     if (value !== undefined && value !== null) event[key] = value;

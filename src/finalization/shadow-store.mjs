@@ -98,6 +98,8 @@ function observationToColumns(obs) {
       v1Action: obs.v1Action,
       v2Decision: obs.v2Decision,
       classification: obs.classification,
+      ...(obs.dedupeKey ? { dedupeKey: obs.dedupeKey } : {}),
+      ...(obs.live ? { live: obs.live } : {}),
       ...(obs.queue ? { queue: obs.queue, dedupeKey: obs.dedupeKey } : {}),
     }),
   };
@@ -136,6 +138,8 @@ export function rowToObservation(row) {
     sawHeadMove: row.saw_head_move === 1,
     sawExhaustion: row.saw_exhaustion === 1,
     dispositionOverride: override,
+    ...(payload.dedupeKey ? { dedupeKey: payload.dedupeKey } : {}),
+    ...(payload.live ? { live: payload.live } : {}),
     ...(payload.queue ? { queue: payload.queue, dedupeKey: payload.dedupeKey } : {}),
   };
 }
@@ -263,9 +267,9 @@ export function openFinalizationShadowStore({ rootDir, db, busyTimeoutMs } = {})
       }
       if (!override.at) throw new TypeError('shadow annotate requires an `at` timestamp');
       const existing = selectById.get(id);
-      if (existing && rowToObservation(existing).queue && (!override.principal || !override.note
+      if (existing && (rowToObservation(existing).queue || rowToObservation(existing).live) && (!override.principal || !override.note
         || !['v1-defect', 'v2-suspect', 'benign', 'open'].includes(override.direction))) {
-        throw new TypeError('queue triage requires principal, note and bidirectional direction');
+        throw new TypeError('queue/live triage requires principal, note and bidirectional direction');
       }
       updateOverride.run({ id, override: JSON.stringify(override) });
       const row = selectById.get(id);

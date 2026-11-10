@@ -139,6 +139,7 @@ export function snapshotLaunchReferenceRead(snapshot, rootDir) {
 export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, candidate = null, labels, checksRollup,
   autonomousMergeExecutionEnabled, rootDir = null, observedAt = null, anchors = null } = {}) {
   const pr = candidate ? { headSha: candidate.headSha ?? null, state: candidate.prState ?? null,
+    baseBranch: candidate.baseBranch ?? null,
     isDraft: candidate.isDraft === true, mergeable: candidate.mergeable ?? null,
     mergeStateStatus: candidate.mergeStateStatus ?? null, labels: Array.isArray(labels) ? labels : candidate.labels } : null;
   const head = input.currentHead || pr?.headSha || null;
@@ -183,7 +184,11 @@ export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, cand
       : launchRecord?.reason === 'ci-infrastructure-recovered' && launchRecord.recoveredLaunchRequestId
         ? { closer: null } : undefined,
     checks: input.checks === undefined && checksRollup === undefined ? undefined
-      : { conclusion: input.checks ?? null, ...(Array.isArray(checksRollup) ? { rollup: checksRollup } : {}) },
+      : { conclusion: input.checks ?? null, headSha: head,
+        // Observation-only metadata: checksFacts must retain its frozen inputs.
+        ...(candidate?.branchProtection?.ok === true
+          ? { finalizationRequiredContexts: candidate.branchProtection.requiredContexts } : {}),
+        ...(Array.isArray(checksRollup) ? { rollup: checksRollup } : {}) },
     policy: { strictMode: input.strictMode !== false, strictNonBlockingRemediation: input.strictNonBlockingRemediation !== false,
       ...(input.operatorLogins ? { operatorLogins: input.operatorLogins } : {}),
       ...(input.operatorLabelActorEnforcement ? { operatorLabelActorEnforcement: input.operatorLabelActorEnforcement } : {}),

@@ -1,0 +1,14 @@
+version: 1
+operator_steps:
+  - description: >-
+      Main Loop 6 / SRE: wait for both MLR-07 repository PRs to merge and verify
+      each declared companion through existing reintegration. After normal
+      submodule float/deployment, prove both merged commits are deployed.
+      Reload the watcher through the existing registered service path and retain
+      its deployment receipt and loaded build/start time. Do not change lane_routes.
+      Capture the report before and after natural traffic: require shadow.rows
+      growth, organic observations for each active repository/base and zero
+      fold errors or explicit bidirectional disposition. Preserve MGQ and MLR-04
+      readiness requirements; this is no promotion or canary authorization.
+    run_as: designated Main Loop 6 SRE operator
+    command: hq merge-lane shadow report --json

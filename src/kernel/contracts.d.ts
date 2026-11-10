@@ -1136,6 +1136,7 @@ export interface ShadowObservation {
   dedupeKey?: string;
   /** Extensible observation evidence, never an executable decision or owner. */
   queue?: JsonObject;
+  live?: JsonObject;
 }
 
 /** The model `finalization shadow-report` renders (SPEC §1 Win 3). */
@@ -1172,6 +1173,12 @@ export interface ShadowReportModel {
   openDivergences: number;
   promotable: boolean;
   blockers: string[];
+  promotionGate?: {
+    approvedSpec: string; minimumFinalizations: number; finalizations: number;
+    headMoves: number; exhaustionCloses: number; openDivergences: number;
+    foldErrors: number; promotable: boolean; mgqPromotable: boolean; blockers: string[];
+  };
+  shadow?: { rows: number; subjects: number; foldErrors: number; lanes: JsonObject[] };
 }
 
 // ---------------------------------------------------------------------------

@@ -56,7 +56,8 @@ test('report model counts agreements vs divergences and computes the promotion v
   assert.equal(model.exhaustionCloses, 1);
   assert.equal(model.coverage.enoughDays, true);
   assert.equal(model.promotable, false);
-  assert.deepEqual(model.blockers, ['1 open divergence']);
+  assert.ok(model.blockers.includes('1 open divergence'));
+  assert.equal(model.promotionGate.finalizations, 0);
 });
 
 test('render matches the Win 3 shadow-report shape', () => {
@@ -66,19 +67,18 @@ test('render matches the Win 3 shadow-report shape', () => {
   assert.equal(lines[0], 'shadowed finalizations: 3   agree: 1   diverge: 2');
   assert.match(lines[1], /^ {2}#612 v1=merged\s+v2=wait\(required check missing\)\s+\[v1 defect: AR#550 class\]$/);
   assert.match(lines[2], /^ {2}#618 v1=hammer-dispatch\s+v2=finalize-now \(verdict@head clean\)\s+\[triage open\]$/);
-  assert.equal(lines[3], 'verdict: NOT promotable (1 open divergence)');
+  assert.match(lines[3], /^promotion gate: ≥50 finalizations ✖/);
+  assert.match(lines[4], /^verdict: NOT promotable \(1 open divergence;/);
 });
 
-test('a fully-dispositioned window with organic coverage is promotable (exact snapshot)', () => {
+test('elapsed-day coverage alone cannot meet the approved volume gate', () => {
   const observations = [
     obs({ subjectExternalId: 'owner/repo#600', observedAt: daysAgo(8), v1: 'merged', v2: 'finalize-now', v2reason: 'clean verdict, green checks at current revision', relation: 'agree', direction: 'benign', cls: 'concur', disposition: 'resolved' }),
     obs({ subjectExternalId: 'owner/repo#605', observedAt: daysAgo(2), v1: 'merged', v2: 'finalize-now', v2reason: 'clean verdict, green checks at current revision', relation: 'agree', direction: 'benign', cls: 'concur', disposition: 'resolved', sawHeadMove: true, sawExhaustion: true }),
   ];
   const out = renderShadowReport(buildShadowReport({ observations, now: NOW, windowDays: 7 }));
-  assert.equal(out, [
-    'shadowed finalizations: 1   agree: 1   diverge: 0',
-    'verdict: promotable',
-  ].join('\n'));
+  assert.match(out, /^shadowed finalizations: 1   agree: 1   diverge: 0/);
+  assert.match(out, /insufficient distinct finalizations \(0 < 50\)/);
 });
 
 test('queue CLI rates use two decimal places while JSON model retains numeric precision', () => {
@@ -125,7 +125,8 @@ test('organic promotion markers count across the full shadow period', () => {
   assert.equal(model.shadowed, 1);
   assert.equal(model.organicHeadMoves, 1);
   assert.equal(model.exhaustionCloses, 1);
-  assert.equal(model.promotable, true);
+  assert.equal(model.promotionGate.mgqPromotable, true);
+  assert.equal(model.promotable, false);
 });
 
 test('buildShadowReport accepts SQL-derived coverage for windowed observations', () => {
@@ -146,7 +147,8 @@ test('buildShadowReport accepts SQL-derived coverage for windowed observations',
   assert.equal(model.coverage.enoughDays, true);
   assert.equal(model.organicHeadMoves, 1);
   assert.equal(model.exhaustionCloses, 1);
-  assert.equal(model.promotable, true);
+  assert.equal(model.promotionGate.mgqPromotable, true);
+  assert.equal(model.promotable, false);
 });
 
 test('a human override supersedes the classifier proposal in the report', () => {
@@ -186,7 +188,7 @@ test('finalization shadow-report CLI prints the operator block and exits 0', () 
   assert.equal(code, 0);
   const text = out.join('');
   assert.match(text, /shadowed finalizations: 3 {3}agree: 1 {3}diverge: 2/);
-  assert.match(text, /verdict: NOT promotable \(1 open divergence\)/);
+  assert.match(text, /verdict: NOT promotable \(1 open divergence;/);
 });
 
 test('finalization shadow-report --json emits the full model', () => {
@@ -202,13 +204,13 @@ test('finalization shadow-report --json emits the full model', () => {
   assert.equal(model.windowDays, 7);
 });
 
-test('finalization shadow-report reads only the window and uses aggregate coverage', () => {
+test('finalization shadow-report reads full promotion history alongside its display window', () => {
   let readWindow = null;
   let coverageRead = false;
   let closed = false;
   const store = {
     read(window) {
-      readWindow = window;
+      if (window.from) readWindow = window;
       return seedNotPromotable().filter((o) => Date.parse(o.observedAt) >= Date.parse(daysAgo(7)));
     },
     readCoverage() {

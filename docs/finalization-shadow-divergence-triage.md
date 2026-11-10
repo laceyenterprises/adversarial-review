@@ -119,7 +119,8 @@ The report opens the existing app database read-only and never runs schema
 convergence, so it is safe to run under an operator account while the daemon
 owns the writable database. A missing database or shadow table fails loud; run
 the daemon-owned migration rather than creating it from the reporting command.
-`promotable` requires **all** of:
+The read model also backs `hq merge-lane shadow report [--json]`; the wrapper
+forwards the service output unchanged. `promotable` requires **all** of:
 
 1. **≥ N days of shadow coverage** (default 7) — the oldest observation is at
    least N days old.
@@ -127,6 +128,41 @@ the daemon-owned migration rather than creating it from the reporting command.
 3. **At least one organic head-move** observed in shadow (`sawHeadMove`).
 4. **At least one budget-exhaustion close** observed in shadow
    (`sawExhaustion`).
+5. **MLR-04's approved volume gate:** at least 50 distinct organic terminal
+   subjects (merged or closed), including a head-move landing and an exhaustion
+   close-by-landing. Dispatches, repeated polls, different heads of the same
+   subject and synthetic samples add no volume. The full retained history must
+   have every divergence dispositioned and no unresolved fold/evidence error.
+   A fold error requires a human resolved override with principal and evidence
+   note; coarse concurrence with a v1 page cannot silently clear it.
+
+`promotionGate` reports the MLR arithmetic and the separate `mgqPromotable`
+coverage result; both are required. `shadow` reports retained rows, distinct
+organic subjects and fold-error rows for read-only activation evidence. A missing
+store fails loud and never appears as a healthy zero. Older rows without organic
+terminal provenance remain visible but cannot establish MLR volume. Historical
+open divergences cannot age out of promotion by leaving the display window.
+
+The existing next-action observer now supplies sourced snapshots and v1 results
+for every observed repository/base, including legacy lanes. Ingestion and pair
+append share the app-store transaction and existing idempotency indexes. Replays
+retain their original event time and observation id. Repeated same-head polls
+cannot advance the revision anchor. Translation/read/fold failures record
+`escalate`; persistence failures emit a local diagnostic and remain missing
+evidence. Live snapshot divergences preserve the existing taxonomy as a proposed
+classification and stay open for bidirectional triage. A held or proposed daemon
+merge is a wait; a live hammer is not a new dispatch. Missing immutable
+primary-change provenance remains a v2 recovery wait.
+
+After both repository PRs merge, Main Loop 6/SRE follows the
+[MLR-07 deployment handoff](deployment/mlr-07-shadow.yaml). Confirm the deployed
+review-service pointer includes this change, then reload the watcher through its
+existing registered service path and retain that path's deployment receipt.
+Take report snapshots before and after natural traffic and require
+`after.shadow.rows > before.shadow.rows`, organic subjects in each active lane,
+and zero fold errors (or explicit triage of each error). A single nonzero count
+does not prove growth or newly loaded code. Keep routing and live promotion under
+Main Loop 6; this worker supplies no config flip or restart.
 
 Any unmet condition is listed as a blocker. Promotion itself is an **operator
 action** (ARC-17 ships the executor gated off); this gate only reports

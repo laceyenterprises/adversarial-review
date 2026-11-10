@@ -25,6 +25,7 @@ import { join } from 'node:path';
 import { deriveNextActionSnapshot, nextAction } from './pr-next-action.mjs';
 import { fromLegacyClosureOwner, markNextActionShadowTestSink, snapshotLaunchReferenceRead } from './pr-next-action-consumer.mjs';
 import { checkPrimaryChange } from './ama/primary-change.mjs';
+import { recordLiveShadow } from './finalization/live-shadow.mjs';
 
 export const NEXT_ACTION_SHADOW_SCHEMA = 'nxa-shadow/v1';
 export const NEXT_ACTION_SHADOW_MAX_BYTES = 16 * 1024 * 1024;
@@ -223,7 +224,7 @@ export function noteNextActionLegacy({ source, subjectKey, head, legacy, env = p
  * inside the shadow's guard); null records only overdue observation. Returns a
  * promise for tests; callers must not await it for control flow.
  */
-export function shadowNextAction({ source, legacy = null, snapshot = null, passSnapshot = null, evidence = null, shared = null,
+export function shadowNextAction({ source, legacy = null, finalizationV1Action = null, snapshot = null, passSnapshot = null, evidence = null, shared = null,
   repo = null, prNumber = null, rootDir = null, now = Date.now, env = process.env,
   sink = null } = {}) {
   let sharedPromise;
@@ -245,6 +246,11 @@ export function shadowNextAction({ source, legacy = null, snapshot = null, passS
     const shared = await sharedPromise;
     const observedMs = now();
     const { decision } = shared;
+    if (rootDir && !env?.NODE_TEST_CONTEXT && adapted && repo && prNumber) {
+      try { recordLiveShadow({ rootDir, snapshot: shared.snapshot, legacy: adapted,
+        v1Action: finalizationV1Action, source, repo, prNumber }); }
+      catch { console.warn('[finalization-shadow] pair not persisted; shadow evidence unavailable'); }
+    }
     // Observation is independent of disagreement sinks and never affects routing.
     if (rootDir && !env?.NODE_TEST_CONTEXT) {
       try { await captureMergeLaneObservation({ rootDir, shared, repo, prNumber, observedMs }); }

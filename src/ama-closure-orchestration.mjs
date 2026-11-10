@@ -927,6 +927,8 @@ async function maybeDispatchAmaClosureForInner({
     const { input, autonomousMergeExecutionEnabled } = closureOwnerSink.shadowInput;
     const candidate = options.candidate || {};
     void shadowNextActionLater({ source: 'closure-orchestration', legacy: result.closureOwner,
+      finalizationV1Action: result.daemonCleanMerge?.merged === true || result.reason === 'daemon-merged'
+        ? { kind: 'merged' } : result.dispatched === true ? { kind: 'hammer-dispatch' } : null,
       passSnapshot: options.passSnapshot || null, repo: options.repoPath, prNumber: options.prNumber,
       rootDir: options.rootDir || ROOT, shared: closureOwnerSink.shared || null,
       evidence: () => closureOwnerShadowEvidence(input, {

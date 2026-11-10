@@ -49,6 +49,23 @@ Eligibility is not stored as mutable state. Consumers replay rows for one
 subject in `seq` order through `src/finalization/ledger-fold.mjs`, then pass the
 projected state to `src/finalization/eligibility.mjs`.
 
+MLR-07 composes the existing next-action snapshot observer with the append
+API and `finalization_shadow` in one app-store transaction. All event types
+accept the existing optional `idempotency_key`, retaining original event times
+on replay. Only a changed head appends `revision_advanced`; readable review,
+exact-head required-check rollup, mergeability and exhaustion observations
+retain provenance. Partial or failed evidence never becomes green or a merge.
+Custody continues to arrive through the existing off-pass bridge.
+
+Shadow `payload_json` additionally retains optional `live` evidence
+(`source`, `lane`, `sourceRef`, `terminalOutcome`, proposed classification) and
+`dedupeKey`, using the existing MGQ-07 unique index. No table/column migration
+or session-ledger SQL is introduced. Live comparisons are observational and
+never claim a queue lane or call an execution adapter. MLR-04 promotion counts
+distinct organic terminal subjects once, with head-move/exhaustion landing
+examples; full-history unresolved divergences and fold errors block readiness.
+See the [triage guide](../finalization-shadow-divergence-triage.md).
+
 ## Table
 
 Table: `finalization_ledger`

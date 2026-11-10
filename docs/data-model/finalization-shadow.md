@@ -93,3 +93,23 @@ Readiness age uses acknowledgement or the latest tail-readmission sequence,
 never poll time. Reports disclose valid/unknown pair counts, unique entry counts,
 completed service denominator and window; they separate organic and synthetic
 cohorts. Synthetic evidence cannot supply organic promotion coverage.
+
+## Live snapshot pairs (MLR-07)
+
+The next-action observer supplies sourced legacy-lane facts through the same
+ledger and shadow stores. Optional `payload_json.live` holds `source: organic`,
+the repository/base lane, v1 source reference, observed terminal outcome and
+proposed divergence classification. The existing `dedupeKey` index also
+deduplicates these pairs. Live disagreements start open; their annotations
+require the same direction/principal/evidence note as queue disagreements.
+Ingestion and comparison append share a transaction; no execution adapter is
+available. Translation/read/fold failure persists an escalate pair. An unavailable
+store produces a local diagnostic rather than fabricated durable evidence.
+
+The report's `promotionGate` counts at least 50 distinct organic terminal subjects,
+including terminal head-move/exhaustion examples, all historical divergence
+dispositions and unresolved fold errors. Polls, dispatches, synthetic samples
+and older unprovenanceable rows add no exercised volume. `mgqPromotable`
+retains the existing coverage condition. `shadow` supplies row/subject/error
+counts for the SRE-owned natural-traffic growth assertion. Reports remain
+read-only and do not select routes or authorize promotion.

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createFollowUpJob } from '../src/follow-up-jobs.mjs';
+import { createFollowUpJob, claimNextFollowUpJob, requeueFollowUpJobForNextRound } from '../src/follow-up-jobs.mjs';
 import { consumeNextFollowUpJob } from '../src/follow-up-remediation.mjs';
 import { resolveCloserDispatchHarness } from '../src/ama/harness-fallback.mjs';
 import { resolveRemediationWorkerClassWithFallback } from '../src/remediation-worker-class-fallback.mjs';
@@ -16,7 +16,6 @@ import { buildLegacyHqRemediationDispatchArgs } from '../src/remediation-dispatc
 import { resolveRemediationModel } from '../src/adapters/agent-runtime/local/remediation.mjs';
 import { resolveConfiguredNonBlockingCodexModel } from '../src/adapters/agent-runtime/local/non-blocking-codex-model.mjs';
 import { remediationWorkerGitIdentity } from '../src/remediation-worker-provenance.mjs';
-import { MAX_QUOTA_HOLD_WINDOW_MS } from '../src/remediation-quota-evidence.mjs';
 import { poolConflictFixture } from './helpers/pool-conflict-fixture.mjs';
 
 const pool = await import('../src/worker-token-pool.mjs').catch(error => {
@@ -302,8 +301,12 @@ test('ITP-14 pooled routing preserves the declared infrastructure fallback', asy
   assert.equal(result.reason, 'infrastructure-fallback');
 });
 
-for (const [builderTag, enabled] of [['grok', true], ['grok-api', true], ['grok-remediation', true], ['codex', false]]) {
-  test(`final assignment handoff refuses Grok for builder=${builderTag}, enabled=${enabled}`, async t => {
+for (const [builderTag, enabled, phase] of [
+  ['grok', true, 'handoff'], ['grok-api', true, 'handoff'],
+  ['grok-remediation', true, 'handoff'], ['codex', false, 'handoff'],
+  ['grok', true, 'initial'], ['codex', false, 'initial'],
+]) {
+  test(`${phase} assignment refuses Grok for builder=${builderTag}, enabled=${enabled}`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'grok-handoff-'));
     const overrides = { AGENT_OS_CONFIG_PATH: '/dev/null', HQ_ROOT: rootDir,
       AGENT_OS_ROLES_REMEDIATOR: 'adversarial', ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: undefined,
@@ -322,9 +325,12 @@ for (const [builderTag, enabled] of [['grok', true], ['grok-api', true], ['grok-
       guardStackedBaseImpl: async () => null, resolvePRLifecycleImpl: async () => null,
       ensureWorkerRegistryReadyImpl: async () => {},
       resolveRemediationWorkerClassImpl: async () => ({
-        workerClass: 'remediator-claude', pooled: true, hold: false }),
-      resolveOsgRemediatorRouteImpl: async () => ({
-        workerClass: 'remediator-grok', pooled: true, hold: false }),
+        workerClass: phase === 'initial' ? 'remediator-grok' : 'remediator-claude',
+        pooled: true, hold: phase === 'initial' }),
+      resolveOsgRemediatorRouteImpl: async () => {
+        assert.equal(phase, 'handoff', 'initial subject refusal must stop before handoff');
+        return { workerClass: 'remediator-grok', pooled: true, hold: false };
+      },
       execFileImpl: async () => assert.fail('refused assignment reached command or dispatch'),
       spawnImpl: () => assert.fail('refused assignment reached local spawn'),
       postCommentImpl: async () => {}, deliverAlertImpl: async () => {},
@@ -333,16 +339,41 @@ for (const [builderTag, enabled] of [['grok', true], ['grok-api', true], ['grok-
     if (['grok-api', 'grok-remediation'].includes(builderTag)) {
       assert.match(result.reason, /cannot remediate its own PR/);
     } else {
-      assert.equal(result.reason, 'remediator-capped-hold');
-      const hold = result.job.remediationPlan.retryHistory.at(-1);
-      assert.equal(result.job.remediationPlan.retryAfter, hold.retryAfter);
-      assert.equal(Date.parse(hold.retryAfter) - Date.parse(hold.requeuedAt), MAX_QUOTA_HOLD_WINDOW_MS);
-      assert.doesNotMatch(hold.retryReason, /undefined/);
-      assert.equal(result.job.remediationPlan.retryHistory.at(-1).retryMetadata.capSource,
-        enabled ? 'grok-acting-lane-unavailable' : 'grok-remediator-disabled');
+      assert.equal(result.reason, 'subject-refused');
+      assert.equal(result.job.status, 'stopped');
+      assert.equal(result.job.remediationWorker.state, 'never-spawned');
+      assert.equal(result.job.remediationPlan.stop.code, 'subject-refused');
+      assert.match(result.job.remediationPlan.stop.reason,
+        new RegExp(enabled ? 'grok-acting-lane-unavailable' : 'grok-remediator-disabled'));
+      assert.match(result.job.remediationPlan.stop.reason, /Owner: adversarial-review operator.*Next action:.*explicitly retrigger/);
+      assert.equal(result.job.remediationPlan.retryHistory?.length || 0, 0);
+      assert.equal(claimNextFollowUpJob({ rootDir }), null, 'terminal refusal cannot re-arm on the next claim');
+      const requeued = requeueFollowUpJobForNextRound({
+        rootDir, jobPath: result.jobPath, requestedBy: 'operator',
+        reason: 'Lane configuration corrected; explicit operator retry.',
+      });
+      assert.equal(requeued.job.status, 'pending');
     }
   });
 }
+
+test('pooled fallback audit providers stay defined for unpooled identities', async () => {
+  for (const candidate of ['gemini', 'remediator-fixture-unpooled']) {
+    const result = await pool.resolvePooledWorkerRouting({
+      primary: 'remediator-codex', kind: 'remediator', env: {},
+      fallbackWorkerClasses: [candidate],
+      selectAccountImpl: async ({ identity }) => ({
+        identity, workerClass: identity, pooled: true, hold: true,
+        status: 'unavailable', reason: 'accounts-unavailable',
+      }),
+      resolveUnpooledFallback: async workerClass => ({ workerClass, hold: false }),
+    });
+    assert.equal(result.fellBack, true);
+    assert.equal(result.workerClass, candidate);
+    assert.equal(result.provider, 'openai');
+    assert.equal(result.fallbackProvider, 'unknown');
+  }
+});
 
 for (const resolver of ['missing', 'null', 'undefined']) {
   for (const laterFallback of [false, true]) {

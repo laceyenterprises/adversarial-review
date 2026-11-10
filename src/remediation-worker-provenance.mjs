@@ -29,7 +29,7 @@ const WORKER_PROVENANCE_HOOK_SRC = join(ROOT, 'hooks', 'worker-provenance-commit
 const REMEDIATION_WORKER_IDENTITY_DEFAULTS = {
   'remediator-grok': {
     name: 'Grok Remediation Worker',
-    email: 'grok-remediation-worker@agent-os.local',
+    email: 'grok-remediation-worker@laceyenterprises.com',
   },
   codex: {
     name: 'Codex Remediation Worker',

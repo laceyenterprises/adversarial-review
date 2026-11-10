@@ -33,6 +33,8 @@ test('opt-in remediator identity and account-bound HQ dispatch', () => {
   assert.equal(remediationLaneModeRefusal('remediator-grok', 'local', { env: {} }), 'requires-account-bound-hq-dispatch');
   assert.equal(remediationWorkerTrailerClass('remediator-grok'), 'grok-remediation');
   assert.equal(remediationWorkerGitIdentity('remediator-grok', {}).name, 'Grok Remediation Worker');
+  assert.equal(remediationWorkerGitIdentity('remediator-grok', {}).email,
+    'grok-remediation-worker@laceyenterprises.com');
 });
 
 test('original Grok provenance refuses all actor aliases before account selection and after handoff', async () => {

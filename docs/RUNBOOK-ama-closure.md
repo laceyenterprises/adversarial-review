@@ -2412,6 +2412,13 @@ GRK-12 reserves the `hammer-grok` routing name without static or seed registrati
 The legacy closer selector and domain `mergeAuthority.workerClass` and
 `workerClassFallback` selections refuse with
 `grok-closer-pending-merge-authority-v2`, even with its flags enabled.
+Domain primary/fallback selections are validated during domain loading, before
+poll phases; the policy resolver also checks supplied fallback configurations.
+The Agent OS Python/shell loader and parity-fixture companion must merge before
+the submodule pointer bump. Before restarting daemons, the operator confirms
+that effective host/local config has no legacy `hammer-grok` closer pin; see
+the [remediation deployment contract](follow-up-runbook.md#remediator-fallback-order-remgemini-01)
+and [GRK-12](changes/GRK-12.md). Offline source checks do not confirm live config.
 The strict primary/fallback config enums do not recognize it until GRK-17.
 Keep the closer cell and live receipt pending v2; GRK-17 adds the Merge
 Authority v2 executor after the MLR cutover using the v2 queue-closer prompt.

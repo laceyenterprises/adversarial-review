@@ -726,16 +726,26 @@ use it, including after assignment handoffs or API-key account selection.
 A Grok pin leaves Grok-built PRs on their `remediator-codex` default route;
 fallback candidates retain the subject refusal after account selection.
 Reconciliation applies that same pin exemption to outcome attribution and
-GitHub-auth recovery, retaining the recorded non-Grok worker class. Refused
-post-assignment subjects return to pending with a retry deadline one existing
-maximum hold window after claim time. Grok outcome delivery uses the existing
+GitHub-auth recovery, retaining the recorded non-Grok worker class. Subject
+refusals, including after assignment handoffs, stop before spawn with
+`subject-refused`, never quota exhaustion. The stop reason names the
+adversarial-review operator: correct the lane flags or select a different
+family, then explicitly retrigger within the existing round cap. Automatic
+claims cannot re-arm this stop. Grok outcome delivery uses the existing
 Codex commenter token (`GH_CODEX_REVIEWER_TOKEN`); its body retains Grok attribution.
 Unpooled Grok quota holds supply the same job-local reset evidence as other
 remediators, including when fleet quota status is unreadable. Resets beyond
 one hold window try the declared non-Grok fallbacks on the next claim.
-Deploy the paired Agent OS loader/fixture companion and let the submodule
-float through the normal delivery path. GRK-16 activation
-requires that paired deployment; see [GRK-12](changes/GRK-12.md).
+Merge the paired Agent OS Python/shell loader and parity-fixture companion
+**before** the submodule pointer bump; then deploy through the normal delivery
+path. Before restarting the watcher or follow-up daemon, the operator must
+confirm that the effective host config (including `config.local.yaml`) has no
+`roles.merge_agent_worker_class: hammer-grok` pin. Node rejects that pin even
+with both flags on; an old pin would prevent daemon config load. Domain
+primary/fallback closer selectors are validated when loading the domain,
+before polling. GRK-16 activation requires the paired deployment; see
+[GRK-12](changes/GRK-12.md). Live config confirmation and the companion change
+belong to Agent OS; this repository's offline checks do not certify them.
 
 ## Remediation round budgets
 

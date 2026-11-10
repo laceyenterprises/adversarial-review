@@ -1,6 +1,6 @@
 # GRK-12 — Opt-in Grok remediation
 
-## Change notes
+## Summary
 
 Plan `grok-build-harness-v1`. `remediator-grok` is an account-bound HQ lane,
 requiring `grok.enabled`, `grok.remediator.enabled` and an enabled imported
@@ -27,8 +27,9 @@ recognizes Grok job-local quota holds, refuses domain closer selectors, and
 names the actual account-bound lane in dispatch errors.
 
 Reconciliation now preserves the Grok-builder pin exemption for public outcome
-attribution and GitHub-auth recovery. Post-assignment subject refusals have a
-bounded retry deadline anchored to the claim. Grok delivery uses the existing
+attribution and GitHub-auth recovery. Subject refusals before spawn, including
+post-assignment refusals, stop with `subject-refused` and a named operator
+correction/retrigger action instead of a re-arming quota hold. Grok delivery uses the existing
 Codex commenter identity; named Codex and Claude remediator routes map to their
 existing commenters as well. This changes no worker execution entitlement.
 
@@ -44,23 +45,43 @@ unregistered Grok values. Deploy the paired changes before GRK-16 activation;
 source validation does not certify live
 deployment readiness. Keep both default-off flags and the Node refusal in place.
 
-No persistent store shape, lifecycle status, merge permission or smoke promise
-changes. Existing pre-spawn routing, quota fallback and HQ admission apply.
+The existing stop record accepts `subject-refused`; explicit retrigger remains
+subject to the existing cap. No new store field, lifecycle status, merge
+permission or smoke promise is introduced. Existing quota fallback and HQ
+admission apply. Domain closer selections are checked during domain loading,
+before poll phases; the policy resolver retains its defensive validation.
+Pooled fallback provider labels use a frozen map and `unknown` for unregistered
+families, including unpooled fallbacks. Grok commit identity uses the same
+`@laceyenterprises.com` domain as the other remediation workers.
+
+The Agent OS Python/shell loader and parity-fixture companion must merge
+**before the submodule pointer bump**, not merely before GRK-16 activation.
+Before daemon restart, the operator must confirm no effective host/local
+config pins `roles.merge_agent_worker_class: hammer-grok`. These are
+superproject deployment obligations; this patch does not edit Agent OS or
+claim live config confirmation.
 
 ## Verification
 
-Passed offline:
+Final fix-all checks passed offline:
 
-- `node --test --test-name-pattern "reconcile routes" test/follow-up-remediation.test.mjs` (385 tests passed; the file runner executes all tests in this file).
-- `node --test test/grok-remediator.test.mjs test/worker-token-pool.test.mjs test/pr-comments.test.mjs` (73 tests, including reconcile comment/auth recovery, bounded handoff hold and named-route delivery regressions).
-
-- `node --test test/grok-remediator.test.mjs test/grok-builder-routing.test.mjs test/domain-policy.test.mjs test/remediation-worker-class-fallback.test.mjs test/config-loader-grok.test.mjs test/remediatorlane-01-mode-runnable-lane.test.mjs test/follow-up-remediation-quota-hold.test.mjs`
+- `node --test test/grok-remediator.test.mjs test/worker-token-pool.test.mjs test/domain-policy.test.mjs test/domain-registry.test.mjs test/config-loader-grok.test.mjs test/remediation-worker-class-fallback.test.mjs test/follow-up-remediation-quota-hold.test.mjs` (155 passed).
+- `node --test test/worker-token-pool.test.mjs test/arc19-boundary-gate.test.mjs` (74 passed, including both added regressions and the unchanged line ceiling).
+- `node --test --test-name-pattern 'AMA merge_authority public docs' test/config-loader.test.mjs` (passed; the predicate was already limited to the closure runbook).
+- `node scripts/validate-data-model-catalog.mjs` (93 entries validated).
+- `node --test test/smv.test.mjs` (11 passed, including disposable sandbox smoke).
+- Six watcher claim-loop cases passed through `test/run-tests.mjs`, with
+  `NODE_OPTIONS=--test-name-pattern=...` selecting claim CAS, head refresh,
+  moved-head release, same-head deduplication and runtime config recovery.
+  Broader attempts reached their 120/60-second bounds without assertion
+  failures; the sandbox re-exec drops a CLI-only name filter.
 - `npm run lint` (zero errors; existing warnings).
 - `npm run typecheck:contracts`.
 - `bash demo/research-finding-walkthrough.sh` (byte-stable transcript).
 - `git diff --check`.
 
-The follow-up-remediation state projection is unchanged. The full suite runs
+The affected state declarations and source projections describe the
+subject-refused terminal stop and explicit retrigger. The full suite runs
 in PR-head CI; no live rollout or parity acceptance is claimed here.
 
 The touched routing block retains the existing monolith line ceiling by

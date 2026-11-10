@@ -139,7 +139,7 @@ import { OAUTH_ENV_STRIP_LIST } from './secret-source/env.mjs';
 import { cloneRemediationWorkspace } from './remediation-workspace-clone.mjs';
 import { drainRemediationJobs } from './remediation-parallel-drain.mjs';
 import { DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS, REMEDIATION_MAX_CONCURRENT_JOBS_ENV, normalizeMaxConcurrentFollowUpJobs, resolveRemediationMaxConcurrentJobs } from './remediation-concurrency.mjs';
-import { holdClaimedJobForCappedRemediator, holdClaimedJobForRefusedSubject, requeueClaimedFollowUpJobBeforeSpawn, requeueClaimedJobForConflictedBaseProbe } from './remediation-claimed-requeue.mjs';
+import { holdClaimedJobForCappedRemediator, stopClaimedJobForRefusedSubject, requeueClaimedFollowUpJobBeforeSpawn, requeueClaimedJobForConflictedBaseProbe } from './remediation-claimed-requeue.mjs';
 import {
   loadRoleConfig,
   resetRoleConfigCache,
@@ -3315,6 +3315,8 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
     const ownBuilderStop = stopRecoveredBuilderRemediator({
       rootDir, job: claimed.job, jobPath: claimed.jobPath, workerClass, now, log });
     if (ownBuilderStop) return ownBuilderStop;
+    const initialSubjectStop = stopClaimedJobForRefusedSubject({ rootDir, claimed, routing: remediatorRouting, env: jobEnv, now, log });
+    if (initialSubjectStop) return initialSubjectStop;
     if (!remediatorRouting.pooled) {
       jobEnv.CODEX_BROKER_PROVIDER = workerClass === 'remediator-codex-corp' ? 'codex-corp' : 'codex';
     }
@@ -3347,8 +3349,8 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
         rootDir, job: claimed.job, jobPath: claimed.jobPath, workerClass, now, log });
       if (ownBuilderStop) return ownBuilderStop;
     }
-    const subjectHold = holdClaimedJobForRefusedSubject({ rootDir, claimed, routing: remediatorRouting, env: jobEnv, delayedPendingPaths, log });
-    if (subjectHold) return subjectHold;
+    const subjectStop = stopClaimedJobForRefusedSubject({ rootDir, claimed, routing: remediatorRouting, env: jobEnv, now, log });
+    if (subjectStop) return subjectStop;
     if (remediatorRouting.pooled || !['codex', 'remediator-codex', 'remediator-codex-corp'].includes(workerClass)) {
       delete jobEnv.CODEX_BROKER_PROVIDER;
     }

@@ -1549,6 +1549,9 @@ missing or conflicting evidence transitions the claimed job to `stopped`, with a
 operator owner and escalation/retrigger action in its stop receipt and output.
 Recovered jobs retain the cross-family remediation requirement. The existing
 explicit retrigger transition resumes these stops after evidence correction.
+Grok subject-policy refusals before spawn, including after assignment, also
+transition to `stopped` with `subject-refused` and an operator correction/retrigger
+action under the existing cap; they create no quota hold or automatic retry.
 The [follow-up job model](docs/data-model/follow-up-jobs.md) describes the receipt;
 deployed smoke commands are unchanged.
 
@@ -3072,7 +3075,7 @@ stateDiagram-v2
     s0 --> s5: follow-up-job.05 operator cancellation
     s1 --> s2: follow-up-job.06 validated worker reply; proven publication precedes infrastructure hold and legacy published wait completes on green
     s1 --> s3: follow-up-job.07 worker failure
-    s1 --> s4: follow-up-job.08 lifecycle, budget or committed-unpublished stop
+    s1 --> s4: follow-up-job.08 lifecycle, budget, subject-refused before spawn or committed-unpublished stop
     s1 --> s5: follow-up-job.09 operator cancellation
     s1 --> s0: follow-up-job.10 transient retry, unpublished infrastructure-only CI recovery or orchestration-mode refusal hold without round charge
     s2 --> s0: follow-up-job.11 next round unless comment-only final hammer handoff

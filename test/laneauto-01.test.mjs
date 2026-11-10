@@ -129,6 +129,23 @@ test('terminal receipt deduplicates a review edit at the same head without remot
   assert.equal(result.action, 'fallback');
 });
 
+test('archived stopped fix-all receipt falls back without remote reads or another enqueue', async t => {
+  const f = fixture(t);
+  await handoffFinalFixAll({ ...f.identity, reviewBody: BODY, execFileImpl: f.execFileImpl });
+  const [{ job }] = listFollowUpJobsInDir(f.rootDir, 'pending');
+  const pendingPath = join(getFollowUpJobDir(f.rootDir, 'pending'), `${job.jobId}.json`);
+  writeFileSync(pendingPath, JSON.stringify({ ...job, status: 'stopped', stoppedAt: AT }));
+  const archiveDir = join(getFollowUpJobDir(f.rootDir, 'stoppedArchived'), '2026-01');
+  mkdirSync(archiveDir, { recursive: true });
+  renameSync(pendingPath, join(archiveDir, `${job.jobId}.json`));
+  const result = await handoffFinalFixAll({ ...f.identity, reviewBody: BODY + '\nEdited.',
+    execFileImpl: () => assert.fail('archived receipt must precede remote reads'),
+    createJobImpl: () => assert.fail('archived receipt must prevent another enqueue') });
+  assert.deepEqual(result, { action: 'fallback' });
+  assert.equal(finalFixAllQueueOwner(f.rootDir, f.identity), null);
+  assert.equal(listFollowUpJobsInDir(f.rootDir, 'pending').length, 0);
+});
+
 test('live closer and PR dispatch lock each prevent fix-all enqueue', async t => {
   const f = fixture(t);
   const release = tryAcquireCloserIntentLock(f.rootDir, f.identity);
@@ -179,12 +196,13 @@ test('a moved or closed live head cannot enqueue the stale review', async t => {
   assert.equal(listFollowUpJobsInDir(f.rootDir, 'pending').length, 0);
 });
 
-for (const mode of ['not-final', 'disabled', 'stale-review', 'conflict']) test(`fix-all preserves ${mode} routing`, async t => {
+for (const mode of ['not-final', 'disabled', 'stale-review', 'conflict', 'dirty']) test(`fix-all preserves ${mode} routing`, async t => {
   const f = fixture(t);
   if (mode === 'not-final') f.args.dispatchJob = {};
   if (mode === 'disabled') f.args.loadConfigImpl = () => ({ getMergeAuthorityConfig: () => ({ enabled: true, autonomousMergeExecutionEnabled: false }) });
   if (mode === 'stale-review') f.args.candidate.headSha = NEXT;
   if (mode === 'conflict') { f.args.candidate.mergeable = 'CONFLICTING'; f.args.candidate.mergeStateStatus = 'DIRTY'; }
+  if (mode === 'dirty') f.args.candidate.mergeStateStatus = 'DIRTY';
   f.args.handoffFinalFixAllImpl = () => assert.fail('ineligible review cannot enter fix-all');
   await maybeDispatchAmaClosureFor(f.args);
   assert.equal(listFollowUpJobsInDir(f.rootDir, 'pending').length, 0);

@@ -38,8 +38,7 @@
         "src/ama/conflict-primary-handoff.mjs",
         "src/ama/hammer-stop-hold.mjs",
         "src/pr-next-action.mjs",
-        "src/remediation-prompt-builder.mjs",
-        "src/ama/final-fix-all.mjs"
+        "src/remediation-prompt-builder.mjs"
       ],
       "owner": "follow-up remediation queue",
       "conflictPrimaryHandoff": {
@@ -72,14 +71,6 @@
         "deduplication": "existing cross-process review claim keyed by PR/head/reason across every queue status and archived stops",
         "pendingOwner": "remediate/remediator, normal admission deadline; no closer replay",
         "closeout": "fullReviewRequired retains normal review intent at the final allowed push; no suppressed finalPush shortcut"
-      },
-      "finalFixAllHandoff": {
-        "optionalField": "closureHandoff",
-        "reason": "final-fix-all",
-        "triggerType": "final-round-review",
-        "review": "full",
-        "maxRounds": 1,
-        "deduplication": "repo/pr/source head/reason across active, terminal and archived receipts; publication head falls back after re-review"
       }
     }
   ]

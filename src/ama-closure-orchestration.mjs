@@ -1902,8 +1902,7 @@ async function dispatchAmaClosureFor({
     && reviewState.blockingFindingState === 'known' && reviewState.blockingFindingCount === 0
     && reviewState.nonBlockingFindingState === 'known' && reviewState.nonBlockingFindingCount > 0
     && shared.decision.action === 'hammer' && shared.decision.reason !== 'automated-stop'
-    && !['R05-structural', 'R10-conflict'].includes(shared.decision.row)
-    && prMetadata.mergeableState !== 'CONFLICTING') {
+    && !['R05-structural', 'R10-conflict'].includes(shared.decision.row)) {
     let fixAll;
     try {
       fixAll = await handoffFinalFixAllImpl({ rootDir, repo: repoPath, prNumber,

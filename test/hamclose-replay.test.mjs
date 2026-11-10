@@ -3,11 +3,12 @@ import { watcherTick } from './helpers/smv-watcher.mjs';
 import { collect } from './helpers/hamclose-history.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { checkPrimaryChange } from '../src/ama/primary-change.mjs';
-import { createFollowUpJob } from '../src/follow-up-jobs.mjs';
+import { createFollowUpJob, getFollowUpJobDir, listFollowUpJobsInDir } from '../src/follow-up-jobs.mjs';
+import { handoffFinalFixAll } from '../src/ama/final-fix-all.mjs';
 import { consumeFollowUpJobsUntilCapacity } from '../src/follow-up-remediation.mjs';
 import { acquireAmaCloserLease, updateAmaCloserLease, rekeyAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { amaCloserDispatchFilePath, maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
@@ -228,7 +229,7 @@ test('ceiling routing preserves generic failures and logs every admitted transit
   assert.equal(logs.length, 1); assert.equal(logs[0].priorStatus, 'failed');
 });
 
-for (const findings of [false, true]) test(`HAMCLOSE-04 handed-off review closes with findings=${findings}`, async t => {
+for (const findings of [false, true]) test(`HAMCLOSE-04 handed-off review closes with findings=${findings} after any final fix-all`, async t => {
   const rootDir = root(t), headSha = 'b'.repeat(40), prNumber = 30;
   const identity = { rootDir, repo, prNumber, headSha };
   acquireAmaCloserLease(identity);
@@ -237,6 +238,11 @@ for (const findings of [false, true]) test(`HAMCLOSE-04 handed-off review closes
   let hammers = 0;
   const args = { ...identity, evidence: { headSha, hasHammerCommits: false }, store, findings,
     row: { review_status: 'posted', reviewer_head_sha: headSha, reviewer: 'gemini', review_body: findings ? findingsBody : cleanBody },
+    handoffFinalFixAllImpl: params => handoffFinalFixAll({ ...params,
+      execFileImpl: async (_bin, args) => ({ stdout: JSON.stringify(args[0] === 'api' ? [[]] : {
+        state: 'OPEN', headRefOid: headSha, headRefName: 'fixture/remediation', baseRefName: 'main',
+        title: '[codex] HAMCLOSE replay', reviews: [], comments: [],
+      }) }) }),
     closerImpl: async () => {
       if (!acquireAmaCloserLease({ ...identity, fromReviewHandoff: true }).acquired)
         return { dispatched: false, reason: 'lease-held' };
@@ -246,6 +252,18 @@ for (const findings of [false, true]) test(`HAMCLOSE-04 handed-off review closes
     } };
   await watcherTick(args);
   assert.equal(store.merged, !findings, JSON.stringify(store));
+  if (findings) {
+    assert.equal(hammers, 0);
+    assert.equal(store.lastClosure.reason, 'final-fix-all-builder-remediation');
+    const [{ job, jobPath }] = listFollowUpJobsInDir(rootDir, 'pending');
+    assert.equal(job.closureHandoff.reason, 'final-fix-all');
+    writeFileSync(jobPath, JSON.stringify({ ...job, status: 'stopped', stoppedAt: new Date().toISOString() }));
+    const stoppedDir = getFollowUpJobDir(rootDir, 'stopped');
+    mkdirSync(stoppedDir, { recursive: true });
+    renameSync(jobPath, join(stoppedDir, `${job.jobId}.json`));
+    await watcherTick(args);
+    assert.equal(listFollowUpJobsInDir(rootDir, 'pending').length, 0);
+  }
   assert.equal(hammers, findings ? 1 : 0, JSON.stringify(store));
   await watcherTick(args);
   assert.equal(hammers, findings ? 1 : 0);

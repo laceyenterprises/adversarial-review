@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { loadConfig } from '../src/config-loader.mjs';
 import test from 'node:test';
 
-test('independent grader budget and arm declarations are closed and opt-in', () => {
+test('independent grader schema declares strict keys, budget defaults and opt-in arms', () => {
   const schema = JSON.parse(readFileSync(new URL('../src/osg-config-schema.v1.json', import.meta.url)));
   const grader = schema.__keys.rgy.__keys.grader;
   assert.equal(grader.__strict, true);
@@ -33,7 +33,7 @@ test('grader config is accepted and negative budget rejected by Node reader', ()
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('grader arms round-trip through the loader and reject invalid or unknown attributes', () => {
+test('grader arms validate supplied fields and reserved keys while tolerating ordinary unknown keys', () => {
   const dir = mkdtempSync(join(tmpdir(), 'rgy-arms-'));
   const topPath = join(dir, 'config.yaml');
   const arm = { name: 'independent', worker_class: 'codex', harness: 'codex',

@@ -1,4 +1,45 @@
+## Final findings remediation through the builder (LANEAUTO-01)
+
+At the final review-round cap, a latest exact-head Comment-only review with
+known zero blocking findings and remaining non-blocking or demoted findings
+gets one builder **final fix-all** work order before findings closure. The
+existing follow-up queue and builder-tag worker sync with main, address every
+finding and the PR's own red checks, validate and push. The work order uses
+`closureHandoff.reason: final-fix-all`, `review: full` and the existing statuses.
+It is claimable for exactly one round, independently of the spent ordinary
+finding-round budget. Pending admission remains remediator-owned beyond the
+ordinary pending-liveness grace; the PR closer-intent lock serializes enqueue
+with closer admission, including rescue. Live closer or remediation custody
+prevents a second owner.
+
+A receipt deduplicates the source head even after terminal settlement or
+archival. Its published head must receive a fresh full review; this round
+never uses the suppressed final-push shortcut. If that review still has
+findings, the configured hammer/operator fallback owns closure. A zero-finding
+exact-head re-review takes the ordinary daemon path, with every existing merge
+predicate, attestation and lease check. Conflicts and CI-only repair retain
+their hammer routes. Blocking reviews retain their existing behavior. Strict
+mode, finding content, head matching, merge authority and leases are unchanged.
+
+After both PRs land, SRE lets the submodule float through main-catchup and
+restarts the registered watcher and follow-up services through the deployment
+procedure. On natural traffic, retain receipts showing (1) a newly final-round
+eligible head queued as `final-fix-all`, (2) no concurrent closer, (3) a pushed
+head with a fresh full review, (4) daemon merge after a zero-finding exact-head
+review, or the configured fallback if findings remain. Compare merges per hour
+and the closer `failed-without-merge` share with the pre-deployment window:
+acceptance requires merges rising and the closer failure share falling.
+No source fixture proves these production outcomes. No migration, new check,
+label or live action is part of the worker change. Operator steps are declared
+in `modules/worker-pool/post-merge-actions/LANEAUTO-01.yaml`.
+
 ## Terminal audit review currency (HAMLATEAUDIT-01)
+
+Terminal launch and lease observations are retained in the
+[append-only closer outcome journal](data-model/ama-closer-outcomes.md).
+Consumers must join these observations by launch identity: successful process
+exit alone never proves merge. Journal failures emit a local diagnostic and
+leave existing closure and paging decisions unchanged.
 
 A validated head alone does not prove that a later review was considered.
 The hammer's initial predicate and final live gate compare each authoritative
@@ -317,6 +358,27 @@ forced launch, ledger mutation or new smoke step is authorized by this change.
 # RUNBOOK — AMA closure pipeline
 
 ## Change notes
+
+- **HAMEDITPLAN-04:** An otherwise admissible `author-lines` plan outside the
+  cited finding's ranges receives exit 21 with those ranges and re-planning
+  guidance. It never permits the uncovered edit; exit 1 remains terminal.
+- **HAMEDITPLAN-03:** A cited non-blocking `in-place` plan is a correctable
+  shape error (exit 21). Re-plan as `additive`; in-place permission is unchanged.
+
+- **HAMEDITPLAN-02:** The edit-plan CLI fills omitted, non-string or empty
+  `reviewedHead` from the run's pinned SHA. Explicit heads must match the cited
+  review's `commit_id`, including citations from another reviewed head.
+  `--help` and `-h` print accepted shapes and exit 0 without checking a plan.
+
+- **HAMCONFLICTOWNER-01:** A current-head `conflict-primary-unproven` closer
+  audit hands the PR to the existing builder-tag-routed remediation queue,
+  before closer cap or retry selection. The job durably names its PR, head,
+  `closureHandoff.reason` and `jobId`; pending work owns the next action.
+  Its work order resolves the conflict preserving both sides, addresses open
+  findings and pushes a head for normal full review. Repeated stops reuse the
+  job across terminal settlement and archival. Unavailable provenance keeps
+  the handoff pending for another watcher pass. `conflict-primary-timeout`
+  retains its existing retry behavior; an unproven replay cannot publish.
 
 - **HAMGITTOKEN-01:** Refresh-on-request Git authentication replaces the
   startup-token helper. A failed mint produces the existing retryable
@@ -4805,8 +4867,25 @@ A blocking finding may authorize a specific reversal. A non-blocking finding may
 also authorize one only when the effective `strict_non_blocking_remediation` policy
 is enabled; advisory findings in non-strict mode cannot waive preservation.
 Before changing author-introduced lines, the hammer runs
-`bin/hammer-edit-plan.mjs OWNER/REPO PR REVIEW_ID PLAN_JSON`. The JSON plan names
-`reviewedHead`, `editKind` (`author-lines`, `additive` or `in-place`), and the
+`bin/hammer-edit-plan.mjs OWNER/REPO PR REVIEW_ID PLAN_JSON --reviewed-head SHA`.
+The prompt substitutes the controller-pinned `<<REVIEWED_SHA>>` in the option,
+including when running as the database owner. Literal plan examples omit the
+optional head; for a cited review on another head, supply that review's
+`commit_id` as `reviewedHead`.
+Without that option the CLI reads `HAM_REVIEWED_SHA`; a missing or invalid pin
+refuses with `review-evidence-invalid` before reading or parsing the plan file.
+Omitted, non-string or empty (including
+whitespace-only) plan `reviewedHead` values are filled from the pin in memory.
+A nonempty string must be a valid 40-hex SHA; the CLI normalizes it to lowercase
+before passing it to the checker, even when it differs from the pin. Malformed
+nonempty strings refuse rather than falling back. The authoritative reviewer
+login, review state and review `commit_id` matching the resolved plan head remain
+mandatory. An omitted head therefore works only for a review on the pinned head.
+`--help` and `-h` print usage and accepted shapes with exit 0 and perform no plan
+check, review read, policy read or backlog capture. Real helper failures retain
+their existing outcomes. Help is handled at the CLI entry point, separately
+from the plan-check exit-code mapping.
+The JSON plan names `editKind` (`author-lines`, `additive` or `in-place`), and the
 affected `path`, `startLine`, `endLine` in reviewed coordinates. Cited plans also
 name `kind` and one-based `findingNumber`. An uncited in-place CI test repair
 instead supplies `requiredCiRepair: true` and omits both citation fields. Other edit kinds receive in-place-only correction feedback. Cited plans reject `requiredCiRepair: true` for every edit kind, preserving applicable policy refusals.
@@ -4818,8 +4897,19 @@ with the primary-change gate. Exit 21 is a shape-only refusal with an expected-s
 correct the plan once and rerun the helper. The prompt permits one correction
 per run across all plans; a second shape refusal exits 1. Exit 21 here is never
 a verify-head or wait-CI conflict. The first shape refusal exits the shell block
-without editing. Cited in-place CI plans retain their citations and are evaluated for
+without editing. A valid cited non-blocking `in-place` plan receives exit 21 with
+`correctable: allowed editKinds for kind=non-blocking are additive|author-lines (author-lines only where checkReversalFinding authorizes)`.
+Re-plan as `additive`; this grants no in-place permission, even in strict mode
+or with `requiredCiRepair`. Missing or invalid finding citations remain terminal.
+Blocking cited in-place CI plans retain their citations and are evaluated for
 policy and readable finding evidence before shape correction.
+An otherwise well-formed, authorized `author-lines` plan outside the cited
+finding's ranges receives exit 21 with
+`correctable: plan region <path>:<start>-<end> is outside the cited finding's ranges <list>; re-plan within a cited range, or as editKind=additive if no existing author line is removed or replaced`.
+The list includes each cited path and range for that finding. Re-plan within
+one cited range or use a genuinely additive fix within the same correction
+budget. The uncovered author-line edit is never allowed. Missing authority,
+unreadable finding ranges and other policy refusals retain their outcomes.
 Review evidence and policy refusals retain their terminal or deferring outcomes.
 Exit 0 allows the planned edit; exit 20 means no edit:
 the shell prints NO EDIT and exits 20; the advisory finding was captured in the existing findings backlog with a one-line
@@ -8416,11 +8506,12 @@ receipt. No worker label change, service action or forced dispatch is needed.
 ## R07 stop supersession (STOPSTALE-02)
 
 `src/pr-next-action.mjs` routes deterministic automated stops, retry-exhausted,
-lifetime-exhausted and hammer-final-no-merge through one supersession helper.
+lifetime-exhausted, hammer-final-no-merge and R08 terminal no-merge with
+retries remaining through one supersession helper.
 A strictly newer exact-head review must be merge-eligible under the current
 strict-mode policy. Normal row selection then runs with hammer history set
 aside, accepting only `daemon-merge` / `daemon`; any other result retains the
-original R07 reason, attempt and recovery ownership. Decision refs include
+original stop or retry reason, attempt and ownership. Decision refs include
 `stop-superseded-by-exact-head-review` and `stop-reason:<original reason>`.
 
 Freshness is anchored to durable evidence: `controls.stop.recordedAt`, an
@@ -8431,6 +8522,10 @@ not change ledger storage. Missing, invalid or non-earlier times fail closed.
 An observation clock or a repeatedly updated ledger timestamp grants no escape.
 Caps remain binding for hammer dispatch; selection neither resets nor refunds
 any budget. Automated hold labels and earlier safety/ownership rows still win.
+An exact-head clean review after a terminal tooling stop can therefore return
+to the daemon without another hammer run. The daemon still reads the live
+head, required checks, primary-change evidence and attestation, and acquires
+the shared merge lease. A strict-mode non-blocking finding cannot use this path.
 
 STOPSTALE-03 preserves `alertedAt` when an alert repeats during the same
 lifetime suppression, including across reviewed-head changes. Series and target

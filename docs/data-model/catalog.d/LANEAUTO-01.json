@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "follow-up-jobs",
+      "title": "Follow-Up Remediation Jobs",
+      "path": "docs/data-model/follow-up-jobs.md",
+      "store": "data/follow-up-jobs/{pending,in-progress,completed,failed,stopped,single-review-voids,missing-label-events}/*.json",
+      "schemaSurface": "src/follow-up-jobs.mjs",
+      "relatedSchemaSurfaces": [
+        "src/ama/final-fix-all.mjs",
+        "src/ama/conflict-primary-handoff.mjs",
+        "src/ama-closure-orchestration.mjs"
+      ],
+      "owner": "follow-up remediation queue",
+      "finalFixAllHandoff": {
+        "optionalField": "closureHandoff",
+        "reason": "final-fix-all",
+        "triggerType": "final-round-review",
+        "review": "full",
+        "maxRounds": 1,
+        "deduplication": "repo/pr/source head/reason across active, terminal and archived receipts; publication head falls back after re-review"
+      }
+    }
+  ]
+}

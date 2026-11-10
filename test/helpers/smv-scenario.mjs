@@ -1,7 +1,7 @@
 // Child of smv-smoke: only synthetic records and file-protocol Git are permitted.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import os, { userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 import net from 'node:net';
@@ -594,6 +594,27 @@ if (scenario === 'clean') {
   assert.equal(claim().changes, 1);
   assert.equal(prepareMarkPosted(db).run('2026-01-01', headSha, repo, prNumber, 'synthetic-claim', headSha).changes, 1);
   db.close();
+  // LANEAUTO-01: routine final findings first get exactly one builder work
+  // order. A terminal no-progress receipt then permits the existing fallback
+  // exercised below. All GitHub reads remain synthetic boundaries.
+  const { handoffFinalFixAll } = await import('../../src/ama/final-fix-all.mjs');
+  let fixAll;
+  await tick({ findings: true, closerImpl: refuse,
+    handoffFinalFixAllImpl: args => handoffFinalFixAll({ ...args,
+      execFileImpl: async (_command, argv) => ({ stdout: JSON.stringify(argv[0] === 'api' ? [[]] : {
+        state: 'OPEN', headRefOid: headSha, headRefName: 'synthetic', baseRefName: 'main',
+        title: '[codex] Synthetic builder change', reviews: [], comments: [],
+      }) }),
+      createJobImpl: input => (fixAll = createFollowUpJob(input)),
+    }) });
+  assert.equal(store.lastClosure.reason, 'final-fix-all-builder-remediation');
+  assert.equal(store.lastClosure.nextAction.actor, 'remediator');
+  assert.equal(fixAll.job.remediationPlan.maxRounds, 1);
+  assert.equal(fixAll.job.finalRound, undefined);
+  const completedFixAll = join(rootDir, 'data', 'follow-up-jobs', 'completed', `${fixAll.job.jobId}.json`);
+  mkdirSync(dirname(completedFixAll), { recursive: true });
+  writeFollowUpJob(fixAll.jobPath, { ...fixAll.job, status: 'completed' });
+  renameSync(fixAll.jobPath, completedFixAll);
   // A finding routes through the watcher/closure hub to the fake hammer boundary.
   let hammers = 0;
   await tick({ findings: true, closerImpl: async () => {
@@ -1062,7 +1083,7 @@ if (scenario === 'clean') {
   assert.equal(existsSync(cursorTrees[0]), true);
   assert.equal(existsSync(cursorTrees[2]), false);
   assert.deepEqual(visits.slice(0, 3), ['synthetic-cursor-0', 'synthetic-cursor-1', 'synthetic-cursor-2']);
-  evidence = { hammers, cleanBranchHoldSettled: true, unchangedHeadHasNoPublicationDebt: true, nullHeadConfirmed: true, unknownBranchRetryRecovered: true, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, scratchCursorResumed: true, scratchLedgerClockIndependent: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, hammerRangeValidated: true, noHammerReviewRequest: true, claimPreserved: true, reviewedHeadRecorded: true,
+  evidence = { hammers, finalFixAllQueuedBeforeHammer: true, finalFixAllTerminalFallback: true, cleanBranchHoldSettled: true, unchangedHeadHasNoPublicationDebt: true, nullHeadConfirmed: true, unknownBranchRetryRecovered: true, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, scratchCursorResumed: true, scratchLedgerClockIndependent: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, hammerRangeValidated: true, noHammerReviewRequest: true, claimPreserved: true, reviewedHeadRecorded: true,
     headlessPostRequeuedOnce: true, terminalRetryable: true, terminalCapacityFreed: true, terminalNoMergeReclaimedSamePass: true,
     autoMergeHeld: true, autoMergeBoundReleased: true, unreadableCapacityReserved: true,
     wakeRearmed: true, expiredWakeRearmed: true, missingHeadAlertDeduplicated: true,

@@ -56,7 +56,7 @@ test('advisory author-line edit is deferred durably through the backlog with no 
   const before = readFileSync(authorFile, 'utf8');
   for (let attempt = 0; attempt < 2; attempt++) {
     const result = await main([repo, '7', '1', planFile], {
-      rootDir, readReviewImpl: async () => review,
+      rootDir, env: { HAM_REVIEWED_SHA: head }, readReviewImpl: async () => review,
       loadPolicy: () => ({ strictNonBlockingRemediation: false }),
     });
     assert.equal(result.action, 'defer');
@@ -97,14 +97,14 @@ test('in-place CI and blocking repairs do not require reversal coverage', () => 
   const blocking = historyReview();
   assert.equal(checkHammerEditPlan(blocking, { ...plan, reviewedHead: blocking.commit_id,
     editKind: 'in-place', kind: 'blocking', startLine: 45, endLine: 45 }).action, 'allow');
-  assert.equal(checkHammerEditPlan(review, { ...plan, editKind: 'in-place' }).action, 'defer');
+  assert.equal(checkHammerEditPlan(review, { ...plan, editKind: 'in-place' }).action, 'correct');
 });
 
 test('advisory additive test is allowed and does not defer the finding', async t => {
   const { rootDir, db, planFile } = fixture(t);
   writeFileSync(planFile, JSON.stringify({ ...plan, editKind: 'additive', path: 'test/router.test.mjs' }));
   const result = await main([repo, '7', '1', planFile], {
-    rootDir, readReviewImpl: async () => review,
+    rootDir, env: { HAM_REVIEWED_SHA: head }, readReviewImpl: async () => review,
     loadPolicy: () => ({ strictNonBlockingRemediation: false }),
   });
   assert.equal(result.action, 'allow');
@@ -135,11 +135,12 @@ test('untrusted, stale, malformed and uncovered evidence never permits an author
     [{ ...review, user: { login: 'synthetic-author' } }, plan],
     [review, { ...plan, kind: 'unknown' }],
     [review, { ...plan, findingNumber: 2 }],
-    [review, { ...plan, endLine: 3 }],
-    [review, { ...plan, path: 'src/other.mjs' }],
     [{ ...review, body: body.replace('**Lines:** 2', '**Lines:** unknown') }, plan],
   ]) {
     assert.equal(checkHammerEditPlan(candidate, edit, { strictNonBlockingRemediation: true }).action, 'stop');
+  }
+  for (const edit of [{ ...plan, endLine: 3 }, { ...plan, path: 'src/other.mjs' }]) {
+    assert.equal(checkHammerEditPlan(review, edit, { strictNonBlockingRemediation: true }).action, 'correct');
   }
 });
 
@@ -147,7 +148,7 @@ test('failed or stale backlog capture cannot return a successful deferral receip
   const { rootDir, db, planFile } = fixture(t);
   db.prepare("UPDATE reviewer_passes SET head_sha=?").run('b'.repeat(40));
   await assert.rejects(main([repo, '7', '1', planFile], {
-    rootDir, readReviewImpl: async () => review,
+    rootDir, env: { HAM_REVIEWED_SHA: head }, readReviewImpl: async () => review,
     loadPolicy: () => ({ strictNonBlockingRemediation: false }),
   }), /findings-capture-not-current/);
   assert.equal(db.prepare('SELECT count(*) n FROM finding_backlog').get().n, 0);
@@ -157,7 +158,7 @@ test('owner mismatch refuses deferral before any database write', async t => {
   const { rootDir, db, planFile } = fixture(t);
   let captured = false;
   await assert.rejects(main([repo, '7', '1', planFile], {
-    rootDir, readReviewImpl: async () => review,
+    rootDir, env: { HAM_REVIEWED_SHA: head }, readReviewImpl: async () => review,
     loadPolicy: () => ({ strictNonBlockingRemediation: false }),
     assertOwner: (root) => assertFindingDisputeOwner(root, {
       geteuidImpl: () => process.geteuid() + 1,
@@ -174,7 +175,7 @@ test('unknown canonical findings refuse deferral before capture', async t => {
   const malformed = { ...review, body: body.replace('**Keep routing simple**', '**<title>**')
     .replace('`src/router.mjs`', '`<path>`') };
   await assert.rejects(main([repo, '7', '1', planFile], {
-    rootDir, readReviewImpl: async () => malformed,
+    rootDir, env: { HAM_REVIEWED_SHA: head }, readReviewImpl: async () => malformed,
     loadPolicy: () => ({ strictNonBlockingRemediation: false }),
     captureImpl: () => { captured = true; },
   }), /non-blocking-findings-unknown/);
@@ -183,7 +184,7 @@ test('unknown canonical findings refuse deferral before capture', async t => {
 
 test('duplicate captured passes reuse the existing pending content identity', async t => {
   const { rootDir, db, planFile } = fixture(t);
-  const dependencies = { rootDir, readReviewImpl: async () => review,
+  const dependencies = { rootDir, env: { HAM_REVIEWED_SHA: head }, readReviewImpl: async () => review,
     loadPolicy: () => ({ strictNonBlockingRemediation: false }) };
   await main([repo, '7', '1', planFile], dependencies);
   const key = { repo, prNumber: 7, attemptNumber: 2, passKind: 'rereview' };

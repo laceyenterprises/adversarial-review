@@ -165,6 +165,11 @@ function remediationFacts(remediation) {
     roundsLeft: remediation.state === 'complete' ? roundsLeft : null,
     nextRound: completed !== null ? completed + 1 : null,
     jobStatus: lower(job?.status) || null,
+    builderHandoff: remediation.state === 'complete'
+      && ['conflict-primary-unproven', 'final-fix-all'].includes(job?.closureHandoff?.reason)
+      && sameHead(lower(job.closureHandoff.headSha), lower(job?.headSha)),
+    handoffReason: job?.closureHandoff?.reason,
+    jobId: text(job?.jobId) || null,
     // Remediation observations belong to this PR; a head move or retrigger
     // with no revision does not release its live worker's ownership.
     jobLive: remediation.state === 'complete'
@@ -373,6 +378,17 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
   // requires a readable execution switch; absence is not implicit enablement.
   if (policy?.autonomousMergeExecutionEnabled !== true) return refresh('policy-unknown');
 
+  // Queue ownership survives admission delay and spent review rounds. A fresh
+  // builder head, rather than another closer replay, resolves this work order.
+  // Live closer/reviewer custody and unreadable ownership still fence admission.
+  if (remediation.builderHandoff && sameHead(lower(remediation.jobHead), lower(head))
+    && remediation.jobStatus === 'pending') {
+    return { row: 'R14-findings', action: 'remediate', actor: 'remediator',
+      reason: remediation.handoffReason, deadlineKind: 'admission',
+      queue: 'dispatch', round: remediation.nextRound,
+      refs: [`remediation:${remediation.jobId}`] };
+  }
+
   // R05: existing structural restriction recovery (empty-diff closure and the
   // primary-change preservation gate) and deterministic safety refusals.
   if (progress?.diffEmpty === true) {
@@ -426,7 +442,7 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
       refs: [`receipt:${lower(receipt.path) || 'unknown-path'}`] };
   }
 
-  // R07 variants share one daemon-only supersession path. The recursive
+  // R07 stops and R08 terminal retries share one daemon-only supersession path. The recursive
   // selection sets aside hammer history, never refunds it or admits dispatch.
   const stopped = (row, recordedMs, forHead = true) => {
     const notFired = reason => ({ ...row,
@@ -518,8 +534,8 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
   const terminalRecoveryExpired = facts.recoveryExpired && leaseForHead && lease.status === 'terminal';
   if (!daemonAfterSupersededStop && launchForHead && launch.owned === false && launch.outcome === 'no-merge' && launch.retryable === true
     && (!terminalHead || terminalRecoveryExpired)) {
-    return { row: 'R08-retry', action: 'hammer', actor: 'hammer', reason: 'retry-no-merge', deadlineKind: 'admission',
-      queue: 'dispatch', attempt: launch.attempt !== null ? launch.attempt + 1 : null };
+    return stopped({ row: 'R08-retry', action: 'hammer', actor: 'hammer', reason: 'retry-no-merge', deadlineKind: 'admission',
+      queue: 'dispatch', attempt: launch.attempt !== null ? launch.attempt + 1 : null }, launch.terminalMs);
   }
 
   // A label-only review has no remediation actor to admit. Preserve established

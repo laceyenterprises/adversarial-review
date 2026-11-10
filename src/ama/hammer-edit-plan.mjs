@@ -5,8 +5,8 @@ import { checkReversalFinding } from './reversal-finding.mjs';
 
 export function checkHammerEditPlan(review, plan, { strictNonBlockingRemediation = false } = {}) {
   const refuse = reason => ({ action: 'stop', reason });
-  const correct = (reason, expectedShape) => ({ action: 'correct', reason,
-    message: `Do not edit. Correct the plan once: ${expectedShape}` });
+  const correct = (reason, expectedShape, prefix = 'Do not edit. Correct the plan once: ') => ({
+    action: 'correct', reason, message: `${prefix}${expectedShape}` });
   const locationValid = () => typeof plan.path === 'string' && plan.path.trim()
     && Number.isSafeInteger(plan.startLine) && Number.isSafeInteger(plan.endLine)
     && plan.startLine >= 1 && plan.endLine >= plan.startLine;
@@ -37,6 +37,11 @@ export function checkHammerEditPlan(review, plan, { strictNonBlockingRemediation
   if (!['author-lines', 'additive', 'in-place'].includes(plan.editKind)) {
     return correct('edit-kind-invalid', 'editKind must be author-lines, additive or in-place.');
   }
+  if (plan.kind === 'non-blocking' && plan.editKind === 'in-place') {
+    return correct('edit-kind-invalid',
+      'allowed editKinds for kind=non-blocking are additive|author-lines (author-lines only where checkReversalFinding authorizes)',
+      'correctable: ');
+  }
   const admissible = checkReversalFinding(parsed, plan.kind, plan.findingNumber, strictNonBlockingRemediation);
   if (plan.editKind !== 'additive' && !admissible.ok) {
     return { action: plan.kind === 'non-blocking' && admissible.reason === 'finding-kind-not-authorizing'
@@ -47,6 +52,7 @@ export function checkHammerEditPlan(review, plan, { strictNonBlockingRemediation
   // Additive means no existing author line is removed, replaced or neutralized.
   if (plan.editKind === 'additive') return { action: 'allow', reason: 'additive-fix' };
   if (plan.editKind === 'in-place') {
+    // Redundant today: retain this safety check against future dispatch changes.
     if (plan.kind !== 'blocking') return refuse('edit-kind-invalid');
     if (!locationValid()) return correct('edit-location-invalid',
       'supply a nonempty path and integer reviewed coordinates 1 <= startLine <= endLine.');
@@ -56,7 +62,11 @@ export function checkHammerEditPlan(review, plan, { strictNonBlockingRemediation
     'supply a nonempty path and integer reviewed coordinates 1 <= startLine <= endLine.');
   if (!admissible.locations.some(location => location.path === plan.path
       && location.ranges.some(range => range.start <= plan.startLine && range.end >= plan.endLine))) {
-    return refuse('not-covered-by-cited-finding');
+    const ranges = admissible.locations.flatMap(location => location.ranges.map(range =>
+      `${location.path}:${range.start}-${range.end}`)).join(', ');
+    return correct('not-covered-by-cited-finding',
+      `plan region ${plan.path}:${plan.startLine}-${plan.endLine} is outside the cited finding's ranges ${ranges}; re-plan within a cited range, or as editKind=additive if no existing author line is removed or replaced`,
+      'correctable: ');
   }
   return { action: 'allow', reason: 'finding-authorizes-planned-region' };
 }

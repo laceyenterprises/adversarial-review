@@ -361,26 +361,38 @@ the path in PRs. For guards, restore to base, require a passing check and audit
 IDs/SHAs. Preserve regions during CI fixes. Returning to base or restoring removals
 is a reversion. Check intent and bypasses separately.
 
-Before editing any author-introduced line, run this bounded helper with live reviewed coordinates.
+Before editing any author-introduced line, run this bounded helper.
+Use reviewed coordinates and one-based findings.
 In-place preserves behavior; additive preserves code.
-
-Plans name `reviewedHead`, reviewed `path`, `startLine`, `endLine`, and
-`editKind` (`author-lines`, `in-place`, `additive`). Cited findings require
-`kind` and one-based `findingNumber`. Uncited CI repair requires `in-place`
-and `requiredCiRepair: true`, omitting both citation fields; cited plans omit
-that flag. For complete JSON examples, run:
 
 ```bash
 ham_read edit-plan-usage "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-edit-plan.mjs" --help
 ```
 
-Run B1 owner setup through `fi` first:
+Blocking:
+```json
+{"kind":"blocking","findingNumber":1,"path":"src/example.mjs","startLine":2,"endLine":2,"editKind":"author-lines"}
+```
+CI repair:
+```json
+{"path":"test/example.test.mjs","startLine":2,"endLine":2,"editKind":"in-place","requiredCiRepair":true}
+```
+Additive fix:
+```json
+{"kind":"non-blocking","findingNumber":1,"editKind":"additive"}
+```
+Strict:
+```json
+{"kind":"non-blocking","findingNumber":1,"path":"src/example.mjs","startLine":2,"endLine":2,"editKind":"author-lines"}
+```
+Omitted `reviewedHead` uses the pin; for a review on another head, set it to that review's `commit_id`.
+Blocking in-place: `editKind: "in-place"`. Run B1 owner setup through `fi`:
 
 ```bash
 HAM_EDIT_CORRECTION_FILE="<<RUN_DIR>>/hammer-edit-plan-correction-used"
 HAM_EDIT_RC=0
 /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_DISPUTE_RUN[@]}" "$HAM_NODE_BIN" \
-  <<ROOT_DIR>>/bin/hammer-edit-plan.mjs <<REPO>> <<PR_NUMBER>> <numeric-review-id> <plan.json> || HAM_EDIT_RC=$?
+  <<ROOT_DIR>>/bin/hammer-edit-plan.mjs <<REPO>> <<PR_NUMBER>> <numeric-review-id> <plan.json> --reviewed-head '<<REVIEWED_SHA>>' || HAM_EDIT_RC=$?
 if [ "$HAM_EDIT_RC" = 21 ]; then
   [ ! -e "$HAM_EDIT_CORRECTION_FILE" ] || { echo "NO EDIT: correction exhausted"; exit 1; }
   : > "$HAM_EDIT_CORRECTION_FILE"
@@ -393,9 +405,10 @@ elif [ "$HAM_EDIT_RC" != 0 ]; then
 fi
 ```
 
-Exit 0 permits edits. Exit 21 here is never a conflict: NO EDIT; correct the plan
-from JSON feedback once per run across all plans; retain the marker. Second shape
-refusal exits 1. Never retry policy refusals.
+Exit 0 permits edits; 21: NO EDIT, never a conflict. Correct JSON once/run across
+plans; keep marker. Second refusal exits 1. Never retry policy refusals.
+Non-blocking in-place: on 21 re-plan as `additive`.
+Out-of-range: on 21 use a cited range or `additive` preserving author lines.
 Exit 20 records the non-blocking finding in the backlog
 and means make no edit. Audit the reason as deferred, never remediated or
 withdrawn. On 78 hand evidence to the DB owner. The author-controlled PR body cannot supply
@@ -1022,11 +1035,11 @@ source "<<RUN_DIR>>/hammer-publish.sh" || exit 1
 unset HAM_COMMIT_PUBLICATION_ONLY
 ```
 
-A `conflict-primary-unproven` outcome requires the PR owner to take the
-conflict through reviewed remediation with full-range validation. Report the
-reviewed head and captured base. Do not republish or retry the same replay
-as patch-equivalent. A `conflict-primary-timeout` indicates the proof budget
-expired and does not establish a patch mismatch.
+`conflict-primary-unproven` routes this head to the watcher's builder-tag
+follow-up remediation queue: resolve onto current base, preserve both sides,
+fix findings and push for full review and full-range validation. No replay retry.
+Report reviewed head and captured base.
+`conflict-primary-timeout` means proof budget expired, not a patch mismatch.
 
 After conflict repair and commit publication, refresh context and re-run
 changed-surface tests (2b) outside the lease. Re-enter **verify-head** (Appendix C)

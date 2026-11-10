@@ -1,5 +1,17 @@
 # Data Model - Hammer Stop Hold
 
+## Conflict-primary handoff
+
+`conflict-primary-unproven` is handled before ordinary transient/conflict
+release. The evaluator queues or recovers the existing remediation job for
+that head and returns a hold with `owner: "remediator"`, `remediationJobId`
+and `remediationStatus`. The durable receipt is the
+[follow-up job](follow-up-jobs.md#conflict-primary-handoff-hamconflictowner-01),
+rather than an input-change hold record. A failed handoff read/write returns
+`owner: "remediation-handoff", handoffPending: true` for another watcher pass;
+it grants no closer admission. Timeout and all other reasons retain their
+existing rules.
+
 ## Deployment recovery (HOLDGATEVERSION-01)
 
 Deterministic refusals also record `gateRevision: { serviceRevision,

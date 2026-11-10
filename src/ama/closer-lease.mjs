@@ -50,6 +50,7 @@ import { isDeepStrictEqual } from 'node:util';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { HAMMER_RETRYABLE_READ_OUTCOMES } from './hammer-phase-outcome.mjs';
+import { appendCloserOutcome } from './closer-outcomes.mjs';
 
 const LEASE_DIR_SEGMENTS = ['data', 'ama-closer-leases'];
 const LEASE_FILE_MODE = 0o640;
@@ -930,6 +931,7 @@ function updateAmaCloserLeaseWithinRepositoryState({
     mode: LEASE_FILE_MODE,
     overwrite: true,
   });
+  appendCloserOutcome(rootDir, next, 'lease-terminal');
   return { leasePath, lease: next };
   } finally { closeSync(mutationFd); }
 }

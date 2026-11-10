@@ -806,9 +806,17 @@ On Agent OS hosts with the Adversarial Merge Authority enabled
 two-path merge model** (operational reference:
 [`docs/RUNBOOK-ama-closure.md`](docs/RUNBOOK-ama-closure.md)):
 
-- **Hammer — the common path.** When the final review carries findings
-  (blocking, or non-blocking under the default strict posture), the PR
-  needs a rebase, or CI needs repair, the watcher dispatches exactly one
+At the round cap, an eligible exact-head Comment-only review with zero
+blocking findings and remaining non-blocking or demoted findings first gets
+one builder fix-all round and a full re-review. Its zero-finding re-review
+uses the daemon path below; remaining findings use the configured fallback.
+The existing durable handoff receipt prevents duplicate builder work and
+concurrent closer admission.
+
+- **Hammer — repair and fallback.** Blocking final findings, conflicts,
+  CI-only repair, and findings remaining after the builder fix-all round
+  retain the configured hammer/operator behavior. When hammer admission
+  applies, the watcher dispatches exactly one
   hammer terminal-remediation worker (`templates/hammer-prompt.md`). The
   default `watcher.ama_hammer_dispatch_mode: inline` contract waits for
   that `hq dispatch` inside the posted-review phase. Operators may set
@@ -824,7 +832,7 @@ two-path merge model** (operational reference:
   GitHub required checks on the exact post-remediation head within a
   bounded remote-CI window, and merges under its own lease with
   `--match-head-commit`.
-- **Daemon inline merge — the rare path.** When the final review is
+- **Daemon inline merge — clean completion.** When the final review is
   fully clean (zero blocking AND zero non-blocking findings, both
   classifications known), GitHub reports required checks green and the
   PR mergeable, and the live head still matches the reviewed head, the
@@ -1088,7 +1096,7 @@ closure ownership across a soft caller deadline. No lifecycle states
 or merge gates change. Runtime recovery requires separate read-only observations
 after normal deployment; see the [lease runbook](docs/RUNBOOK-ama-closure.md#leasefair-01-fair-merge-lease-service).
 
-When the hammer closes a PR (the common MSM path),
+When the hammer closes a PR,
 `templates/hammer-prompt.md` directs one linear flow. The verify-head,
 publish, and merge procedures live in `bin/hammer-*.sh` and are rendered by
 `bin/hammer-procedure.mjs` into the same persistent shell so the verified
@@ -1523,6 +1531,17 @@ records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
 
+The follow-up daemon repairs missing or unrecognized code-PR builder tags from
+agreeing recorded PR authorship before remediator selection, and persists
+canonical forms of legacy tags with recovery evidence. Unavailable PR or transient
+opener reads requeue for 60 seconds without spending a remediation round. Settled
+missing or conflicting evidence transitions the claimed job to `stopped`, with a named
+operator owner and escalation/retrigger action in its stop receipt and output.
+Recovered jobs retain the cross-family remediation requirement. The existing
+explicit retrigger transition resumes these stops after evidence correction.
+The [follow-up job model](docs/data-model/follow-up-jobs.md) describes the receipt;
+deployed smoke commands are unchanged.
+
 Review verdict consistency is enforced before closure: disagreement between
 Blocking issues and Verdict yields `verdict_inconsistent: true`, request-changes
 and an unknown blocking state. The reviewer consumes one durable reservation per
@@ -1534,7 +1553,14 @@ values and deployed smoke commands are unchanged. See
 [reviewer verdict recovery](docs/data-model/reviewer-verdict-recovery.md).
 
 HAMEMPTYPRIMARY-01 preserves author commits before conflict-only publication;
-its local proof does not alter lifecycle states or merge authority. Offline Git
+its local proof does not alter lifecycle states or merge authority.
+When that proof stops with `conflict-primary-unproven`, the watcher queues
+one builder-tag-routed remediation per PR head before further closer admission.
+The job's `closureHandoff` records the reason and full-review requirement.
+Pending remediation owns that head through admission delays; its new pushed
+head returns to normal review. Timeout retains the existing closer retry.
+See [the handoff contract](docs/data-model/follow-up-jobs.md#conflict-primary-handoff-hamconflictowner-01).
+Offline Git
 fixtures establish source behavior. The runtime owner separately observes the
 next natural replay after normal deployment, retaining the primary, exact head,
 checks, authenticated audit and custody outcome as declared in
@@ -2016,6 +2042,14 @@ The offline `ama-closer-dispatch-priority` fixtures verify target dispatch,
 lease outcome and one mismatch diagnostic; existing smoke promises are unchanged.
 
 [state-machines.json](state-machines.json) maps the six owned lifecycle objects.
+Final-round exact-head Comment-only reviews with non-blocking or demoted
+findings receive one durable builder fix-all round before findings closure.
+Its published head requires fresh full review: zero findings select normal
+daemon merge, and remaining findings select the configured closer/operator
+fallback. Pending fix-all work retains ownership through admission delays;
+conflict and CI-only repair keep their hammer routes. See the
+[closure runbook](docs/RUNBOOK-ama-closure.md#final-findings-remediation-through-the-builder-laneauto-01)
+for the state contract and SRE's natural-traffic acceptance procedure.
 LAC-2092 keeps Linear incident acceptance with its external owner: live
 incident/severity labels and legacy leading SEV issue titles suppress terminal
 pipeline sync and stale reopening. Already-matched state sync skips label reads
@@ -2632,7 +2666,7 @@ with `closure-recovery-ownership-unresolved` more than one recovery cycle past
 its deadline; a persistent ledger outage remains an explicit unresolved incident.
 No worker live action is authorized.
 
-<a id="smv-handoff"></a>**smv-handoff:** Expired wake admission verifies a deterministic replacement, replacement dedupe and a named missing-head refusal with one durable alert. OWNERUNREADABLE-02 verifies snapshot-only resolution of terminal lease/receipt placeholders, live retry ownership, failed/partial read fences and one deduplicated hammer wake. After ordinary deployment SRE checks that no terminal ledger launch remains in an R04 retry-chain-unreadable skip more than one wake past its deadline (SEVDOCS-335). HAMRESUMEOWED-01 verifies pending-to-green hammer resume and idempotent audit settlement. Outstanding exact-head receipts receive closure priority each poll without an unrelated wake; red/head movement settle the debt for normal handling. Existing merge gates, leases and caps remain mandatory. After deployment SRE observes the next natural pending-CI stop merging its green recorded head without manual action; offline smoke alone does not establish this live receipt. OWNERUNREADABLE-01 verifies terminal ownership recovery after its anchored deadline selects hammer without re-review while unreadable retry evidence remains fenced. Focused offline fixtures also cover one-read placeholder replacement, bounded backoff, transient recovery, live retries and outage recovery. After deployment SRE observes the next natural R04 case exit within its budget and merge; no worker live operation is authorized. NXA-07 also verifies exact-head validated terminal HAM proof crossing retry selection into pending, failed or green CI gates; mismatched proof retains hammer retry ownership. NXA-07 verifies the common adapter matrix and retains lease/retry settlement; NXA-06 verifies daemon CI changes, operator-approved retry exhaustion selecting R08 hammer repair, live hammer ownership and remote-unconfirmed receipt recovery through the shared decision. NXA-05 verifies that drain/capacity observations
+<a id="smv-handoff"></a>**smv-handoff:** Final-round non-blocking findings enqueue one builder fix-all job before any hammer. A terminal no-progress receipt permits the existing hammer fallback; publication/full-review/clean-daemon coverage is pinned by the focused lane fixtures. Expired wake admission verifies a deterministic replacement, replacement dedupe and a named missing-head refusal with one durable alert. OWNERUNREADABLE-02 verifies snapshot-only resolution of terminal lease/receipt placeholders, live retry ownership, failed/partial read fences and one deduplicated hammer wake. After ordinary deployment SRE checks that no terminal ledger launch remains in an R04 retry-chain-unreadable skip more than one wake past its deadline (SEVDOCS-335). HAMRESUMEOWED-01 verifies pending-to-green hammer resume and idempotent audit settlement. Outstanding exact-head receipts receive closure priority each poll without an unrelated wake; red/head movement settle the debt for normal handling. Existing merge gates, leases and caps remain mandatory. After deployment SRE observes the next natural pending-CI stop merging its green recorded head without manual action; offline smoke alone does not establish this live receipt. OWNERUNREADABLE-01 verifies terminal ownership recovery after its anchored deadline selects hammer without re-review while unreadable retry evidence remains fenced. Focused offline fixtures also cover one-read placeholder replacement, bounded backoff, transient recovery, live retries and outage recovery. After deployment SRE observes the next natural R04 case exit within its budget and merge; no worker live operation is authorized. NXA-07 also verifies exact-head validated terminal HAM proof crossing retry selection into pending, failed or green CI gates; mismatched proof retains hammer retry ownership. NXA-07 verifies the common adapter matrix and retains lease/retry settlement; NXA-06 verifies daemon CI changes, operator-approved retry exhaustion selecting R08 hammer repair, live hammer ownership and remote-unconfirmed receipt recovery through the shared decision. NXA-05 verifies that drain/capacity observations
 retain hammer intent and its deadline, and current deterministic automatic stops retain
 closure-recovery ownership. STOPSTALE-01 / STOPSTALE-02 verify that all four
 R07 variants (deterministic stop, retry cap, lifetime cap and final no-merge)
@@ -2832,7 +2866,19 @@ host mode. Node dependencies and local Git must already be installed.
 The hammer edit-plan helper permits one shape correction per run (exit 21,
 never a conflict) before any edit; a second shape refusal exits 1. Cited plans
 retain their citations during correction; policy refusals retain their existing
-outcomes. After the submodule float and follow-up/watcher restart, SRE verifies the CI-repair closer activation
+outcomes. A valid cited non-blocking `in-place` plan is a shape error: on exit 21,
+re-plan as `additive`. Non-blocking findings never permit in-place edits.
+An otherwise authorized `author-lines` plan outside its cited ranges also receives
+exit 21, naming those ranges. Re-plan within a cited range or as `additive` if no
+existing author line is removed or replaced; uncovered author-line edits remain
+disallowed.
+The CLI takes the controller-pinned head via `--reviewed-head SHA`
+(or `HAM_REVIEWED_SHA`), fills omitted, non-string or empty plan heads, and rejects
+malformed heads or heads that differ from the cited review's `commit_id`.
+For citations from another reviewed head, set the plan's `reviewedHead` to that
+review's `commit_id`; the controller pin remains required. `--help` and `-h`
+print accepted shapes and exit 0 separately from plan-check authorization.
+After the submodule float and follow-up/watcher restart, SRE verifies the CI-repair closer activation
 receipt declared in `post-merge-verify.json` and the
 [closure runbook](docs/RUNBOOK-ama-closure.md). Existing smoke commands are unchanged.
 
@@ -3107,9 +3153,9 @@ stateDiagram-v2
     [*] --> s0: closure-owner.03 project shared next action: wait, including infrastructure-only CI without hammer or automated-stop charge
     [*] --> s1: closure-owner.04 project shared next action: hammer, including readable ownerless recovery at expiry under existing caps and lease
     [*] --> s2: closure-owner.05 project shared next action: review (including a head-bound shared rereview-exact-head decision before historical review ceiling or hammer ownership)
-    [*] --> s3: closure-owner.06 project shared next action: remediation
+    [*] --> s3: closure-owner.06 project shared next action: remediation, including a pending conflict-primary-unproven builder handoff
     [*] --> s3: closure-owner.07 proven live remediation owner retained
-    [*] --> s1: closure-owner.08 confirmed conflict selects capped repair with merge safety retained
+    [*] --> s1: closure-owner.08 confirmed conflict selects capped repair unless a conflict-primary-unproven builder handoff owns the head; merge safety retained
     [*] --> s4: closure-owner.09 project shared next action: daemon-merge, including any R07 deterministic stop, retry cap, lifetime cap or final no-merge superseded by a strictly newer eligible exact-head review with trustworthy recorded time; hammer caps stay binding; continuous cap alerts preserve time, complete confirmed lifetime charges can recover the budget boundary, and non-firing supersessions name why
     s0 --> [*]: closure-owner.10 next bounded observation; every recovery deadline dispatches or escalates once with row reason and evidence
     [*] --> s5: closure-owner.11 explicit hold, draft or disabled execution intent

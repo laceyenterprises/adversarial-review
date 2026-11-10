@@ -323,6 +323,71 @@ test('GEMINIQUOTA-01: no-reset checkout failure falls back in the same pass and 
   }
 });
 
+for (const failureClass of ['quota-exhausted', 'reviewer-model-unavailable']) {
+  test(`GRK-10: ineligible ${failureClass} fallbacks never receive the durable reviewer claim`, async t => {
+    const warnings = t.mock.method(console, 'warn', () => {});
+    const cases = [
+      ...['grok', 'grok-api', 'grok-reviewer', 'remediator-grok', 'hammer-grok', 'unknown']
+        .map(reviewerModel => ({ builderTag: 'grok', reviewerModel })),
+      ...['codex', 'codex-corp', 'codex-reviewer', 'remediator-codex', 'remediator-codex-corp']
+        .map(reviewerModel => ({ builderTag: 'codex', reviewerModel })),
+      ...['claude', 'claude-code', 'claude-code-corp', 'claude-reviewer', 'claude-reviewer-corp',
+        'remediator-claude', 'remediator-claude-corp']
+        .map(reviewerModel => ({ builderTag: 'claude-code', reviewerModel })),
+    ];
+    for (const { builderTag, reviewerModel } of cases) {
+      const rootDir = await mkdtemp(join(tmpdir(), 'reviewer-family-fallback-'));
+      try {
+        const models = [];
+        const transfers = [];
+        const settled = [];
+        const alerts = [];
+        const configuredModel = ` ${reviewerModel.toUpperCase()} `;
+        const args = {
+          ...spawnArgs({ env: { AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'false',
+            ADVERSARIAL_REVIEW_STATE_DIR: rootDir }, capture: newCapture() }),
+          rootDir,
+          builderTag,
+          reviewerModel: 'gemini',
+          geminiQuotaFallbackRoute: { reviewerModel: configuredModel },
+          deliverAlertImpl: async (message, options) => alerts.push({ message, options }),
+          onGeminiQuotaFallback: route => transfers.push(route),
+          onPostOperationSettled: result => settled.push(result),
+          reviewerRuntimeAdapterOverride: {
+            async spawnReviewer({ model }) {
+              models.push(model);
+              return { ok: false, failureClass, error: `Synthetic ${failureClass}` };
+            },
+          },
+        };
+        // Quota exhaustion is also exercised with a persisted cooldown on the second call.
+        const attempts = failureClass === 'quota-exhausted' ? 2 : 1;
+        const warningStart = warnings.mock.callCount();
+        for (let attempt = 0; attempt < attempts; attempt += 1) {
+          const result = await spawnReviewer({ ...args, reviewerSessionUuid: randomUUID() });
+          assert.equal(result.failureClass, failureClass, reviewerModel);
+          assert.equal(result.effectiveReviewerModel, 'gemini', reviewerModel);
+          assert.deepEqual(transfers, [], reviewerModel);
+          assert.equal(settled.length, attempt + 1, reviewerModel);
+          assert.deepEqual(settled[attempt], result, reviewerModel);
+        }
+        assert.ok(models.every(model => model === 'gemini'), reviewerModel);
+        assert.equal(alerts.length, failureClass === 'reviewer-model-unavailable' ? 1 : 0);
+        if (alerts.length) assert.equal(alerts[0].options.event, 'reviewer.model_unavailable');
+        const refusalWarnings = warnings.mock.calls.slice(warningStart)
+          .map(call => call.arguments[0]).filter(message => message.includes('skipped fallback'));
+        assert.equal(refusalWarnings.length, attempts, reviewerModel);
+        for (const message of refusalWarnings) {
+          assert.ok(message.includes(`fallback ${configuredModel} for builder ${builderTag}`));
+          assert.match(message, /builder-family policy refusal/);
+        }
+      } finally {
+        await rm(rootDir, { recursive: true, force: true });
+      }
+    }
+  });
+}
+
 test('GEMINIQUOTA-01: quota_exhausted without reset preserves both settlement budgets', async () => {
   const { classifyReviewerFailure } = await import('../src/adapters/reviewer-runtime/cli-direct/classification.mjs');
   const { settleReviewerAttempt } = await import('../src/reviewer-spawn-settle.mjs');

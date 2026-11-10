@@ -28,6 +28,41 @@ export function effectiveDisposition(observation) {
   return observation?.classification?.disposition === 'resolved' ? 'resolved' : 'open';
 }
 
+/** MLR-04: count terminal subjects, never polls, dispatches or replay samples.
+ * Whole history is required: an old open divergence cannot age out of safety. */
+export function buildMlrPromotionGate(observations, now) {
+  const history = observations.filter(o => Date.parse(o.observedAt) <= Date.parse(now));
+  const organic = history.filter(o => o.live?.source === 'organic' || o.queue?.source === 'organic');
+  const outcomes = new Map();
+  for (const o of organic) {
+    const landed = o.v1Action?.kind === 'merged' && o.v1Action.sourceRef
+      && (o.live?.terminalOutcome === 'merged' && o.live?.lane?.base
+        || o.queue?.phase === 'merged');
+    const closed = o.v1Action?.kind === 'close' && o.v1Action.sourceRef
+      && o.live?.terminalOutcome === 'closed' && o.live?.lane?.base;
+    if ((!landed && !closed) || o.foldError) continue;
+    const key = JSON.stringify(o.subjectKey);
+    const prior = outcomes.get(key);
+    outcomes.set(key, { headMove: prior?.headMove || Boolean(landed && o.sawHeadMove),
+      exhaustion: prior?.exhaustion || Boolean(landed && o.sawExhaustion) });
+  }
+  const finalizations = outcomes.size;
+  const headMoves = [...outcomes.values()].filter(o => o.headMove).length;
+  const exhaustionCloses = [...outcomes.values()].filter(o => o.exhaustion).length;
+  const openDivergences = history.filter(o => o.classification?.relation !== 'agree'
+    && effectiveDisposition(o) === 'open').length;
+  const foldErrors = organic.filter(o => o.foldError && !(o.dispositionOverride?.disposition === 'resolved'
+    && o.dispositionOverride.principal && o.dispositionOverride.note)).length;
+  const blockers = [];
+  if (finalizations < 50) blockers.push(`insufficient distinct finalizations (${finalizations} < 50)`);
+  if (!headMoves) blockers.push('no organic terminal head-move example');
+  if (!exhaustionCloses) blockers.push('no organic exhaustion close-by-landing example');
+  if (openDivergences) blockers.push(`${openDivergences} undispositioned historical divergences`);
+  if (foldErrors) blockers.push(`${foldErrors} unresolved fold/evidence errors`);
+  return { approvedSpec: 'MLR-04', minimumFinalizations: 50, finalizations, headMoves,
+    exhaustionCloses, openDivergences, foldErrors, promotable: blockers.length === 0, blockers };
+}
+
 function subjectLabel(subjectExternalId) {
   const m = /#(\d+)$/.exec(String(subjectExternalId ?? ''));
   return m ? `#${m[1]}` : String(subjectExternalId ?? '<unknown>');
@@ -79,7 +114,8 @@ function dispositionTag(observation) {
  * }} args
  * @returns {ShadowReportModel}
  */
-export function buildShadowReport({ observations, now, windowDays = 7, coverage = null, queueHistory = null }) {
+export function buildShadowReport({ observations, now, windowDays = 7, coverage = null, queueHistory = null,
+  promotionHistory = null }) {
   const nowMs = Date.parse(now);
   if (!Number.isFinite(nowMs)) throw new TypeError('buildShadowReport requires a valid `now` ISO timestamp');
   const days = Number(windowDays) > 0 ? Number(windowDays) : 7;
@@ -94,7 +130,7 @@ export function buildShadowReport({ observations, now, windowDays = 7, coverage 
   if (!coverage) {
     let earliestMsFallback = Infinity;
     for (const o of all) {
-      if (o.queue && o.queue.source !== 'organic') continue;
+      if ((o.queue && o.queue.source !== 'organic') || (o.live && o.live.source !== 'organic')) continue;
       const t = Date.parse(o.observedAt);
       if (Number.isFinite(t) && t < earliestMsFallback) earliestMsFallback = t;
       if (o.sawHeadMove) organicHeadMoves += 1;
@@ -138,7 +174,7 @@ export function buildShadowReport({ observations, now, windowDays = 7, coverage 
         disposition: eff,
         overridden: o.dispositionOverride != null,
         tag: dispositionTag(o),
-        evidence: { v1SourceRef: o.v1Action?.sourceRef ?? null, queue: o.queue ?? null,
+        evidence: { v1SourceRef: o.v1Action?.sourceRef ?? null, queue: o.queue ?? null, live: o.live ?? null,
           disposition: o.dispositionOverride ?? null },
       });
     } else {
@@ -149,13 +185,33 @@ export function buildShadowReport({ observations, now, windowDays = 7, coverage 
   const openDivergences = divergences.filter((d) => d.disposition === 'open').length;
 
   const blockers = [];
-  if (!windowed.some(o => !o.queue || o.queue.source === 'organic')) blockers.push('no shadowed finalizations in window');
+  if (!windowed.some(o => (!o.queue || o.queue.source === 'organic') && (!o.live || o.live.source === 'organic'))) blockers.push('no shadowed finalizations in window');
   if (!enoughDays) blockers.push(`insufficient shadow coverage (${coverageDays}d < ${days}d)`);
   if (openDivergences > 0) {
     blockers.push(`${openDivergences} open divergence${openDivergences === 1 ? '' : 's'}`);
   }
   if (organicHeadMoves < 1) blockers.push('no organic head-move observed in shadow');
   if (exhaustionCloses < 1) blockers.push('no budget-exhaustion close observed in shadow');
+  const mgqPromotable = blockers.length === 0;
+  const history = promotionHistory ?? all;
+  const lanes = new Map();
+  for (const o of history) {
+    const evidence = o.live?.source === 'organic' ? o.live : o.queue?.source === 'organic' ? o.queue : null;
+    if (!evidence?.lane) continue;
+    const key = JSON.stringify(evidence.lane);
+    const lane = lanes.get(key) ?? { lane: evidence.lane, rows: 0, subjects: new Set(), foldErrors: 0,
+      lastObservationAt: null, consumer: null };
+    lane.rows++;
+    lane.subjects.add(JSON.stringify(o.subjectKey));
+    lane.foldErrors += o.foldError ? 1 : 0;
+    if (!lane.lastObservationAt || Date.parse(o.observedAt) >= Date.parse(lane.lastObservationAt)) {
+      lane.lastObservationAt = o.observedAt;
+      lane.consumer = evidence.consumer ?? null;
+    }
+    lanes.set(key, lane);
+  }
+  const promotionGate = buildMlrPromotionGate(history, now);
+  blockers.push(...promotionGate.blockers);
   const promotable = blockers.length === 0;
 
   return {
@@ -172,6 +228,12 @@ export function buildShadowReport({ observations, now, windowDays = 7, coverage 
     openDivergences,
     promotable,
     blockers,
+    promotionGate: { ...promotionGate, mgqPromotable },
+    shadow: { rows: history.length,
+      subjects: new Set(history.filter(o => o.live?.source === 'organic' || o.queue?.source === 'organic')
+        .map(o => JSON.stringify(o.subjectKey))).size,
+      foldErrors: history.filter(o => o.foldError).length,
+      lanes: [...lanes.values()].map(lane => ({ ...lane, subjects: lane.subjects.size })) },
     queue: { organic: buildQueueShadowMetrics(queueHistory ?? all, { from: fromIso, to: now, source: 'organic' }),
       synthetic: buildQueueShadowMetrics(queueHistory ?? all, { from: fromIso, to: now, source: 'synthetic' }) },
   };
@@ -185,6 +247,9 @@ export function buildShadowReport({ observations, now, windowDays = 7, coverage 
 export function renderShadowReport(model) {
   const lines = [];
   lines.push(`shadowed finalizations: ${model.shadowed}   agree: ${model.agree}   diverge: ${model.diverge}`);
+  for (const lane of model.shadow?.lanes ?? []) {
+    lines.push(`lane ${lane.lane.repository}/${lane.lane.base ?? 'unknown'}: pairs=${lane.rows} subjects=${lane.subjects} fold_errors=${lane.foldErrors} observed_at=${lane.lastObservationAt}`);
+  }
   for (const sample of Object.values(model.queue ?? {})) {
     for (const lane of sample.lanes) lines.push(`queue ${lane.lane.repository}/${lane.lane.base} (${sample.source}): entries=${lane.entries} service_samples=${lane.serviceTimeSamples} service_total_ms=${lane.totalServiceTimeMs} service_mean_ms=${lane.serviceTimeMeanMs ?? 'unknown'} oldest_ready_ms=${lane.oldestReadyAgeMs ?? 'none'} arrivals/hour=${lane.arrivalsPerHour.toFixed(2)} merges/hour=${lane.mergesPerHour.toFixed(2)} returns/hour=${lane.returnsToRemediationPerHour.toFixed(2)} infrastructure_wait_ms=${lane.infrastructureWaitMs} infrastructure_park_ms=${lane.infrastructureParkMs} window_hours=${sample.window.hours}`);
   }
@@ -199,6 +264,10 @@ export function renderShadowReport(model) {
       const v2 = `v2=${d.v2Compact}`.padEnd(v2W + 3);
       lines.push(`  ${label} ${v1} ${v2}  [${d.tag}]`);
     }
+  }
+  if (model.promotionGate) {
+    const g = model.promotionGate;
+    lines.push(`promotion gate: ≥50 finalizations ${g.finalizations >= 50 ? '✔' : '✖'} (${g.finalizations}) · ≥1 head-move ${g.headMoves ? '✔' : '✖'} · ≥1 exhaustion close ${g.exhaustionCloses ? '✔' : '✖'} · all dispositioned ${g.openDivergences ? `✖ (${g.openDivergences})` : '✔'} · fold/evidence errors ${g.foldErrors}`);
   }
 
   if (model.promotable) {

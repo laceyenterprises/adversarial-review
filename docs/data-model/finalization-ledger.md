@@ -49,6 +49,31 @@ Eligibility is not stored as mutable state. Consumers replay rows for one
 subject in `seq` order through `src/finalization/ledger-fold.mjs`, then pass the
 projected state to `src/finalization/eligibility.mjs`.
 
+MLR-07 composes the existing next-action snapshot observer with the append
+API and `finalization_shadow` in one app-store transaction. All event types
+accept the existing optional `idempotency_key`, retaining original event times
+on replay. Only a changed head appends `revision_advanced`; readable review,
+exact-head required-check rollup, mergeability and exhaustion observations
+retain provenance. Unchanged facts do not append again when poll timestamps
+advance; keys identify fact transitions and preserve returns to earlier values.
+The daemon reuses one app-root connection, converging schemas once per handle.
+Configured required contexts are unioned with readable branch-protection contexts;
+when protection is unavailable, the configured set still applies through the
+shared CI classifier (an empty rollup still fails closed). An omitted observation
+domain in a lightweight snapshot leaves prior facts intact. An explicitly failed,
+unknown or incomplete refresh of previously settled evidence escalates instead
+of reusing earlier green evidence. Partial or failed evidence never becomes a merge.
+Custody continues to arrive through the existing off-pass bridge.
+
+Shadow `payload_json` additionally retains optional `live` evidence
+(`source`, `lane`, `sourceRef`, `terminalOutcome`, proposed classification) and
+`dedupeKey`, using the existing MGQ-07 unique index. No table/column migration
+or session-ledger SQL is introduced. Live comparisons are observational and
+never claim a queue lane or call an execution adapter. MLR-04 promotion counts
+distinct organic terminal subjects once, with head-move/exhaustion landing
+examples; full-history unresolved divergences and fold errors block readiness.
+See the [triage guide](../finalization-shadow-divergence-triage.md).
+
 ## Table
 
 Table: `finalization_ledger`

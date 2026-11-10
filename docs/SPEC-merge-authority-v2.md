@@ -300,6 +300,12 @@ MLR rollout. Existing stricter safety/evidence requirements remain in force.
 1. In shadow, ingest live facts and record v1 action versus v2 decision with
    source, revision, owner, deadline and policy/code version; only v1 mutates.
    Synthetic scenarios stay offline and cannot count as organic observations.
+   Live ingestion retains fact-transition keys across poll timestamps and reuses
+   the app-store connection/schema setup. Required CI evidence uses configured
+   contexts plus readable branch-protection contexts, including repositories
+   without protection. Omitted domains in lightweight snapshots retain prior
+   evidence; explicit failed or incomplete refreshes of settled facts escalate.
+   Synthetic live and queue rows cannot supply elapsed coverage or organic examples.
 2. Disposition every divergence in either direction, with evidence and owner:
    v1 may be wrong. Persist fold errors and missing evidence as unresolved;
    neither counts as agreement. Recover unavailable ingestion without guessing.

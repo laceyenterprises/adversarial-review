@@ -87,7 +87,8 @@ function finalizationMain(argv, io = {}) {
     const observations = store.read({ from, to: now });
     const coverage = typeof store.readCoverage === 'function' ? store.readCoverage() : null;
     const queueHistory = store.readQueueHistory?.({ to: now }) ?? null;
-    model = buildShadowReport({ observations, now, windowDays: options.days, coverage, queueHistory });
+    const promotionHistory = store.read({ to: now });
+    model = buildShadowReport({ observations, now, windowDays: options.days, coverage, queueHistory, promotionHistory });
   } catch (err) {
     stderr.write(`error: could not build shadow report: ${err?.message || err}\n`);
     return 1;

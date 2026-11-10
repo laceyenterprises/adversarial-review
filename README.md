@@ -4175,6 +4175,18 @@ is valid pending evidence; an organic observation requires a timestamp. See the
 [triage guide](docs/finalization-shadow-divergence-triage.md#queue-decision-evidence-mgq-07)
 and [store contract](docs/data-model/finalization-shadow.md#queue-observations-mgq-07).
 
+The existing next-action observer also feeds legacy-lane snapshots/results into
+the same ledger and shadow report. `hq merge-lane shadow report [--json]`
+forwards the service read model; `promotionGate` adds MLR-04's 50 distinct
+organic terminal-subject requirement, terminal head-move/exhaustion examples and
+full-history triage/error arithmetic. Both MGQ and MLR readiness are required.
+See the [deployment handoff](https://github.com/laceyenterprises/agent-os/blob/main/modules/worker-pool/post-merge-actions/mlr-07-shadow.yaml): after both
+repository PRs merge and normal deployment, Main Loop 6/SRE reloads the watcher
+through its registered service path and proves row growth across natural
+traffic in every active lane. Historical nonzero rows alone are insufficient.
+Shadow has no execution port; frozen v1 policy and existing smoke commands
+remain unchanged. Focused synthetic fixtures exercise the live ingestion seam.
+
 ## Truthful no-op outcomes (LVR-02)
 
 Hammer and closer launches require a launch-bound terminal AMA audit;

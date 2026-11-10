@@ -9,6 +9,7 @@ import {
   openFinalizationShadowStore,
   openReadOnlyFinalizationShadowStore,
 } from '../src/finalization/shadow-store.mjs';
+import { buildShadowReport } from '../src/finalization/shadow-report.mjs';
 import { shadowObserve } from '../src/finalization/shadow-recorder.mjs';
 import {
   checksSettled,
@@ -195,4 +196,27 @@ test('reporting can borrow a snapshot connection without changing or closing it'
   assert.throws(() => openReadOnlyFinalizationShadowStore({ db: missing }), /no such table/);
   assert.equal(missing.open, true);
   missing.close();
+});
+
+
+test('SQL and report fallback exclude synthetic live and queue coverage identically', () => {
+  const db = new Database(':memory:');
+  const store = openFinalizationShadowStore({ db });
+  try {
+    store.append(cleanObs(t(0), { live: { source: 'synthetic' }, sawHeadMove: true, sawExhaustion: true }));
+    store.append(cleanObs(t(1), { queue: { source: 'synthetic' }, dedupeKey: 'synthetic-queue',
+      sawHeadMove: true, sawExhaustion: true }));
+    store.append(cleanObs(t(2), { live: { source: 'organic' }, sawHeadMove: true }));
+    store.append(cleanObs(t(3), { sawExhaustion: true }));
+    const expected = { earliestObservedAt: t(2), organicHeadMoves: 1, exhaustionCloses: 1 };
+    assert.deepEqual(store.readCoverage(), expected);
+    const reader = openReadOnlyFinalizationShadowStore({ db });
+    assert.deepEqual(reader.readCoverage(), expected);
+    const model = buildShadowReport({ observations: store.read(), now: t(10) });
+    assert.equal(model.coverage.earliestObservedAt, expected.earliestObservedAt);
+    assert.equal(model.organicHeadMoves, 1);
+    assert.equal(model.exhaustionCloses, 1);
+    const synthetic = buildShadowReport({ observations: store.read().slice(0, 2), now: t(10) });
+    assert.ok(synthetic.blockers.includes('no shadowed finalizations in window'));
+  } finally { db.close(); }
 });

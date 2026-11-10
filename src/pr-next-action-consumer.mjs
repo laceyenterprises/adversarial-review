@@ -9,6 +9,7 @@ import { owesExhaustedHeadVerdict, hasUnreviewedBuilderHead } from './exhausted-
 // Nothing here throws into a caller or changes a legacy decision.
 import { isUnresolvedLaunchReference } from './launch-reference.mjs';
 import { reviewCeilingOwner } from './review-ceiling-owner.mjs';
+import { resolveRequiredCheckContextsFromCfg } from './ama/required-check-contexts.mjs';
 import { remediationJobOwnership } from './remediation-job-ownership.mjs';
 
 // ── Legacy adapters: old outputs expressed as owned workflows ────────────────
@@ -137,8 +138,9 @@ export function snapshotLaunchReferenceRead(snapshot, rootDir) {
  * evaluated by the shadow with the shared pure helper, never here.
  */
 export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, candidate = null, labels, checksRollup,
-  autonomousMergeExecutionEnabled, rootDir = null, observedAt = null, anchors = null } = {}) {
+  autonomousMergeExecutionEnabled, cfg = null, rootDir = null, observedAt = null, anchors = null } = {}) {
   const pr = candidate ? { headSha: candidate.headSha ?? null, state: candidate.prState ?? null,
+    baseBranch: candidate.baseBranch ?? null,
     isDraft: candidate.isDraft === true, mergeable: candidate.mergeable ?? null,
     mergeStateStatus: candidate.mergeStateStatus ?? null, labels: Array.isArray(labels) ? labels : candidate.labels } : null;
   const head = input.currentHead || pr?.headSha || null;
@@ -183,7 +185,14 @@ export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, cand
       : launchRecord?.reason === 'ci-infrastructure-recovered' && launchRecord.recoveredLaunchRequestId
         ? { closer: null } : undefined,
     checks: input.checks === undefined && checksRollup === undefined ? undefined
-      : { conclusion: input.checks ?? null, ...(Array.isArray(checksRollup) ? { rollup: checksRollup } : {}) },
+      : { conclusion: input.checks ?? null, headSha: head,
+        // Observation-only metadata: checksFacts must retain its frozen inputs.
+        ...((candidate?.branchProtection?.ok === true || cfg !== null)
+          ? { finalizationRequiredContexts: [...new Set([
+            ...resolveRequiredCheckContextsFromCfg(cfg),
+            ...(candidate?.branchProtection?.ok === true ? candidate.branchProtection.requiredContexts ?? [] : []),
+          ])] } : {}),
+        ...(Array.isArray(checksRollup) ? { rollup: checksRollup } : {}) },
     policy: { strictMode: input.strictMode !== false, strictNonBlockingRemediation: input.strictNonBlockingRemediation !== false,
       ...(input.operatorLogins ? { operatorLogins: input.operatorLogins } : {}),
       ...(input.operatorLabelActorEnforcement ? { operatorLabelActorEnforcement: input.operatorLabelActorEnforcement } : {}),

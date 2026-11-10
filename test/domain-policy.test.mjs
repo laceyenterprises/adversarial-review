@@ -14,6 +14,19 @@ import {
 
 const ROOT = new URL('..', import.meta.url).pathname;
 
+test('domain merge authority refuses Grok primary and fallback closer selectors', () => {
+  for (const selection of [
+    { workerClass: 'hammer-grok' },
+    { workerClassFallback: ['hammer', 'hammer-grok'] },
+  ]) {
+    assert.throws(() => resolveMergeAuthorityConfigFromDomain({
+      id: 'synthetic-domain', mergeAuthority: selection,
+    }), /grok-closer-pending-merge-authority-v2/);
+    assert.throws(() => resolveMergeAuthorityConfigFromDomain({}, selection),
+      /grok-closer-pending-merge-authority-v2/);
+  }
+});
+
 test('code-pr reviewer routing is sourced from the domain config', () => {
   const domainConfig = loadDomainConfig(ROOT, 'code-pr');
   const routes = resolveReviewerRouteTableFromDomain(domainConfig);

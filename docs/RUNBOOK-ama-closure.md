@@ -2409,7 +2409,8 @@ Enrollment, deployment and service changes require the ITP-19 operator step.
 
 
 GRK-12 reserves `hammer-grok` in the registry and config vocabulary. Its
-primary, fallback and legacy closer selections are refused with
+primary, fallback and legacy closer selections, including domain
+`mergeAuthority.workerClass` and `workerClassFallback`, are refused with
 `grok-closer-pending-merge-authority-v2`, even with its flags enabled.
 Keep the closer cell and live receipt pending v2; GRK-17 adds the Merge
 Authority v2 executor after the MLR cutover using the v2 queue-closer prompt.

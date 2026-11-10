@@ -130,8 +130,12 @@ function resolveRoleRegistryRemediator({ env = process.env, topPath, loaderImpl,
 
 function pickRemediationWorkerClass(job, { env = process.env, topPath, loaderImpl } = {}) {
   const envOverride = defaultRemediatorWorkerClassFromEnv(env, { topPath, loaderImpl });
-  if (envOverride) return normalizeRemediationWorkerClass(envOverride) || envOverride;
   const builderTag = normalizeBuilderClass(job?.builderTag);
+  // A Grok pin cannot remediate its own builder family. Keep that subject on
+  // its non-Grok default route instead of repeatedly claiming a refused lane.
+  if (envOverride && !(builderTag === 'grok' && normalizeBuilderClass(envOverride) === 'grok')) {
+    return normalizeRemediationWorkerClass(envOverride) || envOverride;
+  }
   if (builderTag && Object.prototype.hasOwnProperty.call(REMEDIATION_WORKER_BY_BUILDER_TAG, builderTag)) {
     return REMEDIATION_WORKER_BY_BUILDER_TAG[builderTag];
   }

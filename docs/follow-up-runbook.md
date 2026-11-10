@@ -715,10 +715,19 @@ An empty dedicated Gemini **builder** pool must refuse builders and must not
 block this registered remediation route. The paired #10117 release and validation
 requirements are recorded in the [SEV/RCA](INCIDENT-2026-11-02-gemini-remediation-builder-class.md).
 
-To add a Grok remediator once its class can run, list `remediator-grok` in the
-order (for example `[gemini, remediator-grok, claude-code]`). Both config
-loaders already accept it; until the class is connected it is skipped as
-`provider-untracked`.
+Grok remediation is an opt-in account-bound HQ lane: enable `grok.enabled`
+and `grok.remediator.enabled`, deploy the imported `remediator-grok` class,
+then select it through `roles.remediator` or the fallback order (for example
+`[gemini, remediator-grok, claude-code]`). Native orchestration hands it to
+reachable HQ dispatch; an unreachable HQ root refuses the lane. There is no
+direct CLI fallback. Unknown builders and Grok-family builders cannot use it.
+A Grok pin leaves Grok-built PRs on their `remediator-codex` default route;
+fallback candidates retain the subject refusal after account selection.
+Unpooled Grok quota holds supply the same job-local reset evidence as other
+remediators, including when fleet quota status is unreadable. Resets beyond
+one hold window try the declared non-Grok fallbacks on the next claim.
+GRK-16 activation requires the paired Agent OS loader/fixture update described
+in [GRK-12](changes/GRK-12.md).
 
 ## Remediation round budgets
 

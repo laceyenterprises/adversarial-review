@@ -139,6 +139,13 @@ const MERGE_AUTHORITY_KEYS = Object.freeze({
 
 export function resolveMergeAuthorityConfigFromDomain(domainConfig, fallbackCfg = {}, options = {}) {
   const policy = objectOrNull(domainConfig?.mergeAuthority);
+  for (const config of [policy, fallbackCfg]) {
+    if (str(config?.workerClass) === 'hammer-grok'
+      || (Array.isArray(config?.workerClassFallback)
+        && config.workerClassFallback.some(value => str(value) === 'hammer-grok'))) {
+      throw new Error('[domain-policy] grok-closer-pending-merge-authority-v2');
+    }
+  }
   if (!policy) return {
     ...fallbackCfg,
     eligibility: {

@@ -5990,8 +5990,9 @@ function validateGoalLineageConfig(merged, trace) {
 }
 
 // GRK-09: a role pin may name a Grok lane only while that lane is enabled.
-// Mirrors _validate_grok_role_pins in the Python loader; the message names the
-// pinned key and the flag to set, never any other config value.
+// Lane enablement mirrors _validate_grok_role_pins in the Python loader.
+// GRK-12's pending-v2 closer refusal also requires the Agent OS companion
+// loader/fixture update before deployment (docs/changes/GRK-12.md).
 function validateGrokRolePins(merged, trace) {
   for (const key of ['roles.merge_agent_worker_class',
     'roles.adversarial.merge_authority.worker_class',

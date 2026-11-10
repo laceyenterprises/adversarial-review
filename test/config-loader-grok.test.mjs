@@ -1,8 +1,9 @@
 // GRK-09 — Grok knobs and default-off lane flags: Node mirror parity.
 //
-// `fixtures/grok-config-parity.v1.json` is an identical copy of the Agent OS
-// parity contract that the Python and shell readers check. Every value in it is
-// synthetic. No live config, sibling repository or credential is read here.
+// `fixtures/grok-config-parity.v1.json` must match the Agent OS parity contract
+// that the Python and shell readers check before paired deployment. GRK-12's
+// pending-v2 refusal needs a companion update; see docs/changes/GRK-12.md.
+// Every value is synthetic; no sibling repository or credential is read here.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

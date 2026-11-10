@@ -3452,8 +3452,8 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
     // Backstop only: the selection above already skips a lane the mode refuses.
     const laneModeRefusal = remediationLaneModeRefusal(workerClass, remediationMode, { env: jobEnv });
     if (laneModeRefusal) {
-      throw new Error(`corporate Claude remediation requires account-bound HQ dispatch `
-        + `(selected lane ${workerClass}, mode ${remediationMode}: ${laneModeRefusal})`);
+      throw new Error(`account-bound remediation lane ${workerClass} requires HQ dispatch `
+        + `(mode ${remediationMode}: ${laneModeRefusal})`);
     }
     if (!(hqDispatchEnabled && ['gemini', 'remediator-claude-corp', 'remediator-grok'].includes(workerClass))) {
       await assertRemediationWorkerOAuth(workerClass, { execFileImpl,

@@ -7,6 +7,8 @@ import { normalizeRemediationWorkerClass, hqRemediationWorkerClass } from '../sr
 import { remediationWorkerTrailerClass, remediationWorkerGitIdentity } from '../src/remediation-worker-provenance.mjs';
 import { selectWorkerTokenAccount } from '../src/worker-token-pool.mjs';
 import { loadConfig } from '../src/config-loader.mjs';
+import { pickRemediationWorkerClass } from '../src/remediation-worker-routing.mjs';
+import { remediatorClassForQuotaLabel, remediatorQuotaEvidence } from '../src/remediation-quota-evidence.mjs';
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -72,6 +74,54 @@ test('enabled other-family routing reaches the Grok pool and retains its class',
   assert.equal(fallback.workerClass, 'remediator-grok');
   assert.equal(fallback.fellBack, true);
   assert.equal(fallback.fallbackProvider, 'xai');
+});
+
+test('enabled Grok pin routes Grok-built PRs to their non-Grok default before account selection', async () => {
+  const pinnedLoader = () => ({ get: (key, fallback) =>
+    key === 'roles.remediator' ? 'remediator-grok' : loaderImpl().get(key, fallback) });
+  assert.equal(pickRemediationWorkerClass({ builderTag: 'codex' }, {
+    env, loaderImpl: pinnedLoader,
+  }), 'remediator-grok');
+  for (const builderTag of ['grok', 'grok-api', 'grok-remediation', 'remediator-grok', 'hammer-grok']) {
+    const job = { builderTag };
+    const primary = pickRemediationWorkerClass(job, { env, loaderImpl: pinnedLoader });
+    assert.equal(primary, 'remediator-codex');
+    const seen = [];
+    const result = await resolveRemediationWorkerClassWithFallback({
+      primary, job, env, loaderImpl: pinnedLoader,
+      ensureWorkerRegistryReadyImpl: async () => {}, modelForClass: () => 'synthetic-model',
+      selectAccountImpl: async ({ identity }) => {
+        seen.push(identity);
+        return { identity, workerClass: identity, pooled: true, hold: false, status: 'selected' };
+      },
+      execFileImpl: () => assert.fail('selected pool must not read fleet status'),
+    });
+    assert.equal(result.workerClass, 'remediator-codex');
+    assert.equal(result.hold, false);
+    assert.deepEqual(seen, ['remediator-codex']);
+  }
+});
+
+test('unpooled Grok quota holds reroute on the next claim without fleet evidence', async () => {
+  const nowMs = Date.parse('2026-11-10T00:00:00Z');
+  for (const label of ['remediator-grok', 'grok', 'grok-remediation']) {
+    assert.equal(remediatorClassForQuotaLabel(label), 'remediator-grok');
+    const job = { builderTag: 'codex', remediationPlan: { retryHistory: [{
+      requeuedAt: '2026-11-09T23:55:00Z',
+      retryMetadata: { code: 'quota-exhausted', workerClass: label,
+        providerResetAt: '2026-11-11T00:00:00Z' },
+    }] } };
+    assert.equal(remediatorQuotaEvidence(job, { nowMs }).get('remediator-grok').pastHoldWindow, true);
+    const result = await resolveRemediationWorkerClassWithFallback({
+      primary: 'remediator-grok', fallbackWorkerClasses: ['claude-code'], job, nowMs, ...options,
+      ensureWorkerRegistryReadyImpl: async () => {}, modelForClass: () => 'synthetic-model',
+      selectAccountImpl: async () => null, execFileImpl: null,
+    });
+    assert.equal(result.workerClass, 'claude-code');
+    assert.equal(result.fellBack, true);
+    assert.equal(result.hold, false);
+    assert.equal(result.capSource, 'provider-reset-past-hold-window');
+  }
 });
 
 test('Grok pool proposal uses the normalized family for either account kind', async () => {

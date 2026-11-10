@@ -750,7 +750,7 @@ export async function tryRetriggerReviewFromLabel({
       ? 'review-retriggered'
       : `noop:${rereviewResult?.reason || 'unknown'}`,
     detail: queued
-      ? 'explicit re-review queued within the bounded dispatch window'
+      ? 'explicit re-review queued; capacity waits retry automatically'
       : `review row not reset: ${rereviewResult?.reason || 'unknown'}`,
     rereviewResult,
     ackComment: consumption.ackComment,

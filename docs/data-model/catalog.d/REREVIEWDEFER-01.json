@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "explicit-review-intents",
+      "title": "Explicit Re-review Intents",
+      "path": "docs/data-model/explicit-review-intents.md",
+      "store": "data/reviews.db: explicit_review_intents",
+      "schemaSurface": "src/explicit-review-intent.mjs",
+      "relatedSchemaSurfaces": [
+        "src/review-state.mjs",
+        "src/operator-label-review-wake.mjs",
+        "src/pollonce-phases.mjs",
+        "src/reviewed-head-dispatch-gate.mjs",
+        "src/review-state-db.mjs",
+        "src/queued-review-dismissal.mjs"
+      ],
+      "owner": "watcher review dispatch",
+      "compatibility": "No schema change. Pending intents never expire for capacity; expires_at is a load-scaled one-time waiting-notice threshold. Exact-head claim consumption, coalescing, ceilings and terminal fences remain; positively unstarted launches return their session-scoped intent to pending. Superseded bot review dismissal grants no merge authority."
+    }
+  ]
+}

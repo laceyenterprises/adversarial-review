@@ -1209,7 +1209,7 @@ function requestReviewRereview({
         });
         return {
           triggered: false,
-          status: receipt.state === 'pending' && receipt.expires_at > requestedAt ? 'already-pending' : 'blocked',
+          status: receipt.state === 'pending' ? 'already-pending' : 'blocked',
           reason: `explicit-review-request-${receipt.state}`,
           reviewRow: currentRow,
           explicitReviewIntent: receipt,

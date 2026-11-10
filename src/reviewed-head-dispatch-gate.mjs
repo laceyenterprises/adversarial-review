@@ -150,8 +150,7 @@ export async function resolveAlreadyReviewedHeadDedup({
   if (explicitReviewIntent?.state === 'pending'
       && explicitReviewIntent.repo === repoPath
       && explicitReviewIntent.pr_number === Number(prNumber)
-      && explicitReviewIntent.head_sha === head
-      && explicitReviewIntent.expires_at > new Date().toISOString()) {
+      && explicitReviewIntent.head_sha === head) {
     return { alreadyReviewed: false, reviewId: null, reviewSubmittedAt: null, reason: 'explicit-review-intent' };
   }
   if (typeof fetchReviewsForHeadImpl !== 'function') {

@@ -1,4 +1,4 @@
-import './helpers/rate-limit-state-isolation.mjs';
+import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ensureReviewStateSchema, openReviewStateDb, requestReviewRereview } from '../src/review-state.mjs';
 import { pendingExplicitReviewIntent, consumeExplicitReviewIntent, reconcileExplicitReviewIntents,
-  explicitReviewRefusalBody, refuseFailedExplicitReviewDispatch } from '../src/explicit-review-intent.mjs';
+  explicitReviewRefusalBody, refuseFailedExplicitReviewDispatch, requeueUnstartedExplicitReviewDispatch,
+  recordExplicitReviewIntent } from '../src/explicit-review-intent.mjs';
 import { resolveAlreadyReviewedHeadDedup, createHeadDispatchLease } from '../src/reviewed-head-dispatch-gate.mjs';
 import { tryRetriggerReviewFromLabel } from '../src/follow-up-retrigger-review-label.mjs';
 import { applyLivePackCrossEditReview, evaluateLivePackCrossEdits } from '../src/live-pack-cross-edit.mjs';
@@ -62,7 +63,7 @@ test('RETRIGGERDEDUP-01: a durable same-head request consumes once under its cla
   assert.equal(f.request().triggered, true);
   const intent = f.intent();
   assert.equal(intent.actor, 'fixture-operator');
-  assert.equal(Date.parse(intent.expires_at) - Date.parse(intent.requested_at), 900_000);
+  assert.ok(Date.parse(intent.expires_at) - Date.parse(intent.requested_at) >= 900_000);
   assert.equal((await dedup(intent)).reason, 'explicit-review-intent');
   assert.equal(consumeExplicitReviewIntent(f.db, intent, { headSha, sessionUuid: 'no-claim' }), false);
   const lease = createHeadDispatchLease(), key = `${repo}#${prNumber}@${headSha}`;
@@ -76,7 +77,7 @@ test('RETRIGGERDEDUP-01: a durable same-head request consumes once under its cla
   lease.release(key);
 });
 
-test('RETRIGGERDEDUP-01: request replay and coalescing preserve the deadline across restart', t => {
+test('RETRIGGERDEDUP-01: request replay and coalescing preserve the waiting threshold across restart', t => {
   const f = fixture(t);
   f.request();
   const original = f.intent();
@@ -109,14 +110,13 @@ test('RETRIGGERDEDUP-01: a failed dispatch reports refusal without rearming a co
 });
 
 for (const [kind, extra, expected] of [
-  ['expiry', {}, 'reviewer-unavailable-before-dispatch-deadline'],
   ['head move', { headSha: 'b'.repeat(40) }, 'head-changed'],
   ['terminal', { terminal: true }, 'pr-terminal'],
 ]) test(`RETRIGGERDEDUP-01: ${kind} persists refusal and retries visible delivery`, async t => {
   const f = fixture(t);
   f.request();
   const intent = f.intent(), notices = [];
-  const options = { repo, prNumber, now: kind === 'expiry' ? intent.expires_at : intent.requested_at, ...extra, logger: quiet };
+  const options = { repo, prNumber, now: intent.requested_at, ...extra, logger: quiet };
   await reconcileExplicitReviewIntents(f.db, { ...options, notify: async () => { throw new Error('synthetic outage'); } });
   f.restart();
   for (let i = 0; i < 2; i++) await reconcileExplicitReviewIntents(f.db, {
@@ -124,6 +124,7 @@ for (const [kind, extra, expected] of [
   });
   assert.equal(notices.length, 1);
   assert.match(notices[0], new RegExp(expected));
+  assert.doesNotMatch(notices[0], /retrigger-review|re-apply/);
   assert.equal(f.intent(), undefined);
 });
 
@@ -200,5 +201,69 @@ test('RETRIGGERDEDUP-01: a label coalescing onto a pending intent reports a queu
   assert.equal(accepted.rereviewResult.status, 'already-pending');
   assert.equal(accepted.rereviewResult.explicitReviewIntent.request_id, 'request-one');
   assert.equal(accepted.outcome, 'review-retriggered');
-  assert.equal(accepted.detail, 'explicit re-review queued within the bounded dispatch window');
+  assert.equal(accepted.detail, 'explicit re-review queued; capacity waits retry automatically');
+});
+
+
+test('REREVIEWDEFER-01: overdue capacity wait survives restart, coalesces, notifies once and consumes once', async t => {
+  const f = fixture(t);
+  f.request();
+  f.db.prepare("UPDATE explicit_review_intents SET requested_at='2026-01-01T00:00:00Z', expires_at='2026-01-01T00:15:00Z'").run();
+  const notices = [];
+  const options = { repo, prNumber, headSha, now: '2026-01-02T00:00:00Z', logger: quiet };
+  await reconcileExplicitReviewIntents(f.db, { ...options, notify: async () => { throw new Error('synthetic outage'); } });
+  f.restart();
+  for (let tick = 0; tick < 3; tick++) await reconcileExplicitReviewIntents(f.db, {
+    ...options, notify: async intent => notices.push(explicitReviewRefusalBody(intent)),
+  });
+  assert.equal(notices.length, 1);
+  assert.match(notices[0], /Re-review queued/);
+  assert.match(notices[0], /busy since 2026-01-01T00:00:00Z/);
+  assert.doesNotMatch(notices[0], /retrigger-review|re-apply|could not run/);
+  assert.equal(f.request().status, 'already-pending');
+  f.request({ explicitReviewRequest: { requestId: 'after-long-wait', actor: 'fixture-operator' } });
+  assert.equal(f.db.prepare("SELECT count(*) AS n FROM explicit_review_intents WHERE state='pending'").get().n, 1);
+  assert.equal((await dedup(f.intent())).alreadyReviewed, false);
+  assert.equal(claimAndConsume(f, f.intent()), true);
+  assert.equal(f.intent(), undefined);
+  assert.equal((await dedup(f.intent())).alreadyReviewed, true);
+});
+
+test('REREVIEWDEFER-01: positively unstarted launches return only their own consumed intent', t => {
+  const f = fixture(t);
+  f.request();
+  const intent = f.intent();
+  assert.equal(claimAndConsume(f, intent), true);
+  assert.equal(requeueUnstartedExplicitReviewDispatch(f.db, intent, 'other-session'), false);
+  f.db.prepare("UPDATE reviewed_prs SET reviewer_session_uuid = 'newer-session'").run();
+  assert.equal(requeueUnstartedExplicitReviewDispatch(f.db, intent, 'fixture-session'), false);
+  f.db.prepare("UPDATE reviewed_prs SET reviewer_session_uuid = 'fixture-session'").run();
+  assert.equal(requeueUnstartedExplicitReviewDispatch(f.db, intent, 'fixture-session'), true);
+  assert.equal(f.intent().state, 'pending');
+  assert.equal(requeueUnstartedExplicitReviewDispatch(f.db, intent, 'fixture-session'), false);
+});
+
+test('REREVIEWDEFER-01: waiting observation scales with load without becoming an expiry', async t => {
+  const f = fixture(t);
+  const requestedAt = '2026-01-01T00:00:00Z';
+  const intent = recordExplicitReviewIntent(f.db, { repo, prNumber, headSha,
+    requestId: 'load-fixture', actor: 'fixture', requestedAt,
+    waitOptions: { loadAvg1m: 12, cpuCount: 4, cpuBusyPercent: 85,
+      enabled: true, maxMultiplier: 6 },
+  });
+  assert.equal(Date.parse(intent.expires_at) - Date.parse(requestedAt), 5_400_000);
+  const notices = [];
+  const run = now => reconcileExplicitReviewIntents(f.db, { repo, prNumber, headSha,
+    now, notify: async receipt => notices.push(explicitReviewRefusalBody(receipt)) });
+  await run('2026-01-01T00:16:00Z');
+  assert.equal(notices.length, 0);
+  await run('2026-01-01T01:30:00Z');
+  assert.equal(notices.length, 1);
+  assert.equal(f.intent().state, 'pending');
+  await reconcileExplicitReviewIntents(f.db, { repo, prNumber, headSha,
+    terminal: true, now: '2026-01-01T02:00:00Z',
+    notify: async receipt => notices.push(explicitReviewRefusalBody(receipt)) });
+  assert.equal(notices.length, 2, 'waiting delivery must not suppress terminal delivery');
+  assert.match(notices[1], /pr-terminal/);
+  assert.doesNotMatch(notices[1], /retrigger-review|re-apply/);
 });

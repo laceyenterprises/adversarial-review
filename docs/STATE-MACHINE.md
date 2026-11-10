@@ -124,12 +124,20 @@ Accepted label, CLI, rescue and remediation requests atomically pair their row
 reset with a persistent exact-head request receipt. `pending` intent becomes
 `consumed` once immediately before reviewer dispatch under the existing claim
 and head lease. It spends the normal rereview budget. Concurrent request IDs
-coalesce without extending the deadline; replayed IDs cannot grant another pass.
+coalesce without changing the waiting threshold; replayed IDs cannot grant another pass.
 
-Credential and capacity holds retain pending intent. Head movement, terminal
-PR, exhausted ceilings or the existing rereview dispatch wait bound (900 seconds
-by default) produce `refused` intent and a visible explanation. Notice failures
-remain durable delivery debt. A valid pending intent prevents dedup row repair
+Credential, capacity and queue-depth holds retain pending intent regardless of age
+and retry each tick. The legacy `expires_at` is a load-scaled waiting-notice
+threshold (900-second nominal), never a refusal deadline. One informational notice
+is delivered after that threshold. Head movement, terminal PR or exhausted ceilings
+produce `refused` intent and a visible explanation. Notice failures remain durable
+delivery debt. A positively unstarted runtime launch returns its own consumed intent
+to pending under its session CAS without spending a review attempt. While an intent
+is queued or running, only configured bots' strictly superseded Request changes are
+dismissed through SVD-02 after a live head/state refresh; unreadable state defers
+dismissal, and moved/closed requests settle even during capacity holds.
+Current/unknown-head and human reviews remain. This grants
+no merge authority: exact-head zero-finding review, attestation and leases still apply. A valid pending intent prevents dedup row repair
 from restoring `posted`. Implicit same-head dispatch remains deduplicated.
 See [the store contract](data-model/explicit-review-intents.md).
 

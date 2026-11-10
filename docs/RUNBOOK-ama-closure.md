@@ -4885,7 +4885,10 @@ mandatory. An omitted head therefore works only for a review on the pinned head.
 `diagnostic` naming the first failed predicate: `run-pin-invalid`, `plan-invalid`,
 `plan-head-invalid`, `review-missing`, `review-head-mismatch`, `reviewer-untrusted`,
 or `review-state-invalid`. These codes are declared in
-`src/ama/hammer-edit-plan-contracts.ts`; they contain no submitted values.
+`src/ama/hammer-edit-plan-contracts.d.ts` and enforced by the frozen
+`HAMMER_REVIEW_EVIDENCE_DIAGNOSTICS` allow-list in `src/ama/hammer-edit-plan.mjs`.
+The shared refusal helper throws for unknown codes without echoing the supplied
+value; neither CLI nor checker can emit an arbitrary diagnostic through it.
 `review-head-mismatch` compares the fetched review with the resolved plan head,
 not with Git HEAD. A candidate SHA does not substitute for a cited review SHA.
 An explicit older review citation only passes this pre-edit check; ancestry,

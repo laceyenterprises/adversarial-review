@@ -32,8 +32,9 @@ and body, including:
 - submitted at: `2026-11-10T01:35:05Z`;
 - zero blocking cards and six advisory cards, the last two demoted from blocking.
 
-`findings.json` pins the complete `parseReviewFindings` output, including title,
-file, lines, problem, significance and recommended fix. It retains all six
+`findings.json` pins the authority-relevant `parseReviewFindings` output: titles,
+files, lines, section counts/states, malformed classification and verdict
+consistency. Explanatory prose is deliberately excluded. It retains all six
 advisory identities in order: pending redispatch/direct reuse, mutation-lock
 hold, retained unknown payload, hourly scan cost, retry cleanup hold, and
 forced teardown. Demotion does not create a blocking citation under the same
@@ -94,3 +95,11 @@ All commands run through the bounded `cwp_dispatch.worker_validation` runner.
   Each reported a pending promise after its event loop resolved; the runner
   then reported `ETIMEDOUT`. This broad run is not green. No second broad run
   was made; scoped tests above verify the changed behavior.
+
+Hosted CI subsequently completed both full-suite lanes on reviewed head
+`bc6f0501e047acb6df7307d0bdea3287014c6aa1`:
+[Node 22 and Node 26](https://github.com/laceyenterprises/adversarial-review/actions/runs/42752511505)
+were both `SUCCESS` (confirmed read-only during final remediation). This
+supersedes the incomplete local run as full-suite evidence for that head.
+The final remediation head must independently pass the existing hosted checks
+before merge; no CI configuration or gate was added.

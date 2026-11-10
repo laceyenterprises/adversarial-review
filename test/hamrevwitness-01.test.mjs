@@ -5,7 +5,8 @@ import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { main, editPlanExitCode } from '../bin/hammer-edit-plan.mjs';
-import { checkHammerEditPlan } from '../src/ama/hammer-edit-plan.mjs';
+import { checkHammerEditPlan, HAMMER_REVIEW_EVIDENCE_DIAGNOSTICS,
+  refuseHammerReviewEvidence } from '../src/ama/hammer-edit-plan.mjs';
 import { parseReviewFindings } from '../src/kernel/review-findings.mjs';
 import { findingLocations } from '../src/kernel/finding-lines.mjs';
 import { normalizeEffectiveReviewVerdict } from '../src/kernel/verdict.mjs';
@@ -18,12 +19,23 @@ const reviewedHead = '89d3e4316d09c584b193a1357a7b4e33e0140311';
 const plan = { kind: 'non-blocking', findingNumber: 1, editKind: 'additive' };
 const refused = diagnostic => ({ action: 'stop', reason: 'review-evidence-invalid', diagnostic });
 
+// Pin authority and coordinates without coupling this RCA to prose normalization.
+const findingEvidence = parsed => ({
+  verdict_inconsistent: parsed.verdict_inconsistent,
+  findingsCount: parsed.findingsCount,
+  ...Object.fromEntries(['blocking', 'nonBlocking'].map(kind => {
+    const { count, state, malformed, findings } = parsed[kind];
+    return [kind, { count, state, ...(malformed === undefined ? {} : { malformed }),
+      findings: findings.map(({ title, file, lines }) => ({ title, file, lines })) }];
+  })),
+});
+
 test('exact posted review retains all six advisory identities, including two demotions', () => {
   assert.equal(review.id, 5835410207);
   assert.equal(review.commit_id, reviewedHead);
   assert.equal(review.user.login, 'lacey-claude-reviewer[bot]');
   assert.equal(review.state, 'CHANGES_REQUESTED');
-  assert.deepEqual(parseReviewFindings(review.body), normalized);
+  assert.deepEqual(findingEvidence(parseReviewFindings(review.body)), normalized);
   assert.equal(normalized.nonBlocking.count, 6);
   assert.equal(normalized.blocking.count, 0);
   // Preserve the independent fail-closed verdict-consistency classifier.
@@ -33,6 +45,23 @@ test('exact posted review retains all six advisory identities, including two dem
   assert.deepEqual(normalized.nonBlocking.findings.map(f => /demoted|insufficient blocking evidence/.test(f.title)),
     [false, false, false, false, true, true]);
   assert.equal((review.body.match(/demoted from blocking/g) || []).length, 2);
+});
+
+test('refusal helper enforces its frozen value-free diagnostic allow-list', () => {
+  assert.equal(Object.isFrozen(HAMMER_REVIEW_EVIDENCE_DIAGNOSTICS), true);
+  assert.deepEqual(HAMMER_REVIEW_EVIDENCE_DIAGNOSTICS, [
+    'run-pin-invalid', 'plan-invalid', 'plan-head-invalid', 'review-missing',
+    'review-head-mismatch', 'reviewer-untrusted', 'review-state-invalid',
+  ]);
+  for (const diagnostic of HAMMER_REVIEW_EVIDENCE_DIAGNOSTICS) {
+    assert.deepEqual(refuseHammerReviewEvidence(diagnostic), refused(diagnostic));
+  }
+  for (const diagnostic of ['review-head-mismatched', 'private-review-body', '', undefined, null,
+    { toString: () => 'review-missing' }]) {
+    assert.throws(() => refuseHammerReviewEvidence(diagnostic), {
+      name: 'TypeError', message: 'Unknown hammer review evidence diagnostic',
+    });
+  }
 });
 
 test('candidate pin reproduces exact-head refusal; explicit review witness passes without rewriting input', async t => {

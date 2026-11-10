@@ -13,50 +13,32 @@
       {
         "title": "Pending-redispatch exemption bypasses direct-reuse protection",
         "file": "`modules/worker-pool/lib/python/cwp_dispatch/reclaim_redispatch_guard.py`",
-        "lines": "`35-45`",
-        "problem": "When `inspect(directory)` succeeds, `_worker_has_pending_redispatch` returns `False` before `pending_reuse()` runs. That skips the `pending_launch_uses_worker` checks for `payload.workerId == worker_id` and for a `target_worktree` inside the directory. The sweep evaluator's `holds()` is the only caller where this changes behaviour. It can now reclaim a slot that a queued launch was told to reuse. `docs/RCA-dag-reaped-reused-worktree-launch-failure-2026-08-01.md` records that a reaped reuse target caused launch failures instead of falling through to a fresh provision. Missing evidence: I did not confirm whether that RCA's fix has landed, so I am not marking this blocking.",
-        "whyItMatters": "If reuse of a missing directory still fails hard, the sweep turns harmless debris into a launch failure for a queued job.",
-        "recommendedFix": "Keep the dirty-index exemption but still run `pending_reuse()` for failed-provision directories, or show that reuse of a missing slot falls through to a fresh provision."
+        "lines": "`35-45`"
       },
       {
         "title": "Pre-add record lengthens repo mutation-lock hold",
         "file": "`modules/worker-pool/lib/hq-worker-provision.sh`",
-        "lines": "`2379-2387; 3613-3622`",
-        "problem": "`hq_record_provision_in_progress` starts a Python interpreter, runs `git rev-parse <startpoint>^{commit}` (up to `scaled_timeout(10)`), then fsyncs the file and its directory. Both call sites do this while holding the per-repo worktree mutation lock. That lock covers every provision in the repo, and DISPATCHBURST-01 narrowed it to \"selection and add\" only. Durable intent before the add is justified, but the cost lands on every add, inside the lock most sensitive to contention (see the SEV1 of 2026-11-07).",
-        "whyItMatters": "Under burst load this adds seconds of serialized hold per add.",
-        "recommendedFix": "Resolve the base commit and write the marker before taking the mutation lock. Under the lock, only recheck that the startpoint still resolves to the recorded commit."
+        "lines": "`2379-2387; 3613-3622`"
       },
       {
         "title": "Unknown-payload marker is never consumed",
         "file": "`modules/worker-pool/lib/python/cwp_dispatch/failed_provision.py`",
-        "lines": "`121-138; reclaim unknown-payload branch`",
-        "problem": "After registered trees are reclaimed and unknown payload remains, the merged marker still lists `targets`. On the next pass, `inspect` finds no trees and raises `unregistered provision payload`. Census then reports `no-worker-record` indefinitely. The docs say \"stale sweeps own deferred cleanup\", but no consumer can ever take it.",
-        "whyItMatters": "These directories pile up silently outside the `failed-provision` census group that SRE is told to watch trend to zero.",
-        "recommendedFix": "Report a distinct census reason (for example `failed-provision-payload-retained`) so operators can see the backlog, and correct the docs' wording on ownership."
+        "lines": "`121-138; reclaim unknown-payload branch`"
       },
       {
         "title": "Hourly scan cost for held manifestless directories",
         "file": "`modules/worker-pool/lib/python/cwp_dispatch/worker_teardown_scan.py`",
-        "lines": "`93-102`",
-        "problem": "Every manifestless, non-gym directory runs `inspect` serially in the scan: three `git rev-parse` calls per tree, each up to `scaled_timeout(10)`. Directories that are held for good (HEAD moved, locked by an operator, index present) are probed again every pass. `handle_candidate` also skips the attempt-fingerprint memo for `failed-provision`. With about 100 such directories under load, this eats into the 595 s pass ceiling.",
-        "whyItMatters": "It delays sweep admission for everything else.",
-        "recommendedFix": "Cache held results by an mtime fingerprint of the worker, admin directory and marker, or route these candidates through the existing `schedulingFingerprint` memo."
+        "lines": "`93-102`"
       },
       {
         "title": "Retry cleanup hold blocks provisioning — insufficient blocking evidence",
         "file": "`modules/worker-pool/lib/hq-worker-provision.sh`",
-        "lines": "`5045-5057` (new retry-cleanup block before `# --- materialize the workspace ---`)",
-        "problem": "Input or state: a fresh provision for job J finds a matching earlier attempt (same launch, ticket or worker stem). That attempt passes `failed_provision retries`, which checks only that the slot lease is dead and runs `inspect`. It does not check for processes using the directory. Canonical teardown then holds it. Examples: an orphaned or hung `git` child from the killed provision, or an operator shell still `cd`'d into it, makes `ensure_idle` raise `live worker path holder`. A `workspace_bytes` `TimeoutError` inside `prepare` does the same. So does an `hq_die` from `hq_validate_identifier`. In every case `hq_failed_provision_reclaim` returns 75 and teardown exits 75. Wrong outcome: `\"$HQ_BIN\" worker tear-down \"$failed_worker\" ... || { hq_err \"provision_failed_attempt_deferred: ...\"; exit 75; }` aborts J's provision before it materializes anything. On the next backoff retry the same attempt is listed again, because `retries` never checks for processes, so J cannot provision until the hold clears. Before this PR, J simply got a new suffixed directory. The time cost is also unbounded. The \"eight inspections within a load-scaled 5 s window\" limit applies only to the scan. Up to eight full canonical teardowns then run one after another on J's critical path. Each starts several Python interpreters, takes a `ps`+`lsof` census, and walks the attempt's size for up to `scaled_timeout(15)`. All of that happens before J has spent any of its own provision or dispatch-deadline budget. Evidence downgrade: missing-behaviour.",
-        "whyItMatters": "This turns optional disk cleanup into a hard gate on admission for every later attempt of the job, and for other worker classes that share the ticket through `ticketRef` matching. It matches the \"preflight refuses instead of recovering\" and `worker-provision.robustness` failure classes. During congestion, the conditions of this incident, it lengthens provisions toward the dispatch deadline and can produce exactly the killed-provision debris this PR is meant to clear (see the 2026-10-10 SEV2 on two-repo provisions cut at the dispatch deadline).",
-        "recommendedFix": "Make retry cleanup truly best-effort. On a teardown failure, log `provision_failed_attempt_deferred` and `continue`, leaving the stale sweep to own the held attempt. If the census call itself fails, continue rather than exiting 75. Put a total wall-clock budget on the teardown loop, not only on the scan, and add a test where a held matching attempt still lets the new provision proceed."
+        "lines": "`5045-5057` (new retry-cleanup block before `# --- materialize the workspace ---`)"
       },
       {
         "title": "`--force` teardown bypassed by failed-provision branch — insufficient blocking evidence",
         "file": "`modules/worker-pool/lib/hq-worker-tear-down.sh`",
-        "lines": "`617-626`",
-        "problem": "Input or state: an operator runs `hq worker tear-down <id> --force` on a manifestless directory that `failed_provision plan` classifies as failed-provision, but whose reclaim holds. Typical causes: a surviving process with its cwd or argv in the tree (an orphaned checkout child), or a size walk that exceeds `scaled_timeout(15)`. Wrong outcome: the new block checks only `ROLLUP_ONLY`, workspace-manifest absence and that the path is not a symlink, never `FORCE`. It runs before the existing `FORCE == 1 && ! -f \"$WORKSPACE_JSON\"` → `cleanup_worker_git_state` path, so `hq_failed_provision_reclaim \"$WORKER_DIR\" || exit 75` returns 75. The forced path that runs `worker_force_terminate` and then `hq_worktree_drop` is never reached. Before this PR, `--force` reclaimed exactly these directories. Evidence downgrade: missing-behaviour.",
-        "whyItMatters": "The operator's explicit recovery override for partial provisions becomes unreachable for the very class this incident is about. A directory that canonical reclaim keeps holding can no longer be removed with the documented tool, which is the \"preflight refuses recovery instead of attempting it\" pattern.",
-        "recommendedFix": "Skip the failed-provision branch when `FORCE == 1`, or fall through to the existing forced path when reclaim fails under `--force`. Add a test where a holder is present and `--force` still reaches `cleanup_worker_git_state`."
+        "lines": "`617-626`"
       }
     ]
   },

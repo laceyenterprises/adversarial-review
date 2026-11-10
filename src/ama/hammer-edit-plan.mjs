@@ -3,11 +3,24 @@ import { normalizeEffectiveReviewVerdict } from '../kernel/verdict.mjs';
 import { amaAllAuthoritativeReviewerLogins } from './reviewer-authority.mjs';
 import { checkReversalFinding } from './reversal-finding.mjs';
 
+export const HAMMER_REVIEW_EVIDENCE_DIAGNOSTICS = Object.freeze([
+  'run-pin-invalid',
+  'plan-invalid',
+  'plan-head-invalid',
+  'review-missing',
+  'review-head-mismatch',
+  'reviewer-untrusted',
+  'review-state-invalid',
+]);
+
 /**
  * @param {import('./hammer-edit-plan-contracts.js').HammerReviewEvidenceDiagnostic} diagnostic
  * @returns {import('./hammer-edit-plan-contracts.js').HammerReviewEvidenceRefusal}
  */
 export function refuseHammerReviewEvidence(diagnostic) {
+  if (!HAMMER_REVIEW_EVIDENCE_DIAGNOSTICS.includes(diagnostic)) {
+    throw new TypeError('Unknown hammer review evidence diagnostic');
+  }
   return { action: 'stop', reason: 'review-evidence-invalid', diagnostic };
 }
 

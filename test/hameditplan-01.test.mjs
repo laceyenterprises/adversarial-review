@@ -232,34 +232,32 @@ test('CLI rejects malformed or mismatched review heads and missing pins and reta
   const rootDir = mkdtempSync(join(tmpdir(), 'hameditplan-evidence-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const planFile = join(rootDir, 'plan.json');
-  for (const [pin, reviewedHead, candidate] of [
-    [review.commit_id, 'b'.repeat(40), review],
-    [review.commit_id.toUpperCase(), 'B'.repeat(40), review],
-    [review.commit_id, 'invalid', review],
-    [review.commit_id, 'd'.repeat(39), review],
-    [review.commit_id, 'd'.repeat(41), review],
-    [review.commit_id, 'G'.repeat(40), review],
-    ['D'.repeat(39), null, review],
-    ['D'.repeat(41), null, review],
-    ['G'.repeat(40), null, review],
-    [review.commit_id, ` ${review.commit_id}`, review],
-    [undefined, review.commit_id, review],
-    ['', review.commit_id, review],
-    ['invalid', review.commit_id, review],
-    [review.commit_id, null, { ...review, commit_id: 'b'.repeat(40) }],
-    [review.commit_id, null, { ...review, user: { login: 'synthetic-author' } }],
-    [review.commit_id, null, { ...review, state: 'PENDING' }],
+  for (const [pin, reviewedHead, candidate, diagnostic] of [
+    [review.commit_id, 'b'.repeat(40), review, 'review-head-mismatch'],
+    [review.commit_id.toUpperCase(), 'B'.repeat(40), review, 'review-head-mismatch'],
+    [review.commit_id, 'invalid', review, 'plan-head-invalid'],
+    [review.commit_id, 'd'.repeat(39), review, 'plan-head-invalid'],
+    [review.commit_id, 'd'.repeat(41), review, 'plan-head-invalid'],
+    [review.commit_id, 'G'.repeat(40), review, 'plan-head-invalid'],
+    ['D'.repeat(39), null, review, 'run-pin-invalid'],
+    ['D'.repeat(41), null, review, 'run-pin-invalid'],
+    ['G'.repeat(40), null, review, 'run-pin-invalid'],
+    [review.commit_id, ` ${review.commit_id}`, review, 'plan-head-invalid'],
+    [undefined, review.commit_id, review, 'run-pin-invalid'],
+    ['', review.commit_id, review, 'run-pin-invalid'],
+    ['invalid', review.commit_id, review, 'run-pin-invalid'],
+    [review.commit_id, null, { ...review, commit_id: 'b'.repeat(40) }, 'review-head-mismatch'],
+    [review.commit_id, null, { ...review, user: { login: 'synthetic-author' } }, 'reviewer-untrusted'],
+    [review.commit_id, null, { ...review, state: 'PENDING' }, 'review-state-invalid'],
     // A valid head matching neither the pin nor the fetched review cannot authorize edits.
-    ['b'.repeat(40), 'c'.repeat(40), review],
+    ['b'.repeat(40), 'c'.repeat(40), review, 'review-head-mismatch'],
   ]) {
     writeFileSync(planFile, JSON.stringify({ ...ci, reviewedHead }));
     const result = await main(['sample/service', '7', '1', planFile], {
       rootDir, env: { HAM_REVIEWED_SHA: pin }, readReviewImpl: async () => candidate,
       loadPolicy: () => ({}), captureImpl: () => assert.fail('invalid evidence must not capture'),
     });
-    assert.equal(result.action, 'stop');
-    assert.equal(result.reason, 'review-evidence-invalid');
-    assert.equal(typeof result.diagnostic, 'string');
+    assert.deepEqual(result, { action: 'stop', reason: 'review-evidence-invalid', diagnostic });
     assert.equal(editPlanExitCode(result), 1);
   }
 });

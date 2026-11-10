@@ -1,4 +1,4 @@
-/** Value-free first-failure codes; never include review or plan content. */
+/** Value-free first-failure codes; the refusal helper enforces the runtime allow-list. */
 export type HammerReviewEvidenceDiagnostic =
   | 'run-pin-invalid'
   | 'plan-invalid'

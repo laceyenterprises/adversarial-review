@@ -3184,15 +3184,11 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
         log,
       });
     }
-    if (claimed.finalCapResult) {
-      log.warn(JSON.stringify({ event: 'remediation.final_cap_operator_action_required',
-        ...claimed.finalCapResult }));
-    }
+    if (claimed.finalCapResult) log.warn(JSON.stringify({ event: 'remediation.final_cap_operator_action_required', ...claimed.finalCapResult }));
     return {
       consumed: false,
       reason: claimed.reason || 'max-rounds-reached',
-      job: claimed.job,
-      jobPath: claimed.jobPath,
+      job: claimed.job, jobPath: claimed.jobPath,
       ...(claimed.finalCapResult ? { finalCapResult: claimed.finalCapResult } : {}),
     };
   }

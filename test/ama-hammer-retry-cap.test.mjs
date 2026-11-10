@@ -532,7 +532,7 @@ for (const reason of HAMMER_RETRYABLE_READ_OUTCOMES) {
   });
 }
 
-test('OVERLOADDEFER-01: real closer dispatch backs off, retries and retains ownership at the overload cap', async t => {
+test('OVERLOADDEFER-01b: real closer dispatch backs off, retries and releases ownership at the overload cap', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'synthetic-closer-overload-cap-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD };
@@ -562,6 +562,16 @@ test('OVERLOADDEFER-01: real closer dispatch backs off, retries and retains owne
         launchRequestId: endedLaunch, overloadEvidence: { phase: 'synthetic-read',
           deadline_seconds: 30, scaled_budget_seconds: 180, load_multiplier: 6, load_per_core: 4 } }) });
     const deferred = await run(now);
+    if (count === 5) {
+      assert.equal(deferred.dispatched, true, JSON.stringify(deferred));
+      const released = readHammerRetryCapLedger(rootDir, identity);
+      assert.ok(!released.overloadDeferral);
+      assert.equal(released.lastOverloadDeferral.deferralCount, 5);
+      assert.equal(pages, 1);
+      assert.equal((await run(now + 10000)).dispatched, false, 'live normal closer retains custody');
+      assert.equal(pages, 1);
+      break;
+    }
     assert.equal(deferred.dispatched, false, JSON.stringify(deferred));
     assert.equal(deferred.reason, 'overload-deferred');
     const receipt = readHammerRetryCapLedger(rootDir, identity).overloadDeferral;
@@ -588,12 +598,9 @@ test('OVERLOADDEFER-01: real closer dispatch backs off, retries and retains owne
         assert.equal(pages, pagesBefore, 'repeat observations must not page');
       }
       assert.equal((await run(retryAt)).dispatched, true);
-    } else {
-      assert.equal(deferred.needsOperator, true);
-      assert.equal((await run(now + 10000)).dispatched, false);
     }
   }
-  assert.equal(launches, 5);
+  assert.equal(launches, 6, 'five overload attempts then one normal-lane closer');
   assert.equal(pages, 1);
 });
 

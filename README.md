@@ -2979,6 +2979,16 @@ verify the hold and fallthrough alongside the existing four smoke promises.
 After ordinary deployment and approved reload, SRE retains an organic native
 fallthrough/hold and OS-mode comparison; offline tests establish no live recovery.
 
+Pending rescue overload receipts are retried by this watcher at startup and
+on a 30-second recovery timer, with one bounded child and fair PR selection.
+Only PR identity goes to retry-only rescue; fresh intent and launch custody
+are re-evaluated there. At helper exhaustion the AMA pass emits one PR/head
+alert, archives overload debt and releases its hold to normal capped closer
+selection. Existing smoke steps and merge predicates are unchanged. After
+both revisions deploy, SRE retains the loaded watcher PID/start time and
+observes natural retry progress without manual rescue pumping. See
+[OVERLOADDEFER-01b](docs/changes/OVERLOADDEFER-01b.md).
+
 <!-- smv:diagrams:start -->
 
 ### explicit-review-intent

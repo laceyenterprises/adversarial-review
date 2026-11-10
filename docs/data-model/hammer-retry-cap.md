@@ -7,8 +7,14 @@ replacement launches and review/head resets for the same PR owner. It carries
 `overloadAlert` and `alertKey=host-overload`. Existing ledger locking serializes
 updates. A launch increments debt once, even when multiple observations see
 its deferred audit. Retry windows are 30, 60, 120 and 240 seconds; the fifth
-deferral retains ownership and requires overload attention without a terminal
-stop or automatic replacement. This debt is distinct from failure charges.
+deferral emits one PR/head alert with phase/load evidence and releases the
+overload hold to ordinary closer selection. `lastOverloadDeferral` archives the
+exhausted receipt across later launches and head/series changes; it prevents
+further overload refunds. `overloadDeferral` is null after release, with
+`leaseWaitExhausted=true` and `deferralNextAt=null` allowing normal selection.
+Existing attempt/lifetime/target caps and lease checks still apply. Alert or
+ledger-write failure remains retryable by the existing AMA pass. This debt is
+distinct from failure charges.
 
 ## Stop repair lineage (STOPHOLDREPAIR-01)
 

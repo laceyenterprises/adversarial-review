@@ -1,0 +1,16 @@
+operator_steps:
+  - description: >-
+      After both reviewed revisions deploy and the review-service float,
+      restart the registered watcher through the documented deployment path.
+      Retain deployed SHAs and watcher PID/start time proving the new revision
+      is loaded. Observe a naturally deferred rescue receipt advancing or
+      launching within one retry interval; affected PRs must acquire a closer
+      or released owner without manual pumping. Coordinate the incident-PR
+      checks with the companion Agent OS handoff. This plan executes no live
+      repair and source fixtures do not establish deployed acceptance.
+    run_as: designated SRE operator
+    command: /bin/cat docs/changes/OVERLOADDEFER-01b.md
+actions: []
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

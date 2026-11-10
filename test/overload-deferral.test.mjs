@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { deferOverload, isLoadTimeout, MAX_OVERLOAD_DEFERRALS } from '../src/overload-deferral.mjs';
 import { evaluateHammerDeferralQueue, recordHammerRetryDispatch, deferHammerRetryDispatch,
-  readHammerRetryCapLedger } from '../src/ama/hammer-retry-cap.mjs';
+  readHammerRetryCapLedger, releaseHammerOverloadDeferral } from '../src/ama/hammer-retry-cap.mjs';
 import { observeClosureWait } from '../src/ama/closure-wait.mjs';
 import { runHelperStep } from '../bin/hammer-helper-step.mjs';
 import { recordHammerEarlyFailure } from '../src/ama/hammer-terminal-audit.mjs';
@@ -64,12 +64,26 @@ test('retry debt survives replacement launches and re-reading the durable ledger
     const now = new Date((1000 + count * 600) * 1000).toISOString();
     recordHammerRetryDispatch(root, identity, { jobKey: head, headSha: head, launchRequestId, now });
     const ledger = deferHammerRetryDispatch(root, identity, { jobKey: head, headSha: head,
-      launchRequestId, now, leaseWaitExhausted: true, overloadEvidence: evidence });
+      launchRequestId, now, leaseWaitExhausted: true, laneBusy: count === 1, overloadEvidence: evidence });
     assert.equal(ledger.overloadDeferral.deferralCount, count);
     assert.equal(readHammerRetryCapLedger(root, identity).overloadDeferral.deferralCount, count);
   }
   const receipt = readHammerRetryCapLedger(root, identity);
   assert.equal(evaluateHammerDeferralQueue(receipt, new Date(1e12).toISOString()).expired, true);
+  releaseHammerOverloadDeferral(root, identity);
+  const released = readHammerRetryCapLedger(root, identity);
+  assert.equal(released.overloadDeferral, null);
+  assert.equal(released.lastOverloadDeferral.deferralCount, MAX_OVERLOAD_DEFERRALS);
+  assert.deepEqual(evaluateHammerDeferralQueue(released, new Date(1e12).toISOString()),
+    { expired: false, backoff: false });
+  // An ordinary closer attempt remains charged after release.
+  recordHammerRetryDispatch(root, identity, { jobKey: head, headSha: head,
+    launchRequestId: 'normal-lane', now: new Date(1e12).toISOString() });
+  const before = readHammerRetryCapLedger(root, identity).attemptCount;
+  const after = deferHammerRetryDispatch(root, identity, { jobKey: head, headSha: head,
+    launchRequestId: 'normal-lane', now: new Date(1e12).toISOString(),
+    leaseWaitExhausted: true, overloadEvidence: evidence });
+  assert.equal(after.attemptCount, before);
 });
 
 test('many overloaded PR owners share one durable host alert', async t => {

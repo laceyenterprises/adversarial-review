@@ -118,6 +118,17 @@ unbatched releases. Settlement and backfill share lifecycle
 grade kinds, and backfill skips settlement observations. Existing states and
 smoke promises are unchanged.
 
+The watcher owns launch-less rescue overload debt on startup and a 30-second
+timer, one bounded child at a time. Retry-only rescue rechecks current PR
+head/review/holds/writers and reconciles the original key before replay or
+release. Head/review changes retire stale intent to normal selection. The
+AMA pass releases exhausted helper holds after one structured PR/head alert;
+`lastOverloadDeferral` survives replacements and prevents further overload
+refunds. Ordinary budgets, leases and merge predicates remain authoritative.
+Existing automated smoke steps are unchanged. SRE verifies loaded revisions,
+watcher PID/start time and natural receipt progress after ordinary deployment;
+see [the change note](changes/OVERLOADDEFER-01b.md).
+
 ## Explicit same-head re-review intent (RETRIGGERDEDUP-01)
 
 Accepted label, CLI, rescue and remediation requests atomically pair their row

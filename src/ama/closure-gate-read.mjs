@@ -4,6 +4,7 @@
 // failure is retried in place with spaced backoff inside a closure budget; a
 // definitive answer refuses at once, exactly as strictly as before. Nothing
 // here ever turns an unreadable result into a passing one.
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 
 // HAMMERLAUNCHREAD-01: a failed read waits before the next one. Remote reads
 // fail in bursts, so back-to-back retries land inside the same burst. Each wait
@@ -65,7 +66,7 @@ export function closureGateFailureDetail(error) {
 // `exhausted` covers transient failures and contradicted 404s that outlast the
 // budget; `notFoundContradicted` says whether any 404 was contradicted.
 export function readClosureGateSync(read, {
-  budgetMs = CLOSURE_GATE_BUDGET_MS, clock = closureGateClock,
+  budgetMs = loadAwareTimeoutMs(CLOSURE_GATE_BUDGET_MS), clock = closureGateClock,
   classify = classifyClosureGateFailure, confirmNotFound,
 } = {}) {
   const begun = clock.now();

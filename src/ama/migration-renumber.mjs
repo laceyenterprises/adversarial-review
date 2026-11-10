@@ -539,7 +539,7 @@ export async function proveMigrationRenumbers(args, evidence) {
   const refuse = reason => { record(reason); return []; };
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new DOMException('migration proof deadline exceeded', 'TimeoutError')),
-    loadAwareTimeoutMs(90000, { maxMs: 180000 }));
+    loadAwareTimeoutMs(90000));
   const deadline = AbortSignal.any([...(args.signal ? [args.signal] : []), controller.signal]);
   const cache = new Map(), get = args.get;
   const read = (path, reader, key = path) => {

@@ -301,7 +301,8 @@ closure-gate read (those inputs, `hammer-context.mjs`, and the Git credential
 mint) shares `src/ama/closure-gate-read.mjs`: transient failures (timeout,
 5xx, connection errors, rate limits, a credential mint that timed out or failed
 to run) retry in place with the same `LAUNCH_READ_BACKOFF_MS` spacing inside a
-120-second closure budget. Definitive answers (401/403, a moved head, malformed
+nominal 120-second closure budget, scaled once by `loadAwareTimeoutMs`.
+Definitive answers (401/403, a moved head, malformed
 output) refuse at once and write a final `terminal-stop` progress receipt.
 A protection 404 "Branch not found" is
 retried only while a branch read contradicts it; confirmed or persistent, it
@@ -4516,7 +4517,8 @@ and their summary suffix are excluded from stop keys and probe comparisons.
 The latest 128 records are retained, including the terminal reason.
 PRs without migration candidates record no proof failures and skip timer/load
 sampling. Candidate collection has one nominal 90-second deadline, scaled once
-by the existing load helper up to 180 seconds, at most 64 distinct hammer snapshots and 512 cached
+by the existing load helper (540 seconds at the default maximum multiplier,
+with its shared 3600-second inflation ceiling), at most 64 distinct hammer snapshots and 512 cached
 immutable reads. Optional proof failures retain the ordinary reversal refusal.
 These proofs and diagnostics remain outside the history cache.
 
@@ -4562,7 +4564,7 @@ Git blob SHA-1**; archive contents are not normalized for comparison. Repositori
 whose tool still embeds nondeterministic bytes must fix their recorded build.
 
 Builds have a 30-second process-group budget and the complete proof has a
-120-second budget, at most four changed candidates, 10,000 source entries and
+nominal 120-second load-scaled budget, at most four changed candidates, 10,000 source entries and
 128 MiB each of unique source blobs and materialized source bytes. Outputs are
 also capped at 128 MiB. A clean
 environment disables implicit npm lifecycle hooks, audit, funding and network
@@ -4733,8 +4735,9 @@ invalidate older proof records, including original-reversal refusals cached befo
 context-tolerant matching, insertion/mixed-restoration authorization, and
 secondary/brace finding locations in historical original-reversal snapshots. Already-held PRs recompute on
 their next evaluation without head/review movement or a manual cache purge. Live head/base and
-merge-base metadata are checked before reuse; CI-cost evidence remains live. Only completed successful
-history reads are stored. An unresolved optional rename-proof read failure
+merge-base metadata are checked before reuse; CI-cost evidence remains live.
+Only completed successful proofs use top-level history records. HISTREADLOAD-01
+also checkpoints completed immutable subreads independently under the exact head. An unresolved optional rename-proof read failure
 prevents caching; a later valid proof resolves earlier failures for that source
 path only. A daemon timeout cancels merge execution while the
 bounded history read finishes and stores evidence for the next tick; stall logs
@@ -4781,7 +4784,8 @@ and HTTP 5xx receive at most three attempts. The nominal 500/1000ms backoff and
 15-second per-attempt timeout scale through `src/load-aware-timeout.mjs`.
 Secondary rate limits require a valid `Retry-After` header; the reader includes
 response headers and waits at least that long. Reads, retry waits and local
-diffs share a fixed 90-second wall-clock context budget; attempts use only the
+diffs share a nominal 90-second wall-clock context budget, scaled once through
+`loadAwareTimeoutMs` (540 seconds at the default 6× maximum); attempts use only the
 remaining time, and a retry whose delay cannot fit fails with the original error.
 An exhausted shared GitHub quota defers instead of entering an unbounded throttle
 sleep. Permanent 404, non-rate-limit 403 and 422 errors, malformed data and
@@ -4792,10 +4796,12 @@ Rejected credentials use
 the helper's single forced token-refresh attempt. Exhausted reads and malformed
 JSON emit head-scoped `historyReadFailed: true` evidence and a non-zero helper
 exit, which the predicate treats as `history-read-failed` rather than a proven reversal. The hammer prompt's
-90-second process limit remains an outer supervisor bound. HAMHISTORYBUDGET-01:
+load-aware helper process limit remains an outer supervisor bound. HAMHISTORYBUDGET-01
+and HISTREADLOAD-01:
 `fetchPrimaryChange` independently bounds the whole collection, including cached
-history waits, CI-cost and optional preservation proofs, to 90 seconds without
-load scaling. It returns exact-head `readFailed` / `historyReadFailed` evidence
+history waits, CI-cost and optional preservation proofs, to the same nominal
+90-second load-scaled budget. Explicit effective caller budgets are honored
+without a fixed nominal clamp or a second scaling pass. It returns exact-head `readFailed` / `historyReadFailed` evidence
 (`historyReadTimedOut: true` on its deadline), classified as `history-read-failed`.
 Reader error wrappers retain `HISTORY_READ_TIMEOUT` even when the elapsed-time
 check detects exhaustion before a deadline timer fires.
@@ -4807,12 +4813,21 @@ Native closer reads inherit the existing shared rate-budget scope. Standalone
 helpers (including rescue transports using this reader) create a defer-on-quota
 scope instead of sleeping until reset. A native daemon's immutable read may
 outlive a shorter poll/tick deadline for cache reuse, but cannot outlive its own
-90-second verification deadline. An external rescue's 180-second operator bound
+load-scaled verification deadline. An external rescue's 180-second operator bound
 does not replace this shared deadline. No claim is made that the reported
 Agent OS #10268 transport stall was reproduced live.
 Completed immutable evidence remains shared within a closure evaluation.
 In-flight reads belong to each reader's deadline so timing out one reader
 cannot cancel another reader's work or extend its wait.
+
+HISTREADLOAD-01: successful immutable API pages and per-file comparisons also
+checkpoint under the canonical data owner in an exact-head progress directory.
+A deferred collection reuses completed work on its next attempt, including
+after a process restart. It still reads live PR/review/cost state and proves
+completeness, provenance and preservation. Failed or cancelled work contributes
+no checkpoint. A head change selects a new progress directory. See the
+[partial-read record contract](data-model/primary-change-history.md#partial-immutable-read-checkpoints-histreadload-01)
+for identities, ownership and retention.
 
 History classification reads every paginated commit before deciding whether a
 hammer exists. Author-only and history-only classification skips file reconstruction;
@@ -4851,7 +4866,7 @@ the walker but does not prevent the cost of the initial attempt. No new size cap
 is introduced under the v1 freeze. The validation fixture covers 53 changed paths;
 large-repository latency and cache reuse are unmeasured, so request-count savings
 are not a repository-size-independent performance guarantee.
-This reduces request volume without changing the 90-second budget, quota policy,
+This reduces request volume without changing the load-scaled history budget, quota policy,
 live provenance reads, reversal authorization or cancellation ownership.
 
 Cancellation reaches metadata, subtree, blob, retry and local proof work.
@@ -5488,7 +5503,8 @@ one of:
    to the last reviewed head. The versioned
    `bin/hammer-head-context.mjs` helper discovers the live PR base and retries
    transient reads at most three times with 500/1000ms backoff and a 15-second
-   per-attempt timeout. The procedure bounds collection to 90 seconds; failed starting-base
+   per-attempt timeout, both load-scaled. The procedure uses the existing load-aware
+helper supervisor budget; failed starting-base
    proof widens the audit to the reviewed head, while failed validation or head
    movement releases for another hammer pass. Proven heads retain merge ownership without another review; all
    ordinary structural merge gates still apply. The zero-finding path is

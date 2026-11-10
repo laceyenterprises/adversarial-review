@@ -10,6 +10,7 @@ import { runInNewContext } from 'node:vm';
 import { composeCloserPrompt } from '../src/ama/dispatch-closer.mjs';
 import { isTransientGhError } from '../src/gh-cli.mjs';
 import { proveReviewedRebase } from '../src/ama/reviewed-rebase.mjs';
+import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
 
 const exec = promisify(execFile);
 const cli = fileURLToPath(new URL('../bin/hammer-head-context.mjs', import.meta.url));
@@ -30,6 +31,7 @@ test(`REBASEPROV-01 coverage fetch retries=${failures} (${failureMessage}) befor
     .replace("await import('../src/ama/reviewed-rebase.mjs')", 'rebaseModule')
     .replace('import.meta.url', 'cliUrl');
   const load = runInNewContext(`${loader}\nloadRebaseCoverage`, {
+    loadAwareTimeoutMs,
     process: { env: { HAM_HQ_ROOT: '/trusted/install' } },
     isTransientGhError, setTimeout: (resolve, ms) => { delays.push(ms); resolve(); },
     reviewedHead, repo: 'fixture/repo', rebaseModule: { proveReviewedRebase },
@@ -87,6 +89,7 @@ test('timeline loader omits absent and invalid cursors and forwards a valid curs
   const loaderSource = source.slice(source.indexOf('const loadTimelinePage ='), source.indexOf('const range ='));
   const calls = [];
   const load = runInNewContext(`${loaderSource}\nloadTimelinePage`, {
+    loadAwareTimeoutMs,
     repo: 'fixture/repo', prNumber: '1',
     execGhWithRetry: async options => {
       calls.push(options.args);
@@ -294,7 +297,7 @@ for (const headers of [
   const source = readFileSync(cli, 'utf8');
   const loaderSource = source.slice(source.indexOf('const loadActivityPage ='), source.indexOf('const range ='));
   const calls = [];
-  const load = runInNewContext(`${loaderSource}\nloadActivityPage`, { URL,
+  const load = runInNewContext(`${loaderSource}\nloadActivityPage`, { URL, loadAwareTimeoutMs,
     execGhWithRetry: async options => {
       calls.push(options.args);
       return { stdout: `HTTP/2.0 200 OK\r\n${headers}\r\n\r\n[]` };
@@ -322,6 +325,7 @@ test('REBASEPROV-01 content proof discovers the actual PR base and refuses a mov
   const current = 'c'.repeat(40), base = 'b'.repeat(40);
   for (const [head, baseSha, expected] of [[current, base, base], ['d'.repeat(40), base, null], [current, '', null]]) {
     const load = runInNewContext(`${loader}\nloadRebaseBase`, {
+      loadAwareTimeoutMs,
       repo: 'fixture/repo', prNumber: 42, currentHead: current,
       execGhWithRetry: async ({ args }) => {
         assert.deepEqual(Array.from(args), ['api', 'repos/fixture/repo/pulls/42']);

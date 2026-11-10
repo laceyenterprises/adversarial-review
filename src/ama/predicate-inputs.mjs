@@ -5,6 +5,7 @@
 // passing input.
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { CLOSURE_GATE_BUDGET_MS, classifyClosureGateFailure, closureGateClock, readClosureGateSync } from './closure-gate-read.mjs';
 
 export const PREDICATE_PR_FIELDS = 'number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName';
@@ -24,7 +25,7 @@ export const CLOSURE_GATE_UNAVAILABLE = 'closure-gate-read-unavailable';
 // child's stderr. Files are written only after every gate has been read.
 export function collectPredicateInputs({
   repo, prNumber, headSha, runDir, readPr, readApi,
-  clock = closureGateClock, budgetMs = CLOSURE_GATE_BUDGET_MS, writeImpl = writeFileSync,
+  clock = closureGateClock, budgetMs = loadAwareTimeoutMs(CLOSURE_GATE_BUDGET_MS), writeImpl = writeFileSync,
 }) {
   if (!/^[^/\s]+\/[^/\s]+$/.test(repo || '') || !/^[1-9]\d*$/.test(String(prNumber)) || !SHA.test(headSha || '') || !runDir) {
     return { ok: false, gate: 'request', kind: 'definitive', reason: 'predicate-input-request-invalid' };

@@ -1,11 +1,50 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, readdirSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, readdirSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { storedPrimaryChange, primaryChangeReadStatus, sweepPrimaryChangeStore, verifiedReversalRecord } from '../src/ama/primary-change-store.mjs';
+import { storedHistoryRead, storedPrimaryChange, primaryChangeReadStatus, sweepPrimaryChangeStore, verifiedReversalRecord } from '../src/ama/primary-change-store.mjs';
+
+test('history progress keeps completed reads only, isolates heads and expires as a whole history', async t => {
+  const args = fixture(t);
+  let computes = 0;
+  const compute = async () => { computes++; return { author: 'synthetic-author' }; };
+  assert.deepEqual(await storedHistoryRead(args, ['page', 1], compute), { author: 'synthetic-author' });
+  await storedHistoryRead(args, ['page', 1], compute);
+  assert.equal(computes, 1);
+  const controller = new AbortController();
+  await assert.rejects(storedHistoryRead(args, ['page', 2], async () => {
+    controller.abort(new Error('cancelled')); return {};
+  }, controller.signal), /cancelled/);
+  await storedHistoryRead(args, ['page', 2], compute);
+  assert.equal(computes, 2, 'late completion after cancellation was never saved');
+  await storedHistoryRead({ ...args, headSha: 'd'.repeat(40) }, ['page', 1], compute);
+  assert.equal(computes, 3);
+  const removed = sweepPrimaryChangeStore(args.rootDir, { nowMs: Date.now() + 8 * 86400000 });
+  assert.equal(removed.length, 2);
+  assert.ok(removed.every(path => !existsSync(path)));
+});
+
+test('partial history treats corrupt records as missing and refuses symlinked progress before compute', async t => {
+  const args = fixture(t);
+  await storedHistoryRead(args, ['page', 1], async () => ({ author: 'fixture' }));
+  const dir = join(args.rootDir, 'data', 'primary-change-history');
+  const progress = join(dir, readdirSync(dir).find(name => name.startsWith('progress-')));
+  const record = join(progress, readdirSync(progress)[0]);
+  for (const value of ['{broken', 'null', '{}']) {
+    writeFileSync(record, value);
+    assert.deepEqual(await storedHistoryRead(args, ['page', 1], async () => ({ author: 'recomputed' })),
+      { author: 'recomputed' });
+  }
+  rmSync(record);
+  symlinkSync(join(args.rootDir, 'foreign-record'), record);
+  await assert.rejects(storedHistoryRead(args, ['page', 1], () => assert.fail('must not compute')), /symlink/);
+  rmSync(progress, { recursive: true });
+  symlinkSync(args.rootDir, progress);
+  await assert.rejects(storedHistoryRead(args, ['page', 1], () => assert.fail('must not compute')), /symlink/);
+});
 
 function fixture(t) {
   const rootDir = mkdtempSync(join(tmpdir(), 'pccslow-'));

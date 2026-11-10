@@ -1,8 +1,8 @@
 import { withRepositoryStateCycle } from '../repository-state-lock.mjs';
 import { canonicalRepositoryArguments } from '../repository-names.mjs';
 import { createHash, randomUUID } from 'node:crypto';
-import { lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
 
 const running = new Map();
 const directory = rootDir => join(rootDir, 'data', 'primary-change-history');
@@ -43,6 +43,43 @@ function assertStoreOwner(rootDir, path = null) {
 export function primaryChangeStoreOwned(rootDir) {
   try { assertStoreOwner(rootDir); return true; }
   catch { return false; } // No store reads or writes by this caller.
+}
+
+// Checkpoint only completed immutable reads, never verdicts or live metadata.
+// A directory per head keeps the existing sweeper's limit in units of histories,
+// rather than evicting the first pages of a long history as later pages arrive.
+export async function storedHistoryRead(args, readKey, compute, signal) {
+  signal?.throwIfAborted();
+  assertStoreOwner(args.rootDir);
+  const canonical = canonicalRepositoryArguments(args.rootDir, args);
+  const key = [canonical.repo, Number(canonical.prNumber), args.headSha, 'history-progress-v1'];
+  if (!/^[0-9a-f]{40}$/i.test(args.headSha || '')) throw new Error('invalid history progress head');
+  const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  const dir = join(directory(args.rootDir), `progress-${digest(key)}`);
+  const path = join(dir, `${digest(readKey)}.json`);
+  assertStoreOwner(args.rootDir, dir);
+  assertStoreOwner(args.rootDir, path);
+  try {
+    const record = JSON.parse(readFileSync(path, 'utf8'));
+    if (record && Object.hasOwn(record, 'value') && JSON.stringify(record.key) === JSON.stringify(key)
+      && JSON.stringify(record.readKey) === JSON.stringify(readKey)) return record.value;
+  } catch (error) {
+    if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
+  }
+  const value = await compute();
+  signal?.throwIfAborted();
+  assertStoreOwner(args.rootDir, dir);
+  assertStoreOwner(args.rootDir, path);
+  mkdirSync(dir, { recursive: true });
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, JSON.stringify({ key, readKey, value }), { mode: 0o600, flag: 'wx' });
+    renameSync(temporary, path);
+    // Retention follows the last established progress, not directory creation.
+    const now = new Date();
+    utimesSync(dir, now, now);
+  } finally { rmSync(temporary, { force: true }); }
+  return value;
 }
 
 // REVERSALPROOF-01: these are verified observations, not head/review caches.
@@ -136,7 +173,7 @@ export function sweepPrimaryChangeStore(rootDir, { nowMs = Date.now() } = {}) {
   const expired = entries.filter((entry, index) => index >= 512 || nowMs - entry.modified > 7 * 86400000);
   for (const entry of expired) {
     assertStoreOwner(rootDir, entry.path);
-    rmSync(entry.path, { force: true });
+    rmSync(entry.path, { force: true, recursive: /^progress-[a-f0-9]{64}$/.test(basename(entry.path)) });
   }
   return expired.map(entry => entry.path);
 }

@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { execGhWithRetry, GH_LOOKUP_MAX_BUFFER } from '../gh-cli.mjs';
 import { HISTORY_CONTEXT_TIMEOUT_MS, historyReadErrorDetail, historyReadRetryDelayMs, historyReadTimeoutError, withHistoryReadBudget } from './history-read-policy.mjs';
 import { currentGitHubBudgetScope, withGitHubBudgetScope } from '../rate-limit-throttle.mjs';
+import { storedHistoryRead } from './primary-change-store.mjs';
 
 const commitFields = '{sha, commit: {message: .commit.message, author: .commit.author, committer: .commit.committer}, author, committer, parents: [.parents[] | {sha}]}';
 
@@ -17,7 +18,8 @@ const commitFields = '{sha, commit: {message: .commit.message, author: .commit.a
 // patches, and never treat a server cap as a complete protected file list.
 export function createHistoryReader(options = {}) {
   const { execGhWithRetryImpl = execGhWithRetry, diffImpl = execHistoryFile,
-    contextTimeoutMs = HISTORY_CONTEXT_TIMEOUT_MS, nowMs = () => performance.now(), ...ghOptions } = options;
+    contextTimeoutMs = loadAwareTimeoutMs(HISTORY_CONTEXT_TIMEOUT_MS), nowMs = () => performance.now(),
+    progress, ...ghOptions } = options;
   const executorIdentity = ghOptions.execFileImpl || execHistoryFile;
   ghOptions.execFileImpl = historyChildExecutor(executorIdentity);
   const controller = new AbortController();
@@ -31,6 +33,18 @@ export function createHistoryReader(options = {}) {
     return remaining;
   };
   const cache = new Map();
+  // Durable object facts belong to the canonical owner/repository/host, not an
+  // expiring installation token. A fresh token on the next closer must retain
+  // progress. Live PR/review reads still establish access and current state;
+  // the evaluation-local cache below independently partitions credentials.
+  const env = ghOptions.env || process.env;
+  const host = env.GH_HOST || 'github.com';
+  const checkpoint = async (key, run) => {
+    remainingMs();
+    const value = await (progress ? storedHistoryRead(progress, [host, ...key], run, ghOptions.signal) : run());
+    remainingMs();
+    return immutableSnapshotValue(value);
+  };
   const json = async (path, jq = '.') => {
     try {
       // Only object-addressed evidence is immutable. Keep PR metadata, refs,
@@ -49,10 +63,10 @@ export function createHistoryReader(options = {}) {
         ghOptions.signal.throwIfAborted();
         return immutableSnapshotValue(JSON.parse(stdout.replace(/^HTTP\/[\s\S]*?\r?\n\r?\n/, '')));
       };
-      const env = ghOptions.env || process.env;
       return await (immutable
-        ? readClosureImmutable(execGhWithRetryImpl, [path, jq, env.GH_TOKEN, env.GITHUB_TOKEN,
-          env.GH_HOST, env.GH_CONFIG_DIR], execute, executorIdentity, ghOptions.signal)
+        ? checkpoint(['json', path, jq], () => readClosureImmutable(execGhWithRetryImpl,
+          [path, jq, env.GH_TOKEN, env.GITHUB_TOKEN, env.GH_HOST, env.GH_CONFIG_DIR],
+          execute, executorIdentity, ghOptions.signal))
         : execute());
     } catch (cause) {
       const limit = cause.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || cause.code === 'ENOBUFS'
@@ -213,29 +227,31 @@ export function createHistoryReader(options = {}) {
           const index = cursor++;
           const { path, a, b } = changed[index];
           const beforePath = `before-${index}`, afterPath = `after-${index}`;
-          const file = { filename: path, status: !a ? 'added' : !b ? 'removed' : 'modified', sha: b?.sha || a.sha };
-          if (a?.type === 'commit' && b?.type === 'commit') {
-            file.additions = 0; file.deletions = 0; files[index] = file; continue;
-          }
-          await Promise.all([
-            blob(a).then(bytes => { ghOptions.signal.throwIfAborted(); return writeFile(join(dir, beforePath), bytes, { signal: ghOptions.signal }); }),
-            blob(b).then(bytes => { ghOptions.signal.throwIfAborted(); return writeFile(join(dir, afterPath), bytes, { signal: ghOptions.signal }); }),
-          ]);
-          let patch;
-          try {
-            ({ stdout: patch } = await bounded(() => diffImpl('git', ['-c', 'core.autocrlf=false', '-c', 'core.attributesFile=/dev/null', 'diff', '--diff-algorithm=myers', '--no-indent-heuristic', '--no-index', '--no-ext-diff', '--no-textconv', '--no-color', '--unified=3', '--', beforePath, afterPath],
-              { cwd: dir, encoding: 'utf8', timeout: Math.min(loadAwareTimeoutMs(15000), remainingMs()), maxBuffer: GH_LOOKUP_MAX_BUFFER, signal: ghOptions.signal, killSignal: 'SIGKILL' })));
-          } catch (error) {
-            if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || error.code === 'ENOBUFS') {
-              throw new Error(`history diff output limit ${GH_LOOKUP_MAX_BUFFER} bytes exceeded for ${path}`, { cause: error });
+          files[index] = await checkpoint(['file', repo, base, head, path, a || null, b || null, 'myers-v1'], async () => {
+            const file = { filename: path, status: !a ? 'added' : !b ? 'removed' : 'modified', sha: b?.sha || a.sha };
+            if (a?.type === 'commit' && b?.type === 'commit') {
+              file.additions = 0; file.deletions = 0; return file;
             }
-            if (error.code !== 1 || typeof error.stdout !== 'string') throw error;
-            patch = error.stdout;
-          }
-          if (patch.includes('\n@@')) file.patch = patch.slice(patch.indexOf('@@'));
-          file.additions = (file.patch || '').split('\n').filter(line => line.startsWith('+')).length;
-          file.deletions = (file.patch || '').split('\n').filter(line => line.startsWith('-')).length;
-          files[index] = file;
+            await Promise.all([
+              blob(a).then(bytes => { ghOptions.signal.throwIfAborted(); return writeFile(join(dir, beforePath), bytes, { signal: ghOptions.signal }); }),
+              blob(b).then(bytes => { ghOptions.signal.throwIfAborted(); return writeFile(join(dir, afterPath), bytes, { signal: ghOptions.signal }); }),
+            ]);
+            let patch;
+            try {
+              ({ stdout: patch } = await bounded(() => diffImpl('git', ['-c', 'core.autocrlf=false', '-c', 'core.attributesFile=/dev/null', 'diff', '--diff-algorithm=myers', '--no-indent-heuristic', '--no-index', '--no-ext-diff', '--no-textconv', '--no-color', '--unified=3', '--', beforePath, afterPath],
+                { cwd: dir, encoding: 'utf8', timeout: Math.min(loadAwareTimeoutMs(15000), remainingMs()), maxBuffer: GH_LOOKUP_MAX_BUFFER, signal: ghOptions.signal, killSignal: 'SIGKILL' })));
+            } catch (error) {
+              if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || error.code === 'ENOBUFS') {
+                throw new Error(`history diff output limit ${GH_LOOKUP_MAX_BUFFER} bytes exceeded for ${path}`, { cause: error });
+              }
+              if (error.code !== 1 || typeof error.stdout !== 'string') throw error;
+              patch = error.stdout;
+            }
+            if (patch.includes('\n@@')) file.patch = patch.slice(patch.indexOf('@@'));
+            file.additions = (file.patch || '').split('\n').filter(line => line.startsWith('+')).length;
+            file.deletions = (file.patch || '').split('\n').filter(line => line.startsWith('-')).length;
+            return file;
+          });
         }
       };
       // Bound GitHub and child concurrency without serializing every blob.
@@ -248,11 +264,9 @@ export function createHistoryReader(options = {}) {
       for (const removed of [...files].filter(file => file.status === 'removed')) {
         const added = files.find(file => file.status === 'added' && file.sha === removed.sha);
         if (added) {
-          added.status = 'renamed';
-          added.previous_filename = removed.filename;
-          delete added.patch;
-          added.additions = 0;
-          added.deletions = 0;
+          const renamed = { ...added, status: 'renamed', previous_filename: removed.filename, additions: 0, deletions: 0 };
+          delete renamed.patch;
+          files[files.indexOf(added)] = renamed;
           files.splice(files.indexOf(removed), 1);
         }
       }
@@ -345,6 +359,8 @@ export function createHistoryReader(options = {}) {
   reader.withSignal = signal => createHistoryReader({ ...options,
     contextTimeoutMs: remainingMs(),
     signal: AbortSignal.any([ghOptions.signal, signal]) });
+  reader.withProgress = progress => createHistoryReader({ ...options, progress,
+    contextTimeoutMs: remainingMs(), signal: ghOptions.signal });
   reader.persistPrimaryChange = true;
   return reader;
 }

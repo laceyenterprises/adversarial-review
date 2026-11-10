@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "primary-change-history",
+      "title": "Primary Change History",
+      "path": "docs/data-model/primary-change-history.md",
+      "store": "<runtime rootDir>/data/primary-change-history/",
+      "schemaSurface": "src/ama/primary-change-store.mjs",
+      "relatedSchemaSurfaces": ["src/ama/history-reader.mjs", "src/ama/primary-change.mjs"],
+      "owner": "AMA canonical daemon data owner",
+      "partialReadProgress": {
+        "directory": "progress-<sha256(key)>/",
+        "key": ["canonical repository", "numeric PR number", "exact head SHA", "history-progress-v1"],
+        "record": "<sha256(readKey)>.json: {key, readKey, value}",
+        "scope": "Completed immutable API projections and per-file comparisons; API-host partition isolates sources; no credentials stored and token rotation retains progress",
+        "authority": "Observations only; live head and review reads, completeness checks, provenance and preservation predicates remain mandatory",
+        "retention": "Existing seven-day/512-entry sweep counts each progress directory as one entry; recursive removal; publication refreshes directory mtime",
+        "ownership": "Canonical effective UID and symlink checks on store, progress directory and record; atomic 0600 temporary file and rename; cancelled/failed reads never publish"
+      }
+    }
+  ]
+}

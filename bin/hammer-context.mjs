@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
 import { recordHammerCiStop } from '../src/ama/hammer-ci-stop.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -24,14 +25,14 @@ if (!/^[^/\s]+\/[^/\s]+$/.test(repo || '') || !/^[1-9]\d*$/.test(number || '') |
   process.exit(64);
 }
 function getOnce(args) {
-  const result = meteredExecFileSync(spawnSync, 'gh', args, { hammerToken: true, encoding: 'utf8', timeout: 15000, maxBuffer: GH_LOOKUP_MAX_BUFFER });
+  const result = meteredExecFileSync(spawnSync, 'gh', args, { hammerToken: true, encoding: 'utf8', timeout: loadAwareTimeoutMs(15000), maxBuffer: GH_LOOKUP_MAX_BUFFER });
   if (result.error || result.status !== 0) throw new Error(`${args[0]} ${args[1]} failed: ${(result.stderr || result.error?.message || '').slice(-500)}`);
   return JSON.parse(result.stdout);
 }
 // CLOSERGATES-01: each read retries transient failures in place with spaced
 // backoff; the whole snapshot shares one closure budget. A definitive failure
 // (or a 404 nobody contradicts) still fails the snapshot at once.
-const contextDeadline = closureGateClock.now() + CLOSURE_GATE_BUDGET_MS;
+const contextDeadline = closureGateClock.now() + loadAwareTimeoutMs(CLOSURE_GATE_BUDGET_MS);
 function readGate(read, options = {}) {
   const result = readClosureGateSync(read, { ...options,
     budgetMs: Math.max(0, contextDeadline - closureGateClock.now()) });

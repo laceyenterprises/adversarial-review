@@ -1,4 +1,6 @@
 import { resolveReviewCliPath, resolveReviewCliPathAsync } from './review-cli-resolver.mjs';
+import { reviewWithGrok } from './grok-reviewer.mjs';
+import { normalizeReviewerModel } from './adapters/subject/github-pr/routing.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { reviewerStallOptions, isReviewerStall } from './reviewer-stall.mjs';
 import { resolveClaudeBrokerProvider } from './claude-account-routing.mjs';
@@ -1464,6 +1466,10 @@ async function reviewWithCodex(diff, extraContext = '', {
 // ── Gemini review ─────────────────────────────────────────────────────────────
 
 const REVIEWER_METADATA_BY_MODEL = Object.freeze({
+  grok: {
+    displayName: 'Grok',
+    reviewerIdentity: 'grok-reviewer',
+  },
   claude: {
     displayName: 'Claude',
     reviewerIdentity: 'claude-reviewer-lacey',
@@ -3597,6 +3603,8 @@ function mergeChunkedAgyReviews(chunkReviews, { truncated = false, promptBytes =
  * returned ready to post.
  */
 async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
+  builderClass,
+  subjectContext,
   promptStage = 'first', reviewKind = selectReviewerRubric(diff),
   reviewerSubprocessCwd = process.cwd(),
   onProgress = null,
@@ -3606,7 +3614,20 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
   reviewWithClaudeImpl = reviewWithClaude,
   reviewWithCodexImpl = reviewWithCodex,
   reviewWithGeminiImpl = reviewWithGemini,
+  reviewWithGrokImpl = reviewWithGrok,
 } = {}) {
+  effectiveModel = normalizeReviewerModel(effectiveModel);
+  if (!effectiveModel) throw new Error('Unknown reviewer family');
+  if (effectiveModel === 'grok') {
+    const result = await reviewWithGrokImpl(diff, extraContext, {
+      builderClass, subjectContext, promptStage, reviewKind,
+    });
+    const reviewText = sanitizeCodexReviewPayload(result.reviewText);
+    assertReviewerReply(reviewText, { allowVerdictInconsistency: true });
+    return { rawReviewText: result.reviewText, reviewText,
+      tokenUsage: result.tokenUsage ?? null, execution: result.execution ?? null,
+      needsSanitize: false };
+  }
   const pins = reviewerArm?.harness === effectiveModel
     ? { modelPin: reviewerArm.model, reasoningPin: reviewerArm.effort === 'default' ? '' : reviewerArm.effort } : {};
   // MES-06 shadow context: absent unless the review pass supplies it. Gemini

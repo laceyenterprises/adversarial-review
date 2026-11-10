@@ -5,10 +5,11 @@
 Release errored batches without launch receipts after the existing timeout, and
 bound returned invalid initial dispatch receipts to three per batch. Subprocess
 transport, timeout and admission failures retain the same batch/key without
-consuming dispatch or finding attempts, even past timeout. Legacy ambiguous
-dispatch errors receive the same retry/reset treatment. A missing keyed
-receipt after timeout requires direct recorded-launch/retry ledger evidence;
-unreadable evidence retains custody and reports `needs-operator`.
+consuming finding attempts or resetting invalid-receipt charges. Legacy
+ambiguous dispatch errors reset the old counter once. A missing keyed receipt
+after timeout requires the recorded launch and its observed retries to be
+terminal in the direct snapshot. Missing or unreadable evidence retains
+custody. Overdue dispatch retries and unproven probes report `needs-operator`.
 Every release keeps the existing per-finding requeue/exhaustion accounting.
 Add bounded redacted dispatch stderr and one per-pass backlog summary.
 See the [SEV2 report](../postmortems/SEV2-findings-batches-retained-open-findings-after-launch-errors-2026-11-08.md).

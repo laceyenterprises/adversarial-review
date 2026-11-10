@@ -444,6 +444,19 @@ test('pickAdversarialGateStatus settles comment-only posted rows even without a 
   assert.equal(decision.reason, 'review-settled');
 });
 
+test('Grok comment-only posted row settles the review gate', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow({
+      reviewer: 'grok',
+      reviewer_login: 'lacey-grok-reviewer[bot]',
+      reviewBody: '## Summary\nClean.\n## Verdict\nComment only',
+    }),
+    latestJob: null,
+  });
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'review-settled');
+});
+
 test('pickAdversarialGateStatus keeps pending clean verdict-carrier jobs queued', () => {
   const decision = pickAdversarialGateStatus({
     reviewRow: makeReviewRow(),

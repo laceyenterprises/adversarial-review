@@ -57,8 +57,11 @@ function fixture(t, titles = ['First result', 'Second result', 'Third result']) 
   };
   const options = { db, rootDir, env, execFileImpl, logger: { warn() {} },
     readLaunches: async ({ idempotencyKey }) => ({ ok: true, rows: launches.get(idempotencyKey) || [] }),
-    readLaunchSnapshot: async ({ launchRequestIds }) => ({ ok: true,
-      rows: [...launches.values()].flat().filter(row => launchRequestIds.includes(row.launch_request_id)) }),
+    readLaunchSnapshot: async ({ launchRequestIds }) => {
+      const rows = [...launches.values()].flat().filter(row => launchRequestIds.includes(row.launch_request_id));
+      return rows.length ? { ok: true, rows }
+        : { ok: false, reason: 'dispatch-read-unavailable', detail: 'dispatch absence scope unproven' };
+    },
     fetchPublication: async () => { reads.publication++; return publication; },
     fetchPr: async () => ({ state: 'MERGED' }) };
   const run = overrides => runFindingBatches({ ...options, ...overrides });
@@ -148,16 +151,19 @@ test('a batch with any live keyed launch, or unreadable launch evidence, is unto
   });
 });
 
-test('a launched batch absent from the ledger is released only after the batch timeout', async t => {
+test('a missing direct snapshot holds custody while a terminal keyed launch can time out', async t => {
   const f = fixture(t);
   await f.run({ day: '2026-01-02' });
   f.launches.clear();
   const launchedAt = Date.parse(f.batches()[0].launched_at);
   await f.run({ resolutionOnly: true, now: launchedAt + DAY - 1 });
   assert.equal(f.batches()[0].released_at, null);
-  await f.run({ resolutionOnly: true, now: launchedAt + DAY + 1 });
-  assert.equal(f.batches()[0].release_reason, 'batch-launch-ended-without-outcomes');
-  assert.ok(f.backlog().every(r => r.batch_id === null && r.batch_attempts === 1));
+  const logs = [];
+  await f.run({ resolutionOnly: true, now: launchedAt + DAY + 1,
+    logger: { warn: message => logs.push(message) } });
+  assert.equal(f.batches()[0].released_at, null);
+  assert.ok(f.backlog().every(r => r.batch_id !== null && r.batch_attempts === 0));
+  assert.ok(logs.some(message => message.includes('needs-operator:') || message.includes('batch-launch-probe-unreadable')));
   // A legacy row with no launched_at ages from its claim day.
   const g = fixture(t);
   await g.run({ day: '2026-01-02' });
@@ -388,7 +394,8 @@ test('an absent keyed receipt checks the actual launch and retry liveness after 
           assert.deepEqual(launchRequestIds, [batch.launch_id]);
           if (state === 'throws') throw Error('synthetic transport error');
           if (state === 'unreadable') return { ok: false };
-          return { ok: true, rows: state === 'absent' ? [] : [
+          if (state === 'absent') return { ok: false, reason: 'dispatch-read-unavailable', detail: 'dispatch absence scope unproven' };
+          return { ok: true, rows: [
             { launch_request_id: batch.launch_id, status: state === 'live-retry' ? 'failed' : state },
             ...(state === 'live-retry' ? [{ launch_request_id: 'synthetic-retry', status: 'running' }] : []),
           ] };
@@ -399,11 +406,11 @@ test('an absent keyed receipt checks the actual launch and retry liveness after 
       assert.equal(f.batches()[0].released_at, null);
       await f.run(overrides);
       assert.equal(exactReads, 1);
-      const released = ['failed', 'succeeded', 'absent'].includes(state);
+      const released = ['failed', 'succeeded'].includes(state);
       assert.equal(Boolean(f.batches()[0].released_at), released);
       assert.equal(f.batches()[0].error, 'batch-publish-receipt-unavailable');
       assert.ok(f.backlog().every(row => row.batch_attempts === (released ? 1 : 0)));
-      if (['unknown', 'unreadable', 'throws'].includes(state)) {
+      if (['absent', 'unknown', 'unreadable', 'throws'].includes(state)) {
         assert.ok(logs.some(line => line.includes('needs-operator')));
         assert.ok(logs.some(line => line.includes('"openFindings":3') && line.includes('"oldestAgeMs":86400001')));
       }
@@ -446,7 +453,8 @@ test('temporary dispatch failures retain the batch and never exhaust findings, e
     } };
   const [batch] = claimFindingBatches(f.db, '2026-01-02');
   // Include an old capped row from before dispatch failures were classified.
-  f.db.prepare("UPDATE finding_batches SET batch_attempts=3,error='batch-dispatch-failed: timeout'").run();
+  f.db.prepare('UPDATE finding_batches SET batch_attempts=3,error=?')
+    .run('Command failed: hq dispatch --priority normal\nsynthetic stderr');
   f.db.prepare('UPDATE finding_backlog SET batch_attempts=2').run();
   const failures = [
     Object.assign(Error('dispatch timeout'), { killed: true, code: 'ETIMEDOUT' }),
@@ -463,6 +471,7 @@ test('temporary dispatch failures retain the batch and never exhaust findings, e
     assert.equal(f.backlog()[0].outcome, null);
   }
   assert.equal(calls, 12);
+  assert.ok(logs.some(line => line.includes('needs-operator:batch-dispatch-retry-overdue')));
   assert.equal(f.db.prepare('SELECT count(*) n FROM finding_batch_releases').get().n, 0);
   assert.ok(f.batches()[0].error.length < 335);
   assert.ok(!logs.join('\n').includes('synthetic-token'));
@@ -489,6 +498,19 @@ test('returned invalid receipts still spend the durable dispatch cap', async t =
   }
   assert.equal(calls, 3);
   assert.match(f.batches()[0].release_reason, /^batch-dispatch-attempts-exhausted: batch-dispatch-receipt-invalid:/);
+});
+
+test('interleaved transient failures preserve the invalid-receipt cap', async t => {
+  const f = fixture(t, ['Only result']);
+  const now = Date.parse('2026-01-02T01:00:00Z');
+  for (const [transient, attempts] of [[false, 1], [true, 1], [false, 2], [true, 2], [false, 3]]) {
+    await f.run({ day: '2026-01-02', now, execFileImpl: async () => {
+      if (transient) throw Object.assign(Error('dispatch timeout'), { code: 'ETIMEDOUT' });
+      return { stdout: '{}' };
+    } });
+    assert.equal(f.batches()[0].batch_attempts, attempts);
+    assert.equal(Boolean(f.batches()[0].released_at), attempts === 3);
+  }
 });
 
 test('dispatch cap holds any live launch without making a fourth submission', async t => {

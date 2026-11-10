@@ -306,8 +306,8 @@ distinct from a missing pushed head.
 
 When a launched batch's keyed receipt is empty or omits its recorded launch,
 timeout release additionally reads that exact `launch_id` from the public ledger,
-including retry descendants. All observed launches must be terminal, or the read
-must prove absence. Unknown status, incomplete reads, unproven absence, mismatched
+including retry descendants. The recorded launch must be present and every
+observed launch must be terminal. A direct snapshot cannot certify absence. Unknown status, incomplete reads, unproven absence, mismatched
 identity and live launches retain custody. Unreadable evidence after the timeout
 emits `needs-operator` with the batch ID and a named probe reason; it never becomes
 an absence certificate.
@@ -321,11 +321,12 @@ batch. Readable terminal/absent keyed evidence permits release with
 `batch-dispatch-attempts-exhausted: batch-dispatch-receipt-invalid: <detail>`;
 unreadable evidence reports `needs-operator`, and live launches retain custody.
 A failed subprocess (including timeout, transport or admission failure) records
-`batch-dispatch-retryable: <detail>`, resets the dispatch counter and retries
-with the same batch/key on the next dispatch pass. These never-launched batches
-cannot release on age alone or consume per-finding attempts. Legacy
-`batch-dispatch-failed` errors are ambiguous and receive the same conservative
-retry/reset treatment. Resolution-only passes retain them without dispatch.
+`batch-dispatch-retryable: <detail>` and retries with the same batch/key on the
+next dispatch pass while preserving invalid-receipt charges. An overdue retry
+reports `needs-operator` and retains custody without consuming per-finding
+attempts. Legacy `batch-dispatch-failed` and raw `Command failed:` errors reset
+the old counter once and become retryable. Resolution-only passes retain them
+without dispatch.
 Dispatch stderr is preferred to the command echo, redacted and capped at 300
 characters before the named error prefix. Each release still charges a finding
 only once. Reapplying the migration preserves the counter.

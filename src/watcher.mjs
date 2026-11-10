@@ -516,6 +516,7 @@ const PENDING_DRAFT_RESPAWN_AGE_MIN_SECONDS_FENCE_OFF = 300;
 const PENDING_DRAFT_RESPAWN_AGE_MAX_SECONDS = 1800;
 const ETAG_CACHE_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV = Object.freeze({
+  GH_GROK_REVIEWER_TOKEN: 'grok-reviewer',
   GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer-lacey',
   GH_CODEX_REVIEWER_TOKEN: 'codex-reviewer-lacey',
   GH_GEMINI_REVIEWER_TOKEN: 'gemini-reviewer-lacey',
@@ -594,6 +595,7 @@ function resolveReviewerIdentity({ reviewerModel, botTokenEnv } = {}) {
     return REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV[botTokenEnv];
   }
   const normalizedModel = String(reviewerModel || '').trim().toLowerCase();
+  if (normalizedModel === 'grok') return 'grok-reviewer';
   if (normalizedModel === 'codex') return 'codex-reviewer-lacey';
   if (normalizedModel === 'gemini') return 'gemini-reviewer-lacey';
   return 'claude-reviewer-lacey';

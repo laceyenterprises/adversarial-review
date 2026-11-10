@@ -3,6 +3,7 @@
 import { normalizeReviewerModel } from './adapters/subject/github-pr/routing.mjs';
 
 const SUBJECTS = Object.freeze({
+  grok: 'grok-reviewer',
   claude: 'claude-reviewer-lacey', codex: 'codex-reviewer-lacey', gemini: 'gemini-reviewer-lacey',
 });
 const reference = value => typeof value === 'string' && value.trim() === value && /^[A-Za-z0-9._:-]{1,160}$/.test(value) ? value : null;

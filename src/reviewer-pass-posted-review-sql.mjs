@@ -40,7 +40,7 @@ export const REVIEWER_PASS_NORMALIZED_STARTED_AT_SQL = `strftime(
   END
 )`;
 
-export const REVIEWER_MODELS = Object.freeze(['claude', 'codex', 'gemini']);
+export const REVIEWER_MODELS = Object.freeze(['claude', 'codex', 'gemini', 'grok']);
 
 export function parseReviewerPassTimestampMs(raw) {
   if (typeof raw !== 'string' || raw.length === 0) return null;

@@ -69,6 +69,7 @@ const REVIEWER_LOGIN_BY_MODEL = new Map([
   ['claude', 'claude-reviewer-lacey'],
   ['codex', 'codex-reviewer-lacey'],
   ['gemini', 'gemini-reviewer-lacey'],
+  ['grok', 'grok-reviewer-lacey'],
 ]);
 
 // Builder-bot identities that can self-comment on their own PRs (status

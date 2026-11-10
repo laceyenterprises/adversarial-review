@@ -49,6 +49,25 @@ import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { PROVIDER_OVERLOADED_FAILURE_CLASS } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS } from '../src/quota-exhaustion.mjs';
 
+test('watcher recovery ignores nested HQ reviewer records', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'nested-reviewer-run-'));
+  try {
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: 'nested-grok', runtime: 'agent-os-hq', state: 'heartbeating',
+      spawnedAt: new Date().toISOString(), reattachToken: 'nested-dispatch',
+      subjectContext: { nestedReviewerRuntime: true, timeoutMs: 20 * 60 * 1000 },
+    });
+    assert.equal(readRecoverableReviewerRunRecords(rootDir).length, 0);
+    const recovered = await recoverReviewerRunRecords({
+      rootDir, adapter: { reattach: () => assert.fail('nested dispatch was reattached') },
+      log: { log() {} },
+    });
+    assert.deepEqual(recovered, { recovered: 0, pruned: 0 });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 const noopPreflight = async ({ model }) => (
   String(model || '').toLowerCase().includes('codex')
     ? { codexCli: '/tmp/fake-codex' }

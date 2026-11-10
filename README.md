@@ -1730,8 +1730,8 @@ and publishers. Existing failed batches stay visible for same-launch repair.
 Simplicity advisories keep their final-review enrollment and validated outcome
 rules, sharing the cap and marked result PR with findings. Failed initial dispatch
 subprocesses retain the same batch/key for retry, even after the batch timeout,
-without consuming finding attempts. Legacy ambiguous dispatch errors also reset
-the dispatch counter. Only successful dispatch responses with invalid receipts
+without consuming finding attempts or resetting invalid-receipt charges. Legacy
+raw command failures reset the old dispatch counter once. Only successful dispatch responses with invalid receipts
 consume the three-response dispatch cap; terminal/absent ledger evidence still
 fences charged release. See the [release contract](docs/data-model/review-findings.md#releasing-batches-whose-launch-ended-findingsrequeue-01).
 
@@ -2046,7 +2046,12 @@ follows the absent-signal path and cannot suppress target hammer dispatch.
 The offline `ama-closer-dispatch-priority` fixtures verify target dispatch,
 lease outcome and one mismatch diagnostic; existing smoke promises are unchanged.
 
-[state-machines.json](state-machines.json) maps the six owned lifecycle objects.
+[state-machines.json](state-machines.json) declares owned lifecycle objects
+and related operational verification records, including launch custody
+freshness and queue maintenance holds. Custody ingestion requires an existing,
+owner-matched app store and does not advance queue merge eligibility currency.
+GSR receipts distinguish absent stores, accepted drains and released holds;
+token mismatches exit nonzero without changing the hold.
 Final-round exact-head Comment-only reviews with non-blocking or demoted
 findings receive one durable builder fix-all round before findings closure.
 Its published head requires fresh full review: zero findings select normal
@@ -2055,6 +2060,15 @@ fallback. Pending fix-all work retains ownership through admission delays;
 conflict and CI-only repair keep their hammer routes. See the
 [closure runbook](docs/RUNBOOK-ama-closure.md#final-findings-remediation-through-the-builder-laneauto-01)
 for the state contract and SRE's natural-traffic acceptance procedure.
+MLR-13 adds launch custody observations with an explicit freshness bound and
+original source identity. These events grant no closure authority. The queue
+executor joins GSR through an original-token maintenance hold that fences
+claims and remote operation intents while preserving ambiguous work. Deploy
+the additive GSR schema and reload affected writers through the registered SRE
+procedure before activation; MLR-08 owns organic read-only custody receipts
+and the separately authorized drain rehearsal before canary. Existing smoke
+promises remain unchanged; bounded synthetic coverage is recorded in
+[the MLR-13 fragment](docs/changes/MLR-13.md).
 LAC-2092 keeps Linear incident acceptance with its external owner: live
 incident/severity labels and legacy leading SEV issue titles suppress terminal
 pipeline sync and stale reopening. Already-matched state sync skips label reads
@@ -4528,8 +4542,9 @@ terminal/absent keyed launch evidence releases the batch through the existing
 per-finding requeue/exhaustion audit. Errored batches without a launch receipt
 also become release candidates after the batch timeout (default 24 hours).
 An empty keyed receipt for a recorded launch additionally requires its exact
-ledger launch and retry descendants to be terminal or proven absent.
-Unreadable evidence holds custody and reports `needs-operator` after timeout.
+ledger launch and retry descendants to be present and terminal.
+Missing or unreadable exact-launch evidence holds custody. Overdue holds and
+retryable dispatch failures report `needs-operator`.
 Each pass logs open findings and stuck batch reasons/counts/oldest ages.
 The batch idempotency key, publication fence and settlement evidence remain
 authoritative. Tests use synthetic dispatch receipts.

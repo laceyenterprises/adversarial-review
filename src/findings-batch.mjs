@@ -451,10 +451,13 @@ function batchAgeMs(batch, now) {
 
 // A failed subprocess does not prove a failed remediation attempt. Keep its
 // key available for retry/receipt recovery even after the ordinary age limit.
-// Legacy dispatch errors did not distinguish transport from receipt failures,
-// so conservatively retry those too, without inheriting their old cap charge.
 function retryableDispatchError(batch) {
-  return !batch.launch_id && /^batch-dispatch-(?:failed|retryable):/.test(batch.error || '');
+  return !batch.launch_id && /^batch-dispatch-retryable:/.test(batch.error || '');
+}
+
+// Legacy subprocess errors did not distinguish transport from invalid receipts.
+function legacyDispatchError(batch) {
+  return !batch.launch_id && /^(?:batch-dispatch-failed:|Command failed:)/.test(batch.error || '');
 }
 
 // Release only on terminal/absent ledger custody. The dispatch-failure cap may
@@ -465,10 +468,12 @@ async function releaseEndedFindingBatch({ db, batchId, hasOutcomes, env, rootDir
   readLaunches, readLaunchSnapshot, now, timeoutMs }) {
   const batch = db.prepare('SELECT * FROM finding_batches WHERE batch_id=?').get(batchId);
   if (!batch || batch.completed_at || batch.released_at) return null;
-  if (retryableDispatchError(batch)) return null;
+  const dispatchExhausted = !batch.launch_id && batch.batch_attempts >= FINDING_BATCH_MAX_DISPATCH_ATTEMPTS;
+  if (legacyDispatchError(batch) || (retryableDispatchError(batch) && !dispatchExhausted)) {
+    return batchAgeMs(batch, now) > timeoutMs ? { needsOperator: 'batch-dispatch-retry-overdue' } : null;
+  }
   if (!batch.launch_id && !batch.error) return null;
   const stale = batchAgeMs(batch, now) > timeoutMs && Boolean(batch.error || !hasOutcomes);
-  const dispatchExhausted = !batch.launch_id && batch.batch_attempts >= FINDING_BATCH_MAX_DISPATCH_ATTEMPTS;
   if (!stale && !dispatchExhausted && !(batch.launch_id && batch.error && ENDED_LAUNCH_RELEASE_ERRORS.test(batch.error))) return null;
   const hold = reason => stale || dispatchExhausted ? { needsOperator: reason } : null;
   const key = `findings-batch-${batch.batch_id}`;
@@ -488,7 +493,7 @@ async function releaseEndedFindingBatch({ db, batchId, hasOutcomes, env, rootDir
     try { snapshot = await readLaunchSnapshot({ ...options, launchRequestIds: [batch.launch_id] }); }
     catch { return hold('batch-launch-probe-unreadable'); }
     if (!snapshot?.ok || !Array.isArray(snapshot.rows)) return hold('batch-launch-probe-unreadable');
-    if (snapshot.rows.length && !snapshot.rows.some(row => row?.launch_request_id === batch.launch_id)) {
+    if (!snapshot.rows.some(row => row?.launch_request_id === batch.launch_id)) {
       return hold('batch-launch-probe-mismatch');
     }
     if (snapshot.rows.some(row => !readLaunchRequestStatus(row?.status).status)) return hold('batch-launch-status-unreadable');
@@ -528,15 +533,22 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
     let dispatchReturned = false;
     try {
       if (fleetStopReason({ env, logger })) { stopped = true; return; }
-      if (retryableDispatchError(batch)) {
-        db.prepare('UPDATE finding_batches SET batch_attempts=0 WHERE batch_id=?').run(batch.batch_id);
+      if (legacyDispatchError(batch)) {
+        const reason = 'batch-dispatch-retryable: legacy dispatch failure';
+        const updated = db.prepare(`UPDATE finding_batches SET error=?,batch_attempts=0
+          WHERE batch_id=? AND error=? AND launch_id IS NULL`).run(reason, batch.batch_id, batch.error);
+        if (!updated.changes) return;
+        batch.error = reason;
         batch.batch_attempts = 0;
       }
       // Release overdue pre-launch failures before another submission can mask
       // their age/error. An exhausted batch never submits again while held.
-      if (!batch.launch_id && batch.error) {
-        const released = await release(batch, false);
-        if (released || batch.batch_attempts >= FINDING_BATCH_MAX_DISPATCH_ATTEMPTS) return;
+      if (!batch.launch_id) {
+        const exhausted = batch.batch_attempts >= FINDING_BATCH_MAX_DISPATCH_ATTEMPTS;
+        if (exhausted || (batch.error && !retryableDispatchError(batch))) {
+          const released = await release(batch, false);
+          if (released || exhausted) return;
+        }
       }
       const dir = join(rootDir, 'data', 'finding-batches', batch.batch_id);
       const outputPath = join(dir, 'outcomes.json');
@@ -560,6 +572,7 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
         const dropPrs = await verifyDropPrs(batch, result, { execFileImpl, env, logger }, fetchPr);
         settleFindingBatch(db, batch, result, pr, dropPrs);
       } else if (!resolutionOnly && !batch.launch_id && (manifest !== null || batch.manifest_sha256 === null)) {
+        dispatching = true;
         const findings = db.prepare(`SELECT b.finding_id AS findingId,b.pr_number AS prNumber,
           b.head_sha AS headSha,b.reviewer_family AS reviewerFamily,f.finding_json FROM finding_backlog b
           JOIN review_findings f USING(finding_id) WHERE b.batch_id=?
@@ -570,7 +583,6 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
         const promptPath = join(dir, 'prompt.md');
         writeFileSync(promptPath, findingBatchPrompt(batch, findings, outputPath, batchNotes(db, batch.batch_id)));
         const args = findingBatchDispatchArgs({ batch, promptPath, workerClass: pickRemediationWorkerClass({ repo: batch.repo }, { env }), env });
-        dispatching = true;
         const { stdout } = await execFileImpl(env.HQ_BIN || 'hq', args, { env, timeout: dispatchTimeoutMs(), maxBuffer: 1024 * 1024 });
         dispatchReturned = true;
         const receipt = readDispatchReceipt(parseDispatchJsonOutput(stdout));
@@ -587,10 +599,9 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
         ? `batch-dispatch-${dispatchReturned ? 'receipt-invalid' : 'retryable'}: ${detail}` : detail;
       // Only a returned, invalid receipt spends the bounded dispatch budget.
       // Timeouts, transport failures and admission refusals retain the same
-      // batch/key and cannot age into a charged release without a launch.
-      db.prepare(`UPDATE finding_batches SET error=?,
-        batch_attempts=CASE WHEN ? THEN 0 ELSE batch_attempts+? END WHERE batch_id=?`)
-        .run(reason, dispatching && !dispatchReturned ? 1 : 0, dispatchReturned ? 1 : 0, batch.batch_id);
+      // batch/key and preserve any earlier invalid-receipt charges.
+      db.prepare('UPDATE finding_batches SET error=?,batch_attempts=batch_attempts+? WHERE batch_id=?')
+        .run(reason, dispatchReturned ? 1 : 0, batch.batch_id);
       logger.warn?.(`[findings-batch] ${batch.repo}/${batch.area}: ${reason}`);
     }
     try {

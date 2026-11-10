@@ -2676,6 +2676,24 @@ function claimNextFollowUpJob({
     const singleReviewFinal = isSingleReviewJob(job)
       && job?.remediationPlan?.nextAction?.operatorOverride !== true;
     if (currentRound >= maxRounds || nonBlockingCapReached || singleReviewFinal) {
+      // FINALCAPHANDOFF-01: this is a refusal, not proof that a hammer owns
+      // the PR. Persist an actionable terminal result in the same move as the
+      // cap stop, including when the consumer dies before returning it.
+      const finalCapResult = nonBlockingCapReached && !singleReviewFinal ? {
+        status: 'operator-action-required',
+        actor: 'operator',
+        action: 'canonical-rescue',
+        reason: 'nonblocking-final-cap',
+        jobId: job.jobId,
+        repo: job.repo,
+        prNumber: job.prNumber,
+        reviewedHeadSha: job.revisionRef || null,
+        recordedAt: claimedAt,
+        successorDispatched: false,
+        blockingFindings: classifyBlockingFindings(job.reviewBody),
+        nonBlockingFindings: classifyNonBlockingFindings(job.reviewBody),
+        nextAction: 'Operator: run canonical rescue after re-reading the live head, findings, CI, conflict state and reviewer/worker/closer ownership. A conflict requires the hammer route. This cap stop does not authorize merge, another remediation round or re-review.',
+      } : null;
       let stopped = null;
       try {
         stopped = markStoppedImpl({
@@ -2688,8 +2706,9 @@ function claimNextFollowUpJob({
           stopReason: singleReviewFinal
             ? `single-review: super-small PR; the first review was the final round (${job.singleReview.basis || 'super-small'}); handing to the hammer without remediation.`
             : nonBlockingCapReached
-            ? `Reached non-blocking remediation rounds (${job.nonBlockingRoundsBefore}/${job.nonBlockingMaxRounds}) before claim.`
+            ? `Reached non-blocking remediation rounds (${job.nonBlockingRoundsBefore}/${job.nonBlockingMaxRounds}) before claim. No successor dispatched. ${finalCapResult.nextAction}`
             : `Reached max remediation rounds (${currentRound}/${maxRounds}) before claim.`,
+          ...(finalCapResult ? { jobUpdates: { finalCapResult } } : {}),
         });
       } catch (err) {
         handleClaimedStopFailure({
@@ -2705,6 +2724,7 @@ function claimNextFollowUpJob({
           jobPath: stopped.jobPath,
           stopped: true,
           reason: 'max-rounds-reached',
+          ...(stopped.job.finalCapResult ? { finalCapResult: stopped.job.finalCapResult } : {}),
         };
       }
       continue;

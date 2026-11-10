@@ -1531,6 +1531,14 @@ records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
 
+Consecutive nonblocking-cap refusals remain `stopped/max-rounds-reached` and
+carry an actionable `finalCapResult` for operator canonical rescue. The result
+records the source review head and finding accounting and explicitly says no
+successor was dispatched. Offline coverage is in
+`test/finalcaphandoff-01.test.mjs`; after deployment, passively inspect the next
+natural cap refusal for that result. Live rescue and loaded revision proof
+remain operator work. See [the queue contract](docs/data-model/follow-up-jobs.md).
+
 The follow-up daemon repairs missing or unrecognized code-PR builder tags from
 agreeing recorded PR authorship before remediator selection, and persists
 canonical forms of legacy tags with recovery evidence. Unavailable PR or transient

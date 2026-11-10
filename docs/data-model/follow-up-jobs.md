@@ -1,5 +1,24 @@
 # Data Model - Follow-Up Remediation Jobs
 
+## Nonblocking cap terminal result
+
+A claim refused by the consecutive nonblocking cap retains `status: stopped`
+and `remediationPlan.stop.code: max-rounds-reached`. Unless single-review policy
+owns the stop, the terminal move also writes optional `finalCapResult`:
+`status: operator-action-required`, `actor: operator`, `action: canonical-rescue`,
+`reason: nonblocking-final-cap`, `jobId`, `repo`, `prNumber`, `reviewedHeadSha`
+(nullable), `recordedAt`, `successorDispatched: false`, `blockingFindings` and
+`nonBlockingFindings` (the shared parsers' count/state pairs), and human-readable
+`nextAction`. Claim and consume results expose that same object. The stop reason
+also names the operator action and absence of a dispatched successor.
+
+This is terminal evidence, not a closure receipt or permission to merge.
+Unknown findings remain unknown. The head identifies the source review only;
+rescue must re-read the live head, findings, CI, conflicts and ownership.
+Settled-clean reviews, remaining budget, explicit override admission and live
+closer custody retain their existing paths. No new store, lifecycle status,
+automatic wake, remediation round or re-review is introduced.
+
 ## Builder authorship recovery
 
 For code-PR jobs with missing or unrecognized `builderTag`, the claim consumer

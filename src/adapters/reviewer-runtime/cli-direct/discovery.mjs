@@ -253,6 +253,9 @@ async function probeReviewerCliOAuth({
   ensureWorkerRegistryReadyImpl,
 } = {}) {
   const normalized = String(model || '').toLowerCase();
+  // Grok preflight and credentials belong to its managed OS adapter. Never
+  // fall through to the Claude probe or invoke interactive Grok auth here.
+  if (normalized.includes('grok')) return { managed: true };
   if (normalized.includes('codex')) {
     return probeCodexCli({ env, cwd, timeout, execFileImpl, requireMcpOAuth, ensureWorkerRegistryReadyImpl });
   }

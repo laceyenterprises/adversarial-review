@@ -110,6 +110,7 @@ function livePrLifecycle(payload) {
 // that must become a sticky failed-orphan rather than silently resolving to some
 // bot. Only the LOGIN STRINGS come from the shared table -- that is what drifted.
 const RECONCILABLE_REVIEWER_MODELS = new Set([
+  'grok', 'grok-reviewer',
   'claude',
   'codex',
   'gemini',

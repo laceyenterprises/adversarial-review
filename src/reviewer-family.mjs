@@ -4,6 +4,7 @@ const REVIEW_FAMILY_BY_REVIEWER_MODEL = Object.freeze({
   'claude-code': 'claude',
   codex: 'codex',
   gemini: 'gemini',
+  grok: 'grok',
 });
 
 function normalizeReviewerFamily(reviewerModel) {

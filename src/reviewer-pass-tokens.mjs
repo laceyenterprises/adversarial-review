@@ -36,6 +36,7 @@ const REVIEWER_USAGE_ARTIFACT_SCHEMA = 'adversarial-reviewer-token-usage/v1';
 
 function normalizeReviewerClass(value) {
   const text = String(value || '').toLowerCase();
+  if (text.includes('grok')) return 'grok';
   if (text.includes('codex') || text.includes('gpt')) return 'codex';
   if (text.includes('gemini') || text.includes('antigravity') || text.includes('agy')) return 'gemini';
   return 'claude';
@@ -1540,6 +1541,9 @@ function readBestReviewerEvidenceTokenUsage({
     env,
     rootDir,
   }) : null);
+  // Grok accounting is owned by the managed adapter/session ingestion path.
+  // Never fill its missing usage from a sibling harness's private transcripts.
+  if (normalizeReviewerClass(reviewerModel) === 'grok') return ledgerUsage;
   // An OS-selected worker's unavailable public accounting stays unknown. Local
   // reviewer evidence is a separate app policy for reviews without an OS worker.
   if (!ledgerUsage && (workerRunId || launchRequestId)) return null;
@@ -1901,6 +1905,7 @@ function readTranscriptTokenUsageForModel({
   claudeTranscriptPathCache = null,
   rootDir = process.cwd(),
 } = {}) {
+  if (normalizeReviewerClass(reviewerModel) === 'grok') return null;
   const readers = normalizeReviewerClass(reviewerModel) === 'claude'
     ? ['claude', 'codex']
     : ['codex', 'claude'];

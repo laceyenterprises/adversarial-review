@@ -18,6 +18,62 @@ const env = { AGENT_OS_CONFIG_PATH: '/dev/null' };
 const loaderImpl = () => ({ get: (_key, fallback) => fallback });
 const route = builderClass => routeSubject({ builderClass }, { env, loaderImpl, geminiReviewerMode: 'off' });
 
+test('Grok reviewer can be explicitly selected while existing routes remain default', () => {
+  const pinLoader = () => ({ get: (key, fallback) => key === 'roles.reviewer' ? 'grok' : fallback });
+  assert.equal(routeSubject({ builderClass: 'codex' }, {
+    env, loaderImpl: pinLoader, geminiReviewerMode: 'off',
+  }).reviewerModel, 'claude');
+  // The actual spawn guard reads the same CFG switches, independently of a
+  // caller's proposed route. No fixture bypasses that production check.
+  assert.equal(reviewerRefusesBuilder('codex', 'grok', {
+    loaderImpl: () => ({ get: key => ['grok.enabled', 'grok.reviewer.enabled'].includes(key) }),
+  }), false);
+  assert.equal(route('grok').reviewerModel, 'codex');
+  const enabledLoader = () => ({ get: (key, fallback) =>
+    ['grok.enabled', 'grok.reviewer.enabled'].includes(key) ? true : fallback });
+  const selected = routeSubject({ builderClass: 'claude-code' }, {
+    env, loaderImpl: enabledLoader, geminiReviewerMode: 'off',
+  });
+  assert.equal(selected.reviewerModel, 'grok');
+  assert.equal(Boolean(selected.operatorPinnedReviewer), false);
+  const enabledPinLoader = () => ({ get: (key, fallback) => key === 'roles.reviewer'
+    ? 'grok' : enabledLoader().get(key, fallback) });
+  assert.equal(routeSubject({ builderClass: 'codex' }, {
+    env, loaderImpl: enabledPinLoader, geminiReviewerMode: 'off',
+  }).reviewerModel, 'grok');
+  assert.equal(routeSubject({ builderClass: 'grok-api' }, {
+    env, loaderImpl: enabledPinLoader, geminiReviewerMode: 'off',
+  }).reviewerModel, 'codex');
+});
+
+test('Grok opt-in does not override security domain routing', () => {
+  const enabledLoader = () => ({ get: (key, fallback) =>
+    ['grok.enabled', 'grok.reviewer.enabled'].includes(key) ? true : fallback });
+  const selected = routeSubject({ builderClass: 'codex', domainId: 'code-pr-security' }, {
+    env, loaderImpl: enabledLoader, geminiReviewerMode: 'off',
+  });
+  assert.equal(selected.reviewerModel, 'claude');
+});
+
+test('Grok opt-in respects retry exclusions through subject and PR routes', () => {
+  const enabledLoader = () => ({ get: (key, fallback) =>
+    ['grok.enabled', 'grok.reviewer.enabled'].includes(key) ? true : fallback });
+  for (const excluded of ['grok', 'grok-reviewer', 'grok-api']) {
+    for (const [builderClass, reviewerModel] of [['codex', 'claude'], ['claude-code', 'codex']]) {
+      for (const applyGeminiReviewerMode of [true, false]) {
+        const options = { env, loaderImpl: enabledLoader, geminiReviewerMode: 'off',
+          excludedReviewerModels: [excluded], applyGeminiReviewerMode };
+        const subjectRoute = routeSubject({ builderClass }, options);
+        const prRoute = routePR(`[${builderClass}] Synthetic change`, null, options);
+        for (const result of [subjectRoute, prRoute]) {
+          assert.equal(result.reviewerModel, reviewerModel);
+          assert.deepEqual(result.excludedReviewerModels, [excluded]);
+        }
+      }
+    }
+  }
+});
+
 test('Grok title tagging and closer wrappers retain original builder provenance', () => {
   assert.equal(buildTaggedTitle(' GROK ', 'Synthetic change'), '[grok] Synthetic change');
   for (const prefix of ['', '[closer] ', '[hammer] ', '[hammer-corp] ', '[hammer-claude] ', '[hammer-claude-corp] ', '[hammer-grok] ']) {

@@ -48,6 +48,7 @@ const REVIEWER_MODEL_BY_WORKER_CLASS = Object.freeze({
   'claude-code': 'claude',
   codex: 'codex',
   gemini: 'gemini',
+  'grok-reviewer': 'grok',
 });
 
 export function reviewWorkerClassFallback(env = process.env) {

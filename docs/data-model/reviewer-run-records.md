@@ -24,6 +24,11 @@ The run-state machine (`launching`, `heartbeating`, `spawned`, `completed`,
 `spawnedAt`, `lastHeartbeatAt`, `reattachToken`, `adoptedAfterBounce`, and a
 free-form `subjectContext`.
 
+Nested Grok HQ dispatches set `subjectContext.nestedReviewerRuntime: true`.
+Watcher startup recovery skips these records because the outer hosted reviewer
+owns their result and cancellation. They remain in this store for ordinary
+24-hour pruning. The nested timeout is shorter than the outer reviewer budget.
+
 `subjectContext.afhReviewerFallback` mirrors the pass metadata documented in
 [reviewer passes](reviewer-passes.md#launch-and-reattach-identity).
 REVIEWERFLOOR-01 adds optional `reserveFloor: { reason, remainingPct, floorPct,

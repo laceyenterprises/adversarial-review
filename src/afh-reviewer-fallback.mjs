@@ -108,6 +108,7 @@ const AFH_QUOTA_ONLY_CACHE_KEY = 'quota-only';
 // (fleet-quota-status.mjs) and CLOSER_WORKER_CLASS_PROVIDER
 // (ama/harness-fallback.mjs), which speak in harness/worker-class terms.
 export const AFH_REVIEWER_MODEL_PROVIDER = Object.freeze({
+  grok: 'xai',
   codex: 'openai',
   claude: 'anthropic',
   'claude-code': 'anthropic',
@@ -873,7 +874,12 @@ export function afhReviewerFallbackDecision({
   grounding = null,
   geminiReviewerMode = null,
   routeTable = ROUTE_BY_BUILDER_CLASS,
+  env = process.env,
+  loaderImpl,
+  topPath,
+  modulePaths,
 } = {}) {
+  const refusalOptions = { env, loaderImpl, topPath, modulePaths };
   const notApplied = (reason, extra = {}) => ({
     applied: false,
     reason,
@@ -888,6 +894,9 @@ export function afhReviewerFallbackDecision({
   if (!baseRoute || baseRoute.configBroken) return notApplied('no-route');
   const currentModel = normalizeReviewerModel(baseRoute.reviewerModel);
   if (!currentModel) return notApplied('unknown-reviewer-model');
+  if (currentModel === 'grok' && reviewerRefusesBuilder(
+    builderClass || baseRoute.builderClass, currentModel, refusalOptions,
+  )) return notApplied('grok-family-refused', { integrityRefused: true });
   const primary = reviewerModelGrounding(grounding, currentModel);
   if (grounding?.reason === 'afh-reviewer-fallback-disabled' && !primary.reserveFloor) {
     return notApplied('afh-grounding-unavailable:afh-reviewer-fallback-disabled', {
@@ -937,7 +946,7 @@ export function afhReviewerFallbackDecision({
         continue;
       }
     }
-    if (reviewerRefusesBuilder(normalizedBuilder, candidate)) {
+    if (reviewerRefusesBuilder(normalizedBuilder, candidate, refusalOptions)) {
       considered.push({ reviewerModel: candidate, selected: false, reason: `${normalizeReviewerModel(candidate)}-builder-integrity-guard` });
       continue;
     }
@@ -984,6 +993,9 @@ export function afhReviewerFallbackDecision({
  */
 export function applyAfhReviewerFallbackDecision(baseRoute, decision) {
   if (!baseRoute) return baseRoute;
+  if (decision?.integrityRefused) return {
+    ...baseRoute, quotaBlocked: true, integrityRefused: true,
+  };
   if (!decision?.applied) {
     if (decision?.primary?.model === 'claude' && decision.primary.accountSelection?.pooled) {
       return { ...baseRoute, claudeAccountSelection: decision.primary.accountSelection,

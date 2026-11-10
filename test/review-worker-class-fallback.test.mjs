@@ -8,9 +8,19 @@ import {
   applyReviewerWorkerClassFallbackToRoute,
   resolveReviewerWorkerClassWithFallback,
   reviewWorkerClassFallback,
+  reviewerWorkerClassEntitled,
   FLEET_QUOTA_STATUS_CACHE_TTL_MS,
   FLEET_QUOTA_STATUS_TIMEOUT_MS,
 } from '../src/review-worker-class-fallback.mjs';
+
+test('reviewer worker-class fallback accepts only the explicit Grok class', () => {
+  const env = { GH_GROK_REVIEWER_TOKEN: 'synthetic-authority',
+    GH_CODEX_REVIEWER_TOKEN: 'synthetic-authority' };
+  assert.equal(reviewerWorkerClassEntitled('grok-reviewer', env), true);
+  for (const workerClass of ['hammer', 'hammer-grok', 'remediator-grok', 'codex-corp']) {
+    assert.equal(reviewerWorkerClassEntitled(workerClass, env), false, workerClass);
+  }
+});
 
 function fleetStatusStub(rows) {
   const stdout = JSON.stringify(fleetStatusWithClaudeAccountEvidence(rows));

@@ -38,6 +38,7 @@ const REVIEWER_BOT_LOGIN_ALIASES = Object.freeze({
   codex: ['lacey-codex-reviewer[bot]', 'codex-reviewer-lacey'],
   'claude-code': ['lacey-claude-reviewer[bot]', 'claude-reviewer-lacey'],
   gemini: ['lacey-gemini-reviewer[bot]', 'gemini-reviewer-lacey'],
+  grok: ['lacey-grok-reviewer[bot]', 'grok-reviewer-lacey'],
   pi: ['lacey-codex-reviewer[bot]', 'codex-reviewer-lacey'],
   // opencode defaults to Anthropic Claude; keep the reviewer cross-model.
   opencode: ['lacey-codex-reviewer[bot]', 'codex-reviewer-lacey'],
@@ -45,6 +46,7 @@ const REVIEWER_BOT_LOGIN_ALIASES = Object.freeze({
   GH_CLAUDE_REVIEWER_TOKEN: ['lacey-claude-reviewer[bot]', 'claude-reviewer-lacey'],
   GH_CODEX_REVIEWER_TOKEN: ['lacey-codex-reviewer[bot]', 'codex-reviewer-lacey'],
   GH_GEMINI_REVIEWER_TOKEN: ['lacey-gemini-reviewer[bot]', 'gemini-reviewer-lacey'],
+  GH_GROK_REVIEWER_TOKEN: ['lacey-grok-reviewer[bot]', 'grok-reviewer-lacey'],
 });
 
 // Match two GitHub logins tolerant of the `[bot]` suffix (app-token authors carry

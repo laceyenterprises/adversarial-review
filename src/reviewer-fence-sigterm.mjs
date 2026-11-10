@@ -63,6 +63,7 @@ function resolveBotTokenEnvForIdentity(identity) {
   const normalized = String(identity || '').trim().toLowerCase();
   if (normalized.startsWith('codex-reviewer-')) return 'GH_CODEX_REVIEWER_TOKEN';
   if (normalized.startsWith('claude-reviewer-')) return 'GH_CLAUDE_REVIEWER_TOKEN';
+  if (normalized === 'grok-reviewer' || normalized.startsWith('grok-reviewer-')) return 'GH_GROK_REVIEWER_TOKEN';
   if (normalized.startsWith('gemini-reviewer-')) return 'GH_GEMINI_REVIEWER_TOKEN';
   return null;
 }

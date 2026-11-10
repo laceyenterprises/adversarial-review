@@ -6141,7 +6141,7 @@ test('reviewer model silence defaults and class allowlist are configurable', () 
   const defaults = resolveReviewPipelineHealthConfig({});
   assert.equal(defaults.reviewerSilenceThresholdMs, 24 * 60 * 60 * 1000);
   assert.equal(defaults.reviewerActivityLookbackMs, 7 * 24 * 60 * 60 * 1000);
-  assert.deepEqual(defaults.reviewerModelSilenceClasses, ['claude', 'codex', 'gemini']);
+  assert.deepEqual(defaults.reviewerModelSilenceClasses, ['claude', 'codex', 'gemini', 'grok']);
 
   const configured = resolveReviewPipelineHealthConfig({
     ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REVIEWER_MODEL_SILENCE_CLASSES:

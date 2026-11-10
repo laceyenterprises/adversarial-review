@@ -4881,6 +4881,19 @@ before passing it to the checker, even when it differs from the pin. Malformed
 nonempty strings refuse rather than falling back. The authoritative reviewer
 login, review state and review `commit_id` matching the resolved plan head remain
 mandatory. An omitted head therefore works only for a review on the pinned head.
+`review-evidence-invalid` remains terminal (exit 1) and includes a value-free
+`diagnostic` naming the first failed predicate: `run-pin-invalid`, `plan-invalid`,
+`plan-head-invalid`, `review-missing`, `review-head-mismatch`, `reviewer-untrusted`,
+or `review-state-invalid`. These codes are declared in
+`src/ama/hammer-edit-plan-contracts.d.ts` and enforced by the frozen
+`HAMMER_REVIEW_EVIDENCE_DIAGNOSTICS` allow-list in `src/ama/hammer-edit-plan.mjs`.
+The shared refusal helper throws for unknown codes without echoing the supplied
+value; neither CLI nor checker can emit an arbitrary diagnostic through it.
+`review-head-mismatch` compares the fetched review with the resolved plan head,
+not with Git HEAD. A candidate SHA does not substitute for a cited review SHA.
+An explicit older review citation only passes this pre-edit check; ancestry,
+review supersession, provenance, patch coverage and exact-candidate validation
+remain the final merge predicate's responsibility.
 `--help` and `-h` print usage and accepted shapes with exit 0 and perform no plan
 check, review read, policy read or backlog capture. Real helper failures retain
 their existing outcomes. Help is handled at the CLI entry point, separately

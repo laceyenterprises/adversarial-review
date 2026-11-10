@@ -24,6 +24,18 @@ import type {
   SubjectState,
   Verdict,
 } from '../../../src/kernel/contracts.js';
+import type {
+  HammerReviewEvidenceDiagnostic,
+  HammerReviewEvidenceRefusal,
+} from '../../../src/ama/hammer-edit-plan-contracts.js';
+
+const editPlanDiagnostic: HammerReviewEvidenceDiagnostic = 'review-head-mismatch';
+const editPlanRefusal: HammerReviewEvidenceRefusal = {
+  action: 'stop', reason: 'review-evidence-invalid', diagnostic: editPlanDiagnostic,
+};
+// @ts-expect-error Diagnostics cannot echo arbitrary review/plan values.
+const invalidEditPlanDiagnostic: HammerReviewEvidenceDiagnostic = 'arbitrary-review-body';
+void [editPlanRefusal, invalidEditPlanDiagnostic];
 
 const ref: SubjectRef = {
   domainId: 'example-domain',

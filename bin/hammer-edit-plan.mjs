@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execGhWithRetry } from '../src/gh-cli.mjs';
-import { checkHammerEditPlan } from '../src/ama/hammer-edit-plan.mjs';
+import { checkHammerEditPlan, refuseHammerReviewEvidence } from '../src/ama/hammer-edit-plan.mjs';
 import { assertFindingDisputeOwner } from '../src/ama/finding-dispute-owner.mjs';
 import { loadEffectiveMergeAuthorityConfig } from '../src/ama/effective-policy.mjs';
 import { primaryChangeRoot } from '../src/ama/primary-change.mjs';
@@ -62,16 +62,16 @@ export async function main(argv = process.argv.slice(2), {
   const pin = extra.length ? extra[1] : env.HAM_REVIEWED_SHA;
   const reviewedHead = typeof pin === 'string' ? pin.toLowerCase() : pin;
   if (typeof reviewedHead !== 'string' || !/^[a-f0-9]{40}$/.test(reviewedHead)) {
-    return { action: 'stop', reason: 'review-evidence-invalid' };
+    return refuseHammerReviewEvidence('run-pin-invalid');
   }
   const plan = JSON.parse(readFileSync(planFile, 'utf8'));
   if (!plan || typeof plan !== 'object' || Array.isArray(plan)) {
-    return { action: 'stop', reason: 'review-evidence-invalid' };
+    return refuseHammerReviewEvidence('plan-invalid');
   }
   plan.reviewedHead = typeof plan.reviewedHead === 'string' && plan.reviewedHead.trim()
     ? plan.reviewedHead.toLowerCase() : reviewedHead;
   if (!/^[a-f0-9]{40}$/.test(plan.reviewedHead)) {
-    return { action: 'stop', reason: 'review-evidence-invalid' };
+    return refuseHammerReviewEvidence('plan-head-invalid');
   }
   rootDir ??= primaryChangeRoot();
   const review = await readReviewImpl(repo, pr, reviewId);

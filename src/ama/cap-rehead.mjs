@@ -1,3 +1,4 @@
+import { prepareLegacyActor } from '../finalization/legacy-actor-boundary.mjs';
 // CAPREHEAD-01: bounded branch maintenance; this grants no merge authority.
 import { closeSync, mkdirSync, openSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -66,7 +67,7 @@ export async function probeCapReheadOwnership(args, {
   return { owned: false, uncertain: false };
 }
 
-export async function maybeDispatchCapRehead({ rootDir, repo, prNumber, headSha, branch, title,
+export async function maybeDispatchCapRehead({ rootDir, repo, prNumber, headSha, branch, baseBranch, title,
   wake, reviewState, requiredChecks, requiredCheckContexts = [], mergeable,
   lifetimeExhausted = false, cfg = {}, defaultBuilder = 'codex', reviewStateRow,
   env = process.env, signal, logger = console,
@@ -77,6 +78,8 @@ export async function maybeDispatchCapRehead({ rootDir, repo, prNumber, headSha,
   now = () => new Date().toISOString(),
 } = {}) {
   if (wake?.outcome !== 'skipped' || !['retry-exhausted', 'hammer-retry-cap-exhausted'].includes(wake.reason)) return null;
+  const route = await prepareLegacyActor({ rootDir, repo, base: baseBranch || reviewStateRow?.base_branch, prNumber, head: headSha, cfg });
+  if (!route.ok) return { dispatched: false, reason: route.reason };
   const report = (dispatched, reason, extra = {}) => {
     counts[dispatched ? 'dispatched' : 'skipped']++;
     const result = { dispatched, reason, ...extra };

@@ -2154,7 +2154,7 @@ async function dispatchAmaClosureFor({
     const capRehead = await runCoexistenceOperation('cap-rehead',
       ({ signal: operationSignal }) => maybeDispatchCapReheadImpl({
       rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
-      branch: candidate?.branch, title: candidate?.title, wake,
+      branch: candidate?.branch, baseBranch: candidate?.baseBranch, title: candidate?.title, wake,
       reviewState: { ...reviewState, reviewCycleExhausted: reviewCycleKnown ? reviewCycleExhausted : null },
       requiredChecks: candidate?.statusCheckRollup,
       requiredCheckContexts: [...resolveRequiredCheckContextsFromCfg(cfg),

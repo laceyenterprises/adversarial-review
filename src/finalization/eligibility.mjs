@@ -14,6 +14,9 @@
 // configured producer is a config-validation error AT LOAD (`normalizePolicy`
 // throws), never a silent premature cutover (LHA class).
 
+import { workflowDecision, workflowEpisode } from './workflow-decision.mjs';
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
+
 /**
  * @typedef {import('../kernel/contracts.js').LedgerState} LedgerState
  * @typedef {import('../kernel/contracts.js').EligibilityPolicy} EligibilityPolicy
@@ -63,6 +66,9 @@ export const DEFAULT_ELIGIBILITY_POLICY = Object.freeze({
   verdictPatienceMs: DEFAULT_PATIENCE_MS,
   attestationPatienceMs: DEFAULT_PATIENCE_MS,
   autonomousExecutionDisabled: false,
+  subjectRoundCap: 4,
+  deadlineCeilingMs: 6 * DEFAULT_PATIENCE_MS,
+  codeVersion: 'mlr06-v1',
 });
 
 /**
@@ -99,6 +105,9 @@ export function normalizePolicy(policy = {}) {
     verdictPatienceMs: positiveMs(merged.verdictPatienceMs),
     attestationPatienceMs: positiveMs(merged.attestationPatienceMs),
     autonomousExecutionDisabled: merged.autonomousExecutionDisabled === true,
+    codeVersion: String(merged.codeVersion),
+    subjectRoundCap: Number.isSafeInteger(merged.subjectRoundCap) && merged.subjectRoundCap > 0 ? merged.subjectRoundCap : 4,
+    deadlineCeilingMs: positiveMs(merged.deadlineCeilingMs),
   });
 }
 
@@ -249,7 +258,22 @@ function conclusionForDispatch(state, rev, round) {
  *   reads a clock.
  * @returns {EligibilityDecision}
  */
-export function eligible(state, policy, { observedAt } = {}) {
+export function eligible(state, policy, observation = {}) {
+  const pol = normalizePolicy(policy);
+  const episode = workflowEpisode(state, pol);
+  const duration = nominal => state.workflow?.anchors[episode]?.effectiveMs ?? loadAwareTimeoutMs(nominal, {
+    enabled: true, maxMultiplier: 6, loadAvg1m: 0, cpuCount: 1, cpuBusyPercent: 100,
+    ...observation.load, maxMs: pol.deadlineCeilingMs,
+  });
+  const effectivePolicy = { ...pol, checksPatienceMs: duration(pol.checksPatienceMs),
+    verdictPatienceMs: duration(pol.verdictPatienceMs), attestationPatienceMs: duration(pol.attestationPatienceMs) };
+  const budgetExhausted = Object.keys(state.workflow?.work ?? {}).length >= pol.subjectRoundCap;
+  const coreState = { ...state, terminal: ['halted', 'escalated'].includes(state.terminal?.kind) ? null : state.terminal,
+    stages: budgetExhausted ? { ...state.stages, subject: { budgetExhausted: true } } : state.stages };
+  return workflowDecision(state, pol, observation, eligibleCore(coreState, effectivePolicy, observation));
+}
+
+function eligibleCore(state, policy, { observedAt } = {}) {
   const pol = normalizePolicy(policy);
   const at = observedAt ?? state?.lastEventAt ?? null;
   const rev = state?.currentRevision ?? null;
@@ -417,7 +441,7 @@ export function eligible(state, policy, { observedAt } = {}) {
   // The final remediation reply is coverage-validated by the producer; the fold
   // trusts its outcome. `completed` ⇒ full coverage ⇒ finalize-now. Anything
   // else ⇒ coverage operationally impossible ⇒ halt (pages); NEVER close.
-  if (conclusion.outcome === 'completed') {
+  if (conclusion.outcome === 'completed' && conclusion.coverageValidated && conclusion.sourceRef) {
     return gate(D('finalize-now', { reason: 'exhaustion final remediation reached validated full coverage' }));
   }
   return D('halt', {

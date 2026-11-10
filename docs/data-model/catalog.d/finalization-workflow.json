@@ -1,0 +1,13 @@
+{
+  "domains": [{
+    "title": "Finalization workflow, custody recovery and delivery",
+    "path": "docs/data-model/finalization-ledger.md",
+    "store": "data/reviews.db",
+    "schemaSurface": "src/finalization/ledger-events.mjs",
+    "relatedSchemaSurfaces": ["src/finalization/workflow-state.mjs", "src/finalization/workflow-decision.mjs", "src/finalization/workflow-effects.mjs"],
+    "owner": "Merge Authority v2",
+    "optionalFields": [
+      "finalization_ledger.payload_json: anchored deadlines, useful-work identities, custody salvage, operation reconciliation, merge/PMA and acknowledged page receipts"
+    ]
+  }]
+}

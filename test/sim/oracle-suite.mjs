@@ -84,10 +84,10 @@ test('parked PR generation requires a non-empty array of known requirement IDs',
   input.parkedPRs[0].requirementIds = ['R-999'];
   assert.throws(() => generate(JSON.stringify(input)), /unknown parked requirement R-999/);
 });
-test('admission refusal is visible as a baseline cap-charge defect; read failures recover', async () => {
+test('admission refusal does not spend work; read failures recover', async () => {
   const refusal = await simulate({ id: 'refusal', profile: 'clone-reserve' });
-  assert.ok(refusal.transientCharges > 0);
-  assert.ok(refusal.failed.includes('transient-retry'));
+  assert.equal(refusal.transientCharges, 0);
+  assert.deepEqual(refusal.failed, []);
   const read = await simulate({ id: 'read', profile: 'ledger-failure' });
   assert.ok(read.readFailed);
   assert.equal(read.transientCharges, 0);
@@ -113,7 +113,7 @@ test('stale review never merges, exhausted head move retains budget, live-owner 
   const headRace = await simulate({ id: 'head-race', profile: 'decision-head-race' });
   assert.equal(headRace.merges.length, 1);
   assert.equal(headRace.merges[0].revision, 'revision-B');
-  assert.ok(headRace.trace.some(t => t.label.includes('head-moved')));
+  assert.ok(headRace.trace.some(t => t.label.includes('world-moved-before-merge')));
 });
 test('rollback transfers the same ledger and queue without losing budget or duplicating effects', async () => {
   const result = await simulate({ id: 'rollback', profile: 'rollback' });
@@ -133,7 +133,19 @@ test('label presence alone never creates an operator override and explicit hold 
   assert.equal(hold.merges.length, 0);
   assert.equal(hold.launches.length, 0);
 });
-test('current v2 pass/fail table matches the recorded MLR-06 baseline', async () => {
+test('the full MLR-05 library passes at load x1, x3 and x6; retain the original baseline', async () => {
   const baseline = JSON.parse(readFileSync(new URL('./baseline.json', import.meta.url), 'utf8'));
-  assert.deepEqual(await report(), baseline);
+  assert.ok(baseline.rows.some(row => row.failed.length));
+  const current = await report();
+  assert.equal(current.requirementsSha256, baseline.requirementsSha256);
+  assert.deepEqual(current.rows.map(r => [r.id, r.load]), baseline.rows.map(r => [r.id, r.load]));
+  assert.deepEqual(current.rows.filter(row => row.failed.length || row.unmet.length), []);
+});
+
+test('all generated scenarios retain the invariants across twenty scheduling seeds at each load', async () => {
+  for (const scenario of library.scenarios) for (const load of [1, 3, 6]) for (let seed = 1; seed <= 20; seed++) {
+    const result = await simulate(scenario, { load, seed });
+    assert.deepEqual(result.failed, [], `${scenario.id} load=${load} seed=${seed}`);
+    assert.deepEqual(result.unmet, [], `${scenario.id} load=${load} seed=${seed}`);
+  }
 });

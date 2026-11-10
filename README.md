@@ -4124,9 +4124,12 @@ receipt. Mismatched, unstructured or foreign already-merged replies are not
 success, and an invisible ambiguous merge waits for drained owner takeover. The
 receipt (old/new head, base, rebase provenance, check snapshot, decision, merge
 SHA, bot/closer attribution) commits with the merged phase, a subject-ledger
-`finalized` event and stable-key outbox rows for the existing merge-action
+`merge_observed` landing event and stable-key outbox rows for the existing merge-action
 accounting and AMA closure audit. Delivery retries never repeat the merge or an
-action, and pending delivery stays visible after the lane advances.
+action, and pending delivery stays visible after the lane advances. The subject
+retains a post-merge delivery owner until a matching PMA run supplies verified
+activation evidence; landing alone never writes `finalized`. Custody changes
+invalidate authorization and select owned reconciliation from the shared fold.
 Outbox database operations retain the store's configured busy timeout so a
 transient writer can finish after lane release. The merge probe's recent receipt
 `recordedAt` is the authoritative merge time (`merge.mergedAt`). Clean reviews

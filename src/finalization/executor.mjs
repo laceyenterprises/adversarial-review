@@ -1,4 +1,4 @@
-import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
+import { loadAwareTimeoutMs, hostCpuBusyPercent } from '../load-aware-timeout.mjs';
 // Merge Authority v2 leased executor (ARC-17; docs/SPEC-merge-authority-v2.md §4).
 // The LAST piece of MA-v2: the single finalization worker per subject that turns
 // the pure `eligible(...)` decision into an action. It is leased, idempotent, and
@@ -25,14 +25,15 @@ import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 //     merge, close, or dispatch proceeds. (Defense in depth: `eligible()` also
 //     gates, but the executor re-checks at the mutation boundary.)
 //
-// Escalate/halt are recorded terminal marks that do not re-page: an already
-// `escalated`/`halted` subject is not re-appended on a later tick (§3).
+// Escalations retain recovery ownership and retry unacknowledged delivery.
 
 import { randomUUID } from 'node:crypto';
-import { hostname } from 'node:os';
+import { hostname, loadavg, availableParallelism } from 'node:os';
 
 import { fold } from './ledger-fold.mjs';
 import { eligible } from './eligibility.mjs';
+import { readQueueEvidence } from './queue-read.mjs';
+import { createWorkflowEffects } from './workflow-effects.mjs';
 import { escalated, finalized, halted, closed, remediationDispatched, resolveSubjectKey } from './ledger-events.mjs';
 import {
   resolveMergeSurface,
@@ -90,11 +91,15 @@ export function createFinalizationExecutor({
   identitySurface = null,
   remediationSurface = null,
   closeSurface = null,
+  liveSurface = null,
+  recoverySurface = null,
+  deliverySurface = null,
+  pageSurface = null,
   mergeMethod = 'squash',
   // Required for merge execution, including legacy-default cached config.
   laneRouting = null,
   holder,
-  leaseTtlMs = loadAwareTimeoutMs(DEFAULT_LEASE_TTL_MS, { maxMs: Infinity }),
+  leaseTtlMs = loadAwareTimeoutMs(DEFAULT_LEASE_TTL_MS, { maxMs: 30 * 60 * 1000 }),
   generateLeaseId = randomUUID,
 } = {}) {
   if (!ledgerStore || typeof ledgerStore.read !== 'function') {
@@ -103,7 +108,14 @@ export function createFinalizationExecutor({
   if (!leaseStore || typeof leaseStore.acquire !== 'function') {
     throw new TypeError('createFinalizationExecutor requires a leaseStore');
   }
+  const executionToken = Symbol('leased-execution');
   const holderId = holder || `finalization-executor:${process.pid}@${safeHostname()}`;
+  const bounded = (fn, request, decision) => {
+    const patience = loadAwareTimeoutMs(5000, { maxMs: 30000 });
+    const remaining = decision?.deadline ? Date.parse(decision.deadline) - Date.parse(request.observedAt) : patience;
+    return readQueueEvidence({ read: fn }, request, Math.min(patience, Math.max(1, remaining)));
+  };
+  const effects = createWorkflowEffects({ ledgerStore, recoverySurface, deliverySurface, pageSurface });
   // Resolve the merge seam once: ARC-20 adjudicate surface, else the injected
   // local fallback, else a default github-adapter local surface (§4).
   const mergeSurface = resolveMergeSurface({
@@ -118,8 +130,8 @@ export function createFinalizationExecutor({
   // intercepted decision. Idempotent + no re-page: skip if already terminal-escalated.
   function recordKillSwitchEscalation(subject, decision, state, at) {
     const reason = `kill switch: ${decision.kind} intercepted (autonomous execution disabled)`;
-    if (state?.terminal?.kind !== 'escalated') {
-      ledgerStore.append(escalated(subject, { at, reason }));
+    if (state?.workflow?.escalation?.episode !== decision.episode) {
+      ledgerStore.append(escalated(subject, { at, reason, episode: decision.episode }));
     }
     return outcome(resolveSubjectKey(subject), decision, {
       status: 'skipped', action: 'escalate', observedAt: at, reason, killSwitch: true,
@@ -137,21 +149,39 @@ export function createFinalizationExecutor({
         reason: state.finalized ? 'already finalized' : 'already closed',
       });
     }
+    if (Date.parse(observedAt) >= Date.parse(decision.deadline) || decision.kind === 'escalate') {
+      await effects.page(subjectKey, decision, observedAt);
+    }
+    if (decision.nextAction === 'settle-delivery') {
+      ledgerStore.append(finalized(subject, { at: observedAt,
+        revisionRef: state.workflow.merge.mergedRevision, method: 'observed',
+        sourceRef: state.workflow.delivery.sourceRef }));
+      return outcome(subjectKey, decision, { status: 'executed', action: 'settle-delivery', observedAt });
+    }
+    if (decision.nextAction === 'deliver') {
+      if (killSwitchOn()) return recordKillSwitchEscalation(subject, decision, state, observedAt);
+      const result = await effects.deliver(subjectKey, decision, observedAt);
+      return outcome(subjectKey, decision, { status: result.ok ? 'executed' : 'deferred',
+        action: 'deliver', reason: result.reason, observedAt });
+    }
+    const recoveryActions = ['recover-custody', 'reconcile-custody', 'recover-primary',
+      'conflict-rebase', 'merge-main', 'reconcile-dispatch', 'reconcile-effects', 'recover-coverage', 'refresh-evidence'];
+    if (decision.kind !== 'escalate' && recoveryActions.includes(decision.nextAction)) {
+      if (killSwitchOn()) return recordKillSwitchEscalation(subject, decision, state, observedAt);
+      const result = await effects.recover(subjectKey, decision, observedAt);
+      return outcome(subjectKey, decision, { status: result.ok ? 'executed' : 'deferred',
+        action: decision.nextAction, reason: result.reason, observedAt });
+    }
 
     switch (decision.kind) {
       case 'finalize-now': {
         if (killSwitchOn()) return recordKillSwitchEscalation(subject, decision, state, observedAt);
         // Identity/attestation read-through (ARC-22), fail-closed.
-        const idv = await checkIdentityAttestation(identitySurface, { subjectKey, revisionRef: rev, decision });
+        const idv = await checkIdentityAttestation(identitySurface && { check: ctx => bounded(
+          request => identitySurface.check(request), { ...ctx, observedAt }, decision) }, { subjectKey, revisionRef: rev, decision });
         if (!idv.ok) {
-          if (idv.surfaceError) {
-            return outcome(subjectKey, decision, {
-              status: 'failed', action: 'merge', observedAt, reason: idv.reason,
-            });
-          }
-          ledgerStore.append(escalated(subject, { at: observedAt, reason: idv.reason }));
           return outcome(subjectKey, decision, {
-            status: 'skipped', action: 'escalate', observedAt, reason: idv.reason,
+            status: 'deferred', action: 'refresh-attestation', observedAt, reason: idv.reason,
           });
         }
         if (!mergeSurface) {
@@ -161,10 +191,21 @@ export function createFinalizationExecutor({
         }
         let result;
         try {
-          const legacy = () => mergeSurface.merge({
-            subjectKey, subjectExternalId: subjectKey.subjectExternalId, revisionRef: rev, mergeMethod,
-          });
-          if (laneRouting) result = await laneRouting.run({ subject: subjectKey, revisionRef: rev, legacy });
+          const legacy = async () => {
+            if (!liveSurface?.read) return { ok: false, reason: 'authoritative-pr-reader-unavailable' };
+            const live = await bounded(request => liveSurface.read(request), { subjectKey, revisionRef: rev, observedAt }, decision);
+            const current = fold(ledgerStore.read(subject));
+            if (live?.state !== 'open' || live.head !== rev || !live.sourceRef
+              || current.eventCount !== state.eventCount) return { ok: false, reason: 'world-moved-before-merge' };
+            const operationId = `merge:${rev}`;
+            if (killSwitchOn()) return { ok: false, reason: 'autonomous-execution-disabled' };
+            effects.emit(subjectKey, observedAt, 'operation_requested', { operationId, action: 'merge', revisionRef: rev });
+            return bounded(request => mergeSurface.merge(request), {
+              subjectKey, subjectExternalId: subjectKey.subjectExternalId, revisionRef: rev,
+              mergeMethod: decision.mergeMethod ?? mergeMethod, idempotencyKey: operationId, deadline: decision.deadline, observedAt,
+            }, decision);
+          };
+          if (laneRouting) result = await laneRouting.run({ subject: subjectKey, revisionRef: rev, deadline: decision.deadline, legacy });
           else result = { ok: false, reason: 'lane-routing-adapter-unavailable' };
         } catch (err) {
           return outcome(subjectKey, decision, {
@@ -189,10 +230,8 @@ export function createFinalizationExecutor({
             reason: result?.reason || 'merge failed', detail: result?.detail,
           });
         }
-        ledgerStore.append(finalized(subject, {
-          at: observedAt, revisionRef: rev, method: mergeMethod,
-          sourceRef: mergeSurfaceName(result, mergeSurface),
-        }));
+        // Landing is not finalization. Authoritative live readback on the next
+        // tick records the actual principal/revision and starts PMA delivery.
         return outcome(subjectKey, decision, { status: 'executed', action: 'merge', observedAt });
       }
 
@@ -211,11 +250,21 @@ export function createFinalizationExecutor({
           });
         }
         if (killSwitchOn()) return recordKillSwitchEscalation(subject, decision, state, observedAt);
+        if (!remediationSurface?.dispatch) return outcome(subjectKey, decision, {
+          status: 'deferred', action: 'dispatch-remediation', observedAt, reason: 'remediation capability unavailable',
+        });
+        const previous = state.workflow.operations[idempotencyKey];
+        if (previous && previous.observation?.outcome !== 'absent') {
+          const recovered = await effects.recover(subjectKey, { ...decision, nextAction: 'reconcile-dispatch', operationId: idempotencyKey }, observedAt);
+          return outcome(subjectKey, decision, { status: 'deferred', action: 'reconcile-dispatch', observedAt, reason: recovered.reason });
+        }
+        effects.emit(subjectKey, observedAt, 'operation_requested', { operationId: idempotencyKey, action: 'remediate', revisionRef: rev });
+        let admission;
         if (remediationSurface && typeof remediationSurface.dispatch === 'function') {
           try {
-            await remediationSurface.dispatch({
-              subjectKey, revisionRef: rev, round, stageId: decision.stageId, final: decision.final === true, idempotencyKey,
-            });
+            admission = await bounded(request => remediationSurface.dispatch(request), {
+              subjectKey, revisionRef: rev, round, stageId: decision.stageId, final: decision.final === true, idempotencyKey, observedAt, deadline: decision.deadline,
+            }, decision);
           } catch (err) {
             return outcome(subjectKey, decision, {
               status: 'failed', action: 'dispatch-remediation', observedAt,
@@ -223,18 +272,36 @@ export function createFinalizationExecutor({
             });
           }
         }
+        if (admission?.admitted !== true || !admission.launchId) {
+          if (admission?.admitted === false) effects.emit(subjectKey, observedAt, 'operation_observed', {
+            operationId: idempotencyKey, outcome: 'absent', result: admission,
+          });
+          return outcome(subjectKey, decision, { status: 'deferred', action: 'dispatch-remediation', observedAt,
+            reason: admission?.reason ?? 'admission requires reconciliation' });
+        }
+        effects.emit(subjectKey, observedAt, 'operation_observed', { operationId: idempotencyKey, outcome: 'admitted', result: admission });
         ledgerStore.append(remediationDispatched(subject, {
           at: observedAt, revisionRef: rev, round, idempotencyKey,
           stageId: decision.stageId, final: decision.final === true,
+          operationId: idempotencyKey, admittedAt: admission.admittedAt ?? observedAt,
         }));
         return outcome(subjectKey, decision, { status: 'executed', action: 'dispatch-remediation', observedAt });
       }
 
       case 'close': {
         if (killSwitchOn()) return recordKillSwitchEscalation(subject, decision, state, observedAt);
+        if (!closeSurface?.close) return outcome(subjectKey, decision, {
+          status: 'deferred', action: 'close', observedAt, reason: 'close surface unavailable',
+        });
+        const operationId = `close:${rev}:${state.operatorOverrides.at(-1)?.at}`;
+        if (state.workflow.operations[operationId]) {
+          const result = await effects.recover(subjectKey, { ...decision, nextAction: 'reconcile-effects', operationId }, observedAt);
+          return outcome(subjectKey, decision, { status: 'deferred', action: 'reconcile-effects', observedAt, reason: result.reason });
+        }
         if (closeSurface && typeof closeSurface.close === 'function') {
+          effects.emit(subjectKey, observedAt, 'operation_requested', { operationId, action: 'close', revisionRef: rev });
           try {
-            await closeSurface.close({ subjectKey, revisionRef: rev, reason: decision.reason });
+            await bounded(request => closeSurface.close(request), { subjectKey, revisionRef: rev, reason: decision.reason, observedAt, idempotencyKey: operationId }, decision);
           } catch (err) {
             return outcome(subjectKey, decision, {
               status: 'failed', action: 'close', observedAt,
@@ -242,7 +309,7 @@ export function createFinalizationExecutor({
             });
           }
         }
-        ledgerStore.append(closed(subject, { at: observedAt, reason: decision.reason || 'operator close' }));
+        // Completion is recorded only by the authoritative lifecycle read in tick().
         return outcome(subjectKey, decision, { status: 'executed', action: 'close', observedAt });
       }
 
@@ -253,18 +320,18 @@ export function createFinalizationExecutor({
         });
 
       case 'halt': {
-        // Records a terminal mark and pages; no re-page once already halted (§3).
+        // Persist the hold while the ordinary episode pager retries delivery.
         if (state.terminal?.kind !== 'halted') {
-          ledgerStore.append(halted(subject, { at: observedAt, reason: decision.reason || 'halt' }));
+          ledgerStore.append(halted(subject, { at: observedAt, reason: decision.reason || 'halt',
+            policyVersion: decision.policyVersion, codeVersion: decision.codeVersion }));
         }
         return outcome(subjectKey, decision, { status: 'skipped', action: 'halt', observedAt, reason: decision.reason });
       }
 
       case 'escalate': {
-        // Fail-closed / patience-expiry / kill-switch-from-fold. Record once; the
-        // terminal `escalated` mark does not re-page on later ticks (§3).
-        if (state.terminal?.kind !== 'escalated') {
-          ledgerStore.append(escalated(subject, { at: observedAt, reason: decision.reason || 'escalate' }));
+        // Record the episode once; unacknowledged pages retry on later ticks.
+        if (state.workflow?.escalation?.episode !== decision.episode) {
+          ledgerStore.append(escalated(subject, { at: observedAt, reason: decision.reason || 'escalate', episode: decision.episode }));
         }
         return outcome(subjectKey, decision, {
           status: 'skipped', action: 'escalate', observedAt, reason: decision.reason,
@@ -289,7 +356,7 @@ export function createFinalizationExecutor({
    * @param {import('../kernel/contracts.js').EligibilityDecision} decision
    * @param {{ subject: object, observedAt: string, basis?: { eventCount?: number } }} ctx
    */
-  async function execute(decision, { subject, observedAt, basis, foldedState = null } = {}) {
+  async function execute(decision, { subject, observedAt, basis, foldedState = null, token = null } = {}) {
     const subjectKey = resolveSubjectKey(subject);
     const state = foldedState ?? fold(ledgerStore.read(subject));
 
@@ -307,6 +374,11 @@ export function createFinalizationExecutor({
           : 'world moved: ledger advanced since decision; decision discarded',
       });
     }
+    if (!foldedState || token !== executionToken) return tick(subject, { observedAt });
+    const activeLease = leaseStore.read(subject);
+    if (!enabled || activeLease?.holder !== holderId || Date.parse(activeLease.deadline) <= Date.parse(observedAt)) {
+      return outcome(subjectKey, decision, { status: 'deferred', action: 're-decide', observedAt, reason: 'executor lease unavailable' });
+    }
     return applyDecision(subject, decision, state, observedAt);
   }
 
@@ -317,7 +389,7 @@ export function createFinalizationExecutor({
    * @param {object} subject SubjectRef / SubjectKey
    * @param {{ observedAt: string, leaseId?: string }} opts
    */
-  async function tick(subject, { observedAt, leaseId } = {}) {
+  async function tick(subject, { observedAt, leaseId, load } = {}) {
     const subjectKey = resolveSubjectKey(subject);
     if (!observedAt) throw new TypeError('executor tick requires an observedAt timestamp');
 
@@ -330,10 +402,56 @@ export function createFinalizationExecutor({
       });
     }
 
+    load ??= { loadAvg1m: loadavg()[0], cpuCount: availableParallelism(), cpuBusyPercent: hostCpuBusyPercent() };
     const myLeaseId = leaseId || generateLeaseId();
     const deadline = isoAdd(observedAt, leaseTtlMs);
-    const events = ledgerStore.read(subject);
-    const state = fold(events);
+    let events;
+    let live;
+    try {
+      events = ledgerStore.read(subject);
+      live = liveSurface?.read ? await bounded(request => liveSurface.read(request), { subjectKey, observedAt }) : null;
+    } catch (error) {
+      // The app store may be unavailable: use the existing pager's durable keyed
+      // outbox rather than pretending an unreadable ledger has no owner.
+      if (pageSurface?.deliver) {
+        try { await bounded(request => pageSurface.deliver(request), { subject: subjectKey,
+          idempotencyKey: `ledger-unavailable:${subjectKey.domainId}:${subjectKey.subjectExternalId}`, observedAt }); } catch { /* retry next pass */ }
+      }
+      return outcome(subjectKey, { kind: 'wait', subjectKey, revisionRef: '', observedAt,
+        owner: { kind: 'workflow', id: 'finalization-evidence-recovery', head: '' }, nextAction: 'refresh-evidence' }, {
+        status: 'deferred', action: 'refresh-evidence', observedAt, reason: 'authoritative evidence unavailable', detail: error.message,
+      });
+    }
+    let state = fold(events);
+    if (!state.finalized && state.terminal?.kind !== 'closed') {
+      if (!live?.sourceRef || !['open', 'merged', 'closed'].includes(live.state)) {
+        return outcome(subjectKey, eligible(state, policy, { observedAt, load }), {
+          status: 'deferred', action: 'refresh-evidence', observedAt, reason: 'authoritative-pr-reader-unavailable',
+        });
+      }
+      if (live.state === 'closed') {
+        ledgerStore.append(closed(subject, { at: observedAt, reason: 'authoritative closed PR', sourceRef: live.sourceRef }));
+        return outcome(subjectKey, eligible(fold(ledgerStore.read(subject)), policy, { observedAt, load }), {
+          status: 'executed', action: 'settle-closed', observedAt,
+        });
+      }
+      if (live.state === 'merged' && !state.workflow.merge) {
+        if (!live.mergedRevision || !live.principal || typeof live.planRequired !== 'boolean') {
+          return outcome(subjectKey, eligible(state, policy, { observedAt, load }), {
+            status: 'deferred', action: 'refresh-evidence', observedAt, reason: 'merge-provenance-unavailable',
+          });
+        }
+        effects.emit(subjectKey, observedAt, 'merge_observed', { mergedRevision: live.mergedRevision,
+          principal: live.principal, planRequired: live.planRequired, sourceRef: live.sourceRef,
+          idempotencyKey: `merge:${live.sourceRef}` });
+        state = fold(ledgerStore.read(subject));
+      }
+      if (live.state === 'open' && live.head !== state.currentRevision) {
+        return outcome(subjectKey, eligible(state, policy, { observedAt, load }), {
+          status: 'deferred', action: 're-decide', observedAt, reason: 'live head requires revision observation',
+        });
+      }
+    }
     const currentRev = state.currentRevision;
     const acq = leaseStore.acquire({
       subject, holder: holderId, leaseId: myLeaseId, revisionRef: currentRev, now: observedAt, deadline,
@@ -348,15 +466,28 @@ export function createFinalizationExecutor({
 
     try {
       const leasedEvents = ledgerStore.read(subject);
-      const leasedState = fold(leasedEvents);
-      const decision = eligible(leasedState, policy, { observedAt });
+      let leasedState = fold(leasedEvents);
+      let decision = eligible(leasedState, policy, { observedAt, load });
+      if (!leasedState.workflow.anchors[decision.episode] && decision.anchorAt) {
+        effects.emit(subjectKey, observedAt, 'decision_anchored', {
+          episode: decision.episode, anchorAt: decision.anchorAt, nominalMs: decision.nominalMs,
+          effectiveMs: decision.effectiveMs, ceilingMs: decision.ceilingMs, policyVersion: decision.policyVersion,
+          codeVersion: decision.codeVersion, loadEvidence: decision.loadEvidence,
+        });
+        leasedState = fold(ledgerStore.read(subject));
+        decision = eligible(leasedState, policy, { observedAt, load });
+      }
       // decide → execute back-to-back under the lease; tick passes the
       // post-acquire folded state so execute() does not perform a third fold.
       return await execute(decision, {
         subject,
         observedAt,
         basis: { eventCount: leasedState.eventCount },
-        foldedState: leasedState,
+        foldedState: leasedState, token: executionToken,
+      });
+    } catch (error) {
+      return outcome(subjectKey, eligible(state, policy, { observedAt, load }), {
+        status: 'deferred', action: 'refresh-evidence', observedAt, reason: 'leased evidence unavailable', detail: error.message,
       });
     } finally {
       leaseStore.release({ subject, leaseId: myLeaseId });
@@ -374,9 +505,6 @@ function safeHostname() {
   }
 }
 
-function mergeSurfaceName(result, surface) {
-  return result?.via || surface?.name || 'merge-surface';
-}
 
 // Local, allocation-free policy normalization for the kill-switch read only. The
 // full validation lives in `eligibility.normalizePolicy`; here we only need the

@@ -1,135 +1,73 @@
 # Merge Authority v2 — Executor Promotion Runbook
 
-**Owner:** ARC-17 (Merge Authority v2 leased executor)
-**Applies to:** `src/finalization/executor.mjs` (+ `executor-lease-store.mjs`,
-`execution-surfaces.mjs`)
-**Design:** `docs/SPEC-merge-authority-v2.md` §4–5.
+**Owner:** Merge Authority v2 runtime owner; Main Loop 6 owns promotion/rollback.
+**Applies to:** `src/finalization/`.
+**Design:** [approved v1.0 contract](SPEC-merge-authority-v2.md) §4–6.
 
-The MA-v2 executor is the single leased worker that turns the pure
-`eligible(fold(ledger), policy)` decision into a merge / remediation dispatch /
-close. It **ships gated off**: `createFinalizationExecutor({ enabled: false })`
-makes every `tick()` inert — no lease is taken, no ledger event is written, no
-adapter is called. Promotion is an **operator action**, taken only after the
-shadow gate clears. This runbook is that procedure.
+## Promotion evidence
 
-> Frozen v1 merge authority (`src/ama/*`, `follow-up-merge-agent.mjs`, the
-> daemon-clean path) keeps acting until — and only until — this executor is
-> promoted. Do not disable v1 before step 4.
+The executor remains gated off by default. MLR-04 approved at least 50 distinct
+shadowed finalizations, including organic head-move and exhaustion examples,
+every divergence dispositioned and no unresolved fold/evidence error. MLR-07
+owns the live report. The historical ARC-16 day count and `shadowed > 0` result
+are insufficient. Retain MGQ's separate at least 20 canary entries, both admission
+types and rollback rehearsal. Synthetic replay supplies code evidence only.
 
----
+MLR-08/09 use the existing [whole-lane canary procedure](finalization-queue-canary-runbook.md)
+and [expansion/rollback procedure](finalization-queue-expansion-runbook.md).
+A flag and bounce alone do not transfer authority. Operators must prove prior
+writer drain, reconcile ambiguous operations, obtain stable acknowledgements,
+then transfer the exact repository/base through MGQ-08. Retain v1 for one release
+cycle; deletion requires its separate approval. No worker performs these actions.
 
-## 1. Gate criteria (must ALL hold before promotion)
+## Composition and read-only activation evidence
 
-The gate is the shadow-mode promotion verdict from ARC-16 (§5.3). Read it with:
+Before a canary, the runtime owner verifies the deployed source contains the
+reviewed implementation and the loaded watcher/consumer started from that build.
+Observe actual build, effective route, fresh custody appends and organic consumer
+progress read-only. Source merge and submodule float alone are not loaded-code
+or activation evidence. Privileged deploy/restart/config changes belong to SRE.
 
-```
-adversarial-review finalization shadow-report --days 7 --json
-```
+The subject executor requires an authoritative lifecycle/head reader and the
+existing lane routing adapter. Queue and subject merge paths consult the same
+workflow recovery decision; any new custody fact invalidates evaluated currency.
+Unavailable identity/attestation remains owned retryable evidence. A merge reply
+never settles the subject. Readback records actual principal/revision, and a
+matching PMA plan-run/activation receipt permits `finalized`. Manual landing
+retains delivery ownership without inflating autonomous throughput.
 
-Promote only when `promotable: true`, i.e. `blockers: []`. Each blocker maps to a
-criterion that must be satisfied first:
+Compose custody recovery with exact-holder probing, complete durable WIP patch
+storage, acknowledged successor handoff and the existing teardown. The adapter
+records salvage before teardown, rechecks terminal custody after handoff, and
+requires completed branch release. Held/failed or ambiguous release stays owned.
+Do not use age, signal silence or PID death as takeover permission.
 
-| Criterion | Report field | Meaning |
-|---|---|---|
-| **Coverage window** | `coverage.enoughDays` | Shadow has run ≥ N days (default 7). |
-| **Some traffic** | `shadowed > 0` | The window actually contains shadowed finalizations. |
-| **Zero open divergences** | `openDivergences === 0` | Every `(v1, v2)` divergence in the window is dispositioned (classifier fingerprint or human override); only an `open` disposition blocks. Triage per `docs/finalization-shadow-divergence-triage.md`. |
-| **Organic head-move seen** | `organicHeadMoves ≥ 1` | At least one real revision advance was observed in shadow — proof the per-revision fold behaved on a moving head. |
-| **Exhaustion close seen** | `exhaustionCloses ≥ 1` | At least one budget-exhaustion close was observed — proof the land-on-exhaustion path was exercised. |
+Compose `createWorkflowPageSurface` with the existing alert outbox/route. It
+reuses the existing infrastructure event family and stable subject/episode key;
+queued, inflight or failed is not acknowledged delivery. Retries retain that key.
+Compose `createPostMergeDeliverySurface` with existing PMA/DAG admission and run
+observation. Missing composition remains visible owned recovery and blocks
+finalization. No new transport, daemon, routing selector or pager is introduced.
 
-If `promotable: false`, **stop.** Do not promote on a red gate. Address the
-listed blockers (usually: keep shadow running for more coverage, or triage the
-open divergences) and re-check.
+## Execution brake, replay and status
 
-Record the passing report (the `--json` blob) in the promotion ticket as the
-evidence of record.
+The existing autonomous execution brake intercepts dispatch, conflict/custody
+mutation, landing, close and PMA mutation. Observation/status continues. Explicit
+operator holds require authenticated release; head/code changes do not waive them.
+Automated escalation is a recoverable episode with one owner and deadline.
+Acknowledged pages deduplicate; failed delivery retries. Useful-work identities
+remain spent across heads, owners, restarts and re-arm. Kills add no round.
 
----
+Deadlines carry nominal/effective/ceiling values and load evidence, sized once
+through the shared primitive. Runtime patience starts at admission, never request.
+Polls and replay cannot slide deadlines. `projectWorkflow` exposes overdue age,
+owner/action, freshness, evidence and code/policy generation. Expiry selects owned
+recovery/page and never proves a branch free or authorizes merging findings.
 
-## 2. Pre-promotion checklist
-
-- [ ] Shadow report is `promotable: true` (§1), evidence attached to the ticket.
-- [ ] Eligibility policy is validated at load: `consume_attestations` is only on
-      when a producer is configured (`normalizePolicy` throws otherwise — this is
-      the LHA-cutover guard, verify it does not throw on the target config).
-- [ ] The merge seam is resolved for the target host: either the ARC-20
-      adjudicate surface is wired, or the github-adapter local fallback binary is
-      resolvable (`GHA_ADAPTER_BIN` / auto-discovery). With neither, a
-      `finalize-now` fails closed to `escalate` — never a phantom merge.
-- [ ] The ARC-22 identity/attestation surface is wired (or you have accepted
-      local-mode token identity, in which case a missing surface is `ok: true`,
-      `localMode: true`). An explicit attestation denial records terminal
-      `escalated`; a surface exception fails only the current tick so transient
-      infrastructure errors can be retried.
-- [ ] The kill switch is reachable: `policy.autonomousExecutionDisabled = true`
-      demonstrably intercepts a mutating decision (see §4).
-- [ ] An operator with merge authority approves (this is not an automated flip).
-
----
-
-## 3. Promotion (one flag, one bounce)
-
-Promotion flips the executor's master gate from off to on. It is a single change:
-
-1. Set the executor's `enabled` flag to `true` for the target domain
-   (`createFinalizationExecutor({ enabled: true, ... })` in the daemon wiring).
-2. Disable the corresponding frozen v1 actors by config (**step 4** of §5 in the
-   design): v1 clean-path close + hammer dispatch for the promoted domain.
-3. Bounce the watcher/daemon so both take effect together.
-
-After the bounce, exactly one authority acts per subject: the leased executor.
-v1 code is **retained for one release cycle** as the documented rollback.
-
----
-
-## 4. Kill switch (fail-closed, audited)
-
-The kill switch is orthogonal to promotion and always available on a promoted
-executor. Setting `policy.autonomousExecutionDisabled = true`:
-
-- Intercepts **every** mutating decision (`finalize-now`, `remediate`, `close`)
-  **before any adapter is called** — no merge, no PR close, no worker dispatch,
-  no commit or push proceeds.
-- Preserves remediation idempotency: replaying a remediation round that is
-  already recorded as dispatched remains a no-op skip rather than becoming a
-  terminal escalation.
-- Writes a **fail-closed audit row**: an `escalated` finalization ledger event
-  whose reason is `kill switch: <decision> intercepted (autonomous execution
-  disabled)`. This is durable and inspectable by folding the subject's ledger.
-- Does **not** re-page: once a subject is terminal-`escalated`, a later tick
-  re-reads the mark and does not append a duplicate (§3).
-
-`eligible()` also gates mutating decisions to `escalate` when the switch is on,
-so the interception is defense-in-depth: even a decision computed under a
-different policy is re-checked at the executor's mutation boundary.
-
-**To engage the kill switch in an incident:** set
-`autonomousExecutionDisabled: true` and bounce. The executor stays live (leases,
-folds, records) but performs zero mutations, and every would-be mutation leaves
-an audit trail in the ledger.
-
----
-
-## 5. Rollback (one flag)
-
-To roll back to frozen v1:
-
-1. Set the executor `enabled` flag back to `false` (inert; no lease, no writes).
-2. Re-enable the v1 actors disabled in §3 step 2.
-3. Bounce the watcher/daemon.
-
-Because the ledger is append-only and the executor is idempotent (re-fold guard
-+ `matchHeadCommit` + terminal short-circuit), rolling back and forward is safe:
-a re-promoted executor folds the existing ledger and resumes; it never
-double-merges a subject already marked `finalized`. A crash or ledger failure
-after the remote merge but before that mark is also resumable: the local GitHub
-adapter fallback recognizes structured `already merged` evidence only when it
-names the decided revision, then the executor records the missing `finalized`
-event. A revision mismatch or unstructured refusal remains a failed attempt.
-
-If you need to stop mutations **without** ceding authority back to v1 (e.g. mid
-investigation), prefer the **kill switch** (§4) over rollback — it keeps the v2
-ledger authoritative and audited while pausing all execution.
+Replay reconciles unknown effects before issuance. Live merged/closed PR state
+settles PR execution before any successor claim. Landing and delivery receipts
+remain separate across restart/rollback; retaining a merge receipt never repeats
+a merge merely to recover a missing delivery receipt.
 
 ## Queue owner storage observation (MGQ-01; no activation)
 

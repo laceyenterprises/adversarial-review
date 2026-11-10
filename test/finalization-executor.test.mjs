@@ -1,358 +1,186 @@
-// ARC-17 — the leased finalization executor (docs/SPEC-merge-authority-v2.md §4).
-// Mandatory tests: lease contention, re-fold discard on world-move, execute
-// idempotency under repeat, and the kill-switch fail-closed audit row. Plus the
-// gated-off master switch and the ARC-20/ARC-22 surface seams.
-
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import Database from 'better-sqlite3';
-
 import { openFinalizationLedgerStore } from '../src/finalization/ledger-store.mjs';
 import { openFinalizationExecutorLeaseStore } from '../src/finalization/executor-lease-store.mjs';
-import { createFinalizationExecutor as createExecutor } from '../src/finalization/executor.mjs';
-
-// Unit fixtures explicitly select legacy execution; runtime never infers that
-// authority from an omitted/cached selector or bypasses the lane port.
-const createFinalizationExecutor = options => createExecutor({
-  laneRouting: { run: ({ legacy }) => legacy() }, ...options,
-});
+import { createFinalizationExecutor } from '../src/finalization/executor.mjs';
+import { makeFinalizationEvent } from '../src/finalization/ledger-events.mjs';
 import { fold } from '../src/finalization/ledger-fold.mjs';
 import { eligible } from '../src/finalization/eligibility.mjs';
-import {
-  checksSettled,
-  revisionAdvanced,
-  verdictRecorded,
-} from '../src/finalization/ledger-events.mjs';
 
-const REF = { domainId: 'code-pr', subjectExternalId: 'owner/repo#17' };
-const t = (n) => new Date(Date.parse('2026-07-19T00:00:00.000Z') + n * 60000).toISOString();
-
-function harness() {
+const subject = { domainId: 'code-pr', subjectExternalId: 'example/project#17' };
+const at = n => new Date(Date.UTC(2030, 0, 1) + n).toISOString();
+const load = { loadAvg1m: 0, cpuCount: 1, cpuBusyPercent: 100 };
+function harness(t, options = {}) {
   const db = new Database(':memory:');
+  t.after(() => db.close());
   const ledgerStore = openFinalizationLedgerStore({ db });
   const leaseStore = openFinalizationExecutorLeaseStore({ db });
-  return { db, ledgerStore, leaseStore };
-}
-
-// Append the events that make a subject finalize-eligible at `rev`.
-function makeEligible(ledgerStore, rev = 'sha-A', base = 0) {
-  ledgerStore.append(revisionAdvanced(REF, { at: t(base), revisionRef: rev, sourceRef: `push-${rev}` }));
-  ledgerStore.append(checksSettled(REF, { at: t(base + 1), revisionRef: rev, conclusion: 'success', requiredChecksPresent: true, sourceRef: `ci-${rev}` }));
-  ledgerStore.append(verdictRecorded(REF, { at: t(base + 2), revisionRef: rev, stageId: 'security', role: 'claude-reviewer', verdictKind: 'approved', sourceRef: `rev-${rev}` }));
-}
-
-function recordingMergeSurface() {
+  const append = (type, fields = {}, n = 0) => ledgerStore.append(makeFinalizationEvent(type, subject, {
+    at: at(n), sourceRef: `fixture:${type}:${n}`, idempotencyKey: `${type}:${n}`, ...fields,
+  }));
+  append('revision_advanced', { revisionRef: 'head-A' });
+  append('provenance_observed', { revisionRef: 'head-A', builderBoundary: 'fixture:builder',
+    primaryChange: 'preserved', hammerCommits: false, mergeMain: false });
+  append('checks_settled', { revisionRef: 'head-A', conclusion: 'success', requiredChecksPresent: true });
+  append('verdict_recorded', { revisionRef: 'head-A', verdictKind: 'approved', stageId: 'review', role: 'independent' });
+  let live = { state: 'open', head: 'head-A', base: 'main', sourceRef: 'fixture:live' };
   const calls = [];
-  return {
-    name: 'fake-adjudicate',
-    calls,
-    async merge(args) {
+  const executor = createFinalizationExecutor({ enabled: true, ledgerStore, leaseStore,
+    holder: 'fixture-executor', policy: { checksPatienceMs: 1000, verdictPatienceMs: 1000, attestationPatienceMs: 1000 },
+    laneRouting: { run: ({ legacy }) => legacy() },
+    liveSurface: { read: async () => live },
+    adjudicateSurface: { merge: async args => {
       calls.push(args);
-      return { ok: true, via: 'fake-adjudicate' };
-    },
-  };
+      live = { ...live, state: 'merged', mergedRevision: args.revisionRef, principal: 'fixture-bot', planRequired: true };
+      return { ok: true };
+    } }, ...options,
+  });
+  return { executor, append, calls, ledgerStore, leaseStore, state: () => fold(ledgerStore.read(subject)),
+    setLive: value => { live = value; }, tick: n => executor.tick(subject, { observedAt: at(n), load }) };
 }
 
-test('ships gated off: tick is inert — no lease, no ledger write, no merge', async () => {
-  const { ledgerStore, leaseStore } = harness();
-  makeEligible(ledgerStore);
-  const merge = recordingMergeSurface();
-  const exec = createFinalizationExecutor({ ledgerStore, leaseStore, adjudicateSurface: merge, enabled: false });
-
-  const out = await exec.tick(REF, { observedAt: t(10) });
-
-  assert.equal(out.status, 'skipped');
-  assert.equal(out.action, 'gated-off');
-  assert.equal(merge.calls.length, 0, 'no merge while gated off');
-  assert.equal(leaseStore.read(REF), null, 'no lease taken while gated off');
-  assert.equal(ledgerStore.read(REF).length, 3, 'no ledger event appended while gated off');
+test('gated-off tick and execute cannot acquire authority or write', async t => {
+  const h = harness(t, { enabled: false });
+  assert.equal((await h.tick(100)).action, 'gated-off');
+  const before = h.state().eventCount;
+  await h.executor.execute(eligible(h.state(), {}, { observedAt: at(100) }), { subject, observedAt: at(100) });
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.state().eventCount, before);
+  assert.equal(h.leaseStore.read(subject), null);
 });
-
-test('finalize-now merges through the adjudicate surface and marks finalized', async () => {
-  const { ledgerStore, leaseStore } = harness();
-  makeEligible(ledgerStore);
-  const merge = recordingMergeSurface();
-  const exec = createFinalizationExecutor({ ledgerStore, leaseStore, adjudicateSurface: merge, enabled: true, mergeMethod: 'squash' });
-
-  const out = await exec.tick(REF, { observedAt: t(10) });
-
-  assert.equal(out.status, 'executed');
-  assert.equal(out.action, 'merge');
-  assert.equal(merge.calls.length, 1);
-  assert.equal(merge.calls[0].revisionRef, 'sha-A');
-  assert.equal(merge.calls[0].mergeMethod, 'squash');
-  const state = fold(ledgerStore.read(REF));
-  assert.equal(state.finalized?.kind, 'finalized');
-  assert.equal(state.finalized?.revisionRef, 'sha-A');
-  // The lease is released after the tick.
-  assert.equal(leaseStore.read(REF), null, 'lease released after tick');
+test('landing requires authoritative readback and a separate verified PMA receipt', async t => {
+  const h = harness(t, { deliverySurface: { reconcile: async () => ({ planRunId: 'fixture-plan', activation: 'verified', sourceRef: 'fixture:activation' }) } });
+  assert.equal((await h.tick(100)).action, 'merge');
+  assert.equal(h.state().finalized, null);
+  assert.equal((await h.tick(200)).action, 'deliver');
+  assert.equal(h.state().finalized, null);
+  assert.equal((await h.tick(300)).action, 'settle-delivery');
+  assert.equal(h.state().finalized.revisionRef, 'head-A');
+  assert.equal((await h.tick(400)).reason, 'already finalized');
+  assert.equal(h.calls.length, 1);
 });
-
-test('tick reuses the post-lease fold instead of folding a third time in execute', async () => {
-  const { ledgerStore, leaseStore } = harness();
-  makeEligible(ledgerStore);
-  let reads = 0;
-  const originalRead = ledgerStore.read.bind(ledgerStore);
-  ledgerStore.read = (subject) => {
-    reads += 1;
-    return originalRead(subject);
-  };
-  const merge = recordingMergeSurface();
-  const exec = createFinalizationExecutor({ ledgerStore, leaseStore, adjudicateSurface: merge, enabled: true });
-
-  const out = await exec.tick(REF, { observedAt: t(10) });
-
-  assert.equal(out.status, 'executed');
-  assert.equal(reads, 2, 'tick folds once for the lease revision and once after acquiring the lease');
+test('a manual foreign-revision merge settles delivery without calling merge', async t => {
+  const h = harness(t);
+  h.setLive({ state: 'merged', mergedRevision: 'external-head', principal: 'fixture-human', planRequired: true, sourceRef: 'fixture:manual' });
+  assert.equal((await h.tick(100)).action, 'deliver');
+  assert.equal(h.state().workflow.merge.principal, 'fixture-human');
+  assert.equal(h.state().finalized, null);
+  assert.equal(h.calls.length, 0);
 });
-
-test('lease contention: a subject held by another executor is deferred, not acted', async () => {
-  const { ledgerStore, leaseStore } = harness();
-  makeEligible(ledgerStore);
-  // Another executor is holding the lease with an unexpired deadline.
-  leaseStore.acquire({ subject: REF, holder: 'other-exec', leaseId: 'other', now: t(9), deadline: t(20) });
-
-  const merge = recordingMergeSurface();
-  const exec = createFinalizationExecutor({ ledgerStore, leaseStore, adjudicateSurface: merge, enabled: true });
-  const out = await exec.tick(REF, { observedAt: t(10) });
-
-  assert.equal(out.status, 'deferred');
-  assert.equal(out.action, 'lease-contended');
-  assert.match(out.reason, /other-exec/);
-  assert.equal(merge.calls.length, 0, 'contended subject is never merged');
-  assert.equal(leaseStore.read(REF).holder, 'other-exec', 'the other holder is untouched');
+test('closed PR settles before any claim or dispatch', async t => {
+  const h = harness(t);
+  h.setLive({ state: 'closed', sourceRef: 'fixture:closed' });
+  assert.equal((await h.tick(100)).action, 'settle-closed');
+  assert.equal(h.leaseStore.read(subject), null);
+  assert.equal(h.calls.length, 0);
 });
-
-test('re-fold discard on world-move: a stale decision is not executed', async () => {
-  const { ledgerStore, leaseStore } = harness();
-  makeEligible(ledgerStore);
-  const merge = recordingMergeSurface();
-  const exec = createFinalizationExecutor({ ledgerStore, leaseStore, adjudicateSurface: merge, enabled: true });
-
-  // Decide at the current basis.
-  const state = fold(ledgerStore.read(REF));
-  const decision = eligible(state, undefined, { observedAt: t(10) });
-  assert.equal(decision.kind, 'finalize-now');
-  const basis = { eventCount: state.eventCount };
-
-  // The world moves: a new revision is advanced before we execute the decision.
-  ledgerStore.append(revisionAdvanced(REF, { at: t(11), revisionRef: 'sha-B', sourceRef: 'push-B' }));
-
-  const out = await exec.execute(decision, { subject: REF, observedAt: t(12), basis });
-
-  assert.equal(out.status, 'deferred');
+test('merge reply without live readback never finalizes or repeats an uncertain effect', async t => {
+  let calls = 0;
+  const h = harness(t, { adjudicateSurface: { merge: async () => { calls++; return { ok: true }; } } });
+  await h.tick(100);
+  assert.equal((await h.tick(200)).action, 'reconcile-effects');
+  assert.equal(calls, 1);
+  assert.equal(h.state().finalized, null);
+});
+test('crash after merge effect is reconciled without a second mutation', async t => {
+  let calls = 0;
+  let merged = false;
+  const h = harness(t, {
+    liveSurface: { read: async () => ({ state: merged ? 'merged' : 'open', head: 'head-A', mergedRevision: 'head-A', principal: 'fixture-bot', planRequired: true, sourceRef: 'fixture:live' }) },
+    adjudicateSurface: { merge: async () => { calls++; merged = true; throw Error('fixture:crash'); } },
+  });
+  await h.tick(100);
+  assert.equal((await h.tick(200)).action, 'deliver');
+  assert.equal(calls, 1);
+});
+test('lease contention keeps the current holder and prevents effects', async t => {
+  const h = harness(t);
+  h.leaseStore.acquire({ subject, holder: 'rival', leaseId: 'rival-lease', now: at(0), deadline: at(500) });
+  assert.equal((await h.tick(100)).action, 'lease-contended');
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.leaseStore.read(subject).holder, 'rival');
+});
+test('a stale decision is discarded after a head move', async t => {
+  const h = harness(t);
+  const state = h.state();
+  const decision = eligible(state, {}, { observedAt: at(100) });
+  h.append('revision_advanced', { revisionRef: 'head-B' }, 150);
+  const out = await h.executor.execute(decision, { subject, observedAt: at(200), basis: { eventCount: state.eventCount } });
   assert.equal(out.action, 're-decide');
-  assert.match(out.reason, /world moved/);
-  assert.equal(merge.calls.length, 0, 'the stale-revision decision is never merged');
-  assert.equal(fold(ledgerStore.read(REF)).finalized, null, 'no finalized mark written for a discarded decision');
+  assert.equal(h.calls.length, 0);
 });
-
-test('execute idempotency under repeat: a second execute does not re-merge', async () => {
-  const { ledgerStore, leaseStore } = harness();
-  makeEligible(ledgerStore);
-  const merge = recordingMergeSurface();
-  const exec = createFinalizationExecutor({ ledgerStore, leaseStore, adjudicateSurface: merge, enabled: true });
-
-  const first = await exec.tick(REF, { observedAt: t(10) });
-  assert.equal(first.status, 'executed');
-  assert.equal(merge.calls.length, 1);
-
-  // Repeat ticks re-fold, see the terminal `finalized` mark, and skip.
-  const second = await exec.tick(REF, { observedAt: t(11) });
-  const third = await exec.tick(REF, { observedAt: t(12) });
-
-  assert.equal(second.status, 'skipped');
-  assert.match(second.reason, /already finalized/);
-  assert.equal(third.status, 'skipped');
-  assert.equal(merge.calls.length, 1, 'merge is issued exactly once across repeats');
-  assert.equal(fold(ledgerStore.read(REF)).eventCount, 4, 'exactly one finalized event appended (3 setup + 1)');
+test('head movement during identity read blocks the merge at the last read', async t => {
+  let h;
+  h = harness(t, { identitySurface: { check: async () => {
+    h.setLive({ state: 'open', head: 'head-B', sourceRef: 'fixture:push' }); return { ok: true };
+  } } });
+  assert.equal((await h.tick(100)).reason, 'world-moved-before-merge');
+  assert.equal(h.calls.length, 0);
 });
-
-test('kill-switch fail-closed audit row: a mutating decision escalates, never merges', async () => {
-  const { ledgerStore, leaseStore } = harness();
-  makeEligible(ledgerStore);
-  const merge = recordingMergeSurface();
-  const exec = createFinalizationExecutor({
-    ledgerStore, leaseStore, adjudicateSurface: merge, enabled: true,
-    policy: { autonomousExecutionDisabled: true },
-  });
-
-  const out = await exec.tick(REF, { observedAt: t(10) });
-
-  assert.equal(out.status, 'skipped');
-  assert.equal(out.action, 'escalate');
-  assert.equal(out.killSwitch, true);
-  assert.equal(merge.calls.length, 0, 'kill switch blocks the merge adapter');
-
-  // The fail-closed audit row: an `escalated` ledger event naming the interception.
-  const events = ledgerStore.read(REF);
-  const escalation = events.find((e) => e.type === 'escalated');
-  assert.ok(escalation, 'an escalated audit event is recorded');
-  assert.match(escalation.reason, /kill switch/i);
-  assert.match(escalation.reason, /autonomous execution disabled/i);
-
-  // It does not re-page: a second tick re-reads the terminal mark, appends nothing.
-  await exec.tick(REF, { observedAt: t(11) });
-  assert.equal(ledgerStore.read(REF).filter((e) => e.type === 'escalated').length, 1, 'no duplicate escalation / re-page');
+for (const result of ['bounce', 'missing']) test(`attestation ${result} remains retryable without terminal refusal`, async t => {
+  const h = harness(t, { identitySurface: { check: async () => {
+    if (result === 'bounce') throw Error('fixture:503');
+    return { ok: false, reason: 'fixture:attestation-missing' };
+  } } });
+  assert.equal((await h.tick(100)).action, 'refresh-attestation');
+  assert.equal((await h.tick(200)).action, 'refresh-attestation');
+  assert.equal(h.state().terminal, null);
+  assert.equal(h.calls.length, 0);
 });
-
-test('executor-level kill-switch interception guards the mutation boundary directly', async () => {
-  const { ledgerStore, leaseStore } = harness();
-  makeEligible(ledgerStore);
-  const merge = recordingMergeSurface();
-  const exec = createFinalizationExecutor({
-    ledgerStore, leaseStore, adjudicateSurface: merge, enabled: true,
-    policy: { autonomousExecutionDisabled: true },
-  });
-
-  // A finalize-now decision arrives at execute() (e.g. computed under a different
-  // policy). The executor re-checks the kill switch before any adapter call.
-  const state = fold(ledgerStore.read(REF));
-  const decision = { kind: 'finalize-now', subjectKey: REF, revisionRef: 'sha-A', observedAt: t(10) };
-  const out = await exec.execute(decision, { subject: REF, observedAt: t(10), basis: { eventCount: state.eventCount } });
-
-  assert.equal(out.killSwitch, true);
-  assert.equal(out.action, 'escalate');
-  assert.equal(merge.calls.length, 0, 'no merge adapter call past the kill switch');
+test('explicit admission refusal records no dispatch or useful round', async t => {
+  const h = harness(t, { remediationSurface: { dispatch: async () => ({ admitted: false, reason: 'fixture:busy' }) } });
+  h.append('verdict_recorded', { revisionRef: 'head-A', verdictKind: 'request-changes', stageId: 'review', role: 'independent' }, 1);
+  await h.tick(100); await h.tick(200);
+  assert.equal(h.state().remediation.dispatched.length, 0);
+  assert.equal(Object.keys(h.state().workflow.work).length, 0);
 });
-
-test('identity/attestation surface (ARC-22) fail-closed: a denied check blocks the merge', async () => {
-  const { ledgerStore, leaseStore } = harness();
-  makeEligible(ledgerStore);
-  const merge = recordingMergeSurface();
-  const identitySurface = { check: async () => ({ ok: false, reason: 'attestation missing at head' }) };
-  const exec = createFinalizationExecutor({
-    ledgerStore, leaseStore, adjudicateSurface: merge, identitySurface, enabled: true,
-  });
-
-  const out = await exec.tick(REF, { observedAt: t(10) });
-
-  assert.equal(out.status, 'skipped');
-  assert.equal(out.action, 'escalate');
-  assert.match(out.reason, /attestation missing/);
-  assert.equal(merge.calls.length, 0, 'a failed identity check blocks the merge');
-  assert.ok(ledgerStore.read(REF).some((e) => e.type === 'escalated'), 'the denial is recorded');
+test('admitted launch is recorded once and receives admission-based patience', async t => {
+  let calls = 0;
+  const h = harness(t, { remediationSurface: { dispatch: async () => { calls++; return { admitted: true, launchId: 'fixture-launch', admittedAt: at(200) }; } } });
+  h.append('verdict_recorded', { revisionRef: 'head-A', verdictKind: 'request-changes', stageId: 'review', role: 'independent' }, 1);
+  await h.tick(200);
+  const out = await h.tick(300);
+  assert.equal(out.action, 'reconcile-dispatch');
+  assert.equal(out.decision.deadline, at(1200));
+  assert.equal(calls, 1);
 });
-
-test('identity/attestation surface errors fail the tick without terminal escalation', async () => {
-  const { ledgerStore, leaseStore } = harness();
-  makeEligible(ledgerStore);
-  const merge = recordingMergeSurface();
-  const identitySurface = { check: async () => { throw new Error('surface unavailable'); } };
-  const exec = createFinalizationExecutor({
-    ledgerStore, leaseStore, adjudicateSurface: merge, identitySurface, enabled: true,
-  });
-
-  const out = await exec.tick(REF, { observedAt: t(10) });
-
-  assert.equal(out.status, 'failed');
-  assert.equal(out.action, 'merge');
-  assert.match(out.reason, /surface unavailable/);
-  assert.equal(merge.calls.length, 0, 'an unavailable identity surface blocks the merge');
-  assert.equal(ledgerStore.read(REF).some((e) => e.type === 'escalated'), false, 'transient errors remain retryable');
+test('unknown dispatch effect is reconciled before any retry', async t => {
+  let calls = 0;
+  const h = harness(t, { remediationSurface: { dispatch: async () => { calls++; throw Error('fixture:lost-reply'); } } });
+  h.append('verdict_recorded', { revisionRef: 'head-A', verdictKind: 'request-changes', stageId: 'review', role: 'independent' }, 1);
+  await h.tick(100); await h.tick(200);
+  assert.equal(calls, 1);
+  assert.equal(h.state().remediation.dispatched.length, 0);
 });
-
-test('an unavailable local merge adapter records terminal escalation', async () => {
-  const { ledgerStore, leaseStore } = harness();
-  makeEligible(ledgerStore);
-  const unavailable = {
-    name: 'github-adapter (local fallback)',
-    merge: async () => ({ ok: false, reason: 'adapter-unavailable', detail: 'binary not resolvable' }),
-  };
-  const exec = createFinalizationExecutor({ ledgerStore, leaseStore, mergeFallback: unavailable, enabled: true });
-
-  const out = await exec.tick(REF, { observedAt: t(10) });
-
-  assert.equal(out.status, 'skipped');
-  assert.equal(out.action, 'escalate');
-  assert.match(out.reason, /no merge surface available/);
-  assert.ok(ledgerStore.read(REF).some((e) => e.type === 'escalated'), 'missing adapter is recorded terminally');
-});
-
-test('remediate dispatches, and replaying the same decision is idempotent on the round key', async () => {
-  const { ledgerStore, leaseStore } = harness();
-  // A blocking verdict at the head → eligible returns remediate(round 1).
-  ledgerStore.append(revisionAdvanced(REF, { at: t(0), revisionRef: 'sha-A', sourceRef: 'push-A' }));
-  ledgerStore.append(checksSettled(REF, { at: t(1), revisionRef: 'sha-A', conclusion: 'success', requiredChecksPresent: true, sourceRef: 'ci-A' }));
-  ledgerStore.append(verdictRecorded(REF, { at: t(2), revisionRef: 'sha-A', stageId: 'security', role: 'claude-reviewer', verdictKind: 'request-changes', sourceRef: 'rev-A' }));
-
-  const dispatches = [];
-  const remediationSurface = { dispatch: async (a) => { dispatches.push(a); } };
-  const policy = {};
-  const exec = createFinalizationExecutor({ ledgerStore, leaseStore, remediationSurface, enabled: true, policy });
-
-  const decision = eligible(fold(ledgerStore.read(REF)), undefined, { observedAt: t(10) });
-  assert.equal(decision.kind, 'remediate');
-  assert.equal(decision.round, 1);
-
-  // Execute the round-1 decision, then REPLAY the very same decision. The second
-  // pass re-folds, sees round 1 already dispatched, and skips (idempotent).
-  const first = await exec.execute(decision, { subject: REF, observedAt: t(10) });
-  assert.equal(first.status, 'executed');
-  assert.equal(first.action, 'dispatch-remediation');
-  assert.equal(dispatches.length, 1);
-  assert.equal(dispatches[0].round, 1);
-
-  policy.autonomousExecutionDisabled = true;
-  const replay = await exec.execute(decision, { subject: REF, observedAt: t(11) });
-  assert.equal(replay.status, 'skipped');
-  assert.match(replay.reason, /already dispatched/);
-  assert.equal(dispatches.length, 1, 'a replayed round-1 decision does not re-dispatch');
-  assert.equal(
-    ledgerStore.read(REF).some((e) => e.type === 'escalated'),
-    false,
-    'kill switch does not convert an already-dispatched replay into terminal escalation',
-  );
-});
-
-test('merge surface failure fails closed: no finalized mark, retried next tick', async () => {
-  const { ledgerStore, leaseStore } = harness();
-  makeEligible(ledgerStore);
-  let attempts = 0;
-  const flaky = {
-    name: 'flaky',
-    merge: async () => {
-      attempts += 1;
-      return attempts === 1 ? { ok: false, reason: 'merge-refused', detail: 'head moved' } : { ok: true };
-    },
-  };
-  const exec = createFinalizationExecutor({ ledgerStore, leaseStore, adjudicateSurface: flaky, enabled: true });
-
-  const first = await exec.tick(REF, { observedAt: t(10) });
-  assert.equal(first.status, 'failed');
-  assert.equal(fold(ledgerStore.read(REF)).finalized, null, 'no finalized mark on a failed merge');
-
-  // The next tick re-folds and retries; the merge now succeeds.
-  const second = await exec.tick(REF, { observedAt: t(11) });
-  assert.equal(second.status, 'executed');
-  assert.equal(fold(ledgerStore.read(REF)).finalized?.kind, 'finalized');
-});
-
-test('lane admission never records a finalized subject or invokes the legacy merge surface', async () => {
-  const { db, ledgerStore, leaseStore } = harness();
-  makeEligible(ledgerStore);
-  const merge = recordingMergeSurface();
-  const exec = createFinalizationExecutor({ ledgerStore, leaseStore, adjudicateSurface: merge, enabled: true,
-    policy: { laneRoutes: [{ repository: 'owner/repo', base: 'main', executor: 'queue-v2' }] },
-    laneRouting: { run: async () => ({ ok: true, queued: true, reason: 'queue-handoff-acknowledged' }) } });
-  const result = await exec.tick(REF, { observedAt: t(10) });
-  assert.equal(result.status, 'deferred');
-  assert.equal(result.action, 'wait');
-  assert.equal(merge.calls.length, 0);
-  assert.equal(fold(ledgerStore.read(REF)).finalized, null);
-  db.close();
-});
-
-test('an omitted/cached selector or selected queue cannot bypass the required v2 lane port', async () => {
-  const { db, ledgerStore, leaseStore } = harness();
-  makeEligible(ledgerStore);
-  const merge = recordingMergeSurface();
-  for (const policy of [{}, { laneRoutes: [{ repository: 'owner/repo', base: 'main', executor: 'queue-v2' }] }]) {
-    const exec = createExecutor({ ledgerStore, leaseStore, adjudicateSurface: merge, enabled: true, policy });
-    const result = await exec.tick(REF, { observedAt: t(10) });
-    assert.equal(result.reason, 'lane-routing-adapter-unavailable');
-    assert.equal(merge.calls.length, 0);
-    assert.equal(fold(ledgerStore.read(REF)).finalized, null);
+test('missing live reader and missing lane router fail closed', async t => {
+  for (const options of [{ liveSurface: null }, { laneRouting: null }]) {
+    const h = harness(t, options);
+    assert.equal((await h.tick(100)).status, options.liveSurface === null ? 'deferred' : 'failed');
+    assert.equal(h.calls.length, 0);
   }
-  db.close();
+});
+test('queue acknowledgement does not claim a merge', async t => {
+  const h = harness(t, { laneRouting: { run: async () => ({ ok: true, queued: true }) } });
+  assert.equal((await h.tick(100)).status, 'deferred');
+  assert.equal(h.state().finalized, null);
+  assert.equal(h.calls.length, 0);
+});
+test('kill switch intercepts dispatch, merge, conflict and PMA mutation', async t => {
+  const h = harness(t, { policy: { autonomousExecutionDisabled: true } });
+  const result = await h.tick(100);
+  assert.equal(result.action, 'escalate');
+  assert.equal(h.calls.length, 0);
+  assert.ok(result.decision.owner);
+});
+test('failed page delivery retries with one stable episode key and persists acknowledgement', async t => {
+  const keys = [];
+  const h = harness(t, { pageSurface: { deliver: async ({ idempotencyKey }) => {
+    keys.push(idempotencyKey);
+    return keys.length > 1 ? { delivered: true, sourceRef: 'fixture:page-ack' } : { delivered: false };
+  } } });
+  await h.tick(1100); await h.tick(1200); await h.tick(1300);
+  assert.equal(keys.length, 2);
+  assert.equal(new Set(keys).size, 1);
+  assert.equal(Object.keys(h.state().workflow.pages).length, 1);
 });

@@ -1,3 +1,4 @@
+import { prepareLegacyActor } from './finalization/legacy-actor-boundary.mjs';
 import { withRepositoryStateCycle } from './repository-state-lock.mjs';
 import { readHostIdentitySync, readHostObservationSync } from './dispatch-files-client.mjs';
 import { observeClosureWait } from './ama/closure-wait.mjs';
@@ -2012,6 +2013,9 @@ function writeMergeAgentPrompt(rootDir, job, prompt, { dispatchedAt = isoNow() }
 }
 
 async function dispatchMergeAgentForPR(args = {}) {
+  const route = await prepareLegacyActor({ rootDir: args.rootDir, repo: args.repo, base: args.baseBranch,
+    prNumber: args.prNumber, head: args.headSha, cfg: args.cfg });
+  if (!route.ok) return { decision: 'dispatch-deferred', dispatched: false, skipMergeAgent: true, reason: route.reason };
   return withRepositoryStateCycle(args.rootDir, () => dispatchMergeAgentForPRWithinRepositoryCycle(args));
 }
 

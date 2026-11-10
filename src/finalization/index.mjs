@@ -165,3 +165,9 @@ export { CANARY_RECOVERIES, CANARY_PRODUCERS, CANARY_ROLLBACK_STEPS, resolveQueu
 
 export { createQueueCloserComposition, prepareQueueCloserDispatch, renderQueueCloserPrompt } from './queue-closer.mjs';
 export { readCutoverEvidence, resolveQueueCutoverAdapter } from './queue-cutover.mjs';
+
+export { projectWorkflow } from './workflow-decision.mjs';
+export { prepareLegacyActor } from './legacy-actor-boundary.mjs';
+export { runLegacyPrWrite } from './legacy-pr-write.mjs';
+export { createCustodyRecovery } from './custody-recovery.mjs';
+export { createWorkflowPageSurface, createPostMergeDeliverySurface } from './workflow-adapters.mjs';

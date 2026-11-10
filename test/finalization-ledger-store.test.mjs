@@ -8,6 +8,7 @@ import { eligible } from '../src/finalization/eligibility.mjs';
 import {
   checksSettled,
   finalized,
+  makeFinalizationEvent,
   remediationDispatched,
   revisionAdvanced,
   verdictRecorded,
@@ -75,6 +76,10 @@ test('read → fold → eligible works end to end from persisted rows', () => {
   store.append(checksSettled(REF, { at: t(1), revisionRef: 'sha-A', conclusion: 'success', requiredChecksPresent: true, sourceRef: 'suite-A' }));
   store.append(verdictRecorded(REF, { at: t(2), revisionRef: 'sha-A', stageId: 's', role: 'r', verdictKind: 'approved', sourceRef: 'rev-A' }));
 
+  assert.equal(eligible(fold(store.read(REF)), undefined, { observedAt: t(3) }).nextAction, 'recover-primary');
+  store.append(makeFinalizationEvent('provenance_observed', REF, { at: t(3), revisionRef: 'sha-A',
+    sourceRef: 'fixture:primary', idempotencyKey: 'fixture:primary', builderBoundary: 'fixture:builder',
+    primaryChange: 'preserved', hammerCommits: false, mergeMain: false }));
   const decision = eligible(fold(store.read(REF)), undefined, { observedAt: t(3) });
   assert.equal(decision.kind, 'finalize-now');
   store.close();

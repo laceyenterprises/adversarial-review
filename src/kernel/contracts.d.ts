@@ -842,7 +842,11 @@ export type FinalizationEventType =
   | 'closed'
   | 'escalated'
   | 'halted'
-  | 'launch_custody_observed';
+  | 'launch_custody_observed'
+  | 'decision_anchored' | 'work_consumed' | 'worker_killed'
+  | 'mergeability_observed' | 'provenance_observed' | 'merge_observed'
+  | 'delivery_observed' | 'custody_patch_recorded' | 'custody_recovered' | 'page_delivered'
+  | 'operation_requested' | 'operation_observed' | 'evidence_refreshed';
 
 /**
  * One appended ledger observation. `at` is the event time (the ONLY way time
@@ -889,6 +893,38 @@ export interface FinalizationEvent {
   overrideKind?: string;
   reason?: string;
   roundCap?: number;
+  /** MLR-06 workflow facts, validated by the event constructor. */
+  operationId?: string;
+  admittedAt?: IsoTimestamp;
+  coverageValidated?: boolean;
+  codeVersion?: string;
+  loadEvidence?: { loadAvg1m?: number; cpuCount?: number; cpuBusyPercent?: number | null };
+  episode?: string;
+  anchorAt?: IsoTimestamp;
+  nominalMs?: number;
+  effectiveMs?: number;
+  ceilingMs?: number;
+  policyVersion?: number;
+  workId?: string;
+  cause?: string;
+  mergeability?: string;
+  builderBoundary?: string;
+  primaryChange?: 'preserved' | 'unknown' | 'missing';
+  hammerCommits?: boolean;
+  mergeMain?: boolean;
+  mergedRevision?: string;
+  planRequired?: boolean;
+  mergeSourceRef?: string;
+  planRunId?: string;
+  activation?: 'pending' | 'failed' | 'verified' | 'not-required';
+  custodySourceRef?: string;
+  patchRef?: string;
+  teardown?: string;
+  successor?: string;
+  receipt?: string;
+  action?: string;
+  result?: unknown;
+  generation?: string;
   /** `finalized`. */
   method?: string;
 }
@@ -912,6 +948,8 @@ export interface LedgerStageState {
 /** A terminal mark (finalized/closed/escalated/halted) in the projection. */
 export interface LedgerTerminalState {
   kind: 'finalized' | 'closed' | 'escalated' | 'halted';
+  codeVersion?: string;
+  policyVersion?: number;
   reason?: string;
   method?: string;
   revisionRef?: string;
@@ -925,17 +963,36 @@ export interface LedgerTerminalState {
  * the terminal mark. `terminal` is the most recent UNRESOLVED mark (a resuming
  * operator override clears escalated/halted); `finalized` is sticky.
  */
+export interface FinalizationWorkflowState {
+  anchors: Record<string, FinalizationEvent>;
+  work: Record<string, FinalizationEvent>;
+  kills: Record<string, FinalizationEvent>;
+  custody: Record<string, FinalizationEvent>;
+  patches: Record<string, FinalizationEvent>;
+  recoveries: Record<string, FinalizationEvent>;
+  pages: Record<string, FinalizationEvent>;
+  operations: Record<string, { intent: FinalizationEvent; observation: FinalizationEvent | null }>;
+  provenance: FinalizationEvent | null;
+  mergeability: FinalizationEvent | null;
+  merge: FinalizationEvent | null;
+  delivery: FinalizationEvent | null;
+  escalation: FinalizationEvent | null;
+  unknown: boolean;
+  primaryUnknown: boolean;
+}
+
 export interface LedgerState {
   subjectKey: SubjectKey | null;
   eventCount: number;
   eligibilityEventCount: number;
+  workflow: FinalizationWorkflowState;
   lastEventAt: IsoTimestamp | null;
   currentRevision: string | null;
   revisions: { [revisionRef: string]: LedgerRevisionState };
   stages: { [stageId: string]: LedgerStageState };
   remediation: {
-    dispatched: { revisionRef: string; round: number; idempotencyKey: string; stageId: string | null; final: boolean; at: IsoTimestamp }[];
-    concluded: { revisionRef: string; round: number; outcome: string; stageId: string | null; at: IsoTimestamp }[];
+    dispatched: { revisionRef: string; round: number; idempotencyKey: string; stageId: string | null; final: boolean; admittedAt: IsoTimestamp | null; operationId: string; at: IsoTimestamp }[];
+    concluded: { revisionRef: string; round: number; outcome: string; stageId: string | null; coverageValidated: boolean; sourceRef: string | null; at: IsoTimestamp }[];
   };
   operatorOverrides: { overrideKind: string; principal: string; reason: string; roundCap: number | null; revisionRef: string | null; at: IsoTimestamp }[];
   terminal: LedgerTerminalState | null;
@@ -955,6 +1012,9 @@ export interface AttestationProducer {
  */
 export interface EligibilityPolicy {
   policyVersion: number;
+  codeVersion: string;
+  subjectRoundCap: number;
+  deadlineCeilingMs: number;
   strictMode: boolean;
   exhaustionAlwaysCloses: boolean;
   allCommentsBeforeMerge: boolean;
@@ -982,6 +1042,17 @@ export type EligibilityDecisionKind =
 
 /** The single decision `eligible` returns for the executor (ARC-17) to act on. */
 export interface EligibilityDecision {
+  owner?: { kind: 'workflow' | 'agent'; id: string; head: string; verified?: boolean; status?: string };
+  nextAction?: string;
+  codeVersion?: string;
+  loadEvidence?: { loadAvg1m?: number; cpuCount?: number; cpuBusyPercent?: number | null };
+  episode?: string;
+  anchorAt?: IsoTimestamp;
+  nominalMs?: number;
+  effectiveMs?: number;
+  ceilingMs?: number;
+  evidence?: string[];
+  mergeMethod?: 'merge' | 'squash';
   kind: EligibilityDecisionKind;
   subjectKey: SubjectKey | null;
   revisionRef: string;

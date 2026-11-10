@@ -1,7 +1,8 @@
 # SPEC — Merge Authority v2: Ground-Up Finalization Redesign
 
-**Status:** v1.0 — proposed contract for MLR-04 operator review; not activation
-approval or a claim that the implementation satisfies this revision.
+**Status:** v1.0 — MLR-04 approved without amendments; not activation approval.
+MLR-06 implements the fold/executor contract with synthetic evidence; deployed
+composition and organic promotion receipts remain separately required.
 **Spec:** `merge-lane-rebuild@a0b63d32143a`, MLR-03, dependent on MLR-02.
 **Scope:** the code-pr finalization port of
 [SPEC-adversarial-review-v2-app-architecture.md](SPEC-adversarial-review-v2-app-architecture.md).
@@ -323,7 +324,7 @@ This PR authorizes no host action. Docs merge requires no restart, migration or
 config flip. Later implementation promotion must declare its deployment and
 read-only activation evidence under the existing operator procedures.
 
-## 6. Proposed operator answers (MLR-04 decides)
+## 6. Approved operator answers (MLR-04)
 
 | Question | Recommendation and evidence |
 |---|---|
@@ -331,9 +332,8 @@ read-only activation evidence under the existing operator procedures.
 | Escalation channel | **Page through the existing Sentinel/PRAGE route plus a durable status row**, with one page per episode, delivery acknowledgement/retry and an accountable recovery owner/deadline. MLR-02 R-17, R-35, R-36 and R-60 capture silent ownerless waits. Normal successful exhaustion landing appears in status/metrics; overdue or impossible coverage pages. No new pager, mandatory Linear ticket, CI gate or override label. |
 | Ledger location | Keep **`data/reviews.db` in the review-service app store** as the authoritative finalization/queue ledger and reuse `finalization_shadow` for comparisons. Existing schema, leases, fenced issuance and MGQ receipts already share this failure domain. Session-ledger launch/custody facts arrive through an adapter with provenance; any later mirror is observational, never a second writer or availability prerequisite. This preserves standalone, token-free offline operation. |
 
-These are proposals, not recorded operator choices. MLR-04 records the approved
-revision and answers; absence of that approval blocks promotion, not this docs PR.
-No operator decision is needed to publish the proposed design.
+MLR-04 approved these three recommendations without amendments. This design
+approval does not authorize activation, lane transfer, restart or retirement.
 
 ## 7. MLR-02 requirement disposition and scenario traceability
 

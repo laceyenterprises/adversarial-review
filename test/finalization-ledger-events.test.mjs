@@ -1,3 +1,4 @@
+import { WORKFLOW_EVENT_FIELDS } from '../src/finalization/workflow-state.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
@@ -22,8 +23,8 @@ test('the event vocabulary is the merge-authority-v2 set plus external custody f
     [
       'attestation_recorded', 'budget_exhausted', 'checks_settled', 'closed', 'escalated',
       'finalized', 'halted', 'launch_custody_observed', 'operator_override', 'remediation_concluded',
-      'remediation_dispatched', 'revision_advanced', 'verdict_recorded',
-    ],
+      'remediation_dispatched', 'revision_advanced', 'verdict_recorded', ...Object.keys(WORKFLOW_EVENT_FIELDS),
+    ].sort(),
   );
   assert.deepEqual([...TERMINAL_EVENT_TYPES].sort(), ['closed', 'escalated', 'finalized', 'halted']);
 });

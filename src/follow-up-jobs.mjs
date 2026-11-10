@@ -116,6 +116,9 @@ const FOLLOW_UP_JOB_DIRS = Object.freeze({
 });
 const ARCHIVE_ANOMALY_DIR = ['data', 'archive-anomalies'];
 const RETRIGGERABLE_STOP_CODES = Object.freeze([
+  'missing-builder-authorship',
+  'conflicting-builder-authorship',
+  'builder-cannot-remediate-own-pr',
   'branch-unresolved',
   'max-rounds-reached',
   'round-budget-exhausted',
@@ -362,6 +365,10 @@ function resolveRiskClassForLinearTicket(linearTicketId, { rootDir }) {
 }
 
 function resolveRoundBudgetForJob(job, { rootDir, preferPersisted = true } = {}) {
+  if (job?.closureHandoff?.reason === 'final-fix-all') {
+    return buildRoundBudgetResolution({ riskClass: normalizeRiskClass(job.riskClass) || DEFAULT_RISK_CLASS,
+      roundBudget: 1, source: 'final-fix-all' });
+  }
   const persistedRiskClass = normalizeRiskClass(job?.riskClass);
   const persistedRoundBudget = Number(
     job?.remediationPlan?.maxRounds
@@ -2161,6 +2168,7 @@ function buildFollowUpJob({
   // pr-merge-orchestration spec's risk-tiered budget. Null for jobs
   // built without a spec linkage; falls back to DEFAULT_RISK_CLASS.
   riskClass = null,
+  closureHandoff = null,
 }) {
   if (String(verdictMode || 'enforce') !== 'enforce') {
     throw new Error('advisory-only reviews must not create follow-up remediation jobs');
@@ -2195,7 +2203,8 @@ function buildFollowUpJob({
     jobId,
     createdAt,
     trigger: {
-      type: 'github-review-posted',
+      type: closureHandoff?.reason === 'final-fix-all' ? 'final-round-review'
+        : closureHandoff ? 'closer-terminal-audit' : 'github-review-posted',
       postedAt: createdAt,
     },
     repo,
@@ -2214,9 +2223,10 @@ function buildFollowUpJob({
     // reviewerModel='codex'. Persisting the tag at creation time keeps the
     // builder→remediator routing deterministic.
     builderTag: builderTag || null,
+    ...(closureHandoff ? { closureHandoff } : {}),
     critical: classification.critical,
     nonBlockingOnly,
-    ...(nonBlockingOnly && normalizeEffectiveReviewVerdict(reviewBody) === 'comment-only'
+    ...(nonBlockingOnly && closureHandoff?.reason !== 'final-fix-all' && normalizeEffectiveReviewVerdict(reviewBody) === 'comment-only'
       ? { finalRound: 'comment-only' } : {}),
     reviewSummary: extractReviewSummary(reviewBody),
     simplicityNote: extractSimplicityNote(reviewBody),
@@ -2287,7 +2297,7 @@ function createFollowUpJob({ rootDir, readPRHeadImpl, ...jobInput }) {
 }
 
 function writeNewFollowUpJob(rootDir, baseJob, jobInput) {
-  const priorNonBlockingRounds = baseJob.nonBlockingOnly
+  const priorNonBlockingRounds = baseJob.nonBlockingOnly && baseJob.closureHandoff?.reason !== 'final-fix-all'
     ? summarizePRRemediationLedger(rootDir, baseJob).consecutiveNonBlockingRounds
     : 0;
   const configuredNonBlockingMax = baseJob.nonBlockingOnly

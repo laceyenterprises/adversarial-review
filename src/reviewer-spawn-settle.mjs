@@ -565,7 +565,15 @@ async function spawnReviewerWithinRepositoryCycle(args) {
   const rootDir = args.rootDir || ROOT;
   const env = args.quotaCheckEnv || args.env || process.env;
   const fallback = args.geminiQuotaFallbackRoute;
-  const canFallback = fallback && !fallback.quotaBlocked && normalizeReviewerModel(fallback.reviewerModel) !== 'gemini';
+  const fallbackRefused = fallback && reviewerRefusesBuilder(args.builderTag, fallback.reviewerModel);
+  // Check the selected route snapshot before any durable claim transfer.
+  // Live credential admission is checked separately inside runFallback.
+  const canFallback = fallback && !fallback.quotaBlocked
+    && normalizeReviewerModel(fallback.reviewerModel) !== 'gemini'
+    && !fallbackRefused;
+  if (fallbackRefused) {
+    console.warn(`[watcher] reviewer-selection ${args.repo}#${args.prNumber}: skipped fallback ${fallback.reviewerModel} for builder ${args.builderTag} (builder-family policy refusal)`);
+  }
   const runFallback = async (quotaResult = null) => {
     const credentialKey = reviewerCredentialKey(fallback.reviewerModel, args.claudeAccountSelection?.provider);
     const gate = shouldPauseReviewerModel(rootDir, credentialKey);

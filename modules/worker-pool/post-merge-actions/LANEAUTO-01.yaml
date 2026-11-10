@@ -1,0 +1,14 @@
+# Human SRE work only; no actions execute under a worker or on merge.
+operator_steps:
+  - description: After both LANEAUTO-01 PRs land, allow the normal main-catchup submodule float. Resolve the registered watcher and follow-up service names and restart only those services through the documented deployment procedure. Record the deployed revision and restart receipts.
+    run_as: SRE deployment owner
+    command: |
+      : "${AGENT_OS_DEPLOY_CHECKOUT:?Use the deployed Agent OS checkout}"
+      "$AGENT_OS_DEPLOY_CHECKOUT/scripts/os-restart.sh" --list-services
+      # SRE uses --restart with each registered watcher/follow-up service name.
+  - description: On natural newly final-round PRs, retain a final-fix-all queue receipt with no concurrent closer, a builder publication and fresh full review, then daemon merge on a zero-finding exact-head review or configured fallback with findings. Compare equal pre/post windows; merges per hour must rise and the closer failed-without-merge share must fall. Missing traffic or receipts leaves acceptance pending.
+    run_as: SRE review-service owner
+    command: |
+      : "${AGENT_OS_DEPLOY_CHECKOUT:?Use the deployed Agent OS checkout}"
+      cat "$AGENT_OS_DEPLOY_CHECKOUT/tools/adversarial-review/docs/RUNBOOK-ama-closure.md"
+      # Retain the natural queue/review/merge and rate-comparison receipts in SRE's rollout record.

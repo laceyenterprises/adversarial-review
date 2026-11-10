@@ -3,12 +3,10 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { classifyCheckRollup } from '../../src/checks-summary.mjs';
-import { evaluateMergeEligibility } from '../../src/ama/merge-eligibility.mjs';
-import { publishPushedHammerAttestation } from '../../src/ama/hammer-pushed-attestation.mjs';
-import { hammerRangeMatches } from '../../src/ama/hammer-head-validation.mjs';
-import { legacyLaneWriteMain } from '../../bin/legacy-lane-write.mjs';
-import { runLegacyLaneWrite } from '../../src/finalization/legacy-lane-write.mjs';
+
+// The shell starts this program for every fake gh read. Load production policy
+// only in modes that exercise it, so a JSON field read does not initialize the
+// eligibility graph and native lane store in a fresh Node process.
 
 const dir = process.env.FIXTURE_DIR;
 const path = join(dir, 'state.json');
@@ -24,6 +22,8 @@ if (args[0] === 'advance-base') {
   git('--git-dir', join(dir, 'remote.git'), 'update-ref', 'refs/heads/main', state.nextBase, state.base);
   save();
 } else if (args[0] === 'legacy') {
+  const { legacyLaneWriteMain } = await import('../../bin/legacy-lane-write.mjs');
+  const { runLegacyLaneWrite } = await import('../../src/finalization/legacy-lane-write.mjs');
   // The rendered shell and real lane writer must share the advancing fixture
   // clock; mixing the synthetic shell deadline with wall time expires it.
   const laneArgs = args.slice(1);
@@ -33,6 +33,7 @@ if (args[0] === 'advance-base') {
       now: () => new Date(Number(readFileSync(join(dir, 'clock'), 'utf8')) * 1000).toISOString() }),
   });
 } else if (args[0] === 'pushed') {
+  const { publishPushedHammerAttestation } = await import('../../src/ama/hammer-pushed-attestation.mjs');
   const [baseHead, pushedHead] = args.slice(-2);
   assert.equal(pushedHead, state.head);
   await publishPushedHammerAttestation({ repo: 'fixture/repo', prNumber: 42, baseHead, pushedHead,
@@ -45,6 +46,8 @@ if (args[0] === 'advance-base') {
       return { id: 42 };
     } });
 } else if (args[0] === 'gate') {
+  const { classifyCheckRollup } = await import('../../src/checks-summary.mjs');
+  const { evaluateMergeEligibility } = await import('../../src/ama/merge-eligibility.mjs');
   const expected = process.env.POST_REMEDIATION_SHA;
   assert.equal(expected, state.retried ? state.nextRebased : state.rebased);
   assert.equal(localHead(), expected);
@@ -91,6 +94,7 @@ if (args[0] === 'advance-base') {
   console.log(JSON.stringify({ eligible: true,
     trace: { headMatch: { current: state.head }, branchProtection: { required: false } } }));
 } else if (args[0] === 'predicate') {
+  const { hammerRangeMatches } = await import('../../src/ama/hammer-head-validation.mjs');
   const claim = JSON.parse(readFileSync(args[args.indexOf('--ham-terminal-remediation') + 1]));
   assert.equal(claim.commit.sha, state.nextRebased);
   assert.deepEqual(claim.auditComment.findings, JSON.parse(readFileSync(join(dir, 'terminal-remediation.json'))).auditComment.findings,

@@ -1,5 +1,131 @@
 # Data Model - Follow-Up Remediation Jobs
 
+## Builder authorship recovery
+
+For code-PR jobs with missing or unrecognized `builderTag`, the claim consumer
+compares the PR title harness prefix, head-independent `pr_opened` worker
+identity, and explicit `Worker-Class:` metadata lines in the PR body, including
+`<!-- Worker-Class: codex-corp -->` and `<!-- hq:worker-class=codex-corp -->`
+comment wrappers outside fenced examples.
+Recognized sources must agree on family (Clio and Codex share one family).
+The job retains its existing ID, head and round plan. Before selection it
+persists canonical `builderTag` plus optional `builderTagRecovery` containing
+`previousTag`, `observedAt`, and `evidence` (`sources`, normalized tags,
+`missingEvidence`, source `availability`, decision and selected tag).
+A log line names the job and derivation. Legacy corporate class spellings and
+bracketed tags normalize through the shared builder classifier.
+
+Absent/conflicting evidence uses the existing `stopped` state with
+`missing-builder-authorship` or `conflicting-builder-authorship`. The stop
+contains `builderAuthorshipEscalation` (`owner`, `nextAction`, `observedAt`,
+`evidence`), and its reason and consume output name the job/PR, sources and
+operator action. No worker is spawned or publication charged; claim-time round
+allocation remains unchanged. These codes permit explicit operator retrigger
+after evidence correction. Recovered jobs also refuse an own-family remediator,
+including pins and fallback/pool proposals; `builder-cannot-remediate-own-pr`
+stops name the operator and action to select a different family.
+Existing noncanonical tags are persisted in canonical form with recovery evidence
+from `job.builderTag` before routing; canonical-tag jobs and non-code domains
+retain their existing routing.
+
+PR metadata reads allow two transient retries within a 15-second total budget.
+Unavailable PR reads or `identity-read-transient` opener reads defer the claimed
+job to `pending` for 60 seconds through the existing pre-spawn requeue, refunding
+claim-time round allocation. Unavailable evidence cannot prove missing authorship;
+only settled absence or conflict produces an operator stop.
+
+## Final fix-all handoff (LANEAUTO-01)
+
+At the final review-round cap, a latest exact-head Comment-only review with
+known zero blocking findings and remaining non-blocking or demoted findings
+gets one builder **final fix-all** work order before findings closure. The
+existing follow-up queue and builder-tag worker sync with main, address every
+finding and the PR's own red checks, validate and push. The work order uses
+`closureHandoff.reason: final-fix-all`, `review: full` and the existing statuses.
+It is claimable for exactly one round, independently of the spent ordinary
+finding-round budget. Queue custody ends at terminal settlement; pending admission remains
+remediator-owned beyond the
+ordinary pending-liveness grace; the PR closer-intent lock serializes enqueue
+with closer admission, including rescue. Live closer or remediation custody
+prevents a second owner.
+
+A receipt deduplicates the source head even after terminal settlement or
+archival. Its published head must receive a fresh full review; this round
+never uses the suppressed final-push shortcut. If that review still has
+findings, the configured hammer/operator fallback owns closure. A zero-finding
+exact-head re-review takes the ordinary daemon path, with every existing merge
+predicate, attestation and lease check. Conflicts and CI-only repair retain
+their hammer routes. Blocking reviews retain their existing behavior. Strict
+mode, finding content, head matching, merge authority and leases are unchanged.
+
+The trigger is `final-round-review`. The deduplication key is `(repo, PR,
+revisionRef, final-fix-all)`, independent of review edits, prompt wording,
+closer attempts or base advances. `reviewBody` retains the authoritative
+review body selected by the gate; `closureHandoff.reviewContext` uses the same
+bounded untrusted host-read context as conflict-primary handoff. The existing
+`completion.workerPushedHeadSha` binds the subsequent fallback decision to the
+published head, including receipts in archived stopped jobs. No new store,
+status, config key or merge predicate is introduced. The ordinary PR-wide
+round ledger remains intact; the one work order starts at round zero with a
+fixed cap of one, preserves the PR risk classification, and does not inherit the consecutive non-blocking stop.
+
+
+## Conflict-primary handoff (HAMCONFLICTOWNER-01)
+
+The watcher consumes the latest current-head closer terminal audit before
+closer cap/retry selection. Only `conflict-primary-unproven` queues a conflict
+work order through `createFollowUpJob`. `conflict-primary-timeout` retains
+the existing closer retry. Live PR state, head branch, base branch and title
+prefix are read by the watcher before enqueue; a changed/closed PR cannot
+enqueue stale work and unavailable provenance retains the stop for retry.
+
+The ordinary queue record is the durable ownership receipt: `repo`,
+`prNumber`, `revisionRef`, `jobId`, `status`, `builderTag` and optional
+`closureHandoff: { reason: "conflict-primary-unproven", headSha, review: "full",
+reviewContext: [{ body, url }] }`. The context contains host-read review
+summaries, PR issue comments and inline diff comments, passed as untrusted data
+to the remediation prompt. Inline comments are read through the paginated
+GitHub REST pull-request comments endpoint because `gh pr view --json` does
+not expose them. Their `html_url` preserves the discussion anchor in `url`.
+Before saving the job, context is sorted by update/submission/creation time
+(undated entries retain source order before dated entries) and limited to the
+50 most recent nonblank entries across all sources. Bodies are capped at 2,000
+characters including a trailing ellipsis when truncated; URLs at 2,048
+characters. Discussion links allow the worker to retrieve omitted context.
+An unavailable or malformed inline-comment read retains the stop for retry
+without enqueueing partial context. Existing
+builder-tag routing, account selection, leases and consumer admission apply.
+This is a new bounded conflict work order, without the prior comment-only
+final-round marker or inherited spent finding-round count. Its required
+resolution is a new pushed head followed by normal full review and full-range
+validation. A published conflict-remediation head retains this requirement
+even at the last allowed round, comparing the published SHA without regard to
+hex casing: closeout omits the suppressed final-push
+shortcut, and `fullReviewRequired` in its remediation observation retains
+review intent while CI is pending. The round budget itself is unchanged.
+
+These jobs use `trigger.type: "closer-terminal-audit"`. The existing cross-process
+review claim deduplicates `(repo, PR, head, reason)` across pending, in-progress,
+completed, failed, stopped and archived stopped jobs. A crash between enqueue
+and response therefore recovers the same `jobId`. A later closer attempt,
+work-order edit, review edit or base advance creates no second remediation at
+that head. Ordinary posted-review deduplication retains its existing body
+digest. A new head is new work. Read-only lookup recovers an existing receipt
+before any GitHub read, so a later transport outage cannot hide its owner.
+Archived receipts read the historical job from `stopped-archived/<YYYY-MM>/`,
+preserving `createdAt`, `claimedAt`, `lastHeartbeatAt` and `remediationWorker`
+when present. The returned observation retains `status: "stopped-archived"`
+and `live: false`; archival grants no worker custody.
+
+The shared next-action reader consumes `remediation.job.closureHandoff`,
+`headSha`, `jobId` and `status`. A matching pending job selects `remediate` /
+`remediator`, reason `conflict-primary-unproven`, with a normal admission
+deadline even after the short pending-liveness grace expires. Live closer or
+reviewer custody and unreadable closer ownership retain precedence. The
+pending route remains distinct from proof of a running worker. In-progress
+jobs retain the existing liveness/ownership rules. No new queue status,
+configuration key or merge authority is introduced.
+
 ## Gemini route and dispatch identity (GEMREMEDIATORCLASS-01)
 
 New HQ Gemini remediation workers record `model: "gemini"` for logical
@@ -139,7 +265,7 @@ replay. Factual-dispute admission is the explicit closure exception described be
 
 **Owner:** follow-up remediation queue
 **Store:** `data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json`, `data/follow-up-jobs/single-review-voids/*.json`, `data/follow-up-jobs/missing-label-events/*.json`
-**Source of truth:** `src/follow-up-jobs.mjs`, `src/follow-up-branch.mjs`, `src/remediation-unpublished.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/worker-token-pool.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`, `src/remediation-closeout.mjs`, `src/remediation-job-ownership.mjs`
+**Source of truth:** `src/remediation-builder-authorship.mjs`, `src/follow-up-jobs.mjs`, `src/follow-up-branch.mjs`, `src/remediation-unpublished.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/worker-token-pool.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`, `src/remediation-closeout.mjs`, `src/remediation-job-ownership.mjs`
 **Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`, `src/adapters/comms/github-pr-comments/comment-delivery.mjs`, `src/reviewer-ci-admission.mjs`
 
 ## Simplicity advisory (REVIEWSIMPLE-01)

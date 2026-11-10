@@ -15,6 +15,7 @@ import { queueRuntimeBuild } from '../src/finalization/queue-build.mjs';
 import { CANARY_RECOVERIES, CANARY_PRODUCERS, CANARY_ROLLBACK_STEPS, CANARY_WRITER_SERVICES, resolveQueueCanaryAdapter } from '../src/finalization/queue-canary.mjs';
 import { queueCleanFixture, queueLiveFixture } from './helpers/queue-clean-fixture.mjs';
 import { queueHandoffFixture } from './helpers/queue-handoff-fixture.mjs';
+import { seedQueuePromotionFinalizations } from './helpers/queue-promotion-fixture.mjs';
 
 const lane = { repository: 'example/review', base: 'main' };
 const cfg = { laneRoutes: [{ ...lane, executor: 'queue-v2' }] };
@@ -24,7 +25,7 @@ const drainAdapter = { read: async () => ({ quiescent: true, sourceRef: 'fake:dr
 const sourced = { observedAt: now, validUntil, sourceRef: 'fixture:observation' };
 const isolated = { observedAt: at, sourceRef: 'fixture:recovery', result: 'passed', environment: 'isolated' };
 
-async function fixture(t, { count = 20, mixed = true } = {}) {
+async function fixture(t, { count = 20, mixed = true, shadowFinalizations = 50 } = {}) {
   const rootDir = mkdtempSync(join(tmpdir(), 'queue-canary-'));
   const store = openFinalizationQueueStore({ rootDir });
   t.after(() => { store.close(); rmSync(rootDir, { recursive: true, force: true }); });
@@ -34,6 +35,7 @@ async function fixture(t, { count = 20, mixed = true } = {}) {
     classification: { relation: 'agree', direction: 'benign', disposition: 'resolved' },
     v1Action: { kind: 'merge' }, v2Decision: { kind: 'finalize-now' }, sawHeadMove: true, sawExhaustion: true,
   });
+  seedQueuePromotionFinalizations(shadow, { lane, head: 'a'.repeat(40), now, count: shadowFinalizations });
   const build = queueRuntimeBuild();
   const routing = createLaneRoutingController({ store, now: () => at, runtime: { build, pid: 42 } });
   await routing.transfer({ cfg, lane, expectedGeneration: 0, drainAdapter });
@@ -89,6 +91,15 @@ test('read-only deployed probe joins receipts, organic observations, metrics and
   assert.equal(queueProbeMain(['--capability', 'canary', '--json'], { probe: () => result,
     stdout: { write: s => { output += s; } } }), 0);
   assert.equal(JSON.parse(output).rollout.canary.entries, 20);
+});
+
+test('complete canary evidence still waits below 50 distinct shadow finalizations', async t => {
+  const f = await fixture(t, { shadowFinalizations: 49 });
+  const result = f.read();
+  assert.equal(result.entries, 20);
+  assert.equal(result.status, 'pending');
+  assert.ok(result.pending.includes('shadow-readiness-pending'));
+  assert.ok(result.preflight.shadow.blockers.includes('insufficient distinct finalizations (49 < 50)'));
 });
 
 test('19 entries, absent admission type, unknown/failed/duplicate recovery never project complete', async t => {

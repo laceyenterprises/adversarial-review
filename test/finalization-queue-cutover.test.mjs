@@ -13,8 +13,9 @@ import { openFinalizationShadowStore } from '../src/finalization/shadow-store.mj
 import { CANARY_PRODUCERS, CANARY_ROLLBACK_STEPS } from '../src/finalization/queue-canary.mjs';
 import { resolveQueueCutoverAdapter } from '../src/finalization/queue-cutover.mjs';
 import { probeQueueOwner, queueProbeMain, queueRuntimeBuild } from '../src/finalization/queue-probe.mjs';
+import { seedQueuePromotionFinalizations } from './helpers/queue-promotion-fixture.mjs';
 
-async function fixture(t) {
+async function fixture(t, { shadowFinalizations = 50 } = {}) {
   const f = gitFixture(t), a = await admitted(f, { remediated: true });
   const lane = a.h.lane, build = queueRuntimeBuild();
   const cfg = { laneRoutes: [{ ...lane, executor: 'queue-v2' }] };
@@ -51,6 +52,7 @@ async function fixture(t) {
     classification: { relation: 'agree', direction: 'benign', disposition: 'resolved' },
     v1Action: { kind: 'merge' }, v2Decision: { kind: 'finalize-now' }, sawHeadMove: true, sawExhaustion: true,
   });
+  seedQueuePromotionFinalizations(shadow, { lane, head: f.oldHead, now, count: shadowFinalizations });
   const owner = f.store.readOwner(lane), configGeneration = resolveLaneRoute(cfg, lane).configGeneration;
   const isolated = { environment: 'isolated', build, result: 'passed', observedAt: handoffTime(20), sourceRef: 'fixture:rollback' };
   const evidence = { schemaVersion: 1, lane, window: { from: handoffTime(-1), to: now },
@@ -84,6 +86,14 @@ test('cutover probe reads real merge-service receipts, effective route, loaded o
   let output = '';
   assert.equal(queueProbeMain(['--capability', 'cutover', '--json'], { probe: () => result, stdout: { write: s => { output += s; } } }), 0);
   assert.equal(JSON.parse(output).rollout.expansion.confirmedReceipts, 1);
+});
+
+test('complete cutover evidence still waits below 50 distinct shadow finalizations', async t => {
+  const p = await fixture(t, { shadowFinalizations: 49 });
+  const result = p.read();
+  assert.equal(result.confirmedReceipts, 1);
+  assert.equal(result.status, 'pending');
+  assert.ok(result.pending.includes('shadow-readiness-pending'));
 });
 
 test('missing, duplicate, foreign, future and late closer releases remain pending; every sampled closer must be released', async t => {

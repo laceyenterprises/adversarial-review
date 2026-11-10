@@ -60,3 +60,23 @@ connection schema-reuse regressions. Repository lint passed with zero errors
 `node scripts/validate-data-model-catalog.mjs` (93 entries) and
 `bash demo/research-finding-walkthrough.sh` passed. `git diff --check` passed.
 No full local test suite or CI configuration change was made.
+
+## CI fixture remediation
+
+Summary: reproduced all five current-head CI failures in the canary/cutover
+tests. Their positive fixtures supplied elapsed coverage but no sourced organic
+terminal outcomes for MLR-04's approved volume criterion. A shared offline
+fixture now supplies 50 distinct terminal subjects. Both suites also verify
+that otherwise complete rollout evidence remains pending at 49 subjects.
+
+Interface changes: none; production behavior, store shapes, operator policy,
+state declarations and smoke promises are unchanged.
+
+Verification: the bounded targeted runner passed 60 tests across
+`finalization-queue-canary`, `finalization-queue-cutover`,
+`finalization-live-shadow`, `finalization-shadow-report` and
+`finalization-shadow-store`. `npm run lint` passed with zero errors and 152
+existing warnings. `npm run typecheck:contracts`,
+`node scripts/validate-data-model-catalog.mjs` (93 entries),
+`bash demo/research-finding-walkthrough.sh` and `git diff --check` passed.
+No full local suite or CI configuration change was made.

@@ -7,16 +7,25 @@
       "path": "docs/data-model/primary-change-history.md",
       "store": "<runtime rootDir>/data/primary-change-history/",
       "schemaSurface": "src/ama/primary-change-store.mjs",
-      "relatedSchemaSurfaces": ["src/ama/history-reader.mjs", "src/ama/primary-change.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/ama/history-reader.mjs",
+        "src/ama/primary-change.mjs"
+      ],
       "owner": "AMA canonical daemon data owner",
       "partialReadProgress": {
         "directory": "progress-<sha256(key)>/",
-        "key": ["canonical repository", "numeric PR number", "exact head SHA", "history-progress-v1"],
+        "key": [
+          "canonical repository",
+          "numeric PR number",
+          "exact head SHA",
+          "history-progress-v1"
+        ],
         "record": "<sha256(readKey)>.json: {key, readKey, value}",
-        "scope": "Completed immutable API projections and per-file comparisons; API-host partition isolates sources; no credentials stored and token rotation retains progress",
+        "scope": "Completed object-addressed API observations and per-file comparisons; account attribution/verification frozen per head until purge/expiry; API-host partition isolates sources; token rotation retains progress",
         "authority": "Observations only; live head and review reads, completeness checks, provenance and preservation predicates remain mandatory",
-        "retention": "Existing seven-day/512-entry sweep counts each progress directory as one entry; recursive removal; publication refreshes directory mtime",
-        "ownership": "Canonical effective UID and symlink checks on store, progress directory and record; atomic 0600 temporary file and rename; cancelled/failed reads never publish"
+        "retention": "Seven days; independent 512-progress-directory count and aggregate 256 MiB serialized-file budget at periodic sweep; completed publication removes head progress; repository rename skips payloads",
+        "ownership": "Canonical effective UID and symlink checks on store, progress directory and record; atomic 0600 temporary file and rename; cancelled/failed reads never publish",
+        "recovery": "Semantic blob/tree/pagination rejection aborts sibling publications and purges head progress; canonical-owner manual purge refreshes account snapshots; transport timeouts retain completed progress"
       }
     }
   ]

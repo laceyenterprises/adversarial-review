@@ -10,7 +10,7 @@ import {
   canonicalRepositoryName, observeRepositoryIdentity, observeRepositoryListing,
   recoverRepositoryObservations, recoverRepositoryRename,
 } from '../src/repository-identity.mjs';
-import { repositoryStateDigest } from '../src/repository-state-files.mjs';
+import { planRepositoryStateFiles, repositoryStateDigest } from '../src/repository-state-files.mjs';
 import { withRepositoryStateCycle, withRepositoryStateRead } from '../src/repository-state-lock.mjs';
 import { acquireAmaCloserLease, readAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { acquireMergeLease, inspectMergeLease, readMergeLeaseAttempts } from '../src/ama/merge-lease.mjs';
@@ -28,6 +28,23 @@ import { withFollowUpJobLock } from '../src/follow-up-job-write.mjs';
 const oldName = 'example-org/alpha', newName = 'example-org/beta';
 const repository = full_name => ({ id: 123, node_id: 'R_fixture123', full_name });
 const head = 'a'.repeat(40);
+
+test('rename planning skips disposable history progress before reading any payload', t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'repository-progress-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const history = join(rootDir, 'data', 'primary-change-history');
+  const progress = join(history, `progress-${'a'.repeat(64)}`);
+  mkdirSync(progress, { recursive: true });
+  writeFileSync(join(progress, 'blob.json'), '{malformed disposable payload');
+  symlinkSync(join(rootDir, 'missing'), join(progress, 'unreadable.json'));
+  writeFileSync(join(history, 'completed.json'), JSON.stringify({ repo: oldName }));
+  const plan = planRepositoryStateFiles(rootDir, { oldName, newName });
+  assert.equal(plan.length, 1);
+  assert.equal(plan[0].source, 'data/primary-change-history/completed.json');
+  assert.equal(JSON.parse(plan[0].after).repo, newName);
+  assert.equal(readFileSync(join(progress, 'blob.json'), 'utf8'), '{malformed disposable payload');
+});
+
 function fixture(t) {
   const rootDir = mkdtempSync(join(tmpdir(), 'repository-rename-'));
   mkdirSync(join(rootDir, 'data'));

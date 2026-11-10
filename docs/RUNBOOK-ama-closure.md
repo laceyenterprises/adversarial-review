@@ -4742,7 +4742,9 @@ prevents caching; a later valid proof resolves earlier failures for that source
 path only. A daemon timeout cancels merge execution while the
 bounded history read finishes and stores evidence for the next tick; stall logs
 name the running read and elapsed seconds. The existing cache sweep removes
-records older than seven days and retains at most 512 records, without a new knob.
+records older than seven days and retains at most 512 completed-store entries,
+plus a separate 512-progress-directory/256 MiB allowance at sweep time, without
+a new knob. Completed publication removes that head's partial progress.
 Compare pages use four workers; blob pairs and tree pairs are fetched together.
 Metadata-only cost reads avoid reconstructing patches they do not consume;
 each page/blob/diff retains the existing output bound.
@@ -4803,6 +4805,12 @@ history waits, CI-cost and optional preservation proofs, to the same nominal
 90-second load-scaled budget. Explicit effective caller budgets are honored
 without a fixed nominal clamp or a second scaling pass. It returns exact-head `readFailed` / `historyReadFailed` evidence
 (`historyReadTimedOut: true` on its deadline), classified as `history-read-failed`.
+The hammer supervisor has the same nominal 90-second load-scaled budget
+(`read primary-change-context 90 540`). Startup and CPU sampling precede the
+child deadline, so under load the supervisor may expire first: expect a
+supervisor timeout or `overload-deferred` instead of helper-classified JSON.
+SIGTERM can leave progress `.tmp` files until the ordinary sweep. These outcomes
+remain deferrals and grant no merge authority.
 Reader error wrappers retain `HISTORY_READ_TIMEOUT` even when the elapsed-time
 check detects exhaustion before a deadline timer fires.
 This retryable failure never authorizes a reversal or merge. The in-lease merge
@@ -4824,8 +4832,15 @@ HISTREADLOAD-01: successful immutable API pages and per-file comparisons also
 checkpoint under the canonical data owner in an exact-head progress directory.
 A deferred collection reuses completed work on its next attempt, including
 after a process restart. It still reads live PR/review/cost state and proves
-completeness, provenance and preservation. Failed or cancelled work contributes
-no checkpoint. A head change selects a new progress directory. See the
+completeness, provenance and preservation. Commit account attribution and
+verification projections are frozen observations for that head, not live
+account-state reads; a new review/launch key alone does not refresh them.
+After an account-link correction, use the canonical-owner
+[manual purge procedure](data-model/primary-change-history.md#account-attribution-and-manual-purge)
+before retrying. Semantic blob/tree/pagination rejection aborts sibling reads
+and removes the head's progress, so a transient malformed 200 can recover on
+the next evaluation. Failed or cancelled work contributes no checkpoint.
+A head change selects a new progress directory. See the
 [partial-read record contract](data-model/primary-change-history.md#partial-immutable-read-checkpoints-histreadload-01)
 for identities, ownership and retention.
 

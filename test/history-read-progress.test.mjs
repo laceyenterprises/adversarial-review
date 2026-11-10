@@ -1,7 +1,7 @@
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHistoryReader } from '../src/ama/history-reader.mjs';
@@ -121,4 +121,43 @@ test('persisted verified file facts still run the preservation predicate', async
     assert.equal(checkPrimaryChange(first, fixture.args.headSha).ok, !changed);
     assert.equal(checkPrimaryChange(again, fixture.args.headSha).ok, !changed);
   }
+});
+
+
+test('semantic compare, blob and recursive-tree failures discard checkpoints so the same head can recover', async t => {
+  for (const failure of ['compare', 'blob', 'blob-with-stalled-sibling', 'recursive-tree']) await t.test(failure, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'history-invalid-progress-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    let broken = true, reads = 0;
+    const directorySha = 'd'.repeat(40), blobSha = 'e'.repeat(40);
+    const entry = { path: 'source.txt', type: 'blob', mode: '100644', sha: blobSha };
+    const subtree = { path: 'dir', type: 'tree', mode: '040000', sha: directorySha };
+    const reader = () => createHistoryReader({ contextTimeoutMs: 1000,
+      progress: { rootDir, repo, prNumber, headSha: head },
+      execGhWithRetryImpl: async ({ args }) => {
+        reads++;
+        const path = args[1];
+        let data;
+        if (broken && failure === 'blob-with-stalled-sibling' && path.endsWith('f'.repeat(40))) return never();
+        if (path.includes('/compare/')) data = { status: 'ahead', total_commits: 0,
+          commits: broken && failure === 'compare' ? [{ sha: head }] : [], merge_base_commit: { sha: base } };
+        else if (path.endsWith('?recursive=1')) data = broken && failure === 'recursive-tree'
+          ? { truncated: false, tree: [subtree] } : { truncated: true, tree: [] };
+        else if (path.includes('/git/trees/')) data = { truncated: false,
+          tree: path.endsWith(base) ? [] : path.endsWith(directorySha) ? [entry]
+            : failure === 'recursive-tree' ? [subtree] : failure === 'blob-with-stalled-sibling'
+              ? [entry, { ...entry, path: 'stalled.txt', sha: 'f'.repeat(40) }] : [entry] };
+        else data = { encoding: 'base64', content: 'eAo=', size: broken && failure.startsWith('blob') ? 3 : 2 };
+        return { stdout: JSON.stringify(data) };
+      }, diffImpl: async () => ({ stdout: 'diff\n@@ -0,0 +1 @@\n+x\n' }),
+    });
+    const path = `repos/${repo}/compare/${base}...${head}`;
+    await assert.rejects(reader()(path), { code: 'HISTORY_READ_INVALID' });
+    const dir = join(rootDir, 'data', 'primary-change-history');
+    assert.deepEqual(existsSync(dir) ? readdirSync(dir) : [], [], 'invalid history left no sticky checkpoints');
+    const previousReads = reads;
+    broken = false;
+    assert.equal((await reader()(path)).files.length, failure === 'blob-with-stalled-sibling' ? 2 : 1);
+    assert.ok(reads > previousReads, 'retry fetched corrected upstream data');
+  });
 });

@@ -311,3 +311,40 @@ test('FINALCLOSE-01 worker computes fresh history without accessing a foreign-ow
   assert.equal(reads, 4, 'each lease evaluation independently reads live history');
   assert.equal(existsSync(join(args.rootDir, 'data', 'primary-change-history')), false);
 });
+
+
+test('completed history publication removes its partial progress', async t => {
+  const args = fixture(t);
+  await storedHistoryRead(args, ['page', 1], async () => ({ complete: true }));
+  await storedPrimaryChange(args, async () => evidence(args));
+  const names = readdirSync(join(args.rootDir, 'data', 'primary-change-history'));
+  assert.equal(names.length, 1);
+  assert.ok(!names[0].startsWith('progress-'));
+});
+
+test('progress byte eviction is separate from the 512 completed-record allowance', async t => {
+  const args = fixture(t);
+  const dir = join(args.rootDir, 'data', 'primary-change-history');
+  mkdirSync(dir, { recursive: true });
+  for (let i = 0; i < 512; i++) writeFileSync(join(dir, `${i}.json`), '{}');
+  for (let i = 0; i < 2; i++) {
+    await storedHistoryRead({ ...args, headSha: String(i + 1).repeat(40) }, ['page', 1], async () => 'x'.repeat(1024));
+  }
+  const progress = readdirSync(dir).filter(name => name.startsWith('progress-'));
+  utimesSync(join(dir, progress[0]), new Date(1000), new Date(1000));
+  utimesSync(join(dir, progress[1]), new Date(2000), new Date(2000));
+  const removed = sweepPrimaryChangeStore(args.rootDir, { nowMs: 3000, progressMaxBytes: 1800 });
+  assert.deepEqual(removed, [join(dir, progress[0])]);
+  assert.equal(readdirSync(dir).filter(name => name.endsWith('.json')).length, 512);
+  assert.ok(existsSync(join(dir, progress[1])));
+});
+
+test('a sweep racing checkpoint publication cannot fail a completed read', async t => {
+  const args = fixture(t);
+  const original = fs.writeFileSync;
+  mockFs(t, 'writeFileSync', (path, ...options) => {
+    if (path.endsWith('.tmp') && path.includes('progress-')) rmSync(join(path, '..'), { recursive: true });
+    return original(path, ...options);
+  });
+  assert.deepEqual(await storedHistoryRead(args, ['page', 1], async () => ({ complete: true })), { complete: true });
+});

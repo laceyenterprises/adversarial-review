@@ -6,6 +6,8 @@ import { basename, join } from 'node:path';
 
 const running = new Map();
 const directory = rootDir => join(rootDir, 'data', 'primary-change-history');
+const PROGRESS_MAX_BYTES = 256 * 1024 * 1024;
+const progressName = name => /^progress-[a-f0-9]{64}$/.test(name);
 // PRIMARYRENAME-01: old history records lack commit-level rename proof. Re-read
 // those once so a cached refusal cannot strand an otherwise preserved head.
 // v2 also recomputes records which omitted builder-originated rename proof.
@@ -45,17 +47,29 @@ export function primaryChangeStoreOwned(rootDir) {
   catch { return false; } // No store reads or writes by this caller.
 }
 
-// Checkpoint only completed immutable reads, never verdicts or live metadata.
-// A directory per head keeps the existing sweeper's limit in units of histories,
-// rather than evicting the first pages of a long history as later pages arrive.
-export async function storedHistoryRead(args, readKey, compute, signal) {
-  signal?.throwIfAborted();
-  assertStoreOwner(args.rootDir);
+function progressDirectory(args) {
   const canonical = canonicalRepositoryArguments(args.rootDir, args);
   const key = [canonical.repo, Number(canonical.prNumber), args.headSha, 'history-progress-v1'];
   if (!/^[0-9a-f]{40}$/i.test(args.headSha || '')) throw new Error('invalid history progress head');
+  const digest = createHash('sha256').update(JSON.stringify(key)).digest('hex');
+  return { key, dir: join(directory(args.rootDir), `progress-${digest}`) };
+}
+
+export function discardHistoryProgress(args) {
+  assertStoreOwner(args.rootDir);
+  const { dir } = progressDirectory(args);
+  assertStoreOwner(args.rootDir, dir);
+  rmSync(dir, { force: true, recursive: true });
+}
+
+// Checkpoint only completed immutable reads, never verdicts or live metadata.
+// A directory per head lets the sweeper evict whole histories independently
+// of the completed-record count, with a separate aggregate byte budget.
+export async function storedHistoryRead(args, readKey, compute, signal) {
+  signal?.throwIfAborted();
+  assertStoreOwner(args.rootDir);
+  const { key, dir } = progressDirectory(args);
   const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-  const dir = join(directory(args.rootDir), `progress-${digest(key)}`);
   const path = join(dir, `${digest(readKey)}.json`);
   assertStoreOwner(args.rootDir, dir);
   assertStoreOwner(args.rootDir, path);
@@ -78,6 +92,10 @@ export async function storedHistoryRead(args, readKey, compute, signal) {
     // Retention follows the last established progress, not directory creation.
     const now = new Date();
     utimesSync(dir, now, now);
+  } catch (error) {
+    // A concurrent sweep/completed collector can remove disposable progress.
+    // The completed read is still valid; retry caching on a later evaluation.
+    if (error.code !== 'ENOENT') throw error;
   } finally { rmSync(temporary, { force: true }); }
   return value;
 }
@@ -147,6 +165,7 @@ async function storedPrimaryChangeWithinRepositoryState(args, compute) {
         writeFileSync(temporary, JSON.stringify({ key: identity(args), history }), { mode: 0o600, flag: 'wx' });
         renameSync(temporary, path);
       } finally { rmSync(temporary, { force: true }); }
+      discardHistoryProgress(args);
     }
     return history;
   }).finally(() => running.delete(path));
@@ -156,7 +175,7 @@ async function storedPrimaryChangeWithinRepositoryState(args, compute) {
 
 // Reuse the watcher's existing periodic sweep; no deployment knob. Fixed age
 // and count bounds cover closed PRs and obsolete heads without live API reads.
-export function sweepPrimaryChangeStore(rootDir, { nowMs = Date.now() } = {}) {
+export function sweepPrimaryChangeStore(rootDir, { nowMs = Date.now(), progressMaxBytes = PROGRESS_MAX_BYTES } = {}) {
   assertStoreOwner(rootDir);
   let names;
   try { names = readdirSync(directory(rootDir)); } catch (error) {
@@ -165,15 +184,36 @@ export function sweepPrimaryChangeStore(rootDir, { nowMs = Date.now() } = {}) {
   }
   const entries = names.filter(name => !/^verified-[a-f0-9]{64}\.json$/.test(name)).flatMap(name => {
     const path = join(directory(rootDir), name);
-    try { return [{ path, modified: statSync(path).mtimeMs }]; } catch (error) {
+    try { return [{ path, progress: progressName(name), modified: statSync(path).mtimeMs }]; } catch (error) {
       if (error.code === 'ENOENT') return [];
       throw error;
     }
   }).sort((a, b) => b.modified - a.modified);
-  const expired = entries.filter((entry, index) => index >= 512 || nowMs - entry.modified > 7 * 86400000);
+  let completedCount = 0, progressCount = 0, progressBytes = 0;
+  const expired = entries.filter(entry => {
+    if (!entry.progress) return completedCount++ >= 512 || nowMs - entry.modified > 7 * 86400000;
+    assertStoreOwner(rootDir, entry.path);
+    if (nowMs - entry.modified > 7 * 86400000 || progressCount >= 512) return true;
+    let bytes = 0;
+    try {
+      for (const name of readdirSync(entry.path)) {
+        const path = join(entry.path, name);
+        assertStoreOwner(rootDir, path);
+        try { bytes += lstatSync(path).size; } catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+        }
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    if (progressBytes + bytes > progressMaxBytes) return true;
+    progressBytes += bytes;
+    progressCount++;
+    return false;
+  });
   for (const entry of expired) {
     assertStoreOwner(rootDir, entry.path);
-    rmSync(entry.path, { force: true, recursive: /^progress-[a-f0-9]{64}$/.test(basename(entry.path)) });
+    rmSync(entry.path, { force: true, recursive: progressName(basename(entry.path)) });
   }
   return expired.map(entry => entry.path);
 }

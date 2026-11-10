@@ -532,6 +532,71 @@ for (const reason of HAMMER_RETRYABLE_READ_OUTCOMES) {
   });
 }
 
+test('OVERLOADDEFER-01: real closer dispatch backs off, retries and retains ownership at the overload cap', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'synthetic-closer-overload-cap-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD };
+  let launches = 0, endedLaunch = null, pages = 0;
+  const deps = hammerDispatchDeps({
+    readLaunchRequestStatusImpl: ({ launchRequestId }) => ({ ok: true,
+      row: { status: launchRequestId === endedLaunch ? 'succeeded' : 'running' } }),
+    execFileImpl: async (_cmd, argv) => {
+      if (argv[0] === 'dispatch' && argv[1] === 'status') return { stdout: '{"status":"succeeded"}' };
+      if (argv[0] === 'dispatch' && argv[1] === '--priority') return { stdout: JSON.stringify({
+        ticketRef: `AMA-PR-${PR_NUMBER}`, launchRequestId: `synthetic-overload-${++launches}`,
+        dispatchId: `synthetic-overload-dispatch-${launches}` }) };
+      return { stdout: '{}' };
+    },
+    deliverAlertImpl: async () => { pages++; return { ok: true }; },
+  });
+  const at = seconds => new Date(Date.parse('2026-01-01T00:00:00Z') + seconds * 1000).toISOString();
+  const run = seconds => maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, { dispatchContext: { dispatchedAt: at(seconds) } }), ...deps,
+  });
+  assert.equal((await run(0)).dispatched, true);
+  for (let count = 1; count <= 5; count++) {
+    const now = count * 600;
+    endedLaunch = readAmaCloserDispatchRecord(rootDir, identity).launchRequestId;
+    writeAmaAuditEntry({ hqRoot: join(rootDir, 'hq-root'), ...identity, now: at(now),
+      attempt: hammerPhaseAttempt({ outcome: 'failed-without-merge', reason: 'overload-deferred',
+        launchRequestId: endedLaunch, overloadEvidence: { phase: 'synthetic-read',
+          deadline_seconds: 30, scaled_budget_seconds: 180, load_multiplier: 6, load_per_core: 4 } }) });
+    const deferred = await run(now);
+    assert.equal(deferred.dispatched, false, JSON.stringify(deferred));
+    assert.equal(deferred.reason, 'overload-deferred');
+    const receipt = readHammerRetryCapLedger(rootDir, identity).overloadDeferral;
+    assert.equal(receipt.deferralCount, count);
+    assert.equal(readHammerStopForHead({ hqRoot: join(rootDir, 'hq-root'), ...identity }), null);
+    if (count < 5) {
+      const retryAt = receipt.nextRetryAt - Date.parse(at(0)) / 1000;
+      assert.equal(retryAt - now, 30 * 2 ** (count - 1));
+      const parkedLedger = readHammerRetryCapLedger(rootDir, identity);
+      const parkedOwner = readAmaCloserLease(rootDir, identity);
+      const pagesBefore = pages;
+      // Replay the same audit through the public dispatcher, including enough
+      // polls to exhaust the cap if each observation incorrectly added debt.
+      for (const seconds of [1, 5, 10, 15, 20, retryAt - now - 1]) {
+        const polled = await run(now + seconds);
+        assert.equal(polled.dispatched, false, JSON.stringify(polled));
+        assert.equal(polled.reason, 'overload-deferred');
+        assert.equal(polled.recoveryWait, true);
+        assert.equal(polled.needsOperator, false);
+        assert.deepEqual(readHammerRetryCapLedger(rootDir, identity), parkedLedger,
+          'repeat observations must preserve debt, retry deadline and refunds');
+        assert.deepEqual(readAmaCloserLease(rootDir, identity), parkedOwner);
+        assert.equal(launches, count, 'no replacement before the retry deadline');
+        assert.equal(pages, pagesBefore, 'repeat observations must not page');
+      }
+      assert.equal((await run(retryAt)).dispatched, true);
+    } else {
+      assert.equal(deferred.needsOperator, true);
+      assert.equal((await run(now + 10000)).dispatched, false);
+    }
+  }
+  assert.equal(launches, 5);
+  assert.equal(pages, 1);
+});
+
 function seedExhaustedHammerCap(rootDir, identity = { repo: REPO, prNumber: PR_NUMBER }) {
   for (let i = 1; i <= HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES; i += 1) {
     recordHammerRetryDispatch(rootDir, identity, {

@@ -41,7 +41,7 @@ export class RepairableConflictError extends Error {
 // Reasons are fixed codes, never transport output (which can contain secrets).
 // The terminal-stop progress receipt is written only when the caller declares
 // the run's final exit; helper failures the closer may still retry write none.
-export function recordHammerEarlyFailure(reason, { env = process.env, headSha, final = false } = {}) {
+export function recordHammerEarlyFailure(reason, { env = process.env, headSha, final = false, overloadEvidence } = {}) {
   if (!/^[a-z][a-z0-9:-]*$/.test(reason || '')) throw new TypeError('invalid hammer failure reason');
   // A later controller step must not terminalize with its previous phase's
   // success. The procedure exports a step identity before non-phase commands.
@@ -60,15 +60,20 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
     if (heads && heads.length < CONFLICT_REPAIR_BUDGET) throw new RepairableConflictError(heads.length);
     if (heads) reason = CONFLICT_REPAIR_EXHAUSTED;
   }
-  try { recordHammerPhase(reason, { env }); } catch { /* Diagnostic capture cannot block the original failure. */ }
-  if (final === true) reportHammerProgress('terminal-stop', { env, reason, final });
   const identity = {
     hqRoot: env.HAM_HQ_ROOT || env.HQ_ROOT,
     repo: env.HAM_REPO,
     prNumber: Number(env.HAM_PR_NUMBER),
     headSha: headFor,
   };
-  if (!identity.hqRoot || !identity.repo || !identity.prNumber || !identity.headSha) return null;
+  const recordPhaseAndFinal = () => {
+    try { recordHammerPhase(reason, { env }); } catch { /* Diagnostic capture cannot block the original failure. */ }
+    if (final === true && !HAMMER_RETRYABLE_READ_OUTCOMES.has(reason)) reportHammerProgress('terminal-stop', { env, reason, final });
+  };
+  if (!identity.hqRoot || !identity.repo || !identity.prNumber || !identity.headSha) {
+    recordPhaseAndFinal();
+    return null;
+  }
   const launchRequestId = env.HQ_LAUNCH_REQUEST_ID || null;
   const existing = readAmaAuditEntry(identity.hqRoot, identity.repo, identity.prNumber, identity.headSha);
   const prior = existing?.attempts?.findLast(attempt =>
@@ -80,11 +85,19 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
   const authoritativeFence = ['controller-cancelled', 'controller-owner-lost', 'head-changed',
     'rebase-conflict', 'github-gate-red', 'predicate-not-eligible', CONFLICT_REPAIR_EXHAUSTED].includes(reason);
   if (prior && !(authoritativeFence && prior.outcome === 'deferred'
-    && HAMMER_RETRYABLE_READ_OUTCOMES.has(prior.reason))) return existing;
+    && HAMMER_RETRYABLE_READ_OUTCOMES.has(prior.reason))) {
+    if (final === true && prior.outcome === 'failed-without-merge') {
+      // Audit dedupe preserves the earlier observation; the run's final
+      // progress receipt must describe the actual exit.
+      recordPhaseAndFinal();
+    }
+    return existing;
+  }
+  recordPhaseAndFinal();
   return appendAmaAuditAttempt({
     ...identity,
     attempt: hammerPhaseAttempt({ outcome: 'failed-without-merge', reason, launchRequestId,
-      attemptPhase: 'hammer-early-exit' }),
+      attemptPhase: 'hammer-early-exit', ...(overloadEvidence ? { overloadEvidence } : {}) }),
     metadata: { closureAuthority: 'ham-terminal-remediation' },
   });
 }

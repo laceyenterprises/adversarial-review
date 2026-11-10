@@ -30,6 +30,7 @@ import { validNoWorkVerdict } from '../execution-verdict.mjs';
 import { join } from 'node:path';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
+import { deferOverload } from '../overload-deferral.mjs';
 import {
   DEFAULT_RISK_CLASS,
   DEFAULT_ROUND_BUDGET_BY_RISK,
@@ -820,6 +821,12 @@ const HAMMER_DEFERRAL_LAUNCH_LIMIT = 12;
 const HAMMER_DEFERRAL_WINDOW_MS = 6 * 3600_000;
 const LIFETIME_DEFERRAL_REFUND_BUDGET = HAMMER_DEFERRAL_LAUNCH_LIMIT;
 export function evaluateHammerDeferralQueue(ledger, now = new Date().toISOString()) {
+  if (ledger?.overloadDeferral) {
+    const receipt = ledger.overloadDeferral;
+    return { expired: receipt.overloadAlert === true,
+      backoff: !Number.isFinite(receipt.nextRetryAt)
+        || Date.parse(now) / 1000 < receipt.nextRetryAt };
+  }
   if (ledger?.leaseWaitExhausted === true) {
     const next = Date.parse(ledger.deferralNextAt);
     return { expired: false, backoff: Boolean(ledger.laneBusyDeferral)
@@ -842,6 +849,7 @@ function deferralFieldsForSeries(existing, jobKeyChanged = false) {
   const lifetimeDeferralRefundCount = Number.isSafeInteger(raw) && raw >= 0
     ? Math.min(LIFETIME_DEFERRAL_REFUND_BUDGET, raw) : LIFETIME_DEFERRAL_REFUND_BUDGET;
   return {
+    ...(existing?.overloadDeferral ? { overloadDeferral: existing.overloadDeferral } : {}),
     deferralLaunches: jobKeyChanged ? [] : launches,
     ...(existing?.laneBusyDeferral ? { laneBusyDeferral: jobKeyChanged ? null : existing.laneBusyDeferral } : {}),
     ...(existing?.leaseWaitLaunches && !jobKeyChanged ? { leaseWaitLaunches: existing.leaseWaitLaunches } : {}),
@@ -853,7 +861,7 @@ function deferralFieldsForSeries(existing, jobKeyChanged = false) {
 }
 
 // Contention has its own bounded history, separate from ordinary retry refunds.
-function deferHammerRetryDispatchUnlocked(rootDir, identity, { jobKey, launchRequestId, headSha, now, leaseWaitExhausted = false, laneBusy = false, laneBusyHeadSha = headSha } = {}) {
+function deferHammerRetryDispatchUnlocked(rootDir, identity, { jobKey, launchRequestId, headSha, now, leaseWaitExhausted = false, laneBusy = false, laneBusyHeadSha = headSha, overloadEvidence } = {}) {
   const ledger = readHammerRetryCapLedger(rootDir, identity);
   if (!ledger || ledger.__corrupt || ledger.jobKey !== jobKey || !launchRequestId) return null;
   const fields = deferralFieldsForSeries(ledger);
@@ -870,6 +878,10 @@ function deferHammerRetryDispatchUnlocked(rootDir, identity, { jobKey, launchReq
     ? ledger.laneBusyDeferral.launches : [];
   const count = (laneBusy ? laneBusyLaunches.length : launches.length) + 1;
   const doc = { ...ledger, ...fields,
+    ...(overloadEvidence ? { overloadDeferral: deferOverload(
+      `${identity.repo}#${identity.prNumber}`, overloadEvidence, ledger.overloadDeferral,
+      Date.parse(deferredAt) / 1000,
+    ) } : {}),
     attemptCount: refund ? Math.max(0, ledger.attemptCount - 1) : ledger.attemptCount,
     lifetimeAttemptCount: lifetimeRefund ? Math.max(0, ledger.lifetimeAttemptCount - 1) : ledger.lifetimeAttemptCount,
     lifetimeDeferralRefundCount: fields.lifetimeDeferralRefundCount + (lifetimeRefund && !leaseWaitExhausted ? 1 : 0),

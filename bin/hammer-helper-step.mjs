@@ -6,6 +6,8 @@ import { constants, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MAX_TIMER_DELAY_MS } from '../src/load-aware-timeout.mjs';
+import { isLoadTimeout, OVERLOAD_DEFERRED } from '../src/overload-deferral.mjs';
+import { writeFileAtomic } from '../src/atomic-write.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -72,6 +74,7 @@ export async function runHelperStep({ mode, step, nominal, ceiling, command, arg
   report = reportFailure,
   stdout = text => process.stdout.write(text),
   stderr = text => process.stderr.write(text),
+  delay = ms => new Promise(resolve => setTimeout(resolve, ms)),
 } = {}) {
   if (!['read', 'mutation', 'read:report', 'mutation:report'].includes(mode) || !/^[a-z][a-z0-9-]*$/.test(step || '')
     || !Number.isSafeInteger(nominal) || nominal <= 0 || !Number.isSafeInteger(ceiling)
@@ -80,6 +83,7 @@ export async function runHelperStep({ mode, step, nominal, ceiling, command, arg
   // Callers own retries, tolerated writes and semantic stops unless they
   // explicitly delegate terminal reporting. Child reports stay provisional.
   const reportsFailure = mode.endsWith(':report');
+  if (env.HAM_RUN_DIR) rmSync(join(env.HAM_RUN_DIR, 'helper-overload.json'), { force: true });
   const attempts = mode.startsWith('read') ? 2 : 1;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     const seconds = budget(nominal, ceiling);
@@ -115,12 +119,27 @@ export async function runHelperStep({ mode, step, nominal, ceiling, command, arg
         if (reportsFailure) await report('hammer-command-error', { env });
         return 75;
       }
-      if (timeout && attempt < attempts) continue;
+      if (timeout && attempt < attempts) {
+        await delay(1000 * attempt);
+        continue;
+      }
       // Keep API publication receipts even on failure. Never replay a mutation.
       stdout(output);
       let reason = `${step}-failed`;
       try { reason = readFileSync(reasonFile, 'utf8').trim(); } catch { /* No child audit. */ }
       if (timeout) reason = `${step}-timeout:budget-${seconds}s:load-${multiplierMilli}-milli:attempts-${attempt}`;
+      if (isLoadTimeout({ timedOut: timeout, deadlineSeconds: seconds,
+        scaledBudgetSeconds: seconds, loadMultiplier: seconds / nominal })) {
+        const overloadEvidence = { phase: step, deadline_seconds: seconds,
+          scaled_budget_seconds: seconds, load_multiplier: seconds / nominal, load_per_core: null };
+        // Even callers that own semantic reporting must retain this observation.
+        // A mutation is never replayed here: its next owner reconciles receipts.
+        if (env.HAM_RUN_DIR) writeFileAtomic(join(env.HAM_RUN_DIR, 'helper-overload.json'),
+          `${JSON.stringify({ outcome: OVERLOAD_DEFERRED, step, overloadEvidence })}\n`, { mode: 0o600 });
+        await report(OVERLOAD_DEFERRED, { env, overloadEvidence });
+        stderr(`HAM helper outcome=${OVERLOAD_DEFERRED} phase=${step}; same closer owner retries later\n`);
+        return 75;
+      }
       stderr(`HAM helper failure reason=${reason}\n`);
       // 20 = semantic stop; 21 = repairable conflict. Their owners have already
       // selected the outcome, possibly at a newer head than the dispatch head.

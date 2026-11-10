@@ -1,0 +1,15 @@
+operator_steps:
+  - description: >-
+      SRE: after normal deployment and separately authorized activation, observe
+      natural hammer helper load timeouts becoming deferred closer attempts that
+      complete later. Retain deployed SHA, PR ownership, counter/backoff and
+      subsequent success receipts; terminal helper timeout failures should
+      approach zero. Correlate provisioning/rescue observations with the
+      companion Agent OS change. No live repair or restart is authorized here.
+      Displaying this handoff does not satisfy the production observation.
+    run_as: designated SRE operator
+    command: /bin/cat docs/changes/OVERLOADDEFER-01.md
+actions: []
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

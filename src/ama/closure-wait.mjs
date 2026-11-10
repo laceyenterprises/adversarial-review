@@ -30,7 +30,11 @@ async function observeClosureWaitWithinRepositoryCycle({ rootDir, repo, prNumber
   const boundMs = loadAwareTimeoutMs(baseMs, { maxMs: Infinity });
   const dir = join(rootDir, 'data', 'ama-closure-waits');
   mkdirSync(dir, { recursive: true });
-  const key = createHash('sha256').update(`${repo}#${prNumber}`).digest('hex');
+  // Overload is one host incident. Keep every PR's retry debt in its owner
+  // record, but share the durable page latch across all PRs and heads.
+  const hostOverload = reasonClass === 'host-overload';
+  if (hostOverload) headSha = 'host-overload';
+  const key = createHash('sha256').update(hostOverload ? 'host-overload' : `${repo}#${prNumber}`).digest('hex');
   const db = new Database(join(dir, `${key}.db`));
   try {
     db.exec('CREATE TABLE IF NOT EXISTS waits_by_class (head TEXT, class TEXT, started INTEGER NOT NULL, reason TEXT, paged INTEGER DEFAULT 0, PRIMARY KEY(head, class))');

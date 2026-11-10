@@ -152,6 +152,17 @@ test('a real review read refusal is terminal and exit 2 without a Bash diagnosti
     assert.deepEqual(result.reports, ['review-read-failed']);
   }
 });
+
+test('load timeouts defer the closer after bounded reads; a subsequent read succeeds', async t => {
+  const result = await fixture(t, `console.error('ETIMEDOUT'); process.exitCode = 124;`, { scaled: true });
+  assert.equal(result.code, 75);
+  assert.equal(result.calls, 2);
+  assert.deepEqual(result.reports, ['overload-deferred']);
+  const { hammerPhaseAttempt } = await import('../src/ama/hammer-phase-outcome.mjs');
+  assert.equal(hammerPhaseAttempt({ outcome: 'failed-without-merge', reason: result.reports[0] }).outcome, 'deferred');
+  const recovered = await fixture(t, `console.log('recovered');`, { scaled: true });
+  assert.equal(recovered.code, 0);
+});
 for (const code of [20, 21]) {
   test(`semantic exit ${code} is neither retried nor reported even when stderr mentions a timeout`, async t => {
     const result = await fixture(t, `console.error('CI infrastructure timeout evidence'); process.exitCode = ${code};`);

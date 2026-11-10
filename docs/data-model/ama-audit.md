@@ -1,5 +1,11 @@
 # Data Model - AMA Closure Audit
 
+A helper load timeout records `outcome=deferred`, `reason=overload-deferred`
+and `overloadEvidence` (phase, deadline seconds, scaled budget seconds,
+multiplier and nullable load per core) on the launch-bound attempt. Generic
+outer failures preserve this observation without writing terminal-stop
+progress; authoritative policy/owner/head fences keep precedence.
+
 COMPANIONFLOAT-01: a pure companion dependency terminal attempt records
 `companionWait: { repo, prNumber, submodulePath, mergeCommit }`, with a null
 merge commit until known. The stop reader preserves this object and extracts

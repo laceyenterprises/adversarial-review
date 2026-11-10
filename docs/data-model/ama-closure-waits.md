@@ -1,5 +1,11 @@
 # Data Model - AMA Closure Waits
 
+`waitClass=host-overload` uses the shared `sha256("host-overload")` file and
+`head=host-overload` row instead of the PR key. This durable page latch
+coalesces exhausted overload retries across PRs and survives process restart;
+individual owner counters remain in their retry ledgers. It changes no PR
+custody or merge predicate.
+
 **Owner:** AMA bounded closure wait and exhaustion paging (HAMCLOSE-01)
 **Store:** `data/ama-closure-waits/<sha256(repo#prNumber)>.db`
 **Source of truth:** `src/ama/closure-wait.mjs`, `src/ama/closure-refresh-loop.mjs`, `src/ama/closure-recovery.mjs`

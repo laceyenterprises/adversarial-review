@@ -57,3 +57,22 @@ Validation results:
 
 Tests and long guards used `bash bin/run-bounded.sh --timeout <seconds> --`
 with bounded output. The full suite remains owned by PR CI.
+
+## CI fixture repair
+
+Watcher lifecycle, fast-merge and reviewer-timeout handoff loaders now stub the
+overload-rescue retry service at its module boundary. The new watcher import
+otherwise pulled the real process-spawn module into fixtures whose timeout
+module intentionally implements only the watcher interface, causing ESM import
+failures before assertions ran. Production behavior and interfaces are unchanged;
+`test/overload-rescue-retry.test.mjs` continues to exercise the real retry service
+with injected execution and configuration.
+
+Validation on Node 26.10.0: `bash bin/run-bounded.sh --timeout 600 -- node
+test/run-tests.mjs test/github-api.test.mjs test/watcher-fast-merge.test.mjs
+test/watcher-reviewer-timeout-handoff.test.mjs test/overload-rescue-retry.test.mjs
+test/watcher-claim-loop.test.mjs` passed all 303 tests. `npm run lint` passed
+with zero errors (existing warnings); `npm run typecheck:contracts`,
+`node scripts/validate-data-model-catalog.mjs` (93 entries),
+`bash demo/research-finding-walkthrough.sh` and `git diff --check` passed.
+The full suite remains owned by PR CI.

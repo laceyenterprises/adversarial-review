@@ -14,6 +14,13 @@ trailers and final branch-push completion to emit exact-commit evidence.
 Canonical runbook, state/verification declarations and data-model docs describe
 the contract. Public examples and fixtures are synthetic.
 
+Final comment-only remediation skips unreadable individual queue receipts and
+recognizes attested lane proofs for unchanged replacement context after rebase.
+The root data-model catalog now records v7 and lane proof/history fields; the
+isolated fragment is removed and the store test checks the root catalog.
+The reported test import was already correct at reviewed head
+`1a7d6c8706bd80144005864eee37049307bb2b12`; its 33 lane tests passed before edits.
+
 ## Interface changes
 
 Lane commits require `Reviewed-Head`, `Worker-Job-Id`, the existing remediation
@@ -53,3 +60,17 @@ The full host suite was excluded as required by the dispatch.
 - Report frontmatter/links, catalog fragment, state declarations and the
   operator-only post-merge plan: passed offline validation, including the
   production plan schema parser. `git diff --check`: passed in both repos.
+
+### Final comment-only round
+
+- `bash bin/run-bounded.sh --timeout 240 -- node --test test/lanereversal-01.test.mjs test/primary-change-store.test.mjs test/primary-change-reversal-rebase.test.mjs test/primary-change.test.mjs test/primary-change-lines.test.mjs`: passed.
+  The 37 lane tests cover empty/partial/unreadable queue files, missing valid
+  custody, rebased replacement context and refusals for invalid identity,
+  changed context and shifted coordinates at both gates. The new context
+  regression fails against the reviewed helper and passes with the fix.
+- `npm run lint`: zero errors, 152 existing warnings.
+- `npm run typecheck:contracts`: passed.
+- `node scripts/validate-data-model-catalog.mjs`: validated 93 entries.
+- `bash demo/research-finding-walkthrough.sh`: byte-equivalence passed.
+- `git diff --check`: passed. The full suite remains delegated to PR-head CI.
+  Existing lifecycle states, transitions and smoke promises are unchanged.

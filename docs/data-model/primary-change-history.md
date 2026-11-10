@@ -90,6 +90,15 @@ lane authority becomes reusable cached evidence. Lane commits do not populate
 the durable verified HAM reversal store. Ordinary hammer caching and stored
 original-reversal proof remain unchanged.
 
+Queue ownership reads skip individual missing, unreadable or malformed JSON
+records; those records supply no authority and other matching receipts are
+still evaluated. Directory enumeration errors other than a missing directory
+remain read failures. Rebased lane proofs use the same replacement-context
+preservation as hammer proofs: a deleted/re-added base line is preserved only
+when the final patch shows identical context at that same base coordinate.
+Exact-commit lane identity, explicit citation kind and reviewed/parent patch
+identity remain required.
+
 The JSON object contains `key` and `history`; there is no schema-version field.
 `history.headSha` is the requested head and `hasHammerCommits` is a boolean.
 Without hammer commits, those two fields are sufficient. With hammer commits,

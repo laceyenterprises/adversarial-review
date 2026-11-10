@@ -27,9 +27,10 @@ export function readLaneReversalOwners(rootDir, repo, prNumber) {
     .filter(entry => entry.isDirectory()).map(entry => join(archive, entry.name)));
   const matches = followUpJobFileFilter({ rootDir, repo, prNumber, caseInsensitiveRepo: true });
   return directories.flatMap(directory => list(directory).filter(matches).map(name => {
-    try { return JSON.parse(readFileSync(join(directory, name), 'utf8')); } catch (error) {
-      if (error.code === 'ENOENT') return null;
-      throw error;
+    try { return JSON.parse(readFileSync(join(directory, name), 'utf8')); } catch {
+      // A disappearing, unreadable or partially written record supplies no
+      // authority; it must not hide valid custody in the remaining records.
+      return null;
     }
   })).filter(job => job?.closureHandoff?.reason === 'final-fix-all'
     && job.repo?.toLowerCase() === repo.toLowerCase() && Number(job.prNumber) === Number(prNumber));

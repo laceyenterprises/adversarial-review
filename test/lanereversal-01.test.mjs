@@ -118,6 +118,18 @@ for (const bucket of ['in-progress', 'completed', 'stopped-archived/fixture-date
   });
 }
 
+for (const unreadable of ['empty', 'partial', 'read-error']) {
+  test(`lane ownership skips ${unreadable} queue records without granting authority`, async t => {
+    const f = fixture(t);
+    const path = join(f.rootDir, 'data', 'follow-up-jobs', 'completed', `${JOB}-unreadable.json`);
+    if (unreadable === 'read-error') mkdirSync(path);
+    else writeFileSync(path, unreadable === 'empty' ? '' : '{"jobId":');
+    assertGates(await f.collect(), true);
+    rmSync(f.ownerPath);
+    assertGates(await f.collect(), false);
+  });
+}
+
 for (const [name, options] of [
   ['missing owner', { owner: false }],
   ['wrong PR', { mutateJob: j => { j.prNumber = 8; } }],
@@ -201,7 +213,7 @@ for (const cited of [true, false]) test(`a later hammer cannot redefine the prim
   assertGates(evidence, cited);
 });
 
-for (const superseded of [false, true]) test(`rebased lane reversal ${superseded ? 'pinned by immutable later review' : 'with current citation'} retains patch proof`, async t => {
+for (const [superseded, replacementContext] of [[false, false], [true, false], [false, true]]) test(`rebased lane reversal ${superseded ? 'pinned by immutable later review' : 'with current citation'} retains patch proof${replacementContext ? ' beside unchanged replacement context' : ''}`, async t => {
   const source = await collectRebased({
     ...(superseded ? { originalRecorded: true, reviews: [rebasedReview(), rebasedReview({
       node_id: 'PRR_clean', commit_id: 'f'.repeat(40), state: 'APPROVED',
@@ -224,6 +236,24 @@ for (const superseded of [false, true]) test(`rebased lane reversal ${superseded
     };
     change(value);
     for (const commit of value.commits || []) change(commit);
+    if (replacementContext) {
+      if (Array.isArray(value)) {
+        for (const entry of value) {
+          if (entry.body) entry.body = entry.body.replace('`10-11`', '`10-12`');
+        }
+      }
+      for (const file of value.files || []) {
+        if (!file.patch?.includes('\n-start()\n+start_unsafe()')) continue;
+        file.patch = file.patch.replace(/@@ -(\d+) \+(\d+),2 @@/, '@@ -$1,2 +$2,3 @@')
+          .replace('\n-start()', '\n-start()\n-keep()') + '\n+keep()';
+        file.additions++;
+        file.deletions++;
+      }
+      if (path.endsWith(`${'b'.repeat(40)}...${HEAD}`)) value.files = [{
+        filename: 'src/a.mjs', status: 'modified', additions: 1, deletions: 1,
+        patch: '@@ -15,3 +15,3 @@\n start()\n keep()\n-old_other()\n+new_other()',
+      }];
+    }
     return value;
   };
   const evidence = await fetchPrimaryChange({ rootDir: f.rootDir, repo: REPO, prNumber: 8088,
@@ -234,8 +264,20 @@ for (const superseded of [false, true]) test(`rebased lane reversal ${superseded
   assertGates(evidence, true);
   const bad = structuredClone(evidence);
   bad.reversalAuthorizations[0].commit.files[0].patch =
-    bad.reversalAuthorizations[0].commit.files[0].patch.replace('-start_unsafe()', '-other_start()');
+    bad.reversalAuthorizations[0].commit.files[0].patch.replace(
+      replacementContext ? '+start()' : '-start_unsafe()', replacementContext ? '+other_start()' : '-other_start()');
   assertGates(bad, false);
+  if (replacementContext) {
+    for (const mutate of [
+      value => { value.reversalAuthorizations[0].laneIdentity.ok = false; },
+      value => { value.finalFiles[0].patch = value.finalFiles[0].patch.replace(' keep()', ' other_keep()'); },
+      value => { value.finalFiles[0].patch = value.finalFiles[0].patch.replace('@@ -15,3 +15,3 @@', '@@ -16,3 +16,3 @@'); },
+    ]) {
+      const bad = structuredClone(evidence);
+      mutate(bad);
+      assertGates(bad, false);
+    }
+  }
 });
 
 test('fix-all worker prompt requires conditional worker-generated citations only in fix-all mode', t => {

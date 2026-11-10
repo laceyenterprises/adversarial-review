@@ -30,6 +30,9 @@ the verified **produced** attestation at the exact authorizing commit SHA.
 Names, emails, title prefixes, a later clean review, and an opener's attestation
 provide no reversal authority. Terminal and archived job receipts retain this
 historical proof without retaining live custody.
+Individual missing, unreadable or malformed queue files supply no authority
+and are skipped while the remaining receipts are read. Failure to enumerate
+an existing queue directory still fails the history read.
 
 When removing or replacing primary lines for a finding, the worker itself
 generates `Reviewed-Head: <review commit SHA>` and
@@ -46,8 +49,12 @@ These trailers are never operator-authored waivers.
 
 Both closer eligibility and daemon merge consume this shared preservation
 proof. Citation currency, ancestry, parent-state content, whole-region coverage
-and immutable original-reversal proofs still apply after a rebase. Lane
-history is collected afresh on each evaluation; ordinary hammer history keeps
+and immutable original-reversal proofs still apply after a rebase. Lane proofs
+also recognize deleted/re-added base lines retained as identical final
+patch context at the same base coordinates, under the same identity and
+reviewed/parent patch requirements as hammer proofs. Changed or shifted context
+does not establish preservation.
+Lane history is collected afresh on each evaluation; ordinary hammer history keeps
 its cache and durable verified-reversal behavior.
 
 After both PRs land, SRE lets the submodule float through main-catchup and

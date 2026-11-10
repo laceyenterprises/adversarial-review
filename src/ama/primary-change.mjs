@@ -712,12 +712,15 @@ function hasRebasedReversalProof(evidence, path) {
   return (evidence.reversalAuthorizations || []).some(authorization => {
     const { commit, review, reviewedFiles, parentFiles, rebased } = authorization;
     try {
-      if (!rebased || !isHammer(commit) || !reversalCommitIdentityMatches(authorization) || (rebased && !commit.author?.login && commit.reversalAppAttested !== true)
+      const lane = !isHammer(commit) && laneReversalIdentityMatches(authorization);
+      if (!rebased || (!lane && (!isHammer(commit) || !reversalCommitIdentityMatches(authorization)
+        || (!commit.author?.login && commit.reversalAppAttested !== true)))
         || commit.parents?.length !== 1
         || !amaAllAuthoritativeReviewerLogins().includes(String(review.user?.login || '').replace(/\[bot\]$/, ''))
         || parseCommitTrailers(commit.commit.message)['reviewed-head'] !== review.commit_id
         || reversalPatchIdentity(reviewedFiles) !== reversalPatchIdentity(parentFiles)) return false;
       return reversalCitations(commit.commit.message).some(cite => {
+        if (lane && !cite[3]) return false;
         if (![review.node_id, review.html_url].includes(cite[1])) return false;
         const findings = cite[3] === 'non-blocking' ? parseNonBlockingFindingsSection(review.body) : parseBlockingFindingsSection(review.body);
         const finding = findings[Number(cite[2]) - 1];

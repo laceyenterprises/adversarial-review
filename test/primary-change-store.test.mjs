@@ -146,8 +146,11 @@ test('pre-deploy reversal refusals recompute once at an unchanged head and revie
   assert.deepEqual(await storedPrimaryChange(args, () => assert.fail('must reuse refreshed history')), refreshed);
   const currentPath = join(dir, readdirSync(dir).find(name => join(dir, name) !== legacyPath));
   assert.equal(JSON.parse(readFileSync(currentPath, 'utf8')).key.at(-1), 'reversalproof-v7');
-  const catalog = JSON.parse(readFileSync(new URL('../docs/data-model/catalog.d/LANEREVERSAL-01.json', import.meta.url), 'utf8'));
-  assert.equal(catalog.entries.find(entry => entry.id === 'primary-change-history').identityVersion, 'reversalproof-v7');
+  const catalog = JSON.parse(readFileSync(new URL('../docs/data-model/catalog.json', import.meta.url), 'utf8'));
+  const entry = catalog.entries.find(entry => entry.id === 'primary-change-history');
+  assert.equal(entry.identityVersion, 'reversalproof-v7');
+  assert.ok(entry.optionalHistoryFields.includes('laneReversalHistory'));
+  assert.match(entry.laneReversalProof, /laneOwner and laneIdentity/);
 });
 
 test('REVERSALPROOF-01: verified observations survive cache expiry and remain PR/patch scoped', async t => {

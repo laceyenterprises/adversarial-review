@@ -3294,8 +3294,8 @@ fields and fixed provider mappings remain unchanged.
 `remediator-grok` uses account-bound HQ dispatch and requires an enabled worker
 class plus `grok.enabled` and `grok.remediator.enabled`, both default off.
 Original Grok builders retain non-Grok remediation after account and assignment
-handoffs. GRK-16 owns activation and live receipts. `hammer-grok` is reserved
-inventory: closer selection refuses with `grok-closer-pending-merge-authority-v2`.
+handoffs. GRK-16 owns remediator registration, activation and live receipts.
+`hammer-grok` is a reserved routing name; closer selection refuses with `grok-closer-pending-merge-authority-v2`.
 GRK-17 adds its v2 executor after the MLR cutover, using the v2 queue-closer prompt.
 
 `oauth.broker_instances` is a third atomic map, empty by default. Each opaque

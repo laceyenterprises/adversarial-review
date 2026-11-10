@@ -733,8 +733,8 @@ Codex commenter token (`GH_CODEX_REVIEWER_TOKEN`); its body retains Grok attribu
 Unpooled Grok quota holds supply the same job-local reset evidence as other
 remediators, including when fleet quota status is unreadable. Resets beyond
 one hold window try the declared non-Grok fallbacks on the next claim.
-Merge the paired Agent OS loader/fixture companion before, or in the same
-superproject pointer bump that imports this Node change. GRK-16 activation
+Deploy the paired Agent OS loader/fixture companion and let the submodule
+float through the normal delivery path. GRK-16 activation
 requires that paired deployment; see [GRK-12](changes/GRK-12.md).
 
 ## Remediation round budgets

@@ -2408,10 +2408,11 @@ explicit legacy corporate requests retain the compatibility behavior below.
 Enrollment, deployment and service changes require the ITP-19 operator step.
 
 
-GRK-12 reserves `hammer-grok` in the registry and config vocabulary. Its
-primary, fallback and legacy closer selections, including domain
-`mergeAuthority.workerClass` and `workerClassFallback`, are refused with
+GRK-12 reserves the `hammer-grok` routing name without static or seed registration.
+The legacy closer selector and domain `mergeAuthority.workerClass` and
+`workerClassFallback` selections refuse with
 `grok-closer-pending-merge-authority-v2`, even with its flags enabled.
+The strict primary/fallback config enums do not recognize it until GRK-17.
 Keep the closer cell and live receipt pending v2; GRK-17 adds the Merge
 Authority v2 executor after the MLR cutover using the v2 queue-closer prompt.
 

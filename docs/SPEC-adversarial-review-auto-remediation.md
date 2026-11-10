@@ -82,10 +82,11 @@ threshold. A `Request changes` verdict, blocking-finding reasons, stale-head
 reasons, and remediation-state reasons still require validated HAM evidence
 (`ham_terminal_remediation_validated`) or a current-head operator override.
 
-GRK-12 registers `hammer-grok` as inventory only. Selecting it as the primary,
-fallback or legacy closer refuses with
-`grok-closer-pending-merge-authority-v2`, regardless of enable flags. GRK-17
-adds execution after the MLR cutover using the v2 queue-closer prompt.
+GRK-12 reserves the Grok closer routing name without static or seed registration.
+Selecting `hammer-grok` through the legacy or domain closer route refuses with
+`grok-closer-pending-merge-authority-v2`, regardless of enable flags. The strict
+merge-authority enums do not recognize it. GRK-17 adds registration and the v2
+executor after the MLR cutover using the v2 queue-closer prompt.
 
 A zero-blocker `Comment only` review with actionable non-blocking findings may
 create a final follow-up job marked `finalRound: 'comment-only'`. Only one

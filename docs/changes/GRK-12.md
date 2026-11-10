@@ -15,8 +15,9 @@ Selecting `hammer-grok` as the closer refuses with
 `grok-closer-pending-merge-authority-v2`, including when its flags are on.
 The Grok closer is deferred to GRK-17: the Merge Authority v2 executor after
 the MLR cutover, using the v2 queue-closer prompt. The closer cell and receipt
-remain **pending v2**. Both flags default off. Static/seed role registration and vault policies are
-deferred to GRK-16/17; the merge-authority enum is deferred to GRK-17.
+remain **pending v2**. Both flags default off. Static/seed registration is deferred to GRK-16 for the
+remediator and GRK-17 for the closer. Grok vault-policy entries are deferred to
+the GRK-16 operator activation; the merge-authority enum is deferred to GRK-17.
 Frozen v1 closer dispatch and
 all v2 finalization code remain unchanged; exact-head checks, merge leases,
 attestations and the prohibition on admin-merge bypass remain in force.
@@ -37,9 +38,10 @@ The parity fixture copies must be updated as a pair:
 `test/fixtures/grok-config-parity.v1.json` here and
 `platform/agent-os-config/src/agent_os_config/tests/fixtures/grok-config-parity.v1.json`
 in Agent OS. The Agent OS companion supplies the same pending-v2 refusal in
-Python `_validate_grok_role_pins`, also used by the shell loader, for the legacy closer selector; the strict merge-authority enum continues to
-reject unregistered Grok values. Deploy the Agent OS companion before activation. Deploy the paired
-changes before GRK-16 activation; source validation does not certify live
+Python `_validate_grok_role_pins`, also used by the shell loader, for the legacy
+closer selector; the strict merge-authority enum continues to reject
+unregistered Grok values. Deploy the paired changes before GRK-16 activation;
+source validation does not certify live
 deployment readiness. Keep both default-off flags and the Node refusal in place.
 
 No persistent store shape, lifecycle status, merge permission or smoke promise

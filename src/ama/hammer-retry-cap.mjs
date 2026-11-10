@@ -850,6 +850,7 @@ function deferralFieldsForSeries(existing, jobKeyChanged = false) {
     ? Math.min(LIFETIME_DEFERRAL_REFUND_BUDGET, raw) : LIFETIME_DEFERRAL_REFUND_BUDGET;
   return {
     ...(existing?.overloadDeferral ? { overloadDeferral: existing.overloadDeferral } : {}),
+    ...(existing?.lastOverloadDeferral ? { lastOverloadDeferral: existing.lastOverloadDeferral } : {}),
     deferralLaunches: jobKeyChanged ? [] : launches,
     ...(existing?.laneBusyDeferral ? { laneBusyDeferral: jobKeyChanged ? null : existing.laneBusyDeferral } : {}),
     ...(existing?.leaseWaitLaunches && !jobKeyChanged ? { leaseWaitLaunches: existing.leaseWaitLaunches } : {}),
@@ -870,7 +871,8 @@ function deferHammerRetryDispatchUnlocked(rootDir, identity, { jobKey, launchReq
   const alreadyRefunded = ledger.retryableLaunchRequestIds?.includes(launchRequestId) === true
     || ledger.unexecutedLaunchRequestIds?.includes(launchRequestId) === true
     || ledger.phaseInputsReplacement?.launchRequestId === launchRequestId;
-  const refund = !alreadyRefunded && (leaseWaitExhausted || launches.length < HAMMER_DEFERRAL_LAUNCH_LIMIT) && ledger.attemptCount > 0;
+  const refund = !(overloadEvidence && ledger.lastOverloadDeferral?.overloadAlert)
+    && !alreadyRefunded && (leaseWaitExhausted || launches.length < HAMMER_DEFERRAL_LAUNCH_LIMIT) && ledger.attemptCount > 0;
   const lifetimeRefund = refund && (leaseWaitExhausted || fields.lifetimeDeferralRefundCount < LIFETIME_DEFERRAL_REFUND_BUDGET);
   const deferredAt = now || new Date().toISOString();
   const laneBusyLaunches = laneBusy && ledger.laneBusyDeferral?.headSha === laneBusyHeadSha
@@ -879,7 +881,7 @@ function deferHammerRetryDispatchUnlocked(rootDir, identity, { jobKey, launchReq
   const count = (laneBusy ? laneBusyLaunches.length : launches.length) + 1;
   const doc = { ...ledger, ...fields,
     ...(overloadEvidence ? { overloadDeferral: deferOverload(
-      `${identity.repo}#${identity.prNumber}`, overloadEvidence, ledger.overloadDeferral,
+      `${identity.repo}#${identity.prNumber}`, overloadEvidence, ledger.overloadDeferral || ledger.lastOverloadDeferral,
       Date.parse(deferredAt) / 1000,
     ) } : {}),
     attemptCount: refund ? Math.max(0, ledger.attemptCount - 1) : ledger.attemptCount,
@@ -901,6 +903,20 @@ function deferHammerRetryDispatchUnlocked(rootDir, identity, { jobKey, launchReq
     head: refund && ledger.targetRemediationSha === headSha, lifetime: lifetimeRefund });
   writeHammerRetryCapLedger(rootDir, identity, doc);
   return doc;
+}
+
+// Exhaustion relinquishes the overload hold to normal closer selection. The
+// ordinary attempt/lease predicates still apply, without further overload refunds.
+export function releaseHammerOverloadDeferral(rootDir, identity) {
+  return mutateHammerLedger(rootDir, identity, () => {
+    const ledger = readHammerRetryCapLedger(rootDir, identity);
+    if (!ledger?.overloadDeferral?.overloadAlert) return ledger;
+    const doc = { ...ledger, lastOverloadDeferral: ledger.overloadDeferral,
+      overloadDeferral: null, leaseWaitExhausted: true, deferralNextAt: null,
+      laneBusyDeferral: null };
+    writeHammerRetryCapLedger(rootDir, identity, doc);
+    return doc;
+  });
 }
 
 // Same stable-inode flock discipline as closer intent/automated recovery.

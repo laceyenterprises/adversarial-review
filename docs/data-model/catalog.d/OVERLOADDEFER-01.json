@@ -138,7 +138,7 @@
       "compatibilityFields": [
         "appendedRecords"
       ],
-      "description": " OVERLOADDEFER-01: helper load timeouts retain deferred closer custody with phase/deadline/load evidence, a bounded persistent per-owner retry receipt, and one host-overload page latch across PRs."
+      "description": " OVERLOADDEFER-01: helper load timeouts retain deferred closer custody with phase/deadline/load evidence, a bounded persistent per-owner retry receipt, and one overload-exhausted page latch per PR/head (OVERLOADDEFER-01b); host-overload shared latches are legacy-only."
     },
     {
       "id": "hammer-retry-cap",
@@ -188,11 +188,13 @@
         "operatorHoldRefundedAt"
       ],
       "operatorHoldRefundsLifetime": true,
-      "leaseWaitExhausted": "green exact-head contention refunds failures and resumes next pass",
+      "leaseWaitExhausted": "green exact-head contention refunds failures and resumes next pass; overload release sets true with deferralNextAt=null for ordinary capped selection",
+      "lastOverloadDeferral": "archived exhausted overload wire receipt retained across launches and head/series changes; prevents subsequent overload refunds and seeds immediate exhaustion on later overloads",
+      "overloadDeferral": "active v1 overload wire receipt; null after delivered exhaustion page and release; later overloads inherit the archived exhausted count without a new backoff hold",
       "leaseDeferralHistoryLimit": 64,
       "leaseDeferralHistoryField": "leaseWaitLaunches",
       "laneBusyDeferral": "optional {headSha, launches}: newest 64 distinct same-head lane-busy launches; reset on parked head/review series change or non-lane deferral; 2-minute exponential backoff capped at 30 minutes and durable closure-wait page on third launch; no failure-budget charge",
-      "description": " OVERLOADDEFER-01: helper load timeouts retain deferred closer custody with phase/deadline/load evidence, a bounded persistent per-owner retry receipt, and one host-overload page latch across PRs."
+      "description": " OVERLOADDEFER-01: helper load timeouts retain deferred closer custody with phase/deadline/load evidence, a bounded persistent per-owner retry receipt, and one overload-exhausted page latch per PR/head (OVERLOADDEFER-01b); host-overload shared latches are legacy-only."
     },
     {
       "id": "ama-closure-waits",
@@ -229,6 +231,8 @@
         "class"
       ],
       "waitClasses": [
+        "overload-exhausted",
+        "host-overload",
         "primary-change",
         "bounded-wait",
         "final-round",
@@ -247,7 +251,7 @@
       "finalRoundReceiptScope": "per PR across heads; independent of primary-change",
       "waitProgress": "launch/head progress restarts the deadline before stall evaluation; retained running/starting launch or confirmed dispatched lease timestamps advance existing final-round rows only when no later than observation time; retained succeeded-awaiting-audit-or-merged-signal holds supply no launch progress; running background dispatch uses ephemeral launchWait from actual start for its dispatch timeout (15-minute fallback), preserving original debt on refusal and paging explicitly on overrun",
       "legacyWaitMigration": "none; one-time deadline and page-reservation reset",
-      "description": " OVERLOADDEFER-01: helper load timeouts retain deferred closer custody with phase/deadline/load evidence, a bounded persistent per-owner retry receipt, and one host-overload page latch across PRs."
+      "description": " OVERLOADDEFER-01: helper load timeouts retain deferred closer custody with phase/deadline/load evidence, a bounded persistent per-owner retry receipt, and one overload-exhausted page latch per PR/head (OVERLOADDEFER-01b); host-overload shared latches are legacy-only."
     }
   ]
 }

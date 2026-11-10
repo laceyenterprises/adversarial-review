@@ -196,6 +196,7 @@ import {
   refundUnexecutedHammerDispatch,
   refundMissingPhaseInputsDispatch,
   deferHammerRetryDispatch,
+  releaseHammerOverloadDeferral,
   refundHammerRetryDispatch,
 } from './hammer-retry-cap.mjs';
 import {
@@ -5596,15 +5597,23 @@ async function maybeDispatchAmaCloserAttempt({
   if (deferredPark && parkLedger && (parkLedger.overloadDeferral || !certifiedPark || laneBusyPark)) {
     const { expired, backoff } = evaluateHammerDeferralQueue(parkLedger, dispatchContext.dispatchedAt);
     if (expired || backoff) {
-      if (expired && parkLedger.overloadDeferral?.overloadAlert) {
+      const overloadExhausted = expired && parkLedger.overloadDeferral?.overloadAlert;
+      if (overloadExhausted) {
         try { await observeClosureWait({ rootDir, repo, prNumber, headSha: queuedHead,
-          reason: 'host-overload: automatic retry budget exhausted; ownership retained',
-          waitClass: 'host-overload', immediate: true, now: Date.parse(dispatchContext.dispatchedAt),
+          reason: `host-overload: retry budget exhausted; releasing ownership; ${JSON.stringify(parkLedger.overloadDeferral.evidence)}`,
+          waitClass: 'overload-exhausted', immediate: true, now: Date.parse(dispatchContext.dispatchedAt),
           pageImpl: message => deliverAlertImpl(message, { event: 'ama_closer.host_overload',
-            payload: { alertKey: 'host-overload', repo, prNumber } }) }); }
-        catch (error) { logger?.warn?.(`[ama-closer] overload alert unavailable: ${error?.message || error}`); }
+            payload: { alertKey: 'host-overload', repo, prNumber,
+              evidence: parkLedger.overloadDeferral.evidence } }) });
+          parkLedger = releaseHammerOverloadDeferral(rootDir, { repo, prNumber });
+        }
+        catch (error) {
+          logger?.warn?.(`[ama-closer] overload release unavailable: ${error?.message || error}`);
+          return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+            reason: 'overload-release-pending', recoveryWait: true });
+        }
       }
-      return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+      if (!overloadExhausted) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
         reason: parkLedger.overloadDeferral ? 'overload-deferred'
           : expired ? 'hammer-deferral-budget-exhausted' : 'hammer-deferral-backoff',
         recoveryWait: !expired, needsOperator: expired });

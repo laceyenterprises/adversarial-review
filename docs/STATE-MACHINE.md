@@ -118,6 +118,26 @@ unbatched releases. Settlement and backfill share lifecycle
 grade kinds, and backfill skips settlement observations. Existing states and
 smoke promises are unchanged.
 
+The watcher owns launch-less rescue overload debt on startup and a 30-second
+timer, one bounded child at a time. Each tick scans at most 100 directory entries
+asynchronously with a retained cursor. Each due window drains before advancing;
+progress may require a full rotation including queued children, their timer
+turns and applicable per-PR backoff. Queued receipts revalidate before execution;
+broken cursors close and reopen on the next scan.
+Live AMA enablement/execution switches gate retry; unreadable config suppresses
+execution. Per-PR child failures and successful no-op children back off in memory
+from 30 seconds through 30 minutes; restart clears backoff while retaining disk
+debt. SIGTERM/SIGINT aborts and awaits the active rescue group before shutdown. Retry-only rescue rechecks current PR
+head/review/holds/writers and reconciles the original key before replay or
+release. Head/review changes retire stale intent to normal selection. The
+AMA pass releases exhausted helper holds after one structured PR/head alert;
+`lastOverloadDeferral` survives replacements and prevents further overload
+refunds. Later overloads inherit the exhausted count and release immediately
+through the existing page deduplication path. Ordinary budgets, leases and merge predicates remain authoritative.
+Existing automated smoke steps are unchanged. SRE verifies loaded revisions,
+watcher PID/start time and natural receipt progress after ordinary deployment;
+see [the change note](../changes/OVERLOADDEFER-01b.md).
+
 ## Explicit same-head re-review intent (RETRIGGERDEDUP-01)
 
 Accepted label, CLI, rescue and remediation requests atomically pair their row

@@ -3,6 +3,7 @@ import { ensureWorkerRegistryReady } from './adapters/agent-runtime/local/remedi
 import { prepareDispatchReadContext } from './dispatch-read-client.mjs';
 import { shutdownAmaHammerBackgroundQueue } from './ama-hammer-background-dispatch.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
+import { createOverloadRescueRetry } from './overload-rescue-retry.mjs';
 import { withHoldRecordPoll } from './ama/hold-record.mjs';
 import { evaluateCloserHoldsForPoll } from './ama/closer-hold-records.mjs';
 import { WATCHER_POLL_INTERVAL_MS } from './watcher-poll-interval.mjs';
@@ -852,6 +853,7 @@ function readWatcherDrainState({
 const SQLITE_ORPHAN_EXIT_CODE = 75;
 
 let watcherHeartbeat = null;
+let overloadRescueRetry = null;
 
 function markWatcherReviewHeartbeat(details = {}) {
   watcherHeartbeat?.markReview?.(details);
@@ -912,7 +914,8 @@ process.on('unhandledRejection', (err) => {
     message: 'unhandledRejection; preserving in-flight reviewer runtime sessions before exit',
   });
 });
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
+  await overloadRescueRetry?.stop();
   shutdownAmaHammerBackgroundQueue();
   const drainState = readWatcherDrainState();
   const preserveInFlightReviewers = shouldPreserveReviewersOnSigterm(drainState);
@@ -952,7 +955,8 @@ process.on('SIGTERM', () => {
       });
     });
 });
-process.on('SIGINT', () => {
+process.on('SIGINT', async () => {
+  await overloadRescueRetry?.stop();
   shutdownAmaHammerBackgroundQueue();
   exitAfterReviewerCleanup({
     code: 130,
@@ -1678,6 +1682,7 @@ async function main() {
     authProvider: () => process.env.GITHUB_TOKEN,
   });
   const intervalMs = config.pollIntervalMs ?? WATCHER_POLL_INTERVAL_MS;
+  overloadRescueRetry = createOverloadRescueRetry({ rootDir: ROOT });
   const configuredDeadlineMs = config.pollDeadlineMs;
   // Always resolve a stable heartbeat path (env override → HQ_ROOT →
   // rootDir default) so the file is written every poll and the external
@@ -1862,6 +1867,10 @@ async function main() {
   const { createFindingBatchTicker } = await import('./findings-batch.mjs');
   const findingBatchTicker = createFindingBatchTicker({ db, rootDir: ROOT });
   startWatcherAuthenticationRefreshTimer({ log: console });
+  // Recovery shares this watcher's lifetime, but not a long discovery pass's
+  // latency. The shortest overload backoff is 30 seconds.
+  void overloadRescueRetry.tick();
+  setInterval(() => { void overloadRescueRetry.tick(); }, 30_000).unref();
 
   (async function pollLoop() {
     let nextStart = Date.now();

@@ -155,7 +155,7 @@ merge is a wait; a live hammer is not a new dispatch. Missing immutable
 primary-change provenance remains a v2 recovery wait.
 
 After both repository PRs merge, Main Loop 6/SRE follows the
-[MLR-07 deployment handoff](deployment/mlr-07-shadow.yaml). Confirm the deployed
+[MLR-07 deployment handoff](https://github.com/laceyenterprises/agent-os/blob/main/modules/worker-pool/post-merge-actions/mlr-07-shadow.yaml). Confirm the deployed
 review-service pointer includes this change, then reload the watcher through its
 existing registered service path and retain that path's deployment receipt.
 Take report snapshots before and after natural traffic and require

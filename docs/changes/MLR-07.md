@@ -20,7 +20,7 @@ Both repository PRs are required, linked through managed publication.
 Existing reintegration must observe every declared companion merged before
 ticket completion. Publication alone is not merged or activated evidence.
 Main Loop 6/SRE owns the committed
-[watcher reload and growth assertion](../deployment/mlr-07-shadow.yaml).
+[watcher reload and growth assertion](https://github.com/laceyenterprises/agent-os/blob/main/modules/worker-pool/post-merge-actions/mlr-07-shadow.yaml).
 No live route, config, watcher or deployment state is changed by this worker.
 
 ## Verification

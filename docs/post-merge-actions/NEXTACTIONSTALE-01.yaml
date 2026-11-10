@@ -1,0 +1,20 @@
+operator_steps:
+  - description: >-
+      SRE: after both companion PRs land and the normal review-service float,
+      restart watcher and follow-up services under their registered runtime owner.
+      Verify both PID start times against the deployed revision; kickstart any
+      service skipped by the normal bounce. Observe natural traffic for at least
+      two watcher passes. No PR may repeat Retrying PR plus budget suppression
+      for more than one pass. Budget-exhausted ready, conflicting and red-CI PRs
+      must acquire a closer within one pass unless an existing live owner,
+      reconciliation, explicit hold or closer-exhaustion escalation owns them.
+      Retain head, current next action, closer receipt or named owner, and one
+      escalation receipt for exhausted closer episodes. Verify inspect-only
+      rescue agrees and never selects rereview for a certainly suppressed head.
+      This command displays the handoff and performs no live action.
+    run_as: SRE with registered review-service ownership
+    command: >-
+      /usr/bin/printf '%s\n' 'NEXTACTIONSTALE-01: SRE verifies float, watcher/follow-up PID start times, kickstart if skipped, and one-pass closer ownership with no repeated budget-suppressed review retries.'
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

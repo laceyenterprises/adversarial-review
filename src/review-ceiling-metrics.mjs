@@ -15,7 +15,13 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 // per call, so an owned db never equals this one and is always closed; under
 // test harnesses that stub `openReviewStateDb` to a shared singleton, an owned
 // handle IS this object and must be left open. Only used for identity here.
-const db = openReviewStateDb(ROOT);
+// Read-only consumers supply their own handle. Importing their budget policy
+// must not create a writable database or migrate a schema as a side effect.
+let db = null;
+function openOwnedReviewStateDb(rootDir) {
+  db ||= openReviewStateDb(ROOT);
+  return openReviewStateDb(rootDir);
+}
 
 // Count completed reviewer rereview passes for a PR.
 //
@@ -38,7 +44,7 @@ export function countCompletedReviewerRereviewRounds({
   const normalizedHeadSha = typeof headSha === 'string' && headSha.trim() !== ''
     ? headSha.trim()
     : null;
-  const ownedDb = dbOverride ? null : openReviewStateDb(rootDir);
+  const ownedDb = dbOverride ? null : openOwnedReviewStateDb(rootDir);
   const readDb = dbOverride || ownedDb;
   try {
     if (!dbOverride) ensureReviewStateSchema(readDb);
@@ -67,7 +73,7 @@ export function hasCompletedReviewerRereviewAfter({
   after,
 } = {}) {
   if (typeof after !== 'string' || after.length === 0) return false;
-  const ownedDb = dbOverride ? null : openReviewStateDb(rootDir);
+  const ownedDb = dbOverride ? null : openOwnedReviewStateDb(rootDir);
   const readDb = dbOverride || ownedDb;
   try {
     if (!dbOverride) ensureReviewStateSchema(readDb);
@@ -97,7 +103,7 @@ export function countDistinctReviewedHeadShas({
   repoPath,
   prNumber,
 } = {}) {
-  const ownedDb = dbOverride ? null : openReviewStateDb(rootDir);
+  const ownedDb = dbOverride ? null : openOwnedReviewStateDb(rootDir);
   const readDb = dbOverride || ownedDb;
   try {
     if (!dbOverride) ensureReviewStateSchema(readDb);
@@ -145,7 +151,7 @@ export function countReviewCeilingUnits({
   const normalizedHeadSha = typeof headSha === 'string' && headSha.trim() !== ''
     ? headSha.trim()
     : null;
-  const ownedDb = dbOverride ? null : openReviewStateDb(rootDir);
+  const ownedDb = dbOverride ? null : openOwnedReviewStateDb(rootDir);
   const readDb = dbOverride || ownedDb;
   try {
     if (!dbOverride) ensureReviewStateSchema(readDb);
@@ -217,7 +223,7 @@ export function countReviewCeilingAttempts({
   const normalizedHeadSha = typeof headSha === 'string' && headSha.trim() !== ''
     ? headSha.trim()
     : null;
-  const ownedDb = dbOverride ? null : openReviewStateDb(rootDir);
+  const ownedDb = dbOverride ? null : openOwnedReviewStateDb(rootDir);
   const readDb = dbOverride || ownedDb;
   try {
     if (!dbOverride) ensureReviewStateSchema(readDb);

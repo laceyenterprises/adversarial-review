@@ -22,7 +22,7 @@ import { observeClosureWait } from './ama/closure-wait.mjs';
 import { handoffWakeLegacy, handoffWakeShadowEvidence, shadowNextActionLater } from './pr-next-action-consumer.mjs';
 import { CODE_PR_DOMAIN_ID } from './identity-shapes.mjs';
 import { closeEmptyPullRequest } from './empty-pr-close.mjs';
-import { routeCappedReviewToClosure, hammerHandoffReviewBypass, resolveMaxRemediationRounds } from './hamclose-review-admission.mjs';
+import { BUDGET_EXHAUSTED_CLOSURE_REASON, routeCappedReviewToClosure, routeBudgetExhaustedReviewToClosure, logBudgetClosureOnce, hammerHandoffReviewBypass, resolveMaxRemediationRounds } from './hamclose-review-admission.mjs';
 import { recoverOwnerlessReview, recoverOverdueOwnership } from './ownerproof-review-recovery.mjs';
 import { isOperatorHeld } from './operator-hold-labels.mjs';
 import { dismissSupersededReviewsForQueuedRereview } from './queued-review-dismissal.mjs';
@@ -50,7 +50,7 @@ import { reviewerRuntimeState } from './reviewer-runtime-adapter.mjs';
 import { recordNoProgressLaneRun, maybeFireOperatorDecisionRequiredAlert } from './watcher-no-progress-lane.mjs';
 import {
   recoverWithheldFinalRoundHead, withheldHeadRecoveryCandidates,
-  findFinalRemediationPushJob, isCompletedCommentOnlyFinalRoundJob, isCompletedFinalRemediationJob,
+  findFinalRemediationPushJob, isCompletedFinalRemediationJob,
 } from './comment-only-final-round.mjs';
 import { parkExhaustedReview } from './review-retry-exhaustion.mjs';
 import { createLabelControlObservationCache, observeOperatorLabelWakes } from './operator-label-wake.mjs';
@@ -122,6 +122,7 @@ import {
   resolveFirstPassReviewBudgetSuppression,
 } from './first-pass-review-suppression.mjs';
 import {
+  isFleetSelfRepairTrailerOnlyRereviewReason,
   declineFleetSelfRepairTrailerOnlyRereview,
   resolveFleetSelfRepairTrailerOnlyRereview,
 } from './fleet-self-repair-rereview.mjs';
@@ -1593,6 +1594,23 @@ export async function processReviewSubject(entry, ctx) {
           (ctx.warn || console.warn)(`[watcher] ceiling closeout wake drain failed for ${repoPath}#${prNumber}: ${error?.message || error}`);
         }
       }
+      // Reconcile certain budget refusals before CI admission, retry logging or
+      // scheduling. The posted handler re-evaluates the shared next action from
+      // live evidence on every pass, including expired/satisfied observer waits.
+      if (effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal
+        && ['pending', 'pending-upstream', 'ci-blocked'].includes(existing?.review_status)
+        && !explicitIntentForHead() && !isExactHeadReviewRecoveryRequested(existing)
+        && !isFleetSelfRepairTrailerOnlyRereviewReason(existing?.rereview_reason)
+        && !isOrphanHeadReviewRequested(existing, subject.headSha) && !transferredHeadReview && !exhaustedHeadVerdict) {
+        const suppression = resolveFirstPassReviewBudgetSuppression({
+          rootDir: ROOT, domainId, repoPath, prNumber, linearTicketId,
+          reviewRow: existing, currentHeadSha: subject.headSha, labelNames: prLabelNames, logger: console, db,
+        });
+        if (routeBudgetExhaustedReviewToClosure({ db, repo: repoPath, prNumber,
+          headSha: subject.headSha, row: existing, suppression })) {
+          existing = stmtGetReviewRow.get(repoPath, prNumber);
+        }
+      }
       // A completed final-round push owes closure, not another reviewer.
       // Restore queued rows too: an earlier stale-head refresh may already
       // have parked this head behind the final-push reviewer suppression.
@@ -1607,7 +1625,8 @@ export async function processReviewSubject(entry, ctx) {
         const overdueHandoff = finalPush?.status === 'completed' && handoff?.action === 'hammer'
           && ['hammer', 'closer'].includes(handoff.actor)
           && Number.isFinite(deadlineMs) && deadlineMs <= Date.now();
-        if ((isCompletedCommentOnlyFinalRoundJob(finalPush) || overdueHandoff) && finalPush.revisionRef) {
+        if ((isCompletedFinalRemediationJob(finalPush) || overdueHandoff) && finalPush.revisionRef) {
+          const queued = existing.review_status !== 'posted';
           if (existing.review_status !== 'posted'
             && latestReviewedHeadSha({ db, repoPath, prNumber }) === finalPush.revisionRef) {
             restoreHammerOwnedReview({ db, repoPath, prNumber, reviewRow: existing,
@@ -1616,7 +1635,7 @@ export async function processReviewSubject(entry, ctx) {
           }
           finalRoundCloserOwned = existing?.review_status === 'posted'
             && existing.reviewer_head_sha === finalPush.revisionRef;
-          if (finalRoundCloserOwned) {
+          if (finalRoundCloserOwned && queued) {
             console.log(`[watcher] owning lane=closer for ${repoPath}#${prNumber}@${subject.headSha}: ` +
               `${overdueHandoff ? 'expired-remediation-handoff' : 'completed-comment-only-final-round'}; re-evaluating normal closure gates`);
           }
@@ -1747,23 +1766,23 @@ export async function processReviewSubject(entry, ctx) {
             `because ${stalePostedReviewSuppression.reason}; leaving posted review to the merge-agent`
         );
       } else if (postedReviewHeadMoved && stalePostedReviewCloserSuppression.suppressed) {
-        console.log(
-          `[watcher] auto-refresh SUPPRESSED for ${repoPath}#${prNumber}: ` +
+        const message = `[watcher] auto-refresh SUPPRESSED for ${repoPath}#${prNumber}: ` +
             `head moved ${existing.reviewer_head_sha.slice(0, 12)} → ${subject.headSha.slice(0, 12)} ` +
-            `because ${stalePostedReviewCloserSuppression.reason}; leaving posted review intact`
-        );
+            `because ${stalePostedReviewCloserSuppression.reason}; leaving posted review intact`;
+        if (finalRoundCloserOwned) logBudgetClosureOnce({ repo: repoPath, prNumber, headSha: subject.headSha, message });
+        else console.log(message);
       } else if (postedReviewHeadMoved && stalePostedReviewBudgetSuppression.suppressed) {
         const budgetDetail =
           stalePostedReviewBudgetSuppression.reason === 'remediation-round-budget-exhausted'
             ? ` (${stalePostedReviewBudgetSuppression.completedRoundsForPR}/${stalePostedReviewBudgetSuppression.roundBudget} rounds, ` +
               `risk=${stalePostedReviewBudgetSuppression.riskClass || 'unknown'})`
             : '';
-        console.log(
-          `[watcher] auto-refresh SUPPRESSED for ${repoPath}#${prNumber}: ` +
+        logBudgetClosureOnce({ repo: repoPath, prNumber, headSha: subject.headSha,
+          message: `[watcher] auto-refresh SUPPRESSED for ${repoPath}#${prNumber}: ` +
             `head moved ${existing.reviewer_head_sha.slice(0, 12)} → ${subject.headSha.slice(0, 12)} ` +
             `because ${stalePostedReviewBudgetSuppression.reason}${budgetDetail}; ` +
-            `leaving posted review intact and routing exhausted close through AMA/HAM`
-        );
+            `leaving posted review intact and routing exhausted close through AMA/HAM`,
+        });
       } else if (postedReviewHeadMoved && finalRoundInProgress) {
         console.log(`[watcher] auto-refresh SUPPRESSED for ${repoPath}#${prNumber}: comment-only final round is in progress`);
       } else if (postedReviewHeadMoved && existing?.review_status === 'posted'
@@ -1823,6 +1842,7 @@ export async function processReviewSubject(entry, ctx) {
           repoPath,
           prNumber,
           finalRoundCloserOwned,
+          budgetExhaustedCloserOwned: existing.rereview_reason === BUDGET_EXHAUSTED_CLOSURE_REASON,
           // WPS-01: the head this handoff was queued against. The no-progress
           // lane keys its series on (repo, pr, head) so a new push always resets
           // the series and a PR that starts moving is never held back.

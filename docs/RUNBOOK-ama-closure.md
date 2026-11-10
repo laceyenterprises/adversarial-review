@@ -847,6 +847,20 @@ watcher restart at deploy. To check the live receipt, look in the watcher log:
 every `class=recovery` expired line should show a dispatch or a
 `closure-recovery-ownership-unresolved` route, with one page for each PR/head.
 
+Queued automatic reviews whose budget suppression is certain return to the
+posted-review closure lane before retry scheduling or CI admission. The
+`system-budget-exhausted-closure` handoff retains the latest delivered review's
+head and timestamp; it grants no verdict on the queued head. Completed final
+pushes re-enter closure for every recorded next action, including `wait-for-CI`.
+Each pass uses the shared evaluator with current checks, mergeability and owner
+evidence, so a satisfied wait does not need to reach its old deadline.
+The budget handoff keeps closure due despite an unchanged review fingerprint;
+no-progress backoff cannot hide CI or mergeability changes on the same head.
+Green unreviewed heads go to the hammer, conflicts to its conflict path and red
+checks to CI repair. Live or unreadable ownership and exhausted closer budgets
+retain their existing lease/reconciliation/escalation behavior. Budget handoff
+logging is deduplicated per head; no suppressed review retry is scheduled.
+
 After primary-change validation or selected R05 repair admission, a changed hammer decision is reported
 before repair-admission refusal. Structural admission refusals remain in the
 replacement snapshot and cannot authorize daemon merge; zero findings alone do

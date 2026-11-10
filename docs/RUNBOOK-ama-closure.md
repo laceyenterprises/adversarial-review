@@ -8146,6 +8146,17 @@ and canonical `project_ref` (camelCase takes precedence), defaulting to
 
 ### Parked final-round pushes reach the closer (CLOSERPARKOWNER-01)
 
+The earlier pre-claim consecutive nonblocking-cap refusal is a different edge:
+it may have no completed push or closure receipt. Such a stop carries
+`finalCapResult` with `successorDispatched: false`, source review head,
+finding count/state pairs and an explicit operator canonical-rescue action.
+Re-read the live head, findings, CI, conflicts and reviewer/worker/closer custody
+before rescue. A green conflicting head still routes through R10 to the hammer;
+the final fix-all branch excludes R10. Exhausted exact-head findings without
+conflicts select R14's final hammer (subject to the existing final fix-all
+handoff). Never interpret this terminal result as a launched successor,
+proven final push, clean review or permission to bypass a lease or cap.
+
 A completed comment-only final-round push head is owned by the closer lane, not by
 exhausted-head verdict admission (EXHAUSTEDHEADOWNER-01 skips it on purpose).
 Discovery's deadline check (`recoverOverdueOwnership`) ends a watcher pass only when

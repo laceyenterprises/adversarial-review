@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "nonblocking-final-cap-result",
+      "title": "Nonblocking Cap Terminal Result",
+      "path": "docs/data-model/follow-up-jobs.md",
+      "store": "data/follow-up-jobs/stopped/*.json",
+      "schemaSurface": "src/follow-up-jobs.mjs",
+      "relatedSchemaSurfaces": ["src/follow-up-remediation.mjs"],
+      "owner": "follow-up remediation queue",
+      "optionalField": "finalCapResult",
+      "authority": "Operator canonical-rescue action only; source review head and count/state accounting grant no dispatch or merge authority."
+    }
+  ]
+}

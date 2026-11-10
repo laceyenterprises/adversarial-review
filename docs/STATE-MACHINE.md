@@ -1204,6 +1204,17 @@ the operator alert and normal no-progress backoff active. AMA may still hand
 the PR to a hammer, but only its own enablement, structural-hold, and cap
 checks can establish whether that dispatch is possible.
 
+When the consecutive nonblocking cap refuses a claim, the stopped job and
+claim/consume result carry `finalCapResult` naming the operator's canonical
+rescue action, the source review head and finding accounting. The stop reason
+explicitly says no successor was dispatched. This evidence survives consumer
+failure after the terminal move; polling cannot create a second result from the
+removed pending job. It grants no live ownership or merge authority. Rescue
+revalidates head, CI, conflicts and all custody before choosing a successor.
+The canonical conflict route remains R10 (hammer); exhausted exact-head
+findings use R14 (final hammer). Settled-clean reviews keep their existing
+closure wake without another re-review.
+
 ### Important nuance
 
 `completed` does **not** mean:

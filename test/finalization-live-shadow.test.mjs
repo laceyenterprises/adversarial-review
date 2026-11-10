@@ -70,6 +70,129 @@ test('same-head polls retain the first revision anchor and expire missing-check 
   assert.equal(events.filter(e => e.type === 'revision_advanced').length, 1);
 });
 
+function ownerSnapshot(at, { finding = true, lease = {}, launch, remediator = false } = {}) {
+  const s = snapshot('head-a', at);
+  s.observations.reviews.value.blockingFindingCount = finding ? 1 : 0;
+  if (!finding) delete s.observations.reviews;
+  s.observations.leases = complete({ closer: remediator ? null : {
+    status: 'dispatched', headSha: 'head-a', updatedAt: at, ...lease,
+  } });
+  s.observations.launches = complete({ closer: launch ?? null });
+  if (remediator) s.observations.remediation = complete({
+    job: { status: 'in_progress', live: true, headSha: 'head-a',
+      deadlineAt: '2026-08-20T01:00:00Z' },
+  });
+  return s;
+}
+
+for (const finding of [true, false]) {
+  test(`live hammer waits ${finding ? 'over a blocking finding' : 'past verdict patience'}; v1 is unchanged`, t => {
+    const { record, shadowStore } = fixture(t);
+    const first = ownerSnapshot(now, { finding });
+    record(first, { action: 'hammer', reason: 'live-owner' });
+    const s = ownerSnapshot('2026-08-20T00:31:00Z', { finding });
+    const before = nextAction(s);
+    assert.equal(before.reason, 'live-owner');
+    const o = record(s, { action: 'hammer', reason: 'live-owner' });
+    assert.equal(o.v2Decision.kind, 'wait');
+    assert.match(o.v2Decision.reason, /live-owner.*hammer/);
+    assert.equal(o.v2Decision.nextAction, 'monitor-agent');
+    assert.equal(o.live.ownerState.live, true);
+    assert.deepEqual(o.v2Decision.liveOwner, o.live.ownerState);
+    assert.deepEqual(shadowStore.read().at(-1).live.ownerState, o.live.ownerState);
+    assert.equal(o.v1Action.kind, 'wait');
+    assert.deepEqual(nextAction(s), before);
+  });
+}
+
+for (const finding of [true, false]) {
+  for (const owner of ['absent', 'expired', 'stale', 'terminal', 'safety-refused']) {
+    test(`${owner} owner retains ${finding ? 'remediation' : 'patience escalation'}`, t => {
+      const { record } = fixture(t);
+      record(ownerSnapshot(now, { finding }));
+      const s = ownerSnapshot('2026-08-20T00:31:00Z', { finding });
+      if (owner === 'absent') s.observations.leases = complete({ closer: null });
+      if (owner === 'expired') s.observations.leases.value.closer.deadlineAt = s.observedAt;
+      if (owner === 'stale') s.observations.leases.value.closer.updatedAt = '2026-08-19T00:00:00Z';
+      if (['terminal', 'safety-refused'].includes(owner)) {
+        s.observations.launches = complete({ closer: { headSha: s.head, row: {
+          status: owner === 'terminal' ? 'completed' : 'blocked', terminal: true,
+          ...(owner === 'safety-refused' ? { last_admit_refusal_reason: 'safety-refused' } : {}),
+        }, retryChain: [] } });
+      }
+      const before = nextAction(s);
+      const o = record(s, { action: 'wait', reason: owner });
+      assert.equal(o.live.ownerState.live, false);
+      assert.equal(o.v2Decision.kind, finding ? 'remediate' : 'escalate');
+      assert.match(o.v2Decision.reason, finding ? /blocking review finding/ : /verdict patience expired/);
+      assert.deepEqual(nextAction(s), before);
+    });
+  }
+}
+
+test('live remediator owns the branch across head changes until its deadline', t => {
+  const { record } = fixture(t);
+  record(ownerSnapshot(now, { finding: false }));
+  const s = ownerSnapshot('2026-08-20T00:31:00Z', { finding: false, remediator: true });
+  s.observations.remediation.value.job.headSha = 'previous-head';
+  const o = record(s, { action: 'remediate', reason: 'live-owner' });
+  assert.equal(o.v2Decision.kind, 'wait');
+  assert.match(o.v2Decision.reason, /live-owner.*remediator/);
+  s.observedAt = '2026-08-20T01:00:00Z';
+  assert.equal(record(s).v2Decision.kind, 'escalate');
+});
+
+test('canonical remediator liveness without an explicit deadline is respected only while live', t => {
+  const { record } = fixture(t);
+  record(ownerSnapshot(now, { finding: false }));
+  const s = ownerSnapshot('2026-08-20T00:31:00Z', { finding: false, remediator: true });
+  delete s.observations.remediation.value.job.deadlineAt;
+  assert.equal(record(s).v2Decision.kind, 'wait');
+  s.observedAt = '2026-08-20T00:32:00Z';
+  s.observations.remediation.value.job.live = false;
+  assert.equal(record(s).v2Decision.kind, 'escalate');
+});
+
+test('live-owner wait does not reset the revision patience anchor', t => {
+  const { record } = fixture(t);
+  record(ownerSnapshot(now, { finding: false }));
+  const s = ownerSnapshot('2026-08-20T00:31:00Z', { finding: false });
+  assert.equal(record(s).v2Decision.kind, 'wait');
+  s.observedAt = '2026-08-20T00:32:00Z';
+  s.observations.leases = complete({ closer: null });
+  const o = record(s);
+  assert.equal(o.v2Decision.kind, 'escalate');
+  assert.match(o.v2Decision.reason, /verdict patience expired/);
+});
+
+test('running launch status cannot renew a stale or missing closer progress bound', t => {
+  const { record } = fixture(t);
+  record(ownerSnapshot(now, { finding: false }));
+  for (const updatedAt of ['2026-08-19T00:00:00Z', undefined]) {
+    const s = ownerSnapshot('2026-08-20T00:31:00Z', { finding: false,
+      lease: { updatedAt }, launch: { status: 'running', headSha: 'head-a' } });
+    if (updatedAt === undefined) delete s.observations.leases.value.closer.updatedAt;
+    // Frozen v1 keeps its existing launch decision. V2 additionally respects
+    // the lease/progress bound instead of renewing it from observation time.
+    assert.equal(nextAction(s).reason, 'live-owner');
+    const o = record(s);
+    assert.equal(o.live.ownerState.live, false);
+    assert.equal(o.v2Decision.kind, 'escalate');
+    assert.match(o.v2Decision.reason, /verdict patience expired/);
+  }
+});
+
+test('execution brake, operator holds and fold errors retain precedence over a live owner', t => {
+  const { record } = fixture(t);
+  for (const condition of ['brake', 'hold', 'error']) {
+    const s = ownerSnapshot(now);
+    if (condition === 'brake') s.observations.policy = complete({ autonomousMergeExecutionEnabled: false });
+    if (condition === 'hold') s.observations.pr.value.labels = ['no-merge-hold'];
+    if (condition === 'error') s.observations.checks = { state: 'error', value: null };
+    assert.equal(record(s).v2Decision.kind, 'escalate');
+  }
+});
+
 test('head moves retain budget history; repeated polls never become distinct finalizations', t => {
   const { record, shadowStore } = fixture(t);
   const s = snapshot();

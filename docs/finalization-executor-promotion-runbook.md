@@ -54,6 +54,24 @@ finalization. No new transport, daemon, routing selector or pager is introduced.
 
 ## Execution brake, replay and status
 
+V2 consumes live owner evidence from the same canonical next-action snapshot
+as v1. A live hammer or remediator selects `wait` / `monitor-agent`, with an
+explicit `live-owner` reason and the owner's deadline. Verdict/check patience
+does not preempt that owner. Lease expiry or a canonical terminal/refused owner
+restores the ordinary decision immediately; waiting never moves the revision's
+patience anchor. Holds, the execution brake and settled lifecycle evidence
+retain precedence.
+
+Organic shadow pairs include `live.ownerState` (liveness, actor, head, deadline,
+canonical reason, decision key and evidence references). A live-owner decision
+also includes `v2Decision.liveOwner`. Inspect these fields to distinguish owner
+waits from verdict waits. This is observation evidence, with no disposition or
+override change. Executor live-reader compositions can supply the same snapshot
+as `ownerSnapshot`; it must match the subject, current head and tick time.
+If a leased ledger read or execution fails, the deferred `refresh-evidence`
+outcome retains that snapshot when recomputing its diagnostic decision, so a
+known live owner remains a `wait` with `liveOwner` evidence.
+
 The existing autonomous execution brake intercepts dispatch, conflict/custody
 mutation, landing, close and PMA mutation. Observation/status continues. Explicit
 operator holds require authenticated release; head/code changes do not waive them.
@@ -540,3 +558,9 @@ whole lane, changes one reviewed selector, bounces/verifies registered system
 services, observes exact-head receipts and slot release before CI, rehearses
 rollback/reactivation and records explicit approval. Worker publication and PR
 merge do not complete operator approval. No new smoke/check or merge authority.
+
+## Change notes
+
+- [V2LIVEOWNER-01](changes/V2LIVEOWNER-01.md): v2 waits for a canonical live
+  closer or remediator owner before remediation or patience escalation;
+  shadow pairs retain the observed owner state.

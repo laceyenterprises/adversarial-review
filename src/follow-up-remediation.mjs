@@ -140,7 +140,7 @@ import { OAUTH_ENV_STRIP_LIST } from './secret-source/env.mjs';
 import { cloneRemediationWorkspace } from './remediation-workspace-clone.mjs';
 import { drainRemediationJobs } from './remediation-parallel-drain.mjs';
 import { DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS, REMEDIATION_MAX_CONCURRENT_JOBS_ENV, normalizeMaxConcurrentFollowUpJobs, resolveRemediationMaxConcurrentJobs } from './remediation-concurrency.mjs';
-import { holdClaimedJobForCappedRemediator, requeueClaimedFollowUpJobBeforeSpawn, requeueClaimedJobForConflictedBaseProbe } from './remediation-claimed-requeue.mjs';
+import { holdClaimedJobForCappedRemediator, holdClaimedJobForRefusedSubject, requeueClaimedFollowUpJobBeforeSpawn, requeueClaimedJobForConflictedBaseProbe } from './remediation-claimed-requeue.mjs';
 import {
   loadRoleConfig,
   resetRoleConfigCache,
@@ -3348,6 +3348,7 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
         rootDir, job: claimed.job, jobPath: claimed.jobPath, workerClass, now, log });
       if (ownBuilderStop) return ownBuilderStop;
     }
+    const subjectHold = holdClaimedJobForRefusedSubject({ rootDir, claimed, routing: remediatorRouting, env: jobEnv, delayedPendingPaths, log }); if (subjectHold) return subjectHold;
     if (remediatorRouting.pooled || !['codex', 'remediator-codex', 'remediator-codex-corp'].includes(workerClass)) {
       delete jobEnv.CODEX_BROKER_PROVIDER;
     }

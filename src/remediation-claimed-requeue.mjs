@@ -3,6 +3,19 @@ import { basename, join } from 'node:path';
 import { getFollowUpJobDir, requeueInProgressFollowUpJobForRetry, writeFollowUpJob } from './follow-up-jobs.mjs';
 import { DEFAULT_REMEDIATOR_ENV } from './remediation-dispatch-mode.mjs';
 import { MAX_QUOTA_HOLD_WINDOW_MS } from './remediation-quota-evidence.mjs';
+import { remediationSubjectRefusal } from './remediation-worker-class-fallback.mjs';
+
+// Revalidate the original subject after an assignment replaces the resolved actor.
+export function holdClaimedJobForRefusedSubject({
+  rootDir, claimed, routing, env, delayedPendingPaths, log,
+}) {
+  const reason = remediationSubjectRefusal(claimed.job, routing.workerClass, { env });
+  if (!reason) return null;
+  return holdClaimedJobForCappedRemediator({
+    rootDir, jobPath: claimed.jobPath, heldAt: claimed.job.claimedAt,
+    routing: { ...routing, hold: true, reason, capSource: reason }, delayedPendingPaths, log,
+  });
+}
 
 // REMCONFLICT-01: transient capability probes retry before worker spawn on the
 // shared bounded budget, preserving an explicit operator retrigger's authority.

@@ -716,11 +716,13 @@ block this registered remediation route. The paired #10117 release and validatio
 requirements are recorded in the [SEV/RCA](INCIDENT-2026-11-02-gemini-remediation-builder-class.md).
 
 Grok remediation is an opt-in account-bound HQ lane: enable `grok.enabled`
-and `grok.remediator.enabled`, deploy the imported `remediator-grok` class,
-then select it through `roles.remediator` or the fallback order (for example
-`[gemini, remediator-grok, claude-code]`). Native orchestration hands it to
-reachable HQ dispatch; an unreachable HQ root refuses the lane. There is no
-direct CLI fallback. Unknown builders and Grok-family builders cannot use it.
+and `grok.remediator.enabled`, import and enable `remediator-grok`, then
+select it through `roles.remediator` or the fallback order (for example
+`[gemini, remediator-grok, claude-code]`). Both flags default off; GRK-16 owns
+activation and live MODEL-TURN evidence. Local and native orchestration hand
+the lane to reachable HQ dispatch; an unreachable HQ root refuses it. There
+is no direct CLI fallback. Unknown builders and Grok-family builders cannot
+use it, including after assignment handoffs or API-key account selection.
 A Grok pin leaves Grok-built PRs on their `remediator-codex` default route;
 fallback candidates retain the subject refusal after account selection.
 Unpooled Grok quota holds supply the same job-local reset evidence as other

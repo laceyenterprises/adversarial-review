@@ -301,6 +301,44 @@ test('ITP-14 pooled routing preserves the declared infrastructure fallback', asy
   assert.equal(result.reason, 'infrastructure-fallback');
 });
 
+for (const [builderTag, enabled] of [['grok', true], ['grok-api', true], ['grok-remediation', true], ['codex', false]]) {
+  test(`final assignment handoff refuses Grok for builder=${builderTag}, enabled=${enabled}`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'grok-handoff-'));
+    const overrides = { AGENT_OS_CONFIG_PATH: '/dev/null', HQ_ROOT: rootDir,
+      AGENT_OS_ROLES_REMEDIATOR: 'adversarial', ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: undefined,
+      AGENT_OS_GROK_ENABLED: String(enabled), AGENT_OS_GROK_REMEDIATOR_ENABLED: String(enabled) };
+    const previous = Object.fromEntries(Object.keys(overrides).map(key => [key, process.env[key]]));
+    const apply = values => { for (const [key, value] of Object.entries(values)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    } };
+    apply(overrides);
+    t.after(() => { apply(previous); rmSync(rootDir, { recursive: true, force: true }); });
+    createFollowUpJob({ rootDir, repo: 'sample/project', prNumber: 42, builderTag,
+      branch: 'fixture/remediation', reviewerModel: 'gemini', critical: true,
+      reviewBody: '## Verdict\nRequest changes', reviewPostedAt: '2026-10-19T00:00:00Z' });
+    const result = await consumeNextFollowUpJob({ rootDir,
+      promptTemplate: 'Synthetic remediation prompt.',
+      guardStackedBaseImpl: async () => null, resolvePRLifecycleImpl: async () => null,
+      ensureWorkerRegistryReadyImpl: async () => {},
+      resolveRemediationWorkerClassImpl: async () => ({
+        workerClass: 'remediator-claude', pooled: true, hold: false }),
+      resolveOsgRemediatorRouteImpl: async () => ({
+        workerClass: 'remediator-grok', pooled: true, hold: false }),
+      execFileImpl: async () => assert.fail('refused assignment reached command or dispatch'),
+      spawnImpl: () => assert.fail('refused assignment reached local spawn'),
+      postCommentImpl: async () => {}, deliverAlertImpl: async () => {},
+      log: { info() {}, warn() {}, log() {}, error() {} } });
+    assert.equal(result.consumed, false);
+    if (['grok-api', 'grok-remediation'].includes(builderTag)) {
+      assert.match(result.reason, /cannot remediate its own PR/);
+    } else {
+      assert.equal(result.reason, 'remediator-capped-hold');
+      assert.equal(result.job.remediationPlan.retryHistory.at(-1).retryMetadata.capSource,
+        enabled ? 'grok-acting-lane-unavailable' : 'grok-remediator-disabled');
+    }
+  });
+}
+
 for (const resolver of ['missing', 'null', 'undefined']) {
   for (const laterFallback of [false, true]) {
     test(`unresolved unpooled fallback is attributed with resolver=${resolver}, laterFallback=${laterFallback}`, async () => {

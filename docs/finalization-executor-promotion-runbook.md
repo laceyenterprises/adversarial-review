@@ -68,6 +68,9 @@ also includes `v2Decision.liveOwner`. Inspect these fields to distinguish owner
 waits from verdict waits. This is observation evidence, with no disposition or
 override change. Executor live-reader compositions can supply the same snapshot
 as `ownerSnapshot`; it must match the subject, current head and tick time.
+If a leased ledger read or execution fails, the deferred `refresh-evidence`
+outcome retains that snapshot when recomputing its diagnostic decision, so a
+known live owner remains a `wait` with `liveOwner` evidence.
 
 The existing autonomous execution brake intercepts dispatch, conflict/custody
 mutation, landing, close and PMA mutation. Observation/status continues. Explicit

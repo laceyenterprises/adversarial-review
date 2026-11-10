@@ -7,6 +7,11 @@ closer or remediator owner. This prevents duplicate remediation and premature
 patience escalation. Expired/stale leases and terminal/refused owners retain
 the existing decisions. V1 and shadow disposition rules are unchanged.
 
+Final comment-only remediation preserves the already-read canonical owner
+snapshot in the leased execution error fallback. Deferred outcomes now retain
+the live-owner wait instead of proposing remediation or patience escalation.
+The promotion runbook documents this diagnostic behavior.
+
 ## Interface changes
 
 V2 eligibility and shadow observation accept an optional `ownerSnapshot`.
@@ -22,6 +27,18 @@ the owner projection and its decision dependencies. No SQL migration, configurat
 disposition, override, live activation or v1 execution change is introduced.
 
 ## Verification
+
+### Final comment-only remediation
+
+Final remediation: four new offline regressions first reproduced the lost-owner
+decision on leased-read and execution errors, then passed for closer and
+remediator owners after the fix. Targeted executor, executor-lease and eligibility
+suites passed (57 tests); `npm run lint` passed with zero errors and existing
+warnings, `npm run typecheck:contracts` passed, and
+`bash demo/research-finding-walkthrough.sh` passed with three byte-stable deliveries.
+The full suite remains delegated to PR-head CI.
+
+### Original implementation
 
 All validation used bounded commands. Test commands used the required netguard
 PATH and `NETGUARD_LOG` prefix; fixtures were synthetic and offline.

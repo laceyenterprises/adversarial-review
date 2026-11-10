@@ -472,10 +472,10 @@ export function createFinalizationExecutor({
       });
     }
 
+    const ownerSnapshot = live?.ownerSnapshot;
     try {
       const leasedEvents = ledgerStore.read(subject);
       let leasedState = fold(leasedEvents);
-      const ownerSnapshot = live?.ownerSnapshot;
       let decision = eligible(leasedState, policy, { observedAt, load, ownerSnapshot });
       if (!leasedState.workflow.anchors[decision.episode] && decision.anchorAt) {
         effects.emit(subjectKey, observedAt, 'decision_anchored', {
@@ -495,7 +495,7 @@ export function createFinalizationExecutor({
         foldedState: leasedState, token: executionToken,
       });
     } catch (error) {
-      return outcome(subjectKey, eligible(state, policy, { observedAt, load }), {
+      return outcome(subjectKey, eligible(state, policy, { observedAt, load, ownerSnapshot }), {
         status: 'deferred', action: 'refresh-evidence', observedAt, reason: 'leased evidence unavailable', detail: error.message,
       });
     } finally {

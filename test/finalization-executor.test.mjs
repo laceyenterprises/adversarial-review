@@ -74,6 +74,64 @@ test('executor waits for a canonical live closer without dispatching or paging',
   assert.equal(h.state().workflow.escalation, null);
 });
 
+for (const owner of ['closer', 'remediator']) {
+  for (const failure of ['leased-read', 'execute']) {
+    test(`${failure} failure preserves the live ${owner} in the deferred decision`, async t => {
+      const effects = [];
+      const h = harness(t, {
+        remediationSurface: { dispatch: async () => { effects.push('dispatch'); } },
+        pageSurface: { deliver: async () => { effects.push('page'); } },
+      });
+      h.append('revision_advanced', { revisionRef: 'head-B' }, 1);
+      h.append('provenance_observed', { revisionRef: 'head-B', builderBoundary: 'fixture:builder',
+        primaryChange: 'preserved', hammerCommits: false, mergeMain: false }, 1);
+      h.append('checks_settled', { revisionRef: 'head-B', conclusion: 'success', requiredChecksPresent: true }, 1);
+      if (owner === 'closer') {
+        h.append('verdict_recorded', { revisionRef: 'head-B', verdictKind: 'request-changes',
+          stageId: 'review', role: 'independent' }, 1);
+      }
+      assert.equal(eligible(h.state(), { verdictPatienceMs: 1000 }, { observedAt: at(2000), load }).kind,
+        owner === 'closer' ? 'remediate' : 'escalate');
+      const ownerSnapshot = { subjectKey: subject.subjectExternalId, head: 'head-B', observedAt: at(2000),
+        observations: {
+          pr: { state: 'complete', value: { state: 'open', headSha: 'head-B' } },
+          leases: { state: 'complete', value: { closer: owner === 'closer' ? {
+            status: 'dispatched', headSha: 'head-B', updatedAt: at(0), deadlineAt: at(3000),
+          } : null } },
+          launches: { state: 'complete', value: { closer: null } },
+          remediation: { state: 'complete', value: { job: owner === 'remediator' ? {
+            status: 'in_progress', live: true, headSha: 'head-B', deadlineAt: at(3000),
+          } : null } },
+        } };
+      h.setLive({ state: 'open', head: 'head-B', sourceRef: 'fixture:live', ownerSnapshot });
+      const expected = eligible(h.state(), { verdictPatienceMs: 1000 },
+        { observedAt: at(2000), load, ownerSnapshot });
+      assert.equal(expected.kind, 'wait');
+      assert.ok(expected.liveOwner);
+      const store = failure === 'leased-read' ? h.ledgerStore : h.leaseStore;
+      const read = store.read;
+      let reads = 0;
+      store.read = (...args) => {
+        if (failure === 'execute' || ++reads === 2) throw Error(`fixture:${failure}`);
+        return read(...args);
+      };
+      let result;
+      try { result = await h.tick(2000); } finally { store.read = read; }
+      assert.equal(result.status, 'deferred');
+      assert.equal(result.action, 'refresh-evidence');
+      assert.equal(result.reason, 'leased evidence unavailable');
+      assert.equal(result.detail, `fixture:${failure}`);
+      assert.equal(result.decision.kind, 'wait');
+      assert.deepEqual(result.decision.liveOwner, expected.liveOwner);
+      assert.equal(result.decision.deadline, at(3000));
+      assert.deepEqual(effects, []);
+      assert.equal(h.calls.length, 0);
+      assert.equal(h.state().workflow.escalation, null);
+      assert.equal(h.leaseStore.read(subject), null);
+    });
+  }
+}
+
 test('owner evidence cannot suppress escalation after expiry or from a foreign/stale snapshot', async t => {
   const h = harness(t);
   // A new revision deliberately has no verdict, and its patience is expired.

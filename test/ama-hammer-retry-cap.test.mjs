@@ -568,7 +568,26 @@ test('OVERLOADDEFER-01: real closer dispatch backs off, retries and retains owne
     assert.equal(receipt.deferralCount, count);
     assert.equal(readHammerStopForHead({ hqRoot: join(rootDir, 'hq-root'), ...identity }), null);
     if (count < 5) {
-      assert.equal((await run(receipt.nextRetryAt - Date.parse(at(0)) / 1000)).dispatched, true);
+      const retryAt = receipt.nextRetryAt - Date.parse(at(0)) / 1000;
+      assert.equal(retryAt - now, 30 * 2 ** (count - 1));
+      const parkedLedger = readHammerRetryCapLedger(rootDir, identity);
+      const parkedOwner = readAmaCloserLease(rootDir, identity);
+      const pagesBefore = pages;
+      // Replay the same audit through the public dispatcher, including enough
+      // polls to exhaust the cap if each observation incorrectly added debt.
+      for (const seconds of [1, 5, 10, 15, 20, retryAt - now - 1]) {
+        const polled = await run(now + seconds);
+        assert.equal(polled.dispatched, false, JSON.stringify(polled));
+        assert.equal(polled.reason, 'overload-deferred');
+        assert.equal(polled.recoveryWait, true);
+        assert.equal(polled.needsOperator, false);
+        assert.deepEqual(readHammerRetryCapLedger(rootDir, identity), parkedLedger,
+          'repeat observations must preserve debt, retry deadline and refunds');
+        assert.deepEqual(readAmaCloserLease(rootDir, identity), parkedOwner);
+        assert.equal(launches, count, 'no replacement before the retry deadline');
+        assert.equal(pages, pagesBefore, 'repeat observations must not page');
+      }
+      assert.equal((await run(retryAt)).dispatched, true);
     } else {
       assert.equal(deferred.needsOperator, true);
       assert.equal((await run(now + 10000)).dispatched, false);

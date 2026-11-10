@@ -87,7 +87,9 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
   if (prior && !(authoritativeFence && prior.outcome === 'deferred'
     && HAMMER_RETRYABLE_READ_OUTCOMES.has(prior.reason))) {
     if (final === true && prior.outcome === 'failed-without-merge') {
-      reportHammerProgress('terminal-stop', { env, reason: prior.reason, final });
+      // Audit dedupe preserves the earlier observation; the run's final
+      // progress receipt must describe the actual exit.
+      recordPhaseAndFinal();
     }
     return existing;
   }

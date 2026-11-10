@@ -1,14 +1,5 @@
 # Adversarial Review
 
-Helper load timeouts retain the closer through `overload-deferred` audits and
-retryable lease release. The per-PR retry ledger keeps the same owner's debt
-across replacement launches, backs off and stops automatic replay after five
-deferrals. One durable host overload alert is shared across PRs. Merge policy,
-strict mode and authoritative refusals remain unchanged. After deployment and
-separately authorized activation, SRE observes natural helper deferrals
-completing later and terminal timeout failures approaching zero; see
-[the deferral contract and observation procedure](docs/changes/OVERLOADDEFER-01.md).
-
 ```
            /\                                                 /\
  _         )( ______________________   ______________________ )(         _

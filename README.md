@@ -2976,7 +2976,7 @@ fallthrough/hold and OS-mode comparison; offline tests establish no live recover
 
 ### explicit-review-intent
 
-One durable receipt per request; only a pending exact-head receipt admits one dispatch. Refused receipts retain visible-notification debt across restart. Consumed requests are never rearmed. The existing rereview dispatch bound is 900 seconds by default.
+One durable receipt per request; only a pending exact-head receipt admits one dispatch. Capacity, credentials and queue-depth holds retain pending intent indefinitely. The nominal 900-second threshold produces one waiting notice, never expiry. Refused receipts retain visible-notification debt across restart. Only a positively unstarted launch may return its own consumed receipt to pending under the session CAS.
 
 ```mermaid
 stateDiagram-v2
@@ -2986,9 +2986,10 @@ stateDiagram-v2
     state "coalesced" as s3
     [*] --> s0: explicit-review-intent.01 accepted exact-head request
     s0 --> s1: explicit-review-intent.02 claim and session CAS immediately before dispatch
-    s0 --> s2: explicit-review-intent.03 head changed, terminal PR, ceiling or dispatch deadline
-    [*] --> s3: explicit-review-intent.04 additional request joins original pending head without extending deadline
-    s1 --> s2: explicit-review-intent.05 runtime dispatch fails visibly without rearming
+    s0 --> s2: explicit-review-intent.03 head changed, terminal PR or ceiling
+    [*] --> s3: explicit-review-intent.04 additional request joins original pending head without changing waiting threshold
+    s1 --> s2: explicit-review-intent.05 runtime dispatch fails after start
+    s1 --> s0: explicit-review-intent.06 positively unstarted launch returns its own intent under session CAS
     s1 --> [*]
     s2 --> [*]
     s3 --> [*]
@@ -4720,15 +4721,22 @@ An accepted `retrigger-review`, rescue `rereview`, or remediation request
 records a durable exact-head intent. It permits one fresh review even when
 the head already has a completed review, subject to existing rereview ceilings,
 reviewer claims and head leases. Implicit repeats remain deduplicated.
-Intents survive restart and expire under the existing rereview dispatch wait
-bound, **900 seconds by default**. Ceiling, head-change and deadline refusals
-receive a visible PR explanation. A fresh review records an observed live-pack
-waiver in its body.
+Intents survive restart and admission holds regardless of age. The load-scaled
+waiting threshold, **900 seconds nominal**, produces one informational notice,
+never an expiry. Ceiling, head-change and terminal-PR refusals receive a visible
+explanation. A positively unstarted launch returns only its own consumed intent
+under the session CAS without charging an attempt. A fresh review records an
+observed live-pack waiver in its body. Queued/running requests dismiss strictly
+superseded configured bot reviews after live verification. Successful checks
+are memoized per request/head in a bounded process-local cache; unchanged live
+probes and failed dismissal retries run at most once per five minutes. New
+requests, changed discovery heads, eviction and restart permit fresh checks.
 
 Deploy with the normal watcher restart. The disposable refusal smoke and
 targeted watcher tests cover this lifecycle. SRE then retains the next organic
-unchanged-head request's fresh-review receipt within the dispatch bound and the
-`explicit re-review intent consumed` log, or its visible refusal. No worker
+unchanged-head request's receipt surviving admission holds and eventually
+dispatching, plus its `explicit re-review intent consumed` log or visible
+head/terminal/ceiling refusal. No worker
 live action is needed. See [the state machine](docs/STATE-MACHINE.md) and
 [store contract](docs/data-model/explicit-review-intents.md).
 

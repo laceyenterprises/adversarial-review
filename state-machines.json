@@ -394,7 +394,7 @@
     {
       "id": "explicit-review-intent",
       "owner": "watcher review dispatch",
-      "description": "One durable receipt per request; only a pending exact-head receipt admits one dispatch. Refused receipts retain visible-notification debt across restart. Consumed requests are never rearmed. The existing rereview dispatch bound is 900 seconds by default.",
+      "description": "One durable receipt per request; only a pending exact-head receipt admits one dispatch. Capacity, credentials and queue-depth holds retain pending intent indefinitely. The nominal 900-second threshold produces one waiting notice, never expiry. Refused receipts retain visible-notification debt across restart. Only a positively unstarted launch may return its own consumed receipt to pending under the session CAS.",
       "codeSources": [
         "src/explicit-review-intent.mjs",
         "src/review-state.mjs",
@@ -406,8 +406,9 @@
           "terminal": false,
           "exitOwner": "watcher review dispatch",
           "maxDurationSeconds": 900,
-          "overdueRecipient": "requester via visible PR refusal",
-          "enforcement": "present"
+          "overdueRecipient": "requester via informational waiting notice",
+          "enforcement": "missing",
+          "deadEndEvidence": "Admission holds intentionally have no terminal age bound; maxDurationSeconds is the nominal waiting-notice threshold, not a refusal deadline."
         },
         {
           "name": "consumed",
@@ -441,21 +442,28 @@
           "id": "explicit-review-intent.03",
           "from": "pending",
           "to": "refused",
-          "trigger": "head changed, terminal PR, ceiling or dispatch deadline",
+          "trigger": "head changed, terminal PR or ceiling",
           "codeSource": "src/explicit-review-intent.mjs"
         },
         {
           "id": "explicit-review-intent.04",
           "from": "[*]",
           "to": "coalesced",
-          "trigger": "additional request joins original pending head without extending deadline",
+          "trigger": "additional request joins original pending head without changing waiting threshold",
           "codeSource": "src/explicit-review-intent.mjs"
         },
         {
           "id": "explicit-review-intent.05",
           "from": "consumed",
           "to": "refused",
-          "trigger": "runtime dispatch fails visibly without rearming",
+          "trigger": "runtime dispatch fails after start",
+          "codeSource": "src/explicit-review-intent.mjs"
+        },
+        {
+          "id": "explicit-review-intent.06",
+          "from": "consumed",
+          "to": "pending",
+          "trigger": "positively unstarted launch returns its own intent under session CAS",
           "codeSource": "src/explicit-review-intent.mjs"
         }
       ]
@@ -1799,7 +1807,7 @@
     }
   ],
   "sourceProjectionSha256": {
-    "src/explicit-review-intent.mjs": "81ecd8080cdfc99417806579d80f75cfc1926eb21bc247ea3ea618bd539b3d6e",
+    "src/explicit-review-intent.mjs": "0f556ec539e2d96e299e97746fbc80adf0f074d721a9c0f254eb7a4584d63d93",
     "src/follow-up-operator-label.mjs": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "src/closer-head-rereview-decline.mjs": "21b6becc81f55d341b989d878161c82ad25b25a1ab1e8136c8cdf264315882b8",
     "src/remediation-ci-infrastructure.mjs": "0473feae0f4eefa22a4bcd6474788963c9fa95f11a601fdd6340da1599841568",
@@ -1809,7 +1817,7 @@
     "src/ama/pre-receipt-intent.mjs": "7a41d9bcd120a0f90bf1187edcd2882b8e7199d65437013be8ad9742e350455c",
     "src/follow-up-branch.mjs": "637f2a18c5fb2a89d2d02c98d80587a713a188c10d70891941d77df847579a8d",
     "src/posted-review-head-repair.mjs": "ce761260224b7a82d152e5b289e8967bbf54026c427a17bdb5cff0a6556ff7d6",
-    "src/pollonce-phases.mjs": "63928dc55cc31ccf48009bdde1d6fed8e1b6b1c134a3a0ea9268eb1c9d22a8e3",
+    "src/pollonce-phases.mjs": "2118d7774037014dd835858eca3c7051f276dc118c02ce1c0acde67e83f53019",
     "src/review-statuses.mjs": "e5b4f877397ccae443c0ea47babdad7c83d71b6f474a31ad92130b88382f6a7b",
     "src/adapters/reviewer-runtime/agent-os-hq/index.mjs": "8ecf105dc9f46ac09f6a8fb369c14ff7e9cfd1bc17a46da4d87fa146a1bf4d2d",
     "src/adapters/reviewer-runtime/agent-runtime/index.mjs": "37a25e62f889f9d87e83a20495a9a3baef75f53db163ef6ed7638f7d6ac09f82",
@@ -1824,9 +1832,9 @@
     "src/follow-up-remediation.mjs": "a6bfbec3da209969aa4b50235fca4936f3b384e5f4ae5f9843fbbea7fd22275f",
     "src/orphan-post-reconcile.mjs": "a4f21f7764d361da91bfa699ad5261e41a2f8348f13c6330ea113b3ae4dad826",
     "src/posted-review-row.mjs": "ae3be33e5c3812b6d421eae1fa19311767e966681da0f8a997ae93127a1f3a07",
-    "src/review-state-db.mjs": "97959038d5e497b70eee07af65d2589f1c706f2ffb16648064317c7d5bf3d743",
+    "src/review-state-db.mjs": "c6cf6b7df98d7c89ef461d163a3ab857bfe67e6866aa35a751e0641c90415413",
     "src/review-state-statements.mjs": "132eb6779846f2ac1db0af373b3b7958a70e2388bc26a640f4c8018484f893fb",
-    "src/review-state.mjs": "14a346d9eb6af8101d68c164f0e2e4e07ea23aa6a0dafa3dbabd14feda933c1b",
+    "src/review-state.mjs": "b1195c974c1a09dcddf75773faf735aff4dd5b32d21b57809f9d7739ed7d623b",
     "src/reviewer-ci-admission.mjs": "b24995f796ae6af2e665d93a30c954b1c78fc59ce62e88074cfb69b965837bdf",
     "src/reviewer-reattach.mjs": "c52dcf0ea186716725d5916c0be5de3619cd44e011c5c06bf4999877369ebd39",
     "src/reviewer.mjs": "10b8e5b50611cebbcffabc5e5709ffcbf33ed856f469c2a946ed14d72c775e88",
@@ -1840,7 +1848,7 @@
   "ownershipUnreadableRecovery": "OWNERUNREADABLE-02: snapshot-only closure reselection and shadow resolution read lease/receipt placeholders through the bounded ledger reader. retryChainReadState distinguishes unresolved, complete and failed reads; unresolved evidence never proves absence or real unreadability. Terminal roots with empty chains reach R08; live retries retain R03 and errors/partial reads retain R04. Synthetic fixtures pin one deduplicated wake. Post-merge SRE checks no terminal launch stays in R04 retry-chain-unreadable more than one wake past its deadline (SEVDOCS-335). OWNERUNREADABLE-01: closure refresh replaces unreadable closer-lease placeholders and failed launch observations; up to three reads use 100/200 ms backoff within one five-second deadline. A terminal root with a complete empty retry chain resolves ownership. After the anchored recovery deadline, a terminal lease and readable terminal launch return a historically validated stale head to R08 hammer dispatch without re-review. Live or parked retries, unknown status, unreadable evidence, holds and caps retain ownership fences. Skipped unreadable wakes remain retryable. Existing closure-owner.04 dispatch and merge authority are unchanged.",
   "recoveryDeadlines": "RECOVERYDEADLINE-01: every closure-recovery deadline acts at expiry: readable ownerless expired leases/remote-unconfirmed receipts select capped leased hammer admission; input/structural/read failures, stops, caps, deferrals and refused dispatches escalate once per head/row/action/actor/reason with evidence. Unreadable ownership never licenses a duplicate. SRE observes no open recovery deadline more than one wake overdue after normal deployment; SEVDOCS-333. Final-round observation retains the recovery clock without a duplicate deadline page; proven live closer launches retain their existing running notices.",
   "reviewerSizeHandoff": "SIZEOWNER-02: terminal size failures retain the head/session CAS and existing failed state. Reviewer capacity releases after that CAS before awaited handoff while the per-head dispatch lease stays held. Two durable head reservations per PR, including legacy and unconfirmed records, cap shrink-diff dispatches across head churn; exhaustion persists shrink-diff-ceiling-exhausted and alerts. Transient transport retries use one key at most three times within one minute, with no later automatic resubmission. Head-bound HQ result evidence and final bounded stderr facts feed the untrusted-data brief. Same-head claim mismatch logs without replacing ownership; direct invocations alert. No lifecycle states, merge authority or smoke promises change. REVIEWLARGE-01: initial prompt-too-large failures use bounded pending-upstream/same-head infrastructure recovery with a dispatched-head/session CAS; raw-first in-attempt recovery defers summarisation I/O (64 KiB diff floor), and only a final chunk size refusal produces terminal chunk-budget evidence and the existing handoff. Manifest disclosure is validated inside Summary before preservation; source projections and smoke steps are unchanged. Base-pinned generated declarations, exact move/split hashes, chunk blocking aggregation and posted scope disclosure have offline fixtures in reviewer-large-diff, reviewer-size-owner and reviewer-oversized-delivery. No new smoke step or live action.",
-  "explicitReviewIntent": "RETRIGGERDEDUP-01: accepted label, rescue and remediation rereviews atomically persist a request receipt with the review reset. Pending receipts are scoped to repository, PR and exact head and coalesce without extending the dispatch deadline. Under the existing claim and head lease, pending becomes consumed once at dispatch; ordinary rereview budgets count that attempt. Head movement, terminal PR, ceiling exhaustion or the existing rereview wait deadline (default 900 seconds) moves pending to refused. Refusal notification debt persists until a visible comment succeeds. Same-head implicit redispatch stays deduplicated; row repair cannot restore posted over pending intent.",
+  "explicitReviewIntent": "REREVIEWDEFER-01: accepted exact-head requests coalesce without changing their waiting-notice threshold. Admission holds retain pending intent indefinitely; the nominal 900 seconds triggers one informational notice. Head movement, terminal PR and exhausted ceilings refuse pending intent. Dispatch consumes once under the existing claim/head/session CAS; only a positively unstarted launch returns its own consumed receipt without charging an attempt. Superseded bot dismissal is memoized per request/head in a bounded process-local cache; unchanged live probes and failed dismissal retries run at most once per five minutes. New requests, changed discovery heads, eviction and restart permit fresh checks. Periodic live probes retain moved/closed settlement during holds. Merge authority is unchanged.",
   "repositoryRenameContinuity": "REPORENAME-01: stable GitHub repository IDs are backfilled from existing listings; known IDs under new names rekey local service state behind shared/exclusive owner flocks, one audited transaction per database and a recoverable file journal. Pending migrations or authoritative payload observations fence intake until replay completes. Review/pass/job/session/lease IDs, attempts and existing lifecycle states remain stable; reused names with new IDs remain distinct. Local attestation lookups move while signed evidence remains intact; HQ Control Plane identity continuity belongs to REPORENAME-02. Scoped synthetic rename, crash, duplicate-claim and lease fixtures establish source behavior only. After normal deployment of all state writers and the separately operator-approved rename, SRE retains one rename audit, unchanged open-PR review/remediation/closer ownership without another review, and normal first review on the next natural new PR. No new smoke step, check, live rename or restart is authorized.",
   "hammerQuotaScratchRecovery": "HAMSCRATCHRESUME-01: before quota retry enqueue, missing hammer phase procedures cancel the parent with quota-resume-phase-inputs-missing and a single audit. AMA owns one normal fresh dispatch with new scratch and lease. Public dispatch reads include latest worker_killed_cause and last_admit_refusal_reason so pending quota recovery retains scratch. Public retry edges settle each historical quota intent when its successor is published; unresolved quota-killed leaves retain ownership. Named missing-input terminal outcomes resolve intent despite retained quota metadata. Omitted/null single-attempt retry chains permit launch-bound audit recovery unless explicitly unreadable. Existing lifecycle enum values and smoke commands remain unchanged. After both repositories deploy and owners reload normally, SRE passively observes the next natural quota kill/resume closing or being replaced once by a closer that closes without dispatch-phase-scripts-missing. No synthetic live dispatch, ledger mutation, cleanup or restart is authorized.",
   "hammerOutcomeProgress": "HAMPROGRESS-01: run-bound closer phase receipts feed supervisor outcome, wall and token limits. HAMMERNOPROGRESS-01: seven first-write-only run-bound receipts: verify-head, remediation-committed, validation-passed, validation-failed, remediation-pushed, merge-attempted, terminal-stop. Commit ancestry above the dispatch target (legacy fallback: reviewed SHA) and advisory completed-command signals earn finite load-aware outcome slices; validation receipts do not prove tests ran, and timeouts remain unknown. Nominal outcome/exit windows are 3600/60 active seconds; final-stop grace expiry retains closer-terminal:<reason>. Wall/token ceilings and attempt charging are unchanged. One-shot and persistent process census deadlines scale with load; unavailable observations refuse merge; merge-lease release and acquisition classify them as controller-observation-unavailable separately from controller-owner-lost (VERIFYHEADTRANSIENT-01). Other admission callers retain generic refusals. SRE owns twelve hours of natural-traffic acceptance after ordinary deployment. Supervisor owns outcome/wall/token stops and existing terminal drain; lifetime charges remain. No merge gate or lifecycle state changes. Deploy the seven-kind supervisor consumer before or together with the producer/schema; older-consumer unknown-name tolerance is unverified; passively observe natural named stops, released custody and replacement under existing ceilings. Existing smoke promises unchanged. CLOSERCIWAIT-01: publication of a changed head uses the existing bounded, load-scaled CI wait before the exact-head predicate, yielding then reacquiring the merge lease. Phase-established heads are exported; post-publication verification and later procedure failures name their failing step. No lifecycle enum, cap, attestation or merge predicate changes. After normal deployment, SRE observes an organic remediation push reaching merge in the same closer run; source publication is not a live receipt. Existing smoke promises and commands remain unchanged. Final remediation preserves the settled exact-head lease and consumed retry budget through the caller predicate and final live gate; only a new merge-phase rebase regenerates internal audit/predicate evidence. CI-only waits defer protection admission to the full predicate, pending-only expiry remains deferred, and exhausted transport probes retain merge-lease-probe-failed. Publication exports the exact-head audit body for claim binding. Lifecycle states, allowances and smoke commands remain unchanged.",

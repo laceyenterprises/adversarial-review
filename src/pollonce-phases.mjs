@@ -14,6 +14,7 @@ import { meteredExecFile } from './metered-gh.mjs';
 import {
   pendingExplicitReviewIntent, reconcileExplicitReviewIntents, explicitReviewRefusalBody,
   settleExplicitReviewIntent, consumeExplicitReviewIntent, refuseFailedExplicitReviewDispatch,
+  requeueUnstartedExplicitReviewDispatch,
 } from './explicit-review-intent.mjs';
 import { maybeDeliverOperatorDecisionNotice } from './operator-decision-notice.mjs';
 import { readAmaCloserLease } from './ama/closer-lease.mjs';
@@ -24,6 +25,7 @@ import { closeEmptyPullRequest } from './empty-pr-close.mjs';
 import { routeCappedReviewToClosure, hammerHandoffReviewBypass, resolveMaxRemediationRounds } from './hamclose-review-admission.mjs';
 import { recoverOwnerlessReview, recoverOverdueOwnership } from './ownerproof-review-recovery.mjs';
 import { isOperatorHeld } from './operator-hold-labels.mjs';
+import { dismissSupersededReviewsForQueuedRereview } from './queued-review-dismissal.mjs';
 import { summarizeChecksConclusion } from './checks-summary.mjs';
 // HELDHEAD-01: admit withheld-head recovery without interrupting other subjects.
 // ARC-18: extracted per-PR processing phase of pollOnce (watcher.mjs).
@@ -827,10 +829,17 @@ export async function processReviewSubject(entry, ctx) {
       const explicitIntentForHead = () => pendingExplicitReviewIntent(db, {
         repo: repoPath, prNumber, headSha: subject.headSha,
       });
-      // Observe the deadline even while every reviewer seat/credential is held.
-      // No per-tick GitHub read: head movement is reconciled against the live
-      // freshness read when dispatch is evaluated, or by the deadline.
+      // Observe waiting while seats/credentials hold. Head movement is settled
+      // against a live read, since discovery can predate the accepted request.
       await reconcileExplicitRequests(null, Boolean(subject.terminal));
+      if (effectiveDomainId === CODE_PR_DOMAIN_ID) {
+        await dismissSupersededReviewsForQueuedRereview(db, {
+          repo: repoPath, prNumber, headSha: subject.headSha,
+          terminal: Boolean(subject.terminal), execFileImpl: execFileAsync,
+          onLiveHead: fresh => reconcileExplicitRequests(
+            fresh.headRefOid, fresh.state !== 'open' || Boolean(fresh.mergedAt)),
+        });
+      }
       if (!subject.terminal) observeReviewLane({});
       // Drafts are intentional waits. Persist discovery evidence so they do
       // not inflate either spill lane, including a PR converted back to draft.
@@ -855,7 +864,7 @@ export async function processReviewSubject(entry, ctx) {
           console.warn(`[watcher] OWNERDEADLINE-01 deadline recovery deferred for ${repoPath} PR ${prNumber}: ${error.message}`);
         }
       }
-      // Deadline observation precedes even an in-process handoff deferral.
+      // Waiting observation precedes even an in-process handoff deferral.
       if (reviewerHandoffPending(repoPath, prNumber)) return;
       if (effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal) {
         if (await maybeRunDocsFastPath({ subject, reviewRow: existing, rootDir: ROOT,
@@ -3466,7 +3475,7 @@ export async function processReviewSubject(entry, ctx) {
             forcedReviewIntent = explicitIntentForHead();
             if (reviewedHeadDedup.reason === 'explicit-review-intent' && !forcedReviewIntent) {
               await reconcileExplicitRequests();
-              return { dispatched: false, reason: 'explicit-review-intent-expired' };
+              return { dispatched: false, reason: 'explicit-review-intent-no-longer-pending' };
             }
             if (reviewedHeadDedup.alreadyReviewed && !forcedReviewIntent) {
               observeReviewLane({ suppressed: true, reason: 'same-head-already-reviewed' });
@@ -4280,6 +4289,9 @@ export async function processReviewSubject(entry, ctx) {
               };
               if (admissionSettlementSplitEnabled && !pipelineEnabled) spawnReviewerArgs.onPostOperationSettled = (postedResult) => {
                 if (reviewRowSettled) return;
+                // Account/seat holds can settle through this callback without
+                // ever starting a process. Keep the claim for intent requeue.
+                if (forcedReviewIntent && !postedResult.ok && !reviewerProcessStarted) return;
                 // Size failures include an awaited PR-update handoff. Leave
                 // those to the caller settlement path below, which retains
                 // the head reservation until the receipt and alert are saved.
@@ -4349,7 +4361,10 @@ export async function processReviewSubject(entry, ctx) {
                   : await spawnReviewer(spawnReviewerArgs);
               } catch (error) {
                 if (forcedReviewIntent) {
-                  refuseFailedExplicitReviewDispatch(db, forcedReviewIntent, reviewerSessionUuid);
+                  if (!reviewerProcessStarted) {
+                    requeueUnstartedExplicitReviewDispatch(db, forcedReviewIntent, reviewerSessionUuid);
+                    stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
+                  } else refuseFailedExplicitReviewDispatch(db, forcedReviewIntent, reviewerSessionUuid);
                   await reconcileExplicitRequests();
                 }
                 if (!reviewerProcessStarted) dispatchCandidate.retainWakeForCapacity?.();
@@ -4370,7 +4385,8 @@ export async function processReviewSubject(entry, ctx) {
               if (result.ok) retainedWatcherWakes?.drop(wakeIdentity);
               else if (!reviewerProcessStarted) dispatchCandidate.retainWakeForCapacity?.();
               if (!result.ok && !reviewerProcessStarted && forcedReviewIntent) {
-                refuseFailedExplicitReviewDispatch(db, forcedReviewIntent, reviewerSessionUuid);
+                requeueUnstartedExplicitReviewDispatch(db, forcedReviewIntent, reviewerSessionUuid);
+                stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
                 await reconcileExplicitRequests();
               }
               if (!result.ok && credentialProbeReservation?.probe && !reviewerProcessStarted) {
@@ -4382,6 +4398,9 @@ export async function processReviewSubject(entry, ctx) {
               }
 
               if (!reviewRowSettled) {
+                if (!result.ok && !reviewerProcessStarted && forcedReviewIntent) {
+                  return { dispatched: false, reason: 'explicit-review-launch-deferred' };
+                }
                 const settlement = await settleReviewerAttempt({
                   rootDir: ROOT,
                   repoPath,

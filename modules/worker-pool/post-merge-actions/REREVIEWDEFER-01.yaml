@@ -1,0 +1,15 @@
+operator_steps:
+  - description: >-
+      After both companion PRs merge, the normal AR float and separately
+      authorized watcher restart, retain a 24-hour SRE observation showing no
+      new reviewer-unavailable-before-dispatch-deadline refusals, no superseded
+      bot Request changes on remediated heads with queued/running re-review,
+      and about zero Re-review could not run comments. Current-head and human
+      findings remain. Acknowledge only after retaining the observations.
+      This command displays the handoff and changes no live state.
+    run_as: SRE with registered review-service ownership
+    command: >-
+      /usr/bin/printf '%s\n' 'REREVIEWDEFER-01: after normal float and separately authorized restart, retain 24h intent-refusal, superseded-review and refusal-comment observations.'
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

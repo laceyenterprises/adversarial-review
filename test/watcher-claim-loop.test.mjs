@@ -3970,7 +3970,7 @@ function seatIdleSynthetic(source) {
     .replaceAll("name: 'adversarial-review'", "name: 'review-fixture'");
 }
 
-for (const mode of ['dispatch', 'credential-hold', 'ceiling', 'expired', 'no-intent', 'spawn-throw', 'spawn-refused']) {
+for (const mode of ['dispatch', 'credential-hold', 'head-moved-held', 'closed-held', 'ceiling', 'overdue', 'no-intent', 'spawn-throw', 'spawn-refused', 'spawn-held-split']) {
   test(`RETRIGGERDEDUP-01: real poll preserves same-head dedup and explicit intent (${mode})`, () => {
     const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-explicit-intent-'));
     try {
@@ -3982,13 +3982,22 @@ for (const mode of ['dispatch', 'credential-hold', 'ceiling', 'expired', 'no-int
           export function createReviewerRuntimeAdapterForDomain() { return {
             spawnReviewer: async payload => {
               globalThis.__watcherClaimLoopReviewerSpawns.push(payload);
-              ${mode === 'spawn-throw' ? "throw new Error('synthetic spawn failure');" : "return { ok: false, stdout: '', stderr: 'synthetic spawn refusal' };"}
+              ${mode === 'spawn-throw' ? "throw new Error('synthetic spawn failure');"
+                : mode === 'spawn-held-split'
+                  ? "const result = { ok: false, failureClass: 'reviewer-account-held', stderr: 'synthetic account hold' }; payload.onPostOperationSettled?.(result); return result;"
+                  : "return { ok: false, stdout: '', stderr: 'synthetic spawn refusal' };"}
             }, cancel: async () => {}, reattach: async () => ({})
           }; }
           export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); }
           export function loadDomainConfig() { return {}; }
           export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }`,
       } : {})
+        .replace('export async function dismissStandingChangesRequestedReviewsForHead() {',
+          'export async function dismissStandingChangesRequestedReviewsForHead(_exec, _repo, _pr, head, options) { (globalThis.queuedDismissals ||= []).push({ head, options });')
+        .replace("return { state: 'open', mergedAt: null, closedAt: null, headRefOid, labels: [] };",
+          mode === 'closed-held'
+            ? "return { state: 'closed', mergedAt: null, closedAt: '2026-01-01T00:00:00Z', headRefOid, labels: [] };"
+            : "return { state: 'open', mergedAt: null, closedAt: null, headRefOid, labels: [] };")
         .replace('export async function fetchSubmittedReviewsForHead() { return []; }',
           "export async function fetchSubmittedReviewsForHead(_exec, _repo, prNumber, head) { return prNumber === 101 ? [{ id: 'synthetic-review', commitId: head, submittedAt: '2026-01-01T00:00:00Z' }] : []; }")
         .replace('export function shouldPauseReviewerModel() { return { paused: false }; }',
@@ -4026,14 +4035,24 @@ for (const mode of ['dispatch', 'credential-hold', 'ceiling', 'expired', 'no-int
               explicitReviewRequest: { requestId: 'synthetic-request', actor: 'fixture-operator' } });
             assert.equal(accepted.triggered,true,JSON.stringify(accepted));
           } else db.prepare("UPDATE reviewed_prs SET review_status='pending', posted_at=NULL WHERE pr_number=101").run();
-          if (${JSON.stringify(mode)} === 'expired') db.prepare(
+          if (${JSON.stringify(['overdue', 'credential-hold'].includes(mode))}) db.prepare(
             "UPDATE explicit_review_intents SET expires_at='2026-01-01T00:00:00Z'").run();
-          globalThis.explicitCredentialHold = ${mode === 'credential-hold'};
+          globalThis.explicitCredentialHold = ${['credential-hold', 'head-moved-held', 'closed-held'].includes(mode)};
+          if (${JSON.stringify(mode)} === 'head-moved-held') {
+            globalThis.__watcherClaimLoopFreshHeads = { '101': 'new-live-head' };
+          }
         `,
         afterFirstPoll: `
           const spawns = () => (globalThis.__watcherClaimLoopReviewerSpawns || [])
             .filter(payload => payload.subjectContext?.prNumber === 101);
           const receipt = () => db.prepare('SELECT * FROM explicit_review_intents WHERE pr_number=101').get();
+          if (${JSON.stringify(!['no-intent', 'head-moved-held', 'closed-held'].includes(mode))}) {
+            const dismissals = globalThis.queuedDismissals || [];
+            assert.ok(dismissals.length > 0, 'queued dismissal must run before credential/capacity holds');
+            assert.equal(dismissals[0].head, 'sha-happy-101');
+            assert.equal(dismissals[0].options.requireSupersededCommitId, 'sha-happy-101');
+            assert.ok(dismissals[0].options.authoritativeReviewerLogins.length > 0);
+          }
           if (${JSON.stringify(mode)} === 'credential-hold') {
             assert.equal(spawns().length,0);
             assert.equal(receipt().state,'pending');
@@ -4046,7 +4065,7 @@ for (const mode of ['dispatch', 'credential-hold', 'ceiling', 'expired', 'no-int
             globalThis.explicitCredentialHold = false;
             await pollOnce(octokit,pollOptions);
           }
-          if (${JSON.stringify(['dispatch', 'credential-hold'].includes(mode))}) {
+          if (${JSON.stringify(['dispatch', 'credential-hold', 'overdue'].includes(mode))}) {
             assert.equal(spawns().length,1);
             assert.equal(receipt().state,'consumed');
             assert.equal(db.prepare("SELECT pass_kind FROM reviewer_passes WHERE pr_number=101 ORDER BY pass_id DESC LIMIT 1").get().pass_kind,'rereview');
@@ -4054,9 +4073,17 @@ for (const mode of ['dispatch', 'credential-hold', 'ceiling', 'expired', 'no-int
             await pollOnce(octokit,pollOptions);
             assert.equal(spawns().length,1,'consumed request must never authorize a second dispatch');
           } else {
-            assert.equal(spawns().length,${mode.startsWith('spawn-') ? 1 : 0});
-            if (${JSON.stringify(mode)} !== 'no-intent') {
+            assert.ok(${mode.startsWith('spawn-') ? 'spawns().length >= 1' : 'spawns().length === 0'});
+            if (${JSON.stringify(mode.startsWith('spawn-'))}) {
+              assert.equal(receipt().state,'pending');
+              assert.equal(receipt().reason,null);
+              const row = db.prepare('SELECT review_status, review_attempts FROM reviewed_prs WHERE pr_number=101').get();
+              assert.equal(row.review_status, 'pending');
+              assert.equal(row.review_attempts, 1, 'an unstarted launch must not charge an attempt');
+            } else if (${JSON.stringify(mode)} !== 'no-intent') {
               assert.equal(receipt().state,'refused');
+              if (${JSON.stringify(mode)} === 'head-moved-held') assert.equal(receipt().reason,'head-changed');
+              if (${JSON.stringify(mode)} === 'closed-held') assert.equal(receipt().reason,'pr-terminal');
               assert.ok(receipt().notified_at);
               assert.ok(githubWrites.some(write => write.args[0].body.includes('Re-review could not run')));
             }
@@ -4077,7 +4104,9 @@ for (const mode of ['dispatch', 'credential-hold', 'ceiling', 'expired', 'no-int
       writeFileSync(ghPath, seatIdleSynthetic(readFileSync(ghPath, 'utf8')));
       const result = spawnSync(process.execPath,
         ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
-        { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(env), timeout: 30_000 });
+        { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv({
+          ...env, ...(mode === 'spawn-held-split' ? { ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT: 'true' } : {}),
+        }), timeout: 30_000 });
       assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
     } finally { rmSync(tmp, { recursive: true, force: true }); }
   });

@@ -258,8 +258,7 @@ export const stmtRestoreSameHeadSuppressedReviewPosted = db.prepare(
       AND reviewer_head_sha = ?
       AND NOT EXISTS (SELECT 1 FROM explicit_review_intents AS intent
         WHERE intent.repo = reviewed_prs.repo AND intent.pr_number = reviewed_prs.pr_number
-          AND intent.state = 'pending'
-          AND intent.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`
+          AND intent.state = 'pending')`
 );
 export const stmtRestoreReviewedHeadDedupSuppressedReviewPosted = db.prepare(
   `UPDATE reviewed_prs
@@ -282,8 +281,7 @@ export const stmtRestoreReviewedHeadDedupSuppressedReviewPosted = db.prepare(
       )
       AND NOT EXISTS (SELECT 1 FROM explicit_review_intents AS intent
         WHERE intent.repo = reviewed_prs.repo AND intent.pr_number = reviewed_prs.pr_number
-          AND intent.state = 'pending'
-          AND intent.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`
+          AND intent.state = 'pending')`
 );
 // CAS variant for reviewer-command-failed posted-reconciliation (LAC-1359
 // follow-up). The reconcile path shells out to GitHub (async) BEFORE mutating

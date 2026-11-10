@@ -8,7 +8,7 @@
     "owner": "Merge Authority v2",
     "optionalFields": [
       "finalization_ledger.payload_json: anchored deadlines, useful-work identities, custody salvage, operation reconciliation, merge/PMA and acknowledged page receipts",
-      "finalization_shadow.payload_json: optional live organic lane/terminal provenance, proposed classification and dedupeKey; existing MGQ-07 unique index; MLR-04 distinct-terminal promotion arithmetic"
+      "finalization_shadow.payload_json: optional live organic lane/terminal provenance, live.ownerState and v2Decision.liveOwner canonical owner evidence, proposed classification and dedupeKey; existing MGQ-07 unique index; MLR-04 distinct-terminal promotion arithmetic"
     ]
   }]
 }

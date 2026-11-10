@@ -49,6 +49,60 @@ test('gated-off tick and execute cannot acquire authority or write', async t => 
   assert.equal(h.state().eventCount, before);
   assert.equal(h.leaseStore.read(subject), null);
 });
+
+test('executor waits for a canonical live closer without dispatching or paging', async t => {
+  const effects = [];
+  const h = harness(t, {
+    remediationSurface: { dispatch: async () => { effects.push('dispatch'); } },
+    pageSurface: { deliver: async () => { effects.push('page'); } },
+  });
+  h.append('verdict_recorded', { revisionRef: 'head-A', verdictKind: 'request-changes',
+    stageId: 'review', role: 'independent' }, 1);
+  const ownerSnapshot = { subjectKey: subject.subjectExternalId, head: 'head-A', observedAt: at(2000),
+    observations: {
+      pr: { state: 'complete', value: { state: 'open', headSha: 'head-A' } },
+      leases: { state: 'complete', value: { closer: { status: 'dispatched',
+        headSha: 'head-A', updatedAt: at(0), deadlineAt: at(3000) } } },
+      launches: { state: 'complete', value: { closer: null } },
+    } };
+  h.setLive({ state: 'open', head: 'head-A', sourceRef: 'fixture:live', ownerSnapshot });
+  const result = await h.tick(2000);
+  assert.equal(result.decision.kind, 'wait');
+  assert.match(result.reason, /live-owner/);
+  assert.equal(result.decision.deadline, at(3000));
+  assert.deepEqual(effects, []);
+  assert.equal(h.state().workflow.escalation, null);
+});
+
+test('owner evidence cannot suppress escalation after expiry or from a foreign/stale snapshot', async t => {
+  const h = harness(t);
+  // A new revision deliberately has no verdict, and its patience is expired.
+  h.append('revision_advanced', { revisionRef: 'head-B' }, 1);
+  h.append('provenance_observed', { revisionRef: 'head-B', builderBoundary: 'fixture:builder',
+    primaryChange: 'preserved', hammerCommits: false, mergeMain: false }, 1);
+  h.append('checks_settled', { revisionRef: 'head-B', conclusion: 'success', requiredChecksPresent: true }, 1);
+  const s = { subjectKey: subject.subjectExternalId, head: 'head-B', observedAt: at(2000),
+    observations: {
+      pr: { state: 'complete', value: { state: 'open', headSha: 'head-B' } },
+      leases: { state: 'complete', value: { closer: { status: 'dispatched',
+        headSha: 'head-B', deadlineAt: at(2000) } } },
+      launches: { state: 'complete', value: { closer: { status: 'running' } } },
+    } };
+  const state = h.state();
+  for (const change of [
+    {},
+    { subjectKey: 'example/foreign#99', deadline: at(4000) },
+    { observedAt: at(1000), deadline: at(4000) },
+  ]) {
+    const snapshot = structuredClone(s);
+    Object.assign(snapshot, change);
+    if (change.deadline) snapshot.observations.leases.value.closer.deadlineAt = change.deadline;
+    const decision = eligible(state, { verdictPatienceMs: 1000 },
+      { observedAt: at(2000), load, ownerSnapshot: snapshot });
+    assert.equal(decision.kind, 'escalate');
+    assert.match(decision.reason, /verdict patience expired/);
+  }
+});
 test('landing requires authoritative readback and a separate verified PMA receipt', async t => {
   const h = harness(t, { deliverySurface: { reconcile: async () => ({ planRunId: 'fixture-plan', activation: 'verified', sourceRef: 'fixture:activation' }) } });
   assert.equal((await h.tick(100)).action, 'merge');

@@ -253,7 +253,7 @@ function conclusionForDispatch(state, rev, round) {
  *
  * @param {LedgerState} state result of `fold(events)`
  * @param {Partial<EligibilityPolicy>} [policy]
- * @param {{ observedAt?: string }} [options] evaluation time (defaults to the
+ * @param {{ observedAt?: string, ownerSnapshot?: object }} [observation] evaluation time (defaults to the
  *   ledger's last event time); pure — the caller supplies it, the fold never
  *   reads a clock.
  * @returns {EligibilityDecision}

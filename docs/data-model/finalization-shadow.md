@@ -119,3 +119,10 @@ and older unprovenanceable rows add no exercised volume. `mgqPromotable`
 retains the existing coverage condition. `shadow` supplies row/subject/error
 counts for the SRE-owned natural-traffic growth assertion. Reports remain
 read-only and do not select routes or authorize promotion.
+
+`live.ownerState` records the canonical next-action owner projection used by v2:
+`live`, `actor`, `head`, `deadline`, `reason`, `decisionKey` and `evidenceRefs`.
+Live-owner waits also retain this projection as `v2Decision.liveOwner`.
+Terminal/refused, absent and expired owners remain distinguishable from an
+unexpired owner. No SQL column or migration is added; older payloads can omit
+these optional fields. This evidence does not change triage dispositions.

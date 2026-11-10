@@ -40,6 +40,28 @@ test('shadow logs the (v1 action, v2 decision) pair without acting — clean hea
   assert.equal(obs.foldError, false);
 });
 
+test('pure trace replay retains the canonical live owner and resumes expired patience on release', () => {
+  const events = cleanTrace().filter(e => e.type !== 'verdict_recorded');
+  const ownerSnapshot = { subjectKey: REF.subjectExternalId, head: 'sha-A', observedAt: t(60),
+    observations: {
+      pr: { state: 'complete', value: { state: 'open', headSha: 'sha-A' } },
+      leases: { state: 'complete', value: { closer: {
+        status: 'dispatched', headSha: 'sha-A', deadlineAt: t(61),
+      } } },
+      launches: { state: 'complete', value: { closer: null } },
+    } };
+  const observations = replayV1Trace({ subject: REF, ticks: [
+    { events, v1Action: 'wait', observedAt: t(60), ownerSnapshot },
+    { events, v1Action: 'wait', observedAt: t(61) },
+  ] });
+  assert.equal(observations[0].v2Decision.kind, 'wait');
+  assert.match(observations[0].v2Decision.reason, /live-owner/);
+  assert.equal(observations[0].v2Decision.liveOwner.live, true);
+  assert.equal(observations[1].v2Decision.kind, 'escalate');
+  assert.match(observations[1].v2Decision.reason, /verdict patience expired/);
+  assert.equal(observations[1].v2Decision.liveOwner, undefined);
+});
+
 test('shadow surfaces a CI-impatience divergence: v1 merged, v2 withheld (no checks yet)', () => {
   // No checks_settled at head — v2 waits on checks; v1 merged anyway.
   const events = [

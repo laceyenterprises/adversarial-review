@@ -145,6 +145,15 @@ difference. Preserve configured branch-protection and CI-cost policy, including
 advisory-default cost evidence and the existing blocking mode; this spec adds no
 check, approval label or waiver. Expired patience never authorizes merge.
 
+A live closer or remediator owns the PR until its canonical lease/progress
+bound expires. V2 consumes the same next-action snapshot owner projection as
+v1 and returns an explicit live-owner `wait`, rather than dispatching another
+remediator or escalating expired verdict/check patience over that owner.
+Terminal or safety-refused owners do not acquire this wait. Owner waits never
+reset patience anchors: the ordinary decision resumes when ownership ends.
+Explicit operator holds, the execution brake and authoritative terminal
+lifecycle evidence retain precedence.
+
 Attestation consumption requires a declared, working producer and revision-bound
 proof. Creation-time title routing identifies the builder harness; it is not
 identity or merge proof. Authorized signing and bump-PR producers must work,

@@ -11,6 +11,7 @@ import { isOperatorHeld } from '../operator-hold-labels.mjs';
 import { isDaemonMergeReviewAllowed } from '../ama/daemon-merge.mjs';
 import { normalizeV1Action } from './shadow-actions.mjs';
 import { resolve } from 'node:path';
+import { finalizationOwner } from './live-owner.mjs';
 
 // One canonical app root per daemon. Bound the cache to one handle and converge
 // each schema once per connection, including caller-owned test/store handles.
@@ -153,6 +154,7 @@ export function recordLiveShadow({ rootDir, snapshot, legacy, source, repo, prNu
     } catch { error = true; }
     const observedPolicy = complete(snapshot, 'policy');
     const observation = shadowObserveFromStore({ subject, observedAt: snapshot.observedAt, v1Action,
+      ownerSnapshot: snapshot,
       policy: { ...policy, autonomousExecutionDisabled: policy?.autonomousExecutionDisabled === true
         || observedPolicy?.autonomousMergeExecutionEnabled === false
         || isOperatorHeld(complete(snapshot, 'pr')?.labels) },
@@ -160,6 +162,7 @@ export function recordLiveShadow({ rootDir, snapshot, legacy, source, repo, prNu
     const pr = complete(snapshot, 'pr');
     const base = pr?.baseBranch ?? complete(snapshot, 'candidate')?.baseBranch ?? null;
     observation.live = { source: 'organic', lane: { repository: repo, base },
+      ownerState: finalizationOwner(snapshot, snapshot.observedAt),
       sourceRef, consumer, terminalOutcome: v1Action.kind === 'merged' ? 'merged'
         : legacy?.action === 'done' && legacy.reason === 'closed' ? 'closed' : null };
     // The snapshot adapter can be incomplete in either direction. Preserve the

@@ -65,6 +65,9 @@ function outcome(subjectKey, decision, { status, action, observedAt, reason, det
  * Build the leased executor. All I/O is injected so the executor is unit-testable
  * against in-memory stores and fake surfaces. Enabled executors require a
  * callable liveSurface.read; disabled construction may omit the reader.
+ * The live reader can include ownerSnapshot: the current canonical next-action
+ * snapshot, with the same subject/head/observation time. No alternate owner
+ * registry is consulted by the executor.
  *
  * @param {{
  *   ledgerStore: { read(subject): any[], append(event): any },
@@ -472,7 +475,8 @@ export function createFinalizationExecutor({
     try {
       const leasedEvents = ledgerStore.read(subject);
       let leasedState = fold(leasedEvents);
-      let decision = eligible(leasedState, policy, { observedAt, load });
+      const ownerSnapshot = live?.ownerSnapshot;
+      let decision = eligible(leasedState, policy, { observedAt, load, ownerSnapshot });
       if (!leasedState.workflow.anchors[decision.episode] && decision.anchorAt) {
         effects.emit(subjectKey, observedAt, 'decision_anchored', {
           episode: decision.episode, anchorAt: decision.anchorAt, nominalMs: decision.nominalMs,
@@ -480,7 +484,7 @@ export function createFinalizationExecutor({
           codeVersion: decision.codeVersion, loadEvidence: decision.loadEvidence,
         });
         leasedState = fold(ledgerStore.read(subject));
-        decision = eligible(leasedState, policy, { observedAt, load });
+        decision = eligible(leasedState, policy, { observedAt, load, ownerSnapshot });
       }
       // decide → execute back-to-back under the lease; tick passes the
       // post-acquire folded state so execute() does not perform a third fold.

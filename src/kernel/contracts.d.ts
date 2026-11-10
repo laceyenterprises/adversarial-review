@@ -1042,6 +1042,15 @@ export type EligibilityDecisionKind =
 
 /** The single decision `eligible` returns for the executor (ARC-17) to act on. */
 export interface EligibilityDecision {
+  liveOwner?: {
+    live: boolean;
+    actor: string;
+    head: string | null;
+    deadline: IsoTimestamp | null;
+    reason: string;
+    decisionKey: string;
+    evidenceRefs: readonly string[];
+  };
   owner?: { kind: 'workflow' | 'agent'; id: string; head: string; verified?: boolean; status?: string };
   nextAction?: string;
   codeVersion?: string;

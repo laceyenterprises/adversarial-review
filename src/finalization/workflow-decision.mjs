@@ -1,4 +1,5 @@
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
+import { finalizationOwner } from './live-owner.mjs';
 
 export function workflowEpisode(state, policy) {
   const pending = state.remediation.dispatched.find(d => d.revisionRef === state.currentRevision
@@ -54,6 +55,16 @@ export function workflowDecision(state, policy, observation, core) {
     && !(state.terminal.codeVersion && state.terminal.codeVersion !== policy.codeVersion)
     && !(state.terminal.policyVersion && state.terminal.policyVersion !== policy.policyVersion)) {
     return blocked('recover-coverage', state.terminal.reason ?? 'automated stop requires relevant evidence');
+  }
+  // One finisher per PR. Owner bounds come from the canonical v1 snapshot
+  // projection; verdict/check patience never preempts a progressing owner.
+  const liveOwner = finalizationOwner(observation.ownerSnapshot, at);
+  if (liveOwner.live && liveOwner.head === head
+    && observation.ownerSnapshot?.subjectKey === state.subjectKey?.subjectExternalId) {
+    return blocked('monitor-agent', `live-owner: ${liveOwner.actor} holds an unexpired lease`, {
+      owner: { kind: 'agent', id: liveOwner.decisionKey, head },
+      deadline: liveOwner.deadline, liveOwner,
+    });
   }
   if (w?.unknown) return blocked('refresh-evidence', 'unknown safety-relevant event');
   for (const custody of Object.values(w?.custody ?? {})) {

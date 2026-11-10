@@ -103,3 +103,21 @@ whole-lane canary and read-only activation receipts. SRE must verify deployed an
 loaded build, fresh custody producer facts, working exact-holder/salvage/teardown,
 PMA run/activation and existing pager composition plus organic consumer progress.
 No worker restart, config flip, lane transfer or live fixture is performed here.
+
+## Final Hammer adjudication (AMA-PR-1806)
+
+The final review has seven non-blocking findings. Four are addressed by the
+executable wrapper mode, enabled-reader constructor validation, merge-event
+lookup in the PMA test and single initial simulator provenance observation.
+The three proposed failure receipts for uncertain merge, remediation dispatch
+and close replies are withdrawn: a lost reply does not establish absence of
+a remote effect. Preserve the operation intent until authoritative readback;
+the executor regressions prove no duplicate mutation and retry after sourced
+absence. Deployment still requires the recovery composition documented in the
+promotion runbook. No runtime interface or persistent shape changes here.
+
+Hammer verification: 81 targeted executor, workflow, final-cap handoff, simulator
+and legacy-actor tests pass. Repository lint passes with zero errors (152
+existing warnings), contract typechecking passes, and the offline research
+walkthrough produces three byte-stable deliveries. Exact-head remote CI and
+the live HAM predicate remain mandatory before merge.

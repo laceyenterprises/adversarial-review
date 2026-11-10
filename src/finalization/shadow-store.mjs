@@ -197,6 +197,7 @@ export function openFinalizationShadowStore({ rootDir, db, busyTimeoutMs } = {})
       COALESCE(SUM(CASE WHEN saw_exhaustion = 1 THEN 1 ELSE 0 END), 0) AS exhaustion_closes
     FROM finalization_shadow
     WHERE (json_type(payload_json,'$.queue') IS NULL OR json_extract(payload_json,'$.queue.source') = 'organic')
+      AND (json_type(payload_json,'$.live') IS NULL OR json_extract(payload_json,'$.live.source') = 'organic')
   `);
 
   const updateOverride = database.prepare(`
@@ -323,6 +324,7 @@ export function openReadOnlyFinalizationShadowStore({ rootDir, db, busyTimeoutMs
         COALESCE(SUM(CASE WHEN saw_exhaustion = 1 THEN 1 ELSE 0 END), 0) AS exhaustion_closes
       FROM finalization_shadow
       WHERE (json_type(payload_json,'$.queue') IS NULL OR json_extract(payload_json,'$.queue.source') = 'organic')
+      AND (json_type(payload_json,'$.live') IS NULL OR json_extract(payload_json,'$.live.source') = 'organic')
     `);
   } catch (err) {
     if (!db) database.close();

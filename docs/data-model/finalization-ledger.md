@@ -54,7 +54,15 @@ API and `finalization_shadow` in one app-store transaction. All event types
 accept the existing optional `idempotency_key`, retaining original event times
 on replay. Only a changed head appends `revision_advanced`; readable review,
 exact-head required-check rollup, mergeability and exhaustion observations
-retain provenance. Partial or failed evidence never becomes green or a merge.
+retain provenance. Unchanged facts do not append again when poll timestamps
+advance; keys identify fact transitions and preserve returns to earlier values.
+The daemon reuses one app-root connection, converging schemas once per handle.
+Configured required contexts are unioned with readable branch-protection contexts;
+when protection is unavailable, the configured set still applies through the
+shared CI classifier (an empty rollup still fails closed). An omitted observation
+domain in a lightweight snapshot leaves prior facts intact. An explicitly failed,
+unknown or incomplete refresh of previously settled evidence escalates instead
+of reusing earlier green evidence. Partial or failed evidence never becomes a merge.
 Custody continues to arrive through the existing off-pass bridge.
 
 Shadow `payload_json` additionally retains optional `live` evidence

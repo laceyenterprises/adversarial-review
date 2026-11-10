@@ -35,3 +35,28 @@ tests passed 17 cases; Ruff and the existing shellcheck gate passed.
 Exact files/commands and managed mirror results are in the PR acceptance evidence.
 No ledger SQL or Postgres store is changed; existing app-owned SQLite APIs
 remain authoritative.
+
+## Review remediation
+
+Live fact ingestion now compares the latest sourced fact before appending, with
+transition keys that preserve changed values and returns to earlier values.
+Poll timestamps do not grow the fact ledger or reset its anchors. The observer
+reuses one app-root SQLite handle and caches ledger setup per connection.
+Comparison telemetry remains per observation. Closure consumers supply configured
+required contexts even without branch protection, unioning readable protection
+contexts. Lightweight snapshots may omit domains; explicit failed/unknown or
+incomplete refreshes of settled evidence still escalate. SQL and fallback report
+coverage exclude synthetic live and queue rows, including the window-presence
+condition. The ledger/shadow data-model docs, catalog and v2 spec describe these
+contracts. Existing lifecycle declarations and smoke promises are unchanged;
+the affected closure state projections remain byte-identical.
+
+The final sandboxed run passed 396 targeted tests across nine files using
+`node test/run-tests.mjs` (live ingestion, shadow store/report, next-action
+adapters, closer/daemon next-action, shadow consumer, watcher claim loop and
+closer lease finalization). This includes both borrowed and daemon-owned
+connection schema-reuse regressions. Repository lint passed with zero errors
+(152 existing warnings); scoped ESLint, `npm run typecheck:contracts`,
+`node scripts/validate-data-model-catalog.mjs` (93 entries) and
+`bash demo/research-finding-walkthrough.sh` passed. `git diff --check` passed.
+No full local test suite or CI configuration change was made.

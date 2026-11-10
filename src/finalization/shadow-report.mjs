@@ -130,7 +130,7 @@ export function buildShadowReport({ observations, now, windowDays = 7, coverage 
   if (!coverage) {
     let earliestMsFallback = Infinity;
     for (const o of all) {
-      if (o.queue && o.queue.source !== 'organic') continue;
+      if ((o.queue && o.queue.source !== 'organic') || (o.live && o.live.source !== 'organic')) continue;
       const t = Date.parse(o.observedAt);
       if (Number.isFinite(t) && t < earliestMsFallback) earliestMsFallback = t;
       if (o.sawHeadMove) organicHeadMoves += 1;
@@ -185,7 +185,7 @@ export function buildShadowReport({ observations, now, windowDays = 7, coverage 
   const openDivergences = divergences.filter((d) => d.disposition === 'open').length;
 
   const blockers = [];
-  if (!windowed.some(o => !o.queue || o.queue.source === 'organic')) blockers.push('no shadowed finalizations in window');
+  if (!windowed.some(o => (!o.queue || o.queue.source === 'organic') && (!o.live || o.live.source === 'organic'))) blockers.push('no shadowed finalizations in window');
   if (!enoughDays) blockers.push(`insufficient shadow coverage (${coverageDays}d < ${days}d)`);
   if (openDivergences > 0) {
     blockers.push(`${openDivergences} open divergence${openDivergences === 1 ? '' : 's'}`);

@@ -10,6 +10,25 @@ import { QUEUE_RUNNING_BUILD } from './queue-build.mjs';
 import { isOperatorHeld } from '../operator-hold-labels.mjs';
 import { isDaemonMergeReviewAllowed } from '../ama/daemon-merge.mjs';
 import { normalizeV1Action } from './shadow-actions.mjs';
+import { resolve } from 'node:path';
+
+// One canonical app root per daemon. Bound the cache to one handle and converge
+// each schema once per connection, including caller-owned test/store handles.
+let cachedStore = null;
+let cachedRoot = null;
+const ledgers = new WeakMap();
+function liveStore(rootDir) {
+  const root = resolve(rootDir);
+  if (cachedRoot !== root || !cachedStore?.db.open) {
+    cachedStore?.close();
+    cachedStore = null;
+    cachedRoot = null;
+    cachedStore = openFinalizationShadowStore({ rootDir: root });
+    cachedRoot = root;
+  }
+  return cachedStore;
+}
+process.once('exit', () => cachedStore?.close());
 
 const consumer = { id: 'next-action-finalization-shadow', build: QUEUE_RUNNING_BUILD,
   loadedAt: new Date().toISOString(), pid: process.pid };
@@ -36,15 +55,23 @@ export function liveV1Action(legacy, sourceRef) {
 }
 
 /** Translate only complete, sourced observations. Missing evidence stays absent.
- * Keys identify the original snapshot, so a retry cannot refresh an event time. */
+ * Unchanged facts retain their original event time; changed facts append a
+ * transition, including a return to a previously observed value. */
 export function snapshotFinalizationEvents(snapshot, subject, previous = []) {
   const at = snapshot.observedAt;
   if (!Number.isFinite(Date.parse(at)) || !snapshot.head) throw new Error('snapshot identity/time unavailable');
-  const tick = handoffDigest(snapshot);
   const events = [];
-  const add = (type, fields, sourceRef) => events.push(makeFinalizationEvent(type, subject, {
-    at, ...fields, sourceRef: sourceRef || `snapshot:${tick}:${type}`, idempotencyKey: `snapshot:${tick}:${type}`,
-  }));
+  const add = (type, fields, sourceRef) => {
+    const ref = sourceRef || `snapshot:${type}:${handoffDigest(fields)}`;
+    const last = previous.filter(e => e.type === type
+      && (type === 'revision_advanced' || e.revisionRef === fields.revisionRef) && e.stageId === fields.stageId
+      && e.role === fields.role).at(-1);
+    if (last?.sourceRef === ref && Object.entries(fields).every(([key, value]) => last[key] === value)) return;
+    const key = handoffDigest({ type, fields, sourceRef: ref, predecessor: last?.idempotencyKey ?? last?.seq ?? null });
+    events.push(makeFinalizationEvent(type, subject, {
+      at, ...fields, sourceRef: ref, idempotencyKey: `snapshot:${key}:${type}`,
+    }));
+  };
   const head = snapshot.head;
   if (previous.filter(e => e.type === 'revision_advanced').at(-1)?.revisionRef !== head) {
     add('revision_advanced', { revisionRef: head });
@@ -86,60 +113,64 @@ export function recordLiveShadow({ rootDir, snapshot, legacy, source, repo, prNu
   shadowStore, policy, v1Action: recordedV1Action = null } = {}) {
   const subject = { domainId: 'code-pr', subjectExternalId: `${repo}#${prNumber}` };
   if (snapshot?.subjectKey !== subject.subjectExternalId) throw new Error('foreign shadow subject');
-  const store = shadowStore ?? openFinalizationShadowStore({ rootDir });
-  try {
-    const ledger = openFinalizationLedgerStore({ db: store.db });
-    return store.db.transaction(() => {
-      const sourceRef = `legacy:${source}:${handoffDigest({ snapshot, legacy, recordedV1Action })}`;
-      const v1Action = recordedV1Action ? normalizeV1Action({ ...recordedV1Action, sourceRef })
-        : liveV1Action(legacy, sourceRef);
-      if (!recordedV1Action) {
-        const receipt = complete(snapshot, 'progress')?.mergeReceipt;
-        // A terminal launch status alone is not GitHub landing evidence.
-        if (receipt?.merged === true && receipt.path === 'daemon-merge'
-          && receipt.headSha === snapshot.head) v1Action.kind = 'merged';
-        if (String(complete(snapshot, 'pr')?.state).toLowerCase() === 'merged') v1Action.kind = 'merged';
-        if (legacy?.action === 'done' && legacy.reason === 'merged') v1Action.kind = 'merged';
-        if (legacy?.action === 'done' && legacy.reason === 'closed') v1Action.kind = 'close';
+  const store = shadowStore ?? liveStore(rootDir);
+  let ledger = ledgers.get(store.db);
+  if (!ledger) {
+    ledger = openFinalizationLedgerStore({ db: store.db });
+    ledgers.set(store.db, ledger);
+  }
+  return store.db.transaction(() => {
+    const sourceRef = `legacy:${source}:${handoffDigest({ snapshot, legacy, recordedV1Action })}`;
+    const v1Action = recordedV1Action ? normalizeV1Action({ ...recordedV1Action, sourceRef })
+      : liveV1Action(legacy, sourceRef);
+    if (!recordedV1Action) {
+      const receipt = complete(snapshot, 'progress')?.mergeReceipt;
+      // A terminal launch status alone is not GitHub landing evidence.
+      if (receipt?.merged === true && receipt.path === 'daemon-merge'
+        && receipt.headSha === snapshot.head) v1Action.kind = 'merged';
+      if (String(complete(snapshot, 'pr')?.state).toLowerCase() === 'merged') v1Action.kind = 'merged';
+      if (legacy?.action === 'done' && legacy.reason === 'merged') v1Action.kind = 'merged';
+      if (legacy?.action === 'done' && legacy.reason === 'closed') v1Action.kind = 'close';
+    }
+    let error = false;
+    try {
+      const previous = ledger.read(subject);
+      const latestRevision = previous.filter(e => e.type === 'revision_advanced').at(-1);
+      if (latestRevision && Date.parse(snapshot.observedAt) < Date.parse(latestRevision.at)) {
+        throw new Error('out-of-order snapshot');
       }
-      let error = false;
-      try {
-        const previous = ledger.read(subject);
-        const latestRevision = previous.filter(e => e.type === 'revision_advanced').at(-1);
-        if (latestRevision && Date.parse(snapshot.observedAt) < Date.parse(latestRevision.at)) {
-          throw new Error('out-of-order snapshot');
-        }
-        for (const event of snapshotFinalizationEvents(snapshot, subject, previous)) ledger.append(event);
-        error = Object.values(snapshot.observations ?? {}).some(o => o?.state === 'error');
-        // A failed refresh must not borrow an earlier green/clean snapshot.
-        const checks = checkEvidence(snapshot);
-        if (previous.some(e => e.type === 'checks_settled' && e.revisionRef === snapshot.head)
-          && (!checks || checks.headSha !== snapshot.head || !Array.isArray(checks.requiredContexts)
-            || !Array.isArray(checks.rollup ?? checks.statusCheckRollup))) error = true;
-        if (previous.some(e => e.type === 'verdict_recorded' && e.revisionRef === snapshot.head)
-          && !complete(snapshot, 'reviews')?.verdict) error = true;
-      } catch { error = true; }
-      const observedPolicy = complete(snapshot, 'policy');
-      const observation = shadowObserveFromStore({ subject, observedAt: snapshot.observedAt, v1Action,
-        policy: { ...policy, autonomousExecutionDisabled: policy?.autonomousExecutionDisabled === true
-          || observedPolicy?.autonomousMergeExecutionEnabled === false
-          || isOperatorHeld(complete(snapshot, 'pr')?.labels) },
-        ledgerStore: error ? { read() { throw new Error('live evidence unavailable'); } } : ledger });
-      const pr = complete(snapshot, 'pr');
-      const base = pr?.baseBranch ?? complete(snapshot, 'candidate')?.baseBranch ?? null;
-      observation.live = { source: 'organic', lane: { repository: repo, base },
-        sourceRef, consumer, terminalOutcome: v1Action.kind === 'merged' ? 'merged'
-          : legacy?.action === 'done' && legacy.reason === 'closed' ? 'closed' : null };
-      // The snapshot adapter can be incomplete in either direction. Preserve the
-      // MGQ-07 discipline: a live disagreement is open until human disposition.
-      if (observation.classification.relation === 'diverge' && !observation.foldError) {
-        observation.live.proposedClassification = observation.classification;
-        observation.classification = { ...observation.classification, direction: 'open', disposition: 'open',
-          reason: 'live snapshot comparison requires bidirectional evidence triage' };
-      }
-      // Terminal metrics require an observed landing, never a requested hammer.
-      observation.dedupeKey = sourceRef;
-      return store.append(observation);
-    })();
-  } finally { if (!shadowStore) store.close(); }
+      for (const event of snapshotFinalizationEvents(snapshot, subject, previous)) ledger.append(event);
+      error = Object.values(snapshot.observations ?? {}).some(o => o?.state === 'error');
+      // A failed refresh must not borrow an earlier green/clean snapshot.
+      const checks = checkEvidence(snapshot);
+      if (snapshot.observations?.checks
+        && previous.some(e => e.type === 'checks_settled' && e.revisionRef === snapshot.head)
+        && (!checks || checks.headSha !== snapshot.head || !Array.isArray(checks.requiredContexts)
+          || !Array.isArray(checks.rollup ?? checks.statusCheckRollup))) error = true;
+      if (snapshot.observations?.reviews
+        && previous.some(e => e.type === 'verdict_recorded' && e.revisionRef === snapshot.head)
+        && !complete(snapshot, 'reviews')?.verdict) error = true;
+    } catch { error = true; }
+    const observedPolicy = complete(snapshot, 'policy');
+    const observation = shadowObserveFromStore({ subject, observedAt: snapshot.observedAt, v1Action,
+      policy: { ...policy, autonomousExecutionDisabled: policy?.autonomousExecutionDisabled === true
+        || observedPolicy?.autonomousMergeExecutionEnabled === false
+        || isOperatorHeld(complete(snapshot, 'pr')?.labels) },
+      ledgerStore: error ? { read() { throw new Error('live evidence unavailable'); } } : ledger });
+    const pr = complete(snapshot, 'pr');
+    const base = pr?.baseBranch ?? complete(snapshot, 'candidate')?.baseBranch ?? null;
+    observation.live = { source: 'organic', lane: { repository: repo, base },
+      sourceRef, consumer, terminalOutcome: v1Action.kind === 'merged' ? 'merged'
+        : legacy?.action === 'done' && legacy.reason === 'closed' ? 'closed' : null };
+    // The snapshot adapter can be incomplete in either direction. Preserve the
+    // MGQ-07 discipline: a live disagreement is open until human disposition.
+    if (observation.classification.relation === 'diverge' && !observation.foldError) {
+      observation.live.proposedClassification = observation.classification;
+      observation.classification = { ...observation.classification, direction: 'open', disposition: 'open',
+        reason: 'live snapshot comparison requires bidirectional evidence triage' };
+    }
+    // Terminal metrics require an observed landing, never a requested hammer.
+    observation.dedupeKey = sourceRef;
+    return store.append(observation);
+  })();
 }

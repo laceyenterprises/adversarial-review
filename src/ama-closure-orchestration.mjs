@@ -924,7 +924,7 @@ async function maybeDispatchAmaClosureForInner({
   }
   // NXA-02 observational shadow of this pass's final legacy owner; no effect.
   if (result?.closureOwner && closureOwnerSink.shadowInput) {
-    const { input, autonomousMergeExecutionEnabled } = closureOwnerSink.shadowInput;
+    const { input, autonomousMergeExecutionEnabled, cfg } = closureOwnerSink.shadowInput;
     const candidate = options.candidate || {};
     void shadowNextActionLater({ source: 'closure-orchestration', legacy: result.closureOwner,
       finalizationV1Action: result.daemonCleanMerge?.merged === true || result.reason === 'daemon-merged'
@@ -932,7 +932,7 @@ async function maybeDispatchAmaClosureForInner({
       passSnapshot: options.passSnapshot || null, repo: options.repoPath, prNumber: options.prNumber,
       rootDir: options.rootDir || ROOT, shared: closureOwnerSink.shared || null,
       evidence: () => closureOwnerShadowEvidence(input, {
-        subjectKey: `${options.repoPath}#${options.prNumber}`, autonomousMergeExecutionEnabled,
+        subjectKey: `${options.repoPath}#${options.prNumber}`, autonomousMergeExecutionEnabled, cfg,
         rootDir: options.rootDir || ROOT, observedAt: new Date(options.now ? options.now() : Date.now()).toISOString(),
         checksRollup: candidate.statusCheckRollup, candidate, labels: options.labelNames }) });
   }
@@ -1869,7 +1869,7 @@ async function dispatchAmaClosureFor({
     reviewCeilingReached: reviewCycleCapReached
       || (dispatchJob?.reviewFailureExhausted === true && dispatchJob?.reviewFailureClass === 'reviewer-timeout') };
   const resolveOwner = () => resolveClosureNextAction({ input: closureOwnerInput, passSnapshot,
-    subjectKey: `${repoPath}#${prNumber}`, autonomousMergeExecutionEnabled,
+    subjectKey: `${repoPath}#${prNumber}`, autonomousMergeExecutionEnabled, cfg,
     rootDir, observedAt: new Date(now()).toISOString(),
     anchors: { postedAt: reviewState.postedAt || reviewStateRow?.posted_at || null, finalRoundCompletedAt },
     checksRollup: candidate?.statusCheckRollup,
@@ -1927,7 +1927,7 @@ async function dispatchAmaClosureFor({
   let closureOwner = closureOwnerFromDecision(shared.decision);
   if (closureOwnerSink) closureOwnerSink.shared = shared;
   if (closureOwnerSink) closureOwnerSink.value = closureOwner;
-  if (closureOwnerSink) closureOwnerSink.shadowInput = { input: closureOwnerInput, autonomousMergeExecutionEnabled };
+  if (closureOwnerSink) closureOwnerSink.shadowInput = { input: closureOwnerInput, autonomousMergeExecutionEnabled, cfg };
   if (conflictPrimaryHandoff) {
     return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
       reason: conflictPrimaryHandoff.remediation ? 'conflict-primary-builder-remediation'
@@ -2435,7 +2435,7 @@ async function dispatchAmaClosureFor({
   closureOwner = closureOwnerFromDecision(shared.decision);
   if (closureOwnerSink) closureOwnerSink.value = closureOwner;
   if (closureOwnerSink) closureOwnerSink.shadowInput = { input: { ...closureOwnerInput, attested: hamTerminalRemediationValidated },
-    autonomousMergeExecutionEnabled };
+    autonomousMergeExecutionEnabled, cfg };
 
   const terminalEvidenceProbe = liveHeadCloserAuthored && allowStaleReviewHeadHammerResume
     && reviewState.blockingFindingState === 'known' && reviewState.blockingFindingCount === 0

@@ -105,6 +105,12 @@ require the same direction/principal/evidence note as queue disagreements.
 Ingestion and comparison append share a transaction; no execution adapter is
 available. Translation/read/fold failure persists an escalate pair. An unavailable
 store produces a local diagnostic rather than fabricated durable evidence.
+Lightweight snapshots may omit observation domains without producing fold errors;
+explicit failed or unreadable refreshes of settled facts still escalate. Repeated
+polls append comparison telemetry, but unchanged facts do not grow the ledger.
+Live ingestion reuses a bounded single-root database handle and schema setup.
+Both SQL coverage readers and report fallback exclude any row carrying non-organic
+live or queue provenance from elapsed coverage, head moves and exhaustion counts.
 
 The report's `promotionGate` counts at least 50 distinct organic terminal subjects,
 including terminal head-move/exhaustion examples, all historical divergence

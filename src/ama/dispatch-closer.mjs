@@ -5209,7 +5209,7 @@ async function maybeDispatchAmaCloserAttempt({
       strictMode: cfg?.strictMode !== false,
       strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
       operatorLogins: cfg?.operatorLogins, operatorLabelActorEnforcement: cfg?.operatorLabelActorEnforcement,
-    }, subjectKey: `${dispatchContext.repo}#${prNumber}`,
+    }, subjectKey: `${dispatchContext.repo}#${prNumber}`, cfg,
     observedAt: dispatchContext.dispatchedAt || new Date().toISOString(),
     autonomousMergeExecutionEnabled: cfg?.autonomousMergeExecutionEnabled !== false,
     checksRollup: prMetadata.statusCheckRollup, rootDir: dispatchContext.rootDir || SUBMODULE_ROOT,

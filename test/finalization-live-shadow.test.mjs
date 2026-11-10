@@ -48,7 +48,7 @@ test('live ingestion atomically replays once and compares the existing fold on e
   assert.equal(shadowStore.read().length, 2);
   const events = ledger.read({ domainId: 'code-pr', subjectExternalId: 'example/repo#1' });
   assert.equal(events.filter(e => e.type === 'revision_advanced').length, 1);
-  assert.equal(events.filter(e => e.type === 'verdict_recorded').length, 2);
+  assert.equal(events.filter(e => e.type === 'verdict_recorded').length, 1);
   assert.ok(events.every(e => e.idempotencyKey && e.sourceRef));
   assert.equal(shadowStore.read()[0].live.source, 'organic');
   assert.ok(shadowStore.read()[0].dedupeKey);
@@ -213,4 +213,97 @@ test('MLR-04 arithmetic requires 50 distinct landed subjects plus both organic e
   assert.equal(buildMlrPromotionGate([...rows, failure], now).promotable, false);
   failure.dispositionOverride = { disposition: 'resolved', principal: 'fixture-operator', note: 'ledger repaired' };
   assert.equal(buildMlrPromotionGate([...rows, failure], now).promotable, true);
+});
+
+
+test('poll timestamps do not grow the fact ledger; real transitions and head returns do', t => {
+  const { record, ledger } = fixture(t);
+  const subject = { domainId: 'code-pr', subjectExternalId: 'example/repo#1' };
+  const first = snapshot();
+  first.observations.policy = complete({ reviewCeilingReached: true });
+  record(first);
+  const original = ledger.read(subject);
+  for (let i = 1; i <= 20; i++) {
+    const later = structuredClone(first);
+    later.observedAt = new Date(Date.parse(now) + i * 1000).toISOString();
+    later.passId = `pass:${i}`;
+    later.observations.checks.value.rollup[0].completedAt = later.observedAt;
+    record(later);
+  }
+  assert.deepEqual(ledger.read(subject), original);
+  const changed = snapshot('head-a', '2026-08-20T00:01:00Z');
+  changed.observations.checks.value.rollup[0].conclusion = 'FAILURE';
+  changed.observations.pr.value.mergeable = 'DIRTY';
+  changed.observations.reviews.value.blockingFindingCount = 1;
+  record(changed);
+  record(snapshot('head-a', '2026-08-20T00:02:00Z'));
+  const events = ledger.read(subject);
+  for (const type of ['checks_settled', 'mergeability_observed', 'verdict_recorded']) {
+    assert.equal(events.filter(e => e.type === type).length, 3, type);
+  }
+  record(snapshot('head-b', '2026-08-20T00:03:00Z'));
+  record(snapshot('head-a', '2026-08-20T00:04:00Z'));
+  assert.deepEqual(ledger.read(subject).filter(e => e.type === 'revision_advanced').map(e => e.revisionRef),
+    ['head-a', 'head-b', 'head-a']);
+});
+
+test('partial snapshots preserve prior evidence while explicit failed refreshes escalate', t => {
+  const { record, ledger } = fixture(t);
+  record(snapshot());
+  const subject = { domainId: 'code-pr', subjectExternalId: 'example/repo#1' };
+  const before = ledger.read(subject);
+  const partial = { ...snapshot('head-a', '2026-08-20T00:01:00Z'), observations: {} };
+  assert.equal(record(partial).foldError, false);
+  assert.deepEqual(ledger.read(subject), before);
+  for (const name of ['reviews', 'checks']) {
+    const failed = { ...partial, observations: { [name]: { state: 'error', value: null } } };
+    assert.equal(record(failed).foldError, true, name);
+  }
+});
+
+test('configured check contexts settle on unprotected repositories and enforce missing contexts', t => {
+  const { record, ledger } = fixture(t);
+  for (const protection of [undefined, { ok: false }, { ok: true, requiredContexts: ['extra'] }]) {
+    const evidence = closureOwnerShadowEvidence({ currentHead: 'head-a', checks: 'SUCCESS' }, {
+      subjectKey: 'example/repo#1', observedAt: now,
+      cfg: { getMergeAuthorityConfig: () => ({ requiredCheckContexts: ['unit'] }) },
+      candidate: { headSha: 'head-a', branchProtection: protection },
+      checksRollup: [{ name: 'unit', conclusion: 'SUCCESS' }],
+    });
+    const s = deriveNextActionSnapshot(evidence);
+    record(s);
+    const check = ledger.read({ domainId: 'code-pr', subjectExternalId: 'example/repo#1' })
+      .filter(e => e.type === 'checks_settled').at(-1);
+    assert.equal(check.requiredChecksPresent, protection?.ok !== true);
+    assert.equal(check.conclusion, protection?.ok === true ? 'pending' : 'success');
+  }
+});
+
+
+test('live ingestion converges ledger schema once per borrowed connection', t => {
+  const { db, record } = fixture(t);
+  const exec = db.exec.bind(db);
+  let schemaWrites = 0;
+  db.exec = sql => { schemaWrites++; return exec(sql); };
+  record(snapshot());
+  assert.equal(schemaWrites, 1);
+  record(snapshot('head-a', '2026-08-20T00:01:00Z'));
+  assert.equal(schemaWrites, 1);
+});
+
+
+test('daemon calls reuse app-root connection and schema setup across polls', t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'live-shadow-cache-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const exec = Database.prototype.exec;
+  let schemaWrites = 0;
+  Database.prototype.exec = function(sql) { schemaWrites++; return exec.call(this, sql); };
+  try {
+    const options = { rootDir, legacy: { action: 'wait' }, source: 'fixture', repo: 'example/repo', prNumber: 1 };
+    recordLiveShadow({ ...options, snapshot: snapshot() });
+    const first = schemaWrites;
+    assert.ok(first > 0);
+    recordLiveShadow({ ...options, snapshot: snapshot('head-a', '2026-08-20T00:01:00Z') });
+    assert.equal(schemaWrites, first);
+  } finally { Database.prototype.exec = exec; }
 });

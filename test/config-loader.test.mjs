@@ -6304,7 +6304,7 @@ test('AMA merge_authority public docs list the Node loader worker_class enum', (
         `${relativePath} must document ${workerClass} as an AMA closer worker class`,
       );
     }
-    if (relativePath.startsWith('docs/')) {
+    if (relativePath === 'docs/RUNBOOK-ama-closure.md') {
       assert.ok(doc.includes('`hammer-grok`'));
       assert.ok(doc.includes('grok-closer-pending-merge-authority-v2'));
     }

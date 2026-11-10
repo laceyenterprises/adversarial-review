@@ -3347,7 +3347,8 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
         rootDir, job: claimed.job, jobPath: claimed.jobPath, workerClass, now, log });
       if (ownBuilderStop) return ownBuilderStop;
     }
-    const subjectHold = holdClaimedJobForRefusedSubject({ rootDir, claimed, routing: remediatorRouting, env: jobEnv, delayedPendingPaths, log }); if (subjectHold) return subjectHold;
+    const subjectHold = holdClaimedJobForRefusedSubject({ rootDir, claimed, routing: remediatorRouting, env: jobEnv, delayedPendingPaths, log });
+    if (subjectHold) return subjectHold;
     if (remediatorRouting.pooled || !['codex', 'remediator-codex', 'remediator-codex-corp'].includes(workerClass)) {
       delete jobEnv.CODEX_BROKER_PROVIDER;
     }
@@ -3382,7 +3383,6 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
         remediationWorker: { state: 'never-spawned' } });
       return { consumed: false, reason: baseHold.reason, job: stopped.job, jobPath: stopped.jobPath };
     }
-
     // Round-budget check first (cheap, short-circuits before any
     // OAuth/work). The pr-merge-orchestration spec's risk-tiered
     // budget enforces "stop the remediation loop when the PR has

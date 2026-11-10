@@ -209,7 +209,7 @@ export function createQueueMergeService({ store, owner, liveAdapter, checkReader
       attribution: { bot: { login: identity.login, producerClass: identity.producerClass, sourceRef: identity.sourceRef },
         closer: receipt.handoff?.closer ?? null, worker: handoff.worker ?? null } };
     return { phase: 'finalizing', decision: { ...decision, id: `decision:${handoffDigest(jsonCopy(decision))}` },
-      checks, receipt, ledgerCount: ledgerState.eventCount };
+      checks, receipt, ledgerCount: ledgerState.eligibilityEventCount };
   }
 
   async function invokeMerge(entry, fence, verdict, intent) {
@@ -225,7 +225,7 @@ export function createQueueMergeService({ store, owner, liveAdapter, checkReader
     }
     if (settledMerge(entry)?.result.outcome === 'succeeded') return notApplied('merge-already-settled');
     const ledgerState = fold(ledger.read(queueMergeSubject(entry)));
-    if (ledgerState.terminal || ledgerState.eventCount !== verdict.ledgerCount) {
+    if (ledgerState.terminal || ledgerState.eligibilityEventCount !== verdict.ledgerCount) {
       return notApplied('subject-ledger-moved', { phase: 'parked-hold', reason: 'subject-ledger-moved' });
     }
     // The issuance lock spans this last live read and the complete merge call.

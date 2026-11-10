@@ -14,6 +14,7 @@ export function ensureFinalizationQueueSchema(db) {
   db.exec(readFileSync(new URL('../../migrations/20261026_finalization_queue_checks.sql', import.meta.url), 'utf8'));
   db.exec(readFileSync(new URL('../../migrations/20261027_finalization_queue_merge.sql', import.meta.url), 'utf8'));
   db.exec(readFileSync(new URL('../../migrations/20261029_finalization_queue_routing.sql', import.meta.url), 'utf8'));
+  db.exec(readFileSync(new URL('../../migrations/20261109_finalization_queue_gsr.sql', import.meta.url), 'utf8'));
 }
 
 export function assertQueueStoreOwner(rootDir) {
@@ -48,6 +49,7 @@ export function openFinalizationQueueStore({ rootDir, db, busyTimeoutMs = 5_000 
     database.pragma(`busy_timeout = ${queueWaitMs(busyTimeoutMs, { ceilingMs: 30_000 })}`);
   }
   ensureFinalizationQueueSchema(database);
+  const gsrHoldStmt = database.prepare('SELECT * FROM finalization_queue_gsr WHERE singleton=1');
   const tx = fn => database.transaction(fn).immediate();
   const laneArgs = lane => Object.values(resolveLaneKey(lane));
   const readOwner = lane => database.prepare('SELECT * FROM finalization_queue_lane WHERE repository=? AND base=?').get(...laneArgs(lane)) ?? null;
@@ -76,6 +78,7 @@ export function openFinalizationQueueStore({ rootDir, db, busyTimeoutMs = 5_000 
 
   const store = {
     db: database, rootDir, tx, readOwner, assertFence,
+    executionHold: () => gsrHoldStmt.get() ?? null,
     // Internal transaction primitives used by queue-owner under the issuance lock.
     ensureLane, append, operations,
     readEntry, entries,

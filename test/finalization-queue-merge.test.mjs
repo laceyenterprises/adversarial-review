@@ -14,6 +14,7 @@ import { createQueueRebaseService } from '../src/finalization/queue-rebase.mjs';
 import { createQueueOwner } from '../src/finalization/queue-owner.mjs';
 import { resolveQueueRequiredSet } from '../src/finalization/queue-check-reader.mjs';
 import { openFinalizationLedgerStore } from '../src/finalization/ledger-store.mjs';
+import { ingestCustody } from '../src/finalization/custody-ingest.mjs';
 import { halted } from '../src/finalization/ledger-events.mjs';
 import { foldQueue } from '../src/finalization/ledger-fold.mjs';
 import { probeQueueOwner } from '../src/finalization/queue-probe.mjs';
@@ -431,4 +432,24 @@ test('ten consecutive stale observers that resume after a settled merge never is
 test('merge probe fails honestly for an absent deployment store', () => {
   const result = probeQueueOwner({ rootDir: '/nonexistent-fixture', now: handoffTime(0), load: idle });
   assert.equal(result.capabilities.merge.available, false); assert.ok(result.runtime.build);
+});
+
+for (const custody of [true, false]) test(`append during evaluation: ${custody ? 'custody permits merge' : 'eligibility change still parks'}`, async t => {
+  const p = await finalizing(t);
+  const identity = p.options.identitySurface;
+  p.options.identitySurface = { check: async request => {
+    const store = openFinalizationLedgerStore({ db: p.f.store.db });
+    if (custody) ingestCustody(store, {
+      type: 'launch_custody_observed', subjectKey: queueMergeSubject(p.entry),
+      revisionRef: p.entry.candidate, at: p.f.now(), sourceRef: 'fixture:custody', idempotencyKey: 'during-evaluate',
+      custody: { repository: p.entry.lane.repository, prNumber: p.entry.prNumber,
+        launchRequestId: 'lrq_fixture', state: 'terminal', at: p.f.now(), freshnessSeconds: 180 },
+    });
+    else store.append(halted(queueMergeSubject(p.entry), { at: p.f.now(), reason: 'operator halt' }));
+    return identity.check(request);
+  } };
+  const result = await p.finalize();
+  assert.equal(result.phase, custody ? 'merged' : 'parked-hold');
+  assert.equal(p.calls.length, custody ? 1 : 0);
+  if (!custody) assert.equal(result.reason, 'subject-ledger-moved');
 });

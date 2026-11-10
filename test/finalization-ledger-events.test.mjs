@@ -16,12 +16,12 @@ import {
 const REF = { domainId: 'code-pr', subjectExternalId: 'owner/repo#42', revisionRef: 'sha-A' };
 const AT = '2026-07-17T00:00:00.000Z';
 
-test('the event vocabulary is exactly the merge-authority-v2 §2 set', () => {
+test('the event vocabulary is the merge-authority-v2 set plus external custody facts', () => {
   assert.deepEqual(
     [...FINALIZATION_EVENT_TYPES].sort(),
     [
       'attestation_recorded', 'budget_exhausted', 'checks_settled', 'closed', 'escalated',
-      'finalized', 'halted', 'operator_override', 'remediation_concluded',
+      'finalized', 'halted', 'launch_custody_observed', 'operator_override', 'remediation_concluded',
       'remediation_dispatched', 'revision_advanced', 'verdict_recorded',
     ],
   );

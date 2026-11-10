@@ -33,6 +33,7 @@ export const FINALIZATION_EVENT_TYPES = Object.freeze([
   'closed',
   'escalated',
   'halted',
+  'launch_custody_observed',
 ]);
 
 const EVENT_TYPE_SET = new Set(FINALIZATION_EVENT_TYPES);
@@ -46,6 +47,7 @@ export const REVISION_SCOPED_EVENT_TYPES = Object.freeze([
   'remediation_dispatched',
   'remediation_concluded',
   'finalized',
+  'launch_custody_observed',
 ]);
 
 const REVISION_SCOPED_SET = new Set(REVISION_SCOPED_EVENT_TYPES);
@@ -94,6 +96,7 @@ const REQUIRED_FIELDS = Object.freeze({
   closed: ['reason'],
   escalated: ['reason'],
   halted: ['reason'],
+  launch_custody_observed: ['revisionRef', 'sourceRef', 'idempotencyKey', 'custody'],
 });
 
 // The optional fields each event type may carry (copied through when present).
@@ -110,6 +113,7 @@ const OPTIONAL_FIELDS = Object.freeze({
   closed: ['sourceRef'],
   escalated: ['sourceRef'],
   halted: ['sourceRef'],
+  launch_custody_observed: [],
 });
 
 function assertRequired(type, fields) {
@@ -117,6 +121,23 @@ function assertRequired(type, fields) {
     const value = fields[key];
     if (value === undefined || value === null || value === '') {
       throw new TypeError(`finalization ${type} event requires a non-empty ${key}`);
+    }
+  }
+  if (type === 'launch_custody_observed') {
+    const c = fields.custody;
+    if (!c || typeof c !== 'object' || Array.isArray(c)
+      || typeof c.launchRequestId !== 'string' || !c.launchRequestId
+      || !isNonEmptyString(fields.revisionRef) || !isNonEmptyString(fields.sourceRef)
+      || !isNonEmptyString(fields.idempotencyKey)
+      || typeof c.repository !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(c.repository)
+      || !Number.isSafeInteger(c.prNumber) || c.prNumber < 1
+      || !['requested', 'admitted', 'leased', 'starting', 'running', 'deferred', 'refused',
+        'terminal', 'workspace', 'waiting_approval', 'waiting_input', 'suspended'].includes(c.state)
+      || !Number.isFinite(Date.parse(fields.at)) || c.at !== fields.at
+      || !Number.isFinite(c.freshnessSeconds) || c.freshnessSeconds <= 0 || c.freshnessSeconds > 180
+      || (c.state === 'workspace' && (!['live', 'terminal', 'unknown'].includes(c.launchLiveness)
+        || ![true, false, null].includes(c.dirty)))) {
+      throw new TypeError('invalid launch custody observation');
     }
   }
   // `requiredChecksPresent` and `final` are booleans — validate shape, not truthiness.
@@ -151,6 +172,11 @@ export function makeFinalizationEvent(type, subject, fields = {}) {
   }
   const subjectKey = resolveSubjectKey(subject);
   assertRequired(type, fields);
+  if (type === 'launch_custody_observed'
+    && (subjectKey.domainId !== 'code-pr'
+      || subjectKey.subjectExternalId !== `${fields.custody.repository}#${fields.custody.prNumber}`)) {
+    throw new TypeError('custody subject mismatch');
+  }
 
   /** @type {FinalizationEvent} */
   const event = { type, subjectKey, at: fields.at };
@@ -189,8 +215,7 @@ export function isFinalizationEvent(value) {
   if (!EVENT_TYPE_SET.has(event.type)) return false;
   if (!isNonEmptyString(event.at)) return false;
   try {
-    resolveSubjectKey(event.subjectKey);
-    assertRequired(event.type, event);
+    makeFinalizationEvent(event.type, event.subjectKey, event);
   } catch {
     return false;
   }

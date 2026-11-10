@@ -123,6 +123,7 @@ export function createQueueOwner({ store, now = () => new Date().toISOString(), 
       queueId(ownerId); expiresAt = queueTime(expiresAt);
       if (!Number.isSafeInteger(routeGeneration) || routeGeneration < 0) throw new TypeError('invalid route generation');
       return locked(lane, async lane => {
+        if (store.executionHold()) return { ok: false, reason: 'maintenance-drain' };
         let at = queueTime(now());
         if (Date.parse(expiresAt) <= Date.parse(at)) throw new TypeError('owner expiry must be in the future');
         store.tx(() => store.ensureLane(lane));
@@ -147,6 +148,7 @@ export function createQueueOwner({ store, now = () => new Date().toISOString(), 
         } else if (prior.owner_state === 'parked') return { ok: false, reason: prior.reason };
         if (Date.parse(expiresAt) <= Date.parse(at)) return { ok: false, reason: 'claim-deadline-expired' };
         return store.tx(() => {
+          if (store.executionHold()) return { ok: false, reason: 'maintenance-drain' };
           // The issuance lock spans all await boundaries and every claimant.
           const row = store.readOwner(lane);
           if (row.generation !== prior.generation || row.route_generation !== routeGeneration) throw new Error('queue ownership moved');
@@ -188,6 +190,7 @@ export function createQueueOwner({ store, now = () => new Date().toISOString(), 
       return locked(fence.lane, async lane => {
         const at = queueTime(now());
         const prepared = store.tx(() => {
+          if (store.executionHold()) throw new Error('queue maintenance drain');
           store.assertFence(fence, at);
           const existing = db.prepare('SELECT * FROM finalization_queue_operation WHERE operation_id=?').get(operationId);
           if (existing) {

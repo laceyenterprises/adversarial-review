@@ -12,7 +12,7 @@
   ],
   "requirementsSha256": "c36dfada9ea3292b8016b31be3570c00e04042d3a261a959b7335610c853bc03",
   "implementationSha256": {
-    "ledger-fold": "22ff943c89683e0488850d262dc0a9c18a1a5f589ac3a4a707ea3665509b38f2",
+    "ledger-fold": "abaab5753a0c3aa9c70ecc9136f8e0500526fc5430d03ea3148836c6c4a6179f",
     "eligibility": "e67a419e4d5d038f363b93c7316ed67d2ccd17429479995c43d5256634859378",
     "executor": "afcb4ffe80b84f0f3d0fdb191eff646fb202baf8b64284a6c6b5e01761e557cc"
   },

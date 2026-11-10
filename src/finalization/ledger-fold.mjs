@@ -27,6 +27,7 @@ export function initialLedgerState() {
   return {
     subjectKey: /** @type {SubjectKey | null} */ (null),
     eventCount: 0,
+    eligibilityEventCount: 0,
     lastEventAt: /** @type {string | null} */ (null),
     currentRevision: /** @type {string | null} */ (null),
     /** @type {Record<string, RevisionState>} */
@@ -82,6 +83,10 @@ function cloneState(state) {
  */
 function applyEvent(state, event) {
   state.eventCount += 1;
+  // Custody is off-pass evidence, including payloads unknown to this reader.
+  if (!['launch_custody_observed', 'unknown:launch_custody_observed'].includes(event.type)) {
+    state.eligibilityEventCount += 1;
+  }
   state.lastEventAt = event.at;
   if (!state.subjectKey && event.subjectKey) {
     state.subjectKey = { ...event.subjectKey };

@@ -1,0 +1,20 @@
+{
+  "domains": [
+    {
+      "title": "Launch custody observations and queue GSR",
+      "path": "docs/data-model/finalization-ledger.md",
+      "store": "data/reviews.db",
+      "schemaSurface": "src/finalization/ledger-events.mjs",
+      "relatedSchemaSurfaces": [
+        "src/finalization/custody-ingest.mjs",
+        "src/finalization/queue-gsr.mjs",
+        "migrations/20261109_finalization_queue_gsr.sql"
+      ],
+      "owner": "Merge Authority v2",
+      "optionalFields": [
+        "finalization_ledger.payload_json.custody: source launch/workspace evidence with original time, scope and freshness",
+        "finalization_queue_gsr: singleton maintenance token and creation time; original-token resume only"
+      ]
+    }
+  ]
+}

@@ -725,11 +725,17 @@ is no direct CLI fallback. Unknown builders and Grok-family builders cannot
 use it, including after assignment handoffs or API-key account selection.
 A Grok pin leaves Grok-built PRs on their `remediator-codex` default route;
 fallback candidates retain the subject refusal after account selection.
+Reconciliation applies that same pin exemption to outcome attribution and
+GitHub-auth recovery, retaining the recorded non-Grok worker class. Refused
+post-assignment subjects return to pending with a retry deadline one existing
+maximum hold window after claim time. Grok outcome delivery uses the existing
+Codex commenter token (`GH_CODEX_REVIEWER_TOKEN`); its body retains Grok attribution.
 Unpooled Grok quota holds supply the same job-local reset evidence as other
 remediators, including when fleet quota status is unreadable. Resets beyond
 one hold window try the declared non-Grok fallbacks on the next claim.
-GRK-16 activation requires the paired Agent OS loader/fixture update described
-in [GRK-12](changes/GRK-12.md).
+Merge the paired Agent OS loader/fixture companion before, or in the same
+superproject pointer bump that imports this Node change. GRK-16 activation
+requires that paired deployment; see [GRK-12](changes/GRK-12.md).
 
 ## Remediation round budgets
 

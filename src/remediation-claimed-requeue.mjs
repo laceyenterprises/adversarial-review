@@ -13,7 +13,9 @@ export function holdClaimedJobForRefusedSubject({
   if (!reason) return null;
   return holdClaimedJobForCappedRemediator({
     rootDir, jobPath: claimed.jobPath, heldAt: claimed.job.claimedAt,
-    routing: { ...routing, hold: true, reason, capSource: reason }, delayedPendingPaths, log,
+    routing: { ...routing, hold: true, reason, capSource: reason,
+      holdUntil: new Date(Date.parse(claimed.job.claimedAt) + MAX_QUOTA_HOLD_WINDOW_MS).toISOString(),
+    }, delayedPendingPaths, log,
   });
 }
 

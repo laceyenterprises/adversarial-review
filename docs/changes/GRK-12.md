@@ -23,6 +23,12 @@ Final remediation preserves the non-Grok builder route under a Grok pin,
 recognizes Grok job-local quota holds, refuses domain closer selectors, and
 names the actual account-bound lane in dispatch errors.
 
+Reconciliation now preserves the Grok-builder pin exemption for public outcome
+attribution and GitHub-auth recovery. Post-assignment subject refusals have a
+bounded retry deadline anchored to the claim. Grok delivery uses the existing
+Codex commenter identity; named Codex and Claude remediator routes map to their
+existing commenters as well. This changes no worker execution entitlement.
+
 ## Interface changes
 
 The parity fixture copies must be updated as a pair:
@@ -30,9 +36,11 @@ The parity fixture copies must be updated as a pair:
 `platform/agent-os-config/src/agent_os_config/tests/fixtures/grok-config-parity.v1.json`
 in Agent OS. The Agent OS companion supplies the same pending-v2 refusal in
 Python `_validate_grok_role_pins`, also used by the shell loader, including
-primary, fallback and legacy closer selectors. Deploy the paired changes
-before GRK-16 activation; source validation does not certify live deployment
-readiness. Keep both default-off flags and the Node refusal in place.
+primary, fallback and legacy closer selectors. Merge the Agent OS companion
+first or include it in the same superproject submodule pointer bump; do not
+advance the pointer with the old Python validator or fixture. Deploy the paired
+changes before GRK-16 activation; source validation does not certify live
+deployment readiness. Keep both default-off flags and the Node refusal in place.
 
 No persistent store shape, lifecycle status, merge permission or smoke promise
 changes. Existing pre-spawn routing, quota fallback and HQ admission apply.
@@ -40,6 +48,9 @@ changes. Existing pre-spawn routing, quota fallback and HQ admission apply.
 ## Verification
 
 Passed offline:
+
+- `node --test --test-name-pattern "reconcile routes" test/follow-up-remediation.test.mjs` (385 tests passed; the file runner executes all tests in this file).
+- `node --test test/grok-remediator.test.mjs test/worker-token-pool.test.mjs test/pr-comments.test.mjs` (73 tests, including reconcile comment/auth recovery, bounded handoff hold and named-route delivery regressions).
 
 - `node --test test/grok-remediator.test.mjs test/grok-builder-routing.test.mjs test/domain-policy.test.mjs test/remediation-worker-class-fallback.test.mjs test/config-loader-grok.test.mjs test/remediatorlane-01-mode-runnable-lane.test.mjs test/follow-up-remediation-quota-hold.test.mjs`
 - `npm run lint` (zero errors; existing warnings).

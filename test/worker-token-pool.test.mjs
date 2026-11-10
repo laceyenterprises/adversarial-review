@@ -16,6 +16,7 @@ import { buildLegacyHqRemediationDispatchArgs } from '../src/remediation-dispatc
 import { resolveRemediationModel } from '../src/adapters/agent-runtime/local/remediation.mjs';
 import { resolveConfiguredNonBlockingCodexModel } from '../src/adapters/agent-runtime/local/non-blocking-codex-model.mjs';
 import { remediationWorkerGitIdentity } from '../src/remediation-worker-provenance.mjs';
+import { MAX_QUOTA_HOLD_WINDOW_MS } from '../src/remediation-quota-evidence.mjs';
 import { poolConflictFixture } from './helpers/pool-conflict-fixture.mjs';
 
 const pool = await import('../src/worker-token-pool.mjs').catch(error => {
@@ -333,6 +334,10 @@ for (const [builderTag, enabled] of [['grok', true], ['grok-api', true], ['grok-
       assert.match(result.reason, /cannot remediate its own PR/);
     } else {
       assert.equal(result.reason, 'remediator-capped-hold');
+      const hold = result.job.remediationPlan.retryHistory.at(-1);
+      assert.equal(result.job.remediationPlan.retryAfter, hold.retryAfter);
+      assert.equal(Date.parse(hold.retryAfter) - Date.parse(hold.requeuedAt), MAX_QUOTA_HOLD_WINDOW_MS);
+      assert.doesNotMatch(hold.retryReason, /undefined/);
       assert.equal(result.job.remediationPlan.retryHistory.at(-1).retryMetadata.capSource,
         enabled ? 'grok-acting-lane-unavailable' : 'grok-remediator-disabled');
     }

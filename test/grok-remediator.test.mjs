@@ -7,11 +7,14 @@ import { normalizeRemediationWorkerClass, hqRemediationWorkerClass } from '../sr
 import { remediationWorkerTrailerClass, remediationWorkerGitIdentity } from '../src/remediation-worker-provenance.mjs';
 import { selectWorkerTokenAccount } from '../src/worker-token-pool.mjs';
 import { loadConfig } from '../src/config-loader.mjs';
-import { pickRemediationWorkerClass } from '../src/remediation-worker-routing.mjs';
+import { pickRemediationWorkerClass, resolveReconcileWorkerClass } from '../src/remediation-worker-routing.mjs';
 import { remediatorClassForQuotaLabel, remediatorQuotaEvidence } from '../src/remediation-quota-evidence.mjs';
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+import { buildRemediationOutcomeCommentBody } from '../src/adapters/comms/github-pr-comments/pr-comments.mjs';
+import { recoverGithubAuthOperationalBlocker } from '../src/github-auth-recovery.mjs';
 
 const env = { AGENT_OS_CONFIG_PATH: '/dev/null', HQ_ROOT: tmpdir() };
 const loaderImpl = () => ({ get: (key, fallback) =>
@@ -151,4 +154,44 @@ test('closer selection is explicitly refused even with both switches enabled', (
       assert.throws(() => loadConfig({ topPath, env: {} }), /grok-closer-pending-merge-authority-v2/);
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('Grok pin bypass survives reconciliation comments and auth recovery', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'grok-reconcile-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const overrides = { AGENT_OS_CONFIG_PATH: '/dev/null',
+    AGENT_OS_ROLES_REMEDIATOR: 'remediator-grok',
+    ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'remediator-grok',
+    AGENT_OS_GROK_ENABLED: 'true', AGENT_OS_GROK_REMEDIATOR_ENABLED: 'true' };
+  const previous = Object.fromEntries(Object.keys(overrides).map(key => [key, process.env[key]]));
+  Object.assign(process.env, overrides);
+  t.after(() => { for (const [key, value] of Object.entries(previous)) {
+    if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  } });
+  for (const builderTag of ['grok', 'grok-api', 'grok-remediation']) {
+    const worker = { model: 'remediator-codex', resolvedModel: 'synthetic-codex' };
+    const job = { builderTag, jobId: 'synthetic', repo: 'fixture/repo', prNumber: 1,
+      branch: 'fixture', finalRound: 'comment-only', remediationWorker: worker };
+    assert.equal(resolveReconcileWorkerClass(job, worker), 'remediator-codex');
+    assert.equal(resolveReconcileWorkerClass(job, {}), 'remediator-codex');
+    const body = buildRemediationOutcomeCommentBody({ job, worker, action: 'completed',
+      workerClass: resolveReconcileWorkerClass(job, worker) });
+    assert.match(body, /## Remediation Worker \(remediator-codex\)/);
+    assert.match(body, /> Remediator: codex · synthetic-codex/);
+    let recoveryClass;
+    const result = await recoverGithubAuthOperationalBlocker({
+      reply: { operationalBlockers: [{ title: 'github-auth', finding: 'Expired credential',
+        commitSha: 'a'.repeat(40), expectedRemoteSha: 'b'.repeat(40) }] },
+      hqRoot: rootDir, workspaceDir: rootDir, rootDir, job, worker,
+      completedAt: '2026-11-10T00:00:00Z', resolveWorkerClass: resolveReconcileWorkerClass,
+      execFileImpl: async () => ({ stdout: '', stderr: '' }),
+      retryGithubAuthPushOnceImpl: async ({ workerClass }) => {
+        recoveryClass = workerClass;
+        return { retried: true, pushed: false };
+      },
+    });
+    assert.equal(result.operationalBlockerRecovery.rescue.preserved, true);
+    assert.equal(recoveryClass, 'remediator-codex');
+  }
+  assert.equal(resolveReconcileWorkerClass({ builderTag: 'codex' }, {}), 'remediator-grok');
 });

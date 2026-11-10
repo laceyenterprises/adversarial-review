@@ -155,10 +155,13 @@ export async function resolveInitialRemediatorRouting({ job, healthRouter, env =
 
 // Reconcile-time GitHub operations must not return unmapped worker
 // identities such as clio-agent. A recorded spawned worker model is
-// attribution ground truth; operator pins win unless a cap fallback replaced them.
+// attribution ground truth; operator pins win unless a cap fallback or the
+// Grok-builder exemption replaced them.
 function resolveReconcileWorkerClass(job, worker) {
   const envOverride = defaultRemediatorWorkerClassFromEnv(process.env);
-  if (envOverride && !worker?.fallbackFrom) return envOverride;
+  const bypassedGrokPin = normalizeBuilderClass(job?.builderTag) === 'grok'
+    && normalizeBuilderClass(envOverride) === 'grok';
+  if (envOverride && !worker?.fallbackFrom && !bypassedGrokPin) return envOverride;
   const recordedModel = normalizeRemediationWorkerClass(worker?.model);
   if (recordedModel) return recordedModel;
   return pickRemediationWorkerClass(job);

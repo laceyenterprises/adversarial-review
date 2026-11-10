@@ -2,9 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { publishRemediation } from '../src/remediation-publication.mjs';
 import { PUBLICATION_CHECK_TIMEOUT_MS, selectRemediationPublicationChecks } from '../src/remediation-publication-checks.mjs';
 
@@ -47,8 +48,8 @@ function fixture(t, changedPaths, baseFiles = {}) {
   git('init', '-b', 'main');
   git('config', 'core.hooksPath', '/dev/null');
   write('package.json', '{"name":"adversarial-review","type":"module"}');
-  // Synthetic fixtures prove execution at the real publication boundary;
-  // the production fixtures run independently through the offline test runner.
+  // Most cases use a minimal runner to keep Git-boundary regressions fast.
+  // The integration cases below also exercise the production runner.
   write('test/run-tests.mjs', `import { pathToFileURL } from 'node:url';
 for (const file of process.argv.slice(2)) await import(pathToFileURL(process.cwd() + '/' + file));`);
   for (const path of [simulation, latency]) {
@@ -77,6 +78,67 @@ if (process.env.ARFINALCHECK_FAIL === ${JSON.stringify(path)}) throw Error('synt
     ? readFileSync(join(work, '.git/fixtures-ran'), 'utf8').trim().split('\n') : [];
   return { work, write, git, publish, ran, calls };
 }
+
+// Keep the actual runner and its preloads intact. Only its selected test body
+// is synthetic; source/dependency links support the production preload imports.
+function realRunnerFixture(t, fail) {
+  const f = fixture(t, ['migrations/additive.sql']);
+  // A nested CLI must start outside the parent node:test worker context.
+  delete f.publish.env.NODE_TEST_CONTEXT;
+  const repoRoot = fileURLToPath(new URL('../', import.meta.url));
+  f.write('test/run-tests.mjs', readFileSync(join(repoRoot, 'test/run-tests.mjs'), 'utf8'));
+  mkdirSync(join(f.work, 'test/adapters'));
+  for (const path of ['test/helpers', 'src', 'node_modules']) {
+    symlinkSync(join(repoRoot, path), join(f.work, path), 'dir');
+  }
+  f.write(latency, `import test from 'node:test';
+import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+test('production runner sandbox and selected fixture', () => {
+  assert.ok(process.env.ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT);
+  assert.notEqual(process.cwd(), ${JSON.stringify(f.work)});
+  assert.equal(existsSync('.git'), false);
+  assert.ok(process.env.HOME.startsWith(process.env.ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT));
+  assert.equal(process.env.TMPDIR, join(process.env.ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT, 'tmp'));
+  ${fail ? "assert.fail('publication assertion diagnostic');" : ''}
+});
+`);
+  f.git('add', 'test', 'src', 'node_modules');
+  f.git('commit', '-m', 'Use production test runner');
+  const execute = f.publish.execFileImpl;
+  f.publish.execFileImpl = async (command, args, options) => {
+    const result = await execute(command, args, options);
+    if (command === process.execPath) f.runnerResult = result;
+    return result;
+  };
+  return f;
+}
+
+test('relative workspace publishes through the production runner and sandbox', async t => {
+  const f = realRunnerFixture(t, false);
+  f.publish.workspaceDir = relative(process.cwd(), f.work);
+  const result = await publishRemediation(f.publish);
+  const validation = f.calls.find(call => call.command === process.execPath);
+  assert.equal(validation.args[0], join(f.work, 'test/run-tests.mjs'));
+  assert.equal(validation.options.cwd, f.work);
+  assert.match(String(f.runnerResult.stdout), /production runner sandbox and selected fixture/);
+  assert.equal(f.git('ls-remote', 'origin', 'refs/heads/topic').split('\t')[0], result.headSha);
+});
+
+test('production runner failure preserves stderr and stdout diagnostics without pushing', async t => {
+  const f = realRunnerFixture(t, true);
+  await assert.rejects(publishRemediation(f.publish), error => {
+    assert.equal(error.code, 'remediation-publication-check-failed');
+    assert.match(String(error.cause.stderr), /Test sandbox cleanup:/);
+    assert.match(String(error.cause.stdout), /publication assertion diagnostic/);
+    assert.match(error.message, /Test sandbox cleanup:/);
+    assert.match(error.message, /publication assertion diagnostic/);
+    return true;
+  });
+  assert.equal(f.calls.some(call => call.args.includes('push')), false);
+  assert.equal(f.git('ls-remote', 'origin', 'refs/heads/topic').split('\t')[0], f.publish.previousHead);
+});
 
 for (const [paths, expected] of [
   [['src/finalization/ledger-fold.mjs'], [simulation]],
@@ -131,7 +193,10 @@ test('fixture timeout refuses publication without retry or push', async t => {
     }
     return execute(command, args, options);
   };
-  await assert.rejects(publishRemediation(f.publish), { code: 'remediation-publication-check-failed' });
+  await assert.rejects(publishRemediation(f.publish), {
+    code: 'remediation-publication-check-failed',
+    message: `Pre-publication fixtures failed: ${latency}\nsynthetic timeout`,
+  });
   assert.equal(attempts, 1);
   assert.equal(f.calls.some(call => call.args.includes('push')), false);
 });

@@ -393,8 +393,10 @@ fixture changes select `test/watcher-closure-latency.test.mjs`. The publisher ru
 them together through `test/run-tests.mjs` with a fixed 180-second timeout before
 push. A selected run requires a clean workspace; fixture failure or timeout
 withholds publication. Unrelated paths run neither suite, and other repositories
-retain their own validation policy. These checks supplement normal PR review
-and CI. Simulation baseline changes still require preserved, reviewed outcomes;
+retain their own validation policy. Relative workspace paths are resolved before
+launching the runner. Failure diagnostics retain both stderr and stdout, including
+the runner cleanup banner and the failing test assertions. These checks supplement
+normal PR review and CI. Simulation baseline changes still require preserved, reviewed outcomes;
 migration sentinels remain individually asserted outside the unchanged runtime
 read budget.
 

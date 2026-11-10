@@ -1,4 +1,4 @@
-import { join } from 'node:path';
+import { resolve } from 'node:path';
 
 export const PUBLICATION_CHECK_TIMEOUT_MS = 180_000;
 
@@ -35,11 +35,13 @@ export async function checkRemediationPublication({ workspaceDir, candidate, pat
   try {
     // The existing runner isolates credentials/state and owns test descendants.
     // SIGTERM on the outer bound invokes its process-group cleanup.
-    await execFileImpl(process.execPath, [join(workspaceDir, 'test/run-tests.mjs'), ...tests],
-      { cwd: workspaceDir, env, timeout: PUBLICATION_CHECK_TIMEOUT_MS,
+    await execFileImpl(process.execPath, [resolve(workspaceDir, 'test/run-tests.mjs'), ...tests],
+      { cwd: resolve(workspaceDir), env, timeout: PUBLICATION_CHECK_TIMEOUT_MS,
         killSignal: 'SIGTERM', maxBuffer: 4 * 1024 * 1024 });
   } catch (cause) {
-    throw Object.assign(new Error(`Pre-publication fixtures failed: ${tests.join(', ')}\n${cause.stderr || cause.message}`),
+    const detail = [cause.stderr, cause.stdout].map(value => String(value ?? '').trim())
+      .filter(Boolean).join('\n') || cause.message;
+    throw Object.assign(new Error(`Pre-publication fixtures failed: ${tests.join(', ')}\n${detail}`),
       { code: 'remediation-publication-check-failed', cause });
   }
 }

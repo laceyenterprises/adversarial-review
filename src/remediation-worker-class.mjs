@@ -3,6 +3,9 @@ export function normalizeRemediationWorkerClass(workerClassInput) {
   const workerClass = String(workerClassInput || '').trim().toLowerCase();
   if (!workerClass) return null;
   switch (workerClass) {
+    case 'grok-remediation':
+      return 'remediator-grok';
+    case 'remediator-grok':
     case 'remediator-codex':
     case 'remediator-codex-corp':
     case 'remediator-claude':

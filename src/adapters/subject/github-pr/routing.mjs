@@ -159,6 +159,7 @@ function normalizeBuilderClass(builderClassInput, routeTable = ROUTE_BY_BUILDER_
     'hammer-grok': 'grok',
     'remediator-gemini': 'gemini',
     'gemini-remediation': 'gemini',
+    'grok-remediation': 'grok',
     'codex-remediation': 'codex',
     'codex-corp': 'codex',
     'remediator-codex': 'codex',
@@ -183,6 +184,7 @@ function normalizeReviewerModel(reviewerInput) {
   switch (reviewer) {
     // Integrity vocabulary only: no Grok execution route is registered here.
     case 'grok':
+    case 'grok-remediation':
     case 'grok-api':
     case 'grok-reviewer':
     case 'remediator-grok':

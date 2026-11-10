@@ -2408,6 +2408,12 @@ explicit legacy corporate requests retain the compatibility behavior below.
 Enrollment, deployment and service changes require the ITP-19 operator step.
 
 
+GRK-12 reserves `hammer-grok` in the registry and config vocabulary. Its
+primary, fallback and legacy closer selections are refused with
+`grok-closer-pending-merge-authority-v2`, even with its flags enabled.
+Keep the closer cell and live receipt pending v2; GRK-17 adds the Merge
+Authority v2 executor after the MLR cutover using the v2 queue-closer prompt.
+
 The default closer `worker_class: hammer` runs on the **codex** (OpenAI OAuth)
 harness. When the codex OAuth quota is grounded (LAC-1463: the re-hammer loop
 burned the weekly cap), the hammer cannot spawn at all — `hq dispatch

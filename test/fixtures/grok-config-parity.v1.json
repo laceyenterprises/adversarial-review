@@ -137,7 +137,7 @@
     },
     {
       "name": "role-pins-load-when-their-lanes-are-on",
-      "top": "version: 1\ngrok:\n  enabled: true\n  reviewer:\n    enabled: true\n  remediator:\n    enabled: true\n  hammer:\n    enabled: true\nroles:\n  reviewer: grok\n  remediator: remediator-grok\n  merge_agent_worker_class: hammer-grok\n",
+      "top": "version: 1\ngrok:\n  enabled: true\n  reviewer:\n    enabled: true\n  remediator:\n    enabled: true\n  hammer:\n    enabled: true\nroles:\n  reviewer: grok\n  remediator: remediator-grok\n",
       "expect": {
         "grok.enabled": true,
         "grok.model": "grok-build",
@@ -149,8 +149,7 @@
         "grok.hammer.enabled": true,
         "grok.native_resume.enabled": false,
         "roles.reviewer": "grok",
-        "roles.remediator": "remediator-grok",
-        "roles.merge_agent_worker_class": "hammer-grok"
+        "roles.remediator": "remediator-grok"
       }
     },
     {
@@ -249,6 +248,21 @@
       "name": "reviewer-enum-rejects-class-spelling",
       "top": "version: 1\ngrok:\n  enabled: true\n  reviewer:\n    enabled: true\nroles:\n  reviewer: grok-reviewer\n",
       "errorKey": "roles.reviewer"
+    },
+    {
+      "name": "closer-pending-v2-even-with-all-flags-on",
+      "top": "version: 1\ngrok:\n  enabled: true\n  hammer:\n    enabled: true\nroles:\n  merge_agent_worker_class: hammer-grok\n",
+      "errorKey": "roles.merge_agent_worker_class"
+    },
+    {
+      "name": "closer-worker_class-pending-v2",
+      "top": "version: 1\ngrok:\n  enabled: true\n  hammer:\n    enabled: true\nroles:\n  adversarial:\n    merge_authority:\n      worker_class: hammer-grok\n",
+      "errorKey": "roles.adversarial.merge_authority.worker_class"
+    },
+    {
+      "name": "closer-worker_class_fallback-pending-v2",
+      "top": "version: 1\ngrok:\n  enabled: true\n  hammer:\n    enabled: true\nroles:\n  adversarial:\n    merge_authority:\n      worker_class_fallback: [hammer-grok]\n",
+      "errorKey": "roles.adversarial.merge_authority.worker_class_fallback"
     }
   ]
 }

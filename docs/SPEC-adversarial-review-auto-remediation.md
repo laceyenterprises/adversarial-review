@@ -82,6 +82,11 @@ threshold. A `Request changes` verdict, blocking-finding reasons, stale-head
 reasons, and remediation-state reasons still require validated HAM evidence
 (`ham_terminal_remediation_validated`) or a current-head operator override.
 
+GRK-12 registers `hammer-grok` as inventory only. Selecting it as the primary,
+fallback or legacy closer refuses with
+`grok-closer-pending-merge-authority-v2`, regardless of enable flags. GRK-17
+adds execution after the MLR cutover using the v2 queue-closer prompt.
+
 A zero-blocker `Comment only` review with actionable non-blocking findings may
 create a final follow-up job marked `finalRound: 'comment-only'`. Only one
 follow-up job exists per posted review: the reviewer and the reviewer-pass reaper

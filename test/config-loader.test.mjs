@@ -6288,7 +6288,7 @@ test('AMA merge_authority public docs list the Node loader worker_class enum', (
   const enumMatch = source.match(/merge_authority:\s*\{[\s\S]*?worker_class:\s*\{[\s\S]*?__enum:\s*\[([^\]]+)\]/);
   assert.ok(enumMatch, 'expected merge_authority.worker_class enum in config-loader schema');
   const enumValues = Array.from(enumMatch[1].matchAll(/'([^']+)'/g), (match) => match[1]);
-  assert.deepEqual(enumValues, ['codex', 'claude-code', 'hammer', 'hammer-corp', 'hammer-claude', 'gemini']);
+  assert.deepEqual(enumValues, ['codex', 'claude-code', 'hammer', 'hammer-corp', 'hammer-claude', 'hammer-grok', 'gemini']);
 
   for (const relativePath of [
     'projects/adversarial-merge-authority/SPEC.md',
@@ -6296,11 +6296,17 @@ test('AMA merge_authority public docs list the Node loader worker_class enum', (
     'docs/RUNBOOK-ama-closure.md',
   ]) {
     const doc = readFileSync(join(REPO_ROOT, relativePath), 'utf8');
-    for (const workerClass of enumValues) {
+    // GRK-12 reserves Grok in inventory, but config selection refuses it.
+    // The frozen project spec continues to describe the dispatchable v1 set.
+    for (const workerClass of enumValues.filter(value => value !== 'hammer-grok')) {
       assert.ok(
         doc.includes(`\`${workerClass}\``),
         `${relativePath} must document ${workerClass} as an AMA closer worker class`,
       );
+    }
+    if (relativePath.startsWith('docs/')) {
+      assert.ok(doc.includes('`hammer-grok`'));
+      assert.ok(doc.includes('grok-closer-pending-merge-authority-v2'));
     }
   }
 });

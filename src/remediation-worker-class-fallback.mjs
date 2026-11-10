@@ -53,7 +53,7 @@ import {
   quotaStatusesFromSnapshot,
   providerForQuotaHarness,
 } from './fleet-quota-status.mjs';
-import { resolveRemediatorFallback, codexWorkerAccountPolicy } from './role-config.mjs';
+import { loadRoleConfig, resolveRemediatorFallback, codexWorkerAccountPolicy } from './role-config.mjs';
 import { MAX_QUOTA_HOLD_WINDOW_MS, remediatorQuotaEvidence } from './remediation-quota-evidence.mjs';
 import {
   resolveClaudeRemediationModel,
@@ -86,7 +86,7 @@ export { normalizeRemediationWorkerClass } from './remediation-worker-class.mjs'
 // the other lanes are capped. The lane is refused only when it genuinely cannot
 // be bound: no HQ_ROOT, or one that does not exist. An unknown mode refuses
 // nothing, which keeps direct callers' behaviour unchanged.
-const ACCOUNT_BOUND_REMEDIATION_WORKER_CLASSES = new Set(['remediator-claude-corp']);
+const ACCOUNT_BOUND_REMEDIATION_WORKER_CLASSES = new Set(['remediator-claude-corp', 'remediator-grok']);
 
 // The same fallbacks the AMA closer applies to its HQ dispatch (follow-up-merge-agent).
 const NATIVE_HANDOFF_PARENT_SESSION = 'session:adversarial-review:watcher';
@@ -244,11 +244,20 @@ async function readFleetQuotaStatuses({ env, hqPath, execFileImpl }) {
   }
 }
 
-// Grok acting lanes remain unavailable in this delivery, independently of CFG
-// recognition. Check before pool selection and again at the claim/spawn boundary.
-export function remediationSubjectRefusal(job, workerClass) {
+// Preserve original builder provenance before pool selection and after handoff.
+export function remediationSubjectRefusal(job, workerClass, { env = process.env, topPath, loaderImpl } = {}) {
   if (normalizeReviewerModel(workerClass) === 'grok') {
-    return 'grok-acting-lane-unavailable';
+    if (normalizeBuilderClass(job?.builderTag) === 'grok') return 'grok-acting-lane-unavailable';
+    if (!normalizeBuilderClass(job?.builderTag)) return 'unknown-builder-family';
+    if (workerClass !== 'remediator-grok') return 'grok-acting-lane-unavailable';
+    try {
+      const cfg = loadRoleConfig({ env, topPath, loaderImpl, contextKey: 'roles.remediator' });
+      if (cfg.get('grok.enabled', false) !== true || cfg.get('grok.remediator.enabled', false) !== true) {
+        return 'grok-remediator-disabled';
+      }
+    } catch {
+      return 'grok-remediator-disabled';
+    }
   }
   if (job && (!job.domainId || job.domainId === 'code-pr')
     && !normalizeBuilderClass(job.builderTag)) return 'unknown-builder-family';
@@ -306,10 +315,10 @@ async function resolveModeRunnableWorkerClass({
   topPath,
   loaderImpl,
 } = {}) {
-  const refusal = remediationSubjectRefusal(job, primary);
+  const refusal = remediationSubjectRefusal(job, primary, { env, topPath, loaderImpl });
   if (refusal) return { workerClass: primary, hold: true, fellBack: false, reason: refusal };
   fallbackWorkerClasses = (Array.isArray(fallbackWorkerClasses) ? fallbackWorkerClasses : [])
-    .filter(candidate => !remediationSubjectRefusal(job, candidate));
+    .filter(candidate => !remediationSubjectRefusal(job, candidate, { env, topPath, loaderImpl }));
   await ensureWorkerRegistryReadyImpl({env});
   const routeConfig = { env, topPath, loaderImpl };
   modelForClass ??= (workerClass) => remediatorModelForClass(workerClass, { job, env });
@@ -636,6 +645,7 @@ function remediatorModelForClass(workerClass, { job, env }) {
   }
   if (workerClass === 'remediator-claude') return resolveRemediationModel(workerClass, { env, fallbackModel: null }).resolvedModel;
   if (['claude-code', 'remediator-claude-corp'].includes(workerClass)) return resolveClaudeRemediationModel(env).resolvedModel;
+  if (workerClass === 'remediator-grok') return resolveRemediationModel(workerClass, { env, fallbackModel: null }).resolvedModel;
   if (workerClass === 'gemini') return resolveGeminiRemediationModel(env);
   return null;
 }
@@ -679,7 +689,7 @@ export async function resolveClaimedRemediatorRouting({
     topPath,
     loaderImpl,
   });
-  const subjectRefusal = remediationSubjectRefusal(job, routing?.workerClass);
+  const subjectRefusal = remediationSubjectRefusal(job, routing?.workerClass, { env, topPath, loaderImpl });
   if (subjectRefusal) return { ...routing, hold: true, reason: subjectRefusal };
   for (const refusal of routing?.modeRefusals || []) {
     log.warn?.(

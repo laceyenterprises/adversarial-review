@@ -13,7 +13,7 @@ const REMEDIATORS = Object.freeze({ codex: 'remediator-codex', 'claude-code': 'r
   'remediator-claude-corp': 'remediator-claude' });
 const HAMMERS = Object.freeze({ 'hammer-corp': 'hammer', 'hammer-claude-corp': 'hammer-claude' });
 const FAMILIES = Object.freeze({ hammer: 'codex', 'hammer-claude': 'claude',
-  'remediator-codex': 'codex', 'remediator-claude': 'claude' });
+  'remediator-grok': 'grok', 'remediator-codex': 'codex', 'remediator-claude': 'claude' });
 
 export async function selectWorkerTokenAccount({ identity, model, env = process.env,
   oauth = null, resolvePoolsImpl = resolveIdentityTokenPools, ownerImpl = reviewerPoolOwner,
@@ -144,8 +144,8 @@ export async function resolvePooledWorkerRouting({ primary, fallbackWorkerClasse
     if (!fallback || fallback.status === 'unavailable' || fallback.reason === 'pool-config-conflict') continue;
     if (fallback.hold) return { ...base, hold: true, status: 'held', reason: fallback.reason, skipped };
     return { ...fallback, workerClass: candidate, fellBack: true, from: identity, to: candidate,
-      provider: FAMILIES[identity] === 'codex' ? 'openai' : 'anthropic',
-      fallbackProvider: FAMILIES[candidate] === 'codex' ? 'openai' : 'anthropic',
+      provider: ({ codex: 'openai', claude: 'anthropic', grok: 'xai' })[FAMILIES[identity]],
+      fallbackProvider: ({ codex: 'openai', claude: 'anthropic', grok: 'xai' })[FAMILIES[candidate]],
       primaryState: account.status, capSource: preferCrossFamily ? infrastructureReason : account.reason,
       reason: preferCrossFamily ? 'infrastructure-fallback' : 'primary-grounded-fallback', skipped };
   }

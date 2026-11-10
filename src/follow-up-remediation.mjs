@@ -3455,7 +3455,7 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
       throw new Error(`corporate Claude remediation requires account-bound HQ dispatch `
         + `(selected lane ${workerClass}, mode ${remediationMode}: ${laneModeRefusal})`);
     }
-    if (!(hqDispatchEnabled && ['gemini', 'remediator-claude-corp'].includes(workerClass))) {
+    if (!(hqDispatchEnabled && ['gemini', 'remediator-claude-corp', 'remediator-grok'].includes(workerClass))) {
       await assertRemediationWorkerOAuth(workerClass, { execFileImpl,
         delegatedPool: hqDispatchEnabled && remediatorRouting.pooled });
     }

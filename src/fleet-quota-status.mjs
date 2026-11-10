@@ -40,6 +40,8 @@ export const QUOTA_HARNESS_PROVIDER = Object.freeze({
   gemini: 'google',
   grok: 'xai',
   'grok-reviewer': 'xai',
+  'remediator-grok': 'xai',
+  'hammer-grok': 'xai',
   'remediator-gemini': 'google',
 });
 

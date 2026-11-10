@@ -24,13 +24,16 @@ const pool = await import('../src/worker-token-pool.mjs').catch(error => {
 });
 const defaults = JSON.parse(readFileSync(new URL('./fixtures/identity-token-selection.v1.json', import.meta.url))).defaults;
 function wireFor(identity, index = 0) {
-  const value = structuredClone(defaults);
-  const family = identity.includes('claude') ? 'claude' : 'codex';
-  const members = family === 'codex' ? ['openai-corporate', 'openai-primary'] : ['anthropic-corporate', 'anthropic-primary'];
+  const value = structuredClone(identity.includes('grok')
+    ? JSON.parse(readFileSync(new URL('./fixtures/identity-token-selection.v1.json', import.meta.url))).grok_defaults
+    : defaults);
+  const family = identity.includes('grok') ? 'grok' : identity.includes('claude') ? 'claude' : 'codex';
+  const members = family === 'grok' ? ['subscription-a', 'key-c']
+    : family === 'codex' ? ['openai-corporate', 'openai-primary'] : ['anthropic-corporate', 'anthropic-primary'];
   value.oauth.identity_token_pools[identity] = members;
   value.request.identity = value.request.snapshot.identity = identity;
   value.request.family = family;
-  value.request.identity_models = value.request.requested_models = value.request.snapshot.requested_models = [family === 'codex' ? 'gpt-6' : 'opus'];
+  value.request.identity_models = value.request.requested_models = value.request.snapshot.requested_models = [family === 'grok' ? 'grok-build' : family === 'codex' ? 'gpt-6' : 'opus'];
   value.selection = { version: 1, identity, generation: value.request.generation,
     status: 'selected', account_id: members[index], reason: index ? 'fallback-ready' : 'preferred-ready',
     considered: members.slice(0, index + 1).map((id, i) => ({ account_id: id,
@@ -208,12 +211,13 @@ test('ITP-14 default Codex worker order is corporate-first and unknown preferred
   assert.equal(selectCodexWorkerAccount(fixture).hold, true);
 });
 
-for (const family of ['codex', 'claude']) for (const index of [0, 1]) for (const experiment of [false, true]) for (const local of (experiment ? [false] : [false, true])) test(`${experiment ? 'OSG-14 assigned arm' : 'ITPREMEDHOLD-01'} ${family} remediation claim account ${index} local=${local} dispatches remediator without local credentials`, async t => {
+for (const family of ['codex', 'claude', 'grok']) for (const index of [0, 1]) for (const experiment of (family === 'grok' ? [false] : [false, true])) for (const local of (experiment ? [false] : [false, true])) test(`${experiment ? 'OSG-14 assigned arm' : 'ITPREMEDHOLD-01'} ${family} remediation claim account ${index} local=${local} dispatches remediator without local credentials`, async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'itp14-claim-'));
   const hqRoot = join(rootDir, 'hq');
   const workspaceDir = join(rootDir, 'worker');
   mkdirSync(hqRoot); mkdirSync(workspaceDir);
   const overrides = { AGENT_OS_CONFIG_PATH: '/dev/null', AGENT_OS_ROLES_REMEDIATOR: 'adversarial',
+    AGENT_OS_GROK_ENABLED: 'true', AGENT_OS_GROK_REMEDIATOR_ENABLED: 'true',
     ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: undefined,
     AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'native', ADV_WITH_HQ_INTEGRATION: local ? '0' : '1',
     HQ_ROOT: hqRoot, HQ_PARENT_SESSION: 'synthetic-parent', HQ_PROJECT: 'synthetic-project',
@@ -251,6 +255,7 @@ for (const family of ['codex', 'claude']) for (const index of [0, 1]) for (const
     resolveRemediationWorkerClassImpl: args => experiment
       ? { workerClass: 'remediator-codex-corp', pooled: false, hold: false }
       : resolveRemediationWorkerClassWithFallback({ ...args,
+      ...(family === 'grok' ? { primary: identity, modelForClass: () => 'grok-build' } : {}),
       selectAccountImpl: request => pool.selectWorkerTokenAccount({ ...request, oauth: wire.oauth,
         model: wire.request.requested_models[0], ownerImpl: async () => wire }),
       execFileImpl: async () => ({ stdout: '{}' }) }),
@@ -302,9 +307,9 @@ for (const resolver of ['missing', 'null', 'undefined']) {
       const seen = [];
       const result = await pool.resolvePooledWorkerRouting({
         primary: 'remediator-codex', kind: 'remediator', env: {},
-        fallbackWorkerClasses: ['remediator-grok', ...(laterFallback ? ['remediator-claude'] : [])],
+        fallbackWorkerClasses: ['remediator-fixture-unpooled', ...(laterFallback ? ['remediator-claude'] : [])],
         ...(resolver === 'missing' ? {} : { resolveUnpooledFallback: async candidate => {
-          assert.equal(candidate, 'remediator-grok');
+          assert.equal(candidate, 'remediator-fixture-unpooled');
           return resolver === 'null' ? null : undefined;
         } }),
         selectAccountImpl: async ({ identity }) => {
@@ -316,7 +321,7 @@ for (const resolver of ['missing', 'null', 'undefined']) {
         },
       });
       assert.deepEqual(result.skipped, [
-        { workerClass: 'remediator-grok', reason: 'unpooled-fallback-unresolved' },
+        { workerClass: 'remediator-fixture-unpooled', reason: 'unpooled-fallback-unresolved' },
       ]);
       assert.deepEqual(seen, ['remediator-codex', ...(laterFallback ? ['remediator-claude'] : [])]);
       assert.equal(result.workerClass, laterFallback ? 'remediator-claude' : 'remediator-codex');

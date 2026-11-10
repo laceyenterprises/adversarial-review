@@ -21,6 +21,35 @@ predicate, attestation and lease check. Conflicts and CI-only repair retain
 their hammer routes. Blocking reviews retain their existing behavior. Strict
 mode, finding content, head matching, merge authority and leases are unchanged.
 
+The final-fix-all worker can authorize a review-cited primary-line reversal
+under the same finding/region rules as the hammer. Its existing queue record
+must bind `repo`, `prNumber`, `jobId`, `revisionRef` and
+`closureHandoff: { reason: final-fix-all, headSha }` to that source review head.
+The recorded `remediationWorker.launchRequestId` and `workerClass` must match
+the verified **produced** attestation at the exact authorizing commit SHA.
+Names, emails, title prefixes, a later clean review, and an opener's attestation
+provide no reversal authority. Terminal and archived job receipts retain this
+historical proof without retaining live custody.
+
+When removing or replacing primary lines for a finding, the worker itself
+generates `Reviewed-Head: <review commit SHA>` and
+`Reversal-Authorized-By: <review node ID or URL> finding=N kind=blocking`
+or `kind=non-blocking`, one trailer per covering finding. Explicit kind is
+required for lane commits; non-blocking admission still requires strict mode.
+The installed hook retains the remediation `Worker-Class` and `Worker-Job-Id`.
+Keep those reversals in the final publication commit, folding later CI repair
+into it and revalidating before guarded publication. After final CI validation,
+the worker runs `hq branch-push complete --reason 'final-fix-all review-cited remediation'`
+to record exact-commit produced evidence, confirms the attestation receipt,
+and adds no further commits. Missing evidence remains an operational blocker.
+These trailers are never operator-authored waivers.
+
+Both closer eligibility and daemon merge consume this shared preservation
+proof. Citation currency, ancestry, parent-state content, whole-region coverage
+and immutable original-reversal proofs still apply after a rebase. Lane
+history is collected afresh on each evaluation; ordinary hammer history keeps
+its cache and durable verified-reversal behavior.
+
 After both PRs land, SRE lets the submodule float through main-catchup and
 restarts the registered watcher and follow-up services through the deployment
 procedure. On natural traffic, retain receipts showing (1) a newly final-round

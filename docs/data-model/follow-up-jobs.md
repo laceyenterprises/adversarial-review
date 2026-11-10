@@ -63,6 +63,19 @@ only settled absence or conflict produces an operator stop.
 
 ## Final fix-all handoff (LANEAUTO-01)
 
+For review-cited reversals, the existing durable job also supplies historical
+authorization provenance (LANEREVERSAL-01). `repo`, `prNumber`, `jobId`,
+`revisionRef` and `closureHandoff.headSha` must match the PR, commit's
+`Worker-Job-Id`, and cited review head. The handoff reason must be
+`final-fix-all`. `remediationWorker.launchRequestId` and `workerClass` must match
+the verified produced attestation for the exact authorizing commit; the commit
+retains the corresponding remediation `Worker-Class`. The worker generates
+`Reviewed-Head` and explicit-kind `Reversal-Authorized-By` trailers only for
+finding-covered primary-line reversals and records final branch-push completion
+to emit that attestation. Missing, conflicting or unreadable evidence refuses
+authorization. Terminal and archived jobs can prove historical ownership but
+cannot claim live custody. No field, status or durable queue schema is added.
+
 At the final review-round cap, a latest exact-head Comment-only review with
 known zero blocking findings and remaining non-blocking or demoted findings
 gets one builder **final fix-all** work order before findings closure. The

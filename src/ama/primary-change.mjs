@@ -18,6 +18,8 @@ import { fileURLToPath } from 'node:url';
 import { parseBlockingFindingsSection, parseNonBlockingFindingsSection } from '../kernel/review-findings.mjs';
 import { normalizeEffectiveReviewVerdict } from '../kernel/verdict.mjs';
 import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers, parseCommitTrailerValues } from './ham-provenance.mjs';
+import { isRemediationCommit, readLaneReversalOwners, laneReversalOwner,
+  laneReversalIdentityMatches, readLaneReversalIdentity } from './lane-reversal.mjs';
 import { proveDerivedArtifacts, proveGeneratedBlocks } from './derived-artifacts.mjs';
 import { proveMigrationRenumbers, verifiedMigrationRenumbers } from './migration-renumber.mjs';
 import { classifyOccurrence, deadCodeLanguage, dynamicHazard, parseDeadCodeDeclaration, symbolOccurrences } from './dead-code-symbols.mjs';
@@ -445,7 +447,9 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
           'non-blocking': parseNonBlockingFindingsSection(review.body) },
       });
       const parsedReview = cache.get(review);
-      if (!isHammer(commit) || !reversalCommitIdentityMatches(authorization, cache) || (rebased && !commit.author?.login && commit.reversalAppAttested !== true) || !SHA.test(commit.sha || '') || !SHA.test(review.commit_id || '')
+      const lane = !isHammer(commit) && laneReversalIdentityMatches(authorization);
+      if ((!lane && (!isHammer(commit) || !reversalCommitIdentityMatches(authorization, cache)
+        || (rebased && !commit.author?.login && commit.reversalAppAttested !== true))) || !SHA.test(commit.sha || '') || !SHA.test(review.commit_id || '')
         || !['CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'APPROVED'].includes(review.state)
         || !['request-changes', 'approved', 'comment-only'].includes(parsedReview.verdict)
         || !amaAllAuthoritativeReviewerLogins().includes(String(review.user?.login || '').replace(/\[bot\]$/, ''))) return false;
@@ -453,8 +457,9 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
         trailers: parseCommitTrailers(commit.commit.message), citations: reversalCitations(commit.commit.message),
       });
       const { trailers, citations } = cache.get(commit);
-      if (!isHamWorkerTicket(trailers['worker-ticket']) || trailers['reviewed-head'] !== review.commit_id) return false;
+      if ((!lane && !isHamWorkerTicket(trailers['worker-ticket'])) || trailers['reviewed-head'] !== review.commit_id) return false;
       return citations.some((cite) => {
+        if (lane && !cite[3]) return false;
         if (![review.node_id, review.html_url].filter(Boolean).includes(cite[1])) return false;
         citation = cite;
         if (authorization.verifiedRegions && (!Array.isArray(authorization.verifiedRegions)
@@ -1108,7 +1113,8 @@ async function attestedReversal(commit, repo, read, prNumber) {
   return Array.isArray(comments) && comments.length < 100 && comments.some(comment => exactHammerValidation(comment, commit.sha));
 }
 
-async function originalReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, readCommit, metadata, prNumber, matchTrailers = false }) {
+async function originalReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, readCommit, metadata, prNumber, matchTrailers = false,
+  laneOwners = [], readLaneIdentityImpl = readLaneReversalIdentity, rootDir }) {
   if (!SHA.test(superseding.commit_id || '')) return { detail: 'invalid superseding review head' };
   const snapshot = await read(`repos/${repo}/compare/${review.commit_id}...${superseding.commit_id}`);
   if (!['ahead', 'diverged'].includes(snapshot.status) || !Array.isArray(snapshot.commits)
@@ -1118,7 +1124,8 @@ async function originalReversalAuthorization({ repo, review, reviews, supersedin
     ? reversalTrailerIdentity(entry) === reversalTrailerIdentity(commit)
     : entry.commit?.message === commit.commit.message);
   if (!sameMessage.length) return { detail: matchTrailers ? 'no candidate with the same trailer set' : 'no candidate with the same commit message' };
-  const candidates = sameMessage.filter(entry => isHammer(entry) && SHA.test(entry.sha || ''));
+  const lane = !isHammer(commit);
+  const candidates = sameMessage.filter(entry => (lane ? isRemediationCommit(entry) : isHammer(entry)) && SHA.test(entry.sha || ''));
   if (!candidates.length) return { detail: 'commit-provenance: no valid same-message candidate identity' };
   const failures = [];
   for (const candidate of candidates) {
@@ -1126,8 +1133,13 @@ async function originalReversalAuthorization({ repo, review, reviews, supersedin
       if (failures.length < 10) failures.push(`${candidate.sha}: ${detail}`);
     };
     const original = await readCommit(`repos/${repo}/commits/${candidate.sha}`);
+    const laneOwner = lane ? laneReversalOwner(original, laneOwners) : null;
+    const laneIdentity = lane && laneOwner ? await readLaneIdentityImpl({
+      repo, prNumber, currentHeadSha: original.sha, rootDir,
+    }) : null;
+    const laneProof = lane ? { laneOwner, laneIdentity } : {};
     if (original.sha !== candidate.sha || original.commit?.message !== candidate.commit.message
-      || !hamCommitIdentityMatches(original) || original.parents?.length !== 1
+      || (lane ? !laneReversalIdentityMatches({ commit: original, ...laneProof }) : !hamCommitIdentityMatches(original)) || original.parents?.length !== 1
       || !SHA.test(original.parents[0].sha || '')) { reject('commit-provenance'); continue; }
     let originalIdentity;
     try {
@@ -1145,7 +1157,7 @@ async function originalReversalAuthorization({ repo, review, reviews, supersedin
     const current = await isCurrentAuthoritativeFamilyReview(review, reviews.slice(0, reviews.indexOf(superseding)), parentSha,
       (from, to) => metadata(`repos/${repo}/compare/${from}...${to}`));
     const rebased = !current;
-    if (rebased && !original.author?.login) {
+    if (!lane && rebased && !original.author?.login) {
       if (!await attestedReversal(original, repo, read, prNumber)) { reject('commit-provenance: missing App attestation'); continue; }
       original.reversalAppAttested = true;
     }
@@ -1170,6 +1182,7 @@ async function originalReversalAuthorization({ repo, review, reviews, supersedin
       continue;
     }
     return { authorization: { commit: original, review, reviewedFiles: reviewed.files, parentFiles: parent.files,
+      ...laneProof,
       ...(rebased ? { rebased: true } : {}),
       completeFileLists: original.filesComplete === true && reviewed.filesComplete === true && parent.filesComplete === true } };
   }
@@ -1193,9 +1206,17 @@ async function recordedReversalAuthorization(args) {
 }
 
 // get is an injected bounded JSON API reader. Compare caps are errors, not empty diffs.
-async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir, builderHead, persistAuthorizations = false, historyOnly = false }) {
+async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir, builderHead, persistAuthorizations = false, historyOnly = false,
+  readLaneIdentityImpl = readLaneReversalIdentity }) {
   // Reuse only within this evaluation. The in-lease evaluation must re-read live state.
   const responses = new Map();
+  const laneIdentityReads = new Map();
+  const readLaneIdentity = args => {
+    if (!laneIdentityReads.has(args.currentHeadSha)) {
+      laneIdentityReads.set(args.currentHeadSha, Promise.resolve().then(() => readLaneIdentityImpl(args)));
+    }
+    return laneIdentityReads.get(args.currentHeadSha);
+  };
   const read = (path) => {
     if (!responses.has(path)) responses.set(path, Promise.resolve().then(() => get(path)).then(result => {
       if (Array.isArray(result?.files) && result.files.length >= 300 && result.filesComplete !== true) {
@@ -1260,10 +1281,20 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
         builderBoundary = boundary;
       }
     }
+    const hasLaneCandidates = history.commits.some(commit => isRemediationCommit(commit)
+      || parseCommitTrailerValues(commit.commit.message)['worker-job-id']?.length);
+    const laneOwners = hasLaneCandidates ? readLaneReversalOwners(primaryChangeRoot({ rootDir }), repo, prNumber) : [];
+    // Known fix-all work remains protected without citations. Claimed waivers
+    // also enter checking when the owner is missing, so they fail closed.
+    // Ordinary builder remediation retains its existing classification.
+    const isLaneClosure = commit => laneOwners.some(job =>
+      (parseCommitTrailerValues(commit.commit.message)['worker-job-id'] || []).includes(job.jobId))
+      || isRemediationCommit(commit) && parseCommitTrailers(commit.commit.message)['reversal-authorized-by'];
     let first = history.commits.find((commit, index) => isHammerCommit(commit,
-      launchIndex >= 0 && index > launchIndex));
-    if (!first) return { headSha, hasHammerCommits: false };
-    if (historyOnly) return { headSha, hasHammerCommits: true };
+      launchIndex >= 0 && index > launchIndex) || isLaneClosure(commit));
+    const laneHistory = hasLaneCandidates ? { laneReversalHistory: true } : {};
+    if (!first) return { headSha, hasHammerCommits: false, ...laneHistory };
+    if (historyOnly) return { headSha, hasHammerCommits: true, ...laneHistory };
     // Only classification can omit patches. Every hammer proof still consumes
     // the complete author and final tree differences before granting authority.
     if (get.commitHistory) {
@@ -1354,7 +1385,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
     const rejectedReversalAuthorizations = [];
     const authorizedPairs = new Set();
     const closure = history.commits.slice(history.commits.findIndex((commit) => commit.sha === primaryHead) + 1);
-    const candidates = closure.filter((candidate) => isHammer(candidate)
+    const candidates = closure.filter((candidate) => (isHammer(candidate) || isLaneClosure(candidate))
       && parseCommitTrailers(candidate.commit.message)['reversal-authorized-by']);
     const reviewList = candidates.length ? await read(`repos/${repo}/pulls/${prNumber}/reviews?per_page=100`) : [];
     // An incomplete list cannot prove a citation is current. Refuse its waiver,
@@ -1372,7 +1403,16 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
         };
         try {
           const commit = await readCommit(`repos/${repo}/commits/${candidate.sha}`);
-          const stored = persistAuthorizations
+          const lane = !isHammer(candidate);
+          const laneOwner = lane ? laneReversalOwner(commit, laneOwners) : null;
+          const laneIdentity = lane && laneOwner ? await readLaneIdentity({
+            repo, prNumber, currentHeadSha: commit.sha, rootDir,
+          }) : null;
+          const laneProof = lane ? { laneOwner, laneIdentity } : {};
+          if (lane && !laneReversalIdentityMatches({ commit, ...laneProof })) { reject('lane-commit-provenance'); continue; }
+          // Stored/recommitted HAM waivers retain their existing proof path.
+          // Lane commits must freshly prove their own exact-SHA attestation.
+          const stored = !lane && persistAuthorizations
             ? await verifiedReversalRecord({ rootDir, repo, prNumber }, verifiedReversalIdentity(commit, cite[1])) : null;
           const review = stored?.authorization?.review
             || reviews.find((entry) => cite && [entry.node_id, entry.html_url].filter(Boolean).includes(cite[1]));
@@ -1381,9 +1421,9 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
           const pair = `${candidate.sha}:${review.node_id || review.html_url}`;
           if (authorizedPairs.has(pair)) continue;
           authorizedPairs.add(pair);
-          const recommitted = isRecommittedHammer(commit);
+          const recommitted = !lane && isRecommittedHammer(commit);
           if (commit.sha !== candidate.sha || commit.commit?.message !== candidate.commit.message
-            || (!hamCommitIdentityMatches(commit) && !recommitted)
+            || (!lane && !hamCommitIdentityMatches(commit) && !recommitted)
             || commit.parents?.length !== 1 || !SHA.test(commit.parents[0].sha)) { reject('commit-provenance'); continue; }
           const parentSha = commit.parents[0].sha;
           if (stored?.regions?.length) {
@@ -1423,7 +1463,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
             if (await attestedReversal(commit, repo, read, prNumber)) commit.reversalAppAttested = true;
             else if (!superseding) { reject('rebased-commit-unproven', 'missing App attestation or immutable original reversal'); continue; }
           }
-          if (rebased && !commit.author?.login) {
+          if (!lane && rebased && !commit.author?.login) {
             if (!await attestedReversal(commit, repo, read, prNumber)) { reject('commit-provenance'); continue; }
             commit.reversalAppAttested = true;
           }
@@ -1446,7 +1486,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
           let originalAuthorization;
           if (superseding) {
             const proof = await recordedReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, readCommit, metadata, prNumber,
-              matchTrailers: recommitted });
+              matchTrailers: recommitted, laneOwners, readLaneIdentityImpl: readLaneIdentity, rootDir });
             originalAuthorization = proof.authorization;
             if (!originalAuthorization) { reject(recommitted && !commit.reversalAppAttested
               ? 'rebased-commit-unproven' : 'original-reversal-not-proven-before-supersession', proof.detail); continue; }
@@ -1455,11 +1495,12 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
             }
           }
           const authorization = { commit, review, mergeBase, reviewedFiles: reviewed.files, parentFiles: parent.files,
+            ...laneProof,
             completeFileLists: reviewed.filesComplete === true && parent.filesComplete === true && commit.filesComplete === true,
             ...(originalAuthorization ? { originalAuthorization } : {}),
             ...(rebased ? { rebased: true } : {}) };
           reversalAuthorizations.push(authorization);
-          if (persistAuthorizations) {
+          if (!lane && persistAuthorizations) {
             const regions = verifiedReversalRegions(primary.files, authorization);
             if (regions.length) await verifiedReversalRecord({ rootDir, repo, prNumber },
               verifiedReversalIdentity(commit, cite[1]), { authorization, regions });
@@ -1480,7 +1521,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
       const finalChanges = changes(final.files, evidencePaths(primaryChanges, final.files), aliases);
       testChanges = testRegionsChanged(primaryChanges, finalChanges);
     } catch { /* Retain raw evidence; the evaluator fails closed on unsupported patches. */ }
-    return { headSha, hasHammerCommits: true, primaryHead, mergeBase,
+    return { headSha, hasHammerCommits: true, primaryHead, mergeBase, ...laneHistory,
       ...(pr.base.ref ? { baseSha: pr.base.sha, baseRef: pr.base.ref } : {}),
       ...(builderBoundary ? { builderBoundary } : {}),
       // Retain the trusted range for rename proof and refusal attribution.

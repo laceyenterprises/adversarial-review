@@ -11,6 +11,7 @@ import { getEventListeners } from 'node:events';
 import { createHistoryReader } from '../src/ama/history-reader.mjs';
 import { execHistoryFile, historyChildExecutor } from '../src/ama/history-child.mjs';
 import { withHistoryReadBudget } from '../src/ama/history-read-policy.mjs';
+import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
 import { fetchPrimaryChange, checkPrimaryChange } from '../src/ama/primary-change.mjs';
 import { currentGitHubBudgetScope, withGitHubBudgetScope } from '../src/rate-limit-throttle.mjs';
 
@@ -45,7 +46,7 @@ test('HAMHISTORYBUDGET-01: an injected reader ignoring cancellation returns a cl
   assert.equal(reads, 1);
 });
 
-test('the production whole-verification deadline is exactly 90 seconds', async t => {
+test('the idle production whole-verification deadline is 90 seconds', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let finished = false;
   const pending = fetchPrimaryChange({ ...args, get: never }).then(result => { finished = true; return result; });
@@ -53,6 +54,27 @@ test('the production whole-verification deadline is exactly 90 seconds', async t
   await Promise.resolve();
   assert.equal(finished, false);
   t.mock.timers.tick(1);
+  assert.equal((await pending).historyReadTimedOut, true);
+});
+
+test('HISTREADLOAD-01: collector and nested reader honor a load-scaled budget above 90 seconds', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const timeoutMs = loadAwareTimeoutMs(90_000, {
+    loadAvg1m: 108, cpuCount: 18, cpuBusyPercent: 100, enabled: true, maxMultiplier: 6,
+  });
+  assert.equal(timeoutMs, 540_000);
+  let started;
+  const ready = new Promise(resolve => { started = resolve; });
+  let finished = false;
+  const get = createHistoryReader({ contextTimeoutMs: timeoutMs, nowMs: () => 0,
+    execGhWithRetryImpl: () => { started(); return never(); } });
+  const pending = fetchPrimaryChange({ ...args, get }, { contextTimeoutMs: timeoutMs })
+    .then(value => { finished = true; return value; });
+  await ready;
+  t.mock.timers.tick(90_001);
+  await Promise.resolve();
+  assert.equal(finished, false);
+  t.mock.timers.tick(timeoutMs - 90_001);
   assert.equal((await pending).historyReadTimedOut, true);
 });
 

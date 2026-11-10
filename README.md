@@ -2871,14 +2871,18 @@ and [RCA with residual renderer scope](docs/INCIDENT-2026-10-24-legacy-artifact-
 Offline regressions are `primary-change-lines`, `primary-change-store`,
 `derived-artifacts` and `primary-change-generated-blocks` under `test/`.
 
-Primary-change collection has a fixed 90-second wall-clock deadline across
-history reads and optional proofs (HAMHISTORYBUDGET-01). Timeout returns
+Primary-change collection has a nominal 90-second load-scaled deadline across
+history reads and optional proofs (HAMHISTORYBUDGET-01 / HISTREADLOAD-01). Explicit
+effective caller budgets are honored without rescaling. An inner timeout returns
 retryable `history-read-failed` evidence and an in-lease merge attempt releases
 custody before returning. Native immutable reads may finish after a shorter
 tick expires, within that verification limit. Standalone rescue readers defer
 exhausted quota; cancellation kills history command groups and prevents late
-read results from continuing verification. The existing exact-head,
-preservation and finding-authorized reversal gates still apply.
+read results from continuing verification. The hammer supervisor can expire
+before the inner deadline under load, producing timeout/overload deferral instead
+of classified helper JSON; see the [history contract](docs/RUNBOOK-ama-closure.md).
+The existing exact-head, preservation and finding-authorized reversal gates
+still apply.
 Lifecycle states, transitions and existing smoke promises are unchanged; native
 receipt registration and live recovery are separate operator work.
 

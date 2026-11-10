@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { createHash } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -101,7 +102,7 @@ export async function proveDerivedArtifacts({ repo, get, signal, rootDir, prNumb
     .filter(({ before, after }) => after && after.status === before.status && after.sha !== before.sha);
   if (!candidates.length || candidates.length > MAX_ARTIFACTS) return [];
   let scratch;
-  const deadline = AbortSignal.timeout(120000);
+  const deadline = AbortSignal.timeout(loadAwareTimeoutMs(120000));
   const bounded = signal ? AbortSignal.any([signal, deadline]) : deadline;
   const trees = new Map(), blobs = new Map();
   let totalBytes = 0, checkoutBytes = 0, count = 0;
@@ -426,7 +427,7 @@ export async function withDerivedCheckout({ repo, rootDir, headSha, mergeBase, p
     || !/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error('invalid derived checkout identity');
   const scratch = await mkdtemp(join(tmpdir(), 'primary-derived-'));
   const git = (...args) => exec('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', ...args],
-    { cwd: scratch, encoding: 'utf8', timeout: 15000, maxBuffer: LIMIT, signal,
+    { cwd: scratch, encoding: 'utf8', timeout: loadAwareTimeoutMs(15000), maxBuffer: LIMIT, signal,
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
   try {
     await git('init', '--bare', '-q', 'objects.git');
@@ -435,7 +436,7 @@ export async function withDerivedCheckout({ repo, rootDir, headSha, mergeBase, p
       try { source = loadDomainConfig(rootDir, 'code-pr')?.remediationCloneReferences?.[repo]; } catch { /* Optional reference. */ }
       if (!source) {
         try {
-          const origin = await exec('git', ['-C', rootDir, 'remote', 'get-url', 'origin'], { encoding: 'utf8', timeout: 5000, signal });
+          const origin = await exec('git', ['-C', rootDir, 'remote', 'get-url', 'origin'], { encoding: 'utf8', timeout: loadAwareTimeoutMs(5000), signal });
           if (origin.stdout.trim().replace(/\.git$/, '').endsWith(`/${repo}`)
             || origin.stdout.trim().replace(/\.git$/, '').endsWith(`:${repo}`)) source = rootDir;
         } catch { /* No local checkout for this subject. */ }
@@ -481,7 +482,7 @@ export async function proveGeneratedBlocks(args, evidence, refusal, {
   const skipped = value => { reason ||= value; };
   const proofs = [];
   try {
-    const signal = AbortSignal.any([...(args.signal ? [args.signal] : []), AbortSignal.timeout(30000)]);
+    const signal = AbortSignal.any([...(args.signal ? [args.signal] : []), AbortSignal.timeout(loadAwareTimeoutMs(30000))]);
     return await checkoutImpl({ ...args, signal, headSha: evidence.headSha, mergeBase: evidence.mergeBase,
       primaryHead: evidence.primaryHead }, async ({ tree, scratch, show, reset }) => {
       // Whole-file headers are trusted at the protected author boundary, not at

@@ -1,0 +1,16 @@
+# SRE-owned verification after ordinary reviewed deployment; no worker action.
+operator_steps:
+  - description: >-
+      After the reviewed adversarial-review revision floats into the deployment,
+      use the existing watcher/follow-up restart procedure and retain each
+      service's PID and process start time, proving both started after the
+      deployed revision became available. Observe a comparable-load window
+      with no new history-read-failed budget-exhaustion events, and retain one
+      long-history PR's successful closer-owned closure. Missing comparable
+      load or closure evidence remains unverified; do not weaken preservation,
+      attestation, leases, head matching or strict mode to obtain a receipt.
+    run_as: designated SRE operator
+    command: >-
+      /usr/bin/printf '%s\n' 'HISTREADLOAD-01: retain the deployed revision,
+      watcher/follow-up PID start times, comparable-load history-read evidence,
+      and a long-history PR closer closure receipt before acknowledging recovery.'

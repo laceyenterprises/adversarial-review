@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { execGhWithRetry, GH_LOOKUP_MAX_BUFFER } from '../gh-cli.mjs';
 import { HISTORY_CONTEXT_TIMEOUT_MS, historyReadErrorDetail, historyReadRetryDelayMs, historyReadTimeoutError, withHistoryReadBudget } from './history-read-policy.mjs';
 import { currentGitHubBudgetScope, withGitHubBudgetScope } from '../rate-limit-throttle.mjs';
+import { discardHistoryProgress, storedHistoryRead } from './primary-change-store.mjs';
 
 const commitFields = '{sha, commit: {message: .commit.message, author: .commit.author, committer: .commit.committer}, author, committer, parents: [.parents[] | {sha}]}';
 
@@ -17,7 +18,8 @@ const commitFields = '{sha, commit: {message: .commit.message, author: .commit.a
 // patches, and never treat a server cap as a complete protected file list.
 export function createHistoryReader(options = {}) {
   const { execGhWithRetryImpl = execGhWithRetry, diffImpl = execHistoryFile,
-    contextTimeoutMs = HISTORY_CONTEXT_TIMEOUT_MS, nowMs = () => performance.now(), ...ghOptions } = options;
+    contextTimeoutMs = loadAwareTimeoutMs(HISTORY_CONTEXT_TIMEOUT_MS), nowMs = () => performance.now(),
+    progress, ...ghOptions } = options;
   const executorIdentity = ghOptions.execFileImpl || execHistoryFile;
   ghOptions.execFileImpl = historyChildExecutor(executorIdentity);
   const controller = new AbortController();
@@ -31,6 +33,27 @@ export function createHistoryReader(options = {}) {
     return remaining;
   };
   const cache = new Map();
+  const invalidHistory = message => {
+    const error = Object.assign(new Error(message), { code: 'HISTORY_READ_INVALID' });
+    // Abort at detection, before waiting for sibling workers to settle. A
+    // stalled sibling must not turn semantic rejection into a sticky timeout.
+    controller.abort(error);
+    cache.clear();
+    if (progress) discardHistoryProgress(progress);
+    return error;
+  };
+  // Durable object facts belong to the canonical owner/repository/host, not an
+  // expiring installation token. A fresh token on the next closer must retain
+  // progress. Live PR/review reads still establish access and current state;
+  // the evaluation-local cache below independently partitions credentials.
+  const env = ghOptions.env || process.env;
+  const host = env.GH_HOST || 'github.com';
+  const checkpoint = async (key, run) => {
+    remainingMs();
+    const value = await (progress ? storedHistoryRead(progress, [host, ...key], run, ghOptions.signal) : run());
+    remainingMs();
+    return immutableSnapshotValue(value);
+  };
   const json = async (path, jq = '.') => {
     try {
       // Only object-addressed evidence is immutable. Keep PR metadata, refs,
@@ -49,10 +72,10 @@ export function createHistoryReader(options = {}) {
         ghOptions.signal.throwIfAborted();
         return immutableSnapshotValue(JSON.parse(stdout.replace(/^HTTP\/[\s\S]*?\r?\n\r?\n/, '')));
       };
-      const env = ghOptions.env || process.env;
       return await (immutable
-        ? readClosureImmutable(execGhWithRetryImpl, [path, jq, env.GH_TOKEN, env.GITHUB_TOKEN,
-          env.GH_HOST, env.GH_CONFIG_DIR], execute, executorIdentity, ghOptions.signal)
+        ? checkpoint(['json', path, jq], () => readClosureImmutable(execGhWithRetryImpl,
+          [path, jq, env.GH_TOKEN, env.GITHUB_TOKEN, env.GH_HOST, env.GH_CONFIG_DIR],
+          execute, executorIdentity, ghOptions.signal))
         : execute());
     } catch (cause) {
       const limit = cause.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || cause.code === 'ENOBUFS'
@@ -74,7 +97,7 @@ export function createHistoryReader(options = {}) {
   };
   const tree = async (repo, ref) => {
     const data = await cached(`repos/${repo}/git/trees/${ref}`, '{tree: [.tree[] | {path, mode, type, sha}], truncated}');
-    if (data.truncated || !Array.isArray(data.tree)) throw new Error(`incomplete tree ${ref}`);
+    if (data.truncated || !Array.isArray(data.tree)) throw invalidHistory(`incomplete tree ${ref}`);
     return new Map(data.tree.map(entry => [entry.path, entry]));
   };
   const filesBetween = async (repo, base, head) => {
@@ -104,7 +127,7 @@ export function createHistoryReader(options = {}) {
         return null;
       }
       if (data.truncated === true) return null;
-      if (data.truncated !== false || !Array.isArray(data.tree)) throw new Error(`incomplete recursive tree ${ref}`);
+      if (data.truncated !== false || !Array.isArray(data.tree)) throw invalidHistory(`incomplete recursive tree ${ref}`);
       const entries = new Map();
       const children = new Map();
       let unsupportedMode = false;
@@ -113,14 +136,14 @@ export function createHistoryReader(options = {}) {
         if (typeof entry.path !== 'string' || !entry.path || entry.path.split('/').some(part => !part || part === '.' || part === '..')
           || entries.has(entry.path) || !/^[0-9a-f]{40}$/i.test(entry.sha || '')
           || !['tree', 'blob', 'commit'].includes(entry.type)
-          || typeof entry.mode !== 'string' || !/^[0-7]{6}$/.test(entry.mode)) throw new Error(`invalid recursive tree ${ref}`);
+          || typeof entry.mode !== 'string' || !/^[0-7]{6}$/.test(entry.mode)) throw invalidHistory(`invalid recursive tree ${ref}`);
         if (!({ tree: ['040000'], blob: ['100644', '100755', '120000'], commit: ['160000'] })[entry.type].includes(entry.mode)) unsupportedMode = true;
         entries.set(entry.path, entry);
       }
       for (const [path, entry] of entries) {
         remainingMs();
         const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : null;
-        if (parent && entries.get(parent)?.type !== 'tree') throw new Error(`incomplete recursive tree ${ref}`);
+        if (parent && entries.get(parent)?.type !== 'tree') throw invalidHistory(`incomplete recursive tree ${ref}`);
         if (parent) {
           if (!children.has(parent)) children.set(parent, []);
           children.get(parent).push(entry);
@@ -128,11 +151,11 @@ export function createHistoryReader(options = {}) {
         if (!parent) {
           const original = root.get(path);
           if (!original || original.sha !== entry.sha || original.mode !== entry.mode || original.type !== entry.type) {
-            throw new Error(`inconsistent recursive tree ${ref}`);
+            throw invalidHistory(`inconsistent recursive tree ${ref}`);
           }
         }
       }
-      for (const name of root.keys()) if (!entries.has(name)) throw new Error(`incomplete recursive tree ${ref}`);
+      for (const name of root.keys()) if (!entries.has(name)) throw invalidHistory(`incomplete recursive tree ${ref}`);
       // Legacy modes cannot be rebuilt canonically. The existing walker can
       // still skip equal directories without interpreting their stored bytes.
       if (unsupportedMode) {
@@ -150,7 +173,7 @@ export function createHistoryReader(options = {}) {
         }).sort((a, b) => Buffer.compare(a.key, b.key));
         const body = Buffer.concat(rows.map(row => row.bytes));
         const digest = createHash('sha1').update(`tree ${body.length}\0`).update(body).digest('hex');
-        if (digest !== entry.sha) throw new Error(`incomplete recursive tree ${ref}: ${path}`);
+        if (digest !== entry.sha) throw invalidHistory(`incomplete recursive tree ${ref}: ${path}`);
       }
       remainingMs();
       return new Map([...entries].filter(([, entry]) => entry.type !== 'tree'));
@@ -201,9 +224,9 @@ export function createHistoryReader(options = {}) {
       if (!entry || entry.type === 'commit') return Buffer.alloc(0);
       if (entry.type !== 'blob') throw new Error(`unsupported changed object ${entry.type}`);
       const data = await cached(`repos/${repo}/git/blobs/${entry.sha}`, '{encoding, content, size}');
-      if (data.encoding !== 'base64' || typeof data.content !== 'string') throw new Error(`unreadable blob ${entry.sha}`);
+      if (data.encoding !== 'base64' || typeof data.content !== 'string') throw invalidHistory(`unreadable blob ${entry.sha}`);
       const bytes = Buffer.from(data.content, 'base64');
-      if (bytes.length !== data.size) throw new Error(`incomplete blob ${entry.sha}`);
+      if (bytes.length !== data.size) throw invalidHistory(`incomplete blob ${entry.sha}`);
       return bytes;
     };
     try {
@@ -213,29 +236,31 @@ export function createHistoryReader(options = {}) {
           const index = cursor++;
           const { path, a, b } = changed[index];
           const beforePath = `before-${index}`, afterPath = `after-${index}`;
-          const file = { filename: path, status: !a ? 'added' : !b ? 'removed' : 'modified', sha: b?.sha || a.sha };
-          if (a?.type === 'commit' && b?.type === 'commit') {
-            file.additions = 0; file.deletions = 0; files[index] = file; continue;
-          }
-          await Promise.all([
-            blob(a).then(bytes => { ghOptions.signal.throwIfAborted(); return writeFile(join(dir, beforePath), bytes, { signal: ghOptions.signal }); }),
-            blob(b).then(bytes => { ghOptions.signal.throwIfAborted(); return writeFile(join(dir, afterPath), bytes, { signal: ghOptions.signal }); }),
-          ]);
-          let patch;
-          try {
-            ({ stdout: patch } = await bounded(() => diffImpl('git', ['-c', 'core.autocrlf=false', '-c', 'core.attributesFile=/dev/null', 'diff', '--diff-algorithm=myers', '--no-indent-heuristic', '--no-index', '--no-ext-diff', '--no-textconv', '--no-color', '--unified=3', '--', beforePath, afterPath],
-              { cwd: dir, encoding: 'utf8', timeout: Math.min(loadAwareTimeoutMs(15000), remainingMs()), maxBuffer: GH_LOOKUP_MAX_BUFFER, signal: ghOptions.signal, killSignal: 'SIGKILL' })));
-          } catch (error) {
-            if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || error.code === 'ENOBUFS') {
-              throw new Error(`history diff output limit ${GH_LOOKUP_MAX_BUFFER} bytes exceeded for ${path}`, { cause: error });
+          files[index] = await checkpoint(['file', repo, base, head, path, a || null, b || null, 'myers-v1'], async () => {
+            const file = { filename: path, status: !a ? 'added' : !b ? 'removed' : 'modified', sha: b?.sha || a.sha };
+            if (a?.type === 'commit' && b?.type === 'commit') {
+              file.additions = 0; file.deletions = 0; return file;
             }
-            if (error.code !== 1 || typeof error.stdout !== 'string') throw error;
-            patch = error.stdout;
-          }
-          if (patch.includes('\n@@')) file.patch = patch.slice(patch.indexOf('@@'));
-          file.additions = (file.patch || '').split('\n').filter(line => line.startsWith('+')).length;
-          file.deletions = (file.patch || '').split('\n').filter(line => line.startsWith('-')).length;
-          files[index] = file;
+            await Promise.all([
+              blob(a).then(bytes => { ghOptions.signal.throwIfAborted(); return writeFile(join(dir, beforePath), bytes, { signal: ghOptions.signal }); }),
+              blob(b).then(bytes => { ghOptions.signal.throwIfAborted(); return writeFile(join(dir, afterPath), bytes, { signal: ghOptions.signal }); }),
+            ]);
+            let patch;
+            try {
+              ({ stdout: patch } = await bounded(() => diffImpl('git', ['-c', 'core.autocrlf=false', '-c', 'core.attributesFile=/dev/null', 'diff', '--diff-algorithm=myers', '--no-indent-heuristic', '--no-index', '--no-ext-diff', '--no-textconv', '--no-color', '--unified=3', '--', beforePath, afterPath],
+                { cwd: dir, encoding: 'utf8', timeout: Math.min(loadAwareTimeoutMs(15000), remainingMs()), maxBuffer: GH_LOOKUP_MAX_BUFFER, signal: ghOptions.signal, killSignal: 'SIGKILL' })));
+            } catch (error) {
+              if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || error.code === 'ENOBUFS') {
+                throw new Error(`history diff output limit ${GH_LOOKUP_MAX_BUFFER} bytes exceeded for ${path}`, { cause: error });
+              }
+              if (error.code !== 1 || typeof error.stdout !== 'string') throw error;
+              patch = error.stdout;
+            }
+            if (patch.includes('\n@@')) file.patch = patch.slice(patch.indexOf('@@'));
+            file.additions = (file.patch || '').split('\n').filter(line => line.startsWith('+')).length;
+            file.deletions = (file.patch || '').split('\n').filter(line => line.startsWith('-')).length;
+            return file;
+          });
         }
       };
       // Bound GitHub and child concurrency without serializing every blob.
@@ -248,11 +273,9 @@ export function createHistoryReader(options = {}) {
       for (const removed of [...files].filter(file => file.status === 'removed')) {
         const added = files.find(file => file.status === 'added' && file.sha === removed.sha);
         if (added) {
-          added.status = 'renamed';
-          added.previous_filename = removed.filename;
-          delete added.patch;
-          added.additions = 0;
-          added.deletions = 0;
+          const renamed = { ...added, status: 'renamed', previous_filename: removed.filename, additions: 0, deletions: 0 };
+          delete renamed.patch;
+          files[files.indexOf(added)] = renamed;
           files.splice(files.indexOf(removed), 1);
         }
       }
@@ -274,7 +297,7 @@ export function createHistoryReader(options = {}) {
     let result;
     const fields = `{status, total_commits, merge_base_commit: {sha: .merge_base_commit.sha}, commits: [.commits[] | ${commitFields}]}`;
     result = await page(`${path}?per_page=100&page=1`, fields);
-    if (!Number.isSafeInteger(result.total_commits) || result.total_commits < 0) throw new Error('missing compare commit count');
+    if (!Number.isSafeInteger(result.total_commits) || result.total_commits < 0) throw invalidHistory('missing compare commit count');
     const batches = [result];
     const pageCount = Math.max(1, Math.ceil(result.total_commits / 100));
     let nextPage = 2;
@@ -295,12 +318,12 @@ export function createHistoryReader(options = {}) {
     if (failed) throw failed.reason;
     for (const batch of batches) {
       if (batch.total_commits !== result.total_commits || !Array.isArray(batch.commits)
-        || batch.status !== result.status || batch.merge_base_commit?.sha !== result.merge_base_commit?.sha) throw new Error('inconsistent compare pagination');
+        || batch.status !== result.status || batch.merge_base_commit?.sha !== result.merge_base_commit?.sha) throw invalidHistory('inconsistent compare pagination');
       commits.push(...batch.commits);
     }
-    if (commits.length !== result.total_commits) throw new Error('incomplete compare pagination');
-    if (new Set(commits.map(commit => commit.sha)).size !== commits.length) throw new Error('duplicate compare commit page');
-    if (!/^[0-9a-f]{40}$/i.test(result.merge_base_commit?.sha || '')) throw new Error('missing compare merge base');
+    if (commits.length !== result.total_commits) throw invalidHistory('incomplete compare pagination');
+    if (new Set(commits.map(commit => commit.sha)).size !== commits.length) throw invalidHistory('duplicate compare commit page');
+    if (!/^[0-9a-f]{40}$/i.test(result.merge_base_commit?.sha || '')) throw invalidHistory('missing compare merge base');
     return { ...result, commits };
   };
   const reader = path => bounded(async () => {
@@ -319,7 +342,7 @@ export function createHistoryReader(options = {}) {
           const batch = await json(`${path}?per_page=100&page=${page}`,
             `${commitFields.slice(0, -1)}, files: [.files[] | {filename, previous_filename, status, sha, patch, additions, deletions}]}`);
           result ??= batch;
-          if (!Array.isArray(batch.files)) throw new Error('missing commit files');
+          if (!Array.isArray(batch.files)) throw invalidHistory('missing commit files');
           files.push(...batch.files);
           if (batch.files.length < 100) break;
           // The commit API caps files at 3000. Use the same uncapped tree path.
@@ -336,7 +359,10 @@ export function createHistoryReader(options = {}) {
   });
   // Cost/ancestry consumers need metadata, not reconstructed per-file patches.
   reader.commitHistory = path => bounded(() => commitHistory(path));
-  reader.metadata = path => bounded(() => json(path, '{status, total_commits, merge_base_commit: {sha: .merge_base_commit.sha}}'));
+  // Completed history publication removes durable progress; retain immutable
+  // metadata for the rest of this evaluation without rereading it for CI cost.
+  reader.metadata = path => bounded(() => (/\/compare\/[0-9a-f]{40}\.\.\.[0-9a-f]{40}$/i.test(path) ? cached : json)(
+    path, '{status, total_commits, merge_base_commit: {sha: .merge_base_commit.sha}}'));
   // Provenance proofs request compact web-flow verification separately; avoid
   // buffering signature payloads in every history and commit-file page.
   reader.commitVerification = path => bounded(() => json(path, '{sha, verification: .commit.verification}'));
@@ -345,6 +371,8 @@ export function createHistoryReader(options = {}) {
   reader.withSignal = signal => createHistoryReader({ ...options,
     contextTimeoutMs: remainingMs(),
     signal: AbortSignal.any([ghOptions.signal, signal]) });
+  reader.withProgress = progress => createHistoryReader({ ...options, progress,
+    contextTimeoutMs: remainingMs(), signal: ghOptions.signal });
   reader.persistPrimaryChange = true;
   return reader;
 }

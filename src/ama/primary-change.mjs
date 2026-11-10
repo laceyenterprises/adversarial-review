@@ -6,7 +6,8 @@ import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { storedPrimaryChange, primaryChangeStoreOwned, verifiedReversalRecord } from './primary-change-store.mjs';
 import { createHistoryReader } from './history-reader.mjs';
-import { historyReadFailureReason, historyReadTimeoutEvidence, withHistoryReadBudget } from './history-read-policy.mjs';
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
+import { HISTORY_CONTEXT_TIMEOUT_MS, historyReadFailureReason, historyReadTimeoutEvidence, withHistoryReadBudget } from './history-read-policy.mjs';
 import { fetchCiCost, checkCiCost } from './ci-cost.mjs';
 import { fetchGuardReversals, verifiedGuardReversals } from './guard-reversal.mjs';
 import { amaAllAuthoritativeReviewerLogins, amaReviewerFamilyForLogin, isCurrentAuthoritativeFamilyReview } from './reviewer-authority.mjs';
@@ -1604,15 +1605,20 @@ export async function fetchPrimaryChangeHistoryClassification(args) {
 // Keep history failures distinct and retain the existing terminal-state handling.
 export async function fetchPrimaryChange(args, options = {}) {
   try {
+    const timeoutMs = options.contextTimeoutMs ?? loadAwareTimeoutMs(HISTORY_CONTEXT_TIMEOUT_MS);
     return await withHistoryReadBudget(async signal => {
-      const source = args.get.withSignal ? args.get.withSignal(signal) : args.get;
-      const read = method => (...values) => withHistoryReadBudget(() => method(...values), { signal });
+      let source = args.get.withSignal ? args.get.withSignal(signal) : args.get;
+      if (source.withProgress && primaryChangeStoreOwned(primaryChangeRoot(args))) {
+        source = source.withProgress({ rootDir: primaryChangeRoot(args),
+          repo: args.repo, prNumber: args.prNumber, headSha: args.headSha });
+      }
+      const read = method => (...values) => withHistoryReadBudget(() => method(...values), { signal, timeoutMs });
       const get = Object.assign(read(source), { persistPrimaryChange: source.persistPrimaryChange });
       for (const method of ['metadata', 'commitVerification', 'commitHistory']) {
         if (source[method]) get[method] = read(source[method].bind(source));
       }
       return collectPrimaryChange({ ...args, get, signal }, options);
-    }, { signal: args.signal, timeoutMs: options.contextTimeoutMs });
+    }, { signal: args.signal, timeoutMs });
   } catch (error) {
     return { headSha: args.headSha, hasHammerCommits: null, readFailed: true, historyReadFailed: true,
       ...historyReadTimeoutEvidence(error),

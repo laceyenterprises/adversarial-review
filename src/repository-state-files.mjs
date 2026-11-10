@@ -57,6 +57,9 @@ function filesUnder(directory) {
     if (entry.name.endsWith('.trash')) return [];
     if (entry.isSymbolicLink()) throw new Error(`Repository migration refuses symlink: ${path}`);
     if (entry.isDirectory()) {
+      // Exact-head observations are disposable and keyed by the old repo.
+      // Reading/rekeying cached blobs adds cost without making them reusable.
+      if (basename(directory) === 'primary-change-history' && /^progress-[a-f0-9]{64}$/.test(entry.name)) return [];
       if (['repository-renames', 'api-cache', 'finalization-git', 'workspaces', 'node_modules', '.git'].includes(entry.name)) return [];
       return filesUnder(path);
     }

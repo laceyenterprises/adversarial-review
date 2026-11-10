@@ -1,4 +1,4 @@
-import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
+import { loadAwareTimeoutMs, timerDelayMs } from '../load-aware-timeout.mjs';
 
 export const HISTORY_READ_ERROR_LIMIT = 2000;
 export const HISTORY_CONTEXT_TIMEOUT_MS = 90_000;
@@ -20,7 +20,7 @@ export function historyReadTimeoutEvidence(error) {
 // spawned (quota admission/auth/cache) and injected transports ignoring abort.
 // Keep the timer referenced: a stalled promise alone does not keep Node alive.
 export async function withHistoryReadBudget(operation, {
-  signal: parentSignal, timeoutMs = HISTORY_CONTEXT_TIMEOUT_MS,
+  signal: parentSignal, timeoutMs = loadAwareTimeoutMs(HISTORY_CONTEXT_TIMEOUT_MS),
 } = {}) {
   const controller = new AbortController();
   const signal = parentSignal ? AbortSignal.any([parentSignal, controller.signal]) : controller.signal;
@@ -31,7 +31,7 @@ export async function withHistoryReadBudget(operation, {
       abort = () => reject(signal.reason);
       signal.addEventListener('abort', abort, { once: true });
       timer = setTimeout(() => controller.abort(historyReadTimeoutError()),
-        Math.max(0, Math.min(HISTORY_CONTEXT_TIMEOUT_MS, timeoutMs)));
+        timerDelayMs(timeoutMs));
     });
     return await Promise.race([interrupted, Promise.resolve().then(() => {
       signal.throwIfAborted();

@@ -28,7 +28,8 @@ function runCli(t, plan, argv = ['fixture/repo', '1208', head]) {
       { path: 'repos/fixture/repo/pulls/1208/reviews?per_page=100', data: [] },
       ...plan.slice(liveIndex + 1),
       { path: prPath, data: pr },
-      { path: comparePath, data: compare },
+      // Exact-object metadata was checkpointed before history collection;
+      // CI-cost still reads the live PR and files but reuses that merge base.
       { path: 'repos/fixture/repo/pulls/1208/files?per_page=100&page=1', data: [] },
       { path: `repos/fixture/repo/commits/${head}/check-runs?per_page=100&page=1`, data: { check_runs: [] } },
       { path: `repos/fixture/repo/commits/${head}/statuses?per_page=100&page=1`, data: [] },
@@ -99,7 +100,7 @@ test('primary-change CLI recovers TLS and HTTP 502 reads and emits complete evid
   assert.deepEqual(parsed, { ...historyEvidence, completeFileLists: true, testRegionsChanged: [],
     diagnosticCommitRange: [{ sha: head }], migrationRenumberDiagnostics: [] });
   assert.deepEqual(result.calls, [prPath, prPath, prPath, comparePath, 'repos/fixture/repo/pulls/1208/reviews?per_page=100', comparePath,
-    primaryPath, primaryPath, prPath, comparePath, 'repos/fixture/repo/pulls/1208/files?per_page=100&page=1', `repos/fixture/repo/commits/${head}/check-runs?per_page=100&page=1`, `repos/fixture/repo/commits/${head}/statuses?per_page=100&page=1`, prPath].map(path => ['api', path]));
+    primaryPath, primaryPath, prPath, 'repos/fixture/repo/pulls/1208/files?per_page=100&page=1', `repos/fixture/repo/commits/${head}/check-runs?per_page=100&page=1`, `repos/fixture/repo/commits/${head}/statuses?per_page=100&page=1`, prPath].map(path => ['api', path]));
 });
 
 test('primary-change CLI exhausts transient reads after three attempts and fails closed', (t) => {

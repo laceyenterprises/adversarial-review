@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
 import { reportHammerEarlyFailure } from '../src/ama/hammer-terminal-audit.mjs';
 import { execGhWithRetry } from '../src/gh-cli.mjs';
 
@@ -15,7 +16,7 @@ if (!ref) {
 try {
   const { stdout } = await execGhWithRetry({ hammerToken: true,
     args: ['api', `repos/${ref[1]}/pulls/${ref[2]}`, '--jq', '.head.sha'],
-    timeoutMs: 15_000,
+    timeoutMs: loadAwareTimeoutMs(15_000),
   });
   const headSha = stdout.trim();
   if (!/^[a-f0-9]{40}$/.test(headSha)) throw new Error('hammer starting PR head is missing or malformed');

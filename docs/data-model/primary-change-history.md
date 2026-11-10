@@ -8,6 +8,64 @@
 
 ## Identity and record shape
 
+### Partial immutable-read checkpoints (HISTREADLOAD-01)
+
+The same store also contains `progress-<sha256(JSON.stringify(key))>/`
+directories. Their ordered key is `[canonical repo, numeric PR number, head SHA,
+"history-progress-v1"]`. Each atomic `<sha256(JSON.stringify(readKey))>.json`
+contains `{ key, readKey, value }` for one successfully completed read.
+`readKey` starts with the GitHub API host (`GH_HOST`, default `github.com`),
+followed by either:
+
+- `["json", object-addressed API path, jq projection]`; or
+- `["file", repo, comparison base, comparison head, path, before tree entry or
+  null, after tree entry or null, "myers-v1"]`.
+
+JSON checkpoints retain projected commit authorship, compare pagination,
+verification, trees and blobs. File checkpoints retain a completed per-file
+comparison. These are observations, not authorizations: the reader still
+validates pagination/completeness and the collector still establishes
+provenance and author-change preservation. Live PR heads/bases, reviews,
+comments, labels, refs and cost evidence are never checkpointed.
+Every collection checks the live head; another head selects an entirely
+different directory, including for otherwise identical object paths.
+Token rotation does not invalidate immutable facts owned by the same canonical
+data owner; live PR/review reads remain required before preservation can pass.
+Evaluation-local response sharing separately retains credential/executor isolation.
+An abort, failed read or late result after cancellation is never published.
+Semantic rejection of blob size/encoding, tree completeness/digest or compare
+pagination aborts sibling publications and discards the head's entire progress
+directory. The next evaluation fetches those observations again; timeouts and
+transport failures retain completed progress.
+Missing or malformed records are recomputed; unreadable or foreign-owned
+records cannot supply proof. The directory and each record receive the same
+effective-UID and symlink checks as completed history records.
+
+Separate readers/processes may reuse completed checkpoints after a deferral.
+Atomic per-read files avoid rewriting an entire growing history on every
+success. The existing sweep retains at most 512 progress directories separately
+from 512 completed records, with a seven-day age limit for both. Progress has an
+aggregate 256 MiB serialized-file byte budget at sweep time, including orphan
+`.tmp` files. Newest directories that fit are retained; other directories are
+removed whole. This is a periodic retention bound, not a write quota: new
+publications can temporarily exceed it between sweeps. Directory modification
+time advances on publication. Publishing a completed history removes that
+head's progress directory. Concurrent removal during publication loses only
+cache reuse and does not fail the completed read. Repository rename planning
+skips progress directories without reading their payloads; old-name progress
+expires through this same sweep.
+The entire collection and standalone reader default to a nominal 90 seconds
+scaled once by `loadAwareTimeoutMs` (540 seconds at the default 6× policy,
+subject to the helper's 3600-second inflation ceiling). An explicit effective
+budget is honored without rescaling; parent deadlines still abort children.
+The hammer supervisor uses the same nominal/default maximum budget; startup
+and sampling precede the child's deadline, so the supervisor may terminate it
+first under load. That outcome is supervisor timeout/`overload-deferred`, rather
+than classified `historyReadTimedOut` JSON. SIGTERM can leave orphan `.tmp`
+files, included in progress retention until the next sweep.
+
+### Completed proof records
+
 Each completed history read is an atomic JSON record named
 `<sha256(JSON.stringify(key))>.json`. The ordered `key` array is:
 
@@ -129,7 +187,31 @@ match an explicit caller `builderHead` when both are present; the boundary is
 validated separately from the filename key. Live PR head/base, merge-base
 metadata, reviews and dispatcher provenance are read before lookup. Missing,
 corrupt or mismatched records trigger recomputation. Unknown, failed or
-head-mismatched reads and unresolved rename-proof read failures are never published.
+head-mismatched proofs and unresolved rename-proof read failures never publish
+a completed history record; already completed immutable subreads may remain
+in the separate exact-head progress directory.
+
+### Account attribution and manual purge
+
+Commit `author`/`committer` logins and verification projections are observations
+of GitHub account state, not immutable git object bytes. This implementation
+retains them in exact-head checkpoints until completion, purge or seven-day
+expiry. A new review or launch key alone does not refresh those checkpoints.
+Reviews and PR/cost metadata remain live, but provenance re-evaluation can reuse
+these account snapshots. An email-to-account correction may therefore require
+an operator purge before a same-head retry.
+
+As the canonical runtime data owner, first wait until no collector for this
+PR/head is active (including daemon and hammer helpers). Inspect `key` in the
+candidate `progress-<digest>/*.json` files and verify its canonical repository,
+PR number and exact head. Remove that one `progress-<digest>/` directory beneath
+`<runtime rootDir>/data/primary-change-history/` with `rm -r -- <verified path>`.
+If a completed refusal exists, inspect its `key` and `history.headSha` and
+remove the matching ordinary `<digest>.json` too; completed records have a
+separate review/launch key. Never remove `verified-*.json`, which are durable
+historical reversal proofs. Retry the normal collector as the canonical owner;
+it must re-read and satisfy all merge predicates. No state, lease or gate is
+waived by purging disposable observations.
 
 ## Ownership and publication
 
@@ -160,10 +242,11 @@ The running-read map and elapsed-time status are process-local, not persistent.
 ## Retention and debugging
 
 The watcher's existing periodic cache sweep removes files older than seven
-days and all but the 512 most recently modified entries, without live API
-reads or an additional cadence knob. Both JSON records and orphan temporary
-files count toward the bounds. A file removed between enumeration and stat is
-skipped individually; other stat errors propagate. Missing directories are
+days and all but the 512 most recently modified completed-store entries,
+without live API reads or an additional cadence knob. Ordinary JSON records
+and their orphan temporary files count toward that allowance. Progress
+retention has the separate count and serialized-byte bounds described above.
+A file removed between enumeration and stat is skipped individually; other stat errors propagate. Missing directories are
 empty stores. Sweeping refuses deletion of a foreign-owned record.
 
 The head-keyed history records are disposable derived evidence. New heads,
@@ -237,7 +320,7 @@ and its bounded summary, preserving deterministic stop identity and region
 history. Legacy stop keys/probes also exclude diagnostics and their summary
 suffix. No migration candidates means no diagnostics, timer or load sampling.
 These records are never stored in history. Collection uses
-one load-scaled 90-second deadline (180-second maximum), 64 distinct snapshots,
+one load-scaled 90-second deadline (the shared helper's 3600-second inflation ceiling), 64 distinct snapshots,
 512 reads, and complete directory trees capped at 10,000 entries. After an
 oversized/truncated recursive tree, later heads use directory walks directly.
 

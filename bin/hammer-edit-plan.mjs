@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -39,7 +40,7 @@ Only exit 0 from a plan check permits an edit; help performs no plan check.
 
 async function readReview(repo, pr, reviewId) {
   const { stdout } = await execGhWithRetry({
-    hammerToken: true, args: ['api', `repos/${repo}/pulls/${pr}/reviews/${reviewId}`], timeoutMs: 15_000,
+    hammerToken: true, args: ['api', `repos/${repo}/pulls/${pr}/reviews/${reviewId}`], timeoutMs: loadAwareTimeoutMs(15_000),
   });
   return JSON.parse(stdout);
 }

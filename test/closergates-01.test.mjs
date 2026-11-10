@@ -2,7 +2,7 @@
 // closer that already pushed a validated head resumes at closure, and a
 // conflict found at closure is repaired rather than terminal. Synthetic,
 // offline fixtures only.
-import './helpers/rate-limit-state-isolation.mjs';
+import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

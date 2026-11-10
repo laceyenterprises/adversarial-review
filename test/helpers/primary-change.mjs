@@ -17,7 +17,8 @@ export function primaryChangeFixture(headSha) {
 export function primaryRenameRepository(t, { changed = false, deleted = false,
   modified = false, builderRenamed = false, author = 'hammer-worker', committer = 'hammer-worker',
   verification = undefined, laterHammer = false, existingDestination = false, binary = false, restored = false,
-  baseMerge = false, earlierHammer = false, destination = 'named-guide.txt' } = {}) {
+  baseMerge = false, earlierHammer = false, destination = 'named-guide.txt',
+  beforeRead = async () => {} } = {}) {
   const rootDir = mkdtempSync(join(tmpdir(), 'primary-rename-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const git = (...args) => execFileSync('git', args, { cwd: rootDir, encoding: 'utf8', timeout: 5000,
@@ -71,7 +72,8 @@ export function primaryRenameRepository(t, { changed = false, deleted = false,
     parents: git('show', '-s', '--format=%P', sha).split(' ').filter(Boolean).map(sha => ({ sha })),
     commit: { message: git('show', '-s', '--format=%B', sha), author: { name: 'Fixture Author' }, verification } });
   const calls = [];
-  const get = createHistoryReader({ execGhWithRetryImpl: async ({ args }) => {
+  const createReader = () => createHistoryReader({ execGhWithRetryImpl: async ({ args }) => {
+    await beforeRead(args);
     const path = args[1]; calls.push(path);
     let data;
     if (path.endsWith('/pulls/1')) data = { head: { sha: headSha }, base: { sha: base } };
@@ -106,6 +108,7 @@ export function primaryRenameRepository(t, { changed = false, deleted = false,
     for (const entry of data.commits || []) delete entry.commit.verification;
     return { stdout: JSON.stringify(data) };
   } });
+  const get = createReader();
   return { rootDir, source, baseSource, destination, builder, blob, renameSha, earlierHammerSha, calls,
-    args: { repo: 'fixture/repo', prNumber: 1, headSha, rootDir, get } };
+    createReader, args: { repo: 'fixture/repo', prNumber: 1, headSha, rootDir, get } };
 }

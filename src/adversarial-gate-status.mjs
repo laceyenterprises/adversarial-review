@@ -334,6 +334,7 @@ function classifyBlockersFromBody(body, verdict) {
   const blocking = classifyBlockingFindings(body, { lastVerdict: verdict || null });
   const nonBlocking = classifyNonBlockingFindings(body, { lastVerdict: verdict || null });
   return {
+    reviewBody: String(body),
     reviewBodySha256: createHash('sha256').update(String(body).trim()).digest('hex'),
     operatorLabelFindings: classifyOperatorGatedFindings(body),
     blockingFindingState: blocking.state,

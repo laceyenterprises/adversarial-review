@@ -2,6 +2,33 @@
   "version": 1,
   "entries": [
     {
+      "id": "follow-up-builder-authorship",
+      "title": "Follow-up builder authorship recovery",
+      "path": "docs/data-model/follow-up-jobs.md",
+      "store": "data/follow-up-jobs/{pending,in-progress,stopped}/",
+      "schemaSurface": "src/remediation-builder-authorship.mjs",
+      "relatedSchemaSurfaces": [
+        "src/follow-up-jobs.mjs",
+        "src/follow-up-remediation.mjs"
+      ],
+      "owner": "follow-up daemon",
+      "optionalFields": [
+        "builderTagRecovery: { previousTag, observedAt, evidence }",
+        "remediationPlan.stop.builderAuthorshipEscalation: { owner, nextAction, observedAt, evidence }"
+      ],
+      "compatibility": "Additive recovery evidence; existing job IDs, claim allocation and publication budgets remain unchanged."
+    },
+    {
+      "id": "ama-closer-outcomes",
+      "title": "AMA closer outcome observations",
+      "path": "docs/data-model/ama-closer-outcomes.md",
+      "store": "data/ama-closer-outcomes/YYYY-MM-DD.jsonl",
+      "schemaSurface": "src/ama/closer-outcomes.mjs",
+      "relatedSchemaSurfaces": ["src/ama/dispatch-closer.mjs", "src/ama/closer-lease.mjs"],
+      "owner": "AMA closer telemetry",
+      "description": "Append-only terminal launch and terminal lease observations, joined by globally unique launch request identity; process success never implies merge."
+    },
+    {
       "id": "mes-review-enforcement",
       "title": "MES Review-service Consumer",
       "path": "docs/data-model/mes-review-enforcement.md",

@@ -236,10 +236,14 @@ test('every concrete hammer prompt helper call executes against the real helper 
   const f = fixture(t);
   const { commands, json } = documentedExamples(template);
   assert.ok(commands.length > 20, 'the prompt reader must find fenced and inline examples');
-  const plans = json.filter(({ value }) => value.reviewedHead);
+  // The prompt now delegates complete plan examples to the helper's --help.
+  const usage = await f.execute('"$HAM_NODE_BIN" "$HAM_ROOT_DIR/bin/hammer-edit-plan.mjs" --help');
+  assert.equal(usage.error, undefined, usage.stderr);
+  assert.equal(usage.status, 0, usage.stderr);
+  const plans = documentedExamples(usage.stdout).json.filter(({ value }) => value.editKind);
   assert.ok(plans.length >= 4);
   for (const { value } of json) {
-    if (value.reviewedHead) continue;
+    if (value.editKind || value.reviewedHead) continue;
     if (value.active === true && value.commit && value.auditComment) {
       // The claim is a schema example; resolve its literal explanatory values
       // without manufacturing or removing any fields.
@@ -297,7 +301,8 @@ test('every concrete hammer prompt helper call executes against the real helper 
     const rendered = f.render(command);
     if (executed.has(rendered)) continue;
     executed.add(rendered);
-    const variants = names.includes('hammer-edit-plan.mjs') ? plans : [null];
+    const editPlan = names.includes('hammer-edit-plan.mjs') && !/\s--help$/.test(rendered);
+    const variants = editPlan ? plans : [null];
     for (const [index, plan] of variants.entries()) {
       let invocation = rendered;
       if (plan) {
@@ -320,7 +325,7 @@ test('every concrete hammer prompt helper call executes against the real helper 
         assert.doesNotMatch(result.stderr, /usage:|ENOENT|command not found|unknown (?:argument|option)/i, detail);
         assert.doesNotMatch(result.stdout, /"(?:reason|reasonCode)"\s*:\s*"[^"]*-invalid"/, detail);
         assert.equal(result.status, 0, detail);
-        if (names.includes('hammer-edit-plan.mjs')) assert.equal(JSON.parse(result.stdout).action, 'allow', detail);
+        if (editPlan) assert.equal(JSON.parse(result.stdout).action, 'allow', detail);
         if (names.includes('hammer-lease-state.mjs')) assert.equal(result.stdout.trim(), 'none', detail);
         if (names.includes('ama-check.mjs')) assert.equal(typeof JSON.parse(result.stdout).eligible, 'boolean', detail);
         if (names.includes('hammer-conflict-primary.mjs')) {

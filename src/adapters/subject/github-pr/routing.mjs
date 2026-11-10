@@ -145,19 +145,24 @@ function getReviewerRouteTable({
 }
 
 function normalizeBuilderClass(builderClassInput, routeTable = ROUTE_BY_BUILDER_CLASS) {
-  const raw = String(builderClassInput || '').trim().toLowerCase();
+  const raw = String(builderClassInput || '').trim().toLowerCase().replace(/^\[([^\]]+)\]$/, '$1');
   const builderClass = ({
+    claude: 'claude-code',
+    clio: 'clio-agent',
     'grok-api': 'grok',
     'grok-reviewer': 'grok',
     'remediator-grok': 'grok',
     'hammer-grok': 'grok',
     'remediator-gemini': 'gemini',
+    'gemini-remediation': 'gemini',
+    'codex-remediation': 'codex',
     'codex-corp': 'codex',
     'remediator-codex': 'codex',
     'remediator-codex-corp': 'codex',
     'hammer': 'codex',
     'hammer-corp': 'codex',
     'claude-code-corp': 'claude-code',
+    'claude-code-remediation': 'claude-code',
     'remediator-claude': 'claude-code',
     'remediator-claude-corp': 'claude-code',
     'hammer-claude': 'claude-code',

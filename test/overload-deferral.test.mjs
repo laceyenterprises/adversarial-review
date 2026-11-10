@@ -86,7 +86,7 @@ test('retry debt survives replacement launches and re-reading the durable ledger
   assert.equal(after.attemptCount, before);
 });
 
-test('many overloaded PR owners share one durable host alert', async t => {
+test('legacy host-overload callers share one durable host alert', async t => {
   const root = mkdtempSync(join(tmpdir(), 'synthetic-overload-alert-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   let pages = 0;
@@ -97,6 +97,19 @@ test('many overloaded PR owners share one durable host alert', async t => {
       pageImpl: async () => { pages++; return { ok: true }; } });
   }
   assert.equal(pages, 1);
+});
+
+test('production overload exhaustion pages once per PR/head across observations', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'synthetic-overload-pages-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let pages = 0;
+  for (const [prNumber, headSha] of [[1, 'a'], [2, 'a'], [1, 'a'], [1, 'b']]) {
+    await observeClosureWait({ rootDir: root, repo: 'example/project', prNumber,
+      headSha, reason: 'synthetic load retry exhausted',
+      waitClass: 'overload-exhausted', immediate: true, now: 1000000,
+      pageImpl: async () => { pages++; return { ok: true }; } });
+  }
+  assert.equal(pages, 3);
 });
 
 test('load timeout defers audit, releases the exact lease and recovers without a terminal stop', async t => {

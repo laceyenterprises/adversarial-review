@@ -2981,6 +2981,10 @@ fallthrough/hold and OS-mode comparison; offline tests establish no live recover
 
 Pending rescue overload receipts are retried by this watcher at startup and
 on a 30-second recovery timer, with one bounded child and fair PR selection.
+Each tick scans at most 100 directory entries asynchronously, retaining its cursor;
+old debt remains eligible and may wait a full rotation. Live AMA enablement and
+execution switches gate each tick. Child failures back off per PR from 30 seconds
+to 30 minutes in memory; restart resets that backoff.
 Only PR identity goes to retry-only rescue; fresh intent and launch custody
 are re-evaluated there. At helper exhaustion the AMA pass emits one PR/head
 alert, archives overload debt and releases its hold to normal capped closer

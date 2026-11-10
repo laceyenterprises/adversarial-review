@@ -119,7 +119,11 @@ grade kinds, and backfill skips settlement observations. Existing states and
 smoke promises are unchanged.
 
 The watcher owns launch-less rescue overload debt on startup and a 30-second
-timer, one bounded child at a time. Retry-only rescue rechecks current PR
+timer, one bounded child at a time. Each tick scans at most 100 directory entries
+asynchronously with a retained cursor, so old debt may wait a full rotation.
+Live AMA enablement/execution switches gate retry; unreadable config suppresses
+execution. Per-PR child failures back off in memory from 30 seconds through
+30 minutes; restart clears this failure backoff while retaining disk debt. Retry-only rescue rechecks current PR
 head/review/holds/writers and reconciles the original key before replay or
 release. Head/review changes retire stale intent to normal selection. The
 AMA pass releases exhausted helper holds after one structured PR/head alert;

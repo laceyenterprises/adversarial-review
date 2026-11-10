@@ -1,5 +1,15 @@
+## Overload rescue retry (OVERLOADDEFER-01b)
+
 The watcher owns launch-less rescue overload debt on startup and a 30-second
-timer, one bounded child at a time. Retry-only rescue rechecks current PR
+timer, one bounded child at a time. Each tick asynchronously examines at most
+100 directory entries, retaining its cursor across ticks so historical files
+cannot block the claim loop and old debt is eventually visited. A full directory
+rotation may take multiple ticks; receipt progress is bounded by that rotation
+plus rescue execution. Live AMA `enabled` and `autonomousMergeExecutionEnabled`
+switches are checked each tick; false or unreadable configuration suppresses
+execution. Failed children receive process-local per-PR exponential backoff
+(30 seconds through 30 minutes), in addition to durable receipt timing. Restart
+clears that failure backoff, but retains disk debt. Retry-only rescue rechecks current PR
 head/review/holds/writers and reconciles the original key before replay or
 release. Head/review changes retire stale intent to normal selection. The
 AMA pass releases exhausted helper holds after one structured PR/head alert;

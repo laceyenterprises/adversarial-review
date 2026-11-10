@@ -26,3 +26,8 @@ closers later completing with the same PR owner, bounded counters and at most
 one host overload alert. Terminal failures of this kind should approach zero.
 The companion Agent OS PR owns the provisioning/rescue/sweep changes and SEV1
 report. This source change authorizes no live mutation or service restart.
+
+Resume validation: overload-deferral 6 passed, hammer-helper-step 22 passed,
+hammer-helper-launch 7 passed, and ama-hammer-retry-cap 196 passed. Each file
+ran separately under netguard with a 600-second process-group bound. ESLint on
+changed sources and the contract typecheck passed.

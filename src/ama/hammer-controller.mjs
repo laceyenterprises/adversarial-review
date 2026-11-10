@@ -322,6 +322,23 @@ export async function runHammerController(script, args = [], {
   if (!env.HAM_RUN_DIR || !env.HAM_ROOT_DIR || !env.HAM_REPO || !/^[1-9]\d*$/.test(env.HAM_PR_NUMBER || '')) {
     throw new Error('source inputs.sh before starting the hammer controller');
   }
+  // A malformed script can fail before ham_read itself is reached. Check it
+  // without executing any command or acquiring a lease; let the model repair
+  // the script instead of attributing Bash's parser error to a GitHub read.
+  try {
+    execFileSync('/bin/bash', ['-n'], { input: readFileSync(script),
+      env, timeout: loadAwareTimeoutMs(5000), stdio: 'pipe' });
+  } catch (error) {
+    if (error.status === 2) {
+      reportHammerEarlyFailure('hammer-command-error', { env });
+      console.error('hammer-controller: hammer-command-error; correct the script before retrying');
+      const diagnostic = error.stderr?.toString().trim();
+      if (diagnostic) console.error(diagnostic);
+      return 75;
+    }
+    // Missing scripts retain the existing execution/cleanup failure path.
+    if (error.code !== 'ENOENT') throw error;
+  }
   try {
     ({ env } = closureLaunchEnvironment(env, { readDispatchFilesImpl, readTimeoutImpl, graceMs: unreadableGraceMs }));
   } catch (error) {

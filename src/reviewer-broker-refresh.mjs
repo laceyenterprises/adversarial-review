@@ -253,6 +253,7 @@ function brokerConfigFingerprint(config) {
 }
 
 async function fetchReviewerTokenFromBrokerUrl({
+  env,
   brokerUrl,
   provider,
   expectedAppId,
@@ -325,7 +326,8 @@ async function fetchReviewerTokenFromBrokerUrl({
     // installation token whose identity was checked against both configured pins.
     if (body?.metadata?.credential_source === 'github_app_installation'
       && expectedAppId && expectedInstallationId) {
-      registerGitHubInstallationToken(accessToken, actualAppId, actualInstallationId);
+      registerGitHubInstallationToken(accessToken, actualAppId, actualInstallationId,
+        { env, expiresAtMs: Date.parse(body?.expires_at) });
     }
     const expiresAtMs = body?.expires_at ? Date.parse(body.expires_at) : NaN;
     return {
@@ -361,6 +363,7 @@ async function fetchReviewerTokenFromBroker({ role, env, fetchImpl, readFileImpl
     const brokerUrl = brokerUrls[index];
     try {
       return await fetchReviewerTokenFromBrokerUrl({
+        env,
         brokerUrl,
         provider,
         expectedAppId,

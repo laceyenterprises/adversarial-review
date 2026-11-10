@@ -189,6 +189,8 @@ test('the attempt cap drops a finding with the exhausted reason instead of leavi
   assert.deepEqual(f.db.prepare('SELECT attempt,disposition FROM finding_batch_releases ORDER BY release_id').all(),
     [{ attempt: 1, disposition: 'requeued' }, { attempt: 2, disposition: 'requeued' }, { attempt: 3, disposition: 'exhausted' }]);
   assert.ok(f.db.prepare('SELECT resolved_at FROM finding_backlog').get().resolved_at);
+  assert.equal(f.db.prepare('SELECT count(*) n FROM review_finding_grades').get().n, 0,
+    'retry exhaustion is a worker outcome, not a reviewer correctness grade');
 });
 
 test('a mixed batch with legacy reasons maps the unambiguous one, re-verifies the other and settles the rest', async t => {
@@ -211,6 +213,8 @@ test('a mixed batch with legacy reasons maps the unambiguous one, re-verifies th
   assert.equal(rows[c].reason, 'not-reproducible: The focused reproduction passes');
   assert.deepEqual([rows[b].outcome, rows[b].batch_id, rows[b].batch_attempts], [null, null, 1]);
   assert.equal(f.dispatches.length, 1);
+  assert.deepEqual(f.db.prepare('SELECT finding_id,taxonomy_code FROM review_finding_grades ORDER BY finding_id').all(),
+    [{ finding_id: a, taxonomy_code: 'fp.unclassified' }, { finding_id: c, taxonomy_code: 'ind.cannot-reproduce' }]);
   await f.run({ day: '2026-01-03' });
   assert.deepEqual(f.ids(f.batches()[1]), [b]);
 });

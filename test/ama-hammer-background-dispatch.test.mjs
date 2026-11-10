@@ -1715,6 +1715,40 @@ test(`background settlement carries the executor generation through result copie
 });
 }
 
+for (const rekeyed of [false, true]) test(`PRERECEIPTADOPT-01 watcher resumes after terminal empty-ticket recovery, rekeyed=${rekeyed}`, async t => {
+  let dispatches = 0;
+  const args = closureArgs({
+    now: () => Date.parse(intentExpired),
+    resolveAmaHammerDispatchModeImpl: () => 'inline',
+    probeClosureOwnershipImpl: async () => ({ owned: true, uncertain: true }),
+    observeClosureWaitImpl: async () => ({ retryAfterMs: 1000, exhausted: false }),
+    fetchMergedProtectiveDependentsImpl: async () => [],
+    fetchProtectivePredecessorStateImpl: async () => null,
+    maybeDispatchAmaCloserImpl: async () => { dispatches++; return { dispatched: true }; },
+  });
+  t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+  const f = seedCloserIntent(args.rootDir, { repo: args.repoPath, prNumber: args.prNumber,
+    headSha: rekeyed ? 'b'.repeat(40) : HEAD }, { rekeyedHead: rekeyed ? HEAD : null });
+  const row = { ...f.receipt, ticket_ref: null, status: 'succeeded' };
+  args.preReceiptIntentOptions = { ...f.options,
+    readIntentReceiptImpl: async () => ({ ok: true, rows: [row] }),
+    readLaunchRequestStatusImpl: async () => ({ ok: true, row, retryChain: [] }),
+    readMergedSignalImpl: async () => ({ ok: false }),
+    readCloserPullRequestStateImpl: async () => ({ state: 'OPEN', headRefOid: HEAD }),
+    cleanupScratchImpl: () => {},
+  };
+  args.closerLeaseLivenessOptions = { isProcessAlive: () => false };
+  const result = await maybeDispatchAmaClosureFor(args);
+  assert.equal(f.record().terminalOutcome, rekeyed ? 'superseded' : 'failed-without-merge');
+  if (f.lease()) {
+    assert.equal(f.lease().status, 'terminal');
+    assert.equal(f.lease().lrqId, row.launch_request_id);
+  } else assert.equal(rekeyed, true, 'ordinary routing may reclaim the superseded lease');
+  assert.equal(dispatches, 1, 'ordinary watcher admission resumes in the same pass');
+  assert.equal(result.dispatched, true);
+  assert.doesNotMatch(result.reason || '', /^in-flight:/);
+});
+
 for (const rekeyed of [false, true]) {
   for (const scenario of ['absent', 'receipt', 'unreadable', 'ambiguous', 'live', 'unknown-process', 'early-absent', 'live-child']) {
     test(`CLOSERINTENTRECON-01 orchestration ${scenario}, rekeyed=${rekeyed}`, async t => {

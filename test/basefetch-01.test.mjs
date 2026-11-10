@@ -136,6 +136,7 @@ test('BASEFETCH-01: stalled fetch keeps scaled deadline and stderr when ps canno
   writeFileSync(preload, `import os from 'node:os';
 import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
+os.platform = () => 'linux';
 os.loadavg = () => [6, 6, 6];
 os.cpus = () => [{}, {}];
 cp.execFileSync = () => { throw new Error('synthetic CPU sample denied'); };
@@ -152,7 +153,7 @@ while :; do /bin/sleep 0.1; done
   });
   assert.equal(result.status, 1, result.stdout + result.stderr);
   const stderr = readFileSync(join(f.dir, 'fetch-base.stderr'), 'utf8');
-  assert.match(stderr, /CPU sample unavailable; using full load-based corroboration/);
+  assert.doesNotMatch(stderr, /load-aware-timeout/);
   assert.equal((stderr.match(/git fetch timed out after 2s/g) || []).length, 2, stderr);
   assert.equal((stderr.match(/synthetic transport stalled/g) || []).length, 2, stderr);
 });

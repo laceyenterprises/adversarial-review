@@ -186,6 +186,39 @@ test('HAMLANEWAIT-01: repeated lane-busy audits leave next action retryable; a r
 
 const STOP = { deterministic: true, headSha: HEAD, recordedAt: ANCHOR, fingerprint: `${HEAD}:2:${ANCHOR}` };
 const AFTER_STOP = '2026-01-01T00:00:30.000Z';
+test('CLOSERREARM-01 terminal retry ownership yields only to a newer exact-head daemon decision', () => {
+  const options = {
+    launches: { closer: { headSha: HEAD, outcome: 'no-merge', retryable: true,
+      row: { status: 'failed', terminal_at: ANCHOR }, attempt: 1 } },
+    reviews: { postedAt: AFTER_STOP },
+  };
+  const decision = nextAction(snap(options));
+  assert.deepEqual(pick(decision), ['daemon-merge', 'daemon', 'clean-exact-head']);
+  assert.ok(decision.evidenceRefs.includes('stop-superseded-by-exact-head-review'));
+  for (const changes of [
+    { reviews: { postedAt: ANCHOR } },
+    { reviews: { postedAt: null } },
+    { reviews: { headSha: OLD } },
+    { reviews: { nonBlockingFindingCount: 1 } },
+    { reviews: { blockingFindingCount: 1 } },
+    { reviews: { nonBlockingFindingState: 'unknown' } },
+    { reviews: { attestation: 'invalid' } },
+    { reviews: { attestation: 'unknown' } },
+    { checks: { conclusion: 'FAILURE' } },
+    { checks: { conclusion: 'PENDING' } },
+    { pr: { mergeable: 'CONFLICTING' } },
+  ]) {
+    const changed = { ...options, ...changes,
+      reviews: { ...options.reviews, ...changes.reviews } };
+    assert.deepEqual(pick(nextAction(snap(changed))), ['hammer', 'hammer', 'retry-no-merge']);
+  }
+  const moved = nextAction(snap({ ...options, launches: { closer: {
+    ...options.launches.closer, headSha: OLD,
+  } } }));
+  assert.equal(moved.action, 'daemon-merge');
+  assert.ok(!moved.evidenceRefs.includes('stop-superseded-by-exact-head-review'));
+});
+
 const stopped = {
   controls: { stop: STOP },
   reviews: { verdict: 'comment-only', nonBlockingFindingCount: 2, postedAt: AFTER_STOP },

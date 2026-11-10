@@ -13,7 +13,8 @@ test('runner gives the shared HQ resolver canonical roots inside its sandbox', (
   assert.equal(process.env.HQ_ROOT, process.env.AGENT_OS_HQ_ROOT);
   assert.equal(process.env.AGENT_OS_WORKER_RUN_AS_USER, undefined);
   assert.equal(process.env.HQ_WORKER_RUN_AS_USER, undefined);
-  for (const key of ['HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND', 'MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND',
+  for (const key of ['HAM_PRODUCED_HEAD', 'HAM_MERGE_LEASE_ID', 'HAM_AUDIT_PATH',
+    'HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND', 'MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND',
     'HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND', 'GH_TOKEN_REFRESH_COMMAND', 'GITHUB_TOKEN_REFRESH_COMMAND',
     'HCP_TOKEN', 'HCP_BEARER_TOKEN', 'HCP_TOKEN_PATH', 'HCP_BASE_URL',
     'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE',

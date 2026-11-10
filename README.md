@@ -1545,7 +1545,14 @@ values and deployed smoke commands are unchanged. See
 [reviewer verdict recovery](docs/data-model/reviewer-verdict-recovery.md).
 
 HAMEMPTYPRIMARY-01 preserves author commits before conflict-only publication;
-its local proof does not alter lifecycle states or merge authority. Offline Git
+its local proof does not alter lifecycle states or merge authority.
+When that proof stops with `conflict-primary-unproven`, the watcher queues
+one builder-tag-routed remediation per PR head before further closer admission.
+The job's `closureHandoff` records the reason and full-review requirement.
+Pending remediation owns that head through admission delays; its new pushed
+head returns to normal review. Timeout retains the existing closer retry.
+See [the handoff contract](docs/data-model/follow-up-jobs.md#conflict-primary-handoff-hamconflictowner-01).
+Offline Git
 fixtures establish source behavior. The runtime owner separately observes the
 next natural replay after normal deployment, retaining the primary, exact head,
 checks, authenticated audit and custody outcome as declared in
@@ -1720,6 +1727,18 @@ After deployment, restart the watcher, then SRE runs
 This is explicit and idempotent; concurrency bounds submissions while existing
 HQ admission bounds running workers. The backfill waits up to five seconds for a
 SQLite writer lock. No automatic deployment backfill runs.
+For a frozen graded selection, add `--manifest <selection.json>`. This validates
+the selection hash and reviewed-head pins, claims only selected real findings
+from merged sources, and dispatches/collects only that selection's batches.
+Workers still check applicability on current main. Settlement appends structured
+grades; lifecycle and stale outcomes remain indeterminate. Omitting the flag
+preserves the default drain. Selected rows remain excluded after release; only
+an explicit selection rechecks consensus and retries them. The ticker collects
+already-started selected work but never starts an undispatched selected batch.
+Backlog health counts cover the automatic drain; `selectedBacklog` separately
+reports per-manifest open, unbatched, errored and undispatched finding counts.
+Rerun the manifest explicitly to recover failed dispatches or released findings.
+See the [selection contract](docs/data-model/review-findings.md#graded-selection-remediation).
 `pipeline-health` JSON `nonBlockingBacklog` exposes open and unbatched finding
 counts, oldest open age, applied/dropped by UTC day and batch error counts. Its
 `progress` object (also printed by `node bin/review-findings.mjs backlog --db <db>`)
@@ -2368,8 +2387,14 @@ pre-rebase head. Reconciliation validates the current rekeyed lease and compares
 its full snapshot across yielded reads before mutating it under the existing
 lease lock. Proven absence defers the current lease on that pass; a canonical
 receipt promotes it; unreadable or ambiguous evidence preserves the wait.
+A unique receipt carrying the intent's own key may have an empty ticket only
+when its worker class is a closer and repository/head metadata matches when
+present. Foreign tickets and ambiguous identity retain the fence. Terminal
+receipt recovery invokes ordinary terminal lease reconciliation before watcher
+admission; live retries and success/merge evidence retain their authority.
+The audited operator settlement tool also supports this terminal receipt case.
 Live submitters within the deadline retain ownership. Query budgets, absence
-rules, operator settlement and retry charging are unchanged.
+rules and retry charging are unchanged.
 
 Admission treats an unreadable current-head lease as held (`lease-unreadable`)
 and logs a warning; confirmed terminal PRs still stop dispatch. A failed intent
@@ -2822,6 +2847,25 @@ approved disposable offline safe canary of deployed code; it does not inspect
 live queues, credentials or running daemon freshness. This worker does not run
 host mode. Node dependencies and local Git must already be installed.
 
+The hammer edit-plan helper permits one shape correction per run (exit 21,
+never a conflict) before any edit; a second shape refusal exits 1. Cited plans
+retain their citations during correction; policy refusals retain their existing
+outcomes. A valid cited non-blocking `in-place` plan is a shape error: on exit 21,
+re-plan as `additive`. Non-blocking findings never permit in-place edits.
+An otherwise authorized `author-lines` plan outside its cited ranges also receives
+exit 21, naming those ranges. Re-plan within a cited range or as `additive` if no
+existing author line is removed or replaced; uncovered author-line edits remain
+disallowed.
+The CLI takes the controller-pinned head via `--reviewed-head SHA`
+(or `HAM_REVIEWED_SHA`), fills omitted, non-string or empty plan heads, and rejects
+malformed heads or heads that differ from the cited review's `commit_id`.
+For citations from another reviewed head, set the plan's `reviewedHead` to that
+review's `commit_id`; the controller pin remains required. `--help` and `-h`
+print accepted shapes and exit 0 separately from plan-check authorization.
+After the submodule float and follow-up/watcher restart, SRE verifies the CI-repair closer activation
+receipt declared in `post-merge-verify.json` and the
+[closure runbook](docs/RUNBOOK-ama-closure.md). Existing smoke commands are unchanged.
+
 LAC-2096: closer recovery reads canonical Postgres request/lineage work-item and
 logical-job identity without assuming launch ticket/head columns. Conflicting
 or unidentified evidence preserves ownership; operator settlement requires its
@@ -3093,9 +3137,9 @@ stateDiagram-v2
     [*] --> s0: closure-owner.03 project shared next action: wait, including infrastructure-only CI without hammer or automated-stop charge
     [*] --> s1: closure-owner.04 project shared next action: hammer, including readable ownerless recovery at expiry under existing caps and lease
     [*] --> s2: closure-owner.05 project shared next action: review (including a head-bound shared rereview-exact-head decision before historical review ceiling or hammer ownership)
-    [*] --> s3: closure-owner.06 project shared next action: remediation
+    [*] --> s3: closure-owner.06 project shared next action: remediation, including a pending conflict-primary-unproven builder handoff
     [*] --> s3: closure-owner.07 proven live remediation owner retained
-    [*] --> s1: closure-owner.08 confirmed conflict selects capped repair with merge safety retained
+    [*] --> s1: closure-owner.08 confirmed conflict selects capped repair unless a conflict-primary-unproven builder handoff owns the head; merge safety retained
     [*] --> s4: closure-owner.09 project shared next action: daemon-merge, including any R07 deterministic stop, retry cap, lifetime cap or final no-merge superseded by a strictly newer eligible exact-head review with trustworthy recorded time; hammer caps stay binding; continuous cap alerts preserve time, complete confirmed lifetime charges can recover the budget boundary, and non-firing supersessions name why
     s0 --> [*]: closure-owner.10 next bounded observation; every recovery deadline dispatches or escalates once with row reason and evidence
     [*] --> s5: closure-owner.11 explicit hold, draft or disabled execution intent

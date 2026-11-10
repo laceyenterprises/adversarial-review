@@ -34,6 +34,9 @@ Grok builders use `[grok]`. Their default reviewer is Codex and their remediator
 defer. Grok acting lanes are not enabled by this routing contract. A closer
 wrapper such as `[hammer] [grok]` retains Grok as the original builder family; a
 closer prefix alone supplies no builder provenance.
+Reviewer fallback checks the original builder family before transferring the
+durable claim, including after a quota failure or during a persisted cooldown.
+An unknown or refused fallback leaves the primary result and retry budgets intact.
 
 ## Placement
 

@@ -1,5 +1,15 @@
 # Data Model - Hammer Retry Cap Ledger
 
+`overloadDeferral` is the version 1 Agent OS wire receipt, retained across
+replacement launches and review/head resets for the same PR owner. It carries
+`owner`, `outcome=overload-deferred`, phase/deadline/load `evidence`,
+`deferralCount`, `maxDeferrals=5`, `nextRetryAt` (epoch seconds or null),
+`overloadAlert` and `alertKey=host-overload`. Existing ledger locking serializes
+updates. A launch increments debt once, even when multiple observations see
+its deferred audit. Retry windows are 30, 60, 120 and 240 seconds; the fifth
+deferral retains ownership and requires overload attention without a terminal
+stop or automatic replacement. This debt is distinct from failure charges.
+
 ## Stop repair lineage (STOPHOLDREPAIR-01)
 
 The optional `stopRepairReservations` object is keyed by repair dispatch key.

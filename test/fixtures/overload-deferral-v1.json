@@ -1,0 +1,22 @@
+{
+  "owner": "synthetic-owner",
+  "now": 1000,
+  "evidence": {
+    "phase": "synthetic-read",
+    "deadline_seconds": 30,
+    "scaled_budget_seconds": 180,
+    "load_multiplier": 6,
+    "load_per_core": 4
+  },
+  "nextRetryAt": [
+    1030,
+    1060,
+    1120,
+    1240,
+    null
+  ],
+  "maxDeferrals": 5,
+  "outcome": "overload-deferred",
+  "alertKey": "host-overload",
+  "schemaVersion": 1
+}

@@ -18,6 +18,9 @@ test('an unavailable audit dependency preserves the wrapped failure status and r
   writeFileSync(helper, readFileSync(join(root, 'bin/hammer-helper-step.mjs')));
   writeFileSync(join(dir, 'bin/load-aware-timeout.mjs'), "process.stdout.write('1');\n");
   writeFileSync(join(dir, 'src/load-aware-timeout.mjs'), 'export const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;\n');
+  for (const name of ['overload-deferral.mjs', 'atomic-write.mjs']) {
+    writeFileSync(join(dir, 'src', name), readFileSync(join(root, 'src', name)));
+  }
   const result = spawnSync(process.execPath, [
     helper, 'mutation:report', 'publication', '1', '1', '/bin/sh', '-c', 'echo receipt; exit 76',
   ], { env: process.env, encoding: 'utf8', timeout: 15000 });

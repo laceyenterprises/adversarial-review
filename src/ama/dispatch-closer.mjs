@@ -5568,6 +5568,7 @@ async function maybeDispatchAmaCloserAttempt({
         || infrastructureReadPark
         || (parkReason === 'merge-lease-timeout' && parkAttempt?.leaseWaitExhausted === true),
       launchRequestId: existingRecord.launchRequestId, now: dispatchContext.dispatchedAt,
+      ...(parkReason === 'overload-deferred' ? { overloadEvidence: parkAttempt.overloadEvidence } : {}),
     });
     if (infrastructureReadPark) logAmaCloserDispatchEvent(logger, 'ama_closer.hammer_ended_without_merge', {
       repo, prNumber, headSha: queuedHead, launchRequestId: existingRecord.launchRequestId,
@@ -5591,11 +5592,20 @@ async function maybeDispatchAmaCloserAttempt({
       logger?.warn?.(`[ama-closer] lane-busy alert failed; retry next pass: ${error?.message || error}`);
     }
   }
-  if (deferredPark && (!certifiedPark || laneBusyPark) && parkLedger) {
+  if (deferredPark && parkLedger && (parkLedger.overloadDeferral || !certifiedPark || laneBusyPark)) {
     const { expired, backoff } = evaluateHammerDeferralQueue(parkLedger, dispatchContext.dispatchedAt);
     if (expired || backoff) {
+      if (expired && parkLedger.overloadDeferral?.overloadAlert) {
+        try { await observeClosureWait({ rootDir, repo, prNumber, headSha: queuedHead,
+          reason: 'host-overload: automatic retry budget exhausted; ownership retained',
+          waitClass: 'host-overload', immediate: true, now: Date.parse(dispatchContext.dispatchedAt),
+          pageImpl: message => deliverAlertImpl(message, { event: 'ama_closer.host_overload',
+            payload: { alertKey: 'host-overload', repo, prNumber } }) }); }
+        catch (error) { logger?.warn?.(`[ama-closer] overload alert unavailable: ${error?.message || error}`); }
+      }
       return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-        reason: expired ? 'hammer-deferral-budget-exhausted' : 'hammer-deferral-backoff',
+        reason: parkLedger.overloadDeferral ? 'overload-deferred'
+          : expired ? 'hammer-deferral-budget-exhausted' : 'hammer-deferral-backoff',
         recoveryWait: !expired, needsOperator: expired });
     }
   }

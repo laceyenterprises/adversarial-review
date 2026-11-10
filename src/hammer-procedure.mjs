@@ -36,6 +36,12 @@ export function renderHammerProcedure(phase, values) {
   source = source.replace(/^(#![^\n]*\n)?/, `$1export HAM_REPO='<<REPO>>' HAM_PR_NUMBER='<<PR_NUMBER>>'
 export HAM_HQ_ROOT='<<HQ_ROOT>>' HAM_TARGET_REMEDIATION_SHA='<<TARGET_REMEDIATION_SHA>>'
 ham_phase_read_retryable() {
+  # Only a generic wrapper failure can inherit a helper's load deferral.
+  # Explicit policy/ownership/predicate refusals retain their own outcome.
+  case "\${HAM_PHASE_OUTCOME:-${phase}-failed}" in
+    ${phase}-failed|submodule-sync-failed|head-context-failed|pushed-attestation-failed|merge-action-receipt-failed|primary-change-context-failed|rebase-result-failed)
+      if [ -f "<<RUN_DIR>>/helper-overload.json" ]; then HAM_PHASE_OUTCOME=overload-deferred; fi ;;
+  esac
   case "\${HAM_PHASE_OUTCOME:-}" in
     ${[...HAMMER_RETRYABLE_READ_OUTCOMES].join('|')}) return 0 ;;
     *) return 1 ;;

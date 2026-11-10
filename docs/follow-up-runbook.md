@@ -384,6 +384,22 @@ failure. A successful push clears the supplied `--failure-path` sidecar before
 reporting success. Missing sidecars are harmless; other cleanup failures are
 reported rather than leaving a prior refusal silently authoritative.
 
+For this repository, ARFINALCHECK-01 supplements worker-selected focused tests
+at the guarded publication boundary. The full merge-base-to-candidate PR diff
+selects at most two existing offline fixtures: finalization source, simulation
+inputs, or the shared load-timeout primitive select
+`test/finalization-simulator.test.mjs`; migration paths or posted-review profiling
+fixture changes select `test/watcher-closure-latency.test.mjs`. The publisher runs
+them together through `test/run-tests.mjs` with a fixed 180-second timeout before
+push. A selected run requires a clean workspace; fixture failure or timeout
+withholds publication. Unrelated paths run neither suite, and other repositories
+retain their own validation policy. Relative workspace paths are resolved before
+launching the runner. Failure diagnostics retain both stderr and stdout, including
+the runner cleanup banner and the failing test assertions. These checks supplement
+normal PR review and CI. Simulation baseline changes still require preserved, reviewed outcomes;
+migration sentinels remain individually asserted outside the unchanged runtime
+read budget.
+
 A lost worker result can complete a round only when the live PR head matches a
 workspace tip carrying the job's exact `Worker-Job-Id` provenance trailer and
 differs from the round start and reviewed heads. Recorded head movement and

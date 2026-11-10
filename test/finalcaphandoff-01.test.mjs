@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -59,8 +59,15 @@ test('FINALCAPHANDOFF-01: 1/1 before claim returns and persists actionable termi
   assert.equal(durable.closureHandoff, undefined, 'does not invent a dispatch receipt');
   assert.match(durable.remediationPlan.stop.reason, /No successor dispatched.*Operator:/);
   const bytes = readFileSync(result.jobPath, 'utf8');
-  assert.equal(claimNextFollowUpJob({ rootDir, claimedAt: NOW, returnStopped: true }), null);
-  assert.equal(readFileSync(result.jobPath, 'utf8'), bytes, 'repeated polling does not rewrite or duplicate the result');
+  const nextJob = createFollowUpJob({ rootDir, repo: 'fixture/project', prNumber: 43,
+    branch: 'fixture/next', reviewerModel: 'gemini', revisionRef: HEAD,
+    reviewPostedAt: '2026-11-10T04:30:59Z',
+    reviewBody: BODY.replace('- **Missing timezone**\n  - **Problem:** timestamp is ambiguous.', '- None.'),
+    riskClass: 'medium' });
+  assert.equal(existsSync(nextJob.jobPath), true, 'the next poll has pending work');
+  const nextClaim = claimNextFollowUpJob({ rootDir, claimedAt: NOW, returnStopped: true });
+  assert.equal(nextClaim.job.jobId, nextJob.job.jobId);
+  assert.equal(readFileSync(result.jobPath, 'utf8'), bytes, 'later polling leaves the terminal result byte-identical');
 });
 
 test('final-cap result is durable even when the caller does not request stopped results', t => {

@@ -3189,7 +3189,7 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
       reason: claimed.reason || 'max-rounds-reached',
       job: claimed.job,
       jobPath: claimed.jobPath,
-      ...(claimed.job.finalCapResult ? { finalCapResult: claimed.job.finalCapResult } : {}),
+      ...(claimed.finalCapResult ? { finalCapResult: claimed.finalCapResult } : {}),
     };
   }
 

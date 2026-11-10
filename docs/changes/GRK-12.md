@@ -86,3 +86,23 @@ in PR-head CI; no live rollout or parity acceptance is claimed here.
 
 The touched routing block retains the existing monolith line ceiling by
 trimming local spacing; no limit or gate changes.
+
+Builder update for PR 1805: the branch already contains current `origin/main`
+and all latest-review fixes: terminal `subject-refused` stops, companion-first
+deployment ordering, domain-load validation, defined pooled provider labels,
+and the shared remediation email domain. The Node 22 and Node 26 CI failures
+both identified the existing retrigger documentation test: its bounded operator
+retrigger sections omitted `subject-refused`. The canonical spec and runbook
+now include that code, the required lane correction, claim-time revalidation,
+and the unchanged round cap. The existing contract test reproduced the failure
+before this correction; no runtime policy or CI gate changed.
+
+Update validation: all 18 affected documentation and review-regression test
+files passed (712 tests), each run separately as `node --test <file>` through
+`cwp_dispatch.worker_validation --timeout-seconds 600`, under netguard.
+This includes `test/follow-up-retrigger-label.test.mjs` (28 passed after the
+reproduced failure), the full config-loader file, reconcile/comment delivery,
+Grok routing, subject-stop, domain-loading, fallback and documentation tests.
+`npm run lint` passed with zero errors (152 existing warnings);
+`npm run typecheck:contracts`, the netguard-wrapped offline research-finding
+demo and `git diff --check` passed. The host full suite was not run.

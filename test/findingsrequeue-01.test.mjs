@@ -57,6 +57,11 @@ function fixture(t, titles = ['First result', 'Second result', 'Third result']) 
   };
   const options = { db, rootDir, env, execFileImpl, logger: { warn() {} },
     readLaunches: async ({ idempotencyKey }) => ({ ok: true, rows: launches.get(idempotencyKey) || [] }),
+    readLaunchSnapshot: async ({ launchRequestIds }) => {
+      const rows = [...launches.values()].flat().filter(row => launchRequestIds.includes(row.launch_request_id));
+      return rows.length ? { ok: true, rows }
+        : { ok: false, reason: 'dispatch-read-unavailable', detail: 'dispatch absence scope unproven' };
+    },
     fetchPublication: async () => { reads.publication++; return publication; },
     fetchPr: async () => ({ state: 'MERGED' }) };
   const run = overrides => runFindingBatches({ ...options, ...overrides });
@@ -146,16 +151,19 @@ test('a batch with any live keyed launch, or unreadable launch evidence, is unto
   });
 });
 
-test('a launched batch absent from the ledger is released only after the batch timeout', async t => {
+test('a missing direct snapshot holds custody while a terminal keyed launch can time out', async t => {
   const f = fixture(t);
   await f.run({ day: '2026-01-02' });
   f.launches.clear();
   const launchedAt = Date.parse(f.batches()[0].launched_at);
   await f.run({ resolutionOnly: true, now: launchedAt + DAY - 1 });
   assert.equal(f.batches()[0].released_at, null);
-  await f.run({ resolutionOnly: true, now: launchedAt + DAY + 1 });
-  assert.equal(f.batches()[0].release_reason, 'batch-launch-ended-without-outcomes');
-  assert.ok(f.backlog().every(r => r.batch_id === null && r.batch_attempts === 1));
+  const logs = [];
+  await f.run({ resolutionOnly: true, now: launchedAt + DAY + 1,
+    logger: { warn: message => logs.push(message) } });
+  assert.equal(f.batches()[0].released_at, null);
+  assert.ok(f.backlog().every(r => r.batch_id !== null && r.batch_attempts === 0));
+  assert.ok(logs.some(message => message.includes('needs-operator:') || message.includes('batch-launch-probe-unreadable')));
   // A legacy row with no launched_at ages from its claim day.
   const g = fixture(t);
   await g.run({ day: '2026-01-02' });
@@ -334,4 +342,216 @@ test('a store not yet migrated keeps its backlog summary and reports progress as
   assert.equal(health.openCount, 1);
   assert.equal(health.progress, null);
   assert.deepEqual(health.batchErrors, [{ error: 'batch-preparation-failed', count: 1 }]);
+});
+
+test('never-launched errored batches release after timeout, without another dispatch or lost accounting', async t => {
+  for (const error of ['batch-push-evidence-missing', 'synthetic launch failure']) await t.test(error, async t => {
+    const f = fixture(t);
+    const [batch] = claimFindingBatches(f.db, '2026-01-02');
+    f.db.prepare('UPDATE finding_batches SET error=?').run(error);
+    const run = now => f.run({ resolutionOnly: true, now, execFileImpl: async () => assert.fail('must not dispatch') });
+    await run(Date.parse('2026-01-02T23:59:59Z'));
+    assert.equal(f.batches()[0].released_at, null);
+    await f.run({ now: Date.parse('2026-01-03T00:00:01Z'),
+      execFileImpl: async () => assert.fail('overdue failure releases before redispatch') });
+    assert.equal(f.batches()[0].release_reason, error);
+    assert.ok(f.backlog().every(row => row.batch_id === null && row.batch_attempts === 1 && row.outcome === null));
+    const audit = f.db.prepare('SELECT batch_id,attempt,reason FROM finding_batch_releases').all();
+    assert.equal(audit.length, 3);
+    assert.ok(audit.every(row => row.batch_id === batch.batch_id && row.attempt === 1 && row.reason === error));
+    await run(Date.parse('2026-01-04T00:00:01Z'));
+    assert.equal(f.db.prepare('SELECT count(*) n FROM finding_batch_releases').get().n, 3);
+  });
+});
+
+test('an applied artifact without a launch receipt names the missing launch rather than the push', async t => {
+  const f = fixture(t);
+  await f.run({ day: '2026-01-02' });
+  const [batch] = f.batches();
+  f.writeOutcomes(batch, f.ids(batch).map(applied), { headSha: head });
+  f.db.prepare('UPDATE finding_batches SET launch_id=NULL,launched_at=NULL').run();
+  await f.run({ resolutionOnly: true, now: Date.parse('2026-01-02T01:00:00Z') });
+  assert.equal(f.batches()[0].error, 'batch-launch-receipt-missing');
+  assert.equal(f.batches()[0].released_at, null);
+});
+
+test('an absent keyed receipt checks the actual launch and retry liveness after timeout', async t => {
+  for (const state of ['failed', 'succeeded', 'absent', 'running', 'unknown', 'live-retry', 'unreadable', 'throws']) {
+    await t.test(state, async t => {
+      const f = fixture(t);
+      const now = Date.parse('2026-01-02T00:00:00Z');
+      await f.run({ day: '2026-01-02', now });
+      const [batch] = f.batches();
+      f.writeOutcomes(batch, f.ids(batch).map(applied), { headSha: head });
+      let exactReads = 0;
+      const logs = [];
+      const overrides = {
+        resolutionOnly: true, now: now + DAY + 1,
+        logger: { warn: message => logs.push(message), info: message => logs.push(message) },
+        readLaunches: async () => ({ ok: true, rows: [] }),
+        readLaunchSnapshot: async ({ launchRequestIds }) => {
+          exactReads++;
+          assert.deepEqual(launchRequestIds, [batch.launch_id]);
+          if (state === 'throws') throw Error('synthetic transport error');
+          if (state === 'unreadable') return { ok: false };
+          if (state === 'absent') return { ok: false, reason: 'dispatch-read-unavailable', detail: 'dispatch absence scope unproven' };
+          return { ok: true, rows: [
+            { launch_request_id: batch.launch_id, status: state === 'live-retry' ? 'failed' : state },
+            ...(state === 'live-retry' ? [{ launch_request_id: 'synthetic-retry', status: 'running' }] : []),
+          ] };
+        },
+      };
+      await f.run({ ...overrides, now: now + DAY - 1 });
+      assert.equal(exactReads, 0, 'absence cannot release before timeout');
+      assert.equal(f.batches()[0].released_at, null);
+      await f.run(overrides);
+      assert.equal(exactReads, 1);
+      const released = ['failed', 'succeeded'].includes(state);
+      assert.equal(Boolean(f.batches()[0].released_at), released);
+      assert.equal(f.batches()[0].error, 'batch-publish-receipt-unavailable');
+      assert.ok(f.backlog().every(row => row.batch_attempts === (released ? 1 : 0)));
+      if (['absent', 'unknown', 'unreadable', 'throws'].includes(state)) {
+        assert.ok(logs.some(line => line.includes('needs-operator')));
+        assert.ok(logs.some(line => line.includes('"openFindings":3') && line.includes('"oldestAgeMs":86400001')));
+      }
+    });
+  }
+});
+
+test('an unreadable keyed probe stays held and reports needs-operator after timeout', async t => {
+  for (const probe of [
+    { ok: false, reason: 'dispatch-read-unavailable', detail: 'dispatch absence scope unproven' },
+    { ok: true, rows: null },
+  ]) await t.test(JSON.stringify(probe), async t => {
+    const f = fixture(t);
+    const now = Date.parse('2026-01-02T00:00:00Z');
+    await f.run({ day: '2026-01-02', now });
+    const logs = [];
+    await f.run({ resolutionOnly: true, now: now + DAY + 1,
+      logger: { warn: message => logs.push(message), info: message => logs.push(message) },
+      readLaunches: async () => probe,
+      readLaunchSnapshot: async () => assert.fail('unreadable keyed lookup cannot be bypassed') });
+    assert.equal(f.batches()[0].released_at, null);
+    assert.ok(f.backlog().every(row => row.batch_attempts === 0));
+    assert.equal(logs.filter(line => line.includes('summary')).length, 1);
+    assert.ok(logs.some(line => line.includes('needs-operator:batch-keyed-launch-probe-unreadable')));
+  });
+});
+
+test('temporary dispatch failures retain the batch and never exhaust findings, even past timeout', async t => {
+  const f = fixture(t, ['Only result']);
+  const now = Date.parse('2026-01-02T00:00:00Z');
+  const logs = [];
+  let calls = 0;
+  const overrides = { day: '2026-01-02', now,
+    logger: { warn: message => logs.push(message), info: message => logs.push(message) },
+    execFileImpl: async () => {
+      calls++;
+      throw Object.assign(Error('Command failed: hq dispatch sensitive command'), {
+        stderr: `synthetic admission refused: Bearer synthetic-token password=synthetic-secret ${'x'.repeat(1000)}`,
+      });
+    } };
+  const [batch] = claimFindingBatches(f.db, '2026-01-02');
+  // Include an old capped row from before dispatch failures were classified.
+  f.db.prepare('UPDATE finding_batches SET batch_attempts=3,error=?')
+    .run('Command failed: hq dispatch --priority normal\nsynthetic stderr');
+  f.db.prepare('UPDATE finding_backlog SET batch_attempts=2').run();
+  const failures = [
+    Object.assign(Error('dispatch timeout'), { killed: true, code: 'ETIMEDOUT' }),
+    Object.assign(Error('TLS connection reset'), { code: 'ECONNRESET' }),
+    Object.assign(Error('I/O unavailable'), { code: 'EIO' }),
+  ];
+  for (let pass = 0; pass < 12; pass++) {
+    await f.run({ ...overrides, now: now + pass * DAY,
+      ...(pass % 4 ? { execFileImpl: async () => { calls++; throw failures[pass % failures.length]; } } : {}) });
+    assert.equal(f.batches().length, 1, 'retry retains the original batch/key');
+    assert.equal(f.batches()[0].batch_attempts, 0);
+    assert.equal(f.batches()[0].released_at, null);
+    assert.equal(f.backlog()[0].batch_attempts, 2, 'no worker attempt was consumed');
+    assert.equal(f.backlog()[0].outcome, null);
+  }
+  assert.equal(calls, 12);
+  assert.ok(logs.some(line => line.includes('needs-operator:batch-dispatch-retry-overdue')));
+  assert.equal(f.db.prepare('SELECT count(*) n FROM finding_batch_releases').get().n, 0);
+  assert.ok(f.batches()[0].error.length < 335);
+  assert.ok(!logs.join('\n').includes('synthetic-token'));
+  assert.ok(!logs.join('\n').includes('synthetic-secret'));
+  assert.ok(!logs.join('\n').includes('sensitive command'));
+  await f.run({ ...overrides, resolutionOnly: true, now: now + 13 * DAY });
+  assert.equal(calls, 12);
+  // Recovery uses the original key and records a normal launch receipt.
+  await f.run({ day: '2026-01-15', now: now + 13 * DAY });
+  assert.equal(f.batches()[0].launch_id, 'synthetic-launch-1');
+  assert.equal(f.batches()[0].error, null);
+  assert.equal(f.dispatches[0][f.dispatches[0].indexOf('--idempotency-key') + 1], `findings-batch-${batch.batch_id}`);
+});
+
+test('returned invalid receipts still spend the durable dispatch cap', async t => {
+  const f = fixture(t, ['Only result']);
+  let calls = 0;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await f.run({ day: '2026-01-02', now: Date.parse('2026-01-02T01:00:00Z'),
+      execFileImpl: async () => { calls++; return { stdout: '{}' }; } });
+    assert.equal(f.batches()[0].batch_attempts, attempt);
+    assert.equal(Boolean(f.batches()[0].released_at), attempt === 3);
+    assert.equal(f.backlog()[0].batch_attempts, attempt === 3 ? 1 : 0);
+  }
+  assert.equal(calls, 3);
+  assert.match(f.batches()[0].release_reason, /^batch-dispatch-attempts-exhausted: batch-dispatch-receipt-invalid:/);
+});
+
+test('interleaved transient failures preserve the invalid-receipt cap', async t => {
+  const f = fixture(t, ['Only result']);
+  const now = Date.parse('2026-01-02T01:00:00Z');
+  for (const [transient, attempts] of [[false, 1], [true, 1], [false, 2], [true, 2], [false, 3]]) {
+    await f.run({ day: '2026-01-02', now, execFileImpl: async () => {
+      if (transient) throw Object.assign(Error('dispatch timeout'), { code: 'ETIMEDOUT' });
+      return { stdout: '{}' };
+    } });
+    assert.equal(f.batches()[0].batch_attempts, attempts);
+    assert.equal(Boolean(f.batches()[0].released_at), attempts === 3);
+  }
+});
+
+test('dispatch cap holds any live launch without making a fourth submission', async t => {
+  const f = fixture(t);
+  const [batch] = claimFindingBatches(f.db, '2026-01-02');
+  f.db.prepare("UPDATE finding_batches SET batch_attempts=3,error='batch-dispatch-receipt-invalid: lost receipt'").run();
+  f.launches.set(`findings-batch-${batch.batch_id}`, [{
+    launch_request_id: 'synthetic-live', idempotency_key: `findings-batch-${batch.batch_id}`, status: 'running',
+  }]);
+  for (let pass = 0; pass < 2; pass++) await f.run({ day: '2026-01-02', now: Date.parse('2026-01-02T01:00:00Z'),
+    execFileImpl: async () => assert.fail('exhausted dispatch must not retry') });
+  assert.equal(f.batches()[0].released_at, null);
+  assert.ok(f.backlog().every(row => row.batch_attempts === 0));
+});
+
+test('normal publisher receipt pending and transient status read failures remain waits before timeout', async t => {
+  for (const pending of [true, false]) await t.test(String(pending), async t => {
+    const f = fixture(t);
+    const now = Date.parse('2026-01-02T00:00:00Z');
+    await f.run({ day: '2026-01-02', now });
+    const [batch] = f.batches();
+    f.endLaunches('succeeded');
+    f.writeOutcomes(batch, f.ids(batch).map(applied), { headSha: head });
+    f.publication.headSha = head;
+    const dir = join(f.rootDir, 'data', 'finding-batches', batch.batch_id);
+    if (pending) writeFileSync(join(dir, 'publish-intent.json'), '{}');
+    await f.run({ resolutionOnly: true, now: now + DAY - 1,
+      ...(pending ? {} : { execFileImpl: async () => { throw Error('synthetic status read failed'); } }) });
+    assert.equal(f.batches()[0].error, pending ? 'batch-publish-receipt-pending' : 'synthetic status read failed');
+    assert.equal(f.batches()[0].released_at, null);
+    assert.equal(f.batches()[0].batch_attempts, 0);
+    assert.ok(f.backlog().every(row => row.batch_attempts === 0 && row.outcome === null));
+  });
+});
+
+test('dispatch-attempt migration reapplication preserves durable counts', t => {
+  const f = fixture(t);
+  claimFindingBatches(f.db, '2026-01-02');
+  f.db.prepare('UPDATE finding_batches SET batch_attempts=2').run();
+  f.db.prepare("DELETE FROM schema_migrations WHERE id='20261109_findings_batch_dispatch_attempts.sql'").run();
+  ensureReviewStateSchema(f.db);
+  assert.equal(f.batches()[0].batch_attempts, 2);
+  assert.deepEqual(f.db.pragma('foreign_key_check'), []);
 });

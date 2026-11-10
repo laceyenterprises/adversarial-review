@@ -48,9 +48,11 @@
         "src/kernel/remediation-reply.mjs",
         "migrations/20261108_findings_batch_manifest.sql",
         "src/finding-remediation-selection.mjs",
-        "migrations/20261108_findings_selection_scope.sql"
+        "migrations/20261108_findings_selection_scope.sql",
+        "migrations/20261109_findings_batch_dispatch_attempts.sql"
       ],
-      "owner": "review-body capture and remediation completion observations"
+      "owner": "review-body capture and remediation completion observations",
+      "compatibility": "FINDINGSSTUCK-01: additive replay-safe finding_batches.batch_attempts counts returned invalid initial receipts separately from per-finding release attempts. Failed dispatch subprocesses preserve that counter and retry the same batch/key without a finding charge. Legacy ambiguous errors reset the old counter once. Overdue retries report needs-operator; actual releases retain their existing requeue/exhaustion audit."
     }
   ]
 }

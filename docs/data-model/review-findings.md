@@ -297,9 +297,45 @@ key (preparation and any publisher) is terminal in the launch ledger and either:
   `launched_at`. In this case a ledger that proves no keyed launch exists also
   counts as ended.
 
-A live keyed launch, or ledger evidence that cannot be read, leaves the batch
+FINDINGSSTUCK-01 also releases an errored batch with no recorded launch after
+the timeout, aging from its claim day, except for retryable dispatch failures
+(described below). A readable keyed probe must prove every
+launch terminal or absent; missing local receipts alone never prove absence.
+Applied artifacts without a launch receipt report `batch-launch-receipt-missing`,
+distinct from a missing pushed head.
+
+When a launched batch's keyed receipt is empty or omits its recorded launch,
+timeout release additionally reads that exact `launch_id` from the public ledger,
+including retry descendants. The recorded launch must be present and every
+observed launch must be terminal. A direct snapshot cannot certify absence. Unknown status, incomplete reads, unproven absence, mismatched
+identity and live launches retain custody. Unreadable evidence after the timeout
+emits `needs-operator` with the batch ID and a named probe reason; it never becomes
+an absence certificate.
+
+Migration `20261109_findings_batch_dispatch_attempts.sql` adds
+`finding_batches.batch_attempts` (default 0), a durable counter of successful
+initial dispatch responses with invalid/missing receipts. This differs from
+`finding_backlog.batch_attempts`, which counts released finding attempts.
+After three invalid receipts, no more initial dispatches are made for that
+batch. Readable terminal/absent keyed evidence permits release with
+`batch-dispatch-attempts-exhausted: batch-dispatch-receipt-invalid: <detail>`;
+unreadable evidence reports `needs-operator`, and live launches retain custody.
+A failed subprocess (including timeout, transport or admission failure) records
+`batch-dispatch-retryable: <detail>` and retries with the same batch/key on the
+next dispatch pass while preserving invalid-receipt charges. An overdue retry
+reports `needs-operator` and retains custody without consuming per-finding
+attempts. Legacy `batch-dispatch-failed` and raw `Command failed:` errors reset
+the old counter once and become retryable. Resolution-only passes retain them
+without dispatch.
+Dispatch stderr is preferred to the command echo, redacted and capped at 300
+characters before the named error prefix. Each release still charges a finding
+only once. Reapplying the migration preserves the counter.
+
+A live keyed launch, or ledger evidence that cannot be read, leaves the findings
 untouched. A batch waiting on its open, marked PR has no error and is never
-released. Release runs in one transaction. Each still-open finding gets
+released. One compact per-pass `summary` log records total open findings and
+stuck batch counts grouped by reason with the oldest age in milliseconds,
+including `needs-operator` probe holds. Release runs in one transaction. Each still-open finding gets
 `batch_attempts + 1` and an audit row naming the old batch and reason, then
 returns to the queue with `batch_id` cleared. On its third attempt it is instead
 dropped with `batch-retry-exhausted: <last error>`. The batch keeps its

@@ -1,3 +1,10 @@
+FINDINGSSTUCK-01 remediation retains never-launched batches across subprocess
+transport, timeout and admission failures, irrespective of claim age. Each retry
+uses the same batch/key without charging a finding attempt. Legacy ambiguous
+errors reset the dispatch counter too. Only returned invalid dispatch receipts
+spend the three-response cap; ordinary ledger custody still fences release.
+Existing lifecycle values and deployed smoke commands remain unchanged.
+
 REMBUILDERTAG-01 remediation normalizes legacy tags before routing and defers
 unavailable PR/transient opener evidence through the existing pre-spawn pending
 requeue with a 60-second retry and claim-round refund. Settled missing/conflicting

@@ -1728,7 +1728,12 @@ failed pushes or failed preparation still refuse publication. Durable batch IDs,
 launch receipts, a per-batch lock and submission intent fence duplicate workers
 and publishers. Existing failed batches stay visible for same-launch repair.
 Simplicity advisories keep their final-review enrollment and validated outcome
-rules, sharing the cap and marked result PR with findings.
+rules, sharing the cap and marked result PR with findings. Failed initial dispatch
+subprocesses retain the same batch/key for retry, even after the batch timeout,
+without consuming finding attempts or resetting invalid-receipt charges. Legacy
+raw command failures reset the old dispatch counter once. Only successful dispatch responses with invalid receipts
+consume the three-response dispatch cap; terminal/absent ledger evidence still
+fences charged release. See the [release contract](docs/data-model/review-findings.md#releasing-batches-whose-launch-ended-findingsrequeue-01).
 
 After deployment, restart the watcher, then SRE runs
 `node bin/findings-batch-backfill.mjs --root <review-root> --db <review-root>/data/reviews.db --concurrency 2 --batch-size 100`.
@@ -4531,8 +4536,18 @@ REBASECURRENCY-01: conflict-owner-review-route reads reviews.db in a read-only t
 Findings preparation and publication each use the shared load-aware timeout with
 900 seconds nominal and no shorter helper ceiling. Dispatch provisions before
 returning its receipt; measured provisioning up to 496 seconds must survive the
-caller's budget. The existing batch idempotency key, publication fence and
-settlement contract remain unchanged. Tests use synthetic dispatch receipts.
+caller's budget. Failed initial submissions increment the durable
+`finding_batches.batch_attempts`; after three failures, submission stops and
+terminal/absent keyed launch evidence releases the batch through the existing
+per-finding requeue/exhaustion audit. Errored batches without a launch receipt
+also become release candidates after the batch timeout (default 24 hours).
+An empty keyed receipt for a recorded launch additionally requires its exact
+ledger launch and retry descendants to be present and terminal.
+Missing or unreadable exact-launch evidence holds custody. Overdue holds and
+retryable dispatch failures report `needs-operator`.
+Each pass logs open findings and stuck batch reasons/counts/oldest ages.
+The batch idempotency key, publication fence and settlement evidence remain
+authoritative. Tests use synthetic dispatch receipts.
 
 GATECAPBASE-01: merge-lease refusal budgets are scoped to the current PR head
 and observed base. Base advances, server rebase conflicts, lane-busy and lease

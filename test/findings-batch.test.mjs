@@ -242,7 +242,7 @@ test('advisory-only health includes waiting and fenced notes, launch errors and 
   [area] = summarizeFindingBacklog(db).areas;
   assert.equal(area.inBatch, 1);
   assert.equal(area.waitingForMerge, 0);
-  assert.equal(area.error, 'launch failed');
+  assert.equal(area.error, 'batch-dispatch-retryable: launch failed');
   const { note_id: noteId } = db.prepare('SELECT note_id FROM finding_batch_notes').get();
   const result = { batchId: batch.batch_id, findings: [], prNumber: 8, headSha: head,
     simplicityNotes: [{ noteId, simplicityNoteApplied: true, reason: 'Reuse the helper' }] };
@@ -412,7 +412,7 @@ test('FINDINGSBATCH-01 default PR reader collects merged evidence through gh and
   const env = { HQ_ROOT: rootDir, GH_TOKEN: 'fixture-only' };
   let response;
   let reads = 0;
-  const options = { db, rootDir, env, day: '2026-01-02', logger: { warn() {} },
+  const options = { db, rootDir, env, day: '2026-01-02', now: Date.parse('2026-01-02T01:00:00Z'), logger: { warn() {} },
     execFileImpl: async (bin, args, opts) => {
       reads++;
       assert.equal(bin, 'gh');

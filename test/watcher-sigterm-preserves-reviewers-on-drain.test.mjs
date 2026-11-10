@@ -123,14 +123,19 @@ for (const signal of ['SIGTERM', 'SIGINT']) test(`CLOSERDISPATCHDEAD-01: ${signa
     node.type === 'ExpressionStatement' && node.expression.callee?.object?.name === 'process'
     && node.expression.callee?.property?.name === 'on' && node.expression.arguments[0]?.value === signal);
   assert.ok(statement);
-  let handler, exited = false;
+  let handler, exited = false, rescueStopped = false;
   runInNewContext(source.slice(statement.start, statement.end), {
     process: { env: {}, on: (_signal, callback) => { handler = callback; } },
     shutdownAmaHammerBackgroundQueue,
+    stopOverloadRescueRetry: async () => { rescueStopped = true; },
     readWatcherDrainState: () => ({}), shouldPreserveReviewersOnSigterm: () => true,
     resolveSigtermFenceMode: () => 'on',
     waitForActiveReviewerFencesOnSigterm: async () => { assert.equal(interrupted, true); },
-    exitAfterReviewerCleanup: () => { assert.equal(interrupted, true); exited = true; },
+    exitAfterReviewerCleanup: () => {
+      assert.equal(interrupted, true);
+      assert.equal(rescueStopped, true);
+      exited = true;
+    },
     console: { error: message => assert.fail(message) },
   });
   handler();

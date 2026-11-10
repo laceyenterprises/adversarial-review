@@ -76,3 +76,17 @@ with zero errors (existing warnings); `npm run typecheck:contracts`,
 `node scripts/validate-data-model-catalog.mjs` (93 entries),
 `bash demo/research-finding-walkthrough.sh` and `git diff --check` passed.
 The full suite remains owned by PR CI.
+
+## HAM final review remediation
+
+Retain unselected due receipts until the scan window drains; re-read queued
+receipts before execution. Successful rescues that leave debt unchanged now
+receive exponential backoff. Directory errors reset the cursor, and watcher
+SIGTERM/SIGINT abort and await the active rescue process group. Fairness-map
+updates refresh insertion order before bounded eviction. The acceptance YAML
+now allows a directory rotation plus queued child execution. Canonical runbook
+and ledger docs explain that a later charged launch may re-arm a bounded hold
+without another same-head page or overload refund.
+
+Verification: targeted retry, overload-ledger and watcher tests, lint, contract
+typecheck and offline walkthrough; exact-head remote CI remains the merge gate.

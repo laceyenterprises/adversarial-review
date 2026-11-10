@@ -16,6 +16,12 @@ Existing attempt/lifetime/target caps and lease checks still apply. Alert or
 ledger-write failure remains retryable by the existing AMA pass. This debt is
 distinct from failure charges.
 
+After release, a later normal-lane launch can re-arm `overloadDeferral` at count
+one and enter its bounded retry hold again. `lastOverloadDeferral` remains the
+archived exhaustion, so these launches receive no overload refunds. The
+`overload-exhausted` page receipt remains deduplicated for the same PR/head;
+ordinary attempt/lifetime caps still apply to the re-armed cycles.
+
 ## Stop repair lineage (STOPHOLDREPAIR-01)
 
 The optional `stopRepairReservations` object is keyed by repair dispatch key.

@@ -19,6 +19,22 @@ Existing automated smoke steps are unchanged. SRE verifies loaded revisions,
 watcher PID/start time and natural receipt progress after ordinary deployment;
 see [the change note](changes/OVERLOADDEFER-01b.md).
 
+Due candidates from a scan window stay queued until attempted, before the cursor
+advances to another window. Each attempt also reads its receipt after the child
+exits; a successful exit with unchanged handoff/count/retry time receives the
+same exponential backoff as a failure. A queued receipt is checked again before
+execution. Directory read errors close and reset the cursor for the next tick.
+SIGTERM/SIGINT stop new rescue work, abort the active child process group and
+await its cleanup before the normal watcher shutdown continues. An uncatchable
+SIGKILL cannot run that cleanup; companion intent locking and reconciliation
+remain necessary after an abrupt host or process failure.
+
+Release clears the current overload hold, rather than permanently disabling
+later holds: a subsequent normal-lane launch can accumulate a new five-deferral
+receipt. Its launches remain charged because the archived exhaustion prevents
+refunds. Same-head exhaustion reuses the delivered page receipt; a later head
+can page separately. Ordinary attempt/lifetime caps still bound these cycles.
+
 ## Final findings remediation through the builder (LANEAUTO-01)
 
 At the final review-round cap, a latest exact-head Comment-only review with

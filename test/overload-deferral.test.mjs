@@ -84,6 +84,10 @@ test('retry debt survives replacement launches and re-reading the durable ledger
     launchRequestId: 'normal-lane', now: new Date(1e12).toISOString(),
     leaseWaitExhausted: true, overloadEvidence: evidence });
   assert.equal(after.attemptCount, before);
+  assert.equal(after.overloadDeferral.deferralCount, 1,
+    'a later overload re-arms bounded debt without refunding the ordinary launch');
+  assert.equal(after.lastOverloadDeferral.deferralCount, MAX_OVERLOAD_DEFERRALS);
+  assert.equal(evaluateHammerDeferralQueue(after, new Date(1e12).toISOString()).backoff, true);
 });
 
 test('legacy host-overload callers share one durable host alert', async t => {

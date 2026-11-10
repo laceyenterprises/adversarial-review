@@ -913,8 +913,10 @@ process.on('unhandledRejection', (err) => {
     message: 'unhandledRejection; preserving in-flight reviewer runtime sessions before exit',
   });
 });
-process.on('SIGTERM', () => {
+let stopOverloadRescueRetry = async () => {};
+process.on('SIGTERM', async () => {
   shutdownAmaHammerBackgroundQueue();
+  await stopOverloadRescueRetry();
   const drainState = readWatcherDrainState();
   const preserveInFlightReviewers = shouldPreserveReviewersOnSigterm(drainState);
   if (resolveSigtermFenceMode(process.env) === 'off') {
@@ -953,8 +955,9 @@ process.on('SIGTERM', () => {
       });
     });
 });
-process.on('SIGINT', () => {
+process.on('SIGINT', async () => {
   shutdownAmaHammerBackgroundQueue();
+  await stopOverloadRescueRetry();
   exitAfterReviewerCleanup({
     code: 130,
     reason: 'SIGINT',
@@ -1680,6 +1683,7 @@ async function main() {
   });
   const intervalMs = config.pollIntervalMs ?? WATCHER_POLL_INTERVAL_MS;
   const overloadRescueRetry = createOverloadRescueRetry({ rootDir: ROOT });
+  stopOverloadRescueRetry = () => overloadRescueRetry.stop();
   const configuredDeadlineMs = config.pollDeadlineMs;
   // Always resolve a stable heartbeat path (env override → HQ_ROOT →
   // rootDir default) so the file is written every poll and the external

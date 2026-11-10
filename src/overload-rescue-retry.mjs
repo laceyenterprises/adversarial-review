@@ -13,51 +13,81 @@ export function createOverloadRescueRetry({
   execute = spawnCapturedProcessGroup,
   readConfig = () => loadConfigCached().getMergeAuthorityConfig(),
   scanLimit = 100, readReceipt = path => readFile(path, 'utf8'),
+  openDirectory = opendir,
 } = {}) {
   let running = null;
   const attempted = new Map();
   const failures = new Map();
   let cursor = null;
+  let pending = [];
+  let stopped = false;
+  const controller = new AbortController();
+  const receiptState = record => JSON.stringify([
+    record.pendingHandoff, record.launchRequestId,
+    record.overloadDeferral?.deferralCount, record.overloadDeferral?.nextRetryAt,
+  ]);
+  async function closeCursor() {
+    const previous = cursor;
+    cursor = null;
+    try { await previous?.close(); } catch { /* Reopen on the next tick. */ }
+  }
   async function scanAndRetry() {
+    if (stopped) return;
     const cfg = readConfig();
     if (cfg.enabled === false || cfg.autonomousMergeExecutionEnabled === false) return;
     const directory = join(rootDir, 'data', 'follow-up-jobs', 'merge-agent-dispatches');
     // Keep a directory cursor across ticks: bound work before reading contents,
     // without dropping old durable debt or restarting at the same history.
-    try { cursor ||= await opendir(directory); }
+    try { if (!pending.length) cursor ||= await openDirectory(directory); }
     catch (error) {
       if (error.code !== 'ENOENT') logger.warn?.(`[overload-rescue] receipt listing failed: ${error.message}`);
       return;
     }
-    const candidates = [];
-    for (let count = 0; count < scanLimit; count++) {
-      const entry = await cursor.read();
-      if (!entry) {
-        await cursor.close();
-        cursor = null;
-        break;
+    const candidates = pending;
+    const queued = candidates.length > 0;
+    pending = [];
+    try {
+      // Drain one bounded window before advancing the directory cursor again.
+      for (let count = 0; !queued && count < scanLimit; count++) {
+        const entry = await cursor.read();
+        if (!entry) {
+          await closeCursor();
+          break;
+        }
+        if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+        const name = entry.name;
+        try {
+          const record = JSON.parse(await readReceipt(join(directory, name)));
+          const receipt = record.overloadDeferral;
+          if (!record.pendingHandoff || !receipt || record.launchRequestId
+            || !/^[\w.-]+\/[\w.-]+$/.test(record.repo)
+            || !Number.isSafeInteger(record.prNumber) || record.prNumber <= 0) continue;
+          if (!receipt.overloadAlert
+            && (!Number.isFinite(receipt.nextRetryAt) || now() < receipt.nextRetryAt * 1000)) continue;
+          const key = `${record.repo}#${record.prNumber}`;
+          if (now() < (failures.get(key)?.retryAt || 0)) continue;
+          candidates.push({ key, record, path: join(directory, name), last: attempted.get(key) || 0 });
+        } catch (error) {
+          logger.warn?.(`[overload-rescue] receipt unreadable ${name}: ${error.message}`);
+        }
       }
-      if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-      const name = entry.name;
-      try {
-        const record = JSON.parse(await readReceipt(join(directory, name)));
-        const receipt = record.overloadDeferral;
-        if (!record.pendingHandoff || !receipt || record.launchRequestId
-          || !/^[\w.-]+\/[\w.-]+$/.test(record.repo)
-          || !Number.isSafeInteger(record.prNumber) || record.prNumber <= 0) continue;
-        if (!receipt.overloadAlert
-          && (!Number.isFinite(receipt.nextRetryAt) || now() < receipt.nextRetryAt * 1000)) continue;
-        const key = `${record.repo}#${record.prNumber}`;
-        if (now() < (failures.get(key)?.retryAt || 0)) continue;
-        candidates.push({ key, record, last: attempted.get(key) || 0 });
-      } catch (error) {
-        logger.warn?.(`[overload-rescue] receipt unreadable ${name}: ${error.message}`);
-      }
+    } catch (error) {
+      await closeCursor();
+      throw error;
     }
     // Round-robin failed observations too; one unavailable PR cannot starve
     // the rest. Durable retry times and local failure backoff both gate attempts.
     const candidate = candidates.sort((a, b) => a.last - b.last || a.key.localeCompare(b.key))[0];
     if (!candidate) return Promise.resolve();
+    pending = candidates.slice(1);
+    if (stopped) return;
+    if (queued) {
+      const current = JSON.parse(await readReceipt(candidate.path));
+      if (current.repo !== candidate.record.repo || current.prNumber !== candidate.record.prNumber
+        || receiptState(current) !== receiptState(candidate.record)
+        || now() < (failures.get(candidate.key)?.retryAt || 0)) return;
+    }
+    attempted.delete(candidate.key);
     attempted.set(candidate.key, now());
     if (attempted.size > 1000) attempted.delete(attempted.keys().next().value);
     const { repo, prNumber } = candidate.record;
@@ -65,9 +95,15 @@ export function createOverloadRescueRetry({
       'merge-agent', 'rescue', String(prNumber), '--repo', repo,
       '--hq-root', resolveHqRoot(env), '--apply', '--json', '--retry-overload-only',
     ], {
-      env, cwd: rootDir, timeout: 600_000, progressTimeout: 0,
+      env, cwd: rootDir, timeout: 600_000, progressTimeout: 0, signal: controller.signal,
       reapGroupOnExit: true, maxBuffer: 1024 * 1024,
-    })).then(() => { failures.delete(candidate.key); }).catch(error => {
+    })).then(async () => {
+      const current = JSON.parse(await readReceipt(candidate.path));
+      if (receiptState(current) === receiptState(candidate.record)) {
+        throw new Error('rescue left receipt unchanged');
+      }
+      failures.delete(candidate.key);
+    }).catch(error => {
       const count = (failures.get(candidate.key)?.count || 0) + 1;
       failures.set(candidate.key, { count,
         retryAt: now() + Math.min(30_000 * 2 ** Math.min(count - 1, 10), 1_800_000) });
@@ -78,6 +114,13 @@ export function createOverloadRescueRetry({
     });
   }
   return {
+    async stop() {
+      stopped = true;
+      controller.abort();
+      await running;
+      pending = [];
+      await closeCursor();
+    },
     tick() {
       if (!running) running = scanAndRetry().catch(error => {
         logger.warn?.(`[overload-rescue] retry observation failed: ${error.message}`);

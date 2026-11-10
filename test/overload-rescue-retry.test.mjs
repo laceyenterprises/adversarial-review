@@ -3,6 +3,7 @@ import test from 'node:test';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { opendir } from 'node:fs/promises';
 import { createOverloadRescueRetry } from '../src/overload-rescue-retry.mjs';
 import { deferOverload } from '../src/overload-deferral.mjs';
 
@@ -174,9 +175,104 @@ test('scan caps content reads per tick and advances past irrelevant history to o
   for (let i = 0; i < 6; i++) {
     reads = 0;
     await driver.tick();
-    assert.ok(reads <= 2);
+    assert.ok(reads <= 3, 'two scanned receipts plus one post-child progress read');
   }
   assert.equal(visited.size, 10);
   assert.ok(visited.has(path));
+  assert.equal(calls, 1);
+});
+
+test('all due receipts in a scan window run before scanning the next window', async t => {
+  const { rootDir, record } = fixture(t);
+  const directory = join(rootDir, 'data/follow-up-jobs/merge-agent-dispatches');
+  // Deterministic directory order makes a dropped candidate visible immediately.
+  const names = ['first.json', 'second.json', 'history-1.json', 'history-2.json'];
+  names.forEach((name, index) => writeFileSync(join(directory, name),
+    JSON.stringify(index < 2 ? { ...record, prNumber: index + 10 } : {})));
+  let position = 0;
+  let scans = 0;
+  const calls = [];
+  const driver = createOverloadRescueRetry({ rootDir, readConfig: enabledConfig, scanLimit: 2,
+    now: () => 2000_000, logger: { warn() {} },
+    openDirectory: async () => ({
+      read: async () => {
+        scans++;
+        const name = names[position++];
+        return name ? { name, isFile: () => true } : null;
+      },
+      close: async () => {},
+    }),
+    execute: async (_cmd, args) => { calls.push(args[2]); } });
+  t.after(() => driver.stop());
+  await driver.tick();
+  await driver.tick();
+  assert.deepEqual(calls, ['10', '11']);
+  assert.equal(scans, 2, 'both candidates must run without another directory rotation');
+});
+
+test('successful no-op rescues back off like failures', async t => {
+  const { rootDir, record, write } = fixture(t);
+  record.overloadDeferral.overloadAlert = true;
+  record.overloadDeferral.nextRetryAt = null;
+  write();
+  let now = 2000_000;
+  let calls = 0;
+  const driver = createOverloadRescueRetry({ rootDir, readConfig: enabledConfig,
+    now: () => now, logger: { warn() {} }, execute: async () => { calls++; } });
+  t.after(() => driver.stop());
+  await driver.tick();
+  now += 30_000;
+  await driver.tick();
+  assert.equal(calls, 2);
+  now += 30_000;
+  await driver.tick();
+  assert.equal(calls, 2);
+  now += 30_000;
+  await driver.tick();
+  assert.equal(calls, 3);
+});
+
+test('a failed directory handle is closed and reopened on the next tick', async t => {
+  const { rootDir } = fixture(t);
+  let opens = 0;
+  let closes = 0;
+  let calls = 0;
+  const driver = createOverloadRescueRetry({ rootDir, readConfig: enabledConfig,
+    now: () => 2000_000, logger: { warn() {} },
+    openDirectory: async path => {
+      if (++opens > 1) return opendir(path);
+      return { read: async () => { throw new Error('synthetic EIO'); },
+        close: async () => { closes++; } };
+    }, execute: async () => { calls++; } });
+  t.after(() => driver.stop());
+  await driver.tick();
+  assert.equal(closes, 1);
+  await driver.tick();
+  assert.equal(opens, 2);
+  assert.equal(calls, 1);
+});
+
+test('shutdown aborts the active rescue and prevents later rescues', async t => {
+  const { rootDir } = fixture(t);
+  let started;
+  const ready = new Promise(resolve => { started = resolve; });
+  let calls = 0;
+  let aborted = false;
+  const driver = createOverloadRescueRetry({ rootDir, readConfig: enabledConfig,
+    now: () => 2000_000, logger: { warn() {} },
+    execute: async (_cmd, _args, { signal }) => {
+      calls++;
+      started();
+      await new Promise(resolve => signal.addEventListener('abort', () => {
+        aborted = true;
+        resolve();
+      }, { once: true }));
+    } });
+  const ticking = driver.tick();
+  await ready;
+  await driver.stop();
+  await ticking;
+  await driver.tick();
+  assert.equal(aborted, true);
   assert.equal(calls, 1);
 });

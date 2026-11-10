@@ -1302,6 +1302,15 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+The builder final-fix-all lane may authorize primary-line reversals only with
+its durable PR/source-head job owner and exact-commit produced attestation
+matching that owner's launch and worker class. Worker-generated
+`Reviewed-Head` and `Reversal-Authorized-By: <review> finding=N kind=...`
+trailers retain the shared finding admissibility, strictness, ancestry and
+region/content proof. Terminal/archived receipts preserve historical authority,
+not live ownership. Both closer and daemon enforce this contract; a clean
+re-review alone grants no reversal authority.
+
 At the final review-round cap, a latest exact-head Comment-only review with
 known zero blocking findings and remaining non-blocking or demoted findings
 gets one builder **final fix-all** work order before findings closure. The

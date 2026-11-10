@@ -19,7 +19,8 @@ const progressName = name => /^progress-[a-f0-9]{64}$/.test(name);
 // LAC-2101: recompute historical snapshot refusals made before literal
 // secondary/brace finding paths could cover the original HAM reversal.
 // SAFETYSTOPOWNER-01: discard refusals based only on the first superseding snapshot.
-const identity = args => [args.repo, Number(args.prNumber), args.baseSha, args.headSha, args.mergeBase, args.reviewKey || null, args.launchHead || null, 'reversalproof-v6'];
+// LANEREVERSAL-01: old entries did not classify builder lane reversals.
+const identity = args => [args.repo, Number(args.prNumber), args.baseSha, args.headSha, args.mergeBase, args.reviewKey || null, args.launchHead || null, 'reversalproof-v7'];
 const pathFor = args => join(directory(args.rootDir), `${createHash('sha256').update(JSON.stringify(identity(args))).digest('hex')}.json`);
 
 // Atomic replacement inherits the writer's UID. Never let a worker replace
@@ -142,6 +143,7 @@ async function storedPrimaryChangeWithinRepositoryState(args, compute) {
   try {
     const record = JSON.parse(readFileSync(path, 'utf8'));
     if (JSON.stringify(record.key) === JSON.stringify(identity(args))
+      && record.history?.laneReversalHistory !== true
       && record.history?.headSha === args.headSha
       && (!record.history.builderBoundary || !args.builderHead || record.history.builderBoundary === args.builderHead)
       && [true, false].includes(record.history.hasHammerCommits)
@@ -156,7 +158,7 @@ async function storedPrimaryChangeWithinRepositoryState(args, compute) {
   }
   const entry = { args, startedAt: Date.now() };
   entry.promise = Promise.resolve().then(compute).then(history => {
-    if ([true, false].includes(history.hasHammerCommits) && !history.readFailed && !history.headMismatch && !history.renameProofReadFailed
+    if (history.laneReversalHistory !== true && [true, false].includes(history.hasHammerCommits) && !history.readFailed && !history.headMismatch && !history.renameProofReadFailed
       && (!history.hasHammerCommits || history.mergeBase === args.mergeBase)) {
       assertStoreOwner(args.rootDir, path);
       mkdirSync(directory(args.rootDir), { recursive: true });

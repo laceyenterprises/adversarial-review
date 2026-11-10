@@ -2067,7 +2067,10 @@ findings receive one durable builder fix-all round before findings closure.
 Its published head requires fresh full review: zero findings select normal
 daemon merge, and remaining findings select the configured closer/operator
 fallback. Pending fix-all work retains ownership through admission delays;
-conflict and CI-only repair keep their hammer routes. See the
+conflict and CI-only repair keep their hammer routes. A fix-all primary-line
+reversal requires worker-generated finding citations, a durable job bound to
+the reviewed head, and exact-commit produced attestation matching its owner
+launch/class. A later clean review cannot supply that authorization. See the
 [closure runbook](docs/RUNBOOK-ama-closure.md#final-findings-remediation-through-the-builder-laneauto-01)
 for the state contract and SRE's natural-traffic acceptance procedure.
 MLR-13 adds launch custody observations with an explicit freshness bound and

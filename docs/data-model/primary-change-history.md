@@ -78,7 +78,26 @@ Each completed history read is an atomic JSON record named
 | 4 | Live merge-base SHA |
 | 5 | Review-response SHA-256 digest (`reviewKey`), or `null` |
 | 6 | Trusted dispatcher launch head (`launchHead`), or `null` |
-| 7 | History proof cache identity version: `reversalproof-v6` |
+| 7 | History proof cache identity version: `reversalproof-v7` |
+
+LANEREVERSAL-01 invalidates older cache entries that did not classify lane
+remediation commits as closure work. Transient lane history carries
+`laneReversalHistory: true` and is never read from or written to the disk cache.
+Its `reversalAuthorizations` include `laneOwner` (the existing queue job) and
+`laneIdentity` (the shared exact-SHA produced-attestation identity result).
+Each evaluation rereads ownership and attestation; neither failed nor successful
+lane authority becomes reusable cached evidence. Lane commits do not populate
+the durable verified HAM reversal store. Ordinary hammer caching and stored
+original-reversal proof remain unchanged.
+
+Queue ownership reads skip individual missing, unreadable or malformed JSON
+records; those records supply no authority and other matching receipts are
+still evaluated. Directory enumeration errors other than a missing directory
+remain read failures. Rebased lane proofs use the same replacement-context
+preservation as hammer proofs: a deleted/re-added base line is preserved only
+when the final patch shows identical context at that same base coordinate.
+Exact-commit lane identity, explicit citation kind and reviewed/parent patch
+identity remain required.
 
 The JSON object contains `key` and `history`; there is no schema-version field.
 `history.headSha` is the requested head and `hasHammerCommits` is a boolean.

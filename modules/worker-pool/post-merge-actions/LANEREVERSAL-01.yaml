@@ -1,0 +1,15 @@
+# Manual SRE acceptance only. No action executes on merge.
+operator_steps:
+  - description: After both LANEREVERSAL-01 PRs land and the normal adversarial-review submodule float completes, restart the registered watcher and follow-up services through the documented deployment procedure. Retain deployed revision and PID start-time evidence proving both processes loaded the change. Only then update the operator lane brief template to permit worker-generated Reviewed-Head and Reversal-Authorized-By trailers; operators do not author these trailers.
+    run_as: SRE deployment owner
+    command: |
+      : "${AGENT_OS_DEPLOY_CHECKOUT:?Use the deployed Agent OS checkout}"
+      "$AGENT_OS_DEPLOY_CHECKOUT/scripts/os-restart.sh" --list-services
+      # SRE restarts the registered watcher/follow-up services and retains PID start times.
+  - description: Observe the next natural lane PR with a review-cited primary-line removal or replacement. Retain the durable owner, exact-commit produced launch/class attestation, finding citation, clean exact-head review and merge receipt without a primary-change-reverted refusal. The affected incident PR requires one new fix-all pass after deployment or explicit operator closure, as recorded in the companion SEV2 report. Missing organic traffic or evidence leaves acceptance pending.
+    run_as: SRE review-service owner
+    command: |
+      : "${AGENT_OS_DEPLOY_CHECKOUT:?Use the deployed Agent OS checkout}"
+      cat "$AGENT_OS_DEPLOY_CHECKOUT/tools/adversarial-review/docs/RUNBOOK-ama-closure.md"
+      # Retain natural traffic and incident recovery receipts in the SRE rollout record.
+actions: []

@@ -1,6 +1,6 @@
 # GRK-12 — Opt-in Grok remediation
 
-## Summary
+## Change notes
 
 Plan `grok-build-harness-v1`. `remediator-grok` is an account-bound HQ lane,
 requiring `grok.enabled`, `grok.remediator.enabled` and an enabled imported
@@ -28,13 +28,11 @@ names the actual account-bound lane in dispatch errors.
 The parity fixture copies must be updated as a pair:
 `test/fixtures/grok-config-parity.v1.json` here and
 `platform/agent-os-config/src/agent_os_config/tests/fixtures/grok-config-parity.v1.json`
-in Agent OS. Before deploying this loader or activating GRK-16, the Agent OS
-companion must copy the pending-v2 refusal cases and apply the same refusal in
-Python `_validate_grok_role_pins` and the shell loader, including primary,
-fallback and legacy closer selectors. The available Agent OS checkout still
-accepts the enabled legacy closer pin and its fixture differs. That companion
-change is outside this PR; source validation here does not certify cross-repo
-parity or deployment readiness. Keep the Node refusal in place.
+in Agent OS. The Agent OS companion supplies the same pending-v2 refusal in
+Python `_validate_grok_role_pins`, also used by the shell loader, including
+primary, fallback and legacy closer selectors. Deploy the paired changes
+before GRK-16 activation; source validation does not certify live deployment
+readiness. Keep both default-off flags and the Node refusal in place.
 
 No persistent store shape, lifecycle status, merge permission or smoke promise
 changes. Existing pre-spawn routing, quota fallback and HQ admission apply.

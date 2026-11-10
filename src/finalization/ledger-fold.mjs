@@ -10,6 +10,7 @@
 // Contract shapes live in `../kernel/contracts.d.ts` (LedgerState).
 
 import { isRevisionScopedEvent } from './ledger-events.mjs';
+import { initialWorkflow, foldWorkflow, WORKFLOW_EVENT_FIELDS } from './workflow-state.mjs';
 
 /**
  * @typedef {import('../kernel/contracts.js').FinalizationEvent} FinalizationEvent
@@ -39,6 +40,7 @@ export function initialLedgerState() {
     /** The most recent UNRESOLVED terminal mark, or null. */
     terminal: /** @type {TerminalState | null} */ (null),
     finalized: /** @type {TerminalState | null} */ (null),
+    workflow: initialWorkflow(),
   };
 }
 
@@ -82,11 +84,19 @@ function cloneState(state) {
  * @param {FinalizationEvent} event
  */
 function applyEvent(state, event) {
+  state.workflow ??= initialWorkflow();
+  // Re-arm an automated stop only on substantive new evidence. Poll anchors,
+  // page receipts and telemetry alone cannot waive a prior recovery duty.
+  if (state.terminal?.kind === 'halted' && [
+    'checks_settled', 'verdict_recorded', 'attestation_recorded',
+    'remediation_concluded', 'provenance_observed', 'mergeability_observed',
+    'evidence_refreshed',
+  ].includes(event.type)) state.terminal = null;
+  foldWorkflow(state, event);
   state.eventCount += 1;
-  // Custody is off-pass evidence, including payloads unknown to this reader.
-  if (!['launch_custody_observed', 'unknown:launch_custody_observed'].includes(event.type)) {
-    state.eligibilityEventCount += 1;
-  }
+  // Custody is safety evidence now: a new holder invalidates in-flight merge
+  // authorization just like a changed verdict. Off-pass delivery remains intact.
+  state.eligibilityEventCount += 1;
   state.lastEventAt = event.at;
   if (!state.subjectKey && event.subjectKey) {
     state.subjectKey = { ...event.subjectKey };
@@ -99,6 +109,8 @@ function applyEvent(state, event) {
       // Head-move is an ordinary event: it does not reset budgets or verdicts;
       // it only makes `rev` the revision later eligibility folds require fresh
       // verdicts/checks at.
+      if (state.currentRevision !== event.revisionRef
+        && ['halted', 'escalated'].includes(state.terminal?.kind)) state.terminal = null;
       state.currentRevision = event.revisionRef;
       const r = ensureRevision(state, rev);
       if (!r.revisionAdvancedAt) r.revisionAdvancedAt = event.at;
@@ -142,7 +154,10 @@ function applyEvent(state, event) {
         round: event.round,
         idempotencyKey: event.idempotencyKey,
         stageId: event.stageId ?? null,
+        sourceRef: event.sourceRef ?? null,
         final: event.final === true,
+        admittedAt: event.admittedAt ?? null,
+        operationId: event.operationId ?? event.idempotencyKey,
         at: event.at,
       });
       if (event.stageId) ensureStage(state, event.stageId).dispatchedRounds += 1;
@@ -153,6 +168,8 @@ function applyEvent(state, event) {
         revisionRef: event.revisionRef,
         round: event.round,
         outcome: event.outcome,
+        coverageValidated: event.coverageValidated === true,
+        sourceRef: event.sourceRef ?? null,
         stageId: event.stageId ?? null,
         at: event.at,
       });
@@ -195,17 +212,24 @@ function applyEvent(state, event) {
       break;
     }
     case 'escalated': {
-      state.terminal = { kind: 'escalated', reason: event.reason, at: event.at };
+      // Escalation retains an executable recovery owner; it never abandons PR
+      // execution. Delivery acknowledgement is a separate event.
       break;
     }
     case 'halted': {
-      state.terminal = { kind: 'halted', reason: event.reason, at: event.at };
+      if (!state.finalized && state.terminal?.kind !== 'closed') state.terminal = {
+        kind: 'halted', reason: event.reason, at: event.at,
+        ...(event.policyVersion !== undefined ? { policyVersion: event.policyVersion } : {}),
+        ...(event.codeVersion !== undefined ? { codeVersion: event.codeVersion } : {}),
+      };
       break;
     }
+    case 'launch_custody_observed': break;
     default:
       // Unknown event types are ignored rather than throwing: a forward-compat
       // ledger (a newer producer) must still fold on an older reader without
       // corrupting the projection. Validation happens at append time.
+      if (!Object.hasOwn(WORKFLOW_EVENT_FIELDS, event.type)) state.workflow.unknown = true;
       break;
   }
 }

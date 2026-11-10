@@ -8,17 +8,23 @@ import {
 } from '../src/finalization/shadow-recorder.mjs';
 import {
   checksSettled,
+  makeFinalizationEvent,
   revisionAdvanced,
   verdictRecorded,
 } from '../src/finalization/ledger-events.mjs';
 
 const REF = { domainId: 'code-pr', subjectExternalId: 'owner/repo#612' };
 const t = (n) => new Date(Date.parse('2026-07-17T00:00:00.000Z') + n * 60000).toISOString();
+const primary = (revisionRef, n) => makeFinalizationEvent('provenance_observed', REF, {
+  at: t(n), revisionRef, sourceRef: `fixture:primary:${revisionRef}`, idempotencyKey: `primary:${revisionRef}`,
+  builderBoundary: 'fixture:builder', primaryChange: 'preserved', hammerCommits: false, mergeMain: false,
+});
 
 // A clean, green, approved head — v2 finalizes; v1 merging is concurrence.
 function cleanTrace() {
   return [
     revisionAdvanced(REF, { at: t(0), revisionRef: 'sha-A', sourceRef: 'push-A' }),
+    primary('sha-A', 0),
     checksSettled(REF, { at: t(1), revisionRef: 'sha-A', conclusion: 'success', requiredChecksPresent: true, sourceRef: 'suite-A' }),
     verdictRecorded(REF, { at: t(2), revisionRef: 'sha-A', stageId: 's', role: 'r', verdictKind: 'approved', sourceRef: 'rev-A' }),
   ];
@@ -55,6 +61,7 @@ test('shadow flags a head-move deadlock: v1 stuck waiting, v2 finalizes the clea
     revisionAdvanced(REF, { at: t(10), revisionRef: 'sha-B', sourceRef: 'push-B' }),
     checksSettled(REF, { at: t(11), revisionRef: 'sha-B', conclusion: 'success', requiredChecksPresent: true, sourceRef: 'suite-B' }),
     verdictRecorded(REF, { at: t(12), revisionRef: 'sha-B', stageId: 's', role: 'r', verdictKind: 'approved', sourceRef: 'rev-B' }),
+    primary('sha-B', 12),
   ];
   const obs = shadowObserve({ subject: REF, events, v1Action: 'wait', observedAt: t(13) });
   assert.equal(obs.v2Decision.kind, 'finalize-now');

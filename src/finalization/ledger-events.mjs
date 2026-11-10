@@ -9,6 +9,8 @@
 //
 // Contract shapes live in `../kernel/contracts.d.ts` (FinalizationEvent*).
 
+import { WORKFLOW_EVENT_FIELDS } from './workflow-state.mjs';
+
 /**
  * @typedef {import('../kernel/contracts.js').SubjectRef} SubjectRef
  * @typedef {import('../kernel/contracts.js').FinalizationEvent} FinalizationEvent
@@ -34,6 +36,7 @@ export const FINALIZATION_EVENT_TYPES = Object.freeze([
   'escalated',
   'halted',
   'launch_custody_observed',
+  ...Object.keys(WORKFLOW_EVENT_FIELDS),
 ]);
 
 const EVENT_TYPE_SET = new Set(FINALIZATION_EVENT_TYPES);
@@ -97,6 +100,8 @@ const REQUIRED_FIELDS = Object.freeze({
   escalated: ['reason'],
   halted: ['reason'],
   launch_custody_observed: ['revisionRef', 'sourceRef', 'idempotencyKey', 'custody'],
+  ...Object.fromEntries(Object.entries(WORKFLOW_EVENT_FIELDS)
+    .map(([type, fields]) => [type, ['sourceRef', 'idempotencyKey', ...fields]])),
 });
 
 // The optional fields each event type may carry (copied through when present).
@@ -105,23 +110,63 @@ const OPTIONAL_FIELDS = Object.freeze({
   verdict_recorded: [],
   checks_settled: [],
   attestation_recorded: [],
-  remediation_dispatched: ['stageId', 'final', 'sourceRef'],
-  remediation_concluded: ['stageId', 'sourceRef'],
+  remediation_dispatched: ['stageId', 'final', 'sourceRef', 'admittedAt', 'operationId'],
+  remediation_concluded: ['stageId', 'sourceRef', 'coverageValidated', 'workId', 'operationId'],
   budget_exhausted: ['sourceRef'],
   operator_override: ['revisionRef', 'roundCap', 'sourceRef'],
   finalized: ['sourceRef'],
   closed: ['sourceRef'],
-  escalated: ['sourceRef'],
-  halted: ['sourceRef'],
+  escalated: ['sourceRef', 'episode'],
+  halted: ['sourceRef', 'policyVersion', 'codeVersion'],
   launch_custody_observed: [],
+  ...Object.fromEntries(Object.keys(WORKFLOW_EVENT_FIELDS).map(type => [type, ['revisionRef']])),
 });
 
 function assertRequired(type, fields) {
+  for (const key of ['workId', 'operationId']) {
+    if (fields[key] !== undefined && (!isNonEmptyString(fields[key]) || Object.hasOwn(Object.prototype, fields[key]))) {
+      throw new TypeError(`invalid workflow ${key}`);
+    }
+  }
+  if (type === 'remediation_concluded' && fields.coverageValidated !== undefined
+    && typeof fields.coverageValidated !== 'boolean') throw new TypeError('invalid coverage validation');
   for (const key of REQUIRED_FIELDS[type]) {
     const value = fields[key];
     if (value === undefined || value === null || value === '') {
       throw new TypeError(`finalization ${type} event requires a non-empty ${key}`);
     }
+  }
+  if (Object.hasOwn(WORKFLOW_EVENT_FIELDS, type)) {
+    if (!Number.isFinite(Date.parse(fields.at)) || !isNonEmptyString(fields.sourceRef)
+      || !isNonEmptyString(fields.idempotencyKey)) throw new TypeError('invalid workflow provenance');
+    for (const key of ['episode', 'workId', 'operationId', 'custodySourceRef', 'mergeSourceRef']) {
+      if (fields[key] !== undefined && (typeof fields[key] !== 'string' || !fields[key] || Object.hasOwn(Object.prototype, fields[key]))) {
+        throw new TypeError(`invalid workflow ${key}`);
+      }
+    }
+    if (type === 'operation_observed' && !['absent', 'admitted', 'completed', 'failed', 'merged'].includes(fields.outcome)) {
+      throw new TypeError('invalid operation observation');
+    }
+    if (type === 'work_consumed' && !['completed', 'findings'].includes(fields.outcome)) throw new TypeError('useful work conclusion required');
+    if (type === 'decision_anchored'
+      && (!Number.isFinite(Date.parse(fields.anchorAt))
+        || ![fields.nominalMs, fields.effectiveMs, fields.ceilingMs].every(n => Number.isFinite(n) && n > 0)
+        || fields.effectiveMs > fields.ceilingMs)) throw new TypeError('invalid decision deadline');
+    if (type === 'custody_recovered'
+      && (fields.teardown !== 'completed' || !isNonEmptyString(fields.patchRef)
+        || !isNonEmptyString(fields.successor))) throw new TypeError('custody release requires salvage and successor');
+    if (type === 'provenance_observed'
+      && (!['preserved', 'unknown', 'missing'].includes(fields.primaryChange)
+        || typeof fields.hammerCommits !== 'boolean' || typeof fields.mergeMain !== 'boolean')) {
+      throw new TypeError('invalid primary provenance');
+    }
+    if (type === 'merge_observed' && typeof fields.planRequired !== 'boolean') throw new TypeError('merge requires plan disposition');
+    if (type === 'delivery_observed' && !['pending', 'failed', 'verified', 'not-required'].includes(fields.activation)) {
+      throw new TypeError('invalid delivery activation');
+    }
+  }
+  if (type === 'remediation_dispatched' && fields.admittedAt !== undefined && !Number.isFinite(Date.parse(fields.admittedAt))) {
+    throw new TypeError('invalid admission timestamp');
   }
   if (type === 'launch_custody_observed') {
     const c = fields.custody;

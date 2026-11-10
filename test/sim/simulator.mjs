@@ -13,14 +13,21 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
   const f = profiles[scenario.profile];
   const clock = new Clock(seed);
   const pressure = loadModel(load);
-  const patience = pressure.timeout(1000);
+  const patience = 1000;
+  const loadObservation = { enabled: true, maxMultiplier: 6, loadAvg1m: 1 + (load - 1) * 2 / 5, cpuCount: 1, cpuBusyPercent: 100 };
+  const policy = { checksPatienceMs: patience, verdictPatienceMs: patience, attestationPatienceMs: patience, deadlineCeilingMs: 6000, autonomousExecutionDisabled: !!f.killSwitch };
   const bound = pressure.timeout(5000);
   const trace = [];
   const failed = new Set();
   const events = [];
   const merges = [];
   const launches = [];
-  const pages = []; // The current executor has no page seam; never invent a receipt.
+  const pages = [];
+  const causes = [];
+  let salvaged = false;
+  let activated = f.activation !== false;
+  let deployed = f.deployed !== false;
+  let repairedConflict = false;
   let lease = null;
   let serial = 0;
   let head = 'revision-A';
@@ -45,12 +52,14 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
   const activeFault = () => clock.now < pressure.timeout(1500);
   function snapshot() {
     const state = fold(events);
-    const terminal = state.terminal?.kind === 'halted' && f.hold ? 'operator-hold' : state.terminal?.kind;
+    decision = eligible(state, policy, { observedAt: clock.iso(), load: loadObservation });
+    const terminal = f.hold || f.killSwitch ? 'operator-hold' : state.terminal?.kind
+      ?? (pages.length ? 'escalated' : null);
     const owners = decision?.owner ? [decision.owner] : [];
     return { now: clock.now, bound, head, terminal, owners,
       deadline: decision?.deadline ? Date.parse(decision.deadline) - Date.UTC(2030, 0, 1) : NaN,
-      merges: structuredClone(merges), activation: f.activation !== false,
-      causes: events.filter(e => e.type === 'escalated').map(e => e.reason), pages: [...pages],
+      merges: structuredClone(merges), activation: activated && deployed,
+      causes: [...causes], pages: [...pages],
       transientCharges, transientRefusals };
   }
   function inspect(label) {
@@ -72,6 +81,9 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
   const emit = (type, fields = {}) => append({ type, subjectKey: subject, at: clock.iso(), ...fields });
   const observe = (revisionRef = head) => {
     emit('revision_advanced', { revisionRef });
+    emit('provenance_observed', { revisionRef, builderBoundary: 'synthetic:builder',
+      primaryChange: f.primaryEvidence === false ? 'unknown' : 'preserved', hammerCommits: false, mergeMain: false,
+      sourceRef: 'synthetic:primary', idempotencyKey: `primary:${revisionRef}` });
     if (checks) emit('checks_settled', { revisionRef, conclusion: checks, requiredChecksPresent: true, sourceRef: 'synthetic:checks' });
     emit('verdict_recorded', { revisionRef: f.staleReview ? 'obsolete-revision' : revisionRef,
       stageId: 'review', role: 'independent-reviewer', verdictKind: blocking ? 'request-changes' : comments ? 'comment-only' : 'approved',
@@ -101,7 +113,7 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
         // must expose executors that count a requested launch as admitted work.
         return { admitted: false, reason: f.admission };
       }
-      if (f.dirtyTerminal) { refused = true; return { admitted: false, reason: 'branch-held-by-terminal-dirty-launch' }; }
+      if (f.dirtyTerminal && !salvaged) { refused = true; return { admitted: false, reason: 'branch-held-by-terminal-dirty-launch' }; }
       const launch = { id: `launch-${++serial}`, head: args.revisionRef, status: 'admitted', verified: false };
       launches.push(launch);
       const startAt = clock.now + pressure.timeout(f.slowStart ? 1800 : 50);
@@ -114,17 +126,19 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
           emit('checks_settled', { revisionRef: args.revisionRef, conclusion: checks, requiredChecksPresent: true, sourceRef: 'synthetic:repaired-checks' });
           emit('verdict_recorded', { revisionRef: args.revisionRef, stageId: 'review', role: 'independent-reviewer', verdictKind: 'approved', sourceRef: 'synthetic:rereview' });
         }
+        if (f.agentOutcome) emit('worker_killed', { operationId: args.idempotencyKey, cause: f.agentOutcome, sourceRef: `synthetic:kill:${launch.id}`, idempotencyKey: `kill:${launch.id}` });
+        else emit('work_consumed', { workId: launch.id, operationId: args.idempotencyKey, outcome: 'completed', sourceRef: `synthetic:work:${launch.id}`, idempotencyKey: `work:${launch.id}` });
         emit('remediation_concluded', { revisionRef: args.revisionRef, stageId: 'review', round: args.round,
           outcome: f.agentOutcome ? 'failed' : 'completed' });
       });
-      return { admitted: true, launchId: launch.id };
+      return { admitted: true, launchId: launch.id, admittedAt: clock.iso() };
     },
   };
   const mergeSurface = {
     name: 'synthetic-github',
     async merge({ revisionRef }) {
       if (revisionRef !== head) return { ok: false, reason: 'head-moved' };
-      if (f.mergeability && (f.mergeability !== 'UNKNOWN' || activeFault())) return { ok: false, reason: f.mergeability };
+      if (!repairedConflict && f.mergeability && (f.mergeability !== 'UNKNOWN' || activeFault())) return { ok: false, reason: f.mergeability };
       if (f.primaryEvidence === false || f.mergeFailure) return { ok: false, reason: 'synthetic-evidence-unavailable' };
       if (!merged) {
         merges.push({ revision: revisionRef, liveHead: head, blocking, comments, base });
@@ -139,9 +153,40 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
   function executor(holder) {
     return createFinalizationExecutor({ ledgerStore, leaseStore, enabled: true, holder,
       generateLeaseId: () => `lease-${++serial}`, leaseTtlMs: pressure.timeout(500),
-      policy: { checksPatienceMs: patience, verdictPatienceMs: patience, attestationPatienceMs: patience,
-        autonomousExecutionDisabled: !!f.killSwitch },
+      policy,
       adjudicateSurface: mergeSurface, remediationSurface,
+      liveSurface: { async read() { return { state: merged ? 'merged' : 'open', head, base,
+        mergedRevision: head, principal: f.merged ? 'synthetic-human' : 'synthetic-bot', planRequired: true,
+        sourceRef: 'synthetic:live-pr' }; } },
+      pageSurface: { async deliver({ idempotencyKey }) {
+        if (!causes.includes(idempotencyKey)) causes.push(idempotencyKey);
+        if (!pages.includes(idempotencyKey)) pages.push(idempotencyKey);
+        return { delivered: true, sourceRef: `synthetic:page:${idempotencyKey}` };
+      } },
+      deliverySurface: { async reconcile() {
+        if (activeFault()) return { planRunId: 'synthetic-plan', activation: 'pending', sourceRef: 'synthetic:pma-pending' };
+        activated = true; deployed = true;
+        return { planRunId: 'synthetic-plan', activation: 'verified', sourceRef: 'synthetic:pma-verified' };
+      } },
+      recoverySurface: { async reconcile({ decision }) {
+        if (decision.nextAction === 'recover-custody') {
+          salvaged = true;
+          emit('custody_patch_recorded', { custodySourceRef: decision.custody.sourceRef, patchRef: 'synthetic:durable-patch',
+            sourceRef: 'synthetic:salvage', idempotencyKey: `salvage:${decision.custody.sourceRef}` });
+          return { ok: true, sourceRef: 'synthetic:teardown', custodySourceRef: decision.custody.sourceRef,
+            patchRef: 'synthetic:durable-patch', teardown: 'completed', successor: 'synthetic-successor' };
+        }
+        if (['conflict-rebase', 'merge-main'].includes(decision.nextAction)) {
+          repairedConflict = true;
+          emit('mergeability_observed', { revisionRef: head, mergeability: 'MERGEABLE', sourceRef: 'synthetic:conflict-repair', idempotencyKey: 'conflict-repair' });
+        }
+        if (decision.operationId) {
+          const operation = fold(events).workflow.operations[decision.operationId];
+          if (operation && !operation.observation) emit('operation_observed', { operationId: decision.operationId,
+            outcome: 'absent', result: { sourceRef: 'synthetic:effect-readback' }, sourceRef: 'synthetic:effect-readback', idempotencyKey: `readback:${decision.operationId}` });
+        }
+        return { ok: false, reason: 'synthetic:recovery-pending', sourceRef: 'synthetic:recovery' };
+      } },
       identitySurface: { async check() {
         if (f.hcpBounce && activeFault()) throw Error('synthetic HCP 503');
         if (f.headRace && !headRaced) {
@@ -160,6 +205,10 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
   }
   let exec = executor('v2');
   observe();
+  if (f.mergeability) emit('mergeability_observed', { revisionRef: head, mergeability: f.mergeability, sourceRef: 'synthetic:mergeability', idempotencyKey: 'mergeability' });
+  if (f.dirtyTerminal) emit('launch_custody_observed', { revisionRef: head, sourceRef: 'synthetic:custody', idempotencyKey: 'custody', custody: {
+    repository: 'synthetic/project', prNumber: 1, launchRequestId: 'synthetic-terminal', state: 'workspace',
+    at: clock.iso(), freshnessSeconds: 180, launchLiveness: 'terminal', dirty: true } });
   if (f.exhausted) emit('budget_exhausted', { stageId: 'review' });
   if (f.hold) emit('operator_override', { overrideKind: 'halt', principal: 'synthetic-operator', reason: 'explicit operator hold' });
   if (f.rearm) emit('escalated', { reason: 'prior-episode' });
@@ -171,7 +220,7 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
   });
   if (f.rollback) clock.at(pressure.timeout(25), 'rollback:adopt-mid-decision', async () => {
     const state = fold(events);
-    const pending = eligible(state, {}, { observedAt: clock.iso() });
+    const pending = eligible(state, policy, { observedAt: clock.iso(), load: loadObservation });
     rollbackReceipt = { pending, events: structuredClone(events), state: foldFrom(fold(events.slice(0, 2)), events.slice(2)), queue: structuredClone(queueState) };
     routedOwner = 'v1';
     // Synthetic v1 adopter consumes the same durable budget/decision, with a
@@ -190,14 +239,14 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
         state = fold(ledgerStore.read());
       } catch (error) {
         if (!f.readFailure) throw error;
+        await exec.tick(subject, { observedAt: clock.iso(), load: loadObservation });
         inspect(`retryable-read:${error.message}`);
         return;
       }
-        decision = eligible(state, { checksPatienceMs: patience, verdictPatienceMs: patience,
-          autonomousExecutionDisabled: !!f.killSwitch }, { observedAt: clock.iso() });
+        decision = eligible(state, policy, { observedAt: clock.iso(), load: loadObservation });
         const outcomes = f.race
-          ? await Promise.all([exec.tick(subject, { observedAt: clock.iso() }), executor('rival').tick(subject, { observedAt: clock.iso() })])
-          : [await exec.tick(subject, { observedAt: clock.iso() })];
+          ? await Promise.all([exec.tick(subject, { observedAt: clock.iso(), load: loadObservation }), executor('rival').tick(subject, { observedAt: clock.iso(), load: loadObservation })])
+          : [await exec.tick(subject, { observedAt: clock.iso(), load: loadObservation })];
         for (const outcome of outcomes) inspect(`executor:${outcome.status}:${outcome.action}:${outcome.reason ?? ''}`);
     });
   }
@@ -206,11 +255,11 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
   const state = fold(events);
   const unmet = [];
   if ((f.mergeability === 'DIRTY' || f.mergeability === 'CONFLICTING') && !merged) unmet.push('conflict-repair-owner');
-  if (f.dirtyTerminal) unmet.push('dirty-work-salvaged-and-released');
+  if (f.dirtyTerminal && !salvaged) unmet.push('dirty-work-salvaged-and-released');
   if (f.rearm && !state.finalized) unmet.push('automatic-rearm');
-  if (f.activation === false) unmet.push('activation-proof');
-  if (f.deployed === false) unmet.push('loaded-build-proof');
-  if (f.primaryEvidence === false) unmet.push('primary-change-proof-recovery');
-  return { id: scenario.id, load, failed: [...failed].sort(), unmet, terminal: state.terminal?.kind ?? null,
+  if (!activated && !pages.length) unmet.push('activation-proof');
+  if (!deployed && !pages.length) unmet.push('loaded-build-proof');
+  if (f.primaryEvidence === false && !pages.length) unmet.push('primary-change-proof-recovery');
+  return { id: scenario.id, load, failed: [...failed].sort(), unmet, terminal: snapshot().terminal,
     trace, events, merges, launches, readFailed, transientCharges, rollbackReceipt, queueState };
 }

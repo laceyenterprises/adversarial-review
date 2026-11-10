@@ -12,6 +12,7 @@ import {
 import { shadowObserve } from '../src/finalization/shadow-recorder.mjs';
 import {
   checksSettled,
+  makeFinalizationEvent,
   revisionAdvanced,
   verdictRecorded,
 } from '../src/finalization/ledger-events.mjs';
@@ -29,6 +30,9 @@ function cleanObs(observedAt, flags = {}) {
       subject: REF,
       events: [
         revisionAdvanced(REF, { at: t(0), revisionRef: 'sha-A', sourceRef: 'push-A' }),
+        makeFinalizationEvent('provenance_observed', REF, { at: t(0), revisionRef: 'sha-A',
+          sourceRef: 'fixture:primary', idempotencyKey: 'fixture:primary', builderBoundary: 'fixture:builder',
+          primaryChange: 'preserved', hammerCommits: false, mergeMain: false }),
         checksSettled(REF, { at: t(1), revisionRef: 'sha-A', conclusion: 'success', requiredChecksPresent: true, sourceRef: 'suite-A' }),
         verdictRecorded(REF, { at: t(2), revisionRef: 'sha-A', stageId: 's', role: 'r', verdictKind: 'approved', sourceRef: 'rev-A' }),
       ],

@@ -98,7 +98,7 @@ test('final eligibility merges the exact candidate once and journals a complete 
   const audit = readAmaAuditEntry(p.hqRoot, 'example/review', 102, before.candidate);
   assert.equal(audit.status, 'succeeded'); assert.equal(audit.attempts.length, 1); assert.equal(audit.attempts[0].mergeCommitSha, mergeSha);
   const ledger = openFinalizationLedgerStore({ db: f.store.db }).read(queueMergeSubject(before));
-  assert.deepEqual(ledger.map(e => [e.type, e.revisionRef]), [['finalized', before.candidate]]);
+  assert.deepEqual(ledger.map(e => [e.type, e.revisionRef]), [['merge_observed', before.candidate]]);
   assert.equal(f.store.readOwner(before.lane).owner_state, 'idle');
   assert.deepEqual(foldQueue(f.store.readEvents(a.h.lane)).entries[before.entryId], result);
 });
@@ -161,7 +161,7 @@ for (const [name, mutate, phase, reason] of [
   ['unreadable brake policy', p => { p.options.policy = () => { throw new Error('policy unreadable'); }; }, 'parked-hold', 'autonomous-execution-disabled'],
   ['pending rerun', p => { p.options.checkReader = { read: async ({ entry }) => ({ ...green(entry), results: [{ name: 'unit', head: entry.candidate, status: 'in_progress' }] }) }; }, 'waiting-checks', 'checks-pending'],
   ['completed red', p => { p.options.checkReader = { read: async ({ entry }) => ({ ...green(entry), results: [{ name: 'unit', head: entry.candidate, conclusion: 'FAILURE' }] }) }; }, 'returned-to-closer', 'checks-completed-red'],
-  ['subject ledger halt', p => { openFinalizationLedgerStore({ db: p.f.store.db }).append(halted(queueMergeSubject(p.entry), { at: p.f.now(), reason: 'operator halt' })); }, 'parked-hold', 'subject-ledger-terminal'],
+  ['subject ledger halt', p => { openFinalizationLedgerStore({ db: p.f.store.db }).append(halted(queueMergeSubject(p.entry), { at: p.f.now(), reason: 'operator halt' })); }, 'parked-hold', 'subject-ledger-owned-recovery'],
   ['primary change reverted', p => { p.a.live.eligibility.primaryChange = { headSha: null, reverted: true }; }, null, null],
 ]) test(`${name} blocks the merge before any mutation`, async t => {
   const p = await finalizing(t); const { f, a } = p;
@@ -434,7 +434,7 @@ test('merge probe fails honestly for an absent deployment store', () => {
   assert.equal(result.capabilities.merge.available, false); assert.ok(result.runtime.build);
 });
 
-for (const custody of [true, false]) test(`append during evaluation: ${custody ? 'custody permits merge' : 'eligibility change still parks'}`, async t => {
+for (const custody of [true, false]) test(`append during evaluation: ${custody ? 'custody invalidates authorization' : 'eligibility change still parks'}`, async t => {
   const p = await finalizing(t);
   const identity = p.options.identitySurface;
   p.options.identitySurface = { check: async request => {
@@ -449,7 +449,7 @@ for (const custody of [true, false]) test(`append during evaluation: ${custody ?
     return identity.check(request);
   } };
   const result = await p.finalize();
-  assert.equal(result.phase, custody ? 'merged' : 'parked-hold');
-  assert.equal(p.calls.length, custody ? 1 : 0);
+  assert.equal(result.phase, 'parked-hold');
+  assert.equal(p.calls.length, 0);
   if (!custody) assert.equal(result.reason, 'subject-ledger-moved');
 });

@@ -17,6 +17,7 @@ import {
   escalated,
   finalized,
   halted,
+  makeFinalizationEvent,
   operatorOverride,
   remediationConcluded,
   remediationDispatched,
@@ -37,6 +38,9 @@ function cleanLedger(overrides = {}) {
   } = overrides;
   return [
     revisionAdvanced(REF, { at: t(0), revisionRef: 'sha-A', sourceRef: 'push-A' }),
+    makeFinalizationEvent('provenance_observed', REF, { at: t(0), revisionRef: 'sha-A',
+      builderBoundary: 'fixture:builder', primaryChange: 'preserved', hammerCommits: false, mergeMain: false,
+      sourceRef: 'fixture:provenance', idempotencyKey: 'fixture:provenance' }),
     checksSettled(REF, { at: t(1), revisionRef: 'sha-A', conclusion, requiredChecksPresent, sourceRef: 'suite-A' }),
     verdictRecorded(REF, {
       at: t(2), revisionRef: 'sha-A', stageId: 'security', role: 'reviewer-1', verdictKind, sourceRef: 'review-A',
@@ -176,7 +180,7 @@ test('budget exhaustion drives the coverage-gated final-remediation → finalize
   // Concluded with full coverage → finalize-now (lands, never abandons).
   const completed = [
     ...dispatched,
-    remediationConcluded(REF, { at: t(5), revisionRef: 'sha-A', round: 1, outcome: 'completed', stageId: 'security' }),
+    remediationConcluded(REF, { at: t(5), revisionRef: 'sha-A', round: 1, outcome: 'completed', stageId: 'security', coverageValidated: true, sourceRef: 'fixture:coverage' }),
   ];
   assert.equal(decide(completed).kind, 'finalize-now');
 
@@ -185,7 +189,7 @@ test('budget exhaustion drives the coverage-gated final-remediation → finalize
     ...dispatched,
     remediationConcluded(REF, { at: t(5), revisionRef: 'sha-A', round: 1, outcome: 'blocked', stageId: 'security' }),
   ];
-  assert.equal(decide(blocked).kind, 'halt');
+  assert.equal(decide(blocked).nextAction, 'recover-coverage');
 });
 
 test('exhaustion-always-closes disabled halts rather than force-landing', () => {
@@ -193,8 +197,7 @@ test('exhaustion-always-closes disabled halts rather than force-landing', () => 
     ...cleanLedger({ verdictKind: 'request-changes' }),
     budgetExhausted(REF, { at: t(3), stageId: 'security' }),
   ], { exhaustionAlwaysCloses: false });
-  assert.equal(d.kind, 'halt');
-  assert.match(d.reason, /exhaustion-always-closes disabled/);
+  assert.equal(d.nextAction, 'recover-coverage');
 });
 
 test('the kill switch intercepts every mutating decision as a fail-closed escalate', () => {
@@ -207,7 +210,8 @@ test('the kill switch intercepts every mutating decision as a fail-closed escala
     revisionAdvanced(REF, { at: t(0), revisionRef: 'sha-A' }),
     checksSettled(REF, { at: t(1), revisionRef: 'sha-A', conclusion: 'success', requiredChecksPresent: true, sourceRef: 's' }),
   ], kill);
-  assert.equal(waiting.kind, 'wait');
+  assert.equal(waiting.kind, 'escalate');
+  assert.equal(waiting.nextAction, 'monitor-hold');
 });
 
 test('operator_override(close) is the only path to a close decision', () => {
@@ -219,7 +223,7 @@ test('operator_override(close) is the only path to a close decision', () => {
   assert.equal(d.reason, 'obsolete PR');
 });
 
-test('terminal marks short-circuit: finalized→finalize-now, closed→close, escalated→escalate (no re-page), halted→halt', () => {
+test('finalized and closed settle; automated escalation and halt re-evaluate evidence', () => {
   const finalizedD = decide([...cleanLedger(), finalized(REF, { at: t(3), revisionRef: 'sha-A', method: 'merge' })]);
   assert.equal(finalizedD.kind, 'finalize-now');
   assert.match(finalizedD.reason, /already finalized/);
@@ -228,11 +232,11 @@ test('terminal marks short-circuit: finalized→finalize-now, closed→close, es
   assert.equal(closedD.kind, 'close');
 
   const escalatedD = decide([...cleanLedger(), escalated(REF, { at: t(3), reason: 'fail-closed' })]);
-  assert.equal(escalatedD.kind, 'escalate');
-  assert.equal(escalatedD.final, true, 'terminal escalate is marked so the executor does not re-page');
+  assert.equal(escalatedD.kind, 'finalize-now');
+  assert.ok(escalatedD.owner);
 
   const haltedD = decide([...cleanLedger(), halted(REF, { at: t(3), reason: 'needs human' })]);
-  assert.equal(haltedD.kind, 'halt');
+  assert.equal(haltedD.nextAction, 'recover-coverage');
 });
 
 test('no revision advanced yet yields a wait', () => {

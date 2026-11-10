@@ -12,7 +12,8 @@ import { verifyQueueDerivation } from './queue-rebase-proof.mjs';
 import { readQueueEvidence } from './queue-read.mjs';
 import { queueWaitMs } from './queue-wait.mjs';
 import { queueTime } from './queue-store.mjs';
-import { finalized, resolveLaneKey } from './ledger-events.mjs';
+import { makeFinalizationEvent, resolveLaneKey } from './ledger-events.mjs';
+import { eligible } from './eligibility.mjs';
 import { fold } from './ledger-fold.mjs';
 import { openFinalizationLedgerStore } from './ledger-store.mjs';
 import { checkIdentityAttestation } from './execution-surfaces.mjs';
@@ -165,10 +166,23 @@ export function createQueueMergeService({ store, owner, liveAdapter, checkReader
   }
   const mergeOperationId = entry => `merge:${handoffDigest([entry.entryId, entry.candidate, entry.exactBase, entry.progressVersion])}`;
 
+  function subjectBlocker(state) {
+    const decision = eligible(state, typeof policy === 'function' ? policy() : policy, { observedAt: now(), load });
+    // The existing queue admission below supplies exact-candidate primary
+    // preservation proof. An observed lost/unknown boundary still blocks here.
+    if (decision.nextAction === 'recover-primary' && !state.workflow.provenance) return null;
+    // Queue admission/derivation supplies review evidence for its transformed
+    // candidate. Custody, holds, provenance and unknown effects have one policy.
+    return ['recover-custody', 'reconcile-custody', 'reconcile-effects', 'recover-primary',
+      'recover-coverage', 'reconcile-dispatch', 'merge-main', 'conflict-rebase',
+      'monitor-agent', 'monitor-hold', 'deliver'].includes(decision.nextAction)
+      || state.workflow.unknown ? decision : null;
+  }
   async function evaluate(entry, deadline) {
     if (brake()) return { phase: 'parked-hold', reason: 'autonomous-execution-disabled' };
     const ledgerState = fold(ledger.read(queueMergeSubject(entry)));
-    if (ledgerState.terminal) return { phase: 'parked-hold', reason: 'subject-ledger-terminal' };
+    if (ledgerState.finalized || ledgerState.terminal?.kind === 'closed') return { phase: 'parked-hold', reason: 'subject-ledger-terminal' };
+    if (subjectBlocker(ledgerState)) return { phase: 'parked-hold', reason: 'subject-ledger-owned-recovery' };
     let receipt = null;
     try { receipt = receipts.receipt(entry); } catch { /* unreadable evidence parks */ }
     if (!receipt) return { phase: 'parked-infrastructure', reason: 'admission-receipt-unavailable' };
@@ -225,7 +239,8 @@ export function createQueueMergeService({ store, owner, liveAdapter, checkReader
     }
     if (settledMerge(entry)?.result.outcome === 'succeeded') return notApplied('merge-already-settled');
     const ledgerState = fold(ledger.read(queueMergeSubject(entry)));
-    if (ledgerState.terminal || ledgerState.eligibilityEventCount !== verdict.ledgerCount) {
+    if (ledgerState.finalized || ledgerState.terminal?.kind === 'closed'
+      || subjectBlocker(ledgerState) || ledgerState.eligibilityEventCount !== verdict.ledgerCount) {
       return notApplied('subject-ledger-moved', { phase: 'parked-hold', reason: 'subject-ledger-moved' });
     }
     // The issuance lock spans this last live read and the complete merge call.
@@ -281,10 +296,9 @@ export function createQueueMergeService({ store, owner, liveAdapter, checkReader
       const insert = store.db.prepare('INSERT INTO finalization_queue_delivery(delivery_key,entry_id,kind,payload_json) VALUES (?,?,?,?)');
       for (const d of deliveries) insert.run(d.key, entry.entryId, d.kind, JSON.stringify(d.payload));
       const subject = queueMergeSubject(entry);
-      if (fold(ledger.read(subject)).finalized?.revisionRef !== entry.candidate) {
-        ledger.append(finalized(subject, { at: queueTime(now()), revisionRef: entry.candidate, method: 'squash',
-          sourceRef: `github:merge:${result.mergeSha}` }));
-      }
+      ledger.append(makeFinalizationEvent('merge_observed', subject, { at: queueTime(now()),
+        revisionRef: entry.candidate, mergedRevision: entry.candidate, principal: result.mergedBy,
+        planRequired: true, sourceRef: `github:merge:${result.mergeSha}`, idempotencyKey: `merge:${result.mergeSha}` }));
       return next;
     });
     await release(fence);

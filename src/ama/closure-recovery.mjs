@@ -1,3 +1,4 @@
+import { prepareLegacyActor } from '../finalization/legacy-actor-boundary.mjs';
 // CLOSURERECOVERYEXEC-01: the executor for an R04 `closure-recovery` next
 // action (ownership reconciliation). Before this, nothing ran that actor: the
 // background hammer queue refused it as `closure-decision-mismatch`, the inline
@@ -38,8 +39,11 @@ const text = value => (typeof value === 'string' ? value.trim() : '');
 // receipt reconciliation, leaving the adopted R04 snapshot stuck forever.
 // This only supplies evidence. Retirement/reacquisition stays under the normal
 // per-PR intent lock, followed by all existing dispatch and merge predicates.
-export async function refreshClosureRecoveryCustody({ rootDir, repo, prNumber, headSha, shared,
+export async function refreshClosureRecoveryCustody({ rootDir, repo, prNumber, headSha, shared, cfg = {},
   now = Date.now(), readLaunchImpl, readOptions = {}, logger = console }) {
+  const route = await prepareLegacyActor({ rootDir, repo,
+    base: shared?.snapshot?.observations?.pr?.value?.baseRefName, prNumber, head: headSha, cfg });
+  if (!route.ok) return { shared, reason: route.reason };
   if (!hasClosureRecoveryIntent(shared, { repo, prNumber, headSha })) return { shared };
   const deadlineAt = shared.decision.deadline?.at;
   const due = Date.parse(deadlineAt);

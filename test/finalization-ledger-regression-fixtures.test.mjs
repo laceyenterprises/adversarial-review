@@ -14,6 +14,7 @@ import {
   attestationRecorded,
   budgetExhausted,
   checksSettled,
+  makeFinalizationEvent,
   remediationConcluded,
   remediationDispatched,
   revisionAdvanced,
@@ -22,6 +23,10 @@ import {
 
 const REF = { domainId: 'code-pr', subjectExternalId: 'owner/repo#1559' };
 const t = (n) => new Date(Date.parse('2026-07-17T00:00:00.000Z') + n * 60000).toISOString();
+const primary = (revisionRef, n) => makeFinalizationEvent('provenance_observed', REF, {
+  at: t(n), revisionRef, sourceRef: `fixture:primary:${revisionRef}`, idempotencyKey: `primary:${revisionRef}`,
+  builderBoundary: 'fixture:builder', primaryChange: 'preserved', hammerCommits: false, mergeMain: false,
+});
 
 // 1. Phantom die-before-merge / non-resumable close (HCM-01). v1 kept hammer
 //    progress in process state; a crash between the final remediation and the
@@ -35,7 +40,9 @@ test('regression: phantom die-before-merge resumes to finalize-now on replay', (
     verdictRecorded(REF, { at: t(2), revisionRef: 'sha-A', stageId: 'security', role: 'r1', verdictKind: 'request-changes', sourceRef: 'rev-A' }),
     budgetExhausted(REF, { at: t(3), stageId: 'security' }),
     remediationDispatched(REF, { at: t(4), revisionRef: 'sha-A', round: 1, idempotencyKey: 'final-1', stageId: 'security', final: true }),
-    remediationConcluded(REF, { at: t(5), revisionRef: 'sha-A', round: 1, outcome: 'completed', stageId: 'security' }),
+    remediationConcluded(REF, { at: t(5), revisionRef: 'sha-A', round: 1, outcome: 'completed', stageId: 'security',
+      coverageValidated: true, sourceRef: 'fixture:validated-coverage' }),
+    primary('sha-A', 5),
     // ... executor process dies here, before issuing the merge.
   ];
   // Restart = fold from scratch, and fold-from-snapshot: both must agree and both
@@ -81,6 +88,7 @@ test('regression: ceiling+head-move deadlock finalizes a clean PR at the new hea
     revisionAdvanced(REF, { at: t(3), revisionRef: 'sha-B', sourceRef: 'push-B' }),
     checksSettled(REF, { at: t(4), revisionRef: 'sha-B', conclusion: 'success', requiredChecksPresent: true, sourceRef: 'suite-B' }),
     verdictRecorded(REF, { at: t(5), revisionRef: 'sha-B', stageId: 'security', role: 'r1', verdictKind: 'approved', sourceRef: 'rev-B' }),
+    primary('sha-B', 5),
   ];
   const d = eligible(fold(ledger), undefined, { observedAt: t(6) });
   assert.equal(d.kind, 'finalize-now', 'a clean green head must not deadlock behind a stale stage exhaustion');

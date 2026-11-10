@@ -11,8 +11,9 @@
 `finalization_ledger` is the append-only, per-subject event ledger for Merge
 Authority v2. It records finalization facts for a subject: head revisions,
 review verdicts, check-settlement observations, attestations, remediation
-dispatch/conclusion events, budget exhaustion, operator overrides, and terminal
-finalized/closed/escalated/halted marks.
+dispatch/conclusion events, budget exhaustion, operator overrides, and authoritative
+landing/closure facts. Escalations retain a recovery owner rather than settling
+PR execution; finalization additionally requires delivery evidence.
 
 MLR-13 adds `launch_custody_observed`, pinned to repository/PR/head with a
 launch id, stable source/idempotency key and original event time. Its `custody`
@@ -30,10 +31,10 @@ data directory ownership); it never creates a store. Invalid custody payloads
 from a newer producer rehydrate as `unknown:launch_custody_observed` passthroughs,
 while writes remain strict. They grant no freshness evidence.
 
-The fold's `eventCount` includes every row. Its `eligibilityEventCount` excludes
-custody observations, including unknown custody payloads; queue merge issuance
-compares that counter so off-pass custody cannot park an eligible candidate.
-Other events still invalidate the evaluated decision.
+The fold's `eventCount` and `eligibilityEventCount` include every row. Queue merge
+issuance compares that counter and the shared workflow decision: a new holder,
+including an unknown custody payload, invalidates an in-flight authorization.
+Custody ingestion remains off-pass; it does not synchronously query launches.
 
 Queue GSR receipts report `present: false` when the database or lane table is
 absent. Drain returns `accepted` only if the stored token matches the request
@@ -84,7 +85,7 @@ columns: `type`, `subjectKey`, `revisionRef`, `at`, `sourceRef`, and
 Writes are strict: `append()` validates events through `makeFinalizationEvent`
 before inserting. Reads preserve forward compatibility: known event types are
 rehydrated through the strict constructor, while unknown future event types are
-returned losslessly so older folds can ignore semantics they do not understand.
+returned losslessly; an unrecognized safety fact selects owned evidence refresh.
 
 ## Operational Contract
 
@@ -588,8 +589,8 @@ a row to retry delivery.
 `createQueueMergeService().finalize` accepts only a `finalizing` entry with an
 exact published candidate. Immediately before mutation it rereads, in order:
 the existing emergency execution brake (an unreadable policy counts as
-engaged), the per-subject v2 ledger fold (an escalated/halted/closed subject
-parks), the immutable admission receipt and its digest against
+engaged), the per-subject v2 ledger fold (settled subjects, unresolved recovery
+and explicit holds park), the immutable admission receipt and its digest against
 `rebase.sourceReceiptDigest`, live lifecycle/head/base, the shared admission
 predicate (holds, identity, branch rights, primary change and existing
 structural eligibility through `evaluateMergeEligibility`), the recomputed
@@ -634,8 +635,8 @@ exact base, rebase provenance (source receipt digest, publication, proof kind,
 no-op flag, digest, fork, replayed commits, derivation hop count), the complete
 final check snapshot, the final decision, merge operation/method/SHA/time/merger,
 attribution and the owner fence, plus `digest`. The `merged` phase, receipt,
-delivery rows and a subject-ledger `finalized` event (`method: squash`,
-`sourceRef: github:merge:<sha>`, appended once) commit in one transaction. The
+delivery rows and a subject-ledger `merge_observed` event (actual merged
+revision/principal, `sourceRef: github:merge:<sha>`, appended once) commit in one transaction. The
 entry gains `merge` and `delivery: { receiptDigest, keys }`. The lane is
 released before delivery.
 
@@ -706,3 +707,32 @@ an additional execution authority. Counts require unique organic observations,
 immutable admission receipts and live admission provenance in one lane/window.
 Runtime, recovery and rollback evidence remain separately sourced; missing
 observations never become successful execution or operator approval.
+
+## Workflow event payloads and finalization
+
+MLR-06 extends `payload_json` through the existing strict append API; no table
+or column migration is needed. Every new event requires `sourceRef` and an
+idempotency key. The `workflow` projection retains these facts across heads:
+
+| Event | Payload and replay rule |
+|---|---|
+| `decision_anchored` | Episode, anchor time, nominal/effective/ceiling milliseconds, policy/code version and load evidence. First anchor wins; polls cannot slide it. Admitted work starts its runtime episode at `admittedAt`, never at request time. |
+| `work_consumed` | Stable work/operation identity and typed useful conclusion. Deduplicate by work identity across heads/stages/owners. Dispatch, admission refusal and kills add no debit. |
+| `worker_killed` | Operation and machine cause. Reconcile effects before replacement work; preserve independently proven useful work. |
+| `operation_requested`, `operation_observed` | Intent precedes issuance; an unknown result requires readback. Only authoritative absent evidence permits retry. |
+| `provenance_observed` | Revision, immutable builder boundary, primary-change status, hammer commits and merge-main history. Merge-main after hammer, or a changed builder boundary, permanently makes primary evidence unknown. |
+| `mergeability_observed` | Exact revision and mergeability. DIRTY/CONFLICTING select owned repair before CI waiting; hammer provenance requires merge-main rather than conflict-rebase. |
+| `custody_patch_recorded`, `custody_recovered` | Record complete durable WIP before teardown. Recovery requires the same source holder, a patch, acknowledged successor and completed branch release. Held/failed teardown never releases custody. |
+| `merge_observed`, `delivery_observed` | Landing records actual principal/revision and a plan disposition. Only a matching PMA plan-run receipt with verified activation (or explicit not-required disposition) permits `finalized`. Queue landing conservatively requires delivery until PMA supplies proof. |
+| `page_delivered` | One acknowledged page per durable episode through the existing alert outbox. Queued/failed delivery retries the same key. |
+| `evidence_refreshed` | A sourced compatible producer generation resolves unknown safety semantics; ordinary review/check facts cannot erase unknown facts. |
+
+`projectWorkflow` derives owner, next action, deadline, overdue milliseconds,
+reason, evidence, generation, code/policy version, freshness and page acknowledgement
+from the same folded decision. Merged subjects retain a delivery owner. Explicit
+operator holds survive head/code changes until an authenticated release.
+
+The app-owned SQLite ledger remains authoritative. Agent OS adapters do not
+write session-ledger SQL or create another ledger. Host custody teardown, PMA
+run admission/observation and the existing pager are explicit injected ports;
+unavailable composition retains owned recovery. No source test invokes them live.

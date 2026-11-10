@@ -8,7 +8,7 @@ const findingsBody = '## Blocking issues\n- None.\n## Non-blocking issues\n- **C
 const quiet = { log() {}, warn() {}, error() {} };
 // Both production watcher phases run. Only external GitHub/dispatch/merge
 // boundaries are injected; the actual primary-change and merge predicates run.
-export async function watcherTick({ rootDir, prNumber, headSha, evidence, store, row, closerImpl, closureOnly = false, runMerge = async () => {}, gateOverrides = {}, candidateOverrides = {}, pageImpl = async () => {}, findings = false }) {
+export async function watcherTick({ rootDir, prNumber, headSha, evidence, store, row, closerImpl, closureOnly = false, runMerge = async () => {}, gateOverrides = {}, candidateOverrides = {}, pageImpl = async () => {}, findings = false, handoffFinalFixAllImpl }) {
   const candidate = { repo, prNumber, headSha, prState: store.merged ? 'merged' : 'open',
     title: '[codex] HAMCLOSE replay', body: '', baseBranch: 'main', isDraft: false, riskClass: 'low',
     mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', statusCheckRollup: [{ name: 'ci', conclusion: 'SUCCESS' }],
@@ -39,6 +39,7 @@ export async function watcherTick({ rootDir, prNumber, headSha, evidence, store,
         fetchMergedProtectiveDependentsImpl: async () => [],
         fetchProtectivePredecessorStateImpl: async () => null,
         fetchLatestHeadReviewBodiesImpl: async () => closureOnly ? [] : [body], liveReviewRetryDelaysMs: [0],
+        handoffFinalFixAllImpl,
         maybeDispatchAmaCloserImpl: closerImpl || (async () => { throw new Error('clean review must not launch a hammer'); }),
         runDaemonCleanMergeAttemptImpl: async () => {
           if (closureOnly) return { disposition: 'not-taken', reason: 'stale-head' };

@@ -21,7 +21,7 @@ export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha
   const head = headSha || lifecycle?.headSha || job.revisionRef;
   const workerPublishedHead = Boolean(workerPushedHeadSha && head)
     && String(workerPushedHeadSha).toLowerCase() === String(head).toLowerCase();
-  const fullReviewRequired = job.closureHandoff?.reason === 'conflict-primary-unproven'
+  const fullReviewRequired = ['conflict-primary-unproven', 'final-fix-all'].includes(job.closureHandoff?.reason)
     && job.closureHandoff.review === 'full' && workerPublishedHead
     && String(head).toLowerCase() !== String(job.revisionRef).toLowerCase();
   let leases = snapshot?.observations?.leases;

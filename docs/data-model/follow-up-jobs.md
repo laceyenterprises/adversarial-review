@@ -33,6 +33,43 @@ Unavailable PR reads or `identity-read-transient` opener reads defer the claimed
 job to `pending` for 60 seconds through the existing pre-spawn requeue, refunding
 claim-time round allocation. Unavailable evidence cannot prove missing authorship;
 only settled absence or conflict produces an operator stop.
+
+## Final fix-all handoff (LANEAUTO-01)
+
+At the final review-round cap, a latest exact-head Comment-only review with
+known zero blocking findings and remaining non-blocking or demoted findings
+gets one builder **final fix-all** work order before findings closure. The
+existing follow-up queue and builder-tag worker sync with main, address every
+finding and the PR's own red checks, validate and push. The work order uses
+`closureHandoff.reason: final-fix-all`, `review: full` and the existing statuses.
+It is claimable for exactly one round, independently of the spent ordinary
+finding-round budget. Queue custody ends at terminal settlement; pending admission remains
+remediator-owned beyond the
+ordinary pending-liveness grace; the PR closer-intent lock serializes enqueue
+with closer admission, including rescue. Live closer or remediation custody
+prevents a second owner.
+
+A receipt deduplicates the source head even after terminal settlement or
+archival. Its published head must receive a fresh full review; this round
+never uses the suppressed final-push shortcut. If that review still has
+findings, the configured hammer/operator fallback owns closure. A zero-finding
+exact-head re-review takes the ordinary daemon path, with every existing merge
+predicate, attestation and lease check. Conflicts and CI-only repair retain
+their hammer routes. Blocking reviews retain their existing behavior. Strict
+mode, finding content, head matching, merge authority and leases are unchanged.
+
+The trigger is `final-round-review`. The deduplication key is `(repo, PR,
+revisionRef, final-fix-all)`, independent of review edits, prompt wording,
+closer attempts or base advances. `reviewBody` retains the authoritative
+review body selected by the gate; `closureHandoff.reviewContext` uses the same
+bounded untrusted host-read context as conflict-primary handoff. The existing
+`completion.workerPushedHeadSha` binds the subsequent fallback decision to the
+published head, including receipts in archived stopped jobs. No new store,
+status, config key or merge predicate is introduced. The ordinary PR-wide
+round ledger remains intact; the one work order starts at round zero with a
+fixed cap of one, preserves the PR risk classification, and does not inherit the consecutive non-blocking stop.
+
+
 ## Conflict-primary handoff (HAMCONFLICTOWNER-01)
 
 The watcher consumes the latest current-head closer terminal audit before

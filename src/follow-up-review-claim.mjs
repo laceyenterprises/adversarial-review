@@ -53,9 +53,9 @@ function followUpDigest(job, context = {}) {
   // Conflict work is identified by its terminal reason, not prompt wording or
   // the review context captured at enqueue. PR and head are already part of
   // the claim key. Ordinary posted-review deduplication remains body-based.
-  if (job?.closureHandoff?.reason === 'conflict-primary-unproven'
+  if (['conflict-primary-unproven', 'final-fix-all'].includes(job?.closureHandoff?.reason)
     && String(job.closureHandoff.headSha || '').toLowerCase() === String(job.revisionRef || '').toLowerCase()) {
-    return createHash('sha256').update('closer-terminal-audit:conflict-primary-unproven').digest('hex');
+    return createHash('sha256').update(`closer-terminal-audit:${job.closureHandoff.reason}`).digest('hex');
   }
   return reviewBodyDigest(job?.reviewBody, context);
 }

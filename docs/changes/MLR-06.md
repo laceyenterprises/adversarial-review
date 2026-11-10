@@ -32,6 +32,12 @@ bridge preflights queue ownership before entering existing guarded AR seams.
 DAG merged-PR reconciliation remains observational; its rescue mutations consume
 these same guarded entry points. No new route selector or live route changes.
 
+Final comment-only remediation makes `bin/legacy-pr-write.mjs` executable,
+corrects failed PMA activation coverage to correlate the actual merge, and
+removes the simulator's duplicate initial unknown-provenance event. Enabled
+subject executors now reject a missing/non-callable `liveSurface.read` at
+construction; disabled construction remains inert without the reader.
+
 ## Failure modes preserved
 
 Current-head authorization, no phantom success after a lost mutation reply,
@@ -40,6 +46,14 @@ budget charge, no skip of findings when repair is unavailable, and no merged-as-
 claim. Page retries use the existing durable outbox and episode key; enqueued is
 not acknowledged. SQLite remains the app's authority, with no session-ledger SQL,
 new schema, config key, CI check, label or gate.
+
+The final review's proposed local failure receipts are deliberately declined:
+an exception or unsuccessful merge reply cannot prove that no remote action
+occurred. The promotion runbook clarifies required authoritative recovery
+composition and the existing owned deferral when it is unavailable. Regression
+tests cover merge error/reply loss, dispatch retry after sourced absence and
+closed-PR readback after a lost close reply. Persistent shapes, workflow states,
+transitions and existing smoke promises remain unchanged.
 
 The first HCP scar query timed out. A subsequent scoped HCP query was available
 and returned no records; local `hq hardening for` queries resolved the hammer
@@ -70,6 +84,17 @@ No session-ledger SQL or Postgres schema changes occur; SQLite app-store
 round trips and routing are exercised directly. No full worker-pool, Sentinel,
 main-catchup or PMV suite is run. Managed push/CI results and unavailable live
 activation evidence are recorded separately in the PR.
+
+Final remediation validation after fresh-main rebase: the bounded targeted run
+of `test/finalization-executor.test.mjs`, `test/finalization-workflow.test.mjs`,
+`test/finalization-simulator.test.mjs` and
+`test/finalization-legacy-actor.test.mjs` passes all 66 tests.
+`npm run lint` passes with zero errors (152 existing warnings);
+`npm run typecheck:contracts`, `bash demo/research-finding-walkthrough.sh`
+and `git diff --check` pass. The initial targeted invocation could not load
+dependencies; validation used the installed checkout's matching locked
+dependency versions through an ignored workspace symlink. No full local suite
+was run; PR-head CI remains the merge gate.
 
 ## Deployment handoff
 

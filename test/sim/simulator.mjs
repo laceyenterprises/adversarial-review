@@ -206,7 +206,6 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
   let exec = executor('v2');
   observe();
   if (f.mergeability) emit('mergeability_observed', { revisionRef: head, mergeability: f.mergeability, sourceRef: 'synthetic:mergeability', idempotencyKey: 'mergeability' });
-  if (f.primaryEvidence === false) emit('provenance_observed', { revisionRef: head, builderBoundary: 'synthetic:builder', primaryChange: 'unknown', hammerCommits: false, mergeMain: false, sourceRef: 'synthetic:primary', idempotencyKey: 'primary' });
   if (f.dirtyTerminal) emit('launch_custody_observed', { revisionRef: head, sourceRef: 'synthetic:custody', idempotencyKey: 'custody', custody: {
     repository: 'synthetic/project', prNumber: 1, launchRequestId: 'synthetic-terminal', state: 'workspace',
     at: clock.iso(), freshnessSeconds: 180, launchLiveness: 'terminal', dirty: true } });

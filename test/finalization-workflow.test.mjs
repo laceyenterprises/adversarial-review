@@ -122,7 +122,7 @@ test('PMA receipt must match the actual merge; failed activation never finalizes
   const events = [...clean(), event('merge_observed', { mergedRevision: 'A', principal: 'fixture-human', planRequired: true })];
   events.push(event('delivery_observed', { mergeSourceRef: 'foreign', planRunId: 'fixture-plan', activation: 'verified' }, 1));
   assert.equal(decide(events).nextAction, 'deliver');
-  events.push(event('delivery_observed', { mergeSourceRef: events[3].sourceRef, planRunId: 'fixture-plan', activation: 'failed' }, 2));
+  events.push(event('delivery_observed', { mergeSourceRef: events.find(e => e.type === 'merge_observed').sourceRef, planRunId: 'fixture-plan', activation: 'failed' }, 2));
   assert.equal(decide(events).nextAction, 'deliver');
 });
 test('every prefix/tail split replays budgets, custody, provenance, delivery and pages exactly', () => {

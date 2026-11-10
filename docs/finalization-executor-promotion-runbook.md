@@ -29,7 +29,10 @@ progress read-only. Source merge and submodule float alone are not loaded-code
 or activation evidence. Privileged deploy/restart/config changes belong to SRE.
 
 The subject executor requires an authoritative lifecycle/head reader and the
-existing lane routing adapter. Queue and subject merge paths consult the same
+existing lane routing adapter. Constructing an enabled executor without a
+callable `liveSurface.read` throws a `TypeError` before any tick. Disabled
+construction remains valid without that reader for the inert rollback path.
+Queue and subject merge paths consult the same
 workflow recovery decision; any new custody fact invalidates evaluated currency.
 Unavailable identity/attestation remains owned retryable evidence. A merge reply
 never settles the subject. Readback records actual principal/revision, and a
@@ -68,6 +71,14 @@ Replay reconciles unknown effects before issuance. Live merged/closed PR state
 settles PR execution before any successor claim. Landing and delivery receipts
 remain separate across restart/rollback; retaining a merge receipt never repeats
 a merge merely to recover a missing delivery receipt.
+
+Compose `recoverySurface.reconcile` to supply sourced operation readback.
+A thrown merge, remediation-dispatch or close call, or an unsuccessful merge
+reply, does not prove absence of its remote effect. The issued intent remains
+unresolved until authoritative lifecycle or recovery evidence arrives; local
+error handling must not manufacture an `absent` or `failed` receipt. Missing
+recovery composition reports `recovery-capability-unavailable` and retains the
+owner and deadline rather than retrying an uncertain mutation.
 
 ## Queue owner storage observation (MGQ-01; no activation)
 

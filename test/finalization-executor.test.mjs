@@ -94,6 +94,25 @@ test('crash after merge effect is reconciled without a second mutation', async t
   assert.equal((await h.tick(200)).action, 'deliver');
   assert.equal(calls, 1);
 });
+for (const reply of ['throw', 'unsuccessful']) test(`uncertain ${reply} merge reply requires readback before retry`, async t => {
+  let calls = 0;
+  const h = harness(t, { adjudicateSurface: { merge: async () => {
+    calls++;
+    if (reply === 'throw') throw Error('fixture:lost-reply');
+    return { ok: false };
+  } } });
+  assert.equal((await h.tick(100)).status, 'failed');
+  const pending = h.state().workflow.operations['merge:head-A'];
+  assert.equal(pending.observation, null);
+  const recovery = await h.tick(200);
+  assert.equal(recovery.action, 'reconcile-effects');
+  assert.equal(recovery.reason, 'recovery-capability-unavailable');
+  assert.equal(calls, 1);
+  h.setLive({ state: 'merged', mergedRevision: 'head-A', principal: 'fixture-bot',
+    planRequired: true, sourceRef: 'fixture:readback' });
+  assert.equal((await h.tick(300)).action, 'deliver');
+  assert.equal(calls, 1);
+});
 test('lease contention keeps the current holder and prevents effects', async t => {
   const h = harness(t);
   h.leaseStore.acquire({ subject, holder: 'rival', leaseId: 'rival-lease', now: at(0), deadline: at(500) });
@@ -149,16 +168,77 @@ test('unknown dispatch effect is reconciled before any retry', async t => {
   let calls = 0;
   const h = harness(t, { remediationSurface: { dispatch: async () => { calls++; throw Error('fixture:lost-reply'); } } });
   h.append('verdict_recorded', { revisionRef: 'head-A', verdictKind: 'request-changes', stageId: 'review', role: 'independent' }, 1);
-  await h.tick(100); await h.tick(200);
+  assert.equal((await h.tick(100)).status, 'failed');
+  const recovery = await h.tick(200);
+  assert.equal(recovery.action, 'reconcile-effects');
+  assert.equal(recovery.reason, 'recovery-capability-unavailable');
+  assert.equal(h.state().workflow.operations['remediate:head-A:1'].observation, null);
   assert.equal(calls, 1);
   assert.equal(h.state().remediation.dispatched.length, 0);
 });
-test('missing live reader and missing lane router fail closed', async t => {
-  for (const options of [{ liveSurface: null }, { laneRouting: null }]) {
-    const h = harness(t, options);
-    assert.equal((await h.tick(100)).status, options.liveSurface === null ? 'deferred' : 'failed');
-    assert.equal(h.calls.length, 0);
+test('authoritative absent dispatch evidence permits retry after a lost reply', async t => {
+  let calls = 0;
+  const h = harness(t, {
+    remediationSurface: { dispatch: async () => {
+      calls++;
+      if (calls === 1) throw Error('fixture:lost-reply');
+      return { admitted: true, launchId: 'fixture-launch', admittedAt: at(300) };
+    } },
+    recoverySurface: { reconcile: async ({ decision }) => ({
+      ok: true, sourceRef: 'fixture:dispatch-readback',
+      events: [makeFinalizationEvent('operation_observed', subject, {
+        at: at(200), sourceRef: 'fixture:dispatch-readback', idempotencyKey: 'dispatch-absent',
+        operationId: decision.operationId, outcome: 'absent', result: { launchId: null },
+      })],
+    }) },
+  });
+  h.append('verdict_recorded', { revisionRef: 'head-A', verdictKind: 'request-changes', stageId: 'review', role: 'independent' }, 1);
+  assert.equal((await h.tick(100)).status, 'failed');
+  assert.equal((await h.tick(200)).action, 'reconcile-effects');
+  assert.equal((await h.tick(300)).action, 'dispatch-remediation');
+  assert.equal(calls, 2);
+  assert.equal(h.state().remediation.dispatched.length, 1);
+});
+test('lost close reply retains intent until authoritative closed readback', async t => {
+  let calls = 0;
+  const h = harness(t, { closeSurface: { close: async () => {
+    calls++;
+    throw Error('fixture:lost-close-reply');
+  } } });
+  h.append('operator_override', { overrideKind: 'close', principal: 'fixture-human', reason: 'obsolete PR' }, 1);
+  assert.equal((await h.tick(100)).status, 'failed');
+  assert.equal(Object.values(h.state().workflow.operations)[0].observation, null);
+  const recovery = await h.tick(200);
+  assert.equal(recovery.action, 'reconcile-effects');
+  assert.equal(recovery.reason, 'recovery-capability-unavailable');
+  assert.equal(calls, 1);
+  h.setLive({ state: 'closed', sourceRef: 'fixture:closed-readback' });
+  assert.equal((await h.tick(300)).action, 'settle-closed');
+  assert.equal(calls, 1);
+});
+test('enabled executor requires a callable live reader at construction', t => {
+  for (const liveSurface of [undefined, null, {}, { read: true }]) {
+    assert.throws(() => harness(t, { liveSurface }),
+      { name: 'TypeError', message: 'createFinalizationExecutor requires a liveSurface with read when enabled' });
   }
+});
+test('disabled executor remains inert without a live reader', async t => {
+  const h = harness(t, { enabled: false, liveSurface: null });
+  const before = h.state().eventCount;
+  assert.equal((await h.tick(100)).action, 'gated-off');
+  assert.equal(h.state().eventCount, before);
+  assert.equal(h.leaseStore.read(subject), null);
+});
+test('missing lane router fails closed', async t => {
+  const h = harness(t, { laneRouting: null });
+  assert.equal((await h.tick(100)).status, 'failed');
+  assert.equal(h.calls.length, 0);
+});
+test('configured live reader with unavailable evidence defers without mutation', async t => {
+  const h = harness(t, { liveSurface: { read: async () => null } });
+  assert.equal((await h.tick(100)).reason, 'authoritative-pr-reader-unavailable');
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.leaseStore.read(subject), null);
 });
 test('queue acknowledgement does not claim a merge', async t => {
   const h = harness(t, { laneRouting: { run: async () => ({ ok: true, queued: true }) } });

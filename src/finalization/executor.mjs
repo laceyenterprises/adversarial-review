@@ -63,7 +63,8 @@ function outcome(subjectKey, decision, { status, action, observedAt, reason, det
 
 /**
  * Build the leased executor. All I/O is injected so the executor is unit-testable
- * against in-memory stores and fake surfaces.
+ * against in-memory stores and fake surfaces. Enabled executors require a
+ * callable liveSurface.read; disabled construction may omit the reader.
  *
  * @param {{
  *   ledgerStore: { read(subject): any[], append(event): any },
@@ -75,6 +76,7 @@ function outcome(subjectKey, decision, { status, action, observedAt, reason, det
  *   identitySurface?: object | null,
  *   remediationSurface?: { dispatch(args): Promise<any> } | null,
  *   closeSurface?: { close(args): Promise<any> } | null,
+ *   liveSurface?: { read(args): Promise<any> } | null,
  *   mergeMethod?: string,
  *   holder?: string,
  *   leaseTtlMs?: number,
@@ -107,6 +109,9 @@ export function createFinalizationExecutor({
   }
   if (!leaseStore || typeof leaseStore.acquire !== 'function') {
     throw new TypeError('createFinalizationExecutor requires a leaseStore');
+  }
+  if (enabled && typeof liveSurface?.read !== 'function') {
+    throw new TypeError('createFinalizationExecutor requires a liveSurface with read when enabled');
   }
   const executionToken = Symbol('leased-execution');
   const holderId = holder || `finalization-executor:${process.pid}@${safeHostname()}`;
@@ -223,8 +228,8 @@ export function createFinalizationExecutor({
               status: 'skipped', action: 'escalate', observedAt, reason, detail: result?.detail,
             });
           }
-          // Fail-closed: a refused/failed merge does NOT append `finalized`; the
-          // next tick re-folds and re-decides (a stale-head refusal self-heals).
+          // A failed reply does not prove the remote effect absent. Preserve
+          // any issued intent for authoritative readback before another merge.
           return outcome(subjectKey, decision, {
             status: 'failed', action: 'merge', observedAt,
             reason: result?.reason || 'merge failed', detail: result?.detail,

@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { accessSync, constants } from 'node:fs';
 import { delimiter, resolve } from 'node:path';
 import { fetchPRBranchMetadata, runWorkspaceNetworkCommandWithTransientRetry } from './remediation-git-pr-io.mjs';
+import { checkRemediationPublication } from './remediation-publication-checks.mjs';
 
 const execFileAsync = promisify(execFile);
 const SHA = /^[a-f0-9]{40}$/i;
@@ -56,11 +57,13 @@ export async function publishRemediation({ workspaceDir = process.cwd(), baseBra
     base, candidate, '--', ...paths.map(path => `:(literal)${path}`)]) : '';
   // Refuse both an empty endpoint tree and an empty GitHub (merge-base) diff.
   const prAnchor = await git(['merge-base', base, candidate]);
-  const prDiff = await git(['diff', '--no-ext-diff', '--no-textconv', '--name-only', '-z', prAnchor, candidate]);
+  const prDiff = await git(['diff', '--no-ext-diff', '--no-textconv', '--name-only', '--no-renames', '-z', prAnchor, candidate]);
   if (!remaining || !prDiff || (paths.length && !originalRemaining)) {
     throw Object.assign(new Error('Remediation publication refused: the result empties the PR diff or restores every originally changed file to base. The previous remote head is retained.'),
       { code: 'remediation-empties-pr-diff', previousHead, candidate });
   }
+  await checkRemediationPublication({ workspaceDir, candidate,
+    paths: prDiff.split('\0').filter(Boolean), git, execFileImpl, env });
   if (await git(['rev-parse', 'HEAD']) !== candidate) {
     throw Object.assign(new Error('Remediation head moved during publication validation.'), { code: 'remediation-publication-head-moved' });
   }

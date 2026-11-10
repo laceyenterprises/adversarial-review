@@ -2,8 +2,8 @@ import { normalizeBuilderClass } from './adapters/subject/github-pr/routing.mjs'
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadRoleConfig, resolveDefaultRemediator } from './role-config.mjs';
-import { DEFAULT_REMEDIATOR_ENV, markRemediationConfigError } from './remediation-dispatch-mode.mjs';
-import { normalizeRemediationWorkerClass } from './remediation-worker-class-fallback.mjs';
+import { DEFAULT_REMEDIATOR_ENV, markRemediationConfigError, resolveRemediationRuntimeMode } from './remediation-dispatch-mode.mjs';
+import { normalizeRemediationWorkerClass, resolveClaimedRemediatorRouting } from './remediation-worker-class-fallback.mjs';
 import { loadDomainConfig } from './domain-config.mjs';
 import { resolveRemediatorWorkerClassFromDomain } from './domain-policy.mjs';
 
@@ -93,9 +93,9 @@ function defaultRemediatorWorkerClassFromEnv(env = process.env, opts = {}) {
 // The env override provides the same operator escape hatch in either
 // direction.
 //
-// Fallback semantics: when `builderTag` is missing or unknown, derivation falls
-// through to `DEFAULT_REMEDIATION_WORKER_CLASS = 'codex'`. This preserves
-// "something runs"; operators can pin via `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR`.
+// This pure selector falls through to the default for unrecognized tags.
+// The code-PR claim consumer must first recover recorded builder authorship
+// or stop with operator ownership; the subject refusal fences direct callers.
 // ARC-08: the role-registry default remediator worker class (SPEC §5,
 // `roles.registry.remediator.workerClass`). ARC-12 lands the registry and its
 // config schema; until then the strict `roles` schema omits `roles.registry`,
@@ -109,8 +109,7 @@ function defaultRemediatorWorkerClassFromEnv(env = process.env, opts = {}) {
 //   2. domain override — per-builder-tag cross-model routing
 //   3. role-registry default (`roles.registry.remediator.workerClass`)
 //   4. documented fallback `DEFAULT_REMEDIATION_WORKER_CLASS` (codex)
-// A missing/unknown builderTag falls through to the registry default, matching
-// the pre-ARC-08 degraded same-model-to-codex behavior (operator can pin).
+// A missing/unknown builderTag falls through here; it is not dispatch admission.
 function resolveRoleRegistryRemediator({ env = process.env, topPath, loaderImpl, domainId = 'code-pr' } = {}) {
   try {
     const cfg = loadRoleConfig({ env, topPath, loaderImpl, contextKey: 'roles.remediator' });
@@ -137,6 +136,17 @@ function pickRemediationWorkerClass(job, { env = process.env, topPath, loaderImp
     return REMEDIATION_WORKER_BY_BUILDER_TAG[builderTag];
   }
   return resolveRoleRegistryRemediator({ env, topPath, loaderImpl, domainId: job?.domainId || 'code-pr' });
+}
+
+// Re-resolve every claim so capped remediators can use a declared fallback.
+// Select for the mode that will execute; pooled proposals are admitted by HQ.
+export async function resolveInitialRemediatorRouting({ job, healthRouter, env = process.env,
+  ensureWorkerRegistryReadyImpl, resolveImpl, log }) {
+  const runtimeMode = resolveRemediationRuntimeMode(job, { healthRouter, env });
+  const routing = await resolveClaimedRemediatorRouting({ job, ensureWorkerRegistryReadyImpl,
+    primary: pickRemediationWorkerClass(job), env, nowMs: Date.parse(job.claimedAt),
+    resolveImpl, log, remediationMode: runtimeMode });
+  return { runtimeMode, routing };
 }
 
 // Reconcile-time GitHub operations must not return unmapped worker

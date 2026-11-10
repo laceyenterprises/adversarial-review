@@ -1,3 +1,10 @@
+REMBUILDERTAG-01 remediation normalizes legacy tags before routing and defers
+unavailable PR/transient opener evidence through the existing pre-spawn pending
+requeue with a 60-second retry and claim-round refund. Settled missing/conflicting
+evidence and recovered own-family routes retain owned stopped/retrigger outcomes.
+Lifecycle values and deployed smoke commands remain unchanged. Authorship preparation
+now lives in its recovery helper; the consumer source projection was reviewed
+and refreshed after this behavior-preserving extraction.
 PRERECEIPTADOPT-01 remediation preserves existing closer states and transitions.
 Terminal recovery reads the HQ audit root before finalizing shared lease outcomes;
 exact-ticket receipts retain pinned and legacy missing-class compatibility.

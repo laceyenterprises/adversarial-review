@@ -116,6 +116,9 @@ const FOLLOW_UP_JOB_DIRS = Object.freeze({
 });
 const ARCHIVE_ANOMALY_DIR = ['data', 'archive-anomalies'];
 const RETRIGGERABLE_STOP_CODES = Object.freeze([
+  'missing-builder-authorship',
+  'conflicting-builder-authorship',
+  'builder-cannot-remediate-own-pr',
   'branch-unresolved',
   'max-rounds-reached',
   'round-budget-exhausted',

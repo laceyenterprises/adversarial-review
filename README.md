@@ -1523,6 +1523,17 @@ records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
 
+The follow-up daemon repairs missing or unrecognized code-PR builder tags from
+agreeing recorded PR authorship before remediator selection, and persists
+canonical forms of legacy tags with recovery evidence. Unavailable PR or transient
+opener reads requeue for 60 seconds without spending a remediation round. Settled
+missing or conflicting evidence transitions the claimed job to `stopped`, with a named
+operator owner and escalation/retrigger action in its stop receipt and output.
+Recovered jobs retain the cross-family remediation requirement. The existing
+explicit retrigger transition resumes these stops after evidence correction.
+The [follow-up job model](docs/data-model/follow-up-jobs.md) describes the receipt;
+deployed smoke commands are unchanged.
+
 Review verdict consistency is enforced before closure: disagreement between
 Blocking issues and Verdict yields `verdict_inconsistent: true`, request-changes
 and an unknown blocking state. The reviewer consumes one durable reservation per

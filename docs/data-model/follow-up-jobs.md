@@ -1,5 +1,38 @@
 # Data Model - Follow-Up Remediation Jobs
 
+## Builder authorship recovery
+
+For code-PR jobs with missing or unrecognized `builderTag`, the claim consumer
+compares the PR title harness prefix, head-independent `pr_opened` worker
+identity, and explicit `Worker-Class:` metadata lines in the PR body, including
+`<!-- Worker-Class: codex-corp -->` and `<!-- hq:worker-class=codex-corp -->`
+comment wrappers outside fenced examples.
+Recognized sources must agree on family (Clio and Codex share one family).
+The job retains its existing ID, head and round plan. Before selection it
+persists canonical `builderTag` plus optional `builderTagRecovery` containing
+`previousTag`, `observedAt`, and `evidence` (`sources`, normalized tags,
+`missingEvidence`, source `availability`, decision and selected tag).
+A log line names the job and derivation. Legacy corporate class spellings and
+bracketed tags normalize through the shared builder classifier.
+
+Absent/conflicting evidence uses the existing `stopped` state with
+`missing-builder-authorship` or `conflicting-builder-authorship`. The stop
+contains `builderAuthorshipEscalation` (`owner`, `nextAction`, `observedAt`,
+`evidence`), and its reason and consume output name the job/PR, sources and
+operator action. No worker is spawned or publication charged; claim-time round
+allocation remains unchanged. These codes permit explicit operator retrigger
+after evidence correction. Recovered jobs also refuse an own-family remediator,
+including pins and fallback/pool proposals; `builder-cannot-remediate-own-pr`
+stops name the operator and action to select a different family.
+Existing noncanonical tags are persisted in canonical form with recovery evidence
+from `job.builderTag` before routing; canonical-tag jobs and non-code domains
+retain their existing routing.
+
+PR metadata reads allow two transient retries within a 15-second total budget.
+Unavailable PR reads or `identity-read-transient` opener reads defer the claimed
+job to `pending` for 60 seconds through the existing pre-spawn requeue, refunding
+claim-time round allocation. Unavailable evidence cannot prove missing authorship;
+only settled absence or conflict produces an operator stop.
 ## Conflict-primary handoff (HAMCONFLICTOWNER-01)
 
 The watcher consumes the latest current-head closer terminal audit before
@@ -195,7 +228,7 @@ replay. Factual-dispute admission is the explicit closure exception described be
 
 **Owner:** follow-up remediation queue
 **Store:** `data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json`, `data/follow-up-jobs/single-review-voids/*.json`, `data/follow-up-jobs/missing-label-events/*.json`
-**Source of truth:** `src/follow-up-jobs.mjs`, `src/follow-up-branch.mjs`, `src/remediation-unpublished.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/worker-token-pool.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`, `src/remediation-closeout.mjs`, `src/remediation-job-ownership.mjs`
+**Source of truth:** `src/remediation-builder-authorship.mjs`, `src/follow-up-jobs.mjs`, `src/follow-up-branch.mjs`, `src/remediation-unpublished.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/worker-token-pool.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`, `src/remediation-closeout.mjs`, `src/remediation-job-ownership.mjs`
 **Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`, `src/adapters/comms/github-pr-comments/comment-delivery.mjs`, `src/reviewer-ci-admission.mjs`
 
 ## Simplicity advisory (REVIEWSIMPLE-01)

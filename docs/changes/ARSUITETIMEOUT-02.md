@@ -67,17 +67,25 @@ timeout message. Sandbox regressions retain signal propagation, descendant
 termination and cleanup coverage. Loader regressions exercise synchronous and
 fallback modes, source overrides, CommonJS imports and syntax preservation.
 
-Final validation on both Node versions is in progress under the approved
-90-minute extension. The earlier Node 26 checkpoint passed all 829 files in
-522.201 seconds; a subsequent cache measurement passed in 613.135 seconds.
-A 32-worker Node 22 trial completed 832 files in 784.802 seconds with one
-failure at an unchanged 45-second fixture subprocess limit. Higher bounds
+The earlier Node 26 checkpoint passed all 829 files in 522.201 seconds; a
+subsequent measurement passed in 613.135 seconds. A 32-worker Node 22 trial
+completed 832 files in 784.802 seconds with one failure at an unchanged
+45-second fixture subprocess limit in `hammer-self-rebase.test.mjs`. That
+fixture deadline flake is tracked separately by ARCIDEFLAKE-01. Higher bounds
 increased aggregate file elapsed time and resource contention, so the final
-bound is eight workers. These trials do not establish the 450-second target.
-The subsequent eight-worker Node 22 run hit the unchanged 900-second deadline
-(961.32 seconds including setup and cleanup). Its baseline scheduling hints
-have since been refreshed from the completed 832-file measurement; the refreshed
-plan still needs full validation on both versions. This is an unpublished
-checkpoint, with performance acceptance outstanding.
-Lint, contract typechecking and the byte-equivalence demo passed on the rebased
-tree. Final results will replace this progress paragraph before publication.
+bound is eight workers.
+
+The final eight-worker full runs on Node 22 and Node 26 reached the unchanged
+900-second deadline on the shared validation host. The refreshed Node 26 run
+reported no assertion failure before the cutoff. Local full-suite timings are
+affected by heavy disk I/O contention and do not establish the approximately
+450-second hosted-runner target. Under the approved continuation, publication
+proceeds with this limitation documented; existing hosted CI jobs supply the
+performance evidence, followed by the SRE observation above.
+
+Lint, contract typechecking, ESLint on changed JavaScript files (zero errors),
+and the byte-equivalence demo passed.
+The final focused runner, loader, sandbox, root-isolation and history-clock
+checks passed on both Node 22.22.3 and Node 26.10.0: 44 tests on each version,
+zero failures or skips. These commands used netguard and a 300-second outer
+bound.

@@ -11,6 +11,11 @@ outcomes retain their terminal or backlog behavior. Correction never permits an
 edit; finding authority, strict mode, range coverage, budgets and leases remain
 mandatory. Prompt, closure runbook and README describe the total contract.
 
+Final comment-only remediation removes the unreachable second review-head
+equality guard. The earlier expected-head evidence guard and plan-head format
+validation already enforce the same invariant; refusal ordering and edit
+authorization are unchanged.
+
 ## Interface changes
 
 Plan errors return `action: correct` (exit 21), including `plan-json-invalid`,
@@ -22,6 +27,14 @@ before correction. One object per invocation; invoke once per finding for
 multiple edits. No new CI check, gate, label or live operation.
 
 ## Verification
+
+Final remediation: `node --test test/hameditplan-01.test.mjs
+test/hameditplan-04.test.mjs test/hameditplan-05.test.mjs
+test/hamrevwitness-01.test.mjs` passed all 25 tests. `npm run lint` passed
+with zero errors (149 existing warnings); `npm run typecheck:contracts` and
+`bash demo/research-finding-walkthrough.sh` passed. Commands used the bounded
+runner with a 120-second limit and local dependencies from an identical
+lockfile. No full suite run.
 
 Individually under netguard with the worker validation runner and a 600-second
 limit per command: `node --test test/<file>` for `hameditplan-01`,

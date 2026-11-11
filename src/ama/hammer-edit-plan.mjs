@@ -89,7 +89,6 @@ export function checkHammerEditPlan(review, plan, { strictNonBlockingRemediation
   if (typeof plan.reviewedHead !== 'string' || !/^[a-f0-9]{40}$/i.test(plan.reviewedHead)) {
     return reject('plan-head-invalid', 'reviewedHead must be a 40-hex reviewed SHA.');
   }
-  if (review.commit_id !== plan.reviewedHead) return refuseHammerReviewEvidence('review-head-mismatch');
   const uncitedCiRepair = plan.kind === undefined && plan.findingNumber === undefined && plan.requiredCiRepair === true;
   if (uncitedCiRepair) {
     if (plan.editKind !== 'in-place') {

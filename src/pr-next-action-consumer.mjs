@@ -178,7 +178,7 @@ export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, cand
           ...(input.followUpJob.remediationPlan.stop
             ? { stop: pick(input.followUpJob.remediationPlan.stop, ['code']) } : {}),
         } : null,
-        failure: pick(input.followUpJob.failure, ['needsOperator']),
+        failure: pick(input.followUpJob.failure, ['code', 'needsOperator']),
         live: remediationJobOwnership(input.followUpJob).live,
         headSha: input.followUpJob.headSha || input.followUpJob.revisionRef || null,
       } : null } : {}) },

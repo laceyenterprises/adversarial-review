@@ -68,6 +68,10 @@ export async function recoverEndedRemediationRound({ execFileImpl = execAsync,
         { timeout: 15_000, maxBuffer: 4 * 1024 * 1024 })).stdout || '').trim();
       let verified = false;
       try {
+        // Retained workspaces may lack the remote base ref. Refresh the same
+        // superproject-only ref used by the publisher before ancestry checks.
+        await git(['fetch', '--no-recurse-submodules', '--no-tags', 'origin',
+          `+refs/heads/${job.baseBranch}:refs/remotes/origin/${job.baseBranch}`]);
         // A model-reported hash is only a hint. Verify the actual checkout,
         // every added commit's provenance and preservation of reviewed patches.
         const tip = await git(['rev-parse', '--verify', 'HEAD^{commit}']);

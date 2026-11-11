@@ -427,6 +427,26 @@ function closureFixture(t, overrides = {}) {
   return { args, effects, waits };
 }
 
+for (const status of ['stopped', 'failed'])
+test(`REMEDIATEEXEC-01: ${status} budget from an older head cannot exhaust the current head`, async t => {
+  const f = closureFixture(t);
+  f.args.dispatchJob = {};
+  const dir = getFollowUpJobDir(f.args.rootDir, status);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${followUpJobFilePrefix(identity.repo, 5)}older.json`), JSON.stringify({
+    schemaVersion: FOLLOW_UP_JOB_SCHEMA_VERSION, repo: identity.repo, prNumber: 5, revisionRef: OLD,
+    jobId: `${followUpJobFilePrefix(identity.repo, 5)}older`, status, createdAt: AT,
+    failure: { code: 'worker-failure' },
+    remediationPlan: { currentRound: 2, maxRounds: 2, stop: { code: 'committed-unpublished' } },
+  }));
+  const result = await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(result.nextAction.action, 'remediate', JSON.stringify(result));
+  const { snapshot } = readClosureNextAction(result);
+  assert.equal(snapshot.observations.remediation.value.job, null);
+  assert.equal(snapshot.observations.remediation.value.roundsLeft, true);
+  assert.ok(!f.effects.some(([effect]) => effect === 'closer'));
+});
+
 for (const workerStarted of [false, true]) for (const maxRounds of [1, 2]) test(`REMEDIATEEXEC-01: terminal blocking round uses its ${maxRounds}-round ceiling through dispatch, workerStarted=${workerStarted}`, async t => {
   const body = '## Blocking issues\n- **Incorrect result**\n  - **Problem:** incorrect result.\n\n## Non-blocking issues\n- None.\n\n## Verdict\nRequest changes';
   let dispatched;

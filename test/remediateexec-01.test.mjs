@@ -141,8 +141,10 @@ function retainedFixture(t) {
   return { ...f, work, git, local, head, options: { ...f.options, headSha: head, execFileImpl } };
 }
 
-test('verified retained work publishes and requests re-review without another worker round', async t => {
+for (const suppliedSnapshot of [true, false]) for (const missingBaseRef of [false, true])
+test(`verified retained work completes without another round: suppliedSnapshot=${suppliedSnapshot}, missingBaseRef=${missingBaseRef}`, async t => {
   const f = retainedFixture(t);
+  if (missingBaseRef) f.git('update-ref', '-d', 'refs/remotes/origin/main');
   let pushes = 0;
   let reviews = 0;
   const snapshot = deriveNextActionSnapshot({ subjectKey: 'fixture/repo#42', head: f.local, observedAt: NOW,
@@ -151,7 +153,7 @@ test('verified retained work publishes and requests re-review without another wo
   const result = await recoverEndedRemediationRound({ ...f.options, publishImpl: args => {
     pushes++;
     return publishRemediation({ ...args, pushCommand: 'git', env: gitEnv });
-  }, completeImpl: args => completeWorkerPublishedHead({ ...args, snapshot,
+  }, completeImpl: args => completeWorkerPublishedHead({ ...args, ...(suppliedSnapshot ? { snapshot } : {}),
     requestReviewRereviewImpl: () => { reviews++; return { triggered: true, status: 'pending' }; },
     requestRereviewWakeImpl: () => ({ requested: true }),
     requestWatcherWakeImpl: () => ({ requested: true }) }) });
@@ -169,6 +171,28 @@ test('verified retained work publishes and requests re-review without another wo
   assert.equal(completed.remediationPlan.maxRounds, 3);
   assert.equal((await recoverEndedRemediationRound(f.options)).recreated, false);
   assert.equal(reviews, 1);
+});
+
+test('unreadable remote base preserves retained work and uses the ordinary retry budget', async t => {
+  const f = retainedFixture(t);
+  let fetched = false;
+  const result = await recoverEndedRemediationRound({ ...f.options,
+    execFileImpl: async (command, args, settings) => {
+      if (command === 'git' && args.includes('fetch')) {
+        fetched = true;
+        assert.ok(args.includes('--no-recurse-submodules'));
+        throw new Error('synthetic unavailable base');
+      }
+      assert.ok(!args.includes('cherry'), 'base must be refreshed before comparing commits');
+      return f.options.execFileImpl(command, args, settings);
+    },
+    publishImpl: () => assert.fail('unreadable base cannot authorize publication') });
+  assert.equal(fetched, true);
+  assert.equal(result.recreated, true);
+  const pending = readFollowUpJob(result.jobPath);
+  assert.equal(pending.unpublishedWork.commitSha, f.local);
+  assert.equal(pending.remediationPlan.currentRound, 1);
+  assert.equal(pending.remediationPlan.maxRounds, 3);
 });
 
 test('publication recovery cannot complete a changed source or an unvalidated final-round reply', t => {
@@ -284,4 +308,22 @@ test('a terminal budget does not grant automatic handoff over explicit operator 
         checks: { conclusion: 'SUCCESS' }, controls: {}, progress: {} } });
     assert.equal(nextAction(snapshot).action, 'remediate', 'the new budget proof cannot bypass a deliberate hold');
   }
+});
+
+for (const code of ['worker-failure', 'worker-timeout'])
+test(`shadow projection preserves ${code} budget handoff evidence`, () => {
+  const evidence = closureOwnerShadowEvidence({ currentHead: HEAD, roundsLeft: true,
+    reviewState: { headSha: HEAD, verdict: 'request-changes', attestation: 'valid',
+      blockingFindingState: 'known', blockingFindingCount: 1,
+      nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 },
+    followUpJob: { status: 'failed', revisionRef: HEAD, failure: { code, needsOperator: false },
+      remediationPlan: { currentRound: 2, maxRounds: 2 } },
+    strictMode: true, lease: null, launchRecord: null },
+  { autonomousMergeExecutionEnabled: true, candidate: { state: 'OPEN', headSha: HEAD } });
+  const snapshot = deriveNextActionSnapshot({ subjectKey: 'fixture/repo#42', head: HEAD, observedAt: NOW,
+    observations: { ...evidence.observations, pr: { state: 'OPEN', headSha: HEAD, mergeable: 'MERGEABLE' },
+      checks: { conclusion: 'SUCCESS' }, controls: {}, progress: {} } });
+  assert.equal(evidence.observations.remediation.job.failure.code, code);
+  assert.equal(nextAction(snapshot).action, 'hammer');
+  assert.equal(classifyClosureOwnership(nextAction(snapshot), HEAD).closureOwner.action, 'hammer');
 });

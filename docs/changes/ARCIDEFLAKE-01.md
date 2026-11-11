@@ -109,9 +109,12 @@ branch still requires the unconfirmed-cleanup diagnostic and descendant death.
 
 Five randomized complete green branch runs remain required; the affected-suite
 results do not substitute for them. ARSUITETIMEOUT-02 had not reached
-`origin/main` after the final branch gate. Publication remains pending the
-dispatch decision on this proof gap. After the runner change lands, rebase and
-repeat the complete proof, including investigation of any remaining failures.
+`origin/main` after the final branch gate. The operator authorized publication
+of the scoped fixes with that proof explicitly pending ARSUITETIMEOUT-02
+(adversarial-review PR 1822), with no merge or check bypass. After the runner
+change lands, rebase and repeat the complete proof, including investigation of
+any remaining failures. The unresolved smoke budget, update-branch subprocess
+cap and restricted-host process-group probe refusal are listed above.
 
 ## Post-merge observation
 
@@ -120,3 +123,6 @@ including PRs and main, require zero failures attributable to the fixed tests.
 Check that remaining failures are attributable only to genuine PR breakage or
 the separately tracked suite timeouts. No live action is performed by this
 change.
+
+The observation is declared in
+`modules/worker-pool/post-merge-actions/arcideflake-01-ci-observation.yaml`.

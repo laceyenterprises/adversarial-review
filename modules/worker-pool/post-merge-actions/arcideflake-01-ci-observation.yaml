@@ -1,0 +1,17 @@
+operator_steps:
+  - description: >-
+      SRE observes the next 20 ordinary adversarial-review CI runs across PRs
+      and main. Require zero failures attributable to the fixed native
+      lane-lock wake and synthetic-census controller tests. Record run links,
+      conclusions and failure attribution; remaining failures must be genuine
+      PR breakage or separately tracked suite timeouts. Five randomized
+      complete green branch runs remain pending ARSUITETIMEOUT-02
+      (adversarial-review PR 1822); after its runner change lands, rebase and
+      repeat that proof, investigating remaining smoke and subprocess cap
+      failures and the restricted-host process-group probe refusal. Do not
+      trigger workflows, bypass checks or make live changes for this observation.
+    run_as: designated SRE
+    command: >-
+      gh run list --workflow test.yml --limit 20
+      --json databaseId,headSha,headBranch,conclusion,url
+actions: []

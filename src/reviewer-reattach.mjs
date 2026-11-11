@@ -1,5 +1,5 @@
 import { persistReviewerAttributionForSession } from './reviewer-attribution.mjs';
-import { normalizeReviewerModel, reviewerRefusesBuilder } from './adapters/subject/github-pr/routing.mjs';
+import { normalizeBuilderClass, normalizeReviewerModel, reviewerRefusesBuilder } from './adapters/subject/github-pr/routing.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execFileSync } from 'node:child_process';
 
@@ -488,6 +488,21 @@ function readReviewerRunRecordBestEffort(rootDir, row) {
   }
 }
 
+function readDurableReviewerContext(db, row) {
+  if (!row.reviewer_session_uuid) return null;
+  const passes = db.prepare(`SELECT metadata_json FROM reviewer_passes
+    WHERE repo = ? AND pr_number = ? AND pass_kind IN ('first-pass', 'rereview')
+    ORDER BY pass_id DESC`).all(row.repo, row.pr_number);
+  for (const pass of passes) {
+    let metadata;
+    try { metadata = JSON.parse(pass.metadata_json || '{}'); } catch { continue; }
+    if (metadata?.reviewerSessionUuid !== row.reviewer_session_uuid) continue;
+    const builderTag = metadata.builderTag || metadata.builder_tag || metadata.subjectContext?.builderTag;
+    if (builderTag) return { ...metadata.subjectContext, builderTag };
+  }
+  return null;
+}
+
 function reviewerRunStateAdoptionCandidate(row, record) {
   const pgid = parsePositiveInteger(record?.pgid);
   if (!record || record.sessionUuid !== row.reviewer_session_uuid || pgid === null) return null;
@@ -567,8 +582,11 @@ async function reconcileReviewerSessions({
   const allRows = statements.listReviewing.all();
   // Seed legacy receipts, then renew/release independently of row selection.
   for (const row of allRows) {
-    const context = readReviewerRunRecordBestEffort(rootDir, row)?.subjectContext;
-    row.builderTag = context?.builderTag || null;
+    const runContext = readReviewerRunRecordBestEffort(rootDir, row)?.subjectContext;
+    const durableContext = runContext?.builderTag ? null : readDurableReviewerContext(db, row);
+    const context = runContext?.builderTag ? runContext
+      : { ...durableContext, ...runContext, builderTag: durableContext?.builderTag || null };
+    row.builderTag = normalizeBuilderClass(context?.builderTag);
     if (context && !reviewerRefusesBuilder(row.builderTag, reattachReviewerFamily(row.reviewer))) {
       try { persistReviewerAttributionForSession(db, row, { ...context, reviewerModel: row.reviewer }); }
       catch { log.warn('[watcher] reviewer attribution recovery unavailable; original receipt retained'); }
@@ -793,13 +811,6 @@ async function reconcileReviewerSessions({
       continue;
     }
 
-    if (reviewerRefusesBuilder(row.builderTag, reattachReviewerFamily(row.reviewer))) {
-      markStickyOrphan({ statements, row, failureAt,
-        message: 'Builder or reviewer family could not be verified as eligible; operator must verify before retrying.',
-        log, event: 'reviewer_reattach_family_refused' });
-      continue;
-    }
-
     if (row.reviewer_pgid === null || row.reviewer_pgid === undefined || row.reviewer_pgid === '') {
       const runRecord = readReviewerRunRecordBestEffort(rootDir, row);
       let processMatch = null;
@@ -859,6 +870,15 @@ async function reconcileReviewerSessions({
             `session=${row.reviewer_session_uuid} last_attempted_at=${row.last_attempted_at} ` +
             `age_ms=${claimedAgeMs} guard_ms=${guardWindowMs} run_state=${runRecord?.state || 'missing'}`
           );
+          continue;
+        }
+
+        // A known refused pair must never settle a posted review, even when
+        // the process exited before its PGID reached the durable claim.
+        if (row.builderTag && reviewerRefusesBuilder(row.builderTag, reattachReviewerFamily(row.reviewer))) {
+          markStickyOrphan({ statements, row, failureAt,
+            message: 'Builder or reviewer family could not be verified as eligible; operator must verify before retrying.',
+            log, event: 'reviewer_reattach_family_refused' });
           continue;
         }
 
@@ -975,6 +995,15 @@ async function reconcileReviewerSessions({
         }
         continue;
       }
+    }
+
+    // Process adoption and launch grace precede family classification. Unknown
+    // launch context continues through ordinary liveness/retry recovery.
+    if (row.builderTag && reviewerRefusesBuilder(row.builderTag, reattachReviewerFamily(row.reviewer))) {
+      markStickyOrphan({ statements, row, failureAt,
+        message: 'Builder or reviewer family could not be verified as eligible; operator must verify before retrying.',
+        log, event: 'reviewer_reattach_family_refused' });
+      continue;
     }
 
     if (parseTime(row.reviewer_started_at) === null) {

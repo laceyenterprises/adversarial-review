@@ -1515,6 +1515,120 @@ test('claimed rows with null pgid stay reviewing while launch guard window is ac
   assert.match(log.lines.join('\n'), /reviewer_reattach_null_pgid_guard_active/);
 });
 
+function seedDurableBuilderContext(db, builderTag, sessionUuid = 'session-70') {
+  db.prepare(`INSERT INTO reviewer_passes
+    (repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, status, metadata_json)
+    VALUES (?, ?, 2, 'codex', 'first-pass', ?, 'running', ?)`)
+    .run(REPO, PR, STARTED_AT, JSON.stringify({ builderTag, reviewerSessionUuid: sessionUuid }));
+}
+
+for (const [recordKind, durableBuilder] of [
+  ['missing', null], ['incomplete', null],
+  ['missing', 'claude-code'], ['incomplete', 'claude-code'],
+]) {
+  test(`${recordKind} launch record with durable builder ${durableBuilder} waits, then retries without family orphaning`, async () => {
+    const db = setupDb();
+    seedReviewing(db, { pgid: null, startedAt: null, reviewerTimeoutMs: 120_000 });
+    if (durableBuilder) seedDurableBuilderContext(db, durableBuilder);
+    const rootDir = roots.get(db);
+    if (recordKind === 'missing') {
+      rmSync(join(rootDir, 'data', 'reviewer-runs', 'session-70.json'));
+    } else {
+      writeReviewerRunRecord(rootDir, {
+        sessionUuid: 'session-70', state: 'launching', spawnedAt: STARTED_AT,
+      });
+    }
+    let probes = 0;
+    const options = {
+      db, octokit: makeOctokit([]), log: makeLog(),
+      findReviewerProcess: noReviewerProcessFound,
+      fetchHeadSha: async () => { probes += 1; return HEAD_SHA; },
+    };
+    await reconcileReviewerSessions({ ...options, now: new Date(Date.parse(STARTED_AT) + 30_000) });
+    assert.equal(readRow(db).review_status, 'reviewing');
+    assert.equal(readRow(db).failure_message, null);
+    assert.equal(probes, 0);
+
+    await reconcileReviewerSessions({ ...options, now: new Date(FAILURE_AT) });
+    assert.equal(readRow(db).review_status, 'pending');
+    assert.equal(readRow(db).review_attempts, 3);
+    assert.match(readRow(db).failure_message, /no live reviewer process group/);
+    assert.doesNotMatch(readRow(db).failure_message, /family/);
+  });
+}
+
+test('incomplete expired launch with exhausted recovery uses ordinary failed disposition', async () => {
+  const db = setupDb();
+  seedReviewing(db, { pgid: null, startedAt: null, infraAutoRecoverAttempts: 3 });
+  writeReviewerRunRecord(roots.get(db), { sessionUuid: 'session-70', state: 'failed', spawnedAt: STARTED_AT });
+  await reconcileReviewerSessions({
+    db, octokit: makeOctokit([]), now: new Date(FAILURE_AT), log: makeLog(),
+    findReviewerProcess: noReviewerProcessFound, fetchHeadSha: async () => HEAD_SHA,
+  });
+  assert.equal(readRow(db).review_status, 'failed');
+  assert.match(readRow(db).failure_message, /reviewer-lease-recovery-cap/);
+  assert.doesNotMatch(readRow(db).failure_message, /family/);
+});
+
+test('reattach recovers the builder from the same session durable pass before adopting a live process', async () => {
+  const db = setupDb();
+  seedReviewing(db, { pgid: null, startedAt: null });
+  seedDurableBuilderContext(db, 'claude');
+  writeReviewerRunRecord(roots.get(db), { sessionUuid: 'session-70', state: 'launching', spawnedAt: STARTED_AT });
+  let recoveredBuilder;
+  await reconcileReviewerSessions({
+    db, octokit: makeOctokit([]), now: new Date(FAILURE_AT), log: makeLog(),
+    findReviewerProcess: () => ({ found: true, pgid: 9001 }),
+    probeSession: row => { recoveredBuilder = row.builderTag; return { alive: true, matched: true }; },
+    fetchHeadSha: async () => HEAD_SHA,
+  });
+  assert.equal(recoveredBuilder, 'claude-code');
+  assert.equal(readRow(db).review_status, 'reviewing');
+  assert.equal(readRow(db).reviewer_pgid, 9001);
+});
+
+test('durable builder context from another session cannot turn an unresolved launch into a family refusal', async () => {
+  const db = setupDb();
+  seedReviewing(db, { pgid: null, startedAt: null });
+  seedDurableBuilderContext(db, 'codex', 'previous-session');
+  rmSync(join(roots.get(db), 'data', 'reviewer-runs', 'session-70.json'));
+  await reconcileReviewerSessions({
+    db, octokit: makeOctokit([]), now: new Date(FAILURE_AT), log: makeLog(),
+    findReviewerProcess: noReviewerProcessFound, fetchHeadSha: async () => HEAD_SHA,
+  });
+  assert.equal(readRow(db).review_status, 'pending');
+});
+
+test('complete same-family record remains a sticky family orphan before any posted settlement', async () => {
+  const db = setupDb();
+  seedReviewing(db, { builderClass: 'codex' });
+  let probes = 0;
+  await reconcileReviewerSessions({
+    db, octokit: makeOctokit([]), now: new Date(FAILURE_AT), log: makeLog(),
+    findPostedReview: async () => { probes += 1; throw new Error('must refuse before settlement'); },
+  });
+  assert.equal(readRow(db).review_status, 'failed-orphan');
+  assert.equal(readRow(db).failure_message,
+    'Builder or reviewer family could not be verified as eligible; operator must verify before retrying.');
+  assert.equal(probes, 0);
+});
+
+test('known refused pair with null pgid waits through launch guard before sticky refusal', async () => {
+  const db = setupDb();
+  seedReviewing(db, {
+    builderClass: 'codex', runState: 'launching', pgid: null, startedAt: null, reviewerTimeoutMs: 120_000,
+  });
+  const options = {
+    db, octokit: makeOctokit([]), log: makeLog(), findReviewerProcess: noReviewerProcessFound,
+    findPostedReview: async () => { throw new Error('refused pair must never settle a review'); },
+  };
+  await reconcileReviewerSessions({ ...options, now: new Date(Date.parse(STARTED_AT) + 30_000) });
+  assert.equal(readRow(db).review_status, 'reviewing');
+  await reconcileReviewerSessions({ ...options, now: new Date(FAILURE_AT) });
+  assert.equal(readRow(db).review_status, 'failed-orphan');
+  assert.match(readRow(db).failure_message, /family could not be verified as eligible/);
+});
+
 test('claimed rows with null pgid adopt a matching process found by session uuid', async () => {
   const db = setupDb();
   seedReviewing(db, {

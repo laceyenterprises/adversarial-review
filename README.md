@@ -3691,6 +3691,15 @@ Same-family exclusion precedes account admission, includes the explicit legacy
 aliases, and refuses recovery of a recorded same-family pair. All seven title
 prefixes and the existing cross-family routes stay the same.
 
+Restart recovery resolves missing builder context from the durable reviewer pass
+for the claim's exact session UUID. Missing or unresolved launch context does not
+prove family ineligibility: null-PGID claims first use the existing launch guard
+and process adoption. After the guard, confirmed dead launches use ordinary
+bounded recovery; known refused pairs still stop before posted-review settlement.
+After deployment, SRE verifies the watcher PID start time and observes 24 hours
+with no new family-message `failed-orphan` rows whose run record shows an eligible
+builder/reviewer pair. This observation requires organic runtime evidence.
+
 Captured-body retries retain their original account attribution. Backfill shares
 App/PAT matching with capture, pins known heads, and preserves old builder-tag
 interpretation when no native reviewer model was recorded. See the

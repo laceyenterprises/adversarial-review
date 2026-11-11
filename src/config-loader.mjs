@@ -2504,7 +2504,7 @@ function schemaV1() {
           overload_deferral: {
             __type: TYPE_DICT, __strict: true,
             __keys: {
-              minimum_multiplier: { __type: TYPE_FLOAT, __default: 2, __min: 2, __max: 20, __enforce_max: true },
+              minimum_multiplier: { __type: TYPE_FLOAT, __default: 2, __min: 2, __max: 20, __enforceMax: true },
             },
           },
           session_resume: {

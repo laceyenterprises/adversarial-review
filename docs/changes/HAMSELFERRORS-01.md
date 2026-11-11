@@ -21,6 +21,10 @@ files, runs repository-owned runners, and claims no local pass when setup cannot
 produce a verdict; exact-head required GitHub checks remain mandatory. Retry and
 dispatch records gain optional bounded self-error refund receipts, documented in
 the data model and catalog fragment. No new CI check, label or live action.
+The documentation-only SRE plan lives at
+`modules/worker-pool/post-merge-actions/HAMSELFERRORS-01.yaml`, the publisher's
+required declaration namespace; it contains operator steps and no automatic
+actions.
 
 ## Verification
 

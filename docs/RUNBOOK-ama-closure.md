@@ -17,6 +17,17 @@ reclaim dead local holders through the existing fenced stale-reclaim writer. Unk
 After confirmed merge, settle both leases and the closing audit before scratch
 cleanup. An ended controller's confirmed-merged closeout is local recovery,
 without another PR-bound dispatch or operator decision.
+Each new closer intent uses a distinct worker ID containing PR, head and a
+random attempt suffix. Terminal launch/retry-chain evidence releases closure
+ownership independently of retained-directory teardown. Cleanup retains its
+existing authority; a retained directory cannot block the next closer or queued
+re-review. Live, parked, unreadable and replacement launch ownership still holds.
+An existing head-matched exact-head review request reaches ordinary review
+admission ahead of a terminal closer retry; safety refusals and retry ceilings
+retain precedence.
+After deployment, verify watcher/follow-up PID start times and observe the next
+natural terminal-failed closer getting a successor or queued re-review within
+one pass, with no retry directory collision.
 Ordinary terminal success retains the worker's successful audit reason; absent
 a success audit, merged evidence records `terminal-merge-reconciliation`.
 `confirmed-merged-closeout` is reserved for the parked-controller merge discovery.

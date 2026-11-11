@@ -3243,6 +3243,7 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
   readWorkerDispatchFilesImpl = readWorkerDispatchFiles,
   readWorkerObservationImpl = readWorkerObservation,
   processKillImpl = process.kill,
+  liveness: knownLiveness = null,
 }) {
   if (!isHammerWorkerClass(workerClass)) {
     return { attempted: false, reason: 'not-hammer-worker-class' };
@@ -3277,7 +3278,7 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
   // SIGKILL mid-planning is the churn this whole fix targets. Defer to the live
   // closer and let the caller skip re-dispatch; the next poll reclaims it only
   // once it has actually terminated (or gone phantom).
-  const liveness = await resolveSelfOwnedHammerCloserRunLiveness({
+  const liveness = knownLiveness || await resolveSelfOwnedHammerCloserRunLiveness({
     prNumber,
     hqRoot: root,
     workerId,
@@ -7857,21 +7858,37 @@ async function maybeDispatchAmaCloserAttempt({
   // Re-read under the PR lock before a new intent overwrites the settled proof.
   // A refusal leaves that proof available for the next ordinary admission.
   const noLaunchRecord = readAmaCloserDispatchRecord(rootDir, targetDispatchIdentity);
-  if (terminalLeaseReclaimed || custodyLaunchRequestId || provenNoLaunchCloserRecord(noLaunchRecord, { repo, prNumber,
-    headSha: targetRemediationSha, workerId })) {
+  if (workerId) {
     try {
-      closerReclaim = await reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
-        repo, prNumber, headSha: targetRemediationSha, noLaunchRecord,
-        workerClass, workerId, hqPath, hqRoot, execFileImpl, logger, env,
-        readWorkerDispatchFilesImpl, readWorkerObservationImpl, readLatestWorkerRunStatusImpl, processKillImpl,
-        launchRequestId: custodyLaunchRequestId, readLaunchRequestStatusImpl,
-        launchReadOptions: { rootDir, signal,
-          ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath },
-        recordOrphanRefusalImpl: refusal => updateDispatchRecord(rootDir, targetDispatchIdentity,
-          current => ({ ...current, preReceiptReconciliation: {
-            ...current.preReceiptReconciliation, orphanReclaimRefusal: refusal,
-          } })),
-      });
+      // Closure custody and directory retention have independent lifetimes.
+      // A terminal launch (including its retry chain) needs no old-directory
+      // teardown before a fresh attempt can acquire its own worker identity.
+      const predecessorLaunch = custodyLaunchRequestId
+        || (terminalLeaseReclaimed ? predecessorLease?.lrqId : null);
+      const predecessor = (predecessorLaunch
+        || existsSync(selfOwnedHammerCloserWorktreePath(prNumber, hqRoot, workerId)))
+        ? await resolveSelfOwnedHammerCloserRunLiveness({
+          prNumber, hqRoot, workerId, launchRequestId: predecessorLaunch,
+          readLaunchRequestStatusImpl, env, readWorkerDispatchFilesImpl,
+          readWorkerObservationImpl, readLatestWorkerRunStatusImpl, processKillImpl,
+          launchReadOptions: { rootDir, signal,
+            ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath },
+        }) : null;
+      closerReclaim = predecessor?.live === false && !predecessor.unknown
+        ? { attempted: false, reason: 'terminal-predecessor-retention-independent' }
+        : await reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+          liveness: predecessor,
+          repo, prNumber, headSha: targetRemediationSha, noLaunchRecord,
+          workerClass, workerId, hqPath, hqRoot, execFileImpl, logger, env,
+          readWorkerDispatchFilesImpl, readWorkerObservationImpl, readLatestWorkerRunStatusImpl, processKillImpl,
+          launchRequestId: custodyLaunchRequestId, readLaunchRequestStatusImpl,
+          launchReadOptions: { rootDir, signal,
+            ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath },
+          recordOrphanRefusalImpl: refusal => updateDispatchRecord(rootDir, targetDispatchIdentity,
+            current => ({ ...current, preReceiptReconciliation: {
+              ...current.preReceiptReconciliation, orphanReclaimRefusal: refusal,
+            } })),
+        });
     } catch (error) {
       if (!restorePredecessorCloserLease()) updateAmaCloserLease({ rootDir, ...leaseIdentity, status: 'terminal',
         expectedLease: leaseResult.lease,
@@ -7892,9 +7909,9 @@ async function maybeDispatchAmaCloserAttempt({
         reason: 'hammer-closer-in-flight', workerStatus: closerReclaim.workerStatus || null });
     }
   }
-  if (terminalLeaseReclaimed && workerId) {
-    // Keep predecessor custody checks intact before allocating a new directory.
-    // A reclaimed attempt never adopts the old (possibly dirty) worktree.
+  if (workerId) {
+    // Allocate for EVERY new intent, including retries without a terminal lease.
+    // Keep predecessor custody checks above; never reuse its retained directory.
     workerId = `${hammerCloserWorkerId(prNumber, targetRemediationSha)}-${dispatchIdempotencyKey.slice('ama-closer-'.length).replaceAll('-', '').slice(0, 12)}`;
   }
   try {

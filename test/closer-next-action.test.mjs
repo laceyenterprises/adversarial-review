@@ -47,6 +47,49 @@ function base(observations = {}) {
 const pair = snapshot => Object.freeze({ snapshot, decision: nextAction(snapshot) });
 const tuple = decision => [decision.action, decision.actor, decision.reason];
 
+test('CLOSERWORKERID-01: queued exact-head re-review proceeds past a failed closer with a retained directory', async t => {
+  const rootDir = root(t);
+  const workerId = `hammer-ama-pr-5-${HEAD.slice(0, 12)}`;
+  const retained = join(rootDir, 'workers', workerId, 'agent-os');
+  mkdirSync(retained, { recursive: true });
+  const lease = { headSha: HEAD, status: 'terminal',
+    terminalOutcome: 'failed-without-merge', lrqId: 'synthetic-ended', workerId };
+  const snapshot = base({
+    reviews: { ...clean, headSha: OLD },
+    closerAuthoredStale: { decision: 'rereview-exact-head', reviewedHead: OLD, currentHead: HEAD },
+    leases: { closer: lease },
+  });
+  const shared = await resolveClosureNextAction({
+    input: { reviewState: { ...clean, headSha: OLD }, currentHead: HEAD, lease,
+      roundsLeft: false, checks: 'SUCCESS',
+      closerAuthoredStale: { decision: 'rereview-exact-head', reviewedHead: OLD, currentHead: HEAD } },
+    passSnapshot: snapshot, subjectKey: 'subject-05#5', observedAt: AT,
+    candidate: { headSha: HEAD, prState: 'OPEN', mergeable: 'MERGEABLE' },
+    autonomousMergeExecutionEnabled: true,
+    readLaunches: async () => launchSource({ state: 'complete',
+      value: { launchRequestId: 'synthetic-ended', terminal: true,
+        launch: { status: 'failed' }, retryChain: [] } }, lease, {}),
+  });
+  const decision = shared.decision;
+  assert.equal(decision.action, 'review');
+  assert.equal(decision.actor, 'reviewer');
+  assert.equal(decision.queue.intent, 'dispatch');
+  assert.equal(fs.existsSync(retained), true, 'review admission does not require directory teardown');
+  const wrongHead = reviseClosureNextAction(shared, {
+    progress: { closerAuthoredStale: { decision: 'rereview-exact-head',
+      reviewedHead: OLD, currentHead: OTHER } },
+  });
+  assert.equal(wrongHead.decision.reason, 'retry-no-merge');
+  const capped = reviseClosureNextAction(shared, {
+    policy: { autonomousMergeExecutionEnabled: true, hammerCap: { headSha: HEAD, retryExhausted: true } },
+  });
+  assert.equal(capped.decision.reason, 'retry-exhausted');
+  const live = reviseClosureNextAction(shared, {
+    launches: { closer: { headSha: HEAD, launchRequestId: 'synthetic-live', status: 'running' } },
+  });
+  assert.equal(live.decision.reason, 'live-owner');
+});
+
 test('RECOVERYSTALL-01: closure-wait migrates a paged receipt, serializes reminders and refunds failed delivery', async t => {
   const rootDir = root(t), dir = join(rootDir, 'data', 'ama-closure-waits');
   mkdirSync(dir, { recursive: true });

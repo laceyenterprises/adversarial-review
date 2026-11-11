@@ -524,6 +524,11 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
   const terminalReview = progress?.terminalReview;
   const terminalHead = terminalReview?.validated === true && sameHead(terminalReview.headSha, head)
     && sameHead(terminalReview.reviewedHeadSha, review.reviewedHead) && !handedToReview;
+  const closerCarry = plain(progress?.closerAuthoredStale);
+  const closerPair = Boolean(closerCarry && sameHead(closerCarry.currentHead, head)
+    && sameHead(closerCarry.reviewedHead, review.reviewedHead));
+  const exactHeadReviewRequested = closerPair && closerCarry.decision === 'rereview-exact-head'
+    && !terminalHead;
   // Certified terminal evidence proceeds through the CI and review gates below.
   // R08: terminal no-merge with retry remaining (exit zero is not merged).
   const approvedHead = review.known && review.operatorOverride && review.attestation !== 'invalid'
@@ -538,8 +543,10 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
   // launch return ownership to hammer even when historical validation exists.
   // Unreadable descendants, live owners, holds and caps already won above.
   const terminalRecoveryExpired = facts.recoveryExpired && leaseForHead && lease.status === 'terminal';
+  // An ended launch cannot displace its exact-head review handoff with another
+  // retry. The ordinary review row below still applies admission and ceilings.
   if (!daemonAfterSupersededStop && launchForHead && launch.owned === false && launch.outcome === 'no-merge' && launch.retryable === true
-    && (!terminalHead || terminalRecoveryExpired)) {
+    && (!terminalHead || terminalRecoveryExpired) && !exactHeadReviewRequested) {
     return stopped({ row: 'R08-retry', action: 'hammer', actor: 'hammer', reason: 'retry-no-merge', deadlineKind: 'admission',
       queue: 'dispatch', attempt: launch.attempt !== null ? launch.attempt + 1 : null }, launch.terminalMs);
   }
@@ -613,9 +620,6 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
   }
   const proof = plain(progress?.contentProof);
   // HAMATTEST-02 closer carry is accepted only for this exact head pair.
-  const closerCarry = plain(progress?.closerAuthoredStale);
-  const closerPair = Boolean(closerCarry && sameHead(closerCarry.currentHead, head)
-    && sameHead(closerCarry.reviewedHead, review.reviewedHead));
   const carryable = review.currentHeadVerdictAbsent && Boolean(review.verdict);
   const semanticCarry = carryable && Boolean(proof && SEMANTIC_PROOF_KINDS.has(lower(proof.kind))
     && proof.semantic === true && sameHead(proof.fromHead, review.reviewedHead) && sameHead(proof.toHead, head));
@@ -634,7 +638,7 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
     return exactHeadReview('attestation-invalid');
   }
   // HAMATTEST-03 recommendations remain bounded by reviewer admission.
-  if (closerPair && closerCarry.decision === 'rereview-exact-head' && !terminalHead) {
+  if (exactHeadReviewRequested) {
     return exactHeadReview('exact-head-review');
   }
   // A suppressed hammer head retains its closer even when an automatic

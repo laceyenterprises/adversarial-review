@@ -1557,6 +1557,14 @@ records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
 
+Closer intents use distinct per-attempt worker IDs. A terminal launch and its
+complete terminal retry chain release closure ownership independently of retained
+directory teardown; live, parked, unknown and replacement owners still hold.
+After deployment and the registered watcher/follow-up restart, SRE verifies PID
+start times and a natural failed closer getting its next closer or queued
+re-review within one pass without a retry-directory collision. Existing lifecycle
+states and automated smoke commands are unchanged.
+
 Consecutive nonblocking-cap refusals remain `stopped/max-rounds-reached` and
 carry an actionable `finalCapResult` for operator canonical rescue. The result
 records the nullable job revision at stop time and finding accounting and

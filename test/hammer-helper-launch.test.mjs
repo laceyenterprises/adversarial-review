@@ -14,8 +14,9 @@ test('an unavailable audit dependency preserves the wrapped failure status and r
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   mkdirSync(join(dir, 'bin'));
   mkdirSync(join(dir, 'src/ama'), { recursive: true });
-  writeFileSync(join(dir, 'src/ama/hammer-stop-origin.mjs'),
-    readFileSync(join(root, 'src/ama/hammer-stop-origin.mjs')));
+  for (const name of ['hammer-stop-origin.mjs', 'checkout-holder.mjs', 'branch-holder-paths.mjs']) {
+    writeFileSync(join(dir, 'src/ama', name), readFileSync(join(root, 'src/ama', name)));
+  }
   const helper = join(dir, 'bin/hammer-helper-step.mjs');
   writeFileSync(helper, readFileSync(join(root, 'bin/hammer-helper-step.mjs')));
   writeFileSync(join(dir, 'bin/load-aware-timeout.mjs'), "process.stdout.write('1');\n");

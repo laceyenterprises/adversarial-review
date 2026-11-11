@@ -1019,10 +1019,10 @@ resolution just described **before** invoking the resolver; then resume at the
 resolver line. Do not execute past unresolved hand-written conflicts.
 
 ```bash
-# BASE_BRANCH is the live value captured by the lease-state block above.
+# BASE_BRANCH was read live.
 HEAD_BRANCH=$(ham_pr --json headRefName --jq '.headRefName')
 ham_bounded_git_sync "$BASE_BRANCH" "$HEAD_BRANCH"
-git checkout "$HEAD_BRANCH"
+ham_step mutation:report checkout 90 540 git checkout "$HEAD_BRANCH"
 # HAMEMPTYPRIMARY-01: capture the fetched source before replay. For a
 # conflict-only repair of the reviewed head, retain author messages/identity;
 # never squash or amend the author change into a HAM-classified commit.

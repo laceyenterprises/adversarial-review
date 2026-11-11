@@ -53,7 +53,7 @@ function fixture(t) {
     AGENT_OS_HQ_ROOT: dir, AGENT_OS_CONFIG_PATH: join(dir, 'root-config.yaml'),
     HAM_REPO: 'fixture/repo', HAM_PR_NUMBER: '42', HAM_RUN_DIR: run,
     HQ_LAUNCH_REQUEST_ID: 'lrq_contract', AGENT_OS_WORKER_LRQ_ID: 'lrq_contract',
-    HQ_WORKER_RUN_ID: 'wrun_contract', BASE_BRANCH: 'main',
+    HQ_WORKER_RUN_ID: 'wrun_contract', BASE_BRANCH: 'main', HEAD_BRANCH: 'author',
     HAM_PROCEDURE_STEP: 'synthetic-contract', HAM_CONFLICT_PROOF_REASON: 'conflict-primary-unproven',
     GHO_RATE_LIMIT_SHARED_STATE_PATH: join(run, 'budget.json'),
     // Guarded CLIs compare import.meta.url with argv[1]. Keep their fixture

@@ -74,6 +74,31 @@ test('REMLABEL-01: a real remediation preserving a changed file publishes normal
   assert.equal(f.git('ls-remote', 'origin', 'refs/heads/topic').split('\t')[0], result.headSha);
 });
 
+test('REMEDIATEEXEC-01: fetching the base does not require an unavailable submodule', async t => {
+  const f = fixture(t);
+  f.git('checkout', 'main');
+  writeFileSync(join(f.work, '.gitmodules'),
+    '[submodule "private-overlay"]\n\tpath = private-overlay\n\turl = ./unavailable-overlay.git\n');
+  f.git('add', '.gitmodules');
+  f.git('update-index', '--add', '--cacheinfo', `160000,${f.previousHead},private-overlay`);
+  f.git('commit', '-m', 'Advance base with optional overlay');
+  f.git('-c', 'push.recurseSubmodules=no', 'push', 'origin', 'main');
+  f.git('checkout', 'topic');
+  f.git('config', 'fetch.recurseSubmodules', 'true');
+  writeFileSync(join(f.work, 'feature.txt'), 'corrected feature\n');
+  f.git('add', 'feature.txt'); f.git('commit', '-m', 'Fix sample feature');
+  let fetched = false;
+  const result = await publishRemediation({ ...f.publish, execFileImpl: async (cmd, args, opts) => {
+    if (args.includes('fetch')) {
+      fetched = true;
+      assert.ok(args.includes('--no-recurse-submodules'));
+    }
+    return execAsync(cmd, args, opts);
+  } });
+  assert.equal(fetched, true);
+  assert.equal(result.headSha, f.git('rev-parse', 'HEAD'));
+});
+
 test('REMLABEL-01: a competing remote head is preserved by the publisher lease', async t => {
   const f = fixture(t);
   writeFileSync(join(f.work, 'feature.txt'), 'competing feature\n');

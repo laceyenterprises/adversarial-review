@@ -1,3 +1,26 @@
+## Remediation ownership
+
+An ordinary remediation round that exits unpublished, stops without progress,
+fails execution or times out retains an executor. When shared next-action
+selection still names `remediate`, closure reconciliation requeues the ended
+follow-up under its queue lock, once per head and spent round, with the existing
+round ceiling and retry backoff. A missing initial job can be created from the
+exact-head delivered review. Active queue ownership and closer leases prevent
+duplicates; operator stops and safety refusals are not automatically retried.
+
+For `committed-unpublished`, recovery first verifies the retained checkout,
+worker commit trailers and preservation of reviewed patches, then attempts the
+existing guarded publisher with the exact old remote-head lease. Successful
+publication must pass structural live-head proof before recovery clears the
+debt and uses the normal completion/re-review flow without another worker.
+Final-round completion still requires its validated reply. Otherwise the next
+bounded round retains the unpublished-work evidence.
+The publisher fetches only the superproject base, without recursive submodule
+fetches. A spent terminal attempt counts even when it never published: the
+shared watcher decision, hammer wake and read-only rescue budget projection
+then name the hammer for findings, including blocking findings. The hammer
+must still remediate and prove every merge predicate.
+
 ## Final findings remediation through the builder (LANEAUTO-01)
 
 At the final review-round cap, a latest exact-head Comment-only review with

@@ -24,10 +24,10 @@ import { maybeDispatchAmaClosureFor, resolveMergeAgentCoexistenceForWatcher } fr
 import { reviewCeilingOwner } from '../src/review-ceiling-owner.mjs';
 import { observeClosureWait, CLOSURE_WAIT_BOUND_MS, CLOSURE_WAIT_RETRY_MS } from '../src/ama/closure-wait.mjs';
 import { followUpJobFilePrefix } from '../src/follow-up-job-names.mjs';
-import { createFollowUpJob, getFollowUpJobDir, markFollowUpJobStopped } from '../src/follow-up-jobs.mjs';
+import { createFollowUpJob, getFollowUpJobDir, markFollowUpJobStopped, FOLLOW_UP_JOB_SCHEMA_VERSION } from '../src/follow-up-jobs.mjs';
 import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import { evaluateHammerStopHold } from '../src/ama/hammer-stop-hold.mjs';
-import { maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
+import { maybeDispatchAmaCloser, terminalHammerReviewCycleExhausted } from '../src/ama/dispatch-closer.mjs';
 import { recordNoProgressLaneRun, readNoProgressLane, evaluateNoProgressLane } from '../src/watcher-no-progress-lane.mjs';
 
 const HEAD = 'a'.repeat(40), OLD = 'b'.repeat(40), OTHER = 'c'.repeat(40);
@@ -426,6 +426,44 @@ function closureFixture(t, overrides = {}) {
       return { dispatched: true, reason: 'dispatched', launchRequestId: 'launch-05' }; }, ...overrides };
   return { args, effects, waits };
 }
+
+for (const workerStarted of [false, true]) for (const maxRounds of [1, 2]) test(`REMEDIATEEXEC-01: terminal blocking round uses its ${maxRounds}-round ceiling through dispatch, workerStarted=${workerStarted}`, async t => {
+  const body = '## Blocking issues\n- **Incorrect result**\n  - **Problem:** incorrect result.\n\n## Non-blocking issues\n- None.\n\n## Verdict\nRequest changes';
+  let dispatched;
+  const f = closureFixture(t, { maybeDispatchAmaCloserImpl: async args => {
+    dispatched = args;
+    return { dispatched: true, launchRequestId: 'synthetic-closer' };
+  } });
+  f.args.dispatchJob = {};
+  f.args.reviewStateRow.review_body = body;
+  f.args.fetchLatestHeadReviewBodiesImpl = async () => [body];
+  const dir = getFollowUpJobDir(f.args.rootDir, 'stopped');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${followUpJobFilePrefix(identity.repo, 5)}ended.json`), JSON.stringify({
+    schemaVersion: FOLLOW_UP_JOB_SCHEMA_VERSION, repo: identity.repo, prNumber: 5, revisionRef: HEAD,
+    jobId: `${followUpJobFilePrefix(identity.repo, 5)}ended`, status: 'stopped',
+    createdAt: AT, stoppedAt: AT, reviewBody: body, branch: 'topic', baseBranch: 'main',
+    remediationWorker: workerStarted ? { state: 'completed', spawnedAt: AT } : { state: 'never-spawned' },
+    remediationPlan: { currentRound: 1, maxRounds, rounds: [{ round: 1, state: 'stopped' }],
+      stop: { code: 'committed-unpublished' } },
+  }));
+  const result = await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(result.nextAction.action, maxRounds === 1 ? 'hammer' : 'remediate', JSON.stringify(result));
+  if (maxRounds === 1) {
+    assert.equal(result.dispatched, true);
+    assert.equal(dispatched.reviewState.reviewCycleExhausted, true);
+    assert.equal(terminalHammerReviewCycleExhausted(dispatched.reviewState), true);
+    assert.equal(terminalHammerReviewCycleExhausted({ ...dispatched.reviewState, remediationPending: true }), false);
+    if (!workerStarted) {
+      assert.equal(dispatched.reviewState.completedRemediationRounds, 0);
+      assert.equal(terminalHammerReviewCycleExhausted({ ...dispatched.reviewState,
+        terminalRemediationBudget: { ...dispatched.reviewState.terminalRemediationBudget, headSha: OTHER } }), false);
+    }
+  } else {
+    assert.equal(dispatched, undefined);
+    assert.equal(result.remediationJobRecovery?.recreated, true, JSON.stringify(result));
+  }
+});
 
 test('HAMCONFLICTOWNER-01: an unproven stop hands off before closer caps and retains one queue owner', async t => {
   const f = closureFixture(t);
@@ -988,11 +1026,12 @@ for (const jobStatus of ['pending', 'in_progress']) {
 }
 
 for (const jobStatus of ['failed', 'stopped']) {
-  test(`a new same-head review waits after an older ${jobStatus} job`, async t => {
+  test(`a new same-head review ${jobStatus === 'stopped' ? 'recovers an ended' : 'waits after an unclassified'} ${jobStatus} job`, async t => {
     const f = redCiFixture(t, { jobStatus, jobCreatedAt: '2025-12-31T23:59:00.000Z' });
     const result = await maybeDispatchAmaClosureFor(f.args);
     assert.equal(result.nextAction.action, 'remediate', JSON.stringify(result.nextAction));
-    assert.equal(result.reason, 'remediation-job-missing');
+    assert.equal(result.reason, jobStatus === 'stopped' ? 'active-remediation-job' : 'remediation-job-missing');
+    assert.equal(result.remediationJobRecovery?.recreated, jobStatus === 'stopped');
     assert.equal(result.dispatched, false);
     assert.ok(!f.effects.some(([kind]) => kind === 'closer'));
   });

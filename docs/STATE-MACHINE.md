@@ -1141,8 +1141,21 @@ the queue lock, bound to its source digest and live head. Validated final-round
 completion moves to `completed` with hammer ownership; other replies requeue
 only within the remaining round budget. Recovery clears publication debt and
 retains the previous stop as audit evidence; it never refunds a spent round.
-Unknown, missing or partial publication stays stopped. Exhausted ordinary
+Unknown, missing or partial publication retains its debt. Exhausted ordinary
 recovery escalates explicitly without another round.
+REMEDIATEEXEC-01: closure reconciliation can publish a verifiable retained
+checkout through the guarded publisher before spending another round.
+An unpublished or execution-failed terminal round with findings transitions
+to `pending` once per head/round while ordinary budget remains; existing
+backoff and spent-round accounting survive. Publication refusal preserves the
+retained work. Missing initial follow-up work is created only from exact-head
+delivered review evidence. Live queue owners and closer leases fence recovery.
+At the terminal job's round ceiling, shared next-action selection and the
+read-only rescue budget projection select the hammer even with blocking
+findings. Exact-head terminal budget evidence also arms repair after failed
+dispatches without counting them as completed worker rounds. This grants
+repair ownership, never merge permission. Operator holds,
+safety refusals, lifecycle stops, strictness and merge predicates are unchanged.
 Concurrent admission observes the same job's in-place `max-rounds-reached`
 reclassification at the proven head and reports budget exhaustion, preserving
 operator escalation. This diagnostic adds no state or transition; the reviewed

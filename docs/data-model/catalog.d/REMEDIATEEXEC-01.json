@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "follow-up-jobs",
+      "title": "Follow-Up Remediation Jobs",
+      "path": "docs/data-model/follow-up-jobs.md",
+      "store": "data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json",
+      "schemaSurface": "src/follow-up-jobs.mjs",
+      "relatedSchemaSurfaces": [
+        "src/remediation-job-missing-recovery.mjs",
+        "src/remediation-ended-round-recovery.mjs",
+        "src/remediation-round-recovery.mjs"
+      ],
+      "owner": "follow-up remediation queue",
+      "compatibility": "Optional remediationJobMissingRecovery.round scopes automatic ended-round recovery to head and spent round. Existing records remain readable; currentRound, maxRounds, backoff and publication proof remain authoritative. No new lifecycle status."
+    }
+  ]
+}

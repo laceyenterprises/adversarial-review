@@ -1,4 +1,5 @@
 {
+  "endedRemediationRecovery": "REMEDIATEEXEC-01: ended unpublished/stopped/failed execution rounds return to pending once per head/spent round while ordinary budget remains, preserving currentRound, maxRounds and existing backoff without operator override. Verifiable retained work goes through the guarded publisher first; structural proof alone clears publication debt. Active queued/running owners and closer leases prevent duplicates. A spent terminal attempt selects hammer findings ownership through the shared decision and rescue budget projection, even without publication. No new lifecycle state or merge authority.",
   "finalizationShadow": "MLR-07: live sourced snapshots and legacy outcomes append idempotently to the existing app-owned finalization ledger/shadow store. Fold/evidence errors record escalate; live disagreements stay open for bidirectional triage. No legacy transition or execution policy changes. MLR-04 readiness counts at least 50 distinct organic terminal subjects, head-move and exhaustion landing examples, with every retained divergence dispositioned and no unresolved fold error. Main Loop 6 owns promotion.",
   "nonBlockingFinalCapTerminal": "FINALCAPHANDOFF-01: consecutive nonblocking cap refusal remains stopped/max-rounds-reached without charging a round. The terminal move persists finalCapResult naming operator canonical-rescue, nullable job revisionRef at stop time (not verified review provenance), count/state accounting and successorDispatched=false; claim and consume return the freshly computed result. Requeue, infrastructure release, admission and later stops clear predecessor results; ordinary and single-review claim caps write null. Consume emits one structured operator-action warning for the refused claim. Settled-clean, override, remaining budget and live closer paths retain precedence. This is actionable terminal evidence, not live custody or merge authority; canonical rescue revalidates the current head and owners. No automatic re-review or new lifecycle value.",
   "remediationBuilderAuthorship": "Noncanonical tags persist normalized values and recovery evidence. Unavailable PR or transient opener reads use the existing pre-spawn pending requeue with a 60-second retry and round refund. Missing or unrecognized code-PR builder tags recover from agreeing recorded title-prefix, stable pr_opened identity and explicit body metadata before dispatch. Missing/conflicting authorship or own-family recovered routing stops with an operator owner and next action; explicit retrigger may resume after evidence/route correction. Existing states, claim allocation and publication budgets remain unchanged.",
@@ -184,7 +185,7 @@
       "returned-to-closer",
       "closed-observed"
     ],
-    "transitions": "Disjoint-file isolated Git replay persists exact old/candidate/base, strict ordered binary proof and immutable source reference before owner-fenced expected-old-head publication. Empty/nonlinear/unprovable changes return to closer. Explicit rights/holds are read again under issuance lock; denied rights park with named notice intent. Ambiguous operations retain intent until proven stop/drain and reconciliation. Restart reuses proven candidate; live candidate resumes checks without repush, proven not-applied old head permits retry, prior successful result with old head parks, foreign head returns. Base advances retain derivation chain and original patience; no-op retains SHA explicitly. Authoritative terminal state outranks unreadable receipts/workspaces and never returns a closed PR to a closer. Original signatures remain at source heads. The existing execution brake intercepts preparation and last-moment push. Network Git requires an injected entitled runner with no ambient fallback. Admission recomputes the complete contiguous proof chain plus immutable receipt digest before treating either candidate or expected old head as derived. Transient proof execution failures park; computed mismatches return; expired patience parks before verification. Already-published progress rechecks holds and permissions. Deterministic pre-invocation refusals settle not-applied. Readmitted retained candidates resume ready \u2192 rebasing \u2192 publishing without recreation. Explicit drained Git success settles with Git provenance despite a lagging API; explicit single-ref porcelain refusals settle not-applied. Failed prepares remove unreturned workspaces; successful workspace retention and repeated full proof/snapshot payloads remain follow-up before production routing. HOLDERPROOF-01: successful leased queue, remediation and auth-recovery Git rewrites record compatible branch receipts after publication. Receipt storage errors preserve the published outcome and expose exact tips for operator recovery; no lifecycle state or merge authority change.",
+    "transitions": "Disjoint-file isolated Git replay persists exact old/candidate/base, strict ordered binary proof and immutable source reference before owner-fenced expected-old-head publication. Empty/nonlinear/unprovable changes return to closer. Explicit rights/holds are read again under issuance lock; denied rights park with named notice intent. Ambiguous operations retain intent until proven stop/drain and reconciliation. Restart reuses proven candidate; live candidate resumes checks without repush, proven not-applied old head permits retry, prior successful result with old head parks, foreign head returns. Base advances retain derivation chain and original patience; no-op retains SHA explicitly. Authoritative terminal state outranks unreadable receipts/workspaces and never returns a closed PR to a closer. Original signatures remain at source heads. The existing execution brake intercepts preparation and last-moment push. Network Git requires an injected entitled runner with no ambient fallback. Admission recomputes the complete contiguous proof chain plus immutable receipt digest before treating either candidate or expected old head as derived. Transient proof execution failures park; computed mismatches return; expired patience parks before verification. Already-published progress rechecks holds and permissions. Deterministic pre-invocation refusals settle not-applied. Readmitted retained candidates resume ready → rebasing → publishing without recreation. Explicit drained Git success settles with Git provenance despite a lagging API; explicit single-ref porcelain refusals settle not-applied. Failed prepares remove unreturned workspaces; successful workspace retention and repeated full proof/snapshot payloads remain follow-up before production routing. HOLDERPROOF-01: successful leased queue, remediation and auth-recovery Git rewrites record compatible branch receipts after publication. Receipt storage errors preserve the published outcome and expose exact tips for operator recovery; no lifecycle state or merge authority change.",
     "codeSources": [
       "src/finalization/queue-rebase.mjs",
       "src/finalization/queue-rebase-proof.mjs",
@@ -855,7 +856,11 @@
         "src/follow-up-remediation.mjs",
         "src/reviewer-ci-admission.mjs",
         "src/remediation-publication-recovery.mjs",
-        "src/remediation-claimed-requeue.mjs"
+        "src/remediation-claimed-requeue.mjs",
+        "src/remediation-job-missing-recovery.mjs",
+        "src/remediation-ended-round-recovery.mjs",
+        "src/remediation-round-recovery.mjs",
+        "src/remediation-published-head.mjs"
       ],
       "states": [
         {
@@ -975,14 +980,14 @@
           "id": "follow-up-job.12",
           "from": "failed",
           "to": "pending",
-          "trigger": "explicit retrigger or all-infrastructure CI stop with successful current-head replacement checks",
+          "trigger": "explicit retrigger, all-infrastructure CI stop with successful current-head replacement checks, or ended execution failure with remaining ordinary round budget and no live owner; automatic recovery preserves spent rounds and backoff",
           "codeSource": "src/follow-up-jobs.mjs"
         },
         {
           "id": "follow-up-job.13",
           "from": "stopped",
           "to": "pending",
-          "trigger": "allowlisted explicit retrigger or live satisfied required-label event with unchanged round cap; branch-unresolved resets lookup attempts; all-infrastructure CI stops except max-rounds recover on successful current-head replacements; structurally proven committed-unpublished recovery uses only remaining rounds; STRICTSETTLED-01: an AMA remediate decision with no live job requeues a settled-clean release once per PR head while merge authority's strict predicate still owes remediation",
+          "trigger": "allowlisted explicit retrigger or live satisfied required-label event with unchanged round cap; branch-unresolved resets lookup attempts; all-infrastructure CI stops except max-rounds recover on successful current-head replacements; ended unpublished/no-progress/execution stops automatically requeue once per head/spent round within ordinary budget after retained publication attempt; STRICTSETTLED-01 settled-clean release recovery remains once per PR head",
           "codeSource": "src/follow-up-jobs.mjs"
         },
         {
@@ -1031,7 +1036,7 @@
           "id": "follow-up-job.20",
           "from": "stopped",
           "to": "completed",
-          "trigger": "committed-unpublished live publication proven and strict final-round reply validated; preserve spent rounds and restore hammer ownership",
+          "trigger": "committed-unpublished live publication proven: ordinary completion/re-review without another worker; strict final-round reply validation restores hammer ownership; preserve spent rounds",
           "codeSource": "src/follow-up-jobs.mjs"
         },
         {
@@ -1846,10 +1851,10 @@
     "src/adapters/reviewer-runtime/agent-runtime/index.mjs": "37a25e62f889f9d87e83a20495a9a3baef75f53db163ef6ed7638f7d6ac09f82",
     "src/adapters/reviewer-runtime/cli-direct/index.mjs": "2879d7385b5ce5388e08e759077e442cfc4f4ba6fe5817b2b03cc40dfdb50eb9",
     "src/adapters/reviewer-runtime/run-state.mjs": "a9ceff855698891e3e7c37d6b552d06462a70e9972f7a23c50811a254a77965d",
-    "src/ama-closure-orchestration.mjs": "7338dc49b9b00c1ed13e5bfad35e7311e7e8ed0b083e9e12ea3913449bffde17",
+    "src/ama-closure-orchestration.mjs": "50eb3f4fef5858bbe3623b21f66b958bb01b534aa8f005ed43646980206e057f",
     "src/ama/closer-lease.mjs": "c2aa021100d2cc5fc0ba2de3ca035dab42d46d416039853d0df4a69a8b2c3900",
     "src/ama/closure-owner.mjs": "2448cded95d11c7a03d85758d16bf1719a433daef79e8d7454c1696c6bfc079e",
-    "src/ama/dispatch-closer.mjs": "dac5f583bf2a5e5b61a4d6bb80a33d186263775e03ce2a782ccaf3e755585166",
+    "src/ama/dispatch-closer.mjs": "df4b05f539ee99e27543d1beab22dbbd1dfca98bc136feaeba7de379b16569af",
     "src/fast-merge-processing.mjs": "2bb4cfe6ab2b4479285e1c48aaf1b0a7a4019a9e95437ba0a1a73a1af73a461b",
     "src/follow-up-jobs.mjs": "24b7862a336beb1b458387afbc9eaf24ae0e7589d732cd40fc0a3f6b655c298d",
     "src/follow-up-remediation.mjs": "a6bfbec3da209969aa4b50235fca4936f3b384e5f4ae5f9843fbbea7fd22275f",
@@ -1866,7 +1871,11 @@
     "src/ama/gsr-closer-lease.mjs": "fea38cdec29edd83201cacbd0fb4134ac4f79156d98a385e647615b45406bff2",
     "src/remediation-publication-recovery.mjs": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "src/remediation-claimed-requeue.mjs": "cf0a1d822d48135bc08429e42eba27292e064d1c62ab283fcd5455c7dc6a140a",
-    "src/hamclose-review-admission.mjs": "049abfff46cd0e301cbadd194edd5f26c9daac1ffe5d0c0fd08c44036d28cf28"
+    "src/hamclose-review-admission.mjs": "049abfff46cd0e301cbadd194edd5f26c9daac1ffe5d0c0fd08c44036d28cf28",
+    "src/remediation-job-missing-recovery.mjs": "773a4a873e4bd06780ace2bca1fdcfd141bfdbaf29387fac6f19a6828ba32794",
+    "src/remediation-ended-round-recovery.mjs": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "src/remediation-round-recovery.mjs": "018a0f5006e65cb652ba6bed2fcf0f5fa4f00ceab8b67af100e4509830f08b6e",
+    "src/remediation-published-head.mjs": "9820f8cf04c26dead1289e92682f4c6f99ed31091a113a9a0688a2e134578a24"
   },
   "workerObservationReads": "DOG-10 / LAC-2118: worker/process/session/provenance observations use the immutable SDK 0.9.0 public HTTP boundary, separately gated by default-off ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED=1 (env only; no template activation). Already enabled ADVERSARIAL_DISPATCH_READS_ENABLED own-launch HCP reads remain independent. Disabled, unsupported, failed and successful-empty provenance permits existing title-based cross-model review intake with persisted builder_class_inconclusive; empty scope_complete:false evidence never certifies absence, merge identity, lease release or teardown. Positive head attestations remain valid independently; otherwise authoritative identity stays unknown without authorized evidence, with no private fallback. Default PR provenance means the single live pr_opened row; builder_identity permits later completions and is reserved for review routing. Ambiguous identity fails closed; branch provenance is diagnostic-only and cannot replace an opener hidden by grants. Cache identity excludes request_timeout_ms; public token-based HTTP reads receive per-call remaining physical deadlines and failed sessions are evicted. Reroute uses async provenance; cold backfill prepares one SDK registration before sync loops and fails readiness before writes. Partial accounting and zero/null meanings persist. No new lifecycle states or smoke authority.",
   "mergeLeaseGateAccounting": "GATECAPBASE-01: head/base-scoped refusal budgets refund base advances, server rebase conflicts, lane-busy, contention and planned yields under the release-identity fence. New heads and observed bases reset caps; stable-base predicate loops still stop. Capped admissible conflicts return to the existing hammer conflict procedure without a lease; other admissible heads page through durable closure-wait deduplication. Terminal, moved, held and draft heads retain admission fences. No operator reset is required. Synthetic merge-lease, recovery and rendered hammer fixtures cover these routes; existing lifecycle states, merge fences and smoke promises remain unchanged. Runtime owner may observe organic reasons and owner/page receipts read-only after normal deployment; no live worker action or new probe.",

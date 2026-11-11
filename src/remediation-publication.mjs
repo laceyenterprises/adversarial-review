@@ -41,7 +41,7 @@ export async function publishRemediation({ workspaceDir = process.cwd(), baseBra
   await git(['check-ref-format', `refs/heads/${branch}`]);
   // Refresh the actual target branch; never compare against a stale worker base.
   await runWorkspaceNetworkCommandWithTransientRetry({ execFileImpl, command: 'git',
-    args: ['--no-replace-objects', '-C', workspaceDir, 'fetch', '--no-tags', 'origin',
+    args: ['--no-replace-objects', '-C', workspaceDir, 'fetch', '--no-recurse-submodules', '--no-tags', 'origin',
       `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`],
     options: { env, timeout: loadAwareTimeoutMs(30_000), maxBuffer: 16 * 1024 * 1024 },
     // Keep the worker's selected credentials; auth failures are not transport retries.

@@ -1,4 +1,5 @@
 import { addCiRegressionFinding } from './ci-regression-finding.mjs';
+import { isEndedRemediationRound } from './remediation-round-recovery.mjs';
 import { infrastructureOnlyFailures, recordedCiFailures, CI_INFRASTRUCTURE_STOP_REASONS } from './ci-infrastructure.mjs';
 import { MAX_BRANCH_RESOLUTION_ATTEMPTS, resolveFollowUpBranch } from './follow-up-branch.mjs';
 import { requiredFollowUpOperatorLabel, readFollowUpOperatorLabel, operatorLabelSatisfiesStop } from './follow-up-operator-label.mjs';
@@ -3463,8 +3464,16 @@ function requeueFollowUpJobForNextRoundLocked({
   readOperatorLabelImpl = readFollowUpOperatorLabel,
   ciRegressionFinding = null,
   publicationRecovery = null,
+  automaticRoundRecovery = null,
 }) {
   const currentJob = readFollowUpJob(jobPath);
+  const automatic = automaticRoundRecovery?.sourceDigest === recoveryDigest(currentJob)
+    && isEndedRemediationRound(currentJob)
+    && (currentJob.revisionRef === revisionRef
+      || (publicationRecovery?.headSha === revisionRef
+        && publicationRecovery.sourceDigest === recoveryDigest(currentJob)
+        && publicationRecovery.proof?.method === FINAL_ROUND_REPLAY_PROOF));
+  if (automaticRoundRecovery && !automatic) throw new Error('Automatic round recovery evidence changed');
   // This terminal handoff is progress. Keep its completed provenance even at
   // the round cap; callers already handle a refused requeue through this error.
   if (isCompletedFinalRemediationJob(currentJob)) {
@@ -3513,7 +3522,7 @@ function requeueFollowUpJobForNextRoundLocked({
       jobUpdates: { unpublishedWork: null, stoppedAt: null },
     });
   }
-  if (currentJob.status === 'stopped' && !recoveredPublication && !isRetriggerableStoppedFollowUpJob(currentJob, { operatorLabelSatisfaction })) {
+  if (currentJob.status === 'stopped' && !automatic && !recoveredPublication && !isRetriggerableStoppedFollowUpJob(currentJob, { operatorLabelSatisfaction })) {
     const code = currentJob?.remediationPlan?.stop?.code || 'unknown';
     throw new Error(`Cannot requeue follow-up job ${currentJob.jobId} from stopped:${code}`);
   }
@@ -3627,11 +3636,16 @@ function requeueFollowUpJobForNextRoundLocked({
         type: 'consume-pending-round',
         round: currentRound + 1,
         operatorVisibility: 'explicit',
-        operatorOverride: true,
+        operatorOverride: !automatic,
         requestedAt,
         requestedBy,
         reason,
       },
+      ...(automatic ? { retryAfter: new Date(Math.max(
+        Date.parse(currentJob.remediationPlan?.retryAfter || '') || 0,
+        Date.parse(currentJob.stoppedAt || currentJob.failedAt || requestedAt)
+          + computeTransientRetryBackoffMs(currentRound),
+      )).toISOString() } : {}),
     },
   };
 

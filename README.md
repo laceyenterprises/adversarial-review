@@ -927,6 +927,16 @@ and reconcile through HQ twice, observing one arm/disarm audit pair. No SPEC
 section 7 account or hardware step blocks this slice. Gate changes require the
 normal cross-model convergence loop; do not admin-merge this change.
 
+Ended unpublished or failed remediation rounds re-enter the existing follow-up
+queue while their ordinary round budget remains. Recovery verifies and tries
+retained work through the guarded publisher first, preserves spent rounds and
+backoff, and grants no operator override. A terminal attempt at its round
+ceiling hands findings to the hammer even without a published head; watcher,
+wake and read-only rescue use the same budget evidence. Live owners and
+explicit stops retain precedence. Scoped disposable fixtures verify these
+transitions; deployed acceptance requires the SRE observation declared in the
+post-merge plan. Existing smoke commands are unchanged.
+
 Two autonomous-close lanes keep a fail-closed daemon attempt from parking
 for manual merge, without ever loosening a safety gate:
 
@@ -2701,7 +2711,7 @@ with `closure-recovery-ownership-unresolved` more than one recovery cycle past
 its deadline; a persistent ledger outage remains an explicit unresolved incident.
 No worker live action is authorized.
 
-<a id="smv-handoff"></a>**smv-handoff:** Final-round non-blocking findings enqueue one builder fix-all job before any hammer. A terminal no-progress receipt permits the existing hammer fallback; publication/full-review/clean-daemon coverage is pinned by the focused lane fixtures. Expired wake admission verifies a deterministic replacement, replacement dedupe and a named missing-head refusal with one durable alert. OWNERUNREADABLE-02 verifies snapshot-only resolution of terminal lease/receipt placeholders, live retry ownership, failed/partial read fences and one deduplicated hammer wake. After ordinary deployment SRE checks that no terminal ledger launch remains in an R04 retry-chain-unreadable skip more than one wake past its deadline (SEVDOCS-335). HAMRESUMEOWED-01 verifies pending-to-green hammer resume and idempotent audit settlement. Outstanding exact-head receipts receive closure priority each poll without an unrelated wake; red/head movement settle the debt for normal handling. Existing merge gates, leases and caps remain mandatory. After deployment SRE observes the next natural pending-CI stop merging its green recorded head without manual action; offline smoke alone does not establish this live receipt. OWNERUNREADABLE-01 verifies terminal ownership recovery after its anchored deadline selects hammer without re-review while unreadable retry evidence remains fenced. Focused offline fixtures also cover one-read placeholder replacement, bounded backoff, transient recovery, live retries and outage recovery. After deployment SRE observes the next natural R04 case exit within its budget and merge; no worker live operation is authorized. NXA-07 also verifies exact-head validated terminal HAM proof crossing retry selection into pending, failed or green CI gates; mismatched proof retains hammer retry ownership. NXA-07 verifies the common adapter matrix and retains lease/retry settlement; NXA-06 verifies daemon CI changes, operator-approved retry exhaustion selecting R08 hammer repair, live hammer ownership and remote-unconfirmed receipt recovery through the shared decision. NXA-05 verifies that drain/capacity observations
+<a id="smv-handoff"></a>**smv-handoff:** Ended unpublished remediation requeues within its unchanged round budget; spent rounds select hammer without an operator override. Final-round non-blocking findings enqueue one builder fix-all job before any hammer. A terminal no-progress receipt permits the existing hammer fallback; publication/full-review/clean-daemon coverage is pinned by the focused lane fixtures. Expired wake admission verifies a deterministic replacement, replacement dedupe and a named missing-head refusal with one durable alert. OWNERUNREADABLE-02 verifies snapshot-only resolution of terminal lease/receipt placeholders, live retry ownership, failed/partial read fences and one deduplicated hammer wake. After ordinary deployment SRE checks that no terminal ledger launch remains in an R04 retry-chain-unreadable skip more than one wake past its deadline (SEVDOCS-335). HAMRESUMEOWED-01 verifies pending-to-green hammer resume and idempotent audit settlement. Outstanding exact-head receipts receive closure priority each poll without an unrelated wake; red/head movement settle the debt for normal handling. Existing merge gates, leases and caps remain mandatory. After deployment SRE observes the next natural pending-CI stop merging its green recorded head without manual action; offline smoke alone does not establish this live receipt. OWNERUNREADABLE-01 verifies terminal ownership recovery after its anchored deadline selects hammer without re-review while unreadable retry evidence remains fenced. Focused offline fixtures also cover one-read placeholder replacement, bounded backoff, transient recovery, live retries and outage recovery. After deployment SRE observes the next natural R04 case exit within its budget and merge; no worker live operation is authorized. NXA-07 also verifies exact-head validated terminal HAM proof crossing retry selection into pending, failed or green CI gates; mismatched proof retains hammer retry ownership. NXA-07 verifies the common adapter matrix and retains lease/retry settlement; NXA-06 verifies daemon CI changes, operator-approved retry exhaustion selecting R08 hammer repair, live hammer ownership and remote-unconfirmed receipt recovery through the shared decision. NXA-05 verifies that drain/capacity observations
 retain hammer intent and its deadline, and current deterministic automatic stops retain
 closure-recovery ownership. STOPSTALE-01 / STOPSTALE-02 verify that all four
 R07 variants (deterministic stop, retry cap, lifetime cap and final no-merge)
@@ -3098,15 +3108,15 @@ stateDiagram-v2
     s1 --> s5: follow-up-job.09 operator cancellation
     s1 --> s0: follow-up-job.10 transient retry, unpublished infrastructure-only CI recovery or orchestration-mode refusal hold without round charge
     s2 --> s0: follow-up-job.11 next round unless comment-only final hammer handoff
-    s3 --> s0: follow-up-job.12 explicit retrigger or all-infrastructure CI stop with successful current-head replacement checks
-    s4 --> s0: follow-up-job.13 allowlisted explicit retrigger or live satisfied required-label event with unchanged round cap; branch-unresolved resets lookup attempts; all-infrastructure CI stops except max-rounds recover on successful current-head replacements; structurally proven committed-unpublished recovery uses only remaining rounds; STRICTSETTLED-01: an AMA remediate decision with no live job requeues a settled-clean release once per PR head while merge authority's strict predicate still owes remediation
+    s3 --> s0: follow-up-job.12 explicit retrigger, all-infrastructure CI stop with successful current-head replacement checks, or ended execution failure with remaining ordinary round budget and no live owner; automatic recovery preserves spent rounds and backoff
+    s4 --> s0: follow-up-job.13 allowlisted explicit retrigger or live satisfied required-label event with unchanged round cap; branch-unresolved resets lookup attempts; all-infrastructure CI stops except max-rounds recover on successful current-head replacements; ended unpublished/no-progress/execution stops automatically requeue once per head/spent round within ordinary budget after retained publication attempt; STRICTSETTLED-01 settled-clean release recovery remains once per PR head
     s1 --> s4: follow-up-job.14 stacked-base-merged: hold before worker spawn and request rebase/retarget
     s1 --> s0: follow-up-job.15 base evidence unreadable: budget-neutral delayed recheck
     s1 --> s4: follow-up-job.16 operator-only findings after lifecycle admission: hold without spawning
     s1 --> s3: follow-up-job.17 exited worker has a matching preservation-refusal sidecar
     s0 --> s0: follow-up-job.18 branch-unresolved remediation: up to three delayed head lookups without worker or round charge
     s1 --> s1: follow-up-job.19 infrastructure-only CI without retained publication work: bounded wait; moved/terminal head clears wait under lock
-    s4 --> s2: follow-up-job.20 committed-unpublished live publication proven and strict final-round reply validated; preserve spent rounds and restore hammer ownership
+    s4 --> s2: follow-up-job.20 committed-unpublished live publication proven: ordinary completion/re-review without another worker; strict final-round reply validation restores hammer ownership; preserve spent rounds
     s4 --> s4: follow-up-job.21 committed-unpublished live publication proven but ordinary round budget exhausted; clear publication debt and escalate max-rounds without another round
     s2 --> [*]
     s3 --> [*]

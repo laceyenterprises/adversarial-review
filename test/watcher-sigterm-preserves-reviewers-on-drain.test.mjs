@@ -127,6 +127,10 @@ for (const signal of ['SIGTERM', 'SIGINT']) test(`CLOSERDISPATCHDEAD-01: ${signa
   runInNewContext(source.slice(statement.start, statement.end), {
     process: { env: {}, on: (_signal, callback) => { handler = callback; } },
     shutdownAmaHammerBackgroundQueue,
+    overloadRescueRetry: { stop: () => {
+      assert.equal(interrupted, true, 'queue shuts down before rescue stop');
+      return new Promise(() => {}); // stuck rescue cannot delay reviewer cleanup
+    } },
     readWatcherDrainState: () => ({}), shouldPreserveReviewersOnSigterm: () => true,
     resolveSigtermFenceMode: () => 'on',
     waitForActiveReviewerFencesOnSigterm: async () => { assert.equal(interrupted, true); },
@@ -138,4 +142,22 @@ for (const signal of ['SIGTERM', 'SIGINT']) test(`CLOSERDISPATCHDEAD-01: ${signa
   await queue.drain();
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(exited, true);
+});
+
+
+test('process exit synchronously aborts rescue work on every exit path', async () => {
+  const { parse } = await import('acorn');
+  const { runInNewContext } = await import('node:vm');
+  const source = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
+  const statement = parse(source, { ecmaVersion: 'latest', sourceType: 'module' }).body.find(node =>
+    node.type === 'ExpressionStatement' && node.expression.callee?.object?.name === 'process'
+    && node.expression.callee?.property?.name === 'on' && node.expression.arguments[0]?.value === 'exit');
+  assert.ok(statement);
+  let handler, aborted = false;
+  runInNewContext(source.slice(statement.start, statement.end), {
+    process: { on: (_event, callback) => { handler = callback; } },
+    overloadRescueRetry: { abort: () => { aborted = true; } },
+  });
+  handler(1);
+  assert.equal(aborted, true);
 });

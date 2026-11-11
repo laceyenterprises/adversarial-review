@@ -2035,6 +2035,7 @@ function buildWatcherLoaderSource(scenario) {
     [fileUrl('src', 'reviewer-pass-tokens.mjs')]: 'fixture:reviewer-pass-tokens',
     [fileUrl('src', 'reviewer-reattach.mjs')]: 'fixture:reviewer-reattach',
     [fileUrl('src', 'reviewer-timeout.mjs')]: 'fixture:reviewer-timeout',
+    [fileUrl('src', 'overload-rescue-retry.mjs')]: 'fixture:overload-rescue-retry',
     [fileUrl('src', 'routing-tier-readiness.mjs')]: 'fixture:routing-tier-readiness',
     [fileUrl('src', 'session-ledger-read-adapter.mjs')]: 'fixture:session-ledger-read-adapter',
     [fileUrl('src', 'stale-drift.mjs')]: 'fixture:stale-drift',
@@ -2065,6 +2066,12 @@ export async function resolve(specifier, context, nextResolve) {
 }
 
 export async function load(url, context, nextLoad) {
+  // Rescue scheduling has its own injected-executor suite. Keep these watcher
+  // fixtures isolated from its real subprocess/config dependency graph.
+  if (url === 'fixture:overload-rescue-retry') {
+    return { format: 'module', shortCircuit: true,
+      source: 'export function createOverloadRescueRetry() { return { tick: async () => {}, stop: async () => {}, abort: () => {} }; }' };
+  }
   if (url === 'fixture:review-state') {
     return {
       format: 'module',

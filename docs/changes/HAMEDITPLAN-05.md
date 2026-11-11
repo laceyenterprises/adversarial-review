@@ -63,3 +63,14 @@ The operator-only plan is
 and watcher/follow-up restart, verify PID start times, kickstart if skipped,
 and retain 24 hours of correction-before-plan-stop and reasoned outcome evidence.
 No live activation receipt is claimed by these offline checks.
+# HAM CI follow-through
+
+The compressed operating core retains the phase execution and source-inspection
+rules. Updated its two wording assertions to match the published instructions,
+preserving the structural phase, exit-code, lease and prompt-size checks.
+No interface changes.
+
+
+HAM follow-through verification: `node --test
+ test/ama-hammer-merge-protocol-prompt.test.mjs
+ test/hammer-prompt-contract.test.mjs` — 50 passed, 0 failed, offline.

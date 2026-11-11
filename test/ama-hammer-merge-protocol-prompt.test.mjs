@@ -35,8 +35,8 @@ test('HAMPROMPT-01: rendered operating core directs execution, observable state 
   const reference = composeCloserReference(inputs);
   const core = prompt.split('## Appendix A —')[0];
   assert.ok(core.split('\n').length <= 150, 'the operating core must fit the first ~150 lines');
-  assert.match(core, /The phase scripts ARE the procedure/);
-  assert.match(core, /Do not read, grep or analyze their source/);
+  assert.match(core, /Run phase scripts as instructed; follow exit codes and stderr/);
+  assert.match(core, /Never inspect their source/);
   assert.match(core, /test -f "\/fixture\/run\/hammer-verify-head.sh" -a -f "\/fixture\/run\/hammer-publish.sh" -a -f "\/fixture\/run\/hammer-merge.sh"/);
   assert.match(core, /test -f "\/fixture\/run\/inputs.sh"/);
   assert.match(core, /hammer-lease-state.mjs.*--pr "42".*--head/);

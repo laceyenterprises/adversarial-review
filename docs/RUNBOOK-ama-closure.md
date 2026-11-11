@@ -1,3 +1,18 @@
+## Lease liveness and terminal closeout
+
+Every watcher pass observes lease holders through the existing fenced reclaimers;
+age-based pruning retains its normal interval.
+
+Lease recovery uses host, PID and process start time for both closer and
+merge-lane holders (LEASEORPHAN-01). A confirmed dead local closer submitter
+requires the existing scan-before-exact-key lookup: adopt the matching admitted
+launch or release proven absent submission under the owner fence. Inspection
+reclaims a dead local merge-lane holder through its existing stale-reclaim
+writer. Unknown local identity retains custody; age is a foreign-host fallback.
+After confirmed merge, settle both leases and the closing audit before scratch
+cleanup. An ended controller's confirmed-merged closeout is local recovery,
+without another PR-bound dispatch or operator decision.
+
 ## Final findings remediation through the builder (LANEAUTO-01)
 
 At the final review-round cap, a latest exact-head Comment-only review with

@@ -1,7 +1,7 @@
 import { canonicalRepositoryArguments } from '../repository-names.mjs';
 import { withRepositoryStateRead } from '../repository-state-lock.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
-import { captureCloserProcessSync } from './dispatch-submitter.mjs';
+import { captureCloserProcessSync, leaseHolderLiveness } from './dispatch-submitter.mjs';
 /**
  * AMA-07 — durable closer lease keyed by `(repo, prNumber, headSha)`.
  *
@@ -134,24 +134,11 @@ export function abandonedAmaCloserLeaseOutcome(lease, {
   if (local && Number(lease.watcherPid) === Number(livePid) && !lease.watcherStartedAt) return null;
   const acquiredAt = Date.parse(lease.acquiredAt);
   const nowMs = typeof now === 'number' ? now : Date.parse(now);
-  const pid = Number(lease.watcherPid);
-  if (local && Number.isInteger(pid) && pid > 0) {
-    try {
-      const alive = isProcessAlive(pid);
-      if (alive === false) return 'abandoned-holder-dead';
-      if (alive === true) {
-        let identity;
-        try { identity = captureProcessImpl(pid); } catch { return null; }
-        const startedAt = Date.parse(identity?.startedAt);
-        const expectedStartedAt = Date.parse(lease.watcherStartedAt);
-        if (Number.isFinite(startedAt)
-          && (Number.isFinite(expectedStartedAt) ? startedAt !== expectedStartedAt
-            : Number.isFinite(acquiredAt) && startedAt > acquiredAt)) return 'abandoned-holder-dead';
-        // Expiry cannot revoke a live local owner's dispatch authority.
-        return null;
-      }
-    } catch { /* Uncertain evidence retains ownership until the deadline. */ }
-  }
+  const liveness = leaseHolderLiveness({ pid: lease.watcherPid, host: lease.holderHost,
+    startedAt: lease.watcherStartedAt, acquiredAt: lease.acquiredAt },
+  { host, isProcessAlive, captureProcessImpl });
+  if (liveness === 'dead') return 'abandoned-holder-dead';
+  if (local) return null;
   const timeout = Number(lease.dispatchTimeoutMs);
   if (Number.isFinite(acquiredAt) && Number.isFinite(nowMs) && timeout > 0
     && Number.isFinite(timeout) && nowMs > acquiredAt + timeout) return 'abandoned-timeout';
@@ -173,6 +160,7 @@ export function isReclaimablePendingAmaCloserLease(lease, {
   const pidAlive = isLocalHost ? observedPidAlive ?? isAmaCloserPidAlive(lease.watcherPid, processKillImpl) : null;
   if (pidAlive === false) return true;
   if (pidAlive === true) return false;
+  if (isLocalHost) return false;
 
   const acquiredAtMs = Date.parse(String(lease.acquiredAt || ''));
   const nowMs = typeof now === 'number' ? now : Date.parse(String(now || new Date().toISOString()));

@@ -13,6 +13,8 @@ Lifecycle values and deployed smoke commands remain unchanged. Authorship prepar
 now lives in its recovery helper; the consumer source projection was reviewed
 and refreshed after this behavior-preserving extraction.
 PRERECEIPTADOPT-01 remediation preserves existing closer states and transitions.
+Lease observation shares host/PID/start-time liveness for closer and merge-lane holders. Same-host death triggers fenced pre-receipt exact-key reconciliation or merge-lane stale reclaim immediately; unknown local identity retains custody. Confirmed-merged terminal controllers settle lane/closer leases and the closing audit before scratch cleanup, without another PR-bound dispatch or decision (LEASEORPHAN-01).
+
 Terminal recovery reads the HQ audit root before finalizing shared lease outcomes;
 exact-ticket receipts retain pinned and legacy missing-class compatibility.
 Settled recovered records consume no fleet capacity. Operator adoption with
@@ -1574,8 +1576,7 @@ Non-repairable refusals, strict mode, merge predicates and lifecycle states are 
 CLOSERLEASEDEAD-01: a launch-less pending closer lease transitions to terminal
 `abandoned-holder-dead` on a confirmed absent/reused same-host watcher PID
 (including legacy hostless leases, CLAIMPIDSTALE-01), or
-`abandoned-timeout` strictly after its recorded dispatch timeout when local liveness
-is unconfirmed. DEADWATCHERLEASE-01 persists optional `watcherStartedAt` and
+`abandoned-timeout` strictly after its recorded dispatch timeout for a foreign-host holder. DEADWATCHERLEASE-01 persists optional `watcherStartedAt` and
 compares exact start identity to reject PID reuse. Confirmed live local owners
 retain custody past expiry. Reclaim audit names the old owner; the existing
 startup sweep runs once before polling, then periodically. Startup and

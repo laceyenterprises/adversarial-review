@@ -172,7 +172,7 @@ import { resolveRequiredCheckContextsFromCfg } from './required-check-contexts.m
 import { resolveCloserDispatchHarness } from './harness-fallback.mjs';
 import { codexWorkerAccountPolicy } from '../role-config.mjs';
 import { logCodexWorkerDispatch } from '../codex-account-routing.mjs';
-import { acquireDaemonMergeLease, acquireMergeLease, releaseMergeLease, withDaemonMergeReservation } from './merge-lease.mjs';
+import { acquireDaemonMergeLease, acquireMergeLease, readMergeLeaseHolders, releaseMergeLease, releaseMergedPrMergeLeases, withDaemonMergeReservation } from './merge-lease.mjs';
 export { formatHamGateAttemptCapClosingStatus } from './merge-lease.mjs';
 import {
   hasMergedDependentProtectingPr,
@@ -848,18 +848,15 @@ export function hammerScratchEnvironment(scratchDir, env = process.env) {
       '-o tmp_path_retention_count=1'].filter(Boolean).join(' ') };
 }
 
-export function hammerScratchLeaseHeld(rootDir, record, options = {}) {
+export function hammerScratchLeaseHeld(rootDir, record, _options = {}) {
   if (!rootDir || !record?.repo || !record.headSha) return false;
+  if (readMergeLeaseHolders({ rootDir, repo: record.repo, prNumber: record.prNumber }).length) return true;
   const lease = readAmaCloserDispatchLease(rootDir, record);
   if (!lease) return false;
-  if (lease.status === AMA_CLOSER_LEASE_STATUS.PENDING) {
-    return !isReclaimablePendingAmaCloserLease(lease, options);
-  }
-  // A terminal launch can retain its own merge-authority lease (HAMTMP-05).
-  // A different launch's live lease must never authorize predecessor removal.
-  return lease.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED
-    && lease.lrqId !== record.launchRequestId
-    && !isReclaimableDispatchedAmaCloserLease(lease, { ...options, rootDir });
+  if (lease.status === AMA_CLOSER_LEASE_STATUS.PENDING) return true;
+  // Keep closeout scripts until custody is durably settled, including this
+  // very launch's lease. Terminal process status alone is insufficient.
+  return lease.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED;
 }
 
 export function cleanupHammerScratchDir(record, logger = console, options = {}) {
@@ -887,7 +884,7 @@ export function cleanupHammerScratchDir(record, logger = console, options = {}) 
   }
 }
 
-// Scratch ownership ends independently of merge/retry authority. In particular,
+// Terminal scratch is eligible only after closure custody settles. In particular,
 // merged-PR reconciliation writes outcome=succeeded without changing the last
 // observed worker status. Do not broaden the authority status sets for cleanup.
 const HAMMER_SCRATCH_TERMINAL_STATUSES = new Set([
@@ -1580,6 +1577,32 @@ function* reconcileAmaCloserLeaseSteps({
       return retireForeignCloserLaunch({ rootDir, repo, prNumber, identity, leaseIdentity: { repo, prNumber, headSha: held.headSha },
         record: readAmaCloserDispatchRecord(rootDir, identity), launchRequestId, now, logger });
     }
+    // Authoritative merge wins over parked/failed controller status. Complete
+    // local custody without dispatching work against the now-merged PR.
+    if (launchRequestParked(probe)) {
+      const livePr = normalizeAmaLivePrProbeResult(yield readPullRequestStateImpl({ repo, prNumber, env, signal }));
+      throwIfAborted(signal);
+      if (livePr?.state === 'MERGED') {
+        const identity = { repo, prNumber, headSha: held.headSha };
+        const dispatchIdentity = { ...identity, headSha: held.lease.rekeyedFromHeadSha || held.headSha };
+        const liveOwner = readAmaCloserLease(rootDir, identity);
+        const liveRecord = readAmaCloserDispatchRecord(rootDir, dispatchIdentity);
+        if (liveOwner?.status !== AMA_CLOSER_LEASE_STATUS.DISPATCHED
+          || liveOwner.lrqId !== launchRequestId || liveOwner.acquiredAt !== held.lease.acquiredAt
+          || isPreReceiptIntent(liveRecord)
+          || (liveRecord?.launchRequestId && liveRecord.launchRequestId !== launchRequestId)) return false;
+        writeAmaAuditEntry({ hqRoot: hqRoot || rootDir, ...identity, now,
+          attempt: { outcome: 'succeeded', reason: 'confirmed-merged-closeout', launchRequestId } });
+        if (!releaseMergedPrMergeLeases({ rootDir, repo, prNumber, now })) return false;
+        if (!finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity: identity,
+          terminalOutcome: 'succeeded', launchRequestId, now, logger, repo, prNumber })) return false;
+        updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, current =>
+          current?.launchRequestId === launchRequestId && !isPreReceiptIntent(current)
+            ? { ...current, state: 'completed', outcome: 'succeeded', terminalOutcome: 'succeeded',
+              lastObservedStatus: 'merged', reconciledAt: now } : null, { cleanupScratchImpl });
+        return true;
+      }
+    }
     if (launchRequestParked(probe)) {
       const dispatchIdentity = { repo, prNumber, headSha: held.lease.rekeyedFromHeadSha || held.headSha };
       const record = readAmaCloserDispatchRecord(rootDir, dispatchIdentity);
@@ -1601,9 +1624,8 @@ function* reconcileAmaCloserLeaseSteps({
     // Do not reconcile an old launch over a newer dispatch intent.
     if (record && (isPreReceiptIntent(record)
       || (record.launchRequestId && record.launchRequestId !== launchRequestId))) return false;
-    // Disk ownership ends at terminal launch observation, even while merge
-    // evidence is unreadable or still inside the success-settlement grace.
-    // The shared writer runs terminal scratch cleanup without releasing leases.
+    // Record terminality now; scratch remains while closure leases are held.
+    // The shared writer retries cleanup after their fenced settlement.
     if (record && !recordTerminalCloserLaunch(rootDir, dispatchIdentity, launchRequestId, status, now, cleanupScratchImpl)) return false;
     const deferral = [identity, dispatchIdentity].map(key =>
       readAmaAuditEntry(hqRoot || rootDir, key.repo, key.prNumber, key.headSha)?.attempts?.at(-1))
@@ -1646,6 +1668,11 @@ function* reconcileAmaCloserLeaseSteps({
     const liveRecord = readAmaCloserDispatchRecord(rootDir, dispatchIdentity);
     if (isPreReceiptIntent(liveRecord)
       || (record && liveRecord?.launchRequestId !== launchRequestId)) return false;
+    if (terminalOutcome === 'succeeded') {
+      writeAmaAuditEntry({ hqRoot: hqRoot || rootDir, ...identity, now,
+        attempt: { outcome: 'succeeded', reason: 'confirmed-merged-closeout', launchRequestId } });
+      if (!releaseMergedPrMergeLeases({ rootDir, repo, prNumber, now })) return false;
+    }
     if (!finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity: identity,
       terminalOutcome, launchRequestId, now, logger, repo, prNumber })) return false;
     updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, live =>
@@ -2581,7 +2608,9 @@ export function updateAmaCloserDispatchRecord(rootDir, identity, mutate, { clean
   if (!isPreReceiptIntent(next)
     && (!isPreReceiptIntent(existing) || ['dispatch-failed', 'dispatch-configuration-refused'].includes(next.state))
     && isTerminalHammerScratchRecord(next)) {
-    cleanupScratchImpl(next, undefined, { rootDir });
+    let held = true;
+    try { held = hammerScratchLeaseHeld(rootDir, next); } catch { /* Unreadable custody retains scratch. */ }
+    if (!held) cleanupScratchImpl(next, undefined, { rootDir });
   }
   return next;
   });
@@ -8131,6 +8160,7 @@ async function maybeDispatchAmaCloserAttempt({
   const args = [
     'dispatch',
     '--idempotency-key', dispatchIdempotencyKey,
+    '--defer-provision',
     '--worker-class', dispatchWorkerClass,
     '--task-kind', 'merge',
     '--completion-shape', queueCloser ? 'branch-push' : 'decision-only',

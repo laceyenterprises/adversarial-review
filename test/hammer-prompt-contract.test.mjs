@@ -20,7 +20,7 @@ function fixture(t) {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-prompt-contract-'));
   const children = new Set();
   const killGroup = (child, signal = 'SIGKILL') => {
-    if (!child.pid) return;
+    if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
     try { process.kill(-child.pid, signal); } catch (error) { if (error.code !== 'ESRCH') throw error; }
   };
   t.after(() => {

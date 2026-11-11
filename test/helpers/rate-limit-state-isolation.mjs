@@ -50,6 +50,13 @@ if (isTestWorker) {
   });
   // The runner also removes its whole sandbox on failure or termination.
   process.env.ADVERSARIAL_REVIEW_TEST_CWD = workerRoot;
+  const temporary = path.join(sandboxRoot, `t${Number(path.basename(workerRoot).slice(5))}`);
+  for (const key of ['TMPDIR', 'TMP', 'TEMP']) process.env[key] = temporary;
+  // Only repeated CLI fixtures benefit from caching their subprocess modules.
+  // Other files generate one-off scripts; caching those increases disk contention.
+  if (['hammer-api-publish-cli.test.mjs', 'hammer-attestation-retry.test.mjs'].includes(path.basename(testFile))) {
+    process.env.NODE_COMPILE_CACHE = path.join(workerRoot, 'compile-cache');
+  }
   process.env.ADVERSARIAL_REVIEW_STATE_DIR = path.join(workerRoot, 'data');
   process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = path.join(workerRoot, 'data', 'api-cache', 'rate-limit-state.json');
   process.chdir(workerRoot);

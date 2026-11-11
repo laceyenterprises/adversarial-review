@@ -1,9 +1,10 @@
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { constants, tmpdir } from 'node:os';
+import { availableParallelism, constants, tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { orderFiles, planShards, workerCount } from './helpers/parallel-plan.mjs';
 import { reclaimAbandonedSandboxes, SANDBOX_OWNER_MARKER } from './helpers/runner-sandbox.mjs';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
@@ -18,10 +19,13 @@ const tempBase = process.env.ADVERSARIAL_REVIEW_TEST_TEMP_BASE
 let sandboxRoot;
 
 function makeWorkerRoot(index) {
-  const root = path.join(sandboxRoot, `file-${index}`);
+  const root = path.join(sandboxRoot, `file-${String(index).padStart(6, '0')}`);
   mkdirSync(root);
+  // Keep fixtures outside the symlinked package's ESM scope.
+  mkdirSync(path.join(sandboxRoot, `t${index}`));
+  mkdirSync(path.join(root, 'compile-cache'));
   for (const entry of readdirSync(repoRoot, { withFileTypes: true })) {
-    if (entry.name === 'data' || entry.name === '.git') continue;
+    if (['data', '.git', 'tmp', 'compile-cache'].includes(entry.name)) continue;
     symlinkSync(path.join(repoRoot, entry.name), path.join(root, entry.name),
       entry.isDirectory() ? 'dir' : 'file');
   }
@@ -139,10 +143,25 @@ try {
   mkdirSync(coordinatorHome);
   // Include this run's random sandbox name so concurrent suites cannot trip the guard.
   const fixtureProbePrefix = `adversarial-review-tmp-probe-${path.basename(sandboxRoot)}-`;
-  const testPaths = testFiles().map((file, index) => {
-    const root = makeWorkerRoot(index);
-    return path.join(root, path.relative(repoRoot, file));
-  });
+  const selected = testFiles().map((file) => path.relative(repoRoot, file));
+  const timingHints = path.join(testDir, 'fixtures', 'suite-durations.json');
+  const durations = existsSync(timingHints) ? JSON.parse(readFileSync(timingHints, 'utf8')) : {};
+  const files = orderFiles(selected, durations);
+  const paths = Object.fromEntries(files.map((file, index) => [file, path.join(makeWorkerRoot(index), file)]));
+  const shards = planShards(files, durations, workerCount(availableParallelism(), files.length));
+  const logDir = path.join(sandboxRoot, 'logs');
+  mkdirSync(logDir);
+  const configPath = path.join(sandboxRoot, 'parallel-config.json');
+  writeFileSync(configPath, JSON.stringify({
+    files, paths, shards, logDir, reportPath: process.env.AR_TEST_TIMINGS,
+    nodeArgs: [
+      '--preserve-symlinks', '--preserve-symlinks-main',
+      ...['child-leak-guard', 'rate-limit-state-isolation', 'load-aware-timeout-fixture', 'temp-sandbox-guard']
+        .flatMap((name) => ['--import', path.join('test', 'helpers', `${name}.mjs`)]),
+      '--test', '--test-concurrency=1', '--test-reporter', path.join(testDir, 'helpers', 'parallel-reporter.mjs'),
+    ],
+  }));
+  console.error(`Test plan: ${files.length} files in ${shards.length} measured parallel shards (maximum 16).`);
   // Tests own their CLI fixture; an omitted stub must not use host credentials.
   const fixtureBin = path.join(sandboxRoot, 'fixture-bin');
   mkdirSync(fixtureBin);
@@ -154,6 +173,7 @@ try {
   // skip its refresh. Tests set their own synthetic auth inputs rather than
   // inheriting tokens, their launch commands or their expiries.
   const inheritedStatePaths = new Set([
+    'AR_TEST_TIMINGS', 'AR_TEST_SHARD_CONFIG', 'NODE_COMPILE_CACHE', 'NODE_TEST_CONTEXT',
     'CODEX_HOME', 'CODEX_SOURCE_HOME', 'CODEX_AUTH_PATH', 'GEMINI_HOME',
     'GEMINI_OAUTH_CREDS_PATH', 'CLAUDE_CONFIG_DIR',
     'CODEX_SESSION_ROOTS', 'CODEX_SESSION_ROOT',
@@ -171,21 +191,7 @@ try {
   // Synthetic phase fixtures must supply their own state instead of inheriting it.
   const testEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     !inheritedStatePaths.has(key) && !key.startsWith('HCP_') && !key.startsWith('HAM_') && !/^(?:GH_.*TOKEN|GITHUB_.*TOKEN|.*_GH_TOKEN)(?:_REFRESH_COMMAND|_EXPIRES_AT)?$/.test(key)));
-  child = spawn(process.execPath, [
-    '--preserve-symlinks',
-    '--preserve-symlinks-main',
-    '--import',
-    path.join(testDir, 'helpers', 'child-leak-guard.mjs'),
-    '--import',
-    path.join(testDir, 'helpers', 'rate-limit-state-isolation.mjs'),
-    '--import',
-    path.join(testDir, 'helpers', 'load-aware-timeout-fixture.mjs'),
-    '--import',
-    path.join(testDir, 'helpers', 'temp-sandbox-guard.mjs'),
-    '--test',
-    '--test-concurrency=8',
-    ...testPaths,
-  ], {
+  child = spawn(process.execPath, [path.join(testDir, 'helpers', 'parallel-runner.mjs'), configPath], {
     cwd: sandboxRoot,
     env: {
       ...testEnv,

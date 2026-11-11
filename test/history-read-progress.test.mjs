@@ -72,12 +72,14 @@ test('persisted history cannot establish a rename whose author identity is unpro
   assert.ok(fixture.calls.some(path => path.includes('/commits/')), 'provenance is read before refusing');
 });
 
-test('completed file comparisons survive a later diff timeout without repeating local git work', async t => {
+test('completed file comparisons survive a later diff timeout without repeating local git work', { timeout: 10_000 }, async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const rootDir = mkdtempSync(join(tmpdir(), 'history-diff-progress-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const diffCalls = [0, 0];
+  let elapsed = 0;
   let stalled = true;
-  const reader = () => createHistoryReader({ contextTimeoutMs: 100,
+  const reader = () => createHistoryReader({ contextTimeoutMs: 100, nowMs: () => elapsed,
     progress: { rootDir, repo, prNumber, headSha: head },
     execGhWithRetryImpl: async ({ args }) => {
       const path = args[1];
@@ -91,7 +93,14 @@ test('completed file comparisons survive a later diff timeout without repeating 
     diffImpl: async (_command, args) => {
       const index = Number(args.at(-1).split('-')[1]);
       diffCalls[index]++;
-      if (index === 1 && stalled) return never();
+      if (index === 1 && stalled) {
+        // Finish the sibling checkpoint, then expire the unchanged 100ms
+        // budget at this exact boundary instead of racing host scheduling.
+        await new Promise(resolve => setImmediate(resolve));
+        elapsed += 100;
+        t.mock.timers.tick(100);
+        return never();
+      }
       return { stdout: 'diff\n@@ -0,0 +1 @@\n+x\n' };
     },
   });

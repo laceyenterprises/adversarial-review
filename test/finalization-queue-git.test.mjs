@@ -6,6 +6,25 @@ import { handoffTime } from './helpers/queue-handoff-fixture.mjs';
 import { readdirSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
+test('pristine Git seeds give every fixture independent worktrees, objects and remote refs', t => {
+  const first = gitFixture(t), second = gitFixture(t);
+  assert.notEqual(first.root, second.root);
+  first.g(['checkout', 'topic']);
+  first.file('content', 'first fixture only\n');
+  const changed = first.commit('fixture-local change');
+  first.g(['push', first.remote, 'topic']);
+  first.store.ensureLane({ repository: 'private/fixture', base: 'main' });
+  for (const other of [second, gitFixture(t)]) {
+    assert.equal(other.g(['rev-parse', 'topic']), other.oldHead);
+    assert.equal(other.g(['--git-dir', other.remote, 'rev-parse', 'topic']), other.oldHead);
+    assert.equal(other.g(['status', '--porcelain']), '');
+    assert.equal(other.store.db.prepare('SELECT count(*) AS n FROM finalization_queue_lane').get().n, 0);
+    assert.throws(() => other.g(['cat-file', '-e', changed]));
+  }
+  const noop = gitFixture(t, { noop: true });
+  assert.equal(noop.base, noop.fork, 'seed keys preserve distinct fixture graphs');
+});
+
 // An unsafe control uses only disposable local refs, to demonstrate the race
 // protected by the new adapter. No credential or network boundary is exercised.
 test('unsafe force control loses the author update in 5/5 repeated trials', async t => {

@@ -78,7 +78,7 @@ function recordEnvironment(dir, value = '1', launchRequestId = 'lrq_controller-t
   }));
 }
 
-function fixture(t, script, { realCensus = false } = {}) {
+function fixture(t, script, { realCensus = false, virtualCensusClock = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ham-controller-'));
   recordEnvironment(dir);
   const env = { ...process.env, HQ_ROOT: dir, HAM_HQ_ROOT: dir, HAM_RUN_DIR: dir, HAM_ROOT_DIR: dir, HAM_REPO: 'fixture/repo',
@@ -111,9 +111,17 @@ function fixture(t, script, { realCensus = false } = {}) {
   writeFileSync(scriptPath, `#!/bin/bash\nset -e\n"${process.execPath}" "${leaseHelper}"\n${script}\n`);
   const driver = join(dir, 'driver.mjs');
   writeFileSync(driver, `
-    import {readFileSync,writeFileSync,renameSync} from 'node:fs';
+    import {readFileSync,writeFileSync,renameSync,existsSync} from 'node:fs';
+    import {setTimeout as delay} from 'node:timers/promises';
     import {runHammerController,controllerGroupSnapshot} from ${JSON.stringify(new URL('../src/ama/hammer-controller.mjs', import.meta.url).href)};
+    let clock = 0;
     const status = await runHammerController(${JSON.stringify(scriptPath)}, [], {
+      // Only this census-loss regression advances its policy clock after
+      // rendezvous. Host pauses must not skip TERM's grace phase.
+      ...(${virtualCensusClock} ? {nowImpl:()=>clock,delayImpl:async ms=>{
+        await delay(5);
+        if(existsSync(process.env.HAM_RUN_DIR+'/probe-denied'))clock+=ms;
+      }} : {}),
       pollMs:20, graceMs:150, drainMs:1000, timeoutMs:10000, launchPollMs:20, gateWaitMs:2000,
       unreadableGraceMs:Number(process.env.FIXTURE_GRACE_MS||300), readTimeoutImpl:()=>50,
       readLaunchImpl:async()=>JSON.parse(readFileSync(${JSON.stringify(launchPath)},'utf8')),
@@ -851,7 +859,7 @@ test('lost process census stops the direct child but retains the owned lease and
   const f = fixture(t, `exec "${process.execPath}" -e '
     process.on("SIGTERM",()=>{});
     require("node:fs").writeFileSync(process.env.HAM_RUN_DIR+"/ready","ready");
-    setInterval(()=>{},1000);'`);
+    setInterval(()=>{},1000);'`, { virtualCensusClock: true });
   const p = f.start();
   await until(() => existsSync(join(f.dir, 'ready')));
   writeFileSync(join(f.dir, 'probe-denied'), 'denied');

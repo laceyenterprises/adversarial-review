@@ -37,6 +37,12 @@ declaration. Terminal-job selection already filters to the current head.
 none. Focused fixtures exercise older-head stopped/failed jobs and real retained
 publication completion with and without a supplied snapshot.
 
+The last Comment-only round separates missing or blank review text from a
+settled-clean refusal and retains `failure.code` in the recovery marker and
+requeue reason when no stop code is available. Focused regressions cover blank
+review bodies, a clean-review control, and failed rounds without plan stops.
+Existing recovery states, transitions, budgets and smoke promises are unchanged.
+
 ## Interface changes
 
 The existing recovery marker optionally records the spent round. Successful
@@ -53,3 +59,11 @@ service or configuration changes are part of this PR. The operator plan retains
 the float, watcher/follow-up PID start-time checks and natural-traffic
 observation, and confirms Grok remediation stays opt-in/default-off and Grok
 closer selection stays refused.
+
+Final diagnostic fixes: bounded `node --test test/remediateexec-01.test.mjs`
+passed 35 tests; bounded `node --test test/strict-settled-remediation.test.mjs`
+passed seven. `npm run lint` passed with zero errors (149 existing warnings),
+`npm run typecheck:contracts`, `node scripts/validate-data-model-catalog.mjs`
+(93 entries), `bash demo/research-finding-walkthrough.sh`, and `git diff --check`
+passed. The SMV `checkMap` source/graph check and README diagram comparison passed
+without declaration changes. Full-suite execution remains with PR-head CI.

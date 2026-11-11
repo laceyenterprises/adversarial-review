@@ -40,7 +40,10 @@ export async function recoverEndedRemediationRound({ execFileImpl = execAsync,
   if (!job || !isEndedRemediationRound(job) || job.revisionRef !== headSha) {
     return recreateMissingRemediationJob(options);
   }
-  if (!job.reviewBody || jobs.isSettledCleanClassification(jobs.classifyFollowUpCriticality(job.reviewBody),
+  if (!String(job.reviewBody ?? '').trim()) {
+    return { recreated: false, reason: 'review-body-missing', jobId: job.jobId };
+  }
+  if (jobs.isSettledCleanClassification(jobs.classifyFollowUpCriticality(job.reviewBody),
     { strictMode: options.strictMode !== false })) {
     return { recreated: false, reason: 'review-settled-clean', jobId: job.jobId };
   }

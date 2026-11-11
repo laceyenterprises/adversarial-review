@@ -98,7 +98,7 @@ export function recreateMissingRemediationJob({
       && (!endedRound || job.remediationJobMissingRecovery?.round === job.remediationPlan.currentRound)) {
       return skipped('already-recreated-for-head', job);
     }
-    const previousStopCode = text(job.remediationPlan?.stop?.code);
+    const previousStopCode = text(job.remediationPlan?.stop?.code) || text(job.failure?.code);
     if (!endedRound && !RELEASED_AS_SETTLED.has(previousStopCode)) {
       return skipped(`stop-code-${previousStopCode || 'unknown'}`, job);
     }

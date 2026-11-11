@@ -375,7 +375,11 @@ codes are `worker-failure`, `worker-timeout`, `timed-out`,
 and `hq-dispatch-transient-budget-exhausted`.
 Human stops, safety refusals and lifecycle stops retain their existing owners.
 These recoveries add optional `round` to `remediationJobMissingRecovery`, making
-the reservation unique per head and spent round. They preserve `currentRound`,
+the reservation unique per head and spent round. The marker's `previousStopCode`
+and requeue reason use the trimmed `remediationPlan.stop.code`, falling back to
+`failure.code` when the stop code is absent or blank. Missing or whitespace-only
+review text refuses recovery as `review-body-missing`, separately from a parsed
+`review-settled-clean` verdict. They preserve `currentRound`,
 `maxRounds`, retry history and the later of existing retryAfter or the existing
 exponential backoff from the terminal timestamp. Automatic next actions have
 `operatorOverride: false`. The writer revalidates the source digest under its

@@ -44,10 +44,14 @@ for (const [status, code] of [['stopped', 'committed-unpublished'], ['stopped', 
   ['failed', 'invalid-remediation-reply'], ['failed', 'hq-dispatch-failed'],
   ['failed', 'hq-dispatch-transient-budget-exhausted']]) {
   test(`ended ${status}:${code} queues the next bounded round exactly once`, async t => {
-    const f = fixture(t, { status, failure: { code }, remediationPlan: { stop: { code } } });
+    const f = fixture(t, { status, failure: { code },
+      remediationPlan: { stop: status === 'failed' ? null : { code } } });
     const first = await recoverEndedRemediationRound(f.options);
     assert.equal(first.recreated, true, JSON.stringify(first));
+    assert.equal(first.previousStopCode, code);
     const pending = readFollowUpJob(first.jobPath);
+    assert.equal(pending.remediationJobMissingRecovery.previousStopCode, code);
+    assert.ok(pending.remediationPlan.nextAction.reason.endsWith(`(stop was ${code}).`));
     assert.equal(pending.remediationPlan.currentRound, 1);
     assert.equal(pending.remediationPlan.maxRounds, 3);
     assert.equal(pending.remediationPlan.nextAction.round, 2);
@@ -60,6 +64,35 @@ for (const [status, code] of [['stopped', 'committed-unpublished'], ['stopped', 
     assert.equal(claim.job.remediationPlan.currentRound, 2);
   });
 }
+
+test('failed round audit preserves an explicit stop code before the failure code', async t => {
+  const f = fixture(t, { status: 'failed', failure: { code: 'worker-timeout' },
+    remediationPlan: { stop: { code: ' stale-heartbeat ' } } });
+  const result = await recoverEndedRemediationRound(f.options);
+  assert.equal(result.recreated, true);
+  assert.equal(result.previousStopCode, 'stale-heartbeat');
+  const pending = readFollowUpJob(result.jobPath);
+  assert.equal(pending.remediationJobMissingRecovery.previousStopCode, 'stale-heartbeat');
+  assert.ok(pending.remediationPlan.nextAction.reason.endsWith('(stop was stale-heartbeat).'));
+});
+
+for (const [label, reviewBody, reason] of [
+  ['missing', undefined, 'review-body-missing'],
+  ['null', null, 'review-body-missing'],
+  ['empty', '', 'review-body-missing'],
+  ['whitespace', ' \n\t ', 'review-body-missing'],
+  ['clean', '## Blocking issues\n- None.\n\n## Non-blocking issues\n- None.\n\n## Verdict\nApproved\n',
+    'review-settled-clean'],
+]) test(`ended round with ${label} review reports its refusal without changing the job`, async t => {
+  const f = fixture(t, { reviewBody });
+  const before = readFollowUpJob(f.jobPath);
+  const result = await recoverEndedRemediationRound({ ...f.options,
+    publicationEnv: {},
+    execFileImpl: () => assert.fail('refused review must not invoke git'),
+    publishImpl: () => assert.fail('refused review must not publish') });
+  assert.deepEqual(result, { recreated: false, reason, jobId: f.job.jobId });
+  assert.deepEqual(readFollowUpJob(f.jobPath), before);
+});
 
 test('a future backoff, moved head, exhausted round and explicit stop never redrive', async t => {
   for (const overrides of [

@@ -23,7 +23,12 @@ test('DEPLOYBATCH-01: strict and runtime readers mirror deploy cadence', () => {
         writeFileSync(topPath, JSON.stringify({
           version: 1, main_catchup: { deploy_batch_window_seconds: value },
         }));
-        assert.throws(() => loader({ topPath, env: {} }));
+        assert.throws(() => loader({ topPath, env: {} }), {
+          name: 'AgentOSConfigError',
+          key,
+          expected: value === -1 ? '>= 0' : 'int',
+          got: value,
+        });
       }
     }
   } finally {

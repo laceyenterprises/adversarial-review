@@ -31,7 +31,7 @@ const adviceOnly = body.replace(/- \*\*Explain the result\*\*[\s\S]*?(?=## Verdi
 function fixture(t) {
   const rootDir = mkdtempSync(join(tmpdir(), 'findings-batch-'));
   const db = openReviewStateDb(rootDir);
-  ensureReviewStateSchema(db);
+  db.transaction(() => ensureReviewStateSchema(db))();
   db.prepare("UPDATE schema_migrations SET applied_at='2026-01-01 00:00:00' WHERE id='20261024_simplicity_batch.sql'").run();
   t.after(() => { db.close(); rmSync(rootDir, { recursive: true, force: true }); });
   const pass = (attempt = 1, text = body, sha = head) => {

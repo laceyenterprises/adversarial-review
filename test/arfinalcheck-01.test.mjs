@@ -100,7 +100,7 @@ test('production runner sandbox and selected fixture', () => {
   assert.notEqual(process.cwd(), ${JSON.stringify(f.work)});
   assert.equal(existsSync('.git'), false);
   assert.ok(process.env.HOME.startsWith(process.env.ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT));
-  assert.equal(process.env.TMPDIR, join(process.env.ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT, 'tmp'));
+  assert.equal(process.env.TMPDIR, join(process.env.ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT, 't0'));
   ${fail ? "assert.fail('publication assertion diagnostic');" : ''}
 });
 `);

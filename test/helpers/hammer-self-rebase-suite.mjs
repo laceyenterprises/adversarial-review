@@ -2,7 +2,7 @@ import './rate-limit-state-isolation.mjs';
 import nodeTest from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setImmediate } from 'node:timers/promises';
@@ -20,6 +20,11 @@ const nodeCompileCache = mkdtempSync(join(tmpdir(), 'hammer-node-cache-'));
 const cleanCompileCache = () => rmSync(nodeCompileCache, { force: true, recursive: true });
 nodeTest.after(cleanCompileCache);
 process.once('exit', cleanCompileCache);
+// Each file owns immutable seed copies; no test ever receives the seed path.
+const gitSeeds = new Map();
+const cleanSeeds = () => { for (const { dir } of gitSeeds.values()) rmSync(dir, { force: true, recursive: true }); };
+nodeTest.after(cleanSeeds);
+process.once('exit', cleanSeeds);
 const fixtureClockStart = 1700000000;
 const ciWaitSeconds = 900;
 
@@ -44,33 +49,47 @@ function fixture(t, scenario) {
     HAM_HQ_ROOT: dir, HAM_PROGRESS_FILE: '',
     FIXTURE_HELPER: helper, PATH: `${bin}:${process.env.PATH}` };
   const git = (args, input) => execFileSync(realGit, args, { cwd: scratch, env, input, encoding: 'utf8', timeout: 10000 }).trim();
-  git(['init', '--bare', '--quiet', remote]);
-  const surfaceTest = `import { readFileSync } from 'node:fs';\nimport assert from 'node:assert/strict';\nassert.equal(readFileSync('surface.txt', 'utf8'), 'base-new\\nbody\\nhammer-new\\n');\n`;
-  const commit = (text, parent, extra = false) => {
-    const blob = git(['--git-dir', remote, 'hash-object', '-w', '--stdin'], text);
-    const tests = git(['--git-dir', remote, 'hash-object', '-w', '--stdin'], surfaceTest);
-    const extraBlob = extra ? git(['--git-dir', remote, 'hash-object', '-w', '--stdin'], 'unrelated base\n') : '';
-    const tree = git(['--git-dir', remote, 'mktree'], `100644 blob ${blob}\tsurface.txt\n100644 blob ${tests}\tsurface.test.mjs\n${extra ? `100644 blob ${extraBlob}\tunrelated.txt\n` : ''}`);
-    return git(['--git-dir', remote, 'commit-tree', tree, ...(parent ? ['-p', parent] : [])], 'Synthetic change\n');
-  };
-  const ancestor = commit('base-old\nbody\nhammer-old\n');
-  const original = commit('base-old\nbody\nhammer-new\n', ancestor);
   const initialDisjoint = scenario === 'initial-disjoint';
-  const base = commit(initialDisjoint ? 'base-old\nbody\nhammer-old\n' : 'base-new\nbody\nhammer-old\n', ancestor, initialDisjoint);
-  const rebased = initialDisjoint ? original : commit('base-new\nbody\nhammer-new\n', base);
-  const foreign = commit('foreign\n', rebased);
   const startsRebased = ['initial-unknown', 'no-op', 'initial-lease-drift', 'ci-disjoint', 'ci-disjoint-conflict', 'ci-disjoint-lease-delay'].includes(scenario);
   const disjoint = scenario.startsWith('ci-disjoint') || ['ci-old-reply', 'local-validation-disjoint-base'].includes(scenario);
-  const nextBase = commit(disjoint ? 'base-new\nbody\nhammer-old\n' : 'base-new\nadvanced\nhammer-old\n', base, disjoint);
-  const nextRebased = commit(disjoint ? 'base-new\nbody\nhammer-new\n' : 'base-new\nadvanced\nhammer-new\n', nextBase, disjoint);
-  git(['--git-dir', remote, 'update-ref', 'refs/heads/main', base]);
-  git(['--git-dir', remote, 'update-ref', 'refs/heads/topic', startsRebased ? rebased : original]);
-  git(['init', '--quiet']);
-  git(['remote', 'add', 'origin', remote]);
-  // Seed only A and its parent. B must be fetched by the production procedure.
-  const pack = execFileSync(realGit, ['--git-dir', remote, 'pack-objects', '--stdout', '--revs'], { env, input: (startsRebased ? rebased : original) + '\n', timeout: 10000 });
-  execFileSync(realGit, ['unpack-objects'], { cwd: scratch, env, input: pack, timeout: 10000 });
-  git(['checkout', '--quiet', '--detach', startsRebased ? rebased : original]);
+  const seedKey = JSON.stringify([initialDisjoint, startsRebased, disjoint]);
+  const seed = gitSeeds.get(seedKey);
+  let ancestor, original, base, rebased, foreign, nextBase, nextRebased;
+  if (seed) {
+    cpSync(join(seed.dir, 'remote.git'), remote, { recursive: true });
+    cpSync(join(seed.dir, 'scratch'), scratch, { recursive: true });
+    ({ ancestor, original, base, rebased, foreign, nextBase, nextRebased } = seed);
+    git(['remote', 'set-url', 'origin', remote]);
+  } else {
+    git(['init', '--bare', '--quiet', remote]);
+    const surfaceTest = `import { readFileSync } from 'node:fs';\nimport assert from 'node:assert/strict';\nassert.equal(readFileSync('surface.txt', 'utf8'), 'base-new\\nbody\\nhammer-new\\n');\n`;
+    const commit = (text, parent, extra = false) => {
+      const blob = git(['--git-dir', remote, 'hash-object', '-w', '--stdin'], text);
+      const tests = git(['--git-dir', remote, 'hash-object', '-w', '--stdin'], surfaceTest);
+      const extraBlob = extra ? git(['--git-dir', remote, 'hash-object', '-w', '--stdin'], 'unrelated base\n') : '';
+      const tree = git(['--git-dir', remote, 'mktree'], `100644 blob ${blob}\tsurface.txt\n100644 blob ${tests}\tsurface.test.mjs\n${extra ? `100644 blob ${extraBlob}\tunrelated.txt\n` : ''}`);
+      return git(['--git-dir', remote, 'commit-tree', tree, ...(parent ? ['-p', parent] : [])], 'Synthetic change\n');
+    };
+    ancestor = commit('base-old\nbody\nhammer-old\n');
+    original = commit('base-old\nbody\nhammer-new\n', ancestor);
+    base = commit(initialDisjoint ? 'base-old\nbody\nhammer-old\n' : 'base-new\nbody\nhammer-old\n', ancestor, initialDisjoint);
+    rebased = initialDisjoint ? original : commit('base-new\nbody\nhammer-new\n', base);
+    foreign = commit('foreign\n', rebased);
+    nextBase = commit(disjoint ? 'base-new\nbody\nhammer-old\n' : 'base-new\nadvanced\nhammer-old\n', base, disjoint);
+    nextRebased = commit(disjoint ? 'base-new\nbody\nhammer-new\n' : 'base-new\nadvanced\nhammer-new\n', nextBase, disjoint);
+    git(['--git-dir', remote, 'update-ref', 'refs/heads/main', base]);
+    git(['--git-dir', remote, 'update-ref', 'refs/heads/topic', startsRebased ? rebased : original]);
+    git(['init', '--quiet']);
+    git(['remote', 'add', 'origin', remote]);
+    // Seed only A and its parent. B must be fetched by the production procedure.
+    const pack = execFileSync(realGit, ['--git-dir', remote, 'pack-objects', '--stdout', '--revs'], { env, input: (startsRebased ? rebased : original) + '\n', timeout: 10000 });
+    execFileSync(realGit, ['unpack-objects'], { cwd: scratch, env, input: pack, timeout: 10000 });
+    git(['checkout', '--quiet', '--detach', startsRebased ? rebased : original]);
+    const seedDir = mkdtempSync(join(tmpdir(), 'hammer-git-seed-'));
+    cpSync(remote, join(seedDir, 'remote.git'), { recursive: true });
+    cpSync(scratch, join(seedDir, 'scratch'), { recursive: true });
+    gitSeeds.set(seedKey, { dir: seedDir, ancestor, original, base, rebased, foreign, nextBase, nextRebased });
+  }
   writeFileSync(join(dir, 'state.json'), JSON.stringify({ original, rebased, base, foreign, nextBase, nextRebased, head: startsRebased ? rebased : original, behind: true }));
   writeFileSync(join(dir, 'details'), 'Synthetic surface repaired.\n');
   writeFileSync(join(dir, 'terminal-remediation.json'), JSON.stringify({ active: true,

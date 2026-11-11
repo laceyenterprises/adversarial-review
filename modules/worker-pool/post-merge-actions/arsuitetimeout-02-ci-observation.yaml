@@ -1,0 +1,16 @@
+operator_steps:
+  - description: >-
+      SRE observes the next five ordinary adversarial-review PR test runs and
+      the ordinary main test runs containing this change. Both npm test
+      (Node 22) and npm test (Node 26) must complete successfully in at most
+      approximately 450 seconds, with no suite timeouts. Retain the run links,
+      Node versions and test-step durations in the ARSUITETIMEOUT-02 PR.
+      Do not trigger workflows or change live configuration.
+    run_as: designated SRE
+    command: >-
+      gh run list --workflow test.yml --limit 20
+      --json databaseId,headSha,event,headBranch,conclusion,url
+actions: []
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

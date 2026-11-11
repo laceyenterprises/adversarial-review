@@ -39,6 +39,7 @@ test('runner isolates inherited roots and credentials, ignores exhausted home qu
         HCP_BEARER_TOKEN: 'fixture-bearer-token',
         HCP_TOKEN_PATH: join(fixture, 'host-token'),
         HCP_BASE_URL: 'https://fixture.invalid',
+        NODE_COMPILE_CACHE: join(fixture, 'host-compile-cache'),
         GIT_DIR: join(fixture, 'host.git'),
         GIT_WORK_TREE: fixture,
         AGENT_OS_WORKER_RUN_AS_USER: 'fixture-primary-worker',
@@ -62,7 +63,9 @@ test('runner isolates inherited roots and credentials, ignores exhausted home qu
       assert.equal(reports.length, 2);
       assert.equal(new Set(reports.map(({ root }) => root)).size, 2, 'each file must get a different HQ root');
       assert.equal(new Set(reports.map(({ home }) => home)).size, 2, 'each file must get a different home');
+      assert.equal(new Set(reports.map(({ tmp }) => tmp)).size, 2, 'each file must get a different temporary directory');
       for (const observed of reports) {
+        assert.equal(existsSync(observed.tmp), false, 'the file temporary directory must be removed after exit');
         assert.notEqual(observed.root, inheritedRoot);
         assert.notEqual(observed.root, secondaryRoot);
         assert.notEqual(observed.home, home);

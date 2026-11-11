@@ -688,7 +688,7 @@ test('pipeline Sentinel findings are diagnostics, never pages', () => {
 
 function openDb(rootDir) {
   const db = openReviewStateDb(rootDir);
-  ensureReviewStateSchema(db);
+  db.transaction(() => ensureReviewStateSchema(db))();
   return db;
 }
 

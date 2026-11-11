@@ -1,8 +1,9 @@
 // A real test-file process, also selected by the runner integration test.
+import './helpers/rate-limit-state-isolation.mjs';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { realpathSync, renameSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { readdirSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import test from 'node:test';
 import { resolveHqRoot } from '../src/hq-root.mjs';
@@ -10,6 +11,11 @@ import { spawnReviewer } from '../src/reviewer-spawn-settle.mjs';
 
 test('runner gives the shared HQ resolver canonical roots inside its sandbox', () => {
   const root = resolveHqRoot();
+  for (const prefix of ['hq-', 'home-']) {
+    assert.equal(readdirSync(process.env.ADVERSARIAL_REVIEW_TEST_CWD, { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && entry.name.startsWith(prefix)).length, 1,
+      'preload and test imports must initialize the isolation guard once');
+  }
   assert.equal(process.env.HQ_ROOT, process.env.AGENT_OS_HQ_ROOT);
   assert.equal(process.env.AGENT_OS_WORKER_RUN_AS_USER, undefined);
   assert.equal(process.env.HQ_WORKER_RUN_AS_USER, undefined);
@@ -43,8 +49,15 @@ test('runner gives the shared HQ resolver canonical roots inside its sandbox', (
   });
   assert.equal(child.status, 0, child.stderr || child.error?.message);
   assert.deepEqual(JSON.parse(child.stdout), { HQ_ROOT: root });
+  // Extensionless CommonJS commands must not inherit the checkout's ESM package.
+  const commonJs = join(tmpdir(), 'commonjs-probe');
+  writeFileSync(commonJs, `const os = require('node:os'); process.stdout.write(os.tmpdir());`);
+  const fixture = spawnSync(process.execPath, [commonJs], { encoding: 'utf8', timeout: 5_000 });
+  assert.equal(fixture.status, 0, fixture.stderr);
+  assert.equal(fixture.stdout, tmpdir());
+  assert.equal(process.env.NODE_COMPILE_CACHE, undefined);
   if (process.env.HQ_ROOT_FIXTURE_REPORT) {
-    writeFileSync(join(process.env.HQ_ROOT_FIXTURE_REPORT, `${process.pid}.json`), JSON.stringify({ root, home: homedir(), deployCheckout }));
+    writeFileSync(join(process.env.HQ_ROOT_FIXTURE_REPORT, `${process.pid}.json`), JSON.stringify({ root, home: homedir(), tmp: tmpdir(), deployCheckout }));
   }
 });
 

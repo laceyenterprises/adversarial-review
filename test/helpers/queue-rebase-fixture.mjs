@@ -1,5 +1,7 @@
+import Database from 'better-sqlite3';
+import { ensureFinalizationQueueSchema } from '../../src/finalization/queue-store.mjs';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { cpSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { openFinalizationQueueStore } from './queue-fixture-store.mjs';
@@ -11,6 +13,11 @@ import { resolveQueueGitAdapter } from '../../src/finalization/queue-git.mjs';
 import { queueCleanFixture, queueLiveFixture } from './queue-clean-fixture.mjs';
 import { handoffTime, queueHandoffFixture } from './queue-handoff-fixture.mjs';
 export const idle = { enabled: false };
+// File-private, pristine Git seeds. Copy ordinary objects (no hardlinks or
+// alternates) before each case so production mutations cannot cross fixtures.
+const seeds = new Map();
+const cleanSeeds = () => { for (const { root } of seeds.values()) rmSync(root, { recursive: true, force: true }); };
+process.once('exit', cleanSeeds);
 export function localGit(cwd, args, input) {
   return execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', ...args], {
     cwd, encoding: 'latin1', timeout: 10000, input, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
@@ -23,23 +30,41 @@ export function localGit(cwd, args, input) {
 export function gitFixture(t, { second = false, conflict = false, noop = false, empty = false, sharedFile = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'mgq-rebase-'));
   const source = join(root, 'source'), remote = join(root, 'remote.git');
-  mkdirSync(source);
   const g = args => localGit(source, args);
-  g(['init', '-b', 'main']);
   const file = (name, data) => writeFileSync(join(source, name), data);
   const commit = message => { g(['add', '--all']); g(['commit', '-m', message]); return g(['rev-parse', 'HEAD']); };
-  const lines = Array.from({ length: 20 }, (_, i) => `line ${i}\n`);
-  file('content', sharedFile ? lines.join('') : 'initial\n'); file('base', 'initial\n'); file('INDEX.md', 'initial\n');
-  const fork = commit('initial');
-  g(['checkout', '-b', 'topic']); file('content', sharedFile ? ['reviewed\n', ...lines.slice(1)].join('') : 'reviewed\n');
-  let oldHead = commit('reviewed change\n\nWorker-Class: builder');
-  if (second) { file('another', 'second\n'); oldHead = commit('second change'); }
-  if (empty) { g(['commit', '--allow-empty', '-m', 'empty']); oldHead = g(['rev-parse', 'HEAD']); }
-  g(['checkout', 'main']);
-  let base = fork;
-  if (!noop) { file(sharedFile || conflict ? 'content' : 'base', sharedFile ? [...lines.slice(0, -1), 'upstream\n'].join('') : 'upstream\n'); base = commit('base advanced'); }
-  g(['init', '--bare', remote]);
-  g(['push', remote, 'main', 'topic']);
+  const key = JSON.stringify([second, conflict, noop, empty, sharedFile]);
+  let fork, base, oldHead;
+  const seed = seeds.get(key);
+  if (seed) {
+    cpSync(join(seed.root, 'source'), source, { recursive: true });
+    cpSync(join(seed.root, 'remote.git'), remote, { recursive: true });
+    cpSync(join(seed.root, 'data'), join(root, 'data'), { recursive: true });
+    ({ fork, base, oldHead } = seed);
+  } else {
+    mkdirSync(source);
+    g(['init', '-b', 'main']);
+    const lines = Array.from({ length: 20 }, (_, i) => `line ${i}\n`);
+    file('content', sharedFile ? lines.join('') : 'initial\n'); file('base', 'initial\n'); file('INDEX.md', 'initial\n');
+    fork = commit('initial');
+    g(['checkout', '-b', 'topic']); file('content', sharedFile ? ['reviewed\n', ...lines.slice(1)].join('') : 'reviewed\n');
+    oldHead = commit('reviewed change\n\nWorker-Class: builder');
+    if (second) { file('another', 'second\n'); oldHead = commit('second change'); }
+    if (empty) { g(['commit', '--allow-empty', '-m', 'empty']); oldHead = g(['rev-parse', 'HEAD']); }
+    g(['checkout', 'main']);
+    base = fork;
+    if (!noop) { file(sharedFile || conflict ? 'content' : 'base', sharedFile ? [...lines.slice(0, -1), 'upstream\n'].join('') : 'upstream\n'); base = commit('base advanced'); }
+    g(['init', '--bare', remote]);
+    g(['push', remote, 'main', 'topic']);
+    mkdirSync(join(root, 'data'));
+    const db = new Database(join(root, 'data', 'reviews.db'));
+    try { db.transaction(() => ensureFinalizationQueueSchema(db))(); } finally { db.close(); }
+    const seedRoot = mkdtempSync(join(tmpdir(), 'mgq-seed-'));
+    cpSync(source, join(seedRoot, 'source'), { recursive: true });
+    cpSync(remote, join(seedRoot, 'remote.git'), { recursive: true });
+    cpSync(join(root, 'data'), join(seedRoot, 'data'), { recursive: true });
+    seeds.set(key, { root: seedRoot, fork, base, oldHead });
+  }
   let store = openFinalizationQueueStore({ rootDir: root });
   t.after(() => { store.close(); rmSync(root, { recursive: true, force: true }); });
   let clock = handoffTime(0);

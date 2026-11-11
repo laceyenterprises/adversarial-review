@@ -1,0 +1,17 @@
+# AR-local manual handoff. From Agent OS this file is under
+# tools/adversarial-review/modules/worker-pool/post-merge-actions/.
+# Registering/copying a plan in the superproject runner root remains follow-up;
+# this source PR does not establish automated discovery or deployment.
+operator_steps:
+  - description: >-
+      After the normal AR float and watcher restart, verify the watcher PID
+      start time. Over 24 hours, require no new failed-orphan rows with the
+      family eligibility failure message where the run record shows an eligible
+      builder/reviewer pair. Retain the loaded revision, process start time and
+      observation evidence. No worker live action is authorized.
+    run_as: SRE operator
+    command: >-
+      Follow the existing deployment and service-owner procedures in
+      docs/RUNBOOK-ama-closure.md, then inspect natural reviewer recovery
+      outcomes against post-merge-verify.json reviewerReattachLaunch for 24 hours.
+actions: []

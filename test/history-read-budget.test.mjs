@@ -278,9 +278,9 @@ test('production child executor preserves stdout, diff exit 1 and bounded output
     'setInterval(() => {}, 1000)'], { timeout: 50 }), error => error.killed && error.signal === 'SIGKILL');
 });
 
-test('an injected diff ignoring abort cannot strand scratch cleanup', { timeout: 2000 }, async () => {
+test('an injected diff ignoring abort cannot strand scratch cleanup', { timeout: 5000 }, async () => {
   let directory;
-  const get = createHistoryReader({ contextTimeoutMs: 100,
+  const get = createHistoryReader({ contextTimeoutMs: 1000,
     execGhWithRetryImpl: async ({ args }) => ({ stdout: JSON.stringify(value(args[1])) }),
     diffImpl: (_command, _args, options) => { directory = options.cwd; return never(); } });
   await assert.rejects(get(`repos/fixture/repo/compare/${base}...${head}`), { code: 'HISTORY_READ_TIMEOUT' });

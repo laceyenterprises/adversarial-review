@@ -106,7 +106,8 @@ test('load timeout defers audit, releases the exact lease and recovers without a
   const audit = readAmaAuditEntry(root, env.HAM_REPO, 7, head);
   assert.equal(audit.status, 'deferred');
   assert.equal(audit.attempts.at(-1).overloadEvidence.load_multiplier, 6);
-  recordHammerEarlyFailure('procedure-step-failed', { env, final: true });
+  assert.throws(() => recordHammerEarlyFailure('procedure-step-failed', { env, final: true }),
+    { code: 'HAM_CLOSER_CORRECTION_REQUIRED' });
   assert.equal(readAmaAuditEntry(root, env.HAM_REPO, 7, head).status, 'deferred');
   assert.equal(existsSync(join(root, 'dispatch/lrq_synthetic/hammer-progress/wrun_synthetic/terminal-stop.json')), false);
   assert.equal(releaseMergeLeaseForRetryableAbort({ rootDir: root, ...lease.lease,

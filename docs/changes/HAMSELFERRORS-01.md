@@ -60,3 +60,13 @@ after removing a redundant sentence to retain the 60 KiB limit.
 `git diff --check` pass. Rebase declaration conflicts preserve both trunk's lease
 liveness and this PR's self-error recovery entries in both JSON declarations.
 No full local suite or live acceptance was run.
+
+Hammer CI repair updates offline fixtures to distinguish closer-owned deferred
+faults from authoritative world-fact stops, preserves unknown-reason diagnostics,
+and exercises all three self-error refunds before exhaustion. Isolated helper
+fixtures include the stop-origin dependency, alert delivery stays synthetic, and
+the diff-timeout fixture permits process startup before testing bounded cleanup.
+The smoke handoff uses a registered world-fact reason. These repairs preserve
+production behavior and required exact-head CI gates. Targeted regression tests,
+lint (zero errors), contract typechecking and the byte-equivalence demo pass;
+no full local suite was run.

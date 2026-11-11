@@ -350,8 +350,9 @@ for (const reviewedHead of ['invalid', 'a'.repeat(39), 'z'.repeat(40)]) {
     assert.match(result.stdout, /release-retryable=reviewed-head-unavailable/);
     assert.match(result.stdout, /note=HAM closing status — no merge\. Reviewed starting base SHA was invalid or unavailable; released for the next hammer pass\./);
     assert.deepEqual(f.comments(), []);
-    assert.equal(f.audit().status, 'failed-without-merge');
+    assert.equal(f.audit().status, 'deferred');
     assert.equal(f.audit().attempts.at(-1).reason, 'reviewed-head-unavailable');
+    assert.equal(f.audit().attempts.at(-1).stopOrigin, 'closer');
     assert.equal(existsSync(join(f.dir, 'range.json')), false);
     assert.doesNotMatch(result.stdout + result.stderr, /exact-head-review-required/);
   });

@@ -939,13 +939,8 @@ test('maybeDispatchAmaCloser records confirmed hammer launches in the retry-cap 
 
   assert.equal(result.dispatched, true);
   assert.equal(deps.execCalls.length, 1);
-  assert.deepEqual(
-    deps.execCalls[0].args.slice(
-      deps.execCalls[0].args.indexOf('--worker-id'),
-      deps.execCalls[0].args.indexOf('--worker-id') + 2,
-    ),
-    ['--worker-id', REVIEWED_HAMMER_WORKER_ID],
-  );
+  const workerId = deps.execCalls[0].args[deps.execCalls[0].args.indexOf('--worker-id') + 1];
+  assert.match(workerId, new RegExp(`^${REVIEWED_HAMMER_WORKER_ID}-[a-f0-9]{12}$`));
   const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
   assert.equal(ledger.jobKey, REVIEWED_HEAD);
   assert.equal(ledger.attemptCount, 1);
@@ -955,7 +950,7 @@ test('maybeDispatchAmaCloser records confirmed hammer launches in the retry-cap 
     prNumber: PR_NUMBER,
     headSha: REVIEWED_HEAD,
   });
-  assert.equal(record.workerId, REVIEWED_HAMMER_WORKER_ID);
+  assert.equal(record.workerId, workerId);
 });
 
 test('maybeDispatchAmaCloser dispatches comment-only terminal unknown non-blocking findings after grace', async (t) => {
@@ -2004,10 +1999,8 @@ test('succeeded old-head hammer dispatch ignores stale concurrent-writer error',
 
   assert.equal(result.dispatched, true);
   assert.equal(result.launchRequestId, 'lrq_new_head');
-  assert.deepEqual(
-    launchedArgs.slice(launchedArgs.indexOf('--worker-id'), launchedArgs.indexOf('--worker-id') + 2),
-    ['--worker-id', ADVANCED_HAMMER_WORKER_ID],
-  );
+  const workerId = launchedArgs[launchedArgs.indexOf('--worker-id') + 1];
+  assert.match(workerId, new RegExp(`^${ADVANCED_HAMMER_WORKER_ID}-[a-f0-9]{12}$`));
   const oldLease = readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
   assert.equal(oldLease.status, AMA_CLOSER_LEASE_STATUS.TERMINAL);
   assert.equal(oldLease.terminalOutcome, 'failed-without-merge');
@@ -2026,7 +2019,7 @@ test('succeeded old-head hammer dispatch ignores stale concurrent-writer error',
   assert.equal(currentRecord.headSha, ADVANCED_HEAD);
   assert.equal(currentRecord.reviewedSha, REVIEWED_HEAD);
   assert.equal(currentRecord.launchRequestId, 'lrq_new_head');
-  assert.equal(currentRecord.workerId, ADVANCED_HAMMER_WORKER_ID);
+  assert.equal(currentRecord.workerId, workerId);
   assert.equal(currentRecord.state, 'dispatched');
 });
 

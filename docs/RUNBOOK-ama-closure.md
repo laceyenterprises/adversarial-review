@@ -22,6 +22,9 @@ random attempt suffix. Terminal launch/retry-chain evidence releases closure
 ownership independently of retained-directory teardown. Cleanup retains its
 existing authority; a retained directory cannot block the next closer or queued
 re-review. Live, parked, unreadable and replacement launch ownership still holds.
+If launch receipts are missing, custody probes the predecessor lease's stored
+worker ID, including its attempt suffix. Live or unreadable evidence preserves
+that lease unchanged so later ticks inspect the same slot.
 An existing head-matched exact-head review request reaches ordinary review
 admission ahead of a terminal closer retry; safety refusals and retry ceilings
 retain precedence.

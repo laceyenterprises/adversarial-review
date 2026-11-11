@@ -7846,8 +7846,9 @@ async function maybeDispatchAmaCloserAttempt({
 
   // Retained custody must not erase a lease-held receipt: the next tick
   // re-probes the same launch rather than falling back to worker evidence.
-  const restorePredecessorCloserLease = () => Boolean(predecessorLease?.lrqId
-    && predecessorLease.workerId === custodyWorkerId
+  const predecessorWorkerId = predecessorLease?.workerId || custodyWorkerId || workerId;
+  const restorePredecessorCloserLease = () => Boolean(predecessorLease?.workerId
+    && predecessorLease.workerId === predecessorWorkerId
     && restoreAmaCloserLeaseIfCurrent(rootDir, predecessorLease, { expectedLease: leaseResult.lease }));
 
   // Allocate only for a lease-owning launch attempt.
@@ -7866,9 +7867,9 @@ async function maybeDispatchAmaCloserAttempt({
       const predecessorLaunch = custodyLaunchRequestId
         || (terminalLeaseReclaimed ? predecessorLease?.lrqId : null);
       const predecessor = (predecessorLaunch
-        || existsSync(selfOwnedHammerCloserWorktreePath(prNumber, hqRoot, workerId)))
+        || existsSync(selfOwnedHammerCloserWorktreePath(prNumber, hqRoot, predecessorWorkerId)))
         ? await resolveSelfOwnedHammerCloserRunLiveness({
-          prNumber, hqRoot, workerId, launchRequestId: predecessorLaunch,
+          prNumber, hqRoot, workerId: predecessorWorkerId, launchRequestId: predecessorLaunch,
           readLaunchRequestStatusImpl, env, readWorkerDispatchFilesImpl,
           readWorkerObservationImpl, readLatestWorkerRunStatusImpl, processKillImpl,
           launchReadOptions: { rootDir, signal,
@@ -7879,7 +7880,7 @@ async function maybeDispatchAmaCloserAttempt({
         : await reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
           liveness: predecessor,
           repo, prNumber, headSha: targetRemediationSha, noLaunchRecord,
-          workerClass, workerId, hqPath, hqRoot, execFileImpl, logger, env,
+          workerClass, workerId: predecessorWorkerId, hqPath, hqRoot, execFileImpl, logger, env,
           readWorkerDispatchFilesImpl, readWorkerObservationImpl, readLatestWorkerRunStatusImpl, processKillImpl,
           launchRequestId: custodyLaunchRequestId, readLaunchRequestStatusImpl,
           launchReadOptions: { rootDir, signal,

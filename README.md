@@ -2095,7 +2095,10 @@ lease outcome and one mismatch diagnostic; existing smoke promises are unchanged
 
 [state-machines.json](state-machines.json) declares owned lifecycle objects
 and related operational verification records, including launch custody
-freshness and queue maintenance holds. Custody ingestion requires an existing,
+freshness and queue maintenance holds. Receipt-less closer custody probes the
+predecessor lease's stored worker ID, including its attempt suffix, and preserves
+that lease on live or unknown evidence so later ticks inspect the same slot.
+Custody ingestion requires an existing,
 owner-matched app store and does not advance queue merge eligibility currency.
 GSR receipts distinguish absent stores, accepted drains and released holds;
 token mismatches exit nonzero without changing the hold.

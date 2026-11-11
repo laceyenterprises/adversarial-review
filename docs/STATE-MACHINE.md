@@ -115,6 +115,9 @@ Reviewed the dispatch producer guards and refreshed its state projection: receip
 identity, predecessor restoration and bounded unknown-evidence accounting retain
 the existing hammer-dispatch states and transitions. Closing-decision and CI
 ownership precedence remain unchanged.
+Receipt-less predecessor probes use the stored suffixed worker ID and restore
+the unchanged predecessor lease on live or unknown evidence, retaining the
+same slot identity across ticks.
 
 RGY-04 selections retain durable backlog provenance after release. Automatic
 claims exclude selected rows and automatic dispatch skips selected prepared

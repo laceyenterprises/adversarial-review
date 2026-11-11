@@ -7,12 +7,11 @@ merge with HAM provenance; the machine gate is mandatory.
 
 ## Operating core — execute the next action
 
-The phase scripts ARE the procedure. Run them as instructed; act on exit code and stderr.
-Do not read, grep or analyze their source. If an outcome is unclear,
-stop with its printed reason.
+Run phase scripts as instructed; follow exit codes and stderr.
+Never inspect their source. If unclear, stop with printed reason.
 
-Before PR reads/edits, check only existence. Missing scripts require a fresh
-AMA dispatch/lease; never reconstruct them:
+Before PR reads/edits, check existence only. Missing scripts require fresh
+AMA dispatch/lease; never reconstruct:
 
 ```bash
 source "<<ROOT_DIR>>/bin/hammer-node-runtime.sh" || exit 1
@@ -385,7 +384,8 @@ Strict:
 ```json
 {"kind":"non-blocking","findingNumber":1,"path":"src/example.mjs","startLine":2,"endLine":2,"editKind":"author-lines"}
 ```
-Omitted `reviewedHead` uses the pin; for a review on another head, set it to that review's `commit_id`.
+`reviewedHead`: pin by default; cross-head: review's `commit_id`.
+One object/invocation; invoke once/finding.
 Blocking in-place: `editKind: "in-place"`. Run B1 owner setup through `fi`:
 
 ```bash
@@ -405,8 +405,9 @@ elif [ "$HAM_EDIT_RC" != 0 ]; then
 fi
 ```
 
-Exit 0 permits edits; 21: NO EDIT, never a conflict. Correct JSON once/run across
-plans; keep marker. Second refusal exits 1. Never retry policy refusals.
+Only exit 0 permits edits; 21: NO EDIT, never conflict. Correct JSON using listed
+findings and field feedback once/run across all plans; keep marker.
+Second refusal exits 1. Never retry policy refusals.
 Non-blocking in-place: on 21 re-plan as `additive`.
 Out-of-range: on 21 use a cited range or `additive` preserving author lines.
 Exit 20 records the non-blocking finding in the backlog

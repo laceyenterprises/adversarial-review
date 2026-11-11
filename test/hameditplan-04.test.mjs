@@ -56,10 +56,9 @@ test('CLI corrects only uncovered author-lines and allows within-range or additi
       const input = JSON.stringify(candidate);
       writeFileSync(planFile, input);
       const result = await main(['sample/service', '7', '1', planFile], dependencies);
-      assert.deepEqual(result, {
-        action: 'correct', reason: 'not-covered-by-cited-finding',
-        message: `correctable: plan region ${region.path}:${region.startLine}-${region.endLine} is outside the cited finding's ranges ${citedRanges}; re-plan within a cited range, or as editKind=additive if no existing author line is removed or replaced`,
-      });
+      assert.equal(result.action, 'correct');
+      assert.equal(result.reason, 'not-covered-by-cited-finding');
+      assert.ok(result.message.startsWith(`correctable: plan region ${region.path}:${region.startLine}-${region.endLine} is outside the cited finding's ranges ${citedRanges}; re-plan within a cited range, or as editKind=additive if no existing author line is removed or replaced`));
       assert.equal(editPlanExitCode(result), 21);
       assert.equal(readFileSync(planFile, 'utf8'), input);
     }
@@ -96,7 +95,7 @@ test('out-of-range author-lines never allow across policy, citation, CI flag and
               assert.equal(result.action, 'correct');
               assert.equal(result.reason, 'edit-kind-invalid');
             } else if (kind === 'unknown' || kind === undefined || findingNumber !== 1) {
-              assert.equal(result.action, 'stop');
+              assert.equal(result.action, 'correct');
             } else if (kind === 'non-blocking' && !strictNonBlockingRemediation) {
               assert.equal(result.action, 'defer');
             } else if (candidateReview !== review) {

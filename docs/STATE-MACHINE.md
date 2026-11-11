@@ -2378,6 +2378,14 @@ Key control points:
   re-plan within a cited range or as `additive` without removing or replacing
   author lines. The uncovered author-line plan never allows an edit; terminal
   evidence and policy outcomes remain unchanged.
+  HAMEDITPLAN-05 classifies every edit-plan error by origin. Plan JSON syntax,
+  non-object/array shape, malformed head, citation, edit-kind and location mistakes
+  receive exit 21 with both parsed finding sections and field-specific feedback.
+  Use one object per invocation, once per finding for multiple edits. The existing
+  run-wide correction marker allows one re-plan; a second refusal stops without
+  editing. Review/run faults remain terminal, including head mismatches, untrusted
+  reviewers, invalid states/verdicts and invalid run pins. Correction grants no edit
+  permission and does not change reversal authorization or backlog deferral.
   HAMLINES-01 reads all cited ranges, including legacy approximate,
   multi-range and symbol-qualified forms; approximate endpoints stay exact.
   Leading range lists stop before explanatory notes; numbers in prose or symbol

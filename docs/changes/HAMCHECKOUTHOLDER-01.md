@@ -28,4 +28,8 @@ After deployment, AR float and an authorized watcher/follow-up restart, SRE
 verifies PID start times and observes 24 hours with zero closer
 `checkout-failed` with a terminal holder and zero terminal-holder
 already-checked-out provision refusals. See the
-[operator plan](../post-merge-actions/hamcheckoutholder-01.yaml).
+[operator plan](../../modules/worker-pool/post-merge-actions/hamcheckoutholder-01.yaml).
+
+The operator plan uses the publication tool’s required
+`modules/worker-pool/post-merge-actions/` path; it is an operator-step declaration,
+with no new runtime worker-pool implementation in this repository.

@@ -50,7 +50,7 @@ for (const failure of [false, true]) test(`exclusive phase completes before para
   `);
   const config = path.join(root, 'config.json'), report = path.join(root, 'report.json');
   writeFileSync(config, JSON.stringify({ files, paths, logDir: root, reportPath: report,
-    nodeArgs: ['--test'], serialFiles: ['serial.mjs'], parallelFiles: files.slice(1), concurrency: 2 }));
+    nodeArgs: [], serialFiles: ['serial.mjs'], parallelFiles: files.slice(1), concurrency: 2 }));
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
   const child = spawnSync(process.execPath, [helper, config],
@@ -70,12 +70,14 @@ for (const failure of [false, true]) test(`real parallel processes report every 
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const files = ['b.mjs', 'a.mjs'];
   const paths = Object.fromEntries(files.map((file) => [file, path.join(root, file)]));
-  writeFileSync(paths['a.mjs'], `console.log('fixture-a'); process.exitCode = ${failure ? 9 : 0};`);
-  writeFileSync(paths['b.mjs'], "console.log('fixture-b');");
+  const preload = path.join(root, 'preload.mjs');
+  writeFileSync(preload, 'globalThis.parallelFixturePreloaded = true;');
+  const assertPreloaded = "import assert from 'node:assert/strict'; assert.equal(globalThis.parallelFixturePreloaded, true);";
+  writeFileSync(paths['a.mjs'], `${assertPreloaded} console.log('fixture-a'); process.exitCode = ${failure ? 9 : 0};`);
+  writeFileSync(paths['b.mjs'], `${assertPreloaded} console.log('fixture-b');`);
   const reportPath = path.join(root, 'report.json');
   const config = path.join(root, 'config.json');
-  writeFileSync(config, JSON.stringify({ files, paths, logDir: root, nodeArgs: ['--test', '--test-concurrency=1', '--test-reporter',
-      path.join(import.meta.dirname, 'helpers', 'parallel-reporter.mjs')], reportPath,
+  writeFileSync(config, JSON.stringify({ files, paths, logDir: root, nodeArgs: ['--import', preload], reportPath,
     parallelFiles: files, concurrency: 2 }));
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
@@ -138,7 +140,7 @@ test('native scheduling overlaps files within the configured worker bound', (t) 
   `);
   const config = path.join(root, 'config.json');
   writeFileSync(config, JSON.stringify({ files, paths, logDir: root,
-    nodeArgs: ['--test'], parallelFiles: files, concurrency: 2 }));
+    nodeArgs: [], parallelFiles: files, concurrency: 2 }));
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
   const child = spawnSync(process.execPath, [helper, config],
@@ -173,7 +175,7 @@ for (const failure of [false, true]) test(`exclusive phase preserves aggregate o
   `);
   const config = path.join(root, 'config.json'), reportPath = path.join(root, 'report.json');
   writeFileSync(config, JSON.stringify({ files, paths, logDir: root, reportPath,
-    nodeArgs: ['--test'], serialFiles: ['serial.mjs'], parallelFiles: files.slice(1), concurrency: 2 }));
+    nodeArgs: [], serialFiles: ['serial.mjs'], parallelFiles: files.slice(1), concurrency: 2 }));
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
   const child = spawnSync(process.execPath, [helper, config],

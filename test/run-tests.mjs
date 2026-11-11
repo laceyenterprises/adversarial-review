@@ -161,7 +161,6 @@ try {
       '--preserve-symlinks', '--preserve-symlinks-main',
       ...['child-leak-guard', 'rate-limit-state-isolation', 'load-aware-timeout-fixture', 'temp-sandbox-guard']
         .flatMap((name) => ['--import', path.join('test', 'helpers', `${name}.mjs`)]),
-      '--test', '--test-concurrency=1', '--test-reporter', path.join(testDir, 'helpers', 'parallel-reporter.mjs'),
     ],
   }));
   console.error(`Test plan: ${files.length} files, ${serialFiles.length} exclusive, ${concurrency} parallel workers in measured order (maximum ${MAX_WORKERS}).`);

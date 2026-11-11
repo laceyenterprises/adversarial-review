@@ -32,9 +32,10 @@ operations and assertions remain intact, including real process timeout tests.
 
 `npm test` remains the full-suite entrypoint. Exact paths or basenames passed to
 `node test/run-tests.mjs` select files. `AR_TEST_TIMINGS=/absolute/path.json`
-records per-file wall times, exit statuses, native test counts and total worker
-wall time. Relative report paths resolve against the caller's working directory
-before entering the disposable sandbox. Node's engine floor is now 22.10,
+records per-file wall times, exit statuses, native test counts and total suite
+wall-clock time (`wallMs`, the coordinator's elapsed time). Relative report paths
+resolve against the caller's working directory before entering the disposable
+sandbox. Node's engine floor is now 22.10,
 the first Node 22 release with native `run({ execArgv })` support; process
 isolation support arrived in 22.8. The native API receives the ordered file
 list and concurrency directly, without unused shard partitions.
@@ -160,3 +161,20 @@ per-command bound. This includes all 168 watcher claim-loop tests.
 The installed `scripts/ci-mirror/run-ci-mirror.py` passed the CDM re-derivation
 audit and contract typecheck, deferring its slow full-suite check normally;
 this repository does not vendor that script. `git diff --check` passed.
+
+### PR 1826 comment-only remediation
+
+Clarified that the timing report's `wallMs` measures total suite wall-clock
+time, matching the README. Removed unused test CLI/reporter arguments from
+the generated coordinator configuration; the coordinator now consumes the
+worker arguments directly. Runner fixtures use the same configuration shape
+and verify that every worker imports its configured preload.
+
+On Node 26.10.0, the focused parallel-runner, HQ-root runner and temporary
+sandbox guard suites passed all 13 tests with no failures or skips, using
+`bash bin/run-bounded.sh --timeout 120 -- node test/run-tests.mjs
+parallel-runner.test.mjs hq-root-runner.test.mjs temp-sandbox-guard.test.mjs`.
+Repository lint passed with zero errors (149 existing warnings), changed-file
+ESLint passed, contract typechecking and the offline byte-equivalence demo
+passed, and `git diff --check` passed. Full-suite validation remains with
+PR-head CI.

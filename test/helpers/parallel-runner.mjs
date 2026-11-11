@@ -8,7 +8,7 @@ import parallelReporter from './parallel-reporter.mjs';
 const config = JSON.parse(readFileSync(process.argv[2], 'utf8'));
 const started = performance.now();
 const reportPath = path.join(config.logDir, 'native-report.json');
-const workerArgs = config.nodeArgs.slice(0, config.nodeArgs.indexOf('--test'));
+const workerArgs = config.nodeArgs;
 const preloads = [], execArgv = [];
 for (let i = 0; i < workerArgs.length; i++) {
   if (workerArgs[i] === '--import') preloads.push(workerArgs[++i]);

@@ -4824,3 +4824,56 @@ for (const scenario of [
   assert.equal(result.overloadDeferral.deferralCount, scenario.count);
   assert.equal(result.attemptCount, scenario.charged);
 });
+
+test('HAMSELFERRORS-01: real dispatch refunds historical harness stops, preserves all budgets and parks/pages once at the per-head cap', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'synthetic-self-error-dispatch-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD };
+  let launches = 0, endedLaunch = null, pages = 0;
+  const deps = hammerDispatchDeps({
+    readLaunchRequestStatusImpl: ({ launchRequestId }) => ({ ok: true,
+      row: { status: launchRequestId === endedLaunch ? 'succeeded' : 'running' } }),
+    execFileImpl: async (_cmd, argv) => {
+      if (argv[0] === 'dispatch' && argv[1] === 'status') return { stdout: '{"status":"succeeded"}' };
+      if (argv[0] === 'dispatch' && argv[1] === '--priority') return { stdout: JSON.stringify({
+        ticketRef: `AMA-PR-${PR_NUMBER}`, launchRequestId: `synthetic-self-error-${++launches}`,
+        dispatchId: `synthetic-self-error-dispatch-${launches}` }) };
+      return { stdout: '{}' };
+    },
+    deliverAlertImpl: async (_text, options) => {
+      if (options?.event === 'ama_closer.self_error_exhausted') pages++;
+      return { ok: true };
+    },
+  });
+  const at = seconds => new Date(Date.parse('2026-01-01T00:00:00Z') + seconds * 1000).toISOString();
+  const run = seconds => maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, { dispatchContext: { dispatchedAt: at(seconds) } }), ...deps,
+  });
+  assert.equal((await run(0)).dispatched, true);
+  for (let count = 1; count <= 3; count++) {
+    const now = count * 600;
+    endedLaunch = readAmaCloserDispatchRecord(rootDir, identity).launchRequestId;
+    writeAmaAuditEntry({ hqRoot: join(rootDir, 'hq-root'), ...identity, now: at(now),
+      attempt: { outcome: 'failed-without-merge', reason: 'controller-setup-failed',
+        attemptPhase: 'hammer-early-exit', launchRequestId: endedLaunch } });
+    const result = await run(now);
+    assert.equal(result.dispatched, count < 3, JSON.stringify(result));
+    assert.notEqual(result.reason, 'dispatch-retry-exhausted');
+    const ledger = readHammerRetryCapLedger(rootDir, identity);
+    for (const key of ['attemptCount', 'targetAttemptCount', 'lifetimeAttemptCount']) {
+      assert.equal(ledger[key], count < 3 ? 1 : 0, 'only the active replacement is charged: ' + key);
+    }
+    assert.equal(ledger.selfErrorRefunds[REVIEWED_HEAD].length, count);
+    assert.equal(readAmaCloserDispatchRecord(rootDir, identity).unexecutedRefundCount, count);
+    if (count === 3) {
+      assert.equal(result.reason, 'closer-self-error-budget-exhausted');
+      for (const poll of [now + 1, now + 1000, now + 10000]) {
+        const repeated = await run(poll);
+        assert.equal(repeated.dispatched, false);
+        assert.equal(repeated.reason, 'closer-self-error-budget-exhausted');
+      }
+    }
+  }
+  assert.equal(launches, 3);
+  assert.equal(pages, 1);
+});

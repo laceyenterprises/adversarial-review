@@ -5,6 +5,14 @@ import { HAMMER_RETRYABLE_READ_OUTCOMES, hammerPhaseAttempt } from './hammer-pha
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from '../atomic-write.mjs';
+import { hammerStopOrigin, closerFaultRecovery } from './hammer-stop-origin.mjs';
+
+export class CloserCorrectionRequired extends Error {
+  constructor(reason) {
+    super(`Correct the closer's ${reason} once using the canonical helper usage, then retry; no edit or merge is authorized.`);
+    this.code = 'HAM_CLOSER_CORRECTION_REQUIRED';
+  }
+}
 
 // CLOSERGATES-01: a merge conflict found at closure is repairable work, not a
 // terminal outcome. Each conflicting head this run reaches is counted in its
@@ -60,6 +68,12 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
     if (heads && heads.length < CONFLICT_REPAIR_BUDGET) throw new RepairableConflictError(heads.length);
     if (heads) reason = CONFLICT_REPAIR_EXHAUSTED;
   }
+  const originalReason = reason;
+  let origin;
+  try { origin = hammerStopOrigin(reason); }
+  catch { reason = 'stop-reason-unregistered'; origin = 'closer'; }
+  const parts = reason.split(':');
+  reason = origin === 'closer' && parts[0] === 'review-evidence-invalid' ? parts[1] : parts[0];
   const identity = {
     hqRoot: env.HAM_HQ_ROOT || env.HQ_ROOT,
     repo: env.HAM_REPO,
@@ -70,7 +84,12 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
     try { recordHammerPhase(reason, { env }); } catch { /* Diagnostic capture cannot block the original failure. */ }
     if (final === true && !HAMMER_RETRYABLE_READ_OUTCOMES.has(reason)) reportHammerProgress('terminal-stop', { env, reason, final });
   };
+  const requireCorrection = () => {
+    if (origin === 'closer' && final === true
+      && closerFaultRecovery(reason, { env }) === 'correct') throw new CloserCorrectionRequired(reason);
+  };
   if (!identity.hqRoot || !identity.repo || !identity.prNumber || !identity.headSha) {
+    requireCorrection();
     recordPhaseAndFinal();
     return null;
   }
@@ -80,10 +99,11 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
     (launchRequestId ? attempt.launchRequestId === launchRequestId
       : !attempt.launchRequestId && attempt.attemptPhase === 'hammer-early-exit') &&
     ['succeeded', 'failed-without-merge', 'superseded', 'deferred'].includes(attempt.outcome));
+  // A world refusal wins over a later generic controller failure.
+  if (!prior || prior.outcome === 'deferred') requireCorrection();
   // A later authoritative fence overrides an observation failure. Generic
   // wrapper exits still preserve the phase's original failure receipt.
-  const authoritativeFence = ['controller-cancelled', 'controller-owner-lost', 'head-changed',
-    'rebase-conflict', 'github-gate-red', 'predicate-not-eligible', CONFLICT_REPAIR_EXHAUSTED].includes(reason);
+  const authoritativeFence = origin === 'world';
   if (prior && !(authoritativeFence && prior.outcome === 'deferred'
     && HAMMER_RETRYABLE_READ_OUTCOMES.has(prior.reason))) {
     if (final === true && prior.outcome === 'failed-without-merge') {
@@ -96,9 +116,10 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
   recordPhaseAndFinal();
   return appendAmaAuditAttempt({
     ...identity,
-    attempt: hammerPhaseAttempt({ outcome: 'failed-without-merge', reason, launchRequestId,
+    attempt: hammerPhaseAttempt({ outcome: 'failed-without-merge', reason, stopOrigin: origin, launchRequestId,
+      ...(originalReason !== reason ? { reasonDetail: originalReason } : {}),
       attemptPhase: 'hammer-early-exit', ...(overloadEvidence ? { overloadEvidence } : {}) }),
-    metadata: { closureAuthority: 'ham-terminal-remediation' },
+    metadata: { closureAuthority: 'ham-terminal-remediation', stopOrigin: origin },
   });
 }
 
@@ -112,7 +133,7 @@ export function reportHammerEarlyFailure(reason, options) {
   }
   try { return recordHammerEarlyFailure(reason, options); }
   catch (error) {
-    if (error instanceof RepairableConflictError) {
+    if (error instanceof RepairableConflictError || error instanceof CloserCorrectionRequired) {
       process.stderr.write(`HAM: ${error.message}; not recorded as a stop\n`);
       return null;
     }

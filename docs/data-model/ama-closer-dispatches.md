@@ -1,5 +1,12 @@
 # Data Model - AMA Closer Dispatch Records
 
+HAMSELFERRORS-01 adds optional `selfErrorRefundedLaunchRequestId`, the last
+ended closer launch whose harness fault received an atomic retry-ledger refund.
+Together with `unexecutedRefundCount`, this preserves the monotonic reviewer-pass
+`retryCount` while subtracting the refunded charge at redispatch admission. The
+receipt deduplicates reconciliation across ticks and process restarts.
+
+
 **Owner:** AMA closer dispatch and recovery
 **Store:** `data/follow-up-jobs/ama-closer-dispatches/`
 **Source of truth:** `src/ama/dispatch-closer.mjs`

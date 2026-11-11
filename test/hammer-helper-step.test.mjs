@@ -81,7 +81,7 @@ test('a permanent refusal is never retried and retains its original reason and e
   const audit = new URL('../src/ama/hammer-terminal-audit.mjs', import.meta.url).href;
   const result = await fixture(t, `const {reportHammerEarlyFailure} = await import(${JSON.stringify(audit)});
 reportHammerEarlyFailure('git-credential-refresh-failed');
-console.error('permission denied'); process.exitCode = 76;`);
+console.error('permission denied'); process.exitCode = 76;`, { scaled: true });
   assert.equal(result.code, 76);
   assert.equal(result.calls, 1);
   assert.deepEqual(result.reports, ['git-credential-refresh-failed']);
@@ -213,7 +213,9 @@ test('durable timeout diagnostics survive a later generic outer-phase failure', 
   reportHammerEarlyFailure('procedure-step-failed', { env });
   const audit = readAmaAuditEntry(dir, 'fixture/repo', 42, head);
   assert.equal(audit.attempts.length, 1);
-  assert.equal(audit.attempts[0].reason, reason);
+  assert.equal(audit.attempts[0].reason, 'base-head-timeout');
+  assert.equal(audit.attempts[0].reasonDetail, reason);
+  assert.equal(audit.attempts[0].outcome, 'deferred');
 });
 
 test('production sizing passes an effective ceiling through the CLI under pinned high load', t => {

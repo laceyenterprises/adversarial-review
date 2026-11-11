@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { MAX_TIMER_DELAY_MS } from '../src/load-aware-timeout.mjs';
 import { isLoadTimeout, OVERLOAD_DEFERRED } from '../src/overload-deferral.mjs';
 import { writeFileAtomic } from '../src/atomic-write.mjs';
+import { HAMMER_CLOSER_FAULTS, closerFaultRecovery } from '../src/ama/hammer-stop-origin.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -126,7 +127,9 @@ export async function runHelperStep({ mode, step, nominal, ceiling, command, arg
       // Keep API publication receipts even on failure. Never replay a mutation.
       stdout(output);
       let reason = `${step}-failed`;
-      try { reason = readFileSync(reasonFile, 'utf8').trim(); } catch { /* No child audit. */ }
+      let childReason = false;
+      try { reason = readFileSync(reasonFile, 'utf8').trim(); childReason = true; } catch { /* No child audit. */ }
+      if (result.code === 64) reason = 'helper-input-invalid';
       if (timeout) reason = `${step}-timeout:budget-${seconds}s:load-${multiplierMilli}-milli:attempts-${attempt}`;
       if (isLoadTimeout({ timedOut: timeout, deadlineSeconds: seconds,
         scaledBudgetSeconds: seconds, loadMultiplier: seconds / nominal })) {
@@ -140,9 +143,18 @@ export async function runHelperStep({ mode, step, nominal, ceiling, command, arg
         stderr(`HAM helper outcome=${OVERLOAD_DEFERRED} phase=${step}; same closer owner retries later\n`);
         return 75;
       }
+      if ((childReason || result.code === 64) && HAMMER_CLOSER_FAULTS.has(reason)) {
+        const action = closerFaultRecovery(reason, { env, operation: step });
+        // The helper's own diagnostics contain its exact expected usage.
+        // A correction requests new inputs; it never repeats a mutation.
+        stderr(`HAM ${action}: ${reason}; use the printed canonical usage; no edit or merge authorized\n`);
+        if (action === 'correct') return 21;
+        if (reportsFailure) await report(reason, { env });
+        return 75;
+      }
       stderr(`HAM helper failure reason=${reason}\n`);
-      // 20 = semantic stop; 21 = repairable conflict. Their owners have already
-      // selected the outcome, possibly at a newer head than the dispatch head.
+      // 20 = semantic stop; 21 = repairable conflict or plan correction.
+      // Their owners select the outcome; typed closer faults were handled above.
       if (reportsFailure && ![20, 21].includes(result.code)) await report(reason, { env });
       return result.code;
     } finally {

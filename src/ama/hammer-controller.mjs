@@ -470,14 +470,25 @@ export async function runHammerController(script, args = [], {
   };
   // Two full reads always fit, even when load stretches each read's timeout.
   const unreadableAfter = () => Math.max(unreadableGraceMs, launchPollMs + 2 * latestReadTimeoutMs);
+  let ready = false;
   try {
     writeFileAtomic(recordPath, `${JSON.stringify(withReads(), null, 2)}\n`, { mode: 0o600, overwrite: false });
     child.stdin.on('error', () => stop('bootstrap-failed'));
     // Check introspection before permitting any script/lease side effects.
-    const initialMembers = await snapshotImpl(child.pid);
-    if (!initialMembers.some(member => member.pid === child.pid)) throw new Error('controller shell identity unavailable');
+    let initialMembers;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        initialMembers = await snapshotImpl(child.pid);
+        if (!initialMembers.some(member => member.pid === child.pid)) throw new Error('controller shell identity unavailable');
+        break;
+      } catch (error) {
+        if (attempt === 1) throw error;
+        console.error('hammer-controller: controller setup observation failed; retrying once before readiness');
+      }
+    }
     for (const member of initialMembers) witnessed.set(member.pid, member.birth);
     child.stdin.end('ready\n');
+    ready = true;
     while (true) {
       const now = nowImpl();
       if (spawnError) { stop('spawn-failed'); drained = true; break; }
@@ -569,6 +580,9 @@ export async function runHammerController(script, args = [], {
     catch { record.leaseCleanup = { released: false, reason: 'lease-cleanup-failed' }; }
     persist();
     if (record.leaseCleanup.reason === 'lease-cleanup-failed' || record.leaseCleanup.reason === 'mutation-lock-busy') return 125;
+    if (drained && reason === 'shell-exited' && status !== 0) {
+      reportHammerEarlyFailure('controller-shell-ended', { env });
+    }
     return drained && reason === 'shell-exited' ? status : drained ? 143 : 125;
   } catch (error) {
     // Bootstrap has not released stdin if initial registration/probing failed.
@@ -607,6 +621,7 @@ export async function runHammerController(script, args = [], {
       catch { record.leaseCleanup = { released: false, reason: 'lease-cleanup-failed' }; }
     }
     try { persist(); } catch { /* Keep the original registration if disk failed. */ }
+    if (!ready) reportHammerEarlyFailure('controller-setup-failed', { env });
     return 125;
   } finally {
     closing.abort();

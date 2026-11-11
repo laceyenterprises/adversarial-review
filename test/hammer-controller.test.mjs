@@ -1682,7 +1682,7 @@ test('bootstrap failure drains the controller group while readiness read is bloc
     env: f.env, pollMs: 5, graceMs: 30, drainMs: 100,
     readLaunchImpl: async () => launch('running'), spawnImpl: () => child,
     snapshotImpl() {
-      if (++snapshots === 1) throw new Error('synthetic bootstrap census failure');
+      if (++snapshots <= 2) throw new Error('synthetic bootstrap census failure');
       return alive ? [{ pid: 4242, birth: 'fixture-birth' }] : [];
     },
     signalGroupImpl(pgid, signal) {
@@ -1726,7 +1726,7 @@ for (const mode of ['owned-group', 'refused-group', 'unreadable-census']) {
       readLaunchImpl: async () => launch('running'), spawnImpl: () => child,
       snapshotImpl() {
         assert.equal(child.stdin.readableLength, 0, 'ready was never released');
-        if (++snapshots === 1 || mode === 'unreadable-census') throw new Error('synthetic census failure');
+        if (++snapshots <= 2 || mode === 'unreadable-census') throw new Error('synthetic census failure');
         return killedAt !== undefined && now - killedAt >= 15 ? [] : [{ pid: 4242, birth: 'fixture-birth' }];
       },
       signalGroupImpl(pgid, signal) {
@@ -1756,3 +1756,19 @@ for (const mode of ['owned-group', 'refused-group', 'unreadable-census']) {
     }
   });
 }
+
+test('HAMSELFERRORS-01: controller setup retries once before readiness and continues the same controller', async t => {
+  let probes = 0, ended = false;
+  const sim = simulate(t, { reads: () => launch('running'),
+    onTick(sim) { ended = true; sim.exit(0); },
+    snapshotImpl() {
+      if (++probes === 1) throw new Error('synthetic transient setup failure');
+      return ended ? [] : [{ pid: 4242, birth: 'fixture-birth' }];
+    } });
+  const result = await sim.done;
+  assert.equal(result.status, 0);
+  assert.equal(result.receipt.reason, 'shell-exited');
+  assert.equal(result.receipt.drained, true);
+  assert.ok(probes >= 3);
+  assert.deepEqual(sim.signals, []);
+});

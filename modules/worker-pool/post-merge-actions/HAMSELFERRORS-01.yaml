@@ -1,0 +1,15 @@
+operator_steps:
+  - description: >-
+      After the ordinary adversarial-review float and watcher/follow-up restart,
+      verify both PID start times and kickstart through the registered service
+      owner if either bounce was skipped. Over 24 hours of natural traffic,
+      require no closer ending terminal on a closer-originated reason without
+      correction or retry and no PR reaching retry-exhausted on harness faults
+      alone. Retain deployed revision, PID start times, origin/correction/refund
+      receipts and any once-per-head exhaustion page in the incident report.
+      This is SRE-only work; the coding worker makes no live changes.
+    run_as: SRE operator
+    command: >-
+      Follow docs/RUNBOOK-ama-closure.md and retain the 24-hour HAMSELFERRORS-01
+      acceptance receipt in the companion SEV2 incident report.
+actions: []

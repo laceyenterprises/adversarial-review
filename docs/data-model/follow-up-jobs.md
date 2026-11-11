@@ -389,11 +389,13 @@ validated reply. Refusal keeps the retained evidence on the next pending round.
 The temporary `<jobPath>.round-recovery.delivery.lock` uses the existing
 five-minute delivery-claim format (`claimer`, `claimedAt`); publication
 subprocesses share a two-minute deadline and release the claim on exit.
-Spent terminal rounds hand findings to the hammer,
-including when no head was published. A completely missing initial job can
-be created once through the existing review claim from exact-head review
-evidence, branch and base branch. No new lifecycle status or round allowance
-is introduced.
+Spent terminal execution rounds and budget stops hand findings to the hammer,
+including when no head was published. Operator-owned holds, safety refusals,
+and closure-handoff jobs do not transfer custody merely because a round claim
+reached the ceiling. A completely missing initial job stays with the reviewer
+or reviewer-pass reaper, which can recover the persisted single-review
+decision and PR-wide round budget before creation. No new lifecycle status
+or round allowance is introduced.
 
 ## Branch and publication contract (REMEDBRANCH-01)
 

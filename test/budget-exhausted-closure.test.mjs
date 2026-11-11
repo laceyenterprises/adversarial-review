@@ -78,9 +78,13 @@ test('REMEDIATEEXEC-01: rescue projects a spent unpublished attempt to closure',
     headSha, owner: 'hammer', reason: 'budget-exhausted-closure',
   });
   assert.deepEqual(f.row(), before);
-  writeFileSync(path, JSON.stringify({ ...job,
-    remediationPlan: { ...job.remediationPlan, stop: { code: 'operator-stop' } } }));
-  assert.equal(budgetExhaustedClosureEvidence(input), null, 'new budget proof cannot release an operator stop');
+  for (const code of ['operator-stop', 'subject-refused', 'builder-cannot-remediate-own-pr']) {
+    writeFileSync(path, JSON.stringify({ ...job,
+      remediationPlan: { ...job.remediationPlan, stop: { code } } }));
+    assert.equal(budgetExhaustedClosureEvidence(input), null, `${code} cannot release an operator hold`);
+  }
+  writeFileSync(path, JSON.stringify({ ...job, status: 'failed', failure: { code: 'branch-contamination' } }));
+  assert.equal(budgetExhaustedClosureEvidence(input), null, 'safety refusal cannot release a hold');
   writeFileSync(path, JSON.stringify(job));
   // Live ownership always precedes admission, even when terminal history is newer.
   const active = join(f.root, 'data/follow-up-jobs/in-progress');

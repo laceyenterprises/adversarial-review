@@ -1,7 +1,7 @@
 import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -15,10 +15,14 @@ import { publishRemediation } from '../src/remediation-publication.mjs';
 import { completeWorkerPublishedHead } from '../src/remediation-published-head.mjs';
 import { acquireAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { recoveryDigest } from '../src/comment-only-recovery-record.mjs';
+import { remediationBudgetHandoffAllowed } from '../src/remediation-round-recovery.mjs';
 
 const HEAD = 'a'.repeat(40), AT = '2026-01-01T00:00:00.000Z', NOW = '2026-01-01T00:10:00.000Z';
 const BODY = '## Blocking issues\n- **Incorrect result**\n  - **Problem:** incorrect result.\n\n## Non-blocking issues\n- None.\n\n## Verdict\nRequest changes\n';
 const quiet = { log() {}, warn() {} };
+test('absent job cannot authorize budget handoff', () => {
+  assert.equal(remediationBudgetHandoffAllowed(null), false);
+});
 function fixture(t, overrides = {}) {
   const rootDir = mkdtempSync(join(tmpdir(), 'remediateexec-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -82,16 +86,16 @@ test('an older queued owner wins over the latest terminal record', async t => {
   assert.equal(readFollowUpJob(f.jobPath).status, 'stopped');
 });
 
-test('missing initial follow-up is created once from exact-head review evidence', async t => {
+test('missing initial follow-up is left to the reviewer reaper with its budget evidence', async t => {
   const f = fixture(t);
   rmSync(f.jobPath);
   const options = { ...f.options, missingJobInput: { repo: f.job.repo, prNumber: 42,
     branch: 'topic', baseBranch: 'main', revisionRef: HEAD, reviewerModel: 'codex',
-    reviewPostedAt: AT, reviewBody: BODY } };
-  const first = await recoverEndedRemediationRound(options);
-  assert.equal(first.recreated, true, JSON.stringify(first));
-  assert.equal(readFollowUpJob(first.jobPath).remediationPlan.currentRound, 0);
-  assert.equal((await recoverEndedRemediationRound(options)).recreated, false);
+    reviewPostedAt: AT, reviewBody: BODY, singleReview: { applied: true, basis: 'super-small' } } };
+  const result = await recoverEndedRemediationRound(options);
+  assert.equal(result.recreated, false);
+  assert.equal(result.reason, 'no-prior-job');
+  assert.equal(existsSync(f.jobPath), false);
 });
 
 test('a live closer lease prevents round recovery', async t => {
@@ -228,7 +232,8 @@ test('shared watcher, wake and rescue agree across findings, remaining budgets a
       followUpJob: { ...f.job, status: live ? 'in_progress' : 'stopped',
         reReview: { nextAction: { action: previousAction, head: HEAD } },
         lastHeartbeatAt: new Date().toISOString(), remediationWorker: { state: 'running' },
-        remediationPlan: { currentRound: left ? 1 : 2, maxRounds: 2 } },
+        remediationPlan: { currentRound: left ? 1 : 2, maxRounds: 2,
+          stop: { code: 'committed-unpublished' } } },
       strictMode: true, lease: null, launchRecord: null },
     { autonomousMergeExecutionEnabled: true, candidate: { state: 'OPEN', headSha: HEAD } });
     const snapshot = deriveNextActionSnapshot({ subjectKey: 'fixture/repo#42', head: HEAD, observedAt: NOW,
@@ -259,8 +264,15 @@ test('a terminal budget does not grant automatic handoff over explicit operator 
   const f = fixture(t);
   for (const hold of [
     { status: 'stopped', remediationPlan: { currentRound: 2, maxRounds: 2, stop: { code: 'operator-stop' } } },
+    { status: 'stopped', remediationPlan: { currentRound: 2, maxRounds: 2, stop: { code: 'subject-refused' } } },
+    { status: 'stopped', remediationPlan: { currentRound: 2, maxRounds: 2,
+      stop: { code: 'builder-cannot-remediate-own-pr' } } },
+    { status: 'failed', failure: { code: 'branch-contamination' },
+      remediationPlan: { currentRound: 2, maxRounds: 2 } },
     { status: 'failed', failure: { code: 'worker-failure', needsOperator: true },
       remediationPlan: { currentRound: 2, maxRounds: 2 } },
+    { status: 'stopped', closureHandoff: { reason: 'final-fix-all', headSha: HEAD },
+      remediationPlan: { currentRound: 2, maxRounds: 2, stop: { code: 'no-progress' } } },
   ]) {
     const evidence = closureOwnerShadowEvidence({ currentHead: HEAD, roundsLeft: true,
       reviewState: { headSha: HEAD, verdict: 'request-changes', attestation: 'valid',

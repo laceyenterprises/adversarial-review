@@ -930,10 +930,12 @@ normal cross-model convergence loop; do not admin-merge this change.
 Ended unpublished or failed remediation rounds re-enter the existing follow-up
 queue while their ordinary round budget remains. Recovery verifies and tries
 retained work through the guarded publisher first, preserves spent rounds and
-backoff, and grants no operator override. A terminal attempt at its round
+backoff, and grants no operator override. A terminal execution attempt at its round
 ceiling hands findings to the hammer even without a published head; watcher,
 wake and read-only rescue use the same budget evidence. Live owners and
-explicit stops retain precedence. Scoped disposable fixtures verify these
+operator-owned or safety stops retain precedence. Initial missing-job creation
+stays with the reviewer/reaper so single-review and PR-wide budget evidence
+is included. Scoped disposable fixtures verify these
 transitions; deployed acceptance requires the SRE observation declared in the
 post-merge plan. Existing smoke commands are unchanged.
 

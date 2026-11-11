@@ -968,11 +968,11 @@ async function recoverEndedRemediationRound(options) {
   return recovery.recoverEndedRemediationRound(options);
 }
 
-async function recoverMissingRemediationJob({ recoverImpl, rootDir, repoPath, prNumber, decision, strictMode, nowMs, logger, missingJobInput }) {
+async function recoverMissingRemediationJob({ recoverImpl, rootDir, repoPath, prNumber, decision, strictMode, nowMs, logger }) {
   if (typeof recoverImpl !== 'function') return null;
   let recovery;
   try {
-    recovery = await recoverImpl({ rootDir, repo: repoPath, prNumber, headSha: decision?.head, strictMode, missingJobInput,
+    recovery = await recoverImpl({ rootDir, repo: repoPath, prNumber, headSha: decision?.head, strictMode,
       now: new Date(Number.isFinite(nowMs) ? nowMs : Date.now()).toISOString() });
   } catch (error) {
     logger?.warn?.(`[watcher] remediation-job-missing recovery failed for ${repoPath}#${prNumber}: ${error.message}`);
@@ -2470,11 +2470,7 @@ async function dispatchAmaClosureFor({
     } catch (error) { logger?.warn?.(`[watcher] next-action observation failed: ${error.message}`); }
     const remediationJobRecovery = decision.action === 'remediate' && !hasLiveRemediationJob(shared.snapshot)
       ? await recoverMissingRemediationJob({ recoverImpl: recreateMissingRemediationJobImpl, rootDir, repoPath,
-        prNumber, decision, strictMode: cfg?.strictMode !== false, nowMs: now(), logger,
-        missingJobInput: { reviewBody: gateSnapshot.settledReview?.reviewBody,
-          revisionRef: reviewState.headSha, reviewPostedAt: reviewState.postedAt,
-          reviewerModel: reviewStateRow?.reviewer, branch: candidate.branch, baseBranch: candidate.baseBranch,
-          riskClass: reviewState.riskClass } }) : null;
+        prNumber, decision, strictMode: cfg?.strictMode !== false, nowMs: now(), logger }) : null;
     return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
       reason: remediationJobRecovery?.completed ? 'remediation-publication-completed' : decision.action === 'review' ? 'handed-to-review'
         : hasLiveRemediationJob(shared.snapshot) || remediationJobRecovery?.recreated
@@ -2734,11 +2730,7 @@ async function dispatchAmaClosureFor({
     } catch (error) { logger?.warn?.(`[watcher] next-action observation failed: ${error.message}`); }
     const remediationJobRecovery = decision.action === 'remediate' && !hasLiveRemediationJob(shared.snapshot)
       ? await recoverMissingRemediationJob({ recoverImpl: recreateMissingRemediationJobImpl, rootDir, repoPath,
-        prNumber, decision, strictMode: cfg?.strictMode !== false, nowMs: now(), logger,
-        missingJobInput: { reviewBody: gateSnapshot.settledReview?.reviewBody,
-          revisionRef: reviewState.headSha, reviewPostedAt: reviewState.postedAt,
-          reviewerModel: reviewStateRow?.reviewer, branch: candidate.branch, baseBranch: candidate.baseBranch,
-          riskClass: reviewState.riskClass } }) : null;
+        prNumber, decision, strictMode: cfg?.strictMode !== false, nowMs: now(), logger }) : null;
     return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
       reason: remediationJobRecovery?.completed ? 'remediation-publication-completed' : decision.action === 'review' ? 'handed-to-review' : decision.action === 'remediate'
         ? hasLiveRemediationJob(shared.snapshot) || remediationJobRecovery?.recreated

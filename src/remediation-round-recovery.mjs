@@ -14,16 +14,20 @@ export function isRemediationRoundBudgetSpent(plan) {
 
 // Exhaustion transfers repair custody; it never supplies operator consent.
 export function remediationBudgetHandoffAllowed(job) {
-  return ['completed', 'failed', 'stopped'].includes(job?.status)
-    && job.remediationPlan?.stop?.code !== 'operator-stop'
+  return Boolean(job) && !job.closureHandoff
     && job.failure?.needsOperator !== true
+    && (job.status === 'completed'
+      || (job.status === 'stopped'
+        && (STOPS.has(job.remediationPlan?.stop?.code)
+          || ['max-rounds-reached', 'round-budget-exhausted'].includes(job.remediationPlan?.stop?.code)))
+      || (job.status === 'failed' && FAILURES.has(job.failure?.code)))
     && isRemediationRoundBudgetSpent(job.remediationPlan);
 }
 
 export function isEndedRemediationRound(job) {
   const round = Number(job?.remediationPlan?.currentRound);
   const max = Number(job?.remediationPlan?.maxRounds);
-  return job?.failure?.needsOperator !== true
+  return !job?.closureHandoff && job?.failure?.needsOperator !== true
     && Number.isInteger(round) && round > 0 && Number.isInteger(max) && round < max
     && (job.status === 'stopped' ? STOPS.has(job.remediationPlan?.stop?.code)
       : job.status === 'failed' && FAILURES.has(job.failure?.code));

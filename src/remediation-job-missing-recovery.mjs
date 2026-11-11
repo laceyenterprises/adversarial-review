@@ -64,7 +64,6 @@ export function recreateMissingRemediationJob({
   requeueImpl = followUpJobs.requeueFollowUpJobForNextRound,
   publicationRecovery = null,
   expectedDigest = null,
-  missingJobInput = null,
 } = {}) {
   const head = text(headSha);
   if (!rootDir || !text(repo) || !Number.isInteger(Number(prNumber)) || !head) {
@@ -82,13 +81,10 @@ export function recreateMissingRemediationJob({
       return skipped(`latest-job-${['pending', 'in_progress'].includes(job?.status) ? job.status : 'active-owner'}`, job);
     }
     if (!job) {
-      if (!missingJobInput?.reviewBody || missingJobInput.revisionRef !== head
-        || !missingJobInput.branch || !missingJobInput.baseBranch) return skipped('no-prior-job');
-      const classification = followUpJobs.classifyFollowUpCriticality(missingJobInput.reviewBody);
-      if (followUpJobs.isSettledCleanClassification(classification, { strictMode })) return skipped('review-settled-clean');
-      const created = followUpJobs.createFollowUpJob({ ...missingJobInput, rootDir, repo, prNumber });
-      return { recreated: Boolean(created.job), reason: created.job ? 'created-missing-job' : 'review-already-queued',
-        jobId: created.job?.jobId || created.duplicateOf?.jobId || null, jobPath: created.jobPath };
+      // The reviewer/reaper owns initial creation: it has the persisted
+      // single-review decision and PR-wide budget inputs. An exact-head body
+      // alone cannot safely recreate that budget.
+      return skipped('no-prior-job');
     }
     if (expectedDigest && recoveryDigest(job) !== expectedDigest) return skipped('job-evidence-changed', job);
     const endedRound = isEndedRemediationRound(job);

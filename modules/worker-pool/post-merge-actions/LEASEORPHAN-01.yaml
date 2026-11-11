@@ -1,0 +1,16 @@
+operator_steps:
+  - description: >-
+      SRE: after both LEASEORPHAN-01 PRs deploy and the review service floats,
+      restart watcher and follow-up through their registered service paths and
+      verify PID start times. Observe natural traffic for 24 hours: no rescue
+      lease-left with a dead submitter; no dead same-host unlaunched closer or
+      merge-lane lease surviving a complete holder-observation rotation
+      (closer batches read at most 50 records per watcher pass); no confirmed-merged PR
+      closeout decision. Retain revision, process and observation receipts.
+      This plan authorizes no worker live mutation.
+    run_as: designated SRE operator
+    command: /bin/cat docs/changes/LEASEORPHAN-01.md
+actions: []
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

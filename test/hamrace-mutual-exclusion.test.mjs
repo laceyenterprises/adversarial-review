@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { acquireAmaCloserLease, isHeldAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { claimNextFollowUpJob } from '../src/follow-up-jobs.mjs';
@@ -35,15 +35,15 @@ test('legacy pending job without a revision ref defers while a closer owns the P
   assert.equal(claimNextFollowUpJob({ rootDir }), null);
 });
 
-test('pending closer lease retains legacy expiry and honors its persisted dispatch deadline', (t) => {
+test('foreign pending closer lease retains legacy expiry and honors its persisted dispatch deadline', (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hamrace-pending-expiry-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const identity = { repo: 'o/r', prNumber: 10, headSha: 'pending-head' };
-  acquireAmaCloserLease({ rootDir, ...identity, now: '2026-09-27T00:00:00.000Z' });
+  acquireAmaCloserLease({ rootDir, ...identity, host: `${hostname()}.foreign`, now: '2026-09-27T00:00:00.000Z' });
   assert.equal(isHeldAmaCloserLease(rootDir, identity, { now: '2026-09-27T00:30:00.000Z' }), true);
   assert.equal(isHeldAmaCloserLease(rootDir, identity, { now: '2026-09-27T00:31:00.000Z' }), false);
   const custom = { repo: 'o/r', prNumber: 11, headSha: 'long-launch' };
-  acquireAmaCloserLease({ rootDir, ...custom, dispatchTimeoutMs: 20 * 60 * 1000,
+  acquireAmaCloserLease({ rootDir, ...custom, host: `${hostname()}.foreign`, dispatchTimeoutMs: 20 * 60 * 1000,
     now: '2026-09-27T00:00:00.000Z' });
   assert.equal(isHeldAmaCloserLease(rootDir, custom, { now: '2026-09-27T00:20:00.000Z' }), true);
   assert.equal(isHeldAmaCloserLease(rootDir, custom, { now: '2026-09-27T00:20:00.001Z' }), false);

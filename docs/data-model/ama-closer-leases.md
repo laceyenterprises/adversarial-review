@@ -7,6 +7,16 @@
 
 ## Unreceipted intents (LAC-2081)
 
+LEASEORPHAN-01 shares the process-identity predicate with merge-lane leases.
+Same-host death/reuse triggers the existing pre-receipt submitter scan and
+exact-idempotency-key reconciliation immediately, including rescue's post-exit
+probe. A uniquely matching launch is bound as `lrqId`; proven dead submission
+with an empty key result terminalizes the unchanged lease as `deferred`.
+Unknown local liveness never authorizes age-only abandonment. Confirmed-merged
+terminal controllers release merge-lane and closer custody and write the success
+audit before terminal scratch cleanup; no new PR-bound dispatch or decision is
+needed. Durable lease status values are unchanged.
+
 A `dispatching` intent now prevents the stale-lease reaper from releasing its
 lease or refunding a presumed phantom attempt. The keyed native reconciler may
 promote a matching dead-owner pending lease after receipt proof, or terminalize

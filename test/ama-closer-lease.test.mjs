@@ -466,7 +466,7 @@ test('CLOSERLEASEDEAD-01 bounds uncertain ownership and checks holder identity',
     assert.equal(abandonedAmaCloserLeaseOutcome(lease, { ...opts, isProcessAlive,
       now: Date.parse(acquiredAt) + 60_000 }), null);
     assert.equal(abandonedAmaCloserLeaseOutcome(lease, { ...opts, isProcessAlive,
-      now: Date.parse(acquiredAt) + 60_001 }), 'abandoned-timeout');
+      now: Date.parse(acquiredAt) + 60_001 }), null, 'unknown local identity cannot expire by age');
   }
   const expired = { ...opts, now: Date.parse(acquiredAt) + 60_001,
     isProcessAlive: () => assert.fail('no process probe required') };

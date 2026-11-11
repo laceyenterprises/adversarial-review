@@ -2508,7 +2508,18 @@ and retain their own complete status projection.
 Unproven refusals consume the existing bounded failure budget. Prompts are unique
 per attempt. Malformed metadata cannot break unrelated chain reads; incomplete
 retry evidence retains the base status but prevents cleanup and re-dispatch.
-Terminal retry chains still permit cleanup. Repository fallback inputs share the
+Terminal retry chains permit cleanup after closure custody settles. For a
+confirmed-merged PR, local recovery releases the merge-lane and closer leases
+and records the closing audit before removing scratch; an ended controller
+requires no further PR-bound dispatch or operator decision (LEASEORPHAN-01).
+Per-poll closer death observation reads at most 50 records from a 250-entry
+lexical page and persists its own cursor across ticks and restarts; large
+histories require multiple batches. Directory-name enumeration remains complete.
+Age pruning has an independent cursor. Merge-lane inspection is read-only;
+acquisition and reaper observation own fenced dead-holder reclamation. Ordinary successful reconciliation
+preserves the worker audit reason; `confirmed-merged-closeout` identifies only
+parked-controller merge discovery.
+Repository fallback inputs share the
 same ownership identity, including PR-number fallbacks from dispatch context,
 PR metadata and top-level input; interrupted admission preserves the current PR's deferred predecessor artifacts;
 other PRs' terminal scratch is reclaimed immediately. Unlaunched attempts remove
@@ -3149,7 +3160,7 @@ stateDiagram-v2
 
 CLOSERLEASEDEAD-01 records `abandoned-holder-dead` or `abandoned-timeout` for
 launch-less pending leases with a confirmed absent/reused same-host watcher PID
-or an elapsed dispatch timeout when liveness is unconfirmed. Local leases record
+or an elapsed dispatch timeout on a foreign host. Unknown same-host identity retains custody. Closer and merge-lane leases share one host/PID/start-time liveness predicate (LEASEORPHAN-01). Local leases record
 optional `watcherStartedAt`; exact start mismatch proves PID reuse even before
 acquisition (DEADWATCHERLEASE-01). Confirmed live owners survive expiry; reclaim
 audit names the old PID and start identity. The existing startup sweep runs once

@@ -40,8 +40,15 @@ function fixture(t) {
   return root;
 }
 
+function settleScratchLease(root, terminalOutcome = 'failed-without-merge') {
+  const identity = { repo: 'fixture/repo', prNumber: 42, headSha: head };
+  updateAmaCloserLease({ rootDir: root, ...identity, status: 'terminal', terminalOutcome });
+  // A later terminal-record observation retries its idempotent cleanup.
+  updateAmaCloserDispatchRecord(root, identity, current => current);
+}
+
 for (const state of ['unreadable', 'OPEN']) {
-  test(`HAMTMP-05: terminal launch records status and cleans scratch while ${state} PR evidence retains lease`, t => {
+  test(`LEASEORPHAN-01: terminal launch records status and retains scratch while ${state} PR evidence retains lease`, t => {
     const root = fixture(t);
     const identity = { repo: 'fixture/repo', prNumber: 42, headSha: head };
     const now = '2026-10-01T00:00:00Z';
@@ -62,7 +69,7 @@ for (const state of ['unreadable', 'OPEN']) {
     assert.equal(record.lastObservedStatus, 'unverified-terminal-success');
     assert.equal(record.terminalLaunchStatus, 'succeeded');
     assert.equal(record.lastObservedAt, now);
-    assert.equal(existsSync(scratchDir), false);
+    assert.equal(existsSync(scratchDir), true, 'closeout scripts outlive the lease they must release');
   });
 }
 
@@ -225,7 +232,7 @@ test('HAMTMP-01: prompt composition preserves an omitted scratch directory for d
 });
 
 for (const status of ['succeeded', 'failed', 'canceled', 'reaped_stuck_requested']) {
-  test(`HAMTMP-01: dispatch renders one private directory and ${status} run cleanup removes it`, async t => {
+  test(`LEASEORPHAN-01: ${status} run cleanup waits for explicit lease settlement`, async t => {
     const root = fixture(t);
     const result = await maybeDispatchAmaCloser({ ...dispatchArgs(root),
       execFileImpl: async () => ({ stdout: JSON.stringify({ ticketRef: 'AMA-PR-42', launchRequestId: 'synthetic-lrq', dispatchId: 'synthetic-dispatch' }) }) });
@@ -240,6 +247,8 @@ for (const status of ['succeeded', 'failed', 'canceled', 'reaped_stuck_requested
     await reconcileAmaCloserDispatches(root, { ...options, dryRun: true });
     assert.equal(existsSync(record.scratchDir), true);
     await reconcileAmaCloserDispatches(root, options);
+    assert.equal(existsSync(record.scratchDir), true);
+    settleScratchLease(root);
     assert.equal(existsSync(record.scratchDir), false);
     const terminalRecord = JSON.parse(readFileSync(path));
     assert.equal(terminalRecord.terminalLaunchStatus, status);
@@ -333,6 +342,8 @@ test('HAMTMP-01: a launch with an ambiguous response retains scratch until termi
   assert.equal(existsSync(record.scratchDir), true);
   await reconcileAmaCloserDispatches(root, { logger,
     readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'failed' } }) });
+  assert.equal(existsSync(record.scratchDir), true);
+  settleScratchLease(root);
   assert.equal(existsSync(record.scratchDir), false);
 });
 
@@ -505,6 +516,8 @@ test('HAMTMP-02: hammer spawn inherits private TMPDIR and terminal cleanup remov
   assert.equal(result.dispatched, true, JSON.stringify(result));
   await reconcileAmaCloserDispatches(root, { logger,
     readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }) });
+  assert.equal(existsSync(scratchDir), true);
+  settleScratchLease(root, 'succeeded');
   assert.equal(existsSync(scratchDir), false);
 });
 
@@ -575,6 +588,8 @@ test('SCRATCHRACE-01: a terminal retry chain still removes predecessor scratch',
   const ledgerTarget = launchRetryFixture(root, 'succeeded');
   const reconciled = await reconcileAmaCloserDispatches(root, { logger, ledgerTarget });
   assert.equal(reconciled.changed, 1);
+  assert.equal(existsSync(scratchDir), true);
+  settleScratchLease(root);
   assert.equal(existsSync(scratchDir), false);
 });
 
@@ -606,7 +621,7 @@ test('RETRYCHAIN-01: PostgreSQL terminal retry chains allow a fresh hammer dispa
   assert.ok(chainReads > 0);
   assert.equal(result.dispatched, true, JSON.stringify(result));
   assert.equal(result.launchRequestId, 'synthetic-fresh-hammer');
-  assert.equal(existsSync(previousScratch), false);
+  assert.equal(existsSync(previousScratch), true, 'replacement custody retains predecessor closeout evidence');
 });
 
 for (const repoSource of ['dispatchContext', 'prMetadata', 'repo', 'advanced-head', 'context-pr-number', 'top-level-pr-number', 'missing-retry-repo', 'null-retry-repo', 'foreign-retry-ticket', 'foreign-retry-repo', 'foreign-retry-head', 'advanced-foreign-retry-ticket']) {

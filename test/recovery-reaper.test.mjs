@@ -1214,11 +1214,11 @@ test('createStaleStateReaperTicker reclaims a lease orphaned AFTER startup, on a
     watcherPid: DEAD_PID, holderHost: THIS_HOST,
   });
 
-  // 3. Polls before the tick interval elapses must not sweep.
+  // 3. Death is observed before the age/prune interval elapses.
   const early = await ticker.tick({ nowMs: startupMs + (ticker.intervalMs / 2) });
   assert.equal(early.ran, false);
   assert.equal(early.reason, 'interval-not-elapsed');
-  assert.equal(existsSync(orphaned), true);
+  assert.equal(JSON.parse(readFileSync(orphaned, 'utf8')).terminalOutcome, 'abandoned-holder-dead');
 
   // 4. A later poll — still hours short of the 6h floor, and with no restart in
   //    between — reclaims it.
@@ -1229,7 +1229,7 @@ test('createStaleStateReaperTicker reclaims a lease orphaned AFTER startup, on a
   );
   const swept = await ticker.tick({ nowMs: sweepMs });
   assert.equal(swept.ran, true, 'reclamation runs from the poll loop, not just at startup');
-  assert.equal(swept.result.closerLeases.released, 1);
+  assert.equal(swept.result.closerLeases.released, 0, 'the first observation already settled custody');
   assert.equal(JSON.parse(readFileSync(orphaned, 'utf8')).terminalOutcome, 'abandoned-holder-dead');
 });
 
@@ -1386,7 +1386,7 @@ test('startWatcherStaleStateReaper runs the startup sweep AND returns a poll-loo
   });
   assert.equal((await ticker.tick()).ran, false, 'startup sweep does not repeat on the first poll');
   assert.equal((await ticker.tick()).ran, false);
-  assert.equal(JSON.parse(readFileSync(afterStartup, 'utf8')).status, 'pending');
+  assert.equal(JSON.parse(readFileSync(afterStartup, 'utf8')).terminalOutcome, 'abandoned-holder-dead');
 });
 
 
@@ -1528,7 +1528,7 @@ for (const scenario of ['dead', 'timeout', 'live', 'expired-live', 'reused', 'cu
         readLegacyIntentLaunchesImpl: async () => ({ ok: false }),
         processExecFileSyncImpl: () => { throw Error('synthetic unavailable scan'); } },
       logger: { warn: text => logs.push(text), log: text => logs.push(text), error: text => logs.push(text) } });
-    const released = ['dead', 'timeout', 'reused'].includes(scenario);
+    const released = ['dead', 'reused'].includes(scenario);
     assert.equal(result.closerLeases.released, released ? 1 : 0);
     if (!['current', 'handoff'].includes(scenario)) {
       const observed = logs.map(text => { try { return JSON.parse(text); } catch { return null; } })

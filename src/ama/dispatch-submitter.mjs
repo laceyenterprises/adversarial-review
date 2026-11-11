@@ -1,6 +1,7 @@
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
+import { hostname } from 'node:os';
 import { isAmaCloserPidAlive } from './closer-lease.mjs';
 
 const psOptions = () => ({ encoding: 'utf8', timeout: loadAwareTimeoutMs(1000), maxBuffer: 4 * 1024 * 1024 });
@@ -12,6 +13,28 @@ const timestamp = value => typeof value === 'string' && Number.isFinite(Date.par
 const psTimestamp = value => timestamp(`${value} UTC`);
 const execFileAsync = promisify(execFile);
 const psEnvironment = env => ({ ...process.env, ...env, LC_ALL: 'C', TZ: 'UTC' });
+
+// Shared lease identity rule. Unknown process evidence never proves death.
+export function leaseHolderLiveness({ pid, host, startedAt, acquiredAt }, {
+  host: localHost = hostname(), isProcessAlive = isAmaCloserPidAlive,
+  captureProcessImpl = captureCloserProcessSync,
+} = {}) {
+  if (host && host !== localHost) return 'remote';
+  let alive;
+  try { alive = isProcessAlive(Number(pid)); } catch { return 'unknown'; }
+  if (alive === false) return 'dead';
+  if (alive !== true) return 'unknown';
+  let observed;
+  try { observed = Date.parse(captureProcessImpl(Number(pid))?.startedAt); }
+  catch { return 'unknown'; }
+  const expected = Date.parse(startedAt);
+  const acquired = Date.parse(acquiredAt);
+  if (!Number.isFinite(observed)) return 'unknown';
+  if (Number.isFinite(expected)) return observed === expected ? 'live' : 'dead';
+  // Legacy records have no birth timestamp. A process born after acquisition
+  // cannot be the recorded holder; older processes remain conservatively live.
+  return Number.isFinite(acquired) && observed > acquired ? 'dead' : 'live';
+}
 
 export function captureCloserProcessSync(pid, options = {}) {
   if (!validPid(pid)) return null;
@@ -75,7 +98,10 @@ export function probeCloserSubmitter(record, lease, options = {}) {
     if (expectedWatcher?.pid !== lease.watcherPid || !expectedStartedAt) {
       Object.assign(watcher, { status: 'unknown', reason: 'watcher-identity-unverified',
         observedStartedAt: watcherRow.startedAt });
-    } else if (watcherRow.startedAt !== expectedStartedAt) {
+    } else if (leaseHolderLiveness({ pid: lease.watcherPid, host: lease.holderHost,
+      startedAt: expectedStartedAt, acquiredAt: lease.acquiredAt }, {
+      isProcessAlive: () => true, captureProcessImpl: () => watcherRow,
+    }) === 'dead') {
       Object.assign(watcher, { status: 'gone', reason: 'pid-reused',
         expectedStartedAt: expectedWatcher.startedAt, observedStartedAt: watcherRow.startedAt });
     } else {

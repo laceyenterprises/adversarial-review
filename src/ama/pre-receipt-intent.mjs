@@ -16,6 +16,8 @@ import { execGhWithRetry } from '../gh-cli.mjs';
 import { probeCloserSubmitter } from './dispatch-submitter.mjs';
 import { isHammerWorkerClass } from './hammer-worker-class.mjs';
 import { isTerminalLaunchRequestStatus } from './launch-request-status.mjs';
+import { releaseMergedPrMergeLeases } from './merge-lease.mjs';
+import { writeAmaAuditEntry } from './audit.mjs';
 
 const heldLocks = new WeakMap();
 function lockPath(rootDir, identity) {
@@ -171,8 +173,19 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
     }
     if (isTerminalCloserPullRequest(pr)) {
       if (options.operatorSettlement) return { status: 'held', reason: 'pr-terminal' };
-      // PR retirement says nothing about submission or worker liveness. Preserve
-      // lease, launch evidence and budgets; only end this intent's PR hold/page.
+      const merged = pr?.isMerged === true || pr?.merged === true
+        || String(pr?.prState || pr?.state || '').toUpperCase() === 'MERGED';
+      if (merged && !options.dryRun) {
+        writeAmaAuditEntry({ hqRoot: options.hqRoot || record.hqRoot || rootDir,
+          ...leaseIdentity, now, attempt: { outcome: 'succeeded', reason: 'confirmed-merged-closeout' } });
+        if (!releaseMergedPrMergeLeases({ rootDir, repo: record.repo, prNumber: record.prNumber, now })) {
+          return { status: 'held', reason: 'merge-closeout-raced' };
+        }
+        if (lease && lease.status !== 'terminal') updateAmaCloserLease({ rootDir, ...leaseIdentity,
+          expectedLease: lease, status: 'terminal', terminalOutcome: 'pr-merged-externally', now });
+      }
+      // A merely closed PR proves no submission/worker death: retain its custody.
+      // Confirmed merge settles custody above; neither path dispatches or pages.
       const next = { ...record, state: 'completed', reason: 'pr-terminal',
         preReceiptReconciliation: { status: 'pr-terminal', observedAt: now } };
       if (!options.dryRun) writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`);

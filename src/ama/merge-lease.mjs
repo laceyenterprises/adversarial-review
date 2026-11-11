@@ -6,6 +6,7 @@ import { loadAwareTimeoutMs, loadAwareTimeoutSeconds } from '../load-aware-timeo
 import { meteredExecFile } from '../metered-gh.mjs';
 import { WATCHER_POLL_INTERVAL_MS } from '../watcher-poll-interval.mjs';
 import { requestWatcherWake } from '../watcher-wake.mjs';
+import { captureCloserProcessSync, leaseHolderLiveness } from './dispatch-submitter.mjs';
 /**
  * AMG-01 — durable merge lease keyed by `(repo, base)`.
  *
@@ -25,7 +26,7 @@ import { requestWatcherWake } from '../watcher-wake.mjs';
 
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { readFileSync, rmSync } from 'node:fs';
+import { readdirSync, readFileSync, rmSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -1095,6 +1096,7 @@ function inspectMergeLeaseWithinRepositoryState({
   now,
   host,
   pidAliveFn = pidIsLive,
+  captureProcessImpl = captureCloserProcessSync,
 } = {}) {
   validateIdentity({ rootDir, repo, base });
   const leasePath = mergeLeaseFilePath(rootDir, { repo, base });
@@ -1108,7 +1110,11 @@ function inspectMergeLeaseWithinRepositoryState({
   const deadlineSeconds = lease?.deadlineSeconds ?? defaultDeadlineSeconds();
   const pastDeadline = lease && ageSeconds !== null ? ageSeconds >= deadlineSeconds : false;
   const sameHost = lease ? lease.holderHost === currentHost : false;
-  const holderPidLive = lease && sameHost ? Boolean(pidAliveFn(lease.holderPid)) : null;
+  const holderLiveness = leaseHolderLiveness({ pid: lease?.holderPid, host: lease?.holderHost,
+    startedAt: lease?.holderStartedAt, acquiredAt: lease?.acquiredAt },
+  { host: currentHost, isProcessAlive: pidAliveFn, captureProcessImpl });
+  const holderPidLive = lease && sameHost ? holderLiveness === 'dead' ? false
+    : Boolean(pidAliveFn(lease.holderPid)) : null;
   return {
     key: deriveLeaseKey({ repo, base }).key,
     leasePath,
@@ -1120,6 +1126,7 @@ function inspectMergeLeaseWithinRepositoryState({
     deadlineSeconds,
     pastDeadline,
     holderPidLive,
+    holderLiveness,
     waiters,
     attempts,
     inspectedAt,
@@ -1154,6 +1161,7 @@ function acquireMergeLeaseWithinRepositoryState({
   acquisitionPid,
   attempt = 1,
   pidAliveFn = pidIsLive,
+  captureProcessImpl = captureCloserProcessSync,
   _afterHolderWrite,
 } = {}) {
   validateIdentity({ rootDir, repo, base });
@@ -1201,6 +1209,7 @@ function acquireMergeLeaseWithinRepositoryState({
       now: acquiredAt,
       host: holderHost,
       pidAliveFn,
+      captureProcessImpl,
     });
     if (!reclaim.reclaimed) {
       const { waiters } = withWaiterMutationLock({ rootDir, repo, base }, () =>
@@ -1252,6 +1261,8 @@ function acquireMergeLeaseWithinRepositoryState({
       holderRole: waiterPriority === 'daemon' ? 'daemon' : 'closer',
       ...(waiter ? { waiter } : {}),
       holderPid: normalizeHolderPid(holderPid),
+      holderStartedAt: (!holderHost || holderHost === hostname())
+        ? captureProcessImpl(normalizeHolderPid(holderPid))?.startedAt || null : null,
       holderHost: holderHost || hostname(),
       ...(holderProcessGroup != null ? { holderProcessGroup: Number(holderProcessGroup) } : {}),
       acquiredAt,
@@ -1368,6 +1379,35 @@ export function releaseMergeLease(...args) {
     args[0] = canonicalRepositoryArguments(root, args[0]);
     return releaseMergeLeaseWithinRepositoryState(...args);
   });
+}
+
+// A confirmed terminal PR needs local closeout, never a PR-bound dispatch.
+// Preserve every generation fence; a different PR in the lane is untouched.
+export function readMergeLeaseHolders({ rootDir, repo, prNumber } = {}) {
+  if (repo) ({ repo } = canonicalRepositoryArguments(rootDir, { repo }));
+  let names;
+  try { names = readdirSync(join(rootDir, ...LEASE_DIR_SEGMENTS)); }
+  catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+  const leases = [];
+  for (const name of names) {
+    if (!name.endsWith('.json') || /\.(waiters|attempts)\.json$/.test(name)) continue;
+    const lease = readJsonFile(join(rootDir, ...LEASE_DIR_SEGMENTS, name), null);
+    if (!lease?.repo || !lease.leaseId || (repo && lease.repo !== repo)
+      || (prNumber != null && Number(lease.holderPr) !== Number(prNumber))) continue;
+    leases.push(lease);
+  }
+  return leases;
+}
+
+export function releaseMergedPrMergeLeases({ rootDir, repo, prNumber, now } = {}) {
+  let complete = true;
+  for (const lease of readMergeLeaseHolders({ rootDir, repo, prNumber })) {
+    const result = releaseMergeLease({ rootDir, repo: lease.repo || repo, base: lease.base,
+      leaseId: lease.leaseId, holderPr: lease.holderPr, holderHead: lease.holderHead,
+      acquiredAt: lease.acquiredAt, now, merged: true, reason: 'holder-pr-merged' });
+    if (!result.released) complete = false;
+  }
+  return complete;
 }
 
 function releaseMergeLeaseWithinRepositoryState({
@@ -1584,15 +1624,16 @@ function reclaimIfStaleWithinRepositoryState({
   now,
   host,
   pidAliveFn = pidIsLive,
+  captureProcessImpl = captureCloserProcessSync,
 } = {}) {
-  const inspection = inspectMergeLease({ rootDir, repo, base, now, host, pidAliveFn });
+  const inspection = inspectMergeLeaseWithinRepositoryState({ rootDir, repo, base, now, host, pidAliveFn, captureProcessImpl });
   const lease = inspection.lease;
   if (!lease) {
     return { reclaimed: false, reason: 'absent', inspection };
   }
 
   const sameHost = lease.holderHost === (host || hostname());
-  const deadSameHostPid = sameHost && !pidAliveFn(lease.holderPid);
+  const deadSameHostPid = sameHost && inspection.holderLiveness === 'dead';
   const staleByDeadline = inspection.pastDeadline;
   const reclaimByDeadline = staleByDeadline && !sameHost;
   if (!deadSameHostPid && !reclaimByDeadline) {
@@ -1668,7 +1709,7 @@ async function reconcileMergeLeasesWithinRepositoryState({
   pidAliveFn = pidIsLive,
   execFileImpl,
 } = {}) {
-  const inspection = inspectMergeLease({ rootDir, repo, base, now, host, pidAliveFn });
+  const inspection = inspectMergeLeaseWithinRepositoryState({ rootDir, repo, base, now, host, pidAliveFn });
   const lease = inspection.lease;
   if (!lease) {
     return { reconciled: true, released: false, reason: 'absent', inspection };

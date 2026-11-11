@@ -77,7 +77,7 @@ test('completed file comparisons survive a later diff timeout without repeating 
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const diffCalls = [0, 0];
   let stalled = true;
-  const reader = () => createHistoryReader({ contextTimeoutMs: 100,
+  const reader = () => createHistoryReader({ contextTimeoutMs: 10_000,
     progress: { rootDir, repo, prNumber, headSha: head },
     execGhWithRetryImpl: async ({ args }) => {
       const path = args[1];
@@ -91,7 +91,7 @@ test('completed file comparisons survive a later diff timeout without repeating 
     diffImpl: async (_command, args) => {
       const index = Number(args.at(-1).split('-')[1]);
       diffCalls[index]++;
-      if (index === 1 && stalled) return never();
+      if (index === 1 && stalled) throw Object.assign(new Error('synthetic diff timeout'), { code: 'HISTORY_READ_TIMEOUT' });
       return { stdout: 'diff\n@@ -0,0 +1 @@\n+x\n' };
     },
   });

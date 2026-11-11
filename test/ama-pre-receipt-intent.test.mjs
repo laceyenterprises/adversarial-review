@@ -731,7 +731,11 @@ for (const pr of [{ state: 'closed', merged: false }, { state: 'closed', merged:
     assert.equal(f.read().preReceiptReconciliation.status, 'pr-terminal');
     assert.equal(f.read().retryCount, before.retryCount);
     assert.equal(f.read().dispatchIdempotencyKey, key);
-    assert.equal(readFileSync(amaCloserLeaseFilePath(f.rootDir, identity), 'utf8'), leaseBefore);
+    if (pr.merged) {
+      assert.equal(readAmaCloserLease(f.rootDir, identity).terminalOutcome, 'pr-merged-externally');
+    } else {
+      assert.equal(readFileSync(amaCloserLeaseFilePath(f.rootDir, identity), 'utf8'), leaseBefore);
+    }
     assert.equal(readHammerRetryCapLedger(f.rootDir, identity), null);
     assert.equal(isActiveAmaCloserDispatchRecord(f.read()), false);
     await reconcileAmaCloserDispatches(f.rootDir, options);

@@ -67,3 +67,21 @@ passed seven. `npm run lint` passed with zero errors (149 existing warnings),
 (93 entries), `bash demo/research-finding-walkthrough.sh`, and `git diff --check`
 passed. The SMV `checkMap` source/graph check and README diagram comparison passed
 without declaration changes. Full-suite execution remains with PR-head CI.
+
+## HAM final adjudication and conflict validation
+
+Both final non-blocking findings are addressed by the existing diagnostic fixes:
+blank or absent review bodies report `review-body-missing`, and failed rounds
+retain their concrete `failure.code` in recovery evidence and requeue reasons.
+No finding is deferred or withdrawn. Conflict resolution preserves current-main
+zero-output-refusal ownership alongside the ended-round recovery declarations;
+the dispatch source projection and independent graph snapshot reflect the merged
+contracts rather than either parent snapshot.
+
+HAM validation uses the repository's isolated `test/run-tests.mjs` coordinator
+for recovery, strict-settled, state/smoke, closure-budget/next-action, publication
+and watcher claim-loop tests. Lint has zero errors (149 existing warnings),
+contract typechecking passes, all 93 catalog entries validate, and the offline
+research-finding walkthrough preserves byte-equivalent transcripts. The initial
+plain `node --test` invocation hit checkout-state isolation failures; it does not
+count as passing evidence. Full-suite execution remains with exact-head PR CI.

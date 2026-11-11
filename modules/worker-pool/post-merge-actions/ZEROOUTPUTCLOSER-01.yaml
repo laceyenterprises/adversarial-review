@@ -1,0 +1,14 @@
+operator_steps:
+  - description: >-
+      After both ZEROOUTPUTCLOSER-01 PRs deploy through normal agent-os catchup
+      and adversarial-review float, restart the watcher through the registered
+      owner and retain PID start time. Observe 24 hours of natural traffic:
+      no already produced zero output twice refusal for AMA-PR tickets with a
+      changed head or prior terminal audit. Genuine refusals retain
+      operator-escalated custody and one escalation per PR/head with no generic
+      prelaunch slow retry. Retain revisions, PR/head/LRQ evidence, interval and
+      sample counts in the agent-os SEV2 report. Zero samples remain unverified.
+      No worker live action is authorized.
+    run_as: SRE operator
+    command: /bin/cat docs/changes/ZEROOUTPUTCLOSER-01.md
+actions: []

@@ -1,3 +1,4 @@
+import { isZeroOutputRefusal, escalateZeroOutputRefusal } from './zero-output-refusal.mjs';
 import { finalFixAllQueueOwner } from './final-fix-all.mjs';
 import { classifyHammerExit, hammerNoMergeDetails } from './hammer-outcome.mjs';
 import { appendCloserOutcome } from './closer-outcomes.mjs';
@@ -897,7 +898,7 @@ const HAMMER_SCRATCH_TERMINAL_STATUSES = new Set([
 
 export function isTerminalHammerScratchRecord(record) {
   if (!record || isPreReceiptIntent(record) || launchRequestMeaning(record.lastObservedStatus).parked) return false;
-  return record.state === 'dispatch-configuration-refused' || record.state === 'launch-terminal' || record.state === 'dispatch-failed'
+  return record.state === 'operator-escalated' || record.state === 'dispatch-configuration-refused' || record.state === 'launch-terminal' || record.state === 'dispatch-failed'
     || [record.state, record.lastObservedStatus, record.outcome, record.terminalOutcome]
       .some(value => HAMMER_SCRATCH_TERMINAL_STATUSES.has(normalizeWorkerRunStatus(value))
         || normalizeWorkerRunStatus(value).startsWith('no-merge:'));
@@ -2611,7 +2612,7 @@ export function updateAmaCloserDispatchRecord(rootDir, identity, mutate, { clean
   // Otherwise retry cleanup on repeated observations too: an earlier removal
   // may have failed, or this may be a pre-cleanup terminal record after restart.
   if (!isPreReceiptIntent(next)
-    && (!isPreReceiptIntent(existing) || ['dispatch-failed', 'dispatch-configuration-refused'].includes(next.state))
+    && (!isPreReceiptIntent(existing) || ['dispatch-failed', 'dispatch-configuration-refused', 'operator-escalated'].includes(next.state))
     && isTerminalHammerScratchRecord(next)) {
     let held = true;
     try { held = hammerScratchLeaseHeld(rootDir, next); } catch { /* Unreadable custody retains scratch. */ }
@@ -5507,6 +5508,17 @@ async function maybeDispatchAmaCloserAttempt({
     if (!owner) break;
     existingRecord = owner;
     existingDispatchIdentity = identity;
+  }
+  if (existingRecord && !existingRecord.launchRequestId && !existingRecord.dispatchId
+    && existingRecord.headSha === targetRemediationSha && isZeroOutputRefusal(existingRecord.lastError)) {
+    return noAmaDispatch(await escalateZeroOutputRefusal({
+      record: existingRecord, repo, prNumber, headSha: targetRemediationSha,
+      persistImpl: next => updateDispatchRecord(rootDir, existingDispatchIdentity, current => (
+        current && !current.launchRequestId && !current.dispatchId && isZeroOutputRefusal(current.lastError)
+          ? { ...current, ...next } : null
+      )),
+      deliverAlertImpl, logger, now: dispatchContext.dispatchedAt,
+    }));
   }
   if (existingRecord && !existingRecord.launchRequestId && !existingRecord.dispatchId) {
     const refusal = dispatchConfigurationRefusal(existingRecord.lastError);
@@ -8691,6 +8703,16 @@ async function maybeDispatchAmaCloserAttempt({
             error: releasePendingLeaseError,
           }));
         }
+      }
+      if (!ambiguousLaunch && isZeroOutputRefusal(err)) {
+        return noAmaDispatch(await escalateZeroOutputRefusal({
+          record: updatedDispatchRecord, repo, prNumber, headSha: targetRemediationSha,
+          persistImpl: next => updateDispatchRecord(rootDir, targetDispatchIdentity, current => (
+            current && !current.launchRequestId && !current.dispatchId && isZeroOutputRefusal(current.lastError)
+              ? { ...current, ...next } : null
+          )),
+          deliverAlertImpl, logger, now: dispatchContext.dispatchedAt,
+        }));
       }
       if (configurationRefusal) {
         await pageDispatchConfigurationRefusal({ rootDir, repo, refusal: configurationRefusal,

@@ -3247,6 +3247,7 @@ stateDiagram-v2
     state "dispatch-configuration-refused" as s9
     state "no-dispatch" as s10
     state "completed" as s11
+    state "operator-escalated" as s12
     s0 --> s1: hammer-dispatch.33 watcher shutdown abort listener synchronously persists interrupted attempt under native intent lock before exit
     s1 --> s2: hammer-dispatch.34 recover exact canonical keyed receipt without launching again
     s1 --> s10: hammer-dispatch.35 fenced conclusive no-launch proof defers pending lease and refunds intent once
@@ -3283,12 +3284,16 @@ stateDiagram-v2
     s9 --> s0: hammer-dispatch.21 normal backoff due, re-probe dispatch, admission clears blocker
     s0 --> s2: hammer-dispatch.22 proven live retry restores same-head ownership and artifacts
     s3 --> s2: hammer-dispatch.23 proven live retry restores original-head ownership
+    s0 --> s12: hammer-dispatch.37 Explicit zero-output ticket refusal without a launch: clear slow retry, record operator custody and page once per head; changed head uses its own record
+    s8 --> s12: hammer-dispatch.38 Explicit zero-output ticket refusal without a launch: clear slow retry, record operator custody and page once per head; changed head uses its own record
+    s5 --> s12: hammer-dispatch.39 Explicit zero-output ticket refusal without a launch: clear slow retry, record operator custody and page once per head; changed head uses its own record
     s3 --> [*]
     s7 --> [*]
     s8 --> [*]
     s9 --> [*]
     s10 --> [*]
     s11 --> [*]
+    s12 --> [*]
 ```
 
 <!-- smv:diagrams:end -->

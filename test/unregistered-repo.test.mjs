@@ -8,6 +8,7 @@ import { codexAccountFixture } from './helpers/codex-account-fixture.mjs';
 
 import {
   amaCloserDispatchFilePath,
+  isTerminalHammerScratchRecord,
   maybeDispatchAmaCloser,
   updateAmaCloserDispatchRecord,
 } from '../src/ama/dispatch-closer.mjs';
@@ -211,4 +212,54 @@ test('legacy transient refusal with an exhausted slow window is reclassified and
   assert.equal(result.dispatched, true);
   const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
   assert.equal(record.closureBlocker, null);
+});
+
+
+test('ZEROOUTPUTCLOSER-01: zero-output refusal has operator custody once per head', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'zero-output-refusal-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const inputs = eligibleInputs(rootDir);
+  const pages = [];
+  let attempts = 0;
+  const run = async (headSha = inputs.headSha) => maybeDispatchAmaCloser({
+    ...inputs,
+    prMetadata: { ...inputs.prMetadata, headSha },
+    reviewState: { ...inputs.reviewState, headSha },
+    dispatchContext: { ...inputs.dispatchContext, reviewedSha: headSha },
+    execFileImpl: async (cmd, args) => {
+      if (args[0] === 'fleet') return { stdout: JSON.stringify(codexAccountFixture()) };
+      if (args[0] !== 'dispatch') return { stdout: '{}' };
+      attempts++;
+      throw Object.assign(new Error('dispatch failed'), {
+        stderr: '[hq] dispatch refused: ticket AMA-PR-1234 already produced zero output twice (lrq-one, lrq-two); escalate',
+      });
+    },
+    deliverAlertImpl: async (text, options) => pages.push({ text, options }),
+    writeFileImpl: () => {}, readTemplateImpl: () => readFileSync(HAMMER_TEMPLATE_PATH, 'utf8'),
+  });
+  const first = await run();
+  assert.equal(first.reason, 'dispatch-zero-output-refused');
+  assert.equal(first.owner, 'operator-escalated');
+  assert.equal(first.needsOperator, true);
+  const again = await run();
+  assert.equal(again.owner, 'operator-escalated');
+  assert.equal(attempts, 1);
+  assert.equal(pages.length, 1);
+  const identity = { repo: inputs.dispatchContext.repo, prNumber: inputs.prMetadata.prNumber, headSha: inputs.headSha };
+  const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
+  assert.equal(record.state, 'operator-escalated');
+  assert.equal(isTerminalHammerScratchRecord(record), true);
+  assert.equal(record.prelaunchRefusalSlowRetry, null);
+  assert.ok(record.zeroOutputEscalatedAt);
+  // A historical slow-retry refusal is adopted immediately, without another dispatch.
+  updateAmaCloserDispatchRecord(rootDir, identity, current => ({ ...current,
+    state: 'dispatch-failed', zeroOutputEscalatedAt: null,
+    prelaunchRefusalSlowRetry: { startedAt: '2026-06-11T19:00:00Z', kind: 'dispatch-refused' },
+  }));
+  assert.equal((await run()).owner, 'operator-escalated');
+  assert.equal(attempts, 1);
+  const newHead = 'def12345def12345def12345def12345def12345';
+  assert.equal((await run(newHead)).owner, 'operator-escalated');
+  assert.equal(attempts, 2, 'new head receives its own attempt');
+  assert.equal(pages.length, 2, 'escalation is head-scoped');
 });

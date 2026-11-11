@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "entries": [{
+    "id": "ama-closer-dispatches",
+    "zeroOutputRefusalCustody": "Explicit zero-output refusal without a launch sets state and owner to operator-escalated, closureBlocker to dispatch-zero-output-refused, clears prelaunchRefusalSlowRetry and lastFailureTransient; zeroOutputEscalatedAt deduplicates successful alert delivery per PR/head. Historical slow-retry refusals are adopted; changed heads retain independent dispatch eligibility."
+  }]
+}

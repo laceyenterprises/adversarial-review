@@ -13,6 +13,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, renam
 import { tmpdir, hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { createInterface } from 'node:readline';
 import { assertHammerController, controllerGroupSnapshot, createControllerGroupCensus, controllerLaunchId, controllerLaunchEnvironment, controllerLedgerTarget, groupStillOwned, releaseControllerLease, runHammerController,
   LAUNCH_POLL_MS, LAUNCH_READ_ATTEMPTS, LAUNCH_UNREADABLE_GRACE_MS, launchReadTimeoutMs,
   launchEnvironmentClock, launchEnvironmentReceiptPath, resolveLaunchEnvironment } from '../src/ama/hammer-controller.mjs';
@@ -36,6 +37,7 @@ const fakeEnvironmentClockPreload = `
 // grace window is spent: 0, 2, 7, 17, 37, 67, 97 and 120 seconds.
 const graceReads = 8;
 const head = 'a'.repeat(40);
+const READY_MARKER = 'hammer-controller-fixture-ready';
 test('controller rejects a malformed ham_read script as a retryable local command error before any command runs', async t => {
   const diagnostics = [];
   t.mock.method(console, 'error', (...args) => diagnostics.push(args.join(' ')));
@@ -113,10 +115,18 @@ function fixture(t, script, { realCensus = false } = {}) {
   writeFileSync(driver, `
     import {readFileSync,writeFileSync,renameSync} from 'node:fs';
     import {runHammerController,controllerGroupSnapshot} from ${JSON.stringify(new URL('../src/ama/hammer-controller.mjs', import.meta.url).href)};
+    let elapsedMs = 0;
     const status = await runHammerController(${JSON.stringify(scriptPath)}, [], {
       pollMs:20, graceMs:150, drainMs:1000, timeoutMs:10000, launchPollMs:20, gateWaitMs:2000,
       unreadableGraceMs:Number(process.env.FIXTURE_GRACE_MS||300), readTimeoutImpl:()=>50,
       readLaunchImpl:async()=>JSON.parse(readFileSync(${JSON.stringify(launchPath)},'utf8')),
+      // Synthetic census tests model elapsed poll intervals. Keep the real
+      // I/O yield so signalled children can exit, but exclude scheduler and
+      // synchronous filesystem delays from the grace/drain assertions.
+      ...(${!realCensus} ? {nowImpl:()=>elapsedMs,delayImpl:async ms=>{
+        await new Promise(resolve=>setTimeout(resolve,ms));
+        elapsedMs+=ms;
+      }} : {}),
       // The test owns these exact births. Inject the OS census so this offline
       // regression also runs in workers whose sandbox forbids ps.
       ...(${realCensus} ? {} : {snapshotImpl:pgid=>{
@@ -149,9 +159,17 @@ function fixture(t, script, { realCensus = false } = {}) {
     rmSync(dir, { recursive: true, force: true });
   });
   return { dir, env, driver, launchPath,
-    start() { controller = spawn(process.execPath, [driver], { env, stdio: ['ignore', 'pipe', 'pipe'] });
-      let output = ''; controller.stderr.on('data', b => { output += b; }); controller.stdout.resume();
-      return { child: controller, closed: once(controller, 'close'), output: () => output }; },
+    start({ waitForReady = false } = {}) { controller = spawn(process.execPath, [driver], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+      let output = ''; controller.stderr.on('data', b => { output += b; });
+      const ready = waitForReady ? (async () => {
+        const lines = createInterface({ input: controller.stdout });
+        try {
+          for await (const line of lines) if (line === READY_MARKER) return;
+          throw new Error('controller fixture exited before readiness');
+        } finally { lines.close(); controller.stdout.resume(); }
+      })() : undefined;
+      if (!waitForReady) controller.stdout.resume();
+      return { child: controller, closed: once(controller, 'close'), output: () => output, ready }; },
     detach() {
       detached = true;
       return spawn(process.execPath, ['-e', `
@@ -850,10 +868,10 @@ test('unreadable process evidence fails before script or lease side effects', as
 test('lost process census stops the direct child but retains the owned lease and unknown drain', { timeout: 12000 }, async t => {
   const f = fixture(t, `exec "${process.execPath}" -e '
     process.on("SIGTERM",()=>{});
-    require("node:fs").writeFileSync(process.env.HAM_RUN_DIR+"/ready","ready");
+    console.log(${JSON.stringify(READY_MARKER)});
     setInterval(()=>{},1000);'`);
-  const p = f.start();
-  await until(() => existsSync(join(f.dir, 'ready')));
+  const p = f.start({ waitForReady: true });
+  await p.ready;
   writeFileSync(join(f.dir, 'probe-denied'), 'denied');
   assert.equal((await p.closed)[0], 125, p.output());
   const receipt = f.receipt();

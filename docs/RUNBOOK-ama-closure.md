@@ -7977,9 +7977,10 @@ HAMLANEWAIT-01 bounds the legacy shell writer's lane-lock wait by the caller's
 absolute deadline (`--deadline-ms`; the closer computes a fresh now + 60 seconds
 at the merge attempt, after CI and merge-lease waits). Direct library callers
 retain the existing 60-second default when no deadline is supplied. The merge subprocess receives only the remaining budget.
-A directory watch, registered before the acquisition recheck, wakes on release
-of the persistent lock inode; release updates its timestamp after closing the
-lock descriptor. Every wake retries the same exclusive lock and rechecks the
+A watch on the persistent lock inode, registered before the acquisition recheck,
+wakes on release; release updates its timestamp after closing the lock
+descriptor. Directory watches can omit these attribute-only changes to a child.
+Every wake retries the same exclusive lock and rechecks the
 durable route before issuing. There is no polling sleep or added config key.
 Watch/notification failures retain the deadline as the bounded fallback.
 

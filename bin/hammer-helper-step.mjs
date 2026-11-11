@@ -102,16 +102,16 @@ export async function runHelperStep({ mode, step, nominal, ceiling, command, arg
       let output = readFileSync(join(directory, 'stdout'), 'utf8');
       let errors = readFileSync(join(directory, 'stderr'), 'utf8')
         + (result.spawnError ? `${result.spawnError}\n` : '');
+      stderr(errors);
       if (mode.startsWith('mutation') && step === 'checkout' && result.code !== 0 && !result.timedOut
         && await releaseHolder({ command, args, errors, env, stderr })) {
-        stderr(errors);
         result = await execute(command, args, { seconds, directory,
           env: { ...env, HAM_HELPER_FAILURE_FILE: reasonFile } });
         output = readFileSync(join(directory, 'stdout'), 'utf8');
         errors = readFileSync(join(directory, 'stderr'), 'utf8')
           + (result.spawnError ? `${result.spawnError}\n` : '');
+        stderr(errors);
       }
-      stderr(errors);
       const timeout = result.timedOut || [124, 142].includes(result.code)
         || (result.code === 1 && /\b(?:ETIMEDOUT|timed out|timeout)\b/i.test(
           errors.replace(/^\[load-aware-timeout\].*$/gm, '')));

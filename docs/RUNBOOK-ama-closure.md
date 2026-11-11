@@ -705,6 +705,10 @@ For the `checkout` step only, a plain `git checkout BRANCH` collision gets one
 recovery attempt. The runner parses the canonical holder path, verifies the
 same shared Git repository and expected branch, then calls
 `hq worker release-branch --root HQ_ROOT --holder PATH --branch BRANCH`.
+The holder and closer directory basenames may differ; Git's common directory
+proves repository identity. Symlinked HQ roots, workers directories and holder
+paths remain refused. The triggering checkout error precedes recovery
+diagnostics, and a failed path preflight explicitly reports retained custody.
 Agent OS owns the terminal/lease/process/cleanliness proofs, salvage refs and
 fenced detach. A successful release permits exactly one checkout retry; live,
 dirty, uncertain or unavailable release evidence stops with the holder named.

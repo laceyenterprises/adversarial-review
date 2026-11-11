@@ -16,6 +16,12 @@ repository and expected branch and calls the companion
 Other mutations retain their single-attempt behavior. Deploy the companion
 command before relying on recovery; absence fails closed.
 
+Final comment-only remediation emits the original checkout failure before
+recovery diagnostics and logs preflight path refusals. Repository identity uses
+the shared Git directory without requiring matching worktree directory names;
+canonical path and expected-branch checks remain mandatory. Lifecycle states,
+durable store shapes and existing post-deploy verification promises are unchanged.
+
 ## Verification
 
 Targeted offline tests under netguard, each command bounded to 600 seconds:
@@ -23,6 +29,14 @@ Targeted offline tests under netguard, each command bounded to 600 seconds:
 `test/hammer-helper-step.test.mjs` (22 passed). `test/ama-closer-branch-holder-reap.test.mjs` passed all 62 regressions.
 Scoped ESLint and contract typechecking passed. No full suite or live
 mutation was run.
+
+Final remediation verification: `bash bin/run-bounded.sh --timeout 120 -- node
+test/run-tests.mjs test/checkout-holder.test.mjs test/hammer-helper-step.test.mjs
+test/ama-closer-branch-holder-reap.test.mjs` passed all 97 tests (13 checkout,
+22 helper and 62 provision regressions). `npm run lint` passed with zero errors
+(149 existing warnings); scoped ESLint, contract typechecking, the offline
+research-finding walkthrough and `git diff --check` passed.
+The clone uses the deployed dependency tree with an identical lockfile.
 
 After deployment, AR float and an authorized watcher/follow-up restart, SRE
 verifies PID start times and observes 24 hours with zero closer

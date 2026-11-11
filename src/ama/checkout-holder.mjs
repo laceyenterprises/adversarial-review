@@ -24,8 +24,10 @@ export async function releaseCheckoutHolder({ command, args, errors, env, stderr
     // Lexical and filesystem identity must agree; no symlink or ../ escape.
     if (realpathSync(root) !== resolve(root)
       || realpathSync(holder) !== holder
-      || realpathSync(join(root, 'workers')) !== join(resolve(root), 'workers')
-      || basename(holder) !== basename(realpathSync(cwd))) return false;
+      || realpathSync(join(root, 'workers')) !== join(resolve(root), 'workers')) {
+      stderr(`HAM checkout holder retained=${holder}; preflight validation failed\n`);
+      return false;
+    }
     const options = { env, encoding: 'utf8', timeout: 15_000, maxBuffer: 64 * 1024 };
     const git = async (path, ...gitArgs) => (await execFileImpl('git',
       ['-C', path, ...gitArgs], options)).stdout.trim();

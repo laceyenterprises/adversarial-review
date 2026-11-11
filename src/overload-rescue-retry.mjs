@@ -20,7 +20,17 @@ export function createOverloadRescueRetry({
   const failures = new Map();
   let cursor = null;
   let pending = [];
+  let activePgid = null;
+  let capabilityUnavailable = false;
   const shutdown = new AbortController();
+  function killActiveGroup() {
+    if (!activePgid) return;
+    try { process.kill(-activePgid, 'SIGKILL'); }
+    catch (error) {
+      if (error.code !== 'ESRCH') logger.warn?.(`[overload-rescue] exit kill failed: ${error.message}`);
+    }
+    activePgid = null;
+  }
   async function closeCursor() {
     const previous = cursor;
     cursor = null;
@@ -50,6 +60,7 @@ export function createOverloadRescueRetry({
       record.overloadDeferral?.overloadAlert]);
   }
   async function scanAndRetry() {
+    if (capabilityUnavailable || shutdown.signal.aborted) return;
     const cfg = readConfig();
     if (cfg.enabled === false || cfg.autonomousMergeExecutionEnabled === false) return;
     if (shutdown.signal.aborted) return;
@@ -102,13 +113,20 @@ export function createOverloadRescueRetry({
     attempted.set(candidate.key, now());
     if (attempted.size > 1000) attempted.delete(attempted.keys().next().value);
     const { repo, prNumber } = candidate.record;
-    await Promise.resolve().then(() => execute(env.HQ_BIN || 'hq', [
-      'merge-agent', 'rescue', String(prNumber), '--repo', repo,
-      '--hq-root', resolveHqRoot(env), '--apply', '--json', '--retry-overload-only',
-    ], {
-      env, signal: shutdown.signal, cwd: rootDir, timeout: 600_000, progressTimeout: 0,
-      reapGroupOnExit: true, settleAfterKillMs: 250, maxBuffer: 1024 * 1024,
-    })).then(async () => {
+    await Promise.resolve().then(() => {
+      if (shutdown.signal.aborted) return;
+      return execute(env.HQ_BIN || 'hq', [
+        'merge-agent', 'rescue', String(prNumber), '--repo', repo,
+        '--hq-root', resolveHqRoot(env), '--apply', '--json', '--retry-overload-only',
+      ], {
+        env, signal: shutdown.signal, cwd: rootDir, timeout: 600_000, progressTimeout: 0,
+        reapGroupOnExit: true, settleAfterKillMs: 250, maxBuffer: 1024 * 1024,
+        onSpawn: ({ pgid }) => {
+          if (Number.isSafeInteger(pgid) && pgid > 0) activePgid = pgid;
+          if (shutdown.signal.aborted) killActiveGroup();
+        },
+      });
+    }).finally(() => { activePgid = null; }).then(async () => {
       let current;
       try { current = JSON.parse(await readReceipt(candidate.path)); }
       catch (error) {
@@ -116,7 +134,15 @@ export function createOverloadRescueRetry({
       }
       if (current && eligible(current) && progress(current) === progress(candidate.record)) backoff(candidate.key);
       else failures.delete(candidate.key);
-    }).catch(error => {
+    }).catch(async error => {
+      const diagnostic = `${error.stderr || ''}\n${error.message || ''}`;
+      if (/(?:unrecognized arguments?|unknown (?:option|argument)|no such option)[^\n]*--retry-overload-only/i.test(diagnostic)) {
+        capabilityUnavailable = true;
+        pending = [];
+        await closeCursor();
+        logger.warn?.('[overload-rescue] companion lacks --retry-overload-only; retries suspended until watcher restart after companion deployment');
+        return;
+      }
       backoff(candidate.key);
       // rc 75 is an ordinary deferral. Timeout/read failures keep disk debt
       // and are observed again, never converted into a dispatch verdict.
@@ -124,7 +150,8 @@ export function createOverloadRescueRetry({
     });
   }
   return {
-    abort() { shutdown.abort(); },
+    // Exit hooks cannot wait for the spawn helper's SIGTERM grace timer.
+    abort() { shutdown.abort(); killActiveGroup(); },
     async stop() {
       shutdown.abort();
       await running;

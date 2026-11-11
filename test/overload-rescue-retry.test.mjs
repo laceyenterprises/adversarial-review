@@ -158,6 +158,88 @@ test('live kill switches suppress rescue and unreadable config fails closed', as
   assert.equal(calls, 1);
 });
 
+test('unsupported retry-only flag warns once and suspends all PR retries until restart', async t => {
+  const { rootDir, record, path } = fixture(t);
+  writeFileSync(join(rootDir, 'data/follow-up-jobs/merge-agent-dispatches/second.json'),
+    JSON.stringify({ ...record, prNumber: 8 }));
+  let calls = 0;
+  let now = 2000_000;
+  const warnings = [];
+  const options = { rootDir, readConfig: enabledConfig, now: () => now,
+    logger: { warn: message => warnings.push(message) },
+    execute: async () => {
+      calls++;
+      throw Object.assign(new Error('Command failed: exit 2'), {
+        exitCode: 2, stderr: 'hq: error: unrecognized arguments: --retry-overload-only',
+      });
+    } };
+  const driver = createOverloadRescueRetry(options);
+  t.after(() => driver.stop());
+  await driver.tick();
+  now += 1800_000;
+  await driver.tick();
+  await driver.tick();
+  assert.equal(calls, 1);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /suspended until watcher restart/);
+  assert.equal(JSON.parse(readFileSync(path, 'utf8')).pendingHandoff, true);
+  const restarted = createOverloadRescueRetry({ ...options, execute: async () => { calls++; } });
+  t.after(() => restarted.stop());
+  await restarted.tick();
+  assert.equal(calls, 2);
+});
+
+test('unrelated exit 2 remains a per-PR failure and does not suspend other receipts', async t => {
+  const { rootDir, record } = fixture(t);
+  writeFileSync(join(rootDir, 'data/follow-up-jobs/merge-agent-dispatches/second.json'),
+    JSON.stringify({ ...record, prNumber: 8 }));
+  const calls = [];
+  const driver = createOverloadRescueRetry({ rootDir, readConfig: enabledConfig,
+    now: () => 2000_000, logger: { warn() {} }, execute: async (_command, args) => {
+      calls.push(args[2]);
+      throw Object.assign(new Error('invalid PR evidence'), { exitCode: 2 });
+    } });
+  t.after(() => driver.stop());
+  await driver.tick();
+  await driver.tick();
+  assert.deepEqual(calls, ['7', '8']);
+});
+
+test('exit abort synchronously kills the recorded group before child settlement', async t => {
+  const { rootDir } = fixture(t);
+  let finish, started;
+  const ready = new Promise(resolve => { started = resolve; });
+  const kills = [];
+  t.mock.method(process, 'kill', (...args) => { kills.push(args); });
+  const driver = createOverloadRescueRetry({ rootDir, readConfig: enabledConfig,
+    now: () => 2000_000, execute: (_command, _args, { onSpawn }) => {
+      onSpawn({ pid: 12345, pgid: 12345 });
+      started();
+      return new Promise(resolve => { finish = resolve; });
+    } });
+  const tick = driver.tick();
+  await ready;
+  driver.abort();
+  assert.deepEqual(kills, [[-12345, 'SIGKILL']]);
+  finish();
+  await tick;
+  await driver.stop();
+  driver.abort();
+  assert.equal(kills.length, 1, 'settled process identity is no longer signalable');
+});
+
+test('abort after child settlement never signals a stale process group', async t => {
+  const { rootDir } = fixture(t);
+  t.mock.method(process, 'kill', () => { assert.fail('stale group signalled'); });
+  const driver = createOverloadRescueRetry({ rootDir, readConfig: enabledConfig,
+    now: () => 2000_000, execute: async (_command, _args, { onSpawn }) => {
+      onSpawn({ pid: 12345, pgid: 12345 });
+    } });
+  await driver.tick();
+  driver.abort();
+  await driver.stop();
+});
+
 test('scan caps content reads per tick and advances past irrelevant history to old debt', async t => {
   const { rootDir, path } = fixture(t);
   const directory = join(rootDir, 'data/follow-up-jobs/merge-agent-dispatches');

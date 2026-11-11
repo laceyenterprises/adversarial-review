@@ -3011,14 +3011,19 @@ rotation includes queued children and their 30-second cadence. Live AMA
 enablement and execution switches gate each tick. Child failures and successful
 no-op rescues back off per PR from 30 seconds to 30 minutes in memory; restart
 resets that backoff. Shutdown aborts and settles the active rescue process group
-in parallel with watcher signal cleanup; all process exits abort it
-synchronously. Only PR identity goes to retry-only rescue; fresh intent and
-launch custody are re-evaluated there. At helper exhaustion the AMA pass emits
+in parallel with watcher signal cleanup; process exit synchronously sends
+SIGKILL to the recorded active rescue group. A companion rejection of
+`--retry-overload-only` logs once and suspends retries until watcher restart
+after companion deployment. Only PR identity goes to retry-only rescue; fresh
+intent and launch custody are re-evaluated there. At helper exhaustion the AMA pass emits
 one PR/head alert, archives overload debt and releases its hold to normal capped
-closer selection. Existing smoke steps and merge predicates are unchanged. After
+closer selection. Sustained overload can spend the ordinary attempt budget within
+minutes during inherited releases. Before deployment, warn on-call that the first
+AMA pass can emit one SEV1 page for every already-exhausted PR/head. Existing
+smoke steps and merge predicates are unchanged. After
 both revisions deploy, SRE retains the loaded watcher PID/start time and
 observes natural retry progress without manual rescue pumping. See
-[OVERLOADDEFER-01b](changes/OVERLOADDEFER-01b.md).
+[OVERLOADDEFER-01b](docs/changes/OVERLOADDEFER-01b.md).
 
 <!-- smv:diagrams:start -->
 

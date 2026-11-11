@@ -40,8 +40,10 @@ no-longer-eligible receipts after successful rescue count as progress. New jobs
 and incidents after the 30-minute exhaustion window regain bounded load backoff
 within existing refund caps. SIGTERM/SIGINT immediately shuts down the
 background queue and aborts the active rescue group alongside reviewer cleanup;
-forced settling bounds inherited-pipe waits. Every process exit synchronously
-aborts the rescue group. Broken directory cursors reopen on the next scan.
+forced settling bounds inherited-pipe waits. Process exit synchronously sends
+SIGKILL to the recorded active rescue group. A companion rejection of
+`--retry-overload-only` logs once and suspends retries until watcher restart
+after companion deployment. Broken directory cursors reopen on the next scan.
 Retry-only rescue rechecks current PR head/review/holds/writers and reconciles
 the original key before replay or release. Head/review changes retire stale
 intent to normal selection. The AMA pass releases exhausted helper holds after
@@ -50,10 +52,15 @@ audit; its `jobKey` and original `exhaustedAt` limit refund suppression to the
 same job and a fixed 30-minute window. Repeated releases do not extend that
 window. Within the same job and 30-minute incident window, later overloads
 inherit the exhausted count and release immediately through the existing page
-deduplication path. Ordinary budgets, leases and merge predicates remain
-authoritative. Existing automated smoke steps are unchanged. SRE verifies loaded
+deduplication path. There is no additional overload delay in that window, so
+sustained overload can consume the ordinary attempt budget within minutes and
+reach an operator stop. On the first AMA pass after deployment, each already
+exhausted PR/head can emit one SEV1 page; the legacy shared host-overload page
+does not suppress these per-PR pages. Coordinate this possible burst with the
+on-call operator before deployment. Ordinary budgets, leases and merge
+predicates remain authoritative. Existing automated smoke steps are unchanged. SRE verifies loaded
 revisions, watcher PID/start time and natural receipt progress after ordinary
-deployment; see [the change note](../changes/OVERLOADDEFER-01b.md).
+deployment; see [the change note](changes/OVERLOADDEFER-01b.md).
 
 ## Final findings remediation through the builder (LANEAUTO-01)
 

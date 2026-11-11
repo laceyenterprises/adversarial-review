@@ -133,8 +133,10 @@ retaining disk debt. Receipts untouched for 24 hours are skipped across
 restarts; fresh writes restore eligibility. Removed or no-longer-eligible
 receipts after successful rescue count as progress. SIGTERM/SIGINT immediately
 shuts down the background queue and aborts the active rescue group alongside
-reviewer cleanup; forced settling bounds inherited-pipe waits. Every process
-exit synchronously aborts the rescue group. Retry-only rescue rechecks current
+reviewer cleanup; forced settling bounds inherited-pipe waits. Process exit
+synchronously sends SIGKILL to the recorded active rescue group.
+A companion rejection of `--retry-overload-only` logs once and suspends retries
+until watcher restart after companion deployment. Retry-only rescue rechecks current
 PR head/review/holds/writers and reconciles the original key before replay or
 release. Head/review changes retire stale intent to normal selection. The AMA
 pass releases exhausted helper holds after one structured PR/head alert;
@@ -146,7 +148,7 @@ release immediately through the existing page deduplication path. Ordinary
 budgets, leases and merge predicates remain authoritative. Existing automated
 smoke steps are unchanged. SRE verifies loaded revisions, watcher PID/start time
 and natural receipt progress after ordinary deployment; see [the change
-note](../changes/OVERLOADDEFER-01b.md).
+note](changes/OVERLOADDEFER-01b.md).
 
 ## Explicit same-head re-review intent (RETRIGGERDEDUP-01)
 

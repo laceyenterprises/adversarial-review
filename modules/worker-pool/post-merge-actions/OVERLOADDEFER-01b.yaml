@@ -10,9 +10,15 @@ operator_steps:
       bounded child execution and applicable per-PR backoff; affected PRs must acquire a closer
       or released owner without manual pumping. Coordinate the incident-PR
       checks with the companion Agent OS handoff. This plan executes no live
-      repair and source fixtures do not establish deployed acceptance.
+      repair and source fixtures do not establish deployed acceptance. Before
+      deployment, warn on-call that the first AMA pass can emit one SEV1 page
+      for every already-exhausted PR/head; the legacy shared host page does not
+      deduplicate these pages. Set ADVERSARIAL_REVIEW_CHECKOUT to the absolute
+      deployed adversarial-review checkout path before running this command;
+      it works from either checkout or the Agent OS superproject directory.
     run_as: designated SRE operator
-    command: /bin/cat changes/OVERLOADDEFER-01b.md
+    command: >-
+      /bin/sh -c 'exec /bin/cat "${ADVERSARIAL_REVIEW_CHECKOUT:?set absolute deployed adversarial-review checkout}/docs/changes/OVERLOADDEFER-01b.md"'
 actions: []
 catchup:
   catchup_timeout_s: 1800

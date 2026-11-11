@@ -8,8 +8,9 @@ Holder files additionally retain optional `holderStartedAt`, captured from the
 local process table at acquisition. LEASEORPHAN-01 uses the same
 host/PID/start-time predicate as closer leases; a missing legacy timestamp can
 still prove reuse when the observed process was born after acquisition.
-Inspection reclaims a positively dead local holder through `reclaimIfStale`
-and its fenced history writer. Unknown local identity retains ownership;
+Inspection reports holder liveness without changing the holder or history.
+Acquisition and reaper observation reclaim a positively dead local holder through
+`reclaimIfStale` and its fenced history writer. Unknown local identity retains ownership;
 foreign-host deadline expiry remains the fallback at acquisition/reconciliation.
 Confirmed-merged PR closeout releases only matching PR generations before
 scratch removal, recording `release` with `holder-pr-merged`.

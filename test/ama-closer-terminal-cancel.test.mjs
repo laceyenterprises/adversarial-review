@@ -2,13 +2,14 @@ import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { acquireAmaCloserLease, readAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { cancelCloserForTerminalPr, queueCloserCancelForClosedPr, retryPendingCloserCancels } from '../src/ama/closer-terminal-cancel.mjs';
 import { reconcileTerminalPrState } from '../src/pr-terminal-reconcile.mjs';
 import { amaCloserDispatchFilePath, createHammerScratchDir, isActiveAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { findActiveRemediationJob } from '../src/ama/active-remediation-job.mjs';
+import { acquireMergeLease } from '../src/ama/merge-lease.mjs';
 
 function fixture(t, prNumber = 7) {
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-terminal-'));
@@ -32,6 +33,8 @@ test('merged PR at closer head succeeds without cancelling its HQ worker', async
   writeFileSync(join(pytestDir, 'ledger.db-wal'), 'synthetic WAL');
   writeFileSync(dispatchPath, JSON.stringify({ ...identity, launchRequestId: 'lrq_7',
     state: 'dispatched', lastObservedStatus: 'running', promptDir, scratchDir }));
+  const lane = acquireMergeLease({ rootDir, repo: identity.repo, base: 'main',
+    holderPr: identity.prNumber, holderHead: identity.headSha, holderPid: process.pid });
   const result = await cancelCloserForTerminalPr({
     rootDir, hqRoot: rootDir, repo: 'o/r', prNumber: 7, transition: 'merged', live: { headRefOid: 'abc' },
     readAuditImpl: () => ({ status: 'succeeded' }),
@@ -41,6 +44,7 @@ test('merged PR at closer head succeeds without cancelling its HQ worker', async
   assert.equal(result.cancelled, false);
   assert.equal(readAmaCloserLease(rootDir, identity).terminalOutcome, 'succeeded');
   assert.equal(JSON.parse(readFileSync(dispatchPath, 'utf8')).lastObservedStatus, 'running');
+  assert.equal(existsSync(lane.leasePath), false, 'lane custody settles before terminal scratch cleanup');
   assert.equal(existsSync(scratchDir), false, 'HAMTMP-03: a merged run leaves no scratch directory');
 });
 
@@ -50,6 +54,23 @@ test('same-head external merge remains owned until authoritative settlement', as
     transition: 'merged', live: { headRefOid: 'abc' }, readAuditImpl: () => null });
   assert.equal(result.reason, 'merged-await-stale-reaper');
   assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
+});
+
+test('merged closeout retains closer custody when lane settlement is busy', async t => {
+  const { rootDir, identity, dispatchPath } = fixture(t);
+  const lane = acquireMergeLease({ rootDir, repo: identity.repo, base: 'main',
+    holderPr: identity.prNumber, holderHead: identity.headSha, holderPid: process.pid });
+  writeFileSync(`${lane.leasePath}.mutation.lock`, JSON.stringify({
+    holderPid: process.pid, holderHost: hostname(), acquiredAt: new Date().toISOString(),
+  }));
+  const before = readFileSync(dispatchPath, 'utf8');
+  const result = await cancelCloserForTerminalPr({ rootDir, hqRoot: rootDir,
+    repo: identity.repo, prNumber: identity.prNumber, transition: 'merged',
+    live: { headRefOid: identity.headSha }, readAuditImpl: () => ({ status: 'succeeded' }) });
+  assert.equal(result.reason, 'merged-await-stale-reaper');
+  assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
+  assert.equal(readFileSync(dispatchPath, 'utf8'), before);
+  assert.equal(existsSync(lane.leasePath), true);
 });
 
 test('merged PR at another head leaves closer for stale-window reaper', async (t) => {

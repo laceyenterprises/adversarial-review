@@ -201,7 +201,7 @@ test('closer dispatch, readiness probes, ownerless and pending lease bounds scal
   assert.equal(resolveRoutingTierReadinessTimeoutMs({ WATCHER_ROUTING_TIER_READINESS_TIMEOUT_MS: '1000' }), 6000);
   assert.equal(ownerlessBoundMs({}), 15 * 60_000 * 6);
   assert.equal(amaCloserPendingLeaseExpiryMs(120_000), 391_500, 'effective dispatch budget is consumed once');
-  const lease = { status: 'pending', watcherPid: null, acquiredAt: new Date(0).toISOString() };
+  const lease = { status: 'pending', holderHost: 'foreign-fixture', watcherPid: null, acquiredAt: new Date(0).toISOString() };
   assert.equal(isReclaimablePendingAmaCloserLease(lease, {
     now: AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, processKillImpl() {},
   }), false);

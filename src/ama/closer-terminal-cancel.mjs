@@ -11,6 +11,7 @@ import { resolveHqBin } from '../remediation-hq-dispatch.mjs';
 import { resolveHqRoot } from '../remediation-reply-paths.mjs';
 import { fetchPullRequestHeadAndState } from '../github-api.mjs';
 import { readAmaAuditEntry } from './audit.mjs';
+import { releaseMergedPrMergeLeases } from './merge-lease.mjs';
 
 const execFileAsync = promisify(execFile);
 const HQ_CANCEL_TIMEOUT_MS = 10_000;
@@ -165,10 +166,13 @@ export async function cancelCloserForTerminalPr({
     }
     const audit = resolvedRoot ? readAuditImpl(resolvedRoot, repo, prNumber, mergedHead) : null;
     if (audit?.status !== 'succeeded') return { cancelled: false, reason: 'merged-await-stale-reaper' };
+    if (!releaseMergedPrMergeLeases({ rootDir, repo, prNumber, now })) {
+      return { cancelled: false, reason: 'merged-await-stale-reaper' };
+    }
+    updateAmaCloserLease({ rootDir, repo, prNumber, headSha, status: 'terminal', terminalOutcome: 'succeeded', now });
     if (dispatch) updateAmaCloserDispatchRecord(rootDir, { repo, prNumber, headSha: dispatch.headSha }, (record) => record && ({
       ...record, outcome: 'succeeded', lastObservedStatus: record.lastObservedStatus || null, lastObservedAt: now,
     }));
-    updateAmaCloserLease({ rootDir, repo, prNumber, headSha, status: 'terminal', terminalOutcome: 'succeeded', now });
     return { cancelled: false, outcome: 'succeeded' };
   }
   if (transition !== 'closed') return { cancelled: false, reason: 'not-terminal' };

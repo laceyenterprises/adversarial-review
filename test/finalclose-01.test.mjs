@@ -872,14 +872,14 @@ test('HAMNOREREVIEW-01 a legacy handoff stop releases before SQLite review recon
 });
 
 
-for (const scenario of ['dead', 'hostless-dead', 'timeout', 'expired-dead', 'reused', 'expired-live', 'live', 'hostless-live', 'current', 'hostless-current', 'launch', 'hold', 'probe-timeout']) {
+for (const scenario of ['dead', 'hostless-dead', 'timeout', 'local-timeout', 'expired-dead', 'reused', 'expired-live', 'live', 'hostless-live', 'current', 'hostless-current', 'launch', 'hold', 'probe-timeout', 'local-probe-timeout']) {
   test(`CLOSERLEASEDEAD-01 closure routing ${scenario}`, async t => {
     const f = await backgroundFinalRound(t);
     f.finish({ dispatched: false, reason: 'fixture-unused' });
     const now = f.launchAt;
-    const lease = acquireAmaCloserLease({ ...f.identity, host: hostname(),
+    const lease = acquireAmaCloserLease({ ...f.identity, host: ['timeout', 'probe-timeout'].includes(scenario) ? 'foreign-fixture' : hostname(),
       watcherPid: ['current', 'hostless-current'].includes(scenario) ? process.pid : 4242,
-      now: new Date(now - 60_000).toISOString(), dispatchTimeoutMs: ['timeout', 'expired-dead', 'reused', 'expired-live'].includes(scenario) ? 30_000 : 120_000,
+      now: new Date(now - 60_000).toISOString(), dispatchTimeoutMs: ['timeout', 'local-timeout', 'expired-dead', 'reused', 'expired-live'].includes(scenario) ? 30_000 : 120_000,
       captureProcessImpl: () => ({ startedAt: new Date(now - 180_000).toISOString() }) }).lease;
     if (scenario.startsWith('hostless-')) {
       delete lease.holderHost;
@@ -890,10 +890,10 @@ for (const scenario of ['dead', 'hostless-dead', 'timeout', 'expired-dead', 'reu
     const result = await maybeDispatchAmaClosureFor({ ...f.args,
       labelNames: scenario === 'hold' ? ['no-merge-hold'] : [],
       resolveAmaHammerDispatchModeImpl: () => 'inline',
-      closerLeaseLivenessOptions: { isProcessAlive: () => ['timeout', 'probe-timeout'].includes(scenario) ? null : ['live', 'hostless-live', 'expired-live', 'reused', 'current', 'hostless-current'].includes(scenario),
+      closerLeaseLivenessOptions: { isProcessAlive: () => ['timeout', 'local-timeout', 'probe-timeout', 'local-probe-timeout'].includes(scenario) ? null : ['live', 'hostless-live', 'expired-live', 'reused', 'current', 'hostless-current'].includes(scenario),
         captureProcessImpl: () => ({ startedAt: new Date(now - (scenario === 'reused' ? 120_000 : 180_000)).toISOString() }) },
       probeClosureOwnershipImpl: async () => {
-        if (scenario === 'probe-timeout') f.advance(60_001);
+        if (['probe-timeout', 'local-probe-timeout'].includes(scenario)) f.advance(60_001);
         return { owned: scenario === 'launch', uncertain: scenario !== 'launch',
           launchIds: scenario === 'launch' ? ['lrq_live'] : [] };
       },

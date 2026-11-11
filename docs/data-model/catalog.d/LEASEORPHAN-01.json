@@ -8,7 +8,7 @@
       "store": "data/merge-leases/",
       "schemaSurface": "src/ama/merge-lease.mjs",
       "owner": "AMA merge lane",
-      "description": "Holder records retain optional holderStartedAt. One host/PID/start-time predicate detects local death and reuse on observation through the existing fenced reclaim writer. Unknown local evidence retains custody; foreign-host expiry remains the fallback. Confirmed-merged PR closeout releases matching generations before scratch removal with the existing holder-pr-merged history reason."
+      "description": "Holder records retain optional holderStartedAt. One host/PID/start-time predicate reports local death and reuse on read-only inspection; acquisition and reaper observation use the existing fenced reclaim writer. Unknown local evidence retains custody; foreign-host expiry remains the fallback. Confirmed-merged PR closeout releases matching generations before scratch removal with the existing holder-pr-merged history reason."
     }
   ]
 }

@@ -112,6 +112,7 @@ export const DEFAULT_CLOSER_LEASE_PROBE_MIN_AGE_MS = 15_000;
 const LEASE_DIR_SEGMENTS = ['data', 'ama-closer-leases'];
 const REAPER_STATE_DIR_SEGMENTS = ['data', 'recovery-reaper'];
 const CLOSER_LEASE_CURSOR_FILE = 'closer-lease-cursor.json';
+const CLOSER_HOLDER_CURSOR_FILE = 'closer-holder-cursor.json';
 
 function resolvePositiveMs(rawValue, fallbackMs) {
   if (rawValue == null || String(rawValue).trim() === '') return fallbackMs;
@@ -425,13 +426,13 @@ function leaseDirPath(rootDir) {
   return join(rootDir, ...LEASE_DIR_SEGMENTS);
 }
 
-function closerLeaseCursorPath(rootDir) {
-  return join(rootDir, ...REAPER_STATE_DIR_SEGMENTS, CLOSER_LEASE_CURSOR_FILE);
+function closerLeaseCursorPath(rootDir, cursorFile = CLOSER_LEASE_CURSOR_FILE) {
+  return join(rootDir, ...REAPER_STATE_DIR_SEGMENTS, cursorFile);
 }
 
-function readCloserLeaseCursor(rootDir, logger = console) {
+function readCloserLeaseCursor(rootDir, logger = console, cursorFile = CLOSER_LEASE_CURSOR_FILE) {
   try {
-    const parsed = JSON.parse(readFileSync(closerLeaseCursorPath(rootDir), 'utf8'));
+    const parsed = JSON.parse(readFileSync(closerLeaseCursorPath(rootDir, cursorFile), 'utf8'));
     if (
       parsed
       && typeof parsed === 'object'
@@ -479,10 +480,11 @@ function writeJsonAtomic(filePath, value) {
   }
 }
 
-function persistCloserLeaseCursor(rootDir, { lastEntryName, entriesSeen }, logger = console) {
+function persistCloserLeaseCursor(rootDir, { lastEntryName, entriesSeen }, logger = console,
+  cursorFile = CLOSER_LEASE_CURSOR_FILE) {
   if (!lastEntryName && !entriesSeen) return false;
   try {
-    writeJsonAtomic(closerLeaseCursorPath(rootDir), {
+    writeJsonAtomic(closerLeaseCursorPath(rootDir, cursorFile), {
       schemaVersion: 2,
       lastEntryName: lastEntryName || null,
       entriesSeen: Math.max(0, Math.floor(Number(entriesSeen) || 0)),
@@ -600,12 +602,13 @@ async function readLeaseRecords(rootDir, {
   readLimit = DEFAULT_CLOSER_LEASE_READ_LIMIT,
   readConcurrency = 8,
   ignoreCursor = false,
+  cursorFile = CLOSER_LEASE_CURSOR_FILE,
   opendirSyncImpl = opendirSync,
   readFileImpl = fsPromises.readFile,
   statImpl = fsPromises.stat,
 } = {}) {
   const dir = leaseDirPath(rootDir);
-  const cursor = ignoreCursor ? { lastEntryName: null } : readCloserLeaseCursor(rootDir, logger);
+  const cursor = ignoreCursor ? { lastEntryName: null } : readCloserLeaseCursor(rootDir, logger, cursorFile);
   const discovery = readDirectoryEntryNames(dir, {
     entryScanLimit,
     lastEntryName: cursor.lastEntryName,
@@ -1143,6 +1146,9 @@ export function createStaleStateReaperTicker({
 
 export async function observeDeadLeaseHolders({ rootDir, now = new Date().toISOString(),
   env = process.env, logger = console, isProcessAlive, captureProcessImpl,
+  entryScanLimit = DEFAULT_CLOSER_LEASE_ENTRY_SCAN_LIMIT,
+  readLimit = DEFAULT_CLOSER_LEASE_READ_LIMIT,
+  readFileImpl = fsPromises.readFile,
   preReceiptIntentOptions = {} } = {}) {
   if (!rootDir) return;
   const options = { now, env, logger,
@@ -1153,12 +1159,16 @@ export async function observeDeadLeaseHolders({ rootDir, now = new Date().toISOS
       ...(isProcessAlive ? { pidAliveFn: isProcessAlive } : {}),
       ...(captureProcessImpl ? { captureProcessImpl } : {}) });
   }
-  // A death observation must cover this pass, including holders behind the
-  // age sweep's persisted cursor. Keep I/O concurrency bounded, not coverage.
-  const discovery = await readLeaseRecords(rootDir, { logger, ignoreCursor: true,
-    entryScanLimit: Infinity, readLimit: Infinity });
+  // Bound parsing and process probes per poll. A separate durable cursor keeps
+  // observation and the slower age/pruning sweep from skipping each other's work.
+  const discovery = await readLeaseRecords(rootDir, { logger,
+    entryScanLimit, readLimit, readFileImpl, cursorFile: CLOSER_HOLDER_CURSOR_FILE });
   for (const lease of discovery.records) {
     if (abandonedAmaCloserLeaseOutcome(lease, options) !== 'abandoned-holder-dead') continue;
     await abandonAmaCloserLease(rootDir, lease, { ...preReceiptIntentOptions, ...options });
   }
+  if (discovery.cursorCanAdvance) persistCloserLeaseCursor(rootDir, {
+    lastEntryName: discovery.lastEntryName, entriesSeen: discovery.cursorEntriesSeen,
+  }, logger, CLOSER_HOLDER_CURSOR_FILE);
+  return discovery;
 }

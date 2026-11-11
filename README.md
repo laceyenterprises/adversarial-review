@@ -2512,6 +2512,13 @@ Terminal retry chains permit cleanup after closure custody settles. For a
 confirmed-merged PR, local recovery releases the merge-lane and closer leases
 and records the closing audit before removing scratch; an ended controller
 requires no further PR-bound dispatch or operator decision (LEASEORPHAN-01).
+Per-poll closer death observation reads at most 50 records from a 250-entry
+lexical page and persists its own cursor across ticks and restarts; large
+histories require multiple batches. Directory-name enumeration remains complete.
+Age pruning has an independent cursor. Merge-lane inspection is read-only;
+acquisition and reaper observation own fenced dead-holder reclamation. Ordinary successful reconciliation
+preserves the worker audit reason; `confirmed-merged-closeout` identifies only
+parked-controller merge discovery.
 Repository fallback inputs share the
 same ownership identity, including PR-number fallbacks from dispatch context,
 PR metadata and top-level input; interrupted admission preserves the current PR's deferred predecessor artifacts;

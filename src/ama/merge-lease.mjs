@@ -1085,8 +1085,6 @@ export function inspectMergeLease(...args) {
   const root = args[0]?.rootDir;
   return withRepositoryStateRead(root, () => {
     args[0] = canonicalRepositoryArguments(root, args[0]);
-    const observed = inspectMergeLeaseWithinRepositoryState(args[0]);
-    if (observed.holderLiveness === 'dead') reclaimIfStaleWithinRepositoryState(args[0]);
     return inspectMergeLeaseWithinRepositoryState(...args);
   });
 }
@@ -1404,7 +1402,7 @@ export function readMergeLeaseHolders({ rootDir, repo, prNumber } = {}) {
 export function releaseMergedPrMergeLeases({ rootDir, repo, prNumber, now } = {}) {
   let complete = true;
   for (const lease of readMergeLeaseHolders({ rootDir, repo, prNumber })) {
-    const result = releaseMergeLease({ rootDir, repo, base: lease.base,
+    const result = releaseMergeLease({ rootDir, repo: lease.repo || repo, base: lease.base,
       leaseId: lease.leaseId, holderPr: lease.holderPr, holderHead: lease.holderHead,
       acquiredAt: lease.acquiredAt, now, merged: true, reason: 'holder-pr-merged' });
     if (!result.released) complete = false;

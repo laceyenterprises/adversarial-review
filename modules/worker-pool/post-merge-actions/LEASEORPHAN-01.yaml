@@ -4,7 +4,8 @@ operator_steps:
       restart watcher and follow-up through their registered service paths and
       verify PID start times. Observe natural traffic for 24 hours: no rescue
       lease-left with a dead submitter; no dead same-host unlaunched closer or
-      merge-lane lease surviving one watcher pass; no confirmed-merged PR
+      merge-lane lease surviving a complete holder-observation rotation
+      (closer batches read at most 50 records per watcher pass); no confirmed-merged PR
       closeout decision. Retain revision, process and observation receipts.
       This plan authorizes no worker live mutation.
     run_as: designated SRE operator

@@ -91,7 +91,8 @@ test('LEASEDEADPID-01 numeric now preserves pending and dispatched expiry bounda
   ]) {
     for (const now of [Date.parse(leaseNow), 0]) {
       for (const age of [boundary - 1, boundary, boundary + 1]) {
-        const lease = { status, lrqId: status === 'dispatched' ? 'synthetic-terminal' : null, acquiredAt: new Date(now - age).toISOString() };
+        const lease = { status, holderHost: `${hostname()}.foreign`,
+          lrqId: status === 'dispatched' ? 'synthetic-terminal' : null, acquiredAt: new Date(now - age).toISOString() };
         assert.equal(reclaim(lease, { now, launchStatusProbe: { ok: true, row: { status: 'failed' } } }), age >= boundary, `${status} age ${age} at ${now}`);
         assert.equal(reclaim(lease, { now: new Date(now).toISOString(), launchStatusProbe: { ok: true, row: { status: 'failed' } } }), age >= boundary);
       }

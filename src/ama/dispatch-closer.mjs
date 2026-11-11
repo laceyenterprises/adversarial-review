@@ -1669,8 +1669,13 @@ function* reconcileAmaCloserLeaseSteps({
     if (isPreReceiptIntent(liveRecord)
       || (record && liveRecord?.launchRequestId !== launchRequestId)) return false;
     if (terminalOutcome === 'succeeded') {
-      writeAmaAuditEntry({ hqRoot: hqRoot || rootDir, ...identity, now,
-        attempt: { outcome: 'succeeded', reason: 'confirmed-merged-closeout', launchRequestId } });
+      const auditRoot = hqRoot || rootDir;
+      if (readAmaAuditEntry(auditRoot, repo, prNumber, identity.headSha)?.status !== 'succeeded') {
+        const completion = readAmaAuditEntry(auditRoot, repo, prNumber, dispatchIdentity.headSha)
+          ?.attempts?.findLast(attempt => attempt.outcome === 'succeeded' && attempt.launchRequestId === launchRequestId);
+        writeAmaAuditEntry({ hqRoot: auditRoot, ...identity, now,
+          attempt: { outcome: 'succeeded', reason: completion?.reason || 'terminal-merge-reconciliation', launchRequestId } });
+      }
       if (!releaseMergedPrMergeLeases({ rootDir, repo, prNumber, now })) return false;
     }
     if (!finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity: identity,

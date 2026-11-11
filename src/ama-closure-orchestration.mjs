@@ -1232,7 +1232,7 @@ async function dispatchAmaClosureFor({
   const remediationHandoff = findFinalRemediationPushJob(rootDir, {
     repo: repoPath, prNumber, headSha: candidate?.headSha || currentRevisionRef });
   const reviewCycleCapReached = Boolean(remediationHandoff) || dispatchJob?.reviewCycleCapReached === true
-    || reviewStateRow?.rereview_reason === 'system-review-ceiling-closure';
+    || ['system-review-ceiling-closure', 'system-budget-exhausted-closure'].includes(reviewStateRow?.rereview_reason);
   // CIBLOCKHAM-01: the same final-hammer close for a red-CI head with no
   // remediation job left to fix it.
   // Historical stop evidence is not enough: rescue must observe failed external

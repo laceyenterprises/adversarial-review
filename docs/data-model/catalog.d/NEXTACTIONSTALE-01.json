@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "reviewer-passes",
+      "title": "Reviewer Passes",
+      "path": "docs/data-model/reviewer-passes.md",
+      "store": "data/reviews.db: reviewer_passes, reviewed_prs",
+      "schemaSurface": "src/review-state.mjs",
+      "relatedSchemaSurfaces": ["src/hamclose-review-admission.mjs", "src/pollonce-phases.mjs"],
+      "owner": "watcher review admission",
+      "compatibility": "No schema change. A request-scoped CAS restores the last completed delivered review to posted with system-budget-exhausted-closure. This routing marker grants no current-head verdict or merge authority and changes no budget."
+    }
+  ]
+}

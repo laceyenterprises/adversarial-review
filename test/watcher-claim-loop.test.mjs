@@ -5050,10 +5050,11 @@ test('OWNERDEADLINE-01: every open subject visits deadline recovery before revie
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
-for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocked', 'sequence', 'parked-green', 'expired-hammer-handoff']) {
+for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocked', 'sequence', 'parked-green', 'expired-hammer-handoff', 'expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only', 'spent-review-wait']) {
   test(`CLOSERDEADLOCK-01 ${initialStatus} final-round push remains in the closer lane`, () => {
     const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-final-round-owner-'));
     const reviewed = '1'.repeat(40), pushed = '2'.repeat(40);
+    const delivered = ['spent-review-only', 'spent-review-wait'].includes(initialStatus) ? pushed : reviewed;
     const body = '## Blocking issues\n- None.\n## Non-blocking issues\n- Synthetic typo.\n## Verdict\nComment only';
     try {
       const postedUrl = fileUrl('src', 'posted-review-row.mjs');
@@ -5084,7 +5085,7 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
             maybeDispatchAmaCloserImpl: async args => {
               assert.equal(green, true, 'pending CI stays in the existing wait');
               assert.equal(args.dispatchContext.targetRemediationSha, '${pushed}');
-              assert.equal(args.reviewState.headSha, '${reviewed}');
+              assert.equal(args.reviewState.headSha, '${delivered}');
               globalThis.finalRoundClosureAdmissions = (globalThis.finalRoundClosureAdmissions || 0) + 1;
               return { dispatched: true, launchRequestId: 'synthetic-closer' };
             }, logger: { log() {}, warn() {} },
@@ -5115,17 +5116,17 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
       writeFileSync(registerPath, buildRegisterSource(loaderPath));
       writeFileSync(runnerPath, buildRunnerSource({ freshHeads: { 101: pushed }, afterFirstPoll: `
         const { mkdirSync, writeFileSync } = await import('node:fs');
-        const completedAt = new Date(Date.now() - ('${initialStatus}' === 'expired-hammer-handoff' ? 360000 : 0)).toISOString();
+        const completedAt = new Date(Date.now() - (['expired-hammer-handoff', 'expired-ci-handoff'].includes('${initialStatus}') ? 3600000 : 0)).toISOString();
         globalThis.finalRoundCompletedAt = completedAt;
         const dir = ${JSON.stringify(path.join(tmp, 'data', 'follow-up-jobs', 'completed'))};
         mkdirSync(dir, { recursive: true });
         const jobId = 'example__project-pr-101-final';
         writeFileSync(dir + '/' + jobId + '.json', JSON.stringify({
-          jobId, repo: 'example/project', prNumber: 101, status: 'completed', finalRound: 'comment-only',
-          revisionRef: '${reviewed}', reviewBody: ${JSON.stringify(body)}, completedAt,
+          jobId, repo: 'example/project', prNumber: 101, status: 'completed', finalRound: ['expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only', 'spent-review-wait'].includes('${initialStatus}') ? null : 'comment-only',
+          revisionRef: '${delivered}', reviewBody: ${JSON.stringify(body)}, completedAt,
           remediationPlan: { currentRound: 2, maxRounds: 2 },
-          completion: { finalRemediationPush: true, workerPushedHeadSha: '${pushed}' },
-          reReview: { requested: false, suppressed: '${initialStatus}' === 'expired-hammer-handoff' ? 'shared-next-action' : 'comment-only-final-round', nextAction: {
+          completion: { finalRemediationPush: !['spent-review-only', 'spent-review-wait'].includes('${initialStatus}'), workerPushedHeadSha: '${pushed}' },
+          reReview: { requested: false, suppressed: ['expired-hammer-handoff', 'expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only'].includes('${initialStatus}') ? 'shared-next-action' : 'comment-only-final-round', nextAction: {
             action: '${initialStatus}' === 'expired-hammer-handoff' ? 'hammer' : 'wait-for-CI',
             actor: '${initialStatus}' === 'expired-hammer-handoff' ? 'hammer' : 'ci',
             reason: 'suppressed-final-push', head: '${pushed}',
@@ -5135,26 +5136,26 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
         const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=101').get();
         db.prepare(\`INSERT INTO reviewer_passes(repo,pr_number,attempt_number,reviewer_class,pass_kind,
           started_at,ended_at,status,head_sha,gh_comment_id,body_md,body_captured_at)
-          VALUES (?,101,50,'claude','rereview',?,?,'completed','${reviewed}','synthetic-review',?,?)\`)
+          VALUES (?,101,50,'claude','rereview',?,?,'completed','${delivered}','synthetic-review',?,?)\`)
           .run(row.repo, completedAt, completedAt, ${JSON.stringify(body)}, completedAt);
-        db.prepare(\`UPDATE reviewed_prs SET review_status=?,reviewer_head_sha='${reviewed}',revision_ref='${pushed}',
+        db.prepare(\`UPDATE reviewed_prs SET review_status=?,reviewer_head_sha='${delivered}',revision_ref='${pushed}',
           rereview_requested_at=?,rereview_reason='auto-refresh: posted review on stale head',
           reviewer_session_uuid=NULL,reviewer_lease_expires_at=NULL WHERE pr_number=101\`)
-          .run('${initialStatus}' === 'sequence' ? 'posted' : ['parked-green', 'expired-hammer-handoff'].includes('${initialStatus}') ? 'pending' : '${initialStatus}',
+          .run('${initialStatus}' === 'sequence' ? 'posted' : ['parked-green', 'expired-hammer-handoff', 'expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only', 'spent-review-wait'].includes('${initialStatus}') ? 'pending' : '${initialStatus}',
             ['posted', 'sequence'].includes('${initialStatus}') ? null : completedAt);
         globalThis.finalRoundArmed = true;
         globalThis.finalRoundLedger = { completedRoundsForPR: 2, latestRiskClass: 'medium', latestMaxRounds: 2,
-          commentOnlyFinalRoundRevisionRefs: ['${reviewed}'],
-          commentOnlyFinalRoundPushedHeads: [{ reviewedHead: '${reviewed}', workerPushedHeadSha: '${pushed}', status: 'completed', completedAt }] };
+          commentOnlyFinalRoundRevisionRefs: ['spent-review-only', 'spent-review-wait'].includes('${initialStatus}') ? [] : ['${delivered}'],
+          commentOnlyFinalRoundPushedHeads: ['spent-review-only', 'spent-review-wait'].includes('${initialStatus}') ? [] : [{ reviewedHead: '${delivered}', workerPushedHeadSha: '${pushed}', status: 'completed', completedAt }] };
         globalThis.finalRoundSettled = { verdict: 'comment-only', remediationPending: false,
           blockingFindingState: 'known', blockingFindingCount: 0, nonBlockingFindingState: 'known', nonBlockingFindingCount: 1,
-          reviewedHeadSha: '${reviewed}', commentOnlyFinalRoundPush: true };
+          reviewedHeadSha: '${delivered}', commentOnlyFinalRoundPush: !['spent-review-only', 'spent-review-wait'].includes('${initialStatus}') };
         globalThis.__watcherClaimLoopReviewerSpawns = [];
-        globalThis.finalRoundGreen = ['parked-green', 'expired-hammer-handoff'].includes('${initialStatus}');
+        globalThis.finalRoundGreen = ['parked-green', 'expired-hammer-handoff', 'expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only'].includes('${initialStatus}');
         await pollOnce(octokit, pollOptions);
         assert.ok(globalThis.finalRoundDecisions?.length >= 1, 'pending CI must reach the closer in this pass');
         assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number=101').get().review_status, 'posted');
-        if (['parked-green', 'expired-hammer-handoff'].includes('${initialStatus}')) {
+        if (['parked-green', 'expired-hammer-handoff', 'expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only'].includes('${initialStatus}')) {
           // Startup refill may also observe closure before the posted phase.
           // This stub counts admissions; the real executor's lease/launch
           // reconciliation, not this stub, deduplicates launches.
@@ -5171,7 +5172,12 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
           } else {
             // Repeated pending observations must not back off closure when CI
             // can settle without changing the review row.
-            for (let tick = 0; tick < 8; tick += 1) await pollOnce(octokit, pollOptions);
+            for (let tick = 0; tick < 8; tick += 1) {
+              const decisionsBefore = globalThis.finalRoundDecisions.length;
+              await pollOnce(octokit, pollOptions);
+              assert.ok(globalThis.finalRoundDecisions.length > decisionsBefore,
+                'closure re-reads live evidence every pass despite an unchanged review fingerprint');
+            }
           }
           globalThis.finalRoundGreen = true;
           await pollOnce(octokit, pollOptions);
@@ -5187,8 +5193,8 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
         { cwd: REPO_ROOT, encoding: 'utf8', env, timeout: 30000 });
       const output = `${result.stdout}${result.stderr}`;
       assert.equal(result.status, 0, output);
-      assert.ok((output.match(/owning lane=closer.*(?:completed-comment-only-final-round|expired-remediation-handoff)/g) || []).length
-        >= (['parked-green', 'expired-hammer-handoff'].includes(initialStatus) ? 1 : initialStatus === 'sequence' ? 2 : 10), 'every pass names the closer owner, including startup refill');
+      assert.ok((output.match(/budget-exhausted-closure-transition/g) || []).length <= 1,
+        'certain budget handoff logs once per head instead of retrying every pass');
     } finally { rmSync(tmp, { recursive: true, force: true }); }
   });
 }

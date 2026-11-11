@@ -56,6 +56,13 @@ releases to `pending` at the current `revision_ref`, preserving attempts and
 retry budgets and logging the reason. A replacement session is never released
 by an older review's settlement.
 
+Budget-exhausted queued review recovery selects the newest completed delivered
+`first-pass` or `rereview` pass, restoring its `head_sha` and `ended_at` to the
+existing review row. A request-scoped CAS sets `review_status=posted` and
+`rereview_reason=system-budget-exhausted-closure`, clears the suppressed request
+and failed attempt metadata, and retains the pass journal and all budgets.
+This closure marker supplies an owner, never a current-head verdict.
+
 Posted-orphan recovery takes the reviewed head from the GitHub review's
 `commit_id`, falling back to the stored reviewer head only when GitHub omits it.
 An empty stored head can therefore be healed by a matching reviewer-bot post

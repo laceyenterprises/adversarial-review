@@ -3054,6 +3054,9 @@ stateDiagram-v2
     s0 --> s4: review-row.34 automatic hammer-owned-head or completed final-round push request restored to delivered review identity with request CAS
     s1 --> s4: review-row.35 automatic hammer-owned-head or completed final-round push request restored to delivered review identity with request CAS
     s3 --> s4: review-row.36 automatic hammer-owned-head or completed final-round push request restored for closure CI evaluation with request CAS
+    s0 --> s4: review-row.37 certain budget suppression restores latest delivered review identity under queued request CAS; live closure gates remain required
+    s1 --> s4: review-row.38 certain budget suppression restores latest delivered review identity under queued request CAS; live closure gates remain required
+    s3 --> s4: review-row.39 certain budget suppression restores latest delivered review identity under queued request CAS; live closure gates remain required
     s4 --> [*]
     s5 --> [*]
     s6 --> [*]

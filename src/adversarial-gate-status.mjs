@@ -36,6 +36,8 @@ import {
   resolveArgusSecurityVerdict,
 } from './argus-security-verdict.mjs';
 import { primaryReviewerQuotaCappedForRow } from "./reviewer-route-selection.mjs";
+import { resolveFirstPassReviewBudgetSuppression, isExactHeadReviewRecoveryRequested } from './first-pass-review-suppression.mjs';
+import { isBudgetExhaustedReviewSuppression, BUDGET_EXHAUSTED_CLOSURE_REASON } from './hamclose-review-admission.mjs';
 
 import { normalizeGithubMergeability } from './github-mergeability.mjs';
 import { extractNonBlockingFindingIdentities } from './kernel/remediation-reply.mjs';
@@ -59,6 +61,19 @@ import {
 } from './ama/hammer-adjudication.mjs';
 
 const execFileAsync = promisify(execFile);
+
+// Read-only rescue projection. Budget policy remains the watcher's admission
+// policy; a persisted handoff survives restoration of the delivered review.
+export function budgetExhaustedClosureEvidence({ rootDir, db, repo, prNumber, headSha, reviewRow, logger = console }) {
+  if (!reviewRow || isExactHeadReviewRecoveryRequested(reviewRow)
+    || isFleetSelfRepairTrailerOnlyRereviewReason(reviewRow.rereview_reason)) return null;
+  const suppression = resolveFirstPassReviewBudgetSuppression({ rootDir, db,
+    domainId: 'code-pr', repoPath: repo, prNumber, currentHeadSha: headSha, reviewRow, logger });
+  return isBudgetExhaustedReviewSuppression(suppression)
+    || (reviewRow.revision_ref === headSha && reviewRow.rereview_reason === BUDGET_EXHAUSTED_CLOSURE_REASON)
+    ? { headSha, owner: 'hammer', reason: 'budget-exhausted-closure' } : null;
+}
+
 const WATCHER_OWNED_HOLD_LABELS = new Set(['duplicate-family-hold']);
 const ADVERSARIAL_GATE_OPERATOR_SKIP_LABELS = new Set(
   [...OPERATOR_SKIP_LABELS].filter((label) => !WATCHER_OWNED_HOLD_LABELS.has(label)),

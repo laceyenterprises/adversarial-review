@@ -12,12 +12,6 @@ import { REVIEWER_CYCLE_CAP_REACHED_LABEL } from './review-cycle-cap.mjs';
 import { findFinalRemediationPushJob } from './comment-only-final-round.mjs';
 import { isAutomaticReviewCycleCapPause, normalizeLabelNames } from './review-cycle-cap-actions.mjs';
 import { isExplicitOperatorRetriggerReason, isExactHeadReviewRecoveryReason } from './retrigger-review-reason.mjs';
-import {
-  stmtMarkFailed,
-  stmtReleaseReviewLease,
-  stmtRestoreSameHeadSuppressedReviewPosted,
-} from './review-state-db.mjs';
-
 import { isExhaustedHeadVerdictRequested } from './exhausted-head-verdict.mjs';
 
 const execFileAsync = promisify(execFile);

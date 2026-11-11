@@ -3410,7 +3410,14 @@ The shared closure projection binds retry exhaustion to the reviewed-head series
 that spent it. A new builder head receives a verdict owner before any closer
 retry. Once reviewed, its new series receives the existing per-head budget.
 Same-head and PR-lifetime caps remain unchanged; closer head churn cannot refund
-its series. Head changes discard previous next-action deadline anchors. A
+its series. Queued automatic reviews with certain budget suppression transition
+back to `posted` under the inspected request's CAS, restoring only the latest
+delivered review's head and timestamp. `system-budget-exhausted-closure` assigns
+unreviewed heads to the closer without granting merge permission. Completed
+final pushes re-enter shared next-action evaluation on every pass, including
+satisfied or expired CI/mergeability waits; retry scheduling cannot hide them.
+Live owners, ownership reconciliation and closer exhaustion keep precedence.
+Head changes discard previous next-action deadline anchors. A
 builder head awaiting review uses its persisted per-head wait anchor, never an
 older head's posting or final-round timestamp.
 

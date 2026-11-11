@@ -6,7 +6,9 @@ import { isOrphanHeadReviewRequested } from './orphan-head-review-requested.mjs'
 // supply the existing delivered-review count result; a persisted closure row
 // carries that result when admission has already handed it off. A closer's
 // rereview-exact-head recommendation does not increase the budget.
-export function reviewCeilingOwner({ row, headSha, ceilingReached = row?.rereview_reason === 'system-review-ceiling-closure' } = {}) {
+export function reviewCeilingOwner({ row, headSha, ceilingReached = [
+  'system-review-ceiling-closure', 'system-budget-exhausted-closure',
+].includes(row?.rereview_reason) } = {}) {
   const explicitReview = Boolean(row?.rereview_requested_at
     && isExplicitOperatorRetriggerReason(row.rereview_reason))
     || isOrphanHeadReviewRequested(row, headSha) || isExhaustedHeadVerdictRequested(row, headSha);

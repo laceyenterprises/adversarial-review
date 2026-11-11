@@ -551,6 +551,12 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          // Python owns deploy admission; mirror its shared CFG contract.
+          deploy_batch_window_seconds: {
+            __type: TYPE_INT,
+            __default: 1200,
+            __min: 0,
+          },
           poll_interval_seconds: {
             __type: TYPE_INT,
             __default: 300,

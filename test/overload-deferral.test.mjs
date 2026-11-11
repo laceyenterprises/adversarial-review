@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { resetConfigCache } from '../src/config-loader.mjs';
 import { deferOverload, isLoadTimeout, MAX_OVERLOAD_DEFERRALS } from '../src/overload-deferral.mjs';
 import { evaluateHammerDeferralQueue, recordHammerRetryDispatch, deferHammerRetryDispatch,
-  readHammerRetryCapLedger } from '../src/ama/hammer-retry-cap.mjs';
+  readHammerRetryCapLedger, releaseHammerOverloadDeferral } from '../src/ama/hammer-retry-cap.mjs';
 import { observeClosureWait } from '../src/ama/closure-wait.mjs';
 import { runHelperStep } from '../bin/hammer-helper-step.mjs';
 import { recordHammerEarlyFailure } from '../src/ama/hammer-terminal-audit.mjs';
@@ -65,15 +65,49 @@ test('retry debt survives replacement launches and re-reading the durable ledger
     const now = new Date((1000 + count * 600) * 1000).toISOString();
     recordHammerRetryDispatch(root, identity, { jobKey: head, headSha: head, launchRequestId, now });
     const ledger = deferHammerRetryDispatch(root, identity, { jobKey: head, headSha: head,
-      launchRequestId, now, leaseWaitExhausted: true, overloadEvidence: evidence });
+      launchRequestId, now, leaseWaitExhausted: true, laneBusy: count === 1, overloadEvidence: evidence });
     assert.equal(ledger.overloadDeferral.deferralCount, count);
     assert.equal(readHammerRetryCapLedger(root, identity).overloadDeferral.deferralCount, count);
   }
   const receipt = readHammerRetryCapLedger(root, identity);
   assert.equal(evaluateHammerDeferralQueue(receipt, new Date(1e12).toISOString()).expired, true);
+  releaseHammerOverloadDeferral(root, identity);
+  const released = readHammerRetryCapLedger(root, identity);
+  assert.equal(released.overloadDeferral, null);
+  assert.equal(released.lastOverloadDeferral.deferralCount, MAX_OVERLOAD_DEFERRALS);
+  assert.deepEqual(evaluateHammerDeferralQueue(released, new Date(1e12).toISOString()),
+    { expired: false, backoff: false });
+  // Ordinary attempts in the same 30-minute incident remain charged after
+  // every release. A timestamp decades later would start a fresh incident.
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const now = new Date(Date.parse(released.lastOverloadDeferral.exhaustedAt) + attempt * 60_000).toISOString();
+    const launchRequestId = `normal-lane-${attempt}`;
+    recordHammerRetryDispatch(root, identity, { jobKey: head, headSha: head, launchRequestId, now });
+    const before = readHammerRetryCapLedger(root, identity);
+    assert.equal(before.attemptCount, attempt);
+    const after = deferHammerRetryDispatch(root, identity, { jobKey: head, headSha: head,
+      launchRequestId, now, leaseWaitExhausted: true, overloadEvidence: evidence });
+    for (const field of ['attemptCount', 'lifetimeAttemptCount', 'targetAttemptCount']) {
+      assert.equal(after[field], before[field], `${field} stays charged after exhaustion`);
+    }
+    assert.equal(after.overloadDeferral.deferralCount, MAX_OVERLOAD_DEFERRALS);
+    assert.equal(after.overloadDeferral.overloadAlert, true);
+    assert.equal(after.overloadDeferral.nextRetryAt, null);
+    releaseHammerOverloadDeferral(root, identity);
+    assert.equal(readHammerRetryCapLedger(root, identity).lastOverloadDeferral.exhaustedAt,
+      released.lastOverloadDeferral.exhaustedAt, 'repeated release cannot extend the incident');
+    assert.deepEqual(evaluateHammerDeferralQueue(readHammerRetryCapLedger(root, identity), now),
+      { expired: false, backoff: false });
+  }
+  const now = new Date(Date.parse(released.lastOverloadDeferral.exhaustedAt) + 30 * 60_000).toISOString();
+  recordHammerRetryDispatch(root, identity, { jobKey: head, headSha: head, launchRequestId: 'new-incident', now });
+  const renewed = deferHammerRetryDispatch(root, identity, { jobKey: head, headSha: head,
+    launchRequestId: 'new-incident', now, leaseWaitExhausted: true, overloadEvidence: evidence });
+  assert.equal(renewed.overloadDeferral.deferralCount, 1);
+  assert.equal(renewed.overloadDeferral.overloadAlert, false);
 });
 
-test('many overloaded PR owners share one durable host alert', async t => {
+test('legacy host-overload callers share one durable host alert', async t => {
   const root = mkdtempSync(join(tmpdir(), 'synthetic-overload-alert-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   let pages = 0;
@@ -84,6 +118,19 @@ test('many overloaded PR owners share one durable host alert', async t => {
       pageImpl: async () => { pages++; return { ok: true }; } });
   }
   assert.equal(pages, 1);
+});
+
+test('production overload exhaustion pages once per PR/head across observations', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'synthetic-overload-pages-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let pages = 0;
+  for (const [prNumber, headSha] of [[1, 'a'], [2, 'a'], [1, 'a'], [1, 'b']]) {
+    await observeClosureWait({ rootDir: root, repo: 'example/project', prNumber,
+      headSha, reason: 'synthetic load retry exhausted',
+      waitClass: 'overload-exhausted', immediate: true, now: 1000000,
+      pageImpl: async () => { pages++; return { ok: true }; } });
+  }
+  assert.equal(pages, 3);
 });
 
 test('load timeout defers audit, releases the exact lease and recovers without a terminal stop', async t => {

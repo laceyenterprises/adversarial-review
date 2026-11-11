@@ -82,7 +82,7 @@ export async function load(url, context, nextLoad) {
   // fixtures isolated from its real subprocess/config dependency graph.
   if (url === 'fixture:overload-rescue-retry') {
     return { format: 'module', shortCircuit: true,
-      source: 'export function createOverloadRescueRetry() { return { tick: async () => {} }; }' };
+      source: 'export function createOverloadRescueRetry() { return { tick: async () => {}, stop: async () => {}, abort: () => {} }; }' };
   }
   if (url === 'fixture:review-state') {
     return {

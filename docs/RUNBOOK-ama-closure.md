@@ -4975,12 +4975,12 @@ Omitted, non-string or empty (including
 whitespace-only) plan `reviewedHead` values are filled from the pin in memory.
 A nonempty string must be a valid 40-hex SHA; the CLI normalizes it to lowercase
 before passing it to the checker, even when it differs from the pin. Malformed
-nonempty strings refuse rather than falling back. The authoritative reviewer
+nonempty strings receive plan correction rather than falling back. The authoritative reviewer
 login, review state and review `commit_id` matching the resolved plan head remain
 mandatory. An omitted head therefore works only for a review on the pinned head.
 `review-evidence-invalid` remains terminal (exit 1) and includes a value-free
-`diagnostic` naming the first failed predicate: `run-pin-invalid`, `plan-invalid`,
-`plan-head-invalid`, `review-missing`, `review-head-mismatch`, `reviewer-untrusted`,
+`diagnostic` naming the first failed evidence predicate: `run-pin-invalid`,
+`review-missing`, `review-head-mismatch`, `reviewer-untrusted`,
 or `review-state-invalid`. These codes are declared in
 `src/ama/hammer-edit-plan-contracts.d.ts` and enforced by the frozen
 `HAMMER_REVIEW_EVIDENCE_DIAGNOSTICS` allow-list in `src/ama/hammer-edit-plan.mjs`.
@@ -4992,8 +4992,7 @@ An explicit older review citation only passes this pre-edit check; ancestry,
 review supersession, provenance, patch coverage and exact-candidate validation
 remain the final merge predicate's responsibility.
 `--help` and `-h` print usage and accepted shapes with exit 0 and perform no plan
-check, review read, policy read or backlog capture. Real helper failures retain
-their existing outcomes. Help is handled at the CLI entry point, separately
+check, review read, policy read or backlog capture. Evidence and run failures remain terminal. Help is handled at the CLI entry point, separately
 from the plan-check exit-code mapping.
 The JSON plan names `editKind` (`author-lines`, `additive` or `in-place`), and the
 affected `path`, `startLine`, `endLine` in reviewed coordinates. Cited plans also
@@ -5003,14 +5002,29 @@ In-place repairs preserve behavior; they do not grant reversal authority.
 `node bin/hammer-edit-plan.mjs --help` prints complete JSON shapes offline;
 the prompt retains the field rules and directs the hammer to that usage output.
 The helper reads the review and effective policy and shares `checkReversalFinding`
-with the primary-change gate. Exit 21 is a shape-only refusal with an expected-shape message: make no edit,
+with the primary-change gate. HAMEDITPLAN-05 classifies all errors in one origin registry,
+`HAMMER_EDIT_PLAN_ERROR_ORIGINS`. Unknown reasons throw; no new reason can silently
+default to a terminal outcome. Invalid JSON, non-object plans (including arrays),
+malformed plan heads, missing/invalid citation fields, unmatched citations, invalid
+edit kinds and locations, and uncovered ranges are plan errors. Invalid review
+verdicts remain terminal `finding-evidence-invalid`; unreadable finding coordinates
+and reversal-policy refusals retain their existing terminal or backlog outcomes.
+Review authority and state are checked before correction; a malformed plan cannot
+mask a review-head mismatch against the run pin. An explicit valid review witness
+continues to support cross-head citations.
+
+Use one object per invocation; for several edits, invoke the helper once per finding.
+Every correction lists both parsed finding sections as
+`kind#number: title (path:lines)`, the required shape and the specific field fault.
+Exit 21 is a plan refusal with correction feedback: make no edit,
 correct the plan once and rerun the helper. The prompt permits one correction
 per run across all plans; a second shape refusal exits 1. Exit 21 here is never
 a verify-head or wait-CI conflict. The first shape refusal exits the shell block
 without editing. A valid cited non-blocking `in-place` plan receives exit 21 with
 `correctable: allowed editKinds for kind=non-blocking are additive|author-lines (author-lines only where checkReversalFinding authorizes)`.
 Re-plan as `additive`; this grants no in-place permission, even in strict mode
-or with `requiredCiRepair`. Missing or invalid finding citations remain terminal.
+or with `requiredCiRepair`. Missing, invalid or unmatched finding citations receive
+exit 21 and the parsed findings list.
 Blocking cited in-place CI plans retain their citations and are evaluated for
 policy and readable finding evidence before shape correction.
 An otherwise well-formed, authorized `author-lines` plan outside the cited

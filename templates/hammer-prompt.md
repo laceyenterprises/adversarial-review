@@ -386,6 +386,7 @@ Strict:
 {"kind":"non-blocking","findingNumber":1,"path":"src/example.mjs","startLine":2,"endLine":2,"editKind":"author-lines"}
 ```
 Omitted `reviewedHead` uses the pin; for a review on another head, set it to that review's `commit_id`.
+One object per invocation; for several edits, invoke the helper once per finding.
 Blocking in-place: `editKind: "in-place"`. Run B1 owner setup through `fi`:
 
 ```bash
@@ -405,7 +406,8 @@ elif [ "$HAM_EDIT_RC" != 0 ]; then
 fi
 ```
 
-Exit 0 permits edits; 21: NO EDIT, never a conflict. Correct JSON once/run across
+Exit 0 permits edits; 21: NO EDIT, never a conflict. Re-plan once using the listed findings
+and the specific field feedback. Correct JSON once/run across
 plans; keep marker. Second refusal exits 1. Never retry policy refusals.
 Non-blocking in-place: on 21 re-plan as `additive`.
 Out-of-range: on 21 use a cited range or `additive` preserving author lines.

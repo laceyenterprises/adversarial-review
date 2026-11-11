@@ -17,6 +17,7 @@ export const EDIT_PLAN_USAGE = `${usage}
 Use the controller-pinned reviewed SHA (--reviewed-head or HAM_REVIEWED_SHA).
 Omitted, non-string or empty reviewedHead values are filled from that pin.
 For a cited review on another head, set reviewedHead to that review's commit_id.
+One object per invocation; for several edits, invoke the helper once per finding.
 Accepted plan shapes (coordinates refer to the reviewed head):
 Blocking reversal:
 \`\`\`json
@@ -65,20 +66,25 @@ export async function main(argv = process.argv.slice(2), {
   if (typeof reviewedHead !== 'string' || !/^[a-f0-9]{40}$/.test(reviewedHead)) {
     return refuseHammerReviewEvidence('run-pin-invalid');
   }
-  const plan = JSON.parse(readFileSync(planFile, 'utf8'));
-  if (!plan || typeof plan !== 'object' || Array.isArray(plan)) {
-    return refuseHammerReviewEvidence('plan-invalid');
+  let plan;
+  let planParseError = false;
+  const planText = readFileSync(planFile, 'utf8');
+  try {
+    plan = JSON.parse(planText);
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    planParseError = true;
   }
-  plan.reviewedHead = typeof plan.reviewedHead === 'string' && plan.reviewedHead.trim()
-    ? plan.reviewedHead.toLowerCase() : reviewedHead;
-  if (!/^[a-f0-9]{40}$/.test(plan.reviewedHead)) {
-    return refuseHammerReviewEvidence('plan-head-invalid');
+  if (plan && typeof plan === 'object' && !Array.isArray(plan)) {
+    plan.reviewedHead = typeof plan.reviewedHead === 'string' && plan.reviewedHead.trim()
+      ? plan.reviewedHead.toLowerCase() : reviewedHead;
   }
   rootDir ??= primaryChangeRoot();
   const review = await readReviewImpl(repo, pr, reviewId);
   const policy = loadPolicy({ rootDir });
   if (!policy) throw Error('merge-policy-unavailable');
   const result = checkHammerEditPlan(review, plan, {
+    planParseError, runReviewedHead: reviewedHead,
     strictNonBlockingRemediation: policy.strictNonBlockingRemediation !== false,
   });
   if (result.action === 'defer') {

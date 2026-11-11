@@ -2902,8 +2902,13 @@ approved disposable offline safe canary of deployed code; it does not inspect
 live queues, credentials or running daemon freshness. This worker does not run
 host mode. Node dependencies and local Git must already be installed.
 
-The hammer edit-plan helper permits one shape correction per run (exit 21,
-never a conflict) before any edit; a second shape refusal exits 1. Cited plans
+The hammer edit-plan helper permits one correction of any plan-originated error
+per run (exit 21, never a conflict) before any edit; a second refusal exits 1.
+This includes malformed JSON, arrays/non-objects, citation and field mistakes.
+Use one object per invocation, once per finding for multiple edits. Correction
+feedback lists both parsed finding sections, the required shape and the field
+fault; correction never authorizes an edit. Review-evidence and run faults remain
+terminal. Cited plans
 retain their citations during correction; policy refusals retain their existing
 outcomes. A valid cited non-blocking `in-place` plan is a shape error: on exit 21,
 re-plan as `additive`. Non-blocking findings never permit in-place edits.
@@ -2913,12 +2918,16 @@ existing author line is removed or replaced; uncovered author-line edits remain
 disallowed.
 The CLI takes the controller-pinned head via `--reviewed-head SHA`
 (or `HAM_REVIEWED_SHA`), fills omitted, non-string or empty plan heads, and rejects
-malformed heads or heads that differ from the cited review's `commit_id`.
+malformed heads correctably. Heads that differ from the cited review's
+`commit_id` remain terminal.
 For citations from another reviewed head, set the plan's `reviewedHead` to that
 review's `commit_id`; the controller pin remains required. `--help` and `-h`
 print accepted shapes and exit 0 separately from plan-check authorization.
-After the submodule float and follow-up/watcher restart, SRE verifies the CI-repair closer activation
-receipt declared in `post-merge-verify.json` and the
+After the submodule float and follow-up/watcher restart, SRE verifies PID start
+times (kickstarting through the existing service owner if the bounce skipped
+either process) and observes 24 hours: no plan-invalid or finding-evidence-invalid
+closer stop without prior correction for plan faults; corrected closers reach an
+edit or a reasoned stop. Retain the receipt declared in `post-merge-verify.json` and the
 [closure runbook](docs/RUNBOOK-ama-closure.md). Existing smoke commands are unchanged.
 
 LAC-2096: closer recovery reads canonical Postgres request/lineage work-item and

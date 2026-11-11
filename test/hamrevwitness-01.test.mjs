@@ -50,7 +50,7 @@ test('exact posted review retains all six advisory identities, including two dem
 test('refusal helper enforces its frozen value-free diagnostic allow-list', () => {
   assert.equal(Object.isFrozen(HAMMER_REVIEW_EVIDENCE_DIAGNOSTICS), true);
   assert.deepEqual(HAMMER_REVIEW_EVIDENCE_DIAGNOSTICS, [
-    'run-pin-invalid', 'plan-invalid', 'plan-head-invalid', 'review-missing',
+    'run-pin-invalid', 'review-missing',
     'review-head-mismatch', 'reviewer-untrusted', 'review-state-invalid',
   ]);
   for (const diagnostic of HAMMER_REVIEW_EVIDENCE_DIAGNOSTICS) {
@@ -104,8 +104,7 @@ test('ordinary and demoted advisory citations retain strict policy and reviewed 
     assert.equal(checkHammerEditPlan(review, { ...cited, startLine: 1, endLine: 1 },
       { strictNonBlockingRemediation: true }).action, 'correct');
     // Demotion never creates a blocking citation under the same ordinal.
-    assert.deepEqual(checkHammerEditPlan(review, { ...cited, kind: 'blocking' }),
-      { action: 'stop', reason: 'finding-evidence-invalid' });
+    assert.equal(checkHammerEditPlan(review, { ...cited, kind: 'blocking' }).action, 'correct');
   }
 });
 
@@ -123,6 +122,11 @@ test('first-failure diagnostics are finite, value-free and never authorize malfo
     [{ ...review, state: 'private-invalid-state' }, valid, 'review-state-invalid'],
   ]) {
     const result = checkHammerEditPlan(inputReview, inputPlan);
+    if (diagnostic.startsWith('plan-')) {
+      assert.equal(result.action, 'correct');
+      assert.equal(result.reason, diagnostic);
+      continue;
+    }
     assert.deepEqual(result, refused(diagnostic));
     assert.equal(editPlanExitCode(result), 1);
     assert.ok(JSON.stringify(result).length < 110);
@@ -132,8 +136,7 @@ test('first-failure diagnostics are finite, value-free and never authorize malfo
     { kind: 'advisory' }, { kind: 'blocking' }, { findingNumber: 0 },
     { findingNumber: '1' }, { findingNumber: 7 }, { findingNumber: 1.5 },
   ]) {
-    assert.deepEqual(checkHammerEditPlan(review, { ...valid, ...fields }),
-      { action: 'stop', reason: 'finding-evidence-invalid' });
+    assert.equal(checkHammerEditPlan(review, { ...valid, ...fields }).action, 'correct');
   }
   assert.deepEqual(checkHammerEditPlan({ ...review, body: '' }, valid),
     { action: 'stop', reason: 'finding-evidence-invalid' });
@@ -144,13 +147,19 @@ test('first-failure diagnostics are finite, value-free and never authorize malfo
   const forbidden = () => assert.fail('invalid local evidence must precede external reads');
   for (const [pin, input, diagnostic] of [
     ['private-pin', valid, 'run-pin-invalid'],
-    [candidateHead, null, 'plan-invalid'],
-    [candidateHead, [], 'plan-invalid'],
-    [candidateHead, { ...valid, reviewedHead: 'private-head' }, 'plan-head-invalid'],
+    [reviewedHead, null, 'plan-invalid'],
+    [reviewedHead, [], 'plan-invalid'],
+    [reviewedHead, { ...valid, reviewedHead: 'private-head' }, 'plan-head-invalid'],
   ]) {
     writeFileSync(planFile, JSON.stringify(input));
-    assert.deepEqual(await main(['laceyenterprises/agent-os', '10491', String(review.id), planFile], {
-      env: { HAM_REVIEWED_SHA: pin }, readReviewImpl: forbidden, loadPolicy: forbidden, captureImpl: forbidden,
-    }), refused(diagnostic));
+    const result = await main(['laceyenterprises/agent-os', '10491', String(review.id), planFile], {
+      rootDir, env: { HAM_REVIEWED_SHA: pin },
+      readReviewImpl: pin === 'private-pin' ? forbidden : async () => review,
+      loadPolicy: () => ({}), captureImpl: forbidden,
+    });
+    if (diagnostic.startsWith('plan-')) {
+      assert.equal(result.action, 'correct');
+      assert.equal(result.reason, diagnostic);
+    } else assert.deepEqual(result, refused(diagnostic));
   }
 });

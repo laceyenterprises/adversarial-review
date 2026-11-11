@@ -1,0 +1,15 @@
+operator_steps:
+  - description: >-
+      After the normal AR float and watcher/follow-up restart, verify PID start
+      times; kickstart through the existing service owner if the bounce skipped
+      either process. Observe natural closer outcomes over 24 hours: no closer
+      ends with plan-invalid or finding-evidence-invalid for a plan-originated
+      fault without first receiving correction; corrected closers proceed to an
+      edit or a reasoned stop. Review-evidence faults remain terminal. Retain
+      deployment, loaded-process and outcome receipts. No worker live action.
+    run_as: SRE operator
+    command: >-
+      Follow docs/RUNBOOK-ama-closure.md deployment and service-owner procedures,
+      then inspect natural outcomes against post-merge-verify.json
+      hammerEditPlanCorrection for 24 hours.
+actions: []

@@ -86,7 +86,6 @@ test('policy and evidence refusals keep their terminal and deferral exits', () =
   for (const [candidate, plan, reason, diagnostic] of [
     [{ ...review, commit_id: 'b'.repeat(40) }, ci, 'review-evidence-invalid', 'review-head-mismatch'],
     [{ ...review, user: { login: 'synthetic-author' } }, ci, 'review-evidence-invalid', 'reviewer-untrusted'],
-    [review, { ...blocking, findingNumber: 99 }, 'finding-evidence-invalid'],
     [{ ...review, body: review.body.replace('**Lines:** 2', '**Lines:** unknown') }, blocking, 'finding-lines-unreadable: \"unknown\"'],
   ]) {
     const result = checkHammerEditPlan(candidate, plan, { strictNonBlockingRemediation: true });
@@ -116,10 +115,13 @@ test('non-blocking in-place plans correct to additive without granting in-place 
         const result = await main(['sample/service', '7', '1', planFile], dependencies);
         assert.deepEqual(result, checkHammerEditPlan(review, plan, { strictNonBlockingRemediation }));
         if (findingNumber === undefined) {
-          assert.deepEqual(result, { action: 'stop', reason: 'finding-evidence-invalid' });
-          assert.equal(editPlanExitCode(result), 1);
+          assert.equal(result.action, 'correct');
+          assert.equal(result.reason, 'finding-citation-invalid');
+          assert.equal(editPlanExitCode(result), 21);
         } else {
-          assert.deepEqual(result, { action: 'correct', reason: 'edit-kind-invalid', message });
+          assert.equal(result.action, 'correct');
+          assert.equal(result.reason, 'edit-kind-invalid');
+          assert.ok(result.message.startsWith(message));
           assert.equal(editPlanExitCode(result), 21);
         }
       }
@@ -150,8 +152,8 @@ test('cited CI plans retain policy refusals and backlog capture through main', a
     [review, { kind: 'non-blocking', findingNumber: 1, editKind: 'author-lines' }, 'defer'],
     [{ ...review, body: review.body.replace('**Lines:** 2', '**Lines:** unknown') },
       { kind: 'blocking', findingNumber: 1 }, 'stop'],
-    [review, { kind: 'blocking' }, 'stop'],
-    [review, { findingNumber: 1 }, 'stop'],
+    [review, { kind: 'blocking' }, 'correct'],
+    [review, { findingNumber: 1 }, 'correct'],
   ]) {
     writeFileSync(planFile, JSON.stringify({ ...ci, ...fields }));
     const captures = [];
@@ -161,7 +163,7 @@ test('cited CI plans retain policy refusals and backlog capture through main', a
       assertOwner: () => {}, captureImpl: capture => captures.push(capture),
     });
     assert.equal(result.action, action);
-    assert.equal(editPlanExitCode(result), action === 'defer' ? 20 : 1);
+    assert.equal(editPlanExitCode(result), action === 'defer' ? 20 : action === 'correct' ? 21 : 1);
     assert.equal(captures.length, action === 'defer' ? 1 : 0);
     if (action === 'defer') assert.equal(captures[0].deferredFinding.findingNumber, 1);
     else if (fields.findingNumber && fields.kind) assert.match(result.reason, /finding-lines-unreadable/);
@@ -257,8 +259,14 @@ test('CLI rejects malformed or mismatched review heads and missing pins and reta
       rootDir, env: { HAM_REVIEWED_SHA: pin }, readReviewImpl: async () => candidate,
       loadPolicy: () => ({}), captureImpl: () => assert.fail('invalid evidence must not capture'),
     });
-    assert.deepEqual(result, { action: 'stop', reason: 'review-evidence-invalid', diagnostic });
-    assert.equal(editPlanExitCode(result), 1);
+    if (diagnostic === 'plan-head-invalid') {
+      assert.equal(result.action, 'correct');
+      assert.equal(result.reason, diagnostic);
+      assert.equal(editPlanExitCode(result), 21);
+    } else {
+      assert.deepEqual(result, { action: 'stop', reason: 'review-evidence-invalid', diagnostic });
+      assert.equal(editPlanExitCode(result), 1);
+    }
   }
 });
 

@@ -29,6 +29,14 @@ export function normalizeRemediationWorkerClass(workerClassInput) {
   }
 }
 
+// Family detection does not grant dispatch admission. Keep legacy actor aliases
+// fenced too, while canonical remediation routes use the normalizer above.
+export function isGrokRemediationWorkerClass(workerClassInput) {
+  if (normalizeRemediationWorkerClass(workerClassInput) === 'remediator-grok') return true;
+  const workerClass = String(workerClassInput || '').trim().toLowerCase();
+  return ['grok', 'grok-api', 'grok-reviewer', 'hammer-grok'].includes(workerClass);
+}
+
 // Only remediation dispatch translates this route. Builder/reviewer callers must
 // continue using their own classes and identity admission.
 export function hqRemediationWorkerClass(workerClass) {

@@ -31,14 +31,18 @@ test('both batch launch shapes replace a Grok pin when builder provenance is una
       : ['grok.enabled', 'grok.remediator.enabled'].includes(key) ? true : fallback }) };
   const workerClass = pickRemediationWorkerClass({ repo: 'sample/project' }, config);
   assert.equal(workerClass, 'remediator-grok');
+  const grokClasses = [workerClass, 'grok', 'grok-api', 'grok-remediation', 'grok-reviewer',
+    'hammer-grok', ' REMEDIATOR-GROK ', ' Grok-Remediation '];
+  const otherClasses = ['codex', 'remediator-codex-corp', 'claude-code', 'remediator-claude-corp',
+    'gemini', 'remediator-gemini', 'custom-worker'];
   for (const branch of [null, 'fixture/batch']) {
-    for (const candidate of [workerClass, 'grok-api', 'grok-remediation', 'remediator-claude-corp']) {
+    for (const candidate of [...grokClasses, ...otherClasses]) {
       const args = findingBatchDispatchArgs({
         batch: { batch_id: 'fixture', repo: 'sample/project' },
         workerClass: candidate, promptPath: '/fixture/prompt.md', env, branch,
       });
       assert.equal(args[args.indexOf('--worker-class') + 1],
-        candidate === 'remediator-claude-corp' ? candidate : 'codex');
+        otherClasses.includes(candidate) ? candidate : 'codex');
       assert.equal(args[args.indexOf('--completion-shape') + 1], branch ? 'pr' : 'decision-only');
     }
   }

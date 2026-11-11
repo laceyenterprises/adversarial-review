@@ -727,7 +727,10 @@ A Grok pin leaves Grok-built PRs on their `remediator-codex` default route;
 fallback candidates retain the subject refusal after account selection.
 Findings-batch decision and publication launches replace Grok-family pins with
 the Codex default because their mixed or unknown builder provenance cannot
-establish Grok subject eligibility.
+establish Grok subject eligibility. Batch dispatch uses the remediation-owned
+`isGrokRemediationWorkerClass` predicate in `src/remediation-worker-class.mjs`,
+which recognizes normalized remediation routes and legacy Grok actor aliases
+without granting those aliases dispatch admission.
 Reconciliation applies that same pin exemption to outcome attribution and
 GitHub-auth recovery, retaining the recorded non-Grok worker class. Subject
 refusals, including after assignment handoffs, stop before spawn with

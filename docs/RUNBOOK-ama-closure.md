@@ -5025,8 +5025,48 @@ In-place repairs preserve behavior; they do not grant reversal authority.
 `node bin/hammer-edit-plan.mjs --help` prints complete JSON shapes offline;
 the prompt retains the field rules and directs the hammer to that usage output.
 The helper reads the review and effective policy and shares `checkReversalFinding`
-with the primary-change gate. HAMEDITPLAN-05 classifies all errors in one origin registry,
-`HAMMER_EDIT_PLAN_ERROR_ORIGINS`. Unknown reasons throw; no new reason can silently
+with the primary-change gate.
+
+HAMSELFERRORS-01 generalizes this to the **world-fact stop rule**: the closer
+corrects its own mistakes once; only world facts stop closure. The central
+`src/ama/hammer-stop-origin.mjs` registry covers helper usage, validation,
+controller setup, phase failures and edit-plan diagnostics. Unknown stop codes
+defer as `stop-reason-unregistered`; they never silently become terminal.
+Helper usage errors request correction with exit 21 and printed canonical usage.
+Mutations are never automatically replayed. Controller readiness observation
+retries once before releasing the blocked shell; after a mistakenly ended shell,
+resume only after confirmed owner cleanup and fresh head/lease checks.
+Exhausted closer faults write deferred audits without terminal-stop receipts.
+Historical, explicitly identified hammer failures with a registered self-error
+project to deferrals on read, retaining their stored outcome and immutable audit
+bytes. Unknown historical reasons, mixed/structured world refusals and succeeded
+audits are preserved. This lets a known prior harness fault reach ordinary
+ended-launch reconciliation without rewriting history.
+The dispatcher proves the charged launch ended, then atomically refunds its
+series, head and lifetime charges. Three refunds per head park further harness
+recovery and page once through the existing durable closure-wait receipt.
+Head/review changes do not erase a head's refund history; a world refusal still
+wins over a later generic controller failure. This adds no merge authority.
+
+Local validation uses `hammer-validate.mjs --canonical -- <changed files>`.
+Agent OS runs `python3 scripts/ci-mirror/run-ci-mirror.py -- <changed files>`;
+this repository runs selected touched/direct-importer tests through
+`node test/run-tests.mjs <test files>`. Never synthesize pytest/PYTHONPATH.
+A missing repository-owned Python package is an environment fault. Unavailable
+canonical setup records `local-battery-skipped-github-required-gate-authoritative`
+and no local pass, then proceeds to fresh verify-head and the exact-head required
+GitHub checks. Genuine test failures require repair. No strict-mode, predicate,
+head, attestation, reversal, lease or CI requirement is waived.
+
+After normal float and watcher/follow-up restart, SRE verifies both PID start
+times and kickstarts through the registered owner if either bounce was skipped.
+Observe 24 hours: no closer ends terminal on a closer-originated reason without
+correction/retry; no PR reaches retry-exhausted on harness faults alone. Retain
+deployed revision, PID start times and natural outcome/refund/page receipts.
+No live receipt is claimed by offline tests.
+
+HAMEDITPLAN-05 classifies edit-plan errors in `HAMMER_EDIT_PLAN_ERROR_ORIGINS`.
+Unknown reasons throw; no new reason can silently
 default to a terminal outcome. Invalid JSON, non-object plans (including arrays),
 malformed plan heads, missing/invalid citation fields, unmatched citations, invalid
 edit kinds and locations, and uncovered ranges are plan errors. Invalid review

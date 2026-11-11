@@ -13,21 +13,8 @@ export const HAMMER_REVIEW_EVIDENCE_DIAGNOSTICS = Object.freeze([
 
 // Every refusal is registered by origin. New reasons must choose an origin;
 // unknown reasons throw rather than silently becoming terminal plan failures.
-export const HAMMER_EDIT_PLAN_ERROR_ORIGINS = Object.freeze({
-  ...Object.fromEntries(HAMMER_REVIEW_EVIDENCE_DIAGNOSTICS.map(reason => [reason, 'evidence'])),
-  'finding-evidence-invalid': 'evidence',
-  'finding-kind-not-authorizing': 'evidence',
-  'finding-not-found': 'plan',
-  'finding-lines-unreadable': 'evidence',
-  'finding-lines-invalid': 'evidence',
-  'plan-json-invalid': 'plan',
-  'plan-invalid': 'plan',
-  'plan-head-invalid': 'plan',
-  'finding-citation-invalid': 'plan',
-  'edit-kind-invalid': 'plan',
-  'edit-location-invalid': 'plan',
-  'not-covered-by-cited-finding': 'plan',
-});
+export { HAMMER_EDIT_PLAN_ERROR_ORIGINS } from './hammer-stop-origin.mjs';
+import { HAMMER_EDIT_PLAN_ERROR_ORIGINS } from './hammer-stop-origin.mjs';
 
 export function hammerEditPlanError(reason, { findings = {}, detail = '', prefix = 'Do not edit. Correct the plan once: ' } = {}) {
   const code = reason.split(':')[0];

@@ -92,6 +92,33 @@ reconstruct its functions or release another invocation's lease.
 
 ### Stop conditions and act-or-stop
 
+For any helper usage, validation-environment or controller-setup fault, read
+Appendix G2 before deciding to stop.
+
+<!-- hammer-reference:G2 -->
+**World-fact stop rule (HAMSELFERRORS-01): the closer corrects its own mistakes
+once; only the world can stop closure.** This applies to every mandatory helper
+and phase, including disputes/withdrawal, edit plans, validation and controller
+setup. Exit 21 for helper usage means correct the printed input/usage once,
+then invoke the appropriate helper again; it grants no edit or merge permission.
+For a non-blocking finding, do not call the blocking-only dispute helper:
+use `hammer-edit-plan.mjs` with `kind=non-blocking` and its section position,
+then remediate or record the policy-permitted backlog deferral.
+Never reinterpret a policy refusal of the plan's substance as a usage error.
+
+For controller setup or a mistakenly ended owning shell, retry setup once
+inside this run only after the existing controller confirms cleanup. Resume
+with verify-head and fresh lease/head checks; never replay publication or merge.
+An unknown cleanup or live owner retains custody and forbids a second controller.
+An exhausted closer fault is a **deferred harness fault**, never a terminal PR
+decision. Record its exact named reason with the terminal helper; dispatch
+refunds the charged attempt and parks/pages once after three refunds per head.
+Unknown stop codes defer as `stop-reason-unregistered` pending contract repair.
+Only review evidence, head movement, CI results, policy and GitHub facts can
+justify a terminal no-merge. Strict mode, attestation, reversal authorization,
+leases and all HAM/merge predicates remain mandatory after every correction.
+<!-- /hammer-reference:G2 -->
+
 If you have announced the same next step twice without executing it, execute it
 now. If you cannot, stop with a named terminal reason via
 `hammer-terminal-audit.mjs` (for example `procedure-stalled`). Repeating a plan
@@ -150,8 +177,22 @@ Bound every shell command. On macOS:
 Validation: load-scaled 360s ceiling (`--nominal-timeout` tunes it); the 120-second no-output deadline never scales.
 
 ```bash
-"${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-validate.mjs --pytest -- tests/test_endpoints.py || exit $?
+"${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-validate.mjs --canonical -- tests/test_endpoints.py || exit $?
 ```
+
+For canonical runner selection or unavailable local setup, read Appendix G3.
+
+<!-- hammer-reference:G3 -->
+Use the changed files from the reviewed-head-to-HEAD range. In agent-os the
+helper runs `python3 scripts/ci-mirror/run-ci-mirror.py -- <changed files>`;
+in adversarial-review it selects touched tests and direct importer tests through
+the repository's `test/run-tests.mjs`. Never construct pytest/PYTHONPATH commands.
+An ImportError for the PR repository's own package is an environment fault,
+not a failed test. If the canonical runner cannot be set up locally, record
+`local-battery-skipped-github-required-gate-authoritative`, claim no local pass,
+and continue to verify-head and the exact-head GitHub required gate. A real
+canonical test failure remains a CI fact requiring repair.
+<!-- /hammer-reference:G3 -->
 
 Never scan `/tmp`, `/private/tmp`, `$HOME`, `$HQ_ROOT` or whole checkouts for review state.
 Use live PR/review and inputs; without GraphQL quota use
@@ -469,7 +510,11 @@ else
   if [ "$DISPUTE_RC" = 78 ] || [ "$DISPUTE_RC" = 79 ]; then
     echo 'Finding dispute refused its daemon-owner or HAM-identity preflight. Preserve the evidence file, record no-merge status and hand off to the canonical owner with the existing HAM identity.' >&2
   fi
-  exit "$DISPUTE_RC"
+  if [ "$DISPUTE_RC" = 21 ]; then
+    echo 'Correct the printed helper usage once; use hammer-edit-plan for a non-blocking finding. Do not end the run or edit without authorization.' >&2
+  else
+    exit "$DISPUTE_RC"
+  fi
 fi
 ```
 
@@ -885,7 +930,11 @@ fi
 
 ```
 
+For commit/validation progress receipt semantics, read Appendix G4.
+
+<!-- hammer-reference:G4 -->
 The commit helper requires `HEAD` to differ from and descend from `HAM_TARGET_REMEDIATION_SHA || HAM_REVIEWED_SHA` before recording `remediation-committed`; an already-advanced dispatch target earns no credit by itself. The bounded validation helper records `validation-passed` or `validation-failed` for completed commands (exit 0 or 1–123); timeouts remain unknown. These validation receipts are advisory liveness signals, not proof tests ran or passed. Each receipt kind earns one bounded outcome slice per run; repeating it earns no additional time.
+<!-- /hammer-reference:G4 -->
 
 Before head validation, export `HAM_COMMIT_PUBLICATION_ONLY=1` and `source "<<RUN_DIR>>/hammer-publish.sh"`. Stop on failure; unset the flag on success. Ordinary remediation retains the conflict-repair guards.
 

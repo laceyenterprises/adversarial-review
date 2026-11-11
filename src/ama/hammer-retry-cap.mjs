@@ -170,7 +170,7 @@ function writeHammerRetryCapLedger(rootDir, identity, doc) {
 
 // Permanent charge/refund identities survive every head/series reset.
 function durableChargeFields(ledger) {
-  return Object.fromEntries(['dispatchCharges', 'noWorkRefunds', 'pendingTransientCharge', 'targetChargeEpoch', 'operatorApprovalRearms', 'phaseInputsReplacement', 'nonCloserHeadResets', 'stopRepairReservations']
+  return Object.fromEntries(['dispatchCharges', 'noWorkRefunds', 'pendingTransientCharge', 'targetChargeEpoch', 'operatorApprovalRearms', 'phaseInputsReplacement', 'nonCloserHeadResets', 'stopRepairReservations', 'selfErrorRefunds']
     .filter(key => ledger?.[key] !== undefined).map(key => [key, ledger[key]]));
 }
 
@@ -953,6 +953,44 @@ export function refundHammerRetryDispatch(rootDir, identity, options = {}) {
 
 export function refundUnexecutedHammerDispatch(rootDir, identity, options = {}) {
   return mutateHammerLedger(rootDir, identity, () => refundUnexecutedHammerDispatchUnlocked(rootDir, identity, options));
+}
+
+// HAMSELFERRORS-01: refund only the recorded charged launch, atomically with
+// a durable per-head ceiling. Reaching the ceiling parks harness recovery,
+// rather than charging more failed PR adjudications.
+export const HAMMER_SELF_ERROR_REFUND_LIMIT = 3;
+export function refundCloserSelfError(rootDir, identity, { jobKey, headSha, launchRequestId, now } = {}) {
+  return mutateHammerLedger(rootDir, identity, () => {
+    const ledger = readHammerRetryCapLedger(rootDir, identity);
+    if (!ledger || ledger.__corrupt || ledger.jobKey !== jobKey || !headSha || !launchRequestId) {
+      return { refunded: false, reason: 'identity-mismatch' };
+    }
+    const launches = ledger.selfErrorRefunds?.[headSha] || [];
+    if (launches.includes(launchRequestId)) return { refunded: false, reason: 'already-refunded',
+      exhausted: launches.length >= HAMMER_SELF_ERROR_REFUND_LIMIT };
+    if (launches.length >= HAMMER_SELF_ERROR_REFUND_LIMIT) return { refunded: false,
+      reason: 'self-error-budget-exhausted', exhausted: true };
+    const charge = Object.values(ledger.dispatchCharges || {}).find(value =>
+      value.launchRequestId === launchRequestId && value.headSha === headSha && value.jobKey === jobKey);
+    if (!charge || Object.values(charge.refundedBudgets || {}).some(Boolean)) {
+      return { refunded: false, reason: 'no-unrefunded-charge' };
+    }
+    const updated = [...launches, launchRequestId];
+    const down = value => Math.max(0, Number(value || 0) - 1);
+    const doc = { ...ledger, attemptCount: down(ledger.attemptCount),
+      lifetimeAttemptCount: down(ledger.lifetimeAttemptCount),
+      targetAttemptCount: ledger.targetRemediationSha === headSha
+        ? down(ledger.targetAttemptCount) : ledger.targetAttemptCount,
+      unexecutedLaunchRequestIds: [...(ledger.unexecutedLaunchRequestIds || []), launchRequestId],
+      suppressed: false, targetSuppressed: false, lifetimeSuppressed: false,
+      updatedAt: now || ledger.updatedAt,
+      selfErrorRefunds: { ...ledger.selfErrorRefunds, [headSha]: updated } };
+    creditHammerDispatchBudgets(doc, launchRequestId, { pr: true,
+      head: ledger.targetRemediationSha === headSha, lifetime: true });
+    writeHammerRetryCapLedger(rootDir, identity, doc);
+    return { refunded: true, reason: 'closer-self-error',
+      exhausted: updated.length >= HAMMER_SELF_ERROR_REFUND_LIMIT };
+  });
 }
 
 // One repair per PR, durable across head/series changes. This repairs invalid

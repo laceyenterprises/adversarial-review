@@ -53,6 +53,7 @@ import { dirname, join } from 'node:path';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { REVIEW_SERVICE_REVISION } from '../review-service-revision.mjs';
+import { projectHammerStopAudit } from './hammer-phase-outcome.mjs';
 
 const AUDIT_FILE_MODE = 0o640;
 const AUDIT_LOCK_RETRY_MS = 10;
@@ -184,7 +185,7 @@ function deriveReconciliation(existing, attempt, timestamp) {
 }
 
 export function readAmaAuditEntry(hqRoot, repo, prNumber, headSha) {
-  return readExisting(amaAuditFilePath(hqRoot, repo, prNumber, headSha));
+  return projectHammerStopAudit(readExisting(amaAuditFilePath(hqRoot, repo, prNumber, headSha)));
 }
 
 function buildInitialAuditDoc({

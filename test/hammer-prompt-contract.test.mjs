@@ -31,6 +31,8 @@ function fixture(t) {
   const checkout = join(dir, 'checkout');
   const fakeBin = join(dir, 'fake-bin');
   for (const path of [run, checkout, fakeBin]) mkdirSync(path);
+  mkdirSync(join(checkout, 'scripts/ci-mirror'), { recursive: true });
+  writeFileSync(join(checkout, 'scripts/ci-mirror/run-ci-mirror.py'), '# Synthetic canonical runner transport fixture\n');
   for (const name of ['bin', 'src', 'domains']) symlinkSync(join(root, name), join(dir, name), 'dir');
   writeFileSync(join(dir, 'config.yaml'), '{}\n');
   writeFileSync(join(dir, 'root-config.yaml'), 'version: 1\n');
@@ -105,7 +107,7 @@ if mkdir "$fixture_bucket" 2>/dev/null; then
 fi
 exec ${fakeGh} "$@"
 `, { mode: 0o755 });
-  // The validator's real pytest argv/environment setup runs, but no Python
+  // The validator's real canonical argv/environment setup runs, but no Python
   // installation or test runner is required for this argument conformance test.
   writeFileSync(join(fakeBin, 'python3'), `#!/bin/sh\nunset NODE_OPTIONS\nexec ${shellQuote(process.execPath)} ${shellQuote(join(root, 'test/fixtures/hammer-prompt-python.mjs'))} "$@"\n`, { mode: 0o755 });
   const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], { encoding: 'utf8', timeout: 2000 }).trim();
@@ -144,8 +146,8 @@ exec ${shellQuote(realGit)} "$@"
   };
   const metavariables = {
     'numeric-review-id': '1', 'plan.json': join(run, 'plan.json'),
-    'complete-final-review-file': join(run, 'review.md'), 'printed-reason': 'synthetic-refusal',
-    'reason-code': 'synthetic-refusal', 'review node id or URL': 'PRR_synthetic', n: '1',
+    'complete-final-review-file': join(run, 'review.md'), 'printed-reason': 'head-changed',
+    'reason-code': 'head-changed', 'review node id or URL': 'PRR_synthetic', n: '1',
   };
   const render = text => text.replace(/<<([A-Z_]+)>>/g, (_, key) => {
     assert.ok(Object.hasOwn(values, key), `unbound template value: ${key}`);

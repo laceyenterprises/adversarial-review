@@ -388,7 +388,7 @@ test('hammer and every remediation stage forbid full suites and polling', () => 
     assert.match(prompt, /Never background a command and poll/i);
     assert.match(prompt, /Codex/i);
   }
-  assert.match(template, /hammer-validate\.mjs --pytest/);
+  assert.match(template, /hammer-validate\.mjs --canonical/);
   assert.match(template, /120-second no-output deadline never scales/);
   assert.match(template, /Any timeout, cancellation/);
 });

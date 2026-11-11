@@ -1,0 +1,38 @@
+# HAMSELFERRORS-01
+
+## Summary
+
+Apply the world-fact stop rule across mandatory closer helpers and phases.
+Closer-owned usage, canonical validation environment and controller setup faults
+receive correction/retry and then defer. Refund ended charged launches atomically
+across series/head/lifetime counters, up to three per head; exhaustion parks and
+pages once without spending the PR adjudication budget. Every registered stop
+origin and concrete phase emission is pinned by offline synthetic fixtures.
+Unknown new stop codes defer for contract repair. Historical explicit hammer
+self-errors project to deferrals without rewriting stored audit evidence;
+unknown historical reasons, structured refusals and success remain authoritative. World facts retain stop authority.
+
+## Interface changes
+
+Helper usage correction returns exit 21 without permission to edit. The private
+run correction receipt prevents repeated corrections; mutations are never
+replayed by the wrapper. Canonical validation accepts repository-relative changed
+files, runs repository-owned runners, and claims no local pass when setup cannot
+produce a verdict; exact-head required GitHub checks remain mandatory. Retry and
+dispatch records gain optional bounded self-error refund receipts, documented in
+the data model and catalog fragment. No new CI check, label or live action.
+
+## Verification
+
+Scoped offline tests run individually through worker_validation under netguard,
+each bounded to 600 seconds. The stop-origin/correction/canonical-runner/refund
+tests, actual dispatch accounting, helper/controller/progress/prompt contracts,
+audit, HAMEDITPLAN-01..05, HAMINTENT-02, HAMREFUND-01, HAMFINAL-01,
+VERIFYHEADTRANSIENT-01 and watcher claim-loop regressions pass. Commands use
+`node test/run-tests.mjs test/<scoped-file>.test.mjs`; no full suite was run.
+`npm run lint` passed with zero errors, `npm run typecheck:contracts` passed,
+and `bash demo/research-finding-walkthrough.sh` preserved byte equivalence.
+Both operator plans parsed successfully. The PR acceptance evidence records
+the scoped counts and any execution limitations.
+The committed operator plan declares ordinary float/restart, PID start-time
+verification and 24-hour acceptance; no live acceptance receipt is claimed.

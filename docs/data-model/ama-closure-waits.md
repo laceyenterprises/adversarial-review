@@ -1,5 +1,11 @@
 # Data Model - AMA Closure Waits
 
+HAMSELFERRORS-01 uses `class=closer-self-error`, keyed by the existing PR/head,
+for the immediate once-per-head page after three harness-fault refunds.
+The durable `paged` latch survives watcher restarts and repeated polls; failed
+delivery refunds the existing reservation for retry. This parks harness recovery
+without declaring PR adjudication retry exhaustion or granting merge authority.
+
 `waitClass=host-overload` uses the shared `sha256("host-overload")` file and
 `head=host-overload` row instead of the PR key. This durable page latch
 coalesces exhausted overload retries across PRs and survives process restart;

@@ -1001,6 +1001,15 @@ Living contract: [`docs/SPEC-adversarial-review-auto-remediation.md`](docs/SPEC-
 
 ## Hammer merge logic
 
+The world-fact stop rule applies throughout closure: correct closer-owned helper
+or environment mistakes once, then defer exhausted harness faults. An ended,
+charged launch receives a bounded per-head refund; three refunds park recovery
+and page once without spending PR adjudication budget. Canonical local runner
+setup failures leave the exact-head GitHub required gate authoritative and claim
+no local pass. Review, head, CI, policy and GitHub facts retain stop authority;
+strict mode, attestation, reversal checks, leases and merge predicates remain
+mandatory. See the [closure runbook](docs/RUNBOOK-ama-closure.md).
+
 Daemon and closer merge requests share FIFO arrival order. A closer releasing
 without merge retains its PR's original arrival across heads for restoration
 before `nextEligibleAt` plus one configured watcher poll interval (unscaled).

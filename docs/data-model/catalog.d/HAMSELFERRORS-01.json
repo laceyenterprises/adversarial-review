@@ -1,0 +1,55 @@
+{
+  "domains": [
+    {
+      "title": "Closer self-error exhaustion page",
+      "path": "docs/data-model/ama-closure-waits.md",
+      "store": "data/ama-closure-waits/",
+      "schemaSurface": "src/ama/closure-wait.mjs",
+      "owner": "AMA closer recovery",
+      "waitClasses": ["closer-self-error"],
+      "description": "Existing per-PR/head page latch parks harness recovery once its bounded refunds are exhausted."
+    },
+    {
+      "title": "Closer stop origin",
+      "path": "docs/data-model/ama-audit.md",
+      "store": "$HQ_ROOT/dispatch/audit/adversarial-merge-authority/",
+      "schemaSurface": "src/ama/hammer-terminal-audit.mjs",
+      "owner": "AMA closer recovery",
+      "optionalFields": [
+        "attempts[].stopOrigin: closer, world or infrastructure",
+        "attempts[].reasonDetail: original reason with colon-suffixed diagnostics when routing normalizes the code",
+        "stopOrigin: initial audit origin when created by an early-exit attempt"
+      ]
+    },
+    {
+      "title": "Closer self-error refunds",
+      "path": "docs/data-model/hammer-retry-cap.md",
+      "store": "data/follow-up-jobs/hammer-retry-cap/",
+      "schemaSurface": "src/ama/hammer-retry-cap.mjs",
+      "owner": "AMA closer recovery",
+      "optionalFields": [
+        "selfErrorRefunds: per-dispatch-head array of at most three refunded charged launch IDs; retained across series/head resets"
+      ]
+    },
+    {
+      "title": "Closer self-error dispatch credit",
+      "path": "docs/data-model/ama-closer-dispatches.md",
+      "store": "data/follow-up-jobs/ama-closer-dispatches/",
+      "schemaSurface": "src/ama/dispatch-closer.mjs",
+      "owner": "AMA closer recovery",
+      "optionalFields": [
+        "selfErrorRefundedLaunchRequestId: last ended launch credited in unexecutedRefundCount"
+      ]
+    },
+    {
+      "title": "Closer run correction receipt",
+      "path": "docs/data-model/hammer-progress.md",
+      "store": "<HAM_RUN_DIR>/self-error-corrections.json",
+      "schemaSurface": "src/ama/hammer-stop-origin.mjs",
+      "owner": "Versioned closer controller",
+      "optionalFields": [
+        "operation-name keys: closer fault codes already offered correction in this run"
+      ]
+    }
+  ]
+}

@@ -3,8 +3,9 @@ import { filterGitHubBody } from '../github-outbound-body.mjs';
 import { createHash } from 'node:crypto';
 import { hamAuditCommentAuthorMatches } from './ham-provenance.mjs';
 import { normalizeEffectiveReviewVerdict } from '../kernel/verdict.mjs';
-import { parseBlockingFindingsSection } from '../kernel/remediation-reply.mjs';
+import { parseBlockingFindingsSection, parseNonBlockingFindingsSection } from '../kernel/remediation-reply.mjs';
 import { amaAllAuthoritativeReviewerLogins, isCurrentAuthoritativeFamilyReview } from './reviewer-authority.mjs';
+import { closerHelperError, worldFactError } from './hammer-stop-origin.mjs';
 import {
   HAMMER_WITHDRAWN_RESOLUTION, blockingFindingIdentity, buildWithdrawalComment, evidenceDigest,
   hasConcreteExactHeadEvidence,
@@ -25,31 +26,43 @@ export async function disputeFinding({ rootDir, repo, prNumber, headSha, reviewR
     || !Number.isInteger(prNumber) || prNumber < 1 || !/^[a-f0-9]{40}$/i.test(headSha || '')
     || !Number.isInteger(findingNumber) || findingNumber < 1 || !evidence?.trim()
     || Buffer.byteLength(evidence, 'utf8') > 16000) {
-    throw new Error('dispute requires PR identity, exact head, finding and evidence');
+    throw closerHelperError('helper-input-invalid', 'dispute requires PR identity, exact head, finding and evidence');
   }
   if (!hasConcreteExactHeadEvidence(evidence)) {
-    throw new Error('dispute evidence must quote an exact-head repro command and output, or the head file, in a fenced block');
+    throw closerHelperError('helper-input-invalid', 'dispute evidence must quote an exact-head repro command and output, or the head file, in a fenced block');
   }
   evidence = filterGitHubBody(evidence, { repo, reviewerHeadSha: headSha, rootDir });
   const pr = await get(`repos/${repo}/pulls/${prNumber}`);
-  if (pr.state !== 'open' || pr.draft || pr.head?.sha !== headSha) throw new Error('dispute head is not live/open');
+  if (pr.state !== 'open' || pr.draft || pr.head?.sha !== headSha) throw worldFactError('head-changed', 'dispute head is not live/open');
   const reviews = await get(`repos/${repo}/pulls/${prNumber}/reviews?per_page=100`);
-  if (!Array.isArray(reviews) || reviews.length >= 100) throw new Error('missing or capped reviews');
+  if (!Array.isArray(reviews) || reviews.length >= 100) throw worldFactError('dispute-review-evidence-invalid', 'missing or capped reviews');
   const review = reviews.find((entry) => [entry.node_id, entry.html_url].filter(Boolean).includes(reviewRef));
   if (!/^[a-f0-9]{40}$/i.test(review?.commit_id || '') || !['CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'APPROVED'].includes(review.state)
-    || normalizeEffectiveReviewVerdict(review.body) !== 'request-changes'
     || !amaAllAuthoritativeReviewerLogins().includes(String(review.user?.login || '').replace(/\[bot\]$/, ''))) {
-    throw new Error('dispute requires authoritative blocking review');
+    throw worldFactError('dispute-review-evidence-invalid', 'dispute requires authoritative blocking review');
+  }
+  const verdict = normalizeEffectiveReviewVerdict(review.body);
+  const blocking = parseBlockingFindingsSection(review.body);
+  if (!['request-changes', 'comment-only', 'approved'].includes(verdict) || !blocking) {
+    throw worldFactError('dispute-review-evidence-invalid', 'dispute requires authoritative blocking review');
   }
   const currency = createReviewCurrencyReader({ repo, prNumber, get, pr, git });
   const reviewCurrency = await currency(review.commit_id, headSha);
   if (!await isCurrentAuthoritativeFamilyReview(review, reviews, headSha,
     (from, to) => get(`repos/${repo}/compare/${from}...${to}`), currency)) {
-    throw new Error('dispute requires the latest authoritative review in live head ancestry for its family, without a newer reviewed head'
+    throw worldFactError('dispute-review-currency-unproven', 'dispute requires the latest authoritative review in live head ancestry for its family, without a newer reviewed head'
       + (reviewCurrency.current ? '' : `; no merge: ${reviewCurrency.missingProof}`));
   }
+  if (blocking.length === 0 && parseNonBlockingFindingsSection(review.body)?.length) {
+    throw closerHelperError('helper-kind-mismatch',
+      'dispute-finding accepts only blocking findings; use hammer-edit-plan.mjs with kind=non-blocking and the non-blocking section position.');
+  }
+  if (verdict !== 'request-changes') {
+    throw worldFactError('dispute-review-evidence-invalid', 'dispute requires authoritative blocking review');
+  }
   const finding = parseBlockingFindingsSection(review.body)?.[findingNumber - 1];
-  if (!finding) throw new Error('blocking finding not found');
+  if (!finding) throw closerHelperError('helper-kind-mismatch',
+    'blocking finding not found; dispute-finding accepts only blocking findings. For non-blocking findings use hammer-edit-plan with kind=non-blocking and the section position; remediate or record the allowed backlog deferral.');
   const identity = blockingFindingIdentity(finding);
   const params = [repo, prNumber, identity];
   const digest = evidenceDigest(evidence);
@@ -62,7 +75,7 @@ export async function disputeFinding({ rootDir, repo, prNumber, headSha, reviewR
     db.prepare(`UPDATE ham_finding_disputes SET requests=MAX(0, requests-1), reserved_at=NULL
       WHERE repo=? AND pr_number=? AND reserved_at IS NOT NULL AND reserved_at < ?`).run(repo, prNumber, new Date(Date.now() - 300000).toISOString());
     const row = db.prepare('SELECT * FROM ham_finding_disputes WHERE repo=? AND pr_number=? AND identity=?').get(...params);
-    if (row.reserved_at) throw new Error('dispute reservation already in flight');
+    if (row.reserved_at) throw worldFactError('dispute-reservation-in-flight', 'dispute reservation already in flight');
     // Idempotent per finding, evidence head and reviewed head: a re-run reuses
     // the recorded adjudication instead of posting a second comment.
     if (row.resolution === HAMMER_WITHDRAWN_RESOLUTION
@@ -80,9 +93,9 @@ export async function disputeFinding({ rootDir, repo, prNumber, headSha, reviewR
       identity, headSha, findingReviewedHead: review.commit_id, evidence }), { repo, reviewerHeadSha: headSha, rootDir });
     const comment = await postComment(commentBody);
     if (!comment?.node_id || !hamAuditCommentAuthorMatches(comment.user?.login)
-      || comment.body !== commentBody) throw new Error('dispute comment lacks trusted HAM provenance');
+      || comment.body !== commentBody) throw worldFactError('dispute-identity-refused', 'dispute comment lacks trusted HAM provenance');
     const live = await get(`repos/${repo}/pulls/${prNumber}`);
-    if (live.state !== 'open' || live.head?.sha !== headSha) throw new Error('head moved before the withdrawal was recorded');
+    if (live.state !== 'open' || live.head?.sha !== headSha) throw worldFactError('head-changed', 'head moved before the withdrawal was recorded');
     db.prepare(`UPDATE ham_finding_disputes SET head_sha=?, comment_id=?, comment_author=?, comment_sha256=?,
       resolution=?, resolved_at=?, finding_reviewed_head=?, evidence_sha256=?, reserved_at=NULL
       WHERE repo=? AND pr_number=? AND identity=?`).run(headSha, comment.node_id, comment.user.login,

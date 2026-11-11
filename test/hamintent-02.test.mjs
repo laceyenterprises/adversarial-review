@@ -671,3 +671,35 @@ test('withdrawal evidence and comment digests use the filtered posted text', asy
   assert.equal(result.evidenceSha256, row.evidence_sha256);
   assert.equal(row.comment_sha256, createHash('sha256').update(posted).digest('hex'));
 });
+
+test('HAMSELFERRORS-01: blocking-only helper misuse requests correction before mutation and corrected citation succeeds', async t => {
+  const h = disputeHarness(t);
+  await assert.rejects(disputeFinding({ ...h.args, findingNumber: 99 }, h.deps), error => {
+    assert.equal(error.phaseOutcome, 'helper-kind-mismatch');
+    assert.match(error.message, /non-blocking findings use hammer-edit-plan/);
+    return true;
+  });
+  assert.deepEqual(h.calls, []);
+  assert.equal(h.db.prepare('SELECT COUNT(*) AS n FROM ham_finding_disputes').get().n, 0);
+  assert.equal((await disputeFinding(h.args, h.deps)).withdrawn, true);
+  assert.deepEqual(h.calls.map(([kind]) => kind), ['comment', 'wake']);
+});
+
+test('HAMSELFERRORS-01: a current non-blocking-only review routes to correction, while untrusted evidence stays a world refusal', async t => {
+  const h = disputeHarness(t);
+  const advisory = { ...review, commit_id: head, body: `## Blocking issues\n- None.\n## Non-blocking issues\n- **Synthetic suggestion**\n  - **File:** \`src/example.mjs\`\n  - **Lines:** 1\n  - **Problem:** Synthetic suggestion.\n## Verdict\nComment only` };
+  const deps = { ...h.deps, get: async url => url.includes('/reviews?') ? [advisory]
+    : { state: 'open', head: { sha: head } } };
+  await assert.rejects(disputeFinding(h.args, deps), error => {
+    assert.equal(error.phaseOutcome, 'helper-kind-mismatch');
+    assert.match(error.message, /kind=non-blocking/);
+    return true;
+  });
+  advisory.user = { login: 'synthetic-untrusted-author' };
+  await assert.rejects(disputeFinding(h.args, deps), error => {
+    assert.equal(error.phaseOutcome, 'dispute-review-evidence-invalid');
+    return true;
+  });
+  assert.deepEqual(h.calls, []);
+  assert.equal(h.db.prepare('SELECT COUNT(*) AS n FROM ham_finding_disputes').get().n, 0);
+});

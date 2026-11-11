@@ -3,6 +3,8 @@ import { classifyHammerExit, hammerNoMergeDetails } from './hammer-outcome.mjs';
 import { appendCloserOutcome } from './closer-outcomes.mjs';
 import { ownershipReadBudgets as closerScanBudgets, boundedOwnershipRead as boundedCloserScanRead } from '../ownership-read.mjs';
 import { HAMMER_RETRYABLE_READ_OUTCOMES } from './hammer-phase-outcome.mjs';
+import { HAMMER_CLOSER_FAULTS } from './hammer-stop-origin.mjs';
+import { refundCloserSelfError, HAMMER_SELF_ERROR_REFUND_LIMIT } from './hammer-retry-cap.mjs';
 import { repositoryObservationCache } from '../repository-state-cache.mjs';
 import { withRepositoryStateCycle } from '../repository-state-lock.mjs';
 import { infrastructureOnlyFailures, recordedCiFailures } from '../ci-infrastructure.mjs';
@@ -406,6 +408,16 @@ export function namedAmaNoDispatchReason(reason, reasons = []) {
     return `not-eligible:${why || 'unknown'}`;
   }
   return reason;
+}
+
+async function holdForCloserSelfError({ rootDir, repo, prNumber, headSha, now, deliverAlertImpl }) {
+  await observeClosureWait({ rootDir, repo, prNumber, headSha,
+    reason: 'closer harness correction/refund budget exhausted; PR adjudication budget preserved',
+    waitClass: 'closer-self-error', immediate: true, now: Date.parse(now),
+    pageImpl: message => deliverAlertImpl(message, { event: 'ama_closer.self_error_exhausted',
+      payload: { repo, prNumber, headSha } }) });
+  return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+    reason: 'closer-self-error-budget-exhausted', needsOperator: true });
 }
 
 function noAmaDispatch(result) {
@@ -5594,6 +5606,29 @@ async function maybeDispatchAmaCloserAttempt({
       || isAmaHammerLaunchTicket(infrastructureAbortProbe.row.ticket_ref, prNumber))
     && ['succeeded', 'failed'].includes(infrastructureAbortProbe.row?.status);
   if (deferredPark && existingRecord?.launchRequestId && (!infrastructureReadPark || refundableReadAbort)) {
+    if (HAMMER_CLOSER_FAULTS.has(parkReason)) {
+      const refund = refundCloserSelfError(rootDir, { repo, prNumber }, {
+        jobKey: reviewedSha, headSha: existingRecord.headSha,
+        launchRequestId: existingRecord.launchRequestId, now: dispatchContext.dispatchedAt,
+      });
+      if (!refund.exhausted && !refund.refunded && refund.reason !== 'already-refunded') {
+        return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+          reason: 'closer-self-error-refund-unavailable', recoveryWait: true });
+      }
+      if (refund.refunded || refund.reason === 'already-refunded') existingRecord = updateDispatchRecord(rootDir, existingDispatchIdentity, current => {
+        if (current?.launchRequestId !== existingRecord.launchRequestId
+          || current.selfErrorRefundedLaunchRequestId === existingRecord.launchRequestId) return null;
+        return { ...current, selfErrorRefundedLaunchRequestId: existingRecord.launchRequestId,
+          unexecutedRefundCount: Number(current.unexecutedRefundCount || 0) + 1 };
+      }) || existingRecord;
+      if (refund.exhausted) {
+        finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity: existingRecordLeaseIdentity,
+          terminalOutcome: `retryable-${parkReason}`, launchRequestId: existingRecord.launchRequestId,
+          now: dispatchContext.dispatchedAt, logger, repo, prNumber });
+        return holdForCloserSelfError({ rootDir, repo, prNumber, headSha: existingRecord.headSha,
+          now: dispatchContext.dispatchedAt, deliverAlertImpl });
+      }
+    }
     parkLedger = deferHammerRetryDispatch(rootDir, { repo, prNumber }, {
       jobKey: reviewedSha, headSha: existingRecord.headSha,
       // Lane-lock contention issued no merge; reuse the lease-wait refund so
@@ -7337,6 +7372,10 @@ async function maybeDispatchAmaCloserAttempt({
   if (isHammerWorkerClass(workerClass) && !ownerProofRecovery) {
     const hammerCapIdentity = { repo, prNumber };
     const hammerRetryLedger = readHammerRetryCapLedger(rootDir, hammerCapIdentity);
+    if (hammerRetryLedger?.selfErrorRefunds?.[prMetadata.headSha]?.length >= HAMMER_SELF_ERROR_REFUND_LIMIT) {
+      return holdForCloserSelfError({ rootDir, repo, prNumber, headSha: prMetadata.headSha,
+        now: dispatchContext.dispatchedAt, deliverAlertImpl });
+    }
     const hammerLifetimeDispatchCeiling = normalizeHammerLifetimeDispatchCeiling(
       cfg?.hammerLifetimeDispatchCeiling,
     );

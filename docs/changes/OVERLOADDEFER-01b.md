@@ -35,7 +35,7 @@ squash onto current main required no textual conflict resolutions. Review
 repairs add queued-debt retention, no-op backoff, shutdown cleanup, cursor
 recovery, immediate re-exhaustion and aligned acceptance wording. The generated
 catalog is left to main automation; its source fragment carries the contract.
-This fragment follows the ticket's requested `changes/` location.
+This fragment uses the canonical repository-level `docs/changes/` location.
 
 Validation: 522 focused tests passed across the retry driver, overload deferral,
 closer retry cap, GitHub API, watcher fast merge, timeout handoff, claim loop and
@@ -49,3 +49,25 @@ suite ran.
 ## HAM final findings
 
 Shutdown starts queue cancellation and rescue abort before reviewer cleanup, with bounded pipe settlement and exit-path abort. Removed receipts count as progress. Receipt file age limits stale retries to 24 hours across watcher restarts. Exhaustion inheritance is limited to the same job and 30 minutes, retaining ordinary lifetime caps. Original state contract text and the canonical note path are restored.
+
+## Builder validation repair
+
+Merged current main, preserving OVERLOADDEFER-01c's configured true-overload
+threshold. The remaining CI failure was in the durable-ledger regression:
+it advanced from an exhausted receipt in 1970 to a retry in 2001 while
+expecting the same 30-minute incident to remain exhausted. Corrected the test
+clock to retry within that incident. It now checks two successive
+release/retry cycles and verifies that series, lifetime and target attempt
+counts all remain charged. Production semantics stay unchanged: an exhausted
+incident cannot keep refunding attempts, while a new job or an expired
+30-minute window can begin another bounded overload deferral cycle.
+
+Verification for this update: `node --test` ran each file separately under
+netguard through `cwp_dispatch.worker_validation`: `overload-deferral` (8),
+`overload-rescue-retry` (14), `watcher-sigterm-preserves-reviewers-on-drain`
+(8), and `watcher-claim-loop` (168), all passing. The larger
+`ama-hammer-retry-cap` file was stopped without a result after the wrapper
+load-scaled its nominal 600-second bound; that run is inconclusive. Subsequent
+runs used an absolute process deadline as well. ESLint, contract typechecking,
+the offline research walkthrough and whitespace validation passed. No full
+suite or workflow changes were made.

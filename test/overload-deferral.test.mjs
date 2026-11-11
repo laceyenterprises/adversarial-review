@@ -77,20 +77,26 @@ test('retry debt survives replacement launches and re-reading the durable ledger
   assert.equal(released.lastOverloadDeferral.deferralCount, MAX_OVERLOAD_DEFERRALS);
   assert.deepEqual(evaluateHammerDeferralQueue(released, new Date(1e12).toISOString()),
     { expired: false, backoff: false });
-  // An ordinary closer attempt remains charged after release.
-  recordHammerRetryDispatch(root, identity, { jobKey: head, headSha: head,
-    launchRequestId: 'normal-lane', now: new Date(1e12).toISOString() });
-  const before = readHammerRetryCapLedger(root, identity).attemptCount;
-  const after = deferHammerRetryDispatch(root, identity, { jobKey: head, headSha: head,
-    launchRequestId: 'normal-lane', now: new Date(1e12).toISOString(),
-    leaseWaitExhausted: true, overloadEvidence: evidence });
-  assert.equal(after.attemptCount, before);
-  assert.equal(after.overloadDeferral.deferralCount, MAX_OVERLOAD_DEFERRALS);
-  assert.equal(after.overloadDeferral.overloadAlert, true);
-  assert.equal(after.overloadDeferral.nextRetryAt, null);
-  releaseHammerOverloadDeferral(root, identity);
-  assert.deepEqual(evaluateHammerDeferralQueue(readHammerRetryCapLedger(root, identity), new Date(1e12).toISOString()),
-    { expired: false, backoff: false });
+  // Ordinary attempts in the same 30-minute incident remain charged after
+  // every release. A timestamp decades later would start a fresh incident.
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const now = new Date(Date.parse(released.lastOverloadDeferral.exhaustedAt) + attempt * 60_000).toISOString();
+    const launchRequestId = `normal-lane-${attempt}`;
+    recordHammerRetryDispatch(root, identity, { jobKey: head, headSha: head, launchRequestId, now });
+    const before = readHammerRetryCapLedger(root, identity);
+    assert.equal(before.attemptCount, attempt);
+    const after = deferHammerRetryDispatch(root, identity, { jobKey: head, headSha: head,
+      launchRequestId, now, leaseWaitExhausted: true, overloadEvidence: evidence });
+    for (const field of ['attemptCount', 'lifetimeAttemptCount', 'targetAttemptCount']) {
+      assert.equal(after[field], before[field], `${field} stays charged after exhaustion`);
+    }
+    assert.equal(after.overloadDeferral.deferralCount, MAX_OVERLOAD_DEFERRALS);
+    assert.equal(after.overloadDeferral.overloadAlert, true);
+    assert.equal(after.overloadDeferral.nextRetryAt, null);
+    releaseHammerOverloadDeferral(root, identity);
+    assert.deepEqual(evaluateHammerDeferralQueue(readHammerRetryCapLedger(root, identity), now),
+      { expired: false, backoff: false });
+  }
 });
 
 test('legacy host-overload callers share one durable host alert', async t => {

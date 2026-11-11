@@ -173,6 +173,12 @@ export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, cand
       ...(input.finalPush ? { finalPush: input.finalPush } : {}),
       ...(input.followUpJob !== undefined ? { job: input.followUpJob ? {
         ...pick(input.followUpJob, ['status', 'clean', 'headSha', 'createdAt', 'jobId', 'closureHandoff']),
+        remediationPlan: input.followUpJob.remediationPlan ? {
+          ...pick(input.followUpJob.remediationPlan, ['currentRound', 'maxRounds']),
+          ...(input.followUpJob.remediationPlan.stop
+            ? { stop: pick(input.followUpJob.remediationPlan.stop, ['code']) } : {}),
+        } : null,
+        failure: pick(input.followUpJob.failure, ['code', 'needsOperator']),
         live: remediationJobOwnership(input.followUpJob).live,
         headSha: input.followUpJob.headSha || input.followUpJob.revisionRef || null,
       } : null } : {}) },

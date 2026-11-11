@@ -358,12 +358,47 @@ off, such a review is released as `settled-clean`, as before.
 
 `settled-clean` and `settled-clean-head-moved` stops are retriggerable, like
 `review-settled` and `no-remediation-required`. When the AMA closer selects
-`remediate` with no live job, it requeues the latest job only if that job is
+`remediate` with no live job, it requeues the latest job if that job is
 stopped with one of these four settled codes, its review still owes remediation,
 and rounds remain. The requeued job carries optional
 `remediationJobMissingRecovery: { headSha, recreatedAt, previousStopCode }`.
 A job whose marker names the current head is never requeued again by this
 path. Older records omit the field. No new store or config key is introduced.
+
+Ended execution rounds also recover automatically when their exact reviewed
+head still has findings and ordinary rounds remain. Eligible stopped codes are
+`committed-unpublished`, `no-progress`, `stale-heartbeat`, `daemon-bounce-safety`,
+`worker-failure`, `worker-timeout`, `timed-out` and `stopped`; eligible failed
+codes are `worker-failure`, `worker-timeout`, `timed-out`,
+`missing-remediation-reply`, `artifact-empty-completion`,
+`artifact-missing-completion`, `invalid-remediation-reply`, `hq-dispatch-failed`
+and `hq-dispatch-transient-budget-exhausted`.
+Human stops, safety refusals and lifecycle stops retain their existing owners.
+These recoveries add optional `round` to `remediationJobMissingRecovery`, making
+the reservation unique per head and spent round. They preserve `currentRound`,
+`maxRounds`, retry history and the later of existing retryAfter or the existing
+exponential backoff from the terminal timestamp. Automatic next actions have
+`operatorOverride: false`. The writer revalidates the source digest under its
+lock, and any queued/running PR job or closer lease prevents another recovery.
+
+Watcher discovery only requeues locally, retaining unpublished work for the
+next bounded worker without running network publication under watcher credentials.
+With an explicitly supplied worker environment and a checkout owned by the
+current uid, the existing publication path runs first after
+checkout/provenance/preservation verification. Structural live-head
+proof permits clearing `unpublishedWork` and using ordinary completion/re-review
+without another worker round. Final-round completion still requires its
+validated reply. Refusal keeps the retained evidence on the next pending round.
+The temporary `<jobPath>.round-recovery.delivery.lock` uses the existing
+five-minute delivery-claim format (`claimer`, `claimedAt`); publication
+subprocesses share a two-minute deadline and release the claim on exit.
+Spent terminal execution rounds and budget stops hand findings to the hammer,
+including when no head was published. Operator-owned holds, safety refusals,
+and closure-handoff jobs do not transfer custody merely because a round claim
+reached the ceiling. A completely missing initial job stays with the reviewer
+or reviewer-pass reaper, which can recover the persisted single-review
+decision and PR-wide round budget before creation. No new lifecycle status
+or round allowance is introduced.
 
 ## Branch and publication contract (REMEDBRANCH-01)
 

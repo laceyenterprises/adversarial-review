@@ -8,7 +8,7 @@ import { checkMap, diagrams, digest, stateProjection } from './helpers/smv-contr
 const root = new URL('../', import.meta.url);
 const read = file => readFileSync(new URL(file, root), 'utf8');
 const map = JSON.parse(read('state-machines.json'));
-const GRAPH_HASH = '41c30ad292d2057a3207d3799a49a8e90dda6fefbbc87fdc80494245a110da30'; // Independent reviewed snapshot; not generated at test time.
+const GRAPH_HASH = 'd432c2c13dc4e065c0c62c8b2f94b8d51247cd66d74c994d7781fc7106ba7c8c'; // Independent reviewed snapshot; not generated at test time.
 test('SMV independent graph, producer state and transition drift', () => {
   checkMap(map, read, GRAPH_HASH);
   assert.equal(read('README.md').split('<!-- smv:diagrams:start -->\n')[1].split('\n<!-- smv:diagrams:end -->')[0], diagrams(map));
@@ -99,6 +99,8 @@ test('SMV canonical sandbox smoke merges only disposable Git', () => {
   assert.ok(report.steps.every(s => s.evidence.ok && s.verdict === 'pass'));
   assert.equal(report.steps.find(s => s.id === 'handoff').evidence.expiredWakeRearmed, true);
   assert.equal(report.steps.find(s => s.id === 'handoff').evidence.missingHeadAlertDeduplicated, true);
+  assert.equal(report.steps.find(s => s.id === 'handoff').evidence.endedRoundRecovered, true);
+  assert.equal(report.steps.find(s => s.id === 'handoff').evidence.spentRoundHammerOwned, true);
   assert.deepEqual(report.steps.find(s => s.id === 'clean').evidence.validatedQueue,
     { merged: [1, 2], sourceMutations: 0, ciRestarts: 0, leaseAndWaitersClean: true });
 });

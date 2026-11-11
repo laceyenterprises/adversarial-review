@@ -366,6 +366,38 @@ if (scenario === 'clean') {
     durableCleanupAndDrainFence: true, releaseReceiptRetained: true, terminalWithoutPgidReadmitted: true,
     immediateFailedReviewRecovery: true };
 } else if (scenario === 'handoff') {
+  const { recoverEndedRemediationRound } = await import('../../src/remediation-ended-round-recovery.mjs');
+  const { markFollowUpJobStopped } = await import('../../src/follow-up-jobs.mjs');
+  const endedRoot = join(rootDir, 'ended-round'), endedHead = 'e'.repeat(40);
+  const endedBody = '## Blocking issues\n- Synthetic incorrect result\n\n## Non-blocking issues\n- None.\n\n## Verdict\nRequest changes';
+  const endedJob = buildFollowUpJob({ repo: 'fixture/ended', prNumber: 42, revisionRef: endedHead,
+    branch: 'topic', baseBranch: 'main', reviewerModel: 'codex', reviewBody: endedBody,
+    reviewPostedAt: '2026-01-01T00:00:00.000Z' });
+  const endedPath = join(endedRoot, 'data/follow-up-jobs/stopped', `${endedJob.jobId}.json`);
+  writeFollowUpJob(endedPath, { ...endedJob, status: 'stopped', stoppedAt: endedJob.createdAt,
+    remediationWorker: { state: 'completed' },
+    remediationPlan: { ...endedJob.remediationPlan, currentRound: 1, maxRounds: 2,
+      rounds: [{ round: 1, state: 'stopped' }], stop: { code: 'committed-unpublished' } } });
+  const recoveredRound = await recoverEndedRemediationRound({ rootDir: endedRoot, repo: endedJob.repo,
+    prNumber: 42, headSha: endedHead, now: '2026-01-01T00:10:00.000Z' });
+  assert.equal(recoveredRound.recreated, true);
+  const recoveredJob = readFollowUpJob(recoveredRound.jobPath);
+  assert.equal(recoveredJob.remediationPlan.currentRound, 1);
+  assert.equal(recoveredJob.remediationPlan.maxRounds, 2);
+  assert.equal(recoveredJob.remediationPlan.nextAction.operatorOverride, false);
+  writeFollowUpJob(recoveredRound.jobPath, { ...recoveredJob,
+    remediationPlan: { ...recoveredJob.remediationPlan, currentRound: 2 } });
+  const spentRound = markFollowUpJobStopped({ rootDir: endedRoot, jobPath: recoveredRound.jobPath,
+    stopCode: 'committed-unpublished', stopReason: 'synthetic ended round',
+    commentDeliveryExemption: 'interrupted-without-reconciled-reply' });
+  const spentSnapshot = deriveNextActionSnapshot({ subjectKey: 'fixture/ended#42', head: endedHead,
+    observations: { pr: { state: 'OPEN', headSha: endedHead, mergeable: 'MERGEABLE' },
+      reviews: { headSha: endedHead, verdict: 'request-changes', blockingFindingState: 'known',
+        blockingFindingCount: 1, nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 },
+      remediation: { roundsLeft: true, job: spentRound.job }, checks: { conclusion: 'SUCCESS' },
+      leases: { closer: null }, launches: { closer: null }, controls: {}, progress: {},
+      policy: { strictMode: true, autonomousMergeExecutionEnabled: true } } });
+  assert.equal(nextAction(spentSnapshot).action, 'hammer');
   const { writeAmaAuditEntry } = await import('../../src/ama/audit.mjs');
   const { reconcileHammerResumes, readHammerResumes, settleHammerResume } = await import('../../src/ama/hammer-resume.mjs');
   const resumeIdentity = { hqRoot: rootDir, repo: 'fixture/resume', prNumber: 17, headSha: 'a'.repeat(40) };
@@ -1088,6 +1120,7 @@ if (scenario === 'clean') {
     autoMergeHeld: true, autoMergeBoundReleased: true, unreadableCapacityReserved: true,
     wakeRearmed: true, expiredWakeRearmed: true, missingHeadAlertDeduplicated: true,
     remediationCloseoutOwned: true, terminalRecoveryHandedToHammer: true,
+    endedRoundRecovered: true, spentRoundHammerOwned: true,
     unreadableRecoveryFenced: true, merged: true, remoteHeadMatches: true };
 } else if (scenario === 'ci-blocked') {
   const ceilingDb = openReviewStateDb(rootDir); ensureReviewStateSchema(ceilingDb);

@@ -1,4 +1,5 @@
 import { isHammerOwnedHead } from './hammer-head-ownership.mjs';
+import { isRemediationRoundBudgetSpent, remediationBudgetHandoffAllowed } from './remediation-round-recovery.mjs';
 import { rollupInfrastructureOnly, rollupInfrastructureEvidencePending } from './ci-infrastructure.mjs';
 // ── NXA-02: one shared next action per open PR ───────────────────────────────
 //
@@ -157,7 +158,12 @@ function remediationFacts(remediation) {
   const plan = plain(job?.remediationPlan);
   const completed = finite(value.completedRounds) ?? finite(plan?.currentRound);
   const max = finite(value.maxRounds) ?? finite(plan?.maxRounds);
-  const roundsLeft = typeof value.roundsLeft === 'boolean' ? value.roundsLeft
+  // A terminal attempt spent its round even if it never published. A broader
+  // cycle ceiling cannot give a job more rounds than its consumer can claim.
+  const spent = job ? remediationBudgetHandoffAllowed({ ...job,
+    remediationPlan: plan || { currentRound: completed, maxRounds: max } })
+    : completed !== null && max !== null && isRemediationRoundBudgetSpent({ currentRound: completed, maxRounds: max });
+  const roundsLeft = spent ? false : typeof value.roundsLeft === 'boolean' ? value.roundsLeft
     : completed !== null && max !== null ? completed < max : null;
   const finalPush = plain(value.finalPush);
   return {

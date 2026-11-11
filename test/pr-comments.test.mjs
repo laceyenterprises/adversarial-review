@@ -2456,7 +2456,9 @@ test('buildRemediationOutcomeCommentBody omits the hardening section when harden
 for (const [workerClass, tokenEnvName] of [
   ['remediator-grok', 'GH_CODEX_REVIEWER_TOKEN'],
   ['remediator-codex', 'GH_CODEX_REVIEWER_TOKEN'],
+  ['remediator-codex-corp', 'GH_CODEX_REVIEWER_TOKEN'],
   ['remediator-claude', 'GH_CLAUDE_REVIEWER_TOKEN'],
+  ['remediator-claude-corp', 'GH_CLAUDE_REVIEWER_TOKEN'],
 ]) {
   test(`postRemediationOutcomeComment delivers ${workerClass} through its commenter identity`, async () => {
     const calls = [];

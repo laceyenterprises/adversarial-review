@@ -54,6 +54,7 @@ import {
   providerForQuotaHarness,
 } from './fleet-quota-status.mjs';
 import { loadRoleConfig, resolveRemediatorFallback, codexWorkerAccountPolicy } from './role-config.mjs';
+import { markRemediationConfigError } from './remediation-dispatch-mode.mjs';
 import { MAX_QUOTA_HOLD_WINDOW_MS, remediatorQuotaEvidence } from './remediation-quota-evidence.mjs';
 import {
   resolveClaudeRemediationModel,
@@ -255,8 +256,9 @@ export function remediationSubjectRefusal(job, workerClass, { env = process.env,
       if (cfg.get('grok.enabled', false) !== true || cfg.get('grok.remediator.enabled', false) !== true) {
         return 'grok-remediator-disabled';
       }
-    } catch {
-      return 'grok-remediator-disabled';
+    } catch (error) {
+      // Unreadable config is retryable; only settled flags refuse the subject.
+      throw markRemediationConfigError(error, { configKey: 'roles.remediator' });
     }
   }
   if (job && (!job.domainId || job.domainId === 'code-pr')

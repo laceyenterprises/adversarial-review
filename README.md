@@ -1557,6 +1557,14 @@ records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
 
+Closer intents use distinct per-attempt worker IDs. A terminal launch and its
+complete terminal retry chain release closure ownership independently of retained
+directory teardown; live, parked, unknown and replacement owners still hold.
+After deployment and the registered watcher/follow-up restart, SRE verifies PID
+start times and a natural failed closer getting its next closer or queued
+re-review within one pass without a retry-directory collision. Existing lifecycle
+states and automated smoke commands are unchanged.
+
 Consecutive nonblocking-cap refusals remain `stopped/max-rounds-reached` and
 carry an actionable `finalCapResult` for operator canonical rescue. The result
 records the nullable job revision at stop time and finding accounting and
@@ -2087,7 +2095,10 @@ lease outcome and one mismatch diagnostic; existing smoke promises are unchanged
 
 [state-machines.json](state-machines.json) declares owned lifecycle objects
 and related operational verification records, including launch custody
-freshness and queue maintenance holds. Custody ingestion requires an existing,
+freshness and queue maintenance holds. Receipt-less closer custody probes the
+predecessor lease's stored worker ID, including its attempt suffix, and preserves
+that lease on live or unknown evidence so later ticks inspect the same slot.
+Custody ingestion requires an existing,
 owner-matched app store and does not advance queue merge eligibility currency.
 GSR receipts distinguish absent stores, accepted drains and released holds;
 token mismatches exit nonzero without changing the hold.

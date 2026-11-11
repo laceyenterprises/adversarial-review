@@ -315,10 +315,8 @@ for (const scenario of ['exhausted-findings', 'clean-red-ci']) test(`CLOSERCUSTO
   assert.notEqual(replacement.workerId, receipt.workerId, 'same-head replacement owns a fresh directory');
   assert.equal(readAmaCloserLease(rootDir, identity).lrqId, second.launchRequestId);
   assert.deepEqual(nextDeps.calls.filter(call => ['worker', 'dispatch'].includes(call.args[0]))
-    .map(call => call.args[0]), ['worker', 'dispatch']);
-  assert.ok(events.some(event => event.event === 'closer_provision_collision_reclaimed'
-    && event.launchRequestId === receipt.launchRequestId && event.terminalStatus === 'failed'
-    && event.reason === 'recorded-launch-terminal'), JSON.stringify(events));
+    .map(call => call.args[0]), ['dispatch']);
+  assert.equal(existsSync(worktree), true, 'failed cleanup retains predecessor evidence independently');
   assert.ok(!events.some(event => event.event === 'closer_reclaim_deferred_unknown_run'));
 });
 
@@ -637,7 +635,7 @@ for (const scenario of ['active', 'active-dead-pid', 'two-runs', 'ledger-unreada
 }
 
 for (const refused of [false, true]) {
-  test(`CLOSERDEADSLOT-02: terminal slot teardown ${refused ? 'refusal prevents dispatch' : 'precedes normal dispatch'}`, async t => {
+  test(`CLOSERWORKERID-01: terminal slot retention is independent of dispatch (refused=${refused})`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'closer-dead-slot-dispatch-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     const f = deadSlotFixture(t, rootDir);
@@ -667,18 +665,11 @@ for (const refused of [false, true]) {
     const result = await maybeDispatchAmaCloser(input);
     assert.equal(observationReads, 1, 'ordinary admission must forward the observation reader');
     assert.ok(f.state.calls.every(call => call.observation !== 'workspaces'));
-    assert.equal(result.dispatched, !refused);
+    assert.equal(result.dispatched, true, JSON.stringify(result));
     const hostCalls = () => deps.calls.filter(call => ['worker', 'dispatch'].includes(call.args[0]));
-    if (refused) {
-      assert.equal(result.skipMergeAgent, true);
-      assert.equal((await maybeDispatchAmaCloser(input)).dispatched, false);
-      assert.ok(hostCalls().every(call => call.args[0] === 'worker'));
-      assert.equal(existsSync(f.worktree), true);
-      assert.ok(events.some(event => event.event === 'closer_provision_collision_reclaim_failed'
-        && event.error === 'credential-cleanup-held'));
-    } else {
-      assert.deepEqual(hostCalls().map(call => call.args[0]), ['worker', 'dispatch']);
-    }
+    assert.deepEqual(hostCalls().map(call => call.args[0]), ['dispatch']);
+    assert.equal(existsSync(f.worktree), true);
+    assert.equal(events.length, 0);
   });
 }
 
@@ -3088,7 +3079,98 @@ test('HAMMERQUOTAREAD-01: snapshot provenance survives personal dispatch and aud
   }
 });
 
+for (const status of ['running', 'unavailable', 'failed']) {
+  test(`CLOSERWORKERID-01: stored suffix locates ${status} predecessor without launch receipts`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closer-stored-suffix-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const args = findingsRemediationArgs(rootDir), deps = testDeps();
+    const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+    const workerId = `hammer-ama-pr-404-${HEAD.slice(0, 12)}-123456abcdef`;
+    const retained = join(args.dispatchContext.hqRoot, 'workers', workerId, 'agent-os');
+    mkdirSync(retained, { recursive: true });
+    acquireAmaCloserLease({ rootDir, ...identity, now: args.dispatchContext.dispatchedAt });
+    updateAmaCloserLease({ rootDir, ...identity, status: 'terminal', terminalOutcome: 'deferred' });
+    // Legacy evidence can retain the slot identity after losing its launch receipt.
+    writeFileSync(amaCloserLeaseFilePath(rootDir, identity), JSON.stringify({
+      ...readAmaCloserLease(rootDir, identity), workerId,
+    }));
+    const predecessorLease = readAmaCloserLease(rootDir, identity);
+    let workerReads = 0;
+    const input = { ...args, ...deps,
+      readWorkerDispatchFilesImpl: async observedId => {
+        workerReads++;
+        assert.equal(observedId, workerId, 'custody follows the stored attempt identity');
+        return { ok: true, metadata: { launchRequestId: 'synthetic-files-launch' } };
+      },
+      readLatestWorkerRunStatusImpl: async ({ launchRequestId }) => {
+        assert.equal(launchRequestId, 'synthetic-files-launch');
+        return status === 'unavailable' ? { ok: false }
+          : { ok: true, row: { status, pid: 12345 } };
+      },
+      processKillImpl: () => {},
+      execFileImpl: async (cmd, argv, options) => {
+        assert.notEqual(argv[0], 'worker', 'retained predecessor is not torn down');
+        return deps.execFileImpl(cmd, argv, options);
+      },
+    };
+    const result = await maybeDispatchAmaCloser(input);
+    assert.equal(workerReads, 1, 'inspect the suffixed worktree even without a receipt');
+    assert.equal(result.dispatched, status === 'failed', JSON.stringify(result));
+    assert.equal(existsSync(retained), true);
+    const launches = deps.calls.filter(call => call.args[0] === 'dispatch' && call.args[1] !== 'status');
+    assert.equal(launches.length, status === 'failed' ? 1 : 0);
+    if (status !== 'failed') {
+      assert.equal(result.reason, 'hammer-closer-in-flight');
+      assert.equal(result.skipMergeAgent, true);
+      assert.deepEqual(readAmaCloserLease(rootDir, identity), predecessorLease);
+      const next = await maybeDispatchAmaCloser(input);
+      assert.equal(next.dispatched, false);
+      assert.equal(next.reason, 'hammer-closer-in-flight');
+      assert.equal(workerReads, 2, 'the next tick must retain the same custody identity');
+      assert.deepEqual(readAmaCloserLease(rootDir, identity), predecessorLease);
+    } else {
+      assert.notEqual(flagValue(launches[0].args, '--worker-id'), workerId);
+    }
+  });
+}
+
 // TERMLEASE-01 fixtures contain only synthetic heads, launches and repository IDs.
+for (const status of ['failed', 'failed-without-merge']) {
+  test(`CLOSERWORKERID-01: retained ${status} predecessor does not own the next attempt`, async t => {
+    const ids = [];
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const rootDir = mkdtempSync(join(tmpdir(), 'closer-attempt-'));
+      t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+      const args = findingsRemediationArgs(rootDir), deps = testDeps();
+      const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+      const workerId = `hammer-ama-pr-404-${HEAD.slice(0, 12)}`;
+      const retained = join(args.dispatchContext.hqRoot, 'workers', workerId, 'agent-os');
+      mkdirSync(retained, { recursive: true });
+      acquireAmaCloserLease({ rootDir, ...identity, now: args.dispatchContext.dispatchedAt });
+      updateAmaCloserLease({ rootDir, ...identity, status: 'dispatched',
+        lrqId: 'synthetic-failed', workerId });
+      updateAmaCloserLease({ rootDir, ...identity, status: 'terminal', terminalOutcome: 'failed-without-merge' });
+      const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+        readLaunchRequestStatusImpl: () => ({ ok: true, row: { status, terminal: true } }),
+        execFileImpl: async (cmd, argv, options) => {
+          if (argv[0] === 'worker' && argv[1] === 'tear-down') {
+            throw new Error('synthetic native retention hold');
+          }
+          return deps.execFileImpl(cmd, argv, options);
+        },
+      });
+      assert.equal(result.dispatched, true, JSON.stringify(result));
+      assert.equal(existsSync(retained), true, 'retained evidence survives independently');
+      const dispatch = deps.calls.find(call => call.args[0] === 'dispatch' && call.args[1] !== 'status');
+      const id = dispatch.args[dispatch.args.indexOf('--worker-id') + 1];
+      assert.match(id, /^hammer-ama-pr-404-[a-z0-9]+-[a-f0-9]{12}$/);
+      assert.notEqual(id, workerId);
+      ids.push(id);
+    }
+    assert.notEqual(ids[0], ids[1], 'same-head attempts allocate distinct directories');
+  });
+}
+
 for (const outcome of ['superseded', 'failed-without-merge', 'deferred', 'succeeded',
   'abandoned-holder-dead', 'abandoned-timeout']) {
   test(`TERMLEASE-01: current-head terminal ${outcome} with a finished launch`, async t => {

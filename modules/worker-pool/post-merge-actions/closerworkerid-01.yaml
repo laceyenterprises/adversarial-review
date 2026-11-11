@@ -1,0 +1,11 @@
+operator_steps:
+  - description: >-
+      After normal deployment and the review-repository float, restart watcher
+      and follow-up through their registered service paths. Verify PID start
+      times against deployment. Observe natural closer retries using distinct
+      worker IDs without directory collisions and a terminal failed launch
+      receiving its successor closer or queued re-review within one pass,
+      independently of retained-directory cleanup. The companion worker-pool
+      change owns spawn-grace teardown acceptance. No coding-worker live action.
+    run_as: Authorized runtime owner
+    command: /usr/bin/less docs/RUNBOOK-ama-closure.md

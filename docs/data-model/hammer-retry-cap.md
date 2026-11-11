@@ -9,10 +9,9 @@ updates. A launch increments debt once, even when multiple observations see
 its deferred audit. Retry windows are 30, 60, 120 and 240 seconds; the fifth
 deferral emits one PR/head alert with phase/load evidence and releases the
 overload hold to ordinary closer selection. `lastOverloadDeferral` archives the
-exhausted receipt across later launches and head/series changes; it prevents
-further overload refunds. `overloadDeferral` is null after release, with
+exhausted receipt across later launches and head/series changes; it records `jobKey` and `exhaustedAt` (ISO time). Only the same job within 30 minutes inherits exhaustion and suppresses further overload refunds. `overloadDeferral` is null after release, with
 `leaseWaitExhausted=true` and `deferralNextAt=null` allowing normal selection.
-A later overload inherits the archived exhausted count, so it immediately follows
+A later overload in the same job within 30 minutes inherits the archived exhausted count, so it immediately follows
 page deduplication and release again without re-arming a multi-cycle backoff hold.
 Its ordinary attempt remains charged.
 Existing attempt/lifetime/target caps and lease checks still apply. Alert or
@@ -226,8 +225,8 @@ Directory: `data/follow-up-jobs/hammer-retry-cap/`
 | `transientRetryHeads` | object of head SHA to positive integer grant count, optional | Spent closer-authored stale-head retry grants. Default limit is one grant per head. Retained for the PR's lifetime across target churn, dispatch/suppression writes and fresh-review job-key resets; unlike refunded launch history, this map is never truncated to ten heads. Absent legacy values mean no grants recorded. |
 | `lastTransientRetryAt` | ISO-8601 string or null, optional | Timestamp supplied for the latest transient retry grant, or null if none was supplied. Preserved with grant history on later dispatch/suppression writes and fresh-review resets. |
 | `deferralLaunches` | string array | Launch IDs observed parked on merge-lease contention or pending required checks in this review series. Dedupes refunds across ticks and against `retryableLaunchRequestIds`. Resets on a changed known job key because the certified reviewed-head queue changed. At twelve deferrals the queue expires. |
-| `overloadDeferral` | object or null, optional | Active v1 overload wire receipt; cleared on exhaustion release. Later overloads inherit the archived exhausted count and immediately release without a new multi-cycle hold. |
-| `lastOverloadDeferral` | object, optional | Archived exhausted receipt retained across launches and series; prevents further overload refunds and seeds subsequent immediate exhaustion. |
+| `overloadDeferral` | object or null, optional | Active v1 overload wire receipt; cleared on exhaustion release. Only same-job overloads within 30 minutes of exhaustedAt inherit the archived count. A new job or expired window starts a new bounded deferral cycle; ordinary lifetime refund caps still apply. |
+| `lastOverloadDeferral` | object, optional | Archived exhausted receipt with `jobKey` and `exhaustedAt`; only the same job within 30 minutes inherits exhaustion and remains charged. Later incidents receive fresh bounded backoff. |
 | `leaseWaitExhausted` | boolean, optional | Also true after overload release, with `deferralNextAt=null` for ordinary capped selection. Whether the latest deferral is proven green exact-head merge-lease wait exhaustion or HAMLANEWAIT-01 legacy lane-busy contention. When true, ordinary contention queue expiry does not apply. Green lease waits skip backoff; legacy lane-busy waits use `deferralNextAt`. Preserved in the same reviewed-head series; reset on a changed known job key. |
 | `leaseWaitLaunches` | string array, optional | Lease-wait or legacy lane-busy launch IDs already observed and refunded, retaining the newest 64 for deduplication across ticks and other refund paths. Preserved in the same reviewed-head series; reset on a changed known job key. |
 | `laneBusyDeferral` | object or null, optional | Latest lane-busy parked `headSha` and `launches` (newest 64 distinct launch IDs). Resets on a changed parked head or reviewed job key, and clears on a non-lane deferral. Same-head observations dedupe through the shared refund history. Selects two-minute exponential backoff capped at thirty minutes, without consuming failure credit. The third distinct launch pages through the existing closure-wait receipt, deduped per PR/head and `lane-busy` class across restarts. |

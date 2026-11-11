@@ -871,17 +871,22 @@ function deferHammerRetryDispatchUnlocked(rootDir, identity, { jobKey, launchReq
   const alreadyRefunded = ledger.retryableLaunchRequestIds?.includes(launchRequestId) === true
     || ledger.unexecutedLaunchRequestIds?.includes(launchRequestId) === true
     || ledger.phaseInputsReplacement?.launchRequestId === launchRequestId;
-  const refund = !(overloadEvidence && ledger.lastOverloadDeferral?.overloadAlert)
+  const deferredAt = now || new Date().toISOString();
+  // An exhausted incident can suppress refunds only in its own job and window.
+  const archived = ledger.lastOverloadDeferral;
+  const inheritExhaustion = archived?.overloadAlert && archived.jobKey === jobKey
+    && Date.parse(deferredAt) >= Date.parse(archived.exhaustedAt)
+    && Date.parse(deferredAt) - Date.parse(archived.exhaustedAt) < 30 * 60 * 1000;
+  const refund = !(overloadEvidence && inheritExhaustion)
     && !alreadyRefunded && (leaseWaitExhausted || launches.length < HAMMER_DEFERRAL_LAUNCH_LIMIT) && ledger.attemptCount > 0;
   const lifetimeRefund = refund && (leaseWaitExhausted || fields.lifetimeDeferralRefundCount < LIFETIME_DEFERRAL_REFUND_BUDGET);
-  const deferredAt = now || new Date().toISOString();
   const laneBusyLaunches = laneBusy && ledger.laneBusyDeferral?.headSha === laneBusyHeadSha
     && Array.isArray(ledger.laneBusyDeferral.launches)
     ? ledger.laneBusyDeferral.launches : [];
   const count = (laneBusy ? laneBusyLaunches.length : launches.length) + 1;
   const doc = { ...ledger, ...fields,
     ...(overloadEvidence ? { overloadDeferral: deferOverload(
-      `${identity.repo}#${identity.prNumber}`, overloadEvidence, ledger.overloadDeferral || ledger.lastOverloadDeferral,
+      `${identity.repo}#${identity.prNumber}`, overloadEvidence, ledger.overloadDeferral || (inheritExhaustion ? archived : null),
       Date.parse(deferredAt) / 1000,
     ) } : {}),
     attemptCount: refund ? Math.max(0, ledger.attemptCount - 1) : ledger.attemptCount,
@@ -911,7 +916,8 @@ export function releaseHammerOverloadDeferral(rootDir, identity) {
   return mutateHammerLedger(rootDir, identity, () => {
     const ledger = readHammerRetryCapLedger(rootDir, identity);
     if (!ledger?.overloadDeferral?.overloadAlert) return ledger;
-    const doc = { ...ledger, lastOverloadDeferral: ledger.overloadDeferral,
+    const doc = { ...ledger, lastOverloadDeferral: { ...ledger.overloadDeferral,
+      jobKey: ledger.jobKey, exhaustedAt: ledger.updatedAt },
       overloadDeferral: null, leaseWaitExhausted: true, deferralNextAt: null,
       laneBusyDeferral: null };
     writeHammerRetryCapLedger(rootDir, identity, doc);

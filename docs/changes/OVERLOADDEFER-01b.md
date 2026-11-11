@@ -12,11 +12,11 @@ Live AMA enablement/execution switches gate every tick. Failed children and
 successful children leaving unchanged retry state back off per PR from 30 seconds
 to 30 minutes in memory; restart resets that backoff. Queued receipts are
 revalidated before execution. Broken directory handles close and reopen on the
-next scan. Watcher SIGTERM/SIGINT aborts and awaits the active rescue process
-group before continuing shutdown. Attempt-history eviction tracks latest attempt.
+next scan. Watcher SIGTERM/SIGINT immediately shuts down the background queue and aborts the active rescue process
+group alongside reviewer cleanup, with forced settlement after kill. All process exits synchronously abort rescue. Attempt-history eviction tracks latest attempt.
 
 Helper exhaustion emits one PR/head page, archives `lastOverloadDeferral` and
-releases the overload hold to ordinary capped closer selection. Later overloads
+releases the overload hold to ordinary capped closer selection. Later same-job overloads within 30 minutes
 inherit the archived exhausted count and immediately release through the same
 page deduplication path, without another multi-cycle hold or refund. Ordinary
 attempt/lifetime/target caps, leases, head matching, attestation, strict mode
@@ -45,3 +45,7 @@ typechecking, data-model validation (93 entries), the offline research
 byte-equivalence demo and whitespace checks passed. The plain-shell CI mirror
 passed its two fast checks and deferred the full suite to CI. No full worker-pool
 suite ran.
+
+## HAM final findings
+
+Shutdown starts queue cancellation and rescue abort before reviewer cleanup, with bounded pipe settlement and exit-path abort. Removed receipts count as progress. Receipt file age limits stale retries to 24 hours across watcher restarts. Exhaustion inheritance is limited to the same job and 30 minutes, retaining ordinary lifetime caps. Original state contract text and the canonical note path are restored.

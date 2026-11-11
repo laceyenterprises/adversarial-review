@@ -11,7 +11,7 @@ operator_steps:
       checks with the companion Agent OS handoff. This plan executes no live
       repair and source fixtures do not establish deployed acceptance.
     run_as: designated SRE operator
-    command: /bin/cat changes/OVERLOADDEFER-01b.md
+    command: /bin/cat docs/changes/OVERLOADDEFER-01b.md
 actions: []
 catchup:
   catchup_timeout_s: 1800

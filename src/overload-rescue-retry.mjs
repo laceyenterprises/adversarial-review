@@ -1,4 +1,4 @@
-import { opendir, readFile } from 'node:fs/promises';
+import { opendir, readFile, stat } from 'node:fs/promises';
 import { loadConfigCached } from './config-loader.mjs';
 import { join } from 'node:path';
 import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
@@ -12,7 +12,8 @@ export function createOverloadRescueRetry({
   rootDir, env = process.env, logger = console, now = () => Date.now(),
   execute = spawnCapturedProcessGroup,
   readConfig = () => loadConfigCached().getMergeAuthorityConfig(),
-  scanLimit = 100, openDirectory = opendir, readReceipt = path => readFile(path, 'utf8'),
+  maxReceiptAgeMs = 24 * 60 * 60 * 1000,
+  receiptStat = stat, scanLimit = 100, openDirectory = opendir, readReceipt = path => readFile(path, 'utf8'),
 } = {}) {
   let running = null;
   const attempted = new Map();
@@ -31,6 +32,9 @@ export function createOverloadRescueRetry({
     failures.set(key, { count,
       retryAt: now() + Math.min(30_000 * 2 ** Math.min(count - 1, 10), 1_800_000) });
     if (failures.size > 1000) failures.delete(failures.keys().next().value);
+  }
+  async function recent(path) {
+    return now() - (await receiptStat(path)).mtimeMs <= maxReceiptAgeMs;
   }
   function eligible(record) {
     const receipt = record.overloadDeferral;
@@ -67,7 +71,7 @@ export function createOverloadRescueRetry({
           try {
             const record = JSON.parse(await readReceipt(path));
             const key = `${record.repo}#${record.prNumber}`;
-            if (eligible(record) && now() >= (failures.get(key)?.retryAt || 0)) {
+            if (eligible(record) && await recent(path) && now() >= (failures.get(key)?.retryAt || 0)) {
               pending.push({ key, path, last: attempted.get(key) || 0 });
             }
           } catch (error) {
@@ -86,7 +90,7 @@ export function createOverloadRescueRetry({
       try {
         const record = JSON.parse(await readReceipt(next.path));
         if (`${record.repo}#${record.prNumber}` !== next.key || !eligible(record)
-          || now() < (failures.get(next.key)?.retryAt || 0)) continue;
+          || !await recent(next.path) || now() < (failures.get(next.key)?.retryAt || 0)) continue;
         candidate = { ...next, record };
         break;
       } catch (error) {
@@ -103,10 +107,14 @@ export function createOverloadRescueRetry({
       '--hq-root', resolveHqRoot(env), '--apply', '--json', '--retry-overload-only',
     ], {
       env, signal: shutdown.signal, cwd: rootDir, timeout: 600_000, progressTimeout: 0,
-      reapGroupOnExit: true, maxBuffer: 1024 * 1024,
+      reapGroupOnExit: true, settleAfterKillMs: 250, maxBuffer: 1024 * 1024,
     })).then(async () => {
-      const current = JSON.parse(await readReceipt(candidate.path));
-      if (progress(current) === progress(candidate.record)) backoff(candidate.key);
+      let current;
+      try { current = JSON.parse(await readReceipt(candidate.path)); }
+      catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+      if (current && eligible(current) && progress(current) === progress(candidate.record)) backoff(candidate.key);
       else failures.delete(candidate.key);
     }).catch(error => {
       backoff(candidate.key);
@@ -116,6 +124,7 @@ export function createOverloadRescueRetry({
     });
   }
   return {
+    abort() { shutdown.abort(); },
     async stop() {
       shutdown.abort();
       await running;

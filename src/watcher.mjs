@@ -855,6 +855,9 @@ const SQLITE_ORPHAN_EXIT_CODE = 75;
 let watcherHeartbeat = null;
 let overloadRescueRetry = null;
 
+// Synchronous exit also covers fatal exceptions and SQLite-orphan exits.
+process.on('exit', () => { overloadRescueRetry?.abort(); });
+
 function markWatcherReviewHeartbeat(details = {}) {
   watcherHeartbeat?.markReview?.(details);
 }
@@ -914,9 +917,9 @@ process.on('unhandledRejection', (err) => {
     message: 'unhandledRejection; preserving in-flight reviewer runtime sessions before exit',
   });
 });
-process.on('SIGTERM', async () => {
-  await overloadRescueRetry?.stop();
+process.on('SIGTERM', () => {
   shutdownAmaHammerBackgroundQueue();
+  void overloadRescueRetry?.stop();
   const drainState = readWatcherDrainState();
   const preserveInFlightReviewers = shouldPreserveReviewersOnSigterm(drainState);
   if (resolveSigtermFenceMode(process.env) === 'off') {
@@ -955,9 +958,9 @@ process.on('SIGTERM', async () => {
       });
     });
 });
-process.on('SIGINT', async () => {
-  await overloadRescueRetry?.stop();
+process.on('SIGINT', () => {
   shutdownAmaHammerBackgroundQueue();
+  void overloadRescueRetry?.stop();
   exitAfterReviewerCleanup({
     code: 130,
     reason: 'SIGINT',

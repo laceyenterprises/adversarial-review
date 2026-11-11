@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createOverloadRescueRetry } from '../src/overload-rescue-retry.mjs';
@@ -295,5 +295,41 @@ test('shutdown aborts the rescue child and prevents subsequent launches', async 
   await tick;
   await driver.tick();
   assert.equal(aborted, true);
+  assert.equal(calls, 1);
+});
+
+
+test('removed success receipt clears backoff for a new receipt of the same PR', async t => {
+  const { rootDir, path, write } = fixture(t);
+  let calls = 0;
+  const warnings = [];
+  const driver = createOverloadRescueRetry({ rootDir, readConfig: enabledConfig,
+    now: () => 2000_000, logger: { warn: message => warnings.push(message) },
+    execute: async () => { calls++; rmSync(path); } });
+  t.after(() => driver.stop());
+  await driver.tick();
+  write();
+  await driver.tick();
+  assert.equal(calls, 2);
+  assert.deepEqual(warnings, []);
+});
+
+test('receipt age bounds stale retry cost across driver restarts', async t => {
+  const { rootDir, path } = fixture(t);
+  let calls = 0;
+  const now = 100_000_000;
+  utimesSync(path, new Date(0), new Date(0));
+  for (let i = 0; i < 2; i++) {
+    const driver = createOverloadRescueRetry({ rootDir, readConfig: enabledConfig,
+      now: () => now, execute: async () => { calls++; } });
+    await driver.tick();
+    await driver.stop();
+  }
+  assert.equal(calls, 0);
+  utimesSync(path, new Date(now), new Date(now));
+  const driver = createOverloadRescueRetry({ rootDir, readConfig: enabledConfig,
+    now: () => now, execute: async () => { calls++; } });
+  await driver.tick();
+  await driver.stop();
   assert.equal(calls, 1);
 });

@@ -12,6 +12,7 @@ import { routeBudgetExhaustedReviewToClosure } from '../src/hamclose-review-admi
 import { resolveClosureNextAction } from '../src/ama/closure-next-action.mjs';
 import { classifyClosureOwnership } from '../src/merge-agent-rescue-classifier.mjs';
 import { budgetExhaustedClosureEvidence } from '../src/adversarial-gate-status.mjs';
+import { FOLLOW_UP_JOB_SCHEMA_VERSION } from '../src/follow-up-jobs.mjs';
 
 const repo = 'example/project', prNumber = 42;
 const headSha = 'a'.repeat(40), reviewedHead = 'b'.repeat(40);
@@ -59,6 +60,40 @@ test('read-only rescue projection reads shared final-push admission without chan
   assert.deepEqual(f.row(), before);
   assert.equal(budgetExhaustedClosureEvidence({ ...input,
     reviewRow: { ...before, rereview_reason: 'FSR-06B: synthetic request' } }), null);
+});
+
+test('REMEDIATEEXEC-01: rescue projects a spent unpublished attempt to closure', t => {
+  const f = fixture(t, 'posted');
+  const dir = join(f.root, 'data/follow-up-jobs/stopped');
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, 'example__project-pr-42-unpublished.json');
+  const job = { schemaVersion: FOLLOW_UP_JOB_SCHEMA_VERSION, jobId: 'example__project-pr-42-unpublished', repo, prNumber,
+    status: 'stopped', stoppedAt: at, revisionRef: headSha,
+    remediationPlan: { currentRound: 2, maxRounds: 2, stop: { code: 'committed-unpublished' } } };
+  writeFileSync(path, JSON.stringify(job));
+  const before = f.row();
+  const input = { rootDir: f.root, db: f.db, repo, prNumber, headSha, reviewRow: before,
+    logger: { log() {}, warn() {} } };
+  assert.deepEqual(budgetExhaustedClosureEvidence(input), {
+    headSha, owner: 'hammer', reason: 'budget-exhausted-closure',
+  });
+  assert.deepEqual(f.row(), before);
+  for (const code of ['operator-stop', 'subject-refused', 'builder-cannot-remediate-own-pr']) {
+    writeFileSync(path, JSON.stringify({ ...job,
+      remediationPlan: { ...job.remediationPlan, stop: { code } } }));
+    assert.equal(budgetExhaustedClosureEvidence(input), null, `${code} cannot release an operator hold`);
+  }
+  writeFileSync(path, JSON.stringify({ ...job, status: 'failed', failure: { code: 'branch-contamination' } }));
+  assert.equal(budgetExhaustedClosureEvidence(input), null, 'safety refusal cannot release a hold');
+  writeFileSync(path, JSON.stringify(job));
+  // Live ownership always precedes admission, even when terminal history is newer.
+  const active = join(f.root, 'data/follow-up-jobs/in-progress');
+  mkdirSync(active, { recursive: true });
+  writeFileSync(join(active, 'example__project-pr-42-active.json'), JSON.stringify({
+    ...job, jobId: 'active', status: 'in_progress', lastHeartbeatAt: new Date().toISOString(),
+    remediationWorker: { state: 'running' },
+  }));
+  assert.equal(budgetExhaustedClosureEvidence(input), null);
 });
 
 test('importing rescue budget policy never opens a writable review-state handle', t => {

@@ -20,6 +20,39 @@ without another PR-bound dispatch or operator decision.
 Ordinary terminal success retains the worker's successful audit reason; absent
 a success audit, merged evidence records `terminal-merge-reconciliation`.
 `confirmed-merged-closeout` is reserved for the parked-controller merge discovery.
+## Remediation ownership
+
+An ordinary remediation round that exits unpublished, stops without progress,
+fails execution or times out retains an executor. When shared next-action
+selection still names `remediate`, closure reconciliation requeues the ended
+follow-up under its queue lock, once per head and spent round, with the existing
+round ceiling and retry backoff. A missing initial job remains with the
+reviewer-pass reaper so its persisted review-mode decision and PR-wide budget
+are included at creation. Active queue ownership and closer leases prevent
+duplicates; operator stops and safety refusals are not automatically retried.
+
+Watcher discovery performs queue recovery only: it does not fetch or push
+retained workspaces under watcher credentials or await network publication.
+The next bounded worker retains the unpublished-work evidence. Recovery invoked
+with an explicit worker environment first checks workspace uid ownership and,
+for `committed-unpublished`, refreshes the retained workspace's
+remote base ref with recursive submodule fetching disabled, verifies the retained
+checkout, worker commit trailers and preservation of reviewed patches, then
+attempts the existing guarded publisher with the exact old remote-head lease. Successful
+publication must pass structural live-head proof before recovery clears the
+debt and uses the normal completion/re-review flow without another worker.
+Final-round completion still requires its validated reply. Otherwise the next
+bounded round retains the unpublished-work evidence.
+The publisher fetches only the superproject base, without recursive submodule
+fetches. A spent terminal execution attempt counts even when it never published: the
+shared watcher decision, hammer wake and read-only rescue budget projection
+then name the hammer for findings, including blocking findings. The hammer
+must still remediate and prove every merge predicate. Operator-owned holds,
+safety refusals and closure-handoff jobs keep their existing owners at the
+round ceiling. Shadow evidence preserves the terminal failure code and
+`needsOperator` flag so execution failures and deliberate holds remain distinct.
+Only terminal jobs selected for the current PR head supply budget exhaustion;
+an older head's terminal job cannot spend the current head's rounds.
 
 ## Final findings remediation through the builder (LANEAUTO-01)
 

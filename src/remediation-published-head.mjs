@@ -10,7 +10,8 @@ import { requestReviewRereview } from './review-state.mjs';
 import { requestWatcherWake } from './watcher-wake.mjs';
 import { requestRereviewWake, REREVIEW_WAKE_REASONS } from './rereview-wake.mjs';
 import { resolveRemediationReplyTarget, resolveReplyStorageKey } from './remediation-reply-paths.mjs';
-import { hasWorkerJobTrailer } from './comment-only-final-round.mjs';
+import { hasWorkerJobTrailer, FINAL_ROUND_REPLAY_PROOF } from './comment-only-final-round.mjs';
+import { recoveryDigest } from './comment-only-recovery-record.mjs';
 import { addToDeliveryRetryIndex, buildReconcileCommentDelivery, releaseDeliveryClaim, tryAcquireDeliveryClaim } from './adapters/comms/github-pr-comments/comment-delivery.mjs';
 
 function isCurrentAttemptReply(replyPath, round, worker) {
@@ -78,11 +79,17 @@ export function completeWorkerPublishedHead({
   requestWatcherWakeImpl = requestWatcherWake,
   execFileSyncImpl = execFileSync,
   ciGate = null, lifecycle = null, snapshot = null,
+  publicationRecovery = null,
 }) {
   try {
     return withFollowUpJobLock(join(rootDir, 'data', 'follow-up-jobs'), () => {
       const job = readFollowUpJob(jobPath);
-      if (!['pending', 'in_progress'].includes(job.status)) return null;
+      const recovered = job.status === 'stopped' && job.remediationPlan?.stop?.code === 'committed-unpublished'
+        && publicationRecovery?.sourceDigest === recoveryDigest(job)
+        && publicationRecovery.headSha === headSha
+        && publicationRecovery.proof?.method === FINAL_ROUND_REPLAY_PROOF
+        && (job.finalRound !== 'comment-only' || publicationRecovery.completedFinalRound === true);
+      if (!['pending', 'in_progress'].includes(job.status) && !recovered) return null;
       const evidence = findWorkerPublishedHead({ rootDir, job, headSha, execFileSyncImpl });
       if (!evidence) return null;
       ensureFollowUpJobDirs(rootDir);
@@ -115,8 +122,14 @@ export function completeWorkerPublishedHead({
           resultingHeadSha: headSha,
           remediationWorker: { ...worker, state: 'completed', reconciledAt: completedAt },
           remediationReply, reReview, commentDelivery,
-          completion: { ...job.completion, source: 'worker-published-head-recovery', publishEvidence: evidence.source,
+          completion: { ...job.completion,
+            ...(recovered ? { ...publicationRecovery.completionFields, withheldPushHeadSha: null,
+              workerPushProof: publicationRecovery.proof } : {}),
+            source: 'worker-published-head-recovery', publishEvidence: evidence.source,
             workerPushedHeadSha: headSha, finalRemediationPush: shared.snapshot.observations.remediation.value.finalPush != null },
+          ...(recovered ? { jobUpdates: { unpublishedWork: null, stoppedAt: null,
+            publicationRecovery: { recoveredAt: completedAt, headSha, proof: publicationRecovery.proof,
+              previousStop: job.remediationPlan.stop } } } : {}),
         });
         if (completed.alreadyTerminal && completed.job.reReview?.nextAction) return completed;
         if (!reReview.requested) {

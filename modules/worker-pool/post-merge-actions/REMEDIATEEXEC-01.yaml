@@ -1,0 +1,16 @@
+operator_steps:
+  - description: >-
+      SRE: after the normal review-service float, restart watcher and follow-up
+      under their registered service owner. Verify both PID start times against
+      deployment. Confirm Grok remediation routing remains opt-in and disabled
+      by default, and Grok closer selection remains refused within this scope.
+      Then kickstart any service skipped by the bounce. Observe 24
+      hours of natural traffic: no expired R14-findings/remediate action may
+      report no discovery executor without a follow-up job or closer within one
+      pass, and no expired remediate action may remain older than 15 minutes.
+      Record current head, next action, follow-up job or closer receipt, PID
+      start times and observation interval. This command displays the handoff;
+      it performs no live action.
+    run_as: SRE with registered review-service ownership
+    command: >-
+      /usr/bin/printf '%s\n' 'REMEDIATEEXEC-01: verify float, watcher/follow-up PID start times and kickstart if skipped; observe 24h for one-pass remediation/closer ownership and no expired remediate action older than 15 minutes.'

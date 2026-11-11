@@ -64,7 +64,9 @@ export async function recoverOverdueOwnership({ rootDir, repo, prNumber, subject
     && !recoveryRunsSelected(selected, subject.headSha)) {
     logger?.log?.(`[watcher] CLOSERPARKOWNER-01: ${repo}#${prNumber}@${subject.headSha} expired ` +
       `${selected.row || 'unknown-row'} (${selected.action}/${selected.actor}) has no discovery executor; ` +
-      'continuing the walk so the closer owns it');
+      (selected.action === 'remediate'
+        ? 'continuing the walk so the follow-up owner recovers the bounded round through closure reconciliation'
+        : 'continuing the walk so the closer owns it'));
     return null;
   }
   return recovered;

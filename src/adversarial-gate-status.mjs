@@ -52,6 +52,7 @@ import {
 import { isSettledReviewJob } from './follow-up-jobs.mjs';
 import { findActiveRemediationJob } from './ama/active-remediation-job.mjs';
 import { remediationJobOwnership } from './remediation-job-ownership.mjs';
+import { remediationBudgetHandoffAllowed } from './remediation-round-recovery.mjs';
 import { findCommentOnlyFinalRoundPushJob } from './comment-only-final-round.mjs';
 import {
   blockingFindingIdentitiesFromBody,
@@ -67,6 +68,14 @@ const execFileAsync = promisify(execFile);
 export function budgetExhaustedClosureEvidence({ rootDir, db, repo, prNumber, headSha, reviewRow, logger = console }) {
   if (!reviewRow || isExactHeadReviewRecoveryRequested(reviewRow)
     || isFleetSelfRepairTrailerOnlyRereviewReason(reviewRow.rereview_reason)) return null;
+  // Rescue reads this same surface. An unpublished terminal attempt still
+  // spends its ordinary round; a broader cycle ceiling cannot re-arm it.
+  const job = findLatestFollowUpJobForPR(rootDir, { repo, prNumber, revisionRef: headSha });
+  if (reviewRow.reviewer_head_sha === headSha && ['stopped', 'failed'].includes(job?.status)
+    && remediationBudgetHandoffAllowed(job)
+    && !findActiveRemediationJob(rootDir, { repo, prNumber }, { logger })) {
+    return { headSha, owner: 'hammer', reason: 'budget-exhausted-closure' };
+  }
   const suppression = resolveFirstPassReviewBudgetSuppression({ rootDir, db,
     domainId: 'code-pr', repoPath: repo, prNumber, currentHeadSha: headSha, reviewRow, logger });
   return isBudgetExhaustedReviewSuppression(suppression)

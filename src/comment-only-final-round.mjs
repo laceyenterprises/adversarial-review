@@ -125,7 +125,7 @@ export async function proveFinalRoundWorkerPush({
     if (localSha === reviewedHead) return { workerPushedHeadSha: null, liveHeadSha, reason: 'no-push' };
     const workerOwns = async (sha) => hasWorkerJobTrailer(await git(['show', '-s', '--format=%B', sha]), jobId);
     if (!await workerOwns(localSha)) return withheld('head-not-worker-commit');
-    if (localSha !== liveHeadSha) await git(['fetch', '--no-tags', 'origin', baseBranch]);
+    if (localSha !== liveHeadSha) await git(['fetch', '--no-recurse-submodules', '--no-tags', 'origin', baseBranch]);
     const baseRef = `origin/${baseBranch}`;
     const base = (await git(['rev-parse', '--verify', `${baseRef}^{commit}`])).trim();
     // Inspect immutable live objects without changing the worker's checkout.
@@ -136,7 +136,7 @@ export async function proveFinalRoundWorkerPush({
       try {
         await git(['cat-file', '-e', `${head}^{commit}`]);
       } catch {
-        await git(['fetch', '--no-tags', 'origin', head]);
+        await git(['fetch', '--no-recurse-submodules', '--no-tags', 'origin', head]);
       }
       const localWork = cherryEntries(await git(['cherry', reviewedHead, localSha, base]))
         .filter(({ sign }) => sign !== '-');

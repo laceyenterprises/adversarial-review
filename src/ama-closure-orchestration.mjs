@@ -11,7 +11,7 @@ import { reviewCeilingOwner } from './review-ceiling-owner.mjs';
 import { infrastructureOnlyFailures } from './ci-infrastructure.mjs';
 import { recoverInfrastructureChecks } from './ci-recovery.mjs';
 import { recoverInfrastructureCiStops } from './remediation-ci-infrastructure.mjs';
-import { recreateMissingRemediationJob } from './remediation-job-missing-recovery.mjs';
+import { remediationBudgetHandoffAllowed } from './remediation-round-recovery.mjs';
 import { remediationJobMissingDetail } from './remediation-hold-cause.mjs';
 import { evaluateHammerStopHold } from './ama/hammer-stop-hold.mjs';
 import { deriveNextActionSnapshot, hasLiveRemediationJob, isClosureRecoveryDecision, nextAction } from './pr-next-action.mjs';
@@ -963,11 +963,16 @@ function closureWaitProgress(result, startedAt) {
 // STRICTSETTLED-01: a `remediate` decision with no live job requeues the PR's
 // released remediation job, once per head, instead of waiting on a lane that no
 // actor owns. Recovery failure never changes the tick's own outcome.
-function recoverMissingRemediationJob({ recoverImpl, rootDir, repoPath, prNumber, decision, strictMode, nowMs, logger }) {
+async function recoverEndedRemediationRound(options) {
+  const recovery = await import('./remediation-ended-round-recovery.mjs');
+  return recovery.recoverEndedRemediationRound(options);
+}
+
+async function recoverMissingRemediationJob({ recoverImpl, rootDir, repoPath, prNumber, decision, strictMode, nowMs, logger }) {
   if (typeof recoverImpl !== 'function') return null;
   let recovery;
   try {
-    recovery = recoverImpl({ rootDir, repo: repoPath, prNumber, headSha: decision?.head, strictMode,
+    recovery = await recoverImpl({ rootDir, repo: repoPath, prNumber, headSha: decision?.head, strictMode,
       now: new Date(Number.isFinite(nowMs) ? nowMs : Date.now()).toISOString() });
   } catch (error) {
     logger?.warn?.(`[watcher] remediation-job-missing recovery failed for ${repoPath}#${prNumber}: ${error.message}`);
@@ -1042,7 +1047,7 @@ async function dispatchAmaClosureFor({
   evaluateHammerStopHoldImpl = evaluateHammerStopHold,
   deliverAlertImpl = deliverAlert,
   recoverInfrastructureChecksImpl = recoverInfrastructureChecks,
-  recreateMissingRemediationJobImpl = recreateMissingRemediationJob,
+  recreateMissingRemediationJobImpl = recoverEndedRemediationRound,
   fetchPullRequestMergeabilityImpl = fetchPullRequestMergeability,
   mergeabilitySampleDelayMs = MERGEABILITY_SAMPLE_DELAY_MS,
   now = () => Date.now(),
@@ -1868,6 +1873,20 @@ async function dispatchAmaClosureFor({
       ? { headSha: currentPrHeadSha, suppressed: true } : null,
     reviewCeilingReached: reviewCycleCapReached
       || (dispatchJob?.reviewFailureExhausted === true && dispatchJob?.reviewFailureClass === 'reviewer-timeout') };
+  // The queue consumer cannot claim beyond this terminal job's own ceiling.
+  // Carry that same exhaustion into hammer admission, not just its wake.
+  if ((closureOwnerInput.followUpJob?.headSha || closureOwnerInput.followUpJob?.revisionRef) === currentPrHeadSha
+    && remediationBudgetHandoffAllowed(closureOwnerInput.followUpJob)) {
+    reviewCycleExhausted = true;
+    reviewCycleKnown = true;
+    reviewState.reviewCycleExhausted = true;
+    reviewState.terminalRemediationBudget = {
+      headSha: currentPrHeadSha, status: closureOwnerInput.followUpJob.status,
+      currentRound: closureOwnerInput.followUpJob.remediationPlan.currentRound,
+      maxRounds: closureOwnerInput.followUpJob.remediationPlan.maxRounds,
+    };
+    closureOwnerInput.roundsLeft = false;
+  }
   const resolveOwner = () => resolveClosureNextAction({ input: closureOwnerInput, passSnapshot,
     subjectKey: `${repoPath}#${prNumber}`, autonomousMergeExecutionEnabled, cfg,
     rootDir, observedAt: new Date(now()).toISOString(),
@@ -2451,10 +2470,10 @@ async function dispatchAmaClosureFor({
         reason: `action=${decision.action} actor=${decision.actor} reason=${decision.reason} head=${decision.head}` });
     } catch (error) { logger?.warn?.(`[watcher] next-action observation failed: ${error.message}`); }
     const remediationJobRecovery = decision.action === 'remediate' && !hasLiveRemediationJob(shared.snapshot)
-      ? recoverMissingRemediationJob({ recoverImpl: recreateMissingRemediationJobImpl, rootDir, repoPath,
+      ? await recoverMissingRemediationJob({ recoverImpl: recreateMissingRemediationJobImpl, rootDir, repoPath,
         prNumber, decision, strictMode: cfg?.strictMode !== false, nowMs: now(), logger }) : null;
     return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
-      reason: decision.action === 'review' ? 'handed-to-review'
+      reason: remediationJobRecovery?.completed ? 'remediation-publication-completed' : decision.action === 'review' ? 'handed-to-review'
         : hasLiveRemediationJob(shared.snapshot) || remediationJobRecovery?.recreated
           ? 'active-remediation-job' : 'remediation-job-missing',
       ...(remediationJobRecovery ? { remediationJobRecovery } : {}),
@@ -2711,10 +2730,10 @@ async function dispatchAmaClosureFor({
         reason: `action=${decision.action} actor=${decision.actor} reason=${decision.reason} head=${decision.head}` });
     } catch (error) { logger?.warn?.(`[watcher] next-action observation failed: ${error.message}`); }
     const remediationJobRecovery = decision.action === 'remediate' && !hasLiveRemediationJob(shared.snapshot)
-      ? recoverMissingRemediationJob({ recoverImpl: recreateMissingRemediationJobImpl, rootDir, repoPath,
+      ? await recoverMissingRemediationJob({ recoverImpl: recreateMissingRemediationJobImpl, rootDir, repoPath,
         prNumber, decision, strictMode: cfg?.strictMode !== false, nowMs: now(), logger }) : null;
     return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
-      reason: decision.action === 'review' ? 'handed-to-review' : decision.action === 'remediate'
+      reason: remediationJobRecovery?.completed ? 'remediation-publication-completed' : decision.action === 'review' ? 'handed-to-review' : decision.action === 'remediate'
         ? hasLiveRemediationJob(shared.snapshot) || remediationJobRecovery?.recreated
           ? 'active-remediation-job' : 'remediation-job-missing'
         : 'pending-required-checks', nextAction: decision,

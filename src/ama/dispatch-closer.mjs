@@ -1,5 +1,6 @@
 import { isZeroOutputRefusal, escalateZeroOutputRefusal } from './zero-output-refusal.mjs';
 import { finalFixAllQueueOwner } from './final-fix-all.mjs';
+import { isRemediationRoundBudgetSpent } from '../remediation-round-recovery.mjs';
 import { classifyHammerExit, hammerNoMergeDetails } from './hammer-outcome.mjs';
 import { appendCloserOutcome } from './closer-outcomes.mjs';
 import { ownershipReadBudgets as closerScanBudgets, boundedOwnershipRead as boundedCloserScanRead } from '../ownership-read.mjs';
@@ -390,6 +391,14 @@ export function terminalHammerReviewCycleExhausted(reviewState) {
   // parked in AWAIT_OPERATOR_ACTION and spun the AMA retain-loop cap forever.
   // See agent-os docs/postmortems/INCIDENT-SEV1-terminal-hammer-revision-ref-deadlock-2026-08-22.md
   if (reviewState?.remediationPending === true) return false;
+  // A terminal queue ceiling can be spent by failed dispatches as well as
+  // worker completions. It grants repair ownership for this exact head, never
+  // a clean verdict or permission to merge findings.
+  const terminalBudget = reviewState?.terminalRemediationBudget;
+  if (/^[a-f0-9]{40}$/i.test(terminalBudget?.headSha || '')
+    && terminalBudget.headSha === reviewState?.headSha
+    && ['completed', 'failed', 'stopped'].includes(terminalBudget?.status)
+    && isRemediationRoundBudgetSpent(terminalBudget)) return true;
   const hasRemediationRoundEvidence = Object.prototype.hasOwnProperty.call(
     reviewState || {},
     'completedRemediationRounds',

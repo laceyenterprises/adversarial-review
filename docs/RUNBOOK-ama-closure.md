@@ -2465,6 +2465,8 @@ The legacy closer selector and domain `mergeAuthority.workerClass` and
 `grok-closer-pending-merge-authority-v2`, even with its flags enabled.
 Domain primary/fallback selections are validated during domain loading, before
 poll phases; the policy resolver also checks supplied fallback configurations.
+The pending-v2 refusal checks both scalar and array fallback declarations,
+including whitespace-padded selectors.
 The Agent OS Python/shell loader and parity-fixture companion must merge before
 the submodule pointer bump. Before restarting daemons, the operator confirms
 that effective host/local config has no legacy `hammer-grok` closer pin; see

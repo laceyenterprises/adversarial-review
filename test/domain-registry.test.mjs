@@ -80,6 +80,8 @@ test('domain load refuses pending-v2 Grok closer selectors before poll phases', 
   for (const mergeAuthority of [
     { workerClass: 'hammer-grok' },
     { workerClassFallback: ['hammer', ' hammer-grok '] },
+    { workerClassFallback: 'hammer-grok' },
+    { workerClassFallback: ' hammer-grok ' },
   ]) {
     const config = baseConfig('domain-a', { enabled: false, mergeAuthority });
     const root = makeRoot({ 'domain-a': config });

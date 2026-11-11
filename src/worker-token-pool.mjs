@@ -8,7 +8,7 @@ import { reviewerPoolOwner } from './reviewer-token-pool.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { isCrossModelReviewWaived } from './adapters/subject/github-pr/routing.mjs';
 
-const REMEDIATORS = Object.freeze({ codex: 'remediator-codex', 'claude-code': 'remediator-claude',
+const REMEDIATORS = Object.freeze({ codex: 'remediator-codex', 'codex-corp': 'remediator-codex', 'claude-code': 'remediator-claude',
   claude: 'remediator-claude', 'remediator-codex-corp': 'remediator-codex',
   'remediator-claude-corp': 'remediator-claude' });
 const HAMMERS = Object.freeze({ 'hammer-corp': 'hammer', 'hammer-claude-corp': 'hammer-claude' });

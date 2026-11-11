@@ -9,8 +9,8 @@ function validateReviewerRuntimeConfig(config) {
 
 function validateMergeAuthorityConfig(config) {
   if (String(config?.workerClass ?? '').trim() === 'hammer-grok'
-    || (Array.isArray(config?.workerClassFallback)
-      && config.workerClassFallback.some(value => String(value ?? '').trim() === 'hammer-grok'))) {
+    || (Array.isArray(config?.workerClassFallback) ? config.workerClassFallback : [config?.workerClassFallback])
+      .some(value => String(value ?? '').trim() === 'hammer-grok')) {
     throw new Error('[domain-config] grok-closer-pending-merge-authority-v2');
   }
 }

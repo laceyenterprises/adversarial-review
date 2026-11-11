@@ -181,3 +181,33 @@ both passed when run individually through the existing isolated
 Lint passed with zero errors, contract typechecking passed, and the
 netguard-wrapped offline walkthrough retained its byte-stable transcript.
 The full suite remains with PR-head CI.
+
+## PR 1815 final advisory remediation
+
+Added the accepted `codex-corp` remediator alias to the shared worker-family
+mapping, so returned unpooled fallbacks report `openai`. Domain closer validation
+now applies the pending-v2 `hammer-grok` refusal to scalar fallbacks as well as
+arrays, including padded strings. The closure runbook records that boundary.
+Regression cases reproduced both failures before the fixes.
+
+The demoted Grok-pin finding is stale at reviewed head
+`cd24165da4166ea66aad07eb129e9e1f5a861d7e`:
+`src/adapters/subject/github-pr/routing.mjs:158` already maps `remediator-grok`
+to `grok`. Existing routing and reconciliation regressions pass unchanged,
+including Codex outcome attribution and GitHub-auth recovery under a Grok pin.
+No routing change is needed for that finding.
+
+Rebased onto freshly fetched main while retaining the reviewed head's combined
+state declarations, graph snapshot and earlier remediation. The resulting tree
+matched the reviewed head before these fixes. No store shape, lifecycle state,
+smoke promise or Agent OS deployment obligation changes in this remediation.
+
+Validation: 180 tests passed across `worker-token-pool`, `domain-registry`,
+`grok-remediator`, `domain-policy`, `config-loader-grok`, `arc19-boundary-gate`
+and `smv` via the bounded offline runner. Lint passed with zero errors and
+149 existing warnings; contract typechecking, the byte-equivalence demo,
+the 93-entry data-model catalog validator and `git diff --check` passed.
+The complete `watcher-claim-loop` file passed through the isolated runner
+(168 tests, 600-second bound). This supersedes an initial 120-second timeout
+and an invalid filtered invocation that affected child fixtures.
+The full suite remains with PR-head CI.

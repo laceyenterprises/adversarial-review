@@ -388,7 +388,7 @@ test('pooled fallback audit providers stay defined for unpooled identities', asy
 
 test('pooled fallback audit providers normalize returned worker aliases', async () => {
   for (const [workerClass, provider] of [
-    ['codex', 'openai'], ['remediator-codex-corp', 'openai'],
+    ['codex', 'openai'], ['codex-corp', 'openai'], ['remediator-codex-corp', 'openai'],
     ['claude', 'anthropic'], ['claude-code', 'anthropic'],
     ['remediator-claude-corp', 'anthropic'],
     ['hammer-corp', 'openai'], ['hammer-claude-corp', 'anthropic'], ['grok', 'xai'],

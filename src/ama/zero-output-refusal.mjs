@@ -21,10 +21,13 @@ export async function escalateZeroOutputRefusal({
   if (stored?.launchRequestId || stored?.dispatchId || stored?.state !== 'operator-escalated') {
     return { dispatched: false, skipMergeAgent: true, reason: 'closure-owner-changed' };
   }
-  if (!next.zeroOutputEscalatedAt && !paged.has(key)) {
+  if (!next.zeroOutputEscalatedAt && !paged.has(key) && typeof deliverAlertImpl === 'function') {
     try {
+      const diagnostic = typeof record.lastError === 'string' ? record.lastError
+        : record.lastError?.stderr || record.lastError?.message || record.lastError?.stdout
+          || JSON.stringify(record.lastError);
       await deliverAlertImpl(
-        `AMA closure for ${key} requires operator action: ${record.lastError}. Automated dispatch stopped.`,
+        `AMA closure for ${key} requires operator action: ${diagnostic}. Automated dispatch stopped.`,
         { event: 'ama_closer.zero_output_operator_escalated', payload: { repo, prNumber, headSha } },
       );
       paged.add(key);

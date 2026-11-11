@@ -543,7 +543,8 @@ if (scenario === 'clean') {
   assert.equal(reclaimLease({ ...agedLease, lrqId: null,
     updatedAt: new Date(leaseClock - fallbackMs).toISOString() }, { now: leaseClock }), true);
 
-  const db = openReviewStateDb(rootDir); ensureReviewStateSchema(db);
+  // Bootstrap fixture schema atomically; retain real production mutations below.
+  const db = openReviewStateDb(rootDir); db.transaction(() => ensureReviewStateSchema(db))();
   // HAMVALIDORPHAN-01: queued automatic review returns to the same closure
   // wake policy, without treating the old verdict as current-head authority.
   {
@@ -1090,7 +1091,7 @@ if (scenario === 'clean') {
     remediationCloseoutOwned: true, terminalRecoveryHandedToHammer: true,
     unreadableRecoveryFenced: true, merged: true, remoteHeadMatches: true };
 } else if (scenario === 'ci-blocked') {
-  const ceilingDb = openReviewStateDb(rootDir); ensureReviewStateSchema(ceilingDb);
+  const ceilingDb = openReviewStateDb(rootDir); ceilingDb.transaction(() => ensureReviewStateSchema(ceilingDb))();
   const ceilingPr = 8, ceilingLogs = [];
   ceilingDb.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,review_status,reviewer_head_sha)
     VALUES (?,?,'2026-01-01','gemini','posted',?)`).run(repo, ceilingPr, base);
@@ -1210,7 +1211,7 @@ if (scenario === 'clean') {
       return { status: 'ahead' };
     } });
   assert.equal(finalProof.proof, 'completed-remediation-round-chain');
-  const db = openReviewStateDb(rootDir); ensureReviewStateSchema(db);
+  const db = openReviewStateDb(rootDir); db.transaction(() => ensureReviewStateSchema(db))();
   db.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,review_status,reviewer_session_uuid)
     VALUES (?,?,'2026-01-01','gemini','reviewing','synthetic-session')`).run(repo, prNumber);
   assert.equal(prepareMarkRereviewCiBlocked(db).run('2026-01-01','red CI','2026-01-01',headSha,headSha,'synthetic-session',repo,prNumber).changes, 1);
@@ -1365,7 +1366,7 @@ if (scenario === 'clean') {
     await import('../../src/explicit-review-intent.mjs');
   const intentRoot = join(rootDir, 'explicit-review-intents');
   let intentDb = openReviewStateDb(intentRoot);
-  ensureReviewStateSchema(intentDb);
+  intentDb.transaction(() => ensureReviewStateSchema(intentDb))();
   intentDb.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,
     review_status,revision_ref,reviewer_head_sha) VALUES (?,71,?,'claude','open','posted',?,?)`)
     .run(repo, new Date().toISOString(), headSha, headSha);

@@ -1,3 +1,4 @@
+import { buildRegisterSource } from './helpers/fixture-loader-register.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -355,12 +356,6 @@ export async function load(url, context, nextLoad) {
 `;
 }
 
-function buildRegisterSource(loaderPath) {
-  return `
-import { register } from 'node:module';
-register(${JSON.stringify(pathToFileURL(loaderPath).href)}, import.meta.url);
-`;
-}
 
 function buildRunnerSource() {
   const watcherUrl = fileUrl('src', 'watcher.mjs');

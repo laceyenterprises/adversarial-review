@@ -1,3 +1,4 @@
+import { buildRegisterSource } from './helpers/fixture-loader-register.mjs';
 import './helpers/rate-limit-state-isolation.mjs';
 import { codexAccountFixture } from './helpers/codex-account-fixture.mjs';
 import { claudeAccountFixture, fleetStatusWithClaudeAccountEvidence } from './helpers/claude-account-fixture.mjs';
@@ -396,14 +397,6 @@ export async function load(url, context, nextLoad) {
 
   return nextLoad(url, context);
 }
-`;
-}
-
-function buildRegisterSource(loaderPath) {
-  return `
-import { register } from 'node:module';
-
-register(${JSON.stringify(pathToFileURL(loaderPath).href)}, import.meta.url);
 `;
 }
 

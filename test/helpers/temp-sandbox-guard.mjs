@@ -9,7 +9,8 @@ if (process.env.NODE_TEST_CONTEXT && process.env.ADVERSARIAL_REVIEW_TEST_SANDBOX
   if (!process.env.ADVERSARIAL_REVIEW_TEST_TMP_PROBE_PREFIX) {
     throw new Error('run tests through test/run-tests.mjs so the temp probe prefix is set');
   }
-  const expected = path.join(process.env.ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT, 'tmp');
+  const expected = path.join(process.env.ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT,
+    `t${Number(path.basename(process.env.ADVERSARIAL_REVIEW_TEST_CWD).slice(5))}`);
   const fixture = mkdtempSync(path.join(tmpdir(), process.env.ADVERSARIAL_REVIEW_TEST_TMP_PROBE_PREFIX));
   for (const key of ['TMPDIR', 'TMP', 'TEMP']) assert.equal(process.env[key], expected);
   assert.equal(path.dirname(fixture), expected);

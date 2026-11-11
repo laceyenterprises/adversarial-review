@@ -50,6 +50,17 @@ if (isTestWorker) {
   });
   // The runner also removes its whole sandbox on failure or termination.
   process.env.ADVERSARIAL_REVIEW_TEST_CWD = workerRoot;
+  const temporary = path.join(sandboxRoot, `t${Number(path.basename(workerRoot).slice(5))}`);
+  for (const key of ['TMPDIR', 'TMP', 'TEMP']) process.env[key] = temporary;
+  // Repeated CLI/loader fixtures reuse large module graphs in child processes.
+  // Keep the cache private to this file; one-off scripts do not enable it.
+  if (['hammer-api-publish-cli.test.mjs', 'hammer-attestation-retry.test.mjs',
+    'watcher-claim-loop.test.mjs', 'ama-hammer-retry-cap.test.mjs',
+    'ama-closer-dispatch-priority.test.mjs', 'hammertrim-contract.test.mjs',
+    'generated-index-replay.test.mjs', 'follow-up-remediation.test.mjs',
+    'ama-hammer-background-dispatch.test.mjs'].includes(path.basename(testFile))) {
+    process.env.NODE_COMPILE_CACHE = path.join(workerRoot, 'compile-cache');
+  }
   process.env.ADVERSARIAL_REVIEW_STATE_DIR = path.join(workerRoot, 'data');
   process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = path.join(workerRoot, 'data', 'api-cache', 'rate-limit-state.json');
   process.chdir(workerRoot);

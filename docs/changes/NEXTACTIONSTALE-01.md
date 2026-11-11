@@ -32,3 +32,11 @@ Operator plan parsing, report links and catalog JSON validated offline.
 The full test suite was not run, per ticket constraints.
 The committed operator-only post-merge plan declares deployment and natural
 traffic verification; this change makes no live service changes.
+
+## HAM validation repair
+
+The reviewed state declaration now includes the three budget-suppressed queued
+review transitions back to `posted` and their CAS producer. Refreshed the
+poll/closure source projections, independent graph snapshot and rendered diagram
+after checking that delivered-review identity and live merge gates are preserved.
+This repairs the Node 22/26 SMV and orchestration-catalog CI failures.

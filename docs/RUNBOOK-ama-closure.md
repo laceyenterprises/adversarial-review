@@ -5051,7 +5051,10 @@ wins over a later generic controller failure. This adds no merge authority.
 Local validation uses `hammer-validate.mjs --canonical -- <changed files>`.
 Agent OS runs `python3 scripts/ci-mirror/run-ci-mirror.py -- <changed files>`;
 this repository runs selected touched/direct-importer tests through
-`node test/run-tests.mjs <test files>`. Never synthesize pytest/PYTHONPATH.
+`node test/run-tests.mjs <test files>`. Importer paths are resolved relative to
+each test directory, including shared test helpers. Legacy command-style callers
+derive changed paths from Git; unavailable Git comparison evidence uses the same
+canonical-setup fallback below. Never synthesize pytest/PYTHONPATH.
 A missing repository-owned Python package is an environment fault. Unavailable
 canonical setup records `local-battery-skipped-github-required-gate-authoritative`
 and no local pass, then proceeds to fresh verify-head and the exact-head required

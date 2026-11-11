@@ -56,15 +56,16 @@ if (!valid || args.shift() !== '--' || !args.length) {
     if (canonical) {
       // Older callers passed commands. Always derive changed paths from Git in
       // that compatibility case instead of executing a hand-built validator.
-      const paths = args;
-      if (!process.argv.includes('--canonical')) {
-        paths.splice(0, paths.length, ...execFileSync('git', ['diff', '--name-only',
-          `${process.env.HAM_REVIEWED_SHA || 'origin/main'}...HEAD`], { encoding: 'utf8' }).trim().split('\n').filter(Boolean));
+      try {
+        const paths = process.argv.includes('--canonical') ? args
+          : execFileSync('git', ['diff', '--name-only',
+            `${process.env.HAM_REVIEWED_SHA || 'origin/main'}...HEAD`],
+          { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim().split('\n').filter(Boolean);
+        runner = canonicalHammerValidation(process.cwd(), paths);
       }
-      try { runner = canonicalHammerValidation(process.cwd(), paths); }
       catch (error) {
         if (error instanceof TypeError) throw error;
-        // Filesystem/setup failures say nothing about the PR's tests.
+        // Git/filesystem/setup failures say nothing about the PR's tests.
         runner = null;
       }
     } else runner = { command: pytest ? 'python3' : args.shift(),

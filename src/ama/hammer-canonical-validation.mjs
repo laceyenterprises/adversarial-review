@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { join, basename, posix } from 'node:path';
 
 // Resolve repository-owned runners, never synthesize pytest or PYTHONPATH.
 export function canonicalHammerValidation(root, changedFiles, { node = process.execPath } = {}) {
@@ -16,9 +16,16 @@ export function canonicalHammerValidation(root, changedFiles, { node = process.e
   if (pkg?.name !== 'adversarial-review') return null;
   const tests = ['test', 'test/adapters'].flatMap(dir => existsSync(join(root, dir))
     ? readdirSync(join(root, dir)).filter(file => file.endsWith('.test.mjs')).map(file => `${dir}/${file}`) : []);
-  const selected = tests.filter(file => changedFiles.includes(file)
-    || changedFiles.some(changed => basename(changed).replace(/\.mjs$/, '.test.mjs') === basename(file)
-      || readFileSync(join(root, file), 'utf8').includes(`../${changed}`)));
+  const selected = tests.filter(file => {
+    if (changedFiles.includes(file)) return true;
+    const source = readFileSync(join(root, file), 'utf8');
+    return changedFiles.some(changed => {
+      const relative = posix.relative(posix.dirname(file), changed);
+      const specifier = relative.startsWith('../') ? relative : `./${relative}`;
+      return basename(changed).replace(/\.mjs$/, '.test.mjs') === basename(file)
+        || source.includes(specifier);
+    });
+  });
   return selected.length ? { command: node, args: ['test/run-tests.mjs', ...selected] } : null;
 }
 

@@ -177,7 +177,7 @@ Bound every shell command. On macOS:
 Validation: load-scaled 360s ceiling (`--nominal-timeout` tunes it); the 120-second no-output deadline never scales.
 
 ```bash
-"${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-validate.mjs --canonical -- tests/test_endpoints.py || exit $?
+"${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-validate.mjs --canonical -- <changed repository-relative files> || exit $?
 ```
 
 For canonical runner selection or unavailable local setup, read Appendix G3.

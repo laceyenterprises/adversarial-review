@@ -176,6 +176,54 @@ test('review-service canonical selection runs touched and importer tests through
   assert.throws(() => canonicalHammerValidation(root, ['../foreign']), /repository-relative/);
 });
 
+test('legacy canonical validation defers Git discovery failures to the required GitHub gate without claiming a pass', t => {
+  const root = scratch(t);
+  const env = { ...isolatedEnv(root), HAM_REPO: 'synthetic/adversarial-review',
+    HQ_LAUNCH_REQUEST_ID: 'lrq_synthetic-git-failure', HQ_WORKER_RUN_ID: 'wrun_synthetic-git-failure' };
+  for (const args of [
+    ['init', '--quiet'],
+    ['-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.test',
+      '-c', 'core.hooksPath=/dev/null', 'commit', '--quiet', '--allow-empty', '--no-gpg-sign', '-m', 'fixture'],
+  ]) {
+    const result = spawnSync('git', args, { cwd: root, env, encoding: 'utf8', timeout: 10000 });
+    assert.equal(result.status, 0, result.stderr);
+  }
+  for (const reviewedSha of [undefined, 'missing-reviewed-sha']) {
+    const result = spawnSync(process.execPath, [new URL('../bin/hammer-validate.mjs', import.meta.url).pathname,
+      '--', process.execPath, '-e', 'throw new Error("legacy command must not execute")'],
+    { cwd: root, env: { ...env, ...(reviewedSha ? { HAM_REVIEWED_SHA: reviewedSha } : {}) },
+      encoding: 'utf8', timeout: 20000 });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stderr, /local-battery-skipped-github-required-gate-authoritative/);
+    assert.doesNotMatch(result.stderr, /Command failed|Error:|scratch retained/);
+  }
+  const progress = join(root, 'dispatch', env.HQ_LAUNCH_REQUEST_ID, 'hammer-progress', env.HQ_WORKER_RUN_ID);
+  assert.equal(JSON.parse(readFileSync(join(progress, 'last-phase.json'))).reason,
+    'local-battery-skipped-github-required-gate-authoritative');
+  for (const receipt of ['validation-passed', 'validation-failed', 'terminal-stop']) {
+    assert.equal(existsSync(join(progress, `${receipt}.json`)), false, receipt);
+  }
+});
+
+test('canonical selection resolves helper and source importers relative to each test directory', t => {
+  const root = scratch(t);
+  mkdirSync(join(root, 'test/adapters'), { recursive: true });
+  writeFileSync(join(root, 'package.json'), '{"name":"adversarial-review"}');
+  writeFileSync(join(root, 'test/helper-user.test.mjs'), "import './helpers/shared-fixture.mjs';");
+  writeFileSync(join(root, 'test/adapters/helper-user.test.mjs'), "import '../helpers/shared-fixture.mjs';");
+  writeFileSync(join(root, 'test/adapters/local-helper-user.test.mjs'), "import './helpers/local-fixture.mjs';");
+  writeFileSync(join(root, 'test/adapters/source-user.test.mjs'), "import '../../src/shared.mjs';");
+  writeFileSync(join(root, 'test/unrelated.test.mjs'), '');
+  for (const [changed, expected] of [
+    ['test/helpers/shared-fixture.mjs', ['test/helper-user.test.mjs', 'test/adapters/helper-user.test.mjs']],
+    ['test/adapters/helpers/local-fixture.mjs', ['test/adapters/local-helper-user.test.mjs']],
+    ['src/shared.mjs', ['test/adapters/source-user.test.mjs']],
+  ]) {
+    assert.deepEqual(canonicalHammerValidation(root, [changed]),
+      { command: process.execPath, args: ['test/run-tests.mjs', ...expected] }, changed);
+  }
+});
+
 test('harness refunds preserve all attempt budgets, dedupe, cap per head and page once durably', async t => {
   const root = scratch(t), identity = { repo: 'synthetic/repo', prNumber: 1 };
   let pages = 0;

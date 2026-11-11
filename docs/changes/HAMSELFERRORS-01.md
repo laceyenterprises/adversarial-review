@@ -21,6 +21,13 @@ files, runs repository-owned runners, and claims no local pass when setup cannot
 produce a verdict; exact-head required GitHub checks remain mandatory. Retry and
 dispatch records gain optional bounded self-error refund receipts, documented in
 the data model and catalog fragment. No new CI check, label or live action.
+
+Final comment-only remediation catches legacy Git changed-file discovery errors
+as canonical setup faults, preserving the exact-head required-check fallback
+without a local-pass receipt. Direct importer selection resolves paths from
+each test directory, including shared and adapter-local helpers. The prompt's
+validation example takes changed repository-relative files instead of a
+repository-specific Python test.
 The documentation-only SRE plan lives at
 `modules/worker-pool/post-merge-actions/HAMSELFERRORS-01.yaml`, the publisher's
 required declaration namespace; it contains operator steps and no automatic
@@ -40,3 +47,16 @@ Both operator plans parsed successfully. The PR acceptance evidence records
 the scoped counts and any execution limitations.
 The committed operator plan declares ordinary float/restart, PID start-time
 verification and 24-hour acceptance; no live acceptance receipt is claimed.
+
+Final remediation validation: the bounded offline command
+`node test/run-tests.mjs test/hamselferrors-01.test.mjs test/hammer-prompt-contract.test.mjs test/ama-hammer-merge-protocol-prompt.test.mjs test/run-bounded.test.mjs`
+passes all 76 tests, including 38 documented prompt commands. The prompt size
+and validation-policy cases in `test/hammertrim-contract.test.mjs` pass separately
+with `--test-name-pattern 'rendered hammer prompt stays|hammer and every remediation stage'`
+after removing a redundant sentence to retain the 60 KiB limit.
+`npm run lint` passes with zero errors (149 existing warnings),
+`npm run typecheck:contracts`, `node scripts/validate-data-model-catalog.mjs`
+(93 entries), `bash demo/research-finding-walkthrough.sh`, and
+`git diff --check` pass. Rebase declaration conflicts preserve both trunk's lease
+liveness and this PR's self-error recovery entries in both JSON declarations.
+No full local suite or live acceptance was run.

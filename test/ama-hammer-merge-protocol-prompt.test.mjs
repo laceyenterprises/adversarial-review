@@ -420,7 +420,7 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.match(HAMMER_PROMPT, /final rebase→remote-CI→merge window/);
   assert.match(HAMMER_PROMPT, /HAM_MERGE_LEASE_WAIT_SECONDS="\$\{HAM_MERGE_LEASE_WAIT_SECONDS:-900\}"/);
   assert.match(HAMMER_PROMPT, /source "<<ROOT_DIR>>\/bin\/hammer-node-runtime\.sh"/);
-  assert.match(HAMMER_PROMPT, /hammer-validate\.mjs --pytest/);
+  assert.match(HAMMER_PROMPT, /hammer-validate\.mjs --canonical -- <changed repository-relative files>/);
   assert.match(HAMMER_PROMPT, /120-second no-output deadline never scales/);
   assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort\(\)/);
   assert.match(HAMMER_PROMPT, /--retryable-abort "\$\{HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON:-retryable-abort\}"/);

@@ -146,6 +146,7 @@ exec ${shellQuote(realGit)} "$@"
   };
   const metavariables = {
     'numeric-review-id': '1', 'plan.json': join(run, 'plan.json'),
+    'changed repository-relative files': 'tests/test_endpoints.py',
     'complete-final-review-file': join(run, 'review.md'), 'printed-reason': 'head-changed',
     'reason-code': 'head-changed', 'review node id or URL': 'PRR_synthetic', n: '1',
   };

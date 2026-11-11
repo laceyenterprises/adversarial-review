@@ -20,7 +20,7 @@ replayed by the wrapper. Canonical validation accepts repository-relative change
 files, runs repository-owned runners, and claims no local pass when setup cannot
 produce a verdict; exact-head required GitHub checks remain mandatory. Retry and
 dispatch records gain optional bounded self-error refund receipts, documented in
-the data model and catalog fragment. No new CI check, label or live action.
+the data model and canonical catalog. No new CI check, label or live action.
 
 Final comment-only remediation catches legacy Git changed-file discovery errors
 as canonical setup faults, preserving the exact-head required-check fallback
@@ -102,3 +102,24 @@ checks pass and the slow suite is deferred to hosted CI. No full local suite
 was run. Hosted current-main run 43028750608 completed its test steps in
 545 seconds on Node 22 and 600 seconds on Node 26, below the unchanged
 900-second cap; replacement-head hosted results belong in the PR evidence.
+
+## PR 1831 final comment-only remediation
+
+Invalid canonical validation paths now print usage and exit 64 without running
+tests or recording a verdict/fallback. Missing dispute arguments report
+`helper-input-invalid` and exit 21 before ownership inspection; complete requests
+still enforce ownership before SQLite access. Controller setup yields for 50 ms
+before its one census retry. The canonical data-model catalog now contains the
+self-error refund, dispatch, audit and wait metadata plus a correction-receipt
+entry, replacing the unindexed fragment. The runbook and progress contract
+describe these refinements. Lifecycle states and existing smoke promises remain
+unchanged.
+
+Verification for this round: bounded targeted runs of
+`node test/run-tests.mjs test/hamselferrors-01.test.mjs test/hamintent-02.test.mjs`
+pass 57 tests; the corrected controller fixtures pass all 113 tests in
+`node test/run-tests.mjs test/hammer-controller.test.mjs`. `npm run lint` passes
+with zero errors (149 existing warnings), `npm run typecheck:contracts` passes,
+`node scripts/validate-data-model-catalog.mjs` validates 94 entries,
+`bash demo/research-finding-walkthrough.sh` preserves byte equivalence, and
+`git diff --check` passes. No full local suite or live acceptance was run.

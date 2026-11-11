@@ -163,6 +163,26 @@ test('canonical runner replaces ad-hoc validation and own-package import faults 
   assert.doesNotMatch(failure.stderr, /local-battery-skipped/);
 });
 
+test('canonical CLI rejects invalid paths as usage errors without running validation or recording a verdict', t => {
+  const root = scratch(t);
+  mkdirSync(join(root, 'scripts/ci-mirror'), { recursive: true });
+  writeFileSync(join(root, 'scripts/ci-mirror/run-ci-mirror.py'), 'open("runner-executed", "w").close()\n');
+  const env = { ...isolatedEnv(root), HQ_LAUNCH_REQUEST_ID: 'lrq_invalid-path',
+    HQ_WORKER_RUN_ID: 'wrun_invalid-path' };
+  for (const path of ['/absolute/file.py', '-option.py', 'src/../foreign.py']) {
+    const result = spawnSync(process.execPath, [new URL('../bin/hammer-validate.mjs', import.meta.url).pathname,
+      '--canonical', '--', path], { cwd: root, env, encoding: 'utf8', timeout: 10000 });
+    assert.equal(result.status, 64, result.stderr);
+    assert.equal(result.stderr, 'usage: hammer-validate.mjs --canonical [--nominal-timeout 1..3600] -- <changed repository-relative files>\n');
+    assert.equal(existsSync(join(root, 'runner-executed')), false);
+    const progress = join(root, 'dispatch', env.HQ_LAUNCH_REQUEST_ID, 'hammer-progress', env.HQ_WORKER_RUN_ID);
+    for (const receipt of ['validation-passed', 'validation-failed', 'terminal-stop', 'last-phase']) {
+      assert.equal(existsSync(join(progress, `${receipt}.json`)), false, receipt);
+    }
+    assert.equal(readdirSync(root).some(name => name.startsWith('ham-validation-')), false);
+  }
+});
+
 test('review-service canonical selection runs touched and importer tests through its own offline runner', t => {
   const root = scratch(t);
   mkdirSync(join(root, 'test/adapters'), { recursive: true });

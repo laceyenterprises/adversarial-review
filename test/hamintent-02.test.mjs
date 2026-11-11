@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -374,6 +374,8 @@ test('CLI refuses a different effective uid before schema or sidecar writes', (t
   const result = spawnSync(process.execPath, [
     '--import', `data:text/javascript,process.geteuid=()=>${process.geteuid() + 1}`,
     new URL('../bin/dispute-finding.mjs', import.meta.url).pathname, '--root-dir', rootDir,
+    '--repo', 'fixture/repo', '--pr', '1', '--head-sha', head,
+    '--review', review.node_id, '--finding', '1', '--evidence-file', join(rootDir, 'evidence.txt'),
   ], { encoding: 'utf8', timeout: 10000 });
   assert.equal(result.status, 78);
   assert.match(result.stderr, /ama_finding_dispute_owner_refused/);
@@ -384,6 +386,30 @@ test('CLI refuses a different effective uid before schema or sidecar writes', (t
   const check = new Database(dbPath, { readonly: true });
   try { assert.deepEqual(check.prepare("SELECT name FROM sqlite_master WHERE type='table'").all(), [{ name: 'sentinel' }]); }
   finally { check.close(); }
+});
+
+test('CLI reports missing arguments before checking a different effective uid', (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ham-dispute-usage-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const db = openReviewStateDb(rootDir); db.exec('CREATE TABLE sentinel (id INTEGER)'); db.close();
+  const options = ['--repo', 'fixture/repo', '--pr', '1', '--head-sha', head,
+    '--review', review.node_id, '--finding', '1', '--evidence-file', join(rootDir, 'evidence.txt')];
+  for (let index = 0; index < options.length; index += 2) {
+    const failureFile = join(rootDir, 'failure');
+    const result = spawnSync(process.execPath, [
+      '--import', `data:text/javascript,process.geteuid=()=>${process.geteuid() + 1}`,
+      new URL('../bin/dispute-finding.mjs', import.meta.url).pathname, '--root-dir', rootDir,
+      ...options.filter((_, position) => position !== index && position !== index + 1),
+    ], { encoding: 'utf8', timeout: 10000,
+      env: { ...process.env, HAM_HELPER_FAILURE_FILE: failureFile } });
+    assert.equal(result.status, 21, result.stderr);
+    assert.match(result.stderr, /^usage: dispute-finding\.mjs/);
+    assert.doesNotMatch(result.stderr, /owner_refused/);
+    assert.equal(readFileSync(failureFile, 'utf8').trim(), 'helper-input-invalid');
+  }
+  const dbPath = join(rootDir, 'data', 'reviews.db');
+  assert.equal(existsSync(`${dbPath}-wal`), false);
+  assert.equal(existsSync(`${dbPath}-shm`), false);
 });
 
 test('legacy REST and adapter comment normalization preserve the reservation node ID', async (t) => {

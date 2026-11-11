@@ -20,6 +20,12 @@ try {
   process.stderr.write(`${usage}\n`);
   process.exit(21);
 }
+if (!values.repo || !values.pr || !values['head-sha'] || !values.review
+  || !values.finding || !values['evidence-file']) {
+  reportHammerEarlyFailure('helper-input-invalid');
+  process.stderr.write(`${usage}\n`);
+  process.exit(21);
+}
 const rootDir = primaryChangeRoot({ rootDir: values['root-dir'] });
 try {
   assertFindingDisputeOwner(rootDir);
@@ -27,12 +33,6 @@ try {
   reportHammerEarlyFailure('dispute-owner-refused');
   process.stderr.write(`${JSON.stringify({ event: 'ama_finding_dispute_owner_refused', reason: error.message, exitCode: 78 })}\n`);
   process.exit(78);
-}
-if (!values.repo || !values.pr || !values['head-sha'] || !values.review
-  || !values.finding || !values['evidence-file']) {
-  reportHammerEarlyFailure('helper-input-invalid');
-  process.stderr.write(`${usage}\n`);
-  process.exit(21);
 }
 const db = openReviewStateDb(rootDir);
 try {

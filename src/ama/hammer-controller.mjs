@@ -484,6 +484,7 @@ export async function runHammerController(script, args = [], {
       } catch (error) {
         if (attempt === 1) throw error;
         console.error('hammer-controller: controller setup observation failed; retrying once before readiness');
+        await delayImpl(50);
       }
     }
     for (const member of initialMembers) witnessed.set(member.pid, member.birth);

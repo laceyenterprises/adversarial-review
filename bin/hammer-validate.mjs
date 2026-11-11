@@ -25,6 +25,7 @@ function closureResumeReceipt() {
 }
 
 const args = process.argv.slice(2);
+const usage = 'usage: hammer-validate.mjs --canonical [--nominal-timeout 1..3600] -- <changed repository-relative files>';
 let pytest = false;
 let canonical = /\/(?:agent-os|adversarial-review)$/.test(process.env.HAM_REPO || '');
 let nominalSeconds = 360;
@@ -41,7 +42,7 @@ while (args.length && args[0] !== '--') {
 }
 let resumed;
 if (!valid || args.shift() !== '--' || !args.length) {
-  console.error('usage: hammer-validate.mjs --canonical [--nominal-timeout 1..3600] -- <changed repository-relative files>');
+  console.error(usage);
   process.exitCode = 64;
 } else if ((resumed = closureResumeReceipt())) {
   const receipt = resumed;
@@ -64,35 +65,41 @@ if (!valid || args.shift() !== '--' || !args.length) {
         runner = canonicalHammerValidation(process.cwd(), paths);
       }
       catch (error) {
-        if (error instanceof TypeError) throw error;
+        if (error instanceof TypeError) {
+          console.error(usage);
+          process.exitCode = 64;
+          valid = false;
+        }
         // Git/filesystem/setup failures say nothing about the PR's tests.
         runner = null;
       }
     } else runner = { command: pytest ? 'python3' : args.shift(),
       args: pytest ? ['-u', '-m', 'pytest', '-p', 'ham_pytest_progress', ...args] : args };
-    let output = '', packageImportFault = false;
-    let packages = new Set();
-    try { if (canonical) packages = repositoryPythonPackages(process.cwd()); }
-    catch { runner = null; }
-    const observeOutput = chunk => {
-      output += String(chunk);
-      packageImportFault ||= ownPackageImportFault(output, packages);
-      output = output.slice(-8192);
-    };
-    process.exitCode = runner ? await runBounded(runner.command, runner.args,
-      { env, timeoutMs: loadAwareTimeoutSeconds(nominalSeconds) * 1000, idleMs: LEASE_VALIDATION_IDLE_MS,
-        observeOutput }) : 127;
-    const environmentFault = canonical && (!runner || [76, 78, 127].includes(process.exitCode)
-      || (process.exitCode !== 0 && process.exitCode < 124
-        && packageImportFault));
-    if (environmentFault) {
-      console.error('hammer-validate: local-battery-skipped-github-required-gate-authoritative; canonical runner environment unavailable. Re-enter verify-head and require exact-head GitHub required checks; no local validation pass is claimed.');
-      recordHammerPhase('local-battery-skipped-github-required-gate-authoritative');
-      process.exitCode = 0;
-    }
-    // Timeouts, cleanup uncertainty, signals and spawn failures are unknown.
-    if (!environmentFault && process.env.HQ_WORKER_RUN_ID && process.exitCode >= 0 && process.exitCode < 124) {
-      reportHammerProgress(process.exitCode === 0 ? 'validation-passed' : 'validation-failed');
+    if (valid) {
+      let output = '', packageImportFault = false;
+      let packages = new Set();
+      try { if (canonical) packages = repositoryPythonPackages(process.cwd()); }
+      catch { runner = null; }
+      const observeOutput = chunk => {
+        output += String(chunk);
+        packageImportFault ||= ownPackageImportFault(output, packages);
+        output = output.slice(-8192);
+      };
+      process.exitCode = runner ? await runBounded(runner.command, runner.args,
+        { env, timeoutMs: loadAwareTimeoutSeconds(nominalSeconds) * 1000, idleMs: LEASE_VALIDATION_IDLE_MS,
+          observeOutput }) : 127;
+      const environmentFault = canonical && (!runner || [76, 78, 127].includes(process.exitCode)
+        || (process.exitCode !== 0 && process.exitCode < 124
+          && packageImportFault));
+      if (environmentFault) {
+        console.error('hammer-validate: local-battery-skipped-github-required-gate-authoritative; canonical runner environment unavailable. Re-enter verify-head and require exact-head GitHub required checks; no local validation pass is claimed.');
+        recordHammerPhase('local-battery-skipped-github-required-gate-authoritative');
+        process.exitCode = 0;
+      }
+      // Timeouts, cleanup uncertainty, signals and spawn failures are unknown.
+      if (!environmentFault && process.env.HQ_WORKER_RUN_ID && process.exitCode >= 0 && process.exitCode < 124) {
+        reportHammerProgress(process.exitCode === 0 ? 'validation-passed' : 'validation-failed');
+      }
     }
   } finally {
     if (process.exitCode === undefined || process.exitCode === 125) {

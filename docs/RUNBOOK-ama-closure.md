@@ -5133,8 +5133,11 @@ corrects its own mistakes once; only world facts stop closure. The central
 controller setup, phase failures and edit-plan diagnostics. Unknown stop codes
 defer as `stop-reason-unregistered`; they never silently become terminal.
 Helper usage errors request correction with exit 21 and printed canonical usage.
+The dispute helper checks required arguments before inspecting database ownership;
+valid invocations still require the canonical owner before opening SQLite.
 Mutations are never automatically replayed. Controller readiness observation
-retries once before releasing the blocked shell; after a mistakenly ended shell,
+retries once after a 50 ms asynchronous delay before releasing the blocked shell;
+after a mistakenly ended shell,
 resume only after confirmed owner cleanup and fresh head/lease checks.
 Exhausted closer faults write deferred audits without terminal-stop receipts.
 Historical, explicitly identified hammer failures with a registered self-error
@@ -5149,6 +5152,8 @@ Head/review changes do not erase a head's refund history; a world refusal still
 wins over a later generic controller failure. This adds no merge authority.
 
 Local validation uses `hammer-validate.mjs --canonical -- <changed files>`.
+Absolute paths, leading hyphens and parent traversal segments print canonical
+usage and exit 64, without a validation verdict or environment-fallback receipt.
 Agent OS runs `python3 scripts/ci-mirror/run-ci-mirror.py -- <changed files>`;
 this repository runs selected touched/direct-importer tests through
 `node test/run-tests.mjs <test files>`. Importer paths are resolved relative to

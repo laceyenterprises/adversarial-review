@@ -6,6 +6,8 @@ fault codes, allowing one correction across helper processes. A first manual
 finalization returns exit 21; an exhausted correction defers. Canonical validation
 environment fallback writes only a diagnostic last phase, never a validation
 pass. World-fact stops keep their existing terminal receipts.
+Invalid canonical changed-file arguments exit 64 with usage and write neither
+a validation verdict nor an environment-fallback phase receipt.
 
 
 **Source of truth:** `src/ama/hammer-progress.mjs`

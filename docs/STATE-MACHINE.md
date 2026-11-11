@@ -43,6 +43,12 @@ See [the closure runbook](RUNBOOK-ama-closure.md).
 
 # Adversarial Review State Machine Notes
 
+Zero-output admission refusals without a launch move closer dispatch custody to
+`operator-escalated` for that head. The watcher clears the generic slow-retry
+clock, records the operator owner, and pages once per PR/head. Legacy
+`dispatch-failed` and `dispatch-deferred-transient` refusal records enter the
+same state. Changed heads use their own dispatch record and budget.
+
 Review parsing fails closed when Blocking issues and Verdict disagree.
 Explicit verdict keywords and counted/remaining blocking-issue phrases in the
 unfenced Verdict section produce `verdict_inconsistent: true`, an effective

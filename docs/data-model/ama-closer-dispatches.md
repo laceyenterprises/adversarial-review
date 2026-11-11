@@ -815,3 +815,14 @@ A dispatch-only legacy response keeps its compatibility launch ID alias and
 sets `launchRequestIdIsDispatchFallback: true`. That alias is not a launch-first
 custody key; its lease omits `workerId` so worker/slot evidence remains the
 reclaim source. Explicit `launchRequestId`/`lrq` responses keep launch-first custody.
+
+## Zero-output refusal custody
+
+`state: operator-escalated`, `owner: operator-escalated` and
+`closureBlocker: dispatch-zero-output-refused` identify an explicit zero-output
+admission refusal without a launched worker. `prelaunchRefusalSlowRetry` becomes
+null and `lastFailureTransient` false. Optional `zeroOutputEscalatedAt` is written
+after successful operator alert delivery; the same head is not dispatched again.
+The process-local debounce covers a failed marker write. Historical refusal
+records are adopted on observation; changed heads retain independent records.
+No launch receipt is invented and no closer attempt budget is introduced.

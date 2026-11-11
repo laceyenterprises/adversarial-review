@@ -3984,6 +3984,18 @@ with no 429, an unreadable LRQ row) stays charged, as before.
 
 ### A PR whose hammer cannot launch or has stopped (NOOWNER-01)
 
+An explicit `already produced zero output twice` dispatch refusal transfers the
+same-head closer record to `state: operator-escalated`, `owner:
+operator-escalated`, with `closureBlocker: dispatch-zero-output-refused`.
+The watcher clears `prelaunchRefusalSlowRetry`, suppresses automatic dispatch and
+merge-agent fallback, and emits one operator escalation per PR/head, tracked by
+`zeroOutputEscalatedAt`. Failed delivery retries the page without resuming work.
+Historical slow-retry records with this refusal are adopted immediately. A new
+head uses its own dispatch record and the existing per-head closer budget.
+After normal deploy and watcher restart, SRE observes 24 hours for false refusals
+on changed heads or terminal-audit attempts and for named operator custody on
+genuine refusals. Zero natural samples leave coverage unverified.
+
 Launch status meanings come from the SDK-pinned public producer vocabulary
 (`hq api spec --surface producer-contracts --format json`, contractVersion 1.x).
 Boolean wire `terminal` and `succeeded` values take precedence when present;

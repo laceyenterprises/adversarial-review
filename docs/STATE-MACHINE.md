@@ -17,6 +17,11 @@ Lease observation shares host/PID/start-time liveness for closer and merge-lane 
 
 Terminal recovery reads the HQ audit root before finalizing shared lease outcomes;
 exact-ticket receipts retain pinned and legacy missing-class compatibility.
+Ticketless receipts additionally require canonical absent-ticket evidence, stored
+hammer class, and exact key/repository/head. Owner legacy settlement requires an
+expired intent, dead local submitters, OPEN unmerged same head and complete terminal
+retry evidence; it preserves the actual launch and charge before ordinary terminal
+observation releases custody. Omitted, live or unknown evidence keeps custody.
 Settled recovered records consume no fleet capacity. Operator adoption with
 pending settlement records a completed adoption audit with persisted state,
 while ordinary lease reconciliation retains ownership. Reviewed and refreshed

@@ -7,7 +7,8 @@ import { closeSync, mkdirSync, openSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { hostname } from 'node:os';
 import { writeFileAtomic } from '../atomic-write.mjs';
-import { readLaunchRequestByIdempotencyKeyAsync, readLaunchRequestsForTicketSinceAsync } from '../session-ledger-read-adapter.mjs';
+import { readLaunchRequestByIdempotencyKeyAsync, readLaunchRequestsForTicketSinceAsync, readLaunchRequestSnapshotFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
+import { isTerminalLaunchRequestStatus, launchRequestOwned } from './launch-request-status.mjs';
 import { amaCloserDispatchFilePath, readAmaCloserDispatchRecord, isPreReceiptIntent } from './dispatch-record-read.mjs';
 import { abandonedAmaCloserLeaseOutcome, readAmaCloserLease, isAmaCloserPidAlive, updateAmaCloserLease, deleteAmaCloserLeaseIfCurrent } from './closer-lease.mjs';
 import { recordHammerRetryDispatch } from './hammer-retry-cap.mjs';
@@ -15,7 +16,6 @@ import { deliverAlert } from '../alert-delivery.mjs';
 import { execGhWithRetry } from '../gh-cli.mjs';
 import { probeCloserSubmitter } from './dispatch-submitter.mjs';
 import { isHammerWorkerClass } from './hammer-worker-class.mjs';
-import { isTerminalLaunchRequestStatus } from './launch-request-status.mjs';
 import { releaseMergedPrMergeLeases } from './merge-lease.mjs';
 import { writeAmaAuditEntry } from './audit.mjs';
 
@@ -63,7 +63,7 @@ export const isTerminalCloserPullRequest = pr => pr?.isOpen === false
 
 async function readPullRequestState({ repo, prNumber }, options) {
   const { stdout } = await execGhWithRetry({
-    args: ['api', `repos/${repo}/pulls/${prNumber}`, '--jq', '{state, merged}'],
+    args: ['api', `repos/${repo}/pulls/${prNumber}`, '--jq', '{state, merged, headSha: .head.sha}'],
     execFileImpl: options.execFileImpl, env: options.env || process.env,
     signal: options.signal, retries: 1, timeoutMs: 3000, totalTimeoutMs: 5000,
   });
@@ -83,6 +83,9 @@ export function closerLaunchMatches(record, row, { uniqueKeyReceipt = false } = 
   return row?.identity_ambiguous !== true
     && (row?.ticket_ref === `AMA-PR-${record.prNumber}`
       || (ownKey && isHammerWorkerClass(row?.worker_class)
+        && row.ticket_identity?.version === 1 && row.ticket_identity.state === 'absent'
+        && typeof row.target_repo === 'string' && row.target_repo.toLowerCase() === record.repo.toLowerCase()
+        && row.head_sha === (record.targetRemediationSha || record.headSha)
         && (row?.ticket_ref == null || row.ticket_ref === '')))
     && (row.target_repo == null || (typeof row.target_repo === 'string' && [record.repo, record.repo.split('/').at(-1)].map(value => value.toLowerCase()).includes(row.target_repo.toLowerCase())))
     && (!row.head_sha || row.head_sha === (record.targetRemediationSha || record.headSha));
@@ -209,7 +212,7 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
     const { firstObservedAt, deadlineAt, deadlinePassed } = intentDeadline(record, now);
     const started = Date.parse(record.lastAttemptedAt);
     // Re-prove absence after a crash between lease deferral and intent write.
-    const canProbeSubmitter = matchingPendingLease || (settledNoLaunch
+    const canProbeSubmitter = matchingPendingLease || (options.operatorSettlement && promotedLease) || (settledNoLaunch
       && (!lease.holderHost || lease.holderHost === hostname()));
     const processes = !legacy && canProbeSubmitter
       ? probeCloserSubmitter(record, lease, options) : null;
@@ -244,6 +247,46 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
     const rows = probe?.ok && Array.isArray(probe.rows) ? probe.rows : null;
     const receipt = rows?.length === 1 ? rows[0] : null;
     options.signal?.throwIfAborted();
+    // CLOSERRECEIPTIDENTITY-01: explicit owner recovery may bind a genuinely
+    // ticketless historical receipt. Never reinterpret it as launch absence.
+    // All identity/progress uncertainty continues to hold ordinary admission.
+    let legacyReceipt = false;
+    if (options.operatorSettlement && !legacy && !foreignLease && deadlinePassed && deadSubmitter
+      && (matchingPendingLease || promotedLease)
+      && (!lease.holderHost || lease.holderHost === hostname())
+      && receipt?.idempotency_key === record.dispatchIdempotencyKey
+      && /^lrq_.+/.test(receipt?.launch_request_id || '')
+      && (!lease.lrqId || lease.lrqId === receipt.launch_request_id)
+      && isHammerWorkerClass(receipt.worker_class)
+      && receipt.ticket_ref === null && receipt.identity_ambiguous === false
+      && receipt.ticket_identity?.version === 1 && receipt.ticket_identity.state === 'absent'
+      && typeof receipt.target_repo === 'string' && receipt.target_repo.toLowerCase() === record.repo.toLowerCase()
+      && receipt.head_sha === (record.targetRemediationSha || record.headSha)
+      && pr?.merged === false && pr?.headSha === receipt.head_sha
+      && String(pr?.state || pr?.prState || '').toUpperCase() === 'OPEN') {
+      const snapshot = await lookupReceipt(
+        options.readLegacyReceiptSnapshotImpl || readLaunchRequestSnapshotFromLedgerAsync,
+        { ...args, launchRequestIds: [receipt.launch_request_id] }, options);
+      const root = snapshot?.ok && snapshot.rows?.find(row => row.launch_request_id === receipt.launch_request_id);
+      legacyReceipt = !!root && root.idempotency_key === receipt.idempotency_key
+        && isHammerWorkerClass(root.worker_class)
+        && root.ticket_ref === null && root.identity_ambiguous === false
+        && root.ticket_identity?.version === 1 && root.ticket_identity.state === 'absent'
+        && root.target_repo === receipt.target_repo && root.head_sha === receipt.head_sha
+        && snapshot.rows.every(row => isTerminalLaunchRequestStatus(row))
+        && launchRequestOwned({ ...snapshot, row: root,
+          retryChain: snapshot.rows.filter(row => row !== root) }) === false;
+      evidence = { ...evidence, legacyReceipt: { authorized: legacyReceipt,
+        launchRequestId: receipt.launch_request_id, ticketIdentity: receipt.ticket_identity,
+        query: queryEvidence({ kind: 'launch-request-retry-chain',
+          launchRequestIds: [receipt.launch_request_id], includeRetryChain: true, timeoutMs }, snapshot),
+        terminalRows: snapshot?.ok ? snapshot.rows.map(row => ({
+          launchRequestId: row.launch_request_id, status: row.status,
+        })) : null }, processes };
+      if (!intentSnapshotMatches(path, bytes, rootDir, leaseIdentity, lease)) {
+        return { status: 'held', reason: 'intent-or-lease-changed' };
+      }
+    }
     const matchingReceipt = !legacy && receipt && receipt.idempotency_key === record.dispatchIdempotencyKey
       && typeof receipt.launch_request_id === 'string' && receipt.launch_request_id.startsWith('lrq_')
       && closerLaunchMatches(record, receipt, { uniqueKeyReceipt: true });
@@ -270,6 +313,10 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
       && (!lease?.lrqId || lease.lrqId === receipt.launch_request_id) && !settledNoLaunch;
     if (options.operatorSettlement && recoverableReceipt && !isTerminalLaunchRequestStatus(receipt)) {
       return { status: 'held', reason: 'closer-receipt-exists', evidence };
+    }
+    if (options.operatorSettlement && recoverableReceipt
+      && receipt.ticket_ref !== `AMA-PR-${record.prNumber}` && !legacyReceipt) {
+      return { status: 'held', reason: 'legacy-receipt-proof-unavailable', evidence };
     }
     if (options.operatorSettlement && recoverableReceipt && !options.dryRun) {
       options.beforeSettlement?.({ ...record, preReceiptReconciliation: { query: evidence } });

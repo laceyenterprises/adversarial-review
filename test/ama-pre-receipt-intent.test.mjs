@@ -16,7 +16,8 @@ import { amaCloserDispatchFilePath, readAmaCloserDispatchRecord, updateAmaCloser
   findActiveAmaCloserLaunches, reconcileAmaCloserDispatches, isActiveAmaCloserDispatchRecord, maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
 import { readHammerRetryCapLedger, recordHammerRetryDispatch, hammerRetryCapFilePath } from '../src/ama/hammer-retry-cap.mjs';
 import { main as settleLegacyIntent } from '../bin/settle-legacy-closer-intent.mjs';
-import { readLaunchRequestByIdempotencyKeyAsync, readLaunchRequestsForTicketSinceAsync } from '../src/session-ledger-read-adapter.mjs';
+import { readLaunchRequestByIdempotencyKeyAsync, readLaunchRequestsForTicketSinceAsync, readLaunchRequestSnapshotFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
+import { buildFollowUpJob, writeFollowUpJob, claimNextFollowUpJob } from '../src/follow-up-jobs.mjs';
 import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import { reconcileAndAbandonAmaCloserLease } from '../src/ama/abandoned-closer-lease.mjs';
 
@@ -28,6 +29,11 @@ const dead = () => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }); 
 const receipt = { launch_request_id: 'lrq_fixture', idempotency_key: key,
   worker_class: 'hammer',
   ticket_ref: 'AMA-PR-8', target_repo: 'repo', status: 'running', requested_at: started };
+function ticketlessReceipt(patch = {}) {
+  return { ...receipt, ticket_ref: null, target_repo: identity.repo,
+    head_sha: identity.headSha, identity_ambiguous: false,
+    ticket_identity: { version: 1, state: 'absent' }, ...patch };
+}
 function fixture(t, patch = {}, lease = true) {
   const rootDir = mkdtempSync(join(tmpdir(), 'intent-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -409,7 +415,7 @@ function operatorArgs(f, extra = []) {
 }
 
 function terminalReceiptOptions(f, row, retryChain = []) {
-  return { ...f.options,
+  return { ...ticketlessRecovery(f, row),
     readIntentReceiptImpl: async () => ({ ok: true, rows: [row] }),
     readLaunchRequestStatusImpl: async args => {
       assert.equal(args.includeRetryChain, true);
@@ -424,7 +430,7 @@ function terminalReceiptOptions(f, row, retryChain = []) {
 for (const ticket_ref of [null, '']) for (const status of ['running', 'failed', 'succeeded']) {
   test(`PRERECEIPTADOPT-01: unique own-key ${status} receipt with ticket ${JSON.stringify(ticket_ref)}`, async t => {
     const f = fixture(t);
-    const row = { ...receipt, ticket_ref, status };
+    const row = ticketlessReceipt({ ticket_ref, status });
     const result = await f.reconcile(terminalReceiptOptions(f, row));
     assert.equal(result.status, 'receipt-recovered');
     assert.equal(f.read().launchRequestId, row.launch_request_id);
@@ -463,7 +469,7 @@ test('PRERECEIPTADOPT-01: two own-key empty-ticket receipts remain ambiguous', a
 
 test('PRERECEIPTADOPT-01: watcher pass settles dead pending ownership and admits one successor', async t => {
   const f = fixture(t);
-  const row = { ...receipt, ticket_ref: null, status: 'succeeded' };
+  const row = ticketlessReceipt({ status: 'succeeded' });
   const settled = await reconcileAndAbandonAmaCloserLease(f.rootDir,
     readAmaCloserLease(f.rootDir, identity), {
       ...terminalReceiptOptions(f, row), reconcileDispatched: () => assert.fail('already settled'),
@@ -479,7 +485,7 @@ test('PRERECEIPTADOPT-01: watcher pass settles dead pending ownership and admits
 
 test('PRERECEIPTADOPT-01: terminal ancestor cannot release a live retry lease', async t => {
   const f = fixture(t);
-  const row = { ...receipt, ticket_ref: null, status: 'succeeded' };
+  const row = ticketlessReceipt({ status: 'succeeded' });
   await f.reconcile(terminalReceiptOptions(f, row,
     [{ ...row, launch_request_id: 'lrq_retry', status: 'running' }]));
   assert.equal(readAmaCloserLease(f.rootDir, identity).status, 'dispatched');
@@ -487,7 +493,7 @@ test('PRERECEIPTADOPT-01: terminal ancestor cannot release a live retry lease', 
 
 test('PRERECEIPTADOPT-01: operator previews and audits terminal empty-ticket receipt recovery', async t => {
   const f = fixture(t);
-  const row = { ...receipt, ticket_ref: null, status: 'succeeded' };
+  const row = ticketlessReceipt({ status: 'succeeded' });
   const options = { ...terminalReceiptOptions(f, row), print() {} };
   const lease = readAmaCloserLease(f.rootDir, identity);
   const preview = await settleLegacyIntent(operatorArgs(f), options);
@@ -504,7 +510,7 @@ test('PRERECEIPTADOPT-01: operator previews and audits terminal empty-ticket rec
 
 test('PRERECEIPTADOPT-01: SDK nullable ticket projection reaches exact-key recovery unchanged', async t => {
   const f = fixture(t);
-  const row = { ...receipt, ticket_ref: null, head_sha: identity.headSha };
+  const row = ticketlessReceipt();
   const result = await f.reconcile({
     readIntentReceiptImpl: readLaunchRequestByIdempotencyKeyAsync,
     dispatchSession: { dispatchLookup: async selector => {
@@ -522,7 +528,7 @@ test('PRERECEIPTADOPT-01: SDK nullable ticket projection reaches exact-key recov
 for (const mode of ['live-receipt', 'audit-failure', 'unreadable-retries']) {
   test(`PRERECEIPTADOPT-01: operator recovery preserves authority on ${mode}`, async t => {
     const f = fixture(t);
-    const row = { ...receipt, ticket_ref: null, status: mode === 'live-receipt' ? 'running' : 'succeeded' };
+    const row = ticketlessReceipt({ status: mode === 'live-receipt' ? 'running' : 'succeeded' });
     const lease = readAmaCloserLease(f.rootDir, identity);
     if (mode === 'audit-failure') writeFileSync(join(f.rootDir, 'data', 'operator-mutations'), 'obstruction');
     const options = { ...terminalReceiptOptions(f, row), print() {},
@@ -748,7 +754,7 @@ test('default PR resolver reads bounded REST metadata rather than stored dispatc
   const result = await f.reconcile({ readPullRequestStateImpl: undefined,
     execFileImpl: async (command, args, options) => {
       assert.equal(command, 'gh');
-      assert.deepEqual(args, ['api', 'repos/fixture/repo/pulls/8', '--jq', '{state, merged}']);
+      assert.deepEqual(args, ['api', 'repos/fixture/repo/pulls/8', '--jq', '{state, merged, headSha: .head.sha}']);
       assert.ok(options.timeout > 0 && options.timeout <= 3000);
       return { stdout: JSON.stringify({ state: 'closed', merged: true }) };
     }, deliverAlertImpl: () => assert.fail('terminal PR must not page') });
@@ -962,8 +968,8 @@ for (const missingColumn of ['target_repo', 'ticket_ref']) {
     assert.equal(probe.ok, true);
     assert.equal(probe.rows[0][missingColumn], null);
     const result = await f.reconcile();
-    assert.equal(result.status, 'receipt-recovered');
-    assert.equal(f.read().state, 'dispatched');
+    assert.equal(result.status, missingColumn === 'ticket_ref' ? 'unknown' : 'receipt-recovered');
+    assert.equal(f.read().state, missingColumn === 'ticket_ref' ? 'dispatching' : 'dispatched');
   });
 }
 
@@ -1073,11 +1079,159 @@ const processScan = (output = processRow(99, 'ps -axww -o pid= -o lstart= -o arg
   (command, args, options) => {
     assert.equal(command, 'ps');
     assert.deepEqual(args, ['-axww', '-o', 'pid=', '-o', 'lstart=', '-o', 'args=']);
-    assert.equal(options.timeout, 1000);
+    assert.ok(options.timeout >= 1000 && options.timeout <= 6000);
     assert.equal(options.maxBuffer, 4 * 1024 * 1024);
     return output;
   };
 const firstPoll = new Date(Date.parse(started) + 1000).toISOString();
+
+// Synthetic reproduction of the older exact-key ticketless receipt: a null
+// ticket in an old/omitted projection remains unknown, even after both PIDs die.
+function ticketlessRecovery(f, patch = {}) {
+  const row = ticketlessReceipt({ status: 'failed', ...patch });
+  const dispatchSession = { dispatchLookup: async () => JSON.parse(JSON.stringify({
+    schema_version: 1, status: 'found', complete: true,
+    roots: [row.launch_request_id], items: [row], retry_edges: [],
+  })) };
+  return { ...f.options, print() {},
+    readPullRequestStateImpl: async () => ({ state: 'OPEN', merged: false, headSha: identity.headSha }),
+    processExecFileSyncImpl: processScan(),
+    readIntentReceiptImpl: args => readLaunchRequestByIdempotencyKeyAsync({ ...args, dispatchSession }),
+    // Ticketless canonical rows intentionally prevent ticket-wide absence.
+    readLegacyIntentLaunchesImpl: async () => ({ ok: false, reason: 'ticket-scope-evidence-unavailable' }),
+    readLegacyReceiptSnapshotImpl: args => readLaunchRequestSnapshotFromLedgerAsync({ ...args, dispatchSession }),
+    readLaunchRequestStatusImpl: async () => ({ ok: false }),
+    readMergedSignalImpl: async () => ({ ok: false }),
+  };
+}
+
+test('CLOSERRECEIPTIDENTITY-01: audited ticketless recovery preserves identity and attempts', async t => {
+  const f = fixture(t);
+  const opts = ticketlessRecovery(f);
+  assert.equal((await f.reconcile(ticketlessRecovery(f, { ticket_identity: undefined }))).status, 'unknown');
+  const preview = await f.reconcile({ ...opts, operatorSettlement: true, dryRun: true });
+  assert.equal(preview.status, 'receipt-recovered', JSON.stringify(preview));
+  const lease = readAmaCloserLease(f.rootDir, identity);
+  assert.equal((await settleLegacyIntent(operatorArgs(f), opts)).status, 'receipt-recovered');
+  assert.deepEqual(readAmaCloserLease(f.rootDir, identity), lease);
+  assert.equal(f.read().state, 'dispatching');
+  assert.equal(readHammerRetryCapLedger(f.rootDir, identity), null);
+  const result = await settleLegacyIntent(operatorArgs(f, ['--apply', '--reason', 'synthetic legacy receipt']), opts);
+  assert.equal(result.status, 'receipt-recovered');
+  assert.equal(f.read().launchRequestId, receipt.launch_request_id);
+  assert.equal(f.read().retryCount, 2);
+  assert.equal(readHammerRetryCapLedger(f.rootDir, identity).lifetimeAttemptCount, 1);
+  assert.equal(readAmaCloserLease(f.rootDir, identity).lrqId, receipt.launch_request_id);
+  const audit = readdirSync(join(f.rootDir, 'data', 'operator-mutations'))
+    .map(name => readFileSync(join(f.rootDir, 'data', 'operator-mutations', name), 'utf8')).join('');
+  assert.match(audit, /settlement-authorized/);
+  assert.match(audit, /receipt-adopted-settlement-pending/);
+  // A second apply cannot recharge or turn this real launch into a refund.
+  await assert.rejects(settleLegacyIntent(operatorArgs(f, ['--apply', '--reason', 'repeat']), opts));
+  assert.equal(readHammerRetryCapLedger(f.rootDir, identity).lifetimeAttemptCount, 1);
+  const job = buildFollowUpJob({ repo: identity.repo, prNumber: identity.prNumber,
+    revisionRef: identity.headSha, reviewerModel: 'codex', reviewBody: '## Verdict\nRequest changes\n' });
+  writeFollowUpJob(join(f.rootDir, 'data/follow-up-jobs/pending', `${job.jobId}.json`), job);
+  assert.equal(claimNextFollowUpJob({ rootDir: f.rootDir, claimedAt: now,
+    closerReconciliationOptions: { readLaunchRequestStatusImpl: () => ({ ok: false }) } }), null,
+  'unreadable terminal status still holds follow-up admission after receipt recovery');
+  const claimed = claimNextFollowUpJob({ rootDir: f.rootDir, claimedAt: now,
+    closerReconciliationOptions: {
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'failed', ticket_ref: null } }),
+      readBuildCompletionSignalForPrImpl: () => ({ ok: false }),
+      readBuildCompletionProducerEvidenceImpl: () => ({ ok: false }),
+      logger: { info() {} },
+    } });
+  assert.ok(claimed, 'normal terminal reconciliation releases the reservation for follow-up');
+  assert.equal(f.read().state, 'launch-terminal');
+  assert.equal(readAmaCloserLease(f.rootDir, identity).terminalOutcome, 'failed-without-merge');
+  assert.equal(readHammerRetryCapLedger(f.rootDir, identity).lifetimeAttemptCount, 1);
+});
+
+test('CLOSERRECEIPTIDENTITY-01: audited terminal recovery settles through the ordinary observer', async t => {
+  const f = fixture(t);
+  const row = ticketlessReceipt({ status: 'failed' });
+  const result = await settleLegacyIntent(
+    operatorArgs(f, ['--apply', '--reason', 'synthetic proven terminal receipt']),
+    { ...terminalReceiptOptions(f, row), print() {} });
+  assert.equal(result.conclusive, true);
+  assert.equal(result.reason, 'terminal-receipt-recovered');
+  assert.equal(f.read().state, 'launch-terminal');
+  assert.equal(readAmaCloserLease(f.rootDir, identity).terminalOutcome, 'failed-without-merge');
+  assert.deepEqual(readFileSync(result.auditPath, 'utf8').trim().split('\n').map(line =>
+    JSON.parse(line).outcome), ['settlement-authorized', 'settled-terminal-receipt']);
+  assert.equal(readHammerRetryCapLedger(f.rootDir, identity).lifetimeAttemptCount, 1);
+});
+
+test('CLOSERRECEIPTIDENTITY-01: interrupted receipt persistence resumes without charging twice', async t => {
+  const f = fixture(t);
+  updateAmaCloserLease({ rootDir: f.rootDir, ...identity, status: 'dispatched',
+    lrqId: receipt.launch_request_id, now });
+  recordHammerRetryDispatch(f.rootDir, identity, { jobKey: identity.headSha,
+    headSha: identity.headSha, dispatchKey: key, launchRequestId: receipt.launch_request_id, now });
+  const applied = await settleLegacyIntent(
+    operatorArgs(f, ['--apply', '--reason', 'synthetic interrupted persistence']), ticketlessRecovery(f));
+  assert.equal(applied.status, 'receipt-recovered');
+  assert.equal(f.read().launchRequestId, receipt.launch_request_id);
+  assert.equal(readHammerRetryCapLedger(f.rootDir, identity).lifetimeAttemptCount, 1);
+});
+
+for (const mode of ['omitted', 'unknown', 'wrong-ticket', 'wrong-key', 'wrong-head', 'wrong-repo',
+  'ambiguous', 'live', 'parked', 'unknown-status', 'live-retry', 'quota-resume',
+  'unreadable-chain', 'live-submitter', 'unknown-processes', 'changed-lease', 'changed-record',
+  'foreign-host', 'wrong-lrq', 'unexpired', 'unknown-pr', 'moved-pr', 'audit-failed']) {
+  test(`CLOSERRECEIPTIDENTITY-01: legacy settlement refuses ${mode}`, async t => {
+    const f = fixture(t);
+    const patch = {
+      omitted: { ticket_identity: undefined }, unknown: { ticket_identity: { version: 1, state: 'unknown' } },
+      'wrong-ticket': { ticket_ref: 'AMA-PR-9' }, 'wrong-key': { idempotency_key: 'other' },
+      'wrong-head': { head_sha: 'b'.repeat(40) }, 'wrong-repo': { target_repo: 'other/repo' },
+      ambiguous: { identity_ambiguous: true }, live: { status: 'running' },
+      parked: { status: 'blocked_needs_decision' }, 'unknown-status': { status: 'novel' },
+      'quota-resume': { status: 'failed', failure_class: 'worker_killed', worker_killed_cause: 'provider_quota_exhausted' },
+    }[mode] || {};
+    const opts = ticketlessRecovery(f, patch);
+    if (mode === 'foreign-host') {
+      const lease = readAmaCloserLease(f.rootDir, identity);
+      writeFileSync(amaCloserLeaseFilePath(f.rootDir, identity), JSON.stringify({ ...lease, holderHost: 'foreign-host' }));
+    }
+    if (mode === 'wrong-lrq') updateAmaCloserLease({
+      rootDir: f.rootDir, ...identity, status: 'dispatched', lrqId: 'lrq_other',
+    });
+    if (mode === 'unexpired') opts.now = firstPoll;
+    if (mode === 'unknown-pr') opts.readPullRequestStateImpl = async () => null;
+    if (mode === 'moved-pr') opts.readPullRequestStateImpl = async () => ({
+      state: 'OPEN', merged: false, headSha: 'b'.repeat(40),
+    });
+    if (mode === 'live-submitter') opts.processExecFileSyncImpl = processScan(processRow(55, key));
+    if (mode === 'unknown-processes') opts.processExecFileSyncImpl = () => { throw Error('unavailable'); };
+    if (mode === 'unreadable-chain') opts.readLegacyReceiptSnapshotImpl = async () => ({ ok: false });
+    if (mode === 'live-retry') {
+      const snapshot = await opts.readLegacyReceiptSnapshotImpl({ launchRequestIds: [receipt.launch_request_id] });
+      opts.readLegacyReceiptSnapshotImpl = async () => ({ ...snapshot,
+        rows: [...snapshot.rows, { launch_request_id: 'lrq_retry', status: 'running' }] });
+    }
+    if (['changed-lease', 'changed-record'].includes(mode)) {
+      const snapshot = opts.readLegacyReceiptSnapshotImpl;
+      opts.readLegacyReceiptSnapshotImpl = async args => {
+        if (mode === 'changed-lease') {
+          updateAmaCloserLease({ rootDir: f.rootDir, ...identity, status: 'dispatched', lrqId: 'lrq_replacement' });
+        } else {
+          const release = tryAcquireCloserIntentLock(f.rootDir, identity);
+          assert.equal(release, null, 'native intent lock fences competing writers');
+          // Simulate an older writer that does not yet honor the lock.
+          writeFileSync(amaCloserDispatchFilePath(f.rootDir, identity),
+            JSON.stringify({ ...f.read(), custom: 'replacement' }));
+        }
+        return snapshot(args);
+      };
+    }
+    if (mode === 'audit-failed') writeFileSync(join(f.rootDir, 'data', 'operator-mutations'), 'obstruction');
+    await assert.rejects(settleLegacyIntent(operatorArgs(f, ['--apply', '--reason', 'synthetic refusal']), opts));
+    assert.equal(f.read().state, 'dispatching');
+    assert.equal(readHammerRetryCapLedger(f.rootDir, identity), null);
+  });
+}
 
 test('CLOSERPENDINGDEAD-01: macOS kernel_task PID 0 permits first-poll recovery', async t => {
   const f = fixture(t);
@@ -1361,7 +1515,7 @@ for (const outcome of ['deferred', 'succeeded']) for (const rootSource of ['reco
     const hqRoot = mkdtempSync(join(tmpdir(), 'intent-hq-'));
     t.after(() => rmSync(hqRoot, { recursive: true, force: true }));
     const f = fixture(t, rootSource === 'record' ? { hqRoot } : {});
-    const row = { ...receipt, ticket_ref: null, status: 'succeeded' };
+    const row = ticketlessReceipt({ status: 'succeeded' });
     writeAmaAuditEntry({ hqRoot, ...identity, now,
       attempt: { outcome, launchRequestId: row.launch_request_id, reason: 'operator-hold' } });
     const options = { ...terminalReceiptOptions(f, row),

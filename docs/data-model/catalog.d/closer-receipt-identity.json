@@ -1,0 +1,11 @@
+{
+  "domains": [
+    {
+      "title": "AMA Closer Dispatch Records",
+      "path": "docs/data-model/ama-closer-dispatches.md",
+      "store": "data/follow-up-jobs/ama-closer-dispatches/",
+      "schemaSurface": "src/ama/dispatch-closer.mjs",
+      "legacyReceiptIdentity": "CLOSERRECEIPTIDENTITY-01: preReceiptReconciliation.query.legacyReceipt stores authorized, launchRequestId, versioned producer ticketIdentity, bounded retry-chain query and terminalRows; query.processes stores verified dead submitter evidence. Owner-authorized recovery adopts a real receipt through receipt-recovered, preserving retry count and charging once; ordinary terminal reconciliation controls lease release and follow-up admission. Omitted identity proof, live/unknown progress, mismatched key/repo/head and concurrent owners refuse."
+    }
+  ]
+}

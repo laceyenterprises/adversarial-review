@@ -25,7 +25,7 @@ Public SDK 0.8.0, 0.9.0 and 0.10.0 transports forward the JSON envelope unchange
 `readDispatchLookupResult` still validates the base envelope; the consumer
 validates this additive optional evidence. No SDK source, types, dependency,
 lockfile, installed package or immutable archive changes are required. This
-consumer uses the installed immutable 0.10.0 artifact; absence evidence needs no artifact modification. If typed SDK
+consumer uses the installed immutable 0.12.0 artifact; absence evidence needs no artifact modification. If typed SDK
 interpretation is added later, release a new producer artifact and adopt its
 merged public bytes.
 
@@ -46,6 +46,44 @@ ownership even after the deadline; verified PID reuse needs complete process and
 canonical absence evidence. Existing full record/lease snapshots protect
 concurrent receipt/replacement, and the intent retry decrement replays once.
 No locking algorithm or transition destination changes.
+
+### Ticketless historical receipts (CLOSERRECEIPTIDENTITY-01)
+
+A null `ticket_ref` is insufficient to distinguish an older projection from a
+launch that never stored a ticket. The producer projects the stored `worker_class` and adds `ticket_identity` with
+`version: 1` and `state: present | absent | conflicting | unknown`. `absent`
+requires readable canonical payload/lineage objects and complete linked identity
+projection. Malformed JSON, incomplete schema or invalid ticket markers cannot
+prove absence. Released SDK transports preserve this additive row evidence.
+
+Ordinary reconciliation accepts positive AMA ticket identity, or a unique same-key
+hammer receipt with producer-proven ticket absence and exact repository/head. The
+dispatch-directory owner's existing `settle-legacy-closer-intent.mjs` command
+also supports an expired keyed intent whose one receipt has explicit `absent`
+ticket evidence, the exact owner-qualified repository and target head, and an
+unambiguous launch ID. Both watcher and submitter must be verified gone, no
+process may carry the key, and a fresh complete authorized retry-chain read must
+prove all launches terminal with no pending quota resume. Live GitHub must
+confirm OPEN, unmerged and that same head. Missing or unsupported proof refuses.
+The native intent lock and full record/lease snapshots remain authoritative.
+
+Dry-run remains the default. Separately authorized apply fsyncs
+`settlement-authorized` before charging/adopting the real receipt and records
+`settled-terminal-receipt` after ordinary terminal settlement, or
+`receipt-adopted-settlement-pending` if fresh terminal observation remains unknown. It returns `receipt-recovered`, preserves
+the retry count, and charges the existing idempotent dispatch budget once.
+It does **not** claim `no-launch` or refund an executed attempt. Normal AMA or
+follow-up reconciliation then observes terminal status and releases custody
+through its existing PR evidence, grace and lease fences. An unreadable status
+or a newly live retry continues to hold follow-up admission.
+
+Deploy the agent-os producer companion before using this consumer extension;
+an older producer safely refuses this recovery. No SDK artifact, runtime
+configuration or live settlement is included. The offline writer/projection
+fixtures are `platform/session-ledger/tests/test_closer_receipt_identity.py`
+and `platform/app-contract-endpoint/tests/test_dispatch_lookup.py` in agent-os;
+the consumer, audit, retry and follow-up reproduction is
+`test/ama-pre-receipt-intent.test.mjs` here.
 
 Before any separately approved recovery, verify normal reviewed producer and
 consumer deployment and their actual loaded generations. Exact, expiring app

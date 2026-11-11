@@ -3286,10 +3286,10 @@ stateDiagram-v2
     state "completed" as s11
     state "operator-escalated" as s12
     s0 --> s1: hammer-dispatch.33 watcher shutdown abort listener synchronously persists interrupted attempt under native intent lock before exit
-    s1 --> s2: hammer-dispatch.34 recover exact canonical keyed receipt without launching again
+    s1 --> s2: hammer-dispatch.34 recover one exact-key receipt with positive AMA ticket, or producer-proven absent ticket plus hammer class and exact repository/head; owner legacy settlement additionally requires expired intent, dead local submitters, OPEN unmerged same head and complete terminal retry proof; preserve charge once and use ordinary terminal observer
     s1 --> s10: hammer-dispatch.35 fenced conclusive no-launch proof defers pending lease and refunds intent once
     s1 --> s11: hammer-dispatch.36 authoritative PR termination retires hold without asserting no launch
-    s0 --> s2: hammer-dispatch.29 recover one canonical receipt by exact attempt key, AMA ticket and repository even with unreadable PR state; preserve retry charge once
+    s0 --> s2: hammer-dispatch.29 recover one exact-key receipt with positive AMA ticket, or producer-proven absent ticket plus hammer class and exact repository/head; owner legacy settlement additionally requires expired intent, dead local submitters, OPEN unmerged same head and complete terminal retry proof; preserve charge once and use ordinary terminal observer
     s0 --> s10: hammer-dispatch.30 closure orchestration, recovery reaper and per-PR admission reconcile the named intent including a rekeyed lease; fenced prepared attempt with dead matching owner and absent key, submitting attempt with dead watcher and submitter plus absent process key then empty ledger key, expired successful empty-key query, or successful empty ticket/time query (legacy automatic or keyed audited) proves no launch; defer lease and refund intent retry once
     s0 --> s11: hammer-dispatch.32 authoritative closed/merged PR state retires intent as pr-terminal under fence; preserve lease and budgets; unreadable PR state permits exact-key receipt recovery but otherwise holds without paging
     s0 --> s0: hammer-dispatch.31 unprovable launch absence: fixed inspection deadline pages once; retain only own PR/head ownership with no fleet launch admission or capacity; legacy active listings retain stale/orphan escapes
@@ -4545,6 +4545,14 @@ settlement composition verify this on demand. Existing smoke promises remain
 unchanged; deployment/loaded generations and organic recovery need independent
 operator evidence. No live activation, grants or settlement are part of this PR.
 
+
+Ticketless receipt recovery requires producer-proven absent ticket identity,
+a stored hammer class, and the exact dispatch key, repository and head.
+Owner-authorized legacy settlement also proves dead local submitters and a
+complete terminal retry chain before adopting the real receipt. Ordinary terminal
+observation releases custody; unknown or live evidence retains ownership.
+Existing lifecycle states and smoke commands remain unchanged. See
+[the recovery contract](docs/dispatch-absence-recovery.md#ticketless-historical-receipts-closerreceiptidentity-01).
 
 ## Review receipts through the public OS boundary
 

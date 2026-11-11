@@ -1597,7 +1597,7 @@
           "id": "hammer-dispatch.34",
           "from": "dispatch-interrupted",
           "to": "dispatched",
-          "trigger": "recover exact canonical keyed receipt without launching again",
+          "trigger": "recover one exact-key receipt with positive AMA ticket, or producer-proven absent ticket plus hammer class and exact repository/head; owner legacy settlement additionally requires expired intent, dead local submitters, OPEN unmerged same head and complete terminal retry proof; preserve charge once and use ordinary terminal observer",
           "codeSource": "src/ama/pre-receipt-intent.mjs"
         },
         {
@@ -1618,7 +1618,7 @@
           "id": "hammer-dispatch.29",
           "from": "dispatching",
           "to": "dispatched",
-          "trigger": "recover one canonical receipt by exact attempt key, AMA ticket and repository even with unreadable PR state; preserve retry charge once",
+          "trigger": "recover one exact-key receipt with positive AMA ticket, or producer-proven absent ticket plus hammer class and exact repository/head; owner legacy settlement additionally requires expired intent, dead local submitters, OPEN unmerged same head and complete terminal retry proof; preserve charge once and use ordinary terminal observer",
           "codeSource": "src/ama/pre-receipt-intent.mjs"
         },
         {
@@ -1870,7 +1870,7 @@
     "src/ama/dispatch-submitter.mjs": "f18b97859f5beeb5f7fbf561e3ba447a229ef44ac89a39bdab34475fcc5c37ee",
     "src/ama/closure-next-action.mjs": "5bb0293c10c0b45c7086401cd9f7d4d137363a39308cf7178891c1c8b5375dcc",
     "src/pr-next-action.mjs": "292f80a1d6548cd450d850ec3ebf23582a099a1f3949d8879cd2a1d5cdc478c3",
-    "src/ama/pre-receipt-intent.mjs": "1656fd19dfaf3ea9bc351c2a70a46f7a7add0b8a0573fbaa259661ea6f762f98",
+    "src/ama/pre-receipt-intent.mjs": "1586a4b327f0a4700a7985250e9dd3ac6c30768b78fd3266f5ff48835566f23a",
     "src/follow-up-branch.mjs": "637f2a18c5fb2a89d2d02c98d80587a713a188c10d70891941d77df847579a8d",
     "src/posted-review-head-repair.mjs": "ce761260224b7a82d152e5b289e8967bbf54026c427a17bdb5cff0a6556ff7d6",
     "src/pollonce-phases.mjs": "e87ce212fb19da076c5fae78f9c468913270528911ca6ad0db238304eecbcc39",

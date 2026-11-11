@@ -95,6 +95,16 @@ attempt results, adapter reason and detail, backend/source, row count and launch
 IDs. Failure diagnostics log when the evidence changes. Census and builder
 routing retain ledger failure details and suppress unchanged repeated failures.
 
+CLOSERRECEIPTIDENTITY-01: owner-authorized ticketless legacy receipt adoption
+also persists `query.legacyReceipt` containing `authorized`, `launchRequestId`,
+producer `ticketIdentity`, the bounded retry-chain `query`, and `terminalRows`
+(launch IDs and statuses). `query.processes` records the submitter/watcher/key
+proof. Missing evidence remains unknown. This records `receipt-recovered` and
+the real launch ID through existing transitions; it never represents launch
+absence or refunds the attempt. The operator audit records authorization before
+mutation and `settled-terminal-receipt` (or `receipt-adopted-settlement-pending` while observation is unknown) on success. See
+[the recovery contract](../dispatch-absence-recovery.md#ticketless-historical-receipts-closerreceiptidentity-01).
+
 After the persisted dispatch deadline, a successful empty idempotency-key query
 settles a fenced keyed intent as `no-dispatch`, reason `keyed-no-launch-proven`.
 CLOSERPENDINGDEAD-01 permits earlier settlement of a `submitting` intent only

@@ -15,6 +15,7 @@ const usage = `Usage: node bin/settle-legacy-closer-intent.mjs
   --repo <owner/repo> --pr <number> --head <dispatch-head-sha>
   [--apply --reason <operator-reason>]
 Dry-run is the default. Apply requires the dispatch directory owner. Supports legacy and expired keyed intents.
+Proven ticketless terminal launches recover their real receipt without refunding an attempt.
 `;
 
 export async function main(args = process.argv.slice(2), options = {}) {

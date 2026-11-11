@@ -701,6 +701,17 @@ deployments; that compatibility path cannot bypass the full-dispatch preflight.
 Base-head, context, full-review, primary-change, range and rebase/conflict proof
 reads use 90 seconds nominal and a 540-second ceiling. A timed-out read gets
 one retry; permanent failures and semantic stop codes return immediately.
+For the `checkout` step only, a plain `git checkout BRANCH` collision gets one
+recovery attempt. The runner parses the canonical holder path, verifies the
+same shared Git repository and expected branch, then calls
+`hq worker release-branch --root HQ_ROOT --holder PATH --branch BRANCH`.
+Agent OS owns the terminal/lease/process/cleanliness proofs, salvage refs and
+fenced detach. A successful release permits exactly one checkout retry; live,
+dirty, uncertain or unavailable release evidence stops with the holder named.
+This path never tears down a worker or deletes its branch or directory.
+Other mutations retain their single-attempt contract. Deploy the companion
+Agent OS command before relying on recovery; an unavailable command retains custody.
+
 The canonical full-review command is
 `ham_read review-read "$HAM_NODE_BIN" "$HAM_ROOT_DIR/bin/hammer-pr-read.mjs" "$HAM_REPO" "$HAM_PR_NUMBER" --full-review`.
 It displays and atomically writes all paginated review bodies and commit

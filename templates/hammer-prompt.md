@@ -973,7 +973,7 @@ resolver line. Do not execute past unresolved hand-written conflicts.
 # BASE_BRANCH is the live value captured by the lease-state block above.
 HEAD_BRANCH=$(ham_pr --json headRefName --jq '.headRefName')
 ham_bounded_git_sync "$BASE_BRANCH" "$HEAD_BRANCH"
-git checkout "$HEAD_BRANCH"
+"$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" mutation:report checkout 90 540 git checkout "$HEAD_BRANCH"
 # HAMEMPTYPRIMARY-01: capture the fetched source before replay. For a
 # conflict-only repair of the reviewed head, retain author messages/identity;
 # never squash or amend the author change into a HAM-classified commit.

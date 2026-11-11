@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Bound one helper, scale once, and retry only an explicitly read-only timeout.
+// Bound helpers; retry read timeouts and one proven branch-custody collision.
 import { execFileSync, spawn } from 'node:child_process';
 import { closeSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { constants, tmpdir } from 'node:os';
@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { MAX_TIMER_DELAY_MS } from '../src/load-aware-timeout.mjs';
 import { isLoadTimeout, OVERLOAD_DEFERRED } from '../src/overload-deferral.mjs';
 import { writeFileAtomic } from '../src/atomic-write.mjs';
+import { releaseCheckoutHolder } from '../src/ama/checkout-holder.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -75,6 +76,7 @@ export async function runHelperStep({ mode, step, nominal, ceiling, command, arg
   stdout = text => process.stdout.write(text),
   stderr = text => process.stderr.write(text),
   delay = ms => new Promise(resolve => setTimeout(resolve, ms)),
+  releaseHolder = releaseCheckoutHolder,
 } = {}) {
   if (!['read', 'mutation', 'read:report', 'mutation:report'].includes(mode) || !/^[a-z][a-z0-9-]*$/.test(step || '')
     || !Number.isSafeInteger(nominal) || nominal <= 0 || !Number.isSafeInteger(ceiling)
@@ -95,11 +97,20 @@ export async function runHelperStep({ mode, step, nominal, ceiling, command, arg
     const directory = mkdtempSync(join(env.TMPDIR || tmpdir(), 'ham-helper-'));
     try {
       const reasonFile = join(directory, 'failure-reason');
-      const result = await execute(command, args, { seconds, directory,
+      let result = await execute(command, args, { seconds, directory,
         env: { ...env, HAM_HELPER_FAILURE_FILE: reasonFile } });
-      const output = readFileSync(join(directory, 'stdout'), 'utf8');
-      const errors = readFileSync(join(directory, 'stderr'), 'utf8')
+      let output = readFileSync(join(directory, 'stdout'), 'utf8');
+      let errors = readFileSync(join(directory, 'stderr'), 'utf8')
         + (result.spawnError ? `${result.spawnError}\n` : '');
+      if (mode.startsWith('mutation') && step === 'checkout' && result.code !== 0 && !result.timedOut
+        && await releaseHolder({ command, args, errors, env, stderr })) {
+        stderr(errors);
+        result = await execute(command, args, { seconds, directory,
+          env: { ...env, HAM_HELPER_FAILURE_FILE: reasonFile } });
+        output = readFileSync(join(directory, 'stdout'), 'utf8');
+        errors = readFileSync(join(directory, 'stderr'), 'utf8')
+          + (result.spawnError ? `${result.spawnError}\n` : '');
+      }
       stderr(errors);
       const timeout = result.timedOut || [124, 142].includes(result.code)
         || (result.code === 1 && /\b(?:ETIMEDOUT|timed out|timeout)\b/i.test(
@@ -123,7 +134,7 @@ export async function runHelperStep({ mode, step, nominal, ceiling, command, arg
         await delay(1000 * attempt);
         continue;
       }
-      // Keep API publication receipts even on failure. Never replay a mutation.
+      // Keep API publication receipts even on failure. Other mutations never replay.
       stdout(output);
       let reason = `${step}-failed`;
       try { reason = readFileSync(reasonFile, 'utf8').trim(); } catch { /* No child audit. */ }

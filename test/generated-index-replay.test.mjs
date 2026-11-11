@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { recoverTerminalCommentOnlyRound } from '../src/comment-only-final-round-recovery.mjs';
@@ -16,39 +16,55 @@ const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTE
 const git = (dir, ...args) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8', env }).trim();
 const implementationPath = (n) => n === 2 ? 'docs/reviewed.md' : `feature${n}.txt`;
 const commit = (dir, message) => { git(dir, 'add', '--all'); git(dir, 'commit', '-qm', message); return git(dir, 'rev-parse', 'HEAD'); };
+// Every case receives an ordinary private copy of the same immutable history.
+// Do not use hardlinks or Git alternates: proofs mutate refs and object stores.
+let seed;
+const cleanSeed = () => { if (seed) rmSync(seed.dir, { recursive: true, force: true }); };
+test.after(cleanSeed);
+process.once('exit', cleanSeed);
 function fixture(t) {
   const dir = mkdtempSync(join(tmpdir(), 'pmsc14-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  git(dir, 'init', '-qb', 'main');
-  mkdirSync(join(dir, 'docs')); mkdirSync(join(dir, 'scripts'));
-  writeFileSync(join(dir, 'scripts/check-generated-index-pr-diff.py'), readFileSync(new URL('./fixtures/generated-index-policy/check-generated-index-pr-diff.py.txt', import.meta.url)));
-  writeFileSync(join(dir, '.gitattributes'), 'docs/INDEX.md merge=agentos-docs-index\n');
-  writeFileSync(join(dir, 'docs/INDEX.md'), 'original index\n');
-  writeFileSync(join(dir, 'code.txt'), 'base\n');
-  const base = commit(dir, 'base');
-  git(dir, 'checkout', '-qb', 'reviewed');
-  const commits = [];
-  for (let n = 1; n <= 3; n++) {
-    writeFileSync(join(dir, implementationPath(n)), `implementation ${n}\n`);
-    if (n === 1) writeFileSync(join(dir, 'docs/reviewed.md'), 'first reviewed doc\n');
-    if (n !== 2) writeFileSync(join(dir, 'docs/INDEX.md'), `intermediate index ${n}\n`);
-    commits.push(commit(dir, `mixed ${n}`));
+  let base, freshBase, commits, reviewedHead, head;
+  if (seed) {
+    cpSync(seed.dir, dir, { recursive: true });
+    ({ base, freshBase, commits, reviewedHead, head } = seed);
+    commits = [...commits];
+  } else {
+    git(dir, 'init', '-qb', 'main');
+    mkdirSync(join(dir, 'docs')); mkdirSync(join(dir, 'scripts'));
+    writeFileSync(join(dir, 'scripts/check-generated-index-pr-diff.py'), readFileSync(new URL('./fixtures/generated-index-policy/check-generated-index-pr-diff.py.txt', import.meta.url)));
+    writeFileSync(join(dir, '.gitattributes'), 'docs/INDEX.md merge=agentos-docs-index\n');
+    writeFileSync(join(dir, 'docs/INDEX.md'), 'original index\n');
+    writeFileSync(join(dir, 'code.txt'), 'base\n');
+    base = commit(dir, 'base');
+    git(dir, 'checkout', '-qb', 'reviewed');
+    commits = [];
+    for (let n = 1; n <= 3; n++) {
+      writeFileSync(join(dir, implementationPath(n)), `implementation ${n}\n`);
+      if (n === 1) writeFileSync(join(dir, 'docs/reviewed.md'), 'first reviewed doc\n');
+      if (n !== 2) writeFileSync(join(dir, 'docs/INDEX.md'), `intermediate index ${n}\n`);
+      commits.push(commit(dir, `mixed ${n}`));
+    }
+    writeFileSync(join(dir, 'docs/INDEX.md'), 'original index\n');
+    reviewedHead = commit(dir, 'INDEX-only reset');
+    git(dir, 'checkout', '-q', 'main');
+    writeFileSync(join(dir, 'docs/INDEX.md'), 'fresh authoritative index\n');
+    writeFileSync(join(dir, 'trunk.txt'), 'fresh trunk\n');
+    freshBase = commit(dir, 'fresh base');
+    git(dir, 'update-ref', 'refs/remotes/origin/main', freshBase);
+    git(dir, 'checkout', '-qb', 'push');
+    for (let n = 1; n <= 3; n++) {
+      writeFileSync(join(dir, implementationPath(n)), `implementation ${n}\n`);
+      if (n === 1) writeFileSync(join(dir, 'docs/reviewed.md'), 'first reviewed doc\n');
+      commit(dir, `replay ${n}`);
+    }
+    writeFileSync(join(dir, 'fix.txt'), 'job remediation\n');
+    head = commit(dir, 'remediation\n\nWorker-Job-Id: job-42');
+    const seedDir = mkdtempSync(join(tmpdir(), 'index-replay-seed-'));
+    cpSync(dir, seedDir, { recursive: true });
+    seed = { dir: seedDir, base, freshBase, commits: [...commits], reviewedHead, head };
   }
-  writeFileSync(join(dir, 'docs/INDEX.md'), 'original index\n');
-  const reviewedHead = commit(dir, 'INDEX-only reset');
-  git(dir, 'checkout', '-q', 'main');
-  writeFileSync(join(dir, 'docs/INDEX.md'), 'fresh authoritative index\n');
-  writeFileSync(join(dir, 'trunk.txt'), 'fresh trunk\n');
-  const freshBase = commit(dir, 'fresh base');
-  git(dir, 'update-ref', 'refs/remotes/origin/main', freshBase);
-  git(dir, 'checkout', '-qb', 'push');
-  for (let n = 1; n <= 3; n++) {
-    writeFileSync(join(dir, implementationPath(n)), `implementation ${n}\n`);
-    if (n === 1) writeFileSync(join(dir, 'docs/reviewed.md'), 'first reviewed doc\n');
-    commit(dir, `replay ${n}`);
-  }
-  writeFileSync(join(dir, 'fix.txt'), 'job remediation\n');
-  const head = commit(dir, 'remediation\n\nWorker-Job-Id: job-42');
   const args = { repo: 'laceyenterprises/agent-os', prNumber: 7544, jobId: 'job-42', reviewedHead,
     baseBranch: 'main', workspaceDir: dir, log: { warn() {} },
     execFileImpl: async (command, argv, options) => command === 'gh'
@@ -371,5 +387,22 @@ test('PMSC-14 never excludes sibling generated paths, nested indexes, reviewed t
     f.args.reviewedHead = commit(f.dir, 'reviewed additional path');
     git(f.dir, 'checkout', '-q', 'push');
     assert.equal((await proveFinalRoundWorkerPush(f.args)).workerPushedHeadSha, null, path);
+  }
+});
+
+
+test('INDEX replay fixture copies keep refs, objects and worktrees independent', (t) => {
+  const first = fixture(t), peer = fixture(t);
+  first.commits.pop();
+  writeFileSync(join(first.dir, 'private.txt'), 'private change\n');
+  const changed = commit(first.dir, 'private mutation');
+  git(first.dir, 'update-ref', 'refs/remotes/origin/main', changed);
+  const next = fixture(t);
+  for (const copy of [peer, next]) {
+    assert.equal(copy.commits.length, 3);
+    assert.equal(git(copy.dir, 'rev-parse', 'HEAD'), copy.head);
+    assert.equal(git(copy.dir, 'rev-parse', 'refs/remotes/origin/main'), copy.freshBase);
+    assert.equal(git(copy.dir, 'status', '--porcelain'), '');
+    assert.throws(() => git(copy.dir, 'cat-file', '-e', changed));
   }
 });

@@ -52,9 +52,13 @@ if (isTestWorker) {
   process.env.ADVERSARIAL_REVIEW_TEST_CWD = workerRoot;
   const temporary = path.join(sandboxRoot, `t${Number(path.basename(workerRoot).slice(5))}`);
   for (const key of ['TMPDIR', 'TMP', 'TEMP']) process.env[key] = temporary;
-  // Only repeated CLI fixtures benefit from caching their subprocess modules.
-  // Other files generate one-off scripts; caching those increases disk contention.
-  if (['hammer-api-publish-cli.test.mjs', 'hammer-attestation-retry.test.mjs'].includes(path.basename(testFile))) {
+  // Repeated CLI/loader fixtures reuse large module graphs in child processes.
+  // Keep the cache private to this file; one-off scripts do not enable it.
+  if (['hammer-api-publish-cli.test.mjs', 'hammer-attestation-retry.test.mjs',
+    'watcher-claim-loop.test.mjs', 'ama-hammer-retry-cap.test.mjs',
+    'ama-closer-dispatch-priority.test.mjs', 'hammertrim-contract.test.mjs',
+    'generated-index-replay.test.mjs', 'follow-up-remediation.test.mjs',
+    'ama-hammer-background-dispatch.test.mjs'].includes(path.basename(testFile))) {
     process.env.NODE_COMPILE_CACHE = path.join(workerRoot, 'compile-cache');
   }
   process.env.ADVERSARIAL_REVIEW_STATE_DIR = path.join(workerRoot, 'data');

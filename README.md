@@ -276,11 +276,12 @@ npm test
 ```
 
 CI runs both on Node 22 and Node 26 on every PR. The runner balances files by
-measured duration across eight workers per available CPU, capped at sixteen.
+measured duration across two workers per available CPU, capped at eight.
 A single native coordinator feeds the longest pending file to each free worker.
+The SMV smoke file runs alone first because it measures real process deadlines.
 Each file runs in its own process with isolated state, home and temporary
-directory. Repeated CLI fixtures use private compile caches. The suite deadline remains 900 seconds; failures name the
-file and return a nonzero status. Set `AR_TEST_TIMINGS=/absolute/path.json` to
+directory. Repeated CLI fixtures use private compile caches. The suite deadline
+remains 900 seconds; failures name the file and return a nonzero status. Set `AR_TEST_TIMINGS=/absolute/path.json` to
 record per-file wall times and total suite wall time. Scheduling hints in
 `test/fixtures/suite-durations.json` never control which files run.
 For a focused run, pass exact paths or basenames to `node test/run-tests.mjs`.

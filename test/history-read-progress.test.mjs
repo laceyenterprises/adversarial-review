@@ -111,10 +111,17 @@ test('completed file comparisons survive a later diff timeout without repeating 
   assert.deepEqual(diffCalls, [1, 2], 'only the unfinished comparison retries');
 });
 
-test('a mixed-author preservation collection finishes through repeated deferrals using durable progress', async t => {
+test('a mixed-author preservation collection finishes through repeated deferrals using durable progress', { timeout: 20_000 }, async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   let reads = 0;
   const fixture = primaryRenameRepository(t, {
-    beforeRead: async () => { if (++reads > 5) await never(); },
+    beforeRead: async () => {
+      if (++reads > 5) {
+        await new Promise(resolve => setImmediate(resolve));
+        t.mock.timers.tick(1000);
+        await never();
+      }
+    },
   });
   const options = { contextTimeoutMs: 1000,
     fetchCiCostImpl: async () => ({ headSha: fixture.args.headSha, ok: true }) };
@@ -144,14 +151,17 @@ test('persisted verified file facts still run the preservation predicate', async
 
 
 test('semantic compare, blob and recursive-tree failures discard checkpoints so the same head can recover', async t => {
-  for (const failure of ['compare', 'blob', 'blob-with-stalled-sibling', 'recursive-tree']) await t.test(failure, async t => {
+  for (const failure of ['compare', 'blob', 'blob-with-stalled-sibling', 'recursive-tree']) await t.test(failure, { timeout: 10_000 }, async t => {
+    // This regression exercises semantic failure and sibling cancellation.
+    // Keep its original timer budget frozen while real fixture I/O completes.
+    t.mock.timers.enable({ apis: ['setTimeout'] });
     const rootDir = mkdtempSync(join(tmpdir(), 'history-invalid-progress-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     let broken = true, reads = 0;
     const directorySha = 'd'.repeat(40), blobSha = 'e'.repeat(40);
     const entry = { path: 'source.txt', type: 'blob', mode: '100644', sha: blobSha };
     const subtree = { path: 'dir', type: 'tree', mode: '040000', sha: directorySha };
-    const reader = () => createHistoryReader({ contextTimeoutMs: 1000,
+    const reader = () => createHistoryReader({ contextTimeoutMs: 1000, nowMs: () => 0,
       progress: { rootDir, repo, prNumber, headSha: head },
       execGhWithRetryImpl: async ({ args }) => {
         reads++;

@@ -1,7 +1,12 @@
 // Stable longest-processing-time partitioning. Missing measurements receive the
 // median known duration so new files do not all collect in the last shard.
+export const MAX_WORKERS = 8;
+// This smoke asserts real per-step wall budgets in its child process tree.
+// Keep that measurement independent of the suite's artificial CPU/I/O load.
+export const SERIAL_TEST_FILES = new Set(['test/smv.test.mjs']);
+
 export function workerCount(cpuCount, fileCount) {
-  return Math.min(fileCount, 16, Math.max(1, Math.floor(cpuCount) * 8));
+  return Math.min(fileCount, MAX_WORKERS, Math.max(1, Math.floor(cpuCount) * 2));
 }
 
 function estimate(durations) {

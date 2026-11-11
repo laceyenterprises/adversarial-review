@@ -5,19 +5,21 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync,
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { orderFiles, planShards, workerCount } from './helpers/parallel-plan.mjs';
+import { SERIAL_TEST_FILES, orderFiles, planShards, workerCount } from './helpers/parallel-plan.mjs';
 
 const helper = path.join(import.meta.dirname, 'helpers', 'parallel-runner.mjs');
 
-test('CPU-derived parallelism is bounded by CPUs, sixteen workers and the file count', () => {
-  assert.equal(workerCount(1, 100), 8);
-  assert.equal(workerCount(2, 100), 16);
-  assert.equal(workerCount(64, 100), 16);
+test('CPU-derived parallelism is bounded by CPUs, eight workers and the file count', () => {
+  assert.equal(workerCount(1, 100), 2);
+  assert.equal(workerCount(2, 100), 4);
+  assert.equal(workerCount(4, 100), 8);
+  assert.equal(workerCount(64, 100), 8);
   assert.equal(workerCount(64, 3), 3);
   assert.equal(workerCount(1, 0), 0);
 });
 
 test('shards balance measured durations longest first with deterministic ties and unknown files', () => {
+  assert.deepEqual([...SERIAL_TEST_FILES], ['test/smv.test.mjs']);
   const files = ['e', 'd', 'c', 'b', 'a'];
   const durations = { a: 8, b: 7, c: 6, d: 5 };
   const expected = [
@@ -31,6 +33,44 @@ test('shards balance measured durations longest first with deterministic ties an
   assert.deepEqual(planShards([], {}, 2), []);
   assert.throws(() => planShards(files, durations, 0), /positive worker count/);
   assert.equal(new Set(planShards(files, durations, 8).flatMap((s) => s.files)).size, files.length);
+});
+
+for (const failure of [false, true]) test(`exclusive phase completes before parallel work and aggregates TAP (failure=${failure})`, t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'serial-phase-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const files = ['serial.mjs', 'a.mjs', 'b.mjs'];
+  const paths = Object.fromEntries(files.map(file => [file, path.join(root, file)]));
+  const done = path.join(root, 'done');
+  writeFileSync(paths['serial.mjs'], `
+    import test from 'node:test';
+    import assert from 'node:assert/strict';
+    import { writeFileSync } from 'node:fs';
+    test('exclusive assertion', t => {
+      t.diagnostic('exclusive diagnostic retained');
+      writeFileSync(${JSON.stringify(done)}, '');
+      assert.equal(${failure}, false);
+    });
+  `);
+  for (const file of ['a.mjs', 'b.mjs']) writeFileSync(paths[file], `
+    import assert from 'node:assert/strict';
+    import { existsSync } from 'node:fs';
+    assert.ok(existsSync(${JSON.stringify(done)}), 'exclusive file has completed');
+  `);
+  const config = path.join(root, 'config.json'), report = path.join(root, 'report.json');
+  writeFileSync(config, JSON.stringify({ files, paths, logDir: root, reportPath: report,
+    nodeArgs: ['--test'], serialFiles: ['serial.mjs'], shards: planShards(files.slice(1), {}, 2) }));
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const child = spawnSync(process.execPath, [helper, config],
+    { env, encoding: 'utf8', timeout: 20_000 });
+  assert.equal(child.status, failure ? 1 : 0, child.stdout + child.stderr);
+  assert.equal((child.stdout.match(/^1\.\./gm) ?? []).length, 1, child.stdout);
+  assert.match(child.stdout, /^1\.\.3$/m);
+  assert.match(child.stdout, /^# tests 3$/m);
+  assert.match(child.stdout, /exclusive diagnostic retained/);
+  assert.match(child.stdout, new RegExp(`^# fail ${failure ? 1 : 0}$`, 'm'));
+  assert.equal(JSON.parse(readFileSync(report, 'utf8')).files.length, 3);
+  if (failure) assert.match(child.stderr, /Failed test file: serial.mjs/);
 });
 
 for (const failure of [false, true]) test(`real parallel processes report every file and propagate failure=${failure}`, (t) => {
@@ -83,6 +123,77 @@ test('suite timeout names the unchanged 900-second cap and removes the running s
   assert.equal(readdirSync(root).some((file) => file.startsWith('art-')), false);
 });
 
+test('native scheduling overlaps files within the configured worker bound', (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), 'parallel-bound-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const active = path.join(root, 'active'), ready = path.join(root, 'ready');
+  mkdirSync(active); mkdirSync(ready);
+  const files = ['a.mjs', 'b.mjs', 'c.mjs', 'd.mjs'];
+  const paths = Object.fromEntries(files.map(file => [file, path.join(root, file)]));
+  for (const [index, file] of files.entries()) writeFileSync(paths[file], `
+    import assert from 'node:assert/strict';
+    import { readdirSync, writeFileSync, unlinkSync } from 'node:fs';
+    import { setTimeout as delay } from 'node:timers/promises';
+    const marker = ${JSON.stringify(active)} + '/' + process.pid;
+    writeFileSync(marker, '');
+    assert.ok(readdirSync(${JSON.stringify(active)}).length <= 2, 'worker bound');
+    if (${index} < 2) {
+      writeFileSync(${JSON.stringify(ready)} + '/' + process.pid, '');
+      // The first two files must coexist; a serial scheduler cannot pass.
+      while (readdirSync(${JSON.stringify(ready)}).length < 2) await delay(10);
+    }
+    unlinkSync(marker);
+  `);
+  const config = path.join(root, 'config.json');
+  writeFileSync(config, JSON.stringify({ files, paths, logDir: root,
+    nodeArgs: ['--test'], shards: planShards(files, {}, 2) }));
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const child = spawnSync(process.execPath, [helper, config],
+    { env, encoding: 'utf8', timeout: 20_000 });
+  assert.equal(child.status, 0, child.stdout + child.stderr);
+  assert.equal(readdirSync(ready).length, 2);
+  assert.equal(readdirSync(active).length, 0);
+});
+
+
+for (const failure of [false, true]) test(`exclusive phase preserves aggregate output and failure=${failure}`, (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), 'parallel-phases-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const done = path.join(root, 'done');
+  const files = ['serial.mjs', 'a.mjs', 'b.mjs'];
+  const paths = Object.fromEntries(files.map(file => [file, path.join(root, file)]));
+  writeFileSync(paths['serial.mjs'], `
+    import test from 'node:test';
+    import assert from 'node:assert/strict';
+    import { writeFileSync } from 'node:fs';
+    test('exclusive', t => {
+      writeFileSync(${JSON.stringify(done)}, '');
+      t.diagnostic('phase diagnostic retained');
+      assert.equal(${failure}, false);
+    });
+  `);
+  for (const file of files.slice(1)) writeFileSync(paths[file], `
+    import test from 'node:test';
+    import assert from 'node:assert/strict';
+    import { existsSync } from 'node:fs';
+    test('parallel', () => assert.ok(existsSync(${JSON.stringify(done)})));
+  `);
+  const config = path.join(root, 'config.json'), reportPath = path.join(root, 'report.json');
+  writeFileSync(config, JSON.stringify({ files, paths, logDir: root, reportPath,
+    nodeArgs: ['--test'], serialFiles: ['serial.mjs'], shards: planShards(files.slice(1), {}, 2) }));
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const child = spawnSync(process.execPath, [helper, config],
+    { env, encoding: 'utf8', timeout: 20_000 });
+  assert.equal(child.status, failure ? 1 : 0, child.stdout + child.stderr);
+  assert.equal(child.stdout.match(/^1\.\.3$/gm)?.length, 1, child.stdout);
+  assert.match(child.stdout, /# tests 3/);
+  assert.match(child.stdout, new RegExp(`# fail ${failure ? 1 : 0}`));
+  assert.match(child.stdout, /phase diagnostic retained/);
+  assert.equal(JSON.parse(readFileSync(reportPath)).files.length, 3);
+  if (failure) assert.match(child.stderr, /Failed test file: serial.mjs/);
+});
 
 test('runner executes measured order across double-digit worker ranks', (t) => {
   const root = mkdtempSync(path.join(tmpdir(), 'native-order-'));

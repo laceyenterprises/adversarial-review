@@ -4728,6 +4728,8 @@ test('APPROVALREARM-01: watcher approval consumes a truncated-clock launch once 
     observeClosureWaitImpl: async () => ({ exhausted: true, retryAfterMs: 30000 }),
     deliverAlertImpl: deps.deliverAlertImpl,
     maybeDispatchAmaCloserImpl: args => maybeDispatchAmaCloser({ ...args, ...deps,
+      // Retain both classification retries without real 20/40-second waits.
+      operatorLabelClassificationRetryDelaysMs: [0, 0],
       guardStackedBaseImpl: async () => null,
       dispatchContext: { ...hammerDispatchArgs(rootDir).dispatchContext, ...args.dispatchContext,
         hqRoot, dispatchedAt: '2026-01-01T04:00:00Z' } }),

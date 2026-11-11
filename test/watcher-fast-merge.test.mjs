@@ -1,3 +1,4 @@
+import { buildRegisterSource } from './helpers/fixture-loader-register.mjs';
 import { claudeAccountFixture } from './helpers/claude-account-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -219,12 +220,6 @@ export async function load(url, context, nextLoad) {
 `;
 }
 
-function buildRegisterSource(loaderPath) {
-  return `
-import { register } from 'node:module';
-register(${JSON.stringify(pathToFileURL(loaderPath).href)}, import.meta.url);
-`;
-}
 
 function buildRunnerSource(scenario) {
   const watcherUrl = fileUrl('src', 'watcher.mjs');

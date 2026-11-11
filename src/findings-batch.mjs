@@ -3,7 +3,8 @@ import { execFile } from 'node:child_process';
 import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
-import { pickRemediationWorkerClass } from './remediation-worker-routing.mjs';
+import { DEFAULT_REMEDIATION_WORKER_CLASS, pickRemediationWorkerClass } from './remediation-worker-routing.mjs';
+import { isGrokRemediationWorkerClass } from './remediation-worker-class.mjs';
 import { parseDispatchJsonOutput, readDispatchReceipt, parseHqDispatchStatus } from './producer-contracts/dispatch-receipt.mjs';
 import { execGhWithRetry } from './gh-cli.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
@@ -310,6 +311,9 @@ export function settleFindingBatch(db, batch, result, pr = null, dropPrs = {}) {
 }
 
 export function findingBatchDispatchArgs({ batch, workerClass, promptPath, env, branch = null }) {
+  // Both decision and publication launches can cover mixed/unknown builders.
+  // Without per-finding provenance, a Grok pin cannot establish subject eligibility.
+  if (isGrokRemediationWorkerClass(workerClass)) workerClass = DEFAULT_REMEDIATION_WORKER_CLASS;
   return ['dispatch', '--priority', 'normal', '--idempotency-key', `findings-batch-${batch.batch_id}`,
     '--worker-class', workerClass, '--task-kind', 'coding', '--completion-shape', branch ? 'pr' : 'decision-only',
     ...(branch ? ['--branch', branch] : []),

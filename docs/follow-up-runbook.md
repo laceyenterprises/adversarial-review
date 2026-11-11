@@ -725,6 +725,12 @@ is no direct CLI fallback. Unknown builders and Grok-family builders cannot
 use it, including after assignment handoffs or API-key account selection.
 A Grok pin leaves Grok-built PRs on their `remediator-codex` default route;
 fallback candidates retain the subject refusal after account selection.
+Findings-batch decision and publication launches replace Grok-family pins with
+the Codex default because their mixed or unknown builder provenance cannot
+establish Grok subject eligibility. Batch dispatch uses the remediation-owned
+`isGrokRemediationWorkerClass` predicate in `src/remediation-worker-class.mjs`,
+which recognizes normalized remediation routes and legacy Grok actor aliases
+without granting those aliases dispatch admission.
 Reconciliation applies that same pin exemption to outcome attribution and
 GitHub-auth recovery, retaining the recorded non-Grok worker class. Subject
 refusals, including after assignment handoffs, stop before spawn with
@@ -733,6 +739,8 @@ adversarial-review operator: correct the lane flags or select a different
 family, then explicitly retrigger within the existing round cap. Automatic
 claims cannot re-arm this stop. Grok outcome delivery uses the existing
 Codex commenter token (`GH_CODEX_REVIEWER_TOKEN`); its body retains Grok attribution.
+Configuration load failures during subject validation requeue the claimed job
+through the config-error path; they do not count as settled subject refusals.
 Unpooled Grok quota holds supply the same job-local reset evidence as other
 remediators, including when fleet quota status is unreadable. Resets beyond
 one hold window try the declared non-Grok fallbacks on the next claim.

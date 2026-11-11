@@ -6,7 +6,8 @@ import { remediationSubjectRefusal, resolveClaimedRemediatorRouting,
 import { normalizeRemediationWorkerClass, hqRemediationWorkerClass } from '../src/remediation-worker-class.mjs';
 import { remediationWorkerTrailerClass, remediationWorkerGitIdentity } from '../src/remediation-worker-provenance.mjs';
 import { selectWorkerTokenAccount } from '../src/worker-token-pool.mjs';
-import { loadConfig } from '../src/config-loader.mjs';
+import { AgentOSConfigError, loadConfig } from '../src/config-loader.mjs';
+import { findingBatchDispatchArgs } from '../src/findings-batch.mjs';
 import { pickRemediationWorkerClass, resolveReconcileWorkerClass } from '../src/remediation-worker-routing.mjs';
 import { remediatorClassForQuotaLabel, remediatorQuotaEvidence } from '../src/remediation-quota-evidence.mjs';
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
@@ -23,6 +24,68 @@ const env = { AGENT_OS_CONFIG_PATH: '/dev/null', HQ_ROOT: tmpdir() };
 const loaderImpl = () => ({ get: (key, fallback) =>
   ['grok.enabled', 'grok.remediator.enabled'].includes(key) ? true : fallback });
 const options = { env, loaderImpl };
+
+test('both batch launch shapes replace a Grok pin when builder provenance is unavailable', () => {
+  const config = { env, loaderImpl: () => ({ get: (key, fallback) =>
+    key === 'roles.remediator' ? 'remediator-grok'
+      : ['grok.enabled', 'grok.remediator.enabled'].includes(key) ? true : fallback }) };
+  const workerClass = pickRemediationWorkerClass({ repo: 'sample/project' }, config);
+  assert.equal(workerClass, 'remediator-grok');
+  const grokClasses = [workerClass, 'grok', 'grok-api', 'grok-remediation', 'grok-reviewer',
+    'hammer-grok', ' REMEDIATOR-GROK ', ' Grok-Remediation '];
+  const otherClasses = ['codex', 'remediator-codex-corp', 'claude-code', 'remediator-claude-corp',
+    'gemini', 'remediator-gemini', 'custom-worker'];
+  for (const branch of [null, 'fixture/batch']) {
+    for (const candidate of [...grokClasses, ...otherClasses]) {
+      const args = findingBatchDispatchArgs({
+        batch: { batch_id: 'fixture', repo: 'sample/project' },
+        workerClass: candidate, promptPath: '/fixture/prompt.md', env, branch,
+      });
+      assert.equal(args[args.indexOf('--worker-class') + 1],
+        otherClasses.includes(candidate) ? candidate : 'codex');
+      assert.equal(args[args.indexOf('--completion-shape') + 1], branch ? 'pr' : 'decision-only');
+    }
+  }
+});
+
+test('consumer requeues config failure arising after initial Grok selection', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'grok-config-retry-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  createFollowUpJob({ rootDir, repo: 'sample/project', prNumber: 42,
+    branch: 'fixture/remediation', builderTag: 'codex', reviewerModel: 'gemini',
+    reviewBody: '## Blocking issues\n- Synthetic finding\n\n## Verdict\nRequest changes',
+    critical: true, reviewPostedAt: '2026-10-19T00:00:00Z' });
+  let configFailed = false;
+  const error = new AgentOSConfigError('configuration changed during routing', { key: 'grok.enabled' });
+  await assert.rejects(consumeNextFollowUpJob({
+    rootDir, promptTemplate: 'Synthetic remediation prompt.',
+    loaderImpl: () => {
+      if (configFailed) throw error;
+      return { get: (key, fallback) => key === 'roles.remediator' ? 'remediator-grok'
+        : ['grok.enabled', 'grok.remediator.enabled'].includes(key) ? true : fallback };
+    },
+    healthRouter: { getMode: () => 'local' },
+    ensureWorkerRegistryReadyImpl: async () => {},
+    resolvePRLifecycleImpl: async () => null,
+    resolveRemediationWorkerClassImpl: async args => {
+      assert.equal(args.primary, 'remediator-grok');
+      configFailed = true;
+      return { workerClass: args.primary, hold: false };
+    },
+    execFileImpl: () => assert.fail('config failure must not execute a subprocess'),
+    spawnImpl: () => assert.fail('config failure must not spawn'),
+    log: { error() {}, warn() {} },
+  }), caught => {
+    assert.equal(caught, error);
+    assert.equal(caught.isRemediationConfigError, true);
+    assert.equal(caught.followUpJobRequeued, true);
+    const job = readFollowUpJob(caught.followUpJobPath);
+    assert.equal(job.status, 'pending');
+    assert.equal(job.remediationPlan.currentRound, 0);
+    assert.equal(job.remediationPlan.stop, null);
+    return true;
+  });
+});
 
 for (const source of ['loader', 'path']) {
   test(`consumer retains ${source} config throughout initial Grok routing`, async t => {

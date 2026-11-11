@@ -25,8 +25,8 @@ async function* phases() {
   const counts = {};
   let offset = 0;
   const groups = (config.serialFiles ?? []).map(file => ({ files: [config.paths[file]], concurrency: 1 }));
-  const files = config.shards.flatMap(shard => shard.files).map(file => config.paths[file]).sort();
-  if (files.length) groups.push({ files, concurrency: Math.max(1, config.shards.length) });
+  const files = config.parallelFiles.map(file => config.paths[file]).sort();
+  if (files.length) groups.push({ files, concurrency: config.concurrency });
   for (const group of groups) {
     const source = run({ ...group, isolation: 'process', execArgv });
     source.on('test:fail', () => { failed = true; });
@@ -76,5 +76,5 @@ for (const result of results) {
 }
 const report = { wallMs: performance.now() - started, files: results };
 if (config.reportPath) writeFileSync(config.reportPath, `${JSON.stringify(report, null, 2)}\n`);
-console.error(`Test suite: ${results.length} files, ${results.filter(r => r.status !== 0).length} failed, ${Math.round(report.wallMs)} ms, ${config.shards.length} workers`);
+console.error(`Test suite: ${results.length} files, ${results.filter(r => r.status !== 0).length} failed, ${Math.round(report.wallMs)} ms, ${config.concurrency} workers`);
 process.exitCode = failed || results.some(result => result.status !== 0) ? 1 : 0;

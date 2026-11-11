@@ -1,10 +1,10 @@
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { availableParallelism, constants, tmpdir } from 'node:os';
+import { constants, tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { MAX_WORKERS, SERIAL_TEST_FILES, orderFiles, planShards, workerCount } from './helpers/parallel-plan.mjs';
+import { MAX_WORKERS, SERIAL_TEST_FILES, orderFiles, workerCount } from './helpers/parallel-plan.mjs';
 import { reclaimAbandonedSandboxes, SANDBOX_OWNER_MARKER } from './helpers/runner-sandbox.mjs';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
@@ -150,13 +150,13 @@ try {
   const parallelFiles = orderFiles(selected.filter(file => !SERIAL_TEST_FILES.has(file)), durations);
   const files = [...serialFiles, ...parallelFiles];
   const paths = Object.fromEntries(files.map((file, index) => [file, path.join(makeWorkerRoot(index), file)]));
-  const shards = parallelFiles.length
-    ? planShards(parallelFiles, durations, workerCount(availableParallelism(), parallelFiles.length)) : [];
+  const concurrency = workerCount(parallelFiles.length);
   const logDir = path.join(sandboxRoot, 'logs');
   mkdirSync(logDir);
   const configPath = path.join(sandboxRoot, 'parallel-config.json');
   writeFileSync(configPath, JSON.stringify({
-    files, paths, shards, serialFiles, logDir, reportPath: process.env.AR_TEST_TIMINGS,
+    files, paths, parallelFiles, concurrency, serialFiles, logDir,
+    reportPath: process.env.AR_TEST_TIMINGS ? path.resolve(process.env.AR_TEST_TIMINGS) : undefined,
     nodeArgs: [
       '--preserve-symlinks', '--preserve-symlinks-main',
       ...['child-leak-guard', 'rate-limit-state-isolation', 'load-aware-timeout-fixture', 'temp-sandbox-guard']
@@ -164,7 +164,7 @@ try {
       '--test', '--test-concurrency=1', '--test-reporter', path.join(testDir, 'helpers', 'parallel-reporter.mjs'),
     ],
   }));
-  console.error(`Test plan: ${files.length} files, ${serialFiles.length} exclusive, ${shards.length} measured parallel shards (maximum ${MAX_WORKERS}).`);
+  console.error(`Test plan: ${files.length} files, ${serialFiles.length} exclusive, ${concurrency} parallel workers in measured order (maximum ${MAX_WORKERS}).`);
   // Tests own their CLI fixture; an omitted stub must not use host credentials.
   const fixtureBin = path.join(sandboxRoot, 'fixture-bin');
   mkdirSync(fixtureBin);

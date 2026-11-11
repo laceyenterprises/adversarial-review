@@ -20,8 +20,12 @@ function fixture(t) {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-prompt-contract-'));
   const children = new Set();
   const killGroup = (child, signal = 'SIGKILL') => {
-    if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
-    try { process.kill(-child.pid, signal); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+    if (!child.pid) return;
+    // Descendants can retain the group and its pipes after bash exits.
+    try { process.kill(-child.pid, signal); } catch (error) {
+      if (error.code === 'EPERM' && (child.exitCode !== null || child.signalCode !== null)) return;
+      if (error.code !== 'ESRCH') throw error;
+    }
   };
   t.after(() => {
     for (const child of children) killGroup(child);
@@ -182,6 +186,15 @@ exec ${shellQuote(realGit)} "$@"
   });
   return { dir, run, head, reviewed, base, env, render, execute };
 }
+
+test('command timeout reaps descendants holding pipes after the group leader exits', async t => {
+  const f = fixture(t);
+  const source = "process.on('SIGTERM', () => {}); console.log('descendant ready'); setInterval(() => {}, 1000);";
+  const result = await f.execute(`${shellQuote(process.execPath)} -e ${shellQuote(source)} &\nexit 0`);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /descendant ready/);
+  assert.match(result.error?.message ?? '', /documented command exceeded 10 seconds/);
+});
 
 test('offline transport fixtures handle blob queries and reject unknown projections', async t => {
   const f = fixture(t);

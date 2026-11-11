@@ -5,34 +5,26 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync,
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { SERIAL_TEST_FILES, orderFiles, planShards, workerCount } from './helpers/parallel-plan.mjs';
+import { SERIAL_TEST_FILES, orderFiles, workerCount } from './helpers/parallel-plan.mjs';
 
 const helper = path.join(import.meta.dirname, 'helpers', 'parallel-runner.mjs');
 
-test('CPU-derived parallelism is bounded by CPUs, eight workers and the file count', () => {
-  assert.equal(workerCount(1, 100), 2);
-  assert.equal(workerCount(2, 100), 4);
-  assert.equal(workerCount(4, 100), 8);
-  assert.equal(workerCount(64, 100), 8);
-  assert.equal(workerCount(64, 3), 3);
-  assert.equal(workerCount(1, 0), 0);
+test('parallelism retains eight workers, capped only by the file count', () => {
+  assert.equal(workerCount(100), 8);
+  assert.equal(workerCount(8), 8);
+  assert.equal(workerCount(3), 3);
+  assert.equal(workerCount(0), 0);
 });
 
-test('shards balance measured durations longest first with deterministic ties and unknown files', () => {
+test('measured order is longest first with deterministic ties and unknown files', () => {
   assert.deepEqual([...SERIAL_TEST_FILES], ['test/smv.test.mjs']);
   const files = ['e', 'd', 'c', 'b', 'a'];
   const durations = { a: 8, b: 7, c: 6, d: 5 };
-  const expected = [
-    { files: ['a', 'c', 'd'], durationMs: 19 },
-    { files: ['b', 'e'], durationMs: 14 },
-  ];
-  assert.deepEqual(planShards(files, durations, 2), expected);
-  assert.deepEqual(planShards([...files].reverse(), durations, 2), expected);
-  assert.deepEqual(orderFiles(files, durations), ['a', 'b', 'e', 'c', 'd']);
-  assert.deepEqual(planShards(['z', 'a', 'b'], {}, 2).map((s) => s.files), [['a', 'z'], ['b']]);
-  assert.deepEqual(planShards([], {}, 2), []);
-  assert.throws(() => planShards(files, durations, 0), /positive worker count/);
-  assert.equal(new Set(planShards(files, durations, 8).flatMap((s) => s.files)).size, files.length);
+  const expected = ['a', 'b', 'e', 'c', 'd'];
+  assert.deepEqual(orderFiles(files, durations), expected);
+  assert.deepEqual(orderFiles([...files].reverse(), durations), expected);
+  assert.deepEqual(orderFiles(['z', 'a', 'b'], {}), ['a', 'b', 'z']);
+  assert.deepEqual(orderFiles([], {}), []);
 });
 
 for (const failure of [false, true]) test(`exclusive phase completes before parallel work and aggregates TAP (failure=${failure})`, t => {
@@ -58,7 +50,7 @@ for (const failure of [false, true]) test(`exclusive phase completes before para
   `);
   const config = path.join(root, 'config.json'), report = path.join(root, 'report.json');
   writeFileSync(config, JSON.stringify({ files, paths, logDir: root, reportPath: report,
-    nodeArgs: ['--test'], serialFiles: ['serial.mjs'], shards: planShards(files.slice(1), {}, 2) }));
+    nodeArgs: ['--test'], serialFiles: ['serial.mjs'], parallelFiles: files.slice(1), concurrency: 2 }));
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
   const child = spawnSync(process.execPath, [helper, config],
@@ -84,7 +76,7 @@ for (const failure of [false, true]) test(`real parallel processes report every 
   const config = path.join(root, 'config.json');
   writeFileSync(config, JSON.stringify({ files, paths, logDir: root, nodeArgs: ['--test', '--test-concurrency=1', '--test-reporter',
       path.join(import.meta.dirname, 'helpers', 'parallel-reporter.mjs')], reportPath,
-    shards: planShards(files, {}, 2) }));
+    parallelFiles: files, concurrency: 2 }));
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
   const child = spawnSync(process.execPath, [helper, config], { env, encoding: 'utf8', timeout: 20_000 });
@@ -146,7 +138,7 @@ test('native scheduling overlaps files within the configured worker bound', (t) 
   `);
   const config = path.join(root, 'config.json');
   writeFileSync(config, JSON.stringify({ files, paths, logDir: root,
-    nodeArgs: ['--test'], shards: planShards(files, {}, 2) }));
+    nodeArgs: ['--test'], parallelFiles: files, concurrency: 2 }));
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
   const child = spawnSync(process.execPath, [helper, config],
@@ -181,7 +173,7 @@ for (const failure of [false, true]) test(`exclusive phase preserves aggregate o
   `);
   const config = path.join(root, 'config.json'), reportPath = path.join(root, 'report.json');
   writeFileSync(config, JSON.stringify({ files, paths, logDir: root, reportPath,
-    nodeArgs: ['--test'], serialFiles: ['serial.mjs'], shards: planShards(files.slice(1), {}, 2) }));
+    nodeArgs: ['--test'], serialFiles: ['serial.mjs'], parallelFiles: files.slice(1), concurrency: 2 }));
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
   const child = spawnSync(process.execPath, [helper, config],
@@ -204,8 +196,17 @@ test('runner executes measured order across double-digit worker ranks', (t) => {
   writeFileSync(path.join(root, 'package.json'), '{"type":"module"}');
   writeFileSync(path.join(root, 'test', 'run-tests.mjs'),
     readFileSync(path.join(import.meta.dirname, 'run-tests.mjs')));
-  for (const name of ['src', 'node_modules', 'test/helpers']) {
+  for (const name of ['src', 'node_modules']) {
     symlinkSync(path.join(repo, name), path.join(root, name), 'dir');
+  }
+  // Force one slot to observe dispatch order independently of CPU capacity.
+  mkdirSync(path.join(root, 'test', 'helpers'));
+  writeFileSync(path.join(root, 'test', 'helpers', 'parallel-plan.mjs'), `
+    export { MAX_WORKERS, SERIAL_TEST_FILES, orderFiles } from ${JSON.stringify(path.join(repo, 'test/helpers/parallel-plan.mjs'))};
+    export const workerCount = () => 1;
+  `);
+  for (const name of readdirSync(path.join(repo, 'test/helpers'))) {
+    if (name !== 'parallel-plan.mjs') symlinkSync(path.join(repo, 'test/helpers', name), path.join(root, 'test/helpers', name));
   }
   const trace = path.join(root, 'order');
   const names = Array.from({ length: 12 }, (_, n) => `test/f${String(n).padStart(2, '0')}.test.mjs`);
@@ -217,14 +218,14 @@ test('runner executes measured order across double-digit worker ranks', (t) => {
   `);
   writeFileSync(path.join(root, 'test', 'fixtures', 'suite-durations.json'),
     JSON.stringify(Object.fromEntries(names.map((file, n) => [file, n + 1]))));
-  const hook = path.join(root, 'cpu.mjs');
-  writeFileSync(hook, `import os from 'node:os';
-    import { syncBuiltinESMExports } from 'node:module';
-    os.availableParallelism = () => 0; syncBuiltinESMExports();`);
-  const env = { ...process.env, ADVERSARIAL_REVIEW_TEST_TEMP_BASE: root };
+  const env = { ...process.env, ADVERSARIAL_REVIEW_TEST_TEMP_BASE: root, AR_TEST_TIMINGS: 'timings.json' };
   delete env.NODE_TEST_CONTEXT;
-  const child = spawnSync(process.execPath, ['--import', hook, path.join(root, 'test', 'run-tests.mjs')],
-    { env, encoding: 'utf8', timeout: 45_000 });
+  const child = spawnSync(process.execPath, [path.join(root, 'test', 'run-tests.mjs')],
+    { cwd: root, env, encoding: 'utf8', timeout: 45_000 });
   assert.equal(child.status, 0, child.stdout + child.stderr);
   assert.deepEqual(readFileSync(trace, 'utf8').trim().split('\n'), names.reverse());
+  const report = JSON.parse(readFileSync(path.join(root, 'timings.json'), 'utf8'));
+  assert.equal(report.files.length, names.length);
+  assert.ok(report.files.every(file => file.status === 0));
+  assert.equal(readdirSync(root).some(file => file.startsWith('art-')), false);
 });

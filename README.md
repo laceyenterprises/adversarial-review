@@ -275,15 +275,19 @@ The full unit + adapter test suite runs the same way:
 npm test
 ```
 
-CI runs both on Node 22 and Node 26 on every PR. The runner balances files by
-measured duration across two workers per available CPU, capped at eight.
+CI runs both on Node 22 and Node 26 on every PR. Node 22.10 or newer is required
+for native test-runner `execArgv` support, which installs each file's preloads.
+The runner schedules files by measured duration across eight workers, capped
+only by the number of selected parallel files.
 A single native coordinator feeds the longest pending file to each free worker.
 The SMV smoke file runs alone first because it measures real process deadlines.
 Each file runs in its own process with isolated state, home and temporary
 directory. Repeated CLI fixtures use private compile caches. The suite deadline
-remains 900 seconds; failures name the file and return a nonzero status. Set `AR_TEST_TIMINGS=/absolute/path.json` to
-record per-file wall times and total suite wall time. Scheduling hints in
-`test/fixtures/suite-durations.json` never control which files run.
+remains 900 seconds; failures name the file and return a nonzero status.
+Set `AR_TEST_TIMINGS=/absolute/path.json` to
+record per-file wall times and total suite wall time. Relative report paths
+resolve against the caller's working directory and survive sandbox cleanup.
+Scheduling hints in `test/fixtures/suite-durations.json` never control which files run.
 For a focused run, pass exact paths or basenames to `node test/run-tests.mjs`.
 
 ### AgentOS Reviewer Runtime Routing
@@ -360,7 +364,7 @@ same kernel verdict contract.
 ```bash
 git clone https://github.com/laceyenterprises/adversarial-review.git
 cd adversarial-review
-npm ci            # Node >=22 <27
+npm ci            # Node >=22.10 <27
 
 export ANTHROPIC_API_KEY=...   # or OPENAI_API_KEY=...
 git diff main...HEAD | npm run --silent review:standalone -- \

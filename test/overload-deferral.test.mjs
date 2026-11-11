@@ -1,9 +1,10 @@
 import './helpers/rate-limit-state-isolation.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { resetConfigCache } from '../src/config-loader.mjs';
 import { deferOverload, isLoadTimeout, MAX_OVERLOAD_DEFERRALS } from '../src/overload-deferral.mjs';
 import { evaluateHammerDeferralQueue, recordHammerRetryDispatch, deferHammerRetryDispatch,
   readHammerRetryCapLedger } from '../src/ama/hammer-retry-cap.mjs';
@@ -27,7 +28,7 @@ test('v1 wire vectors match the platform contract without a Python runtime', () 
 
 test('shared v1 load classification excludes policy failures and idle deadlines', () => {
   for (const [timedOut, loadMultiplier, deadlineSeconds, scaledBudgetSeconds, expected] of [
-    [true, 6, 60, 60, true], [true, 1, 30, 60, true],
+    [true, 6, 60, 60, true], [true, 1, 30, 60, false], [true, 1.1, 300, 330, false], [true, 2, 600, 600, true], [true, 3, 900, 900, true],
     [true, 1, 60, 60, false], [false, 6, 30, 60, false], [true, NaN, 30, 60, false],
   ]) assert.equal(isLoadTimeout({ timedOut, loadMultiplier, deadlineSeconds, scaledBudgetSeconds }), expected);
 });
@@ -118,4 +119,23 @@ test('load timeout defers audit, releases the exact lease and recovers without a
   recordHammerEarlyFailure('predicate-not-eligible', { env, final: true });
   assert.equal(readAmaAuditEntry(root, env.HAM_REPO, 7, head).status, 'failed-without-merge');
   assert.equal(existsSync(join(root, 'dispatch/lrq_synthetic/hammer-progress/wrun_synthetic/terminal-stop.json')), true);
+});
+
+
+test('OVERLOADDEFER-01c: runtime adapter honors the configured overload threshold', () => {
+  const root = mkdtempSync(join(tmpdir(), 'overload-threshold-'));
+  const prior = process.env.AGENT_OS_CONFIG_PATH;
+  try {
+    const top = join(root, 'config.yaml');
+    writeFileSync(top, 'version: 1\nworker_pool:\n  overload_deferral:\n    minimum_multiplier: 3\n');
+    process.env.AGENT_OS_CONFIG_PATH = top;
+    resetConfigCache();
+    assert.equal(isLoadTimeout({ timedOut: true, deadlineSeconds: 600, scaledBudgetSeconds: 600, loadMultiplier: 2.9 }), false);
+    assert.equal(isLoadTimeout({ timedOut: true, deadlineSeconds: 900, scaledBudgetSeconds: 900, loadMultiplier: 3 }), true);
+  } finally {
+    if (prior === undefined) delete process.env.AGENT_OS_CONFIG_PATH;
+    else process.env.AGENT_OS_CONFIG_PATH = prior;
+    resetConfigCache();
+    rmSync(root, { recursive: true, force: true });
+  }
 });

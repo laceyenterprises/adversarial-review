@@ -83,3 +83,17 @@ test('CFGFOREIGN-01: new foreign sections are ignored in checked-in config', () 
     }), { version: 1 });
   }
 });
+
+test('OVERLOADDEFER-01c: overload threshold mirrors Python and shell CFG', () => {
+  withConfig(({ topPath }) => {
+    assert.equal(loadConfig({ topPath, env: {} }).get('worker_pool.overload_deferral.minimum_multiplier'), 2);
+    writeFileSync(topPath, 'version: 1\nworker_pool:\n  overload_deferral:\n    minimum_multiplier: 3\n');
+    for (const loader of [loadConfig, loadConfigRuntime]) {
+      assert.equal(loader({ topPath, env: {} }).get('worker_pool.overload_deferral.minimum_multiplier'), 3);
+    }
+    for (const value of [1.9, 20.1, true, 'two', null]) {
+      writeFileSync(topPath, JSON.stringify({ version: 1, worker_pool: { overload_deferral: { minimum_multiplier: value } } }));
+      assert.throws(() => loadConfig({ topPath, env: {} }));
+    }
+  });
+});

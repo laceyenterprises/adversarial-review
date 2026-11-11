@@ -124,12 +124,14 @@ test('claim-time routing passes the mode through and logs the refused lane', asy
   assert.ok(warnings.some(line => line.includes('remediator-claude-corp refused in local mode')), warnings.join('\n'));
 });
 
-function nativeConsumeFixture(t) {
+function nativeConsumeFixture(t, { grokEnabled = false } = {}) {
   const rootDir = mkdtempSync(join(tmpdir(), 'remediatorlane-01-'));
   // HQ_ROOT names a directory that does not exist: HQ dispatch is unreachable.
   const overrides = { AGENT_OS_CONFIG_PATH: '/dev/null', AGENT_OS_ROLES_REMEDIATOR: 'adversarial',
     ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: undefined, ADV_WITH_HQ_INTEGRATION: undefined,
-    AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'native', HQ_ROOT: join(rootDir, 'hq-unreachable') };
+    AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'native', HQ_ROOT: join(rootDir, 'hq-unreachable'),
+    AGENT_OS_GROK_ENABLED: grokEnabled ? 'true' : undefined,
+    AGENT_OS_GROK_REMEDIATOR_ENABLED: grokEnabled ? 'true' : undefined };
   const previous = Object.fromEntries(Object.keys(overrides).map(key => [key, process.env[key]]));
   const apply = values => {
     for (const [key, value] of Object.entries(values)) {
@@ -176,16 +178,18 @@ test('native consume with no runnable lane holds the job: no claim burned, no wo
   assert.deepEqual(hold.modeRefusals, [CORPORATE_REFUSAL]);
 });
 
-test('the native-mode refusal stays as a backstop that names the lane and the mode', async t => {
-  const rootDir = nativeConsumeFixture(t);
-  // A selector defect that ignores the mode still never reaches a spawn.
-  const error = await consumeNative(rootDir, async () => ({ workerClass: 'remediator-claude-corp',
-    hold: false, fellBack: false, reason: 'synthetic-selector-defect' })).then(
-    () => assert.fail('the backstop must refuse the corporate lane in native mode'), err => err);
-  assert.match(error.message,
-    /requires account-bound HQ dispatch \(selected lane remediator-claude-corp, mode local: requires-account-bound-hq-dispatch\)/);
-  assert.match(error.followUpJobPath, /follow-up-jobs\/failed\//);
-});
+for (const workerClass of ['remediator-claude-corp', 'remediator-grok']) {
+  test(`the native-mode refusal names the ${workerClass} lane and the mode`, async t => {
+    const rootDir = nativeConsumeFixture(t, { grokEnabled: true });
+    // A selector defect that ignores the mode still never reaches a spawn.
+    const error = await consumeNative(rootDir, async () => ({ workerClass,
+      hold: false, fellBack: false, reason: 'synthetic-selector-defect' })).then(
+      () => assert.fail('the backstop must refuse the account-bound lane in native mode'), err => err);
+    assert.equal(error.message, `account-bound remediation lane ${workerClass} requires HQ dispatch `
+      + '(mode local: requires-account-bound-hq-dispatch)');
+    assert.match(error.followUpJobPath, /follow-up-jobs\/failed\//);
+  });
+}
 
 
 for (const primary of ['ok', 'exhausted']) {

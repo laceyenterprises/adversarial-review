@@ -1,0 +1,15 @@
+actions: []
+operator_steps:
+  - description: >-
+      After the Agent OS loader and parity-fixture companion lands, allow the
+      normal AR submodule float and restart watcher/follow-up through the
+      documented deployment procedure. Verify deployed revision and PID start
+      times. Grok remediation stays opt-in and disabled by default; the closer
+      stays refused per GRK-12. Retain the effective flag values and closer
+      refusal evidence in the operator rollout record. No worker live action
+      or activation is authorized.
+    run_as: SRE deployment owner
+    command: >-
+      Follow docs/RUNBOOK-ama-closure.md and docs/follow-up-runbook.md; verify
+      post-merge-verify.json grokSubjectRefusal after deployment, including
+      both default-off flags and no effective hammer-grok closer pin.

@@ -156,13 +156,14 @@ export function resetRuntimeUnknownWarningCacheForTests() {
 // family, `remediator-grok`, `hammer-grok`), mirroring the Python schema_v1.
 // Recognition is not dispatchability: a pin naming a Grok lane loads only while
 // `grok.enabled` and that lane's flag are true (config-grok.mjs), both default false.
+// GRK-12: the closer pin is always refused pending the Merge Authority v2 executor.
 const ENUM_ROLES_REVIEWER = ['claude-code', 'codex', 'claude', 'gemini', 'grok', 'adversarial'];
 const ENUM_ROLES_REMEDIATOR = ['claude-code', 'codex', 'gemini', 'remediator-codex-corp', 'codex-corp', 'remediator-grok', 'adversarial'];
 export const ENUM_CODEX_WORKER_ACCOUNT_ORDER = Object.freeze(['personal-first', 'corporate-first']);
 // REMFALLBACK-01: the concrete remediator worker classes a capped remediator can
 // fall back to. `adversarial` is a routing mode, not a class, so it is excluded.
-// REMGEMINI-01: `remediator-grok` reserves the Grok slot. Until that class can
-// run, the fallback selection skips it for the launch and tries the next one.
+// GRK-12: Grok remediation additionally requires its default-off lane flags,
+// enabled registry class and a known original builder from another family.
 const ENUM_ROLES_REMEDIATOR_FALLBACK = ['claude-code', 'codex', 'gemini', 'remediator-gemini', 'remediator-codex-corp', 'codex-corp', 'remediator-claude', 'remediator-grok'];
 // `hammer` is the universal end-of-budget rescue worker (codex-backed, runs under
 // the merge-agent app identity); allowed here so the budget-exhausted final pass
@@ -5989,9 +5990,20 @@ function validateGoalLineageConfig(merged, trace) {
 }
 
 // GRK-09: a role pin may name a Grok lane only while that lane is enabled.
-// Mirrors _validate_grok_role_pins in the Python loader; the message names the
-// pinned key and the flag to set, never any other config value.
+// Lane enablement mirrors _validate_grok_role_pins in the Python loader.
+// GRK-12's pending-v2 closer refusal also requires the Agent OS companion
+// loader/fixture update before deployment (docs/changes/GRK-12.md).
 function validateGrokRolePins(merged, trace) {
+  for (const key of ['roles.merge_agent_worker_class',
+    'roles.adversarial.merge_authority.worker_class',
+    'roles.adversarial.merge_authority.worker_class_fallback']) {
+    const value = getLeaf(merged, key);
+    if ((Array.isArray(value) ? value : [value]).some(pin => String(pin ?? '').trim() === 'hammer-grok')) {
+      throw new AgentOSConfigError(`${key}: grok-closer-pending-merge-authority-v2`, {
+        key, expected: 'Merge Authority v2 executor', got: value, source: 'merged-config',
+      });
+    }
+  }
   const [violation] = grokRolePinViolations(merged);
   if (!violation) return;
   const { key, value, required } = violation;

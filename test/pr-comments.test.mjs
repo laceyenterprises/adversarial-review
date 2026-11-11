@@ -2452,3 +2452,25 @@ test('buildRemediationOutcomeCommentBody omits the hardening section when harden
   assert.match(body, /## Addressed findings/);
   assert.doesNotMatch(body, /## Additional hardening/);
 });
+
+for (const [workerClass, tokenEnvName] of [
+  ['remediator-grok', 'GH_CODEX_REVIEWER_TOKEN'],
+  ['remediator-codex', 'GH_CODEX_REVIEWER_TOKEN'],
+  ['remediator-claude', 'GH_CLAUDE_REVIEWER_TOKEN'],
+]) {
+  test(`postRemediationOutcomeComment delivers ${workerClass} through its commenter identity`, async () => {
+    const calls = [];
+    const result = await postRemediationOutcomeComment({
+      repo: 'fixture/repo', prNumber: 7, workerClass, body: 'Synthetic outcome',
+      env: { [tokenEnvName]: 'synthetic-token' },
+      execFileImpl: async (_cmd, _args, options) => {
+        calls.push(options.env.GH_TOKEN);
+        return { stdout: '', stderr: '' };
+      },
+    });
+    assert.equal(result.posted, true);
+    assert.equal(result.workerClass, workerClass);
+    assert.equal(result.tokenEnvName, tokenEnvName);
+    assert.deepEqual(calls, ['synthetic-token']);
+  });
+}

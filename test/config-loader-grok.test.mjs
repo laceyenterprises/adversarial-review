@@ -1,8 +1,9 @@
 // GRK-09 — Grok knobs and default-off lane flags: Node mirror parity.
 //
-// `fixtures/grok-config-parity.v1.json` is an identical copy of the Agent OS
-// parity contract that the Python and shell readers check. Every value in it is
-// synthetic. No live config, sibling repository or credential is read here.
+// `fixtures/grok-config-parity.v1.json` must match the Agent OS parity contract
+// that the Python and shell readers check before paired deployment. GRK-12's
+// pending-v2 refusal needs a companion update; see docs/changes/GRK-12.md.
+// Every value is synthetic; no sibling repository or credential is read here.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -45,6 +46,29 @@ function schemaLeaf(schema, dotted) {
   for (const part of dotted.slice('grok.'.length).split('.')) node = node.__keys[part];
   return node;
 }
+
+test('GRK-12: all closer selectors reject padded Grok pins during schema validation', () => {
+  for (const loader of [loadConfig, loadConfigRuntime]) {
+    for (const value of [' hammer-grok ', '\thammer-grok\t']) {
+      for (const [key, roles] of [
+        ['roles.merge_agent_worker_class', { merge_agent_worker_class: value }],
+        ['roles.adversarial.merge_authority.worker_class',
+          { adversarial: { merge_authority: { worker_class: value } } }],
+        ['roles.adversarial.merge_authority.worker_class_fallback[0]',
+          { adversarial: { merge_authority: { worker_class_fallback: [value] } } }],
+      ]) {
+        const top = JSON.stringify({ version: 1, grok: { enabled: true, hammer: { enabled: true } }, roles });
+        withCase({ top }, topPath => {
+          assert.throws(() => loader({ topPath, env: {} }), error => {
+            assert.equal(error.key, key);
+            assert.match(error.message, /not in allowlist/);
+            return true;
+          });
+        });
+      }
+    }
+  }
+});
 
 test('GRK-09: Node grok schema matches the parity snapshot', () => {
   const schema = grokSchema();

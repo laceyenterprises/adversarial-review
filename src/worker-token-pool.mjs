@@ -8,12 +8,16 @@ import { reviewerPoolOwner } from './reviewer-token-pool.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { isCrossModelReviewWaived } from './adapters/subject/github-pr/routing.mjs';
 
-const REMEDIATORS = Object.freeze({ codex: 'remediator-codex', 'claude-code': 'remediator-claude',
+const REMEDIATORS = Object.freeze({ codex: 'remediator-codex', 'codex-corp': 'remediator-codex', 'claude-code': 'remediator-claude',
   claude: 'remediator-claude', 'remediator-codex-corp': 'remediator-codex',
   'remediator-claude-corp': 'remediator-claude' });
 const HAMMERS = Object.freeze({ 'hammer-corp': 'hammer', 'hammer-claude-corp': 'hammer-claude' });
-const FAMILIES = Object.freeze({ hammer: 'codex', 'hammer-claude': 'claude',
-  'remediator-codex': 'codex', 'remediator-claude': 'claude' });
+const FAMILIES = Object.freeze({ hammer: 'codex', 'hammer-claude': 'claude', grok: 'grok',
+  'remediator-grok': 'grok', 'remediator-codex': 'codex', 'remediator-claude': 'claude' });
+const PROVIDERS_BY_FAMILY = Object.freeze({ codex: 'openai', claude: 'anthropic', grok: 'xai' });
+const providerForWorker = workerClass => PROVIDERS_BY_FAMILY[
+  FAMILIES[workerClass] ?? FAMILIES[REMEDIATORS[workerClass]] ?? FAMILIES[HAMMERS[workerClass]]
+] ?? 'unknown';
 
 export async function selectWorkerTokenAccount({ identity, model, env = process.env,
   oauth = null, resolvePoolsImpl = resolveIdentityTokenPools, ownerImpl = reviewerPoolOwner,
@@ -118,6 +122,7 @@ export async function resolvePooledWorkerRouting({ primary, fallbackWorkerClasse
       const fallback = await resolveUnpooledFallback?.(candidate);
       if (fallback && !fallback.hold) return { ...fallback, fellBack: true,
         from: identity, to: fallback.workerClass,
+        provider: providerForWorker(identity), fallbackProvider: providerForWorker(fallback.workerClass),
         capSource: preferCrossFamily ? infrastructureReason : account.reason,
         primaryState: account.status,
         reason: preferCrossFamily ? 'infrastructure-fallback' : 'primary-grounded-fallback', skipped };
@@ -144,8 +149,8 @@ export async function resolvePooledWorkerRouting({ primary, fallbackWorkerClasse
     if (!fallback || fallback.status === 'unavailable' || fallback.reason === 'pool-config-conflict') continue;
     if (fallback.hold) return { ...base, hold: true, status: 'held', reason: fallback.reason, skipped };
     return { ...fallback, workerClass: candidate, fellBack: true, from: identity, to: candidate,
-      provider: FAMILIES[identity] === 'codex' ? 'openai' : 'anthropic',
-      fallbackProvider: FAMILIES[candidate] === 'codex' ? 'openai' : 'anthropic',
+      provider: providerForWorker(identity),
+      fallbackProvider: providerForWorker(candidate),
       primaryState: account.status, capSource: preferCrossFamily ? infrastructureReason : account.reason,
       reason: preferCrossFamily ? 'infrastructure-fallback' : 'primary-grounded-fallback', skipped };
   }

@@ -6296,11 +6296,16 @@ test('AMA merge_authority public docs list the Node loader worker_class enum', (
     'docs/RUNBOOK-ama-closure.md',
   ]) {
     const doc = readFileSync(join(REPO_ROOT, relativePath), 'utf8');
+    // GRK-12 defers the Grok merge-authority enum to its v2 executor.
     for (const workerClass of enumValues) {
       assert.ok(
         doc.includes(`\`${workerClass}\``),
         `${relativePath} must document ${workerClass} as an AMA closer worker class`,
       );
+    }
+    if (relativePath === 'docs/RUNBOOK-ama-closure.md') {
+      assert.ok(doc.includes('`hammer-grok`'));
+      assert.ok(doc.includes('grok-closer-pending-merge-authority-v2'));
     }
   }
 });

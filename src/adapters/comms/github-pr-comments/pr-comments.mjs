@@ -56,6 +56,9 @@ const BULLET_LIST_MAX_ITEMS = 25;
 // message) rather than crash the reconcile path.
 const WORKER_CLASS_TO_BOT_TOKEN_ENV = {
   codex: 'GH_CODEX_REVIEWER_TOKEN',
+  'remediator-codex': 'GH_CODEX_REVIEWER_TOKEN',
+  'remediator-claude': 'GH_CLAUDE_REVIEWER_TOKEN',
+  'remediator-grok': 'GH_CODEX_REVIEWER_TOKEN',
   'claude-code': 'GH_CLAUDE_REVIEWER_TOKEN',
   gemini: 'GH_GEMINI_REVIEWER_TOKEN',
   pi: 'GH_CODEX_REVIEWER_TOKEN',

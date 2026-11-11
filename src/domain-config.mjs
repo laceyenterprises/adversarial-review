@@ -7,6 +7,14 @@ function validateReviewerRuntimeConfig(config) {
   }
 }
 
+function validateMergeAuthorityConfig(config) {
+  if (String(config?.workerClass ?? '').trim() === 'hammer-grok'
+    || (Array.isArray(config?.workerClassFallback) ? config.workerClassFallback : [config?.workerClassFallback])
+      .some(value => String(value ?? '').trim() === 'hammer-grok')) {
+    throw new Error('[domain-config] grok-closer-pending-merge-authority-v2');
+  }
+}
+
 /**
  * Load a domain configuration document (`domains/<id>.json`).
  *
@@ -33,7 +41,8 @@ function loadDomainConfig(rootDir, domainId) {
   }
   const config = JSON.parse(raw);
   validateReviewerRuntimeConfig(config);
+  validateMergeAuthorityConfig(config?.mergeAuthority);
   return config;
 }
 
-export { loadDomainConfig, validateReviewerRuntimeConfig };
+export { loadDomainConfig, validateReviewerRuntimeConfig, validateMergeAuthorityConfig };

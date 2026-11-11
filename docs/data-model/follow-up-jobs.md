@@ -29,6 +29,16 @@ receives a cap refusal. The removed pending file prevents repeated-poll notices.
 
 ## Builder authorship recovery
 
+Grok subject-policy refusals before spawn, including after an assignment
+handoff, use the existing `stopped` state with
+`remediationPlan.stop.code: subject-refused`. The stop reason includes the
+refusal reason, the adversarial-review operator owner, and the action to
+correct lane flags or choose a different family, then explicitly retrigger.
+The worker is `never-spawned`; no quota retry history is written and automatic
+claims cannot re-arm the stop. Explicit retrigger is allowlisted, with the
+existing round cap and claim-time allocation unchanged. Existing lifecycle
+values and smoke promises remain unchanged.
+
 For code-PR jobs with missing or unrecognized `builderTag`, the claim consumer
 compares the PR title harness prefix, head-independent `pr_opened` worker
 identity, and explicit `Worker-Class:` metadata lines in the PR body, including

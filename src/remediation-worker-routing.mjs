@@ -130,8 +130,12 @@ function resolveRoleRegistryRemediator({ env = process.env, topPath, loaderImpl,
 
 function pickRemediationWorkerClass(job, { env = process.env, topPath, loaderImpl } = {}) {
   const envOverride = defaultRemediatorWorkerClassFromEnv(env, { topPath, loaderImpl });
-  if (envOverride) return normalizeRemediationWorkerClass(envOverride) || envOverride;
   const builderTag = normalizeBuilderClass(job?.builderTag);
+  // A Grok pin cannot remediate its own builder family. Keep that subject on
+  // its non-Grok default route instead of repeatedly claiming a refused lane.
+  if (envOverride && !(builderTag === 'grok' && normalizeBuilderClass(envOverride) === 'grok')) {
+    return normalizeRemediationWorkerClass(envOverride) || envOverride;
+  }
   if (builderTag && Object.prototype.hasOwnProperty.call(REMEDIATION_WORKER_BY_BUILDER_TAG, builderTag)) {
     return REMEDIATION_WORKER_BY_BUILDER_TAG[builderTag];
   }
@@ -141,20 +145,24 @@ function pickRemediationWorkerClass(job, { env = process.env, topPath, loaderImp
 // Re-resolve every claim so capped remediators can use a declared fallback.
 // Select for the mode that will execute; pooled proposals are admitted by HQ.
 export async function resolveInitialRemediatorRouting({ job, healthRouter, env = process.env,
-  ensureWorkerRegistryReadyImpl, resolveImpl, log }) {
+  topPath, loaderImpl, ensureWorkerRegistryReadyImpl, resolveImpl, log }) {
   const runtimeMode = resolveRemediationRuntimeMode(job, { healthRouter, env });
   const routing = await resolveClaimedRemediatorRouting({ job, ensureWorkerRegistryReadyImpl,
-    primary: pickRemediationWorkerClass(job), env, nowMs: Date.parse(job.claimedAt),
+    primary: pickRemediationWorkerClass(job, { env, topPath, loaderImpl }),
+    env, topPath, loaderImpl, nowMs: Date.parse(job.claimedAt),
     resolveImpl, log, remediationMode: runtimeMode });
   return { runtimeMode, routing };
 }
 
 // Reconcile-time GitHub operations must not return unmapped worker
 // identities such as clio-agent. A recorded spawned worker model is
-// attribution ground truth; operator pins win unless a cap fallback replaced them.
+// attribution ground truth; operator pins win unless a cap fallback or the
+// Grok-builder exemption replaced them.
 function resolveReconcileWorkerClass(job, worker) {
   const envOverride = defaultRemediatorWorkerClassFromEnv(process.env);
-  if (envOverride && !worker?.fallbackFrom) return envOverride;
+  const bypassedGrokPin = normalizeBuilderClass(job?.builderTag) === 'grok'
+    && normalizeBuilderClass(envOverride) === 'grok';
+  if (envOverride && !worker?.fallbackFrom && !bypassedGrokPin) return envOverride;
   const recordedModel = normalizeRemediationWorkerClass(worker?.model);
   if (recordedModel) return recordedModel;
   return pickRemediationWorkerClass(job);

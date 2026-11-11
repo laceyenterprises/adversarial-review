@@ -1,7 +1,6 @@
 import { hqRemediationWorkerClass } from './remediation-worker-class.mjs';
 import { prepareRemediationBuilder, readRemediationBuilderEvidence, stopRecoveredBuilderRemediator } from './remediation-builder-authorship.mjs';
 import { cleanupServiceCodexAuth } from './codex-service-home.mjs';
-
 import { withRepositoryStateCycle } from './repository-state-lock.mjs';
 import { codexToolHostLogEvidence, readDispatchCodexToolHostEvidence } from './codex-tool-host-failure.mjs';
 import { ensureWorkerRegistryReady, resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
@@ -140,7 +139,7 @@ import { OAUTH_ENV_STRIP_LIST } from './secret-source/env.mjs';
 import { cloneRemediationWorkspace } from './remediation-workspace-clone.mjs';
 import { drainRemediationJobs } from './remediation-parallel-drain.mjs';
 import { DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS, REMEDIATION_MAX_CONCURRENT_JOBS_ENV, normalizeMaxConcurrentFollowUpJobs, resolveRemediationMaxConcurrentJobs } from './remediation-concurrency.mjs';
-import { holdClaimedJobForCappedRemediator, requeueClaimedFollowUpJobBeforeSpawn, requeueClaimedJobForConflictedBaseProbe } from './remediation-claimed-requeue.mjs';
+import { holdClaimedJobForCappedRemediator, stopClaimedJobForRefusedSubject, requeueClaimedFollowUpJobBeforeSpawn, requeueClaimedJobForConflictedBaseProbe } from './remediation-claimed-requeue.mjs';
 import {
   loadRoleConfig,
   resetRoleConfigCache,
@@ -3131,6 +3130,7 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
   deliverAlertImpl = deliverAlert,
   healthRouter = null,
   readBuilderEvidenceImpl = readRemediationBuilderEvidence,
+  topPath, loaderImpl,
   log = console,
 } = {}) {
   // CFG-09: per-job boundary for the role-config cascade cache. Match
@@ -3309,13 +3309,15 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
     if (!authorship.ok) return authorship.result;
     claimed.job = authorship.job;
     const { runtimeMode, routing } = await resolveInitialRemediatorRouting({ job: claimed.job,
-      healthRouter, env: jobEnv, ensureWorkerRegistryReadyImpl,
+      healthRouter, env: jobEnv, topPath, loaderImpl, ensureWorkerRegistryReadyImpl,
       resolveImpl: resolveRemediationWorkerClassImpl, log });
     let remediatorRouting = routing;
     workerClass = remediatorRouting.workerClass;
     const ownBuilderStop = stopRecoveredBuilderRemediator({
       rootDir, job: claimed.job, jobPath: claimed.jobPath, workerClass, now, log });
     if (ownBuilderStop) return ownBuilderStop;
+    const initialSubjectStop = stopClaimedJobForRefusedSubject({ rootDir, claimed, routing: remediatorRouting, env: jobEnv, topPath, loaderImpl, now, log });
+    if (initialSubjectStop) return initialSubjectStop;
     if (!remediatorRouting.pooled) {
       jobEnv.CODEX_BROKER_PROVIDER = workerClass === 'remediator-codex-corp' ? 'codex-corp' : 'codex';
     }
@@ -3348,6 +3350,8 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
         rootDir, job: claimed.job, jobPath: claimed.jobPath, workerClass, now, log });
       if (ownBuilderStop) return ownBuilderStop;
     }
+    const subjectStop = stopClaimedJobForRefusedSubject({ rootDir, claimed, routing: remediatorRouting, env: jobEnv, topPath, loaderImpl, now, log });
+    if (subjectStop) return subjectStop;
     if (remediatorRouting.pooled || !['codex', 'remediator-codex', 'remediator-codex-corp'].includes(workerClass)) {
       delete jobEnv.CODEX_BROKER_PROVIDER;
     }
@@ -3382,7 +3386,6 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
         remediationWorker: { state: 'never-spawned' } });
       return { consumed: false, reason: baseHold.reason, job: stopped.job, jobPath: stopped.jobPath };
     }
-
     // Round-budget check first (cheap, short-circuits before any
     // OAuth/work). The pr-merge-orchestration spec's risk-tiered
     // budget enforces "stop the remediation loop when the PR has
@@ -3398,7 +3401,6 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
       };
       writeFollowUpJob(claimed.jobPath, claimed.job);
     }
-
     const currentRound = Number(claimed.job?.remediationPlan?.currentRound || 0);
     if (currentRound > roundBudgetResolution.roundBudget) {
       logRoundBudgetDecision(log, {
@@ -3426,7 +3428,6 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
         now,
         log,
       });
-
       return {
         consumed: false,
         reason: 'round-budget-exhausted',
@@ -3434,7 +3435,6 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
         jobPath: stopped.jobPath,
       };
     }
-
     workflowPushPreflight = await assertWorkflowPushCapabilityForJob({
       job: claimed.job,
       execFileImpl,
@@ -3452,10 +3452,10 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
     // Backstop only: the selection above already skips a lane the mode refuses.
     const laneModeRefusal = remediationLaneModeRefusal(workerClass, remediationMode, { env: jobEnv });
     if (laneModeRefusal) {
-      throw new Error(`corporate Claude remediation requires account-bound HQ dispatch `
-        + `(selected lane ${workerClass}, mode ${remediationMode}: ${laneModeRefusal})`);
+      throw new Error(`account-bound remediation lane ${workerClass} requires HQ dispatch `
+        + `(mode ${remediationMode}: ${laneModeRefusal})`);
     }
-    if (!(hqDispatchEnabled && ['gemini', 'remediator-claude-corp'].includes(workerClass))) {
+    if (!(hqDispatchEnabled && ['gemini', 'remediator-claude-corp', 'remediator-grok'].includes(workerClass))) {
       await assertRemediationWorkerOAuth(workerClass, { execFileImpl,
         delegatedPool: hqDispatchEnabled && remediatorRouting.pooled });
     }

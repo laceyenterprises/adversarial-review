@@ -27,6 +27,10 @@ const WORKER_PROVENANCE_HOOK_SRC = join(ROOT, 'hooks', 'worker-provenance-commit
 // below can pick up env overrides at call time, even if they are exported
 // after this process has started.
 const REMEDIATION_WORKER_IDENTITY_DEFAULTS = {
+  'remediator-grok': {
+    name: 'Grok Remediation Worker',
+    email: 'grok-remediation-worker@laceyenterprises.com',
+  },
   codex: {
     name: 'Codex Remediation Worker',
     email: 'codex-remediation-worker@laceyenterprises.com',
@@ -180,6 +184,8 @@ const GEMINI_REMEDIATION_WORKER_TRAILER_CLASS = 'gemini-remediation';
 // for back-compat with callers that don't specify a class.
 function remediationWorkerTrailerClass(workerClass) {
   switch (canonicalWorkerClass(workerClass)) {
+    case 'remediator-grok':
+      return 'grok-remediation';
     case 'remediator-gemini':
     case 'gemini':
       return GEMINI_REMEDIATION_WORKER_TRAILER_CLASS;

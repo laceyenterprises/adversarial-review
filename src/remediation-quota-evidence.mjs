@@ -28,6 +28,8 @@ const REMEDIATOR_CLASS_BY_QUOTA_LABEL = Object.freeze({
   'claude-code': 'claude-code',
   gemini: 'gemini',
   'remediator-gemini': 'gemini',
+  grok: 'remediator-grok',
+  'remediator-grok': 'remediator-grok',
 });
 
 export function remediatorClassForQuotaLabel(value) {

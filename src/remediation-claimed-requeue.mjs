@@ -1,8 +1,31 @@
 import { readFileSync, renameSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { getFollowUpJobDir, requeueInProgressFollowUpJobForRetry, writeFollowUpJob } from './follow-up-jobs.mjs';
+import { getFollowUpJobDir, markFollowUpJobStopped, requeueInProgressFollowUpJobForRetry, writeFollowUpJob } from './follow-up-jobs.mjs';
 import { DEFAULT_REMEDIATOR_ENV } from './remediation-dispatch-mode.mjs';
 import { MAX_QUOTA_HOLD_WINDOW_MS } from './remediation-quota-evidence.mjs';
+import { remediationSubjectRefusal } from './remediation-worker-class-fallback.mjs';
+
+// Refuse invalid subjects before spawn and revalidate after actor assignment,
+// retaining the caller's optional config path and loader.
+export function stopClaimedJobForRefusedSubject({
+  rootDir, claimed, routing, env, topPath, loaderImpl, now = () => new Date().toISOString(), log = console,
+}) {
+  if (!routing?.workerClass || !claimed?.job) return null;
+  const reason = remediationSubjectRefusal(claimed.job, routing.workerClass, { env, topPath, loaderImpl });
+  if (!reason) return null;
+  const stoppedAt = now();
+  const stopReason = `Job ${claimed.job.jobId} (${claimed.job.repo}#${claimed.job.prNumber}): `
+    + `${routing.workerClass} subject refused (${reason}). Owner: adversarial-review operator. `
+    + 'Next action: correct the lane flags or select a different remediator family, then explicitly retrigger remediation.';
+  const stopped = markFollowUpJobStopped({
+    rootDir, jobPath: claimed.jobPath, stoppedAt, sourceStatus: 'in_progress',
+    stopCode: 'subject-refused', stopReason,
+    commentDeliveryExemption: 'no-remediation-started',
+    remediationWorker: { state: 'never-spawned', reconciledAt: stoppedAt },
+  });
+  log.error?.(`[follow-up-remediation] ${stopReason}`);
+  return { consumed: false, reason: 'subject-refused', job: stopped.job, jobPath: stopped.jobPath };
+}
 
 // REMCONFLICT-01: transient capability probes retry before worker spawn on the
 // shared bounded budget, preserving an explicit operator retrigger's authority.

@@ -1549,6 +1549,9 @@ missing or conflicting evidence transitions the claimed job to `stopped`, with a
 operator owner and escalation/retrigger action in its stop receipt and output.
 Recovered jobs retain the cross-family remediation requirement. The existing
 explicit retrigger transition resumes these stops after evidence correction.
+Grok subject-policy refusals before spawn, including after assignment, also
+transition to `stopped` with `subject-refused` and an operator correction/retrigger
+action under the existing cap; they create no quota hold or automatic retry.
 The [follow-up job model](docs/data-model/follow-up-jobs.md) describes the receipt;
 deployed smoke commands are unchanged.
 
@@ -3082,7 +3085,7 @@ stateDiagram-v2
     s0 --> s5: follow-up-job.05 operator cancellation
     s1 --> s2: follow-up-job.06 validated worker reply; proven publication precedes infrastructure hold and legacy published wait completes on green
     s1 --> s3: follow-up-job.07 worker failure
-    s1 --> s4: follow-up-job.08 lifecycle, budget or committed-unpublished stop
+    s1 --> s4: follow-up-job.08 lifecycle, budget, subject-refused before spawn or committed-unpublished stop
     s1 --> s5: follow-up-job.09 operator cancellation
     s1 --> s0: follow-up-job.10 transient retry, unpublished infrastructure-only CI recovery or orchestration-mode refusal hold without round charge
     s2 --> s0: follow-up-job.11 next round unless comment-only final hammer handoff
@@ -3300,6 +3303,13 @@ GRK-03 extends these declarations with family `grok` and canonical roles `grok`,
 require `kind` (`oauth` or `api-key`) and `broker_instance`; `broker_provider`
 remains a provider type (`grok` for OAuth, `grok-api` for keys). Legacy account
 fields and fixed provider mappings remain unchanged.
+
+`remediator-grok` uses account-bound HQ dispatch and requires an enabled worker
+class plus `grok.enabled` and `grok.remediator.enabled`, both default off.
+Original Grok builders retain non-Grok remediation after account and assignment
+handoffs. GRK-16 owns remediator registration, activation and live receipts.
+`hammer-grok` is a reserved routing name; closer selection refuses with `grok-closer-pending-merge-authority-v2`.
+GRK-17 adds its v2 executor after the MLR cutover, using the v2 queue-closer prompt.
 
 `oauth.broker_instances` is a third atomic map, empty by default. Each opaque
 instance names exactly `provider` plus `custody_dir` (OAuth) or `op_ref` (key).

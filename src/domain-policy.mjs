@@ -1,5 +1,6 @@
 import { validateRoleRegistry } from './role-registry.mjs';
 import { publishedWorkerClassSet } from './hq-worker-classes.mjs';
+import { validateMergeAuthorityConfig } from './domain-config.mjs';
 
 const LEGACY_REVIEWER_ROUTE_BY_ROLE_ID = Object.freeze({
   'claude-reviewer-lacey': Object.freeze({
@@ -139,6 +140,9 @@ const MERGE_AUTHORITY_KEYS = Object.freeze({
 
 export function resolveMergeAuthorityConfigFromDomain(domainConfig, fallbackCfg = {}, options = {}) {
   const policy = objectOrNull(domainConfig?.mergeAuthority);
+  for (const config of [policy, fallbackCfg]) {
+    validateMergeAuthorityConfig(config);
+  }
   if (!policy) return {
     ...fallbackCfg,
     eligibility: {

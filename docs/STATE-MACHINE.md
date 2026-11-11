@@ -1115,6 +1115,12 @@ data/follow-up-jobs/
 
 Directory = state.
 
+Grok subject refusals before spawn or after an assignment handoff transition
+from `in-progress` to `stopped` with `subject-refused`, a never-spawned worker
+and an operator-owned correction/retrigger action. They create no quota hold
+or automatic retry loop. Explicit retrigger retains the existing round cap.
+No lifecycle value or existing smoke promise changes.
+
 REMEDBRANCH-01: `pending` jobs can carry the explicit `branch-unresolved`
 hold in `branchResolution`. Creation attempts one bounded PR-head lookup; the
 claim owner retries after 60 seconds without incrementing the round or spawning

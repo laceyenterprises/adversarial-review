@@ -11,6 +11,7 @@ import {
   validateDomainConfig,
 } from '../src/domain-registry.mjs';
 import { createReviewerRuntimeAdapterForDomain } from '../src/adapters/reviewer-runtime/index.mjs';
+import { loadDomainConfig } from '../src/domain-config.mjs';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -72,6 +73,23 @@ test('registry rejects retired ACPX runtime even on a disabled domain', () => {
     assert.throws(() => validateDomainConfig('domain-a', config), /ACPX reviewer runtime has been removed/);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('domain load refuses pending-v2 Grok closer selectors before poll phases', () => {
+  for (const mergeAuthority of [
+    { workerClass: 'hammer-grok' },
+    { workerClassFallback: ['hammer', ' hammer-grok '] },
+  ]) {
+    const config = baseConfig('domain-a', { enabled: false, mergeAuthority });
+    const root = makeRoot({ 'domain-a': config });
+    try {
+      assert.throws(() => loadDomainConfig(root, 'domain-a'), /grok-closer-pending-merge-authority-v2/);
+      assert.throws(() => loadDomainRegistry(root), /grok-closer-pending-merge-authority-v2/);
+      assert.throws(() => validateDomainConfig('domain-a', config), /grok-closer-pending-merge-authority-v2/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 

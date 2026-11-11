@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createFollowUpJob } from '../src/follow-up-jobs.mjs';
+import { createFollowUpJob, claimNextFollowUpJob, requeueFollowUpJobForNextRound } from '../src/follow-up-jobs.mjs';
 import { consumeNextFollowUpJob } from '../src/follow-up-remediation.mjs';
 import { resolveCloserDispatchHarness } from '../src/ama/harness-fallback.mjs';
 import { resolveRemediationWorkerClassWithFallback } from '../src/remediation-worker-class-fallback.mjs';
@@ -24,13 +24,16 @@ const pool = await import('../src/worker-token-pool.mjs').catch(error => {
 });
 const defaults = JSON.parse(readFileSync(new URL('./fixtures/identity-token-selection.v1.json', import.meta.url))).defaults;
 function wireFor(identity, index = 0) {
-  const value = structuredClone(defaults);
-  const family = identity.includes('claude') ? 'claude' : 'codex';
-  const members = family === 'codex' ? ['openai-corporate', 'openai-primary'] : ['anthropic-corporate', 'anthropic-primary'];
+  const value = structuredClone(identity.includes('grok')
+    ? JSON.parse(readFileSync(new URL('./fixtures/identity-token-selection.v1.json', import.meta.url))).grok_defaults
+    : defaults);
+  const family = identity.includes('grok') ? 'grok' : identity.includes('claude') ? 'claude' : 'codex';
+  const members = family === 'grok' ? ['subscription-a', 'key-c']
+    : family === 'codex' ? ['openai-corporate', 'openai-primary'] : ['anthropic-corporate', 'anthropic-primary'];
   value.oauth.identity_token_pools[identity] = members;
   value.request.identity = value.request.snapshot.identity = identity;
   value.request.family = family;
-  value.request.identity_models = value.request.requested_models = value.request.snapshot.requested_models = [family === 'codex' ? 'gpt-6' : 'opus'];
+  value.request.identity_models = value.request.requested_models = value.request.snapshot.requested_models = [family === 'grok' ? 'grok-build' : family === 'codex' ? 'gpt-6' : 'opus'];
   value.selection = { version: 1, identity, generation: value.request.generation,
     status: 'selected', account_id: members[index], reason: index ? 'fallback-ready' : 'preferred-ready',
     considered: members.slice(0, index + 1).map((id, i) => ({ account_id: id,
@@ -208,12 +211,13 @@ test('ITP-14 default Codex worker order is corporate-first and unknown preferred
   assert.equal(selectCodexWorkerAccount(fixture).hold, true);
 });
 
-for (const family of ['codex', 'claude']) for (const index of [0, 1]) for (const experiment of [false, true]) for (const local of (experiment ? [false] : [false, true])) test(`${experiment ? 'OSG-14 assigned arm' : 'ITPREMEDHOLD-01'} ${family} remediation claim account ${index} local=${local} dispatches remediator without local credentials`, async t => {
+for (const family of ['codex', 'claude', 'grok']) for (const index of [0, 1]) for (const experiment of (family === 'grok' ? [false] : [false, true])) for (const local of (experiment ? [false] : [false, true])) test(`${experiment ? 'OSG-14 assigned arm' : 'ITPREMEDHOLD-01'} ${family} remediation claim account ${index} local=${local} dispatches remediator without local credentials`, async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'itp14-claim-'));
   const hqRoot = join(rootDir, 'hq');
   const workspaceDir = join(rootDir, 'worker');
   mkdirSync(hqRoot); mkdirSync(workspaceDir);
   const overrides = { AGENT_OS_CONFIG_PATH: '/dev/null', AGENT_OS_ROLES_REMEDIATOR: 'adversarial',
+    AGENT_OS_GROK_ENABLED: 'true', AGENT_OS_GROK_REMEDIATOR_ENABLED: 'true',
     ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: undefined,
     AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'native', ADV_WITH_HQ_INTEGRATION: local ? '0' : '1',
     HQ_ROOT: hqRoot, HQ_PARENT_SESSION: 'synthetic-parent', HQ_PROJECT: 'synthetic-project',
@@ -251,6 +255,7 @@ for (const family of ['codex', 'claude']) for (const index of [0, 1]) for (const
     resolveRemediationWorkerClassImpl: args => experiment
       ? { workerClass: 'remediator-codex-corp', pooled: false, hold: false }
       : resolveRemediationWorkerClassWithFallback({ ...args,
+      ...(family === 'grok' ? { primary: identity, modelForClass: () => 'grok-build' } : {}),
       selectAccountImpl: request => pool.selectWorkerTokenAccount({ ...request, oauth: wire.oauth,
         model: wire.request.requested_models[0], ownerImpl: async () => wire }),
       execFileImpl: async () => ({ stdout: '{}' }) }),
@@ -296,15 +301,123 @@ test('ITP-14 pooled routing preserves the declared infrastructure fallback', asy
   assert.equal(result.reason, 'infrastructure-fallback');
 });
 
+for (const configSource of ['env', 'loader']) for (const [builderTag, enabled, phase] of [
+  ['grok', true, 'handoff'], ['grok-api', true, 'handoff'],
+  ['grok-remediation', true, 'handoff'], ['codex', false, 'handoff'],
+  ['grok', true, 'initial'], ['codex', false, 'initial'],
+]) {
+  test(`${phase} assignment refuses Grok for builder=${builderTag}, enabled=${enabled} via ${configSource}`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'grok-handoff-'));
+    const overrides = { AGENT_OS_CONFIG_PATH: '/dev/null', HQ_ROOT: rootDir,
+      AGENT_OS_ROLES_REMEDIATOR: 'adversarial', ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: undefined,
+      AGENT_OS_GROK_ENABLED: String(configSource === 'loader' ? !enabled : enabled),
+      AGENT_OS_GROK_REMEDIATOR_ENABLED: String(configSource === 'loader' ? !enabled : enabled) };
+    const previous = Object.fromEntries(Object.keys(overrides).map(key => [key, process.env[key]]));
+    const apply = values => { for (const [key, value] of Object.entries(values)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    } };
+    apply(overrides);
+    t.after(() => { apply(previous); rmSync(rootDir, { recursive: true, force: true }); });
+    createFollowUpJob({ rootDir, repo: 'sample/project', prNumber: 42, builderTag,
+      branch: 'fixture/remediation', reviewerModel: 'gemini', critical: true,
+      reviewBody: '## Verdict\nRequest changes', reviewPostedAt: '2026-10-19T00:00:00Z' });
+    const topPath = join(rootDir, 'injected-config.yaml');
+    let loads = 0;
+    const result = await consumeNextFollowUpJob({ rootDir,
+      ...(configSource === 'loader' ? { topPath, loaderImpl: args => {
+        loads++;
+        assert.equal(args.topPath, topPath);
+        assert.equal(args.env.AGENT_OS_GROK_ENABLED, String(!enabled));
+        return { get: (key, fallback) =>
+          ['grok.enabled', 'grok.remediator.enabled'].includes(key) ? enabled : fallback };
+      } } : {}),
+      promptTemplate: 'Synthetic remediation prompt.',
+      guardStackedBaseImpl: async () => null, resolvePRLifecycleImpl: async () => null,
+      ensureWorkerRegistryReadyImpl: async () => {},
+      resolveRemediationWorkerClassImpl: async () => ({
+        workerClass: phase === 'initial' ? 'remediator-grok' : 'remediator-claude',
+        pooled: true, hold: phase === 'initial' }),
+      resolveOsgRemediatorRouteImpl: async () => {
+        assert.equal(phase, 'handoff', 'initial subject refusal must stop before handoff');
+        return { workerClass: 'remediator-grok', pooled: true, hold: false };
+      },
+      execFileImpl: async () => assert.fail('refused assignment reached command or dispatch'),
+      spawnImpl: () => assert.fail('refused assignment reached local spawn'),
+      postCommentImpl: async () => {}, deliverAlertImpl: async () => {},
+      log: { info() {}, warn() {}, log() {}, error() {} } });
+    assert.equal(result.consumed, false);
+    if (['grok-api', 'grok-remediation'].includes(builderTag)) {
+      assert.match(result.reason, /cannot remediate its own PR/);
+    } else {
+      assert.equal(result.reason, 'subject-refused');
+      if (builderTag === 'codex' && configSource === 'loader') assert.ok(loads > 0);
+      assert.equal(result.job.status, 'stopped');
+      assert.equal(result.job.remediationWorker.state, 'never-spawned');
+      assert.equal(result.job.remediationPlan.stop.code, 'subject-refused');
+      assert.match(result.job.remediationPlan.stop.reason,
+        new RegExp(enabled ? 'grok-acting-lane-unavailable' : 'grok-remediator-disabled'));
+      assert.match(result.job.remediationPlan.stop.reason, /Owner: adversarial-review operator.*Next action:.*explicitly retrigger/);
+      assert.equal(result.job.remediationPlan.retryHistory?.length || 0, 0);
+      assert.equal(claimNextFollowUpJob({ rootDir }), null, 'terminal refusal cannot re-arm on the next claim');
+      const requeued = requeueFollowUpJobForNextRound({
+        rootDir, jobPath: result.jobPath, requestedBy: 'operator',
+        reason: 'Lane configuration corrected; explicit operator retry.',
+      });
+      assert.equal(requeued.job.status, 'pending');
+    }
+  });
+}
+
+test('pooled fallback audit providers stay defined for unpooled identities', async () => {
+  for (const candidate of ['gemini', 'remediator-fixture-unpooled']) {
+    const result = await pool.resolvePooledWorkerRouting({
+      primary: 'remediator-codex', kind: 'remediator', env: {},
+      fallbackWorkerClasses: [candidate],
+      selectAccountImpl: async ({ identity }) => ({
+        identity, workerClass: identity, pooled: true, hold: true,
+        status: 'unavailable', reason: 'accounts-unavailable',
+      }),
+      resolveUnpooledFallback: async workerClass => ({ workerClass, hold: false }),
+    });
+    assert.equal(result.fellBack, true);
+    assert.equal(result.workerClass, candidate);
+    assert.equal(result.provider, 'openai');
+    assert.equal(result.fallbackProvider, 'unknown');
+  }
+});
+
+test('pooled fallback audit providers normalize returned worker aliases', async () => {
+  for (const [workerClass, provider] of [
+    ['codex', 'openai'], ['remediator-codex-corp', 'openai'],
+    ['claude', 'anthropic'], ['claude-code', 'anthropic'],
+    ['remediator-claude-corp', 'anthropic'],
+    ['hammer-corp', 'openai'], ['hammer-claude-corp', 'anthropic'], ['grok', 'xai'],
+  ]) {
+    const result = await pool.resolvePooledWorkerRouting({
+      primary: 'remediator-grok', kind: 'remediator', env: {},
+      fallbackWorkerClasses: ['gemini'],
+      selectAccountImpl: async ({ identity }) => ({
+        identity, workerClass: identity, pooled: true, hold: true,
+        status: 'unavailable', reason: 'accounts-unavailable',
+      }),
+      resolveUnpooledFallback: async () => ({ workerClass, hold: false }),
+    });
+    assert.equal(result.fellBack, true);
+    assert.equal(result.workerClass, workerClass);
+    assert.equal(result.provider, 'xai');
+    assert.equal(result.fallbackProvider, provider, workerClass);
+  }
+});
+
 for (const resolver of ['missing', 'null', 'undefined']) {
   for (const laterFallback of [false, true]) {
     test(`unresolved unpooled fallback is attributed with resolver=${resolver}, laterFallback=${laterFallback}`, async () => {
       const seen = [];
       const result = await pool.resolvePooledWorkerRouting({
         primary: 'remediator-codex', kind: 'remediator', env: {},
-        fallbackWorkerClasses: ['remediator-grok', ...(laterFallback ? ['remediator-claude'] : [])],
+        fallbackWorkerClasses: ['remediator-fixture-unpooled', ...(laterFallback ? ['remediator-claude'] : [])],
         ...(resolver === 'missing' ? {} : { resolveUnpooledFallback: async candidate => {
-          assert.equal(candidate, 'remediator-grok');
+          assert.equal(candidate, 'remediator-fixture-unpooled');
           return resolver === 'null' ? null : undefined;
         } }),
         selectAccountImpl: async ({ identity }) => {
@@ -316,7 +429,7 @@ for (const resolver of ['missing', 'null', 'undefined']) {
         },
       });
       assert.deepEqual(result.skipped, [
-        { workerClass: 'remediator-grok', reason: 'unpooled-fallback-unresolved' },
+        { workerClass: 'remediator-fixture-unpooled', reason: 'unpooled-fallback-unresolved' },
       ]);
       assert.deepEqual(seen, ['remediator-codex', ...(laterFallback ? ['remediator-claude'] : [])]);
       assert.equal(result.workerClass, laterFallback ? 'remediator-claude' : 'remediator-codex');

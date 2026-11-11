@@ -119,6 +119,7 @@ const RETRIGGERABLE_STOP_CODES = Object.freeze([
   'missing-builder-authorship',
   'conflicting-builder-authorship',
   'builder-cannot-remediate-own-pr',
+  'subject-refused',
   'branch-unresolved',
   'max-rounds-reached',
   'round-budget-exhausted',

@@ -1,6 +1,6 @@
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { loadDomainConfig, validateReviewerRuntimeConfig } from './domain-config.mjs';
+import { loadDomainConfig, validateReviewerRuntimeConfig, validateMergeAuthorityConfig } from './domain-config.mjs';
 
 // ARC-03: the watcher no longer assumes a single hardcoded `code-pr` domain.
 // The domain registry enumerates `domains/*.json`, validates each config, and
@@ -60,6 +60,7 @@ function validateDomainConfig(id, config) {
     }
   }
   validateReviewerRuntimeConfig(config);
+  validateMergeAuthorityConfig(config.mergeAuthority);
   if (config.riskClasses !== undefined
     && (config.riskClasses === null || typeof config.riskClasses !== 'object' || Array.isArray(config.riskClasses))) {
     throw new Error(

@@ -1,46 +1,48 @@
-// Infrastructure observations spend no adjudication authority. Keep this list
-// explicit: a red check, moved head or lost owner must never match by message.
+import { HAMMER_STOP_ORIGINS, hammerStopOrigin } from './hammer-stop-origin.mjs';
+
 export const HAMMER_RETRYABLE_READ_OUTCOMES = new Set([
-  'overload-deferred',
-  'hammer-command-error',
-  'git-credential-refresh-failed',
-  // CLOSERGATES-01: an API credential mint that timed out or failed to run,
-  // and a closure gate whose transient read failures outlasted the budget.
-  'credential-refresh-unavailable',
-  'closure-gate-read-unavailable',
-  'launch-environment-read-unavailable',
-  // HAMMERLAUNCHREAD-01: the same deferral at the closure step, after work.
-  'launch-environment-read-unavailable-at-closure',
-  'launch-environment-missing-legacy-dispatch',
-  'merge-lease-base-read-failed',
-  'verify-head-pr-read-failed',
-  'missing-pr-state',
-  'published-head-timeout',
-  'published-head-probe-failed',
-  'published-head-probe-invalid',
-  'controller-observation-unavailable',
-  'ci-infrastructure-evidence-unavailable',
-  'merge-lease-probe-failed',
-  'merge-lease-response-invalid',
-  'pr-refresh-failed',
-  'produced-head-read-failed',
-  'rebase-head-timeout',
-  'rebase-base-unavailable',
-  'history-read-failed',
-  'predicate-verdict-unavailable',
-  'github-gate-read-failed',
-  'protective-predecessor-read-failed',
-  'commit-title-read-failed',
-  'stacked-base-read-failed',
-  'ci-wait-pr-refresh-failed',
-  'merge-confirmation-read-failed',
-  'merge-confirmation-read-failed-after-merge-accepted',
-  'publish-head-read-failed',
-  'publish-identity-read-failed',
+  ...Object.keys(HAMMER_STOP_ORIGINS).filter(reason => HAMMER_STOP_ORIGINS[reason] !== 'world'),
 ]);
+
 
 export function hammerPhaseAttempt(attempt) {
   return ['failed-without-merge', 'deferred'].includes(attempt?.outcome)
     && HAMMER_RETRYABLE_READ_OUTCOMES.has(attempt.reason)
     ? { ...attempt, outcome: 'deferred' } : attempt;
+}
+
+// Historical audits remain immutable on disk. Reclassify only explicitly
+// identified hammer faults on read so an old harness mistake can reach the
+// same ended-launch reconciliation as a new deferral. Structured world
+// refusals and succeeded audits always win.
+export function projectHammerStopAudit(doc) {
+  if (!doc || doc.status === 'succeeded' || !Array.isArray(doc.attempts)
+    || doc.attempts.some(attempt => !attempt || typeof attempt !== 'object' || Array.isArray(attempt))
+    || doc.attempts.some(attempt => attempt.outcome === 'succeeded')) return doc;
+  let changed = false;
+  const attempts = doc.attempts.map(attempt => {
+    let closerReason;
+    try {
+      if (hammerStopOrigin(attempt.reason) === 'closer') {
+        const [code, diagnostic] = attempt.reason.split(':');
+        closerReason = code === 'review-evidence-invalid' ? diagnostic : code;
+      }
+    } catch { /* Unknown historical codes retain their original authority. */ }
+    const daemon = String(attempt.attemptPhase).startsWith('daemon')
+      || String(attempt.path).startsWith('daemon');
+    const hammer = !daemon && (doc.closureAuthority === 'ham-terminal-remediation'
+      || attempt.attemptPhase === 'hammer-early-exit' || attempt.path === 'hammer');
+    const facts = [attempt.reasons, attempt.eligibilityTrace?.reasons, attempt.githubGate?.reasons];
+    const sameLaunchRefusal = doc.attempts.some(other => other !== attempt
+      && other.launchRequestId === attempt.launchRequestId && other.outcome === 'failed-without-merge'
+      && (() => { try { return hammerStopOrigin(other.reason) === 'world'; } catch { return true; } })());
+    if (!hammer || sameLaunchRefusal || facts.some(value => value != null && (!Array.isArray(value) || value.length))
+      || !closerReason
+      || attempt.outcome !== 'failed-without-merge') return attempt;
+    changed = true;
+    return { ...attempt, reason: closerReason, outcome: 'deferred', recordedOutcome: attempt.outcome,
+      ...(closerReason !== attempt.reason ? { reasonDetail: attempt.reason } : {}) };
+  });
+  return changed ? { ...doc, attempts, status: doc.status === 'failed-without-merge'
+    && attempts.at(-1).outcome === 'deferred' ? 'deferred' : doc.status } : doc;
 }

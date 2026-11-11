@@ -36,8 +36,10 @@ test('LVR-02: failed refresh before any GitHub call writes a redacted launch-bou
   assert.throws(() => withHammerTokenSync(() => { calls++; }, { env, hammerToken: true }), /refresh/);
   assert.equal(calls, 0);
   const doc = audit();
-  assert.equal(doc.status, 'failed-without-merge');
-  assert.equal(doc.attempts[0].reason, 'credential-refresh-failed');
+  assert.equal(doc.status, 'deferred');
+  assert.equal(doc.attempts[0].reason, 'stop-reason-unregistered');
+  assert.equal(doc.attempts[0].reasonDetail, 'credential-refresh-failed');
+  assert.equal(doc.attempts[0].stopOrigin, 'closer');
   assert.equal(doc.attempts[0].launchRequestId, env.HQ_LAUNCH_REQUEST_ID);
   assert.doesNotMatch(JSON.stringify(doc), /SECRET_SYNTHETIC_VALUE/);
 });
@@ -72,7 +74,7 @@ for (const phase of ['hammer-verify-head', 'hammer-publish', 'hammer-merge']) {
     assert.match(result.stdout, /settled:/);
     if (phase === 'hammer-merge') assert.equal(existsSync(env.GH_CALL_LOG), false);
     const doc = audit();
-    assert.equal(doc.status, phase === 'hammer-verify-head' ? 'deferred' : 'failed-without-merge');
+    assert.equal(doc.status, phase === 'hammer-merge' ? 'failed-without-merge' : 'deferred');
     assert.equal(doc.attempts[0].reason, {
       'hammer-verify-head': 'missing-pr-state', 'hammer-publish': 'hammer-publish-error',
       'hammer-merge': 'merge-lease-not-held',
@@ -91,17 +93,17 @@ for (const helper of ['hammer-context.mjs', 'hammer-base-head.mjs']) {
     const args = helper === 'hammer-context.mjs' ? ['owner/repo', '42'] : ['https://github.com/owner/repo/pull/42'];
     const result = spawnSync(process.execPath, [join(root, 'bin', helper), ...args], { env, encoding: 'utf8', timeout: 30_000 });
     assert.equal(result.status, 1, result.stderr);
-    assert.equal(audit().status, 'failed-without-merge');
+    assert.equal(audit().status, 'deferred');
     assert.equal(audit().attempts[0].launchRequestId, 'lrq_synthetic');
   });
 }
 
 test('LVR-02: launch-bound refusal is terminal and repeated reporting preserves the first reason', t => {
   const { env, audit } = fixture(t);
-  reportHammerEarlyFailure('early-refusal', { env });
-  reportHammerEarlyFailure('later-wrapper-failure', { env });
+  reportHammerEarlyFailure('head-changed', { env });
+  reportHammerEarlyFailure('merge-error', { env });
   assert.equal(audit().attempts.length, 1);
-  assert.equal(audit().attempts[0].reason, 'early-refusal');
+  assert.equal(audit().attempts[0].reason, 'head-changed');
 });
 
 test('HAMPROGRESS-01: only the final early refusal leaves the first run-bound progress receipt', t => {
@@ -109,13 +111,13 @@ test('HAMPROGRESS-01: only the final early refusal leaves the first run-bound pr
   env.HQ_WORKER_RUN_ID = 'wrun_synthetic';
   env.AGENT_OS_WORKER_LRQ_ID = env.LAUNCH_REQUEST_ID = env.HQ_LAUNCH_REQUEST_ID;
   const path = join(env.HAM_HQ_ROOT, 'dispatch/lrq_synthetic/hammer-progress/wrun_synthetic/terminal-stop.json');
-  reportHammerEarlyFailure('retryable-refusal', { env });
+  reportHammerEarlyFailure('head-changed', { env });
   assert.equal(existsSync(path), false);
-  assert.equal(audit().attempts[0].reason, 'retryable-refusal');
-  reportHammerEarlyFailure('early-refusal', { env, final: true });
-  reportHammerEarlyFailure('later-wrapper-failure', { env, final: true });
+  assert.equal(audit().attempts[0].reason, 'head-changed');
+  reportHammerEarlyFailure('head-changed', { env, final: true });
+  reportHammerEarlyFailure('merge-error', { env, final: true });
   const receipt = JSON.parse(readFileSync(path, 'utf8'));
-  assert.equal(receipt.reason, 'early-refusal');
+  assert.equal(receipt.reason, 'head-changed');
   assert.equal(receipt.runId, 'wrun_synthetic');
   assert.equal(audit().attempts.length, 1);
 });
@@ -123,23 +125,23 @@ test('HAMPROGRESS-01: only the final early refusal leaves the first run-bound pr
 test('LVR-02: unkeyed manual refusals preserve the first reason without suppressing new launches', t => {
   const { env, audit } = fixture(t);
   delete env.HQ_LAUNCH_REQUEST_ID;
-  reportHammerEarlyFailure('early-refusal', { env });
-  reportHammerEarlyFailure('later-wrapper-failure', { env });
+  reportHammerEarlyFailure('head-changed', { env });
+  reportHammerEarlyFailure('merge-error', { env });
   assert.equal(audit().attempts.length, 1);
-  assert.equal(audit().attempts[0].reason, 'early-refusal');
+  assert.equal(audit().attempts[0].reason, 'head-changed');
   env.HQ_LAUNCH_REQUEST_ID = 'lrq_new';
-  reportHammerEarlyFailure('new-launch-failure', { env });
+  reportHammerEarlyFailure('predicate-not-eligible', { env });
   assert.equal(audit().attempts.length, 2);
-  assert.equal(audit().attempts[1].reason, 'new-launch-failure');
+  assert.equal(audit().attempts[1].reason, 'predicate-not-eligible');
 });
 
 test('LVR-02: an earlier keyed failure does not suppress an unkeyed manual refusal', t => {
   const { env, audit } = fixture(t);
-  reportHammerEarlyFailure('launch-failure', { env });
+  reportHammerEarlyFailure('head-changed', { env });
   delete env.HQ_LAUNCH_REQUEST_ID;
-  reportHammerEarlyFailure('manual-refusal', { env });
-  reportHammerEarlyFailure('later-wrapper-failure', { env });
-  assert.deepEqual(audit().attempts.map(attempt => attempt.reason), ['launch-failure', 'manual-refusal']);
+  reportHammerEarlyFailure('operator-cancelled', { env });
+  reportHammerEarlyFailure('merge-error', { env });
+  assert.deepEqual(audit().attempts.map(attempt => attempt.reason), ['head-changed', 'operator-cancelled']);
 });
 
 test('LVR-02: only a versioned incident comment with an id supplies the scheduling hint', () => {
@@ -190,12 +192,12 @@ test('LVR-02 rendered failure auditing preserves errexit before GitHub admission
   const script = join(dir, 'merge.sh');
   writeFileSync(script, renderHammerProcedure('hammer-merge', values).replace(
     'HAM_PHASE_OUTCOME=merge-error',
-    "HAM_PHASE_OUTCOME=synthetic-command-failed\nfalse\necho unexpected-continuation"));
+    "HAM_PHASE_OUTCOME=head-changed\nfalse\necho unexpected-continuation"));
   const result = spawnSync('bash', ['-e', '-c', 'source "$1"', 'fixture', script],
     { env, encoding: 'utf8', timeout: 30_000 });
   assert.equal(result.status, 1, result.stderr);
   assert.doesNotMatch(result.stdout, /unexpected-continuation/);
-  assert.equal(audit().attempts[0].reason, 'synthetic-command-failed');
+  assert.equal(audit().attempts[0].reason, 'head-changed');
 });
 
 
@@ -210,7 +212,7 @@ for (const [helper, args, reason] of [
     const result = spawnSync(process.execPath, [join(root, 'bin', helper), ...args],
       { env, encoding: 'utf8', timeout: 30_000 });
     assert.equal(result.status, 64, result.stderr);
-    assert.equal(audit().status, 'failed-without-merge');
+    assert.equal(audit().status, 'deferred');
     assert.equal(audit().attempts[0].reason, reason);
   });
 }

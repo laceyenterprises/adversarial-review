@@ -11,6 +11,7 @@ import { loadEffectiveMergeAuthorityConfig } from '../src/ama/effective-policy.m
 import { primaryChangeRoot } from '../src/ama/primary-change.mjs';
 import { captureReadyFindings } from '../src/findings-backlog.mjs';
 import { parseReviewFindings } from '../src/kernel/review-findings.mjs';
+import { reportHammerEarlyFailure } from '../src/ama/hammer-terminal-audit.mjs';
 
 const usage = 'usage: hammer-edit-plan.mjs OWNER/REPO PR REVIEW_ID PLAN_JSON [--reviewed-head SHA]';
 export const EDIT_PLAN_USAGE = `${usage}
@@ -114,11 +115,18 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     } else {
       const result = await main(argv);
       process.stdout.write(`${JSON.stringify(result)}\n`);
+      if (result.action === 'stop') reportHammerEarlyFailure(result.reason);
       // A recorded deferral is handled feedback, but must never authorize an edit.
       process.exitCode = editPlanExitCode(result);
     }
   } catch (error) {
     process.stderr.write(`hammer edit pre-check failed; do not edit: ${error.message}\n`);
-    process.exitCode = error.exitCode || 1;
+    if (error.message === usage || ['ENOENT', 'EISDIR'].includes(error.code)) {
+      reportHammerEarlyFailure('helper-input-invalid');
+      process.stderr.write(EDIT_PLAN_USAGE);
+      process.exitCode = 21;
+    } else {
+      process.exitCode = error.exitCode || 1;
+    }
   }
 }

@@ -6,6 +6,7 @@ import { writeSync } from 'node:fs';
 export async function runBounded(command, args, {
   timeoutMs = 900_000, idleMs = 120_000, tailBytes = 4096, graceMs = 5000,
   env = process.env, stdout = process.stdout, stderr = process.stderr,
+  observeOutput = () => {},
   spawnImpl = spawn, killImpl = (pid, signal) => process.kill(pid, signal),
 } = {}) {
   // A registered closer owns one group for shell + validators + test children.
@@ -120,6 +121,8 @@ export async function runBounded(command, args, {
       else if (now - lastOutput >= idleMs) stop('no-progress-timeout', 124);
     }, Math.min(100, idleMs, timeoutMs));
     const capture = chunk => {
+      // Diagnostic observers cannot interrupt process-group cleanup.
+      try { observeOutput(chunk); } catch { /* Retain the bounded command result. */ }
       lastOutput = performance.now();
       totalBytes += chunk.length;
       tail = Buffer.concat([tail, chunk.subarray(-tailBytes)]).subarray(-tailBytes);

@@ -2433,12 +2433,20 @@ Key control points:
   re-plan within a cited range or as `additive` without removing or replacing
   author lines. The uncovered author-line plan never allows an edit; terminal
   evidence and policy outcomes remain unchanged.
+  The world-fact stop rule classifies all helper and phase stops centrally.
+  Helper input mistakes receive one correction, and readiness setup retries
+  once before side effects. Exhausted closer faults defer without terminal-stop
+  receipts; ended charged launches receive three bounded refunds per head before
+  harness recovery parks and pages once. Review/head/CI/policy/GitHub facts keep
+  stop authority. Canonical runner environment failures claim no local pass and
+  leave the exact-head GitHub required gate authoritative. Every correction
+  rechecks ordinary authority and ownership; no mutation is blindly replayed.
   HAMEDITPLAN-05 classifies every edit-plan error by origin. Plan JSON syntax,
   non-object/array shape, malformed head, citation, edit-kind and location mistakes
   receive exit 21 with both parsed finding sections and field-specific feedback.
   Use one object per invocation, once per finding for multiple edits. The existing
-  run-wide correction marker allows one re-plan; a second refusal stops without
-  editing. Review/run faults remain terminal, including head mismatches, untrusted
+  run-wide correction marker allows one re-plan; a second refusal defers without
+  editing under the world-fact stop rule. Review/run faults remain terminal, including head mismatches, untrusted
   reviewers, invalid states/verdicts and invalid run pins. Correction grants no edit
   permission and does not change reversal authorization or backlog deferral.
   HAMLINES-01 reads all cited ranges, including legacy approximate,

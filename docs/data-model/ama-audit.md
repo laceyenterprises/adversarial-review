@@ -1,5 +1,16 @@
 # Data Model - AMA Closure Audit
 
+HAMSELFERRORS-01 preserves historical audit bytes. On read, explicitly identified
+hammer attempts with a registered closer-originated reason project from
+`failed-without-merge` to `deferred`, retaining `recordedOutcome` in the returned
+view. Unknown historical reasons, daemon attempts, structured predicate refusals
+and succeeded audits are never reclassified. The dispatcher still requires an
+ended matching charged launch before any bounded refund; this projection grants
+no merge or lease authority. New early-exit attempts record `stopOrigin`
+(`closer`, `world` or `infrastructure`); creation metadata also records the
+initial origin. Colon-suffixed diagnostic details remain in the optional
+`attempts[].reasonDetail`; routing uses the registered reason code.
+
 A helper load timeout records `outcome=deferred`, `reason=overload-deferred`
 and `overloadEvidence` (phase, deadline seconds, scaled budget seconds,
 multiplier and nullable load per core) on the launch-bound attempt. Generic

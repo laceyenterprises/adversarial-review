@@ -96,6 +96,7 @@ function dispatchArgs(root) {
     resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
     readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
     readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
+    deliverAlertImpl: async () => {},
     logger,
   };
 }
@@ -105,7 +106,7 @@ for (const [reason, status] of [
   ['quota-resume-phase-inputs-missing', 'canceled'],
   ['dispatch-phase-scripts-missing', 'failed'],
 ]) {
-  test(`HAMSCRATCHRESUME-01: ${reason} (${status}) replaces broken inputs once through normal closer dispatch`, async t => {
+  test(`HAMSCRATCHRESUME-01: ${reason} (${status}) bounds broken-input recovery through normal closer dispatch`, async t => {
     const root = fixture(t);
     const args = dispatchArgs(root);
     const identity = { repo: 'fixture/repo', prNumber: 42, headSha: head };
@@ -122,6 +123,8 @@ for (const [reason, status] of [
     const readRecord = () => JSON.parse(readFileSync(path));
     assert.equal((await maybeDispatchAmaCloser({ ...args, execFileImpl })).dispatched, true);
     const original = readRecord();
+    const alerts = [];
+    args.deliverAlertImpl = async (message, options) => alerts.push({ message, options });
     rmSync(original.scratchDir, { recursive: true, force: true });
     let currentLaunch = original.launchRequestId;
     const readLaunchRequestStatusImpl = ({ launchRequestId }) => ({ ok: true, retryChain: [],
@@ -144,12 +147,30 @@ for (const [reason, status] of [
     assert.equal(refundHammerRetryDispatch(root, identity, {
       jobKey: head, headSha: head, launchRequestId: original.launchRequestId,
     }).reason, 'already-refunded', 'sibling refund cannot credit the same dispatch again');
-    // Re-observing a broken replacement cannot grant another repair.
+    // Quota scratch repair remains one-shot. Closer-owned missing scripts use
+    // the bounded three-refund harness budget, without spending adjudication.
     currentLaunch = replacement.launchRequestId;
-    if (!reason.startsWith('quota-')) audit();
+    if (!reason.startsWith('quota-')) {
+      for (let refund = 2; refund < 3; refund++) {
+        audit();
+        const recovered = await maybeDispatchAmaCloser({ ...args, readLaunchRequestStatusImpl, execFileImpl });
+        assert.equal(recovered.dispatched, true, JSON.stringify(recovered));
+        currentLaunch = readRecord().launchRequestId;
+        assert.equal(readHammerRetryCapLedger(root, identity).attemptCount, 1);
+      }
+      audit();
+    }
     const again = await maybeDispatchAmaCloser({ ...args, readLaunchRequestStatusImpl, execFileImpl });
     assert.equal(again.dispatched, false, JSON.stringify(again));
-    assert.equal(launches.length, 2);
+    assert.equal(launches.length, reason.startsWith('quota-') ? 2 : 3);
+    if (!reason.startsWith('quota-')) {
+      assert.equal(again.reason, 'closer-self-error-budget-exhausted');
+      const ledger = readHammerRetryCapLedger(root, identity);
+      assert.equal(ledger.selfErrorRefunds[head].length, 3);
+      assert.equal(ledger.attemptCount, 0);
+      assert.equal(alerts.length, 1);
+      assert.equal(alerts[0].options.event, 'ama_closer.self_error_exhausted');
+    }
   });
 }
 

@@ -1682,7 +1682,7 @@ test('bootstrap failure drains the controller group while readiness read is bloc
     env: f.env, pollMs: 5, graceMs: 30, drainMs: 100,
     readLaunchImpl: async () => launch('running'), spawnImpl: () => child,
     snapshotImpl() {
-      if (++snapshots === 1) throw new Error('synthetic bootstrap census failure');
+      if (++snapshots <= 2) throw new Error('synthetic bootstrap census failure');
       return alive ? [{ pid: 4242, birth: 'fixture-birth' }] : [];
     },
     signalGroupImpl(pgid, signal) {
@@ -1726,7 +1726,7 @@ for (const mode of ['owned-group', 'refused-group', 'unreadable-census']) {
       readLaunchImpl: async () => launch('running'), spawnImpl: () => child,
       snapshotImpl() {
         assert.equal(child.stdin.readableLength, 0, 'ready was never released');
-        if (++snapshots === 1 || mode === 'unreadable-census') throw new Error('synthetic census failure');
+        if (++snapshots <= 2 || mode === 'unreadable-census') throw new Error('synthetic census failure');
         return killedAt !== undefined && now - killedAt >= 15 ? [] : [{ pid: 4242, birth: 'fixture-birth' }];
       },
       signalGroupImpl(pgid, signal) {
@@ -1741,7 +1741,8 @@ for (const mode of ['owned-group', 'refused-group', 'unreadable-census']) {
       },
     });
     assert.equal(status, 125);
-    const expected = [['SIGTERM', 0], ['SIGKILL', 30]];
+    // Setup consumes its one 50 ms backoff; drain still keeps the full grace.
+    const expected = [['SIGTERM', 50], ['SIGKILL', 80]];
     if (mode === 'owned-group') assert.deepEqual(signals, expected);
     else assert.deepEqual(directSignals, expected);
     if (mode === 'unreadable-census') assert.deepEqual(signals, []);
@@ -1754,5 +1755,32 @@ for (const mode of ['owned-group', 'refused-group', 'unreadable-census']) {
       assert.equal(f.receipt().directTermSent, true);
       assert.equal(f.receipt().directKillSent, true);
     }
+  });
+}
+
+for (const fault of ['throw', 'missing-shell']) {
+  test(`HAMSELFERRORS-01: controller setup backs off once before readiness after ${fault}`, async t => {
+    const probeTimes = [];
+    let ended = false, sim;
+    sim = simulate(t, { reads: () => launch('running'),
+      onTick(sim) {
+        if (probeTimes.length < 2) return; // The setup backoff must not end the blocked shell.
+        ended = true; sim.exit(0);
+      },
+      snapshotImpl() {
+        probeTimes.push(sim.clock());
+        if (probeTimes.length === 1) {
+          if (fault === 'throw') throw new Error('synthetic transient setup failure');
+          return [];
+        }
+        return ended ? [] : [{ pid: 4242, birth: 'fixture-birth' }];
+      } });
+    const result = await sim.done;
+    assert.equal(result.status, 0);
+    assert.equal(result.receipt.reason, 'shell-exited');
+    assert.equal(result.receipt.drained, true);
+    assert.deepEqual(probeTimes.slice(0, 2), [0, 50]);
+    assert.ok(probeTimes.length >= 3);
+    assert.deepEqual(sim.signals, []);
   });
 }

@@ -1,11 +1,11 @@
 // The validator and controller exercise their real argv parsing. Their external
-// pytest/census programs are synthetic, just like the existing controller tests'
+// canonical validation/census programs are synthetic, like the controller tests'
 // snapshotImpl: only the exact child PID requested by this fixture is observed.
 import { createInterface } from 'node:readline';
 const args = process.argv.slice(2);
-if (args[0] === '-u' && args[1] === '-m' && args[2] === 'pytest'
+if (args[0] === 'scripts/ci-mirror/run-ci-mirror.py' && args[1] === '--'
     && args.at(-1) === 'tests/test_endpoints.py') {
-  console.log('synthetic pytest passed');
+  console.log('synthetic canonical validation passed');
 } else if (args[0] === '-I' && args[1] === '-B' && args[2]?.endsWith('/controller_process_census.py')) {
   const answer = (verb, rawPid) => {
     const pid = Number(rawPid);

@@ -123,3 +123,17 @@ with zero errors (149 existing warnings), `npm run typecheck:contracts` passes,
 `node scripts/validate-data-model-catalog.mjs` validates 94 entries,
 `bash demo/research-finding-walkthrough.sh` preserves byte equivalence, and
 `git diff --check` passes. No full local suite or live acceptance was run.
+
+## Hammer final closure validation
+
+The final four non-blocking findings are addressed: invalid canonical paths emit
+usage/64, missing dispute arguments are rejected before ownership inspection,
+controller census retry yields for 50 ms, and all five persistent store updates
+are indexed in the canonical catalog with the obsolete fragment removed.
+The Hammer rebase preserves main's overload-exhausted and legacy host-overload
+classes alongside closer-self-error, keeps both paging contracts, and retains
+both overload-inheritance and three-refund exhaustion regression coverage.
+Targeted offline validation covers the self-error, controller, retry-accounting
+and watcher claim-loop suites. Lint, contract typechecking, the byte-equivalence
+demo, catalog validation and whitespace checks pass. Full-suite verification
+remains with the exact-head hosted checks under the existing merge predicate.

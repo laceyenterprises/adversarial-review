@@ -1,10 +1,14 @@
 # Data Model - AMA Closure Waits
 
-`waitClass=host-overload` uses the shared `sha256("host-overload")` file and
-`head=host-overload` row instead of the PR key. This durable page latch
-coalesces exhausted overload retries across PRs and survives process restart;
-individual owner counters remain in their retry ledgers. It changes no PR
-custody or merge predicate.
+`waitClass=overload-exhausted` reserves one immediate exhaustion page per PR/head
+in the ordinary PR-keyed database. It survives watcher restart and retries failed
+delivery before the closer releases the overload hold. An incident affecting N PRs
+can therefore emit N pages; `alertKey=host-overload` in evidence does not change
+this store's deduplication scope. The shared `sha256("host-overload")` file and
+`head=host-overload` row remain supported for legacy `host-overload` callers only;
+production exhaustion uses `overload-exhausted`. Inspect/reset its exact PR/head
+row after verifying delivery, rather than the legacy shared latch. Individual
+owner counters remain in their retry ledgers; this store grants no merge authority.
 
 **Owner:** AMA bounded closure wait and exhaustion paging (HAMCLOSE-01)
 **Store:** `data/ama-closure-waits/<sha256(repo#prNumber)>.db`
@@ -22,7 +26,7 @@ daemon owns these databases. `CREATE TABLE IF NOT EXISTS` initializes
 | Column | SQLite definition | Meaning |
 | --- | --- | --- |
 | `head` | `TEXT` | Exact PR head SHA. |
-| `class` | `TEXT` | `primary-change` for immediate primary-change pages, `final-round` for final-round stalls and cap exhaustion, `lane-busy` for the third repeated legacy lane-busy launch on a head, `ci-regression-ownerless` for immediate failed-CI remediation refusals, `closure-recovery-deadline` for deadline escalation and six-hour reminders of unresolved R04 custody (RECOVERYSTALL-01), `live-closer-handoff:<lrq>:<acquiredAt>` for one operator inspection notice per exact-head live closer acquisition, and `bounded-wait` for other waits. Lane-busy pages are immediate, retain contention refunds/backoff, retry failed delivery, and dedupe per PR/head across restarts. Primary-change receipts remain independent of final-round receipts. |
+| `class` | `TEXT` | `overload-exhausted` for immediate per-PR/head helper exhaustion pages, `host-overload` for legacy shared host pages, `primary-change` for immediate primary-change pages, `final-round` for final-round stalls and cap exhaustion, `lane-busy` for the third repeated legacy lane-busy launch on a head, `ci-regression-ownerless` for immediate failed-CI remediation refusals, `closure-recovery-deadline` for deadline escalation and six-hour reminders of unresolved R04 custody (RECOVERYSTALL-01), `live-closer-handoff:<lrq>:<acquiredAt>` for one operator inspection notice per exact-head live closer acquisition, and `bounded-wait` for other waits. Lane-busy pages are immediate, retain contention refunds/backoff, retry failed delivery, and dedupe per PR/head across restarts. Primary-change receipts remain independent of final-round receipts. |
 | `started` | `INTEGER NOT NULL` | First observation or latest launch/head progress in epoch milliseconds. |
 | `reason` | `TEXT` | Latest wait reason, refreshed on every observation. |
 | `paged` | `INTEGER DEFAULT 0` | Exhaustion page reservation: 0 available, 1 reserved/sent. |

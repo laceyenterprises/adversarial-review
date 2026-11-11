@@ -120,6 +120,34 @@ unbatched releases. Settlement and backfill share lifecycle
 grade kinds, and backfill skips settlement observations. Existing states and
 smoke promises are unchanged.
 
+The watcher owns launch-less rescue overload debt on startup and a 30-second
+timer, one bounded child at a time. Each tick scans at most 100 directory
+entries asynchronously with a retained cursor. Each due window drains before
+advancing; progress may require a full rotation including queued children, their
+timer turns and applicable per-PR backoff. Queued receipts revalidate before
+execution; broken cursors close and reopen on the next scan. Live AMA
+enablement/execution switches gate retry; unreadable config suppresses
+execution. Per-PR child failures and successful no-op children back off in
+memory from 30 seconds through 30 minutes; restart clears backoff while
+retaining disk debt. Receipts untouched for 24 hours are skipped across
+restarts; fresh writes restore eligibility. Removed or no-longer-eligible
+receipts after successful rescue count as progress. SIGTERM/SIGINT immediately
+shuts down the background queue and aborts the active rescue group alongside
+reviewer cleanup; forced settling bounds inherited-pipe waits. Every process
+exit synchronously aborts the rescue group. Retry-only rescue rechecks current
+PR head/review/holds/writers and reconciles the original key before replay or
+release. Head/review changes retire stale intent to normal selection. The AMA
+pass releases exhausted helper holds after one structured PR/head alert;
+`lastOverloadDeferral` survives replacements for audit; its job key and original
+exhaustion timestamp scope refund suppression to the same job within a fixed 30
+minutes; repeated releases do not extend that window. Within the same job and
+30-minute incident window, later overloads inherit the exhausted count and
+release immediately through the existing page deduplication path. Ordinary
+budgets, leases and merge predicates remain authoritative. Existing automated
+smoke steps are unchanged. SRE verifies loaded revisions, watcher PID/start time
+and natural receipt progress after ordinary deployment; see [the change
+note](../changes/OVERLOADDEFER-01b.md).
+
 ## Explicit same-head re-review intent (RETRIGGERDEDUP-01)
 
 Accepted label, CLI, rescue and remediation requests atomically pair their row

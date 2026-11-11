@@ -714,6 +714,7 @@
       "store": "data/reviews.db",
       "schemaSurface": "migrations/20260518_reviewer_passes.sql",
       "relatedSchemaSurfaces": [
+        "src/reviewer-reattach.mjs",
         "src/reviewer-attribution.mjs",
         "migrations/20260810_reviewer_passes_posted_review_freshness_index.sql",
         "src/review-state.mjs",

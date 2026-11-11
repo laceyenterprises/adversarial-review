@@ -1093,8 +1093,12 @@ new PR
   cannot supply it. An unresolved builder is launch uncertainty, not a family
   refusal. Process adoption and the null-PGID guard precede family classification;
   a known refused pair still becomes sticky before posted-review settlement.
-  Expired unresolved launches follow ordinary bounded recovery, including the
-  existing `failed` disposition when the automatic recovery cap is exhausted.
+  A discovered posted review also requires verified eligible builder context
+  before either the runtime pass or delivery row can complete; unresolved
+  identity becomes `failed-orphan` for operator inspection. This applies with
+  or without a persisted PGID. Without a posted review, expired unresolved
+  launches follow ordinary bounded recovery, including the existing `failed`
+  disposition when the automatic recovery cap is exhausted.
   A row with no run-state record and no historical `reviewer_started_at` is
   guarded by the null-PGID launch grace window
   (`DEFAULT_NULL_PGID_LAUNCH_GRACE_MS`, 60 seconds by default) from

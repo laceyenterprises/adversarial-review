@@ -1587,6 +1587,84 @@ test('reattach recovers the builder from the same session durable pass before ad
   assert.equal(readRow(db).reviewer_pgid, 9001);
 });
 
+for (const passKind of ['first-pass', 'rereview', 're-review']) {
+  for (const sessionKey of ['reviewerSessionUuid', 'sessionUuid', 'session_uuid']) {
+    test(`durable ${passKind} context matches ${sessionKey} despite newer unrelated or corrupt passes`, async () => {
+      const db = setupDb();
+      seedReviewing(db, { pgid: null, startedAt: null });
+      rmSync(join(roots.get(db), 'data', 'reviewer-runs', 'session-70.json'));
+      seedReviewerPassArtifact(db, {
+        passKind, attemptNumber: 1, ghCommentId: 'IC_1',
+        metadataJson: JSON.stringify({ [sessionKey]: 'session-70', subjectContext: { builderTag: 'claude' } }),
+      });
+      seedReviewerPassArtifact(db, {
+        passKind, attemptNumber: 2, ghCommentId: 'IC_2',
+        metadataJson: JSON.stringify({ [sessionKey]: 'another-session', builderTag: 'codex' }),
+      });
+      seedReviewerPassArtifact(db, { passKind, attemptNumber: 3, ghCommentId: 'IC_3', metadataJson: '{broken' });
+      seedReviewerPassArtifact(db, {
+        passKind, attemptNumber: 4, ghCommentId: 'IC_4',
+        metadataJson: JSON.stringify({ [sessionKey]: 'session-70' }),
+      });
+      await reconcileReviewerSessions({
+        db, octokit: makeOctokit([]), now: new Date(FAILURE_AT), log: makeLog(),
+        findReviewerProcess: noReviewerProcessFound, fetchHeadSha: async () => HEAD_SHA,
+        findPostedReview: async () => ({ commit_id: HEAD_SHA, submitted_at: FAILURE_AT }),
+      });
+      assert.equal(readRow(db).review_status, 'posted');
+    });
+  }
+}
+
+test('durable lookup compiles once across ticks and reads newly written context', async () => {
+  const db = setupDb();
+  seedReviewing(db, { pgid: null, startedAt: null });
+  rmSync(join(roots.get(db), 'data', 'reviewer-runs', 'session-70.json'));
+  const prepare = db.prepare.bind(db);
+  let compilations = 0;
+  db.prepare = sql => {
+    if (sql.includes('SELECT metadata_json FROM reviewer_passes')) compilations += 1;
+    return prepare(sql);
+  };
+  const options = {
+    db, octokit: makeOctokit([]), log: makeLog(), findReviewerProcess: noReviewerProcessFound,
+    fetchHeadSha: async () => HEAD_SHA,
+    findPostedReview: async () => ({ commit_id: HEAD_SHA, submitted_at: FAILURE_AT }),
+  };
+  await reconcileReviewerSessions({ ...options, now: new Date(Date.parse(STARTED_AT) + 30_000) });
+  assert.equal(readRow(db).review_status, 'reviewing');
+  seedDurableBuilderContext(db, 'claude-code');
+  await reconcileReviewerSessions({ ...options, now: new Date(FAILURE_AT) });
+  assert.equal(readRow(db).review_status, 'posted', 'statement reuse must not cache absent context');
+  assert.equal(compilations, 1);
+});
+
+for (const pgid of [null, 9001]) {
+  for (const recordKind of ['missing', 'incomplete']) {
+    test(`posted review with ${recordKind} builder context and pgid ${pgid} requires operator verification`, async () => {
+      const db = setupDb();
+      seedReviewing(db, { pgid, startedAt: pgid === null ? null : STARTED_AT });
+      if (recordKind === 'missing') {
+        rmSync(join(roots.get(db), 'data', 'reviewer-runs', 'session-70.json'));
+      } else {
+        writeReviewerRunRecord(roots.get(db), { sessionUuid: 'session-70', state: 'completed' });
+      }
+      let completions = 0;
+      await reconcileReviewerSessions({
+        db, octokit: makeOctokit([]), now: new Date(FAILURE_AT), log: makeLog(),
+        probeAlive: () => false, findReviewerProcess: noReviewerProcessFound,
+        fetchHeadSha: async () => HEAD_SHA,
+        findPostedReview: async () => ({ commit_id: HEAD_SHA, submitted_at: FAILURE_AT }),
+        onTerminalDeadSession: async () => { completions += 1; },
+      });
+      assert.equal(readRow(db).review_status, 'failed-orphan');
+      assert.match(readRow(db).failure_message, /family could not be verified as eligible/);
+      assert.equal(readRow(db).posted_at, null);
+      assert.equal(completions, 0, 'unverified reviews must not complete the runtime pass');
+    });
+  }
+}
+
 test('durable builder context from another session cannot turn an unresolved launch into a family refusal', async () => {
   const db = setupDb();
   seedReviewing(db, { pgid: null, startedAt: null });

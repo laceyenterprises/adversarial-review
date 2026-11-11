@@ -3696,6 +3696,11 @@ for the claim's exact session UUID. Missing or unresolved launch context does no
 prove family ineligibility: null-PGID claims first use the existing launch guard
 and process adoption. After the guard, confirmed dead launches use ordinary
 bounded recovery; known refused pairs still stop before posted-review settlement.
+Settlement also requires a verified eligible builder: a posted review with
+unresolved builder identity becomes `failed-orphan` for operator inspection.
+Durable lookup selects the newest matching pass with builder context, accepting
+`first-pass`, canonical `rereview` and compatibility spelling `re-review`, with
+session keys `reviewerSessionUuid`, `sessionUuid` or `session_uuid`.
 After deployment, SRE verifies the watcher PID start time and observes 24 hours
 with no new family-message `failed-orphan` rows whose run record shows an eligible
 builder/reviewer pair. This observation requires organic runtime evidence.

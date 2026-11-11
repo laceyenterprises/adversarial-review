@@ -49,6 +49,7 @@ const LEASE_RECOVERY_CAP_FAILURE_MESSAGE =
   'Reviewer lease recovery cap exhausted; leaving the review failed for operator inspection.';
 const POSTED_REVIEW_CLEANUP_RECHECK_DELAYS_MS = Object.freeze([0]);
 const reconcileOrderByDb = new WeakMap();
+const reconcileStatementsByDb = new WeakMap();
 
 function selectReconcileRows(db, matchingRows, limit) {
   const terminal = matchingRows.filter((row) => ['merged', 'closed'].includes(String(row.pr_state).toLowerCase()));
@@ -338,7 +339,23 @@ async function fetchCurrentHeadSha(octokit, row) {
 }
 
 function prepareStatements(db) {
-  return {
+  if (reconcileStatementsByDb.has(db)) return reconcileStatementsByDb.get(db);
+  const statements = {
+    durableReviewerContext: db.prepare(
+      `SELECT metadata_json FROM reviewer_passes
+        WHERE repo = ? AND pr_number = ? AND pass_kind IN ('first-pass', 'rereview', 're-review')
+          AND CASE WHEN json_valid(metadata_json) THEN
+            COALESCE(NULLIF(json_extract(metadata_json, '$.reviewerSessionUuid'), ''),
+                     NULLIF(json_extract(metadata_json, '$.sessionUuid'), ''),
+                     json_extract(metadata_json, '$.session_uuid'))
+          END = ?
+          AND CASE WHEN json_valid(metadata_json) THEN
+            COALESCE(NULLIF(json_extract(metadata_json, '$.builderTag'), ''),
+                     NULLIF(json_extract(metadata_json, '$.builder_tag'), ''),
+                     NULLIF(json_extract(metadata_json, '$.subjectContext.builderTag'), ''))
+          END IS NOT NULL
+        ORDER BY pass_id DESC LIMIT 1`
+    ),
     releaseUnsettledPostedReview: prepareReleaseUnsettledPostedReview(db),
     listReviewing: db.prepare(
       `SELECT repo, pr_number, reviewer, review_attempts, last_attempted_at,
@@ -447,6 +464,8 @@ function prepareStatements(db) {
           AND (reviewer_pgid IS NULL OR reviewer_pgid = '')`
     ),
   };
+  reconcileStatementsByDb.set(db, statements);
+  return statements;
 }
 
 function settleRecoveredPostedReview({ statements, row, postedReview, log }) {
@@ -488,19 +507,13 @@ function readReviewerRunRecordBestEffort(rootDir, row) {
   }
 }
 
-function readDurableReviewerContext(db, row) {
+function readDurableReviewerContext(statements, row) {
   if (!row.reviewer_session_uuid) return null;
-  const passes = db.prepare(`SELECT metadata_json FROM reviewer_passes
-    WHERE repo = ? AND pr_number = ? AND pass_kind IN ('first-pass', 'rereview')
-    ORDER BY pass_id DESC`).all(row.repo, row.pr_number);
-  for (const pass of passes) {
-    let metadata;
-    try { metadata = JSON.parse(pass.metadata_json || '{}'); } catch { continue; }
-    if (metadata?.reviewerSessionUuid !== row.reviewer_session_uuid) continue;
-    const builderTag = metadata.builderTag || metadata.builder_tag || metadata.subjectContext?.builderTag;
-    if (builderTag) return { ...metadata.subjectContext, builderTag };
-  }
-  return null;
+  const pass = statements.durableReviewerContext.get(row.repo, row.pr_number, row.reviewer_session_uuid);
+  if (!pass) return null;
+  const metadata = JSON.parse(pass.metadata_json);
+  const builderTag = metadata.builderTag || metadata.builder_tag || metadata.subjectContext?.builderTag;
+  return { ...metadata.subjectContext, builderTag };
 }
 
 function reviewerRunStateAdoptionCandidate(row, record) {
@@ -583,7 +596,7 @@ async function reconcileReviewerSessions({
   // Seed legacy receipts, then renew/release independently of row selection.
   for (const row of allRows) {
     const runContext = readReviewerRunRecordBestEffort(rootDir, row)?.subjectContext;
-    const durableContext = runContext?.builderTag ? null : readDurableReviewerContext(db, row);
+    const durableContext = runContext?.builderTag ? null : readDurableReviewerContext(statements, row);
     const context = runContext?.builderTag ? runContext
       : { ...durableContext, ...runContext, builderTag: durableContext?.builderTag || null };
     row.builderTag = normalizeBuilderClass(context?.builderTag);
@@ -630,6 +643,14 @@ async function reconcileReviewerSessions({
     ? Number(leaseRecoveryMaxAttempts)
     : DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS;
   const nullPgidGraceMs = resolveNullPgidLaunchGraceMs(nullPgidLaunchGraceMs);
+
+  function canSettlePostedReview(row) {
+    if (!reviewerRefusesBuilder(row.builderTag, reattachReviewerFamily(row.reviewer))) return true;
+    markStickyOrphan({ statements, row, failureAt,
+      message: 'Builder or reviewer family could not be verified as eligible; operator must verify before retrying.',
+      log, event: 'reviewer_reattach_family_unverified_posted' });
+    return false;
+  }
 
   function recordRecoveryEvent(row, { eventType, reason, at = failureAt, payload = {} }) {
     try {
@@ -939,6 +960,7 @@ async function reconcileReviewerSessions({
         }
 
         if (postedReview && (!currentHeadSha || !postedReview.commit_id || postedReview.commit_id === currentHeadSha)) {
+          if (!canSettlePostedReview(row)) continue;
           await onTerminalDeadSession({
             row,
             state: 'completed',
@@ -1299,6 +1321,7 @@ async function reconcileReviewerSessions({
     if (!(await probePostedReviewOrMarkSticky())) continue;
 
     if (postedReview) {
+      if (!canSettlePostedReview(row)) continue;
       await onTerminalDeadSession({
         row,
         state: 'completed',

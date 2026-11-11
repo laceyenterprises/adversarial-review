@@ -1,3 +1,7 @@
+# AR-local manual handoff. From Agent OS this file is under
+# tools/adversarial-review/modules/worker-pool/post-merge-actions/.
+# Registering/copying a plan in the superproject runner root remains follow-up;
+# this source PR does not establish automated discovery or deployment.
 operator_steps:
   - description: >-
       After the normal AR float and watcher restart, verify the watcher PID

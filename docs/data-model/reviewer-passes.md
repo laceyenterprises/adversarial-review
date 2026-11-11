@@ -1,6 +1,6 @@
 # Reviewer passes
 
-**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `src/review-state.mjs`, `src/review-state-statements.mjs`, `src/review-state-db.mjs`, `src/reviewer-route-selection.mjs`, `src/reviewer-pass-tokens.mjs`, `src/reviewer-harness.mjs`, `src/ama/closer-pass-attempt.mjs`, `src/reviewer-pass-reaper.mjs`, `src/reviewer-spawn-settle.mjs`, `src/pollonce-phases.mjs`, `src/daemon-bounce-posted-review.mjs`, `src/orphan-post-reconcile.mjs`, and `src/follow-up-jobs.mjs`
+**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `src/review-state.mjs`, `src/review-state-statements.mjs`, `src/review-state-db.mjs`, `src/reviewer-route-selection.mjs`, `src/reviewer-pass-tokens.mjs`, `src/reviewer-harness.mjs`, `src/ama/closer-pass-attempt.mjs`, `src/reviewer-pass-reaper.mjs`, `src/reviewer-spawn-settle.mjs`, `src/pollonce-phases.mjs`, `src/daemon-bounce-posted-review.mjs`, `src/orphan-post-reconcile.mjs`, `src/reviewer-reattach.mjs`, and `src/follow-up-jobs.mjs`
 
 AGYTELEMETRY-01 counter decoding and reconciliation additionally use
 `src/agy-usage.mjs` as a source of truth.
@@ -410,6 +410,21 @@ The agent-runtime run record carries the same fields in `subjectContext`.
 The pass reaper forwards them into follow-up creation; historical missing
 branches use the bounded live PR lookup and pending branch-resolution hold
 documented in [follow-up jobs](follow-up-jobs.md#branch-and-publication-contract-remedbranch-01).
+
+Restart recovery in `src/reviewer-reattach.mjs` reads builder context from the
+newest pass with a builder and the claim's exact repo, PR and session. It accepts
+`first-pass`, canonical `rereview`, and read-only compatibility spelling
+`re-review`. Session matching uses the first non-empty `reviewerSessionUuid`,
+`sessionUuid` or `session_uuid`, in that order. Builder context uses `builderTag`,
+`builder_tag` or `subjectContext.builderTag`; corrupt JSON, unrelated sessions
+and passes without builders cannot supply context. Prepared statements are
+reused per database, but lookup results are fresh on each tick. No stored
+metadata or pass-kind values are rewritten.
+
+Missing builder context preserves launch grace and ordinary no-review recovery.
+A discovered posted review cannot complete either runtime or delivery settlement
+until builder/reviewer family eligibility is verified; otherwise the claim
+becomes sticky `failed-orphan` for operator inspection.
 
 ## Review execution attribution (ITP-13)
 

@@ -2,7 +2,7 @@ import { withRepositoryStateCycle } from '../repository-state-lock.mjs';
 import fsExt from 'fs-ext';
 import { createHash } from 'node:crypto';
 import { closeSync, mkdirSync, openSync, realpathSync, utimesSync, watch } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { resolveLaneKey, QUEUE_ACTIONABLE_PHASES } from './ledger-events.mjs';
 import { assertQueueStoreOwner, queueId, queueTime } from './queue-store.mjs';
 import { queueWaitMs } from './queue-wait.mjs';
@@ -67,9 +67,9 @@ export function resolveQueueOwnerAdapter({ rootDir, db }) {
         try {
           // Register before rechecking the CAS, so release cannot be lost
           // between the initial refusal and subscription. No polling sleeps.
-          watcher = watch(dirname(path), (_event, filename) => {
-            if (filename == null || String(filename) === basename(path) || String(filename) === basename(dirname(path))) acquire();
-          });
+          // Release changes this persistent inode's attributes. Directory
+          // watches can omit attribute-only changes to their children.
+          watcher = watch(path, acquire);
           watcher.on('error', () => watcher.close());
         } catch { /* An unavailable wake waits only for the caller's deadline. */ }
         acquire();

@@ -285,9 +285,10 @@ test('HAMLANEWAIT-01: waking rechecks lane transfer and never invokes the old le
   assert.equal(typeof release, 'function');
   t.after(() => release?.());
   let refusals = 0, recheckAcquisitions = 0;
-  let watcherRegistered = false;
+  let watcherRegistered = false, watchedPath;
   const watch = fs.watch;
   const watchMock = t.mock.method(fs, 'watch', (...args) => {
+    watchedPath = args[0];
     const watcher = watch(...args);
     watcherRegistered = true;
     return watcher;
@@ -324,6 +325,7 @@ test('HAMLANEWAIT-01: waking rechecks lane transfer and never invokes the old le
     exec: () => assert.fail('stale route must refuse') });
   assert.equal(refusals, 1, 'initial routing acquisition must encounter contention');
   assert.equal(recheckAcquisitions, 1, 'must acquire once at the subscription recheck');
+  assert.match(watchedPath, /\.lock$/, 'release changes the persistent lock inode; subscribe to its attribute events');
   assert.equal(release, null, 'the waiter must reach the acquisition recheck');
   assert.equal(result.reason, 'lane-transfer-required');
   assert.equal(result.outcome, undefined);

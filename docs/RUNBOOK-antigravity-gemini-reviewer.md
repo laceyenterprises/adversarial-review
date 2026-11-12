@@ -361,16 +361,36 @@ Every lease is therefore also written into the reviewer run record
 readers and written before the reviewer child is spawned). Every readiness pass reads the
 run records, including terminal holder records with live process groups. It keeps a holder out while a review that this watcher
 does not hold in memory still runs on it: the record is `launching` with no
-process group yet, or its process group is alive. A terminal record without a
-PGID does not hold admission. Terminal live groups also require a start-time
-identity check against `spawnedAt`: a proven mismatch cannot hold the slot;
-unknown identity evidence still holds. Strict scans continue reading historical
-records; no age cutoff may free a live review. For example, a review
-leased by the watcher before a restart:
+process group yet, or its process group is alive and is that review's. A PGID
+is not an identity: macOS reuses them. In every state, including `launching`,
+a live group requires a start-time identity check against `spawnedAt`. The
+leader must have started with the review, from just before `spawnedAt` to the
+load-scaled launch grace after it. A proven mismatch cannot hold the slot;
+unknown identity evidence still holds. A terminal record without a PGID does
+not hold admission. Strict scans continue reading historical records; no age
+cutoff may free a review whose leader is verified. For example, a review leased
+by the watcher before a restart:
 
 ```text
-[agy-identities] identity=<user> review <reviewId> (reviewer session <uuid>) from a previous watcher still runs; not leased until it ends
+[agy-identities] identity=<user> review <reviewId> (reviewer session <uuid>, state heartbeating, age 4m12s, verified: process group <pgid> leader started with this review) from a previous watcher still runs; not leased until it ends
 ```
+
+The state, age and identity result tell a stale hold from a live one. An
+`unverified` result means the evidence could not be read. **Stale `launching`
+records (AGYSTALELAUNCH-01).** A record still `launching` past the launch grace
+(60 s, load-scaled) without a verified leader holds nothing. That covers no
+PGID, a gone or recycled process group, and unreadable evidence. Each readiness
+pass, and the watcher's startup checks before the first lease, settle it
+`failed`, clear its PGID and release the holder, logged once:
+
+```text
+[agy-identities] identity=<user> reaped stale launching reviewer run record <uuid> (review <reviewId>, age 15d0h > launch grace 1m0s, recycled: process group <pgid> leader started <time>, not with this review (spawnedAt <time>)); settled failed, identity released
+```
+
+No manual quarantine of the record is needed. A restart clears these holds.
+The startup reap scans persisted holder records regardless of the current
+identity/runtime plan, including an undeclared owner-only pool or a runtime
+that no longer leases agy holders.
 
 Once that review ends, the pass does what the lease release would have done.
 It removes the review's scratch copy and re-probes the identity if the run

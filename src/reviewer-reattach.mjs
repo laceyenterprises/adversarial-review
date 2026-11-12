@@ -3,7 +3,7 @@ import { normalizeBuilderClass, normalizeReviewerModel, reviewerRefusesBuilder }
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execFileSync } from 'node:child_process';
 
-import { readReviewerRunRecord, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
+import { readReviewerRunRecord, REVIEWER_LAUNCH_GRACE_MS, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
 import { reviewerPoolOwner, updateReviewerTokenLease } from './reviewer-token-pool.mjs';
 import { journalReviewerTokenLease, forgetReviewerTokenLease, reconcileReviewerTokenLeases } from './reviewer-token-leases.mjs';
 import {
@@ -32,7 +32,7 @@ const NULL_PGID_DIAGNOSTIC_MESSAGE =
 const NULL_PGID_REARM_MESSAGE =
   `${NULL_PGID_DIAGNOSTIC_MESSAGE} ` +
   'GitHub was checked for a completed review before automatically re-arming.';
-const DEFAULT_NULL_PGID_LAUNCH_GRACE_MS = 60 * 1000;
+const DEFAULT_NULL_PGID_LAUNCH_GRACE_MS = REVIEWER_LAUNCH_GRACE_MS;
 const UNKNOWN_REVIEWER_FAILURE_MESSAGE =
   'Reviewer session has an unknown reviewer value; operator must verify GitHub before retrying.';
 const CORRUPT_SESSION_FAILURE_MESSAGE =

@@ -119,6 +119,7 @@ function verifyPgidIdentitySync(pgid, expectedSpawnedAt, { execFileSyncImpl = ex
 }
 
 export {
+  PGID_IDENTITY_TOLERANCE_MS,
   currentProcessGroupId,
   isPgidAlive,
   verifyPgidIdentity,

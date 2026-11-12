@@ -75,12 +75,31 @@ The holder pool keeps a durable claim before spawn, described in
 [agy execution holder leases](agy-holder-leases.md). Each readiness pass also
 reads run records, preferring `agyHolderLease` and falling back to
 `agyIdentityLease`. A live process group retains the holder even with an old
-heartbeat or terminal run state. A launching record without a PGID is ambiguous
-and holds too. Neither heartbeat expiry nor a terminal status proves exit.
-Terminal records without a PGID do not hold admission. For terminal records
-with a live PGID, the pool verifies the leader's start time against `spawnedAt`;
-a proven mismatch releases that historical record's occupancy. Unknown start-time
-evidence holds, including a missing leader while its process group remains alive.
+heartbeat or terminal run state, but only when it is that review's process
+group: a PGID is not an identity, because macOS reuses them (AGYSTALELAUNCH-01).
+For a live PGID in any state, the pool verifies the leader's start time against
+`spawnedAt`. The leader is the review when it started no earlier than the `ps`
+rounding tolerance before `spawnedAt` and no later than the load-scaled launch
+grace (`REVIEWER_LAUNCH_GRACE_MS`, the null-PGID reattach grace) after it,
+because cli-direct stamps `spawnedAt` before its preflight. A proven mismatch
+releases the record's occupancy. Unknown start-time evidence holds, including a
+missing leader while its process group remains alive. Neither heartbeat expiry
+nor a terminal status proves exit. Terminal and other non-launching records
+without a PGID do not hold admission.
+
+A `launching` record without a PGID is ambiguous (the fork may have happened)
+and holds, but only for the launch grace. A `launching` record older than that
+without a verified leader (no PGID, a gone or recycled group, or unreadable
+evidence) is settled `failed` by `reapStaleLaunchingReviewerRunRecord`, its PGID
+cleared, and the holder released. The settle applies only when the record still
+has the state, PGID and `spawnedAt` the pool judged, so a launch that reached
+`heartbeating` meanwhile is untouched. A launch that forks after the settle
+sees the terminal record and terminates its process group, as for any record
+settled before its spawn. Each readiness pass and the watcher's startup checks
+(`runAgyReviewerStartupChecks`) run this reap, so a restart clears stale holds.
+It is logged once, with the record's age and identity result. A `launching`
+record with a verified leader keeps holding past the grace: an Argus child's
+record stays `launching` for its whole bounded run.
 The strict scanner's `includeTerminalAgyLeases` option includes these terminal
 holder records; its default and the other runtime recovery readers retain
 their existing active-state filtering.

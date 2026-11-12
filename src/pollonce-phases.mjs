@@ -3362,12 +3362,24 @@ export async function processReviewSubject(entry, ctx) {
         retainWakeForCapacity() {
           if (retainWakeForCapacity()) this.retainedWakePriority = true;
         },
-        refundDepthSpill(reason = 'pool-admission-deferred') {
+        refundDepthSpill(reason = 'not-started') {
           if (!depthSpillReserved) return;
           firstPassSpilloverController?.refundSpill?.({ repo: repoPath, prNumber, reason });
           depthSpillReserved = false;
+          // REVIEWSPILLSTALL-01: a started candidate leaves the queue on
+          // refusal, so its route never returns to the saturated primary. Only
+          // a still-queued snapshot that lost its reservation is restored.
+          if (preflightConsumed) return;
           route = this.preferredRoute;
           this.syncDepthSpillRoute(reason);
+        },
+        // A pool-deferred spill keeps its reservation and alternate route;
+        // run() commits it at spawn or refunds it with the refusal reason.
+        retainDepthSpill(reason = 'not-started') {
+          if (!depthSpillReserved) return false;
+          console.log(`[watcher] review-queue-depth-spill-retained repo=${repoPath} pr=${prNumber} `
+            + `reviewer=${this.reviewerModel} reason=${reason}`);
+          return true;
         },
         syncDepthSpillRoute(reason) {
           const from = this.reviewerModel;
@@ -3386,7 +3398,12 @@ export async function processReviewSubject(entry, ctx) {
           await this.prepareAdmission();
           if (depthSpillReserved) firstPassSpilloverController?.handoffSpill?.({ repo: repoPath, prNumber });
         },
-        admissionBlocked: () => reviewerHandoffPending(repoPath, prNumber),
+        // A head this process is already dispatching cannot start a second
+        // reviewer, so it must not reserve a spill slot another PR could use.
+        admissionBlockReason: () => (reviewerHandoffPending(repoPath, prNumber) ? 'inline-final-hammer-pending'
+          : reviewerHeadDispatchLease.has?.(headDispatchLeaseKey({ repoPath, prNumber, headSha: subject?.headSha }))
+            ? 'head-dispatch-lease-held' : null),
+        admissionBlocked() { return this.admissionBlockReason() !== null; },
         prepareAdmission() {
           if (preparation) return preparation;
           preparation = (async () => {
@@ -3414,12 +3431,12 @@ export async function processReviewSubject(entry, ctx) {
           preflightConsumed = true;
           if (reviewerHandoffPending(repoPath, prNumber)) {
             this.retainWakeForCapacity();
-            this.refundDepthSpill();
+            this.refundDepthSpill('inline-final-hammer-pending');
             return { dispatched: false, reason: 'inline-final-hammer-pending' };
           }
           if (readWatcherDrainState().active) {
             this.retainWakeForCapacity();
-            this.refundDepthSpill();
+            this.refundDepthSpill('watcher-drain-active');
             return { dispatched: false, reason: 'watcher-drain-active' };
           }
           if (route.reviewerModel === 'codex') {
@@ -3445,11 +3462,11 @@ export async function processReviewSubject(entry, ctx) {
                 headSha: live.headRefOid || subject.headSha, liveLabels: live.labels });
               const intent = db.prepare('SELECT cancelled_at FROM operator_hold_releases WHERE id = ?').get(holdReleaseId);
               if (intent?.cancelled_at || !Array.isArray(live.labels) || isOperatorHeld(live.labels)) {
-                this.refundDepthSpill();
+                this.refundDepthSpill('hold-release-cancelled');
                 return { dispatched: false, reason: 'hold-release-cancelled' };
               }
             } catch (err) {
-              this.refundDepthSpill();
+              this.refundDepthSpill('hold-release-read-deferred');
               console.warn(`[watcher] hold-release freshness read deferred for ${repoPath}#${prNumber}: ${err.message}`);
               return { dispatched: false, reason: 'hold-release-read-deferred' };
             }
@@ -3469,7 +3486,7 @@ export async function processReviewSubject(entry, ctx) {
                 `(pr, head) dispatch lease already held this window (${dispatchLeaseKey}); ` +
                 `another pool worker owns this head`
             );
-            this.refundDepthSpill();
+            this.refundDepthSpill('head-dispatch-lease-held');
             return { dispatched: false, reason: 'head-dispatch-lease-held' };
           }
 

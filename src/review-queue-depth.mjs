@@ -53,8 +53,9 @@ import { loadRoleConfig } from './role-config.mjs';
 // Both lanes measure the whole actionable queue but retain separate thresholds
 // and per-tick budgets. The historical first-pass pager count stays separate.
 export const FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT =
-  'open PRs awaiting a review pass (first pass or requested re-review; '
-  + 'excluding held, draft, malformed, Argus-only and already-admitted rows)';
+  'open PRs awaiting a review pass (first pass, requested re-review, or a head '
+  + 'newer than its posted review; excluding held, draft, malformed, Argus-only '
+  + 'and already-admitted rows)';
 
 export const REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY =
   'watcher.first_pass_review_queue_depth_failover_threshold';

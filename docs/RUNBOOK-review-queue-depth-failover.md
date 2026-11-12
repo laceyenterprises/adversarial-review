@@ -51,14 +51,28 @@ Candidates whose pipeline still requires Gemini seats cannot spill their main
 route, because that would not release Gemini capacity.
 Spill reservations require a repository and a positive PR number; missing or
 invalid coordinates fail before charging capacity or the cost ledger.
-A candidate refused by a later gate, or deferred by pool admission, refunds its
-reservation. A pool deferral uses reason `pool-admission-deferred`, restores the
-preferred route, and can be re-evaluated in a later drain. Spill and refund route
-changes refresh cross-model waiver metadata before spawn. A failed drain also
-refunds reservations for every candidate it did not start; started candidates
-settle their own reservations at spawn or refusal. The shared drain also refunds
-a started candidate that returns `dispatched: false` or rejects admission; refunds
-are idempotent with the candidate's cleanup and restore its preferred route.
+A spill is admitted to the capacity it reserved (REVIEWSPILLSTALL-01). If pool
+admission defers a spilled candidate that is still queued, the candidate keeps
+its reservation and its alternate route. It logs
+`review-queue-depth-spill-retained … reason=<pool reason>` and retries on that
+class in the next drain. It never falls back to a saturated Gemini lane. A
+candidate refused by a later gate refunds its reservation under the refusal's
+own reason, for example `head-dispatch-lease-held`, `claim-race-lost` or
+`reviewer-not-spawned`. A started candidate leaves the queue, so a refund does
+not move its route back to Gemini. Spill and refund route changes refresh
+cross-model waiver metadata before spawn. A failed drain refunds every candidate
+it did not start, under reason `admission-error`, and restores the preferred
+route of those still queued. A discovery refresh that replaces a queued
+snapshot refunds the old one under `candidate-refreshed`. Started candidates settle their own reservations at spawn or refusal.
+The shared drain also refunds a started candidate that returns
+`dispatched: false` or rejects admission. These refunds are idempotent with the
+candidate's own cleanup. No refund or decision line reports "not started" as
+pool capacity: the pool's own deferral reason is logged, or `not-started` when
+it gave none.
+
+A queued snapshot of a head that this process is already dispatching is
+admission-blocked (`head-dispatch-lease-held`). It reserves no spill slot and
+starts no reviewer. It waits in the queue until the in-flight review settles.
 
 ### Claude account order
 
@@ -153,11 +167,14 @@ apply to both triggers.
 
 ### The unit: what "queue depth" counts
 
-Depth counts open PRs awaiting admission for either a first pass or a requested
-re-review (`pending` or `pending-upstream`). It excludes drafts, operator holds,
-malformed and Argus-only rows, and reviews already running. Genuine posted-pass
-evidence distinguishes the two populations; a posted review on the current head
-excludes a requested re-review. The first-pass stall pager retains its existing
+Depth counts open PRs awaiting admission for a first pass or a requested
+re-review (`pending` or `pending-upstream`). It also counts a PR whose review was
+posted at an older head when its current revision has no posted review
+(REVIEWSPILLSTALL-01). In-place repairs usually leave that row `posted`, so
+every unreviewed head counts as demand whether or not its row has been re-armed.
+Depth excludes drafts, operator holds, malformed and Argus-only rows, and
+reviews already running. Genuine posted-pass evidence distinguishes the two
+populations; a posted review on the current head excludes the PR. The first-pass stall pager retains its existing
 undelivered-review count. The CLI and both spill lanes use
 `countOpenPrsAwaitingReview` / `SQL_COUNT_OPEN_AWAITING_REVIEW`.
 
@@ -229,7 +246,8 @@ Log lines (stable, greppable prefixes):
 [watcher] review-queue-depth-failover rereview threshold inherited from first-pass=…; both lanes may spend separate spill slots
 [watcher] review-queue-depth-spillover repo=… pr=… from=gemini to=codex pass_kind=… depth=… slot=1/2 total_spillover_reviews=…
 [watcher] review-queue-depth-wait oldest_first_pass_age_ms=… first_pass_waiting=…
-[watcher] review-queue-depth-spillover-refund repo=… pr=… pass_kind=… reason=pool-admission-deferred remaining=…
+[watcher] review-queue-depth-spillover-refund repo=… pr=… pass_kind=… reason=<refusal or deferral reason> remaining=…
+[watcher] review-queue-depth-spill-retained repo=… pr=… reviewer=… reason=<pool deferral reason>
 [watcher] review-queue-depth-route repo=… pr=… from=… to=… reason=…
 [watcher] review-worker-class-fallback repo=… pr=… from=… to=… reason=queue-depth-pressure queueDepth=… queueDepthThreshold=…
 [watcher] review-worker-class-fallback quota-status timing duration_ms=… attempts=… outcome=…

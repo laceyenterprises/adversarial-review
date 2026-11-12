@@ -2531,15 +2531,17 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
         return { ...result, deferred: 1, deferredCandidates: [deferred] };
       }
     `;
-    if (drainOutcome === 'lease-held') {
+    if (drainOutcome === 'lease-held' || drainOutcome === 'lease-busy') {
       delete sources[poolUrl];
       const gateUrl = fileUrl('src', 'reviewed-head-dispatch-gate.mjs');
+      // lease-busy: #102's head is visibly under dispatch before admission.
       sources[gateUrl] = `
         import * as actual from '${gateUrl}?actual';
         export * from '${gateUrl}?actual';
         export function createHeadDispatchLease() {
           const lease = actual.createHeadDispatchLease();
-          return { ...lease, tryAcquire(key) { return key.includes('#102@') ? false : lease.tryAcquire(key); } };
+          return { ...lease, tryAcquire(key) { return key.includes('#102@') ? false : lease.tryAcquire(key); },
+            has(key) { return ${JSON.stringify(drainOutcome)} === 'lease-busy' && key.includes('#102@') ? true : lease.has(key); } };
         }
       `;
     }
@@ -2812,18 +2814,21 @@ test('disengaged depth still permits burst admission at discovery', () => {
   assert.equal(summary.depthDiagnostics.report?.engagementSpilloverReviews || 0, 0);
 });
 
-test('deferred production spill restores Gemini route and waiver before the next drain', () => {
+test('REVIEWSPILLSTALL-01: a pool-deferred production spill keeps its alternate route and reservation for the next drain', () => {
   const { summary, output } = runDepthDiscoveryScenario({ drainOutcome: 'defer' });
   assert.equal(summary.depthDiagnostics.reservedModel, 'claude');
-  assert.deepEqual(summary.depthDiagnostics.restoredModels, ['gemini']);
-  assert.equal(summary.depthDiagnostics.report.engagementSpilloverReviews, 0);
-  assert.match(output, /from=claude to=gemini reason=pool-admission-deferred/);
+  // The next drain sees the spilled pass on its alternate class, not Gemini.
+  assert.deepEqual(summary.depthDiagnostics.restoredModels, ['claude']);
+  assert.match(output, /review-queue-depth-spill-retained repo=.* pr=102 reviewer=claude reason=not-started/);
+  assert.doesNotMatch(output, /review-queue-depth-spillover-refund .*pr=102/);
+  assert.doesNotMatch(output, /review-queue-depth-route .*pr=102 from=claude to=gemini/);
+  assert.equal(summary.depthDiagnostics.report.engagementSpilloverReviews, 1);
   assert.equal(summary.reviewerSpawns.length, 2);
-  for (const spawn of summary.reviewerSpawns) {
-    assert.equal(spawn.subjectContext.reviewerModel, 'gemini');
-    assert.equal(spawn.subjectContext.crossModelReviewWaived, true);
-    assert.match(spawn.subjectContext.crossModelReviewWaiverReason, /to reviewer=gemini/);
-  }
+  const spill = summary.reviewerSpawns.find(spawn => spawn.subjectContext.prNumber === 102);
+  assert.ok(spill, output);
+  assert.equal(spill.subjectContext.reviewerModel, 'claude');
+  assert.equal(spill.subjectContext.crossModelReviewWaived, false);
+  assert.equal(spill.subjectContext.crossModelReviewWaiverReason, null);
 });
 
 test('failed drain refunds unstarted production spill reservations', () => {
@@ -2836,14 +2841,26 @@ test('failed drain refunds unstarted production spill reservations', () => {
   assert.match(output, /review-queue-depth-spillover-refund .*pr=102/);
 });
 
-test('head dispatch lease refusal refunds the production spill and restores its route', () => {
+test('head dispatch lease refusal refunds the production spill under its real reason without rerouting to Gemini', () => {
   const { summary, output } = runDepthDiscoveryScenario({ drainOutcome: 'lease-held' });
   assert.equal(summary.reviewerSpawns.length, 1);
   assert.equal(summary.depthDiagnostics.report.engagementSpilloverReviews, 0);
   assert.match(output, /dispatch lease already held/);
-  assert.match(output, /from=claude to=gemini reason=pool-admission-deferred/);
+  // REVIEWSPILLSTALL-01: the refund names the refusal; "not started" is never
+  // reported as pool admission, and the refused pass is not routed to Gemini.
+  assert.match(output, /review-queue-depth-spillover-refund .*pr=102 .*reason=head-dispatch-lease-held/);
+  assert.doesNotMatch(output, /pool-admission-deferred/);
+  assert.doesNotMatch(output, /review-queue-depth-route .*pr=102 from=claude to=gemini/);
 });
 
+test('REVIEWSPILLSTALL-01: a queued snapshot of a head already under dispatch reserves no production spill', () => {
+  const { summary, output } = runDepthDiscoveryScenario({ drainOutcome: 'lease-busy' });
+  assert.equal(summary.reviewerSpawns.length, 1);
+  assert.doesNotMatch(output, /review-queue-depth-spillover repo=.* pr=102 /);
+  assert.doesNotMatch(output, /review-queue-depth-spillover-refund .*pr=102/);
+  assert.doesNotMatch(output, /dispatch lease already held/);
+  assert.equal(summary.depthDiagnostics.report?.cost?.byWorkerClass?.['claude-code'] || 0, 0);
+});
 
 test('REVIEWSPILL-01 production admission spills overdue requests before Gemini saturation', () => {
   const { summary, output } = runDepthDiscoveryScenario({ depthEngaged: false, ageSpill: true });

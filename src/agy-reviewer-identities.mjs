@@ -1457,9 +1457,9 @@ function createAgyReviewerIdentityPool({
 
   // AGYSTALELAUNCH-01: the watcher's startup reap. The same read and reap as a
   // readiness pass, so a restart clears a stale `launching` hold before the
-  // first lease. Returns the records it settled.
+  // first lease, regardless of the current identity/runtime plan. Persisted
+  // holds can outlive that plan. Returns the records it settled.
   async function reapStaleLaunchingRecords() {
-    if (!currentPlan().multi) return [];
     const reaped = [];
     await leasesFromRunRecords({ reaped });
     return reaped;

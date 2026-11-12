@@ -388,6 +388,9 @@ pass, and the watcher's startup checks before the first lease, settle it
 ```
 
 No manual quarantine of the record is needed. A restart clears these holds.
+The startup reap scans persisted holder records regardless of the current
+identity/runtime plan, including an undeclared owner-only pool or a runtime
+that no longer leases agy holders.
 
 Once that review ends, the pass does what the lease release would have done.
 It removes the review's scratch copy and re-probes the identity if the run

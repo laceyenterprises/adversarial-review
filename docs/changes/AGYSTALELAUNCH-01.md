@@ -42,7 +42,9 @@ identity result (`verified`, `unverified`, with the reason).
   returns a new `reapStaleLaunchingRecords()`.
 - `runAgyReviewerStartupChecks` calls `reapStaleLaunchingRecords()` after the
   workspace sweep and returns `{ auth, sweep, reaped }`. A failed reap warns
-  and never blocks startup.
+  and never blocks startup. Final comment-only remediation removes the
+  `currentPlan().multi` guard: persisted holds are scanned even with an
+  undeclared owner-only pool or a runtime that no longer leases agy holders.
 - No new run state: a reaped record uses the existing `launching → failed`
   transition (`reviewer-run.08`). No config key, CI check, gate or label.
   Corrected in place: `docs/data-model/reviewer-run-records.md`,
@@ -71,3 +73,20 @@ Run individually under netguard, each bounded to 600 s, with
 - `test/argusquota-01.test.mjs` is 31/32. Its one failure ("Argus lease
   acquisition defaults the shared pool without arguments") fails the same way
   on an unmodified `origin/main` archive.
+
+Final remediation validation after rebasing onto fresh `origin/main`:
+
+- The new non-multi startup regression fails with the guard present and passes
+  after removal. Owner-only Antigravity also passes; both cases preserve a
+  verified live record and prove repeat reaping is idempotent.
+- `node test/run-tests.mjs test/agystalelaunch-01.test.mjs
+  test/agy-reviewer-identities.test.mjs test/watcher-agy-auth-startup.test.mjs`:
+  104/104 pass using the repository's isolated runner. An initial mixed
+  `node --test` invocation passed all assertions but failed the runner's
+  checkout-data isolation check; the isolated invocation resolves it.
+- `node --test test/smv.test.mjs`: 11/11 pass.
+- `npm run lint`: zero errors (149 existing warnings).
+- `npm run typecheck:contracts`, `git diff --check`,
+  `node scripts/validate-data-model-catalog.mjs` (94 entries), and
+  `bash demo/research-finding-walkthrough.sh`: pass.
+- Full-suite validation remains with PR-head CI.

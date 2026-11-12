@@ -224,6 +224,34 @@ test('AGYSTALELAUNCH-01: the watcher startup checks reap stale launching records
   assert.deepEqual(throwing.reaped, [], 'a failed reap never blocks startup');
 });
 
+for (const [runtime, multi] of [['agent-runtime', false], ['antigravity', true]]) {
+  test(`AGYSTALELAUNCH-01: startup reaps persisted holds with an undeclared owner-only ${runtime} plan`, async (t) => {
+    const root = fixture(t);
+    const spawnedAtMs = Date.now() - 9 * DAY;
+    writeHolderRecord(root, { sessionUuid: 'agy-stale', pgid: null, spawnedAtMs });
+    writeHolderRecord(root, { sessionUuid: 'agy-live', pgid: 41012, spawnedAtMs });
+    const pool = makePool(root, { 41012: spawnedAtMs }, {
+      resolveRuntime: () => runtime,
+      loadIdentities: () => [],
+      loadTokenPools: () => ({}),
+    });
+    assert.equal(pool.plan().multi, multi, 'exercise the actual runtime plan');
+    const livePath = join(root, 'data', 'reviewer-runs', 'agy-live.json');
+    const liveBefore = readFileSync(livePath, 'utf8');
+
+    const result = await runAgyReviewerStartupChecks({
+      env: {}, log: recordingLog(), identityPool: pool,
+      warnIfUnavailableImpl: async () => ({ checked: false }),
+    });
+    assert.deepEqual(result.reaped.map(({ sessionUuid }) => sessionUuid), ['agy-stale']);
+    const settled = readReviewerRunRecord(root, 'agy-stale');
+    assert.equal(settled.state, 'failed');
+    assert.equal(settled.pgid, null);
+    assert.equal(readFileSync(livePath, 'utf8'), liveBefore, 'verified live records remain unchanged');
+    assert.deepEqual(await pool.reapStaleLaunchingRecords(), [], 'repeated startup reap is idempotent');
+  });
+}
+
 test('AGYSTALELAUNCH-01: a reap that cannot be written still does not hold past the grace, and warns once', async (t) => {
   const root = fixture(t);
   writeHolderRecord(root, { pgid: null, spawnedAtMs: Date.now() - 5 * MINUTE });

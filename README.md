@@ -1567,6 +1567,12 @@ records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
 
+Watcher startup reaps stale `launching` agy holder records regardless of the
+current identity/runtime plan, including undeclared owner-only pools and runtimes
+that no longer lease agy holders. This uses the existing `launching → failed`
+transition; verified live leaders retain their records. Offline coverage is in
+`test/agystalelaunch-01.test.mjs`; existing smoke commands are unchanged.
+
 Closer intents use distinct per-attempt worker IDs. A terminal launch and its
 complete terminal retry chain release closure ownership independently of retained
 directory teardown; live, parked, unknown and replacement owners still hold.

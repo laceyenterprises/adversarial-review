@@ -144,6 +144,9 @@ async function execHqDispatchCancel({
   env = process.env,
   parentSession,
   retryDelaysMs = HQ_DISPATCH_CANCEL_TRANSIENT_RETRY_DELAYS_MS,
+  // Typed cancellation reason recorded in the HQ dispatch audit. Omitted, HQ
+  // records its default (`operator_cancel`).
+  reason = null,
 } = {}) {
   if (typeof hqExecFileImpl !== 'function') {
     throw new TypeError('execHqDispatchCancel requires hqExecFileImpl');
@@ -153,7 +156,7 @@ async function execHqDispatchCancel({
     ...env,
     ...(parentSession !== undefined ? { HQ_PARENT_SESSION: parentSession } : {}),
   };
-  const cancelArgs = ['dispatch', 'cancel', launchRequestId];
+  const cancelArgs = ['dispatch', 'cancel', launchRequestId, ...(reason ? ['--reason', String(reason)] : [])];
   let transientRetryIndex = 0;
   for (;;) {
     try {

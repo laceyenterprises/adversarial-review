@@ -6,11 +6,23 @@ Together with `unexecutedRefundCount`, this preserves the monotonic reviewer-pas
 `retryCount` while subtracting the refunded charge at redispatch admission. The
 receipt deduplicates reconciliation across ticks and process restarts.
 
+DAEMONSUPERSEDE-01 adds optional `supersededByReview` (`launchRequestId`,
+`headSha`, `reviewedHeadSha`, `reason: superseded-by-clean-exact-head-review`,
+`observedStatus`, `supersededAt`). The executor durably writes this intent
+before cancelling a not-booted closer; `supersededAt` is the intent timestamp
+and `observedStatus` starts as null. A failed write or missing/replaced dispatch
+record refuses cancellation and lease settlement. After a fresh boot-state
+check, cancellation and terminal confirmation, `observedStatus` is enriched
+with the terminal status. If that enrichment fails, the original intent remains
+durable. For the same head and launch, only complete terminal launch evidence
+allows the shared next action to exclude the cancelled launch as a hammer retry
+owner; live or unreadable launches remain protected. A new head ignores it.
+
 
 **Owner:** AMA closer dispatch and recovery
 **Store:** `data/follow-up-jobs/ama-closer-dispatches/`
 **Source of truth:** `src/ama/dispatch-closer.mjs`
-**Runtime surface:** `src/ama/primary-change.mjs`, `src/ama/dispatch-closer.mjs`, `src/ama/prelaunch-refusal-retry.mjs`, `src/ama/dispatch-dir-names.mjs`, `src/ama/closer-terminal-cancel.mjs`, `src/follow-up-stuck-claim-sweep.mjs`, `src/recovery-reaper.mjs`, `bin/reconcile-ama-closer-dispatches.mjs`, `bin/settle-legacy-closer-intent.mjs`
+**Runtime surface:** `src/ama/primary-change.mjs`, `src/ama/dispatch-closer.mjs`, `src/ama/closer-supersede.mjs`, `src/ama/prelaunch-refusal-retry.mjs`, `src/ama/dispatch-dir-names.mjs`, `src/ama/closer-terminal-cancel.mjs`, `src/follow-up-stuck-claim-sweep.mjs`, `src/recovery-reaper.mjs`, `bin/reconcile-ama-closer-dispatches.mjs`, `bin/settle-legacy-closer-intent.mjs`
 
 ## Terminal launch observations
 

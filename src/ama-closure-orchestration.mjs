@@ -14,7 +14,8 @@ import { recoverInfrastructureCiStops } from './remediation-ci-infrastructure.mj
 import { remediationBudgetHandoffAllowed } from './remediation-round-recovery.mjs';
 import { remediationJobMissingDetail } from './remediation-hold-cause.mjs';
 import { evaluateHammerStopHold } from './ama/hammer-stop-hold.mjs';
-import { deriveNextActionSnapshot, hasLiveRemediationJob, isClosureRecoveryDecision, nextAction } from './pr-next-action.mjs';
+import { closerSupersedeOf, deriveNextActionSnapshot, hasLiveRemediationJob, isClosureRecoveryDecision, nextAction } from './pr-next-action.mjs';
+import { supersedeNotBootedCloser } from './ama/closer-supersede.mjs';
 import { withDaemonMergeReservation } from './ama/merge-lease.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { withClosureEvaluationReadCache } from './closure-evaluation-cache.mjs';
@@ -1040,6 +1041,7 @@ async function dispatchAmaClosureFor({
   probeCloserAuthoredStale = false,
   closureOwnerSink = null,
   probeClosureOwnershipImpl = probeOrphanOwnership,
+  supersedeNotBootedCloserImpl = supersedeNotBootedCloser,
   closerLeaseLivenessOptions = {},
   preReceiptIntentOptions = {},
   observeClosureWaitImpl = observeClosureWait,
@@ -2521,6 +2523,32 @@ async function dispatchAmaClosureFor({
   };
   const daemonSelected = (shared.decision.action === 'daemon-merge' && shared.decision.actor === 'daemon')
     || shared.decision.action === 'wait-for-CI' || terminalEvidenceProbe;
+  // DAEMONSUPERSEDE-01: the shared decision set aside a closer that has not
+  // booted. Cancel it (audited, typed reason) and confirm it ended before the
+  // daemon merges; an unconfirmed cancel leaves the closer as the owner.
+  const closerSupersede = daemonSelected && !orphanRecovery?.ownerProof && !priorDaemonCleanMerge
+    ? closerSupersedeOf(shared.decision) : null;
+  if (closerSupersede?.pending) {
+    const supersede = disabledEligibility.eligible ? await runCoexistenceOperation('closer-supersede',
+      ({ signal: operationSignal }) => supersedeNotBootedCloserImpl({ rootDir, repo: repoPath, prNumber,
+        headSha: currentPrHeadSha, reviewedHeadSha: reviewState.headSha,
+        launchRequestId: closerSupersede.launchRequestId,
+        recordHeadSha: handoffLease?.rekeyedFromHeadSha || currentPrHeadSha,
+        hqRoot: resolveHqRoot(env), signal: operationSignal, logger }),
+      { timeoutMs: operationTimeoutMs, parentSignal: signal, operationTracker, logger, repoPath, prNumber })
+      : { superseded: false, reason: 'not-eligible', reasons: disabledEligibility.reasons };
+    throwIfAborted(signal);
+    if (!supersede?.superseded) {
+      const closureBlocker = `in-flight:${closerSupersede.launchRequestId}`;
+      logger?.log?.(`[watcher] AMA closer supersede declined for ${repoPath}#${prNumber}`
+        + `@${String(currentPrHeadSha || '').slice(0, 12)}: ${supersede?.reason || 'unknown'}; closer keeps the PR`);
+      return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
+        reason: `closer-supersede-${supersede?.reason || 'declined'}`, closureBlocker,
+        closerSupersede: supersede || null, retryAfterMs: 30_000 }, { amaEnabled: true });
+    }
+    logger?.log?.(`[watcher] AMA closer ${closerSupersede.launchRequestId} superseded by the clean exact-head `
+      + `review for ${repoPath}#${prNumber}@${String(currentPrHeadSha || '').slice(0, 12)}; daemon merges`);
+  }
   const daemonCleanMerge = !daemonSelected
     ? { disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason: shared.decision.reason }
     : orphanRecovery?.ownerProof

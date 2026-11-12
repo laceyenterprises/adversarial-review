@@ -107,6 +107,7 @@ export function launchSource(observation, lease, cap) {
     row: value.launch, retryChain: value.retryChain ?? undefined, retryChainUnreadable: value.retryChainUnreadable === true,
     retryChainReadState: value.retryChainUnreadable === true ? 'failed' : 'complete',
     launchRequestId: value.liveRetryLaunchRequestId || value.launchRequestId || null, headSha: lease?.headSha ?? null,
+    rootLaunchRequestId: value.launchRequestId || null,
     attempt: value.launch?.attempt ?? value.attempt ?? null,
     outcome: terminalNoMerge ? 'no-merge' : null,
     retryable: terminalNoMerge ? !(cap.retryExhausted || cap.lifetimeExhausted) : null,
@@ -211,6 +212,10 @@ export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, cand
       ...((input.hammerHead || input.closerAuthoredStale?.hammerHead)
         ? { hammerHead: pick(input.hammerHead || input.closerAuthoredStale.hammerHead, ['headSha', 'reason']) } : {}), ...(closerAuthoredStale ? { closerAuthoredStale } : {}),
       ...(input.terminalReview ? { terminalReview: pick(input.terminalReview, ['validated', 'headSha', 'reviewedHeadSha']) } : {}),
+      // DAEMONSUPERSEDE-01: this head's clean review cancelled the not-booted
+      // closer named here; its terminal launch is not a retry owner.
+      ...(launchRecord?.supersededByReview && head && launchRecord.supersededByReview.headSha === head
+        ? { closerSuperseded: pick(launchRecord.supersededByReview, ['launchRequestId', 'headSha']) } : {}),
       ...(mergedReceipt ? { mergeReceipt: { merged: true, headSha: head, path: 'hammer' } } : {}) },
     ...(input.hammerStop ? { controls: {
       stop: { deterministic: input.hammerStop.deterministic !== false, fingerprint: input.hammerStop.stopKey || input.hammerStop.predicate,

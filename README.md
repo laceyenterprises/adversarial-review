@@ -853,6 +853,14 @@ concurrent closer admission.
   the shared merge lease (`src/ama/daemon-merge.mjs`) — no agent is
   spawned. `strict_mode` defaults on; turning it off permits daemon
   merge over *known non-blocking* findings only.
+  A zero-finding exact-head review can supersede an unbooted closer after a
+  durable dispatch marker, a fresh boot-state check and confirmed cancellation.
+  Marker persistence failure prevents cancellation. The intent survives a
+  failed terminal-status write or deferred merge, preventing a hammer retry
+  once terminal launch evidence is complete; live or unreadable owners remain
+  protected. A matching deferred terminal lease retains custody when a parked
+  closer resumes through `requested` or `admitted`. Lifecycle states and
+  existing smoke commands are unchanged.
 
 CLOSURESPLIT-01: closure and background hammer admission share a decision key,
 generation and complete evidence snapshot, including head-scoped primary change.

@@ -51,6 +51,14 @@ const AUTOMATION_ACTOR_KINDS = new Set(['automation', 'bot', 'app', 'watcher', '
 // accountability. The hammer does not need it: it merges under its own lease.
 const HAMMER_CLOSABLE_DAEMON_FAILURES = new Set(['worker-identity-unresolved']);
 const SEMANTIC_PROOF_KINDS = new Set(['context-only-rebase']);
+// DAEMONSUPERSEDE-01: a launch still waiting for admission or a workspace has
+// no worker, workspace or pushes. Leased/starting/running/suspended launches
+// and parked (waiting_/blocked_) workers have booted and keep their ownership.
+const NOT_BOOTED_LAUNCH_STATUSES = new Set(['requested', 'admitted']);
+export const CLOSER_SUPERSEDE_REASON = 'superseded-by-clean-exact-head-review';
+export const CLOSER_SUPERSEDE_REF_PREFIX = 'supersede-not-booted-closer:';
+const SET_ASIDE_LAUNCH = Object.freeze({ known: true, present: false, owned: null });
+const SET_ASIDE_LEASE = Object.freeze({ known: true, present: false });
 
 const text = value => (typeof value === 'string' ? value.trim() : '');
 const upper = value => text(value).toUpperCase();
@@ -138,6 +146,10 @@ function reviewFacts(reviews, head, policy, labels) {
     currentHeadVerdictAbsent: reviews.state === 'complete'
       && (normalized ? !verdict || !sameHead(reviewedHead, head) : !sameHead(reviewedHead, head)),
     clean,
+    // Strict zero, independent of strict-mode demotion: no blocking and no
+    // non-blocking (including demoted) findings at all.
+    zeroFindings: lower(value.blockingFindingState) === 'known' && value.blockingFindingCount === 0
+      && lower(value.nonBlockingFindingState) === 'known' && value.nonBlockingFindingCount === 0,
     hasFindings: (value.blockingFindingState === 'known' && value.blockingFindingCount > 0)
       || (value.nonBlockingFindingState === 'known' && value.nonBlockingFindingCount > 0),
     operatorOverride: hasOperatorApprovedOverride({ operatorApprovedEvidence: value.operatorApprovedEvidence,
@@ -197,9 +209,14 @@ function launchFacts(launches, head) {
     retryChain: Array.isArray(closer.retryChain) ? closer.retryChain : undefined,
     retryChainUnreadable: closer.retryChainUnreadable === true };
   const effective = withLiveLaunchRetry(probe);
+  const effectiveStatus = lower(effective?.row?.status);
   return {
     known: launches.state === 'complete',
     present: true,
+    // Boot state is read from the effective (live retry descendant) row only
+    // when the retry chain is readable; anything else is never "not booted".
+    notBooted: launches.state === 'complete' && probe.ok === true && probe.retryChainUnreadable !== true
+      && NOT_BOOTED_LAUNCH_STATUSES.has(effectiveStatus),
     forHead: !text(closer.headSha) || sameHead(closer.headSha, head),
     // true: running or parked; false: terminal with readable descendants;
     // null: unknown. Unreadable retry descendants are unknown, never absence.
@@ -209,6 +226,7 @@ function launchFacts(launches, head) {
     outcome: lower(closer.outcome) || null,
     retryable: typeof closer.retryable === 'boolean' ? closer.retryable : null,
     attempt: finite(closer.attempt),
+    rootLaunchRef: text(closer.rootLaunchRequestId) || text(closer.launchRequestId) || null,
     launchRef: text(effective?.liveRetryLaunchRequestId) || text(closer.launchRequestId) || null,
     // Every terminal retry must predate the review; a missing terminal time
     // cannot prove freshness. Never substitute requested/updated/observed time.
@@ -232,6 +250,7 @@ function leaseFacts(leases, head) {
     present: true,
     forHead: !text(lease.headSha) || sameHead(lease.headSha, head),
     status,
+    terminalOutcome: lower(lease.terminalOutcome) || null,
     lrqRef: text(lease.lrqId) || null,
     deadlineMs: timeMs(lease.deadlineAt) ?? (atMs !== null && windowMs !== null ? atMs + windowMs : null),
   };
@@ -316,7 +335,34 @@ function decisionKey(snapshot, fields) {
 // it returns the owned snapshot refresh instead.
 const DISPATCH_ACTORS = new Set(['reviewer', 'remediator', 'hammer']);
 
-function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
+// DAEMONSUPERSEDE-01: an owner that has done nothing yet does not outrank a
+// completed clean verdict. A closer launch that has not booted (or one this
+// head's clean review already superseded and cancelled) is set aside, and the
+// whole policy is re-run without it. Only the ordinary R15 daemon row on a
+// zero-finding exact-head review may take the PR; every hold, stop, cap,
+// safety refusal, live remediator/reviewer and CI row still wins first.
+function supersedeNotBootedCloser(facts, options) {
+  const { launch, lease, review, progress, head } = facts;
+  if (options.closerSetAside || !lease.known || !launch.present || !launch.forHead || !launch.launchRef) return null;
+  if (!review.known || !review.clean || !review.zeroFindings || review.currentHeadVerdictAbsent
+    || !sameHead(review.reviewedHead, head)) return null;
+  const marker = plain(progress?.closerSuperseded);
+  const cancelled = launch.owned === false && Boolean(marker) && sameHead(marker.headSha, head)
+    && text(marker.launchRequestId) === launch.launchRef;
+  // A matching deferred terminal lease records a previously parked closer.
+  // Resuming its launch through requested/admitted does not erase that custody.
+  const resumed = [launch.launchRef, launch.rootLaunchRef].includes(lease.lrqRef)
+    && lease.status === 'terminal' && lease.terminalOutcome === 'deferred';
+  if (!(launch.owned === true && launch.notBooted === true && !resumed) && !cancelled) return null;
+  const next = selectRow({ ...facts, launch: SET_ASIDE_LAUNCH,
+    lease: lease.status === 'handed-to-review' ? lease : SET_ASIDE_LEASE }, { ...options, closerSetAside: true });
+  if (next.row !== 'R15-daemon' || next.action !== 'daemon-merge' || next.reason !== 'clean-exact-head') return null;
+  return { ...next, refs: [...(next.refs || []), `${CLOSER_SUPERSEDE_REF_PREFIX}${launch.launchRef}`,
+    cancelled ? 'closer-supersede:cancelled' : 'closer-supersede:not-booted'] };
+}
+
+function selectRow(facts, options = {}) {
+  const { daemonAfterSupersededStop = false } = options;
   const { pr, review, remediation, launch, lease, checks, policy, controls, progress, head } = facts;
   const refresh = (reason, refs = []) => ({ row: 'R16-refresh', action: 'wait-for-CI', actor: 'watcher', reason,
     deadlineKind: 'refresh', queue: 'observe', refs });
@@ -348,6 +394,8 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
   const leaseForHead = lease.present && lease.forHead;
   const leaseInFlight = leaseForHead && ['pending', 'dispatched'].includes(lease.status);
   const launchForHead = launch.present && launch.forHead;
+  const superseding = supersedeNotBootedCloser(facts, options);
+  if (superseding) return superseding;
   if (launchForHead && launch.owned === true) {
     return { row: 'R03-live-owner', action: 'hammer', actor: 'hammer', reason: 'live-owner', deadlineKind: 'liveDispatched',
       deadlineAtMs: launch.deadlineMs ?? lease.deadlineMs, queue: 'owned', refs: [`launch:${launch.launchRef || 'unidentified'}`] };
@@ -461,7 +509,7 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
     if (recordedMs === null) return notFired('stop-time-unknown');
     if (review.postedMs === null) return notFired('review-time-unknown');
     if (review.postedMs <= recordedMs) return notFired('review-not-newer');
-    const next = selectRow(facts, { daemonAfterSupersededStop: true });
+    const next = selectRow(facts, { ...options, daemonAfterSupersededStop: true });
     if (next.action === 'daemon-merge' && next.actor === 'daemon') {
       return { ...next, refs: [...(next.refs || []), ...(row.refs || []),
         `stop-reason:${row.reason}`, 'stop-superseded-by-exact-head-review'] };
@@ -777,6 +825,19 @@ export function nextAction(snapshot) {
     generation: finite(snapshot?.generation),
     passId: text(snapshot?.passId) || null,
   });
+}
+
+/**
+ * DAEMONSUPERSEDE-01: the closer launch a daemon-merge decision supersedes.
+ * `pending` is true while that launch has not been cancelled yet.
+ * @returns {{launchRequestId:string, pending:boolean}|null}
+ */
+export function closerSupersedeOf(decision) {
+  if (decision?.action !== 'daemon-merge' || decision.actor !== 'daemon') return null;
+  const refs = Array.isArray(decision.evidenceRefs) ? decision.evidenceRefs : [];
+  const ref = refs.find(entry => typeof entry === 'string' && entry.startsWith(CLOSER_SUPERSEDE_REF_PREFIX));
+  const launchRequestId = ref ? ref.slice(CLOSER_SUPERSEDE_REF_PREFIX.length) : '';
+  return launchRequestId ? { launchRequestId, pending: refs.includes('closer-supersede:not-booted') } : null;
 }
 
 // Diagnostic blockers use the same exact-head liveness proof as selection.

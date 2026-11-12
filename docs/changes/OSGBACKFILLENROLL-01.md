@@ -30,6 +30,19 @@ The full `npm test` invocation did not return within its requested 600-second
 bound; the wrapper and its process group were stopped and no full-suite pass is
 claimed. Final scoped suites passed after the last implementation change.
 
+After rebasing onto OSGPROJECTLOCK-01, the read-count pin accounts for the new
+migration's sentinel reads separately, keeping the non-migration budget at 114.
+The open-PR deferral fixture records `merged_at` at merge, as merge writers do,
+because unknown merge times are outside the automatic window. Scoped suites
+pass on Node 22 and 26. The full `npm test` completed in about 16 minutes with
+three failures in untouched hammer and remediation suites. One also fails on
+`origin/main`; another passes in isolation on both trees.
+
 Initial targeted memory search was available with no matching records. A
 follow-up search for the sibling historical body writer timed out; local
 projection/backlog contracts and sibling call sites supplied the evidence.
+
+Operator steering adds a hard stop on all review-store backfills and projections
+until both this fix and OSGPROJECTLOCK-01 merge and float in both repositories.
+The operator declaration and canonical store instructions carry that prerequisite.
+The companion incident report is classified SEV0; implementation is unchanged.

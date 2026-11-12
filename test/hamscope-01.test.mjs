@@ -85,7 +85,9 @@ test('open-PR deferrals become overdue only after the source merges', t => {
   assert.equal(open.openCount, 1);
   assert.equal(open.areas[0].waitingForMerge, 1);
   assert.equal(findingBacklogAlert(open), null);
-  db.prepare("UPDATE reviewed_prs SET pr_state='merged' WHERE repo=? AND pr_number=7").run(repo);
+  // Merge writers record merged_at; an unknown merge time is outside the automatic window.
+  db.prepare("UPDATE reviewed_prs SET pr_state='merged', merged_at=? WHERE repo=? AND pr_number=7")
+    .run(new Date(now - 3600_000).toISOString(), repo);
   assert.equal(findingBacklogAlert(summarizeFindingBacklog(db, now)).code, 'review:findings_backlog_overdue');
 });
 

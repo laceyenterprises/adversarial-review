@@ -195,6 +195,10 @@ node bin/review-findings.mjs backfill --db /path/to/reviews.db --limit 500 --aft
 node bin/review-findings.mjs link-job --db /path/to/reviews.db --job /path/to/job.json --workspace /path/to/history --round 1
 ```
 
+**Operational hard stop:** no activation re-run or other review-store backfill
+or projection until OSGBACKFILLENROLL-01 and OSGPROJECTLOCK-01 are both merged
+and floated in both repositories. Verify deployed revisions before any write.
+
 Repeat `backfill` with the returned `nextPassId` until `scanned` is zero. A rerun
 from zero is idempotent. Historical projection inserts findings and simplicity
 observations with `historical_projection=1` (integer 0/1, default 0), added by
